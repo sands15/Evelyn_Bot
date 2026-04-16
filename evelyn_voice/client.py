@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import struct
+from collections import deque
 
 import davey
 import discord
@@ -139,6 +141,7 @@ class EvelynVoiceClient(discord.VoiceClient):
 
         self.end_silence_sec = 0.45
         self.voice_payload_threshold = 60
+        self.preroll_packet_limit = max(0, int(round(float(os.getenv("VOICE_PREROLL_MS", "400")) / 20.0)))
 
         self.utterance_states: dict[int, dict] = {}
         self.utterance_count = 0
@@ -574,6 +577,7 @@ class EvelynVoiceClient(discord.VoiceClient):
                             "in_utterance": False,
                             "last_voice_like_at": 0.0,
                             "packets": [],
+                            "preroll": deque(maxlen=self.preroll_packet_limit),
                         },
                     )
 
@@ -581,18 +585,20 @@ class EvelynVoiceClient(discord.VoiceClient):
                         state["last_voice_like_at"] = now
                         if not state["in_utterance"]:
                             state["in_utterance"] = True
-                            state["packets"] = []
+                            state["packets"] = list(state["preroll"])
                             log.info(
-                                "UTTERANCE START | ssrc=%d seq=%d ts=%d payload=%d",
+                                "UTTERANCE START | ssrc=%d seq=%d ts=%d payload=%d preroll=%d",
                                 ssrc,
                                 sequence,
                                 timestamp,
                                 payload_len,
+                                len(state["packets"]),
                             )
 
                     if state["in_utterance"]:
                         state["packets"].append(current_packet)
 
+                    state["preroll"].append(current_packet)
                     self.decrypt_packet_count += 1
 
                 now = asyncio.get_running_loop().time()

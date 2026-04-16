@@ -16,6 +16,11 @@ import discord
 from discord.ext import commands
 from transformers import AutoProcessor, CohereAsrForConditionalGeneration
 
+try:
+    import torchaudio.functional as torchaudio_F
+except Exception:
+    torchaudio_F = None
+
 from evelyn_voice import EvelynVoiceClient
 
 
@@ -49,6 +54,14 @@ VAD_ENABLED = os.getenv("VAD_ENABLED", "true").lower() == "true"
 VAD_RMS_THRESHOLD = float(os.getenv("VAD_RMS_THRESHOLD", "0.008"))
 VAD_PEAK_THRESHOLD = float(os.getenv("VAD_PEAK_THRESHOLD", "0.020"))
 VAD_MIN_VOICED_RATIO = float(os.getenv("VAD_MIN_VOICED_RATIO", "0.015"))
+
+DENOISE_ENABLED = os.getenv("DENOISE_ENABLED", "true").lower() == "true"
+DENOISE_HIGHPASS_HZ = float(os.getenv("DENOISE_HIGHPASS_HZ", "120"))
+DENOISE_NOISE_FLOOR_SEC = float(os.getenv("DENOISE_NOISE_FLOOR_SEC", "0.20"))
+DENOISE_GATE_MULT = float(os.getenv("DENOISE_GATE_MULT", "1.35"))
+WAKE_AUDIO_SEC = float(os.getenv("WAKE_AUDIO_SEC", "1.4"))
+WAKE_MAX_TOKENS = int(os.getenv("WAKE_MAX_TOKENS", "48"))
+WAKE_FUZZY_THRESHOLD = float(os.getenv("WAKE_FUZZY_THRESHOLD", "0.72"))
 
 MAX_HISTORY_ITEMS = 1024
 MAX_VISIBLE_TEXT = 1800
@@ -534,6 +547,32 @@ def contains_wake_word(text: str) -> bool:
     return any(w in text_n for w in normalized_wake_words())
 
 
+def contains_leading_wake_word(text: str) -> bool:
+    text_n = normalize_voice_text(text)
+    if not text_n:
+        return False
+
+    prefixes: list[str] = []
+    tokens = text_n.split()
+    if tokens:
+        prefixes.append(tokens[0])
+        prefixes.append("".join(tokens[:2]))
+    prefixes.append(text_n[: max(8, min(len(text_n), 14))])
+
+    wake_words = normalized_wake_words()
+    for prefix in prefixes:
+        prefix = clean_text(prefix)
+        if not prefix:
+            continue
+        if any(w in prefix or prefix in w for w in wake_words):
+            return True
+        for wake in wake_words:
+            if SequenceMatcher(None, prefix[: len(wake) + 2], wake).ratio() >= WAKE_FUZZY_THRESHOLD:
+                return True
+
+    return False
+
+
 def strip_voice_wake_word(text: str) -> str:
     text_n = clean_text(text)
 
@@ -578,7 +617,7 @@ def should_ignore_short_transcription(text: str, pcm_bytes: bytes) -> bool:
     return False
 
 
-def should_reply_to_voice(guild_id: int, text: str) -> tuple[bool, str]:
+def should_reply_to_voice(guild_id: int, text: str, *, wake_detected: bool = False) -> tuple[bool, str]:
     now = time.monotonic()
     text_n = normalize_voice_text(text)
 
@@ -591,10 +630,10 @@ def should_reply_to_voice(guild_id: int, text: str) -> tuple[bool, str]:
     if not text_n:
         return False, "empty"
 
-    if not contains_wake_word(text_n):
+    if not wake_detected and not contains_wake_word(text_n):
         return False, "no_wake_word"
 
-    if len(text_n) < MIN_TEXT_LEN:
+    if len(text_n) < MIN_TEXT_LEN and not wake_detected:
         return False, "too_short"
 
     if now - last_voice_reply_at.get(guild_id, 0.0) < REPLY_COOLDOWN_SEC:
@@ -627,8 +666,56 @@ def downmix_and_resample_int16_stereo_to_mono16k(pcm_bytes: bytes) -> np.ndarray
 
     return audio
 
-def is_probably_silent(pcm_bytes: bytes) -> bool:
+
+def apply_light_denoise(audio16k: np.ndarray) -> np.ndarray:
+    if not DENOISE_ENABLED or audio16k.size == 0:
+        return audio16k
+
+    audio = np.asarray(audio16k, dtype=np.float32).copy()
+
+    if torchaudio_F is not None:
+        try:
+            tensor = torch.from_numpy(audio)
+            tensor = torchaudio_F.highpass_biquad(tensor, TARGET_RATE, DENOISE_HIGHPASS_HZ)
+            audio = tensor.cpu().numpy().astype(np.float32)
+        except Exception:
+            pass
+
+    noise_len = min(len(audio), max(1, int(TARGET_RATE * DENOISE_NOISE_FLOOR_SEC)))
+    noise_sample = np.abs(audio[:noise_len]) if noise_len > 0 else np.abs(audio)
+    base_floor = float(np.percentile(noise_sample, 65)) if noise_sample.size else 0.0
+    global_floor = float(np.percentile(np.abs(audio), 20)) if audio.size else 0.0
+    threshold = max(base_floor, global_floor * 0.85, 0.0015) * DENOISE_GATE_MULT
+
+    abs_audio = np.abs(audio)
+    gain = np.ones_like(audio, dtype=np.float32)
+    below = abs_audio < threshold
+    if np.any(below):
+        gain[below] = np.clip(abs_audio[below] / max(threshold, 1e-6), 0.12, 1.0)
+        audio[below] *= gain[below]
+
+    peak = float(np.max(np.abs(audio))) if audio.size else 0.0
+    if peak > 0:
+        audio = np.clip(audio * min(1.6, 0.98 / peak), -1.0, 1.0)
+
+    return audio.astype(np.float32)
+
+
+def prepare_stt_audio(pcm_bytes: bytes) -> np.ndarray:
     audio16k = downmix_and_resample_int16_stereo_to_mono16k(pcm_bytes)
+    if audio16k.size == 0:
+        return audio16k
+    return apply_light_denoise(audio16k)
+
+
+def slice_audio_window(audio16k: np.ndarray, max_sec: float) -> np.ndarray:
+    if audio16k.size == 0 or max_sec <= 0:
+        return audio16k
+    sample_len = max(1, int(TARGET_RATE * max_sec))
+    return audio16k[:sample_len].copy()
+
+
+def is_probably_silent(audio16k: np.ndarray) -> bool:
     if audio16k.size == 0:
         return True
 
@@ -833,8 +920,7 @@ def get_stt_model() -> tuple[AutoProcessor, CohereAsrForConditionalGeneration]:
     return stt_processor, stt_model
 
 
-def transcribe_voice_sync(pcm_bytes: bytes) -> str:
-    audio16k = downmix_and_resample_int16_stereo_to_mono16k(pcm_bytes)
+def transcribe_audio16k_sync(audio16k: np.ndarray, max_new_tokens: int = 256) -> str:
     if audio16k.size == 0:
         return ""
 
@@ -858,10 +944,20 @@ def transcribe_voice_sync(pcm_bytes: bytes) -> str:
             moved[k] = v
 
     with torch.inference_mode():
-        outputs = model.generate(**moved, max_new_tokens=256)
+        outputs = model.generate(**moved, max_new_tokens=max_new_tokens)
 
     text = processor.decode(outputs[0], skip_special_tokens=True)
     return clean_text(text)
+
+
+def transcribe_voice_sync(pcm_bytes: bytes) -> str:
+    return transcribe_audio16k_sync(prepare_stt_audio(pcm_bytes), max_new_tokens=256)
+
+
+def detect_wake_word_sync(audio16k: np.ndarray) -> tuple[bool, str]:
+    wake_audio = slice_audio_window(audio16k, WAKE_AUDIO_SEC)
+    wake_text = transcribe_audio16k_sync(wake_audio, max_new_tokens=WAKE_MAX_TOKENS)
+    return contains_leading_wake_word(wake_text), wake_text
 
 
 # =========================================================
@@ -1216,12 +1312,26 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes) 
         return
 
     guild_id = guild.id
+    audio16k = prepare_stt_audio(pcm_bytes)
+    if audio16k.size == 0:
+        return
 
-    if VAD_ENABLED and is_probably_silent(pcm_bytes):
+    if VAD_ENABLED and is_probably_silent(audio16k):
         return
 
     try:
-        text = await asyncio.to_thread(transcribe_voice_sync, pcm_bytes)
+        wake_detected, wake_probe = await asyncio.to_thread(detect_wake_word_sync, audio16k)
+    except Exception as e:
+        print(f"❌ [WAKE-STT] {e}")
+        return
+
+    if not wake_detected:
+        if wake_probe:
+            print(f"[WAKE IGNORE] {member.display_name}: {wake_probe!r}")
+        return
+
+    try:
+        text = await asyncio.to_thread(transcribe_audio16k_sync, audio16k, 256)
     except Exception as e:
         print(f"❌ [STT] {e}")
         return
@@ -1233,9 +1343,9 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes) 
         print(f"[STT IGNORE] short_noise: {text!r}")
         return
 
-    print(f"🎤 [{member.display_name}] {text}")
+    print(f"🎤 [{member.display_name}] wake={wake_probe!r} text={text}")
 
-    ok, reason = should_reply_to_voice(guild_id, text)
+    ok, reason = should_reply_to_voice(guild_id, text, wake_detected=True)
     if not ok:
         print(f"[STT IGNORE] {reason}: {text!r}")
         return
