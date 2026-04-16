@@ -361,22 +361,13 @@ class VoiceGateway:
                 try:
                     user_id_i = int(user_id)
                     ssrc_i = int(ssrc)
-                    rebound = self.state.bind_ssrc(
-                        user_id_i,
-                        ssrc_i,
-                        source="speaking",
-                        stable=True,
-                        allow_override=False,
-                    )
-                    self.state.set_speaking(user_id_i, ssrc_i, bool(speaking))
+                    self.state.bind_ssrc(user_id_i, ssrc_i)
+                    self.state.set_current_speaking(user_id_i, ssrc_i)
                     log.info(
-                        "VOICE MAP SPEAKING | user_id=%s ssrc=%s speaking=%s rebound=%s stable=%s source=%s",
+                        "VOICE MAP SPEAKING | user_id=%s ssrc=%s speaking=%s",
                         user_id_i,
                         ssrc_i,
                         speaking,
-                        rebound,
-                        self.state.is_stable_binding(ssrc_i),
-                        self.state.get_binding_source(ssrc_i),
                     )
                 except Exception as e:
                     log.warning("VOICE SPEAKING map failed | data=%r err=%r", data, e)
@@ -403,21 +394,8 @@ class VoiceGateway:
 
             if user_id is not None and audio_ssrc is not None:
                 try:
-                    rebound = self.state.bind_ssrc(
-                        int(user_id),
-                        int(audio_ssrc),
-                        source="client_connect",
-                        stable=True,
-                        allow_override=True,
-                    )
-                    log.info(
-                        "VOICE MAP | user_id=%s ssrc=%s rebound=%s stable=%s source=%s",
-                        user_id,
-                        audio_ssrc,
-                        rebound,
-                        self.state.is_stable_binding(int(audio_ssrc)),
-                        self.state.get_binding_source(int(audio_ssrc)),
-                    )
+                    self.state.bind_ssrc(int(user_id), int(audio_ssrc))
+                    log.info("VOICE MAP | user_id=%s ssrc=%s", user_id, audio_ssrc)
                 except Exception as e:
                     log.warning("VOICE MAP failed | data=%r err=%r", data, e)
             else:
@@ -428,8 +406,8 @@ class VoiceGateway:
             log.info("VOICE CLIENT_DISCONNECT | data=%r", data)
             try:
                 uid = data.get("user_id")
-                if uid is not None:
-                    self.state.clear_speaking(user_id=int(uid))
+                if uid is not None and self.state.current_speaking_user_id == int(uid):
+                    self.state.set_current_speaking(None, None)
             except Exception:
                 pass
             return
