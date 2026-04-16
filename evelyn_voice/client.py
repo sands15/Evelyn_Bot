@@ -494,7 +494,7 @@ class EvelynVoiceClient(discord.VoiceClient):
 
             if log_allowed:
                 log.warning(
-                    "DAVE INNER failed | user_id=%s ssrc=%s preferred_user_id=%s in_len=%d passthrough=%s prefix=%s stats=%r known_ids=%r known_stats=%r dave_ssrc_map=%r ssrc_map=%r candidates=%r err=%r",
+                    "DAVE INNER failed | user_id=%s ssrc=%s preferred_user_id=%s in_len=%d passthrough=%s prefix=%s stats=%r known_ids=%r known_stats=%r dave_ssrc_map=%r ssrc_map=%r candidates=%r dave_ready=%s dave_status=%r dave_epoch=%r dave_proto=%r last_ws_op=%r last_server_seq=%r err=%r",
                     user_id,
                     ssrc,
                     self.runtime.get_preferred_user_id(int(ssrc)) if ssrc is not None else None,
@@ -507,6 +507,12 @@ class EvelynVoiceClient(discord.VoiceClient):
                     dict(self.runtime.dave_ssrc_to_user_id),
                     dict(self.runtime.ssrc_to_user_id),
                     self._candidate_dave_user_ids(user_id, ssrc),
+                    self.dave.ready,
+                    self.dave.status,
+                    self.dave.epoch,
+                    self.dave.protocol_version,
+                    self.runtime.last_voice_ws_op,
+                    self.runtime.last_server_seq,
                     e,
                 )
             self.dave_inner_fail_log_count += 1

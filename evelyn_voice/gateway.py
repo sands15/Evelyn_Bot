@@ -335,7 +335,30 @@ class VoiceGateway:
 
 
     async def _handle_voice_binary_opcode(self, op: int, payload: bytes) -> None:
-        if op in (22, 24, 25, 27, 28, 29, 30):
+        if op in (25, 27, 28, 29, 30):
+            log.info(
+                "VOICE BINARY DAVE | op=%s payload_len=%s ready=%s status=%r epoch=%r proto=%r last_server_seq=%r",
+                op,
+                len(payload),
+                self.state.dave_ready,
+                self.state.dave_status,
+                self.state.dave_epoch,
+                self.state.dave_protocol_version,
+                self.state.last_server_seq,
+            )
+            return
+
+        if op in (22, 24):
+            log.info(
+                "VOICE BINARY TRANSITION | op=%s payload_len=%s ready=%s status=%r epoch=%r proto=%r last_server_seq=%r",
+                op,
+                len(payload),
+                self.state.dave_ready,
+                self.state.dave_status,
+                self.state.dave_epoch,
+                self.state.dave_protocol_version,
+                self.state.last_server_seq,
+            )
             return
 
     async def handle_voice_payload(self, payload: dict) -> None:
@@ -440,7 +463,20 @@ class VoiceGateway:
 
         if op == 8 and isinstance(data, dict):
             return
-        if op in (22, 24, 25, 27, 28, 29, 30):
+
+        if op in (21, 22, 23, 24) and isinstance(data, dict):
+            log.info(
+                "VOICE JSON DAVE | op=%s data=%r ready=%s status=%r epoch=%r proto=%r",
+                op,
+                data,
+                self.state.dave_ready,
+                self.state.dave_status,
+                self.state.dave_epoch,
+                self.state.dave_protocol_version,
+            )
+            return
+
+        if op in (25, 27, 28, 29, 30):
             return
 
     async def close(self) -> None:
