@@ -459,6 +459,7 @@ class EvelynVoiceClient(discord.VoiceClient):
         except Exception as e:
             err_text = repr(e)
             log_allowed = self.dave_inner_fail_log_count < self.dave_inner_fail_log_limit
+            current_stats = self._get_dave_decryption_stats(user_id)
 
             if allow_passthrough and "UnencryptedWhenPassthroughDisabled" in err_text:
                 if log_allowed:
@@ -492,6 +493,22 @@ class EvelynVoiceClient(discord.VoiceClient):
                     except Exception:
                         pass
 
+            if (
+                "NoValidCryptorFound" in err_text
+                and current_stats is not None
+                and int(current_stats.get("successes") or 0) > 0
+            ):
+                if log_allowed:
+                    log.warning(
+                        "DAVE INNER raw fallback | user_id=%s ssrc=%s in_len=%d prefix=%s stats=%r",
+                        user_id,
+                        ssrc,
+                        len(outer_plain),
+                        outer_plain[:8].hex(),
+                        current_stats,
+                    )
+                return outer_plain, user_id
+
             if log_allowed:
                 log.warning(
                     "DAVE INNER failed | user_id=%s ssrc=%s preferred_user_id=%s in_len=%d passthrough=%s prefix=%s stats=%r known_ids=%r known_stats=%r dave_ssrc_map=%r ssrc_map=%r candidates=%r dave_ready=%s dave_status=%r dave_epoch=%r dave_proto=%r last_ws_op=%r last_server_seq=%r err=%r",
@@ -501,7 +518,7 @@ class EvelynVoiceClient(discord.VoiceClient):
                     len(outer_plain),
                     allow_passthrough,
                     outer_plain[:8].hex(),
-                    self._get_dave_decryption_stats(user_id),
+                    current_stats,
                     self._get_dave_known_user_ids(),
                     self._get_dave_known_user_stats(),
                     dict(self.runtime.dave_ssrc_to_user_id),
