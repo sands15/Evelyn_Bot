@@ -377,6 +377,12 @@ class EvelynVoiceClient(discord.VoiceClient):
             "duration": getattr(stats, "duration", None),
         }
 
+    def _get_dave_known_user_stats(self) -> dict[int, dict | None]:
+        return {
+            int(user_id): self._get_dave_decryption_stats(int(user_id))
+            for user_id in self._get_dave_known_user_ids()
+        }
+
     def _get_dave_known_user_ids(self) -> list[int]:
         base_dave = self._get_base_dave_session()
         if base_dave is None:
@@ -391,7 +397,7 @@ class EvelynVoiceClient(discord.VoiceClient):
         except Exception:
             return []
 
-    def _candidate_dave_user_ids(self, primary_user_id: int) -> list[int]:
+    def _candidate_dave_user_ids(self, primary_user_id: int, ssrc: int | None = None) -> list[int]:
         candidates: list[int] = []
 
         def add(value) -> None:
@@ -405,6 +411,9 @@ class EvelynVoiceClient(discord.VoiceClient):
                 candidates.append(value_i)
 
         add(primary_user_id)
+        if ssrc is not None:
+            add(self.runtime.dave_ssrc_to_user_id.get(int(ssrc)))
+            add(self.runtime.get_preferred_user_id(int(ssrc)))
         add(self.runtime.current_speaking_user_id)
 
         for known_user_id in self._get_dave_known_user_ids():
@@ -422,7 +431,7 @@ class EvelynVoiceClient(discord.VoiceClient):
 
         return candidates
 
-    def _decrypt_dave_inner_packet(self, *, user_id: int, outer_plain: bytes) -> tuple[bytes | None, int | None]:
+    def _decrypt_dave_inner_packet(self, *, user_id: int, ssrc: int | None, outer_plain: bytes) -> tuple[bytes | None, int | None]:
         if not outer_plain:
             return None, None
 
@@ -462,7 +471,7 @@ class EvelynVoiceClient(discord.VoiceClient):
                 return outer_plain, user_id
 
             if "NoValidCryptorFound" in err_text:
-                for candidate_user_id in self._candidate_dave_user_ids(user_id):
+                for candidate_user_id in self._candidate_dave_user_ids(user_id, ssrc):
                     if candidate_user_id == int(user_id):
                         continue
                     try:
@@ -472,9 +481,10 @@ class EvelynVoiceClient(discord.VoiceClient):
                             bytes(outer_plain),
                         )
                         log.warning(
-                            "DAVE INNER remap | old_user_id=%s new_user_id=%s in_len=%d prefix=%s",
+                            "DAVE INNER remap | old_user_id=%s new_user_id=%s ssrc=%s in_len=%d prefix=%s",
                             user_id,
                             candidate_user_id,
+                            ssrc,
                             len(outer_plain),
                             outer_plain[:8].hex(),
                         )
@@ -484,15 +494,19 @@ class EvelynVoiceClient(discord.VoiceClient):
 
             if log_allowed:
                 log.warning(
-                    "DAVE INNER failed | user_id=%s in_len=%d passthrough=%s prefix=%s stats=%r known_ids=%r ssrc_map=%r candidates=%r err=%r",
+                    "DAVE INNER failed | user_id=%s ssrc=%s preferred_user_id=%s in_len=%d passthrough=%s prefix=%s stats=%r known_ids=%r known_stats=%r dave_ssrc_map=%r ssrc_map=%r candidates=%r err=%r",
                     user_id,
+                    ssrc,
+                    self.runtime.get_preferred_user_id(int(ssrc)) if ssrc is not None else None,
                     len(outer_plain),
                     allow_passthrough,
                     outer_plain[:8].hex(),
                     self._get_dave_decryption_stats(user_id),
                     self._get_dave_known_user_ids(),
+                    self._get_dave_known_user_stats(),
+                    dict(self.runtime.dave_ssrc_to_user_id),
                     dict(self.runtime.ssrc_to_user_id),
-                    self._candidate_dave_user_ids(user_id),
+                    self._candidate_dave_user_ids(user_id, ssrc),
                     e,
                 )
             self.dave_inner_fail_log_count += 1
@@ -700,7 +714,7 @@ class EvelynVoiceClient(discord.VoiceClient):
         last_seq = packets[-1]["sequence"]
         total_payload = sum(len(p["payload"]) for p in packets)
 
-        user_id = self.runtime.ssrc_to_user_id.get(ssrc)
+        user_id = self.runtime.get_preferred_user_id(ssrc)
 
         if user_id is None:
             try:
@@ -716,7 +730,14 @@ class EvelynVoiceClient(discord.VoiceClient):
         if user_id is None:
             log.warning("No user_id mapping yet for ssrc=%d; skipping idx=%d", ssrc, idx)
             return
-        log.info("MAP DEBUG | idx=%d ssrc=%d user_id=%s", idx, ssrc, user_id)
+        log.info(
+            "MAP DEBUG | idx=%d ssrc=%d user_id=%s preferred_user_id=%s dave_user_id=%s",
+            idx,
+            ssrc,
+            user_id,
+            self.runtime.get_preferred_user_id(ssrc),
+            self.runtime.dave_ssrc_to_user_id.get(ssrc),
+        )
         self._sync_dave_from_base()
 
         use_dave = bool(self.dave.ready)
@@ -776,11 +797,13 @@ class EvelynVoiceClient(discord.VoiceClient):
             if use_dave:
                 opus_packet, resolved_user_id = self._decrypt_dave_inner_packet(
                     user_id=int(user_id),
+                    ssrc=int(ssrc),
                     outer_plain=outer_plain,
                 )
                 if resolved_user_id is not None and int(resolved_user_id) != int(user_id):
                     user_id = int(resolved_user_id)
-                    self.runtime.bind_ssrc(int(user_id), int(ssrc))
+                    self.runtime.bind_dave_ssrc(int(user_id), int(ssrc))
+                    log.info("VOICE MAP DAVE REMAP | idx=%d ssrc=%d user_id=%s", idx, ssrc, user_id)
 
                 if opus_packet is None:
                     failed += 1
@@ -867,6 +890,9 @@ class EvelynVoiceClient(discord.VoiceClient):
 
         if not pcm_chunks:
             return
+
+        if dave_success > 0 and user_id is not None:
+            self.runtime.bind_dave_ssrc(int(user_id), int(ssrc))
 
         pcm_bytes = b"".join(pcm_chunks)
 

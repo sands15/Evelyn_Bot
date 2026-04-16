@@ -361,13 +361,25 @@ class VoiceGateway:
                 try:
                     user_id_i = int(user_id)
                     ssrc_i = int(ssrc)
-                    self.state.bind_ssrc(user_id_i, ssrc_i)
+                    dave_user_id = self.state.dave_ssrc_to_user_id.get(ssrc_i)
+                    if dave_user_id is not None and dave_user_id != user_id_i:
+                        log.info(
+                            "VOICE MAP SPEAKING skipped | ssrc=%s ws_user_id=%s dave_user_id=%s speaking=%s",
+                            ssrc_i,
+                            user_id_i,
+                            dave_user_id,
+                            speaking,
+                        )
+                        user_id_i = int(dave_user_id)
+                    else:
+                        self.state.bind_ssrc(user_id_i, ssrc_i)
                     self.state.set_current_speaking(user_id_i, ssrc_i)
                     log.info(
-                        "VOICE MAP SPEAKING | user_id=%s ssrc=%s speaking=%s",
+                        "VOICE MAP SPEAKING | user_id=%s ssrc=%s speaking=%s dave_user_id=%s",
                         user_id_i,
                         ssrc_i,
                         speaking,
+                        dave_user_id,
                     )
                 except Exception as e:
                     log.warning("VOICE SPEAKING map failed | data=%r err=%r", data, e)
@@ -394,8 +406,19 @@ class VoiceGateway:
 
             if user_id is not None and audio_ssrc is not None:
                 try:
-                    self.state.bind_ssrc(int(user_id), int(audio_ssrc))
-                    log.info("VOICE MAP | user_id=%s ssrc=%s", user_id, audio_ssrc)
+                    user_id_i = int(user_id)
+                    ssrc_i = int(audio_ssrc)
+                    dave_user_id = self.state.dave_ssrc_to_user_id.get(ssrc_i)
+                    if dave_user_id is not None and dave_user_id != user_id_i:
+                        log.info(
+                            "VOICE MAP skipped | ssrc=%s ws_user_id=%s dave_user_id=%s",
+                            ssrc_i,
+                            user_id_i,
+                            dave_user_id,
+                        )
+                    else:
+                        self.state.bind_ssrc(user_id_i, ssrc_i)
+                    log.info("VOICE MAP | user_id=%s ssrc=%s dave_user_id=%s", user_id_i, ssrc_i, dave_user_id)
                 except Exception as e:
                     log.warning("VOICE MAP failed | data=%r err=%r", data, e)
             else:

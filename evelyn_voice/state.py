@@ -37,6 +37,7 @@ class VoiceRuntimeState:
 
     ssrc_to_user_id: dict[int, int] = field(default_factory=dict)
     user_id_to_ssrc: dict[int, int] = field(default_factory=dict)
+    dave_ssrc_to_user_id: dict[int, int] = field(default_factory=dict)
 
     current_speaking_user_id: int | None = None
     current_speaking_ssrc: int | None = None
@@ -59,6 +60,13 @@ class VoiceRuntimeState:
         self.ssrc_to_user_id[ssrc] = user_id
         self.user_id_to_ssrc[user_id] = ssrc
 
+    def bind_dave_ssrc(self, user_id: int, ssrc: int) -> None:
+        self.dave_ssrc_to_user_id[ssrc] = user_id
+        self.bind_ssrc(user_id, ssrc)
+
+    def get_preferred_user_id(self, ssrc: int) -> int | None:
+        return self.dave_ssrc_to_user_id.get(ssrc, self.ssrc_to_user_id.get(ssrc))
+
     def set_current_speaking(self, user_id: int | None, ssrc: int | None) -> None:
         self.current_speaking_user_id = user_id
         self.current_speaking_ssrc = ssrc
@@ -66,6 +74,7 @@ class VoiceRuntimeState:
     def clear_mappings(self) -> None:
         self.ssrc_to_user_id.clear()
         self.user_id_to_ssrc.clear()
+        self.dave_ssrc_to_user_id.clear()
         self.current_speaking_user_id = None
         self.current_speaking_ssrc = None
         self.pending_user_ids.clear()
