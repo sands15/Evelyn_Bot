@@ -229,6 +229,35 @@ pip install -r requirements.txt
 start.bat
 ```
 
+참고로 OmniVoice 서버는 전용 Python 환경에서 실행되도록 분리했습니다.
+이유는 `qwen_tts`와 `omnivoice`가 서로 다른 `transformers` 계열을 요구할 수 있어서, 한 환경에 섞어두면 쉽게 깨지기 때문입니다.
+
+또한 복제 음성 프로필은 아래 폴더에 저장되도록 맞춰두었습니다.
+
+- `C:\Evelyn\omnivoice_profiles`
+
+### 1-1) OmniVoice 복제 음성 프로필 만들기
+
+서버가 떠 있는 상태에서 아래 스크립트로 프로필을 만들 수 있습니다.
+
+```bat
+create_omnivoice_profile.bat 내목소리 C:\path\to\ref_voice.wav "여기에 기준 문장"
+```
+
+만들어진 프로필은 OmniVoice 서버에서 `clone:내목소리` 형태로 사용할 수 있습니다.
+
+예를 들면 OpenAI 호환 요청에서:
+
+```json
+{
+  "model": "omnivoice",
+  "input": "안녕하세요, 테스트입니다.",
+  "voice": "clone:내목소리"
+}
+```
+
+처럼 호출하면 됩니다.
+
 ### 2) 봇 본체 실행
 
 디스코드 봇은 `run_bot.bat`로 따로 실행합니다.
