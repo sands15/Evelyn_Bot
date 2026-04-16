@@ -1,8 +1,8 @@
+import io
 import os
 import re
 import time
 import asyncio
-import tempfile
 from difflib import SequenceMatcher
 from typing import Optional
 
@@ -398,9 +398,7 @@ def warmup_tts_sync() -> None:
         print("Qwen3-TTS 웜업 실패:", repr(e))
 
 
-def synthesize_qwen_tts_sync(text: str, output_path: str) -> None:
-    t0 = time.perf_counter()
-
+def synthesize_qwen_tts_sync(text: str) -> io.BytesIO:
     model = get_tts_model()
     text = clean_tts_text(text)
 
@@ -414,19 +412,18 @@ def synthesize_qwen_tts_sync(text: str, output_path: str) -> None:
             do_sample=False,
         )
 
-    sf.write(output_path, wavs[0], sr)
+    buffer = io.BytesIO()
+    sf.write(buffer, wavs[0], sr, format="WAV")
+    buffer.seek(0)
+    return buffer
 
 
-async def synthesize_qwen_tts_file(text: str) -> str:
+async def synthesize_qwen_tts_buffer(text: str) -> io.BytesIO:
     text = clean_tts_text(text)
     if not text:
         raise ValueError("TTS 텍스트가 비어 있습니다.")
 
-    fd, path = tempfile.mkstemp(suffix=".wav")
-    os.close(fd)
-
-    await asyncio.to_thread(synthesize_qwen_tts_sync, text, path)
-    return path
+    return await asyncio.to_thread(synthesize_qwen_tts_sync, text)
 
 
 # =========================================================
@@ -511,7 +508,7 @@ async def wait_until_not_playing(vc: discord.VoiceClient) -> None:
         await asyncio.sleep(0.05)
 
 
-async def play_audio_file(vc: discord.VoiceClient, path: str) -> None:
+async def play_audio_buffer(vc: discord.VoiceClient, audio_buffer: io.BytesIO) -> None:
     await wait_until_not_playing(vc)
 
     done = asyncio.Event()
@@ -521,7 +518,9 @@ async def play_audio_file(vc: discord.VoiceClient, path: str) -> None:
             print("재생 오류:", repr(err))
         bot.loop.call_soon_threadsafe(done.set)
 
-    source = discord.FFmpegPCMAudio(path, executable=FFMPEG_PATH)
+    audio_buffer.seek(0)
+    source = discord.FFmpegPCMAudio(audio_buffer, executable=FFMPEG_PATH, pipe=True)
+    source._evelyn_audio_buffer = audio_buffer
     vc.play(source, after=after_play)
 
     await done.wait()
@@ -531,20 +530,15 @@ async def speak_answer(vc: discord.VoiceClient, answer: str) -> None:
     guild_id = getattr(getattr(vc, "guild", None), "id", None)
 
     async with tts_lock:
-        audio_path = await synthesize_qwen_tts_file(answer)
+        audio_buffer = await synthesize_qwen_tts_buffer(answer)
         try:
             if guild_id is not None:
                 bot_speaking_guilds.add(guild_id)
-            await play_audio_file(vc, audio_path)
+            await play_audio_buffer(vc, audio_buffer)
         finally:
             if guild_id is not None:
                 bot_speaking_guilds.discard(guild_id)
                 last_bot_audio_end_at[guild_id] = time.monotonic()
-            try:
-                if os.path.exists(audio_path):
-                    os.remove(audio_path)
-            except Exception:
-                pass
 
 
 # =========================================================
