@@ -1,10 +1,12 @@
 import audioop
+import json
 import os
 import queue
 import re
 import time
 import asyncio
 from difflib import SequenceMatcher
+from pathlib import Path
 from typing import Optional
 
 import aiohttp
@@ -12,7 +14,7 @@ import numpy as np
 import torch
 import discord
 from discord.ext import commands
-from faster_whisper import WhisperModel
+from transformers import AutoProcessor, CohereAsrForConditionalGeneration
 
 from evelyn_voice import EvelynVoiceClient
 
@@ -23,7 +25,7 @@ from evelyn_voice import EvelynVoiceClient
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 
 LLM_SERVER_URL = os.getenv("LLM_SERVER_URL", "http://127.0.0.1:9820/v1/chat/completions")
-MODEL_NAME = os.getenv("LLM_MODEL_NAME", "Qwen3.5-35B-A3B-Uncensored-HauhauCS-Aggressive-Q4_K_M.gguf")
+MODEL_NAME = os.getenv("LLM_MODEL_NAME", "Qwen3.5-9B-Uncensored-HauhauCS-Aggressive-Q8_0.gguf")
 
 OMNIVOICE_SERVER_URL = os.getenv("OMNIVOICE_SERVER_URL", "http://127.0.0.1:8880")
 OMNIVOICE_MODEL = os.getenv("OMNIVOICE_MODEL", "omnivoice")
@@ -32,20 +34,40 @@ OMNIVOICE_LANGUAGE = os.getenv("OMNIVOICE_LANGUAGE", "ko")
 OMNIVOICE_STREAM = os.getenv("OMNIVOICE_STREAM", "true").lower() == "true"
 OMNIVOICE_TIMEOUT_SEC = float(os.getenv("OMNIVOICE_TIMEOUT_SEC", "180"))
 
-STT_MODEL_NAME = os.getenv("STT_MODEL_NAME", "large-v3-turbo")
+SUMMARY_LLM_URL = os.getenv("SUMMARY_LLM_URL", "http://127.0.0.1:9821/v1/chat/completions")
+SUMMARY_MODEL_NAME = os.getenv("SUMMARY_MODEL_NAME", "Qwen2.5-1.5B-Instruct-Q8_0.gguf")
+MEMORY_ROOT = Path(os.getenv("BOT_MEMORY_DIR", str(Path(__file__).resolve().parent / "bot_memory")))
+MEMORY_FACT_LIMIT = int(os.getenv("MEMORY_FACT_LIMIT", "200"))
+MEMORY_LOOP_LIMIT = int(os.getenv("MEMORY_LOOP_LIMIT", "100"))
+MEMORY_RETRIEVE_LIMIT = int(os.getenv("MEMORY_RETRIEVE_LIMIT", "8"))
+
+STT_MODEL_NAME = os.getenv("STT_MODEL_NAME", "CohereLabs/cohere-transcribe-03-2026")
 STT_LANGUAGE = os.getenv("STT_LANGUAGE", "ko")
 STT_COMPUTE_TYPE = os.getenv("STT_COMPUTE_TYPE", "float16")
+
+VAD_ENABLED = os.getenv("VAD_ENABLED", "true").lower() == "true"
+VAD_RMS_THRESHOLD = float(os.getenv("VAD_RMS_THRESHOLD", "0.008"))
+VAD_PEAK_THRESHOLD = float(os.getenv("VAD_PEAK_THRESHOLD", "0.020"))
+VAD_MIN_VOICED_RATIO = float(os.getenv("VAD_MIN_VOICED_RATIO", "0.015"))
 
 MAX_HISTORY_ITEMS = 1024
 MAX_VISIBLE_TEXT = 1800
 AUTO_JOIN_VOICE = os.getenv("AUTO_JOIN_VOICE", "true").lower() == "true"
 
-WAKE_WORD = os.getenv("WAKE_WORD", "이블린")
 MIN_TEXT_LEN = int(os.getenv("VOICE_MIN_TEXT_LEN", "4"))
+MIN_TRANSCRIBED_LEN = int(os.getenv("VOICE_MIN_TRANSCRIBED_LEN", "6"))
+MIN_AUDIO_SEC = float(os.getenv("VOICE_MIN_AUDIO_SEC", "0.6"))
 REPLY_COOLDOWN_SEC = float(os.getenv("VOICE_REPLY_COOLDOWN_SEC", "2.5"))
 POST_TTS_IGNORE_SEC = float(os.getenv("VOICE_POST_TTS_IGNORE_SEC", "1.2"))
 SIMILARITY_BLOCK = float(os.getenv("VOICE_SIMILARITY_BLOCK", "0.88"))
-
+WAKE_WORDS = [
+    w.strip()
+    for w in os.getenv(
+        "WAKE_WORDS",
+        "이별인,이별링,이벨링,에벌링,이블린,이불린,이불링,이브린,이브링,입을린,입을링,이블닝,이블링,이별린,이벌린,에블린,에브린,에블링,에브링,에벌린,이벨린,이반린"
+    ).split(",")
+    if w.strip()
+]
 RATE = 48000
 CHANNELS = 2
 TARGET_RATE = 16000
@@ -55,18 +77,7 @@ OMNIVOICE_PCM_RATE = 24000
 OMNIVOICE_PCM_CHANNELS = 1
 DISCORD_FRAME_BYTES = 3840
 
-BAD_SHORTS = {
-    "안녕",
-    "안녕하세요",
-    "감사합니다",
-    "고맙습니다",
-    "네",
-    "네 감사합니다",
-    "시청해주셔서 감사합니다",
-    "감사합니다 여러분",
-}
-
-
+print(WAKE_WORDS)
 # =========================================================
 # 봇 설정
 # =========================================================
@@ -94,13 +105,15 @@ conversation_history = [
 guild_locks: dict[int, asyncio.Lock] = {}
 tts_lock = asyncio.Lock()
 
-stt_model: Optional[WhisperModel] = None
+stt_processor: Optional[AutoProcessor] = None
+stt_model: Optional[CohereAsrForConditionalGeneration] = None
 http_session: Optional[aiohttp.ClientSession] = None
 
 last_voice_reply_at: dict[int, float] = {}
 last_voice_text: dict[int, str] = {}
 last_bot_audio_end_at: dict[int, float] = {}
 bot_speaking_guilds: set[int] = set()
+memory_locks: dict[int, asyncio.Lock] = {}
 
 
 # =========================================================
@@ -127,6 +140,233 @@ def append_history(user_text: str, answer: str) -> None:
     conversation_history.append({"role": "user", "content": clean_text(user_text)})
     conversation_history.append({"role": "assistant", "content": clean_text(answer)})
     trim_history()
+
+
+def guild_memory_dir(guild_id: int) -> Path:
+    path = MEMORY_ROOT / f"guild_{guild_id}"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def memory_summary_path(guild_id: int) -> Path:
+    return guild_memory_dir(guild_id) / "rolling_summary.txt"
+
+
+def memory_facts_path(guild_id: int) -> Path:
+    return guild_memory_dir(guild_id) / "durable_facts.jsonl"
+
+
+def memory_loops_path(guild_id: int) -> Path:
+    return guild_memory_dir(guild_id) / "open_loops.jsonl"
+
+
+def read_text_file(path: Path) -> str:
+    if not path.exists():
+        return ""
+    return path.read_text(encoding="utf-8", errors="ignore").strip()
+
+
+def write_text_file(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(clean_text(text), encoding="utf-8")
+
+
+def read_jsonl(path: Path) -> list[dict]:
+    if not path.exists():
+        return []
+
+    rows: list[dict] = []
+    for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(row, dict):
+            rows.append(row)
+    return rows
+
+
+def write_jsonl(path: Path, rows: list[dict]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    content = "\n".join(json.dumps(row, ensure_ascii=False) for row in rows)
+    if content:
+        content += "\n"
+    path.write_text(content, encoding="utf-8")
+
+
+def append_unique_memory_rows(path: Path, rows: list[dict], limit: int) -> None:
+    existing = read_jsonl(path)
+    seen = {clean_text(str(row.get("text", ""))) for row in existing}
+
+    for row in rows:
+        text = clean_text(str(row.get("text", "")))
+        if len(text) < 2 or text in seen:
+            continue
+        seen.add(text)
+        existing.append({
+            "text": text,
+            "type": clean_text(str(row.get("type", "memory"))) or "memory",
+            "saved_at": int(time.time()),
+        })
+
+    if len(existing) > limit:
+        existing = existing[-limit:]
+
+    write_jsonl(path, existing)
+
+
+def memory_tokens(text: str) -> set[str]:
+    return set(re.findall(r"[A-Za-z0-9_]+|[가-힣]{2,}", clean_text(text).lower()))
+
+
+def select_relevant_memory_rows(query: str, rows: list[dict], limit: int) -> list[dict]:
+    q = memory_tokens(query)
+    if not rows:
+        return []
+
+    scored: list[tuple[int, int, dict]] = []
+    for index, row in enumerate(rows):
+        text = clean_text(str(row.get("text", "")))
+        if not text:
+            continue
+        score = len(q & memory_tokens(text))
+        recency = int(row.get("saved_at", index))
+        scored.append((score, recency, row))
+
+    scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    selected = [row for score, _, row in scored if score > 0][:limit]
+    if selected:
+        return selected
+    return [row for _, _, row in scored[:limit]]
+
+
+def build_memory_context(guild_id: int, user_text: str) -> str:
+    summary = read_text_file(memory_summary_path(guild_id))
+    facts = select_relevant_memory_rows(user_text, read_jsonl(memory_facts_path(guild_id)), MEMORY_RETRIEVE_LIMIT)
+    loops = select_relevant_memory_rows(user_text, read_jsonl(memory_loops_path(guild_id)), 4)
+
+    parts: list[str] = []
+    if summary:
+        parts.append(f"최근 누적 요약:\n{summary}")
+    if facts:
+        parts.append(
+            "장기 기억 후보:\n" + "\n".join(f"- {clean_text(str(row.get('text', '')))}" for row in facts)
+        )
+    if loops:
+        parts.append(
+            "열린 작업/보류 메모:\n" + "\n".join(f"- {clean_text(str(row.get('text', '')))}" for row in loops)
+        )
+
+    if not parts:
+        return ""
+
+    return (
+        "다음은 이전 대화에서 정리한 참고 메모다. 사실처럼 단정하지 말고, 현재 질문과 맞는 경우에만 자연스럽게 반영해라.\n\n"
+        + "\n\n".join(parts)
+    )
+
+
+def extract_json_object(text: str) -> dict:
+    text = text.strip()
+    try:
+        data = json.loads(text)
+        if isinstance(data, dict):
+            return data
+    except Exception:
+        pass
+
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        try:
+            data = json.loads(text[start : end + 1])
+            if isinstance(data, dict):
+                return data
+        except Exception:
+            pass
+
+    return {}
+
+
+async def ask_summary_llm(messages: list[dict]) -> dict:
+    session = await get_http_session()
+    payload = {
+        "model": SUMMARY_MODEL_NAME,
+        "messages": messages,
+        "temperature": 0.1,
+        "max_tokens": 500,
+        "stream": False,
+    }
+    timeout = aiohttp.ClientTimeout(total=90)
+
+    async with session.post(SUMMARY_LLM_URL, json=payload, timeout=timeout) as resp:
+        if resp.status != 200:
+            error_text = await resp.text()
+            raise RuntimeError(f"요약 LLM 서버 오류: {resp.status} / {error_text[:300]}")
+
+        data = await resp.json()
+        choices = data.get("choices", [])
+        if not choices:
+            return {}
+
+        msg = choices[0].get("message", {})
+        text = clean_text(msg.get("content", "") or msg.get("reasoning_content", ""))
+        return extract_json_object(text)
+
+
+async def update_long_term_memory(guild_id: int, user_text: str, answer: str) -> None:
+    lock = memory_locks.setdefault(guild_id, asyncio.Lock())
+    async with lock:
+        current_summary = read_text_file(memory_summary_path(guild_id))
+        recent_facts = read_jsonl(memory_facts_path(guild_id))[-12:]
+        recent_loops = read_jsonl(memory_loops_path(guild_id))[-8:]
+
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "너는 대화 장기기억 관리자다. 반드시 JSON 객체 하나만 출력한다. "
+                    "형식은 {\"summary_update\": string, \"durable_facts\": [{\"type\": string, \"text\": string}], \"open_loops\": [{\"type\": string, \"text\": string}]}. "
+                    "durable_facts에는 오래 기억할 만한 선호, 설정, 프로젝트 결정, 반복되는 사실만 넣어라. "
+                    "잡담, 일회성 문장, 추측, 노이즈는 넣지 마라. open_loops에는 아직 끝나지 않은 작업이나 다음에 이어야 할 일만 넣어라. "
+                    "summary_update는 지금까지 맥락을 짧게 압축한 한국어 요약으로 작성해라."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"현재 요약:\n{current_summary or '(없음)'}\n\n"
+                    f"최근 durable_facts:\n{json.dumps(recent_facts, ensure_ascii=False)}\n\n"
+                    f"최근 open_loops:\n{json.dumps(recent_loops, ensure_ascii=False)}\n\n"
+                    f"새 대화:\nuser: {clean_text(user_text)}\nassistant: {clean_text(answer)}"
+                ),
+            },
+        ]
+
+        try:
+            result = await ask_summary_llm(messages)
+        except Exception as e:
+            print(f"[MEMORY] 요약 업데이트 실패: {e}")
+            return
+
+        summary_update = clean_text(str(result.get("summary_update", "")))
+        if summary_update:
+            write_text_file(memory_summary_path(guild_id), summary_update)
+
+        durable_facts = result.get("durable_facts", [])
+        if isinstance(durable_facts, list):
+            append_unique_memory_rows(memory_facts_path(guild_id), [row for row in durable_facts if isinstance(row, dict)], MEMORY_FACT_LIMIT)
+
+        open_loops = result.get("open_loops", [])
+        if isinstance(open_loops, list):
+            append_unique_memory_rows(memory_loops_path(guild_id), [row for row in open_loops if isinstance(row, dict)], MEMORY_LOOP_LIMIT)
+
+
+def schedule_memory_update(guild_id: int, user_text: str, answer: str) -> None:
+    asyncio.create_task(update_long_term_memory(guild_id, user_text, answer))
 
 
 def clean_tts_text(text: str) -> str:
@@ -252,19 +492,59 @@ def normalize_voice_text(s: str) -> str:
     s = re.sub(r"[^\w가-힣 ]+", "", s)
     return s
 
+def normalized_wake_words() -> list[str]:
+    return [normalize_voice_text(w) for w in WAKE_WORDS if normalize_voice_text(w)]
+
+
+def contains_wake_word(text: str) -> bool:
+    text_n = normalize_voice_text(text)
+    if not text_n:
+        return False
+    return any(w in text_n for w in normalized_wake_words())
+
+
+def strip_voice_wake_word(text: str) -> str:
+    text_n = clean_text(text)
+
+    for wake_word in WAKE_WORDS:
+        ww = wake_word.strip()
+        if not ww:
+            continue
+
+        # 맨 앞 호출 제거: "이블린", "이블린아", "이블린,"
+        pattern_front = rf"^\s*{re.escape(ww)}[야아]?\s*[, ]*"
+        new_text = re.sub(pattern_front, "", text_n, count=1)
+        if new_text != text_n:
+            text_n = clean_text(new_text)
+            return text_n or "부르셨나요?"
+
+        # 문장 중 첫 1회 제거
+        pattern_once = rf"{re.escape(ww)}[야아]?"
+        new_text = re.sub(pattern_once, "", text_n, count=1)
+        if new_text != text_n:
+            text_n = clean_text(new_text)
+            return text_n or "부르셨나요?"
+
+    return text_n or "부르셨나요?"
 
 def is_similar(a: str, b: str) -> bool:
     if not a or not b:
         return False
     return SequenceMatcher(None, a, b).ratio() >= SIMILARITY_BLOCK
 
+def should_ignore_short_transcription(text: str, pcm_bytes: bytes) -> bool:
+    text_n = normalize_voice_text(text)
+    if not text_n:
+        return True
 
-def strip_voice_wake_word(text: str) -> str:
-    text = clean_text(text)
-    text = re.sub(rf"^\s*{re.escape(WAKE_WORD)}[야아]?[\s,]*", "", text)
-    text = re.sub(rf"\b{re.escape(WAKE_WORD)}[야아]?\b", "", text, count=1)
-    text = clean_text(text)
-    return text or "부르셨나요?"
+    if text_n in normalized_wake_words():
+        return False
+
+    audio_sec = len(pcm_bytes) / (RATE * CHANNELS * 2)
+    if audio_sec < MIN_AUDIO_SEC and len(text_n) < MIN_TRANSCRIBED_LEN:
+        return True
+
+    return False
 
 
 def should_reply_to_voice(guild_id: int, text: str) -> tuple[bool, str]:
@@ -280,11 +560,8 @@ def should_reply_to_voice(guild_id: int, text: str) -> tuple[bool, str]:
     if not text_n:
         return False, "empty"
 
-    if WAKE_WORD not in text_n:
+    if not contains_wake_word(text_n):
         return False, "no_wake_word"
-
-    if text_n in BAD_SHORTS:
-        return False, "bad_short"
 
     if len(text_n) < MIN_TEXT_LEN:
         return False, "too_short"
@@ -319,6 +596,22 @@ def downmix_and_resample_int16_stereo_to_mono16k(pcm_bytes: bytes) -> np.ndarray
 
     return audio
 
+def is_probably_silent(pcm_bytes: bytes) -> bool:
+    audio16k = downmix_and_resample_int16_stereo_to_mono16k(pcm_bytes)
+    if audio16k.size == 0:
+        return True
+
+    abs_audio = np.abs(audio16k)
+    rms = float(np.sqrt(np.mean(np.square(audio16k))))
+    voiced_ratio = float(np.mean(abs_audio > VAD_PEAK_THRESHOLD))
+
+    if rms < VAD_RMS_THRESHOLD:
+        return True
+
+    if voiced_ratio < VAD_MIN_VOICED_RATIO:
+        return True
+
+    return False
 
 def log_visible_gpus() -> None:
     print("CUDA available:", torch.cuda.is_available())
@@ -482,21 +775,31 @@ async def create_omnivoice_source(text: str) -> OmniVoicePCMStream:
 # =========================================================
 # STT
 # =========================================================
-def get_stt_model() -> WhisperModel:
-    global stt_model
+def get_stt_model() -> tuple[AutoProcessor, CohereAsrForConditionalGeneration]:
+    global stt_processor, stt_model
 
-    if stt_model is not None:
-        return stt_model
+    if stt_processor is not None and stt_model is not None:
+        return stt_processor, stt_model
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"Whisper 로드 시작: model={STT_MODEL_NAME}, device={device}, compute_type={STT_COMPUTE_TYPE}")
-    stt_model = WhisperModel(
+    token = os.getenv("HF_TOKEN")
+    torch_dtype = torch.float16 if device == "cuda" and STT_COMPUTE_TYPE == "float16" else torch.float32
+
+    print(f"STT 로드 시작: model={STT_MODEL_NAME}, device={device}, dtype={torch_dtype}")
+
+    stt_processor = AutoProcessor.from_pretrained(
         STT_MODEL_NAME,
-        device=device,
-        compute_type=STT_COMPUTE_TYPE if device == "cuda" else "int8",
+        token=token,
     )
-    print("Whisper 로드 완료")
-    return stt_model
+
+    stt_model = CohereAsrForConditionalGeneration.from_pretrained(
+        STT_MODEL_NAME,
+        token=token,
+        torch_dtype=torch_dtype,
+    ).to(device)
+
+    print("STT 로드 완료")
+    return stt_processor, stt_model
 
 
 def transcribe_voice_sync(pcm_bytes: bytes) -> str:
@@ -504,20 +807,30 @@ def transcribe_voice_sync(pcm_bytes: bytes) -> str:
     if audio16k.size == 0:
         return ""
 
-    model = get_stt_model()
-    segments, _ = model.transcribe(
+    processor, model = get_stt_model()
+
+    inputs = processor(
         audio16k,
-        beam_size=3,
-        best_of=1,
-        temperature=0.0,
+        sampling_rate=TARGET_RATE,
+        return_tensors="pt",
         language=STT_LANGUAGE,
-        vad_filter=False,
-        condition_on_previous_text=False,
-        no_speech_threshold=0.55,
-        log_prob_threshold=-0.9,
-        compression_ratio_threshold=2.3,
     )
-    return clean_text("".join(seg.text for seg in segments))
+
+    moved = {}
+    for k, v in inputs.items():
+        if torch.is_tensor(v):
+            if torch.is_floating_point(v):
+                moved[k] = v.to(model.device, dtype=model.dtype)
+            else:
+                moved[k] = v.to(model.device)
+        else:
+            moved[k] = v
+
+    with torch.inference_mode():
+        outputs = model.generate(**moved, max_new_tokens=256)
+
+    text = processor.decode(outputs[0], skip_special_tokens=True)
+    return clean_text(text)
 
 
 # =========================================================
@@ -607,15 +920,28 @@ def fallback_answer_for(user_text: str) -> str:
     return "응, 잠깐만."
 
 
-async def ask_llm_once(user_text: str) -> str:
+async def ask_llm_once(user_text: str, guild_id: int | None = None) -> str:
     final_user_text = (
         f"{user_text}\n\n"
         "주의: 생각 과정 말하지 말고, 최종 답변만 한국어로 한두 문장으로 짧게 말해."
     )
 
+    messages = list(conversation_history)
+
+    if guild_id is not None:
+        memory_context = build_memory_context(guild_id, user_text)
+        if memory_context:
+            base_system = messages[0]["content"] if messages and messages[0].get("role") == "system" else ""
+            merged_system = clean_text(base_system + "\n\n" + memory_context)
+
+            if messages and messages[0].get("role") == "system":
+                messages[0] = {"role": "system", "content": merged_system}
+            else:
+                messages.insert(0, {"role": "system", "content": merged_system})
+
     payload = {
         "model": MODEL_NAME,
-        "messages": conversation_history + [{"role": "user", "content": final_user_text}],
+        "messages": messages + [{"role": "user", "content": final_user_text}],
         "temperature": 0.1,
         "max_tokens": 320,
         "stream": False,
@@ -667,6 +993,9 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes) 
 
     guild_id = guild.id
 
+    if VAD_ENABLED and is_probably_silent(pcm_bytes):
+        return
+
     try:
         text = await asyncio.to_thread(transcribe_voice_sync, pcm_bytes)
     except Exception as e:
@@ -674,6 +1003,10 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes) 
         return
 
     if not text:
+        return
+
+    if should_ignore_short_transcription(text, pcm_bytes):
+        print(f"[STT IGNORE] short_noise: {text!r}")
         return
 
     print(f"🎤 [{member.display_name}] {text}")
@@ -696,7 +1029,7 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes) 
             return
 
         try:
-            answer = await ask_llm_once(user_text)
+            answer = await ask_llm_once(user_text, guild_id=guild_id)
         except Exception as e:
             print(f"❌ [LLM] {e}")
             return
@@ -706,6 +1039,7 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes) 
             return
 
         append_history(user_text, answer)
+        schedule_memory_update(guild_id, user_text, answer)
         print(f"💬 [Evelyn] {answer}")
 
         try:
@@ -723,7 +1057,7 @@ async def on_ready():
     try:
         await asyncio.to_thread(get_stt_model)
     except Exception as e:
-        print("Whisper 사전 로드 실패:", repr(e))
+        print(f"STT 로드 실패: {e}")
 
     try:
         await warmup_tts_server()
@@ -742,7 +1076,7 @@ async def on_message(message: discord.Message):
         await bot.process_commands(message)
         return
 
-    is_wake_word = WAKE_WORD in message.content
+    is_wake_word = contains_wake_word(message.content)
     is_reply = False
 
     if message.reference:
@@ -757,7 +1091,7 @@ async def on_message(message: discord.Message):
         await bot.process_commands(message)
         return
 
-    user_text = message.content[len(WAKE_WORD):].strip() if is_wake_word else message.content.strip()
+    user_text = strip_voice_wake_word(message.content) if is_wake_word else message.content.strip()
     if not user_text:
         user_text = "부르셨나요?"
 
@@ -779,11 +1113,12 @@ async def on_message(message: discord.Message):
                 if AUTO_JOIN_VOICE:
                     vc = await ensure_voice_client(message)
 
-                answer = await ask_llm_once(user_text)
+                answer = await ask_llm_once(user_text, guild_id=message.guild.id)
 
                 await message.channel.send(visible_text(answer))
 
             append_history(user_text, answer)
+            schedule_memory_update(message.guild.id, user_text, answer)
 
             if vc is not None:
                 await speak_answer(vc, answer)
