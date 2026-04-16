@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 import struct
+from dataclasses import dataclass
 from collections import deque
 
 import davey
@@ -18,7 +19,19 @@ from .state import VoiceRuntimeState
 from .udp import VoiceUDPTransport
 
 
-async def on_user_audio(member, pcm_bytes: bytes):
+@dataclass(slots=True)
+class VoiceAudioEvent:
+    member: discord.Member | None
+    user_id: int | None
+    ssrc: int
+    utterance_index: int
+    mapping_source: str | None
+    mapping_stable: bool
+    dave_packets_ok: int
+    total_packets: int
+
+
+async def on_user_audio(member, pcm_bytes: bytes, event: VoiceAudioEvent | None = None):
     return None
 
 
@@ -391,7 +404,7 @@ class EvelynVoiceClient(discord.VoiceClient):
         except Exception:
             return []
 
-    def _candidate_dave_user_ids(self, primary_user_id: int) -> list[int]:
+    def _candidate_dave_user_ids(self, primary_user_id: int, ssrc: int | None = None) -> list[int]:
         candidates: list[int] = []
 
         def add(value) -> None:
@@ -405,7 +418,12 @@ class EvelynVoiceClient(discord.VoiceClient):
                 candidates.append(value_i)
 
         add(primary_user_id)
+        if ssrc is not None:
+            add(self.runtime.get_bound_user_id(int(ssrc)))
         add(self.runtime.current_speaking_user_id)
+
+        for active_user_id in self.runtime.get_active_speaker_ids():
+            add(active_user_id)
 
         for known_user_id in self._get_dave_known_user_ids():
             add(known_user_id)
@@ -422,7 +440,7 @@ class EvelynVoiceClient(discord.VoiceClient):
 
         return candidates
 
-    def _decrypt_dave_inner_packet(self, *, user_id: int, outer_plain: bytes) -> tuple[bytes | None, int | None]:
+    def _decrypt_dave_inner_packet(self, *, user_id: int, ssrc: int | None, outer_plain: bytes) -> tuple[bytes | None, int | None]:
         if not outer_plain:
             return None, None
 
@@ -462,7 +480,7 @@ class EvelynVoiceClient(discord.VoiceClient):
                 return outer_plain, user_id
 
             if "NoValidCryptorFound" in err_text:
-                for candidate_user_id in self._candidate_dave_user_ids(user_id):
+                for candidate_user_id in self._candidate_dave_user_ids(user_id, ssrc):
                     if candidate_user_id == int(user_id):
                         continue
                     try:
@@ -472,9 +490,10 @@ class EvelynVoiceClient(discord.VoiceClient):
                             bytes(outer_plain),
                         )
                         log.warning(
-                            "DAVE INNER remap | old_user_id=%s new_user_id=%s in_len=%d prefix=%s",
+                            "DAVE INNER remap | old_user_id=%s new_user_id=%s ssrc=%s in_len=%d prefix=%s",
                             user_id,
                             candidate_user_id,
+                            ssrc,
                             len(outer_plain),
                             outer_plain[:8].hex(),
                         )
@@ -484,15 +503,18 @@ class EvelynVoiceClient(discord.VoiceClient):
 
             if log_allowed:
                 log.warning(
-                    "DAVE INNER failed | user_id=%s in_len=%d passthrough=%s prefix=%s stats=%r known_ids=%r ssrc_map=%r candidates=%r err=%r",
+                    "DAVE INNER failed | user_id=%s ssrc=%s binding_source=%r binding_stable=%s in_len=%d passthrough=%s prefix=%s stats=%r known_ids=%r ssrc_map=%r candidates=%r err=%r",
                     user_id,
+                    ssrc,
+                    self.runtime.get_binding_source(int(ssrc)) if ssrc is not None else None,
+                    self.runtime.is_stable_binding(int(ssrc)) if ssrc is not None else False,
                     len(outer_plain),
                     allow_passthrough,
                     outer_plain[:8].hex(),
                     self._get_dave_decryption_stats(user_id),
                     self._get_dave_known_user_ids(),
                     dict(self.runtime.ssrc_to_user_id),
-                    self._candidate_dave_user_ids(user_id),
+                    self._candidate_dave_user_ids(user_id, ssrc),
                     e,
                 )
             self.dave_inner_fail_log_count += 1
@@ -700,7 +722,7 @@ class EvelynVoiceClient(discord.VoiceClient):
         last_seq = packets[-1]["sequence"]
         total_payload = sum(len(p["payload"]) for p in packets)
 
-        user_id = self.runtime.ssrc_to_user_id.get(ssrc)
+        user_id = self.runtime.get_bound_user_id(ssrc)
 
         if user_id is None:
             try:
@@ -710,13 +732,21 @@ class EvelynVoiceClient(discord.VoiceClient):
 
             if len(human_members) == 1:
                 user_id = int(human_members[0].id)
-                self.runtime.bind_ssrc(user_id, ssrc)
+                self.runtime.bind_ssrc(user_id, ssrc, source="single_member_fallback", stable=False)
                 log.info("VOICE MAP FALLBACK | user_id=%d ssrc=%d", user_id, ssrc)
 
         if user_id is None:
             log.warning("No user_id mapping yet for ssrc=%d; skipping idx=%d", ssrc, idx)
             return
-        log.info("MAP DEBUG | idx=%d ssrc=%d user_id=%s", idx, ssrc, user_id)
+        log.info(
+            "MAP DEBUG | idx=%d ssrc=%d user_id=%s source=%r stable=%s active_speakers=%r",
+            idx,
+            ssrc,
+            user_id,
+            self.runtime.get_binding_source(ssrc),
+            self.runtime.is_stable_binding(ssrc),
+            self.runtime.get_active_speaker_ids(),
+        )
         self._sync_dave_from_base()
 
         use_dave = bool(self.dave.ready)
@@ -776,11 +806,29 @@ class EvelynVoiceClient(discord.VoiceClient):
             if use_dave:
                 opus_packet, resolved_user_id = self._decrypt_dave_inner_packet(
                     user_id=int(user_id),
+                    ssrc=int(ssrc),
                     outer_plain=outer_plain,
                 )
                 if resolved_user_id is not None and int(resolved_user_id) != int(user_id):
+                    old_user_id = int(user_id)
                     user_id = int(resolved_user_id)
-                    self.runtime.bind_ssrc(int(user_id), int(ssrc))
+                    rebound = self.runtime.bind_ssrc(
+                        int(user_id),
+                        int(ssrc),
+                        source="dave_remap",
+                        stable=False,
+                        allow_override=False,
+                    )
+                    log.info(
+                        "VOICE MAP REMAP | idx=%d ssrc=%d old_user_id=%s new_user_id=%s rebound=%s stable=%s source=%r",
+                        idx,
+                        ssrc,
+                        old_user_id,
+                        user_id,
+                        rebound,
+                        self.runtime.is_stable_binding(ssrc),
+                        self.runtime.get_binding_source(ssrc),
+                    )
 
                 if opus_packet is None:
                     failed += 1
@@ -868,6 +916,15 @@ class EvelynVoiceClient(discord.VoiceClient):
         if not pcm_chunks:
             return
 
+        if user_id is not None and dave_success >= 3 and not self.runtime.is_stable_binding(ssrc):
+            self.runtime.bind_ssrc(
+                int(user_id),
+                int(ssrc),
+                source="dave_confirmed",
+                stable=True,
+                allow_override=True,
+            )
+
         pcm_bytes = b"".join(pcm_chunks)
 
         member = None
@@ -876,16 +933,33 @@ class EvelynVoiceClient(discord.VoiceClient):
         except Exception:
             member = None
 
+        event = VoiceAudioEvent(
+            member=member,
+            user_id=int(user_id) if user_id is not None else None,
+            ssrc=int(ssrc),
+            utterance_index=int(idx),
+            mapping_source=self.runtime.get_binding_source(ssrc),
+            mapping_stable=self.runtime.is_stable_binding(ssrc),
+            dave_packets_ok=int(dave_success),
+            total_packets=int(len(packets)),
+        )
+
         if getattr(self, "on_user_audio", None) is not None:
             try:
                 log.info(
-                    "on_user_audio call | idx=%d user_id=%s member=%s pcm_bytes=%d",
+                    "on_user_audio call | idx=%d user_id=%s member=%s ssrc=%d source=%r stable=%s pcm_bytes=%d",
                     idx,
                     user_id,
                     getattr(member, "display_name", None),
+                    ssrc,
+                    event.mapping_source,
+                    event.mapping_stable,
                     len(pcm_bytes),
                 )
-                await self.on_user_audio(member, pcm_bytes)
+                try:
+                    await self.on_user_audio(member, pcm_bytes, event)
+                except TypeError:
+                    await self.on_user_audio(member, pcm_bytes)
                 log.info("on_user_audio ok | idx=%d pcm_bytes=%d", idx, len(pcm_bytes))
             except Exception as e:
                 log.warning("on_user_audio callback failed | idx=%d err=%r", idx, e)

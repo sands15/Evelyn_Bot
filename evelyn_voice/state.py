@@ -37,6 +37,9 @@ class VoiceRuntimeState:
 
     ssrc_to_user_id: dict[int, int] = field(default_factory=dict)
     user_id_to_ssrc: dict[int, int] = field(default_factory=dict)
+    stable_ssrc_to_user_id: dict[int, int] = field(default_factory=dict)
+    ssrc_binding_source: dict[int, str] = field(default_factory=dict)
+    speaking_user_by_ssrc: dict[int, int] = field(default_factory=dict)
 
     current_speaking_user_id: int | None = None
     current_speaking_ssrc: int | None = None
@@ -55,17 +58,88 @@ class VoiceRuntimeState:
     dave_apply_attempts: int = 0
     last_dave_apply_error: str | None = None
 
-    def bind_ssrc(self, user_id: int, ssrc: int) -> None:
+    def bind_ssrc(
+        self,
+        user_id: int,
+        ssrc: int,
+        *,
+        source: str = "unknown",
+        stable: bool = False,
+        allow_override: bool = True,
+    ) -> bool:
+        user_id = int(user_id)
+        ssrc = int(ssrc)
+
+        locked_user_id = self.stable_ssrc_to_user_id.get(ssrc)
+        if locked_user_id is not None and locked_user_id != user_id and not allow_override:
+            return False
+
+        previous_user_id = self.ssrc_to_user_id.get(ssrc)
         self.ssrc_to_user_id[ssrc] = user_id
         self.user_id_to_ssrc[user_id] = ssrc
+        self.ssrc_binding_source[ssrc] = source
+
+        if stable:
+            self.stable_ssrc_to_user_id[ssrc] = user_id
+
+        return previous_user_id != user_id
+
+    def get_bound_user_id(self, ssrc: int, *, prefer_stable: bool = True) -> int | None:
+        ssrc = int(ssrc)
+        if prefer_stable:
+            stable_user_id = self.stable_ssrc_to_user_id.get(ssrc)
+            if stable_user_id is not None:
+                return stable_user_id
+        return self.ssrc_to_user_id.get(ssrc)
+
+    def get_binding_source(self, ssrc: int) -> str | None:
+        return self.ssrc_binding_source.get(int(ssrc))
+
+    def is_stable_binding(self, ssrc: int) -> bool:
+        return int(ssrc) in self.stable_ssrc_to_user_id
+
+    def get_active_speaker_ids(self) -> list[int]:
+        return list(dict.fromkeys(self.speaking_user_by_ssrc.values()))
 
     def set_current_speaking(self, user_id: int | None, ssrc: int | None) -> None:
         self.current_speaking_user_id = user_id
         self.current_speaking_ssrc = ssrc
 
+    def set_speaking(self, user_id: int | None, ssrc: int | None, speaking: bool) -> None:
+        if user_id is None and ssrc is None:
+            self.set_current_speaking(None, None)
+            return
+
+        if user_id is None and ssrc is not None:
+            user_id = self.speaking_user_by_ssrc.get(int(ssrc))
+        if ssrc is None and user_id is not None:
+            ssrc = self.user_id_to_ssrc.get(int(user_id))
+        if user_id is None or ssrc is None:
+            return
+
+        user_id = int(user_id)
+        ssrc = int(ssrc)
+
+        if speaking:
+            self.speaking_user_by_ssrc[ssrc] = user_id
+            self.set_current_speaking(user_id, ssrc)
+            return
+
+        if self.speaking_user_by_ssrc.get(ssrc) == user_id:
+            self.speaking_user_by_ssrc.pop(ssrc, None)
+
+        if self.current_speaking_user_id == user_id or self.current_speaking_ssrc == ssrc:
+            self.set_current_speaking(None, None)
+
+    def clear_speaking(self, *, user_id: int | None = None, ssrc: int | None = None) -> None:
+        self.set_speaking(user_id, ssrc, False)
+
     def clear_mappings(self) -> None:
         self.ssrc_to_user_id.clear()
         self.user_id_to_ssrc.clear()
+        self.stable_ssrc_to_user_id.clear()
+        self.ssrc_binding_source.clear()
+        self.speaking_user_by_ssrc.clear()
         self.current_speaking_user_id = None
         self.current_speaking_ssrc = None
         self.pending_user_ids.clear()

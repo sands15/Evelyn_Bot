@@ -21,7 +21,7 @@ try:
 except Exception:
     torchaudio_F = None
 
-from evelyn_voice import EvelynVoiceClient
+from evelyn_voice import EvelynVoiceClient, VoiceAudioEvent
 
 
 # =========================================================
@@ -122,11 +122,13 @@ stt_processor: Optional[AutoProcessor] = None
 stt_model: Optional[CohereAsrForConditionalGeneration] = None
 http_session: Optional[aiohttp.ClientSession] = None
 
-last_voice_reply_at: dict[int, float] = {}
-last_voice_text: dict[int, str] = {}
+last_voice_reply_at: dict[tuple[int, int], float] = {}
+last_voice_text: dict[tuple[int, int], str] = {}
 last_bot_audio_end_at: dict[int, float] = {}
 bot_speaking_guilds: set[int] = set()
 memory_locks: dict[int, asyncio.Lock] = {}
+voice_response_queues: dict[int, asyncio.Queue[dict]] = {}
+voice_response_tasks: dict[int, asyncio.Task] = {}
 
 
 # =========================================================
@@ -617,9 +619,16 @@ def should_ignore_short_transcription(text: str, pcm_bytes: bytes) -> bool:
     return False
 
 
-def should_reply_to_voice(guild_id: int, text: str, *, wake_detected: bool = False) -> tuple[bool, str]:
+def should_reply_to_voice(
+    guild_id: int,
+    text: str,
+    *,
+    wake_detected: bool = False,
+    speaker_id: int | None = None,
+) -> tuple[bool, str]:
     now = time.monotonic()
     text_n = normalize_voice_text(text)
+    speaker_key = (guild_id, int(speaker_id) if speaker_id is not None else 0)
 
     if guild_id in bot_speaking_guilds:
         return False, "bot_is_speaking"
@@ -636,15 +645,61 @@ def should_reply_to_voice(guild_id: int, text: str, *, wake_detected: bool = Fal
     if len(text_n) < MIN_TEXT_LEN and not wake_detected:
         return False, "too_short"
 
-    if now - last_voice_reply_at.get(guild_id, 0.0) < REPLY_COOLDOWN_SEC:
+    if now - last_voice_reply_at.get(speaker_key, 0.0) < REPLY_COOLDOWN_SEC:
         return False, "cooldown"
 
-    if is_similar(text_n, last_voice_text.get(guild_id, "")):
+    if is_similar(text_n, last_voice_text.get(speaker_key, "")):
         return False, "duplicate"
 
-    last_voice_text[guild_id] = text_n
-    last_voice_reply_at[guild_id] = now
+    last_voice_text[speaker_key] = text_n
+    last_voice_reply_at[speaker_key] = now
     return True, "ok"
+
+
+def ensure_voice_response_queue(guild_id: int) -> asyncio.Queue[dict]:
+    response_queue = voice_response_queues.get(guild_id)
+    if response_queue is None:
+        response_queue = asyncio.Queue(maxsize=8)
+        voice_response_queues[guild_id] = response_queue
+
+    task = voice_response_tasks.get(guild_id)
+    if task is None or task.done():
+        voice_response_tasks[guild_id] = asyncio.create_task(voice_response_worker(guild_id, response_queue))
+
+    return response_queue
+
+
+async def voice_response_worker(guild_id: int, response_queue: "asyncio.Queue[dict]") -> None:
+    while True:
+        item = await response_queue.get()
+        speaker_name = item.get("speaker_name") or "unknown"
+        user_text = clean_text(item.get("user_text", ""))
+
+        if not user_text:
+            continue
+
+        try:
+            guild = bot.get_guild(guild_id)
+            if guild is None:
+                continue
+
+            vc = guild.voice_client
+            if vc is None:
+                print(f"[VOICE WORKER] guild={guild_id} speaker={speaker_name} skip=no_voice_client")
+                continue
+
+            answer = await ask_llm_and_speak_streaming(vc, user_text, guild_id=guild_id)
+            answer = clean_text(answer)
+            if not answer:
+                continue
+
+            append_history(user_text, answer)
+            schedule_memory_update(guild_id, user_text, answer)
+            print(f"💬 [Evelyn->{speaker_name}] {answer}")
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            print(f"❌ [VOICE WORKER] guild={guild_id} speaker={speaker_name} err={e}")
 
 
 def downmix_and_resample_int16_stereo_to_mono16k(pcm_bytes: bytes) -> np.ndarray:
@@ -1300,7 +1355,11 @@ async def ask_llm_and_speak_streaming(vc: discord.VoiceClient, user_text: str, g
 # =========================================================
 # 음성 입력 처리
 # =========================================================
-async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes) -> None:
+async def process_member_audio(
+    member: discord.Member | None,
+    pcm_bytes: bytes,
+    event: VoiceAudioEvent | None = None,
+) -> None:
     if member is None:
         return
 
@@ -1343,38 +1402,42 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes) 
         print(f"[STT IGNORE] short_noise: {text!r}")
         return
 
-    print(f"🎤 [{member.display_name}] wake={wake_probe!r} text={text}")
+    print(
+        f"🎤 [{member.display_name}] ssrc={getattr(event, 'ssrc', None)} "
+        f"source={getattr(event, 'mapping_source', None)!r} stable={getattr(event, 'mapping_stable', None)} "
+        f"wake={wake_probe!r} text={text}"
+    )
 
-    ok, reason = should_reply_to_voice(guild_id, text, wake_detected=True)
+    ok, reason = should_reply_to_voice(guild_id, text, wake_detected=True, speaker_id=member.id)
     if not ok:
         print(f"[STT IGNORE] {reason}: {text!r}")
         return
 
     user_text = strip_voice_wake_word(text)
-    lock = guild_locks.setdefault(guild_id, asyncio.Lock())
-
-    if lock.locked():
-        print(f"[VOICE SKIP] busy guild={guild_id} text={user_text!r}")
+    vc = guild.voice_client
+    if vc is None:
         return
 
-    async with lock:
-        vc = guild.voice_client
-        if vc is None:
-            return
+    response_queue = ensure_voice_response_queue(guild_id)
 
-        try:
-            answer = await ask_llm_and_speak_streaming(vc, user_text, guild_id=guild_id)
-        except Exception as e:
-            print(f"❌ [LLM/TTS] {e}")
-            return
+    try:
+        response_queue.put_nowait(
+            {
+                "speaker_id": member.id,
+                "speaker_name": member.display_name,
+                "user_text": user_text,
+                "ssrc": getattr(event, "ssrc", None),
+                "mapping_source": getattr(event, "mapping_source", None),
+            }
+        )
+    except asyncio.QueueFull:
+        print(f"[VOICE SKIP] queue_full guild={guild_id} speaker={member.display_name} text={user_text!r}")
+        return
 
-        answer = clean_text(answer)
-        if not answer:
-            return
-
-        append_history(user_text, answer)
-        schedule_memory_update(guild_id, user_text, answer)
-        print(f"💬 [Evelyn] {answer}")
+    print(
+        f"[VOICE ENQUEUE] guild={guild_id} speaker={member.display_name} "
+        f"ssrc={getattr(event, 'ssrc', None)} qsize={response_queue.qsize()} text={user_text!r}"
+    )
 
 
 # =========================================================
