@@ -64,7 +64,7 @@ WAKE_WORDS = [
     w.strip()
     for w in os.getenv(
         "WAKE_WORDS",
-        "이별인,이별링,이벨링,에벌링,이블린,이불린,이불링,이브린,이브링,입을린,입을링,이블닝,이블링,이별린,이벌린,에블린,에브린,에블링,에브링,에벌린,이벨린,이반린"
+        "이별인,이별링,이벨링,에벌링,이블린,이불린,이불링,이브린,이브링,입을린,입을링,이블닝,이블링,이별린,이벌린,에블린,에브린,에블링,에브링,에벌린,이벨린,이반린,불리읍"
     ).split(",")
     if w.strip()
 ]
@@ -1104,6 +1104,7 @@ async def ask_llm_streaming(
     session = await get_http_session()
     raw_parts: list[str] = []
     sentence_buffer = ""
+    emitted_any = False
 
     async with session.post(LLM_SERVER_URL, json=payload, timeout=timeout) as resp:
         if resp.status != 200:
@@ -1152,6 +1153,7 @@ async def ask_llm_streaming(
             if on_sentence is not None:
                 ready_chunks, sentence_buffer = split_tts_sentences(sentence_buffer)
                 for chunk in ready_chunks:
+                    emitted_any = True
                     await on_sentence(chunk)
 
     answer = sanitize_model_output("".join(raw_parts))
@@ -1160,9 +1162,10 @@ async def ask_llm_streaming(
 
     if on_sentence is not None:
         ready_chunks, sentence_buffer = split_tts_sentences(sentence_buffer, force=True)
-        if not ready_chunks and answer:
+        if not ready_chunks and answer and not emitted_any:
             ready_chunks = [answer]
         for chunk in ready_chunks:
+            emitted_any = True
             await on_sentence(chunk)
 
     return answer

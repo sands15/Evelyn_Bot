@@ -133,18 +133,14 @@ class EvelynVoiceClient(discord.VoiceClient):
         self._decrypt_task: asyncio.Task | None = None
         self._utterance_task: asyncio.Task | None = None
 
-        self.target_ssrc: int | None = None
-
         self.media_queue: asyncio.Queue = asyncio.Queue(maxsize=2000)
         self.media_packet_count = 0
         self.decrypt_packet_count = 0
 
-        self.in_utterance = False
-        self.last_voice_like_at = 0.0
         self.end_silence_sec = 0.45
         self.voice_payload_threshold = 60
 
-        self.current_utterance_packets: list[dict] = []
+        self.utterance_states: dict[int, dict] = {}
         self.utterance_count = 0
         self.utterance_queue: asyncio.Queue = asyncio.Queue(maxsize=32)
 
@@ -519,19 +515,6 @@ class EvelynVoiceClient(discord.VoiceClient):
                 if info["payload_type"] != 120:
                     continue
 
-                speaking_ssrc = self.runtime.current_speaking_ssrc
-
-                if speaking_ssrc is not None and info["ssrc"] == speaking_ssrc:
-                    if self.target_ssrc != speaking_ssrc:
-                        self.target_ssrc = speaking_ssrc
-                        log.info("Locked media SSRC from speaking map: %d", self.target_ssrc)
-                elif self.target_ssrc is None:
-                    self.target_ssrc = info["ssrc"]
-                    log.info("Locked provisional media SSRC: %d", self.target_ssrc)
-
-                if self.target_ssrc is None or info["ssrc"] != self.target_ssrc:
-                    continue
-
                 payload = packet[info["header_len"]:]
 
                 packet_info = {
@@ -585,11 +568,20 @@ class EvelynVoiceClient(discord.VoiceClient):
                         "payload": payload,
                     }
 
+                    state = self.utterance_states.setdefault(
+                        ssrc,
+                        {
+                            "in_utterance": False,
+                            "last_voice_like_at": 0.0,
+                            "packets": [],
+                        },
+                    )
+
                     if payload_len >= self.voice_payload_threshold:
-                        self.last_voice_like_at = now
-                        if not self.in_utterance:
-                            self.in_utterance = True
-                            self.current_utterance_packets = []
+                        state["last_voice_like_at"] = now
+                        if not state["in_utterance"]:
+                            state["in_utterance"] = True
+                            state["packets"] = []
                             log.info(
                                 "UTTERANCE START | ssrc=%d seq=%d ts=%d payload=%d",
                                 ssrc,
@@ -598,44 +590,50 @@ class EvelynVoiceClient(discord.VoiceClient):
                                 payload_len,
                             )
 
-                    if self.in_utterance:
-                        self.current_utterance_packets.append(current_packet)
+                    if state["in_utterance"]:
+                        state["packets"].append(current_packet)
 
                     self.decrypt_packet_count += 1
 
                 now = asyncio.get_running_loop().time()
 
-                if self.in_utterance and (now - self.last_voice_like_at) >= self.end_silence_sec:
-                    self.in_utterance = False
+                for ssrc, state in list(self.utterance_states.items()):
+                    if not state["in_utterance"]:
+                        continue
+                    if (now - state["last_voice_like_at"]) < self.end_silence_sec:
+                        continue
+
+                    state["in_utterance"] = False
                     self.utterance_count += 1
 
-                    packet_count = len(self.current_utterance_packets)
-                    first_seq = self.current_utterance_packets[0]["sequence"] if packet_count else -1
-                    last_seq = self.current_utterance_packets[-1]["sequence"] if packet_count else -1
+                    packet_count = len(state["packets"])
+                    first_seq = state["packets"][0]["sequence"] if packet_count else -1
+                    last_seq = state["packets"][-1]["sequence"] if packet_count else -1
 
                     log.info(
-                        "UTTERANCE END | idx=%d packets=%d first_seq=%d last_seq=%d gap=%.3f",
+                        "UTTERANCE END | idx=%d ssrc=%d packets=%d first_seq=%d last_seq=%d gap=%.3f",
                         self.utterance_count,
+                        ssrc,
                         packet_count,
                         first_seq,
                         last_seq,
-                        now - self.last_voice_like_at,
+                        now - state["last_voice_like_at"],
                     )
 
-                    utterance_packets = self.current_utterance_packets.copy()
+                    utterance_packets = state["packets"].copy()
 
                     try:
                         self.utterance_queue.put_nowait(
                             {
                                 "idx": self.utterance_count,
-                                "ssrc": self.target_ssrc,
+                                "ssrc": ssrc,
                                 "packets": utterance_packets,
                             }
                         )
                     except asyncio.QueueFull:
-                        log.warning("utterance_queue is full, dropping utterance idx=%d", self.utterance_count)
+                        log.warning("utterance_queue is full, dropping utterance idx=%d ssrc=%d", self.utterance_count, ssrc)
 
-                    self.current_utterance_packets = []
+                    state["packets"] = []
 
         except asyncio.CancelledError:
             pass
@@ -883,6 +881,8 @@ class EvelynVoiceClient(discord.VoiceClient):
         if self.sink is not None:
             self.sink.cleanup()
             self.sink = None
+
+        self.utterance_states.clear()
 
         log.info("Receive loop stopped")
 
