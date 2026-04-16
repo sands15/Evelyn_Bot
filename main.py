@@ -7,7 +7,7 @@ import time
 import asyncio
 from difflib import SequenceMatcher
 from pathlib import Path
-from typing import Optional
+from typing import Awaitable, Callable, Optional
 
 import aiohttp
 import numpy as np
@@ -373,6 +373,37 @@ def clean_tts_text(text: str) -> str:
     text = clean_text(text)
     text = re.sub(r"[\"'`~*_#@^|<>\[\]{}()]", "", text)
     return text
+
+
+def split_tts_sentences(buffer: str, *, force: bool = False) -> tuple[list[str], str]:
+    working = buffer or ""
+    chunks: list[str] = []
+
+    while True:
+        match = re.search(r"(.+?[.!?…。]+)(?:\s+|$)", working, flags=re.DOTALL)
+        if not match:
+            break
+
+        sentence = clean_tts_text(match.group(1))
+        if sentence:
+            chunks.append(sentence)
+        working = working[match.end():].lstrip()
+
+    if not force:
+        compact = clean_text(working)
+        if len(compact) >= 40:
+            cut = working.rfind(" ")
+            if cut >= 20:
+                sentence = clean_tts_text(working[:cut])
+                if sentence:
+                    chunks.append(sentence)
+                working = working[cut + 1 :].lstrip()
+        return chunks, working
+
+    tail = clean_tts_text(working)
+    if tail:
+        chunks.append(tail)
+    return chunks, ""
 
 
 def sanitize_model_output(text: str) -> str:
@@ -910,6 +941,37 @@ async def speak_answer(vc: discord.VoiceClient, answer: str) -> None:
                 last_bot_audio_end_at[guild_id] = time.monotonic()
 
 
+async def stream_tts_sentences(
+    vc: discord.VoiceClient,
+    sentence_queue: "asyncio.Queue[str | None]",
+) -> None:
+    guild_id = getattr(getattr(vc, "guild", None), "id", None)
+    did_speak = False
+
+    async with tts_lock:
+        try:
+            while True:
+                sentence = await sentence_queue.get()
+                if sentence is None:
+                    break
+
+                sentence = clean_tts_text(sentence)
+                if not sentence:
+                    continue
+
+                if guild_id is not None and not did_speak:
+                    bot_speaking_guilds.add(guild_id)
+
+                did_speak = True
+                source = await create_omnivoice_source(sentence)
+                await play_audio_source(vc, source)
+        finally:
+            if guild_id is not None:
+                bot_speaking_guilds.discard(guild_id)
+                if did_speak:
+                    last_bot_audio_end_at[guild_id] = time.monotonic()
+
+
 # =========================================================
 # LLM
 # =========================================================
@@ -977,6 +1039,165 @@ async def ask_llm_once(user_text: str, guild_id: int | None = None) -> str:
         return fallback_answer_for(user_text)
 
 
+def extract_stream_delta_text(data: dict) -> str:
+    choices = data.get("choices", [])
+    if not choices:
+        return ""
+
+    choice = choices[0]
+    delta = choice.get("delta") or {}
+    content = delta.get("content")
+
+    if isinstance(content, str):
+        return content
+
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, dict):
+                text = item.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+        return "".join(parts)
+
+    message = choice.get("message") or {}
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+
+    text = choice.get("text")
+    return text if isinstance(text, str) else ""
+
+
+async def ask_llm_streaming(
+    user_text: str,
+    guild_id: int | None = None,
+    on_sentence: Callable[[str], Awaitable[None]] | None = None,
+) -> str:
+    final_user_text = (
+        f"{user_text}\n\n"
+        "주의: 생각 과정 말하지 말고, 최종 답변만 한국어로 한두 문장으로 짧게 말해."
+    )
+
+    messages = list(conversation_history)
+
+    if guild_id is not None:
+        memory_context = build_memory_context(guild_id, user_text)
+        if memory_context:
+            base_system = messages[0]["content"] if messages and messages[0].get("role") == "system" else ""
+            merged_system = clean_text(base_system + "\n\n" + memory_context)
+
+            if messages and messages[0].get("role") == "system":
+                messages[0] = {"role": "system", "content": merged_system}
+            else:
+                messages.insert(0, {"role": "system", "content": merged_system})
+
+    payload = {
+        "model": MODEL_NAME,
+        "messages": messages + [{"role": "user", "content": final_user_text}],
+        "temperature": 0.1,
+        "max_tokens": 320,
+        "stream": True,
+    }
+
+    timeout = aiohttp.ClientTimeout(total=120)
+    session = await get_http_session()
+    raw_parts: list[str] = []
+    sentence_buffer = ""
+
+    async with session.post(LLM_SERVER_URL, json=payload, timeout=timeout) as resp:
+        if resp.status != 200:
+            error_text = await resp.text()
+            raise RuntimeError(f"LLM 서버 오류: {resp.status} / {error_text[:300]}")
+
+        content_type = resp.headers.get("Content-Type", "")
+        if "application/json" in content_type.lower():
+            data = await resp.json()
+            choices = data.get("choices", [])
+            answer = ""
+            if choices:
+                msg = choices[0].get("message", {})
+                answer = sanitize_model_output(msg.get("content", ""))
+                if not answer:
+                    answer = extract_answer_from_reasoning(msg.get("reasoning_content", ""), user_text)
+            if not answer:
+                answer = fallback_answer_for(user_text)
+            if on_sentence is not None:
+                await on_sentence(answer)
+            return answer
+
+        async for raw_line in resp.content:
+            line = raw_line.decode("utf-8", errors="ignore").strip()
+            if not line or line.startswith(":"):
+                continue
+            if line.startswith("data:"):
+                line = line[5:].strip()
+            if not line:
+                continue
+            if line == "[DONE]":
+                break
+
+            try:
+                data = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+            delta_text = extract_stream_delta_text(data)
+            if not delta_text:
+                continue
+
+            raw_parts.append(delta_text)
+            sentence_buffer += delta_text
+
+            if on_sentence is not None:
+                ready_chunks, sentence_buffer = split_tts_sentences(sentence_buffer)
+                for chunk in ready_chunks:
+                    await on_sentence(chunk)
+
+    answer = sanitize_model_output("".join(raw_parts))
+    if not answer:
+        answer = fallback_answer_for(user_text)
+
+    if on_sentence is not None:
+        ready_chunks, sentence_buffer = split_tts_sentences(sentence_buffer, force=True)
+        if not ready_chunks and answer:
+            ready_chunks = [answer]
+        for chunk in ready_chunks:
+            await on_sentence(chunk)
+
+    return answer
+
+
+async def ask_llm_and_speak_streaming(vc: discord.VoiceClient, user_text: str, guild_id: int | None = None) -> str:
+    sentence_queue: asyncio.Queue[str | None] = asyncio.Queue()
+    playback_task = asyncio.create_task(stream_tts_sentences(vc, sentence_queue))
+    llm_error: Exception | None = None
+
+    async def enqueue_sentence(sentence: str) -> None:
+        sentence = clean_tts_text(sentence)
+        if sentence:
+            await sentence_queue.put(sentence)
+
+    try:
+        answer = await ask_llm_streaming(user_text, guild_id=guild_id, on_sentence=enqueue_sentence)
+    except Exception as e:
+        llm_error = e
+        answer = ""
+    finally:
+        await sentence_queue.put(None)
+
+    try:
+        await playback_task
+    except Exception:
+        if llm_error is None:
+            raise
+
+    if llm_error is not None:
+        raise llm_error
+
+    return answer
+
+
 # =========================================================
 # 음성 입력 처리
 # =========================================================
@@ -1029,9 +1250,9 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes) 
             return
 
         try:
-            answer = await ask_llm_once(user_text, guild_id=guild_id)
+            answer = await ask_llm_and_speak_streaming(vc, user_text, guild_id=guild_id)
         except Exception as e:
-            print(f"❌ [LLM] {e}")
+            print(f"❌ [LLM/TTS] {e}")
             return
 
         answer = clean_text(answer)
@@ -1041,11 +1262,6 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes) 
         append_history(user_text, answer)
         schedule_memory_update(guild_id, user_text, answer)
         print(f"💬 [Evelyn] {answer}")
-
-        try:
-            await speak_answer(vc, answer)
-        except Exception as e:
-            print(f"❌ [TTS/PLAY] {e}")
 
 
 # =========================================================
