@@ -15,8 +15,8 @@ Evelyn Bot은 디스코드에서 텍스트와 음성으로 대화하는 개인�
 4. 발화 단위 PCM 조립
 5. `faster-whisper`로 STT
 6. 깨우는 말인 `이블린`이 들어간 경우에만 LLM 호출
-7. 답변을 `Qwen3TTSModel`로 합성
-8. 합성된 음성을 디스코드 음성 채널에 바로 재생
+7. 답변을 로컬 `omnivoice-server`에 넘겨 음성으로 합성
+8. 스트리밍으로 받은 PCM을 디스코드 음성 채널에 바로 재생
 
 핵심은 중간에 쓸데없는 저장 과정을 줄여서 가능한 한 바로 다음 단계로 넘기는 구조라는 점입니다.
 
@@ -137,21 +137,30 @@ STT로 얻은 문장을 정리한 뒤, OpenAI 호환 `/v1/chat/completions` 엔�
 
 ### TTS
 
-LLM이 답변을 만들면 `Qwen3TTSModel`로 바로 음성을 생성합니다.
+LLM이 답변을 만들면 `main.py`가 직접 모델을 들고 합성하는 대신, 로컬 `omnivoice-server`에 요청을 보냅니다.
 
-여기서도 디스크 저장을 피하도록 정리했습니다.
+여기서 레이턴시를 줄이기 위해 두 가지를 같이 적용했습니다.
 
-- TTS 결과를 임시 WAV 파일로 저장하지 않음
-- 메모리 버퍼에 바로 WAV를 생성
-- 그 버퍼를 `ffmpeg` stdin으로 바로 넘겨 디스코드에서 재생
+- 요청은 `stream=true`, `response_format=pcm`으로 보냄
+- 서버가 돌려주는 24kHz mono PCM을 받아서 봇 안에서 바로 48kHz stereo PCM으로 변환해 재생함
 
-즉, 출력 쪽 흐름은 다음과 같습니다.
+즉, 예전처럼
+
+- 임시 WAV 파일 생성
+- `ffmpeg` 프로세스 실행
+- 파일 또는 파이프를 다시 읽어서 재생
+
+이 경로를 거치지 않습니다.
+
+지금 출력 쪽 흐름은 이렇게 바뀌었습니다.
 
 - 텍스트 답변 생성
-- 메모리에서 바로 TTS 합성
-- 메모리 버퍼에서 바로 디스코드 재생
+- 로컬 OmniVoice 서버에 바로 TTS 요청
+- PCM 스트림 수신
+- 봇 안에서 바로 디스코드 재생 포맷으로 변환
+- 음성 채널로 즉시 재생
 
-중간 산출물을 파일로 남기지 않습니다.
+중간 산출물을 파일로 남기지 않고, 별도 ffmpeg 프로세스도 쓰지 않습니다.
 
 ## 레이턴시를 줄이기 위해 신경 쓴 점
 
@@ -162,14 +171,17 @@ LLM이 답변을 만들면 `Qwen3TTSModel`로 바로 음성을 생성합니다.
 - 패킷 디버그 덤프 저장 제거
 - 사용자 음성 WAV 저장 제거
 - TTS 임시 파일 저장 제거
+- ffmpeg subprocess 제거
 - 복호화 후 바로 PCM 처리
 - PCM을 메모리에서 바로 Whisper로 전달
 - 로컬 LLM 서버 사용
-- TTS 모델 사전 로드 및 웜업
+- 로컬 OmniVoice 서버 사용
+- TTS를 PCM 스트리밍으로 받아 첫 청크부터 재생 가능하게 구성
+- HTTP 세션 재사용으로 요청 연결 오버헤드 감소
 - wake word 기반 응답으로 불필요한 호출 감소
 - 응답 중복 차단과 lock으로 겹치는 처리 방지
 
-완전히 실시간 스트리밍 TTS/LLM 구조는 아니지만, 적어도 불필요한 디스크 I/O와 디버그성 병목은 많이 덜어낸 상태입니다.
+아직 LLM까지 토큰 스트리밍으로 끊어서 읽는 구조는 아니지만, 적어도 TTS 쪽은 파일 저장과 ffmpeg 호출을 없애고 스트리밍 재생 쪽으로 당겨서 체감 지연을 꽤 줄인 상태입니다.
 
 ## 주요 명령어
 
@@ -190,8 +202,7 @@ pip install -r requirements.txt
 
 추가로 환경에 따라 아래가 준비되어 있어야 합니다.
 
-- `Qwen3TTSModel`을 제공하는 TTS 패키지 또는 로컬 설치 환경
-- `ffmpeg`
+- 로컬 `omnivoice-server` 실행 환경
 - CUDA 가능한 GPU 환경 권장
 
 ### 2) 환경변수
@@ -200,13 +211,14 @@ pip install -r requirements.txt
 
 - `DISCORD_BOT_TOKEN`
 - `LLM_SERVER_URL`
-- `FFMPEG_PATH`
+- `OMNIVOICE_SERVER_URL`
+- `OMNIVOICE_VOICE`
 
 필요하면 아래도 조정할 수 있습니다.
 
-- `QWEN_TTS_MODEL_ID`
-- `QWEN_TTS_SPEAKER`
-- `QWEN_TTS_LANGUAGE`
+- `OMNIVOICE_LANGUAGE`
+- `OMNIVOICE_STREAM`
+- `OMNIVOICE_TIMEOUT_SEC`
 - `STT_MODEL_NAME`
 - `WAKE_WORD`
 - `AUTO_JOIN_VOICE`
@@ -245,6 +257,7 @@ create_omnivoice_profile.bat 내목소리 C:\path\to\ref_voice.wav "여기에 �
 ```
 
 만들어진 프로필은 OmniVoice 서버에서 `clone:내목소리` 형태로 사용할 수 있습니다.
+기본 예시는 `OMNIVOICE_VOICE=clone:evelyn` 기준으로 잡아뒀으니, 실제로는 `evelyn` 프로필 이름으로 만들어두는 편이 가장 덜 헷갈립니다.
 
 예를 들면 OpenAI 호환 요청에서:
 

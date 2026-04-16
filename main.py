@@ -1,5 +1,6 @@
-import io
+import audioop
 import os
+import queue
 import re
 import time
 import asyncio
@@ -8,12 +9,10 @@ from typing import Optional
 
 import aiohttp
 import numpy as np
-import soundfile as sf
 import torch
 import discord
 from discord.ext import commands
 from faster_whisper import WhisperModel
-from qwen_tts import Qwen3TTSModel
 
 from evelyn_voice import EvelynVoiceClient
 
@@ -26,13 +25,12 @@ DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 LLM_SERVER_URL = os.getenv("LLM_SERVER_URL", "http://127.0.0.1:9820/v1/chat/completions")
 MODEL_NAME = os.getenv("LLM_MODEL_NAME", "Qwen3.5-35B-A3B-Uncensored-HauhauCS-Aggressive-Q4_K_M.gguf")
 
-FFMPEG_PATH = os.getenv("FFMPEG_PATH", r"C:\ffmpeg\bin\ffmpeg.exe")
-
-QWEN_TTS_MODEL_ID = os.getenv("QWEN_TTS_MODEL_ID", "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice")
-QWEN_TTS_SPEAKER = os.getenv("QWEN_TTS_SPEAKER", "Sohee")
-QWEN_TTS_LANGUAGE = os.getenv("QWEN_TTS_LANGUAGE", "Korean")
-QWEN_TTS_INSTRUCT = os.getenv("QWEN_TTS_INSTRUCT", "")
-QWEN_TTS_MAX_NEW_TOKENS = int(os.getenv("QWEN_TTS_MAX_NEW_TOKENS", "256"))
+OMNIVOICE_SERVER_URL = os.getenv("OMNIVOICE_SERVER_URL", "http://127.0.0.1:8880")
+OMNIVOICE_MODEL = os.getenv("OMNIVOICE_MODEL", "omnivoice")
+OMNIVOICE_VOICE = os.getenv("OMNIVOICE_VOICE", "clone:evelyn")
+OMNIVOICE_LANGUAGE = os.getenv("OMNIVOICE_LANGUAGE", "ko")
+OMNIVOICE_STREAM = os.getenv("OMNIVOICE_STREAM", "true").lower() == "true"
+OMNIVOICE_TIMEOUT_SEC = float(os.getenv("OMNIVOICE_TIMEOUT_SEC", "180"))
 
 STT_MODEL_NAME = os.getenv("STT_MODEL_NAME", "large-v3-turbo")
 STT_LANGUAGE = os.getenv("STT_LANGUAGE", "ko")
@@ -51,6 +49,11 @@ SIMILARITY_BLOCK = float(os.getenv("VOICE_SIMILARITY_BLOCK", "0.88"))
 RATE = 48000
 CHANNELS = 2
 TARGET_RATE = 16000
+DISCORD_PCM_RATE = 48000
+DISCORD_PCM_CHANNELS = 2
+OMNIVOICE_PCM_RATE = 24000
+OMNIVOICE_PCM_CHANNELS = 1
+DISCORD_FRAME_BYTES = 3840
 
 BAD_SHORTS = {
     "안녕",
@@ -91,9 +94,8 @@ conversation_history = [
 guild_locks: dict[int, asyncio.Lock] = {}
 tts_lock = asyncio.Lock()
 
-tts_model: Optional[Qwen3TTSModel] = None
-tts_device: Optional[str] = None
 stt_model: Optional[WhisperModel] = None
+http_session: Optional[aiohttp.ClientSession] = None
 
 last_voice_reply_at: dict[int, float] = {}
 last_voice_text: dict[int, str] = {}
@@ -326,104 +328,155 @@ def log_visible_gpus() -> None:
             print(f"GPU {i}: {torch.cuda.get_device_name(i)}")
 
 
-def resolve_tts_device() -> str:
-    if not torch.cuda.is_available():
-        raise RuntimeError("CUDA를 사용할 수 없습니다. TTS GPU가 필요합니다.")
-
-    for i in range(torch.cuda.device_count()):
-        name = torch.cuda.get_device_name(i).lower()
-        if "4060" in name:
-            return f"cuda:{i}"
-
-    if torch.cuda.device_count() >= 2:
-        return "cuda:1"
-
-    return "cuda:0"
+async def get_http_session() -> aiohttp.ClientSession:
+    global http_session
+    if http_session is None or http_session.closed:
+        timeout = aiohttp.ClientTimeout(total=None, connect=10, sock_connect=10)
+        http_session = aiohttp.ClientSession(timeout=timeout)
+    return http_session
 
 
-# =========================================================
-# TTS
-# =========================================================
-def get_tts_model() -> Qwen3TTSModel:
-    global tts_model, tts_device
+class OmniVoicePCMStream(discord.AudioSource):
+    def __init__(self):
+        self._queue: queue.Queue[bytes | None] = queue.Queue()
+        self._buffer = bytearray()
+        self._done = False
+        self._closed = False
+        self._rate_state = None
+        self._input_remainder = b""
+        self.error: Exception | None = None
 
-    if tts_model is not None:
-        return tts_model
+    def feed_pcm24_mono(self, chunk: bytes) -> None:
+        if self._closed or not chunk:
+            return
 
-    log_visible_gpus()
-    tts_device = resolve_tts_device()
-    print("TTS device target:", tts_device)
+        pcm = self._input_remainder + chunk
+        if len(pcm) % 2 == 1:
+            self._input_remainder = pcm[-1:]
+            pcm = pcm[:-1]
+        else:
+            self._input_remainder = b""
 
-    torch.set_grad_enabled(False)
-    if torch.cuda.is_available():
-        torch.backends.cuda.matmul.allow_tf32 = True
-        torch.backends.cudnn.allow_tf32 = True
+        if not pcm:
+            return
 
-    try:
-        tts_model = Qwen3TTSModel.from_pretrained(
-            QWEN_TTS_MODEL_ID,
-            device_map=tts_device,
-            dtype=torch.float16,
-            attn_implementation="flash_attention_2",
+        upsampled, self._rate_state = audioop.ratecv(
+            pcm,
+            2,
+            OMNIVOICE_PCM_CHANNELS,
+            OMNIVOICE_PCM_RATE,
+            DISCORD_PCM_RATE,
+            self._rate_state,
         )
-        print("Qwen3-TTS 로드 완료 (flash_attention_2)")
-    except Exception as e:
-        print("flash_attention_2 로드 실패:", repr(e))
-        tts_model = Qwen3TTSModel.from_pretrained(
-            QWEN_TTS_MODEL_ID,
-            device_map=tts_device,
-            dtype=torch.float16,
-            attn_implementation="sdpa",
-        )
-        print("Qwen3-TTS 로드 완료 (sdpa fallback)")
+        stereo = audioop.tostereo(upsampled, 2, 1, 1)
+        if stereo:
+            self._queue.put(stereo)
 
-    return tts_model
+    def finish(self) -> None:
+        self._done = True
+        self._queue.put(None)
 
+    def fail(self, err: Exception) -> None:
+        self.error = err
+        self.finish()
 
-def warmup_tts_sync() -> None:
-    try:
-        model = get_tts_model()
-        with torch.inference_mode():
-            wavs, sr = model.generate_custom_voice(
-                text="안녕하세요.",
-                language=QWEN_TTS_LANGUAGE,
-                speaker=QWEN_TTS_SPEAKER,
-                instruct=QWEN_TTS_INSTRUCT,
-                max_new_tokens=32,
-                do_sample=False,
-            )
-        _ = wavs, sr
-        print("Qwen3-TTS 웜업 완료")
-    except Exception as e:
-        print("Qwen3-TTS 웜업 실패:", repr(e))
+    def read(self) -> bytes:
+        while len(self._buffer) < DISCORD_FRAME_BYTES:
+            try:
+                item = self._queue.get(timeout=0.1)
+            except queue.Empty:
+                if self._done:
+                    break
+                continue
 
+            if item is None:
+                self._done = True
+                break
 
-def synthesize_qwen_tts_sync(text: str) -> io.BytesIO:
-    model = get_tts_model()
-    text = clean_tts_text(text)
+            self._buffer.extend(item)
 
-    with torch.inference_mode():
-        wavs, sr = model.generate_custom_voice(
-            text=text,
-            language=QWEN_TTS_LANGUAGE,
-            speaker=QWEN_TTS_SPEAKER,
-            instruct=QWEN_TTS_INSTRUCT,
-            max_new_tokens=QWEN_TTS_MAX_NEW_TOKENS,
-            do_sample=False,
-        )
+        if len(self._buffer) >= DISCORD_FRAME_BYTES:
+            chunk = bytes(self._buffer[:DISCORD_FRAME_BYTES])
+            del self._buffer[:DISCORD_FRAME_BYTES]
+            return chunk
 
-    buffer = io.BytesIO()
-    sf.write(buffer, wavs[0], sr, format="WAV")
-    buffer.seek(0)
-    return buffer
+        if self._done and self._buffer:
+            chunk = bytes(self._buffer)
+            self._buffer.clear()
+            return chunk + (b"\x00" * (DISCORD_FRAME_BYTES - len(chunk)))
+
+        return b""
+
+    def cleanup(self) -> None:
+        self._closed = True
+        self._done = True
+        try:
+            self._queue.put_nowait(None)
+        except Exception:
+            pass
 
 
-async def synthesize_qwen_tts_buffer(text: str) -> io.BytesIO:
+async def warmup_tts_server() -> None:
+    session = await get_http_session()
+    timeout = aiohttp.ClientTimeout(total=10)
+    async with session.get(f"{OMNIVOICE_SERVER_URL}/health", timeout=timeout) as resp:
+        if resp.status != 200:
+            text = await resp.text()
+            raise RuntimeError(f"OmniVoice health check 실패: {resp.status} / {text[:200]}")
+        print("OmniVoice 서버 준비 확인 완료")
+
+
+async def create_omnivoice_source(text: str) -> OmniVoicePCMStream:
     text = clean_tts_text(text)
     if not text:
         raise ValueError("TTS 텍스트가 비어 있습니다.")
 
-    return await asyncio.to_thread(synthesize_qwen_tts_sync, text)
+    source = OmniVoicePCMStream()
+
+    async def producer() -> None:
+        session = await get_http_session()
+        timeout = aiohttp.ClientTimeout(total=OMNIVOICE_TIMEOUT_SEC)
+
+        async def stream_with_voice(voice_name: str) -> tuple[bool, str]:
+            payload = {
+                "model": OMNIVOICE_MODEL,
+                "input": text,
+                "voice": voice_name,
+                "response_format": "pcm",
+                "stream": OMNIVOICE_STREAM,
+            }
+            if OMNIVOICE_LANGUAGE:
+                payload["language"] = OMNIVOICE_LANGUAGE
+
+            async with session.post(
+                f"{OMNIVOICE_SERVER_URL}/v1/audio/speech",
+                json=payload,
+                timeout=timeout,
+            ) as resp:
+                if resp.status != 200:
+                    return False, await resp.text()
+
+                async for chunk in resp.content.iter_chunked(8192):
+                    if chunk:
+                        source.feed_pcm24_mono(chunk)
+                return True, ""
+
+        try:
+            ok, error_text = await stream_with_voice(OMNIVOICE_VOICE)
+            if not ok:
+                if OMNIVOICE_VOICE.startswith("clone:"):
+                    print(f"[TTS FALLBACK] clone voice 실패 -> auto 사용 | voice={OMNIVOICE_VOICE} err={error_text[:200]}")
+                    ok, error_text = await stream_with_voice("auto")
+                if not ok:
+                    raise RuntimeError(f"OmniVoice 서버 오류: {error_text[:300]}")
+        except Exception as e:
+            source.fail(e)
+            return
+
+        source.finish()
+
+    asyncio.create_task(producer())
+    return source
 
 
 # =========================================================
@@ -508,33 +561,36 @@ async def wait_until_not_playing(vc: discord.VoiceClient) -> None:
         await asyncio.sleep(0.05)
 
 
-async def play_audio_buffer(vc: discord.VoiceClient, audio_buffer: io.BytesIO) -> None:
+async def play_audio_source(vc: discord.VoiceClient, source: discord.AudioSource) -> None:
     await wait_until_not_playing(vc)
 
     done = asyncio.Event()
+    playback_error: list[Exception | None] = [None]
 
     def after_play(err):
         if err:
-            print("재생 오류:", repr(err))
+            playback_error[0] = err
         bot.loop.call_soon_threadsafe(done.set)
 
-    audio_buffer.seek(0)
-    source = discord.FFmpegPCMAudio(audio_buffer, executable=FFMPEG_PATH, pipe=True)
-    source._evelyn_audio_buffer = audio_buffer
     vc.play(source, after=after_play)
-
     await done.wait()
+
+    if playback_error[0] is not None:
+        raise playback_error[0]
+
+    if isinstance(source, OmniVoicePCMStream) and source.error is not None:
+        raise source.error
 
 
 async def speak_answer(vc: discord.VoiceClient, answer: str) -> None:
     guild_id = getattr(getattr(vc, "guild", None), "id", None)
 
     async with tts_lock:
-        audio_buffer = await synthesize_qwen_tts_buffer(answer)
+        source = await create_omnivoice_source(answer)
         try:
             if guild_id is not None:
                 bot_speaking_guilds.add(guild_id)
-            await play_audio_buffer(vc, audio_buffer)
+            await play_audio_source(vc, source)
         finally:
             if guild_id is not None:
                 bot_speaking_guilds.discard(guild_id)
@@ -566,33 +622,33 @@ async def ask_llm_once(user_text: str) -> str:
     }
 
     timeout = aiohttp.ClientTimeout(total=120)
+    session = await get_http_session()
 
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        async with session.post(LLM_SERVER_URL, json=payload) as resp:
-            if resp.status != 200:
-                error_text = await resp.text()
-                raise RuntimeError(f"LLM 서버 오류: {resp.status} / {error_text[:300]}")
+    async with session.post(LLM_SERVER_URL, json=payload, timeout=timeout) as resp:
+        if resp.status != 200:
+            error_text = await resp.text()
+            raise RuntimeError(f"LLM 서버 오류: {resp.status} / {error_text[:300]}")
 
-            data = await resp.json()
-            choices = data.get("choices", [])
-            if not choices:
-                return fallback_answer_for(user_text)
-
-            choice = choices[0]
-            msg = choice.get("message", {})
-            answer = sanitize_model_output(msg.get("content", ""))
-            reasoning = msg.get("reasoning_content", "")
-            finish_reason = choice.get("finish_reason", "")
-
-            if answer:
-                return answer
-
-            extracted = extract_answer_from_reasoning(reasoning, user_text)
-            if extracted:
-                return extracted
-
-            print(f"LLM 응답 본문이 비어 있어서 fallback 사용, finish_reason={finish_reason}")
+        data = await resp.json()
+        choices = data.get("choices", [])
+        if not choices:
             return fallback_answer_for(user_text)
+
+        choice = choices[0]
+        msg = choice.get("message", {})
+        answer = sanitize_model_output(msg.get("content", ""))
+        reasoning = msg.get("reasoning_content", "")
+        finish_reason = choice.get("finish_reason", "")
+
+        if answer:
+            return answer
+
+        extracted = extract_answer_from_reasoning(reasoning, user_text)
+        if extracted:
+            return extracted
+
+        print(f"LLM 응답 본문이 비어 있어서 fallback 사용, finish_reason={finish_reason}")
+        return fallback_answer_for(user_text)
 
 
 # =========================================================
@@ -670,10 +726,9 @@ async def on_ready():
         print("Whisper 사전 로드 실패:", repr(e))
 
     try:
-        await asyncio.to_thread(get_tts_model)
-        await asyncio.to_thread(warmup_tts_sync)
+        await warmup_tts_server()
     except Exception as e:
-        print("Qwen3-TTS 사전 로드 실패:", repr(e))
+        print("OmniVoice 서버 준비 확인 실패:", repr(e))
 
 
 @bot.event
