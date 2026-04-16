@@ -377,6 +377,20 @@ class EvelynVoiceClient(discord.VoiceClient):
             "duration": getattr(stats, "duration", None),
         }
 
+    def _get_dave_known_user_ids(self) -> list[int]:
+        base_dave = self._get_base_dave_session()
+        if base_dave is None:
+            return []
+
+        getter = getattr(base_dave, "get_user_ids", None)
+        if getter is None:
+            return []
+
+        try:
+            return [int(uid) for uid in getter()]
+        except Exception:
+            return []
+
     def _candidate_dave_user_ids(self, primary_user_id: int) -> list[int]:
         candidates: list[int] = []
 
@@ -392,6 +406,9 @@ class EvelynVoiceClient(discord.VoiceClient):
 
         add(primary_user_id)
         add(self.runtime.current_speaking_user_id)
+
+        for known_user_id in self._get_dave_known_user_ids():
+            add(known_user_id)
 
         for mapped_user_id in self.runtime.ssrc_to_user_id.values():
             add(mapped_user_id)
@@ -467,12 +484,14 @@ class EvelynVoiceClient(discord.VoiceClient):
 
             if log_allowed:
                 log.warning(
-                    "DAVE INNER failed | user_id=%s in_len=%d passthrough=%s prefix=%s stats=%r candidates=%r err=%r",
+                    "DAVE INNER failed | user_id=%s in_len=%d passthrough=%s prefix=%s stats=%r known_ids=%r ssrc_map=%r candidates=%r err=%r",
                     user_id,
                     len(outer_plain),
                     allow_passthrough,
                     outer_plain[:8].hex(),
                     self._get_dave_decryption_stats(user_id),
+                    self._get_dave_known_user_ids(),
+                    dict(self.runtime.ssrc_to_user_id),
                     self._candidate_dave_user_ids(user_id),
                     e,
                 )
