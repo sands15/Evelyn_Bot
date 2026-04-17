@@ -1297,6 +1297,22 @@ async def ask_llm_once(user_text: str, guild_id: int | None = None) -> str:
         return fallback_answer_for(user_text)
 
 
+def _extract_text_payload(value) -> str:
+    if isinstance(value, str):
+        return value
+
+    if isinstance(value, list):
+        parts: list[str] = []
+        for item in value:
+            if isinstance(item, dict):
+                text = item.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+        return "".join(parts)
+
+    return ""
+
+
 def extract_stream_delta_text(data: dict) -> str:
     choices = data.get("choices", [])
     if not choices:
@@ -1304,27 +1320,41 @@ def extract_stream_delta_text(data: dict) -> str:
 
     choice = choices[0]
     delta = choice.get("delta") or {}
-    content = delta.get("content")
-
-    if isinstance(content, str):
+    content = _extract_text_payload(delta.get("content"))
+    if content:
         return content
 
-    if isinstance(content, list):
-        parts: list[str] = []
-        for item in content:
-            if isinstance(item, dict):
-                text = item.get("text")
-                if isinstance(text, str):
-                    parts.append(text)
-        return "".join(parts)
-
     message = choice.get("message") or {}
-    content = message.get("content")
-    if isinstance(content, str):
+    content = _extract_text_payload(message.get("content"))
+    if content:
         return content
 
     text = choice.get("text")
     return text if isinstance(text, str) else ""
+
+
+def extract_stream_reasoning_text(data: dict) -> str:
+    choices = data.get("choices", [])
+    if not choices:
+        return ""
+
+    choice = choices[0]
+    delta = choice.get("delta") or {}
+    reasoning = _extract_text_payload(delta.get("reasoning_content"))
+    if reasoning:
+        return reasoning
+
+    reasoning = _extract_text_payload(delta.get("reasoning"))
+    if reasoning:
+        return reasoning
+
+    message = choice.get("message") or {}
+    reasoning = _extract_text_payload(message.get("reasoning_content"))
+    if reasoning:
+        return reasoning
+
+    reasoning = _extract_text_payload(message.get("reasoning"))
+    return reasoning
 
 
 async def ask_llm_streaming(
@@ -1362,6 +1392,7 @@ async def ask_llm_streaming(
     timeout = aiohttp.ClientTimeout(total=120)
     session = await get_http_session()
     raw_parts: list[str] = []
+    reasoning_parts: list[str] = []
     sentence_buffer = ""
     emitted_any = False
 
@@ -1405,6 +1436,10 @@ async def ask_llm_streaming(
                 continue
 
             delta_text = extract_stream_delta_text(data)
+            reasoning_text = extract_stream_reasoning_text(data)
+            if reasoning_text:
+                reasoning_parts.append(reasoning_text)
+
             if not delta_text:
                 continue
 
@@ -1422,7 +1457,15 @@ async def ask_llm_streaming(
                     await on_sentence(chunk)
 
     answer = sanitize_model_output("".join(raw_parts))
+    if not answer and reasoning_parts:
+        answer = extract_answer_from_reasoning("".join(reasoning_parts), user_text)
+        if answer:
+            print("[LLM STREAM] reasoning_content에서 답변 복구")
+
     if not answer:
+        print(
+            f"[LLM STREAM] fallback 사용 | raw_len={len(''.join(raw_parts))} reasoning_len={len(''.join(reasoning_parts))} emitted_any={emitted_any}"
+        )
         answer = fallback_answer_for(user_text)
 
     if on_sentence is not None:
