@@ -240,26 +240,12 @@ class EvelynVoiceClient(discord.VoiceClient):
         self.runtime.dave_ready = self.dave.ready
         self.runtime.dave_status = str(self.dave.status)
 
-        connect_task = asyncio.create_task(
-            super().connect(
-                timeout=timeout,
-                reconnect=reconnect,
-                self_deaf=self_deaf,
-                self_mute=self_mute,
-            )
+        await super().connect(
+            timeout=timeout,
+            reconnect=reconnect,
+            self_deaf=self_deaf,
+            self_mute=self_mute,
         )
-
-        while not connect_task.done():
-            ws = getattr(self, "ws", None)
-            if (
-                ws is not None
-                and hasattr(ws, "received_message")
-                and not getattr(ws, "_evelyn_gateway_hooked", False)
-            ):
-                self.gateway.bind_ws(ws)
-            await asyncio.sleep(0.01)
-
-        await connect_task
 
         self.runtime.endpoint = getattr(self, "endpoint", None)
         self.runtime.session_id = getattr(self, "session_id", None)
