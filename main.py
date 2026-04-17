@@ -53,6 +53,11 @@ MEMORY_LOOP_LIMIT = int(os.getenv("MEMORY_LOOP_LIMIT", "100"))
 MEMORY_RAW_LIMIT = int(os.getenv("MEMORY_RAW_LIMIT", "400"))
 MEMORY_RAW_CONTEXT_LIMIT = int(os.getenv("MEMORY_RAW_CONTEXT_LIMIT", "6"))
 MEMORY_RETRIEVE_LIMIT = int(os.getenv("MEMORY_RETRIEVE_LIMIT", "8"))
+MEMORY_WORKING_SUMMARY_MAX_CHARS = int(os.getenv("MEMORY_WORKING_SUMMARY_MAX_CHARS", "700"))
+MEMORY_COGNITIVE_RAW_LIMIT = int(os.getenv("MEMORY_COGNITIVE_RAW_LIMIT", "4"))
+MEMORY_LONGTERM_RAW_LIMIT = int(os.getenv("MEMORY_LONGTERM_RAW_LIMIT", "6"))
+MEMORY_VAULT_RAW_RETRIEVE_LIMIT = int(os.getenv("MEMORY_VAULT_RAW_RETRIEVE_LIMIT", "4"))
+MEMORY_VAULT_DAYS = int(os.getenv("MEMORY_VAULT_DAYS", "7"))
 COGNITIVE_MAX_TOKENS = int(os.getenv("COGNITIVE_MAX_TOKENS", "120"))
 COGNITIVE_TIMEOUT_SEC = float(os.getenv("COGNITIVE_TIMEOUT_SEC", "8"))
 
@@ -261,6 +266,12 @@ def guild_memory_dir(guild_id: int) -> Path:
     return path
 
 
+def memory_vault_dir(guild_id: int) -> Path:
+    path = guild_memory_dir(guild_id) / "vault"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 def memory_summary_path(guild_id: int) -> Path:
     return guild_memory_dir(guild_id) / "rolling_summary.txt"
 
@@ -269,12 +280,31 @@ def memory_raw_path(guild_id: int) -> Path:
     return guild_memory_dir(guild_id) / "raw_transcript.jsonl"
 
 
+def vault_raw_dir(guild_id: int) -> Path:
+    path = memory_vault_dir(guild_id) / "raw"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def vault_daily_raw_path(guild_id: int, day_key: str | None = None) -> Path:
+    day_key = day_key or time.strftime("%Y-%m-%d")
+    return vault_raw_dir(guild_id) / f"{day_key}.jsonl"
+
+
 def memory_facts_path(guild_id: int) -> Path:
     return guild_memory_dir(guild_id) / "durable_facts.jsonl"
 
 
+def vault_facts_path(guild_id: int) -> Path:
+    return memory_vault_dir(guild_id) / "facts.jsonl"
+
+
 def memory_questions_path(guild_id: int) -> Path:
     return guild_memory_dir(guild_id) / "open_questions.jsonl"
+
+
+def vault_questions_path(guild_id: int) -> Path:
+    return memory_vault_dir(guild_id) / "questions.jsonl"
 
 
 def cognitive_state_path(guild_id: int) -> Path:
@@ -345,6 +375,46 @@ def append_jsonl_rows(path: Path, rows: list[dict], limit: int) -> None:
     write_jsonl(path, existing)
 
 
+def compact_working_summary(text: str) -> str:
+    text = clean_text(text)
+    if len(text) <= MEMORY_WORKING_SUMMARY_MAX_CHARS:
+        return text
+    return clean_text(text[-MEMORY_WORKING_SUMMARY_MAX_CHARS:])
+
+
+def merge_memory_rows(*row_groups: list[dict]) -> list[dict]:
+    merged: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for rows in row_groups:
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            text = clean_text(str(row.get("text", "")))
+            row_type = clean_text(str(row.get("type", row.get("role", "memory")))) or "memory"
+            if len(text) < 1:
+                continue
+            key = (row_type, text)
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(row)
+    return merged
+
+
+def read_vault_raw_rows(guild_id: int, *, days: int | None = None) -> list[dict]:
+    days = days or MEMORY_VAULT_DAYS
+    paths = sorted(vault_raw_dir(guild_id).glob("*.jsonl"))
+    selected = paths[-max(1, days):]
+    rows: list[dict] = []
+    for path in selected:
+        rows.extend(read_jsonl(path))
+    return rows
+
+
+def read_fact_rows(guild_id: int) -> list[dict]:
+    return merge_memory_rows(read_jsonl(memory_facts_path(guild_id)), read_jsonl(vault_facts_path(guild_id)))
+
+
 def append_raw_transcript_rows(guild_id: int, rows: list[dict]) -> None:
     normalized: list[dict] = []
     now = int(time.time())
@@ -365,27 +435,35 @@ def append_raw_transcript_rows(guild_id: int, rows: list[dict]) -> None:
 
     if normalized:
         append_jsonl_rows(memory_raw_path(guild_id), normalized, MEMORY_RAW_LIMIT)
+        append_jsonl_rows(vault_daily_raw_path(guild_id), normalized, max(MEMORY_RAW_LIMIT * 20, 5000))
 
 
-def append_unique_memory_rows(path: Path, rows: list[dict], limit: int) -> None:
+def append_unique_memory_rows(path: Path, rows: list[dict], limit: int, *, mirror_path: Path | None = None) -> None:
     existing = read_jsonl(path)
-    seen = {clean_text(str(row.get("text", ""))) for row in existing}
+    mirror_existing = read_jsonl(mirror_path) if mirror_path is not None else []
+    seen = {clean_text(str(row.get("text", ""))) for row in merge_memory_rows(existing, mirror_existing)}
+    appended_rows: list[dict] = []
 
     for row in rows:
         text = clean_text(str(row.get("text", "")))
         if len(text) < 2 or text in seen:
             continue
-        seen.add(text)
-        existing.append({
+        saved_row = {
             "text": text,
             "type": clean_text(str(row.get("type", "memory"))) or "memory",
             "saved_at": int(time.time()),
-        })
+        }
+        seen.add(text)
+        existing.append(saved_row)
+        appended_rows.append(saved_row)
 
     if len(existing) > limit:
         existing = existing[-limit:]
 
     write_jsonl(path, existing)
+    if mirror_path is not None and appended_rows:
+        mirror_rows = mirror_existing + appended_rows
+        write_jsonl(mirror_path, mirror_rows)
 
 
 def memory_tokens(text: str) -> set[str]:
@@ -416,7 +494,7 @@ def select_relevant_memory_rows(query: str, rows: list[dict], limit: int) -> lis
 def read_question_rows(guild_id: int) -> list[dict]:
     merged: list[dict] = []
     seen: set[str] = set()
-    for path in (memory_questions_path(guild_id), memory_loops_path(guild_id)):
+    for path in (memory_questions_path(guild_id), memory_loops_path(guild_id), vault_questions_path(guild_id)):
         for row in read_jsonl(path):
             text = clean_text(str(row.get("text", "")))
             if len(text) < 2 or text in seen:
@@ -531,15 +609,16 @@ async def prepare_llm_messages(
 
 
 def build_memory_context(guild_id: int, user_text: str, cognitive_state: dict | None = None) -> str:
-    summary = read_text_file(memory_summary_path(guild_id))
+    summary = compact_working_summary(read_text_file(memory_summary_path(guild_id)))
     raw_rows = read_jsonl(memory_raw_path(guild_id))[-MEMORY_RAW_CONTEXT_LIMIT:]
-    facts = select_relevant_memory_rows(user_text, read_jsonl(memory_facts_path(guild_id)), MEMORY_RETRIEVE_LIMIT)
+    vault_raw_rows = select_relevant_memory_rows(user_text, read_vault_raw_rows(guild_id), MEMORY_VAULT_RAW_RETRIEVE_LIMIT)
+    facts = select_relevant_memory_rows(user_text, read_fact_rows(guild_id), MEMORY_RETRIEVE_LIMIT)
     questions = select_relevant_memory_rows(user_text, read_question_rows(guild_id), 4)
     state = normalize_cognitive_state(cognitive_state or read_json_file(cognitive_state_path(guild_id)))
 
     parts: list[str] = []
     if summary:
-        parts.append(f"최근 누적 요약:\n{summary}")
+        parts.append(f"현재 작업 요약:\n{summary}")
     if raw_rows:
         parts.append(
             "최근 원문 로그:\n"
@@ -547,6 +626,16 @@ def build_memory_context(guild_id: int, user_text: str, cognitive_state: dict | 
                 f"- {clean_text(str(row.get('speaker', row.get('role', 'unknown')))) or 'unknown'}"
                 f" ({clean_text(str(row.get('source', 'unknown'))) or 'unknown'}): {clean_text(str(row.get('text', '')))}"
                 for row in raw_rows
+                if clean_text(str(row.get('text', '')))
+            )
+        )
+    if vault_raw_rows:
+        parts.append(
+            "문서 보관함에서 꺼낸 관련 대화:\n"
+            + "\n".join(
+                f"- {clean_text(str(row.get('speaker', row.get('role', 'unknown')))) or 'unknown'}"
+                f" ({clean_text(str(row.get('source', 'unknown'))) or 'unknown'}): {clean_text(str(row.get('text', '')))}"
+                for row in vault_raw_rows
                 if clean_text(str(row.get('text', '')))
             )
         )
@@ -639,11 +728,11 @@ async def update_cognitive_state(guild_id: int, user_text: str) -> dict:
     started_at = time.monotonic()
     lock = cognitive_locks.setdefault(guild_id, asyncio.Lock())
     async with lock:
-        current_summary = read_text_file(memory_summary_path(guild_id))
+        current_summary = compact_working_summary(read_text_file(memory_summary_path(guild_id)))
         current_state = normalize_cognitive_state(read_json_file(cognitive_state_path(guild_id)))
-        recent_raw = read_jsonl(memory_raw_path(guild_id))[-10:]
-        recent_facts = read_jsonl(memory_facts_path(guild_id))[-8:]
-        recent_questions = read_question_rows(guild_id)[-8:]
+        recent_raw = read_jsonl(memory_raw_path(guild_id))[-MEMORY_COGNITIVE_RAW_LIMIT:]
+        recent_facts = read_fact_rows(guild_id)[-4:]
+        recent_questions = read_question_rows(guild_id)[-4:]
 
         messages = [
             {
@@ -714,10 +803,10 @@ async def update_long_term_memory(guild_id: int, user_text: str, answer: str) ->
     started_at = time.monotonic()
     lock = memory_locks.setdefault(guild_id, asyncio.Lock())
     async with lock:
-        current_summary = read_text_file(memory_summary_path(guild_id))
-        recent_raw = read_jsonl(memory_raw_path(guild_id))[-16:]
-        recent_facts = read_jsonl(memory_facts_path(guild_id))[-12:]
-        recent_questions = read_question_rows(guild_id)[-8:]
+        current_summary = compact_working_summary(read_text_file(memory_summary_path(guild_id)))
+        recent_raw = read_jsonl(memory_raw_path(guild_id))[-MEMORY_LONGTERM_RAW_LIMIT:]
+        recent_facts = read_fact_rows(guild_id)[-6:]
+        recent_questions = read_question_rows(guild_id)[-4:]
 
         messages = [
             {
@@ -752,17 +841,27 @@ async def update_long_term_memory(guild_id: int, user_text: str, answer: str) ->
                 print(f"[MEMORY LATENCY] guild={guild_id} failed_after_ms={elapsed_ms:.0f}")
             return
 
-        summary_update = clean_text(str(result.get("summary_update", "")))
+        summary_update = compact_working_summary(str(result.get("summary_update", "")))
         if summary_update:
             write_text_file(memory_summary_path(guild_id), summary_update)
 
         durable_facts = result.get("durable_facts", [])
         if isinstance(durable_facts, list):
-            append_unique_memory_rows(memory_facts_path(guild_id), [row for row in durable_facts if isinstance(row, dict)], MEMORY_FACT_LIMIT)
+            append_unique_memory_rows(
+                memory_facts_path(guild_id),
+                [row for row in durable_facts if isinstance(row, dict)],
+                MEMORY_FACT_LIMIT,
+                mirror_path=vault_facts_path(guild_id),
+            )
 
         open_questions = result.get("open_questions", [])
         if isinstance(open_questions, list):
-            append_unique_memory_rows(memory_questions_path(guild_id), [row for row in open_questions if isinstance(row, dict)], MEMORY_LOOP_LIMIT)
+            append_unique_memory_rows(
+                memory_questions_path(guild_id),
+                [row for row in open_questions if isinstance(row, dict)],
+                MEMORY_LOOP_LIMIT,
+                mirror_path=vault_questions_path(guild_id),
+            )
 
         elapsed_ms = (time.monotonic() - started_at) * 1000.0
         if should_log_voice_timing(elapsed_ms):
