@@ -67,7 +67,7 @@ VAD_PEAK_THRESHOLD = float(os.getenv("VAD_PEAK_THRESHOLD", "0.020"))
 VAD_MIN_VOICED_RATIO = float(os.getenv("VAD_MIN_VOICED_RATIO", "0.015"))
 VAD_CHUNK_MS = float(os.getenv("VAD_CHUNK_MS", "32"))
 VAD_START_CONSECUTIVE = int(os.getenv("VAD_START_CONSECUTIVE", "2"))
-SILERO_VAD_THRESHOLD = float(os.getenv("SILERO_VAD_THRESHOLD", "0.5"))
+SILERO_VAD_THRESHOLD = float(os.getenv("SILERO_VAD_THRESHOLD", "0.35"))
 SILERO_MIN_SPEECH_MS = int(os.getenv("SILERO_MIN_SPEECH_MS", "64"))
 SILERO_MIN_SILENCE_MS = int(os.getenv("SILERO_MIN_SILENCE_MS", "0"))
 SILERO_SPEECH_PAD_MS = int(os.getenv("SILERO_SPEECH_PAD_MS", "0"))
@@ -1128,7 +1128,18 @@ def is_probably_silent(audio16k: np.ndarray) -> bool:
 
     if VAD_PROVIDER == "silero":
         try:
-            return is_probably_silent_silero(audio16k)
+            silero_silent = is_probably_silent_silero(audio16k)
+            if silero_silent:
+                energy_silent = is_probably_silent_energy(audio16k)
+                if not energy_silent:
+                    duration_sec = len(audio16k) / float(TARGET_RATE)
+                    peak = float(np.max(np.abs(audio16k))) if audio16k.size else 0.0
+                    rms = float(np.sqrt(np.mean(np.square(audio16k)))) if audio16k.size else 0.0
+                    print(
+                        f"[VAD OVERRIDE] silero=silent energy=voiced sec={duration_sec:.2f} peak={peak:.4f} rms={rms:.4f}"
+                    )
+                    return False
+            return silero_silent
         except Exception as e:
             if not silero_vad_warned:
                 print(f"[VAD FALLBACK] Silero VAD 실패 -> energy 사용 | err={e}")
@@ -1870,6 +1881,10 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes) 
         return
 
     if VAD_ENABLED and is_probably_silent(audio16k):
+        duration_sec = len(audio16k) / float(TARGET_RATE)
+        peak = float(np.max(np.abs(audio16k))) if audio16k.size else 0.0
+        rms = float(np.sqrt(np.mean(np.square(audio16k)))) if audio16k.size else 0.0
+        print(f"[VAD IGNORE] speaker={member.display_name} sec={duration_sec:.2f} peak={peak:.4f} rms={rms:.4f}")
         return
 
     try:
