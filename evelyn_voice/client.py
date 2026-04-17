@@ -24,6 +24,8 @@ async def on_user_audio(member, pcm_bytes: bytes):
 
 log = logging.getLogger(__name__)
 
+OPUS_ERROR_TO_SILENCE = os.getenv("OPUS_ERROR_TO_SILENCE", "true").lower() == "true"
+
 
 def _parse_rtp_header(packet: bytes):
     if len(packet) < 12:
@@ -731,6 +733,7 @@ class EvelynVoiceClient(discord.VoiceClient):
         outer_fail = 0
         dave_fail = 0
         opus_fail = 0
+        opus_silence_fill = 0
         real_silence = 0
         self.dave_inner_fail_log_count = 0
 
@@ -882,6 +885,20 @@ class EvelynVoiceClient(discord.VoiceClient):
             except Exception as e:
                 failed += 1
                 opus_fail += 1
+                if OPUS_ERROR_TO_SILENCE:
+                    opus_silence_fill += 1
+                    pcm_chunks.append(SILENCE_PCM)
+                    if packet_index <= 5:
+                        log.warning(
+                            "PACKET OPUS failed -> silence | idx=%d pkt=%d seq=%d ts=%d bytes=%d err=%r",
+                            idx,
+                            packet_index,
+                            p["sequence"],
+                            p["timestamp"],
+                            len(opus_packet),
+                            e,
+                        )
+                    continue
                 if packet_index <= 5:
                     log.warning(
                         "PACKET OPUS failed | idx=%d pkt=%d seq=%d ts=%d bytes=%d err=%r",
@@ -907,7 +924,7 @@ class EvelynVoiceClient(discord.VoiceClient):
 
 
         log.info(
-            "DECRYPT SUMMARY | idx=%d packets=%d success=%d failed=%d pcm_chunks=%d dave_ok=%d outer_fail=%d dave_fail=%d opus_fail=%d real_silence=%d",
+            "DECRYPT SUMMARY | idx=%d packets=%d success=%d failed=%d pcm_chunks=%d dave_ok=%d outer_fail=%d dave_fail=%d opus_fail=%d opus_silence_fill=%d real_silence=%d",
             idx,
             len(packets),
             success,
@@ -917,6 +934,7 @@ class EvelynVoiceClient(discord.VoiceClient):
             outer_fail,
             dave_fail,
             opus_fail,
+            opus_silence_fill,
             real_silence,
         )
 

@@ -36,7 +36,7 @@ from evelyn_voice import EvelynVoiceClient
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 
 LLM_SERVER_URL = os.getenv("LLM_SERVER_URL", "http://127.0.0.1:9820/v1/chat/completions")
-MODEL_NAME = os.getenv("LLM_MODEL_NAME", "Qwen3.5-9B-Uncensored-HauhauCS-Aggressive-Q8_0.gguf")
+MODEL_NAME = os.getenv("LLM_MODEL_NAME", "Qwen3-8B-Q4_K_M.gguf")
 
 OMNIVOICE_SERVER_URL = os.getenv("OMNIVOICE_SERVER_URL", "http://127.0.0.1:8880")
 OMNIVOICE_MODEL = os.getenv("OMNIVOICE_MODEL", "omnivoice")
@@ -46,7 +46,7 @@ OMNIVOICE_STREAM = os.getenv("OMNIVOICE_STREAM", "true").lower() == "true"
 OMNIVOICE_TIMEOUT_SEC = float(os.getenv("OMNIVOICE_TIMEOUT_SEC", "180"))
 
 SUMMARY_LLM_URL = os.getenv("SUMMARY_LLM_URL", "http://127.0.0.1:9821/v1/chat/completions")
-SUMMARY_MODEL_NAME = os.getenv("SUMMARY_MODEL_NAME", "Qwen2.5-1.5B-Instruct-Q8_0.gguf")
+SUMMARY_MODEL_NAME = os.getenv("SUMMARY_MODEL_NAME", "Qwen3.6-35B-A3B-UD-Q3_K_XL.gguf")
 MEMORY_ROOT = Path(os.getenv("BOT_MEMORY_DIR", str(Path(__file__).resolve().parent / "bot_memory")))
 MEMORY_FACT_LIMIT = int(os.getenv("MEMORY_FACT_LIMIT", "200"))
 MEMORY_LOOP_LIMIT = int(os.getenv("MEMORY_LOOP_LIMIT", "100"))
@@ -69,7 +69,7 @@ SILERO_VAD_THRESHOLD = float(os.getenv("SILERO_VAD_THRESHOLD", "0.5"))
 SILERO_MIN_SPEECH_MS = int(os.getenv("SILERO_MIN_SPEECH_MS", "64"))
 SILERO_MIN_SILENCE_MS = int(os.getenv("SILERO_MIN_SILENCE_MS", "0"))
 SILERO_SPEECH_PAD_MS = int(os.getenv("SILERO_SPEECH_PAD_MS", "0"))
-SILERO_VAD_ONNX = os.getenv("SILERO_VAD_ONNX", "false").lower() == "true"
+SILERO_VAD_ONNX = os.getenv("SILERO_VAD_ONNX", "true").lower() == "true"
 
 DENOISE_ENABLED = os.getenv("DENOISE_ENABLED", "true").lower() == "true"
 DENOISE_HIGHPASS_HZ = float(os.getenv("DENOISE_HIGHPASS_HZ", "120"))
@@ -778,7 +778,12 @@ def get_silero_vad_model():
         raise RuntimeError("silero_vad is not available")
 
     silero_vad_model = load_silero_vad(onnx=SILERO_VAD_ONNX)
-    print(f"Silero VAD 로드 완료 | onnx={SILERO_VAD_ONNX}")
+    provider_text = ""
+    if SILERO_VAD_ONNX:
+        providers = getattr(getattr(silero_vad_model, "session", None), "get_providers", lambda: None)()
+        if providers:
+            provider_text = f" | providers={providers}"
+    print(f"Silero VAD 로드 완료 | onnx={SILERO_VAD_ONNX}{provider_text}")
     return silero_vad_model
 
 
@@ -1091,11 +1096,16 @@ def transcribe_audio16k_sync(audio16k: np.ndarray, max_new_tokens: int = 256) ->
 
     processor, model = get_stt_model()
 
+    processor_kwargs = {
+        "sampling_rate": TARGET_RATE,
+        "return_tensors": "pt",
+    }
+    if STT_FORCE_LANGUAGE:
+        processor_kwargs["language"] = STT_LANGUAGE
+
     inputs = processor(
         audio16k,
-        sampling_rate=TARGET_RATE,
-        return_tensors="pt",
-        language=STT_LANGUAGE,
+        **processor_kwargs,
     )
 
     moved = {}
@@ -1119,7 +1129,7 @@ def transcribe_audio16k_sync(audio16k: np.ndarray, max_new_tokens: int = 256) ->
                 punctuation=STT_FORCE_PUNCTUATION,
             )
             if decoder_prompt_ids:
-                generate_kwargs["decoder_input_ids"] = torch.tensor(
+                moved["decoder_input_ids"] = torch.tensor(
                     [decoder_prompt_ids],
                     device=model.device,
                     dtype=torch.long,
