@@ -54,6 +54,7 @@ MEMORY_RAW_LIMIT = int(os.getenv("MEMORY_RAW_LIMIT", "400"))
 MEMORY_RAW_CONTEXT_LIMIT = int(os.getenv("MEMORY_RAW_CONTEXT_LIMIT", "6"))
 MEMORY_RETRIEVE_LIMIT = int(os.getenv("MEMORY_RETRIEVE_LIMIT", "8"))
 MEMORY_WORKING_SUMMARY_MAX_CHARS = int(os.getenv("MEMORY_WORKING_SUMMARY_MAX_CHARS", "700"))
+MEMORY_ROW_MAX_CHARS = int(os.getenv("MEMORY_ROW_MAX_CHARS", "120"))
 MEMORY_COGNITIVE_RAW_LIMIT = int(os.getenv("MEMORY_COGNITIVE_RAW_LIMIT", "4"))
 MEMORY_LONGTERM_RAW_LIMIT = int(os.getenv("MEMORY_LONGTERM_RAW_LIMIT", "6"))
 MEMORY_VAULT_RAW_RETRIEVE_LIMIT = int(os.getenv("MEMORY_VAULT_RAW_RETRIEVE_LIMIT", "4"))
@@ -382,6 +383,32 @@ def compact_working_summary(text: str) -> str:
     if len(text) <= MEMORY_WORKING_SUMMARY_MAX_CHARS:
         return text
     return clean_text(text[-MEMORY_WORKING_SUMMARY_MAX_CHARS:])
+
+
+def compact_memory_text(text: str, max_chars: int | None = None) -> str:
+    text = clean_text(text)
+    limit = max_chars or MEMORY_ROW_MAX_CHARS
+    if len(text) <= limit:
+        return text
+    return clean_text(text[:limit] + "...")
+
+
+def format_memory_rows_for_llm(rows: list[dict], *, max_items: int, max_chars: int | None = None) -> str:
+    lines: list[str] = []
+    for row in rows[-max_items:]:
+        if not isinstance(row, dict):
+            continue
+        text = compact_memory_text(str(row.get("text", "")), max_chars=max_chars)
+        if not text:
+            continue
+        speaker = compact_memory_text(str(row.get("speaker", row.get("role", row.get("type", "memory")))), max_chars=24)
+        source = compact_memory_text(str(row.get("source", row.get("type", "unknown"))), max_chars=16)
+        lines.append(f"- {speaker} ({source}): {text}")
+    return "\n".join(lines) if lines else "(없음)"
+
+
+def is_context_size_error(exc: Exception) -> bool:
+    return "Context size has been exceeded" in str(exc)
 
 
 def merge_memory_rows(*row_groups: list[dict]) -> list[dict]:
@@ -812,10 +839,10 @@ async def update_cognitive_state(guild_id: int, user_text: str) -> dict:
                 "content": (
                     f"이전 cognitive_state:\n{json.dumps(current_state, ensure_ascii=False)}\n\n"
                     f"현재 rolling_summary:\n{current_summary or '(없음)'}\n\n"
-                    f"최근 raw_transcript:\n{json.dumps(recent_raw, ensure_ascii=False)}\n\n"
-                    f"최근 durable_facts:\n{json.dumps(recent_facts, ensure_ascii=False)}\n\n"
-                    f"최근 open_questions:\n{json.dumps(recent_questions, ensure_ascii=False)}\n\n"
-                    f"현재 사용자 입력:\n{clean_text(user_text)}"
+                    f"최근 raw_transcript:\n{format_memory_rows_for_llm(recent_raw, max_items=MEMORY_COGNITIVE_RAW_LIMIT)}\n\n"
+                    f"최근 durable_facts:\n{format_memory_rows_for_llm(recent_facts, max_items=4)}\n\n"
+                    f"최근 open_questions:\n{format_memory_rows_for_llm(recent_questions, max_items=4)}\n\n"
+                    f"현재 사용자 입력:\n{compact_memory_text(user_text, max_chars=160)}"
                 ),
             },
         ]
@@ -827,23 +854,46 @@ async def update_cognitive_state(guild_id: int, user_text: str) -> dict:
                 timeout_seconds=COGNITIVE_TIMEOUT_SEC,
             )
         except Exception as e:
-            print(f"[COGNITIVE] 상태 업데이트 실패 또는 timeout: {e}")
-            elapsed_ms = (time.monotonic() - started_at) * 1000.0
-            if should_log_voice_timing(elapsed_ms):
-                print(f"[COGNITIVE LATENCY] guild={guild_id} failed_after_ms={elapsed_ms:.0f}")
-            fallback = current_state or {
-                "action": "answer",
-                "confidence": 0.5,
-                "user_intent": clean_text(user_text),
-                "state_summary": clean_text(user_text),
-                "question_for_user": "",
-                "main_prompt_hint": "짧고 자연스럽게 답해라.",
-                "reason_brief": "fallback",
-                "retrieved_context_ids": [],
-                "updated_at": int(time.time()),
-            }
-            write_json_file(cognitive_state_path(guild_id), fallback)
-            return fallback
+            if is_context_size_error(e):
+                compact_messages = [
+                    messages[0],
+                    {
+                        "role": "user",
+                        "content": (
+                            f"현재 rolling_summary:\n{current_summary or '(없음)'}\n\n"
+                            f"현재 사용자 입력:\n{compact_memory_text(user_text, max_chars=120)}"
+                        ),
+                    },
+                ]
+                try:
+                    result = await ask_summary_llm(
+                        compact_messages,
+                        max_tokens=COGNITIVE_MAX_TOKENS,
+                        timeout_seconds=max(3.0, COGNITIVE_TIMEOUT_SEC - 2.0),
+                    )
+                except Exception as e2:
+                    e = e2
+                    print(f"[COGNITIVE] compact retry 실패: {e2}")
+                else:
+                    print("[COGNITIVE] compact retry 성공")
+            if 'result' not in locals() or not isinstance(result, dict):
+                print(f"[COGNITIVE] 상태 업데이트 실패 또는 timeout: {e}")
+                elapsed_ms = (time.monotonic() - started_at) * 1000.0
+                if should_log_voice_timing(elapsed_ms):
+                    print(f"[COGNITIVE LATENCY] guild={guild_id} failed_after_ms={elapsed_ms:.0f}")
+                fallback = current_state or {
+                    "action": "answer",
+                    "confidence": 0.5,
+                    "user_intent": clean_text(user_text),
+                    "state_summary": clean_text(user_text),
+                    "question_for_user": "",
+                    "main_prompt_hint": "짧고 자연스럽게 답해라.",
+                    "reason_brief": "fallback",
+                    "retrieved_context_ids": [],
+                    "updated_at": int(time.time()),
+                }
+                write_json_file(cognitive_state_path(guild_id), fallback)
+                return fallback
 
         state = normalize_cognitive_state(result)
         if not state.get("state_summary"):
@@ -889,10 +939,10 @@ async def update_long_term_memory(guild_id: int, user_text: str, answer: str) ->
                 "role": "user",
                 "content": (
                     f"현재 요약:\n{current_summary or '(없음)'}\n\n"
-                    f"최근 raw_transcript:\n{json.dumps(recent_raw, ensure_ascii=False)}\n\n"
-                    f"최근 durable_facts:\n{json.dumps(recent_facts, ensure_ascii=False)}\n\n"
-                    f"최근 open_questions:\n{json.dumps(recent_questions, ensure_ascii=False)}\n\n"
-                    f"새 대화:\nuser: {clean_text(user_text)}\nassistant: {clean_text(answer)}"
+                    f"최근 raw_transcript:\n{format_memory_rows_for_llm(recent_raw, max_items=MEMORY_LONGTERM_RAW_LIMIT)}\n\n"
+                    f"최근 durable_facts:\n{format_memory_rows_for_llm(recent_facts, max_items=6)}\n\n"
+                    f"최근 open_questions:\n{format_memory_rows_for_llm(recent_questions, max_items=4)}\n\n"
+                    f"새 대화:\n- user: {compact_memory_text(user_text, max_chars=120)}\n- assistant: {compact_memory_text(answer, max_chars=120)}"
                 ),
             },
         ]
@@ -900,11 +950,30 @@ async def update_long_term_memory(guild_id: int, user_text: str, answer: str) ->
         try:
             result = await ask_summary_llm(messages)
         except Exception as e:
-            print(f"[MEMORY] 요약 업데이트 실패: {e}")
-            elapsed_ms = (time.monotonic() - started_at) * 1000.0
-            if should_log_voice_timing(elapsed_ms):
-                print(f"[MEMORY LATENCY] guild={guild_id} failed_after_ms={elapsed_ms:.0f}")
-            return
+            if is_context_size_error(e):
+                compact_messages = [
+                    messages[0],
+                    {
+                        "role": "user",
+                        "content": (
+                            f"현재 요약:\n{current_summary or '(없음)'}\n\n"
+                            f"새 대화:\n- user: {compact_memory_text(user_text, max_chars=100)}\n- assistant: {compact_memory_text(answer, max_chars=100)}"
+                        ),
+                    },
+                ]
+                try:
+                    result = await ask_summary_llm(compact_messages, max_tokens=220, timeout_seconds=20)
+                except Exception as e2:
+                    e = e2
+                    print(f"[MEMORY] compact retry 실패: {e2}")
+                else:
+                    print("[MEMORY] compact retry 성공")
+            if 'result' not in locals() or not isinstance(result, dict):
+                print(f"[MEMORY] 요약 업데이트 실패: {e}")
+                elapsed_ms = (time.monotonic() - started_at) * 1000.0
+                if should_log_voice_timing(elapsed_ms):
+                    print(f"[MEMORY LATENCY] guild={guild_id} failed_after_ms={elapsed_ms:.0f}")
+                return
 
         summary_update = compact_working_summary(str(result.get("summary_update", "")))
         if summary_update:
