@@ -53,6 +53,8 @@ MEMORY_LOOP_LIMIT = int(os.getenv("MEMORY_LOOP_LIMIT", "100"))
 MEMORY_RAW_LIMIT = int(os.getenv("MEMORY_RAW_LIMIT", "400"))
 MEMORY_RAW_CONTEXT_LIMIT = int(os.getenv("MEMORY_RAW_CONTEXT_LIMIT", "6"))
 MEMORY_RETRIEVE_LIMIT = int(os.getenv("MEMORY_RETRIEVE_LIMIT", "8"))
+COGNITIVE_MAX_TOKENS = int(os.getenv("COGNITIVE_MAX_TOKENS", "120"))
+COGNITIVE_TIMEOUT_SEC = float(os.getenv("COGNITIVE_TIMEOUT_SEC", "8"))
 
 STT_MODEL_NAME = os.getenv("STT_MODEL_NAME", "CohereLabs/cohere-transcribe-03-2026")
 STT_LANGUAGE = os.getenv("STT_LANGUAGE", "ko")
@@ -609,9 +611,13 @@ async def update_cognitive_state(guild_id: int, user_text: str) -> dict:
         ]
 
         try:
-            result = await ask_summary_llm(messages, max_tokens=220, timeout_seconds=45)
+            result = await ask_summary_llm(
+                messages,
+                max_tokens=COGNITIVE_MAX_TOKENS,
+                timeout_seconds=COGNITIVE_TIMEOUT_SEC,
+            )
         except Exception as e:
-            print(f"[COGNITIVE] 상태 업데이트 실패: {e}")
+            print(f"[COGNITIVE] 상태 업데이트 실패 또는 timeout: {e}")
             fallback = current_state or {
                 "action": "answer",
                 "state_summary": clean_text(user_text),
