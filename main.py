@@ -65,6 +65,8 @@ WAKE_AUDIO_SEC = float(os.getenv("WAKE_AUDIO_SEC", "1.4"))
 WAKE_MAX_TOKENS = int(os.getenv("WAKE_MAX_TOKENS", "48"))
 WAKE_FUZZY_THRESHOLD = float(os.getenv("WAKE_FUZZY_THRESHOLD", "0.72"))
 WAKE_SHORT_TEXT_KEEP_LEN = int(os.getenv("WAKE_SHORT_TEXT_KEEP_LEN", "2"))
+TTS_EARLY_CHUNK_LEN = int(os.getenv("TTS_EARLY_CHUNK_LEN", "24"))
+TTS_EARLY_CUT_MIN = int(os.getenv("TTS_EARLY_CUT_MIN", "12"))
 
 MAX_HISTORY_ITEMS = 1024
 MAX_VISIBLE_TEXT = 1800
@@ -405,9 +407,9 @@ def split_tts_sentences(buffer: str, *, force: bool = False) -> tuple[list[str],
 
     if not force:
         compact = clean_text(working)
-        if len(compact) >= 40:
-            cut = working.rfind(" ")
-            if cut >= 20:
+        if len(compact) >= TTS_EARLY_CHUNK_LEN:
+            cut = max(working.rfind(" "), working.rfind(","), working.rfind("，"))
+            if cut >= TTS_EARLY_CUT_MIN:
                 sentence = clean_tts_text(working[:cut])
                 if sentence:
                     chunks.append(sentence)
@@ -597,6 +599,38 @@ def strip_voice_wake_word(text: str) -> str:
             return text_n or "부르셨나요?"
 
     return text_n or "부르셨나요?"
+
+def apply_stt_post_corrections(text: str, *, wake_detected: bool = False) -> str:
+    text = clean_text(text)
+    if not text:
+        return text
+
+    corrections = [
+        (r"\b이\s*블\s*린\b", "이블린"),
+        (r"\b이\s*브\s*린\b", "이블린"),
+        (r"\b에\s*블\s*린\b", "에블린"),
+        (r"\b에\s*브\s*린\b", "에브린"),
+        (r"\b이\s*벨\s*린\b", "이벨린"),
+        (r"\b이\s*벌\s*린\b", "이벌린"),
+    ]
+
+    corrected = text
+    for pattern, replacement in corrections:
+        corrected = re.sub(pattern, replacement, corrected, flags=re.IGNORECASE)
+
+    corrected = clean_text(corrected)
+
+    if wake_detected:
+        for wake_word in WAKE_WORDS:
+            ww = wake_word.strip()
+            if not ww:
+                continue
+            pattern_front = rf"^\s*{re.escape(ww)}[아야]?\s*[, ]*"
+            if re.match(pattern_front, corrected):
+                rest = clean_text(re.sub(pattern_front, "", corrected, count=1))
+                return clean_text(f"이블린 {rest}" if rest else "이블린")
+
+    return corrected
 
 def is_similar(a: str, b: str) -> bool:
     if not a or not b:
@@ -1369,6 +1403,11 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes) 
 
     if not text:
         return
+
+    corrected_text = apply_stt_post_corrections(text, wake_detected=wake_detected)
+    if corrected_text != text:
+        print(f"[STT CORRECT] raw={text!r} -> corrected={corrected_text!r}")
+    text = corrected_text
 
     if should_ignore_short_transcription(text, pcm_bytes, wake_detected=wake_detected):
         print(f"[STT IGNORE] short_noise: {text!r}")
