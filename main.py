@@ -132,7 +132,9 @@ conversation_history = [
             "항상 자연스러운 한국어로만 답한다. "
             "반드시 최종 답변만 바로 출력한다. "
             "<think>, reasoning, thinking process, memo, bullet, 사용자 분석, 초안은 절대 출력하지 않는다. "
-            "질문에는 한 문장 또는 두 문장으로 짧고 자연스럽게 답한다."
+            "질문에는 한 문장 또는 두 문장으로 짧고 자연스럽게 답한다. "
+            "OmniVoice 감정 태그를 쓸 수 있다. 허용 태그는 [laughter], [sigh], [confirmation-en], [question-en], [question-ah], [question-oh], [question-ei], [question-yi], [surprise-ah], [surprise-oh], [surprise-wa], [surprise-yo], [dissatisfaction-hnn] 뿐이다. "
+            "감정이 자연스럽게 들릴 때만 태그를 짧게 붙이고, 남용하지 마라. 태그 외 다른 대괄호 표현은 절대 쓰지 마라."
         ),
     }
 ]
@@ -153,6 +155,27 @@ bot_speaking_guilds: set[int] = set()
 memory_locks: dict[int, asyncio.Lock] = {}
 cognitive_locks: dict[int, asyncio.Lock] = {}
 
+ALLOWED_OMNIVOICE_TAGS = {
+    "[laughter]",
+    "[sigh]",
+    "[confirmation-en]",
+    "[question-en]",
+    "[question-ah]",
+    "[question-oh]",
+    "[question-ei]",
+    "[question-yi]",
+    "[surprise-ah]",
+    "[surprise-oh]",
+    "[surprise-wa]",
+    "[surprise-yo]",
+    "[dissatisfaction-hnn]",
+}
+OMNIVOICE_TAG_GUIDANCE = (
+    "필요할 때만 OmniVoice 감정 태그를 매우 짧게 써도 된다. "
+    "허용 태그는 [laughter], [sigh], [confirmation-en], [question-en], [question-ah], [question-oh], [question-ei], [question-yi], [surprise-ah], [surprise-oh], [surprise-wa], [surprise-yo], [dissatisfaction-hnn] 뿐이다. "
+    "태그는 문장 앞이나 짧은 감탄 앞에 자연스럽게 붙이고 남용하지 마라."
+)
+
 
 # =========================================================
 # 유틸
@@ -161,8 +184,41 @@ def clean_text(text: str) -> str:
     return re.sub(r"\s+", " ", (text or "").strip())
 
 
-def visible_text(text: str) -> str:
+def normalize_omnivoice_tags(text: str) -> str:
+    text = text or ""
+
+    def repl(match: re.Match) -> str:
+        tag = f"[{clean_text(match.group(1)).lower()}]"
+        return tag if tag in ALLOWED_OMNIVOICE_TAGS else ""
+
+    return re.sub(r"\[\s*([^\[\]]+?)\s*\]", repl, text)
+
+
+def strip_omnivoice_tags(text: str) -> str:
+    text = normalize_omnivoice_tags(text)
+    text = re.sub(r"\[[^\[\]]+\]", " ", text)
+    return clean_text(text)
+
+
+def clean_tts_text(text: str) -> str:
+    text = normalize_omnivoice_tags(clean_text(text))
+    placeholders: dict[str, str] = {}
+
+    def protect(match: re.Match) -> str:
+        key = f"__TAG_{len(placeholders)}__"
+        placeholders[key] = match.group(0)
+        return f" {key} "
+
+    text = re.sub(r"\[[^\[\]]+\]", protect, text)
+    text = re.sub(r"[\"'`~*_#@^|<>{}()]", "", text)
     text = clean_text(text)
+    for key, value in placeholders.items():
+        text = text.replace(key, value)
+    return clean_text(text)
+
+
+def visible_text(text: str) -> str:
+    text = strip_omnivoice_tags(text)
     if len(text) > MAX_VISIBLE_TEXT:
         return text[:MAX_VISIBLE_TEXT] + "..."
     return text
@@ -616,12 +672,6 @@ def schedule_memory_update(
     asyncio.create_task(update_long_term_memory(guild_id, user_text, answer))
 
 
-def clean_tts_text(text: str) -> str:
-    text = clean_text(text)
-    text = re.sub(r"[\"'`~*_#@^|<>\[\]{}()]", "", text)
-    return text
-
-
 def split_tts_sentences(buffer: str, *, force: bool = False) -> tuple[list[str], str]:
     working = buffer or ""
     chunks: list[str] = []
@@ -657,6 +707,7 @@ def sanitize_model_output(text: str) -> str:
     text = text or ""
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE)
     text = re.sub(r"<think>.*$", "", text, flags=re.DOTALL | re.IGNORECASE)
+    text = normalize_omnivoice_tags(text)
     text = clean_text(text)
     return text
 
@@ -1493,7 +1544,8 @@ def fallback_answer_for(user_text: str) -> str:
 async def ask_llm_once(user_text: str, guild_id: int | None = None) -> str:
     final_user_text = (
         f"{user_text}\n\n"
-        "주의: 생각 과정 말하지 말고, 최종 답변만 한국어로 한두 문장으로 짧게 말해."
+        "주의: 생각 과정 말하지 말고, 최종 답변만 한국어로 한두 문장으로 짧게 말해. "
+        f"{OMNIVOICE_TAG_GUIDANCE}"
     )
 
     messages = list(conversation_history)
@@ -1616,7 +1668,8 @@ async def ask_llm_streaming(
 ) -> str:
     final_user_text = (
         f"{user_text}\n\n"
-        "주의: 생각 과정 말하지 말고, 최종 답변만 한국어로 한두 문장으로 짧게 말해."
+        "주의: 생각 과정 말하지 말고, 최종 답변만 한국어로 한두 문장으로 짧게 말해. "
+        f"{OMNIVOICE_TAG_GUIDANCE}"
     )
 
     messages = list(conversation_history)
@@ -1844,7 +1897,7 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes) 
             return
 
         async def on_final_answer(answer_text: str) -> None:
-            print(f"💬 [Evelyn] {answer_text}")
+            print(f"💬 [Evelyn] {visible_text(answer_text)}")
 
         try:
             answer = await ask_llm_and_speak_streaming(
@@ -1861,11 +1914,15 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes) 
         if not answer:
             return
 
-        append_history(user_text, answer)
+        plain_answer = strip_omnivoice_tags(answer)
+        if not plain_answer:
+            plain_answer = answer
+
+        append_history(user_text, plain_answer)
         schedule_memory_update(
             guild_id,
             user_text,
-            answer,
+            plain_answer,
             source="voice",
             user_speaker=member.display_name,
             assistant_speaker="Evelyn",
@@ -1938,14 +1995,17 @@ async def on_message(message: discord.Message):
                     vc = await ensure_voice_client(message)
 
                 answer = await ask_llm_once(user_text, guild_id=message.guild.id)
+                plain_answer = strip_omnivoice_tags(answer)
+                if not plain_answer:
+                    plain_answer = answer
 
                 await message.channel.send(visible_text(answer))
 
-            append_history(user_text, answer)
+            append_history(user_text, plain_answer)
             schedule_memory_update(
                 message.guild.id,
                 user_text,
-                answer,
+                plain_answer,
                 source="text",
                 user_speaker=message.author.display_name,
                 assistant_speaker="Evelyn",

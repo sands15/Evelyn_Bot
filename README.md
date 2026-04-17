@@ -141,6 +141,24 @@ STT로 얻은 문장을 정리한 뒤, OpenAI 호환 `/v1/chat/completions` 엔�
 - 큰 모델: 실제 답변 생성
 - 작은 모델: 롤링 요약 갱신, 장기 기억 후보 추출, 열린 작업 정리
 
+큰 모델은 필요할 때 OmniVoice 감정 태그도 함께 낼 수 있습니다. 현재 허용 태그는 아래뿐입니다.
+
+- `[laughter]`
+- `[sigh]`
+- `[confirmation-en]`
+- `[question-en]`
+- `[question-ah]`
+- `[question-oh]`
+- `[question-ei]`
+- `[question-yi]`
+- `[surprise-ah]`
+- `[surprise-oh]`
+- `[surprise-wa]`
+- `[surprise-yo]`
+- `[dissatisfaction-hnn]`
+
+이 태그들은 TTS 입력에는 유지되고, 일반 텍스트 표시에는 자동으로 제거됩니다.
+
 로컬 서버를 쓰는 이유도 결국 레이턴시 때문입니다.
 왕복이 짧고, 응답 속도를 직접 통제하기 쉽습니다.
 
