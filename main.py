@@ -64,6 +64,7 @@ DENOISE_GATE_MULT = float(os.getenv("DENOISE_GATE_MULT", "1.35"))
 WAKE_AUDIO_SEC = float(os.getenv("WAKE_AUDIO_SEC", "1.4"))
 WAKE_MAX_TOKENS = int(os.getenv("WAKE_MAX_TOKENS", "48"))
 WAKE_FUZZY_THRESHOLD = float(os.getenv("WAKE_FUZZY_THRESHOLD", "0.72"))
+WAKE_SHORT_TEXT_KEEP_LEN = int(os.getenv("WAKE_SHORT_TEXT_KEEP_LEN", "2"))
 
 MAX_HISTORY_ITEMS = 1024
 MAX_VISIBLE_TEXT = 1800
@@ -602,12 +603,20 @@ def is_similar(a: str, b: str) -> bool:
         return False
     return SequenceMatcher(None, a, b).ratio() >= SIMILARITY_BLOCK
 
-def should_ignore_short_transcription(text: str, pcm_bytes: bytes) -> bool:
+def should_ignore_short_transcription(
+    text: str,
+    pcm_bytes: bytes,
+    *,
+    wake_detected: bool = False,
+) -> bool:
     text_n = normalize_voice_text(text)
     if not text_n:
         return True
 
     if text_n in normalized_wake_words():
+        return False
+
+    if wake_detected and len(text_n) >= WAKE_SHORT_TEXT_KEEP_LEN:
         return False
 
     audio_sec = len(pcm_bytes) / (RATE * CHANNELS * 2)
@@ -1361,7 +1370,7 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes) 
     if not text:
         return
 
-    if should_ignore_short_transcription(text, pcm_bytes):
+    if should_ignore_short_transcription(text, pcm_bytes, wake_detected=wake_detected):
         print(f"[STT IGNORE] short_noise: {text!r}")
         return
 
