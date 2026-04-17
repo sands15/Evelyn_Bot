@@ -2,6 +2,7 @@ import audioop
 import json
 import queue
 import re
+import shutil
 import time
 import asyncio
 from typing import Awaitable, Callable, Optional
@@ -53,12 +54,7 @@ intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-conversation_history = [
-    {
-        "role": "system",
-        "content": SYSTEM_PROMPT,
-    }
-]
+guild_histories: dict[int, list[dict]] = {}
 
 guild_locks: dict[int, asyncio.Lock] = {}
 tts_lock = asyncio.Lock()
@@ -78,16 +74,37 @@ cognitive_locks: dict[int, asyncio.Lock] = {}
 # =========================================================
 # 유틸
 # =========================================================
-def trim_history() -> None:
-    global conversation_history
-    if len(conversation_history) > 1 + MAX_HISTORY_ITEMS:
-        conversation_history = [conversation_history[0]] + conversation_history[-MAX_HISTORY_ITEMS:]
+def new_conversation_history() -> list[dict]:
+    return [{"role": "system", "content": SYSTEM_PROMPT}]
 
 
-def append_history(user_text: str, answer: str) -> None:
-    conversation_history.append({"role": "user", "content": clean_text(user_text)})
-    conversation_history.append({"role": "assistant", "content": clean_text(answer)})
-    trim_history()
+def get_conversation_history(guild_id: int | None = None) -> list[dict]:
+    if guild_id is None:
+        return new_conversation_history()
+    return guild_histories.setdefault(guild_id, new_conversation_history())
+
+
+def trim_history(guild_id: int | None = None) -> None:
+    history = get_conversation_history(guild_id)
+    if len(history) > 1 + MAX_HISTORY_ITEMS:
+        del history[1:-MAX_HISTORY_ITEMS]
+
+
+def append_history(guild_id: int | None, user_text: str, answer: str) -> None:
+    history = get_conversation_history(guild_id)
+    history.append({"role": "user", "content": clean_text(user_text)})
+    history.append({"role": "assistant", "content": clean_text(answer)})
+    trim_history(guild_id)
+
+
+def reset_guild_runtime_state(guild_id: int) -> None:
+    guild_histories.pop(guild_id, None)
+    last_voice_reply_at.pop(guild_id, None)
+    last_voice_text.pop(guild_id, None)
+    last_bot_audio_end_at.pop(guild_id, None)
+    bot_speaking_guilds.discard(guild_id)
+    memory_locks.pop(guild_id, None)
+    cognitive_locks.pop(guild_id, None)
 
 
 def should_ignore_short_transcription(
@@ -230,7 +247,7 @@ async def prepare_llm_messages(
     debug_text: str | None = None,
 ) -> tuple[list[dict], dict | None, str]:
     route = classify_llm_route(user_text, source=source)
-    messages = list(conversation_history)
+    messages = list(get_conversation_history(guild_id))
     cognitive_state: dict | None = None
 
     if guild_id is not None and route == "sub_wait":
@@ -1619,7 +1636,7 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes) 
         if not plain_answer:
             plain_answer = answer
 
-        append_history(history_user_text, plain_answer)
+        append_history(guild_id, history_user_text, plain_answer)
         schedule_memory_update(
             guild_id,
             history_user_text,
@@ -1650,8 +1667,6 @@ async def on_ready():
 
 @bot.event
 async def on_message(message: discord.Message):
-    global conversation_history
-
     if message.author.bot:
         return
 
@@ -1678,9 +1693,7 @@ async def on_message(message: discord.Message):
     if not user_text:
         user_text = "부르셨나요?"
 
-    conversation_history[:] = [conversation_history[0]] + [
-        m for m in conversation_history[1:] if m.get("role") != "system"
-    ]
+    get_conversation_history(message.guild.id)
 
     lock = guild_locks.setdefault(message.guild.id, asyncio.Lock())
 
@@ -1703,7 +1716,7 @@ async def on_message(message: discord.Message):
 
                 await message.channel.send(visible_text(answer))
 
-            append_history(user_text, plain_answer)
+            append_history(message.guild.id, user_text, plain_answer)
             schedule_memory_update(
                 message.guild.id,
                 user_text,
@@ -1786,6 +1799,31 @@ async def leave_voice(ctx):
 
     await vc.disconnect()
     await ctx.send("👋 나갔어.")
+
+
+@bot.command(name="초기화", aliases=["reset"])
+@commands.has_guild_permissions(manage_guild=True)
+async def reset_guild_memory(ctx):
+    if ctx.guild is None:
+        await ctx.send("이 명령은 길드에서만 쓸 수 있어.")
+        return
+
+    guild_id = ctx.guild.id
+    memory_dir = MEMORY_ROOT / f"guild_{guild_id}"
+
+    reset_guild_runtime_state(guild_id)
+    if memory_dir.exists():
+        shutil.rmtree(memory_dir)
+
+    await ctx.send(f"🧹 {ctx.guild.name} 메모리와 대화 히스토리를 이 길드만 초기화했어.")
+
+
+@reset_guild_memory.error
+async def reset_guild_memory_error(ctx, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("이 명령은 서버 관리 권한이 있어야 쓸 수 있어.")
+        return
+    raise error
 
 
 # =========================================================
