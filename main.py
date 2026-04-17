@@ -1296,6 +1296,24 @@ def looks_like_repetitive_noise_text(text: str) -> bool:
     return unique_ratio < 0.35 or longest_same_run >= 4
 
 
+def looks_like_brief_filler_text(text: str) -> bool:
+    text_n = normalize_voice_text(text)
+    if not text_n:
+        return True
+
+    compact = text_n.replace(" ", "")
+    if len(compact) > 6:
+        return False
+
+    return compact in {
+        "아", "아아", "아아아",
+        "어", "어어", "어어어",
+        "응", "응응",
+        "음", "으음", "음음", "음음음",
+        "흠", "흠흠",
+    }
+
+
 def should_ignore_short_transcription(
     text: str,
     pcm_bytes: bytes,
@@ -2319,40 +2337,52 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes) 
         log_voice_stage(metrics, "VAD 무음 판정", extra=f"sec={duration_sec:.2f} peak={peak:.4f} rms={rms:.4f}")
         return
 
-    log_voice_stage(metrics, "STT 시작", extra=f"samples={audio16k.size}")
+    log_voice_stage(metrics, "웨이크 프로브 시작", extra=f"samples={audio16k.size}")
     try:
-        text = await asyncio.to_thread(transcribe_audio16k_sync, audio16k, VOICE_STT_MAX_NEW_TOKENS)
+        wake_detected, wake_probe_raw = await asyncio.to_thread(detect_wake_word_sync, audio16k)
     except Exception as e:
-        print(f"❌ [STT] {e}")
-        log_voice_stage(metrics, "STT 실패", extra=repr(e))
+        print(f"❌ [WAKE STT] {e}")
+        log_voice_stage(metrics, "웨이크 프로브 실패", extra=repr(e))
         return
 
-    log_voice_stage(metrics, "STT 완료", extra=f"text_len={len(text)}")
-
-    if not text:
-        log_voice_stage(metrics, "STT 빈 결과")
-        return
-
-    corrected_text = apply_stt_post_corrections(text, wake_detected=False)
-    wake_detected = contains_leading_wake_word(strip_leading_voice_fillers(corrected_text))
-    wake_probe = corrected_text
-    text = corrected_text
+    wake_probe = apply_stt_post_corrections(wake_probe_raw, wake_detected=False)
+    wake_detected = wake_detected or contains_leading_wake_word(strip_leading_voice_fillers(wake_probe))
+    log_voice_stage(metrics, "웨이크 프로브 완료", extra=f"wake={wake_detected} probe_len={len(wake_probe)}")
 
     if is_likely_environment_noise(audio16k):
         band_ratio, flatness, rms = compute_voice_band_metrics(audio16k)
         print(
-            f"[ENV IGNORE] speaker={member.display_name} band_ratio={band_ratio:.3f} flatness={flatness:.3f} rms={rms:.4f} text={text!r}"
+            f"[ENV IGNORE] speaker={member.display_name} band_ratio={band_ratio:.3f} flatness={flatness:.3f} rms={rms:.4f} probe={wake_probe!r}"
         )
         return
 
-    if looks_like_repetitive_noise_text(text):
-        print(f"[NOISE TEXT IGNORE] speaker={member.display_name} text={text!r}")
+    if looks_like_brief_filler_text(wake_probe):
+        print(f"[FILLER IGNORE] speaker={member.display_name} probe={wake_probe!r}")
+        log_voice_stage(metrics, "짧은 필러 무시", extra=f"probe={wake_probe!r}")
+        return
+
+    if looks_like_repetitive_noise_text(wake_probe):
+        print(f"[NOISE TEXT IGNORE] speaker={member.display_name} probe={wake_probe!r}")
         return
 
     if not wake_detected:
         if wake_probe:
             print(f"[WAKE IGNORE] {member.display_name}: {wake_probe!r}")
         log_voice_stage(metrics, "웨이크 미검출", extra=f"probe={wake_probe!r}")
+        return
+
+    log_voice_stage(metrics, "본문 STT 시작", extra=f"samples={audio16k.size}")
+    try:
+        text = await asyncio.to_thread(transcribe_audio16k_sync, audio16k, VOICE_STT_MAX_NEW_TOKENS)
+    except Exception as e:
+        print(f"❌ [STT] {e}")
+        log_voice_stage(metrics, "본문 STT 실패", extra=repr(e))
+        return
+
+    log_voice_stage(metrics, "본문 STT 완료", extra=f"text_len={len(text)}")
+
+    if not text:
+        log_voice_stage(metrics, "본문 STT 빈 결과")
         return
 
     corrected_text = apply_stt_post_corrections(text, wake_detected=wake_detected)
