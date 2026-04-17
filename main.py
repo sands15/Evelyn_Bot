@@ -50,6 +50,8 @@ SUMMARY_MODEL_NAME = os.getenv("SUMMARY_MODEL_NAME", "Qwen3.6-35B-A3B-UD-Q3_K_XL
 MEMORY_ROOT = Path(os.getenv("BOT_MEMORY_DIR", str(Path(__file__).resolve().parent / "bot_memory")))
 MEMORY_FACT_LIMIT = int(os.getenv("MEMORY_FACT_LIMIT", "200"))
 MEMORY_LOOP_LIMIT = int(os.getenv("MEMORY_LOOP_LIMIT", "100"))
+MEMORY_RAW_LIMIT = int(os.getenv("MEMORY_RAW_LIMIT", "400"))
+MEMORY_RAW_CONTEXT_LIMIT = int(os.getenv("MEMORY_RAW_CONTEXT_LIMIT", "6"))
 MEMORY_RETRIEVE_LIMIT = int(os.getenv("MEMORY_RETRIEVE_LIMIT", "8"))
 
 STT_MODEL_NAME = os.getenv("STT_MODEL_NAME", "CohereLabs/cohere-transcribe-03-2026")
@@ -197,8 +199,16 @@ def memory_summary_path(guild_id: int) -> Path:
     return guild_memory_dir(guild_id) / "rolling_summary.txt"
 
 
+def memory_raw_path(guild_id: int) -> Path:
+    return guild_memory_dir(guild_id) / "raw_transcript.jsonl"
+
+
 def memory_facts_path(guild_id: int) -> Path:
     return guild_memory_dir(guild_id) / "durable_facts.jsonl"
+
+
+def memory_questions_path(guild_id: int) -> Path:
+    return guild_memory_dir(guild_id) / "open_questions.jsonl"
 
 
 def memory_loops_path(guild_id: int) -> Path:
@@ -240,6 +250,36 @@ def write_jsonl(path: Path, rows: list[dict]) -> None:
     if content:
         content += "\n"
     path.write_text(content, encoding="utf-8")
+
+
+def append_jsonl_rows(path: Path, rows: list[dict], limit: int) -> None:
+    existing = read_jsonl(path)
+    existing.extend(row for row in rows if isinstance(row, dict))
+    if len(existing) > limit:
+        existing = existing[-limit:]
+    write_jsonl(path, existing)
+
+
+def append_raw_transcript_rows(guild_id: int, rows: list[dict]) -> None:
+    normalized: list[dict] = []
+    now = int(time.time())
+
+    for row in rows:
+        text = clean_text(str(row.get("text", "")))
+        if len(text) < 1:
+            continue
+        normalized.append(
+            {
+                "role": clean_text(str(row.get("role", "user"))) or "user",
+                "speaker": clean_text(str(row.get("speaker", ""))),
+                "source": clean_text(str(row.get("source", "unknown"))) or "unknown",
+                "text": text,
+                "saved_at": int(row.get("saved_at", now)),
+            }
+        )
+
+    if normalized:
+        append_jsonl_rows(memory_raw_path(guild_id), normalized, MEMORY_RAW_LIMIT)
 
 
 def append_unique_memory_rows(path: Path, rows: list[dict], limit: int) -> None:
@@ -288,21 +328,45 @@ def select_relevant_memory_rows(query: str, rows: list[dict], limit: int) -> lis
     return [row for _, _, row in scored[:limit]]
 
 
+def read_question_rows(guild_id: int) -> list[dict]:
+    merged: list[dict] = []
+    seen: set[str] = set()
+    for path in (memory_questions_path(guild_id), memory_loops_path(guild_id)):
+        for row in read_jsonl(path):
+            text = clean_text(str(row.get("text", "")))
+            if len(text) < 2 or text in seen:
+                continue
+            seen.add(text)
+            merged.append(row)
+    return merged
+
+
 def build_memory_context(guild_id: int, user_text: str) -> str:
     summary = read_text_file(memory_summary_path(guild_id))
+    raw_rows = read_jsonl(memory_raw_path(guild_id))[-MEMORY_RAW_CONTEXT_LIMIT:]
     facts = select_relevant_memory_rows(user_text, read_jsonl(memory_facts_path(guild_id)), MEMORY_RETRIEVE_LIMIT)
-    loops = select_relevant_memory_rows(user_text, read_jsonl(memory_loops_path(guild_id)), 4)
+    questions = select_relevant_memory_rows(user_text, read_question_rows(guild_id), 4)
 
     parts: list[str] = []
     if summary:
         parts.append(f"최근 누적 요약:\n{summary}")
+    if raw_rows:
+        parts.append(
+            "최근 원문 로그:\n"
+            + "\n".join(
+                f"- {clean_text(str(row.get('speaker', row.get('role', 'unknown')))) or 'unknown'}"
+                f" ({clean_text(str(row.get('source', 'unknown'))) or 'unknown'}): {clean_text(str(row.get('text', '')))}"
+                for row in raw_rows
+                if clean_text(str(row.get('text', '')))
+            )
+        )
     if facts:
         parts.append(
             "장기 기억 후보:\n" + "\n".join(f"- {clean_text(str(row.get('text', '')))}" for row in facts)
         )
-    if loops:
+    if questions:
         parts.append(
-            "열린 작업/보류 메모:\n" + "\n".join(f"- {clean_text(str(row.get('text', '')))}" for row in loops)
+            "열린 질문/가설:\n" + "\n".join(f"- {clean_text(str(row.get('text', '')))}" for row in questions)
         )
 
     if not parts:
@@ -366,26 +430,29 @@ async def update_long_term_memory(guild_id: int, user_text: str, answer: str) ->
     lock = memory_locks.setdefault(guild_id, asyncio.Lock())
     async with lock:
         current_summary = read_text_file(memory_summary_path(guild_id))
+        recent_raw = read_jsonl(memory_raw_path(guild_id))[-16:]
         recent_facts = read_jsonl(memory_facts_path(guild_id))[-12:]
-        recent_loops = read_jsonl(memory_loops_path(guild_id))[-8:]
+        recent_questions = read_question_rows(guild_id)[-8:]
 
         messages = [
             {
                 "role": "system",
                 "content": (
-                    "너는 대화 장기기억 관리자다. 반드시 JSON 객체 하나만 출력한다. "
-                    "형식은 {\"summary_update\": string, \"durable_facts\": [{\"type\": string, \"text\": string}], \"open_loops\": [{\"type\": string, \"text\": string}]}. "
+                    "너는 대화 장기기억 관리자이자 상황 정리자다. 반드시 JSON 객체 하나만 출력한다. "
+                    "형식은 {\"summary_update\": string, \"durable_facts\": [{\"type\": string, \"text\": string}], \"open_questions\": [{\"type\": string, \"text\": string}]}. "
+                    "summary_update는 지금 상황을 짧고 자연스러운 한국어로 압축한 누적 요약이다. "
                     "durable_facts에는 오래 기억할 만한 선호, 설정, 프로젝트 결정, 반복되는 사실만 넣어라. "
-                    "잡담, 일회성 문장, 추측, 노이즈는 넣지 마라. open_loops에는 아직 끝나지 않은 작업이나 다음에 이어야 할 일만 넣어라. "
-                    "summary_update는 지금까지 맥락을 짧게 압축한 한국어 요약으로 작성해라."
+                    "open_questions에는 아직 확정되지 않은 추정, 확인이 필요한 질문, 다음에 물어볼 만한 포인트만 넣어라. "
+                    "잡담, 일회성 노이즈, 이미 해결된 내용은 넣지 마라. JSON 외 다른 텍스트는 절대 출력하지 마라."
                 ),
             },
             {
                 "role": "user",
                 "content": (
                     f"현재 요약:\n{current_summary or '(없음)'}\n\n"
+                    f"최근 raw_transcript:\n{json.dumps(recent_raw, ensure_ascii=False)}\n\n"
                     f"최근 durable_facts:\n{json.dumps(recent_facts, ensure_ascii=False)}\n\n"
-                    f"최근 open_loops:\n{json.dumps(recent_loops, ensure_ascii=False)}\n\n"
+                    f"최근 open_questions:\n{json.dumps(recent_questions, ensure_ascii=False)}\n\n"
                     f"새 대화:\nuser: {clean_text(user_text)}\nassistant: {clean_text(answer)}"
                 ),
             },
@@ -405,12 +472,27 @@ async def update_long_term_memory(guild_id: int, user_text: str, answer: str) ->
         if isinstance(durable_facts, list):
             append_unique_memory_rows(memory_facts_path(guild_id), [row for row in durable_facts if isinstance(row, dict)], MEMORY_FACT_LIMIT)
 
-        open_loops = result.get("open_loops", [])
-        if isinstance(open_loops, list):
-            append_unique_memory_rows(memory_loops_path(guild_id), [row for row in open_loops if isinstance(row, dict)], MEMORY_LOOP_LIMIT)
+        open_questions = result.get("open_questions", [])
+        if isinstance(open_questions, list):
+            append_unique_memory_rows(memory_questions_path(guild_id), [row for row in open_questions if isinstance(row, dict)], MEMORY_LOOP_LIMIT)
 
 
-def schedule_memory_update(guild_id: int, user_text: str, answer: str) -> None:
+def schedule_memory_update(
+    guild_id: int,
+    user_text: str,
+    answer: str,
+    *,
+    source: str = "chat",
+    user_speaker: str = "user",
+    assistant_speaker: str = "Evelyn",
+) -> None:
+    append_raw_transcript_rows(
+        guild_id,
+        [
+            {"role": "user", "speaker": user_speaker, "source": source, "text": user_text},
+            {"role": "assistant", "speaker": assistant_speaker, "source": source, "text": answer},
+        ],
+    )
     asyncio.create_task(update_long_term_memory(guild_id, user_text, answer))
 
 
@@ -1658,7 +1740,14 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes) 
             return
 
         append_history(user_text, answer)
-        schedule_memory_update(guild_id, user_text, answer)
+        schedule_memory_update(
+            guild_id,
+            user_text,
+            answer,
+            source="voice",
+            user_speaker=member.display_name,
+            assistant_speaker="Evelyn",
+        )
 
 
 # =========================================================
@@ -1731,7 +1820,14 @@ async def on_message(message: discord.Message):
                 await message.channel.send(visible_text(answer))
 
             append_history(user_text, answer)
-            schedule_memory_update(message.guild.id, user_text, answer)
+            schedule_memory_update(
+                message.guild.id,
+                user_text,
+                answer,
+                source="text",
+                user_speaker=message.author.display_name,
+                assistant_speaker="Evelyn",
+            )
 
             if vc is not None:
                 await speak_answer(vc, answer)
