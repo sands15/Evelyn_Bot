@@ -17,6 +17,12 @@ from discord.ext import commands
 from transformers import AutoProcessor, CohereAsrForConditionalGeneration
 
 try:
+    from silero_vad import load_silero_vad, get_speech_timestamps
+except Exception:
+    load_silero_vad = None
+    get_speech_timestamps = None
+
+try:
     import torchaudio.functional as torchaudio_F
 except Exception:
     torchaudio_F = None
@@ -51,11 +57,17 @@ STT_LANGUAGE = os.getenv("STT_LANGUAGE", "ko")
 STT_COMPUTE_TYPE = os.getenv("STT_COMPUTE_TYPE", "float16")
 
 VAD_ENABLED = os.getenv("VAD_ENABLED", "true").lower() == "true"
+VAD_PROVIDER = os.getenv("VAD_PROVIDER", "silero").lower()
 VAD_RMS_THRESHOLD = float(os.getenv("VAD_RMS_THRESHOLD", "0.008"))
 VAD_PEAK_THRESHOLD = float(os.getenv("VAD_PEAK_THRESHOLD", "0.020"))
 VAD_MIN_VOICED_RATIO = float(os.getenv("VAD_MIN_VOICED_RATIO", "0.015"))
 VAD_CHUNK_MS = float(os.getenv("VAD_CHUNK_MS", "32"))
 VAD_START_CONSECUTIVE = int(os.getenv("VAD_START_CONSECUTIVE", "2"))
+SILERO_VAD_THRESHOLD = float(os.getenv("SILERO_VAD_THRESHOLD", "0.5"))
+SILERO_MIN_SPEECH_MS = int(os.getenv("SILERO_MIN_SPEECH_MS", "64"))
+SILERO_MIN_SILENCE_MS = int(os.getenv("SILERO_MIN_SILENCE_MS", "0"))
+SILERO_SPEECH_PAD_MS = int(os.getenv("SILERO_SPEECH_PAD_MS", "0"))
+SILERO_VAD_ONNX = os.getenv("SILERO_VAD_ONNX", "false").lower() == "true"
 
 DENOISE_ENABLED = os.getenv("DENOISE_ENABLED", "true").lower() == "true"
 DENOISE_HIGHPASS_HZ = float(os.getenv("DENOISE_HIGHPASS_HZ", "120"))
@@ -124,6 +136,8 @@ tts_lock = asyncio.Lock()
 stt_processor: Optional[AutoProcessor] = None
 stt_model: Optional[CohereAsrForConditionalGeneration] = None
 http_session: Optional[aiohttp.ClientSession] = None
+silero_vad_model = None
+silero_vad_warned = False
 
 last_voice_reply_at: dict[int, float] = {}
 last_voice_text: dict[int, str] = {}
@@ -758,7 +772,21 @@ def slice_audio_window(audio16k: np.ndarray, max_sec: float) -> np.ndarray:
     return audio16k[:sample_len].copy()
 
 
-def _is_voiced_vad_chunk(chunk: np.ndarray) -> bool:
+def get_silero_vad_model():
+    global silero_vad_model
+
+    if silero_vad_model is not None:
+        return silero_vad_model
+
+    if load_silero_vad is None or get_speech_timestamps is None:
+        raise RuntimeError("silero_vad is not available")
+
+    silero_vad_model = load_silero_vad(onnx=SILERO_VAD_ONNX)
+    print(f"Silero VAD 로드 완료 | onnx={SILERO_VAD_ONNX}")
+    return silero_vad_model
+
+
+def _is_voiced_vad_chunk_energy(chunk: np.ndarray) -> bool:
     if chunk.size == 0:
         return False
 
@@ -768,7 +796,7 @@ def _is_voiced_vad_chunk(chunk: np.ndarray) -> bool:
     return rms >= VAD_RMS_THRESHOLD and voiced_ratio >= VAD_MIN_VOICED_RATIO
 
 
-def is_probably_silent(audio16k: np.ndarray) -> bool:
+def is_probably_silent_energy(audio16k: np.ndarray) -> bool:
     if audio16k.size == 0:
         return True
 
@@ -778,7 +806,7 @@ def is_probably_silent(audio16k: np.ndarray) -> bool:
 
     for start in range(0, len(audio16k), chunk_samples):
         chunk = audio16k[start:start + chunk_samples]
-        if _is_voiced_vad_chunk(chunk):
+        if _is_voiced_vad_chunk_energy(chunk):
             voiced_streak += 1
             if voiced_streak >= required_streak:
                 return False
@@ -786,6 +814,46 @@ def is_probably_silent(audio16k: np.ndarray) -> bool:
             voiced_streak = 0
 
     return True
+
+
+def is_probably_silent_silero(audio16k: np.ndarray) -> bool:
+    if audio16k.size == 0:
+        return True
+
+    model = get_silero_vad_model()
+    audio_tensor = torch.from_numpy(np.asarray(audio16k, dtype=np.float32))
+    speech_timestamps = get_speech_timestamps(
+        audio_tensor,
+        model,
+        threshold=SILERO_VAD_THRESHOLD,
+        sampling_rate=TARGET_RATE,
+        min_speech_duration_ms=SILERO_MIN_SPEECH_MS,
+        min_silence_duration_ms=SILERO_MIN_SILENCE_MS,
+        speech_pad_ms=SILERO_SPEECH_PAD_MS,
+        return_seconds=False,
+    )
+    return len(speech_timestamps) == 0
+
+
+def is_probably_silent(audio16k: np.ndarray) -> bool:
+    global silero_vad_warned
+
+    if audio16k.size == 0:
+        return True
+
+    if not VAD_ENABLED:
+        return False
+
+    if VAD_PROVIDER == "silero":
+        try:
+            return is_probably_silent_silero(audio16k)
+        except Exception as e:
+            if not silero_vad_warned:
+                print(f"[VAD FALLBACK] Silero VAD 실패 -> energy 사용 | err={e}")
+                silero_vad_warned = True
+            return is_probably_silent_energy(audio16k)
+
+    return is_probably_silent_energy(audio16k)
 
 def log_visible_gpus() -> None:
     print("CUDA available:", torch.cuda.is_available())
