@@ -42,6 +42,7 @@ silero_vad_warned = False
 
 
 def compute_voice_band_metrics(audio16k: np.ndarray) -> tuple[float, float, float]:
+    """주파수 대역 분포와 flatness, RMS를 계산해 사람 목소리/환경음 구분에 쓴다."""
     if audio16k.size == 0:
         return 0.0, 1.0, 0.0
 
@@ -65,6 +66,7 @@ def compute_voice_band_metrics(audio16k: np.ndarray) -> tuple[float, float, floa
 
 
 def is_likely_environment_noise(audio16k: np.ndarray) -> bool:
+    """저레벨 환경음처럼 보이는 오디오인지 스펙트럼 특성으로 판정한다."""
     band_ratio, flatness, rms = compute_voice_band_metrics(audio16k)
     return (
         rms <= VOICE_ENV_RMS_MAX
@@ -128,6 +130,7 @@ def apply_light_denoise(audio16k: np.ndarray) -> np.ndarray:
 
 
 def prepare_stt_audio(pcm_bytes: bytes) -> np.ndarray:
+    """디스코드 PCM을 mono 16kHz로 바꾸고 경량 denoise까지 적용한다."""
     audio16k = downmix_and_resample_int16_stereo_to_mono16k(pcm_bytes)
     if audio16k.size == 0:
         return audio16k
@@ -142,6 +145,7 @@ def slice_audio_window(audio16k: np.ndarray, max_sec: float) -> np.ndarray:
 
 
 def get_silero_vad_model():
+    """Silero VAD 모델을 lazy-load하고 한 번만 재사용한다."""
     global silero_vad_model
 
     if silero_vad_model is not None:
@@ -171,6 +175,7 @@ def _is_voiced_vad_chunk_energy(chunk: np.ndarray) -> bool:
 
 
 def is_probably_silent_energy(audio16k: np.ndarray) -> bool:
+    """경량 energy 기반 규칙으로 음성 시작이 없는 구간인지 판정한다."""
     if audio16k.size == 0:
         return True
 
@@ -191,6 +196,7 @@ def is_probably_silent_energy(audio16k: np.ndarray) -> bool:
 
 
 def is_probably_silent_silero(audio16k: np.ndarray) -> bool:
+    """Silero VAD 타임스탬프가 비어 있으면 무음으로 본다."""
     if audio16k.size == 0:
         return True
 
@@ -210,6 +216,7 @@ def is_probably_silent_silero(audio16k: np.ndarray) -> bool:
 
 
 def is_probably_silent(audio16k: np.ndarray) -> bool:
+    """Silero 결과를 우선 쓰되 필요하면 energy fallback/override로 보정한다."""
     global silero_vad_warned
 
     if audio16k.size == 0:

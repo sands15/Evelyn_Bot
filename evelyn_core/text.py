@@ -11,10 +11,12 @@ from .config import (
 
 
 def clean_text(text: str) -> str:
+    """여러 공백을 하나로 줄이고 앞뒤 공백을 정리한다."""
     return re.sub(r"\s+", " ", (text or "").strip())
 
 
 def normalize_omnivoice_tags(text: str) -> str:
+    """허용된 OmniVoice 태그만 남기고 표기를 정규화한다."""
     text = text or ""
 
     def repl(match: re.Match) -> str:
@@ -31,6 +33,7 @@ def strip_omnivoice_tags(text: str) -> str:
 
 
 def clean_tts_text(text: str) -> str:
+    """TTS로 보내기 전 태그와 특수문자를 정리해 읽기 쉬운 문장으로 만든다."""
     text = normalize_omnivoice_tags(clean_text(text))
     leading_tag_match = re.match(r"^\s*(\[[^\[\]]+\])", text)
     leading_tag = leading_tag_match.group(1) if leading_tag_match else ""
@@ -76,6 +79,7 @@ def strip_leading_voice_fillers(text: str) -> str:
 
 
 def contains_leading_wake_word(text: str) -> bool:
+    """문장 맨 앞부분이 wake word로 시작했는지 fuzzy matching까지 포함해 판별한다."""
     text_n = normalize_voice_text(text)
     if not text_n:
         return False
@@ -123,6 +127,7 @@ def strip_voice_wake_word(text: str) -> str:
 
 
 def apply_stt_post_corrections(text: str, *, wake_detected: bool = False) -> str:
+    """STT 결과에서 자주 틀리는 wake word 표기를 canonical 형태로 교정한다."""
     text = clean_text(text)
     if not text:
         return text
@@ -155,6 +160,7 @@ def is_similar(a: str, b: str) -> bool:
 
 
 def looks_like_repetitive_noise_text(text: str) -> bool:
+    """반복 토큰이 과도한 전사 결과를 잡음성 텍스트로 본다."""
     tokens = [t for t in normalize_voice_text(text).split() if t]
     if len(tokens) < 8:
         return False
@@ -171,6 +177,7 @@ def looks_like_repetitive_noise_text(text: str) -> bool:
 
 
 def looks_like_brief_filler_text(text: str) -> bool:
+    """아, 어, 음 같은 짧은 필러 발화만 들어온 경우를 빠르게 걸러낸다."""
     text_n = normalize_voice_text(text)
     if not text_n:
         return True

@@ -16,6 +16,7 @@ from .text import clean_text
 
 
 def guild_memory_dir(guild_id: int) -> Path:
+    """길드별 메모리 파일이 모이는 디렉터리를 만들고 반환한다."""
     path = MEMORY_ROOT / f"guild_{guild_id}"
     path.mkdir(parents=True, exist_ok=True)
     return path
@@ -97,6 +98,7 @@ def write_json_file(path: Path, data: dict) -> None:
 
 
 def read_jsonl(path: Path) -> list[dict]:
+    """jsonl 파일을 읽어 dict 행 목록으로 반환한다. 깨진 줄은 건너뛴다."""
     if not path.exists():
         return []
 
@@ -115,6 +117,7 @@ def read_jsonl(path: Path) -> list[dict]:
 
 
 def write_jsonl(path: Path, rows: list[dict]) -> None:
+    """dict 행 목록을 jsonl 형식으로 저장한다."""
     path.parent.mkdir(parents=True, exist_ok=True)
     content = "\n".join(json.dumps(row, ensure_ascii=False) for row in rows)
     if content:
@@ -197,6 +200,7 @@ def read_fact_rows(guild_id: int) -> list[dict]:
 
 
 def append_raw_transcript_rows(guild_id: int, rows: list[dict]) -> None:
+    """새 대화 raw transcript를 hot 파일과 일자별 vault 파일에 함께 누적한다."""
     normalized: list[dict] = []
     now = int(time.time())
 
@@ -220,6 +224,7 @@ def append_raw_transcript_rows(guild_id: int, rows: list[dict]) -> None:
 
 
 def append_unique_memory_rows(path: Path, rows: list[dict], limit: int, *, mirror_path: Path | None = None) -> None:
+    """중복 텍스트를 제외하고 메모리 행을 추가한 뒤, 필요하면 mirror 파일에도 반영한다."""
     existing = read_jsonl(path)
     mirror_existing = read_jsonl(mirror_path) if mirror_path is not None else []
     seen = {clean_text(str(row.get("text", ""))) for row in merge_memory_rows(existing, mirror_existing)}
@@ -252,6 +257,7 @@ def memory_tokens(text: str) -> set[str]:
 
 
 def select_relevant_memory_rows(query: str, rows: list[dict], limit: int) -> list[dict]:
+    """질문과 토큰이 많이 겹치는 메모리를 우선순위로 골라 prompt에 넣는다."""
     q = memory_tokens(query)
     if not rows:
         return []
@@ -295,6 +301,7 @@ def normalize_cognitive_action(value: str) -> str:
 
 
 def normalize_cognitive_state(data: dict) -> dict:
+    """서브 LLM의 cognitive JSON을 안전한 내부 표준 형태로 정규화한다."""
     if not isinstance(data, dict):
         data = {}
 
