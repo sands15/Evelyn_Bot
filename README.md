@@ -165,6 +165,13 @@ STT로 얻은 문장을 정리한 뒤, OpenAI 호환 `/v1/chat/completions` 엔�
 - `wait`면 태그를 거의 쓰지 않음
 - `answer`면 확인, 놀람, 가벼운 웃음 태그를 필요할 때만 사용
 
+현재 라우팅은 이렇게 나뉩니다.
+
+- `main_direct`: 메인 LLM 직행, sub를 기다리지 않음
+- `sub_hint`: 저장돼 있던 sub 결과만 힌트로 참고
+- `sub_wait`: 정말 문맥이 깊거나 애매할 때만 fresh sub 판단을 잠깐 기다림
+- 음성 입력은 기본적으로 `main_direct`로 처리하고, sub는 뒤에서 raw/summary/state 저장만 갱신
+
 로컬 서버를 쓰는 이유도 결국 레이턴시 때문입니다.
 왕복이 짧고, 응답 속도를 직접 통제하기 쉽습니다.
 

@@ -472,6 +472,59 @@ def build_main_response_guidance(cognitive_state: dict | None = None) -> str:
     return " ".join(clean_text(part) for part in parts if clean_text(part))
 
 
+def classify_llm_route(user_text: str, *, source: str = "text") -> str:
+    text = clean_text(user_text)
+    if source == "voice":
+        return "main_direct"
+
+    short_text = len(text) <= 18 or len(text.split()) <= 4
+    if short_text:
+        return "main_direct"
+
+    context_markers = [
+        "아까", "방금", "전에", "이전", "기억", "문맥", "계속", "이어서",
+        "요약", "정리", "판단", "비교", "설명", "의견", "생각", "왜", "어떻게",
+    ]
+    marker_hits = sum(1 for marker in context_markers if marker in text)
+
+    if len(text) >= 60 or marker_hits >= 2:
+        return "sub_wait"
+    if len(text) >= 24 or marker_hits >= 1:
+        return "sub_hint"
+    return "main_direct"
+
+
+async def prepare_llm_messages(
+    user_text: str,
+    *,
+    guild_id: int | None = None,
+    source: str = "text",
+) -> tuple[list[dict], dict | None, str]:
+    route = classify_llm_route(user_text, source=source)
+    messages = list(conversation_history)
+    cognitive_state: dict | None = None
+
+    if guild_id is not None and route == "sub_wait":
+        cognitive_state = await update_cognitive_state(guild_id, user_text)
+    elif guild_id is not None and route == "sub_hint":
+        saved_state = read_json_file(cognitive_state_path(guild_id))
+        cognitive_state = normalize_cognitive_state(saved_state) if saved_state else None
+
+    if guild_id is not None and route != "main_direct":
+        memory_context = build_memory_context(guild_id, user_text, cognitive_state=cognitive_state)
+        if memory_context:
+            base_system = messages[0]["content"] if messages and messages[0].get("role") == "system" else ""
+            merged_system = clean_text(base_system + "\n\n" + memory_context)
+
+            if messages and messages[0].get("role") == "system":
+                messages[0] = {"role": "system", "content": merged_system}
+            else:
+                messages.insert(0, {"role": "system", "content": merged_system})
+
+    print(f"[LLM ROUTE] source={source} route={route} text={visible_text(user_text)!r}")
+    return messages, cognitive_state, route
+
+
 def build_memory_context(guild_id: int, user_text: str, cognitive_state: dict | None = None) -> str:
     summary = read_text_file(memory_summary_path(guild_id))
     raw_rows = read_jsonl(memory_raw_path(guild_id))[-MEMORY_RAW_CONTEXT_LIMIT:]
@@ -707,6 +760,7 @@ def schedule_memory_update(
         ],
     )
     asyncio.create_task(update_long_term_memory(guild_id, user_text, answer))
+    asyncio.create_task(update_cognitive_state(guild_id, user_text))
 
 
 def split_tts_sentences(buffer: str, *, force: bool = False) -> tuple[list[str], str]:
@@ -1630,21 +1684,12 @@ def fallback_answer_for(user_text: str) -> str:
     return "응, 잠깐만."
 
 
-async def ask_llm_once(user_text: str, guild_id: int | None = None) -> str:
-    cognitive_state: dict | None = None
-    messages = list(conversation_history)
-
-    if guild_id is not None:
-        cognitive_state = await update_cognitive_state(guild_id, user_text)
-        memory_context = build_memory_context(guild_id, user_text, cognitive_state=cognitive_state)
-        if memory_context:
-            base_system = messages[0]["content"] if messages and messages[0].get("role") == "system" else ""
-            merged_system = clean_text(base_system + "\n\n" + memory_context)
-
-            if messages and messages[0].get("role") == "system":
-                messages[0] = {"role": "system", "content": merged_system}
-            else:
-                messages.insert(0, {"role": "system", "content": merged_system})
+async def ask_llm_once(user_text: str, guild_id: int | None = None, *, source: str = "text") -> str:
+    messages, cognitive_state, _route = await prepare_llm_messages(
+        user_text,
+        guild_id=guild_id,
+        source=source,
+    )
 
     final_user_text = f"{user_text}\n\n{build_main_response_guidance(cognitive_state)}"
 
@@ -1751,21 +1796,14 @@ async def ask_llm_streaming(
     guild_id: int | None = None,
     on_sentence: Callable[[str], Awaitable[None]] | None = None,
     on_first_chunk: Callable[[], None] | None = None,
+    *,
+    source: str = "text",
 ) -> str:
-    cognitive_state: dict | None = None
-    messages = list(conversation_history)
-
-    if guild_id is not None:
-        cognitive_state = await update_cognitive_state(guild_id, user_text)
-        memory_context = build_memory_context(guild_id, user_text, cognitive_state=cognitive_state)
-        if memory_context:
-            base_system = messages[0]["content"] if messages and messages[0].get("role") == "system" else ""
-            merged_system = clean_text(base_system + "\n\n" + memory_context)
-
-            if messages and messages[0].get("role") == "system":
-                messages[0] = {"role": "system", "content": merged_system}
-            else:
-                messages.insert(0, {"role": "system", "content": merged_system})
+    messages, cognitive_state, _route = await prepare_llm_messages(
+        user_text,
+        guild_id=guild_id,
+        source=source,
+    )
 
     final_user_text = f"{user_text}\n\n{build_main_response_guidance(cognitive_state)}"
 
@@ -1799,7 +1837,7 @@ async def ask_llm_streaming(
                 answer = sanitize_model_output(msg.get("content", ""))
             if not answer:
                 print("[LLM STREAM] json 응답 본문 비어 있음, non-stream 재시도")
-                answer = await ask_llm_once(user_text, guild_id=guild_id)
+                answer = await ask_llm_once(user_text, guild_id=guild_id, source=source)
             if on_first_chunk is not None:
                 on_first_chunk()
             if on_sentence is not None:
@@ -1848,7 +1886,7 @@ async def ask_llm_streaming(
         print(
             f"[LLM STREAM] stream 본문 비어 있음, non-stream 재시도 | raw_len={len(''.join(raw_parts))} reasoning_len={len(''.join(reasoning_parts))} emitted_any={emitted_any}"
         )
-        answer = await ask_llm_once(user_text, guild_id=guild_id)
+        answer = await ask_llm_once(user_text, guild_id=guild_id, source=source)
 
     if on_sentence is not None:
         ready_chunks, sentence_buffer = split_tts_sentences(sentence_buffer, force=True)
@@ -1866,6 +1904,8 @@ async def ask_llm_and_speak_streaming(
     user_text: str,
     guild_id: int | None = None,
     on_final_answer: Callable[[str], Awaitable[None]] | None = None,
+    *,
+    source: str = "voice",
 ) -> str:
     metrics = {
         "started_at": time.monotonic(),
@@ -1889,6 +1929,7 @@ async def ask_llm_and_speak_streaming(
             guild_id=guild_id,
             on_sentence=enqueue_sentence,
             on_first_chunk=lambda: log_voice_latency(metrics, "llm_first_chunk_logged", "LLM 첫 chunk 시간"),
+            source=source,
         )
         answer = clean_text(answer)
         if answer and on_final_answer is not None:
@@ -1992,6 +2033,7 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes) 
                 user_text,
                 guild_id=guild_id,
                 on_final_answer=on_final_answer,
+                source="voice",
             )
         except Exception as e:
             print(f"❌ [LLM/TTS] {e}")
@@ -2081,7 +2123,7 @@ async def on_message(message: discord.Message):
                 if AUTO_JOIN_VOICE:
                     vc = await ensure_voice_client(message)
 
-                answer = await ask_llm_once(user_text, guild_id=message.guild.id)
+                answer = await ask_llm_once(user_text, guild_id=message.guild.id, source="text")
                 plain_answer = strip_omnivoice_tags(answer)
                 if not plain_answer:
                     plain_answer = answer
