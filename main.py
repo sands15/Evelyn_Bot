@@ -631,6 +631,7 @@ async def ask_summary_llm(
 
 
 async def update_cognitive_state(guild_id: int, user_text: str) -> dict:
+    started_at = time.monotonic()
     lock = cognitive_locks.setdefault(guild_id, asyncio.Lock())
     async with lock:
         current_summary = read_text_file(memory_summary_path(guild_id))
@@ -671,6 +672,7 @@ async def update_cognitive_state(guild_id: int, user_text: str) -> dict:
             )
         except Exception as e:
             print(f"[COGNITIVE] 상태 업데이트 실패 또는 timeout: {e}")
+            print(f"[COGNITIVE LATENCY] guild={guild_id} failed_after_ms={(time.monotonic() - started_at) * 1000.0:.0f}")
             fallback = current_state or {
                 "action": "answer",
                 "state_summary": clean_text(user_text),
@@ -689,6 +691,9 @@ async def update_cognitive_state(guild_id: int, user_text: str) -> dict:
             state["main_prompt_hint"] = "짧고 자연스럽게 답해라."
         state["updated_at"] = int(time.time())
         write_json_file(cognitive_state_path(guild_id), state)
+        print(
+            f"[COGNITIVE LATENCY] guild={guild_id} action={state.get('action')} ms={(time.monotonic() - started_at) * 1000.0:.0f}"
+        )
 
         if state.get("action") == "ask" and state.get("suggested_user_question"):
             print(
@@ -699,6 +704,7 @@ async def update_cognitive_state(guild_id: int, user_text: str) -> dict:
 
 
 async def update_long_term_memory(guild_id: int, user_text: str, answer: str) -> None:
+    started_at = time.monotonic()
     lock = memory_locks.setdefault(guild_id, asyncio.Lock())
     async with lock:
         current_summary = read_text_file(memory_summary_path(guild_id))
@@ -734,6 +740,7 @@ async def update_long_term_memory(guild_id: int, user_text: str, answer: str) ->
             result = await ask_summary_llm(messages)
         except Exception as e:
             print(f"[MEMORY] 요약 업데이트 실패: {e}")
+            print(f"[MEMORY LATENCY] guild={guild_id} failed_after_ms={(time.monotonic() - started_at) * 1000.0:.0f}")
             return
 
         summary_update = clean_text(str(result.get("summary_update", "")))
@@ -747,6 +754,8 @@ async def update_long_term_memory(guild_id: int, user_text: str, answer: str) ->
         open_questions = result.get("open_questions", [])
         if isinstance(open_questions, list):
             append_unique_memory_rows(memory_questions_path(guild_id), [row for row in open_questions if isinstance(row, dict)], MEMORY_LOOP_LIMIT)
+
+        print(f"[MEMORY LATENCY] guild={guild_id} ms={(time.monotonic() - started_at) * 1000.0:.0f}")
 
 
 def schedule_memory_update(
@@ -1359,6 +1368,17 @@ def log_voice_latency(metrics: dict | None, key: str, label: str) -> None:
     print(f"[VOICE LATENCY] {label}: {elapsed_ms:.0f}ms")
 
 
+def log_voice_stage(metrics: dict | None, label: str, *, extra: str = "") -> None:
+    if not metrics:
+        return
+    started_at = metrics.get("started_at")
+    if started_at is None:
+        return
+    elapsed_ms = (time.monotonic() - float(started_at)) * 1000.0
+    suffix = f" | {extra}" if extra else ""
+    print(f"[VOICE STAGE] {label}: {elapsed_ms:.0f}ms{suffix}")
+
+
 async def create_omnivoice_source(
     text: str,
     *,
@@ -1919,6 +1939,7 @@ async def ask_llm_and_speak_streaming(
         "tts_first_byte_logged": False,
         "playback_start_logged": False,
     }
+    log_voice_stage(metrics, "LLM/TTS 파이프라인 시작", extra=f"source={source}")
     sentence_queue: asyncio.Queue[str | None] = asyncio.Queue()
     playback_task = asyncio.create_task(stream_tts_sentences(vc, sentence_queue, metrics=metrics))
     llm_error: Exception | None = None
@@ -1937,6 +1958,7 @@ async def ask_llm_and_speak_streaming(
             on_first_chunk=lambda: log_voice_latency(metrics, "llm_first_chunk_logged", "LLM 첫 chunk 시간"),
             source=source,
         )
+        log_voice_stage(metrics, "LLM 완료", extra=f"chars={len(answer)}")
         answer = clean_text(answer)
         if answer and on_final_answer is not None:
             await on_final_answer(answer)
@@ -1973,8 +1995,12 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes) 
         return
 
     guild_id = guild.id
+    metrics = {"started_at": time.monotonic()}
+    log_voice_stage(metrics, "process_member_audio 시작", extra=f"speaker={member.display_name} pcm_bytes={len(pcm_bytes)}")
+
     audio16k = prepare_stt_audio(pcm_bytes)
     if audio16k.size == 0:
+        log_voice_stage(metrics, "오디오 비어있음")
         return
 
     if VAD_ENABLED and is_probably_silent(audio16k):
@@ -1982,15 +2008,21 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes) 
         peak = float(np.max(np.abs(audio16k))) if audio16k.size else 0.0
         rms = float(np.sqrt(np.mean(np.square(audio16k)))) if audio16k.size else 0.0
         print(f"[VAD IGNORE] speaker={member.display_name} sec={duration_sec:.2f} peak={peak:.4f} rms={rms:.4f}")
+        log_voice_stage(metrics, "VAD 무음 판정", extra=f"sec={duration_sec:.2f} peak={peak:.4f} rms={rms:.4f}")
         return
 
+    log_voice_stage(metrics, "STT 시작", extra=f"samples={audio16k.size}")
     try:
         text = await asyncio.to_thread(transcribe_audio16k_sync, audio16k, VOICE_STT_MAX_NEW_TOKENS)
     except Exception as e:
         print(f"❌ [STT] {e}")
+        log_voice_stage(metrics, "STT 실패", extra=repr(e))
         return
 
+    log_voice_stage(metrics, "STT 완료", extra=f"text_len={len(text)}")
+
     if not text:
+        log_voice_stage(metrics, "STT 빈 결과")
         return
 
     corrected_text = apply_stt_post_corrections(text, wake_detected=False)
@@ -2001,6 +2033,7 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes) 
     if not wake_detected:
         if wake_probe:
             print(f"[WAKE IGNORE] {member.display_name}: {wake_probe!r}")
+        log_voice_stage(metrics, "웨이크 미검출", extra=f"probe={wake_probe!r}")
         return
 
     corrected_text = apply_stt_post_corrections(text, wake_detected=wake_detected)
@@ -2010,6 +2043,7 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes) 
 
     if should_ignore_short_transcription(text, pcm_bytes, wake_detected=wake_detected):
         print(f"[STT IGNORE] short_noise: {text!r}")
+        log_voice_stage(metrics, "짧은 STT 무시", extra=f"text={text!r}")
         return
 
     print(f"🎤 [{member.display_name}] wake={wake_probe!r} text={text}")
@@ -2017,15 +2051,20 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes) 
     ok, reason = should_reply_to_voice(guild_id, text, wake_detected=True)
     if not ok:
         print(f"[STT IGNORE] {reason}: {text!r}")
+        log_voice_stage(metrics, "응답 차단", extra=f"reason={reason}")
         return
+
+    log_voice_stage(metrics, "웨이크 통과", extra=f"user_text={strip_voice_wake_word(text)!r}")
 
     user_text = strip_voice_wake_word(text)
     lock = guild_locks.setdefault(guild_id, asyncio.Lock())
 
     if lock.locked():
         print(f"[VOICE WAIT] guild={guild_id} speaker={member.display_name} text={user_text!r}")
+        log_voice_stage(metrics, "길드 락 대기", extra=f"guild={guild_id}")
 
     async with lock:
+        log_voice_stage(metrics, "길드 락 획득", extra=f"guild={guild_id}")
         vc = guild.voice_client
         if vc is None:
             return
@@ -2041,12 +2080,14 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes) 
                 on_final_answer=on_final_answer,
                 source="voice",
             )
+            log_voice_stage(metrics, "LLM/TTS 완료", extra=f"answer_len={len(answer)}")
         except Exception as e:
             print(f"❌ [LLM/TTS] {e}")
             return
 
         answer = clean_text(answer)
         if not answer:
+            log_voice_stage(metrics, "최종 답변 비어있음")
             return
 
         plain_answer = strip_omnivoice_tags(answer)
@@ -2062,6 +2103,7 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes) 
             user_speaker=member.display_name,
             assistant_speaker="Evelyn",
         )
+        log_voice_stage(metrics, "process_member_audio 완료", extra=f"speaker={member.display_name}")
 
 
 # =========================================================

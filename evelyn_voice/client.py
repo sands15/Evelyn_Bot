@@ -150,6 +150,11 @@ class EvelynVoiceClient(discord.VoiceClient):
         self.utterance_queue: asyncio.Queue = asyncio.Queue(maxsize=32)
         self._utterance_processing_tasks: set[asyncio.Task] = set()
 
+    def _latency_ms(self, started_at: float | None) -> float | None:
+        if started_at is None:
+            return None
+        return (asyncio.get_running_loop().time() - float(started_at)) * 1000.0
+
     def _decrypt_standard_voice_packet(self, packet_bytes: bytes) -> tuple[bytes, dict] | None:
         info = _parse_rtp_header(packet_bytes)
         if info is None:
@@ -569,6 +574,7 @@ class EvelynVoiceClient(discord.VoiceClient):
                     "marker": info["marker"],
                     "header_len": info["header_len"],
                     "payload": payload,
+                    "received_at": asyncio.get_running_loop().time(),
                 }
 
                 try:
@@ -616,6 +622,7 @@ class EvelynVoiceClient(discord.VoiceClient):
                         {
                             "in_utterance": False,
                             "last_voice_like_at": 0.0,
+                            "utterance_started_at": None,
                             "packets": [],
                             "preroll": deque(maxlen=self.preroll_packet_limit),
                         },
@@ -625,14 +632,16 @@ class EvelynVoiceClient(discord.VoiceClient):
                         state["last_voice_like_at"] = now
                         if not state["in_utterance"]:
                             state["in_utterance"] = True
+                            state["utterance_started_at"] = packet_info.get("received_at", now)
                             state["packets"] = list(state["preroll"])
                             log.info(
-                                "UTTERANCE START | ssrc=%d seq=%d ts=%d payload=%d preroll=%d",
+                                "UTTERANCE START | ssrc=%d seq=%d ts=%d payload=%d preroll=%d media_q=%d",
                                 ssrc,
                                 sequence,
                                 timestamp,
                                 payload_len,
                                 len(state["packets"]),
+                                self.media_queue.qsize(),
                             )
 
                     if state["in_utterance"]:
@@ -656,14 +665,17 @@ class EvelynVoiceClient(discord.VoiceClient):
                     first_seq = state["packets"][0]["sequence"] if packet_count else -1
                     last_seq = state["packets"][-1]["sequence"] if packet_count else -1
 
+                    utterance_started_at = state.get("utterance_started_at")
+                    utterance_age_ms = self._latency_ms(utterance_started_at)
                     log.info(
-                        "UTTERANCE END | idx=%d ssrc=%d packets=%d first_seq=%d last_seq=%d gap=%.3f",
+                        "UTTERANCE END | idx=%d ssrc=%d packets=%d first_seq=%d last_seq=%d gap=%.3f utterance_ms=%s",
                         self.utterance_count,
                         ssrc,
                         packet_count,
                         first_seq,
                         last_seq,
                         now - state["last_voice_like_at"],
+                        f"{utterance_age_ms:.0f}" if utterance_age_ms is not None else "?",
                     )
 
                     utterance_packets = state["packets"].copy()
@@ -674,12 +686,16 @@ class EvelynVoiceClient(discord.VoiceClient):
                                 "idx": self.utterance_count,
                                 "ssrc": ssrc,
                                 "packets": utterance_packets,
+                                "utterance_started_at": utterance_started_at,
+                                "utterance_ended_at": now,
+                                "queued_at": asyncio.get_running_loop().time(),
                             }
                         )
                     except asyncio.QueueFull:
                         log.warning("utterance_queue is full, dropping utterance idx=%d ssrc=%d", self.utterance_count, ssrc)
 
                     state["packets"] = []
+                    state["utterance_started_at"] = None
 
         except asyncio.CancelledError:
             pass
@@ -698,8 +714,10 @@ class EvelynVoiceClient(discord.VoiceClient):
                 last_seq = packets[-1]["sequence"] if packet_count else -1
                 total_payload = sum(len(p["payload"]) for p in packets)
 
+                queued_at = item.get("queued_at")
+                queue_wait_ms = self._latency_ms(queued_at)
                 log.info(
-                    "UTTERANCE DISPATCH | idx=%d ssrc=%d packets=%d first_seq=%d last_seq=%d payload=%d active=%d",
+                    "UTTERANCE DISPATCH | idx=%d ssrc=%d packets=%d first_seq=%d last_seq=%d payload=%d active=%d queue_wait_ms=%s utterance_q=%d",
                     idx,
                     ssrc,
                     packet_count,
@@ -707,6 +725,8 @@ class EvelynVoiceClient(discord.VoiceClient):
                     last_seq,
                     total_payload,
                     len(self._utterance_processing_tasks),
+                    f"{queue_wait_ms:.0f}" if queue_wait_ms is not None else "?",
+                    self.utterance_queue.qsize(),
                 )
 
                 task = asyncio.create_task(self._process_utterance_packets(item))
@@ -726,6 +746,9 @@ class EvelynVoiceClient(discord.VoiceClient):
         idx = item["idx"]
         ssrc = item["ssrc"]
         packets = item["packets"]
+        utterance_started_at = item.get("utterance_started_at")
+        queued_at = item.get("queued_at")
+        processing_started_at = asyncio.get_running_loop().time()
         dave_success = 0
 
         if not packets:
@@ -909,8 +932,17 @@ class EvelynVoiceClient(discord.VoiceClient):
                 dave_success += 1
 
 
+        decrypt_ms = (asyncio.get_running_loop().time() - processing_started_at) * 1000.0
+        utterance_total_ms = self._latency_ms(utterance_started_at)
+        queue_wait_ms = self._latency_ms(queued_at)
+        first_packet_wait_ms = None
+        if packets:
+            first_received_at = packets[0].get("received_at")
+            if first_received_at is not None:
+                first_packet_wait_ms = (processing_started_at - float(first_received_at)) * 1000.0
+
         log.info(
-            "DECRYPT SUMMARY | idx=%d packets=%d success=%d failed=%d pcm_chunks=%d dave_ok=%d outer_fail=%d dave_fail=%d opus_fail=%d opus_silence_fill=%d real_silence=%d",
+            "DECRYPT SUMMARY | idx=%d packets=%d success=%d failed=%d pcm_chunks=%d dave_ok=%d outer_fail=%d dave_fail=%d opus_fail=%d opus_silence_fill=%d real_silence=%d first_packet_wait_ms=%s queue_wait_ms=%s decrypt_ms=%.0f utterance_total_ms=%s",
             idx,
             len(packets),
             success,
@@ -922,6 +954,10 @@ class EvelynVoiceClient(discord.VoiceClient):
             opus_fail,
             opus_silence_fill,
             real_silence,
+            f"{first_packet_wait_ms:.0f}" if first_packet_wait_ms is not None else "?",
+            f"{queue_wait_ms:.0f}" if queue_wait_ms is not None else "?",
+            decrypt_ms,
+            f"{utterance_total_ms:.0f}" if utterance_total_ms is not None else "?",
         )
 
         if not pcm_chunks:
@@ -940,15 +976,18 @@ class EvelynVoiceClient(discord.VoiceClient):
 
         if getattr(self, "on_user_audio", None) is not None:
             try:
+                callback_started_at = asyncio.get_running_loop().time()
                 log.info(
-                    "on_user_audio call | idx=%d user_id=%s member=%s pcm_bytes=%d",
+                    "on_user_audio call | idx=%d user_id=%s member=%s pcm_bytes=%d utterance_total_ms=%s",
                     idx,
                     user_id,
                     getattr(member, "display_name", None),
                     len(pcm_bytes),
+                    f"{self._latency_ms(utterance_started_at):.0f}" if self._latency_ms(utterance_started_at) is not None else "?",
                 )
                 await self.on_user_audio(member, pcm_bytes)
-                log.info("on_user_audio ok | idx=%d pcm_bytes=%d", idx, len(pcm_bytes))
+                callback_ms = (asyncio.get_running_loop().time() - callback_started_at) * 1000.0
+                log.info("on_user_audio ok | idx=%d pcm_bytes=%d callback_ms=%.0f", idx, len(pcm_bytes), callback_ms)
             except Exception as e:
                 log.warning("on_user_audio callback failed | idx=%d err=%r", idx, e)
 
