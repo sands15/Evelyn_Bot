@@ -73,12 +73,15 @@ DENOISE_ENABLED = os.getenv("DENOISE_ENABLED", "true").lower() == "true"
 DENOISE_HIGHPASS_HZ = float(os.getenv("DENOISE_HIGHPASS_HZ", "120"))
 DENOISE_NOISE_FLOOR_SEC = float(os.getenv("DENOISE_NOISE_FLOOR_SEC", "0.20"))
 DENOISE_GATE_MULT = float(os.getenv("DENOISE_GATE_MULT", "1.35"))
-WAKE_AUDIO_SEC = float(os.getenv("WAKE_AUDIO_SEC", "1.4"))
-WAKE_MAX_TOKENS = int(os.getenv("WAKE_MAX_TOKENS", "48"))
+WAKE_AUDIO_SEC = float(os.getenv("WAKE_AUDIO_SEC", "1.1"))
+WAKE_MAX_TOKENS = int(os.getenv("WAKE_MAX_TOKENS", "32"))
 WAKE_FUZZY_THRESHOLD = float(os.getenv("WAKE_FUZZY_THRESHOLD", "0.72"))
 WAKE_SHORT_TEXT_KEEP_LEN = int(os.getenv("WAKE_SHORT_TEXT_KEEP_LEN", "2"))
-TTS_EARLY_CHUNK_LEN = int(os.getenv("TTS_EARLY_CHUNK_LEN", "24"))
-TTS_EARLY_CUT_MIN = int(os.getenv("TTS_EARLY_CUT_MIN", "12"))
+TTS_EARLY_CHUNK_LEN = int(os.getenv("TTS_EARLY_CHUNK_LEN", "14"))
+TTS_EARLY_CUT_MIN = int(os.getenv("TTS_EARLY_CUT_MIN", "6"))
+VOICE_STT_MAX_NEW_TOKENS = int(os.getenv("VOICE_STT_MAX_NEW_TOKENS", "160"))
+VOICE_LLM_MAX_TOKENS = int(os.getenv("VOICE_LLM_MAX_TOKENS", "96"))
+VOICE_HISTORY_LIMIT = int(os.getenv("VOICE_HISTORY_LIMIT", "12"))
 
 MAX_HISTORY_ITEMS = 1024
 MAX_VISIBLE_TEXT = 1800
@@ -164,6 +167,16 @@ def trim_history() -> None:
     global conversation_history
     if len(conversation_history) > 1 + MAX_HISTORY_ITEMS:
         conversation_history = [conversation_history[0]] + conversation_history[-MAX_HISTORY_ITEMS:]
+
+
+def get_voice_history_messages() -> list[dict]:
+    messages = list(conversation_history)
+    if not messages:
+        return []
+
+    system_message = messages[0] if messages[0].get("role") == "system" else None
+    tail = [m for m in messages[1:] if m.get("role") != "system"][-VOICE_HISTORY_LIMIT:]
+    return ([system_message] if system_message else []) + tail
 
 
 def append_history(user_text: str, answer: str) -> None:
@@ -960,6 +973,29 @@ async def warmup_tts_server() -> None:
             raise RuntimeError(f"OmniVoice health check 실패: {resp.status} / {text[:200]}")
         print("OmniVoice 서버 준비 확인 완료")
 
+    payload = {
+        "model": OMNIVOICE_MODEL,
+        "input": "안녕",
+        "voice": OMNIVOICE_VOICE if OMNIVOICE_VOICE else "auto",
+        "response_format": "pcm",
+        "stream": True,
+    }
+    if OMNIVOICE_LANGUAGE:
+        payload["language"] = OMNIVOICE_LANGUAGE
+
+    async with session.post(
+        f"{OMNIVOICE_SERVER_URL}/v1/audio/speech",
+        json=payload,
+        timeout=aiohttp.ClientTimeout(total=20),
+    ) as resp:
+        if resp.status != 200:
+            text = await resp.text()
+            raise RuntimeError(f"OmniVoice warmup 실패: {resp.status} / {text[:200]}")
+        async for chunk in resp.content.iter_chunked(4096):
+            if chunk:
+                print("OmniVoice TTS 워밍업 완료")
+                break
+
 
 def log_voice_latency(metrics: dict | None, key: str, label: str) -> None:
     if not metrics or metrics.get(key):
@@ -1097,7 +1133,7 @@ def transcribe_audio16k_sync(audio16k: np.ndarray, max_new_tokens: int = 256) ->
 
 
 def transcribe_voice_sync(pcm_bytes: bytes) -> str:
-    return transcribe_audio16k_sync(prepare_stt_audio(pcm_bytes), max_new_tokens=256)
+    return transcribe_audio16k_sync(prepare_stt_audio(pcm_bytes), max_new_tokens=VOICE_STT_MAX_NEW_TOKENS)
 
 
 def detect_wake_word_sync(audio16k: np.ndarray) -> tuple[bool, str]:
@@ -1246,7 +1282,7 @@ async def ask_llm_once(user_text: str, guild_id: int | None = None) -> str:
         "주의: 생각 과정 말하지 말고, 최종 답변만 한국어로 한두 문장으로 짧게 말해."
     )
 
-    messages = list(conversation_history)
+    messages = get_voice_history_messages()
 
     if guild_id is not None:
         memory_context = build_memory_context(guild_id, user_text)
@@ -1263,7 +1299,7 @@ async def ask_llm_once(user_text: str, guild_id: int | None = None) -> str:
         "model": MODEL_NAME,
         "messages": messages + [{"role": "user", "content": final_user_text}],
         "temperature": 0.1,
-        "max_tokens": 320,
+        "max_tokens": VOICE_LLM_MAX_TOKENS,
         "stream": False,
     }
 
@@ -1368,7 +1404,7 @@ async def ask_llm_streaming(
         "주의: 생각 과정 말하지 말고, 최종 답변만 한국어로 한두 문장으로 짧게 말해."
     )
 
-    messages = list(conversation_history)
+    messages = get_voice_history_messages()
 
     if guild_id is not None:
         memory_context = build_memory_context(guild_id, user_text)
@@ -1385,7 +1421,7 @@ async def ask_llm_streaming(
         "model": MODEL_NAME,
         "messages": messages + [{"role": "user", "content": final_user_text}],
         "temperature": 0.1,
-        "max_tokens": 320,
+        "max_tokens": VOICE_LLM_MAX_TOKENS,
         "stream": True,
     }
 
@@ -1563,7 +1599,7 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes) 
         return
 
     try:
-        text = await asyncio.to_thread(transcribe_audio16k_sync, audio16k, 256)
+        text = await asyncio.to_thread(transcribe_audio16k_sync, audio16k, VOICE_STT_MAX_NEW_TOKENS)
     except Exception as e:
         print(f"❌ [STT] {e}")
         return

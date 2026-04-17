@@ -462,8 +462,12 @@ class EvelynVoiceClient(discord.VoiceClient):
             log_allowed = self.dave_inner_fail_log_count < self.dave_inner_fail_log_limit
             current_stats = self._get_dave_decryption_stats(user_id)
 
-            if allow_passthrough and "UnencryptedWhenPassthroughDisabled" in err_text:
-                if log_allowed:
+            if "UnencryptedWhenPassthroughDisabled" in err_text:
+                try:
+                    self._enable_dave_passthrough()
+                except Exception:
+                    pass
+                if log_allowed and allow_passthrough:
                     log.info(
                         "DAVE INNER passthrough | user_id=%s in_len=%d prefix=%s",
                         user_id,
