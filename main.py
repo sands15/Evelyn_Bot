@@ -54,6 +54,8 @@ VAD_ENABLED = os.getenv("VAD_ENABLED", "true").lower() == "true"
 VAD_RMS_THRESHOLD = float(os.getenv("VAD_RMS_THRESHOLD", "0.008"))
 VAD_PEAK_THRESHOLD = float(os.getenv("VAD_PEAK_THRESHOLD", "0.020"))
 VAD_MIN_VOICED_RATIO = float(os.getenv("VAD_MIN_VOICED_RATIO", "0.015"))
+VAD_CHUNK_MS = float(os.getenv("VAD_CHUNK_MS", "32"))
+VAD_START_CONSECUTIVE = int(os.getenv("VAD_START_CONSECUTIVE", "3"))
 
 DENOISE_ENABLED = os.getenv("DENOISE_ENABLED", "true").lower() == "true"
 DENOISE_HIGHPASS_HZ = float(os.getenv("DENOISE_HIGHPASS_HZ", "120"))
@@ -77,7 +79,7 @@ WAKE_WORDS = [
     w.strip()
     for w in os.getenv(
         "WAKE_WORDS",
-        "이별인,이별링,이벨링,에벌링,이블린,이불린,이불링,이브린,이브링,입을린,입을링,이블닝,이블링,이별린,이벌린,에블린,에브린,에블링,에브링,에벌린,이벨린,이반린,불리읍"
+        "이별인,이별링,이벨링,에벌링,이블린,이불린,이불링,이브린,이브링,입을린,입을링,이블닝,이블링,이별린,이벌린,에블린,에브린,에블링,에브링,에벌린,이벨린,이반린,불리읍,이블리"
     ).split(",")
     if w.strip()
 ]
@@ -89,8 +91,6 @@ DISCORD_PCM_CHANNELS = 2
 OMNIVOICE_PCM_RATE = 24000
 OMNIVOICE_PCM_CHANNELS = 1
 DISCORD_FRAME_BYTES = 3840
-
-print(WAKE_WORDS)
 # =========================================================
 # 봇 설정
 # =========================================================
@@ -715,21 +715,34 @@ def slice_audio_window(audio16k: np.ndarray, max_sec: float) -> np.ndarray:
     return audio16k[:sample_len].copy()
 
 
+def _is_voiced_vad_chunk(chunk: np.ndarray) -> bool:
+    if chunk.size == 0:
+        return False
+
+    abs_chunk = np.abs(chunk)
+    rms = float(np.sqrt(np.mean(np.square(chunk))))
+    voiced_ratio = float(np.mean(abs_chunk > VAD_PEAK_THRESHOLD))
+    return rms >= VAD_RMS_THRESHOLD and voiced_ratio >= VAD_MIN_VOICED_RATIO
+
+
 def is_probably_silent(audio16k: np.ndarray) -> bool:
     if audio16k.size == 0:
         return True
 
-    abs_audio = np.abs(audio16k)
-    rms = float(np.sqrt(np.mean(np.square(audio16k))))
-    voiced_ratio = float(np.mean(abs_audio > VAD_PEAK_THRESHOLD))
+    chunk_samples = max(1, int(TARGET_RATE * (VAD_CHUNK_MS / 1000.0)))
+    required_streak = max(1, VAD_START_CONSECUTIVE)
+    voiced_streak = 0
 
-    if rms < VAD_RMS_THRESHOLD:
-        return True
+    for start in range(0, len(audio16k), chunk_samples):
+        chunk = audio16k[start:start + chunk_samples]
+        if _is_voiced_vad_chunk(chunk):
+            voiced_streak += 1
+            if voiced_streak >= required_streak:
+                return False
+        else:
+            voiced_streak = 0
 
-    if voiced_ratio < VAD_MIN_VOICED_RATIO:
-        return True
-
-    return False
+    return True
 
 def log_visible_gpus() -> None:
     print("CUDA available:", torch.cuda.is_available())
@@ -1267,10 +1280,16 @@ async def ask_llm_streaming(
     return answer
 
 
-async def ask_llm_and_speak_streaming(vc: discord.VoiceClient, user_text: str, guild_id: int | None = None) -> str:
+async def ask_llm_and_speak_streaming(
+    vc: discord.VoiceClient,
+    user_text: str,
+    guild_id: int | None = None,
+    on_final_answer: Callable[[str], Awaitable[None]] | None = None,
+) -> str:
     sentence_queue: asyncio.Queue[str | None] = asyncio.Queue()
     playback_task = asyncio.create_task(stream_tts_sentences(vc, sentence_queue))
     llm_error: Exception | None = None
+    answer = ""
 
     async def enqueue_sentence(sentence: str) -> None:
         sentence = clean_tts_text(sentence)
@@ -1279,6 +1298,9 @@ async def ask_llm_and_speak_streaming(vc: discord.VoiceClient, user_text: str, g
 
     try:
         answer = await ask_llm_streaming(user_text, guild_id=guild_id, on_sentence=enqueue_sentence)
+        answer = clean_text(answer)
+        if answer and on_final_answer is not None:
+            await on_final_answer(answer)
     except Exception as e:
         llm_error = e
         answer = ""
@@ -1362,8 +1384,16 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes) 
         if vc is None:
             return
 
+        async def on_final_answer(answer_text: str) -> None:
+            print(f"💬 [Evelyn] {answer_text}")
+
         try:
-            answer = await ask_llm_and_speak_streaming(vc, user_text, guild_id=guild_id)
+            answer = await ask_llm_and_speak_streaming(
+                vc,
+                user_text,
+                guild_id=guild_id,
+                on_final_answer=on_final_answer,
+            )
         except Exception as e:
             print(f"❌ [LLM/TTS] {e}")
             return
@@ -1374,7 +1404,6 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes) 
 
         append_history(user_text, answer)
         schedule_memory_update(guild_id, user_text, answer)
-        print(f"💬 [Evelyn] {answer}")
 
 
 # =========================================================
