@@ -173,7 +173,8 @@ ALLOWED_OMNIVOICE_TAGS = {
 OMNIVOICE_TAG_GUIDANCE = (
     "필요할 때만 OmniVoice 감정 태그를 매우 짧게 써도 된다. "
     "허용 태그는 [laughter], [sigh], [confirmation-en], [question-en], [question-ah], [question-oh], [question-ei], [question-yi], [surprise-ah], [surprise-oh], [surprise-wa], [surprise-yo], [dissatisfaction-hnn] 뿐이다. "
-    "태그는 문장 앞이나 짧은 감탄 앞에 자연스럽게 붙이고 남용하지 마라."
+    "태그는 문장 앞이나 짧은 감탄 앞에 자연스럽게 붙이고, 보통 답변 전체에서 0개 또는 1개만 쓰고 남용하지 마라. "
+    "한 문장에 여러 태그를 연달아 붙이지 마라. 태그는 말투를 보조할 때만 써라."
 )
 
 
@@ -437,6 +438,33 @@ def normalize_cognitive_state(data: dict) -> dict:
         "reason_brief": clean_text(str(data.get("reason_brief", ""))),
         "updated_at": int(data.get("updated_at", time.time())),
     }
+
+
+def build_main_response_guidance(cognitive_state: dict | None = None) -> str:
+    state = normalize_cognitive_state(cognitive_state or {})
+    parts = [
+        "주의: 생각 과정 말하지 말고, 최종 답변만 한국어로 한두 문장으로 짧게 말해.",
+        OMNIVOICE_TAG_GUIDANCE,
+        "텍스트만 봤을 때도 자연스럽게 읽혀야 하고, 태그를 빼도 문장이 성립해야 한다.",
+    ]
+
+    action = state.get("action", "answer")
+    if action == "ask":
+        parts.append("지금은 바로 단정하기보다 짧은 확인 질문을 먼저 하는 편이 자연스럽다.")
+        parts.append("질문형 태그가 필요하면 [question-en], [question-ah], [question-oh], [question-ei], [question-yi] 중 하나만 골라라.")
+        if state.get("suggested_user_question"):
+            parts.append(f"우선 질문 후보: {state['suggested_user_question']}")
+    elif action == "wait":
+        parts.append("지금은 길게 답하지 말고, 더 들을 여지를 두는 짧은 반응이 자연스럽다.")
+        parts.append("wait 상황에서는 감정 태그를 거의 쓰지 말고, 정말 필요할 때만 [sigh] 같은 약한 태그 하나만 써라.")
+    else:
+        parts.append("지금은 답변을 주는 편이 자연스럽다.")
+        parts.append("확인이나 수긍에는 [confirmation-en], 가벼운 웃음에는 [laughter], 놀람에는 [surprise-oh]나 [surprise-wa]를 필요할 때만 써라.")
+
+    if state.get("main_prompt_hint"):
+        parts.append(f"응답 추가 힌트: {state['main_prompt_hint']}")
+
+    return " ".join(clean_text(part) for part in parts if clean_text(part))
 
 
 def build_memory_context(guild_id: int, user_text: str, cognitive_state: dict | None = None) -> str:
@@ -1542,12 +1570,7 @@ def fallback_answer_for(user_text: str) -> str:
 
 
 async def ask_llm_once(user_text: str, guild_id: int | None = None) -> str:
-    final_user_text = (
-        f"{user_text}\n\n"
-        "주의: 생각 과정 말하지 말고, 최종 답변만 한국어로 한두 문장으로 짧게 말해. "
-        f"{OMNIVOICE_TAG_GUIDANCE}"
-    )
-
+    cognitive_state: dict | None = None
     messages = list(conversation_history)
 
     if guild_id is not None:
@@ -1561,6 +1584,8 @@ async def ask_llm_once(user_text: str, guild_id: int | None = None) -> str:
                 messages[0] = {"role": "system", "content": merged_system}
             else:
                 messages.insert(0, {"role": "system", "content": merged_system})
+
+    final_user_text = f"{user_text}\n\n{build_main_response_guidance(cognitive_state)}"
 
     payload = {
         "model": MODEL_NAME,
@@ -1666,12 +1691,7 @@ async def ask_llm_streaming(
     on_sentence: Callable[[str], Awaitable[None]] | None = None,
     on_first_chunk: Callable[[], None] | None = None,
 ) -> str:
-    final_user_text = (
-        f"{user_text}\n\n"
-        "주의: 생각 과정 말하지 말고, 최종 답변만 한국어로 한두 문장으로 짧게 말해. "
-        f"{OMNIVOICE_TAG_GUIDANCE}"
-    )
-
+    cognitive_state: dict | None = None
     messages = list(conversation_history)
 
     if guild_id is not None:
@@ -1685,6 +1705,8 @@ async def ask_llm_streaming(
                 messages[0] = {"role": "system", "content": merged_system}
             else:
                 messages.insert(0, {"role": "system", "content": merged_system})
+
+    final_user_text = f"{user_text}\n\n{build_main_response_guidance(cognitive_state)}"
 
     payload = {
         "model": MODEL_NAME,
