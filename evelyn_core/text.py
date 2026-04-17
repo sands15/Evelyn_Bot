@@ -1,7 +1,7 @@
 import re
 from difflib import SequenceMatcher
 
-from evelyn_config import (
+from .config import (
     ALLOWED_OMNIVOICE_TAGS,
     MAX_VISIBLE_TEXT,
     SIMILARITY_BLOCK,

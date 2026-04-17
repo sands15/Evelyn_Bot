@@ -3,7 +3,7 @@ import re
 import time
 from pathlib import Path
 
-from evelyn_config import (
+from .config import (
     MEMORY_FACT_LIMIT,
     MEMORY_LOOP_LIMIT,
     MEMORY_RAW_LIMIT,
@@ -12,7 +12,7 @@ from evelyn_config import (
     MEMORY_VAULT_DAYS,
     MEMORY_WORKING_SUMMARY_MAX_CHARS,
 )
-from evelyn_text import clean_text
+from .text import clean_text
 
 
 def guild_memory_dir(guild_id: int) -> Path:

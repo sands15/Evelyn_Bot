@@ -13,16 +13,16 @@ import discord
 from discord.ext import commands
 from transformers import AutoProcessor, CohereAsrForConditionalGeneration
 
-from evelyn_audio import (
+from evelyn_core.audio import (
     compute_voice_band_metrics,
     is_likely_environment_noise,
     is_probably_silent,
     prepare_stt_audio,
     slice_audio_window,
 )
-from evelyn_config import *
-from evelyn_memory import *
-from evelyn_text import (
+from evelyn_core.config import *
+from evelyn_core.memory import *
+from evelyn_core.text import (
     apply_stt_post_corrections,
     clean_text,
     clean_tts_text,

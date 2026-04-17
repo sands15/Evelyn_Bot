@@ -1,7 +1,7 @@
 import numpy as np
 import torch
 
-from evelyn_config import (
+from .config import (
     CHANNELS,
     DENOISE_ENABLED,
     DENOISE_GATE_MULT,
