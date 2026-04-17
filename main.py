@@ -52,9 +52,51 @@ intents.guilds = True
 intents.voice_states = True
 intents.members = True
 
-bot = commands.Bot(command_prefix="!", intents=intents)
-
+guild_prefix_cache: dict[int, str] = {}
 guild_histories: dict[int, list[dict]] = {}
+
+
+def normalize_command_prefix(prefix: str | None) -> str:
+    prefix = (prefix or "").strip()
+    if not prefix:
+        return DEFAULT_COMMAND_PREFIX
+    if any(ch.isspace() for ch in prefix):
+        raise ValueError("명령어 시작 부호에는 공백을 넣을 수 없어.")
+    if len(prefix) > 5:
+        raise ValueError("명령어 시작 부호는 5자 이하로 해줘.")
+    return prefix
+
+
+def get_guild_command_prefix(guild_id: int | None) -> str:
+    if guild_id is None:
+        return DEFAULT_COMMAND_PREFIX
+    cached = guild_prefix_cache.get(guild_id)
+    if cached:
+        return cached
+
+    settings = read_json_file(guild_settings_path(guild_id))
+    prefix = normalize_command_prefix(str(settings.get("command_prefix", DEFAULT_COMMAND_PREFIX)))
+    guild_prefix_cache[guild_id] = prefix
+    return prefix
+
+
+def save_guild_command_prefix(guild_id: int, prefix: str) -> str:
+    prefix = normalize_command_prefix(prefix)
+    settings_path = guild_settings_path(guild_id)
+    settings = read_json_file(settings_path)
+    settings["command_prefix"] = prefix
+    settings["updated_at"] = int(time.time())
+    write_json_file(settings_path, settings)
+    guild_prefix_cache[guild_id] = prefix
+    return prefix
+
+
+async def resolve_command_prefix(_bot, message: discord.Message):
+    prefix = get_guild_command_prefix(message.guild.id if message.guild else None)
+    return commands.when_mentioned_or(prefix)(_bot, message)
+
+
+bot = commands.Bot(command_prefix=resolve_command_prefix, intents=intents)
 
 guild_locks: dict[int, asyncio.Lock] = {}
 tts_lock = asyncio.Lock()
@@ -1801,6 +1843,44 @@ async def leave_voice(ctx):
     await ctx.send("👋 나갔어.")
 
 
+@bot.command(name="접두사", aliases=["prefix"])
+@commands.has_guild_permissions(manage_guild=True)
+async def set_guild_prefix(ctx, new_prefix: str | None = None):
+    if ctx.guild is None:
+        await ctx.send("이 명령은 길드에서만 쓸 수 있어.")
+        return
+
+    guild_id = ctx.guild.id
+    current_prefix = get_guild_command_prefix(guild_id)
+
+    if not new_prefix:
+        await ctx.send(
+            f"현재 이 길드 명령어 시작 부호는 `{current_prefix}` 야. 바꾸려면 `{current_prefix}접두사 ?` 처럼 써줘. 기본값으로 돌리려면 `{current_prefix}접두사 기본`"
+        )
+        return
+
+    if new_prefix.lower() in {"기본", "default", "reset"}:
+        saved_prefix = save_guild_command_prefix(guild_id, DEFAULT_COMMAND_PREFIX)
+        await ctx.send(f"✅ 명령어 시작 부호를 기본값 `{saved_prefix}` 로 되돌렸어.")
+        return
+
+    try:
+        saved_prefix = save_guild_command_prefix(guild_id, new_prefix)
+    except ValueError as e:
+        await ctx.send(f"❌ {e}")
+        return
+
+    await ctx.send(f"✅ 이 길드 명령어 시작 부호를 `{saved_prefix}` 로 저장했어. 이제 `{saved_prefix}초기화`, `{saved_prefix}들어와` 처럼 쓰면 돼.")
+
+
+@set_guild_prefix.error
+async def set_guild_prefix_error(ctx, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("이 명령은 서버 관리 권한이 있어야 쓸 수 있어.")
+        return
+    raise error
+
+
 @bot.command(name="초기화", aliases=["reset"])
 @commands.has_guild_permissions(manage_guild=True)
 async def reset_guild_memory(ctx):
@@ -1810,12 +1890,13 @@ async def reset_guild_memory(ctx):
 
     guild_id = ctx.guild.id
     memory_dir = MEMORY_ROOT / f"guild_{guild_id}"
+    current_prefix = get_guild_command_prefix(guild_id)
 
     reset_guild_runtime_state(guild_id)
     if memory_dir.exists():
         shutil.rmtree(memory_dir)
 
-    await ctx.send(f"🧹 {ctx.guild.name} 메모리와 대화 히스토리를 이 길드만 초기화했어.")
+    await ctx.send(f"🧹 {ctx.guild.name} 메모리와 대화 히스토리를 이 길드만 초기화했어. 명령어 시작 부호 `{current_prefix}` 설정은 유지했어.")
 
 
 @reset_guild_memory.error

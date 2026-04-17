@@ -4,6 +4,7 @@ import time
 from pathlib import Path
 
 from .config import (
+    GUILD_SETTINGS_ROOT,
     MEMORY_FACT_LIMIT,
     MEMORY_LOOP_LIMIT,
     MEMORY_RAW_LIMIT,
@@ -20,6 +21,12 @@ def guild_memory_dir(guild_id: int) -> Path:
     path = MEMORY_ROOT / f"guild_{guild_id}"
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def guild_settings_path(guild_id: int) -> Path:
+    """길드별 설정 파일 경로를 반환한다."""
+    GUILD_SETTINGS_ROOT.mkdir(parents=True, exist_ok=True)
+    return GUILD_SETTINGS_ROOT / f"guild_{guild_id}.json"
 
 
 def memory_vault_dir(guild_id: int) -> Path:

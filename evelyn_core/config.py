@@ -4,10 +4,12 @@ from pathlib import Path
 # Evelyn 봇이 디스코드에 로그인할 때 쓰는 토큰.
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 
+
 # 사용자 응답용 메인 LLM 서버 엔드포인트.
 LLM_SERVER_URL = os.getenv("LLM_SERVER_URL", "http://127.0.0.1:9820/v1/chat/completions")
 # 메인 LLM 서버에 전달할 모델 이름.
 MODEL_NAME = os.getenv("LLM_MODEL_NAME", "Qwen3-8B-Q4_K_M.gguf")
+
 
 # OmniVoice TTS 서버 주소.
 OMNIVOICE_SERVER_URL = os.getenv("OMNIVOICE_SERVER_URL", "http://127.0.0.1:8880")
@@ -22,12 +24,17 @@ OMNIVOICE_STREAM = os.getenv("OMNIVOICE_STREAM", "true").lower() == "true"
 # TTS 한 요청의 전체 타임아웃.
 OMNIVOICE_TIMEOUT_SEC = float(os.getenv("OMNIVOICE_TIMEOUT_SEC", "180"))
 
+
 # 메모리 업데이트와 cognitive 판단에 쓰는 서브 LLM 서버 엔드포인트.
 SUMMARY_LLM_URL = os.getenv("SUMMARY_LLM_URL", "http://127.0.0.1:9821/v1/chat/completions")
 # 요약/상황판단용 서브 모델 이름.
 SUMMARY_MODEL_NAME = os.getenv("SUMMARY_MODEL_NAME", "Qwen3.6-35B-A3B-UD-Q3_K_XL.gguf")
 # 길드별 메모리 파일을 저장하는 루트 디렉터리.
 MEMORY_ROOT = Path(os.getenv("BOT_MEMORY_DIR", str(Path(__file__).resolve().parent.parent / "bot_memory")))
+# 길드별 설정(prefix 등)을 저장하는 루트 디렉터리.
+GUILD_SETTINGS_ROOT = Path(os.getenv("GUILD_SETTINGS_DIR", str(Path(__file__).resolve().parent.parent / "guild_settings")))
+# 기본 명령어 시작 부호(prefix).
+DEFAULT_COMMAND_PREFIX = os.getenv("DEFAULT_COMMAND_PREFIX", "!")
 # 작업 메모리 파일에 유지할 durable facts 최대 개수.
 MEMORY_FACT_LIMIT = int(os.getenv("MEMORY_FACT_LIMIT", "200"))
 # open loop / 질문성 메모리 최대 개수.
@@ -55,9 +62,10 @@ COGNITIVE_MAX_TOKENS = int(os.getenv("COGNITIVE_MAX_TOKENS", "120"))
 # cognitive 서브모델 호출 타임아웃.
 COGNITIVE_TIMEOUT_SEC = float(os.getenv("COGNITIVE_TIMEOUT_SEC", "8"))
 # 텍스트 입력에서 ask 행동을 허용할 최소 confidence.
-ASK_CONFIDENCE_THRESHOLD_TEXT = float(os.getenv("ASK_CONFIDENCE_THRESHOLD_TEXT", "0.30"))
+ASK_CONFIDENCE_THRESHOLD_TEXT = float(os.getenv("ASK_CONFIDENCE_THRESHOLD_TEXT", "0.00"))
 # 음성 입력에서 ask 행동을 허용할 최소 confidence.
-ASK_CONFIDENCE_THRESHOLD_VOICE = float(os.getenv("ASK_CONFIDENCE_THRESHOLD_VOICE", "0.30"))
+ASK_CONFIDENCE_THRESHOLD_VOICE = float(os.getenv("ASK_CONFIDENCE_THRESHOLD_VOICE", "0.00"))
+
 
 # Speech-to-text 모델 id.
 STT_MODEL_NAME = os.getenv("STT_MODEL_NAME", "CohereLabs/cohere-transcribe-03-2026")
@@ -69,6 +77,7 @@ STT_COMPUTE_TYPE = os.getenv("STT_COMPUTE_TYPE", "float16")
 STT_FORCE_LANGUAGE = os.getenv("STT_FORCE_LANGUAGE", "true").lower() == "true"
 # 디코더 프롬프트에서 문장부호를 강제할지 여부.
 STT_FORCE_PUNCTUATION = os.getenv("STT_FORCE_PUNCTUATION", "true").lower() == "true"
+
 
 # STT 전에 VAD 필터링을 켤지 여부.
 VAD_ENABLED = os.getenv("VAD_ENABLED", "true").lower() == "true"
@@ -101,6 +110,7 @@ SILERO_SPEECH_PAD_MS = int(os.getenv("SILERO_SPEECH_PAD_MS", "80"))
 # CPU에서 ONNX Silero 런타임을 우선 쓸지 여부.
 SILERO_VAD_ONNX = os.getenv("SILERO_VAD_ONNX", "true").lower() == "true"
 
+
 # STT 전에 경량 denoise를 켤지 여부.
 DENOISE_ENABLED = os.getenv("DENOISE_ENABLED", "true").lower() == "true"
 # 음성 정리를 위한 high-pass cutoff 주파수.
@@ -126,6 +136,7 @@ VOICE_STT_MAX_NEW_TOKENS = int(os.getenv("VOICE_STT_MAX_NEW_TOKENS", "256"))
 # 메인 LLM 한 번의 최대 응답 토큰 수.
 VOICE_LLM_MAX_TOKENS = int(os.getenv("VOICE_LLM_MAX_TOKENS", "320"))
 
+
 # 대화 히스토리에 유지할 총 턴 수 상한.
 MAX_HISTORY_ITEMS = 1024
 # voice history tail 길이. 현재는 MAX_HISTORY_ITEMS와 맞춰 두지만 따로 조절 가능.
@@ -134,6 +145,7 @@ VOICE_HISTORY_LIMIT = int(os.getenv("VOICE_HISTORY_LIMIT", str(MAX_HISTORY_ITEMS
 MAX_VISIBLE_TEXT = 1800
 # 텍스트 메시지에서도 자동으로 음성 채널에 붙을지 여부.
 AUTO_JOIN_VOICE = os.getenv("AUTO_JOIN_VOICE", "true").lower() == "true"
+
 
 # wake 없는 음성을 버릴 때 쓰는 최소 텍스트 길이.
 MIN_TEXT_LEN = int(os.getenv("VOICE_MIN_TEXT_LEN", "4"))
