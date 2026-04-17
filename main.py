@@ -55,6 +55,8 @@ MEMORY_RETRIEVE_LIMIT = int(os.getenv("MEMORY_RETRIEVE_LIMIT", "8"))
 STT_MODEL_NAME = os.getenv("STT_MODEL_NAME", "CohereLabs/cohere-transcribe-03-2026")
 STT_LANGUAGE = os.getenv("STT_LANGUAGE", "ko")
 STT_COMPUTE_TYPE = os.getenv("STT_COMPUTE_TYPE", "float16")
+STT_FORCE_LANGUAGE = os.getenv("STT_FORCE_LANGUAGE", "true").lower() == "true"
+STT_FORCE_PUNCTUATION = os.getenv("STT_FORCE_PUNCTUATION", "true").lower() == "true"
 
 VAD_ENABLED = os.getenv("VAD_ENABLED", "true").lower() == "true"
 VAD_PROVIDER = os.getenv("VAD_PROVIDER", "silero").lower()
@@ -97,7 +99,7 @@ WAKE_WORDS = [
     w.strip()
     for w in os.getenv(
         "WAKE_WORDS",
-        "이별인,이별링,이벨링,에벌링,이블린,이불린,이불링,이브린,이브링,입을린,입을링,이블닝,이블링,이별린,이벌린,에블린,에브린,에블링,에브링,에벌린,이벨린,이반린,불리읍,이블리"
+        "이별인,이별링,이벨링,에벌링,이블린,이불린,이불링,이브린,이브링,입을린,입을링,이블닝,이블링,이별린,이벌린,에블린,에브린,에블링,에브링,에벌린,이벨린,이반린,불리읍,이블리,이별된"
     ).split(",")
     if w.strip()
 ]
@@ -1125,8 +1127,27 @@ def transcribe_audio16k_sync(audio16k: np.ndarray, max_new_tokens: int = 256) ->
         else:
             moved[k] = v
 
+    generate_kwargs = {
+        "max_new_tokens": max_new_tokens,
+    }
+
+    if STT_FORCE_LANGUAGE and hasattr(processor, "get_decoder_prompt_ids"):
+        try:
+            decoder_prompt_ids = processor.get_decoder_prompt_ids(
+                language=STT_LANGUAGE,
+                punctuation=STT_FORCE_PUNCTUATION,
+            )
+            if decoder_prompt_ids:
+                generate_kwargs["decoder_input_ids"] = torch.tensor(
+                    [decoder_prompt_ids],
+                    device=model.device,
+                    dtype=torch.long,
+                )
+        except Exception as e:
+            print(f"[STT] decoder prompt 강제 실패 | err={e}")
+
     with torch.inference_mode():
-        outputs = model.generate(**moved, max_new_tokens=max_new_tokens)
+        outputs = model.generate(**moved, **generate_kwargs)
 
     text = processor.decode(outputs[0], skip_special_tokens=True)
     return clean_text(text)
