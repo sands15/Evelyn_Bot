@@ -35,6 +35,11 @@ MEMORY_ROOT = Path(os.getenv("BOT_MEMORY_DIR", str(Path(__file__).resolve().pare
 GUILD_SETTINGS_ROOT = Path(os.getenv("GUILD_SETTINGS_DIR", str(Path(__file__).resolve().parent.parent / "guild_settings")))
 # 기본 명령어 시작 부호(prefix).
 DEFAULT_COMMAND_PREFIX = os.getenv("DEFAULT_COMMAND_PREFIX", "!")
+# 봇 전체 재시작 명령을 사용할 수 있는 사용자 ID 목록.
+ALLOWED_RESTART_USER_IDS = {
+    441943340624248843,
+    405351496012791808,
+}
 # 작업 메모리 파일에 유지할 durable facts 최대 개수.
 MEMORY_FACT_LIMIT = int(os.getenv("MEMORY_FACT_LIMIT", "200"))
 # open loop / 질문성 메모리 최대 개수.

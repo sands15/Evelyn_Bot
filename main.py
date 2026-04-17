@@ -1860,7 +1860,7 @@ async def restart_bot_process() -> None:
 
 
 @bot.command(name="재시작", aliases=["restart"])
-@commands.has_guild_permissions(administrator=True)
+@commands.check(lambda ctx: ctx.author.id in ALLOWED_RESTART_USER_IDS)
 async def restart_bot_command(ctx):
     await ctx.send("🔄 봇을 재시작할게. 잠깐만 기다려줘.")
     asyncio.create_task(restart_bot_process())
@@ -1868,8 +1868,8 @@ async def restart_bot_command(ctx):
 
 @restart_bot_command.error
 async def restart_bot_command_error(ctx, error):
-    if isinstance(error, commands.MissingPermissions):
-        await ctx.send("이 명령은 서버 관리자 권한이 있어야 쓸 수 있어.")
+    if isinstance(error, commands.CheckFailure):
+        await ctx.send("이 명령은 허용된 사용자만 쓸 수 있어.")
         return
     raise error
 
