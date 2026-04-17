@@ -60,6 +60,8 @@ MEMORY_VAULT_RAW_RETRIEVE_LIMIT = int(os.getenv("MEMORY_VAULT_RAW_RETRIEVE_LIMIT
 MEMORY_VAULT_DAYS = int(os.getenv("MEMORY_VAULT_DAYS", "7"))
 COGNITIVE_MAX_TOKENS = int(os.getenv("COGNITIVE_MAX_TOKENS", "120"))
 COGNITIVE_TIMEOUT_SEC = float(os.getenv("COGNITIVE_TIMEOUT_SEC", "8"))
+ASK_CONFIDENCE_THRESHOLD_TEXT = float(os.getenv("ASK_CONFIDENCE_THRESHOLD_TEXT", "0.75"))
+ASK_CONFIDENCE_THRESHOLD_VOICE = float(os.getenv("ASK_CONFIDENCE_THRESHOLD_VOICE", "0.85"))
 
 STT_MODEL_NAME = os.getenv("STT_MODEL_NAME", "CohereLabs/cohere-transcribe-03-2026")
 STT_LANGUAGE = os.getenv("STT_LANGUAGE", "ko")
@@ -544,13 +546,37 @@ def normalize_cognitive_state(data: dict) -> dict:
     }
 
 
-def build_main_response_guidance(cognitive_state: dict | None = None) -> str:
+def ask_confidence_threshold_for_source(source: str) -> float:
+    return ASK_CONFIDENCE_THRESHOLD_VOICE if source == "voice" else ASK_CONFIDENCE_THRESHOLD_TEXT
+
+
+def apply_ask_gating(cognitive_state: dict | None = None, *, source: str = "text") -> dict:
     state = normalize_cognitive_state(cognitive_state or {})
+    threshold = ask_confidence_threshold_for_source(source)
+
+    if state.get("action") == "ask":
+        question_for_user = clean_text(str(state.get("question_for_user", "")))
+        confidence = float(state.get("confidence", 0.0) or 0.0)
+        if not question_for_user or confidence < threshold:
+            gated = dict(state)
+            gated["action"] = "wait" if source == "voice" else "answer"
+            reason = clean_text(str(gated.get("reason_brief", "")))
+            gate_note = f"ask_gated_{source}_{confidence:.2f}_lt_{threshold:.2f}"
+            gated["reason_brief"] = clean_text(f"{reason} {gate_note}") if reason else gate_note
+            return gated
+
+    return state
+
+
+def build_main_response_guidance(cognitive_state: dict | None = None, *, source: str = "text") -> str:
+    state = apply_ask_gating(cognitive_state, source=source)
+    threshold = ask_confidence_threshold_for_source(source)
     parts = [
         "주의: 생각 과정 말하지 말고, 최종 답변만 한국어로 한두 문장으로 짧게 말해.",
         OMNIVOICE_TAG_GUIDANCE,
         "텍스트만 봤을 때도 자연스럽게 읽혀야 하고, 태그를 빼도 문장이 성립해야 한다.",
         "sub handoff의 question_for_user는 사용자가 한 말이 아니다. 내부 메모이므로, 그 문장을 사용자의 질문으로 오해해서 답하지 마라.",
+        f"ask 행동은 {source} 입력에서 confidence {threshold:.2f} 이상일 때만 허용한다.",
     ]
 
     action = state.get("action", "answer")
@@ -626,6 +652,14 @@ async def prepare_llm_messages(
                 messages[0] = {"role": "system", "content": merged_system}
             else:
                 messages.insert(0, {"role": "system", "content": merged_system})
+
+    if cognitive_state is not None:
+        gated_state = apply_ask_gating(cognitive_state, source=source)
+        if gated_state.get("action") != cognitive_state.get("action"):
+            print(
+                f"[ASK GATE] source={source} action={cognitive_state.get('action')} -> {gated_state.get('action')} confidence={float(cognitive_state.get('confidence', 0.0) or 0.0):.2f} threshold={ask_confidence_threshold_for_source(source):.2f}"
+            )
+            cognitive_state = gated_state
 
     route_text = debug_text if debug_text is not None else user_text
     print(f"[LLM ROUTE] source={source} route={route} text={visible_text(route_text)!r}")
@@ -1918,7 +1952,7 @@ async def ask_llm_once(
         debug_text=debug_text,
     )
 
-    final_user_text = f"{user_text}\n\n{build_main_response_guidance(cognitive_state)}"
+    final_user_text = f"{user_text}\n\n{build_main_response_guidance(cognitive_state, source=source)}"
 
     payload = {
         "model": MODEL_NAME,
@@ -2034,7 +2068,7 @@ async def ask_llm_streaming(
         debug_text=debug_text,
     )
 
-    final_user_text = f"{user_text}\n\n{build_main_response_guidance(cognitive_state)}"
+    final_user_text = f"{user_text}\n\n{build_main_response_guidance(cognitive_state, source=source)}"
 
     payload = {
         "model": MODEL_NAME,
