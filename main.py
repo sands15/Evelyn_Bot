@@ -73,15 +73,15 @@ DENOISE_ENABLED = os.getenv("DENOISE_ENABLED", "true").lower() == "true"
 DENOISE_HIGHPASS_HZ = float(os.getenv("DENOISE_HIGHPASS_HZ", "120"))
 DENOISE_NOISE_FLOOR_SEC = float(os.getenv("DENOISE_NOISE_FLOOR_SEC", "0.20"))
 DENOISE_GATE_MULT = float(os.getenv("DENOISE_GATE_MULT", "1.35"))
-WAKE_AUDIO_SEC = float(os.getenv("WAKE_AUDIO_SEC", "1.1"))
-WAKE_MAX_TOKENS = int(os.getenv("WAKE_MAX_TOKENS", "32"))
+WAKE_AUDIO_SEC = float(os.getenv("WAKE_AUDIO_SEC", "1.4"))
+WAKE_MAX_TOKENS = int(os.getenv("WAKE_MAX_TOKENS", "48"))
 WAKE_FUZZY_THRESHOLD = float(os.getenv("WAKE_FUZZY_THRESHOLD", "0.72"))
 WAKE_SHORT_TEXT_KEEP_LEN = int(os.getenv("WAKE_SHORT_TEXT_KEEP_LEN", "2"))
 TTS_EARLY_CHUNK_LEN = int(os.getenv("TTS_EARLY_CHUNK_LEN", "14"))
 TTS_EARLY_CUT_MIN = int(os.getenv("TTS_EARLY_CUT_MIN", "6"))
-VOICE_STT_MAX_NEW_TOKENS = int(os.getenv("VOICE_STT_MAX_NEW_TOKENS", "160"))
-VOICE_LLM_MAX_TOKENS = int(os.getenv("VOICE_LLM_MAX_TOKENS", "96"))
-VOICE_HISTORY_LIMIT = int(os.getenv("VOICE_HISTORY_LIMIT", "12"))
+VOICE_STT_MAX_NEW_TOKENS = int(os.getenv("VOICE_STT_MAX_NEW_TOKENS", "256"))
+VOICE_LLM_MAX_TOKENS = int(os.getenv("VOICE_LLM_MAX_TOKENS", "320"))
+VOICE_HISTORY_LIMIT = int(os.getenv("VOICE_HISTORY_LIMIT", str(MAX_HISTORY_ITEMS)))
 
 MAX_HISTORY_ITEMS = 1024
 MAX_VISIBLE_TEXT = 1800
@@ -1282,7 +1282,7 @@ async def ask_llm_once(user_text: str, guild_id: int | None = None) -> str:
         "주의: 생각 과정 말하지 말고, 최종 답변만 한국어로 한두 문장으로 짧게 말해."
     )
 
-    messages = get_voice_history_messages()
+    messages = list(conversation_history)
 
     if guild_id is not None:
         memory_context = build_memory_context(guild_id, user_text)
@@ -1404,7 +1404,7 @@ async def ask_llm_streaming(
         "주의: 생각 과정 말하지 말고, 최종 답변만 한국어로 한두 문장으로 짧게 말해."
     )
 
-    messages = get_voice_history_messages()
+    messages = list(conversation_history)
 
     if guild_id is not None:
         memory_context = build_memory_context(guild_id, user_text)
@@ -1588,23 +1588,22 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes) 
         return
 
     try:
-        wake_detected, wake_probe = await asyncio.to_thread(detect_wake_word_sync, audio16k)
-    except Exception as e:
-        print(f"❌ [WAKE-STT] {e}")
-        return
-
-    if not wake_detected:
-        if wake_probe:
-            print(f"[WAKE IGNORE] {member.display_name}: {wake_probe!r}")
-        return
-
-    try:
         text = await asyncio.to_thread(transcribe_audio16k_sync, audio16k, VOICE_STT_MAX_NEW_TOKENS)
     except Exception as e:
         print(f"❌ [STT] {e}")
         return
 
     if not text:
+        return
+
+    corrected_text = apply_stt_post_corrections(text, wake_detected=False)
+    wake_detected = contains_wake_word(corrected_text)
+    wake_probe = corrected_text
+    text = corrected_text
+
+    if not wake_detected:
+        if wake_probe:
+            print(f"[WAKE IGNORE] {member.display_name}: {wake_probe!r}")
         return
 
     corrected_text = apply_stt_post_corrections(text, wake_detected=wake_detected)
