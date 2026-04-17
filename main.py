@@ -97,6 +97,9 @@ MIN_AUDIO_SEC = float(os.getenv("VOICE_MIN_AUDIO_SEC", "0.6"))
 REPLY_COOLDOWN_SEC = float(os.getenv("VOICE_REPLY_COOLDOWN_SEC", "2.5"))
 POST_TTS_IGNORE_SEC = float(os.getenv("VOICE_POST_TTS_IGNORE_SEC", "1.2"))
 SIMILARITY_BLOCK = float(os.getenv("VOICE_SIMILARITY_BLOCK", "0.88"))
+VOICE_CONNECT_TIMEOUT = float(os.getenv("VOICE_CONNECT_TIMEOUT", "45"))
+VOICE_CONNECT_RETRIES = max(1, int(os.getenv("VOICE_CONNECT_RETRIES", "2")))
+VOICE_CONNECT_RETRY_DELAY_SEC = float(os.getenv("VOICE_CONNECT_RETRY_DELAY_SEC", "1.5"))
 WAKE_WORDS = [
     w.strip()
     for w in os.getenv(
@@ -1449,6 +1452,47 @@ def detect_wake_word_sync(audio16k: np.ndarray) -> tuple[bool, str]:
 # =========================================================
 # 디스코드 음성
 # =========================================================
+async def connect_evelyn_voice_client(target_channel: discord.VoiceChannel) -> EvelynVoiceClient:
+    last_error: Exception | None = None
+
+    for attempt in range(1, VOICE_CONNECT_RETRIES + 1):
+        try:
+            print(
+                f"[VOICE CONNECT] attempt={attempt}/{VOICE_CONNECT_RETRIES} channel={target_channel.name} timeout={VOICE_CONNECT_TIMEOUT}"
+            )
+            vc = await target_channel.connect(
+                cls=EvelynVoiceClient,
+                timeout=VOICE_CONNECT_TIMEOUT,
+                reconnect=False,
+            )
+            if not isinstance(vc, EvelynVoiceClient):
+                raise RuntimeError(f"unexpected voice client type: {type(vc)!r}")
+            return vc
+        except Exception as e:
+            last_error = e
+            print(
+                f"[VOICE CONNECT FAIL] attempt={attempt}/{VOICE_CONNECT_RETRIES} channel={target_channel.name} err={e!r}"
+            )
+
+            stale_vc = target_channel.guild.voice_client
+            if stale_vc is not None:
+                try:
+                    await stale_vc.disconnect(force=True)
+                except Exception:
+                    pass
+
+            try:
+                await target_channel.guild.change_voice_state(channel=None, self_deaf=False, self_mute=False)
+            except Exception:
+                pass
+
+            if attempt < VOICE_CONNECT_RETRIES:
+                await asyncio.sleep(VOICE_CONNECT_RETRY_DELAY_SEC)
+
+    assert last_error is not None
+    raise last_error
+
+
 async def ensure_listening_voice_client(guild: discord.Guild, target_channel: discord.VoiceChannel) -> Optional[EvelynVoiceClient]:
     vc = guild.voice_client
 
@@ -1457,7 +1501,7 @@ async def ensure_listening_voice_client(guild: discord.Guild, target_channel: di
         vc = None
 
     if vc is None:
-        vc = await target_channel.connect(cls=EvelynVoiceClient)
+        vc = await connect_evelyn_voice_client(target_channel)
     elif vc.channel != target_channel:
         await vc.move_to(target_channel)
 
