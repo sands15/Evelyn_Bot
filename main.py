@@ -516,12 +516,30 @@ def normalize_cognitive_action(value: str) -> str:
 def normalize_cognitive_state(data: dict) -> dict:
     if not isinstance(data, dict):
         data = {}
+
+    question_for_user = clean_text(
+        str(data.get("question_for_user", data.get("suggested_user_question", "")))
+    )
+    confidence_raw = data.get("confidence", 0.5)
+    try:
+        confidence = float(confidence_raw)
+    except Exception:
+        confidence = 0.5
+    confidence = max(0.0, min(1.0, confidence))
+
+    retrieved_context_ids = data.get("retrieved_context_ids", [])
+    if not isinstance(retrieved_context_ids, list):
+        retrieved_context_ids = []
+
     return {
         "action": normalize_cognitive_action(str(data.get("action", "answer"))),
+        "confidence": confidence,
+        "user_intent": clean_text(str(data.get("user_intent", ""))),
         "state_summary": clean_text(str(data.get("state_summary", ""))),
-        "suggested_user_question": clean_text(str(data.get("suggested_user_question", ""))),
+        "question_for_user": question_for_user,
         "main_prompt_hint": clean_text(str(data.get("main_prompt_hint", ""))),
         "reason_brief": clean_text(str(data.get("reason_brief", ""))),
+        "retrieved_context_ids": [clean_text(str(x)) for x in retrieved_context_ids if clean_text(str(x))],
         "updated_at": int(data.get("updated_at", time.time())),
     }
 
@@ -532,14 +550,18 @@ def build_main_response_guidance(cognitive_state: dict | None = None) -> str:
         "주의: 생각 과정 말하지 말고, 최종 답변만 한국어로 한두 문장으로 짧게 말해.",
         OMNIVOICE_TAG_GUIDANCE,
         "텍스트만 봤을 때도 자연스럽게 읽혀야 하고, 태그를 빼도 문장이 성립해야 한다.",
+        "sub handoff의 question_for_user는 사용자가 한 말이 아니다. 내부 메모이므로, 그 문장을 사용자의 질문으로 오해해서 답하지 마라.",
     ]
 
     action = state.get("action", "answer")
+    if state.get("user_intent"):
+        parts.append(f"사용자 의도 추정: {state['user_intent']}")
+
     if action == "ask":
-        parts.append("지금은 바로 단정하기보다 짧은 확인 질문을 먼저 하는 편이 자연스럽다.")
+        parts.append("지금은 바로 단정하기보다 사용자의 원래 발화에 이어서 짧은 확인 질문을 먼저 하는 편이 자연스럽다.")
         parts.append("질문형 태그가 필요하면 [question-en], [question-ah], [question-oh], [question-ei], [question-yi] 중 하나만 골라라.")
-        if state.get("suggested_user_question"):
-            parts.append(f"우선 질문 후보: {state['suggested_user_question']}")
+        if state.get("question_for_user"):
+            parts.append(f"사용자에게 되물을 내부 질문 초안: {state['question_for_user']}")
     elif action == "wait":
         parts.append("지금은 길게 답하지 말고, 더 들을 여지를 두는 짧은 반응이 자연스럽다.")
         parts.append("wait 상황에서는 감정 태그를 거의 쓰지 말고, 정말 필요할 때만 [sigh] 같은 약한 태그 하나만 써라.")
@@ -549,6 +571,8 @@ def build_main_response_guidance(cognitive_state: dict | None = None) -> str:
 
     if state.get("main_prompt_hint"):
         parts.append(f"응답 추가 힌트: {state['main_prompt_hint']}")
+    if state.get("confidence", 0.0) > 0:
+        parts.append(f"내부 판단 신뢰도: {state['confidence']:.2f}")
 
     return " ".join(clean_text(part) for part in parts if clean_text(part))
 
@@ -639,20 +663,24 @@ def build_memory_context(guild_id: int, user_text: str, cognitive_state: dict | 
                 if clean_text(str(row.get('text', '')))
             )
         )
-    if state.get("state_summary") or state.get("suggested_user_question") or state.get("main_prompt_hint"):
+    if state.get("state_summary") or state.get("question_for_user") or state.get("main_prompt_hint"):
         action_label = {
             "answer": "답하기",
             "ask": "질문하기",
             "wait": "더 듣기",
         }.get(state.get("action", "answer"), "답하기")
         state_lines = [f"- 권장 행동: {action_label}"]
+        if state.get("user_intent"):
+            state_lines.append(f"- 사용자 의도: {state['user_intent']}")
         if state.get("state_summary"):
             state_lines.append(f"- 현재 판단: {state['state_summary']}")
-        if state.get("suggested_user_question"):
-            state_lines.append(f"- 물어볼 후보: {state['suggested_user_question']}")
+        if state.get("question_for_user"):
+            state_lines.append(f"- 사용자에게 되물을 내부 질문 초안: {state['question_for_user']}")
         if state.get("main_prompt_hint"):
             state_lines.append(f"- 응답 힌트: {state['main_prompt_hint']}")
-        parts.append("현재 내부 상태:\n" + "\n".join(state_lines))
+        if state.get("retrieved_context_ids"):
+            state_lines.append(f"- 참고 문맥 ID: {', '.join(state['retrieved_context_ids'][:4])}")
+        parts.append("현재 내부 상태(사용자 발화 아님):\n" + "\n".join(state_lines))
     if facts:
         parts.append(
             "장기 기억 후보:\n" + "\n".join(f"- {clean_text(str(row.get('text', '')))}" for row in facts)
@@ -739,10 +767,10 @@ async def update_cognitive_state(guild_id: int, user_text: str) -> dict:
                 "role": "system",
                 "content": (
                     "너는 실시간 대화 조율자다. 반드시 JSON 객체 하나만 출력한다. "
-                    "형식은 {\"action\": \"answer|ask|wait\", \"state_summary\": string, \"suggested_user_question\": string, \"main_prompt_hint\": string, \"reason_brief\": string}. "
-                    "answer는 지금 답하면 되는 경우다. ask는 짧게 되묻거나 확인 질문을 하는 편이 자연스러운 경우다. wait는 아직 단정하지 말고 더 듣거나 짧게 여지를 두는 편이 자연스러운 경우다. "
-                    "state_summary에는 현재 상황을 한두 문장으로 적어라. suggested_user_question에는 ask일 때 특히 유용한 실제 질문 후보를 한 문장으로 적어라. wait면 비워도 된다. "
-                    "main_prompt_hint에는 메인 LLM이 말할 때 지켜야 할 한 줄 힌트를 적어라. reason_brief는 아주 짧게 써라. JSON 외 다른 텍스트는 절대 출력하지 마라."
+                    "형식은 {\"action\": \"answer|ask|wait\", \"confidence\": number, \"user_intent\": string, \"state_summary\": string, \"question_for_user\": string, \"main_prompt_hint\": string, \"reason_brief\": string, \"retrieved_context_ids\": string[]}. "
+                    "answer는 지금 답하면 되는 경우다. ask는 사용자의 원래 발화에 이어서 짧게 되묻거나 확인 질문을 하는 편이 자연스러운 경우다. wait는 아직 단정하지 말고 더 듣거나 짧게 여지를 두는 편이 자연스러운 경우다. "
+                    "question_for_user는 사용자가 한 말이 아니라, 메인 LLM이 사용자에게 되물을 내부 질문 초안이다. 절대로 사용자의 질문을 베껴 쓰거나 사용자가 이미 한 말처럼 적지 마라. "
+                    "user_intent에는 사용자가 진짜로 하려는 말을 아주 짧게 적어라. state_summary에는 현재 상황을 한두 문장으로 적어라. main_prompt_hint에는 메인 LLM이 말할 때 지켜야 할 한 줄 힌트를 적어라. confidence는 0~1, reason_brief는 아주 짧게 써라. JSON 외 다른 텍스트는 절대 출력하지 마라."
                 ),
             },
             {
@@ -771,10 +799,13 @@ async def update_cognitive_state(guild_id: int, user_text: str) -> dict:
                 print(f"[COGNITIVE LATENCY] guild={guild_id} failed_after_ms={elapsed_ms:.0f}")
             fallback = current_state or {
                 "action": "answer",
+                "confidence": 0.5,
+                "user_intent": clean_text(user_text),
                 "state_summary": clean_text(user_text),
-                "suggested_user_question": "",
+                "question_for_user": "",
                 "main_prompt_hint": "짧고 자연스럽게 답해라.",
                 "reason_brief": "fallback",
+                "retrieved_context_ids": [],
                 "updated_at": int(time.time()),
             }
             write_json_file(cognitive_state_path(guild_id), fallback)
@@ -791,9 +822,9 @@ async def update_cognitive_state(guild_id: int, user_text: str) -> dict:
         if should_log_voice_timing(elapsed_ms):
             print(f"[COGNITIVE LATENCY] guild={guild_id} action={state.get('action')} ms={elapsed_ms:.0f}")
 
-        if state.get("action") == "ask" and state.get("suggested_user_question"):
+        if state.get("action") == "ask" and state.get("question_for_user"):
             print(
-                f"[COGNITIVE ASK] guild={guild_id} question={state['suggested_user_question']!r} reason={state.get('reason_brief', '')!r}"
+                f"[COGNITIVE ASK] guild={guild_id} question={state['question_for_user']!r} reason={state.get('reason_brief', '')!r} confidence={state.get('confidence', 0.0):.2f}"
             )
 
         return state
