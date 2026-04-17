@@ -102,6 +102,7 @@ SIMILARITY_BLOCK = float(os.getenv("VOICE_SIMILARITY_BLOCK", "0.88"))
 VOICE_CONNECT_TIMEOUT = float(os.getenv("VOICE_CONNECT_TIMEOUT", "45"))
 VOICE_CONNECT_RETRIES = max(1, int(os.getenv("VOICE_CONNECT_RETRIES", "2")))
 VOICE_CONNECT_RETRY_DELAY_SEC = float(os.getenv("VOICE_CONNECT_RETRY_DELAY_SEC", "1.5"))
+VOICE_TIMING_LOG_THRESHOLD_MS = float(os.getenv("VOICE_TIMING_LOG_THRESHOLD_MS", "3000"))
 WAKE_WORDS = [
     w.strip()
     for w in os.getenv(
@@ -672,7 +673,9 @@ async def update_cognitive_state(guild_id: int, user_text: str) -> dict:
             )
         except Exception as e:
             print(f"[COGNITIVE] 상태 업데이트 실패 또는 timeout: {e}")
-            print(f"[COGNITIVE LATENCY] guild={guild_id} failed_after_ms={(time.monotonic() - started_at) * 1000.0:.0f}")
+            elapsed_ms = (time.monotonic() - started_at) * 1000.0
+            if should_log_voice_timing(elapsed_ms):
+                print(f"[COGNITIVE LATENCY] guild={guild_id} failed_after_ms={elapsed_ms:.0f}")
             fallback = current_state or {
                 "action": "answer",
                 "state_summary": clean_text(user_text),
@@ -691,9 +694,9 @@ async def update_cognitive_state(guild_id: int, user_text: str) -> dict:
             state["main_prompt_hint"] = "짧고 자연스럽게 답해라."
         state["updated_at"] = int(time.time())
         write_json_file(cognitive_state_path(guild_id), state)
-        print(
-            f"[COGNITIVE LATENCY] guild={guild_id} action={state.get('action')} ms={(time.monotonic() - started_at) * 1000.0:.0f}"
-        )
+        elapsed_ms = (time.monotonic() - started_at) * 1000.0
+        if should_log_voice_timing(elapsed_ms):
+            print(f"[COGNITIVE LATENCY] guild={guild_id} action={state.get('action')} ms={elapsed_ms:.0f}")
 
         if state.get("action") == "ask" and state.get("suggested_user_question"):
             print(
@@ -740,7 +743,9 @@ async def update_long_term_memory(guild_id: int, user_text: str, answer: str) ->
             result = await ask_summary_llm(messages)
         except Exception as e:
             print(f"[MEMORY] 요약 업데이트 실패: {e}")
-            print(f"[MEMORY LATENCY] guild={guild_id} failed_after_ms={(time.monotonic() - started_at) * 1000.0:.0f}")
+            elapsed_ms = (time.monotonic() - started_at) * 1000.0
+            if should_log_voice_timing(elapsed_ms):
+                print(f"[MEMORY LATENCY] guild={guild_id} failed_after_ms={elapsed_ms:.0f}")
             return
 
         summary_update = clean_text(str(result.get("summary_update", "")))
@@ -755,7 +760,9 @@ async def update_long_term_memory(guild_id: int, user_text: str, answer: str) ->
         if isinstance(open_questions, list):
             append_unique_memory_rows(memory_questions_path(guild_id), [row for row in open_questions if isinstance(row, dict)], MEMORY_LOOP_LIMIT)
 
-        print(f"[MEMORY LATENCY] guild={guild_id} ms={(time.monotonic() - started_at) * 1000.0:.0f}")
+        elapsed_ms = (time.monotonic() - started_at) * 1000.0
+        if should_log_voice_timing(elapsed_ms):
+            print(f"[MEMORY LATENCY] guild={guild_id} ms={elapsed_ms:.0f}")
 
 
 def schedule_memory_update(
@@ -1355,6 +1362,10 @@ async def warmup_tts_server() -> None:
                 break
 
 
+def should_log_voice_timing(elapsed_ms: float) -> bool:
+    return elapsed_ms >= VOICE_TIMING_LOG_THRESHOLD_MS
+
+
 def log_voice_latency(metrics: dict | None, key: str, label: str) -> None:
     if not metrics or metrics.get(key):
         return
@@ -1365,7 +1376,8 @@ def log_voice_latency(metrics: dict | None, key: str, label: str) -> None:
 
     elapsed_ms = (time.monotonic() - float(started_at)) * 1000.0
     metrics[key] = True
-    print(f"[VOICE LATENCY] {label}: {elapsed_ms:.0f}ms")
+    if should_log_voice_timing(elapsed_ms):
+        print(f"[VOICE LATENCY] {label}: {elapsed_ms:.0f}ms")
 
 
 def log_voice_stage(metrics: dict | None, label: str, *, extra: str = "") -> None:
@@ -1375,6 +1387,8 @@ def log_voice_stage(metrics: dict | None, label: str, *, extra: str = "") -> Non
     if started_at is None:
         return
     elapsed_ms = (time.monotonic() - float(started_at)) * 1000.0
+    if not should_log_voice_timing(elapsed_ms):
+        return
     suffix = f" | {extra}" if extra else ""
     print(f"[VOICE STAGE] {label}: {elapsed_ms:.0f}ms{suffix}")
 

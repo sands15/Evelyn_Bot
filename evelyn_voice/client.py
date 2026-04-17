@@ -25,6 +25,7 @@ async def on_user_audio(member, pcm_bytes: bytes):
 log = logging.getLogger(__name__)
 
 OPUS_ERROR_TO_SILENCE = os.getenv("OPUS_ERROR_TO_SILENCE", "true").lower() == "true"
+VOICE_TIMING_LOG_THRESHOLD_MS = float(os.getenv("VOICE_TIMING_LOG_THRESHOLD_MS", "3000"))
 
 
 def _parse_rtp_header(packet: bytes):
@@ -154,6 +155,9 @@ class EvelynVoiceClient(discord.VoiceClient):
         if started_at is None:
             return None
         return (asyncio.get_running_loop().time() - float(started_at)) * 1000.0
+
+    def _should_log_timing(self, *values: float | None) -> bool:
+        return any(value is not None and value >= VOICE_TIMING_LOG_THRESHOLD_MS for value in values)
 
     def _decrypt_standard_voice_packet(self, packet_bytes: bytes) -> tuple[bytes, dict] | None:
         info = _parse_rtp_header(packet_bytes)
@@ -634,15 +638,16 @@ class EvelynVoiceClient(discord.VoiceClient):
                             state["in_utterance"] = True
                             state["utterance_started_at"] = packet_info.get("received_at", now)
                             state["packets"] = list(state["preroll"])
-                            log.info(
-                                "UTTERANCE START | ssrc=%d seq=%d ts=%d payload=%d preroll=%d media_q=%d",
-                                ssrc,
-                                sequence,
-                                timestamp,
-                                payload_len,
-                                len(state["packets"]),
-                                self.media_queue.qsize(),
-                            )
+                            if self.media_queue.qsize() * 20 >= VOICE_TIMING_LOG_THRESHOLD_MS:
+                                log.info(
+                                    "UTTERANCE START | ssrc=%d seq=%d ts=%d payload=%d preroll=%d media_q=%d",
+                                    ssrc,
+                                    sequence,
+                                    timestamp,
+                                    payload_len,
+                                    len(state["packets"]),
+                                    self.media_queue.qsize(),
+                                )
 
                     if state["in_utterance"]:
                         state["packets"].append(current_packet)
@@ -667,16 +672,17 @@ class EvelynVoiceClient(discord.VoiceClient):
 
                     utterance_started_at = state.get("utterance_started_at")
                     utterance_age_ms = self._latency_ms(utterance_started_at)
-                    log.info(
-                        "UTTERANCE END | idx=%d ssrc=%d packets=%d first_seq=%d last_seq=%d gap=%.3f utterance_ms=%s",
-                        self.utterance_count,
-                        ssrc,
-                        packet_count,
-                        first_seq,
-                        last_seq,
-                        now - state["last_voice_like_at"],
-                        f"{utterance_age_ms:.0f}" if utterance_age_ms is not None else "?",
-                    )
+                    if self._should_log_timing(utterance_age_ms):
+                        log.info(
+                            "UTTERANCE END | idx=%d ssrc=%d packets=%d first_seq=%d last_seq=%d gap=%.3f utterance_ms=%s",
+                            self.utterance_count,
+                            ssrc,
+                            packet_count,
+                            first_seq,
+                            last_seq,
+                            now - state["last_voice_like_at"],
+                            f"{utterance_age_ms:.0f}" if utterance_age_ms is not None else "?",
+                        )
 
                     utterance_packets = state["packets"].copy()
 
@@ -716,18 +722,19 @@ class EvelynVoiceClient(discord.VoiceClient):
 
                 queued_at = item.get("queued_at")
                 queue_wait_ms = self._latency_ms(queued_at)
-                log.info(
-                    "UTTERANCE DISPATCH | idx=%d ssrc=%d packets=%d first_seq=%d last_seq=%d payload=%d active=%d queue_wait_ms=%s utterance_q=%d",
-                    idx,
-                    ssrc,
-                    packet_count,
-                    first_seq,
-                    last_seq,
-                    total_payload,
-                    len(self._utterance_processing_tasks),
-                    f"{queue_wait_ms:.0f}" if queue_wait_ms is not None else "?",
-                    self.utterance_queue.qsize(),
-                )
+                if self._should_log_timing(queue_wait_ms) or self.utterance_queue.qsize() > 0:
+                    log.info(
+                        "UTTERANCE DISPATCH | idx=%d ssrc=%d packets=%d first_seq=%d last_seq=%d payload=%d active=%d queue_wait_ms=%s utterance_q=%d",
+                        idx,
+                        ssrc,
+                        packet_count,
+                        first_seq,
+                        last_seq,
+                        total_payload,
+                        len(self._utterance_processing_tasks),
+                        f"{queue_wait_ms:.0f}" if queue_wait_ms is not None else "?",
+                        self.utterance_queue.qsize(),
+                    )
 
                 task = asyncio.create_task(self._process_utterance_packets(item))
                 self._utterance_processing_tasks.add(task)
@@ -941,24 +948,25 @@ class EvelynVoiceClient(discord.VoiceClient):
             if first_received_at is not None:
                 first_packet_wait_ms = (processing_started_at - float(first_received_at)) * 1000.0
 
-        log.info(
-            "DECRYPT SUMMARY | idx=%d packets=%d success=%d failed=%d pcm_chunks=%d dave_ok=%d outer_fail=%d dave_fail=%d opus_fail=%d opus_silence_fill=%d real_silence=%d first_packet_wait_ms=%s queue_wait_ms=%s decrypt_ms=%.0f utterance_total_ms=%s",
-            idx,
-            len(packets),
-            success,
-            failed,
-            len(pcm_chunks),
-            dave_success,
-            outer_fail,
-            dave_fail,
-            opus_fail,
-            opus_silence_fill,
-            real_silence,
-            f"{first_packet_wait_ms:.0f}" if first_packet_wait_ms is not None else "?",
-            f"{queue_wait_ms:.0f}" if queue_wait_ms is not None else "?",
-            decrypt_ms,
-            f"{utterance_total_ms:.0f}" if utterance_total_ms is not None else "?",
-        )
+        if self._should_log_timing(first_packet_wait_ms, queue_wait_ms, decrypt_ms, utterance_total_ms):
+            log.info(
+                "DECRYPT SUMMARY | idx=%d packets=%d success=%d failed=%d pcm_chunks=%d dave_ok=%d outer_fail=%d dave_fail=%d opus_fail=%d opus_silence_fill=%d real_silence=%d first_packet_wait_ms=%s queue_wait_ms=%s decrypt_ms=%.0f utterance_total_ms=%s",
+                idx,
+                len(packets),
+                success,
+                failed,
+                len(pcm_chunks),
+                dave_success,
+                outer_fail,
+                dave_fail,
+                opus_fail,
+                opus_silence_fill,
+                real_silence,
+                f"{first_packet_wait_ms:.0f}" if first_packet_wait_ms is not None else "?",
+                f"{queue_wait_ms:.0f}" if queue_wait_ms is not None else "?",
+                decrypt_ms,
+                f"{utterance_total_ms:.0f}" if utterance_total_ms is not None else "?",
+            )
 
         if not pcm_chunks:
             return
@@ -977,17 +985,20 @@ class EvelynVoiceClient(discord.VoiceClient):
         if getattr(self, "on_user_audio", None) is not None:
             try:
                 callback_started_at = asyncio.get_running_loop().time()
-                log.info(
-                    "on_user_audio call | idx=%d user_id=%s member=%s pcm_bytes=%d utterance_total_ms=%s",
-                    idx,
-                    user_id,
-                    getattr(member, "display_name", None),
-                    len(pcm_bytes),
-                    f"{self._latency_ms(utterance_started_at):.0f}" if self._latency_ms(utterance_started_at) is not None else "?",
-                )
+                utterance_total_before_callback_ms = self._latency_ms(utterance_started_at)
+                if self._should_log_timing(utterance_total_before_callback_ms):
+                    log.info(
+                        "on_user_audio call | idx=%d user_id=%s member=%s pcm_bytes=%d utterance_total_ms=%s",
+                        idx,
+                        user_id,
+                        getattr(member, "display_name", None),
+                        len(pcm_bytes),
+                        f"{utterance_total_before_callback_ms:.0f}" if utterance_total_before_callback_ms is not None else "?",
+                    )
                 await self.on_user_audio(member, pcm_bytes)
                 callback_ms = (asyncio.get_running_loop().time() - callback_started_at) * 1000.0
-                log.info("on_user_audio ok | idx=%d pcm_bytes=%d callback_ms=%.0f", idx, len(pcm_bytes), callback_ms)
+                if self._should_log_timing(callback_ms):
+                    log.info("on_user_audio ok | idx=%d pcm_bytes=%d callback_ms=%.0f", idx, len(pcm_bytes), callback_ms)
             except Exception as e:
                 log.warning("on_user_audio callback failed | idx=%d err=%r", idx, e)
 
