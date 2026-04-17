@@ -69,10 +69,13 @@ VAD_PEAK_THRESHOLD = float(os.getenv("VAD_PEAK_THRESHOLD", "0.020"))
 VAD_MIN_VOICED_RATIO = float(os.getenv("VAD_MIN_VOICED_RATIO", "0.015"))
 VAD_CHUNK_MS = float(os.getenv("VAD_CHUNK_MS", "32"))
 VAD_START_CONSECUTIVE = int(os.getenv("VAD_START_CONSECUTIVE", "2"))
-SILERO_VAD_THRESHOLD = float(os.getenv("SILERO_VAD_THRESHOLD", "0.35"))
-SILERO_MIN_SPEECH_MS = int(os.getenv("SILERO_MIN_SPEECH_MS", "64"))
+VOICE_ENV_FLATNESS_MAX = float(os.getenv("VOICE_ENV_FLATNESS_MAX", "0.72"))
+VOICE_HUMAN_BAND_RATIO_MIN = float(os.getenv("VOICE_HUMAN_BAND_RATIO_MIN", "0.38"))
+VOICE_ENV_RMS_MAX = float(os.getenv("VOICE_ENV_RMS_MAX", "0.020"))
+SILERO_VAD_THRESHOLD = float(os.getenv("SILERO_VAD_THRESHOLD", "0.30"))
+SILERO_MIN_SPEECH_MS = int(os.getenv("SILERO_MIN_SPEECH_MS", "32"))
 SILERO_MIN_SILENCE_MS = int(os.getenv("SILERO_MIN_SILENCE_MS", "0"))
-SILERO_SPEECH_PAD_MS = int(os.getenv("SILERO_SPEECH_PAD_MS", "0"))
+SILERO_SPEECH_PAD_MS = int(os.getenv("SILERO_SPEECH_PAD_MS", "80"))
 SILERO_VAD_ONNX = os.getenv("SILERO_VAD_ONNX", "true").lower() == "true"
 
 DENOISE_ENABLED = os.getenv("DENOISE_ENABLED", "true").lower() == "true"
@@ -209,19 +212,18 @@ def strip_omnivoice_tags(text: str) -> str:
 
 def clean_tts_text(text: str) -> str:
     text = normalize_omnivoice_tags(clean_text(text))
-    placeholders: dict[str, str] = {}
+    leading_tag_match = re.match(r"^\s*(\[[^\[\]]+\])", text)
+    leading_tag = leading_tag_match.group(1) if leading_tag_match else ""
 
-    def protect(match: re.Match) -> str:
-        key = f"__TAG_{len(placeholders)}__"
-        placeholders[key] = match.group(0)
-        return f" {key} "
-
-    text = re.sub(r"\[[^\[\]]+\]", protect, text)
+    text = re.sub(r"\[[^\[\]]+\]", " ", text)
     text = re.sub(r"[\"'`~*_#@^|<>{}()]", "", text)
     text = clean_text(text)
-    for key, value in placeholders.items():
-        text = text.replace(key, value)
-    return clean_text(text)
+
+    if not text:
+        return ""
+    if leading_tag:
+        return clean_text(f"{leading_tag} {text}")
+    return text
 
 
 def visible_text(text: str) -> str:
@@ -500,6 +502,7 @@ async def prepare_llm_messages(
     *,
     guild_id: int | None = None,
     source: str = "text",
+    debug_text: str | None = None,
 ) -> tuple[list[dict], dict | None, str]:
     route = classify_llm_route(user_text, source=source)
     messages = list(conversation_history)
@@ -522,7 +525,8 @@ async def prepare_llm_messages(
             else:
                 messages.insert(0, {"role": "system", "content": merged_system})
 
-    print(f"[LLM ROUTE] source={source} route={route} text={visible_text(user_text)!r}")
+    route_text = debug_text if debug_text is not None else user_text
+    print(f"[LLM ROUTE] source={source} route={route} text={visible_text(route_text)!r}")
     return messages, cognitive_state, route
 
 
@@ -971,17 +975,15 @@ def strip_voice_wake_word(text: str) -> str:
         pattern_front = rf"^\s*{re.escape(ww)}[야아]?\s*[, ]*"
         new_text = re.sub(pattern_front, "", text_n, count=1)
         if new_text != text_n:
-            text_n = clean_text(new_text)
-            return text_n or "부르셨나요?"
+            return clean_text(new_text)
 
         # 문장 중 첫 1회 제거
         pattern_once = rf"{re.escape(ww)}[야아]?"
         new_text = re.sub(pattern_once, "", text_n, count=1)
         if new_text != text_n:
-            text_n = clean_text(new_text)
-            return text_n or "부르셨나요?"
+            return clean_text(new_text)
 
-    return text_n or "부르셨나요?"
+    return clean_text(text_n)
 
 def apply_stt_post_corrections(text: str, *, wake_detected: bool = False) -> str:
     text = clean_text(text)
@@ -1012,6 +1014,54 @@ def is_similar(a: str, b: str) -> bool:
     if not a or not b:
         return False
     return SequenceMatcher(None, a, b).ratio() >= SIMILARITY_BLOCK
+
+def compute_voice_band_metrics(audio16k: np.ndarray) -> tuple[float, float, float]:
+    if audio16k.size == 0:
+        return 0.0, 1.0, 0.0
+
+    audio = np.asarray(audio16k, dtype=np.float32)
+    spectrum = np.abs(np.fft.rfft(audio))
+    if spectrum.size == 0:
+        return 0.0, 1.0, 0.0
+
+    freqs = np.fft.rfftfreq(len(audio), d=1.0 / TARGET_RATE)
+    total_energy = float(np.sum(spectrum)) + 1e-8
+    human_mask = (freqs >= 85.0) & (freqs <= 3400.0)
+    human_energy = float(np.sum(spectrum[human_mask]))
+    band_ratio = human_energy / total_energy
+
+    geometric = float(np.exp(np.mean(np.log(spectrum + 1e-8))))
+    arithmetic = float(np.mean(spectrum + 1e-8))
+    flatness = geometric / arithmetic if arithmetic > 0 else 1.0
+
+    rms = float(np.sqrt(np.mean(np.square(audio))))
+    return band_ratio, flatness, rms
+
+
+def is_likely_environment_noise(audio16k: np.ndarray) -> bool:
+    band_ratio, flatness, rms = compute_voice_band_metrics(audio16k)
+    return (
+        rms <= VOICE_ENV_RMS_MAX
+        and band_ratio < VOICE_HUMAN_BAND_RATIO_MIN
+        and flatness > VOICE_ENV_FLATNESS_MAX
+    )
+
+
+def looks_like_repetitive_noise_text(text: str) -> bool:
+    tokens = [t for t in normalize_voice_text(text).split() if t]
+    if len(tokens) < 8:
+        return False
+    unique_ratio = len(set(tokens)) / max(1, len(tokens))
+    longest_same_run = 1
+    current_run = 1
+    for prev, cur in zip(tokens, tokens[1:]):
+        if prev == cur:
+            current_run += 1
+            longest_same_run = max(longest_same_run, current_run)
+        else:
+            current_run = 1
+    return unique_ratio < 0.35 or longest_same_run >= 4
+
 
 def should_ignore_short_transcription(
     text: str,
@@ -1724,11 +1774,18 @@ def fallback_answer_for(user_text: str) -> str:
     return "응, 잠깐만."
 
 
-async def ask_llm_once(user_text: str, guild_id: int | None = None, *, source: str = "text") -> str:
+async def ask_llm_once(
+    user_text: str,
+    guild_id: int | None = None,
+    *,
+    source: str = "text",
+    debug_text: str | None = None,
+) -> str:
     messages, cognitive_state, _route = await prepare_llm_messages(
         user_text,
         guild_id=guild_id,
         source=source,
+        debug_text=debug_text,
     )
 
     final_user_text = f"{user_text}\n\n{build_main_response_guidance(cognitive_state)}"
@@ -1838,11 +1895,13 @@ async def ask_llm_streaming(
     on_first_chunk: Callable[[], None] | None = None,
     *,
     source: str = "text",
+    debug_text: str | None = None,
 ) -> str:
     messages, cognitive_state, _route = await prepare_llm_messages(
         user_text,
         guild_id=guild_id,
         source=source,
+        debug_text=debug_text,
     )
 
     final_user_text = f"{user_text}\n\n{build_main_response_guidance(cognitive_state)}"
@@ -1877,7 +1936,7 @@ async def ask_llm_streaming(
                 answer = sanitize_model_output(msg.get("content", ""))
             if not answer:
                 print("[LLM STREAM] json 응답 본문 비어 있음, non-stream 재시도")
-                answer = await ask_llm_once(user_text, guild_id=guild_id, source=source)
+                answer = await ask_llm_once(user_text, guild_id=guild_id, source=source, debug_text=debug_text)
             if on_first_chunk is not None:
                 on_first_chunk()
             if on_sentence is not None:
@@ -1926,7 +1985,7 @@ async def ask_llm_streaming(
         print(
             f"[LLM STREAM] stream 본문 비어 있음, non-stream 재시도 | raw_len={len(''.join(raw_parts))} reasoning_len={len(''.join(reasoning_parts))} emitted_any={emitted_any}"
         )
-        answer = await ask_llm_once(user_text, guild_id=guild_id, source=source)
+        answer = await ask_llm_once(user_text, guild_id=guild_id, source=source, debug_text=debug_text)
 
     if on_sentence is not None:
         ready_chunks, sentence_buffer = split_tts_sentences(sentence_buffer, force=True)
@@ -1946,6 +2005,7 @@ async def ask_llm_and_speak_streaming(
     on_final_answer: Callable[[str], Awaitable[None]] | None = None,
     *,
     source: str = "voice",
+    debug_text: str | None = None,
 ) -> str:
     metrics = {
         "started_at": time.monotonic(),
@@ -1971,6 +2031,7 @@ async def ask_llm_and_speak_streaming(
             on_sentence=enqueue_sentence,
             on_first_chunk=lambda: log_voice_latency(metrics, "llm_first_chunk_logged", "LLM 첫 chunk 시간"),
             source=source,
+            debug_text=debug_text,
         )
         log_voice_stage(metrics, "LLM 완료", extra=f"chars={len(answer)}")
         answer = clean_text(answer)
@@ -2044,6 +2105,17 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes) 
     wake_probe = corrected_text
     text = corrected_text
 
+    if is_likely_environment_noise(audio16k):
+        band_ratio, flatness, rms = compute_voice_band_metrics(audio16k)
+        print(
+            f"[ENV IGNORE] speaker={member.display_name} band_ratio={band_ratio:.3f} flatness={flatness:.3f} rms={rms:.4f} text={text!r}"
+        )
+        return
+
+    if looks_like_repetitive_noise_text(text):
+        print(f"[NOISE TEXT IGNORE] speaker={member.display_name} text={text!r}")
+        return
+
     if not wake_detected:
         if wake_probe:
             print(f"[WAKE IGNORE] {member.display_name}: {wake_probe!r}")
@@ -2070,11 +2142,13 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes) 
 
     log_voice_stage(metrics, "웨이크 통과", extra=f"user_text={strip_voice_wake_word(text)!r}")
 
-    user_text = strip_voice_wake_word(text)
+    raw_user_text = strip_voice_wake_word(text)
+    prompt_user_text = raw_user_text or "사용자가 너를 이름만 불렀다. 아주 짧고 자연스럽게 반응해라."
+    history_user_text = raw_user_text or text
     lock = guild_locks.setdefault(guild_id, asyncio.Lock())
 
     if lock.locked():
-        print(f"[VOICE WAIT] guild={guild_id} speaker={member.display_name} text={user_text!r}")
+        print(f"[VOICE WAIT] guild={guild_id} speaker={member.display_name} text={history_user_text!r}")
         log_voice_stage(metrics, "길드 락 대기", extra=f"guild={guild_id}")
 
     async with lock:
@@ -2089,10 +2163,11 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes) 
         try:
             answer = await ask_llm_and_speak_streaming(
                 vc,
-                user_text,
+                prompt_user_text,
                 guild_id=guild_id,
                 on_final_answer=on_final_answer,
                 source="voice",
+                debug_text=history_user_text,
             )
             log_voice_stage(metrics, "LLM/TTS 완료", extra=f"answer_len={len(answer)}")
         except Exception as e:
@@ -2108,10 +2183,10 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes) 
         if not plain_answer:
             plain_answer = answer
 
-        append_history(user_text, plain_answer)
+        append_history(history_user_text, plain_answer)
         schedule_memory_update(
             guild_id,
-            user_text,
+            history_user_text,
             plain_answer,
             source="voice",
             user_speaker=member.display_name,
@@ -2185,7 +2260,7 @@ async def on_message(message: discord.Message):
                 if AUTO_JOIN_VOICE:
                     vc = await ensure_voice_client(message)
 
-                answer = await ask_llm_once(user_text, guild_id=message.guild.id, source="text")
+                answer = await ask_llm_once(user_text, guild_id=message.guild.id, source="text", debug_text=user_text)
                 plain_answer = strip_omnivoice_tags(answer)
                 if not plain_answer:
                     plain_answer = answer
