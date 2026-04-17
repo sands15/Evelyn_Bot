@@ -689,6 +689,12 @@ async def update_cognitive_state(guild_id: int, user_text: str) -> dict:
             state["main_prompt_hint"] = "짧고 자연스럽게 답해라."
         state["updated_at"] = int(time.time())
         write_json_file(cognitive_state_path(guild_id), state)
+
+        if state.get("action") == "ask" and state.get("suggested_user_question"):
+            print(
+                f"[COGNITIVE ASK] guild={guild_id} question={state['suggested_user_question']!r} reason={state.get('reason_brief', '')!r}"
+            )
+
         return state
 
 
