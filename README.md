@@ -128,12 +128,44 @@ STT 결과에 `이블린`이 들어 있을 때만 응답합니다.
 ### LLM
 
 STT로 얻은 문장을 정리한 뒤, OpenAI 호환 `/v1/chat/completions` 엔드포인트로 보냅니다.
-기본값은 아래입니다.
+기본 응답 모델은 아래처럼 큰 모델을 사용합니다.
 
 - `http://127.0.0.1:9820/v1/chat/completions`
 
+그리고 작은 모델은 별도로 돌려서 실제 답변 대신 메모리 관리에 씁니다.
+
+- `http://127.0.0.1:9821/v1/chat/completions`
+
+즉 역할을 이렇게 나눴습니다.
+
+- 큰 모델: 실제 답변 생성
+- 작은 모델: 롤링 요약 갱신, 장기 기억 후보 추출, 열린 작업 정리
+
 로컬 서버를 쓰는 이유도 결국 레이턴시 때문입니다.
 왕복이 짧고, 응답 속도를 직접 통제하기 쉽습니다.
+
+### 장기 기억 구조
+
+장기 기억은 단순히 이전 대화를 전부 프롬프트에 넣는 방식이 아니라, 작은 모델이 따로 관리하는 구조입니다.
+
+현재는 길드별로 아래 파일들이 생깁니다.
+
+- `bot_memory/guild_<id>/raw_transcript.jsonl`
+- `bot_memory/guild_<id>/rolling_summary.txt`
+- `bot_memory/guild_<id>/durable_facts.jsonl`
+- `bot_memory/guild_<id>/open_questions.jsonl`
+- `bot_memory/guild_<id>/cognitive_state.json`
+- 기존 호환용 `bot_memory/guild_<id>/open_loops.jsonl`
+
+대화가 끝나면 작은 모델이 백그라운드에서 다음 작업을 합니다.
+
+- 최근 raw 원문 로그를 누적 저장
+- 최근 대화를 짧은 요약으로 갱신
+- 오래 기억할 만한 사실 추출
+- 아직 확인이 필요한 질문이나 가설 정리
+
+그리고 새 입력이 오면 작은 모델이 먼저 현재 상황을 보고 `answer`, `ask`, `wait` 중 어떤 태도가 자연스러운지 판단한 뒤, 그 상태를 큰 모델 프롬프트에 힌트로 붙입니다.
+이 방식이 컨텍스트를 무작정 늘리는 것보다 훨씬 안정적이고, 작은 모델을 실제로 유용하게 쓰는 방법에 가깝습니다.
 
 ### TTS
 
@@ -179,9 +211,11 @@ LLM이 답변을 만들면 `main.py`가 직접 모델을 들고 합성하는 대
 - TTS를 PCM 스트리밍으로 받아 첫 청크부터 재생 가능하게 구성
 - HTTP 세션 재사용으로 요청 연결 오버헤드 감소
 - wake word 기반 응답으로 불필요한 호출 감소
+- 너무 짧은 발화와 짧은 잡음 인식 결과 무시
 - 응답 중복 차단과 lock으로 겹치는 처리 방지
+- 작은 모델을 백그라운드 메모리 관리자 역할로 분리
 
-아직 LLM까지 토큰 스트리밍으로 끊어서 읽는 구조는 아니지만, 적어도 TTS 쪽은 파일 저장과 ffmpeg 호출을 없애고 스트리밍 재생 쪽으로 당겨서 체감 지연을 꽤 줄인 상태입니다.
+아직 LLM까지 토큰 스트리밍으로 끊어서 읽는 구조는 아니지만, 적어도 TTS 쪽은 파일 저장과 ffmpeg 호출을 없애고 스트리밍 재생 쪽으로 당겨서 체감 지연을 꽤 줄였고, 메모리 쪽은 작은 모델을 따로 써서 긴 대화 대응력을 보강한 상태입니다.
 
 ## 주요 명령어
 
@@ -216,12 +250,17 @@ pip install -r requirements.txt
 
 필요하면 아래도 조정할 수 있습니다.
 
+- `SUMMARY_LLM_URL`
+- `SUMMARY_MODEL_NAME`
+- `BOT_MEMORY_DIR`
 - `OMNIVOICE_LANGUAGE`
 - `OMNIVOICE_STREAM`
 - `OMNIVOICE_TIMEOUT_SEC`
 - `STT_MODEL_NAME`
 - `WAKE_WORD`
 - `AUTO_JOIN_VOICE`
+- `VOICE_MIN_TRANSCRIBED_LEN`
+- `VOICE_MIN_AUDIO_SEC`
 
 ## 실행 방법
 

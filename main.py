@@ -151,6 +151,7 @@ last_voice_text: dict[int, str] = {}
 last_bot_audio_end_at: dict[int, float] = {}
 bot_speaking_guilds: set[int] = set()
 memory_locks: dict[int, asyncio.Lock] = {}
+cognitive_locks: dict[int, asyncio.Lock] = {}
 
 
 # =========================================================
@@ -211,6 +212,10 @@ def memory_questions_path(guild_id: int) -> Path:
     return guild_memory_dir(guild_id) / "open_questions.jsonl"
 
 
+def cognitive_state_path(guild_id: int) -> Path:
+    return guild_memory_dir(guild_id) / "cognitive_state.json"
+
+
 def memory_loops_path(guild_id: int) -> Path:
     return guild_memory_dir(guild_id) / "open_loops.jsonl"
 
@@ -224,6 +229,21 @@ def read_text_file(path: Path) -> str:
 def write_text_file(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(clean_text(text), encoding="utf-8")
+
+
+def read_json_file(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8", errors="ignore"))
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def write_json_file(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def read_jsonl(path: Path) -> list[dict]:
@@ -341,11 +361,34 @@ def read_question_rows(guild_id: int) -> list[dict]:
     return merged
 
 
-def build_memory_context(guild_id: int, user_text: str) -> str:
+def normalize_cognitive_action(value: str) -> str:
+    action = clean_text(value).lower()
+    if action in {"ask", "question", "clarify"}:
+        return "ask"
+    if action in {"wait", "listen", "hold"}:
+        return "wait"
+    return "answer"
+
+
+def normalize_cognitive_state(data: dict) -> dict:
+    if not isinstance(data, dict):
+        data = {}
+    return {
+        "action": normalize_cognitive_action(str(data.get("action", "answer"))),
+        "state_summary": clean_text(str(data.get("state_summary", ""))),
+        "suggested_user_question": clean_text(str(data.get("suggested_user_question", ""))),
+        "main_prompt_hint": clean_text(str(data.get("main_prompt_hint", ""))),
+        "reason_brief": clean_text(str(data.get("reason_brief", ""))),
+        "updated_at": int(data.get("updated_at", time.time())),
+    }
+
+
+def build_memory_context(guild_id: int, user_text: str, cognitive_state: dict | None = None) -> str:
     summary = read_text_file(memory_summary_path(guild_id))
     raw_rows = read_jsonl(memory_raw_path(guild_id))[-MEMORY_RAW_CONTEXT_LIMIT:]
     facts = select_relevant_memory_rows(user_text, read_jsonl(memory_facts_path(guild_id)), MEMORY_RETRIEVE_LIMIT)
     questions = select_relevant_memory_rows(user_text, read_question_rows(guild_id), 4)
+    state = normalize_cognitive_state(cognitive_state or read_json_file(cognitive_state_path(guild_id)))
 
     parts: list[str] = []
     if summary:
@@ -360,6 +403,20 @@ def build_memory_context(guild_id: int, user_text: str) -> str:
                 if clean_text(str(row.get('text', '')))
             )
         )
+    if state.get("state_summary") or state.get("suggested_user_question") or state.get("main_prompt_hint"):
+        action_label = {
+            "answer": "답하기",
+            "ask": "질문하기",
+            "wait": "더 듣기",
+        }.get(state.get("action", "answer"), "답하기")
+        state_lines = [f"- 권장 행동: {action_label}"]
+        if state.get("state_summary"):
+            state_lines.append(f"- 현재 판단: {state['state_summary']}")
+        if state.get("suggested_user_question"):
+            state_lines.append(f"- 물어볼 후보: {state['suggested_user_question']}")
+        if state.get("main_prompt_hint"):
+            state_lines.append(f"- 응답 힌트: {state['main_prompt_hint']}")
+        parts.append("현재 내부 상태:\n" + "\n".join(state_lines))
     if facts:
         parts.append(
             "장기 기억 후보:\n" + "\n".join(f"- {clean_text(str(row.get('text', '')))}" for row in facts)
@@ -400,16 +457,21 @@ def extract_json_object(text: str) -> dict:
     return {}
 
 
-async def ask_summary_llm(messages: list[dict]) -> dict:
+async def ask_summary_llm(
+    messages: list[dict],
+    *,
+    max_tokens: int = 500,
+    timeout_seconds: float = 90,
+) -> dict:
     session = await get_http_session()
     payload = {
         "model": SUMMARY_MODEL_NAME,
         "messages": messages,
         "temperature": 0.1,
-        "max_tokens": 500,
+        "max_tokens": max_tokens,
         "stream": False,
     }
-    timeout = aiohttp.ClientTimeout(total=90)
+    timeout = aiohttp.ClientTimeout(total=timeout_seconds)
 
     async with session.post(SUMMARY_LLM_URL, json=payload, timeout=timeout) as resp:
         if resp.status != 200:
@@ -424,6 +486,64 @@ async def ask_summary_llm(messages: list[dict]) -> dict:
         msg = choices[0].get("message", {})
         text = clean_text(msg.get("content", "") or msg.get("reasoning_content", ""))
         return extract_json_object(text)
+
+
+async def update_cognitive_state(guild_id: int, user_text: str) -> dict:
+    lock = cognitive_locks.setdefault(guild_id, asyncio.Lock())
+    async with lock:
+        current_summary = read_text_file(memory_summary_path(guild_id))
+        current_state = normalize_cognitive_state(read_json_file(cognitive_state_path(guild_id)))
+        recent_raw = read_jsonl(memory_raw_path(guild_id))[-10:]
+        recent_facts = read_jsonl(memory_facts_path(guild_id))[-8:]
+        recent_questions = read_question_rows(guild_id)[-8:]
+
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "너는 실시간 대화 조율자다. 반드시 JSON 객체 하나만 출력한다. "
+                    "형식은 {\"action\": \"answer|ask|wait\", \"state_summary\": string, \"suggested_user_question\": string, \"main_prompt_hint\": string, \"reason_brief\": string}. "
+                    "answer는 지금 답하면 되는 경우다. ask는 짧게 되묻거나 확인 질문을 하는 편이 자연스러운 경우다. wait는 아직 단정하지 말고 더 듣거나 짧게 여지를 두는 편이 자연스러운 경우다. "
+                    "state_summary에는 현재 상황을 한두 문장으로 적어라. suggested_user_question에는 ask일 때 특히 유용한 실제 질문 후보를 한 문장으로 적어라. wait면 비워도 된다. "
+                    "main_prompt_hint에는 메인 LLM이 말할 때 지켜야 할 한 줄 힌트를 적어라. reason_brief는 아주 짧게 써라. JSON 외 다른 텍스트는 절대 출력하지 마라."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"이전 cognitive_state:\n{json.dumps(current_state, ensure_ascii=False)}\n\n"
+                    f"현재 rolling_summary:\n{current_summary or '(없음)'}\n\n"
+                    f"최근 raw_transcript:\n{json.dumps(recent_raw, ensure_ascii=False)}\n\n"
+                    f"최근 durable_facts:\n{json.dumps(recent_facts, ensure_ascii=False)}\n\n"
+                    f"최근 open_questions:\n{json.dumps(recent_questions, ensure_ascii=False)}\n\n"
+                    f"현재 사용자 입력:\n{clean_text(user_text)}"
+                ),
+            },
+        ]
+
+        try:
+            result = await ask_summary_llm(messages, max_tokens=220, timeout_seconds=45)
+        except Exception as e:
+            print(f"[COGNITIVE] 상태 업데이트 실패: {e}")
+            fallback = current_state or {
+                "action": "answer",
+                "state_summary": clean_text(user_text),
+                "suggested_user_question": "",
+                "main_prompt_hint": "짧고 자연스럽게 답해라.",
+                "reason_brief": "fallback",
+                "updated_at": int(time.time()),
+            }
+            write_json_file(cognitive_state_path(guild_id), fallback)
+            return fallback
+
+        state = normalize_cognitive_state(result)
+        if not state.get("state_summary"):
+            state["state_summary"] = current_state.get("state_summary", "") or clean_text(user_text)
+        if not state.get("main_prompt_hint"):
+            state["main_prompt_hint"] = "짧고 자연스럽게 답해라."
+        state["updated_at"] = int(time.time())
+        write_json_file(cognitive_state_path(guild_id), state)
+        return state
 
 
 async def update_long_term_memory(guild_id: int, user_text: str, answer: str) -> None:
@@ -1379,7 +1499,8 @@ async def ask_llm_once(user_text: str, guild_id: int | None = None) -> str:
     messages = list(conversation_history)
 
     if guild_id is not None:
-        memory_context = build_memory_context(guild_id, user_text)
+        cognitive_state = await update_cognitive_state(guild_id, user_text)
+        memory_context = build_memory_context(guild_id, user_text, cognitive_state=cognitive_state)
         if memory_context:
             base_system = messages[0]["content"] if messages and messages[0].get("role") == "system" else ""
             merged_system = clean_text(base_system + "\n\n" + memory_context)
@@ -1501,7 +1622,8 @@ async def ask_llm_streaming(
     messages = list(conversation_history)
 
     if guild_id is not None:
-        memory_context = build_memory_context(guild_id, user_text)
+        cognitive_state = await update_cognitive_state(guild_id, user_text)
+        memory_context = build_memory_context(guild_id, user_text, cognitive_state=cognitive_state)
         if memory_context:
             base_system = messages[0]["content"] if messages and messages[0].get("role") == "system" else ""
             merged_system = clean_text(base_system + "\n\n" + memory_context)
