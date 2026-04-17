@@ -146,6 +146,7 @@ class EvelynVoiceClient(discord.VoiceClient):
         self.utterance_states: dict[int, dict] = {}
         self.utterance_count = 0
         self.utterance_queue: asyncio.Queue = asyncio.Queue(maxsize=32)
+        self._utterance_processing_tasks: set[asyncio.Task] = set()
 
     def _decrypt_standard_voice_packet(self, packet_bytes: bytes) -> tuple[bytes, dict] | None:
         info = _parse_rtp_header(packet_bytes)
@@ -714,7 +715,20 @@ class EvelynVoiceClient(discord.VoiceClient):
                 last_seq = packets[-1]["sequence"] if packet_count else -1
                 total_payload = sum(len(p["payload"]) for p in packets)
 
-                await self._process_utterance_packets(item)
+                log.info(
+                    "UTTERANCE DISPATCH | idx=%d ssrc=%d packets=%d first_seq=%d last_seq=%d payload=%d active=%d",
+                    idx,
+                    ssrc,
+                    packet_count,
+                    first_seq,
+                    last_seq,
+                    total_payload,
+                    len(self._utterance_processing_tasks),
+                )
+
+                task = asyncio.create_task(self._process_utterance_packets(item))
+                self._utterance_processing_tasks.add(task)
+                task.add_done_callback(self._utterance_processing_tasks.discard)
         except asyncio.CancelledError:
             pass
 
@@ -951,6 +965,10 @@ class EvelynVoiceClient(discord.VoiceClient):
         if self._utterance_task is not None:
             self._utterance_task.cancel()
             self._utterance_task = None
+
+        for task in list(self._utterance_processing_tasks):
+            task.cancel()
+        self._utterance_processing_tasks.clear()
 
         if self.sink is not None:
             self.sink.cleanup()

@@ -55,7 +55,7 @@ VAD_RMS_THRESHOLD = float(os.getenv("VAD_RMS_THRESHOLD", "0.008"))
 VAD_PEAK_THRESHOLD = float(os.getenv("VAD_PEAK_THRESHOLD", "0.020"))
 VAD_MIN_VOICED_RATIO = float(os.getenv("VAD_MIN_VOICED_RATIO", "0.015"))
 VAD_CHUNK_MS = float(os.getenv("VAD_CHUNK_MS", "32"))
-VAD_START_CONSECUTIVE = int(os.getenv("VAD_START_CONSECUTIVE", "3"))
+VAD_START_CONSECUTIVE = int(os.getenv("VAD_START_CONSECUTIVE", "2"))
 
 DENOISE_ENABLED = os.getenv("DENOISE_ENABLED", "true").lower() == "true"
 DENOISE_HIGHPASS_HZ = float(os.getenv("DENOISE_HIGHPASS_HZ", "120"))
@@ -1376,8 +1376,7 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes) 
     lock = guild_locks.setdefault(guild_id, asyncio.Lock())
 
     if lock.locked():
-        print(f"[VOICE SKIP] busy guild={guild_id} text={user_text!r}")
-        return
+        print(f"[VOICE WAIT] guild={guild_id} speaker={member.display_name} text={user_text!r}")
 
     async with lock:
         vc = guild.voice_client
