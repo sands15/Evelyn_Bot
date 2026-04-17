@@ -499,15 +499,6 @@ class EvelynVoiceClient(discord.VoiceClient):
                 and current_stats is not None
                 and int(current_stats.get("successes") or 0) > 0
             ):
-                if log_allowed:
-                    log.warning(
-                        "DAVE INNER raw fallback | user_id=%s ssrc=%s in_len=%d prefix=%s stats=%r",
-                        user_id,
-                        ssrc,
-                        len(outer_plain),
-                        outer_plain[:8].hex(),
-                        current_stats,
-                    )
                 return outer_plain, user_id
 
             if log_allowed:

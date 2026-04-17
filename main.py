@@ -893,7 +893,24 @@ async def warmup_tts_server() -> None:
         print("OmniVoice 서버 준비 확인 완료")
 
 
-async def create_omnivoice_source(text: str) -> OmniVoicePCMStream:
+def log_voice_latency(metrics: dict | None, key: str, label: str) -> None:
+    if not metrics or metrics.get(key):
+        return
+
+    started_at = metrics.get("started_at")
+    if started_at is None:
+        return
+
+    elapsed_ms = (time.monotonic() - float(started_at)) * 1000.0
+    metrics[key] = True
+    print(f"[VOICE LATENCY] {label}: {elapsed_ms:.0f}ms")
+
+
+async def create_omnivoice_source(
+    text: str,
+    *,
+    on_first_byte: Callable[[], None] | None = None,
+) -> OmniVoicePCMStream:
     text = clean_tts_text(text)
     if not text:
         raise ValueError("TTS 텍스트가 비어 있습니다.")
@@ -915,6 +932,8 @@ async def create_omnivoice_source(text: str) -> OmniVoicePCMStream:
             if OMNIVOICE_LANGUAGE:
                 payload["language"] = OMNIVOICE_LANGUAGE
 
+            first_byte_logged = False
+
             async with session.post(
                 f"{OMNIVOICE_SERVER_URL}/v1/audio/speech",
                 json=payload,
@@ -925,6 +944,9 @@ async def create_omnivoice_source(text: str) -> OmniVoicePCMStream:
 
                 async for chunk in resp.content.iter_chunked(8192):
                     if chunk:
+                        if on_first_byte is not None and not first_byte_logged:
+                            on_first_byte()
+                            first_byte_logged = True
                         source.feed_pcm24_mono(chunk)
                 return True, ""
 
@@ -1057,7 +1079,12 @@ async def wait_until_not_playing(vc: discord.VoiceClient) -> None:
         await asyncio.sleep(0.05)
 
 
-async def play_audio_source(vc: discord.VoiceClient, source: discord.AudioSource) -> None:
+async def play_audio_source(
+    vc: discord.VoiceClient,
+    source: discord.AudioSource,
+    *,
+    on_play_start: Callable[[], None] | None = None,
+) -> None:
     await wait_until_not_playing(vc)
 
     done = asyncio.Event()
@@ -1068,6 +1095,8 @@ async def play_audio_source(vc: discord.VoiceClient, source: discord.AudioSource
             playback_error[0] = err
         bot.loop.call_soon_threadsafe(done.set)
 
+    if on_play_start is not None:
+        on_play_start()
     vc.play(source, after=after_play)
     await done.wait()
 
@@ -1096,6 +1125,8 @@ async def speak_answer(vc: discord.VoiceClient, answer: str) -> None:
 async def stream_tts_sentences(
     vc: discord.VoiceClient,
     sentence_queue: "asyncio.Queue[str | None]",
+    *,
+    metrics: dict | None = None,
 ) -> None:
     guild_id = getattr(getattr(vc, "guild", None), "id", None)
     did_speak = False
@@ -1115,8 +1146,15 @@ async def stream_tts_sentences(
                     bot_speaking_guilds.add(guild_id)
 
                 did_speak = True
-                source = await create_omnivoice_source(sentence)
-                await play_audio_source(vc, source)
+                source = await create_omnivoice_source(
+                    sentence,
+                    on_first_byte=lambda: log_voice_latency(metrics, "tts_first_byte_logged", "TTS 첫 바이트 도착 시간"),
+                )
+                await play_audio_source(
+                    vc,
+                    source,
+                    on_play_start=lambda: log_voice_latency(metrics, "playback_start_logged", "첫 재생 시작 시간"),
+                )
         finally:
             if guild_id is not None:
                 bot_speaking_guilds.discard(guild_id)
@@ -1225,6 +1263,7 @@ async def ask_llm_streaming(
     user_text: str,
     guild_id: int | None = None,
     on_sentence: Callable[[str], Awaitable[None]] | None = None,
+    on_first_chunk: Callable[[], None] | None = None,
 ) -> str:
     final_user_text = (
         f"{user_text}\n\n"
@@ -1275,6 +1314,8 @@ async def ask_llm_streaming(
                     answer = extract_answer_from_reasoning(msg.get("reasoning_content", ""), user_text)
             if not answer:
                 answer = fallback_answer_for(user_text)
+            if on_first_chunk is not None:
+                on_first_chunk()
             if on_sentence is not None:
                 await on_sentence(answer)
             return answer
@@ -1298,6 +1339,10 @@ async def ask_llm_streaming(
             delta_text = extract_stream_delta_text(data)
             if not delta_text:
                 continue
+
+            if on_first_chunk is not None:
+                on_first_chunk()
+                on_first_chunk = None
 
             raw_parts.append(delta_text)
             sentence_buffer += delta_text
@@ -1329,8 +1374,14 @@ async def ask_llm_and_speak_streaming(
     guild_id: int | None = None,
     on_final_answer: Callable[[str], Awaitable[None]] | None = None,
 ) -> str:
+    metrics = {
+        "started_at": time.monotonic(),
+        "llm_first_chunk_logged": False,
+        "tts_first_byte_logged": False,
+        "playback_start_logged": False,
+    }
     sentence_queue: asyncio.Queue[str | None] = asyncio.Queue()
-    playback_task = asyncio.create_task(stream_tts_sentences(vc, sentence_queue))
+    playback_task = asyncio.create_task(stream_tts_sentences(vc, sentence_queue, metrics=metrics))
     llm_error: Exception | None = None
     answer = ""
 
@@ -1340,7 +1391,12 @@ async def ask_llm_and_speak_streaming(
             await sentence_queue.put(sentence)
 
     try:
-        answer = await ask_llm_streaming(user_text, guild_id=guild_id, on_sentence=enqueue_sentence)
+        answer = await ask_llm_streaming(
+            user_text,
+            guild_id=guild_id,
+            on_sentence=enqueue_sentence,
+            on_first_chunk=lambda: log_voice_latency(metrics, "llm_first_chunk_logged", "LLM 첫 chunk 시간"),
+        )
         answer = clean_text(answer)
         if answer and on_final_answer is not None:
             await on_final_answer(answer)
