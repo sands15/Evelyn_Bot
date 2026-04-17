@@ -33,6 +33,7 @@ from evelyn_core.text import (
     looks_like_repetitive_noise_text,
     normalize_omnivoice_tags,
     normalize_voice_text,
+    normalized_wake_words,
     strip_leading_voice_fillers,
     strip_omnivoice_tags,
     strip_voice_wake_word,
@@ -87,6 +88,59 @@ def append_history(user_text: str, answer: str) -> None:
     conversation_history.append({"role": "user", "content": clean_text(user_text)})
     conversation_history.append({"role": "assistant", "content": clean_text(answer)})
     trim_history()
+
+
+def should_ignore_short_transcription(
+    text: str,
+    pcm_bytes: bytes,
+    *,
+    wake_detected: bool = False,
+) -> bool:
+    text_n = normalize_voice_text(text)
+    if not text_n:
+        return True
+
+    if text_n in normalized_wake_words():
+        return False
+
+    if wake_detected and len(text_n) >= WAKE_SHORT_TEXT_KEEP_LEN:
+        return False
+
+    audio_sec = len(pcm_bytes) / (RATE * CHANNELS * 2)
+    if audio_sec < MIN_AUDIO_SEC and len(text_n) < MIN_TRANSCRIBED_LEN:
+        return True
+
+    return False
+
+
+def should_reply_to_voice(guild_id: int, text: str, *, wake_detected: bool = False) -> tuple[bool, str]:
+    now = time.monotonic()
+    text_n = normalize_voice_text(text)
+
+    if guild_id in bot_speaking_guilds:
+        return False, "bot_is_speaking"
+
+    if now - last_bot_audio_end_at.get(guild_id, 0.0) < POST_TTS_IGNORE_SEC:
+        return False, "post_tts_ignore"
+
+    if not text_n:
+        return False, "empty"
+
+    if not wake_detected and not contains_wake_word(text_n):
+        return False, "no_wake_word"
+
+    if len(text_n) < MIN_TEXT_LEN and not wake_detected:
+        return False, "too_short"
+
+    if now - last_voice_reply_at.get(guild_id, 0.0) < REPLY_COOLDOWN_SEC:
+        return False, "cooldown"
+
+    if is_similar(text_n, last_voice_text.get(guild_id, "")):
+        return False, "duplicate"
+
+    last_voice_text[guild_id] = text_n
+    last_voice_reply_at[guild_id] = now
+    return True, "ok"
 
 
 def ask_confidence_threshold_for_source(source: str) -> float:
