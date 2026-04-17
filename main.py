@@ -99,7 +99,7 @@ WAKE_WORDS = [
     w.strip()
     for w in os.getenv(
         "WAKE_WORDS",
-        "이별인,이별링,이벨링,에벌링,이블린,이불린,이불링,이브린,이브링,입을린,입을링,이블닝,이블링,이별린,이벌린,에블린,에브린,에블링,에브링,에벌린,이벨린,이반린,불리읍,이블리,이별된"
+        "이별인,이별링,이벨링,에벌링,이블린,이불린,이불링,이브린,이브링,입을린,입을링,이블닝,이블링,이별린,이벌린,에블린,에브린,에블링,에브링,에벌린,이벨린,이반린,불리읍,이블리,이별된,이벨리나,이별레인"
     ).split(",")
     if w.strip()
 ]
@@ -517,28 +517,20 @@ def extract_answer_from_reasoning(reasoning: str, user_text: str) -> str:
             continue
         candidates.append(q)
 
-    for raw_line in text.splitlines():
-        line = strip_markdown_noise(raw_line)
-        if not line:
-            continue
-        if not re.search(r"[가-힣]", line):
-            continue
-        if looks_like_meta_line(line):
-            continue
-        if clean_text(line) == clean_text(user_text):
-            continue
-        candidates.append(line)
-
-    sentence_candidates = re.findall(r"[가-힣0-9 ,~…?!\.]+[?!\.]", text)
-    for s in sentence_candidates:
-        s = strip_markdown_noise(s)
-        if not s:
-            continue
-        if looks_like_meta_line(s):
-            continue
-        if clean_text(s) == clean_text(user_text):
-            continue
-        candidates.append(s)
+    explicit_patterns = [
+        r"(?:최종\s*답변|답변|response|assistant)\s*[:：]\s*([^\n]{4,120})",
+        r"(?:최종\s*출력|final\s*answer)\s*[:：]\s*([^\n]{4,120})",
+    ]
+    for pattern in explicit_patterns:
+        for match in re.findall(pattern, text, flags=re.IGNORECASE):
+            candidate = strip_markdown_noise(match)
+            if not candidate or not re.search(r"[가-힣]", candidate):
+                continue
+            if looks_like_meta_line(candidate):
+                continue
+            if clean_text(candidate) == clean_text(user_text):
+                continue
+            candidates.append(candidate)
 
     seen = set()
     filtered: list[str] = []
@@ -549,18 +541,9 @@ def extract_answer_from_reasoning(reasoning: str, user_text: str) -> str:
         seen.add(c)
         if len(c) < 6 or len(c) > 120:
             continue
-        if clean_text(user_text) in c and len(c) <= len(clean_text(user_text)) + 6:
-            continue
         filtered.append(c)
 
-    if not filtered:
-        return ""
-
-    for c in reversed(filtered):
-        if re.search(r"[가-힣]", c):
-            return c
-
-    return filtered[-1]
+    return filtered[-1] if filtered else ""
 
 
 def normalize_voice_text(s: str) -> str:
@@ -577,6 +560,11 @@ def contains_wake_word(text: str) -> bool:
     if not text_n:
         return False
     return any(w in text_n for w in normalized_wake_words())
+
+
+def strip_leading_voice_fillers(text: str) -> str:
+    text = clean_text(text)
+    return re.sub(r"^(?:아+|어+|음+|흠+|저기|야|아니)[,\s]+", "", text, count=1)
 
 
 def contains_leading_wake_word(text: str) -> bool:
@@ -606,7 +594,7 @@ def contains_leading_wake_word(text: str) -> bool:
 
 
 def strip_voice_wake_word(text: str) -> str:
-    text_n = clean_text(text)
+    text_n = strip_leading_voice_fillers(text)
 
     for wake_word in WAKE_WORDS:
         ww = wake_word.strip()
@@ -634,32 +622,25 @@ def apply_stt_post_corrections(text: str, *, wake_detected: bool = False) -> str
     if not text:
         return text
 
-    corrections = [
-        (r"\b이\s*블\s*린\b", "이블린"),
-        (r"\b이\s*브\s*린\b", "이블린"),
-        (r"\b에\s*블\s*린\b", "에블린"),
-        (r"\b에\s*브\s*린\b", "에브린"),
-        (r"\b이\s*벨\s*린\b", "이벨린"),
-        (r"\b이\s*벌\s*린\b", "이벌린"),
+    leading_fillers = ""
+    filler_match = re.match(r"^((?:아+|어+|음+|흠+|저기|야|아니)[,\s]+)", text)
+    if filler_match:
+        leading_fillers = filler_match.group(1)
+        text = text[len(leading_fillers):].lstrip()
+
+    wake_variants = [
+        "이블린", "이불린", "이브린", "이벨린", "이벌린", "에블린", "에브린",
+        "이블리", "이별인", "이별린", "이벨링", "에벌린", "입을린",
     ]
 
-    corrected = text
-    for pattern, replacement in corrections:
-        corrected = re.sub(pattern, replacement, corrected, flags=re.IGNORECASE)
+    for variant in wake_variants:
+        pattern_front = rf"^{re.escape(variant)}(?:[아야])?(?=(?:[,.!?\s]|$))[,.!?\s]*"
+        if re.match(pattern_front, text):
+            rest = clean_text(re.sub(pattern_front, "", text, count=1))
+            normalized = clean_text(f"이블린 {rest}" if rest else "이블린")
+            return clean_text(f"{leading_fillers}{normalized}" if leading_fillers else normalized)
 
-    corrected = clean_text(corrected)
-
-    if wake_detected:
-        for wake_word in WAKE_WORDS:
-            ww = wake_word.strip()
-            if not ww:
-                continue
-            pattern_front = rf"^\s*{re.escape(ww)}[아야]?\s*[, ]*"
-            if re.match(pattern_front, corrected):
-                rest = clean_text(re.sub(pattern_front, "", corrected, count=1))
-                return clean_text(f"이블린 {rest}" if rest else "이블린")
-
-    return corrected
+    return clean_text(f"{leading_fillers}{text}" if leading_fillers else text)
 
 def is_similar(a: str, b: str) -> bool:
     if not a or not b:
@@ -1466,10 +1447,9 @@ async def ask_llm_streaming(
             if choices:
                 msg = choices[0].get("message", {})
                 answer = sanitize_model_output(msg.get("content", ""))
-                if not answer:
-                    answer = extract_answer_from_reasoning(msg.get("reasoning_content", ""), user_text)
             if not answer:
-                answer = fallback_answer_for(user_text)
+                print("[LLM STREAM] json 응답 본문 비어 있음, non-stream 재시도")
+                answer = await ask_llm_once(user_text, guild_id=guild_id)
             if on_first_chunk is not None:
                 on_first_chunk()
             if on_sentence is not None:
@@ -1514,16 +1494,11 @@ async def ask_llm_streaming(
                     await on_sentence(chunk)
 
     answer = sanitize_model_output("".join(raw_parts))
-    if not answer and reasoning_parts:
-        answer = extract_answer_from_reasoning("".join(reasoning_parts), user_text)
-        if answer:
-            print("[LLM STREAM] reasoning_content에서 답변 복구")
-
     if not answer:
         print(
-            f"[LLM STREAM] fallback 사용 | raw_len={len(''.join(raw_parts))} reasoning_len={len(''.join(reasoning_parts))} emitted_any={emitted_any}"
+            f"[LLM STREAM] stream 본문 비어 있음, non-stream 재시도 | raw_len={len(''.join(raw_parts))} reasoning_len={len(''.join(reasoning_parts))} emitted_any={emitted_any}"
         )
-        answer = fallback_answer_for(user_text)
+        answer = await ask_llm_once(user_text, guild_id=guild_id)
 
     if on_sentence is not None:
         ready_chunks, sentence_buffer = split_tts_sentences(sentence_buffer, force=True)
@@ -1618,7 +1593,7 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes) 
         return
 
     corrected_text = apply_stt_post_corrections(text, wake_detected=False)
-    wake_detected = contains_wake_word(corrected_text)
+    wake_detected = contains_leading_wake_word(strip_leading_voice_fillers(corrected_text))
     wake_probe = corrected_text
     text = corrected_text
 
