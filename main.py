@@ -1,10 +1,14 @@
 import audioop
 import json
+import os
 import queue
 import re
 import shutil
+import subprocess
+import sys
 import time
 import asyncio
+from pathlib import Path
 from typing import Awaitable, Callable, Optional
 
 import aiohttp
@@ -1841,6 +1845,33 @@ async def leave_voice(ctx):
 
     await vc.disconnect()
     await ctx.send("👋 나갔어.")
+
+
+async def restart_bot_process() -> None:
+    await asyncio.sleep(1.0)
+    script_path = Path(__file__).resolve()
+    subprocess.Popen(
+        [sys.executable, str(script_path)],
+        cwd=str(script_path.parent),
+        env=os.environ.copy(),
+        close_fds=True,
+    )
+    os._exit(0)
+
+
+@bot.command(name="재시작", aliases=["restart"])
+@commands.has_guild_permissions(administrator=True)
+async def restart_bot_command(ctx):
+    await ctx.send("🔄 봇을 재시작할게. 잠깐만 기다려줘.")
+    asyncio.create_task(restart_bot_process())
+
+
+@restart_bot_command.error
+async def restart_bot_command_error(ctx, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("이 명령은 서버 관리자 권한이 있어야 쓸 수 있어.")
+        return
+    raise error
 
 
 @bot.command(name="접두사", aliases=["prefix"])
