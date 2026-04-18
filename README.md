@@ -32,7 +32,7 @@ Evelyn Bot은 디스코드에서 텍스트와 음성으로 대화하는 개인�
   - DAVE 처리
   - UDP / gateway / sink 구현
 - `start.bat`
-  - 사용자용 통합 실행 진입점, 내부적으로 `evelyn_core\start.bat`를 호출
+  - 루트에 남겨두는 유일한 실행 진입점, 내부적으로 `evelyn_core\start.bat`를 호출
 - `evelyn_core\start.bat`
   - LLM 서버 2개와 OmniVoice 서버를 띄우는 실제 통합 배치 파일
 - `run_bot.bat`

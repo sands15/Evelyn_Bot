@@ -1,7 +1,7 @@
 @echo off
 chcp 65001 >nul
 setlocal
-call "%~dp0start_env.bat"
+call "%~dp0evelyn_core\start_env.bat"
 pushd "%~dp0"
 
 if "%DISCORD_BOT_TOKEN%"=="" (
