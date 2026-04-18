@@ -1,12 +1,14 @@
 @echo off
 chcp 65001 >nul
 setlocal
-set OPUS_ERROR_TO_SILENCE=false
+call "%~dp0start_env.bat"
+pushd "%~dp0"
 
 if "%DISCORD_BOT_TOKEN%"=="" (
   echo [Evelyn] DISCORD_BOT_TOKEN 환경변수가 설정되지 않았습니다.
   echo [Evelyn] .env.example 을 참고해서 먼저 환경변수를 준비하세요.
-  exit /b 1
+  popd
+  endlocal & exit /b 1
 )
 
 if exist .venv\Scripts\python.exe (
@@ -15,4 +17,6 @@ if exist .venv\Scripts\python.exe (
   py -3 main.py
 )
 
-endlocal
+set "EXIT_CODE=%ERRORLEVEL%"
+popd
+endlocal & exit /b %EXIT_CODE%
