@@ -26,7 +26,6 @@ from evelyn_core.audio import (
     is_likely_environment_noise,
     is_probably_silent,
     prepare_stt_audio,
-    resample_audio_float,
     slice_audio_window,
 )
 from evelyn_core.config import *
@@ -1122,31 +1121,45 @@ def transcribe_audio16k_sync(audio16k: np.ndarray, max_new_tokens: int = 256, *,
     print(f"[STT INPUT][{stage}] sampling_rate={sampling_rate} samples={audio16k.size} sec={audio16k.size / float(max(1, sampling_rate)):.2f}")
     processor, model = get_stt_model()
 
-    processor_rate = getattr(getattr(processor, "feature_extractor", None), "sampling_rate", None)
-    if processor_rate is None:
-        processor_rate = getattr(processor, "sampling_rate", TARGET_RATE)
-    processor_rate = max(1, int(processor_rate or TARGET_RATE))
-
     stt_audio = np.asarray(audio16k, dtype=np.float32)
     effective_rate = max(1, int(sampling_rate))
-    if effective_rate != processor_rate:
-        stt_audio = resample_audio_float(stt_audio, effective_rate, processor_rate)
-        print(
-            f"[STT RESAMPLE][{stage}] from={effective_rate} to={processor_rate} in_samples={audio16k.size} out_samples={stt_audio.size}"
+    use_raw48_path = STT_USE_RAW_48K and effective_rate == RATE
+
+    if use_raw48_path:
+        feature_extractor = getattr(processor, "feature_extractor", None)
+        if feature_extractor is None:
+            raise RuntimeError("STT processor has no feature_extractor for raw 48k path")
+
+        original_rate = getattr(feature_extractor, "sampling_rate", TARGET_RATE)
+        feature_extractor.sampling_rate = effective_rate
+        try:
+            inputs = feature_extractor(
+                stt_audio,
+                sampling_rate=effective_rate,
+                return_tensors="pt",
+            )
+        finally:
+            feature_extractor.sampling_rate = original_rate
+
+        prompt_ids = processor.get_decoder_prompt_ids(
+            language=STT_LANGUAGE,
+            punctuation=STT_FORCE_PUNCTUATION,
         )
-        effective_rate = processor_rate
+        batch_size = inputs["input_features"].shape[0]
+        inputs["decoder_input_ids"] = torch.tensor([prompt_ids] * batch_size, dtype=torch.long)
+        print(f"[STT RAW48][{stage}] processor_bypass=true sampling_rate={effective_rate}")
+    else:
+        processor_kwargs = {
+            "sampling_rate": effective_rate,
+            "return_tensors": "pt",
+        }
+        if STT_FORCE_LANGUAGE:
+            processor_kwargs["language"] = STT_LANGUAGE
 
-    processor_kwargs = {
-        "sampling_rate": effective_rate,
-        "return_tensors": "pt",
-    }
-    if STT_FORCE_LANGUAGE:
-        processor_kwargs["language"] = STT_LANGUAGE
-
-    inputs = processor(
-        stt_audio,
-        **processor_kwargs,
-    )
+        inputs = processor(
+            stt_audio,
+            **processor_kwargs,
+        )
 
     moved = {}
     for k, v in inputs.items():
