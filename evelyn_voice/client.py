@@ -9,6 +9,7 @@ from copy import deepcopy
 
 import davey
 import discord
+import numpy as np
 from discord.opus import Decoder
 from nacl.bindings import crypto_aead_xchacha20poly1305_ietf_decrypt
 
@@ -37,7 +38,64 @@ VOICE_START_STABLE_PACKETS = max(1, int(os.getenv("VOICE_START_STABLE_PACKETS", 
 VOICE_GAP_CONCEAL_MAX = max(0, int(os.getenv("VOICE_GAP_CONCEAL_MAX", "6")))
 VOICE_LEADING_GOOD_DROP_PACKETS = max(0, int(os.getenv("VOICE_LEADING_GOOD_DROP_PACKETS", "0")))
 VOICE_HARD_TRIM_MS = max(0.0, float(os.getenv("VOICE_HARD_TRIM_MS", "0")))
+VOICE_DYNAMIC_TRIM_ENABLE = os.getenv("VOICE_DYNAMIC_TRIM_ENABLE", "true").lower() == "true"
+VOICE_DYNAMIC_TRIM_MIN_MS = max(0.0, float(os.getenv("VOICE_DYNAMIC_TRIM_MIN_MS", "60")))
+VOICE_DYNAMIC_TRIM_MAX_MS = max(VOICE_DYNAMIC_TRIM_MIN_MS, float(os.getenv("VOICE_DYNAMIC_TRIM_MAX_MS", "480")))
+VOICE_DYNAMIC_TRIM_CONSECUTIVE = max(1, int(os.getenv("VOICE_DYNAMIC_TRIM_CONSECUTIVE", "3")))
 VOICE_PCM_BYTES_PER_MS = int((48000 * 2 * 2) / 1000)
+
+
+def _pcm16le_stereo_to_mono_float(pcm_bytes: bytes) -> np.ndarray:
+    audio = np.frombuffer(pcm_bytes, dtype=np.int16)
+    if audio.size == 0:
+        return np.zeros(0, dtype=np.float32)
+    audio = audio.reshape(-1, 2).mean(axis=1)
+    return (audio.astype(np.float32) / 32768.0).astype(np.float32)
+
+
+def _estimate_leading_trim_ms(pcm_bytes: bytes, *, sampling_rate: int = 48000) -> tuple[float, dict]:
+    if not VOICE_DYNAMIC_TRIM_ENABLE or not pcm_bytes:
+        return VOICE_HARD_TRIM_MS, {"stable_ms": None, "body_rms": 0.0}
+
+    audio = _pcm16le_stereo_to_mono_float(pcm_bytes)
+    if audio.size < int(max(1, sampling_rate) * 0.25):
+        return VOICE_HARD_TRIM_MS, {"stable_ms": None, "body_rms": 0.0}
+
+    sr = max(1, int(sampling_rate))
+    inspect_samples = min(audio.size, int(sr * 0.9))
+    window = max(1, int(sr * 0.02))
+    body_start = int(sr * 0.6) if audio.size > int(sr * 0.8) else int(audio.size * 0.5)
+    body = audio[body_start:]
+    body_rms = float(np.sqrt(np.mean(np.square(body))) + 1e-12) if body.size else 0.0
+
+    consecutive = 0
+    stable_ms = None
+    for idx, start in enumerate(range(0, inspect_samples, window)):
+        chunk = audio[start:start + window]
+        if chunk.size == 0:
+            break
+        rms = float(np.sqrt(np.mean(np.square(chunk))) + 1e-12)
+        zcr = float(np.mean(chunk[:-1] * chunk[1:] < 0)) if chunk.size > 1 else 0.0
+        spec = np.abs(np.fft.rfft(chunk * np.hanning(chunk.size))) + 1e-9
+        freqs = np.fft.rfftfreq(chunk.size, d=1.0 / sr)
+        flatness = float(np.exp(np.mean(np.log(spec))) / np.mean(spec)) if spec.size else 1.0
+        hi_ratio = float(spec[freqs >= 5000.0].sum() / spec.sum()) if spec.size and spec.sum() > 0 else 1.0
+        voiced_like = (
+            rms > max(0.01, body_rms * 0.35)
+            and zcr < 0.22
+            and flatness < 0.35
+            and hi_ratio < 0.18
+        )
+        consecutive = consecutive + 1 if voiced_like else 0
+        if consecutive >= VOICE_DYNAMIC_TRIM_CONSECUTIVE:
+            stable_ms = max(0.0, (idx - VOICE_DYNAMIC_TRIM_CONSECUTIVE + 1) * 20.0)
+            break
+
+    trim_ms = max(VOICE_HARD_TRIM_MS, 0.0 if stable_ms is None else stable_ms)
+    if trim_ms < VOICE_DYNAMIC_TRIM_MIN_MS:
+        trim_ms = VOICE_HARD_TRIM_MS
+    trim_ms = min(trim_ms, VOICE_DYNAMIC_TRIM_MAX_MS)
+    return trim_ms, {"stable_ms": stable_ms, "body_rms": body_rms}
 
 
 def _parse_rtp_header(packet: bytes):
@@ -1172,6 +1230,21 @@ class EvelynVoiceClient(discord.VoiceClient):
             self.runtime.bind_dave_ssrc(int(user_id), int(ssrc))
 
         pcm_bytes = b"".join(pcm_chunks)
+        trim_ms, trim_meta = _estimate_leading_trim_ms(pcm_bytes)
+        trim_bytes = int(trim_ms * VOICE_PCM_BYTES_PER_MS)
+        trim_bytes -= trim_bytes % 4
+        min_keep_bytes = VOICE_PCM_BYTES_PER_MS * 120
+        if trim_bytes > 0 and len(pcm_bytes) > trim_bytes + min_keep_bytes:
+            pcm_bytes = pcm_bytes[trim_bytes:]
+            log.info(
+                "LEADING PCM TRIM | idx=%d ssrc=%d trim_ms=%.0f stable_ms=%s body_rms=%.4f out_bytes=%d",
+                idx,
+                ssrc,
+                trim_ms,
+                f"{trim_meta.get('stable_ms'):.0f}" if trim_meta.get("stable_ms") is not None else "?",
+                float(trim_meta.get("body_rms") or 0.0),
+                len(pcm_bytes),
+            )
 
         member = None
         try:
