@@ -31,6 +31,9 @@ VOICE_MAP_RETRY_MS = float(os.getenv("VOICE_MAP_RETRY_MS", "700"))
 VOICE_MAP_RETRY_MAX = max(0, int(os.getenv("VOICE_MAP_RETRY_MAX", "2")))
 VOICE_INITIAL_MAP_HOLD_MS = float(os.getenv("VOICE_INITIAL_MAP_HOLD_MS", "900"))
 VOICE_DAVE_WARMUP_GRACE_PACKETS = max(0, int(os.getenv("VOICE_DAVE_WARMUP_GRACE_PACKETS", "6")))
+VOICE_PENDING_SSRC_MAX_PACKETS = max(1, int(os.getenv("VOICE_PENDING_SSRC_MAX_PACKETS", "96")))
+VOICE_LEADING_DROP_MAX_PACKETS = max(0, int(os.getenv("VOICE_LEADING_DROP_MAX_PACKETS", "8")))
+VOICE_START_STABLE_PACKETS = max(1, int(os.getenv("VOICE_START_STABLE_PACKETS", "2")))
 
 
 def _parse_rtp_header(packet: bytes):
@@ -152,6 +155,7 @@ class EvelynVoiceClient(discord.VoiceClient):
         self.preroll_packet_limit = max(0, int(round(float(os.getenv("VOICE_PREROLL_MS", "520")) / 20.0)))
 
         self.utterance_states: dict[int, dict] = {}
+        self.pending_ssrc_packets: dict[int, deque] = {}
         self.utterance_count = 0
         self.utterance_queue: asyncio.Queue = asyncio.Queue(maxsize=32)
         self._utterance_processing_tasks: set[asyncio.Task] = set()
@@ -605,6 +609,12 @@ class EvelynVoiceClient(discord.VoiceClient):
                     "received_at": asyncio.get_running_loop().time(),
                 }
 
+                pending = self.pending_ssrc_packets.setdefault(
+                    int(info["ssrc"]),
+                    deque(maxlen=VOICE_PENDING_SSRC_MAX_PACKETS),
+                )
+                pending.append(packet_info)
+
                 try:
                     self.media_queue.put_nowait(packet_info)
                 except asyncio.QueueFull:
@@ -815,19 +825,25 @@ class EvelynVoiceClient(discord.VoiceClient):
                 retry_delay_ms = hold_remaining
                 retry_reason = "initial_map_hold"
 
-            if map_retry < VOICE_MAP_RETRY_MAX and retry_delay_ms > 0:
+            pending_packets = list(self.pending_ssrc_packets.get(int(ssrc), ()))
+            if pending_packets and map_retry < VOICE_MAP_RETRY_MAX and retry_delay_ms > 0:
                 retry_delay = max(0.0, retry_delay_ms / 1000.0)
                 log.info(
-                    "VOICE MAP RETRY | idx=%d ssrc=%d retry=%d/%d delay_ms=%d reason=%s",
+                    "VOICE MAP RETRY | idx=%d ssrc=%d retry=%d/%d delay_ms=%d reason=%s pending=%d",
                     idx,
                     ssrc,
                     map_retry + 1,
                     VOICE_MAP_RETRY_MAX,
                     int(retry_delay_ms),
                     retry_reason,
+                    len(pending_packets),
                 )
                 retry_item = deepcopy(item)
                 retry_item["map_retry"] = map_retry + 1
+                retry_item["packets"] = pending_packets
+                first_pending = pending_packets[0].get("received_at") if pending_packets else None
+                if first_pending is not None:
+                    retry_item["utterance_started_at"] = first_pending
 
                 async def _requeue_map_retry() -> None:
                     await asyncio.sleep(retry_delay)
@@ -872,6 +888,10 @@ class EvelynVoiceClient(discord.VoiceClient):
         pcm_chunks: list[bytes] = []
         SILENCE_PCM = b"\x00" * (960 * 2 * 2)
         dave_warmup_fallbacks = 0
+
+        leading_bad_packets = 0
+        stable_voice_packets = 0
+        started_output = False
 
         for packet_index, p in enumerate(packets, start=1):
             raw_packet = p.get("raw_packet")
@@ -954,13 +974,16 @@ class EvelynVoiceClient(discord.VoiceClient):
 
             if opus_packet == b"\xF8\xFF\xFE":
                 real_silence += 1
-                pcm_chunks.append(SILENCE_PCM)
-                success += 1
+                if started_output:
+                    pcm_chunks.append(SILENCE_PCM)
+                    success += 1
                 continue
 
             if len(opus_packet) < 8:
                 failed += 1
                 opus_fail += 1
+                if not started_output and leading_bad_packets < VOICE_LEADING_DROP_MAX_PACKETS:
+                    leading_bad_packets += 1
                 if packet_index <= 5:
                     log.warning(
                         "PACKET too short | idx=%d pkt=%d seq=%d ts=%d len=%d",
@@ -977,6 +1000,21 @@ class EvelynVoiceClient(discord.VoiceClient):
             except Exception as e:
                 failed += 1
                 opus_fail += 1
+                if not started_output and leading_bad_packets < VOICE_LEADING_DROP_MAX_PACKETS:
+                    leading_bad_packets += 1
+                    if packet_index <= 5:
+                        log.warning(
+                            "PACKET OPUS failed -> leading drop | idx=%d pkt=%d seq=%d ts=%d bytes=%d err=%r dropped=%d/%d",
+                            idx,
+                            packet_index,
+                            p["sequence"],
+                            p["timestamp"],
+                            len(opus_packet),
+                            e,
+                            leading_bad_packets,
+                            VOICE_LEADING_DROP_MAX_PACKETS,
+                        )
+                    continue
                 if OPUS_ERROR_TO_SILENCE:
                     opus_silence_fill += 1
                     pcm_chunks.append(SILENCE_PCM)
@@ -1006,8 +1044,15 @@ class EvelynVoiceClient(discord.VoiceClient):
             if not pcm:
                 failed += 1
                 opus_fail += 1
+                if not started_output and leading_bad_packets < VOICE_LEADING_DROP_MAX_PACKETS:
+                    leading_bad_packets += 1
                 continue
 
+            stable_voice_packets += 1
+            if not started_output and stable_voice_packets < VOICE_START_STABLE_PACKETS:
+                continue
+
+            started_output = True
             pcm_chunks.append(pcm)
             success += 1
 
@@ -1024,9 +1069,9 @@ class EvelynVoiceClient(discord.VoiceClient):
             if first_received_at is not None:
                 first_packet_wait_ms = (processing_started_at - float(first_received_at)) * 1000.0
 
-        if self._should_log_timing(first_packet_wait_ms, queue_wait_ms, decrypt_ms, utterance_total_ms):
+        if self._should_log_timing(first_packet_wait_ms, queue_wait_ms, decrypt_ms, utterance_total_ms) or leading_bad_packets > 0:
             log.info(
-                "DECRYPT SUMMARY | idx=%d packets=%d success=%d failed=%d pcm_chunks=%d dave_ok=%d dave_warmup_fallbacks=%d outer_fail=%d dave_fail=%d opus_fail=%d opus_silence_fill=%d real_silence=%d first_packet_wait_ms=%s queue_wait_ms=%s decrypt_ms=%.0f utterance_total_ms=%s",
+                "DECRYPT SUMMARY | idx=%d packets=%d success=%d failed=%d pcm_chunks=%d dave_ok=%d dave_warmup_fallbacks=%d outer_fail=%d dave_fail=%d opus_fail=%d opus_silence_fill=%d real_silence=%d leading_bad=%d started_output=%s first_packet_wait_ms=%s queue_wait_ms=%s decrypt_ms=%.0f utterance_total_ms=%s",
                 idx,
                 len(packets),
                 success,
@@ -1039,6 +1084,8 @@ class EvelynVoiceClient(discord.VoiceClient):
                 opus_fail,
                 opus_silence_fill,
                 real_silence,
+                leading_bad_packets,
+                started_output,
                 f"{first_packet_wait_ms:.0f}" if first_packet_wait_ms is not None else "?",
                 f"{queue_wait_ms:.0f}" if queue_wait_ms is not None else "?",
                 decrypt_ms,
@@ -1101,6 +1148,7 @@ class EvelynVoiceClient(discord.VoiceClient):
             self.sink = None
 
         self.utterance_states.clear()
+        self.pending_ssrc_packets.clear()
 
         log.info("Receive loop stopped")
 
