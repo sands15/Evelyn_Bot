@@ -41,19 +41,21 @@ silero_vad_model = None
 silero_vad_warned = False
 
 
-def compute_voice_band_metrics(audio16k: np.ndarray) -> tuple[float, float, float]:
+def compute_voice_band_metrics(audio: np.ndarray, sampling_rate: int = TARGET_RATE) -> tuple[float, float, float]:
     """주파수 대역 분포와 flatness, RMS를 계산해 사람 목소리/환경음 구분에 쓴다."""
-    if audio16k.size == 0:
+    if audio.size == 0:
         return 0.0, 1.0, 0.0
 
-    audio = np.asarray(audio16k, dtype=np.float32)
+    audio = np.asarray(audio, dtype=np.float32)
     spectrum = np.abs(np.fft.rfft(audio))
     if spectrum.size == 0:
         return 0.0, 1.0, 0.0
 
-    freqs = np.fft.rfftfreq(len(audio), d=1.0 / TARGET_RATE)
+    effective_rate = max(1, int(sampling_rate))
+    freqs = np.fft.rfftfreq(len(audio), d=1.0 / effective_rate)
     total_energy = float(np.sum(spectrum)) + 1e-8
-    human_mask = (freqs >= 85.0) & (freqs <= 3400.0)
+    human_hi = min(3400.0, (effective_rate / 2.0) - 1.0)
+    human_mask = (freqs >= 85.0) & (freqs <= max(85.0, human_hi))
     human_energy = float(np.sum(spectrum[human_mask]))
     band_ratio = human_energy / total_energy
 
@@ -65,9 +67,9 @@ def compute_voice_band_metrics(audio16k: np.ndarray) -> tuple[float, float, floa
     return band_ratio, flatness, rms
 
 
-def is_likely_environment_noise(audio16k: np.ndarray) -> bool:
+def is_likely_environment_noise(audio: np.ndarray, sampling_rate: int = TARGET_RATE) -> bool:
     """저레벨 환경음처럼 보이는 오디오인지 스펙트럼 특성으로 판정한다."""
-    band_ratio, flatness, rms = compute_voice_band_metrics(audio16k)
+    band_ratio, flatness, rms = compute_voice_band_metrics(audio, sampling_rate=sampling_rate)
     return (
         rms <= VOICE_ENV_RMS_MAX
         and band_ratio < VOICE_HUMAN_BAND_RATIO_MIN
@@ -95,21 +97,22 @@ def downmix_and_resample_int16_stereo_to_mono16k(pcm_bytes: bytes) -> np.ndarray
     return audio
 
 
-def apply_light_denoise(audio16k: np.ndarray) -> np.ndarray:
-    if not DENOISE_ENABLED or audio16k.size == 0:
-        return audio16k
+def apply_light_denoise(audio_in: np.ndarray, sampling_rate: int = TARGET_RATE) -> np.ndarray:
+    if not DENOISE_ENABLED or audio_in.size == 0:
+        return audio_in
 
-    audio = np.asarray(audio16k, dtype=np.float32).copy()
+    audio = np.asarray(audio_in, dtype=np.float32).copy()
+    effective_rate = max(1, int(sampling_rate))
 
     if torchaudio_F is not None:
         try:
             tensor = torch.from_numpy(audio)
-            tensor = torchaudio_F.highpass_biquad(tensor, TARGET_RATE, DENOISE_HIGHPASS_HZ)
+            tensor = torchaudio_F.highpass_biquad(tensor, effective_rate, DENOISE_HIGHPASS_HZ)
             audio = tensor.cpu().numpy().astype(np.float32)
         except Exception:
             pass
 
-    noise_len = min(len(audio), max(1, int(TARGET_RATE * DENOISE_NOISE_FLOOR_SEC)))
+    noise_len = min(len(audio), max(1, int(effective_rate * DENOISE_NOISE_FLOOR_SEC)))
     noise_sample = np.abs(audio[:noise_len]) if noise_len > 0 else np.abs(audio)
     base_floor = float(np.percentile(noise_sample, 65)) if noise_sample.size else 0.0
     global_floor = float(np.percentile(np.abs(audio), 20)) if audio.size else 0.0
@@ -129,6 +132,17 @@ def apply_light_denoise(audio16k: np.ndarray) -> np.ndarray:
     return audio.astype(np.float32)
 
 
+def downmix_int16_stereo_to_mono_float(pcm_bytes: bytes) -> np.ndarray:
+    audio = np.frombuffer(pcm_bytes, dtype=np.int16)
+    if audio.size == 0:
+        return np.zeros(0, dtype=np.float32)
+
+    if CHANNELS == 2:
+        audio = audio.reshape(-1, 2).mean(axis=1)
+
+    return (audio.astype(np.float32) / 32768.0).astype(np.float32)
+
+
 def prepare_stt_audio(pcm_bytes: bytes) -> np.ndarray:
     """디스코드 PCM을 mono 16kHz로 바꾸고 경량 denoise까지 적용한다."""
     audio16k = downmix_and_resample_int16_stereo_to_mono16k(pcm_bytes)
@@ -137,11 +151,11 @@ def prepare_stt_audio(pcm_bytes: bytes) -> np.ndarray:
     return apply_light_denoise(audio16k)
 
 
-def slice_audio_window(audio16k: np.ndarray, max_sec: float) -> np.ndarray:
-    if audio16k.size == 0 or max_sec <= 0:
-        return audio16k
-    sample_len = max(1, int(TARGET_RATE * max_sec))
-    return audio16k[:sample_len].copy()
+def slice_audio_window(audio: np.ndarray, max_sec: float, sampling_rate: int = TARGET_RATE) -> np.ndarray:
+    if audio.size == 0 or max_sec <= 0:
+        return audio
+    sample_len = max(1, int(max(1, int(sampling_rate)) * max_sec))
+    return audio[:sample_len].copy()
 
 
 def get_silero_vad_model():
@@ -174,17 +188,17 @@ def _is_voiced_vad_chunk_energy(chunk: np.ndarray) -> bool:
     return rms >= VAD_RMS_THRESHOLD and voiced_ratio >= VAD_MIN_VOICED_RATIO
 
 
-def is_probably_silent_energy(audio16k: np.ndarray) -> bool:
+def is_probably_silent_energy(audio: np.ndarray, sampling_rate: int = TARGET_RATE) -> bool:
     """경량 energy 기반 규칙으로 음성 시작이 없는 구간인지 판정한다."""
-    if audio16k.size == 0:
+    if audio.size == 0:
         return True
 
-    chunk_samples = max(1, int(TARGET_RATE * (VAD_CHUNK_MS / 1000.0)))
+    chunk_samples = max(1, int(max(1, int(sampling_rate)) * (VAD_CHUNK_MS / 1000.0)))
     required_streak = max(1, VAD_START_CONSECUTIVE)
     voiced_streak = 0
 
-    for start in range(0, len(audio16k), chunk_samples):
-        chunk = audio16k[start:start + chunk_samples]
+    for start in range(0, len(audio), chunk_samples):
+        chunk = audio[start:start + chunk_samples]
         if _is_voiced_vad_chunk_energy(chunk):
             voiced_streak += 1
             if voiced_streak >= required_streak:
@@ -195,18 +209,24 @@ def is_probably_silent_energy(audio16k: np.ndarray) -> bool:
     return True
 
 
-def is_probably_silent_silero(audio16k: np.ndarray) -> bool:
+def is_probably_silent_silero(audio: np.ndarray, sampling_rate: int = TARGET_RATE) -> bool:
     """Silero VAD 타임스탬프가 비어 있으면 무음으로 본다."""
-    if audio16k.size == 0:
+    if audio.size == 0:
         return True
 
+    effective_rate = max(1, int(sampling_rate))
+    vad_audio = np.asarray(audio, dtype=np.float32)
+    if effective_rate != TARGET_RATE:
+        vad_audio = downmix_and_resample_int16_stereo_to_mono16k((np.clip(vad_audio, -1.0, 1.0) * 32767.0).astype(np.int16).tobytes())
+        effective_rate = TARGET_RATE
+
     model = get_silero_vad_model()
-    audio_tensor = torch.from_numpy(np.asarray(audio16k, dtype=np.float32))
+    audio_tensor = torch.from_numpy(np.asarray(vad_audio, dtype=np.float32))
     speech_timestamps = get_speech_timestamps(
         audio_tensor,
         model,
         threshold=SILERO_VAD_THRESHOLD,
-        sampling_rate=TARGET_RATE,
+        sampling_rate=effective_rate,
         min_speech_duration_ms=SILERO_MIN_SPEECH_MS,
         min_silence_duration_ms=SILERO_MIN_SILENCE_MS,
         speech_pad_ms=SILERO_SPEECH_PAD_MS,
@@ -215,11 +235,11 @@ def is_probably_silent_silero(audio16k: np.ndarray) -> bool:
     return len(speech_timestamps) == 0
 
 
-def is_probably_silent(audio16k: np.ndarray) -> bool:
+def is_probably_silent(audio: np.ndarray, sampling_rate: int = TARGET_RATE) -> bool:
     """Silero 결과를 우선 쓰되 필요하면 energy fallback/override로 보정한다."""
     global silero_vad_warned
 
-    if audio16k.size == 0:
+    if audio.size == 0:
         return True
 
     if not VAD_ENABLED:
@@ -227,15 +247,15 @@ def is_probably_silent(audio16k: np.ndarray) -> bool:
 
     if VAD_PROVIDER == "silero":
         try:
-            silero_silent = is_probably_silent_silero(audio16k)
+            silero_silent = is_probably_silent_silero(audio, sampling_rate=sampling_rate)
             if silero_silent:
-                energy_silent = is_probably_silent_energy(audio16k)
+                energy_silent = is_probably_silent_energy(audio, sampling_rate=sampling_rate)
                 if not energy_silent:
-                    duration_sec = len(audio16k) / float(TARGET_RATE)
-                    peak = float(np.max(np.abs(audio16k))) if audio16k.size else 0.0
-                    rms = float(np.sqrt(np.mean(np.square(audio16k)))) if audio16k.size else 0.0
+                    duration_sec = len(audio) / float(max(1, int(sampling_rate)))
+                    peak = float(np.max(np.abs(audio))) if audio.size else 0.0
+                    rms = float(np.sqrt(np.mean(np.square(audio)))) if audio.size else 0.0
                     print(
-                        f"[VAD OVERRIDE] silero=silent energy=voiced sec={duration_sec:.2f} peak={peak:.4f} rms={rms:.4f}"
+                        f"[VAD OVERRIDE] silero=silent energy=voiced sampling_rate={sampling_rate} sec={duration_sec:.2f} peak={peak:.4f} rms={rms:.4f}"
                     )
                     return False
             return silero_silent
@@ -243,6 +263,6 @@ def is_probably_silent(audio16k: np.ndarray) -> bool:
             if not silero_vad_warned:
                 print(f"[VAD FALLBACK] Silero VAD 실패 -> energy 사용 | err={e}")
                 silero_vad_warned = True
-            return is_probably_silent_energy(audio16k)
+            return is_probably_silent_energy(audio, sampling_rate=sampling_rate)
 
-    return is_probably_silent_energy(audio16k)
+    return is_probably_silent_energy(audio, sampling_rate=sampling_rate)

@@ -21,6 +21,7 @@ from transformers import AutoProcessor, CohereAsrForConditionalGeneration
 
 from evelyn_core.audio import (
     compute_voice_band_metrics,
+    downmix_int16_stereo_to_mono_float,
     is_likely_environment_noise,
     is_probably_silent,
     prepare_stt_audio,
@@ -331,8 +332,9 @@ def build_main_response_guidance(cognitive_state: dict | None = None, *, source:
     if action == "ask":
         parts.append("지금은 바로 단정하기보다 사용자의 원래 발화에 이어서 짧은 확인 질문을 먼저 하는 편이 자연스럽다.")
         parts.append("질문형 태그가 필요하면 [question-en], [question-ah], [question-oh], [question-ei], [question-yi] 중 하나만 골라라.")
+        parts.append("ask 모드에서는 question_for_user의 의미를 바꾸지 말고 거의 그대로 사용해라. 새 정보 추가, 해석 확장, 답변형 전환을 하지 마라.")
         if state.get("question_for_user"):
-            parts.append(f"사용자에게 되물을 내부 질문 초안: {state['question_for_user']}")
+            parts.append(f"사용자에게 그대로 되물을 문장: {state['question_for_user']}")
     elif action == "wait":
         parts.append("지금은 길게 답하지 말고, 더 들을 여지를 두는 짧은 반응이 자연스럽다.")
         parts.append("wait 상황에서는 감정 태그를 거의 쓰지 말고, 정말 필요할 때만 [sigh] 같은 약한 태그 하나만 써라.")
@@ -387,7 +389,7 @@ async def prepare_llm_messages(
         saved_state = read_json_file(cognitive_state_path(guild_id))
         cognitive_state = normalize_cognitive_state(saved_state) if saved_state else None
 
-    if guild_id is not None and route != "main_direct":
+    if guild_id is not None:
         memory_context = build_memory_context(guild_id, user_text, cognitive_state=cognitive_state)
         if memory_context:
             base_system = messages[0]["content"] if messages and messages[0].get("role") == "system" else ""
@@ -1111,14 +1113,15 @@ def get_stt_model() -> tuple[AutoProcessor, CohereAsrForConditionalGeneration]:
     return stt_processor, stt_model
 
 
-def transcribe_audio16k_sync(audio16k: np.ndarray, max_new_tokens: int = 256) -> str:
+def transcribe_audio16k_sync(audio16k: np.ndarray, max_new_tokens: int = 256, *, sampling_rate: int = TARGET_RATE, stage: str = "full") -> str:
     if audio16k.size == 0:
         return ""
 
+    print(f"[STT INPUT][{stage}] sampling_rate={sampling_rate} samples={audio16k.size} sec={audio16k.size / float(max(1, sampling_rate)):.2f}")
     processor, model = get_stt_model()
 
     processor_kwargs = {
-        "sampling_rate": TARGET_RATE,
+        "sampling_rate": sampling_rate,
         "return_tensors": "pt",
     }
     if STT_FORCE_LANGUAGE:
@@ -1165,9 +1168,14 @@ def transcribe_audio16k_sync(audio16k: np.ndarray, max_new_tokens: int = 256) ->
     return clean_text(text)
 
 
-def detect_wake_word_sync(audio16k: np.ndarray) -> tuple[bool, str]:
-    wake_audio = slice_audio_window(audio16k, WAKE_AUDIO_SEC)
-    wake_text = transcribe_audio16k_sync(wake_audio, max_new_tokens=WAKE_MAX_TOKENS)
+def detect_wake_word_sync(audio: np.ndarray, *, sampling_rate: int = TARGET_RATE) -> tuple[bool, str]:
+    wake_audio = slice_audio_window(audio, WAKE_AUDIO_SEC, sampling_rate=sampling_rate)
+    wake_text = transcribe_audio16k_sync(
+        wake_audio,
+        max_new_tokens=WAKE_MAX_TOKENS,
+        sampling_rate=sampling_rate,
+        stage="wake",
+    )
     return contains_leading_wake_word(wake_text), wake_text
 
 
@@ -1360,7 +1368,11 @@ async def ask_llm_once(
         debug_text=debug_text,
     )
 
-    final_user_text = f"{user_text}\n\n{build_main_response_guidance(cognitive_state, source=source)}"
+    guided_user_text = user_text
+    gated_state = apply_ask_gating(cognitive_state, source=source) if cognitive_state is not None else None
+    if gated_state and gated_state.get("action") == "ask" and gated_state.get("question_for_user"):
+        guided_user_text = clean_text(str(gated_state.get("question_for_user", "")))
+    final_user_text = f"{guided_user_text}\n\n{build_main_response_guidance(cognitive_state, source=source)}"
 
     payload = {
         "model": MODEL_NAME,
@@ -1476,7 +1488,11 @@ async def ask_llm_streaming(
         debug_text=debug_text,
     )
 
-    final_user_text = f"{user_text}\n\n{build_main_response_guidance(cognitive_state, source=source)}"
+    guided_user_text = user_text
+    gated_state = apply_ask_gating(cognitive_state, source=source) if cognitive_state is not None else None
+    if gated_state and gated_state.get("action") == "ask" and gated_state.get("question_for_user"):
+        guided_user_text = clean_text(str(gated_state.get("question_for_user", "")))
+    final_user_text = f"{guided_user_text}\n\n{build_main_response_guidance(cognitive_state, source=source)}"
 
     payload = {
         "model": MODEL_NAME,
@@ -1645,24 +1661,34 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes) 
     metrics = {"started_at": time.monotonic()}
     log_voice_stage(metrics, "process_member_audio 시작", extra=f"speaker={member.display_name} pcm_bytes={len(pcm_bytes)}")
 
-    audio16k = prepare_stt_audio(pcm_bytes)
+    if STT_USE_RAW_48K:
+        audio16k = downmix_int16_stereo_to_mono_float(pcm_bytes)
+        audio_for_wake = apply_light_denoise(audio16k, sampling_rate=RATE)
+        stt_sampling_rate = RATE
+        wake_sampling_rate = RATE
+    else:
+        audio16k = prepare_stt_audio(pcm_bytes)
+        audio_for_wake = audio16k
+        stt_sampling_rate = TARGET_RATE
+        wake_sampling_rate = TARGET_RATE
     speaker_name = member.display_name or str(member.id)
     if audio16k.size == 0:
         log_voice_stage(metrics, "오디오 비어있음")
         return
 
-    if VAD_ENABLED and is_probably_silent(audio16k):
-        duration_sec = len(audio16k) / float(TARGET_RATE)
+    if VAD_ENABLED and is_probably_silent(audio16k, sampling_rate=stt_sampling_rate):
+        duration_sec = len(audio16k) / float(max(1, stt_sampling_rate))
         peak = float(np.max(np.abs(audio16k))) if audio16k.size else 0.0
         rms = float(np.sqrt(np.mean(np.square(audio16k)))) if audio16k.size else 0.0
-        print(f"[VAD IGNORE] speaker={member.display_name} sec={duration_sec:.2f} peak={peak:.4f} rms={rms:.4f}")
+        print(f"[FULL STT SKIP] reason=vad_ignore speaker={member.display_name} sampling_rate={stt_sampling_rate} sec={duration_sec:.2f} peak={peak:.4f} rms={rms:.4f}")
+        print(f"[VAD IGNORE] speaker={member.display_name} sampling_rate={stt_sampling_rate} sec={duration_sec:.2f} peak={peak:.4f} rms={rms:.4f}")
         save_voice_debug_audio(guild_id, speaker_name, pcm_bytes, audio16k, final_text="[VAD IGNORE]")
-        log_voice_stage(metrics, "VAD 무음 판정", extra=f"sec={duration_sec:.2f} peak={peak:.4f} rms={rms:.4f}")
+        log_voice_stage(metrics, "VAD 무음 판정", extra=f"sampling_rate={stt_sampling_rate} sec={duration_sec:.2f} peak={peak:.4f} rms={rms:.4f}")
         return
 
-    log_voice_stage(metrics, "웨이크 프로브 시작", extra=f"samples={audio16k.size}")
+    log_voice_stage(metrics, "웨이크 프로브 시작", extra=f"samples={audio_for_wake.size} sampling_rate={wake_sampling_rate}")
     try:
-        wake_detected, wake_probe_raw = await asyncio.to_thread(detect_wake_word_sync, audio16k)
+        wake_detected, wake_probe_raw = await asyncio.to_thread(detect_wake_word_sync, audio_for_wake, sampling_rate=wake_sampling_rate)
     except Exception as e:
         print(f"❌ [WAKE STT] {e}")
         log_voice_stage(metrics, "웨이크 프로브 실패", extra=repr(e))
@@ -1672,8 +1698,9 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes) 
     wake_detected = wake_detected or contains_leading_wake_word(strip_leading_voice_fillers(wake_probe))
     log_voice_stage(metrics, "웨이크 프로브 완료", extra=f"wake={wake_detected} probe_len={len(wake_probe)}")
 
-    if is_likely_environment_noise(audio16k):
-        band_ratio, flatness, rms = compute_voice_band_metrics(audio16k)
+    if is_likely_environment_noise(audio_for_wake, sampling_rate=wake_sampling_rate):
+        band_ratio, flatness, rms = compute_voice_band_metrics(audio_for_wake, sampling_rate=wake_sampling_rate)
+        print(f"[FULL STT SKIP] reason=env_ignore speaker={member.display_name} probe={wake_probe!r}")
         print(
             f"[ENV IGNORE] speaker={member.display_name} band_ratio={band_ratio:.3f} flatness={flatness:.3f} rms={rms:.4f} probe={wake_probe!r}"
         )
@@ -1681,26 +1708,54 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes) 
         return
 
     if looks_like_brief_filler_text(wake_probe):
+        print(f"[FULL STT SKIP] reason=filler_ignore speaker={member.display_name} probe={wake_probe!r}")
         print(f"[FILLER IGNORE] speaker={member.display_name} probe={wake_probe!r}")
         save_voice_debug_audio(guild_id, speaker_name, pcm_bytes, audio16k, wake_probe=wake_probe, final_text="[FILLER IGNORE]")
         log_voice_stage(metrics, "짧은 필러 무시", extra=f"probe={wake_probe!r}")
         return
 
     if looks_like_repetitive_noise_text(wake_probe):
+        print(f"[FULL STT SKIP] reason=noise_text_ignore speaker={member.display_name} probe={wake_probe!r}")
         print(f"[NOISE TEXT IGNORE] speaker={member.display_name} probe={wake_probe!r}")
         save_voice_debug_audio(guild_id, speaker_name, pcm_bytes, audio16k, wake_probe=wake_probe, final_text="[NOISE TEXT IGNORE]")
         return
 
     if not wake_detected:
+        print(f"[FULL STT SKIP] reason=wake_ignore speaker={member.display_name} probe={wake_probe!r}")
         if wake_probe:
             print(f"[WAKE IGNORE] {member.display_name}: {wake_probe!r}")
         save_voice_debug_audio(guild_id, speaker_name, pcm_bytes, audio16k, wake_probe=wake_probe, final_text="[WAKE IGNORE]")
-        log_voice_stage(metrics, "웨이크 미검출", extra=f"probe={wake_probe!r}")
-        return
+        full_probe_text = ""
+        if wake_probe and len(strip_leading_voice_fillers(wake_probe)) >= 2:
+            try:
+                full_probe_text = await asyncio.to_thread(
+                    transcribe_audio16k_sync,
+                    audio16k,
+                    WAKE_MAX_TOKENS + 48,
+                    sampling_rate=stt_sampling_rate,
+                    stage="wake-fallback",
+                )
+            except Exception as e:
+                print(f"❌ [WAKE FALLBACK STT] {e}")
 
+        if full_probe_text:
+            fallback_probe = apply_stt_post_corrections(full_probe_text, wake_detected=False)
+            fallback_wake = contains_leading_wake_word(strip_leading_voice_fillers(fallback_probe))
+            if fallback_wake:
+                wake_detected = True
+                wake_probe = fallback_probe
+                print(f"[WAKE FALLBACK HIT] speaker={member.display_name} probe={wake_probe!r}")
+            else:
+                print(f"[WAKE FALLBACK MISS] speaker={member.display_name} probe={fallback_probe!r}")
+
+        if not wake_detected:
+            log_voice_stage(metrics, "웨이크 미검출", extra=f"probe={wake_probe!r}")
+            return
+
+    print(f"[FULL STT ENTER] speaker={member.display_name} sampling_rate={stt_sampling_rate} samples={audio16k.size}")
     log_voice_stage(metrics, "본문 STT 시작", extra=f"samples={audio16k.size}")
     try:
-        text = await asyncio.to_thread(transcribe_audio16k_sync, audio16k, VOICE_STT_MAX_NEW_TOKENS)
+        text = await asyncio.to_thread(transcribe_audio16k_sync, audio16k, VOICE_STT_MAX_NEW_TOKENS, sampling_rate=stt_sampling_rate, stage="full")
     except Exception as e:
         print(f"❌ [STT] {e}")
         log_voice_stage(metrics, "본문 STT 실패", extra=repr(e))
@@ -2069,7 +2124,7 @@ async def set_guild_prefix_error(ctx, error):
 
 
 @bot.command(name="초기화", aliases=["reset"])
-@commands.has_guild_permissions(manage_guild=True)
+@commands.check(lambda ctx: ctx.author.id in ALLOWED_RESTART_USER_IDS)
 async def reset_guild_memory(ctx):
     if ctx.guild is None:
         await ctx.send("이 명령은 길드에서만 쓸 수 있어.")
@@ -2088,8 +2143,8 @@ async def reset_guild_memory(ctx):
 
 @reset_guild_memory.error
 async def reset_guild_memory_error(ctx, error):
-    if isinstance(error, commands.MissingPermissions):
-        await ctx.send("이 명령은 서버 관리 권한이 있어야 쓸 수 있어.")
+    if isinstance(error, commands.CheckFailure):
+        await ctx.send("이 명령은 허용된 사용자만 쓸 수 있어.")
         return
     raise error
 
