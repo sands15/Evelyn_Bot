@@ -1111,7 +1111,9 @@ def resolve_stt_torch_dtype() -> torch.dtype:
 def get_stt_model() -> tuple[str, Any, Any]:
     global stt_processor, stt_model, stt_backend
 
-    if stt_processor is not None and stt_model is not None and stt_backend is not None:
+    if stt_backend == "qwen" and stt_model is not None:
+        return stt_backend, stt_processor, stt_model
+    if stt_backend == "cohere" and stt_processor is not None and stt_model is not None:
         return stt_backend, stt_processor, stt_model
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
