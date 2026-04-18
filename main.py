@@ -20,6 +20,7 @@ from discord.ext import commands
 from transformers import AutoProcessor, CohereAsrForConditionalGeneration
 
 from evelyn_core.audio import (
+    apply_light_denoise,
     compute_voice_band_metrics,
     downmix_int16_stereo_to_mono_float,
     is_likely_environment_noise,
