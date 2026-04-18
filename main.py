@@ -10,7 +10,7 @@ import time
 import asyncio
 import wave
 from pathlib import Path
-from typing import Awaitable, Callable, Optional
+from typing import Any, Awaitable, Callable, Optional
 
 import aiohttp
 import numpy as np
@@ -18,6 +18,11 @@ import torch
 import discord
 from discord.ext import commands
 from transformers import AutoProcessor, CohereAsrForConditionalGeneration
+
+try:
+    from qwen_asr import Qwen3ASRModel
+except Exception:
+    Qwen3ASRModel = None
 
 from evelyn_core.audio import (
     apply_light_denoise,
@@ -109,8 +114,9 @@ guild_locks: dict[int, asyncio.Lock] = {}
 tts_lock = asyncio.Lock()
 voice_debug_counts: dict[int, int] = {}
 
-stt_processor: Optional[AutoProcessor] = None
-stt_model: Optional[CohereAsrForConditionalGeneration] = None
+stt_processor: Optional[Any] = None
+stt_model: Optional[Any] = None
+stt_backend: Optional[str] = None
 http_session: Optional[aiohttp.ClientSession] = None
 
 last_voice_reply_at: dict[int, float] = {}
@@ -1087,18 +1093,55 @@ async def create_omnivoice_source(
 # =========================================================
 # STT
 # =========================================================
-def get_stt_model() -> tuple[AutoProcessor, CohereAsrForConditionalGeneration]:
-    global stt_processor, stt_model
+def resolve_stt_torch_dtype() -> torch.dtype:
+    value = str(STT_COMPUTE_TYPE).strip().lower()
+    mapping = {
+        "float16": torch.float16,
+        "fp16": torch.float16,
+        "half": torch.float16,
+        "bfloat16": torch.bfloat16,
+        "bf16": torch.bfloat16,
+        "float32": torch.float32,
+        "fp32": torch.float32,
+        "float": torch.float32,
+    }
+    return mapping.get(value, torch.float32)
 
-    if stt_processor is not None and stt_model is not None:
-        return stt_processor, stt_model
+
+def get_stt_model() -> tuple[str, Any, Any]:
+    global stt_processor, stt_model, stt_backend
+
+    if stt_processor is not None and stt_model is not None and stt_backend is not None:
+        return stt_backend, stt_processor, stt_model
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     token = os.getenv("HF_TOKEN")
-    torch_dtype = torch.float16 if device == "cuda" and STT_COMPUTE_TYPE == "float16" else torch.float32
+    torch_dtype = resolve_stt_torch_dtype()
 
     print(f"STT 로드 시작: model={STT_MODEL_NAME}, device={device}, dtype={torch_dtype}")
 
+    if STT_MODEL_NAME.startswith("Qwen/") or "qwen3-asr" in STT_MODEL_NAME.lower():
+        if Qwen3ASRModel is None:
+            raise RuntimeError("qwen_asr package is not available")
+
+        stt_backend = "qwen"
+        stt_processor = None
+        stt_model = Qwen3ASRModel.from_pretrained(
+            STT_MODEL_NAME,
+            token=token,
+            trust_remote_code=True,
+            torch_dtype=torch_dtype,
+            max_new_tokens=max(WAKE_MAX_TOKENS, VOICE_STT_MAX_NEW_TOKENS),
+        )
+        if device == "cuda" and hasattr(stt_model, "model"):
+            try:
+                stt_model.model = stt_model.model.to(device)
+            except Exception as e:
+                print(f"[STT] Qwen model cuda 이동 실패 | err={e}")
+        print("STT 로드 완료 (Qwen)")
+        return stt_backend, stt_processor, stt_model
+
+    stt_backend = "cohere"
     stt_processor = AutoProcessor.from_pretrained(
         STT_MODEL_NAME,
         token=token,
@@ -1111,20 +1154,35 @@ def get_stt_model() -> tuple[AutoProcessor, CohereAsrForConditionalGeneration]:
     ).to(device)
 
     print("STT 로드 완료")
-    return stt_processor, stt_model
+    return stt_backend, stt_processor, stt_model
 
 
 def transcribe_audio16k_sync(audio16k: np.ndarray, max_new_tokens: int = 256, *, sampling_rate: int = TARGET_RATE, stage: str = "full") -> str:
     if audio16k.size == 0:
         return ""
 
-    print(f"[STT INPUT][{stage}] sampling_rate={sampling_rate} samples={audio16k.size} sec={audio16k.size / float(max(1, sampling_rate)):.2f}")
-    processor, model = get_stt_model()
-
-    stt_audio = np.asarray(audio16k, dtype=np.float32)
     effective_rate = max(1, int(sampling_rate))
-    use_raw48_path = STT_USE_RAW_48K and effective_rate == RATE
+    print(f"[STT INPUT][{stage}] sampling_rate={effective_rate} samples={audio16k.size} sec={audio16k.size / float(effective_rate):.2f}")
+    backend, processor, model = get_stt_model()
+    stt_audio = np.asarray(audio16k, dtype=np.float32)
 
+    if backend == "qwen":
+        old_max_new_tokens = getattr(model, "max_new_tokens", max_new_tokens)
+        try:
+            model.max_new_tokens = max_new_tokens
+            results = model.transcribe(
+                audio=(stt_audio, effective_rate),
+                context="",
+                language=STT_LANGUAGE if STT_FORCE_LANGUAGE else None,
+                return_time_stamps=False,
+            )
+        finally:
+            model.max_new_tokens = old_max_new_tokens
+
+        text = results[0].text if results else ""
+        return clean_text(text)
+
+    use_raw48_path = STT_USE_RAW_48K and effective_rate == RATE
     if use_raw48_path:
         feature_extractor = getattr(processor, "feature_extractor", None)
         if feature_extractor is None:

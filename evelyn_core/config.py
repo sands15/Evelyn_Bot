@@ -80,11 +80,11 @@ ASK_CONFIDENCE_THRESHOLD_VOICE = float(os.getenv("ASK_CONFIDENCE_THRESHOLD_VOICE
 
 
 # Speech-to-text 모델 id.
-STT_MODEL_NAME = os.getenv("STT_MODEL_NAME", "CohereLabs/cohere-transcribe-03-2026")
+STT_MODEL_NAME = os.getenv("STT_MODEL_NAME", "Qwen/Qwen3-ASR-1.7B")
 # STT 디코딩에 강제로 넣는 언어 힌트.
 STT_LANGUAGE = os.getenv("STT_LANGUAGE", "ko")
 # STT 모델의 연산 dtype.
-STT_COMPUTE_TYPE = os.getenv("STT_COMPUTE_TYPE", "float16")
+STT_COMPUTE_TYPE = os.getenv("STT_COMPUTE_TYPE", "float32")
 # STT에 언어 프롬프트를 강제로 넣을지 여부.
 STT_FORCE_LANGUAGE = _env_flag("STT_FORCE_LANGUAGE", "true")
 # 디코더 프롬프트에서 문장부호를 강제할지 여부.
