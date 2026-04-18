@@ -1,8 +1,8 @@
 @echo off
 chcp 65001 >nul
 setlocal
-call "%~dp0evelyn_core\start_env.bat"
-pushd "%~dp0"
+call "%~dp0start_env.bat"
+pushd "%~dp0.."
 
 if "%DISCORD_BOT_TOKEN%"=="" (
   echo [Evelyn] DISCORD_BOT_TOKEN 환경변수가 설정되지 않았습니다.

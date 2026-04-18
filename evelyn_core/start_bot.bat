@@ -13,7 +13,7 @@ if errorlevel 1 goto :fail
 call :wait_for_port 127.0.0.1 %TTS_PORT% OmniVoice-TTS
 if errorlevel 1 goto :fail
 
-call "%~dp0..\run_bot.bat"
+call "%~dp0run_bot.bat"
 set "EXIT_CODE=%ERRORLEVEL%"
 popd
 endlocal & exit /b %EXIT_CODE%

@@ -2213,7 +2213,7 @@ async def restart_bot_process() -> None:
     script_path = Path(__file__).resolve()
     project_dir = script_path.parent
     start_bot_bat = project_dir / "evelyn_core" / "start_bot.bat"
-    run_bot_bat = project_dir / "run_bot.bat"
+    run_bot_bat = project_dir / "evelyn_core" / "run_bot.bat"
     start_bat = project_dir / "evelyn_core" / "start.bat"
 
     env = os.environ.copy()
