@@ -41,7 +41,7 @@ def clean_tts_text(text: str) -> str:
     text = re.sub(r"\[[^\[\]]+\]", " ", text)
     text = re.sub(r"[\U0001F300-\U0001FAFF\u2600-\u27BF\uFE0F]+", " ", text)
     text = re.sub(r"(?:\s|^)[:;=8xX]-?[)DdpP(/\\|]+\s*$", "", text)
-    text = re.sub(r"(?:\s|^)(?:ㅎㅎ+|ㅋㅋ+|ㅠㅠ+|ㅜㅜ+|^^+|헤헤+|하하+|흐흐+)\s*$", "", text)
+    text = re.sub(r"(?:\s|^)(?:ㅎㅎ+|ㅋㅋ+|ㅠㅠ+|ㅜㅜ+|\^\^+|헤헤+|하하+|흐흐+)\s*$", "", text)
     text = re.sub(r"[\"'`~*_#@^|<>{}()]", "", text)
     text = clean_text(text)
 
@@ -165,9 +165,9 @@ def is_similar(a: str, b: str) -> bool:
 def looks_like_repetitive_noise_text(text: str) -> bool:
     """반복 토큰이 과도한 전사 결과를 잡음성 텍스트로 본다."""
     tokens = [t for t in normalize_voice_text(text).split() if t]
-    if len(tokens) < 8:
+    if not tokens:
         return False
-    unique_ratio = len(set(tokens)) / max(1, len(tokens))
+
     longest_same_run = 1
     current_run = 1
     for prev, cur in zip(tokens, tokens[1:]):
@@ -176,6 +176,15 @@ def looks_like_repetitive_noise_text(text: str) -> bool:
             longest_same_run = max(longest_same_run, current_run)
         else:
             current_run = 1
+
+    wake_words = set(normalized_wake_words())
+    if len(tokens) >= 3 and len(set(tokens)) == 1 and (tokens[0] in wake_words or contains_leading_wake_word(tokens[0])):
+        return True
+
+    if len(tokens) < 8:
+        return False
+
+    unique_ratio = len(set(tokens)) / max(1, len(tokens))
     return unique_ratio < 0.35 or longest_same_run >= 4
 
 

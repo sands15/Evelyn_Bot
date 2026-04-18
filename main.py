@@ -1281,9 +1281,6 @@ def transcribe_audio16k_sync(audio16k: np.ndarray, max_new_tokens: int = 256, *,
             "vad_filter": False,
             "max_new_tokens": max_new_tokens,
         }
-        if stage.startswith("wake"):
-            whisper_kwargs["hotwords"] = " ".join(sorted(set(normalized_wake_words() + ["이블린"])))
-
         segments, _info = model.transcribe(
             whisper_audio,
             **whisper_kwargs,
