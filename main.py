@@ -1999,12 +1999,36 @@ async def leave_voice(ctx):
 async def restart_bot_process() -> None:
     await asyncio.sleep(1.0)
     script_path = Path(__file__).resolve()
-    subprocess.Popen(
-        [sys.executable, str(script_path)],
-        cwd=str(script_path.parent),
-        env=os.environ.copy(),
-        close_fds=True,
-    )
+    project_dir = script_path.parent
+    start_bat = project_dir / "start.bat"
+    run_bot_bat = project_dir / "run_bot.bat"
+
+    if start_bat.exists():
+        subprocess.Popen(
+            ["cmd.exe", "/c", str(start_bat)],
+            cwd=str(project_dir),
+            close_fds=True,
+            creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
+        )
+    elif run_bot_bat.exists():
+        env = os.environ.copy()
+        env.setdefault("STT_USE_RAW_48K", "true")
+        subprocess.Popen(
+            ["cmd.exe", "/c", str(run_bot_bat)],
+            cwd=str(project_dir),
+            env=env,
+            close_fds=True,
+            creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
+        )
+    else:
+        env = os.environ.copy()
+        env.setdefault("STT_USE_RAW_48K", "true")
+        subprocess.Popen(
+            [sys.executable, str(script_path)],
+            cwd=str(project_dir),
+            env=env,
+            close_fds=True,
+        )
     os._exit(0)
 
 
