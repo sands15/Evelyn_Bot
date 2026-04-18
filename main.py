@@ -26,6 +26,7 @@ from evelyn_core.audio import (
     is_likely_environment_noise,
     is_probably_silent,
     prepare_stt_audio,
+    resample_audio_float,
     slice_audio_window,
 )
 from evelyn_core.config import *
@@ -1121,15 +1122,29 @@ def transcribe_audio16k_sync(audio16k: np.ndarray, max_new_tokens: int = 256, *,
     print(f"[STT INPUT][{stage}] sampling_rate={sampling_rate} samples={audio16k.size} sec={audio16k.size / float(max(1, sampling_rate)):.2f}")
     processor, model = get_stt_model()
 
+    processor_rate = getattr(getattr(processor, "feature_extractor", None), "sampling_rate", None)
+    if processor_rate is None:
+        processor_rate = getattr(processor, "sampling_rate", TARGET_RATE)
+    processor_rate = max(1, int(processor_rate or TARGET_RATE))
+
+    stt_audio = np.asarray(audio16k, dtype=np.float32)
+    effective_rate = max(1, int(sampling_rate))
+    if effective_rate != processor_rate:
+        stt_audio = resample_audio_float(stt_audio, effective_rate, processor_rate)
+        print(
+            f"[STT RESAMPLE][{stage}] from={effective_rate} to={processor_rate} in_samples={audio16k.size} out_samples={stt_audio.size}"
+        )
+        effective_rate = processor_rate
+
     processor_kwargs = {
-        "sampling_rate": sampling_rate,
+        "sampling_rate": effective_rate,
         "return_tensors": "pt",
     }
     if STT_FORCE_LANGUAGE:
         processor_kwargs["language"] = STT_LANGUAGE
 
     inputs = processor(
-        audio16k,
+        stt_audio,
         **processor_kwargs,
     )
 

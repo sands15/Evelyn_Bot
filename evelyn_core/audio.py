@@ -143,6 +143,22 @@ def downmix_int16_stereo_to_mono_float(pcm_bytes: bytes) -> np.ndarray:
     return (audio.astype(np.float32) / 32768.0).astype(np.float32)
 
 
+def resample_audio_float(audio: np.ndarray, from_rate: int, to_rate: int) -> np.ndarray:
+    audio = np.asarray(audio, dtype=np.float32)
+    if audio.size == 0:
+        return np.zeros(0, dtype=np.float32)
+
+    src_rate = max(1, int(from_rate))
+    dst_rate = max(1, int(to_rate))
+    if src_rate == dst_rate:
+        return audio.astype(np.float32, copy=True)
+
+    new_len = max(1, int(round(len(audio) * (dst_rate / float(src_rate)))))
+    x_old = np.linspace(0, 1, len(audio), endpoint=False)
+    x_new = np.linspace(0, 1, new_len, endpoint=False)
+    return np.interp(x_new, x_old, audio).astype(np.float32)
+
+
 def prepare_stt_audio(pcm_bytes: bytes) -> np.ndarray:
     """디스코드 PCM을 mono 16kHz로 바꾸고 경량 denoise까지 적용한다."""
     audio16k = downmix_and_resample_int16_stereo_to_mono16k(pcm_bytes)
