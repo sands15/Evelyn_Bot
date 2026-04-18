@@ -1779,35 +1779,29 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes) 
 
     if is_likely_environment_noise(audio_for_wake, sampling_rate=wake_sampling_rate):
         band_ratio, flatness, rms = compute_voice_band_metrics(audio_for_wake, sampling_rate=wake_sampling_rate)
-        print(f"[FULL STT SKIP] reason=env_ignore speaker={member.display_name} probe={wake_probe!r}")
+        print(f"[FULL STT CONTINUE] reason=env_ignore speaker={member.display_name} probe={wake_probe!r}")
         print(
             f"[ENV IGNORE] speaker={member.display_name} band_ratio={band_ratio:.3f} flatness={flatness:.3f} rms={rms:.4f} probe={wake_probe!r}"
         )
-        save_voice_debug_audio(guild_id, speaker_name, pcm_bytes, audio16k, wake_probe=wake_probe, final_text="[ENV IGNORE]")
-        return
+        log_voice_stage(metrics, "환경음 후보지만 본문 STT 진행", extra=f"probe={wake_probe!r}")
 
     if looks_like_brief_filler_text(wake_probe):
-        print(f"[FULL STT SKIP] reason=filler_ignore speaker={member.display_name} probe={wake_probe!r}")
+        print(f"[FULL STT CONTINUE] reason=filler_ignore speaker={member.display_name} probe={wake_probe!r}")
         print(f"[FILLER IGNORE] speaker={member.display_name} probe={wake_probe!r}")
-        save_voice_debug_audio(guild_id, speaker_name, pcm_bytes, audio16k, wake_probe=wake_probe, final_text="[FILLER IGNORE]")
-        log_voice_stage(metrics, "짧은 필러 무시", extra=f"probe={wake_probe!r}")
-        return
+        log_voice_stage(metrics, "짧은 필러 후보지만 본문 STT 진행", extra=f"probe={wake_probe!r}")
 
     if looks_like_repetitive_noise_text(wake_probe):
-        print(f"[FULL STT SKIP] reason=noise_text_ignore speaker={member.display_name} probe={wake_probe!r}")
+        print(f"[FULL STT CONTINUE] reason=noise_text_ignore speaker={member.display_name} probe={wake_probe!r}")
         print(f"[NOISE TEXT IGNORE] speaker={member.display_name} probe={wake_probe!r}")
-        save_voice_debug_audio(guild_id, speaker_name, pcm_bytes, audio16k, wake_probe=wake_probe, final_text="[NOISE TEXT IGNORE]")
-        return
+        log_voice_stage(metrics, "반복 소음 후보지만 본문 STT 진행", extra=f"probe={wake_probe!r}")
 
     if not wake_detected:
-        print(f"[FULL STT SKIP] reason=wake_ignore speaker={member.display_name} probe={wake_probe!r}")
+        print(f"[FULL STT CONTINUE] reason=wake_ignore speaker={member.display_name} probe={wake_probe!r}")
         if wake_probe:
             print(f"[WAKE IGNORE] {member.display_name}: {wake_probe!r}")
-        save_voice_debug_audio(guild_id, speaker_name, pcm_bytes, audio16k, wake_probe=wake_probe, final_text="[WAKE IGNORE]")
-        log_voice_stage(metrics, "웨이크 미검출", extra=f"probe={wake_probe!r}")
-        return
+        log_voice_stage(metrics, "웨이크 미검출이지만 본문 STT 진행", extra=f"probe={wake_probe!r}")
 
-    print(f"[FULL STT ENTER] speaker={member.display_name} sampling_rate={stt_sampling_rate} samples={audio16k.size}")
+    print(f"[FULL STT ENTER] speaker={member.display_name} sampling_rate={stt_sampling_rate} samples={audio16k.size} wake_detected={wake_detected}")
     log_voice_stage(metrics, "본문 STT 시작", extra=f"samples={audio16k.size}")
     try:
         text = await asyncio.to_thread(transcribe_audio16k_sync, audio16k, VOICE_STT_MAX_NEW_TOKENS, sampling_rate=stt_sampling_rate, stage="full")
@@ -1837,7 +1831,7 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes) 
     save_voice_debug_audio(guild_id, speaker_name, pcm_bytes, audio16k, wake_probe=wake_probe, final_text=text)
     print(f"🎤 [{member.display_name}] wake={wake_probe!r} text={text}")
 
-    ok, reason = should_reply_to_voice(guild_id, text, wake_detected=True)
+    ok, reason = should_reply_to_voice(guild_id, text, wake_detected=wake_detected)
     if not ok:
         print(f"[STT IGNORE] {reason}: {text!r}")
         log_voice_stage(metrics, "응답 차단", extra=f"reason={reason}")
