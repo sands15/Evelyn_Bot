@@ -53,25 +53,37 @@ def _pcm16le_stereo_to_mono_float(pcm_bytes: bytes) -> np.ndarray:
     return (audio.astype(np.float32) / 32768.0).astype(np.float32)
 
 
+def _resample_mono_float(audio: np.ndarray, from_rate: int, to_rate: int) -> np.ndarray:
+    audio = np.asarray(audio, dtype=np.float32)
+    src = max(1, int(from_rate))
+    dst = max(1, int(to_rate))
+    if audio.size == 0 or src == dst:
+        return audio.astype(np.float32, copy=True)
+    new_len = max(1, int(round(len(audio) * (dst / float(src)))))
+    x_old = np.linspace(0.0, 1.0, len(audio), endpoint=False)
+    x_new = np.linspace(0.0, 1.0, new_len, endpoint=False)
+    return np.interp(x_new, x_old, audio).astype(np.float32)
+
+
 def _estimate_leading_trim_ms(pcm_bytes: bytes, *, sampling_rate: int = 48000) -> tuple[float, dict]:
     if not VOICE_DYNAMIC_TRIM_ENABLE or not pcm_bytes:
-        return VOICE_HARD_TRIM_MS, {"stable_ms": None, "body_rms": 0.0}
+        return VOICE_HARD_TRIM_MS, {"stable_ms": None, "body_rms": 0.0, "mode": "disabled"}
 
     audio = _pcm16le_stereo_to_mono_float(pcm_bytes)
     if audio.size < int(max(1, sampling_rate) * 0.25):
-        return VOICE_HARD_TRIM_MS, {"stable_ms": None, "body_rms": 0.0}
+        return VOICE_HARD_TRIM_MS, {"stable_ms": None, "body_rms": 0.0, "mode": "short"}
 
-    sr = max(1, int(sampling_rate))
-    inspect_samples = min(audio.size, int(sr * 0.9))
+    sr = 16000
+    audio16 = _resample_mono_float(audio, sampling_rate, sr)
+    inspect_samples = min(audio16.size, int(sr * 1.2))
     window = max(1, int(sr * 0.02))
-    body_start = int(sr * 0.6) if audio.size > int(sr * 0.8) else int(audio.size * 0.5)
-    body = audio[body_start:]
+    body_start = int(sr * 0.6) if audio16.size > int(sr * 0.8) else int(audio16.size * 0.5)
+    body = audio16[body_start:]
     body_rms = float(np.sqrt(np.mean(np.square(body))) + 1e-12) if body.size else 0.0
 
-    consecutive = 0
-    stable_ms = None
-    for idx, start in enumerate(range(0, inspect_samples, window)):
-        chunk = audio[start:start + window]
+    flags: list[bool] = []
+    for start in range(0, inspect_samples, window):
+        chunk = audio16[start:start + window]
         if chunk.size == 0:
             break
         rms = float(np.sqrt(np.mean(np.square(chunk))) + 1e-12)
@@ -79,23 +91,38 @@ def _estimate_leading_trim_ms(pcm_bytes: bytes, *, sampling_rate: int = 48000) -
         spec = np.abs(np.fft.rfft(chunk * np.hanning(chunk.size))) + 1e-9
         freqs = np.fft.rfftfreq(chunk.size, d=1.0 / sr)
         flatness = float(np.exp(np.mean(np.log(spec))) / np.mean(spec)) if spec.size else 1.0
-        hi_ratio = float(spec[freqs >= 5000.0].sum() / spec.sum()) if spec.size and spec.sum() > 0 else 1.0
+        hi_ratio = float(spec[freqs >= 4000.0].sum() / spec.sum()) if spec.size and spec.sum() > 0 else 1.0
         voiced_like = (
-            rms > max(0.01, body_rms * 0.35)
-            and zcr < 0.22
-            and flatness < 0.35
-            and hi_ratio < 0.18
+            rms > max(0.006, body_rms * 0.40)
+            and zcr < 0.18
+            and flatness < 0.30
+            and hi_ratio < 0.16
         )
-        consecutive = consecutive + 1 if voiced_like else 0
-        if consecutive >= VOICE_DYNAMIC_TRIM_CONSECUTIVE:
-            stable_ms = max(0.0, (idx - VOICE_DYNAMIC_TRIM_CONSECUTIVE + 1) * 20.0)
+        flags.append(voiced_like)
+
+    stable_ms = None
+    consec = VOICE_DYNAMIC_TRIM_CONSECUTIVE
+    silence_needed = 5
+    for idx in range(silence_needed, max(0, len(flags) - consec + 1)):
+        if sum(flags[idx - silence_needed:idx]) != 0:
+            continue
+        if all(flags[idx + off] for off in range(consec)):
+            stable_ms = idx * 20.0
             break
+
+    if stable_ms is None:
+        run = 0
+        for idx, flag in enumerate(flags):
+            run = run + 1 if flag else 0
+            if run >= consec:
+                stable_ms = max(0.0, (idx - consec + 1) * 20.0)
+                break
 
     trim_ms = max(VOICE_HARD_TRIM_MS, 0.0 if stable_ms is None else stable_ms)
     if trim_ms < VOICE_DYNAMIC_TRIM_MIN_MS:
         trim_ms = VOICE_HARD_TRIM_MS
     trim_ms = min(trim_ms, VOICE_DYNAMIC_TRIM_MAX_MS)
-    return trim_ms, {"stable_ms": stable_ms, "body_rms": body_rms}
+    return trim_ms, {"stable_ms": stable_ms, "body_rms": body_rms, "mode": "16k-leading-scan"}
 
 
 def _parse_rtp_header(packet: bytes):
@@ -1167,10 +1194,43 @@ class EvelynVoiceClient(discord.VoiceClient):
                             len(opus_packet),
                             e,
                         )
-                    if OPUS_ERROR_TO_SILENCE:
+
+                    pcm = b""
+                    next_packet = expanded_packets[packet_index] if packet_index < len(expanded_packets) else None
+                    if next_packet is not None and not next_packet.get("fake_packet"):
+                        next_opus = next_packet.get("opus_packet") or b""
+                        if next_opus not in (b"", b"\xF8\xFF\xFE"):
+                            try:
+                                pcm = self.opus_decoder.decode(next_opus, fec=True)
+                            except Exception:
+                                pcm = b""
+                            if pcm:
+                                fec_packets += 1
+                                log.info(
+                                    "PACKET OPUS corrupt -> FEC | idx=%d pkt=%d seq=%d next_seq=%d",
+                                    idx,
+                                    packet_index,
+                                    p["sequence"],
+                                    next_packet.get("sequence"),
+                                )
+                    if not pcm:
+                        try:
+                            pcm = self.opus_decoder.decode(None, fec=False)
+                        except Exception:
+                            pcm = b""
+                        if pcm:
+                            plc_packets += 1
+                            log.info(
+                                "PACKET OPUS corrupt -> PLC | idx=%d pkt=%d seq=%d",
+                                idx,
+                                packet_index,
+                                p["sequence"],
+                            )
+
+                    if not pcm and OPUS_ERROR_TO_SILENCE:
                         opus_silence_fill += 1
                         pcm = SILENCE_PCM
-                    else:
+                    if not pcm:
                         continue
 
             if not pcm:
