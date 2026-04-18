@@ -17,7 +17,7 @@ import numpy as np
 import torch
 import discord
 from discord.ext import commands
-from transformers import AutoProcessor, CohereAsrForConditionalGeneration
+from transformers import AutoProcessor
 
 try:
     from qwen_asr import Qwen3ASRModel
@@ -1142,6 +1142,11 @@ def get_stt_model() -> tuple[str, Any, Any]:
         return stt_backend, stt_processor, stt_model
 
     stt_backend = "cohere"
+    try:
+        from transformers import CohereAsrForConditionalGeneration
+    except Exception as e:
+        raise RuntimeError(f"Cohere STT backend import failed: {e}") from e
+
     stt_processor = AutoProcessor.from_pretrained(
         STT_MODEL_NAME,
         token=token,
