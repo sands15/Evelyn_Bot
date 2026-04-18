@@ -1128,18 +1128,19 @@ def get_stt_model() -> tuple[str, Any, Any]:
 
         stt_backend = "qwen"
         stt_processor = None
+        qwen_load_kwargs = {
+            "token": token,
+            "trust_remote_code": True,
+            "torch_dtype": torch_dtype,
+            "max_new_tokens": max(WAKE_MAX_TOKENS, VOICE_STT_MAX_NEW_TOKENS),
+        }
+        if device == "cuda":
+            qwen_load_kwargs["device_map"] = "cuda:0"
+
         stt_model = Qwen3ASRModel.from_pretrained(
             STT_MODEL_NAME,
-            token=token,
-            trust_remote_code=True,
-            torch_dtype=torch_dtype,
-            max_new_tokens=max(WAKE_MAX_TOKENS, VOICE_STT_MAX_NEW_TOKENS),
+            **qwen_load_kwargs,
         )
-        if device == "cuda" and hasattr(stt_model, "model"):
-            try:
-                stt_model.model = stt_model.model.to(device)
-            except Exception as e:
-                print(f"[STT] Qwen model cuda 이동 실패 | err={e}")
         print("STT 로드 완료 (Qwen)")
         return stt_backend, stt_processor, stt_model
 
