@@ -190,6 +190,7 @@ def save_voice_debug_audio(
     wake_probe: str | None = None,
     final_text: str | None = None,
     debug_meta: dict | None = None,
+    save_stt_audio: bool = True,
 ) -> None:
     if not VOICE_DEBUG_SAVE_AUDIO:
         return
@@ -216,20 +217,22 @@ def save_voice_debug_audio(
             wf.setframerate(RATE)
             wf.writeframes(pcm_bytes)
 
-        audio16k_int16 = np.clip(audio16k, -1.0, 1.0)
-        audio16k_int16 = (audio16k_int16 * 32767.0).astype(np.int16)
-        with wave.open(str(stt_path), "wb") as wf:
-            wf.setnchannels(1)
-            wf.setsampwidth(2)
-            wf.setframerate(TARGET_RATE)
-            wf.writeframes(audio16k_int16.tobytes())
+        if save_stt_audio:
+            audio16k_int16 = np.clip(audio16k, -1.0, 1.0)
+            audio16k_int16 = (audio16k_int16 * 32767.0).astype(np.int16)
+            with wave.open(str(stt_path), "wb") as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(2)
+                wf.setframerate(TARGET_RATE)
+                wf.writeframes(audio16k_int16.tobytes())
 
         meta = {
             "saved_at": stamp,
             "guild_id": guild_id,
             "speaker": speaker,
             "raw_path": str(raw_path),
-            "stt_path": str(stt_path),
+            "stt_path": str(stt_path) if save_stt_audio else None,
+            "stt_saved": bool(save_stt_audio),
             "raw_bytes": len(pcm_bytes),
             "raw_seconds": round(len(pcm_bytes) / float(RATE * CHANNELS * 2), 3),
             "stt_samples": int(audio16k.size),
@@ -241,7 +244,8 @@ def save_voice_debug_audio(
             meta["voice_receive"] = debug_meta
         meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
         _trim_voice_debug_dir(guild_dir)
-        print(f"[VOICE DEBUG SAVE] speaker={speaker} raw={raw_path} stt={stt_path}")
+        stt_log = str(stt_path) if save_stt_audio else "[SKIPPED]"
+        print(f"[VOICE DEBUG SAVE] speaker={speaker} raw={raw_path} stt={stt_log}")
     except Exception as e:
         print(f"[VOICE DEBUG SAVE FAIL] speaker={speaker} err={e!r}")
 
@@ -1757,7 +1761,7 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes, 
         reasons = ",".join(str(r) for r in debug_meta.get("reasons", []))
         print(f"[FULL STT SKIP] reason=unstable_audio speaker={member.display_name} reasons={reasons}")
         print(f"[UNSTABLE AUDIO IGNORE] speaker={member.display_name} reasons={reasons}")
-        save_voice_debug_audio(guild_id, speaker_name, pcm_bytes, audio16k, final_text="[UNSTABLE AUDIO IGNORE]", debug_meta=debug_meta)
+        save_voice_debug_audio(guild_id, speaker_name, pcm_bytes, audio16k, final_text="[UNSTABLE AUDIO IGNORE]", debug_meta=debug_meta, save_stt_audio=False)
         log_voice_stage(metrics, "불안정 음성 제외", extra=f"reasons={reasons}")
         return
 
