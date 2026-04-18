@@ -189,6 +189,7 @@ def save_voice_debug_audio(
     *,
     wake_probe: str | None = None,
     final_text: str | None = None,
+    debug_meta: dict | None = None,
 ) -> None:
     if not VOICE_DEBUG_SAVE_AUDIO:
         return
@@ -236,6 +237,8 @@ def save_voice_debug_audio(
             "wake_probe": wake_probe,
             "final_text": final_text,
         }
+        if debug_meta is not None:
+            meta["voice_receive"] = debug_meta
         meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
         _trim_voice_debug_dir(guild_dir)
         print(f"[VOICE DEBUG SAVE] speaker={speaker} raw={raw_path} stt={stt_path}")
@@ -1720,7 +1723,7 @@ async def ask_llm_and_speak_streaming(
 # =========================================================
 # 음성 입력 처리
 # =========================================================
-async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes) -> None:
+async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes, debug_meta: dict | None = None) -> None:
     if member is None:
         return
 
@@ -1756,7 +1759,7 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes) 
         rms = float(np.sqrt(np.mean(np.square(audio16k)))) if audio16k.size else 0.0
         print(f"[FULL STT SKIP] reason=vad_ignore speaker={member.display_name} sampling_rate={stt_sampling_rate} sec={duration_sec:.2f} peak={peak:.4f} rms={rms:.4f}")
         print(f"[VAD IGNORE] speaker={member.display_name} sampling_rate={stt_sampling_rate} sec={duration_sec:.2f} peak={peak:.4f} rms={rms:.4f}")
-        save_voice_debug_audio(guild_id, speaker_name, pcm_bytes, audio16k, final_text="[VAD IGNORE]")
+        save_voice_debug_audio(guild_id, speaker_name, pcm_bytes, audio16k, final_text="[VAD IGNORE]", debug_meta=debug_meta)
         log_voice_stage(metrics, "VAD 무음 판정", extra=f"sampling_rate={stt_sampling_rate} sec={duration_sec:.2f} peak={peak:.4f} rms={rms:.4f}")
         return
 
@@ -1813,7 +1816,7 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes) 
     log_voice_stage(metrics, "본문 STT 완료", extra=f"text_len={len(text)}")
 
     if not text:
-        save_voice_debug_audio(guild_id, speaker_name, pcm_bytes, audio16k, wake_probe=wake_probe, final_text="[EMPTY STT]")
+        save_voice_debug_audio(guild_id, speaker_name, pcm_bytes, audio16k, wake_probe=wake_probe, final_text="[EMPTY STT]", debug_meta=debug_meta)
         log_voice_stage(metrics, "본문 STT 빈 결과")
         return
 
@@ -1824,11 +1827,11 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes) 
 
     if should_ignore_short_transcription(text, pcm_bytes, wake_detected=wake_detected):
         print(f"[STT IGNORE] short_noise: {text!r}")
-        save_voice_debug_audio(guild_id, speaker_name, pcm_bytes, audio16k, wake_probe=wake_probe, final_text=text)
+        save_voice_debug_audio(guild_id, speaker_name, pcm_bytes, audio16k, wake_probe=wake_probe, final_text=text, debug_meta=debug_meta)
         log_voice_stage(metrics, "짧은 STT 무시", extra=f"text={text!r}")
         return
 
-    save_voice_debug_audio(guild_id, speaker_name, pcm_bytes, audio16k, wake_probe=wake_probe, final_text=text)
+    save_voice_debug_audio(guild_id, speaker_name, pcm_bytes, audio16k, wake_probe=wake_probe, final_text=text, debug_meta=debug_meta)
     print(f"🎤 [{member.display_name}] wake={wake_probe!r} text={text}")
 
     ok, reason = should_reply_to_voice(guild_id, text, wake_detected=wake_detected)

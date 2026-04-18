@@ -21,7 +21,7 @@ from .state import VoiceRuntimeState
 from .udp import VoiceUDPTransport
 
 
-async def on_user_audio(member, pcm_bytes: bytes):
+async def on_user_audio(member, pcm_bytes: bytes, debug_meta: dict | None = None):
     return None
 
 
@@ -166,6 +166,119 @@ def _estimate_leading_trim_ms(pcm_bytes: bytes, *, sampling_rate: int = 48000) -
         "early8_peak": early8_peak,
         "burst_trim_ms": burst_trim_ms,
         "mode": "16k-leading-scan",
+    }
+
+
+def _round_metric(value: float | None, digits: int = 1) -> float | None:
+    if value is None:
+        return None
+    return round(float(value), digits)
+
+
+
+def _build_voice_receive_debug_meta(
+    *,
+    idx: int,
+    ssrc: int,
+    packet_count: int,
+    expanded_count: int,
+    success: int,
+    failed: int,
+    started_output: bool,
+    dave_success: int,
+    dave_warmup_skips: int,
+    outer_fail: int,
+    dave_fail: int,
+    opus_fail: int,
+    opus_silence_fill: int,
+    real_silence: int,
+    plc_packets: int,
+    fec_packets: int,
+    trim_ms: float,
+    trim_meta: dict,
+    first_packet_wait_ms: float | None,
+    queue_wait_ms: float | None,
+    decrypt_ms: float | None,
+    utterance_total_ms: float | None,
+    pcm_bytes_len: int,
+) -> dict:
+    reasons: list[str] = []
+
+    burst_trim_ms = float(trim_meta.get("burst_trim_ms") or 0.0)
+    early8_rms = float(trim_meta.get("early8_rms") or 0.0)
+    early8_peak = float(trim_meta.get("early8_peak") or 0.0)
+    body_rms = float(trim_meta.get("body_rms") or 0.0)
+
+    if not started_output:
+        reasons.append("no_started_output")
+    if dave_warmup_skips > 0:
+        reasons.append(f"dave_warmup_skips={dave_warmup_skips}")
+    if outer_fail > 0:
+        reasons.append(f"outer_decrypt_fail={outer_fail}")
+    if dave_fail > dave_warmup_skips:
+        reasons.append(f"dave_fail={dave_fail}")
+    if opus_fail > 0:
+        reasons.append(f"opus_fail={opus_fail}")
+    if plc_packets > 0:
+        reasons.append(f"plc={plc_packets}")
+    if fec_packets > 0:
+        reasons.append(f"fec={fec_packets}")
+    if real_silence > 0:
+        reasons.append(f"real_silence={real_silence}")
+    if opus_silence_fill > 0:
+        reasons.append(f"opus_silence_fill={opus_silence_fill}")
+    if failed >= max(2, int(round(packet_count * 0.15))):
+        reasons.append(f"high_failed_ratio={failed}/{packet_count}")
+    if burst_trim_ms >= 160.0:
+        reasons.append(f"burst_trim_ms={int(round(burst_trim_ms))}")
+    if trim_ms >= 240.0:
+        reasons.append(f"heavy_trim_ms={int(round(trim_ms))}")
+    if early8_peak >= 0.98 and early8_rms > max(0.12, body_rms * 2.2):
+        reasons.append("front_burst_detected")
+    if first_packet_wait_ms is not None and first_packet_wait_ms >= 250.0:
+        reasons.append(f"first_packet_wait_ms={int(round(first_packet_wait_ms))}")
+
+    return {
+        "unstable": bool(reasons),
+        "reasons": reasons,
+        "idx": int(idx),
+        "ssrc": int(ssrc),
+        "packets": {
+            "input": int(packet_count),
+            "expanded": int(expanded_count),
+            "success": int(success),
+            "failed": int(failed),
+            "started_output": bool(started_output),
+        },
+        "repair": {
+            "dave_success": int(dave_success),
+            "dave_warmup_skips": int(dave_warmup_skips),
+            "outer_fail": int(outer_fail),
+            "dave_fail": int(dave_fail),
+            "opus_fail": int(opus_fail),
+            "opus_silence_fill": int(opus_silence_fill),
+            "real_silence": int(real_silence),
+            "plc_packets": int(plc_packets),
+            "fec_packets": int(fec_packets),
+        },
+        "trim": {
+            "trim_ms": _round_metric(trim_ms, 1),
+            "stable_ms": _round_metric(trim_meta.get("stable_ms"), 1),
+            "burst_trim_ms": _round_metric(burst_trim_ms, 1),
+            "early4_rms": _round_metric(trim_meta.get("early4_rms"), 4),
+            "early8_rms": _round_metric(early8_rms, 4),
+            "early4_peak": _round_metric(trim_meta.get("early4_peak"), 4),
+            "early8_peak": _round_metric(early8_peak, 4),
+            "body_rms": _round_metric(body_rms, 4),
+            "mode": str(trim_meta.get("mode") or "unknown"),
+        },
+        "timing": {
+            "first_packet_wait_ms": _round_metric(first_packet_wait_ms, 1),
+            "queue_wait_ms": _round_metric(queue_wait_ms, 1),
+            "decrypt_ms": _round_metric(decrypt_ms, 1),
+            "utterance_total_ms": _round_metric(utterance_total_ms, 1),
+        },
+        "out_bytes": int(pcm_bytes_len),
     }
 
 
@@ -1508,6 +1621,47 @@ class EvelynVoiceClient(discord.VoiceClient):
                 len(pcm_bytes),
             )
 
+        voice_debug_meta = _build_voice_receive_debug_meta(
+            idx=idx,
+            ssrc=ssrc,
+            packet_count=len(packets),
+            expanded_count=len(expanded_packets),
+            success=success,
+            failed=failed,
+            started_output=started_output,
+            dave_success=dave_success,
+            dave_warmup_skips=dave_warmup_skips,
+            outer_fail=outer_fail,
+            dave_fail=dave_fail,
+            opus_fail=opus_fail,
+            opus_silence_fill=opus_silence_fill,
+            real_silence=real_silence,
+            plc_packets=plc_packets,
+            fec_packets=fec_packets,
+            trim_ms=trim_ms,
+            trim_meta=trim_meta,
+            first_packet_wait_ms=first_packet_wait_ms,
+            queue_wait_ms=queue_wait_ms,
+            decrypt_ms=decrypt_ms,
+            utterance_total_ms=utterance_total_ms,
+            pcm_bytes_len=len(pcm_bytes),
+        )
+        if voice_debug_meta["unstable"]:
+            log.warning(
+                "VOICE UNSTABLE | idx=%d ssrc=%d reasons=%s packets=%d/%d plc=%d fec=%d outer=%d dave=%d opus=%d trim_ms=%.0f",
+                idx,
+                ssrc,
+                ",".join(voice_debug_meta["reasons"]),
+                success,
+                len(expanded_packets),
+                plc_packets,
+                fec_packets,
+                outer_fail,
+                dave_fail,
+                opus_fail,
+                trim_ms,
+            )
+
         member = None
         try:
             member = self.channel.guild.get_member(int(user_id))
@@ -1527,7 +1681,12 @@ class EvelynVoiceClient(discord.VoiceClient):
                         len(pcm_bytes),
                         f"{utterance_total_before_callback_ms:.0f}" if utterance_total_before_callback_ms is not None else "?",
                     )
-                await self.on_user_audio(member, pcm_bytes)
+                try:
+                    await self.on_user_audio(member, pcm_bytes, debug_meta=voice_debug_meta)
+                except TypeError as e:
+                    if "debug_meta" not in str(e):
+                        raise
+                    await self.on_user_audio(member, pcm_bytes)
                 callback_ms = (asyncio.get_running_loop().time() - callback_started_at) * 1000.0
                 if self._should_log_timing(callback_ms):
                     log.info("on_user_audio ok | idx=%d pcm_bytes=%d callback_ms=%.0f", idx, len(pcm_bytes), callback_ms)
