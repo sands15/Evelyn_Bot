@@ -32,10 +32,11 @@ VOICE_MAP_RETRY_MAX = max(0, int(os.getenv("VOICE_MAP_RETRY_MAX", "2")))
 VOICE_INITIAL_MAP_HOLD_MS = float(os.getenv("VOICE_INITIAL_MAP_HOLD_MS", "900"))
 VOICE_DAVE_WARMUP_GRACE_PACKETS = max(0, int(os.getenv("VOICE_DAVE_WARMUP_GRACE_PACKETS", "6")))
 VOICE_PENDING_SSRC_MAX_PACKETS = max(1, int(os.getenv("VOICE_PENDING_SSRC_MAX_PACKETS", "96")))
-VOICE_LEADING_DROP_MAX_PACKETS = max(0, int(os.getenv("VOICE_LEADING_DROP_MAX_PACKETS", "12")))
-VOICE_START_STABLE_PACKETS = max(1, int(os.getenv("VOICE_START_STABLE_PACKETS", "3")))
+VOICE_LEADING_DROP_MAX_PACKETS = max(0, int(os.getenv("VOICE_LEADING_DROP_MAX_PACKETS", "16")))
+VOICE_START_STABLE_PACKETS = max(1, int(os.getenv("VOICE_START_STABLE_PACKETS", "5")))
 VOICE_GAP_CONCEAL_MAX = max(0, int(os.getenv("VOICE_GAP_CONCEAL_MAX", "6")))
-VOICE_HARD_TRIM_MS = max(0.0, float(os.getenv("VOICE_HARD_TRIM_MS", "180")))
+VOICE_LEADING_GOOD_DROP_PACKETS = max(0, int(os.getenv("VOICE_LEADING_GOOD_DROP_PACKETS", "4")))
+VOICE_HARD_TRIM_MS = max(0.0, float(os.getenv("VOICE_HARD_TRIM_MS", "320")))
 VOICE_PCM_BYTES_PER_MS = int((48000 * 2 * 2) / 1000)
 
 
@@ -894,6 +895,7 @@ class EvelynVoiceClient(discord.VoiceClient):
 
         leading_bad_packets = 0
         stable_voice_packets = 0
+        leading_good_drop_remaining = VOICE_LEADING_GOOD_DROP_PACKETS
         started_output = False
         last_sequence = None
         last_good_pcm = None
@@ -1068,6 +1070,9 @@ class EvelynVoiceClient(discord.VoiceClient):
             stable_voice_packets += 1
             if not started_output and stable_voice_packets < VOICE_START_STABLE_PACKETS:
                 continue
+            if not started_output and leading_good_drop_remaining > 0:
+                leading_good_drop_remaining -= 1
+                continue
 
             started_output = True
             pcm_chunks.append(pcm)
@@ -1120,19 +1125,23 @@ class EvelynVoiceClient(discord.VoiceClient):
 
         trim_ms = VOICE_HARD_TRIM_MS
         if leading_bad_packets > 0:
-            trim_ms = max(trim_ms, min(420.0, leading_bad_packets * 20.0))
+            trim_ms = max(trim_ms, min(650.0, leading_bad_packets * 24.0))
+        if dave_fail > 0 or dave_warmup_fallbacks > 0:
+            trim_ms = max(trim_ms, min(650.0, 280.0 + (dave_fail + dave_warmup_fallbacks) * 35.0))
         trim_bytes = int(trim_ms * VOICE_PCM_BYTES_PER_MS)
         trim_bytes -= trim_bytes % 4
         min_keep_bytes = VOICE_PCM_BYTES_PER_MS * 80
         if trim_bytes > 0 and len(pcm_bytes) > trim_bytes + min_keep_bytes:
             pcm_bytes = pcm_bytes[trim_bytes:]
             log.info(
-                "LEADING PCM TRIM | idx=%d ssrc=%d trim_ms=%.0f trim_bytes=%d leading_bad=%d out_bytes=%d",
+                "LEADING PCM TRIM | idx=%d ssrc=%d trim_ms=%.0f trim_bytes=%d leading_bad=%d dave_fail=%d dave_warmup=%d out_bytes=%d",
                 idx,
                 ssrc,
                 trim_ms,
                 trim_bytes,
                 leading_bad_packets,
+                dave_fail,
+                dave_warmup_fallbacks,
                 len(pcm_bytes),
             )
 
