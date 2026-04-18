@@ -89,8 +89,8 @@ STT_COMPUTE_TYPE = os.getenv("STT_COMPUTE_TYPE", "float32")
 STT_FORCE_LANGUAGE = _env_flag("STT_FORCE_LANGUAGE", "true")
 # 디코더 프롬프트에서 문장부호를 강제할지 여부.
 STT_FORCE_PUNCTUATION = _env_flag("STT_FORCE_PUNCTUATION", "true")
-# 실험용: STT에 48k mono 오디오를 직접 전달할지 여부.
-STT_USE_RAW_48K = _env_flag("STT_USE_RAW_48K", "true")
+# STT/VAD/wake 경로를 원본 48k 대신 16k 준비 오디오로 통일할지 여부.
+STT_USE_RAW_48K = _env_flag("STT_USE_RAW_48K", "false")
 
 
 # STT 전에 VAD 필터링을 켤지 여부.

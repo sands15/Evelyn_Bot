@@ -2099,7 +2099,7 @@ async def restart_bot_process() -> None:
         )
     elif run_bot_bat.exists():
         env = os.environ.copy()
-        env.setdefault("STT_USE_RAW_48K", "true")
+        env.setdefault("STT_USE_RAW_48K", "false")
         subprocess.Popen(
             ["cmd.exe", "/c", str(run_bot_bat)],
             cwd=str(project_dir),
@@ -2109,7 +2109,7 @@ async def restart_bot_process() -> None:
         )
     else:
         env = os.environ.copy()
-        env.setdefault("STT_USE_RAW_48K", "true")
+        env.setdefault("STT_USE_RAW_48K", "false")
         subprocess.Popen(
             [sys.executable, str(script_path)],
             cwd=str(project_dir),
