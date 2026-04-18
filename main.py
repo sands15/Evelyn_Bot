@@ -1267,13 +1267,19 @@ def transcribe_audio16k_sync(audio16k: np.ndarray, max_new_tokens: int = 256, *,
             whisper_audio = resample_audio_float(whisper_audio, effective_rate, TARGET_RATE)
             print(f"[STT RESAMPLE][{stage}] {effective_rate} -> {TARGET_RATE} samples={whisper_audio.size}")
 
-        beam_size = 5 if stage == "full" else 2
+        if stage == "full":
+            beam_size = max(1, STT_WHISPER_FULL_BEAM_SIZE)
+            best_of = max(1, STT_WHISPER_FULL_BEST_OF)
+        else:
+            beam_size = max(1, STT_WHISPER_WAKE_BEAM_SIZE)
+            best_of = max(1, STT_WHISPER_WAKE_BEST_OF)
+
         language = normalize_stt_language() if STT_FORCE_LANGUAGE else None
         whisper_kwargs = {
             "language": language,
             "task": "transcribe",
             "beam_size": beam_size,
-            "best_of": beam_size,
+            "best_of": best_of,
             "condition_on_previous_text": False,
             "temperature": 0.0,
             "without_timestamps": True,
@@ -1940,7 +1946,7 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes) 
                 full_probe_text = await asyncio.to_thread(
                     transcribe_audio16k_sync,
                     audio16k,
-                    WAKE_MAX_TOKENS + 48,
+                    WAKE_FALLBACK_MAX_TOKENS,
                     sampling_rate=stt_sampling_rate,
                     stage="wake-fallback",
                 )

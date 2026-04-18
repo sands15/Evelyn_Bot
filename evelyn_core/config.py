@@ -134,9 +134,19 @@ DENOISE_NOISE_FLOOR_SEC = float(os.getenv("DENOISE_NOISE_FLOOR_SEC", "0.20"))
 # 추정한 denoise gate threshold에 곱하는 배수.
 DENOISE_GATE_MULT = float(os.getenv("DENOISE_GATE_MULT", "1.35"))
 # wake probe STT에 잘라서 넣을 오디오 길이(초).
-WAKE_AUDIO_SEC = float(os.getenv("WAKE_AUDIO_SEC", "1.4"))
+WAKE_AUDIO_SEC = float(os.getenv("WAKE_AUDIO_SEC", "1.1"))
 # wake probe STT의 최대 토큰 수.
-WAKE_MAX_TOKENS = int(os.getenv("WAKE_MAX_TOKENS", "48"))
+WAKE_MAX_TOKENS = int(os.getenv("WAKE_MAX_TOKENS", "32"))
+# wake miss 보정용 fallback STT 최대 토큰 수.
+WAKE_FALLBACK_MAX_TOKENS = int(os.getenv("WAKE_FALLBACK_MAX_TOKENS", "48"))
+# Whisper wake probe beam size.
+STT_WHISPER_WAKE_BEAM_SIZE = int(os.getenv("STT_WHISPER_WAKE_BEAM_SIZE", "1"))
+# Whisper wake probe best_of 값.
+STT_WHISPER_WAKE_BEST_OF = int(os.getenv("STT_WHISPER_WAKE_BEST_OF", "1"))
+# Whisper full STT beam size.
+STT_WHISPER_FULL_BEAM_SIZE = int(os.getenv("STT_WHISPER_FULL_BEAM_SIZE", "2"))
+# Whisper full STT best_of 값.
+STT_WHISPER_FULL_BEST_OF = int(os.getenv("STT_WHISPER_FULL_BEST_OF", "1"))
 # wake word 정규화에 쓰는 fuzzy matching threshold.
 WAKE_FUZZY_THRESHOLD = float(os.getenv("WAKE_FUZZY_THRESHOLD", "0.72"))
 # wake가 잡혔을 때 너무 짧은 텍스트라도 남길 최소 길이.
@@ -146,7 +156,7 @@ TTS_EARLY_CHUNK_LEN = int(os.getenv("TTS_EARLY_CHUNK_LEN", "14"))
 # 너무 짧아도 강제로 early cut을 허용할 최소 길이.
 TTS_EARLY_CUT_MIN = int(os.getenv("TTS_EARLY_CUT_MIN", "6"))
 # full voice STT 한 번의 최대 토큰 수.
-VOICE_STT_MAX_NEW_TOKENS = int(os.getenv("VOICE_STT_MAX_NEW_TOKENS", "256"))
+VOICE_STT_MAX_NEW_TOKENS = int(os.getenv("VOICE_STT_MAX_NEW_TOKENS", "160"))
 # 메인 LLM 한 번의 최대 응답 토큰 수.
 VOICE_LLM_MAX_TOKENS = int(os.getenv("VOICE_LLM_MAX_TOKENS", "320"))
 
