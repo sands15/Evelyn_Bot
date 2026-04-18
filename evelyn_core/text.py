@@ -5,7 +5,6 @@ from .config import (
     ALLOWED_OMNIVOICE_TAGS,
     MAX_VISIBLE_TEXT,
     SIMILARITY_BLOCK,
-    WAKE_FUZZY_THRESHOLD,
     WAKE_WORDS,
 )
 
@@ -73,7 +72,14 @@ def contains_wake_word(text: str) -> bool:
     text_n = normalize_voice_text(text)
     if not text_n:
         return False
-    return any(w in text_n for w in normalized_wake_words())
+
+    for wake in normalized_wake_words():
+        if not wake:
+            continue
+        pattern = rf"(?:^|\s){re.escape(wake)}(?:\s|$)"
+        if re.search(pattern, text_n):
+            return True
+    return False
 
 
 def strip_leading_voice_fillers(text: str) -> str:
@@ -82,30 +88,8 @@ def strip_leading_voice_fillers(text: str) -> str:
 
 
 def contains_leading_wake_word(text: str) -> bool:
-    """문장 맨 앞부분이 wake word로 시작했는지 fuzzy matching까지 포함해 판별한다."""
-    text_n = normalize_voice_text(text)
-    if not text_n:
-        return False
-
-    prefixes: list[str] = []
-    tokens = text_n.split()
-    if tokens:
-        prefixes.append(tokens[0])
-        prefixes.append("".join(tokens[:2]))
-    prefixes.append(text_n[: max(8, min(len(text_n), 14))])
-
-    wake_words = normalized_wake_words()
-    for prefix in prefixes:
-        prefix = clean_text(prefix)
-        if not prefix:
-            continue
-        if any(w in prefix or prefix in w for w in wake_words):
-            return True
-        for wake in wake_words:
-            if SequenceMatcher(None, prefix[: len(wake) + 2], wake).ratio() >= WAKE_FUZZY_THRESHOLD:
-                return True
-
-    return False
+    """호환성을 위해 남겨둔 함수. 이제 wake word는 문장 어느 위치에서든 exact match만 허용한다."""
+    return contains_wake_word(text)
 
 
 def strip_voice_wake_word(text: str) -> str:
@@ -116,13 +100,8 @@ def strip_voice_wake_word(text: str) -> str:
         if not ww:
             continue
 
-        pattern_front = rf"^\s*{re.escape(ww)}[야아]?\s*[, ]*"
-        new_text = re.sub(pattern_front, "", text_n, count=1)
-        if new_text != text_n:
-            return clean_text(new_text)
-
-        pattern_once = rf"{re.escape(ww)}[야아]?"
-        new_text = re.sub(pattern_once, "", text_n, count=1)
+        pattern_once = rf"(?:^|\s){re.escape(ww)}(?:\s|$)"
+        new_text = re.sub(pattern_once, " ", text_n, count=1)
         if new_text != text_n:
             return clean_text(new_text)
 
@@ -130,30 +109,12 @@ def strip_voice_wake_word(text: str) -> str:
 
 
 def apply_stt_post_corrections(text: str, *, wake_detected: bool = False) -> str:
-    """STT 결과에서 자주 틀리는 wake word 표기를 canonical 형태로 교정한다."""
+    """wake word는 exact match만 허용하므로 STT 결과를 wake 기준으로 퍼지 교정하지 않는다."""
     text = clean_text(text)
     if not text:
         return text
 
-    leading_fillers = ""
-    filler_match = re.match(r"^((?:아+|어+|음+|흠+|저기|야|아니)[,\s]+)", text)
-    if filler_match:
-        leading_fillers = filler_match.group(1)
-        text = text[len(leading_fillers):].lstrip()
-
-    wake_variants = [
-        "이블린", "이불린", "이브린", "이벨린", "이벌린", "에블린", "에브린",
-        "이블리", "이별인", "이별린", "이벨링", "에벌린", "입을린",
-    ]
-
-    for variant in wake_variants:
-        pattern_front = rf"^{re.escape(variant)}(?:[아야])?(?=(?:[,.!?\s]|$))[,.!?\s]*"
-        if re.match(pattern_front, text):
-            rest = clean_text(re.sub(pattern_front, "", text, count=1))
-            normalized = clean_text(f"이블린 {rest}" if rest else "이블린")
-            return clean_text(f"{leading_fillers}{normalized}" if leading_fillers else normalized)
-
-    return clean_text(f"{leading_fillers}{text}" if leading_fillers else text)
+    return text
 
 
 def is_similar(a: str, b: str) -> bool:
