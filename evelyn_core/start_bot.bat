@@ -13,7 +13,19 @@ if errorlevel 1 goto :fail
 call :wait_for_port 127.0.0.1 %TTS_PORT% OmniVoice-TTS
 if errorlevel 1 goto :fail
 
-call "%~dp0run_bot.bat"
+if "%DISCORD_BOT_TOKEN%"=="" (
+  echo [Evelyn] DISCORD_BOT_TOKEN 환경변수가 설정되지 않았습니다.
+  echo [Evelyn] .env.example 을 참고해서 먼저 환경변수를 준비하세요.
+  popd
+  endlocal & exit /b 1
+)
+
+if exist .venv\Scripts\python.exe (
+  .venv\Scripts\python.exe main.py
+) else (
+  py -3 main.py
+)
+
 set "EXIT_CODE=%ERRORLEVEL%"
 popd
 endlocal & exit /b %EXIT_CODE%

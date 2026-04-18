@@ -35,8 +35,8 @@ Evelyn Bot은 디스코드에서 텍스트와 음성으로 대화하는 개인�
   - 루트에 남겨두는 유일한 실행 진입점, 내부적으로 `evelyn_core\start.bat`를 호출
 - `evelyn_core\start.bat`
   - LLM 서버 2개와 OmniVoice 서버를 띄우는 실제 통합 배치 파일
-- `evelyn_core\run_bot.bat`
-  - 디스코드 봇 본체만 실행하는 배치 파일
+- `evelyn_core\start_bot.bat`
+  - 디스코드 봇 본체 실행 전 준비 상태를 확인하고 바로 본체를 띄우는 배치 파일
 - `.env.example`
   - 환경변수 예시
 
@@ -326,7 +326,7 @@ start.bat
 서버가 떠 있는 상태에서 아래 스크립트로 프로필을 만들 수 있습니다.
 
 ```bat
-evelyn_core\create_omnivoice_profile.bat 내목소리 C:\path\to\ref_voice.wav "여기에 기준 문장"
+evelyn_core\tools\create_omnivoice_profile.bat 내목소리 C:\path\to\ref_voice.wav "여기에 기준 문장"
 ```
 
 만들어진 프로필은 OmniVoice 서버에서 `clone:내목소리` 형태로 사용할 수 있습니다.
@@ -346,10 +346,10 @@ evelyn_core\create_omnivoice_profile.bat 내목소리 C:\path\to\ref_voice.wav "
 
 ### 2) 봇 본체 실행
 
-디스코드 봇은 `evelyn_core\run_bot.bat`로 따로 실행합니다.
+디스코드 봇은 `evelyn_core\start_bot.bat`로 따로 실행합니다.
 
 ```bat
-evelyn_core\run_bot.bat
+evelyn_core\start_bot.bat
 ```
 
 또는 직접:

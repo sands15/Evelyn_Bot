@@ -1,7 +1,7 @@
 @echo off
 chcp 65001 >nul
 setlocal
-pushd "%~dp0.."
+pushd "%~dp0..\.."
 
 REM ===== 기본값: 더블클릭만 해도 evelyn 생성 =====
 set "PROFILE_ID=evelyn"

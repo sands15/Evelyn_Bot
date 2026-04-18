@@ -2213,7 +2213,6 @@ async def restart_bot_process() -> None:
     script_path = Path(__file__).resolve()
     project_dir = script_path.parent
     start_bot_bat = project_dir / "evelyn_core" / "start_bot.bat"
-    run_bot_bat = project_dir / "evelyn_core" / "run_bot.bat"
     start_bat = project_dir / "evelyn_core" / "start.bat"
 
     env = os.environ.copy()
@@ -2222,14 +2221,6 @@ async def restart_bot_process() -> None:
     if start_bot_bat.exists():
         subprocess.Popen(
             ["cmd.exe", "/c", str(start_bot_bat)],
-            cwd=str(project_dir),
-            env=env,
-            close_fds=True,
-            creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
-        )
-    elif run_bot_bat.exists():
-        subprocess.Popen(
-            ["cmd.exe", "/c", str(run_bot_bat)],
             cwd=str(project_dir),
             env=env,
             close_fds=True,
