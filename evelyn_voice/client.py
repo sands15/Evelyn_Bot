@@ -34,15 +34,15 @@ VOICE_MAP_RETRY_MAX = max(0, int(os.getenv("VOICE_MAP_RETRY_MAX", "2")))
 VOICE_INITIAL_MAP_HOLD_MS = float(os.getenv("VOICE_INITIAL_MAP_HOLD_MS", "900"))
 VOICE_DAVE_WARMUP_GRACE_PACKETS = max(0, int(os.getenv("VOICE_DAVE_WARMUP_GRACE_PACKETS", "6")))
 VOICE_PENDING_SSRC_MAX_PACKETS = max(1, int(os.getenv("VOICE_PENDING_SSRC_MAX_PACKETS", "96")))
-VOICE_LEADING_DROP_MAX_PACKETS = max(0, int(os.getenv("VOICE_LEADING_DROP_MAX_PACKETS", "2")))
-VOICE_START_STABLE_PACKETS = max(1, int(os.getenv("VOICE_START_STABLE_PACKETS", "2")))
+VOICE_LEADING_DROP_MAX_PACKETS = max(0, int(os.getenv("VOICE_LEADING_DROP_MAX_PACKETS", "4")))
+VOICE_START_STABLE_PACKETS = max(1, int(os.getenv("VOICE_START_STABLE_PACKETS", "3")))
 VOICE_GAP_CONCEAL_MAX = max(0, int(os.getenv("VOICE_GAP_CONCEAL_MAX", "6")))
-VOICE_LEADING_GOOD_DROP_PACKETS = max(0, int(os.getenv("VOICE_LEADING_GOOD_DROP_PACKETS", "2")))
-VOICE_HARD_TRIM_MS = max(0.0, float(os.getenv("VOICE_HARD_TRIM_MS", "60")))
+VOICE_LEADING_GOOD_DROP_PACKETS = max(0, int(os.getenv("VOICE_LEADING_GOOD_DROP_PACKETS", "4")))
+VOICE_HARD_TRIM_MS = max(0.0, float(os.getenv("VOICE_HARD_TRIM_MS", "120")))
 VOICE_DYNAMIC_TRIM_ENABLE = os.getenv("VOICE_DYNAMIC_TRIM_ENABLE", "true").lower() == "true"
-VOICE_DYNAMIC_TRIM_MIN_MS = max(0.0, float(os.getenv("VOICE_DYNAMIC_TRIM_MIN_MS", "100")))
+VOICE_DYNAMIC_TRIM_MIN_MS = max(0.0, float(os.getenv("VOICE_DYNAMIC_TRIM_MIN_MS", "160")))
 VOICE_DYNAMIC_TRIM_MAX_MS = max(VOICE_DYNAMIC_TRIM_MIN_MS, float(os.getenv("VOICE_DYNAMIC_TRIM_MAX_MS", "480")))
-VOICE_DYNAMIC_TRIM_CONSECUTIVE = max(1, int(os.getenv("VOICE_DYNAMIC_TRIM_CONSECUTIVE", "3")))
+VOICE_DYNAMIC_TRIM_CONSECUTIVE = max(1, int(os.getenv("VOICE_DYNAMIC_TRIM_CONSECUTIVE", "4")))
 VOICE_PCM_BYTES_PER_MS = int((48000 * 2 * 2) / 1000)
 VOICE_PENDING_INNER_MAX_ATTEMPTS = max(1, int(os.getenv("VOICE_PENDING_INNER_MAX_ATTEMPTS", "8")))
 VOICE_PENDING_INNER_MAX_AGE_SEC = max(0.2, float(os.getenv("VOICE_PENDING_INNER_MAX_AGE_SEC", "1.8")))
@@ -100,27 +100,32 @@ def _estimate_leading_trim_ms(pcm_bytes: bytes, *, sampling_rate: int = 48000) -
     body_rms = float(np.sqrt(np.mean(np.square(body))) + 1e-12) if body.size else 0.0
 
     flags: list[bool] = []
+    chunk_rms: list[float] = []
+    chunk_peak: list[float] = []
     for start in range(0, inspect_samples, window):
         chunk = audio16[start:start + window]
         if chunk.size == 0:
             break
         rms = float(np.sqrt(np.mean(np.square(chunk))) + 1e-12)
+        peak = float(np.max(np.abs(chunk))) if chunk.size else 0.0
         zcr = float(np.mean(chunk[:-1] * chunk[1:] < 0)) if chunk.size > 1 else 0.0
         spec = np.abs(np.fft.rfft(chunk * np.hanning(chunk.size))) + 1e-9
         freqs = np.fft.rfftfreq(chunk.size, d=1.0 / sr)
         flatness = float(np.exp(np.mean(np.log(spec))) / np.mean(spec)) if spec.size else 1.0
         hi_ratio = float(spec[freqs >= 4000.0].sum() / spec.sum()) if spec.size and spec.sum() > 0 else 1.0
         voiced_like = (
-            rms > max(0.006, body_rms * 0.40)
-            and zcr < 0.18
-            and flatness < 0.30
-            and hi_ratio < 0.16
+            rms > max(0.006, body_rms * 0.50)
+            and zcr < 0.16
+            and flatness < 0.28
+            and hi_ratio < 0.14
         )
         flags.append(voiced_like)
+        chunk_rms.append(rms)
+        chunk_peak.append(peak)
 
     stable_ms = None
     consec = VOICE_DYNAMIC_TRIM_CONSECUTIVE
-    silence_needed = 5
+    silence_needed = 6
     for idx in range(silence_needed, max(0, len(flags) - consec + 1)):
         if sum(flags[idx - silence_needed:idx]) != 0:
             continue
@@ -136,11 +141,32 @@ def _estimate_leading_trim_ms(pcm_bytes: bytes, *, sampling_rate: int = 48000) -
                 stable_ms = max(0.0, (idx - consec + 1) * 20.0)
                 break
 
-    trim_ms = max(VOICE_HARD_TRIM_MS, 0.0 if stable_ms is None else stable_ms)
+    early4_rms = max(chunk_rms[:4], default=0.0)
+    early8_rms = max(chunk_rms[:8], default=0.0)
+    early4_peak = max(chunk_peak[:4], default=0.0)
+    early8_peak = max(chunk_peak[:8], default=0.0)
+    burst_trim_ms = 0.0
+    if early4_peak >= 0.90 and early4_rms > max(0.10, body_rms * 2.5):
+        burst_trim_ms = max(burst_trim_ms, 160.0)
+    if early8_peak >= 0.98 and early8_rms > max(0.12, body_rms * 2.2):
+        burst_trim_ms = max(burst_trim_ms, 240.0)
+    if body_rms < 0.02 and early8_peak >= 0.98 and early8_rms > 0.18:
+        burst_trim_ms = max(burst_trim_ms, 320.0)
+
+    trim_ms = max(VOICE_HARD_TRIM_MS, burst_trim_ms, 0.0 if stable_ms is None else stable_ms)
     if trim_ms < VOICE_DYNAMIC_TRIM_MIN_MS:
-        trim_ms = VOICE_HARD_TRIM_MS
+        trim_ms = max(VOICE_HARD_TRIM_MS, burst_trim_ms)
     trim_ms = min(trim_ms, VOICE_DYNAMIC_TRIM_MAX_MS)
-    return trim_ms, {"stable_ms": stable_ms, "body_rms": body_rms, "mode": "16k-leading-scan"}
+    return trim_ms, {
+        "stable_ms": stable_ms,
+        "body_rms": body_rms,
+        "early4_rms": early4_rms,
+        "early8_rms": early8_rms,
+        "early4_peak": early4_peak,
+        "early8_peak": early8_peak,
+        "burst_trim_ms": burst_trim_ms,
+        "mode": "16k-leading-scan",
+    }
 
 
 def _read_uleb128(buf: bytes, start: int, end: int) -> tuple[int, int]:
@@ -1468,11 +1494,16 @@ class EvelynVoiceClient(discord.VoiceClient):
         if trim_bytes > 0 and len(pcm_bytes) > trim_bytes + min_keep_bytes:
             pcm_bytes = pcm_bytes[trim_bytes:]
             log.info(
-                "LEADING PCM TRIM | idx=%d ssrc=%d trim_ms=%.0f stable_ms=%s body_rms=%.4f out_bytes=%d",
+                "LEADING PCM TRIM | idx=%d ssrc=%d trim_ms=%.0f stable_ms=%s burst_trim_ms=%.0f early4_rms=%.4f early8_rms=%.4f early4_peak=%.3f early8_peak=%.3f body_rms=%.4f out_bytes=%d",
                 idx,
                 ssrc,
                 trim_ms,
                 f"{trim_meta.get('stable_ms'):.0f}" if trim_meta.get("stable_ms") is not None else "?",
+                float(trim_meta.get("burst_trim_ms") or 0.0),
+                float(trim_meta.get("early4_rms") or 0.0),
+                float(trim_meta.get("early8_rms") or 0.0),
+                float(trim_meta.get("early4_peak") or 0.0),
+                float(trim_meta.get("early8_peak") or 0.0),
                 float(trim_meta.get("body_rms") or 0.0),
                 len(pcm_bytes),
             )
