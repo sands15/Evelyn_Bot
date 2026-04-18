@@ -114,6 +114,10 @@ guild_locks: dict[int, asyncio.Lock] = {}
 tts_lock = asyncio.Lock()
 voice_debug_counts: dict[int, int] = {}
 
+tts_warmup_started = False
+tts_warmup_ready = False
+tts_warmup_error: str | None = None
+
 stt_processor: Optional[Any] = None
 stt_model: Optional[Any] = None
 stt_backend: Optional[str] = None
@@ -965,11 +969,18 @@ class OmniVoicePCMStream(discord.AudioSource):
 
 
 async def warmup_tts_server() -> None:
+    global tts_warmup_started, tts_warmup_ready, tts_warmup_error
+
+    tts_warmup_started = True
+    tts_warmup_ready = False
+    tts_warmup_error = None
+
     session = await get_http_session()
     timeout = aiohttp.ClientTimeout(total=10)
     async with session.get(f"{OMNIVOICE_SERVER_URL}/health", timeout=timeout) as resp:
         if resp.status != 200:
             text = await resp.text()
+            tts_warmup_error = f"health check 실패: {resp.status} / {text[:200]}"
             raise RuntimeError(f"OmniVoice health check 실패: {resp.status} / {text[:200]}")
         print("OmniVoice 서버 준비 확인 완료")
 
@@ -990,9 +1001,12 @@ async def warmup_tts_server() -> None:
     ) as resp:
         if resp.status != 200:
             text = await resp.text()
+            tts_warmup_error = f"warmup 실패: {resp.status} / {text[:200]}"
             raise RuntimeError(f"OmniVoice warmup 실패: {resp.status} / {text[:200]}")
         async for chunk in resp.content.iter_chunked(4096):
             if chunk:
+                tts_warmup_ready = True
+                tts_warmup_error = None
                 print("OmniVoice TTS 워밍업 완료")
                 break
 
@@ -2189,6 +2203,13 @@ async def status_command(ctx):
         from evelyn_voice.client import OPUS_ERROR_TO_SILENCE as OPUS_RUNTIME_VALUE
     except Exception:
         OPUS_RUNTIME_VALUE = None
+    if not tts_warmup_started or not tts_warmup_ready:
+        tts_status = "봇 준비중..."
+    else:
+        tts_status = "준비 완료"
+    if tts_warmup_error:
+        tts_status = f"오류: {tts_warmup_error}"
+
     await ctx.send(
         "\n".join([
             f"모델: {MODEL_NAME}",
@@ -2196,6 +2217,7 @@ async def status_command(ctx):
             f"STT: {STT_MODEL_NAME}",
             f"음성채널: {voice_channel_name}",
             f"리스닝: {'on' if listening else 'off'}",
+            f"TTS: {tts_status}",
             f"디버그 오디오 저장: {debug_audio_state}",
             f"OPUS_ERROR_TO_SILENCE(env): {opus_env_state if opus_env_state is not None else 'unset'}",
             f"OPUS_ERROR_TO_SILENCE(runtime): {OPUS_RUNTIME_VALUE}",
