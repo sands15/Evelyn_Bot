@@ -15,6 +15,11 @@ recordings/
 logs/
 *.log
 
+bot_memory/
+debug_audio/
+guild_settings/
+omnivoice_profiles/
+
 ref_voice.wav
 ref_text.txt
 pets-*.json
