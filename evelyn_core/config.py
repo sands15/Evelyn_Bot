@@ -79,12 +79,12 @@ ASK_CONFIDENCE_THRESHOLD_TEXT = float(os.getenv("ASK_CONFIDENCE_THRESHOLD_TEXT",
 ASK_CONFIDENCE_THRESHOLD_VOICE = float(os.getenv("ASK_CONFIDENCE_THRESHOLD_VOICE", "0.00"))
 
 
-# Speech-to-text 모델 id.
-STT_MODEL_NAME = os.getenv("STT_MODEL_NAME", "Qwen/Qwen3-ASR-1.7B")
+# Speech-to-text 모델 id. 기본값은 Whisper large-v3.
+STT_MODEL_NAME = os.getenv("STT_MODEL_NAME", "large-v3")
 # STT 디코딩에 강제로 넣는 언어 힌트.
 STT_LANGUAGE = os.getenv("STT_LANGUAGE", "ko")
 # STT 모델의 연산 dtype.
-STT_COMPUTE_TYPE = os.getenv("STT_COMPUTE_TYPE", "float32")
+STT_COMPUTE_TYPE = os.getenv("STT_COMPUTE_TYPE", "float16")
 # STT에 언어 프롬프트를 강제로 넣을지 여부.
 STT_FORCE_LANGUAGE = _env_flag("STT_FORCE_LANGUAGE", "true")
 # 디코더 프롬프트에서 문장부호를 강제할지 여부.
@@ -114,7 +114,7 @@ VOICE_HUMAN_BAND_RATIO_MIN = float(os.getenv("VOICE_HUMAN_BAND_RATIO_MIN", "0.38
 # 저수준 환경음으로 볼 최대 RMS.
 VOICE_ENV_RMS_MAX = float(os.getenv("VOICE_ENV_RMS_MAX", "0.020"))
 # Silero가 음성으로 볼 confidence threshold.
-SILERO_VAD_THRESHOLD = float(os.getenv("SILERO_VAD_THRESHOLD", "0.30"))
+SILERO_VAD_THRESHOLD = float(os.getenv("SILERO_VAD_THRESHOLD", "0.50"))
 # Silero 타임스탬프 계산에 넣을 최소 speech 길이(ms).
 SILERO_MIN_SPEECH_MS = int(os.getenv("SILERO_MIN_SPEECH_MS", "32"))
 # Silero 세그먼트 분리에 필요한 최소 silence 길이(ms).

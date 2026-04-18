@@ -20,6 +20,11 @@ from discord.ext import commands
 from transformers import AutoProcessor
 
 try:
+    from faster_whisper import WhisperModel
+except Exception:
+    WhisperModel = None
+
+try:
     from qwen_asr import Qwen3ASRModel
 except Exception:
     Qwen3ASRModel = None
@@ -31,6 +36,7 @@ from evelyn_core.audio import (
     is_likely_environment_noise,
     is_probably_silent,
     prepare_stt_audio,
+    resample_audio_float,
     slice_audio_window,
 )
 from evelyn_core.config import *
@@ -1125,9 +1131,55 @@ def resolve_stt_torch_dtype() -> torch.dtype:
     return mapping.get(value, torch.float32)
 
 
+def normalize_stt_language(language: str | None = None) -> str | None:
+    value = str(language if language is not None else STT_LANGUAGE).strip()
+    if not value:
+        return None
+
+    lowered = value.lower()
+    aliases = {
+        "korean": "ko",
+        "kor": "ko",
+        "kr": "ko",
+        "ko-kr": "ko",
+        "ko_kr": "ko",
+        "english": "en",
+    }
+    return aliases.get(lowered, lowered)
+
+
+def resolve_whisper_compute_type(device: str) -> str:
+    value = str(STT_COMPUTE_TYPE).strip().lower()
+    if device == "cuda":
+        mapping = {
+            "float16": "float16",
+            "fp16": "float16",
+            "half": "float16",
+            "bfloat16": "float16",
+            "bf16": "float16",
+            "float32": "float32",
+            "fp32": "float32",
+            "float": "float32",
+            "int8": "int8_float16",
+            "int8_float16": "int8_float16",
+            "int8_float32": "int8_float32",
+        }
+        return mapping.get(value, "float16")
+
+    mapping = {
+        "float32": "float32",
+        "fp32": "float32",
+        "float": "float32",
+        "int8": "int8",
+    }
+    return mapping.get(value, "int8")
+
+
 def get_stt_model() -> tuple[str, Any, Any]:
     global stt_processor, stt_model, stt_backend
 
+    if stt_backend == "whisper" and stt_model is not None:
+        return stt_backend, stt_processor, stt_model
     if stt_backend == "qwen" and stt_model is not None:
         return stt_backend, stt_processor, stt_model
     if stt_backend == "cohere" and stt_processor is not None and stt_model is not None:
@@ -1136,10 +1188,28 @@ def get_stt_model() -> tuple[str, Any, Any]:
     device = "cuda" if torch.cuda.is_available() else "cpu"
     token = os.getenv("HF_TOKEN")
     torch_dtype = resolve_stt_torch_dtype()
+    model_name_l = STT_MODEL_NAME.lower()
 
     print(f"STT 로드 시작: model={STT_MODEL_NAME}, device={device}, dtype={torch_dtype}")
 
-    if STT_MODEL_NAME.startswith("Qwen/") or "qwen3-asr" in STT_MODEL_NAME.lower():
+    if "whisper" in model_name_l or model_name_l in {"large-v3", "large-v3-turbo", "distil-large-v3", "distil-whisper-large-v3"}:
+        if WhisperModel is None:
+            raise RuntimeError("faster_whisper package is not available")
+
+        stt_backend = "whisper"
+        stt_processor = None
+        whisper_compute_type = resolve_whisper_compute_type(device)
+        stt_model = WhisperModel(
+            STT_MODEL_NAME,
+            device=device,
+            device_index=0,
+            compute_type=whisper_compute_type,
+            cpu_threads=max(1, (os.cpu_count() or 4) - 2),
+        )
+        print(f"STT 로드 완료 (Whisper) | compute_type={whisper_compute_type}")
+        return stt_backend, stt_processor, stt_model
+
+    if STT_MODEL_NAME.startswith("Qwen/") or "qwen3-asr" in model_name_l:
         if Qwen3ASRModel is None:
             raise RuntimeError("qwen_asr package is not available")
 
@@ -1191,6 +1261,36 @@ def transcribe_audio16k_sync(audio16k: np.ndarray, max_new_tokens: int = 256, *,
     backend, processor, model = get_stt_model()
     stt_audio = np.asarray(audio16k, dtype=np.float32)
 
+    if backend == "whisper":
+        whisper_audio = stt_audio
+        if effective_rate != TARGET_RATE:
+            whisper_audio = resample_audio_float(whisper_audio, effective_rate, TARGET_RATE)
+            print(f"[STT RESAMPLE][{stage}] {effective_rate} -> {TARGET_RATE} samples={whisper_audio.size}")
+
+        beam_size = 5 if stage == "full" else 2
+        language = normalize_stt_language() if STT_FORCE_LANGUAGE else None
+        whisper_kwargs = {
+            "language": language,
+            "task": "transcribe",
+            "beam_size": beam_size,
+            "best_of": beam_size,
+            "condition_on_previous_text": False,
+            "temperature": 0.0,
+            "without_timestamps": True,
+            "word_timestamps": False,
+            "vad_filter": False,
+            "max_new_tokens": max_new_tokens,
+        }
+        if stage.startswith("wake"):
+            whisper_kwargs["hotwords"] = " ".join(sorted(set(normalized_wake_words() + ["이블린"])))
+
+        segments, _info = model.transcribe(
+            whisper_audio,
+            **whisper_kwargs,
+        )
+        text = "".join(segment.text for segment in segments).strip()
+        return clean_text(text)
+
     if backend == "qwen":
         old_max_new_tokens = getattr(model, "max_new_tokens", max_new_tokens)
         try:
@@ -1198,7 +1298,7 @@ def transcribe_audio16k_sync(audio16k: np.ndarray, max_new_tokens: int = 256, *,
             results = model.transcribe(
                 audio=(stt_audio, effective_rate),
                 context="",
-                language=STT_LANGUAGE if STT_FORCE_LANGUAGE else None,
+                language=normalize_stt_language(STT_LANGUAGE) if STT_FORCE_LANGUAGE else None,
                 return_time_stamps=False,
             )
         finally:
@@ -1225,7 +1325,7 @@ def transcribe_audio16k_sync(audio16k: np.ndarray, max_new_tokens: int = 256, *,
             feature_extractor.sampling_rate = original_rate
 
         prompt_ids = processor.get_decoder_prompt_ids(
-            language=STT_LANGUAGE,
+            language=normalize_stt_language(STT_LANGUAGE),
             punctuation=STT_FORCE_PUNCTUATION,
         )
         batch_size = inputs["input_features"].shape[0]
@@ -1237,7 +1337,7 @@ def transcribe_audio16k_sync(audio16k: np.ndarray, max_new_tokens: int = 256, *,
             "return_tensors": "pt",
         }
         if STT_FORCE_LANGUAGE:
-            processor_kwargs["language"] = STT_LANGUAGE
+            processor_kwargs["language"] = normalize_stt_language(STT_LANGUAGE)
 
         inputs = processor(
             stt_audio,
@@ -1261,7 +1361,7 @@ def transcribe_audio16k_sync(audio16k: np.ndarray, max_new_tokens: int = 256, *,
     if STT_FORCE_LANGUAGE and hasattr(processor, "get_decoder_prompt_ids"):
         try:
             decoder_prompt_ids = processor.get_decoder_prompt_ids(
-                language=STT_LANGUAGE,
+                language=normalize_stt_language(STT_LANGUAGE),
                 punctuation=STT_FORCE_PUNCTUATION,
             )
             if decoder_prompt_ids:
