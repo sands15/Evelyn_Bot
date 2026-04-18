@@ -1753,6 +1753,14 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes, 
         log_voice_stage(metrics, "오디오 비어있음")
         return
 
+    if debug_meta and debug_meta.get("unstable"):
+        reasons = ",".join(str(r) for r in debug_meta.get("reasons", []))
+        print(f"[FULL STT SKIP] reason=unstable_audio speaker={member.display_name} reasons={reasons}")
+        print(f"[UNSTABLE AUDIO IGNORE] speaker={member.display_name} reasons={reasons}")
+        save_voice_debug_audio(guild_id, speaker_name, pcm_bytes, audio16k, final_text="[UNSTABLE AUDIO IGNORE]", debug_meta=debug_meta)
+        log_voice_stage(metrics, "불안정 음성 제외", extra=f"reasons={reasons}")
+        return
+
     if VAD_ENABLED and is_probably_silent(audio16k, sampling_rate=stt_sampling_rate):
         duration_sec = len(audio16k) / float(max(1, stt_sampling_rate))
         peak = float(np.max(np.abs(audio16k))) if audio16k.size else 0.0
