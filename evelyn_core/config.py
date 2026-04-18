@@ -141,8 +141,6 @@ WAKE_CONFIRM_AUDIO_SEC = float(os.getenv("WAKE_CONFIRM_AUDIO_SEC", "1.6"))
 WAKE_MAX_TOKENS = int(os.getenv("WAKE_MAX_TOKENS", "32"))
 # wake 2차 확인 STT 최대 토큰 수.
 WAKE_CONFIRM_MAX_TOKENS = int(os.getenv("WAKE_CONFIRM_MAX_TOKENS", "48"))
-# wake miss 보정용 fallback STT 최대 토큰 수.
-WAKE_FALLBACK_MAX_TOKENS = int(os.getenv("WAKE_FALLBACK_MAX_TOKENS", "48"))
 # Whisper wake probe beam size.
 STT_WHISPER_WAKE_BEAM_SIZE = int(os.getenv("STT_WHISPER_WAKE_BEAM_SIZE", "1"))
 # Whisper wake probe best_of 값.
