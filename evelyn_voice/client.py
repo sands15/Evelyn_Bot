@@ -35,6 +35,8 @@ VOICE_PENDING_SSRC_MAX_PACKETS = max(1, int(os.getenv("VOICE_PENDING_SSRC_MAX_PA
 VOICE_LEADING_DROP_MAX_PACKETS = max(0, int(os.getenv("VOICE_LEADING_DROP_MAX_PACKETS", "12")))
 VOICE_START_STABLE_PACKETS = max(1, int(os.getenv("VOICE_START_STABLE_PACKETS", "3")))
 VOICE_GAP_CONCEAL_MAX = max(0, int(os.getenv("VOICE_GAP_CONCEAL_MAX", "6")))
+VOICE_HARD_TRIM_MS = max(0.0, float(os.getenv("VOICE_HARD_TRIM_MS", "180")))
+VOICE_PCM_BYTES_PER_MS = int((48000 * 2 * 2) / 1000)
 
 
 def _parse_rtp_header(packet: bytes):
@@ -1115,6 +1117,24 @@ class EvelynVoiceClient(discord.VoiceClient):
             self.runtime.bind_dave_ssrc(int(user_id), int(ssrc))
 
         pcm_bytes = b"".join(pcm_chunks)
+
+        trim_ms = VOICE_HARD_TRIM_MS
+        if leading_bad_packets > 0:
+            trim_ms = max(trim_ms, min(420.0, leading_bad_packets * 20.0))
+        trim_bytes = int(trim_ms * VOICE_PCM_BYTES_PER_MS)
+        trim_bytes -= trim_bytes % 4
+        min_keep_bytes = VOICE_PCM_BYTES_PER_MS * 80
+        if trim_bytes > 0 and len(pcm_bytes) > trim_bytes + min_keep_bytes:
+            pcm_bytes = pcm_bytes[trim_bytes:]
+            log.info(
+                "LEADING PCM TRIM | idx=%d ssrc=%d trim_ms=%.0f trim_bytes=%d leading_bad=%d out_bytes=%d",
+                idx,
+                ssrc,
+                trim_ms,
+                trim_bytes,
+                leading_bad_packets,
+                len(pcm_bytes),
+            )
 
         member = None
         try:
