@@ -32,8 +32,9 @@ VOICE_MAP_RETRY_MAX = max(0, int(os.getenv("VOICE_MAP_RETRY_MAX", "2")))
 VOICE_INITIAL_MAP_HOLD_MS = float(os.getenv("VOICE_INITIAL_MAP_HOLD_MS", "900"))
 VOICE_DAVE_WARMUP_GRACE_PACKETS = max(0, int(os.getenv("VOICE_DAVE_WARMUP_GRACE_PACKETS", "6")))
 VOICE_PENDING_SSRC_MAX_PACKETS = max(1, int(os.getenv("VOICE_PENDING_SSRC_MAX_PACKETS", "96")))
-VOICE_LEADING_DROP_MAX_PACKETS = max(0, int(os.getenv("VOICE_LEADING_DROP_MAX_PACKETS", "8")))
-VOICE_START_STABLE_PACKETS = max(1, int(os.getenv("VOICE_START_STABLE_PACKETS", "2")))
+VOICE_LEADING_DROP_MAX_PACKETS = max(0, int(os.getenv("VOICE_LEADING_DROP_MAX_PACKETS", "12")))
+VOICE_START_STABLE_PACKETS = max(1, int(os.getenv("VOICE_START_STABLE_PACKETS", "3")))
+VOICE_GAP_CONCEAL_MAX = max(0, int(os.getenv("VOICE_GAP_CONCEAL_MAX", "6")))
 
 
 def _parse_rtp_header(packet: bytes):
@@ -892,9 +893,23 @@ class EvelynVoiceClient(discord.VoiceClient):
         leading_bad_packets = 0
         stable_voice_packets = 0
         started_output = False
+        last_sequence = None
+        last_good_pcm = None
 
         for packet_index, p in enumerate(packets, start=1):
             raw_packet = p.get("raw_packet")
+            sequence = int(p.get("sequence", 0))
+            if last_sequence is not None:
+                gap = (sequence - last_sequence - 1) & 0xFFFF
+                if gap > 0:
+                    if not started_output and leading_bad_packets < VOICE_LEADING_DROP_MAX_PACKETS:
+                        leading_bad_packets = min(VOICE_LEADING_DROP_MAX_PACKETS, leading_bad_packets + gap)
+                    elif started_output and last_good_pcm is not None:
+                        conceal = min(gap, VOICE_GAP_CONCEAL_MAX)
+                        for _ in range(conceal):
+                            pcm_chunks.append(last_good_pcm)
+                            success += 1
+            last_sequence = sequence
             if raw_packet is None:
                 failed += 1
                 outer_fail += 1
@@ -975,7 +990,7 @@ class EvelynVoiceClient(discord.VoiceClient):
             if opus_packet == b"\xF8\xFF\xFE":
                 real_silence += 1
                 if started_output:
-                    pcm_chunks.append(SILENCE_PCM)
+                    pcm_chunks.append(last_good_pcm or SILENCE_PCM)
                     success += 1
                 continue
 
@@ -1017,10 +1032,10 @@ class EvelynVoiceClient(discord.VoiceClient):
                     continue
                 if OPUS_ERROR_TO_SILENCE:
                     opus_silence_fill += 1
-                    pcm_chunks.append(SILENCE_PCM)
+                    pcm_chunks.append(last_good_pcm or SILENCE_PCM)
                     if packet_index <= 5:
                         log.warning(
-                            "PACKET OPUS failed -> silence | idx=%d pkt=%d seq=%d ts=%d bytes=%d err=%r",
+                            "PACKET OPUS failed -> conceal | idx=%d pkt=%d seq=%d ts=%d bytes=%d err=%r",
                             idx,
                             packet_index,
                             p["sequence"],
@@ -1054,6 +1069,7 @@ class EvelynVoiceClient(discord.VoiceClient):
 
             started_output = True
             pcm_chunks.append(pcm)
+            last_good_pcm = pcm
             success += 1
 
             if used_dave_inner:
