@@ -252,7 +252,7 @@ def is_probably_silent_silero(audio: np.ndarray, sampling_rate: int = TARGET_RAT
 
 
 def is_probably_silent(audio: np.ndarray, sampling_rate: int = TARGET_RATE) -> bool:
-    """Silero 결과를 우선 쓰되 필요하면 energy fallback/override로 보정한다."""
+    """Silero 결과를 우선 쓰고, Silero 자체가 실패한 경우에만 energy fallback으로 간다."""
     global silero_vad_warned
 
     if audio.size == 0:
@@ -263,18 +263,7 @@ def is_probably_silent(audio: np.ndarray, sampling_rate: int = TARGET_RATE) -> b
 
     if VAD_PROVIDER == "silero":
         try:
-            silero_silent = is_probably_silent_silero(audio, sampling_rate=sampling_rate)
-            if silero_silent:
-                energy_silent = is_probably_silent_energy(audio, sampling_rate=sampling_rate)
-                if not energy_silent:
-                    duration_sec = len(audio) / float(max(1, int(sampling_rate)))
-                    peak = float(np.max(np.abs(audio))) if audio.size else 0.0
-                    rms = float(np.sqrt(np.mean(np.square(audio)))) if audio.size else 0.0
-                    print(
-                        f"[VAD OVERRIDE] silero=silent energy=voiced sampling_rate={sampling_rate} sec={duration_sec:.2f} peak={peak:.4f} rms={rms:.4f}"
-                    )
-                    return False
-            return silero_silent
+            return is_probably_silent_silero(audio, sampling_rate=sampling_rate)
         except Exception as e:
             if not silero_vad_warned:
                 print(f"[VAD FALLBACK] Silero VAD 실패 -> energy 사용 | err={e}")
