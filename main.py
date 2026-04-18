@@ -2212,9 +2212,9 @@ async def restart_bot_process() -> None:
     await asyncio.sleep(1.0)
     script_path = Path(__file__).resolve()
     project_dir = script_path.parent
-    start_bot_bat = project_dir / "start_bot.bat"
+    start_bot_bat = project_dir / "evelyn_core" / "start_bot.bat"
     run_bot_bat = project_dir / "run_bot.bat"
-    start_bat = project_dir / "start.bat"
+    start_bat = project_dir / "evelyn_core" / "start.bat"
 
     env = os.environ.copy()
     env.setdefault("STT_USE_RAW_48K", "false")

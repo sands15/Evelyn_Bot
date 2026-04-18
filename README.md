@@ -32,7 +32,9 @@ Evelyn Bot은 디스코드에서 텍스트와 음성으로 대화하는 개인�
   - DAVE 처리
   - UDP / gateway / sink 구현
 - `start.bat`
-  - LLM 서버 2개와 OmniVoice 서버를 띄우는 배치 파일
+  - 사용자용 통합 실행 진입점, 내부적으로 `evelyn_core\start.bat`를 호출
+- `evelyn_core\start.bat`
+  - LLM 서버 2개와 OmniVoice 서버를 띄우는 실제 통합 배치 파일
 - `run_bot.bat`
   - 디스코드 봇 본체만 실행하는 배치 파일
 - `.env.example`
@@ -297,6 +299,7 @@ pip install -r requirements.txt
 
 ### 1) 서버들 실행
 
+루트의 `start.bat`는 사용자용 진입점이고, 실제 실행 로직은 `evelyn_core\start.bat`에 있습니다.
 `start.bat`는 봇 자체가 아니라, 로컬 추론 서버들을 띄우는 배치 파일입니다.
 
 현재 구성:
