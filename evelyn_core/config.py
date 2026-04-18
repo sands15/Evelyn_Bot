@@ -1,6 +1,13 @@
 import os
 from pathlib import Path
 
+
+def _env_flag(name: str, default: str = "false") -> bool:
+    value = os.getenv(name)
+    if value is None:
+        value = default
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
 # Evelyn 봇이 디스코드에 로그인할 때 쓰는 토큰.
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 
@@ -79,13 +86,15 @@ STT_LANGUAGE = os.getenv("STT_LANGUAGE", "ko")
 # STT 모델의 연산 dtype.
 STT_COMPUTE_TYPE = os.getenv("STT_COMPUTE_TYPE", "float16")
 # STT에 언어 프롬프트를 강제로 넣을지 여부.
-STT_FORCE_LANGUAGE = os.getenv("STT_FORCE_LANGUAGE", "true").lower() == "true"
+STT_FORCE_LANGUAGE = _env_flag("STT_FORCE_LANGUAGE", "true")
 # 디코더 프롬프트에서 문장부호를 강제할지 여부.
-STT_FORCE_PUNCTUATION = os.getenv("STT_FORCE_PUNCTUATION", "true").lower() == "true"
+STT_FORCE_PUNCTUATION = _env_flag("STT_FORCE_PUNCTUATION", "true")
+# 실험용: STT에 48k mono 오디오를 직접 전달할지 여부.
+STT_USE_RAW_48K = _env_flag("STT_USE_RAW_48K", "true")
 
 
 # STT 전에 VAD 필터링을 켤지 여부.
-VAD_ENABLED = os.getenv("VAD_ENABLED", "true").lower() == "true"
+VAD_ENABLED = _env_flag("VAD_ENABLED", "true")
 # VAD 백엔드 선택값. 현재는 silero 또는 energy fallback 흐름을 기대.
 VAD_PROVIDER = os.getenv("VAD_PROVIDER", "silero").lower()
 # 경량 energy VAD fallback에서 쓰는 RMS 기준치.
@@ -113,11 +122,11 @@ SILERO_MIN_SILENCE_MS = int(os.getenv("SILERO_MIN_SILENCE_MS", "0"))
 # Silero speech segment 앞뒤로 더해줄 pad(ms).
 SILERO_SPEECH_PAD_MS = int(os.getenv("SILERO_SPEECH_PAD_MS", "80"))
 # CPU에서 ONNX Silero 런타임을 우선 쓸지 여부.
-SILERO_VAD_ONNX = os.getenv("SILERO_VAD_ONNX", "true").lower() == "true"
+SILERO_VAD_ONNX = _env_flag("SILERO_VAD_ONNX", "true")
 
 
 # STT 전에 경량 denoise를 켤지 여부.
-DENOISE_ENABLED = os.getenv("DENOISE_ENABLED", "true").lower() == "true"
+DENOISE_ENABLED = _env_flag("DENOISE_ENABLED", "true")
 # 음성 정리를 위한 high-pass cutoff 주파수.
 DENOISE_HIGHPASS_HZ = float(os.getenv("DENOISE_HIGHPASS_HZ", "120"))
 # 노이즈 바닥값을 추정할 때 앞부분에서 볼 길이(초).
