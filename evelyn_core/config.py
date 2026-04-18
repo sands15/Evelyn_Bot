@@ -79,8 +79,8 @@ ASK_CONFIDENCE_THRESHOLD_TEXT = float(os.getenv("ASK_CONFIDENCE_THRESHOLD_TEXT",
 ASK_CONFIDENCE_THRESHOLD_VOICE = float(os.getenv("ASK_CONFIDENCE_THRESHOLD_VOICE", "0.00"))
 
 
-# Speech-to-text 모델 id. 기본값은 Whisper large-v3.
-STT_MODEL_NAME = os.getenv("STT_MODEL_NAME", "large-v3")
+# Speech-to-text 모델 id. 기본값은 한국어 파인튜닝 Whisper 모델.
+STT_MODEL_NAME = os.getenv("STT_MODEL_NAME", "byoussef/whisper-large-v2-Ko")
 # STT 디코딩에 강제로 넣는 언어 힌트.
 STT_LANGUAGE = os.getenv("STT_LANGUAGE", "ko")
 # STT 모델의 연산 dtype.
@@ -135,14 +135,22 @@ DENOISE_NOISE_FLOOR_SEC = float(os.getenv("DENOISE_NOISE_FLOOR_SEC", "0.20"))
 DENOISE_GATE_MULT = float(os.getenv("DENOISE_GATE_MULT", "1.35"))
 # wake probe STT에 잘라서 넣을 오디오 길이(초).
 WAKE_AUDIO_SEC = float(os.getenv("WAKE_AUDIO_SEC", "1.1"))
+# wake 2차 확인 단계에서 쓸 오디오 길이(초).
+WAKE_CONFIRM_AUDIO_SEC = float(os.getenv("WAKE_CONFIRM_AUDIO_SEC", "1.6"))
 # wake probe STT의 최대 토큰 수.
 WAKE_MAX_TOKENS = int(os.getenv("WAKE_MAX_TOKENS", "32"))
+# wake 2차 확인 STT 최대 토큰 수.
+WAKE_CONFIRM_MAX_TOKENS = int(os.getenv("WAKE_CONFIRM_MAX_TOKENS", "48"))
 # wake miss 보정용 fallback STT 최대 토큰 수.
 WAKE_FALLBACK_MAX_TOKENS = int(os.getenv("WAKE_FALLBACK_MAX_TOKENS", "48"))
 # Whisper wake probe beam size.
 STT_WHISPER_WAKE_BEAM_SIZE = int(os.getenv("STT_WHISPER_WAKE_BEAM_SIZE", "1"))
 # Whisper wake probe best_of 값.
 STT_WHISPER_WAKE_BEST_OF = int(os.getenv("STT_WHISPER_WAKE_BEST_OF", "1"))
+# Whisper wake confirm beam size.
+STT_WHISPER_WAKE_CONFIRM_BEAM_SIZE = int(os.getenv("STT_WHISPER_WAKE_CONFIRM_BEAM_SIZE", "2"))
+# Whisper wake confirm best_of 값.
+STT_WHISPER_WAKE_CONFIRM_BEST_OF = int(os.getenv("STT_WHISPER_WAKE_CONFIRM_BEST_OF", "1"))
 # Whisper full STT beam size.
 STT_WHISPER_FULL_BEAM_SIZE = int(os.getenv("STT_WHISPER_FULL_BEAM_SIZE", "2"))
 # Whisper full STT best_of 값.

@@ -17,7 +17,7 @@ import numpy as np
 import torch
 import discord
 from discord.ext import commands
-from transformers import AutoProcessor
+from transformers import AutoProcessor, WhisperForConditionalGeneration
 
 try:
     from faster_whisper import WhisperModel
@@ -1180,6 +1180,8 @@ def get_stt_model() -> tuple[str, Any, Any]:
 
     if stt_backend == "whisper" and stt_model is not None:
         return stt_backend, stt_processor, stt_model
+    if stt_backend == "hf_whisper" and stt_processor is not None and stt_model is not None:
+        return stt_backend, stt_processor, stt_model
     if stt_backend == "qwen" and stt_model is not None:
         return stt_backend, stt_processor, stt_model
     if stt_backend == "cohere" and stt_processor is not None and stt_model is not None:
@@ -1192,7 +1194,8 @@ def get_stt_model() -> tuple[str, Any, Any]:
 
     print(f"STT 로드 시작: model={STT_MODEL_NAME}, device={device}, dtype={torch_dtype}")
 
-    if "whisper" in model_name_l or model_name_l in {"large-v3", "large-v3-turbo", "distil-large-v3", "distil-whisper-large-v3"}:
+    fast_whisper_models = {"large-v3", "large-v3-turbo", "distil-large-v3", "distil-whisper-large-v3"}
+    if model_name_l in fast_whisper_models:
         if WhisperModel is None:
             raise RuntimeError("faster_whisper package is not available")
 
@@ -1206,7 +1209,26 @@ def get_stt_model() -> tuple[str, Any, Any]:
             compute_type=whisper_compute_type,
             cpu_threads=max(1, (os.cpu_count() or 4) - 2),
         )
-        print(f"STT 로드 완료 (Whisper) | compute_type={whisper_compute_type}")
+        print(f"STT 로드 완료 (Whisper/faster-whisper) | compute_type={whisper_compute_type}")
+        return stt_backend, stt_processor, stt_model
+
+    if "whisper" in model_name_l:
+        stt_backend = "hf_whisper"
+        stt_processor = AutoProcessor.from_pretrained(
+            STT_MODEL_NAME,
+            token=token,
+        )
+        hf_load_kwargs = {
+            "token": token,
+            "torch_dtype": torch_dtype,
+            "low_cpu_mem_usage": True,
+        }
+        stt_model = WhisperForConditionalGeneration.from_pretrained(
+            STT_MODEL_NAME,
+            **hf_load_kwargs,
+        ).to(device)
+        stt_model.eval()
+        print("STT 로드 완료 (Whisper/transformers)")
         return stt_backend, stt_processor, stt_model
 
     if STT_MODEL_NAME.startswith("Qwen/") or "qwen3-asr" in model_name_l:
@@ -1261,7 +1283,7 @@ def transcribe_audio16k_sync(audio16k: np.ndarray, max_new_tokens: int = 256, *,
     backend, processor, model = get_stt_model()
     stt_audio = np.asarray(audio16k, dtype=np.float32)
 
-    if backend == "whisper":
+    if backend in {"whisper", "hf_whisper"}:
         whisper_audio = stt_audio
         if effective_rate != TARGET_RATE:
             whisper_audio = resample_audio_float(whisper_audio, effective_rate, TARGET_RATE)
@@ -1270,28 +1292,69 @@ def transcribe_audio16k_sync(audio16k: np.ndarray, max_new_tokens: int = 256, *,
         if stage == "full":
             beam_size = max(1, STT_WHISPER_FULL_BEAM_SIZE)
             best_of = max(1, STT_WHISPER_FULL_BEST_OF)
+        elif stage == "wake-confirm":
+            beam_size = max(1, STT_WHISPER_WAKE_CONFIRM_BEAM_SIZE)
+            best_of = max(1, STT_WHISPER_WAKE_CONFIRM_BEST_OF)
         else:
             beam_size = max(1, STT_WHISPER_WAKE_BEAM_SIZE)
             best_of = max(1, STT_WHISPER_WAKE_BEST_OF)
 
         language = normalize_stt_language() if STT_FORCE_LANGUAGE else None
-        whisper_kwargs = {
-            "language": language,
-            "task": "transcribe",
-            "beam_size": beam_size,
-            "best_of": best_of,
-            "condition_on_previous_text": False,
-            "temperature": 0.0,
-            "without_timestamps": True,
-            "word_timestamps": False,
-            "vad_filter": False,
-            "max_new_tokens": max_new_tokens,
-        }
-        segments, _info = model.transcribe(
+        if backend == "whisper":
+            whisper_kwargs = {
+                "language": language,
+                "task": "transcribe",
+                "beam_size": beam_size,
+                "best_of": best_of,
+                "condition_on_previous_text": False,
+                "temperature": 0.0,
+                "without_timestamps": True,
+                "word_timestamps": False,
+                "vad_filter": False,
+                "max_new_tokens": max_new_tokens,
+            }
+            segments, _info = model.transcribe(
+                whisper_audio,
+                **whisper_kwargs,
+            )
+            text = "".join(segment.text for segment in segments).strip()
+            return clean_text(text)
+
+        inputs = processor(
             whisper_audio,
-            **whisper_kwargs,
+            sampling_rate=TARGET_RATE,
+            return_tensors="pt",
         )
-        text = "".join(segment.text for segment in segments).strip()
+        moved = {}
+        for k, v in inputs.items():
+            if torch.is_tensor(v):
+                if torch.is_floating_point(v):
+                    moved[k] = v.to(model.device, dtype=model.dtype)
+                else:
+                    moved[k] = v.to(model.device)
+            else:
+                moved[k] = v
+
+        generate_kwargs = {
+            "max_new_tokens": max_new_tokens,
+            "num_beams": beam_size,
+            "do_sample": False,
+        }
+        if best_of > 1:
+            generate_kwargs["num_return_sequences"] = 1
+
+        if STT_FORCE_LANGUAGE and hasattr(processor, "get_decoder_prompt_ids"):
+            decoder_prompt_ids = processor.get_decoder_prompt_ids(
+                language=language,
+                task="transcribe",
+            )
+            if decoder_prompt_ids:
+                generate_kwargs["forced_decoder_ids"] = decoder_prompt_ids
+
+        with torch.inference_mode():
+            outputs = model.generate(**moved, **generate_kwargs)
+
+        text = processor.batch_decode(outputs, skip_special_tokens=True)[0]
         return clean_text(text)
 
     if backend == "qwen":
@@ -1383,7 +1446,7 @@ def transcribe_audio16k_sync(audio16k: np.ndarray, max_new_tokens: int = 256, *,
     return clean_text(text)
 
 
-def detect_wake_word_sync(audio: np.ndarray, *, sampling_rate: int = TARGET_RATE) -> tuple[bool, str]:
+def detect_wake_word_sync(audio: np.ndarray, *, sampling_rate: int = TARGET_RATE) -> tuple[bool, str, str]:
     wake_audio = slice_audio_window(audio, WAKE_AUDIO_SEC, sampling_rate=sampling_rate)
     wake_text = transcribe_audio16k_sync(
         wake_audio,
@@ -1391,7 +1454,22 @@ def detect_wake_word_sync(audio: np.ndarray, *, sampling_rate: int = TARGET_RATE
         sampling_rate=sampling_rate,
         stage="wake",
     )
-    return contains_leading_wake_word(wake_text), wake_text
+
+    stripped = strip_leading_voice_fillers(wake_text)
+    first_hit = contains_leading_wake_word(stripped)
+    confirm_text = ""
+    if first_hit:
+        confirm_audio = slice_audio_window(audio, WAKE_CONFIRM_AUDIO_SEC, sampling_rate=sampling_rate)
+        confirm_text = transcribe_audio16k_sync(
+            confirm_audio,
+            max_new_tokens=WAKE_CONFIRM_MAX_TOKENS,
+            sampling_rate=sampling_rate,
+            stage="wake-confirm",
+        )
+        confirm_hit = contains_leading_wake_word(strip_leading_voice_fillers(confirm_text))
+        return confirm_hit, wake_text, confirm_text
+
+    return False, wake_text, confirm_text
 
 
 # =========================================================
@@ -1903,15 +1981,20 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes) 
 
     log_voice_stage(metrics, "웨이크 프로브 시작", extra=f"samples={audio_for_wake.size} sampling_rate={wake_sampling_rate}")
     try:
-        wake_detected, wake_probe_raw = await asyncio.to_thread(detect_wake_word_sync, audio_for_wake, sampling_rate=wake_sampling_rate)
+        wake_detected, wake_probe_raw, wake_confirm_raw = await asyncio.to_thread(detect_wake_word_sync, audio_for_wake, sampling_rate=wake_sampling_rate)
     except Exception as e:
         print(f"❌ [WAKE STT] {e}")
         log_voice_stage(metrics, "웨이크 프로브 실패", extra=repr(e))
         return
 
     wake_probe = apply_stt_post_corrections(wake_probe_raw, wake_detected=False)
+    wake_confirm = apply_stt_post_corrections(wake_confirm_raw, wake_detected=False) if wake_confirm_raw else ""
     wake_detected = wake_detected or contains_leading_wake_word(strip_leading_voice_fillers(wake_probe))
-    log_voice_stage(metrics, "웨이크 프로브 완료", extra=f"wake={wake_detected} probe_len={len(wake_probe)}")
+    if wake_detected and wake_confirm:
+        wake_detected = contains_leading_wake_word(strip_leading_voice_fillers(wake_confirm))
+        if wake_detected:
+            wake_probe = wake_confirm
+    log_voice_stage(metrics, "웨이크 프로브 완료", extra=f"wake={wake_detected} probe_len={len(wake_probe)} confirm_len={len(wake_confirm)}")
 
     if is_likely_environment_noise(audio_for_wake, sampling_rate=wake_sampling_rate):
         band_ratio, flatness, rms = compute_voice_band_metrics(audio_for_wake, sampling_rate=wake_sampling_rate)
