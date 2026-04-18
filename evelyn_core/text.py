@@ -39,6 +39,9 @@ def clean_tts_text(text: str) -> str:
     leading_tag = leading_tag_match.group(1) if leading_tag_match else ""
 
     text = re.sub(r"\[[^\[\]]+\]", " ", text)
+    text = re.sub(r"[\U0001F300-\U0001FAFF\u2600-\u27BF\uFE0F]+", " ", text)
+    text = re.sub(r"(?:\s|^)[:;=8xX]-?[)DdpP(/\\|]+\s*$", "", text)
+    text = re.sub(r"(?:\s|^)(?:ㅎㅎ+|ㅋㅋ+|ㅠㅠ+|ㅜㅜ+|^^+|헤헤+|하하+|흐흐+)\s*$", "", text)
     text = re.sub(r"[\"'`~*_#@^|<>{}()]", "", text)
     text = clean_text(text)
 

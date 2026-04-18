@@ -8,6 +8,7 @@ import subprocess
 import sys
 import time
 import asyncio
+import wave
 from pathlib import Path
 from typing import Awaitable, Callable, Optional
 
@@ -104,6 +105,7 @@ bot = commands.Bot(command_prefix=resolve_command_prefix, intents=intents)
 
 guild_locks: dict[int, asyncio.Lock] = {}
 tts_lock = asyncio.Lock()
+voice_debug_counts: dict[int, int] = {}
 
 stt_processor: Optional[AutoProcessor] = None
 stt_model: Optional[CohereAsrForConditionalGeneration] = None
@@ -151,6 +153,89 @@ def reset_guild_runtime_state(guild_id: int) -> None:
     bot_speaking_guilds.discard(guild_id)
     memory_locks.pop(guild_id, None)
     cognitive_locks.pop(guild_id, None)
+
+
+def _sanitize_debug_label(value: str | None, *, fallback: str = "unknown") -> str:
+    text = (value or "").strip()
+    text = re.sub(r"[^0-9A-Za-z가-힣._-]+", "_", text)
+    text = text.strip("._-")
+    return text or fallback
+
+
+def _trim_voice_debug_dir(guild_dir: Path) -> None:
+    if VOICE_DEBUG_MAX_FILES_PER_GUILD <= 0 or not guild_dir.exists():
+        return
+    wavs = sorted(guild_dir.glob("*.wav"), key=lambda p: p.stat().st_mtime)
+    overflow = len(wavs) - VOICE_DEBUG_MAX_FILES_PER_GUILD
+    if overflow <= 0:
+        return
+    for path in wavs[:overflow]:
+        try:
+            path.unlink()
+        except Exception:
+            pass
+
+
+def save_voice_debug_audio(
+    guild_id: int,
+    speaker: str,
+    pcm_bytes: bytes,
+    audio16k: np.ndarray,
+    *,
+    wake_probe: str | None = None,
+    final_text: str | None = None,
+) -> None:
+    if not VOICE_DEBUG_SAVE_AUDIO:
+        return
+    try:
+        base_dir = Path(VOICE_DEBUG_AUDIO_DIR)
+        if not base_dir.is_absolute():
+            base_dir = Path(__file__).resolve().parent / base_dir
+        guild_dir = base_dir / str(guild_id)
+        guild_dir.mkdir(parents=True, exist_ok=True)
+
+        idx = voice_debug_counts.get(guild_id, 0) + 1
+        voice_debug_counts[guild_id] = idx
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        speaker_label = _sanitize_debug_label(speaker)
+        stem = f"{stamp}_{idx:04d}_{speaker_label}"
+
+        raw_path = guild_dir / f"{stem}_raw48k.wav"
+        stt_path = guild_dir / f"{stem}_stt16k.wav"
+        meta_path = guild_dir / f"{stem}.json"
+
+        with wave.open(str(raw_path), "wb") as wf:
+            wf.setnchannels(CHANNELS)
+            wf.setsampwidth(2)
+            wf.setframerate(RATE)
+            wf.writeframes(pcm_bytes)
+
+        audio16k_int16 = np.clip(audio16k, -1.0, 1.0)
+        audio16k_int16 = (audio16k_int16 * 32767.0).astype(np.int16)
+        with wave.open(str(stt_path), "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(TARGET_RATE)
+            wf.writeframes(audio16k_int16.tobytes())
+
+        meta = {
+            "saved_at": stamp,
+            "guild_id": guild_id,
+            "speaker": speaker,
+            "raw_path": str(raw_path),
+            "stt_path": str(stt_path),
+            "raw_bytes": len(pcm_bytes),
+            "raw_seconds": round(len(pcm_bytes) / float(RATE * CHANNELS * 2), 3),
+            "stt_samples": int(audio16k.size),
+            "stt_seconds": round(audio16k.size / float(TARGET_RATE), 3),
+            "wake_probe": wake_probe,
+            "final_text": final_text,
+        }
+        meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+        _trim_voice_debug_dir(guild_dir)
+        print(f"[VOICE DEBUG SAVE] speaker={speaker} raw={raw_path} stt={stt_path}")
+    except Exception as e:
+        print(f"[VOICE DEBUG SAVE FAIL] speaker={speaker} err={e!r}")
 
 
 def should_ignore_short_transcription(
@@ -672,7 +757,7 @@ def split_tts_sentences(buffer: str, *, force: bool = False) -> tuple[list[str],
     if not force:
         compact = clean_text(working)
         if len(compact) >= TTS_EARLY_CHUNK_LEN:
-            cut = max(working.rfind(" "), working.rfind(","), working.rfind("，"))
+            cut = max(working.rfind(","), working.rfind("，"))
             if cut >= TTS_EARLY_CUT_MIN:
                 sentence = clean_tts_text(working[:cut])
                 if sentence:
@@ -1561,6 +1646,7 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes) 
     log_voice_stage(metrics, "process_member_audio 시작", extra=f"speaker={member.display_name} pcm_bytes={len(pcm_bytes)}")
 
     audio16k = prepare_stt_audio(pcm_bytes)
+    speaker_name = member.display_name or str(member.id)
     if audio16k.size == 0:
         log_voice_stage(metrics, "오디오 비어있음")
         return
@@ -1570,6 +1656,7 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes) 
         peak = float(np.max(np.abs(audio16k))) if audio16k.size else 0.0
         rms = float(np.sqrt(np.mean(np.square(audio16k)))) if audio16k.size else 0.0
         print(f"[VAD IGNORE] speaker={member.display_name} sec={duration_sec:.2f} peak={peak:.4f} rms={rms:.4f}")
+        save_voice_debug_audio(guild_id, speaker_name, pcm_bytes, audio16k, final_text="[VAD IGNORE]")
         log_voice_stage(metrics, "VAD 무음 판정", extra=f"sec={duration_sec:.2f} peak={peak:.4f} rms={rms:.4f}")
         return
 
@@ -1590,20 +1677,24 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes) 
         print(
             f"[ENV IGNORE] speaker={member.display_name} band_ratio={band_ratio:.3f} flatness={flatness:.3f} rms={rms:.4f} probe={wake_probe!r}"
         )
+        save_voice_debug_audio(guild_id, speaker_name, pcm_bytes, audio16k, wake_probe=wake_probe, final_text="[ENV IGNORE]")
         return
 
     if looks_like_brief_filler_text(wake_probe):
         print(f"[FILLER IGNORE] speaker={member.display_name} probe={wake_probe!r}")
+        save_voice_debug_audio(guild_id, speaker_name, pcm_bytes, audio16k, wake_probe=wake_probe, final_text="[FILLER IGNORE]")
         log_voice_stage(metrics, "짧은 필러 무시", extra=f"probe={wake_probe!r}")
         return
 
     if looks_like_repetitive_noise_text(wake_probe):
         print(f"[NOISE TEXT IGNORE] speaker={member.display_name} probe={wake_probe!r}")
+        save_voice_debug_audio(guild_id, speaker_name, pcm_bytes, audio16k, wake_probe=wake_probe, final_text="[NOISE TEXT IGNORE]")
         return
 
     if not wake_detected:
         if wake_probe:
             print(f"[WAKE IGNORE] {member.display_name}: {wake_probe!r}")
+        save_voice_debug_audio(guild_id, speaker_name, pcm_bytes, audio16k, wake_probe=wake_probe, final_text="[WAKE IGNORE]")
         log_voice_stage(metrics, "웨이크 미검출", extra=f"probe={wake_probe!r}")
         return
 
@@ -1618,6 +1709,7 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes) 
     log_voice_stage(metrics, "본문 STT 완료", extra=f"text_len={len(text)}")
 
     if not text:
+        save_voice_debug_audio(guild_id, speaker_name, pcm_bytes, audio16k, wake_probe=wake_probe, final_text="[EMPTY STT]")
         log_voice_stage(metrics, "본문 STT 빈 결과")
         return
 
@@ -1628,9 +1720,11 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes) 
 
     if should_ignore_short_transcription(text, pcm_bytes, wake_detected=wake_detected):
         print(f"[STT IGNORE] short_noise: {text!r}")
+        save_voice_debug_audio(guild_id, speaker_name, pcm_bytes, audio16k, wake_probe=wake_probe, final_text=text)
         log_voice_stage(metrics, "짧은 STT 무시", extra=f"text={text!r}")
         return
 
+    save_voice_debug_audio(guild_id, speaker_name, pcm_bytes, audio16k, wake_probe=wake_probe, final_text=text)
     print(f"🎤 [{member.display_name}] wake={wake_probe!r} text={text}")
 
     ok, reason = should_reply_to_voice(guild_id, text, wake_detected=True)
@@ -1859,6 +1953,26 @@ async def restart_bot_process() -> None:
     os._exit(0)
 
 
+async def shutdown_bot_process() -> None:
+    await asyncio.sleep(0.5)
+    try:
+        for guild in list(bot.guilds):
+            vc = guild.voice_client
+            if vc is None:
+                continue
+            try:
+                if hasattr(vc, "stop_listening"):
+                    vc.stop_listening()
+            except Exception:
+                pass
+            try:
+                await vc.disconnect(force=True)
+            except Exception:
+                pass
+    finally:
+        os._exit(0)
+
+
 @bot.command(name="재시작", aliases=["restart"])
 @commands.check(lambda ctx: ctx.author.id in ALLOWED_RESTART_USER_IDS)
 async def restart_bot_command(ctx):
@@ -1872,6 +1986,48 @@ async def restart_bot_command_error(ctx, error):
         await ctx.send("이 명령은 허용된 사용자만 쓸 수 있어.")
         return
     raise error
+
+
+@bot.command(name="종료", aliases=["shutdown", "quit", "exit"])
+@commands.check(lambda ctx: ctx.author.id in ALLOWED_RESTART_USER_IDS)
+async def shutdown_bot_command(ctx):
+    await ctx.send("⏹️ 봇을 종료할게.")
+    asyncio.create_task(shutdown_bot_process())
+
+
+@shutdown_bot_command.error
+async def shutdown_bot_command_error(ctx, error):
+    if isinstance(error, commands.CheckFailure):
+        await ctx.send("이 명령은 허용된 사용자만 쓸 수 있어.")
+        return
+    raise error
+
+
+@bot.command(name="상태", aliases=["status"])
+async def status_command(ctx):
+    guild = ctx.guild
+    vc = guild.voice_client if guild else None
+    voice_channel_name = getattr(getattr(vc, "channel", None), "name", None) or "없음"
+    listening = bool(vc and hasattr(vc, "is_listening") and vc.is_listening())
+    debug_audio_state = "on" if VOICE_DEBUG_SAVE_AUDIO else "off"
+    opus_env_state = os.getenv("OPUS_ERROR_TO_SILENCE")
+    try:
+        from evelyn_voice.client import OPUS_ERROR_TO_SILENCE as OPUS_RUNTIME_VALUE
+    except Exception:
+        OPUS_RUNTIME_VALUE = None
+    await ctx.send(
+        "\n".join([
+            f"모델: {MODEL_NAME}",
+            f"서브모델: {SUMMARY_MODEL_NAME}",
+            f"STT: {STT_MODEL_NAME}",
+            f"음성채널: {voice_channel_name}",
+            f"리스닝: {'on' if listening else 'off'}",
+            f"디버그 오디오 저장: {debug_audio_state}",
+            f"OPUS_ERROR_TO_SILENCE(env): {opus_env_state if opus_env_state is not None else 'unset'}",
+            f"OPUS_ERROR_TO_SILENCE(runtime): {OPUS_RUNTIME_VALUE}",
+            f"VAD: {'on' if VAD_ENABLED else 'off'} ({VAD_PROVIDER})",
+        ])
+    )
 
 
 @bot.command(name="접두사", aliases=["prefix"])

@@ -8,7 +8,7 @@ DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 # 사용자 응답용 메인 LLM 서버 엔드포인트.
 LLM_SERVER_URL = os.getenv("LLM_SERVER_URL", "http://127.0.0.1:9820/v1/chat/completions")
 # 메인 LLM 서버에 전달할 모델 이름.
-MODEL_NAME = os.getenv("LLM_MODEL_NAME", "Qwen3-8B-Q4_K_M.gguf")
+MODEL_NAME = os.getenv("LLM_MODEL_NAME", "gemma-4-E4B-it-OBLITERATED-Q5_K_M.gguf")
 
 
 # OmniVoice TTS 서버 주소.
@@ -172,6 +172,12 @@ VOICE_CONNECT_RETRIES = max(1, int(os.getenv("VOICE_CONNECT_RETRIES", "2")))
 VOICE_CONNECT_RETRY_DELAY_SEC = float(os.getenv("VOICE_CONNECT_RETRY_DELAY_SEC", "1.5"))
 # 이 시간(ms) 이상 느려질 때 상세 timing 로그 출력.
 VOICE_TIMING_LOG_THRESHOLD_MS = float(os.getenv("VOICE_TIMING_LOG_THRESHOLD_MS", "3000"))
+# 수신 원본/전처리 오디오를 디버그용으로 저장할지 여부.
+VOICE_DEBUG_SAVE_AUDIO = os.getenv("VOICE_DEBUG_SAVE_AUDIO", "true").lower() == "true"
+# 디버그 WAV 저장 루트 디렉터리.
+VOICE_DEBUG_AUDIO_DIR = os.getenv("VOICE_DEBUG_AUDIO_DIR", "debug_audio")
+# 저장 개수를 제한하기 위한 길드별 최대 utterance 수. 0 이하면 무제한.
+VOICE_DEBUG_MAX_FILES_PER_GUILD = int(os.getenv("VOICE_DEBUG_MAX_FILES_PER_GUILD", "200"))
 # 허용하는 wake word 변형 목록. 이후 정규화로 canonical 이름으로 맞춤.
 WAKE_WORDS = [
     w.strip()

@@ -5,6 +5,7 @@ import logging
 import os
 import struct
 from collections import deque
+from copy import deepcopy
 
 import davey
 import discord
@@ -24,8 +25,12 @@ async def on_user_audio(member, pcm_bytes: bytes):
 
 log = logging.getLogger(__name__)
 
-OPUS_ERROR_TO_SILENCE = os.getenv("OPUS_ERROR_TO_SILENCE", "true").lower() == "true"
+OPUS_ERROR_TO_SILENCE = os.getenv("OPUS_ERROR_TO_SILENCE", "false").lower() == "false"
 VOICE_TIMING_LOG_THRESHOLD_MS = float(os.getenv("VOICE_TIMING_LOG_THRESHOLD_MS", "3000"))
+VOICE_MAP_RETRY_MS = float(os.getenv("VOICE_MAP_RETRY_MS", "700"))
+VOICE_MAP_RETRY_MAX = max(0, int(os.getenv("VOICE_MAP_RETRY_MAX", "2")))
+VOICE_INITIAL_MAP_HOLD_MS = float(os.getenv("VOICE_INITIAL_MAP_HOLD_MS", "900"))
+VOICE_DAVE_WARMUP_GRACE_PACKETS = max(0, int(os.getenv("VOICE_DAVE_WARMUP_GRACE_PACKETS", "6")))
 
 
 def _parse_rtp_header(packet: bytes):
@@ -150,6 +155,7 @@ class EvelynVoiceClient(discord.VoiceClient):
         self.utterance_count = 0
         self.utterance_queue: asyncio.Queue = asyncio.Queue(maxsize=32)
         self._utterance_processing_tasks: set[asyncio.Task] = set()
+        self.connected_at: float | None = None
 
     def _latency_ms(self, started_at: float | None) -> float | None:
         if started_at is None:
@@ -249,12 +255,29 @@ class EvelynVoiceClient(discord.VoiceClient):
         self.runtime.dave_ready = self.dave.ready
         self.runtime.dave_status = str(self.dave.status)
 
-        await super().connect(
-            timeout=timeout,
-            reconnect=reconnect,
-            self_deaf=self_deaf,
-            self_mute=self_mute,
+        connect_task = asyncio.create_task(
+            super().connect(
+                timeout=timeout,
+                reconnect=reconnect,
+                self_deaf=self_deaf,
+                self_mute=self_mute,
+            )
         )
+
+        hook_deadline = asyncio.get_running_loop().time() + max(1.5, min(float(timeout), 8.0))
+        while not connect_task.done() and asyncio.get_running_loop().time() < hook_deadline:
+            ws = getattr(self, "ws", None)
+            if (
+                ws is not None
+                and hasattr(ws, "received_message")
+                and not getattr(ws, "_evelyn_gateway_hooked", False)
+            ):
+                self.gateway.bind_ws(ws)
+                log.info("VOICE WS HOOK EARLY | handshake_phase=true")
+                break
+            await asyncio.sleep(0.01)
+
+        await connect_task
 
         self.runtime.endpoint = getattr(self, "endpoint", None)
         self.runtime.session_id = getattr(self, "session_id", None)
@@ -285,6 +308,7 @@ class EvelynVoiceClient(discord.VoiceClient):
         )
 
         self.gateway.bind_ws(self.ws)
+        self.connected_at = asyncio.get_running_loop().time()
 
         await self.gateway.connect()
 
@@ -757,6 +781,7 @@ class EvelynVoiceClient(discord.VoiceClient):
         queued_at = item.get("queued_at")
         processing_started_at = asyncio.get_running_loop().time()
         dave_success = 0
+        map_retry = int(item.get("map_retry", 0))
 
         if not packets:
             return
@@ -779,7 +804,42 @@ class EvelynVoiceClient(discord.VoiceClient):
                 log.info("VOICE MAP FALLBACK | user_id=%d ssrc=%d", user_id, ssrc)
 
         if user_id is None:
-            log.warning("No user_id mapping yet for ssrc=%d; skipping idx=%d", ssrc, idx)
+            hold_remaining = 0.0
+            if self.connected_at is not None:
+                elapsed_ms = (asyncio.get_running_loop().time() - float(self.connected_at)) * 1000.0
+                hold_remaining = max(0.0, VOICE_INITIAL_MAP_HOLD_MS - elapsed_ms)
+
+            retry_delay_ms = VOICE_MAP_RETRY_MS
+            retry_reason = "map_retry"
+            if hold_remaining > retry_delay_ms:
+                retry_delay_ms = hold_remaining
+                retry_reason = "initial_map_hold"
+
+            if map_retry < VOICE_MAP_RETRY_MAX and retry_delay_ms > 0:
+                retry_delay = max(0.0, retry_delay_ms / 1000.0)
+                log.info(
+                    "VOICE MAP RETRY | idx=%d ssrc=%d retry=%d/%d delay_ms=%d reason=%s",
+                    idx,
+                    ssrc,
+                    map_retry + 1,
+                    VOICE_MAP_RETRY_MAX,
+                    int(retry_delay_ms),
+                    retry_reason,
+                )
+                retry_item = deepcopy(item)
+                retry_item["map_retry"] = map_retry + 1
+
+                async def _requeue_map_retry() -> None:
+                    await asyncio.sleep(retry_delay)
+                    try:
+                        await self.utterance_queue.put(retry_item)
+                    except Exception as e:
+                        log.warning("VOICE MAP RETRY enqueue failed | idx=%d err=%r", idx, e)
+
+                asyncio.create_task(_requeue_map_retry())
+                return
+
+            log.warning("No user_id mapping yet for ssrc=%d; skipping idx=%d after_retries=%d", ssrc, idx, map_retry)
             return
         log.info(
             "MAP DEBUG | idx=%d ssrc=%d user_id=%s preferred_user_id=%s dave_user_id=%s",
@@ -811,6 +871,7 @@ class EvelynVoiceClient(discord.VoiceClient):
         failed = 0
         pcm_chunks: list[bytes] = []
         SILENCE_PCM = b"\x00" * (960 * 2 * 2)
+        dave_warmup_fallbacks = 0
 
         for packet_index, p in enumerate(packets, start=1):
             raw_packet = p.get("raw_packet")
@@ -860,17 +921,32 @@ class EvelynVoiceClient(discord.VoiceClient):
                     failed += 1
                     dave_fail += 1
 
-                    if packet_index <= 3:
-                        log.warning(
-                            "PACKET DAVE failed | idx=%d pkt=%d seq=%d ts=%d outer_len=%d ext_len=%d",
-                            idx,
-                            packet_index,
-                            p["sequence"],
-                            p["timestamp"],
-                            len(outer_plain),
-                            max(0, outer_info["header_len"] - outer_info["unencrypted_header_len"]),
-                        )
-                    continue
+                    if dave_success == 0 and dave_fail <= VOICE_DAVE_WARMUP_GRACE_PACKETS:
+                        opus_packet = outer_plain
+                        used_dave_inner = False
+                        dave_warmup_fallbacks += 1
+                        if packet_index <= 5:
+                            log.info(
+                                "PACKET DAVE warmup fallback -> outer_plain | idx=%d pkt=%d seq=%d ts=%d grace=%d/%d",
+                                idx,
+                                packet_index,
+                                p["sequence"],
+                                p["timestamp"],
+                                dave_fail,
+                                VOICE_DAVE_WARMUP_GRACE_PACKETS,
+                            )
+                    else:
+                        if packet_index <= 3:
+                            log.warning(
+                                "PACKET DAVE failed | idx=%d pkt=%d seq=%d ts=%d outer_len=%d ext_len=%d",
+                                idx,
+                                packet_index,
+                                p["sequence"],
+                                p["timestamp"],
+                                len(outer_plain),
+                                max(0, outer_info["header_len"] - outer_info["unencrypted_header_len"]),
+                            )
+                        continue
 
                 used_dave_inner = True
             else:
@@ -950,13 +1026,14 @@ class EvelynVoiceClient(discord.VoiceClient):
 
         if self._should_log_timing(first_packet_wait_ms, queue_wait_ms, decrypt_ms, utterance_total_ms):
             log.info(
-                "DECRYPT SUMMARY | idx=%d packets=%d success=%d failed=%d pcm_chunks=%d dave_ok=%d outer_fail=%d dave_fail=%d opus_fail=%d opus_silence_fill=%d real_silence=%d first_packet_wait_ms=%s queue_wait_ms=%s decrypt_ms=%.0f utterance_total_ms=%s",
+                "DECRYPT SUMMARY | idx=%d packets=%d success=%d failed=%d pcm_chunks=%d dave_ok=%d dave_warmup_fallbacks=%d outer_fail=%d dave_fail=%d opus_fail=%d opus_silence_fill=%d real_silence=%d first_packet_wait_ms=%s queue_wait_ms=%s decrypt_ms=%.0f utterance_total_ms=%s",
                 idx,
                 len(packets),
                 success,
                 failed,
                 len(pcm_chunks),
                 dave_success,
+                dave_warmup_fallbacks,
                 outer_fail,
                 dave_fail,
                 opus_fail,
