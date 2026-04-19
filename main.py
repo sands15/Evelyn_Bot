@@ -373,13 +373,25 @@ def normalize_route_name(value: str) -> str:
     return "main_direct"
 
 
+def should_force_voice_context_route(user_text: str) -> bool:
+    text = clean_text(user_text)
+    if not text:
+        return False
+    voice_context_markers = [
+        "기억", "방금", "아까", "전에", "이전", "대화", "말했던", "했었던", "했던",
+        "무슨 얘기", "뭐였", "기억나", "기억해", "이어", "계속", "정리", "요약",
+    ]
+    marker_hits = sum(1 for marker in voice_context_markers if marker in text)
+    return marker_hits >= 1
+
+
 def classify_llm_route_fallback(user_text: str, *, source: str = "text") -> str:
     text = clean_text(user_text)
-    if source == "voice":
+    if source == "voice" and not should_force_voice_context_route(text):
         return "main_direct"
 
     short_text = len(text) <= 18 or len(text.split()) <= 4
-    if short_text:
+    if short_text and source != "voice":
         return "main_direct"
 
     context_markers = [
@@ -604,7 +616,8 @@ async def ask_router_llm(
 
 async def classify_llm_route_async(user_text: str, *, guild_id: int | None = None, source: str = "text") -> tuple[str, dict | None]:
     fallback_route = classify_llm_route_fallback(user_text, source=source)
-    if source == "voice" or not ROUTER_LLM_ENABLED:
+    force_voice_context = source == "voice" and should_force_voice_context_route(user_text)
+    if (source == "voice" and not force_voice_context) or not ROUTER_LLM_ENABLED:
         return fallback_route, {"selected": fallback_route, "source": "fallback"}
 
     summary = compact_working_summary(read_text_file(memory_summary_path(guild_id))) if guild_id is not None else ""
@@ -1923,13 +1936,21 @@ async def ask_llm_and_speak_streaming(
     *,
     source: str = "voice",
     debug_text: str | None = None,
+    metrics: dict | None = None,
 ) -> str:
-    metrics = {
-        "started_at": time.monotonic(),
-        "llm_first_chunk_logged": False,
-        "tts_first_byte_logged": False,
-        "playback_start_logged": False,
-    }
+    if metrics is None:
+        metrics = {
+            "started_at": time.monotonic(),
+            "llm_first_chunk_logged": False,
+            "tts_first_byte_logged": False,
+            "playback_start_logged": False,
+        }
+    else:
+        metrics.setdefault("started_at", time.monotonic())
+        metrics.setdefault("llm_first_chunk_logged", False)
+        metrics.setdefault("tts_first_byte_logged", False)
+        metrics.setdefault("playback_start_logged", False)
+        metrics.setdefault("marks", {})
     log_voice_stage(metrics, "LLM/TTS 파이프라인 시작", extra=f"source={source}")
     sentence_queue: asyncio.Queue[str | None] = asyncio.Queue()
     playback_task = asyncio.create_task(stream_tts_sentences(vc, sentence_queue, metrics=metrics))
@@ -2170,6 +2191,7 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes, 
                 on_final_answer=on_final_answer,
                 source="voice",
                 debug_text=history_user_text,
+                metrics=metrics,
             )
             log_voice_stage(metrics, "LLM/TTS 완료", extra=f"answer_len={len(answer)}")
         except Exception as e:
