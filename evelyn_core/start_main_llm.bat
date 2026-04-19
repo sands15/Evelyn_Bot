@@ -20,7 +20,7 @@ if not defined WT_READY (
         set "WT_READY=1"
     )
 )
-set "TERM_CMD=title Main-LLM && wsl.exe bash -lc \"%WSL_CMD%\""
+set "TERM_CMD=title Main-LLM && call \"%~f0\" --inline"
 if not defined WT_READY (
     start "Main-LLM" cmd.exe /q /d /c "%TERM_CMD%"
 ) else (
