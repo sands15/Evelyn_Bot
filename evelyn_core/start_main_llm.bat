@@ -21,9 +21,9 @@ if not defined WT_READY (
     )
 )
 if not defined WT_READY (
-    start "Main-LLM" cmd.exe /k ""%~f0" --inline"
+    start "Main-LLM" cmd.exe /q /d /c ""%~f0" --inline"
 ) else (
-    "%WT_EXE%" new-tab --title "Main-LLM" cmd.exe /k ""%~f0" --inline"
+    "%WT_EXE%" new-tab --title "Main-LLM" cmd.exe /q /d /c ""%~f0" --inline"
 )
 
 endlocal

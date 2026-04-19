@@ -21,16 +21,16 @@ if not defined WT_READY (
     )
 )
 if not defined WT_READY (
-    start "Sub-LLM" cmd.exe /k ""%~f0" --inline"
+    start "Sub-LLM" cmd.exe /q /d /c ""%~f0" --inline"
 ) else (
-    "%WT_EXE%" new-tab --title "Sub-LLM" cmd.exe /k ""%~f0" --inline"
+    "%WT_EXE%" new-tab --title "Sub-LLM" cmd.exe /q /d /c ""%~f0" --inline"
 )
 
 endlocal
 exit /b 0
 
 :run_inline
-wsl.exe bash -lc "%WSL_CMD%"
+wsl.exe bash -lc "%WSL_CMD%" >nul 2>&1
 set "EXIT_CODE=%ERRORLEVEL%"
 endlocal & exit /b %EXIT_CODE%
 
@@ -38,5 +38,4 @@ endlocal & exit /b %EXIT_CODE%
 powershell -NoProfile -ExecutionPolicy Bypass -Command "if (Get-NetTCPConnection -State Listen -LocalPort %~1 -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }"
 if errorlevel 1 exit /b 1
 
-echo [Evelyn] %~2 already listening on port %~1, skipping new launch
 exit /b 2
