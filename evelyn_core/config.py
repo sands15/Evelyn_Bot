@@ -15,7 +15,7 @@ DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 # 사용자 응답용 메인 LLM 서버 엔드포인트.
 LLM_SERVER_URL = os.getenv("LLM_SERVER_URL", "http://127.0.0.1:9820/v1/chat/completions")
 # 메인 LLM 서버에 전달할 모델 이름.
-MODEL_NAME = os.getenv("LLM_MODEL_NAME", "gemma-4-E4B-it-OBLITERATED-Q5_K_M.gguf")
+MODEL_NAME = os.getenv("LLM_MODEL_NAME", "gemma-4-E4B-it-Q5_K_M.gguf")
 
 
 # OmniVoice TTS 서버 주소.
@@ -35,7 +35,7 @@ OMNIVOICE_TIMEOUT_SEC = float(os.getenv("OMNIVOICE_TIMEOUT_SEC", "180"))
 # 메모리 업데이트와 cognitive 판단에 쓰는 서브 LLM 서버 엔드포인트.
 SUMMARY_LLM_URL = os.getenv("SUMMARY_LLM_URL", "http://127.0.0.1:9821/v1/chat/completions")
 # 요약/상황판단용 서브 모델 이름.
-SUMMARY_MODEL_NAME = os.getenv("SUMMARY_MODEL_NAME", "Qwen3.6-35B-A3B-UD-Q3_K_XL.gguf")
+SUMMARY_MODEL_NAME = os.getenv("SUMMARY_MODEL_NAME", "EXAONE-3.5-7.8B-Instruct-Q4_K_M.gguf")
 # 길드별 메모리 파일을 저장하는 루트 디렉터리.
 MEMORY_ROOT = Path(os.getenv("BOT_MEMORY_DIR", str(Path(__file__).resolve().parent.parent / "bot_memory")))
 # 길드별 설정(prefix 등)을 저장하는 루트 디렉터리.
