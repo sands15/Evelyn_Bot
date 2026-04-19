@@ -229,13 +229,13 @@ def _build_voice_receive_debug_meta(
         reasons.append(f"plc={plc_packets}")
     if fec_packets >= (6 if short_clip else 4):
         reasons.append(f"fec={fec_packets}")
-    if real_silence >= (28 if short_clip else 20):
+    if real_silence >= (28 if short_clip else 24):
         reasons.append(f"real_silence={real_silence}")
     if opus_silence_fill > 0:
         reasons.append(f"opus_silence_fill={opus_silence_fill}")
     if failed >= max(5 if short_clip else 3, int(round(packet_count * (0.22 if short_clip else 0.18)))):
         reasons.append(f"high_failed_ratio={failed}/{packet_count}")
-    if not short_clip and burst_trim_ms >= 240.0:
+    if not short_clip and burst_trim_ms >= 280.0:
         reasons.append(f"burst_trim_ms={int(round(burst_trim_ms))}")
     if not short_clip and trim_ms >= 320.0 and body_rms < 0.010:
         reasons.append(f"heavy_trim_ms={int(round(trim_ms))}")
