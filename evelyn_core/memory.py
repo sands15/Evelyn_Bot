@@ -23,59 +23,84 @@ def guild_memory_dir(guild_id: int) -> Path:
     return path
 
 
+def sanitize_memory_scope_key(scope_key: str | None) -> str:
+    text = clean_text(scope_key or "")
+    if not text:
+        return "default"
+    text = re.sub(r"[^0-9A-Za-z가-힣._-]+", "_", text)
+    text = text.strip("._-")
+    return text or "default"
+
+
+def scoped_memory_dir(guild_id: int, *, scope_type: str = "guild", scope_key: str | None = None) -> Path:
+    base = guild_memory_dir(guild_id)
+    normalized_scope = clean_text(scope_type).lower() or "guild"
+    if normalized_scope == "guild":
+        return base
+    path = base / normalized_scope / sanitize_memory_scope_key(scope_key)
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 def guild_settings_path(guild_id: int) -> Path:
     """길드별 설정 파일 경로를 반환한다."""
     GUILD_SETTINGS_ROOT.mkdir(parents=True, exist_ok=True)
     return GUILD_SETTINGS_ROOT / f"guild_{guild_id}.json"
 
 
-def memory_vault_dir(guild_id: int) -> Path:
-    path = guild_memory_dir(guild_id) / "vault"
+def memory_vault_dir(guild_id: int, *, scope_type: str = "guild", scope_key: str | None = None) -> Path:
+    path = scoped_memory_dir(guild_id, scope_type=scope_type, scope_key=scope_key) / "vault"
     path.mkdir(parents=True, exist_ok=True)
     return path
 
 
-def memory_summary_path(guild_id: int) -> Path:
-    return guild_memory_dir(guild_id) / "rolling_summary.txt"
+def memory_summary_path(guild_id: int, *, scope_type: str = "guild", scope_key: str | None = None) -> Path:
+    return scoped_memory_dir(guild_id, scope_type=scope_type, scope_key=scope_key) / "rolling_summary.txt"
 
 
-def memory_raw_path(guild_id: int) -> Path:
-    return guild_memory_dir(guild_id) / "raw_transcript.jsonl"
+def memory_raw_path(guild_id: int, *, scope_type: str = "guild", scope_key: str | None = None) -> Path:
+    return scoped_memory_dir(guild_id, scope_type=scope_type, scope_key=scope_key) / "raw_transcript.jsonl"
 
 
-def vault_raw_dir(guild_id: int) -> Path:
-    path = memory_vault_dir(guild_id) / "raw"
+def vault_raw_dir(guild_id: int, *, scope_type: str = "guild", scope_key: str | None = None) -> Path:
+    path = memory_vault_dir(guild_id, scope_type=scope_type, scope_key=scope_key) / "raw"
     path.mkdir(parents=True, exist_ok=True)
     return path
 
 
-def vault_daily_raw_path(guild_id: int, day_key: str | None = None) -> Path:
+def vault_daily_raw_path(
+    guild_id: int,
+    day_key: str | None = None,
+    *,
+    scope_type: str = "guild",
+    scope_key: str | None = None,
+) -> Path:
     day_key = day_key or time.strftime("%Y-%m-%d")
-    return vault_raw_dir(guild_id) / f"{day_key}.jsonl"
+    return vault_raw_dir(guild_id, scope_type=scope_type, scope_key=scope_key) / f"{day_key}.jsonl"
 
 
-def memory_facts_path(guild_id: int) -> Path:
-    return guild_memory_dir(guild_id) / "durable_facts.jsonl"
+def memory_facts_path(guild_id: int, *, scope_type: str = "guild", scope_key: str | None = None) -> Path:
+    return scoped_memory_dir(guild_id, scope_type=scope_type, scope_key=scope_key) / "durable_facts.jsonl"
 
 
-def vault_facts_path(guild_id: int) -> Path:
-    return memory_vault_dir(guild_id) / "facts.jsonl"
+def vault_facts_path(guild_id: int, *, scope_type: str = "guild", scope_key: str | None = None) -> Path:
+    return memory_vault_dir(guild_id, scope_type=scope_type, scope_key=scope_key) / "facts.jsonl"
 
 
-def memory_questions_path(guild_id: int) -> Path:
-    return guild_memory_dir(guild_id) / "open_questions.jsonl"
+def memory_questions_path(guild_id: int, *, scope_type: str = "guild", scope_key: str | None = None) -> Path:
+    return scoped_memory_dir(guild_id, scope_type=scope_type, scope_key=scope_key) / "open_questions.jsonl"
 
 
-def vault_questions_path(guild_id: int) -> Path:
-    return memory_vault_dir(guild_id) / "questions.jsonl"
+def vault_questions_path(guild_id: int, *, scope_type: str = "guild", scope_key: str | None = None) -> Path:
+    return memory_vault_dir(guild_id, scope_type=scope_type, scope_key=scope_key) / "questions.jsonl"
 
 
-def cognitive_state_path(guild_id: int) -> Path:
-    return guild_memory_dir(guild_id) / "cognitive_state.json"
+def cognitive_state_path(guild_id: int, *, scope_type: str = "guild", scope_key: str | None = None) -> Path:
+    return scoped_memory_dir(guild_id, scope_type=scope_type, scope_key=scope_key) / "cognitive_state.json"
 
 
-def memory_loops_path(guild_id: int) -> Path:
-    return guild_memory_dir(guild_id) / "open_loops.jsonl"
+def memory_loops_path(guild_id: int, *, scope_type: str = "guild", scope_key: str | None = None) -> Path:
+    return scoped_memory_dir(guild_id, scope_type=scope_type, scope_key=scope_key) / "open_loops.jsonl"
 
 
 def read_text_file(path: Path) -> str:
@@ -192,9 +217,15 @@ def merge_memory_rows(*row_groups: list[dict]) -> list[dict]:
     return merged
 
 
-def read_vault_raw_rows(guild_id: int, *, days: int | None = None) -> list[dict]:
+def read_vault_raw_rows(
+    guild_id: int,
+    *,
+    days: int | None = None,
+    scope_type: str = "guild",
+    scope_key: str | None = None,
+) -> list[dict]:
     days = days or MEMORY_VAULT_DAYS
-    paths = sorted(vault_raw_dir(guild_id).glob("*.jsonl"))
+    paths = sorted(vault_raw_dir(guild_id, scope_type=scope_type, scope_key=scope_key).glob("*.jsonl"))
     selected = paths[-max(1, days):]
     rows: list[dict] = []
     for path in selected:
@@ -202,11 +233,20 @@ def read_vault_raw_rows(guild_id: int, *, days: int | None = None) -> list[dict]
     return rows
 
 
-def read_fact_rows(guild_id: int) -> list[dict]:
-    return merge_memory_rows(read_jsonl(memory_facts_path(guild_id)), read_jsonl(vault_facts_path(guild_id)))
+def read_fact_rows(guild_id: int, *, scope_type: str = "guild", scope_key: str | None = None) -> list[dict]:
+    return merge_memory_rows(
+        read_jsonl(memory_facts_path(guild_id, scope_type=scope_type, scope_key=scope_key)),
+        read_jsonl(vault_facts_path(guild_id, scope_type=scope_type, scope_key=scope_key)),
+    )
 
 
-def append_raw_transcript_rows(guild_id: int, rows: list[dict]) -> None:
+def append_raw_transcript_rows(
+    guild_id: int,
+    rows: list[dict],
+    *,
+    scope_type: str = "guild",
+    scope_key: str | None = None,
+) -> None:
     """새 대화 raw transcript를 hot 파일과 일자별 vault 파일에 함께 누적한다."""
     normalized: list[dict] = []
     now = int(time.time())
@@ -226,8 +266,16 @@ def append_raw_transcript_rows(guild_id: int, rows: list[dict]) -> None:
         )
 
     if normalized:
-        append_jsonl_rows(memory_raw_path(guild_id), normalized, MEMORY_RAW_LIMIT)
-        append_jsonl_rows(vault_daily_raw_path(guild_id), normalized, max(MEMORY_RAW_LIMIT * 20, 5000))
+        append_jsonl_rows(
+            memory_raw_path(guild_id, scope_type=scope_type, scope_key=scope_key),
+            normalized,
+            MEMORY_RAW_LIMIT,
+        )
+        append_jsonl_rows(
+            vault_daily_raw_path(guild_id, scope_type=scope_type, scope_key=scope_key),
+            normalized,
+            max(MEMORY_RAW_LIMIT * 20, 5000),
+        )
 
 
 def append_unique_memory_rows(path: Path, rows: list[dict], limit: int, *, mirror_path: Path | None = None) -> None:
@@ -285,10 +333,14 @@ def select_relevant_memory_rows(query: str, rows: list[dict], limit: int) -> lis
     return [row for _, _, row in scored[:limit]]
 
 
-def read_question_rows(guild_id: int) -> list[dict]:
+def read_question_rows(guild_id: int, *, scope_type: str = "guild", scope_key: str | None = None) -> list[dict]:
     merged: list[dict] = []
     seen: set[str] = set()
-    for path in (memory_questions_path(guild_id), memory_loops_path(guild_id), vault_questions_path(guild_id)):
+    for path in (
+        memory_questions_path(guild_id, scope_type=scope_type, scope_key=scope_key),
+        memory_loops_path(guild_id, scope_type=scope_type, scope_key=scope_key),
+        vault_questions_path(guild_id, scope_type=scope_type, scope_key=scope_key),
+    ):
         for row in read_jsonl(path):
             text = clean_text(str(row.get("text", "")))
             if len(text) < 2 or text in seen:
@@ -298,14 +350,23 @@ def read_question_rows(guild_id: int) -> list[dict]:
     return merged
 
 
-def resolve_open_question_rows(guild_id: int, *reference_texts: str) -> int:
+def resolve_open_question_rows(
+    guild_id: int,
+    *reference_texts: str,
+    scope_type: str = "guild",
+    scope_key: str | None = None,
+) -> int:
     """관련성이 높은 열린 질문 항목을 닫는다."""
     refs = [memory_tokens(text) for text in reference_texts if clean_text(text)]
     if not refs:
         return 0
 
     removed = 0
-    for path in (memory_questions_path(guild_id), memory_loops_path(guild_id), vault_questions_path(guild_id)):
+    for path in (
+        memory_questions_path(guild_id, scope_type=scope_type, scope_key=scope_key),
+        memory_loops_path(guild_id, scope_type=scope_type, scope_key=scope_key),
+        vault_questions_path(guild_id, scope_type=scope_type, scope_key=scope_key),
+    ):
         rows = read_jsonl(path)
         if not rows:
             continue

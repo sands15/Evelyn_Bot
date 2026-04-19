@@ -129,7 +129,7 @@ last_bot_audio_end_at: dict[int, float] = {}
 bot_speaking_guilds: set[int] = set()
 memory_locks: dict[int, asyncio.Lock] = {}
 cognitive_locks: dict[int, asyncio.Lock] = {}
-background_cognitive_tasks: dict[int, asyncio.Task] = {}
+background_cognitive_tasks: dict[str, asyncio.Task] = {}
 
 
 # =========================================================
@@ -154,6 +154,25 @@ def make_text_session_key(guild_id: int, channel_id: int) -> str:
 def make_voice_session_key(guild_id: int, voice_channel_id: int | None) -> str:
     channel_part = voice_channel_id if voice_channel_id is not None else "none"
     return f"guild:{guild_id}:voice:{channel_part}"
+
+
+def make_room_memory_key(kind: str, room_id: int | None) -> str:
+    room_part = room_id if room_id is not None else "none"
+    return f"{kind}:{room_part}"
+
+
+def make_person_memory_key(user_id: int | None) -> str | None:
+    if user_id is None:
+        return None
+    return f"user:{user_id}"
+
+
+def make_session_memory_key(session_key: str | None, user_id: int | None = None) -> str | None:
+    if not session_key:
+        return None
+    if user_id is None:
+        return session_key
+    return f"{session_key}:user:{user_id}"
 
 
 def remember_session_followup_target(session_key: str, *, channel_id: int | None = None) -> None:
@@ -220,9 +239,11 @@ def reset_guild_runtime_state(guild_id: int) -> None:
     bot_speaking_guilds.discard(guild_id)
     memory_locks.pop(guild_id, None)
     cognitive_locks.pop(guild_id, None)
-    task = background_cognitive_tasks.pop(guild_id, None)
-    if task is not None and not task.done():
-        task.cancel()
+    for key, task in list(background_cognitive_tasks.items()):
+        if key.startswith(prefix):
+            if task is not None and not task.done():
+                task.cancel()
+            background_cognitive_tasks.pop(key, None)
 
 
 def _sanitize_debug_label(value: str | None, *, fallback: str = "unknown") -> str:
@@ -431,34 +452,75 @@ def policy_response_for_state(cognitive_state: dict | None = None, *, source: st
     return None
 
 
-def read_cached_cognitive_state(guild_id: int | None) -> dict | None:
+def read_cached_cognitive_state(
+    guild_id: int | None,
+    *,
+    room_key: str | None = None,
+    session_memory_key: str | None = None,
+) -> dict | None:
     if guild_id is None:
         return None
-    cached = read_json_file(cognitive_state_path(guild_id))
-    return normalize_cognitive_state(cached) if cached else None
+    return read_layered_cognitive_state(
+        guild_id,
+        room_key=room_key,
+        session_memory_key=session_memory_key,
+    )
 
 
-async def refresh_cognitive_state_in_background(guild_id: int, user_text: str, *, reason: str) -> None:
+async def refresh_cognitive_state_in_background(
+    guild_id: int,
+    user_text: str,
+    *,
+    reason: str,
+    room_key: str | None = None,
+    person_key: str | None = None,
+    session_memory_key: str | None = None,
+) -> None:
+    task_key = session_memory_key or runtime_session_key(guild_id=guild_id)
     try:
-        await update_cognitive_state(guild_id, user_text)
+        await update_cognitive_state(
+            guild_id,
+            user_text,
+            room_key=room_key,
+            person_key=person_key,
+            session_memory_key=session_memory_key,
+        )
     except asyncio.CancelledError:
         raise
     except Exception as e:
-        print(f"[COGNITIVE] background refresh 실패 guild={guild_id} reason={reason} err={e!r}")
+        print(f"[COGNITIVE] background refresh 실패 guild={guild_id} session={task_key!r} reason={reason} err={e!r}")
     finally:
-        task = background_cognitive_tasks.get(guild_id)
+        task = background_cognitive_tasks.get(task_key)
         if task is asyncio.current_task():
-            background_cognitive_tasks.pop(guild_id, None)
+            background_cognitive_tasks.pop(task_key, None)
 
 
-def schedule_cognitive_refresh(guild_id: int | None, user_text: str, *, reason: str) -> None:
+def schedule_cognitive_refresh(
+    guild_id: int | None,
+    user_text: str,
+    *,
+    reason: str,
+    room_key: str | None = None,
+    person_key: str | None = None,
+    session_memory_key: str | None = None,
+) -> None:
     if guild_id is None:
         return
-    existing = background_cognitive_tasks.get(guild_id)
+    task_key = session_memory_key or runtime_session_key(guild_id=guild_id)
+    if task_key is None:
+        return
+    existing = background_cognitive_tasks.get(task_key)
     if existing is not None and not existing.done():
         existing.cancel()
-    background_cognitive_tasks[guild_id] = asyncio.create_task(
-        refresh_cognitive_state_in_background(guild_id, user_text, reason=reason)
+    background_cognitive_tasks[task_key] = asyncio.create_task(
+        refresh_cognitive_state_in_background(
+            guild_id,
+            user_text,
+            reason=reason,
+            room_key=room_key,
+            person_key=person_key,
+            session_memory_key=session_memory_key,
+        )
     )
 
 
@@ -549,6 +611,9 @@ async def prepare_llm_messages(
     *,
     guild_id: int | None = None,
     session_key: str | None = None,
+    room_key: str | None = None,
+    person_key: str | None = None,
+    session_memory_key: str | None = None,
     source: str = "text",
     debug_text: str | None = None,
     metrics: dict | None = None,
@@ -561,16 +626,33 @@ async def prepare_llm_messages(
     cognitive_state: dict | None = None
 
     cognitive_started_at = time.monotonic()
-    cached_cognitive_state = read_cached_cognitive_state(guild_id)
+    cached_cognitive_state = read_cached_cognitive_state(
+        guild_id,
+        room_key=room_key,
+        session_memory_key=session_memory_key,
+    )
     should_block_on_cognitive = guild_id is not None and (cached_cognitive_state is None or route == "sub_wait")
     if should_block_on_cognitive and guild_id is not None:
-        cognitive_state = await update_cognitive_state(guild_id, user_text)
+        cognitive_state = await update_cognitive_state(
+            guild_id,
+            user_text,
+            room_key=room_key,
+            person_key=person_key,
+            session_memory_key=session_memory_key,
+        )
         if metrics is not None:
             metrics.setdefault("meta", {})["cognitive_mode"] = "blocking"
     else:
         cognitive_state = cached_cognitive_state
         if guild_id is not None:
-            schedule_cognitive_refresh(guild_id, user_text, reason=f"{source}:{route}")
+            schedule_cognitive_refresh(
+                guild_id,
+                user_text,
+                reason=f"{source}:{route}",
+                room_key=room_key,
+                person_key=person_key,
+                session_memory_key=session_memory_key,
+            )
         if metrics is not None:
             metrics.setdefault("meta", {})["cognitive_mode"] = "background"
     if metrics is not None:
@@ -578,7 +660,14 @@ async def prepare_llm_messages(
 
     if guild_id is not None:
         memory_started_at = time.monotonic()
-        memory_context = build_memory_context(guild_id, user_text, cognitive_state=cognitive_state)
+        memory_context = build_memory_context(
+            guild_id,
+            user_text,
+            cognitive_state=cognitive_state,
+            room_key=room_key,
+            person_key=person_key,
+            session_memory_key=session_memory_key,
+        )
         if metrics is not None:
             metrics.setdefault("marks", {})["memory_ready"] = (time.monotonic() - memory_started_at) * 1000.0
         if memory_context:
@@ -608,37 +697,162 @@ async def prepare_llm_messages(
     return messages, cognitive_state, route
 
 
-def build_memory_context(guild_id: int, user_text: str, cognitive_state: dict | None = None) -> str:
-    summary = compact_working_summary(read_text_file(memory_summary_path(guild_id)))
-    raw_rows = read_jsonl(memory_raw_path(guild_id))[-MEMORY_RAW_CONTEXT_LIMIT:]
-    vault_raw_rows = select_relevant_memory_rows(user_text, read_vault_raw_rows(guild_id), MEMORY_VAULT_RAW_RETRIEVE_LIMIT)
-    facts = select_relevant_memory_rows(user_text, read_fact_rows(guild_id), MEMORY_RETRIEVE_LIMIT)
-    questions = select_relevant_memory_rows(user_text, read_question_rows(guild_id), 4)
-    state = normalize_cognitive_state(cognitive_state or read_json_file(cognitive_state_path(guild_id)))
+def collect_memory_layers(
+    guild_id: int,
+    *,
+    room_key: str | None = None,
+    person_key: str | None = None,
+    session_memory_key: str | None = None,
+) -> dict[str, dict]:
+    layers: dict[str, dict] = {
+        "guild": {
+            "label": "공용 방 기억",
+            "scope_type": "guild",
+            "scope_key": None,
+            "summary": compact_working_summary(read_text_file(memory_summary_path(guild_id))),
+            "raw": read_jsonl(memory_raw_path(guild_id)),
+            "vault_raw": read_vault_raw_rows(guild_id),
+            "facts": read_fact_rows(guild_id),
+            "questions": read_question_rows(guild_id),
+        }
+    }
+
+    if room_key:
+        layers["room"] = {
+            "label": "방 기억",
+            "scope_type": "room",
+            "scope_key": room_key,
+            "summary": compact_working_summary(read_text_file(memory_summary_path(guild_id, scope_type="room", scope_key=room_key))),
+            "raw": read_jsonl(memory_raw_path(guild_id, scope_type="room", scope_key=room_key)),
+            "vault_raw": read_vault_raw_rows(guild_id, scope_type="room", scope_key=room_key),
+            "facts": read_fact_rows(guild_id, scope_type="room", scope_key=room_key),
+            "questions": read_question_rows(guild_id, scope_type="room", scope_key=room_key),
+        }
+
+    if person_key:
+        layers["person"] = {
+            "label": "이 사람 기억",
+            "scope_type": "person",
+            "scope_key": person_key,
+            "summary": compact_working_summary(read_text_file(memory_summary_path(guild_id, scope_type="person", scope_key=person_key))),
+            "raw": read_jsonl(memory_raw_path(guild_id, scope_type="person", scope_key=person_key)),
+            "vault_raw": read_vault_raw_rows(guild_id, scope_type="person", scope_key=person_key),
+            "facts": read_fact_rows(guild_id, scope_type="person", scope_key=person_key),
+            "questions": read_question_rows(guild_id, scope_type="person", scope_key=person_key),
+        }
+
+    if session_memory_key:
+        layers["session"] = {
+            "label": "현재 세션 기억",
+            "scope_type": "session",
+            "scope_key": session_memory_key,
+            "summary": compact_working_summary(read_text_file(memory_summary_path(guild_id, scope_type="session", scope_key=session_memory_key))),
+            "raw": read_jsonl(memory_raw_path(guild_id, scope_type="session", scope_key=session_memory_key)),
+            "vault_raw": read_vault_raw_rows(guild_id, scope_type="session", scope_key=session_memory_key),
+            "facts": read_fact_rows(guild_id, scope_type="session", scope_key=session_memory_key),
+            "questions": read_question_rows(guild_id, scope_type="session", scope_key=session_memory_key),
+        }
+
+    return layers
+
+
+def merge_recent_memory_rows(*row_groups: list[dict], limit: int) -> list[dict]:
+    merged = merge_memory_rows(*row_groups)
+    merged.sort(key=lambda row: int(row.get("saved_at", 0) or 0))
+    return merged[-limit:]
+
+
+def read_layered_cognitive_state(
+    guild_id: int,
+    *,
+    room_key: str | None = None,
+    session_memory_key: str | None = None,
+) -> dict | None:
+    if session_memory_key:
+        session_state = read_json_file(cognitive_state_path(guild_id, scope_type="session", scope_key=session_memory_key))
+        if session_state:
+            return normalize_cognitive_state(session_state)
+    if room_key:
+        room_state = read_json_file(cognitive_state_path(guild_id, scope_type="room", scope_key=room_key))
+        if room_state:
+            return normalize_cognitive_state(room_state)
+    guild_state = read_json_file(cognitive_state_path(guild_id))
+    return normalize_cognitive_state(guild_state) if guild_state else None
+
+
+def format_memory_row_lines(rows: list[dict]) -> str:
+    return "\n".join(
+        f"- {clean_text(str(row.get('speaker', row.get('role', 'unknown')))) or 'unknown'}"
+        f" ({clean_text(str(row.get('source', 'unknown'))) or 'unknown'}): {clean_text(str(row.get('text', '')))}"
+        for row in rows
+        if clean_text(str(row.get('text', '')))
+    )
+
+
+def build_memory_context(
+    guild_id: int,
+    user_text: str,
+    cognitive_state: dict | None = None,
+    *,
+    room_key: str | None = None,
+    person_key: str | None = None,
+    session_memory_key: str | None = None,
+) -> str:
+    layers = collect_memory_layers(
+        guild_id,
+        room_key=room_key,
+        person_key=person_key,
+        session_memory_key=session_memory_key,
+    )
+    facts = select_relevant_memory_rows(
+        user_text,
+        merge_memory_rows(*(layer["facts"] for layer in layers.values())),
+        MEMORY_RETRIEVE_LIMIT,
+    )
+    questions = select_relevant_memory_rows(
+        user_text,
+        merge_memory_rows(*(layer["questions"] for layer in layers.values())),
+        4,
+    )
+    vault_raw_rows = select_relevant_memory_rows(
+        user_text,
+        merge_memory_rows(*(layer["vault_raw"] for layer in layers.values())),
+        MEMORY_VAULT_RAW_RETRIEVE_LIMIT,
+    )
+    state = normalize_cognitive_state(
+        cognitive_state or read_layered_cognitive_state(
+            guild_id,
+            room_key=room_key,
+            session_memory_key=session_memory_key,
+        ) or {}
+    )
 
     parts: list[str] = []
-    if summary:
-        parts.append(f"현재 작업 요약:\n{summary}")
-    if raw_rows:
-        parts.append(
-            "최근 원문 로그:\n"
-            + "\n".join(
-                f"- {clean_text(str(row.get('speaker', row.get('role', 'unknown')))) or 'unknown'}"
-                f" ({clean_text(str(row.get('source', 'unknown'))) or 'unknown'}): {clean_text(str(row.get('text', '')))}"
-                for row in raw_rows
-                if clean_text(str(row.get('text', '')))
-            )
-        )
+    summary_lines = [
+        f"- {layer['label']}: {layer['summary']}"
+        for layer in (layers.get("session"), layers.get("person"), layers.get("room"), layers.get("guild"))
+        if layer and layer.get("summary")
+    ]
+    if summary_lines:
+        parts.append("현재 작업 요약:\n" + "\n".join(summary_lines))
+
+    session_rows = merge_recent_memory_rows(*(layer["raw"] for layer in (layers.get("session"),) if layer), limit=4)
+    if session_rows:
+        parts.append("현재 세션 최근 대화:\n" + format_memory_row_lines(session_rows))
+
+    person_rows = merge_recent_memory_rows(*(layer["raw"] for layer in (layers.get("person"),) if layer), limit=4)
+    if person_rows:
+        parts.append("이 사람과의 최근 대화:\n" + format_memory_row_lines(person_rows))
+
+    room_rows = merge_recent_memory_rows(
+        *(layer["raw"] for layer in (layers.get("room"), layers.get("guild")) if layer),
+        limit=MEMORY_RAW_CONTEXT_LIMIT,
+    )
+    if room_rows:
+        parts.append("방 최근 대화:\n" + format_memory_row_lines(room_rows))
+
     if vault_raw_rows:
-        parts.append(
-            "문서 보관함에서 꺼낸 관련 대화:\n"
-            + "\n".join(
-                f"- {clean_text(str(row.get('speaker', row.get('role', 'unknown')))) or 'unknown'}"
-                f" ({clean_text(str(row.get('source', 'unknown'))) or 'unknown'}): {clean_text(str(row.get('text', '')))}"
-                for row in vault_raw_rows
-                if clean_text(str(row.get('text', '')))
-            )
-        )
+        parts.append("문서 보관함에서 꺼낸 관련 대화:\n" + format_memory_row_lines(vault_raw_rows))
     if state.get("state_summary") or state.get("question_for_user") or state.get("main_prompt_hint"):
         action_label = {
             "answer": "답하기",
@@ -818,15 +1032,50 @@ async def classify_llm_route_async(user_text: str, *, guild_id: int | None = Non
     return route, meta
 
 
-async def update_cognitive_state(guild_id: int, user_text: str) -> dict:
+async def update_cognitive_state(
+    guild_id: int,
+    user_text: str,
+    *,
+    room_key: str | None = None,
+    person_key: str | None = None,
+    session_memory_key: str | None = None,
+) -> dict:
     started_at = time.monotonic()
     lock = cognitive_locks.setdefault(guild_id, asyncio.Lock())
+    scope_type = "session" if session_memory_key else "room" if room_key else "guild"
+    scope_key = session_memory_key if session_memory_key else room_key
     async with lock:
-        current_summary = compact_working_summary(read_text_file(memory_summary_path(guild_id)))
-        current_state = normalize_cognitive_state(read_json_file(cognitive_state_path(guild_id)))
-        recent_raw = read_jsonl(memory_raw_path(guild_id))[-MEMORY_COGNITIVE_RAW_LIMIT:]
-        recent_facts = read_fact_rows(guild_id)[-4:]
-        recent_questions = read_question_rows(guild_id)[-4:]
+        layers = collect_memory_layers(
+            guild_id,
+            room_key=room_key,
+            person_key=person_key,
+            session_memory_key=session_memory_key,
+        )
+        summary_lines = [
+            f"- {layer['label']}: {layer['summary']}"
+            for layer in (layers.get("session"), layers.get("person"), layers.get("room"), layers.get("guild"))
+            if layer and layer.get("summary")
+        ]
+        current_summary = "\n".join(summary_lines)
+        current_state = normalize_cognitive_state(
+            read_layered_cognitive_state(
+                guild_id,
+                room_key=room_key,
+                session_memory_key=session_memory_key,
+            ) or {}
+        )
+        recent_raw = merge_recent_memory_rows(
+            *(layer["raw"] for layer in layers.values()),
+            limit=MEMORY_COGNITIVE_RAW_LIMIT,
+        )
+        recent_facts = merge_recent_memory_rows(
+            *(layer["facts"] for layer in layers.values()),
+            limit=4,
+        )
+        recent_questions = merge_recent_memory_rows(
+            *(layer["questions"] for layer in layers.values()),
+            limit=4,
+        )
 
         messages = [
             {
@@ -843,7 +1092,7 @@ async def update_cognitive_state(guild_id: int, user_text: str) -> dict:
                 "role": "user",
                 "content": (
                     f"이전 cognitive_state:\n{json.dumps(current_state, ensure_ascii=False)}\n\n"
-                    f"현재 rolling_summary:\n{current_summary or '(없음)'}\n\n"
+                    f"현재 layered_summary:\n{current_summary or '(없음)'}\n\n"
                     f"최근 raw_transcript:\n{format_memory_rows_for_llm(recent_raw, max_items=MEMORY_COGNITIVE_RAW_LIMIT)}\n\n"
                     f"최근 durable_facts:\n{format_memory_rows_for_llm(recent_facts, max_items=4)}\n\n"
                     f"최근 open_questions:\n{format_memory_rows_for_llm(recent_questions, max_items=4)}\n\n"
@@ -865,7 +1114,7 @@ async def update_cognitive_state(guild_id: int, user_text: str) -> dict:
                     {
                         "role": "user",
                         "content": (
-                            f"현재 rolling_summary:\n{current_summary or '(없음)'}\n\n"
+                            f"현재 layered_summary:\n{current_summary or '(없음)'}\n\n"
                             f"현재 사용자 입력:\n{compact_memory_text(user_text, max_chars=120)}"
                         ),
                     },
@@ -885,7 +1134,7 @@ async def update_cognitive_state(guild_id: int, user_text: str) -> dict:
                 print(f"[COGNITIVE] 상태 업데이트 실패 또는 timeout: {e}")
                 elapsed_ms = (time.monotonic() - started_at) * 1000.0
                 if should_log_voice_timing(elapsed_ms):
-                    print(f"[COGNITIVE LATENCY] guild={guild_id} failed_after_ms={elapsed_ms:.0f}")
+                    print(f"[COGNITIVE LATENCY] guild={guild_id} scope={scope_type}:{scope_key or 'default'} failed_after_ms={elapsed_ms:.0f}")
                 fallback = current_state or {
                     "action": "answer",
                     "confidence": 0.5,
@@ -897,7 +1146,7 @@ async def update_cognitive_state(guild_id: int, user_text: str) -> dict:
                     "retrieved_context_ids": [],
                     "updated_at": int(time.time()),
                 }
-                write_json_file(cognitive_state_path(guild_id), fallback)
+                write_json_file(cognitive_state_path(guild_id, scope_type=scope_type, scope_key=scope_key), fallback)
                 return fallback
 
         state = normalize_cognitive_state(result)
@@ -906,27 +1155,56 @@ async def update_cognitive_state(guild_id: int, user_text: str) -> dict:
         if not state.get("main_prompt_hint"):
             state["main_prompt_hint"] = "짧고 자연스럽게 답해라."
         state["updated_at"] = int(time.time())
-        write_json_file(cognitive_state_path(guild_id), state)
+        write_json_file(cognitive_state_path(guild_id, scope_type=scope_type, scope_key=scope_key), state)
         elapsed_ms = (time.monotonic() - started_at) * 1000.0
         if should_log_voice_timing(elapsed_ms):
-            print(f"[COGNITIVE LATENCY] guild={guild_id} action={state.get('action')} ms={elapsed_ms:.0f}")
+            print(f"[COGNITIVE LATENCY] guild={guild_id} scope={scope_type}:{scope_key or 'default'} action={state.get('action')} ms={elapsed_ms:.0f}")
 
         if state.get("action") == "ask" and state.get("question_for_user"):
             print(
-                f"[COGNITIVE ASK] guild={guild_id} question={state['question_for_user']!r} reason={state.get('reason_brief', '')!r} confidence={state.get('confidence', 0.0):.2f}"
+                f"[COGNITIVE ASK] guild={guild_id} scope={scope_type}:{scope_key or 'default'} question={state['question_for_user']!r} reason={state.get('reason_brief', '')!r} confidence={state.get('confidence', 0.0):.2f}"
             )
 
         return state
 
 
-async def update_long_term_memory(guild_id: int, user_text: str, answer: str) -> None:
+async def update_long_term_memory(
+    guild_id: int,
+    user_text: str,
+    answer: str,
+    *,
+    room_key: str | None = None,
+    person_key: str | None = None,
+    session_memory_key: str | None = None,
+) -> None:
     started_at = time.monotonic()
     lock = memory_locks.setdefault(guild_id, asyncio.Lock())
+    scope_note = session_memory_key or room_key or "guild"
     async with lock:
-        current_summary = compact_working_summary(read_text_file(memory_summary_path(guild_id)))
-        recent_raw = read_jsonl(memory_raw_path(guild_id))[-MEMORY_LONGTERM_RAW_LIMIT:]
-        recent_facts = read_fact_rows(guild_id)[-6:]
-        recent_questions = read_question_rows(guild_id)[-4:]
+        layers = collect_memory_layers(
+            guild_id,
+            room_key=room_key,
+            person_key=person_key,
+            session_memory_key=session_memory_key,
+        )
+        summary_lines = [
+            f"- {layer['label']}: {layer['summary']}"
+            for layer in (layers.get("session"), layers.get("person"), layers.get("room"), layers.get("guild"))
+            if layer and layer.get("summary")
+        ]
+        current_summary = "\n".join(summary_lines)
+        recent_raw = merge_recent_memory_rows(
+            *(layer["raw"] for layer in layers.values()),
+            limit=MEMORY_LONGTERM_RAW_LIMIT,
+        )
+        recent_facts = merge_recent_memory_rows(
+            *(layer["facts"] for layer in layers.values()),
+            limit=6,
+        )
+        recent_questions = merge_recent_memory_rows(
+            *(layer["questions"] for layer in layers.values()),
+            limit=4,
+        )
 
         messages = [
             {
@@ -943,7 +1221,7 @@ async def update_long_term_memory(guild_id: int, user_text: str, answer: str) ->
             {
                 "role": "user",
                 "content": (
-                    f"현재 요약:\n{current_summary or '(없음)'}\n\n"
+                    f"현재 layered_summary:\n{current_summary or '(없음)'}\n\n"
                     f"최근 raw_transcript:\n{format_memory_rows_for_llm(recent_raw, max_items=MEMORY_LONGTERM_RAW_LIMIT)}\n\n"
                     f"최근 durable_facts:\n{format_memory_rows_for_llm(recent_facts, max_items=6)}\n\n"
                     f"최근 open_questions:\n{format_memory_rows_for_llm(recent_questions, max_items=4)}\n\n"
@@ -961,7 +1239,7 @@ async def update_long_term_memory(guild_id: int, user_text: str, answer: str) ->
                     {
                         "role": "user",
                         "content": (
-                            f"현재 요약:\n{current_summary or '(없음)'}\n\n"
+                            f"현재 layered_summary:\n{current_summary or '(없음)'}\n\n"
                             f"새 대화:\n- user: {compact_memory_text(user_text, max_chars=100)}\n- assistant: {compact_memory_text(answer, max_chars=100)}"
                         ),
                     },
@@ -977,34 +1255,45 @@ async def update_long_term_memory(guild_id: int, user_text: str, answer: str) ->
                 print(f"[MEMORY] 요약 업데이트 실패: {e}")
                 elapsed_ms = (time.monotonic() - started_at) * 1000.0
                 if should_log_voice_timing(elapsed_ms):
-                    print(f"[MEMORY LATENCY] guild={guild_id} failed_after_ms={elapsed_ms:.0f}")
+                    print(f"[MEMORY LATENCY] guild={guild_id} scope={scope_note} failed_after_ms={elapsed_ms:.0f}")
                 return
+
+        scope_targets: list[tuple[str, str | None]] = [("guild", None)]
+        if room_key:
+            scope_targets.append(("room", room_key))
+        if session_memory_key:
+            scope_targets.append(("session", session_memory_key))
 
         summary_update = compact_working_summary(str(result.get("summary_update", "")))
         if summary_update:
-            write_text_file(memory_summary_path(guild_id), summary_update)
+            for scope_type, scope_key in scope_targets:
+                write_text_file(memory_summary_path(guild_id, scope_type=scope_type, scope_key=scope_key), summary_update)
 
         durable_facts = result.get("durable_facts", [])
         if isinstance(durable_facts, list):
-            append_unique_memory_rows(
-                memory_facts_path(guild_id),
-                [row for row in durable_facts if isinstance(row, dict)],
-                MEMORY_FACT_LIMIT,
-                mirror_path=vault_facts_path(guild_id),
-            )
+            rows = [row for row in durable_facts if isinstance(row, dict)]
+            for scope_type, scope_key in scope_targets:
+                append_unique_memory_rows(
+                    memory_facts_path(guild_id, scope_type=scope_type, scope_key=scope_key),
+                    rows,
+                    MEMORY_FACT_LIMIT,
+                    mirror_path=vault_facts_path(guild_id, scope_type=scope_type, scope_key=scope_key),
+                )
 
         open_questions = result.get("open_questions", [])
         if isinstance(open_questions, list):
-            append_unique_memory_rows(
-                memory_questions_path(guild_id),
-                [row for row in open_questions if isinstance(row, dict)],
-                MEMORY_LOOP_LIMIT,
-                mirror_path=vault_questions_path(guild_id),
-            )
+            rows = [row for row in open_questions if isinstance(row, dict)]
+            for scope_type, scope_key in scope_targets:
+                append_unique_memory_rows(
+                    memory_questions_path(guild_id, scope_type=scope_type, scope_key=scope_key),
+                    rows,
+                    MEMORY_LOOP_LIMIT,
+                    mirror_path=vault_questions_path(guild_id, scope_type=scope_type, scope_key=scope_key),
+                )
 
         elapsed_ms = (time.monotonic() - started_at) * 1000.0
         if should_log_voice_timing(elapsed_ms):
-            print(f"[MEMORY LATENCY] guild={guild_id} ms={elapsed_ms:.0f}")
+            print(f"[MEMORY LATENCY] guild={guild_id} scope={scope_note} ms={elapsed_ms:.0f}")
 
 
 def schedule_memory_update(
@@ -1012,19 +1301,43 @@ def schedule_memory_update(
     user_text: str,
     answer: str,
     *,
+    room_key: str | None = None,
+    person_key: str | None = None,
+    session_memory_key: str | None = None,
     source: str = "chat",
     user_speaker: str = "user",
     assistant_speaker: str = "Evelyn",
 ) -> None:
-    append_raw_transcript_rows(
-        guild_id,
-        [
-            {"role": "user", "speaker": user_speaker, "source": source, "text": user_text},
-            {"role": "assistant", "speaker": assistant_speaker, "source": source, "text": answer},
-        ],
+    rows = [
+        {"role": "user", "speaker": user_speaker, "source": source, "text": user_text},
+        {"role": "assistant", "speaker": assistant_speaker, "source": source, "text": answer},
+    ]
+    append_raw_transcript_rows(guild_id, rows)
+    if room_key:
+        append_raw_transcript_rows(guild_id, rows, scope_type="room", scope_key=room_key)
+    if person_key:
+        append_raw_transcript_rows(guild_id, rows, scope_type="person", scope_key=person_key)
+    if session_memory_key:
+        append_raw_transcript_rows(guild_id, rows, scope_type="session", scope_key=session_memory_key)
+    asyncio.create_task(
+        update_long_term_memory(
+            guild_id,
+            user_text,
+            answer,
+            room_key=room_key,
+            person_key=person_key,
+            session_memory_key=session_memory_key,
+        )
     )
-    asyncio.create_task(update_long_term_memory(guild_id, user_text, answer))
-    asyncio.create_task(update_cognitive_state(guild_id, user_text))
+    asyncio.create_task(
+        update_cognitive_state(
+            guild_id,
+            user_text,
+            room_key=room_key,
+            person_key=person_key,
+            session_memory_key=session_memory_key,
+        )
+    )
 
 
 def split_tts_sentences(buffer: str, *, force: bool = False) -> tuple[list[str], str]:
@@ -1371,6 +1684,9 @@ async def deliver_proactive_followup(
     answer: str,
     *,
     session_key: str | None,
+    room_key: str | None,
+    person_key: str | None,
+    session_memory_key: str | None,
     channel_id: int | None,
     source: str,
 ) -> None:
@@ -1402,6 +1718,9 @@ async def deliver_proactive_followup(
         guild_id,
         query,
         plain_answer,
+        room_key=room_key,
+        person_key=person_key,
+        session_memory_key=session_memory_key,
         source=source,
         user_speaker="search_task",
         assistant_speaker="Evelyn",
@@ -1413,6 +1732,9 @@ async def run_search_followup(
     query: str,
     *,
     session_key: str | None,
+    room_key: str | None,
+    person_key: str | None,
+    session_memory_key: str | None,
     channel_id: int | None,
     source: str,
 ) -> None:
@@ -1420,27 +1742,36 @@ async def run_search_followup(
         results = await search_duckduckgo(query)
         answer = await answer_from_search_results(query, results)
         removed = resolve_open_question_rows(guild_id, query, answer)
+        if room_key:
+            removed += resolve_open_question_rows(guild_id, query, answer, scope_type="room", scope_key=room_key)
+        if session_memory_key:
+            removed += resolve_open_question_rows(guild_id, query, answer, scope_type="session", scope_key=session_memory_key)
         if removed:
             print(f"[SEARCH] resolved_open_questions guild={guild_id} removed={removed}")
-        write_json_file(
-            cognitive_state_path(guild_id),
-            {
-                "action": "answer",
-                "confidence": 1.0,
-                "user_intent": clean_text(query),
-                "state_summary": "검색을 마쳤고 결과를 사용자에게 전달했다.",
-                "question_for_user": "",
-                "main_prompt_hint": "찾은 내용을 바로 전달해라.",
-                "reason_brief": "search_completed",
-                "retrieved_context_ids": [],
-                "updated_at": int(time.time()),
-            },
-        )
+        completed_state = {
+            "action": "answer",
+            "confidence": 1.0,
+            "user_intent": clean_text(query),
+            "state_summary": "검색을 마쳤고 결과를 사용자에게 전달했다.",
+            "question_for_user": "",
+            "main_prompt_hint": "찾은 내용을 바로 전달해라.",
+            "reason_brief": "search_completed",
+            "retrieved_context_ids": [],
+            "updated_at": int(time.time()),
+        }
+        write_json_file(cognitive_state_path(guild_id), completed_state)
+        if room_key:
+            write_json_file(cognitive_state_path(guild_id, scope_type="room", scope_key=room_key), completed_state)
+        if session_memory_key:
+            write_json_file(cognitive_state_path(guild_id, scope_type="session", scope_key=session_memory_key), completed_state)
         await deliver_proactive_followup(
             guild_id,
             query,
             answer,
             session_key=session_key,
+            room_key=room_key,
+            person_key=person_key,
+            session_memory_key=session_memory_key,
             channel_id=channel_id,
             source=source,
         )
@@ -1461,6 +1792,9 @@ def schedule_search_followup(
     user_text: str,
     answer: str,
     *,
+    room_key: str | None = None,
+    person_key: str | None = None,
+    session_memory_key: str | None = None,
     channel_id: int | None,
     source: str,
 ) -> None:
@@ -1484,7 +1818,16 @@ def schedule_search_followup(
 
     print(f"[SEARCH] scheduled guild={guild_id} session={task_key!r} query={query!r} source={source}")
     background_search_tasks[task_key] = asyncio.create_task(
-        run_search_followup(guild_id, query, session_key=task_key, channel_id=channel_id, source=source)
+        run_search_followup(
+            guild_id,
+            query,
+            session_key=task_key,
+            room_key=room_key,
+            person_key=person_key,
+            session_memory_key=session_memory_key,
+            channel_id=channel_id,
+            source=source,
+        )
     )
 
 
@@ -2187,6 +2530,9 @@ async def ask_llm_once(
     guild_id: int | None = None,
     *,
     session_key: str | None = None,
+    room_key: str | None = None,
+    person_key: str | None = None,
+    session_memory_key: str | None = None,
     source: str = "text",
     debug_text: str | None = None,
 ) -> str:
@@ -2194,6 +2540,9 @@ async def ask_llm_once(
         user_text,
         guild_id=guild_id,
         session_key=session_key,
+        room_key=room_key,
+        person_key=person_key,
+        session_memory_key=session_memory_key,
         source=source,
         debug_text=debug_text,
     )
@@ -2313,6 +2662,9 @@ async def ask_llm_streaming(
     on_first_chunk: Callable[[], None] | None = None,
     *,
     session_key: str | None = None,
+    room_key: str | None = None,
+    person_key: str | None = None,
+    session_memory_key: str | None = None,
     source: str = "text",
     debug_text: str | None = None,
     metrics: dict | None = None,
@@ -2321,6 +2673,9 @@ async def ask_llm_streaming(
         user_text,
         guild_id=guild_id,
         session_key=session_key,
+        room_key=room_key,
+        person_key=person_key,
+        session_memory_key=session_memory_key,
         source=source,
         debug_text=debug_text,
         metrics=metrics,
@@ -2374,7 +2729,16 @@ async def ask_llm_streaming(
                 answer = sanitize_model_output(msg.get("content", ""))
             if not answer:
                 print("[LLM STREAM] json 응답 본문 비어 있음, non-stream 재시도")
-                answer = await ask_llm_once(user_text, guild_id=guild_id, session_key=session_key, source=source, debug_text=debug_text)
+                answer = await ask_llm_once(
+                    user_text,
+                    guild_id=guild_id,
+                    session_key=session_key,
+                    room_key=room_key,
+                    person_key=person_key,
+                    session_memory_key=session_memory_key,
+                    source=source,
+                    debug_text=debug_text,
+                )
             if on_first_chunk is not None:
                 on_first_chunk()
             if on_sentence is not None:
@@ -2425,7 +2789,16 @@ async def ask_llm_streaming(
         print(
             f"[LLM STREAM] stream 본문 비어 있음, non-stream 재시도 | raw_len={len(''.join(raw_parts))} reasoning_len={len(''.join(reasoning_parts))} emitted_any={emitted_any}"
         )
-        answer = await ask_llm_once(user_text, guild_id=guild_id, session_key=session_key, source=source, debug_text=debug_text)
+        answer = await ask_llm_once(
+            user_text,
+            guild_id=guild_id,
+            session_key=session_key,
+            room_key=room_key,
+            person_key=person_key,
+            session_memory_key=session_memory_key,
+            source=source,
+            debug_text=debug_text,
+        )
 
     if on_sentence is not None:
         ready_chunks, sentence_buffer = split_tts_sentences(sentence_buffer, force=True)
@@ -2449,6 +2822,9 @@ async def ask_llm_and_speak_streaming(
     on_final_answer: Callable[[str], Awaitable[None]] | None = None,
     *,
     session_key: str | None = None,
+    room_key: str | None = None,
+    person_key: str | None = None,
+    session_memory_key: str | None = None,
     source: str = "voice",
     debug_text: str | None = None,
     metrics: dict | None = None,
@@ -2490,6 +2866,9 @@ async def ask_llm_and_speak_streaming(
             on_sentence=enqueue_sentence,
             on_first_chunk=lambda: log_voice_latency(metrics, "llm_first_chunk_logged", "LLM 첫 chunk 시간"),
             session_key=session_key,
+            room_key=room_key,
+            person_key=person_key,
+            session_memory_key=session_memory_key,
             source=source,
             debug_text=debug_text,
             metrics=metrics,
@@ -2523,6 +2902,9 @@ async def stream_text_reply(
     *,
     guild_id: int,
     session_key: str,
+    room_key: str | None = None,
+    person_key: str | None = None,
+    session_memory_key: str | None = None,
     source: str = "text",
     debug_text: str | None = None,
 ) -> tuple[str, discord.Message | None]:
@@ -2548,6 +2930,9 @@ async def stream_text_reply(
         user_text,
         guild_id=guild_id,
         session_key=session_key,
+        room_key=room_key,
+        person_key=person_key,
+        session_memory_key=session_memory_key,
         on_sentence=on_sentence,
         source=source,
         debug_text=debug_text,
@@ -2748,6 +3133,9 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes, 
     print(f"🎤 [{member.display_name}] wake={wake_probe!r} text={text}")
 
     voice_session_key = make_voice_session_key(guild_id, getattr(getattr(guild.voice_client, "channel", None), "id", None))
+    room_key = make_room_memory_key("voice", getattr(getattr(guild.voice_client, "channel", None), "id", None))
+    person_key = make_person_memory_key(member.id)
+    session_memory_key = make_session_memory_key(voice_session_key, member.id)
     ok, reason = should_reply_to_voice(
         guild_id,
         text,
@@ -2789,6 +3177,9 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes, 
                 guild_id=guild_id,
                 on_final_answer=on_final_answer,
                 session_key=session_key,
+                room_key=room_key,
+                person_key=person_key,
+                session_memory_key=session_memory_key,
                 source="voice",
                 debug_text=history_user_text,
                 metrics=metrics,
@@ -2812,6 +3203,9 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes, 
             guild_id,
             history_user_text,
             plain_answer,
+            room_key=room_key,
+            person_key=person_key,
+            session_memory_key=session_memory_key,
             source="voice",
             user_speaker=member.display_name,
             assistant_speaker="Evelyn",
@@ -2821,10 +3215,13 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes, 
             session_key,
             history_user_text,
             plain_answer,
+            room_key=room_key,
+            person_key=person_key,
+            session_memory_key=session_memory_key,
             channel_id=None,
             source="search-followup-voice",
         )
-        mark_session_active(session_key, user_id=member.id, ttl_sec=45.0)
+        mark_session_active(session_key, user_id=member.id, ttl_sec=75.0 if "?" in plain_answer or "？" in plain_answer else 45.0)
         log_voice_stage(metrics, "process_member_audio 완료", extra=f"speaker={member.display_name}")
 
 
@@ -2858,6 +3255,9 @@ async def on_message(message: discord.Message):
         return
 
     session_key = make_text_session_key(message.guild.id, message.channel.id)
+    room_key = make_room_memory_key("text", message.channel.id)
+    person_key = make_person_memory_key(message.author.id)
+    session_memory_key = make_session_memory_key(session_key, message.author.id)
     remember_session_followup_target(session_key, channel_id=message.channel.id)
 
     is_wake_word = contains_wake_word(message.content)
@@ -2901,6 +3301,9 @@ async def on_message(message: discord.Message):
                     user_text,
                     guild_id=message.guild.id,
                     session_key=session_key,
+                    room_key=room_key,
+                    person_key=person_key,
+                    session_memory_key=session_memory_key,
                     source="text",
                     debug_text=user_text,
                 )
@@ -2913,6 +3316,9 @@ async def on_message(message: discord.Message):
                 message.guild.id,
                 user_text,
                 plain_answer,
+                room_key=room_key,
+                person_key=person_key,
+                session_memory_key=session_memory_key,
                 source="text",
                 user_speaker=message.author.display_name,
                 assistant_speaker="Evelyn",
@@ -2922,11 +3328,14 @@ async def on_message(message: discord.Message):
                 session_key,
                 user_text,
                 plain_answer,
+                room_key=room_key,
+                person_key=person_key,
+                session_memory_key=session_memory_key,
                 channel_id=message.channel.id,
                 source="search-followup-text",
             )
 
-            mark_session_active(session_key, user_id=message.author.id, ttl_sec=90.0)
+            mark_session_active(session_key, user_id=message.author.id, ttl_sec=150.0 if "?" in plain_answer or "？" in plain_answer else 90.0)
 
             if vc is not None:
                 await speak_answer(vc, answer)
