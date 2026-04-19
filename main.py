@@ -2025,7 +2025,12 @@ def schedule_search_followup(
 
 
 class OmniVoicePCMStream(discord.AudioSource):
-    def __init__(self, *, on_first_frame: Callable[[], None] | None = None):
+    def __init__(
+        self,
+        *,
+        on_first_frame: Callable[[], None] | None = None,
+        on_first_packet_sent: Callable[[], None] | None = None,
+    ):
         self._queue: queue.Queue[bytes | None] = queue.Queue()
         self._buffer = bytearray()
         self._done = False
@@ -2034,6 +2039,7 @@ class OmniVoicePCMStream(discord.AudioSource):
         self._input_remainder = b""
         self._first_frame_sent = False
         self._on_first_frame = on_first_frame
+        self._on_first_packet_sent = on_first_packet_sent
         self.error: Exception | None = None
 
     def feed_pcm24_mono(self, chunk: bytes) -> None:
@@ -2092,6 +2098,8 @@ class OmniVoicePCMStream(discord.AudioSource):
                 self._first_frame_sent = True
                 if self._on_first_frame is not None:
                     self._on_first_frame()
+                if self._on_first_packet_sent is not None:
+                    self._on_first_packet_sent()
             return chunk
 
         if self._done and self._buffer:
@@ -2102,6 +2110,8 @@ class OmniVoicePCMStream(discord.AudioSource):
                 self._first_frame_sent = True
                 if self._on_first_frame is not None:
                     self._on_first_frame()
+                if self._on_first_packet_sent is not None:
+                    self._on_first_packet_sent()
             return padded
 
         return b""
@@ -2288,12 +2298,16 @@ async def create_omnivoice_source(
     on_response_headers: Callable[[], None] | None = None,
     on_first_byte: Callable[[], None] | None = None,
     on_first_frame: Callable[[], None] | None = None,
+    on_first_packet_sent: Callable[[], None] | None = None,
 ) -> OmniVoicePCMStream:
     text = clean_tts_text(text)
     if not text:
         raise ValueError("TTS 텍스트가 비어 있습니다.")
 
-    source = OmniVoicePCMStream(on_first_frame=on_first_frame)
+    source = OmniVoicePCMStream(
+        on_first_frame=on_first_frame,
+        on_first_packet_sent=on_first_packet_sent,
+    )
 
     async def producer() -> None:
         session = await get_http_session()
@@ -2689,7 +2703,10 @@ async def speak_answer(vc: discord.VoiceClient, answer: str) -> None:
     guild_id = getattr(getattr(vc, "guild", None), "id", None)
 
     async with tts_lock:
-        source = await create_omnivoice_source(answer)
+        source = await create_omnivoice_source(
+            answer,
+            on_first_packet_sent=lambda: print("first_packet_sent"),
+        )
         try:
             if guild_id is not None:
                 bot_speaking_guilds.add(guild_id)
@@ -2730,6 +2747,7 @@ async def stream_tts_sentences(
                     on_response_headers=lambda: log_voice_latency(metrics, "tts_response_headers_logged", "TTS 응답 헤더 도착 시간"),
                     on_first_byte=lambda: log_voice_latency(metrics, "tts_first_byte_logged", "TTS 첫 바이트 도착 시간"),
                     on_first_frame=lambda: log_voice_latency(metrics, "tts_first_frame_logged", "TTS 첫 프레임 공급 시간"),
+                    on_first_packet_sent=lambda: print("first_packet_sent"),
                 )
                 await play_audio_source(
                     vc,
