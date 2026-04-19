@@ -1,4 +1,5 @@
 import audioop
+import html
 import json
 import os
 import queue
@@ -11,6 +12,7 @@ import asyncio
 import wave
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
+from urllib.parse import parse_qs, unquote, urlparse
 
 import aiohttp
 import numpy as np
@@ -63,6 +65,8 @@ intents.members = True
 
 guild_prefix_cache: dict[int, str] = {}
 guild_histories: dict[int, list[dict]] = {}
+last_text_channel_ids: dict[int, int] = {}
+background_search_tasks: dict[int, asyncio.Task] = {}
 
 
 def normalize_command_prefix(prefix: str | None) -> str:
@@ -1016,6 +1020,291 @@ async def get_http_session() -> aiohttp.ClientSession:
         timeout = aiohttp.ClientTimeout(total=None, connect=10, sock_connect=10)
         http_session = aiohttp.ClientSession(timeout=timeout)
     return http_session
+
+
+def answer_promises_search(answer_text: str) -> bool:
+    text = clean_text(strip_omnivoice_tags(answer_text)).lower()
+    if not text:
+        return False
+
+    completed_markers = [
+        "찾아봤",
+        "검색해봤",
+        "확인해봤",
+        "알아봤",
+        "찾아보니",
+        "검색해보니",
+        "결과는",
+    ]
+    if any(marker in text for marker in completed_markers):
+        return False
+
+    promise_markers = [
+        "찾아볼게",
+        "찾아볼께",
+        "찾아보고",
+        "찾아보고 올게",
+        "검색해볼게",
+        "검색해볼께",
+        "확인해볼게",
+        "알아볼게",
+        "찾는 중",
+        "찾아보고 있어",
+        "자료 찾아볼게",
+    ]
+    return any(marker in text for marker in promise_markers)
+
+
+def build_search_query(guild_id: int, user_text: str) -> str:
+    text = clean_text(strip_omnivoice_tags(user_text))
+    if len(text) >= 8:
+        return text
+
+    summary = compact_working_summary(read_text_file(memory_summary_path(guild_id)))
+    if summary:
+        return clean_text(f"{text} {summary}")
+    return text
+
+
+def decode_duckduckgo_url(url: str) -> str:
+    parsed = urlparse(url)
+    if "duckduckgo.com" in parsed.netloc and parsed.path.startswith("/l/"):
+        target = parse_qs(parsed.query).get("uddg", [""])[0]
+        if target:
+            return unquote(target)
+    return html.unescape(url)
+
+
+def strip_html_tags(text: str) -> str:
+    return clean_text(html.unescape(re.sub(r"<[^>]+>", " ", text or "")))
+
+
+async def search_duckduckgo(query: str, *, limit: int = 5) -> list[dict]:
+    session = await get_http_session()
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36"}
+    results: list[dict] = []
+    seen_urls: set[str] = set()
+
+    try:
+        async with session.get(
+            "https://api.duckduckgo.com/",
+            params={
+                "q": query,
+                "format": "json",
+                "no_html": "1",
+                "skip_disambig": "0",
+            },
+            headers=headers,
+            timeout=aiohttp.ClientTimeout(total=12),
+        ) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                abstract = clean_text(str(data.get("AbstractText", "")))
+                abstract_url = clean_text(str(data.get("AbstractURL", "")))
+                abstract_source = clean_text(str(data.get("AbstractSource", "DuckDuckGo"))) or "DuckDuckGo"
+                if abstract and abstract_url:
+                    results.append({
+                        "title": abstract_source,
+                        "snippet": abstract,
+                        "url": abstract_url,
+                    })
+                    seen_urls.add(abstract_url)
+
+                def collect_topics(items):
+                    for item in items or []:
+                        if not isinstance(item, dict):
+                            continue
+                        if "Topics" in item:
+                            collect_topics(item.get("Topics"))
+                            continue
+                        snippet = clean_text(str(item.get("Text", "")))
+                        url = clean_text(str(item.get("FirstURL", "")))
+                        if not snippet or not url or url in seen_urls:
+                            continue
+                        results.append({
+                            "title": snippet.split(" - ", 1)[0][:80],
+                            "snippet": snippet,
+                            "url": url,
+                        })
+                        seen_urls.add(url)
+                        if len(results) >= limit:
+                            return
+
+                collect_topics(data.get("RelatedTopics", []))
+    except Exception as e:
+        print(f"[SEARCH] instant API 실패: {e!r}")
+
+    if len(results) >= limit:
+        return results[:limit]
+
+    try:
+        async with session.post(
+            "https://html.duckduckgo.com/html/",
+            data={"q": query, "kl": "kr-ko"},
+            headers=headers,
+            timeout=aiohttp.ClientTimeout(total=15),
+        ) as resp:
+            if resp.status != 200:
+                return results[:limit]
+            page = await resp.text()
+    except Exception as e:
+        print(f"[SEARCH] html search 실패: {e!r}")
+        return results[:limit]
+
+    pattern = re.compile(
+        r'<a[^>]+class="result__a"[^>]+href="(?P<url>[^"]+)"[^>]*>(?P<title>.*?)</a>(?P<rest>.*?)</div>',
+        re.S,
+    )
+    for match in pattern.finditer(page):
+        url = decode_duckduckgo_url(match.group("url"))
+        if not url or url in seen_urls:
+            continue
+        title = strip_html_tags(match.group("title"))
+        snippet_match = re.search(r'class="result__snippet"[^>]*>(.*?)</a>|class="result__snippet"[^>]*>(.*?)</div>', match.group("rest"), re.S)
+        snippet = strip_html_tags((snippet_match.group(1) or snippet_match.group(2)) if snippet_match else "")
+        if not title and not snippet:
+            continue
+        results.append({"title": title or url, "snippet": snippet, "url": url})
+        seen_urls.add(url)
+        if len(results) >= limit:
+            break
+
+    return results[:limit]
+
+
+async def answer_from_search_results(query: str, results: list[dict]) -> str:
+    if not results:
+        return "찾아봤는데 지금 바로 쓸 만한 결과를 못 찾았어. 검색어를 조금 더 구체적으로 말해주면 다시 찾아볼게."
+
+    session = await get_http_session()
+    payload = {
+        "model": MODEL_NAME,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "너는 검색 결과를 짧게 정리하는 비서다. 검색은 이미 끝났다. "
+                    "'찾아볼게', '찾는 중', '확인해볼게' 같은 표현은 절대 쓰지 마라. "
+                    "찾은 내용만 한국어로 바로 말하고, 한두 문장 뒤에 필요하면 출처 1~2개를 괄호로 덧붙여라."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"사용자 질문:\n{query}\n\n"
+                    + "검색 결과:\n"
+                    + "\n".join(
+                        f"- {clean_text(row.get('title', ''))} | {clean_text(row.get('snippet', ''))} | {clean_text(row.get('url', ''))}"
+                        for row in results[:5]
+                    )
+                ),
+            },
+        ],
+        "temperature": 0.1,
+        "max_tokens": 220,
+        "stream": False,
+    }
+
+    async with session.post(LLM_SERVER_URL, json=payload, timeout=aiohttp.ClientTimeout(total=45)) as resp:
+        if resp.status != 200:
+            error_text = await resp.text()
+            raise RuntimeError(f"검색 정리 LLM 오류: {resp.status} / {error_text[:300]}")
+        data = await resp.json()
+
+    choices = data.get("choices", [])
+    if not choices:
+        first = results[0]
+        return clean_text(f"찾아보니까 {first.get('snippet', '')} ({first.get('url', '')})")
+
+    message = choices[0].get("message", {})
+    answer = sanitize_model_output(message.get("content", ""))
+    if answer:
+        return answer
+
+    first = results[0]
+    return clean_text(f"찾아보니까 {first.get('snippet', '')} ({first.get('url', '')})")
+
+
+async def deliver_proactive_followup(guild_id: int, query: str, answer: str, *, channel_id: int | None, source: str) -> None:
+    plain_answer = strip_omnivoice_tags(answer) or answer
+    guild = bot.get_guild(guild_id)
+
+    if channel_id is not None:
+        channel = bot.get_channel(channel_id)
+        if channel is None:
+            try:
+                channel = await bot.fetch_channel(channel_id)
+            except Exception:
+                channel = None
+        if channel is not None and hasattr(channel, "send"):
+            await channel.send(visible_text(answer))
+
+    vc = guild.voice_client if guild else None
+    if vc is not None and vc.is_connected():
+        try:
+            await speak_answer(vc, answer)
+        except Exception as e:
+            print(f"[SEARCH] proactive TTS 실패: {e!r}")
+
+    append_history(guild_id, query, plain_answer)
+    schedule_memory_update(
+        guild_id,
+        query,
+        plain_answer,
+        source=source,
+        user_speaker="search_task",
+        assistant_speaker="Evelyn",
+    )
+
+
+async def run_search_followup(guild_id: int, query: str, *, channel_id: int | None, source: str) -> None:
+    try:
+        results = await search_duckduckgo(query)
+        answer = await answer_from_search_results(query, results)
+        removed = resolve_open_question_rows(guild_id, query, answer)
+        if removed:
+            print(f"[SEARCH] resolved_open_questions guild={guild_id} removed={removed}")
+        write_json_file(
+            cognitive_state_path(guild_id),
+            {
+                "action": "answer",
+                "confidence": 1.0,
+                "user_intent": clean_text(query),
+                "state_summary": "검색을 마쳤고 결과를 사용자에게 전달했다.",
+                "question_for_user": "",
+                "main_prompt_hint": "찾은 내용을 바로 전달해라.",
+                "reason_brief": "search_completed",
+                "retrieved_context_ids": [],
+                "updated_at": int(time.time()),
+            },
+        )
+        await deliver_proactive_followup(guild_id, query, answer, channel_id=channel_id, source=source)
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        print(f"[SEARCH] follow-up 실패 guild={guild_id} query={query!r} err={e!r}")
+    finally:
+        task = background_search_tasks.get(guild_id)
+        if task is asyncio.current_task():
+            background_search_tasks.pop(guild_id, None)
+
+
+def schedule_search_followup(guild_id: int, user_text: str, answer: str, *, channel_id: int | None, source: str) -> None:
+    if not guild_id or not answer_promises_search(answer):
+        return
+
+    query = build_search_query(guild_id, user_text)
+    if len(query) < 2:
+        return
+
+    existing = background_search_tasks.get(guild_id)
+    if existing is not None and not existing.done():
+        existing.cancel()
+
+    print(f"[SEARCH] scheduled guild={guild_id} query={query!r} source={source}")
+    background_search_tasks[guild_id] = asyncio.create_task(
+        run_search_followup(guild_id, query, channel_id=channel_id, source=source)
+    )
 
 
 class OmniVoicePCMStream(discord.AudioSource):
@@ -2267,6 +2556,13 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes, 
             user_speaker=member.display_name,
             assistant_speaker="Evelyn",
         )
+        schedule_search_followup(
+            guild_id,
+            history_user_text,
+            plain_answer,
+            channel_id=last_text_channel_ids.get(guild_id),
+            source="search-followup-voice",
+        )
         log_voice_stage(metrics, "process_member_audio 완료", extra=f"speaker={member.display_name}")
 
 
@@ -2298,6 +2594,8 @@ async def on_message(message: discord.Message):
     if not message.guild:
         await bot.process_commands(message)
         return
+
+    last_text_channel_ids[message.guild.id] = message.channel.id
 
     is_wake_word = contains_wake_word(message.content)
     is_reply = False
@@ -2349,6 +2647,13 @@ async def on_message(message: discord.Message):
                 source="text",
                 user_speaker=message.author.display_name,
                 assistant_speaker="Evelyn",
+            )
+            schedule_search_followup(
+                message.guild.id,
+                user_text,
+                plain_answer,
+                channel_id=message.channel.id,
+                source="search-followup-text",
             )
 
             if vc is not None:

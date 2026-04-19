@@ -298,6 +298,37 @@ def read_question_rows(guild_id: int) -> list[dict]:
     return merged
 
 
+def resolve_open_question_rows(guild_id: int, *reference_texts: str) -> int:
+    """관련성이 높은 열린 질문 항목을 닫는다."""
+    refs = [memory_tokens(text) for text in reference_texts if clean_text(text)]
+    if not refs:
+        return 0
+
+    removed = 0
+    for path in (memory_questions_path(guild_id), memory_loops_path(guild_id), vault_questions_path(guild_id)):
+        rows = read_jsonl(path)
+        if not rows:
+            continue
+
+        kept: list[dict] = []
+        for row in rows:
+            text = clean_text(str(row.get("text", "")))
+            if not text:
+                continue
+
+            row_tokens = memory_tokens(text)
+            overlap = max((len(row_tokens & ref) for ref in refs), default=0)
+            if overlap >= 1:
+                removed += 1
+                continue
+
+            kept.append(row)
+
+        write_jsonl(path, kept)
+
+    return removed
+
+
 def normalize_cognitive_action(value: str) -> str:
     action = clean_text(value).lower()
     if action in {"ask", "question", "clarify"}:
