@@ -1221,6 +1221,8 @@ def log_voice_bottleneck_summary(metrics: dict | None, *, label: str, extra: str
         f"stt={_fmt('stt_done')}",
         f"llm_first={_fmt('llm_first_chunk_logged')}",
         f"llm_done={_fmt('llm_done')}",
+        f"tts_req={_fmt('tts_request_logged')}",
+        f"tts_headers={_fmt('tts_response_headers_logged')}",
         f"tts_first={_fmt('tts_first_byte_logged')}",
         f"playback={_fmt('playback_start_logged')}",
     ]
@@ -1232,6 +1234,8 @@ def log_voice_bottleneck_summary(metrics: dict | None, *, label: str, extra: str
 async def create_omnivoice_source(
     text: str,
     *,
+    on_request_start: Callable[[], None] | None = None,
+    on_response_headers: Callable[[], None] | None = None,
     on_first_byte: Callable[[], None] | None = None,
 ) -> OmniVoicePCMStream:
     text = clean_tts_text(text)
@@ -1257,11 +1261,15 @@ async def create_omnivoice_source(
 
             first_byte_logged = False
 
+            if on_request_start is not None:
+                on_request_start()
             async with session.post(
                 f"{OMNIVOICE_SERVER_URL}/v1/audio/speech",
                 json=payload,
                 timeout=timeout,
             ) as resp:
+                if on_response_headers is not None:
+                    on_response_headers()
                 if resp.status != 200:
                     return False, await resp.text()
 
@@ -1667,6 +1675,8 @@ async def stream_tts_sentences(
                 did_speak = True
                 source = await create_omnivoice_source(
                     sentence,
+                    on_request_start=lambda: log_voice_latency(metrics, "tts_request_logged", "TTS 요청 시작 시간"),
+                    on_response_headers=lambda: log_voice_latency(metrics, "tts_response_headers_logged", "TTS 응답 헤더 도착 시간"),
                     on_first_byte=lambda: log_voice_latency(metrics, "tts_first_byte_logged", "TTS 첫 바이트 도착 시간"),
                 )
                 await play_audio_source(
@@ -1946,12 +1956,16 @@ async def ask_llm_and_speak_streaming(
         metrics = {
             "started_at": time.monotonic(),
             "llm_first_chunk_logged": False,
+            "tts_request_logged": False,
+            "tts_response_headers_logged": False,
             "tts_first_byte_logged": False,
             "playback_start_logged": False,
         }
     else:
         metrics.setdefault("started_at", time.monotonic())
         metrics.setdefault("llm_first_chunk_logged", False)
+        metrics.setdefault("tts_request_logged", False)
+        metrics.setdefault("tts_response_headers_logged", False)
         metrics.setdefault("tts_first_byte_logged", False)
         metrics.setdefault("playback_start_logged", False)
         metrics.setdefault("marks", {})
