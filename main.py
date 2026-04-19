@@ -138,6 +138,8 @@ bot_speaking_guilds: set[int] = set()
 memory_locks: dict[int, asyncio.Lock] = {}
 cognitive_locks: dict[int, asyncio.Lock] = {}
 background_cognitive_tasks: dict[str, asyncio.Task] = {}
+voice_ingress_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+voice_worker_task: asyncio.Task | None = None
 
 
 # =========================================================
@@ -217,8 +219,8 @@ def next_segment_id(session_key: str | None) -> int:
     return next_value
 
 
-def start_new_turn(session_key: str | None) -> str:
-    turn_id = new_turn_id()
+def start_new_turn(session_key: str | None, *, turn_id: str | None = None) -> str:
+    turn_id = turn_id or new_turn_id()
     if session_key:
         session_turn_ids[session_key] = turn_id
         session_last_turn_accepted_at[session_key] = time.monotonic()
@@ -658,6 +660,24 @@ def policy_response_for_state(cognitive_state: dict | None = None, *, source: st
     return None
 
 
+async def voice_ingress_worker() -> None:
+    while True:
+        item = await voice_ingress_queue.get()
+        try:
+            await _process_member_audio_impl(**item)
+        except Exception as e:
+            print(f"[VOICE WORKER] 실패: {e!r}")
+        finally:
+            voice_ingress_queue.task_done()
+
+
+def ensure_voice_worker_started() -> None:
+    global voice_worker_task
+    if voice_worker_task is not None and not voice_worker_task.done():
+        return
+    voice_worker_task = asyncio.create_task(voice_ingress_worker())
+
+
 def should_label_question_response(text: str, *, session_key: str | None = None) -> bool:
     visible = visible_text(text).strip()
     if not visible:
@@ -700,11 +720,13 @@ async def refresh_cognitive_state_in_background(
     user_text: str,
     *,
     reason: str,
+    session_key: str | None = None,
     room_key: str | None = None,
     person_key: str | None = None,
     session_memory_key: str | None = None,
 ) -> None:
     task_key = session_memory_key or runtime_session_key(guild_id=guild_id)
+    started_at = time.monotonic()
     try:
         await update_cognitive_state(
             guild_id,
@@ -712,6 +734,13 @@ async def refresh_cognitive_state_in_background(
             room_key=room_key,
             person_key=person_key,
             session_memory_key=session_memory_key,
+        )
+        log_turn_event(
+            "cognitive_background_done",
+            session_key=session_key,
+            turn_id=current_turn_id(session_key),
+            cognitive_background_ms=round((time.monotonic() - started_at) * 1000.0, 1),
+            reason=reason,
         )
     except asyncio.CancelledError:
         raise
@@ -728,6 +757,7 @@ def schedule_cognitive_refresh(
     user_text: str,
     *,
     reason: str,
+    session_key: str | None = None,
     room_key: str | None = None,
     person_key: str | None = None,
     session_memory_key: str | None = None,
@@ -745,6 +775,7 @@ def schedule_cognitive_refresh(
             guild_id,
             user_text,
             reason=reason,
+            session_key=session_key,
             room_key=room_key,
             person_key=person_key,
             session_memory_key=session_memory_key,
@@ -886,14 +917,15 @@ async def prepare_llm_messages(
                 guild_id,
                 user_text,
                 reason=f"{source}:{route}",
+                session_key=session_key,
                 room_key=room_key,
                 person_key=person_key,
                 session_memory_key=session_memory_key,
             )
         if metrics is not None:
             metrics.setdefault("meta", {})["cognitive_mode"] = "background"
-    if metrics is not None:
-        metrics.setdefault("marks", {})["cognitive_ready"] = (time.monotonic() - cognitive_started_at) * 1000.0
+    if metrics is not None and should_block_on_cognitive:
+        metrics.setdefault("marks", {})["cognitive_hotpath_ms"] = (time.monotonic() - cognitive_started_at) * 1000.0
 
     if guild_id is not None:
         memory_started_at = time.monotonic()
@@ -2272,13 +2304,13 @@ def log_voice_latency(metrics: dict | None, key: str, label: str) -> None:
     metrics[key] = True
     metrics.setdefault("marks", {})[key] = elapsed_ms
     alias_map = {
-        "llm_first_chunk_logged": "t_main_first_token",
-        "tts_first_byte_logged": "t_tts_first_byte",
-        "tts_first_frame_logged": "t_tts_first_frame",
-        "playback_start_logged": "t_tts_first_audio",
+        "llm_first_chunk_logged": ["t_main_first_token"],
+        "tts_first_byte_logged": ["t_tts_first_byte", "t_tts_first_audio"],
+        "tts_first_frame_logged": ["t_tts_first_frame"],
+        "first_packet_sent_logged": ["t_playback_first_packet"],
     }
-    alias = alias_map.get(key)
-    if alias:
+    aliases = alias_map.get(key, [])
+    for alias in aliases:
         metrics.setdefault("marks", {})[alias] = elapsed_ms
     if should_log_voice_timing(elapsed_ms):
         print(f"[VOICE LATENCY] {label}: {elapsed_ms:.0f}ms")
@@ -2336,7 +2368,7 @@ def log_voice_bottleneck_summary(metrics: dict | None, *, label: str, extra: str
         parts = [
             f"total={total_ms:.0f}ms",
             f"route={_fmt('route_ready')}",
-            f"cognitive={_fmt('cognitive_ready')}",
+            f"cognitive={_fmt('cognitive_hotpath_ms')}",
             f"memory={_fmt('memory_ready')}",
             f"wake_probe_ms={_fmt('wake_done')}",
             f"stt={_fmt('stt_done')}",
@@ -2346,7 +2378,7 @@ def log_voice_bottleneck_summary(metrics: dict | None, *, label: str, extra: str
             f"tts_headers={_fmt('tts_response_headers_logged')}",
             f"tts_first={_fmt('tts_first_byte_logged')}",
             f"tts_frame={_fmt('tts_first_frame_logged')}",
-            f"playback={_fmt('playback_start_logged')}",
+            f"playback={_fmt('first_packet_sent_logged')}",
         ]
         if extra:
             parts.append(extra)
@@ -2366,9 +2398,11 @@ def log_voice_bottleneck_summary(metrics: dict | None, *, label: str, extra: str
         t_ingress=marks.get("t_ingress"),
         t_policy=marks.get("t_policy"),
         t_context_build=marks.get("t_context_build"),
+        cognitive_hotpath_ms=marks.get("cognitive_hotpath_ms"),
         t_main_first_token=marks.get("t_main_first_token"),
         t_main_done=marks.get("t_main_done"),
         t_tts_first_audio=marks.get("t_tts_first_audio"),
+        t_playback_first_packet=marks.get("t_playback_first_packet"),
         t_stt_done=marks.get("t_stt_done"),
         total_ms=round(total_ms, 1),
         extra=extra or None,
@@ -2882,18 +2916,17 @@ async def stream_tts_sentences(
                     on_response_headers=lambda: log_voice_latency(metrics, "tts_response_headers_logged", "TTS 응답 헤더 도착 시간"),
                     on_first_byte=lambda: log_voice_latency(metrics, "tts_first_byte_logged", "TTS 첫 바이트 도착 시간"),
                     on_first_frame=lambda: log_voice_latency(metrics, "tts_first_frame_logged", "TTS 첫 프레임 공급 시간"),
-                    on_first_packet_sent=lambda ci=chunk_index: log_turn_event(
-                        "first_packet_sent",
-                        turn_id=turn_id,
-                        chunk_index=ci,
-                        session_key=session_key,
+                    on_first_packet_sent=lambda ci=chunk_index: (
+                        log_voice_latency(metrics, "first_packet_sent_logged", "첫 패킷 송신 시간"),
+                        log_turn_event(
+                            "first_packet_sent",
+                            turn_id=turn_id,
+                            chunk_index=ci,
+                            session_key=session_key,
+                        )
                     ),
                 )
-                await play_audio_source(
-                    vc,
-                    source,
-                    on_play_start=lambda: log_voice_latency(metrics, "playback_start_logged", "첫 재생 시작 시간"),
-                )
+                await play_audio_source(vc, source)
         finally:
             if guild_id is not None:
                 bot_speaking_guilds.discard(guild_id)
@@ -3250,7 +3283,7 @@ async def ask_llm_and_speak_streaming(
     metrics.setdefault("tts_response_headers_logged", False)
     metrics.setdefault("tts_first_byte_logged", False)
     metrics.setdefault("tts_first_frame_logged", False)
-    metrics.setdefault("playback_start_logged", False)
+    metrics.setdefault("first_packet_sent_logged", False)
     log_voice_stage(metrics, "LLM/TTS 파이프라인 시작", extra=f"source={source}")
     sentence_queue: asyncio.Queue[str | None] = asyncio.Queue()
     playback_task = asyncio.create_task(
@@ -3372,6 +3405,50 @@ async def stream_text_reply(
 # 음성 입력 처리
 # =========================================================
 async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes, debug_meta: dict | None = None) -> None:
+    if member is None or member.bot:
+        return
+
+    guild = getattr(member, "guild", None)
+    if guild is None:
+        return
+
+    ensure_voice_worker_started()
+
+    guild_id = guild.id
+    voice_channel_id = getattr(getattr(guild.voice_client, "channel", None), "id", None)
+    session_key = make_voice_session_key(guild_id, voice_channel_id, member.id)
+    room_key = make_room_memory_key("voice", voice_channel_id)
+    person_key = make_person_memory_key(member.id)
+    session_memory_key = make_session_memory_key(session_key, member.id)
+    segment_id = next_segment_id(session_key)
+    turn_id = new_turn_id()
+    voice_ingress_queue.put_nowait(
+        {
+            "member": member,
+            "pcm_bytes": pcm_bytes,
+            "debug_meta": debug_meta,
+            "session_key": session_key,
+            "room_key": room_key,
+            "person_key": person_key,
+            "session_memory_key": session_memory_key,
+            "turn_id": turn_id,
+            "segment_id": segment_id,
+        }
+    )
+
+
+async def _process_member_audio_impl(
+    member: discord.Member | None,
+    pcm_bytes: bytes,
+    debug_meta: dict | None = None,
+    *,
+    session_key: str,
+    room_key: str | None,
+    person_key: str | None,
+    session_memory_key: str | None,
+    turn_id: str,
+    segment_id: int,
+) -> None:
     if member is None:
         return
 
@@ -3383,20 +3460,14 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes, 
         return
 
     guild_id = guild.id
-    voice_channel_id = getattr(getattr(guild.voice_client, "channel", None), "id", None)
-    session_key = make_voice_session_key(guild_id, voice_channel_id, member.id)
-    room_key = make_room_memory_key("voice", voice_channel_id)
-    person_key = make_person_memory_key(member.id)
-    session_memory_key = make_session_memory_key(session_key, member.id)
     topic_id = session_topic_ids.get(session_key) or build_topic_id(member.display_name or str(member.id))
-    segment_id = next_segment_id(session_key)
     metrics = new_turn_metrics(
         source="voice",
         session_key=session_key,
         guild_id=guild_id,
         user_id=member.id,
         topic_id=topic_id,
-        turn_id=current_turn_id(session_key),
+        turn_id=turn_id,
         segment_id=segment_id,
     )
     log_voice_stage(metrics, "process_member_audio 시작", extra=f"speaker={member.display_name} pcm_bytes={len(pcm_bytes)}")
@@ -3660,7 +3731,7 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes, 
     prompt_user_text = raw_user_text or "사용자가 너를 이름만 불렀다. 아주 짧고 자연스럽게 반응해라."
     history_user_text = raw_user_text or text
     topic_id = build_topic_id(history_user_text, session_topic_ids.get(session_key, ""))
-    accepted_turn_id = start_new_turn(session_key)
+    accepted_turn_id = start_new_turn(session_key, turn_id=turn_id)
     update_session_state(
         session_key,
         user_id=member.id,
@@ -3757,6 +3828,7 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes, 
 @bot.event
 async def on_ready():
     print(f"로그인 완료: {bot.user}")
+    ensure_voice_worker_started()
     await set_tts_presence(True)
     try:
         await asyncio.to_thread(get_stt_model)
