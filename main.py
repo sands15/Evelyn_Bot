@@ -2294,6 +2294,7 @@ def log_voice_bottleneck_summary(metrics: dict | None, *, label: str, extra: str
 async def create_omnivoice_source(
     text: str,
     *,
+    on_task_started: Callable[[], None] | None = None,
     on_request_start: Callable[[], None] | None = None,
     on_response_headers: Callable[[], None] | None = None,
     on_first_byte: Callable[[], None] | None = None,
@@ -2312,6 +2313,11 @@ async def create_omnivoice_source(
     async def producer() -> None:
         session = await get_http_session()
         timeout = aiohttp.ClientTimeout(total=OMNIVOICE_TIMEOUT_SEC)
+        request_started_logged = False
+        first_byte_logged = False
+
+        if on_task_started is not None:
+            on_task_started()
 
         async def stream_with_voice(voice_name: str) -> tuple[bool, str]:
             payload = {
@@ -2324,10 +2330,11 @@ async def create_omnivoice_source(
             if OMNIVOICE_LANGUAGE:
                 payload["language"] = OMNIVOICE_LANGUAGE
 
-            first_byte_logged = False
+            nonlocal request_started_logged, first_byte_logged
 
-            if on_request_start is not None:
+            if on_request_start is not None and not request_started_logged:
                 on_request_start()
+                request_started_logged = True
             async with session.post(
                 f"{OMNIVOICE_SERVER_URL}/v1/audio/speech",
                 json=payload,
@@ -2705,6 +2712,9 @@ async def speak_answer(vc: discord.VoiceClient, answer: str) -> None:
     async with tts_lock:
         source = await create_omnivoice_source(
             answer,
+            on_task_started=lambda: print("playback_task_started"),
+            on_request_start=lambda: print("tts_request_started"),
+            on_first_byte=lambda: print("tts_first_pcm_received"),
             on_first_packet_sent=lambda: print("first_packet_sent"),
         )
         try:
@@ -2743,9 +2753,10 @@ async def stream_tts_sentences(
                 did_speak = True
                 source = await create_omnivoice_source(
                     sentence,
-                    on_request_start=lambda: log_voice_latency(metrics, "tts_request_logged", "TTS 요청 시작 시간"),
+                    on_task_started=lambda: print("playback_task_started"),
+                    on_request_start=lambda: (print("tts_request_started"), log_voice_latency(metrics, "tts_request_logged", "TTS 요청 시작 시간")),
                     on_response_headers=lambda: log_voice_latency(metrics, "tts_response_headers_logged", "TTS 응답 헤더 도착 시간"),
-                    on_first_byte=lambda: log_voice_latency(metrics, "tts_first_byte_logged", "TTS 첫 바이트 도착 시간"),
+                    on_first_byte=lambda: (print("tts_first_pcm_received"), log_voice_latency(metrics, "tts_first_byte_logged", "TTS 첫 바이트 도착 시간")),
                     on_first_frame=lambda: log_voice_latency(metrics, "tts_first_frame_logged", "TTS 첫 프레임 공급 시간"),
                     on_first_packet_sent=lambda: print("first_packet_sent"),
                 )
