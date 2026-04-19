@@ -23,7 +23,7 @@ if not defined WT_READY (
 if not defined WT_READY (
     start "TTS" cmd.exe /q /d /c "title TTS ^& pushd %~dp0.. ^& set CUDA_VISIBLE_DEVICES=1 ^& %OMNIVOICE_VENV%\Scripts\python.exe -m omnivoice_server.cli --host 127.0.0.1 --port %TTS_PORT% --device cuda --profile-dir %OMNIVOICE_PROFILE_DIR%"
 ) else (
-    "%WT_EXE%" new-tab --title "TTS" cmd.exe /q /d /c "title TTS ^& pushd %~dp0.. ^& set CUDA_VISIBLE_DEVICES=1 ^& %OMNIVOICE_VENV%\Scripts\python.exe -m omnivoice_server.cli --host 127.0.0.1 --port %TTS_PORT% --device cuda --profile-dir %OMNIVOICE_PROFILE_DIR%"
+    start "" "%WT_EXE%" new-tab --title "TTS" cmd.exe /q /d /c "title TTS ^& pushd %~dp0.. ^& set CUDA_VISIBLE_DEVICES=1 ^& %OMNIVOICE_VENV%\Scripts\python.exe -m omnivoice_server.cli --host 127.0.0.1 --port %TTS_PORT% --device cuda --profile-dir %OMNIVOICE_PROFILE_DIR%"
 )
 
 endlocal

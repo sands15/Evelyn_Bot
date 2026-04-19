@@ -25,9 +25,10 @@ if not defined WT_READY (
     "%WT_EXE%" ^
       new-tab --title "Main-LLM" cmd.exe /q /d /c "title Main-LLM & \"%~dp0start_main_llm.bat\" --inline" ^
       ; new-tab --title "Router-LLM" cmd.exe /q /d /c "title Router-LLM & \"%~dp0start_router_llm.bat\" --inline" ^
-      ; new-tab --title "Sub-LLM" cmd.exe /q /d /c "title Sub-LLM & \"%~dp0start_sub_llm.bat\" --inline" ^
-      ; new-tab --title "TTS" cmd.exe /q /d /c "title TTS ^& pushd %~dp0.. ^& set CUDA_VISIBLE_DEVICES=1 ^& %OMNIVOICE_VENV%\Scripts\python.exe -m omnivoice_server.cli --host 127.0.0.1 --port %TTS_PORT% --device cuda --profile-dir %OMNIVOICE_PROFILE_DIR%" ^
-      ; new-tab --title "Bot" powershell.exe -NoExit -ExecutionPolicy Bypass -File "%~dp0start_bot.ps1"
+      ; new-tab --title "Sub-LLM" cmd.exe /q /d /c "title Sub-LLM & \"%~dp0start_sub_llm.bat\" --inline"
+    timeout /t 1 /nobreak >nul
+    start "" cmd.exe /q /d /c ""%~dp0start_tts.bat""
+    start "" cmd.exe /q /d /c ""%~dp0start_bot.bat""
 )
 
 endlocal
