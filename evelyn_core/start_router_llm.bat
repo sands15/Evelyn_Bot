@@ -21,9 +21,9 @@ if not defined WT_READY (
     )
 )
 if not defined WT_READY (
-    start "Router-LLM" cmd.exe /q /d /c ""%~f0" --inline"
+    start "Router-LLM" cmd.exe /q /d /k ""%~f0" --inline"
 ) else (
-    "%WT_EXE%" new-tab --title "Router-LLM" cmd.exe /q /d /c ""%~f0" --inline"
+    "%WT_EXE%" new-tab --title "Router-LLM" cmd.exe /q /d /k ""%~f0" --inline"
 )
 
 endlocal

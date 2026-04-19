@@ -24,9 +24,9 @@ if not defined WT_READY (
 ) else (
     "%WT_EXE%" ^
       new-tab --title "Main-LLM" cmd.exe /q /d /c ""%~dp0start_main_llm.bat" --inline" ^
-      ; new-tab --title "Router-LLM" cmd.exe /q /d /c ""%~dp0start_router_llm.bat" --inline" ^
-      ; new-tab --title "Sub-LLM" cmd.exe /q /d /c ""%~dp0start_sub_llm.bat" --inline" ^
-      ; new-tab --title "TTS" powershell.exe -NoExit -ExecutionPolicy Bypass -File "%~dp0start_tts.ps1" ^
+      ; new-tab --title "Router-LLM" cmd.exe /q /d /k ""%~dp0start_router_llm.bat" --inline" ^
+      ; new-tab --title "Sub-LLM" cmd.exe /q /d /k ""%~dp0start_sub_llm.bat" --inline" ^
+      ; new-tab --title "TTS" cmd.exe /q /d /k ""%~dp0start_tts.bat" --inline" ^
       ; new-tab --title "Bot" powershell.exe -NoExit -ExecutionPolicy Bypass -File "%~dp0start_bot.ps1"
 )
 
