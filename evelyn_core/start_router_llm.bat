@@ -18,9 +18,9 @@ if not defined WT_READY (
     )
 )
 if not defined WT_READY (
-    start "Router-LLM" wsl.exe bash -lc "%WSL_CMD%"
+    start "Router-LLM" cmd.exe /k ""%~f0" --inline"
 ) else (
-    "%WT_EXE%" new-tab --title "Router-LLM" wsl.exe bash -lc "%WSL_CMD%"
+    "%WT_EXE%" new-tab --title "Router-LLM" cmd.exe /k ""%~f0" --inline"
 )
 
 endlocal

@@ -18,9 +18,9 @@ if not defined WT_READY (
     )
 )
 if not defined WT_READY (
-    start "Sub-LLM" wsl.exe bash -lc "%WSL_CMD%"
+    start "Sub-LLM" cmd.exe /k ""%~f0" --inline"
 ) else (
-    "%WT_EXE%" new-tab --title "Sub-LLM" wsl.exe bash -lc "%WSL_CMD%"
+    "%WT_EXE%" new-tab --title "Sub-LLM" cmd.exe /k ""%~f0" --inline"
 )
 
 endlocal
