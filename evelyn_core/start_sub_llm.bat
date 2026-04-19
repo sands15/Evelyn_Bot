@@ -30,7 +30,7 @@ endlocal
 exit /b 0
 
 :run_inline
-wsl.exe bash -lc "%WSL_CMD%" >nul 2>&1
+wsl.exe bash -lc "%WSL_CMD%"
 set "EXIT_CODE=%ERRORLEVEL%"
 endlocal & exit /b %EXIT_CODE%
 
