@@ -7,11 +7,20 @@ set "WSL_CMD=%VENV_ACT% && export CUDA_VISIBLE_DEVICES=%SUB_LLM_GPU% && if [ ! -
 
 if /I "%~1"=="--inline" goto :run_inline
 
-where wt >nul 2>nul
-if errorlevel 1 (
+set "WT_EXE=%LOCALAPPDATA%\Microsoft\WindowsApps\wt.exe"
+set "WT_READY="
+if exist "%WT_EXE%" set "WT_READY=1"
+if not defined WT_READY (
+    where.exe wt.exe >nul 2>nul
+    if not errorlevel 1 (
+        set "WT_EXE=wt.exe"
+        set "WT_READY=1"
+    )
+)
+if not defined WT_READY (
     start "Sub-LLM" wsl.exe bash -lc "%WSL_CMD%"
 ) else (
-    wt new-tab --title "Sub-LLM" wsl.exe bash -lc "%WSL_CMD%"
+    "%WT_EXE%" new-tab --title "Sub-LLM" wsl.exe bash -lc "%WSL_CMD%"
 )
 
 endlocal
