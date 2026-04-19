@@ -65,7 +65,41 @@ def normalize_voice_text(s: str) -> str:
 
 
 def normalized_wake_words() -> list[str]:
-    return [normalize_voice_text(w) for w in WAKE_WORDS if normalize_voice_text(w)]
+    seen: set[str] = set()
+    items: list[str] = []
+    for wake in WAKE_WORDS:
+        normalized = normalize_voice_text(wake)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        items.append(normalized)
+    items.sort(key=len, reverse=True)
+    return items
+
+
+def extract_leading_wake_alias(text: str) -> str | None:
+    text_n = normalize_voice_text(strip_leading_voice_fillers(text))
+    if not text_n:
+        return None
+    for wake in normalized_wake_words():
+        if text_n == wake or text_n.startswith(f"{wake} "):
+            return wake
+    return None
+
+
+def fuzzy_leading_wake_alias(text: str, *, min_ratio: float = 0.84) -> str | None:
+    text_n = normalize_voice_text(strip_leading_voice_fillers(text))
+    if not text_n:
+        return None
+    first_token = text_n.split()[0] if text_n.split() else text_n
+    best_alias: str | None = None
+    best_ratio = 0.0
+    for wake in normalized_wake_words():
+        ratio = SequenceMatcher(None, first_token, wake).ratio()
+        if ratio >= min_ratio and ratio > best_ratio:
+            best_alias = wake
+            best_ratio = ratio
+    return best_alias
 
 
 def contains_wake_word(text: str) -> bool:
@@ -88,24 +122,16 @@ def strip_leading_voice_fillers(text: str) -> str:
 
 
 def contains_leading_wake_word(text: str) -> bool:
-    """호환성을 위해 남겨둔 함수. 이제 wake word는 문장 어느 위치에서든 exact match만 허용한다."""
-    return contains_wake_word(text)
+    return extract_leading_wake_alias(text) is not None
 
 
 def strip_voice_wake_word(text: str) -> str:
     text_n = strip_leading_voice_fillers(text)
-
-    for wake_word in WAKE_WORDS:
-        ww = wake_word.strip()
-        if not ww:
-            continue
-
-        pattern_once = rf"(?:^|\s){re.escape(ww)}(?:\s|$)"
-        new_text = re.sub(pattern_once, " ", text_n, count=1)
-        if new_text != text_n:
-            return clean_text(new_text)
-
-    return clean_text(text_n)
+    alias = extract_leading_wake_alias(text_n)
+    if alias is None:
+        return clean_text(text_n)
+    pattern_once = rf"^{re.escape(alias)}(?:\s+|$)"
+    return clean_text(re.sub(pattern_once, " ", normalize_voice_text(text_n), count=1))
 
 
 def apply_stt_post_corrections(text: str, *, wake_detected: bool = False) -> str:
@@ -165,4 +191,23 @@ def looks_like_brief_filler_text(text: str) -> bool:
         "응", "응응",
         "음", "으음", "음음", "음음음",
         "흠", "흠흠",
+        "네", "예", "어어", "네네",
     }
+
+
+def looks_like_gibberish_probe(text: str) -> bool:
+    text_n = normalize_voice_text(strip_leading_voice_fillers(text))
+    if not text_n:
+        return True
+    compact = text_n.replace(" ", "")
+    if extract_leading_wake_alias(text_n) is not None:
+        return False
+    if looks_like_brief_filler_text(text_n):
+        return True
+    if looks_like_repetitive_noise_text(text_n):
+        return True
+    if len(compact) <= 2:
+        return True
+    if len(compact) <= 5 and fuzzy_leading_wake_alias(text_n) is None:
+        return True
+    return False

@@ -42,8 +42,11 @@ from evelyn_core.text import (
     clean_tts_text,
     contains_leading_wake_word,
     contains_wake_word,
+    extract_leading_wake_alias,
+    fuzzy_leading_wake_alias,
     is_similar,
     looks_like_brief_filler_text,
+    looks_like_gibberish_probe,
     looks_like_repetitive_noise_text,
     normalize_omnivoice_tags,
     normalize_voice_text,
@@ -598,6 +601,31 @@ def should_skip_full_stt_after_wake_probe(*, wake_detected: bool, wake_probe: st
     if looks_like_brief_filler_text(probe) and duration_sec <= VOICE_NO_WAKE_MAX_CONTINUE_SEC:
         return True
     if looks_like_repetitive_noise_text(probe):
+        return True
+    return False
+
+
+def should_require_confirm_exact_for_wake(debug_meta: dict | None) -> bool:
+    if not debug_meta:
+        return False
+    reasons = [str(reason) for reason in (debug_meta.get("reasons") or [])]
+    if any(
+        marker in reason
+        for reason in reasons
+        for marker in ("opus_fail", "plc", "fec", "front_burst_detected", "heavy_trim_ms", "burst_trim_ms")
+    ):
+        return True
+    if debug_meta.get("front_burst_detected"):
+        return True
+    if int(debug_meta.get("opus_fail") or 0) > 0:
+        return True
+    if int(debug_meta.get("plc_packets") or 0) > 0:
+        return True
+    if int(debug_meta.get("fec_packets") or 0) > 0:
+        return True
+    if float(debug_meta.get("trim_ms") or 0.0) >= 220.0:
+        return True
+    if float(debug_meta.get("burst_trim_ms") or 0.0) >= 140.0:
         return True
     return False
 
@@ -2710,7 +2738,7 @@ def choose_full_stt_candidate(primary_text: str, rescore_text: str, *, wake_prob
     }
 
 
-def detect_wake_word_sync(audio: np.ndarray, *, sampling_rate: int = TARGET_RATE) -> tuple[bool, str, str]:
+def detect_wake_word_sync(audio: np.ndarray, *, sampling_rate: int = TARGET_RATE) -> dict[str, str | bool | None]:
     wake_audio = slice_audio_window(audio, WAKE_AUDIO_SEC, sampling_rate=sampling_rate)
     wake_text = transcribe_audio16k_sync(
         wake_audio,
@@ -2719,21 +2747,70 @@ def detect_wake_word_sync(audio: np.ndarray, *, sampling_rate: int = TARGET_RATE
         stage="wake",
     )
 
-    stripped = strip_leading_voice_fillers(wake_text)
-    first_hit = contains_leading_wake_word(stripped)
+    probe_text = strip_leading_voice_fillers(wake_text)
+    probe_alias = extract_leading_wake_alias(probe_text)
+    probe_fuzzy_alias = fuzzy_leading_wake_alias(probe_text) if probe_alias is None else None
     confirm_text = ""
-    if first_hit:
-        confirm_audio = slice_audio_window(audio, WAKE_CONFIRM_AUDIO_SEC, sampling_rate=sampling_rate)
-        confirm_text = transcribe_audio16k_sync(
-            confirm_audio,
-            max_new_tokens=WAKE_CONFIRM_MAX_TOKENS,
-            sampling_rate=sampling_rate,
-            stage="wake-confirm",
-        )
-        confirm_hit = contains_leading_wake_word(strip_leading_voice_fillers(confirm_text))
-        return confirm_hit, wake_text, confirm_text
 
-    return False, wake_text, confirm_text
+    if probe_alias is None and looks_like_gibberish_probe(probe_text):
+        return {
+            "wake_detected": False,
+            "wake_probe_text": wake_text,
+            "wake_confirm_text": "",
+            "wake_match_mode": "rejected",
+            "wake_alias": None,
+            "wake_reject_reason": "gibberish_probe",
+        }
+
+    if probe_alias is None and probe_fuzzy_alias is None:
+        return {
+            "wake_detected": False,
+            "wake_probe_text": wake_text,
+            "wake_confirm_text": "",
+            "wake_match_mode": "rejected",
+            "wake_alias": None,
+            "wake_reject_reason": "probe_miss",
+        }
+
+    confirm_audio = slice_audio_window(audio, WAKE_CONFIRM_AUDIO_SEC, sampling_rate=sampling_rate)
+    confirm_text = transcribe_audio16k_sync(
+        confirm_audio,
+        max_new_tokens=WAKE_CONFIRM_MAX_TOKENS,
+        sampling_rate=sampling_rate,
+        stage="wake-confirm",
+    )
+    confirm_probe = strip_leading_voice_fillers(confirm_text)
+    confirm_alias = extract_leading_wake_alias(confirm_probe)
+
+    if probe_alias is not None and confirm_alias == probe_alias:
+        return {
+            "wake_detected": True,
+            "wake_probe_text": wake_text,
+            "wake_confirm_text": confirm_text,
+            "wake_match_mode": "exact",
+            "wake_alias": probe_alias,
+            "wake_reject_reason": None,
+        }
+
+    confirm_fuzzy_alias = fuzzy_leading_wake_alias(confirm_probe) if confirm_alias is None else None
+    if probe_alias is None and probe_fuzzy_alias is not None and confirm_fuzzy_alias == probe_fuzzy_alias:
+        return {
+            "wake_detected": True,
+            "wake_probe_text": wake_text,
+            "wake_confirm_text": confirm_text,
+            "wake_match_mode": "fuzzy",
+            "wake_alias": probe_fuzzy_alias,
+            "wake_reject_reason": None,
+        }
+
+    return {
+        "wake_detected": False,
+        "wake_probe_text": wake_text,
+        "wake_confirm_text": confirm_text,
+        "wake_match_mode": "rejected",
+        "wake_alias": probe_alias or probe_fuzzy_alias,
+        "wake_reject_reason": "confirm_miss",
+    }
 
 
 # =========================================================
@@ -3514,6 +3591,7 @@ async def _process_member_audio_impl(
         print(f"[UNSTABLE AUDIO CONTINUE] speaker={member.display_name} reasons={reasons}")
         log_voice_stage(metrics, "불안정 음성이지만 본문 STT 진행", extra=f"reasons={reasons}")
 
+    duration_sec = len(audio16k) / float(max(1, stt_sampling_rate))
     waveform_stats = compute_waveform_activity_stats(audio16k, sampling_rate=stt_sampling_rate)
     voiced_ms = float(waveform_stats.get("voiced_ms") or 0.0)
     longest_voiced_ms = float(waveform_stats.get("longest_voiced_ms") or 0.0)
@@ -3572,7 +3650,7 @@ async def _process_member_audio_impl(
 
     log_voice_stage(metrics, "웨이크 프로브 시작", extra=f"samples={audio_for_wake.size} sampling_rate={wake_sampling_rate}")
     try:
-        wake_detected, wake_probe_raw, wake_confirm_raw = await asyncio.to_thread(detect_wake_word_sync, audio_for_wake, sampling_rate=wake_sampling_rate)
+        wake_result = await asyncio.to_thread(detect_wake_word_sync, audio_for_wake, sampling_rate=wake_sampling_rate)
     except Exception as e:
         print(f"❌ [WAKE STT] {e}")
         register_drop_reason(metrics, "wake_probe_error", session_key=session_key, error=repr(e))
@@ -3580,21 +3658,44 @@ async def _process_member_audio_impl(
         log_voice_bottleneck_summary(metrics, label="voice_reply", extra="drop=wake_probe_error")
         return
 
-    wake_probe = apply_stt_post_corrections(wake_probe_raw, wake_detected=False)
-    wake_confirm = apply_stt_post_corrections(wake_confirm_raw, wake_detected=False) if wake_confirm_raw else ""
-    wake_detected = wake_detected or contains_leading_wake_word(strip_leading_voice_fillers(wake_probe))
-    if wake_detected and wake_confirm:
-        wake_detected = contains_leading_wake_word(strip_leading_voice_fillers(wake_confirm))
-        if wake_detected:
-            wake_probe = wake_confirm
+    wake_probe = apply_stt_post_corrections(str(wake_result.get("wake_probe_text") or ""), wake_detected=False)
+    wake_confirm = apply_stt_post_corrections(str(wake_result.get("wake_confirm_text") or ""), wake_detected=False)
+    wake_detected = bool(wake_result.get("wake_detected"))
+    wake_match_mode = str(wake_result.get("wake_match_mode") or ("exact" if wake_detected else "rejected"))
+    wake_alias = clean_text(str(wake_result.get("wake_alias") or "")) or None
+    wake_reject_reason = clean_text(str(wake_result.get("wake_reject_reason") or "")) or None
+
+    strict_confirm_required = should_require_confirm_exact_for_wake(debug_meta)
+    if strict_confirm_required and wake_match_mode != "exact":
+        wake_detected = False
+        wake_match_mode = "rejected"
+        wake_reject_reason = "unstable_audio"
+
     log_voice_stage(
         metrics,
         "웨이크 프로브 완료",
-        extra=f"wake_detected={wake_detected} wake_probe_text={wake_probe!r} wake_confirm_text={wake_confirm!r}",
+        extra=(
+            f"wake_detected={wake_detected} wake_match_mode={wake_match_mode} wake_alias={wake_alias!r} "
+            f"wake_probe_text={wake_probe!r} wake_confirm_text={wake_confirm!r} wake_reject_reason={wake_reject_reason!r}"
+        ),
         key="wake_done",
     )
 
     active_session = is_session_active_for_user(session_key, member.id)
+    if not active_session and not wake_detected:
+        reject_reason = wake_reject_reason or "confirm_miss"
+        register_drop_reason(
+            metrics,
+            reject_reason,
+            session_key=session_key,
+            wake_probe_text=wake_probe,
+            wake_confirm_text=wake_confirm,
+            wake_match_mode=wake_match_mode,
+            wake_alias=wake_alias,
+        )
+        log_voice_stage(metrics, "패시브 웨이크 거부", extra=f"wake_reject_reason={reject_reason} wake_match_mode={wake_match_mode}")
+        log_voice_bottleneck_summary(metrics, label="voice_reply", extra=f"drop={reject_reason}")
+        return
     env_noise_candidate = is_likely_environment_noise(audio_for_wake, sampling_rate=wake_sampling_rate)
     filler_candidate = looks_like_brief_filler_text(wake_probe)
     repetitive_noise_candidate = looks_like_repetitive_noise_text(wake_probe)
@@ -3708,8 +3809,31 @@ async def _process_member_audio_impl(
         log_voice_stage(metrics, "짧은 STT 무시", extra=f"text={text!r}")
         return
 
+    if not active_session:
+        final_wake_alias = extract_leading_wake_alias(text)
+        if final_wake_alias is None:
+            wake_detected = False
+            wake_match_mode = "rejected"
+            wake_reject_reason = "full_text_veto"
+            register_drop_reason(
+                metrics,
+                "full_text_veto",
+                session_key=session_key,
+                wake_probe_text=wake_probe,
+                wake_confirm_text=wake_confirm,
+                final_text=text,
+            )
+            save_voice_debug_audio(guild_id, speaker_name, pcm_bytes, audio16k, wake_probe=wake_probe, final_text=text, debug_meta=debug_meta, stt_meta=stt_meta)
+            log_voice_stage(metrics, "최종 텍스트 veto", extra=f"wake_reject_reason={wake_reject_reason} text={text!r}")
+            log_voice_bottleneck_summary(metrics, label="voice_reply", extra="drop=full_text_veto")
+            return
+        wake_alias = final_wake_alias
+
     save_voice_debug_audio(guild_id, speaker_name, pcm_bytes, audio16k, wake_probe=wake_probe, final_text=text, debug_meta=debug_meta, stt_meta=stt_meta)
-    print(f"🎤 [{member.display_name}] wake_detected={wake_detected} wake_probe_text={wake_probe!r} wake_confirm_text={wake_confirm!r} text={text}")
+    print(
+        f"🎤 [{member.display_name}] wake_detected={wake_detected} wake_match_mode={wake_match_mode} wake_alias={wake_alias!r} "
+        f"wake_probe_text={wake_probe!r} wake_confirm_text={wake_confirm!r} wake_reject_reason={wake_reject_reason!r} text={text}"
+    )
 
     ok, reason = should_reply_to_voice(
         guild_id,
