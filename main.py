@@ -439,12 +439,13 @@ def register_drop_reason(metrics: dict | None, reason: str, **extra) -> None:
         return
     meta = metrics.setdefault("meta", {})
     meta["drop_reason"] = reason
+    extra_session_key = extra.pop("session_key", None)
     log_turn_event(
         "turn_drop",
         turn_id=meta.get("turn_id"),
         segment_id=meta.get("segment_id"),
         chunk_index=meta.get("chunk_index"),
-        session_key=meta.get("session_key"),
+        session_key=extra_session_key if extra_session_key is not None else meta.get("session_key"),
         reason=reason,
         **extra,
     )
@@ -2649,6 +2650,7 @@ def transcribe_audio16k_sync(audio16k: np.ndarray, max_new_tokens: int = 256, *,
         whisper_audio,
         sampling_rate=TARGET_RATE,
         return_tensors="pt",
+        return_attention_mask=True,
     )
     moved = {}
     for k, v in inputs.items():
@@ -2665,6 +2667,8 @@ def transcribe_audio16k_sync(audio16k: np.ndarray, max_new_tokens: int = 256, *,
         "num_beams": beam_size,
         "do_sample": False,
     }
+    if "attention_mask" in moved and moved["attention_mask"] is not None:
+        generate_kwargs["attention_mask"] = moved["attention_mask"]
 
     if STT_FORCE_LANGUAGE and hasattr(processor, "get_decoder_prompt_ids"):
         decoder_prompt_ids = processor.get_decoder_prompt_ids(
