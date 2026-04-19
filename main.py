@@ -64,9 +64,9 @@ intents.voice_states = True
 intents.members = True
 
 guild_prefix_cache: dict[int, str] = {}
-guild_histories: dict[int, list[dict]] = {}
-last_text_channel_ids: dict[int, int] = {}
-background_search_tasks: dict[int, asyncio.Task] = {}
+session_histories: dict[str, list[dict]] = {}
+session_followup_targets: dict[str, dict[str, int]] = {}
+background_search_tasks: dict[str, asyncio.Task] = {}
 
 
 def normalize_command_prefix(prefix: str | None) -> str:
@@ -111,7 +111,7 @@ async def resolve_command_prefix(_bot, message: discord.Message):
 
 bot = commands.Bot(command_prefix=resolve_command_prefix, intents=intents)
 
-guild_locks: dict[int, asyncio.Lock] = {}
+session_locks: dict[str, asyncio.Lock] = {}
 tts_lock = asyncio.Lock()
 voice_debug_counts: dict[int, int] = {}
 
@@ -136,27 +136,62 @@ def new_conversation_history() -> list[dict]:
     return [{"role": "system", "content": SYSTEM_PROMPT}]
 
 
-def get_conversation_history(guild_id: int | None = None) -> list[dict]:
+def runtime_session_key(*, session_key: str | None = None, guild_id: int | None = None) -> str | None:
+    if session_key:
+        return session_key
     if guild_id is None:
+        return None
+    return f"guild:{guild_id}:default"
+
+
+def make_text_session_key(guild_id: int, channel_id: int) -> str:
+    return f"guild:{guild_id}:text:{channel_id}"
+
+
+def make_voice_session_key(guild_id: int, voice_channel_id: int | None) -> str:
+    channel_part = voice_channel_id if voice_channel_id is not None else "none"
+    return f"guild:{guild_id}:voice:{channel_part}"
+
+
+def remember_session_followup_target(session_key: str, *, channel_id: int | None = None) -> None:
+    if channel_id is None:
+        return
+    session_followup_targets[session_key] = {"channel_id": channel_id}
+
+
+def get_conversation_history(*, session_key: str | None = None, guild_id: int | None = None) -> list[dict]:
+    resolved = runtime_session_key(session_key=session_key, guild_id=guild_id)
+    if resolved is None:
         return new_conversation_history()
-    return guild_histories.setdefault(guild_id, new_conversation_history())
+    return session_histories.setdefault(resolved, new_conversation_history())
 
 
-def trim_history(guild_id: int | None = None) -> None:
-    history = get_conversation_history(guild_id)
+def trim_history(*, session_key: str | None = None, guild_id: int | None = None) -> None:
+    history = get_conversation_history(session_key=session_key, guild_id=guild_id)
     if len(history) > 1 + MAX_HISTORY_ITEMS:
         del history[1:-MAX_HISTORY_ITEMS]
 
 
-def append_history(guild_id: int | None, user_text: str, answer: str) -> None:
-    history = get_conversation_history(guild_id)
+def append_history(session_key: str | None, user_text: str, answer: str, *, guild_id: int | None = None) -> None:
+    history = get_conversation_history(session_key=session_key, guild_id=guild_id)
     history.append({"role": "user", "content": clean_text(user_text)})
     history.append({"role": "assistant", "content": clean_text(answer)})
-    trim_history(guild_id)
+    trim_history(session_key=session_key, guild_id=guild_id)
 
 
 def reset_guild_runtime_state(guild_id: int) -> None:
-    guild_histories.pop(guild_id, None)
+    prefix = f"guild:{guild_id}:"
+    for key in [key for key in session_histories if key.startswith(prefix)]:
+        session_histories.pop(key, None)
+    for key in [key for key in session_followup_targets if key.startswith(prefix)]:
+        session_followup_targets.pop(key, None)
+    for key in [key for key in session_locks if key.startswith(prefix)]:
+        session_locks.pop(key, None)
+    for key, task in list(background_search_tasks.items()):
+        if key.startswith(prefix):
+            if task is not None and not task.done():
+                task.cancel()
+            background_search_tasks.pop(key, None)
     last_voice_reply_at.pop(guild_id, None)
     last_voice_text.pop(guild_id, None)
     last_bot_audio_end_at.pop(guild_id, None)
@@ -419,6 +454,7 @@ async def prepare_llm_messages(
     user_text: str,
     *,
     guild_id: int | None = None,
+    session_key: str | None = None,
     source: str = "text",
     debug_text: str | None = None,
     metrics: dict | None = None,
@@ -427,7 +463,7 @@ async def prepare_llm_messages(
     route, route_meta = await classify_llm_route_async(user_text, guild_id=guild_id, source=source)
     if metrics is not None:
         metrics.setdefault("marks", {})["route_ready"] = (time.monotonic() - route_started_at) * 1000.0
-    messages = list(get_conversation_history(guild_id))
+    messages = list(get_conversation_history(session_key=session_key, guild_id=guild_id))
     cognitive_state: dict | None = None
 
     cognitive_started_at = time.monotonic()
@@ -1225,15 +1261,26 @@ async def answer_from_search_results(query: str, results: list[dict]) -> str:
     return clean_text(f"찾아보니까 {first.get('snippet', '')} ({first.get('url', '')})")
 
 
-async def deliver_proactive_followup(guild_id: int, query: str, answer: str, *, channel_id: int | None, source: str) -> None:
+async def deliver_proactive_followup(
+    guild_id: int,
+    query: str,
+    answer: str,
+    *,
+    session_key: str | None,
+    channel_id: int | None,
+    source: str,
+) -> None:
     plain_answer = strip_omnivoice_tags(answer) or answer
     guild = bot.get_guild(guild_id)
+    target_channel_id = channel_id
+    if target_channel_id is None and session_key is not None:
+        target_channel_id = session_followup_targets.get(session_key, {}).get("channel_id")
 
-    if channel_id is not None:
-        channel = bot.get_channel(channel_id)
+    if target_channel_id is not None:
+        channel = bot.get_channel(target_channel_id)
         if channel is None:
             try:
-                channel = await bot.fetch_channel(channel_id)
+                channel = await bot.fetch_channel(target_channel_id)
             except Exception:
                 channel = None
         if channel is not None and hasattr(channel, "send"):
@@ -1246,7 +1293,7 @@ async def deliver_proactive_followup(guild_id: int, query: str, answer: str, *, 
         except Exception as e:
             print(f"[SEARCH] proactive TTS 실패: {e!r}")
 
-    append_history(guild_id, query, plain_answer)
+    append_history(session_key, query, plain_answer, guild_id=guild_id)
     schedule_memory_update(
         guild_id,
         query,
@@ -1257,7 +1304,14 @@ async def deliver_proactive_followup(guild_id: int, query: str, answer: str, *, 
     )
 
 
-async def run_search_followup(guild_id: int, query: str, *, channel_id: int | None, source: str) -> None:
+async def run_search_followup(
+    guild_id: int,
+    query: str,
+    *,
+    session_key: str | None,
+    channel_id: int | None,
+    source: str,
+) -> None:
     try:
         results = await search_duckduckgo(query)
         answer = await answer_from_search_results(query, results)
@@ -1278,18 +1332,34 @@ async def run_search_followup(guild_id: int, query: str, *, channel_id: int | No
                 "updated_at": int(time.time()),
             },
         )
-        await deliver_proactive_followup(guild_id, query, answer, channel_id=channel_id, source=source)
+        await deliver_proactive_followup(
+            guild_id,
+            query,
+            answer,
+            session_key=session_key,
+            channel_id=channel_id,
+            source=source,
+        )
     except asyncio.CancelledError:
         raise
     except Exception as e:
         print(f"[SEARCH] follow-up 실패 guild={guild_id} query={query!r} err={e!r}")
     finally:
-        task = background_search_tasks.get(guild_id)
-        if task is asyncio.current_task():
-            background_search_tasks.pop(guild_id, None)
+        task_key = runtime_session_key(session_key=session_key, guild_id=guild_id)
+        task = background_search_tasks.get(task_key) if task_key is not None else None
+        if task is asyncio.current_task() and task_key is not None:
+            background_search_tasks.pop(task_key, None)
 
 
-def schedule_search_followup(guild_id: int, user_text: str, answer: str, *, channel_id: int | None, source: str) -> None:
+def schedule_search_followup(
+    guild_id: int,
+    session_key: str | None,
+    user_text: str,
+    answer: str,
+    *,
+    channel_id: int | None,
+    source: str,
+) -> None:
     if not guild_id or not answer_promises_search(answer):
         return
 
@@ -1297,13 +1367,20 @@ def schedule_search_followup(guild_id: int, user_text: str, answer: str, *, chan
     if len(query) < 2:
         return
 
-    existing = background_search_tasks.get(guild_id)
+    task_key = runtime_session_key(session_key=session_key, guild_id=guild_id)
+    if task_key is None:
+        return
+
+    if channel_id is not None:
+        remember_session_followup_target(task_key, channel_id=channel_id)
+
+    existing = background_search_tasks.get(task_key)
     if existing is not None and not existing.done():
         existing.cancel()
 
-    print(f"[SEARCH] scheduled guild={guild_id} query={query!r} source={source}")
-    background_search_tasks[guild_id] = asyncio.create_task(
-        run_search_followup(guild_id, query, channel_id=channel_id, source=source)
+    print(f"[SEARCH] scheduled guild={guild_id} session={task_key!r} query={query!r} source={source}")
+    background_search_tasks[task_key] = asyncio.create_task(
+        run_search_followup(guild_id, query, session_key=task_key, channel_id=channel_id, source=source)
     )
 
 
@@ -2005,12 +2082,14 @@ async def ask_llm_once(
     user_text: str,
     guild_id: int | None = None,
     *,
+    session_key: str | None = None,
     source: str = "text",
     debug_text: str | None = None,
 ) -> str:
     messages, cognitive_state, _route = await prepare_llm_messages(
         user_text,
         guild_id=guild_id,
+        session_key=session_key,
         source=source,
         debug_text=debug_text,
     )
@@ -2125,6 +2204,7 @@ async def ask_llm_streaming(
     on_sentence: Callable[[str], Awaitable[None]] | None = None,
     on_first_chunk: Callable[[], None] | None = None,
     *,
+    session_key: str | None = None,
     source: str = "text",
     debug_text: str | None = None,
     metrics: dict | None = None,
@@ -2132,6 +2212,7 @@ async def ask_llm_streaming(
     messages, cognitive_state, _route = await prepare_llm_messages(
         user_text,
         guild_id=guild_id,
+        session_key=session_key,
         source=source,
         debug_text=debug_text,
         metrics=metrics,
@@ -2174,7 +2255,7 @@ async def ask_llm_streaming(
                 answer = sanitize_model_output(msg.get("content", ""))
             if not answer:
                 print("[LLM STREAM] json 응답 본문 비어 있음, non-stream 재시도")
-                answer = await ask_llm_once(user_text, guild_id=guild_id, source=source, debug_text=debug_text)
+                answer = await ask_llm_once(user_text, guild_id=guild_id, session_key=session_key, source=source, debug_text=debug_text)
             if on_first_chunk is not None:
                 on_first_chunk()
             if on_sentence is not None:
@@ -2225,7 +2306,7 @@ async def ask_llm_streaming(
         print(
             f"[LLM STREAM] stream 본문 비어 있음, non-stream 재시도 | raw_len={len(''.join(raw_parts))} reasoning_len={len(''.join(reasoning_parts))} emitted_any={emitted_any}"
         )
-        answer = await ask_llm_once(user_text, guild_id=guild_id, source=source, debug_text=debug_text)
+        answer = await ask_llm_once(user_text, guild_id=guild_id, session_key=session_key, source=source, debug_text=debug_text)
 
     if on_sentence is not None:
         ready_chunks, sentence_buffer = split_tts_sentences(sentence_buffer, force=True)
@@ -2248,6 +2329,7 @@ async def ask_llm_and_speak_streaming(
     guild_id: int | None = None,
     on_final_answer: Callable[[str], Awaitable[None]] | None = None,
     *,
+    session_key: str | None = None,
     source: str = "voice",
     debug_text: str | None = None,
     metrics: dict | None = None,
@@ -2288,6 +2370,7 @@ async def ask_llm_and_speak_streaming(
             guild_id=guild_id,
             on_sentence=enqueue_sentence,
             on_first_chunk=lambda: log_voice_latency(metrics, "llm_first_chunk_logged", "LLM 첫 chunk 시간"),
+            session_key=session_key,
             source=source,
             debug_text=debug_text,
             metrics=metrics,
@@ -2313,6 +2396,49 @@ async def ask_llm_and_speak_streaming(
 
     log_voice_bottleneck_summary(metrics, label="voice_reply", extra=f"source={source} chars={len(answer)}")
     return answer
+
+
+async def stream_text_reply(
+    channel: discord.abc.Messageable,
+    user_text: str,
+    *,
+    guild_id: int,
+    session_key: str,
+    source: str = "text",
+    debug_text: str | None = None,
+) -> tuple[str, discord.Message | None]:
+    streamed_message: discord.Message | None = None
+    rendered_text = ""
+    streamed_parts: list[str] = []
+
+    async def on_sentence(sentence: str) -> None:
+        nonlocal streamed_message, rendered_text
+        if not sentence:
+            return
+        streamed_parts.append(sentence)
+        candidate = visible_text("".join(streamed_parts)).strip()
+        if not candidate or candidate == rendered_text:
+            return
+        if streamed_message is None:
+            streamed_message = await channel.send(candidate)
+        else:
+            await streamed_message.edit(content=candidate)
+        rendered_text = candidate
+
+    answer = await ask_llm_streaming(
+        user_text,
+        guild_id=guild_id,
+        session_key=session_key,
+        on_sentence=on_sentence,
+        source=source,
+        debug_text=debug_text,
+    )
+    final_text = visible_text(answer).strip()
+    if streamed_message is None:
+        streamed_message = await channel.send(final_text or fallback_answer_for(user_text))
+    elif final_text and final_text != rendered_text:
+        await streamed_message.edit(content=final_text)
+    return answer, streamed_message
 
 
 # =========================================================
@@ -2508,14 +2634,16 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes, 
     raw_user_text = strip_voice_wake_word(text)
     prompt_user_text = raw_user_text or "사용자가 너를 이름만 불렀다. 아주 짧고 자연스럽게 반응해라."
     history_user_text = raw_user_text or text
-    lock = guild_locks.setdefault(guild_id, asyncio.Lock())
+    vc = guild.voice_client
+    session_key = make_voice_session_key(guild_id, getattr(getattr(vc, "channel", None), "id", None))
+    lock = session_locks.setdefault(session_key, asyncio.Lock())
 
     if lock.locked():
-        print(f"[VOICE WAIT] guild={guild_id} speaker={member.display_name} text={history_user_text!r}")
-        log_voice_stage(metrics, "길드 락 대기", extra=f"guild={guild_id}")
+        print(f"[VOICE WAIT] session={session_key} speaker={member.display_name} text={history_user_text!r}")
+        log_voice_stage(metrics, "세션 락 대기", extra=f"session={session_key}")
 
     async with lock:
-        log_voice_stage(metrics, "길드 락 획득", extra=f"guild={guild_id}")
+        log_voice_stage(metrics, "세션 락 획득", extra=f"session={session_key}")
         vc = guild.voice_client
         if vc is None:
             return
@@ -2529,6 +2657,7 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes, 
                 prompt_user_text,
                 guild_id=guild_id,
                 on_final_answer=on_final_answer,
+                session_key=session_key,
                 source="voice",
                 debug_text=history_user_text,
                 metrics=metrics,
@@ -2547,7 +2676,7 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes, 
         if not plain_answer:
             plain_answer = answer
 
-        append_history(guild_id, history_user_text, plain_answer)
+        append_history(session_key, history_user_text, plain_answer, guild_id=guild_id)
         schedule_memory_update(
             guild_id,
             history_user_text,
@@ -2558,9 +2687,10 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes, 
         )
         schedule_search_followup(
             guild_id,
+            session_key,
             history_user_text,
             plain_answer,
-            channel_id=last_text_channel_ids.get(guild_id),
+            channel_id=None,
             source="search-followup-voice",
         )
         log_voice_stage(metrics, "process_member_audio 완료", extra=f"speaker={member.display_name}")
@@ -2595,7 +2725,8 @@ async def on_message(message: discord.Message):
         await bot.process_commands(message)
         return
 
-    last_text_channel_ids[message.guild.id] = message.channel.id
+    session_key = make_text_session_key(message.guild.id, message.channel.id)
+    remember_session_followup_target(session_key, channel_id=message.channel.id)
 
     is_wake_word = contains_wake_word(message.content)
     is_reply = False
@@ -2616,9 +2747,9 @@ async def on_message(message: discord.Message):
     if not user_text:
         user_text = "부르셨나요?"
 
-    get_conversation_history(message.guild.id)
+    get_conversation_history(session_key=session_key, guild_id=message.guild.id)
 
-    lock = guild_locks.setdefault(message.guild.id, asyncio.Lock())
+    lock = session_locks.setdefault(session_key, asyncio.Lock())
 
     if lock.locked():
         await message.channel.send("⏳ 지금 다른 응답을 처리 중이야. 잠깐만.")
@@ -2632,14 +2763,19 @@ async def on_message(message: discord.Message):
                 if AUTO_JOIN_VOICE:
                     vc = await ensure_voice_client(message)
 
-                answer = await ask_llm_once(user_text, guild_id=message.guild.id, source="text", debug_text=user_text)
+                answer, _sent_message = await stream_text_reply(
+                    message.channel,
+                    user_text,
+                    guild_id=message.guild.id,
+                    session_key=session_key,
+                    source="text",
+                    debug_text=user_text,
+                )
                 plain_answer = strip_omnivoice_tags(answer)
                 if not plain_answer:
                     plain_answer = answer
 
-                await message.channel.send(visible_text(answer))
-
-            append_history(message.guild.id, user_text, plain_answer)
+            append_history(session_key, user_text, plain_answer, guild_id=message.guild.id)
             schedule_memory_update(
                 message.guild.id,
                 user_text,
@@ -2650,6 +2786,7 @@ async def on_message(message: discord.Message):
             )
             schedule_search_followup(
                 message.guild.id,
+                session_key,
                 user_text,
                 plain_answer,
                 channel_id=message.channel.id,
