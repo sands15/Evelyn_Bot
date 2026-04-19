@@ -183,6 +183,12 @@ WAKE_SHORT_TEXT_KEEP_LEN = int(os.getenv("WAKE_SHORT_TEXT_KEEP_LEN", "2"))
 TTS_EARLY_CHUNK_LEN = int(os.getenv("TTS_EARLY_CHUNK_LEN", "14"))
 # 너무 짧아도 강제로 early cut을 허용할 최소 길이.
 TTS_EARLY_CUT_MIN = int(os.getenv("TTS_EARLY_CUT_MIN", "6"))
+# 첫 청크 이후 streaming TTS가 최소한 이 길이는 넘겨야 잘게 쪼개지지 않는다.
+TTS_MIN_CHUNK_LEN = int(os.getenv("TTS_MIN_CHUNK_LEN", "14"))
+# 첫 청크에서 이런 짧은 필러/앞머리는 단독 청크로 보내지 않고 다음 내용과 합친다.
+TTS_SHORT_LEAD_IN_MAX_LEN = int(os.getenv("TTS_SHORT_LEAD_IN_MAX_LEN", "6"))
+# 재생 중 미리 합성해 둘 다음 청크 수.
+TTS_PREFETCH_CHUNKS = int(os.getenv("TTS_PREFETCH_CHUNKS", "2"))
 # full voice STT 한 번의 최대 토큰 수.
 VOICE_STT_MAX_NEW_TOKENS = int(os.getenv("VOICE_STT_MAX_NEW_TOKENS", "160"))
 # 메인 LLM 한 번의 최대 응답 토큰 수.

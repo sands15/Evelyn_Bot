@@ -1694,7 +1694,32 @@ def schedule_memory_update(
     )
 
 
-def split_tts_sentences(buffer: str, *, force: bool = False) -> tuple[list[str], str]:
+def _should_defer_first_tts_chunk(text: str) -> bool:
+    compact = clean_text(text).replace(" ", "")
+    if not compact or len(compact) > TTS_SHORT_LEAD_IN_MAX_LEN:
+        return False
+    if not looks_like_brief_filler_text(text):
+        return False
+    return compact.endswith(("...", "…", ",", "，", ":", "：", ";", "；"))
+
+
+def _find_streaming_tts_cut(working: str, *, min_len: int) -> int:
+    best = -1
+    for idx, ch in enumerate(working):
+        if ch not in ",，:：;；":
+            continue
+        candidate = clean_tts_text(working[:idx])
+        if len(clean_text(candidate).replace(" ", "")) >= min_len:
+            best = idx
+    return best
+
+
+def split_tts_sentences(
+    buffer: str,
+    *,
+    force: bool = False,
+    emitted_chunks: int = 0,
+) -> tuple[list[str], str]:
     working = buffer or ""
     chunks: list[str] = []
 
@@ -1704,19 +1729,34 @@ def split_tts_sentences(buffer: str, *, force: bool = False) -> tuple[list[str],
             break
 
         sentence = clean_tts_text(match.group(1))
+        rest = working[match.end():].lstrip()
+        emitted_so_far = emitted_chunks + len(chunks)
+
+        if sentence and emitted_so_far == 0 and not force and _should_defer_first_tts_chunk(sentence):
+            next_match = re.search(r"(.+?[.!?…。]+)(?:\s+|$)", rest, flags=re.DOTALL)
+            if next_match:
+                merged = clean_tts_text(f"{sentence} {rest[:next_match.end()]}")
+                if merged:
+                    chunks.append(merged)
+                working = rest[next_match.end():].lstrip()
+                continue
+            break
+
         if sentence:
             chunks.append(sentence)
-        working = working[match.end():].lstrip()
+        working = rest
 
     if not force:
         compact = clean_text(working)
-        if len(compact) >= TTS_EARLY_CHUNK_LEN:
-            cut = max(working.rfind(","), working.rfind("，"))
-            if cut >= TTS_EARLY_CUT_MIN:
+        emitted_so_far = emitted_chunks + len(chunks)
+        min_len = TTS_EARLY_CHUNK_LEN if emitted_so_far == 0 else TTS_MIN_CHUNK_LEN
+        if len(compact.replace(" ", "")) >= min_len:
+            cut = _find_streaming_tts_cut(working, min_len=max(TTS_EARLY_CUT_MIN, min_len))
+            if cut >= 0:
                 sentence = clean_tts_text(working[:cut])
-                if sentence:
+                if sentence and not (emitted_so_far == 0 and _should_defer_first_tts_chunk(sentence)):
                     chunks.append(sentence)
-                working = working[cut + 1 :].lstrip()
+                    working = working[cut + 1 :].lstrip()
         return chunks, working
 
     tail = clean_tts_text(working)
@@ -2979,6 +3019,52 @@ async def speak_answer(
                 last_bot_audio_end_at[guild_id] = time.monotonic()
 
 
+async def _prefetch_tts_sources(
+    sentence_queue: "asyncio.Queue[str | None]",
+    prepared_queue: "asyncio.Queue[object]",
+    *,
+    metrics: dict | None = None,
+    turn_id: str | None = None,
+    session_key: str | None = None,
+) -> None:
+    chunk_index = 0
+
+    try:
+        while True:
+            sentence = await sentence_queue.get()
+            if sentence is None:
+                await prepared_queue.put(None)
+                return
+
+            sentence = clean_tts_text(sentence)
+            if not sentence:
+                continue
+
+            chunk_index += 1
+            source = await create_omnivoice_source(
+                sentence,
+                turn_id=turn_id,
+                chunk_index=chunk_index,
+                session_key=session_key,
+                on_request_start=lambda: log_voice_latency(metrics, "tts_request_logged", "TTS 요청 시작 시간"),
+                on_response_headers=lambda: log_voice_latency(metrics, "tts_response_headers_logged", "TTS 응답 헤더 도착 시간"),
+                on_first_byte=lambda: log_voice_latency(metrics, "tts_first_byte_logged", "TTS 첫 바이트 도착 시간"),
+                on_first_frame=lambda: log_voice_latency(metrics, "tts_first_frame_logged", "TTS 첫 프레임 공급 시간"),
+                on_first_packet_sent=lambda ci=chunk_index: (
+                    log_voice_latency(metrics, "first_packet_sent_logged", "첫 패킷 송신 시간"),
+                    log_turn_event(
+                        "first_packet_sent",
+                        turn_id=turn_id,
+                        chunk_index=ci,
+                        session_key=session_key,
+                    )
+                ),
+            )
+            await prepared_queue.put((chunk_index, source))
+    except Exception as exc:
+        await prepared_queue.put(exc)
+
+
 async def stream_tts_sentences(
     vc: discord.VoiceClient,
     sentence_queue: "asyncio.Queue[str | None]",
@@ -2991,44 +3077,38 @@ async def stream_tts_sentences(
     did_speak = False
 
     async with tts_lock:
+        prepared_queue: asyncio.Queue[object] = asyncio.Queue(maxsize=max(1, TTS_PREFETCH_CHUNKS))
+        prefetch_task = asyncio.create_task(
+            _prefetch_tts_sources(
+                sentence_queue,
+                prepared_queue,
+                metrics=metrics,
+                turn_id=turn_id,
+                session_key=session_key,
+            )
+        )
         try:
-            chunk_index = 0
             while True:
-                sentence = await sentence_queue.get()
-                if sentence is None:
+                item = await prepared_queue.get()
+                if item is None:
                     break
+                if isinstance(item, Exception):
+                    raise item
 
-                sentence = clean_tts_text(sentence)
-                if not sentence:
-                    continue
-
-                chunk_index += 1
+                _, source = item
 
                 if guild_id is not None and not did_speak:
                     bot_speaking_guilds.add(guild_id)
 
                 did_speak = True
-                source = await create_omnivoice_source(
-                    sentence,
-                    turn_id=turn_id,
-                    chunk_index=chunk_index,
-                    session_key=session_key,
-                    on_request_start=lambda: log_voice_latency(metrics, "tts_request_logged", "TTS 요청 시작 시간"),
-                    on_response_headers=lambda: log_voice_latency(metrics, "tts_response_headers_logged", "TTS 응답 헤더 도착 시간"),
-                    on_first_byte=lambda: log_voice_latency(metrics, "tts_first_byte_logged", "TTS 첫 바이트 도착 시간"),
-                    on_first_frame=lambda: log_voice_latency(metrics, "tts_first_frame_logged", "TTS 첫 프레임 공급 시간"),
-                    on_first_packet_sent=lambda ci=chunk_index: (
-                        log_voice_latency(metrics, "first_packet_sent_logged", "첫 패킷 송신 시간"),
-                        log_turn_event(
-                            "first_packet_sent",
-                            turn_id=turn_id,
-                            chunk_index=ci,
-                            session_key=session_key,
-                        )
-                    ),
-                )
                 await play_audio_source(vc, source)
         finally:
+            if not prefetch_task.done():
+                prefetch_task.cancel()
+                try:
+                    await prefetch_task
+                except asyncio.CancelledError:
+                    pass
             if guild_id is not None:
                 bot_speaking_guilds.discard(guild_id)
                 if did_speak:
@@ -3249,6 +3329,7 @@ async def ask_llm_streaming(
     reasoning_parts: list[str] = []
     sentence_buffer = ""
     emitted_any = False
+    emitted_chunk_count = 0
     llm_started_at = time.monotonic()
 
     async with session.post(LLM_SERVER_URL, json=payload, timeout=timeout) as resp:
@@ -3316,9 +3397,13 @@ async def ask_llm_streaming(
             sentence_buffer += delta_text
 
             if on_sentence is not None:
-                ready_chunks, sentence_buffer = split_tts_sentences(sentence_buffer)
+                ready_chunks, sentence_buffer = split_tts_sentences(
+                    sentence_buffer,
+                    emitted_chunks=emitted_chunk_count,
+                )
                 for chunk in ready_chunks:
                     emitted_any = True
+                    emitted_chunk_count += 1
                     await on_sentence(chunk)
 
     answer = sanitize_model_output("".join(raw_parts))
@@ -3338,11 +3423,16 @@ async def ask_llm_streaming(
         )
 
     if on_sentence is not None:
-        ready_chunks, sentence_buffer = split_tts_sentences(sentence_buffer, force=True)
+        ready_chunks, sentence_buffer = split_tts_sentences(
+            sentence_buffer,
+            force=True,
+            emitted_chunks=emitted_chunk_count,
+        )
         if not ready_chunks and answer and not emitted_any:
             ready_chunks = [answer]
         for chunk in ready_chunks:
             emitted_any = True
+            emitted_chunk_count += 1
             await on_sentence(chunk)
 
     if metrics is not None:
