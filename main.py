@@ -2652,29 +2652,23 @@ def transcribe_audio16k_sync(audio16k: np.ndarray, max_new_tokens: int = 256, *,
         beam_size = max(1, STT_WHISPER_WAKE_BEAM_SIZE)
 
     language = normalize_stt_language() if STT_FORCE_LANGUAGE else None
-    inputs = processor(
+    batch = processor(
         whisper_audio,
         sampling_rate=TARGET_RATE,
         return_tensors="pt",
         return_attention_mask=True,
     )
-    moved = {}
-    for k, v in inputs.items():
-        if torch.is_tensor(v):
-            if torch.is_floating_point(v):
-                moved[k] = v.to(model.device, dtype=model.dtype)
-            else:
-                moved[k] = v.to(model.device)
-        else:
-            moved[k] = v
+    input_features = batch["input_features"].to(model.device, dtype=model.dtype)
+    attention_mask = batch.get("attention_mask")
+    if attention_mask is not None:
+        attention_mask = attention_mask.to(model.device)
 
     generate_kwargs = {
         "max_new_tokens": max_new_tokens,
         "num_beams": beam_size,
         "do_sample": False,
     }
-    if "attention_mask" in moved and moved["attention_mask"] is not None:
-        generate_kwargs["attention_mask"] = moved["attention_mask"]
+    generate_kwargs.pop("attention_mask", None)
 
     if STT_FORCE_LANGUAGE and hasattr(processor, "get_decoder_prompt_ids"):
         decoder_prompt_ids = processor.get_decoder_prompt_ids(
@@ -2685,7 +2679,11 @@ def transcribe_audio16k_sync(audio16k: np.ndarray, max_new_tokens: int = 256, *,
             generate_kwargs["forced_decoder_ids"] = decoder_prompt_ids
 
     with torch.inference_mode():
-        outputs = model.generate(**moved, **generate_kwargs)
+        outputs = model.generate(
+            input_features=input_features,
+            attention_mask=attention_mask,
+            **generate_kwargs,
+        )
 
     text = processor.batch_decode(outputs, skip_special_tokens=True)[0]
     return clean_text(text)
