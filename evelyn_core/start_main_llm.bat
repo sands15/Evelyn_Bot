@@ -20,16 +20,18 @@ if not defined WT_READY (
         set "WT_READY=1"
     )
 )
+set "TERM_CMD=title Main-LLM && wsl.exe bash -lc \"%WSL_CMD%\""
 if not defined WT_READY (
-    start "Main-LLM" cmd.exe /q /d /c ""%~f0" --inline"
+    start "Main-LLM" cmd.exe /q /d /c "%TERM_CMD%"
 ) else (
-    "%WT_EXE%" new-tab --title "Main-LLM" cmd.exe /q /d /c ""%~f0" --inline"
+    "%WT_EXE%" new-tab --title "Main-LLM" cmd.exe /q /d /c "%TERM_CMD%"
 )
 
 endlocal
 exit /b 0
 
 :run_inline
+title Main-LLM
 wsl.exe bash -lc "%WSL_CMD%"
 set "EXIT_CODE=%ERRORLEVEL%"
 endlocal & exit /b %EXIT_CODE%

@@ -20,16 +20,18 @@ if not defined WT_READY (
         set "WT_READY=1"
     )
 )
+set "TERM_CMD=title Router-LLM && wsl.exe bash -lc \"%WSL_CMD%\""
 if not defined WT_READY (
-    start "Router-LLM" cmd.exe /q /d /k ""%~f0" --inline"
+    start "Router-LLM" cmd.exe /q /d /k "%TERM_CMD%"
 ) else (
-    "%WT_EXE%" new-tab --title "Router-LLM" cmd.exe /q /d /k ""%~f0" --inline"
+    "%WT_EXE%" new-tab --title "Router-LLM" cmd.exe /q /d /k "%TERM_CMD%"
 )
 
 endlocal
 exit /b 0
 
 :run_inline
+title Router-LLM
 wsl.exe bash -lc "%WSL_CMD%"
 set "EXIT_CODE=%ERRORLEVEL%"
 endlocal & exit /b %EXIT_CODE%
