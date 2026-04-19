@@ -233,6 +233,14 @@ ACTIVE_CONVERSATION_VOICE_QUESTION_SEC = float(os.getenv("ACTIVE_CONVERSATION_VO
 ACTIVE_CONVERSATION_AWAITING_REPLY_SEC = float(os.getenv("ACTIVE_CONVERSATION_AWAITING_REPLY_SEC", "180"))
 # wake 미검출 상태에서 짧은 환경음 후보를 full STT로 계속 넘길 최대 길이(초).
 VOICE_NO_WAKE_MAX_CONTINUE_SEC = float(os.getenv("VOICE_NO_WAKE_MAX_CONTINUE_SEC", "2.4"))
+# 직전 accepted turn 직후 tail fragment를 바로 버릴 최대 시간창(초).
+TAIL_FRAGMENT_WINDOW_SEC = float(os.getenv("TAIL_FRAGMENT_WINDOW_SEC", "1.2"))
+# tail fragment로 볼 최대 raw 길이(초).
+TAIL_FRAGMENT_MAX_RAW_SEC = float(os.getenv("TAIL_FRAGMENT_MAX_RAW_SEC", "0.9"))
+# tail fragment로 볼 최대 voiced 길이(ms).
+TAIL_FRAGMENT_MAX_VOICED_MS = float(os.getenv("TAIL_FRAGMENT_MAX_VOICED_MS", "260"))
+# tail fragment로 볼 최대 longest voiced run(ms).
+TAIL_FRAGMENT_MAX_LONGEST_MS = float(os.getenv("TAIL_FRAGMENT_MAX_LONGEST_MS", "170"))
 # 수신 원본/전처리 오디오를 디버그용으로 저장할지 여부.
 VOICE_DEBUG_SAVE_AUDIO = os.getenv("VOICE_DEBUG_SAVE_AUDIO", "true").lower() == "true"
 # 디버그 WAV 저장 루트 디렉터리.

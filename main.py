@@ -73,7 +73,9 @@ active_session_user_ids: dict[str, int] = {}
 session_awaiting_user_reply: dict[str, bool] = {}
 session_last_speaker: dict[str, str] = {}
 session_topic_ids: dict[str, str] = {}
-session_trace_ids: dict[str, str] = {}
+session_turn_ids: dict[str, str] = {}
+session_segment_counters: dict[str, int] = {}
+session_last_turn_accepted_at: dict[str, float] = {}
 background_search_tasks: dict[str, asyncio.Task] = {}
 
 
@@ -197,15 +199,30 @@ def build_topic_id(*texts: str) -> str:
     return hashlib.sha1(material.encode("utf-8", errors="ignore")).hexdigest()[:12]
 
 
-def ensure_trace_id(session_key: str | None) -> str:
+def new_turn_id() -> str:
+    return uuid.uuid4().hex[:12]
+
+
+def current_turn_id(session_key: str | None) -> str | None:
     if not session_key:
-        return uuid.uuid4().hex[:12]
-    trace_id = session_trace_ids.get(session_key)
-    if trace_id:
-        return trace_id
-    trace_id = uuid.uuid4().hex[:12]
-    session_trace_ids[session_key] = trace_id
-    return trace_id
+        return None
+    return session_turn_ids.get(session_key)
+
+
+def next_segment_id(session_key: str | None) -> int:
+    if not session_key:
+        return 1
+    next_value = session_segment_counters.get(session_key, 0) + 1
+    session_segment_counters[session_key] = next_value
+    return next_value
+
+
+def start_new_turn(session_key: str | None) -> str:
+    turn_id = new_turn_id()
+    if session_key:
+        session_turn_ids[session_key] = turn_id
+        session_last_turn_accepted_at[session_key] = time.monotonic()
+    return turn_id
 
 
 def session_state_snapshot(session_key: str | None) -> dict:
@@ -216,7 +233,8 @@ def session_state_snapshot(session_key: str | None) -> dict:
         "awaiting_user_reply": session_awaiting_user_reply.get(session_key, False),
         "last_speaker": session_last_speaker.get(session_key, ""),
         "topic_id": session_topic_ids.get(session_key, ""),
-        "trace_id": session_trace_ids.get(session_key, ""),
+        "turn_id": session_turn_ids.get(session_key, ""),
+        "last_turn_accepted_at": session_last_turn_accepted_at.get(session_key, 0.0),
     }
 
 
@@ -247,7 +265,8 @@ def update_session_state(
         session_topic_ids[session_key] = topic_id
     elif user_text or answer_text:
         session_topic_ids[session_key] = build_topic_id(user_text or "", answer_text or "")
-    ensure_trace_id(session_key)
+    if session_key and session_key not in session_turn_ids:
+        session_turn_ids[session_key] = new_turn_id()
 
 
 def mark_session_active(
@@ -316,7 +335,9 @@ def reset_guild_runtime_state(guild_id: int) -> None:
         session_awaiting_user_reply.pop(key, None)
         session_last_speaker.pop(key, None)
         session_topic_ids.pop(key, None)
-        session_trace_ids.pop(key, None)
+        session_turn_ids.pop(key, None)
+        session_segment_counters.pop(key, None)
+        session_last_turn_accepted_at.pop(key, None)
     for key in [key for key in session_locks if key.startswith(prefix)]:
         session_locks.pop(key, None)
     for key, task in list(background_search_tasks.items()):
@@ -376,6 +397,9 @@ def new_turn_metrics(
     guild_id: int | None = None,
     user_id: int | None = None,
     topic_id: str | None = None,
+    turn_id: str | None = None,
+    segment_id: int | None = None,
+    chunk_index: int | None = None,
 ) -> dict:
     metrics = {
         "started_at": time.monotonic(),
@@ -386,7 +410,9 @@ def new_turn_metrics(
             "guild_id": guild_id,
             "user_id": user_id,
             "topic_id": topic_id,
-            "trace_id": ensure_trace_id(session_key),
+            "turn_id": turn_id,
+            "segment_id": segment_id,
+            "chunk_index": chunk_index,
         },
     }
     log_turn_event(
@@ -396,7 +422,9 @@ def new_turn_metrics(
         guild_id=guild_id,
         user_id=user_id,
         topic_id=topic_id,
-        trace_id=metrics["meta"]["trace_id"],
+        turn_id=turn_id,
+        segment_id=segment_id,
+        chunk_index=chunk_index,
     )
     return metrics
 
@@ -404,9 +432,17 @@ def new_turn_metrics(
 def register_drop_reason(metrics: dict | None, reason: str, **extra) -> None:
     if not metrics:
         return
-    metrics.setdefault("meta", {})["drop_reason"] = reason
-    trace_id = metrics.get("meta", {}).get("trace_id")
-    log_turn_event("turn_drop", trace_id=trace_id, reason=reason, **extra)
+    meta = metrics.setdefault("meta", {})
+    meta["drop_reason"] = reason
+    log_turn_event(
+        "turn_drop",
+        turn_id=meta.get("turn_id"),
+        segment_id=meta.get("segment_id"),
+        chunk_index=meta.get("chunk_index"),
+        session_key=meta.get("session_key"),
+        reason=reason,
+        **extra,
+    )
 
 
 def save_voice_debug_audio(
@@ -562,6 +598,30 @@ def should_skip_full_stt_after_wake_probe(*, wake_detected: bool, wake_probe: st
     if looks_like_repetitive_noise_text(probe):
         return True
     return False
+
+
+def is_tail_fragment_candidate(
+    *,
+    session_key: str | None,
+    raw_seconds: float,
+    voiced_ms: float,
+    longest_voiced_ms: float,
+    unstable: bool,
+) -> bool:
+    if not session_key:
+        return False
+    accepted_at = session_last_turn_accepted_at.get(session_key, 0.0)
+    if accepted_at <= 0.0:
+        return False
+    if (time.monotonic() - accepted_at) > TAIL_FRAGMENT_WINDOW_SEC:
+        return False
+    if raw_seconds > TAIL_FRAGMENT_MAX_RAW_SEC:
+        return False
+    if voiced_ms > TAIL_FRAGMENT_MAX_VOICED_MS:
+        return False
+    if longest_voiced_ms > TAIL_FRAGMENT_MAX_LONGEST_MS:
+        return False
+    return unstable or raw_seconds <= (TAIL_FRAGMENT_MAX_RAW_SEC * 0.6)
 
 
 def apply_ask_gating(cognitive_state: dict | None = None, *, source: str = "text") -> dict:
@@ -796,7 +856,6 @@ async def prepare_llm_messages(
                 "session_key": session_key,
                 "guild_id": guild_id,
                 "topic_id": session_topic_ids.get(session_key or "", "") if session_key else None,
-                "trace_id": ensure_trace_id(session_key),
             }
         )
     messages = list(get_conversation_history(session_key=session_key, guild_id=guild_id))
@@ -871,9 +930,12 @@ async def prepare_llm_messages(
     if metrics is not None:
         metrics.setdefault("marks", {})["t_policy"] = (time.monotonic() - float(metrics.get("started_at", time.monotonic()))) * 1000.0
     route_text = debug_text if debug_text is not None else user_text
+    meta = metrics.get("meta") if metrics is not None else {}
     log_turn_event(
         "policy_ready",
-        trace_id=ensure_trace_id(session_key),
+        turn_id=(meta or {}).get("turn_id"),
+        segment_id=(meta or {}).get("segment_id"),
+        chunk_index=(meta or {}).get("chunk_index"),
         session_key=session_key,
         source=source,
         route=route,
@@ -1918,7 +1980,7 @@ async def deliver_proactive_followup(
     vc = guild.voice_client if guild else None
     if vc is not None and vc.is_connected():
         try:
-            await speak_answer(vc, answer)
+            await speak_answer(vc, answer, turn_id=current_turn_id(session_key), session_key=session_key)
         except Exception as e:
             print(f"[SEARCH] proactive TTS 실패: {e!r}")
 
@@ -2276,7 +2338,7 @@ def log_voice_bottleneck_summary(metrics: dict | None, *, label: str, extra: str
             f"route={_fmt('route_ready')}",
             f"cognitive={_fmt('cognitive_ready')}",
             f"memory={_fmt('memory_ready')}",
-            f"wake={_fmt('wake_done')}",
+            f"wake_probe_ms={_fmt('wake_done')}",
             f"stt={_fmt('stt_done')}",
             f"llm_first={_fmt('llm_first_chunk_logged')}",
             f"llm_done={_fmt('llm_done')}",
@@ -2294,7 +2356,9 @@ def log_voice_bottleneck_summary(metrics: dict | None, *, label: str, extra: str
     log_turn_event(
         "turn_summary",
         label=label,
-        trace_id=meta.get("trace_id"),
+        turn_id=meta.get("turn_id"),
+        segment_id=meta.get("segment_id"),
+        chunk_index=meta.get("chunk_index"),
         source=meta.get("source"),
         session_key=meta.get("session_key"),
         topic_id=meta.get("topic_id"),
@@ -2320,6 +2384,9 @@ async def create_omnivoice_source(
     on_first_byte: Callable[[], None] | None = None,
     on_first_frame: Callable[[], None] | None = None,
     on_first_packet_sent: Callable[[], None] | None = None,
+    turn_id: str | None = None,
+    chunk_index: int | None = None,
+    session_key: str | None = None,
 ) -> OmniVoicePCMStream:
     text = clean_tts_text(text)
     if not text:
@@ -2333,11 +2400,16 @@ async def create_omnivoice_source(
     async def producer() -> None:
         session = await get_http_session()
         timeout = aiohttp.ClientTimeout(total=OMNIVOICE_TIMEOUT_SEC)
-        request_started_logged = False
-        first_byte_logged = False
+        first_pcm_logged = False
 
         if on_task_started is not None:
             on_task_started()
+        log_turn_event(
+            "playback_task_started",
+            turn_id=turn_id,
+            chunk_index=chunk_index,
+            session_key=session_key,
+        )
 
         async def stream_with_voice(voice_name: str) -> tuple[bool, str]:
             payload = {
@@ -2350,11 +2422,17 @@ async def create_omnivoice_source(
             if OMNIVOICE_LANGUAGE:
                 payload["language"] = OMNIVOICE_LANGUAGE
 
-            nonlocal request_started_logged, first_byte_logged
+            nonlocal first_pcm_logged
 
-            if on_request_start is not None and not request_started_logged:
+            if on_request_start is not None:
                 on_request_start()
-                request_started_logged = True
+            log_turn_event(
+                "tts_request_started",
+                turn_id=turn_id,
+                chunk_index=chunk_index,
+                session_key=session_key,
+                voice=voice_name,
+            )
             async with session.post(
                 f"{OMNIVOICE_SERVER_URL}/v1/audio/speech",
                 json=payload,
@@ -2367,9 +2445,17 @@ async def create_omnivoice_source(
 
                 async for chunk in resp.content.iter_chunked(8192):
                     if chunk:
-                        if on_first_byte is not None and not first_byte_logged:
+                        if on_first_byte is not None and not first_pcm_logged:
                             on_first_byte()
-                            first_byte_logged = True
+                        if not first_pcm_logged:
+                            first_pcm_logged = True
+                            log_turn_event(
+                                "tts_first_pcm_received",
+                                turn_id=turn_id,
+                                chunk_index=chunk_index,
+                                session_key=session_key,
+                                bytes=len(chunk),
+                            )
                         source.feed_pcm24_mono(chunk)
                 return True, ""
 
@@ -2726,16 +2812,27 @@ async def play_audio_source(
         raise source.error
 
 
-async def speak_answer(vc: discord.VoiceClient, answer: str) -> None:
+async def speak_answer(
+    vc: discord.VoiceClient,
+    answer: str,
+    *,
+    turn_id: str | None = None,
+    session_key: str | None = None,
+) -> None:
     guild_id = getattr(getattr(vc, "guild", None), "id", None)
 
     async with tts_lock:
         source = await create_omnivoice_source(
             answer,
-            on_task_started=lambda: print("playback_task_started"),
-            on_request_start=lambda: print("tts_request_started"),
-            on_first_byte=lambda: print("tts_first_pcm_received"),
-            on_first_packet_sent=lambda: print("first_packet_sent"),
+            turn_id=turn_id,
+            chunk_index=1,
+            session_key=session_key,
+            on_first_packet_sent=lambda: log_turn_event(
+                "first_packet_sent",
+                turn_id=turn_id,
+                chunk_index=1,
+                session_key=session_key,
+            ),
         )
         try:
             if guild_id is not None:
@@ -2752,12 +2849,15 @@ async def stream_tts_sentences(
     sentence_queue: "asyncio.Queue[str | None]",
     *,
     metrics: dict | None = None,
+    turn_id: str | None = None,
+    session_key: str | None = None,
 ) -> None:
     guild_id = getattr(getattr(vc, "guild", None), "id", None)
     did_speak = False
 
     async with tts_lock:
         try:
+            chunk_index = 0
             while True:
                 sentence = await sentence_queue.get()
                 if sentence is None:
@@ -2767,18 +2867,27 @@ async def stream_tts_sentences(
                 if not sentence:
                     continue
 
+                chunk_index += 1
+
                 if guild_id is not None and not did_speak:
                     bot_speaking_guilds.add(guild_id)
 
                 did_speak = True
                 source = await create_omnivoice_source(
                     sentence,
-                    on_task_started=lambda: print("playback_task_started"),
-                    on_request_start=lambda: (print("tts_request_started"), log_voice_latency(metrics, "tts_request_logged", "TTS 요청 시작 시간")),
+                    turn_id=turn_id,
+                    chunk_index=chunk_index,
+                    session_key=session_key,
+                    on_request_start=lambda: log_voice_latency(metrics, "tts_request_logged", "TTS 요청 시작 시간"),
                     on_response_headers=lambda: log_voice_latency(metrics, "tts_response_headers_logged", "TTS 응답 헤더 도착 시간"),
-                    on_first_byte=lambda: (print("tts_first_pcm_received"), log_voice_latency(metrics, "tts_first_byte_logged", "TTS 첫 바이트 도착 시간")),
+                    on_first_byte=lambda: log_voice_latency(metrics, "tts_first_byte_logged", "TTS 첫 바이트 도착 시간"),
                     on_first_frame=lambda: log_voice_latency(metrics, "tts_first_frame_logged", "TTS 첫 프레임 공급 시간"),
-                    on_first_packet_sent=lambda: print("first_packet_sent"),
+                    on_first_packet_sent=lambda ci=chunk_index: log_turn_event(
+                        "first_packet_sent",
+                        turn_id=turn_id,
+                        chunk_index=ci,
+                        session_key=session_key,
+                    ),
                 )
                 await play_audio_source(
                     vc,
@@ -3124,7 +3233,14 @@ async def ask_llm_and_speak_streaming(
     metrics: dict | None = None,
 ) -> str:
     if metrics is None:
-        metrics = new_turn_metrics(source=source, session_key=session_key, guild_id=guild_id, topic_id=session_topic_ids.get(session_key))
+        metrics = new_turn_metrics(
+            source=source,
+            session_key=session_key,
+            guild_id=guild_id,
+            topic_id=session_topic_ids.get(session_key),
+            turn_id=current_turn_id(session_key),
+            segment_id=0,
+        )
     else:
         metrics.setdefault("started_at", time.monotonic())
         metrics.setdefault("marks", {})
@@ -3137,7 +3253,15 @@ async def ask_llm_and_speak_streaming(
     metrics.setdefault("playback_start_logged", False)
     log_voice_stage(metrics, "LLM/TTS 파이프라인 시작", extra=f"source={source}")
     sentence_queue: asyncio.Queue[str | None] = asyncio.Queue()
-    playback_task = asyncio.create_task(stream_tts_sentences(vc, sentence_queue, metrics=metrics))
+    playback_task = asyncio.create_task(
+        stream_tts_sentences(
+            vc,
+            sentence_queue,
+            metrics=metrics,
+            turn_id=metrics.get("meta", {}).get("turn_id"),
+            session_key=session_key,
+        )
+    )
     llm_error: Exception | None = None
     answer = ""
 
@@ -3189,6 +3313,7 @@ async def stream_text_reply(
     *,
     guild_id: int,
     session_key: str,
+    turn_id: str | None = None,
     room_key: str | None = None,
     person_key: str | None = None,
     session_memory_key: str | None = None,
@@ -3200,6 +3325,8 @@ async def stream_text_reply(
         session_key=session_key,
         guild_id=guild_id,
         topic_id=session_topic_ids.get(session_key),
+        turn_id=turn_id,
+        segment_id=0,
     )
     streamed_message: discord.Message | None = await channel.send("…")
     rendered_text = "…"
@@ -3262,7 +3389,16 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes, 
     person_key = make_person_memory_key(member.id)
     session_memory_key = make_session_memory_key(session_key, member.id)
     topic_id = session_topic_ids.get(session_key) or build_topic_id(member.display_name or str(member.id))
-    metrics = new_turn_metrics(source="voice", session_key=session_key, guild_id=guild_id, user_id=member.id, topic_id=topic_id)
+    segment_id = next_segment_id(session_key)
+    metrics = new_turn_metrics(
+        source="voice",
+        session_key=session_key,
+        guild_id=guild_id,
+        user_id=member.id,
+        topic_id=topic_id,
+        turn_id=current_turn_id(session_key),
+        segment_id=segment_id,
+    )
     log_voice_stage(metrics, "process_member_audio 시작", extra=f"speaker={member.display_name} pcm_bytes={len(pcm_bytes)}")
 
     if STT_USE_RAW_48K:
@@ -3300,13 +3436,38 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes, 
         log_voice_bottleneck_summary(metrics, label="voice_reply", extra="drop=too_short_total")
         return
 
-    if debug_meta and debug_meta.get("unstable"):
+    unstable_audio = bool(debug_meta and debug_meta.get("unstable"))
+    if unstable_audio:
         reasons = ",".join(str(r) for r in debug_meta.get("reasons", []))
         print(f"[FULL STT CONTINUE] reason=unstable_audio speaker={member.display_name} reasons={reasons}")
         print(f"[UNSTABLE AUDIO CONTINUE] speaker={member.display_name} reasons={reasons}")
         log_voice_stage(metrics, "불안정 음성이지만 본문 STT 진행", extra=f"reasons={reasons}")
 
     waveform_stats = compute_waveform_activity_stats(audio16k, sampling_rate=stt_sampling_rate)
+    voiced_ms = float(waveform_stats.get("voiced_ms") or 0.0)
+    longest_voiced_ms = float(waveform_stats.get("longest_voiced_ms") or 0.0)
+    if is_tail_fragment_candidate(
+        session_key=session_key,
+        raw_seconds=raw_seconds,
+        voiced_ms=voiced_ms,
+        longest_voiced_ms=longest_voiced_ms,
+        unstable=unstable_audio,
+    ):
+        register_drop_reason(
+            metrics,
+            "tail_fragment_drop",
+            session_key=session_key,
+            raw_seconds=round(raw_seconds, 3),
+            voiced_ms=round(voiced_ms, 1),
+            longest_voiced_ms=round(longest_voiced_ms, 1),
+        )
+        log_voice_stage(
+            metrics,
+            "tail fragment 조기 종료",
+            extra=f"raw_seconds={raw_seconds:.3f} voiced_ms={voiced_ms:.0f} longest_ms={longest_voiced_ms:.0f}",
+        )
+        log_voice_bottleneck_summary(metrics, label="voice_reply", extra="drop=tail_fragment_drop")
+        return
     if VAD_ENABLED and is_probably_silent(audio16k, sampling_rate=stt_sampling_rate):
         duration_sec = len(audio16k) / float(max(1, stt_sampling_rate))
         peak = float(np.max(np.abs(audio16k))) if audio16k.size else 0.0
@@ -3355,7 +3516,12 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes, 
         wake_detected = contains_leading_wake_word(strip_leading_voice_fillers(wake_confirm))
         if wake_detected:
             wake_probe = wake_confirm
-    log_voice_stage(metrics, "웨이크 프로브 완료", extra=f"wake={wake_detected} probe_len={len(wake_probe)} confirm_len={len(wake_confirm)}", key="wake_done")
+    log_voice_stage(
+        metrics,
+        "웨이크 프로브 완료",
+        extra=f"wake_detected={wake_detected} wake_probe_text={wake_probe!r} wake_confirm_text={wake_confirm!r}",
+        key="wake_done",
+    )
 
     active_session = is_session_active_for_user(session_key, member.id)
     env_noise_candidate = is_likely_environment_noise(audio_for_wake, sampling_rate=wake_sampling_rate)
@@ -3370,41 +3536,41 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes, 
                 f"[ENV IGNORE] speaker={member.display_name} band_ratio={band_ratio:.3f} flatness={flatness:.3f} rms={rms:.4f} probe={wake_probe!r}"
             )
             save_voice_debug_audio(guild_id, speaker_name, pcm_bytes, audio16k, wake_probe=wake_probe, final_text="[ENV IGNORE]", debug_meta=debug_meta)
-            register_drop_reason(metrics, "env_ignore", session_key=session_key, probe=wake_probe)
-            log_voice_stage(metrics, "환경음 후보 조기 종료", extra=f"probe={wake_probe!r}")
+            register_drop_reason(metrics, "env_ignore", session_key=session_key, wake_probe_text=wake_probe)
+            log_voice_stage(metrics, "환경음 후보 조기 종료", extra=f"wake_probe_text={wake_probe!r}")
             log_voice_bottleneck_summary(metrics, label="voice_reply", extra="drop=env_ignore")
             return
         print(f"[FULL STT CONTINUE] reason=env_ignore speaker={member.display_name} probe={wake_probe!r}")
         print(
             f"[ENV IGNORE] speaker={member.display_name} band_ratio={band_ratio:.3f} flatness={flatness:.3f} rms={rms:.4f} probe={wake_probe!r}"
         )
-        log_voice_stage(metrics, "환경음 후보지만 본문 STT 진행", extra=f"probe={wake_probe!r}")
+        log_voice_stage(metrics, "환경음 후보지만 본문 STT 진행", extra=f"wake_probe_text={wake_probe!r}")
 
     if filler_candidate:
         if not wake_detected and not active_session and raw_seconds <= VOICE_NO_WAKE_MAX_CONTINUE_SEC:
             print(f"[FULL STT SKIP] reason=filler_ignore speaker={member.display_name} probe={wake_probe!r}")
             print(f"[FILLER IGNORE] speaker={member.display_name} probe={wake_probe!r}")
             save_voice_debug_audio(guild_id, speaker_name, pcm_bytes, audio16k, wake_probe=wake_probe, final_text="[FILLER IGNORE]", debug_meta=debug_meta)
-            register_drop_reason(metrics, "filler_ignore", session_key=session_key, probe=wake_probe)
-            log_voice_stage(metrics, "짧은 필러 후보 조기 종료", extra=f"probe={wake_probe!r}")
+            register_drop_reason(metrics, "filler_ignore", session_key=session_key, wake_probe_text=wake_probe)
+            log_voice_stage(metrics, "짧은 필러 후보 조기 종료", extra=f"wake_probe_text={wake_probe!r}")
             log_voice_bottleneck_summary(metrics, label="voice_reply", extra="drop=filler_ignore")
             return
         print(f"[FULL STT CONTINUE] reason=filler_ignore speaker={member.display_name} probe={wake_probe!r}")
         print(f"[FILLER IGNORE] speaker={member.display_name} probe={wake_probe!r}")
-        log_voice_stage(metrics, "짧은 필러 후보지만 본문 STT 진행", extra=f"probe={wake_probe!r}")
+        log_voice_stage(metrics, "짧은 필러 후보지만 본문 STT 진행", extra=f"wake_probe_text={wake_probe!r}")
 
     if repetitive_noise_candidate:
         if not wake_detected and not active_session:
             print(f"[FULL STT SKIP] reason=noise_text_ignore speaker={member.display_name} probe={wake_probe!r}")
             print(f"[NOISE TEXT IGNORE] speaker={member.display_name} probe={wake_probe!r}")
             save_voice_debug_audio(guild_id, speaker_name, pcm_bytes, audio16k, wake_probe=wake_probe, final_text="[NOISE TEXT IGNORE]", debug_meta=debug_meta)
-            register_drop_reason(metrics, "noise_text_ignore", session_key=session_key, probe=wake_probe)
-            log_voice_stage(metrics, "반복 소음 후보 조기 종료", extra=f"probe={wake_probe!r}")
+            register_drop_reason(metrics, "noise_text_ignore", session_key=session_key, wake_probe_text=wake_probe)
+            log_voice_stage(metrics, "반복 소음 후보 조기 종료", extra=f"wake_probe_text={wake_probe!r}")
             log_voice_bottleneck_summary(metrics, label="voice_reply", extra="drop=noise_text_ignore")
             return
         print(f"[FULL STT CONTINUE] reason=noise_text_ignore speaker={member.display_name} probe={wake_probe!r}")
         print(f"[NOISE TEXT IGNORE] speaker={member.display_name} probe={wake_probe!r}")
-        log_voice_stage(metrics, "반복 소음 후보지만 본문 STT 진행", extra=f"probe={wake_probe!r}")
+        log_voice_stage(metrics, "반복 소음 후보지만 본문 STT 진행", extra=f"wake_probe_text={wake_probe!r}")
 
     if not wake_detected:
         print(f"[FULL STT CONTINUE] reason=wake_ignore speaker={member.display_name} probe={wake_probe!r}")
@@ -3413,9 +3579,10 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes, 
         if should_skip_full_stt_after_wake_probe(wake_detected=wake_detected, wake_probe=wake_probe, duration_sec=duration_sec):
             print(f"[FULL STT SKIP] reason=wake_probe_low_signal speaker={member.display_name} probe={wake_probe!r} sec={duration_sec:.2f}")
             save_voice_debug_audio(guild_id, speaker_name, pcm_bytes, audio16k, wake_probe=wake_probe, final_text="[WAKE PROBE SKIP]", debug_meta=debug_meta)
-            log_voice_stage(metrics, "웨이크 프로브 기반 조기 종료", extra=f"probe={wake_probe!r} sec={duration_sec:.2f}")
+            register_drop_reason(metrics, "wake_probe_low_signal", session_key=session_key, wake_probe_text=wake_probe, wake_detected=wake_detected)
+            log_voice_stage(metrics, "웨이크 프로브 기반 조기 종료", extra=f"wake_probe_text={wake_probe!r} sec={duration_sec:.2f}")
             return
-        log_voice_stage(metrics, "웨이크 미검출이지만 본문 STT 진행", extra=f"probe={wake_probe!r}")
+        log_voice_stage(metrics, "웨이크 미검출이지만 본문 STT 진행", extra=f"wake_probe_text={wake_probe!r}")
 
     print(f"[FULL STT ENTER] speaker={member.display_name} sampling_rate={stt_sampling_rate} samples={audio16k.size} wake_detected={wake_detected}")
     log_voice_stage(metrics, "본문 STT 시작", extra=f"samples={audio16k.size}")
@@ -3471,7 +3638,7 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes, 
         return
 
     save_voice_debug_audio(guild_id, speaker_name, pcm_bytes, audio16k, wake_probe=wake_probe, final_text=text, debug_meta=debug_meta, stt_meta=stt_meta)
-    print(f"🎤 [{member.display_name}] wake={wake_probe!r} text={text}")
+    print(f"🎤 [{member.display_name}] wake_detected={wake_detected} wake_probe_text={wake_probe!r} wake_confirm_text={wake_confirm!r} text={text}")
 
     ok, reason = should_reply_to_voice(
         guild_id,
@@ -3493,6 +3660,7 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes, 
     prompt_user_text = raw_user_text or "사용자가 너를 이름만 불렀다. 아주 짧고 자연스럽게 반응해라."
     history_user_text = raw_user_text or text
     topic_id = build_topic_id(history_user_text, session_topic_ids.get(session_key, ""))
+    accepted_turn_id = start_new_turn(session_key)
     update_session_state(
         session_key,
         user_id=member.id,
@@ -3501,7 +3669,7 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes, 
         topic_id=topic_id,
         user_text=history_user_text,
     )
-    metrics.setdefault("meta", {}).update({"topic_id": topic_id, "trace_id": ensure_trace_id(session_key)})
+    metrics.setdefault("meta", {}).update({"topic_id": topic_id, "turn_id": accepted_turn_id})
     vc = guild.voice_client
     lock = session_locks.setdefault(session_key, asyncio.Lock())
 
@@ -3634,7 +3802,8 @@ async def on_message(message: discord.Message):
     if not (is_wake_word or is_reply or is_active_session):
         log_turn_event(
             "turn_drop",
-            trace_id=ensure_trace_id(session_key),
+            turn_id=current_turn_id(session_key),
+            segment_id=0,
             source="text",
             session_key=session_key,
             reason="text_gate_not_open",
@@ -3648,6 +3817,7 @@ async def on_message(message: discord.Message):
         user_text = "부르셨나요?"
 
     topic_id = build_topic_id(user_text, session_topic_ids.get(session_key, ""))
+    turn_id = start_new_turn(session_key)
     update_session_state(
         session_key,
         user_id=message.author.id,
@@ -3678,6 +3848,7 @@ async def on_message(message: discord.Message):
                     user_text,
                     guild_id=message.guild.id,
                     session_key=session_key,
+                    turn_id=turn_id,
                     room_key=room_key,
                     person_key=person_key,
                     session_memory_key=session_memory_key,
