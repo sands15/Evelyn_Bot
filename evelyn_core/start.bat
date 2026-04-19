@@ -28,10 +28,10 @@ if not defined WT_READY (
 
 set "WT_WINDOW=evelyn"
 
-start "" "%WT_EXE%" -w %WT_WINDOW% new-tab --title "Main-LLM" cmd.exe /q /d /c "title Main-LLM ^& wsl.exe bash /mnt/c/Evelyn/evelyn_core/run_main_llm.sh"
+start "" "%WT_EXE%" -w new new-tab --title "Main-LLM" wsl.exe bash /mnt/c/Evelyn/evelyn_core/run_main_llm.sh
 timeout /t 1 /nobreak >nul
-"%WT_EXE%" -w %WT_WINDOW% new-tab --title "Router-LLM" cmd.exe /q /d /c "title Router-LLM ^& wsl.exe bash /mnt/c/Evelyn/evelyn_core/run_router_llm.sh"
-"%WT_EXE%" -w %WT_WINDOW% new-tab --title "Sub-LLM" cmd.exe /q /d /c "title Sub-LLM ^& wsl.exe bash /mnt/c/Evelyn/evelyn_core/run_sub_llm.sh"
+"%WT_EXE%" -w %WT_WINDOW% new-tab --title "Router-LLM" wsl.exe bash /mnt/c/Evelyn/evelyn_core/run_router_llm.sh
+"%WT_EXE%" -w %WT_WINDOW% new-tab --title "Sub-LLM" wsl.exe bash /mnt/c/Evelyn/evelyn_core/run_sub_llm.sh
 "%WT_EXE%" -w %WT_WINDOW% new-tab --title "TTS" powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0start_tts.ps1"
 "%WT_EXE%" -w %WT_WINDOW% new-tab --title "Bot" powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0start_bot.ps1"
 
