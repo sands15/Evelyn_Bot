@@ -598,6 +598,26 @@ def policy_response_for_state(cognitive_state: dict | None = None, *, source: st
     return None
 
 
+def should_label_question_response(text: str, *, session_key: str | None = None) -> bool:
+    visible = visible_text(text).strip()
+    if not visible:
+        return False
+    if visible.startswith("[질문]"):
+        return False
+    if session_key is not None and session_state_snapshot(session_key).get("awaiting_user_reply"):
+        return True
+    return "?" in visible or "？" in visible
+
+
+def format_display_text(text: str, *, session_key: str | None = None) -> str:
+    visible = visible_text(text).strip()
+    if not visible:
+        return visible
+    if should_label_question_response(visible, session_key=session_key):
+        return f"[질문] {visible}"
+    return visible
+
+
 def read_cached_cognitive_state(
     guild_id: int | None,
     *,
@@ -1893,7 +1913,7 @@ async def deliver_proactive_followup(
             except Exception:
                 channel = None
         if channel is not None and hasattr(channel, "send"):
-            await channel.send(visible_text(answer))
+            await channel.send(format_display_text(answer, session_key=session_key))
 
     vc = guild.voice_client if guild else None
     if vc is not None and vc.is_connected():
@@ -3190,7 +3210,7 @@ async def stream_text_reply(
         if not sentence:
             return
         streamed_parts.append(sentence)
-        candidate = visible_text("".join(streamed_parts)).strip()
+        candidate = format_display_text("".join(streamed_parts), session_key=session_key).strip()
         if not candidate or candidate == rendered_text:
             return
         if streamed_message is None:
@@ -3212,7 +3232,7 @@ async def stream_text_reply(
         debug_text=debug_text,
         metrics=metrics,
     )
-    final_text = visible_text(answer).strip()
+    final_text = format_display_text(answer, session_key=session_key).strip()
     if streamed_message is None:
         streamed_message = await channel.send(final_text or fallback_answer_for(user_text))
     elif final_text and final_text != rendered_text:
