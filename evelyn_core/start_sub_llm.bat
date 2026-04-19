@@ -22,9 +22,9 @@ if not defined WT_READY (
 )
 set "TERM_CMD=title Sub-LLM && call \"%~f0\" --inline"
 if not defined WT_READY (
-    start "Sub-LLM" cmd.exe /q /d /k "%TERM_CMD%"
+    start "Sub-LLM" cmd.exe /q /d /c "%TERM_CMD%"
 ) else (
-    "%WT_EXE%" new-tab --title "Sub-LLM" cmd.exe /q /d /k "%TERM_CMD%"
+    "%WT_EXE%" new-tab --title "Sub-LLM" cmd.exe /q /d /c "%TERM_CMD%"
 )
 
 endlocal
