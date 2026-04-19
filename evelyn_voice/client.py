@@ -1459,6 +1459,18 @@ class EvelynVoiceClient(discord.VoiceClient):
 
                 if not pcm:
                     failed += 1
+                    if not started_output and leading_bad_packets < VOICE_LEADING_DROP_MAX_PACKETS:
+                        leading_bad_packets += 1
+                        opus_silence_fill += 1
+                        started_output = True
+                        pcm_chunks.append(SILENCE_PCM)
+                        success += 1
+                        log.info(
+                            "LEADING fake packet -> SILENCE | idx=%d pkt=%d seq=%d",
+                            idx,
+                            packet_index,
+                            p.get("sequence"),
+                        )
                     continue
 
                 stable_voice_packets += 1
@@ -1480,8 +1492,6 @@ class EvelynVoiceClient(discord.VoiceClient):
             elif len(opus_packet) < 8:
                 failed += 1
                 opus_fail += 1
-                if not started_output and leading_bad_packets < VOICE_LEADING_DROP_MAX_PACKETS:
-                    leading_bad_packets += 1
                 if packet_index <= 5:
                     log.warning(
                         "PACKET too short | idx=%d pkt=%d seq=%d ts=%d len=%d",
@@ -1490,6 +1500,18 @@ class EvelynVoiceClient(discord.VoiceClient):
                         p["sequence"],
                         p["timestamp"],
                         len(opus_packet),
+                    )
+                if not started_output and leading_bad_packets < VOICE_LEADING_DROP_MAX_PACKETS:
+                    leading_bad_packets += 1
+                    opus_silence_fill += 1
+                    started_output = True
+                    pcm_chunks.append(SILENCE_PCM)
+                    success += 1
+                    log.info(
+                        "LEADING short packet -> SILENCE | idx=%d pkt=%d seq=%d",
+                        idx,
+                        packet_index,
+                        p["sequence"],
                     )
                 continue
             else:
@@ -1541,6 +1563,19 @@ class EvelynVoiceClient(discord.VoiceClient):
                                 p["sequence"],
                             )
 
+                    if not pcm and not started_output and leading_bad_packets < VOICE_LEADING_DROP_MAX_PACKETS:
+                        leading_bad_packets += 1
+                        opus_silence_fill += 1
+                        started_output = True
+                        pcm_chunks.append(SILENCE_PCM)
+                        success += 1
+                        log.info(
+                            "LEADING OPUS fail -> SILENCE | idx=%d pkt=%d seq=%d",
+                            idx,
+                            packet_index,
+                            p["sequence"],
+                        )
+                        continue
                     if not pcm and OPUS_ERROR_TO_SILENCE:
                         opus_silence_fill += 1
                         pcm = SILENCE_PCM
