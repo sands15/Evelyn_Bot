@@ -378,11 +378,14 @@ def should_force_voice_context_route(user_text: str) -> bool:
     if not text:
         return False
     voice_context_markers = [
-        "기억", "방금", "아까", "전에", "이전", "대화", "말했던", "했었던", "했던",
+        "기억", "방금", "아까", "전에", "이전", "대화", "말했던", "했었던", "했던", "했었어",
         "무슨 얘기", "뭐였", "기억나", "기억해", "이어", "계속", "정리", "요약",
+        "우리", "우리가", "하기로 했", "먹기로 했", "가기로 했", "약속", "정했",
     ]
     marker_hits = sum(1 for marker in voice_context_markers if marker in text)
-    return marker_hits >= 1
+    if marker_hits >= 1:
+        return True
+    return bool(re.search(r"(우리|우리가).*(했었|하기로 했|먹기로 했|가기로 했)", text))
 
 
 def classify_llm_route_fallback(user_text: str, *, source: str = "text") -> str:
