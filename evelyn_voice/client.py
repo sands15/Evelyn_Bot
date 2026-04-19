@@ -1129,6 +1129,200 @@ class EvelynVoiceClient(discord.VoiceClient):
             )
         return None, resolved_user_id or user_id, f"unhandled_{reason}"
 
+    def _decode_fake_packet_pcm(self, *, idx: int, packet_index: int, packet: dict, next_packet: dict | None) -> dict:
+        result = {
+            "pcm": b"",
+            "failed": 0,
+            "plc": 0,
+            "fec": 0,
+            "opus_fail": 0,
+            "real_silence": 0,
+            "opus_silence_fill": 0,
+            "status": "fake_drop",
+        }
+
+        if packet.get("fec_candidate") and next_packet is not None and not next_packet.get("fake_packet"):
+            next_opus = next_packet.get("opus_packet") or b""
+            if next_opus not in (b"", b"\xF8\xFF\xFE"):
+                try:
+                    pcm = self.opus_decoder.decode(next_opus, fec=True)
+                except Exception:
+                    pcm = b""
+                if pcm:
+                    result["pcm"] = pcm
+                    result["fec"] = 1
+                    result["status"] = "fake_fec"
+                    log.info(
+                        "PACKET fake -> FEC | idx=%d pkt=%d seq=%s next_seq=%s",
+                        idx,
+                        packet_index,
+                        packet.get("sequence"),
+                        next_packet.get("sequence"),
+                    )
+                    return result
+
+        try:
+            pcm = self.opus_decoder.decode(None, fec=False)
+        except Exception:
+            pcm = b""
+        if pcm:
+            result["pcm"] = pcm
+            result["plc"] = 1
+            result["status"] = "fake_plc"
+            log.info(
+                "PACKET fake -> PLC | idx=%d pkt=%d seq=%s",
+                idx,
+                packet_index,
+                packet.get("sequence"),
+            )
+            return result
+
+        result["failed"] = 1
+        return result
+
+    def _decode_opus_packet_pcm(self, *, idx: int, packet_index: int, packet: dict, opus_packet: bytes, next_packet: dict | None, silence_pcm: bytes) -> dict:
+        result = {
+            "pcm": b"",
+            "failed": 0,
+            "plc": 0,
+            "fec": 0,
+            "opus_fail": 0,
+            "real_silence": 0,
+            "opus_silence_fill": 0,
+            "status": "drop",
+        }
+
+        if opus_packet == b"\xF8\xFF\xFE":
+            result["pcm"] = silence_pcm
+            result["real_silence"] = 1
+            result["status"] = "silence"
+            return result
+
+        if len(opus_packet) < 8:
+            result["failed"] = 1
+            result["opus_fail"] = 1
+            result["status"] = "too_short"
+            if packet_index <= 5:
+                log.warning(
+                    "PACKET too short | idx=%d pkt=%d seq=%d ts=%d len=%d",
+                    idx,
+                    packet_index,
+                    packet["sequence"],
+                    packet["timestamp"],
+                    len(opus_packet),
+                )
+            return result
+
+        try:
+            pcm = self.opus_decoder.decode(opus_packet, fec=False)
+            result["pcm"] = pcm
+            result["status"] = "ok"
+            return result
+        except Exception as e:
+            result["failed"] = 1
+            result["opus_fail"] = 1
+            result["status"] = "decode_fail"
+            if packet_index <= 5:
+                log.warning(
+                    "PACKET OPUS failed | idx=%d pkt=%d seq=%d ts=%d bytes=%d err=%r",
+                    idx,
+                    packet_index,
+                    packet["sequence"],
+                    packet["timestamp"],
+                    len(opus_packet),
+                    e,
+                )
+
+        if next_packet is not None and not next_packet.get("fake_packet"):
+            next_opus = next_packet.get("opus_packet") or b""
+            if next_opus not in (b"", b"\xF8\xFF\xFE"):
+                try:
+                    pcm = self.opus_decoder.decode(next_opus, fec=True)
+                except Exception:
+                    pcm = b""
+                if pcm:
+                    result["pcm"] = pcm
+                    result["fec"] = 1
+                    result["status"] = "decode_fail_fec"
+                    log.info(
+                        "PACKET OPUS corrupt -> FEC | idx=%d pkt=%d seq=%d next_seq=%d",
+                        idx,
+                        packet_index,
+                        packet["sequence"],
+                        next_packet.get("sequence"),
+                    )
+                    return result
+
+        try:
+            pcm = self.opus_decoder.decode(None, fec=False)
+        except Exception:
+            pcm = b""
+        if pcm:
+            result["pcm"] = pcm
+            result["plc"] = 1
+            result["status"] = "decode_fail_plc"
+            log.info(
+                "PACKET OPUS corrupt -> PLC | idx=%d pkt=%d seq=%d",
+                idx,
+                packet_index,
+                packet["sequence"],
+            )
+            return result
+
+        if OPUS_ERROR_TO_SILENCE:
+            result["pcm"] = silence_pcm
+            result["opus_silence_fill"] = 1
+            result["status"] = "decode_fail_silence"
+            return result
+
+        return result
+
+    def _maybe_insert_leading_silence(
+        self,
+        *,
+        idx: int,
+        packet_index: int,
+        packet: dict,
+        started_output: bool,
+        leading_bad_packets: int,
+        pcm_chunks: list[bytes],
+        silence_pcm: bytes,
+        label: str,
+    ) -> tuple[bool, bool, int]:
+        if started_output or leading_bad_packets >= VOICE_LEADING_DROP_MAX_PACKETS:
+            return False, started_output, leading_bad_packets
+
+        leading_bad_packets += 1
+        pcm_chunks.append(silence_pcm)
+        log.info(
+            "%s -> SILENCE | idx=%d pkt=%d seq=%s",
+            label,
+            idx,
+            packet_index,
+            packet.get("sequence"),
+        )
+        return True, True, leading_bad_packets
+
+    def _apply_output_packet_gating(
+        self,
+        *,
+        pcm: bytes,
+        started_output: bool,
+        stable_voice_packets: int,
+        leading_good_drop_remaining: int,
+        pcm_chunks: list[bytes],
+    ) -> tuple[bool, int, int, bool]:
+        stable_voice_packets += 1
+        if not started_output and stable_voice_packets < VOICE_START_STABLE_PACKETS:
+            return started_output, stable_voice_packets, leading_good_drop_remaining, False
+        if not started_output and leading_good_drop_remaining > 0:
+            leading_good_drop_remaining -= 1
+            return started_output, stable_voice_packets, leading_good_drop_remaining, False
+
+        started_output = True
+        pcm_chunks.append(pcm)
+        return started_output, stable_voice_packets, leading_good_drop_remaining, True
+
     def is_connected(self) -> bool:
         return super().is_connected()
 
@@ -1563,166 +1757,57 @@ class EvelynVoiceClient(discord.VoiceClient):
         normalized_packets = self._ordered_unique_packets(normalized_packets)
         expanded_packets = self._expand_packets_with_fakes(normalized_packets)
         for packet_index, p in enumerate(expanded_packets, start=1):
+            next_packet = expanded_packets[packet_index] if packet_index < len(expanded_packets) else None
             if p.get("fake_packet"):
-                next_packet = expanded_packets[packet_index] if packet_index < len(expanded_packets) else None
-                pcm = b""
-                if p.get("fec_candidate") and next_packet is not None and not next_packet.get("fake_packet"):
-                    next_opus = next_packet.get("opus_packet") or b""
-                    if next_opus not in (b"", b"\xF8\xFF\xFE"):
-                        try:
-                            pcm = self.opus_decoder.decode(next_opus, fec=True)
-                        except Exception:
-                            pcm = b""
-                        if pcm:
-                            fec_packets += 1
-                if not pcm:
-                    try:
-                        pcm = self.opus_decoder.decode(None, fec=False)
-                    except Exception:
-                        pcm = b""
-                    if pcm:
-                        plc_packets += 1
-
-                if not pcm:
-                    failed += 1
-                    if not started_output and leading_bad_packets < VOICE_LEADING_DROP_MAX_PACKETS:
-                        leading_bad_packets += 1
-                        opus_silence_fill += 1
-                        started_output = True
-                        pcm_chunks.append(SILENCE_PCM)
-                        success += 1
-                        log.info(
-                            "LEADING fake packet -> SILENCE | idx=%d pkt=%d seq=%d",
-                            idx,
-                            packet_index,
-                            p.get("sequence"),
-                        )
-                    continue
-
-                stable_voice_packets += 1
-                if not started_output and stable_voice_packets < VOICE_START_STABLE_PACKETS:
-                    continue
-                if not started_output and leading_good_drop_remaining > 0:
-                    leading_good_drop_remaining -= 1
-                    continue
-
-                started_output = True
-                pcm_chunks.append(pcm)
-                success += 1
-                continue
-
-            opus_packet = p.get("opus_packet") or b""
-            if opus_packet == b"\xF8\xFF\xFE":
-                real_silence += 1
-                pcm = SILENCE_PCM
-            elif len(opus_packet) < 8:
-                failed += 1
-                opus_fail += 1
-                if packet_index <= 5:
-                    log.warning(
-                        "PACKET too short | idx=%d pkt=%d seq=%d ts=%d len=%d",
-                        idx,
-                        packet_index,
-                        p["sequence"],
-                        p["timestamp"],
-                        len(opus_packet),
-                    )
-                if not started_output and leading_bad_packets < VOICE_LEADING_DROP_MAX_PACKETS:
-                    leading_bad_packets += 1
-                    opus_silence_fill += 1
-                    started_output = True
-                    pcm_chunks.append(SILENCE_PCM)
-                    success += 1
-                    log.info(
-                        "LEADING short packet -> SILENCE | idx=%d pkt=%d seq=%d",
-                        idx,
-                        packet_index,
-                        p["sequence"],
-                    )
-                continue
+                decode_result = self._decode_fake_packet_pcm(
+                    idx=idx,
+                    packet_index=packet_index,
+                    packet=p,
+                    next_packet=next_packet,
+                )
             else:
-                try:
-                    pcm = self.opus_decoder.decode(opus_packet, fec=False)
-                except Exception as e:
-                    failed += 1
-                    opus_fail += 1
-                    if packet_index <= 5:
-                        log.warning(
-                            "PACKET OPUS failed | idx=%d pkt=%d seq=%d ts=%d bytes=%d err=%r",
-                            idx,
-                            packet_index,
-                            p["sequence"],
-                            p["timestamp"],
-                            len(opus_packet),
-                            e,
-                        )
+                decode_result = self._decode_opus_packet_pcm(
+                    idx=idx,
+                    packet_index=packet_index,
+                    packet=p,
+                    opus_packet=p.get("opus_packet") or b"",
+                    next_packet=next_packet,
+                    silence_pcm=SILENCE_PCM,
+                )
 
-                    pcm = b""
-                    next_packet = expanded_packets[packet_index] if packet_index < len(expanded_packets) else None
-                    if next_packet is not None and not next_packet.get("fake_packet"):
-                        next_opus = next_packet.get("opus_packet") or b""
-                        if next_opus not in (b"", b"\xF8\xFF\xFE"):
-                            try:
-                                pcm = self.opus_decoder.decode(next_opus, fec=True)
-                            except Exception:
-                                pcm = b""
-                            if pcm:
-                                fec_packets += 1
-                                log.info(
-                                    "PACKET OPUS corrupt -> FEC | idx=%d pkt=%d seq=%d next_seq=%d",
-                                    idx,
-                                    packet_index,
-                                    p["sequence"],
-                                    next_packet.get("sequence"),
-                                )
-                    if not pcm:
-                        try:
-                            pcm = self.opus_decoder.decode(None, fec=False)
-                        except Exception:
-                            pcm = b""
-                        if pcm:
-                            plc_packets += 1
-                            log.info(
-                                "PACKET OPUS corrupt -> PLC | idx=%d pkt=%d seq=%d",
-                                idx,
-                                packet_index,
-                                p["sequence"],
-                            )
-
-                    if not pcm and not started_output and leading_bad_packets < VOICE_LEADING_DROP_MAX_PACKETS:
-                        leading_bad_packets += 1
-                        opus_silence_fill += 1
-                        started_output = True
-                        pcm_chunks.append(SILENCE_PCM)
-                        success += 1
-                        log.info(
-                            "LEADING OPUS fail -> SILENCE | idx=%d pkt=%d seq=%d",
-                            idx,
-                            packet_index,
-                            p["sequence"],
-                        )
-                        continue
-                    if not pcm and OPUS_ERROR_TO_SILENCE:
-                        opus_silence_fill += 1
-                        pcm = SILENCE_PCM
-                    if not pcm:
-                        continue
+            failed += int(decode_result.get("failed") or 0)
+            opus_fail += int(decode_result.get("opus_fail") or 0)
+            plc_packets += int(decode_result.get("plc") or 0)
+            fec_packets += int(decode_result.get("fec") or 0)
+            real_silence += int(decode_result.get("real_silence") or 0)
+            opus_silence_fill += int(decode_result.get("opus_silence_fill") or 0)
+            pcm = decode_result.get("pcm") or b""
 
             if not pcm:
-                failed += 1
-                opus_fail += 1
+                inserted_silence, started_output, leading_bad_packets = self._maybe_insert_leading_silence(
+                    idx=idx,
+                    packet_index=packet_index,
+                    packet=p,
+                    started_output=started_output,
+                    leading_bad_packets=leading_bad_packets,
+                    pcm_chunks=pcm_chunks,
+                    silence_pcm=SILENCE_PCM,
+                    label=("LEADING fake packet" if p.get("fake_packet") else "LEADING OPUS fail"),
+                )
+                if inserted_silence:
+                    opus_silence_fill += 1
+                    success += 1
                 continue
 
-            stable_voice_packets += 1
-            if not started_output and stable_voice_packets < VOICE_START_STABLE_PACKETS:
-                continue
-            if not started_output and leading_good_drop_remaining > 0:
-                leading_good_drop_remaining -= 1
-                continue
-
-            started_output = True
-            pcm_chunks.append(pcm)
-            success += 1
+            started_output, stable_voice_packets, leading_good_drop_remaining, appended = self._apply_output_packet_gating(
+                pcm=pcm,
+                started_output=started_output,
+                stable_voice_packets=stable_voice_packets,
+                leading_good_drop_remaining=leading_good_drop_remaining,
+                pcm_chunks=pcm_chunks,
+            )
+            if appended:
+                success += 1
 
         decrypt_ms = (asyncio.get_running_loop().time() - processing_started_at) * 1000.0
         utterance_total_ms = self._latency_ms(utterance_started_at)
