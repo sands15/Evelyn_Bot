@@ -153,6 +153,12 @@ STT_WHISPER_WAKE_CONFIRM_BEST_OF = int(os.getenv("STT_WHISPER_WAKE_CONFIRM_BEST_
 STT_WHISPER_FULL_BEAM_SIZE = int(os.getenv("STT_WHISPER_FULL_BEAM_SIZE", "2"))
 # Whisper full STT best_of 값.
 STT_WHISPER_FULL_BEST_OF = int(os.getenv("STT_WHISPER_FULL_BEST_OF", "1"))
+# full STT 뒤에 더 무거운 2차 rescoring pass를 돌릴지 여부.
+STT_FULL_RESCORING_ENABLED = _env_flag("STT_FULL_RESCORING_ENABLED", "true")
+# 2차 full STT rescoring pass에서 쓸 beam size.
+STT_WHISPER_FULL_RESCORE_BEAM_SIZE = int(os.getenv("STT_WHISPER_FULL_RESCORE_BEAM_SIZE", "5"))
+# 2차 full STT rescoring pass에서 추가로 허용할 토큰 수.
+STT_FULL_RESCORE_EXTRA_TOKENS = int(os.getenv("STT_FULL_RESCORE_EXTRA_TOKENS", "96"))
 # wake word 정규화에 쓰는 fuzzy matching threshold.
 WAKE_FUZZY_THRESHOLD = float(os.getenv("WAKE_FUZZY_THRESHOLD", "0.72"))
 # wake가 잡혔을 때 너무 짧은 텍스트라도 남길 최소 길이.

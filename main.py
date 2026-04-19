@@ -191,6 +191,7 @@ def save_voice_debug_audio(
     final_text: str | None = None,
     debug_meta: dict | None = None,
     save_stt_audio: bool = True,
+    stt_meta: dict | None = None,
 ) -> None:
     if not VOICE_DEBUG_SAVE_AUDIO:
         return
@@ -242,6 +243,8 @@ def save_voice_debug_audio(
         }
         if debug_meta is not None:
             meta["voice_receive"] = debug_meta
+        if stt_meta is not None:
+            meta["stt"] = stt_meta
         meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
         _trim_voice_debug_dir(guild_dir)
         stt_log = str(stt_path) if save_stt_audio else "[SKIPPED]"
@@ -1192,6 +1195,8 @@ def transcribe_audio16k_sync(audio16k: np.ndarray, max_new_tokens: int = 256, *,
 
     if stage == "full":
         beam_size = max(1, STT_WHISPER_FULL_BEAM_SIZE)
+    elif stage == "full-rescore":
+        beam_size = max(1, STT_WHISPER_FULL_RESCORE_BEAM_SIZE)
     elif stage == "wake-confirm":
         beam_size = max(1, STT_WHISPER_WAKE_CONFIRM_BEAM_SIZE)
     else:
@@ -1232,6 +1237,79 @@ def transcribe_audio16k_sync(audio16k: np.ndarray, max_new_tokens: int = 256, *,
 
     text = processor.batch_decode(outputs, skip_special_tokens=True)[0]
     return clean_text(text)
+
+
+def score_stt_candidate(text: str, *, wake_probe: str = "") -> float:
+    text = clean_text(text)
+    if not text:
+        return -100.0
+
+    normalized = normalize_voice_text(text)
+    if not normalized:
+        return -80.0
+
+    compact = normalized.replace(" ", "")
+    token_count = len([t for t in normalized.split() if t])
+    hangul_alnum_count = len(re.findall(r"[가-힣A-Za-z0-9]", text))
+    unique_chars = len(set(compact))
+    unique_ratio = unique_chars / max(1, len(compact))
+
+    score = 0.0
+    score += min(24.0, len(compact) * 0.75)
+    score += min(6.0, token_count * 0.6)
+    score += min(8.0, hangul_alnum_count * 0.15)
+    score += unique_ratio * 2.0
+
+    if contains_wake_word(text):
+        score += 10.0
+    if wake_probe:
+        wake_probe_n = normalize_voice_text(wake_probe)
+        if wake_probe_n and wake_probe_n in normalized:
+            score += 2.0
+
+    if looks_like_brief_filler_text(text):
+        score -= 14.0
+    if looks_like_repetitive_noise_text(text):
+        score -= 16.0
+    if re.search(r"(.)\1{3,}", compact):
+        score -= 6.0
+    if len(compact) <= 2:
+        score -= 4.0
+
+    return score
+
+
+def choose_full_stt_candidate(primary_text: str, rescore_text: str, *, wake_probe: str = "") -> tuple[str, dict]:
+    primary = clean_text(primary_text)
+    rescore = clean_text(rescore_text)
+    primary_score = score_stt_candidate(primary, wake_probe=wake_probe)
+    rescore_score = score_stt_candidate(rescore, wake_probe=wake_probe)
+
+    choice = "primary"
+    chosen_text = primary
+
+    if not primary and rescore:
+        choice = "rescore"
+        chosen_text = rescore
+    elif rescore and not is_similar(primary, rescore):
+        if rescore_score >= primary_score + 1.5:
+            choice = "rescore"
+            chosen_text = rescore
+        elif contains_wake_word(rescore) and not contains_wake_word(primary) and rescore_score >= primary_score:
+            choice = "rescore"
+            chosen_text = rescore
+        elif len(normalize_voice_text(rescore).replace(" ", "")) >= len(normalize_voice_text(primary).replace(" ", "")) + 3 and rescore_score > primary_score:
+            choice = "rescore"
+            chosen_text = rescore
+
+    return chosen_text, {
+        "enabled": True,
+        "primary_text": primary,
+        "primary_score": round(primary_score, 3),
+        "rescore_text": rescore,
+        "rescore_score": round(rescore_score, 3),
+        "selected": choice,
+    }
 
 
 def detect_wake_word_sync(audio: np.ndarray, *, sampling_rate: int = TARGET_RATE) -> tuple[bool, str, str]:
@@ -1818,17 +1896,43 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes, 
 
     print(f"[FULL STT ENTER] speaker={member.display_name} sampling_rate={stt_sampling_rate} samples={audio16k.size} wake_detected={wake_detected}")
     log_voice_stage(metrics, "본문 STT 시작", extra=f"samples={audio16k.size}")
+    stt_meta: dict | None = None
     try:
-        text = await asyncio.to_thread(transcribe_audio16k_sync, audio16k, VOICE_STT_MAX_NEW_TOKENS, sampling_rate=stt_sampling_rate, stage="full")
+        primary_text = await asyncio.to_thread(transcribe_audio16k_sync, audio16k, VOICE_STT_MAX_NEW_TOKENS, sampling_rate=stt_sampling_rate, stage="full")
     except Exception as e:
         print(f"❌ [STT] {e}")
         log_voice_stage(metrics, "본문 STT 실패", extra=repr(e))
         return
 
+    text = primary_text
+    if STT_FULL_RESCORING_ENABLED:
+        log_voice_stage(metrics, "본문 STT 2차 rescoring 시작")
+        try:
+            rescore_text = await asyncio.to_thread(
+                transcribe_audio16k_sync,
+                audio16k,
+                VOICE_STT_MAX_NEW_TOKENS + max(0, STT_FULL_RESCORE_EXTRA_TOKENS),
+                sampling_rate=stt_sampling_rate,
+                stage="full-rescore",
+            )
+            text, stt_meta = choose_full_stt_candidate(primary_text, rescore_text, wake_probe=wake_probe)
+            print(
+                f"[STT RESCORE] speaker={member.display_name} selected={stt_meta['selected']} primary_score={stt_meta['primary_score']:.3f} rescore_score={stt_meta['rescore_score']:.3f}"
+            )
+            if stt_meta["selected"] == "rescore":
+                print(f"[STT RESCORE PICK] primary={primary_text!r} -> rescore={rescore_text!r}")
+            log_voice_stage(metrics, "본문 STT 2차 rescoring 완료", extra=f"selected={stt_meta['selected']}")
+        except Exception as e:
+            stt_meta = {"enabled": True, "selected": "primary", "rescore_error": repr(e), "primary_text": primary_text}
+            print(f"⚠️ [STT RESCORE FAIL] {e}")
+            log_voice_stage(metrics, "본문 STT 2차 rescoring 실패", extra=repr(e))
+    else:
+        stt_meta = {"enabled": False, "selected": "primary", "primary_text": primary_text}
+
     log_voice_stage(metrics, "본문 STT 완료", extra=f"text_len={len(text)}")
 
     if not text:
-        save_voice_debug_audio(guild_id, speaker_name, pcm_bytes, audio16k, wake_probe=wake_probe, final_text="[EMPTY STT]", debug_meta=debug_meta)
+        save_voice_debug_audio(guild_id, speaker_name, pcm_bytes, audio16k, wake_probe=wake_probe, final_text="[EMPTY STT]", debug_meta=debug_meta, stt_meta=stt_meta)
         log_voice_stage(metrics, "본문 STT 빈 결과")
         return
 
@@ -1839,11 +1943,11 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes, 
 
     if should_ignore_short_transcription(text, pcm_bytes, wake_detected=wake_detected):
         print(f"[STT IGNORE] short_noise: {text!r}")
-        save_voice_debug_audio(guild_id, speaker_name, pcm_bytes, audio16k, wake_probe=wake_probe, final_text=text, debug_meta=debug_meta)
+        save_voice_debug_audio(guild_id, speaker_name, pcm_bytes, audio16k, wake_probe=wake_probe, final_text=text, debug_meta=debug_meta, stt_meta=stt_meta)
         log_voice_stage(metrics, "짧은 STT 무시", extra=f"text={text!r}")
         return
 
-    save_voice_debug_audio(guild_id, speaker_name, pcm_bytes, audio16k, wake_probe=wake_probe, final_text=text, debug_meta=debug_meta)
+    save_voice_debug_audio(guild_id, speaker_name, pcm_bytes, audio16k, wake_probe=wake_probe, final_text=text, debug_meta=debug_meta, stt_meta=stt_meta)
     print(f"🎤 [{member.display_name}] wake={wake_probe!r} text={text}")
 
     ok, reason = should_reply_to_voice(guild_id, text, wake_detected=wake_detected)
