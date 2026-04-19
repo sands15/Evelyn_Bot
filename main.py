@@ -630,6 +630,22 @@ def should_require_confirm_exact_for_wake(debug_meta: dict | None) -> bool:
     return False
 
 
+def is_transport_corrupted_audio(debug_meta: dict | None) -> bool:
+    if not debug_meta:
+        return False
+    reasons = [str(reason) for reason in (debug_meta.get("reasons") or [])]
+    required_markers = ("opus_fail", "plc", "fec", "front_burst_detected", "heavy_trim_ms", "burst_trim_ms")
+    reason_hits = {marker: any(marker in reason for reason in reasons) for marker in required_markers}
+    return (
+        (reason_hits["opus_fail"] or int(debug_meta.get("opus_fail") or 0) >= 4)
+        and (reason_hits["plc"] or int(debug_meta.get("plc_packets") or 0) >= 2)
+        and (reason_hits["fec"] or int(debug_meta.get("fec_packets") or 0) >= 2)
+        and (reason_hits["front_burst_detected"] or bool(debug_meta.get("front_burst_detected")))
+        and (reason_hits["heavy_trim_ms"] or float(debug_meta.get("trim_ms") or 0.0) >= 220.0)
+        and (reason_hits["burst_trim_ms"] or float(debug_meta.get("burst_trim_ms") or 0.0) >= 140.0)
+    )
+
+
 def is_tail_fragment_candidate(
     *,
     session_key: str | None,
@@ -3547,7 +3563,7 @@ async def _process_member_audio_impl(
         turn_id=turn_id,
         segment_id=segment_id,
     )
-    log_voice_stage(metrics, "process_member_audio 시작", extra=f"speaker={member.display_name} pcm_bytes={len(pcm_bytes)}")
+    log_voice_stage(metrics, "voice_worker_turn 시작", extra=f"speaker={member.display_name} pcm_bytes={len(pcm_bytes)}")
 
     if STT_USE_RAW_48K:
         audio16k = downmix_int16_stereo_to_mono_float(pcm_bytes)
@@ -3585,16 +3601,32 @@ async def _process_member_audio_impl(
         return
 
     unstable_audio = bool(debug_meta and debug_meta.get("unstable"))
+    transport_corrupted = is_transport_corrupted_audio(debug_meta)
     if unstable_audio:
         reasons = ",".join(str(r) for r in debug_meta.get("reasons", []))
-        print(f"[FULL STT CONTINUE] reason=unstable_audio speaker={member.display_name} reasons={reasons}")
-        print(f"[UNSTABLE AUDIO CONTINUE] speaker={member.display_name} reasons={reasons}")
-        log_voice_stage(metrics, "불안정 음성이지만 본문 STT 진행", extra=f"reasons={reasons}")
+        print(f"[UNSTABLE AUDIO] speaker={member.display_name} reasons={reasons}")
+        log_voice_stage(metrics, "불안정 음성 감지", extra=f"reasons={reasons}")
 
     duration_sec = len(audio16k) / float(max(1, stt_sampling_rate))
     waveform_stats = compute_waveform_activity_stats(audio16k, sampling_rate=stt_sampling_rate)
     voiced_ms = float(waveform_stats.get("voiced_ms") or 0.0)
     longest_voiced_ms = float(waveform_stats.get("longest_voiced_ms") or 0.0)
+    if transport_corrupted and raw_seconds <= max(1.4, TAIL_FRAGMENT_MAX_RAW_SEC + 0.5):
+        register_drop_reason(
+            metrics,
+            "transport_corrupted",
+            session_key=session_key,
+            raw_seconds=round(raw_seconds, 3),
+            voiced_ms=round(voiced_ms, 1),
+            longest_voiced_ms=round(longest_voiced_ms, 1),
+        )
+        log_voice_stage(
+            metrics,
+            "transport corrupted 조기 종료",
+            extra=f"raw_seconds={raw_seconds:.3f} voiced_ms={voiced_ms:.0f} longest_ms={longest_voiced_ms:.0f}",
+        )
+        log_voice_bottleneck_summary(metrics, label="voice_reply", extra="drop=transport_corrupted")
+        return
     if is_tail_fragment_candidate(
         session_key=session_key,
         raw_seconds=raw_seconds,
@@ -3625,7 +3657,7 @@ async def _process_member_audio_impl(
         longest_voiced_ms = float(waveform_stats.get("longest_voiced_ms") or 0.0)
         body_rms = float(waveform_stats.get("body_rms") or 0.0)
         body_peak = float(waveform_stats.get("body_peak") or 0.0)
-        waveform_override = voiced_ms >= VOICE_WAVEFORM_MIN_VOICED_MS and (
+        waveform_override = (not transport_corrupted) and voiced_ms >= VOICE_WAVEFORM_MIN_VOICED_MS and (
             longest_voiced_ms >= VOICE_WAVEFORM_MIN_RUN_MS
             or body_rms >= VOICE_WAVEFORM_BODY_RMS_MIN
             or body_peak >= VOICE_WAVEFORM_BODY_PEAK_MIN
@@ -3682,20 +3714,22 @@ async def _process_member_audio_impl(
     )
 
     active_session = is_session_active_for_user(session_key, member.id)
-    if not active_session and not wake_detected:
+    hard_drop_reasons = {"unstable_audio", "gibberish_probe", "probe_miss", "confirm_miss", "wake_probe_low_signal", "full_text_veto", "transport_corrupted"}
+    if not wake_detected:
         reject_reason = wake_reject_reason or "confirm_miss"
-        register_drop_reason(
-            metrics,
-            reject_reason,
-            session_key=session_key,
-            wake_probe_text=wake_probe,
-            wake_confirm_text=wake_confirm,
-            wake_match_mode=wake_match_mode,
-            wake_alias=wake_alias,
-        )
-        log_voice_stage(metrics, "패시브 웨이크 거부", extra=f"wake_reject_reason={reject_reason} wake_match_mode={wake_match_mode}")
-        log_voice_bottleneck_summary(metrics, label="voice_reply", extra=f"drop={reject_reason}")
-        return
+        if (not active_session) or (reject_reason in hard_drop_reasons):
+            register_drop_reason(
+                metrics,
+                reject_reason,
+                session_key=session_key,
+                wake_probe_text=wake_probe,
+                wake_confirm_text=wake_confirm,
+                wake_match_mode=wake_match_mode,
+                wake_alias=wake_alias,
+            )
+            log_voice_stage(metrics, "웨이크 거부", extra=f"wake_reject_reason={reject_reason} wake_match_mode={wake_match_mode} active_session={active_session}")
+            log_voice_bottleneck_summary(metrics, label="voice_reply", extra=f"drop={reject_reason}")
+            return
     env_noise_candidate = is_likely_environment_noise(audio_for_wake, sampling_rate=wake_sampling_rate)
     filler_candidate = looks_like_brief_filler_text(wake_probe)
     repetitive_noise_candidate = looks_like_repetitive_noise_text(wake_probe)
@@ -3943,7 +3977,7 @@ async def _process_member_audio_impl(
             answer_text=plain_answer,
             user_text=history_user_text,
         )
-        log_voice_stage(metrics, "process_member_audio 완료", extra=f"speaker={member.display_name}")
+        log_voice_stage(metrics, "voice_worker_turn 완료", extra=f"speaker={member.display_name}")
 
 
 # =========================================================
