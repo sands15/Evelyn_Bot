@@ -66,6 +66,8 @@ intents.members = True
 guild_prefix_cache: dict[int, str] = {}
 session_histories: dict[str, list[dict]] = {}
 session_followup_targets: dict[str, dict[str, int]] = {}
+active_session_until: dict[str, float] = {}
+active_session_user_ids: dict[str, int] = {}
 background_search_tasks: dict[str, asyncio.Task] = {}
 
 
@@ -127,6 +129,7 @@ last_bot_audio_end_at: dict[int, float] = {}
 bot_speaking_guilds: set[int] = set()
 memory_locks: dict[int, asyncio.Lock] = {}
 cognitive_locks: dict[int, asyncio.Lock] = {}
+background_cognitive_tasks: dict[int, asyncio.Task] = {}
 
 
 # =========================================================
@@ -159,6 +162,22 @@ def remember_session_followup_target(session_key: str, *, channel_id: int | None
     session_followup_targets[session_key] = {"channel_id": channel_id}
 
 
+def mark_session_active(session_key: str, *, user_id: int | None = None, ttl_sec: float = 90.0) -> None:
+    active_session_until[session_key] = time.monotonic() + ttl_sec
+    if user_id is not None:
+        active_session_user_ids[session_key] = user_id
+
+
+def is_session_active_for_user(session_key: str, user_id: int | None = None) -> bool:
+    expires_at = active_session_until.get(session_key, 0.0)
+    if expires_at <= time.monotonic():
+        return False
+    remembered_user = active_session_user_ids.get(session_key)
+    if remembered_user is not None and user_id is not None and remembered_user != user_id:
+        return False
+    return True
+
+
 def get_conversation_history(*, session_key: str | None = None, guild_id: int | None = None) -> list[dict]:
     resolved = runtime_session_key(session_key=session_key, guild_id=guild_id)
     if resolved is None:
@@ -185,6 +204,9 @@ def reset_guild_runtime_state(guild_id: int) -> None:
         session_histories.pop(key, None)
     for key in [key for key in session_followup_targets if key.startswith(prefix)]:
         session_followup_targets.pop(key, None)
+    for key in [key for key in active_session_until if key.startswith(prefix)]:
+        active_session_until.pop(key, None)
+        active_session_user_ids.pop(key, None)
     for key in [key for key in session_locks if key.startswith(prefix)]:
         session_locks.pop(key, None)
     for key, task in list(background_search_tasks.items()):
@@ -198,6 +220,9 @@ def reset_guild_runtime_state(guild_id: int) -> None:
     bot_speaking_guilds.discard(guild_id)
     memory_locks.pop(guild_id, None)
     cognitive_locks.pop(guild_id, None)
+    task = background_cognitive_tasks.pop(guild_id, None)
+    if task is not None and not task.done():
+        task.cancel()
 
 
 def _sanitize_debug_label(value: str | None, *, fallback: str = "unknown") -> str:
@@ -316,9 +341,17 @@ def should_ignore_short_transcription(
     return False
 
 
-def should_reply_to_voice(guild_id: int, text: str, *, wake_detected: bool = False) -> tuple[bool, str]:
+def should_reply_to_voice(
+    guild_id: int,
+    text: str,
+    *,
+    wake_detected: bool = False,
+    session_key: str | None = None,
+    user_id: int | None = None,
+) -> tuple[bool, str]:
     now = time.monotonic()
     text_n = normalize_voice_text(text)
+    active_session = session_key is not None and is_session_active_for_user(session_key, user_id)
 
     if guild_id in bot_speaking_guilds:
         return False, "bot_is_speaking"
@@ -329,10 +362,10 @@ def should_reply_to_voice(guild_id: int, text: str, *, wake_detected: bool = Fal
     if not text_n:
         return False, "empty"
 
-    if not wake_detected and not contains_wake_word(text_n):
+    if not wake_detected and not contains_wake_word(text_n) and not active_session:
         return False, "no_wake_word"
 
-    if len(text_n) < MIN_TEXT_LEN and not wake_detected:
+    if len(text_n) < MIN_TEXT_LEN and not wake_detected and not active_session:
         return False, "too_short"
 
     if now - last_voice_reply_at.get(guild_id, 0.0) < REPLY_COOLDOWN_SEC:
@@ -348,6 +381,20 @@ def should_reply_to_voice(guild_id: int, text: str, *, wake_detected: bool = Fal
 
 def ask_confidence_threshold_for_source(source: str) -> float:
     return ASK_CONFIDENCE_THRESHOLD_VOICE if source == "voice" else ASK_CONFIDENCE_THRESHOLD_TEXT
+
+
+def should_skip_full_stt_after_wake_probe(*, wake_detected: bool, wake_probe: str, duration_sec: float) -> bool:
+    if wake_detected:
+        return False
+
+    probe = clean_text(wake_probe)
+    if not probe and duration_sec <= 1.8:
+        return True
+    if looks_like_brief_filler_text(probe) and duration_sec <= 1.8:
+        return True
+    if looks_like_repetitive_noise_text(probe):
+        return True
+    return False
 
 
 def apply_ask_gating(cognitive_state: dict | None = None, *, source: str = "text") -> dict:
@@ -366,6 +413,53 @@ def apply_ask_gating(cognitive_state: dict | None = None, *, source: str = "text
             return gated
 
     return state
+
+
+def policy_response_for_state(cognitive_state: dict | None = None, *, source: str = "text") -> str | None:
+    state = apply_ask_gating(cognitive_state, source=source)
+    action = state.get("action", "answer")
+
+    if action == "ask":
+        question = clean_text(str(state.get("question_for_user", "")))
+        if question:
+            return question
+        return None
+
+    if action == "wait":
+        return "응, 계속 말해줘." if source == "voice" else "잠깐, 이어서 말해줘."
+
+    return None
+
+
+def read_cached_cognitive_state(guild_id: int | None) -> dict | None:
+    if guild_id is None:
+        return None
+    cached = read_json_file(cognitive_state_path(guild_id))
+    return normalize_cognitive_state(cached) if cached else None
+
+
+async def refresh_cognitive_state_in_background(guild_id: int, user_text: str, *, reason: str) -> None:
+    try:
+        await update_cognitive_state(guild_id, user_text)
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        print(f"[COGNITIVE] background refresh 실패 guild={guild_id} reason={reason} err={e!r}")
+    finally:
+        task = background_cognitive_tasks.get(guild_id)
+        if task is asyncio.current_task():
+            background_cognitive_tasks.pop(guild_id, None)
+
+
+def schedule_cognitive_refresh(guild_id: int | None, user_text: str, *, reason: str) -> None:
+    if guild_id is None:
+        return
+    existing = background_cognitive_tasks.get(guild_id)
+    if existing is not None and not existing.done():
+        existing.cancel()
+    background_cognitive_tasks[guild_id] = asyncio.create_task(
+        refresh_cognitive_state_in_background(guild_id, user_text, reason=reason)
+    )
 
 
 def build_main_response_guidance(cognitive_state: dict | None = None, *, source: str = "text") -> str:
@@ -467,8 +561,18 @@ async def prepare_llm_messages(
     cognitive_state: dict | None = None
 
     cognitive_started_at = time.monotonic()
-    if guild_id is not None:
+    cached_cognitive_state = read_cached_cognitive_state(guild_id)
+    should_block_on_cognitive = guild_id is not None and (cached_cognitive_state is None or route == "sub_wait")
+    if should_block_on_cognitive and guild_id is not None:
         cognitive_state = await update_cognitive_state(guild_id, user_text)
+        if metrics is not None:
+            metrics.setdefault("meta", {})["cognitive_mode"] = "blocking"
+    else:
+        cognitive_state = cached_cognitive_state
+        if guild_id is not None:
+            schedule_cognitive_refresh(guild_id, user_text, reason=f"{source}:{route}")
+        if metrics is not None:
+            metrics.setdefault("meta", {})["cognitive_mode"] = "background"
     if metrics is not None:
         metrics.setdefault("marks", {})["cognitive_ready"] = (time.monotonic() - cognitive_started_at) * 1000.0
 
@@ -2094,6 +2198,10 @@ async def ask_llm_once(
         debug_text=debug_text,
     )
 
+    policy_response = policy_response_for_state(cognitive_state, source=source)
+    if policy_response:
+        return policy_response
+
     guided_user_text = user_text
     gated_state = apply_ask_gating(cognitive_state, source=source) if cognitive_state is not None else None
     if gated_state and gated_state.get("action") == "ask" and gated_state.get("question_for_user"):
@@ -2217,6 +2325,17 @@ async def ask_llm_streaming(
         debug_text=debug_text,
         metrics=metrics,
     )
+
+    policy_response = policy_response_for_state(cognitive_state, source=source)
+    if policy_response:
+        if on_first_chunk is not None:
+            on_first_chunk()
+        if on_sentence is not None:
+            await on_sentence(policy_response)
+        if metrics is not None:
+            metrics.setdefault("marks", {})["policy_short_circuit"] = (time.monotonic() - float(metrics.get("started_at", time.monotonic()))) * 1000.0
+            metrics.setdefault("marks", {})["llm_done"] = (time.monotonic() - float(metrics.get("started_at", time.monotonic()))) * 1000.0
+        return policy_response
 
     guided_user_text = user_text
     gated_state = apply_ask_gating(cognitive_state, source=source) if cognitive_state is not None else None
@@ -2565,6 +2684,11 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes, 
         print(f"[FULL STT CONTINUE] reason=wake_ignore speaker={member.display_name} probe={wake_probe!r}")
         if wake_probe:
             print(f"[WAKE IGNORE] {member.display_name}: {wake_probe!r}")
+        if should_skip_full_stt_after_wake_probe(wake_detected=wake_detected, wake_probe=wake_probe, duration_sec=duration_sec):
+            print(f"[FULL STT SKIP] reason=wake_probe_low_signal speaker={member.display_name} probe={wake_probe!r} sec={duration_sec:.2f}")
+            save_voice_debug_audio(guild_id, speaker_name, pcm_bytes, audio16k, wake_probe=wake_probe, final_text="[WAKE PROBE SKIP]", debug_meta=debug_meta)
+            log_voice_stage(metrics, "웨이크 프로브 기반 조기 종료", extra=f"probe={wake_probe!r} sec={duration_sec:.2f}")
+            return
         log_voice_stage(metrics, "웨이크 미검출이지만 본문 STT 진행", extra=f"probe={wake_probe!r}")
 
     print(f"[FULL STT ENTER] speaker={member.display_name} sampling_rate={stt_sampling_rate} samples={audio16k.size} wake_detected={wake_detected}")
@@ -2623,7 +2747,14 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes, 
     save_voice_debug_audio(guild_id, speaker_name, pcm_bytes, audio16k, wake_probe=wake_probe, final_text=text, debug_meta=debug_meta, stt_meta=stt_meta)
     print(f"🎤 [{member.display_name}] wake={wake_probe!r} text={text}")
 
-    ok, reason = should_reply_to_voice(guild_id, text, wake_detected=wake_detected)
+    voice_session_key = make_voice_session_key(guild_id, getattr(getattr(guild.voice_client, "channel", None), "id", None))
+    ok, reason = should_reply_to_voice(
+        guild_id,
+        text,
+        wake_detected=wake_detected,
+        session_key=voice_session_key,
+        user_id=member.id,
+    )
     if not ok:
         print(f"[STT IGNORE] {reason}: {text!r}")
         log_voice_stage(metrics, "응답 차단", extra=f"reason={reason}")
@@ -2693,6 +2824,7 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes, 
             channel_id=None,
             source="search-followup-voice",
         )
+        mark_session_active(session_key, user_id=member.id, ttl_sec=45.0)
         log_voice_stage(metrics, "process_member_audio 완료", extra=f"speaker={member.display_name}")
 
 
@@ -2730,6 +2862,7 @@ async def on_message(message: discord.Message):
 
     is_wake_word = contains_wake_word(message.content)
     is_reply = False
+    is_active_session = is_session_active_for_user(session_key, message.author.id)
 
     if message.reference:
         try:
@@ -2739,7 +2872,7 @@ async def on_message(message: discord.Message):
         except Exception as e:
             print("답장 확인 오류:", repr(e))
 
-    if not (is_wake_word or is_reply):
+    if not (is_wake_word or is_reply or is_active_session):
         await bot.process_commands(message)
         return
 
@@ -2792,6 +2925,8 @@ async def on_message(message: discord.Message):
                 channel_id=message.channel.id,
                 source="search-followup-text",
             )
+
+            mark_session_active(session_key, user_id=message.author.id, ttl_sec=90.0)
 
             if vc is not None:
                 await speak_answer(vc, answer)
