@@ -427,11 +427,8 @@ async def prepare_llm_messages(
     cognitive_state: dict | None = None
 
     cognitive_started_at = time.monotonic()
-    if guild_id is not None and route == "sub_wait":
+    if guild_id is not None:
         cognitive_state = await update_cognitive_state(guild_id, user_text)
-    elif guild_id is not None and route == "sub_hint":
-        saved_state = read_json_file(cognitive_state_path(guild_id))
-        cognitive_state = normalize_cognitive_state(saved_state) if saved_state else None
     if metrics is not None:
         metrics.setdefault("marks", {})["cognitive_ready"] = (time.monotonic() - cognitive_started_at) * 1000.0
 
