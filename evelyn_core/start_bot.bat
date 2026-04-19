@@ -7,6 +7,9 @@ pushd "%~dp0.."
 call :wait_for_port 127.0.0.1 %MAIN_LLM_PORT% Main-LLM
 if errorlevel 1 goto :fail
 
+call :wait_for_port 127.0.0.1 %ROUTER_LLM_PORT% Router-LLM
+if errorlevel 1 goto :fail
+
 call :wait_for_port 127.0.0.1 %SUB_LLM_PORT% Sub-LLM
 if errorlevel 1 goto :fail
 

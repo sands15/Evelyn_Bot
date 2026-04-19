@@ -8,12 +8,14 @@ if not exist "%OMNIVOICE_PROFILE_DIR%" mkdir "%OMNIVOICE_PROFILE_DIR%"
 where wt >nul 2>nul
 if errorlevel 1 (
     call "%~dp0start_main_llm.bat"
+    call "%~dp0start_router_llm.bat"
     call "%~dp0start_sub_llm.bat"
     call "%~dp0start_tts.bat"
     call "%~dp0start_bot.bat"
 ) else (
     wt ^
       new-tab --title "Main-LLM" wsl.exe bash -lc "%VENV_ACT% && export CUDA_VISIBLE_DEVICES=%MAIN_LLM_GPU% && MODEL_PATH='%MAIN_LLM_MODEL%' && if [ -z \"$MODEL_PATH\" ]; then SNAPSHOT=$(cat '%MAIN_LLM_MODEL_REPO%/refs/main' 2>/dev/null) && MODEL_PATH='%MAIN_LLM_MODEL_REPO%/snapshots/'\"$SNAPSHOT\"'/%MAIN_LLM_MODEL_FILE%'; fi && if [ ! -f \"$MODEL_PATH\" ]; then echo '[Main-LLM] model file not found:' \"$MODEL_PATH\"; exit 1; fi && cd %LLAMA_DIR% && ./build/bin/llama-server -m \"$MODEL_PATH\" --host 0.0.0.0 --port %MAIN_LLM_PORT% --flash-attn on -ngl 999 -c %MAIN_LLM_CONTEXT% --reasoning on --reasoning-budget %MAIN_LLM_REASONING_BUDGET%" ^
+      ; new-tab --title "Router-LLM" wsl.exe bash -lc "%VENV_ACT% && export CUDA_VISIBLE_DEVICES=%ROUTER_LLM_GPU% && MODEL_PATH='%ROUTER_LLM_MODEL%' && if [ ! -f \"$MODEL_PATH\" ]; then echo '[Router-LLM] model file not found:' \"$MODEL_PATH\"; exit 1; fi && cd %LLAMA_DIR% && ./build/bin/llama-server -m \"$MODEL_PATH\" --host 0.0.0.0 --port %ROUTER_LLM_PORT% --flash-attn on -ngl 999 -c %ROUTER_LLM_CONTEXT% --reasoning on --reasoning-budget %ROUTER_LLM_REASONING_BUDGET%" ^
       ; new-tab --title "Sub-LLM" wsl.exe bash -lc "%VENV_ACT% && export CUDA_VISIBLE_DEVICES=%SUB_LLM_GPU% && MODEL_PATH='%SUB_LLM_MODEL%' && if [ -z \"$MODEL_PATH\" ]; then SNAPSHOT=$(cat '%SUB_LLM_MODEL_REPO%/refs/main' 2>/dev/null) && MODEL_PATH='%SUB_LLM_MODEL_REPO%/snapshots/'\"$SNAPSHOT\"'/%SUB_LLM_MODEL_FILE%'; fi && if [ ! -f \"$MODEL_PATH\" ]; then echo '[Sub-LLM] model file not found:' \"$MODEL_PATH\"; exit 1; fi && cd %LLAMA_DIR% && ./build/bin/llama-server -m \"$MODEL_PATH\" --host 0.0.0.0 --port %SUB_LLM_PORT% --flash-attn on -ngl 999 -c %SUB_LLM_CONTEXT% --reasoning on --reasoning-budget %SUB_LLM_REASONING_BUDGET%" ^
       ; new-tab --title "TTS" powershell.exe -NoExit -ExecutionPolicy Bypass -File "%~dp0start_tts.ps1" ^
       ; new-tab --title "Bot" powershell.exe -NoExit -ExecutionPolicy Bypass -File "%~dp0start_bot.ps1"

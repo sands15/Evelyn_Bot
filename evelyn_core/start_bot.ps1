@@ -41,10 +41,12 @@ $env:OPUS_ERROR_TO_SILENCE = if ($env:OPUS_ERROR_TO_SILENCE) { $env:OPUS_ERROR_T
 $env:STT_USE_RAW_48K = if ($env:STT_USE_RAW_48K) { $env:STT_USE_RAW_48K } else { 'false' }
 
 $mainPort = if ($env:MAIN_LLM_PORT) { [int]$env:MAIN_LLM_PORT } else { 9820 }
+$routerPort = if ($env:ROUTER_LLM_PORT) { [int]$env:ROUTER_LLM_PORT } else { 9822 }
 $subPort = if ($env:SUB_LLM_PORT) { [int]$env:SUB_LLM_PORT } else { 9821 }
 $ttsPort = if ($env:TTS_PORT) { [int]$env:TTS_PORT } else { 8880 }
 
 Wait-Port -HostName '127.0.0.1' -Port $mainPort -Label 'Main-LLM'
+Wait-Port -HostName '127.0.0.1' -Port $routerPort -Label 'Router-LLM'
 Wait-Port -HostName '127.0.0.1' -Port $subPort -Label 'Sub-LLM'
 Wait-Port -HostName '127.0.0.1' -Port $ttsPort -Label 'OmniVoice-TTS'
 

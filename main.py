@@ -364,7 +364,16 @@ def build_main_response_guidance(cognitive_state: dict | None = None, *, source:
     return " ".join(clean_text(part) for part in parts if clean_text(part))
 
 
-def classify_llm_route(user_text: str, *, source: str = "text") -> str:
+def normalize_route_name(value: str) -> str:
+    route = clean_text(value).lower()
+    if route in {"subwait", "sub_wait", "wait", "fresh_sub", "fresh-sub"}:
+        return "sub_wait"
+    if route in {"subhint", "sub_hint", "hint", "cached_sub", "cached-sub"}:
+        return "sub_hint"
+    return "main_direct"
+
+
+def classify_llm_route_fallback(user_text: str, *, source: str = "text") -> str:
     text = clean_text(user_text)
     if source == "voice":
         return "main_direct"
@@ -393,7 +402,7 @@ async def prepare_llm_messages(
     source: str = "text",
     debug_text: str | None = None,
 ) -> tuple[list[dict], dict | None, str]:
-    route = classify_llm_route(user_text, source=source)
+    route, route_meta = await classify_llm_route_async(user_text, guild_id=guild_id, source=source)
     messages = list(get_conversation_history(guild_id))
     cognitive_state: dict | None = None
 
@@ -423,7 +432,12 @@ async def prepare_llm_messages(
             cognitive_state = gated_state
 
     route_text = debug_text if debug_text is not None else user_text
-    print(f"[LLM ROUTE] source={source} route={route} text={visible_text(route_text)!r}")
+    if route_meta and route_meta.get("source") == "router":
+        print(
+            f"[LLM ROUTE] source={source} route={route} via=router confidence={float(route_meta.get('confidence', 0.0) or 0.0):.2f} reason={route_meta.get('reason_brief', '')!r} text={visible_text(route_text)!r}"
+        )
+    else:
+        print(f"[LLM ROUTE] source={source} route={route} via=fallback text={visible_text(route_text)!r}")
     return messages, cognitive_state, route
 
 
@@ -547,6 +561,95 @@ async def ask_summary_llm(
         return extract_json_object(text)
 
 
+async def ask_router_llm(
+    messages: list[dict],
+    *,
+    max_tokens: int,
+    timeout_seconds: float,
+) -> dict:
+    session = await get_http_session()
+    payload = {
+        "model": ROUTER_MODEL_NAME,
+        "messages": messages,
+        "temperature": 0.1,
+        "max_tokens": max_tokens,
+        "stream": False,
+    }
+    timeout = aiohttp.ClientTimeout(total=timeout_seconds)
+
+    async with session.post(ROUTER_LLM_URL, json=payload, timeout=timeout) as resp:
+        if resp.status != 200:
+            error_text = await resp.text()
+            raise RuntimeError(f"router LLM 서버 오류: {resp.status} / {error_text[:300]}")
+
+        data = await resp.json()
+        choices = data.get("choices", [])
+        if not choices:
+            return {}
+
+        msg = choices[0].get("message", {})
+        text = clean_text(msg.get("content", "") or msg.get("reasoning_content", ""))
+        return extract_json_object(text)
+
+
+async def classify_llm_route_async(user_text: str, *, guild_id: int | None = None, source: str = "text") -> tuple[str, dict | None]:
+    fallback_route = classify_llm_route_fallback(user_text, source=source)
+    if source == "voice" or not ROUTER_LLM_ENABLED:
+        return fallback_route, {"selected": fallback_route, "source": "fallback"}
+
+    summary = compact_working_summary(read_text_file(memory_summary_path(guild_id))) if guild_id is not None else ""
+    state = normalize_cognitive_state(read_json_file(cognitive_state_path(guild_id))) if guild_id is not None else normalize_cognitive_state({})
+    recent_raw = read_jsonl(memory_raw_path(guild_id))[-3:] if guild_id is not None else []
+    recent_facts = read_fact_rows(guild_id)[-3:] if guild_id is not None else []
+
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "너는 Evelyn의 router다. 반드시 JSON 객체 하나만 출력한다. "
+                "형식은 {\"route\": \"main_direct|sub_hint|sub_wait\", \"confidence\": number, \"reason_brief\": string}. "
+                "main_direct는 메인 LLM으로 바로 처리하면 되는 경우다. "
+                "sub_hint는 저장된 state/summary를 힌트로만 참고하면 충분한 경우다. "
+                "sub_wait는 fresh router 판단과 문맥 반영을 잠깐 기다리는 편이 좋은 경우다. "
+                "짧고 직접적인 요청, 단순 대답, 즉답 가능한 질문은 main_direct를 우선한다. "
+                "이전 대화 맥락, 기억, 비교, 판단, 요약, 이어지는 작업, 애매한 의도는 sub_hint 또는 sub_wait로 올린다. "
+                "JSON 외 다른 텍스트는 절대 출력하지 마라."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f"최근 요약:\n{summary or '(없음)'}\n\n"
+                f"최근 cognitive_state:\n{json.dumps(state, ensure_ascii=False)}\n\n"
+                f"최근 raw_transcript:\n{format_memory_rows_for_llm(recent_raw, max_items=3)}\n\n"
+                f"최근 durable_facts:\n{format_memory_rows_for_llm(recent_facts, max_items=3)}\n\n"
+                f"현재 입력:\n{compact_memory_text(user_text, max_chars=200)}"
+            ),
+        },
+    ]
+
+    try:
+        result = await ask_router_llm(messages, max_tokens=ROUTER_ROUTE_MAX_TOKENS, timeout_seconds=ROUTER_ROUTE_TIMEOUT_SEC)
+    except Exception as e:
+        print(f"[ROUTER ROUTE] fallback reason={e!r}")
+        return fallback_route, {"selected": fallback_route, "source": "fallback", "error": repr(e)}
+
+    route = normalize_route_name(str(result.get("route", fallback_route)))
+    confidence_raw = result.get("confidence", 0.0)
+    try:
+        confidence = float(confidence_raw)
+    except Exception:
+        confidence = 0.0
+    meta = {
+        "selected": route,
+        "source": "router",
+        "confidence": max(0.0, min(1.0, confidence)),
+        "reason_brief": clean_text(str(result.get("reason_brief", ""))),
+        "fallback": fallback_route,
+    }
+    return route, meta
+
+
 async def update_cognitive_state(guild_id: int, user_text: str) -> dict:
     started_at = time.monotonic()
     lock = cognitive_locks.setdefault(guild_id, asyncio.Lock())
@@ -582,7 +685,7 @@ async def update_cognitive_state(guild_id: int, user_text: str) -> dict:
         ]
 
         try:
-            result = await ask_summary_llm(
+            result = await ask_router_llm(
                 messages,
                 max_tokens=COGNITIVE_MAX_TOKENS,
                 timeout_seconds=COGNITIVE_TIMEOUT_SEC,
@@ -600,7 +703,7 @@ async def update_cognitive_state(guild_id: int, user_text: str) -> dict:
                     },
                 ]
                 try:
-                    result = await ask_summary_llm(
+                    result = await ask_router_llm(
                         compact_messages,
                         max_tokens=COGNITIVE_MAX_TOKENS,
                         timeout_seconds=max(3.0, COGNITIVE_TIMEOUT_SEC - 2.0),
@@ -2269,6 +2372,7 @@ async def status_command(ctx):
     await ctx.send(
         "\n".join([
             f"모델: {MODEL_NAME}",
+            f"라우터모델: {ROUTER_MODEL_NAME}",
             f"서브모델: {SUMMARY_MODEL_NAME}",
             f"STT: {STT_MODEL_NAME}",
             f"음성채널: {voice_channel_name}",

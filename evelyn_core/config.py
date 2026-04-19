@@ -32,10 +32,20 @@ OMNIVOICE_STREAM = os.getenv("OMNIVOICE_STREAM", "true").lower() == "true"
 OMNIVOICE_TIMEOUT_SEC = float(os.getenv("OMNIVOICE_TIMEOUT_SEC", "180"))
 
 
-# 메모리 업데이트와 cognitive 판단에 쓰는 서브 LLM 서버 엔드포인트.
+# 메모리 업데이트에 쓰는 서브 LLM 서버 엔드포인트.
 SUMMARY_LLM_URL = os.getenv("SUMMARY_LLM_URL", "http://127.0.0.1:9821/v1/chat/completions")
-# 요약/상황판단용 서브 모델 이름.
+# 요약/메모리 관리용 서브 모델 이름.
 SUMMARY_MODEL_NAME = os.getenv("SUMMARY_MODEL_NAME", "EXAONE-3.5-7.8B-Instruct-Q4_K_M.gguf")
+# 라우팅/인지 판단에 쓰는 router LLM 서버 엔드포인트.
+ROUTER_LLM_URL = os.getenv("ROUTER_LLM_URL", "http://127.0.0.1:9822/v1/chat/completions")
+# router 서버에 전달할 모델 이름.
+ROUTER_MODEL_NAME = os.getenv("ROUTER_MODEL_NAME", "gemma-4-E2B-it-UD-Q6_K_XL.gguf")
+# router LLM 사용 여부. false면 기존 heuristic/fallback만 사용한다.
+ROUTER_LLM_ENABLED = _env_flag("ROUTER_LLM_ENABLED", "true")
+# route 분류 한 번의 최대 토큰 수.
+ROUTER_ROUTE_MAX_TOKENS = int(os.getenv("ROUTER_ROUTE_MAX_TOKENS", "80"))
+# route 분류 타임아웃(초).
+ROUTER_ROUTE_TIMEOUT_SEC = float(os.getenv("ROUTER_ROUTE_TIMEOUT_SEC", "8"))
 # 길드별 메모리 파일을 저장하는 루트 디렉터리.
 MEMORY_ROOT = Path(os.getenv("BOT_MEMORY_DIR", str(Path(__file__).resolve().parent.parent / "bot_memory")))
 # 길드별 설정(prefix 등)을 저장하는 루트 디렉터리.
