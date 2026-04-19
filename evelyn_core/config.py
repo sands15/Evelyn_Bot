@@ -219,6 +219,20 @@ VOICE_CONNECT_RETRIES = max(1, int(os.getenv("VOICE_CONNECT_RETRIES", "2")))
 VOICE_CONNECT_RETRY_DELAY_SEC = float(os.getenv("VOICE_CONNECT_RETRY_DELAY_SEC", "1.5"))
 # 이 시간(ms) 이상 느려질 때 상세 timing 로그 출력.
 VOICE_TIMING_LOG_THRESHOLD_MS = float(os.getenv("VOICE_TIMING_LOG_THRESHOLD_MS", "3000"))
+# 턴 단위 구조화 로그(JSON)를 출력할지 여부.
+TURN_TRACE_JSON_LOG = _env_flag("TURN_TRACE_JSON_LOG", "true")
+# 텍스트 세션이 활성 상태로 유지되는 기본 시간(초).
+ACTIVE_CONVERSATION_TEXT_SEC = float(os.getenv("ACTIVE_CONVERSATION_TEXT_SEC", "90"))
+# 텍스트에서 봇이 질문을 던졌을 때 follow-up 창을 더 길게 유지하는 시간(초).
+ACTIVE_CONVERSATION_TEXT_QUESTION_SEC = float(os.getenv("ACTIVE_CONVERSATION_TEXT_QUESTION_SEC", "150"))
+# 음성 세션이 활성 상태로 유지되는 기본 시간(초).
+ACTIVE_CONVERSATION_VOICE_SEC = float(os.getenv("ACTIVE_CONVERSATION_VOICE_SEC", "45"))
+# 음성에서 봇이 질문을 던졌을 때 follow-up 창을 더 길게 유지하는 시간(초).
+ACTIVE_CONVERSATION_VOICE_QUESTION_SEC = float(os.getenv("ACTIVE_CONVERSATION_VOICE_QUESTION_SEC", "75"))
+# await 상태일 때 후속 입력을 기다리는 추가 여유 시간(초).
+ACTIVE_CONVERSATION_AWAITING_REPLY_SEC = float(os.getenv("ACTIVE_CONVERSATION_AWAITING_REPLY_SEC", "180"))
+# wake 미검출 상태에서 짧은 환경음 후보를 full STT로 계속 넘길 최대 길이(초).
+VOICE_NO_WAKE_MAX_CONTINUE_SEC = float(os.getenv("VOICE_NO_WAKE_MAX_CONTINUE_SEC", "2.4"))
 # 수신 원본/전처리 오디오를 디버그용으로 저장할지 여부.
 VOICE_DEBUG_SAVE_AUDIO = os.getenv("VOICE_DEBUG_SAVE_AUDIO", "true").lower() == "true"
 # 디버그 WAV 저장 루트 디렉터리.

@@ -29,9 +29,12 @@ if "%ROUTER_LLM_MODEL%"=="" set "ROUTER_LLM_MODEL=/home/sands12/.cache/huggingfa
 if "%OMNIVOICE_VENV%"=="" set "OMNIVOICE_VENV=C:\Users\Admin\omnivoice-server\.venv"
 if "%OMNIVOICE_PROFILE_DIR%"=="" set "OMNIVOICE_PROFILE_DIR=%~dp0..\omnivoice_profiles"
 if "%TTS_PORT%"=="" set "TTS_PORT=8880"
+if "%TTS_GPU%"=="" set "TTS_GPU=0"
+if "%TTS_DEVICE%"=="" set "TTS_DEVICE=cuda"
 
 if "%OPUS_ERROR_TO_SILENCE%"=="" set "OPUS_ERROR_TO_SILENCE=false"
 if "%STT_USE_RAW_48K%"=="" set "STT_USE_RAW_48K=false"
 
 if "%START_WAIT_TIMEOUT_SEC%"=="" set "START_WAIT_TIMEOUT_SEC=120"
 if "%START_WAIT_INTERVAL_SEC%"=="" set "START_WAIT_INTERVAL_SEC=2"
+if "%SUPERVISOR_RESTART_DELAY_SEC%"=="" set "SUPERVISOR_RESTART_DELAY_SEC=3"

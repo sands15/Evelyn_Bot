@@ -1,4 +1,5 @@
 import audioop
+import hashlib
 import html
 import json
 import os
@@ -9,6 +10,7 @@ import subprocess
 import sys
 import time
 import asyncio
+import uuid
 import wave
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
@@ -68,6 +70,10 @@ session_histories: dict[str, list[dict]] = {}
 session_followup_targets: dict[str, dict[str, int]] = {}
 active_session_until: dict[str, float] = {}
 active_session_user_ids: dict[str, int] = {}
+session_awaiting_user_reply: dict[str, bool] = {}
+session_last_speaker: dict[str, str] = {}
+session_topic_ids: dict[str, str] = {}
+session_trace_ids: dict[str, str] = {}
 background_search_tasks: dict[str, asyncio.Task] = {}
 
 
@@ -147,13 +153,16 @@ def runtime_session_key(*, session_key: str | None = None, guild_id: int | None 
     return f"guild:{guild_id}:default"
 
 
-def make_text_session_key(guild_id: int, channel_id: int) -> str:
-    return f"guild:{guild_id}:text:{channel_id}"
+def make_text_session_key(guild_id: int, channel_id: int, user_id: int | None = None, thread_id: int | None = None) -> str:
+    thread_part = f":thread:{thread_id}" if thread_id is not None else ""
+    user_part = f":user:{user_id}" if user_id is not None else ""
+    return f"guild:{guild_id}:text:{channel_id}{thread_part}{user_part}"
 
 
-def make_voice_session_key(guild_id: int, voice_channel_id: int | None) -> str:
+def make_voice_session_key(guild_id: int, voice_channel_id: int | None, user_id: int | None = None) -> str:
     channel_part = voice_channel_id if voice_channel_id is not None else "none"
-    return f"guild:{guild_id}:voice:{channel_part}"
+    user_part = f":user:{user_id}" if user_id is not None else ""
+    return f"guild:{guild_id}:voice:{channel_part}{user_part}"
 
 
 def make_room_memory_key(kind: str, room_id: int | None) -> str:
@@ -181,15 +190,93 @@ def remember_session_followup_target(session_key: str, *, channel_id: int | None
     session_followup_targets[session_key] = {"channel_id": channel_id}
 
 
-def mark_session_active(session_key: str, *, user_id: int | None = None, ttl_sec: float = 90.0) -> None:
-    active_session_until[session_key] = time.monotonic() + ttl_sec
+def build_topic_id(*texts: str) -> str:
+    material = "\n".join(clean_text(text) for text in texts if clean_text(text))
+    if not material:
+        material = "idle"
+    return hashlib.sha1(material.encode("utf-8", errors="ignore")).hexdigest()[:12]
+
+
+def ensure_trace_id(session_key: str | None) -> str:
+    if not session_key:
+        return uuid.uuid4().hex[:12]
+    trace_id = session_trace_ids.get(session_key)
+    if trace_id:
+        return trace_id
+    trace_id = uuid.uuid4().hex[:12]
+    session_trace_ids[session_key] = trace_id
+    return trace_id
+
+
+def session_state_snapshot(session_key: str | None) -> dict:
+    if not session_key:
+        return {}
+    return {
+        "active_until": active_session_until.get(session_key, 0.0),
+        "awaiting_user_reply": session_awaiting_user_reply.get(session_key, False),
+        "last_speaker": session_last_speaker.get(session_key, ""),
+        "topic_id": session_topic_ids.get(session_key, ""),
+        "trace_id": session_trace_ids.get(session_key, ""),
+    }
+
+
+def update_session_state(
+    session_key: str | None,
+    *,
+    user_id: int | None = None,
+    speaker: str | None = None,
+    ttl_sec: float | None = None,
+    awaiting_user_reply: bool | None = None,
+    topic_id: str | None = None,
+    answer_text: str | None = None,
+    user_text: str | None = None,
+) -> None:
+    if not session_key:
+        return
+    if ttl_sec is not None:
+        active_session_until[session_key] = time.monotonic() + ttl_sec
     if user_id is not None:
         active_session_user_ids[session_key] = user_id
+    if speaker is not None:
+        session_last_speaker[session_key] = speaker
+    if awaiting_user_reply is not None:
+        session_awaiting_user_reply[session_key] = awaiting_user_reply
+        if awaiting_user_reply and ttl_sec is None:
+            active_session_until[session_key] = time.monotonic() + ACTIVE_CONVERSATION_AWAITING_REPLY_SEC
+    if topic_id:
+        session_topic_ids[session_key] = topic_id
+    elif user_text or answer_text:
+        session_topic_ids[session_key] = build_topic_id(user_text or "", answer_text or "")
+    ensure_trace_id(session_key)
+
+
+def mark_session_active(
+    session_key: str,
+    *,
+    user_id: int | None = None,
+    ttl_sec: float = 90.0,
+    speaker: str = "assistant",
+    awaiting_user_reply: bool | None = None,
+    topic_id: str | None = None,
+    answer_text: str | None = None,
+    user_text: str | None = None,
+) -> None:
+    update_session_state(
+        session_key,
+        user_id=user_id,
+        speaker=speaker,
+        ttl_sec=ttl_sec,
+        awaiting_user_reply=awaiting_user_reply,
+        topic_id=topic_id,
+        answer_text=answer_text,
+        user_text=user_text,
+    )
 
 
 def is_session_active_for_user(session_key: str, user_id: int | None = None) -> bool:
     expires_at = active_session_until.get(session_key, 0.0)
-    if expires_at <= time.monotonic():
+    awaiting_user_reply = session_awaiting_user_reply.get(session_key, False)
+    if expires_at <= time.monotonic() and not awaiting_user_reply:
         return False
     remembered_user = active_session_user_ids.get(session_key)
     if remembered_user is not None and user_id is not None and remembered_user != user_id:
@@ -226,6 +313,10 @@ def reset_guild_runtime_state(guild_id: int) -> None:
     for key in [key for key in active_session_until if key.startswith(prefix)]:
         active_session_until.pop(key, None)
         active_session_user_ids.pop(key, None)
+        session_awaiting_user_reply.pop(key, None)
+        session_last_speaker.pop(key, None)
+        session_topic_ids.pop(key, None)
+        session_trace_ids.pop(key, None)
     for key in [key for key in session_locks if key.startswith(prefix)]:
         session_locks.pop(key, None)
     for key, task in list(background_search_tasks.items()):
@@ -265,6 +356,57 @@ def _trim_voice_debug_dir(guild_dir: Path) -> None:
             path.unlink()
         except Exception:
             pass
+
+
+def log_turn_event(event: str, **payload) -> None:
+    if not TURN_TRACE_JSON_LOG:
+        return
+    record = {"event": event, "ts": round(time.time(), 3)}
+    for key, value in payload.items():
+        if value is None:
+            continue
+        record[key] = value
+    print("[TURN TRACE] " + json.dumps(record, ensure_ascii=False, sort_keys=True))
+
+
+def new_turn_metrics(
+    *,
+    source: str,
+    session_key: str | None = None,
+    guild_id: int | None = None,
+    user_id: int | None = None,
+    topic_id: str | None = None,
+) -> dict:
+    metrics = {
+        "started_at": time.monotonic(),
+        "marks": {"t_ingress": 0.0},
+        "meta": {
+            "source": source,
+            "session_key": session_key,
+            "guild_id": guild_id,
+            "user_id": user_id,
+            "topic_id": topic_id,
+            "trace_id": ensure_trace_id(session_key),
+        },
+    }
+    log_turn_event(
+        "turn_ingress",
+        source=source,
+        session_key=session_key,
+        guild_id=guild_id,
+        user_id=user_id,
+        topic_id=topic_id,
+        trace_id=metrics["meta"]["trace_id"],
+    )
+    return metrics
+
+
+def register_drop_reason(metrics: dict | None, reason: str, **extra) -> None:
+    if not metrics:
+        return
+    metrics.setdefault("meta", {})["drop_reason"] = reason
+    trace_id = metrics.get("meta", {}).get("trace_id")
+    log_turn_event("turn_drop", trace_id=trace_id, reason=reason, **extra)
 
 
 def save_voice_debug_audio(
@@ -373,6 +515,7 @@ def should_reply_to_voice(
     now = time.monotonic()
     text_n = normalize_voice_text(text)
     active_session = session_key is not None and is_session_active_for_user(session_key, user_id)
+    state = session_state_snapshot(session_key)
 
     if guild_id in bot_speaking_guilds:
         return False, "bot_is_speaking"
@@ -389,7 +532,10 @@ def should_reply_to_voice(
     if len(text_n) < MIN_TEXT_LEN and not wake_detected and not active_session:
         return False, "too_short"
 
-    if now - last_voice_reply_at.get(guild_id, 0.0) < REPLY_COOLDOWN_SEC:
+    if state.get("last_speaker") == "assistant" and state.get("awaiting_user_reply"):
+        active_session = True
+
+    if now - last_voice_reply_at.get(guild_id, 0.0) < REPLY_COOLDOWN_SEC and not active_session:
         return False, "cooldown"
 
     if is_similar(text_n, last_voice_text.get(guild_id, "")):
@@ -409,9 +555,9 @@ def should_skip_full_stt_after_wake_probe(*, wake_detected: bool, wake_probe: st
         return False
 
     probe = clean_text(wake_probe)
-    if not probe and duration_sec <= 1.8:
+    if not probe and duration_sec <= VOICE_NO_WAKE_MAX_CONTINUE_SEC:
         return True
-    if looks_like_brief_filler_text(probe) and duration_sec <= 1.8:
+    if looks_like_brief_filler_text(probe) and duration_sec <= VOICE_NO_WAKE_MAX_CONTINUE_SEC:
         return True
     if looks_like_repetitive_noise_text(probe):
         return True
@@ -456,6 +602,7 @@ def read_cached_cognitive_state(
     guild_id: int | None,
     *,
     room_key: str | None = None,
+    person_key: str | None = None,
     session_memory_key: str | None = None,
 ) -> dict | None:
     if guild_id is None:
@@ -463,6 +610,7 @@ def read_cached_cognitive_state(
     return read_layered_cognitive_state(
         guild_id,
         room_key=room_key,
+        person_key=person_key,
         session_memory_key=session_memory_key,
     )
 
@@ -622,6 +770,15 @@ async def prepare_llm_messages(
     route, route_meta = await classify_llm_route_async(user_text, guild_id=guild_id, source=source)
     if metrics is not None:
         metrics.setdefault("marks", {})["route_ready"] = (time.monotonic() - route_started_at) * 1000.0
+        metrics.setdefault("meta", {}).update(
+            {
+                "source": source,
+                "session_key": session_key,
+                "guild_id": guild_id,
+                "topic_id": session_topic_ids.get(session_key or "", "") if session_key else None,
+                "trace_id": ensure_trace_id(session_key),
+            }
+        )
     messages = list(get_conversation_history(session_key=session_key, guild_id=guild_id))
     cognitive_state: dict | None = None
 
@@ -629,6 +786,7 @@ async def prepare_llm_messages(
     cached_cognitive_state = read_cached_cognitive_state(
         guild_id,
         room_key=room_key,
+        person_key=person_key,
         session_memory_key=session_memory_key,
     )
     should_block_on_cognitive = guild_id is not None and (cached_cognitive_state is None or route == "sub_wait")
@@ -664,12 +822,15 @@ async def prepare_llm_messages(
             guild_id,
             user_text,
             cognitive_state=cognitive_state,
+            session_key=session_key,
             room_key=room_key,
             person_key=person_key,
             session_memory_key=session_memory_key,
         )
         if metrics is not None:
-            metrics.setdefault("marks", {})["memory_ready"] = (time.monotonic() - memory_started_at) * 1000.0
+            memory_elapsed = (time.monotonic() - memory_started_at) * 1000.0
+            metrics.setdefault("marks", {})["memory_ready"] = memory_elapsed
+            metrics.setdefault("marks", {})["t_context_build"] = (time.monotonic() - float(metrics.get("started_at", time.monotonic()))) * 1000.0
         if memory_context:
             base_system = messages[0]["content"] if messages and messages[0].get("role") == "system" else ""
             merged_system = clean_text(base_system + "\n\n" + memory_context)
@@ -687,7 +848,18 @@ async def prepare_llm_messages(
             )
             cognitive_state = gated_state
 
+    if metrics is not None:
+        metrics.setdefault("marks", {})["t_policy"] = (time.monotonic() - float(metrics.get("started_at", time.monotonic()))) * 1000.0
     route_text = debug_text if debug_text is not None else user_text
+    log_turn_event(
+        "policy_ready",
+        trace_id=ensure_trace_id(session_key),
+        session_key=session_key,
+        source=source,
+        route=route,
+        cognitive_action=(cognitive_state or {}).get("action") if cognitive_state else None,
+        topic_id=session_topic_ids.get(session_key or "", "") if session_key else None,
+    )
     if route_meta and route_meta.get("source") == "router":
         print(
             f"[LLM ROUTE] source={source} route={route} via=router confidence={float(route_meta.get('confidence', 0.0) or 0.0):.2f} reason={route_meta.get('reason_brief', '')!r} text={visible_text(route_text)!r}"
@@ -766,12 +938,17 @@ def read_layered_cognitive_state(
     guild_id: int,
     *,
     room_key: str | None = None,
+    person_key: str | None = None,
     session_memory_key: str | None = None,
 ) -> dict | None:
     if session_memory_key:
         session_state = read_json_file(cognitive_state_path(guild_id, scope_type="session", scope_key=session_memory_key))
         if session_state:
             return normalize_cognitive_state(session_state)
+    if person_key:
+        person_state = read_json_file(cognitive_state_path(guild_id, scope_type="person", scope_key=person_key))
+        if person_state:
+            return normalize_cognitive_state(person_state)
     if room_key:
         room_state = read_json_file(cognitive_state_path(guild_id, scope_type="room", scope_key=room_key))
         if room_state:
@@ -794,6 +971,7 @@ def build_memory_context(
     user_text: str,
     cognitive_state: dict | None = None,
     *,
+    session_key: str | None = None,
     room_key: str | None = None,
     person_key: str | None = None,
     session_memory_key: str | None = None,
@@ -823,6 +1001,7 @@ def build_memory_context(
         cognitive_state or read_layered_cognitive_state(
             guild_id,
             room_key=room_key,
+            person_key=person_key,
             session_memory_key=session_memory_key,
         ) or {}
     )
@@ -853,7 +1032,8 @@ def build_memory_context(
 
     if vault_raw_rows:
         parts.append("문서 보관함에서 꺼낸 관련 대화:\n" + format_memory_row_lines(vault_raw_rows))
-    if state.get("state_summary") or state.get("question_for_user") or state.get("main_prompt_hint"):
+    session_state = session_state_snapshot(session_key)
+    if state.get("state_summary") or state.get("question_for_user") or state.get("main_prompt_hint") or session_state:
         action_label = {
             "answer": "답하기",
             "ask": "질문하기",
@@ -870,6 +1050,12 @@ def build_memory_context(
             state_lines.append(f"- 응답 힌트: {state['main_prompt_hint']}")
         if state.get("retrieved_context_ids"):
             state_lines.append(f"- 참고 문맥 ID: {', '.join(state['retrieved_context_ids'][:4])}")
+        if session_state.get("last_speaker"):
+            state_lines.append(f"- 마지막 화자: {session_state['last_speaker']}")
+        if session_state.get("awaiting_user_reply"):
+            state_lines.append("- 사용자 후속 응답 대기 중")
+        if session_state.get("topic_id"):
+            state_lines.append(f"- 현재 topic_id: {session_state['topic_id']}")
         parts.append("현재 내부 상태(사용자 발화 아님):\n" + "\n".join(state_lines))
     if facts:
         parts.append(
@@ -1042,8 +1228,8 @@ async def update_cognitive_state(
 ) -> dict:
     started_at = time.monotonic()
     lock = cognitive_locks.setdefault(guild_id, asyncio.Lock())
-    scope_type = "session" if session_memory_key else "room" if room_key else "guild"
-    scope_key = session_memory_key if session_memory_key else room_key
+    scope_type = "session" if session_memory_key else "person" if person_key else "room" if room_key else "guild"
+    scope_key = session_memory_key if session_memory_key else person_key if person_key else room_key
     async with lock:
         layers = collect_memory_layers(
             guild_id,
@@ -1061,6 +1247,7 @@ async def update_cognitive_state(
             read_layered_cognitive_state(
                 guild_id,
                 room_key=room_key,
+                person_key=person_key,
                 session_memory_key=session_memory_key,
             ) or {}
         )
@@ -1261,6 +1448,8 @@ async def update_long_term_memory(
         scope_targets: list[tuple[str, str | None]] = [("guild", None)]
         if room_key:
             scope_targets.append(("room", room_key))
+        if person_key:
+            scope_targets.append(("person", person_key))
         if session_memory_key:
             scope_targets.append(("session", session_memory_key))
 
@@ -1744,6 +1933,8 @@ async def run_search_followup(
         removed = resolve_open_question_rows(guild_id, query, answer)
         if room_key:
             removed += resolve_open_question_rows(guild_id, query, answer, scope_type="room", scope_key=room_key)
+        if person_key:
+            removed += resolve_open_question_rows(guild_id, query, answer, scope_type="person", scope_key=person_key)
         if session_memory_key:
             removed += resolve_open_question_rows(guild_id, query, answer, scope_type="session", scope_key=session_memory_key)
         if removed:
@@ -1762,6 +1953,8 @@ async def run_search_followup(
         write_json_file(cognitive_state_path(guild_id), completed_state)
         if room_key:
             write_json_file(cognitive_state_path(guild_id, scope_type="room", scope_key=room_key), completed_state)
+        if person_key:
+            write_json_file(cognitive_state_path(guild_id, scope_type="person", scope_key=person_key), completed_state)
         if session_memory_key:
             write_json_file(cognitive_state_path(guild_id, scope_type="session", scope_key=session_memory_key), completed_state)
         await deliver_proactive_followup(
@@ -1986,6 +2179,15 @@ def log_voice_latency(metrics: dict | None, key: str, label: str) -> None:
     elapsed_ms = (time.monotonic() - float(started_at)) * 1000.0
     metrics[key] = True
     metrics.setdefault("marks", {})[key] = elapsed_ms
+    alias_map = {
+        "llm_first_chunk_logged": "t_main_first_token",
+        "tts_first_byte_logged": "t_tts_first_byte",
+        "tts_first_frame_logged": "t_tts_first_frame",
+        "playback_start_logged": "t_tts_first_audio",
+    }
+    alias = alias_map.get(key)
+    if alias:
+        metrics.setdefault("marks", {})[alias] = elapsed_ms
     if should_log_voice_timing(elapsed_ms):
         print(f"[VOICE LATENCY] {label}: {elapsed_ms:.0f}ms")
 
@@ -2010,6 +2212,14 @@ def log_voice_stage(metrics: dict | None, label: str, *, extra: str = "", key: s
     elapsed_ms = (time.monotonic() - float(started_at)) * 1000.0
     if key:
         metrics.setdefault("marks", {})[key] = elapsed_ms
+    stage_alias = {
+        "route_ready": "t_policy",
+        "memory_ready": "t_context_build",
+        "stt_done": "t_stt_done",
+        "llm_done": "t_main_done",
+    }
+    if key and key in stage_alias:
+        metrics.setdefault("marks", {})[stage_alias[key]] = elapsed_ms
     if not should_log_voice_timing(elapsed_ms):
         return
     suffix = f" | {extra}" if extra else ""
@@ -2024,33 +2234,51 @@ def log_voice_bottleneck_summary(metrics: dict | None, *, label: str, extra: str
         return
 
     total_ms = (time.monotonic() - float(started_at)) * 1000.0
-    if not should_log_voice_timing(total_ms):
-        return
-
     marks = metrics.get("marks") or {}
 
     def _fmt(name: str) -> str:
         value = marks.get(name)
         return f"{float(value):.0f}ms" if value is not None else "-"
 
-    parts = [
-        f"total={total_ms:.0f}ms",
-        f"route={_fmt('route_ready')}",
-        f"cognitive={_fmt('cognitive_ready')}",
-        f"memory={_fmt('memory_ready')}",
-        f"wake={_fmt('wake_done')}",
-        f"stt={_fmt('stt_done')}",
-        f"llm_first={_fmt('llm_first_chunk_logged')}",
-        f"llm_done={_fmt('llm_done')}",
-        f"tts_req={_fmt('tts_request_logged')}",
-        f"tts_headers={_fmt('tts_response_headers_logged')}",
-        f"tts_first={_fmt('tts_first_byte_logged')}",
-        f"tts_frame={_fmt('tts_first_frame_logged')}",
-        f"playback={_fmt('playback_start_logged')}",
-    ]
-    if extra:
-        parts.append(extra)
-    print(f"[VOICE BOTTLENECK] {label} | " + " | ".join(parts))
+    if should_log_voice_timing(total_ms):
+        parts = [
+            f"total={total_ms:.0f}ms",
+            f"route={_fmt('route_ready')}",
+            f"cognitive={_fmt('cognitive_ready')}",
+            f"memory={_fmt('memory_ready')}",
+            f"wake={_fmt('wake_done')}",
+            f"stt={_fmt('stt_done')}",
+            f"llm_first={_fmt('llm_first_chunk_logged')}",
+            f"llm_done={_fmt('llm_done')}",
+            f"tts_req={_fmt('tts_request_logged')}",
+            f"tts_headers={_fmt('tts_response_headers_logged')}",
+            f"tts_first={_fmt('tts_first_byte_logged')}",
+            f"tts_frame={_fmt('tts_first_frame_logged')}",
+            f"playback={_fmt('playback_start_logged')}",
+        ]
+        if extra:
+            parts.append(extra)
+        print(f"[VOICE BOTTLENECK] {label} | " + " | ".join(parts))
+
+    meta = metrics.get("meta") or {}
+    log_turn_event(
+        "turn_summary",
+        label=label,
+        trace_id=meta.get("trace_id"),
+        source=meta.get("source"),
+        session_key=meta.get("session_key"),
+        topic_id=meta.get("topic_id"),
+        drop_reason=meta.get("drop_reason"),
+        t_ingress=marks.get("t_ingress"),
+        t_policy=marks.get("t_policy"),
+        t_context_build=marks.get("t_context_build"),
+        t_main_first_token=marks.get("t_main_first_token"),
+        t_main_done=marks.get("t_main_done"),
+        t_tts_first_audio=marks.get("t_tts_first_audio"),
+        t_stt_done=marks.get("t_stt_done"),
+        total_ms=round(total_ms, 1),
+        extra=extra or None,
+    )
 
 
 async def create_omnivoice_source(
@@ -2548,11 +2776,19 @@ async def ask_llm_once(
     )
 
     policy_response = policy_response_for_state(cognitive_state, source=source)
+    gated_state = apply_ask_gating(cognitive_state, source=source) if cognitive_state is not None else None
     if policy_response:
+        if session_key is not None and gated_state is not None:
+            update_session_state(
+                session_key,
+                speaker="assistant",
+                awaiting_user_reply=gated_state.get("action") in {"ask", "wait"},
+                answer_text=policy_response,
+                user_text=user_text,
+            )
         return policy_response
 
     guided_user_text = user_text
-    gated_state = apply_ask_gating(cognitive_state, source=source) if cognitive_state is not None else None
     if gated_state and gated_state.get("action") == "ask" and gated_state.get("question_for_user"):
         guided_user_text = clean_text(str(gated_state.get("question_for_user", "")))
     final_user_text = f"{guided_user_text}\n\n{build_main_response_guidance(cognitive_state, source=source)}"
@@ -2682,7 +2918,16 @@ async def ask_llm_streaming(
     )
 
     policy_response = policy_response_for_state(cognitive_state, source=source)
+    gated_state = apply_ask_gating(cognitive_state, source=source) if cognitive_state is not None else None
     if policy_response:
+        if session_key is not None and gated_state is not None:
+            update_session_state(
+                session_key,
+                speaker="assistant",
+                awaiting_user_reply=gated_state.get("action") in {"ask", "wait"},
+                answer_text=policy_response,
+                user_text=user_text,
+            )
         if on_first_chunk is not None:
             on_first_chunk()
         if on_sentence is not None:
@@ -2690,10 +2935,10 @@ async def ask_llm_streaming(
         if metrics is not None:
             metrics.setdefault("marks", {})["policy_short_circuit"] = (time.monotonic() - float(metrics.get("started_at", time.monotonic()))) * 1000.0
             metrics.setdefault("marks", {})["llm_done"] = (time.monotonic() - float(metrics.get("started_at", time.monotonic()))) * 1000.0
+            metrics.setdefault("marks", {})["t_main_done"] = metrics.setdefault("marks", {}).get("llm_done")
         return policy_response
 
     guided_user_text = user_text
-    gated_state = apply_ask_gating(cognitive_state, source=source) if cognitive_state is not None else None
     if gated_state and gated_state.get("action") == "ask" and gated_state.get("question_for_user"):
         guided_user_text = clean_text(str(gated_state.get("question_for_user", "")))
     final_user_text = f"{guided_user_text}\n\n{build_main_response_guidance(cognitive_state, source=source)}"
@@ -2830,24 +3075,17 @@ async def ask_llm_and_speak_streaming(
     metrics: dict | None = None,
 ) -> str:
     if metrics is None:
-        metrics = {
-            "started_at": time.monotonic(),
-            "llm_first_chunk_logged": False,
-            "tts_request_logged": False,
-            "tts_response_headers_logged": False,
-            "tts_first_byte_logged": False,
-            "tts_first_frame_logged": False,
-            "playback_start_logged": False,
-        }
+        metrics = new_turn_metrics(source=source, session_key=session_key, guild_id=guild_id, topic_id=session_topic_ids.get(session_key))
     else:
         metrics.setdefault("started_at", time.monotonic())
-        metrics.setdefault("llm_first_chunk_logged", False)
-        metrics.setdefault("tts_request_logged", False)
-        metrics.setdefault("tts_response_headers_logged", False)
-        metrics.setdefault("tts_first_byte_logged", False)
-        metrics.setdefault("tts_first_frame_logged", False)
-        metrics.setdefault("playback_start_logged", False)
         metrics.setdefault("marks", {})
+        metrics.setdefault("meta", {})
+    metrics.setdefault("llm_first_chunk_logged", False)
+    metrics.setdefault("tts_request_logged", False)
+    metrics.setdefault("tts_response_headers_logged", False)
+    metrics.setdefault("tts_first_byte_logged", False)
+    metrics.setdefault("tts_first_frame_logged", False)
+    metrics.setdefault("playback_start_logged", False)
     log_voice_stage(metrics, "LLM/TTS 파이프라인 시작", extra=f"source={source}")
     sentence_queue: asyncio.Queue[str | None] = asyncio.Queue()
     playback_task = asyncio.create_task(stream_tts_sentences(vc, sentence_queue, metrics=metrics))
@@ -2908,8 +3146,14 @@ async def stream_text_reply(
     source: str = "text",
     debug_text: str | None = None,
 ) -> tuple[str, discord.Message | None]:
-    streamed_message: discord.Message | None = None
-    rendered_text = ""
+    metrics = new_turn_metrics(
+        source=source,
+        session_key=session_key,
+        guild_id=guild_id,
+        topic_id=session_topic_ids.get(session_key),
+    )
+    streamed_message: discord.Message | None = await channel.send("…")
+    rendered_text = "…"
     streamed_parts: list[str] = []
 
     async def on_sentence(sentence: str) -> None:
@@ -2934,14 +3178,17 @@ async def stream_text_reply(
         person_key=person_key,
         session_memory_key=session_memory_key,
         on_sentence=on_sentence,
+        on_first_chunk=lambda: log_voice_latency(metrics, "llm_first_chunk_logged", "LLM 첫 chunk 시간"),
         source=source,
         debug_text=debug_text,
+        metrics=metrics,
     )
     final_text = visible_text(answer).strip()
     if streamed_message is None:
         streamed_message = await channel.send(final_text or fallback_answer_for(user_text))
     elif final_text and final_text != rendered_text:
         await streamed_message.edit(content=final_text)
+    log_voice_bottleneck_summary(metrics, label="text_reply", extra=f"chars={len(final_text)}")
     return answer, streamed_message
 
 
@@ -2960,7 +3207,13 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes, 
         return
 
     guild_id = guild.id
-    metrics = {"started_at": time.monotonic()}
+    voice_channel_id = getattr(getattr(guild.voice_client, "channel", None), "id", None)
+    session_key = make_voice_session_key(guild_id, voice_channel_id, member.id)
+    room_key = make_room_memory_key("voice", voice_channel_id)
+    person_key = make_person_memory_key(member.id)
+    session_memory_key = make_session_memory_key(session_key, member.id)
+    topic_id = session_topic_ids.get(session_key) or build_topic_id(member.display_name or str(member.id))
+    metrics = new_turn_metrics(source="voice", session_key=session_key, guild_id=guild_id, user_id=member.id, topic_id=topic_id)
     log_voice_stage(metrics, "process_member_audio 시작", extra=f"speaker={member.display_name} pcm_bytes={len(pcm_bytes)}")
 
     if STT_USE_RAW_48K:
@@ -2975,7 +3228,9 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes, 
         wake_sampling_rate = TARGET_RATE
     speaker_name = member.display_name or str(member.id)
     if audio16k.size == 0:
+        register_drop_reason(metrics, "empty_audio", session_key=session_key)
         log_voice_stage(metrics, "오디오 비어있음")
+        log_voice_bottleneck_summary(metrics, label="voice_reply", extra="drop=empty_audio")
         return
 
     raw_seconds = len(pcm_bytes) / float(RATE * CHANNELS * 2)
@@ -2991,7 +3246,9 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes, 
             debug_meta=debug_meta,
             save_stt_audio=False,
         )
+        register_drop_reason(metrics, "too_short_total", session_key=session_key, raw_seconds=round(raw_seconds, 3))
         log_voice_stage(metrics, "전체 길이 너무 짧아서 제외", extra=f"raw_seconds={raw_seconds:.3f}")
+        log_voice_bottleneck_summary(metrics, label="voice_reply", extra="drop=too_short_total")
         return
 
     if debug_meta and debug_meta.get("unstable"):
@@ -3027,7 +3284,9 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes, 
             print(f"[FULL STT SKIP] reason=vad_ignore speaker={member.display_name} sampling_rate={stt_sampling_rate} sec={duration_sec:.2f} peak={peak:.4f} rms={rms:.4f} voiced_ms={voiced_ms:.0f} longest_ms={longest_voiced_ms:.0f} body_rms={body_rms:.4f}")
             print(f"[VAD IGNORE] speaker={member.display_name} sampling_rate={stt_sampling_rate} sec={duration_sec:.2f} peak={peak:.4f} rms={rms:.4f}")
             save_voice_debug_audio(guild_id, speaker_name, pcm_bytes, audio16k, final_text="[VAD IGNORE]", debug_meta=debug_meta)
+            register_drop_reason(metrics, "vad_ignore", session_key=session_key, voiced_ms=round(voiced_ms, 1))
             log_voice_stage(metrics, "VAD 무시 처리", extra=f"sampling_rate={stt_sampling_rate} sec={duration_sec:.2f} peak={peak:.4f} rms={rms:.4f} voiced_ms={voiced_ms:.0f} longest_ms={longest_voiced_ms:.0f} body_rms={body_rms:.4f}")
+            log_voice_bottleneck_summary(metrics, label="voice_reply", extra="drop=vad_ignore")
             return
 
     log_voice_stage(metrics, "웨이크 프로브 시작", extra=f"samples={audio_for_wake.size} sampling_rate={wake_sampling_rate}")
@@ -3035,7 +3294,9 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes, 
         wake_detected, wake_probe_raw, wake_confirm_raw = await asyncio.to_thread(detect_wake_word_sync, audio_for_wake, sampling_rate=wake_sampling_rate)
     except Exception as e:
         print(f"❌ [WAKE STT] {e}")
+        register_drop_reason(metrics, "wake_probe_error", session_key=session_key, error=repr(e))
         log_voice_stage(metrics, "웨이크 프로브 실패", extra=repr(e))
+        log_voice_bottleneck_summary(metrics, label="voice_reply", extra="drop=wake_probe_error")
         return
 
     wake_probe = apply_stt_post_corrections(wake_probe_raw, wake_detected=False)
@@ -3047,20 +3308,51 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes, 
             wake_probe = wake_confirm
     log_voice_stage(metrics, "웨이크 프로브 완료", extra=f"wake={wake_detected} probe_len={len(wake_probe)} confirm_len={len(wake_confirm)}", key="wake_done")
 
-    if is_likely_environment_noise(audio_for_wake, sampling_rate=wake_sampling_rate):
+    active_session = is_session_active_for_user(session_key, member.id)
+    env_noise_candidate = is_likely_environment_noise(audio_for_wake, sampling_rate=wake_sampling_rate)
+    filler_candidate = looks_like_brief_filler_text(wake_probe)
+    repetitive_noise_candidate = looks_like_repetitive_noise_text(wake_probe)
+
+    if env_noise_candidate:
         band_ratio, flatness, rms = compute_voice_band_metrics(audio_for_wake, sampling_rate=wake_sampling_rate)
+        if not wake_detected and not active_session and raw_seconds <= VOICE_NO_WAKE_MAX_CONTINUE_SEC:
+            print(f"[FULL STT SKIP] reason=env_ignore speaker={member.display_name} probe={wake_probe!r}")
+            print(
+                f"[ENV IGNORE] speaker={member.display_name} band_ratio={band_ratio:.3f} flatness={flatness:.3f} rms={rms:.4f} probe={wake_probe!r}"
+            )
+            save_voice_debug_audio(guild_id, speaker_name, pcm_bytes, audio16k, wake_probe=wake_probe, final_text="[ENV IGNORE]", debug_meta=debug_meta)
+            register_drop_reason(metrics, "env_ignore", session_key=session_key, probe=wake_probe)
+            log_voice_stage(metrics, "환경음 후보 조기 종료", extra=f"probe={wake_probe!r}")
+            log_voice_bottleneck_summary(metrics, label="voice_reply", extra="drop=env_ignore")
+            return
         print(f"[FULL STT CONTINUE] reason=env_ignore speaker={member.display_name} probe={wake_probe!r}")
         print(
             f"[ENV IGNORE] speaker={member.display_name} band_ratio={band_ratio:.3f} flatness={flatness:.3f} rms={rms:.4f} probe={wake_probe!r}"
         )
         log_voice_stage(metrics, "환경음 후보지만 본문 STT 진행", extra=f"probe={wake_probe!r}")
 
-    if looks_like_brief_filler_text(wake_probe):
+    if filler_candidate:
+        if not wake_detected and not active_session and raw_seconds <= VOICE_NO_WAKE_MAX_CONTINUE_SEC:
+            print(f"[FULL STT SKIP] reason=filler_ignore speaker={member.display_name} probe={wake_probe!r}")
+            print(f"[FILLER IGNORE] speaker={member.display_name} probe={wake_probe!r}")
+            save_voice_debug_audio(guild_id, speaker_name, pcm_bytes, audio16k, wake_probe=wake_probe, final_text="[FILLER IGNORE]", debug_meta=debug_meta)
+            register_drop_reason(metrics, "filler_ignore", session_key=session_key, probe=wake_probe)
+            log_voice_stage(metrics, "짧은 필러 후보 조기 종료", extra=f"probe={wake_probe!r}")
+            log_voice_bottleneck_summary(metrics, label="voice_reply", extra="drop=filler_ignore")
+            return
         print(f"[FULL STT CONTINUE] reason=filler_ignore speaker={member.display_name} probe={wake_probe!r}")
         print(f"[FILLER IGNORE] speaker={member.display_name} probe={wake_probe!r}")
         log_voice_stage(metrics, "짧은 필러 후보지만 본문 STT 진행", extra=f"probe={wake_probe!r}")
 
-    if looks_like_repetitive_noise_text(wake_probe):
+    if repetitive_noise_candidate:
+        if not wake_detected and not active_session:
+            print(f"[FULL STT SKIP] reason=noise_text_ignore speaker={member.display_name} probe={wake_probe!r}")
+            print(f"[NOISE TEXT IGNORE] speaker={member.display_name} probe={wake_probe!r}")
+            save_voice_debug_audio(guild_id, speaker_name, pcm_bytes, audio16k, wake_probe=wake_probe, final_text="[NOISE TEXT IGNORE]", debug_meta=debug_meta)
+            register_drop_reason(metrics, "noise_text_ignore", session_key=session_key, probe=wake_probe)
+            log_voice_stage(metrics, "반복 소음 후보 조기 종료", extra=f"probe={wake_probe!r}")
+            log_voice_bottleneck_summary(metrics, label="voice_reply", extra="drop=noise_text_ignore")
+            return
         print(f"[FULL STT CONTINUE] reason=noise_text_ignore speaker={member.display_name} probe={wake_probe!r}")
         print(f"[NOISE TEXT IGNORE] speaker={member.display_name} probe={wake_probe!r}")
         log_voice_stage(metrics, "반복 소음 후보지만 본문 STT 진행", extra=f"probe={wake_probe!r}")
@@ -3132,20 +3424,18 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes, 
     save_voice_debug_audio(guild_id, speaker_name, pcm_bytes, audio16k, wake_probe=wake_probe, final_text=text, debug_meta=debug_meta, stt_meta=stt_meta)
     print(f"🎤 [{member.display_name}] wake={wake_probe!r} text={text}")
 
-    voice_session_key = make_voice_session_key(guild_id, getattr(getattr(guild.voice_client, "channel", None), "id", None))
-    room_key = make_room_memory_key("voice", getattr(getattr(guild.voice_client, "channel", None), "id", None))
-    person_key = make_person_memory_key(member.id)
-    session_memory_key = make_session_memory_key(voice_session_key, member.id)
     ok, reason = should_reply_to_voice(
         guild_id,
         text,
         wake_detected=wake_detected,
-        session_key=voice_session_key,
+        session_key=session_key,
         user_id=member.id,
     )
     if not ok:
         print(f"[STT IGNORE] {reason}: {text!r}")
+        register_drop_reason(metrics, reason, session_key=session_key, text=text)
         log_voice_stage(metrics, "응답 차단", extra=f"reason={reason}")
+        log_voice_bottleneck_summary(metrics, label="voice_reply", extra=f"drop={reason}")
         return
 
     log_voice_stage(metrics, "웨이크 통과", extra=f"user_text={strip_voice_wake_word(text)!r}")
@@ -3153,8 +3443,17 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes, 
     raw_user_text = strip_voice_wake_word(text)
     prompt_user_text = raw_user_text or "사용자가 너를 이름만 불렀다. 아주 짧고 자연스럽게 반응해라."
     history_user_text = raw_user_text or text
+    topic_id = build_topic_id(history_user_text, session_topic_ids.get(session_key, ""))
+    update_session_state(
+        session_key,
+        user_id=member.id,
+        speaker="user",
+        awaiting_user_reply=False,
+        topic_id=topic_id,
+        user_text=history_user_text,
+    )
+    metrics.setdefault("meta", {}).update({"topic_id": topic_id, "trace_id": ensure_trace_id(session_key)})
     vc = guild.voice_client
-    session_key = make_voice_session_key(guild_id, getattr(getattr(vc, "channel", None), "id", None))
     lock = session_locks.setdefault(session_key, asyncio.Lock())
 
     if lock.locked():
@@ -3221,7 +3520,17 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes, 
             channel_id=None,
             source="search-followup-voice",
         )
-        mark_session_active(session_key, user_id=member.id, ttl_sec=75.0 if "?" in plain_answer or "？" in plain_answer else 45.0)
+        awaiting_reply = bool("?" in plain_answer or "？" in plain_answer)
+        mark_session_active(
+            session_key,
+            user_id=member.id,
+            ttl_sec=ACTIVE_CONVERSATION_VOICE_QUESTION_SEC if awaiting_reply else ACTIVE_CONVERSATION_VOICE_SEC,
+            speaker="assistant",
+            awaiting_user_reply=awaiting_reply,
+            topic_id=topic_id,
+            answer_text=plain_answer,
+            user_text=history_user_text,
+        )
         log_voice_stage(metrics, "process_member_audio 완료", extra=f"speaker={member.display_name}")
 
 
@@ -3254,7 +3563,8 @@ async def on_message(message: discord.Message):
         await bot.process_commands(message)
         return
 
-    session_key = make_text_session_key(message.guild.id, message.channel.id)
+    thread_id = getattr(message.channel, "id", None) if isinstance(getattr(message.channel, "parent", None), discord.TextChannel) else None
+    session_key = make_text_session_key(message.guild.id, message.channel.id, message.author.id, thread_id=thread_id)
     room_key = make_room_memory_key("text", message.channel.id)
     person_key = make_person_memory_key(message.author.id)
     session_memory_key = make_session_memory_key(session_key, message.author.id)
@@ -3273,12 +3583,30 @@ async def on_message(message: discord.Message):
             print("답장 확인 오류:", repr(e))
 
     if not (is_wake_word or is_reply or is_active_session):
+        log_turn_event(
+            "turn_drop",
+            trace_id=ensure_trace_id(session_key),
+            source="text",
+            session_key=session_key,
+            reason="text_gate_not_open",
+            user_id=message.author.id,
+        )
         await bot.process_commands(message)
         return
 
     user_text = strip_voice_wake_word(message.content) if is_wake_word else message.content.strip()
     if not user_text:
         user_text = "부르셨나요?"
+
+    topic_id = build_topic_id(user_text, session_topic_ids.get(session_key, ""))
+    update_session_state(
+        session_key,
+        user_id=message.author.id,
+        speaker="user",
+        awaiting_user_reply=False,
+        topic_id=topic_id,
+        user_text=user_text,
+    )
 
     get_conversation_history(session_key=session_key, guild_id=message.guild.id)
 
@@ -3335,7 +3663,17 @@ async def on_message(message: discord.Message):
                 source="search-followup-text",
             )
 
-            mark_session_active(session_key, user_id=message.author.id, ttl_sec=150.0 if "?" in plain_answer or "？" in plain_answer else 90.0)
+            awaiting_reply = bool("?" in plain_answer or "？" in plain_answer)
+            mark_session_active(
+                session_key,
+                user_id=message.author.id,
+                ttl_sec=ACTIVE_CONVERSATION_TEXT_QUESTION_SEC if awaiting_reply else ACTIVE_CONVERSATION_TEXT_SEC,
+                speaker="assistant",
+                awaiting_user_reply=awaiting_reply,
+                topic_id=topic_id,
+                answer_text=plain_answer,
+                user_text=user_text,
+            )
 
             if vc is not None:
                 await speak_answer(vc, answer)
