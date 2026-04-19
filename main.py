@@ -1022,13 +1022,15 @@ async def get_http_session() -> aiohttp.ClientSession:
 
 
 class OmniVoicePCMStream(discord.AudioSource):
-    def __init__(self):
+    def __init__(self, *, on_first_frame: Callable[[], None] | None = None):
         self._queue: queue.Queue[bytes | None] = queue.Queue()
         self._buffer = bytearray()
         self._done = False
         self._closed = False
         self._rate_state = None
         self._input_remainder = b""
+        self._first_frame_sent = False
+        self._on_first_frame = on_first_frame
         self.error: Exception | None = None
 
     def feed_pcm24_mono(self, chunk: bytes) -> None:
@@ -1083,12 +1085,21 @@ class OmniVoicePCMStream(discord.AudioSource):
         if len(self._buffer) >= DISCORD_FRAME_BYTES:
             chunk = bytes(self._buffer[:DISCORD_FRAME_BYTES])
             del self._buffer[:DISCORD_FRAME_BYTES]
+            if not self._first_frame_sent and any(chunk):
+                self._first_frame_sent = True
+                if self._on_first_frame is not None:
+                    self._on_first_frame()
             return chunk
 
         if self._done and self._buffer:
             chunk = bytes(self._buffer)
             self._buffer.clear()
-            return chunk + (b"\x00" * (DISCORD_FRAME_BYTES - len(chunk)))
+            padded = chunk + (b"\x00" * (DISCORD_FRAME_BYTES - len(chunk)))
+            if not self._first_frame_sent and any(padded):
+                self._first_frame_sent = True
+                if self._on_first_frame is not None:
+                    self._on_first_frame()
+            return padded
 
         return b""
 
@@ -1224,6 +1235,7 @@ def log_voice_bottleneck_summary(metrics: dict | None, *, label: str, extra: str
         f"tts_req={_fmt('tts_request_logged')}",
         f"tts_headers={_fmt('tts_response_headers_logged')}",
         f"tts_first={_fmt('tts_first_byte_logged')}",
+        f"tts_frame={_fmt('tts_first_frame_logged')}",
         f"playback={_fmt('playback_start_logged')}",
     ]
     if extra:
@@ -1237,12 +1249,13 @@ async def create_omnivoice_source(
     on_request_start: Callable[[], None] | None = None,
     on_response_headers: Callable[[], None] | None = None,
     on_first_byte: Callable[[], None] | None = None,
+    on_first_frame: Callable[[], None] | None = None,
 ) -> OmniVoicePCMStream:
     text = clean_tts_text(text)
     if not text:
         raise ValueError("TTS 텍스트가 비어 있습니다.")
 
-    source = OmniVoicePCMStream()
+    source = OmniVoicePCMStream(on_first_frame=on_first_frame)
 
     async def producer() -> None:
         session = await get_http_session()
@@ -1678,6 +1691,7 @@ async def stream_tts_sentences(
                     on_request_start=lambda: log_voice_latency(metrics, "tts_request_logged", "TTS 요청 시작 시간"),
                     on_response_headers=lambda: log_voice_latency(metrics, "tts_response_headers_logged", "TTS 응답 헤더 도착 시간"),
                     on_first_byte=lambda: log_voice_latency(metrics, "tts_first_byte_logged", "TTS 첫 바이트 도착 시간"),
+                    on_first_frame=lambda: log_voice_latency(metrics, "tts_first_frame_logged", "TTS 첫 프레임 공급 시간"),
                 )
                 await play_audio_source(
                     vc,
@@ -1959,6 +1973,7 @@ async def ask_llm_and_speak_streaming(
             "tts_request_logged": False,
             "tts_response_headers_logged": False,
             "tts_first_byte_logged": False,
+            "tts_first_frame_logged": False,
             "playback_start_logged": False,
         }
     else:
@@ -1967,6 +1982,7 @@ async def ask_llm_and_speak_streaming(
         metrics.setdefault("tts_request_logged", False)
         metrics.setdefault("tts_response_headers_logged", False)
         metrics.setdefault("tts_first_byte_logged", False)
+        metrics.setdefault("tts_first_frame_logged", False)
         metrics.setdefault("playback_start_logged", False)
         metrics.setdefault("marks", {})
     log_voice_stage(metrics, "LLM/TTS 파이프라인 시작", extra=f"source={source}")
