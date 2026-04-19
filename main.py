@@ -22,6 +22,7 @@ from transformers import AutoProcessor, WhisperForConditionalGeneration
 from evelyn_core.audio import (
     apply_light_denoise,
     compute_voice_band_metrics,
+    compute_waveform_activity_stats,
     downmix_int16_stereo_to_mono_float,
     is_likely_environment_noise,
     is_probably_silent,
@@ -2053,15 +2054,35 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes, 
         print(f"[UNSTABLE AUDIO CONTINUE] speaker={member.display_name} reasons={reasons}")
         log_voice_stage(metrics, "불안정 음성이지만 본문 STT 진행", extra=f"reasons={reasons}")
 
+    waveform_stats = compute_waveform_activity_stats(audio16k, sampling_rate=stt_sampling_rate)
     if VAD_ENABLED and is_probably_silent(audio16k, sampling_rate=stt_sampling_rate):
         duration_sec = len(audio16k) / float(max(1, stt_sampling_rate))
         peak = float(np.max(np.abs(audio16k))) if audio16k.size else 0.0
         rms = float(np.sqrt(np.mean(np.square(audio16k)))) if audio16k.size else 0.0
-        print(f"[FULL STT SKIP] reason=vad_ignore speaker={member.display_name} sampling_rate={stt_sampling_rate} sec={duration_sec:.2f} peak={peak:.4f} rms={rms:.4f}")
-        print(f"[VAD IGNORE] speaker={member.display_name} sampling_rate={stt_sampling_rate} sec={duration_sec:.2f} peak={peak:.4f} rms={rms:.4f}")
-        save_voice_debug_audio(guild_id, speaker_name, pcm_bytes, audio16k, final_text="[VAD IGNORE]", debug_meta=debug_meta)
-        log_voice_stage(metrics, "VAD 무음 판정", extra=f"sampling_rate={stt_sampling_rate} sec={duration_sec:.2f} peak={peak:.4f} rms={rms:.4f}")
-        return
+        voiced_ms = float(waveform_stats.get("voiced_ms") or 0.0)
+        longest_voiced_ms = float(waveform_stats.get("longest_voiced_ms") or 0.0)
+        body_rms = float(waveform_stats.get("body_rms") or 0.0)
+        body_peak = float(waveform_stats.get("body_peak") or 0.0)
+        waveform_override = voiced_ms >= VOICE_WAVEFORM_MIN_VOICED_MS and (
+            longest_voiced_ms >= VOICE_WAVEFORM_MIN_RUN_MS
+            or body_rms >= VOICE_WAVEFORM_BODY_RMS_MIN
+            or body_peak >= VOICE_WAVEFORM_BODY_PEAK_MIN
+        )
+        if waveform_override:
+            print(
+                f"[VAD OVERRIDE] speaker={member.display_name} sec={duration_sec:.2f} voiced_ms={voiced_ms:.0f} longest_ms={longest_voiced_ms:.0f} body_rms={body_rms:.4f} body_peak={body_peak:.4f}"
+            )
+            log_voice_stage(
+                metrics,
+                "VAD override",
+                extra=f"voiced_ms={voiced_ms:.0f} longest_ms={longest_voiced_ms:.0f} body_rms={body_rms:.4f} body_peak={body_peak:.4f}",
+            )
+        else:
+            print(f"[FULL STT SKIP] reason=vad_ignore speaker={member.display_name} sampling_rate={stt_sampling_rate} sec={duration_sec:.2f} peak={peak:.4f} rms={rms:.4f} voiced_ms={voiced_ms:.0f} longest_ms={longest_voiced_ms:.0f} body_rms={body_rms:.4f}")
+            print(f"[VAD IGNORE] speaker={member.display_name} sampling_rate={stt_sampling_rate} sec={duration_sec:.2f} peak={peak:.4f} rms={rms:.4f}")
+            save_voice_debug_audio(guild_id, speaker_name, pcm_bytes, audio16k, final_text="[VAD IGNORE]", debug_meta=debug_meta)
+            log_voice_stage(metrics, "VAD 무시 처리", extra=f"sampling_rate={stt_sampling_rate} sec={duration_sec:.2f} peak={peak:.4f} rms={rms:.4f} voiced_ms={voiced_ms:.0f} longest_ms={longest_voiced_ms:.0f} body_rms={body_rms:.4f}")
+            return
 
     log_voice_stage(metrics, "웨이크 프로브 시작", extra=f"samples={audio_for_wake.size} sampling_rate={wake_sampling_rate}")
     try:

@@ -24,6 +24,8 @@ from .config import (
     VOICE_ENV_FLATNESS_MAX,
     VOICE_ENV_RMS_MAX,
     VOICE_HUMAN_BAND_RATIO_MIN,
+    VOICE_WAVEFORM_BODY_PEAK_MIN,
+    VOICE_WAVEFORM_BODY_RMS_MIN,
 )
 
 try:
@@ -270,4 +272,47 @@ def is_probably_silent(audio: np.ndarray, sampling_rate: int = TARGET_RATE) -> b
                 silero_vad_warned = True
             return is_probably_silent_energy(audio, sampling_rate=sampling_rate)
 
+
     return is_probably_silent_energy(audio, sampling_rate=sampling_rate)
+def compute_waveform_activity_stats(audio: np.ndarray, sampling_rate: int = TARGET_RATE) -> dict[str, float]:
+    if audio.size == 0:
+        return {
+            "voiced_ms": 0.0,
+            "longest_voiced_ms": 0.0,
+            "body_rms": 0.0,
+            "body_peak": 0.0,
+        }
+
+    effective_rate = max(1, int(sampling_rate))
+    chunk_samples = max(1, int(effective_rate * 0.02))
+    body_start = min(len(audio), int(effective_rate * 0.12))
+    body = audio[body_start:] if body_start < len(audio) else audio
+    body_rms = float(np.sqrt(np.mean(np.square(body)))) if body.size else 0.0
+    body_peak = float(np.max(np.abs(body))) if body.size else 0.0
+    rms_gate = max(VAD_RMS_THRESHOLD * 1.1, VOICE_WAVEFORM_BODY_RMS_MIN * 0.55)
+    peak_gate = max(VAD_PEAK_THRESHOLD * 2.0, VOICE_WAVEFORM_BODY_PEAK_MIN * 0.65)
+
+    voiced_samples = 0
+    longest_samples = 0
+    current_samples = 0
+    for start in range(0, len(audio), chunk_samples):
+        chunk = audio[start:start + chunk_samples]
+        if chunk.size == 0:
+            continue
+        chunk_rms = float(np.sqrt(np.mean(np.square(chunk))))
+        chunk_peak = float(np.max(np.abs(chunk)))
+        voiced = chunk_rms >= rms_gate or chunk_peak >= peak_gate
+        if voiced:
+            voiced_samples += len(chunk)
+            current_samples += len(chunk)
+            longest_samples = max(longest_samples, current_samples)
+        else:
+            current_samples = 0
+
+    return {
+        "voiced_ms": (voiced_samples / float(effective_rate)) * 1000.0,
+        "longest_voiced_ms": (longest_samples / float(effective_rate)) * 1000.0,
+        "body_rms": body_rms,
+        "body_peak": body_peak,
+    }
+

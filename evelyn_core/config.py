@@ -103,6 +103,10 @@ STT_FORCE_PUNCTUATION = _env_flag("STT_FORCE_PUNCTUATION", "true")
 STT_USE_RAW_48K = _env_flag("STT_USE_RAW_48K", "false")
 # 전체 길이가 이 값 이하인 음성은 STT 전에 바로 무시한다.
 VOICE_MIN_TOTAL_SEC = float(os.getenv("VOICE_MIN_TOTAL_SEC", "0.30"))
+VOICE_WAVEFORM_MIN_VOICED_MS = float(os.getenv("VOICE_WAVEFORM_MIN_VOICED_MS", "220"))
+VOICE_WAVEFORM_MIN_RUN_MS = float(os.getenv("VOICE_WAVEFORM_MIN_RUN_MS", "120"))
+VOICE_WAVEFORM_BODY_RMS_MIN = float(os.getenv("VOICE_WAVEFORM_BODY_RMS_MIN", "0.010"))
+VOICE_WAVEFORM_BODY_PEAK_MIN = float(os.getenv("VOICE_WAVEFORM_BODY_PEAK_MIN", "0.055"))
 
 
 # STT 전에 VAD 필터링을 켤지 여부.
@@ -226,7 +230,7 @@ WAKE_WORDS = [
     w.strip()
     for w in os.getenv(
         "WAKE_WORDS",
-        "이별인,이별링,이벨링,에벌링,이블린,이불린,이불링,이브린,이브링,입을린,입을링,이블닝,이블링,이별린,이벌린,에블린,에브린,에블링,에브링,에벌린,이벨린,이반린,불리읍,이블리,이별된,이벨리나,이별레인,리블린,이글린,리블링,이글링,리브린,리브링,니블린,니블링,니브린,니브링,이블니,이브니,에블니,에브니,이벨니,에벨니,이불니,에불린,에불링,이블렌,이브렌,에블렌,에브렌,이벨렌,에벨렌,이벌렌,에벌렌,이블럼,이브럼,에블럼,에브럼,이블랑,이브랑,에블랑,에브랑,이블랭,이브랭,에블랭,에브랭,이블럼,이브럼,이블링아,이브링아,에블링아,에브링아,리블린아,리브린아,이클린,이클링,에클린,에클링,이그린,에그린,"
+        "이별인,이별링,이벨링,에벌링,이블린,이불린,이불링,이브린,이브링,입을린,입을링,이블닝,이블링,이별린,이벌린,에블린,에브린,에블링,에브링,에벌린,비벌레,이벨린,이반린,불리읍,이블리,이별된,이벨리나,이별레인,리블린,이글린,리블링,이글링,리브린,리브링,니블린,니블링,니브린,니브링,이블니,이브니,에블니,에브니,이벨니,에벨니,이불니,에불린,에불링,이블렌,이브렌,에블렌,에브렌,이벨렌,에벨렌,이벌렌,에벌렌,이블럼,이브럼,에블럼,에브럼,이블랑,이브랑,에블랑,에브랑,이블랭,이브랭,에블랭,에브랭,이블럼,이브럼,이블링아,이브링아,에블링아,에브링아,리블린아,리브린아,이클린,이클링,에클린,에클링,이그린,에그린,"
     ).split(",")
     if w.strip()
 ]
