@@ -395,6 +395,14 @@ def log_turn_event(event: str, **payload) -> None:
     print("[TURN TRACE] " + json.dumps(record, ensure_ascii=False, sort_keys=True))
 
 
+def merge_log_event_payload(*, explicit: dict[str, Any], extra: dict[str, Any] | None = None) -> dict[str, Any]:
+    merged = dict(extra or {})
+    for key in explicit.keys():
+        merged.pop(key, None)
+    merged.update(explicit)
+    return merged
+
+
 def new_turn_metrics(
     *,
     source: str,
@@ -439,16 +447,14 @@ def register_drop_reason(metrics: dict | None, reason: str, **extra) -> None:
         return
     meta = metrics.setdefault("meta", {})
     meta["drop_reason"] = reason
-    extra_session_key = extra.pop("session_key", None)
-    log_turn_event(
-        "turn_drop",
-        turn_id=meta.get("turn_id"),
-        segment_id=meta.get("segment_id"),
-        chunk_index=meta.get("chunk_index"),
-        session_key=extra_session_key if extra_session_key is not None else meta.get("session_key"),
-        reason=reason,
-        **extra,
-    )
+    explicit = {
+        "turn_id": meta.get("turn_id"),
+        "segment_id": meta.get("segment_id"),
+        "chunk_index": meta.get("chunk_index"),
+        "session_key": extra.get("session_key") if extra.get("session_key") is not None else meta.get("session_key"),
+        "reason": reason,
+    }
+    log_turn_event("turn_drop", **merge_log_event_payload(explicit=explicit, extra=extra))
 
 
 def save_voice_debug_audio(
