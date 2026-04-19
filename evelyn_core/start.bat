@@ -28,7 +28,7 @@ if not defined WT_READY (
 
 set "WT_WINDOW=evelyn"
 
-start "" "%WT_EXE%" -w new new-tab --title "Main-LLM" wsl.exe bash /mnt/c/Evelyn/evelyn_core/run_main_llm.sh
+start "" "%WT_EXE%" -w %WT_WINDOW% new-tab --title "Main-LLM" wsl.exe bash /mnt/c/Evelyn/evelyn_core/run_main_llm.sh
 timeout /t 1 /nobreak >nul
 "%WT_EXE%" -w %WT_WINDOW% new-tab --title "Router-LLM" wsl.exe bash /mnt/c/Evelyn/evelyn_core/run_router_llm.sh
 "%WT_EXE%" -w %WT_WINDOW% new-tab --title "Sub-LLM" wsl.exe bash /mnt/c/Evelyn/evelyn_core/run_sub_llm.sh
