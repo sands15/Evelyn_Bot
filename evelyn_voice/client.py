@@ -46,6 +46,9 @@ VOICE_DYNAMIC_TRIM_CONSECUTIVE = max(1, int(os.getenv("VOICE_DYNAMIC_TRIM_CONSEC
 VOICE_PCM_BYTES_PER_MS = int((48000 * 2 * 2) / 1000)
 VOICE_PENDING_INNER_MAX_ATTEMPTS = max(1, int(os.getenv("VOICE_PENDING_INNER_MAX_ATTEMPTS", "8")))
 VOICE_PENDING_INNER_MAX_AGE_SEC = max(0.2, float(os.getenv("VOICE_PENDING_INNER_MAX_AGE_SEC", "1.8")))
+VOICE_UNKNOWN_SSRC_MAX_AGE_SEC = max(0.4, float(os.getenv("VOICE_UNKNOWN_SSRC_MAX_AGE_SEC", "2.8")))
+VOICE_UNKNOWN_SSRC_RETRY_MS = max(80.0, float(os.getenv("VOICE_UNKNOWN_SSRC_RETRY_MS", "350")))
+VOICE_UNKNOWN_SSRC_LOG_INTERVAL_SEC = max(0.5, float(os.getenv("VOICE_UNKNOWN_SSRC_LOG_INTERVAL_SEC", "8.0")))
 
 _DAVE_MARKER = b"\xfa\xfa"
 
@@ -464,6 +467,7 @@ class EvelynVoiceClient(discord.VoiceClient):
         self.utterance_states: dict[int, dict] = {}
         self.pending_ssrc_packets: dict[int, deque] = {}
         self.pending_inner_packets: dict[int, list[dict]] = {}
+        self.unknown_ssrc_log_times: dict[int, float] = {}
         self.utterance_count = 0
         self.utterance_queue: asyncio.Queue = asyncio.Queue(maxsize=32)
         self._utterance_processing_tasks: set[asyncio.Task] = set()
@@ -934,6 +938,48 @@ class EvelynVoiceClient(discord.VoiceClient):
         if len(queue) > VOICE_PENDING_SSRC_MAX_PACKETS:
             del queue[:-VOICE_PENDING_SSRC_MAX_PACKETS]
 
+    def _prune_pending_ssrc_packets(self, *, now: float | None = None) -> None:
+        if now is None:
+            now = asyncio.get_running_loop().time()
+        stale_ssrc: list[int] = []
+        for ssrc, queue in list(self.pending_ssrc_packets.items()):
+            kept = [p for p in queue if (now - float(p.get("received_at", now))) <= VOICE_UNKNOWN_SSRC_MAX_AGE_SEC]
+            if kept:
+                self.pending_ssrc_packets[int(ssrc)] = deque(kept, maxlen=VOICE_PENDING_SSRC_MAX_PACKETS)
+            else:
+                stale_ssrc.append(int(ssrc))
+        for ssrc in stale_ssrc:
+            self.pending_ssrc_packets.pop(ssrc, None)
+            self.unknown_ssrc_log_times.pop(ssrc, None)
+
+    def _pending_ssrc_snapshot(self, *, ssrc: int, now: float | None = None) -> tuple[list[dict], float]:
+        if now is None:
+            now = asyncio.get_running_loop().time()
+        self._prune_pending_ssrc_packets(now=now)
+        pending = list(self.pending_ssrc_packets.get(int(ssrc), ()))
+        if not pending:
+            return [], 0.0
+        oldest = float(pending[0].get("received_at", now))
+        return self._ordered_unique_packets(pending), max(0.0, now - oldest)
+
+    def _log_unknown_ssrc_anomaly(self, *, idx: int, ssrc: int, pending_count: int, pending_age_sec: float, map_retry: int, reason: str) -> None:
+        now = asyncio.get_running_loop().time()
+        last_logged = float(self.unknown_ssrc_log_times.get(int(ssrc), 0.0))
+        if (now - last_logged) < VOICE_UNKNOWN_SSRC_LOG_INTERVAL_SEC:
+            return
+        self.unknown_ssrc_log_times[int(ssrc)] = now
+        log.warning(
+            "UNKNOWN SSRC HOLD | idx=%d ssrc=%d pending=%d age_sec=%.2f retry=%d current_user=%s current_ssrc=%s reason=%s",
+            idx,
+            ssrc,
+            pending_count,
+            pending_age_sec,
+            map_retry,
+            self.runtime.current_speaking_user_id,
+            self.runtime.current_speaking_ssrc,
+            reason,
+        )
+
     def _drain_pending_inner_packets(self, *, ssrc: int, user_id: int) -> list[dict]:
         pending = self.pending_inner_packets.get(int(ssrc))
         if not pending:
@@ -1068,6 +1114,7 @@ class EvelynVoiceClient(discord.VoiceClient):
                     deque(maxlen=VOICE_PENDING_SSRC_MAX_PACKETS),
                 )
                 pending.append(packet_info)
+                self._prune_pending_ssrc_packets(now=packet_info["received_at"])
 
                 try:
                     self.media_queue.put_nowait(packet_info)
@@ -1269,29 +1316,28 @@ class EvelynVoiceClient(discord.VoiceClient):
                 log.info("VOICE MAP FALLBACK | user_id=%d ssrc=%d", user_id, ssrc)
 
         if user_id is None:
+            now = asyncio.get_running_loop().time()
             hold_remaining = 0.0
             if self.connected_at is not None:
-                elapsed_ms = (asyncio.get_running_loop().time() - float(self.connected_at)) * 1000.0
+                elapsed_ms = (now - float(self.connected_at)) * 1000.0
                 hold_remaining = max(0.0, VOICE_INITIAL_MAP_HOLD_MS - elapsed_ms)
 
-            retry_delay_ms = VOICE_MAP_RETRY_MS
-            retry_reason = "map_retry"
+            pending_packets, pending_age_sec = self._pending_ssrc_snapshot(ssrc=int(ssrc), now=now)
+            retry_delay_ms = max(VOICE_UNKNOWN_SSRC_RETRY_MS, VOICE_MAP_RETRY_MS)
+            retry_reason = "unknown_ssrc_wait"
             if hold_remaining > retry_delay_ms:
                 retry_delay_ms = hold_remaining
                 retry_reason = "initial_map_hold"
 
-            pending_packets = list(self.pending_ssrc_packets.get(int(ssrc), ()))
-            if pending_packets and map_retry < VOICE_MAP_RETRY_MAX and retry_delay_ms > 0:
+            if pending_packets and pending_age_sec <= VOICE_UNKNOWN_SSRC_MAX_AGE_SEC and retry_delay_ms > 0:
                 retry_delay = max(0.0, retry_delay_ms / 1000.0)
-                log.info(
-                    "VOICE MAP RETRY | idx=%d ssrc=%d retry=%d/%d delay_ms=%d reason=%s pending=%d",
-                    idx,
-                    ssrc,
-                    map_retry + 1,
-                    VOICE_MAP_RETRY_MAX,
-                    int(retry_delay_ms),
-                    retry_reason,
-                    len(pending_packets),
+                self._log_unknown_ssrc_anomaly(
+                    idx=idx,
+                    ssrc=int(ssrc),
+                    pending_count=len(pending_packets),
+                    pending_age_sec=pending_age_sec,
+                    map_retry=map_retry,
+                    reason=retry_reason,
                 )
                 retry_item = deepcopy(item)
                 retry_item["map_retry"] = map_retry + 1
@@ -1310,7 +1356,14 @@ class EvelynVoiceClient(discord.VoiceClient):
                 asyncio.create_task(_requeue_map_retry())
                 return
 
-            log.warning("No user_id mapping yet for ssrc=%d; skipping idx=%d after_retries=%d", ssrc, idx, map_retry)
+            self._log_unknown_ssrc_anomaly(
+                idx=idx,
+                ssrc=int(ssrc),
+                pending_count=len(pending_packets),
+                pending_age_sec=pending_age_sec,
+                map_retry=map_retry,
+                reason="drop_unknown_ssrc",
+            )
             return
         log.info(
             "MAP DEBUG | idx=%d ssrc=%d user_id=%s preferred_user_id=%s dave_user_id=%s",
