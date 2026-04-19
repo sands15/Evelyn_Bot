@@ -5,6 +5,9 @@ call "%~dp0start_env.bat"
 
 if not exist "%OMNIVOICE_PROFILE_DIR%" mkdir "%OMNIVOICE_PROFILE_DIR%"
 
+call :port_ready %TTS_PORT% "OmniVoice-TTS"
+if %ERRORLEVEL%==2 exit /b 0
+
 if /I "%~1"=="--inline" goto :run_inline
 
 set "WT_EXE=%LOCALAPPDATA%\Microsoft\WindowsApps\wt.exe"
@@ -34,3 +37,10 @@ set "CUDA_VISIBLE_DEVICES=1"
 set "EXIT_CODE=%ERRORLEVEL%"
 popd
 endlocal & exit /b %EXIT_CODE%
+
+:port_ready
+powershell -NoProfile -ExecutionPolicy Bypass -Command "if (Get-NetTCPConnection -State Listen -LocalPort %~1 -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }"
+if errorlevel 1 exit /b 1
+
+echo [Evelyn] %~2 already listening on port %~1, skipping new launch
+exit /b 2
