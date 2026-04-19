@@ -977,7 +977,7 @@ class EvelynVoiceClient(discord.VoiceClient):
             ssrc=int(ssrc),
             reason=reason,
             message=f"queued seq={int(packet.get('sequence', 0))} pending={len(queue)} ranges={int(ranges_count)}",
-            level=logging.INFO,
+            level=logging.DEBUG,
         )
 
     def _prune_pending_ssrc_packets(self, *, now: float | None = None) -> None:
@@ -1056,7 +1056,7 @@ class EvelynVoiceClient(discord.VoiceClient):
                     ssrc=int(ssrc),
                     reason=reason,
                     message=f"recovered seq={int(item.get('sequence', 0))} attempts={int(item.get('attempts', 0))} pending_left={max(0, len(pending) - len(recovered))}",
-                    level=logging.INFO,
+                    level=logging.DEBUG,
                 )
                 continue
 
@@ -1152,7 +1152,7 @@ class EvelynVoiceClient(discord.VoiceClient):
                     result["pcm"] = pcm
                     result["fec"] = 1
                     result["status"] = "fake_fec"
-                    log.info(
+                    log.debug(
                         "PACKET fake -> FEC | idx=%d pkt=%d seq=%s next_seq=%s",
                         idx,
                         packet_index,
@@ -1169,7 +1169,7 @@ class EvelynVoiceClient(discord.VoiceClient):
             result["pcm"] = pcm
             result["plc"] = 1
             result["status"] = "fake_plc"
-            log.info(
+            log.debug(
                 "PACKET fake -> PLC | idx=%d pkt=%d seq=%s",
                 idx,
                 packet_index,
@@ -1244,7 +1244,7 @@ class EvelynVoiceClient(discord.VoiceClient):
                     result["pcm"] = pcm
                     result["fec"] = 1
                     result["status"] = "decode_fail_fec"
-                    log.info(
+                    log.debug(
                         "PACKET OPUS corrupt -> FEC | idx=%d pkt=%d seq=%d next_seq=%d",
                         idx,
                         packet_index,
@@ -1261,7 +1261,7 @@ class EvelynVoiceClient(discord.VoiceClient):
             result["pcm"] = pcm
             result["plc"] = 1
             result["status"] = "decode_fail_plc"
-            log.info(
+            log.debug(
                 "PACKET OPUS corrupt -> PLC | idx=%d pkt=%d seq=%d",
                 idx,
                 packet_index,
@@ -1294,7 +1294,7 @@ class EvelynVoiceClient(discord.VoiceClient):
 
         leading_bad_packets += 1
         pcm_chunks.append(silence_pcm)
-        log.info(
+        log.debug(
             "%s -> SILENCE | idx=%d pkt=%d seq=%s",
             label,
             idx,
@@ -1921,16 +1921,6 @@ class EvelynVoiceClient(discord.VoiceClient):
         if getattr(self, "on_user_audio", None) is not None:
             try:
                 callback_started_at = asyncio.get_running_loop().time()
-                utterance_total_before_callback_ms = self._latency_ms(utterance_started_at)
-                if self._should_log_timing(utterance_total_before_callback_ms):
-                    log.info(
-                        "on_user_audio call | idx=%d user_id=%s member=%s pcm_bytes=%d utterance_total_ms=%s",
-                        idx,
-                        user_id,
-                        getattr(member, "display_name", None),
-                        len(pcm_bytes),
-                        f"{utterance_total_before_callback_ms:.0f}" if utterance_total_before_callback_ms is not None else "?",
-                    )
                 try:
                     await self.on_user_audio(member, pcm_bytes, debug_meta=voice_debug_meta)
                 except TypeError as e:
@@ -1939,7 +1929,7 @@ class EvelynVoiceClient(discord.VoiceClient):
                     await self.on_user_audio(member, pcm_bytes)
                 callback_ms = (asyncio.get_running_loop().time() - callback_started_at) * 1000.0
                 if self._should_log_timing(callback_ms):
-                    log.info("on_user_audio ok | idx=%d pcm_bytes=%d callback_ms=%.0f", idx, len(pcm_bytes), callback_ms)
+                    log.warning("VOICE CALLBACK SLOW | idx=%d pcm_bytes=%d callback_ms=%.0f", idx, len(pcm_bytes), callback_ms)
             except Exception as e:
                 log.warning("on_user_audio callback failed | idx=%d err=%r", idx, e)
 

@@ -401,19 +401,29 @@ async def prepare_llm_messages(
     guild_id: int | None = None,
     source: str = "text",
     debug_text: str | None = None,
+    metrics: dict | None = None,
 ) -> tuple[list[dict], dict | None, str]:
+    route_started_at = time.monotonic()
     route, route_meta = await classify_llm_route_async(user_text, guild_id=guild_id, source=source)
+    if metrics is not None:
+        metrics.setdefault("marks", {})["route_ready"] = (time.monotonic() - route_started_at) * 1000.0
     messages = list(get_conversation_history(guild_id))
     cognitive_state: dict | None = None
 
+    cognitive_started_at = time.monotonic()
     if guild_id is not None and route == "sub_wait":
         cognitive_state = await update_cognitive_state(guild_id, user_text)
     elif guild_id is not None and route == "sub_hint":
         saved_state = read_json_file(cognitive_state_path(guild_id))
         cognitive_state = normalize_cognitive_state(saved_state) if saved_state else None
+    if metrics is not None:
+        metrics.setdefault("marks", {})["cognitive_ready"] = (time.monotonic() - cognitive_started_at) * 1000.0
 
     if guild_id is not None:
+        memory_started_at = time.monotonic()
         memory_context = build_memory_context(guild_id, user_text, cognitive_state=cognitive_state)
+        if metrics is not None:
+            metrics.setdefault("marks", {})["memory_ready"] = (time.monotonic() - memory_started_at) * 1000.0
         if memory_context:
             base_system = messages[0]["content"] if messages and messages[0].get("role") == "system" else ""
             merged_system = clean_text(base_system + "\n\n" + memory_context)
@@ -1137,21 +1147,69 @@ def log_voice_latency(metrics: dict | None, key: str, label: str) -> None:
 
     elapsed_ms = (time.monotonic() - float(started_at)) * 1000.0
     metrics[key] = True
+    metrics.setdefault("marks", {})[key] = elapsed_ms
     if should_log_voice_timing(elapsed_ms):
         print(f"[VOICE LATENCY] {label}: {elapsed_ms:.0f}ms")
 
 
-def log_voice_stage(metrics: dict | None, label: str, *, extra: str = "") -> None:
+def record_voice_mark(metrics: dict | None, key: str) -> float | None:
+    if not metrics:
+        return None
+    started_at = metrics.get("started_at")
+    if started_at is None:
+        return None
+    elapsed_ms = (time.monotonic() - float(started_at)) * 1000.0
+    metrics.setdefault("marks", {})[key] = elapsed_ms
+    return elapsed_ms
+
+
+def log_voice_stage(metrics: dict | None, label: str, *, extra: str = "", key: str | None = None) -> None:
     if not metrics:
         return
     started_at = metrics.get("started_at")
     if started_at is None:
         return
     elapsed_ms = (time.monotonic() - float(started_at)) * 1000.0
+    if key:
+        metrics.setdefault("marks", {})[key] = elapsed_ms
     if not should_log_voice_timing(elapsed_ms):
         return
     suffix = f" | {extra}" if extra else ""
     print(f"[VOICE STAGE] {label}: {elapsed_ms:.0f}ms{suffix}")
+
+
+def log_voice_bottleneck_summary(metrics: dict | None, *, label: str, extra: str = "") -> None:
+    if not metrics:
+        return
+    started_at = metrics.get("started_at")
+    if started_at is None:
+        return
+
+    total_ms = (time.monotonic() - float(started_at)) * 1000.0
+    if not should_log_voice_timing(total_ms):
+        return
+
+    marks = metrics.get("marks") or {}
+
+    def _fmt(name: str) -> str:
+        value = marks.get(name)
+        return f"{float(value):.0f}ms" if value is not None else "-"
+
+    parts = [
+        f"total={total_ms:.0f}ms",
+        f"route={_fmt('route_ready')}",
+        f"cognitive={_fmt('cognitive_ready')}",
+        f"memory={_fmt('memory_ready')}",
+        f"wake={_fmt('wake_done')}",
+        f"stt={_fmt('stt_done')}",
+        f"llm_first={_fmt('llm_first_chunk_logged')}",
+        f"llm_done={_fmt('llm_done')}",
+        f"tts_first={_fmt('tts_first_byte_logged')}",
+        f"playback={_fmt('playback_start_logged')}",
+    ]
+    if extra:
+        parts.append(extra)
+    print(f"[VOICE BOTTLENECK] {label} | " + " | ".join(parts))
 
 
 async def create_omnivoice_source(
@@ -1742,12 +1800,14 @@ async def ask_llm_streaming(
     *,
     source: str = "text",
     debug_text: str | None = None,
+    metrics: dict | None = None,
 ) -> str:
     messages, cognitive_state, _route = await prepare_llm_messages(
         user_text,
         guild_id=guild_id,
         source=source,
         debug_text=debug_text,
+        metrics=metrics,
     )
 
     guided_user_text = user_text
@@ -1770,6 +1830,7 @@ async def ask_llm_streaming(
     reasoning_parts: list[str] = []
     sentence_buffer = ""
     emitted_any = False
+    llm_started_at = time.monotonic()
 
     async with session.post(LLM_SERVER_URL, json=payload, timeout=timeout) as resp:
         if resp.status != 200:
@@ -1791,6 +1852,8 @@ async def ask_llm_streaming(
                 on_first_chunk()
             if on_sentence is not None:
                 await on_sentence(answer)
+            if metrics is not None:
+                metrics.setdefault("marks", {})["llm_done"] = (time.monotonic() - float(metrics.get("started_at", time.monotonic()))) * 1000.0
             return answer
 
         async for raw_line in resp.content:
@@ -1845,6 +1908,10 @@ async def ask_llm_streaming(
             emitted_any = True
             await on_sentence(chunk)
 
+    if metrics is not None:
+        metrics.setdefault("marks", {})["llm_http_ms"] = (time.monotonic() - llm_started_at) * 1000.0
+        metrics.setdefault("marks", {})["llm_done"] = (time.monotonic() - float(metrics.get("started_at", time.monotonic()))) * 1000.0
+
     return answer
 
 
@@ -1882,8 +1949,9 @@ async def ask_llm_and_speak_streaming(
             on_first_chunk=lambda: log_voice_latency(metrics, "llm_first_chunk_logged", "LLM 첫 chunk 시간"),
             source=source,
             debug_text=debug_text,
+            metrics=metrics,
         )
-        log_voice_stage(metrics, "LLM 완료", extra=f"chars={len(answer)}")
+        log_voice_stage(metrics, "LLM 완료", extra=f"chars={len(answer)}", key="llm_done")
         answer = clean_text(answer)
         if answer and on_final_answer is not None:
             await on_final_answer(answer)
@@ -1902,6 +1970,7 @@ async def ask_llm_and_speak_streaming(
     if llm_error is not None:
         raise llm_error
 
+    log_voice_bottleneck_summary(metrics, label="voice_reply", extra=f"source={source} chars={len(answer)}")
     return answer
 
 
@@ -1985,7 +2054,7 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes, 
         wake_detected = contains_leading_wake_word(strip_leading_voice_fillers(wake_confirm))
         if wake_detected:
             wake_probe = wake_confirm
-    log_voice_stage(metrics, "웨이크 프로브 완료", extra=f"wake={wake_detected} probe_len={len(wake_probe)} confirm_len={len(wake_confirm)}")
+    log_voice_stage(metrics, "웨이크 프로브 완료", extra=f"wake={wake_detected} probe_len={len(wake_probe)} confirm_len={len(wake_confirm)}", key="wake_done")
 
     if is_likely_environment_noise(audio_for_wake, sampling_rate=wake_sampling_rate):
         band_ratio, flatness, rms = compute_voice_band_metrics(audio_for_wake, sampling_rate=wake_sampling_rate)
@@ -2046,7 +2115,7 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes, 
     else:
         stt_meta = {"enabled": False, "selected": "primary", "primary_text": primary_text}
 
-    log_voice_stage(metrics, "본문 STT 완료", extra=f"text_len={len(text)}")
+    log_voice_stage(metrics, "본문 STT 완료", extra=f"text_len={len(text)}", key="stt_done")
 
     if not text:
         save_voice_debug_audio(guild_id, speaker_name, pcm_bytes, audio16k, wake_probe=wake_probe, final_text="[EMPTY STT]", debug_meta=debug_meta, stt_meta=stt_meta)
