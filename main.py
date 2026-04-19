@@ -1938,6 +1938,22 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes, 
         log_voice_stage(metrics, "오디오 비어있음")
         return
 
+    raw_seconds = len(pcm_bytes) / float(RATE * CHANNELS * 2)
+    if raw_seconds <= VOICE_MIN_TOTAL_SEC:
+        print(f"[FULL STT SKIP] reason=too_short_total speaker={member.display_name} raw_seconds={raw_seconds:.3f}")
+        print(f"[SHORT AUDIO IGNORE] speaker={member.display_name} raw_seconds={raw_seconds:.3f}")
+        save_voice_debug_audio(
+            guild_id,
+            speaker_name,
+            pcm_bytes,
+            audio16k,
+            final_text="[SHORT AUDIO IGNORE]",
+            debug_meta=debug_meta,
+            save_stt_audio=False,
+        )
+        log_voice_stage(metrics, "전체 길이 너무 짧아서 제외", extra=f"raw_seconds={raw_seconds:.3f}")
+        return
+
     if debug_meta and debug_meta.get("unstable"):
         reasons = ",".join(str(r) for r in debug_meta.get("reasons", []))
         print(f"[FULL STT SKIP] reason=unstable_audio speaker={member.display_name} reasons={reasons}")

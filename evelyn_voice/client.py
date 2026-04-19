@@ -204,6 +204,8 @@ def _build_voice_receive_debug_meta(
 ) -> dict:
     reasons: list[str] = []
 
+    audio_seconds = pcm_bytes_len / float(max(1, VOICE_PCM_BYTES_PER_MS) * 1000)
+    short_clip = audio_seconds < 1.0
     burst_trim_ms = float(trim_meta.get("burst_trim_ms") or 0.0)
     early8_rms = float(trim_meta.get("early8_rms") or 0.0)
     early8_peak = float(trim_meta.get("early8_peak") or 0.0)
@@ -217,23 +219,23 @@ def _build_voice_receive_debug_meta(
         reasons.append(f"outer_decrypt_fail={outer_fail}")
     if dave_fail > dave_warmup_skips:
         reasons.append(f"dave_fail={dave_fail}")
-    if opus_fail > 0:
+    if opus_fail >= (8 if short_clip else 4):
         reasons.append(f"opus_fail={opus_fail}")
-    if plc_packets > 0:
+    if plc_packets >= (4 if short_clip else 2):
         reasons.append(f"plc={plc_packets}")
-    if fec_packets > 0:
+    if fec_packets >= (6 if short_clip else 4):
         reasons.append(f"fec={fec_packets}")
-    if real_silence > 0:
+    if real_silence >= (28 if short_clip else 20):
         reasons.append(f"real_silence={real_silence}")
     if opus_silence_fill > 0:
         reasons.append(f"opus_silence_fill={opus_silence_fill}")
-    if failed >= max(2, int(round(packet_count * 0.15))):
+    if failed >= max(5 if short_clip else 3, int(round(packet_count * (0.22 if short_clip else 0.18)))):
         reasons.append(f"high_failed_ratio={failed}/{packet_count}")
-    if burst_trim_ms >= 160.0:
+    if not short_clip and burst_trim_ms >= 240.0:
         reasons.append(f"burst_trim_ms={int(round(burst_trim_ms))}")
-    if trim_ms >= 240.0:
+    if not short_clip and trim_ms >= 320.0 and body_rms < 0.010:
         reasons.append(f"heavy_trim_ms={int(round(trim_ms))}")
-    if early8_peak >= 0.98 and early8_rms > max(0.12, body_rms * 2.2):
+    if (not short_clip) and early8_peak >= 0.98 and early8_rms > max(0.16, body_rms * 3.0) and body_rms < 0.010:
         reasons.append("front_burst_detected")
     if first_packet_wait_ms is not None and first_packet_wait_ms >= 250.0:
         reasons.append(f"first_packet_wait_ms={int(round(first_packet_wait_ms))}")
@@ -243,6 +245,8 @@ def _build_voice_receive_debug_meta(
         "reasons": reasons,
         "idx": int(idx),
         "ssrc": int(ssrc),
+        "audio_seconds": _round_metric(audio_seconds, 3),
+        "short_clip": bool(short_clip),
         "packets": {
             "input": int(packet_count),
             "expanded": int(expanded_count),

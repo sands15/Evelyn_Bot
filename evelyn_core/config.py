@@ -35,7 +35,7 @@ OMNIVOICE_TIMEOUT_SEC = float(os.getenv("OMNIVOICE_TIMEOUT_SEC", "180"))
 # 메모리 업데이트에 쓰는 서브 LLM 서버 엔드포인트.
 SUMMARY_LLM_URL = os.getenv("SUMMARY_LLM_URL", "http://127.0.0.1:9821/v1/chat/completions")
 # 요약/메모리 관리용 서브 모델 이름.
-SUMMARY_MODEL_NAME = os.getenv("SUMMARY_MODEL_NAME", "EXAONE-3.5-7.8B-Instruct-Q4_K_M.gguf")
+SUMMARY_MODEL_NAME = os.getenv("SUMMARY_MODEL_NAME", "EXAONE-3.5-7.8B-Instruct-BF16.gguf")
 # 라우팅/인지 판단에 쓰는 router LLM 서버 엔드포인트.
 ROUTER_LLM_URL = os.getenv("ROUTER_LLM_URL", "http://127.0.0.1:9822/v1/chat/completions")
 # router 서버에 전달할 모델 이름.
@@ -101,6 +101,8 @@ STT_FORCE_LANGUAGE = _env_flag("STT_FORCE_LANGUAGE", "true")
 STT_FORCE_PUNCTUATION = _env_flag("STT_FORCE_PUNCTUATION", "true")
 # STT/VAD/wake 경로를 원본 48k 대신 16k 준비 오디오로 통일할지 여부.
 STT_USE_RAW_48K = _env_flag("STT_USE_RAW_48K", "false")
+# 전체 길이가 이 값 이하인 음성은 STT 전에 바로 무시한다.
+VOICE_MIN_TOTAL_SEC = float(os.getenv("VOICE_MIN_TOTAL_SEC", "0.30"))
 
 
 # STT 전에 VAD 필터링을 켤지 여부.
