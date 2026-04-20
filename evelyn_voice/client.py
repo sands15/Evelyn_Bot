@@ -13,6 +13,7 @@ import davey
 import discord
 import numpy as np
 from discord.opus import Decoder
+from discord.voice_state import VoiceConnectionState
 from nacl.bindings import crypto_aead_xchacha20poly1305_ietf_decrypt
 
 from .dave_session import DaveSession
@@ -394,6 +395,18 @@ def _parse_rtp_header(packet: bytes):
     }
 
 
+class EvelynVoiceConnectionState(VoiceConnectionState):
+    async def _potential_reconnect(self) -> bool:
+        voice_client = self.voice_client
+        if hasattr(voice_client, "_set_internal_voice_reconnect_active"):
+            voice_client._set_internal_voice_reconnect_active(True)
+        try:
+            return await super()._potential_reconnect()
+        finally:
+            if hasattr(voice_client, "_set_internal_voice_reconnect_active"):
+                voice_client._set_internal_voice_reconnect_active(False)
+
+
 class EvelynVoiceClient(discord.VoiceClient):
 
     def _dump_frame_probe(
@@ -441,8 +454,14 @@ class EvelynVoiceClient(discord.VoiceClient):
             self.dave.protocol_version,
         )
 
+    def create_connection_state(self) -> VoiceConnectionState:
+        return EvelynVoiceConnectionState(self)
+
     def __init__(self, client: discord.Client, channel: discord.abc.Connectable):
         super().__init__(client, channel)
+
+        self._internal_voice_reconnect_active = False
+        self._internal_voice_reconnect_started_at: float | None = None
 
         self.runtime = VoiceRuntimeState(
             guild_id=getattr(channel.guild, "id", None),
@@ -482,6 +501,31 @@ class EvelynVoiceClient(discord.VoiceClient):
         self.utterance_queue: asyncio.Queue = asyncio.Queue(maxsize=32)
         self._utterance_processing_tasks: set[asyncio.Task] = set()
         self.connected_at: float | None = None
+
+    def _set_internal_voice_reconnect_active(self, active: bool) -> None:
+        self._internal_voice_reconnect_active = bool(active)
+        if active:
+            self._internal_voice_reconnect_started_at = asyncio.get_running_loop().time()
+        else:
+            self._internal_voice_reconnect_started_at = None
+
+    def is_internal_voice_reconnect_active(self) -> bool:
+        if self._internal_voice_reconnect_active:
+            return True
+        connection = getattr(self, "_connection", None)
+        state = getattr(connection, "state", None)
+        state_name = getattr(state, "name", str(state) if state is not None else "")
+        return bool(state is not None and state_name != "connected" and state_name != "disconnected" and getattr(connection, "_runner", None) is not None)
+
+    async def wait_for_internal_voice_reconnect(self, timeout: float) -> bool:
+        deadline = asyncio.get_running_loop().time() + max(0.1, timeout)
+        while asyncio.get_running_loop().time() < deadline:
+            if self.is_connected():
+                return True
+            if not self.is_internal_voice_reconnect_active():
+                return self.is_connected()
+            await asyncio.sleep(0.05)
+        return self.is_connected()
 
     def _latency_ms(self, started_at: float | None) -> float | None:
         if started_at is None:

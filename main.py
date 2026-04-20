@@ -109,6 +109,7 @@ session_bad_audio_counts: dict[str, int] = {}
 room_owner_user_ids: dict[str, int] = {}
 room_owner_until: dict[str, float] = {}
 room_reply_in_progress: dict[str, bool] = {}
+voice_connect_locks: dict[int, asyncio.Lock] = {}
 background_search_tasks: dict[str, asyncio.Task] = {}
 
 
@@ -3042,45 +3043,73 @@ def detect_wake_word_sync(audio: np.ndarray, *, sampling_rate: int = TARGET_RATE
 # =========================================================
 # 디스코드 음성
 # =========================================================
+async def _wait_for_internal_voice_reconnect(target_channel: discord.VoiceChannel) -> EvelynVoiceClient | None:
+    existing_vc = target_channel.guild.voice_client
+    if not isinstance(existing_vc, EvelynVoiceClient):
+        return None
+    if not existing_vc.is_internal_voice_reconnect_active():
+        return None
+
+    resumed = await existing_vc.wait_for_internal_voice_reconnect(timeout=max(VOICE_CONNECT_TIMEOUT, 5.0))
+    if resumed and existing_vc.channel == target_channel:
+        return existing_vc
+    refreshed_vc = target_channel.guild.voice_client
+    if isinstance(refreshed_vc, EvelynVoiceClient) and refreshed_vc.is_connected() and refreshed_vc.channel == target_channel:
+        return refreshed_vc
+    return None
+
+
 async def connect_evelyn_voice_client(target_channel: discord.VoiceChannel) -> EvelynVoiceClient:
-    last_error: Exception | None = None
+    guild_id = target_channel.guild.id
+    lock = voice_connect_locks.setdefault(guild_id, asyncio.Lock())
 
-    for attempt in range(1, VOICE_CONNECT_RETRIES + 1):
-        try:
-            print(
-                f"[VOICE CONNECT] attempt={attempt}/{VOICE_CONNECT_RETRIES} channel={target_channel.name} timeout={VOICE_CONNECT_TIMEOUT}"
-            )
-            vc = await target_channel.connect(
-                cls=EvelynVoiceClient,
-                timeout=VOICE_CONNECT_TIMEOUT,
-                reconnect=False,
-            )
-            if not isinstance(vc, EvelynVoiceClient):
-                raise RuntimeError(f"unexpected voice client type: {type(vc)!r}")
-            return vc
-        except Exception as e:
-            last_error = e
-            print(
-                f"[VOICE CONNECT FAIL] attempt={attempt}/{VOICE_CONNECT_RETRIES} channel={target_channel.name} err={e!r}"
-            )
+    async with lock:
+        reused_vc = await _wait_for_internal_voice_reconnect(target_channel)
+        if reused_vc is not None:
+            return reused_vc
 
-            stale_vc = target_channel.guild.voice_client
-            if stale_vc is not None:
+        last_error: Exception | None = None
+
+        for attempt in range(1, VOICE_CONNECT_RETRIES + 1):
+            try:
+                print(
+                    f"[VOICE CONNECT] attempt={attempt}/{VOICE_CONNECT_RETRIES} channel={target_channel.name} timeout={VOICE_CONNECT_TIMEOUT}"
+                )
+                vc = await target_channel.connect(
+                    cls=EvelynVoiceClient,
+                    timeout=VOICE_CONNECT_TIMEOUT,
+                    reconnect=False,
+                )
+                if not isinstance(vc, EvelynVoiceClient):
+                    raise RuntimeError(f"unexpected voice client type: {type(vc)!r}")
+                return vc
+            except Exception as e:
+                last_error = e
+                print(
+                    f"[VOICE CONNECT FAIL] attempt={attempt}/{VOICE_CONNECT_RETRIES} channel={target_channel.name} err={e!r}"
+                )
+
+                reused_vc = await _wait_for_internal_voice_reconnect(target_channel)
+                if reused_vc is not None:
+                    return reused_vc
+
+                stale_vc = target_channel.guild.voice_client
+                if stale_vc is not None:
+                    try:
+                        await stale_vc.disconnect(force=True)
+                    except Exception:
+                        pass
+
                 try:
-                    await stale_vc.disconnect(force=True)
+                    await target_channel.guild.change_voice_state(channel=None, self_deaf=False, self_mute=False)
                 except Exception:
                     pass
 
-            try:
-                await target_channel.guild.change_voice_state(channel=None, self_deaf=False, self_mute=False)
-            except Exception:
-                pass
+                if attempt < VOICE_CONNECT_RETRIES:
+                    await asyncio.sleep(VOICE_CONNECT_RETRY_DELAY_SEC)
 
-            if attempt < VOICE_CONNECT_RETRIES:
-                await asyncio.sleep(VOICE_CONNECT_RETRY_DELAY_SEC)
-
-    assert last_error is not None
-    raise last_error
+        assert last_error is not None
+        raise last_error
 
 
 async def ensure_listening_voice_client(guild: discord.Guild, target_channel: discord.VoiceChannel) -> Optional[EvelynVoiceClient]:
@@ -3092,6 +3121,10 @@ async def ensure_listening_voice_client(guild: discord.Guild, target_channel: di
 
     if vc is None:
         vc = await connect_evelyn_voice_client(target_channel)
+    elif isinstance(vc, EvelynVoiceClient) and vc.is_internal_voice_reconnect_active():
+        waited_vc = await _wait_for_internal_voice_reconnect(target_channel)
+        if waited_vc is not None:
+            vc = waited_vc
     elif vc.channel != target_channel:
         await vc.move_to(target_channel)
 
