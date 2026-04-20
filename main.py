@@ -79,6 +79,11 @@ session_topic_ids: dict[str, str] = {}
 session_turn_ids: dict[str, str] = {}
 session_segment_counters: dict[str, int] = {}
 session_last_turn_accepted_at: dict[str, float] = {}
+session_last_stt_text: dict[str, str] = {}
+session_bad_audio_counts: dict[str, int] = {}
+room_owner_user_ids: dict[str, int] = {}
+room_owner_until: dict[str, float] = {}
+room_reply_in_progress: dict[str, bool] = {}
 background_search_tasks: dict[str, asyncio.Task] = {}
 
 
@@ -134,8 +139,7 @@ stt_model: Optional[Any] = None
 stt_backend: Optional[str] = None
 http_session: Optional[aiohttp.ClientSession] = None
 
-last_voice_reply_at: dict[int, float] = {}
-last_voice_text: dict[int, str] = {}
+room_last_voice_reply_at: dict[str, float] = {}
 last_bot_audio_end_at: dict[int, float] = {}
 bot_speaking_guilds: set[int] = set()
 memory_locks: dict[int, asyncio.Lock] = {}
@@ -166,10 +170,15 @@ def make_text_session_key(guild_id: int, channel_id: int, user_id: int | None = 
     return f"guild:{guild_id}:text:{channel_id}{thread_part}{user_part}"
 
 
-def make_voice_session_key(guild_id: int, voice_channel_id: int | None, user_id: int | None = None) -> str:
+def make_voice_room_session_key(guild_id: int, voice_channel_id: int | None) -> str:
     channel_part = voice_channel_id if voice_channel_id is not None else "none"
+    return f"guild:{guild_id}:voice:{channel_part}"
+
+
+def make_voice_session_key(guild_id: int, voice_channel_id: int | None, user_id: int | None = None) -> str:
+    room_session_key = make_voice_room_session_key(guild_id, voice_channel_id)
     user_part = f":user:{user_id}" if user_id is not None else ""
-    return f"guild:{guild_id}:voice:{channel_part}{user_part}"
+    return f"{room_session_key}{user_part}"
 
 
 def make_room_memory_key(kind: str, room_id: int | None) -> str:
@@ -240,7 +249,97 @@ def session_state_snapshot(session_key: str | None) -> dict:
         "topic_id": session_topic_ids.get(session_key, ""),
         "turn_id": session_turn_ids.get(session_key, ""),
         "last_turn_accepted_at": session_last_turn_accepted_at.get(session_key, 0.0),
+        "last_stt_text": session_last_stt_text.get(session_key, ""),
+        "bad_audio_count": session_bad_audio_counts.get(session_key, 0),
     }
+
+
+def _clear_room_owner(room_session_key: str | None) -> None:
+    if not room_session_key:
+        return
+    room_owner_user_ids.pop(room_session_key, None)
+    room_owner_until.pop(room_session_key, None)
+
+
+
+def room_state_snapshot(room_session_key: str | None) -> dict:
+    if not room_session_key:
+        return {}
+    owner_until = room_owner_until.get(room_session_key, 0.0)
+    if owner_until <= time.monotonic() and not room_reply_in_progress.get(room_session_key, False):
+        _clear_room_owner(room_session_key)
+        owner_until = 0.0
+    return {
+        "owner_user_id": room_owner_user_ids.get(room_session_key),
+        "owner_until": owner_until,
+        "reply_in_progress": room_reply_in_progress.get(room_session_key, False),
+    }
+
+
+
+def is_room_owner_active(room_session_key: str | None, user_id: int | None) -> bool:
+    if not room_session_key or user_id is None:
+        return False
+    state = room_state_snapshot(room_session_key)
+    return state.get("owner_user_id") == user_id and float(state.get("owner_until") or 0.0) > time.monotonic()
+
+
+
+def set_room_owner(
+    room_session_key: str | None,
+    user_id: int | None,
+    *,
+    ttl_sec: float,
+    reason: str,
+    session_key: str | None = None,
+    turn_id: str | None = None,
+    segment_id: int | None = None,
+) -> None:
+    if not room_session_key or user_id is None:
+        return
+    previous_owner = room_owner_user_ids.get(room_session_key)
+    room_owner_user_ids[room_session_key] = user_id
+    room_owner_until[room_session_key] = time.monotonic() + max(0.0, ttl_sec)
+    log_turn_event(
+        "room_owner_update",
+        room_session_key=room_session_key,
+        previous_owner_user_id=previous_owner,
+        owner_user_id=user_id,
+        owner_until=round(room_owner_until[room_session_key], 3),
+        reason=reason,
+        session_key=session_key,
+        turn_id=turn_id,
+        segment_id=segment_id,
+    )
+
+
+
+def set_room_reply_in_progress(room_session_key: str | None, value: bool, *, owner_user_id: int | None = None) -> None:
+    if not room_session_key:
+        return
+    room_reply_in_progress[room_session_key] = value
+    log_turn_event(
+        "room_reply_state",
+        room_session_key=room_session_key,
+        reply_in_progress=value,
+        owner_user_id=owner_user_id if owner_user_id is not None else room_owner_user_ids.get(room_session_key),
+    )
+
+
+
+def increment_session_bad_audio(session_key: str | None) -> int:
+    if not session_key:
+        return 0
+    count = session_bad_audio_counts.get(session_key, 0) + 1
+    session_bad_audio_counts[session_key] = count
+    return count
+
+
+
+def reset_session_bad_audio(session_key: str | None) -> None:
+    if not session_key:
+        return
+    session_bad_audio_counts[session_key] = 0
 
 
 def update_session_state(
@@ -343,6 +442,13 @@ def reset_guild_runtime_state(guild_id: int) -> None:
         session_turn_ids.pop(key, None)
         session_segment_counters.pop(key, None)
         session_last_turn_accepted_at.pop(key, None)
+        session_last_stt_text.pop(key, None)
+        session_bad_audio_counts.pop(key, None)
+    for key in [key for key in room_owner_user_ids if key.startswith(prefix)]:
+        room_owner_user_ids.pop(key, None)
+        room_owner_until.pop(key, None)
+        room_reply_in_progress.pop(key, None)
+        room_last_voice_reply_at.pop(key, None)
     for key in [key for key in session_locks if key.startswith(prefix)]:
         session_locks.pop(key, None)
     for key, task in list(background_search_tasks.items()):
@@ -350,8 +456,6 @@ def reset_guild_runtime_state(guild_id: int) -> None:
             if task is not None and not task.done():
                 task.cancel()
             background_search_tasks.pop(key, None)
-    last_voice_reply_at.pop(guild_id, None)
-    last_voice_text.pop(guild_id, None)
     last_bot_audio_end_at.pop(guild_id, None)
     bot_speaking_guilds.discard(guild_id)
     memory_locks.pop(guild_id, None)
@@ -407,8 +511,10 @@ def new_turn_metrics(
     *,
     source: str,
     session_key: str | None = None,
+    room_session_key: str | None = None,
     guild_id: int | None = None,
     user_id: int | None = None,
+    owner_user_id: int | None = None,
     topic_id: str | None = None,
     turn_id: str | None = None,
     segment_id: int | None = None,
@@ -422,6 +528,8 @@ def new_turn_metrics(
             "session_key": session_key,
             "guild_id": guild_id,
             "user_id": user_id,
+            "owner_user_id": owner_user_id,
+            "room_session_key": room_session_key,
             "topic_id": topic_id,
             "turn_id": turn_id,
             "segment_id": segment_id,
@@ -434,6 +542,8 @@ def new_turn_metrics(
         session_key=session_key,
         guild_id=guild_id,
         user_id=user_id,
+        owner_user_id=owner_user_id,
+        room_session_key=room_session_key,
         topic_id=topic_id,
         turn_id=turn_id,
         segment_id=segment_id,
@@ -452,6 +562,8 @@ def register_drop_reason(metrics: dict | None, reason: str, **extra) -> None:
         "segment_id": meta.get("segment_id"),
         "chunk_index": meta.get("chunk_index"),
         "session_key": extra.get("session_key") if extra.get("session_key") is not None else meta.get("session_key"),
+        "room_session_key": extra.get("room_session_key") if extra.get("room_session_key") is not None else meta.get("room_session_key"),
+        "owner_user_id": extra.get("owner_user_id") if extra.get("owner_user_id") is not None else meta.get("owner_user_id"),
         "reason": reason,
     }
     log_turn_event("turn_drop", **merge_log_event_payload(explicit=explicit, extra=extra))
@@ -557,41 +669,62 @@ def should_reply_to_voice(
     text: str,
     *,
     wake_detected: bool = False,
+    wake_match_mode: str = "",
     session_key: str | None = None,
+    room_session_key: str | None = None,
     user_id: int | None = None,
-) -> tuple[bool, str]:
+) -> tuple[bool, str, str]:
     now = time.monotonic()
     text_n = normalize_voice_text(text)
+    session_state = session_state_snapshot(session_key)
+    room_state = room_state_snapshot(room_session_key)
+    owner_user_id = room_state.get("owner_user_id")
+    owner_active = is_room_owner_active(room_session_key, user_id)
     active_session = session_key is not None and is_session_active_for_user(session_key, user_id)
-    state = session_state_snapshot(session_key)
+    awaiting_followup = bool(session_state.get("awaiting_user_reply")) and owner_active
+    followup_allowed = owner_active and (active_session or awaiting_followup)
 
     if guild_id in bot_speaking_guilds:
-        return False, "bot_is_speaking"
+        return False, "bot_is_speaking", "bot_is_speaking"
 
     if now - last_bot_audio_end_at.get(guild_id, 0.0) < POST_TTS_IGNORE_SEC:
-        return False, "post_tts_ignore"
+        return False, "post_tts_ignore", "post_tts_ignore"
 
     if not text_n:
-        return False, "empty"
+        return False, "empty", "empty"
 
-    if not wake_detected and not contains_wake_word(text_n) and not active_session:
-        return False, "no_wake_word"
+    if looks_like_brief_filler_text(text_n):
+        return False, "reply_gate_brief_filler", "reply_gate_brief_filler"
 
-    if len(text_n) < MIN_TEXT_LEN and not wake_detected and not active_session:
-        return False, "too_short"
+    if looks_like_repetitive_noise_text(text_n):
+        return False, "reply_gate_noise_text", "reply_gate_noise_text"
 
-    if state.get("last_speaker") == "assistant" and state.get("awaiting_user_reply"):
-        active_session = True
+    last_stt_text = normalize_voice_text(session_state.get("last_stt_text", ""))
+    if last_stt_text and is_similar(text_n, last_stt_text):
+        return False, "duplicate", "duplicate"
 
-    if now - last_voice_reply_at.get(guild_id, 0.0) < REPLY_COOLDOWN_SEC and not active_session:
-        return False, "cooldown"
+    if followup_allowed:
+        return True, "ok", "owner_followup"
 
-    if is_similar(text_n, last_voice_text.get(guild_id, "")):
-        return False, "duplicate"
+    if owner_user_id is not None and user_id is not None and owner_user_id != user_id:
+        if not wake_detected:
+            return False, "owner_mismatch_needs_wake", "owner_mismatch_needs_wake"
+        if wake_match_mode != "exact":
+            return False, "owner_takeover_requires_exact_wake", "owner_takeover_requires_exact_wake"
 
-    last_voice_text[guild_id] = text_n
-    last_voice_reply_at[guild_id] = now
-    return True, "ok"
+    if not wake_detected and not contains_wake_word(text_n):
+        return False, "no_wake_word", "no_wake_word"
+
+    if len(text_n) < MIN_TEXT_LEN and not wake_detected:
+        return False, "too_short", "too_short"
+
+    if room_session_key and (now - room_last_voice_reply_at.get(room_session_key, 0.0) < REPLY_COOLDOWN_SEC) and not wake_detected:
+        return False, "cooldown", "cooldown"
+
+    if wake_detected and owner_user_id is not None and owner_user_id != user_id:
+        return True, "ok", "owner_takeover"
+
+    return True, "ok", "wake_entry"
 
 
 def ask_confidence_threshold_for_source(source: str) -> float:
@@ -2484,6 +2617,10 @@ def log_voice_bottleneck_summary(metrics: dict | None, *, label: str, extra: str
         chunk_index=meta.get("chunk_index"),
         source=meta.get("source"),
         session_key=meta.get("session_key"),
+        room_session_key=meta.get("room_session_key"),
+        owner_user_id=meta.get("owner_user_id"),
+        reply_gate_passed_by=meta.get("reply_gate_passed_by"),
+        reply_gate_blocked_by=meta.get("reply_gate_blocked_by"),
         topic_id=meta.get("topic_id"),
         drop_reason=meta.get("drop_reason"),
         t_ingress=marks.get("t_ingress"),
@@ -3607,23 +3744,28 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes, 
 
     guild_id = guild.id
     voice_channel_id = getattr(getattr(guild.voice_client, "channel", None), "id", None)
+    room_session_key = make_voice_room_session_key(guild_id, voice_channel_id)
     session_key = make_voice_session_key(guild_id, voice_channel_id, member.id)
     room_key = make_room_memory_key("voice", voice_channel_id)
     person_key = make_person_memory_key(member.id)
     session_memory_key = make_session_memory_key(session_key, member.id)
     segment_id = next_segment_id(session_key)
     turn_id = new_turn_id()
+    room_state = room_state_snapshot(room_session_key)
     voice_ingress_queue.put_nowait(
         {
             "member": member,
             "pcm_bytes": pcm_bytes,
             "debug_meta": debug_meta,
             "session_key": session_key,
+            "room_session_key": room_session_key,
             "room_key": room_key,
             "person_key": person_key,
             "session_memory_key": session_memory_key,
             "turn_id": turn_id,
             "segment_id": segment_id,
+            "ingress_during_reply": bool(room_state.get("reply_in_progress")),
+            "owner_user_id_on_ingress": room_state.get("owner_user_id"),
         }
     )
 
@@ -3634,11 +3776,14 @@ async def _process_member_audio_impl(
     debug_meta: dict | None = None,
     *,
     session_key: str,
+    room_session_key: str,
     room_key: str | None,
     person_key: str | None,
     session_memory_key: str | None,
     turn_id: str,
     segment_id: int,
+    ingress_during_reply: bool = False,
+    owner_user_id_on_ingress: int | None = None,
 ) -> None:
     if member is None:
         return
@@ -3651,17 +3796,33 @@ async def _process_member_audio_impl(
         return
 
     guild_id = guild.id
+    room_state = room_state_snapshot(room_session_key)
+    owner_user_id = room_state.get("owner_user_id")
     topic_id = session_topic_ids.get(session_key) or build_topic_id(member.display_name or str(member.id))
     metrics = new_turn_metrics(
         source="voice",
         session_key=session_key,
+        room_session_key=room_session_key,
         guild_id=guild_id,
         user_id=member.id,
+        owner_user_id=owner_user_id,
         topic_id=topic_id,
         turn_id=turn_id,
         segment_id=segment_id,
     )
-    log_voice_stage(metrics, "voice_worker_turn 시작", extra=f"speaker={member.display_name} pcm_bytes={len(pcm_bytes)}")
+    log_voice_stage(metrics, "voice_worker_turn 시작", extra=f"speaker={member.display_name} pcm_bytes={len(pcm_bytes)} owner={owner_user_id}")
+
+    if ingress_during_reply and owner_user_id_on_ingress is not None and owner_user_id_on_ingress != member.id:
+        register_drop_reason(
+            metrics,
+            "other_speaker_during_reply",
+            session_key=session_key,
+            room_session_key=room_session_key,
+            owner_user_id=owner_user_id_on_ingress,
+        )
+        log_voice_stage(metrics, "다른 화자 중복 진입 차단", extra=f"owner_user_id={owner_user_id_on_ingress}")
+        log_voice_bottleneck_summary(metrics, label="voice_reply", extra="drop=other_speaker_during_reply")
+        return
 
     if STT_USE_RAW_48K:
         audio16k = downmix_int16_stereo_to_mono_float(pcm_bytes)
@@ -3710,13 +3871,17 @@ async def _process_member_audio_impl(
     voiced_ms = float(waveform_stats.get("voiced_ms") or 0.0)
     longest_voiced_ms = float(waveform_stats.get("longest_voiced_ms") or 0.0)
     if transport_corrupted and raw_seconds <= max(1.4, TAIL_FRAGMENT_MAX_RAW_SEC + 0.5):
+        bad_audio_count = increment_session_bad_audio(session_key)
         register_drop_reason(
             metrics,
             "transport_corrupted",
             session_key=session_key,
+            room_session_key=room_session_key,
+            owner_user_id=owner_user_id,
             raw_seconds=round(raw_seconds, 3),
             voiced_ms=round(voiced_ms, 1),
             longest_voiced_ms=round(longest_voiced_ms, 1),
+            bad_audio_count=bad_audio_count,
         )
         log_voice_stage(
             metrics,
@@ -3732,13 +3897,17 @@ async def _process_member_audio_impl(
         longest_voiced_ms=longest_voiced_ms,
         unstable=unstable_audio,
     ):
+        bad_audio_count = increment_session_bad_audio(session_key)
         register_drop_reason(
             metrics,
             "tail_fragment_drop",
             session_key=session_key,
+            room_session_key=room_session_key,
+            owner_user_id=owner_user_id,
             raw_seconds=round(raw_seconds, 3),
             voiced_ms=round(voiced_ms, 1),
             longest_voiced_ms=round(longest_voiced_ms, 1),
+            bad_audio_count=bad_audio_count,
         )
         log_voice_stage(
             metrics,
@@ -3773,120 +3942,139 @@ async def _process_member_audio_impl(
             print(f"[FULL STT SKIP] reason=vad_ignore speaker={member.display_name} sampling_rate={stt_sampling_rate} sec={duration_sec:.2f} peak={peak:.4f} rms={rms:.4f} voiced_ms={voiced_ms:.0f} longest_ms={longest_voiced_ms:.0f} body_rms={body_rms:.4f}")
             print(f"[VAD IGNORE] speaker={member.display_name} sampling_rate={stt_sampling_rate} sec={duration_sec:.2f} peak={peak:.4f} rms={rms:.4f}")
             save_voice_debug_audio(guild_id, speaker_name, pcm_bytes, audio16k, final_text="[VAD IGNORE]", debug_meta=debug_meta)
-            register_drop_reason(metrics, "vad_ignore", session_key=session_key, voiced_ms=round(voiced_ms, 1))
+            bad_audio_count = increment_session_bad_audio(session_key)
+            register_drop_reason(metrics, "vad_ignore", session_key=session_key, room_session_key=room_session_key, owner_user_id=owner_user_id, voiced_ms=round(voiced_ms, 1), bad_audio_count=bad_audio_count)
             log_voice_stage(metrics, "VAD 무시 처리", extra=f"sampling_rate={stt_sampling_rate} sec={duration_sec:.2f} peak={peak:.4f} rms={rms:.4f} voiced_ms={voiced_ms:.0f} longest_ms={longest_voiced_ms:.0f} body_rms={body_rms:.4f}")
             log_voice_bottleneck_summary(metrics, label="voice_reply", extra="drop=vad_ignore")
             return
 
-    log_voice_stage(metrics, "웨이크 프로브 시작", extra=f"samples={audio_for_wake.size} sampling_rate={wake_sampling_rate}")
-    try:
-        wake_result = await asyncio.to_thread(detect_wake_word_sync, audio_for_wake, sampling_rate=wake_sampling_rate)
-    except Exception as e:
-        print(f"❌ [WAKE STT] {e}")
-        register_drop_reason(metrics, "wake_probe_error", session_key=session_key, error=repr(e))
-        log_voice_stage(metrics, "웨이크 프로브 실패", extra=repr(e))
-        log_voice_bottleneck_summary(metrics, label="voice_reply", extra="drop=wake_probe_error")
-        return
+    owner_followup_active = is_room_owner_active(room_session_key, member.id) and is_session_active_for_user(session_key, member.id)
+    wake_probe = ""
+    wake_confirm = ""
+    wake_detected = False
+    wake_match_mode = "owner_followup_active" if owner_followup_active else "rejected"
+    wake_alias = None
+    wake_reject_reason = None
 
-    wake_probe = apply_stt_post_corrections(str(wake_result.get("wake_probe_text") or ""), wake_detected=False)
-    wake_confirm = apply_stt_post_corrections(str(wake_result.get("wake_confirm_text") or ""), wake_detected=False)
-    wake_detected = bool(wake_result.get("wake_detected"))
-    wake_match_mode = str(wake_result.get("wake_match_mode") or ("exact" if wake_detected else "rejected"))
-    wake_alias = clean_text(str(wake_result.get("wake_alias") or "")) or None
-    wake_reject_reason = clean_text(str(wake_result.get("wake_reject_reason") or "")) or None
-
-    strict_confirm_required = should_require_confirm_exact_for_wake(debug_meta)
-    if strict_confirm_required and wake_match_mode != "exact":
-        wake_detected = False
-        wake_match_mode = "rejected"
-        wake_reject_reason = "unstable_audio"
-
-    log_voice_stage(
-        metrics,
-        "웨이크 프로브 완료",
-        extra=(
-            f"wake_detected={wake_detected} wake_match_mode={wake_match_mode} wake_alias={wake_alias!r} "
-            f"wake_probe_text={wake_probe!r} wake_confirm_text={wake_confirm!r} wake_reject_reason={wake_reject_reason!r}"
-        ),
-        key="wake_done",
-    )
-
-    active_session = is_session_active_for_user(session_key, member.id)
-    hard_drop_reasons = {"unstable_audio", "gibberish_probe", "probe_miss", "confirm_miss", "wake_probe_low_signal", "full_text_veto", "transport_corrupted"}
-    if not wake_detected:
-        reject_reason = wake_reject_reason or "confirm_miss"
-        if (not active_session) or (reject_reason in hard_drop_reasons):
-            register_drop_reason(
-                metrics,
-                reject_reason,
-                session_key=session_key,
-                wake_probe_text=wake_probe,
-                wake_confirm_text=wake_confirm,
-                wake_match_mode=wake_match_mode,
-                wake_alias=wake_alias,
-            )
-            log_voice_stage(metrics, "웨이크 거부", extra=f"wake_reject_reason={reject_reason} wake_match_mode={wake_match_mode} active_session={active_session}")
-            log_voice_bottleneck_summary(metrics, label="voice_reply", extra=f"drop={reject_reason}")
+    if owner_followup_active:
+        log_voice_stage(
+            metrics,
+            "active owner follow-up, wake probe 생략",
+            extra=f"owner_user_id={member.id}",
+            key="wake_done",
+        )
+    else:
+        log_voice_stage(metrics, "웨이크 프로브 시작", extra=f"samples={audio_for_wake.size} sampling_rate={wake_sampling_rate}")
+        try:
+            wake_result = await asyncio.to_thread(detect_wake_word_sync, audio_for_wake, sampling_rate=wake_sampling_rate)
+        except Exception as e:
+            print(f"❌ [WAKE STT] {e}")
+            register_drop_reason(metrics, "wake_probe_error", session_key=session_key, room_session_key=room_session_key, owner_user_id=owner_user_id, error=repr(e))
+            log_voice_stage(metrics, "웨이크 프로브 실패", extra=repr(e))
+            log_voice_bottleneck_summary(metrics, label="voice_reply", extra="drop=wake_probe_error")
             return
-    env_noise_candidate = is_likely_environment_noise(audio_for_wake, sampling_rate=wake_sampling_rate)
-    filler_candidate = looks_like_brief_filler_text(wake_probe)
-    repetitive_noise_candidate = looks_like_repetitive_noise_text(wake_probe)
 
-    if env_noise_candidate:
-        band_ratio, flatness, rms = compute_voice_band_metrics(audio_for_wake, sampling_rate=wake_sampling_rate)
-        if not wake_detected and not active_session and raw_seconds <= VOICE_NO_WAKE_MAX_CONTINUE_SEC:
-            print(f"[FULL STT SKIP] reason=env_ignore speaker={member.display_name} probe={wake_probe!r}")
+        wake_probe = apply_stt_post_corrections(str(wake_result.get("wake_probe_text") or ""), wake_detected=False)
+        wake_confirm = apply_stt_post_corrections(str(wake_result.get("wake_confirm_text") or ""), wake_detected=False)
+        wake_detected = bool(wake_result.get("wake_detected"))
+        wake_match_mode = str(wake_result.get("wake_match_mode") or ("exact" if wake_detected else "rejected"))
+        wake_alias = clean_text(str(wake_result.get("wake_alias") or "")) or None
+        wake_reject_reason = clean_text(str(wake_result.get("wake_reject_reason") or "")) or None
+
+        strict_confirm_required = should_require_confirm_exact_for_wake(debug_meta)
+        if strict_confirm_required and wake_match_mode != "exact":
+            wake_detected = False
+            wake_match_mode = "rejected"
+            wake_reject_reason = "unstable_audio"
+
+        log_voice_stage(
+            metrics,
+            "웨이크 프로브 완료",
+            extra=(
+                f"wake_detected={wake_detected} wake_match_mode={wake_match_mode} wake_alias={wake_alias!r} "
+                f"wake_probe_text={wake_probe!r} wake_confirm_text={wake_confirm!r} wake_reject_reason={wake_reject_reason!r}"
+            ),
+            key="wake_done",
+        )
+
+        hard_drop_reasons = {"unstable_audio", "gibberish_probe", "probe_miss", "confirm_miss", "wake_probe_low_signal", "full_text_veto", "transport_corrupted"}
+        if not wake_detected:
+            reject_reason = wake_reject_reason or "confirm_miss"
+            if reject_reason in hard_drop_reasons:
+                register_drop_reason(
+                    metrics,
+                    reject_reason,
+                    session_key=session_key,
+                    room_session_key=room_session_key,
+                    owner_user_id=owner_user_id,
+                    wake_probe_text=wake_probe,
+                    wake_confirm_text=wake_confirm,
+                    wake_match_mode=wake_match_mode,
+                    wake_alias=wake_alias,
+                )
+                log_voice_stage(metrics, "웨이크 거부", extra=f"wake_reject_reason={reject_reason} wake_match_mode={wake_match_mode}")
+                log_voice_bottleneck_summary(metrics, label="voice_reply", extra=f"drop={reject_reason}")
+                return
+        env_noise_candidate = is_likely_environment_noise(audio_for_wake, sampling_rate=wake_sampling_rate)
+        filler_candidate = looks_like_brief_filler_text(wake_probe)
+        repetitive_noise_candidate = looks_like_repetitive_noise_text(wake_probe)
+
+        if env_noise_candidate:
+            band_ratio, flatness, rms = compute_voice_band_metrics(audio_for_wake, sampling_rate=wake_sampling_rate)
+            if not wake_detected and raw_seconds <= VOICE_NO_WAKE_MAX_CONTINUE_SEC:
+                print(f"[FULL STT SKIP] reason=env_ignore speaker={member.display_name} probe={wake_probe!r}")
+                print(
+                    f"[ENV IGNORE] speaker={member.display_name} band_ratio={band_ratio:.3f} flatness={flatness:.3f} rms={rms:.4f} probe={wake_probe!r}"
+                )
+                save_voice_debug_audio(guild_id, speaker_name, pcm_bytes, audio16k, wake_probe=wake_probe, final_text="[ENV IGNORE]", debug_meta=debug_meta)
+                bad_audio_count = increment_session_bad_audio(session_key)
+                register_drop_reason(metrics, "env_ignore", session_key=session_key, room_session_key=room_session_key, owner_user_id=owner_user_id, wake_probe_text=wake_probe, bad_audio_count=bad_audio_count)
+                log_voice_stage(metrics, "환경음 후보 조기 종료", extra=f"wake_probe_text={wake_probe!r}")
+                log_voice_bottleneck_summary(metrics, label="voice_reply", extra="drop=env_ignore")
+                return
+            print(f"[FULL STT CONTINUE] reason=env_ignore speaker={member.display_name} probe={wake_probe!r}")
             print(
                 f"[ENV IGNORE] speaker={member.display_name} band_ratio={band_ratio:.3f} flatness={flatness:.3f} rms={rms:.4f} probe={wake_probe!r}"
             )
-            save_voice_debug_audio(guild_id, speaker_name, pcm_bytes, audio16k, wake_probe=wake_probe, final_text="[ENV IGNORE]", debug_meta=debug_meta)
-            register_drop_reason(metrics, "env_ignore", session_key=session_key, wake_probe_text=wake_probe)
-            log_voice_stage(metrics, "환경음 후보 조기 종료", extra=f"wake_probe_text={wake_probe!r}")
-            log_voice_bottleneck_summary(metrics, label="voice_reply", extra="drop=env_ignore")
-            return
-        print(f"[FULL STT CONTINUE] reason=env_ignore speaker={member.display_name} probe={wake_probe!r}")
-        print(
-            f"[ENV IGNORE] speaker={member.display_name} band_ratio={band_ratio:.3f} flatness={flatness:.3f} rms={rms:.4f} probe={wake_probe!r}"
-        )
-        log_voice_stage(metrics, "환경음 후보지만 본문 STT 진행", extra=f"wake_probe_text={wake_probe!r}")
+            log_voice_stage(metrics, "환경음 후보지만 본문 STT 진행", extra=f"wake_probe_text={wake_probe!r}")
 
-    if filler_candidate:
-        if not wake_detected and not active_session and raw_seconds <= VOICE_NO_WAKE_MAX_CONTINUE_SEC:
-            print(f"[FULL STT SKIP] reason=filler_ignore speaker={member.display_name} probe={wake_probe!r}")
+        if filler_candidate:
+            if not wake_detected and raw_seconds <= VOICE_NO_WAKE_MAX_CONTINUE_SEC:
+                print(f"[FULL STT SKIP] reason=filler_ignore speaker={member.display_name} probe={wake_probe!r}")
+                print(f"[FILLER IGNORE] speaker={member.display_name} probe={wake_probe!r}")
+                save_voice_debug_audio(guild_id, speaker_name, pcm_bytes, audio16k, wake_probe=wake_probe, final_text="[FILLER IGNORE]", debug_meta=debug_meta)
+                register_drop_reason(metrics, "filler_ignore", session_key=session_key, room_session_key=room_session_key, owner_user_id=owner_user_id, wake_probe_text=wake_probe)
+                log_voice_stage(metrics, "짧은 필러 후보 조기 종료", extra=f"wake_probe_text={wake_probe!r}")
+                log_voice_bottleneck_summary(metrics, label="voice_reply", extra="drop=filler_ignore")
+                return
+            print(f"[FULL STT CONTINUE] reason=filler_ignore speaker={member.display_name} probe={wake_probe!r}")
             print(f"[FILLER IGNORE] speaker={member.display_name} probe={wake_probe!r}")
-            save_voice_debug_audio(guild_id, speaker_name, pcm_bytes, audio16k, wake_probe=wake_probe, final_text="[FILLER IGNORE]", debug_meta=debug_meta)
-            register_drop_reason(metrics, "filler_ignore", session_key=session_key, wake_probe_text=wake_probe)
-            log_voice_stage(metrics, "짧은 필러 후보 조기 종료", extra=f"wake_probe_text={wake_probe!r}")
-            log_voice_bottleneck_summary(metrics, label="voice_reply", extra="drop=filler_ignore")
-            return
-        print(f"[FULL STT CONTINUE] reason=filler_ignore speaker={member.display_name} probe={wake_probe!r}")
-        print(f"[FILLER IGNORE] speaker={member.display_name} probe={wake_probe!r}")
-        log_voice_stage(metrics, "짧은 필러 후보지만 본문 STT 진행", extra=f"wake_probe_text={wake_probe!r}")
+            log_voice_stage(metrics, "짧은 필러 후보지만 본문 STT 진행", extra=f"wake_probe_text={wake_probe!r}")
 
-    if repetitive_noise_candidate:
-        if not wake_detected and not active_session:
-            print(f"[FULL STT SKIP] reason=noise_text_ignore speaker={member.display_name} probe={wake_probe!r}")
+        if repetitive_noise_candidate:
+            if not wake_detected:
+                print(f"[FULL STT SKIP] reason=noise_text_ignore speaker={member.display_name} probe={wake_probe!r}")
+                print(f"[NOISE TEXT IGNORE] speaker={member.display_name} probe={wake_probe!r}")
+                save_voice_debug_audio(guild_id, speaker_name, pcm_bytes, audio16k, wake_probe=wake_probe, final_text="[NOISE TEXT IGNORE]", debug_meta=debug_meta)
+                register_drop_reason(metrics, "noise_text_ignore", session_key=session_key, room_session_key=room_session_key, owner_user_id=owner_user_id, wake_probe_text=wake_probe)
+                log_voice_stage(metrics, "반복 소음 후보 조기 종료", extra=f"wake_probe_text={wake_probe!r}")
+                log_voice_bottleneck_summary(metrics, label="voice_reply", extra="drop=noise_text_ignore")
+                return
+            print(f"[FULL STT CONTINUE] reason=noise_text_ignore speaker={member.display_name} probe={wake_probe!r}")
             print(f"[NOISE TEXT IGNORE] speaker={member.display_name} probe={wake_probe!r}")
-            save_voice_debug_audio(guild_id, speaker_name, pcm_bytes, audio16k, wake_probe=wake_probe, final_text="[NOISE TEXT IGNORE]", debug_meta=debug_meta)
-            register_drop_reason(metrics, "noise_text_ignore", session_key=session_key, wake_probe_text=wake_probe)
-            log_voice_stage(metrics, "반복 소음 후보 조기 종료", extra=f"wake_probe_text={wake_probe!r}")
-            log_voice_bottleneck_summary(metrics, label="voice_reply", extra="drop=noise_text_ignore")
-            return
-        print(f"[FULL STT CONTINUE] reason=noise_text_ignore speaker={member.display_name} probe={wake_probe!r}")
-        print(f"[NOISE TEXT IGNORE] speaker={member.display_name} probe={wake_probe!r}")
-        log_voice_stage(metrics, "반복 소음 후보지만 본문 STT 진행", extra=f"wake_probe_text={wake_probe!r}")
+            log_voice_stage(metrics, "반복 소음 후보지만 본문 STT 진행", extra=f"wake_probe_text={wake_probe!r}")
 
-    if not wake_detected:
-        print(f"[FULL STT CONTINUE] reason=wake_ignore speaker={member.display_name} probe={wake_probe!r}")
-        if wake_probe:
-            print(f"[WAKE IGNORE] {member.display_name}: {wake_probe!r}")
-        if should_skip_full_stt_after_wake_probe(wake_detected=wake_detected, wake_probe=wake_probe, duration_sec=duration_sec):
-            print(f"[FULL STT SKIP] reason=wake_probe_low_signal speaker={member.display_name} probe={wake_probe!r} sec={duration_sec:.2f}")
-            save_voice_debug_audio(guild_id, speaker_name, pcm_bytes, audio16k, wake_probe=wake_probe, final_text="[WAKE PROBE SKIP]", debug_meta=debug_meta)
-            register_drop_reason(metrics, "wake_probe_low_signal", session_key=session_key, wake_probe_text=wake_probe, wake_detected=wake_detected)
-            log_voice_stage(metrics, "웨이크 프로브 기반 조기 종료", extra=f"wake_probe_text={wake_probe!r} sec={duration_sec:.2f}")
-            return
-        log_voice_stage(metrics, "웨이크 미검출이지만 본문 STT 진행", extra=f"wake_probe_text={wake_probe!r}")
+        if not wake_detected:
+            print(f"[FULL STT CONTINUE] reason=wake_ignore speaker={member.display_name} probe={wake_probe!r}")
+            if wake_probe:
+                print(f"[WAKE IGNORE] {member.display_name}: {wake_probe!r}")
+            if should_skip_full_stt_after_wake_probe(wake_detected=wake_detected, wake_probe=wake_probe, duration_sec=duration_sec):
+                print(f"[FULL STT SKIP] reason=wake_probe_low_signal speaker={member.display_name} probe={wake_probe!r} sec={duration_sec:.2f}")
+                save_voice_debug_audio(guild_id, speaker_name, pcm_bytes, audio16k, wake_probe=wake_probe, final_text="[WAKE PROBE SKIP]", debug_meta=debug_meta)
+                register_drop_reason(metrics, "wake_probe_low_signal", session_key=session_key, room_session_key=room_session_key, owner_user_id=owner_user_id, wake_probe_text=wake_probe, wake_detected=wake_detected)
+                log_voice_stage(metrics, "웨이크 프로브 기반 조기 종료", extra=f"wake_probe_text={wake_probe!r} sec={duration_sec:.2f}")
+                return
+            log_voice_stage(metrics, "웨이크 미검출이지만 본문 STT 진행", extra=f"wake_probe_text={wake_probe!r}")
 
     print(f"[FULL STT ENTER] speaker={member.display_name} sampling_rate={stt_sampling_rate} samples={audio16k.size} wake_detected={wake_detected}")
     log_voice_stage(metrics, "본문 STT 시작", extra=f"samples={audio16k.size}")
@@ -3941,7 +4129,7 @@ async def _process_member_audio_impl(
         log_voice_stage(metrics, "짧은 STT 무시", extra=f"text={text!r}")
         return
 
-    if not active_session:
+    if not owner_followup_active:
         final_wake_alias = extract_leading_wake_alias(text)
         if final_wake_alias is None:
             wake_detected = False
@@ -3951,6 +4139,8 @@ async def _process_member_audio_impl(
                 metrics,
                 "full_text_veto",
                 session_key=session_key,
+                room_session_key=room_session_key,
+                owner_user_id=owner_user_id,
                 wake_probe_text=wake_probe,
                 wake_confirm_text=wake_confirm,
                 final_text=text,
@@ -3967,115 +4157,150 @@ async def _process_member_audio_impl(
         f"wake_probe_text={wake_probe!r} wake_confirm_text={wake_confirm!r} wake_reject_reason={wake_reject_reason!r} text={text}"
     )
 
-    ok, reason = should_reply_to_voice(
+    ok, reason, gate_mode = should_reply_to_voice(
         guild_id,
         text,
         wake_detected=wake_detected,
+        wake_match_mode=wake_match_mode,
         session_key=session_key,
+        room_session_key=room_session_key,
         user_id=member.id,
     )
+    metrics.setdefault("meta", {}).update({
+        "owner_user_id": owner_user_id,
+        "reply_gate_passed_by": gate_mode if ok else None,
+        "reply_gate_blocked_by": None if ok else gate_mode,
+    })
     if not ok:
         print(f"[STT IGNORE] {reason}: {text!r}")
-        register_drop_reason(metrics, reason, session_key=session_key, text=text)
-        log_voice_stage(metrics, "응답 차단", extra=f"reason={reason}")
+        register_drop_reason(metrics, reason, session_key=session_key, room_session_key=room_session_key, owner_user_id=owner_user_id, text=text)
+        log_voice_stage(metrics, "응답 차단", extra=f"reason={reason} gate={gate_mode}")
         log_voice_bottleneck_summary(metrics, label="voice_reply", extra=f"drop={reason}")
         return
 
-    log_voice_stage(metrics, "웨이크 통과", extra=f"user_text={strip_voice_wake_word(text)!r}")
+    reset_session_bad_audio(session_key)
+    session_last_stt_text[session_key] = text
+    room_last_voice_reply_at[room_session_key] = time.monotonic()
+
+    log_voice_stage(metrics, "응답 게이트 통과", extra=f"gate={gate_mode} user_text={strip_voice_wake_word(text)!r}")
 
     raw_user_text = strip_voice_wake_word(text)
     prompt_user_text = raw_user_text or "사용자가 너를 이름만 불렀다. 아주 짧고 자연스럽게 반응해라."
     history_user_text = raw_user_text or text
     topic_id = build_topic_id(history_user_text, session_topic_ids.get(session_key, ""))
     accepted_turn_id = start_new_turn(session_key, turn_id=turn_id)
+    set_room_owner(
+        room_session_key,
+        member.id,
+        ttl_sec=ACTIVE_CONVERSATION_AWAITING_REPLY_SEC if gate_mode == "owner_followup" else ACTIVE_CONVERSATION_VOICE_SEC,
+        reason=gate_mode,
+        session_key=session_key,
+        turn_id=accepted_turn_id,
+        segment_id=segment_id,
+    )
     update_session_state(
         session_key,
         user_id=member.id,
         speaker="user",
+        ttl_sec=ACTIVE_CONVERSATION_AWAITING_REPLY_SEC if gate_mode == "owner_followup" else ACTIVE_CONVERSATION_VOICE_SEC,
         awaiting_user_reply=False,
         topic_id=topic_id,
         user_text=history_user_text,
     )
-    metrics.setdefault("meta", {}).update({"topic_id": topic_id, "turn_id": accepted_turn_id})
+    metrics.setdefault("meta", {}).update({"topic_id": topic_id, "turn_id": accepted_turn_id, "owner_user_id": member.id})
     vc = guild.voice_client
-    lock = session_locks.setdefault(session_key, asyncio.Lock())
+    lock = session_locks.setdefault(room_session_key, asyncio.Lock())
 
     if lock.locked():
-        print(f"[VOICE WAIT] session={session_key} speaker={member.display_name} text={history_user_text!r}")
-        log_voice_stage(metrics, "세션 락 대기", extra=f"session={session_key}")
+        print(f"[VOICE WAIT] room={room_session_key} speaker={member.display_name} text={history_user_text!r}")
+        log_voice_stage(metrics, "방 락 대기", extra=f"room={room_session_key}")
 
-    async with lock:
-        log_voice_stage(metrics, "세션 락 획득", extra=f"session={session_key}")
-        vc = guild.voice_client
-        if vc is None:
-            return
+    set_room_reply_in_progress(room_session_key, True, owner_user_id=member.id)
+    try:
+        async with lock:
+            log_voice_stage(metrics, "방 락 획득", extra=f"room={room_session_key}")
+            vc = guild.voice_client
+            if vc is None:
+                return
 
-        async def on_final_answer(answer_text: str) -> None:
-            print(f"💬 [Evelyn] {visible_text(answer_text)}")
+            async def on_final_answer(answer_text: str) -> None:
+                print(f"💬 [Evelyn] {visible_text(answer_text)}")
 
-        try:
-            answer = await ask_llm_and_speak_streaming(
-                vc,
-                prompt_user_text,
-                guild_id=guild_id,
-                on_final_answer=on_final_answer,
-                session_key=session_key,
+            try:
+                answer = await ask_llm_and_speak_streaming(
+                    vc,
+                    prompt_user_text,
+                    guild_id=guild_id,
+                    on_final_answer=on_final_answer,
+                    session_key=session_key,
+                    room_key=room_key,
+                    person_key=person_key,
+                    session_memory_key=session_memory_key,
+                    source="voice",
+                    debug_text=history_user_text,
+                    metrics=metrics,
+                )
+                log_voice_stage(metrics, "LLM/TTS 완료", extra=f"answer_len={len(answer)}")
+            except Exception as e:
+                print(f"❌ [LLM/TTS] {e}")
+                return
+
+            answer = clean_text(answer)
+            if not answer:
+                log_voice_stage(metrics, "최종 답변 비어있음")
+                return
+
+            plain_answer = strip_omnivoice_tags(answer)
+            if not plain_answer:
+                plain_answer = answer
+
+            append_history(session_key, history_user_text, plain_answer, guild_id=guild_id)
+            schedule_memory_update(
+                guild_id,
+                history_user_text,
+                plain_answer,
                 room_key=room_key,
                 person_key=person_key,
                 session_memory_key=session_memory_key,
                 source="voice",
-                debug_text=history_user_text,
-                metrics=metrics,
+                user_speaker=member.display_name,
+                assistant_speaker="Evelyn",
             )
-            log_voice_stage(metrics, "LLM/TTS 완료", extra=f"answer_len={len(answer)}")
-        except Exception as e:
-            print(f"❌ [LLM/TTS] {e}")
-            return
-
-        answer = clean_text(answer)
-        if not answer:
-            log_voice_stage(metrics, "최종 답변 비어있음")
-            return
-
-        plain_answer = strip_omnivoice_tags(answer)
-        if not plain_answer:
-            plain_answer = answer
-
-        append_history(session_key, history_user_text, plain_answer, guild_id=guild_id)
-        schedule_memory_update(
-            guild_id,
-            history_user_text,
-            plain_answer,
-            room_key=room_key,
-            person_key=person_key,
-            session_memory_key=session_memory_key,
-            source="voice",
-            user_speaker=member.display_name,
-            assistant_speaker="Evelyn",
-        )
-        schedule_search_followup(
-            guild_id,
-            session_key,
-            history_user_text,
-            plain_answer,
-            room_key=room_key,
-            person_key=person_key,
-            session_memory_key=session_memory_key,
-            channel_id=None,
-            source="search-followup-voice",
-        )
-        awaiting_reply = bool("?" in plain_answer or "？" in plain_answer)
-        mark_session_active(
-            session_key,
-            user_id=member.id,
-            ttl_sec=ACTIVE_CONVERSATION_VOICE_QUESTION_SEC if awaiting_reply else ACTIVE_CONVERSATION_VOICE_SEC,
-            speaker="assistant",
-            awaiting_user_reply=awaiting_reply,
-            topic_id=topic_id,
-            answer_text=plain_answer,
-            user_text=history_user_text,
-        )
-        log_voice_stage(metrics, "voice_worker_turn 완료", extra=f"speaker={member.display_name}")
+            schedule_search_followup(
+                guild_id,
+                session_key,
+                history_user_text,
+                plain_answer,
+                room_key=room_key,
+                person_key=person_key,
+                session_memory_key=session_memory_key,
+                channel_id=None,
+                source="search-followup-voice",
+            )
+            awaiting_reply = bool("?" in plain_answer or "？" in plain_answer)
+            followup_ttl = ACTIVE_CONVERSATION_VOICE_QUESTION_SEC if awaiting_reply else ACTIVE_CONVERSATION_VOICE_SEC
+            mark_session_active(
+                session_key,
+                user_id=member.id,
+                ttl_sec=followup_ttl,
+                speaker="assistant",
+                awaiting_user_reply=awaiting_reply,
+                topic_id=topic_id,
+                answer_text=plain_answer,
+                user_text=history_user_text,
+            )
+            set_room_owner(
+                room_session_key,
+                member.id,
+                ttl_sec=ACTIVE_CONVERSATION_AWAITING_REPLY_SEC if awaiting_reply else followup_ttl,
+                reason="assistant_reply",
+                session_key=session_key,
+                turn_id=accepted_turn_id,
+                segment_id=segment_id,
+            )
+            log_voice_stage(metrics, "voice_worker_turn 완료", extra=f"speaker={member.display_name} gate={gate_mode}")
+    finally:
+        set_room_reply_in_progress(room_session_key, False, owner_user_id=member.id)
 
 
 # =========================================================
