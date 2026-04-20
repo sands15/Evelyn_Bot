@@ -2042,6 +2042,86 @@ async def get_http_session() -> aiohttp.ClientSession:
     return http_session
 
 
+class TtsSessionClient:
+    def __init__(self, *, turn_id: str, session_key: str | None = None) -> None:
+        self.turn_id = turn_id
+        self.session_key = session_key
+
+    async def feed_text(self, text_piece: str) -> None:
+        if not text_piece:
+            return
+        session = await get_http_session()
+        url = f"{OMNIVOICE_URL.rstrip('/')}/turn-session/{self.turn_id}/feed"
+        async with session.post(url, json={"text": text_piece}) as resp:
+            if resp.status != 200:
+                raise RuntimeError(f"TTS feed failed: {resp.status} / {(await resp.text())[:200]}")
+
+    async def finish_input(self) -> None:
+        session = await get_http_session()
+        url = f"{OMNIVOICE_URL.rstrip('/')}/turn-session/{self.turn_id}/finish"
+        async with session.post(url) as resp:
+            if resp.status != 200:
+                raise RuntimeError(f"TTS finish failed: {resp.status} / {(await resp.text())[:200]}")
+
+    async def cancel(self) -> None:
+        session = await get_http_session()
+        url = f"{OMNIVOICE_URL.rstrip('/')}/turn-session/{self.turn_id}/cancel"
+        try:
+            async with session.post(url) as resp:
+                await resp.read()
+        except Exception:
+            pass
+
+    async def stream_audio(self):
+        session = await get_http_session()
+        url = f"{OMNIVOICE_URL.rstrip('/')}/turn-session/{self.turn_id}/stream"
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=None, sock_read=None)) as resp:
+            if resp.status != 200:
+                raise RuntimeError(f"TTS stream failed: {resp.status} / {(await resp.text())[:200]}")
+            async for chunk in resp.content.iter_chunked(8192):
+                if chunk:
+                    yield chunk
+
+
+class TtsClient:
+    async def start_turn_session(
+        self,
+        *,
+        turn_id: str,
+        voice: str,
+        initial_text: str = "",
+        session_key: str | None = None,
+    ) -> TtsSessionClient:
+        session = await get_http_session()
+        url = f"{OMNIVOICE_URL.rstrip('/')}/turn-session/start"
+        payload: dict[str, Any] = {
+            "model": OMNIVOICE_MODEL,
+            "input": initial_text,
+            "voice": voice,
+            "response_format": "pcm",
+            "stream": True,
+            "turn_id": turn_id,
+            "session_key": session_key,
+        }
+        if OMNIVOICE_LANGUAGE:
+            payload["language"] = OMNIVOICE_LANGUAGE
+        async with session.post(url, json=payload) as resp:
+            if resp.status != 200:
+                raise RuntimeError(f"TTS start failed: {resp.status} / {(await resp.text())[:200]}")
+            data = await resp.json()
+        return TtsSessionClient(turn_id=str(data.get("turn_id") or turn_id), session_key=session_key)
+
+
+def should_start_tts(buffered_text: str) -> bool:
+    text = clean_text(buffered_text)
+    if not text:
+        return False
+    compact = text.replace(" ", "")
+    if len(compact) >= 14:
+        return True
+    return text.endswith(("?", "!", ".", "요", "야", "네", "지"))
+
+
 def answer_promises_search(answer_text: str) -> bool:
     text = clean_text(strip_omnivoice_tags(answer_text)).lower()
     if not text:
@@ -3580,6 +3660,131 @@ def extract_stream_reasoning_text(data: dict) -> str:
     return reasoning
 
 
+async def stream_llm_text(
+    user_text: str,
+    guild_id: int | None = None,
+    on_first_chunk: Callable[[], None] | None = None,
+    *,
+    session_key: str | None = None,
+    room_key: str | None = None,
+    person_key: str | None = None,
+    session_memory_key: str | None = None,
+    source: str = "voice",
+    debug_text: str | None = None,
+    metrics: dict | None = None,
+):
+    messages, cognitive_state, _route = await prepare_llm_messages(
+        user_text,
+        guild_id=guild_id,
+        session_key=session_key,
+        room_key=room_key,
+        person_key=person_key,
+        session_memory_key=session_memory_key,
+        source=source,
+        debug_text=debug_text,
+        metrics=metrics,
+    )
+
+    policy_response = policy_response_for_state(cognitive_state, source=source)
+    gated_state = apply_ask_gating(cognitive_state, source=source) if cognitive_state is not None else None
+    if policy_response:
+        if session_key is not None and gated_state is not None:
+            update_session_state(
+                session_key,
+                speaker="assistant",
+                awaiting_user_reply=gated_state.get("action") in {"ask", "wait"},
+                answer_text=policy_response,
+                user_text=user_text,
+            )
+        if on_first_chunk is not None:
+            on_first_chunk()
+        if metrics is not None:
+            metrics.setdefault("marks", {})["policy_short_circuit"] = (time.monotonic() - float(metrics.get("started_at", time.monotonic()))) * 1000.0
+            metrics.setdefault("marks", {})["llm_done"] = (time.monotonic() - float(metrics.get("started_at", time.monotonic()))) * 1000.0
+            metrics.setdefault("marks", {})["t_main_done"] = metrics.setdefault("marks", {}).get("llm_done")
+        yield policy_response
+        return
+
+    guided_user_text = user_text
+    if gated_state and gated_state.get("action") == "ask" and gated_state.get("question_for_user"):
+        guided_user_text = clean_text(str(gated_state.get("question_for_user", "")))
+    final_user_text = f"{guided_user_text}\n\n{build_main_response_guidance(cognitive_state, source=source)}"
+
+    payload = {
+        "model": MODEL_NAME,
+        "messages": messages + [{"role": "user", "content": final_user_text}],
+        "temperature": 0.1,
+        "max_tokens": VOICE_LLM_MAX_TOKENS,
+        "stream": True,
+    }
+
+    timeout = aiohttp.ClientTimeout(total=120)
+    session = await get_http_session()
+    llm_started_at = time.monotonic()
+
+    async with session.post(LLM_SERVER_URL, json=payload, timeout=timeout) as resp:
+        if resp.status != 200:
+            error_text = await resp.text()
+            raise RuntimeError(f"LLM 서버 오류: {resp.status} / {error_text[:300]}")
+
+        content_type = resp.headers.get("Content-Type", "")
+        if "application/json" in content_type.lower():
+            data = await resp.json()
+            choices = data.get("choices", [])
+            answer = ""
+            if choices:
+                msg = choices[0].get("message", {})
+                answer = sanitize_model_output(msg.get("content", ""))
+            if not answer:
+                answer = await ask_llm_once(
+                    user_text,
+                    guild_id=guild_id,
+                    session_key=session_key,
+                    room_key=room_key,
+                    person_key=person_key,
+                    session_memory_key=session_memory_key,
+                    source=source,
+                    debug_text=debug_text,
+                )
+            if on_first_chunk is not None:
+                on_first_chunk()
+            yield answer
+            if metrics is not None:
+                metrics.setdefault("marks", {})["llm_done"] = (time.monotonic() - float(metrics.get("started_at", time.monotonic()))) * 1000.0
+            return
+
+        first_chunk_seen = False
+        async for raw_line in resp.content:
+            line = raw_line.decode("utf-8", errors="ignore").strip()
+            if not line or line.startswith(":"):
+                continue
+            if line.startswith("data:"):
+                line = line[5:].strip()
+            if not line:
+                continue
+            if line == "[DONE]":
+                break
+
+            try:
+                data = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+            delta_text = extract_stream_delta_text(data)
+            if not delta_text:
+                continue
+
+            if not first_chunk_seen and on_first_chunk is not None:
+                on_first_chunk()
+                first_chunk_seen = True
+                on_first_chunk = None
+
+            yield delta_text
+
+    if metrics is not None:
+        metrics.setdefault("marks", {})["llm_http_ms"] = (time.monotonic() - llm_started_at) * 1000.0
+
+
 async def ask_llm_streaming(
     user_text: str,
     guild_id: int | None = None,
@@ -3759,6 +3964,90 @@ async def ask_llm_streaming(
     return answer
 
 
+async def _empty_async_generator():
+    if False:
+        yield ""
+
+
+async def play_tts_turn_session(
+    vc: discord.VoiceClient,
+    tts_session: TtsSessionClient,
+    *,
+    metrics: dict | None = None,
+    turn_id: str | None = None,
+    session_key: str | None = None,
+) -> None:
+    source = OmniVoicePCMStream(
+        on_first_frame=lambda: log_voice_latency(metrics, "tts_first_frame_logged", "TTS 첫 프레임 공급 시간"),
+        on_first_packet_sent=lambda: (
+            log_voice_latency(metrics, "first_packet_sent_logged", "첫 패킷 송신 시간"),
+            log_turn_event("first_packet_sent", turn_id=turn_id, session_key=session_key),
+        ),
+    )
+
+    async def pump_audio() -> None:
+        first_chunk = True
+        try:
+            async for chunk in tts_session.stream_audio():
+                if first_chunk:
+                    log_voice_latency(metrics, "tts_first_byte_logged", "TTS 첫 바이트 도착 시간")
+                    log_turn_event("tts_first_pcm_received", turn_id=turn_id, session_key=session_key, bytes=len(chunk))
+                    first_chunk = False
+                source.feed_pcm24_mono(chunk)
+            source.finish()
+        except Exception as exc:
+            source.fail(exc)
+
+    pump_task = asyncio.create_task(pump_audio())
+    try:
+        await play_audio_source(vc, source)
+    finally:
+        if not pump_task.done():
+            pump_task.cancel()
+            try:
+                await pump_task
+            except asyncio.CancelledError:
+                pass
+
+
+async def run_tts_turn_session(
+    *,
+    vc: discord.VoiceClient,
+    turn_id: str,
+    voice: str,
+    initial_text: str,
+    llm_text_stream,
+    session_key: str | None = None,
+    metrics: dict | None = None,
+) -> tuple[TtsSessionClient, asyncio.Task[None], asyncio.Task[None]]:
+    tts_client = TtsClient()
+    log_voice_latency(metrics, "tts_request_logged", "TTS 턴 세션 시작 시간")
+    tts_session = await tts_client.start_turn_session(
+        turn_id=turn_id,
+        voice=voice,
+        initial_text=initial_text,
+        session_key=session_key,
+    )
+    log_turn_event("tts_request_started", turn_id=turn_id, session_key=session_key)
+
+    async def feed_input() -> None:
+        async for text_piece in llm_text_stream:
+            await tts_session.feed_text(text_piece)
+        await tts_session.finish_input()
+
+    feed_task = asyncio.create_task(feed_input())
+    play_task = asyncio.create_task(
+        play_tts_turn_session(
+            vc,
+            tts_session,
+            metrics=metrics,
+            turn_id=turn_id,
+            session_key=session_key,
+        )
+    )
+    return tts_session, feed_task, play_task
+
+
 async def ask_llm_and_speak_streaming(
     vc: discord.VoiceClient,
     user_text: str,
@@ -3793,57 +4082,76 @@ async def ask_llm_and_speak_streaming(
     metrics.setdefault("tts_first_frame_logged", False)
     metrics.setdefault("first_packet_sent_logged", False)
     log_voice_stage(metrics, "LLM/TTS 파이프라인 시작", extra=f"source={source}")
-    sentence_queue: asyncio.Queue[str | None] = asyncio.Queue()
-    playback_task = asyncio.create_task(
-        stream_tts_sentences(
-            vc,
-            sentence_queue,
-            metrics=metrics,
-            turn_id=metrics.get("meta", {}).get("turn_id"),
-            session_key=session_key,
-        )
+
+    llm_stream = stream_llm_text(
+        user_text,
+        guild_id=guild_id,
+        on_first_chunk=lambda: log_voice_latency(metrics, "llm_first_chunk_logged", "LLM 첫 chunk 시간"),
+        session_key=session_key,
+        room_key=room_key,
+        person_key=person_key,
+        session_memory_key=session_memory_key,
+        source=source,
+        debug_text=debug_text,
+        metrics=metrics,
     )
-    llm_error: Exception | None = None
-    answer = ""
 
-    async def enqueue_sentence(sentence: str) -> None:
-        sentence = clean_tts_text(sentence)
-        if sentence:
-            await sentence_queue.put(sentence)
+    answer_parts: list[str] = []
+    startup_buffer = ""
+    tts_session: TtsSessionClient | None = None
+    feed_task: asyncio.Task[None] | None = None
+    play_task: asyncio.Task[None] | None = None
 
-    try:
-        answer = await ask_llm_streaming(
-            user_text,
-            guild_id=guild_id,
-            on_sentence=enqueue_sentence,
-            on_first_chunk=lambda: log_voice_latency(metrics, "llm_first_chunk_logged", "LLM 첫 chunk 시간"),
-            session_key=session_key,
-            room_key=room_key,
-            person_key=person_key,
-            session_memory_key=session_memory_key,
-            source=source,
-            debug_text=debug_text,
-            metrics=metrics,
-        )
-        log_voice_stage(metrics, "LLM 완료", extra=f"chars={len(answer)}", key="llm_done")
-        answer = clean_text(answer)
-        if answer and on_final_answer is not None:
-            await on_final_answer(answer)
-    except Exception as e:
-        llm_error = e
-        answer = ""
-    finally:
-        await sentence_queue.put(None)
+    async def continuing_llm_stream(upstream):
+        async for piece in upstream:
+            answer_parts.append(piece)
+            yield piece
 
     try:
-        await playback_task
+        async for delta_text in llm_stream:
+            answer_parts.append(delta_text)
+            startup_buffer += delta_text
+            if tts_session is None and should_start_tts(startup_buffer):
+                tts_session, feed_task, play_task = await run_tts_turn_session(
+                    vc=vc,
+                    turn_id=metrics.get("meta", {}).get("turn_id") or current_turn_id(session_key),
+                    voice=OMNIVOICE_VOICE,
+                    initial_text=startup_buffer,
+                    llm_text_stream=continuing_llm_stream(llm_stream),
+                    session_key=session_key,
+                    metrics=metrics,
+                )
+                startup_buffer = ""
+                break
+
+        if tts_session is None:
+            final_answer = clean_text("".join(answer_parts))
+            if final_answer:
+                tts_session, feed_task, play_task = await run_tts_turn_session(
+                    vc=vc,
+                    turn_id=metrics.get("meta", {}).get("turn_id") or current_turn_id(session_key),
+                    voice=OMNIVOICE_VOICE,
+                    initial_text=final_answer,
+                    llm_text_stream=_empty_async_generator(),
+                    session_key=session_key,
+                    metrics=metrics,
+                )
+        elif feed_task is not None:
+            await feed_task
+
+        if play_task is not None:
+            await play_task
     except Exception:
-        if llm_error is None:
-            raise
+        if tts_session is not None:
+            await tts_session.cancel()
+        raise
 
-    if llm_error is not None:
-        raise llm_error
+    answer = clean_text("".join(answer_parts))
+    log_voice_stage(metrics, "LLM 완료", extra=f"chars={len(answer)}", key="llm_done")
+    if answer and on_final_answer is not None:
+        await on_final_answer(answer)
 
+    metrics.setdefault("marks", {})["llm_done"] = (time.monotonic() - float(metrics.get("started_at", time.monotonic()))) * 1000.0
     log_voice_bottleneck_summary(metrics, label="voice_reply", extra=f"source={source} chars={len(answer)}")
     return answer
 
