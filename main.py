@@ -1,7 +1,9 @@
 import audioop
+import builtins
 import hashlib
 import html
 import json
+import logging
 import os
 import queue
 import re
@@ -57,6 +59,29 @@ from evelyn_core.text import (
     visible_text,
 )
 from evelyn_voice import EvelynVoiceClient
+
+
+VOICE_CONSOLE_ONLY_STT_AND_REPLY = os.getenv("VOICE_CONSOLE_ONLY_STT_AND_REPLY", "true").lower() == "true"
+_ALLOWED_CONSOLE_PREFIXES = (
+    "🎤 [",
+    "💬 [Evelyn]",
+)
+
+
+def print(*args, **kwargs):
+    if not VOICE_CONSOLE_ONLY_STT_AND_REPLY:
+        return builtins.print(*args, **kwargs)
+    text = " ".join(str(arg) for arg in args)
+    if text.startswith(_ALLOWED_CONSOLE_PREFIXES):
+        return builtins.print(*args, **kwargs)
+    return None
+
+
+if VOICE_CONSOLE_ONLY_STT_AND_REPLY:
+    logging.getLogger().setLevel(logging.CRITICAL)
+    logging.getLogger("discord").setLevel(logging.CRITICAL)
+    logging.getLogger("aiohttp").setLevel(logging.CRITICAL)
+    logging.getLogger("evelyn_voice").setLevel(logging.CRITICAL)
 
 
 # =========================================================
