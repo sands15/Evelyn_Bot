@@ -74,7 +74,17 @@ _ALLOWED_CONSOLE_PREFIXES = (
 )
 _BOTTLENECK_TURN_TRACE_EVENTS = {
     "tts_request_started",
+    "tts_stream_opened",
     "tts_first_pcm_received",
+    "tts_pcm_chunk_received",
+    "tts_stream_completed",
+    "tts_stream_exception",
+    "playback_queue_put",
+    "playback_queue_get",
+    "discord_playback_started",
+    "discord_first_packet_sent",
+    "discord_playback_finished",
+    "discord_playback_exception",
     "first_packet_sent",
     "turn_summary",
 }
@@ -2488,6 +2498,7 @@ class OmniVoicePCMStream(discord.AudioSource):
         *,
         on_first_frame: Callable[[], None] | None = None,
         on_first_packet_sent: Callable[[], None] | None = None,
+        trace_payload: dict[str, Any] | None = None,
     ):
         self._queue: queue.Queue[bytes | None] = queue.Queue()
         self._buffer = bytearray()
@@ -2499,6 +2510,7 @@ class OmniVoicePCMStream(discord.AudioSource):
         self._on_first_frame = on_first_frame
         self._on_first_packet_sent = on_first_packet_sent
         self._ready_event = threading.Event()
+        self._trace_payload = dict(trace_payload or {})
         self.error: Exception | None = None
 
     def feed_pcm24_mono(self, chunk: bytes) -> None:
@@ -2527,6 +2539,7 @@ class OmniVoicePCMStream(discord.AudioSource):
         if stereo:
             self._ready_event.set()
             self._queue.put(stereo)
+            log_turn_event("playback_queue_put", bytes=len(stereo), **self._trace_payload)
 
     def finish(self) -> None:
         self._done = True
@@ -2559,6 +2572,7 @@ class OmniVoicePCMStream(discord.AudioSource):
                 self._done = True
                 break
 
+            log_turn_event("playback_queue_get", bytes=len(item), **self._trace_payload)
             self._buffer.extend(item)
 
         if len(self._buffer) >= DISCORD_FRAME_BYTES:
@@ -3344,9 +3358,12 @@ async def play_audio_source(
     source: discord.AudioSource,
     *,
     on_play_start: Callable[[], None] | None = None,
+    trace_payload: dict[str, Any] | None = None,
 ) -> None:
     await wait_until_not_playing(vc)
 
+    payload = dict(trace_payload or {})
+    payload.setdefault("source_type", type(source).__name__)
     done = asyncio.Event()
     playback_error: list[Exception | None] = [None]
 
@@ -3355,16 +3372,25 @@ async def play_audio_source(
             playback_error[0] = err
         bot.loop.call_soon_threadsafe(done.set)
 
-    if on_play_start is not None:
-        on_play_start()
-    vc.play(source, after=after_play)
-    await done.wait()
+    try:
+        if on_play_start is not None:
+            on_play_start()
+        log_turn_event("discord_playback_started", **payload)
+        vc.play(source, after=after_play)
+        await done.wait()
+    except Exception as exc:
+        log_turn_event("discord_playback_exception", stage="vc_play", error=repr(exc), **payload)
+        raise
 
     if playback_error[0] is not None:
+        log_turn_event("discord_playback_exception", stage="after_play", error=repr(playback_error[0]), **payload)
         raise playback_error[0]
 
     if isinstance(source, (OmniVoicePCMStream, QueuedAudioSource)) and source.error is not None:
+        log_turn_event("discord_playback_exception", stage="source_error", error=repr(source.error), **payload)
         raise source.error
+
+    log_turn_event("discord_playback_finished", **payload)
 
 
 async def speak_answer(
@@ -3977,30 +4003,39 @@ async def play_tts_turn_session(
     turn_id: str | None = None,
     session_key: str | None = None,
 ) -> None:
+    trace_payload = {"turn_id": turn_id, "session_key": session_key}
     source = OmniVoicePCMStream(
         on_first_frame=lambda: log_voice_latency(metrics, "tts_first_frame_logged", "TTS 첫 프레임 공급 시간"),
         on_first_packet_sent=lambda: (
             log_voice_latency(metrics, "first_packet_sent_logged", "첫 패킷 송신 시간"),
             log_turn_event("first_packet_sent", turn_id=turn_id, session_key=session_key),
+            log_turn_event("discord_first_packet_sent", turn_id=turn_id, session_key=session_key),
         ),
+        trace_payload=trace_payload,
     )
 
     async def pump_audio() -> None:
         first_chunk = True
+        chunk_index = 0
+        log_turn_event("tts_stream_opened", turn_id=turn_id, session_key=session_key)
         try:
             async for chunk in tts_session.stream_audio():
+                chunk_index += 1
                 if first_chunk:
                     log_voice_latency(metrics, "tts_first_byte_logged", "TTS 첫 바이트 도착 시간")
-                    log_turn_event("tts_first_pcm_received", turn_id=turn_id, session_key=session_key, bytes=len(chunk))
+                    log_turn_event("tts_first_pcm_received", turn_id=turn_id, session_key=session_key, bytes=len(chunk), chunk_index=chunk_index)
                     first_chunk = False
+                log_turn_event("tts_pcm_chunk_received", turn_id=turn_id, session_key=session_key, bytes=len(chunk), chunk_index=chunk_index)
                 source.feed_pcm24_mono(chunk)
+            log_turn_event("tts_stream_completed", turn_id=turn_id, session_key=session_key, chunk_count=chunk_index)
             source.finish()
         except Exception as exc:
+            log_turn_event("tts_stream_exception", turn_id=turn_id, session_key=session_key, error=repr(exc), chunk_count=chunk_index)
             source.fail(exc)
 
     pump_task = asyncio.create_task(pump_audio())
     try:
-        await play_audio_source(vc, source)
+        await play_audio_source(vc, source, trace_payload=trace_payload)
     finally:
         if not pump_task.done():
             pump_task.cancel()
