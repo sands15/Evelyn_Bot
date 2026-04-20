@@ -62,10 +62,21 @@ from evelyn_voice import EvelynVoiceClient
 
 
 VOICE_CONSOLE_ONLY_STT_AND_REPLY = os.getenv("VOICE_CONSOLE_ONLY_STT_AND_REPLY", "true").lower() == "true"
+VOICE_BOTTLENECK_LOGS = os.getenv("VOICE_BOTTLENECK_LOGS", "true").lower() == "true"
 _ALLOWED_CONSOLE_PREFIXES = (
     "🎤 [",
     "💬 [Evelyn]",
+    "[VOICE LATENCY]",
+    "[VOICE STAGE]",
+    "[VOICE BOTTLENECK]",
+    "[TURN TRACE]",
 )
+_BOTTLENECK_TURN_TRACE_EVENTS = {
+    "tts_request_started",
+    "tts_first_pcm_received",
+    "first_packet_sent",
+    "turn_summary",
+}
 
 
 def print(*args, **kwargs):
@@ -517,12 +528,14 @@ def _trim_voice_debug_dir(guild_dir: Path) -> None:
 def log_turn_event(event: str, **payload) -> None:
     if not TURN_TRACE_JSON_LOG:
         return
+    if VOICE_CONSOLE_ONLY_STT_AND_REPLY and VOICE_BOTTLENECK_LOGS and event not in _BOTTLENECK_TURN_TRACE_EVENTS:
+        return
     record = {"event": event, "ts": round(time.time(), 3)}
     for key, value in payload.items():
         if value is None:
             continue
         record[key] = value
-    print("[TURN TRACE] " + json.dumps(record, ensure_ascii=False, sort_keys=True))
+    print("[TURN TRACE]\n" + json.dumps(record, ensure_ascii=False, sort_keys=True, indent=2))
 
 
 def merge_log_event_payload(*, explicit: dict[str, Any], extra: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -2562,8 +2575,13 @@ def log_voice_latency(metrics: dict | None, key: str, label: str) -> None:
     aliases = alias_map.get(key, [])
     for alias in aliases:
         metrics.setdefault("marks", {})[alias] = elapsed_ms
-    if should_log_voice_timing(elapsed_ms):
-        print(f"[VOICE LATENCY] {label}: {elapsed_ms:.0f}ms")
+    if VOICE_BOTTLENECK_LOGS or should_log_voice_timing(elapsed_ms):
+        print(
+            "[VOICE LATENCY]\n"
+            f"label={label}\n"
+            f"elapsed_ms={elapsed_ms:.0f}\n"
+            f"metric_key={key}"
+        )
 
 
 def record_voice_mark(metrics: dict | None, key: str) -> float | None:
@@ -2594,10 +2612,18 @@ def log_voice_stage(metrics: dict | None, label: str, *, extra: str = "", key: s
     }
     if key and key in stage_alias:
         metrics.setdefault("marks", {})[stage_alias[key]] = elapsed_ms
-    if not should_log_voice_timing(elapsed_ms):
+    if not (VOICE_BOTTLENECK_LOGS or should_log_voice_timing(elapsed_ms)):
         return
-    suffix = f" | {extra}" if extra else ""
-    print(f"[VOICE STAGE] {label}: {elapsed_ms:.0f}ms{suffix}")
+    lines = [
+        "[VOICE STAGE]",
+        f"label={label}",
+        f"elapsed_ms={elapsed_ms:.0f}",
+    ]
+    if key:
+        lines.append(f"metric_key={key}")
+    if extra:
+        lines.append(f"extra={extra}")
+    print("\n".join(lines))
 
 
 def log_voice_bottleneck_summary(metrics: dict | None, *, label: str, extra: str = "") -> None:
@@ -2614,9 +2640,11 @@ def log_voice_bottleneck_summary(metrics: dict | None, *, label: str, extra: str
         value = marks.get(name)
         return f"{float(value):.0f}ms" if value is not None else "-"
 
-    if should_log_voice_timing(total_ms):
-        parts = [
-            f"total={total_ms:.0f}ms",
+    if VOICE_BOTTLENECK_LOGS or should_log_voice_timing(total_ms):
+        lines = [
+            "[VOICE BOTTLENECK]",
+            f"label={label}",
+            f"total_ms={total_ms:.0f}",
             f"route={_fmt('route_ready')}",
             f"cognitive={_fmt('cognitive_hotpath_ms')}",
             f"memory={_fmt('memory_ready')}",
@@ -2631,8 +2659,8 @@ def log_voice_bottleneck_summary(metrics: dict | None, *, label: str, extra: str
             f"playback={_fmt('first_packet_sent_logged')}",
         ]
         if extra:
-            parts.append(extra)
-        print(f"[VOICE BOTTLENECK] {label} | " + " | ".join(parts))
+            lines.append(f"extra={extra}")
+        print("\n".join(lines))
 
     meta = metrics.get("meta") or {}
     log_turn_event(
