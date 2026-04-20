@@ -50,6 +50,8 @@ VOICE_DYNAMIC_TRIM_ENABLE = os.getenv("VOICE_DYNAMIC_TRIM_ENABLE", "true").lower
 VOICE_DYNAMIC_TRIM_MIN_MS = max(0.0, float(os.getenv("VOICE_DYNAMIC_TRIM_MIN_MS", "120")))
 VOICE_DYNAMIC_TRIM_MAX_MS = max(VOICE_DYNAMIC_TRIM_MIN_MS, float(os.getenv("VOICE_DYNAMIC_TRIM_MAX_MS", "480")))
 VOICE_DYNAMIC_TRIM_CONSECUTIVE = max(1, int(os.getenv("VOICE_DYNAMIC_TRIM_CONSECUTIVE", "4")))
+VOICE_UNSTABLE_TRIM_CAP_MS = max(0.0, float(os.getenv("VOICE_UNSTABLE_TRIM_CAP_MS", "80")))
+VOICE_UNSTABLE_FIRST_PACKET_WAIT_MS = max(250.0, float(os.getenv("VOICE_UNSTABLE_FIRST_PACKET_WAIT_MS", "1500")))
 VOICE_PCM_BYTES_PER_MS = int((48000 * 2 * 2) / 1000)
 VOICE_PENDING_INNER_MAX_ATTEMPTS = max(1, int(os.getenv("VOICE_PENDING_INNER_MAX_ATTEMPTS", "8")))
 VOICE_PENDING_INNER_MAX_AGE_SEC = max(0.2, float(os.getenv("VOICE_PENDING_INNER_MAX_AGE_SEC", "1.8")))
@@ -187,6 +189,43 @@ def _round_metric(value: float | None, digits: int = 1) -> float | None:
 
 
 
+def _adjust_trim_for_unstable_onset(
+    *,
+    trim_ms: float,
+    trim_meta: dict,
+    packet_count: int,
+    failed: int,
+    opus_fail: int,
+    plc_packets: int,
+    fec_packets: int,
+    first_packet_wait_ms: float | None,
+    pcm_bytes_len: int,
+) -> tuple[float, dict]:
+    short_clip = (pcm_bytes_len / float(max(1, VOICE_PCM_BYTES_PER_MS) * 1000)) < 1.0
+    unstable_reasons: list[str] = []
+    if opus_fail >= (8 if short_clip else 4):
+        unstable_reasons.append(f"opus_fail={opus_fail}")
+    if plc_packets >= (4 if short_clip else 2):
+        unstable_reasons.append(f"plc={plc_packets}")
+    if fec_packets >= (6 if short_clip else 4):
+        unstable_reasons.append(f"fec={fec_packets}")
+    if failed >= max(5 if short_clip else 3, int(round(packet_count * (0.22 if short_clip else 0.18)))):
+        unstable_reasons.append(f"high_failed_ratio={failed}/{packet_count}")
+    if first_packet_wait_ms is not None and first_packet_wait_ms >= VOICE_UNSTABLE_FIRST_PACKET_WAIT_MS:
+        unstable_reasons.append(f"first_packet_wait_ms={int(round(first_packet_wait_ms))}")
+
+    adjusted_meta = dict(trim_meta)
+    adjusted_meta["unstable_onset"] = bool(unstable_reasons)
+    adjusted_meta["unstable_reasons"] = unstable_reasons
+    adjusted_meta["repair_trim_cap_ms"] = None
+
+    if unstable_reasons and trim_ms > VOICE_UNSTABLE_TRIM_CAP_MS:
+        adjusted_meta["repair_trim_cap_ms"] = float(VOICE_UNSTABLE_TRIM_CAP_MS)
+        trim_ms = min(trim_ms, VOICE_UNSTABLE_TRIM_CAP_MS)
+
+    return trim_ms, adjusted_meta
+
+
 def _build_voice_receive_debug_meta(
     *,
     idx: int,
@@ -221,6 +260,7 @@ def _build_voice_receive_debug_meta(
     early8_rms = float(trim_meta.get("early8_rms") or 0.0)
     early8_peak = float(trim_meta.get("early8_peak") or 0.0)
     body_rms = float(trim_meta.get("body_rms") or 0.0)
+    repair_trim_cap_ms = trim_meta.get("repair_trim_cap_ms")
 
     if not started_output:
         reasons.append("no_started_output")
@@ -246,6 +286,8 @@ def _build_voice_receive_debug_meta(
         reasons.append(f"burst_trim_ms={int(round(burst_trim_ms))}")
     if not short_clip and trim_ms >= 320.0 and body_rms < 0.010:
         reasons.append(f"heavy_trim_ms={int(round(trim_ms))}")
+    if repair_trim_cap_ms is not None:
+        reasons.append(f"repair_trim_cap_ms={int(round(float(repair_trim_cap_ms)))}")
     if (not short_clip) and early8_peak >= 0.98 and early8_rms > max(0.16, body_rms * 3.0) and body_rms < 0.010:
         reasons.append("front_burst_detected")
     if first_packet_wait_ms is not None and first_packet_wait_ms >= 250.0:
@@ -2083,18 +2125,31 @@ class EvelynVoiceClient(discord.VoiceClient):
 
         pcm_bytes = b"".join(pcm_chunks)
         trim_ms, trim_meta = _estimate_leading_trim_ms(pcm_bytes)
+        trim_ms, trim_meta = _adjust_trim_for_unstable_onset(
+            trim_ms=trim_ms,
+            trim_meta=trim_meta,
+            packet_count=len(packets),
+            failed=failed,
+            opus_fail=opus_fail,
+            plc_packets=plc_packets,
+            fec_packets=fec_packets,
+            first_packet_wait_ms=first_packet_wait_ms,
+            pcm_bytes_len=len(pcm_bytes),
+        )
         trim_bytes = int(trim_ms * VOICE_PCM_BYTES_PER_MS)
         trim_bytes -= trim_bytes % 4
         min_keep_bytes = VOICE_PCM_BYTES_PER_MS * 120
         if trim_bytes > 0 and len(pcm_bytes) > trim_bytes + min_keep_bytes:
             pcm_bytes = pcm_bytes[trim_bytes:]
             log.info(
-                "LEADING PCM TRIM | idx=%d ssrc=%d trim_ms=%.0f stable_ms=%s burst_trim_ms=%.0f early4_rms=%.4f early8_rms=%.4f early4_peak=%.3f early8_peak=%.3f body_rms=%.4f out_bytes=%d",
+                "LEADING PCM TRIM | idx=%d ssrc=%d trim_ms=%.0f stable_ms=%s burst_trim_ms=%.0f repair_trim_cap_ms=%s unstable_onset=%s early4_rms=%.4f early8_rms=%.4f early4_peak=%.3f early8_peak=%.3f body_rms=%.4f out_bytes=%d",
                 idx,
                 ssrc,
                 trim_ms,
                 f"{trim_meta.get('stable_ms'):.0f}" if trim_meta.get("stable_ms") is not None else "?",
                 float(trim_meta.get("burst_trim_ms") or 0.0),
+                f"{float(trim_meta.get('repair_trim_cap_ms')):.0f}" if trim_meta.get("repair_trim_cap_ms") is not None else "-",
+                bool(trim_meta.get("unstable_onset")),
                 float(trim_meta.get("early4_rms") or 0.0),
                 float(trim_meta.get("early8_rms") or 0.0),
                 float(trim_meta.get("early4_peak") or 0.0),
