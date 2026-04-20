@@ -10,6 +10,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import asyncio
 import uuid
@@ -2417,6 +2418,7 @@ class OmniVoicePCMStream(discord.AudioSource):
         self._first_frame_sent = False
         self._on_first_frame = on_first_frame
         self._on_first_packet_sent = on_first_packet_sent
+        self._ready_event = threading.Event()
         self.error: Exception | None = None
 
     def feed_pcm24_mono(self, chunk: bytes) -> None:
@@ -2443,20 +2445,31 @@ class OmniVoicePCMStream(discord.AudioSource):
         )
         stereo = audioop.tostereo(upsampled, 2, 1, 1)
         if stereo:
+            self._ready_event.set()
             self._queue.put(stereo)
 
     def finish(self) -> None:
         self._done = True
+        self._ready_event.set()
         self._queue.put(None)
 
     def fail(self, err: Exception) -> None:
         self.error = err
         self.finish()
 
+    def has_audio_ready(self) -> bool:
+        return bool(self._buffer) or not self._queue.empty() or self._ready_event.is_set()
+
+    def is_exhausted(self) -> bool:
+        return self._done and not self._buffer and self._queue.empty()
+
+    async def wait_until_ready(self, timeout: float = 1.0) -> bool:
+        return await asyncio.to_thread(self._ready_event.wait, timeout)
+
     def read(self) -> bytes:
         while len(self._buffer) < DISCORD_FRAME_BYTES:
             try:
-                item = self._queue.get(timeout=0.1)
+                item = self._queue.get(timeout=0.02)
             except queue.Empty:
                 if self._done:
                     break
@@ -2496,10 +2509,70 @@ class OmniVoicePCMStream(discord.AudioSource):
     def cleanup(self) -> None:
         self._closed = True
         self._done = True
+        self._ready_event.set()
         try:
             self._queue.put_nowait(None)
         except Exception:
             pass
+
+
+class QueuedAudioSource(discord.AudioSource):
+    def __init__(self) -> None:
+        self._sources: queue.Queue[OmniVoicePCMStream | None] = queue.Queue()
+        self._current: OmniVoicePCMStream | None = None
+        self._closed = False
+        self._done = False
+        self.error: Exception | None = None
+
+    def add_source(self, source: OmniVoicePCMStream) -> None:
+        if self._closed:
+            source.cleanup()
+            return
+        self._sources.put(source)
+
+    def finish(self) -> None:
+        self._done = True
+        self._sources.put(None)
+
+    def read(self) -> bytes:
+        while True:
+            if self._current is None:
+                try:
+                    next_source = self._sources.get(timeout=0.02)
+                except queue.Empty:
+                    if self._done:
+                        return b""
+                    return b"\x00" * DISCORD_FRAME_BYTES
+                if next_source is None:
+                    self._done = True
+                    return b""
+                self._current = next_source
+
+            chunk = self._current.read()
+            if chunk:
+                return chunk
+
+            if self._current.error is not None and self.error is None:
+                self.error = self._current.error
+            if self._current.is_exhausted():
+                self._current.cleanup()
+                self._current = None
+                continue
+
+            return b"\x00" * DISCORD_FRAME_BYTES
+
+    def cleanup(self) -> None:
+        self._closed = True
+        if self._current is not None:
+            self._current.cleanup()
+            self._current = None
+        while True:
+            try:
+                item = self._sources.get_nowait()
+            except queue.Empty:
+                break
+            if item is not None:
+                item.cleanup()
 
 
 async def set_tts_presence(is_warming_up: bool) -> None:
@@ -2737,6 +2810,10 @@ async def create_omnivoice_source(
             }
             if OMNIVOICE_LANGUAGE:
                 payload["language"] = OMNIVOICE_LANGUAGE
+            if turn_id:
+                payload["turn_id"] = turn_id
+            if session_key:
+                payload["session_key"] = session_key
 
             nonlocal first_pcm_logged
 
@@ -3206,7 +3283,7 @@ async def play_audio_source(
     if playback_error[0] is not None:
         raise playback_error[0]
 
-    if isinstance(source, OmniVoicePCMStream) and source.error is not None:
+    if isinstance(source, (OmniVoicePCMStream, QueuedAudioSource)) and source.error is not None:
         raise source.error
 
 
@@ -3283,6 +3360,7 @@ async def _prefetch_tts_sources(
                     )
                 ),
             )
+            await source.wait_until_ready(timeout=max(0.2, OMNIVOICE_TIMEOUT_SEC))
             await prepared_queue.put((chunk_index, source))
     except Exception as exc:
         await prepared_queue.put(exc)
@@ -3301,6 +3379,7 @@ async def stream_tts_sentences(
 
     async with tts_lock:
         prepared_queue: asyncio.Queue[object] = asyncio.Queue(maxsize=max(1, TTS_PREFETCH_CHUNKS))
+        playback_source = QueuedAudioSource()
         prefetch_task = asyncio.create_task(
             _prefetch_tts_sources(
                 sentence_queue,
@@ -3310,22 +3389,37 @@ async def stream_tts_sentences(
                 session_key=session_key,
             )
         )
+        playback_task: asyncio.Task | None = None
         try:
             while True:
                 item = await prepared_queue.get()
                 if item is None:
+                    playback_source.finish()
                     break
                 if isinstance(item, Exception):
+                    playback_source.finish()
                     raise item
 
                 _, source = item
+                playback_source.add_source(source)
 
                 if guild_id is not None and not did_speak:
                     bot_speaking_guilds.add(guild_id)
 
-                did_speak = True
-                await play_audio_source(vc, source)
+                if playback_task is None:
+                    did_speak = True
+                    playback_task = asyncio.create_task(play_audio_source(vc, playback_source))
+
+            if playback_task is not None:
+                await playback_task
         finally:
+            playback_source.finish()
+            if playback_task is not None and not playback_task.done():
+                playback_task.cancel()
+                try:
+                    await playback_task
+                except asyncio.CancelledError:
+                    pass
             if not prefetch_task.done():
                 prefetch_task.cancel()
                 try:
