@@ -4029,11 +4029,19 @@ async def run_tts_turn_session(
         session_key=session_key,
     )
     log_turn_event("tts_request_started", turn_id=turn_id, session_key=session_key)
+    log_turn_event("tts_turn_session_started", turn_id=turn_id, session_key=session_key)
 
     async def feed_input() -> None:
+        first_text_fed = False
         async for text_piece in llm_text_stream:
             await tts_session.feed_text(text_piece)
+            if not first_text_fed:
+                first_text_fed = True
+                log_turn_event("tts_turn_session_first_text_fed", turn_id=turn_id, session_key=session_key)
+            else:
+                log_turn_event("later_text_fed", turn_id=turn_id, session_key=session_key, chars=len(text_piece))
         await tts_session.finish_input()
+        log_turn_event("tts_turn_session_finish_input", turn_id=turn_id, session_key=session_key)
 
     feed_task = asyncio.create_task(feed_input())
     play_task = asyncio.create_task(
@@ -4141,8 +4149,11 @@ async def ask_llm_and_speak_streaming(
 
         if play_task is not None:
             await play_task
+        if tts_session is not None:
+            log_turn_event("tts_turn_session_closed", turn_id=tts_session.turn_id, session_key=session_key)
     except Exception:
         if tts_session is not None:
+            log_turn_event("tts_turn_session_cancelled", turn_id=tts_session.turn_id, session_key=session_key)
             await tts_session.cancel()
         raise
 
