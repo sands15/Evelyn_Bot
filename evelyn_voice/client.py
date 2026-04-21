@@ -2559,9 +2559,10 @@ class EvelynVoiceClient(discord.VoiceClient):
                 clean_run_packets=onset_clean_run_max,
                 strict=onset_strict,
             )
+            stale_penalty_active = stale_onset and not (onset_packet_ok and first_clean_window_ok)
             severe_onset = (
-                (stale_onset and onset_robotic)
-                or (stale_onset and segment_started_with_concealment)
+                (stale_penalty_active and onset_robotic)
+                or (stale_penalty_active and segment_started_with_concealment)
                 or (segment_started_with_concealment and onset_robotic)
                 or (segment_started_with_concealment and onset_vad_prob < VOICE_ONSET_VAD_MIN_PROB)
                 or (segment_started_with_concealment and onset_clean_run_max < VOICE_ONSET_STRICT_MIN_GOOD_PACKETS)
@@ -2659,9 +2660,10 @@ class EvelynVoiceClient(discord.VoiceClient):
             and segment_first_clean_decode_ms is not None
             and float(segment_first_clean_decode_ms) <= VOICE_ONSET_FIRST_CLEAN_WINDOW_MS
         )
+        stale_penalty_active = stale_onset and not (onset_packet_ok and first_clean_window_ok)
         severe_onset = (
-            (stale_onset and onset_robotic)
-            or (stale_onset and segment_started_with_concealment)
+            (stale_penalty_active and onset_robotic)
+            or (stale_penalty_active and segment_started_with_concealment)
             or (segment_started_with_concealment and onset_robotic)
             or (segment_started_with_concealment and onset_vad_prob < VOICE_ONSET_VAD_MIN_PROB)
             or (segment_started_with_concealment and onset_clean_run_max < VOICE_ONSET_STRICT_MIN_GOOD_PACKETS)
@@ -2676,10 +2678,10 @@ class EvelynVoiceClient(discord.VoiceClient):
         if not segment_passes_onset:
             onset_dropped = True
             print(
-                f"[VOICE STAGE] onset_gate_drop idx={idx} ssrc={ssrc} packet_ok={onset_packet_ok} clean_run={onset_clean_run_max} failed_ratio={onset_failed_ratio:.3f} opus_fail={onset_opus_fail_count} plc={onset_plc_count} fec={onset_fec_count} robotic={onset_robotic} artifact={onset_artifact_score:.2f} vad={onset_vad_prob:.2f} rms={onset_rms:.4f} stale={stale_onset} conceal={segment_started_with_concealment} clean_window={first_clean_window_ok}"
+                f"[VOICE STAGE] onset_gate_drop idx={idx} ssrc={ssrc} packet_ok={onset_packet_ok} clean_run={onset_clean_run_max} failed_ratio={onset_failed_ratio:.3f} opus_fail={onset_opus_fail_count} plc={onset_plc_count} fec={onset_fec_count} robotic={onset_robotic} artifact={onset_artifact_score:.2f} vad={onset_vad_prob:.2f} rms={onset_rms:.4f} stale={stale_onset} stale_penalty={stale_penalty_active} conceal={segment_started_with_concealment} clean_window={first_clean_window_ok}"
             )
             log.warning(
-                "ONSET GATE DROP | idx=%d ssrc=%d packet_ok=%s clean_run=%d failed_ratio=%.3f opus_fail=%d plc=%d fec=%d robotic=%s artifact=%.2f vad=%.2f rms=%.4f stale=%s conceal=%s clean_window=%s",
+                "ONSET GATE DROP | idx=%d ssrc=%d packet_ok=%s clean_run=%d failed_ratio=%.3f opus_fail=%d plc=%d fec=%d robotic=%s artifact=%.2f vad=%.2f rms=%.4f stale=%s stale_penalty=%s conceal=%s clean_window=%s",
                 idx,
                 ssrc,
                 onset_packet_ok,
@@ -2693,6 +2695,7 @@ class EvelynVoiceClient(discord.VoiceClient):
                 onset_vad_prob,
                 onset_rms,
                 stale_onset,
+                stale_penalty_active,
                 segment_started_with_concealment,
                 first_clean_window_ok,
             )
