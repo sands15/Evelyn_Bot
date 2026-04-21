@@ -51,6 +51,13 @@ VOICE_ONSET_REORDER_BUFFER_PACKETS = max(VOICE_JITTER_BUFFER_PACKETS, int(os.get
 VOICE_ONSET_MIN_GOOD_PACKETS = max(1, int(os.getenv("VOICE_ONSET_MIN_GOOD_PACKETS", "3")))
 VOICE_ONSET_TRIM_CAP_MS = max(0.0, float(os.getenv("VOICE_ONSET_TRIM_CAP_MS", "40")))
 VOICE_ONSET_DROP_CONCEAL_RATIO = min(1.0, max(0.2, float(os.getenv("VOICE_ONSET_DROP_CONCEAL_RATIO", "0.5"))))
+VOICE_ONSET_HEALTH_WINDOW_MS = max(160.0, float(os.getenv("VOICE_ONSET_HEALTH_WINDOW_MS", "220")))
+VOICE_ONSET_MAX_OPUS_FAIL = max(1, int(os.getenv("VOICE_ONSET_MAX_OPUS_FAIL", "2")))
+VOICE_ONSET_MAX_PLC_FEC = max(1, int(os.getenv("VOICE_ONSET_MAX_PLC_FEC", "3")))
+VOICE_ONSET_MAX_FAILED_RATIO = min(1.0, max(0.05, float(os.getenv("VOICE_ONSET_MAX_FAILED_RATIO", "0.25"))))
+VOICE_ONSET_ARTIFACT_THRESHOLD = max(0.5, float(os.getenv("VOICE_ONSET_ARTIFACT_THRESHOLD", "2.0")))
+VOICE_ONSET_VAD_MIN_PROB = min(1.0, max(0.1, float(os.getenv("VOICE_ONSET_VAD_MIN_PROB", "0.65"))))
+VOICE_ONSET_RMS_MIN = max(0.001, float(os.getenv("VOICE_ONSET_RMS_MIN", "0.01")))
 VOICE_HARD_TRIM_MS = max(0.0, float(os.getenv("VOICE_HARD_TRIM_MS", "80")))
 VOICE_DYNAMIC_TRIM_ENABLE = os.getenv("VOICE_DYNAMIC_TRIM_ENABLE", "true").lower() == "true"
 VOICE_DYNAMIC_TRIM_MIN_MS = max(0.0, float(os.getenv("VOICE_DYNAMIC_TRIM_MIN_MS", "120")))
@@ -194,6 +201,150 @@ def _round_metric(value: float | None, digits: int = 1) -> float | None:
     return round(float(value), digits)
 
 
+def should_open_segment_from_packet_health(
+    opus_fail: int,
+    plc: int,
+    fec: int,
+    failed_ratio: float,
+    clean_run_packets: int,
+) -> bool:
+    if clean_run_packets < VOICE_ONSET_MIN_GOOD_PACKETS:
+        return False
+    if opus_fail >= VOICE_ONSET_MAX_OPUS_FAIL:
+        return False
+    if (plc + fec) >= VOICE_ONSET_MAX_PLC_FEC:
+        return False
+    if failed_ratio >= VOICE_ONSET_MAX_FAILED_RATIO:
+        return False
+    return True
+
+
+def _frame_audio(audio: np.ndarray, frame_samples: int) -> list[np.ndarray]:
+    if audio.size <= 0 or frame_samples <= 0:
+        return []
+    frames: list[np.ndarray] = []
+    for start in range(0, max(0, audio.size - frame_samples + 1), frame_samples):
+        frame = audio[start:start + frame_samples]
+        if frame.size == frame_samples:
+            frames.append(frame)
+    return frames
+
+
+def _spectral_flatness(frame: np.ndarray) -> float:
+    if frame.size <= 1:
+        return 1.0
+    spec = np.abs(np.fft.rfft(frame * np.hanning(frame.size))) + 1e-9
+    return float(np.exp(np.mean(np.log(spec))) / np.mean(spec)) if spec.size else 1.0
+
+
+def _zero_crossing_rate(frame: np.ndarray) -> float:
+    if frame.size <= 1:
+        return 0.0
+    return float(np.mean(frame[:-1] * frame[1:] < 0))
+
+
+def _pitch_confidence(frame: np.ndarray, *, sampling_rate: int = 16000) -> float:
+    if frame.size < 32:
+        return 0.0
+    centered = frame - np.mean(frame)
+    energy = float(np.sqrt(np.mean(np.square(centered))) + 1e-12)
+    if energy < 1e-4:
+        return 0.0
+    corr = np.correlate(centered, centered, mode="full")[frame.size - 1:]
+    if corr.size <= 1 or corr[0] <= 1e-9:
+        return 0.0
+    min_lag = max(1, int(sampling_rate / 400.0))
+    max_lag = min(corr.size - 1, int(sampling_rate / 80.0))
+    if max_lag <= min_lag:
+        return 0.0
+    peak = float(np.max(corr[min_lag:max_lag + 1]))
+    return max(0.0, min(1.0, peak / float(corr[0] + 1e-9)))
+
+
+def _logmel_like_vector(frame: np.ndarray) -> np.ndarray:
+    if frame.size <= 1:
+        return np.zeros(8, dtype=np.float32)
+    spec = np.abs(np.fft.rfft(frame * np.hanning(frame.size))) + 1e-9
+    bands = np.array_split(spec, 8)
+    return np.asarray([np.log(float(np.mean(band))) if len(band) else -20.0 for band in bands], dtype=np.float32)
+
+
+def _logmel_distance(frame: np.ndarray, prev_frame: np.ndarray) -> float:
+    cur = _logmel_like_vector(frame)
+    prev = _logmel_like_vector(prev_frame)
+    return float(np.mean(np.abs(cur - prev)))
+
+
+def _repeated_sample_ratio(frame: np.ndarray, prev_frame: np.ndarray | None) -> float:
+    if frame.size <= 1:
+        return 0.0
+    repeated = float(np.mean(np.abs(np.diff(frame)) < 1e-4))
+    if prev_frame is not None and prev_frame.size == frame.size:
+        repeated = max(repeated, float(np.mean(np.abs(frame - prev_frame) < 1e-4)))
+    return repeated
+
+
+def compute_robotic_artifact_score(frame: np.ndarray, prev_frame: np.ndarray | None) -> float:
+    flatness = _spectral_flatness(frame)
+    zcr = _zero_crossing_rate(frame)
+    pitch_conf = _pitch_confidence(frame)
+    mel_jump = _logmel_distance(frame, prev_frame) if prev_frame is not None else 0.0
+    repeat_ratio = _repeated_sample_ratio(frame, prev_frame)
+
+    score = 0.0
+    score += 1.2 if flatness > 0.32 else 0.0
+    score += 1.0 if pitch_conf < 0.45 else 0.0
+    score += 1.0 if mel_jump > 0.85 else 0.0
+    score += 0.8 if repeat_ratio > 0.18 else 0.0
+    score += 0.6 if zcr > 0.22 else 0.0
+    return score
+
+
+def _estimate_onset_artifact_metrics(pcm_bytes: bytes, *, sampling_rate: int = 48000) -> dict:
+    audio = _pcm16le_stereo_to_mono_float(pcm_bytes)
+    if audio.size == 0:
+        return {"robotic": False, "artifact_score": 0.0, "vad_prob": 0.0, "rms": 0.0, "frame_count": 0}
+    audio16 = _resample_mono_float(audio, sampling_rate, 16000)
+    window_samples = min(audio16.size, int(16000 * 0.30))
+    onset = audio16[:window_samples]
+    rms = float(np.sqrt(np.mean(np.square(onset))) + 1e-12) if onset.size else 0.0
+    frames = _frame_audio(onset, max(1, int(16000 * 0.02)))
+    prev: np.ndarray | None = None
+    scores: list[float] = []
+    voiced_votes = 0
+    for frame in frames:
+        score = compute_robotic_artifact_score(frame, prev)
+        scores.append(score)
+        if _pitch_confidence(frame) >= 0.45 and _zero_crossing_rate(frame) < 0.22 and _spectral_flatness(frame) < 0.32:
+            voiced_votes += 1
+        prev = frame
+    artifact_score = float(sum(scores) / len(scores)) if scores else 0.0
+    vad_prob = float(voiced_votes / len(frames)) if frames else 0.0
+    return {
+        "robotic": artifact_score >= VOICE_ONSET_ARTIFACT_THRESHOLD,
+        "artifact_score": artifact_score,
+        "vad_prob": vad_prob,
+        "rms": rms,
+        "frame_count": len(frames),
+    }
+
+
+def should_pass_audio_segment(
+    vad_prob: float,
+    rms: float,
+    packet_ok: bool,
+    robotic: bool,
+) -> bool:
+    if not packet_ok:
+        return False
+    if robotic:
+        return False
+    if vad_prob < VOICE_ONSET_VAD_MIN_PROB:
+        return False
+    if rms < VOICE_ONSET_RMS_MIN:
+        return False
+    return True
+
 
 def _adjust_trim_for_unstable_onset(
     *,
@@ -264,6 +415,13 @@ def _build_voice_receive_debug_meta(
     onset_fec_count: int,
     onset_opus_fail_count: int,
     onset_trim_ms: float | None,
+    onset_packet_ok: bool,
+    onset_failed_ratio: float,
+    onset_clean_run_packets: int,
+    onset_robotic: bool,
+    onset_artifact_score: float,
+    onset_vad_prob: float,
+    onset_rms: float,
     onset_dropped: bool,
     segment_started_with_concealment: bool,
     segment_first_clean_decode_ms: float | None,
@@ -308,6 +466,14 @@ def _build_voice_receive_debug_meta(
         reasons.append(f"repair_trim_cap_ms={int(round(float(repair_trim_cap_ms)))}")
     if (not short_clip) and early8_peak >= 0.98 and early8_rms > max(0.16, body_rms * 3.0) and body_rms < 0.010:
         reasons.append("front_burst_detected")
+    if not onset_packet_ok:
+        reasons.append("onset_packet_gate_failed")
+    if onset_robotic:
+        reasons.append("onset_robotic")
+    if onset_vad_prob < VOICE_ONSET_VAD_MIN_PROB:
+        reasons.append(f"onset_vad_prob={onset_vad_prob:.2f}")
+    if onset_rms < VOICE_ONSET_RMS_MIN:
+        reasons.append(f"onset_rms={onset_rms:.4f}")
     if onset_dropped:
         reasons.append("onset_dropped")
     if segment_started_with_concealment:
@@ -373,9 +539,16 @@ def _build_voice_receive_debug_meta(
         },
         "onset": {
             "good_packets_before_decode": int(onset_good_packets_before_decode),
+            "clean_run_packets": int(onset_clean_run_packets),
+            "packet_ok": bool(onset_packet_ok),
+            "failed_ratio": _round_metric(onset_failed_ratio, 3),
             "plc_packets": int(onset_plc_count),
             "fec_packets": int(onset_fec_count),
             "opus_fail": int(onset_opus_fail_count),
+            "robotic": bool(onset_robotic),
+            "artifact_score": _round_metric(onset_artifact_score, 3),
+            "vad_prob": _round_metric(onset_vad_prob, 3),
+            "rms": _round_metric(onset_rms, 4),
             "dropped": bool(onset_dropped),
             "segment_started_with_concealment": bool(segment_started_with_concealment),
             "decoder_reset_before_first_clean": bool(segment_decoder_reset_before_first_clean),
@@ -2014,11 +2187,20 @@ class EvelynVoiceClient(discord.VoiceClient):
         stable_voice_packets = 0
         started_output = False
         onset_pending_pcm: list[bytes] = []
-        onset_window_packets = max(1, int(round(VOICE_ONSET_PRE_ROLL_MS / 20.0)))
+        onset_window_packets = max(1, int(round(VOICE_ONSET_HEALTH_WINDOW_MS / 20.0)))
         onset_buffer_ms = 0.0
         onset_plc_count = 0
         onset_fec_count = 0
         onset_opus_fail_count = 0
+        onset_packet_count = 0
+        onset_failed_packets = 0
+        onset_clean_run_packets = 0
+        onset_clean_run_max = 0
+        onset_packet_ok = False
+        onset_robotic = False
+        onset_artifact_score = 0.0
+        onset_vad_prob = 0.0
+        onset_rms = 0.0
         onset_dropped = False
         segment_started_with_concealment = False
         segment_first_clean_decode_ms: float | None = None
@@ -2148,12 +2330,17 @@ class EvelynVoiceClient(discord.VoiceClient):
             real_silence += int(decode_result.get("real_silence") or 0)
             opus_silence_fill += int(decode_result.get("opus_silence_fill") or 0)
             if onset_phase:
+                onset_packet_count += 1
                 onset_opus_fail_count += int(decode_result.get("opus_fail") or 0)
                 onset_plc_count += int(decode_result.get("plc") or 0)
                 onset_fec_count += int(decode_result.get("fec") or 0)
+                if int(decode_result.get("failed") or 0):
+                    onset_failed_packets += 1
             pcm = decode_result.get("pcm") or b""
 
             if not pcm:
+                if onset_phase:
+                    onset_clean_run_packets = 0
                 inserted_silence, started_output, leading_bad_packets = self._maybe_insert_leading_silence(
                     idx=idx,
                     packet_index=packet_index,
@@ -2169,6 +2356,14 @@ class EvelynVoiceClient(discord.VoiceClient):
                     opus_silence_fill += 1
                     success += 1
                 continue
+
+            if onset_phase:
+                clean_packet = not bool(decode_result.get("opus_fail") or decode_result.get("plc") or decode_result.get("fec") or decode_result.get("failed"))
+                if clean_packet:
+                    onset_clean_run_packets += 1
+                    onset_clean_run_max = max(onset_clean_run_max, onset_clean_run_packets)
+                else:
+                    onset_clean_run_packets = 0
 
             if segment_first_clean_decode_ms is None:
                 segment_first_clean_decode_ms = float(onset_buffer_ms)
@@ -2195,9 +2390,29 @@ class EvelynVoiceClient(discord.VoiceClient):
                 first_packet_wait_ms = (processing_started_at - float(first_received_at)) * 1000.0
 
         onset_conceal_total = onset_opus_fail_count + onset_plc_count + onset_fec_count
+        onset_failed_ratio = (float(onset_failed_packets) / float(onset_packet_count)) if onset_packet_count > 0 else 1.0
+        onset_packet_ok = should_open_segment_from_packet_health(
+            opus_fail=onset_opus_fail_count,
+            plc=onset_plc_count,
+            fec=onset_fec_count,
+            failed_ratio=onset_failed_ratio,
+            clean_run_packets=onset_clean_run_max,
+        )
         onset_drop_threshold = max(3, int((min(len(expanded_packets), onset_window_packets) * VOICE_ONSET_DROP_CONCEAL_RATIO) + 0.999))
         if not started_output and onset_pending_pcm:
-            if segment_first_clean_decode_ms is not None and onset_conceal_total < onset_drop_threshold:
+            onset_preview_pcm = b"".join(onset_pending_pcm)
+            onset_artifact = _estimate_onset_artifact_metrics(onset_preview_pcm)
+            onset_robotic = bool(onset_artifact.get("robotic"))
+            onset_artifact_score = float(onset_artifact.get("artifact_score") or 0.0)
+            onset_vad_prob = float(onset_artifact.get("vad_prob") or 0.0)
+            onset_rms = float(onset_artifact.get("rms") or 0.0)
+            should_open = should_pass_audio_segment(
+                vad_prob=onset_vad_prob,
+                rms=onset_rms,
+                packet_ok=onset_packet_ok and onset_conceal_total < onset_drop_threshold,
+                robotic=onset_robotic,
+            )
+            if should_open and segment_first_clean_decode_ms is not None:
                 pcm_chunks.extend(onset_pending_pcm)
                 success += len(onset_pending_pcm)
                 started_output = True
@@ -2249,6 +2464,38 @@ class EvelynVoiceClient(discord.VoiceClient):
             self.runtime.bind_dave_ssrc(int(user_id), int(ssrc))
 
         pcm_bytes = b"".join(pcm_chunks)
+        onset_probe_bytes = pcm_bytes[: int(VOICE_PCM_BYTES_PER_MS * 300)]
+        if onset_probe_bytes:
+            onset_artifact = _estimate_onset_artifact_metrics(onset_probe_bytes)
+            onset_robotic = bool(onset_artifact.get("robotic"))
+            onset_artifact_score = float(onset_artifact.get("artifact_score") or 0.0)
+            onset_vad_prob = float(onset_artifact.get("vad_prob") or 0.0)
+            onset_rms = float(onset_artifact.get("rms") or 0.0)
+        segment_passes_onset = should_pass_audio_segment(
+            vad_prob=onset_vad_prob,
+            rms=onset_rms,
+            packet_ok=onset_packet_ok,
+            robotic=onset_robotic,
+        )
+        if not segment_passes_onset:
+            onset_dropped = True
+            log.warning(
+                "ONSET GATE DROP | idx=%d ssrc=%d packet_ok=%s clean_run=%d failed_ratio=%.3f opus_fail=%d plc=%d fec=%d robotic=%s artifact=%.2f vad=%.2f rms=%.4f",
+                idx,
+                ssrc,
+                onset_packet_ok,
+                onset_clean_run_max,
+                onset_failed_ratio,
+                onset_opus_fail_count,
+                onset_plc_count,
+                onset_fec_count,
+                onset_robotic,
+                onset_artifact_score,
+                onset_vad_prob,
+                onset_rms,
+            )
+            return
+
         trim_ms, trim_meta = _estimate_leading_trim_ms(pcm_bytes)
         trim_ms, trim_meta = _adjust_trim_for_unstable_onset(
             trim_ms=trim_ms,
@@ -2328,6 +2575,13 @@ class EvelynVoiceClient(discord.VoiceClient):
             onset_fec_count=onset_fec_count,
             onset_opus_fail_count=onset_opus_fail_count,
             onset_trim_ms=trim_meta.get("onset_trim_cap_ms"),
+            onset_packet_ok=onset_packet_ok,
+            onset_failed_ratio=onset_failed_ratio,
+            onset_clean_run_packets=onset_clean_run_max,
+            onset_robotic=onset_robotic,
+            onset_artifact_score=onset_artifact_score,
+            onset_vad_prob=onset_vad_prob,
+            onset_rms=onset_rms,
             onset_dropped=onset_dropped,
             segment_started_with_concealment=segment_started_with_concealment,
             segment_first_clean_decode_ms=segment_first_clean_decode_ms,
