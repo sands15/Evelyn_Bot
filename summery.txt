@@ -310,7 +310,6 @@ cognitive_state는 현재 Evelyn의 "내부 태도 결정기"에 가깝다.
 - raw_transcript.jsonl
 - durable_facts.jsonl
 - open_questions.jsonl
-- open_loops.jsonl
 - cognitive_state.json
 - vault\facts.jsonl
 - vault\questions.jsonl
@@ -488,7 +487,8 @@ on_voice_state_update에서는:
 - turn_id / segment_id 추적
 - stage별 latency 로그
 - bottleneck summary 로그
-- discord_playback_started / first_packet_sent / finished 등 이벤트 로그
+- discord_playback_play_invoked / first_packet_sent / discord_playback_finished 등 이벤트 로그
+- text_turn_summary / voice_turn_summary / voice_drop_summary 요약 이벤트 로그
 - WAV 디버그 저장(debug_audio)
 - STT metadata 저장
 - unstable audio 사유 기록

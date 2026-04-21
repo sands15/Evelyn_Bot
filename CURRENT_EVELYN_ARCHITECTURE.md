@@ -410,7 +410,7 @@ TTS:
 - vault raw 중 관련 항목
 - 현재 `cognitive_state.json` 또는 fresh cognitive_state
 - 관련 `durable_facts`
-- 관련 `open_questions` / `open_loops`
+- 관련 `open_questions`
 
 이 memory context는 메인 LLM system prompt에 병합된다.
 
@@ -486,7 +486,6 @@ ask가 gate 되면:
 - `raw_transcript.jsonl`
 - `durable_facts.jsonl`
 - `open_questions.jsonl`
-- `open_loops.jsonl`
 - `cognitive_state.json`
 - `vault\facts.jsonl`
 - `vault\questions.jsonl`
@@ -522,7 +521,7 @@ ask가 gate 되면:
 현재 사용처는 검색 후속답변 쪽이다.
 검색 태스크가 결과를 찾고 answer를 만든 뒤:
 - `resolve_open_question_rows(guild_id, query, answer)`
-를 호출해 관련 open question / open loop / vault question 항목을 제거한다.
+를 호출해 관련 open question / vault question 항목을 제거한다.
 
 ---
 

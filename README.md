@@ -186,7 +186,6 @@ STT로 얻은 문장을 정리한 뒤, OpenAI 호환 `/v1/chat/completions` 엔�
 - `bot_memory/guild_<id>/durable_facts.jsonl`
 - `bot_memory/guild_<id>/open_questions.jsonl`
 - `bot_memory/guild_<id>/cognitive_state.json`
-- 기존 호환용 `bot_memory/guild_<id>/open_loops.jsonl`
 
 대화가 끝나면 작은 모델이 백그라운드에서 다음 작업을 합니다.
 
