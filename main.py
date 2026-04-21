@@ -199,7 +199,6 @@ tts_lock = asyncio.Lock()
 active_tts_playbacks: dict[int, dict[str, Any]] = {}
 voice_debug_counts: dict[int, int] = {}
 voice_debug_stems: dict[tuple[int, str], str] = {}
-voice_debug_stage_files: dict[tuple[int, str], dict[str, tuple[str, str | None, str]]] = {}
 
 tts_warmup_started = False
 stt_processor: Optional[Any] = None
@@ -763,22 +762,9 @@ def save_voice_debug_audio(
             stem = f"{stamp}_{idx:04d}_{speaker_label}"
             voice_debug_stems[stem_key] = stem
 
-        suffix = f"_{stage_label}" if stage_label else ""
-        raw_path = guild_dir / f"{stem}{suffix}_raw48k.wav"
-        stt_path = guild_dir / f"{stem}{suffix}_stt16k.wav"
-        meta_path = guild_dir / f"{stem}{suffix}.json"
-        stage_key = stage_label or "default"
-        stage_files = voice_debug_stage_files.setdefault(stem_key, {})
-
-        if stage_key == "final" and "ingress" in stage_files:
-            ingress_raw, ingress_stt, ingress_meta = stage_files.pop("ingress")
-            with contextlib.suppress(FileNotFoundError):
-                Path(ingress_raw).unlink()
-            if ingress_stt:
-                with contextlib.suppress(FileNotFoundError):
-                    Path(ingress_stt).unlink()
-            with contextlib.suppress(FileNotFoundError):
-                Path(ingress_meta).unlink()
+        raw_path = guild_dir / f"{stem}_raw48k.wav"
+        stt_path = guild_dir / f"{stem}_stt16k.wav"
+        meta_path = guild_dir / f"{stem}.json"
 
         with wave.open(str(raw_path), "wb") as wf:
             wf.setnchannels(CHANNELS)
@@ -809,17 +795,16 @@ def save_voice_debug_audio(
             "wake_probe": wake_probe,
             "final_text": final_text,
             "session_key": session_key,
-            "stage_label": stage_label,
+            "stage_label": "ingress",
         }
         if debug_meta is not None:
             meta["voice_receive"] = debug_meta
         if stt_meta is not None:
             meta["stt"] = stt_meta
         meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
-        stage_files[stage_key] = (str(raw_path), str(stt_path) if save_stt_audio else None, str(meta_path))
         _trim_voice_debug_dir(guild_dir)
         stt_log = str(stt_path) if save_stt_audio else "[SKIPPED]"
-        print(f"[VOICE DEBUG SAVE] speaker={speaker} stage={stage_key} raw={raw_path} stt={stt_log}")
+        print(f"[VOICE DEBUG SAVE] speaker={speaker} stage=ingress raw={raw_path} stt={stt_log}")
     except Exception as e:
         print(f"[VOICE DEBUG SAVE FAIL] speaker={speaker} err={e!r}")
 
