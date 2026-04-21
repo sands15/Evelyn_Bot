@@ -1,5 +1,6 @@
 import audioop
 import builtins
+import contextlib
 import hashlib
 import html
 import json
@@ -3765,9 +3766,42 @@ async def stream_llm_text(
     first_chunk_timeout = max(1.0, VOICE_LLM_FIRST_CHUNK_TIMEOUT_SEC)
     log_voice_stage(metrics, "LLM 요청 시작", extra=f"messages={len(payload['messages'])} max_tokens={VOICE_LLM_MAX_TOKENS}")
 
+    first_chunk_received = asyncio.Event()
+    stream_closed = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    first_chunk_watchdog_fired: asyncio.Future[str] = loop.create_future()
+    first_chunk_watchdog_task: asyncio.Task[None] | None = None
+
+    def mark_first_chunk_received(reason: str) -> None:
+        nonlocal on_first_chunk, first_chunk_watchdog_task
+        if first_chunk_received.is_set():
+            return
+        first_chunk_received.set()
+        log_voice_stage(metrics, "llm_first_chunk_marked_received", extra=reason)
+        if on_first_chunk is not None:
+            on_first_chunk()
+            on_first_chunk = None
+        if first_chunk_watchdog_task is not None and not first_chunk_watchdog_task.done():
+            log_voice_stage(metrics, "llm_first_chunk_watchdog_cancelled", extra=reason)
+            first_chunk_watchdog_task.cancel()
+
+    async def first_chunk_watchdog() -> None:
+        try:
+            log_voice_stage(metrics, "llm_first_chunk_watchdog_started", extra=f"timeout_sec={first_chunk_timeout:.1f}")
+            await asyncio.wait_for(first_chunk_received.wait(), timeout=first_chunk_timeout)
+        except asyncio.TimeoutError:
+            if stream_closed.is_set() or first_chunk_received.is_set() or first_chunk_watchdog_fired.done():
+                return
+            reason = f"first_chunk_timeout={first_chunk_timeout:.1f}s"
+            log_voice_stage(metrics, "llm_first_chunk_watchdog_fired", extra=reason)
+            first_chunk_watchdog_fired.set_result(reason)
+        except asyncio.CancelledError:
+            raise
+
     async def fallback_after_stream_stall(reason: str) -> str:
+        if first_chunk_received.is_set():
+            return ""
         fallback_timeout = max(1.0, VOICE_LLM_FALLBACK_TIMEOUT_SEC)
-        log_voice_stage(metrics, "LLM 스트림 헤더 타임아웃", extra=reason)
         log_voice_stage(metrics, "LLM 스트림 fallback 시작", extra=f"reason={reason} timeout_sec={fallback_timeout:.1f}")
         try:
             return await asyncio.wait_for(
@@ -3796,10 +3830,11 @@ async def stream_llm_text(
         try:
             resp = await asyncio.wait_for(request_ctx.__aenter__(), timeout=first_chunk_timeout)
         except asyncio.TimeoutError:
+            log_voice_stage(metrics, "LLM 스트림 헤더 타임아웃", extra=f"response_headers_timeout={first_chunk_timeout:.1f}s")
             answer = await fallback_after_stream_stall(f"response_headers_timeout={first_chunk_timeout:.1f}s")
-            if on_first_chunk is not None:
-                on_first_chunk()
-            yield answer
+            if answer:
+                mark_first_chunk_received("fallback_after_response_headers_timeout")
+                yield answer
             if metrics is not None:
                 metrics.setdefault("marks", {})["llm_done"] = (time.monotonic() - float(metrics.get("started_at", time.monotonic()))) * 1000.0
             return
@@ -3820,31 +3855,47 @@ async def stream_llm_text(
                     answer = sanitize_model_output(msg.get("content", ""))
                 if not answer:
                     answer = await fallback_after_stream_stall("json_response_without_answer")
-                if on_first_chunk is not None:
-                    on_first_chunk()
-                yield answer
+                if answer:
+                    mark_first_chunk_received("json_response")
+                    yield answer
                 if metrics is not None:
                     metrics.setdefault("marks", {})["llm_done"] = (time.monotonic() - float(metrics.get("started_at", time.monotonic()))) * 1000.0
                 return
 
-            first_chunk_seen = False
+            first_chunk_watchdog_task = asyncio.create_task(first_chunk_watchdog())
             line_iter = resp.content.__aiter__()
             while True:
-                try:
-                    if not first_chunk_seen:
-                        raw_line = await asyncio.wait_for(line_iter.__anext__(), timeout=first_chunk_timeout)
-                    else:
+                if not first_chunk_received.is_set():
+                    next_line_task = asyncio.create_task(line_iter.__anext__())
+                    done, pending = await asyncio.wait(
+                        {next_line_task, first_chunk_watchdog_fired},
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if first_chunk_watchdog_fired in done:
+                        if not next_line_task.done():
+                            next_line_task.cancel()
+                            with contextlib.suppress(asyncio.CancelledError):
+                                await next_line_task
+                        reason = first_chunk_watchdog_fired.result()
+                        answer = await fallback_after_stream_stall(reason)
+                        if answer:
+                            mark_first_chunk_received("fallback_after_first_chunk_watchdog")
+                            yield answer
+                        if metrics is not None:
+                            metrics.setdefault("marks", {})["llm_done"] = (time.monotonic() - float(metrics.get("started_at", time.monotonic()))) * 1000.0
+                        return
+                    for pending_task in pending:
+                        if pending_task is not first_chunk_watchdog_fired:
+                            pending_task.cancel()
+                    try:
+                        raw_line = await next_line_task
+                    except StopAsyncIteration:
+                        break
+                else:
+                    try:
                         raw_line = await line_iter.__anext__()
-                except StopAsyncIteration:
-                    break
-                except asyncio.TimeoutError:
-                    answer = await fallback_after_stream_stall(f"first_chunk_timeout={first_chunk_timeout:.1f}s")
-                    if on_first_chunk is not None:
-                        on_first_chunk()
-                    yield answer
-                    if metrics is not None:
-                        metrics.setdefault("marks", {})["llm_done"] = (time.monotonic() - float(metrics.get("started_at", time.monotonic()))) * 1000.0
-                    return
+                    except StopAsyncIteration:
+                        break
 
                 line = raw_line.decode("utf-8", errors="ignore").strip()
                 if not line or line.startswith(":"):
@@ -3865,15 +3916,20 @@ async def stream_llm_text(
                 if not delta_text:
                     continue
 
-                if not first_chunk_seen and on_first_chunk is not None:
-                    on_first_chunk()
-                    first_chunk_seen = True
-                    on_first_chunk = None
-                elif not first_chunk_seen:
-                    first_chunk_seen = True
+                if not first_chunk_received.is_set():
+                    mark_first_chunk_received("stream_delta")
 
                 yield delta_text
         finally:
+            stream_closed.set()
+            if first_chunk_watchdog_task is not None and not first_chunk_watchdog_task.done():
+                log_voice_stage(metrics, "llm_first_chunk_watchdog_cancelled", extra="stream_finally")
+                first_chunk_watchdog_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await first_chunk_watchdog_task
+            if not first_chunk_watchdog_fired.done():
+                first_chunk_watchdog_fired.cancel()
+            log_voice_stage(metrics, "llm_stream_closed")
             await request_ctx.__aexit__(None, None, None)
     finally:
         if metrics is not None:
