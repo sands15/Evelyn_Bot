@@ -4954,8 +4954,33 @@ async def on_ready():
         vc = guild.voice_client
         if isinstance(vc, EvelynVoiceClient):
             print(f"[VOICE READY] guild={guild.id} channel={getattr(getattr(vc, 'channel', None), 'name', None)} listening={vc.is_listening()}")
+            try:
+                if vc.channel is not None:
+                    await ensure_listening_voice_client(guild, vc.channel)
+            except Exception as e:
+                print(f"[VOICE READY REARM FAIL] guild={guild.id} err={e!r}")
         elif vc is not None:
             print(f"[VOICE READY] guild={guild.id} unexpected_voice_client={type(vc)!r}")
+
+
+@bot.event
+async def on_voice_state_update(member, before, after):
+    if bot.user is None or member.id != bot.user.id:
+        return
+    guild = getattr(member, 'guild', None)
+    if guild is None:
+        return
+    vc = guild.voice_client
+    if not isinstance(vc, EvelynVoiceClient):
+        return
+    target_channel = after.channel or vc.channel
+    if target_channel is None:
+        return
+    try:
+        await ensure_listening_voice_client(guild, target_channel)
+        print(f"[VOICE STATE REARM] guild={guild.id} channel={getattr(target_channel, 'name', None)} listening={vc.is_listening()}")
+    except Exception as e:
+        print(f"[VOICE STATE REARM FAIL] guild={guild.id} err={e!r}")
     await set_tts_presence(True)
     try:
         await asyncio.to_thread(get_stt_model)
