@@ -4488,6 +4488,16 @@ async def _process_member_audio_impl(
         print(f"[UNSTABLE AUDIO] speaker={member.display_name} reasons={reasons}")
         log_voice_stage(metrics, "불안정 음성 감지", extra=f"reasons={reasons}")
 
+    save_voice_debug_audio(
+        guild_id,
+        speaker_name,
+        pcm_bytes,
+        audio16k,
+        final_text="[INGRESS RAW]",
+        debug_meta=debug_meta,
+        save_stt_audio=True,
+    )
+
     duration_sec = len(audio16k) / float(max(1, stt_sampling_rate))
     waveform_stats = compute_waveform_activity_stats(audio16k, sampling_rate=stt_sampling_rate)
     voiced_ms = float(waveform_stats.get("voiced_ms") or 0.0)
