@@ -3561,7 +3561,9 @@ async def ask_llm_once(
     session_memory_key: str | None = None,
     source: str = "text",
     debug_text: str | None = None,
+    metrics: dict | None = None,
 ) -> str:
+    log_voice_stage(metrics, "LLM fallback 단발 요청 시작", extra=f"source={source} user_text_len={len(clean_text(user_text))}")
     messages, cognitive_state, _route = await prepare_llm_messages(
         user_text,
         guild_id=guild_id,
@@ -3571,6 +3573,7 @@ async def ask_llm_once(
         session_memory_key=session_memory_key,
         source=source,
         debug_text=debug_text,
+        metrics=metrics,
     )
 
     policy_response = policy_response_for_state(cognitive_state, source=source)
@@ -3584,6 +3587,7 @@ async def ask_llm_once(
                 answer_text=policy_response,
                 user_text=user_text,
             )
+        log_voice_stage(metrics, "LLM fallback 단발 요청 성공", extra=f"policy_len={len(policy_response)}")
         return policy_response
 
     guided_user_text = user_text
@@ -3610,7 +3614,9 @@ async def ask_llm_once(
         data = await resp.json()
         choices = data.get("choices", [])
         if not choices:
-            return fallback_answer_for(user_text)
+            answer = fallback_answer_for(user_text)
+            log_voice_stage(metrics, "LLM fallback 단발 요청 성공", extra=f"fallback_len={len(answer)}")
+            return answer
 
         choice = choices[0]
         msg = choice.get("message", {})
@@ -3619,14 +3625,18 @@ async def ask_llm_once(
         finish_reason = choice.get("finish_reason", "")
 
         if answer:
+            log_voice_stage(metrics, "LLM fallback 단발 요청 성공", extra=f"answer_len={len(answer)}")
             return answer
 
         extracted = extract_answer_from_reasoning(reasoning, user_text)
         if extracted:
+            log_voice_stage(metrics, "LLM fallback 단발 요청 성공", extra=f"reasoning_len={len(extracted)}")
             return extracted
 
         print(f"LLM 응답 본문이 비어 있어서 fallback 사용, finish_reason={finish_reason}")
-        return fallback_answer_for(user_text)
+        answer = fallback_answer_for(user_text)
+        log_voice_stage(metrics, "LLM canned reply 사용", extra=f"reason=empty_body fallback_len={len(answer)}")
+        return answer
 
 
 def _extract_text_payload(value) -> str:
@@ -3756,7 +3766,9 @@ async def stream_llm_text(
     log_voice_stage(metrics, "LLM 요청 시작", extra=f"messages={len(payload['messages'])} max_tokens={VOICE_LLM_MAX_TOKENS}")
 
     async def fallback_after_stream_stall(reason: str) -> str:
-        log_voice_stage(metrics, "LLM 스트림 fallback", extra=reason)
+        fallback_timeout = max(1.0, VOICE_LLM_FALLBACK_TIMEOUT_SEC)
+        log_voice_stage(metrics, "LLM 스트림 헤더 타임아웃", extra=reason)
+        log_voice_stage(metrics, "LLM 스트림 fallback 시작", extra=f"reason={reason} timeout_sec={fallback_timeout:.1f}")
         try:
             return await asyncio.wait_for(
                 ask_llm_once(
@@ -3768,14 +3780,18 @@ async def stream_llm_text(
                     session_memory_key=session_memory_key,
                     source=source,
                     debug_text=debug_text,
+                    metrics=metrics,
                 ),
-                timeout=max(5.0, first_chunk_timeout + 4.0),
+                timeout=fallback_timeout,
             )
         except Exception as fallback_exc:
             log_voice_stage(metrics, "LLM fallback 실패", extra=repr(fallback_exc))
-            return fallback_answer_for(user_text)
+            answer = fallback_answer_for(user_text)
+            log_voice_stage(metrics, "LLM canned reply 사용", extra=f"reason=stream_and_fallback_failed len={len(answer)}")
+            return answer
 
     request_ctx = session.post(LLM_SERVER_URL, json=payload, timeout=timeout)
+    log_voice_stage(metrics, "LLM 스트림 open 시작", extra=f"timeout_sec={first_chunk_timeout:.1f}")
     try:
         try:
             resp = await asyncio.wait_for(request_ctx.__aenter__(), timeout=first_chunk_timeout)
@@ -4223,14 +4239,19 @@ async def ask_llm_and_speak_streaming(
         return False
 
     try:
-        outer_llm_timeout = max(1.0, VOICE_LLM_FIRST_CHUNK_TIMEOUT_SEC + 12.0)
+        outer_llm_timeout = max(30.0, VOICE_LLM_FIRST_CHUNK_TIMEOUT_SEC + VOICE_LLM_FALLBACK_TIMEOUT_SEC + 12.0)
         try:
             first_delta_text = await asyncio.wait_for(llm_iter.__anext__(), timeout=outer_llm_timeout)
         except StopAsyncIteration:
             first_delta_text = None
-        except asyncio.TimeoutError as exc:
+        except asyncio.TimeoutError:
             log_voice_stage(metrics, "LLM 상위 watchdog 타임아웃", extra=f"timeout_sec={outer_llm_timeout:.1f}")
-            raise RuntimeError(f"LLM 응답 대기 시간 초과 ({outer_llm_timeout:.1f}s)") from exc
+            try:
+                await llm_stream.aclose()
+            except Exception:
+                pass
+            first_delta_text = fallback_answer_for(user_text)
+            log_voice_stage(metrics, "LLM canned reply 사용", extra=f"reason=outer_watchdog_timeout len={len(first_delta_text)}")
 
         if first_delta_text is not None:
             started_tts = await handle_llm_piece(first_delta_text)
