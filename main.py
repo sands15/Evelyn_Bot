@@ -2052,6 +2052,9 @@ async def get_http_session() -> aiohttp.ClientSession:
     return http_session
 
 
+OMNIVOICE_TURN_SESSION_BASE_URL = f"{OMNIVOICE_SERVER_URL.rstrip('/')}/v1/audio/speech/turn-session"
+
+
 class TtsSessionClient:
     def __init__(self, *, turn_id: str, session_key: str | None = None) -> None:
         self.turn_id = turn_id
@@ -2061,21 +2064,21 @@ class TtsSessionClient:
         if not text_piece:
             return
         session = await get_http_session()
-        url = f"{OMNIVOICE_URL.rstrip('/')}/turn-session/{self.turn_id}/feed"
+        url = f"{OMNIVOICE_TURN_SESSION_BASE_URL}/{self.turn_id}/feed"
         async with session.post(url, json={"text": text_piece}) as resp:
             if resp.status != 200:
                 raise RuntimeError(f"TTS feed failed: {resp.status} / {(await resp.text())[:200]}")
 
     async def finish_input(self) -> None:
         session = await get_http_session()
-        url = f"{OMNIVOICE_URL.rstrip('/')}/turn-session/{self.turn_id}/finish"
+        url = f"{OMNIVOICE_TURN_SESSION_BASE_URL}/{self.turn_id}/finish"
         async with session.post(url) as resp:
             if resp.status != 200:
                 raise RuntimeError(f"TTS finish failed: {resp.status} / {(await resp.text())[:200]}")
 
     async def cancel(self) -> None:
         session = await get_http_session()
-        url = f"{OMNIVOICE_URL.rstrip('/')}/turn-session/{self.turn_id}/cancel"
+        url = f"{OMNIVOICE_TURN_SESSION_BASE_URL}/{self.turn_id}/cancel"
         try:
             async with session.post(url) as resp:
                 await resp.read()
@@ -2084,7 +2087,7 @@ class TtsSessionClient:
 
     async def stream_audio(self):
         session = await get_http_session()
-        url = f"{OMNIVOICE_URL.rstrip('/')}/turn-session/{self.turn_id}/stream"
+        url = f"{OMNIVOICE_TURN_SESSION_BASE_URL}/{self.turn_id}/stream"
         async with session.get(url, timeout=aiohttp.ClientTimeout(total=None, sock_read=None)) as resp:
             if resp.status != 200:
                 raise RuntimeError(f"TTS stream failed: {resp.status} / {(await resp.text())[:200]}")
@@ -2103,7 +2106,7 @@ class TtsClient:
         session_key: str | None = None,
     ) -> TtsSessionClient:
         session = await get_http_session()
-        url = f"{OMNIVOICE_URL.rstrip('/')}/turn-session/start"
+        url = f"{OMNIVOICE_TURN_SESSION_BASE_URL}/start"
         payload: dict[str, Any] = {
             "model": OMNIVOICE_MODEL,
             "input": initial_text,
