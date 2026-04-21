@@ -85,8 +85,12 @@ ROUTER_ROUTE_TIMEOUT_SEC = float(globals().get("ROUTER_ROUTE_TIMEOUT_SEC", os.ge
 _ALLOWED_CONSOLE_PREFIXES = (
     "🎤 [",
     "💬 [Evelyn]",
+    "[VOICE LATENCY]",
+    "[VOICE BOTTLENECK]",
     "[FULL STT ENTER]",
-    "[STT RESULT]",
+    "[STT RESULT][wake]",
+    "[STT RESULT][partial]",
+    "[STT RESULT][full-final]",
 )
 _BOTTLENECK_TURN_TRACE_EVENTS = {
     "tts_interrupt",
