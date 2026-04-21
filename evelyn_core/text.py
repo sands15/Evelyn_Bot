@@ -117,6 +117,23 @@ def extract_leading_wake_alias(text: str) -> str | None:
 
 
 def fuzzy_leading_wake_alias(text: str) -> str | None:
+    text_n = normalize_voice_text(strip_leading_voice_fillers(text))
+    if not text_n:
+        return None
+
+    tokens = [t for t in text_n.split() if t]
+    if not tokens:
+        return None
+
+    head = tokens[0]
+    for wake in normalized_wake_words():
+        wake_tokens = [t for t in wake.split() if t]
+        if not wake_tokens:
+            continue
+        target = wake_tokens[0]
+        ratio = SequenceMatcher(None, head, target).ratio()
+        if ratio >= 0.74:
+            return wake
     return None
 
 

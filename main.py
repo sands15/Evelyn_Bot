@@ -4725,6 +4725,15 @@ async def _process_member_audio_impl(
         )
 
         hard_drop_reasons = {"unstable_audio", "gibberish_probe", "probe_miss", "confirm_miss", "wake_probe_low_signal", "full_text_veto", "transport_corrupted"}
+        fuzzy_probe_alias = fuzzy_leading_wake_alias(wake_probe)
+        fuzzy_confirm_alias = fuzzy_leading_wake_alias(wake_confirm)
+        near_miss_wake = bool((not wake_detected) and (fuzzy_probe_alias or fuzzy_confirm_alias))
+        if near_miss_wake:
+            wake_detected = True
+            wake_match_mode = "fuzzy"
+            wake_alias = fuzzy_probe_alias or fuzzy_confirm_alias
+            wake_reject_reason = None
+            log_voice_stage(metrics, "웨이크 근접오타 완화", extra=f"probe={wake_probe!r} confirm={wake_confirm!r} alias={wake_alias!r}")
         if not wake_detected:
             reject_reason = wake_reject_reason or "confirm_miss"
             if reject_reason in hard_drop_reasons:
