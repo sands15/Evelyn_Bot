@@ -4316,6 +4316,7 @@ async def ask_llm_and_speak_streaming(
     if is_duplicate_followup(first_response, followup_text):
         followup_text = ""
     answer = clean_text(f"{first_response} {followup_text}" if followup_text else first_response)
+    print(f"[LLM DEBUG] first_response={first_response!r} followup_text={followup_text!r} answer={answer!r}")
     log_voice_stage(metrics, "LLM 완료", extra=f"chars={len(answer)}", key="llm_done")
 
     if answer and on_final_answer is not None:
@@ -4330,6 +4331,7 @@ async def ask_llm_and_speak_streaming(
         if cleaned_answer:
             sentences = [cleaned_answer]
 
+    print(f"[TTS DEBUG] sentences={sentences!r} tail={tail!r}")
     log_voice_stage(metrics, "문장 분리 완료", extra=f"sentence_count={len(sentences)} chars={len(answer)}")
 
     sentence_queue: asyncio.Queue[str | None] = asyncio.Queue()
