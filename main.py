@@ -3857,7 +3857,7 @@ async def build_followup_response(
     metrics: dict | None = None,
 ) -> str:
     log_voice_stage(metrics, "2단계 followup 생성 시작", extra=f"source={source} first_len={len(clean_text(first_response))}")
-    answer = await ask_llm_once(
+    messages, cognitive_state, _route = await prepare_llm_messages(
         user_text,
         guild_id=guild_id,
         session_key=session_key,
@@ -3868,6 +3868,31 @@ async def build_followup_response(
         debug_text=debug_text,
         metrics=metrics,
     )
+    followup_prompt = (
+        f"사용자가 방금 한 말: {clean_text(user_text)}\n"
+        f"이미 먼저 말한 첫 응답: {clean_text(first_response)}\n\n"
+        "할 일: 첫 응답과 겹치지 않는 보충 설명만 1~2문장으로 이어서 말해. "
+        "첫 문장을 반복하거나 비슷하게 다시 시작하지 마. 새 정보가 없으면 빈 응답을 반환해."
+    )
+    payload = {
+        "model": MODEL_NAME,
+        "messages": messages + [{"role": "user", "content": followup_prompt}],
+        "temperature": 0.1,
+        "max_tokens": min(96, VOICE_LLM_MAX_TOKENS),
+        "stream": False,
+    }
+    timeout = aiohttp.ClientTimeout(total=120)
+    session = await get_http_session()
+    async with session.post(LLM_SERVER_URL, json=payload, timeout=timeout) as resp:
+        if resp.status != 200:
+            error_text = await resp.text()
+            raise RuntimeError(f"LLM 서버 오류: {resp.status} / {error_text[:300]}")
+        data = await resp.json()
+        choices = data.get("choices", [])
+        if not choices:
+            return ""
+        msg = choices[0].get("message", {})
+        answer = sanitize_model_output(msg.get("content", ""))
     first, followup = split_first_response_and_followup(answer)
     if clean_text(first) == clean_text(first_response):
         return followup
