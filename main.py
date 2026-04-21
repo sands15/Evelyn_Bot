@@ -25,7 +25,11 @@ import numpy as np
 import torch
 import discord
 from discord.ext import commands
-from transformers import AutoProcessor, WhisperForConditionalGeneration
+
+try:
+    from qwen_asr import Qwen3ASRModel
+except ImportError:
+    Qwen3ASRModel = None
 
 from evelyn_core.audio import (
     apply_light_denoise,
@@ -2983,44 +2987,53 @@ def normalize_stt_language(language: str | None = None) -> str | None:
 
     lowered = value.lower()
     aliases = {
-        "korean": "ko",
-        "kor": "ko",
-        "kr": "ko",
-        "ko-kr": "ko",
-        "ko_kr": "ko",
-        "english": "en",
+        "korean": "Korean",
+        "kor": "Korean",
+        "kr": "Korean",
+        "ko": "Korean",
+        "ko-kr": "Korean",
+        "ko_kr": "Korean",
+        "english": "English",
+        "en": "English",
+        "chinese": "Chinese",
+        "zh": "Chinese",
+        "japanese": "Japanese",
+        "ja": "Japanese",
     }
-    return aliases.get(lowered, lowered)
+    return aliases.get(lowered, value)
 
 
 def get_stt_model() -> tuple[str, Any, Any]:
     global stt_processor, stt_model, stt_backend
 
-    if stt_backend == "hf_whisper" and stt_processor is not None and stt_model is not None:
+    if stt_backend == "qwen_asr" and stt_model is not None:
         return stt_backend, stt_processor, stt_model
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    if Qwen3ASRModel is None:
+        raise RuntimeError("qwen-asr 패키지가 설치되지 않았습니다. `pip install -r requirements.txt` 후 다시 실행하세요.")
+
+    device = "cuda:0" if torch.cuda.is_available() else "cpu"
     token = os.getenv("HF_TOKEN")
     torch_dtype = resolve_stt_torch_dtype()
 
     print(f"STT 로드 시작: model={STT_MODEL_NAME}, device={device}, dtype={torch_dtype}")
 
-    stt_backend = "hf_whisper"
-    stt_processor = AutoProcessor.from_pretrained(
-        STT_MODEL_NAME,
-        token=token,
-    )
-    hf_load_kwargs = {
-        "token": token,
-        "torch_dtype": torch_dtype,
-        "low_cpu_mem_usage": True,
+    stt_backend = "qwen_asr"
+    stt_processor = None
+    load_kwargs: dict[str, Any] = {
+        "dtype": torch_dtype,
+        "device_map": device,
+        "max_inference_batch_size": 1,
+        "max_new_tokens": max(VOICE_STT_MAX_NEW_TOKENS, 256),
     }
-    stt_model = WhisperForConditionalGeneration.from_pretrained(
+    if token:
+        load_kwargs["token"] = token
+
+    stt_model = Qwen3ASRModel.from_pretrained(
         STT_MODEL_NAME,
-        **hf_load_kwargs,
-    ).to(device)
-    stt_model.eval()
-    print("STT 로드 완료 (Whisper/transformers)")
+        **load_kwargs,
+    )
+    print("STT 로드 완료 (Qwen3-ASR)")
     return stt_backend, stt_processor, stt_model
 
 
@@ -3030,59 +3043,25 @@ def transcribe_audio16k_sync(audio16k: np.ndarray, max_new_tokens: int = 256, *,
 
     effective_rate = max(1, int(sampling_rate))
     print(f"[STT INPUT][{stage}] sampling_rate={effective_rate} samples={audio16k.size} sec={audio16k.size / float(effective_rate):.2f}")
-    backend, processor, model = get_stt_model()
+    backend, _processor, model = get_stt_model()
     stt_audio = np.asarray(audio16k, dtype=np.float32)
 
-    whisper_audio = stt_audio
     if effective_rate != TARGET_RATE:
-        whisper_audio = resample_audio_float(whisper_audio, effective_rate, TARGET_RATE)
-        print(f"[STT RESAMPLE][{stage}] {effective_rate} -> {TARGET_RATE} samples={whisper_audio.size}")
-
-    if stage == "full":
-        beam_size = max(1, STT_WHISPER_FULL_BEAM_SIZE)
-    elif stage == "full-rescore":
-        beam_size = max(1, STT_WHISPER_FULL_RESCORE_BEAM_SIZE)
-    elif stage == "wake-confirm":
-        beam_size = max(1, STT_WHISPER_WAKE_CONFIRM_BEAM_SIZE)
-    else:
-        beam_size = max(1, STT_WHISPER_WAKE_BEAM_SIZE)
+        stt_audio = resample_audio_float(stt_audio, effective_rate, TARGET_RATE)
+        effective_rate = TARGET_RATE
+        print(f"[STT RESAMPLE][{stage}] {sampling_rate} -> {TARGET_RATE} samples={stt_audio.size}")
 
     language = normalize_stt_language() if STT_FORCE_LANGUAGE else None
-    batch = processor(
-        whisper_audio,
-        sampling_rate=TARGET_RATE,
-        return_tensors="pt",
-        return_attention_mask=True,
+    results = model.transcribe(
+        audio=(stt_audio, effective_rate),
+        language=language,
+        return_time_stamps=False,
     )
-    input_features = batch["input_features"].to(model.device, dtype=model.dtype)
-    attention_mask = batch.get("attention_mask")
-    if attention_mask is not None:
-        attention_mask = attention_mask.to(model.device)
+    if not results:
+        return ""
 
-    generate_kwargs = {
-        "max_new_tokens": max_new_tokens,
-        "num_beams": beam_size,
-        "do_sample": False,
-    }
-    generate_kwargs.pop("attention_mask", None)
-
-    if STT_FORCE_LANGUAGE and hasattr(processor, "get_decoder_prompt_ids"):
-        decoder_prompt_ids = processor.get_decoder_prompt_ids(
-            language=language,
-            task="transcribe",
-        )
-        if decoder_prompt_ids:
-            generate_kwargs["forced_decoder_ids"] = decoder_prompt_ids
-
-    with torch.inference_mode():
-        outputs = model.generate(
-            input_features=input_features,
-            attention_mask=attention_mask,
-            **generate_kwargs,
-        )
-
-    text = processor.batch_decode(outputs, skip_special_tokens=True)[0]
-    return clean_text(text)
+    text = clean_text(getattr(results[0], "text", "") or "")
+    return text
 
 
 def score_stt_candidate(text: str, *, wake_probe: str = "") -> float:

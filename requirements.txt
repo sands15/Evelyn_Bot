@@ -1,6 +1,6 @@
 aiohttp>=3.13
 discord.py>=2.7
-faster-whisper>=1.2
+qwen-asr
 numpy>=2.0
 requests>=2.32
 torch>=2.8
