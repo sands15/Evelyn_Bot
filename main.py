@@ -211,6 +211,7 @@ bot = commands.Bot(command_prefix=resolve_command_prefix, intents=intents)
 
 session_locks: dict[str, asyncio.Lock] = {}
 tts_lock = asyncio.Lock()
+active_tts_playbacks: dict[int, dict[str, Any]] = {}
 voice_debug_counts: dict[int, int] = {}
 
 tts_warmup_started = False
@@ -3477,6 +3478,46 @@ async def ensure_voice_client(message: discord.Message) -> Optional[EvelynVoiceC
     return vc
 
 
+async def stop_active_tts_playback(guild_id: int | None, *, reason: str = "interrupt") -> None:
+    if guild_id is None:
+        return
+    state = active_tts_playbacks.get(guild_id)
+    if not state:
+        return
+
+    vc = state.get("vc")
+    playback_task = state.get("playback_task")
+    prefetch_task = state.get("prefetch_task")
+    sentence_queue = state.get("sentence_queue")
+    prepared_queue = state.get("prepared_queue")
+    playback_source = state.get("playback_source")
+
+    if sentence_queue is not None:
+        with contextlib.suppress(Exception):
+            await sentence_queue.put(None)
+    if prepared_queue is not None:
+        with contextlib.suppress(Exception):
+            await prepared_queue.put(None)
+    if playback_source is not None:
+        with contextlib.suppress(Exception):
+            playback_source.finish()
+    if vc is not None and (vc.is_playing() or vc.is_paused()):
+        with contextlib.suppress(Exception):
+            vc.stop()
+    if playback_task is not None and not playback_task.done():
+        playback_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await playback_task
+    if prefetch_task is not None and not prefetch_task.done():
+        prefetch_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await prefetch_task
+    active_tts_playbacks.pop(guild_id, None)
+    bot_speaking_guilds.discard(guild_id)
+    last_bot_audio_end_at[guild_id] = time.monotonic()
+    log_turn_event("tts_interrupt", guild_id=guild_id, reason=reason)
+
+
 async def wait_until_not_playing(vc: discord.VoiceClient) -> None:
     while vc.is_playing() or vc.is_paused():
         await asyncio.sleep(0.05)
@@ -3625,6 +3666,17 @@ async def stream_tts_sentences(
             )
         )
         playback_task: asyncio.Task | None = None
+        if guild_id is not None:
+            active_tts_playbacks[guild_id] = {
+                "vc": vc,
+                "sentence_queue": sentence_queue,
+                "prepared_queue": prepared_queue,
+                "playback_source": playback_source,
+                "prefetch_task": prefetch_task,
+                "playback_task": playback_task,
+                "turn_id": turn_id,
+                "session_key": session_key,
+            }
         try:
             while True:
                 item = await prepared_queue.get()
@@ -3644,6 +3696,8 @@ async def stream_tts_sentences(
                 if playback_task is None:
                     did_speak = True
                     playback_task = asyncio.create_task(play_audio_source(vc, playback_source))
+                    if guild_id is not None and guild_id in active_tts_playbacks:
+                        active_tts_playbacks[guild_id]["playback_task"] = playback_task
 
             if playback_task is not None:
                 await playback_task
@@ -3662,6 +3716,7 @@ async def stream_tts_sentences(
                 except asyncio.CancelledError:
                     pass
             if guild_id is not None:
+                active_tts_playbacks.pop(guild_id, None)
                 bot_speaking_guilds.discard(guild_id)
                 if did_speak:
                     last_bot_audio_end_at[guild_id] = time.monotonic()
@@ -4365,6 +4420,7 @@ async def _process_member_audio_impl(
         return
 
     guild_id = guild.id
+    await stop_active_tts_playback(guild_id, reason="new_user_audio")
     room_state = room_state_snapshot(room_session_key)
     owner_user_id = room_state.get("owner_user_id")
     topic_id = session_topic_ids.get(session_key) or build_topic_id(member.display_name or str(member.id))
