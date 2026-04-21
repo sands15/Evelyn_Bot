@@ -1019,6 +1019,9 @@ def policy_response_for_state(cognitive_state: dict | None = None, *, source: st
     if action == "wait":
         return "응, 계속 말해줘." if source == "voice" else "잠깐, 이어서 말해줘."
 
+    if action == "search_then_answer":
+        return "금방 찾아보고 바로 알려줄게."
+
     return None
 
 
@@ -1745,8 +1748,8 @@ async def update_cognitive_state(
                 "role": "system",
                 "content": (
                     "너는 실시간 대화 조율자다. 반드시 JSON 객체 하나만 출력한다. "
-                    "형식은 {\"action\": \"answer|ask|wait\", \"confidence\": number, \"user_intent\": string, \"state_summary\": string, \"question_for_user\": string, \"main_prompt_hint\": string, \"reason_brief\": string, \"retrieved_context_ids\": string[]}. "
-                    "answer는 지금 답하면 되는 경우다. ask는 사용자의 원래 발화에 이어서 짧게 되묻거나 확인 질문을 하는 편이 자연스러운 경우다. wait는 아직 단정하지 말고 더 듣거나 짧게 여지를 두는 편이 자연스러운 경우다. "
+                    "형식은 {\"action\": \"answer|ask|wait|search_then_answer\", \"confidence\": number, \"user_intent\": string, \"state_summary\": string, \"question_for_user\": string, \"main_prompt_hint\": string, \"reason_brief\": string, \"retrieved_context_ids\": string[]}. "
+                    "answer는 지금 답하면 되는 경우다. ask는 사용자의 원래 발화에 이어서 짧게 되묻거나 확인 질문을 하는 편이 자연스러운 경우다. wait는 아직 단정하지 말고 더 듣거나 짧게 여지를 두는 편이 자연스러운 경우다. search_then_answer는 최신 정보나 외부 확인이 필요해서 먼저 짧게 알리고 뒤이어 검색 결과를 전해야 하는 경우다. "
                     "question_for_user는 사용자가 한 말이 아니라, 메인 LLM이 사용자에게 되물을 내부 질문 초안이다. 절대로 사용자의 질문을 베껴 쓰거나 사용자가 이미 한 말처럼 적지 마라. "
                     "user_intent에는 사용자가 진짜로 하려는 말을 아주 짧게 적어라. state_summary에는 현재 상황을 한두 문장으로 적어라. main_prompt_hint에는 메인 LLM이 말할 때 지켜야 할 한 줄 힌트를 적어라. confidence는 0~1, reason_brief는 아주 짧게 써라. JSON 외 다른 텍스트는 절대 출력하지 마라."
                 ),
@@ -1826,6 +1829,10 @@ async def update_cognitive_state(
         if state.get("action") == "ask" and state.get("question_for_user"):
             print(
                 f"[COGNITIVE ASK] guild={guild_id} scope={scope_type}:{scope_key or 'default'} question={state['question_for_user']!r} reason={state.get('reason_brief', '')!r} confidence={state.get('confidence', 0.0):.2f}"
+            )
+        elif state.get("action") == "search_then_answer":
+            print(
+                f"[COGNITIVE SEARCH] guild={guild_id} scope={scope_type}:{scope_key or 'default'} intent={state.get('user_intent', '')!r} reason={state.get('reason_brief', '')!r}"
             )
 
         return state
@@ -2485,8 +2492,11 @@ def schedule_search_followup(
     session_memory_key: str | None = None,
     channel_id: int | None,
     source: str,
+    force: bool = False,
 ) -> None:
-    if not guild_id or not answer_promises_search(answer):
+    if not guild_id:
+        return
+    if not force and not answer_promises_search(answer):
         return
 
     query = build_search_query(guild_id, user_text)
@@ -3699,7 +3709,7 @@ async def ask_llm_once(
             update_session_state(
                 session_key,
                 speaker="assistant",
-                awaiting_user_reply=gated_state.get("action") in {"ask", "wait"},
+                awaiting_user_reply=gated_state.get("action") in {"ask", "wait", "search_then_answer"},
                 answer_text=policy_response,
                 user_text=user_text,
             )
@@ -3848,7 +3858,7 @@ async def ask_llm_streaming(
             update_session_state(
                 session_key,
                 speaker="assistant",
-                awaiting_user_reply=gated_state.get("action") in {"ask", "wait"},
+                awaiting_user_reply=gated_state.get("action") in {"ask", "wait", "search_then_answer"},
                 answer_text=policy_response,
                 user_text=user_text,
             )
@@ -4761,6 +4771,7 @@ async def _process_member_audio_impl(
                 user_speaker=member.display_name,
                 assistant_speaker="Evelyn",
             )
+            search_requested = bool(apply_ask_gating(read_cached_cognitive_state(guild_id, room_key=room_key, person_key=person_key, session_memory_key=session_memory_key), source="voice").get("action") == "search_then_answer")
             schedule_search_followup(
                 guild_id,
                 session_key,
@@ -4771,6 +4782,7 @@ async def _process_member_audio_impl(
                 session_memory_key=session_memory_key,
                 channel_id=None,
                 source="search-followup-voice",
+                force=search_requested,
             )
             awaiting_reply = bool("?" in plain_answer or "？" in plain_answer)
             followup_ttl = ACTIVE_CONVERSATION_VOICE_QUESTION_SEC if awaiting_reply else ACTIVE_CONVERSATION_VOICE_SEC
@@ -4943,6 +4955,7 @@ async def on_message(message: discord.Message):
                 user_speaker=message.author.display_name,
                 assistant_speaker="Evelyn",
             )
+            search_requested = bool(apply_ask_gating(read_cached_cognitive_state(message.guild.id, room_key=room_key, person_key=person_key, session_memory_key=session_memory_key), source="text").get("action") == "search_then_answer")
             schedule_search_followup(
                 message.guild.id,
                 session_key,
@@ -4953,6 +4966,7 @@ async def on_message(message: discord.Message):
                 session_memory_key=session_memory_key,
                 channel_id=message.channel.id,
                 source="search-followup-text",
+                force=search_requested,
             )
 
             awaiting_reply = bool("?" in plain_answer or "？" in plain_answer)
