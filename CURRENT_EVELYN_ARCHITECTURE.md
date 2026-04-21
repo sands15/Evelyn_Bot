@@ -82,7 +82,7 @@
 - `SUB_LLM_PORT=9821`
 - `SUB_LLM_CONTEXT=8192`
 - `SUB_LLM_REASONING_BUDGET=96`
-- `SUB_LLM_MODEL=/home/sands12/.cache/huggingface/hub/models--LGAI-EXAONE--EXAONE-3.5-7.8B-Instruct-GGUF/snapshots/c618bf67338171760c72c3f109f2900cb7d79855/EXAONE-3.5-7.8B-Instruct-BF16.gguf`
+- `SUB_LLM_MODEL=/home/sands12/.cache/huggingface/hub/models--LGAI-EXAONE--EXAONE-3.5-7.8B-Instruct-GGUF/snapshots/c618bf67338171760c72c3f109f2900cb7d79855/EXAONE-3.5-7.8B-Instruct-Q8_0.gguf`
 
 라우터 LLM:
 - `ROUTER_LLM_GPU=0`

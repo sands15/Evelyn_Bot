@@ -18,7 +18,7 @@ if "%SUB_LLM_GPU%"=="" set "SUB_LLM_GPU=0"
 if "%SUB_LLM_PORT%"=="" set "SUB_LLM_PORT=9821"
 if "%SUB_LLM_CONTEXT%"=="" set "SUB_LLM_CONTEXT=8192"
 if "%SUB_LLM_REASONING_BUDGET%"=="" set "SUB_LLM_REASONING_BUDGET=96"
-if "%SUB_LLM_MODEL%"=="" set "SUB_LLM_MODEL=/home/sands12/.cache/huggingface/hub/models--LGAI-EXAONE--EXAONE-3.5-7.8B-Instruct-GGUF/snapshots/c618bf67338171760c72c3f109f2900cb7d79855/EXAONE-3.5-7.8B-Instruct-BF16.gguf"
+if "%SUB_LLM_MODEL%"=="" set "SUB_LLM_MODEL=/home/sands12/.cache/huggingface/hub/models--LGAI-EXAONE--EXAONE-3.5-7.8B-Instruct-GGUF/snapshots/c618bf67338171760c72c3f109f2900cb7d79855/EXAONE-3.5-7.8B-Instruct-Q8_0.gguf"
 
 if "%ROUTER_LLM_GPU%"=="" set "ROUTER_LLM_GPU=1"
 if "%ROUTER_LLM_PORT%"=="" set "ROUTER_LLM_PORT=9822"
