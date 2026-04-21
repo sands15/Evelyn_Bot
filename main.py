@@ -5067,6 +5067,12 @@ async def on_message(message: discord.Message):
     session_memory_key = make_session_memory_key(session_key, message.author.id)
     remember_session_followup_target(session_key, channel_id=message.channel.id)
 
+    prefix = get_guild_command_prefix(message.guild.id)
+    content_stripped = (message.content or "").lstrip()
+    if content_stripped.startswith(prefix):
+        await bot.process_commands(message)
+        return
+
     is_wake_word = contains_wake_word(message.content)
     is_reply = False
     is_active_session = is_session_active_for_user(session_key, message.author.id)
