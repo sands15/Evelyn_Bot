@@ -193,6 +193,7 @@ TTS_PREFETCH_CHUNKS = int(os.getenv("TTS_PREFETCH_CHUNKS", "2"))
 VOICE_STT_MAX_NEW_TOKENS = int(os.getenv("VOICE_STT_MAX_NEW_TOKENS", "160"))
 # 메인 LLM 한 번의 최대 응답 토큰 수.
 VOICE_LLM_MAX_TOKENS = int(os.getenv("VOICE_LLM_MAX_TOKENS", "320"))
+VOICE_LLM_FIRST_CHUNK_TIMEOUT_SEC = float(os.getenv("VOICE_LLM_FIRST_CHUNK_TIMEOUT_SEC", "8"))
 
 
 # 대화 히스토리에 유지할 총 턴 수 상한.

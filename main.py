@@ -3702,6 +3702,7 @@ async def stream_llm_text(
     debug_text: str | None = None,
     metrics: dict | None = None,
 ):
+    log_voice_stage(metrics, "프롬프트 구성 시작", extra=f"source={source} user_text_len={len(clean_text(user_text))}")
     messages, cognitive_state, _route = await prepare_llm_messages(
         user_text,
         guild_id=guild_id,
@@ -3714,6 +3715,7 @@ async def stream_llm_text(
         metrics=metrics,
     )
 
+    log_voice_stage(metrics, "프롬프트 구성 완료", extra=f"messages={len(messages)} source={source}")
     policy_response = policy_response_for_state(cognitive_state, source=source)
     gated_state = apply_ask_gating(cognitive_state, source=source) if cognitive_state is not None else None
     if policy_response:
@@ -3750,6 +3752,7 @@ async def stream_llm_text(
     timeout = aiohttp.ClientTimeout(total=120)
     session = await get_http_session()
     llm_started_at = time.monotonic()
+    log_voice_stage(metrics, "LLM 요청 시작", extra=f"messages={len(payload['messages'])} max_tokens={VOICE_LLM_MAX_TOKENS}")
 
     async with session.post(LLM_SERVER_URL, json=payload, timeout=timeout) as resp:
         if resp.status != 200:
@@ -4147,28 +4150,46 @@ async def ask_llm_and_speak_streaming(
     tts_session: TtsSessionClient | None = None
     feed_task: asyncio.Task[None] | None = None
     play_task: asyncio.Task[None] | None = None
+    llm_iter = llm_stream.__aiter__()
 
     async def continuing_llm_stream(upstream):
         async for piece in upstream:
             answer_parts.append(piece)
             yield piece
 
+    async def handle_llm_piece(delta_text: str) -> bool:
+        nonlocal tts_session, feed_task, play_task, startup_buffer
+        answer_parts.append(delta_text)
+        startup_buffer += delta_text
+        if tts_session is None and should_start_tts(startup_buffer):
+            tts_session, feed_task, play_task = await run_tts_turn_session(
+                vc=vc,
+                turn_id=metrics.get("meta", {}).get("turn_id") or current_turn_id(session_key),
+                voice=OMNIVOICE_VOICE,
+                initial_text=startup_buffer,
+                llm_text_stream=continuing_llm_stream(llm_iter),
+                session_key=session_key,
+                metrics=metrics,
+            )
+            startup_buffer = ""
+            return True
+        return False
+
     try:
-        async for delta_text in llm_stream:
-            answer_parts.append(delta_text)
-            startup_buffer += delta_text
-            if tts_session is None and should_start_tts(startup_buffer):
-                tts_session, feed_task, play_task = await run_tts_turn_session(
-                    vc=vc,
-                    turn_id=metrics.get("meta", {}).get("turn_id") or current_turn_id(session_key),
-                    voice=OMNIVOICE_VOICE,
-                    initial_text=startup_buffer,
-                    llm_text_stream=continuing_llm_stream(llm_stream),
-                    session_key=session_key,
-                    metrics=metrics,
-                )
-                startup_buffer = ""
-                break
+        try:
+            first_delta_text = await asyncio.wait_for(llm_iter.__anext__(), timeout=max(1.0, VOICE_LLM_FIRST_CHUNK_TIMEOUT_SEC))
+        except StopAsyncIteration:
+            first_delta_text = None
+        except asyncio.TimeoutError as exc:
+            log_voice_stage(metrics, "LLM 첫 chunk 타임아웃", extra=f"timeout_sec={VOICE_LLM_FIRST_CHUNK_TIMEOUT_SEC}")
+            raise RuntimeError(f"LLM 첫 응답 대기 시간 초과 ({VOICE_LLM_FIRST_CHUNK_TIMEOUT_SEC:.1f}s)") from exc
+
+        if first_delta_text is not None:
+            started_tts = await handle_llm_piece(first_delta_text)
+            if not started_tts:
+                async for delta_text in llm_iter:
+                    if await handle_llm_piece(delta_text):
+                        break
 
         if tts_session is None:
             final_answer = clean_text("".join(answer_parts))
@@ -4722,6 +4743,8 @@ async def _process_member_audio_impl(
     log_voice_stage(metrics, "응답 게이트 통과", extra=f"gate={gate_mode} user_text={strip_voice_wake_word(text)!r}")
 
     raw_user_text = strip_voice_wake_word(text)
+    wake_only_turn = not bool(clean_text(raw_user_text))
+    canned_wake_reply = "응, 왜 불렀어?"
     prompt_user_text = raw_user_text or "사용자가 너를 이름만 불렀다. 아주 짧고 자연스럽게 반응해라."
     history_user_text = raw_user_text or text
     topic_id = build_topic_id(history_user_text, session_topic_ids.get(session_key, ""))
@@ -4764,19 +4787,31 @@ async def _process_member_audio_impl(
                 print(f"💬 [Evelyn] {visible_text(answer_text)}")
 
             try:
-                answer = await ask_llm_and_speak_streaming(
-                    vc,
-                    prompt_user_text,
-                    guild_id=guild_id,
-                    on_final_answer=on_final_answer,
-                    session_key=session_key,
-                    room_key=room_key,
-                    person_key=person_key,
-                    session_memory_key=session_memory_key,
-                    source="voice",
-                    debug_text=history_user_text,
-                    metrics=metrics,
-                )
+                if wake_only_turn:
+                    answer = canned_wake_reply
+                    log_voice_stage(metrics, "웨이크 전용 턴 canned reply", extra=f"answer={answer!r}")
+                    if on_final_answer is not None:
+                        await on_final_answer(answer)
+                    await speak_answer(
+                        vc,
+                        answer,
+                        turn_id=accepted_turn_id,
+                        session_key=session_key,
+                    )
+                else:
+                    answer = await ask_llm_and_speak_streaming(
+                        vc,
+                        prompt_user_text,
+                        guild_id=guild_id,
+                        on_final_answer=on_final_answer,
+                        session_key=session_key,
+                        room_key=room_key,
+                        person_key=person_key,
+                        session_memory_key=session_memory_key,
+                        source="voice",
+                        debug_text=history_user_text,
+                        metrics=metrics,
+                    )
                 log_voice_stage(metrics, "LLM/TTS 완료", extra=f"answer_len={len(answer)}")
             except Exception as e:
                 print(f"❌ [LLM/TTS] {e}")
