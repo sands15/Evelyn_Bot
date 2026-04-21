@@ -1912,7 +1912,10 @@ class EvelynVoiceClient(discord.VoiceClient):
                 "last_voice_like_at": 0.0,
                 "utterance_started_at": None,
                 "packets": [],
+                "body_packets": [],
                 "preroll": deque(maxlen=self.preroll_packet_limit),
+                "last_onset_drop_at": 0.0,
+                "consecutive_onset_drops": 0,
             },
         )
 
@@ -1921,9 +1924,11 @@ class EvelynVoiceClient(discord.VoiceClient):
             if not state["in_utterance"]:
                 state["in_utterance"] = True
                 state["utterance_started_at"] = packet_info.get("received_at", now)
-                state["packets"] = list(state["preroll"])
+                preroll_snapshot = [] if state.get("last_onset_drop_at") else list(state["preroll"])
+                state["packets"] = list(preroll_snapshot)
+                state["body_packets"] = []
                 print(
-                    f"[VOICE STAGE] utterance_start ssrc={ssrc} seq={sequence} ts={timestamp} payload={payload_len} preroll={len(state['packets'])} media_q={self.media_queue.qsize()}"
+                    f"[VOICE STAGE] utterance_start ssrc={ssrc} seq={sequence} ts={timestamp} payload={payload_len} preroll={len(preroll_snapshot)} media_q={self.media_queue.qsize()}"
                 )
                 if self.media_queue.qsize() * 20 >= VOICE_TIMING_LOG_THRESHOLD_MS:
                     log.info(
@@ -1938,6 +1943,7 @@ class EvelynVoiceClient(discord.VoiceClient):
 
         if state["in_utterance"]:
             state["packets"].append(current_packet)
+            state["body_packets"].append(current_packet)
 
         state["preroll"].append(current_packet)
         self.decrypt_packet_count += 1
@@ -2092,6 +2098,7 @@ class EvelynVoiceClient(discord.VoiceClient):
                         )
 
                     utterance_packets = state["packets"].copy()
+                    utterance_body_packets = state.get("body_packets", []).copy()
 
                     try:
                         print(
@@ -2102,6 +2109,7 @@ class EvelynVoiceClient(discord.VoiceClient):
                                 "idx": self.utterance_count,
                                 "ssrc": ssrc,
                                 "packets": utterance_packets,
+                                "body_packets": utterance_body_packets,
                                 "utterance_started_at": utterance_started_at,
                                 "utterance_ended_at": now,
                                 "queued_at": asyncio.get_running_loop().time(),
@@ -2111,7 +2119,9 @@ class EvelynVoiceClient(discord.VoiceClient):
                         log.warning("utterance_queue is full, dropping utterance idx=%d ssrc=%d", self.utterance_count, ssrc)
 
                     state["packets"] = []
+                    state["body_packets"] = []
                     state["utterance_started_at"] = None
+                    state["preroll"].clear()
 
         except asyncio.CancelledError:
             pass
@@ -2124,6 +2134,7 @@ class EvelynVoiceClient(discord.VoiceClient):
                 idx = item["idx"]
                 ssrc = item["ssrc"]
                 packets = item["packets"]
+                body_packets = item.get("body_packets") or packets
 
                 packet_count = len(packets)
                 first_seq = packets[0]["sequence"] if packet_count else -1
@@ -2411,8 +2422,18 @@ class EvelynVoiceClient(discord.VoiceClient):
         normalized_packets.extend(self._drain_pending_inner_packets(ssrc=int(ssrc), user_id=int(user_id)))
         normalized_packets = self._ordered_unique_packets(normalized_packets)
         expanded_packets = self._expand_packets_with_fakes(normalized_packets)
-        first_timestamp = int(expanded_packets[0].get("timestamp") or 0) if expanded_packets else 0
-        for packet_index, p in enumerate(expanded_packets, start=1):
+
+        body_seq_keys = {
+            (int(p.get("sequence") or 0), int(p.get("timestamp") or 0))
+            for p in body_packets
+        }
+        onset_source_packets = [
+            p for p in expanded_packets
+            if (int(p.get("sequence") or 0), int(p.get("timestamp") or 0)) in body_seq_keys
+        ] or expanded_packets
+
+        first_timestamp = int(onset_source_packets[0].get("timestamp") or 0) if onset_source_packets else 0
+        for packet_index, p in enumerate(onset_source_packets, start=1):
             next_packet = expanded_packets[packet_index] if packet_index < len(expanded_packets) else None
             packet_timestamp = int(p.get("timestamp") or first_timestamp)
             onset_buffer_ms = max(onset_buffer_ms, max(0.0, ((packet_timestamp - first_timestamp) & 0xFFFFFFFF) / 48.0))
@@ -2499,8 +2520,8 @@ class EvelynVoiceClient(discord.VoiceClient):
         utterance_total_ms = self._latency_ms(utterance_started_at)
         queue_wait_ms = self._latency_ms(queued_at)
         first_packet_wait_ms = None
-        if packets:
-            first_received_at = packets[0].get("received_at")
+        if body_packets:
+            first_received_at = body_packets[0].get("received_at")
             if first_received_at is not None:
                 first_packet_wait_ms = (processing_started_at - float(first_received_at)) * 1000.0
 
@@ -2559,6 +2580,11 @@ class EvelynVoiceClient(discord.VoiceClient):
                 onset_pending_pcm.clear()
             else:
                 onset_dropped = True
+                state = self.utterance_states.get(int(ssrc))
+                if state is not None:
+                    state["last_onset_drop_at"] = asyncio.get_running_loop().time()
+                    state["consecutive_onset_drops"] = int(state.get("consecutive_onset_drops") or 0) + 1
+                    state["preroll"].clear()
                 onset_pending_pcm.clear()
 
         if self._should_log_timing(first_packet_wait_ms, queue_wait_ms, decrypt_ms, utterance_total_ms) or dave_warmup_skips > 0 or plc_packets > 0 or fec_packets > 0:
@@ -2670,7 +2696,17 @@ class EvelynVoiceClient(discord.VoiceClient):
                 segment_started_with_concealment,
                 first_clean_window_ok,
             )
+            state = self.utterance_states.get(int(ssrc))
+            if state is not None:
+                state["last_onset_drop_at"] = asyncio.get_running_loop().time()
+                state["consecutive_onset_drops"] = int(state.get("consecutive_onset_drops") or 0) + 1
+                state["preroll"].clear()
             return
+
+        state = self.utterance_states.get(int(ssrc))
+        if state is not None:
+            state["last_onset_drop_at"] = 0.0
+            state["consecutive_onset_drops"] = 0
 
         trim_ms, trim_meta = _estimate_leading_trim_ms(pcm_bytes)
         trim_ms, trim_meta = _adjust_trim_for_unstable_onset(
