@@ -3749,26 +3749,17 @@ async def stream_llm_text(
         "stream": True,
     }
 
-    timeout = aiohttp.ClientTimeout(total=120)
+    timeout = aiohttp.ClientTimeout(total=120, connect=10, sock_connect=10)
     session = await get_http_session()
     llm_started_at = time.monotonic()
+    first_chunk_timeout = max(1.0, VOICE_LLM_FIRST_CHUNK_TIMEOUT_SEC)
     log_voice_stage(metrics, "LLM 요청 시작", extra=f"messages={len(payload['messages'])} max_tokens={VOICE_LLM_MAX_TOKENS}")
 
-    async with session.post(LLM_SERVER_URL, json=payload, timeout=timeout) as resp:
-        if resp.status != 200:
-            error_text = await resp.text()
-            raise RuntimeError(f"LLM 서버 오류: {resp.status} / {error_text[:300]}")
-
-        content_type = resp.headers.get("Content-Type", "")
-        if "application/json" in content_type.lower():
-            data = await resp.json()
-            choices = data.get("choices", [])
-            answer = ""
-            if choices:
-                msg = choices[0].get("message", {})
-                answer = sanitize_model_output(msg.get("content", ""))
-            if not answer:
-                answer = await ask_llm_once(
+    async def fallback_after_stream_stall(reason: str) -> str:
+        log_voice_stage(metrics, "LLM 스트림 fallback", extra=reason)
+        try:
+            return await asyncio.wait_for(
+                ask_llm_once(
                     user_text,
                     guild_id=guild_id,
                     session_key=session_key,
@@ -3777,7 +3768,19 @@ async def stream_llm_text(
                     session_memory_key=session_memory_key,
                     source=source,
                     debug_text=debug_text,
-                )
+                ),
+                timeout=max(5.0, first_chunk_timeout + 4.0),
+            )
+        except Exception as fallback_exc:
+            log_voice_stage(metrics, "LLM fallback 실패", extra=repr(fallback_exc))
+            return fallback_answer_for(user_text)
+
+    request_ctx = session.post(LLM_SERVER_URL, json=payload, timeout=timeout)
+    try:
+        try:
+            resp = await asyncio.wait_for(request_ctx.__aenter__(), timeout=first_chunk_timeout)
+        except asyncio.TimeoutError:
+            answer = await fallback_after_stream_stall(f"response_headers_timeout={first_chunk_timeout:.1f}s")
             if on_first_chunk is not None:
                 on_first_chunk()
             yield answer
@@ -3785,36 +3788,80 @@ async def stream_llm_text(
                 metrics.setdefault("marks", {})["llm_done"] = (time.monotonic() - float(metrics.get("started_at", time.monotonic()))) * 1000.0
             return
 
-        first_chunk_seen = False
-        async for raw_line in resp.content:
-            line = raw_line.decode("utf-8", errors="ignore").strip()
-            if not line or line.startswith(":"):
-                continue
-            if line.startswith("data:"):
-                line = line[5:].strip()
-            if not line:
-                continue
-            if line == "[DONE]":
-                break
+        try:
+            if resp.status != 200:
+                error_text = await resp.text()
+                raise RuntimeError(f"LLM 서버 오류: {resp.status} / {error_text[:300]}")
 
-            try:
-                data = json.loads(line)
-            except json.JSONDecodeError:
-                continue
+            content_type = resp.headers.get("Content-Type", "")
+            log_voice_stage(metrics, "LLM 응답 헤더 도착", extra=f"status={resp.status} content_type={content_type}")
+            if "application/json" in content_type.lower():
+                data = await resp.json()
+                choices = data.get("choices", [])
+                answer = ""
+                if choices:
+                    msg = choices[0].get("message", {})
+                    answer = sanitize_model_output(msg.get("content", ""))
+                if not answer:
+                    answer = await fallback_after_stream_stall("json_response_without_answer")
+                if on_first_chunk is not None:
+                    on_first_chunk()
+                yield answer
+                if metrics is not None:
+                    metrics.setdefault("marks", {})["llm_done"] = (time.monotonic() - float(metrics.get("started_at", time.monotonic()))) * 1000.0
+                return
 
-            delta_text = extract_stream_delta_text(data)
-            if not delta_text:
-                continue
+            first_chunk_seen = False
+            line_iter = resp.content.__aiter__()
+            while True:
+                try:
+                    if not first_chunk_seen:
+                        raw_line = await asyncio.wait_for(line_iter.__anext__(), timeout=first_chunk_timeout)
+                    else:
+                        raw_line = await line_iter.__anext__()
+                except StopAsyncIteration:
+                    break
+                except asyncio.TimeoutError:
+                    answer = await fallback_after_stream_stall(f"first_chunk_timeout={first_chunk_timeout:.1f}s")
+                    if on_first_chunk is not None:
+                        on_first_chunk()
+                    yield answer
+                    if metrics is not None:
+                        metrics.setdefault("marks", {})["llm_done"] = (time.monotonic() - float(metrics.get("started_at", time.monotonic()))) * 1000.0
+                    return
 
-            if not first_chunk_seen and on_first_chunk is not None:
-                on_first_chunk()
-                first_chunk_seen = True
-                on_first_chunk = None
+                line = raw_line.decode("utf-8", errors="ignore").strip()
+                if not line or line.startswith(":"):
+                    continue
+                if line.startswith("data:"):
+                    line = line[5:].strip()
+                if not line:
+                    continue
+                if line == "[DONE]":
+                    break
 
-            yield delta_text
+                try:
+                    data = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
 
-    if metrics is not None:
-        metrics.setdefault("marks", {})["llm_http_ms"] = (time.monotonic() - llm_started_at) * 1000.0
+                delta_text = extract_stream_delta_text(data)
+                if not delta_text:
+                    continue
+
+                if not first_chunk_seen and on_first_chunk is not None:
+                    on_first_chunk()
+                    first_chunk_seen = True
+                    on_first_chunk = None
+                elif not first_chunk_seen:
+                    first_chunk_seen = True
+
+                yield delta_text
+        finally:
+            await request_ctx.__aexit__(None, None, None)
+    finally:
+        if metrics is not None:
+            metrics.setdefault("marks", {})["llm_http_ms"] = (time.monotonic() - llm_started_at) * 1000.0
 
 
 async def ask_llm_streaming(
@@ -4176,13 +4223,14 @@ async def ask_llm_and_speak_streaming(
         return False
 
     try:
+        outer_llm_timeout = max(1.0, VOICE_LLM_FIRST_CHUNK_TIMEOUT_SEC + 12.0)
         try:
-            first_delta_text = await asyncio.wait_for(llm_iter.__anext__(), timeout=max(1.0, VOICE_LLM_FIRST_CHUNK_TIMEOUT_SEC))
+            first_delta_text = await asyncio.wait_for(llm_iter.__anext__(), timeout=outer_llm_timeout)
         except StopAsyncIteration:
             first_delta_text = None
         except asyncio.TimeoutError as exc:
-            log_voice_stage(metrics, "LLM 첫 chunk 타임아웃", extra=f"timeout_sec={VOICE_LLM_FIRST_CHUNK_TIMEOUT_SEC}")
-            raise RuntimeError(f"LLM 첫 응답 대기 시간 초과 ({VOICE_LLM_FIRST_CHUNK_TIMEOUT_SEC:.1f}s)") from exc
+            log_voice_stage(metrics, "LLM 상위 watchdog 타임아웃", extra=f"timeout_sec={outer_llm_timeout:.1f}")
+            raise RuntimeError(f"LLM 응답 대기 시간 초과 ({outer_llm_timeout:.1f}s)") from exc
 
         if first_delta_text is not None:
             started_tts = await handle_llm_piece(first_delta_text)
