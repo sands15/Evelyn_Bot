@@ -1,5 +1,16 @@
+param(
+    [switch]$Supervised
+)
+
 $ErrorActionPreference = 'Stop'
 $projectRoot = Resolve-Path (Join-Path $PSScriptRoot '..')
+
+if (-not $Supervised) {
+    $supervisor = Join-Path $PSScriptRoot 'supervise_service.ps1'
+    & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $supervisor -Name 'TTS' -Workdir $projectRoot -Command "& '$PSCommandPath' -Supervised"
+    exit $LASTEXITCODE
+}
+
 Set-Location $projectRoot
 
 $profileDir = if ($env:OMNIVOICE_PROFILE_DIR) { $env:OMNIVOICE_PROFILE_DIR } else { Join-Path $projectRoot 'omnivoice_profiles' }
@@ -15,6 +26,7 @@ $env:CUDA_VISIBLE_DEVICES = $ttsGpu
 $env:OMNIVOICE_NUM_STEP = $ttsNumStep
 $env:OMNIVOICE_MAX_CONCURRENT = $ttsMaxConcurrent
 $env:OMNIVOICE_REQUEST_TIMEOUT_S = $ttsTimeout
+Write-Host "[Evelyn] TTS launch config gpu=$ttsGpu device=$ttsDevice num_step=$ttsNumStep max_concurrent=$ttsMaxConcurrent timeout=$ttsTimeout"
 if (-not (Test-Path $profileDir)) {
     New-Item -ItemType Directory -Path $profileDir -Force | Out-Null
 }

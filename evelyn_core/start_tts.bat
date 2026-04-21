@@ -18,10 +18,11 @@ if not defined WT_READY (
         set "WT_READY=1"
     )
 )
+set "SUPERVISOR=%~dp0supervise_service.ps1"
 if not defined WT_READY (
-    start "TTS" powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0start_tts.ps1"
+    start "TTS" powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%SUPERVISOR%" -Name "TTS" -Workdir "%~dp0.." -Command "& '%~dp0start_tts.ps1' -Supervised"
 ) else (
-    "%WT_EXE%" new-tab --title "TTS" powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0start_tts.ps1"
+    "%WT_EXE%" new-tab --title "TTS" powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%SUPERVISOR%" -Name "TTS" -Workdir "%~dp0.." -Command "& '%~dp0start_tts.ps1' -Supervised"
 )
 
 endlocal
