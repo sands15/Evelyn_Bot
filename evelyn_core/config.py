@@ -1,13 +1,6 @@
 import os
 from pathlib import Path
 
-
-def _env_flag(name: str, default: str = "false") -> bool:
-    value = os.getenv(name)
-    if value is None:
-        value = default
-    return str(value).strip().lower() in {"1", "true", "yes", "on"}
-
 # Evelyn 봇이 디스코드에 로그인할 때 쓰는 토큰.
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 
@@ -15,7 +8,7 @@ DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 # 사용자 응답용 메인 LLM 서버 엔드포인트.
 LLM_SERVER_URL = os.getenv("LLM_SERVER_URL", "http://127.0.0.1:9820/v1/chat/completions")
 # 메인 LLM 서버에 전달할 모델 이름.
-MODEL_NAME = os.getenv("LLM_MODEL_NAME", "gemma-4-E4B-it-Q5_K_M.gguf")
+MODEL_NAME = os.getenv("LLM_MODEL_NAME", "Qwen3-8B-Q4_K_M.gguf")
 
 
 # OmniVoice TTS 서버 주소.
@@ -32,20 +25,10 @@ OMNIVOICE_STREAM = os.getenv("OMNIVOICE_STREAM", "true").lower() == "true"
 OMNIVOICE_TIMEOUT_SEC = float(os.getenv("OMNIVOICE_TIMEOUT_SEC", "180"))
 
 
-# 메모리 업데이트에 쓰는 서브 LLM 서버 엔드포인트.
+# 메모리 업데이트와 cognitive 판단에 쓰는 서브 LLM 서버 엔드포인트.
 SUMMARY_LLM_URL = os.getenv("SUMMARY_LLM_URL", "http://127.0.0.1:9821/v1/chat/completions")
-# 요약/메모리 관리용 서브 모델 이름.
-SUMMARY_MODEL_NAME = os.getenv("SUMMARY_MODEL_NAME", "EXAONE-3.5-7.8B-Instruct-BF16.gguf")
-# 라우팅/인지 판단에 쓰는 router LLM 서버 엔드포인트.
-ROUTER_LLM_URL = os.getenv("ROUTER_LLM_URL", "http://127.0.0.1:9822/v1/chat/completions")
-# router 서버에 전달할 모델 이름.
-ROUTER_MODEL_NAME = os.getenv("ROUTER_MODEL_NAME", "gemma-4-E2B-it-UD-Q6_K_XL.gguf")
-# router LLM 사용 여부. false면 기존 heuristic/fallback만 사용한다.
-ROUTER_LLM_ENABLED = _env_flag("ROUTER_LLM_ENABLED", "true")
-# route 분류 한 번의 최대 토큰 수.
-ROUTER_ROUTE_MAX_TOKENS = int(os.getenv("ROUTER_ROUTE_MAX_TOKENS", "80"))
-# route 분류 타임아웃(초).
-ROUTER_ROUTE_TIMEOUT_SEC = float(os.getenv("ROUTER_ROUTE_TIMEOUT_SEC", "8"))
+# 요약/상황판단용 서브 모델 이름.
+SUMMARY_MODEL_NAME = os.getenv("SUMMARY_MODEL_NAME", "Qwen3.6-35B-A3B-UD-Q3_K_XL.gguf")
 # 길드별 메모리 파일을 저장하는 루트 디렉터리.
 MEMORY_ROOT = Path(os.getenv("BOT_MEMORY_DIR", str(Path(__file__).resolve().parent.parent / "bot_memory")))
 # 길드별 설정(prefix 등)을 저장하는 루트 디렉터리.
@@ -89,28 +72,20 @@ ASK_CONFIDENCE_THRESHOLD_TEXT = float(os.getenv("ASK_CONFIDENCE_THRESHOLD_TEXT",
 ASK_CONFIDENCE_THRESHOLD_VOICE = float(os.getenv("ASK_CONFIDENCE_THRESHOLD_VOICE", "0.00"))
 
 
-# Speech-to-text 모델 id. 기본값은 한국어 파인튜닝 Whisper 모델.
-STT_MODEL_NAME = os.getenv("STT_MODEL_NAME", "seastar105/whisper-medium-komixv2")
+# Speech-to-text 모델 id.
+STT_MODEL_NAME = os.getenv("STT_MODEL_NAME", "CohereLabs/cohere-transcribe-03-2026")
 # STT 디코딩에 강제로 넣는 언어 힌트.
 STT_LANGUAGE = os.getenv("STT_LANGUAGE", "ko")
 # STT 모델의 연산 dtype.
 STT_COMPUTE_TYPE = os.getenv("STT_COMPUTE_TYPE", "float16")
 # STT에 언어 프롬프트를 강제로 넣을지 여부.
-STT_FORCE_LANGUAGE = _env_flag("STT_FORCE_LANGUAGE", "true")
+STT_FORCE_LANGUAGE = os.getenv("STT_FORCE_LANGUAGE", "true").lower() == "true"
 # 디코더 프롬프트에서 문장부호를 강제할지 여부.
-STT_FORCE_PUNCTUATION = _env_flag("STT_FORCE_PUNCTUATION", "true")
-# STT/VAD/wake 경로를 원본 48k 대신 16k 준비 오디오로 통일할지 여부.
-STT_USE_RAW_48K = _env_flag("STT_USE_RAW_48K", "false")
-# 전체 길이가 이 값 이하인 음성은 STT 전에 바로 무시한다.
-VOICE_MIN_TOTAL_SEC = float(os.getenv("VOICE_MIN_TOTAL_SEC", "0.30"))
-VOICE_WAVEFORM_MIN_VOICED_MS = float(os.getenv("VOICE_WAVEFORM_MIN_VOICED_MS", "220"))
-VOICE_WAVEFORM_MIN_RUN_MS = float(os.getenv("VOICE_WAVEFORM_MIN_RUN_MS", "120"))
-VOICE_WAVEFORM_BODY_RMS_MIN = float(os.getenv("VOICE_WAVEFORM_BODY_RMS_MIN", "0.010"))
-VOICE_WAVEFORM_BODY_PEAK_MIN = float(os.getenv("VOICE_WAVEFORM_BODY_PEAK_MIN", "0.055"))
+STT_FORCE_PUNCTUATION = os.getenv("STT_FORCE_PUNCTUATION", "true").lower() == "true"
 
 
 # STT 전에 VAD 필터링을 켤지 여부.
-VAD_ENABLED = _env_flag("VAD_ENABLED", "true")
+VAD_ENABLED = os.getenv("VAD_ENABLED", "true").lower() == "true"
 # VAD 백엔드 선택값. 현재는 silero 또는 energy fallback 흐름을 기대.
 VAD_PROVIDER = os.getenv("VAD_PROVIDER", "silero").lower()
 # 경량 energy VAD fallback에서 쓰는 RMS 기준치.
@@ -130,7 +105,7 @@ VOICE_HUMAN_BAND_RATIO_MIN = float(os.getenv("VOICE_HUMAN_BAND_RATIO_MIN", "0.38
 # 저수준 환경음으로 볼 최대 RMS.
 VOICE_ENV_RMS_MAX = float(os.getenv("VOICE_ENV_RMS_MAX", "0.020"))
 # Silero가 음성으로 볼 confidence threshold.
-SILERO_VAD_THRESHOLD = float(os.getenv("SILERO_VAD_THRESHOLD", "0.50"))
+SILERO_VAD_THRESHOLD = float(os.getenv("SILERO_VAD_THRESHOLD", "0.30"))
 # Silero 타임스탬프 계산에 넣을 최소 speech 길이(ms).
 SILERO_MIN_SPEECH_MS = int(os.getenv("SILERO_MIN_SPEECH_MS", "32"))
 # Silero 세그먼트 분리에 필요한 최소 silence 길이(ms).
@@ -138,11 +113,11 @@ SILERO_MIN_SILENCE_MS = int(os.getenv("SILERO_MIN_SILENCE_MS", "0"))
 # Silero speech segment 앞뒤로 더해줄 pad(ms).
 SILERO_SPEECH_PAD_MS = int(os.getenv("SILERO_SPEECH_PAD_MS", "80"))
 # CPU에서 ONNX Silero 런타임을 우선 쓸지 여부.
-SILERO_VAD_ONNX = _env_flag("SILERO_VAD_ONNX", "true")
+SILERO_VAD_ONNX = os.getenv("SILERO_VAD_ONNX", "true").lower() == "true"
 
 
 # STT 전에 경량 denoise를 켤지 여부.
-DENOISE_ENABLED = _env_flag("DENOISE_ENABLED", "true")
+DENOISE_ENABLED = os.getenv("DENOISE_ENABLED", "true").lower() == "true"
 # 음성 정리를 위한 high-pass cutoff 주파수.
 DENOISE_HIGHPASS_HZ = float(os.getenv("DENOISE_HIGHPASS_HZ", "120"))
 # 노이즈 바닥값을 추정할 때 앞부분에서 볼 길이(초).
@@ -150,31 +125,9 @@ DENOISE_NOISE_FLOOR_SEC = float(os.getenv("DENOISE_NOISE_FLOOR_SEC", "0.20"))
 # 추정한 denoise gate threshold에 곱하는 배수.
 DENOISE_GATE_MULT = float(os.getenv("DENOISE_GATE_MULT", "1.35"))
 # wake probe STT에 잘라서 넣을 오디오 길이(초).
-WAKE_AUDIO_SEC = float(os.getenv("WAKE_AUDIO_SEC", "1.1"))
-# wake 2차 확인 단계에서 쓸 오디오 길이(초).
-WAKE_CONFIRM_AUDIO_SEC = float(os.getenv("WAKE_CONFIRM_AUDIO_SEC", "1.6"))
+WAKE_AUDIO_SEC = float(os.getenv("WAKE_AUDIO_SEC", "1.4"))
 # wake probe STT의 최대 토큰 수.
-WAKE_MAX_TOKENS = int(os.getenv("WAKE_MAX_TOKENS", "32"))
-# wake 2차 확인 STT 최대 토큰 수.
-WAKE_CONFIRM_MAX_TOKENS = int(os.getenv("WAKE_CONFIRM_MAX_TOKENS", "48"))
-# Whisper wake probe beam size.
-STT_WHISPER_WAKE_BEAM_SIZE = int(os.getenv("STT_WHISPER_WAKE_BEAM_SIZE", "1"))
-# Whisper wake probe best_of 값.
-STT_WHISPER_WAKE_BEST_OF = int(os.getenv("STT_WHISPER_WAKE_BEST_OF", "1"))
-# Whisper wake confirm beam size.
-STT_WHISPER_WAKE_CONFIRM_BEAM_SIZE = int(os.getenv("STT_WHISPER_WAKE_CONFIRM_BEAM_SIZE", "2"))
-# Whisper wake confirm best_of 값.
-STT_WHISPER_WAKE_CONFIRM_BEST_OF = int(os.getenv("STT_WHISPER_WAKE_CONFIRM_BEST_OF", "1"))
-# Whisper full STT beam size.
-STT_WHISPER_FULL_BEAM_SIZE = int(os.getenv("STT_WHISPER_FULL_BEAM_SIZE", "2"))
-# Whisper full STT best_of 값.
-STT_WHISPER_FULL_BEST_OF = int(os.getenv("STT_WHISPER_FULL_BEST_OF", "1"))
-# full STT 뒤에 더 무거운 2차 rescoring pass를 돌릴지 여부.
-STT_FULL_RESCORING_ENABLED = _env_flag("STT_FULL_RESCORING_ENABLED", "true")
-# 2차 full STT rescoring pass에서 쓸 beam size.
-STT_WHISPER_FULL_RESCORE_BEAM_SIZE = int(os.getenv("STT_WHISPER_FULL_RESCORE_BEAM_SIZE", "5"))
-# 2차 full STT rescoring pass에서 추가로 허용할 토큰 수.
-STT_FULL_RESCORE_EXTRA_TOKENS = int(os.getenv("STT_FULL_RESCORE_EXTRA_TOKENS", "96"))
+WAKE_MAX_TOKENS = int(os.getenv("WAKE_MAX_TOKENS", "48"))
 # wake word 정규화에 쓰는 fuzzy matching threshold.
 WAKE_FUZZY_THRESHOLD = float(os.getenv("WAKE_FUZZY_THRESHOLD", "0.72"))
 # wake가 잡혔을 때 너무 짧은 텍스트라도 남길 최소 길이.
@@ -183,18 +136,10 @@ WAKE_SHORT_TEXT_KEEP_LEN = int(os.getenv("WAKE_SHORT_TEXT_KEEP_LEN", "2"))
 TTS_EARLY_CHUNK_LEN = int(os.getenv("TTS_EARLY_CHUNK_LEN", "14"))
 # 너무 짧아도 강제로 early cut을 허용할 최소 길이.
 TTS_EARLY_CUT_MIN = int(os.getenv("TTS_EARLY_CUT_MIN", "6"))
-# 첫 청크 이후 streaming TTS가 최소한 이 길이는 넘겨야 잘게 쪼개지지 않는다.
-TTS_MIN_CHUNK_LEN = int(os.getenv("TTS_MIN_CHUNK_LEN", "14"))
-# 첫 청크에서 이런 짧은 필러/앞머리는 단독 청크로 보내지 않고 다음 내용과 합친다.
-TTS_SHORT_LEAD_IN_MAX_LEN = int(os.getenv("TTS_SHORT_LEAD_IN_MAX_LEN", "6"))
-# 재생 중 미리 합성해 둘 다음 청크 수.
-TTS_PREFETCH_CHUNKS = int(os.getenv("TTS_PREFETCH_CHUNKS", "2"))
 # full voice STT 한 번의 최대 토큰 수.
-VOICE_STT_MAX_NEW_TOKENS = int(os.getenv("VOICE_STT_MAX_NEW_TOKENS", "160"))
+VOICE_STT_MAX_NEW_TOKENS = int(os.getenv("VOICE_STT_MAX_NEW_TOKENS", "256"))
 # 메인 LLM 한 번의 최대 응답 토큰 수.
 VOICE_LLM_MAX_TOKENS = int(os.getenv("VOICE_LLM_MAX_TOKENS", "320"))
-VOICE_LLM_FIRST_CHUNK_TIMEOUT_SEC = float(os.getenv("VOICE_LLM_FIRST_CHUNK_TIMEOUT_SEC", "8"))
-VOICE_LLM_FALLBACK_TIMEOUT_SEC = float(os.getenv("VOICE_LLM_FALLBACK_TIMEOUT_SEC", "6"))
 
 
 # 대화 히스토리에 유지할 총 턴 수 상한.
@@ -227,40 +172,12 @@ VOICE_CONNECT_RETRIES = max(1, int(os.getenv("VOICE_CONNECT_RETRIES", "2")))
 VOICE_CONNECT_RETRY_DELAY_SEC = float(os.getenv("VOICE_CONNECT_RETRY_DELAY_SEC", "1.5"))
 # 이 시간(ms) 이상 느려질 때 상세 timing 로그 출력.
 VOICE_TIMING_LOG_THRESHOLD_MS = float(os.getenv("VOICE_TIMING_LOG_THRESHOLD_MS", "3000"))
-# 턴 단위 구조화 로그(JSON)를 출력할지 여부.
-TURN_TRACE_JSON_LOG = _env_flag("TURN_TRACE_JSON_LOG", "true")
-# 텍스트 세션이 활성 상태로 유지되는 기본 시간(초).
-ACTIVE_CONVERSATION_TEXT_SEC = float(os.getenv("ACTIVE_CONVERSATION_TEXT_SEC", "90"))
-# 텍스트에서 봇이 질문을 던졌을 때 follow-up 창을 더 길게 유지하는 시간(초).
-ACTIVE_CONVERSATION_TEXT_QUESTION_SEC = float(os.getenv("ACTIVE_CONVERSATION_TEXT_QUESTION_SEC", "150"))
-# 음성 세션이 활성 상태로 유지되는 기본 시간(초).
-ACTIVE_CONVERSATION_VOICE_SEC = float(os.getenv("ACTIVE_CONVERSATION_VOICE_SEC", "45"))
-# 음성에서 봇이 질문을 던졌을 때 follow-up 창을 더 길게 유지하는 시간(초).
-ACTIVE_CONVERSATION_VOICE_QUESTION_SEC = float(os.getenv("ACTIVE_CONVERSATION_VOICE_QUESTION_SEC", "75"))
-# await 상태일 때 후속 입력을 기다리는 추가 여유 시간(초).
-ACTIVE_CONVERSATION_AWAITING_REPLY_SEC = float(os.getenv("ACTIVE_CONVERSATION_AWAITING_REPLY_SEC", "180"))
-# wake 미검출 상태에서 짧은 환경음 후보를 full STT로 계속 넘길 최대 길이(초).
-VOICE_NO_WAKE_MAX_CONTINUE_SEC = float(os.getenv("VOICE_NO_WAKE_MAX_CONTINUE_SEC", "2.4"))
-# 직전 accepted turn 직후 tail fragment를 바로 버릴 최대 시간창(초).
-TAIL_FRAGMENT_WINDOW_SEC = float(os.getenv("TAIL_FRAGMENT_WINDOW_SEC", "1.2"))
-# tail fragment로 볼 최대 raw 길이(초).
-TAIL_FRAGMENT_MAX_RAW_SEC = float(os.getenv("TAIL_FRAGMENT_MAX_RAW_SEC", "0.9"))
-# tail fragment로 볼 최대 voiced 길이(ms).
-TAIL_FRAGMENT_MAX_VOICED_MS = float(os.getenv("TAIL_FRAGMENT_MAX_VOICED_MS", "260"))
-# tail fragment로 볼 최대 longest voiced run(ms).
-TAIL_FRAGMENT_MAX_LONGEST_MS = float(os.getenv("TAIL_FRAGMENT_MAX_LONGEST_MS", "170"))
-# 수신 원본/전처리 오디오를 디버그용으로 저장할지 여부.
-VOICE_DEBUG_SAVE_AUDIO = os.getenv("VOICE_DEBUG_SAVE_AUDIO", "true").lower() == "true"
-# 디버그 WAV 저장 루트 디렉터리.
-VOICE_DEBUG_AUDIO_DIR = os.getenv("VOICE_DEBUG_AUDIO_DIR", "debug_audio")
-# 저장 개수를 제한하기 위한 길드별 최대 utterance 수. 0 이하면 무제한.
-VOICE_DEBUG_MAX_FILES_PER_GUILD = int(os.getenv("VOICE_DEBUG_MAX_FILES_PER_GUILD", "200"))
 # 허용하는 wake word 변형 목록. 이후 정규화로 canonical 이름으로 맞춤.
 WAKE_WORDS = [
     w.strip()
     for w in os.getenv(
         "WAKE_WORDS",
-        "이블린,이브린,에블린,이블린아"
+        "이별인,이별링,이벨링,에벌링,이블린,이불린,이불링,이브린,이브링,입을린,입을링,이블닝,이블링,이별린,이벌린,에블린,에브린,에블링,에브링,에벌린,이벨린,이반린,불리읍,이블리,이별된,이벨리나,이별레인"
     ).split(",")
     if w.strip()
 ]
