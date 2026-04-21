@@ -4417,6 +4417,17 @@ async def _process_member_audio_impl(
         return
 
     guild_id = guild.id
+    speaker_name = member.display_name or str(member.id)
+    audio16k_ingress = prepare_stt_audio(pcm_bytes)
+    save_voice_debug_audio(
+        guild_id,
+        speaker_name,
+        pcm_bytes,
+        audio16k_ingress,
+        final_text="[INGRESS RAW]",
+        debug_meta=debug_meta,
+        save_stt_audio=True,
+    )
     await stop_active_tts_playback(guild_id, reason="new_user_audio")
     room_state = room_state_snapshot(room_session_key)
     owner_user_id = room_state.get("owner_user_id")
@@ -4456,7 +4467,6 @@ async def _process_member_audio_impl(
         audio_for_wake = audio16k
         stt_sampling_rate = TARGET_RATE
         wake_sampling_rate = TARGET_RATE
-    speaker_name = member.display_name or str(member.id)
     if audio16k.size == 0:
         register_drop_reason(metrics, "empty_audio", session_key=session_key)
         log_voice_stage(metrics, "오디오 비어있음")
@@ -4487,16 +4497,6 @@ async def _process_member_audio_impl(
         reasons = ",".join(str(r) for r in debug_meta.get("reasons", []))
         print(f"[UNSTABLE AUDIO] speaker={member.display_name} reasons={reasons}")
         log_voice_stage(metrics, "불안정 음성 감지", extra=f"reasons={reasons}")
-
-    save_voice_debug_audio(
-        guild_id,
-        speaker_name,
-        pcm_bytes,
-        audio16k,
-        final_text="[INGRESS RAW]",
-        debug_meta=debug_meta,
-        save_stt_audio=True,
-    )
 
     duration_sec = len(audio16k) / float(max(1, stt_sampling_rate))
     waveform_stats = compute_waveform_activity_stats(audio16k, sampling_rate=stt_sampling_rate)
