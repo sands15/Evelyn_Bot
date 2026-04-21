@@ -210,6 +210,7 @@ session_locks: dict[str, asyncio.Lock] = {}
 tts_lock = asyncio.Lock()
 active_tts_playbacks: dict[int, dict[str, Any]] = {}
 voice_debug_counts: dict[int, int] = {}
+voice_debug_stems: dict[tuple[int, str], str] = {}
 
 tts_warmup_started = False
 stt_processor: Optional[Any] = None
@@ -750,6 +751,8 @@ def save_voice_debug_audio(
     debug_meta: dict | None = None,
     save_stt_audio: bool = True,
     stt_meta: dict | None = None,
+    session_key: str | None = None,
+    stage_label: str | None = None,
 ) -> None:
     if not VOICE_DEBUG_SAVE_AUDIO:
         return
@@ -760,15 +763,20 @@ def save_voice_debug_audio(
         guild_dir = base_dir / str(guild_id)
         guild_dir.mkdir(parents=True, exist_ok=True)
 
-        idx = voice_debug_counts.get(guild_id, 0) + 1
-        voice_debug_counts[guild_id] = idx
-        stamp = time.strftime("%Y%m%d-%H%M%S")
-        speaker_label = _sanitize_debug_label(speaker)
-        stem = f"{stamp}_{idx:04d}_{speaker_label}"
+        stem_key = (guild_id, session_key or "")
+        stem = voice_debug_stems.get(stem_key)
+        if stem is None:
+            idx = voice_debug_counts.get(guild_id, 0) + 1
+            voice_debug_counts[guild_id] = idx
+            stamp = time.strftime("%Y%m%d-%H%M%S")
+            speaker_label = _sanitize_debug_label(speaker)
+            stem = f"{stamp}_{idx:04d}_{speaker_label}"
+            voice_debug_stems[stem_key] = stem
 
-        raw_path = guild_dir / f"{stem}_raw48k.wav"
-        stt_path = guild_dir / f"{stem}_stt16k.wav"
-        meta_path = guild_dir / f"{stem}.json"
+        suffix = f"_{stage_label}" if stage_label else ""
+        raw_path = guild_dir / f"{stem}{suffix}_raw48k.wav"
+        stt_path = guild_dir / f"{stem}{suffix}_stt16k.wav"
+        meta_path = guild_dir / f"{stem}{suffix}.json"
 
         with wave.open(str(raw_path), "wb") as wf:
             wf.setnchannels(CHANNELS)
@@ -798,6 +806,8 @@ def save_voice_debug_audio(
             "stt_seconds": round(audio16k.size / float(TARGET_RATE), 3),
             "wake_probe": wake_probe,
             "final_text": final_text,
+            "session_key": session_key,
+            "stage_label": stage_label,
         }
         if debug_meta is not None:
             meta["voice_receive"] = debug_meta
@@ -3742,6 +3752,24 @@ def split_first_response_and_followup(answer: str) -> tuple[str, str]:
     return first, followup
 
 
+def normalize_compare_text(text: str) -> str:
+    cleaned = clean_text(text).lower()
+    return "".join(ch for ch in cleaned if ch.isalnum() or ch.isspace()).strip()
+
+
+def is_duplicate_followup(first_response: str, followup_text: str) -> bool:
+    first_norm = normalize_compare_text(first_response)
+    follow_norm = normalize_compare_text(followup_text)
+    if not first_norm or not follow_norm:
+        return False
+    if follow_norm == first_norm:
+        return True
+    if follow_norm.startswith(first_norm):
+        remainder = follow_norm[len(first_norm):].strip()
+        return len(remainder) <= 8
+    return False
+
+
 async def build_first_response(
     user_text: str,
     *,
@@ -3843,7 +3871,10 @@ async def build_followup_response(
     first, followup = split_first_response_and_followup(answer)
     if clean_text(first) == clean_text(first_response):
         return followup
-    return clean_text(answer)
+    cleaned_answer = clean_text(answer)
+    if is_duplicate_followup(first_response, cleaned_answer):
+        return ""
+    return cleaned_answer
 
 
 async def ask_llm_once(
@@ -4239,6 +4270,8 @@ async def ask_llm_and_speak_streaming(
                 metrics=metrics,
             )
         )
+    if is_duplicate_followup(first_response, followup_text):
+        followup_text = ""
     answer = clean_text(f"{first_response} {followup_text}" if followup_text else first_response)
     log_voice_stage(metrics, "LLM 완료", extra=f"chars={len(answer)}", key="llm_done")
 
