@@ -1931,16 +1931,6 @@ def split_tts_sentences(
         working = rest
 
     if not force:
-        compact = clean_text(working)
-        emitted_so_far = emitted_chunks + len(chunks)
-        min_len = TTS_EARLY_CHUNK_LEN if emitted_so_far == 0 else TTS_MIN_CHUNK_LEN
-        if len(compact.replace(" ", "")) >= min_len:
-            cut = _find_streaming_tts_cut(working, min_len=max(TTS_EARLY_CUT_MIN, min_len))
-            if cut >= 0:
-                sentence = clean_tts_text(working[:cut])
-                if sentence and not (emitted_so_far == 0 and _should_defer_first_tts_chunk(sentence)):
-                    chunks.append(sentence)
-                    working = working[cut + 1 :].lstrip()
         return chunks, working
 
     tail = clean_tts_text(working)
