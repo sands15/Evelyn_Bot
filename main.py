@@ -85,20 +85,8 @@ ROUTER_ROUTE_TIMEOUT_SEC = float(globals().get("ROUTER_ROUTE_TIMEOUT_SEC", os.ge
 _ALLOWED_CONSOLE_PREFIXES = (
     "🎤 [",
     "💬 [Evelyn]",
-    "[VOICE LATENCY]",
-    "[VOICE STAGE]",
-    "[VOICE BOTTLENECK]",
-    "[TURN TRACE]",
     "[FULL STT ENTER]",
-    "[STT INPUT]",
-    "[STT RESAMPLE]",
-    "[STT DONE]",
-    "[STT LOAD]",
     "[STT RESULT]",
-    "[WAKE STT]",
-    "[STT]",
-    "[OPUS LOAD]",
-    "[STARTUP]",
 )
 _BOTTLENECK_TURN_TRACE_EVENTS = {
     "tts_interrupt",
@@ -655,9 +643,10 @@ def _trim_voice_debug_dir(guild_dir: Path) -> None:
 def log_turn_event(event: str, **payload) -> None:
     if not TURN_TRACE_JSON_LOG:
         return
+    if VOICE_CONSOLE_ONLY_STT_AND_REPLY:
+        return
     if (
-        VOICE_CONSOLE_ONLY_STT_AND_REPLY
-        and VOICE_BOTTLENECK_LOGS
+        VOICE_BOTTLENECK_LOGS
         and not VOICE_TRACE_ALL_EVENTS
         and event not in _BOTTLENECK_TURN_TRACE_EVENTS
     ):
