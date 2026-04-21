@@ -844,6 +844,24 @@ def should_ignore_short_transcription(
     return False
 
 
+def is_short_followup_candidate(
+    text: str,
+    pcm_bytes: bytes,
+    *,
+    wake_detected: bool = False,
+    owner_followup_active: bool = False,
+) -> bool:
+    text_n = normalize_voice_text(text)
+    if not owner_followup_active:
+        return False
+    if wake_detected:
+        return False
+    if not text_n:
+        return False
+    audio_sec = len(pcm_bytes) / (RATE * CHANNELS * 2)
+    return audio_sec < max(MIN_AUDIO_SEC * 1.5, 1.2) and len(text_n) < max(MIN_TRANSCRIBED_LEN + 2, 8)
+
+
 def should_reply_to_voice(
     guild_id: int,
     text: str,
@@ -4860,11 +4878,22 @@ async def _process_member_audio_impl(
         text = clean_text(text)
     print(f"[STT RESULT][full-final] text={text!r} committed={committed_text!r} wake_detected={wake_detected}")
 
+    short_followup_candidate = is_short_followup_candidate(
+        text,
+        pcm_bytes,
+        wake_detected=wake_detected,
+        owner_followup_active=owner_followup_active,
+    )
     if should_ignore_short_transcription(text, pcm_bytes, wake_detected=wake_detected):
-        print(f"[STT IGNORE] short_noise: {text!r}")
-        save_voice_debug_audio(guild_id, speaker_name, pcm_bytes, audio16k, wake_probe=wake_probe, final_text=text, debug_meta=debug_meta, stt_meta=stt_meta, session_key=session_key, stage_label="drop")
-        log_voice_stage(metrics, "짧은 STT 무시", extra=f"text={text!r}")
-        return
+        if short_followup_candidate:
+            print(f"[SHORT FOLLOWUP CANDIDATE] text={text!r}")
+            metrics.setdefault("meta", {})["short_followup_candidate"] = True
+            save_voice_debug_audio(guild_id, speaker_name, pcm_bytes, audio16k, wake_probe=wake_probe, final_text=f"[SHORT FOLLOWUP CANDIDATE] {text}", debug_meta=debug_meta, stt_meta=stt_meta, session_key=session_key, stage_label="drop")
+        else:
+            print(f"[STT IGNORE] short_noise: {text!r}")
+            save_voice_debug_audio(guild_id, speaker_name, pcm_bytes, audio16k, wake_probe=wake_probe, final_text=text, debug_meta=debug_meta, stt_meta=stt_meta, session_key=session_key, stage_label="drop")
+            log_voice_stage(metrics, "짧은 STT 무시", extra=f"text={text!r}")
+            return
 
     if not owner_followup_active:
         final_wake_alias = extract_leading_wake_alias(text)
