@@ -45,6 +45,12 @@ VOICE_LEADING_DROP_MAX_PACKETS = max(0, int(os.getenv("VOICE_LEADING_DROP_MAX_PA
 VOICE_START_STABLE_PACKETS = max(1, int(os.getenv("VOICE_START_STABLE_PACKETS", "3")))
 VOICE_GAP_CONCEAL_MAX = max(0, int(os.getenv("VOICE_GAP_CONCEAL_MAX", "6")))
 VOICE_LEADING_GOOD_DROP_PACKETS = max(0, int(os.getenv("VOICE_LEADING_GOOD_DROP_PACKETS", "3")))
+VOICE_ONSET_PRE_ROLL_MS = max(80.0, float(os.getenv("VOICE_ONSET_PRE_ROLL_MS", "180")))
+VOICE_ONSET_REORDER_WAIT_MS = max(40.0, float(os.getenv("VOICE_ONSET_REORDER_WAIT_MS", "120")))
+VOICE_ONSET_REORDER_BUFFER_PACKETS = max(VOICE_JITTER_BUFFER_PACKETS, int(os.getenv("VOICE_ONSET_REORDER_BUFFER_PACKETS", "6")))
+VOICE_ONSET_MIN_GOOD_PACKETS = max(1, int(os.getenv("VOICE_ONSET_MIN_GOOD_PACKETS", "3")))
+VOICE_ONSET_TRIM_CAP_MS = max(0.0, float(os.getenv("VOICE_ONSET_TRIM_CAP_MS", "40")))
+VOICE_ONSET_DROP_CONCEAL_RATIO = min(1.0, max(0.2, float(os.getenv("VOICE_ONSET_DROP_CONCEAL_RATIO", "0.5"))))
 VOICE_HARD_TRIM_MS = max(0.0, float(os.getenv("VOICE_HARD_TRIM_MS", "80")))
 VOICE_DYNAMIC_TRIM_ENABLE = os.getenv("VOICE_DYNAMIC_TRIM_ENABLE", "true").lower() == "true"
 VOICE_DYNAMIC_TRIM_MIN_MS = max(0.0, float(os.getenv("VOICE_DYNAMIC_TRIM_MIN_MS", "120")))
@@ -251,6 +257,17 @@ def _build_voice_receive_debug_meta(
     decrypt_ms: float | None,
     utterance_total_ms: float | None,
     pcm_bytes_len: int,
+    onset_buffer_ms: float | None,
+    onset_reorder_wait_ms: float | None,
+    onset_good_packets_before_decode: int,
+    onset_plc_count: int,
+    onset_fec_count: int,
+    onset_opus_fail_count: int,
+    onset_trim_ms: float | None,
+    onset_dropped: bool,
+    segment_started_with_concealment: bool,
+    segment_first_clean_decode_ms: float | None,
+    segment_decoder_reset_before_first_clean: bool,
 ) -> dict:
     reasons: list[str] = []
 
@@ -261,6 +278,7 @@ def _build_voice_receive_debug_meta(
     early8_peak = float(trim_meta.get("early8_peak") or 0.0)
     body_rms = float(trim_meta.get("body_rms") or 0.0)
     repair_trim_cap_ms = trim_meta.get("repair_trim_cap_ms")
+    onset_trim_cap_ms = trim_meta.get("onset_trim_cap_ms", onset_trim_ms)
 
     if not started_output:
         reasons.append("no_started_output")
@@ -290,6 +308,20 @@ def _build_voice_receive_debug_meta(
         reasons.append(f"repair_trim_cap_ms={int(round(float(repair_trim_cap_ms)))}")
     if (not short_clip) and early8_peak >= 0.98 and early8_rms > max(0.16, body_rms * 3.0) and body_rms < 0.010:
         reasons.append("front_burst_detected")
+    if onset_dropped:
+        reasons.append("onset_dropped")
+    if segment_started_with_concealment:
+        reasons.append("segment_started_with_concealment")
+    if segment_decoder_reset_before_first_clean:
+        reasons.append("decoder_reset_before_first_clean")
+    if onset_opus_fail_count > 0:
+        reasons.append(f"onset_opus_fail={onset_opus_fail_count}")
+    if onset_plc_count > 0:
+        reasons.append(f"onset_plc={onset_plc_count}")
+    if onset_fec_count > 0:
+        reasons.append(f"onset_fec={onset_fec_count}")
+    if onset_trim_cap_ms is not None:
+        reasons.append(f"onset_trim_cap_ms={int(round(float(onset_trim_cap_ms)))}")
     if first_packet_wait_ms is not None and first_packet_wait_ms >= 250.0:
         reasons.append(f"first_packet_wait_ms={int(round(first_packet_wait_ms))}")
 
@@ -328,12 +360,25 @@ def _build_voice_receive_debug_meta(
             "early8_peak": _round_metric(early8_peak, 4),
             "body_rms": _round_metric(body_rms, 4),
             "mode": str(trim_meta.get("mode") or "unknown"),
+            "onset_trim_cap_ms": _round_metric(onset_trim_cap_ms, 1),
         },
         "timing": {
             "first_packet_wait_ms": _round_metric(first_packet_wait_ms, 1),
             "queue_wait_ms": _round_metric(queue_wait_ms, 1),
             "decrypt_ms": _round_metric(decrypt_ms, 1),
             "utterance_total_ms": _round_metric(utterance_total_ms, 1),
+            "onset_buffer_ms": _round_metric(onset_buffer_ms, 1),
+            "onset_reorder_wait_ms": _round_metric(onset_reorder_wait_ms, 1),
+            "segment_first_clean_decode_ms": _round_metric(segment_first_clean_decode_ms, 1),
+        },
+        "onset": {
+            "good_packets_before_decode": int(onset_good_packets_before_decode),
+            "plc_packets": int(onset_plc_count),
+            "fec_packets": int(onset_fec_count),
+            "opus_fail": int(onset_opus_fail_count),
+            "dropped": bool(onset_dropped),
+            "segment_started_with_concealment": bool(segment_started_with_concealment),
+            "decoder_reset_before_first_clean": bool(segment_decoder_reset_before_first_clean),
         },
         "out_bytes": int(pcm_bytes_len),
     }
@@ -616,16 +661,21 @@ class EvelynVoiceClient(discord.VoiceClient):
                 "consecutive_failures": 0,
                 "last_sequence": None,
                 "last_decode_at": None,
+                "had_clean_decode": False,
+                "decoder_reset_before_first_clean": False,
             }
         return decoder
 
     def _reset_opus_decoder(self, ssrc: int, *, reason: str, sequence: int | None = None) -> Decoder:
+        previous_stats = self.opus_decoder_stats.get(int(ssrc)) or {}
         decoder = Decoder()
         self.opus_decoders[int(ssrc)] = decoder
         self.opus_decoder_stats[int(ssrc)] = {
             "consecutive_failures": 0,
             "last_sequence": sequence,
             "last_decode_at": asyncio.get_running_loop().time(),
+            "had_clean_decode": False,
+            "decoder_reset_before_first_clean": bool(previous_stats.get("decoder_reset_before_first_clean")) or not bool(previous_stats.get("had_clean_decode")),
         }
         log.info("OPUS DECODER RESET | ssrc=%d seq=%s reason=%s", int(ssrc), sequence, reason)
         return decoder
@@ -634,16 +684,18 @@ class EvelynVoiceClient(discord.VoiceClient):
         decoder = self._get_opus_decoder(int(ssrc))
         stats = self.opus_decoder_stats.setdefault(
             int(ssrc),
-            {"consecutive_failures": 0, "last_sequence": None, "last_decode_at": None},
+            {"consecutive_failures": 0, "last_sequence": None, "last_decode_at": None, "had_clean_decode": False, "decoder_reset_before_first_clean": False},
         )
         now = asyncio.get_running_loop().time()
+        had_clean_decode = bool(stats.get("had_clean_decode"))
         last_decode_at = stats.get("last_decode_at")
-        if last_decode_at is not None and (now - float(last_decode_at)) >= VOICE_DECODER_RESET_IDLE_SEC:
+        if had_clean_decode and last_decode_at is not None and (now - float(last_decode_at)) >= VOICE_DECODER_RESET_IDLE_SEC:
             decoder = self._reset_opus_decoder(int(ssrc), reason="idle_timeout", sequence=sequence)
             stats = self.opus_decoder_stats[int(ssrc)]
+            had_clean_decode = bool(stats.get("had_clean_decode"))
 
         last_sequence = stats.get("last_sequence")
-        if sequence is not None and last_sequence is not None:
+        if had_clean_decode and sequence is not None and last_sequence is not None:
             gap = self._sequence_gap(int(last_sequence), int(sequence))
             if gap >= VOICE_DECODER_RESET_GAP:
                 decoder = self._reset_opus_decoder(int(ssrc), reason=f"large_gap:{gap}", sequence=sequence)
@@ -652,9 +704,10 @@ class EvelynVoiceClient(discord.VoiceClient):
     def _note_decoder_success(self, ssrc: int, *, sequence: int | None = None) -> None:
         stats = self.opus_decoder_stats.setdefault(
             int(ssrc),
-            {"consecutive_failures": 0, "last_sequence": None, "last_decode_at": None},
+            {"consecutive_failures": 0, "last_sequence": None, "last_decode_at": None, "had_clean_decode": False, "decoder_reset_before_first_clean": False},
         )
         stats["consecutive_failures"] = 0
+        stats["had_clean_decode"] = True
         if sequence is not None:
             stats["last_sequence"] = int(sequence)
         stats["last_decode_at"] = asyncio.get_running_loop().time()
@@ -662,13 +715,13 @@ class EvelynVoiceClient(discord.VoiceClient):
     def _note_decoder_failure(self, ssrc: int, *, sequence: int | None = None, reason: str = "decode_fail") -> None:
         stats = self.opus_decoder_stats.setdefault(
             int(ssrc),
-            {"consecutive_failures": 0, "last_sequence": None, "last_decode_at": None},
+            {"consecutive_failures": 0, "last_sequence": None, "last_decode_at": None, "had_clean_decode": False, "decoder_reset_before_first_clean": False},
         )
         stats["consecutive_failures"] = int(stats.get("consecutive_failures") or 0) + 1
         if sequence is not None:
             stats["last_sequence"] = int(sequence)
         stats["last_decode_at"] = asyncio.get_running_loop().time()
-        if int(stats["consecutive_failures"]) >= VOICE_DECODER_RESET_FAILS:
+        if bool(stats.get("had_clean_decode")) and int(stats["consecutive_failures"]) >= VOICE_DECODER_RESET_FAILS:
             self._reset_opus_decoder(int(ssrc), reason=f"consecutive_failures:{reason}", sequence=sequence)
 
     def _choose_reorder_seq(self, ssrc: int) -> int | None:
@@ -724,8 +777,11 @@ class EvelynVoiceClient(discord.VoiceClient):
             last_released = state.get("last_released_seq")
             expected_seq = ((int(last_released) + 1) & 0xFFFF) if last_released is not None else chosen_seq
             oldest_seen_at = min(float(ts) for ts in first_seen_at.values()) if first_seen_at else now
-            waited_long_enough = (now - oldest_seen_at) >= (VOICE_JITTER_MAX_WAIT_MS / 1000.0)
-            have_window = len(buffer) >= VOICE_JITTER_BUFFER_PACKETS
+            onset_phase = last_released is None
+            reorder_wait_ms = VOICE_ONSET_REORDER_WAIT_MS if onset_phase else VOICE_JITTER_MAX_WAIT_MS
+            reorder_window_packets = VOICE_ONSET_REORDER_BUFFER_PACKETS if onset_phase else VOICE_JITTER_BUFFER_PACKETS
+            waited_long_enough = (now - oldest_seen_at) >= (reorder_wait_ms / 1000.0)
+            have_window = len(buffer) >= reorder_window_packets
             in_order_ready = chosen_seq == expected_seq
 
             if not flush_all and not in_order_ready and not have_window and not waited_long_enough:
@@ -1357,7 +1413,7 @@ class EvelynVoiceClient(discord.VoiceClient):
             )
         return None, resolved_user_id or user_id, f"unhandled_{reason}"
 
-    def _decode_fake_packet_pcm(self, *, idx: int, packet_index: int, packet: dict, next_packet: dict | None, silence_pcm: bytes) -> dict:
+    def _decode_fake_packet_pcm(self, *, idx: int, packet_index: int, packet: dict, next_packet: dict | None, silence_pcm: bytes, allow_concealment: bool = True) -> dict:
         result = {
             "pcm": b"",
             "failed": 0,
@@ -1372,7 +1428,7 @@ class EvelynVoiceClient(discord.VoiceClient):
         sequence = packet.get("sequence")
         decoder = self._prepare_decoder_for_packet(ssrc, sequence=sequence)
 
-        if packet.get("fec_candidate") and next_packet is not None and not next_packet.get("fake_packet"):
+        if allow_concealment and packet.get("fec_candidate") and next_packet is not None and not next_packet.get("fake_packet"):
             next_opus = next_packet.get("opus_packet") or b""
             if next_opus not in (b"", b"\xF8\xFF\xFE"):
                 try:
@@ -1394,33 +1450,37 @@ class EvelynVoiceClient(discord.VoiceClient):
                     )
                     return result
 
-        try:
-            pcm = decoder.decode(None, fec=False)
-        except Exception as exc:
-            self._note_decoder_failure(ssrc, sequence=sequence, reason=f"fake_plc:{type(exc).__name__}")
-            pcm = b""
-        if pcm:
-            result["pcm"] = pcm
-            result["plc"] = 1
-            result["status"] = "fake_plc"
-            self._note_decoder_success(ssrc, sequence=sequence)
-            log.debug(
-                "PACKET fake -> PLC | idx=%d pkt=%d seq=%s",
-                idx,
-                packet_index,
-                packet.get("sequence"),
-            )
-            return result
+        if allow_concealment:
+            try:
+                pcm = decoder.decode(None, fec=False)
+            except Exception as exc:
+                self._note_decoder_failure(ssrc, sequence=sequence, reason=f"fake_plc:{type(exc).__name__}")
+                pcm = b""
+            if pcm:
+                result["pcm"] = pcm
+                result["plc"] = 1
+                result["status"] = "fake_plc"
+                self._note_decoder_success(ssrc, sequence=sequence)
+                log.debug(
+                    "PACKET fake -> PLC | idx=%d pkt=%d seq=%s",
+                    idx,
+                    packet_index,
+                    packet.get("sequence"),
+                )
+                return result
 
         result["failed"] = 1
-        if OPUS_ERROR_TO_SILENCE:
+        if allow_concealment and OPUS_ERROR_TO_SILENCE:
             result["pcm"] = silence_pcm
             result["opus_silence_fill"] = 1
             result["status"] = "fake_silence"
             self._note_decoder_failure(ssrc, sequence=sequence, reason="fake_silence")
+        else:
+            result["status"] = "fake_hold"
+            self._note_decoder_failure(ssrc, sequence=sequence, reason="fake_hold")
         return result
 
-    def _decode_opus_packet_pcm(self, *, idx: int, packet_index: int, packet: dict, opus_packet: bytes, next_packet: dict | None, silence_pcm: bytes) -> dict:
+    def _decode_opus_packet_pcm(self, *, idx: int, packet_index: int, packet: dict, opus_packet: bytes, next_packet: dict | None, silence_pcm: bytes, allow_concealment: bool = True) -> dict:
         result = {
             "pcm": b"",
             "failed": 0,
@@ -1456,10 +1516,12 @@ class EvelynVoiceClient(discord.VoiceClient):
                     packet["timestamp"],
                     len(opus_packet),
                 )
-            if OPUS_ERROR_TO_SILENCE:
+            if allow_concealment and OPUS_ERROR_TO_SILENCE:
                 result["pcm"] = silence_pcm
                 result["opus_silence_fill"] = 1
                 result["status"] = "too_short_silence"
+            else:
+                result["status"] = "too_short_hold"
             return result
 
         try:
@@ -1484,7 +1546,7 @@ class EvelynVoiceClient(discord.VoiceClient):
                     e,
                 )
 
-        if next_packet is not None and not next_packet.get("fake_packet"):
+        if allow_concealment and next_packet is not None and not next_packet.get("fake_packet"):
             next_opus = next_packet.get("opus_packet") or b""
             if next_opus not in (b"", b"\xF8\xFF\xFE"):
                 try:
@@ -1506,31 +1568,33 @@ class EvelynVoiceClient(discord.VoiceClient):
                     )
                     return result
 
-        try:
-            pcm = decoder.decode(None, fec=False)
-        except Exception as exc:
-            self._note_decoder_failure(ssrc, sequence=sequence, reason=f"plc:{type(exc).__name__}")
-            pcm = b""
-        if pcm:
-            result["pcm"] = pcm
-            result["plc"] = 1
-            result["status"] = "decode_fail_plc"
-            self._note_decoder_success(ssrc, sequence=sequence)
-            log.debug(
-                "PACKET OPUS corrupt -> PLC | idx=%d pkt=%d seq=%d",
-                idx,
-                packet_index,
-                packet["sequence"],
-            )
-            return result
+        if allow_concealment:
+            try:
+                pcm = decoder.decode(None, fec=False)
+            except Exception as exc:
+                self._note_decoder_failure(ssrc, sequence=sequence, reason=f"plc:{type(exc).__name__}")
+                pcm = b""
+            if pcm:
+                result["pcm"] = pcm
+                result["plc"] = 1
+                result["status"] = "decode_fail_plc"
+                self._note_decoder_success(ssrc, sequence=sequence)
+                log.debug(
+                    "PACKET OPUS corrupt -> PLC | idx=%d pkt=%d seq=%d",
+                    idx,
+                    packet_index,
+                    packet["sequence"],
+                )
+                return result
 
-        if OPUS_ERROR_TO_SILENCE:
+        if allow_concealment and OPUS_ERROR_TO_SILENCE:
             result["pcm"] = silence_pcm
             result["opus_silence_fill"] = 1
             result["status"] = "decode_fail_silence"
             self._note_decoder_failure(ssrc, sequence=sequence, reason="decode_fail_silence")
             return result
 
+        result["status"] = "decode_fail_hold"
         return result
 
     def _maybe_insert_leading_silence(
@@ -1544,7 +1608,10 @@ class EvelynVoiceClient(discord.VoiceClient):
         pcm_chunks: list[bytes],
         silence_pcm: bytes,
         label: str,
+        allow_concealment: bool = True,
     ) -> tuple[bool, bool, int]:
+        if not allow_concealment:
+            return False, started_output, leading_bad_packets
         if started_output or leading_bad_packets >= VOICE_LEADING_DROP_MAX_PACKETS:
             return False, started_output, leading_bad_packets
 
@@ -1565,19 +1632,24 @@ class EvelynVoiceClient(discord.VoiceClient):
         pcm: bytes,
         started_output: bool,
         stable_voice_packets: int,
-        leading_good_drop_remaining: int,
+        onset_pending_pcm: list[bytes],
+        onset_buffer_ms: float,
         pcm_chunks: list[bytes],
-    ) -> tuple[bool, int, int, bool]:
+    ) -> tuple[bool, int, int]:
         stable_voice_packets += 1
-        if not started_output and stable_voice_packets < VOICE_START_STABLE_PACKETS:
-            return started_output, stable_voice_packets, leading_good_drop_remaining, False
-        if not started_output and leading_good_drop_remaining > 0:
-            leading_good_drop_remaining -= 1
-            return started_output, stable_voice_packets, leading_good_drop_remaining, False
+        if started_output:
+            pcm_chunks.append(pcm)
+            return started_output, stable_voice_packets, 1
+
+        onset_pending_pcm.append(pcm)
+        if stable_voice_packets < VOICE_ONSET_MIN_GOOD_PACKETS or onset_buffer_ms < VOICE_ONSET_PRE_ROLL_MS:
+            return started_output, stable_voice_packets, 0
 
         started_output = True
-        pcm_chunks.append(pcm)
-        return started_output, stable_voice_packets, leading_good_drop_remaining, True
+        pcm_chunks.extend(onset_pending_pcm)
+        appended = len(onset_pending_pcm)
+        onset_pending_pcm.clear()
+        return started_output, stable_voice_packets, appended
 
     def _route_packet_to_utterance_state(self, packet_info: dict, *, now: float) -> None:
         payload = packet_info["payload"]
@@ -1940,8 +2012,21 @@ class EvelynVoiceClient(discord.VoiceClient):
         fec_packets = 0
         leading_bad_packets = 0
         stable_voice_packets = 0
-        leading_good_drop_remaining = VOICE_LEADING_GOOD_DROP_PACKETS
         started_output = False
+        onset_pending_pcm: list[bytes] = []
+        onset_window_packets = max(1, int(round(VOICE_ONSET_PRE_ROLL_MS / 20.0)))
+        onset_buffer_ms = 0.0
+        onset_plc_count = 0
+        onset_fec_count = 0
+        onset_opus_fail_count = 0
+        onset_dropped = False
+        segment_started_with_concealment = False
+        segment_first_clean_decode_ms: float | None = None
+        decoder_stats = self.opus_decoder_stats.setdefault(
+            int(ssrc),
+            {"consecutive_failures": 0, "last_sequence": None, "last_decode_at": None, "had_clean_decode": False, "decoder_reset_before_first_clean": False},
+        )
+        decoder_stats["decoder_reset_before_first_clean"] = False
 
         normalized_packets: list[dict] = []
         for packet_index, p in enumerate(packets, start=1):
@@ -2029,8 +2114,13 @@ class EvelynVoiceClient(discord.VoiceClient):
         normalized_packets.extend(self._drain_pending_inner_packets(ssrc=int(ssrc), user_id=int(user_id)))
         normalized_packets = self._ordered_unique_packets(normalized_packets)
         expanded_packets = self._expand_packets_with_fakes(normalized_packets)
+        first_timestamp = int(expanded_packets[0].get("timestamp") or 0) if expanded_packets else 0
         for packet_index, p in enumerate(expanded_packets, start=1):
             next_packet = expanded_packets[packet_index] if packet_index < len(expanded_packets) else None
+            packet_timestamp = int(p.get("timestamp") or first_timestamp)
+            onset_buffer_ms = max(onset_buffer_ms, max(0.0, ((packet_timestamp - first_timestamp) & 0xFFFFFFFF) / 48.0))
+            onset_phase = (not started_output) and (packet_index <= onset_window_packets or onset_buffer_ms < VOICE_ONSET_PRE_ROLL_MS)
+            allow_onset_concealment = not onset_phase
             if p.get("fake_packet"):
                 decode_result = self._decode_fake_packet_pcm(
                     idx=idx,
@@ -2038,6 +2128,7 @@ class EvelynVoiceClient(discord.VoiceClient):
                     packet=p,
                     next_packet=next_packet,
                     silence_pcm=SILENCE_PCM,
+                    allow_concealment=allow_onset_concealment,
                 )
             else:
                 decode_result = self._decode_opus_packet_pcm(
@@ -2047,6 +2138,7 @@ class EvelynVoiceClient(discord.VoiceClient):
                     opus_packet=p.get("opus_packet") or b"",
                     next_packet=next_packet,
                     silence_pcm=SILENCE_PCM,
+                    allow_concealment=allow_onset_concealment,
                 )
 
             failed += int(decode_result.get("failed") or 0)
@@ -2055,6 +2147,10 @@ class EvelynVoiceClient(discord.VoiceClient):
             fec_packets += int(decode_result.get("fec") or 0)
             real_silence += int(decode_result.get("real_silence") or 0)
             opus_silence_fill += int(decode_result.get("opus_silence_fill") or 0)
+            if onset_phase:
+                onset_opus_fail_count += int(decode_result.get("opus_fail") or 0)
+                onset_plc_count += int(decode_result.get("plc") or 0)
+                onset_fec_count += int(decode_result.get("fec") or 0)
             pcm = decode_result.get("pcm") or b""
 
             if not pcm:
@@ -2067,21 +2163,27 @@ class EvelynVoiceClient(discord.VoiceClient):
                     pcm_chunks=pcm_chunks,
                     silence_pcm=SILENCE_PCM,
                     label=("LEADING fake packet" if p.get("fake_packet") else "LEADING OPUS fail"),
+                    allow_concealment=allow_onset_concealment,
                 )
                 if inserted_silence:
                     opus_silence_fill += 1
                     success += 1
                 continue
 
-            started_output, stable_voice_packets, leading_good_drop_remaining, appended = self._apply_output_packet_gating(
+            if segment_first_clean_decode_ms is None:
+                segment_first_clean_decode_ms = float(onset_buffer_ms)
+                segment_started_with_concealment = bool(onset_opus_fail_count or onset_plc_count or onset_fec_count)
+
+            started_output, stable_voice_packets, appended_count = self._apply_output_packet_gating(
                 pcm=pcm,
                 started_output=started_output,
                 stable_voice_packets=stable_voice_packets,
-                leading_good_drop_remaining=leading_good_drop_remaining,
+                onset_pending_pcm=onset_pending_pcm,
+                onset_buffer_ms=onset_buffer_ms,
                 pcm_chunks=pcm_chunks,
             )
-            if appended:
-                success += 1
+            if appended_count:
+                success += appended_count
 
         decrypt_ms = (asyncio.get_running_loop().time() - processing_started_at) * 1000.0
         utterance_total_ms = self._latency_ms(utterance_started_at)
@@ -2091,6 +2193,18 @@ class EvelynVoiceClient(discord.VoiceClient):
             first_received_at = packets[0].get("received_at")
             if first_received_at is not None:
                 first_packet_wait_ms = (processing_started_at - float(first_received_at)) * 1000.0
+
+        onset_conceal_total = onset_opus_fail_count + onset_plc_count + onset_fec_count
+        onset_drop_threshold = max(3, int((min(len(expanded_packets), onset_window_packets) * VOICE_ONSET_DROP_CONCEAL_RATIO) + 0.999))
+        if not started_output and onset_pending_pcm:
+            if segment_first_clean_decode_ms is not None and onset_conceal_total < onset_drop_threshold:
+                pcm_chunks.extend(onset_pending_pcm)
+                success += len(onset_pending_pcm)
+                started_output = True
+                onset_pending_pcm.clear()
+            else:
+                onset_dropped = True
+                onset_pending_pcm.clear()
 
         if self._should_log_timing(first_packet_wait_ms, queue_wait_ms, decrypt_ms, utterance_total_ms) or dave_warmup_skips > 0 or plc_packets > 0 or fec_packets > 0:
             log.info(
@@ -2118,6 +2232,17 @@ class EvelynVoiceClient(discord.VoiceClient):
             )
 
         if not pcm_chunks:
+            if onset_dropped:
+                log.warning(
+                    "ONSET DROP | idx=%d ssrc=%d onset_buffer_ms=%.1f onset_good=%d onset_opus_fail=%d onset_plc=%d onset_fec=%d",
+                    idx,
+                    ssrc,
+                    onset_buffer_ms,
+                    stable_voice_packets,
+                    onset_opus_fail_count,
+                    onset_plc_count,
+                    onset_fec_count,
+                )
             return
 
         if dave_success > 0 and user_id is not None:
@@ -2136,6 +2261,20 @@ class EvelynVoiceClient(discord.VoiceClient):
             first_packet_wait_ms=first_packet_wait_ms,
             pcm_bytes_len=len(pcm_bytes),
         )
+        trim_meta["onset_buffer_ms"] = float(onset_buffer_ms)
+        trim_meta["onset_good_packets_before_decode"] = int(stable_voice_packets)
+        trim_meta["onset_plc_count"] = int(onset_plc_count)
+        trim_meta["onset_fec_count"] = int(onset_fec_count)
+        trim_meta["onset_opus_fail_count"] = int(onset_opus_fail_count)
+        trim_meta["segment_started_with_concealment"] = bool(segment_started_with_concealment)
+        trim_meta["segment_first_clean_decode_ms"] = _round_metric(segment_first_clean_decode_ms, 1)
+        trim_meta["decoder_reset_before_first_clean"] = bool(decoder_stats.get("decoder_reset_before_first_clean"))
+        if onset_conceal_total > 0 and trim_ms > VOICE_ONSET_TRIM_CAP_MS:
+            trim_meta["onset_trim_cap_ms"] = float(VOICE_ONSET_TRIM_CAP_MS)
+            trim_ms = min(trim_ms, VOICE_ONSET_TRIM_CAP_MS)
+        if onset_dropped:
+            trim_meta["onset_trim_cap_ms"] = 0.0
+            trim_ms = 0.0
         trim_bytes = int(trim_ms * VOICE_PCM_BYTES_PER_MS)
         trim_bytes -= trim_bytes % 4
         min_keep_bytes = VOICE_PCM_BYTES_PER_MS * 120
@@ -2182,6 +2321,17 @@ class EvelynVoiceClient(discord.VoiceClient):
             decrypt_ms=decrypt_ms,
             utterance_total_ms=utterance_total_ms,
             pcm_bytes_len=len(pcm_bytes),
+            onset_buffer_ms=onset_buffer_ms,
+            onset_reorder_wait_ms=VOICE_ONSET_REORDER_WAIT_MS,
+            onset_good_packets_before_decode=stable_voice_packets,
+            onset_plc_count=onset_plc_count,
+            onset_fec_count=onset_fec_count,
+            onset_opus_fail_count=onset_opus_fail_count,
+            onset_trim_ms=trim_meta.get("onset_trim_cap_ms"),
+            onset_dropped=onset_dropped,
+            segment_started_with_concealment=segment_started_with_concealment,
+            segment_first_clean_decode_ms=segment_first_clean_decode_ms,
+            segment_decoder_reset_before_first_clean=bool(decoder_stats.get("decoder_reset_before_first_clean")),
         )
         if voice_debug_meta["unstable"]:
             log.warning(
