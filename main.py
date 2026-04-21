@@ -24,6 +24,7 @@ import aiohttp
 import numpy as np
 import torch
 import discord
+import discord.opus as discord_opus
 from discord.ext import commands
 
 try:
@@ -96,6 +97,8 @@ _ALLOWED_CONSOLE_PREFIXES = (
     "[STT RESULT]",
     "[WAKE STT]",
     "[STT]",
+    "[OPUS LOAD]",
+    "[STARTUP]",
 )
 _BOTTLENECK_TURN_TRACE_EVENTS = {
     "tts_request_started",
@@ -213,6 +216,8 @@ stt_processor: Optional[Any] = None
 stt_model: Optional[Any] = None
 stt_backend: Optional[str] = None
 http_session: Optional[aiohttp.ClientSession] = None
+startup_components_ready = False
+startup_components_task: Optional[asyncio.Task] = None
 
 room_last_voice_reply_at: dict[str, float] = {}
 last_bot_audio_end_at: dict[int, float] = {}
@@ -2612,6 +2617,59 @@ async def set_tts_presence(is_warming_up: bool) -> None:
         print("Presence 변경 실패:", repr(e))
 
 
+def ensure_opus_loaded() -> None:
+    if discord_opus.is_loaded():
+        print("[OPUS LOAD] already_loaded")
+        return
+    try:
+        discord_opus._load_default()
+    except Exception as e:
+        raise RuntimeError(f"Opus library load failed: {e!r}") from e
+    if not discord_opus.is_loaded():
+        raise RuntimeError("Opus library did not report loaded after default load")
+    print("[OPUS LOAD] done")
+
+
+def warmup_stt_sync() -> None:
+    print("[STARTUP] stt_warmup_begin")
+    silence = np.zeros(TARGET_RATE, dtype=np.float32)
+    try:
+        _ = transcribe_audio16k_sync(
+            silence,
+            max_new_tokens=min(32, max(8, WAKE_MAX_TOKENS)),
+            sampling_rate=TARGET_RATE,
+            stage="warmup",
+        )
+    except Exception as e:
+        raise RuntimeError(f"STT warmup failed: {e!r}") from e
+    print("[STARTUP] stt_warmup_done")
+
+
+async def initialize_startup_components() -> None:
+    print("[STARTUP] init_begin")
+    await set_tts_presence(True)
+    try:
+        await asyncio.to_thread(ensure_opus_loaded)
+        await asyncio.to_thread(get_stt_model)
+        await asyncio.to_thread(warmup_stt_sync)
+        await warmup_tts_server()
+        print("[STARTUP] init_done")
+    finally:
+        await set_tts_presence(False)
+
+
+async def ensure_startup_components_ready() -> None:
+    global startup_components_ready, startup_components_task
+    if startup_components_ready:
+        return
+    current = startup_components_task
+    if current is None or current.done():
+        startup_components_task = asyncio.create_task(initialize_startup_components())
+        current = startup_components_task
+    await current
+    startup_components_ready = True
+
+
 async def warmup_tts_server() -> None:
     global tts_warmup_started
 
@@ -3219,6 +3277,7 @@ async def connect_evelyn_voice_client(target_channel: discord.VoiceChannel) -> E
 
 
 async def ensure_listening_voice_client(guild: discord.Guild, target_channel: discord.VoiceChannel) -> Optional[EvelynVoiceClient]:
+    await ensure_startup_components_ready()
     vc = guild.voice_client
 
     if vc is not None and not isinstance(vc, EvelynVoiceClient):
@@ -3951,6 +4010,7 @@ async def stream_text_reply(
 # 음성 입력 처리
 # =========================================================
 async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes, debug_meta: dict | None = None) -> None:
+    await ensure_startup_components_ready()
     if member is None or member.bot:
         return
 
@@ -4554,6 +4614,11 @@ async def _process_member_audio_impl(
 async def on_ready():
     print(f"로그인 완료: {bot.user}")
     ensure_voice_worker_started()
+    try:
+        await ensure_startup_components_ready()
+    except Exception as e:
+        print(f"[STARTUP] init_fail err={e!r}")
+        raise
     for guild in bot.guilds:
         vc = guild.voice_client
         if isinstance(vc, EvelynVoiceClient):
@@ -4585,18 +4650,6 @@ async def on_voice_state_update(member, before, after):
         print(f"[VOICE STATE REARM] guild={guild.id} channel={getattr(target_channel, 'name', None)} listening={vc.is_listening()}")
     except Exception as e:
         print(f"[VOICE STATE REARM FAIL] guild={guild.id} err={e!r}")
-    await set_tts_presence(True)
-    try:
-        await asyncio.to_thread(get_stt_model)
-    except Exception as e:
-        print(f"STT 로드 실패: {e}")
-
-    try:
-        await warmup_tts_server()
-    except Exception as e:
-        print("OmniVoice 서버 준비 확인 실패:", repr(e))
-    finally:
-        await set_tts_presence(False)
 
 
 @bot.event

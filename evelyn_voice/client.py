@@ -2547,6 +2547,9 @@ class EvelynVoiceClient(discord.VoiceClient):
 
         if not pcm_chunks:
             if onset_dropped:
+                print(
+                    f"[VOICE STAGE] onset_drop idx={idx} ssrc={ssrc} onset_buffer_ms={onset_buffer_ms:.1f} onset_good={stable_voice_packets} opus_fail={onset_opus_fail_count} plc={onset_plc_count} fec={onset_fec_count}"
+                )
                 log.warning(
                     "ONSET DROP | idx=%d ssrc=%d onset_buffer_ms=%.1f onset_good=%d onset_opus_fail=%d onset_plc=%d onset_fec=%d",
                     idx,
@@ -2556,6 +2559,10 @@ class EvelynVoiceClient(discord.VoiceClient):
                     onset_opus_fail_count,
                     onset_plc_count,
                     onset_fec_count,
+                )
+            else:
+                print(
+                    f"[VOICE STAGE] no_pcm_chunks idx={idx} ssrc={ssrc} packets={len(packets)} expanded={len(expanded_packets)} success={success} failed={failed} dave_ok={dave_success} outer_fail={outer_fail} dave_fail={dave_fail} opus_fail={opus_fail} plc={plc_packets} fec={fec_packets} started_output={started_output}"
                 )
             return
 
@@ -2578,6 +2585,9 @@ class EvelynVoiceClient(discord.VoiceClient):
         )
         if not segment_passes_onset:
             onset_dropped = True
+            print(
+                f"[VOICE STAGE] onset_gate_drop idx={idx} ssrc={ssrc} packet_ok={onset_packet_ok} clean_run={onset_clean_run_max} failed_ratio={onset_failed_ratio:.3f} opus_fail={onset_opus_fail_count} plc={onset_plc_count} fec={onset_fec_count} robotic={onset_robotic} artifact={onset_artifact_score:.2f} vad={onset_vad_prob:.2f} rms={onset_rms:.4f}"
+            )
             log.warning(
                 "ONSET GATE DROP | idx=%d ssrc=%d packet_ok=%s clean_run=%d failed_ratio=%.3f opus_fail=%d plc=%d fec=%d robotic=%s artifact=%.2f vad=%.2f rms=%.4f",
                 idx,
