@@ -3554,7 +3554,7 @@ async def ask_llm_once(
     debug_text: str | None = None,
     metrics: dict | None = None,
 ) -> str:
-    log_voice_stage(metrics, "LLM fallback 단발 요청 시작", extra=f"source={source} user_text_len={len(clean_text(user_text))}")
+    log_voice_stage(metrics, "LLM 단발 요청 시작", extra=f"source={source} user_text_len={len(clean_text(user_text))}")
     messages, cognitive_state, _route = await prepare_llm_messages(
         user_text,
         guild_id=guild_id,
@@ -3578,7 +3578,7 @@ async def ask_llm_once(
                 answer_text=policy_response,
                 user_text=user_text,
             )
-        log_voice_stage(metrics, "LLM fallback 단발 요청 성공", extra=f"policy_len={len(policy_response)}")
+        log_voice_stage(metrics, "LLM 단발 요청 성공", extra=f"policy_len={len(policy_response)}")
         return policy_response
 
     guided_user_text = user_text
@@ -3606,7 +3606,7 @@ async def ask_llm_once(
         choices = data.get("choices", [])
         if not choices:
             answer = fallback_answer_for(user_text)
-            log_voice_stage(metrics, "LLM fallback 단발 요청 성공", extra=f"fallback_len={len(answer)}")
+            log_voice_stage(metrics, "LLM 단발 요청 성공", extra=f"fallback_len={len(answer)}")
             return answer
 
         choice = choices[0]
@@ -3616,12 +3616,12 @@ async def ask_llm_once(
         finish_reason = choice.get("finish_reason", "")
 
         if answer:
-            log_voice_stage(metrics, "LLM fallback 단발 요청 성공", extra=f"answer_len={len(answer)}")
+            log_voice_stage(metrics, "LLM 단발 요청 성공", extra=f"answer_len={len(answer)}")
             return answer
 
         extracted = extract_answer_from_reasoning(reasoning, user_text)
         if extracted:
-            log_voice_stage(metrics, "LLM fallback 단발 요청 성공", extra=f"reasoning_len={len(extracted)}")
+            log_voice_stage(metrics, "LLM 단발 요청 성공", extra=f"reasoning_len={len(extracted)}")
             return extracted
 
         print(f"LLM 응답 본문이 비어 있어서 fallback 사용, finish_reason={finish_reason}")
@@ -4233,37 +4233,17 @@ async def ask_llm_and_speak_streaming(
         metrics.setdefault("started_at", time.monotonic())
         metrics.setdefault("marks", {})
         metrics.setdefault("meta", {})
-    metrics.setdefault("llm_first_chunk_logged", False)
     metrics.setdefault("tts_request_logged", False)
     metrics.setdefault("tts_response_headers_logged", False)
     metrics.setdefault("tts_first_byte_logged", False)
     metrics.setdefault("tts_first_frame_logged", False)
     metrics.setdefault("first_packet_sent_logged", False)
-    log_voice_stage(metrics, "LLM/TTS 파이프라인 시작", extra=f"source={source}")
-    sentence_queue: asyncio.Queue[str | None] = asyncio.Queue()
-    playback_task = asyncio.create_task(
-        stream_tts_sentences(
-            vc,
-            sentence_queue,
-            metrics=metrics,
-            turn_id=metrics.get("meta", {}).get("turn_id"),
-            session_key=session_key,
-        )
-    )
-    llm_error: Exception | None = None
-    answer = ""
+    log_voice_stage(metrics, "LLM/TTS 파이프라인 시작", extra=f"source={source} mode=non_stream_full_answer")
 
-    async def enqueue_sentence(sentence: str) -> None:
-        sentence = clean_tts_text(sentence)
-        if sentence:
-            await sentence_queue.put(sentence)
-
-    try:
-        answer = await ask_llm_streaming(
+    answer = clean_text(
+        await ask_llm_once(
             user_text,
             guild_id=guild_id,
-            on_sentence=enqueue_sentence,
-            on_first_chunk=lambda: log_voice_latency(metrics, "llm_first_chunk_logged", "LLM 첫 chunk 시간"),
             session_key=session_key,
             room_key=room_key,
             person_key=person_key,
@@ -4272,26 +4252,25 @@ async def ask_llm_and_speak_streaming(
             debug_text=debug_text,
             metrics=metrics,
         )
-        log_voice_stage(metrics, "LLM 완료", extra=f"chars={len(answer)}", key="llm_done")
-        answer = clean_text(answer)
-        if answer and on_final_answer is not None:
-            await on_final_answer(answer)
-    except Exception as e:
-        llm_error = e
-        answer = ""
-    finally:
-        await sentence_queue.put(None)
+    )
+    log_voice_stage(metrics, "LLM 완료", extra=f"chars={len(answer)}", key="llm_done")
 
-    try:
-        await playback_task
-    except Exception:
-        if llm_error is None:
-            raise
+    if not answer:
+        answer = fallback_answer_for(user_text)
+        log_voice_stage(metrics, "LLM canned reply 사용", extra=f"reason=empty_non_stream_answer len={len(answer)}")
 
-    if llm_error is not None:
-        raise llm_error
+    if answer and on_final_answer is not None:
+        await on_final_answer(answer)
 
-    log_voice_bottleneck_summary(metrics, label="voice_reply", extra=f"source={source} chars={len(answer)}")
+    log_voice_stage(metrics, "전체 답변 확보 후 TTS 시작", extra=f"chars={len(answer)}")
+    await speak_answer(
+        vc,
+        answer,
+        turn_id=metrics.get("meta", {}).get("turn_id") or current_turn_id(session_key),
+        session_key=session_key,
+    )
+
+    log_voice_bottleneck_summary(metrics, label="voice_reply", extra=f"source={source} chars={len(answer)} mode=non_stream_full_answer")
     return answer
 
 
