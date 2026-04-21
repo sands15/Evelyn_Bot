@@ -3677,6 +3677,123 @@ def fallback_answer_for(user_text: str) -> str:
     return "응, 잠깐만."
 
 
+def split_first_response_and_followup(answer: str) -> tuple[str, str]:
+    cleaned = clean_text(answer)
+    if not cleaned:
+        return "", ""
+    sentences, _tail = split_tts_sentences(cleaned, force=True)
+    sentences = [clean_tts_text(sentence) for sentence in sentences if clean_tts_text(sentence)]
+    if not sentences:
+        return cleaned, ""
+    first = sentences[0]
+    followup = clean_text(" ".join(sentences[1:])) if len(sentences) > 1 else ""
+    return first, followup
+
+
+async def build_first_response(
+    user_text: str,
+    *,
+    guild_id: int | None = None,
+    session_key: str | None = None,
+    room_key: str | None = None,
+    person_key: str | None = None,
+    session_memory_key: str | None = None,
+    source: str = "text",
+    debug_text: str | None = None,
+    metrics: dict | None = None,
+) -> tuple[str, str, dict | None]:
+    log_voice_stage(metrics, "1단계 first response 생성 시작", extra=f"source={source} user_text_len={len(clean_text(user_text))}")
+    messages, cognitive_state, _route = await prepare_llm_messages(
+        user_text,
+        guild_id=guild_id,
+        session_key=session_key,
+        room_key=room_key,
+        person_key=person_key,
+        session_memory_key=session_memory_key,
+        source=source,
+        debug_text=debug_text,
+        metrics=metrics,
+    )
+
+    policy_response = policy_response_for_state(cognitive_state, source=source)
+    gated_state = apply_ask_gating(cognitive_state, source=source) if cognitive_state is not None else None
+    if policy_response:
+        return policy_response, "", gated_state
+
+    guided_user_text = user_text
+    if gated_state and gated_state.get("action") == "ask" and gated_state.get("question_for_user"):
+        guided_user_text = clean_text(str(gated_state.get("question_for_user", "")))
+    final_user_text = f"{guided_user_text}\n\n{build_main_response_guidance(cognitive_state, source=source)}"
+
+    payload = {
+        "model": MODEL_NAME,
+        "messages": messages + [{"role": "user", "content": final_user_text}],
+        "temperature": 0.1,
+        "max_tokens": min(64, VOICE_LLM_MAX_TOKENS),
+        "stream": False,
+    }
+
+    timeout = aiohttp.ClientTimeout(total=120)
+    session = await get_http_session()
+
+    async with session.post(LLM_SERVER_URL, json=payload, timeout=timeout) as resp:
+        if resp.status != 200:
+            error_text = await resp.text()
+            raise RuntimeError(f"LLM 서버 오류: {resp.status} / {error_text[:300]}")
+
+        data = await resp.json()
+        choices = data.get("choices", [])
+        if not choices:
+            answer = fallback_answer_for(user_text)
+            return answer, "", gated_state
+
+        choice = choices[0]
+        msg = choice.get("message", {})
+        answer = sanitize_model_output(msg.get("content", ""))
+        reasoning = msg.get("reasoning_content", "")
+        finish_reason = choice.get("finish_reason", "")
+
+        if not answer:
+            answer = extract_answer_from_reasoning(reasoning, user_text)
+        if not answer:
+            print(f"LLM 1단계 응답 본문이 비어 있어서 fallback 사용, finish_reason={finish_reason}")
+            answer = fallback_answer_for(user_text)
+
+        first_response, followup_seed = split_first_response_and_followup(answer)
+        return first_response or answer, followup_seed, gated_state
+
+
+async def build_followup_response(
+    user_text: str,
+    first_response: str,
+    *,
+    guild_id: int | None = None,
+    session_key: str | None = None,
+    room_key: str | None = None,
+    person_key: str | None = None,
+    session_memory_key: str | None = None,
+    source: str = "text",
+    debug_text: str | None = None,
+    metrics: dict | None = None,
+) -> str:
+    log_voice_stage(metrics, "2단계 followup 생성 시작", extra=f"source={source} first_len={len(clean_text(first_response))}")
+    answer = await ask_llm_once(
+        user_text,
+        guild_id=guild_id,
+        session_key=session_key,
+        room_key=room_key,
+        person_key=person_key,
+        session_memory_key=session_memory_key,
+        source=source,
+        debug_text=debug_text,
+        metrics=metrics,
+    )
+    first, followup = split_first_response_and_followup(answer)
+    if clean_text(first) == clean_text(first_response):
+        return followup
+    return clean_text(answer)
+
+
 async def ask_llm_once(
     user_text: str,
     guild_id: int | None = None,
@@ -4036,26 +4153,42 @@ async def ask_llm_and_speak_streaming(
     metrics.setdefault("tts_first_byte_logged", False)
     metrics.setdefault("tts_first_frame_logged", False)
     metrics.setdefault("first_packet_sent_logged", False)
-    log_voice_stage(metrics, "LLM/TTS 파이프라인 시작", extra=f"source={source} mode=full_answer_sentence_prefetch")
+    log_voice_stage(metrics, "LLM/TTS 파이프라인 시작", extra=f"source={source} mode=first_then_followup")
 
-    answer = clean_text(
-        await ask_llm_once(
-            user_text,
-            guild_id=guild_id,
-            session_key=session_key,
-            room_key=room_key,
-            person_key=person_key,
-            session_memory_key=session_memory_key,
-            source=source,
-            debug_text=debug_text,
-            metrics=metrics,
-        )
+    first_response, followup_seed, gated_state = await build_first_response(
+        user_text,
+        guild_id=guild_id,
+        session_key=session_key,
+        room_key=room_key,
+        person_key=person_key,
+        session_memory_key=session_memory_key,
+        source=source,
+        debug_text=debug_text,
+        metrics=metrics,
     )
-    log_voice_stage(metrics, "LLM 완료", extra=f"chars={len(answer)}", key="llm_done")
+    first_response = clean_text(first_response)
+    if not first_response:
+        first_response = fallback_answer_for(user_text)
+    log_voice_stage(metrics, "1단계 응답 완료", extra=f"chars={len(first_response)}")
 
-    if not answer:
-        answer = fallback_answer_for(user_text)
-        log_voice_stage(metrics, "LLM canned reply 사용", extra=f"reason=empty_non_stream_answer len={len(answer)}")
+    followup_text = clean_text(followup_seed)
+    if not followup_text and (gated_state or {}).get("action") == "answer":
+        followup_text = clean_text(
+            await build_followup_response(
+                user_text,
+                first_response,
+                guild_id=guild_id,
+                session_key=session_key,
+                room_key=room_key,
+                person_key=person_key,
+                session_memory_key=session_memory_key,
+                source=source,
+                debug_text=debug_text,
+                metrics=metrics,
+            )
+        )
+    answer = clean_text(f"{first_response} {followup_text}" if followup_text else first_response)
+    log_voice_stage(metrics, "LLM 완료", extra=f"chars={len(answer)}", key="llm_done")
 
     if answer and on_final_answer is not None:
         await on_final_answer(answer)
@@ -4098,7 +4231,7 @@ async def ask_llm_and_speak_streaming(
     log_voice_bottleneck_summary(
         metrics,
         label="voice_turn",
-        extra=f"source={source} chars={len(answer)} mode=full_answer_sentence_prefetch sentences={len(sentences)}",
+        extra=f"source={source} chars={len(answer)} mode=first_then_followup sentences={len(sentences)}",
         event_name="voice_turn_summary",
     )
     return answer
