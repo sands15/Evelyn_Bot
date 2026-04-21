@@ -8,7 +8,7 @@ DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 # 사용자 응답용 메인 LLM 서버 엔드포인트.
 LLM_SERVER_URL = os.getenv("LLM_SERVER_URL", "http://127.0.0.1:9820/v1/chat/completions")
 # 메인 LLM 서버에 전달할 모델 이름.
-MODEL_NAME = os.getenv("LLM_MODEL_NAME", "Qwen3-8B-Q4_K_M.gguf")
+MODEL_NAME = os.getenv("LLM_MODEL_NAME", "gemma-4-E4B-it-Q5_K_M.gguf")
 
 
 # OmniVoice TTS 서버 주소.
@@ -28,7 +28,7 @@ OMNIVOICE_TIMEOUT_SEC = float(os.getenv("OMNIVOICE_TIMEOUT_SEC", "180"))
 # 메모리 업데이트와 cognitive 판단에 쓰는 서브 LLM 서버 엔드포인트.
 SUMMARY_LLM_URL = os.getenv("SUMMARY_LLM_URL", "http://127.0.0.1:9821/v1/chat/completions")
 # 요약/상황판단용 서브 모델 이름.
-SUMMARY_MODEL_NAME = os.getenv("SUMMARY_MODEL_NAME", "Qwen3.6-35B-A3B-UD-Q3_K_XL.gguf")
+SUMMARY_MODEL_NAME = os.getenv("SUMMARY_MODEL_NAME", "EXAONE-3.5-7.8B-Instruct-Q8_0.gguf")
 # 길드별 메모리 파일을 저장하는 루트 디렉터리.
 MEMORY_ROOT = Path(os.getenv("BOT_MEMORY_DIR", str(Path(__file__).resolve().parent.parent / "bot_memory")))
 # 길드별 설정(prefix 등)을 저장하는 루트 디렉터리.
@@ -104,6 +104,10 @@ VOICE_ENV_FLATNESS_MAX = float(os.getenv("VOICE_ENV_FLATNESS_MAX", "0.72"))
 VOICE_HUMAN_BAND_RATIO_MIN = float(os.getenv("VOICE_HUMAN_BAND_RATIO_MIN", "0.38"))
 # 저수준 환경음으로 볼 최대 RMS.
 VOICE_ENV_RMS_MAX = float(os.getenv("VOICE_ENV_RMS_MAX", "0.020"))
+# waveform 기반 후반(body) RMS 최소값.
+VOICE_WAVEFORM_BODY_RMS_MIN = float(os.getenv("VOICE_WAVEFORM_BODY_RMS_MIN", "0.010"))
+# waveform 기반 후반(body) peak 최소값.
+VOICE_WAVEFORM_BODY_PEAK_MIN = float(os.getenv("VOICE_WAVEFORM_BODY_PEAK_MIN", "0.055"))
 # Silero가 음성으로 볼 confidence threshold.
 SILERO_VAD_THRESHOLD = float(os.getenv("SILERO_VAD_THRESHOLD", "0.30"))
 # Silero 타임스탬프 계산에 넣을 최소 speech 길이(ms).

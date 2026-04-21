@@ -5,7 +5,6 @@ from .config import (
     ALLOWED_OMNIVOICE_TAGS,
     MAX_VISIBLE_TEXT,
     SIMILARITY_BLOCK,
-    WAKE_FUZZY_THRESHOLD,
     WAKE_WORDS,
 )
 
@@ -39,6 +38,9 @@ def clean_tts_text(text: str) -> str:
     leading_tag = leading_tag_match.group(1) if leading_tag_match else ""
 
     text = re.sub(r"\[[^\[\]]+\]", " ", text)
+    text = re.sub(r"[\U0001F300-\U0001FAFF\u2600-\u27BF\uFE0F]+", " ", text)
+    text = re.sub(r"(?:\s|^)[:;=8xX]-?[)DdpP(/\\|]+\s*$", "", text)
+    text = re.sub(r"(?:\s|^)(?:ㅎㅎ+|ㅋㅋ+|ㅠㅠ+|ㅜㅜ+|\^\^+|헤헤+|하하+|흐흐+)\s*$", "", text)
     text = re.sub(r"[\"'`~*_#@^|<>{}()]", "", text)
     text = clean_text(text)
 
@@ -70,7 +72,14 @@ def contains_wake_word(text: str) -> bool:
     text_n = normalize_voice_text(text)
     if not text_n:
         return False
-    return any(w in text_n for w in normalized_wake_words())
+
+    for wake in normalized_wake_words():
+        if not wake:
+            continue
+        pattern = rf"(?:^|\s){re.escape(wake)}(?:\s|$)"
+        if re.search(pattern, text_n):
+            return True
+    return False
 
 
 def strip_leading_voice_fillers(text: str) -> str:
@@ -79,29 +88,57 @@ def strip_leading_voice_fillers(text: str) -> str:
 
 
 def contains_leading_wake_word(text: str) -> bool:
-    """문장 맨 앞부분이 wake word로 시작했는지 fuzzy matching까지 포함해 판별한다."""
+    """호환성을 위해 남겨둔 함수. 이제 wake word는 문장 어느 위치에서든 exact match만 허용한다."""
+    return contains_wake_word(text)
+
+
+def extract_leading_wake_alias(text: str) -> str | None:
+    text_n = normalize_voice_text(strip_leading_voice_fillers(text))
+    if not text_n:
+        return None
+
+    tokens = [t for t in text_n.split() if t]
+    if not tokens:
+        return None
+
+    for wake in normalized_wake_words():
+        wake_tokens = [t for t in wake.split() if t]
+        if wake_tokens and tokens[: len(wake_tokens)] == wake_tokens:
+            return wake
+    return None
+
+
+def fuzzy_leading_wake_alias(text: str) -> str | None:
+    text_n = normalize_voice_text(strip_leading_voice_fillers(text))
+    if not text_n:
+        return None
+
+    tokens = [t for t in text_n.split() if t]
+    if not tokens:
+        return None
+
+    probe = " ".join(tokens[:2]) if len(tokens) >= 2 else tokens[0]
+    best_alias = None
+    best_score = 0.0
+    for wake in normalized_wake_words():
+        score = SequenceMatcher(None, probe, wake).ratio()
+        if score > best_score:
+            best_score = score
+            best_alias = wake
+    return best_alias if best_alias is not None and best_score >= SIMILARITY_BLOCK else None
+
+
+def looks_like_gibberish_probe(text: str) -> bool:
     text_n = normalize_voice_text(text)
     if not text_n:
-        return False
-
-    prefixes: list[str] = []
-    tokens = text_n.split()
-    if tokens:
-        prefixes.append(tokens[0])
-        prefixes.append("".join(tokens[:2]))
-    prefixes.append(text_n[: max(8, min(len(text_n), 14))])
-
-    wake_words = normalized_wake_words()
-    for prefix in prefixes:
-        prefix = clean_text(prefix)
-        if not prefix:
-            continue
-        if any(w in prefix or prefix in w for w in wake_words):
-            return True
-        for wake in wake_words:
-            if SequenceMatcher(None, prefix[: len(wake) + 2], wake).ratio() >= WAKE_FUZZY_THRESHOLD:
-                return True
-
+        return True
+    compact = text_n.replace(" ", "")
+    if len(compact) <= 2:
+        return True
+    if looks_like_repetitive_noise_text(text_n):
+        return True
+    if len(set(compact)) <= 2 and len(compact) >= 4:
+        return True
     return False
 
 
@@ -113,13 +150,8 @@ def strip_voice_wake_word(text: str) -> str:
         if not ww:
             continue
 
-        pattern_front = rf"^\s*{re.escape(ww)}[야아]?\s*[, ]*"
-        new_text = re.sub(pattern_front, "", text_n, count=1)
-        if new_text != text_n:
-            return clean_text(new_text)
-
-        pattern_once = rf"{re.escape(ww)}[야아]?"
-        new_text = re.sub(pattern_once, "", text_n, count=1)
+        pattern_once = rf"(?:^|\s){re.escape(ww)}(?:\s|$)"
+        new_text = re.sub(pattern_once, " ", text_n, count=1)
         if new_text != text_n:
             return clean_text(new_text)
 
@@ -127,30 +159,12 @@ def strip_voice_wake_word(text: str) -> str:
 
 
 def apply_stt_post_corrections(text: str, *, wake_detected: bool = False) -> str:
-    """STT 결과에서 자주 틀리는 wake word 표기를 canonical 형태로 교정한다."""
+    """wake word는 exact match만 허용하므로 STT 결과를 wake 기준으로 퍼지 교정하지 않는다."""
     text = clean_text(text)
     if not text:
         return text
 
-    leading_fillers = ""
-    filler_match = re.match(r"^((?:아+|어+|음+|흠+|저기|야|아니)[,\s]+)", text)
-    if filler_match:
-        leading_fillers = filler_match.group(1)
-        text = text[len(leading_fillers):].lstrip()
-
-    wake_variants = [
-        "이블린", "이불린", "이브린", "이벨린", "이벌린", "에블린", "에브린",
-        "이블리", "이별인", "이별린", "이벨링", "에벌린", "입을린",
-    ]
-
-    for variant in wake_variants:
-        pattern_front = rf"^{re.escape(variant)}(?:[아야])?(?=(?:[,.!?\s]|$))[,.!?\s]*"
-        if re.match(pattern_front, text):
-            rest = clean_text(re.sub(pattern_front, "", text, count=1))
-            normalized = clean_text(f"이블린 {rest}" if rest else "이블린")
-            return clean_text(f"{leading_fillers}{normalized}" if leading_fillers else normalized)
-
-    return clean_text(f"{leading_fillers}{text}" if leading_fillers else text)
+    return text
 
 
 def is_similar(a: str, b: str) -> bool:
@@ -162,9 +176,9 @@ def is_similar(a: str, b: str) -> bool:
 def looks_like_repetitive_noise_text(text: str) -> bool:
     """반복 토큰이 과도한 전사 결과를 잡음성 텍스트로 본다."""
     tokens = [t for t in normalize_voice_text(text).split() if t]
-    if len(tokens) < 8:
+    if not tokens:
         return False
-    unique_ratio = len(set(tokens)) / max(1, len(tokens))
+
     longest_same_run = 1
     current_run = 1
     for prev, cur in zip(tokens, tokens[1:]):
@@ -173,6 +187,15 @@ def looks_like_repetitive_noise_text(text: str) -> bool:
             longest_same_run = max(longest_same_run, current_run)
         else:
             current_run = 1
+
+    wake_words = set(normalized_wake_words())
+    if len(tokens) >= 3 and len(set(tokens)) == 1 and (tokens[0] in wake_words or contains_leading_wake_word(tokens[0])):
+        return True
+
+    if len(tokens) < 8:
+        return False
+
+    unique_ratio = len(set(tokens)) / max(1, len(tokens))
     return unique_ratio < 0.35 or longest_same_run >= 4
 
 
