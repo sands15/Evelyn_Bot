@@ -157,6 +157,8 @@ session_turn_ids: dict[str, str] = {}
 session_segment_counters: dict[str, int] = {}
 session_last_turn_accepted_at: dict[str, float] = {}
 session_last_stt_text: dict[str, str] = {}
+session_partial_stt_text: dict[str, str] = {}
+session_committed_stt_text: dict[str, str] = {}
 session_bad_audio_counts: dict[str, int] = {}
 room_owner_user_ids: dict[str, int] = {}
 room_owner_until: dict[str, float] = {}
@@ -331,6 +333,8 @@ def session_state_snapshot(session_key: str | None) -> dict:
         "turn_id": session_turn_ids.get(session_key, ""),
         "last_turn_accepted_at": session_last_turn_accepted_at.get(session_key, 0.0),
         "last_stt_text": session_last_stt_text.get(session_key, ""),
+        "partial_stt_text": session_partial_stt_text.get(session_key, ""),
+        "committed_stt_text": session_committed_stt_text.get(session_key, ""),
         "bad_audio_count": session_bad_audio_counts.get(session_key, 0),
     }
 
@@ -602,6 +606,8 @@ def reset_guild_runtime_state(guild_id: int) -> None:
         session_segment_counters.pop(key, None)
         session_last_turn_accepted_at.pop(key, None)
         session_last_stt_text.pop(key, None)
+        session_partial_stt_text.pop(key, None)
+        session_committed_stt_text.pop(key, None)
         session_bad_audio_counts.pop(key, None)
     for key in [key for key in room_owner_user_ids if key.startswith(prefix)]:
         room_owner_user_ids.pop(key, None)
@@ -3137,6 +3143,63 @@ def transcribe_audio16k_sync(audio16k: np.ndarray, max_new_tokens: int = 256, *,
     return text
 
 
+def build_partial_stt_window(audio16k: np.ndarray, *, sampling_rate: int = TARGET_RATE) -> np.ndarray:
+    if audio16k.size == 0:
+        return audio16k
+    rate = max(1, int(sampling_rate))
+    max_samples = int(rate * 1.2)
+    overlap_samples = int(rate * 0.3)
+    if audio16k.size <= max_samples:
+        return np.asarray(audio16k, dtype=np.float32)
+    start = max(0, audio16k.size - max_samples)
+    if start > overlap_samples:
+        start -= overlap_samples
+    return np.asarray(audio16k[start:], dtype=np.float32)
+
+
+def longest_common_prefix_text(a: str, b: str) -> str:
+    left = clean_text(a)
+    right = clean_text(b)
+    limit = min(len(left), len(right))
+    idx = 0
+    while idx < limit and left[idx] == right[idx]:
+        idx += 1
+    return left[:idx]
+
+
+def commit_stable_transcript(session_key: str | None, *, new_partial_text: str) -> str:
+    if not session_key:
+        return clean_text(new_partial_text)
+    prev_partial = clean_text(session_partial_stt_text.get(session_key, ""))
+    committed = clean_text(session_committed_stt_text.get(session_key, ""))
+    current_partial = clean_text(new_partial_text)
+    session_partial_stt_text[session_key] = current_partial
+    if not current_partial:
+        return committed
+    stable = longest_common_prefix_text(prev_partial, current_partial) if prev_partial else current_partial
+    safe = stable[:-3].strip() if len(stable) > 3 else ""
+    if not safe and current_partial == prev_partial:
+        safe = current_partial
+    if safe and len(safe) > len(committed):
+        committed = clean_text(safe)
+        session_committed_stt_text[session_key] = committed
+    elif not committed:
+        session_committed_stt_text[session_key] = committed
+    return committed
+
+
+def get_partial_transcript(session_key: str | None, audio16k: np.ndarray, *, sampling_rate: int = TARGET_RATE) -> tuple[str, str]:
+    partial_audio = build_partial_stt_window(audio16k, sampling_rate=sampling_rate)
+    partial_text = transcribe_audio16k_sync(
+        partial_audio,
+        max_new_tokens=max(64, min(VOICE_STT_MAX_NEW_TOKENS, 128)),
+        sampling_rate=sampling_rate,
+        stage="partial",
+    )
+    committed_text = commit_stable_transcript(session_key, new_partial_text=partial_text)
+    return partial_text, committed_text
+
+
 def score_stt_candidate(text: str, *, wake_probe: str = "") -> float:
     text = clean_text(text)
     if not text:
@@ -4457,6 +4520,24 @@ async def _process_member_audio_impl(
     print(f"[FULL STT ENTER] speaker={member.display_name} sampling_rate={stt_sampling_rate} samples={audio16k.size} wake_detected={wake_detected}")
     log_voice_stage(metrics, "본문 STT 시작", extra=f"samples={audio16k.size}")
     stt_meta: dict | None = None
+    partial_text = ""
+    committed_partial_text = ""
+    try:
+        partial_text, committed_partial_text = await asyncio.to_thread(
+            get_partial_transcript,
+            session_key,
+            audio16k,
+            sampling_rate=stt_sampling_rate,
+        )
+        metrics.setdefault("meta", {}).update({
+            "partial_stt_text": partial_text,
+            "committed_stt_text": committed_partial_text,
+        })
+        if partial_text:
+            print(f"[STT RESULT][partial] text={partial_text!r} committed={committed_partial_text!r}")
+    except Exception as e:
+        print(f"[STT PARTIAL] {e}")
+
     try:
         primary_text = await asyncio.wait_for(
             asyncio.to_thread(transcribe_audio16k_sync, audio16k, VOICE_STT_MAX_NEW_TOKENS, sampling_rate=stt_sampling_rate, stage="full"),
@@ -4505,7 +4586,11 @@ async def _process_member_audio_impl(
     if corrected_text != text:
         print(f"[STT CORRECT] raw={text!r} -> corrected={corrected_text!r}")
     text = corrected_text
-    print(f"[STT RESULT][full-final] text={text!r} wake_detected={wake_detected}")
+    session_partial_stt_text[session_key] = clean_text(partial_text)
+    committed_text = commit_stable_transcript(session_key, new_partial_text=text)
+    if committed_text and len(clean_text(text)) >= len(committed_text):
+        text = clean_text(text)
+    print(f"[STT RESULT][full-final] text={text!r} committed={committed_text!r} wake_detected={wake_detected}")
 
     if should_ignore_short_transcription(text, pcm_bytes, wake_detected=wake_detected):
         print(f"[STT IGNORE] short_noise: {text!r}")
