@@ -2189,6 +2189,7 @@ class EvelynVoiceClient(discord.VoiceClient):
         idx = item["idx"]
         ssrc = item["ssrc"]
         packets = item["packets"]
+        body_packets = item.get("body_packets") or list(packets)
         utterance_started_at = item.get("utterance_started_at")
         queued_at = item.get("queued_at")
         processing_started_at = asyncio.get_running_loop().time()
