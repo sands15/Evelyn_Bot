@@ -52,12 +52,14 @@ VOICE_ONSET_MIN_GOOD_PACKETS = max(1, int(os.getenv("VOICE_ONSET_MIN_GOOD_PACKET
 VOICE_ONSET_TRIM_CAP_MS = max(0.0, float(os.getenv("VOICE_ONSET_TRIM_CAP_MS", "40")))
 VOICE_ONSET_DROP_CONCEAL_RATIO = min(1.0, max(0.2, float(os.getenv("VOICE_ONSET_DROP_CONCEAL_RATIO", "0.5"))))
 VOICE_ONSET_HEALTH_WINDOW_MS = max(160.0, float(os.getenv("VOICE_ONSET_HEALTH_WINDOW_MS", "220")))
-VOICE_ONSET_MAX_OPUS_FAIL = max(1, int(os.getenv("VOICE_ONSET_MAX_OPUS_FAIL", "2")))
-VOICE_ONSET_MAX_PLC_FEC = max(1, int(os.getenv("VOICE_ONSET_MAX_PLC_FEC", "3")))
-VOICE_ONSET_MAX_FAILED_RATIO = min(1.0, max(0.05, float(os.getenv("VOICE_ONSET_MAX_FAILED_RATIO", "0.25"))))
+VOICE_ONSET_MAX_OPUS_FAIL = max(1, int(os.getenv("VOICE_ONSET_MAX_OPUS_FAIL", "4")))
+VOICE_ONSET_MAX_PLC_FEC = max(1, int(os.getenv("VOICE_ONSET_MAX_PLC_FEC", "4")))
+VOICE_ONSET_MAX_FAILED_RATIO = min(1.0, max(0.05, float(os.getenv("VOICE_ONSET_MAX_FAILED_RATIO", "0.40"))))
 VOICE_ONSET_ARTIFACT_THRESHOLD = max(0.5, float(os.getenv("VOICE_ONSET_ARTIFACT_THRESHOLD", "2.0")))
-VOICE_ONSET_VAD_MIN_PROB = min(1.0, max(0.1, float(os.getenv("VOICE_ONSET_VAD_MIN_PROB", "0.65"))))
+VOICE_ONSET_VAD_MIN_PROB = min(1.0, max(0.0, float(os.getenv("VOICE_ONSET_VAD_MIN_PROB", "0.20"))))
 VOICE_ONSET_RMS_MIN = max(0.001, float(os.getenv("VOICE_ONSET_RMS_MIN", "0.01")))
+VOICE_ONSET_STRONG_RMS_BYPASS = max(VOICE_ONSET_RMS_MIN, float(os.getenv("VOICE_ONSET_STRONG_RMS_BYPASS", "0.03")))
+VOICE_ONSET_ROBOTIC_RMS_BYPASS = max(VOICE_ONSET_STRONG_RMS_BYPASS, float(os.getenv("VOICE_ONSET_ROBOTIC_RMS_BYPASS", "0.05")))
 VOICE_HARD_TRIM_MS = max(0.0, float(os.getenv("VOICE_HARD_TRIM_MS", "80")))
 VOICE_DYNAMIC_TRIM_ENABLE = os.getenv("VOICE_DYNAMIC_TRIM_ENABLE", "true").lower() == "true"
 VOICE_DYNAMIC_TRIM_MIN_MS = max(0.0, float(os.getenv("VOICE_DYNAMIC_TRIM_MIN_MS", "120")))
@@ -335,11 +337,14 @@ def should_pass_audio_segment(
     packet_ok: bool,
     robotic: bool,
 ) -> bool:
-    if not packet_ok:
+    strong_rms = rms >= VOICE_ONSET_STRONG_RMS_BYPASS
+    robotic_bypass = rms >= VOICE_ONSET_ROBOTIC_RMS_BYPASS
+
+    if not packet_ok and not strong_rms:
         return False
-    if robotic:
+    if robotic and not robotic_bypass:
         return False
-    if vad_prob < VOICE_ONSET_VAD_MIN_PROB:
+    if vad_prob < VOICE_ONSET_VAD_MIN_PROB and not strong_rms:
         return False
     if rms < VOICE_ONSET_RMS_MIN:
         return False
