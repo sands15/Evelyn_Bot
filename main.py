@@ -4250,103 +4250,57 @@ async def ask_llm_and_speak_streaming(
     metrics.setdefault("tts_first_frame_logged", False)
     metrics.setdefault("first_packet_sent_logged", False)
     log_voice_stage(metrics, "LLM/TTS 파이프라인 시작", extra=f"source={source}")
-
-    llm_stream = stream_llm_text(
-        user_text,
-        guild_id=guild_id,
-        on_first_chunk=lambda: log_voice_latency(metrics, "llm_first_chunk_logged", "LLM 첫 chunk 시간"),
-        session_key=session_key,
-        room_key=room_key,
-        person_key=person_key,
-        session_memory_key=session_memory_key,
-        source=source,
-        debug_text=debug_text,
-        metrics=metrics,
+    sentence_queue: asyncio.Queue[str | None] = asyncio.Queue()
+    playback_task = asyncio.create_task(
+        stream_tts_sentences(
+            vc,
+            sentence_queue,
+            metrics=metrics,
+            turn_id=metrics.get("meta", {}).get("turn_id"),
+            session_key=session_key,
+        )
     )
+    llm_error: Exception | None = None
+    answer = ""
 
-    answer_parts: list[str] = []
-    startup_buffer = ""
-    tts_session: TtsSessionClient | None = None
-    feed_task: asyncio.Task[None] | None = None
-    play_task: asyncio.Task[None] | None = None
-    llm_iter = llm_stream.__aiter__()
-
-    async def continuing_llm_stream(upstream):
-        async for piece in upstream:
-            answer_parts.append(piece)
-            yield piece
-
-    async def handle_llm_piece(delta_text: str) -> bool:
-        nonlocal tts_session, feed_task, play_task, startup_buffer
-        answer_parts.append(delta_text)
-        startup_buffer += delta_text
-        if tts_session is None and should_start_tts(startup_buffer):
-            tts_session, feed_task, play_task = await run_tts_turn_session(
-                vc=vc,
-                turn_id=metrics.get("meta", {}).get("turn_id") or current_turn_id(session_key),
-                voice=OMNIVOICE_VOICE,
-                initial_text=startup_buffer,
-                llm_text_stream=continuing_llm_stream(llm_iter),
-                session_key=session_key,
-                metrics=metrics,
-            )
-            startup_buffer = ""
-            return True
-        return False
+    async def enqueue_sentence(sentence: str) -> None:
+        sentence = clean_tts_text(sentence)
+        if sentence:
+            await sentence_queue.put(sentence)
 
     try:
-        outer_llm_timeout = max(30.0, VOICE_LLM_FIRST_CHUNK_TIMEOUT_SEC + VOICE_LLM_FALLBACK_TIMEOUT_SEC + 12.0)
-        try:
-            first_delta_text = await asyncio.wait_for(llm_iter.__anext__(), timeout=outer_llm_timeout)
-        except StopAsyncIteration:
-            first_delta_text = None
-        except asyncio.TimeoutError:
-            log_voice_stage(metrics, "LLM 상위 watchdog 타임아웃", extra=f"timeout_sec={outer_llm_timeout:.1f}")
-            try:
-                await llm_stream.aclose()
-            except Exception:
-                pass
-            first_delta_text = fallback_answer_for(user_text)
-            log_voice_stage(metrics, "LLM canned reply 사용", extra=f"reason=outer_watchdog_timeout len={len(first_delta_text)}")
+        answer = await ask_llm_streaming(
+            user_text,
+            guild_id=guild_id,
+            on_sentence=enqueue_sentence,
+            on_first_chunk=lambda: log_voice_latency(metrics, "llm_first_chunk_logged", "LLM 첫 chunk 시간"),
+            session_key=session_key,
+            room_key=room_key,
+            person_key=person_key,
+            session_memory_key=session_memory_key,
+            source=source,
+            debug_text=debug_text,
+            metrics=metrics,
+        )
+        log_voice_stage(metrics, "LLM 완료", extra=f"chars={len(answer)}", key="llm_done")
+        answer = clean_text(answer)
+        if answer and on_final_answer is not None:
+            await on_final_answer(answer)
+    except Exception as e:
+        llm_error = e
+        answer = ""
+    finally:
+        await sentence_queue.put(None)
 
-        if first_delta_text is not None:
-            started_tts = await handle_llm_piece(first_delta_text)
-            if not started_tts:
-                async for delta_text in llm_iter:
-                    if await handle_llm_piece(delta_text):
-                        break
-
-        if tts_session is None:
-            final_answer = clean_text("".join(answer_parts))
-            if final_answer:
-                tts_session, feed_task, play_task = await run_tts_turn_session(
-                    vc=vc,
-                    turn_id=metrics.get("meta", {}).get("turn_id") or current_turn_id(session_key),
-                    voice=OMNIVOICE_VOICE,
-                    initial_text=final_answer,
-                    llm_text_stream=_empty_async_generator(),
-                    session_key=session_key,
-                    metrics=metrics,
-                )
-        elif feed_task is not None:
-            await feed_task
-
-        if play_task is not None:
-            await play_task
-        if tts_session is not None:
-            log_turn_event("tts_turn_session_closed", turn_id=tts_session.turn_id, session_key=session_key)
+    try:
+        await playback_task
     except Exception:
-        if tts_session is not None:
-            log_turn_event("tts_turn_session_cancelled", turn_id=tts_session.turn_id, session_key=session_key)
-            await tts_session.cancel()
-        raise
+        if llm_error is None:
+            raise
 
-    answer = clean_text("".join(answer_parts))
-    log_voice_stage(metrics, "LLM 완료", extra=f"chars={len(answer)}", key="llm_done")
-    if answer and on_final_answer is not None:
-        await on_final_answer(answer)
+    if llm_error is not None:
+        raise llm_error
 
-    metrics.setdefault("marks", {})["llm_done"] = (time.monotonic() - float(metrics.get("started_at", time.monotonic()))) * 1000.0
     log_voice_bottleneck_summary(metrics, label="voice_reply", extra=f"source={source} chars={len(answer)}")
     return answer
 
