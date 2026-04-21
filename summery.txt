@@ -1,0 +1,581 @@
+Evelyn 디스코드 봇 현재 구조 정리
+기준: 현재 코드(main.py, evelyn_core/*, evelyn_voice/*, CURRENT_EVELYN_ARCHITECTURE.md) 기준. README의 예전 설명보다 실제 코드 동작을 우선함.
+
+==================================================
+1. 한 줄 요약
+==================================================
+Evelyn은 디스코드에서 텍스트/음성 둘 다 처리하는 한국어 개인 봇이다.
+핵심 파이프라인은 다음 5개 축으로 돌아간다.
+
+1) Discord 이벤트 처리와 세션 관리: main.py
+2) 음성 수신/복호화/세그먼트화: evelyn_voice/
+3) STT: Qwen3-ASR 기반 음성 전사
+4) LLM 3계층 분업
+   - Main LLM: 실제 답변 생성
+   - Router LLM: route/cognitive 판단
+   - Sub(Summary) LLM: 메모리 요약/사실/열린 질문 갱신
+5) TTS: OmniVoice 서버에 스트리밍 요청 후 바로 디스코드 재생
+
+즉, "듣기 -> 걸러내기 -> 전사 -> 기억 반영 -> 답 생성 -> 즉시 말하기" 구조다.
+
+
+==================================================
+2. 현재 실제 실행 구조
+==================================================
+루트 start.bat는 결국 evelyn_core\start.bat를 호출한다.
+현재 의도된 실행 구조는 Windows Terminal 한 창 + 5개 탭이다.
+
+1) Main-LLM 탭
+   - 포트 9820
+   - 실제 사용자 답변 생성 담당
+   - Gemma 4 계열 모델
+
+2) Router-LLM 탭
+   - 포트 9822
+   - route 판단, cognitive_state 판단 담당
+   - Gemma 4 E2B 계열 모델
+
+3) Sub-LLM 탭
+   - 포트 9821
+   - rolling summary, durable facts, open questions 업데이트 담당
+   - EXAONE 계열 모델
+
+4) TTS 탭
+   - 포트 8880
+   - omnivoice-server 실행
+
+5) Bot 탭
+   - main.py 실행
+   - 위 4개 백엔드 포트가 준비될 때까지 기다렸다가 실행
+
+즉 Bot은 혼자 돌지 않고, 로컬 LLM 3개 + TTS 1개를 전제로 붙는다.
+
+
+==================================================
+3. 메인 응답 구조, 누가 무슨 일을 하는가
+==================================================
+현재 코드에서 실제 사용자 답변을 만드는 건 Main LLM 하나다.
+
+- Main LLM (9820): 사용자에게 보여줄 최종 답변 생성
+- Router LLM (9822):
+  - main_direct / sub_hint / sub_wait 라우팅 판단
+  - answer / ask / wait 성격의 cognitive_state 생성
+- Sub LLM (9821):
+  - rolling_summary.txt 갱신
+  - durable_facts.jsonl 갱신
+  - open_questions.jsonl 갱신
+- OmniVoice (8880): 최종 답변을 음성으로 변환
+
+중요:
+현재 route 값은 로그/메타 판단에 가깝고, 실제 응답 경로를 크게 갈라버리지는 않는다.
+즉 route가 main_direct/sub_hint/sub_wait 어디로 나와도 결국 실제 답은 대부분 Main LLM이 만든다.
+
+
+==================================================
+4. 텍스트 채널 핵심 로직
+==================================================
+텍스트 입력은 아무 말에나 반응하지 않는다. 아래 중 하나일 때만 반응한다.
+
+1) 메시지에 wake word가 포함됨
+   - 예: 이블린 오늘 뭐해?
+2) 사용자가 봇 메시지에 답장함
+3) 현재 활성 세션으로 간주되는 후속 대화임
+
+반응 흐름:
+1) 세션 키 생성
+   - guild/channel/user/thread 기반으로 텍스트 세션 분리
+2) follow-up 대상 채널 기억
+3) wake/reply/active-session 조건 확인
+4) user_text 정리
+5) 세션 락 획득
+   - 이미 다른 응답 처리 중이면 "잠깐만" 메시지 출력
+6) 필요시 음성 채널 자동 접속(AUTO_JOIN_VOICE=true)
+7) stream_text_reply() 실행
+   - 텍스트 답변도 스트리밍 편집 방식 사용
+   - 처음엔 "…"를 보내고, 답이 오면 메시지를 수정하며 늘려감
+8) 완료 후
+   - append_history()
+   - schedule_memory_update()
+   - schedule_search_followup()
+   - 질문형 답변이면 세션 활성시간을 더 길게 유지
+   - 음성 채널 연결 중이면 텍스트 답도 같이 TTS로 읽어줌
+
+부가기능:
+- 질문형 응답은 화면 표시 시 [질문] 접두어를 붙인다.
+- TTS로 읽을 때는 OmniVoice 태그만 살리고, 일반 표시 텍스트에서는 태그를 제거한다.
+
+
+==================================================
+5. 음성 채널 핵심 로직
+==================================================
+음성 경로의 진짜 핵심은 "discord 음성 수신을 직접 안정화한 커스텀 스택"이다.
+
+진입점:
+- EvelynVoiceClient가 유저 PCM을 발화 단위로 묶어서 process_member_audio()로 넘김
+- 실제 무거운 처리는 voice_ingress_worker()가 큐 기반으로 순차 처리
+
+음성 처리 큰 흐름:
+1) Discord voice 수신
+2) outer decrypt
+3) DAVE inner decrypt
+4) Opus decode
+5) PCM segment 조립
+6) 음성 품질 필터링
+7) wake probe STT
+8) full STT
+9) 응답 게이트 통과 시 Main LLM 호출
+10) 문장 단위 TTS 스트리밍 재생
+
+
+==================================================
+6. evelyn_voice/ 커스텀 음성 스택 역할
+==================================================
+evelyn_voice는 단순 래퍼가 아니라 실제로 Discord 음성 수신 안정화를 위한 별도 구현체다.
+
+주요 파일 역할:
+- client.py
+  - EvelynVoiceClient 구현
+  - DAVE payload 파싱
+  - jitter/reorder/onset 안정화
+  - segment open/close 판단
+  - 디코드 후 on_user_audio 콜백 호출
+- gateway.py
+  - Discord voice gateway 처리
+- udp.py
+  - UDP transport 관리
+- dave_session.py
+  - DAVE 세션 처리
+- opus_decode.py
+  - Opus 디코딩 보조
+- state.py
+  - 음성 런타임 상태 보관
+- sink.py
+  - 수신 오디오 sink 구조
+- errors.py
+  - 음성 수신 전용 예외 정의
+
+현재 이쪽에 들어간 안정화 포인트:
+- discord.py 기본 흐름 보완
+- RTP/DAVE payload 경계 처리
+- unknown SSRC / 늦은 매핑 보정
+- 초기 프레임 hold/retry
+- jitter buffer
+- onset trim / unstable onset 보정
+- packet health 기반 segment 개방 판단
+- robotic artifact 추정
+
+즉 "그냥 음성채널 들어간다" 수준이 아니라, 최근 Discord voice/DAVE 환경에서 실제 수신이 되도록 꽤 깊게 손본 상태다.
+
+
+==================================================
+7. 음성 입력 필터링 상세
+==================================================
+음성은 full STT 전에 여러 차단 로직을 거친다.
+
+1) 너무 짧은 raw 오디오 차단
+2) transport corrupted 조기 차단
+3) tail fragment 조기 차단
+4) VAD 무시 처리
+   - 단 waveform 조건이 좋으면 override 가능
+5) wake probe 수행
+6) 환경음 / filler / 반복소음 후보 조기 차단 가능
+7) full STT
+8) full-rescore(옵션 on)
+9) 짧은 잡음성 전사 차단
+10) 최종 텍스트에서 wake alias가 앞부분에 없으면 veto 가능
+11) should_reply_to_voice() 최종 게이트
+
+현재 should_reply_to_voice()가 막는 대표 조건:
+- 봇이 지금 말하고 있음
+- 봇이 막 말한 직후 무시 구간
+- 텍스트 비어 있음
+- wake 미검출 + wake word 없음
+- 너무 짧음
+- 최근 reply cooldown 중
+- 직전 음성과 너무 유사함
+
+즉 음성은 "전사되기만 하면 답한다"가 아니라, 여러 단계에서 꽤 빡빡하게 거른 뒤에만 응답한다.
+
+
+==================================================
+8. wake word / active voice follow-up 구조
+==================================================
+wake word는 여러 오인식 변형을 허용하지만, 실제 최종 승인 로직은 보수적이다.
+기본 이름은 "이블린"이고 여러 STT 오타형이 WAKE_WORDS에 들어 있다.
+
+현재 중요한 특징:
+- wake probe 1차 STT
+- 필요시 wake confirm 2차 STT
+- unstable/gibberish/confirm_miss/full_text_veto 같은 사유는 hard drop 가능
+- 이미 내가 현재 방 대화 owner일 때는 wake probe를 생략하고 이어서 듣는 follow-up 모드 가능
+
+또한 room owner 개념이 있다.
+- 특정 사용자가 최근 대화 owner가 되면
+- 그 사람의 후속 짧은 발화는 wake 없이도 이어받을 수 있다.
+- 대신 다른 사람이 끼어들면 차단할 수 있다.
+- room_reply_in_progress 상태로 중복 화자 진입도 막는다.
+
+즉 음성 쪽은 단순 wake bot이 아니라,
+"현재 누구와 대화 중인지"를 방 단위로 관리한다.
+
+
+==================================================
+9. STT 구조
+==================================================
+현재 코드는 faster-whisper 설명이 남아 있는 문서도 있지만, 실제 코드는 Qwen3-ASR 기반이다.
+
+실제 동작:
+- get_stt_model()에서 Qwen/Qwen3-ASR-1.7B 로드
+- 필요시 48k -> 16k 변환
+- 언어 힌트 적용 가능
+- wake probe용 짧은 STT
+- full STT
+- full-rescore 옵션 사용 가능
+- choose_full_stt_candidate()로 본문 채택
+
+즉 현재 STT는:
+- 단일 전사 한 번으로 끝나지 않고
+- wake probe / confirm / full / rescore까지 단계적으로 나뉜다.
+
+
+==================================================
+10. Main LLM 호출 전 준비 로직
+==================================================
+Main LLM에 바로 던지지 않고 prepare_llm_messages()를 거친다.
+
+여기서 하는 일:
+1) classify_llm_route_async()
+   - route 계산
+2) update_cognitive_state()
+   - answer / ask / wait
+   - confidence
+   - user_intent
+   - state_summary
+   - question_for_user
+   - main_prompt_hint
+   - reason_brief
+3) build_memory_context()
+   - rolling summary
+   - raw transcript 일부
+   - vault raw 일부
+   - durable facts
+   - open questions
+   - cognitive state
+   를 합성해 system prompt 쪽에 붙임
+4) build_main_response_guidance()
+   - "짧고 자연스럽게"
+   - OmniVoice 태그 규칙
+   - ask/wait 모드 지침
+   - internal hint
+   같은 제약을 Main LLM에 추가
+
+중요:
+현재 ask 행동이 나와도 Router가 직접 사용자에게 따로 질문 메시지를 보내는 게 아니다.
+question_for_user를 Main LLM 쪽에 힌트로 넣어서 최종 질문도 Main LLM이 말하게 만든다.
+
+
+==================================================
+11. cognitive_state 기능
+==================================================
+cognitive_state는 현재 Evelyn의 "내부 태도 결정기"에 가깝다.
+
+출력 action:
+- answer: 지금 답하는 편이 자연스럽다
+- ask: 짧게 되묻는 편이 자연스럽다
+- wait: 더 듣는 편이 자연스럽다
+
+이 값은:
+- 텍스트/음성 모두에서 fresh 계산 가능
+- 답변 전 await되고
+- 답변 후 백그라운드로 다시 갱신되기도 함
+- session/person/room/guild 스코프별로 저장 가능
+
+실패 시 fallback state도 저장한다.
+즉 cognitive는 죽어도 전체 봇이 멈추기보다 기본 answer 모드로 내려가게 되어 있다.
+
+
+==================================================
+12. 메모리 구조
+==================================================
+메모리는 길드 하나당 한 폴더만 쓰는 수준이 아니라, scope가 나뉜다.
+
+스코프:
+- guild
+- room
+- person
+- session
+
+주요 파일:
+- rolling_summary.txt
+- raw_transcript.jsonl
+- durable_facts.jsonl
+- open_questions.jsonl
+- open_loops.jsonl
+- cognitive_state.json
+- vault\facts.jsonl
+- vault\questions.jsonl
+- vault\raw\YYYY-MM-DD.jsonl
+
+현재 구조적 특징:
+- 최근 대화 hot log와 장기 보관 vault를 함께 사용
+- summary/facts/questions를 분리 저장
+- session/person/room/guild 별 레이어 메모리를 합성 가능
+- 대화가 끝날 때마다 raw 기록 + 메모리 업데이트 태스크 예약
+
+즉 Evelyn은 단순 대화 history만 쌓는 게 아니라,
+"요약, 사실, 미해결 질문, 현재 인지 상태"를 따로 관리한다.
+
+
+==================================================
+13. 검색 후속답변(proactive follow-up)
+==================================================
+현재 코드에서 스스로 새 메시지를 다시 보내는 가장 명시적인 기능이 이 검색 후속답변이다.
+
+동작 조건:
+- Main 답변이 "찾아볼게", "확인해볼게" 같은 표현을 했을 때만 예약
+
+흐름:
+1) build_search_query()
+2) DuckDuckGo Instant API 시도
+3) 부족하면 DuckDuckGo HTML 검색 파싱
+4) 검색 결과를 다시 Main LLM에 짧게 정리시킴
+5) 관련 open question 닫기
+6) cognitive_state를 search_completed 쪽으로 덮어쓰기
+7) deliver_proactive_followup() 실행
+   - 텍스트 채널에 후속 메시지 전송
+   - 음성 채널 연결 중이면 TTS로도 읽기
+   - history/memory에도 반영
+
+즉 Evelyn은 "잠깐 찾아볼게"라고 말한 뒤, 실제로 나중에 결과를 들고 와서 한 번 더 말할 수 있다.
+
+
+==================================================
+14. TTS 구조
+==================================================
+TTS는 봇 내부 모델이 아니라 외부 OmniVoice 서버를 HTTP로 호출하는 방식이다.
+
+핵심 함수:
+- create_omnivoice_source()
+- speak_answer()
+- stream_tts_sentences()
+
+동작:
+1) 텍스트 정리(clean_tts_text)
+2) /v1/audio/speech POST
+3) response_format=pcm, stream=true
+4) 24k mono PCM 수신
+5) 봇 내부에서 48k stereo 디스코드 재생 포맷으로 변환
+6) 바로 재생
+
+특징:
+- clone voice 실패 시 auto로 fallback 가능
+- on_ready 때 warmup_tts_server()로 헬스체크 + 테스트 요청
+- 음성 답변은 문장별 큐를 사용해 앞 문장부터 재생 가능
+- 텍스트 답변도 필요하면 음성 채널에 읽어줄 수 있음
+
+즉 TTS는 파일 완성 후 재생 방식이 아니라, 스트리밍 받아서 최대한 빨리 틀어주는 구조다.
+
+
+==================================================
+15. 텍스트/음성 응답 출력 특징
+==================================================
+1) OmniVoice 감정 태그 허용
+   - [laughter], [sigh], [question-en] 등 제한된 태그만 허용
+2) 화면용 텍스트는 태그 제거
+3) 질문형 응답은 [질문] 접두어 표시
+4) voice에서는 ask_llm_and_speak_streaming()으로 문장 단위 TTS
+5) text에서는 stream_text_reply()로 메시지 수정형 스트리밍 표시
+
+즉 사용자 체감상 응답은 최대한 짧고 자연스럽고, 음성은 빨리 재생되도록 설계돼 있다.
+
+
+==================================================
+16. 세션/상태 관리 기능
+==================================================
+main.py 내부에는 꽤 많은 세션 상태 캐시가 있다.
+
+대표적으로 관리하는 것:
+- session_histories
+- session_followup_targets
+- active_session_until
+- active_session_user_ids
+- session_awaiting_user_reply
+- session_last_speaker
+- session_topic_ids
+- session_turn_ids
+- session_segment_counters
+- session_last_turn_accepted_at
+- session_last_stt_text
+- session_bad_audio_counts
+- room_owner_user_ids
+- room_owner_until
+- room_reply_in_progress
+- memory_locks / cognitive_locks / session_locks
+
+이걸로 해결하는 것:
+- 같은 세션 이어받기
+- 누가 지금 대화 owner인지 추적
+- 같은 주제인지 유지
+- turn_id / segment_id 추적
+- 중복 처리 방지
+- bad audio 누적 감시
+
+즉 메모리 파일과 별개로, 런타임 상태 머신도 상당히 많은 편이다.
+
+
+==================================================
+17. 디스코드 명령어(부가기능)
+==================================================
+현재 주요 명령어:
+
+1) 들어와 / join
+   - 사용자가 있는 음성채널로 들어감
+
+2) 다시들어와 / rejoin
+   - 기존 연결 끊고 다시 접속
+
+3) 나가 / leave
+   - 음성채널에서 나감
+
+4) 재시작 / restart
+   - 허용된 사용자만 가능
+   - start_bot.bat 또는 start.bat를 다시 띄우고 현재 프로세스 종료
+
+5) 종료 / shutdown / quit / exit
+   - 허용된 사용자만 가능
+   - 음성 연결 정리 후 프로세스 종료
+
+6) 상태 / status
+   - 현재 모델 이름들, STT, 연결 채널, listening 상태,
+     디버그 저장 여부, OPUS_ERROR_TO_SILENCE, VAD 상태 표시
+
+7) 접두사 / prefix
+   - 길드별 명령어 접두사 변경
+   - 기본값은 !
+   - 길드 설정 파일에 저장
+
+8) 초기화 / reset
+   - 허용된 사용자만 가능
+   - 해당 길드의 메모리/대화 히스토리 초기화
+   - 접두사 설정은 유지
+
+즉 대화 기능 외에도 운영용 관리 명령이 꽤 들어 있다.
+
+
+==================================================
+18. on_ready / 자동 복구 / 워밍업 부가기능
+==================================================
+on_ready에서 하는 일:
+- voice_ingress_worker 시작
+- 이미 붙어 있는 EvelynVoiceClient 재무장 시도
+- STT 모델 미리 로드
+- TTS 서버 warmup
+- presence 토글
+
+on_voice_state_update에서는:
+- 봇 자신의 voice state가 바뀌면
+- listening voice client를 다시 arm 하려고 시도
+
+즉 재부팅/재연결 후에도 음성 수신 상태를 최대한 복구하려는 코드가 있다.
+
+
+==================================================
+19. 디버그/추적/로그 기능
+==================================================
+이 프로젝트는 음성 디버깅용 계측이 강한 편이다.
+
+대표 기능:
+- turn_id / segment_id 추적
+- stage별 latency 로그
+- bottleneck summary 로그
+- discord_playback_started / first_packet_sent / finished 등 이벤트 로그
+- WAV 디버그 저장(debug_audio)
+- STT metadata 저장
+- unstable audio 사유 기록
+- drop reason 기록
+
+특히 음성 쪽에서:
+- wake probe 결과
+- STT rescore 선택 결과
+- VAD ignore 사유
+- tail fragment drop 사유
+- transport corrupted 사유
+같은 게 꽤 세밀하게 남는다.
+
+즉 이 봇은 단순 기능 구현보다, 실제 운영 중 문제를 추적하기 쉽게 만들어져 있다.
+
+
+==================================================
+20. 현재 구조에서 중요한 사실 / 주의점
+==================================================
+1) 실제 답변 생성은 Main LLM 한 곳으로 수렴한다.
+2) Router LLM은 중요하지만, 아직 실제 하드 분기 엔진이라기보단 판단기/메타 공급자에 가깝다.
+3) Sub LLM은 사용자 응답용이 아니라 메모리 관리 전용이다.
+4) 텍스트도 active session 개념이 있어서 wake 없이 후속 대화가 이어질 수 있다.
+5) 음성은 wake bot이지만, room owner follow-up 덕분에 최근 화자와는 이어 대화가 가능하다.
+6) 검색 후속답변은 실제 proactive 기능이다.
+7) README에 남아 있는 일부 설명보다 현재 코드는 더 발전한 상태다.
+   - 예: Router LLM, Sub LLM, scoped memory, Qwen3-ASR, streaming text reply 등
+8) 음성 수신부는 프로젝트의 난이도 높은 핵심이며, 대부분의 안정화 로직이 여기에 몰려 있다.
+
+
+==================================================
+21. 파일별 핵심 역할 요약
+==================================================
+- main.py
+  - 전체 봇 엔트리포인트
+  - Discord 이벤트 처리
+  - 텍스트/음성 응답 흐름 총괄
+  - STT/LLM/TTS 연결
+  - 세션 상태 머신
+  - 명령어
+
+- evelyn_core\config.py
+  - 전체 환경변수/기본값/튜닝 파라미터
+  - 모델 포트, STT/VAD/TTS 임계값, wake word, tag 정책
+
+- evelyn_core\memory.py
+  - 메모리 파일 구조와 I/O
+  - guild/room/person/session 스코프 경로 관리
+  - json/jsonl/vault 처리
+
+- evelyn_core\text.py
+  - 텍스트 정리
+  - wake word 처리
+  - OmniVoice tag 정규화/제거
+  - 표시용 텍스트 생성
+
+- evelyn_voice\*
+  - Discord 음성 수신/복호화/세그먼트화 핵심
+
+- guild_settings\guild_<id>.json
+  - 길드별 접두사 같은 설정 저장
+
+- bot_memory\guild_<id>\...
+  - 장기 메모리, 요약, 질문, 인지 상태 저장소
+
+- debug_audio\...
+  - 음성 디버그 산출물
+
+
+==================================================
+22. 최종 결론
+==================================================
+현재 Evelyn은 단순 디스코드 챗봇이 아니라,
+
+- 커스텀 Discord 음성 수신기
+- 다단계 STT 필터링 엔진
+- Main/Router/Sub 3모델 분업 구조
+- 계층형 장기 메모리 시스템
+- proactive 검색 후속답변 기능
+- 문장 단위 스트리밍 TTS 재생기
+- 세션/room-owner 상태 머신
+
+이 합쳐진 꽤 복합적인 음성 대화 봇이다.
+
+핵심은 두 가지다.
+1) 음성 수신 안정화와 지연 최소화
+2) 단순 history가 아니라 cognitive + memory + follow-up까지 가진 대화 흐름 유지
+
+한마디로 정리하면,
+현재 Evelyn의 본체는 "디스코드용 실시간 한국어 음성 대화 에이전트 + 장기기억/후속검색 보조 시스템"이다.
