@@ -4936,6 +4936,12 @@ async def _process_member_audio_impl(
 async def on_ready():
     print(f"로그인 완료: {bot.user}")
     ensure_voice_worker_started()
+    for guild in bot.guilds:
+        vc = guild.voice_client
+        if isinstance(vc, EvelynVoiceClient):
+            print(f"[VOICE READY] guild={guild.id} channel={getattr(getattr(vc, 'channel', None), 'name', None)} listening={vc.is_listening()}")
+        elif vc is not None:
+            print(f"[VOICE READY] guild={guild.id} unexpected_voice_client={type(vc)!r}")
     await set_tts_presence(True)
     try:
         await asyncio.to_thread(get_stt_model)

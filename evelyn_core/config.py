@@ -144,6 +144,18 @@ TTS_EARLY_CUT_MIN = int(os.getenv("TTS_EARLY_CUT_MIN", "6"))
 VOICE_STT_MAX_NEW_TOKENS = int(os.getenv("VOICE_STT_MAX_NEW_TOKENS", "256"))
 # 메인 LLM 한 번의 최대 응답 토큰 수.
 VOICE_LLM_MAX_TOKENS = int(os.getenv("VOICE_LLM_MAX_TOKENS", "320"))
+# turn trace JSON 로그를 콘솔에 남길지 여부.
+TURN_TRACE_JSON_LOG = os.getenv("TURN_TRACE_JSON_LOG", "true").lower() == "true"
+# bottleneck 로그를 남길지 여부.
+VOICE_BOTTLENECK_LOGS = os.getenv("VOICE_BOTTLENECK_LOGS", "true").lower() == "true"
+# 콘솔을 STT/TTS 핵심 로그 위주로 줄일지 여부.
+VOICE_CONSOLE_ONLY_STT_AND_REPLY = os.getenv("VOICE_CONSOLE_ONLY_STT_AND_REPLY", "false").lower() == "true"
+# WAV 디버그 아티팩트를 저장할지 여부.
+VOICE_DEBUG_SAVE_AUDIO = os.getenv("VOICE_DEBUG_SAVE_AUDIO", "true").lower() == "true"
+# WAV 디버그 아티팩트 루트 디렉터리.
+VOICE_DEBUG_AUDIO_DIR = os.getenv("VOICE_DEBUG_AUDIO_DIR", "debug_audio")
+# 길드별 디버그 WAV 최대 보관 개수.
+VOICE_DEBUG_MAX_FILES_PER_GUILD = int(os.getenv("VOICE_DEBUG_MAX_FILES_PER_GUILD", "200"))
 
 
 # 대화 히스토리에 유지할 총 턴 수 상한.
