@@ -74,6 +74,8 @@ VOICE_TRACE_ALL_EVENTS = os.getenv("VOICE_TRACE_ALL_EVENTS", "true").lower() == 
 VOICE_DEBUG_SAVE_AUDIO = os.getenv("VOICE_DEBUG_SAVE_AUDIO", "true").lower() == "true"
 VOICE_DEBUG_AUDIO_DIR = os.getenv("VOICE_DEBUG_AUDIO_DIR", "debug_audio")
 VOICE_DEBUG_MAX_FILES_PER_GUILD = int(os.getenv("VOICE_DEBUG_MAX_FILES_PER_GUILD", "200"))
+WAKE_STT_TIMEOUT_SEC = float(os.getenv("WAKE_STT_TIMEOUT_SEC", "20"))
+FULL_STT_TIMEOUT_SEC = float(os.getenv("FULL_STT_TIMEOUT_SEC", "30"))
 ROUTER_LLM_URL = globals().get("ROUTER_LLM_URL", os.getenv("ROUTER_LLM_URL", "http://127.0.0.1:9822/v1/chat/completions"))
 ROUTER_MODEL_NAME = globals().get("ROUTER_MODEL_NAME", os.getenv("ROUTER_MODEL_NAME", "gemma-4-E2B-it-UD-Q6_K_XL.gguf"))
 ROUTER_LLM_ENABLED = globals().get("ROUTER_LLM_ENABLED", os.getenv("ROUTER_LLM_ENABLED", "true").lower() in {"1", "true", "yes", "on"})
@@ -86,6 +88,14 @@ _ALLOWED_CONSOLE_PREFIXES = (
     "[VOICE STAGE]",
     "[VOICE BOTTLENECK]",
     "[TURN TRACE]",
+    "[FULL STT ENTER]",
+    "[STT INPUT]",
+    "[STT RESAMPLE]",
+    "[STT DONE]",
+    "[STT LOAD]",
+    "[STT RESULT]",
+    "[WAKE STT]",
+    "[STT]",
 )
 _BOTTLENECK_TURN_TRACE_EVENTS = {
     "tts_request_started",
@@ -2934,7 +2944,7 @@ def get_stt_model() -> tuple[str, Any, Any]:
     token = os.getenv("HF_TOKEN")
     torch_dtype = resolve_stt_torch_dtype()
 
-    print(f"STT 로드 시작: model={STT_MODEL_NAME}, device={device}, dtype={torch_dtype}")
+    print(f"[STT LOAD] start model={STT_MODEL_NAME} device={device} dtype={torch_dtype}")
 
     stt_backend = "qwen_asr"
     stt_processor = None
@@ -2951,7 +2961,7 @@ def get_stt_model() -> tuple[str, Any, Any]:
         STT_MODEL_NAME,
         **load_kwargs,
     )
-    print("STT 로드 완료 (Qwen3-ASR)")
+    print("[STT LOAD] done backend=Qwen3-ASR")
     return stt_backend, stt_processor, stt_model
 
 
@@ -2976,9 +2986,11 @@ def transcribe_audio16k_sync(audio16k: np.ndarray, max_new_tokens: int = 256, *,
         return_time_stamps=False,
     )
     if not results:
+        print(f"[STT DONE][{stage}] empty_result")
         return ""
 
     text = clean_text(getattr(results[0], "text", "") or "")
+    print(f"[STT DONE][{stage}] text={text!r}")
     return text
 
 
@@ -4172,9 +4184,12 @@ async def _process_member_audio_impl(
     else:
         log_voice_stage(metrics, "웨이크 프로브 시작", extra=f"samples={audio_for_wake.size} sampling_rate={wake_sampling_rate}")
         try:
-            wake_result = await asyncio.to_thread(detect_wake_word_sync, audio_for_wake, sampling_rate=wake_sampling_rate)
+            wake_result = await asyncio.wait_for(
+                asyncio.to_thread(detect_wake_word_sync, audio_for_wake, sampling_rate=wake_sampling_rate),
+                timeout=max(5.0, WAKE_STT_TIMEOUT_SEC),
+            )
         except Exception as e:
-            print(f"❌ [WAKE STT] {e}")
+            print(f"[WAKE STT] {e}")
             register_drop_reason(metrics, "wake_probe_error", session_key=session_key, room_session_key=room_session_key, owner_user_id=owner_user_id, error=repr(e))
             log_voice_stage(metrics, "웨이크 프로브 실패", extra=repr(e))
             log_voice_bottleneck_summary(metrics, label="voice_drop", extra="drop=wake_probe_error", event_name="voice_drop_summary")
@@ -4186,6 +4201,9 @@ async def _process_member_audio_impl(
         wake_match_mode = str(wake_result.get("wake_match_mode") or ("exact" if wake_detected else "rejected"))
         wake_alias = clean_text(str(wake_result.get("wake_alias") or "")) or None
         wake_reject_reason = clean_text(str(wake_result.get("wake_reject_reason") or "")) or None
+        print(
+            f"[STT RESULT][wake] probe={wake_probe!r} confirm={wake_confirm!r} detected={wake_detected} mode={wake_match_mode} alias={wake_alias!r} reject={wake_reject_reason!r}"
+        )
 
         strict_confirm_required = should_require_confirm_exact_for_wake(debug_meta)
         if strict_confirm_required and wake_match_mode != "exact":
@@ -4286,13 +4304,17 @@ async def _process_member_audio_impl(
     log_voice_stage(metrics, "본문 STT 시작", extra=f"samples={audio16k.size}")
     stt_meta: dict | None = None
     try:
-        primary_text = await asyncio.to_thread(transcribe_audio16k_sync, audio16k, VOICE_STT_MAX_NEW_TOKENS, sampling_rate=stt_sampling_rate, stage="full")
+        primary_text = await asyncio.wait_for(
+            asyncio.to_thread(transcribe_audio16k_sync, audio16k, VOICE_STT_MAX_NEW_TOKENS, sampling_rate=stt_sampling_rate, stage="full"),
+            timeout=max(8.0, FULL_STT_TIMEOUT_SEC),
+        )
     except Exception as e:
-        print(f"❌ [STT] {e}")
+        print(f"[STT] {e}")
         log_voice_stage(metrics, "본문 STT 실패", extra=repr(e))
         return
 
     text = primary_text
+    print(f"[STT RESULT][full-primary] text={primary_text!r}")
     if STT_FULL_RESCORING_ENABLED:
         log_voice_stage(metrics, "본문 STT 2차 rescoring 시작")
         try:
@@ -4307,6 +4329,7 @@ async def _process_member_audio_impl(
             print(
                 f"[STT RESCORE] speaker={member.display_name} selected={stt_meta['selected']} primary_score={stt_meta['primary_score']:.3f} rescore_score={stt_meta['rescore_score']:.3f}"
             )
+            print(f"[STT RESULT][full-rescore] text={rescore_text!r}")
             if stt_meta["selected"] == "rescore":
                 print(f"[STT RESCORE PICK] primary={primary_text!r} -> rescore={rescore_text!r}")
             log_voice_stage(metrics, "본문 STT 2차 rescoring 완료", extra=f"selected={stt_meta['selected']}")
@@ -4328,6 +4351,7 @@ async def _process_member_audio_impl(
     if corrected_text != text:
         print(f"[STT CORRECT] raw={text!r} -> corrected={corrected_text!r}")
     text = corrected_text
+    print(f"[STT RESULT][full-final] text={text!r} wake_detected={wake_detected}")
 
     if should_ignore_short_transcription(text, pcm_bytes, wake_detected=wake_detected):
         print(f"[STT IGNORE] short_noise: {text!r}")

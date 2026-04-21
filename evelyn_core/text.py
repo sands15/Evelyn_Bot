@@ -3,6 +3,7 @@ from difflib import SequenceMatcher
 
 from .config import (
     ALLOWED_OMNIVOICE_TAGS,
+    EXACT_WAKE_WORD,
     MAX_VISIBLE_TEXT,
     SIMILARITY_BLOCK,
     WAKE_WORDS,
@@ -65,7 +66,14 @@ def normalize_voice_text(s: str) -> str:
 
 
 def normalized_wake_words() -> list[str]:
-    return [normalize_voice_text(w) for w in WAKE_WORDS if normalize_voice_text(w)]
+    exact = normalize_voice_text(EXACT_WAKE_WORD)
+    if exact:
+        return [exact]
+
+    normalized = [normalize_voice_text(w) for w in WAKE_WORDS if normalize_voice_text(w)]
+    if normalized:
+        return [normalized[0]]
+    return []
 
 
 def contains_wake_word(text: str) -> bool:
@@ -109,23 +117,7 @@ def extract_leading_wake_alias(text: str) -> str | None:
 
 
 def fuzzy_leading_wake_alias(text: str) -> str | None:
-    text_n = normalize_voice_text(strip_leading_voice_fillers(text))
-    if not text_n:
-        return None
-
-    tokens = [t for t in text_n.split() if t]
-    if not tokens:
-        return None
-
-    probe = " ".join(tokens[:2]) if len(tokens) >= 2 else tokens[0]
-    best_alias = None
-    best_score = 0.0
-    for wake in normalized_wake_words():
-        score = SequenceMatcher(None, probe, wake).ratio()
-        if score > best_score:
-            best_score = score
-            best_alias = wake
-    return best_alias if best_alias is not None and best_score >= SIMILARITY_BLOCK else None
+    return None
 
 
 def looks_like_gibberish_probe(text: str) -> bool:
@@ -145,14 +137,13 @@ def looks_like_gibberish_probe(text: str) -> bool:
 def strip_voice_wake_word(text: str) -> str:
     text_n = strip_leading_voice_fillers(text)
 
-    for wake_word in WAKE_WORDS:
-        ww = wake_word.strip()
-        if not ww:
+    for wake_word in normalized_wake_words():
+        if not wake_word:
             continue
 
-        pattern_once = rf"(?:^|\s){re.escape(ww)}(?:\s|$)"
-        new_text = re.sub(pattern_once, " ", text_n, count=1)
-        if new_text != text_n:
+        pattern_once = rf"(?:^|\s){re.escape(wake_word)}(?:\s|$)"
+        new_text = re.sub(pattern_once, " ", normalize_voice_text(text_n), count=1)
+        if new_text != normalize_voice_text(text_n):
             return clean_text(new_text)
 
     return clean_text(text_n)

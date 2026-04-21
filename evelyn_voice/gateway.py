@@ -397,6 +397,7 @@ class VoiceGateway:
                     else:
                         self.state.bind_ssrc(user_id_i, ssrc_i)
                     self.state.set_current_speaking(user_id_i, ssrc_i)
+                    print(f"[VOICE STAGE] speaking_map user_id={user_id_i} ssrc={ssrc_i} speaking={speaking} dave_user_id={dave_user_id}")
                     log.info(
                         "VOICE MAP SPEAKING | user_id=%s ssrc=%s speaking=%s dave_user_id=%s",
                         user_id_i,
@@ -420,6 +421,7 @@ class VoiceGateway:
                     except Exception:
                         continue
             self.state.pending_user_ids = parsed_ids
+            print(f"[VOICE STAGE] clients_connect pending_user_ids={parsed_ids}")
             log.info("VOICE CLIENTS_CONNECT | data=%r", data)
             return
 
@@ -441,6 +443,7 @@ class VoiceGateway:
                         )
                     else:
                         self.state.bind_ssrc(user_id_i, ssrc_i)
+                    print(f"[VOICE STAGE] client_map user_id={user_id_i} ssrc={ssrc_i} dave_user_id={dave_user_id}")
                     log.info("VOICE MAP | user_id=%s ssrc=%s dave_user_id=%s", user_id_i, ssrc_i, dave_user_id)
                 except Exception as e:
                     log.warning("VOICE MAP failed | data=%r err=%r", data, e)

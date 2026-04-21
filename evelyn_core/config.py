@@ -258,6 +258,8 @@ WAKE_WORDS = [
     ).split(",")
     if w.strip()
 ]
+# 단 하나의 exact wake word만 허용하고 싶을 때 명시적으로 지정.
+EXACT_WAKE_WORD = os.getenv("EXACT_WAKE_WORD", "이블린").strip()
 
 # 디스코드 수신 PCM 샘플레이트.
 RATE = 48000

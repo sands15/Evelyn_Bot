@@ -1291,6 +1291,49 @@ class EvelynVoiceClient(discord.VoiceClient):
 
         return candidates
 
+    def _fallback_unmapped_user_id(self, *, ssrc: int) -> int | None:
+        candidates: list[int] = []
+
+        def add(value) -> None:
+            if value is None:
+                return
+            try:
+                value_i = int(value)
+            except Exception:
+                return
+            if value_i not in candidates:
+                candidates.append(value_i)
+
+        add(self.runtime.get_preferred_user_id(int(ssrc)))
+        add(self.runtime.current_speaking_user_id)
+
+        for pending_user_id in getattr(self.runtime, "pending_user_ids", ()):
+            add(pending_user_id)
+
+        try:
+            human_members = [m for m in getattr(self.channel, "members", []) if not getattr(m, "bot", False)]
+        except Exception:
+            human_members = []
+
+        if len(human_members) == 1:
+            add(human_members[0].id)
+
+        active_humans = []
+        for member in human_members:
+            voice_state = getattr(member, "voice", None)
+            if voice_state is None:
+                continue
+            if getattr(voice_state, "deaf", False) or getattr(voice_state, "self_deaf", False):
+                continue
+            active_humans.append(member)
+
+        if len(active_humans) == 1:
+            add(active_humans[0].id)
+
+        if len(candidates) == 1:
+            return candidates[0]
+        return None
+
     @staticmethod
     def _is_retryable_inner_reason(reason: str | None) -> bool:
         return reason in {"not_ready", "no_session", "no_valid_cryptor", "retry_candidate_failed", "cryptor_pending"}
@@ -1863,6 +1906,9 @@ class EvelynVoiceClient(discord.VoiceClient):
                 state["in_utterance"] = True
                 state["utterance_started_at"] = packet_info.get("received_at", now)
                 state["packets"] = list(state["preroll"])
+                print(
+                    f"[VOICE STAGE] utterance_start ssrc={ssrc} seq={sequence} ts={timestamp} payload={payload_len} preroll={len(state['packets'])} media_q={self.media_queue.qsize()}"
+                )
                 if self.media_queue.qsize() * 20 >= VOICE_TIMING_LOG_THRESHOLD_MS:
                     log.info(
                         "UTTERANCE START | ssrc=%d seq=%d ts=%d payload=%d preroll=%d media_q=%d",
@@ -1964,6 +2010,11 @@ class EvelynVoiceClient(discord.VoiceClient):
                 pending.append(packet_info)
                 self._prune_pending_ssrc_packets(now=packet_info["received_at"])
 
+                if self.media_packet_count == 0:
+                    print(
+                        f"[VOICE STAGE] first_rtp_packet ssrc={info['ssrc']} seq={info['sequence']} ts={info['timestamp']} payload={len(payload)}"
+                    )
+
                 try:
                     self.media_queue.put_nowait(packet_info)
                 except asyncio.QueueFull:
@@ -2027,6 +2078,9 @@ class EvelynVoiceClient(discord.VoiceClient):
                     utterance_packets = state["packets"].copy()
 
                     try:
+                        print(
+                            f"[VOICE STAGE] utterance_queue_put idx={self.utterance_count} ssrc={ssrc} packets={packet_count} first_seq={first_seq} last_seq={last_seq}"
+                        )
                         self.utterance_queue.put_nowait(
                             {
                                 "idx": self.utterance_count,
@@ -2076,13 +2130,28 @@ class EvelynVoiceClient(discord.VoiceClient):
                         self.utterance_queue.qsize(),
                     )
 
+                print(
+                    f"[VOICE STAGE] utterance_dispatch idx={idx} ssrc={ssrc} packets={packet_count} payload={total_payload} queue_wait_ms={f'{queue_wait_ms:.0f}' if queue_wait_ms is not None else '?'}"
+                )
                 task = asyncio.create_task(self._process_utterance_packets(item))
                 self._utterance_processing_tasks.add(task)
-                task.add_done_callback(self._utterance_processing_tasks.discard)
+                def _done(t: asyncio.Task) -> None:
+                    self._utterance_processing_tasks.discard(t)
+                    try:
+                        exc = t.exception()
+                    except asyncio.CancelledError:
+                        print(f"[VOICE STAGE] process_utterance_cancelled idx={idx} ssrc={ssrc}")
+                        return
+                    if exc is not None:
+                        print(f"[VOICE STAGE] process_utterance_exception idx={idx} ssrc={ssrc} err={exc!r}")
+                task.add_done_callback(_done)
         except asyncio.CancelledError:
             pass
 
     async def _process_utterance_packets(self, item: dict) -> None:
+        print(
+            f"[VOICE STAGE] process_utterance_enter idx={item.get('idx')} ssrc={item.get('ssrc')} packets={len(item.get('packets') or [])}"
+        )
         outer_fail = 0
         dave_fail = 0
         opus_fail = 0
@@ -2107,18 +2176,22 @@ class EvelynVoiceClient(discord.VoiceClient):
         last_seq = packets[-1]["sequence"]
         total_payload = sum(len(p["payload"]) for p in packets)
 
+        print(
+            f"[VOICE STAGE] process_utterance_packets_ready idx={idx} ssrc={ssrc} packets={len(packets)} first_seq={first_seq} last_seq={last_seq} payload={total_payload}"
+        )
+
         user_id = self.runtime.get_preferred_user_id(ssrc)
+        print(
+            f"[VOICE STAGE] preferred_user_lookup idx={idx} ssrc={ssrc} user_id={user_id} current_speaking_user_id={self.runtime.current_speaking_user_id} pending={list(getattr(self.runtime, 'pending_user_ids', []))}"
+        )
 
         if user_id is None:
-            try:
-                human_members = [m for m in getattr(self.channel, "members", []) if not getattr(m, "bot", False)]
-            except Exception:
-                human_members = []
-
-            if len(human_members) == 1:
-                user_id = int(human_members[0].id)
+            rescued_user_id = self._fallback_unmapped_user_id(ssrc=int(ssrc))
+            if rescued_user_id is not None:
+                user_id = int(rescued_user_id)
                 self.runtime.bind_ssrc(user_id, ssrc)
-                log.info("VOICE MAP FALLBACK | user_id=%d ssrc=%d", user_id, ssrc)
+                print(f"[VOICE STAGE] map_rescue user_id={user_id} ssrc={ssrc} pending={list(getattr(self.runtime, 'pending_user_ids', []))}")
+                log.warning("VOICE MAP RESCUE | user_id=%d ssrc=%d pending=%r", user_id, ssrc, list(getattr(self.runtime, "pending_user_ids", [])))
 
         if user_id is None:
             now = asyncio.get_running_loop().time()
@@ -2144,6 +2217,9 @@ class EvelynVoiceClient(discord.VoiceClient):
                     map_retry=map_retry,
                     reason=retry_reason,
                 )
+                print(
+                    f"[VOICE STAGE] unknown_ssrc_wait idx={idx} ssrc={ssrc} pending={len(pending_packets)} age_sec={pending_age_sec:.2f} retry={map_retry} reason={retry_reason}"
+                )
                 retry_item = deepcopy(item)
                 retry_item["map_retry"] = map_retry + 1
                 retry_item["packets"] = pending_packets
@@ -2168,6 +2244,9 @@ class EvelynVoiceClient(discord.VoiceClient):
                 pending_age_sec=pending_age_sec,
                 map_retry=map_retry,
                 reason="drop_unknown_ssrc",
+            )
+            print(
+                f"[VOICE STAGE] drop_unknown_ssrc idx={idx} ssrc={ssrc} pending={len(pending_packets)} age_sec={pending_age_sec:.2f} retry={map_retry}"
             )
             return
         log.info(
@@ -2631,6 +2710,9 @@ class EvelynVoiceClient(discord.VoiceClient):
 
         if getattr(self, "on_user_audio", None) is not None:
             try:
+                print(
+                    f"[VOICE STAGE] on_user_audio_dispatch idx={idx} user_id={user_id} ssrc={ssrc} pcm_bytes={len(pcm_bytes)}"
+                )
                 callback_started_at = asyncio.get_running_loop().time()
                 try:
                     await self.on_user_audio(member, pcm_bytes, debug_meta=voice_debug_meta)
@@ -2642,6 +2724,7 @@ class EvelynVoiceClient(discord.VoiceClient):
                 if self._should_log_timing(callback_ms):
                     log.warning("VOICE CALLBACK SLOW | idx=%d pcm_bytes=%d callback_ms=%.0f", idx, len(pcm_bytes), callback_ms)
             except Exception as e:
+                print(f"[VOICE STAGE] on_user_audio_error idx={idx} err={e!r}")
                 log.warning("on_user_audio callback failed | idx=%d err=%r", idx, e)
 
     def stop_listening(self) -> None:
