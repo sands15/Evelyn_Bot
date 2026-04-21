@@ -227,6 +227,7 @@ cognitive_locks: dict[int, asyncio.Lock] = {}
 background_cognitive_tasks: dict[str, asyncio.Task] = {}
 voice_ingress_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
 voice_worker_task: asyncio.Task | None = None
+room_recent_speaker_stats: dict[str, dict[int, dict[str, float]]] = {}
 
 
 # =========================================================
@@ -353,7 +354,85 @@ def room_state_snapshot(room_session_key: str | None) -> dict:
         "owner_user_id": room_owner_user_ids.get(room_session_key),
         "owner_until": owner_until,
         "reply_in_progress": room_reply_in_progress.get(room_session_key, False),
+        "active_speaker_user_id": pick_active_speaker(room_session_key),
     }
+
+
+
+def _prune_room_speaker_stats(room_session_key: str | None, *, now: float | None = None) -> dict[int, dict[str, float]]:
+    if not room_session_key:
+        return {}
+    now_mono = now if now is not None else time.monotonic()
+    stats = room_recent_speaker_stats.get(room_session_key, {})
+    keep: dict[int, dict[str, float]] = {}
+    for user_id, data in stats.items():
+        last_packet_at = float(data.get("last_packet_at") or 0.0)
+        if now_mono - last_packet_at <= 2.5:
+            keep[int(user_id)] = data
+    if keep:
+        room_recent_speaker_stats[room_session_key] = keep
+    else:
+        room_recent_speaker_stats.pop(room_session_key, None)
+    return keep
+
+
+
+def update_room_speaker_activity(
+    room_session_key: str | None,
+    user_id: int | None,
+    *,
+    voiced_ms: float,
+    raw_seconds: float,
+    rms: float,
+    wake_detected: bool = False,
+) -> dict[str, float]:
+    if not room_session_key or user_id is None:
+        return {}
+    now_mono = time.monotonic()
+    stats = _prune_room_speaker_stats(room_session_key, now=now_mono)
+    entry = stats.setdefault(int(user_id), {})
+    entry["last_packet_at"] = now_mono
+    entry["recent_voiced_ms"] = max(float(entry.get("recent_voiced_ms") or 0.0) * 0.55, float(voiced_ms))
+    entry["recent_raw_ms"] = max(float(entry.get("recent_raw_ms") or 0.0) * 0.55, float(raw_seconds) * 1000.0)
+    entry["body_rms"] = max(float(entry.get("body_rms") or 0.0) * 0.6, float(rms))
+    if wake_detected:
+        entry["wake_priority"] = now_mono
+    else:
+        entry["wake_priority"] = float(entry.get("wake_priority") or 0.0)
+    room_recent_speaker_stats[room_session_key] = stats
+    return entry
+
+
+
+def pick_active_speaker(room_session_key: str | None) -> int | None:
+    if not room_session_key:
+        return None
+    now_mono = time.monotonic()
+    stats = _prune_room_speaker_stats(room_session_key, now=now_mono)
+    if not stats:
+        return None
+
+    owner_user_id = room_owner_user_ids.get(room_session_key)
+    owner_until = float(room_owner_until.get(room_session_key, 0.0) or 0.0)
+    owner_active = owner_user_id is not None and owner_until > now_mono
+    if owner_active:
+        owner_stats = stats.get(int(owner_user_id))
+        if owner_stats and now_mono - float(owner_stats.get("last_packet_at") or 0.0) <= 0.5:
+            return int(owner_user_id)
+
+    scored: list[tuple[tuple[float, float, float, float], int]] = []
+    for user_id, data in stats.items():
+        scored.append((
+            (
+                float(data.get("wake_priority") or 0.0),
+                float(data.get("recent_voiced_ms") or 0.0),
+                float(data.get("body_rms") or 0.0),
+                float(data.get("last_packet_at") or 0.0),
+            ),
+            int(user_id),
+        ))
+    scored.sort(reverse=True)
+    return scored[0][1] if scored else None
 
 
 
@@ -760,6 +839,7 @@ def should_reply_to_voice(
     session_key: str | None = None,
     room_session_key: str | None = None,
     user_id: int | None = None,
+    active_speaker_user_id: int | None = None,
 ) -> tuple[bool, str, str]:
     now = time.monotonic()
     text_n = normalize_voice_text(text)
@@ -768,6 +848,8 @@ def should_reply_to_voice(
     owner_user_id = room_state.get("owner_user_id")
     owner_active = is_room_owner_active(room_session_key, user_id)
     active_session = session_key is not None and is_session_active_for_user(session_key, user_id)
+    if active_speaker_user_id is None:
+        active_speaker_user_id = room_state.get("active_speaker_user_id")
     awaiting_followup = bool(session_state.get("awaiting_user_reply")) and owner_active
     followup_allowed = owner_active and (active_session or awaiting_followup)
 
@@ -792,6 +874,9 @@ def should_reply_to_voice(
 
     if followup_allowed:
         return True, "ok", "owner_followup"
+
+    if active_speaker_user_id is not None and user_id is not None and active_speaker_user_id != user_id and not wake_detected:
+        return False, "not_active_speaker", "not_active_speaker"
 
     if owner_user_id is not None and user_id is not None and owner_user_id != user_id:
         if not wake_detected:
@@ -4148,6 +4233,15 @@ async def _process_member_audio_impl(
     waveform_stats = compute_waveform_activity_stats(audio16k, sampling_rate=stt_sampling_rate)
     voiced_ms = float(waveform_stats.get("voiced_ms") or 0.0)
     longest_voiced_ms = float(waveform_stats.get("longest_voiced_ms") or 0.0)
+    body_rms = float(waveform_stats.get("body_rms") or 0.0)
+    update_room_speaker_activity(
+        room_session_key,
+        member.id,
+        voiced_ms=voiced_ms,
+        raw_seconds=raw_seconds,
+        rms=body_rms,
+        wake_detected=False,
+    )
     if transport_corrupted and raw_seconds <= max(1.4, TAIL_FRAGMENT_MAX_RAW_SEC + 0.5):
         bad_audio_count = increment_session_bad_audio(session_key)
         register_drop_reason(
@@ -4447,6 +4541,17 @@ async def _process_member_audio_impl(
         f"wake_probe_text={wake_probe!r} wake_confirm_text={wake_confirm!r} wake_reject_reason={wake_reject_reason!r} text={text}"
     )
 
+    update_room_speaker_activity(
+        room_session_key,
+        member.id,
+        voiced_ms=voiced_ms,
+        raw_seconds=raw_seconds,
+        rms=body_rms,
+        wake_detected=wake_detected,
+    )
+    active_speaker_user_id = pick_active_speaker(room_session_key)
+    metrics.setdefault("meta", {}).update({"active_speaker_user_id": active_speaker_user_id})
+
     ok, reason, gate_mode = should_reply_to_voice(
         guild_id,
         text,
@@ -4455,6 +4560,7 @@ async def _process_member_audio_impl(
         session_key=session_key,
         room_session_key=room_session_key,
         user_id=member.id,
+        active_speaker_user_id=active_speaker_user_id,
     )
     metrics.setdefault("meta", {}).update({
         "owner_user_id": owner_user_id,
