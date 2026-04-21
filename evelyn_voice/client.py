@@ -1888,7 +1888,16 @@ class EvelynVoiceClient(discord.VoiceClient):
         return super().is_connected()
 
     def is_listening(self) -> bool:
-        return self._receive_task is not None and not self._receive_task.done()
+        return self.is_listener_healthy()
+
+    def is_listener_healthy(self) -> bool:
+        return bool(
+            self.udp_transport is not None
+            and self.runtime.receive_ready.is_set()
+            and self._receive_task is not None and not self._receive_task.done()
+            and self._decrypt_task is not None and not self._decrypt_task.done()
+            and self._utterance_task is not None and not self._utterance_task.done()
+        )
 
     def listen(self, sink: AudioSink | None = None) -> None:
         if self.udp_transport is None:

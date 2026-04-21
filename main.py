@@ -73,6 +73,11 @@ VOICE_BOTTLENECK_LOGS = os.getenv("VOICE_BOTTLENECK_LOGS", "true").lower() == "t
 VOICE_DEBUG_SAVE_AUDIO = os.getenv("VOICE_DEBUG_SAVE_AUDIO", "true").lower() == "true"
 VOICE_DEBUG_AUDIO_DIR = os.getenv("VOICE_DEBUG_AUDIO_DIR", "debug_audio")
 VOICE_DEBUG_MAX_FILES_PER_GUILD = int(os.getenv("VOICE_DEBUG_MAX_FILES_PER_GUILD", "200"))
+ROUTER_LLM_URL = globals().get("ROUTER_LLM_URL", os.getenv("ROUTER_LLM_URL", "http://127.0.0.1:9822/v1/chat/completions"))
+ROUTER_MODEL_NAME = globals().get("ROUTER_MODEL_NAME", os.getenv("ROUTER_MODEL_NAME", "gemma-4-E2B-it-UD-Q6_K_XL.gguf"))
+ROUTER_LLM_ENABLED = globals().get("ROUTER_LLM_ENABLED", os.getenv("ROUTER_LLM_ENABLED", "true").lower() in {"1", "true", "yes", "on"})
+ROUTER_ROUTE_MAX_TOKENS = int(globals().get("ROUTER_ROUTE_MAX_TOKENS", os.getenv("ROUTER_ROUTE_MAX_TOKENS", "80")))
+ROUTER_ROUTE_TIMEOUT_SEC = float(globals().get("ROUTER_ROUTE_TIMEOUT_SEC", os.getenv("ROUTER_ROUTE_TIMEOUT_SEC", "8")))
 _ALLOWED_CONSOLE_PREFIXES = (
     "🎤 [",
     "💬 [Evelyn]",
@@ -3306,8 +3311,13 @@ async def ensure_listening_voice_client(guild: discord.Guild, target_channel: di
 
     if isinstance(vc, EvelynVoiceClient):
         vc.on_user_audio = process_member_audio
-        if not vc.is_listening():
+        if not vc.is_listener_healthy():
+            try:
+                vc.stop_listening()
+            except Exception:
+                pass
             vc.listen()
+            print(f"[VOICE LISTEN REARM] guild={guild.id} channel={target_channel.name}")
         return vc
 
     return None
