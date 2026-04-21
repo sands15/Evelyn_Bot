@@ -70,6 +70,7 @@ from evelyn_voice import EvelynVoiceClient
 TURN_TRACE_JSON_LOG = os.getenv("TURN_TRACE_JSON_LOG", "true").lower() == "true"
 VOICE_CONSOLE_ONLY_STT_AND_REPLY = os.getenv("VOICE_CONSOLE_ONLY_STT_AND_REPLY", "true").lower() == "true"
 VOICE_BOTTLENECK_LOGS = os.getenv("VOICE_BOTTLENECK_LOGS", "true").lower() == "true"
+VOICE_TRACE_ALL_EVENTS = os.getenv("VOICE_TRACE_ALL_EVENTS", "true").lower() == "true"
 VOICE_DEBUG_SAVE_AUDIO = os.getenv("VOICE_DEBUG_SAVE_AUDIO", "true").lower() == "true"
 VOICE_DEBUG_AUDIO_DIR = os.getenv("VOICE_DEBUG_AUDIO_DIR", "debug_audio")
 VOICE_DEBUG_MAX_FILES_PER_GUILD = int(os.getenv("VOICE_DEBUG_MAX_FILES_PER_GUILD", "200"))
@@ -553,7 +554,12 @@ def _trim_voice_debug_dir(guild_dir: Path) -> None:
 def log_turn_event(event: str, **payload) -> None:
     if not TURN_TRACE_JSON_LOG:
         return
-    if VOICE_CONSOLE_ONLY_STT_AND_REPLY and VOICE_BOTTLENECK_LOGS and event not in _BOTTLENECK_TURN_TRACE_EVENTS:
+    if (
+        VOICE_CONSOLE_ONLY_STT_AND_REPLY
+        and VOICE_BOTTLENECK_LOGS
+        and not VOICE_TRACE_ALL_EVENTS
+        and event not in _BOTTLENECK_TURN_TRACE_EVENTS
+    ):
         return
     record = {"event": event, "ts": round(time.time(), 3)}
     for key, value in payload.items():
