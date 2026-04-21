@@ -126,13 +126,16 @@ def fuzzy_leading_wake_alias(text: str) -> str | None:
         return None
 
     head = tokens[0]
+    compact = text_n.replace(" ", "")
     for wake in normalized_wake_words():
         wake_tokens = [t for t in wake.split() if t]
         if not wake_tokens:
             continue
         target = wake_tokens[0]
+        wake_compact = wake.replace(" ", "")
         ratio = SequenceMatcher(None, head, target).ratio()
-        if ratio >= 0.74:
+        compact_ratio = SequenceMatcher(None, compact, wake_compact).ratio()
+        if ratio >= 0.72 or compact_ratio >= 0.78:
             return wake
     return None
 

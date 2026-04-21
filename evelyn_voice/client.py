@@ -2666,13 +2666,13 @@ class EvelynVoiceClient(discord.VoiceClient):
             not segment_started_with_concealment
             and onset_packet_ok
             and first_clean_window_ok
-            and not stale_onset
-            and len(body_packets) >= 20
+            and (not stale_onset or not stale_penalty_active)
+            and len(body_packets) >= 12
         )
         robotic_probe_candidate = bool(
             owner_followup_candidate
             and onset_robotic
-            and (onset_vad_prob >= 0.20 or len(body_packets) >= 20 or total_payload >= 12000)
+            and (onset_vad_prob >= 0.16 or len(body_packets) >= 12 or total_payload >= 8000)
         )
         severe_onset = (
             ((stale_penalty_active and onset_robotic) and not robotic_probe_candidate)

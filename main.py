@@ -3826,8 +3826,8 @@ async def build_first_response(
     payload = {
         "model": MODEL_NAME,
         "messages": messages + [{"role": "user", "content": final_user_text}],
-        "temperature": 0.1,
-        "max_tokens": min(64, VOICE_LLM_MAX_TOKENS),
+        "temperature": 0.0,
+        "max_tokens": min(40, VOICE_LLM_MAX_TOKENS),
         "stream": False,
     }
 
@@ -3895,8 +3895,8 @@ async def build_followup_response(
     payload = {
         "model": MODEL_NAME,
         "messages": messages + [{"role": "user", "content": followup_prompt}],
-        "temperature": 0.1,
-        "max_tokens": min(96, VOICE_LLM_MAX_TOKENS),
+        "temperature": 0.0,
+        "max_tokens": min(64, VOICE_LLM_MAX_TOKENS),
         "stream": False,
     }
     timeout = aiohttp.ClientTimeout(total=120)
