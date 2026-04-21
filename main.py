@@ -3263,6 +3263,10 @@ async def connect_evelyn_voice_client(target_channel: discord.VoiceChannel) -> E
                 )
                 if not isinstance(vc, EvelynVoiceClient):
                     raise RuntimeError(f"unexpected voice client type: {type(vc)!r}")
+                vc.on_user_audio = process_member_audio
+                if not vc.is_listener_healthy():
+                    vc.listen()
+                    print(f"[VOICE CONNECT ARM] guild={guild_id} channel={target_channel.name}")
                 return vc
             except Exception as e:
                 last_error = e
