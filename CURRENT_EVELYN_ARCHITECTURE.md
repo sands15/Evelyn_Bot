@@ -20,6 +20,8 @@
 - `C:\Evelyn\main.py`
 - `C:\Evelyn\evelyn_core\config.py`
 - `C:\Evelyn\evelyn_core\memory.py`
+- `C:\Evelyn\evelyn_core\text.py`
+- `C:\Evelyn\evelyn_voice\client.py`
 
 ---
 
@@ -50,13 +52,13 @@
    - Sub-LLM 탭: `wsl.exe bash /mnt/c/Evelyn/evelyn_core/run_sub_llm.sh`
    - TTS 탭: `powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0start_tts.ps1"`
    - Bot 탭: `powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0start_bot.ps1"`
-6. Main-LLM 탭을 먼저 `start "" "%WT_EXE%" -w %WT_WINDOW% new-tab ...` 로 열고, `timeout /t 1 /nobreak >nul` 후 나머지 4개 탭을 같은 `-w %WT_WINDOW%` 로 연다.
+6. Main-LLM 탭을 먼저 열고 `timeout /t 1 /nobreak >nul` 후 나머지 탭을 같은 WT window에 연다.
 
 현재 통합 시작 구조의 핵심은:
 
 - **의도된 구조는 한 개 WT 창 + 5개 탭**
-- 각 LLM 탭은 **WT에서 직접 `wsl.exe bash run_*.sh`** 를 실행한다.
-- TTS/Bot 탭은 **WT에서 직접 PowerShell 스크립트** 를 실행한다.
+- 각 LLM 탭은 WT에서 직접 `wsl.exe bash run_*.sh` 를 실행한다.
+- TTS/Bot 탭은 WT에서 직접 PowerShell 스크립트를 실행한다.
 
 ---
 
@@ -75,21 +77,21 @@
 - `MAIN_LLM_N_PARALLEL=1`
 - `MAIN_LLM_REASONING=off`
 - `MAIN_LLM_REASONING_BUDGET=0`
-- `MAIN_LLM_MODEL=/home/sands12/.cache/huggingface/hub/models--unsloth--gemma-4-E4B-it-GGUF/snapshots/ce152932ac27bc40bc9c727386760424d50bb456/gemma-4-E4B-it-Q5_K_M.gguf`
+- `MAIN_LLM_MODEL=/home/sands12/.cache/huggingface/hub/models--unsloth--gemma-4-E4B-it-GGUF/.../gemma-4-E4B-it-Q5_K_M.gguf`
 
 서브 LLM:
 - `SUB_LLM_GPU=0`
 - `SUB_LLM_PORT=9821`
 - `SUB_LLM_CONTEXT=8192`
 - `SUB_LLM_REASONING_BUDGET=96`
-- `SUB_LLM_MODEL=/home/sands12/.cache/huggingface/hub/models--LGAI-EXAONE--EXAONE-3.5-7.8B-Instruct-GGUF/snapshots/c618bf67338171760c72c3f109f2900cb7d79855/EXAONE-3.5-7.8B-Instruct-Q8_0.gguf`
+- `SUB_LLM_MODEL=/home/sands12/.cache/huggingface/hub/models--LGAI-EXAONE--EXAONE-3.5-7.8B-Instruct-GGUF/.../EXAONE-3.5-7.8B-Instruct-Q8_0.gguf`
 
 라우터 LLM:
 - `ROUTER_LLM_GPU=0`
 - `ROUTER_LLM_PORT=9822`
 - `ROUTER_LLM_CONTEXT=4096`
 - `ROUTER_LLM_REASONING_BUDGET=96`
-- `ROUTER_LLM_MODEL=/home/sands12/.cache/huggingface/hub/models--unsloth--gemma-4-E2B-it-GGUF/snapshots/f064409f340b34190993560b2168133e5dbae558/gemma-4-E2B-it-UD-Q6_K_XL.gguf`
+- `ROUTER_LLM_MODEL=/home/sands12/.cache/huggingface/hub/models--unsloth--gemma-4-E2B-it-GGUF/.../gemma-4-E2B-it-UD-Q6_K_XL.gguf`
 
 TTS:
 - `OMNIVOICE_VENV=C:\Users\Admin\omnivoice-server\.venv`
@@ -101,6 +103,7 @@ TTS:
 - `START_WAIT_INTERVAL_SEC=2`
 - `OPUS_ERROR_TO_SILENCE=false`
 - `STT_USE_RAW_48K=false`
+- `VOICE_CONSOLE_ONLY_STT_AND_REPLY=true` 일 때 콘솔 허용 prefix만 출력한다.
 
 ### 2-2. Main-LLM
 현재 `run_main_llm.sh` 는:
@@ -110,7 +113,7 @@ TTS:
 3. `export CUDA_VISIBLE_DEVICES="$MAIN_LLM_GPU"`
 4. 모델 파일 존재 여부 검사
 5. `cd "$LLAMA_DIR"`
-6. `exec ./build/bin/llama-server` 실행
+6. `exec ./build/bin/llama-server`
 
 실행 인자:
 - `-m "$MAIN_LLM_MODEL"`
@@ -123,356 +126,368 @@ TTS:
 - `--reasoning "$MAIN_LLM_REASONING"`
 - `--reasoning-budget "$MAIN_LLM_REASONING_BUDGET"`
 
-`start_main_llm.bat` 는:
-- 먼저 `:port_ready` 로 `%MAIN_LLM_PORT%` 가 이미 열려 있으면 종료 코드 2로 빠진다.
-- `--inline` 이면 `wsl.exe bash -lc "%WSL_CMD%"` 를 직접 실행한다.
-- inline이 아니면 WT 탭 또는 cmd 창에서 `wsl.exe bash /mnt/c/Evelyn/evelyn_core/run_main_llm.sh` 를 연다.
-- 탭 제목은 `Main-LLM` 이다.
-
 ### 2-3. Router-LLM
-현재 `run_router_llm.sh` 는:
-- `CUDA_VISIBLE_DEVICES="$ROUTER_LLM_GPU"`
-- `llama-server`
+`run_router_llm.sh` 는:
+- GPU `0`
 - 포트 `9822`
 - reasoning `on`
 - reasoning budget `96`
 - context `4096`
 
-`start_router_llm.bat` 는 Main과 같은 구조다.
-차이는 모델/포트/제목만 Router-LLM 쪽 값이라는 점이다.
-
 ### 2-4. Sub-LLM
-현재 `run_sub_llm.sh` 는:
-- `CUDA_VISIBLE_DEVICES="$SUB_LLM_GPU"`
-- `llama-server`
+`run_sub_llm.sh` 는:
+- GPU `0`
 - 포트 `9821`
 - reasoning `on`
 - reasoning budget `96`
 - context `8192`
 
-`start_sub_llm.bat` 도 Router와 같은 구조다.
-차이는 모델/포트/제목만 Sub-LLM 쪽 값이라는 점이다.
-
 ### 2-5. TTS
-현재 `start_tts.ps1` 는:
-
-1. 프로젝트 루트를 `C:\Evelyn` 으로 잡고 `Set-Location`
-2. `profileDir` 를 `%OMNIVOICE_PROFILE_DIR%` 또는 `C:\Evelyn\omnivoice_profiles` 로 정함
-3. `venvDir` 를 `%OMNIVOICE_VENV%` 또는 `C:\Users\Admin\omnivoice-server\.venv` 로 정함
-4. `ttsPort` 를 `%TTS_PORT%` 또는 `8880` 으로 정함
-5. `$env:CUDA_VISIBLE_DEVICES = '1'`
-6. 프로필 디렉터리가 없으면 생성
-7. `python.exe -m omnivoice_server.cli --host 127.0.0.1 --port $ttsPort --device cuda --profile-dir $profileDir`
-
-`start_tts.bat` 는:
-- 먼저 `%TTS_PORT%` 가 이미 listening 이면 종료 코드 2로 빠진다.
-- WT가 있으면 `start_tts.ps1` 를 새 TTS 탭에서 실행한다.
-- WT가 없으면 별도 PowerShell 창에서 `start_tts.ps1` 를 실행한다.
+`start_tts.ps1` 는:
+- 프로젝트 루트를 `C:\Evelyn` 으로 잡는다.
+- OmniVoice profile dir / venv / port 를 잡는다.
+- `$env:CUDA_VISIBLE_DEVICES = '1'`
+- `python -m omnivoice_server.cli --host 127.0.0.1 --port 8880 --device cuda --profile-dir <dir>` 를 실행한다.
 
 ### 2-6. Bot
-현재 `start_bot.ps1` 는:
+`start_bot.ps1` 는 아래 순서로 대기 후 실행한다.
 
-1. 프로젝트 루트를 `C:\Evelyn` 으로 잡고 `Set-Location`
-2. `Wait-Port` 함수로 아래 순서대로 127.0.0.1 포트를 기다린다.
-   - `9820` Main-LLM
-   - `9822` Router-LLM
-   - `9821` Sub-LLM
-   - `8880` OmniVoice-TTS
-3. `DISCORD_BOT_TOKEN` 이 없으면 throw
-4. `.venv\Scripts\python.exe` 가 있으면 그것으로 `main.py` 실행
-5. 없으면 `py -3 main.py` 실행
+1. `9820` Main-LLM
+2. `9822` Router-LLM
+3. `9821` Sub-LLM
+4. `8880` TTS
+5. `main.py`
 
-현재 `start_bot.bat` 는:
-- `--inline` 이 아니면 WT 탭 또는 별도 PowerShell 창에서 `start_bot.ps1` 를 연다.
-- `--inline` 이면 배치 내부에서 포트 대기 후 `main.py` 를 실행한다.
-
-즉 현재 Bot은 **자기 탭 안에서 스스로 main/router/sub/tts 준비를 기다린 다음 main.py 를 실행하는 구조**다.
+즉 현재 Bot은 **자기 탭 안에서 모델/TTS 준비를 모두 기다린 뒤 main.py 를 실행하는 구조**다.
 
 ---
 
-## 3. 현재 답장 구조의 핵심 요약
+## 3. 현재 역할 분담
 
-현재 코드 기준으로 사용자에게 실제 답을 만드는 경로는 **메인 LLM 하나**다.
+현재 코드 기준 역할은 아래다.
 
-- 메인 답변 생성: `LLM_SERVER_URL` (`127.0.0.1:9820`)
-- 라우터 판단 / cognitive 상태 생성: `ROUTER_LLM_URL` (`127.0.0.1:9822`)
-- 장기기억 요약/사실/열린질문 업데이트: `SUMMARY_LLM_URL` (`127.0.0.1:9821`)
-- 음성 합성: OmniVoice (`127.0.0.1:8880`)
-
-즉 현재 역할은 실제 코드 기준으로 아래다.
-
-- **Main**: 사용자에게 보이는 실제 답변 생성
-- **Router**: route JSON 생성 + cognitive_state JSON 생성
-- **Sub(SUMMARY)**: rolling summary / durable facts / open questions 저장
-- **TTS**: 음성 합성
-- **Bot**: 디스코드 이벤트 처리, STT, 메모리, 라우팅 호출, TTS 재생
+- **Main LLM (`9820`)**: 사용자에게 보이는 실제 답변 생성
+- **Router LLM (`9822`)**: route 판단 + cognitive_state 생성
+- **Sub/Summary LLM (`9821`)**: rolling summary / durable facts / open questions 갱신
+- **OmniVoice TTS (`8880`)**: 음성 합성
+- **Bot (`main.py`)**: 디스코드 이벤트, STT, wake gating, memory, routing, TTS 재생
 
 중요한 현재 사실:
-
-- `prepare_llm_messages()` 는 항상 `classify_llm_route_async()` 를 호출한다.
-- 하지만 현재 코드에서는 그 route 값을 **실제 분기 실행에 거의 사용하지 않고**, 주로 로그로 남긴다.
-- 현재 응답 경로는 route가 `main_direct / sub_hint / sub_wait` 여도 결국 **메인 LLM** 으로 간다.
-- 즉 현재 route는 **실행 분기보다는 진단/메타값에 가깝다.**
+- route 계산은 여전히 존재한다.
+- 하지만 실제 최종 답변 경로는 대부분 메인 LLM으로 수렴한다.
+- cognitive_state 는 실행 경로 일부를 바꾸기 시작했지만, 최종 자연어 생성은 여전히 메인 LLM이 담당한다.
 
 ---
 
-## 4. 현재 텍스트 답장 구조
+## 4. 현재 텍스트 입력 구조
 
-현재 텍스트 답장은 `main.py` 의 `on_message()` 에서 처리한다.
+### 4-1. on_message 기본 동작
+현재 텍스트 입력은 `main.py` 의 `on_message()` 에서 처리한다.
 
-### 4-1. 텍스트 트리거 조건
-텍스트 입력은 아래 둘 중 하나일 때만 답한다.
+텍스트가 일반 대화 경로로 들어가는 조건은 아래 둘 중 하나다.
 
-1. `contains_wake_word(message.content)` 가 참인 경우
-2. `message.reference` 로 가져온 원문이 봇 자신의 메시지인 경우
+1. `contains_wake_word(message.content)` 가 참
+2. `message.reference` 로 가져온 원문이 봇 메시지인 경우
 
-둘 다 아니면 `await bot.process_commands(message)` 후 바로 return 한다.
-
-즉 현재 텍스트 일반 메시지에는 상시 반응하지 않는다.
+추가로 현재는 **길드 command prefix로 시작하는 메시지는 대화 라우팅에서 제외**된다.
+즉 `!재시작` 같은 메시지는 일반 대화로 처리하지 않고 바로 `bot.process_commands(message)` 로 넘긴다.
 
 ### 4-2. 텍스트 처리 순서
 현재 순서는 아래와 같다.
 
-1. `last_text_channel_ids[message.guild.id] = message.channel.id` 저장
-2. wake word 또는 bot reply 여부 검사
-3. 사용자 텍스트 정리
-   - wake word면 `strip_voice_wake_word(message.content)`
-   - 아니면 `message.content.strip()`
-   - 비면 `"부르셨나요?"`
-4. `get_conversation_history(message.guild.id)` 로 길드별 대화 히스토리 준비
-5. `guild_locks[guild_id]` 락 획득
-   - 이미 락이 걸려 있으면 `⏳ 지금 다른 응답을 처리 중이야. 잠깐만.` 전송 후 종료
-6. `message.channel.typing()` 안에서
-   - `AUTO_JOIN_VOICE` 가 true면 `ensure_voice_client(message)` 로 음성 채널 자동 연결 시도
-   - `answer = await ask_llm_once(...)`
-   - `plain_answer = strip_omnivoice_tags(answer)` (비면 원문 answer)
-   - `await message.channel.send(visible_text(answer))`
-7. 락 안에서 후처리
-   - `append_history(...)`
-   - `schedule_memory_update(...)`
-   - `schedule_search_followup(...)`
-   - `vc` 가 있으면 `await speak_answer(vc, answer)` 로 음성 채널에도 읽음
-8. 마지막에 `await bot.process_commands(message)`
+1. 세션 키/메모리 키 계산
+2. command prefix 메시지면 즉시 command 처리
+3. wake word 또는 bot-reply 여부 검사
+4. 사용자 텍스트 정리
+5. 길드 락 획득
+6. `ask_llm_once(...)` 로 메인 응답 생성
+7. 채널에 visible text 전송
+8. history append
+9. memory update 예약
+10. search follow-up 예약
+11. voice client가 있으면 TTS로도 읽기
+12. 마지막에 `bot.process_commands(message)`
 
-### 4-3. 현재 텍스트 답장의 실제 LLM 경로
-`ask_llm_once()` 는 아래 순서로 간다.
+### 4-3. 현재 텍스트 답변 LLM 경로
+`ask_llm_once()` 는 아래를 한다.
 
 1. `prepare_llm_messages()` 호출
-2. cognitive_state가 `ask` 이고 `question_for_user` 가 있으면
-   - 원래 user_text 대신 `question_for_user` 를 `guided_user_text` 로 사용
-3. `build_main_response_guidance(cognitive_state, source=source)` 를 붙여 최종 user message 생성
-4. 메인 LLM (`LLM_SERVER_URL`) 로 non-stream 요청
-5. 응답 본문이 있으면 그대로 반환
-6. 본문이 없으면 reasoning에서 답변을 추출 시도
+2. cognitive_state가 ask 이고 `question_for_user` 가 있으면 그 질문을 user content처럼 사용
+3. `build_main_response_guidance()` 를 붙여 최종 user prompt 생성
+4. 메인 LLM non-stream 요청
+5. 응답 본문 사용
+6. 본문이 없으면 reasoning에서 추출 시도
 7. 그것도 없으면 fallback
-   - user_text 비어 있으면 `응, 듣고 있어.`
-   - 아니면 `응, 잠깐만.`
 
-즉 현재 ask 행동은 **router/cognitive가 직접 사용자에게 질문하지 않고**, 메인 LLM에 `question_for_user` 를 실제 user content처럼 넣어서 메인 LLM이 질문을 말하게 만드는 구조**다.**
+즉 텍스트에서는 현재 **메인 LLM non-stream** 이 기본이다.
 
 ---
 
-## 5. 현재 음성 답장 구조
+## 5. 현재 음성 입력 파이프라인
 
-현재 음성 답장은 `process_member_audio()` 에서 처리한다.
+현재 음성 입력은 `EvelynVoiceClient` 와 `main.py` 의 `process_member_audio()` 체인에서 처리한다.
 
-### 5-1. 음성 입력 시작 조건
-이 함수는 `EvelynVoiceClient` 가 사용자 PCM을 발화 단위로 넘겼을 때 불린다.
+### 5-1. Voice receive 런타임 구조
+`evelyn_voice/client.py` 에서 listen 시작 후 다음 3개 루프가 살아 있다.
 
-초기 차단:
-- `member is None` 이면 return
-- `member.bot` 이면 return
-- `guild is None` 이면 return
+- `_receive_loop()`
+- `_decrypt_loop()`
+- `_utterance_loop()`
 
-### 5-2. 음성 전처리
-현재 `STT_USE_RAW_48K` 기본값은 false 이다.
-그래서 기본 경로는:
+`_receive_loop()` 는 RTP packet을 받고 `media_queue` 로 넣는다.
+`_decrypt_loop()` 는 reorder 처리 후 packet을 utterance state로 보낸다.
+`_utterance_loop()` 는 발화 종료 조건이 만족된 utterance를 `_process_utterance_packets()` 로 넘긴다.
 
-- `audio16k = prepare_stt_audio(pcm_bytes)`
-- `audio_for_wake = audio16k`
-- `stt_sampling_rate = TARGET_RATE`
-- `wake_sampling_rate = TARGET_RATE`
+### 5-2. SSRC별 utterance state
+현재 SSRC별 state는 대략 아래 필드를 가진다.
 
-### 5-3. 음성 차단/필터링
-현재 아래 검사를 통과해야 한다.
+- `in_utterance`
+- `last_voice_like_at`
+- `utterance_started_at`
+- `packets`
+- `body_packets`
+- `preroll`
+- `last_onset_drop_at`
+- `consecutive_onset_drops`
+
+여기서 중요한 현재 변경점은:
+- **onset 평가는 `body_packets` 기준**으로 한다.
+- `first_packet_wait_ms` 도 body first packet 기준으로 계산한다.
+- utterance close 시 `preroll.clear()` 한다.
+- onset drop 시에도 `preroll.clear()` 한다.
+- 직전 onset drop 직후 새 utterance는 preroll snapshot 없이 시작한다.
+
+즉 현재는 예전보다 preroll carry-over를 강하게 줄인 상태다.
+
+### 5-3. process_member_audio() 초반
+`process_member_audio()` 초반에는 아래를 한다.
+
+1. `member.bot`, `guild is None` 같은 기본 차단
+2. `prepare_stt_audio(pcm_bytes)` 로 16k 오디오 생성
+3. **debug audio ingress 저장**
+4. 현재 guild TTS가 재생 중이면 `stop_active_tts_playback(... reason="new_user_audio")`
+5. room/session/metrics 계산
+
+현재 debug audio 저장 정책은 **ingress-only** 다.
+즉 한 턴당 저장 파일은 아래 한 세트만 유지한다.
+
+- `*_raw48k.wav`
+- `*_stt16k.wav`
+- `*.json`
+
+성공/실패에 따라 stage별 별도 wav/json을 여러 개 만들지 않는다.
+메타 JSON만 현재 상태로 덮어쓴다.
+
+### 5-4. active speaker / owner 상태
+현재 room 단위로 다음 상태가 있다.
+
+- `room_owner_user_ids`
+- `room_owner_until`
+- `room_reply_in_progress`
+- `room_recent_speaker_stats`
+
+추가 함수:
+- `update_room_speaker_activity()`
+- `pick_active_speaker()`
+- `room_state_snapshot()` 에 `active_speaker_user_id` 포함
+
+현재 규칙:
+- owner가 살아 있고 최근 0.5초 안에 말했으면 owner를 active speaker로 유지한다.
+- 아니면 wake priority, voiced_ms, rms, last_packet_at 순으로 active speaker를 고른다.
+- `should_reply_to_voice()` 는 active speaker가 아닌 사용자면 wake 없이 통과시키지 않는다.
+
+즉 현재는 단순 wake-only가 아니라 **room owner + active speaker 정책**이 같이 작동한다.
+
+### 5-5. 현재 음성 전처리와 차단
+기본 경로는 `STT_USE_RAW_48K=false` 이므로 16k 경로다.
+
+전처리 후 현재 아래를 본다.
 
 1. 전체 raw 길이
-   - `raw_seconds <= VOICE_MIN_TOTAL_SEC` 면 무시
-2. VAD
-   - `VAD_ENABLED` 이고 `is_probably_silent(...)` 면 기본적으로 무시
-   - 단 waveform override 조건이면 계속 진행
-3. wake probe 실행
-   - `detect_wake_word_sync(audio_for_wake, sampling_rate=wake_sampling_rate)`
-4. 환경음 후보 / filler 후보 / 반복소음 후보여도 **현재는 로그만 찍고 full STT는 계속 진행**
-5. wake가 미검출이어도 **현재는 full STT를 계속 진행**
-6. full STT 후 `should_ignore_short_transcription()` 검사
-7. 최종적으로 `should_reply_to_voice()` 검사
+   - 너무 짧으면 차단
+2. VAD / waveform stats
+3. unstable audio 여부
+4. wake probe
+5. full STT
+6. short transcription ignore
+7. final full text veto / reply gate
 
-`should_reply_to_voice()` 의 현재 규칙은 아래다.
+### 5-6. wake probe 현재 구조
+현재 wake probe는 다음 순서다.
 
-- `bot_speaking_guilds` 에 있으면 차단
-- 최근 TTS 종료 직후 `POST_TTS_IGNORE_SEC` 안이면 차단
-- 텍스트가 비면 차단
-- wake_detected 가 false 이고 wake word도 없으면 차단
-- 길이가 너무 짧고 wake_detected도 false면 차단
-- 최근 reply cooldown 안이면 차단
-- 직전 voice text 와 유사하면 차단
+1. `detect_wake_word_sync()` 실행
+2. `wake_probe_text`, `wake_confirm_text`, `wake_detected`, `wake_match_mode`, `wake_alias`, `wake_reject_reason` 획득
+3. strict confirm required면 unstable audio에서 exact 외를 reject 가능
+4. hard drop reason 검사 전 **근접 오타 완화** 수행
 
-통과하면 `last_voice_text[guild_id]` 와 `last_voice_reply_at[guild_id]` 를 갱신한다.
+현재 근접 오타 완화는:
+- `fuzzy_leading_wake_alias(wake_probe)` 또는 `fuzzy_leading_wake_alias(wake_confirm)` 가 있으면
+- `wake_detected=True`
+- `wake_match_mode="fuzzy"`
+- `wake_alias=<wake>`
+로 승격한다.
 
-### 5-4. 음성 STT 구조
-현재 음성 STT는 아래다.
+`fuzzy_leading_wake_alias()` 는 현재:
+- leading token similarity `>= 0.72`
+- 또는 compact 전체 similarity `>= 0.78`
+이면 근접 wake로 본다.
 
-1. wake probe
-   - `slice_audio_window(..., WAKE_AUDIO_SEC)`
-   - `transcribe_audio16k_sync(..., stage="wake")`
-2. wake 2차 확인
-   - wake 첫 히트가 있으면 `WAKE_CONFIRM_AUDIO_SEC` 로 재전사
-3. full STT
-   - `transcribe_audio16k_sync(..., stage="full")`
-4. full-rescore
-   - `STT_FULL_RESCORING_ENABLED` 가 true 면
-   - 더 큰 token 허용량으로 `stage="full-rescore"` 한 번 더 돌림
-   - `choose_full_stt_candidate(primary_text, rescore_text, wake_probe=wake_probe)` 로 최종 텍스트 선택
-5. 후처리
-   - `apply_stt_post_corrections(text, wake_detected=wake_detected)`
-6. 짧은 잡음 판정 후 무시 가능
-7. 디버그 오디오/메타 저장 가능
+즉 현재는 `이불린`, `비블린` 류를 exact miss로 바로 죽이지 않도록 한 상태다.
 
-### 5-5. 음성 답변 생성 구조
-음성에서 실제 답변은 `ask_llm_and_speak_streaming()` 이 한다.
+### 5-7. full STT 현재 구조
+현재 full STT는 다음 순서다.
 
-순서:
+1. partial transcript 추출
+   - 최근 1.2초 + overlap 0.3초 window 사용
+2. `session_partial_stt_text`, `session_committed_stt_text` 갱신
+3. full STT 실행
+4. 후처리
+5. committed transcript 갱신
+6. short noise 판단
+7. final wake/full-text/reply gate
 
-1. `ask_llm_streaming(...)` 으로 메인 LLM 스트리밍 요청
-2. 스트림으로 받은 delta_text 를 `split_tts_sentences()` 로 문장 단위 분리
-3. 문장이 나오면 `sentence_queue` 에 넣음
-4. 별도 playback task인 `stream_tts_sentences()` 가 queue에서 문장을 꺼내 TTS 생성 및 재생
-5. 전체 스트림이 끝나면 최종 answer를 반환
+즉 현재는 **partial / committed / full-final** 상태를 분리해 추적한다.
 
-현재 음성은 **메인 LLM 출력 스트림을 받아 문장 단위로 TTS를 먼저 시작하는 구조**다.
-즉 텍스트처럼 완성 후 한번에 읽지 않고, 음성에서는 streaming path를 쓴다.
+### 5-8. onset gating 현재 구조
+`evelyn_voice/client.py` 에서 onset 관련 핵심 신호는 아래다.
 
-### 5-6. 음성 후처리
-답변이 끝나면 현재 아래를 한다.
+- `onset_packet_ok`
+- `onset_clean_run_max`
+- `segment_started_with_concealment`
+- `segment_first_clean_decode_ms`
+- `first_packet_wait_ms`
+- `onset_robotic`
+- `onset_artifact_score`
+- `onset_vad_prob`
+- `onset_rms`
+- `stale_penalty_active`
+- `robotic_probe_candidate`
 
-- `append_history(guild_id, history_user_text, plain_answer)`
-- `schedule_memory_update(...)`
-- `schedule_search_followup(...)`
+현재 중요한 변경점:
+- `stale_penalty_active = stale_onset and not (onset_packet_ok and first_clean_window_ok)`
+- 즉 clean window와 packet health가 좋으면 stale penalty를 일부 완화한다.
 
-즉 음성도 텍스트와 마찬가지로 답변 후 메모리 저장과 검색 후속작업 예약을 한다.
+현재 `robotic_probe_candidate` 는 다음 쪽에서 살아난다.
+- concealment 없음
+- `onset_packet_ok`
+- `first_clean_window_ok`
+- stale이 아니거나 stale penalty가 비활성
+- `len(body_packets) >= 12`
+- robotic 이더라도
+  - `vad_prob >= 0.16`
+  - 또는 `len(body_packets) >= 12`
+  - 또는 `total_payload >= 8000`
+
+즉 현재는 clean non-concealed owner-followup 계열 robotic onset을 예전보다 더 쉽게 STT probe로 통과시킨다.
+
+### 5-9. 짧은 조각 처리
+현재 `main.py` 에는 `is_short_followup_candidate()` 가 있다.
+
+조건:
+- owner follow-up active
+- wake 아님
+- 텍스트가 짧음
+- audio_sec가 짧음
+
+이 경우 `should_ignore_short_transcription()` 에 걸려도 완전 noise drop으로만 보지 않고,
+현재는 메타에 `short_followup_candidate=True` 를 남기고 debug 저장에도 표시한다.
+
+### 5-10. final reply gate
+full STT 후에는 아래를 거친다.
+
+- `should_ignore_short_transcription()`
+- owner follow-up가 아니면 `extract_leading_wake_alias(text)` 로 final wake 재검사
+- wake alias 없으면 `full_text_veto`
+- 그 다음 `should_reply_to_voice()`
+
+즉 wake probe를 통과해도 final full text가 wake 없이 시작하면 veto될 수 있다.
 
 ---
 
-## 6. 현재 LLM 메시지 준비 구조
+## 6. 현재 음성 답변 생성 구조
 
-현재 모든 메인 답변 전에는 `prepare_llm_messages()` 가 돈다.
+현재 음성 답변은 `ask_llm_and_speak_streaming()` 이 담당한다.
 
-### 6-1. route 계산
-`prepare_llm_messages()` 는 맨 먼저 `classify_llm_route_async()` 를 호출한다.
+### 6-1. first response / follow-up 분리
+현재 구조는 **first_then_followup** 모드다.
 
+1. `build_first_response()`
+   - 메인 LLM non-stream
+   - 짧은 첫 응답 생성
+2. `build_followup_response()`
+   - 이미 말한 first_response를 포함한 전용 prompt로 보충 응답 생성
+3. 둘을 합쳐 최종 answer 생성
+4. 문장 단위 TTS 큐잉
+
+현재 first response 쪽은 더 빠르게 하려고:
+- `temperature = 0.0`
+- `max_tokens = min(40, VOICE_LLM_MAX_TOKENS)`
+
+follow-up 쪽은:
+- `temperature = 0.0`
+- `max_tokens = min(64, VOICE_LLM_MAX_TOKENS)`
+
+### 6-2. duplicate follow-up 억제
+현재는:
+- `normalize_compare_text()`
+- `is_duplicate_followup()`
+를 써서 first response와 사실상 같은 follow-up이면 버린다.
+
+또한 follow-up prompt 자체도:
+- 첫 응답과 겹치지 않는 보충만 말하라
+- 첫 문장을 반복하지 마라
+- 새 정보 없으면 빈 응답
+을 명시한다.
+
+### 6-3. 현재 TTS 재생 구조
+`stream_tts_sentences()` 는:
+- sentence queue
+- prepared queue
+- prefetch task
+- playback task
+를 사용한다.
+
+추가로 guild별 `active_tts_playbacks` 를 추적한다.
+현재 새 사용자 음성이 들어오면:
+- `stop_active_tts_playback(guild_id, reason="new_user_audio")`
+로 기존 TTS를 중단한다.
+
+즉 현재는 **interruption 가능한 TTS playback tracking** 이 들어간 상태다.
+
+---
+
+## 7. 현재 route / cognitive 구조
+
+### 7-1. route
+`prepare_llm_messages()` 는 route를 계산한다.
 현재 route 후보는:
 - `main_direct`
 - `sub_hint`
 - `sub_wait`
 
-#### fallback heuristic
-`classify_llm_route_fallback()` 의 현재 규칙:
+하지만 route는 여전히 대부분 실행 하드 분기보다 메타 판단값에 가깝다.
 
-- voice 입력이고 `should_force_voice_context_route(text)` 가 false 면 무조건 `main_direct`
-- 짧은 text 입력이면 `main_direct`
-- 문맥 marker 개수와 길이에 따라 `sub_hint` 또는 `sub_wait`
+### 7-2. cognitive_state
+현재 cognitive_state는 `update_cognitive_state()` 가 만든다.
+출력은 현재 아래 액션을 포함할 수 있다.
 
-#### router LLM 실제 사용 조건
-`classify_llm_route_async()` 는 다음일 때 router LLM을 **안 쓰고 fallback만 반환**한다.
+- `answer`
+- `ask`
+- `wait`
+- `search_then_answer`
 
-- `source == "voice"` 이고 `should_force_voice_context_route(user_text)` 가 false
-- 또는 `ROUTER_LLM_ENABLED == false`
+즉 예전 문서보다 현재는 `search_then_answer` 까지 실제 액션 후보에 포함된다.
 
-즉 음성은 기본적으로 router LLM route 호출을 생략하고 fallback route만 쓴다.
+### 7-3. cognitive action 실제 영향
+현재 `policy_response_for_state()` 는 아래 short-circuit를 가진다.
 
-#### 현재 route의 실제 영향
-현재 코드에서는 route를 계산하고 로그를 찍지만, 그 route에 따라 메인 답변 경로를 실제 분기하지 않는다.
-즉 현재 route는 **실행 경로를 바꾸는 하드 분기점이 아니라 메타 판단값**이다.
+- `ask` -> `question_for_user` 반환
+- `wait` -> `응, 계속 말해줘.` 또는 `잠깐, 이어서 말해줘.`
+- `search_then_answer` -> `금방 찾아보고 바로 알려줄게.`
 
-### 6-2. cognitive_state 계산
-현재 `prepare_llm_messages()` 는 `guild_id is not None` 이면 **매번 `update_cognitive_state(guild_id, user_text)`** 를 await 한다.
+즉 cognitive action은 이제 단순 진단이 아니라 일부 경우 **직접 짧은 응답을 결정**한다.
 
-즉 현재는:
-- 길드 입력이면 text/voice 모두 fresh cognitive_state를 다시 계산한다.
-- 예전처럼 일부 route에서만 계산하는 구조가 아니다.
-
-### 6-3. memory context 합성
-`build_memory_context()` 는 아래를 읽어 system prompt 쪽에 붙인다.
-
-- `rolling_summary.txt`
-- 최근 hot `raw_transcript.jsonl`
-- vault raw 중 관련 항목
-- 현재 `cognitive_state.json` 또는 fresh cognitive_state
-- 관련 `durable_facts`
-- 관련 `open_questions`
-
-이 memory context는 메인 LLM system prompt에 병합된다.
-
-### 6-4. ask gating
-`apply_ask_gating()` 는 현재 `action == "ask"` 인 state에 대해 아래 조건을 본다.
-
-- `question_for_user` 가 비어 있으면 gate
-- `confidence < threshold` 면 gate
-
-기본 threshold는 현재 config 기준으로:
-- `ASK_CONFIDENCE_THRESHOLD_TEXT = 0.00`
-- `ASK_CONFIDENCE_THRESHOLD_VOICE = 0.00`
-
-즉 현재 기본값으로는 confidence threshold 때문에 ask가 막히지는 않는다.
-막히는 경우는 보통 `question_for_user` 가 비었을 때다.
-
-ask가 gate 되면:
-- voice source: `wait`
-- text source: `answer`
-
-으로 바뀐다.
-
----
-
-## 7. 현재 cognitive 구조
-
-현재 cognitive는 `update_cognitive_state()` 가 담당한다.
-
-입력 자료:
-- 기존 `cognitive_state.json`
-- `rolling_summary.txt`
-- 최근 raw transcript
-- 최근 durable facts
-- 최근 open questions
-- 현재 사용자 입력
-
-출력 JSON 형식:
-- `action`: `answer | ask | wait`
-- `confidence`
-- `user_intent`
-- `state_summary`
-- `question_for_user`
-- `main_prompt_hint`
-- `reason_brief`
-- `retrieved_context_ids`
-
-실패 시 현재 동작:
-- context size 에러면 compact retry 시도
-- 그래도 실패하면 fallback state 저장
-  - 기본 fallback action은 `answer`
-  - confidence는 `0.5`
-  - `main_prompt_hint` 는 `짧고 자연스럽게 답해라.`
-
-성공하면:
-- state를 normalize
-- 부족한 `state_summary` 는 기존 state 또는 user_text 로 메움
-- 부족한 `main_prompt_hint` 는 `짧고 자연스럽게 답해라.` 로 메움
-- `cognitive_state.json` 저장
-
-현재 cognitive의 의미는:
-- 메인 LLM이 지금 **답해야 하는지**, **짧게 되물어야 하는지**, **더 듣는 편이 자연스러운지** 정하는 내부 상태다.
-- 하지만 최종 말은 여전히 메인 LLM이 만든다.
+또 `search_then_answer` 면 `schedule_search_followup(..., force=True)` 로 실제 검색 후속작업을 강제 예약한다.
 
 ---
 
@@ -491,239 +506,66 @@ ask가 gate 되면:
 - `vault\questions.jsonl`
 - `vault\raw\YYYY-MM-DD.jsonl`
 
-### 8-1. 현재 저장 흐름
-사용자-봇 한 턴이 끝나면 `schedule_memory_update()` 가 아래를 한다.
+현재 저장 흐름:
+1. 턴 종료 후 raw transcript append
+2. `update_long_term_memory()` 비동기 실행
+3. `update_cognitive_state()` 비동기 실행
 
-1. `append_raw_transcript_rows(...)`
-   - hot raw transcript와 일자별 vault raw 둘 다 저장
-2. `asyncio.create_task(update_long_term_memory(...))`
-3. `asyncio.create_task(update_cognitive_state(...))`
+즉 메모리/인지 상태는 답변 후에도 다시 비동기 갱신된다.
 
-즉 장기 메모리 갱신과 cognitive 갱신은 **답변 뒤 비동기 태스크** 로도 한 번 더 돈다.
-
-### 8-2. 장기 메모리 업데이트
-`update_long_term_memory()` 는 SUMMARY_LLM_URL (`9821`) 에 JSON 지시를 보내서 아래를 만든다.
-
-- `summary_update`
-- `durable_facts`
-- `open_questions`
-
-이 결과로:
-- rolling summary 갱신
-- durable facts 추가 저장
-- open questions 추가 저장
-
-즉 현재 SUMMARY 모델은 **사용자에게 답하지 않고 메모리 관리만 한다.**
-
-### 8-3. 열린 질문 닫기
-현재 `resolve_open_question_rows(guild_id, *reference_texts)` 가 있다.
-
-현재 사용처는 검색 후속답변 쪽이다.
-검색 태스크가 결과를 찾고 answer를 만든 뒤:
-- `resolve_open_question_rows(guild_id, query, answer)`
-를 호출해 관련 open question / vault question 항목을 제거한다.
+Sub/Summary 모델은 여전히 사용자에게 답하지 않고 메모리 관리만 담당한다.
 
 ---
 
-## 9. 현재 검색 구조
+## 9. 현재 디버그 / 콘솔 출력 구조
 
-현재 검색은 **메인 답변이 검색을 약속하는 표현을 썼을 때만** 예약된다.
+현재 `VOICE_CONSOLE_ONLY_STT_AND_REPLY=true` 일 때 콘솔 허용 prefix는 최소화되어 있다.
+현재 병목 판단용으로 남기도록 설정한 것은 아래다.
 
-### 9-1. 검색 예약 조건
-`schedule_search_followup()` 는 아래일 때만 동작한다.
+- `🎤 [...]`
+- `💬 [Evelyn]`
+- `[VOICE LATENCY]`
+- `[VOICE BOTTLENECK]`
+- `[FULL STT ENTER]`
+- `[STT RESULT][wake]`
+- `[STT RESULT][partial]`
+- `[STT RESULT][full-final]`
 
-- `guild_id` 가 존재하고
-- `answer_promises_search(answer)` 가 true
+현재 `[TURN TRACE]` 는 `VOICE_CONSOLE_ONLY_STT_AND_REPLY=true` 일 때 출력되지 않는다.
 
-현재 promise marker 예시:
-- `찾아볼게`
-- `찾아보고`
-- `검색해볼게`
-- `확인해볼게`
-- `알아볼게`
-- `찾는 중`
-- `찾아보고 있어`
-- `자료 찾아볼게`
-
-completed marker 예시:
-- `찾아봤`
-- `검색해봤`
-- `확인해봤`
-- `알아봤`
-- `찾아보니`
-- `검색해보니`
-- `결과는`
-
-completed marker가 있으면 follow-up search를 예약하지 않는다.
-
-### 9-2. 검색 실행
-현재 검색은 `run_search_followup()` 가 한다.
-
-순서:
-1. `search_duckduckgo(query)` 로 DuckDuckGo Instant API 시도
-2. 부족하면 `https://html.duckduckgo.com/html/` HTML 검색 파싱
-3. 결과를 `answer_from_search_results()` 로 메인 LLM에 짧게 요약시키기
-4. `resolve_open_question_rows(guild_id, query, answer)` 로 관련 열린 질문 닫기
-5. `cognitive_state.json` 을 강제로 `action="answer"`, `reason_brief="search_completed"` 쪽으로 덮어쓰기
-6. `deliver_proactive_followup(...)` 호출
-
-### 9-3. 검색 후속답변 전달
-`deliver_proactive_followup()` 는 현재 아래를 한다.
-
-1. `channel_id` 가 있으면 해당 텍스트 채널에 `visible_text(answer)` 전송
-2. 길드 voice client가 연결 중이면 `speak_answer(vc, answer)` 로 음성 발화
-3. `append_history(...)`
-4. `schedule_memory_update(...)`
-
-즉 검색 follow-up 은 현재 **사용자의 추가 질문이 없어도 스스로 텍스트/음성 후속답변을 할 수 있는 유일한 명시적 경로**다.
-
-### 9-4. 현재 proactive 성격의 정확한 범위
-현재 코드에서 자발적으로 새 답을 다시 말하는 구조는 기본적으로 이 검색 후속답변 태스크 쪽이다.
-일반 메모리 업데이트나 cognitive 업데이트가 끝났다고 스스로 새 메시지를 보내지는 않는다.
+즉 병목 판단용 최소 로그만 남기는 방향으로 현재 정리되어 있다.
 
 ---
 
-## 10. 현재 TTS 구조
+## 10. 현재 코드 기준 핵심 요약
 
-현재 메인 TTS 생성 함수는 `create_omnivoice_source()` 다.
+현재 Evelyn 구조를 아주 짧게 요약하면 아래다.
 
-동작:
-1. `clean_tts_text(text)`
-2. `OmniVoicePCMStream` 생성
-3. 내부 producer task 생성
-4. `POST {OMNIVOICE_SERVER_URL}/v1/audio/speech`
-   - `model = OMNIVOICE_MODEL`
-   - `input = text`
-   - `voice = OMNIVOICE_VOICE`
-   - `response_format = pcm`
-   - `stream = OMNIVOICE_STREAM`
-   - `language = OMNIVOICE_LANGUAGE` (있으면)
-5. 200 응답이면 chunk를 `source.feed_pcm24_mono(chunk)` 로 계속 밀어넣음
-6. `OMNIVOICE_VOICE` 가 `clone:` 으로 시작하고 실패하면 `auto` voice 로 한 번 더 요청
-7. 둘 다 실패하면 `source.fail(e)` 로 오디오 소스에 에러 기록
-8. 성공하면 `source.finish()`
+1. **실행 구조**
+   - WT 1창 5탭 구조를 기본 의도로 가진다.
 
-현재 TTS 재생은:
-- 텍스트/검색 follow-up 경로에서는 `speak_answer()`
-- 음성 스트리밍 경로에서는 `stream_tts_sentences()`
+2. **응답 구조**
+   - 실제 사용자 답변은 메인 LLM이 만든다.
+   - Router는 route/cognitive를 계산한다.
+   - Sub는 메모리 갱신용이다.
 
-을 통해 이뤄진다.
+3. **음성 구조**
+   - wake probe -> partial/full STT -> final reply gate -> first response + follow-up -> streaming TTS
+   - active speaker / room owner / interruptible TTS가 함께 작동한다.
 
-`warmup_tts_server()` 는 봇 on_ready 시 아래를 한다.
-- `/health` 체크
-- `안녕` 한 번 스트리밍 TTS 요청
-- 첫 chunk가 오면 warmup 완료로 간주
+4. **최근 중요한 변화**
+   - active speaker 도입
+   - partial/committed STT 도입
+   - `search_then_answer` 실제 반영
+   - first response / follow-up 분리
+   - TTS interrupt 추적
+   - preroll carry-over 완화
+   - wake near-miss fuzzy 완화
+   - robotic short follow-up 완화
+   - debug audio ingress-only 단순화
+   - 병목용 콘솔 로그 최소화
 
-즉 현재 TTS는:
-- 별도 OmniVoice 서버 프로세스가 따로 뜨고
-- 봇은 HTTP PCM stream client 역할만 한다.
-
----
-
-## 11. 현재 디스코드 음성 연결 구조
-
-현재 음성 연결은 커스텀 `EvelynVoiceClient` 를 쓴다.
-
-핵심 흐름:
-- `ensure_voice_client(message)` 또는 `join/rejoin` 명령
-- `ensure_listening_voice_client(guild, target_channel)`
-- 필요하면 `connect_evelyn_voice_client()`
-- 연결되면 `vc.on_user_audio = process_member_audio`
-- `vc.listen()` 시작
-
-즉 현재 구조에서 실제 음성 입력 진입점은 `EvelynVoiceClient -> process_member_audio()` 연결이다.
-
----
-
-## 12. 현재 conversation history 구조
-
-메인 LLM용 in-memory history 는 `guild_histories[guild_id]` 에 유지된다.
-형식은 OpenAI style list 이며, 첫 항목은 항상 `SYSTEM_PROMPT` 를 담는 system message다.
-
-현재 `append_history()` 는 매 턴마다 아래 두 줄을 메모리 history에 추가한다.
-- `{"role": "user", "content": clean_text(user_text)}`
-- `{"role": "assistant", "content": clean_text(answer)}`
-
-그리고 `trim_history()` 로 `MAX_HISTORY_ITEMS` 상한을 유지한다.
-
-즉 현재는:
-- 파일 기반 memory context
-- 길드별 in-memory chat history
-
-둘 다 같이 메인 LLM 프롬프트 형성에 기여한다.
-
----
-
-## 13. 현재 명령어 구조
-
-현재 주요 명령어는 아래가 있다.
-
-- `들어와` / `join`
-- `다시들어와` / `rejoin`
-- `나가` / `leave`
-- `재시작` / `restart`
-- `종료` / `shutdown` / `quit` / `exit`
-- `상태` / `status`
-- `접두사` / `prefix`
-- `초기화` / `reset`
-
-현재 텍스트 일반 대화는 wake word 또는 bot reply 기준이고,
-명령어는 command prefix 기준으로 처리된다.
-기본 prefix 는 config 기본값상 `!` 다.
-
----
-
-## 14. 현재 구조에서 중요한 사실만 다시 요약
-
-1. **실제 사용자 답변 생성기는 main LLM 하나다.**
-   - main: `9820`
-   - router: `9822`
-   - sub(summary): `9821`
-
-2. **router는 현재 route와 cognitive JSON을 만든다.**
-   하지만 route는 현재 메인 응답 경로를 실질적으로 분기하지 않는다.
-
-3. **sub(summary) 모델은 현재 메모리 관리 전용이다.**
-   - rolling summary
-   - durable facts
-   - open questions
-   저장에만 직접 쓰인다.
-
-4. **메인 답변 전에는 길드 입력이면 매번 fresh cognitive_state를 await 한다.**
-
-5. **ask 행동이 나오면 메인 LLM이 그 질문을 말한다.**
-   router/cognitive가 직접 사용자에게 따로 메시지를 보내지 않는다.
-
-6. **음성은 full STT 후 메인 LLM 스트리밍 + 문장 단위 TTS 스트리밍 구조다.**
-
-7. **자발적 후속발화는 현재 검색 follow-up 경로가 가장 명시적이다.**
-   일반 memory/cognitive 완료만으로는 스스로 새 메시지를 보내지 않는다.
-
-8. **통합 시작 구조의 현재 목표는 한 WT 창 + 5개 탭이다.**
-   - Main-LLM
-   - Router-LLM
-   - Sub-LLM
-   - TTS
-   - Bot
-
-9. **Bot 탭은 실제 실행 전에 4개 백엔드 포트를 기다린다.**
-   - 9820
-   - 9822
-   - 9821
-   - 8880
-
-10. **voice search follow-up 은 last_text_channel_ids 를 참조해서 텍스트 채널에도 후속결과를 보내려 한다.**
-    즉 음성에서 시작한 검색 follow-up도 마지막 텍스트 채널 ID를 사용할 수 있다.
-
----
-
-## 15. 이 문서의 의미
-
-이 문서는 "현재 코드가 실제로 어떻게 동작하는가"만 적은 스냅샷이다.
-즉 아래를 뜻하지 않는다.
-
-- 이 구조가 최종 설계라는 뜻 아님
-- README 설명과 완전히 일치한다는 뜻 아님
-- 원하는 동작이라는 뜻 아님
-
-오직 현재 파일 기준의 실제 구조만 기록한다.
+5. **현재 여전히 중요한 사실**
+   - 최종 자연어 생성은 여전히 메인 LLM 중심이다.
+   - route는 일부 행동에 영향이 생겼지만, 전체 실행 분기를 완전히 갈라놓는 구조는 아니다.
+   - 음성 품질 문제는 지금도 wake / onset gating / LLM latency 조정이 핵심 튜닝 포인트다.
