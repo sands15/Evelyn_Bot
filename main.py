@@ -96,12 +96,14 @@ _BOTTLENECK_TURN_TRACE_EVENTS = {
     "tts_stream_exception",
     "playback_queue_put",
     "playback_queue_get",
-    "discord_playback_started",
+    "discord_playback_play_invoked",
     "discord_first_packet_sent",
     "discord_playback_finished",
     "discord_playback_exception",
     "first_packet_sent",
-    "turn_summary",
+    "text_turn_summary",
+    "voice_turn_summary",
+    "voice_drop_summary",
 }
 
 
@@ -2701,7 +2703,13 @@ def log_voice_stage(metrics: dict | None, label: str, *, extra: str = "", key: s
     print("\n".join(lines))
 
 
-def log_voice_bottleneck_summary(metrics: dict | None, *, label: str, extra: str = "") -> None:
+def log_voice_bottleneck_summary(
+    metrics: dict | None,
+    *,
+    label: str,
+    extra: str = "",
+    event_name: str = "turn_summary",
+) -> None:
     if not metrics:
         return
     started_at = metrics.get("started_at")
@@ -2739,7 +2747,7 @@ def log_voice_bottleneck_summary(metrics: dict | None, *, label: str, extra: str
 
     meta = metrics.get("meta") or {}
     log_turn_event(
-        "turn_summary",
+        event_name,
         label=label,
         turn_id=meta.get("turn_id"),
         segment_id=meta.get("segment_id"),
@@ -3267,7 +3275,7 @@ async def play_audio_source(
     try:
         if on_play_start is not None:
             on_play_start()
-        log_turn_event("discord_playback_started", **payload)
+        log_turn_event("discord_playback_play_invoked", **payload)
         vc.play(source, after=after_play)
         await done.wait()
     except Exception as exc:
@@ -3858,7 +3866,12 @@ async def ask_llm_and_speak_streaming(
             with contextlib.suppress(asyncio.CancelledError):
                 await playback_task
 
-    log_voice_bottleneck_summary(metrics, label="voice_reply", extra=f"source={source} chars={len(answer)} mode=full_answer_sentence_prefetch sentences={len(sentences)}")
+    log_voice_bottleneck_summary(
+        metrics,
+        label="voice_turn",
+        extra=f"source={source} chars={len(answer)} mode=full_answer_sentence_prefetch sentences={len(sentences)}",
+        event_name="voice_turn_summary",
+    )
     return answer
 
 
@@ -3874,7 +3887,7 @@ async def stream_text_reply(
     session_memory_key: str | None = None,
     source: str = "text",
     debug_text: str | None = None,
-) -> tuple[str, discord.Message | None]:
+) -> tuple[str, discord.Message | None, dict]:
     metrics = new_turn_metrics(
         source=source,
         session_key=session_key,
@@ -3919,8 +3932,7 @@ async def stream_text_reply(
         streamed_message = await channel.send(final_text or fallback_answer_for(user_text))
     elif final_text and final_text != rendered_text:
         await streamed_message.edit(content=final_text)
-    log_voice_bottleneck_summary(metrics, label="text_reply", extra=f"chars={len(final_text)}")
-    return answer, streamed_message
+    return answer, streamed_message, metrics
 
 
 # =========================================================
@@ -4015,7 +4027,7 @@ async def _process_member_audio_impl(
             owner_user_id=owner_user_id_on_ingress,
         )
         log_voice_stage(metrics, "다른 화자 중복 진입 차단", extra=f"owner_user_id={owner_user_id_on_ingress}")
-        log_voice_bottleneck_summary(metrics, label="voice_reply", extra="drop=other_speaker_during_reply")
+        log_voice_bottleneck_summary(metrics, label="voice_drop", extra="drop=other_speaker_during_reply", event_name="voice_drop_summary")
         return
 
     if STT_USE_RAW_48K:
@@ -4032,7 +4044,7 @@ async def _process_member_audio_impl(
     if audio16k.size == 0:
         register_drop_reason(metrics, "empty_audio", session_key=session_key)
         log_voice_stage(metrics, "오디오 비어있음")
-        log_voice_bottleneck_summary(metrics, label="voice_reply", extra="drop=empty_audio")
+        log_voice_bottleneck_summary(metrics, label="voice_drop", extra="drop=empty_audio", event_name="voice_drop_summary")
         return
 
     raw_seconds = len(pcm_bytes) / float(RATE * CHANNELS * 2)
@@ -4050,7 +4062,7 @@ async def _process_member_audio_impl(
         )
         register_drop_reason(metrics, "too_short_total", session_key=session_key, raw_seconds=round(raw_seconds, 3))
         log_voice_stage(metrics, "전체 길이 너무 짧아서 제외", extra=f"raw_seconds={raw_seconds:.3f}")
-        log_voice_bottleneck_summary(metrics, label="voice_reply", extra="drop=too_short_total")
+        log_voice_bottleneck_summary(metrics, label="voice_drop", extra="drop=too_short_total", event_name="voice_drop_summary")
         return
 
     unstable_audio = bool(debug_meta and debug_meta.get("unstable"))
@@ -4082,7 +4094,7 @@ async def _process_member_audio_impl(
             "transport corrupted 조기 종료",
             extra=f"raw_seconds={raw_seconds:.3f} voiced_ms={voiced_ms:.0f} longest_ms={longest_voiced_ms:.0f}",
         )
-        log_voice_bottleneck_summary(metrics, label="voice_reply", extra="drop=transport_corrupted")
+        log_voice_bottleneck_summary(metrics, label="voice_drop", extra="drop=transport_corrupted", event_name="voice_drop_summary")
         return
     if is_tail_fragment_candidate(
         session_key=session_key,
@@ -4108,7 +4120,7 @@ async def _process_member_audio_impl(
             "tail fragment 조기 종료",
             extra=f"raw_seconds={raw_seconds:.3f} voiced_ms={voiced_ms:.0f} longest_ms={longest_voiced_ms:.0f}",
         )
-        log_voice_bottleneck_summary(metrics, label="voice_reply", extra="drop=tail_fragment_drop")
+        log_voice_bottleneck_summary(metrics, label="voice_drop", extra="drop=tail_fragment_drop", event_name="voice_drop_summary")
         return
     if VAD_ENABLED and is_probably_silent(audio16k, sampling_rate=stt_sampling_rate):
         duration_sec = len(audio16k) / float(max(1, stt_sampling_rate))
@@ -4139,7 +4151,7 @@ async def _process_member_audio_impl(
             bad_audio_count = increment_session_bad_audio(session_key)
             register_drop_reason(metrics, "vad_ignore", session_key=session_key, room_session_key=room_session_key, owner_user_id=owner_user_id, voiced_ms=round(voiced_ms, 1), bad_audio_count=bad_audio_count)
             log_voice_stage(metrics, "VAD 무시 처리", extra=f"sampling_rate={stt_sampling_rate} sec={duration_sec:.2f} peak={peak:.4f} rms={rms:.4f} voiced_ms={voiced_ms:.0f} longest_ms={longest_voiced_ms:.0f} body_rms={body_rms:.4f}")
-            log_voice_bottleneck_summary(metrics, label="voice_reply", extra="drop=vad_ignore")
+            log_voice_bottleneck_summary(metrics, label="voice_drop", extra="drop=vad_ignore", event_name="voice_drop_summary")
             return
 
     owner_followup_active = is_room_owner_active(room_session_key, member.id) and is_session_active_for_user(session_key, member.id)
@@ -4165,7 +4177,7 @@ async def _process_member_audio_impl(
             print(f"❌ [WAKE STT] {e}")
             register_drop_reason(metrics, "wake_probe_error", session_key=session_key, room_session_key=room_session_key, owner_user_id=owner_user_id, error=repr(e))
             log_voice_stage(metrics, "웨이크 프로브 실패", extra=repr(e))
-            log_voice_bottleneck_summary(metrics, label="voice_reply", extra="drop=wake_probe_error")
+            log_voice_bottleneck_summary(metrics, label="voice_drop", extra="drop=wake_probe_error", event_name="voice_drop_summary")
             return
 
         wake_probe = apply_stt_post_corrections(str(wake_result.get("wake_probe_text") or ""), wake_detected=False)
@@ -4207,7 +4219,7 @@ async def _process_member_audio_impl(
                     wake_alias=wake_alias,
                 )
                 log_voice_stage(metrics, "웨이크 거부", extra=f"wake_reject_reason={reject_reason} wake_match_mode={wake_match_mode}")
-                log_voice_bottleneck_summary(metrics, label="voice_reply", extra=f"drop={reject_reason}")
+                log_voice_bottleneck_summary(metrics, label="voice_drop", extra=f"drop={reject_reason}", event_name="voice_drop_summary")
                 return
         env_noise_candidate = is_likely_environment_noise(audio_for_wake, sampling_rate=wake_sampling_rate)
         filler_candidate = looks_like_brief_filler_text(wake_probe)
@@ -4224,7 +4236,7 @@ async def _process_member_audio_impl(
                 bad_audio_count = increment_session_bad_audio(session_key)
                 register_drop_reason(metrics, "env_ignore", session_key=session_key, room_session_key=room_session_key, owner_user_id=owner_user_id, wake_probe_text=wake_probe, bad_audio_count=bad_audio_count)
                 log_voice_stage(metrics, "환경음 후보 조기 종료", extra=f"wake_probe_text={wake_probe!r}")
-                log_voice_bottleneck_summary(metrics, label="voice_reply", extra="drop=env_ignore")
+                log_voice_bottleneck_summary(metrics, label="voice_drop", extra="drop=env_ignore", event_name="voice_drop_summary")
                 return
             print(f"[FULL STT CONTINUE] reason=env_ignore speaker={member.display_name} probe={wake_probe!r}")
             print(
@@ -4239,7 +4251,7 @@ async def _process_member_audio_impl(
                 save_voice_debug_audio(guild_id, speaker_name, pcm_bytes, audio16k, wake_probe=wake_probe, final_text="[FILLER IGNORE]", debug_meta=debug_meta)
                 register_drop_reason(metrics, "filler_ignore", session_key=session_key, room_session_key=room_session_key, owner_user_id=owner_user_id, wake_probe_text=wake_probe)
                 log_voice_stage(metrics, "짧은 필러 후보 조기 종료", extra=f"wake_probe_text={wake_probe!r}")
-                log_voice_bottleneck_summary(metrics, label="voice_reply", extra="drop=filler_ignore")
+                log_voice_bottleneck_summary(metrics, label="voice_drop", extra="drop=filler_ignore", event_name="voice_drop_summary")
                 return
             print(f"[FULL STT CONTINUE] reason=filler_ignore speaker={member.display_name} probe={wake_probe!r}")
             print(f"[FILLER IGNORE] speaker={member.display_name} probe={wake_probe!r}")
@@ -4252,7 +4264,7 @@ async def _process_member_audio_impl(
                 save_voice_debug_audio(guild_id, speaker_name, pcm_bytes, audio16k, wake_probe=wake_probe, final_text="[NOISE TEXT IGNORE]", debug_meta=debug_meta)
                 register_drop_reason(metrics, "noise_text_ignore", session_key=session_key, room_session_key=room_session_key, owner_user_id=owner_user_id, wake_probe_text=wake_probe)
                 log_voice_stage(metrics, "반복 소음 후보 조기 종료", extra=f"wake_probe_text={wake_probe!r}")
-                log_voice_bottleneck_summary(metrics, label="voice_reply", extra="drop=noise_text_ignore")
+                log_voice_bottleneck_summary(metrics, label="voice_drop", extra="drop=noise_text_ignore", event_name="voice_drop_summary")
                 return
             print(f"[FULL STT CONTINUE] reason=noise_text_ignore speaker={member.display_name} probe={wake_probe!r}")
             print(f"[NOISE TEXT IGNORE] speaker={member.display_name} probe={wake_probe!r}")
@@ -4341,7 +4353,7 @@ async def _process_member_audio_impl(
             )
             save_voice_debug_audio(guild_id, speaker_name, pcm_bytes, audio16k, wake_probe=wake_probe, final_text=text, debug_meta=debug_meta, stt_meta=stt_meta)
             log_voice_stage(metrics, "최종 텍스트 veto", extra=f"wake_reject_reason={wake_reject_reason} text={text!r}")
-            log_voice_bottleneck_summary(metrics, label="voice_reply", extra="drop=full_text_veto")
+            log_voice_bottleneck_summary(metrics, label="voice_drop", extra="drop=full_text_veto", event_name="voice_drop_summary")
             return
         wake_alias = final_wake_alias
 
@@ -4369,7 +4381,7 @@ async def _process_member_audio_impl(
         print(f"[STT IGNORE] {reason}: {text!r}")
         register_drop_reason(metrics, reason, session_key=session_key, room_session_key=room_session_key, owner_user_id=owner_user_id, text=text)
         log_voice_stage(metrics, "응답 차단", extra=f"reason={reason} gate={gate_mode}")
-        log_voice_bottleneck_summary(metrics, label="voice_reply", extra=f"drop={reason}")
+        log_voice_bottleneck_summary(metrics, label="voice_drop", extra=f"drop={reason}", event_name="voice_drop_summary")
         return
 
     reset_session_bad_audio(session_key)
@@ -4635,7 +4647,7 @@ async def on_message(message: discord.Message):
                 if AUTO_JOIN_VOICE:
                     vc = await ensure_voice_client(message)
 
-                answer, _sent_message = await stream_text_reply(
+                answer, _sent_message, text_metrics = await stream_text_reply(
                     message.channel,
                     user_text,
                     guild_id=message.guild.id,
@@ -4689,6 +4701,13 @@ async def on_message(message: discord.Message):
 
             if vc is not None:
                 await speak_answer(vc, answer)
+
+            log_voice_bottleneck_summary(
+                text_metrics,
+                label="text_turn",
+                extra=f"chars={len(format_display_text(answer, session_key=session_key).strip())} voice_read={str(vc is not None).lower()}",
+                event_name="text_turn_summary",
+            )
 
         except Exception as e:
             print("전체 오류:", repr(e))

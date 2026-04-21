@@ -92,10 +92,6 @@ def cognitive_state_path(guild_id: int, *, scope_type: str = "guild", scope_key:
     return scoped_memory_dir(guild_id, scope_type=scope_type, scope_key=scope_key) / "cognitive_state.json"
 
 
-def memory_loops_path(guild_id: int, *, scope_type: str = "guild", scope_key: str | None = None) -> Path:
-    return scoped_memory_dir(guild_id, scope_type=scope_type, scope_key=scope_key) / "open_loops.jsonl"
-
-
 def read_text_file(path: Path) -> str:
     if not path.exists():
         return ""
@@ -315,7 +311,6 @@ def read_question_rows(guild_id: int, *, scope_type: str = "guild", scope_key: s
     seen: set[str] = set()
     for path in (
         memory_questions_path(guild_id, scope_type=scope_type, scope_key=scope_key),
-        memory_loops_path(guild_id, scope_type=scope_type, scope_key=scope_key),
         vault_questions_path(guild_id, scope_type=scope_type, scope_key=scope_key),
     ):
         for row in read_jsonl(path):
@@ -341,7 +336,6 @@ def resolve_open_question_rows(
 
     paths = [
         memory_questions_path(guild_id, scope_type=scope_type, scope_key=scope_key),
-        memory_loops_path(guild_id, scope_type=scope_type, scope_key=scope_key),
         vault_questions_path(guild_id, scope_type=scope_type, scope_key=scope_key),
     ]
     query_tokens = memory_tokens(query)

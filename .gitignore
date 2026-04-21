@@ -24,3 +24,8 @@ pets-*.json
 
 .vscode/
 .idea/
+
+bot_memory/
+debug_audio/
+guild_settings/
+omnivoice_profiles/
