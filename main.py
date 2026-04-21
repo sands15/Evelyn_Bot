@@ -4238,7 +4238,7 @@ async def ask_llm_and_speak_streaming(
     metrics.setdefault("tts_first_byte_logged", False)
     metrics.setdefault("tts_first_frame_logged", False)
     metrics.setdefault("first_packet_sent_logged", False)
-    log_voice_stage(metrics, "LLM/TTS 파이프라인 시작", extra=f"source={source} mode=non_stream_full_answer")
+    log_voice_stage(metrics, "LLM/TTS 파이프라인 시작", extra=f"source={source} mode=full_answer_sentence_prefetch")
 
     answer = clean_text(
         await ask_llm_once(
@@ -4262,15 +4262,42 @@ async def ask_llm_and_speak_streaming(
     if answer and on_final_answer is not None:
         await on_final_answer(answer)
 
-    log_voice_stage(metrics, "전체 답변 확보 후 TTS 시작", extra=f"chars={len(answer)}")
-    await speak_answer(
-        vc,
-        answer,
-        turn_id=metrics.get("meta", {}).get("turn_id") or current_turn_id(session_key),
-        session_key=session_key,
+    sentences, tail = split_tts_sentences(answer, force=True)
+    if tail:
+        sentences.append(clean_tts_text(tail))
+    sentences = [clean_tts_text(sentence) for sentence in sentences if clean_tts_text(sentence)]
+    if not sentences:
+        cleaned_answer = clean_tts_text(answer)
+        if cleaned_answer:
+            sentences = [cleaned_answer]
+
+    log_voice_stage(metrics, "문장 분리 완료", extra=f"sentence_count={len(sentences)} chars={len(answer)}")
+
+    sentence_queue: asyncio.Queue[str | None] = asyncio.Queue()
+    playback_task = asyncio.create_task(
+        stream_tts_sentences(
+            vc,
+            sentence_queue,
+            metrics=metrics,
+            turn_id=metrics.get("meta", {}).get("turn_id") or current_turn_id(session_key),
+            session_key=session_key,
+        )
     )
 
-    log_voice_bottleneck_summary(metrics, label="voice_reply", extra=f"source={source} chars={len(answer)} mode=non_stream_full_answer")
+    try:
+        for sentence in sentences:
+            await sentence_queue.put(sentence)
+        await sentence_queue.put(None)
+        log_voice_stage(metrics, "문장별 TTS 예약 완료", extra=f"sentence_count={len(sentences)} prefetch={TTS_PREFETCH_CHUNKS}")
+        await playback_task
+    finally:
+        if not playback_task.done():
+            await sentence_queue.put(None)
+            playback_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await playback_task
+
+    log_voice_bottleneck_summary(metrics, label="voice_reply", extra=f"source={source} chars={len(answer)} mode=full_answer_sentence_prefetch sentences={len(sentences)}")
     return answer
 
 
