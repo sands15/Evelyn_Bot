@@ -1170,6 +1170,12 @@ class EvelynVoiceClient(discord.VoiceClient):
             self.runtime.udp_ready.set()
 
         log.info("EvelynVoiceClient ready | udp=%s", self.runtime.udp_ready.is_set())
+        try:
+            if not self.is_listener_healthy():
+                self.listen()
+                print(f"[VOICE CLIENT AUTO ARM] channel={getattr(self.channel, 'name', None)}")
+        except Exception as e:
+            print(f"[VOICE CLIENT AUTO ARM FAIL] err={e!r}")
     
     def _get_base_dave_session(self):
         base_conn = getattr(self, "_connection", None)
@@ -1916,6 +1922,11 @@ class EvelynVoiceClient(discord.VoiceClient):
         if self._utterance_task is None:
             self._utterance_task = asyncio.create_task(self._utterance_loop())
 
+        print(
+            f"[VOICE LISTEN START] channel={getattr(self.channel, 'name', None)} "
+            f"udp_ready={self.runtime.udp_ready.is_set()} receive_task={self._receive_task is not None} "
+            f"decrypt_task={self._decrypt_task is not None} utterance_task={self._utterance_task is not None}"
+        )
         log.info("Receive loop started")
 
     async def _receive_loop(self) -> None:
