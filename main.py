@@ -159,7 +159,6 @@ room_owner_user_ids: dict[str, int] = {}
 room_owner_until: dict[str, float] = {}
 room_reply_in_progress: dict[str, bool] = {}
 voice_connect_locks: dict[int, asyncio.Lock] = {}
-background_search_tasks: dict[str, asyncio.Task] = {}
 
 
 def normalize_command_prefix(prefix: str | None) -> str:
@@ -225,12 +224,20 @@ bot_speaking_guilds: set[int] = set()
 memory_locks: dict[int, asyncio.Lock] = {}
 cognitive_locks: dict[int, asyncio.Lock] = {}
 background_cognitive_tasks: dict[str, asyncio.Task] = {}
+background_memory_tasks: dict[str, asyncio.Task] = {}
+background_search_tasks: dict[str, asyncio.Task] = {}
+inflight_search_tasks: dict[str, asyncio.Task] = {}
 voice_ingress_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
 voice_worker_task: asyncio.Task | None = None
 debug_write_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=max(8, DEBUG_WRITE_QUEUE_MAX))
 debug_write_task: asyncio.Task | None = None
 room_recent_speaker_stats: dict[str, dict[int, dict[str, float]]] = {}
 session_speculative_policies: dict[str, dict[str, Any]] = {}
+room_turn_scopes: dict[str, "TurnScope"] = {}
+turn_stage_metrics: dict[str, dict[str, float]] = {}
+search_followup_queued_count = 0
+cancelled_stale_turn_count = 0
+inflight_llm_requests = 0
 
 
 # =========================================================
@@ -620,6 +627,11 @@ def reset_guild_runtime_state(guild_id: int) -> None:
         room_owner_until.pop(key, None)
         room_reply_in_progress.pop(key, None)
         room_last_voice_reply_at.pop(key, None)
+    for key, scope in list(room_turn_scopes.items()):
+        if key.startswith(prefix):
+            if scope is not None:
+                scope.cancel()
+            room_turn_scopes.pop(key, None)
     for key in [key for key in session_locks if key.startswith(prefix)]:
         session_locks.pop(key, None)
     for key, task in list(background_search_tasks.items()):
@@ -683,6 +695,142 @@ def merge_log_event_payload(*, explicit: dict[str, Any], extra: dict[str, Any] |
     for key in explicit.keys():
         merged.pop(key, None)
     merged.update(explicit)
+    return merged
+
+
+@dataclass
+class TurnScope:
+    turn_id: str
+    cancelled: bool = False
+    tasks: set[asyncio.Task] = field(default_factory=set)
+
+    def cancel(self):
+        self.cancelled = True
+        for task in list(self.tasks):
+            if task is not None and not task.done():
+                task.cancel()
+
+    def raise_if_cancelled(self):
+        if self.cancelled:
+            raise asyncio.CancelledError()
+
+    def register_task(self, task: asyncio.Task | None = None) -> asyncio.Task | None:
+        task = task or asyncio.current_task()
+        if task is not None:
+            self.tasks.add(task)
+        return task
+
+    def unregister_task(self, task: asyncio.Task | None = None) -> None:
+        task = task or asyncio.current_task()
+        if task is not None:
+            self.tasks.discard(task)
+
+
+def replace_room_turn_scope(room_id: str, new_scope: TurnScope) -> TurnScope | None:
+    global cancelled_stale_turn_count
+    old = room_turn_scopes.get(room_id)
+    room_turn_scopes[room_id] = new_scope
+    if old is not None and old is not new_scope:
+        old.cancel()
+        cancelled_stale_turn_count += 1
+    return old
+
+
+def get_room_turn_scope(room_id: str | None) -> TurnScope | None:
+    if not room_id:
+        return None
+    return room_turn_scopes.get(room_id)
+
+
+def _attach_current_task(turn_scope: TurnScope | None) -> asyncio.Task | None:
+    if turn_scope is None:
+        return None
+    return turn_scope.register_task(asyncio.current_task())
+
+
+def _detach_task(turn_scope: TurnScope | None, task: asyncio.Task | None) -> None:
+    if turn_scope is None:
+        return
+    turn_scope.unregister_task(task)
+
+
+def create_turn_scoped_task(coro: Awaitable[Any], turn_scope: TurnScope | None = None) -> asyncio.Task:
+    task = asyncio.create_task(coro)
+    if turn_scope is not None:
+        turn_scope.register_task(task)
+        task.add_done_callback(lambda done, scope=turn_scope: scope.unregister_task(done))
+    return task
+
+
+def clear_room_turn_scope(room_id: str | None, turn_scope: TurnScope | None = None) -> None:
+    if not room_id:
+        return
+    current = room_turn_scopes.get(room_id)
+    if current is None:
+        return
+    if turn_scope is not None and current is not turn_scope:
+        return
+    room_turn_scopes.pop(room_id, None)
+
+
+def record_turn_stage(turn_id: str | None, stage: str, elapsed_ms: float) -> None:
+    if not turn_id or not stage:
+        return
+    stages = turn_stage_metrics.setdefault(turn_id, {})
+    stages[stage] = float(elapsed_ms)
+
+
+def _p95(values: list[float]) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(float(v) for v in values)
+    idx = max(0, min(len(ordered) - 1, math.ceil(len(ordered) * 0.95) - 1))
+    return ordered[idx]
+
+
+def summarize_p95_metrics() -> dict[str, float | int]:
+    all_stt_ms = [row.get("t_stt_done") for row in turn_stage_metrics.values() if row.get("t_stt_done") is not None]
+    all_router_ms = [row.get("route_ready") for row in turn_stage_metrics.values() if row.get("route_ready") is not None]
+    all_main_first_token_ms = [row.get("t_main_first_token") for row in turn_stage_metrics.values() if row.get("t_main_first_token") is not None]
+    all_tts_first_audio_ms = [row.get("t_tts_first_audio") for row in turn_stage_metrics.values() if row.get("t_tts_first_audio") is not None]
+    return {
+        "stt_ms_p95": round(_p95(all_stt_ms), 1),
+        "router_ms_p95": round(_p95(all_router_ms), 1),
+        "main_first_token_ms_p95": round(_p95(all_main_first_token_ms), 1),
+        "tts_first_audio_ms_p95": round(_p95(all_tts_first_audio_ms), 1),
+        "search_followup_queued_count": search_followup_queued_count,
+        "cancelled_stale_turn_count": cancelled_stale_turn_count,
+    }
+
+
+def compute_runtime_mode(metrics: dict | None) -> str:
+    meta = (metrics or {}).get("meta") or {}
+    marks = (metrics or {}).get("marks") or {}
+    tts_backlog = len(active_tts_playbacks)
+    voice_queue_wait_ms = float(meta.get("voice_queue_wait_ms") or marks.get("voice_queue_wait_ms") or 0.0)
+    if tts_backlog >= 2:
+        return "realtime"
+    if voice_queue_wait_ms >= 250.0:
+        return "realtime"
+    if inflight_llm_requests >= 2:
+        return "congested"
+    return "normal"
+
+
+def apply_runtime_mode(mode: str, opts: dict[str, Any] | None = None) -> dict[str, Any]:
+    merged = dict(opts or {})
+    merged.setdefault("skip_router", False)
+    merged.setdefault("skip_search_followup", False)
+    merged.setdefault("memory_update_mode", "normal")
+    merged.setdefault("tts_chunk_min_chars", 12)
+    if mode == "realtime":
+        merged["skip_router"] = True
+        merged["skip_search_followup"] = True
+        merged["memory_update_mode"] = "defer"
+        merged["tts_chunk_min_chars"] = 18
+    elif mode == "congested":
+        merged["skip_router"] = False
+        merged["memory_update_mode"] = "batch"
     return merged
 
 
@@ -1463,6 +1611,7 @@ async def refresh_cognitive_state_in_background(
     person_key: str | None = None,
     session_memory_key: str | None = None,
     source: str = "text",
+    turn_scope: TurnScope | None = None,
 ) -> None:
     task_key = session_memory_key or runtime_session_key(guild_id=guild_id)
     started_at = time.monotonic()
@@ -1475,6 +1624,7 @@ async def refresh_cognitive_state_in_background(
             person_key=person_key,
             session_memory_key=session_memory_key,
             source=source,
+            turn_scope=turn_scope,
         )
         log_turn_event(
             "cognitive_background_done",
@@ -1503,6 +1653,7 @@ def schedule_cognitive_refresh(
     person_key: str | None = None,
     session_memory_key: str | None = None,
     source: str = "text",
+    turn_scope: TurnScope | None = None,
 ) -> None:
     if guild_id is None:
         return
@@ -1512,7 +1663,7 @@ def schedule_cognitive_refresh(
     existing = background_cognitive_tasks.get(task_key)
     if existing is not None and not existing.done():
         existing.cancel()
-    background_cognitive_tasks[task_key] = asyncio.create_task(
+    background_cognitive_tasks[task_key] = create_turn_scoped_task(
         refresh_cognitive_state_in_background(
             guild_id,
             user_text,
@@ -1522,7 +1673,9 @@ def schedule_cognitive_refresh(
             person_key=person_key,
             session_memory_key=session_memory_key,
             source=source,
-        )
+            turn_scope=turn_scope,
+        ),
+        turn_scope=turn_scope,
     )
 
 
@@ -1619,9 +1772,18 @@ async def prepare_llm_messages(
     source: str = "text",
     debug_text: str | None = None,
     metrics: dict | None = None,
+    turn_scope: TurnScope | None = None,
 ) -> tuple[list[dict], dict | None, str]:
+    if turn_scope is not None:
+        turn_scope.raise_if_cancelled()
+    runtime_mode = compute_runtime_mode(metrics)
+    runtime_opts = apply_runtime_mode(runtime_mode)
     route_started_at = time.monotonic()
-    route, route_meta = await classify_llm_route_async(user_text, guild_id=guild_id, source=source, session_key=session_key)
+    if runtime_opts.get("skip_router"):
+        route = classify_llm_route_fallback(user_text, source=source)
+        route_meta = {"selected": route, "source": "runtime_mode", "mode": runtime_mode}
+    else:
+        route, route_meta = await classify_llm_route_async(user_text, guild_id=guild_id, source=source, session_key=session_key)
     if metrics is not None:
         metrics.setdefault("marks", {})["route_ready"] = (time.monotonic() - route_started_at) * 1000.0
         metrics.setdefault("meta", {}).update(
@@ -1630,11 +1792,15 @@ async def prepare_llm_messages(
                 "session_key": session_key,
                 "guild_id": guild_id,
                 "topic_id": session_topic_ids.get(session_key or "", "") if session_key else None,
+                "runtime_mode": runtime_mode,
+                "runtime_opts": dict(runtime_opts),
             }
         )
     messages = list(get_conversation_history(session_key=session_key, guild_id=guild_id))
     cognitive_state: dict | None = None
 
+    if turn_scope is not None:
+        turn_scope.raise_if_cancelled()
     cognitive_started_at = time.monotonic()
     cached_cognitive_state = read_cached_cognitive_state(
         guild_id,
@@ -1663,12 +1829,13 @@ async def prepare_llm_messages(
             person_key=person_key,
             session_memory_key=session_memory_key,
             source=source,
+            turn_scope=turn_scope,
         )
         if metrics is not None:
             metrics.setdefault("meta", {})["cognitive_mode"] = "blocking"
     else:
         cognitive_state = cached_cognitive_state
-        if guild_id is not None:
+        if guild_id is not None and runtime_opts.get("memory_update_mode") != "defer":
             schedule_cognitive_refresh(
                 guild_id,
                 user_text,
@@ -1678,11 +1845,15 @@ async def prepare_llm_messages(
                 person_key=person_key,
                 session_memory_key=session_memory_key,
                 source=source,
+                turn_scope=turn_scope,
             )
         if metrics is not None:
             metrics.setdefault("meta", {})["cognitive_mode"] = "background"
     if metrics is not None and should_block_on_cognitive:
         metrics.setdefault("marks", {})["cognitive_hotpath_ms"] = (time.monotonic() - cognitive_started_at) * 1000.0
+
+    if turn_scope is not None:
+        turn_scope.raise_if_cancelled()
 
     if guild_id is not None:
         memory_started_at = time.monotonic()
@@ -2032,8 +2203,7 @@ async def ask_router_llm(
 
 async def classify_llm_route_async(user_text: str, *, guild_id: int | None = None, source: str = "text", session_key: str | None = None) -> tuple[str, dict | None]:
     fallback_route = classify_llm_route_fallback(user_text, source=source)
-    speculative = get_matching_speculative_policy(session_key, user_text) if source == "voice" else None
-    fast_policy = (speculative or {}).get("policy") or fast_path_policy(user_text, source, session_state_snapshot(session_key))
+    fast_policy = fast_path_policy(user_text, source, session_state_snapshot(session_key))
     if fast_policy is not None:
         fast_route = normalize_route_name(str(fast_policy.get("route", fallback_route)))
         return fast_route, {
@@ -2056,24 +2226,21 @@ async def classify_llm_route_async(user_text: str, *, guild_id: int | None = Non
         {
             "role": "system",
             "content": (
-                "너는 Evelyn의 router다. 반드시 JSON 객체 하나만 출력한다. "
-                "형식은 {\"route\": \"main_direct|sub_hint|sub_wait\", \"confidence\": number, \"reason_brief\": string}. "
-                "main_direct는 메인 LLM으로 바로 처리하면 되는 경우다. "
-                "sub_hint는 저장된 state/summary를 힌트로만 참고하면 충분한 경우다. "
-                "sub_wait는 fresh router 판단과 문맥 반영을 잠깐 기다리는 편이 좋은 경우다. "
-                "짧고 직접적인 요청, 단순 대답, 즉답 가능한 질문은 main_direct를 우선한다. "
-                "이전 대화 맥락, 기억, 비교, 판단, 요약, 이어지는 작업, 애매한 의도는 sub_hint 또는 sub_wait로 올린다. "
-                "JSON 외 다른 텍스트는 절대 출력하지 마라."
+                '너는 경량 라우터다. 반드시 JSON 객체 하나만 출력한다. ',
+                '형식은 {"selected": "main_direct|voice_context|sub_wait", "confidence": number, "reason_brief": string}. ',
+                'main_direct는 메인 LLM만으로 바로 답하는 경우, voice_context는 최근 대화/상태를 강하게 이어받아야 하는 경우, sub_wait는 먼저 search/wait/search_then_answer 성격 판단이 필요한 경우다. ',
+                'JSON 외 다른 텍스트는 절대 출력하지 마라.'
             ),
         },
         {
             "role": "user",
             "content": (
                 f"최근 요약:\n{summary or '(없음)'}\n\n"
-                f"최근 cognitive_state:\n{json.dumps(state, ensure_ascii=False)}\n\n"
+                f"현재 cognitive_state:\n{json.dumps(state, ensure_ascii=False)}\n\n"
                 f"최근 raw_transcript:\n{format_memory_rows_for_llm(recent_raw, max_items=3)}\n\n"
                 f"최근 durable_facts:\n{format_memory_rows_for_llm(recent_facts, max_items=3)}\n\n"
-                f"현재 입력:\n{compact_memory_text(user_text, max_chars=200)}"
+                f"현재 사용자 입력:\n{compact_memory_text(user_text, max_chars=160)}\n\n"
+                f"fallback_route={fallback_route}\nsource={source}"
             ),
         },
     ]
@@ -2081,25 +2248,21 @@ async def classify_llm_route_async(user_text: str, *, guild_id: int | None = Non
     try:
         result = await ask_router_llm(messages, max_tokens=ROUTER_ROUTE_MAX_TOKENS, timeout_seconds=ROUTER_ROUTE_TIMEOUT_SEC)
     except Exception as e:
-        print(f"[ROUTER ROUTE] fallback reason={e!r}")
-        return fallback_route, {"selected": fallback_route, "source": "fallback", "error": repr(e)}
+        print(f"[ROUTER] route 실패 fallback 사용: {e!r}")
+        return fallback_route, {"selected": fallback_route, "source": "fallback", "error": clean_text(repr(e))[:120]}
 
-    route = normalize_route_name(str(result.get("route", fallback_route)))
-    confidence_raw = result.get("confidence", 0.0)
-    try:
-        confidence = float(confidence_raw)
-    except Exception:
-        confidence = 0.0
+    if not isinstance(result, dict):
+        return fallback_route, {"selected": fallback_route, "source": "fallback", "reason_brief": "invalid_router_json"}
+
+    selected = normalize_route_name(str(result.get("selected", fallback_route)))
     meta = {
-        "selected": route,
+        "selected": selected,
         "source": "router",
-        "confidence": max(0.0, min(1.0, confidence)),
+        "confidence": float(result.get("confidence", 0.0) or 0.0),
         "reason_brief": clean_text(str(result.get("reason_brief", ""))),
         "fallback": fallback_route,
     }
-    return route, meta
-
-
+    return selected, meta
 async def update_cognitive_state(
     guild_id: int,
     user_text: str,
@@ -2109,151 +2272,162 @@ async def update_cognitive_state(
     person_key: str | None = None,
     session_memory_key: str | None = None,
     source: str = "text",
+    turn_scope: TurnScope | None = None,
 ) -> dict:
     started_at = time.monotonic()
+    task = _attach_current_task(turn_scope)
     lock = cognitive_locks.setdefault(guild_id, asyncio.Lock())
     scope_type = "session" if session_memory_key else "person" if person_key else "room" if room_key else "guild"
     scope_key = session_memory_key if session_memory_key else person_key if person_key else room_key
-    async with lock:
-        layers = collect_memory_layers(
-            guild_id,
-            room_key=room_key,
-            person_key=person_key,
-            session_memory_key=session_memory_key,
-        )
-        summary_lines = [
-            f"- {layer['label']}: {layer['summary']}"
-            for layer in (layers.get("session"), layers.get("person"), layers.get("room"), layers.get("guild"))
-            if layer and layer.get("summary")
-        ]
-        current_summary = "\n".join(summary_lines)
-        current_state = normalize_cognitive_state(
-            read_layered_cognitive_state(
+    try:
+        async with lock:
+            if turn_scope is not None:
+                turn_scope.raise_if_cancelled()
+            layers = collect_memory_layers(
                 guild_id,
                 room_key=room_key,
                 person_key=person_key,
                 session_memory_key=session_memory_key,
-            ) or {}
-        )
-        speculative = get_matching_speculative_policy(session_key, user_text) if source == "voice" else None
-        fast_policy = (speculative or {}).get("policy") or fast_path_policy(user_text, source, session_state_snapshot(session_key))
-        if fast_policy is not None:
-            state = build_fast_cognitive_state(
-                user_text,
-                action=str(fast_policy.get("action", "answer")),
-                current_state=current_state,
-                reason_brief=str(fast_policy.get("reason_brief", "fast_path")),
             )
+            summary_lines = [
+                f"- {layer['label']}: {layer['summary']}"
+                for layer in (layers.get("session"), layers.get("person"), layers.get("room"), layers.get("guild"))
+                if layer and layer.get("summary")
+            ]
+            current_summary = "\n".join(summary_lines)
+            current_state = normalize_cognitive_state(
+                read_layered_cognitive_state(
+                    guild_id,
+                    room_key=room_key,
+                    person_key=person_key,
+                    session_memory_key=session_memory_key,
+                ) or {}
+            )
+            speculative = get_matching_speculative_policy(session_key, user_text) if source == "voice" else None
+            fast_policy = (speculative or {}).get("policy") or fast_path_policy(user_text, source, session_state_snapshot(session_key))
+            if fast_policy is not None:
+                state = build_fast_cognitive_state(
+                    user_text,
+                    action=str(fast_policy.get("action", "answer")),
+                    current_state=current_state,
+                    reason_brief=str(fast_policy.get("reason_brief", "fast_path")),
+                )
+                write_json_file(cognitive_state_path(guild_id, scope_type=scope_type, scope_key=scope_key), state)
+                return state
+            recent_raw = merge_recent_memory_rows(
+                *(layer["raw"] for layer in layers.values()),
+                limit=MEMORY_COGNITIVE_RAW_LIMIT,
+            )
+            recent_facts = merge_recent_memory_rows(
+                *(layer["facts"] for layer in layers.values()),
+                limit=4,
+            )
+            recent_questions = merge_recent_memory_rows(
+                *(layer["questions"] for layer in layers.values()),
+                limit=4,
+            )
+
+            messages = [
+                {
+                    "role": "system",
+                    "content": (
+                        '너는 실시간 대화 조율자다. 반드시 JSON 객체 하나만 출력한다. '
+                        '형식은 {"action": "answer|ask|wait|search_then_answer", "confidence": number, "user_intent": string, "state_summary": string, "question_for_user": string, "main_prompt_hint": string, "reason_brief": string, "retrieved_context_ids": string[]}. '
+                        'answer는 지금 답하면 되는 경우다. ask는 사용자의 원래 발화에 이어서 짧게 되묻거나 확인 질문을 하는 편이 자연스러운 경우다. wait는 아직 단정하지 말고 더 듣거나 짧게 여지를 두는 편이 자연스러운 경우다. search_then_answer는 최신 정보나 외부 확인이 필요해서 먼저 짧게 알리고 뒤이어 검색 결과를 전해야 하는 경우다. '
+                        'question_for_user는 사용자가 한 말이 아니라, 메인 LLM이 사용자에게 되물을 내부 질문 초안이다. 절대로 사용자의 질문을 베껴 쓰거나 사용자가 이미 한 말처럼 적지 마라. '
+                        'user_intent에는 사용자가 진짜로 하려는 말을 아주 짧게 적어라. state_summary에는 현재 상황을 한두 문장으로 적어라. main_prompt_hint에는 메인 LLM이 말할 때 지켜야 할 한 줄 힌트를 적어라. confidence는 0~1, reason_brief는 아주 짧게 써라. JSON 외 다른 텍스트는 절대 출력하지 마라.'
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"이전 cognitive_state:\n{json.dumps(current_state, ensure_ascii=False)}\n\n"
+                        f"현재 layered_summary:\n{current_summary or '(없음)'}\n\n"
+                        f"최근 raw_transcript:\n{format_memory_rows_for_llm(recent_raw, max_items=MEMORY_COGNITIVE_RAW_LIMIT)}\n\n"
+                        f"최근 durable_facts:\n{format_memory_rows_for_llm(recent_facts, max_items=4)}\n\n"
+                        f"최근 open_questions:\n{format_memory_rows_for_llm(recent_questions, max_items=4)}\n\n"
+                        f"현재 사용자 입력:\n{compact_memory_text(user_text, max_chars=160)}"
+                    ),
+                },
+            ]
+
+            try:
+                if turn_scope is not None:
+                    turn_scope.raise_if_cancelled()
+                result = await ask_router_llm(
+                    messages,
+                    max_tokens=COGNITIVE_MAX_TOKENS,
+                    timeout_seconds=COGNITIVE_TIMEOUT_SEC,
+                )
+            except Exception as e:
+                if is_context_size_error(e):
+                    compact_messages = [
+                        messages[0],
+                        {
+                            "role": "user",
+                            "content": (
+                                f"현재 layered_summary:\n{current_summary or '(없음)'}\n\n"
+                                f"현재 사용자 입력:\n{compact_memory_text(user_text, max_chars=120)}"
+                            ),
+                        },
+                    ]
+                    try:
+                        if turn_scope is not None:
+                            turn_scope.raise_if_cancelled()
+                        result = await ask_router_llm(
+                            compact_messages,
+                            max_tokens=COGNITIVE_MAX_TOKENS,
+                            timeout_seconds=max(3.0, COGNITIVE_TIMEOUT_SEC - 2.0),
+                        )
+                    except Exception as e2:
+                        e = e2
+                        print(f"[COGNITIVE] compact retry 실패: {e2}")
+                    else:
+                        print("[COGNITIVE] compact retry 성공")
+                if "result" not in locals() or not isinstance(result, dict):
+                    print(f"[COGNITIVE] 상태 업데이트 실패 또는 timeout: {e}")
+                    elapsed_ms = (time.monotonic() - started_at) * 1000.0
+                    if should_log_voice_timing(elapsed_ms):
+                        print(f"[COGNITIVE LATENCY] guild={guild_id} scope={scope_type}:{scope_key or 'default'} failed_after_ms={elapsed_ms:.0f}")
+                    fallback = current_state or {
+                        "action": "answer",
+                        "confidence": 0.5,
+                        "user_intent": clean_text(user_text),
+                        "state_summary": clean_text(user_text),
+                        "question_for_user": "",
+                        "main_prompt_hint": "짧고 자연스럽게 답해라.",
+                        "reason_brief": "fallback",
+                        "retrieved_context_ids": [],
+                        "updated_at": int(time.time()),
+                    }
+                    write_json_file(cognitive_state_path(guild_id, scope_type=scope_type, scope_key=scope_key), fallback)
+                    return fallback
+
+            if turn_scope is not None:
+                turn_scope.raise_if_cancelled()
+            state = normalize_cognitive_state(result)
+            if not state.get("state_summary"):
+                state["state_summary"] = current_state.get("state_summary", "") or clean_text(user_text)
+            if not state.get("main_prompt_hint"):
+                state["main_prompt_hint"] = "짧고 자연스럽게 답해라."
+            state["updated_at"] = int(time.time())
             write_json_file(cognitive_state_path(guild_id, scope_type=scope_type, scope_key=scope_key), state)
+            elapsed_ms = (time.monotonic() - started_at) * 1000.0
+            if should_log_voice_timing(elapsed_ms):
+                print(f"[COGNITIVE LATENCY] guild={guild_id} scope={scope_type}:{scope_key or 'default'} action={state.get('action')} ms={elapsed_ms:.0f}")
+
+            if state.get("action") == "ask" and state.get("question_for_user"):
+                print(
+                    f"[COGNITIVE ASK] guild={guild_id} scope={scope_type}:{scope_key or 'default'} question={state['question_for_user']!r} reason={state.get('reason_brief', '')!r} confidence={state.get('confidence', 0.0):.2f}"
+                )
+            elif state.get("action") == "search_then_answer":
+                print(
+                    f"[COGNITIVE SEARCH] guild={guild_id} scope={scope_type}:{scope_key or 'default'} intent={state.get('user_intent', '')!r} reason={state.get('reason_brief', '')!r}"
+                )
+
             return state
-        recent_raw = merge_recent_memory_rows(
-            *(layer["raw"] for layer in layers.values()),
-            limit=MEMORY_COGNITIVE_RAW_LIMIT,
-        )
-        recent_facts = merge_recent_memory_rows(
-            *(layer["facts"] for layer in layers.values()),
-            limit=4,
-        )
-        recent_questions = merge_recent_memory_rows(
-            *(layer["questions"] for layer in layers.values()),
-            limit=4,
-        )
-
-        messages = [
-            {
-                "role": "system",
-                "content": (
-                    "너는 실시간 대화 조율자다. 반드시 JSON 객체 하나만 출력한다. "
-                    "형식은 {\"action\": \"answer|ask|wait|search_then_answer\", \"confidence\": number, \"user_intent\": string, \"state_summary\": string, \"question_for_user\": string, \"main_prompt_hint\": string, \"reason_brief\": string, \"retrieved_context_ids\": string[]}. "
-                    "answer는 지금 답하면 되는 경우다. ask는 사용자의 원래 발화에 이어서 짧게 되묻거나 확인 질문을 하는 편이 자연스러운 경우다. wait는 아직 단정하지 말고 더 듣거나 짧게 여지를 두는 편이 자연스러운 경우다. search_then_answer는 최신 정보나 외부 확인이 필요해서 먼저 짧게 알리고 뒤이어 검색 결과를 전해야 하는 경우다. "
-                    "question_for_user는 사용자가 한 말이 아니라, 메인 LLM이 사용자에게 되물을 내부 질문 초안이다. 절대로 사용자의 질문을 베껴 쓰거나 사용자가 이미 한 말처럼 적지 마라. "
-                    "user_intent에는 사용자가 진짜로 하려는 말을 아주 짧게 적어라. state_summary에는 현재 상황을 한두 문장으로 적어라. main_prompt_hint에는 메인 LLM이 말할 때 지켜야 할 한 줄 힌트를 적어라. confidence는 0~1, reason_brief는 아주 짧게 써라. JSON 외 다른 텍스트는 절대 출력하지 마라."
-                ),
-            },
-            {
-                "role": "user",
-                "content": (
-                    f"이전 cognitive_state:\n{json.dumps(current_state, ensure_ascii=False)}\n\n"
-                    f"현재 layered_summary:\n{current_summary or '(없음)'}\n\n"
-                    f"최근 raw_transcript:\n{format_memory_rows_for_llm(recent_raw, max_items=MEMORY_COGNITIVE_RAW_LIMIT)}\n\n"
-                    f"최근 durable_facts:\n{format_memory_rows_for_llm(recent_facts, max_items=4)}\n\n"
-                    f"최근 open_questions:\n{format_memory_rows_for_llm(recent_questions, max_items=4)}\n\n"
-                    f"현재 사용자 입력:\n{compact_memory_text(user_text, max_chars=160)}"
-                ),
-            },
-        ]
-
-        try:
-            result = await ask_router_llm(
-                messages,
-                max_tokens=COGNITIVE_MAX_TOKENS,
-                timeout_seconds=COGNITIVE_TIMEOUT_SEC,
-            )
-        except Exception as e:
-            if is_context_size_error(e):
-                compact_messages = [
-                    messages[0],
-                    {
-                        "role": "user",
-                        "content": (
-                            f"현재 layered_summary:\n{current_summary or '(없음)'}\n\n"
-                            f"현재 사용자 입력:\n{compact_memory_text(user_text, max_chars=120)}"
-                        ),
-                    },
-                ]
-                try:
-                    result = await ask_router_llm(
-                        compact_messages,
-                        max_tokens=COGNITIVE_MAX_TOKENS,
-                        timeout_seconds=max(3.0, COGNITIVE_TIMEOUT_SEC - 2.0),
-                    )
-                except Exception as e2:
-                    e = e2
-                    print(f"[COGNITIVE] compact retry 실패: {e2}")
-                else:
-                    print("[COGNITIVE] compact retry 성공")
-            if 'result' not in locals() or not isinstance(result, dict):
-                print(f"[COGNITIVE] 상태 업데이트 실패 또는 timeout: {e}")
-                elapsed_ms = (time.monotonic() - started_at) * 1000.0
-                if should_log_voice_timing(elapsed_ms):
-                    print(f"[COGNITIVE LATENCY] guild={guild_id} scope={scope_type}:{scope_key or 'default'} failed_after_ms={elapsed_ms:.0f}")
-                fallback = current_state or {
-                    "action": "answer",
-                    "confidence": 0.5,
-                    "user_intent": clean_text(user_text),
-                    "state_summary": clean_text(user_text),
-                    "question_for_user": "",
-                    "main_prompt_hint": "짧고 자연스럽게 답해라.",
-                    "reason_brief": "fallback",
-                    "retrieved_context_ids": [],
-                    "updated_at": int(time.time()),
-                }
-                write_json_file(cognitive_state_path(guild_id, scope_type=scope_type, scope_key=scope_key), fallback)
-                return fallback
-
-        state = normalize_cognitive_state(result)
-        if not state.get("state_summary"):
-            state["state_summary"] = current_state.get("state_summary", "") or clean_text(user_text)
-        if not state.get("main_prompt_hint"):
-            state["main_prompt_hint"] = "짧고 자연스럽게 답해라."
-        state["updated_at"] = int(time.time())
-        write_json_file(cognitive_state_path(guild_id, scope_type=scope_type, scope_key=scope_key), state)
-        elapsed_ms = (time.monotonic() - started_at) * 1000.0
-        if should_log_voice_timing(elapsed_ms):
-            print(f"[COGNITIVE LATENCY] guild={guild_id} scope={scope_type}:{scope_key or 'default'} action={state.get('action')} ms={elapsed_ms:.0f}")
-
-        if state.get("action") == "ask" and state.get("question_for_user"):
-            print(
-                f"[COGNITIVE ASK] guild={guild_id} scope={scope_type}:{scope_key or 'default'} question={state['question_for_user']!r} reason={state.get('reason_brief', '')!r} confidence={state.get('confidence', 0.0):.2f}"
-            )
-        elif state.get("action") == "search_then_answer":
-            print(
-                f"[COGNITIVE SEARCH] guild={guild_id} scope={scope_type}:{scope_key or 'default'} intent={state.get('user_intent', '')!r} reason={state.get('reason_brief', '')!r}"
-            )
-
-        return state
-
-
+    finally:
+        _detach_task(turn_scope, task)
 async def update_long_term_memory(
     guild_id: int,
     user_text: str,
@@ -2262,128 +2436,139 @@ async def update_long_term_memory(
     room_key: str | None = None,
     person_key: str | None = None,
     session_memory_key: str | None = None,
+    turn_scope: TurnScope | None = None,
 ) -> None:
     started_at = time.monotonic()
+    task = _attach_current_task(turn_scope)
     lock = memory_locks.setdefault(guild_id, asyncio.Lock())
     scope_note = session_memory_key or room_key or "guild"
-    async with lock:
-        layers = collect_memory_layers(
-            guild_id,
-            room_key=room_key,
-            person_key=person_key,
-            session_memory_key=session_memory_key,
-        )
-        summary_lines = [
-            f"- {layer['label']}: {layer['summary']}"
-            for layer in (layers.get("session"), layers.get("person"), layers.get("room"), layers.get("guild"))
-            if layer and layer.get("summary")
-        ]
-        current_summary = "\n".join(summary_lines)
-        recent_raw = merge_recent_memory_rows(
-            *(layer["raw"] for layer in layers.values()),
-            limit=MEMORY_LONGTERM_RAW_LIMIT,
-        )
-        recent_facts = merge_recent_memory_rows(
-            *(layer["facts"] for layer in layers.values()),
-            limit=6,
-        )
-        recent_questions = merge_recent_memory_rows(
-            *(layer["questions"] for layer in layers.values()),
-            limit=4,
-        )
+    try:
+        async with lock:
+            if turn_scope is not None:
+                turn_scope.raise_if_cancelled()
+            layers = collect_memory_layers(
+                guild_id,
+                room_key=room_key,
+                person_key=person_key,
+                session_memory_key=session_memory_key,
+            )
+            summary_lines = [
+                f"- {layer['label']}: {layer['summary']}"
+                for layer in (layers.get("session"), layers.get("person"), layers.get("room"), layers.get("guild"))
+                if layer and layer.get("summary")
+            ]
+            current_summary = "\n".join(summary_lines)
+            recent_raw = merge_recent_memory_rows(
+                *(layer["raw"] for layer in layers.values()),
+                limit=MEMORY_LONGTERM_RAW_LIMIT,
+            )
+            recent_facts = merge_recent_memory_rows(
+                *(layer["facts"] for layer in layers.values()),
+                limit=6,
+            )
+            recent_questions = merge_recent_memory_rows(
+                *(layer["questions"] for layer in layers.values()),
+                limit=4,
+            )
 
-        messages = [
-            {
-                "role": "system",
-                "content": (
-                    "너는 대화 장기기억 관리자이자 상황 정리자다. 반드시 JSON 객체 하나만 출력한다. "
-                    "형식은 {\"summary_update\": string, \"durable_facts\": [{\"type\": string, \"text\": string}], \"open_questions\": [{\"type\": string, \"text\": string}]}. "
-                    "summary_update는 지금 상황을 짧고 자연스러운 한국어로 압축한 누적 요약이다. "
-                    "durable_facts에는 오래 기억할 만한 선호, 설정, 프로젝트 결정, 반복되는 사실만 넣어라. "
-                    "open_questions에는 아직 확정되지 않은 추정, 확인이 필요한 질문, 다음에 물어볼 만한 포인트만 넣어라. "
-                    "잡담, 일회성 노이즈, 이미 해결된 내용은 넣지 마라. JSON 외 다른 텍스트는 절대 출력하지 마라."
-                ),
-            },
-            {
-                "role": "user",
-                "content": (
-                    f"현재 layered_summary:\n{current_summary or '(없음)'}\n\n"
-                    f"최근 raw_transcript:\n{format_memory_rows_for_llm(recent_raw, max_items=MEMORY_LONGTERM_RAW_LIMIT)}\n\n"
-                    f"최근 durable_facts:\n{format_memory_rows_for_llm(recent_facts, max_items=6)}\n\n"
-                    f"최근 open_questions:\n{format_memory_rows_for_llm(recent_questions, max_items=4)}\n\n"
-                    f"새 대화:\n- user: {compact_memory_text(user_text, max_chars=120)}\n- assistant: {compact_memory_text(answer, max_chars=120)}"
-                ),
-            },
-        ]
+            messages = [
+                {
+                    "role": "system",
+                    "content": (
+                        '너는 대화 장기기억 관리자이자 상황 정리자다. 반드시 JSON 객체 하나만 출력한다. '
+                        '형식은 {"summary_update": string, "durable_facts": [{"type": string, "text": string}], "open_questions": [{"type": string, "text": string}]}. '
+                        'summary_update는 지금 상황을 짧고 자연스러운 한국어로 압축한 누적 요약이다. '
+                        'durable_facts에는 오래 기억할 만한 선호, 설정, 프로젝트 결정, 반복되는 사실만 넣어라. '
+                        'open_questions에는 아직 확정되지 않은 추정, 확인이 필요한 질문, 다음에 물어볼 만한 포인트만 넣어라. '
+                        '잡담, 일회성 노이즈, 이미 해결된 내용은 넣지 마라. JSON 외 다른 텍스트는 절대 출력하지 마라.'
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"현재 layered_summary:\n{current_summary or '(없음)'}\n\n"
+                        f"최근 raw_transcript:\n{format_memory_rows_for_llm(recent_raw, max_items=MEMORY_LONGTERM_RAW_LIMIT)}\n\n"
+                        f"최근 durable_facts:\n{format_memory_rows_for_llm(recent_facts, max_items=6)}\n\n"
+                        f"최근 open_questions:\n{format_memory_rows_for_llm(recent_questions, max_items=4)}\n\n"
+                        f"새 대화:\n- user: {compact_memory_text(user_text, max_chars=120)}\n- assistant: {compact_memory_text(answer, max_chars=120)}"
+                    ),
+                },
+            ]
 
-        try:
-            result = await ask_summary_llm(messages)
-        except Exception as e:
-            if is_context_size_error(e):
-                compact_messages = [
-                    messages[0],
-                    {
-                        "role": "user",
-                        "content": (
-                            f"현재 layered_summary:\n{current_summary or '(없음)'}\n\n"
-                            f"새 대화:\n- user: {compact_memory_text(user_text, max_chars=100)}\n- assistant: {compact_memory_text(answer, max_chars=100)}"
-                        ),
-                    },
-                ]
-                try:
-                    result = await ask_summary_llm(compact_messages, max_tokens=220, timeout_seconds=20)
-                except Exception as e2:
-                    e = e2
-                    print(f"[MEMORY] compact retry 실패: {e2}")
-                else:
-                    print("[MEMORY] compact retry 성공")
-            if 'result' not in locals() or not isinstance(result, dict):
-                print(f"[MEMORY] 요약 업데이트 실패: {e}")
-                elapsed_ms = (time.monotonic() - started_at) * 1000.0
-                if should_log_voice_timing(elapsed_ms):
-                    print(f"[MEMORY LATENCY] guild={guild_id} scope={scope_note} failed_after_ms={elapsed_ms:.0f}")
-                return
+            try:
+                if turn_scope is not None:
+                    turn_scope.raise_if_cancelled()
+                result = await ask_summary_llm(messages)
+            except Exception as e:
+                if is_context_size_error(e):
+                    compact_messages = [
+                        messages[0],
+                        {
+                            "role": "user",
+                            "content": (
+                                f"현재 layered_summary:\n{current_summary or '(없음)'}\n\n"
+                                f"새 대화:\n- user: {compact_memory_text(user_text, max_chars=100)}\n- assistant: {compact_memory_text(answer, max_chars=100)}"
+                            ),
+                        },
+                    ]
+                    try:
+                        if turn_scope is not None:
+                            turn_scope.raise_if_cancelled()
+                        result = await ask_summary_llm(compact_messages, max_tokens=220, timeout_seconds=20)
+                    except Exception as e2:
+                        e = e2
+                        print(f"[MEMORY] compact retry 실패: {e2}")
+                    else:
+                        print("[MEMORY] compact retry 성공")
+                if "result" not in locals() or not isinstance(result, dict):
+                    print(f"[MEMORY] 요약 업데이트 실패: {e}")
+                    elapsed_ms = (time.monotonic() - started_at) * 1000.0
+                    if should_log_voice_timing(elapsed_ms):
+                        print(f"[MEMORY LATENCY] guild={guild_id} scope={scope_note} failed_after_ms={elapsed_ms:.0f}")
+                    return
 
-        scope_targets: list[tuple[str, str | None]] = [("guild", None)]
-        if room_key:
-            scope_targets.append(("room", room_key))
-        if person_key:
-            scope_targets.append(("person", person_key))
-        if session_memory_key:
-            scope_targets.append(("session", session_memory_key))
+            if turn_scope is not None:
+                turn_scope.raise_if_cancelled()
+            scope_targets: list[tuple[str, str | None]] = [("guild", None)]
+            if room_key:
+                scope_targets.append(("room", room_key))
+            if person_key:
+                scope_targets.append(("person", person_key))
+            if session_memory_key:
+                scope_targets.append(("session", session_memory_key))
 
-        summary_update = compact_working_summary(str(result.get("summary_update", "")))
-        if summary_update:
-            for scope_type, scope_key in scope_targets:
-                write_text_file(memory_summary_path(guild_id, scope_type=scope_type, scope_key=scope_key), summary_update)
+            summary_update = compact_working_summary(str(result.get("summary_update", "")))
+            if summary_update:
+                for scope_type, scope_key in scope_targets:
+                    write_text_file(memory_summary_path(guild_id, scope_type=scope_type, scope_key=scope_key), summary_update)
 
-        durable_facts = result.get("durable_facts", [])
-        if isinstance(durable_facts, list):
-            rows = [row for row in durable_facts if isinstance(row, dict)]
-            for scope_type, scope_key in scope_targets:
-                append_unique_memory_rows(
-                    memory_facts_path(guild_id, scope_type=scope_type, scope_key=scope_key),
-                    rows,
-                    MEMORY_FACT_LIMIT,
-                    mirror_path=vault_facts_path(guild_id, scope_type=scope_type, scope_key=scope_key),
-                )
+            durable_facts = result.get("durable_facts", [])
+            if isinstance(durable_facts, list):
+                rows = [row for row in durable_facts if isinstance(row, dict)]
+                for scope_type, scope_key in scope_targets:
+                    append_unique_memory_rows(
+                        memory_facts_path(guild_id, scope_type=scope_type, scope_key=scope_key),
+                        rows,
+                        MEMORY_FACT_LIMIT,
+                        mirror_path=vault_facts_path(guild_id, scope_type=scope_type, scope_key=scope_key),
+                    )
 
-        open_questions = result.get("open_questions", [])
-        if isinstance(open_questions, list):
-            rows = [row for row in open_questions if isinstance(row, dict)]
-            for scope_type, scope_key in scope_targets:
-                append_unique_memory_rows(
-                    memory_questions_path(guild_id, scope_type=scope_type, scope_key=scope_key),
-                    rows,
-                    MEMORY_LOOP_LIMIT,
-                    mirror_path=vault_questions_path(guild_id, scope_type=scope_type, scope_key=scope_key),
-                )
+            open_questions = result.get("open_questions", [])
+            if isinstance(open_questions, list):
+                rows = [row for row in open_questions if isinstance(row, dict)]
+                for scope_type, scope_key in scope_targets:
+                    append_unique_memory_rows(
+                        memory_questions_path(guild_id, scope_type=scope_type, scope_key=scope_key),
+                        rows,
+                        MEMORY_LOOP_LIMIT,
+                        mirror_path=vault_questions_path(guild_id, scope_type=scope_type, scope_key=scope_key),
+                    )
 
-        elapsed_ms = (time.monotonic() - started_at) * 1000.0
-        if should_log_voice_timing(elapsed_ms):
-            print(f"[MEMORY LATENCY] guild={guild_id} scope={scope_note} ms={elapsed_ms:.0f}")
-
-
+            elapsed_ms = (time.monotonic() - started_at) * 1000.0
+            if should_log_voice_timing(elapsed_ms):
+                print(f"[MEMORY LATENCY] guild={guild_id} scope={scope_note} ms={elapsed_ms:.0f}")
+    finally:
+        _detach_task(turn_scope, task)
 def should_run_memory_update(
     *,
     guild_id: int,
@@ -2432,6 +2617,8 @@ def schedule_memory_update(
     user_speaker: str = "user",
     assistant_speaker: str = "Evelyn",
     session_key: str | None = None,
+    turn_scope: TurnScope | None = None,
+    runtime_mode: str | None = None,
 ) -> None:
     rows = [
         {"role": "user", "speaker": user_speaker, "source": source, "text": user_text},
@@ -2454,7 +2641,47 @@ def schedule_memory_update(
     ):
         return
 
-    asyncio.create_task(
+    mode = runtime_mode or "normal"
+    if mode == "realtime":
+        return
+
+    memory_task_key = session_memory_key or room_key or session_key or runtime_session_key(guild_id=guild_id)
+    if mode == "batch" and memory_task_key is not None:
+        existing = background_memory_tasks.get(memory_task_key)
+        if existing is not None and not existing.done():
+            existing.cancel()
+        async def _batched_memory_refresh() -> None:
+            try:
+                await asyncio.sleep(1.5)
+                if turn_scope is not None:
+                    turn_scope.raise_if_cancelled()
+                await update_long_term_memory(
+                    guild_id,
+                    user_text,
+                    answer,
+                    room_key=room_key,
+                    person_key=person_key,
+                    session_memory_key=session_memory_key,
+                    turn_scope=turn_scope,
+                )
+                await update_cognitive_state(
+                    guild_id,
+                    user_text,
+                    session_key=session_key,
+                    room_key=room_key,
+                    person_key=person_key,
+                    session_memory_key=session_memory_key,
+                    source=source,
+                    turn_scope=turn_scope,
+                )
+            finally:
+                task = background_memory_tasks.get(memory_task_key)
+                if task is asyncio.current_task():
+                    background_memory_tasks.pop(memory_task_key, None)
+        background_memory_tasks[memory_task_key] = create_turn_scoped_task(_batched_memory_refresh(), turn_scope=turn_scope)
+        return
+
+    create_turn_scoped_task(
         update_long_term_memory(
             guild_id,
             user_text,
@@ -2462,9 +2689,11 @@ def schedule_memory_update(
             room_key=room_key,
             person_key=person_key,
             session_memory_key=session_memory_key,
-        )
+            turn_scope=turn_scope,
+        ),
+        turn_scope=turn_scope,
     )
-    asyncio.create_task(
+    create_turn_scoped_task(
         update_cognitive_state(
             guild_id,
             user_text,
@@ -2473,7 +2702,9 @@ def schedule_memory_update(
             person_key=person_key,
             session_memory_key=session_memory_key,
             source=source,
-        )
+            turn_scope=turn_scope,
+        ),
+        turn_scope=turn_scope,
     )
 
 
@@ -3047,7 +3278,11 @@ async def deliver_proactive_followup(
     session_memory_key: str | None,
     channel_id: int | None,
     source: str,
+    turn_scope: TurnScope | None = None,
+    runtime_mode: str | None = None,
 ) -> None:
+    if turn_scope is not None:
+        turn_scope.raise_if_cancelled()
     plain_answer = strip_omnivoice_tags(answer) or answer
     guild = bot.get_guild(guild_id)
     target_channel_id = channel_id
@@ -3062,15 +3297,21 @@ async def deliver_proactive_followup(
             except Exception:
                 channel = None
         if channel is not None and hasattr(channel, "send"):
+            if turn_scope is not None:
+                turn_scope.raise_if_cancelled()
             await channel.send(format_display_text(answer, session_key=session_key))
 
     vc = guild.voice_client if guild else None
     if vc is not None and vc.is_connected():
         try:
+            if turn_scope is not None:
+                turn_scope.raise_if_cancelled()
             await speak_answer(vc, answer, turn_id=current_turn_id(session_key), session_key=session_key)
         except Exception as e:
             print(f"[SEARCH] proactive TTS 실패: {e!r}")
 
+    if turn_scope is not None:
+        turn_scope.raise_if_cancelled()
     append_history(session_key, query, plain_answer, guild_id=guild_id)
     schedule_memory_update(
         guild_id,
@@ -3082,7 +3323,50 @@ async def deliver_proactive_followup(
         source=source,
         user_speaker="search_task",
         assistant_speaker="Evelyn",
+        turn_scope=turn_scope,
+        runtime_mode=runtime_mode,
     )
+
+
+def normalize_search_key(session_key: str, query: str) -> str:
+    return f"{session_key}:{clean_text(query).lower()}"
+
+
+def schedule_search_followup_singleflight(
+    guild_id: int,
+    query: str,
+    *,
+    session_key: str,
+    room_key: str | None,
+    person_key: str | None,
+    session_memory_key: str | None,
+    channel_id: int | None,
+    source: str,
+    turn_scope: TurnScope | None = None,
+    runtime_mode: str | None = None,
+) -> asyncio.Task:
+    search_key = normalize_search_key(session_key, query)
+    existing = inflight_search_tasks.get(search_key)
+    if existing is not None and not existing.done():
+        return existing
+    task = create_turn_scoped_task(
+        run_search_followup(
+            guild_id,
+            query,
+            session_key=session_key,
+            room_key=room_key,
+            person_key=person_key,
+            session_memory_key=session_memory_key,
+            channel_id=channel_id,
+            source=source,
+            turn_scope=turn_scope,
+            runtime_mode=runtime_mode,
+            search_key=search_key,
+        ),
+        turn_scope=turn_scope,
+    )
+    inflight_search_tasks[search_key] = task
+    return task
 
 
 async def run_search_followup(
@@ -3095,9 +3379,17 @@ async def run_search_followup(
     session_memory_key: str | None,
     channel_id: int | None,
     source: str,
+    turn_scope: TurnScope | None = None,
+    runtime_mode: str | None = None,
+    search_key: str | None = None,
 ) -> None:
+    task = _attach_current_task(turn_scope)
     try:
+        if turn_scope is not None:
+            turn_scope.raise_if_cancelled()
         results = await search_duckduckgo(query)
+        if turn_scope is not None:
+            turn_scope.raise_if_cancelled()
         answer = await answer_from_search_results(query, results)
         removed = resolve_open_question_rows(guild_id, query, answer)
         if room_key:
@@ -3126,6 +3418,8 @@ async def run_search_followup(
             write_json_file(cognitive_state_path(guild_id, scope_type="person", scope_key=person_key), completed_state)
         if session_memory_key:
             write_json_file(cognitive_state_path(guild_id, scope_type="session", scope_key=session_memory_key), completed_state)
+        if turn_scope is not None:
+            turn_scope.raise_if_cancelled()
         await deliver_proactive_followup(
             guild_id,
             query,
@@ -3136,6 +3430,8 @@ async def run_search_followup(
             session_memory_key=session_memory_key,
             channel_id=channel_id,
             source=source,
+            turn_scope=turn_scope,
+            runtime_mode=runtime_mode,
         )
     except asyncio.CancelledError:
         raise
@@ -3143,9 +3439,14 @@ async def run_search_followup(
         print(f"[SEARCH] follow-up 실패 guild={guild_id} query={query!r} err={e!r}")
     finally:
         task_key = runtime_session_key(session_key=session_key, guild_id=guild_id)
-        task = background_search_tasks.get(task_key) if task_key is not None else None
-        if task is asyncio.current_task() and task_key is not None:
+        task_ref = background_search_tasks.get(task_key) if task_key is not None else None
+        if task_ref is asyncio.current_task() and task_key is not None:
             background_search_tasks.pop(task_key, None)
+        if search_key:
+            inflight = inflight_search_tasks.get(search_key)
+            if inflight is asyncio.current_task():
+                inflight_search_tasks.pop(search_key, None)
+        _detach_task(turn_scope, task)
 
 
 def schedule_search_followup(
@@ -3160,42 +3461,55 @@ def schedule_search_followup(
     channel_id: int | None,
     source: str,
     force: bool = False,
+    turn_scope: TurnScope | None = None,
+    runtime_mode: str | None = None,
 ) -> None:
+    global search_followup_queued_count
     if not guild_id:
+        return
+    opts = apply_runtime_mode(runtime_mode or "normal")
+    if opts.get("skip_search_followup") and not force:
         return
     if not force and not answer_promises_search(answer):
         return
-
     query = build_search_query(guild_id, user_text)
     if len(query) < 2:
         return
-
     task_key = runtime_session_key(session_key=session_key, guild_id=guild_id)
     if task_key is None:
         return
-
     if channel_id is not None:
         remember_session_followup_target(task_key, channel_id=channel_id)
-
+    search_key = normalize_search_key(task_key, query)
+    for existing_key, existing_task in list(inflight_search_tasks.items()):
+        if not existing_key.startswith(f"{task_key}:"):
+            continue
+        prior_query = existing_key.split(":", 1)[1]
+        if existing_key == search_key:
+            if existing_task is not None and not existing_task.done():
+                return
+            continue
+        if is_similar(prior_query, clean_text(query).lower()) and existing_task is not None and not existing_task.done():
+            existing_task.cancel()
+            inflight_search_tasks.pop(existing_key, None)
     existing = background_search_tasks.get(task_key)
     if existing is not None and not existing.done():
         existing.cancel()
-
     print(f"[SEARCH] scheduled guild={guild_id} session={task_key!r} query={query!r} source={source}")
-    background_search_tasks[task_key] = asyncio.create_task(
-        run_search_followup(
-            guild_id,
-            query,
-            session_key=task_key,
-            room_key=room_key,
-            person_key=person_key,
-            session_memory_key=session_memory_key,
-            channel_id=channel_id,
-            source=source,
-        )
+    search_followup_queued_count += 1
+    task = schedule_search_followup_singleflight(
+        guild_id,
+        query,
+        session_key=task_key,
+        room_key=room_key,
+        person_key=person_key,
+        session_memory_key=session_memory_key,
+        channel_id=channel_id,
+        source=source,
+        turn_scope=turn_scope,
+        runtime_mode=runtime_mode,
     )
-
-
+    background_search_tasks[task_key] = task
 class OmniVoicePCMStream(discord.AudioSource):
     def __init__(
         self,
@@ -3490,6 +3804,7 @@ def log_voice_latency(metrics: dict | None, key: str, label: str) -> None:
     elapsed_ms = (time.monotonic() - float(started_at)) * 1000.0
     metrics[key] = True
     metrics.setdefault("marks", {})[key] = elapsed_ms
+    record_turn_stage((metrics.get("meta") or {}).get("turn_id"), key, elapsed_ms)
     alias_map = {
         "llm_first_chunk_logged": ["t_main_first_token"],
         "tts_first_byte_logged": ["t_tts_first_byte", "t_tts_first_audio"],
@@ -3499,6 +3814,7 @@ def log_voice_latency(metrics: dict | None, key: str, label: str) -> None:
     aliases = alias_map.get(key, [])
     for alias in aliases:
         metrics.setdefault("marks", {})[alias] = elapsed_ms
+        record_turn_stage((metrics.get("meta") or {}).get("turn_id"), alias, elapsed_ms)
     if VOICE_BOTTLENECK_LOGS or should_log_voice_timing(elapsed_ms):
         print(
             "[VOICE LATENCY]\n"
@@ -3517,6 +3833,7 @@ def log_voice_stage(metrics: dict | None, label: str, *, extra: str = "", key: s
     elapsed_ms = (time.monotonic() - float(started_at)) * 1000.0
     if key:
         metrics.setdefault("marks", {})[key] = elapsed_ms
+        record_turn_stage((metrics.get("meta") or {}).get("turn_id"), key, elapsed_ms)
     stage_alias = {
         "route_ready": "t_policy",
         "memory_ready": "t_context_build",
@@ -3525,6 +3842,7 @@ def log_voice_stage(metrics: dict | None, label: str, *, extra: str = "", key: s
     }
     if key and key in stage_alias:
         metrics.setdefault("marks", {})[stage_alias[key]] = elapsed_ms
+        record_turn_stage((metrics.get("meta") or {}).get("turn_id"), stage_alias[key], elapsed_ms)
     if not (VOICE_BOTTLENECK_LOGS or should_log_voice_timing(elapsed_ms)):
         return
     lines = [
@@ -3559,6 +3877,7 @@ def log_voice_bottleneck_summary(
         value = marks.get(name)
         return f"{float(value):.0f}ms" if value is not None else "-"
 
+    p95_summary = summarize_p95_metrics()
     if VOICE_BOTTLENECK_LOGS or should_log_voice_timing(total_ms):
         lines = [
             "[VOICE BOTTLENECK]",
@@ -3576,6 +3895,12 @@ def log_voice_bottleneck_summary(
             f"tts_first={_fmt('tts_first_byte_logged')}",
             f"tts_frame={_fmt('tts_first_frame_logged')}",
             f"playback={_fmt('first_packet_sent_logged')}",
+            f"p95_stt={p95_summary['stt_ms_p95']:.0f}ms",
+            f"p95_router={p95_summary['router_ms_p95']:.0f}ms",
+            f"p95_main_first={p95_summary['main_first_token_ms_p95']:.0f}ms",
+            f"p95_tts_first={p95_summary['tts_first_audio_ms_p95']:.0f}ms",
+            f"search_q={p95_summary['search_followup_queued_count']}",
+            f"cancelled_turns={p95_summary['cancelled_stale_turn_count']}",
         ]
         if extra:
             lines.append(f"extra={extra}")
@@ -3606,6 +3931,12 @@ def log_voice_bottleneck_summary(
         t_playback_first_packet=marks.get("t_playback_first_packet"),
         t_stt_done=marks.get("t_stt_done"),
         total_ms=round(total_ms, 1),
+        stt_ms_p95=p95_summary.get("stt_ms_p95"),
+        router_ms_p95=p95_summary.get("router_ms_p95"),
+        main_first_token_ms_p95=p95_summary.get("main_first_token_ms_p95"),
+        tts_first_audio_ms_p95=p95_summary.get("tts_first_audio_ms_p95"),
+        search_followup_queued_count=p95_summary.get("search_followup_queued_count"),
+        cancelled_stale_turn_count=p95_summary.get("cancelled_stale_turn_count"),
         extra=extra or None,
     )
 
@@ -4268,11 +4599,15 @@ async def _prefetch_tts_sources(
     metrics: dict | None = None,
     turn_id: str | None = None,
     session_key: str | None = None,
+    turn_scope: TurnScope | None = None,
 ) -> None:
     chunk_index = 0
+    task = _attach_current_task(turn_scope)
 
     try:
         while True:
+            if turn_scope is not None:
+                turn_scope.raise_if_cancelled()
             sentence = await sentence_queue.get()
             if sentence is None:
                 await prepared_queue.put(None)
@@ -4282,6 +4617,8 @@ async def _prefetch_tts_sources(
             if not sentence:
                 continue
 
+            if turn_scope is not None:
+                turn_scope.raise_if_cancelled()
             chunk_index += 1
             source = await create_omnivoice_source(
                 sentence,
@@ -4306,6 +4643,8 @@ async def _prefetch_tts_sources(
             await prepared_queue.put((chunk_index, source))
     except Exception as exc:
         await prepared_queue.put(exc)
+    finally:
+        _detach_task(turn_scope, task)
 
 
 async def stream_tts_sentences(
@@ -4315,77 +4654,86 @@ async def stream_tts_sentences(
     metrics: dict | None = None,
     turn_id: str | None = None,
     session_key: str | None = None,
+    turn_scope: TurnScope | None = None,
 ) -> None:
     guild_id = getattr(getattr(vc, "guild", None), "id", None)
     did_speak = False
+    task = _attach_current_task(turn_scope)
 
-    async with tts_lock:
-        prepared_queue: asyncio.Queue[object] = asyncio.Queue(maxsize=max(1, TTS_PREFETCH_CHUNKS))
-        playback_source = QueuedAudioSource()
-        prefetch_task = asyncio.create_task(
-            _prefetch_tts_sources(
-                sentence_queue,
-                prepared_queue,
-                metrics=metrics,
-                turn_id=turn_id,
-                session_key=session_key,
+    try:
+        async with tts_lock:
+            prepared_queue: asyncio.Queue[object] = asyncio.Queue(maxsize=max(1, TTS_PREFETCH_CHUNKS))
+            playback_source = QueuedAudioSource()
+            prefetch_task = create_turn_scoped_task(
+                _prefetch_tts_sources(
+                    sentence_queue,
+                    prepared_queue,
+                    metrics=metrics,
+                    turn_id=turn_id,
+                    session_key=session_key,
+                    turn_scope=turn_scope,
+                ),
+                turn_scope=turn_scope,
             )
-        )
-        playback_task: asyncio.Task | None = None
-        if guild_id is not None:
-            active_tts_playbacks[guild_id] = {
-                "vc": vc,
-                "sentence_queue": sentence_queue,
-                "prepared_queue": prepared_queue,
-                "playback_source": playback_source,
-                "prefetch_task": prefetch_task,
-                "playback_task": playback_task,
-                "turn_id": turn_id,
-                "session_key": session_key,
-            }
-        try:
-            while True:
-                item = await prepared_queue.get()
-                if item is None:
-                    playback_source.finish()
-                    break
-                if isinstance(item, Exception):
-                    playback_source.finish()
-                    raise item
-
-                _, source = item
-                playback_source.add_source(source)
-
-                if guild_id is not None and not did_speak:
-                    bot_speaking_guilds.add(guild_id)
-
-                if playback_task is None:
-                    did_speak = True
-                    playback_task = asyncio.create_task(play_audio_source(vc, playback_source))
-                    if guild_id is not None and guild_id in active_tts_playbacks:
-                        active_tts_playbacks[guild_id]["playback_task"] = playback_task
-
-            if playback_task is not None:
-                await playback_task
-        finally:
-            playback_source.finish()
-            if playback_task is not None and not playback_task.done():
-                playback_task.cancel()
-                try:
-                    await playback_task
-                except asyncio.CancelledError:
-                    pass
-            if not prefetch_task.done():
-                prefetch_task.cancel()
-                try:
-                    await prefetch_task
-                except asyncio.CancelledError:
-                    pass
+            playback_task: asyncio.Task | None = None
             if guild_id is not None:
-                active_tts_playbacks.pop(guild_id, None)
-                bot_speaking_guilds.discard(guild_id)
-                if did_speak:
-                    last_bot_audio_end_at[guild_id] = time.monotonic()
+                active_tts_playbacks[guild_id] = {
+                    "vc": vc,
+                    "sentence_queue": sentence_queue,
+                    "prepared_queue": prepared_queue,
+                    "playback_source": playback_source,
+                    "prefetch_task": prefetch_task,
+                    "playback_task": playback_task,
+                    "turn_id": turn_id,
+                    "session_key": session_key,
+                }
+            try:
+                while True:
+                    if turn_scope is not None:
+                        turn_scope.raise_if_cancelled()
+                    item = await prepared_queue.get()
+                    if item is None:
+                        playback_source.finish()
+                        break
+                    if isinstance(item, Exception):
+                        playback_source.finish()
+                        raise item
+
+                    _, source = item
+                    playback_source.add_source(source)
+
+                    if guild_id is not None and not did_speak:
+                        bot_speaking_guilds.add(guild_id)
+
+                    if playback_task is None:
+                        did_speak = True
+                        playback_task = create_turn_scoped_task(play_audio_source(vc, playback_source), turn_scope=turn_scope)
+                        if guild_id is not None and guild_id in active_tts_playbacks:
+                            active_tts_playbacks[guild_id]["playback_task"] = playback_task
+
+                if playback_task is not None:
+                    await playback_task
+            finally:
+                playback_source.finish()
+                if playback_task is not None and not playback_task.done():
+                    playback_task.cancel()
+                    try:
+                        await playback_task
+                    except asyncio.CancelledError:
+                        pass
+                if not prefetch_task.done():
+                    prefetch_task.cancel()
+                    try:
+                        await prefetch_task
+                    except asyncio.CancelledError:
+                        pass
+                if guild_id is not None:
+                    active_tts_playbacks.pop(guild_id, None)
+                    bot_speaking_guilds.discard(guild_id)
+                    if did_speak:
+                        last_bot_audio_end_at[guild_id] = time.monotonic()
+    finally:
+        _detach_task(turn_scope, task)
 
 
 # =========================================================
@@ -4722,155 +5070,14 @@ async def ask_llm_streaming(
     source: str = "text",
     debug_text: str | None = None,
     metrics: dict | None = None,
+    turn_scope: TurnScope | None = None,
 ) -> str:
-    messages, cognitive_state, _route = await prepare_llm_messages(
-        user_text,
-        guild_id=guild_id,
-        session_key=session_key,
-        room_key=room_key,
-        person_key=person_key,
-        session_memory_key=session_memory_key,
-        source=source,
-        debug_text=debug_text,
-        metrics=metrics,
-    )
-
-    policy_response = policy_response_for_state(cognitive_state, source=source)
-    gated_state = apply_ask_gating(cognitive_state, source=source) if cognitive_state is not None else None
-    if policy_response:
-        if session_key is not None and gated_state is not None:
-            update_session_state(
-                session_key,
-                speaker="assistant",
-                awaiting_user_reply=gated_state.get("action") in {"ask", "wait", "search_then_answer"},
-                answer_text=policy_response,
-                user_text=user_text,
-            )
-        if on_first_chunk is not None:
-            on_first_chunk()
-        if on_sentence is not None:
-            ready_chunks, _ = split_tts_sentences(policy_response, force=True)
-            if not ready_chunks and policy_response:
-                ready_chunks = [clean_tts_text(policy_response)]
-            for chunk in ready_chunks:
-                if not chunk:
-                    continue
-                await on_sentence(chunk)
-        if metrics is not None:
-            metrics.setdefault("marks", {})["policy_short_circuit"] = (time.monotonic() - float(metrics.get("started_at", time.monotonic()))) * 1000.0
-            metrics.setdefault("marks", {})["llm_done"] = (time.monotonic() - float(metrics.get("started_at", time.monotonic()))) * 1000.0
-            metrics.setdefault("marks", {})["t_main_done"] = metrics.setdefault("marks", {}).get("llm_done")
-        return policy_response
-
-    guided_user_text = user_text
-    if gated_state and gated_state.get("action") == "ask" and gated_state.get("question_for_user"):
-        guided_user_text = clean_text(str(gated_state.get("question_for_user", "")))
-    final_user_text = f"{guided_user_text}\n\n{build_main_response_guidance(cognitive_state, source=source)}"
-
-    stream_temperature = 0.3 if source == "voice" else 0.1
-    payload = {
-        "model": MODEL_NAME,
-        "messages": messages + [{"role": "user", "content": final_user_text}],
-        "temperature": stream_temperature,
-        "max_tokens": VOICE_LLM_MAX_TOKENS,
-        "stream": True,
-    }
-
-    timeout = aiohttp.ClientTimeout(total=120)
-    session = await get_http_session()
-    raw_parts: list[str] = []
-    reasoning_parts: list[str] = []
-    speech_chunker = SpeechChunker()
-    emitted_any = False
-    emitted_chunk_count = 0
-    llm_started_at = time.monotonic()
-
-    async with session.post(LLM_SERVER_URL, json=payload, timeout=timeout) as resp:
-        if resp.status != 200:
-            error_text = await resp.text()
-            raise RuntimeError(f"LLM 서버 오류: {resp.status} / {error_text[:300]}")
-
-        content_type = resp.headers.get("Content-Type", "")
-        if "application/json" in content_type.lower():
-            data = await resp.json()
-            choices = data.get("choices", [])
-            answer = ""
-            if choices:
-                msg = choices[0].get("message", {})
-                answer = sanitize_model_output(msg.get("content", ""))
-            if not answer:
-                print("[LLM STREAM] json 응답 본문 비어 있음, non-stream 재시도")
-                answer = await ask_llm_once(
-                    user_text,
-                    guild_id=guild_id,
-                    session_key=session_key,
-                    room_key=room_key,
-                    person_key=person_key,
-                    session_memory_key=session_memory_key,
-                    source=source,
-                    debug_text=debug_text,
-                )
-            if on_first_chunk is not None:
-                on_first_chunk()
-                on_first_chunk = None
-            if on_sentence is not None:
-                ready_chunks, _ = split_tts_sentences(answer, force=True)
-                if not ready_chunks and answer:
-                    ready_chunks = [clean_tts_text(answer)]
-                for chunk in ready_chunks:
-                    if not chunk:
-                        continue
-                    emitted_any = True
-                    emitted_chunk_count += 1
-                    await on_sentence(chunk)
-            if metrics is not None:
-                metrics.setdefault("marks", {})["llm_done"] = (time.monotonic() - float(metrics.get("started_at", time.monotonic()))) * 1000.0
-            return answer
-
-        async for raw_line in resp.content:
-            line = raw_line.decode("utf-8", errors="ignore").strip()
-            if not line or line.startswith(":"):
-                continue
-            if line.startswith("data:"):
-                line = line[5:].strip()
-            if not line:
-                continue
-            if line == "[DONE]":
-                break
-
-            try:
-                data = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-
-            delta_text = extract_stream_delta_text(data)
-            reasoning_text = extract_stream_reasoning_text(data)
-            if reasoning_text:
-                reasoning_parts.append(reasoning_text)
-
-            if not delta_text:
-                continue
-
-            if on_first_chunk is not None:
-                on_first_chunk()
-                on_first_chunk = None
-
-            raw_parts.append(delta_text)
-
-            if on_sentence is not None:
-                for chunk in speech_chunker.push(delta_text, max_chunks=1):
-                    if not chunk:
-                        continue
-                    emitted_any = True
-                    emitted_chunk_count += 1
-                    await on_sentence(chunk)
-
-    answer = sanitize_model_output("".join(raw_parts))
-    if not answer:
-        print(
-            f"[LLM STREAM] stream 본문 비어 있음, non-stream 재시도 | raw_len={len(''.join(raw_parts))} reasoning_len={len(''.join(reasoning_parts))} emitted_any={emitted_any}"
-        )
-        answer = await ask_llm_once(
+    global inflight_llm_requests
+    task = _attach_current_task(turn_scope)
+    try:
+        if turn_scope is not None:
+            turn_scope.raise_if_cancelled()
+        messages, cognitive_state, _route = await prepare_llm_messages(
             user_text,
             guild_id=guild_id,
             session_key=session_key,
@@ -4879,24 +5086,189 @@ async def ask_llm_streaming(
             session_memory_key=session_memory_key,
             source=source,
             debug_text=debug_text,
+            metrics=metrics,
+            turn_scope=turn_scope,
         )
 
-    if on_sentence is not None:
-        ready_chunks = speech_chunker.flush()
-        if not ready_chunks and answer and not emitted_any:
-            ready_chunks = [clean_tts_text(answer)]
-        for chunk in ready_chunks:
-            if not chunk:
-                continue
-            emitted_any = True
-            emitted_chunk_count += 1
-            await on_sentence(chunk)
+        policy_response = policy_response_for_state(cognitive_state, source=source)
+        gated_state = apply_ask_gating(cognitive_state, source=source) if cognitive_state is not None else None
+        if policy_response:
+            if session_key is not None and gated_state is not None:
+                update_session_state(
+                    session_key,
+                    speaker="assistant",
+                    awaiting_user_reply=gated_state.get("action") in {"ask", "wait", "search_then_answer"},
+                    answer_text=policy_response,
+                    user_text=user_text,
+                )
+            if on_first_chunk is not None:
+                on_first_chunk()
+            if on_sentence is not None:
+                ready_chunks, _ = split_tts_sentences(policy_response, force=True)
+                if not ready_chunks and policy_response:
+                    ready_chunks = [clean_tts_text(policy_response)]
+                for chunk in ready_chunks:
+                    if not chunk:
+                        continue
+                    await on_sentence(chunk)
+            if metrics is not None:
+                metrics.setdefault("marks", {})["policy_short_circuit"] = (time.monotonic() - float(metrics.get("started_at", time.monotonic()))) * 1000.0
+                metrics.setdefault("marks", {})["llm_done"] = (time.monotonic() - float(metrics.get("started_at", time.monotonic()))) * 1000.0
+                metrics.setdefault("marks", {})["t_main_done"] = metrics.setdefault("marks", {}).get("llm_done")
+            return policy_response
 
-    if metrics is not None:
-        metrics.setdefault("marks", {})["llm_http_ms"] = (time.monotonic() - llm_started_at) * 1000.0
-        metrics.setdefault("marks", {})["llm_done"] = (time.monotonic() - float(metrics.get("started_at", time.monotonic()))) * 1000.0
+        guided_user_text = user_text
+        if gated_state and gated_state.get("action") == "ask" and gated_state.get("question_for_user"):
+            guided_user_text = clean_text(str(gated_state.get("question_for_user", "")))
+        final_user_text = f"{guided_user_text}\n\n{build_main_response_guidance(cognitive_state, source=source)}"
 
-    return answer
+        stream_temperature = 0.3 if source == "voice" else 0.1
+        payload = {
+            "model": MODEL_NAME,
+            "messages": messages + [{"role": "user", "content": final_user_text}],
+            "temperature": stream_temperature,
+            "max_tokens": VOICE_LLM_MAX_TOKENS,
+            "stream": True,
+        }
+
+        timeout = aiohttp.ClientTimeout(total=120)
+        session = await get_http_session()
+        raw_parts: list[str] = []
+        reasoning_parts: list[str] = []
+        speech_chunker = SpeechChunker()
+        emitted_any = False
+        llm_started_at = time.monotonic()
+        runtime_opts = ((metrics or {}).get("meta") or {}).get("runtime_opts") or {}
+        if runtime_opts.get("tts_chunk_min_chars"):
+            speech_chunker.config.next_window = ChunkWindow(
+                int(runtime_opts.get("tts_chunk_min_chars") or speech_chunker.config.next_window.min_chars),
+                speech_chunker.config.next_window.target_chars,
+                speech_chunker.config.next_window.max_chars,
+                speech_chunker.config.next_window.allow_soft_breaks,
+                speech_chunker.config.next_window.soft_break_overflow_only,
+            )
+
+        inflight_llm_requests += 1
+        try:
+            async with session.post(LLM_SERVER_URL, json=payload, timeout=timeout) as resp:
+                if resp.status != 200:
+                    error_text = await resp.text()
+                    raise RuntimeError(f"LLM 서버 오류: {resp.status} / {error_text[:300]}")
+
+                content_type = resp.headers.get("Content-Type", "")
+                if "application/json" in content_type.lower():
+                    if turn_scope is not None:
+                        turn_scope.raise_if_cancelled()
+                    data = await resp.json()
+                    choices = data.get("choices", [])
+                    answer = ""
+                    if choices:
+                        msg = choices[0].get("message", {})
+                        answer = sanitize_model_output(msg.get("content", ""))
+                    if not answer:
+                        print("[LLM STREAM] json 응답 본문 비어 있음, non-stream 재시도")
+                        answer = await ask_llm_once(
+                            user_text,
+                            guild_id=guild_id,
+                            session_key=session_key,
+                            room_key=room_key,
+                            person_key=person_key,
+                            session_memory_key=session_memory_key,
+                            source=source,
+                            debug_text=debug_text,
+                        )
+                    if on_first_chunk is not None:
+                        on_first_chunk()
+                        on_first_chunk = None
+                    if on_sentence is not None:
+                        ready_chunks, _ = split_tts_sentences(answer, force=True)
+                        if not ready_chunks and answer:
+                            ready_chunks = [clean_tts_text(answer)]
+                        for chunk in ready_chunks:
+                            if not chunk:
+                                continue
+                            await on_sentence(chunk)
+                    if metrics is not None:
+                        metrics.setdefault("marks", {})["llm_done"] = (time.monotonic() - float(metrics.get("started_at", time.monotonic()))) * 1000.0
+                    return answer
+
+                async for raw_line in resp.content:
+                    if turn_scope is not None:
+                        turn_scope.raise_if_cancelled()
+                    line = raw_line.decode("utf-8", errors="ignore").strip()
+                    if not line or line.startswith(":"):
+                        continue
+                    if line.startswith("data:"):
+                        line = line[5:].strip()
+                    if not line:
+                        continue
+                    if line == "[DONE]":
+                        break
+
+                    try:
+                        data = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+
+                    delta_text = extract_stream_delta_text(data)
+                    reasoning_text = extract_stream_reasoning_text(data)
+                    if reasoning_text:
+                        reasoning_parts.append(reasoning_text)
+
+                    if not delta_text:
+                        continue
+
+                    if on_first_chunk is not None:
+                        on_first_chunk()
+                        on_first_chunk = None
+
+                    raw_parts.append(delta_text)
+
+                    if on_sentence is not None:
+                        for chunk in speech_chunker.push(delta_text, max_chunks=1):
+                            if not chunk:
+                                continue
+                            emitted_any = True
+                            await on_sentence(chunk)
+        finally:
+            inflight_llm_requests = max(0, inflight_llm_requests - 1)
+
+        if turn_scope is not None:
+            turn_scope.raise_if_cancelled()
+        answer = sanitize_model_output("".join(raw_parts))
+        if not answer:
+            print(
+                f"[LLM STREAM] stream 본문 비어 있음, non-stream 재시도 | raw_len={len(''.join(raw_parts))} reasoning_len={len(''.join(reasoning_parts))} emitted_any={emitted_any}"
+            )
+            answer = await ask_llm_once(
+                user_text,
+                guild_id=guild_id,
+                session_key=session_key,
+                room_key=room_key,
+                person_key=person_key,
+                session_memory_key=session_memory_key,
+                source=source,
+                debug_text=debug_text,
+            )
+
+        if turn_scope is not None:
+            turn_scope.raise_if_cancelled()
+        if on_sentence is not None:
+            ready_chunks = speech_chunker.flush()
+            if not ready_chunks and answer and not emitted_any:
+                ready_chunks = [clean_tts_text(answer)]
+            for chunk in ready_chunks:
+                if not chunk:
+                    continue
+                await on_sentence(chunk)
+
+        if metrics is not None:
+            metrics.setdefault("marks", {})["llm_http_ms"] = (time.monotonic() - llm_started_at) * 1000.0
+            metrics.setdefault("marks", {})["llm_done"] = (time.monotonic() - float(metrics.get("started_at", time.monotonic()))) * 1000.0
+
+        return answer
+    finally:
+        _detach_task(turn_scope, task)
 
 
 async def ask_llm_and_speak_streaming(
@@ -4912,77 +5284,85 @@ async def ask_llm_and_speak_streaming(
     source: str = "voice",
     debug_text: str | None = None,
     metrics: dict | None = None,
+    turn_scope: TurnScope | None = None,
 ) -> str:
-    if metrics is None:
-        metrics = new_turn_metrics(
-            source=source,
-            session_key=session_key,
-            guild_id=guild_id,
-            topic_id=session_topic_ids.get(session_key),
-            turn_id=current_turn_id(session_key),
-            segment_id=0,
-        )
-    else:
-        metrics.setdefault("started_at", time.monotonic())
-        metrics.setdefault("marks", {})
-        metrics.setdefault("meta", {})
-    metrics.setdefault("tts_request_logged", False)
-    metrics.setdefault("tts_response_headers_logged", False)
-    metrics.setdefault("tts_first_byte_logged", False)
-    metrics.setdefault("tts_first_frame_logged", False)
-    metrics.setdefault("first_packet_sent_logged", False)
-    log_voice_stage(metrics, "LLM/TTS 파이프라인 시작", extra=f"source={source} mode=llm_streaming")
-
-    sentence_queue: asyncio.Queue[str | None] = asyncio.Queue()
-    tts_sink = TTSQueueSink(sentence_queue)
-    fanout = ReplyStreamFanout([tts_sink])
-
-    playback_task = asyncio.create_task(
-        stream_tts_sentences(
-            vc,
-            sentence_queue,
-            metrics=metrics,
-            turn_id=metrics.get("meta", {}).get("turn_id") or current_turn_id(session_key),
-            session_key=session_key,
-        )
-    )
-
-    answer = ""
+    task = _attach_current_task(turn_scope)
     try:
-        answer = await ask_llm_streaming(
-            user_text,
-            guild_id=guild_id,
-            session_key=session_key,
-            room_key=room_key,
-            person_key=person_key,
-            session_memory_key=session_memory_key,
-            on_sentence=fanout.on_chunk,
-            on_first_chunk=lambda: log_voice_latency(metrics, "llm_first_chunk_logged", "LLM 첫 chunk 시간"),
-            source=source,
-            debug_text=debug_text,
-            metrics=metrics,
-        )
-        answer = clean_text(answer)
-        log_voice_stage(metrics, "LLM 완료", extra=f"chars={len(answer)}", key="llm_done")
-        if answer and on_final_answer is not None:
-            await on_final_answer(answer)
-        await fanout.close(answer)
-        log_voice_stage(metrics, "문장별 TTS 예약 완료", extra=f"sentence_count={tts_sink.queued_sentence_count} prefetch={TTS_PREFETCH_CHUNKS}")
-        await playback_task
-    finally:
-        if not playback_task.done():
-            await sentence_queue.put(None)
-            playback_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await playback_task
+        if metrics is None:
+            metrics = new_turn_metrics(
+                source=source,
+                session_key=session_key,
+                guild_id=guild_id,
+                topic_id=session_topic_ids.get(session_key),
+                turn_id=current_turn_id(session_key),
+                segment_id=0,
+            )
+        else:
+            metrics.setdefault("started_at", time.monotonic())
+            metrics.setdefault("marks", {})
+            metrics.setdefault("meta", {})
+        metrics.setdefault("tts_request_logged", False)
+        metrics.setdefault("tts_response_headers_logged", False)
+        metrics.setdefault("tts_first_byte_logged", False)
+        metrics.setdefault("tts_first_frame_logged", False)
+        metrics.setdefault("first_packet_sent_logged", False)
+        log_voice_stage(metrics, "LLM/TTS 파이프라인 시작", extra=f"source={source} mode=llm_streaming")
 
-    log_voice_bottleneck_summary(
-        metrics,
-        label="voice_turn",
-        extra=f"source={source} chars={len(answer)} mode=llm_streaming sentences={tts_sink.queued_sentence_count}",
-        event_name="voice_turn_summary",
-    )
-    return answer
+        sentence_queue: asyncio.Queue[str | None] = asyncio.Queue()
+        tts_sink = TTSQueueSink(sentence_queue)
+        fanout = ReplyStreamFanout([tts_sink])
+
+        playback_task = create_turn_scoped_task(
+            stream_tts_sentences(
+                vc,
+                sentence_queue,
+                metrics=metrics,
+                turn_id=metrics.get("meta", {}).get("turn_id") or current_turn_id(session_key),
+                session_key=session_key,
+                turn_scope=turn_scope,
+            ),
+            turn_scope=turn_scope,
+        )
+
+        answer = ""
+        try:
+            answer = await ask_llm_streaming(
+                user_text,
+                guild_id=guild_id,
+                session_key=session_key,
+                room_key=room_key,
+                person_key=person_key,
+                session_memory_key=session_memory_key,
+                on_sentence=fanout.on_chunk,
+                on_first_chunk=lambda: log_voice_latency(metrics, "llm_first_chunk_logged", "LLM 첫 chunk 시간"),
+                source=source,
+                debug_text=debug_text,
+                metrics=metrics,
+                turn_scope=turn_scope,
+            )
+            answer = clean_text(answer)
+            log_voice_stage(metrics, "LLM 완료", extra=f"chars={len(answer)}", key="llm_done")
+            if answer and on_final_answer is not None:
+                await on_final_answer(answer)
+            await fanout.close(answer)
+            log_voice_stage(metrics, "문장별 TTS 예약 완료", extra=f"sentence_count={tts_sink.queued_sentence_count} prefetch={TTS_PREFETCH_CHUNKS}")
+            await playback_task
+        finally:
+            if not playback_task.done():
+                await sentence_queue.put(None)
+                playback_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await playback_task
+
+        log_voice_bottleneck_summary(
+            metrics,
+            label="voice_turn",
+            extra=f"source={source} chars={len(answer)} mode=llm_streaming sentences={tts_sink.queued_sentence_count}",
+            event_name="voice_turn_summary",
+        )
+        return answer
+    finally:
+        _detach_task(turn_scope, task)
 
 
 async def stream_text_reply(
@@ -4998,59 +5378,76 @@ async def stream_text_reply(
     source: str = "text",
     debug_text: str | None = None,
     vc: discord.VoiceClient | None = None,
+    turn_scope: TurnScope | None = None,
 ) -> tuple[str, discord.Message | None, dict]:
-    metrics = new_turn_metrics(
-        source=source,
-        session_key=session_key,
-        guild_id=guild_id,
-        topic_id=session_topic_ids.get(session_key),
-        turn_id=turn_id,
-        segment_id=0,
-    )
-    streamed_message: discord.Message | None = await channel.send("…")
-    buffered_editor = BufferedEditStreamer(streamed_message, session_key=session_key)
-    edit_sink = DiscordEditSink(buffered_editor)
-
-    sentence_queue: asyncio.Queue[str | None] | None = None
-    tts_sink: TTSQueueSink | None = None
-    playback_task: asyncio.Task | None = None
-    if vc is not None:
-        sentence_queue = asyncio.Queue()
-        tts_sink = TTSQueueSink(sentence_queue)
-        playback_task = asyncio.create_task(
-            stream_tts_sentences(
-                vc,
-                sentence_queue,
-                metrics=metrics,
-                turn_id=turn_id or current_turn_id(session_key),
-                session_key=session_key,
-            )
+    task = _attach_current_task(turn_scope)
+    try:
+        metrics = new_turn_metrics(
+            source=source,
+            session_key=session_key,
+            guild_id=guild_id,
+            topic_id=session_topic_ids.get(session_key),
+            turn_id=turn_id,
+            segment_id=0,
         )
+        streamed_message: discord.Message | None = await channel.send("…")
+        buffered_editor = BufferedEditStreamer(streamed_message, session_key=session_key)
+        edit_sink = DiscordEditSink(buffered_editor)
 
-    fanout = ReplyStreamFanout([edit_sink, tts_sink] if tts_sink is not None else [edit_sink])
+        sentence_queue: asyncio.Queue[str | None] | None = None
+        tts_sink: TTSQueueSink | None = None
+        playback_task: asyncio.Task | None = None
+        if vc is not None:
+            sentence_queue = asyncio.Queue()
+            tts_sink = TTSQueueSink(sentence_queue)
+            playback_task = create_turn_scoped_task(
+                stream_tts_sentences(
+                    vc,
+                    sentence_queue,
+                    metrics=metrics,
+                    turn_id=turn_id or current_turn_id(session_key),
+                    session_key=session_key,
+                    turn_scope=turn_scope,
+                ),
+                turn_scope=turn_scope,
+            )
 
-    answer = await ask_llm_streaming(
-        user_text,
-        guild_id=guild_id,
-        session_key=session_key,
-        room_key=room_key,
-        person_key=person_key,
-        session_memory_key=session_memory_key,
-        on_sentence=fanout.on_chunk,
-        on_first_chunk=lambda: log_voice_latency(metrics, "llm_first_chunk_logged", "LLM 첫 chunk 시간"),
-        source=source,
-        debug_text=debug_text,
-        metrics=metrics,
-    )
-    final_text = format_display_text(answer, session_key=session_key).strip() or fallback_answer_for(user_text)
-    await fanout.close(answer)
-    if streamed_message is None:
-        streamed_message = await channel.send(final_text)
-    elif final_text != buffered_editor.rendered_text:
-        await streamed_message.edit(content=final_text)
-    if playback_task is not None:
-        await playback_task
-    return answer, streamed_message, metrics
+        fanout = ReplyStreamFanout([edit_sink, tts_sink] if tts_sink is not None else [edit_sink])
+
+        answer = ""
+        try:
+            answer = await ask_llm_streaming(
+                user_text,
+                guild_id=guild_id,
+                session_key=session_key,
+                room_key=room_key,
+                person_key=person_key,
+                session_memory_key=session_memory_key,
+                on_sentence=fanout.on_chunk,
+                on_first_chunk=lambda: log_voice_latency(metrics, "llm_first_chunk_logged", "LLM 첫 chunk 시간"),
+                source=source,
+                debug_text=debug_text,
+                metrics=metrics,
+                turn_scope=turn_scope,
+            )
+            final_text = format_display_text(answer, session_key=session_key).strip() or fallback_answer_for(user_text)
+            await fanout.close(answer)
+            if streamed_message is None:
+                streamed_message = await channel.send(final_text)
+            elif final_text != buffered_editor.rendered_text:
+                await streamed_message.edit(content=final_text)
+            if playback_task is not None:
+                await playback_task
+            return answer, streamed_message, metrics
+        finally:
+            if playback_task is not None and not playback_task.done():
+                if sentence_queue is not None:
+                    await sentence_queue.put(None)
+                playback_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await playback_task
+    finally:
+        _detach_task(turn_scope, task)
 
 
 # =========================================================
@@ -5148,6 +5545,16 @@ async def _process_member_audio_impl(
         turn_id=turn_id,
         segment_id=segment_id,
     )
+    if isinstance(debug_meta, dict):
+        queue_wait_ms = debug_meta.get("queue_wait_ms")
+        if queue_wait_ms is not None:
+            try:
+                queue_wait_ms = float(queue_wait_ms)
+            except (TypeError, ValueError):
+                queue_wait_ms = None
+            else:
+                metrics.setdefault("meta", {})["voice_queue_wait_ms"] = queue_wait_ms
+                metrics.setdefault("marks", {})["voice_queue_wait_ms"] = queue_wait_ms
     log_voice_stage(metrics, "voice_worker_turn 시작", extra=f"speaker={member.display_name} pcm_bytes={len(pcm_bytes)} owner={owner_user_id}")
 
     if ingress_during_reply and owner_user_id_on_ingress is not None and owner_user_id_on_ingress != member.id:
@@ -5645,6 +6052,9 @@ async def _process_member_audio_impl(
         user_text=history_user_text,
     )
     metrics.setdefault("meta", {}).update({"topic_id": topic_id, "turn_id": accepted_turn_id, "owner_user_id": member.id})
+    turn_scope = TurnScope(accepted_turn_id)
+    replace_room_turn_scope(room_session_key, turn_scope)
+    turn_task = _attach_current_task(turn_scope)
     vc = guild.voice_client
     lock = session_locks.setdefault(room_session_key, asyncio.Lock())
 
@@ -5688,6 +6098,7 @@ async def _process_member_audio_impl(
                         source="voice",
                         debug_text=history_user_text,
                         metrics=metrics,
+                        turn_scope=turn_scope,
                     )
                 log_voice_stage(metrics, "LLM/TTS 완료", extra=f"answer_len={len(answer)}")
             except Exception as e:
@@ -5705,6 +6116,7 @@ async def _process_member_audio_impl(
 
             session_speculative_policies.pop(session_key, None)
             append_history(session_key, history_user_text, plain_answer, guild_id=guild_id)
+            runtime_mode = ((metrics.get("meta") or {}).get("runtime_mode")) or compute_runtime_mode(metrics)
             schedule_memory_update(
                 guild_id,
                 history_user_text,
@@ -5716,6 +6128,8 @@ async def _process_member_audio_impl(
                 user_speaker=member.display_name,
                 assistant_speaker="Evelyn",
                 session_key=session_key,
+                turn_scope=turn_scope,
+                runtime_mode=runtime_mode,
             )
             search_requested = bool(apply_ask_gating(read_cached_cognitive_state(guild_id, room_key=room_key, person_key=person_key, session_memory_key=session_memory_key), source="voice").get("action") == "search_then_answer")
             schedule_search_followup(
@@ -5729,6 +6143,8 @@ async def _process_member_audio_impl(
                 channel_id=None,
                 source="search-followup-voice",
                 force=search_requested,
+                turn_scope=turn_scope,
+                runtime_mode=runtime_mode,
             )
             awaiting_reply = bool("?" in plain_answer or "？" in plain_answer)
             followup_ttl = ACTIVE_CONVERSATION_VOICE_QUESTION_SEC if awaiting_reply else ACTIVE_CONVERSATION_VOICE_SEC
@@ -5753,7 +6169,11 @@ async def _process_member_audio_impl(
             )
             log_voice_stage(metrics, "voice_worker_turn 완료", extra=f"speaker={member.display_name} gate={gate_mode}")
     finally:
-        set_room_reply_in_progress(room_session_key, False, owner_user_id=member.id)
+        current_scope = get_room_turn_scope(room_session_key)
+        if current_scope is turn_scope or current_scope is None:
+            set_room_reply_in_progress(room_session_key, False, owner_user_id=member.id)
+        _detach_task(turn_scope, turn_task)
+        clear_room_turn_scope(room_session_key, turn_scope)
 
 
 # =========================================================
@@ -5874,6 +6294,9 @@ async def on_message(message: discord.Message):
         )
         get_conversation_history(session_key=session_key, guild_id=message.guild.id)
 
+    turn_scope = TurnScope(turn_id)
+    replace_room_turn_scope(session_key, turn_scope)
+    turn_task = _attach_current_task(turn_scope)
     vc = None
     answer = ""
     plain_answer = ""
@@ -5896,6 +6319,7 @@ async def on_message(message: discord.Message):
                     source="text",
                     debug_text=user_text,
                     vc=vc,
+                    turn_scope=turn_scope,
                 )
                 plain_answer = strip_omnivoice_tags(answer)
                 if not plain_answer:
@@ -5904,6 +6328,7 @@ async def on_message(message: discord.Message):
         async with state_lock:
             session_speculative_policies.pop(session_key, None)
             append_history(session_key, user_text, plain_answer, guild_id=message.guild.id)
+            runtime_mode = ((text_metrics.get("meta") or {}).get("runtime_mode")) or compute_runtime_mode(text_metrics)
             schedule_memory_update(
                 message.guild.id,
                 user_text,
@@ -5915,6 +6340,8 @@ async def on_message(message: discord.Message):
                 user_speaker=message.author.display_name,
                 assistant_speaker="Evelyn",
                 session_key=session_key,
+                turn_scope=turn_scope,
+                runtime_mode=runtime_mode,
             )
             search_requested = bool(apply_ask_gating(read_cached_cognitive_state(message.guild.id, room_key=room_key, person_key=person_key, session_memory_key=session_memory_key), source="text").get("action") == "search_then_answer")
             schedule_search_followup(
@@ -5928,6 +6355,8 @@ async def on_message(message: discord.Message):
                 channel_id=message.channel.id,
                 source="search-followup-text",
                 force=search_requested,
+                turn_scope=turn_scope,
+                runtime_mode=runtime_mode,
             )
 
             awaiting_reply = bool("?" in plain_answer or "？" in plain_answer)
@@ -5952,6 +6381,9 @@ async def on_message(message: discord.Message):
     except Exception as e:
         print("전체 오류:", repr(e))
         await message.channel.send(f"❌ 오류 발생: {e}")
+    finally:
+        _detach_task(turn_scope, turn_task)
+        clear_room_turn_scope(session_key, turn_scope)
 
     await bot.process_commands(message)
 

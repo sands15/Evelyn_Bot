@@ -205,8 +205,9 @@ TTS:
 8. history append
 9. memory update 예약
 10. search follow-up 예약
-11. voice client가 있으면 **최종 answer 전체**를 `speak_answer()` 로 따로 읽기
-12. 마지막에 `bot.process_commands(message)`
+11. text session별 `TurnScope` 를 교체해서 이전 턴의 남은 LLM/search/memory 작업을 취소
+12. voice client가 있으면 **최종 answer 전체**를 `speak_answer()` 로 따로 읽기
+13. 마지막에 `bot.process_commands(message)`
 
 ### 4-3. 현재 텍스트 답변 LLM 경로
 현재 텍스트 경로의 실제 기본은 `stream_text_reply()` + `ask_llm_streaming()` 조합이다.
@@ -484,6 +485,9 @@ full STT 후에는 아래를 거친다.
 현재 새 사용자 음성이 들어오면:
 - `stop_active_tts_playback(guild_id, reason="new_user_audio")`
 로 기존 TTS를 중단한다.
+- 동시에 room 단위 `TurnScope` 를 교체해서 이전 턴의 `ask_llm_streaming()`, `stream_tts_sentences()`, `_prefetch_tts_sources()`, search/memory 후속 task까지 함께 취소한다.
+
+즉 지금은 **TTS만 끊는 게 아니라 이전 턴의 잔여 비동기 작업도 함께 정리하는 구조**다.
 
 즉 현재는 **interrupt 가능한 playback tracking + next chunk prefetch** 가 같이 들어간 상태다.
 
@@ -521,6 +525,11 @@ full STT 후에는 아래를 거친다.
 즉 cognitive action은 이제 단순 진단이 아니라 일부 경우 **직접 짧은 응답을 결정**한다.
 
 또 `search_then_answer` 면 `schedule_search_followup(..., force=True)` 로 실제 검색 후속작업을 강제 예약한다.
+
+현재 search follow-up 은 session/query 기준 singleflight 로 묶는다.
+- 같은 세션 + 같은 정규화 query는 기존 task가 살아 있으면 재사용한다.
+- 같은 세션에서 유사한 이전 query task가 남아 있으면 취소한다.
+- runtime mode가 `realtime` 이면 일반 follow-up 검색은 건너뛸 수 있다.
 
 ---
 
@@ -564,6 +573,14 @@ Sub/Summary 모델은 여전히 사용자에게 답하지 않고 메모리 관�
 - `[STT RESULT][partial]`
 - `[STT RESULT][full-final]`
 
+`[VOICE BOTTLENECK]` / turn summary에는 turn-stage 기반 p95 집계도 함께 실린다.
+- `stt_ms_p95`
+- `router_ms_p95`
+- `main_first_token_ms_p95`
+- `tts_first_audio_ms_p95`
+- `search_followup_queued_count`
+- `cancelled_stale_turn_count`
+
 현재 `[TURN TRACE]` 는 `VOICE_CONSOLE_ONLY_STT_AND_REPLY=true` 일 때 출력되지 않는다.
 
 즉 병목 판단용 최소 로그만 남기는 방향으로 현재 정리되어 있다.
@@ -593,6 +610,9 @@ Sub/Summary 모델은 여전히 사용자에게 답하지 않고 메모리 관�
    - voice 경로를 first/follow-up 분리 대신 main LLM streaming 직결 구조로 변경
    - unstable tail 판정 기반 chunk dispatch 추가
    - text 경로도 message edit 기반 streaming 응답 사용
+   - room/session 단위 `TurnScope` 로 이전 턴의 stale task 취소 전파 추가
+   - search follow-up singleflight 및 runtime degrade mode 연결
+   - turn-stage p95 집계 자동 로그 추가
    - TTS interrupt 추적 + prefetch 유지
    - preroll carry-over 완화
    - wake near-miss fuzzy 완화
