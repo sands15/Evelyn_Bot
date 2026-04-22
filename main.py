@@ -16,6 +16,7 @@ import time
 import asyncio
 import uuid
 import wave
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
 from urllib.parse import parse_qs, unquote, urlparse
@@ -2030,13 +2031,156 @@ def schedule_memory_update(
     )
 
 
-def _should_defer_first_tts_chunk(text: str) -> bool:
-    compact = clean_text(text).replace(" ", "")
-    if not compact or len(compact) > TTS_SHORT_LEAD_IN_MAX_LEN:
-        return False
-    if not looks_like_brief_filler_text(text):
-        return False
-    return compact.endswith(("...", "…", ",", "，", ":", "：", ";", "；"))
+@dataclass
+class ChunkerConfig:
+    min_first_chars: int = 18
+    target_first_chars: int = 24
+    max_first_chars: int = 40
+    min_chunk_chars: int = 12
+    target_chunk_chars: int = 36
+    max_chunk_chars: int = 72
+    hard_break_grace_chars: int = 10
+    soft_breaks: tuple[str, ...] = (",", "，", "…", ":", "：", ";", "；")
+    hard_breaks: tuple[str, ...] = (".", "!", "?", "\n", "。", "！", "？")
+
+
+@dataclass
+class SpeechChunker:
+    config: ChunkerConfig = field(default_factory=ChunkerConfig)
+    buf: str = ""
+    sent_first: bool = False
+
+    def push(self, delta: str) -> list[str]:
+        if not delta:
+            return []
+
+        self.buf += delta
+        out: list[str] = []
+
+        if not self.sent_first:
+            cut = self._find_first_dispatch_point(self.buf)
+            if cut is not None:
+                first = self._consume(cut)
+                if first:
+                    self.sent_first = True
+                    out.append(first)
+
+        while self.sent_first:
+            cut = self._find_next_dispatch_point(self.buf)
+            if cut is None:
+                break
+            chunk = self._consume(cut)
+            if chunk:
+                out.append(chunk)
+
+        return out
+
+    def flush(self) -> list[str]:
+        tail = clean_tts_text(self.buf)
+        self.buf = ""
+        return [tail] if tail else []
+
+    def _consume(self, cut: int) -> str:
+        raw = self.buf[:cut]
+        self.buf = self.buf[cut:].lstrip()
+        return clean_tts_text(raw)
+
+    def _find_first_dispatch_point(self, text: str) -> int | None:
+        cfg = self.config
+        return self._find_dispatch_point(
+            text=text,
+            min_chars=cfg.min_first_chars,
+            target_chars=cfg.target_first_chars,
+            max_chars=cfg.max_first_chars,
+            allow_soft=True,
+            allow_force=True,
+        )
+
+    def _find_next_dispatch_point(self, text: str) -> int | None:
+        cfg = self.config
+        return self._find_dispatch_point(
+            text=text,
+            min_chars=cfg.min_chunk_chars,
+            target_chars=cfg.target_chunk_chars,
+            max_chars=cfg.max_chunk_chars,
+            allow_soft=True,
+            allow_force=True,
+        )
+
+    def _find_dispatch_point(
+        self,
+        *,
+        text: str,
+        min_chars: int,
+        target_chars: int,
+        max_chars: int,
+        allow_soft: bool,
+        allow_force: bool,
+    ) -> int | None:
+        if not text.strip():
+            return None
+
+        candidates: list[tuple[int, str, int, int]] = []
+        for i, ch in enumerate(text):
+            raw_idx = i + 1
+            visible = clean_text(text[:raw_idx])
+            n = len(visible)
+            if n < min_chars:
+                continue
+
+            if ch in self.config.hard_breaks:
+                score = 100
+                break_type = "hard"
+            elif allow_soft and ch in self.config.soft_breaks:
+                score = 60
+                break_type = "soft"
+            else:
+                continue
+
+            score -= abs(n - target_chars)
+            if n > max_chars:
+                score -= 20
+            candidates.append((raw_idx, break_type, n, score))
+
+        if candidates:
+            best_raw_idx, best_type, best_len, best_score = max(candidates, key=lambda row: row[3])
+            if best_type == "soft":
+                for raw_idx, break_type, visible_len, score in candidates:
+                    if break_type != "hard":
+                        continue
+                    if visible_len > max_chars:
+                        continue
+                    if raw_idx <= best_raw_idx:
+                        continue
+                    if visible_len - best_len > self.config.hard_break_grace_chars:
+                        continue
+                    if score >= best_score - 8:
+                        return raw_idx
+            return best_raw_idx
+
+        if allow_force and len(clean_text(text)) >= max_chars:
+            return self._find_forced_cut(text, max_chars)
+        return None
+
+    def _find_forced_cut(self, text: str, max_chars: int) -> int:
+        visible_count = 0
+        target_raw_idx = len(text)
+
+        for i, ch in enumerate(text):
+            if not ch.isspace() or visible_count > 0:
+                visible_count += 1
+            if visible_count >= max_chars:
+                target_raw_idx = i + 1
+                break
+
+        search_start = max(1, target_raw_idx - 12)
+        window = text[search_start - 1:target_raw_idx]
+        for j in range(len(window) - 1, -1, -1):
+            ch = window[j]
+            raw_idx = (search_start - 1) + j + 1
+            if ch.isspace() or ch in self.config.soft_breaks or ch in self.config.hard_breaks:
+                return raw_idx
+        return target_raw_idx
 
 
 def split_tts_sentences(
@@ -2045,38 +2189,12 @@ def split_tts_sentences(
     force: bool = False,
     emitted_chunks: int = 0,
 ) -> tuple[list[str], str]:
-    working = buffer or ""
-    chunks: list[str] = []
-
-    while True:
-        match = re.search(r"(.+?[.!?…。]+)(?:\s+|$)", working, flags=re.DOTALL)
-        if not match:
-            break
-
-        sentence = clean_tts_text(match.group(1))
-        rest = working[match.end():].lstrip()
-        emitted_so_far = emitted_chunks + len(chunks)
-
-        if sentence and emitted_so_far == 0 and not force and _should_defer_first_tts_chunk(sentence):
-            next_match = re.search(r"(.+?[.!?…。]+)(?:\s+|$)", rest, flags=re.DOTALL)
-            if next_match:
-                merged = clean_tts_text(f"{sentence} {rest[:next_match.end()]}")
-                if merged:
-                    chunks.append(merged)
-                working = rest[next_match.end():].lstrip()
-                continue
-            break
-
-        if sentence:
-            chunks.append(sentence)
-        working = rest
-
+    chunker = SpeechChunker()
+    chunker.sent_first = emitted_chunks > 0
+    chunks = chunker.push(buffer or "")
     if not force:
-        return chunks, working
-
-    tail = clean_tts_text(working)
-    if tail:
-        chunks.append(tail)
+        return chunks, chunker.buf
+    chunks.extend(chunker.flush())
     return chunks, ""
 
 
@@ -4124,7 +4242,7 @@ async def ask_llm_streaming(
     session = await get_http_session()
     raw_parts: list[str] = []
     reasoning_parts: list[str] = []
-    sentence_buffer = ""
+    speech_chunker = SpeechChunker()
     emitted_any = False
     emitted_chunk_count = 0
     llm_started_at = time.monotonic()
@@ -4156,8 +4274,17 @@ async def ask_llm_streaming(
                 )
             if on_first_chunk is not None:
                 on_first_chunk()
+                on_first_chunk = None
             if on_sentence is not None:
-                await on_sentence(answer)
+                ready_chunks, _ = split_tts_sentences(answer, force=True)
+                if not ready_chunks and answer:
+                    ready_chunks = [clean_tts_text(answer)]
+                for chunk in ready_chunks:
+                    if not chunk:
+                        continue
+                    emitted_any = True
+                    emitted_chunk_count += 1
+                    await on_sentence(chunk)
             if metrics is not None:
                 metrics.setdefault("marks", {})["llm_done"] = (time.monotonic() - float(metrics.get("started_at", time.monotonic()))) * 1000.0
             return answer
@@ -4191,14 +4318,11 @@ async def ask_llm_streaming(
                 on_first_chunk = None
 
             raw_parts.append(delta_text)
-            sentence_buffer += delta_text
 
             if on_sentence is not None:
-                ready_chunks, sentence_buffer = split_tts_sentences(
-                    sentence_buffer,
-                    emitted_chunks=emitted_chunk_count,
-                )
-                for chunk in ready_chunks:
+                for chunk in speech_chunker.push(delta_text):
+                    if not chunk:
+                        continue
                     emitted_any = True
                     emitted_chunk_count += 1
                     await on_sentence(chunk)
@@ -4220,14 +4344,12 @@ async def ask_llm_streaming(
         )
 
     if on_sentence is not None:
-        ready_chunks, sentence_buffer = split_tts_sentences(
-            sentence_buffer,
-            force=True,
-            emitted_chunks=emitted_chunk_count,
-        )
+        ready_chunks = speech_chunker.flush()
         if not ready_chunks and answer and not emitted_any:
-            ready_chunks = [answer]
+            ready_chunks = [clean_tts_text(answer)]
         for chunk in ready_chunks:
+            if not chunk:
+                continue
             emitted_any = True
             emitted_chunk_count += 1
             await on_sentence(chunk)
@@ -4271,62 +4393,19 @@ async def ask_llm_and_speak_streaming(
     metrics.setdefault("tts_first_byte_logged", False)
     metrics.setdefault("tts_first_frame_logged", False)
     metrics.setdefault("first_packet_sent_logged", False)
-    log_voice_stage(metrics, "LLM/TTS 파이프라인 시작", extra=f"source={source} mode=first_then_followup")
-
-    first_response, followup_seed, gated_state = await build_first_response(
-        user_text,
-        guild_id=guild_id,
-        session_key=session_key,
-        room_key=room_key,
-        person_key=person_key,
-        session_memory_key=session_memory_key,
-        source=source,
-        debug_text=debug_text,
-        metrics=metrics,
-    )
-    first_response = clean_text(first_response)
-    if not first_response:
-        first_response = fallback_answer_for(user_text)
-    log_voice_stage(metrics, "1단계 응답 완료", extra=f"chars={len(first_response)}")
-
-    followup_text = clean_text(followup_seed)
-    if not followup_text and (gated_state or {}).get("action") == "answer":
-        followup_text = clean_text(
-            await build_followup_response(
-                user_text,
-                first_response,
-                guild_id=guild_id,
-                session_key=session_key,
-                room_key=room_key,
-                person_key=person_key,
-                session_memory_key=session_memory_key,
-                source=source,
-                debug_text=debug_text,
-                metrics=metrics,
-            )
-        )
-    if is_duplicate_followup(first_response, followup_text):
-        followup_text = ""
-    answer = clean_text(f"{first_response} {followup_text}" if followup_text else first_response)
-    print(f"[LLM DEBUG] first_response={first_response!r} followup_text={followup_text!r} answer={answer!r}")
-    log_voice_stage(metrics, "LLM 완료", extra=f"chars={len(answer)}", key="llm_done")
-
-    if answer and on_final_answer is not None:
-        await on_final_answer(answer)
-
-    sentences, tail = split_tts_sentences(answer, force=True)
-    if tail:
-        sentences.append(clean_tts_text(tail))
-    sentences = [clean_tts_text(sentence) for sentence in sentences if clean_tts_text(sentence)]
-    if not sentences:
-        cleaned_answer = clean_tts_text(answer)
-        if cleaned_answer:
-            sentences = [cleaned_answer]
-
-    print(f"[TTS DEBUG] sentences={sentences!r} tail={tail!r}")
-    log_voice_stage(metrics, "문장 분리 완료", extra=f"sentence_count={len(sentences)} chars={len(answer)}")
+    log_voice_stage(metrics, "LLM/TTS 파이프라인 시작", extra=f"source={source} mode=llm_streaming")
 
     sentence_queue: asyncio.Queue[str | None] = asyncio.Queue()
+    queued_sentence_count = 0
+
+    async def on_sentence(sentence: str) -> None:
+        nonlocal queued_sentence_count
+        cleaned = clean_tts_text(sentence)
+        if not cleaned:
+            return
+        queued_sentence_count += 1
+        await sentence_queue.put(cleaned)
+
     playback_task = asyncio.create_task(
         stream_tts_sentences(
             vc,
@@ -4337,11 +4416,27 @@ async def ask_llm_and_speak_streaming(
         )
     )
 
+    answer = ""
     try:
-        for sentence in sentences:
-            await sentence_queue.put(sentence)
+        answer = await ask_llm_streaming(
+            user_text,
+            guild_id=guild_id,
+            session_key=session_key,
+            room_key=room_key,
+            person_key=person_key,
+            session_memory_key=session_memory_key,
+            on_sentence=on_sentence,
+            on_first_chunk=lambda: log_voice_latency(metrics, "llm_first_chunk_logged", "LLM 첫 chunk 시간"),
+            source=source,
+            debug_text=debug_text,
+            metrics=metrics,
+        )
+        answer = clean_text(answer)
+        log_voice_stage(metrics, "LLM 완료", extra=f"chars={len(answer)}", key="llm_done")
+        if answer and on_final_answer is not None:
+            await on_final_answer(answer)
         await sentence_queue.put(None)
-        log_voice_stage(metrics, "문장별 TTS 예약 완료", extra=f"sentence_count={len(sentences)} prefetch={TTS_PREFETCH_CHUNKS}")
+        log_voice_stage(metrics, "문장별 TTS 예약 완료", extra=f"sentence_count={queued_sentence_count} prefetch={TTS_PREFETCH_CHUNKS}")
         await playback_task
     finally:
         if not playback_task.done():
@@ -4353,7 +4448,7 @@ async def ask_llm_and_speak_streaming(
     log_voice_bottleneck_summary(
         metrics,
         label="voice_turn",
-        extra=f"source={source} chars={len(answer)} mode=first_then_followup sentences={len(sentences)}",
+        extra=f"source={source} chars={len(answer)} mode=llm_streaming sentences={queued_sentence_count}",
         event_name="voice_turn_summary",
     )
     return answer
