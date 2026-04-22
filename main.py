@@ -2031,17 +2031,112 @@ def schedule_memory_update(
     )
 
 
+BAD_TAIL_WORDS = (
+    "그리고",
+    "근데",
+    "하지만",
+    "다만",
+    "또",
+    "그래서",
+)
+
+BAD_TAIL_SUFFIXES = (
+    "은", "는", "이", "가", "을", "를", "에", "와", "과",
+    "도", "로", "며", "고", "서", "면", "한", "할",
+)
+
+GOOD_END_SUFFIXES = (
+    "다", "요", "지", "네", "까", "어", "아", "음",
+)
+
+
+@dataclass(frozen=True)
+class ChunkWindow:
+    min_chars: int
+    target_chars: int
+    max_chars: int
+    allow_soft_breaks: bool = True
+    soft_break_overflow_only: bool = False
+
+
 @dataclass
 class ChunkerConfig:
-    min_first_chars: int = 18
-    target_first_chars: int = 24
-    max_first_chars: int = 40
-    min_chunk_chars: int = 12
-    target_chunk_chars: int = 36
-    max_chunk_chars: int = 72
-    hard_break_grace_chars: int = 10
-    soft_breaks: tuple[str, ...] = (",", "，", "…", ":", "：", ";", "；")
     hard_breaks: tuple[str, ...] = (".", "!", "?", "\n", "。", "！", "？")
+    soft_breaks: tuple[str, ...] = (",", "，", "…", ";", "；", ":", "：")
+    hard_break_grace_chars: int = 10
+    candidate_unstable_penalty: int = 80
+    natural_end_bonus: int = 12
+    first_window: ChunkWindow = field(default_factory=lambda: ChunkWindow(18, 24, 40, True, False))
+    next_window: ChunkWindow = field(default_factory=lambda: ChunkWindow(12, 36, 72, False, True))
+    structured_first_window: ChunkWindow = field(default_factory=lambda: ChunkWindow(22, 30, 48, False, False))
+    structured_next_window: ChunkWindow = field(default_factory=lambda: ChunkWindow(18, 40, 84, False, True))
+
+
+def _normalized_tail_probe(text: str) -> str:
+    s = clean_tts_text(text).strip()
+    if not s:
+        return ""
+    while s and s[-1] in " \t\r\n,，;；:：….!?。！？)]}>'\"”’」』】":
+        s = s[:-1].rstrip()
+    return s
+
+
+def has_unbalanced_pairs(text: str) -> bool:
+    s = text or ""
+    pairs = (("(", ")"), ("[", "]"), ("{", "}"))
+    for left, right in pairs:
+        if s.count(left) != s.count(right):
+            return True
+    if s.count('"') % 2 == 1:
+        return True
+    if s.count("'") % 2 == 1:
+        return True
+    if s.count("```") % 2 == 1:
+        return True
+    return False
+
+
+def is_unstable_tail(chunk: str) -> bool:
+    s = clean_tts_text(chunk).strip()
+    if not s:
+        return True
+    if has_unbalanced_pairs(s):
+        return True
+
+    tail_probe = _normalized_tail_probe(s)
+    if not tail_probe:
+        return True
+
+    for word in BAD_TAIL_WORDS:
+        if tail_probe.endswith(word):
+            return True
+
+    for suffix in BAD_TAIL_SUFFIXES:
+        if tail_probe.endswith(suffix):
+            return True
+
+    return False
+
+
+def has_natural_end(chunk: str) -> bool:
+    tail_probe = _normalized_tail_probe(chunk)
+    if not tail_probe:
+        return False
+    return tail_probe.endswith(GOOD_END_SUFFIXES)
+
+
+def detect_output_shape(text: str) -> str:
+    s = text or ""
+    stripped = s.lstrip()
+    if not stripped:
+        return "chat"
+    if stripped.startswith(("```", "`")):
+        return "structured"
+    if re.search(r"(?m)^\s*(?:[-*•]|\d+[.)])\s+\S", stripped):
+        return "structured"
+    if re.search(r"(?m)^\s*\|.+\|\s*$", stripped):
+        return "structured"
+    return "chat"
 
 
 @dataclass
@@ -2049,29 +2144,27 @@ class SpeechChunker:
     config: ChunkerConfig = field(default_factory=ChunkerConfig)
     buf: str = ""
     sent_first: bool = False
+    mode: str = "chat"
 
-    def push(self, delta: str) -> list[str]:
-        if not delta:
-            return []
+    def push(self, delta: str, *, max_chunks: int | None = 1) -> list[str]:
+        if delta:
+            self.buf += delta
+        self.mode = detect_output_shape(self.buf)
 
-        self.buf += delta
         out: list[str] = []
-
-        if not self.sent_first:
-            cut = self._find_first_dispatch_point(self.buf)
-            if cut is not None:
-                first = self._consume(cut)
-                if first:
-                    self.sent_first = True
-                    out.append(first)
-
-        while self.sent_first:
-            cut = self._find_next_dispatch_point(self.buf)
+        while True:
+            cut = self._find_dispatch_point(self.buf)
             if cut is None:
                 break
+
             chunk = self._consume(cut)
-            if chunk:
-                out.append(chunk)
+            if not chunk:
+                continue
+
+            out.append(chunk)
+            self.sent_first = True
+            if max_chunks is not None and len(out) >= max_chunks:
+                break
 
         return out
 
@@ -2080,87 +2173,80 @@ class SpeechChunker:
         self.buf = ""
         return [tail] if tail else []
 
+    def _window(self) -> ChunkWindow:
+        if self.mode == "structured":
+            return self.config.structured_next_window if self.sent_first else self.config.structured_first_window
+        return self.config.next_window if self.sent_first else self.config.first_window
+
     def _consume(self, cut: int) -> str:
         raw = self.buf[:cut]
         self.buf = self.buf[cut:].lstrip()
         return clean_tts_text(raw)
 
-    def _find_first_dispatch_point(self, text: str) -> int | None:
-        cfg = self.config
-        return self._find_dispatch_point(
-            text=text,
-            min_chars=cfg.min_first_chars,
-            target_chars=cfg.target_first_chars,
-            max_chars=cfg.max_first_chars,
-            allow_soft=True,
-            allow_force=True,
-        )
-
-    def _find_next_dispatch_point(self, text: str) -> int | None:
-        cfg = self.config
-        return self._find_dispatch_point(
-            text=text,
-            min_chars=cfg.min_chunk_chars,
-            target_chars=cfg.target_chunk_chars,
-            max_chars=cfg.max_chunk_chars,
-            allow_soft=True,
-            allow_force=True,
-        )
-
-    def _find_dispatch_point(
-        self,
-        *,
-        text: str,
-        min_chars: int,
-        target_chars: int,
-        max_chars: int,
-        allow_soft: bool,
-        allow_force: bool,
-    ) -> int | None:
+    def _find_dispatch_point(self, text: str) -> int | None:
         if not text.strip():
             return None
 
-        candidates: list[tuple[int, str, int, int]] = []
+        window = self._window()
+        best_idx: int | None = None
+        best_score = -(10 ** 9)
+        best_kind: str | None = None
+        best_visible_len = 0
+        clean_len = len(clean_text(text))
+
         for i, ch in enumerate(text):
             raw_idx = i + 1
-            visible = clean_text(text[:raw_idx])
-            n = len(visible)
-            if n < min_chars:
+            chunk = clean_tts_text(text[:raw_idx])
+            visible_len = len(clean_text(chunk))
+            if visible_len < window.min_chars:
                 continue
 
-            if ch in self.config.hard_breaks:
-                score = 100
-                break_type = "hard"
-            elif allow_soft and ch in self.config.soft_breaks:
-                score = 60
-                break_type = "soft"
-            else:
-                continue
+            is_hard = ch in self.config.hard_breaks
+            is_soft = ch in self.config.soft_breaks
+            if not is_hard:
+                if not is_soft:
+                    continue
+                if not window.allow_soft_breaks:
+                    if not window.soft_break_overflow_only or visible_len < window.max_chars:
+                        continue
 
-            score -= abs(n - target_chars)
-            if n > max_chars:
+            score = 100 if is_hard else 55
+            score -= abs(visible_len - window.target_chars)
+            if visible_len > window.max_chars:
                 score -= 20
-            candidates.append((raw_idx, break_type, n, score))
+            if is_unstable_tail(chunk):
+                score -= self.config.candidate_unstable_penalty
+            if has_natural_end(chunk):
+                score += self.config.natural_end_bonus
 
-        if candidates:
-            best_raw_idx, best_type, best_len, best_score = max(candidates, key=lambda row: row[3])
-            if best_type == "soft":
-                for raw_idx, break_type, visible_len, score in candidates:
-                    if break_type != "hard":
-                        continue
-                    if visible_len > max_chars:
-                        continue
-                    if raw_idx <= best_raw_idx:
-                        continue
-                    if visible_len - best_len > self.config.hard_break_grace_chars:
-                        continue
-                    if score >= best_score - 8:
-                        return raw_idx
-            return best_raw_idx
+            if score > best_score:
+                best_score = score
+                best_idx = raw_idx
+                best_kind = "hard" if is_hard else "soft"
+                best_visible_len = visible_len
 
-        if allow_force and len(clean_text(text)) >= max_chars:
-            return self._find_forced_cut(text, max_chars)
-        return None
+        if best_idx is not None and best_kind == "soft":
+            for i, ch in enumerate(text):
+                raw_idx = i + 1
+                if raw_idx <= best_idx or ch not in self.config.hard_breaks:
+                    continue
+                candidate = clean_tts_text(text[:raw_idx])
+                visible_len = len(clean_text(candidate))
+                if visible_len > window.max_chars:
+                    continue
+                if visible_len - best_visible_len > self.config.hard_break_grace_chars:
+                    continue
+                if is_unstable_tail(candidate):
+                    continue
+                return raw_idx
+
+        if best_idx is None and clean_len >= window.max_chars:
+            forced_idx = self._find_forced_cut(text, window.max_chars)
+            forced_chunk = clean_tts_text(text[:forced_idx])
+            if forced_chunk and not is_unstable_tail(forced_chunk):
+                return forced_idx
+
+        return best_idx
 
     def _find_forced_cut(self, text: str, max_chars: int) -> int:
         visible_count = 0
@@ -2173,7 +2259,7 @@ class SpeechChunker:
                 target_raw_idx = i + 1
                 break
 
-        search_start = max(1, target_raw_idx - 12)
+        search_start = max(1, target_raw_idx - 14)
         window = text[search_start - 1:target_raw_idx]
         for j in range(len(window) - 1, -1, -1):
             ch = window[j]
@@ -2189,9 +2275,8 @@ def split_tts_sentences(
     force: bool = False,
     emitted_chunks: int = 0,
 ) -> tuple[list[str], str]:
-    chunker = SpeechChunker()
-    chunker.sent_first = emitted_chunks > 0
-    chunks = chunker.push(buffer or "")
+    chunker = SpeechChunker(sent_first=emitted_chunks > 0)
+    chunks = chunker.push(buffer or "", max_chunks=None)
     if not force:
         return chunks, chunker.buf
     chunks.extend(chunker.flush())
@@ -4218,7 +4303,13 @@ async def ask_llm_streaming(
         if on_first_chunk is not None:
             on_first_chunk()
         if on_sentence is not None:
-            await on_sentence(policy_response)
+            ready_chunks, _ = split_tts_sentences(policy_response, force=True)
+            if not ready_chunks and policy_response:
+                ready_chunks = [clean_tts_text(policy_response)]
+            for chunk in ready_chunks:
+                if not chunk:
+                    continue
+                await on_sentence(chunk)
         if metrics is not None:
             metrics.setdefault("marks", {})["policy_short_circuit"] = (time.monotonic() - float(metrics.get("started_at", time.monotonic()))) * 1000.0
             metrics.setdefault("marks", {})["llm_done"] = (time.monotonic() - float(metrics.get("started_at", time.monotonic()))) * 1000.0
@@ -4230,10 +4321,11 @@ async def ask_llm_streaming(
         guided_user_text = clean_text(str(gated_state.get("question_for_user", "")))
     final_user_text = f"{guided_user_text}\n\n{build_main_response_guidance(cognitive_state, source=source)}"
 
+    stream_temperature = 0.3 if source == "voice" else 0.1
     payload = {
         "model": MODEL_NAME,
         "messages": messages + [{"role": "user", "content": final_user_text}],
-        "temperature": 0.1,
+        "temperature": stream_temperature,
         "max_tokens": VOICE_LLM_MAX_TOKENS,
         "stream": True,
     }
@@ -4320,7 +4412,7 @@ async def ask_llm_streaming(
             raw_parts.append(delta_text)
 
             if on_sentence is not None:
-                for chunk in speech_chunker.push(delta_text):
+                for chunk in speech_chunker.push(delta_text, max_chunks=1):
                     if not chunk:
                         continue
                     emitted_any = True
