@@ -79,6 +79,10 @@ VOICE_DEBUG_MAX_FILES_PER_GUILD = int(os.getenv("VOICE_DEBUG_MAX_FILES_PER_GUILD
 WAKE_STT_TIMEOUT_SEC = float(os.getenv("WAKE_STT_TIMEOUT_SEC", "20"))
 FULL_STT_TIMEOUT_SEC = float(os.getenv("FULL_STT_TIMEOUT_SEC", "30"))
 TTS_INTERRUPT_DEBOUNCE_SEC = float(os.getenv("TTS_INTERRUPT_DEBOUNCE_SEC", "0.18"))
+DEBUG_WRITE_QUEUE_MAX = int(os.getenv("DEBUG_WRITE_QUEUE_MAX", "128"))
+MIN_EDIT_INTERVAL_MS = int(os.getenv("MIN_EDIT_INTERVAL_MS", "300"))
+MIN_DELTA_CHARS = int(os.getenv("MIN_DELTA_CHARS", "24"))
+MAX_HOLD_MS = int(os.getenv("MAX_HOLD_MS", "900"))
 ROUTER_LLM_URL = globals().get("ROUTER_LLM_URL", os.getenv("ROUTER_LLM_URL", "http://127.0.0.1:9822/v1/chat/completions"))
 ROUTER_MODEL_NAME = globals().get("ROUTER_MODEL_NAME", os.getenv("ROUTER_MODEL_NAME", "gemma-4-E2B-it-UD-Q6_K_XL.gguf"))
 ROUTER_LLM_ENABLED = globals().get("ROUTER_LLM_ENABLED", os.getenv("ROUTER_LLM_ENABLED", "true").lower() in {"1", "true", "yes", "on"})
@@ -222,7 +226,10 @@ cognitive_locks: dict[int, asyncio.Lock] = {}
 background_cognitive_tasks: dict[str, asyncio.Task] = {}
 voice_ingress_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
 voice_worker_task: asyncio.Task | None = None
+debug_write_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=max(8, DEBUG_WRITE_QUEUE_MAX))
+debug_write_task: asyncio.Task | None = None
 room_recent_speaker_stats: dict[str, dict[int, dict[str, float]]] = {}
+session_speculative_policies: dict[str, dict[str, Any]] = {}
 
 
 # =========================================================
@@ -735,7 +742,7 @@ def register_drop_reason(metrics: dict | None, reason: str, **extra) -> None:
     log_turn_event("turn_drop", **merge_log_event_payload(explicit=explicit, extra=extra))
 
 
-def save_voice_debug_audio(
+def _save_voice_debug_audio_now(
     guild_id: int,
     speaker: str,
     pcm_bytes: bytes,
@@ -749,8 +756,6 @@ def save_voice_debug_audio(
     session_key: str | None = None,
     stage_label: str | None = None,
 ) -> None:
-    if not VOICE_DEBUG_SAVE_AUDIO:
-        return
     try:
         base_dir = Path(VOICE_DEBUG_AUDIO_DIR)
         if not base_dir.is_absolute():
@@ -814,6 +819,60 @@ def save_voice_debug_audio(
         print(f"[VOICE DEBUG SAVE] speaker={speaker} stage={stage} raw={raw_path} stt={stt_log}")
     except Exception as e:
         print(f"[VOICE DEBUG SAVE FAIL] speaker={speaker} err={e!r}")
+
+
+async def debug_write_worker() -> None:
+    while True:
+        item = await debug_write_queue.get()
+        try:
+            await asyncio.to_thread(_save_voice_debug_audio_now, **item)
+        except Exception as e:
+            print(f"[VOICE DEBUG WORKER FAIL] err={e!r}")
+        finally:
+            debug_write_queue.task_done()
+
+
+def ensure_debug_write_worker_started() -> None:
+    global debug_write_task
+    if debug_write_task is not None and not debug_write_task.done():
+        return
+    debug_write_task = asyncio.create_task(debug_write_worker())
+
+
+def save_voice_debug_audio(
+    guild_id: int,
+    speaker: str,
+    pcm_bytes: bytes,
+    audio16k: np.ndarray,
+    *,
+    wake_probe: str | None = None,
+    final_text: str | None = None,
+    debug_meta: dict | None = None,
+    save_stt_audio: bool = True,
+    stt_meta: dict | None = None,
+    session_key: str | None = None,
+    stage_label: str | None = None,
+) -> None:
+    if not VOICE_DEBUG_SAVE_AUDIO:
+        return
+    ensure_debug_write_worker_started()
+    item = {
+        "guild_id": guild_id,
+        "speaker": speaker,
+        "pcm_bytes": pcm_bytes,
+        "audio16k": np.array(audio16k, copy=True),
+        "wake_probe": wake_probe,
+        "final_text": final_text,
+        "debug_meta": dict(debug_meta) if isinstance(debug_meta, dict) else debug_meta,
+        "save_stt_audio": save_stt_audio,
+        "stt_meta": dict(stt_meta) if isinstance(stt_meta, dict) else stt_meta,
+        "session_key": session_key,
+        "stage_label": stage_label,
+    }
+    try:
+        debug_write_queue.put_nowait(item)
+    except asyncio.QueueFull:
+        print(f"[VOICE DEBUG DROP] speaker={speaker} stage={clean_text(stage_label or 'ingress') or 'ingress'} reason=queue_full")
 
 
 @dataclass(frozen=True)
@@ -1223,6 +1282,7 @@ async def voice_ingress_worker() -> None:
 
 def ensure_voice_worker_started() -> None:
     global voice_worker_task
+    ensure_debug_write_worker_started()
     if voice_worker_task is not None and not voice_worker_task.done():
         return
     voice_worker_task = asyncio.create_task(voice_ingress_worker())
@@ -1246,6 +1306,128 @@ def format_display_text(text: str, *, session_key: str | None = None) -> str:
     if should_label_question_response(visible, session_key=session_key):
         return f"[질문] {visible}"
     return visible
+
+
+def speculate_from_committed_stt(committed_text: str, room_state: dict | None) -> dict | None:
+    cleaned = clean_text(committed_text)
+    state = room_state or {}
+    if len(cleaned) < 8:
+        return None
+    if not (state.get("active_speaker_user_id") or state.get("owner_user_id")):
+        return None
+    policy = fast_path_policy(cleaned, "voice", state)
+    if policy is None:
+        return None
+    return {
+        "text": cleaned,
+        "policy": policy,
+        "prepared_at": time.monotonic(),
+    }
+
+
+def remember_speculative_policy(session_key: str | None, speculative: dict | None) -> None:
+    if not session_key or not speculative:
+        return
+    session_speculative_policies[session_key] = speculative
+
+
+def get_matching_speculative_policy(session_key: str | None, user_text: str) -> dict | None:
+    if not session_key:
+        return None
+    speculative = session_speculative_policies.get(session_key)
+    if not speculative:
+        return None
+    if (time.monotonic() - float(speculative.get("prepared_at") or 0.0)) > 20.0:
+        session_speculative_policies.pop(session_key, None)
+        return None
+    speculative_text = clean_text(str(speculative.get("text") or ""))
+    current_text = clean_text(user_text)
+    if not speculative_text or not current_text:
+        return None
+    if current_text.startswith(speculative_text) or speculative_text.startswith(current_text) or is_similar(current_text, speculative_text):
+        return speculative
+    return None
+
+
+class BufferedEditStreamer:
+    def __init__(self, message: discord.Message, *, session_key: str | None = None):
+        self.message = message
+        self.session_key = session_key
+        self.rendered_text = clean_text(message.content or "")
+        self.pending_text = self.rendered_text
+        self.last_flush_at = 0.0
+        self.first_pending_at = 0.0
+
+    async def push(self, full_text: str, *, force: bool = False) -> None:
+        candidate = format_display_text(full_text, session_key=self.session_key).strip()
+        if not candidate or candidate == self.rendered_text:
+            return
+        now = time.monotonic()
+        if self.pending_text != candidate:
+            self.pending_text = candidate
+            if self.first_pending_at <= 0.0:
+                self.first_pending_at = now
+        delta_chars = max(0, len(candidate) - len(self.rendered_text))
+        elapsed_ms = (now - self.last_flush_at) * 1000.0 if self.last_flush_at > 0 else 10000.0
+        held_ms = (now - self.first_pending_at) * 1000.0 if self.first_pending_at > 0 else elapsed_ms
+        hard_break = candidate.endswith((".", "!", "?", "\n", "。", "！", "？"))
+        should_flush = force or hard_break or held_ms >= MAX_HOLD_MS or (delta_chars >= MIN_DELTA_CHARS and elapsed_ms >= MIN_EDIT_INTERVAL_MS)
+        if not should_flush:
+            return
+        await self.message.edit(content=candidate)
+        self.rendered_text = candidate
+        self.pending_text = candidate
+        self.last_flush_at = now
+        self.first_pending_at = 0.0
+
+    async def close(self, final_text: str) -> None:
+        await self.push(final_text, force=True)
+
+
+class DiscordEditSink:
+    def __init__(self, streamer: BufferedEditStreamer):
+        self.streamer = streamer
+        self.parts: list[str] = []
+
+    async def on_chunk(self, text: str) -> None:
+        if not text:
+            return
+        self.parts.append(text)
+        await self.streamer.push("".join(self.parts))
+
+    async def close(self, final_text: str) -> None:
+        await self.streamer.close(final_text)
+
+
+class TTSQueueSink:
+    def __init__(self, sentence_queue: "asyncio.Queue[str | None]"):
+        self.sentence_queue = sentence_queue
+        self.queued_sentence_count = 0
+
+    async def on_chunk(self, text: str) -> None:
+        cleaned = clean_tts_text(text)
+        if not cleaned:
+            return
+        self.queued_sentence_count += 1
+        await self.sentence_queue.put(cleaned)
+
+    async def close(self, _final_text: str) -> None:
+        await self.sentence_queue.put(None)
+
+
+class ReplyStreamFanout:
+    def __init__(self, sinks: list[Any]):
+        self.sinks = [sink for sink in sinks if sink is not None]
+
+    async def on_chunk(self, text: str) -> None:
+        for sink in self.sinks:
+            await sink.on_chunk(text)
+
+    async def close(self, final_text: str) -> None:
+        for sink in self.sinks:
+            close = getattr(sink, "close", None)
+            if close is not None:
+                await close(final_text)
 
 
 def read_cached_cognitive_state(
@@ -1454,7 +1636,8 @@ async def prepare_llm_messages(
         person_key=person_key,
         session_memory_key=session_memory_key,
     )
-    local_fast_policy = fast_path_policy(user_text, source, session_state_snapshot(session_key))
+    speculative = get_matching_speculative_policy(session_key, user_text) if source == "voice" else None
+    local_fast_policy = (speculative or {}).get("policy") or fast_path_policy(user_text, source, session_state_snapshot(session_key))
     should_block_on_cognitive = guild_id is not None and (cached_cognitive_state is None or route == "sub_wait")
     if local_fast_policy is not None:
         cognitive_state = build_fast_cognitive_state(
@@ -1843,7 +2026,8 @@ async def ask_router_llm(
 
 async def classify_llm_route_async(user_text: str, *, guild_id: int | None = None, source: str = "text", session_key: str | None = None) -> tuple[str, dict | None]:
     fallback_route = classify_llm_route_fallback(user_text, source=source)
-    fast_policy = fast_path_policy(user_text, source, session_state_snapshot(session_key))
+    speculative = get_matching_speculative_policy(session_key, user_text) if source == "voice" else None
+    fast_policy = (speculative or {}).get("policy") or fast_path_policy(user_text, source, session_state_snapshot(session_key))
     if fast_policy is not None:
         fast_route = normalize_route_name(str(fast_policy.get("route", fallback_route)))
         return fast_route, {
@@ -1945,7 +2129,8 @@ async def update_cognitive_state(
                 session_memory_key=session_memory_key,
             ) or {}
         )
-        fast_policy = fast_path_policy(user_text, source, session_state_snapshot(session_key))
+        speculative = get_matching_speculative_policy(session_key, user_text) if source == "voice" else None
+        fast_policy = (speculative or {}).get("policy") or fast_path_policy(user_text, source, session_state_snapshot(session_key))
         if fast_policy is not None:
             state = build_fast_cognitive_state(
                 user_text,
@@ -4743,15 +4928,8 @@ async def ask_llm_and_speak_streaming(
     log_voice_stage(metrics, "LLM/TTS 파이프라인 시작", extra=f"source={source} mode=llm_streaming")
 
     sentence_queue: asyncio.Queue[str | None] = asyncio.Queue()
-    queued_sentence_count = 0
-
-    async def on_sentence(sentence: str) -> None:
-        nonlocal queued_sentence_count
-        cleaned = clean_tts_text(sentence)
-        if not cleaned:
-            return
-        queued_sentence_count += 1
-        await sentence_queue.put(cleaned)
+    tts_sink = TTSQueueSink(sentence_queue)
+    fanout = ReplyStreamFanout([tts_sink])
 
     playback_task = asyncio.create_task(
         stream_tts_sentences(
@@ -4772,7 +4950,7 @@ async def ask_llm_and_speak_streaming(
             room_key=room_key,
             person_key=person_key,
             session_memory_key=session_memory_key,
-            on_sentence=on_sentence,
+            on_sentence=fanout.on_chunk,
             on_first_chunk=lambda: log_voice_latency(metrics, "llm_first_chunk_logged", "LLM 첫 chunk 시간"),
             source=source,
             debug_text=debug_text,
@@ -4782,8 +4960,8 @@ async def ask_llm_and_speak_streaming(
         log_voice_stage(metrics, "LLM 완료", extra=f"chars={len(answer)}", key="llm_done")
         if answer and on_final_answer is not None:
             await on_final_answer(answer)
-        await sentence_queue.put(None)
-        log_voice_stage(metrics, "문장별 TTS 예약 완료", extra=f"sentence_count={queued_sentence_count} prefetch={TTS_PREFETCH_CHUNKS}")
+        await fanout.close(answer)
+        log_voice_stage(metrics, "문장별 TTS 예약 완료", extra=f"sentence_count={tts_sink.queued_sentence_count} prefetch={TTS_PREFETCH_CHUNKS}")
         await playback_task
     finally:
         if not playback_task.done():
@@ -4795,7 +4973,7 @@ async def ask_llm_and_speak_streaming(
     log_voice_bottleneck_summary(
         metrics,
         label="voice_turn",
-        extra=f"source={source} chars={len(answer)} mode=llm_streaming sentences={queued_sentence_count}",
+        extra=f"source={source} chars={len(answer)} mode=llm_streaming sentences={tts_sink.queued_sentence_count}",
         event_name="voice_turn_summary",
     )
     return answer
@@ -4813,6 +4991,7 @@ async def stream_text_reply(
     session_memory_key: str | None = None,
     source: str = "text",
     debug_text: str | None = None,
+    vc: discord.VoiceClient | None = None,
 ) -> tuple[str, discord.Message | None, dict]:
     metrics = new_turn_metrics(
         source=source,
@@ -4823,22 +5002,26 @@ async def stream_text_reply(
         segment_id=0,
     )
     streamed_message: discord.Message | None = await channel.send("…")
-    rendered_text = "…"
-    streamed_parts: list[str] = []
+    buffered_editor = BufferedEditStreamer(streamed_message, session_key=session_key)
+    edit_sink = DiscordEditSink(buffered_editor)
 
-    async def on_sentence(sentence: str) -> None:
-        nonlocal streamed_message, rendered_text
-        if not sentence:
-            return
-        streamed_parts.append(sentence)
-        candidate = format_display_text("".join(streamed_parts), session_key=session_key).strip()
-        if not candidate or candidate == rendered_text:
-            return
-        if streamed_message is None:
-            streamed_message = await channel.send(candidate)
-        else:
-            await streamed_message.edit(content=candidate)
-        rendered_text = candidate
+    sentence_queue: asyncio.Queue[str | None] | None = None
+    tts_sink: TTSQueueSink | None = None
+    playback_task: asyncio.Task | None = None
+    if vc is not None:
+        sentence_queue = asyncio.Queue()
+        tts_sink = TTSQueueSink(sentence_queue)
+        playback_task = asyncio.create_task(
+            stream_tts_sentences(
+                vc,
+                sentence_queue,
+                metrics=metrics,
+                turn_id=turn_id or current_turn_id(session_key),
+                session_key=session_key,
+            )
+        )
+
+    fanout = ReplyStreamFanout([edit_sink, tts_sink] if tts_sink is not None else [edit_sink])
 
     answer = await ask_llm_streaming(
         user_text,
@@ -4847,17 +5030,20 @@ async def stream_text_reply(
         room_key=room_key,
         person_key=person_key,
         session_memory_key=session_memory_key,
-        on_sentence=on_sentence,
+        on_sentence=fanout.on_chunk,
         on_first_chunk=lambda: log_voice_latency(metrics, "llm_first_chunk_logged", "LLM 첫 chunk 시간"),
         source=source,
         debug_text=debug_text,
         metrics=metrics,
     )
-    final_text = format_display_text(answer, session_key=session_key).strip()
+    final_text = format_display_text(answer, session_key=session_key).strip() or fallback_answer_for(user_text)
+    await fanout.close(answer)
     if streamed_message is None:
-        streamed_message = await channel.send(final_text or fallback_answer_for(user_text))
-    elif final_text and final_text != rendered_text:
+        streamed_message = await channel.send(final_text)
+    elif final_text != buffered_editor.rendered_text:
         await streamed_message.edit(content=final_text)
+    if playback_task is not None:
+        await playback_task
     return answer, streamed_message, metrics
 
 
@@ -5279,6 +5465,10 @@ async def _process_member_audio_impl(
         })
         if partial_text:
             print(f"[STT RESULT][partial] text={partial_text!r} committed={committed_partial_text!r}")
+        speculative = speculate_from_committed_stt(committed_partial_text or partial_text, room_state_snapshot(room_session_key))
+        if speculative is not None:
+            remember_speculative_policy(session_key, speculative)
+            metrics.setdefault("meta", {})["speculative_policy"] = dict(speculative.get("policy") or {})
     except Exception as e:
         print(f"[STT PARTIAL] {e}")
 
@@ -5332,6 +5522,9 @@ async def _process_member_audio_impl(
     text = corrected_text
     session_partial_stt_text[session_key] = clean_text(partial_text)
     committed_text = commit_stable_transcript(session_key, new_partial_text=text)
+    speculative = speculate_from_committed_stt(committed_text, room_state_snapshot(room_session_key))
+    if speculative is not None:
+        remember_speculative_policy(session_key, speculative)
     if committed_text and len(clean_text(text)) >= len(committed_text):
         text = clean_text(text)
     print(f"[STT RESULT][full-final] text={text!r} committed={committed_text!r} wake_detected={wake_detected}")
@@ -5504,6 +5697,7 @@ async def _process_member_audio_impl(
             if not plain_answer:
                 plain_answer = answer
 
+            session_speculative_policies.pop(session_key, None)
             append_history(session_key, history_user_text, plain_answer, guild_id=guild_id)
             schedule_memory_update(
                 guild_id,
@@ -5690,11 +5884,13 @@ async def on_message(message: discord.Message):
                     session_memory_key=session_memory_key,
                     source="text",
                     debug_text=user_text,
+                    vc=vc,
                 )
                 plain_answer = strip_omnivoice_tags(answer)
                 if not plain_answer:
                     plain_answer = answer
 
+            session_speculative_policies.pop(session_key, None)
             append_history(session_key, user_text, plain_answer, guild_id=message.guild.id)
             schedule_memory_update(
                 message.guild.id,
@@ -5733,9 +5929,6 @@ async def on_message(message: discord.Message):
                 answer_text=plain_answer,
                 user_text=user_text,
             )
-
-            if vc is not None:
-                await speak_answer(vc, answer)
 
             log_voice_bottleneck_summary(
                 text_metrics,
