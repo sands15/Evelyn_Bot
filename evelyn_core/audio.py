@@ -1,6 +1,11 @@
 import numpy as np
 import torch
 
+try:
+    import soxr
+except Exception:
+    soxr = None
+
 from .config import (
     CHANNELS,
     DENOISE_ENABLED,
@@ -41,6 +46,7 @@ except Exception:
 
 silero_vad_model = None
 silero_vad_warned = False
+soxr_warned = False
 
 
 def compute_voice_band_metrics(audio: np.ndarray, sampling_rate: int = TARGET_RATE) -> tuple[float, float, float]:
@@ -90,13 +96,9 @@ def downmix_and_resample_int16_stereo_to_mono16k(pcm_bytes: bytes) -> np.ndarray
     audio = audio.astype(np.float32) / 32768.0
 
     if RATE != TARGET_RATE:
-        ratio = TARGET_RATE / RATE
-        new_len = max(1, int(len(audio) * ratio))
-        x_old = np.linspace(0, 1, len(audio), endpoint=False)
-        x_new = np.linspace(0, 1, new_len, endpoint=False)
-        audio = np.interp(x_new, x_old, audio).astype(np.float32)
+        audio = resample_audio_float(audio, RATE, TARGET_RATE)
 
-    return audio
+    return audio.astype(np.float32, copy=False)
 
 
 def apply_light_denoise(audio_in: np.ndarray, sampling_rate: int = TARGET_RATE) -> np.ndarray:
@@ -146,6 +148,8 @@ def downmix_int16_stereo_to_mono_float(pcm_bytes: bytes) -> np.ndarray:
 
 
 def resample_audio_float(audio: np.ndarray, from_rate: int, to_rate: int) -> np.ndarray:
+    global soxr_warned
+
     audio = np.asarray(audio, dtype=np.float32)
     if audio.size == 0:
         return np.zeros(0, dtype=np.float32)
@@ -154,6 +158,14 @@ def resample_audio_float(audio: np.ndarray, from_rate: int, to_rate: int) -> np.
     dst_rate = max(1, int(to_rate))
     if src_rate == dst_rate:
         return audio.astype(np.float32, copy=True)
+
+    if soxr is not None:
+        try:
+            return np.asarray(soxr.resample(audio, src_rate, dst_rate, quality="HQ"), dtype=np.float32)
+        except Exception:
+            if not soxr_warned:
+                soxr_warned = True
+                print(f"[AUDIO RESAMPLE] soxr fallback engaged src={src_rate} dst={dst_rate}")
 
     new_len = max(1, int(round(len(audio) * (dst_rate / float(src_rate)))))
     x_old = np.linspace(0, 1, len(audio), endpoint=False)
