@@ -200,26 +200,35 @@ TTS:
 3. wake word 또는 bot-reply 여부 검사
 4. 사용자 텍스트 정리
 5. 길드 락 획득
-6. `ask_llm_once(...)` 로 메인 응답 생성
-7. 채널에 visible text 전송
+6. `AUTO_JOIN_VOICE` 가 켜져 있으면 `ensure_voice_client()` 로 현재 길드 voice client를 확보 시도
+7. `stream_text_reply(...)` 로 메인 응답 생성 및 채널 편집 스트리밍
 8. history append
 9. memory update 예약
 10. search follow-up 예약
-11. voice client가 있으면 TTS로도 읽기
+11. voice client가 있으면 **최종 answer 전체**를 `speak_answer()` 로 따로 읽기
 12. 마지막에 `bot.process_commands(message)`
 
 ### 4-3. 현재 텍스트 답변 LLM 경로
-`ask_llm_once()` 는 아래를 한다.
+현재 텍스트 경로의 실제 기본은 `stream_text_reply()` + `ask_llm_streaming()` 조합이다.
+
+`stream_text_reply()` 는 아래를 한다.
+
+1. 먼저 `channel.send("…")` 로 placeholder 메시지를 보낸다.
+2. `ask_llm_streaming(... source="text")` 를 호출한다.
+3. `on_sentence()` 콜백에서 들어오는 chunk를 이어붙여 같은 메시지를 `edit()` 한다.
+4. 최종 answer가 나오면 마지막 한 번 더 정리된 텍스트로 edit 한다.
+
+`ask_llm_streaming()` 의 텍스트 모드는 아래 특성을 가진다.
 
 1. `prepare_llm_messages()` 호출
-2. cognitive_state가 ask 이고 `question_for_user` 가 있으면 그 질문을 user content처럼 사용
+2. cognitive_state short-circuit (`ask`, `wait`, `search_then_answer`) 가능
 3. `build_main_response_guidance()` 를 붙여 최종 user prompt 생성
-4. 메인 LLM non-stream 요청
-5. 응답 본문 사용
-6. 본문이 없으면 reasoning에서 추출 시도
-7. 그것도 없으면 fallback
+4. 메인 LLM을 `stream=true` 로 호출
+5. stream delta를 chunk 단위로 `on_sentence()` 에 넘김
+6. stream 본문이 비면 `ask_llm_once()` 로 non-stream 재시도
 
-즉 텍스트에서는 현재 **메인 LLM non-stream** 이 기본이다.
+즉 현재 텍스트에서는 **메인 LLM stream 응답 + 메시지 edit 스트리밍** 이 기본이고,
+non-stream `ask_llm_once()` 는 주로 fallback 경로다.
 
 ---
 
@@ -406,53 +415,77 @@ full STT 후에는 아래를 거친다.
 
 ## 6. 현재 음성 답변 생성 구조
 
-현재 음성 답변은 `ask_llm_and_speak_streaming()` 이 담당한다.
+현재 음성 답변의 실제 활성 경로는 `ask_llm_and_speak_streaming()` + `ask_llm_streaming()` + `stream_tts_sentences()` 조합이다.
 
-### 6-1. first response / follow-up 분리
-현재 구조는 **first_then_followup** 모드다.
+### 6-1. 현재 voice LLM 생성 경로
+`ask_llm_and_speak_streaming()` 는 현재 아래 순서로 동작한다.
 
-1. `build_first_response()`
-   - 메인 LLM non-stream
-   - 짧은 첫 응답 생성
-2. `build_followup_response()`
-   - 이미 말한 first_response를 포함한 전용 prompt로 보충 응답 생성
-3. 둘을 합쳐 최종 answer 생성
-4. 문장 단위 TTS 큐잉
+1. `sentence_queue` 를 만든다.
+2. `stream_tts_sentences()` playback task를 먼저 띄운다.
+3. `ask_llm_streaming(... source="voice")` 를 호출한다.
+4. LLM stream 중간에 나온 chunk를 `on_sentence()` 로 바로 `sentence_queue` 에 넣는다.
+5. stream 종료 후 `None` sentinel을 넣고 playback task가 끝날 때까지 기다린다.
+6. 최종 answer는 memory/history 갱신용으로 따로 반환한다.
 
-현재 first response 쪽은 더 빠르게 하려고:
-- `temperature = 0.0`
-- `max_tokens = min(40, VOICE_LLM_MAX_TOKENS)`
+즉 현재 음성 경로는 예전의 first response / follow-up 2단계 조합이 아니라,
+**메인 LLM stream 결과를 바로 TTS queue로 넘기는 구조**다.
 
-follow-up 쪽은:
-- `temperature = 0.0`
-- `max_tokens = min(64, VOICE_LLM_MAX_TOKENS)`
+참고로 `build_first_response()` 와 `build_followup_response()` 함수는 아직 파일 안에 남아 있지만,
+현재 활성 voice 경로에서는 호출되지 않는다.
 
-### 6-2. duplicate follow-up 억제
-현재는:
-- `normalize_compare_text()`
-- `is_duplicate_followup()`
-를 써서 first response와 사실상 같은 follow-up이면 버린다.
+### 6-2. 현재 stream chunk 분리 구조
+현재 chunk 분리는 `SpeechChunker` 가 담당한다.
 
-또한 follow-up prompt 자체도:
-- 첫 응답과 겹치지 않는 보충만 말하라
-- 첫 문장을 반복하지 마라
-- 새 정보 없으면 빈 응답
-을 명시한다.
+핵심 규칙은 아래다.
 
-### 6-3. 현재 TTS 재생 구조
-`stream_tts_sentences()` 는:
-- sentence queue
-- prepared queue
-- prefetch task
-- playback task
-를 사용한다.
+1. LLM delta가 들어올 때마다 내부 `buf` 에 누적한다.
+2. `detect_output_shape()` 로 현재 출력이 일반 대화(`chat`)인지, 코드/목록/표 같은 구조화 출력(`structured`)인지 본다.
+3. 첫 chunk는 soft break(`,`, `…`, `:`, `;`)도 후보로 허용한다.
+4. 첫 chunk 이후는 hard break(`.`, `!`, `?`, 줄바꿈`) 위주로 자르고,
+   너무 길어졌을 때만 제한적으로 soft break를 허용한다.
+5. `is_unstable_tail()` 로 아래 꼬리를 불안정하다고 본다.
+   - 조사/어미로 매달린 끝
+   - `그리고`, `하지만`, `그래서` 같은 미완성 연결어 끝
+   - 괄호/따옴표/코드펜스 짝이 안 맞는 경우
+6. `has_natural_end()` 면 가산점을 준다.
+7. 강제 분할이 필요해도 불안정 꼬리면 보내지 않고 더 기다린다.
+
+즉 현재 목표는:
+- 첫 chunk를 너무 짧게 보내지 않기
+- 쉼표가 있어도 미완성 꼬리면 보류하기
+- 구조화 출력은 일반 대화보다 덜 공격적으로 자르기
+이다.
+
+### 6-3. 현재 voice LLM sampling
+`ask_llm_streaming()` 의 현재 temperature는 source별로 다르다.
+
+- `source="voice"` -> `temperature = 0.3`
+- `source="text"` -> `temperature = 0.1`
+
+즉 voice는 약간 더 자연스럽게 두되, 여전히 낮은 온도로 안정성을 우선한다.
+
+### 6-4. 현재 TTS 재생 구조
+`stream_tts_sentences()` 는 아래 구성요소를 쓴다.
+
+- `sentence_queue`
+- `prepared_queue`
+- `prefetch_task`
+- `playback_task`
+- `QueuedAudioSource`
+
+실제 흐름은:
+
+1. `sentence_queue` 에 텍스트 chunk가 들어온다.
+2. `_prefetch_tts_sources()` 가 이를 받아 OmniVoice source를 미리 만든다.
+3. 준비된 source를 `prepared_queue` 에 넣는다.
+4. `QueuedAudioSource` 가 source들을 순서대로 재생한다.
 
 추가로 guild별 `active_tts_playbacks` 를 추적한다.
 현재 새 사용자 음성이 들어오면:
 - `stop_active_tts_playback(guild_id, reason="new_user_audio")`
 로 기존 TTS를 중단한다.
 
-즉 현재는 **interruption 가능한 TTS playback tracking** 이 들어간 상태다.
+즉 현재는 **interrupt 가능한 playback tracking + next chunk prefetch** 가 같이 들어간 상태다.
 
 ---
 
@@ -550,15 +583,17 @@ Sub/Summary 모델은 여전히 사용자에게 답하지 않고 메모리 관�
    - Sub는 메모리 갱신용이다.
 
 3. **음성 구조**
-   - wake probe -> partial/full STT -> final reply gate -> first response + follow-up -> streaming TTS
+   - wake probe -> partial/full STT -> final reply gate -> 메인 LLM streaming -> `SpeechChunker` -> TTS queue -> playback
    - active speaker / room owner / interruptible TTS가 함께 작동한다.
 
 4. **최근 중요한 변화**
    - active speaker 도입
    - partial/committed STT 도입
    - `search_then_answer` 실제 반영
-   - first response / follow-up 분리
-   - TTS interrupt 추적
+   - voice 경로를 first/follow-up 분리 대신 main LLM streaming 직결 구조로 변경
+   - unstable tail 판정 기반 chunk dispatch 추가
+   - text 경로도 message edit 기반 streaming 응답 사용
+   - TTS interrupt 추적 + prefetch 유지
    - preroll carry-over 완화
    - wake near-miss fuzzy 완화
    - robotic short follow-up 완화
