@@ -5,8 +5,9 @@ VENV_ACT="${VENV_ACT:-source ~/venvs/vllm-env/bin/activate}"
 LLAMA_DIR="${LLAMA_DIR:-/mnt/c/Users/Admin/llama.cpp}"
 ROUTER_LLM_GPU="${ROUTER_LLM_GPU:-0}"
 ROUTER_LLM_PORT="${ROUTER_LLM_PORT:-9822}"
-ROUTER_LLM_CONTEXT="${ROUTER_LLM_CONTEXT:-4096}"
-ROUTER_LLM_REASONING_BUDGET="${ROUTER_LLM_REASONING_BUDGET:-96}"
+ROUTER_LLM_CONTEXT="${ROUTER_LLM_CONTEXT:-1536}"
+ROUTER_LLM_REASONING="${ROUTER_LLM_REASONING:-off}"
+ROUTER_LLM_REASONING_BUDGET="${ROUTER_LLM_REASONING_BUDGET:-12}"
 ROUTER_LLM_MODEL="${ROUTER_LLM_MODEL:-/home/sands12/.cache/huggingface/hub/models--unsloth--gemma-4-E2B-it-GGUF/snapshots/f064409f340b34190993560b2168133e5dbae558/gemma-4-E2B-it-UD-Q6_K_XL.gguf}"
 
 eval "$VENV_ACT"
@@ -25,5 +26,5 @@ exec ./build/bin/llama-server \
   --flash-attn on \
   -ngl 999 \
   -c "$ROUTER_LLM_CONTEXT" \
-  --reasoning on \
+  --reasoning "$ROUTER_LLM_REASONING" \
   --reasoning-budget "$ROUTER_LLM_REASONING_BUDGET"

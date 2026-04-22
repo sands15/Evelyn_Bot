@@ -78,6 +78,7 @@ VOICE_DEBUG_AUDIO_DIR = os.getenv("VOICE_DEBUG_AUDIO_DIR", "debug_audio")
 VOICE_DEBUG_MAX_FILES_PER_GUILD = int(os.getenv("VOICE_DEBUG_MAX_FILES_PER_GUILD", "200"))
 WAKE_STT_TIMEOUT_SEC = float(os.getenv("WAKE_STT_TIMEOUT_SEC", "20"))
 FULL_STT_TIMEOUT_SEC = float(os.getenv("FULL_STT_TIMEOUT_SEC", "30"))
+TTS_INTERRUPT_DEBOUNCE_SEC = float(os.getenv("TTS_INTERRUPT_DEBOUNCE_SEC", "0.18"))
 ROUTER_LLM_URL = globals().get("ROUTER_LLM_URL", os.getenv("ROUTER_LLM_URL", "http://127.0.0.1:9822/v1/chat/completions"))
 ROUTER_MODEL_NAME = globals().get("ROUTER_MODEL_NAME", os.getenv("ROUTER_MODEL_NAME", "gemma-4-E2B-it-UD-Q6_K_XL.gguf"))
 ROUTER_LLM_ENABLED = globals().get("ROUTER_LLM_ENABLED", os.getenv("ROUTER_LLM_ENABLED", "true").lower() in {"1", "true", "yes", "on"})
@@ -786,6 +787,7 @@ def save_voice_debug_audio(
                 wf.setframerate(TARGET_RATE)
                 wf.writeframes(audio16k_int16.tobytes())
 
+        stage = clean_text(stage_label or "ingress") or "ingress"
         meta = {
             "saved_at": stamp,
             "guild_id": guild_id,
@@ -800,7 +802,7 @@ def save_voice_debug_audio(
             "wake_probe": wake_probe,
             "final_text": final_text,
             "session_key": session_key,
-            "stage_label": "ingress",
+            "stage_label": stage,
         }
         if debug_meta is not None:
             meta["voice_receive"] = debug_meta
@@ -809,9 +811,173 @@ def save_voice_debug_audio(
         meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
         _trim_voice_debug_dir(guild_dir)
         stt_log = str(stt_path) if save_stt_audio else "[SKIPPED]"
-        print(f"[VOICE DEBUG SAVE] speaker={speaker} stage=ingress raw={raw_path} stt={stt_log}")
+        print(f"[VOICE DEBUG SAVE] speaker={speaker} stage={stage} raw={raw_path} stt={stt_log}")
     except Exception as e:
         print(f"[VOICE DEBUG SAVE FAIL] speaker={speaker} err={e!r}")
+
+
+@dataclass(frozen=True)
+class TtsInterruptMeta:
+    active_speaker_match: bool = False
+    wake_detected: bool = False
+    vad_prob: float = 0.0
+    audio_sec: float = 0.0
+    rms_ok: bool = False
+    voice_like: bool = False
+
+
+def estimate_voice_like_probability(*, voiced_ms: float, audio_sec: float, body_rms: float) -> float:
+    audio_ms = max(audio_sec * 1000.0, 1.0)
+    voiced_ratio = max(0.0, min(1.0, voiced_ms / audio_ms))
+    rms_ratio = 0.0
+    if VOICE_WAVEFORM_BODY_RMS_MIN > 0:
+        rms_ratio = max(0.0, min(1.0, body_rms / VOICE_WAVEFORM_BODY_RMS_MIN))
+    return max(voiced_ratio, rms_ratio)
+
+
+def should_interrupt_tts(meta: TtsInterruptMeta) -> bool:
+    if meta.active_speaker_match and meta.voice_like:
+        return True
+    if meta.wake_detected:
+        return True
+    return meta.vad_prob >= 0.45 and meta.audio_sec >= 0.22 and meta.rms_ok
+
+
+FAST_PATH_CONTINUE_MARKERS = (
+    "그리고",
+    "근데",
+    "아니",
+    "아니야",
+    "잠깐",
+    "음",
+    "어",
+    "그거",
+    "그건",
+    "그 다음",
+    "이어서",
+    "계속",
+)
+
+FAST_PATH_DIRECTIVE_MARKERS = (
+    "해줘",
+    "해 줘",
+    "말해줘",
+    "말해 줘",
+    "알려줘",
+    "알려 줘",
+    "정리해줘",
+    "정리해 줘",
+    "요약해줘",
+    "요약해 줘",
+    "설명해줘",
+    "설명해 줘",
+    "번역해줘",
+    "번역해 줘",
+    "고쳐줘",
+    "고쳐 줘",
+    "수정해줘",
+    "수정해 줘",
+)
+
+FAST_PATH_DEEP_ROUTE_MARKERS = (
+    "검색",
+    "찾아봐",
+    "찾아 봐",
+    "최신",
+    "뉴스",
+    "시세",
+    "가격",
+    "환율",
+    "주가",
+    "날씨",
+    "비교",
+    "분석",
+    "판단",
+    "기억",
+    "아까",
+    "방금",
+    "전에",
+    "이전",
+    "이어서",
+    "계속",
+    "요약",
+    "정리",
+)
+
+
+def needs_search_or_deep_routing(text: str) -> bool:
+    cleaned = clean_text(text)
+    if not cleaned:
+        return False
+    marker_hits = sum(1 for marker in FAST_PATH_DEEP_ROUTE_MARKERS if marker in cleaned)
+    if marker_hits >= 2:
+        return True
+    if len(cleaned) >= 72:
+        return True
+    search_markers = ("검색", "찾아", "최신", "뉴스", "날씨", "가격", "주가", "환율")
+    return any(marker in cleaned for marker in search_markers)
+
+
+def is_simple_directive(text: str) -> bool:
+    cleaned = clean_text(text)
+    if not cleaned:
+        return False
+    if needs_search_or_deep_routing(cleaned):
+        return False
+    if any(marker in cleaned for marker in FAST_PATH_DIRECTIVE_MARKERS):
+        return True
+    return len(cleaned) <= 24 and "?" not in cleaned and "？" not in cleaned
+
+
+def is_obvious_continue(text: str, source: str, room_state: dict | None = None) -> bool:
+    cleaned = normalize_voice_text(text) if source == "voice" else clean_text(text)
+    if not cleaned:
+        return True
+    state = room_state or {}
+    if not (state.get("reply_in_progress") or state.get("awaiting_user_reply") or state.get("owner_user_id")):
+        return False
+    if len(cleaned) > 12 and len(cleaned.split()) > 3:
+        return False
+    return any(cleaned == marker or cleaned.startswith(marker) for marker in FAST_PATH_CONTINUE_MARKERS)
+
+
+def fast_path_policy(text: str, source: str, room_state: dict | None = None) -> dict | None:
+    cleaned = clean_text(text)
+    if not cleaned:
+        return {"route": "main_direct", "action": "wait", "reason_brief": "empty_input"}
+    if is_obvious_continue(cleaned, source, room_state):
+        return {"route": "main_direct", "action": "wait", "reason_brief": "obvious_continue"}
+    if is_simple_directive(cleaned):
+        return {"route": "main_direct", "action": "answer", "reason_brief": "simple_directive"}
+    if not needs_search_or_deep_routing(cleaned):
+        return {"route": "main_direct", "action": "answer", "reason_brief": "light_request"}
+    return None
+
+
+def build_fast_cognitive_state(
+    user_text: str,
+    *,
+    action: str,
+    current_state: dict | None = None,
+    reason_brief: str = "fast_path",
+) -> dict:
+    base = normalize_cognitive_state(current_state or {})
+    cleaned = clean_text(user_text)
+    hint = "짧고 자연스럽게 답해라."
+    if action == "wait":
+        hint = "지금은 더 듣는 쪽이 자연스럽다. 아주 짧게 반응해라."
+    state = {
+        "action": action if action in {"answer", "ask", "wait", "search_then_answer"} else "answer",
+        "confidence": 0.92 if action == "answer" else 0.82,
+        "user_intent": cleaned,
+        "state_summary": base.get("state_summary") or cleaned,
+        "question_for_user": "",
+        "main_prompt_hint": base.get("main_prompt_hint") or hint,
+        "reason_brief": reason_brief,
+        "retrieved_context_ids": base.get("retrieved_context_ids") or [],
+        "updated_at": int(time.time()),
+    }
+    return normalize_cognitive_state(state)
 
 
 def should_ignore_short_transcription(
@@ -1108,6 +1274,7 @@ async def refresh_cognitive_state_in_background(
     room_key: str | None = None,
     person_key: str | None = None,
     session_memory_key: str | None = None,
+    source: str = "text",
 ) -> None:
     task_key = session_memory_key or runtime_session_key(guild_id=guild_id)
     started_at = time.monotonic()
@@ -1115,9 +1282,11 @@ async def refresh_cognitive_state_in_background(
         await update_cognitive_state(
             guild_id,
             user_text,
+            session_key=session_key,
             room_key=room_key,
             person_key=person_key,
             session_memory_key=session_memory_key,
+            source=source,
         )
         log_turn_event(
             "cognitive_background_done",
@@ -1145,6 +1314,7 @@ def schedule_cognitive_refresh(
     room_key: str | None = None,
     person_key: str | None = None,
     session_memory_key: str | None = None,
+    source: str = "text",
 ) -> None:
     if guild_id is None:
         return
@@ -1163,6 +1333,7 @@ def schedule_cognitive_refresh(
             room_key=room_key,
             person_key=person_key,
             session_memory_key=session_memory_key,
+            source=source,
         )
     )
 
@@ -1262,7 +1433,7 @@ async def prepare_llm_messages(
     metrics: dict | None = None,
 ) -> tuple[list[dict], dict | None, str]:
     route_started_at = time.monotonic()
-    route, route_meta = await classify_llm_route_async(user_text, guild_id=guild_id, source=source)
+    route, route_meta = await classify_llm_route_async(user_text, guild_id=guild_id, source=source, session_key=session_key)
     if metrics is not None:
         metrics.setdefault("marks", {})["route_ready"] = (time.monotonic() - route_started_at) * 1000.0
         metrics.setdefault("meta", {}).update(
@@ -1283,14 +1454,26 @@ async def prepare_llm_messages(
         person_key=person_key,
         session_memory_key=session_memory_key,
     )
+    local_fast_policy = fast_path_policy(user_text, source, session_state_snapshot(session_key))
     should_block_on_cognitive = guild_id is not None and (cached_cognitive_state is None or route == "sub_wait")
-    if should_block_on_cognitive and guild_id is not None:
+    if local_fast_policy is not None:
+        cognitive_state = build_fast_cognitive_state(
+            user_text,
+            action=str(local_fast_policy.get("action", "answer")),
+            current_state=cached_cognitive_state,
+            reason_brief=str(local_fast_policy.get("reason_brief", "fast_path")),
+        )
+        if metrics is not None:
+            metrics.setdefault("meta", {})["cognitive_mode"] = "fast_path"
+    elif should_block_on_cognitive and guild_id is not None:
         cognitive_state = await update_cognitive_state(
             guild_id,
             user_text,
+            session_key=session_key,
             room_key=room_key,
             person_key=person_key,
             session_memory_key=session_memory_key,
+            source=source,
         )
         if metrics is not None:
             metrics.setdefault("meta", {})["cognitive_mode"] = "blocking"
@@ -1305,6 +1488,7 @@ async def prepare_llm_messages(
                 room_key=room_key,
                 person_key=person_key,
                 session_memory_key=session_memory_key,
+                source=source,
             )
         if metrics is not None:
             metrics.setdefault("meta", {})["cognitive_mode"] = "background"
@@ -1657,8 +1841,18 @@ async def ask_router_llm(
         return extract_json_object(text)
 
 
-async def classify_llm_route_async(user_text: str, *, guild_id: int | None = None, source: str = "text") -> tuple[str, dict | None]:
+async def classify_llm_route_async(user_text: str, *, guild_id: int | None = None, source: str = "text", session_key: str | None = None) -> tuple[str, dict | None]:
     fallback_route = classify_llm_route_fallback(user_text, source=source)
+    fast_policy = fast_path_policy(user_text, source, session_state_snapshot(session_key))
+    if fast_policy is not None:
+        fast_route = normalize_route_name(str(fast_policy.get("route", fallback_route)))
+        return fast_route, {
+            "selected": fast_route,
+            "source": "fast_path",
+            "confidence": 0.92,
+            "reason_brief": clean_text(str(fast_policy.get("reason_brief", "fast_path"))),
+            "fallback": fallback_route,
+        }
     force_voice_context = source == "voice" and should_force_voice_context_route(user_text)
     if (source == "voice" and not force_voice_context) or not ROUTER_LLM_ENABLED:
         return fallback_route, {"selected": fallback_route, "source": "fallback"}
@@ -1720,9 +1914,11 @@ async def update_cognitive_state(
     guild_id: int,
     user_text: str,
     *,
+    session_key: str | None = None,
     room_key: str | None = None,
     person_key: str | None = None,
     session_memory_key: str | None = None,
+    source: str = "text",
 ) -> dict:
     started_at = time.monotonic()
     lock = cognitive_locks.setdefault(guild_id, asyncio.Lock())
@@ -1749,6 +1945,16 @@ async def update_cognitive_state(
                 session_memory_key=session_memory_key,
             ) or {}
         )
+        fast_policy = fast_path_policy(user_text, source, session_state_snapshot(session_key))
+        if fast_policy is not None:
+            state = build_fast_cognitive_state(
+                user_text,
+                action=str(fast_policy.get("action", "answer")),
+                current_state=current_state,
+                reason_brief=str(fast_policy.get("reason_brief", "fast_path")),
+            )
+            write_json_file(cognitive_state_path(guild_id, scope_type=scope_type, scope_key=scope_key), state)
+            return state
         recent_raw = merge_recent_memory_rows(
             *(layer["raw"] for layer in layers.values()),
             limit=MEMORY_COGNITIVE_RAW_LIMIT,
@@ -1987,6 +2193,42 @@ async def update_long_term_memory(
             print(f"[MEMORY LATENCY] guild={guild_id} scope={scope_note} ms={elapsed_ms:.0f}")
 
 
+def should_run_memory_update(
+    *,
+    guild_id: int,
+    user_text: str,
+    answer: str,
+    source: str,
+    session_key: str | None = None,
+) -> bool:
+    cleaned_user = clean_text(user_text)
+    cleaned_answer = clean_text(answer)
+    merged = clean_text(f"{cleaned_user} {cleaned_answer}")
+    text_len = len(cleaned_user)
+    has_open_question = ("?" in cleaned_user) or ("？" in cleaned_user) or ("?" in cleaned_answer) or ("？" in cleaned_answer)
+    explicit_fact_markers = ("내 ", "나는 ", "제가 ", "우리는 ", "설정", "결정", "기억해", "기억해줘", "해야", "하기로")
+    has_explicit_fact = any(marker in merged for marker in explicit_fact_markers)
+    is_smalltalk = (not needs_search_or_deep_routing(cleaned_user)) and len(cleaned_user) <= 14 and len(cleaned_answer) <= 32
+    turn_index = 1
+    idle_gap_sec = 0.0
+    if session_key:
+        history_len = len(get_conversation_history(session_key=session_key, guild_id=guild_id))
+        turn_index = max(1, (history_len + 1) // 2)
+        idle_gap_sec = max(0.0, time.monotonic() - float(session_last_active_at.get(session_key, 0.0) or 0.0))
+
+    if has_explicit_fact:
+        return True
+    if has_open_question:
+        return True
+    if turn_index % 4 == 0:
+        return True
+    if source == "voice" and text_len < 12:
+        return False
+    if is_smalltalk:
+        return False
+    return idle_gap_sec >= 20.0
+
+
 def schedule_memory_update(
     guild_id: int,
     user_text: str,
@@ -1998,6 +2240,7 @@ def schedule_memory_update(
     source: str = "chat",
     user_speaker: str = "user",
     assistant_speaker: str = "Evelyn",
+    session_key: str | None = None,
 ) -> None:
     rows = [
         {"role": "user", "speaker": user_speaker, "source": source, "text": user_text},
@@ -2010,6 +2253,16 @@ def schedule_memory_update(
         append_raw_transcript_rows(guild_id, rows, scope_type="person", scope_key=person_key)
     if session_memory_key:
         append_raw_transcript_rows(guild_id, rows, scope_type="session", scope_key=session_memory_key)
+
+    if not should_run_memory_update(
+        guild_id=guild_id,
+        user_text=user_text,
+        answer=answer,
+        source=source,
+        session_key=session_key,
+    ):
+        return
+
     asyncio.create_task(
         update_long_term_memory(
             guild_id,
@@ -2024,9 +2277,11 @@ def schedule_memory_update(
         update_cognitive_state(
             guild_id,
             user_text,
+            session_key=session_key,
             room_key=room_key,
             person_key=person_key,
             session_memory_key=session_memory_key,
+            source=source,
         )
     )
 
@@ -4687,7 +4942,6 @@ async def _process_member_audio_impl(
         session_key=session_key,
         stage_label="ingress",
     )
-    await stop_active_tts_playback(guild_id, reason="new_user_audio")
     room_state = room_state_snapshot(room_session_key)
     owner_user_id = room_state.get("owner_user_id")
     topic_id = session_topic_ids.get(session_key) or build_topic_id(member.display_name or str(member.id))
@@ -4764,6 +5018,7 @@ async def _process_member_audio_impl(
     voiced_ms = float(waveform_stats.get("voiced_ms") or 0.0)
     longest_voiced_ms = float(waveform_stats.get("longest_voiced_ms") or 0.0)
     body_rms = float(waveform_stats.get("body_rms") or 0.0)
+    voice_like_prob = estimate_voice_like_probability(voiced_ms=voiced_ms, audio_sec=duration_sec, body_rms=body_rms)
     update_room_speaker_activity(
         room_session_key,
         member.id,
@@ -4851,6 +5106,7 @@ async def _process_member_audio_impl(
             return
 
     owner_followup_active = is_room_owner_active(room_session_key, member.id) and is_session_active_for_user(session_key, member.id)
+    active_speaker_user_id = pick_active_speaker(room_session_key)
     wake_probe = ""
     wake_confirm = ""
     wake_detected = False
@@ -4992,6 +5248,18 @@ async def _process_member_audio_impl(
                 log_voice_stage(metrics, "웨이크 프로브 기반 조기 종료", extra=f"wake_probe_text={wake_probe!r} sec={duration_sec:.2f}")
                 return
             log_voice_stage(metrics, "웨이크 미검출이지만 본문 STT 진행", extra=f"wake_probe_text={wake_probe!r}")
+
+    interrupt_meta = TtsInterruptMeta(
+        active_speaker_match=active_speaker_user_id == member.id,
+        wake_detected=wake_detected,
+        vad_prob=voice_like_prob,
+        audio_sec=duration_sec,
+        rms_ok=body_rms >= VOICE_WAVEFORM_BODY_RMS_MIN,
+        voice_like=voice_like_prob >= 0.45,
+    )
+    if should_interrupt_tts(interrupt_meta):
+        await asyncio.sleep(TTS_INTERRUPT_DEBOUNCE_SEC)
+        await stop_active_tts_playback(guild_id, reason="qualified_user_audio")
 
     print(f"[FULL STT ENTER] speaker={member.display_name} sampling_rate={stt_sampling_rate} samples={audio16k.size} wake_detected={wake_detected}")
     log_voice_stage(metrics, "본문 STT 시작", extra=f"samples={audio16k.size}")
@@ -5247,6 +5515,7 @@ async def _process_member_audio_impl(
                 source="voice",
                 user_speaker=member.display_name,
                 assistant_speaker="Evelyn",
+                session_key=session_key,
             )
             search_requested = bool(apply_ask_gating(read_cached_cognitive_state(guild_id, room_key=room_key, person_key=person_key, session_memory_key=session_memory_key), source="voice").get("action") == "search_then_answer")
             schedule_search_followup(
@@ -5437,6 +5706,7 @@ async def on_message(message: discord.Message):
                 source="text",
                 user_speaker=message.author.display_name,
                 assistant_speaker="Evelyn",
+                session_key=session_key,
             )
             search_requested = bool(apply_ask_gating(read_cached_cognitive_state(message.guild.id, room_key=room_key, person_key=person_key, session_memory_key=session_memory_key), source="text").get("action") == "search_then_answer")
             schedule_search_followup(

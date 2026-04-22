@@ -22,8 +22,9 @@ if "%SUB_LLM_MODEL%"=="" set "SUB_LLM_MODEL=/home/sands12/.cache/huggingface/hub
 
 if "%ROUTER_LLM_GPU%"=="" set "ROUTER_LLM_GPU=1"
 if "%ROUTER_LLM_PORT%"=="" set "ROUTER_LLM_PORT=9822"
-if "%ROUTER_LLM_CONTEXT%"=="" set "ROUTER_LLM_CONTEXT=4096"
-if "%ROUTER_LLM_REASONING_BUDGET%"=="" set "ROUTER_LLM_REASONING_BUDGET=96"
+if "%ROUTER_LLM_CONTEXT%"=="" set "ROUTER_LLM_CONTEXT=1536"
+if "%ROUTER_LLM_REASONING%"=="" set "ROUTER_LLM_REASONING=off"
+if "%ROUTER_LLM_REASONING_BUDGET%"=="" set "ROUTER_LLM_REASONING_BUDGET=12"
 if "%ROUTER_LLM_MODEL%"=="" set "ROUTER_LLM_MODEL=/home/sands12/.cache/huggingface/hub/models--unsloth--gemma-4-E2B-it-GGUF/snapshots/f064409f340b34190993560b2168133e5dbae558/gemma-4-E2B-it-UD-Q6_K_XL.gguf"
 
 if "%OMNIVOICE_VENV%"=="" set "OMNIVOICE_VENV=C:\Users\Admin\omnivoice-server\.venv"
