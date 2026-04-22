@@ -205,6 +205,7 @@ async def resolve_command_prefix(_bot, message: discord.Message):
 bot = commands.Bot(command_prefix=resolve_command_prefix, intents=intents)
 
 session_locks: dict[str, asyncio.Lock] = {}
+reply_slot_locks: dict[str, asyncio.Lock] = {}
 tts_lock = asyncio.Lock()
 active_tts_playbacks: dict[int, dict[str, Any]] = {}
 voice_debug_counts: dict[int, int] = {}
@@ -251,6 +252,11 @@ def make_text_session_key(guild_id: int, channel_id: int, user_id: int | None = 
     thread_part = f":thread:{thread_id}" if thread_id is not None else ""
     user_part = f":user:{user_id}" if user_id is not None else ""
     return f"guild:{guild_id}:text:{channel_id}{thread_part}{user_part}"
+
+
+def make_text_reply_slot_key(guild_id: int, channel_id: int, thread_id: int | None = None) -> str:
+    thread_part = f":thread:{thread_id}" if thread_id is not None else ""
+    return f"guild:{guild_id}:reply:text:{channel_id}{thread_part}"
 
 
 def make_voice_room_session_key(guild_id: int, voice_channel_id: int | None) -> str:
@@ -5846,30 +5852,35 @@ async def on_message(message: discord.Message):
     if not user_text:
         user_text = "부르셨나요?"
 
-    topic_id = build_topic_id(user_text, session_topic_ids.get(session_key, ""))
-    turn_id = start_new_turn(session_key)
-    update_session_state(
-        session_key,
-        user_id=message.author.id,
-        speaker="user",
-        awaiting_user_reply=False,
-        topic_id=topic_id,
-        user_text=user_text,
-    )
+    state_lock = session_locks.setdefault(session_key, asyncio.Lock())
+    reply_slot_key = make_text_reply_slot_key(message.guild.id, message.channel.id, thread_id=thread_id)
+    reply_lock = reply_slot_locks.setdefault(reply_slot_key, asyncio.Lock())
 
-    get_conversation_history(session_key=session_key, guild_id=message.guild.id)
-
-    lock = session_locks.setdefault(session_key, asyncio.Lock())
-
-    if lock.locked():
+    if reply_lock.locked():
         await message.channel.send("⏳ 지금 다른 응답을 처리 중이야. 잠깐만.")
         await bot.process_commands(message)
         return
 
-    async with lock:
-        try:
+    async with state_lock:
+        topic_id = build_topic_id(user_text, session_topic_ids.get(session_key, ""))
+        turn_id = start_new_turn(session_key)
+        update_session_state(
+            session_key,
+            user_id=message.author.id,
+            speaker="user",
+            awaiting_user_reply=False,
+            topic_id=topic_id,
+            user_text=user_text,
+        )
+        get_conversation_history(session_key=session_key, guild_id=message.guild.id)
+
+    vc = None
+    answer = ""
+    plain_answer = ""
+    text_metrics: dict[str, Any] = {}
+    try:
+        async with reply_lock:
             async with message.channel.typing():
-                vc = None
                 if AUTO_JOIN_VOICE:
                     vc = await ensure_voice_client(message)
 
@@ -5890,6 +5901,7 @@ async def on_message(message: discord.Message):
                 if not plain_answer:
                     plain_answer = answer
 
+        async with state_lock:
             session_speculative_policies.pop(session_key, None)
             append_history(session_key, user_text, plain_answer, guild_id=message.guild.id)
             schedule_memory_update(
@@ -5930,16 +5942,16 @@ async def on_message(message: discord.Message):
                 user_text=user_text,
             )
 
-            log_voice_bottleneck_summary(
-                text_metrics,
-                label="text_turn",
-                extra=f"chars={len(format_display_text(answer, session_key=session_key).strip())} voice_read={str(vc is not None).lower()}",
-                event_name="text_turn_summary",
-            )
+        log_voice_bottleneck_summary(
+            text_metrics,
+            label="text_turn",
+            extra=f"chars={len(format_display_text(answer, session_key=session_key).strip())} voice_read={str(vc is not None).lower()}",
+            event_name="text_turn_summary",
+        )
 
-        except Exception as e:
-            print("전체 오류:", repr(e))
-            await message.channel.send(f"❌ 오류 발생: {e}")
+    except Exception as e:
+        print("전체 오류:", repr(e))
+        await message.channel.send(f"❌ 오류 발생: {e}")
 
     await bot.process_commands(message)
 
