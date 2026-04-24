@@ -66,6 +66,7 @@ from evelyn_core.text import (
     normalized_wake_words,
     strip_leading_voice_fillers,
     strip_omnivoice_tags,
+    strip_response_action_tags,
     strip_voice_wake_word,
     visible_text,
 )
@@ -199,12 +200,75 @@ def save_guild_command_prefix(guild_id: int, prefix: str) -> str:
     return prefix
 
 
+def _normalize_channel_id_list(values: list[Any] | None) -> list[int]:
+    normalized: list[int] = []
+    for value in values or []:
+        try:
+            channel_id = int(value)
+        except (TypeError, ValueError):
+            continue
+        if channel_id not in normalized:
+            normalized.append(channel_id)
+    return normalized
+
+
+def get_guild_observe_channel_ids(guild_id: int | None) -> list[int]:
+    if guild_id is None:
+        return []
+    settings = read_json_file(guild_settings_path(guild_id))
+    return _normalize_channel_id_list(settings.get("observe_channel_ids"))
+
+
+def get_guild_command_only_channel_ids(guild_id: int | None) -> list[int]:
+    if guild_id is None:
+        return []
+    settings = read_json_file(guild_settings_path(guild_id))
+    return _normalize_channel_id_list(settings.get("command_only_channel_ids"))
+
+
+def save_guild_channel_list(guild_id: int, key: str, channel_ids: list[int]) -> list[int]:
+    settings_path = guild_settings_path(guild_id)
+    settings = read_json_file(settings_path)
+    normalized = _normalize_channel_id_list(channel_ids)
+    settings[key] = normalized
+    settings["updated_at"] = int(time.time())
+    write_json_file(settings_path, settings)
+    return normalized
+
+
+def add_guild_channel_setting(guild_id: int, key: str, channel_id: int) -> list[int]:
+    existing = get_guild_observe_channel_ids(guild_id) if key == "observe_channel_ids" else get_guild_command_only_channel_ids(guild_id)
+    if channel_id not in existing:
+        existing.append(channel_id)
+    return save_guild_channel_list(guild_id, key, existing)
+
+
+def remove_guild_channel_setting(guild_id: int, key: str, channel_id: int) -> list[int]:
+    existing = get_guild_observe_channel_ids(guild_id) if key == "observe_channel_ids" else get_guild_command_only_channel_ids(guild_id)
+    return save_guild_channel_list(guild_id, key, [value for value in existing if value != channel_id])
+
+
 async def resolve_command_prefix(_bot, message: discord.Message):
     prefix = get_guild_command_prefix(message.guild.id if message.guild else None)
     return commands.when_mentioned_or(prefix)(_bot, message)
 
 
 bot = commands.Bot(command_prefix=resolve_command_prefix, intents=intents)
+
+SYSTEM_PROMPT = """
+너는 Evelyn이야.
+- 항상 한국어로 답해.
+- 디스코드에서 활동하는 따뜻하고 유능한 보이스/텍스트 비서야.
+- 질문에 답할 땐 짧고 자연스럽게, 필요할 때만 길게.
+- 이미 아는 척 지어내지 말고, 불확실하면 솔직하게 말해.
+- 사용자가 뭔가를 찾아봐 달라고 했거나 네가 검색이 필요하다고 판단하면, 찾아본 뒤 후속으로 알려줄 수 있어.
+- 텍스트 답변은 보기 좋게 정리하고, TTS로 읽어도 어색하지 않게 써.
+- 답변 맨 앞에는 필요할 때만 다음 중 하나의 태그를 붙여라: [찾기] [질문] [대기] [답변]
+- 검색 후속이 실제로 필요할 때만 [찾기]를 붙여라.
+- 사용자에게 되물어야 할 때만 [질문], 잠시 보류만 할 때만 [대기]를 붙여라.
+- 일반적인 즉답은 [답변] 또는 태그 없이 써도 된다.
+- 태그는 반드시 맨 앞 한 번만 쓰고, 본문에서는 반복하지 마라.
+""".strip()
 
 session_locks: dict[str, asyncio.Lock] = {}
 reply_slot_locks: dict[str, asyncio.Lock] = {}
@@ -271,6 +335,11 @@ def get_or_create_autonomy_engine(guild_id: int) -> AutonomyEngine:
         guild = bot.get_guild(guild_id)
         if guild is None:
             return None
+        preferred_channels = get_guild_observe_channel_ids(guild_id)
+        for channel_id in preferred_channels:
+            channel = guild.get_channel(channel_id)
+            if channel is not None and hasattr(channel, "send"):
+                return channel
         for channel_id in reversed([v.get("channel_id") for v in session_followup_targets.values() if isinstance(v, dict) and v.get("channel_id")]):
             channel = guild.get_channel(channel_id)
             if channel is not None and hasattr(channel, "send"):
@@ -292,6 +361,33 @@ def get_or_create_autonomy_engine(guild_id: int) -> AutonomyEngine:
         recent_context_items = max(0, min(len(history) - 1, 6))
         last_ping_at = float(last_autonomy_ping_at.get(guild_id, 0.0) or 0.0)
         last_ping_gap = 999999.0 if last_ping_at <= 0 else max(0.0, time.monotonic() - last_ping_at)
+        observe_channel_ids = get_guild_observe_channel_ids(guild_id)
+        command_only_channel_ids = get_guild_command_only_channel_ids(guild_id)
+        observed_channels: list[dict[str, Any]] = []
+        guild = bot.get_guild(guild_id)
+        now_local = time.localtime()
+        quiet_hours = now_local.tm_hour < 8 or now_local.tm_hour >= 23
+        last_result = (autonomy_engines.get(guild_id).state.last_step_result if autonomy_engines.get(guild_id) is not None else {}) or {}
+        repeated_blocked_action = str(last_result.get("reason", "")) in {"retry_suppressed", "action_not_allowed", "unsupported_default_action"}
+        unresolved_items = 0
+        search_pending = False
+        recent_visible = []
+        if guild is not None:
+            for channel_id in observe_channel_ids[:8]:
+                channel_obj = guild.get_channel(channel_id)
+                channel_name = getattr(channel_obj, "name", str(channel_id)) if channel_obj is not None else str(channel_id)
+                observed_channels.append({"id": channel_id, "name": channel_name})
+            for entry in history[-8:]:
+                if not isinstance(entry, dict):
+                    continue
+                content = clean_text(str(entry.get("content", "")))
+                if not content:
+                    continue
+                recent_visible.append(content)
+                if "?" in content or "？" in content:
+                    unresolved_items += 1
+                if answer_promises_search(content):
+                    search_pending = True
         return {
             "connected": channel is not None,
             "known_followup_channels": len([v for v in session_followup_targets.values() if isinstance(v, dict) and v.get("channel_id")]),
@@ -299,6 +395,14 @@ def get_or_create_autonomy_engine(guild_id: int) -> AutonomyEngine:
             "active_sessions": len(active_session_until),
             "recent_context_items": recent_context_items,
             "last_autonomy_ping_sec": last_ping_gap,
+            "observe_channel_ids": observe_channel_ids,
+            "command_only_channel_ids": command_only_channel_ids,
+            "observed_channels": observed_channels,
+            "quiet_hours": quiet_hours,
+            "repeated_blocked_action": repeated_blocked_action,
+            "unresolved_items": unresolved_items,
+            "search_pending": search_pending,
+            "recent_visible": recent_visible[-6:],
         }
 
     async def _default_send_followup(text: str) -> dict[str, Any]:
@@ -438,10 +542,15 @@ def make_session_memory_key(session_key: str | None, user_id: int | None = None)
     return f"{session_key}:user:{user_id}"
 
 
-def remember_session_followup_target(session_key: str, *, channel_id: int | None = None) -> None:
-    if channel_id is None:
+def remember_session_followup_target(session_key: str, *, channel_id: int | None = None, message_id: int | None = None) -> None:
+    if channel_id is None and message_id is None:
         return
-    session_followup_targets[session_key] = {"channel_id": channel_id}
+    existing = session_followup_targets.get(session_key, {}).copy()
+    if channel_id is not None:
+        existing["channel_id"] = channel_id
+    if message_id is not None:
+        existing["message_id"] = message_id
+    session_followup_targets[session_key] = existing
 
 
 def build_topic_id(*texts: str) -> str:
@@ -3132,12 +3241,26 @@ def split_tts_sentences(
     return chunks, ""
 
 
+RESPONSE_ACTION_TAGS = {"찾기": "search", "질문": "ask", "대기": "wait", "답변": "answer"}
+
+
+def parse_response_action_tag(text: str) -> tuple[str | None, str]:
+    raw = text or ""
+    match = re.match(r"^\s*\[(찾기|질문|대기|답변)\]\s*", raw)
+    if not match:
+        return None, clean_text(raw)
+    action = RESPONSE_ACTION_TAGS.get(match.group(1))
+    stripped = clean_text(raw[match.end():])
+    return action, stripped
+
+
 def sanitize_model_output(text: str) -> str:
     text = text or ""
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE)
     text = re.sub(r"<think>.*$", "", text, flags=re.DOTALL | re.IGNORECASE)
     text = normalize_omnivoice_tags(text)
-    text = clean_text(text)
+    _action, cleaned = parse_response_action_tag(text)
+    text = clean_text(cleaned)
     return text
 
 
@@ -3237,7 +3360,10 @@ async def get_http_session() -> aiohttp.ClientSession:
 
 
 def answer_promises_search(answer_text: str) -> bool:
-    text = clean_text(strip_omnivoice_tags(answer_text)).lower()
+    action, stripped = parse_response_action_tag(answer_text)
+    if action == "search":
+        return True
+    text = clean_text(strip_omnivoice_tags(stripped)).lower()
     if not text:
         return False
 
@@ -3449,6 +3575,7 @@ async def deliver_proactive_followup(
     person_key: str | None,
     session_memory_key: str | None,
     channel_id: int | None,
+    reply_to_message_id: int | None = None,
     source: str,
     turn_scope: TurnScope | None = None,
     runtime_mode: str | None = None,
@@ -3458,8 +3585,10 @@ async def deliver_proactive_followup(
     plain_answer = strip_omnivoice_tags(answer) or answer
     guild = bot.get_guild(guild_id)
     target_channel_id = channel_id
+    stored_target = session_followup_targets.get(session_key, {}) if session_key is not None else {}
     if target_channel_id is None and session_key is not None:
-        target_channel_id = session_followup_targets.get(session_key, {}).get("channel_id")
+        target_channel_id = stored_target.get("channel_id")
+    reply_target_id = reply_to_message_id if reply_to_message_id is not None else stored_target.get("message_id")
 
     if target_channel_id is not None:
         channel = bot.get_channel(target_channel_id)
@@ -3471,7 +3600,13 @@ async def deliver_proactive_followup(
         if channel is not None and hasattr(channel, "send"):
             if turn_scope is not None:
                 turn_scope.raise_if_cancelled()
-            await channel.send(format_display_text(answer, session_key=session_key))
+            try:
+                if reply_target_id is not None:
+                    await channel.send(format_display_text(answer, session_key=session_key), reference=discord.Object(id=int(reply_target_id)))
+                else:
+                    await channel.send(format_display_text(answer, session_key=session_key))
+            except Exception:
+                await channel.send(format_display_text(answer, session_key=session_key))
 
     vc = guild.voice_client if guild else None
     if vc is not None and vc.is_connected():
@@ -3513,6 +3648,7 @@ def schedule_search_followup_singleflight(
     person_key: str | None,
     session_memory_key: str | None,
     channel_id: int | None,
+    reply_to_message_id: int | None,
     source: str,
     turn_scope: TurnScope | None = None,
     runtime_mode: str | None = None,
@@ -3530,6 +3666,7 @@ def schedule_search_followup_singleflight(
             person_key=person_key,
             session_memory_key=session_memory_key,
             channel_id=channel_id,
+            reply_to_message_id=reply_to_message_id,
             source=source,
             turn_scope=turn_scope,
             runtime_mode=runtime_mode,
@@ -3550,6 +3687,7 @@ async def run_search_followup(
     person_key: str | None,
     session_memory_key: str | None,
     channel_id: int | None,
+    reply_to_message_id: int | None = None,
     source: str,
     turn_scope: TurnScope | None = None,
     runtime_mode: str | None = None,
@@ -3601,6 +3739,7 @@ async def run_search_followup(
             person_key=person_key,
             session_memory_key=session_memory_key,
             channel_id=channel_id,
+            reply_to_message_id=reply_to_message_id,
             source=source,
             turn_scope=turn_scope,
             runtime_mode=runtime_mode,
@@ -3631,6 +3770,7 @@ def schedule_search_followup(
     person_key: str | None = None,
     session_memory_key: str | None = None,
     channel_id: int | None,
+    reply_to_message_id: int | None = None,
     source: str,
     force: bool = False,
     turn_scope: TurnScope | None = None,
@@ -3642,7 +3782,12 @@ def schedule_search_followup(
     opts = apply_runtime_mode(runtime_mode or "normal")
     if opts.get("skip_search_followup") and not force:
         return
-    if not force and not answer_promises_search(answer):
+    tagged_action, stripped_answer = parse_response_action_tag(answer)
+    wants_search_by_tag = tagged_action == "search"
+    wants_search_by_fallback = answer_promises_search(stripped_answer)
+    if wants_search_by_tag:
+        wants_search_by_fallback = False
+    if not force and not wants_search_by_tag and not wants_search_by_fallback:
         return
     query = build_search_query(guild_id, user_text)
     if len(query) < 2:
@@ -3650,8 +3795,8 @@ def schedule_search_followup(
     task_key = runtime_session_key(session_key=session_key, guild_id=guild_id)
     if task_key is None:
         return
-    if channel_id is not None:
-        remember_session_followup_target(task_key, channel_id=channel_id)
+    if channel_id is not None or reply_to_message_id is not None:
+        remember_session_followup_target(task_key, channel_id=channel_id, message_id=reply_to_message_id)
     search_key = normalize_search_key(task_key, query)
     for existing_key, existing_task in list(inflight_search_tasks.items()):
         if not existing_key.startswith(f"{task_key}:"):
@@ -3677,6 +3822,7 @@ def schedule_search_followup(
         person_key=person_key,
         session_memory_key=session_memory_key,
         channel_id=channel_id,
+        reply_to_message_id=reply_to_message_id,
         source=source,
         turn_scope=turn_scope,
         runtime_mode=runtime_mode,
@@ -5088,7 +5234,8 @@ async def build_first_response(
 
         choice = choices[0]
         msg = choice.get("message", {})
-        answer = sanitize_model_output(msg.get("content", ""))
+        raw_answer = msg.get("content", "")
+        _response_action, answer = parse_response_action_tag(sanitize_model_output(raw_answer))
         reasoning = msg.get("reasoning_content", "")
         finish_reason = choice.get("finish_reason", "")
 
@@ -5151,7 +5298,8 @@ async def build_followup_response(
         if not choices:
             return ""
         msg = choices[0].get("message", {})
-        answer = sanitize_model_output(msg.get("content", ""))
+        raw_answer = msg.get("content", "")
+        _response_action, answer = parse_response_action_tag(sanitize_model_output(raw_answer))
     first, followup = split_first_response_and_followup(answer)
     if clean_text(first) == clean_text(first_response):
         return followup
@@ -5230,7 +5378,8 @@ async def ask_llm_once(
 
         choice = choices[0]
         msg = choice.get("message", {})
-        answer = sanitize_model_output(msg.get("content", ""))
+        raw_answer = msg.get("content", "")
+        _response_action, answer = parse_response_action_tag(sanitize_model_output(raw_answer))
         reasoning = msg.get("reasoning_content", "")
         finish_reason = choice.get("finish_reason", "")
 
@@ -5670,9 +5819,6 @@ async def stream_text_reply(
             turn_id=turn_id,
             segment_id=0,
         )
-        streamed_message: discord.Message | None = await channel.send("…")
-        buffered_editor = BufferedEditStreamer(streamed_message, session_key=session_key)
-        edit_sink = DiscordEditSink(buffered_editor)
 
         sentence_queue: asyncio.Queue[str | None] | None = None
         tts_sink: TTSQueueSink | None = None
@@ -5692,9 +5838,8 @@ async def stream_text_reply(
                 turn_scope=turn_scope,
             )
 
-        fanout = ReplyStreamFanout([edit_sink, tts_sink] if tts_sink is not None else [edit_sink])
-
         answer = ""
+        sent_message: discord.Message | None = None
         try:
             answer = await ask_llm_streaming(
                 user_text,
@@ -5703,7 +5848,7 @@ async def stream_text_reply(
                 room_key=room_key,
                 person_key=person_key,
                 session_memory_key=session_memory_key,
-                on_sentence=fanout.on_chunk,
+                on_sentence=tts_sink.on_chunk if tts_sink is not None else None,
                 on_first_chunk=lambda: log_voice_latency(metrics, "llm_first_chunk_logged", "LLM 첫 chunk 시간"),
                 source=source,
                 debug_text=debug_text,
@@ -5711,14 +5856,12 @@ async def stream_text_reply(
                 turn_scope=turn_scope,
             )
             final_text = format_display_text(answer, session_key=session_key).strip() or fallback_answer_for(user_text)
-            await fanout.close(answer)
-            if streamed_message is None:
-                streamed_message = await channel.send(final_text)
-            elif final_text != buffered_editor.rendered_text:
-                await streamed_message.edit(content=final_text)
+            if tts_sink is not None:
+                await tts_sink.close(answer)
+            sent_message = await channel.send(final_text)
             if playback_task is not None:
                 await playback_task
-            return answer, streamed_message, metrics
+            return answer, sent_message, metrics
         finally:
             if playback_task is not None and not playback_task.done():
                 if sentence_queue is not None:
@@ -6530,12 +6673,15 @@ async def on_message(message: discord.Message):
     room_key = make_room_memory_key("text", message.channel.id)
     person_key = make_person_memory_key(message.author.id)
     session_memory_key = make_session_memory_key(session_key, message.author.id)
-    remember_session_followup_target(session_key, channel_id=message.channel.id)
+    remember_session_followup_target(session_key, channel_id=message.channel.id, message_id=message.id)
 
     prefix = get_guild_command_prefix(message.guild.id)
     content_stripped = (message.content or "").lstrip()
+    command_only_channel_ids = set(get_guild_command_only_channel_ids(message.guild.id))
     if content_stripped.startswith(prefix):
         await bot.process_commands(message)
+        return
+    if message.channel.id in command_only_channel_ids:
         return
 
     is_wake_word = contains_wake_word(message.content)
@@ -6648,6 +6794,7 @@ async def on_message(message: discord.Message):
                 person_key=person_key,
                 session_memory_key=session_memory_key,
                 channel_id=message.channel.id,
+                reply_to_message_id=message.id,
                 source="search-followup-text",
                 force=search_requested,
                 turn_scope=turn_scope,
@@ -6947,6 +7094,97 @@ async def autonomy_status_command(ctx):
     await ctx.send(
         f"🤖 자율상태\n- status: {state.status}\n- safety: {state.safety_mode}\n- goal: {goal}\n- plan: {plan}\n- failures: {state.failure_count}\n- last_error: {state.last_error or '없음'}\n- allowed: {allowed or '없음'}"
     )
+
+
+@bot.command(name="관찰채널", aliases=["observe-channel"])
+@commands.has_guild_permissions(manage_guild=True)
+async def observe_channel_command(ctx, action: str | None = None, channel: discord.TextChannel | None = None):
+    if ctx.guild is None:
+        await ctx.send("이 명령은 길드에서만 쓸 수 있어.")
+        return
+    action = clean_text(str(action or "목록")).lower()
+    current = get_guild_observe_channel_ids(ctx.guild.id)
+    if action in {"목록", "list"}:
+        names = []
+        for channel_id in current:
+            target = ctx.guild.get_channel(channel_id)
+            names.append(target.mention if target is not None else f"#{channel_id}")
+        await ctx.send("👀 관찰채널: " + (", ".join(names) if names else "없음"))
+        return
+    if channel is None:
+        await ctx.send("채널을 같이 지정해줘. 예: `!관찰채널 추가 #general`")
+        return
+    if action in {"추가", "add"}:
+        updated = add_guild_channel_setting(ctx.guild.id, "observe_channel_ids", channel.id)
+        await ctx.send(f"✅ 관찰채널에 {channel.mention} 추가했어. (총 {len(updated)}개)")
+        return
+    if action in {"제거", "remove", "삭제"}:
+        updated = remove_guild_channel_setting(ctx.guild.id, "observe_channel_ids", channel.id)
+        await ctx.send(f"🗑️ 관찰채널에서 {channel.mention} 뺐어. (총 {len(updated)}개)")
+        return
+    await ctx.send("사용법: `!관찰채널 목록` / `!관찰채널 추가 #채널` / `!관찰채널 제거 #채널`")
+
+
+@observe_channel_command.error
+async def observe_channel_command_error(ctx, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("이 명령은 서버 관리 권한이 있어야 쓸 수 있어.")
+        return
+    raise error
+
+
+@bot.command(name="명령채널", aliases=["command-channel"])
+@commands.has_guild_permissions(manage_guild=True)
+async def command_channel_command(ctx, action: str | None = None, channel: discord.TextChannel | None = None):
+    if ctx.guild is None:
+        await ctx.send("이 명령은 길드에서만 쓸 수 있어.")
+        return
+    action = clean_text(str(action or "목록")).lower()
+    current = get_guild_command_only_channel_ids(ctx.guild.id)
+    if action in {"목록", "list"}:
+        names = []
+        for channel_id in current:
+            target = ctx.guild.get_channel(channel_id)
+            names.append(target.mention if target is not None else f"#{channel_id}")
+        await ctx.send("🧭 명령채널: " + (", ".join(names) if names else "없음"))
+        return
+    if channel is None:
+        await ctx.send("채널을 같이 지정해줘. 예: `!명령채널 추가 #bot-control`")
+        return
+    if action in {"추가", "add"}:
+        updated = add_guild_channel_setting(ctx.guild.id, "command_only_channel_ids", channel.id)
+        await ctx.send(f"✅ 명령채널에 {channel.mention} 추가했어. 이제 여기선 명령어만 읽어.")
+        return
+    if action in {"제거", "remove", "삭제"}:
+        updated = remove_guild_channel_setting(ctx.guild.id, "command_only_channel_ids", channel.id)
+        await ctx.send(f"🗑️ 명령채널에서 {channel.mention} 뺐어. (총 {len(updated)}개)")
+        return
+    await ctx.send("사용법: `!명령채널 목록` / `!명령채널 추가 #채널` / `!명령채널 제거 #채널`")
+
+
+@command_channel_command.error
+async def command_channel_command_error(ctx, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("이 명령은 서버 관리 권한이 있어야 쓸 수 있어.")
+        return
+    raise error
+
+
+@bot.command(name="도움말", aliases=["help"])
+async def help_command(ctx):
+    prefix = get_guild_command_prefix(ctx.guild.id if ctx.guild else None)
+    lines = [
+        "📘 Evelyn 명령어",
+        f"- {prefix}들어와 / {prefix}다시들어와 / {prefix}나가",
+        f"- {prefix}상태 / {prefix}접두사",
+        f"- {prefix}자율시작 / {prefix}자율정지 / {prefix}자율상태",
+        f"- {prefix}관찰채널 목록|추가 #채널|제거 #채널",
+        f"- {prefix}명령채널 목록|추가 #채널|제거 #채널",
+        f"- {prefix}초기화",
+    ]
+    if ctx.author.id in ALLOWED_RESTART_USER_IDS:
+        lines.append(f"- {prefix}재시작 / {prefix}종료")
+    await ctx.send("\n".join(lines))
 
 
 @bot.command(name="초기화", aliases=["reset"])

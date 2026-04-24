@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections import defaultdict, deque
 from dataclasses import asdict, dataclass, field
 from typing import Any, Awaitable, Callable, Protocol
 
@@ -84,6 +85,8 @@ class AutonomyEngine:
         self.state = AutonomyRuntimeState(allowed_actions=["assistant:check_status", "assistant:summarize_notifications", "assistant:summarize_recent_context", "assistant:send_followup", "assistant:maybe_ping_user", "assistant:idle", "minecraft:retreat", "minecraft:heal_or_regroup", "minecraft:find_food_source", "minecraft:consume_food", "minecraft:gather_logs", "minecraft:craft_basic_tools", "minecraft:gather_basic_resources"])
         self._task: asyncio.Task | None = None
         self._lock = asyncio.Lock()
+        self._blocked_counts: dict[str, int] = defaultdict(int)
+        self._recent_goal_kinds: deque[str] = deque(maxlen=8)
 
     @property
     def memory_scope_key(self) -> str:
@@ -177,8 +180,17 @@ class AutonomyEngine:
         observation = await self.observe()
         needs = self.derive_needs(observation)
         selected_goal = self.select_goal(needs)
+        if selected_goal is not None:
+            self._recent_goal_kinds.append(selected_goal.kind)
         planned = self.plan_goal(selected_goal, observation)
         step_result = await self.execute_next_step(planned)
+        if isinstance(step_result, dict):
+            step = step_result.get("step") if isinstance(step_result.get("step"), dict) else None
+            action_key = self._action_key(step) if step else ""
+            if step_result.get("status") == "blocked" and action_key:
+                self._blocked_counts[action_key] += 1
+            elif action_key and step_result.get("status") in {"ok", "done", "completed"}:
+                self._blocked_counts.pop(action_key, None)
         if self.should_replan(step_result):
             planned = self.replan_goal(selected_goal, observation, step_result)
         self.state.last_observation = observation
@@ -200,6 +212,13 @@ class AutonomyEngine:
     async def observe(self) -> dict[str, Any]:
         observed = await self.executor.observe()
         return observed if isinstance(observed, dict) else {"raw": observed}
+
+    def _action_key(self, step: dict[str, Any] | None) -> str:
+        if not isinstance(step, dict):
+            return ""
+        domain = clean_text(str(step.get("domain", "assistant"))) or "assistant"
+        action = clean_text(str(step.get("action", "")))
+        return f"{domain}:{action}" if action else ""
 
     def derive_needs(self, observation: dict[str, Any]) -> list[AutonomyNeed]:
         needs: list[AutonomyNeed] = []
@@ -224,14 +243,22 @@ class AutonomyEngine:
             inflight_requests = int(observation.get("inflight_llm_requests", 0) or 0)
             recent_context_items = int(observation.get("recent_context_items", 0) or 0)
             last_autonomy_ping_sec = float(observation.get("last_autonomy_ping_sec", 999999) or 999999)
+            repeated_blocked = bool(observation.get("repeated_blocked_action", False))
+            quiet_hours = bool(observation.get("quiet_hours", False))
+            unresolved_items = int(observation.get("unresolved_items", 0) or 0)
+            search_pending = bool(observation.get("search_pending", False))
             if inflight_requests >= 2:
                 needs.append(AutonomyNeed("check_status", 0.42, detail="런타임 혼잡 상태를 점검할 수 있음", metadata={"domain": "assistant"}))
-            if active_sessions > 0 and recent_context_items > 0:
+            if active_sessions > 0 and recent_context_items > 0 and not repeated_blocked:
                 needs.append(AutonomyNeed("summarize", 0.35, detail="최근 문맥을 짧게 요약할 수 있음", metadata={"domain": "assistant"}))
-            if known_followup_channels > 0 and last_autonomy_ping_sec > 900:
-                needs.append(AutonomyNeed("maintain", 0.28, detail="오랜 침묵 뒤 저위험 후속 메시지를 보낼 수 있음", metadata={"domain": "assistant"}))
-            if known_followup_channels > 0 and inflight_requests == 0 and active_sessions > 0:
-                needs.append(AutonomyNeed("ping", 0.22, detail="필요하면 사용자에게 짧게 핑할 수 있음", metadata={"domain": "assistant"}))
+            if search_pending and known_followup_channels > 0 and inflight_requests == 0:
+                needs.append(AutonomyNeed("maintain", 0.34, detail="검색 후속 응답이 필요함", metadata={"domain": "assistant", "text": "아까 이어서 실제로 찾아본 결과를 정리해볼게."}))
+            if unresolved_items > 0 and known_followup_channels > 0 and not quiet_hours:
+                needs.append(AutonomyNeed("maintain", 0.28, detail="미해결 문맥 후속이 필요함", metadata={"domain": "assistant", "text": "아직 덜 끝난 문맥이 있어서 이어서 챙겨볼게."}))
+            if known_followup_channels > 0 and last_autonomy_ping_sec > 900 and not quiet_hours:
+                needs.append(AutonomyNeed("maintain", 0.24, detail="오랜 침묵 뒤 저위험 후속 메시지를 보낼 수 있음", metadata={"domain": "assistant", "text": "지금은 저위험 자율 보조 모드로 상태를 점검하고 있어."}))
+            if known_followup_channels > 0 and inflight_requests == 0 and active_sessions > 0 and last_autonomy_ping_sec > 1800 and not quiet_hours:
+                needs.append(AutonomyNeed("ping", 0.20, detail="필요하면 사용자에게 짧게 핑할 수 있음", metadata={"domain": "assistant"}))
             if not needs:
                 needs.append(AutonomyNeed("idle", 0.10, detail="대기", metadata={"domain": "assistant"}))
         needs.sort(key=lambda item: item.priority, reverse=True)
@@ -297,8 +324,9 @@ class AutonomyEngine:
                     {"domain": domain, "action": "summarize_notifications"},
                 ]
             elif goal.kind == "maintain":
+                followup_text = clean_text(str(goal.metadata.get("text", ""))) or "지금은 저위험 자율 보조 모드로 상태를 점검하고 있어."
                 steps = [
-                    {"domain": domain, "action": "send_followup", "text": "지금은 저위험 자율 보조 모드로 상태를 점검하고 있어."},
+                    {"domain": domain, "action": "send_followup", "text": followup_text},
                 ]
             elif goal.kind == "ping":
                 steps = [
@@ -342,6 +370,9 @@ class AutonomyEngine:
         if plan.cursor >= len(plan.steps):
             return {"status": "done", "reason": "plan_complete"}
         step = plan.steps[plan.cursor]
+        action_key = self._action_key(step)
+        if action_key and self._blocked_counts.get(action_key, 0) >= 2:
+            return {"status": "blocked", "reason": "retry_suppressed", "step": step}
         if not self.is_action_allowed(step):
             return {"status": "blocked", "reason": "action_not_allowed", "step": step}
         result = await self.executor.execute_step(step)

@@ -15,9 +15,14 @@ def clean_text(text: str) -> str:
     return re.sub(r"\s+", " ", (text or "").strip())
 
 
+def strip_response_action_tags(text: str) -> str:
+    """내부 제어용 응답 태그([찾기]/[질문]/[대기]/[답변])는 사용자 표시/STT/TTS 경로에서 제거한다."""
+    return re.sub(r"^\s*\[(?:찾기|질문|대기|답변)\]\s*", "", text or "", flags=re.IGNORECASE)
+
+
 def normalize_omnivoice_tags(text: str) -> str:
     """허용된 OmniVoice 태그만 남기고 표기를 정규화한다."""
-    text = text or ""
+    text = strip_response_action_tags(text or "")
 
     def repl(match: re.Match) -> str:
         tag = f"[{clean_text(match.group(1)).lower()}]"
@@ -34,7 +39,7 @@ def strip_omnivoice_tags(text: str) -> str:
 
 def clean_tts_text(text: str) -> str:
     """TTS로 보내기 전 태그와 특수문자를 정리해 읽기 쉬운 문장으로 만든다."""
-    text = normalize_omnivoice_tags(clean_text(text))
+    text = normalize_omnivoice_tags(clean_text(strip_response_action_tags(text)))
     leading_tag_match = re.match(r"^\s*(\[[^\[\]]+\])", text)
     leading_tag = leading_tag_match.group(1) if leading_tag_match else ""
 
@@ -53,7 +58,7 @@ def clean_tts_text(text: str) -> str:
 
 
 def visible_text(text: str) -> str:
-    text = strip_omnivoice_tags(text)
+    text = strip_omnivoice_tags(strip_response_action_tags(text))
     if len(text) > MAX_VISIBLE_TEXT:
         return text[:MAX_VISIBLE_TEXT] + "..."
     return text
