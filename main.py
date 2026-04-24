@@ -44,8 +44,11 @@ from evelyn_core.audio import (
     resample_audio_float,
     slice_audio_window,
 )
+from evelyn_core.autonomy import AutonomyEngine
+from evelyn_core.autonomy_router import DefaultAutonomyExecutor, RoutedAutonomyExecutor
 from evelyn_core.config import *
 from evelyn_core.memory import *
+from evelyn_core.mineflayer_executor import MineflayerExecutor
 from evelyn_core.text import (
     apply_stt_post_corrections,
     clean_text,
@@ -238,6 +241,8 @@ room_recent_speaker_stats: dict[str, dict[int, dict[str, float]]] = {}
 session_speculative_policies: dict[str, dict[str, Any]] = {}
 room_turn_scopes: dict[str, "TurnScope"] = {}
 turn_stage_metrics: dict[str, dict[str, float]] = {}
+autonomy_engines: dict[int, AutonomyEngine] = {}
+last_autonomy_ping_at: dict[int, float] = {}
 search_followup_queued_count = 0
 cancelled_stale_turn_count = 0
 inflight_llm_requests = 0
@@ -248,6 +253,140 @@ inflight_llm_requests = 0
 # =========================================================
 def new_conversation_history() -> list[dict]:
     return [{"role": "system", "content": SYSTEM_PROMPT}]
+
+
+def autonomy_sidecar_command() -> list[str]:
+    raw = clean_text(AUTONOMY_MINEFLAYER_COMMAND)
+    if raw:
+        return raw.split()
+    return ["node", "mineflayer_sidecar.js"]
+
+
+def get_or_create_autonomy_engine(guild_id: int) -> AutonomyEngine:
+    engine = autonomy_engines.get(guild_id)
+    if engine is not None:
+        return engine
+
+    async def _find_followup_channel() -> discord.abc.Messageable | None:
+        guild = bot.get_guild(guild_id)
+        if guild is None:
+            return None
+        for channel_id in reversed([v.get("channel_id") for v in session_followup_targets.values() if isinstance(v, dict) and v.get("channel_id")]):
+            channel = guild.get_channel(channel_id)
+            if channel is not None and hasattr(channel, "send"):
+                return channel
+        return None
+
+    async def _notify(text: str) -> None:
+        text = clean_text(text)
+        if not text:
+            return
+        channel = await _find_followup_channel()
+        if channel is not None:
+            await channel.send(text)
+
+    async def _default_observe() -> dict[str, Any]:
+        channel = await _find_followup_channel()
+        session_key = runtime_session_key(guild_id=guild_id)
+        history = get_conversation_history(session_key=session_key, guild_id=guild_id)
+        recent_context_items = max(0, min(len(history) - 1, 6))
+        last_ping_at = float(last_autonomy_ping_at.get(guild_id, 0.0) or 0.0)
+        last_ping_gap = 999999.0 if last_ping_at <= 0 else max(0.0, time.monotonic() - last_ping_at)
+        return {
+            "connected": channel is not None,
+            "known_followup_channels": len([v for v in session_followup_targets.values() if isinstance(v, dict) and v.get("channel_id")]),
+            "inflight_llm_requests": inflight_llm_requests,
+            "active_sessions": len(active_session_until),
+            "recent_context_items": recent_context_items,
+            "last_autonomy_ping_sec": last_ping_gap,
+        }
+
+    async def _default_send_followup(text: str) -> dict[str, Any]:
+        channel = await _find_followup_channel()
+        if channel is None:
+            return {"status": "blocked", "reason": "no_followup_channel"}
+        await channel.send(text)
+        session_key = runtime_session_key(guild_id=guild_id)
+        append_history(session_key, "[autonomy]", text, guild_id=guild_id)
+        schedule_memory_update(
+            guild_id,
+            "[autonomy]",
+            text,
+            source="autonomy",
+            assistant_speaker="Evelyn-Autonomy",
+            session_key=session_key,
+            runtime_mode="batch",
+        )
+        mark_session_active(
+            session_key,
+            ttl_sec=ACTIVE_CONVERSATION_TEXT_SEC,
+            speaker="assistant",
+            awaiting_user_reply=False,
+            topic_id=build_topic_id("autonomy", text),
+            answer_text=text,
+            user_text="[autonomy]",
+        )
+        last_autonomy_ping_at[guild_id] = time.monotonic()
+        return {"status": "ok", "reason": "sent_followup", "text": text}
+
+    async def _default_summarize() -> dict[str, Any]:
+        history = get_conversation_history(session_key=runtime_session_key(guild_id=guild_id), guild_id=guild_id)
+        recent = history[-4:] if len(history) > 4 else history[1:]
+        summary = " | ".join(clean_text(str(item.get("content", "")))[:80] for item in recent if isinstance(item, dict) and clean_text(str(item.get("content", ""))))
+        return {
+            "status": "ok",
+            "reason": "summary_ready",
+            "summary": summary or f"active_sessions={len(active_session_until)} inflight_llm={inflight_llm_requests}",
+        }
+
+    async def _default_check_status() -> dict[str, Any]:
+        channel = await _find_followup_channel()
+        return {
+            "status": "ok",
+            "reason": "status_checked",
+            "connected": channel is not None,
+            "active_sessions": len(active_session_until),
+            "inflight_llm_requests": inflight_llm_requests,
+            "known_followup_channels": len([v for v in session_followup_targets.values() if isinstance(v, dict) and v.get("channel_id")]),
+        }
+
+    async def _default_summarize_recent_context() -> dict[str, Any]:
+        history = get_conversation_history(session_key=runtime_session_key(guild_id=guild_id), guild_id=guild_id)
+        recent = history[-6:] if len(history) > 6 else history[1:]
+        items = [clean_text(str(item.get("content", "")))[:120] for item in recent if isinstance(item, dict) and clean_text(str(item.get("content", "")))]
+        return {
+            "status": "ok",
+            "reason": "recent_context_summarized",
+            "summary": " / ".join(items) if items else "최근 문맥 없음",
+            "count": len(items),
+        }
+
+    async def _default_maybe_ping_user(text: str) -> dict[str, Any]:
+        last_ping_at = float(last_autonomy_ping_at.get(guild_id, 0.0) or 0.0)
+        if last_ping_at > 0 and (time.monotonic() - last_ping_at) < 900:
+            return {"status": "blocked", "reason": "ping_cooldown"}
+        return await _default_send_followup(text)
+
+    engine = AutonomyEngine(
+        guild_id=guild_id,
+        executor=RoutedAutonomyExecutor(
+            default_executor=DefaultAutonomyExecutor(
+                observe_fn=_default_observe,
+                send_followup_fn=_default_send_followup,
+                summarize_fn=_default_summarize,
+                check_status_fn=_default_check_status,
+                summarize_recent_context_fn=_default_summarize_recent_context,
+                maybe_ping_user_fn=_default_maybe_ping_user,
+            ),
+            executors={
+                "minecraft": MineflayerExecutor(autonomy_sidecar_command(), cwd=str(Path(__file__).resolve().parent)),
+            },
+        ),
+        notify=_notify,
+        poll_interval_sec=AUTONOMY_POLL_INTERVAL_SEC,
+    )
+    autonomy_engines[guild_id] = engine
+    return engine
 
 
 def runtime_session_key(*, session_key: str | None = None, guild_id: int | None = None) -> str | None:
@@ -6349,6 +6488,12 @@ async def on_ready():
                 print(f"[VOICE READY REARM FAIL] guild={guild.id} err={e!r}")
         elif vc is not None:
             print(f"[VOICE READY] guild={guild.id} unexpected_voice_client={type(vc)!r}")
+        if AUTONOMY_ENABLED:
+            try:
+                await get_or_create_autonomy_engine(guild.id).start()
+                print(f"[AUTONOMY] guild={guild.id} started")
+            except Exception as e:
+                print(f"[AUTONOMY] guild={guild.id} start_fail err={e!r}")
 
 
 @bot.event
@@ -6754,6 +6899,54 @@ async def set_guild_prefix_error(ctx, error):
         await ctx.send("이 명령은 서버 관리 권한이 있어야 쓸 수 있어.")
         return
     raise error
+
+
+@bot.command(name="자율시작", aliases=["autonomy-on"])
+async def autonomy_start_command(ctx):
+    if ctx.guild is None:
+        await ctx.send("이 명령은 길드에서만 쓸 수 있어.")
+        return
+    try:
+        await get_or_create_autonomy_engine(ctx.guild.id).start()
+        await ctx.send("🤖 자율 행동 루프를 시작했어.")
+    except Exception as e:
+        await ctx.send(f"❌ 자율 행동 시작 실패: {e}")
+
+
+@bot.command(name="자율정지", aliases=["autonomy-off"])
+async def autonomy_stop_command(ctx):
+    if ctx.guild is None:
+        await ctx.send("이 명령은 길드에서만 쓸 수 있어.")
+        return
+    engine = autonomy_engines.get(ctx.guild.id)
+    if engine is None:
+        await ctx.send("이미 자율 행동이 꺼져 있어.")
+        return
+    try:
+        await engine.stop()
+        await ctx.send("🛑 자율 행동 루프를 멈췄어.")
+    except Exception as e:
+        await ctx.send(f"❌ 자율 행동 정지 실패: {e}")
+
+
+@bot.command(name="자율상태", aliases=["autonomy-status"])
+async def autonomy_status_command(ctx):
+    if ctx.guild is None:
+        await ctx.send("이 명령은 길드에서만 쓸 수 있어.")
+        return
+    engine = autonomy_engines.get(ctx.guild.id)
+    if engine is None:
+        await ctx.send("자율 행동 엔진이 아직 만들어지지 않았어.")
+        return
+    state = engine.state
+    goal = state.current_goal.summary if state.current_goal else "없음"
+    plan = state.current_plan.summary if state.current_plan else "없음"
+    allowed = ", ".join(state.allowed_actions[:6])
+    if len(state.allowed_actions) > 6:
+        allowed += ", ..."
+    await ctx.send(
+        f"🤖 자율상태\n- status: {state.status}\n- safety: {state.safety_mode}\n- goal: {goal}\n- plan: {plan}\n- failures: {state.failure_count}\n- last_error: {state.last_error or '없음'}\n- allowed: {allowed or '없음'}"
+    )
 
 
 @bot.command(name="초기화", aliases=["reset"])

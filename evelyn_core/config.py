@@ -57,6 +57,12 @@ ALLOWED_RESTART_USER_IDS = {
     441943340624248843,
     405351496012791808,
 }
+# 자율 행동 루프 기본 활성 여부.
+AUTONOMY_ENABLED = _env_flag("AUTONOMY_ENABLED", "false")
+# 자율 행동 주기(초).
+AUTONOMY_POLL_INTERVAL_SEC = float(os.getenv("AUTONOMY_POLL_INTERVAL_SEC", "4.0"))
+# Mineflayer 사이드카 실행 명령. 비워두면 node mineflayer_sidecar.js 사용.
+AUTONOMY_MINEFLAYER_COMMAND = os.getenv("AUTONOMY_MINEFLAYER_COMMAND", "")
 # 작업 메모리 파일에 유지할 durable facts 최대 개수.
 MEMORY_FACT_LIMIT = int(os.getenv("MEMORY_FACT_LIMIT", "200"))
 # open loop / 질문성 메모리 최대 개수.
