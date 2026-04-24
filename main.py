@@ -217,6 +217,9 @@ stt_backend: Optional[str] = None
 http_session: Optional[aiohttp.ClientSession] = None
 startup_components_ready = False
 startup_components_task: Optional[asyncio.Task] = None
+voice_path_warmup_locks: dict[str, asyncio.Lock] = {}
+voice_path_warmup_done: dict[str, float] = {}
+partial_stt_cache: dict[str, dict[str, Any]] = {}
 
 room_last_voice_reply_at: dict[str, float] = {}
 last_bot_audio_end_at: dict[int, float] = {}
@@ -877,6 +880,36 @@ def new_turn_metrics(
         chunk_index=chunk_index,
     )
     return metrics
+
+
+def mark_turn_stage(metrics: dict | None, key: str, *, event_name: str | None = None, **extra) -> None:
+    if not metrics:
+        return
+    started_at = metrics.get("started_at")
+    if started_at is None:
+        return
+    elapsed_ms = (time.monotonic() - float(started_at)) * 1000.0
+    marks = metrics.setdefault("marks", {})
+    marks[key] = elapsed_ms
+    meta = metrics.get("meta") or {}
+    turn_id = meta.get("turn_id")
+    if turn_id:
+        record_turn_stage(turn_id, key, elapsed_ms)
+    if event_name:
+        log_turn_event(
+            event_name,
+            turn_id=meta.get("turn_id"),
+            segment_id=meta.get("segment_id"),
+            chunk_index=meta.get("chunk_index"),
+            session_key=meta.get("session_key"),
+            room_session_key=meta.get("room_session_key"),
+            guild_id=meta.get("guild_id"),
+            user_id=meta.get("user_id"),
+            owner_user_id=meta.get("owner_user_id"),
+            source=meta.get("source"),
+            elapsed_ms=elapsed_ms,
+            **extra,
+        )
 
 
 def register_drop_reason(metrics: dict | None, reason: str, **extra) -> None:
@@ -3727,14 +3760,63 @@ def warmup_stt_sync() -> None:
     print("[STARTUP] stt_warmup_done")
 
 
+async def warmup_llm() -> None:
+    session = await get_http_session()
+    payload = {
+        "model": MODEL_NAME,
+        "messages": [{"role": "user", "content": "짧게: 준비됐으면 '응'만 답해."}],
+        "temperature": 0.0,
+        "max_tokens": min(8, VOICE_LLM_MAX_TOKENS),
+        "stream": True,
+    }
+    print("[STARTUP] llm_warmup_begin")
+    async with session.post(LLM_SERVER_URL, json=payload, timeout=aiohttp.ClientTimeout(total=20)) as resp:
+        if resp.status != 200:
+            error_text = await resp.text()
+            raise RuntimeError(f"LLM warmup failed: {resp.status} / {error_text[:300]}")
+        async for raw_line in resp.content:
+            line = raw_line.decode("utf-8", errors="ignore").strip()
+            if not line:
+                continue
+            if line.startswith("data:"):
+                line = line[5:].strip()
+            if not line or line == "[DONE]":
+                continue
+            try:
+                data = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            delta_text = extract_stream_delta_text(data)
+            if delta_text:
+                print("[STARTUP] llm_warmup_done")
+                return
+    print("[STARTUP] llm_warmup_done_no_chunk")
+
+
+async def warmup_voice_path(*, reason: str, key: str | None = None, include_stt: bool = True, include_llm: bool = True, include_tts: bool = True) -> None:
+    lock_key = key or reason
+    lock = voice_path_warmup_locks.setdefault(lock_key, asyncio.Lock())
+    async with lock:
+        if key is not None and voice_path_warmup_done.get(key):
+            return
+        print(f"[STARTUP] voice_path_warmup_begin reason={reason} key={lock_key}")
+        if include_stt:
+            await asyncio.to_thread(get_stt_model)
+            await asyncio.to_thread(warmup_stt_sync)
+        if include_llm:
+            await warmup_llm()
+        if include_tts:
+            await warmup_tts_server()
+        voice_path_warmup_done[lock_key] = time.monotonic()
+        print(f"[STARTUP] voice_path_warmup_done reason={reason} key={lock_key}")
+
+
 async def initialize_startup_components() -> None:
     print("[STARTUP] init_begin")
     await set_tts_presence(True)
     try:
         await asyncio.to_thread(ensure_opus_loaded)
-        await asyncio.to_thread(get_stt_model)
-        await asyncio.to_thread(warmup_stt_sync)
-        await warmup_tts_server()
+        await warmup_voice_path(reason="startup", key="startup")
         print("[STARTUP] init_done")
     finally:
         await set_tts_presence(False)
@@ -4198,12 +4280,32 @@ def commit_stable_transcript(session_key: str | None, *, new_partial_text: str) 
 
 def get_partial_transcript(session_key: str | None, audio16k: np.ndarray, *, sampling_rate: int = TARGET_RATE) -> tuple[str, str]:
     partial_audio = build_partial_stt_window(audio16k, sampling_rate=sampling_rate)
+    partial_samples = int(partial_audio.size)
+    min_partial_samples = max(1, int(float(sampling_rate) * 0.85))
+    if partial_samples < min_partial_samples:
+        committed_text = clean_text(session_committed_stt_text.get(session_key or "", ""))
+        return "", committed_text
+
+    audio_hash = hashlib.sha1(np.asarray(partial_audio, dtype=np.float32).tobytes()).hexdigest()
+    cache_key = session_key or "__global__"
+    cached = partial_stt_cache.get(cache_key)
+    if cached and cached.get("hash") == audio_hash:
+        partial_text = clean_text(cached.get("partial_text", ""))
+        committed_text = commit_stable_transcript(session_key, new_partial_text=partial_text)
+        return partial_text, committed_text
+
     partial_text = transcribe_audio16k_sync(
         partial_audio,
         max_new_tokens=max(64, min(VOICE_STT_MAX_NEW_TOKENS, 128)),
         sampling_rate=sampling_rate,
         stage="partial",
     )
+    partial_stt_cache[cache_key] = {
+        "hash": audio_hash,
+        "partial_text": partial_text,
+        "samples": partial_samples,
+        "updated_at": time.monotonic(),
+    }
     committed_text = commit_stable_transcript(session_key, new_partial_text=partial_text)
     return partial_text, committed_text
 
@@ -4458,6 +4560,11 @@ async def ensure_listening_voice_client(guild: discord.Guild, target_channel: di
                 pass
             vc.listen()
             print(f"[VOICE LISTEN REARM] guild={guild.id} channel={target_channel.name}")
+        warmup_key = f"voice:{guild.id}:{getattr(target_channel, 'id', 'unknown')}"
+        try:
+            await warmup_voice_path(reason="voice_connect", key=warmup_key)
+        except Exception as e:
+            print(f"[VOICE PATH WARMUP FAIL] guild={guild.id} channel={getattr(target_channel, 'name', None)} err={e!r}")
         return vc
 
     return None
@@ -4625,9 +4732,15 @@ async def _prefetch_tts_sources(
                 turn_id=turn_id,
                 chunk_index=chunk_index,
                 session_key=session_key,
-                on_request_start=lambda: log_voice_latency(metrics, "tts_request_logged", "TTS 요청 시작 시간"),
+                on_request_start=lambda: (
+                    mark_turn_stage(metrics, "tts_request_start", event_name="tts_request_start", chunk_index=chunk_index),
+                    log_voice_latency(metrics, "tts_request_logged", "TTS 요청 시작 시간")
+                ),
                 on_response_headers=lambda: log_voice_latency(metrics, "tts_response_headers_logged", "TTS 응답 헤더 도착 시간"),
-                on_first_byte=lambda: log_voice_latency(metrics, "tts_first_byte_logged", "TTS 첫 바이트 도착 시간"),
+                on_first_byte=lambda: (
+                    mark_turn_stage(metrics, "tts_first_byte", event_name="tts_first_byte", chunk_index=chunk_index),
+                    log_voice_latency(metrics, "tts_first_byte_logged", "TTS 첫 바이트 도착 시간")
+                ),
                 on_first_frame=lambda: log_voice_latency(metrics, "tts_first_frame_logged", "TTS 첫 프레임 공급 시간"),
                 on_first_packet_sent=lambda ci=chunk_index: (
                     log_voice_latency(metrics, "first_packet_sent_logged", "첫 패킷 송신 시간"),
@@ -5121,6 +5234,13 @@ async def ask_llm_streaming(
         if gated_state and gated_state.get("action") == "ask" and gated_state.get("question_for_user"):
             guided_user_text = clean_text(str(gated_state.get("question_for_user", "")))
         final_user_text = f"{guided_user_text}\n\n{build_main_response_guidance(cognitive_state, source=source)}"
+        mark_turn_stage(
+            metrics,
+            "prompt_built",
+            event_name="prompt_built",
+            prompt_chars=len(final_user_text),
+            source_mode=source,
+        )
 
         stream_temperature = 0.3 if source == "voice" else 0.1
         payload = {
@@ -5150,6 +5270,13 @@ async def ask_llm_streaming(
 
         inflight_llm_requests += 1
         try:
+            mark_turn_stage(
+                metrics,
+                "llm_request_start",
+                event_name="llm_request_start",
+                source_mode=source,
+                prompt_chars=len(final_user_text),
+            )
             async with session.post(LLM_SERVER_URL, json=payload, timeout=timeout) as resp:
                 if resp.status != 200:
                     error_text = await resp.text()
@@ -5178,6 +5305,13 @@ async def ask_llm_streaming(
                             debug_text=debug_text,
                         )
                     if on_first_chunk is not None:
+                        mark_turn_stage(
+                            metrics,
+                            "llm_first_chunk",
+                            event_name="llm_first_chunk",
+                            source_mode=source,
+                            since_request_ms=max(0.0, (time.monotonic() - llm_started_at) * 1000.0),
+                        )
                         on_first_chunk()
                         on_first_chunk = None
                     if on_sentence is not None:
@@ -5219,6 +5353,13 @@ async def ask_llm_streaming(
                         continue
 
                     if on_first_chunk is not None:
+                        mark_turn_stage(
+                            metrics,
+                            "llm_first_chunk",
+                            event_name="llm_first_chunk",
+                            source_mode=source,
+                            since_request_ms=max(0.0, (time.monotonic() - llm_started_at) * 1000.0),
+                        )
                         on_first_chunk()
                         on_first_chunk = None
 
@@ -5865,13 +6006,21 @@ async def _process_member_audio_impl(
     stt_meta: dict | None = None
     partial_text = ""
     committed_partial_text = ""
+    partial_audio = build_partial_stt_window(audio16k, sampling_rate=stt_sampling_rate)
+    partial_min_samples = max(1, int(float(stt_sampling_rate) * 0.85))
+    partial_should_run = partial_audio.size >= partial_min_samples
+    if not partial_should_run:
+        metrics.setdefault("meta", {})["partial_stt_skip_reason"] = "insufficient_audio"
     try:
-        partial_text, committed_partial_text = await asyncio.to_thread(
-            get_partial_transcript,
-            session_key,
-            audio16k,
-            sampling_rate=stt_sampling_rate,
-        )
+        if partial_should_run:
+            partial_text, committed_partial_text = await asyncio.to_thread(
+                get_partial_transcript,
+                session_key,
+                audio16k,
+                sampling_rate=stt_sampling_rate,
+            )
+        else:
+            committed_partial_text = clean_text(session_committed_stt_text.get(session_key, ""))
         metrics.setdefault("meta", {}).update({
             "partial_stt_text": partial_text,
             "committed_stt_text": committed_partial_text,
@@ -5922,6 +6071,7 @@ async def _process_member_audio_impl(
     else:
         stt_meta = {"enabled": False, "selected": "primary", "primary_text": primary_text}
 
+    mark_turn_stage(metrics, "stt_full_done", event_name="stt_full_done", text_len=len(text))
     log_voice_stage(metrics, "본문 STT 완료", extra=f"text_len={len(text)}", key="stt_done")
 
     if not text:
