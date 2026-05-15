@@ -446,11 +446,10 @@ def inspect_resume_checkpoint(ckpt_dir: str) -> dict[str, Any]:
         summary["reason"] = "missing_event_history"
         return summary
 
-    inspected = event_files[-20:]
-    observe_records = 0
-    missing_position_records = 0
-    missing_inventory_used_records = 0
-    for record in inspected:
+    inspected_payloads: list[tuple[Path, list[Any]]] = []
+    inspected_files = 0
+    for record in reversed(event_files):
+        inspected_files += 1
         try:
             payload = json.loads(record.read_text(encoding="utf-8"))
         except Exception:
@@ -459,6 +458,15 @@ def inspect_resume_checkpoint(ckpt_dir: str) -> dict[str, Any]:
         if not isinstance(payload, list):
             summary["malformed_event_files"].append(record.name)
             continue
+        if payload:
+            inspected_payloads.append((record, payload))
+        if len(inspected_payloads) >= 20 or inspected_files >= 200:
+            break
+
+    observe_records = 0
+    missing_position_records = 0
+    missing_inventory_used_records = 0
+    for _, payload in reversed(inspected_payloads):
         for item in payload:
             if not (isinstance(item, list) and len(item) == 2 and isinstance(item[1], dict)):
                 continue

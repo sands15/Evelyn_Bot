@@ -561,8 +561,6 @@ class Voyager:
             last_ai_response_preview=None,
             last_env_event_count=None,
             last_critique=None,
-            last_completion_reason=None,
-            last_success=None,
         )
         self.last_rollout_info = None
         if reset_env:
