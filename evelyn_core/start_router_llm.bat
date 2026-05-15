@@ -20,7 +20,7 @@ if not defined WT_READY (
         set "WT_READY=1"
     )
 )
-set "TERM_CMD=title Router-LLM && wsl.exe bash /mnt/c/Evelyn/evelyn_core/run_router_llm.sh"
+set "TERM_CMD=title Router-LLM && wsl.exe bash /mnt/c/Evelyn/evelyn_core/runtime/launchers/run_router_llm.sh"
 if not defined WT_READY (
     start "Router-LLM" cmd.exe /q /d /c "%TERM_CMD%"
 ) else (

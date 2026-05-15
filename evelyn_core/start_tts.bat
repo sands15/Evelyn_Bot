@@ -19,9 +19,9 @@ if not defined WT_READY (
     )
 )
 if not defined WT_READY (
-    start "TTS" powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0start_tts.ps1"
+    start "TTS" powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0runtime\launchers\start_tts.ps1"
 ) else (
-    "%WT_EXE%" new-tab --title "TTS" powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0start_tts.ps1"
+    "%WT_EXE%" new-tab --title "TTS" powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0runtime\launchers\start_tts.ps1"
 )
 
 endlocal

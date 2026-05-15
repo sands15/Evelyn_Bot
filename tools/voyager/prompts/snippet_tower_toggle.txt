@@ -1,0 +1,63 @@
+330:       for (const dy of [0, -1, 1]) {
+331:         const target = feet.offset(dx * distance, dy, dz * distance);
+332:         if (!isPassableAt(target)) continue;
+333:         candidates.push(target);
+334:       }
+335:     }
+336:   }
+337:   if (!candidates.length) return null;
+338:   candidates.sort((a, b) => scoreStandPosition(a, feet) - scoreStandPosition(b, feet));
+339:   return candidates[0] || null;
+340: }
+341: 
+342: function countAvailableScaffoldingBlocks() {
+343:   if (movementProfile && typeof movementProfile.countScaffoldingItems === 'function') {
+344:     try {
+345:       return Number(movementProfile.countScaffoldingItems() || 0);
+346:     } catch (_) {}
+347:   }
+348:   return 0;
+349: }
+350: 
+351: function hasImmediateLateralExit(position, options = {}) {
+352:   if (!position) return false;
+353:   for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+354:     if (isPassableAt(position.offset(dx, 0, dz), options)) return true;
+355:   }
+356:   return false;
+357: }
+358: 
+359: function setTowerBuildingEnabled(enabled) {
+360:   if (!movementProfile) return;
+361:   movementProfile.allow1by1towers = !!enabled;
+362:   if (bot?.pathfinder?.setMovements) {
+363:     bot.pathfinder.setMovements(movementProfile);
+364:   }
+365:   syncInteractionPluginMovements();
+366: }
+367: 
+368: function isLikelyVerticalTrap(position = null) {
+369:   const feet = position || getFeetPosition();
+370:   if (!feet || !bot?.blockAt) return false;
+371:   if (hasImmediateLateralExit(feet)) return false;
+372:   return countSideWalls(feet) >= 4;
+373: }
+374: 
+375: async function escapeVerticalTrap(maxClimbSteps = 2) {
+376:   const feet = getFeetPosition();
+377:   if (!feet) return { status: 'blocked', reason: 'missing_bot_position' };
+378:   if (!ensureMovementProfile()) return { status: 'blocked', reason: 'movement_profile_unavailable' };
+379:   if (!isLikelyVerticalTrap(feet)) return { status: 'blocked', reason: 'not_in_vertical_trap', position: toBlockPosition(feet) };
+380:   const scaffoldingBlocks = countAvailableScaffoldingBlocks();
+381:   if (scaffoldingBlocks <= 0) {
+382:     return { status: 'blocked', reason: 'no_scaffolding_blocks_for_escape', position: toBlockPosition(feet) };
+383:   }
+384: 
+385:   const originalAllowTower = !!movementProfile.allow1by1towers;
+386:   let climbed = 0;
+387:   try {
+388:     setTowerBuildingEnabled(true);
+389:     while (climbed < Math.max(1, Number(maxClimbSteps || 1))) {
+390:       const currentFeet = getFeetPosition();
+391:       if (!currentFeet) break;
+392:       const exitTarget = findNearbyPassableStandPosition(1, currentFeet);

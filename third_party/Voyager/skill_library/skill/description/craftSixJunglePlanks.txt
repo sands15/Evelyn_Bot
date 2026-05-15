@@ -1,0 +1,3 @@
+async function craftSixJunglePlanks(bot) {
+    // This function attempts to ensure the bot has at least six jungle planks. It first checks the current plank count and calculates how many logs are needed to reach the target. If logs are insufficient, it searches for and mines nearby jungle logs. If enough logs are present, it locates a crafting table and proceeds to craft the required number of jungle planks. The process includes error handling for missing logs or a crafting table.
+}

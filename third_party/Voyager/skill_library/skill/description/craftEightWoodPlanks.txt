@@ -1,0 +1,3 @@
+async function craftEightWoodPlanks(bot) {
+    // This function attempts to gather at least eight wood planks from various types of logs. It first checks the current total count of all available planks. If fewer than eight are present, it iterates through all known log types. For each log type, it calculates how many planks are still needed and how many can be crafted from the available logs. It then executes the crafting action for the required amount, stopping as soon as eight planks are obtained or all logs have been processed. If the process finishes and the plank count is still below eight, it throws an error indicating insufficient logs.
+}

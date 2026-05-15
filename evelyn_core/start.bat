@@ -27,13 +27,13 @@ if not defined WT_READY (
 )
 
 set "WT_WINDOW=evelyn"
-set "SUPERVISOR=%~dp0supervise_service.ps1"
+set "SUPERVISOR=%~dp0runtime\launchers\supervise_service.ps1"
 
 start "" "%WT_EXE%" -w %WT_WINDOW% new-tab --title "Main-LLM" powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%SUPERVISOR%" -Name "Main-LLM" -Workdir "%~dp0.." -Command "& '%~dp0start_main_llm.bat' --inline"
 timeout /t 1 /nobreak >nul
 "%WT_EXE%" -w %WT_WINDOW% new-tab --title "Router-LLM" powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%SUPERVISOR%" -Name "Router-LLM" -Workdir "%~dp0.." -Command "& '%~dp0start_router_llm.bat' --inline"
 "%WT_EXE%" -w %WT_WINDOW% new-tab --title "Sub-LLM" powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%SUPERVISOR%" -Name "Sub-LLM" -Workdir "%~dp0.." -Command "& '%~dp0start_sub_llm.bat' --inline"
-"%WT_EXE%" -w %WT_WINDOW% new-tab --title "TTS" powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%SUPERVISOR%" -Name "TTS" -Workdir "%~dp0.." -Command "& '%~dp0start_tts.ps1'"
-"%WT_EXE%" -w %WT_WINDOW% new-tab --title "Bot" powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%SUPERVISOR%" -Name "Bot" -Workdir "%~dp0.." -Command "& '%~dp0start_bot.ps1'"
+"%WT_EXE%" -w %WT_WINDOW% new-tab --title "TTS" powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%SUPERVISOR%" -Name "TTS" -Workdir "%~dp0.." -Command "& '%~dp0runtime\launchers\start_tts.ps1'"
+"%WT_EXE%" -w %WT_WINDOW% new-tab --title "Bot" powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%SUPERVISOR%" -Name "Bot" -Workdir "%~dp0.." -Command "& '%~dp0runtime\launchers\start_bot.ps1'"
 
 endlocal

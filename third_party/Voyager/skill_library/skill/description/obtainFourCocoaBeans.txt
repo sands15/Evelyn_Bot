@@ -1,0 +1,3 @@
+async function obtainFourCocoaBeans(bot) {
+    // The function attempts to gather four cocoa beans. It first checks the inventory to see if the required amount is already present. If not, it begins by mining any nearby cocoa blocks. If the target is still not met, it explores the surroundings to locate cocoa pods. It then continues mining cocoa blocks until four beans are collected or no more pods are found. If the final count is less than four, an error is thrown.
+}

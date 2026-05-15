@@ -1,0 +1,14 @@
+627: function movementStepHazardCost(block) {
+628:   const position = block?.position;
+629:   if (!position) return 0;
+630:   if (hasImmediateFallRisk(position)) return 100;
+631:   if (countVerticalClearance(position, 2) < 2) return 100;
+632:   if (isConfinedPitPosition(position)) return 100;
+633:   if (isNarrowLedgePosition(position)) return 100;
+634:   const supportDepth = findSafeSupportDepth(position, 6);
+635:   const traversableNeighbors = countTraversableNeighbors(position);
+636:   const sideWalls = countSideWalls(position);
+637:   const openDropSides = countOpenDropSides(position, 2);
+638:   if (supportDepth != null && supportDepth >= 1 && sideWalls >= 2 && traversableNeighbors <= 2) return 20;
+639:   if (openDropSides >= 1 && traversableNeighbors <= 2) return 25;
+640:   return 0;

@@ -1,0 +1,3 @@
+async function craft32Torches(bot) {
+    // This routine aims to ensure the bot has at least 32 torches. It first checks the current inventory count of torches and skips if the required amount is already present. It then calculates how many torches need to be crafted and determines the necessary fuel. If there isn't enough coal or charcoal, it attempts to mine the required amount of coal ore. Finally, it crafts the necessary torches using the available fuel and sticks, throwing an error if the goal is not met.
+}

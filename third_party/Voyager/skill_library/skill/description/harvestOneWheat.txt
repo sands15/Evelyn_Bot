@@ -1,0 +1,3 @@
+async function harvestOneWheat(bot) {
+    // This function checks if the bot already possesses at least one wheat item. If not, it searches within a 32-block radius for up to eight mature wheat blocks. If no mature wheat is found, it throws an error indicating the search was exhausted. Otherwise, it targets the first found wheat block and attempts to collect it. Finally, it verifies that at least one wheat item was successfully collected.
+}

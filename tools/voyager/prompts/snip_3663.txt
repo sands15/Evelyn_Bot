@@ -1,0 +1,15 @@
+3656:   bot = null;
+3657:   movementProfile = null;
+3658:   connectPromise = null;
+3659:   state.connected = false;
+3660:   state.active = false;
+3661:   state.last_error = reason;
+3662:   if (currentBot) {
+3663:     try { stopMovement(); } catch (_) {}
+3664:     try { currentBot.end(reason); } catch (_) {
+3665:       try { currentBot.quit(reason); } catch (_) {}
+3666:     }
+3667:   }
+3668:   await delay(250);
+3669: }
+3670: 

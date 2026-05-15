@@ -1,0 +1,30 @@
+531: function isPassableAt(position, options = {}) {
+532:   if (!isBasePassableAt(position)) return false;
+533:   if (options.allowConfinedPit !== true && isConfinedPitPosition(position)) return false;
+534:   if (options.allowNarrowLedge !== true && isNarrowLedgePosition(position)) return false;
+535:   return true;
+536: }
+537: 
+538: function countSideWalls(position) {
+539:   const offsets = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+540:   let walls = 0;
+541:   for (const [dx, dz] of offsets) {
+542:     if (isSolidBlock(bot?.blockAt?.(position.offset(dx, 0, dz)))) walls += 1;
+543:   }
+544:   return walls;
+545: }
+546: 
+547: function countSafeSupportBlocks(position, radius = 1) {
+548:   if (!position || !bot?.blockAt) return 0;
+549:   let supports = 0;
+550:   for (let dx = -radius; dx <= radius; dx += 1) {
+551:     for (let dz = -radius; dz <= radius; dz += 1) {
+552:       const support = bot.blockAt(position.offset(dx, -1, dz));
+553:       if (isSolidBlock(support) && !isHazardousBlock(support)) supports += 1;
+554:     }
+555:   }
+556:   return supports;
+557: }
+558: 
+559: function findSafeSupportDepth(position, maxDepth = 6) {
+560:   if (!position || !bot?.blockAt) return null;

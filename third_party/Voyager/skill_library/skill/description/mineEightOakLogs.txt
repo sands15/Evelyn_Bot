@@ -1,0 +1,3 @@
+async function mineEightOakLogs(bot) {
+    // The function checks if the bot already possesses at least eight oak logs. If not, it attempts to find and mine any nearby oak logs up to the required amount. If more logs are needed, it explores the surroundings until an oak log is located. Finally, it mines the remaining necessary oak logs to ensure the total count reaches eight.
+}

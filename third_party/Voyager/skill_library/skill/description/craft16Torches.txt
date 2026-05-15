@@ -1,0 +1,3 @@
+async function craft16Torches(bot) {
+    // This function checks if the player has at least sixteen torches; if so, it stops. Otherwise, it locates or places a crafting table nearby. It then calculates how many torches are missing and determines the required amounts of coal and sticks. If sticks are insufficient, it ensures enough jungle planks are available by mining logs and crafting planks. Finally, it crafts the necessary number of torches using the available ingredients.
+}

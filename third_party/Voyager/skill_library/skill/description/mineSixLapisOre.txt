@@ -1,0 +1,3 @@
+async function mineSixLapisOre(bot) {
+    // The function first checks if six or more lapis lazuli items are already present in the inventory, exiting if so. It then ensures an iron pickaxe is equipped before attempting to mine. The process involves repeatedly searching for and mining lapis ore blocks until six items are collected or no more are found nearby. If the initial search fails, it explores the area to locate lapis ore, and then continues mining until the target of six items is reached or no more ore is found. Finally, it verifies that at least six lapis lazuli items were successfully mined.
+}

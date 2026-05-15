@@ -1,0 +1,3 @@
+async function obtainSixJungleLogs(bot) {
+    // The function attempts to gather six jungle logs. It first checks if the required amount is already in the inventory and exits if so. It then tries to equip an axe if one is found in the inventory. The process involves searching for and mining nearby jungle logs until the target amount is reached or no more are found. If the goal is not met, it searches further into the environment for more logs and repeats the mining process. Finally, it throws an error if six logs cannot be obtained.
+}

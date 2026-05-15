@@ -1,0 +1,3 @@
+async function equipIronPickaxe(bot) {
+    // The function ensures the bot is equipped with an iron pickaxe. It first checks if the iron pickaxe is already in the hand; if not, it attempts to find one in the inventory. If the pickaxe is missing, it verifies if at least three iron ingots are available. If not enough ingots are present, it attempts to mine iron ore and smelt the raw iron using coal. Finally, it crafts the iron pickaxe and equips it in the hand.
+}

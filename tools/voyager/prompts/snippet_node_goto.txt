@@ -1,0 +1,67 @@
+1: function error (name, message) {
+2:   const err = new Error(message)
+3:   err.name = name
+4:   return err
+5: }
+6: 
+7: /**
+8:    * Adds a easy-to-use API wrapper for quickly executing a goal and running
+9:    * a callback when that goal is reached. This function serves to remove a
+10:    * lot of boilerplate code for quickly executing a goal.
+11:    *
+12:    * @param {Bot} bot - The bot.
+13:    * @param {Goal} goal - The goal to execute.
+14:    * @returns {Promise} - resolves on success, rejects on error
+15:    */
+16: function goto (bot, goal) {
+17:   return new Promise((resolve, reject) => {
+18:     function goalReached () {
+19:       cleanup()
+20:     }
+21: 
+22:     function noPathListener (results) {
+23:       if (results.path.length === 0) {
+24:         cleanup()
+25:       } else if (results.status === 'noPath') {
+26:         cleanup(error('NoPath', 'No path to the goal!'))
+27:       } else if (results.status === 'timeout') {
+28:         cleanup(error('Timeout', 'Took to long to decide path to goal!'))
+29:       }
+30:     }
+31: 
+32:     function goalChangedListener (newGoal) {
+33:       if (newGoal !== goal) {
+34:         cleanup(error('GoalChanged', 'The goal was changed before it could be completed!'))
+35:       }
+36:     }
+37: 
+38:     function pathStopped () {
+39:       cleanup(error('PathStopped', 'Path was stopped before it could be completed! Thus, the desired goal was not reached.'))
+40:     }
+41: 
+42:     function cleanup (err) {
+43:       bot.removeListener('goal_reached', goalReached)
+44:       bot.removeListener('path_update', noPathListener)
+45:       bot.removeListener('goal_updated', goalChangedListener)
+46:       bot.removeListener('path_stop', pathStopped)
+47: 
+48:       // Run callback on next event stack to let pathfinder properly cleanup,
+49:       // otherwise chaining waypoints does not work properly.
+50:       setTimeout(() => {
+51:         if (err) {
+52:           reject(err)
+53:         } else {
+54:           resolve()
+55:         }
+56:       }, 0)
+57:     }
+58: 
+59:     bot.on('path_stop', pathStopped)
+60:     bot.on('goal_reached', goalReached)
+61:     bot.on('path_update', noPathListener)
+62:     bot.on('goal_updated', goalChangedListener)
+63:     bot.pathfinder.setGoal(goal)
+64:   })
+65: }
+66: 
+67: module.exports = goto

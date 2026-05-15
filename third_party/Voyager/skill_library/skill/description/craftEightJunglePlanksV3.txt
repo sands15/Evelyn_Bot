@@ -1,0 +1,3 @@
+async function craftEightJunglePlanks(bot) {
+    // This function checks if the bot possesses at least eight jungle planks. If not, it calculates how many more are needed and determines the required number of jungle logs. It then verifies if enough jungle logs are present in the inventory. If sufficient logs are available, it uses the crafting recipe to produce the missing jungle planks. Finally, it confirms that the total count of jungle planks has reached eight.
+}

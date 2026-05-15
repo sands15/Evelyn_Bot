@@ -1,0 +1,23 @@
+2810:       return { status: 'ok', note: 'hazard_avoided_vertical_escape', hazards, position: state.position, escape: escapeResult };
+2811:     }
+2812:   }
+2813:   if (lastKnownSafePosition && !(feet.x === lastKnownSafePosition.x && feet.y === lastKnownSafePosition.y && feet.z === lastKnownSafePosition.z)) {
+2814:     const fallbackMove = await moveNearPosition(lastKnownSafePosition, 1, 15000, { interruptOnThreat: false });
+2815:     if (fallbackMove.status === 'ok') {
+2816:       updateState();
+2817:       return { status: 'ok', note: 'hazard_avoided_return_safe_anchor', hazards, position: state.position, target: lastKnownSafePosition };
+2818:     }
+2819:   }
+2820:   stopMovement();
+2821:   updateState();
+2822:   return { status: 'blocked', reason: 'hazard_locally_unresolved', hazards, position: state.position, safe_anchor: lastKnownSafePosition };
+2823: }
+2824: 
+2825: async function equipBestCombatTool() {
+2826:   const preferred = ['diamond_sword', 'iron_sword', 'stone_sword', 'wooden_sword', 'diamond_axe', 'iron_axe', 'stone_axe', 'wooden_axe'];
+2827:   for (const itemName of preferred) {
+2828:     const item = getInventoryItem(itemName);
+2829:     if (!item) continue;
+2830:     try {
+2831:       await bot.equip(item, 'hand');
+2832:       return { status: 'ok', item: itemName };

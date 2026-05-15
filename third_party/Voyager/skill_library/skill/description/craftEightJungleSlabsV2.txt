@@ -1,0 +1,3 @@
+async function craftEightJungleSlabs(bot) {
+    // The function checks if eight jungle slabs are already present in the inventory; if so, it stops. It then ensures there are enough jungle planks, mining jungle logs if necessary to meet the plank requirement. Next, it verifies the presence of a crafting table, crafting and placing one if needed in a nearby valid location. Finally, it crafts the required eight jungle slabs using the planks and checks if the goal was achieved.
+}

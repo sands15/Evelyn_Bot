@@ -1,0 +1,23 @@
+1378:   const dy = target.y - feet.y;
+1379:   if (Math.abs(dx) > 1 || Math.abs(dz) > 1 || dy !== 1) {
+1380:     return { status: 'blocked', reason: 'direct_step_not_adjacent' };
+1381:   }
+1382:   const attempts = [420, 560];
+1383:   for (const durationMs of attempts) {
+1384:     try {
+1385:       await bot.lookAt(new Vec3(target.x + 0.5, target.y + 0.2, target.z + 0.5), true);
+1386:     } catch (_) {}
+1387:     try {
+1388:       bot.setControlState('forward', true);
+1389:       bot.setControlState('jump', true);
+1390:       bot.setControlState('sprint', true);
+1391:       await delay(durationMs);
+1392:     } finally {
+1393:       stopMovement();
+1394:     }
+1395:     await delay(180);
+1396:     updateState();
+1397:     const afterFeet = getFeetPosition();
+1398:     const progressed = afterFeet && ((afterFeet.x === target.x && afterFeet.y === target.y && afterFeet.z === target.z) || afterFeet.y >= target.y);
+1399:     if (progressed) {
+1400:       return { status: 'ok', note: 'direct_step_up', position: state.position, target: toBlockPosition(target), duration_ms: durationMs };

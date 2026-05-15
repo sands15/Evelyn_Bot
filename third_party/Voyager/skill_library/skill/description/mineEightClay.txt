@@ -1,0 +1,3 @@
+async function mineEightClay(bot) {
+    // This function attempts to gather at least eight clay balls. It first checks the current inventory count to see if the goal is already met. It then tries to mine nearby clay blocks up to two times to increase the count. If that fails, it probes in two specific directions, searching for clay. If clay is found during these probes, it attempts to mine enough to reach the target. If, after all attempts, the required amount is not gathered, it throws an error indicating the search was unsuccessful.
+}

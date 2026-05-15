@@ -1,0 +1,3 @@
+async function mineSixteenGravel(bot) {
+    // The function first checks if the bot already possesses sixteen gravel blocks. If not, it attempts to mine gravel one block at a time up to twelve times near the bot. If the target amount is still not reached, it explores the area until gravel is found. Finally, it attempts to mine gravel one block at a time up to sixteen times, throwing an error if the required amount is not collected.
+}

@@ -1,0 +1,22 @@
+3858:     if (hostile) {
+3859:       return await retreatFromHostile();
+3860:     }
+3861:     const health = bot.health ?? 20;
+3862:     const hunger = bot.food ?? 20;
+3863:     if (health < 16 || hunger < 18) {
+3864:       const foods = getFoodItems();
+3865:       if (!foods.length) {
+3866:         stopMovement();
+3867:         updateState();
+3868:         if (health < 16 && hunger >= 18) {
+3869:           return { status: 'ok', note: 'regrouped_healing_naturally', health: state.health, hunger: state.hunger };
+3870:         }
+3871:         return { status: 'blocked', reason: 'no_food_in_inventory', health: state.health, hunger: state.hunger };
+3872:       }
+3873:       return await consumeFoodFromInventory();
+3874:     }
+3875:     stopMovement();
+3876:     updateState();
+3877:     return { status: 'ok', note: 'regrouped_idle', health: state.health, hunger: state.hunger };
+3878:   }
+3879:   if (action === 'find_food_source') {

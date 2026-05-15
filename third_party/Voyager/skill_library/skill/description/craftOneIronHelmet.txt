@@ -1,0 +1,3 @@
+async function craftOneIronHelmet(bot) {
+    // This routine checks if the bot already possesses an iron helmet. If not, it verifies that at least five iron ingots are present in the inventory. It then searches for a crafting table within a 32-block radius. If a crafting table is found, it attempts to craft one iron helmet. Finally, it confirms that the helmet was successfully added to the inventory.
+}

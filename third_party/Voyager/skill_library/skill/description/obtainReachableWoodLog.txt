@@ -1,0 +1,3 @@
+async function obtainReachableWoodLog(bot) {
+    // The function attempts to gather wood logs from the immediate vicinity. It first checks if any wood logs are already present in the inventory. If not, it searches for nearby log blocks, prioritizing the closest ones. If no logs are found initially, it performs two short exploratory searches in different directions. If logs are still not found, it throws an error indicating the search was exhausted. Finally, it attempts to mine up to four of the closest available log blocks.
+}

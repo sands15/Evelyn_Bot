@@ -1,0 +1,3 @@
+async function mine16Bamboo(bot) {
+    // This function attempts to gather sixteen bamboo blocks. It first checks if the required amount is already in the inventory and returns if so. It then searches for bamboo nearby and mines as many as needed from that location. If not enough is found, it probes in two different directions to search for more bamboo. If the search fails to yield the required amount, it throws an error indicating the search was exhausted.
+}

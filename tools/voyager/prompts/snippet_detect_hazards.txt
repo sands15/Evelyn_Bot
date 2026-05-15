@@ -1,0 +1,28 @@
+643: function detectImmediateHazards() {
+644:   const origin = getFeetPosition();
+645:   if (!origin || !bot?.blockAt) return [];
+646:   const hazards = [];
+647:   const below = getBlockAtOffset(0, -1, 0);
+648:   const feet = getBlockAtOffset(0, 0, 0);
+649:   const head = getBlockAtOffset(0, 1, 0);
+650:   if (hasImmediateFallRisk(origin)) hazards.push('fall_risk');
+651:   if (isHazardousBlock(below)) hazards.push(`below:${getBlockName(below)}`);
+652:   if (isHazardousBlock(feet)) hazards.push(`feet:${getBlockName(feet)}`);
+653:   if (isHazardousBlock(head)) hazards.push(`head:${getBlockName(head)}`);
+654:   const neighborOffsets = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+655:   for (const [dx, dz] of neighborOffsets) {
+656:     const adjacent = getBlockAtOffset(dx, 0, dz);
+657:     if (isHazardousBlock(adjacent)) hazards.push(`adjacent:${dx},${dz}:${getBlockName(adjacent)}`);
+658:   }
+659:   return hazards;
+660: }
+661: 
+662: function stopLightStatePolling() {
+663:   if (lightStatePollTimer) {
+664:     clearInterval(lightStatePollTimer);
+665:     lightStatePollTimer = null;
+666:   }
+667:   if (heavyStatePollTimer) {
+668:     clearInterval(heavyStatePollTimer);
+669:     heavyStatePollTimer = null;
+670:   }

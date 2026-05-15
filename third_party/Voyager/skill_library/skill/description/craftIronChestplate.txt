@@ -1,0 +1,3 @@
+async function craftIronChestplate(bot) {
+    // This routine checks if the player already possesses an iron chestplate; if so, it stops. It then verifies that at least eight iron ingots are present in the inventory. The function searches for a crafting table within a 32-block radius. If a crafting table is found, it attempts to craft one iron chestplate. Finally, it confirms that the chestplate was successfully added to the inventory.
+}

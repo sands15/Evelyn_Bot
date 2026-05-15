@@ -1,0 +1,3 @@
+async function obtainSixRawIron(bot) {
+    // The function checks if the bot already possesses at least six raw iron items. It then attempts to find and equip a suitable pickaxe. The process begins by searching for nearby iron or deepslate iron ore to mine. If none are found initially, the bot explores the area until it locates some iron ore. Finally, it mines the necessary amount of iron ore or deepslate iron ore to reach the target of six raw iron items.
+}

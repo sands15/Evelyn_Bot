@@ -1,0 +1,3 @@
+async function craftOneIronChestplate(bot) {
+    // The function checks if an iron chestplate is already present in the inventory; if so, it stops. It then calculates how many iron ingots are needed and verifies if enough raw iron and coal are available. If a furnace is missing, it attempts to mine cobblestone and craft one. After ensuring the furnace is placed and iron is smelted, it proceeds to craft the iron chestplate.
+}

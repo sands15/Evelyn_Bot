@@ -1,0 +1,3 @@
+async function craftStonePickaxe(bot) {
+    // This function attempts to create a stone pickaxe if one is not already present in the inventory. It first verifies that the bot possesses at least three cobblestone blocks and two sticks. It then searches for a crafting table nearby, exploring if necessary to locate one. After reaching the crafting table, it proceeds to craft one stone pickaxe. Finally, it confirms that the crafting process was successful.
+}

@@ -1,0 +1,90 @@
+1261: async function moveNearPosition(position, range = 1, timeoutMs = 15000, options = {}) {
+1262:   if (!bot?.pathfinder || !GoalNear) {
+1263:     return { status: 'blocked', reason: 'pathfinder_unavailable' };
+1264:   }
+1265:   if (!ensureMovementProfile()) {
+1266:     return { status: 'blocked', reason: 'movement_profile_unavailable' };
+1267:   }
+1268:   const targetVec = new Vec3(Math.round(position.x), Math.round(position.y), Math.round(position.z));
+1269:   const effectiveRange = Math.max(0, Number(range || 0));
+1270:   const beforeFeet = getFeetPosition();
+1271:   if (effectiveRange === 0) {
+1272:     if (!isPassableAt(targetVec)) {
+1273:       return {
+1274:         status: 'blocked',
+1275:         reason: 'target_position_not_passable',
+1276:         position: toBlockPosition(targetVec),
+1277:         clearance: countVerticalClearance(targetVec, 3),
+1278:       };
+1279:     }
+1280:   }
+1281:   const goal = new GoalNear(position.x, position.y, position.z, range);
+1282:   const movementOverrides = {
+1283:     canDig: options.allowPathDig === true,
+1284:   };
+1285:   const firstResult = await withMovementProfileOverrides(movementOverrides, async () => await gotoGoalSafely(
+1286:     goal,
+1287:     timeoutMs,
+1288:     { note: 'moved_near_goal', position },
+1289:     { reason: 'pathfinder_failed', position },
+1290:     options,
+1291:   ));
+1292:   if (firstResult.status === 'ok') {
+1293:     const afterFeet = getFeetPosition();
+1294:     const withinRange = !!(afterFeet && afterFeet.distanceTo(targetVec) <= effectiveRange + 0.75);
+1295:     if (!withinRange) {
+1296:       return {
+1297:         status: 'blocked',
+1298:         reason: 'goal_not_reached_after_path',
+1299:         position: toBlockPosition(afterFeet || beforeFeet),
+1300:         target: { x: position.x, y: position.y, z: position.z },
+1301:         allowed_range: effectiveRange,
+1302:       };
+1303:     }
+1304:     if (options.requireMovement) {
+1305:       const progressed = beforeFeet && afterFeet && (afterFeet.x !== beforeFeet.x || afterFeet.y !== beforeFeet.y || afterFeet.z !== beforeFeet.z);
+1306:       const alreadyNear = !!(beforeFeet && beforeFeet.distanceTo(targetVec) <= effectiveRange + 0.75);
+1307:       if (!progressed && !alreadyNear) {
+1308:         return { status: 'blocked', reason: 'no_progress_move', position: toBlockPosition(afterFeet || beforeFeet), target: { x: position.x, y: position.y, z: position.z } };
+1309:       }
+1310:     }
+1311:     return firstResult;
+1312:   }
+1313:   if (options.allowTrapEscape === false) {
+1314:     return firstResult;
+1315:   }
+1316:   const feet = getFeetPosition();
+1317:   if (!feet) {
+1318:     return { ...firstResult, trap_escape: { status: 'blocked', reason: 'missing_bot_position' } };
+1319:   }
+1320:   const escapeResult = await escapeVerticalTrap(Number(options.maxTrapEscapeSteps || 2));
+1321:   if (escapeResult.status !== 'ok') {
+1322:     return { ...firstResult, trap_escape: escapeResult };
+1323:   }
+1324:   const retryResult = await withMovementProfileOverrides(movementOverrides, async () => await gotoGoalSafely(
+1325:     goal,
+1326:     timeoutMs,
+1327:     { note: 'moved_near_goal', position },
+1328:     { reason: 'pathfinder_failed', position },
+1329:     { ...options, allowTrapEscape: false },
+1330:   ));
+1331:   if (retryResult.status === 'ok') {
+1332:     const afterFeet = getFeetPosition();
+1333:     const withinRange = !!(afterFeet && afterFeet.distanceTo(targetVec) <= effectiveRange + 0.75);
+1334:     if (!withinRange) {
+1335:       return {
+1336:         status: 'blocked',
+1337:         reason: 'goal_not_reached_after_path',
+1338:         position: toBlockPosition(afterFeet || beforeFeet),
+1339:         target: { x: position.x, y: position.y, z: position.z },
+1340:         allowed_range: effectiveRange,
+1341:         trap_escape: escapeResult,
+1342:       };
+1343:     }
+1344:     if (options.requireMovement) {
+1345:       const progressed = beforeFeet && afterFeet && (afterFeet.x !== beforeFeet.x || afterFeet.y !== beforeFeet.y || afterFeet.z !== beforeFeet.z);
+1346:       const alreadyNear = !!(beforeFeet && beforeFeet.distanceTo(targetVec) <= effectiveRange + 0.75);
+1347:       if (!progressed && !alreadyNear) {
+1348:         return { status: 'blocked', reason: 'no_progress_move', position: toBlockPosition(afterFeet || beforeFeet), target: { x: position.x, y: position.y, z: position.z }, trap_escape: escapeResult };
+1349:       }
+1350:     }

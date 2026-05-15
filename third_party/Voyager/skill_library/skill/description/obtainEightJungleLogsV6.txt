@@ -1,0 +1,3 @@
+async function obtainEightJungleLogs(bot) {
+    // This function aims to ensure the bot has at least eight jungle logs in its inventory. It first checks the current count and exits if the requirement is already met. If not enough logs are present, it searches for nearby jungle logs. If none are found nearby, it explores the area until a jungle log is located. Finally, it mines the necessary number of jungle logs to reach the target of eight.
+}

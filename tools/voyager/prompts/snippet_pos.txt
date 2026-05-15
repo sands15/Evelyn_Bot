@@ -1,0 +1,30 @@
+216: function toBlockPosition(vec) {
+217:   if (!hasFiniteVec3(vec)) return null;
+218:   const floored = typeof vec.floored === 'function'
+219:     ? vec.floored()
+220:     : { x: Math.floor(vec.x), y: Math.floor(vec.y), z: Math.floor(vec.z) };
+221:   if (!hasFiniteVec3(floored)) return null;
+222:   return { x: floored.x, y: floored.y, z: floored.z };
+223: }
+224: 
+225: function entityDistance(entity) {
+226:   if (!bot?.entity?.position || !entity?.position) return null;
+227:   return bot.entity.position.distanceTo(entity.position);
+228: }
+229: 
+230: function getFeetPosition() {
+231:   if (!hasFiniteVec3(bot?.entity?.position)) return null;
+232:   return bot.entity.position.floored();
+233: }
+234: 
+235: async function waitForFeetPosition(timeoutMs = 250, fallback = null) {
+236:   const deadline = Date.now() + Math.max(0, Number(timeoutMs || 0));
+237:   while (Date.now() <= deadline) {
+238:     const feet = getFeetPosition();
+239:     if (feet) return feet;
+240:     if (Date.now() >= deadline) break;
+241:     await delay(50);
+242:   }
+243:   return fallback;
+244: }
+245: 

@@ -1,0 +1,3 @@
+async function buildTemporaryShelter(bot) {
+    // This process constructs a small, temporary shelter around the bot's current location. It first calculates the required positions for a two-high wall ring and a roof structure. It then counts how many of these positions are currently empty air blocks. If there are missing blocks, it checks if enough dirt is available in the inventory, mining more if necessary. Finally, it places dirt blocks in all the calculated empty positions, avoiding the center and the block directly above it.
+}

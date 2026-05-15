@@ -1,0 +1,3 @@
+async function craftWoodenPickaxe(bot) {
+    // This routine checks if the bot already possesses a wooden pickaxe. If not, it verifies that the inventory contains at least three jungle planks and two sticks. It then searches for a crafting table within a 32-block radius. If a crafting table is found, it attempts to craft one wooden pickaxe. Finally, it confirms that the pickaxe was successfully added to the inventory.
+}

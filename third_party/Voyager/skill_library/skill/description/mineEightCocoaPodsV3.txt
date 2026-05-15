@@ -1,0 +1,3 @@
+async function mineEightCocoaPods(bot) {
+    // The function attempts to gather eight cocoa beans. It first checks if the required amount of beans is already in the inventory. If not, it searches nearby blocks to mine cocoa pods until enough beans are found or a set number of attempts is reached. If the initial search fails, it explores in specific directions to find and mine more cocoa pods. If all search efforts are exhausted without reaching the required bean count, an error is thrown.
+}

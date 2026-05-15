@@ -1,0 +1,59 @@
+959: function getNearbyEntities(limit = 8) {
+960:   if (!bot?.entities || !bot?.entity?.position) return [];
+961:   const entries = [];
+962:   for (const entity of Object.values(bot.entities)) {
+963:     if (!entity?.position || entity === bot.entity) continue;
+964:     const dist = entityDistance(entity);
+965:     if (dist == null || dist > 24) continue;
+966:     entries.push({
+967:       name: entity.name || entity.username || entity.displayName || entity.type || 'unknown',
+968:       type: entity.type || 'unknown',
+969:       kind: entity.kind || null,
+970:       distance: Number(dist.toFixed(2)),
+971:     });
+972:   }
+973:   entries.sort((a, b) => a.distance - b.distance);
+974:   return entries.slice(0, limit);
+975: }
+976: 
+977: function getNearbyBlocks(limit = 10) {
+978:   if (!bot?.findBlocks || !bot?.blockAt) return [];
+979:   try {
+980:     const found = bot.findBlocks({
+981:       matching: (block) => isInterestingBlockName(getBlockName(block)),
+982:       maxDistance: 20,
+983:       count: limit,
+984:     });
+985:     return found
+986:       .map((pos) => bot.blockAt(pos))
+987:       .filter(Boolean)
+988:       .map((block) => ({
+989:         name: block.name,
+990:         position: { x: block.position.x, y: block.position.y, z: block.position.z },
+991:         properties: getBlockProperties(block),
+992:       }));
+993:   } catch (_) {
+994:     return [];
+995:   }
+996: }
+997: 
+998: function getNamedBlocks(names, maxDistance = 16, count = 32) {
+999:   if (!bot?.findBlocks || !bot?.blockAt) return [];
+1000:   const wanted = new Set((names || []).map((value) => String(value)));
+1001:   try {
+1002:     const found = bot.findBlocks({
+1003:       matching: (block) => wanted.has(getBlockName(block)),
+1004:       maxDistance,
+1005:       count,
+1006:     });
+1007:     return found
+1008:       .map((pos) => bot.blockAt(pos))
+1009:       .filter(Boolean);
+1010:   } catch (_) {
+1011:     return [];
+1012:   }
+1013: }
+1014: 
+1015: function hasExposedFace(block) {
+1016:   if (!block?.position || !bot?.blockAt) return false;
+1017:   const offsets = [

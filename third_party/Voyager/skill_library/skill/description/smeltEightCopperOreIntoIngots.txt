@@ -1,0 +1,3 @@
+async function smeltEightCopperOreIntoIngots(bot) {
+    // The function checks if eight copper ingots are already present; if so, it stops. Otherwise, it determines how many more ingots are required. It then ensures a suitable pickaxe is equipped and attempts to find or explore for copper ore. After mining the necessary raw copper, it verifies the availability of coal and a furnace. If no furnace is found, it attempts to place one nearby. Finally, it smelts the raw copper into ingots and confirms that at least eight were successfully created.
+}

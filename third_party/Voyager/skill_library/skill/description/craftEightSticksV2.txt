@@ -1,0 +1,3 @@
+async function craftEightSticks(bot) {
+    // This logic checks if the bot already possesses at least eight sticks. If not, it determines how many more sticks are required. It then searches through various types of wooden planks to find one with enough quantity to perform the necessary crafting. If a suitable plank is found, the required number of sticks is crafted. Finally, it verifies that the bot now has eight or more sticks.
+}

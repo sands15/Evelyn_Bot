@@ -1,0 +1,3 @@
+async function craftOneStoneAxe(bot) {
+    // This function attempts to create a stone axe if one is not already present in the inventory. It first verifies that the bot possesses at least three cobblestone blocks and two sticks. It then searches for a crafting table within a 32-block radius. If a crafting table is found, it proceeds to craft one stone axe. Finally, it confirms that the stone axe was successfully added to the inventory.
+}

@@ -1,0 +1,3 @@
+async function mineEightLapisOre(bot) {
+    // The process begins by checking if eight lapis lazuli items are already in the inventory. If not, the bot equips the best available pickaxe from a predefined list. It then attempts to mine eight lapis ore blocks within a certain range. If that fails, the bot explores the area until lapis ore is located. Finally, it mines the required amount of lapis ore and verifies that at least eight items have been collected.
+}

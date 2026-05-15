@@ -1,0 +1,3 @@
+async function obtainFourCoal(bot) {
+    // The function attempts to gather four units of coal. It first checks the current inventory count and, if less than four, it tries to mine nearby coal or deepslate coal ore using an equipped pickaxe. If nearby resources are insufficient, it performs two short exploratory searches in different directions for coal ore. Finally, if the required amount is still not met after these searches, it throws an error indicating the search was exhausted.
+}

@@ -32,9 +32,7 @@ Evelyn Bot은 디스코드에서 텍스트와 음성으로 대화하는 개인�
   - DAVE 처리
   - UDP / gateway / sink 구현
 - `start.bat`
-  - LLM 서버 2개와 OmniVoice 서버를 띄우는 배치 파일
-- `run_bot.bat`
-  - 디스코드 봇 본체만 실행하는 배치 파일
+  - 통합 런처. LLM 서버들, OmniVoice 서버, 디스코드 봇을 함께 띄우는 배치 파일
 - `.env.example`
   - 환경변수 예시
 
@@ -294,15 +292,17 @@ pip install -r requirements.txt
 
 ## 실행 방법
 
-### 1) 서버들 실행
+### 1) 통합 실행
 
-`start.bat`는 봇 자체가 아니라, 로컬 추론 서버들을 띄우는 배치 파일입니다.
+`start.bat`는 현재 메인 통합 런처입니다. 로컬 추론 서버들, OmniVoice 서버, 디스코드 봇을 함께 띄웁니다.
 
 현재 구성:
 
-- `llama-server` 9821
-- `llama-server` 9820
+- Main LLM (`llama-server`) 9820
+- Router LLM (`llama-server`) 9822
+- Sub/Summary LLM (`llama-server`) 9821
 - `omnivoice-server` 8880
+- Discord bot
 
 실행:
 
@@ -340,19 +340,17 @@ create_omnivoice_profile.bat 내목소리 C:\path\to\ref_voice.wav "여기에 �
 
 처럼 호출하면 됩니다.
 
-### 2) 봇 본체 실행
+### 2) 봇만 직접 실행하고 싶을 때
 
-디스코드 봇은 `run_bot.bat`로 따로 실행합니다.
+기본 실행 경로는 `start.bat`입니다.
 
-```bat
-run_bot.bat
-```
-
-또는 직접:
+봇 프로세스만 직접 실행하고 싶다면 프로젝트 루트에서 아래처럼 실행할 수 있습니다.
 
 ```bash
 py -3 main.py
 ```
+
+단, 이 경우 필요한 LLM/TTS 서버들이 먼저 떠 있어야 합니다.
 
 ## 사용 예시
 

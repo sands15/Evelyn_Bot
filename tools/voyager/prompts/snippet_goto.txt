@@ -1,0 +1,69 @@
+1192: async function gotoGoalSafely(goal, timeoutMs, successPayload, failurePayload, options = {}) {
+1193:   const interruptOnThreat = options.interruptOnThreat !== false;
+1194:   const hostileDistance = Number(options.hostileDistance || 6);
+1195:   const deadlineMs = Math.max(500, Number(timeoutMs || 15000));
+1196:   let pathDone = false;
+1197:   let timeoutHandle = null;
+1198:   const guardedPath = bot.pathfinder.goto(goal)
+1199:     .then(() => ({ kind: 'ok' }))
+1200:     .catch((err) => ({ kind: 'path_error', err }))
+1201:     .finally(() => { pathDone = true; if (timeoutHandle) clearTimeout(timeoutHandle); });
+1202:   const timeoutWatcher = new Promise((resolve) => {
+1203:     timeoutHandle = setTimeout(() => resolve({ kind: 'timeout' }), deadlineMs);
+1204:   });
+1205: 
+1206:   if (!interruptOnThreat) {
+1207:     const outcome = await Promise.race([guardedPath, timeoutWatcher]);
+1208:     if (outcome.kind === 'ok') {
+1209:       updateState();
+1210:       return { status: 'ok', ...successPayload };
+1211:     }
+1212:     stopMovement();
+1213:     try { bot.pathfinder.setGoal(null); } catch (_) {}
+1214:     updateState();
+1215:     if (outcome.kind === 'timeout') {
+1216:       return { status: 'blocked', ...failurePayload, error: 'path_timeout', timeout_ms: deadlineMs };
+1217:     }
+1218:     return { status: 'blocked', ...failurePayload, error: String(outcome.err?.message || outcome.err) };
+1219:   }
+1220: 
+1221:   const raced = await Promise.race([
+1222:     guardedPath,
+1223:     timeoutWatcher,
+1224:     waitForThreatInterrupt(deadlineMs, hostileDistance, () => pathDone),
+1225:   ]);
+1226: 
+1227:   if (raced.kind === 'ok') {
+1228:     updateState();
+1229:     return { status: 'ok', ...successPayload };
+1230:   }
+1231:   if (raced.kind === 'path_error') {
+1232:     stopMovement();
+1233:     try { bot.pathfinder.setGoal(null); } catch (_) {}
+1234:     updateState();
+1235:     return { status: 'blocked', ...failurePayload, error: String(raced.err?.message || raced.err) };
+1236:   }
+1237:   if (raced.kind === 'interrupt') {
+1238:     stopMovement();
+1239:     try { bot.pathfinder.setGoal(null); } catch (_) {}
+1240:     updateState();
+1241:     return { status: 'blocked', reason: raced.reason, interrupt: raced, ...failurePayload };
+1242:   }
+1243:   if (raced.kind === 'timeout') {
+1244:     stopMovement();
+1245:     try { bot.pathfinder.setGoal(null); } catch (_) {}
+1246:     updateState();
+1247:     return { status: 'blocked', ...failurePayload, error: 'path_timeout', timeout_ms: deadlineMs };
+1248:   }
+1249: 
+1250:   const finalOutcome = await guardedPath;
+1251:   if (finalOutcome.kind === 'ok') {
+1252:     updateState();
+1253:     return { status: 'ok', ...successPayload };
+1254:   }
+1255:   stopMovement();
+1256:   try { bot.pathfinder.setGoal(null); } catch (_) {}
+1257:   updateState();
+1258:   return { status: 'blocked', ...failurePayload, error: String(finalOutcome.err?.message || finalOutcome.err) };
+1259: }
+1260: 

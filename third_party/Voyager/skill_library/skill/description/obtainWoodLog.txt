@@ -1,0 +1,3 @@
+async function obtainWoodLog(bot) {
+    // The function first checks if any type of wood log is already present in the inventory. If not, it attempts to collect up to four of the closest logs within a 32-block radius. If that fails, it explores in two different directions, attempting to collect a log upon reaching a target. If all these search attempts fail, it throws an error indicating that no reachable wood log could be found nearby.
+}

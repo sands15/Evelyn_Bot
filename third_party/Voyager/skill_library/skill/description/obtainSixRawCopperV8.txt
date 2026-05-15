@@ -1,0 +1,3 @@
+async function obtainSixRawCopper(bot) {
+    // The function aims to gather six raw copper items. It first checks if the required amount is already in the inventory and exits if so. It then selects an available pickaxe, either stone or wooden, and equips it. The process begins by searching for nearby copper ore blocks to mine. If not enough are found, it explores the area until copper ore is located. Finally, it mines the necessary amount of copper ore to ensure at least six raw copper items are obtained.
+}

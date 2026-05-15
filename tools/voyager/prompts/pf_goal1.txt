@@ -1,0 +1,26 @@
+445:       pathFromPlayer(results.path)
+446:       bot.emit('path_update', results)
+447:       path = results.path
+448:       astartTimedout = results.status === 'partial'
+449:     }
+450: 
+451:     if (bot.pathfinder.LOSWhenPlacingBlocks && returningPos) {
+452:       if (!moveToBlock(returningPos)) return
+453:       returningPos = null
+454:     }
+455: 
+456:     if (path.length === 0) {
+457:       lastNodeTime = performance.now()
+458:       if (stateGoal && stateMovements) {
+459:         if (stateGoal.isEnd(bot.entity.position.floored())) {
+460:           if (!dynamicGoal) {
+461:             bot.emit('goal_reached', stateGoal)
+462:             stateGoal = null
+463:             fullStop()
+464:           }
+465:         } else if (!pathUpdated) {
+466:           const results = bot.pathfinder.getPathTo(stateMovements, stateGoal)
+467:           bot.emit('path_update', results)
+468:           path = results.path
+469:           astartTimedout = results.status === 'partial'
+470:           pathUpdated = true

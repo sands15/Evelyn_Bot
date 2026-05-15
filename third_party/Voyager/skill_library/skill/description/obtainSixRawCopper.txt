@@ -1,0 +1,3 @@
+async function obtainSixRawCopper(bot) {
+    // This process aims to gather six units of raw copper. It first checks if the required amount is already present; otherwise, it ensures a stone pickaxe is available. If a stone pickaxe is missing, it attempts to craft one, which may involve mining stone using a wooden pickaxe if necessary. Once the stone pickaxe is equipped, the function repeatedly searches for and mines copper ore until six raw copper items are collected.
+}

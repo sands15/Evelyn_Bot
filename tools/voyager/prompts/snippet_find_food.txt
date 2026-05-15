@@ -1,0 +1,87 @@
+3879:     if (hostile) {
+3880:       let shield = null;
+3881:       if (countInventoryItems('shield') > 0) {
+3882:         shield = await equipShield();
+3883:       }
+3884:       const handled = await retreatFromHostile();
+3885:       return { status: 'blocked', reason: 'hostile_interrupt', hostile, shield, handled, step };
+3886:     }
+3887:     if ((bot.health ?? 20) <= 12 && !LOW_RISK_ACTIONS.has(String(action)) && !SURVIVAL_ACTIONS.has(String(action))) {
+3888:       const handled = await eatIfLow(16, 16);
+3889:       return { status: 'blocked', reason: 'low_health_interrupt', health: bot.health ?? 20, hunger: bot.food ?? 20, handled, step };
+3890:     }
+3891:   }
+3892: 
+3893:   if (action === 'retreat') {
+3894:     return await retreatFromHostile();
+3895:   }
+3896:   if (action === 'heal_or_regroup') {
+3897:     const hostile = findNearestHostile(12);
+3898:     if (hostile) {
+3899:       return await retreatFromHostile();
+3900:     }
+3901:     const health = bot.health ?? 20;
+3902:     const hunger = bot.food ?? 20;
+3903:     if (health < 16 || hunger < 18) {
+3904:       const foods = getFoodItems();
+3905:       if (!foods.length) {
+3906:         stopMovement();
+3907:         updateState();
+3908:         if (health < 16 && hunger >= 18) {
+3909:           return { status: 'ok', note: 'regrouped_healing_naturally', health: state.health, hunger: state.hunger };
+3910:         }
+3911:         return { status: 'blocked', reason: 'no_food_in_inventory', health: state.health, hunger: state.hunger };
+3912:       }
+3913:       return await consumeFoodFromInventory();
+3914:     }
+3915:     stopMovement();
+3916:     updateState();
+3917:     return { status: 'ok', note: 'regrouped_idle', health: state.health, hunger: state.hunger };
+3918:   }
+3919:   if (action === 'find_food_source') {
+3920:     const foods = getFoodItems();
+3921:     if (foods.length) {
+3922:       const shouldConsumeHeldFood = Number(bot?.food ?? 20) < 18 || Number(bot?.health ?? 20) < 16;
+3923:       if (shouldConsumeHeldFood) {
+3924:         const consumeResult = await eatIfLow(16, 18);
+3925:         if (consumeResult.status === 'ok' && consumeResult.note !== 'not_hungry_or_low_health') {
+3926:           return { ...consumeResult, note: 'food_in_inventory_consumed', items: foods.map((item) => item.name) };
+3927:         }
+3928:         if (consumeResult.status !== 'ok' && consumeResult.reason !== 'food_meter_full') {
+3929:           return { ...consumeResult, items: foods.map((item) => item.name) };
+3930:         }
+3931:       }
+3932:       updateState();
+3933:       return { status: 'ok', note: 'food_in_inventory', items: foods.map((item) => item.name), hunger: state.hunger, health: state.health };
+3934:     }
+3935:     const criticalFoodNeed = Number(bot?.food ?? 20) <= 4 || Number(bot?.health ?? 20) <= 10;
+3936:     const foodSearchPass = Math.max(0, Number(step._food_search_pass || 0));
+3937:     const maxFoodSearchPasses = criticalFoodNeed ? 3 : 2;
+3938:     const foodMobNames = ['cow', 'pig', 'chicken', 'sheep', 'rabbit', 'cod', 'salmon'];
+3939:     const foodSearchDistance = criticalFoodNeed ? 32 : 20;
+3940:     const nearbyFoodEntity = getNearestEntityByNames(foodMobNames, foodSearchDistance);
+3941:     let huntAttempt = null;
+3942:     if (nearbyFoodEntity) {
+3943:       const targetName = nearbyFoodEntity.name || nearbyFoodEntity.type;
+3944:       const expectedDrops = getExpectedFoodDropNamesForEntity(targetName);
+3945:       const inventoryBeforeHunt = snapshotInventory();
+3946:       const countBeforeHunt = countInventoryItemsByNamesInSnapshot(inventoryBeforeHunt, expectedDrops);
+3947:       const anchorPosition = nearbyFoodEntity.position ? toBlockPosition(nearbyFoodEntity.position) : null;
+3948:       const attackResult = await attackNearestEntity(foodMobNames, foodSearchDistance);
+3949:       let dropCollection = null;
+3950:       if (attackResult.status === 'ok') {
+3951:         dropCollection = await collectNearbyDrops(12, 4500, anchorPosition, 9);
+3952:       }
+3953:       updateState();
+3954:       const inventoryAfterHunt = snapshotInventory();
+3955:       const gainedFood = Math.max(0, countInventoryItemsByNamesInSnapshot(inventoryAfterHunt, expectedDrops) - countBeforeHunt);
+3956:       huntAttempt = {
+3957:         attack: attackResult,
+3958:         drop_collection: dropCollection,
+3959:         target: targetName,
+3960:         gained_food: gainedFood,
+3961:         inventory_changes: diffInventorySnapshots(inventoryBeforeHunt, inventoryAfterHunt),
+3962:       };
+3963:       if (attackResult.status === 'ok' && gainedFood > 0) {
+3964:         return {
+3965:           status: 'ok',

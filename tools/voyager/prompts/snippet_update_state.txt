@@ -1,0 +1,98 @@
+3588:     out[name] = {
+3589:       username: name,
+3590:       ping: info?.ping ?? null,
+3591:       entityId: info?.entity?.id ?? null,
+3592:       heldItem: info?.entity?.heldItem ? info.entity.heldItem.name : null,
+3593:       position: info?.entity?.position ? toBlockPosition(info.entity.position) : null,
+3594:       position_precise: info?.entity?.position ? toPrecisePosition(info.entity.position) : null,
+3595:     };
+3596:   }
+3597:   return out;
+3598: }
+3599: 
+3600: function snapshotInventory() {
+3601:   if (!bot || !bot.inventory || !Array.isArray(bot.inventory.items())) return {};
+3602:   const counts = {};
+3603:   for (const item of bot.inventory.items()) {
+3604:     counts[item.name] = (counts[item.name] || 0) + (item.count || 1);
+3605:   }
+3606:   return counts;
+3607: }
+3608: 
+3609: function updateState(options = {}) {
+3610:   if (!bot) return;
+3611:   const now = Date.now();
+3612:   const force = options.force === true;
+3613:   const includeHeavy = options.includeHeavy !== false;
+3614:   const periodic = options.periodic === true;
+3615:   const throttleMs = Math.max(0, Number(options.throttleMs || 0));
+3616:   if (!force && throttleMs > 0 && (now - lastStateUpdateAt) < throttleMs) return;
+3617: 
+3618:   state.connected = !!bot.player;
+3619:   state.active = !!bot.player;
+3620:   state.health = bot.health ?? state.health;
+3621:   state.hunger = bot.food ?? state.hunger;
+3622:   state.difficulty = normalizeDifficulty(bot?.game?.difficulty ?? bot?.game?.difficultyName ?? state.difficulty);
+3623:   state.food_saturation = Number.isFinite(Number(bot?.foodSaturation)) ? Number(bot.foodSaturation) : state.food_saturation;
+3624:   state.starvation_expected = starvationExpected(state.difficulty, state.health, state.hunger);
+3625:   state.held_item = bot.heldItem ? bot.heldItem.name : null;
+3626:   state.position_precise = bot.entity?.position ? toPrecisePosition(bot.entity.position) : null;
+3627:   state.position_block = bot.entity?.position ? toBlockPosition(bot.entity.position) : null;
+3628:   state.position = state.position_block;
+3629:   if (state.position_precise && state.position_block) {
+3630:     lastFinitePositionAt = now;
+3631:     invalidPositionSince = 0;
+3632:   } else if (bot.entity?.position && !hasFiniteVec3(bot.entity.position) && !invalidPositionSince) {
+3633:     invalidPositionSince = now;
+3634:   }
+3635:   state.hostiles_nearby = 0;
+3636:   state.nearest_hostile = null;
+3637:   state.is_day = bot?.time ? !!bot.time.isDay : state.is_day;
+3638:   state.time_of_day = bot?.time?.timeOfDay ?? state.time_of_day;
+3639:   state.immediate_hazards = detectImmediateHazards();
+3640: 
+3641:   if (bot.entities) {
+3642:     for (const entity of Object.values(bot.entities)) {
+3643:       if (!entity?.position || !bot.entity?.position) continue;
+3644:       if (!isHostileEntity(entity)) continue;
+3645:       const dist = bot.entity.position.distanceTo(entity.position);
+3646:       if (dist <= 12) state.hostiles_nearby += 1;
+3647:       if (!state.nearest_hostile || Number(dist) < Number(state.nearest_hostile.distance || Infinity)) {
+3648:         state.nearest_hostile = {
+3649:           name: entity.name || entity.type || 'mob',
+3650:           distance: dist,
+3651:           position: toBlockPosition(entity.position),
+3652:         };
+3653:       }
+3654:     }
+3655:   }
+3656:   if (state.position_block && state.immediate_hazards.length === 0 && Number(state.hostiles_nearby || 0) === 0) {
+3657:     lastKnownSafePosition = { ...state.position_block };
+3658:   }
+3659: 
+3660:   const shouldRefreshHeavy = includeHeavy && (
+3661:     force
+3662:     || !periodic
+3663:     || (now - lastHeavyStateRefreshAt) >= HEAVY_STATE_REFRESH_MS
+3664:   );
+3665:   if (shouldRefreshHeavy) {
+3666:     state.inventory = snapshotInventory();
+3667:     state.players = snapshotPlayers();
+3668:     state.nearby_entity_details = getNearbyEntities();
+3669:     state.nearby_entities = state.nearby_entity_details.map((entity) => entity.name);
+3670:     state.nearby_blocks = getNearbyBlocks().map((block) => block.name);
+3671:     const detailedHostiles = state.nearby_entity_details.filter((entity) => entity?.type === 'hostile');
+3672:     if (detailedHostiles.length) {
+3673:       const closeHostiles = detailedHostiles.filter((entity) => Number(entity.distance || Infinity) <= 12);
+3674:       state.hostiles_nearby = Math.max(Number(state.hostiles_nearby || 0), closeHostiles.length);
+3675:       const nearestDetailed = detailedHostiles.reduce((best, entity) => {
+3676:         if (!best) return entity;
+3677:         return Number(entity.distance || Infinity) < Number(best.distance || Infinity) ? entity : best;
+3678:       }, null);
+3679:       if (nearestDetailed && (!state.nearest_hostile || Number(nearestDetailed.distance || Infinity) < Number(state.nearest_hostile.distance || Infinity))) {
+3680:         state.nearest_hostile = {
+3681:           name: nearestDetailed.name || nearestDetailed.kind || 'hostile',
+3682:           distance: Number(nearestDetailed.distance || Infinity),
+3683:           position: nearestDetailed.position || null,
+3684:         };
+3685:       }

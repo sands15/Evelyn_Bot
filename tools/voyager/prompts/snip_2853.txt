@@ -1,0 +1,17 @@
+2844:     const eatResult = await eatIfLow(12, 14);
+2845:     if (eatResult.status === 'ok' && eatResult.note === 'consumed_food') {
+2846:       return { ...eatResult, note: 'ate_before_attack', target: entity.name || entity.username || entity.type };
+2847:     }
+2848:   }
+2849:   const combatTool = await equipBestCombatTool();
+2850:   const moveResult = await moveNearEntity(entity, 2, 10000);
+2851:   if (moveResult.status !== 'ok') return { status: 'blocked', reason: 'target_entity_unreachable', move: moveResult, combat_tool: combatTool };
+2852:   const distanceBeforeAttack = entityDistance(entity);
+2853:   stopMovement();
+2854:   try { await bot.lookAt(entity.position.offset(0, 1.2, 0), true); } catch (_) {}
+2855:   let knockbackAttempted = false;
+2856:   let swings = 0;
+2857:   try {
+2858:     if (bot?.setControlState) {
+2859:       bot.setControlState('forward', true);
+2860:       bot.setControlState('sprint', true);

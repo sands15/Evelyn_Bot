@@ -1,0 +1,3 @@
+async function mineFourJungleLogs(bot) {
+    // This function attempts to gather four jungle logs. It first checks the current inventory to see if the required amount is already present. If not, it searches for nearby jungle log blocks within a 32-block radius. If logs are found, it proceeds to mine the necessary quantity. If, after the search, the required number of logs is still not met, it throws an error indicating that fewer than four logs were available locally.
+}

@@ -1,0 +1,164 @@
+477: function isHazardousBlock(block) {
+478:   return HAZARD_BLOCK_NAMES.has(getBlockName(block));
+479: }
+480: 
+481: function isSolidBlock(block) {
+482:   return !!block && !isAirBlock(block) && block.boundingBox !== 'empty';
+483: }
+484: 
+485: function countVerticalClearance(position, maxHeight = 2) {
+486:   if (!position || !bot?.blockAt) return 0;
+487:   let clear = 0;
+488:   for (let dy = 0; dy < maxHeight; dy += 1) {
+489:     if (!isAirBlock(bot.blockAt(position.offset(0, dy, 0)))) break;
+490:     clear += 1;
+491:   }
+492:   return clear;
+493: }
+494: 
+495: function hasBodyClearanceAt(position, height = 2) {
+496:   return countVerticalClearance(position, height) >= height;
+497: }
+498: 
+499: function canTraverseBetween(from, to, options = {}) {
+500:   if (!from || !to) return false;
+501:   const dx = Math.abs(to.x - from.x);
+502:   const dz = Math.abs(to.z - from.z);
+503:   const dy = Math.abs(to.y - from.y);
+504:   if (dx > 1 || dz > 1 || dy > 1) return false;
+505:   if (!isPassableAt(to, options)) return false;
+506:   if (dy > 0 && countVerticalClearance(to, 2) < 2) return false;
+507:   return true;
+508: }
+509: 
+510: function countTraversableNeighbors(position, options = {}) {
+511:   if (!position) return 0;
+512:   let count = 0;
+513:   for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+514:     for (const dy of [0, -1, 1]) {
+515:       const candidate = position.offset(dx, dy, dz);
+516:       if (canTraverseBetween(position, candidate, options)) {
+517:         count += 1;
+518:         break;
+519:       }
+520:     }
+521:   }
+522:   return count;
+523: }
+524: 
+525: function isBasePassableAt(position) {
+526:   if (!bot?.blockAt || !position) return false;
+527:   const belowBlock = bot.blockAt(position.offset(0, -1, 0));
+528:   return hasBodyClearanceAt(position, 2) && isSolidBlock(belowBlock) && !isHazardousBlock(belowBlock);
+529: }
+530: 
+531: function isPassableAt(position, options = {}) {
+532:   if (!isBasePassableAt(position)) return false;
+533:   if (options.allowConfinedPit !== true && isConfinedPitPosition(position)) return false;
+534:   if (options.allowNarrowLedge !== true && isNarrowLedgePosition(position)) return false;
+535:   return true;
+536: }
+537: 
+538: function countSideWalls(position) {
+539:   const offsets = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+540:   let walls = 0;
+541:   for (const [dx, dz] of offsets) {
+542:     if (isSolidBlock(bot?.blockAt?.(position.offset(dx, 0, dz)))) walls += 1;
+543:   }
+544:   return walls;
+545: }
+546: 
+547: function countSafeSupportBlocks(position, radius = 1) {
+548:   if (!position || !bot?.blockAt) return 0;
+549:   let supports = 0;
+550:   for (let dx = -radius; dx <= radius; dx += 1) {
+551:     for (let dz = -radius; dz <= radius; dz += 1) {
+552:       const support = bot.blockAt(position.offset(dx, -1, dz));
+553:       if (isSolidBlock(support) && !isHazardousBlock(support)) supports += 1;
+554:     }
+555:   }
+556:   return supports;
+557: }
+558: 
+559: function findSafeSupportDepth(position, maxDepth = 6) {
+560:   if (!position || !bot?.blockAt) return null;
+561:   for (let depth = 1; depth <= maxDepth; depth += 1) {
+562:     const support = bot.blockAt(position.offset(0, -depth, 0));
+563:     if (isAirBlock(support)) continue;
+564:     if (!isSolidBlock(support) || isHazardousBlock(support)) return null;
+565:     return depth;
+566:   }
+567:   return null;
+568: }
+569: 
+570: function countOpenDropSides(position, minDropDepth = 2) {
+571:   if (!position || !bot?.blockAt) return 0;
+572:   let count = 0;
+573:   for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+574:     const side = position.offset(dx, 0, dz);
+575:     if (countVerticalClearance(side, 2) < 2) continue;
+576:     const supportDepth = findSafeSupportDepth(side, Math.max(4, minDropDepth + 2));
+577:     if (supportDepth == null || supportDepth >= minDropDepth) {
+578:       count += 1;
+579:     }
+580:   }
+581:   return count;
+582: }
+583: 
+584: function hasImmediateFallRisk(position) {
+585:   if (!position || !bot?.blockAt) return false;
+586:   const below = bot.blockAt(position.offset(0, -1, 0));
+587:   if (!below || !isAirBlock(below)) return false;
+588:   const safeSupportDepth = findSafeSupportDepth(position, 5);
+589:   const verticalVelocity = Number(bot?.entity?.velocity?.y || 0);
+590:   const onGround = !!bot?.entity?.onGround;
+591:   const safeSupports = countSafeSupportBlocks(position, 1);
+592:   const traversableNeighbors = countTraversableNeighbors(position);
+593:   if (verticalVelocity < -0.18) return true;
+594:   if (!onGround && verticalVelocity < -0.03) return true;
+595:   if (safeSupportDepth === null) {
+596:     return safeSupports === 0 && traversableNeighbors <= 1;
+597:   }
+598:   if (safeSupportDepth >= 5 && safeSupports <= 1 && traversableNeighbors === 0) {
+599:     return true;
+600:   }
+601:   return false;
+602: }
+603: 
+604: function isConfinedPitPosition(position) {
+605:   if (!position || !bot?.blockAt) return false;
+606:   if (!isBasePassableAt(position)) return false;
+607:   const supportDepth = findSafeSupportDepth(position, 6);
+608:   if (supportDepth == null || supportDepth < 1) return false;
+609:   const sideWalls = countSideWalls(position);
+610:   const traversableNeighbors = countTraversableNeighbors(position, { allowConfinedPit: true, allowNarrowLedge: true });
+611:   const immediateExit = hasImmediateLateralExit(position, { allowConfinedPit: true, allowNarrowLedge: true });
+612:   return (sideWalls >= 3 && traversableNeighbors <= 1) || (supportDepth >= 2 && !immediateExit && sideWalls >= 2 && traversableNeighbors <= 2);
+613: }
+614: 
+615: function isNarrowLedgePosition(position) {
+616:   if (!position || !bot?.blockAt) return false;
+617:   if (!isBasePassableAt(position)) return false;
+618:   const supportDepth = findSafeSupportDepth(position, 4);
+619:   if (supportDepth == null || supportDepth !== 1) return false;
+620:   const openDropSides = countOpenDropSides(position, 2);
+621:   if (openDropSides < 2) return false;
+622:   const safeSupports = countSafeSupportBlocks(position, 1);
+623:   const traversableNeighbors = countTraversableNeighbors(position, { allowConfinedPit: true, allowNarrowLedge: true });
+624:   return safeSupports <= 4 && traversableNeighbors <= 2;
+625: }
+626: 
+627: function movementStepHazardCost(block) {
+628:   const position = block?.position;
+629:   if (!position) return 0;
+630:   if (hasImmediateFallRisk(position)) return 100;
+631:   if (countVerticalClearance(position, 2) < 2) return 100;
+632:   if (isConfinedPitPosition(position)) return 100;
+633:   if (isNarrowLedgePosition(position)) return 100;
+634:   const supportDepth = findSafeSupportDepth(position, 6);
+635:   const traversableNeighbors = countTraversableNeighbors(position);
+636:   const sideWalls = countSideWalls(position);
+637:   const openDropSides = countOpenDropSides(position, 2);
+638:   if (supportDepth != null && supportDepth >= 1 && sideWalls >= 2 && traversableNeighbors <= 2) return 20;
+639:   if (openDropSides >= 1 && traversableNeighbors <= 2) return 25;
+640:   return 0;

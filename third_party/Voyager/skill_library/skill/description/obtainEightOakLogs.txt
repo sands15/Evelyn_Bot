@@ -1,0 +1,3 @@
+async function obtainEightOakLogs(bot) {
+    // The function attempts to gather eight oak logs for the bot. It first checks the current inventory count and tries to mine any nearby oak logs if fewer than eight are present. If the goal is not met, it explores two specific directions to search for more logs. If logs are found during exploration, it attempts to mine them. If, after these searches, the required eight logs are still not obtained, it throws an error indicating the search was exhausted.
+}

@@ -1,0 +1,3 @@
+async function mineTwelveLapisOre(bot) {
+    // The process first checks if at least twelve lapis lazuli items are already present in the inventory, exiting if so. It then ensures an iron pickaxe is equipped before attempting to mine. The function iteratively searches for and mines lapis ore blocks until twelve items are collected or no more ore is found in the initial search. If the goal is not met, it performs a broader exploration to locate more ore. Finally, it continues mining until the required twelve lapis lazuli items are obtained or an error is thrown.
+}

@@ -1,0 +1,3 @@
+async function craftOneWoodenSword(bot) {
+    // This process first checks if a wooden sword is already present in the inventory. If not, it attempts to locate or build a crafting table nearby. If a table is needed, it ensures there are enough planks, crafting one if necessary. After securing a crafting table, it verifies the availability of planks and sticks. Finally, it crafts and confirms the presence of one wooden sword.
+}

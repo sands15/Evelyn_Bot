@@ -1,0 +1,3 @@
+async function craftOneIronLeggings(bot) {
+    // This function ensures a crafting table is nearby, gathering wood and crafting planks if necessary. It then checks if enough iron ingots are available to craft iron leggings. If not, it ensures a furnace is present, mines stone if needed, and smelts raw iron using coal. Finally, it crafts and verifies the presence of one pair of iron leggings.
+}

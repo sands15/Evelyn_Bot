@@ -1,0 +1,23 @@
+3450:       reason: 'generated_skill_runtime_error',
+3451:       error: String(err?.message || err),
+3452:       skill_name: step?.skill_name || null,
+3453:       inventory: state.inventory,
+3454:       position: state.position,
+3455:     };
+3456:   }
+3457: }
+3458: 
+3459: async function retreatFromHostile() {
+3460:   const hostile = findNearestHostile(16);
+3461:   if (!hostile) {
+3462:     stopMovement();
+3463:     updateState();
+3464:     return { status: 'ok', note: 'safe_now', position: state.position };
+3465:   }
+3466:   try {
+3467:     if (bot.lookAt && hostile?.position) {
+3468:       await bot.lookAt(hostile.position.offset(0, 1.4, 0), true);
+3469:     }
+3470:   } catch (_) {}
+3471: 
+3472:   const beforeFeet = getFeetPosition();

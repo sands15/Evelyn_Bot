@@ -1,0 +1,3 @@
+async function mineSixJungleLogs(bot) {
+    // The function attempts to gather six jungle logs. It first checks the current inventory count and, if fewer than six are present, it searches for nearby logs to mine. If the required amount is still not met, it begins exploring the surroundings to locate more jungle logs. Once found, it mines the necessary quantity to reach the target of six logs. If the final count is still below six, an error is thrown.
+}

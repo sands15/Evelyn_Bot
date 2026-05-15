@@ -1,0 +1,3 @@
+async function obtainEightRawCopper(bot) {
+    // The function checks if the bot already possesses at least eight raw copper items. If not, it attempts to locate a suitable pickaxe in the inventory. It then searches for copper ore blocks nearby or explores until one is found. If copper ore is located, the function proceeds to mine the required number of blocks to reach the target count. Finally, it verifies that eight raw copper items have been successfully obtained.
+}

@@ -1,0 +1,3 @@
+async function craftOneIronShovel(bot) {
+    // This function attempts to craft a single iron shovel if one is not already present. It first ensures the bot has at least two sticks, crafting them if necessary. If iron ingots are missing, it searches for and mines iron ore, then smelts the raw iron using a nearby furnace and coal. Finally, it crafts the iron shovel using the required materials.
+}

@@ -1,0 +1,3 @@
+async function obtainEightRawIron(bot) {
+    // The function checks if eight units of raw iron are already present in the inventory; if so, it stops. Otherwise, it ensures an appropriate pickaxe is equipped. It then attempts to mine the required amount of iron ore in the immediate vicinity. If that fails, it performs a limited exploration to search for iron ore. After each search attempt, it tries to mine the remaining needed iron. If all search attempts fail to yield the required amount, it throws an error indicating the search was exhausted.
+}

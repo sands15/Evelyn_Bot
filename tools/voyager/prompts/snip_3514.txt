@@ -1,0 +1,15 @@
+3506: 
+3507:   if (!movedByPath) {
+3508:     bot.setControlState('back', true);
+3509:     bot.setControlState('sprint', true);
+3510:     if ((entityDistance(hostile) ?? 999) < 4) {
+3511:       bot.setControlState('jump', true);
+3512:     }
+3513:     await delay(1200);
+3514:     stopMovement();
+3515:   }
+3516: 
+3517:   const afterFeet = getFeetPosition();
+3518:   if (beforeFeet) markRecoveryPosition(beforeFeet, 12000);
+3519:   if (afterFeet) markRecoveryPosition(afterFeet, 12000);
+3520: 

@@ -1,0 +1,3 @@
+async function craftEightSticks(bot) {
+    // This function aims to ensure the bot has at least eight sticks in its inventory. It first checks if the required number of sticks is already present. If not, it calculates how many sticks are needed and determines the necessary amount of jungle planks. If planks are insufficient, it checks for and crafts the required jungle planks from jungle logs. Finally, it crafts the remaining sticks using the available planks.
+}

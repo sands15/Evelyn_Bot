@@ -1,0 +1,16 @@
+2688:   return !findNearestHostile(hostileRadius);
+2689: }
+2690: 
+2691: async function waitForDaylight(maxWaitMs = 15000, pollMs = 1000) {
+2692:   const waitBudget = Math.max(1000, Number(maxWaitMs || 0));
+2693:   const tick = Math.max(250, Number(pollMs || 1000));
+2694:   const started = Date.now();
+2695:   stopMovement();
+2696:   while (isNightTime() && (Date.now() - started) < waitBudget) {
+2697:     if (findNearestHostile(14)) {
+2698:       updateState();
+2699:       return { status: 'blocked', reason: 'hostile_during_daylight_wait', position: state.position, time_of_day: state.time_of_day };
+2700:     }
+2701:     await delay(Math.min(tick, waitBudget - (Date.now() - started)));
+2702:     updateState();
+2703:   }

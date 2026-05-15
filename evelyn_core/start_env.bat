@@ -2,6 +2,15 @@
 if defined EVELYN_START_ENV_LOADED goto :eof
 set "EVELYN_START_ENV_LOADED=1"
 
+set "EVELYN_CORE_ROOT=%~dp0"
+set "EVELYN_PROJECT_ROOT=%~dp0.."
+set "EVELYN_CORE_RUNTIME=%~dp0runtime"
+if defined PYTHONPATH (
+    set "PYTHONPATH=%EVELYN_CORE_RUNTIME%;%PYTHONPATH%"
+) else (
+    set "PYTHONPATH=%EVELYN_CORE_RUNTIME%"
+)
+
 REM ===== Shared launch settings =====
 if "%LLAMA_DIR%"=="" set "LLAMA_DIR=/mnt/c/Users/Admin/llama.cpp"
 if "%VENV_ACT%"=="" set "VENV_ACT=source ~/venvs/vllm-env/bin/activate"
@@ -12,7 +21,7 @@ if "%MAIN_LLM_CONTEXT%"=="" set "MAIN_LLM_CONTEXT=4096"
 if "%MAIN_LLM_N_PARALLEL%"=="" set "MAIN_LLM_N_PARALLEL=1"
 if "%MAIN_LLM_REASONING%"=="" set "MAIN_LLM_REASONING=off"
 if "%MAIN_LLM_REASONING_BUDGET%"=="" set "MAIN_LLM_REASONING_BUDGET=0"
-if "%MAIN_LLM_MODEL%"=="" set "MAIN_LLM_MODEL=/home/sands12/.cache/huggingface/hub/models--unsloth--gemma-4-E4B-it-GGUF/snapshots/ce152932ac27bc40bc9c727386760424d50bb456/gemma-4-E4B-it-Q5_K_M.gguf"
+if "%MAIN_LLM_MODEL%"=="" set "MAIN_LLM_MODEL=/mnt/c/Users/Admin/llama.cpp/models/supergemma4-e4b-abliterated-Q5_K_M.gguf"
 
 if "%SUB_LLM_GPU%"=="" set "SUB_LLM_GPU=0"
 if "%SUB_LLM_PORT%"=="" set "SUB_LLM_PORT=9821"
@@ -32,6 +41,18 @@ if "%OMNIVOICE_PROFILE_DIR%"=="" set "OMNIVOICE_PROFILE_DIR=%~dp0..\omnivoice_pr
 if "%TTS_PORT%"=="" set "TTS_PORT=8880"
 if "%TTS_GPU%"=="" set "TTS_GPU=0"
 if "%TTS_DEVICE%"=="" set "TTS_DEVICE=cuda"
+
+set "MINEFLAYER_HOST=127.0.0.1"
+if "%MINEFLAYER_PORT%"=="" set "MINEFLAYER_PORT=25565"
+if "%MINEFLAYER_USERNAME%"=="" set "MINEFLAYER_USERNAME=sands12@naver.com"
+if "%MINEFLAYER_AUTH%"=="" set "MINEFLAYER_AUTH=microsoft"
+if "%MINEFLAYER_PROFILES_FOLDER%"=="" set "MINEFLAYER_PROFILES_FOLDER=%~dp0..\bot_profiles"
+
+if "%VOYAGER_ACTION_BACKEND%"=="" set "VOYAGER_ACTION_BACKEND=codex-gateway"
+if "%VOYAGER_CODEX_GATEWAY_HOST%"=="" set "VOYAGER_CODEX_GATEWAY_HOST=127.0.0.1"
+if "%VOYAGER_CODEX_GATEWAY_PORT%"=="" set "VOYAGER_CODEX_GATEWAY_PORT=8787"
+if "%VOYAGER_CODEX_GATEWAY_URL%"=="" set "VOYAGER_CODEX_GATEWAY_URL=http://%VOYAGER_CODEX_GATEWAY_HOST%:%VOYAGER_CODEX_GATEWAY_PORT%/codex/action"
+if "%VOYAGER_CODEX_GATEWAY_PYTHON_EXE%"=="" set "VOYAGER_CODEX_GATEWAY_PYTHON_EXE=%~dp0..\.venv-voyager\Scripts\python.exe"
 
 if "%OPUS_ERROR_TO_SILENCE%"=="" set "OPUS_ERROR_TO_SILENCE=true"
 if "%STT_USE_RAW_48K%"=="" set "STT_USE_RAW_48K=false"

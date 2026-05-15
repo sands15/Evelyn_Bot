@@ -1,0 +1,3 @@
+async function craftEightWoodPlanksTask(bot) {
+    // This function checks if the bot possesses at least eight wood planks across various types. If not, it iterates through different types of logs available in the inventory. For each log type, it calculates how many planks are still needed to reach eight. It then crafts the necessary number of planks from the available logs until the target of eight planks is met. If, after checking all logs, the required eight planks are still not present, it throws an error.
+}

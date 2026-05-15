@@ -1,0 +1,49 @@
+1117: function ensureMovementProfile() {
+1118:   if (!bot || !pathfinderPlugin || !Movements || !minecraftData) return false;
+1119:   if (movementProfile) {
+1120:     syncInteractionPluginMovements();
+1121:     return true;
+1122:   }
+1123:   try {
+1124:     const mcData = minecraftData(bot.version);
+1125:     movementProfile = new Movements(bot, mcData);
+1126:     movementProfile.canDig = false;
+1127:     movementProfile.allow1by1towers = false;
+1128:     movementProfile.allowFreeMotion = false;
+1129:     movementProfile.allowParkour = false;
+1130:     movementProfile.allowSprinting = true;
+1131:     movementProfile.allowEntityDetection = true;
+1132:     movementProfile.maxDropDown = 1;
+1133:     movementProfile.exclusionAreasStep = [movementStepHazardCost];
+1134:     if (bot.pathfinder?.setMovements) {
+1135:       bot.pathfinder.setMovements(movementProfile);
+1136:     }
+1137:     syncInteractionPluginMovements();
+1138:     return true;
+1139:   } catch (err) {
+1140:     state.last_error = `movement_profile:${err?.message || err}`;
+1141:     return false;
+1142:   }
+1143: }
+1144: 
+1145: async function withMovementProfileOverrides(overrides, fn) {
+1146:   if (!ensureMovementProfile()) {
+1147:     return await fn();
+1148:   }
+1149:   const entries = Object.entries(overrides || {}).filter(([, value]) => value !== undefined);
+1150:   if (!entries.length) {
+1151:     return await fn();
+1152:   }
+1153:   const previous = new Map();
+1154:   try {
+1155:     for (const [key, value] of entries) {
+1156:       previous.set(key, movementProfile[key]);
+1157:       movementProfile[key] = value;
+1158:     }
+1159:     if (bot.pathfinder?.setMovements) {
+1160:       bot.pathfinder.setMovements(movementProfile);
+1161:     }
+1162:     syncInteractionPluginMovements();
+1163:     return await fn();
+1164:   } finally {
+1165:     for (const [key, value] of previous.entries()) {

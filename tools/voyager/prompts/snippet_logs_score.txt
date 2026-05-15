@@ -1,0 +1,134 @@
+807:   switch (String(entityName || '').toLowerCase()) {
+808:     case 'cow':
+809:       return ['beef'];
+810:     case 'pig':
+811:       return ['porkchop'];
+812:     case 'sheep':
+813:       return ['mutton'];
+814:     case 'chicken':
+815:       return ['chicken'];
+816:     case 'rabbit':
+817:       return ['rabbit'];
+818:     case 'cod':
+819:       return ['cod'];
+820:     case 'salmon':
+821:       return ['salmon'];
+822:     default:
+823:       return [];
+824:   }
+825: }
+826: 
+827: function totalPlankCount() {
+828:   return countInventoryItemsWhere((name) => name.endsWith('_planks'));
+829: }
+830: 
+831: function totalStoneToolMaterialCount() {
+832:   return countInventoryItemsByNames(STONE_TOOL_MATERIAL_NAMES);
+833: }
+834: 
+835: function logNameToPlankName(logName) {
+836:   return String(logName || '').replace(/_log$/, '_planks');
+837: }
+838: 
+839: function findFirstInventoryLogName() {
+840:   for (const logName of LOG_BLOCK_NAMES) {
+841:     if (countInventoryItems(logName) > 0) return logName;
+842:   }
+843:   return null;
+844: }
+845: 
+846: function getRegistryItem(name) {
+847:   return bot?.registry?.itemsByName?.[name] || null;
+848: }
+849: 
+850: function getBlockName(block) {
+851:   return String(block?.name || '');
+852: }
+853: 
+854: function getBlockProperties(block) {
+855:   try {
+856:     return typeof block?.getProperties === 'function' ? (block.getProperties() || {}) : {};
+857:   } catch (_) {
+858:     return {};
+859:   }
+860: }
+861: 
+862: function isAirBlock(block) {
+863:   const name = getBlockName(block);
+864:   return !block || name === 'air' || block.boundingBox === 'empty';
+865: }
+866: 
+867: function isDoorLikeBlockName(name) {
+868:   return name.endsWith('_door') || name.endsWith('_trapdoor') || name.endsWith('_fence_gate');
+869: }
+870: 
+871: function isSwitchBlockName(name) {
+872:   return name === 'lever' || name.endsWith('_button');
+873: }
+874: 
+875: function isBedBlockName(name) {
+876:   return name.endsWith('_bed');
+877: }
+878: 
+879: function getCropConfigBySeedOrCrop(name) {
+880:   if (!name) return null;
+881:   const lowered = String(name).toLowerCase();
+882:   return SIMPLE_CROP_CONFIGS.find((config) => config.seed === lowered || config.crop === lowered) || null;
+883: }
+884: 
+885: function findAvailableCropConfig(preferred = null) {
+886:   const preferredConfig = getCropConfigBySeedOrCrop(preferred);
+887:   if (preferredConfig) {
+888:     return getInventoryItem(preferredConfig.seed) ? preferredConfig : null;
+889:   }
+890:   for (const config of SIMPLE_CROP_CONFIGS) {
+891:     if (getInventoryItem(config.seed)) return config;
+892:   }
+893:   return null;
+894: }
+895: 
+896: function isMatureCropBlock(block) {
+897:   const name = getBlockName(block);
+898:   const config = SIMPLE_CROP_CONFIGS.find((entry) => entry.crop === name);
+899:   if (!config) return false;
+900:   const props = getBlockProperties(block);
+901:   const age = Number(props.age ?? -1);
+902:   return Number.isFinite(age) && age >= Number(config.matureAge);
+903: }
+904: 
+905: function isInterestingBlockName(name) {
+906:   return LOG_BLOCK_NAMES.includes(name)
+907:     || BASIC_RESOURCE_BLOCK_NAMES.includes(name)
+908:     || STONE_BLOCK_NAMES.includes(name)
+909:     || COAL_BLOCK_NAMES.includes(name)
+910:     || IRON_BLOCK_NAMES.includes(name)
+911:     || SOFT_RESOURCE_BLOCK_NAMES.includes(name)
+912:     || name === 'crafting_table'
+913:     || CONTAINER_BLOCK_NAMES.includes(name)
+914:     || FURNACE_BLOCK_NAMES.includes(name)
+915:     || name === 'farmland'
+916:     || SIMPLE_CROP_CONFIGS.some((config) => config.crop === name)
+917:     || isDoorLikeBlockName(name)
+918:     || isSwitchBlockName(name)
+919:     || isBedBlockName(name);
+920: }
+921: 
+922: function findNearestBlockByPredicate(predicate, maxDistance = 16) {
+923:   if (!bot?.findBlock) return null;
+924:   try {
+925:     return bot.findBlock({
+926:       matching: (block) => {
+927:         try {
+928:           return !!predicate(block);
+929:         } catch (_) {
+930:           return false;
+931:         }
+932:       },
+933:       maxDistance,
+934:     });
+935:   } catch (_) {
+936:     return null;
+937:   }
+938: }
+939: 
+940: function getNearestEntityByNames(names, maxDistance = 16) {

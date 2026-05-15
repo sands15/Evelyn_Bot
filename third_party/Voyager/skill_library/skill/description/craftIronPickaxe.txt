@@ -1,0 +1,3 @@
+async function craftIronPickaxe(bot) {
+    // This process aims to create an iron pickaxe if one is not already present. It first checks for a crafting table and ensures the necessary sticks are available by crafting them if needed. If iron ingots are insufficient, it attempts to mine iron ore and smelt it using a furnace. Finally, it crafts the iron pickaxe using the required materials.
+}

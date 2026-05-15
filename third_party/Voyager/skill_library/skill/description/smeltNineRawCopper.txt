@@ -1,0 +1,3 @@
+async function smeltNineRawCopper(bot) {
+    // The function checks if nine copper ingots are already present; if not, it verifies if enough raw copper is available. It then ensures there is enough coal for fuel, mining coal ore if necessary using a stone pickaxe. If coal is still insufficient, it searches for more coal ore to mine. Finally, it ensures a furnace exists, crafting and placing one if needed, before smelting the raw copper into ingots.
+}

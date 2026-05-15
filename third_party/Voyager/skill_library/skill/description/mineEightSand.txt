@@ -1,0 +1,3 @@
+async function mineEightSand(bot) {
+    // This function attempts to gather eight units of sand. It first checks the current inventory count to see if the goal has been met. If not, it searches the immediate vicinity for sand blocks and mines as many as needed. If local searching fails, it probes in two specific directions for sand. If after all attempts the required amount is still not present, it throws an error indicating the search was exhausted.
+}

@@ -29,3 +29,13 @@ bot_memory/
 debug_audio/
 guild_settings/
 omnivoice_profiles/
+
+.venv-voyager/
+node_modules/
+.evelyn_bot.lock
+
+bot_profiles/*-cache.json
+archive/logs/
+archive/scratch/
+archive/nested-git/
+external/Voyager-upstream/

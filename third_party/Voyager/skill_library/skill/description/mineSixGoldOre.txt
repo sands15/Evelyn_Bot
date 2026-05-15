@@ -1,0 +1,3 @@
+async function mineSixGoldOre(bot) {
+    // The function checks if the bot already possesses six raw gold items; if so, it stops. Otherwise, it ensures an iron pickaxe is equipped. It first searches for and mines nearby gold ore blocks until six raw gold items are collected or no more are found. If not enough is gathered, it searches for and mines deepslate gold ore blocks. Finally, it explores the area to find any remaining gold ore or deepslate gold ore and mines enough to reach the target of six raw gold items.
+}

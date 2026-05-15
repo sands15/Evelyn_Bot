@@ -1,0 +1,248 @@
+2158:     }
+2159:     await furnace.putInput(inputItem.id, null, 1);
+2160:     const startedAt = Date.now();
+2161:     while (Date.now() - startedAt < maxWaitMs) {
+2162:       await delay(500);
+2163:       if (furnace.outputItem()) break;
+2164:     }
+2165:     if (!furnace.outputItem()) {
+2166:       return { status: 'blocked', reason: 'smelt_timeout', input: inputName, output: outputName };
+2167:     }
+2168:     await furnace.takeOutput();
+2169:   } finally {
+2170:     try { furnace.close(); } catch (_) {}
+2171:   }
+2172:   updateState();
+2173:   return { status: 'ok', note: 'item_smelted', input: inputName, output: outputName, inventory: state.inventory };
+2174: }
+2175: 
+2176: async function smeltIronIngot() {
+2177:   return await smeltItemInNearestFurnace(['raw_iron', 'iron_ore', 'deepslate_iron_ore'], 'iron_ingot', ['blast_furnace', 'furnace']);
+2178: }
+2179: 
+2180: async function cookAvailableFood() {
+2181:   const rawFood = Object.keys(RAW_FOOD_OUTPUT_MAP).find((name) => countInventoryItems(name) >= 1);
+2182:   if (!rawFood) return { status: 'blocked', reason: 'no_raw_food_for_cooking' };
+2183:   return await smeltItemInNearestFurnace(rawFood, RAW_FOOD_OUTPUT_MAP[rawFood], ['smoker', 'furnace']);
+2184: }
+2185: 
+2186: async function consumeFoodFromInventory() {
+2187:   const hunger = Number(bot?.food ?? 20);
+2188:   if (hunger >= 20) {
+2189:     updateState();
+2190:     return { status: 'blocked', reason: 'food_meter_full', hunger: state.hunger, health: state.health };
+2191:   }
+2192:   const foods = getFoodItems();
+2193:   if (!foods.length) {
+2194:     return { status: 'blocked', reason: 'no_food_in_inventory' };
+2195:   }
+2196:   const item = foods[0];
+2197:   try {
+2198:     await bot.equip(item, 'hand');
+2199:     await bot.consume();
+2200:   } catch (err) {
+2201:     let error = String(err?.message || err);
+2202:     if (/promise timed out/i.test(error) && Number(bot?.food ?? 20) < 20) {
+2203:       try {
+2204:         await delay(250);
+2205:         await bot.consume();
+2206:       } catch (retryErr) {
+2207:         error = `${error}; retry=${String(retryErr?.message || retryErr)}`;
+2208:       }
+2209:     }
+2210:     updateState();
+2211:     if (/food is full/i.test(error)) {
+2212:       return { status: 'blocked', reason: 'food_meter_full', hunger: state.hunger, health: state.health, error };
+2213:     }
+2214:     if (Number(bot?.food ?? 20) > hunger) {
+2215:       return { status: 'ok', note: 'consumed_food_after_retry', item: item.name, hunger: state.hunger, health: state.health };
+2216:     }
+2217:     return { status: 'blocked', reason: 'food_consume_failed', hunger: state.hunger, health: state.health, item: item.name, error };
+2218:   }
+2219:   updateState();
+2220:   return { status: 'ok', note: 'consumed_food', item: item.name, hunger: state.hunger, health: state.health };
+2221: }
+2222: 
+2223: async function eatIfLow(minHealth = 12, minHunger = 16) {
+2224:   const health = Number(bot?.health ?? 20);
+2225:   const hunger = Number(bot?.food ?? 20);
+2226:   if (health >= minHealth && hunger >= minHunger) {
+2227:     updateState();
+2228:     return { status: 'ok', note: 'not_hungry_or_low_health', health: state.health, hunger: state.hunger };
+2229:   }
+2230:   if (hunger >= 20) {
+2231:     updateState();
+2232:     return { status: 'ok', note: 'healing_with_full_hunger', health: state.health, hunger: state.hunger };
+2233:   }
+2234:   return await consumeFoodFromInventory();
+2235: }
+2236: 
+2237: async function equipShield() {
+2238:   const shield = getInventoryItem('shield');
+2239:   if (!shield) return { status: 'blocked', reason: 'shield_not_in_inventory' };
+2240:   try {
+2241:     await bot.equip(shield, 'off-hand');
+2242:   } catch (err) {
+2243:     return { status: 'blocked', reason: 'shield_equip_failed', error: String(err?.message || err) };
+2244:   }
+2245:   updateState();
+2246:   return { status: 'ok', note: 'shield_equipped', held_item: state.held_item, inventory: state.inventory };
+2247: }
+2248: 
+2249: function isDroppedItemEntity(entity) {
+2250:   const entityType = String(entity?.type || '').toLowerCase();
+2251:   const entityName = String(entity?.name || '').toLowerCase();
+2252:   const entityKind = String(entity?.kind || '').toLowerCase();
+2253:   return entityType === 'object'
+2254:     || entityName === 'item'
+2255:     || entityKind === 'item'
+2256:     || entityKind === 'unknown';
+2257: }
+2258: 
+2259: function getDropAnchorVec(position) {
+2260:   if (!position) return null;
+2261:   return new Vec3(Number(position.x) + 0.5, Number(position.y) + 0.5, Number(position.z) + 0.5);
+2262: }
+2263: 
+2264: function isEntityNearAnchor(entity, anchorPosition, radius = 4.5) {
+2265:   const anchorVec = anchorPosition instanceof Vec3 ? anchorPosition : getDropAnchorVec(anchorPosition);
+2266:   if (!anchorVec || !entity?.position) return false;
+2267:   return entity.position.distanceTo(anchorVec) <= radius;
+2268: }
+2269: 
+2270: function findNearestDropEntity(anchorPosition = null, radius = 8.5) {
+2271:   if (!bot?.entities) return null;
+2272:   const anchorVec = anchorPosition instanceof Vec3 ? anchorPosition : getDropAnchorVec(anchorPosition);
+2273:   let nearest = null;
+2274:   let nearestDist = Infinity;
+2275:   for (const entity of Object.values(bot.entities)) {
+2276:     if (!isDroppedItemEntity(entity) || !entity?.position) continue;
+2277:     const dist = anchorVec ? entity.position.distanceTo(anchorVec) : entityDistance(entity);
+2278:     if (dist == null || dist > radius) continue;
+2279:     if (dist < nearestDist) {
+2280:       nearest = entity;
+2281:       nearestDist = dist;
+2282:     }
+2283:   }
+2284:   return nearest;
+2285: }
+2286: 
+2287: function removeBotListener(eventName, handler) {
+2288:   if (!bot || !handler) return;
+2289:   if (typeof bot.off === 'function') {
+2290:     bot.off(eventName, handler);
+2291:     return;
+2292:   }
+2293:   if (typeof bot.removeListener === 'function') {
+2294:     bot.removeListener(eventName, handler);
+2295:   }
+2296: }
+2297: 
+2298: async function collectSpecificDropEntity(entity, timeoutMs = 5000) {
+2299:   if (!entity?.position) return { status: 'blocked', reason: 'drop_entity_missing' };
+2300:   if (hasCollectBlockSupport()) {
+2301:     try {
+2302:       await withMovementProfileOverrides({ canDig: true }, async () => {
+2303:         await bot.collectBlock.collect(entity, { ignoreNoPath: true });
+2304:       });
+2305:       await delay(200);
+2306:       updateState();
+2307:       return { status: 'ok', note: 'drop_collected_via_plugin', position: state.position, inventory: state.inventory };
+2308:     } catch (err) {
+2309:       const pluginError = String(err?.message || err);
+2310:       const moveResult = await moveNearEntity(entity, 1, timeoutMs);
+2311:       if (moveResult.status !== 'ok') {
+2312:         return { status: 'blocked', reason: 'drop_unreachable', move: moveResult, error: pluginError };
+2313:       }
+2314:       await delay(500);
+2315:       updateState();
+2316:       return { status: 'ok', note: 'drop_collected_after_plugin_fallback', position: state.position, inventory: state.inventory, error: pluginError };
+2317:     }
+2318:   }
+2319:   const moveResult = await moveNearEntity(entity, 1, timeoutMs);
+2320:   if (moveResult.status !== 'ok') {
+2321:     return { status: 'blocked', reason: 'drop_unreachable', move: moveResult };
+2322:   }
+2323:   await delay(500);
+2324:   updateState();
+2325:   return { status: 'ok', note: 'drop_collected', position: state.position, inventory: state.inventory };
+2326: }
+2327: 
+2328: async function collectNearbyDrops(radius = 8, timeoutMs = 10000, anchorPosition = null, anchorRadius = 5.5) {
+2329:   const anchorVec = anchorPosition ? new Vec3(anchorPosition.x, anchorPosition.y, anchorPosition.z) : null;
+2330:   const startedAt = Date.now();
+2331:   let attemptedAnchorMove = false;
+2332:   while (Date.now() - startedAt < timeoutMs) {
+2333:     const candidates = Object.values(bot?.entities || {}).filter((entity) => {
+2334:       if (!isDroppedItemEntity(entity) || !entity?.position) return false;
+2335:       const distance = entityDistance(entity);
+2336:       if (distance == null || distance > radius) return false;
+2337:       if (anchorVec && entity.position.distanceTo(anchorVec) > anchorRadius) return false;
+2338:       return true;
+2339:     });
+2340:     candidates.sort((a, b) => entityDistance(a) - entityDistance(b));
+2341:     const drop = candidates[0];
+2342:     if (!drop) {
+2343:       if (anchorPosition && !attemptedAnchorMove && bot?.entity?.position) {
+2344:         attemptedAnchorMove = true;
+2345:         try {
+2346:           await moveNearPosition(
+2347:             { x: anchorPosition.x, y: Math.min(anchorPosition.y, Math.round(bot.entity.position.y)), z: anchorPosition.z },
+2348:             1,
+2349:             Math.min(5000, timeoutMs),
+2350:             { interruptOnThreat: false },
+2351:           );
+2352:         } catch (_) {}
+2353:       }
+2354:       await delay(250);
+2355:       continue;
+2356:     }
+2357:     const moveBudget = Math.max(1200, timeoutMs - (Date.now() - startedAt));
+2358:     const moveResult = await moveNearEntity(drop, 1, moveBudget);
+2359:     if (moveResult.status !== 'ok') {
+2360:       return { status: 'blocked', reason: 'drop_unreachable', move: moveResult, anchor_position: anchorPosition };
+2361:     }
+2362:     await delay(900);
+2363:     updateState();
+2364:     return { status: 'ok', note: 'collected_nearby_drop', position: state.position, inventory: state.inventory, anchor_position: anchorPosition };
+2365:   }
+2366:   return { status: 'blocked', reason: 'no_item_drop_nearby', anchor_position: anchorPosition, anchor_radius: anchorRadius };
+2367: }
+2368: 
+2369: async function finalizeBlockCollection(targetPosition, expectedDropNames, countBefore, timeoutMs = 12000, inventoryBeforeSnapshot = null) {
+2370:   if (!Array.isArray(expectedDropNames) || !expectedDropNames.length) {
+2371:     updateState();
+2372:     return { inventory_gained: 0, inventory_changes: {}, drop_collection: null };
+2373:   }
+2374:   const startedAt = Date.now();
+2375:   const anchorVec = getDropAnchorVec(targetPosition);
+2376:   let dropCollection = null;
+2377:   let pendingDropEntity = null;
+2378:   let pickupObserved = false;
+2379:   const onItemDrop = (entity) => {
+2380:     if (isEntityNearAnchor(entity, anchorVec, 5.5)) {
+2381:       pendingDropEntity = entity;
+2382:     }
+2383:   };
+2384:   const onPlayerCollect = (collector, collected) => {
+2385:     if ((collector === bot?.entity || collector?.id === bot?.entity?.id) && (!anchorVec || isEntityNearAnchor(collected, anchorVec, 7.5))) {
+2386:       pickupObserved = true;
+2387:     }
+2388:   };
+2389:   if (bot?.on) {
+2390:     bot.on('itemDrop', onItemDrop);
+2391:     bot.on('playerCollect', onPlayerCollect);
+2392:   }
+2393:   try {
+2394:     while (Date.now() - startedAt < timeoutMs) {
+2395:       updateState();
+2396:       const inventoryNow = snapshotInventory();
+2397:       const gainedNow = Math.max(0, countInventoryItemsByNamesInSnapshot(inventoryNow, expectedDropNames) - countBefore);
+2398:       if (gainedNow > 0) {
+2399:         return {
+2400:           inventory_gained: gainedNow,
+2401:           inventory_changes: diffInventorySnapshots(inventoryBeforeSnapshot || {}, inventoryNow),
+2402:           drop_collection: dropCollection,
+2403:         };
+2404:       }
+2405:       if (pickupObserved) {

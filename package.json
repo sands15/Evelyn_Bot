@@ -1,0 +1,14 @@
+{
+  "name": "evelyn-minecraft-sidecar",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Node dependency bundle for Evelyn Minecraft tooling",
+  "license": "UNLICENSED",
+  "dependencies": {
+    "minecraft-data": "^3.78.0",
+    "mineflayer": "4.37.1",
+    "mineflayer-collectblock": "^1.6.0",
+    "mineflayer-pathfinder": "^2.4.5",
+    "mineflayer-tool": "^1.2.0"
+  }
+}

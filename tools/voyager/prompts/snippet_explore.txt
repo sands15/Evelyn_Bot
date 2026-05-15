@@ -1,0 +1,137 @@
+3229: async function exploreNearbyArea({ blockNames = null, entityNames = null, maxRadius = 32, minRadius = 8, allowNight = false, maxDurationMs = 20000, maxProbeMoves = 8 } = {}) {
+3230:   const guard = await ensureExplorationReady({ allowNight });
+3231:   if (guard.status !== 'ok') return guard;
+3232:   const startingFeet = getFeetPosition();
+3233:   if (!startingFeet) return { status: 'blocked', reason: 'missing_bot_position' };
+3234:   const localTarget = hasNearbyTargets({ blockNames, entityNames, maxDistance: 20 });
+3235:   if (localTarget.found) {
+3236:     updateState();
+3237:     return {
+3238:       status: 'ok',
+3239:       note: 'target_already_visible',
+3240:       target_visible: true,
+3241:       targetBlock: localTarget.block,
+3242:       targetEntity: localTarget.entity,
+3243:       position: state.position,
+3244:     };
+3245:   }
+3246:   const startedAt = Date.now();
+3247:   const maxMoves = Math.max(1, Number(maxProbeMoves || 8));
+3248:   const maxTime = Math.max(3000, Number(maxDurationMs || 20000));
+3249:   let moveCount = 0;
+3250:   const radii = [];
+3251:   for (let radius = Math.max(4, Number(minRadius || 8)); radius <= Math.max(8, Number(maxRadius || 32)); radius += 6) {
+3252:     radii.push(radius);
+3253:   }
+3254:   const offsets = [[1,0],[-1,0],[0,1],[0,-1],[1,1],[1,-1],[-1,1],[-1,-1]];
+3255:   let lastMove = null;
+3256:   let lastSuccessfulPosition = startingFeet;
+3257:   let frontierAdvanced = false;
+3258:   let budgetExhausted = false;
+3259:   const seenProbeKeys = new Set();
+3260:   const attemptedTargets = [];
+3261:   for (const radius of radii) {
+3262:     const anchorFeet = getFeetPosition() || lastSuccessfulPosition || startingFeet;
+3263:     const probes = [];
+3264:     for (const [dx, dz] of offsets) {
+3265:       const probe = anchorFeet.offset(dx * radius, 0, dz * radius);
+3266:       const stand = findNearbyPassableStandPosition(3, probe) || (isPassableAt(probe) ? probe : null);
+3267:       if (!stand) continue;
+3268:       if (Math.abs(stand.y - anchorFeet.y) > 3) continue;
+3269:       if (hasRecentRecoveryPosition(stand)) continue;
+3270:       const standKey = blockPositionKey(stand);
+3271:       if (!standKey || seenProbeKeys.has(standKey)) continue;
+3272:       const recentFailure = getRecentTargetFailure(stand, 45000);
+3273:       if (recentFailure && ['goal_not_reached_after_path', 'no_progress_move', 'pathfinder_failed', 'target_position_not_passable'].includes(String(recentFailure.reason || ''))) {
+3274:         continue;
+3275:       }
+3276:       const traversableNeighbors = countTraversableNeighbors(stand);
+3277:       if (traversableNeighbors <= 0) continue;
+3278:       seenProbeKeys.add(standKey);
+3279:       probes.push({ stand, score: scoreStandPosition(stand, anchorFeet) + Math.abs(radius - anchorFeet.distanceTo(stand)) });
+3280:     }
+3281:     probes.sort((a, b) => a.score - b.score);
+3282:     let movedOnThisRadius = false;
+3283:     for (const { stand } of probes) {
+3284:       if ((Date.now() - startedAt) >= maxTime || moveCount >= maxMoves) {
+3285:         budgetExhausted = true;
+3286:         break;
+3287:       }
+3288:       const remainingBudget = Math.max(1500, maxTime - (Date.now() - startedAt));
+3289:       const timeout = Math.min(Math.min(9000, 4500 + radius * 120), remainingBudget);
+3290:       const beforeMove = getFeetPosition() || lastSuccessfulPosition || anchorFeet;
+3291:       const moveResult = await moveNearPosition({ x: stand.x, y: stand.y, z: stand.z }, 1, timeout, { interruptOnThreat: false, allowTrapEscape: false, requireMovement: true });
+3292:       moveCount += 1;
+3293:       attemptedTargets.push({ target: toBlockPosition(stand), status: moveResult.status, reason: moveResult.reason || moveResult.error || null });
+3294:       lastMove = moveResult;
+3295:       if (moveResult.status !== 'ok') {
+3296:         markTargetFailure(stand, moveResult.reason || moveResult.error || 'probe_move_failed');
+3297:         continue;
+3298:       }
+3299:       if (beforeMove) markRecoveryPosition(beforeMove, 15000);
+3300:       updateState();
+3301:       const afterMove = getFeetPosition();
+3302:       if (afterMove) {
+3303:         markRecoveryPosition(afterMove, 15000);
+3304:         lastSuccessfulPosition = afterMove;
+3305:       }
+3306:       frontierAdvanced = true;
+3307:       const targetStatus = hasNearbyTargets({ blockNames, entityNames, maxDistance: 22 });
+3308:       if (targetStatus.found) {
+3309:         return {
+3310:           status: 'ok',
+3311:           note: 'explored_nearby_and_found_target',
+3312:           target_visible: true,
+3313:           frontier_advanced: frontierAdvanced,
+3314:           radius,
+3315:           position: state.position,
+3316:           targetBlock: targetStatus.block,
+3317:           targetEntity: targetStatus.entity,
+3318:           explored_moves: moveCount,
+3319:         };
+3320:       }
+3321:       movedOnThisRadius = true;
+3322:       break;
+3323:     }
+3324:     if (budgetExhausted) break;
+3325:     if (movedOnThisRadius) continue;
+3326:   }
+3327:   updateState();
+3328:   if (frontierAdvanced) {
+3329:     return {
+3330:       status: 'ok',
+3331:       note: 'exploration_frontier_advanced',
+3332:       target_visible: false,
+3333:       frontier_advanced: true,
+3334:       blockNames,
+3335:       entityNames,
+3336:       lastMove,
+3337:       position: state.position,
+3338:       explored_moves: moveCount,
+3339:       budget_exhausted: budgetExhausted,
+3340:       attempted_targets: attemptedTargets,
+3341:     };
+3342:   }
+3343:   return {
+3344:     status: 'blocked',
+3345:     reason: 'exploration_target_not_found',
+3346:     blockNames,
+3347:     entityNames,
+3348:     lastMove,
+3349:     position: state.position,
+3350:     explored_moves: moveCount,
+3351:     budget_exhausted: budgetExhausted,
+3352:     attempted_targets: attemptedTargets,
+3353:   };
+3354: }
+3355: 
+3356: function buildGeneratedSkillApi() {
+3357:   return Object.freeze({
+3358:     observe: async () => ({ ...state, inventory: { ...state.inventory } }),
+3359:     moveToCoordinates: async (x, y, z, range = 1) => moveToCoordinatesSafely(x, y, z, range),
+3360:     moveNearBlockNames: async (names, maxDistance = 16, range = 1) => {
+3361:       const block = getNearestNamedBlock((names || []).map((value) => String(value)), maxDistance);
+3362:       if (!block) return { status: 'blocked', reason: 'target_block_not_found', names };
+3363:       const result = await moveNearBlock(block, range, 15000);
+3364:       return { ...result, block: block.name, position: block.position };
+3365:     },

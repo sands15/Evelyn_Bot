@@ -1,0 +1,3 @@
+async function obtainEightRawIron(bot) {
+    // The function first checks if eight raw iron items are already present in the inventory; if so, it stops. It then attempts to equip a suitable pickaxe, such as iron, stone, or copper. It repeatedly searches nearby for and mines iron or deepslate iron ore until eight raw iron items are collected or the initial search is complete. If the goal is not met, it enters a loop to explore and search again for more ore. If all attempts fail to gather the required amount, an error is thrown.
+}

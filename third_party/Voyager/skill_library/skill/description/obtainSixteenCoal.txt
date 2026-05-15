@@ -1,0 +1,3 @@
+async function obtainSixteenCoal(bot) {
+    // The function attempts to gather sixteen units of coal. It first checks the inventory to see if the required amount is already present. If not, it tries to mine nearby coal or deepslate coal ore using an equipped pickaxe. If that fails, it probes in two specific directions to search for coal ore. After each successful find, it attempts to mine more coal until the target of sixteen is reached. If all attempts fail, it throws an error indicating the search was exhausted.
+}

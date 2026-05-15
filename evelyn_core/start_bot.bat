@@ -16,9 +16,9 @@ if not defined WT_READY (
     )
 )
 if not defined WT_READY (
-    start "Bot" powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0start_bot.ps1"
+    start "Bot" powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0runtime\launchers\start_bot.ps1"
 ) else (
-    "%WT_EXE%" new-tab --title "Bot" powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0start_bot.ps1"
+    "%WT_EXE%" new-tab --title "Bot" powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0runtime\launchers\start_bot.ps1"
 )
 
 endlocal

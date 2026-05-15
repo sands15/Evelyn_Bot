@@ -1,0 +1,3 @@
+async function obtainEightOakPlanks(bot) {
+    // This function aims to ensure the bot has at least eight oak planks in its inventory. It first checks if the required number of planks is already present. If not, it calculates how many oak logs are needed to craft the missing planks. It then searches for and mines the necessary oak logs if they are not available. Finally, it crafts the required number of oak planks using the found logs and verifies that the target amount has been reached.
+}

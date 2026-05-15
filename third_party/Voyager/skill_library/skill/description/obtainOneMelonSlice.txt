@@ -1,0 +1,3 @@
+async function obtainOneMelonSlice(bot) {
+    // The function checks if a melon slice is already in the inventory; if so, it stops. Otherwise, it attempts to locate a melon block by searching the immediate vicinity. If not found, it explores in two different directions to find the melon block. After locating the block, it mines one unit of the melon block. Finally, it verifies that at least one melon slice was successfully obtained from the mined block.
+}
