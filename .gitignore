@@ -39,3 +39,7 @@ archive/logs/
 archive/scratch/
 archive/nested-git/
 external/Voyager-upstream/
+third_party/Voyager/skill_library/skill/vectordb/
+third_party/Voyager/skill_library/skill/policy_state.json
+third_party/Voyager/skill_library/*/skill/vectordb/
+third_party/Voyager/skill_library/*/skill/policy_state.json
