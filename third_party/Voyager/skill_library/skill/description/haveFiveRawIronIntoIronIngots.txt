@@ -1,0 +1,3 @@
+async function haveFiveRawIronIntoIronIngots(bot) {
+    // The function checks if the player has at least five iron ingots; if not, it determines how many more are needed. It verifies that enough raw iron is present to meet the requirement. If a furnace is not found nearby, it attempts to place one. It then searches for a suitable fuel source, such as coal or logs, to cover the smelting needs. Finally, it initiates the smelting process using the raw iron and fuel to produce the target number of iron ingots.
+}

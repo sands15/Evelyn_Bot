@@ -1,0 +1,3 @@
+async function obtainCoal4(bot) {
+    // This function checks if the entity possesses at least four units of coal. If not, it verifies that a suitable pickaxe is available for mining. It first attempts to mine any visible coal ore within a certain range, prioritizing the closest blocks. If the required amount is still not met, it initiates a broader search for coal ore. Finally, it mines any newly found coal ore until the target of four units is reached or all nearby options are exhausted.
+}

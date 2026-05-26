@@ -187,7 +187,7 @@ def _render_runner_status_line(payload: dict[str, Any]) -> str:
     hunger = observation.get("hunger")
     task = payload.get("current_task") or payload.get("goal") or "idle"
     goal = payload.get("goal") or "idle"
-    phase = payload.get("last_phase") or ("running" if payload.get("running") else "idle")
+    phase = payload.get("display_stage") or payload.get("current_task_stage") or payload.get("last_phase") or ("running" if payload.get("running") else "idle")
     connection_state = payload.get("connection_state") or observation.get("connection_state")
     connection_label = _connection_state_label(connection_state, bool(position))
     lines = [
@@ -204,6 +204,36 @@ def _render_runner_status_line(payload: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _compute_display_stage(*, running: bool, current_task: Any, last_phase: Any, last_error: Any, current_task_bookkeeping: Any, last_task_result: Any) -> str:
+    if last_error:
+        return "blocked"
+    if not running:
+        return "idle"
+    phase = str(last_phase or "").strip().lower()
+    bookkeeping = current_task_bookkeeping if isinstance(current_task_bookkeeping, dict) else {}
+    bookkeeping_status = str(bookkeeping.get("status") or "").strip().lower()
+    if phase == "persistent_session_bootstrap":
+        return "bootstrapping_session"
+    if phase in {"persistent_session_ready", "task_selection"}:
+        return "selecting_task"
+    if phase in {"task_session_turnover", "task_rollout_finished", "objective_node_advanced", "curriculum_progress_update"}:
+        if bookkeeping_status in {"completed", "effect_verified"} or isinstance(last_task_result, dict):
+            return "between_tasks"
+    if phase in {"task_session_start", "task_observation_ready", "awaiting_action_llm", "action_llm_request", "action_llm_response", "action_program_ready", "minecraft_step_response", "action_step_complete", "skill_retrieval"}:
+        return "executing_task"
+    if phase in {"effect_verifier_check", "effect_verifier_result", "critic_check", "critic_result"}:
+        return "verifying_result"
+    if phase == "skill_persistence":
+        return "persisting_skill"
+    if phase in {"death_recovery_required", "death_interrupt_observed"} or bookkeeping_status == "recovery_required":
+        return "recovery_required"
+    if phase == "action_parse_failed":
+        return "action_parse_failed"
+    if current_task:
+        return "executing_task"
+    return "waiting_for_task"
+
+
 class RunnerStatus:
     def __init__(self, path: Path, mode: str, goal: str) -> None:
         self.path = path
@@ -214,6 +244,7 @@ class RunnerStatus:
         self.last_result: dict[str, Any] | None = None
         self.current_task: str | None = None
         self.current_task_stage: str | None = None
+        self.display_stage: str | None = None
         self.last_progress_message: str | None = None
         self.progress_messages: list[str] = []
         self.completed_tasks: list[str] = []
@@ -227,6 +258,18 @@ class RunnerStatus:
         self.last_completion_reason: str | None = None
         self.last_success: bool | None = None
         self.last_search_metrics: dict[str, Any] | None = None
+        self.speculative_next_task: dict[str, Any] | None = None
+        self.last_speculative_decision: dict[str, Any] | None = None
+        self.last_inventory_plan: dict[str, Any] | None = None
+        self.active_plan_state: dict[str, Any] | None = None
+        self.last_task_contract_decision: dict[str, Any] | None = None
+        self.current_task_bookkeeping: dict[str, Any] | None = None
+        self.last_task_bookkeeping: dict[str, Any] | None = None
+        self.last_world_effect_verification: dict[str, Any] | None = None
+        self.last_critic_result: dict[str, Any] | None = None
+        self.last_recovery_boundary: dict[str, Any] | None = None
+        self.execution_session: dict[str, Any] | None = None
+        self.reset_audit_log: list[dict[str, Any]] = []
         self.search_metrics_history: list[dict[str, Any]] = []
         self._last_search_metrics_fingerprint: str | None = None
 
@@ -246,6 +289,7 @@ class RunnerStatus:
             "running": self.running,
             "current_task": self.current_task,
             "current_task_stage": self.current_task_stage,
+            "display_stage": self.display_stage,
             "completed_tasks": self.completed_tasks,
             "failed_tasks": self.failed_tasks,
             "last_error": self.last_error,
@@ -264,6 +308,18 @@ class RunnerStatus:
             "last_completion_reason": self.last_completion_reason,
             "last_success": self.last_success,
             "last_search_metrics": self.last_search_metrics,
+            "speculative_next_task": self.speculative_next_task,
+            "last_speculative_decision": self.last_speculative_decision,
+            "last_inventory_plan": self.last_inventory_plan,
+            "active_plan_state": self.active_plan_state,
+            "last_task_contract_decision": self.last_task_contract_decision,
+            "current_task_bookkeeping": self.current_task_bookkeeping,
+            "last_task_bookkeeping": self.last_task_bookkeeping,
+            "last_world_effect_verification": self.last_world_effect_verification,
+            "last_critic_result": self.last_critic_result,
+            "last_recovery_boundary": self.last_recovery_boundary,
+            "execution_session": self.execution_session,
+            "reset_audit_log": self.reset_audit_log,
             "search_metrics_history": self.search_metrics_history,
         }
         payload.update(extra)
@@ -554,6 +610,14 @@ def monitor_loop(voyager: Any, status: RunnerStatus, stop_event: threading.Event
                 pass
             status.current_task = voyager.task
             status.current_task_stage = getattr(voyager, "last_phase", None)
+            status.display_stage = _compute_display_stage(
+                running=True,
+                current_task=voyager.task,
+                last_phase=getattr(voyager, "last_phase", None),
+                last_error=status.last_error,
+                current_task_bookkeeping=getattr(voyager, "current_task_bookkeeping", None),
+                last_task_result=getattr(voyager, "last_task_result", None),
+            )
             status.iteration = max(0, voyager.recorder.iteration)
             status.completed_tasks = list(getattr(voyager.curriculum_agent, "completed_tasks", []) or [])
             status.failed_tasks = list(getattr(voyager.curriculum_agent, "failed_tasks", []) or [])
@@ -566,6 +630,21 @@ def monitor_loop(voyager: Any, status: RunnerStatus, stop_event: threading.Event
             status.last_completion_reason = getattr(voyager, "last_completion_reason", None)
             status.last_success = getattr(voyager, "last_success", None)
             status.last_search_metrics = _to_jsonable(getattr(voyager, "last_search_metrics", None))
+            status.speculative_next_task = _to_jsonable(getattr(voyager, "current_speculative_next_task", None))
+            status.last_speculative_decision = _to_jsonable(getattr(voyager, "last_speculative_decision", None))
+            status.last_inventory_plan = _to_jsonable(getattr(voyager, "last_inventory_plan", None))
+            status.active_plan_state = _to_jsonable(getattr(getattr(voyager, "curriculum_agent", None), "active_plan_state", None))
+            status.last_task_contract_decision = _to_jsonable(
+                getattr(voyager, "last_task_contract_decision", None)
+                or getattr(getattr(voyager, "curriculum_agent", None), "last_task_contract_decision", None)
+            )
+            status.current_task_bookkeeping = _to_jsonable(getattr(voyager, "current_task_bookkeeping", None))
+            status.last_task_bookkeeping = _to_jsonable(getattr(voyager, "last_task_bookkeeping", None))
+            status.last_world_effect_verification = _to_jsonable(getattr(voyager, "last_world_effect_verification", None))
+            status.last_critic_result = _to_jsonable(getattr(voyager, "last_critic_result", None))
+            status.last_recovery_boundary = _to_jsonable(getattr(voyager, "last_recovery_boundary", None))
+            status.execution_session = _to_jsonable(getattr(voyager, "execution_session", None))
+            status.reset_audit_log = _to_jsonable(getattr(voyager, "reset_audit_log", None)) or []
             status.write(
                 last_phase=getattr(voyager, "last_phase", None),
                 last_phase_at=getattr(voyager, "last_phase_at", None),
@@ -625,6 +704,14 @@ def main() -> int:
         status.last_error = None
         status.observation = _merge_live_telemetry(summarize_events(getattr(voyager, "last_events", None)), _fetch_bridge_telemetry())
         status.current_task_stage = getattr(voyager, "last_phase", None)
+        status.display_stage = _compute_display_stage(
+            running=True,
+            current_task=getattr(voyager, "task", None),
+            last_phase=getattr(voyager, "last_phase", None),
+            last_error=status.last_error,
+            current_task_bookkeeping=getattr(voyager, "current_task_bookkeeping", None),
+            last_task_result=getattr(voyager, "last_task_result", None),
+        )
         status.last_progress_message = status.observation.get("last_progress_message") if isinstance(status.observation.get("last_progress_message"), str) else None
         status.progress_messages = list(status.observation.get("progress_messages", []) or [])[:5]
         status.completed_tasks = list(getattr(voyager.curriculum_agent, "completed_tasks", []) or [])
@@ -634,6 +721,19 @@ def main() -> int:
         status.last_completion_reason = getattr(voyager, "last_completion_reason", None)
         status.last_success = getattr(voyager, "last_success", None)
         status.last_search_metrics = _to_jsonable(getattr(voyager, "last_search_metrics", None))
+        status.last_inventory_plan = _to_jsonable(getattr(voyager, "last_inventory_plan", None))
+        status.active_plan_state = _to_jsonable(getattr(getattr(voyager, "curriculum_agent", None), "active_plan_state", None))
+        status.last_task_contract_decision = _to_jsonable(
+            getattr(voyager, "last_task_contract_decision", None)
+            or getattr(getattr(voyager, "curriculum_agent", None), "last_task_contract_decision", None)
+        )
+        status.current_task_bookkeeping = _to_jsonable(getattr(voyager, "current_task_bookkeeping", None))
+        status.last_task_bookkeeping = _to_jsonable(getattr(voyager, "last_task_bookkeeping", None))
+        status.last_world_effect_verification = _to_jsonable(getattr(voyager, "last_world_effect_verification", None))
+        status.last_critic_result = _to_jsonable(getattr(voyager, "last_critic_result", None))
+        status.last_recovery_boundary = _to_jsonable(getattr(voyager, "last_recovery_boundary", None))
+        status.execution_session = _to_jsonable(getattr(voyager, "execution_session", None))
+        status.reset_audit_log = _to_jsonable(getattr(voyager, "reset_audit_log", None)) or []
         status.running = False
         status.write(
             note="finished",
@@ -660,6 +760,14 @@ def main() -> int:
         if voyager is not None:
             status.observation = _merge_live_telemetry(summarize_events(getattr(voyager, "last_events", None)), _fetch_bridge_telemetry())
             status.current_task_stage = getattr(voyager, "last_phase", None)
+            status.display_stage = _compute_display_stage(
+                running=False,
+                current_task=getattr(voyager, "task", None),
+                last_phase=getattr(voyager, "last_phase", None),
+                last_error=status.last_error,
+                current_task_bookkeeping=getattr(voyager, "current_task_bookkeeping", None),
+                last_task_result=getattr(voyager, "last_task_result", None),
+            )
             status.last_progress_message = status.observation.get("last_progress_message") if isinstance(status.observation.get("last_progress_message"), str) else None
             status.progress_messages = list(status.observation.get("progress_messages", []) or [])[:5]
             status.completed_tasks = list(getattr(voyager.curriculum_agent, "completed_tasks", []) or [])
@@ -669,6 +777,19 @@ def main() -> int:
             status.last_completion_reason = getattr(voyager, "last_completion_reason", None)
             status.last_success = getattr(voyager, "last_success", None)
             status.last_search_metrics = _to_jsonable(getattr(voyager, "last_search_metrics", None))
+            status.last_inventory_plan = _to_jsonable(getattr(voyager, "last_inventory_plan", None))
+            status.active_plan_state = _to_jsonable(getattr(getattr(voyager, "curriculum_agent", None), "active_plan_state", None))
+            status.last_task_contract_decision = _to_jsonable(
+                getattr(voyager, "last_task_contract_decision", None)
+                or getattr(getattr(voyager, "curriculum_agent", None), "last_task_contract_decision", None)
+            )
+            status.current_task_bookkeeping = _to_jsonable(getattr(voyager, "current_task_bookkeeping", None))
+            status.last_task_bookkeeping = _to_jsonable(getattr(voyager, "last_task_bookkeeping", None))
+            status.last_world_effect_verification = _to_jsonable(getattr(voyager, "last_world_effect_verification", None))
+            status.last_critic_result = _to_jsonable(getattr(voyager, "last_critic_result", None))
+            status.last_recovery_boundary = _to_jsonable(getattr(voyager, "last_recovery_boundary", None))
+            status.execution_session = _to_jsonable(getattr(voyager, "execution_session", None))
+            status.reset_audit_log = _to_jsonable(getattr(voyager, "reset_audit_log", None)) or []
         status.running = False
         status.write(
             note="failed",

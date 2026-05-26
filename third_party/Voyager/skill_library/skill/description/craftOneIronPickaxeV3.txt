@@ -1,0 +1,3 @@
+async function craftOneIronPickaxe(bot) {
+    // This routine checks if the bot already possesses an iron pickaxe. If not, it verifies that the inventory contains at least three iron ingots and two sticks. It then attempts to craft one iron pickaxe using the available materials. Finally, it confirms that the crafting process was successful by checking for the presence of the newly created pickaxe.
+}

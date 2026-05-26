@@ -5,6 +5,7 @@ $env:EVELYN_PROJECT_ROOT = [string]$projectRoot
 $env:EVELYN_CORE_ROOT = Join-Path $projectRoot 'evelyn_core'
 $env:EVELYN_CORE_RUNTIME = [string]$coreRuntime
 $env:PYTHONPATH = if ($env:PYTHONPATH) { "$coreRuntime;$($env:PYTHONPATH)" } else { [string]$coreRuntime }
+$env:CONTROL_PAGE_PORT = if ($env:CONTROL_PAGE_PORT) { $env:CONTROL_PAGE_PORT } else { '8798' }
 Set-Location $projectRoot
 
 function Wait-Port {

@@ -1,0 +1,3 @@
+async function have5RawIronIntoIronIngots(bot) {
+    // This function checks if the required amount of iron ingots is already present. If not, it determines how many more are needed and verifies that enough raw iron is available. It then locates or places a furnace block nearby. The function searches for a suitable fuel source to cover the smelting requirement. Finally, it initiates the smelting process and confirms that the target number of ingots has been successfully produced.
+}

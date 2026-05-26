@@ -1,0 +1,3 @@
+async function haveOneRawIronSmeltedIntoIronIngot(bot) {
+    // This function checks if one iron ingot is already present in the inventory. If not, it verifies if raw iron is available to smelt. It then attempts to locate or construct a furnace nearby. After securing a furnace, it searches for a suitable fuel source from a predefined list. Finally, it initiates the smelting process to convert raw iron into an iron ingot.
+}

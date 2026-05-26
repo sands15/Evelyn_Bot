@@ -1,66 +1,12 @@
 import re
 
+from voyager.agents.outcome_policy import CriticOutcomePolicy
+from voyager.agents.observation_utils import observe_payload, payload_inventory, payload_status, safe_int
 from voyager.prompts import load_prompt
 from voyager.utils.json_utils import fix_and_parse_json
 from voyager.utils.console import safe_print as print
 from langchain.chat_models import ChatOpenAI
 from langchain.schema import HumanMessage, SystemMessage
-
-ORE_TASK_ITEM_MAP = {
-    "coal_ore": "coal",
-    "iron_ore": "raw_iron",
-    "copper_ore": "raw_copper",
-}
-HOSTILE_ENTITY_NAMES = ("zombie", "skeleton", "creeper", "spider", "drowned", "witch", "enderman")
-SURVIVAL_TASK_HINTS = ("shelter", "retreat", "safe", "food", "eat", "cook")
-
-
-def _observe_payload(events):
-    if not events:
-        return {}
-    try:
-        event_type, payload = events[-1]
-    except Exception:
-        return {}
-    if event_type != "observe" or not isinstance(payload, dict):
-        return {}
-    return payload
-
-
-def _payload_status(payload):
-    status = payload.get("status") if isinstance(payload, dict) else None
-    return status if isinstance(status, dict) else {}
-
-
-def _payload_inventory(payload):
-    inventory = payload.get("inventory") if isinstance(payload, dict) else None
-    return inventory if isinstance(inventory, dict) else {}
-
-
-def _safe_int(value, default=0):
-    try:
-        return int(value)
-    except Exception:
-        return default
-
-
-def _hostiles_nearby(entities):
-    return any(
-        any(hostile in str(name).lower() for hostile in HOSTILE_ENTITY_NAMES)
-        for name in (entities or {}).keys()
-    )
-
-
-def _is_night(status):
-    return str((status or {}).get("timeOfDay") or "").strip().lower() in {"night", "midnight", "sunset", "sunrise"}
-
-
-def _has_shelter_material_nearby(payload):
-    voxels = payload.get("voxels") if isinstance(payload.get("voxels"), list) else []
-    return any(
-        any(token in str(block).lower() for token in ["planks", "log", "cobblestone", "dirt"])
-        for block in voxels
-    )
 
 
 class CriticAgent:
@@ -82,6 +28,40 @@ class CriticAgent:
         self.llm = ChatOpenAI(**llm_kwargs)
         assert mode in ["auto", "manual"]
         self.mode = mode
+        self.last_result = None
+        self.outcome_policy = CriticOutcomePolicy()
+
+    def _build_result(self, outcome, reason_code, critique="", evidence=None, source="critic"):
+        normalized_outcome = str(outcome or "unknown").strip().lower()
+        if normalized_outcome not in {"success", "partial", "fail", "unknown"}:
+            normalized_outcome = "unknown"
+        result = {
+            "outcome": normalized_outcome,
+            "success": normalized_outcome == "success",
+            "reason_code": str(reason_code or "unspecified").strip().lower(),
+            "critique": str(critique or "").strip(),
+            "source": source,
+            "evidence": evidence if isinstance(evidence, dict) else {},
+        }
+        self.last_result = result
+        return result
+
+    def _policy_result_to_result(self, value, outcome=None):
+        if not isinstance(value, dict):
+            return None
+        success = bool(value.get("success"))
+        return self._build_result(
+            outcome or ("success" if success else "fail"),
+            value.get("reason_code"),
+            critique=value.get("critique"),
+            evidence=value.get("evidence"),
+            source=value.get("source") or "outcome_policy",
+        )
+
+    def _result_tuple(self, result):
+        if not isinstance(result, dict):
+            return False, ""
+        return bool(result.get("success")), str(result.get("critique") or "")
 
     def render_system_message(self):
         system_message = SystemMessage(content=load_prompt("critic"))
@@ -89,8 +69,8 @@ class CriticAgent:
 
     def render_human_message(self, *, events, task, context, chest_observation):
         assert events[-1][0] == "observe", "Last event must be observe"
-        payload = _observe_payload(events)
-        status = _payload_status(payload)
+        payload = observe_payload(events)
+        status = payload_status(payload)
         biome = status.get("biome")
         time_of_day = status.get("timeOfDay")
         voxels = payload.get("voxels") if isinstance(payload.get("voxels"), list) else []
@@ -98,8 +78,8 @@ class CriticAgent:
         hunger = status.get("food")
         position = status.get("position") if isinstance(status.get("position"), dict) else None
         equipment = status.get("equipment")
-        inventory_used = _safe_int(status.get("inventoryUsed") or 0)
-        inventory = _payload_inventory(payload)
+        inventory_used = safe_int(status.get("inventoryUsed") or 0)
+        inventory = payload_inventory(payload)
 
         for i, (event_type, event) in enumerate(events):
             if event_type == "onError":
@@ -154,123 +134,38 @@ class CriticAgent:
             critique = input("Enter your critique:")
             print(f"Success: {success}\nCritique: {critique}")
             confirmed = input("Confirm? (y/n)") in ["y", ""]
-        return success, critique
-
-    def _count_inventory_item(self, inventory, item_name):
-        if not isinstance(inventory, dict):
-            return 0
-        value = inventory.get(item_name, 0)
-        try:
-            return int(value)
-        except Exception:
-            return 0
-
-    def _last_observation(self, events=None):
-        if not events:
-            return {}
-        payload = events[-1][1]
-        return payload if isinstance(payload, dict) else {}
-
-    def _evaluate_chest_open_result(self, task_text, events=None):
-        lowered_task = str(task_text or "").strip().lower()
-        if "open" not in lowered_task or "chest" not in lowered_task:
-            return None
-
-        last_observation = self._last_observation(events)
-        interaction = last_observation.get("voyagerContainerInteraction")
-        if not isinstance(interaction, dict):
-            interaction = {}
-
-        kind = str(interaction.get("kind", "")).lower()
-        if kind and kind != "chest":
-            return False, f"Expected chest interaction but observed {kind}."
-
-        if bool(interaction.get("blockedAbove")):
-            blocked_by = interaction.get("blockedBy") or "a solid block"
-            return False, f"Chest is blocked above by {blocked_by}."
-
-        if bool(interaction.get("interacted")):
-            return True, "Chest helper completed a chest interaction in this step."
-
-        if bool(interaction.get("opened")) and not interaction.get("error"):
-            return True, "Chest interaction window opened successfully."
-
-        if interaction.get("error"):
-            return False, f"Chest interaction failed: {interaction['error']}"
-
-        window_result = last_observation.get("voyagerWindowResult")
-        if isinstance(window_result, dict):
-            label = str(window_result.get("label", "")).lower()
-            status = str(window_result.get("status", "")).lower()
-            if "chest" in label and status in {"opened", "closed", "success"}:
-                return True, "Chest interaction window opened successfully."
-
-        return None
-
-    def _inventory_success_override(self, task, inventory, events=None):
-        task_text = str(task or "").strip()
-        match = re.fullmatch(r"(Obtain|Have|Craft|Smelt|Mine)\s+(\d+)\s+([a-z0-9_]+)", task_text)
-        if match:
-            verb, amount_text, target = match.groups()
-            amount = int(amount_text)
-            inventory_target = target
-            if verb == "Mine" and target in ORE_TASK_ITEM_MAP:
-                inventory_target = ORE_TASK_ITEM_MAP[target]
-            current = self._count_inventory_item(inventory, inventory_target)
-            if current >= amount:
-                return True, f"Inventory already satisfies the task with {current} {inventory_target}."
-        shelter_override = self._shelter_success_override(task_text, inventory, events=events)
-        if shelter_override is not None:
-            return shelter_override
-        return self._evaluate_chest_open_result(task_text, events=events)
+        return self._build_result(
+            "success" if success else "fail",
+            "manual_confirmation" if success else "manual_rejection",
+            critique=critique,
+            source="manual",
+        )
 
     def preflight_task_success(self, task, events=None):
-        inventory = _payload_inventory(_observe_payload(events))
-        return self._inventory_success_override(task, inventory, events=events)
-
-    def _shelter_success_override(self, task_text, inventory, events=None):
-        lowered_task = str(task_text or "").strip().lower()
-        if "shelter" not in lowered_task:
-            return None
-        payload = _observe_payload(events)
-        status = _payload_status(payload)
-        entities = status.get("entities") if isinstance(status.get("entities"), dict) else {}
-        health = status.get("health")
-        if health is None or float(health) < 10:
-            return None
-        if _hostiles_nearby(entities):
-            return None
-        if _has_shelter_material_nearby(payload):
-            return True, "Nearby placed shelter materials are present and no immediate hostiles remain; count the temporary shelter as established."
-        return None
-
-    def _safety_failure_override(self, task, events=None):
-        payload = _observe_payload(events)
-        status = _payload_status(payload)
-        task_text = str(task or "").strip().lower()
-        if any(token in task_text for token in SURVIVAL_TASK_HINTS):
-            return None
-        health = status.get("health")
-        hunger = status.get("food")
-        entities = status.get("entities") if isinstance(status.get("entities"), dict) else {}
-        hostile_nearby = _hostiles_nearby(entities)
-        if health is not None and float(health) <= 4:
-            return False, "Safety override: ending health is critically low, so this step should not count as stable progress. Recover first."
-        if hunger is not None and float(hunger) <= 3:
-            return False, "Safety override: ending hunger is critically low, so progression should pause for recovery."
-        if hostile_nearby and _is_night(status) and health is not None and float(health) <= 8:
-            return False, "Safety override: hostiles remain nearby at night while health is low; prioritize shelter or retreat before counting progress."
-        return None
+        result = self._policy_result_to_result(
+            self.outcome_policy.evaluate_preflight(task, events=events)
+        )
+        return self._result_tuple(result) if result is not None else None
 
     def ai_check_task_success(self, messages, max_retries=5):
         if max_retries == 0:
             print(
                 "\033[31mFailed to parse Critic Agent response. Consider updating your prompt.\033[0m"
             )
-            return False, ""
+            return self._build_result(
+                "unknown",
+                "critic_parse_exhausted",
+                critique="Failed to parse critic response after retries.",
+                source="critic_llm",
+            )
 
         if messages[1] is None:
-            return False, ""
+            return self._build_result(
+                "unknown",
+                "critic_human_message_missing",
+                critique="Critic human message was missing.",
+                source="critic_llm",
+            )
 
         critic = self.llm(messages).content
         print(f"\033[31m****Critic Agent ai message****\n{critic}\033[0m")
@@ -279,7 +174,13 @@ class CriticAgent:
             assert response["success"] in [True, False]
             if "critique" not in response:
                 response["critique"] = ""
-            return response["success"], response["critique"]
+            return self._build_result(
+                "success" if response["success"] else "fail",
+                "critic_llm_success" if response["success"] else "critic_llm_failure",
+                critique=response["critique"],
+                source="critic_llm",
+                evidence={"raw_response": response},
+            )
         except Exception as e:
             print(f"\033[31mError parsing critic response: {e} Trying again!\033[0m")
             return self.ai_check_task_success(
@@ -287,16 +188,14 @@ class CriticAgent:
                 max_retries=max_retries - 1,
             )
 
-    def check_task_success(
+    def check_task_success_result(
         self, *, events, task, context, chest_observation, max_retries=5
     ):
-        inventory = _payload_inventory(_observe_payload(events))
-        override = self._inventory_success_override(task, inventory, events=events)
+        override = self._policy_result_to_result(
+            self.outcome_policy.evaluate_post_action(task, events=events)
+        )
         if override is not None:
             return override
-        safety_override = self._safety_failure_override(task, events=events)
-        if safety_override is not None:
-            return safety_override
 
         human_message = self.render_human_message(
             events=events,
@@ -318,3 +217,15 @@ class CriticAgent:
             )
         else:
             raise ValueError(f"Invalid critic agent mode: {self.mode}")
+
+    def check_task_success(
+        self, *, events, task, context, chest_observation, max_retries=5
+    ):
+        result = self.check_task_success_result(
+            events=events,
+            task=task,
+            context=context,
+            chest_observation=chest_observation,
+            max_retries=max_retries,
+        )
+        return self._result_tuple(result)

@@ -1,0 +1,3 @@
+async function craftIronPickaxeIfNeeded(bot) {
+    // The function first checks if an iron pickaxe is already present in the inventory; if so, it stops. If materials are insufficient, it attempts to gather necessary sticks by searching for nearby wood. It then checks for required iron ingots, either by smelting raw iron if a furnace is nearby and fuel is available, or by searching for iron ore locally. Finally, after ensuring all prerequisites are met, it crafts the iron pickaxe and verifies its presence.
+}

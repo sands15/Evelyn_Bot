@@ -1,0 +1,3 @@
+async function craftOneFurnace(bot) {
+    // The function checks if a furnace is already present in the inventory; if so, it stops. Otherwise, it calculates how many cobblestone blocks are needed to meet the recipe requirement. It then attempts to gather the necessary cobblestone by mining nearby cobblestone or, as a fallback, mining stone. After ensuring enough cobblestone is available, it proceeds to craft one furnace using the required materials. Finally, it verifies that the furnace was successfully added to the inventory.
+}

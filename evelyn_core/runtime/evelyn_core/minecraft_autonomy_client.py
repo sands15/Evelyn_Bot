@@ -12,12 +12,20 @@ from typing import Any
 import aiohttp
 import psutil
 
-from .config import MINECRAFT_AUTONOMY_SERVICE_HOST, MINECRAFT_AUTONOMY_SERVICE_PORT, VOYAGER_PYTHON_EXE
+from .config import (
+    MINECRAFT_AUTONOMY_SERVICE_HOST,
+    MINECRAFT_AUTONOMY_SERVICE_PORT,
+    VOYAGER_ACTION_BACKEND,
+    VOYAGER_CODEX_GATEWAY_PORT,
+    VOYAGER_CODEX_GATEWAY_PYTHON_EXE,
+    VOYAGER_PYTHON_EXE,
+)
 from .paths import get_repo_root
 
 
 REPO_ROOT = get_repo_root()
 START_SERVICE_PS1 = REPO_ROOT / "evelyn_core" / "runtime" / "launchers" / "start_voyager_service.ps1"
+START_CODEX_GATEWAY_PS1 = REPO_ROOT / "evelyn_core" / "runtime" / "launchers" / "start_codex_gateway.ps1"
 
 
 class MinecraftAutonomyClient:
@@ -27,10 +35,13 @@ class MinecraftAutonomyClient:
         self.base_url = f"http://{self.host}:{self.port}"
         self._session: aiohttp.ClientSession | None = None
         self._proc: asyncio.subprocess.Process | None = None
+        self._gateway_proc: asyncio.subprocess.Process | None = None
         self._log_handle = None
         self._cwd = str(REPO_ROOT)
         self._startup_lock = asyncio.Lock()
+        self._gateway_startup_lock = asyncio.Lock()
         self._python_exe = self._resolve_python_exe()
+        self._gateway_python_exe = self._resolve_gateway_python_exe()
         self._startup_lock_path = Path(self._cwd) / ".voyager_service.start.lock"
         self._goal_state_path = Path(self._cwd) / "bot_memory" / "voyager_goal_state.json"
         self._launcher_env = os.environ.copy()
@@ -48,20 +59,30 @@ class MinecraftAutonomyClient:
             payload = {"ok": False, "error": text.strip() or f"HTTP {resp.status}"}
         return payload if isinstance(payload, dict) else {"value": payload}
 
-    async def _request(self, method: str, path: str, json_data: dict[str, Any] | None = None, *, ensure_service: bool = True) -> dict[str, Any]:
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        json_data: dict[str, Any] | None = None,
+        *,
+        ensure_service: bool = True,
+        timeout_sec: float | None = None,
+    ) -> dict[str, Any]:
         if ensure_service:
             await self.ensure_service()
         session = await self._get_session()
-        async with session.request(method, self.base_url + path, json=json_data) as resp:
+        timeout = aiohttp.ClientTimeout(total=max(0.1, float(timeout_sec))) if timeout_sec is not None else None
+        async with session.request(method, self.base_url + path, json=json_data, timeout=timeout) as resp:
             payload = await self._decode_response(resp)
             if resp.status >= 400:
                 raise RuntimeError(str(payload.get("error") or payload))
             return payload
 
-    async def is_service_alive(self) -> bool:
+    async def is_service_alive(self, timeout_sec: float = 0.8) -> bool:
         try:
             session = await self._get_session()
-            async with session.get(self.base_url + "/health") as resp:
+            timeout = aiohttp.ClientTimeout(total=max(0.1, float(timeout_sec)))
+            async with session.get(self.base_url + "/health", timeout=timeout) as resp:
                 return resp.status == 200
         except Exception:
             return False
@@ -120,6 +141,12 @@ class MinecraftAutonomyClient:
         if configured.exists():
             return str(configured)
         return sys.executable
+
+    def _resolve_gateway_python_exe(self) -> str:
+        configured = Path(str(VOYAGER_CODEX_GATEWAY_PYTHON_EXE or "")).expanduser()
+        if configured.exists():
+            return str(configured)
+        return self._python_exe
 
     def _iter_existing_service_processes(self):
         wanted_port = int(self.port)
@@ -210,7 +237,7 @@ class MinecraftAutonomyClient:
             self._log_handle = None
         creationflags = 0
         if os.name == "nt":
-            creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
+            creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0)
         env = self._launcher_env.copy()
         env["VOYAGER_PYTHON_EXE"] = self._python_exe
         env.setdefault("MINECRAFT_AUTONOMY_SERVICE_HOST", self.host)
@@ -244,7 +271,75 @@ class MinecraftAutonomyClient:
             creationflags=creationflags,
         )
 
+    async def is_codex_gateway_alive(self, timeout_sec: float = 0.8) -> bool:
+        gateway_url = f"http://127.0.0.1:{int(VOYAGER_CODEX_GATEWAY_PORT)}/health"
+        try:
+            session = await self._get_session()
+            timeout = aiohttp.ClientTimeout(total=max(0.1, float(timeout_sec)))
+            async with session.get(gateway_url, timeout=timeout) as resp:
+                return resp.status == 200
+        except Exception:
+            return False
+
+    async def _spawn_codex_gateway_process(self) -> None:
+        if self._gateway_proc is not None and self._gateway_proc.returncode is None:
+            return
+        creationflags = 0
+        if os.name == "nt":
+            creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        env = self._launcher_env.copy()
+        env["VOYAGER_CODEX_GATEWAY_PYTHON_EXE"] = self._gateway_python_exe
+        env.setdefault("VOYAGER_CODEX_GATEWAY_PORT", str(int(VOYAGER_CODEX_GATEWAY_PORT)))
+        env.setdefault("PYTHONIOENCODING", "utf-8")
+        env.setdefault("PYTHONUTF8", "1")
+        if os.name == "nt" and START_CODEX_GATEWAY_PS1.exists():
+            self._gateway_proc = await asyncio.create_subprocess_exec(
+                "powershell.exe",
+                "-NoLogo",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(START_CODEX_GATEWAY_PS1),
+                cwd=self._cwd,
+                env=env,
+                creationflags=creationflags,
+            )
+            return
+        self._gateway_proc = await asyncio.create_subprocess_exec(
+            self._gateway_python_exe,
+            "-m",
+            "evelyn_core.codex_gateway_server",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            str(int(VOYAGER_CODEX_GATEWAY_PORT)),
+            cwd=self._cwd,
+            env=env,
+            creationflags=creationflags,
+        )
+
+    async def ensure_codex_gateway(self, timeout_sec: float = 15.0) -> None:
+        if str(VOYAGER_ACTION_BACKEND or "").strip().lower() != "codex-gateway":
+            return
+        if await self.is_codex_gateway_alive():
+            return
+        async with self._gateway_startup_lock:
+            if await self.is_codex_gateway_alive():
+                return
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + max(1.0, timeout_sec)
+            await self._spawn_codex_gateway_process()
+            while loop.time() < deadline:
+                if await self.is_codex_gateway_alive():
+                    return
+                if self._gateway_proc is not None and self._gateway_proc.returncode is not None:
+                    raise RuntimeError(f"Codex gateway exited early with code {self._gateway_proc.returncode}")
+                await asyncio.sleep(0.25)
+            raise RuntimeError("Codex gateway did not become ready in time")
+
     async def start(self, goal: str | None = None) -> dict[str, Any]:
+        await self.ensure_codex_gateway()
         return await self._request("POST", "/start", {"goal": goal} if goal else {})
 
     async def stop(self) -> dict[str, Any]:
@@ -259,7 +354,7 @@ class MinecraftAutonomyClient:
     async def status(self) -> dict[str, Any]:
         async def _live_probe_status() -> dict[str, Any] | None:
             try:
-                probe = await self._request("GET", "/observe", ensure_service=False)
+                probe = await self._request("GET", "/observe", ensure_service=False, timeout_sec=1.25)
             except Exception:
                 return None
             if isinstance(probe, dict) and (probe.get("connected") or probe.get("active") or probe.get("position")):
@@ -274,7 +369,7 @@ class MinecraftAutonomyClient:
                 }
             return None
 
-        if not await self.is_service_alive():
+        if not await self.is_service_alive(timeout_sec=0.6):
             live = await _live_probe_status()
             if live is not None:
                 return live
@@ -286,7 +381,7 @@ class MinecraftAutonomyClient:
                 "goal": None,
                 "observation": {},
             }
-        status = await self._request("GET", "/status", ensure_service=False)
+        status = await self._request("GET", "/status", ensure_service=False, timeout_sec=1.5)
         if isinstance(status, dict) and not status.get("connected"):
             live = await _live_probe_status()
             if live is not None:
@@ -295,8 +390,8 @@ class MinecraftAutonomyClient:
                 return merged
         return status
 
-    async def observe(self, *, ensure_service: bool = True) -> dict[str, Any]:
-        return await self._request("GET", "/observe", ensure_service=ensure_service)
+    async def observe(self, *, ensure_service: bool = True, timeout_sec: float | None = 1.25) -> dict[str, Any]:
+        return await self._request("GET", "/observe", ensure_service=ensure_service, timeout_sec=timeout_sec)
 
     def _persist_goal_override(self, goal: str) -> None:
         goal_text = str(goal or "").strip()

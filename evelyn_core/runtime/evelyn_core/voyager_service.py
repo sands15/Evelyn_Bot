@@ -118,6 +118,48 @@ def _inventory_summary(inventory: dict[str, Any], limit: int = 8) -> str:
     return " | ".join(parts)
 
 
+def _stability_signals(*, display_stage: Any, last_phase_at: Any, execution_session: Any, reset_audit_log: Any, active_plan_state: Any = None, now_ts: float | None = None) -> dict[str, Any]:
+    now = float(now_ts if now_ts is not None else time.time())
+    session = execution_session if isinstance(execution_session, dict) else {}
+    audit_log = reset_audit_log if isinstance(reset_audit_log, list) else []
+    plan_state = active_plan_state if isinstance(active_plan_state, dict) else {}
+    last_reset = audit_log[-1] if audit_log else None
+    phase_age_seconds = None
+    if isinstance(last_phase_at, (int, float)):
+        phase_age_seconds = max(0.0, now - float(last_phase_at))
+    unexpected_reset_count = int(session.get("unexpected_reset_count") or 0)
+    recovery_reset_count = int(session.get("recovery_reset_count") or 0)
+    total_reset_count = int(session.get("reset_count") or 0)
+    transition_history = plan_state.get("transition_history") if isinstance(plan_state.get("transition_history"), list) else []
+    recent_plan_transitions = [
+        entry for entry in transition_history
+        if isinstance(entry, dict)
+        and isinstance(entry.get("recorded_at"), (int, float))
+        and (now - float(entry.get("recorded_at"))) <= 120.0
+        and str(entry.get("transition") or "") in {"selected", "advanced_to_next_node", "current_node_failed"}
+    ]
+    alerts: list[str] = []
+    if unexpected_reset_count > 0:
+        alerts.append("unexpected_reset_detected")
+    if str(display_stage or "") == "between_tasks" and phase_age_seconds is not None and phase_age_seconds >= 30:
+        alerts.append("between_tasks_stalled")
+    if recovery_reset_count >= 3:
+        alerts.append("recovery_reset_churn")
+    if len(recent_plan_transitions) >= 6:
+        alerts.append("plan_churn_detected")
+    return {
+        "healthy": not alerts,
+        "alerts": alerts,
+        "display_stage": display_stage,
+        "phase_age_seconds": phase_age_seconds,
+        "reset_count": total_reset_count,
+        "recovery_reset_count": recovery_reset_count,
+        "unexpected_reset_count": unexpected_reset_count,
+        "recent_plan_transition_count": len(recent_plan_transitions),
+        "last_reset": last_reset,
+    }
+
+
 def _format_position(position: dict[str, Any] | None) -> str:
     if not isinstance(position, dict):
         return "-"
@@ -132,7 +174,7 @@ def _format_position(position: dict[str, Any] | None) -> str:
         return f"({x}, {y}, {z})"
 
 
-def _fetch_bridge_telemetry() -> dict[str, Any]:
+def _fetch_bridge_telemetry(timeout_sec: float = 0.6) -> dict[str, Any]:
     url = f"http://{BRIDGE_HTTP_HOST}:{BRIDGE_HTTP_PORT}/telemetry"
     req = urllib_request.Request(
         url,
@@ -141,7 +183,7 @@ def _fetch_bridge_telemetry() -> dict[str, Any]:
         method="POST",
     )
     try:
-        with urllib_request.urlopen(req, timeout=2.0) as resp:
+        with urllib_request.urlopen(req, timeout=max(0.1, float(timeout_sec))) as resp:
             payload = json.loads(resp.read().decode("utf-8", errors="replace"))
     except (urllib_error.URLError, TimeoutError, json.JSONDecodeError, OSError, ValueError):
         return {}
@@ -150,10 +192,12 @@ def _fetch_bridge_telemetry() -> dict[str, Any]:
     status = payload.get("status") if isinstance(payload.get("status"), dict) else {}
     result: dict[str, Any] = {
         "inventory": payload.get("inventory") if isinstance(payload.get("inventory"), dict) else {},
+        "inventory_slots": payload.get("inventorySlots") if isinstance(payload.get("inventorySlots"), list) else [],
         "position": status.get("position") if isinstance(status.get("position"), dict) else None,
         "health": status.get("health"),
         "hunger": status.get("food"),
         "inventory_used": status.get("inventoryUsed"),
+        "equipment": status.get("equipment") if isinstance(status.get("equipment"), list) else [],
         "connection_state": payload.get("connectionState") if isinstance(payload.get("connectionState"), str) else None,
         "connection_note": payload.get("connectionNote") if isinstance(payload.get("connectionNote"), str) else None,
         "last_death_event": payload.get("lastDeathEvent") if isinstance(payload.get("lastDeathEvent"), dict) else None,
@@ -226,7 +270,7 @@ def _format_minecraft_status(payload: dict[str, Any]) -> str:
     goal = payload.get("goal") or "idle"
     health = payload.get("health") if payload.get("health") is not None else observation.get("health")
     hunger = payload.get("hunger") if payload.get("hunger") is not None else observation.get("hunger")
-    phase = payload.get("last_phase") or "waiting_for_task"
+    phase = payload.get("display_stage") or payload.get("current_task_stage") or payload.get("last_phase") or "waiting_for_task"
     connection_state = payload.get("connection_state") or observation.get("connection_state")
     connection_label = _connection_state_label(connection_state, isinstance(position, dict))
     lines = [
@@ -280,6 +324,8 @@ class UpstreamDirectBridge:
         self.runner_mode: str | None = None
         self.runner_goal: str | None = None
         self.last_runner_exit_code: int | None = None
+        self._runtime_probe_cache_lock = threading.Lock()
+        self._runtime_probe_cache: dict[str, Any] = {}
 
     def _load_goal_override(self) -> str | None:
         try:
@@ -341,6 +387,39 @@ class UpstreamDirectBridge:
         if not isinstance(updated_at, (int, float)):
             return False
         return (time.time() - float(updated_at)) > max_age_seconds
+
+    def _collect_runtime_probes(self, *, running: bool) -> dict[str, Any]:
+        max_age_seconds = 1.5
+        now_monotonic = time.monotonic()
+        with self._runtime_probe_cache_lock:
+            cached = dict(self._runtime_probe_cache) if self._runtime_probe_cache else {}
+        cached_at = cached.get("captured_monotonic")
+        if (
+            cached
+            and cached.get("running") == running
+            and isinstance(cached_at, (int, float))
+            and (now_monotonic - float(cached_at)) <= max_age_seconds
+        ):
+            return cached
+
+        minecraft_target = {
+            "host": os.environ.get("MINEFLAYER_HOST", "127.0.0.1"),
+            "port": int(os.environ.get("MINEFLAYER_PORT", "25565")),
+        }
+        live_telemetry = _fetch_bridge_telemetry(timeout_sec=0.6) if running else {}
+        payload = {
+            "running": running,
+            "captured_at": time.time(),
+            "captured_monotonic": now_monotonic,
+            "live_telemetry": live_telemetry if isinstance(live_telemetry, dict) else {},
+            "bridge_http_reachable": _tcp_probe(BRIDGE_HTTP_HOST, BRIDGE_HTTP_PORT),
+            "bridge_telemetry_alive": bool(live_telemetry),
+            "minecraft_target": minecraft_target,
+            "minecraft_tcp_reachable": _tcp_probe(str(minecraft_target["host"]), int(minecraft_target["port"])),
+        }
+        with self._runtime_probe_cache_lock:
+            self._runtime_probe_cache = dict(payload)
+        return payload
 
     def _terminate_runner(self) -> None:
         self._cleanup_runner_handle()
@@ -436,7 +515,9 @@ class UpstreamDirectBridge:
         runner_status_stale = self._runner_is_stale(runner_status) if runner_status else False
         mode = self.runner_mode or runner_status.get("mode") or self._determine_mode(goal)
         current_task = runner_status.get("current_task")
-        current_task_stage = runner_status.get("current_task_stage")
+        current_task_stage_raw = runner_status.get("current_task_stage")
+        display_stage = runner_status.get("display_stage")
+        current_task_stage = display_stage or current_task_stage_raw
         completed_tasks = runner_status.get("completed_tasks") if isinstance(runner_status.get("completed_tasks"), list) else []
         failed_tasks = runner_status.get("failed_tasks") if isinstance(runner_status.get("failed_tasks"), list) else []
         last_phase = runner_status.get("last_phase")
@@ -453,25 +534,60 @@ class UpstreamDirectBridge:
         last_completion_reason = runner_status.get("last_completion_reason") if isinstance(runner_status.get("last_completion_reason"), str) else None
         last_success = runner_status.get("last_success") if isinstance(runner_status.get("last_success"), bool) else None
         last_search_metrics = runner_status.get("last_search_metrics") if isinstance(runner_status.get("last_search_metrics"), dict) else None
+        speculative_next_task = runner_status.get("speculative_next_task") if isinstance(runner_status.get("speculative_next_task"), dict) else None
+        last_speculative_decision = runner_status.get("last_speculative_decision") if isinstance(runner_status.get("last_speculative_decision"), dict) else None
+        last_inventory_plan = runner_status.get("last_inventory_plan") if isinstance(runner_status.get("last_inventory_plan"), dict) else None
+        active_plan_state = runner_status.get("active_plan_state") if isinstance(runner_status.get("active_plan_state"), dict) else None
+        last_task_contract_decision = runner_status.get("last_task_contract_decision") if isinstance(runner_status.get("last_task_contract_decision"), dict) else None
+        current_task_bookkeeping = runner_status.get("current_task_bookkeeping") if isinstance(runner_status.get("current_task_bookkeeping"), dict) else None
+        last_task_bookkeeping = runner_status.get("last_task_bookkeeping") if isinstance(runner_status.get("last_task_bookkeeping"), dict) else None
+        last_world_effect_verification = runner_status.get("last_world_effect_verification") if isinstance(runner_status.get("last_world_effect_verification"), dict) else None
+        last_critic_result = runner_status.get("last_critic_result") if isinstance(runner_status.get("last_critic_result"), dict) else None
+        last_recovery_boundary = runner_status.get("last_recovery_boundary") if isinstance(runner_status.get("last_recovery_boundary"), dict) else None
+        execution_session = runner_status.get("execution_session") if isinstance(runner_status.get("execution_session"), dict) else None
+        reset_audit_log = runner_status.get("reset_audit_log") if isinstance(runner_status.get("reset_audit_log"), list) else []
         search_metrics_history = runner_status.get("search_metrics_history") if isinstance(runner_status.get("search_metrics_history"), list) else []
         resume_checkpoint = runner_status.get("resume_checkpoint") if isinstance(runner_status.get("resume_checkpoint"), dict) else None
+        stability_signals = _stability_signals(
+            display_stage=display_stage,
+            last_phase_at=last_phase_at,
+            execution_session=execution_session,
+            reset_audit_log=reset_audit_log,
+            active_plan_state=active_plan_state,
+        )
         inventory = observation.get("inventory") if isinstance(observation.get("inventory"), dict) else {}
+        inventory_slots = observation.get("inventory_slots") if isinstance(observation.get("inventory_slots"), list) else []
         position = observation.get("position") if isinstance(observation.get("position"), dict) else None
         health = observation.get("health")
         hunger = observation.get("hunger")
+        inventory_used = observation.get("inventory_used")
+        if inventory_used is None:
+            inventory_used = observation.get("inventoryUsed")
+        equipment = observation.get("equipment") if isinstance(observation.get("equipment"), list) else []
         nearby_entities = observation.get("nearby_entities") if isinstance(observation.get("nearby_entities"), dict) else {}
-        live_telemetry = _fetch_bridge_telemetry() if running else {}
+        runtime_probes = self._collect_runtime_probes(running=running)
+        live_telemetry = runtime_probes.get("live_telemetry") if isinstance(runtime_probes.get("live_telemetry"), dict) else {}
         if running and live_telemetry:
             inventory = live_telemetry.get("inventory") if isinstance(live_telemetry.get("inventory"), dict) and (not inventory or not isinstance(inventory, dict)) else inventory
+            inventory_slots = live_telemetry.get("inventory_slots") if isinstance(live_telemetry.get("inventory_slots"), list) and not inventory_slots else inventory_slots
             position = live_telemetry.get("position") if isinstance(live_telemetry.get("position"), dict) and position is None else position
             health = live_telemetry.get("health") if live_telemetry.get("health") is not None and health is None else health
             hunger = live_telemetry.get("hunger") if live_telemetry.get("hunger") is not None and hunger is None else hunger
+            inventory_used = live_telemetry.get("inventory_used") if live_telemetry.get("inventory_used") is not None and inventory_used is None else inventory_used
+            equipment = live_telemetry.get("equipment") if isinstance(live_telemetry.get("equipment"), list) and not equipment else equipment
             nearby_entities = live_telemetry.get("nearby_entities") if isinstance(live_telemetry.get("nearby_entities"), dict) and not nearby_entities else nearby_entities
             observation = dict(observation)
             observation["inventory"] = inventory
+            if isinstance(inventory_slots, list):
+                observation["inventory_slots"] = inventory_slots
             observation["position"] = position
             observation["health"] = health
             observation["hunger"] = hunger
+            if inventory_used is not None:
+                observation["inventory_used"] = inventory_used
+                observation["inventoryUsed"] = inventory_used
+            if isinstance(equipment, list):
+                observation["equipment"] = equipment
             if isinstance(nearby_entities, dict):
                 observation["nearby_entities"] = nearby_entities
             if isinstance(live_telemetry.get("connection_state"), str):
@@ -506,13 +622,13 @@ class UpstreamDirectBridge:
         last_error = runner_status.get("last_error")
         if not running and last_error is None and runner_exit_code is not None and not runner_status:
             last_error = f"runner exited before writing status file (code {runner_exit_code})"
-        minecraft_target = {
+        minecraft_target = runtime_probes.get("minecraft_target") if isinstance(runtime_probes.get("minecraft_target"), dict) else {
             "host": os.environ.get("MINEFLAYER_HOST", "127.0.0.1"),
             "port": int(os.environ.get("MINEFLAYER_PORT", "25565")),
         }
-        bridge_http_reachable = _tcp_probe(BRIDGE_HTTP_HOST, BRIDGE_HTTP_PORT)
-        bridge_telemetry_alive = bool(live_telemetry)
-        minecraft_tcp_reachable = _tcp_probe(str(minecraft_target["host"]), int(minecraft_target["port"]))
+        bridge_http_reachable = bool(runtime_probes.get("bridge_http_reachable"))
+        bridge_telemetry_alive = bool(runtime_probes.get("bridge_telemetry_alive"))
+        minecraft_tcp_reachable = bool(runtime_probes.get("minecraft_tcp_reachable"))
         has_live_position = isinstance(position, dict)
         raw_connection_state = observation.get("connection_state") if isinstance(observation.get("connection_state"), str) else (runner_status.get("connection_state") if isinstance(runner_status.get("connection_state"), str) else None)
         if not running:
@@ -566,22 +682,56 @@ class UpstreamDirectBridge:
                 "has_last_rollout_info": isinstance(last_rollout_info, dict),
                 "has_last_task_result": isinstance(last_task_result, dict),
                 "has_last_search_metrics": isinstance(last_search_metrics, dict),
+                "has_current_task_bookkeeping": isinstance(current_task_bookkeeping, dict),
+                "has_last_task_bookkeeping": isinstance(last_task_bookkeeping, dict),
+                "has_last_task_contract_decision": isinstance(last_task_contract_decision, dict),
+                "has_last_world_effect_verification": isinstance(last_world_effect_verification, dict),
+                "has_last_critic_result": isinstance(last_critic_result, dict),
+                "has_last_recovery_boundary": isinstance(last_recovery_boundary, dict),
             },
             "resume_checkpoint": resume_checkpoint,
         }
         if last_error:
-            recovery_domain = "runner_exception"
-            recovery_reason = last_error
+            runtime_recovery_domain = "runner_exception"
+            runtime_recovery_reason = last_error
         elif not minecraft_tcp_reachable:
-            recovery_domain = "minecraft_dependency"
-            recovery_reason = "Minecraft server is not reachable on the configured TCP port."
+            runtime_recovery_domain = "minecraft_dependency"
+            runtime_recovery_reason = "Minecraft server is not reachable on the configured TCP port."
         elif running and not bridge_http_reachable:
-            recovery_domain = "bridge_http"
-            recovery_reason = "Runner is up but the bridge HTTP port is not reachable."
+            runtime_recovery_domain = "bridge_http"
+            runtime_recovery_reason = "Runner is up but the bridge HTTP port is not reachable."
         elif running and bridge_http_reachable and not minecraft_connected:
-            recovery_domain = "runner_runtime"
-            recovery_reason = "Runner and bridge are up, but Minecraft connection is not yet healthy."
+            runtime_recovery_domain = "runner_runtime"
+            runtime_recovery_reason = "Runner and bridge are up, but Minecraft connection is not yet healthy."
         else:
+            runtime_recovery_domain = "healthy"
+            runtime_recovery_reason = None
+        runtime_boundary = {
+            "scope": "runtime",
+            "domain": runtime_recovery_domain,
+            "reason": runtime_recovery_reason,
+            "healthy": runtime_recovery_domain == "healthy",
+        }
+        task_boundary = last_recovery_boundary if isinstance(last_recovery_boundary, dict) else {
+            "scope": "task",
+            "domain": "healthy" if not last_completion_reason or last_success else "unknown",
+            "reason": None if last_success else (last_completion_reason or None),
+            "healthy": bool(last_success) if last_completion_reason else True,
+        }
+        if not runtime_boundary["healthy"]:
+            recovery_scope = "runtime"
+            recovery_domain = runtime_boundary["domain"]
+            recovery_reason = runtime_boundary["reason"]
+        elif not stability_signals.get("healthy", True):
+            recovery_scope = "runtime"
+            recovery_domain = "runtime_stability"
+            recovery_reason = ", ".join(stability_signals.get("alerts") or []) or "stability alerts detected"
+        elif not task_boundary.get("healthy", True):
+            recovery_scope = "task"
+            recovery_domain = task_boundary.get("domain")
+            recovery_reason = task_boundary.get("reason")
+        else:
+            recovery_scope = "healthy"
             recovery_domain = "healthy"
             recovery_reason = None
         status_summary = {
@@ -602,15 +752,34 @@ class UpstreamDirectBridge:
             },
             "last_step": {
                 "phase": last_phase,
+                "display_stage": display_stage,
+                "raw_phase": current_task_stage_raw,
                 "phase_at": last_phase_at,
                 "action_program": last_action_program_name,
                 "env_event_count": last_env_event_count,
                 "progress": last_progress_message,
                 "completion_reason": last_completion_reason,
                 "success": last_success,
+                "speculative_next_task": speculative_next_task,
+                "last_speculative_decision": last_speculative_decision,
+                "last_inventory_plan": last_inventory_plan,
+                "active_plan_state": active_plan_state,
+                "last_task_contract_decision": last_task_contract_decision,
+                "current_task_bookkeeping": current_task_bookkeeping,
+                "last_task_bookkeeping": last_task_bookkeeping,
+                "last_world_effect_verification": last_world_effect_verification,
+                "last_critic_result": last_critic_result,
+                "last_recovery_boundary": last_recovery_boundary,
+                "execution_session": execution_session,
+                "reset_audit_log": reset_audit_log,
             },
             "last_completed": last_result if isinstance(last_result, dict) else None,
             "health_domains": health_domains,
+            "recovery_boundaries": {
+                "runtime_boundary": runtime_boundary,
+                "task_boundary": task_boundary,
+            },
+            "stability_signals": stability_signals,
             "evaluation": voyager_evaluation,
             "position": position,
             "health": health,
@@ -638,11 +807,15 @@ class UpstreamDirectBridge:
             "stage": mode,
             "current_task": current_task,
             "current_task_stage": current_task_stage,
+            "display_stage": display_stage,
+            "current_task_stage_raw": current_task_stage_raw,
             "autonomy_current_execution": None,
             "autonomy_last_result": last_result,
             "executor_last_step": last_phase,
             "executor_last_step_summary": {
                 "phase": last_phase,
+                "display_stage": display_stage,
+                "raw_phase": current_task_stage_raw,
                 "phase_at": last_phase_at,
                 "action_program": last_action_program_name,
                 "env_event_count": last_env_event_count,
@@ -656,6 +829,18 @@ class UpstreamDirectBridge:
             "last_completion_reason": last_completion_reason,
             "last_success": last_success,
             "last_search_metrics": last_search_metrics,
+            "speculative_next_task": speculative_next_task,
+            "last_speculative_decision": last_speculative_decision,
+            "last_inventory_plan": last_inventory_plan,
+            "active_plan_state": active_plan_state,
+            "last_task_contract_decision": last_task_contract_decision,
+            "current_task_bookkeeping": current_task_bookkeeping,
+            "last_task_bookkeeping": last_task_bookkeeping,
+            "last_world_effect_verification": last_world_effect_verification,
+            "last_critic_result": last_critic_result,
+            "last_recovery_boundary": last_recovery_boundary,
+            "execution_session": execution_session,
+            "reset_audit_log": reset_audit_log,
             "search_metrics_history": search_metrics_history,
             "last_error": last_error,
             "last_progress_message": last_progress_message,
@@ -669,11 +854,16 @@ class UpstreamDirectBridge:
             "voyager_evaluation": voyager_evaluation,
             "status_summary": status_summary,
             "health_domains": health_domains,
+            "stability_signals": stability_signals,
             "resume_checkpoint": resume_checkpoint,
             "recovery_state": {
+                "scope": recovery_scope,
                 "domain": recovery_domain,
                 "reason": recovery_reason,
                 "healthy": recovery_domain == "healthy",
+                "runtime_boundary": runtime_boundary,
+                "task_boundary": task_boundary,
+                "stability_signals": stability_signals,
             },
             "agent_models": {
                 "action": os.environ.get("VOYAGER_CODEX_MODEL") or None,

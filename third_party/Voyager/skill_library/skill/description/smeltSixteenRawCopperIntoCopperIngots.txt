@@ -1,0 +1,3 @@
+async function smeltSixteenRawCopperIntoCopperIngots(bot) {
+    // The function checks if sixteen copper ingots are already present in the inventory; if so, it stops. It then verifies that sufficient raw copper and coal are available for the required amount. If a furnace is not found, it attempts to craft one if enough cobblestone is present, or finds a suitable spot to place it. Finally, it initiates the smelting process using the furnace to convert the raw copper into the desired number of copper ingots.
+}

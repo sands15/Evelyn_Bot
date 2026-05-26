@@ -1,0 +1,3 @@
+async function smelt5RawIronIntoIronIngotsTask(bot) {
+    // This function aims to produce five iron ingots. It first checks if the target amount of ingots is already met. If not, it verifies that enough raw iron is available. It then ensures a furnace is present, placing one if necessary. Next, it selects a suitable fuel source to cover the required smelting operations. Finally, it performs the smelting process and confirms that the correct amount of ingots was produced and raw iron was consumed.
+}

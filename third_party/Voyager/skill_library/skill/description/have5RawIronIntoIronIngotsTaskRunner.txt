@@ -1,0 +1,3 @@
+async function have5RawIronIntoIronIngotsTaskRunner(bot) {
+    // This function attempts to ensure the player has at least five iron ingots by smelting raw iron. It first verifies that there are at least five raw iron items available. It then locates or places a furnace and selects a suitable fuel source from a list of candidates. Finally, it executes the smelting process for exactly five raw iron items and confirms that the required ingots were produced and the raw iron was consumed.
+}

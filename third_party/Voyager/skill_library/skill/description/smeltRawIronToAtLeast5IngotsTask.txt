@@ -1,0 +1,3 @@
+async function smeltRawIronToAtLeast5IngotsTask(bot) {
+    // The function checks if at least five iron ingots are present in the inventory. If not, it determines how many more are required and verifies that enough raw iron is available. It then ensures a furnace is present, placing one if necessary. Next, it selects a suitable fuel source from a list of candidates. Finally, it smelts the necessary amount of raw iron into ingots, confirming the target count is met.
+}

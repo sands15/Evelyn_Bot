@@ -1,10 +1,74 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Callable
 
 from ...text import clean_text
 from ...voice_pipeline import RouteDecision
+
+
+def _extract_image_urls_from_text(text: str) -> list[str]:
+    urls: list[str] = []
+    for match in re.finditer(r"url=(https?://[^\s;]+)", text):
+        url = match.group(1).strip().rstrip(").,]")
+        if url and url not in urls:
+            urls.append(url)
+    for match in re.finditer(r"https?://[^\s<>)]+", text):
+        url = match.group(0).strip().rstrip(").,]")
+        lowered = url.lower()
+        if any(lowered.endswith(suffix) for suffix in (".png", ".jpg", ".jpeg", ".webp", ".gif")) and url not in urls:
+            urls.append(url)
+    return urls[:4]
+
+
+def _as_openai_text_content(value: Any) -> list[dict[str, Any]]:
+    if isinstance(value, list):
+        normalized: list[dict[str, Any]] = []
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") == "text" and isinstance(item.get("text"), str):
+                normalized.append({"type": "text", "text": item["text"]})
+            elif item.get("type") == "image_url":
+                image_url = item.get("image_url")
+                if isinstance(image_url, dict) and isinstance(image_url.get("url"), str):
+                    normalized.append({"type": "image_url", "image_url": {"url": image_url["url"]}})
+                elif isinstance(image_url, str):
+                    normalized.append({"type": "image_url", "image_url": {"url": image_url}})
+        return normalized
+    text = clean_text(str(value))
+    content: list[dict[str, Any]] = [{"type": "text", "text": text}]
+    if "[Attached Visual Inputs]" in text:
+        for url in _extract_image_urls_from_text(text):
+            content.append({"type": "image_url", "image_url": {"url": url}})
+    return content
+
+
+def build_chat_messages(
+    messages: list[dict[str, Any]],
+    *,
+    content_format: str = "plain",
+) -> list[dict[str, Any]]:
+    if clean_text(content_format).lower() not in {"openai", "content-array", "content_array"}:
+        return list(messages)
+
+    normalized: list[dict[str, Any]] = []
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        role = clean_text(str(message.get("role") or "user")) or "user"
+        content = message.get("content", "")
+        if role == "user":
+            content = _as_openai_text_content(content)
+        normalized.append(
+            {
+                **message,
+                "role": role,
+                "content": content,
+            }
+        )
+    return normalized
 
 
 def build_main_llm_payload(
@@ -14,12 +78,17 @@ def build_main_llm_payload(
     final_user_text: str,
     source: str,
     stream: bool,
+    content_format: str = "plain",
     temperature: float | None = None,
     max_tokens: int | None = None,
 ) -> dict[str, Any]:
+    final_messages = build_chat_messages(
+        messages + [{"role": "user", "content": final_user_text}],
+        content_format=content_format,
+    )
     return {
         "model": model_name,
-        "messages": messages + [{"role": "user", "content": final_user_text}],
+        "messages": final_messages,
         "temperature": temperature if temperature is not None else (0.3 if source == "voice" else 0.1),
         "max_tokens": max_tokens,
         "stream": stream,

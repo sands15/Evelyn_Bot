@@ -1,0 +1,3 @@
+async function haveEightIronOreSmeltedIntoIngots(bot) {
+    // The function checks if eight iron ingots are present in the inventory; if not, it calculates the deficit. It then attempts to mine the necessary iron ore, searching for more if initial mining is insufficient. Next, it ensures a furnace is available, crafting and placing one if needed. Finally, it secures enough fuel, either by checking existing supplies or mining coal, before smelting the required amount of ore into ingots.
+}

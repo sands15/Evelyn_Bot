@@ -1,3 +1,0 @@
-async function craftOneChest(bot) {
-    // The function attempts to craft a single chest by first checking if one already exists. It then iterates through various types of logs to craft enough wooden planks, stopping if eight planks are gathered. If insufficient planks are available, it searches for and harvests wood. Finally, it crafts the chest if at least eight planks have been successfully obtained.
-}

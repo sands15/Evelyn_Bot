@@ -1,0 +1,3 @@
+async function smelt3RawIronIntoIronIngotsTask(bot) {
+    // This process aims to produce three iron ingots. It first checks if the required amount of ingots is already present in the inventory. If not, it determines how many raw iron items need to be smelted. It then selects a suitable fuel source, prioritizing coal, followed by various types of planks and logs. The function ensures a furnace is present nearby, placing one if necessary. Finally, it initiates the smelting of the raw iron using the chosen fuel and verifies that the target number of ingots has been successfully created.
+}

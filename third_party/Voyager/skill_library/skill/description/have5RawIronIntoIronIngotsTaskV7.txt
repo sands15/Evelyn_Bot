@@ -1,0 +1,3 @@
+async function have5RawIronIntoIronIngotsTask(bot) {
+    // This function checks if the bot possesses at least five iron ingots. If not, it calculates how many more are needed and verifies if enough raw iron is available. It then locates or places a furnace block nearby. The function searches for a suitable fuel source, such as coal or wood, to cover the required smelting amount. Finally, it initiates the smelting process to convert the raw iron into the target number of iron ingots.
+}

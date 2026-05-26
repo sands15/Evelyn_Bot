@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from .voice_llm import (
+    build_chat_messages,
     build_main_llm_payload,
     build_route_decision_from_state,
     decode_sse_stream_line,
@@ -9,6 +10,7 @@ from .voice_llm import (
 )
 
 __all__ = [
+    "build_chat_messages",
     "build_main_llm_payload",
     "build_route_decision_from_state",
     "decode_sse_stream_line",

@@ -1,0 +1,3 @@
+async function smeltEightIronOreIntoIngots(bot) {
+    // The function aims to produce eight iron ingots. It first checks if the required number of ingots is already present in the inventory. If not, it ensures enough iron ore is available, mining more if necessary. It then locates or constructs a furnace, ensuring a safe placement spot. Finally, it secures sufficient fuel, either by finding existing resources or mining more, before smelting the iron ore into the target amount of ingots.
+}

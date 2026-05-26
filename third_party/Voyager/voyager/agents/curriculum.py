@@ -10,6 +10,35 @@ import voyager.utils as U
 from voyager.prompts import load_prompt
 from voyager.utils.console import safe_print as print
 from voyager.utils.json_utils import fix_and_parse_json
+from voyager.agents.inventory_planner import (
+    InventoryFirstPlanner,
+    InventoryState,
+    capability_satisfies_item as planner_capability_satisfies_item,
+    canonical_item_name as planner_canonical_item_name,
+    count_capability_at_least as planner_count_capability_at_least,
+    has_armor_at_least as planner_has_armor_at_least,
+    has_tool_at_least as planner_has_tool_at_least,
+    material_tier as planner_material_tier,
+    split_tiered_item as planner_split_tiered_item,
+)
+from voyager.agents.curriculum_recovery_policy import CurriculumRecoveryPolicy
+from voyager.agents.curriculum_fallback_policy import CurriculumFallbackPolicy
+from voyager.agents.curriculum_failure_policy import CurriculumFailurePolicy
+from voyager.agents.curriculum_reason_policy import CurriculumReasonPolicy
+from voyager.agents.curriculum_context_policy import CurriculumContextPolicy
+from voyager.agents.curriculum_qa_cache import CurriculumQACache
+from voyager.agents.objective_templates import OBJECTIVE_TEMPLATES, infer_objective_template
+from voyager.agents.task_contract_policy import TaskContractPolicy
+from voyager.agents.observation_utils import (
+    observe_payload,
+    payload_dict,
+    payload_inventory,
+    payload_list,
+    payload_status,
+    safe_int,
+)
+from voyager.agents.progression_policy import EarlyGameProgressionPolicy
+from voyager.agents.survival_signals import inventory_has_food, is_night
 from langchain.chat_models import ChatOpenAI
 
 ORE_TASK_ITEM_MAP = {
@@ -32,6 +61,8 @@ WOOD_VARIANT_PREFIXES = (
     "warped",
 )
 TASK_ITEM_PATTERN = re.compile(r"^(?:Obtain|Mine|Craft|Smelt|Kill|Cook|Eat)\s+\d+\s+(.+)$", re.IGNORECASE)
+OBTAIN_TASK_PATTERN = re.compile(r"^Obtain\s+(\d+)\s+([a-z0-9_]+)$", re.IGNORECASE)
+SMELT_RAW_IRON_TASK_PATTERN = re.compile(r"^Smelt\s+(\d+)\s+raw_iron\s+into\s+iron_ingots?$", re.IGNORECASE)
 LOCAL_SEARCH_EXHAUSTED_REASON = "LOCAL_SEARCH_EXHAUSTED"
 SEARCH_FAILURE_REASONS = {
     LOCAL_SEARCH_EXHAUSTED_REASON,
@@ -48,6 +79,14 @@ SEARCH_FAILURE_REASONS = {
     "ore_scout_timeout",
     "ore_scout_exhausted",
 }
+ACTION_GENERATION_FAILURE_REASON = "action_generation_failed"
+RESET_ONLY_LOOP_FAILURE_REASON = "reset_only_loop"
+REPEAT_BLOCK_FAILURE_REASONS = SEARCH_FAILURE_REASONS.union({
+    ACTION_GENERATION_FAILURE_REASON,
+    RESET_ONLY_LOOP_FAILURE_REASON,
+    "action_parse_failed",
+    "max_retries_exhausted",
+})
 LOCAL_SEARCH_FAILURE_SNIPPETS = (
     "local_search_exhausted",
     "max exploration time reached",
@@ -77,9 +116,25 @@ TASK_KEYWORD_STOPWORDS = {
     "items",
     "chest",
 }
-HOSTILE_ENTITY_NAMES = ("zombie", "skeleton", "creeper", "spider", "drowned", "witch", "enderman")
-FOOD_HINT_TOKENS = ("beef", "pork", "mutton", "chicken", "fish", "salmon", "cod", "bread", "carrot", "potato", "melon", "apple")
-SURVIVAL_TASK_HINTS = ("shelter", "retreat", "safe", "food", "eat", "cook", "coal", "torch", "iron", "wood", "log", "planks", "stick", "crafting table", "crafting_table", "wooden pickaxe", "stone pickaxe", "stone axe", "cobblestone")
+TOOL_MATERIAL_TIERS = {
+    "wooden": 1,
+    "golden": 1,
+    "stone": 2,
+    "iron": 3,
+    "diamond": 4,
+    "netherite": 5,
+}
+ARMOR_MATERIAL_TIERS = {
+    "leather": 1,
+    "golden": 1,
+    "chainmail": 2,
+    "iron": 3,
+    "diamond": 4,
+    "netherite": 5,
+    "turtle": 2,
+}
+TOOL_SUFFIXES = ("pickaxe", "axe", "shovel", "hoe", "sword")
+ARMOR_SUFFIXES = ("helmet", "chestplate", "leggings", "boots")
 
 
 def _inv_count(inventory, item_name):
@@ -109,6 +164,30 @@ def _count_generic_stone(inventory):
     )
 
 
+def _split_tiered_item(item_name):
+    return planner_split_tiered_item(item_name)
+
+
+def _material_tier(kind, material):
+    return planner_material_tier(kind, material)
+
+
+def _count_capability_at_least(inventory, kind, slot, minimum_material):
+    return planner_count_capability_at_least(inventory, kind, slot, minimum_material)
+
+
+def _has_tool_at_least(inventory, tool_type, minimum_material):
+    return planner_has_tool_at_least(inventory, tool_type, minimum_material)
+
+
+def _has_armor_at_least(inventory, armor_slot, minimum_material):
+    return planner_has_armor_at_least(inventory, armor_slot, minimum_material)
+
+
+def _capability_satisfies_item(inventory, item_name, quantity=1):
+    return planner_capability_satisfies_item(inventory, item_name, quantity)
+
+
 def _has_named_planks(inventory, prefix, needed):
     candidates = [f"{prefix}_planks"]
     if prefix == "wood":
@@ -116,15 +195,30 @@ def _has_named_planks(inventory, prefix, needed):
     return sum(_inv_count(inventory, name) for name in candidates) >= needed
 
 
+def _position_key(position):
+    if not isinstance(position, dict):
+        return None
+    try:
+        return tuple(round(float(position.get(axis)), 1) for axis in ("x", "y", "z"))
+    except (TypeError, ValueError):
+        return None
+
+
 def _can_craft_tool(inventory, material, sticks_needed, units_needed):
     if _inv_count(inventory, "stick") < sticks_needed:
         return False
     if material == "wooden":
         return _count_planks(inventory) >= units_needed
+    if material == "golden":
+        return _inv_count(inventory, "gold_ingot") >= units_needed
     if material == "stone":
         return _count_generic_stone(inventory) >= units_needed
     if material == "iron":
         return _inv_count(inventory, "iron_ingot") >= units_needed
+    if material == "diamond":
+        return _inv_count(inventory, "diamond") >= units_needed
+    if material == "netherite":
+        return False
     return True
 
 
@@ -174,13 +268,6 @@ def _recipe_gate(item_name, quantity, inventory):
     return True
 
 
-def _safe_int(value, default=0):
-    try:
-        return int(value)
-    except Exception:
-        return default
-
-
 def _task_keywords(task):
     normalized = str(task or "").strip().lower().replace("_", " ")
     match = TASK_ITEM_PATTERN.match(str(task or "").strip())
@@ -198,38 +285,6 @@ def _task_keywords(task):
     return keywords
 
 
-def _observe_payload(events):
-    if not events:
-        return {}
-    try:
-        event_type, payload = events[-1]
-    except Exception:
-        return {}
-    if event_type != "observe" or not isinstance(payload, dict):
-        return {}
-    return payload
-
-
-def _payload_status(payload):
-    status = payload.get("status") if isinstance(payload, dict) else None
-    return status if isinstance(status, dict) else {}
-
-
-def _payload_inventory(payload):
-    inventory = payload.get("inventory") if isinstance(payload, dict) else None
-    return inventory if isinstance(inventory, dict) else {}
-
-
-def _payload_list(payload, key):
-    value = payload.get(key) if isinstance(payload, dict) else None
-    return value if isinstance(value, list) else []
-
-
-def _payload_dict(payload, key):
-    value = payload.get(key) if isinstance(payload, dict) else None
-    return value if isinstance(value, dict) else {}
-
-
 def _task_text(task):
     return str(task or "").strip().lower().replace("_", " ")
 
@@ -244,26 +299,6 @@ def _status_number(status, key, default=0):
 
 def _has_any(inventory, *names):
     return any(_inv_count(inventory, name) > 0 for name in names)
-
-
-def _is_night(status):
-    raw = str((status or {}).get("timeOfDay") or "").strip().lower()
-    return raw in {"night", "midnight", "sunset", "sunrise"}
-
-
-def _inventory_has_food(inventory):
-    return any(
-        _inv_count(inventory, name) > 0
-        for name in inventory.keys()
-        if any(token in str(name) for token in FOOD_HINT_TOKENS)
-    )
-
-
-def _hostiles_nearby(entities):
-    return any(
-        any(hostile in str(name).lower() for hostile in HOSTILE_ENTITY_NAMES)
-        for name in (entities or {}).keys()
-    )
 
 
 def _event_age_seconds(event):
@@ -322,6 +357,16 @@ class CurriculumAgent:
         ], f"mode {mode} not supported"
         self.mode = mode
         self.ckpt_dir = ckpt_dir
+        self.reason_policy = CurriculumReasonPolicy(
+            action_generation_failure_reason=ACTION_GENERATION_FAILURE_REASON,
+            reset_only_loop_failure_reason=RESET_ONLY_LOOP_FAILURE_REASON,
+            search_failure_reasons=SEARCH_FAILURE_REASONS,
+            local_search_failure_snippets=LOCAL_SEARCH_FAILURE_SNIPPETS,
+            local_search_exhausted_reason=LOCAL_SEARCH_EXHAUSTED_REASON,
+        )
+        self.context_policy = CurriculumContextPolicy()
+        self.task_contract_policy = TaskContractPolicy()
+        self.last_task_contract_decision = None
         U.f_mkdir(f"{ckpt_dir}/curriculum/vectordb")
         if resume:
             print(f"\033[35mLoading Curriculum Agent from {ckpt_dir}/curriculum\033[0m")
@@ -342,6 +387,40 @@ class CurriculumAgent:
             self.completed_tasks = []
             self.failed_tasks = []
             self.qa_cache = {}
+        self.speculative_next_task = None
+        self.last_speculative_decision = None
+        self.last_inventory_plan = None
+        self.last_completed_task = None
+        self.current_objective_template = OBJECTIVE_TEMPLATES["progression"]
+        self.active_plan_state = None
+        self.progression_policy = EarlyGameProgressionPolicy(
+            get_completed_tasks=lambda: self.completed_tasks,
+            get_nearby_progression_candidates=self._nearby_progression_candidates,
+        )
+        self.recovery_policy = CurriculumRecoveryPolicy(
+            count_logs=_count_logs,
+            count_planks=_count_planks,
+            has_tool_at_least=_has_tool_at_least,
+            status_number=_status_number,
+            event_age_seconds=_event_age_seconds,
+        )
+        self.fallback_policy = CurriculumFallbackPolicy(
+            normalize_task=self.normalize_task,
+            is_repeatable_state_task=self._is_repeatable_state_task,
+            task_inventory_satisfied=self._task_inventory_satisfied,
+            predict_task_from_inventory=self._predict_task_from_inventory,
+            nearby_progression_candidates=self._nearby_progression_candidates,
+            recovery_fallback_task=self.recovery_policy.fallback_recovery_task,
+            count_logs=_count_logs,
+            count_planks=_count_planks,
+        )
+        self.failure_policy = CurriculumFailurePolicy(
+            normalize_task=self.normalize_task,
+            task_keywords=_task_keywords,
+            current_position_key=self._current_position_key,
+            search_failure_reasons=SEARCH_FAILURE_REASONS,
+            repeat_block_failure_reasons=REPEAT_BLOCK_FAILURE_REASONS,
+        )
         # vectordb for qa cache
         self.qa_cache_questions_vectordb = Chroma(
             collection_name="qa_cache_questions_vectordb",
@@ -361,6 +440,11 @@ class CurriculumAgent:
             if self.qa_cache:
                 self.qa_cache_questions_vectordb.add_texts(texts=list(self.qa_cache.keys()))
             self.qa_cache_questions_vectordb.persist()
+        self.qa_cache_helper = CurriculumQACache(
+            qa_cache=self.qa_cache,
+            vectordb=self.qa_cache_questions_vectordb,
+            cache_path=f"{ckpt_dir}/curriculum/qa_cache.json",
+        )
         # if warm up not defined, initialize it as a dict, else, initialize all the missing value as a default value
         if not warm_up:
             warm_up = self.default_warmup
@@ -513,120 +597,390 @@ class CurriculumAgent:
         return self._summarize_failed_tasks()
 
     def _extract_failure_reason(self, info):
-        if not isinstance(info, dict):
-            return "Unknown", ""
-        for key in ("error", "critique", "failure_reason", "reset_error"):
-            value = info.get(key)
-            if value:
-                text = str(value).strip()
-                if text:
-                    reason = text.splitlines()[0][:160]
-                    return self._canonicalize_failure_reason(reason, text[:300], info)
-        return self._canonicalize_failure_reason("Unknown", "", info)
+        return self.reason_policy.extract_failure_reason(info)
 
     def _canonicalize_failure_reason(self, reason, evidence, info=None):
-        reason_text = str(reason or "Unknown").strip() or "Unknown"
-        evidence_text = str(evidence or "").strip()
-        combined = f"{reason_text}\n{evidence_text}".lower()
-        completion_reason = ""
-        if isinstance(info, dict):
-            completion_reason = str(info.get("completion_reason") or "").strip()
-        if reason_text in SEARCH_FAILURE_REASONS:
-            return reason_text, evidence_text or reason_text
-        if completion_reason in SEARCH_FAILURE_REASONS:
-            return completion_reason, evidence_text or reason_text
-        if any(snippet in combined for snippet in LOCAL_SEARCH_FAILURE_SNIPPETS):
-            return LOCAL_SEARCH_EXHAUSTED_REASON, evidence_text or reason_text
-        if reason_text == "Unknown" and completion_reason:
-            return completion_reason, evidence_text
-        if self._looks_like_prompt_or_conversation_dump(reason_text, evidence_text):
-            fallback_reason = completion_reason or "action_or_critic_output_not_normalized"
-            return fallback_reason, evidence_text[:300]
-        return reason_text, evidence_text
+        return self.reason_policy.canonicalize_failure_reason(reason, evidence, info)
+
+    def _looks_like_non_runtime_failure_instruction(self, reason_text, evidence_text):
+        return self.reason_policy.looks_like_non_runtime_failure_instruction(reason_text, evidence_text)
 
     def _looks_like_prompt_or_conversation_dump(self, reason_text, evidence_text):
-        combined = f"{reason_text}\n{evidence_text}".strip().lower()
-        if not combined:
-            return False
-        suspicious_snippets = (
-            "you are a helpful assistant that writes mineflayer javascript code",
-            "here are some useful programs written with mineflayer apis",
-            "completed tasks so far:",
-            "failed tasks that are too hard:",
-        )
-        if any(snippet in combined for snippet in suspicious_snippets):
-            return True
-        if combined.startswith("(") and "mineflayer javascript code" in combined:
-            return True
-        if len(reason_text) >= 140 and any(token in reason_text.lower() for token in ("you are ", "inventory", "nearby blocks", "task:")):
-            return True
-        return False
+        return self.reason_policy.looks_like_prompt_or_conversation_dump(reason_text, evidence_text)
 
     def _recent_local_search_failure(self, task):
-        target_keywords = _task_keywords(task)
-        if not target_keywords:
-            return None
-        best_record = None
-        best_overlap = 0
-        for record in self.failed_tasks:
-            if record.get("reason") not in SEARCH_FAILURE_REASONS:
-                continue
-            overlap = len(target_keywords.intersection(_task_keywords(record.get("task"))))
-            if overlap > best_overlap:
-                best_overlap = overlap
-                best_record = record
-        return best_record if best_overlap > 0 else None
+        return self.failure_policy.recent_local_search_failure(task, self.failed_tasks)
 
-    def _search_policy_context(self, task):
-        verb = str(task or "").strip().split(" ", 1)[0].lower()
-        if verb not in {"obtain", "mine", "kill", "cook", "eat"}:
-            return ""
-        return (
-            "\nOperational policy: prefer intent-level search helpers instead of ad-hoc wandering. "
-            "For wood or food in the wrong domain, recover to the surface first. "
-            "For nearby-search tasks, first check within 32 blocks, then use short bounded search only if needed. "
-            f"If search stalls or exhausts candidates, stop with a concise reason such as {LOCAL_SEARCH_EXHAUSTED_REASON}, wood_scout_exhausted, food_scout_exhausted, or surface_recovery_exhausted so the next curriculum step can change direction, biome, or prerequisites."
+    def _current_position_key(self, events):
+        event = observe_payload(events)
+        status = payload_status(event)
+        return _position_key(status.get("position"))
+
+    def _recent_blocking_failure(self, task, events):
+        return self.failure_policy.recent_blocking_failure(task, events, self.failed_tasks)
+
+    def _nearby_progression_candidates(self, events):
+        event = observe_payload(events)
+        voxels = set(payload_list(event, "voxels"))
+        voxels.update(payload_list(event, "nearby_blocks"))
+        inventory, _, _ = self._extract_live_inventory_state(events)
+        completed_tasks = self._completed_task_names()
+        status = payload_status(event)
+        health = _status_number(status, "health", default=20)
+        hunger = _status_number(status, "food", default=20)
+        if health < 16 or hunger < 16:
+            return []
+        candidates = []
+
+        def add_candidate(task, context):
+            normalized = self.normalize_task(task)
+            if normalized in completed_tasks:
+                return
+            if not self._is_repeatable_state_task(task) and self._task_inventory_satisfied(task, inventory):
+                return
+            candidates.append((task, context))
+
+        if "coal_ore" in voxels:
+            add_candidate(
+                "Mine 4 coal_ore",
+                "Food search is currently blocked but health and hunger are stable. Mine nearby visible coal to make useful progress without long travel.",
+            )
+        if "iron_ore" in voxels and _has_tool_at_least(inventory, "pickaxe", "stone"):
+            add_candidate(
+                "Mine 2 iron_ore",
+                "Food search is currently blocked but health and hunger are stable. Mine nearby visible iron with the available pickaxe instead of resetting in place.",
+            )
+        if "grass_block" in voxels and _has_any(inventory, "wheat_seeds", "stone_hoe", "dirt"):
+            add_candidate(
+                "Move 24 blocks away from current position",
+                "Food search has stalled from this checkpoint. Reposition safely before attempting a new food route or nearby progression task.",
+            )
+        return candidates
+
+    def _completed_task_names(self):
+        return {
+            self.normalize_task(task)
+            for task in self.completed_tasks
+            if str(task or "").strip()
+        }
+
+    def _is_repeatable_state_task(self, task):
+        task_text = str(task or "").strip().lower()
+        return any(
+            token in task_text
+            for token in (
+                "temporary shelter",
+                "retreat to a safe position",
+                "safe position",
+                "reach a surface position",
+                "move 24 blocks away from current position",
+                "establish a lit temporary shelter",
+                "find food source",
+                "acquire 1 edible food item",
+                "eat food",
+                "cook food",
+            )
         )
 
-    def _fallback_after_local_search_failure(self, events, failed_record=None):
-        event = _observe_payload(events)
-        voxels = _payload_list(event, "voxels")
+    def _task_inventory_satisfied(self, task, inventory):
+        return InventoryFirstPlanner().is_task_satisfied(self.normalize_task(task), inventory)
+
+    def _fallback_after_local_search_failure(self, events, failed_record=None, blocked_tasks=None):
+        event = observe_payload(events)
+        voxels = payload_list(event, "voxels")
         inventory, _, _ = self._extract_live_inventory_state(events)
-        failed_reason = str((failed_record or {}).get("reason") or "")
-        if failed_reason.startswith("surface_recovery_"):
-            return (
-                "Retreat to a safe position",
-                "Recent recovery search could not find a clean surface route. Re-stabilize locally, avoid hazards, and let the next task choose a different recovery direction or safer travel context.",
+        return self.fallback_policy.fallback_after_local_search_failure(
+            events=events,
+            voxels=voxels,
+            inventory=inventory,
+            failed_record=failed_record,
+            blocked_tasks=blocked_tasks,
+        )
+
+    def _inventory_first_task(self, events, inventory, *, allow_optional=False):
+        state = self._planner_state(events, inventory)
+        planner = InventoryFirstPlanner(completed_tasks=self._completed_task_names())
+        planned = planner.choose_next(
+            state,
+            previous_task="inventory_first",
+            allow_optional=allow_optional,
+            objective=self.current_objective_template.id,
+        )
+        candidates = []
+        if planned:
+            candidates.append((planned.task, planned.context))
+
+        selected = self.fallback_policy.select_unblocked_task(
+            candidates,
+            blocked_tasks=self._completed_task_names(),
+            inventory=inventory,
+        )
+        if selected is not None:
+            task, context = selected
+            chain = [planned.as_dict()] if planned else []
+            self._start_or_refresh_active_plan(
+                task=task,
+                context=context,
+                capability=planned.capability if planned else None,
+                reason=planned.reason if planned else None,
+                source="inventory_first",
+                chain=chain,
             )
-        if failed_reason.startswith("food_scout_") and any(item in inventory for item in FOOD_HINT_TOKENS):
-            return (
-                "Cook food",
-                "Recent food scouting was inefficient. Convert already-owned food resources into immediate survival value before attempting a broader search again.",
+            self._set_last_inventory_plan(
+                phase="selected",
+                source="inventory_first",
+                selected_task=task,
+                selected_context=context,
+                reason=planned.reason if planned else None,
+                chain=chain,
+                objective_template=self.current_objective_template.as_dict(),
+                capability=planned.capability if planned else None,
+                active_plan=self.active_plan_state,
             )
-        if failed_reason.startswith("ore_scout_"):
-            return (
-                "Retreat to a safe position",
-                "Recent ore scouting failed to find a productive underground route. Re-stabilize, avoid burning more cave time immediately, and let the next task choose a different ore direction, elevation, or prerequisite.",
+            print(
+                f"\033[35mInventory-first selected task '{task}' from live inventory before curriculum LLM.\033[0m"
             )
-        if _count_logs(inventory) and _count_planks(inventory) < 8:
-            return (
-                "Craft 8 wood planks",
-                "The previous search was inefficient. Use this turn to strengthen travel and crafting prerequisites instead of repeating a long local search.",
+            return task, context
+        if planned:
+            self._set_last_inventory_plan(
+                phase="blocked",
+                source="inventory_first",
+                selected_task=planned.task,
+                selected_context=planned.context,
+                reason=planned.reason,
+                chain=[planned.as_dict()],
+                active_plan=self.active_plan_state,
             )
-        if any("log" in block for block in voxels):
-            return (
-                "Obtain 8 wood logs",
-                "The previous target was not nearby or the scout path stalled. Gather reusable travel resources from the current area, then let the next task choose a new direction or biome.",
+        else:
+            self._set_last_inventory_plan(
+                phase="no_match",
+                source="inventory_first",
+                selected_task=None,
+                selected_context=None,
+                reason="no_deterministic_inventory_rule_matched",
+                chain=[],
+                objective_template=self.current_objective_template.as_dict(),
+                active_plan=self.active_plan_state,
             )
-        return self._fallback_recovery_task(inventory)
+        return None
+
+    def set_objective_template(self, goal_text=None, current_task=None):
+        previous = getattr(self, "current_objective_template", None)
+        self.current_objective_template = infer_objective_template(goal_text, current_task)
+        if previous and getattr(previous, "id", None) != self.current_objective_template.id:
+            self.active_plan_state = None
+        return self.current_objective_template
+
+    def _make_plan_node(self, *, task, context, capability=None, reason=None, source=None, status="ready"):
+        return {
+            "task": self.normalize_task(task),
+            "context": context,
+            "capability": capability,
+            "reason": reason,
+            "source": source,
+            "status": status,
+            "created_at": time.time(),
+        }
+
+    def _record_active_plan_transition(self, plan, transition, **extra):
+        if not isinstance(plan, dict):
+            return
+        history = plan.get("transition_history") if isinstance(plan.get("transition_history"), list) else []
+        entry = {
+            "transition": transition,
+            "recorded_at": time.time(),
+        }
+        entry.update(extra)
+        history.append(entry)
+        plan["transition_history"] = history[-20:]
+        plan["last_transition"] = transition
+        plan["updated_at"] = time.time()
+
+    def _start_or_refresh_active_plan(self, *, task, context, capability=None, reason=None, source=None, chain=None):
+        node = self._make_plan_node(
+            task=task,
+            context=context,
+            capability=capability,
+            reason=reason,
+            source=source,
+            status="ready",
+        )
+        previous = self.active_plan_state if isinstance(self.active_plan_state, dict) else None
+        previous_plan_id = previous.get("plan_id") if previous else None
+        nodes = []
+        if isinstance(chain, list) and chain:
+            for entry in chain:
+                if not isinstance(entry, dict):
+                    continue
+                entry_task = self.normalize_task(entry.get("task"))
+                if not entry_task:
+                    continue
+                nodes.append(
+                    {
+                        "task": entry_task,
+                        "context": entry.get("context"),
+                        "capability": entry.get("capability"),
+                        "reason": entry.get("reason"),
+                        "source": entry.get("source") or source,
+                        "status": "ready" if entry_task == node["task"] else "pending",
+                        "created_at": time.time(),
+                    }
+                )
+        if not nodes:
+            nodes = [dict(node)]
+        self.active_plan_state = {
+            "plan_id": previous_plan_id or f"objective-plan-{int(time.time() * 1000)}",
+            "objective_template": self.current_objective_template.as_dict(),
+            "source": source,
+            "status": "active",
+            "current_node": dict(node),
+            "nodes": nodes,
+            "pending_next_node": None,
+            "last_transition": "selected",
+            "transition_history": [],
+            "updated_at": time.time(),
+        }
+        self._record_active_plan_transition(
+            self.active_plan_state,
+            "selected",
+            task=node.get("task"),
+            source=source,
+            capability=capability,
+        )
+        return self.active_plan_state
+
+    def _queue_pending_plan_node(self, *, trigger_task, next_task, context, reason=None, expected_minimums=None):
+        if not isinstance(self.active_plan_state, dict):
+            return None
+        current_node = self.active_plan_state.get("current_node") if isinstance(self.active_plan_state.get("current_node"), dict) else None
+        if not current_node or self.normalize_task(current_node.get("task")) != self.normalize_task(trigger_task):
+            return None
+        pending = self._make_plan_node(
+            task=next_task,
+            context=context,
+            capability=None,
+            reason=reason,
+            source="speculative_successor",
+            status="pending",
+        )
+        pending["trigger_task"] = self.normalize_task(trigger_task)
+        pending["expected_minimums"] = dict(expected_minimums or {})
+        self.active_plan_state["pending_next_node"] = pending
+        self._record_active_plan_transition(
+            self.active_plan_state,
+            "pending_successor_prepared",
+            trigger_task=self.normalize_task(trigger_task),
+            next_task=pending.get("task"),
+        )
+        return pending
+
+    def _consume_active_plan_task(self, events):
+        plan = self.active_plan_state
+        if not isinstance(plan, dict):
+            return None
+        current_node = plan.get("current_node") if isinstance(plan.get("current_node"), dict) else None
+        if not current_node:
+            self.active_plan_state = None
+            return None
+        task = self.normalize_task(current_node.get("task"))
+        context = current_node.get("context") or ""
+        if not task:
+            self.active_plan_state = None
+            return None
+        if self.normalize_task(task) in self._completed_task_names():
+            plan["status"] = "completed"
+            self._record_active_plan_transition(plan, "completed_already_owned", task=task)
+            return None
+        inventory, _, _ = self._extract_live_inventory_state(events)
+        if not self._is_repeatable_state_task(task) and self._task_inventory_satisfied(task, inventory):
+            plan["status"] = "satisfied_without_execution"
+            self._record_active_plan_transition(plan, "inventory_satisfied", task=task)
+            return None
+        if self._recent_blocking_failure(task, events):
+            plan["status"] = "blocked"
+            self._record_active_plan_transition(plan, "recent_blocking_failure", task=task)
+            return None
+        self._record_active_plan_transition(plan, "reused_current_node", task=task)
+        return task, context
+
+    def _apply_task_result_to_active_plan(self, info):
+        plan = self.active_plan_state
+        if not isinstance(plan, dict):
+            return
+        task = self.normalize_task(info.get("task"))
+        current_node = plan.get("current_node") if isinstance(plan.get("current_node"), dict) else None
+        if not current_node or self.normalize_task(current_node.get("task")) != task:
+            return
+        current_node["status"] = "completed" if info.get("success") else "failed"
+        current_node["updated_at"] = time.time()
+        if info.get("success"):
+            pending = plan.get("pending_next_node") if isinstance(plan.get("pending_next_node"), dict) else None
+            if pending and self.normalize_task(pending.get("trigger_task")) == task:
+                promoted = dict(pending)
+                promoted["status"] = "ready"
+                promoted["promoted_at"] = time.time()
+                plan["current_node"] = promoted
+                nodes = plan.get("nodes") if isinstance(plan.get("nodes"), list) else []
+                if all(self.normalize_task(node.get("task")) != self.normalize_task(promoted.get("task")) for node in nodes if isinstance(node, dict)):
+                    nodes.append(dict(promoted))
+                plan["nodes"] = nodes
+                plan["pending_next_node"] = None
+                self._record_active_plan_transition(
+                    plan,
+                    "advanced_to_next_node",
+                    task=promoted.get("task"),
+                    trigger_task=task,
+                )
+            else:
+                plan["status"] = "completed"
+                self._record_active_plan_transition(plan, "completed_without_successor", task=task)
+        else:
+            plan["status"] = "failed"
+            plan["pending_next_node"] = None
+            self._record_active_plan_transition(plan, "current_node_failed", task=task)
+
+    def _planner_state(self, events, inventory=None):
+        event = observe_payload(events)
+        nearby_blocks = set(payload_list(event, "voxels"))
+        nearby_blocks.update(payload_list(event, "nearby_blocks"))
+        return InventoryState.from_observation(
+            inventory=inventory if inventory is not None else payload_inventory(event),
+            status=payload_status(event),
+            nearby_blocks=nearby_blocks,
+        )
+
+    def _set_last_inventory_plan(
+        self,
+        *,
+        phase,
+        source,
+        selected_task=None,
+        selected_context=None,
+        reason=None,
+        chain=None,
+        **extra,
+    ):
+        payload = {
+            "phase": phase,
+            "source": source,
+            "selected_task": selected_task,
+            "selected_context": selected_context,
+            "reason": reason,
+            "chain": chain or [],
+            "created_at": time.time(),
+        }
+        payload.update(extra)
+        self.last_inventory_plan = payload
 
     def _record_failed_task(self, info):
         task = str(info.get("task") or "").strip()
         if not task:
             return
         reason, evidence = self._extract_failure_reason(info)
+        position_key = _position_key(info.get("last_position"))
         for record in self.failed_tasks:
             if record.get("task") == task:
+                previous_position_key = record.get("last_position_key")
                 record["repeat_count"] = int(record.get("repeat_count") or 1) + 1
                 record["reason"] = reason or record.get("reason") or "Unknown"
                 if evidence:
@@ -634,34 +988,44 @@ class CurriculumAgent:
                 record["last_seen_at"] = int(time.time())
                 record["last_error_type"] = info.get("error_type")
                 record["last_program_name"] = info.get("program_name")
+                if position_key is not None:
+                    record["last_position"] = info.get("last_position")
+                    record["last_position_key"] = list(position_key)
+                    if previous_position_key == list(position_key):
+                        record["same_position_repeat_count"] = int(record.get("same_position_repeat_count") or 1) + 1
+                    else:
+                        record["same_position_repeat_count"] = 1
                 return
-        self.failed_tasks.append(
-            {
-                "task": task,
-                "reason": reason,
-                "evidence": evidence,
-                "repeat_count": 1,
-                "last_seen_at": int(time.time()),
-                "last_error_type": info.get("error_type"),
-                "last_program_name": info.get("program_name"),
-            }
-        )
+        record = {
+            "task": task,
+            "reason": reason,
+            "evidence": evidence,
+            "repeat_count": 1,
+            "last_seen_at": int(time.time()),
+            "last_error_type": info.get("error_type"),
+            "last_program_name": info.get("program_name"),
+        }
+        if position_key is not None:
+            record["last_position"] = info.get("last_position")
+            record["last_position_key"] = list(position_key)
+            record["same_position_repeat_count"] = 1
+        self.failed_tasks.append(record)
 
     def render_observation(self, *, events, chest_observation):
         assert events[-1][0] == "observe", "Last event must be observe"
-        event = _observe_payload(events)
-        status = _payload_status(event)
+        event = observe_payload(events)
+        status = payload_status(event)
         biome = status.get("biome")
         time_of_day = status.get("timeOfDay")
-        voxels = _payload_list(event, "voxels")
-        block_records = _payload_list(event, "blockRecords")
-        entities = _payload_dict(status, "entities")
+        voxels = payload_list(event, "voxels")
+        block_records = payload_list(event, "blockRecords")
+        entities = payload_dict(status, "entities")
         health = status.get("health")
         hunger = status.get("food")
         position = status.get("position") if isinstance(status.get("position"), dict) else None
         equipment = status.get("equipment")
-        inventory_used = _safe_int(status.get("inventoryUsed") or 0)
-        inventory = _payload_inventory(event)
+        inventory_used = safe_int(status.get("inventoryUsed") or 0)
+        inventory = payload_inventory(event)
 
         if not any(
             "dirt" in block
@@ -749,17 +1113,52 @@ class CurriculumAgent:
         print(f"\033[35m****Curriculum Agent human message****\n{content}\033[0m")
         return HumanMessage(content=content)
 
+    def _finalize_task_choice(self, task, context, events):
+        finalized_task, finalized_context, decision = self.task_contract_policy.enforce_task_choice(
+            task,
+            context,
+            events=events,
+        )
+        self.last_task_contract_decision = decision
+        if str(finalized_task or "").strip() != str(task or "").strip():
+            print(
+                f"\033[35mTask contract lowered '{task}' to '{finalized_task}'.\033[0m"
+            )
+        if isinstance(decision, dict) and decision.get("fallback_applied"):
+            print(
+                f"\033[35mTask contract rejected non-verifiable task '{decision.get('normalized_task')}' and replaced it with '{finalized_task}'.\033[0m"
+            )
+        return finalized_task, finalized_context
+
     def propose_next_task(self, *, events, chest_observation, max_retries=5):
+        latest_event = observe_payload(events)
+        latest_status = payload_status(latest_event)
+        latest_inventory = payload_inventory(latest_event)
         if self.progress == 0 and self.mode == "auto":
-            task = "Mine 1 wood log"
-            context = "You can mine one of oak, birch, spruce, jungle, acacia, dark oak, or mangrove logs."
-            return task, context
+            bootstrap_stage = self.progression_policy.infer_stage(events)
+            if bootstrap_stage <= 0:
+                task = "Mine 1 wood log"
+                context = (
+                    "You can mine one of oak, birch, spruce, jungle, acacia, dark oak, or mangrove logs. "
+                    "If no log is already nearby, prefer searchAndHarvest(bot, { goalType: \"wood\", quantity: 1, maxSearchBudgetSec: 24 }) "
+                    "and recoverToSurface(...) when the current area is underground or unsuitable. "
+                    "Do not hand-write long exploreUntil wandering loops for wood search."
+                )
+                return self._finalize_task_choice(task, context, events)
+            bootstrap_inventory_first = self._inventory_first_task(
+                events,
+                latest_inventory,
+                allow_optional=True,
+            )
+            if bootstrap_inventory_first:
+                return self._finalize_task_choice(
+                    bootstrap_inventory_first[0],
+                    bootstrap_inventory_first[1],
+                    events,
+                )
 
         # hard code task when inventory is almost full
-        latest_event = _observe_payload(events)
-        latest_status = _payload_status(latest_event)
-        latest_inventory = _payload_inventory(latest_event)
-        inventory_used = _safe_int(latest_status.get("inventoryUsed") or 0)
+        inventory_used = safe_int(latest_status.get("inventoryUsed") or 0)
         if inventory_used >= 33:
             if chest_observation != "Chests: None\n\n":
                 chests = chest_observation[8:-2].split("\n")
@@ -778,9 +1177,9 @@ class CurriculumAgent:
                             "(do not list items already in the chest), "
                             "You can use bot.inventoryUsed() to check how many inventory slots are used."
                         )
-                        return task, context
+                        return self._finalize_task_choice(task, context, events)
             if "chest" in latest_inventory:
-                task = "Place a chest"
+                task = "Place 1 chest"
                 context = (
                     f"You have a chest in inventory, place it around you. "
                     f"If chests is not None, or nearby blocks contains chest, this task is success."
@@ -788,7 +1187,19 @@ class CurriculumAgent:
             else:
                 task = "Craft 1 chest"
                 context = "Craft 1 chest with 8 planks of any kind of wood."
-            return task, context
+            return self._finalize_task_choice(task, context, events)
+
+        inventory_first = self._inventory_first_task(events, latest_inventory)
+        if inventory_first:
+            return self._finalize_task_choice(inventory_first[0], inventory_first[1], events)
+
+        active_plan_task = self._consume_active_plan_task(events)
+        if active_plan_task:
+            return self._finalize_task_choice(active_plan_task[0], active_plan_task[1], events)
+
+        speculative = self.consume_speculative_next_task(events=events)
+        if speculative:
+            return self._finalize_task_choice(speculative[0], speculative[1], events)
 
         messages = [
             self.render_system_message(),
@@ -798,11 +1209,252 @@ class CurriculumAgent:
         ]
 
         if self.mode == "auto":
-            return self.propose_next_ai_task(messages=messages, events=events, max_retries=max_retries)
+            task, context = self.propose_next_ai_task(messages=messages, events=events, max_retries=max_retries)
+            return self._finalize_task_choice(task, context, events)
         elif self.mode == "manual":
-            return self.propose_next_manual_task()
+            task, context = self.propose_next_manual_task()
+            return self._finalize_task_choice(task, context, events)
         else:
             raise ValueError(f"Invalid curriculum agent mode: {self.mode}")
+
+    def _task_success_delta(self, task, inventory):
+        raw_task = str(task or "").strip()
+        mine_match = re.fullmatch(r"Mine\s+(\d+)\s+([a-z0-9_ ]+)", raw_task, re.IGNORECASE)
+        if mine_match:
+            amount = int(mine_match.group(1))
+            target = mine_match.group(2).strip().lower().replace(" ", "_")
+            mined_item = ORE_TASK_ITEM_MAP.get(target)
+            if mined_item:
+                predicted = dict(inventory or {})
+                before = _inv_count(predicted, mined_item)
+                predicted[mined_item] = before + amount
+                return predicted, {mined_item: before + amount}
+
+        task = self.normalize_task(task)
+        predicted = dict(inventory or {})
+        expected_minimums = {}
+        match = OBTAIN_TASK_PATTERN.match(task)
+        if match:
+            amount = int(match.group(1))
+            item_name = match.group(2)
+            before = _inv_count(predicted, item_name)
+            predicted[item_name] = max(before, amount)
+            expected_minimums[item_name] = max(before + 1, amount)
+            return predicted, expected_minimums
+
+        craft_match = CRAFT_TASK_PATTERN.match(task)
+        if craft_match:
+            amount = int(craft_match.group(1))
+            item_name = planner_canonical_item_name(craft_match.group(2))
+            before = _inv_count(predicted, item_name)
+            simulated = InventoryFirstPlanner().recipe_catalog.simulate_craft(item_name, amount, predicted)
+            if simulated:
+                predicted, crafted_amount = simulated
+                expected_minimums[item_name] = before + min(amount, crafted_amount)
+                return predicted, expected_minimums
+
+            predicted[item_name] = before + amount
+            expected_minimums[item_name] = before + amount
+            if item_name == "furnace":
+                predicted["cobblestone"] = max(0, _inv_count(predicted, "cobblestone") - 8 * amount)
+            elif item_name == "crafting_table":
+                self._consume_planks(predicted, 4 * amount)
+            elif item_name == "stick":
+                self._consume_planks(predicted, 2 * max(1, (amount + 3) // 4))
+            elif item_name == "torch":
+                crafts = max(1, (amount + 3) // 4)
+                self._consume_fuel(predicted, crafts)
+                predicted["stick"] = max(0, _inv_count(predicted, "stick") - crafts)
+            elif item_name.endswith("_pickaxe"):
+                material = item_name[: -len("_pickaxe")]
+                self._consume_tool_material(predicted, material, 3 * amount)
+                predicted["stick"] = max(0, _inv_count(predicted, "stick") - 2 * amount)
+            elif item_name.endswith("_axe"):
+                material = item_name[: -len("_axe")]
+                self._consume_tool_material(predicted, material, 3 * amount)
+                predicted["stick"] = max(0, _inv_count(predicted, "stick") - 2 * amount)
+            elif item_name.endswith("_sword"):
+                material = item_name[: -len("_sword")]
+                self._consume_tool_material(predicted, material, 2 * amount)
+                predicted["stick"] = max(0, _inv_count(predicted, "stick") - amount)
+            elif item_name.endswith("_shovel"):
+                material = item_name[: -len("_shovel")]
+                self._consume_tool_material(predicted, material, amount)
+                predicted["stick"] = max(0, _inv_count(predicted, "stick") - 2 * amount)
+            elif item_name.endswith("_hoe"):
+                material = item_name[: -len("_hoe")]
+                self._consume_tool_material(predicted, material, 2 * amount)
+                predicted["stick"] = max(0, _inv_count(predicted, "stick") - 2 * amount)
+            return predicted, expected_minimums
+
+        smelt_match = SMELT_RAW_IRON_TASK_PATTERN.match(task)
+        if smelt_match:
+            amount = int(smelt_match.group(1))
+            before = _inv_count(predicted, "iron_ingot")
+            predicted["iron_ingot"] = before + amount
+            predicted["raw_iron"] = max(0, _inv_count(predicted, "raw_iron") - amount)
+            self._consume_fuel(predicted, max(1, (amount + 7) // 8))
+            expected_minimums["iron_ingot"] = before + amount
+            return predicted, expected_minimums
+
+        return predicted, expected_minimums
+
+    def _consume_planks(self, inventory, amount):
+        remaining = max(0, int(amount or 0))
+        for name in sorted(list(inventory.keys())):
+            if remaining <= 0:
+                break
+            if not (isinstance(name, str) and name.endswith("_planks")):
+                continue
+            take = min(_inv_count(inventory, name), remaining)
+            inventory[name] = max(0, _inv_count(inventory, name) - take)
+            remaining -= take
+
+    def _consume_tool_material(self, inventory, material, amount):
+        if material == "stone":
+            remaining = max(0, int(amount or 0))
+            for name in ("cobblestone", "cobbled_deepslate", "blackstone"):
+                if remaining <= 0:
+                    break
+                take = min(_inv_count(inventory, name), remaining)
+                inventory[name] = max(0, _inv_count(inventory, name) - take)
+                remaining -= take
+        elif material == "iron":
+            inventory["iron_ingot"] = max(0, _inv_count(inventory, "iron_ingot") - int(amount or 0))
+        elif material == "wooden":
+            self._consume_planks(inventory, amount)
+
+    def _consume_fuel(self, inventory, amount):
+        remaining = max(0, int(amount or 0))
+        for name in ("coal", "charcoal"):
+            if remaining <= 0:
+                break
+            take = min(_inv_count(inventory, name), remaining)
+            inventory[name] = max(0, _inv_count(inventory, name) - take)
+            remaining -= take
+
+    def _predict_task_from_inventory(self, inventory, events, previous_task):
+        state = self._planner_state(events, inventory)
+        planned = InventoryFirstPlanner(
+            completed_tasks=self._completed_task_names()
+        ).choose_next(
+            state,
+            previous_task=previous_task,
+            allow_optional=True,
+            objective=self.current_objective_template.id,
+        )
+        if not planned:
+            return None
+        return (
+            planned.task,
+            planned.context.replace("Inventory-first:", "Speculative successor:"),
+            planned.reason,
+        )
+
+    def prepare_speculative_next_task(self, task, events):
+        event = observe_payload(events)
+        inventory = payload_inventory(event)
+        predicted_inventory, expected_minimums = self._task_success_delta(task, inventory)
+        predicted = self._predict_task_from_inventory(predicted_inventory, events, task)
+        if not predicted:
+            self.speculative_next_task = None
+            self.last_speculative_decision = {
+                "phase": "not_prepared",
+                "trigger_task": self.normalize_task(task),
+                "reason": "no_rule_matched",
+                "created_at": time.time(),
+            }
+            return None
+        next_task, context, reason = predicted
+        next_task = self.normalize_task(next_task)
+        self.speculative_next_task = {
+            "trigger_task": self.normalize_task(task),
+            "next_task": next_task,
+            "context": context,
+            "reason": reason,
+            "expected_minimums": expected_minimums,
+            "created_at": time.time(),
+        }
+        self._queue_pending_plan_node(
+            trigger_task=task,
+            next_task=next_task,
+            context=context,
+            reason=reason,
+            expected_minimums=expected_minimums,
+        )
+        self.last_speculative_decision = {
+            "phase": "prepared",
+            **self.speculative_next_task,
+            "active_plan": self.active_plan_state,
+        }
+        print(
+            f"\033[35mPrepared speculative next task after '{task}': '{next_task}' ({reason}).\033[0m"
+        )
+        return self.speculative_next_task
+
+    def consume_speculative_next_task(self, events):
+        pending = self.speculative_next_task
+        if not isinstance(pending, dict):
+            return None
+        self.speculative_next_task = None
+        trigger_task = self.normalize_task(pending.get("trigger_task"))
+        next_task = self.normalize_task(pending.get("next_task"))
+        decision = {
+            "phase": "discarded",
+            "trigger_task": trigger_task,
+            "next_task": next_task,
+            "reason": pending.get("reason"),
+            "created_at": pending.get("created_at"),
+            "consumed_at": time.time(),
+        }
+        if not next_task:
+            decision["discard_reason"] = "missing_next_task"
+            self.last_speculative_decision = decision
+            return None
+        if time.time() - float(pending.get("created_at") or 0) > 900:
+            decision["discard_reason"] = "expired"
+            self.last_speculative_decision = decision
+            return None
+        last_completed_task = self.last_completed_task
+        if not last_completed_task and self.completed_tasks:
+            last_completed_task = self.completed_tasks[-1]
+        if trigger_task and self.normalize_task(last_completed_task) != trigger_task:
+            decision["discard_reason"] = "trigger_not_last_completed"
+            decision["last_completed_task"] = last_completed_task
+            self.last_speculative_decision = decision
+            return None
+        inventory, _, _ = self._extract_live_inventory_state(events)
+        for item_name, minimum in (pending.get("expected_minimums") or {}).items():
+            if _inv_count(inventory, item_name) < int(minimum or 0):
+                decision["discard_reason"] = f"expected_{item_name}_below_{minimum}"
+                self.last_speculative_decision = decision
+                return None
+        if (
+            next_task in self._completed_task_names()
+            and not self._is_repeatable_state_task(next_task)
+            and self._task_inventory_satisfied(next_task, inventory)
+        ):
+            decision["discard_reason"] = "next_task_already_completed"
+            self.last_speculative_decision = decision
+            return None
+        context = str(pending.get("context") or self.get_task_context(next_task))
+        task, context = self._guard_task_with_live_inventory(next_task, context, events)
+        blocking_failure = self._recent_blocking_failure(task, events)
+        if blocking_failure:
+            decision["discard_reason"] = "next_task_blocked"
+            decision["blocking_failure"] = blocking_failure.get("task")
+            self.last_speculative_decision = decision
+            return None
+        decision.update({
+            "phase": "accepted",
+            "next_task": task,
+            "context": context,
+        })
+        self.last_speculative_decision = decision
+        print(
+            f"\033[35mAccepted speculative next task after '{trigger_task}': '{task}'.\033[0m"
+        )
+        return task, context
 
     def propose_next_ai_task(self, *, messages, events, max_retries=5):
         if max_retries == 0:
@@ -813,22 +1465,25 @@ class CurriculumAgent:
             response = self.parse_ai_message(curriculum)
             assert "next_task" in response
             task = response["next_task"]
-            completed_tasks = {
-                self.normalize_task(completed_task)
-                for completed_task in self.completed_tasks
-                if str(completed_task or "").strip()
-            }
-            if task in completed_tasks:
+            normalized_task = self.normalize_task(task)
+            completed_tasks = self._completed_task_names()
+            live_inventory, _, _ = self._extract_live_inventory_state(events)
+            if not self._is_repeatable_state_task(normalized_task) and self._task_inventory_satisfied(normalized_task, live_inventory):
                 if max_retries <= 1:
-                    fallback_task, fallback_context = self._fallback_after_local_search_failure(events)
+                    blocked_tasks = set(completed_tasks)
+                    blocked_tasks.add(normalized_task)
+                    fallback_task, fallback_context = self._fallback_after_local_search_failure(
+                        events,
+                        blocked_tasks=blocked_tasks,
+                    )
                     print(
-                        f"\033[35mReplacing already completed task '{task}' with fallback '{fallback_task}'.\033[0m"
+                        f"\033[35mReplacing inventory-satisfied task '{task}' with fallback '{fallback_task}'.\033[0m"
                     )
                     return fallback_task, fallback_context
                 retry_messages = list(messages) + [
                     HumanMessage(
                         content=(
-                            f"Do not repeat '{task}'. It is already in completed_tasks. "
+                            f"Do not repeat '{task}'. It is already satisfied by the current live inventory. "
                             "Choose a different single next task that advances survival, progression, or a new nearby novelty."
                         )
                     )
@@ -841,7 +1496,14 @@ class CurriculumAgent:
             repeated_local_failure = self._recent_local_search_failure(task)
             if repeated_local_failure:
                 if max_retries <= 1:
-                    fallback_task, fallback_context = self._fallback_after_local_search_failure(events, repeated_local_failure)
+                    blocked_tasks = set(completed_tasks)
+                    blocked_tasks.add(task)
+                    blocked_tasks.add(repeated_local_failure.get("task"))
+                    fallback_task, fallback_context = self._fallback_after_local_search_failure(
+                        events,
+                        repeated_local_failure,
+                        blocked_tasks=blocked_tasks,
+                    )
                     print(
                         f"\033[35mReplacing repeated search-failed task '{task}' with fallback '{fallback_task}'.\033[0m"
                     )
@@ -859,8 +1521,39 @@ class CurriculumAgent:
                     events=events,
                     max_retries=max_retries - 1,
                 )
-            context = self.get_task_context(task) + self._search_policy_context(task)
+            repeated_blocking_failure = self._recent_blocking_failure(task, events)
+            if repeated_blocking_failure:
+                blocked_tasks = set(completed_tasks)
+                blocked_tasks.add(task)
+                blocked_tasks.add(repeated_blocking_failure.get("task"))
+                fallback_task, fallback_context = self._fallback_after_local_search_failure(
+                    events,
+                    repeated_blocking_failure,
+                    blocked_tasks=blocked_tasks,
+                )
+                print(
+                    f"\033[35mReplacing repeatedly blocked task '{task}' with fallback '{fallback_task}'.\033[0m"
+                )
+                return fallback_task, fallback_context
+            context = self.get_task_context(task) + self.context_policy.search_policy_context(
+                task,
+                local_search_exhausted_reason=LOCAL_SEARCH_EXHAUSTED_REASON,
+            )
             task, context = self._guard_task_with_live_inventory(task, context, events)
+            guarded_blocking_failure = self._recent_blocking_failure(task, events)
+            if guarded_blocking_failure:
+                blocked_tasks = set(completed_tasks)
+                blocked_tasks.add(task)
+                blocked_tasks.add(guarded_blocking_failure.get("task"))
+                fallback_task, fallback_context = self._fallback_after_local_search_failure(
+                    events,
+                    guarded_blocking_failure,
+                    blocked_tasks=blocked_tasks,
+                )
+                print(
+                    f"\033[35mReplacing guardrail-selected blocked task '{task}' with fallback '{fallback_task}'.\033[0m"
+                )
+                return fallback_task, fallback_context
             return task, context
         except Exception as e:
             print(
@@ -874,20 +1567,20 @@ class CurriculumAgent:
 
     def normalize_task(self, task):
         normalized = str(task or "").strip()
-        match = re.fullmatch(r"Mine\s+(\d+)\s+([a-z0-9_]+)", normalized)
+        match = re.fullmatch(r"Mine\s+(\d+)\s+([a-z0-9_ ]+)", normalized)
         if match:
             amount = match.group(1)
-            target = match.group(2)
+            target = match.group(2).strip().lower().replace(" ", "_")
             item_name = ORE_TASK_ITEM_MAP.get(target)
             if item_name:
                 return f"Obtain {amount} {item_name}"
         return normalized
 
     def _extract_live_inventory_state(self, events):
-        event = _observe_payload(events)
-        inventory = _payload_inventory(event)
-        status = _payload_status(event)
-        inventory_used = _safe_int(status.get("inventoryUsed") or 0)
+        event = observe_payload(events)
+        inventory = payload_inventory(event)
+        status = payload_status(event)
+        inventory_used = safe_int(status.get("inventoryUsed") or 0)
         last_death_event = event.get("lastDeathEvent") if isinstance(event.get("lastDeathEvent"), dict) else None
         return inventory, inventory_used, last_death_event
 
@@ -897,336 +1590,80 @@ class CurriculumAgent:
             return True
         quantity = int(match.group(1))
         item_name = match.group(2).strip().lower().replace(" ", "_")
-        return bool(_recipe_gate(item_name, quantity, inventory))
-
-    def _fallback_recovery_task(self, inventory):
-        if _count_logs(inventory) < 8:
-            return (
-                "Obtain 8 wood logs",
-                "Your current inventory is too sparse for advanced crafting. Rebuild from the live inventory state: collect at least 8 wood logs first, then recover planks, sticks, and tools.",
-            )
-        if _count_planks(inventory) < 8:
-            return (
-                "Craft 8 wood planks",
-                "Use your current logs to rebuild core crafting materials before attempting advanced items.",
-            )
-        if not _has_any(inventory, "crafting_table"):
-            return (
-                "Craft 1 crafting_table",
-                "Rebuild your basic crafting setup from the live inventory state before attempting advanced items.",
-            )
-        if _inv_count(inventory, "stick") < 4:
-            return (
-                "Craft 4 sticks",
-                "Rebuild a small stick reserve so tool recovery does not stall on the next step.",
-            )
-        if not _has_any(inventory, "wooden_pickaxe"):
-            return (
-                "Craft 1 wooden_pickaxe",
-                "Finish the wooden pickaxe bootstrap before trying broader survival or progression tasks.",
-            )
-        if _count_generic_stone(inventory) < 6:
-            return (
-                "Mine 6 cobblestone",
-                "Secure the first stone batch again so you can restore the basic stone tool loop.",
-            )
-        if not _has_any(inventory, "stone_pickaxe"):
-            return (
-                "Craft 1 stone_pickaxe",
-                "Restore stone mining capability before attempting optional progression.",
-            )
-        if not _has_any(inventory, "stone_axe"):
-            return (
-                "Craft 1 stone_axe",
-                "Restore the basic gathering toolset before attempting optional progression.",
-            )
-        if not _inventory_has_food(inventory):
-            return (
-                "Find food source",
-                "Recovery mode: stabilize food before returning to progression so low-hunger deaths do not chain.",
-            )
-        return (
-            "Craft 1 crafting_table",
-            "Rebuild your basic crafting setup from the live inventory state before attempting advanced items.",
-        )
-
-    def _death_specific_recovery_task(self, last_death_event, inventory, status):
-        if not isinstance(last_death_event, dict):
-            return None
-        combined = " ".join(
-            str(last_death_event.get(key) or "")
-            for key in ("cause", "death_message", "likely_reason", "likely_killer")
-        ).lower()
-        nearby_hostiles = last_death_event.get("nearby_hostiles") if isinstance(last_death_event.get("nearby_hostiles"), list) else []
-        has_hostiles = bool(nearby_hostiles)
-        if any(token in combined for token in ["drown", "drowned", "water", "bubble"]):
-            return (
-                "Retreat to a safe position",
-                "Death-derived countermeasure: the last death was water-related. Use recoverToSurface-style behavior immediately, move onto solid ground, avoid deep water routes, surface as soon as submerged, and do not keep working underwater unless the task explicitly requires it.",
-            )
-        if any(token in combined for token in ["lava", "burn", "fire", "magma"]):
-            return (
-                "Retreat to a safe position",
-                "Death-derived countermeasure: the last death was lava or fire related. Back away from exposed lava, avoid mining directly over voids or lava pockets, and secure footing before resuming resource collection.",
-            )
-        if any(token in combined for token in ["fell", "fall", "hit the ground", "cliff"]):
-            return (
-                "Retreat to a safe position",
-                "Death-derived countermeasure: the last death was fall-related. Favor flat routes, descend one block at a time, and avoid sprinting near drops until health and terrain are stable.",
-            )
-        if any(token in combined for token in ["starv", "hunger"]):
-            return (
-                "Find food source",
-                "Death-derived countermeasure: the last death was hunger related. Secure edible food before travel, mining, or combat, and keep a safety reserve instead of consuming the last item too late.",
-            )
-        if has_hostiles or any(token in combined for token in ["slain", "shot", "blown up", "creeper", "skeleton", "zombie", "spider", "drowned", "witch", "enderman"]):
-            return (
-                "Build a temporary shelter",
-                "Death-derived countermeasure: the last death involved hostile pressure. Re-establish shelter, avoid open combat, and only re-engage after recovering health, food, and a safer position.",
-            )
-        return None
-
-    def _post_death_recovery_task(self, inventory, status, last_death_event=None):
-        specific = self._death_specific_recovery_task(last_death_event, inventory, status)
-        if specific:
-            return specific
-        health = _status_number(status, "health", default=20)
-        hunger = _status_number(status, "food", default=20)
-        if health <= 12 or _is_night(status):
-            return (
-                "Build a temporary shelter",
-                "Recent death recovery: immediately rebuild a safe position, prefer recoverToSurface-style movement before broader search, avoid combat, and only resume progression after stabilizing health and exposure.",
-            )
-        if hunger <= 8 and not _inventory_has_food(inventory):
-            return (
-                "Find food source",
-                "Recent death recovery: secure nearby edible food before longer travel or mining, and use surface-oriented food search rather than underground wandering.",
-            )
-        return self._fallback_recovery_task(inventory)
-
-    def _should_force_post_death_recovery(self, last_death_event, inventory, status):
-        if not isinstance(last_death_event, dict):
-            return False
-        age_seconds = _event_age_seconds(last_death_event)
-        if age_seconds is not None and age_seconds > 180:
-            return False
-        health = _status_number(status, "health", default=20)
-        hunger = _status_number(status, "food", default=20)
-        if health <= 16 or hunger <= 12:
-            return True
-        if not _inventory_has_food(inventory):
-            return True
-        if not _has_any(inventory, "wooden_pickaxe", "stone_pickaxe"):
-            return True
-        if _count_logs(inventory) + _count_planks(inventory) <= 4:
-            return True
-        return False
+        return InventoryFirstPlanner().can_craft(item_name, quantity, inventory)
 
     def _is_bootstrap_or_survival_task(self, task):
-        task_text = _task_text(task)
-        return any(token in task_text for token in SURVIVAL_TASK_HINTS)
+        return self.progression_policy.is_bootstrap_or_survival_task(task)
 
     def _infer_early_game_stage(self, events):
-        payload = _observe_payload(events)
-        status = _payload_status(payload)
-        inventory = _payload_inventory(payload)
-        logs = _count_logs(inventory)
-        planks = _count_planks(inventory)
-        sticks = _inv_count(inventory, "stick")
-        stone = _count_generic_stone(inventory)
-        has_table = _has_any(inventory, "crafting_table")
-        has_wooden_pickaxe = _has_any(inventory, "wooden_pickaxe")
-        has_stone_pickaxe = _has_any(inventory, "stone_pickaxe")
-        has_stone_axe = _has_any(inventory, "stone_axe")
-        has_food = _inventory_has_food(inventory)
-        has_iron_progress = _has_any(inventory, "raw_iron", "iron_ingot", "iron_ore")
-        if not has_wooden_pickaxe:
-            if logs <= 0 and planks <= 0 and sticks <= 0:
-                return 0
-            return 1
-        if not (has_stone_pickaxe and has_stone_axe):
-            return 2
-        if not has_food or not has_iron_progress:
-            return 3
-        return 4
+        return self.progression_policy.infer_stage(events)
 
     def _survival_override_task(self, events):
-        payload = _observe_payload(events)
-        status = _payload_status(payload)
-        inventory = _payload_inventory(payload)
-        entities = _payload_dict(status, "entities")
-        health = _status_number(status, "health", default=20)
-        hunger = _status_number(status, "food", default=20)
-        hostile_nearby = _hostiles_nearby(entities)
-        has_food = _inventory_has_food(inventory)
-        recent_shelter_success = bool(self.completed_tasks and self.completed_tasks[-1] == "Build a temporary shelter")
-        if recent_shelter_success and not hostile_nearby and health >= 16:
-            if hunger <= 12 and not has_food:
-                return (
-                    "Find food source",
-                    "Shelter exit override: safety is restored, so leave shelter mode and secure nearby food before resuming broader progression.",
-                )
-            return None
-        if health <= 6 or (health <= 10 and hostile_nearby):
-            return (
-                "Build a temporary shelter",
-                "Low health override: immediately get to safety, block exposure, and avoid combat before resuming progression.",
-            )
-        if hunger <= 8 and not has_food:
-            return (
-                "Find food source",
-                "Low hunger override: prioritize obtaining nearby edible food before any ore processing or exploration. Keep the search local and safe.",
-            )
-        if _is_night(status) and (hostile_nearby or health <= 10):
-            return (
-                "Build a temporary shelter",
-                "Night danger override: secure a safe shelter before other progression tasks and avoid long surface travel.",
-            )
-        if hostile_nearby and health <= 14:
-            return (
-                "Retreat to a safe position",
-                "Hostile danger override: disengage and move to a safe position before continuing task progression.",
-            )
-        return None
+        return self.progression_policy.survival_override(events)
 
     def _early_game_guard_task(self, task, context, events):
-        stage = self._infer_early_game_stage(events)
-        task_text = _task_text(task)
-        payload = _observe_payload(events)
-        inventory = _payload_inventory(payload)
-        has_food = _inventory_has_food(inventory)
-        has_iron_progress = _has_any(inventory, "raw_iron", "iron_ingot", "iron_ore")
-
-        survival_override = self._survival_override_task(events)
-        if survival_override:
-            print(f"\033[35mEarly-game survival override replaced '{task}' with '{survival_override[0]}'.\033[0m")
-            return survival_override
-
-        def replace(next_task, next_context):
-            print(
-                f"\033[35mEarly-game guardrail replaced '{task}' with '{next_task}' at stage {stage}.\033[0m"
-            )
-            return next_task, next_context
-
-        is_smelt = task_text.startswith("smelt ") or " smelt " in task_text
-        mentions_copper = "copper" in task_text
-        mentions_iron = "iron" in task_text
-        mentions_logs = "log" in task_text or "wood" in task_text
-        mentions_stone = "stone" in task_text or "cobblestone" in task_text or "deepslate" in task_text or "blackstone" in task_text
-        mentions_food = "food" in task_text or "eat" in task_text or "cook" in task_text or "animal" in task_text or "beef" in task_text or "pork" in task_text or "chicken" in task_text or "mutton" in task_text
-
-        if mentions_copper and stage < 4:
-            if stage <= 1:
-                return replace(
-                    "Craft 1 wooden_pickaxe",
-                    "Copper processing is blocked during early bootstrap. First secure a crafting table and wooden pickaxe.",
+        decision = self.progression_policy.guard_task(task, context, events)
+        if not isinstance(decision, dict):
+            return task, context
+        if bool(decision.get("changed")):
+            if decision.get("kind") == "survival_override":
+                print(f"\033[35mEarly-game survival override replaced '{task}' with '{decision.get('task')}'.\033[0m")
+            else:
+                print(
+                    f"\033[35mEarly-game guardrail replaced '{task}' with '{decision.get('task')}' at stage {decision.get('stage')}.\033[0m"
                 )
-            if stage == 2:
-                return replace(
-                    "Craft 1 stone_pickaxe",
-                    "Copper processing is blocked until stone tools are ready. Upgrade tools first.",
-                )
-            return replace(
-                "Find food source",
-                "Copper processing is optional in early progression. Stabilize food and iron progression before processing copper.",
-            )
-
-        if is_smelt and stage < 4:
-            if mentions_iron and stage == 3 and _has_any(inventory, "furnace") and (_has_any(inventory, "coal", "charcoal") or _has_any(inventory, "raw_iron", "iron_ore")):
-                return task, context
-            if stage <= 1:
-                return replace(
-                    "Obtain 8 wood logs",
-                    "Smelting is blocked during early bootstrap. Gather wood and basic crafting materials first.",
-                )
-            if stage == 2:
-                return replace(
-                    "Craft 1 stone_axe",
-                    "Smelting is blocked until stone tool progression is finished.",
-                )
-            return replace(
-                "Find food source",
-                "Smelting is blocked until survival and iron progression are stable.",
-            )
-
-        if "wooden axe" in task_text and stage < 3:
-            return replace(
-                "Craft 1 wooden_pickaxe",
-                "Do not branch into a wooden axe during early bootstrap; prioritize pickaxe and stone unlock first.",
-            )
-
-        if stage == 0:
-            if not mentions_logs:
-                return replace(
-                    "Mine 1 wood log",
-                    "Early bootstrap stage: first obtain wood before considering other tasks.",
-                )
-        elif stage == 1:
-            if not any(token in task_text for token in ["wooden pickaxe", "crafting table", "crafting_table", "planks", "sticks", "wood log", "wood logs"]):
-                if _count_planks(inventory) < 4:
-                    return replace(
-                        "Craft 8 wood planks",
-                        "Basic tool bootstrap stage: convert wood into planks before exploring broader tasks.",
-                    )
-                return replace(
-                    "Craft 1 wooden_pickaxe",
-                    "Basic tool bootstrap stage: finish wooden pickaxe before any side goals.",
-                )
-        elif stage == 2:
-            if not (mentions_stone or "stone pickaxe" in task_text or "stone axe" in task_text):
-                if _count_generic_stone(inventory) < 6:
-                    return replace(
-                        "Mine 6 cobblestone",
-                        "Stone unlock stage: secure the first stone batch before optional tasks.",
-                    )
-                if not _has_any(inventory, "stone_pickaxe"):
-                    return replace(
-                        "Craft 1 stone_pickaxe",
-                        "Stone unlock stage: craft a stone pickaxe before optional tasks.",
-                    )
-                return replace(
-                    "Craft 1 stone_axe",
-                    "Stone unlock stage: craft a stone axe before optional tasks.",
-                )
-        elif stage == 3:
-            if not has_food and not mentions_food:
-                return replace(
-                    "Find food source",
-                    "Stability stage: secure renewable or nearby edible food before optional progression so survival does not collapse.",
-                )
-            if has_food and not has_iron_progress and not (mentions_iron or is_smelt or "furnace" in task_text or "coal" in task_text or "torch" in task_text or "shelter" in task_text):
-                return replace(
-                    "Obtain 8 raw_iron",
-                    "Stability stage: after food, move into first iron progression before unrelated novelty tasks.",
-                )
-            allowed = mentions_food or mentions_iron or is_smelt or "furnace" in task_text or "torch" in task_text or "coal" in task_text or "shelter" in task_text
-            if not allowed:
-                return replace(
-                    "Find food source",
-                    "Stability stage: prioritize food, fuel, shelter, and first iron progression before unrelated tasks.",
-                )
-
-        return task, context
+        return decision.get("task", task), decision.get("context", context)
 
     def _guard_task_with_live_inventory(self, task, context, events):
         inventory, inventory_used, last_death_event = self._extract_live_inventory_state(events)
-        status = _payload_status(_observe_payload(events))
+        status = payload_status(observe_payload(events))
         sparse_inventory = inventory_used <= 2 or sum(int(v or 0) for v in inventory.values()) <= 4
-        if self._should_force_post_death_recovery(last_death_event, inventory, status):
-            recovery_task, recovery_context = self._post_death_recovery_task(inventory, status, last_death_event)
+        if self.recovery_policy.should_force_post_death_recovery(last_death_event, inventory, status):
+            recovery_task, recovery_context = self.recovery_policy.post_death_recovery_task(inventory, status, last_death_event)
             print(
                 f"\033[35mPost-death recovery replaced '{task}' with '{recovery_task}'.\033[0m"
             )
             return recovery_task, recovery_context
         if sparse_inventory and not self._is_bootstrap_or_survival_task(task):
-            fallback_task, fallback_context = self._fallback_recovery_task(inventory)
+            fallback_task, fallback_context = self.recovery_policy.fallback_recovery_task(inventory)
             print(
                 f"\033[35mSparse-inventory recovery replaced '{task}' with '{fallback_task}' based on live inventory {inventory}.\033[0m"
             )
             task, context = fallback_task, fallback_context
         if not self._craft_task_feasible(task, inventory):
-            if sparse_inventory or last_death_event:
-                fallback_task, fallback_context = self._fallback_recovery_task(inventory)
+            craft_match = CRAFT_TASK_PATTERN.match(str(task or "").strip())
+            prerequisite = None
+            prerequisite_chain = []
+            if craft_match:
+                planner = InventoryFirstPlanner()
+                craft_item = craft_match.group(2)
+                craft_quantity = int(craft_match.group(1))
+                prerequisite_chain = [
+                    step.as_dict()
+                    for step in planner.prerequisite_chain_for_craft(
+                        craft_item,
+                        craft_quantity,
+                        inventory,
+                    )
+                ]
+                prerequisite = planner.prerequisite_for_craft(craft_item, craft_quantity, inventory)
+            if prerequisite:
+                self._set_last_inventory_plan(
+                    phase="prerequisite",
+                    source="recipe_guard",
+                    selected_task=prerequisite.task,
+                    selected_context=prerequisite.context,
+                    reason=prerequisite.reason,
+                    chain=prerequisite_chain,
+                    blocked_task=task,
+                    blocked_context=context,
+                )
+                print(
+                    f"\033[35mRecipe planner replaced infeasible craft task '{task}' with prerequisite '{prerequisite.task}'.\033[0m"
+                )
+                task, context = prerequisite.task, prerequisite.context
+            elif sparse_inventory or last_death_event:
+                fallback_task, fallback_context = self.recovery_policy.fallback_recovery_task(inventory)
                 print(
                     f"\033[35mOverriding infeasible craft task '{task}' with '{fallback_task}' based on live inventory {inventory}.\033[0m"
                 )
@@ -1253,13 +1690,26 @@ class CurriculumAgent:
 
     def update_exploration_progress(self, info):
         task = info["task"]
+        self._apply_task_result_to_active_plan(info)
         if task.startswith("Deposit useless items into the chest at"):
             # No need to record the deposit task
             return
         if info["success"]:
             print(f"\033[35mCompleted task {task}.\033[0m")
+            self.last_completed_task = task
             self.completed_tasks.append(task)
         else:
+            pending = self.speculative_next_task
+            if isinstance(pending, dict) and self.normalize_task(pending.get("trigger_task")) == self.normalize_task(task):
+                self.last_speculative_decision = {
+                    "phase": "discarded",
+                    "trigger_task": self.normalize_task(task),
+                    "next_task": pending.get("next_task"),
+                    "reason": pending.get("reason"),
+                    "discard_reason": "trigger_task_failed",
+                    "consumed_at": time.time(),
+                }
+                self.speculative_next_task = None
             print(
                 f"\033[35mFailed to complete task {task}. Skipping to next task.\033[0m"
             )
@@ -1314,49 +1764,46 @@ class CurriculumAgent:
         )
         questions = []
         answers = []
-        for question in questions_new:
-            if self.qa_cache_questions_vectordb._collection.count() > 0:
-                docs_and_scores = (
-                    self.qa_cache_questions_vectordb.similarity_search_with_score(
-                        question, k=1
-                    )
-                )
-                if docs_and_scores and docs_and_scores[0][1] < 0.05:
-                    question_cached = docs_and_scores[0][0].page_content
-                    assert question_cached in self.qa_cache
-                    answer_cached = self.qa_cache[question_cached]
-                    questions.append(question_cached)
-                    answers.append(answer_cached)
-                    continue
+        seen_questions = set()
+        for raw_question in questions_new:
+            question = self.context_policy.normalize_qa_question(raw_question)
+            if not question or question in seen_questions:
+                continue
+            seen_questions.add(question)
+            cached = self.qa_cache_helper.get_exact_answer(question)
+            if cached is not None:
+                question_cached, answer_cached = cached
+                questions.append(question_cached)
+                answers.append(answer_cached)
+                continue
+            cached = self.qa_cache_helper.get_similar_answer(question, max_score=0.05)
+            if cached is not None:
+                question_cached, answer_cached = cached
+                questions.append(question_cached)
+                answers.append(answer_cached)
+                continue
             answer = self.run_qa_step2_answer_questions(question=question)
-            assert question not in self.qa_cache
-            self.qa_cache[question] = answer
-            self.qa_cache_questions_vectordb.add_texts(
-                texts=[question],
-            )
-            U.dump_json(self.qa_cache, f"{self.ckpt_dir}/curriculum/qa_cache.json")
-            self.qa_cache_questions_vectordb.persist()
+            cached = self.qa_cache_helper.get_exact_answer(question)
+            if cached is not None:
+                question_cached, answer_cached = cached
+                questions.append(question_cached)
+                answers.append(answer_cached)
+                continue
+            self.qa_cache_helper.store_answer(question, answer)
             questions.append(question)
             answers.append(answer)
-        assert len(questions_new) == len(questions) == len(answers)
+        assert len(questions) == len(answers)
         return questions, answers
 
     def get_task_context(self, task):
         # if include ore in question, gpt will try to use tool with skill touch enhancement to mine
-        question = (
-            f"How to {task.replace('_', ' ').replace(' ore', '').replace(' ores', '').replace('.', '').strip().lower()}"
-            f" in Minecraft?"
-        )
-        if question in self.qa_cache:
-            answer = self.qa_cache[question]
+        question = self.context_policy.task_question(task)
+        cached = self.qa_cache_helper.get_exact_answer(question)
+        if cached is not None:
+            _, answer = cached
         else:
             answer = self.run_qa_step2_answer_questions(question=question)
-            self.qa_cache[question] = answer
-            self.qa_cache_questions_vectordb.add_texts(
-                texts=[question],
-            )
-            U.dump_json(self.qa_cache, f"{self.ckpt_dir}/curriculum/qa_cache.json")
-            self.qa_cache_questions_vectordb.persist()
+            self.qa_cache_helper.store_answer(question, answer)
         context = f"Question: {question}\n{answer}"
         return context
 
@@ -1373,12 +1820,8 @@ class CurriculumAgent:
         return HumanMessage(content=content)
 
     def run_qa_step1_ask_questions(self, *, events, chest_observation):
-        biome = events[-1][1]["status"]["biome"].replace("_", " ")
-        questions = [
-            f"What are the blocks that I can find in the {biome} in Minecraft?",
-            f"What are the items that I can find in the {biome} in Minecraft?",
-            f"What are the mobs that I can find in the {biome} in Minecraft?",
-        ]
+        biome = self.context_policy.biome_label(events[-1][1]["status"].get("biome"))
+        questions = self.context_policy.seed_questions_for_biome(biome)
         concepts = [biome, biome, biome]
         messages = [
             self.render_system_message_qa_step1_ask_questions(),
@@ -1393,8 +1836,15 @@ class CurriculumAgent:
             # Extracting all question and concept pairs from the text
             pairs = re.findall(pattern, qa_response)
             # Storing each question and concept in separate lists
-            questions_new = [pair[0] for pair in pairs]
-            concepts_new = [pair[1] for pair in pairs]
+            questions_new = []
+            concepts_new = []
+            for pair in pairs:
+                question = self.context_policy.normalize_qa_question(pair[0])
+                concept = str(pair[1] or "").strip() or biome
+                if not question:
+                    continue
+                questions_new.append(question)
+                concepts_new.append(concept)
             assert len(questions_new) == len(concepts_new)
             questions.extend(questions_new)
             concepts.extend(concepts_new)

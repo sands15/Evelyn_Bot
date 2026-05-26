@@ -1,0 +1,3 @@
+async function mineEightLapisOre(bot) {
+    // The function first checks if eight lapis lazuli items are already in the inventory; if so, it stops. It then ensures an iron pickaxe is equipped before proceeding. The core logic attempts to mine up to four visible lapis ore blocks, repeatedly searching for and mining the closest ones until the required amount is gathered or no more are found. If the initial visible search fails, it initiates a broader search for lapis ore. Finally, it attempts another round of mining visible ore before throwing an error if the goal is not met.
+}

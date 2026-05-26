@@ -1,0 +1,409 @@
+<!DOCTYPE html>
+<html lang="ko" class="no-js">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Evelyn Control Page</title>
+  <meta name="description" content="Evelyn runtime control page with chat, focused status, and Minecraft controls.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+KR:wght@400;500;600;700&family=Space+Grotesk:wght@500;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="./assets/vendor/winbox/winbox.min.css?v=0.2.82">
+  <link rel="stylesheet" href="./assets/evelyn-page.css?v=20260523w">
+</head>
+<body>
+  <div class="control-page is-default-mode" id="control-page-root">
+    <aside class="side-rail left-rail reveal is-visible" aria-label="Evelyn runtime summary">
+      <section class="panel context-card">
+        <div class="panel-title-row">
+          <span class="panel-icon" aria-hidden="true">E</span>
+          <div>
+            <p class="panel-eyebrow">RUNTIME</p>
+            <strong class="panel-dynamic-title">현재 상태</strong>
+            <p class="panel-subcopy">대화, 음성, 모델 상태를 한눈에 확인합니다.</p>
+          </div>
+        </div>
+
+        <div class="context-shell">
+          <div class="status-chip-box">
+            <div class="status-chip-copy">
+              <span class="chip-label">말하는 대상</span>
+              <strong id="tts-target-name">없음</strong>
+            </div>
+            <span class="presence-pill is-idle" id="voice-presence-pill">대기 중</span>
+          </div>
+
+          <div class="runtime-card slot-default" id="operator-runtime-card">
+            <div class="runtime-header">
+              <div>
+                <strong id="operator-runtime-title">Evelyn 대기 중</strong>
+                <p id="operator-runtime-subcopy">음성, TTS, LLM 상태를 확인하고 있습니다.</p>
+              </div>
+              <span class="runtime-dot" id="operator-runtime-dot"></span>
+            </div>
+            <p class="runtime-idle-note" id="operator-runtime-note">Minecraft가 꺼져 있을 때는 기본 대화와 운영 상태만 보여줍니다.</p>
+            <div class="stat-grid" id="operator-runtime-stats">
+              <article class="stat-tile">
+                <span>음성 채널</span>
+                <strong id="operator-stat-channel">없음</strong>
+              </article>
+              <article class="stat-tile">
+                <span>현재 모드</span>
+                <strong id="operator-stat-mode">default</strong>
+              </article>
+              <article class="stat-tile">
+                <span>TTS 대기열</span>
+                <strong id="operator-stat-tts">0</strong>
+              </article>
+              <article class="stat-tile">
+                <span>LLM 요청</span>
+                <strong id="operator-stat-llm">0</strong>
+              </article>
+            </div>
+          </div>
+
+          <div class="runtime-card slot-minecraft" id="minecraft-runtime-card">
+            <div class="runtime-header">
+              <div>
+                <strong id="minecraft-runtime-title">Minecraft 대기 중</strong>
+                <p id="minecraft-runtime-subcopy">Voyager 연결 상태를 확인하고 있습니다.</p>
+              </div>
+              <span class="runtime-dot" id="minecraft-runtime-dot"></span>
+            </div>
+            <p class="runtime-idle-note" id="minecraft-idle-note">Minecraft 세션이 붙으면 작업, 위치, 인벤토리가 자동으로 표시됩니다.</p>
+            <div class="stat-grid" id="minecraft-runtime-stats">
+              <article class="stat-tile">
+                <span>현재 작업</span>
+                <strong id="stat-current-task">없음</strong>
+              </article>
+              <article class="stat-tile">
+                <span>진행 단계</span>
+                <strong id="stat-stage">없음</strong>
+              </article>
+              <article class="stat-tile">
+                <span>고유 아이템</span>
+                <strong id="stat-unique-items">-</strong>
+              </article>
+              <article class="stat-tile">
+                <span>이동 거리</span>
+                <strong id="stat-travel-distance">-</strong>
+              </article>
+              <article class="stat-tile">
+                <span>체력 / 배고픔</span>
+                <strong id="stat-health-hunger">-</strong>
+              </article>
+              <article class="stat-tile">
+                <span>스킬 라이브러리</span>
+                <strong id="stat-skill-library">-</strong>
+              </article>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel widget-card" id="minecraft-telemetry-panel">
+        <div class="panel-title-row compact-title-row">
+          <span class="panel-icon cube" aria-hidden="true">D</span>
+          <div>
+            <p class="panel-eyebrow orange" id="operations-eyebrow">DIAGNOSTICS</p>
+            <strong class="panel-dynamic-title" id="operations-title">운영 흐름</strong>
+            <p class="panel-subcopy" id="operations-subcopy">서버 상태와 최근 이벤트는 필요할 때만 확인합니다.</p>
+          </div>
+        </div>
+
+        <details class="diagnostics-details" open>
+          <summary>
+            <span>서버 상태</span>
+            <strong id="system-summary-pill" class="good-pill is-idle">기본 준비됨</strong>
+          </summary>
+          <div class="meter-list">
+            <div class="meter-row">
+              <span class="meter-name">Voyager</span>
+              <div class="meter-main">
+                <div class="meter"><i id="meter-voyager"></i></div>
+                <strong id="meter-voyager-label">idle</strong>
+              </div>
+            </div>
+            <div class="meter-row">
+              <span class="meter-name">Voice</span>
+              <div class="meter-main">
+                <div class="meter"><i id="meter-voice"></i></div>
+                <strong id="meter-voice-label">idle</strong>
+              </div>
+            </div>
+            <div class="meter-row">
+              <span class="meter-name">TTS</span>
+              <div class="meter-main">
+                <div class="meter"><i id="meter-tts"></i></div>
+                <strong id="meter-tts-label">없음</strong>
+              </div>
+            </div>
+            <div class="meter-row">
+              <span class="meter-name">LLM</span>
+              <div class="meter-main">
+                <div class="meter"><i id="meter-llm"></i></div>
+                <strong id="meter-llm-label">0 inflight</strong>
+              </div>
+            </div>
+          </div>
+          <div class="voice-pipeline-grid" aria-label="Voice pipeline health">
+            <span>Queue <strong id="voice-pipeline-queue">0/0</strong></span>
+            <span>STT <strong id="voice-pipeline-stt">idle</strong></span>
+            <span>TTS p95 <strong id="voice-pipeline-tts">0ms</strong></span>
+            <span>Drops <strong id="voice-pipeline-drops">0</strong></span>
+          </div>
+        </details>
+
+        <div class="subpanel" id="recent-activity-panel">
+          <div class="subpanel-head">
+            <strong>최근 흐름</strong>
+            <button type="button" class="more-link" id="refresh-state-button">새로고침</button>
+          </div>
+          <p class="subpanel-note">성공, 대기, 실패 이벤트를 최근 순서대로 표시합니다.</p>
+          <div class="event-list compact-event-list" id="recent-activity-list">
+            <div class="event-row empty-row">
+              <span>--:--</span>
+              <strong>아직 활동 기록이 없습니다.</strong>
+              <em>WAIT</em>
+            </div>
+          </div>
+        </div>
+      </section>
+    </aside>
+
+    <main class="center-stage reveal is-visible">
+      <section class="model-viewport">
+        <div class="viewport-topbar">
+          <div class="viewport-topbar-copy">
+            <p class="panel-eyebrow pink">EVELYN CONTROL</p>
+            <strong id="guild-name">Guild 미연결</strong>
+          </div>
+          <div class="viewport-topbar-status">
+            <div class="topbar-pill-row">
+              <span class="topbar-pill is-default" id="mode-pill">default mode</span>
+              <span class="topbar-pill topbar-pill-muted is-warmup" id="submode-pill">idle</span>
+            </div>
+            <p class="topbar-status-line" id="topbar-status-line">Evelyn 상태를 기다리는 중입니다.</p>
+          </div>
+        </div>
+
+        <div class="viewport-fog viewport-fog-left"></div>
+        <div class="viewport-fog viewport-fog-right"></div>
+        <div class="viewport-noise"></div>
+        <section class="viewport-illustration" aria-label="Evelyn bot illustration">
+          <div class="avatar-shell" id="avatar-shell">
+            <div class="avatar-aura avatar-aura-back"></div>
+            <div id="avatar" class="evelyn-avatar" data-talking="false">
+              <div id="avatar-model" class="avatar-model">
+                <div id="avatar-layer-underpaint" class="avatar-layer avatar-layer-underpaint" aria-hidden="true">
+                  <img class="avatar-part avatar-underpaint" src="./assets/evelyn-avatar/model-v2/preview_composite.png" alt="" draggable="false">
+                </div>
+                <div id="avatar-layer-back" class="avatar-layer avatar-layer-back">
+                  <img class="avatar-part avatar-back-hair" src="./assets/evelyn-avatar/model-v2/parts/01_back_hair.png" alt="" draggable="false">
+                </div>
+                <div id="avatar-layer-legs" class="avatar-layer avatar-layer-legs">
+                  <img class="avatar-part avatar-leg-left" src="./assets/evelyn-avatar/model-v2/parts/19_leg_L.png" alt="" draggable="false">
+                  <img class="avatar-part avatar-leg-right" src="./assets/evelyn-avatar/model-v2/parts/20_leg_R.png" alt="" draggable="false">
+                </div>
+                <div id="avatar-layer-body" class="avatar-layer avatar-layer-body">
+                  <img class="avatar-part avatar-body-base" src="./assets/evelyn-avatar/model-v2/parts/02_body_base.png" alt="Evelyn bot illustration" draggable="false">
+                  <img class="avatar-part avatar-dress" src="./assets/evelyn-avatar/model-v2/parts/12_dress.png" alt="" draggable="false">
+                  <img class="avatar-part avatar-cardigan-left" src="./assets/evelyn-avatar/model-v2/parts/13_cardigan_L.png" alt="" draggable="false">
+                  <img class="avatar-part avatar-cardigan-right" src="./assets/evelyn-avatar/model-v2/parts/14_cardigan_R.png" alt="" draggable="false">
+                  <img class="avatar-part avatar-arm-left" src="./assets/evelyn-avatar/model-v2/parts/15_arm_L.png" alt="" draggable="false">
+                  <img class="avatar-part avatar-arm-right" src="./assets/evelyn-avatar/model-v2/parts/16_arm_R.png" alt="" draggable="false">
+                  <img class="avatar-part avatar-chest-ribbon" src="./assets/evelyn-avatar/model-v2/parts/28_chest_ribbon.png" alt="" draggable="false">
+                </div>
+                <div id="avatar-volume-shadow" class="avatar-volume-shadow" aria-hidden="true"></div>
+                <div id="avatar-volume-light" class="avatar-volume-light" aria-hidden="true"></div>
+                <div id="avatar-neck-shadow" class="avatar-neck-shadow" aria-hidden="true"></div>
+                <div id="avatar-layer-teddy" class="avatar-layer avatar-layer-teddy">
+                  <img class="avatar-part avatar-teddy-limbs avatar-teddy-leg-left" src="./assets/evelyn-avatar/model-v2/parts/26_teddy_leg_L.png" alt="" draggable="false">
+                  <img class="avatar-part avatar-teddy-limbs avatar-teddy-leg-right" src="./assets/evelyn-avatar/model-v2/parts/27_teddy_leg_R.png" alt="" draggable="false">
+                  <img class="avatar-part avatar-teddy-limbs avatar-teddy-arm-left" src="./assets/evelyn-avatar/model-v2/parts/24_teddy_arm_L.png" alt="" draggable="false">
+                  <img class="avatar-part avatar-teddy-limbs avatar-teddy-arm-right" src="./assets/evelyn-avatar/model-v2/parts/25_teddy_arm_R.png" alt="" draggable="false">
+                  <img class="avatar-part avatar-teddy-body" src="./assets/evelyn-avatar/model-v2/parts/23_teddy_body.png" alt="" draggable="false">
+                </div>
+                <div id="avatar-layer-hands" class="avatar-layer avatar-layer-hands">
+                  <img class="avatar-part avatar-hand-left" src="./assets/evelyn-avatar/model-v2/parts/17_hand_L.png" alt="" draggable="false">
+                  <img class="avatar-part avatar-hand-right" src="./assets/evelyn-avatar/model-v2/parts/18_hand_R.png" alt="" draggable="false">
+                </div>
+                <div id="avatar-layer-face" class="avatar-layer avatar-layer-face">
+                  <img class="avatar-part avatar-neck" src="./assets/evelyn-avatar/model-v2/parts/03_neck.png" alt="" draggable="false">
+                  <img class="avatar-part avatar-face-base" src="./assets/evelyn-avatar/model-v2/parts/04_face_base.png" alt="" draggable="false">
+                </div>
+                <div id="avatar-layer-features" class="avatar-layer avatar-layer-features">
+                  <img id="avatar-eye-left" class="avatar-part avatar-eye avatar-eye-left" src="./assets/evelyn-avatar/model-v2/parts/05_eye_L.png" alt="" draggable="false">
+                  <img id="avatar-eye-right" class="avatar-part avatar-eye avatar-eye-right" src="./assets/evelyn-avatar/model-v2/parts/06_eye_R.png" alt="" draggable="false">
+                  <img id="avatar-mouth" class="avatar-part avatar-mouth" src="./assets/evelyn-avatar/model-v2/parts/07_mouth_idle.png" alt="" draggable="false">
+                </div>
+                <div id="avatar-layer-front" class="avatar-layer avatar-layer-front">
+                  <img class="avatar-part avatar-side-hair-left" src="./assets/evelyn-avatar/model-v2/parts/10_side_hair_L.png" alt="" draggable="false">
+                  <img class="avatar-part avatar-side-hair-right" src="./assets/evelyn-avatar/model-v2/parts/11_side_hair_R.png" alt="" draggable="false">
+                  <img class="avatar-part avatar-front-hair" src="./assets/evelyn-avatar/model-v2/parts/09_front_hair.png" alt="" draggable="false">
+                  <img class="avatar-part avatar-flower" src="./assets/evelyn-avatar/model-v2/parts/21_flower.png" alt="" draggable="false">
+                  <img class="avatar-part avatar-ribbon" src="./assets/evelyn-avatar/model-v2/parts/22_hair_ribbon.png" alt="" draggable="false">
+                </div>
+              </div>
+            </div>
+            <div class="avatar-aura avatar-aura-front"></div>
+          </div>
+          <div class="avatar-annotation">
+            <span class="avatar-tag">EVELYN</span>
+            <strong>대기 중</strong>
+            <p id="avatar-status-copy">음성 출력 중이 아니면 차분한 idle 상태를 유지합니다.</p>
+          </div>
+        </section>
+        <div class="viewport-particles" aria-hidden="true">
+          <span></span><span></span><span></span><span></span><span></span><span></span>
+        </div>
+
+        <section class="viewport-focus slot-default" id="default-viewport-panel" aria-label="Default focus panel">
+          <article class="focus-hero">
+            <span class="focus-label">CURRENT FOCUS</span>
+            <strong id="default-focus-title">연결 상태 확인 중</strong>
+            <p id="default-focus-body">Evelyn과 control page API 응답을 기다리는 중입니다.</p>
+          </article>
+          <div class="focus-grid">
+            <article class="focus-card">
+              <span class="focus-card-label">최근 응답</span>
+              <strong id="default-focus-recent-title">아직 없음</strong>
+              <p id="default-focus-recent-body">최근 assistant 응답이 생기면 여기에 요약합니다.</p>
+            </article>
+            <article class="focus-card">
+              <span class="focus-card-label">운영 컨텍스트</span>
+              <strong id="default-focus-context-title">대기 중</strong>
+              <p id="default-focus-context-body">길드, 음성, 현재 모드, 다음 액션을 묶어서 보여줍니다.</p>
+            </article>
+          </div>
+        </section>
+
+        <div class="viewport-hud slot-minecraft" id="minecraft-viewport-hud">
+          <div class="hud-card hud-card-goal">
+            <span class="hud-label">목표</span>
+            <strong id="objective-goal">없음</strong>
+            <p id="objective-progress">진행 메시지 없음</p>
+          </div>
+          <div class="hud-card hud-card-stage">
+            <span class="hud-label">작업 단계</span>
+            <strong id="objective-stage">없음</strong>
+            <p id="objective-task-stage">없음</p>
+          </div>
+          <div class="hud-position-dock" id="inventory-dock">
+            <div class="hud-card hud-card-position" id="position-card">
+              <div class="hud-card-header inventory-position-header">
+                <span class="hud-label">현재 위치</span>
+                <button type="button" class="hud-inline-button hud-inline-button-dock" id="inventory-toggle-button" aria-expanded="false" aria-controls="inventory-widget">인벤토리</button>
+              </div>
+              <strong id="position-block">미확인</strong>
+            </div>
+            <div class="inventory-widget is-hidden" id="inventory-widget" role="dialog" aria-label="현재 인벤토리" aria-hidden="true">
+              <div class="inventory-widget-header">
+                <strong>인벤토리</strong>
+                <button type="button" class="inventory-widget-close" id="inventory-widget-close" aria-label="인벤토리 닫기">닫기</button>
+              </div>
+              <p class="inventory-widget-summary" id="inventory-summary">인벤토리 정보 없음</p>
+              <div class="inventory-widget-list" id="inventory-widget-list">
+                <p class="inventory-widget-empty">표시할 인벤토리 항목이 없습니다.</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <aside class="side-rail right-rail reveal is-visible" aria-label="Evelyn chat and actions">
+      <section class="panel chat-panel">
+        <header class="chat-header">
+          <div class="chat-header-mark">C</div>
+          <div class="chat-header-copy">
+            <p class="panel-eyebrow pink" id="actions-eyebrow">CONTROL ACTIONS</p>
+            <strong>Evelyn</strong>
+            <p class="panel-subcopy wide" id="actions-subcopy">자주 쓰는 명령과 최근 대화를 한곳에서 처리합니다.</p>
+          </div>
+          <div class="chat-header-actions">
+            <button type="button" class="quick-command is-danger chat-header-button" id="chat-shutdown-button" data-chat-command="/shutdown" data-chat-send="1" data-confirm="Evelyn 전체 스택을 종료할까요?">종료</button>
+          </div>
+        </header>
+
+        <section class="minecraft-ops slot-minecraft" id="minecraft-ops-panel" aria-label="Minecraft operations summary">
+          <article class="brief-card brief-card-accent">
+            <span class="brief-label">Minecraft Overview</span>
+            <strong id="minecraft-ops-title">세션 대기 중</strong>
+            <p id="minecraft-ops-body">Minecraft 세션이 붙으면 인벤토리, 생존 상태, 진행 정보를 요약합니다.</p>
+          </article>
+          <div class="minecraft-ops-grid">
+            <article class="mini-ops-card">
+              <span class="focus-card-label">인벤토리</span>
+              <strong id="minecraft-ops-inventory-title">없음</strong>
+              <p id="minecraft-ops-inventory-body">인벤토리 정보 없음</p>
+            </article>
+            <article class="mini-ops-card">
+              <span class="focus-card-label">생존 상태</span>
+              <strong id="minecraft-ops-survival-title">미확인</strong>
+              <p id="minecraft-ops-survival-body">체력과 배고픔이 여기에 표시됩니다.</p>
+            </article>
+          </div>
+        </section>
+
+        <section class="control-brief slot-default" id="control-brief" aria-label="Current control summary">
+          <article class="brief-card">
+            <span class="brief-label">지금 상태</span>
+            <strong id="control-brief-title">연결 상태 확인 중</strong>
+            <p id="control-brief-body">Evelyn과 control page API 응답을 기다리는 중입니다.</p>
+          </article>
+          <article class="brief-card brief-card-accent">
+            <span class="brief-label">추천 액션</span>
+            <strong id="control-next-title">잠시만 기다려 주세요</strong>
+            <p id="control-next-body">API가 뜨면 현재 상태에 맞는 다음 액션을 안내합니다.</p>
+          </article>
+          <article class="brief-card brief-card-warning control-hidden" id="control-issue-card">
+            <span class="brief-label">주의</span>
+            <strong id="control-issue-title">문제 없음</strong>
+            <p id="control-issue-body">특이사항이 없습니다.</p>
+          </article>
+        </section>
+
+        <div class="quick-command-stack">
+          <section class="quick-command-block" aria-label="Primary actions">
+            <div class="quick-command-head">
+              <strong id="primary-action-title">바로 실행</strong>
+              <span id="quick-command-caption">현재 상태에 맞는 기본 액션입니다.</span>
+            </div>
+            <div class="quick-command-row quick-command-row-primary" id="primary-action-row" aria-label="Primary actions"></div>
+          </section>
+
+          <section class="quick-command-block" aria-label="Supporting commands">
+            <div class="quick-command-head">
+              <strong id="support-action-title">세부 명령</strong>
+              <span id="support-action-caption">상태 확인과 보조 제어를 모았습니다.</span>
+            </div>
+            <div class="quick-command-row" id="quick-command-row" aria-label="Quick commands"></div>
+          </section>
+        </div>
+
+        <section class="chat-thread" id="chat-thread" aria-label="Local control page chat log"></section>
+
+        <form class="chat-composer" id="chat-composer">
+          <label class="composer-shell" for="command-preview">
+            <textarea id="command-preview" rows="1" placeholder="Evelyn에게 메시지를 보내거나 /minecraft connect 입력"></textarea>
+            <div class="command-suggestions is-hidden" id="command-suggestions" aria-live="polite"></div>
+          </label>
+
+          <div class="composer-toolbar">
+            <span id="composer-hint-left">Enter 전송</span>
+            <span>Shift + Enter 줄바꿈</span>
+          </div>
+
+          <div class="composer-actions">
+            <button type="submit" class="composer-send" id="composer-send-button">보내기</button>
+          </div>
+        </form>
+      </section>
+    </aside>
+  </div>
+
+  <script src="./assets/vendor/winbox/winbox.bundle.min.js?v=0.2.82"></script>
+  <script src="./assets/evelyn-page.js?v=20260523w"></script>
+</body>
+</html>

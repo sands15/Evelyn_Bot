@@ -1,0 +1,3 @@
+async function haveFiveRawIronIntoIronIngots(bot) {
+    // The function checks if five iron ingots are already present in the inventory. If not, it verifies that enough raw iron is available to meet the target. It then locates or places a furnace block nearby. Next, it attempts to find sufficient fuel, crafting planks from logs if necessary. Finally, it smelts the required amount of raw iron using the chosen fuel to ensure the target number of ingots is reached.
+}

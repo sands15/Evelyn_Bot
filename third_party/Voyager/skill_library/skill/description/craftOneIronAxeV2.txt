@@ -1,0 +1,3 @@
+async function craftOneIronAxe(bot) {
+    // The function checks if an iron axe is already present in the inventory; if so, it stops. It verifies if at least three iron ingots are available, throwing an error if not. It then ensures two sticks are available, crafting planks from logs if necessary to make the required sticks. Finally, it locates a crafting table nearby and attempts to craft one iron axe.
+}

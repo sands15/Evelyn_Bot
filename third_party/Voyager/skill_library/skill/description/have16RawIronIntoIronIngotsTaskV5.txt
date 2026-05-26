@@ -1,0 +1,3 @@
+async function have16RawIronIntoIronIngotsTask(bot) {
+    // This process checks if the required amount of iron ingots has been gathered. If not, it verifies if enough raw iron is present to meet the target. It then locates or places a furnace nearby if one is not found. Finally, it attempts to smelt the raw iron into ingots using various available fuel sources until the target amount is reached or fuel runs out.
+}

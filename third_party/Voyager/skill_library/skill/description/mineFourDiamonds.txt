@@ -1,0 +1,3 @@
+async function mineFourDiamonds(bot) {
+    // The process begins by checking if four diamonds are already in the inventory; if so, nothing further is done. An iron pickaxe is equipped to prepare for mining. The function then attempts to mine nearby diamond or deepslate diamond ore up to six times, checking for four diamonds after each attempt. If that fails, it searches for the remaining needed diamonds within a set time limit. Finally, it attempts to mine more nearby ores up to eight times to ensure the target of four diamonds is met.
+}

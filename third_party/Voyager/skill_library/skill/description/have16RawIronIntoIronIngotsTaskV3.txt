@@ -1,0 +1,3 @@
+async function have16RawIronIntoIronIngotsTask(bot) {
+    // This function checks if the player has at least sixteen iron ingots. If not, it determines how many more are needed and verifies if enough raw iron is available. It then locates or places a furnace to begin the smelting process. The function iterates through various fuel types, smelting the required amount of raw iron until the target number of ingots is reached or fuel runs out. Finally, it confirms whether the goal of having sixteen iron ingots was successfully achieved.
+}

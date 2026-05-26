@@ -1,0 +1,3 @@
+async function smeltThreeRawIronIntoIronIngots(bot) {
+    // The function checks if at least three iron ingots are already present in the inventory. If not, it determines how many more are needed and verifies that enough raw iron is available. It then selects a suitable fuel source, prioritizing coal, and ensures a furnace is present nearby, placing one if necessary. Finally, it initiates the smelting process to convert the raw iron into the required number of iron ingots.
+}

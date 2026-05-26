@@ -1,0 +1,3 @@
+async function ironPickaxeUpgradeNightBootstrap(bot) {
+    // This function attempts to create an iron pickaxe if one is not already present in the inventory. It first checks if the necessary components, such as iron ingots and sticks, are available. If materials are lacking, it tries to gather wood for sticks or search for iron ore and smelt raw iron using a furnace. Finally, it crafts the iron pickaxe if all prerequisites are met.
+}

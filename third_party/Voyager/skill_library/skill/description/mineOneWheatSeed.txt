@@ -1,0 +1,3 @@
+async function mineOneWheatSeed(bot) {
+    // This function attempts to gather wheat seeds if the inventory is empty. It iterates through a list of plant types, searching for them within a certain range. If any plants are found, the function mines them. After mining, it waits for a short period to allow seeds to drop. If seeds are obtained during this process, the function stops; otherwise, it throws an error indicating no seeds were found nearby.
+}

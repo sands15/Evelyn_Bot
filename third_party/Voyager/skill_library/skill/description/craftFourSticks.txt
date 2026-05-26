@@ -1,0 +1,3 @@
+async function craftFourSticks(bot) {
+    // The function checks if there are at least four sticks in the inventory; if so, it does nothing. Otherwise, it verifies if at least two planks are available. If not, it attempts to craft one plank from any available log. If planks are still insufficient, it throws an error. Finally, it crafts one stick and ensures that the inventory contains at least four sticks.
+}

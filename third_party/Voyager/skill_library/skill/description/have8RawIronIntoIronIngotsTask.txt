@@ -1,0 +1,3 @@
+async function have8RawIronIntoIronIngotsTask(bot) {
+    // The function checks if the required number of iron ingots is already present in the inventory. If not, it determines how many more are needed and verifies if enough raw iron is available. It then locates or places a furnace block nearby. Finally, it iterates through various fuel types, smelting raw iron into iron ingots until the target amount is reached or all attempts fail.
+}

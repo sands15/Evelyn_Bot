@@ -1,0 +1,3 @@
+async function mineOneWheatSeed(bot) {
+    // This function attempts to gather at least one wheat seed from nearby plants. It first checks if the bot already possesses a wheat seed and exits if it does. It then iterates through a list of plant types, searching for them within a certain range. If plants are found, the function mines them, waiting a short period between attempts. If, after checking all listed plants, no wheat seed has been obtained, it throws an error indicating the search was unsuccessful.
+}

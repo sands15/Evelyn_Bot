@@ -1,3 +1,30 @@
+const PLACED_BLOCK_ALIASES = {
+    torch: ["torch", "wall_torch"],
+    redstone_torch: ["redstone_torch", "redstone_wall_torch"],
+    wheat_seeds: ["wheat"],
+    beetroot_seeds: ["beetroots"],
+    melon_seeds: ["melon_stem"],
+    pumpkin_seeds: ["pumpkin_stem"],
+    carrot: ["carrots"],
+    potato: ["potatoes"],
+    sweet_berries: ["sweet_berry_bush"],
+};
+
+function expectedPlacedBlockNames(name) {
+    const expected = new Set([name, ...(PLACED_BLOCK_ALIASES[name] || [])]);
+    if (name.endsWith("_hanging_sign")) {
+        expected.add(name.replace("_hanging_sign", "_wall_hanging_sign"));
+    } else if (name.endsWith("_sign")) {
+        expected.add(name.replace("_sign", "_wall_sign"));
+    }
+    if (name.endsWith("_sapling")) expected.add(name);
+    return expected;
+}
+
+function isExpectedPlacedBlock(placedBlock, name) {
+    return Boolean(placedBlock && expectedPlacedBlockNames(name).has(placedBlock.name));
+}
+
 async function placeItem(bot, name, position) {
     // return if name is not string
     if (typeof name !== "string") {
@@ -65,9 +92,9 @@ async function placeItem(bot, name, position) {
         await bot.placeBlock(referenceBlock, faceVector);
         await bot.waitForTicks(6);
         const placedBlock = bot.blockAt(position);
-        if (!placedBlock || placedBlock.name !== name) {
+        if (!isExpectedPlacedBlock(placedBlock, name)) {
             throw new Error(
-                `Placement of ${name} was not confirmed at ${position}`
+                `Placement of ${name} was not confirmed at ${position}; found ${placedBlock?.name || "nothing"}`
             );
         }
         bot.chat(`Placed ${name}`);
@@ -87,9 +114,9 @@ async function placeItem(bot, name, position) {
         } else {
             await bot.waitForTicks(6);
             const placedBlock = bot.blockAt(position);
-            if (!placedBlock || placedBlock.name !== name) {
+            if (!isExpectedPlacedBlock(placedBlock, name)) {
                 throw new Error(
-                    `Placement of ${name} was not confirmed at ${position}`
+                    `Placement of ${name} was not confirmed at ${position}; found ${placedBlock?.name || "nothing"}`
                 );
             }
             bot.chat(`Placed ${name}`);

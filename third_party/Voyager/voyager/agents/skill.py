@@ -19,6 +19,7 @@ class SkillManager:
     POLICY_STATE_FILENAME = "policy_state.json"
     POLICY_REJECT_SCORE = 6
     POLICY_DELETE_FAILURES = 2
+    POLICY_MIN_PROVED_SUCCESSES = 2
     POLICY_MAX_EVENTS = 200
     POLICY_MAX_EXPLORE_CALLS = 2
     POLICY_MAX_HELPERS = 5
@@ -127,6 +128,41 @@ class SkillManager:
                 "last_updated_at": None,
             },
         )
+
+    @staticmethod
+    def _skill_family_name(program_name, task_text=""):
+        base = re.sub(r"V\d+$", "", str(program_name or "").strip())
+        if base:
+            return base
+        lowered = str(task_text or "").strip().lower()
+        lowered = re.sub(r"\d+", "N", lowered)
+        lowered = re.sub(r"[^a-z0-9]+", "_", lowered).strip("_")
+        return lowered or "unknown_family"
+
+    def _existing_family_skill(self, family_name, *, exclude=None):
+        family = str(family_name or "").strip()
+        if not family:
+            return None
+        for skill_name, state in self.policy_state.get("skills", {}).items():
+            if skill_name == exclude:
+                continue
+            if str(state.get("family") or "") != family:
+                continue
+            if state.get("auto_deleted") or state.get("delete_candidate"):
+                continue
+            if skill_name in self.skills:
+                return skill_name
+        return None
+
+    @staticmethod
+    def _is_proved_success(info):
+        if not isinstance(info, dict) or not info.get("success"):
+            return False
+        completion_reason = str(info.get("completion_reason") or "").strip().lower()
+        if completion_reason == "world_effect_verified":
+            return True
+        effect = info.get("world_effect_verification") if isinstance(info.get("world_effect_verification"), dict) else {}
+        return str(effect.get("outcome") or "").strip().lower() == "success"
 
     def _search_state(self, goal_type):
         search_state = self.policy_state.setdefault("search", {})
@@ -409,6 +445,8 @@ class SkillManager:
         program_code = info["program_code"]
         review = self._analyze_skill(program_code)
         state = self._skill_state(program_name)
+        family_name = self._skill_family_name(program_name, info.get("task"))
+        state["family"] = family_name
         if review["reject_save"]:
             state["rejected_saves"] = int(state.get("rejected_saves", 0)) + 1
             state["delete_candidate"] = True
@@ -419,6 +457,45 @@ class SkillManager:
             self._save_policy_state()
             print(f"\033[33mSkill policy rejected save for {program_name}: {', '.join(review['reasons']) or 'policy'}\033[0m")
             return
+        if not self._is_proved_success(info):
+            state["pending_proof"] = True
+            self._append_policy_event(
+                program_name,
+                "save_deferred_unproved",
+                ["not_proved_routine"],
+                {"task": info.get("task"), "family": family_name},
+            )
+            self._save_policy_state()
+            print(f"\033[33mSkill Manager deferred save for {program_name}: routine is not yet proved by deterministic evidence.\033[0m")
+            return
+        state["proved_successes"] = int(state.get("proved_successes", 0)) + 1
+        if int(state.get("proved_successes", 0)) < self.POLICY_MIN_PROVED_SUCCESSES:
+            state["pending_proof"] = True
+            self._append_policy_event(
+                program_name,
+                "save_deferred_pending_more_proof",
+                ["insufficient_proved_runs"],
+                {"task": info.get("task"), "family": family_name, "proved_successes": state.get("proved_successes", 0)},
+            )
+            self._save_policy_state()
+            print(f"\033[33mSkill Manager deferred save for {program_name}: waiting for repeated proved success.\033[0m")
+            return
+        existing_family_skill = self._existing_family_skill(family_name, exclude=program_name)
+        if existing_family_skill:
+            existing_state = self.policy_state.get("skills", {}).get(existing_family_skill, {})
+            existing_score = int(existing_state.get("last_score", 0) or 0)
+            existing_successes = int(existing_state.get("proved_successes", 0) or 0)
+            if existing_score > review["score"] or existing_successes > int(state.get("proved_successes", 0) or 0):
+                state["pending_proof"] = False
+                self._append_policy_event(
+                    program_name,
+                    "save_skipped_family_duplicate",
+                    ["family_duplicate"],
+                    {"task": info.get("task"), "family": family_name, "active_skill": existing_family_skill},
+                )
+                self._save_policy_state()
+                print(f"\033[33mSkill Manager skipped save for {program_name}: family '{family_name}' already has proved representative {existing_family_skill}.\033[0m")
+                return
         try:
             skill_description = self.generate_skill_description(program_name, program_code)
         except Exception as exc:
@@ -449,9 +526,12 @@ class SkillManager:
             "code": program_code,
             "description": skill_description,
         }
+        if existing_family_skill and existing_family_skill != program_name:
+            self.maybe_delete_skill(existing_family_skill, ["family_replaced"], force=True)
         state["delete_candidate"] = False
         state["candidate_reasons"] = []
         state["auto_deleted"] = False
+        state["pending_proof"] = False
         self._append_policy_event(program_name, "saved", [], {"task": info.get("task"), "score": review["score"]})
         self._ensure_vectordb_sync(repair=True)
         U.dump_text(

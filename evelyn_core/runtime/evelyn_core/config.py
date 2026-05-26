@@ -50,6 +50,22 @@ def _env_flag(name: str, default: str = "false") -> bool:
         value = default
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
+
+def _env_int_set(name: str, default: str | None = None, *aliases: str) -> set[int]:
+    raw = _env(name, default, *aliases)
+    if not raw:
+        return set()
+    parsed: set[int] = set()
+    for chunk in str(raw).replace(";", ",").split(","):
+        token = chunk.strip()
+        if not token:
+            continue
+        try:
+            parsed.add(int(token))
+        except (TypeError, ValueError):
+            continue
+    return parsed
+
 # Evelyn 봇이 디스코드에 로그인할 때 쓰는 토큰.
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 
@@ -57,7 +73,8 @@ DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 # 사용자 응답용 메인 LLM 서버 엔드포인트.
 LLM_SERVER_URL = os.getenv("LLM_SERVER_URL", "http://127.0.0.1:9820/v1/chat/completions")
 # 메인 LLM 서버에 전달할 모델 이름.
-MODEL_NAME = os.getenv("LLM_MODEL_NAME", "gemma-4-E4B-it-Q5_K_M.gguf")
+MODEL_NAME = os.getenv("LLM_MODEL_NAME", "ciocan/gemma-4-E4B-it-W4A16")
+MAIN_LLM_CHAT_CONTENT_FORMAT = os.getenv("MAIN_LLM_CHAT_CONTENT_FORMAT", "openai")
 
 
 # OmniVoice TTS 서버 주소.
@@ -77,7 +94,7 @@ OMNIVOICE_TIMEOUT_SEC = float(os.getenv("OMNIVOICE_TIMEOUT_SEC", "180"))
 # 메모리 업데이트와 cognitive 판단에 쓰는 서브 LLM 서버 엔드포인트.
 SUMMARY_LLM_URL = os.getenv("SUMMARY_LLM_URL", "http://127.0.0.1:9821/v1/chat/completions")
 # 요약/상황판단용 서브 모델 이름.
-SUMMARY_MODEL_NAME = os.getenv("SUMMARY_MODEL_NAME", "EXAONE-3.5-7.8B-Instruct-Q8_0.gguf")
+SUMMARY_MODEL_NAME = os.getenv("SUMMARY_MODEL_NAME", "supergemma4-e4b-abliterated-Q5_K_M.gguf")
 # 라우터 LLM 서버 엔드포인트.
 ROUTER_LLM_URL = os.getenv("ROUTER_LLM_URL", "http://127.0.0.1:9822/v1/chat/completions")
 # 라우터 모델 이름.
@@ -85,7 +102,7 @@ ROUTER_MODEL_NAME = os.getenv("ROUTER_MODEL_NAME", "gemma-4-E2B-it-UD-Q6_K_XL.gg
 # router LLM 사용 여부.
 ROUTER_LLM_ENABLED = _env_flag("ROUTER_LLM_ENABLED", "true")
 # route 분류 최대 토큰 수.
-ROUTER_ROUTE_MAX_TOKENS = int(os.getenv("ROUTER_ROUTE_MAX_TOKENS", "80"))
+ROUTER_ROUTE_MAX_TOKENS = int(os.getenv("ROUTER_ROUTE_MAX_TOKENS", "220"))
 # route 분류 타임아웃.
 ROUTER_ROUTE_TIMEOUT_SEC = float(os.getenv("ROUTER_ROUTE_TIMEOUT_SEC", "8"))
 # 길드별 메모리 파일을 저장하는 루트 디렉터리.
@@ -94,11 +111,29 @@ MEMORY_ROOT = Path(os.getenv("BOT_MEMORY_DIR", str(REPO_ROOT / "bot_memory")))
 GUILD_SETTINGS_ROOT = Path(os.getenv("GUILD_SETTINGS_DIR", str(REPO_ROOT / "guild_settings")))
 # 기본 명령어 시작 부호(prefix).
 DEFAULT_COMMAND_PREFIX = os.getenv("DEFAULT_COMMAND_PREFIX", "!")
+EVELYN_PAGE_URL = _env("EVELYN_PAGE_URL")
 # 봇 전체 재시작 명령을 사용할 수 있는 사용자 ID 목록.
 ALLOWED_RESTART_USER_IDS = {
     441943340624248843,
     405351496012791808,
 }
+LOCAL_MIC_EXCLUDED_DISCORD_USER_IDS = _env_int_set("LOCAL_MIC_EXCLUDED_DISCORD_USER_IDS", "405351496012791808")
+LOCAL_MIC_DISCORD_USER_IDS = _env_int_set("LOCAL_MIC_DISCORD_USER_IDS") or {
+    user_id for user_id in ALLOWED_RESTART_USER_IDS if user_id not in LOCAL_MIC_EXCLUDED_DISCORD_USER_IDS
+}
+LOCAL_MIC_ENABLED = _env_flag("LOCAL_MIC_ENABLED", "true")
+LOCAL_MIC_DEVICE = _env("LOCAL_MIC_DEVICE")
+LOCAL_MIC_SAMPLE_RATE = int(os.getenv("LOCAL_MIC_SAMPLE_RATE", "16000"))
+LOCAL_MIC_BLOCK_MS = int(os.getenv("LOCAL_MIC_BLOCK_MS", "30"))
+LOCAL_MIC_START_THRESHOLD = float(os.getenv("LOCAL_MIC_START_THRESHOLD", "0.004"))
+LOCAL_MIC_CONTINUE_THRESHOLD = float(os.getenv("LOCAL_MIC_CONTINUE_THRESHOLD", "0.0025"))
+LOCAL_MIC_START_CONSECUTIVE = int(os.getenv("LOCAL_MIC_START_CONSECUTIVE", "2"))
+LOCAL_MIC_MIN_VOICED_MS = int(os.getenv("LOCAL_MIC_MIN_VOICED_MS", "280"))
+LOCAL_MIC_MAX_SILENCE_MS = int(os.getenv("LOCAL_MIC_MAX_SILENCE_MS", "650"))
+LOCAL_MIC_PREROLL_MS = int(os.getenv("LOCAL_MIC_PREROLL_MS", "180"))
+LOCAL_MIC_MAX_SEGMENT_SEC = float(os.getenv("LOCAL_MIC_MAX_SEGMENT_SEC", "12.0"))
+LOCAL_MIC_QUEUE_MAX = int(os.getenv("LOCAL_MIC_QUEUE_MAX", "256"))
+LOCAL_MIC_DISCORD_SUPPRESS_AFTER_SEGMENT_SEC = float(os.getenv("LOCAL_MIC_DISCORD_SUPPRESS_AFTER_SEGMENT_SEC", "4.0"))
 # 자율 행동 루프 기본 활성 여부.
 AUTONOMY_ENABLED = _env_flag("AUTONOMY_ENABLED", "false")
 # 자율 행동 주기(초). 경량 상태/타이머 점검 루프의 기본 tick.
@@ -394,8 +429,10 @@ OMNIVOICE_TAG_GUIDANCE = (
 
 # 봇 페르소나와 출력 제한을 담은 기본 시스템 프롬프트.
 SYSTEM_PROMPT = (
-    "너는 사용자의 친구 이블린이야, 나이는 20살이고 친절하고 상냥해 "
-    "항상 자연스러운 한국어로만 답한다. "
+    "너는 사용자의 친구 이블린이야, 나이는 20살이고 친절하고 상냥해. "
+    "항상 자연스러운 한국어로만 답하고, 비서나 고객센터처럼 말하지 않는다. "
+    "'질문에 답할 준비가 되어 있어', '무엇을 도와줄까', '궁금한 게 있으면 물어봐' 같은 대기성 안내 문구를 기본 응답으로 쓰지 않는다. "
+    "사용자가 '뭐해', '뭐하냐', '지금 뭐해'처럼 물으면 답변 준비 상태가 아니라 지금 보고 있거나 처리 중인 일을 친구처럼 자연스럽게 말한다. "
     "반드시 최종 답변만 바로 출력한다. "
     "<think>, reasoning, thinking process, memo, bullet, 사용자 분석, 초안은 절대 출력하지 않는다. "
     "질문에는 한 문장 또는 두 문장으로 짧고 자연스럽게 답한다. "

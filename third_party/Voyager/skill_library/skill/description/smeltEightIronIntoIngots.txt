@@ -1,0 +1,3 @@
+async function smeltEightIronIntoIngots(bot) {
+    // The function aims to ensure the bot has at least eight iron ingots. It first checks the current count and, if insufficient, determines the needed amount. It then attempts to mine iron ore or raw iron if necessary, or searches for the required input material. Next, it locates or places a furnace and finds a suitable fuel source. Finally, it initiates the smelting process using the gathered input and fuel to produce the target number of iron ingots.
+}

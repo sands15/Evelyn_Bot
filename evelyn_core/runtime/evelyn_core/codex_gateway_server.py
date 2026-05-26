@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import ctypes
+import itertools
 import json
 import os
 import shutil
 import sys
 import tempfile
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -22,12 +25,29 @@ DEFAULT_PORT = int(os.getenv("VOYAGER_CODEX_GATEWAY_PORT", "8787"))
 DEFAULT_MODEL = os.getenv("VOYAGER_CODEX_MODEL", "gpt-5.5")
 DEFAULT_TIMEOUT_SEC = float(os.getenv("VOYAGER_CODEX_GATEWAY_TIMEOUT_SEC", "260"))
 DEFAULT_WORKDIR = str(REPO_ROOT)
+DEFAULT_BACKEND_MODE = os.getenv("VOYAGER_CODEX_GATEWAY_BACKEND", "codex-exec").strip().lower()
 LAST_REQUEST_STATUS_PATH = REPO_ROOT / "bot_memory" / "codex_gateway_last_request.json"
 GATEWAY_ERROR_LOG_PATH = REPO_ROOT / "bot_memory" / "codex_gateway_errors.log"
 _GATEWAY_STATUS_LINE_LENGTH = 0
 _VT_MODE_ENABLED: bool | None = None
 _ALT_SCREEN_ENABLED = False
 _GATEWAY_NOTICE = "waiting for action request"
+_QUEUE: asyncio.PriorityQueue[tuple[int, int, "GatewayQueueItem"]] | None = None
+_QUEUE_WORKER: asyncio.Task[None] | None = None
+_QUEUE_SEQUENCE = itertools.count()
+_ACTIVE_QUEUE_ITEM: dict[str, Any] | None = None
+
+
+@dataclass
+class GatewayQueueItem:
+    prompt: str
+    model: str
+    timeout_sec: float
+    cwd: str
+    source: str
+    priority: int
+    enqueued_at: float
+    future: asyncio.Future[str]
 
 
 def _set_console_title(text: str) -> None:
@@ -150,6 +170,51 @@ def _backend_command() -> str:
     return str(os.getenv("VOYAGER_CODEX_GATEWAY_COMMAND", "")).strip()
 
 
+def _backend_mode(env: dict[str, str] | None = None) -> str:
+    source = env if env is not None else os.environ
+    mode = str(source.get("VOYAGER_CODEX_GATEWAY_BACKEND") or DEFAULT_BACKEND_MODE or "codex-exec").strip().lower()
+    aliases = {
+        "cli": "codex-exec",
+        "codex": "codex-exec",
+    }
+    resolved = aliases.get(mode, mode)
+    if resolved != "codex-exec":
+        return "codex-exec"
+    return resolved
+
+
+def _backend_label(env: dict[str, str] | None = None) -> str:
+    command = _backend_command()
+    if command:
+        return "shell-command"
+    return _backend_mode(env)
+
+
+def _request_priority(payload: dict[str, Any], source: str) -> int:
+    raw_priority = payload.get("priority")
+    try:
+        return max(0, int(raw_priority))
+    except (TypeError, ValueError):
+        pass
+
+    normalized = " ".join(
+        str(value or "").strip().lower()
+        for value in (
+            source,
+            payload.get("kind"),
+            payload.get("request_type"),
+            payload.get("route"),
+        )
+    )
+    if any(token in normalized for token in ("interactive", "user", "control", "manual")):
+        return 0
+    if "recovery" in normalized or "health" in normalized:
+        return 10
+    if "background" in normalized or "learning" in normalized:
+        return 100
+    return 50
+
+
 def _load_last_request_status() -> dict[str, Any] | None:
     try:
         payload = json.loads(LAST_REQUEST_STATUS_PATH.read_text(encoding="utf-8"))
@@ -186,18 +251,27 @@ def _write_last_request_status(payload: dict[str, Any]) -> None:
             "codex returned empty output",
             str(payload.get("stderr_preview") or ""),
         )
+    elif phase == "queued":
+        queue_size = payload.get("queue_size")
+        priority = payload.get("priority")
+        _announce_gateway_status(f"queued request priority={priority} queue={queue_size}")
     elif phase == "starting":
         _announce_gateway_status("waiting for action request")
 
 
 def _gateway_status() -> dict[str, Any]:
-    command = _backend_command()
+    queue = _QUEUE
     return {
         "ok": True,
         "service": "voyager_codex_gateway",
         "configured": True,
-        "backend": "shell-command" if command else "codex-exec",
+        "backend": _backend_label(),
         "route": "/codex/action",
+        "queue": {
+            "mode": "priority-serial",
+            "size": queue.qsize() if queue is not None else 0,
+            "active": _ACTIVE_QUEUE_ITEM,
+        },
         "last_request": _load_last_request_status(),
     }
 
@@ -238,9 +312,18 @@ def _strip_outer_fence(text: str) -> str:
     return stripped
 
 
+def _preview_text(text: str, limit: int = 2000) -> str:
+    if len(text) <= limit:
+        return text
+    head = max(0, limit // 2)
+    tail = max(0, limit - head - 80)
+    return f"{text[:head]}\n... <truncated {len(text) - head - tail} chars> ...\n{text[-tail:]}"
+
+
 async def _run_backend(prompt: str, model: str, timeout_sec: float, cwd: str) -> str:
     command = _backend_command()
     env = os.environ.copy()
+    _backend_mode(env)
     env["VOYAGER_CODEX_MODEL"] = model
     env["VOYAGER_CODEX_TIMEOUT_SEC"] = str(timeout_sec)
     env["VOYAGER_CODEX_CWD"] = cwd
@@ -248,7 +331,7 @@ async def _run_backend(prompt: str, model: str, timeout_sec: float, cwd: str) ->
     status_payload = {
         "started_at": started_at,
         "phase": "starting",
-        "backend": "shell-command" if command else "codex-exec",
+        "backend": _backend_label(env),
         "model": model,
         "timeout_sec": timeout_sec,
         "cwd": cwd,
@@ -319,8 +402,8 @@ async def _run_backend(prompt: str, model: str, timeout_sec: float, cwd: str) ->
                 "finished_at": time.time(),
                 "elapsed_sec": round(time.time() - started_at, 3),
                 "returncode": proc.returncode,
-                "stderr_preview": err[:2000],
-                "stdout_preview": output[:2000],
+                "stderr_preview": _preview_text(err),
+                "stdout_preview": _preview_text(output),
             })
             _write_last_request_status(status_payload)
             raise RuntimeError(err or output or f"Codex gateway backend exited with code {proc.returncode}")
@@ -330,7 +413,7 @@ async def _run_backend(prompt: str, model: str, timeout_sec: float, cwd: str) ->
                 "finished_at": time.time(),
                 "elapsed_sec": round(time.time() - started_at, 3),
                 "returncode": proc.returncode,
-                "stderr_preview": err[:2000],
+                "stderr_preview": _preview_text(err),
             })
             _write_last_request_status(status_payload)
             raise RuntimeError(err or "Codex gateway backend returned empty stdout")
@@ -350,6 +433,92 @@ async def _run_backend(prompt: str, model: str, timeout_sec: float, cwd: str) ->
                 prompt_path.unlink(missing_ok=True)
             except Exception:
                 pass
+
+
+async def _queue_worker() -> None:
+    global _ACTIVE_QUEUE_ITEM
+    assert _QUEUE is not None
+    while True:
+        priority, sequence, item = await _QUEUE.get()
+        _ACTIVE_QUEUE_ITEM = {
+            "source": item.source,
+            "priority": priority,
+            "sequence": sequence,
+            "queued_sec": round(time.time() - item.enqueued_at, 3),
+        }
+        try:
+            if item.future.cancelled():
+                continue
+            try:
+                result = await _run_backend(item.prompt, item.model, item.timeout_sec, item.cwd)
+            except Exception as exc:
+                if not item.future.cancelled():
+                    item.future.set_exception(exc)
+            else:
+                if not item.future.cancelled():
+                    item.future.set_result(result)
+        finally:
+            _ACTIVE_QUEUE_ITEM = None
+            _QUEUE.task_done()
+
+
+async def _start_queue(app: web.Application) -> None:
+    global _QUEUE, _QUEUE_WORKER
+    _QUEUE = asyncio.PriorityQueue()
+    _QUEUE_WORKER = asyncio.create_task(_queue_worker())
+    app["codex_gateway_queue_worker"] = _QUEUE_WORKER
+
+
+async def _stop_queue(app: web.Application) -> None:
+    global _QUEUE_WORKER
+    worker = app.get("codex_gateway_queue_worker") or _QUEUE_WORKER
+    if worker is None:
+        return
+    worker.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await worker
+    _QUEUE_WORKER = None
+
+
+async def _submit_backend(
+    *,
+    prompt: str,
+    model: str,
+    timeout_sec: float,
+    cwd: str,
+    source: str,
+    priority: int,
+) -> str:
+    if _QUEUE is None:
+        return await _run_backend(prompt, model, timeout_sec, cwd)
+    loop = asyncio.get_running_loop()
+    future: asyncio.Future[str] = loop.create_future()
+    sequence = next(_QUEUE_SEQUENCE)
+    item = GatewayQueueItem(
+        prompt=prompt,
+        model=model,
+        timeout_sec=timeout_sec,
+        cwd=cwd,
+        source=source,
+        priority=priority,
+        enqueued_at=time.time(),
+        future=future,
+    )
+    await _QUEUE.put((priority, sequence, item))
+    _write_last_request_status({
+        "started_at": item.enqueued_at,
+        "phase": "queued",
+        "backend": _backend_label(),
+        "model": model,
+        "timeout_sec": timeout_sec,
+        "cwd": cwd,
+        "prompt_chars": len(prompt),
+        "source": source,
+        "priority": priority,
+        "queue_size": _QUEUE.qsize(),
+        "sequence": sequence,
+    })
+    return await future
 
 
 async def health(_: web.Request) -> web.Response:
@@ -373,9 +542,18 @@ async def codex_action(request: web.Request) -> web.Response:
     model = str((payload or {}).get("model") or DEFAULT_MODEL).strip() or DEFAULT_MODEL
     timeout_sec = float((payload or {}).get("timeout_sec") or DEFAULT_TIMEOUT_SEC)
     cwd = str((payload or {}).get("cwd") or os.getenv("VOYAGER_CODEX_GATEWAY_WORKDIR") or DEFAULT_WORKDIR)
+    source = str((payload or {}).get("source") or (payload or {}).get("request_type") or "voyager-action").strip() or "voyager-action"
+    priority = _request_priority(payload or {}, source)
 
     try:
-        content = await _run_backend(prompt, model, timeout_sec, cwd)
+        content = await _submit_backend(
+            prompt=prompt,
+            model=model,
+            timeout_sec=timeout_sec,
+            cwd=cwd,
+            source=source,
+            priority=priority,
+        )
     except RuntimeError as exc:
         message = str(exc)
         return web.json_response({"ok": False, "error": message}, status=500)
@@ -392,11 +570,13 @@ async def codex_action(request: web.Request) -> web.Response:
         _append_error_log(GATEWAY_ERROR_LOG_PATH, "codex_gateway_handler", str(exc))
         return web.json_response({"ok": False, "error": str(exc)}, status=500)
 
-    return web.json_response({"ok": True, "content": content})
+    return web.json_response({"ok": True, "content": content, "source": source, "priority": priority})
 
 
 def build_app() -> web.Application:
     app = web.Application()
+    app.on_startup.append(_start_queue)
+    app.on_cleanup.append(_stop_queue)
     app.router.add_get("/health", health)
     app.router.add_get("/status", status)
     app.router.add_post("/codex/action", codex_action)

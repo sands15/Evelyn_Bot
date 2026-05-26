@@ -1,0 +1,54 @@
+async function have5RawIronIntoIronIngots(bot) {
+  if (!bot) throw new Error("BOT_MISSING");
+  if (typeof mcData === "undefined" || !mcData) throw new Error("MCDATA_MISSING");
+  const countItem = name => {
+    const item = mcData.itemsByName[name];
+    if (!item) return 0;
+    return bot.inventory.count(item.id, null);
+  };
+  const targetIngots = 5;
+  const rawName = "raw_iron";
+  const ingotName = "iron_ingot";
+  if (countItem(ingotName) >= targetIngots) {
+    return {
+      success: true
+    };
+  }
+  const neededToSmelt = targetIngots - countItem(ingotName);
+  if (countItem(rawName) < neededToSmelt) {
+    throw new Error("NOT_ENOUGH_RAW_IRON");
+  }
+  let furnaceBlock = bot.findBlock({
+    matching: mcData.blocksByName.furnace.id,
+    maxDistance: 32
+  });
+  if (!furnaceBlock) {
+    if (countItem("furnace") < 1) throw new Error("NO_FURNACE_AVAILABLE");
+    await placeItem(bot, "furnace", bot.entity.position.offset(2, 0, 0));
+    furnaceBlock = bot.findBlock({
+      matching: mcData.blocksByName.furnace.id,
+      maxDistance: 32
+    });
+    if (!furnaceBlock) throw new Error("FURNACE_NOT_AVAILABLE_AFTER_PLACEMENT");
+  }
+  const fuelCandidates = ["coal", "charcoal", "oak_planks", "birch_planks", "spruce_planks", "jungle_planks", "acacia_planks", "dark_oak_planks", "mangrove_planks", "cherry_planks", "oak_log", "birch_log", "spruce_log", "jungle_log", "acacia_log", "dark_oak_log", "mangrove_log", "cherry_log"];
+  let fuelName = null;
+  for (const candidate of fuelCandidates) {
+    if (countItem(candidate) >= neededToSmelt) {
+      fuelName = candidate;
+      break;
+    }
+  }
+  if (!fuelName) throw new Error("NOT_ENOUGH_FUEL_FOR_SMELTING");
+  const rawBefore = countItem(rawName);
+  await smeltItem(bot, rawName, fuelName, neededToSmelt);
+  if (countItem(ingotName) < targetIngots) {
+    throw new Error("SMELTING_FAILED_TO_REACH_TARGET");
+  }
+  if (rawBefore - countItem(rawName) < neededToSmelt) {
+    throw new Error("RAW_IRON_NOT_CONSUMED_AS_EXPECTED");
+  }
+  return {
+    success: true
+  };
+}

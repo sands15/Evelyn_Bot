@@ -1,0 +1,3 @@
+async function get5RawIronIntoIronIngotsContract(bot) {
+    // This function aims to ensure the player has at least five iron ingots. It first checks if the target amount of ingots is already met. If not, it calculates how many more are needed and verifies sufficient raw iron is available. It then selects a suitable fuel source from a predefined list, ensuring enough fuel exists for the required smelting operations. Finally, it locates or places a furnace and proceeds to smelt the necessary raw iron into ingots, confirming the target is reached and resources were consumed correctly.
+}

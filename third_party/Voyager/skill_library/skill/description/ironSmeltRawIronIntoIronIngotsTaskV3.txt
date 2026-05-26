@@ -1,0 +1,3 @@
+async function ironSmeltRawIronIntoIronIngotsTask(bot) {
+    // This process aims to produce a specific number of iron ingots. It first checks if the required amount of ingots is already present in the inventory. If not, it verifies that enough raw iron is available to meet the target. The function then ensures a furnace is present, placing one if necessary. It selects a suitable fuel source based on available resources. Finally, it smelts the necessary raw iron into ingots using the chosen fuel, confirming the production meets the target.
+}

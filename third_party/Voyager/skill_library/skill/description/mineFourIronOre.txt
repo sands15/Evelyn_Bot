@@ -1,0 +1,3 @@
+async function mineFourIronOre(bot) {
+    // The function first checks if the bot already possesses four or more units of raw iron or iron ore. It then ensures the bot has either an iron or stone pickaxe, equipping it if available. The process attempts to mine any nearby iron ore to meet the required quantity. If not enough is found locally, it initiates a search for the remaining ore. Finally, it mines the necessary amount of iron ore to reach a total of four units.
+}

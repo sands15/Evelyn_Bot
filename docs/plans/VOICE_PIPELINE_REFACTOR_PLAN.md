@@ -40,6 +40,42 @@ Audio Input
 -> Delivery Runtime
 ```
 
+### Hybrid Local Mic + Discord Input
+
+For mixed-source rooms, the input stage should branch before segmentation:
+
+```text
+Local Mic (preferred speaker only) ----\\
+                                        -> Source Router -> Audio Segment Filter -> STT -> ...
+Discord Voice (all other speakers) ----/
+```
+
+Rules:
+- exactly one configured Discord user id can be treated as the local-mic speaker
+- that user's Discord voice packets must be dropped at ingress to prevent duplicate STT
+- all other Discord speakers continue through the existing Discord receive path
+- downstream stages must still see the same logical Discord speaker id so room ownership, wake handling, memory, and command authorization stay coherent
+
+Implementation shape:
+- keep source selection in a narrow helper/module instead of scattering id checks across `main.py`
+- keep local mic capture optional and fail-closed: if local mic capture does not start, Discord audio for that user must not be dropped
+- feed local mic utterances into the same `process_member_audio` pipeline using the resolved Discord member identity
+
+### Stability Guardrails Before Full Refactor
+
+Before the full chain extraction, the current monolithic pipeline should still obey these safety rules:
+
+- voice ingress is bounded; if input arrives faster than STT/LLM/TTS can consume it, stale audio is dropped instead of processed late
+- every queued voice segment carries `turn_id`, `segment_id`, enqueue time, and queue wait metadata into logs and debug artifacts
+- STT rescore is conditional and separately timed out so the second pass cannot double latency on short or already usable utterances
+- TTS producer tasks are registered in the current turn scope and are cancelled with playback when a turn is aborted
+- debug WAV/JSON stems are scoped to a single logical segment, not an entire speaker session
+- restart recovery should remember the last successful voice channel and rejoin it on bot startup unless the user explicitly left
+- STT inference should be single-flight with a short cooldown after timeout so timed-out worker threads do not stampede the model
+- TTS chunking should avoid tiny standalone follow-up chunks and expose first-audio latency as a runtime metric
+- failure logs should identify the failing layer: voice reconnect, queue ingress, STT, LLM, TTS request, or playback
+- the control page should show voice queue depth, STT busy/cooldown, drop counts, and TTS first-audio p95 so instability is visible without reading logs
+
 For voice queries needing search:
 
 ```text

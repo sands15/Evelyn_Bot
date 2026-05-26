@@ -1,0 +1,3 @@
+async function harvestTwoWheat(bot) {
+    // This function checks if the bot already possesses at least two wheat items. If not, it searches the vicinity for two mature wheat blocks. If no mature wheat is found, it throws an error indicating the search was exhausted. Otherwise, it collects the required number of wheat blocks. Finally, it verifies that the bot now has at least two wheat items after the collection attempt.
+}

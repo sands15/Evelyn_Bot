@@ -1,0 +1,3 @@
+async function craftFourTorches(bot) {
+    // This function ensures the bot has at least four torches. It first checks if the required number of torches is already present in the inventory. It then verifies if the bot possesses either coal or charcoal, throwing an error if neither is available. The function also checks for and attempts to craft a stick if one is missing, using planks if necessary. Finally, it crafts torches until the required count of four is met, throwing an error if the crafting process fails to reach the target.
+}

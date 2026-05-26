@@ -8,45 +8,27 @@ from langchain.chat_models import ChatOpenAI
 from langchain.prompts import SystemMessagePromptTemplate
 from langchain.schema import AIMessage, HumanMessage, SystemMessage
 
+from voyager.agents.action_prompt_policy import ActionPromptPolicy
+from voyager.agents.action_validator_policy import ActionValidatorPolicy
 from voyager.agents.codex_gateway_llm import CodexGatewayLLM
+from voyager.agents.observation_utils import payload_status, safe_int
 from voyager.prompts import load_prompt
 from voyager.control_primitives_context import load_control_primitives_context
 from voyager.utils.console import safe_print as print
 
-
-def _payload_status(payload):
-    status = payload.get("status") if isinstance(payload, dict) else None
-    return status if isinstance(status, dict) else {}
-
-
-def _safe_int(value, default=0):
-    try:
-        return int(value)
-    except Exception:
-        return default
-
-
-HOSTILE_ENTITY_NAMES = ("zombie", "skeleton", "creeper", "spider", "drowned", "witch", "enderman")
-FOOD_HINT_TOKENS = ("beef", "pork", "mutton", "chicken", "fish", "salmon", "cod", "bread", "carrot", "potato", "melon", "apple")
-
-
-def _hostiles_nearby(entities):
-    return any(
-        any(hostile in str(name).lower() for hostile in HOSTILE_ENTITY_NAMES)
-        for name in (entities or {}).keys()
-    )
-
-
-def _inventory_has_food(inventory):
-    return any(
-        int(count or 0) > 0
-        for name, count in (inventory or {}).items()
-        if any(token in str(name) for token in FOOD_HINT_TOKENS)
-    )
-
-
-def _is_night(time_of_day):
-    return str(time_of_day or "").strip().lower() in {"night", "midnight", "sunset", "sunrise"}
+BASE_CONTROL_PRIMITIVE_NAMES = (
+    "search",
+    "exploreUntil",
+    "mineBlock",
+    "craftItem",
+    "placeItem",
+    "smeltItem",
+    "killMob",
+)
+EXTENDED_CONTROL_PRIMITIVE_NAMES = (
+    "useChest",
+    "mineflayer",
+)
 
 
 def _extract_fenced_code_blocks(text):
@@ -241,6 +223,14 @@ class ActionAgent:
             if llm_url:
                 llm_kwargs["openai_api_base"] = llm_url.removesuffix("/chat/completions")
             self.llm = ChatOpenAI(**llm_kwargs)
+        self.prompt_policy = ActionPromptPolicy()
+        self.validator_policy = ActionValidatorPolicy()
+
+    def _control_primitive_names(self):
+        primitive_names = list(BASE_CONTROL_PRIMITIVE_NAMES)
+        if self.llm.model_name != "gpt-3.5-turbo":
+            primitive_names.extend(EXTENDED_CONTROL_PRIMITIVE_NAMES)
+        return primitive_names
 
     def update_chest_memory(self, chests):
         for position, chest in chests.items():
@@ -279,22 +269,9 @@ class ActionAgent:
 
     def render_system_message(self, skills=[]):
         system_template = load_prompt("action_template")
-        # FIXME: Hardcoded control_primitives
-        base_skills = [
-            "search",
-            "exploreUntil",
-            "mineBlock",
-            "craftItem",
-            "placeItem",
-            "smeltItem",
-            "killMob",
-        ]
-        if not self.llm.model_name == "gpt-3.5-turbo":
-            base_skills += [
-                "useChest",
-                "mineflayer",
-            ]
-        programs = "\n\n".join(load_control_primitives_context(base_skills) + skills)
+        programs = "\n\n".join(
+            load_control_primitives_context(self._control_primitive_names()) + skills
+        )
         response_format = load_prompt("action_response_format")
         system_message_prompt = SystemMessagePromptTemplate.from_template(
             system_template
@@ -306,64 +283,16 @@ class ActionAgent:
         return system_message
 
     def _validate_program_code(self, program_code):
-        errors = []
-        code = str(program_code or "")
-        uses_search_helper = any(
-            marker in code
-            for marker in [
-                "await searchAndHarvest(",
-                "await searchAndCollectFood(",
-                "await searchForOre(",
-                "await recoverToSurface(",
-                "await searchAndMove(",
-                "await searchAndAct(",
-            ]
+        return self.validator_policy.validate_program_code(
+            program_code,
+            extract_explore_timeouts=_extract_explore_timeouts,
         )
-        explore_calls = code.count("await exploreUntil(")
-        if explore_calls > 2:
-            errors.append("Use at most two short exploreUntil probes in one function.")
-        if explore_calls and not uses_search_helper:
-            nearby_markers = [
-                "bot.findBlock(",
-                "bot.findBlocks(",
-                "bot.nearestEntity(",
-                "nearestEntity(",
-            ]
-            nearby_searches = sum(code.count(marker) for marker in nearby_markers)
-            first_probe = code.find("await exploreUntil(")
-            search_positions = [
-                pos
-                for pos in [code.find(marker) for marker in nearby_markers]
-                if pos != -1
-            ]
-            first_nearby_search = min(search_positions) if search_positions else -1
-            if nearby_searches == 0 or (first_nearby_search != -1 and first_nearby_search > first_probe):
-                errors.append("Do a nearby 32-block search before any exploreUntil probe.")
-            timeouts = _extract_explore_timeouts(code)
-            if any(timeout is None for timeout in timeouts):
-                errors.append("exploreUntil must use an explicit numeric maxTime so local search stays bounded.")
-            if any(timeout is not None and (timeout < 10 or timeout > 20) for timeout in timeouts):
-                errors.append("Each exploreUntil maxTime must be between 10 and 20 seconds.")
-            if "LOCAL_SEARCH_EXHAUSTED" not in code:
-                errors.append("If local probes fail, throw a concise LOCAL_SEARCH_EXHAUSTED error so the higher-level planner can change direction, biome, or prerequisites.")
-        if any(log_name in code for log_name in ["oak_log", "spruce_log", "birch_log", "jungle_log", "acacia_log", "dark_oak_log", "mangrove_log", "cherry_log"]):
-            if explore_calls and not any(marker in code for marker in ["searchAndHarvest(", "recoverToSurface("]):
-                errors.append("Wood search should prefer searchAndHarvest(...) and recoverToSurface(...) instead of hand-written wandering.")
-        if any(food_marker in code for food_marker in ["cow", "pig", "chicken", "sheep", "rabbit", "wheat", "carrots", "potatoes", "beetroots"]):
-            if "searchAndCollectFood(" not in code and "recoverToSurface(" not in code and explore_calls:
-                errors.append("Food search should prefer searchAndCollectFood(...) and recoverToSurface(...) over custom exploreUntil loops.")
-        if any(ore_marker in code for ore_marker in ["iron_ore", "coal_ore", "copper_ore", "gold_ore", "diamond_ore", "raw_iron", "raw_gold"]):
-            if "searchForOre(" not in code and explore_calls:
-                errors.append("Ore search should prefer searchForOre(...) over custom exploreUntil cave wandering.")
-        return errors
 
     def render_human_message(
         self, *, events, code="", task="", context="", critique=""
     ):
         chat_messages = []
         error_messages = []
-        # FIXME: damage_messages is not used
-        damage_messages = []
         assert events[-1][0] == "observe", "Last event must be observe"
         biome = None
         time_of_day = None
@@ -380,11 +309,9 @@ class ActionAgent:
                 chat_messages.append(event["onChat"])
             elif event_type == "onError":
                 error_messages.append(event["onError"])
-            elif event_type == "onDamage":
-                damage_messages.append(event["onDamage"])
             elif event_type == "observe":
                 payload = event if isinstance(event, dict) else {}
-                status = _payload_status(payload)
+                status = payload_status(payload)
                 biome = status.get("biome")
                 time_of_day = status.get("timeOfDay")
                 voxels = payload.get("voxels") if isinstance(payload.get("voxels"), list) else []
@@ -393,7 +320,7 @@ class ActionAgent:
                 hunger = status.get("food")
                 position = status.get("position") if isinstance(status.get("position"), dict) else None
                 equipment = status.get("equipment")
-                inventory_used = _safe_int(status.get("inventoryUsed") or 0)
+                inventory_used = safe_int(status.get("inventoryUsed") or 0)
                 inventory = payload.get("inventory") if isinstance(payload.get("inventory"), dict) else {}
                 assert i == len(events) - 1, "observe must be the last event"
 
@@ -457,19 +384,14 @@ class ActionAgent:
         ):
             observation += self.render_chest_observation()
 
-        safety_lines = []
-        hostile_nearby = _hostiles_nearby(entities)
-        has_food = _inventory_has_food(inventory)
-        if health is not None and health <= 12:
-            safety_lines.append("Health is limited. Avoid combat, avoid fall risk, and prefer the nearest safe progress only.")
-        if hostile_nearby:
-            safety_lines.append("Hostile mobs are nearby. Disengage instead of fighting unless the task is explicitly survival-critical.")
-        if hunger is not None and hunger <= 8 and not has_food:
-            safety_lines.append("Hunger is low and no edible food is in inventory. Prefer nearby food or shelter over longer travel.")
-        if _is_night(time_of_day):
-            safety_lines.append("It is night or a dangerous transition period. Keep exploration short and local; shelter is better than long surface travel.")
-        if any(token in str(task or "").lower() for token in ["wood", "log", "planks", "pickaxe", "axe", "food", "shelter", "coal", "torch", "iron"]):
-            safety_lines.append("For bootstrap tasks, stop once the minimum safe progress is achieved instead of overextending.")
+        safety_lines = self.prompt_policy.build_safety_lines(
+            task=task,
+            time_of_day=time_of_day,
+            entities=entities,
+            health=health,
+            hunger=hunger,
+            inventory=inventory,
+        )
         if safety_lines:
             observation += "Safety policy:\n- " + "\n- ".join(safety_lines) + "\n\n"
 

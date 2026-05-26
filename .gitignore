@@ -6,6 +6,7 @@ __pycache__/
 .venv/
 venv/
 venv_pycord_test/
+tools/probes/.venv*/
 
 .env
 .env.*

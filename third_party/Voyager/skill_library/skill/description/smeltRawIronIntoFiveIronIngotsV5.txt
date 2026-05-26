@@ -1,0 +1,3 @@
+async function smeltRawIronIntoFiveIronIngots(bot) {
+    // This process aims to produce five iron ingots if the current count is less than that amount. It first checks if enough raw iron is available to meet the required number of smelts. If a furnace is not found nearby, it attempts to place one. It then searches for a suitable fuel source, such as coal or various planks, ensuring enough fuel is present. Finally, it initiates the smelting process using the raw iron and fuel, verifying that the target number of ingots is reached and the correct amount of raw iron was consumed.
+}

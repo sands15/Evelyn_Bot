@@ -388,6 +388,40 @@ function getEquipmentSnapshot(botInstance) {
     return items.map((item) => (item ? item.name : null));
 }
 
+function buildInventorySlotSnapshot(botInstance) {
+    if (!botInstance || !botInstance.inventory || !Array.isArray(botInstance.inventory.slots)) {
+        return [];
+    }
+    const slots = botInstance.inventory.slots;
+    const selectedHotbarSlot = Number.isInteger(botInstance.quickBarSlot) ? botInstance.quickBarSlot : -1;
+    const rows = [];
+    const pushSlot = (slotIndex, section, sectionIndex, label) => {
+        const item = slots[slotIndex];
+        rows.push({
+            slot: slotIndex,
+            section,
+            sectionIndex,
+            label,
+            selected: section === "hotbar" && sectionIndex === selectedHotbarSlot,
+            item: item && item.name ? item.name : null,
+            count: item && Number.isFinite(item.count) ? item.count : 0,
+            displayName: item && item.displayName ? item.displayName : null,
+        });
+    };
+    const armorLabels = ["helmet", "chestplate", "leggings", "boots"];
+    for (let slotIndex = 5; slotIndex <= 8; slotIndex += 1) {
+        pushSlot(slotIndex, "armor", slotIndex - 5, armorLabels[slotIndex - 5]);
+    }
+    for (let slotIndex = 9; slotIndex <= 35; slotIndex += 1) {
+        pushSlot(slotIndex, "main", slotIndex - 9, String(slotIndex - 8));
+    }
+    for (let slotIndex = 36; slotIndex <= 44; slotIndex += 1) {
+        pushSlot(slotIndex, "hotbar", slotIndex - 36, String(slotIndex - 35));
+    }
+    pushSlot(45, "offhand", 0, "offhand");
+    return rows;
+}
+
 function buildVoyagerTelemetry(botInstance) {
     if (!botInstance || !botInstance.entity) {
         return null;
@@ -419,6 +453,7 @@ function buildVoyagerTelemetry(botInstance) {
     return {
         recordedAt: new Date().toISOString(),
         inventory: botConnected ? listInventoryItems(botInstance) : {},
+        inventorySlots: botConnected ? buildInventorySlotSnapshot(botInstance) : [],
         status: {
             health: botConnected ? botInstance.health : null,
             food: botConnected ? botInstance.food : null,

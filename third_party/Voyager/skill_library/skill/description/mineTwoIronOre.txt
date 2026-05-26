@@ -1,0 +1,3 @@
+async function mineTwoIronOre(bot) {
+    // The function attempts to gather two pieces of iron ore. It first checks for the presence of a suitable pickaxe, such as stone, copper, or iron. If one is found, it equips it in the hand. It then calculates how many more iron ore pieces are needed to reach a total of two. The function searches for the required amount of iron ore nearby, and if not found, it initiates a search for the ore. Finally, it mines the necessary amount of iron ore and verifies that the target quantity has been collected.
+}

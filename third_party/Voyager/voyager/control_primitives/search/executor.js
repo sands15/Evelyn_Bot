@@ -70,8 +70,13 @@ function _applySearchOutcomePolicy(bot, goalType, success, reason, failureCatego
             policy.radiusBonus = Math.min(2, Number(policy.radiusBonus || 0) + 1);
             policy.timeBudgetScale = Math.min(1.5, Number((Number(policy.timeBudgetScale || 1) + 0.1).toFixed(2)));
         }
-        if (["stuck", "timeout"].includes(failureCategory)) {
-            policy.progressTimeoutScale = Math.max(0.65, Number((Number(policy.progressTimeoutScale || 1) - 0.1).toFixed(2)));
+        if (failureCategory === "stuck") {
+            policy.progressTimeoutScale = Math.min(1.5, Number((Number(policy.progressTimeoutScale || 1) + 0.15).toFixed(2)));
+            policy.timeBudgetScale = Math.min(1.5, Number((Number(policy.timeBudgetScale || 1) + 0.05).toFixed(2)));
+        }
+        if (failureCategory === "timeout") {
+            policy.progressTimeoutScale = Math.min(1.25, Number((Number(policy.progressTimeoutScale || 1) + 0.05).toFixed(2)));
+            policy.timeBudgetScale = Math.min(1.5, Number((Number(policy.timeBudgetScale || 1) + 0.1).toFixed(2)));
         }
         if (["wood", "food"].includes(goalType) && ["surface_not_found", "surface_recovery_exhausted"].includes(reason)) {
             policy.forceDomain = "surface";
@@ -105,6 +110,15 @@ function _countermeasureApplied(plan) {
     if (plan.goalType === "recovery" || plan.mode === "surface_recovery") return "surface_recovery";
     if (plan.mode === "guarded_probe") return "guarded_probe";
     return null;
+}
+
+function _canAttemptBlockActionAfterPartialMove(moveResult, maxDistance = 12) {
+    if (!moveResult || moveResult.success) return false;
+    const finalDistance = Number(moveResult.finalDistance);
+    const progressDistance = Number(moveResult.progressDistance);
+    if (!Number.isFinite(finalDistance)) return false;
+    if (finalDistance > maxDistance) return false;
+    return !Number.isFinite(progressDistance) || progressDistance >= 3;
 }
 
 function _recordSearchStart(bot, helper, plan, options = {}) {
@@ -359,7 +373,8 @@ async function searchAndHarvest(bot, options = {}) {
         helperName: "searchAndHarvest",
     };
     const moveResult = await searchAndMove(bot, normalized);
-    if (!moveResult.success) {
+    const partialHarvestAttempt = _canAttemptBlockActionAfterPartialMove(moveResult, 12);
+    if (!moveResult.success && !partialHarvestAttempt) {
         return moveResult;
     }
     let snapshot = perceiveSearchState(bot, normalized);
@@ -393,6 +408,7 @@ async function searchAndHarvest(bot, options = {}) {
     _finalizeSearchResult(bot, moveResult.plan, {
         success: true,
         reason: "harvest_attempt_started",
+        partialMoveAttempt: partialHarvestAttempt || null,
         targetBlockName: target.blockName,
         selectedTargetType: target.type || "block",
         selectedTargetDistance: target.distance || null,
@@ -453,7 +469,8 @@ async function searchForOre(bot, options = {}) {
         helperName: "searchForOre",
     };
     const moveResult = await searchAndMove(bot, normalized);
-    if (!moveResult.success) {
+    const partialOreAttempt = _canAttemptBlockActionAfterPartialMove(moveResult, 10);
+    if (!moveResult.success && !partialOreAttempt) {
         return moveResult;
     }
     let snapshot = perceiveSearchState(bot, normalized);
@@ -487,6 +504,7 @@ async function searchForOre(bot, options = {}) {
     _finalizeSearchResult(bot, moveResult.plan, {
         success: true,
         reason: "ore_harvest_attempt_started",
+        partialMoveAttempt: partialOreAttempt || null,
         targetBlockName: target.blockName,
         selectedTargetType: target.type || "block",
         selectedTargetDistance: target.distance || null,

@@ -1,0 +1,592 @@
+{
+  "source_image": "Adobe Express - file.png",
+  "canvas": {
+    "width": 1122,
+    "height": 1402
+  },
+  "format": "same-canvas transparent PNG layers; PSD exported with ImageMagick when available",
+  "draw_order_bottom_to_top": [
+    "01_back_hair",
+    "02_body_base",
+    "19_leg_L",
+    "20_leg_R",
+    "26_teddy_leg_L",
+    "27_teddy_leg_R",
+    "24_teddy_arm_L",
+    "25_teddy_arm_R",
+    "23_teddy_body",
+    "12_dress",
+    "13_cardigan_L",
+    "14_cardigan_R",
+    "15_arm_L",
+    "16_arm_R",
+    "28_chest_ribbon",
+    "17_hand_L",
+    "18_hand_R",
+    "03_neck",
+    "04_face_base",
+    "05_eye_L",
+    "06_eye_R",
+    "08_mouth_open",
+    "10_side_hair_L",
+    "11_side_hair_R",
+    "09_front_hair",
+    "22_hair_ribbon",
+    "21_flower"
+  ],
+  "default_expression": {
+    "mouth_visible": "08_mouth_open",
+    "hidden_by_default": [
+      "07_mouth_idle"
+    ]
+  },
+  "pointer_rig": {
+    "root": {
+      "move": false,
+      "note": "캐릭터 전체 root는 고정"
+    },
+    "bodyGroup": {
+      "layers": [
+        "02_body_base",
+        "12_dress",
+        "13_cardigan_L",
+        "14_cardigan_R",
+        "15_arm_L",
+        "16_arm_R",
+        "17_hand_L",
+        "18_hand_R",
+        "19_leg_L",
+        "20_leg_R",
+        "28_chest_ribbon"
+      ],
+      "move": false
+    },
+    "headGroup": {
+      "layers": [
+        "03_neck",
+        "04_face_base",
+        "05_eye_L",
+        "06_eye_R",
+        "07_mouth_idle",
+        "08_mouth_open",
+        "09_front_hair",
+        "10_side_hair_L",
+        "11_side_hair_R",
+        "21_flower",
+        "22_hair_ribbon"
+      ],
+      "pivot": [
+        555,
+        505
+      ],
+      "mouseRotateMaxDeg": 5,
+      "mouseTranslateMax": [
+        10,
+        8
+      ]
+    },
+    "eyesGroup": {
+      "layers": [
+        "05_eye_L",
+        "06_eye_R"
+      ],
+      "mouseTranslateMax": [
+        8,
+        6
+      ],
+      "sensitivity": 1.75
+    },
+    "frontHair": {
+      "layers": [
+        "09_front_hair"
+      ],
+      "lag": 0.18,
+      "mouseTranslateScale": 0.55
+    },
+    "sideHair": {
+      "layers": [
+        "10_side_hair_L",
+        "11_side_hair_R"
+      ],
+      "lag": 0.32,
+      "mouseTranslateScale": 0.35
+    },
+    "accessory": {
+      "layers": [
+        "21_flower",
+        "22_hair_ribbon"
+      ],
+      "lag": 0.25,
+      "mouseTranslateScale": 0.3
+    },
+    "teddy": {
+      "layers": [
+        "23_teddy_body",
+        "24_teddy_arm_L",
+        "25_teddy_arm_R",
+        "26_teddy_leg_L",
+        "27_teddy_leg_R"
+      ],
+      "move": false
+    }
+  },
+  "parts": [
+    {
+      "file": "01_back_hair.png",
+      "name": "01_back_hair",
+      "bbox": [
+        191,
+        46,
+        963,
+        917
+      ],
+      "default_visible": true,
+      "pivot": [
+        555,
+        445
+      ],
+      "group": "hair_back"
+    },
+    {
+      "file": "02_body_base.png",
+      "name": "02_body_base",
+      "bbox": [
+        430,
+        500,
+        700,
+        890
+      ],
+      "default_visible": true,
+      "pivot": [
+        555,
+        745
+      ],
+      "group": "body"
+    },
+    {
+      "file": "03_neck.png",
+      "name": "03_neck",
+      "bbox": [
+        496,
+        440,
+        620,
+        569
+      ],
+      "default_visible": true,
+      "pivot": [
+        555,
+        505
+      ],
+      "group": "head"
+    },
+    {
+      "file": "04_face_base.png",
+      "name": "04_face_base",
+      "bbox": [
+        345,
+        204,
+        760,
+        565
+      ],
+      "default_visible": true,
+      "pivot": [
+        555,
+        440
+      ],
+      "group": "head"
+    },
+    {
+      "file": "05_eye_L.png",
+      "name": "05_eye_L",
+      "bbox": [
+        465,
+        355,
+        511,
+        423
+      ],
+      "default_visible": true,
+      "pivot": [
+        480,
+        390
+      ],
+      "group": "eyes"
+    },
+    {
+      "file": "06_eye_R.png",
+      "name": "06_eye_R",
+      "bbox": [
+        609,
+        352,
+        655,
+        421
+      ],
+      "default_visible": true,
+      "pivot": [
+        635,
+        390
+      ],
+      "group": "eyes"
+    },
+    {
+      "file": "07_mouth_idle.png",
+      "name": "07_mouth_idle",
+      "bbox": [
+        540,
+        442,
+        582,
+        454
+      ],
+      "default_visible": false,
+      "pivot": [
+        561,
+        438
+      ],
+      "group": "mouth"
+    },
+    {
+      "file": "08_mouth_open.png",
+      "name": "08_mouth_open",
+      "bbox": [
+        544,
+        416,
+        579,
+        453
+      ],
+      "default_visible": true,
+      "pivot": [
+        561,
+        438
+      ],
+      "group": "mouth"
+    },
+    {
+      "file": "09_front_hair.png",
+      "name": "09_front_hair",
+      "bbox": [
+        289,
+        52,
+        786,
+        470
+      ],
+      "default_visible": true,
+      "pivot": [
+        555,
+        250
+      ],
+      "group": "hair_front"
+    },
+    {
+      "file": "10_side_hair_L.png",
+      "name": "10_side_hair_L",
+      "bbox": [
+        191,
+        200,
+        440,
+        879
+      ],
+      "default_visible": true,
+      "pivot": [
+        420,
+        510
+      ],
+      "group": "hair_side_L"
+    },
+    {
+      "file": "11_side_hair_R.png",
+      "name": "11_side_hair_R",
+      "bbox": [
+        690,
+        150,
+        961,
+        917
+      ],
+      "default_visible": true,
+      "pivot": [
+        700,
+        510
+      ],
+      "group": "hair_side_R"
+    },
+    {
+      "file": "12_dress.png",
+      "name": "12_dress",
+      "bbox": [
+        387,
+        500,
+        810,
+        1045
+      ],
+      "default_visible": true,
+      "pivot": [
+        555,
+        780
+      ],
+      "group": "body"
+    },
+    {
+      "file": "13_cardigan_L.png",
+      "name": "13_cardigan_L",
+      "bbox": [
+        355,
+        533,
+        524,
+        959
+      ],
+      "default_visible": true,
+      "pivot": [
+        450,
+        740
+      ],
+      "group": "body"
+    },
+    {
+      "file": "14_cardigan_R.png",
+      "name": "14_cardigan_R",
+      "bbox": [
+        596,
+        534,
+        763,
+        952
+      ],
+      "default_visible": true,
+      "pivot": [
+        660,
+        740
+      ],
+      "group": "body"
+    },
+    {
+      "file": "15_arm_L.png",
+      "name": "15_arm_L",
+      "bbox": [
+        303,
+        604,
+        415,
+        880
+      ],
+      "default_visible": true,
+      "pivot": [
+        370,
+        620
+      ],
+      "group": "body"
+    },
+    {
+      "file": "16_arm_R.png",
+      "name": "16_arm_R",
+      "bbox": [
+        700,
+        557,
+        833,
+        876
+      ],
+      "default_visible": true,
+      "pivot": [
+        740,
+        620
+      ],
+      "group": "body"
+    },
+    {
+      "file": "17_hand_L.png",
+      "name": "17_hand_L",
+      "bbox": [
+        289,
+        802,
+        400,
+        930
+      ],
+      "default_visible": true,
+      "pivot": [
+        335,
+        860
+      ],
+      "group": "body"
+    },
+    {
+      "file": "18_hand_R.png",
+      "name": "18_hand_R",
+      "bbox": [
+        745,
+        787,
+        870,
+        940
+      ],
+      "default_visible": true,
+      "pivot": [
+        800,
+        850
+      ],
+      "group": "body"
+    },
+    {
+      "file": "19_leg_L.png",
+      "name": "19_leg_L",
+      "bbox": [
+        386,
+        965,
+        559,
+        1284
+      ],
+      "default_visible": true,
+      "pivot": [
+        505,
+        1060
+      ],
+      "group": "body"
+    },
+    {
+      "file": "20_leg_R.png",
+      "name": "20_leg_R",
+      "bbox": [
+        555,
+        965,
+        677,
+        1284
+      ],
+      "default_visible": true,
+      "pivot": [
+        620,
+        1060
+      ],
+      "group": "body"
+    },
+    {
+      "file": "21_flower.png",
+      "name": "21_flower",
+      "bbox": [
+        715,
+        130,
+        835,
+        312
+      ],
+      "default_visible": true,
+      "pivot": [
+        780,
+        240
+      ],
+      "group": "head_accessory"
+    },
+    {
+      "file": "22_hair_ribbon.png",
+      "name": "22_hair_ribbon",
+      "bbox": [
+        787,
+        220,
+        907,
+        448
+      ],
+      "default_visible": true,
+      "pivot": [
+        835,
+        300
+      ],
+      "group": "head_accessory"
+    },
+    {
+      "file": "23_teddy_body.png",
+      "name": "23_teddy_body",
+      "bbox": [
+        183,
+        860,
+        428,
+        1148
+      ],
+      "default_visible": true,
+      "pivot": [
+        300,
+        1040
+      ],
+      "group": "teddy"
+    },
+    {
+      "file": "24_teddy_arm_L.png",
+      "name": "24_teddy_arm_L",
+      "bbox": [
+        197,
+        1020,
+        275,
+        1155
+      ],
+      "default_visible": true,
+      "pivot": [
+        220,
+        1070
+      ],
+      "group": "teddy"
+    },
+    {
+      "file": "25_teddy_arm_R.png",
+      "name": "25_teddy_arm_R",
+      "bbox": [
+        331,
+        982,
+        440,
+        1158
+      ],
+      "default_visible": true,
+      "pivot": [
+        390,
+        1070
+      ],
+      "group": "teddy"
+    },
+    {
+      "file": "26_teddy_leg_L.png",
+      "name": "26_teddy_leg_L",
+      "bbox": [
+        249,
+        1135,
+        303,
+        1203
+      ],
+      "default_visible": true,
+      "pivot": [
+        260,
+        1170
+      ],
+      "group": "teddy"
+    },
+    {
+      "file": "27_teddy_leg_R.png",
+      "name": "27_teddy_leg_R",
+      "bbox": [
+        297,
+        1135,
+        393,
+        1201
+      ],
+      "default_visible": true,
+      "pivot": [
+        345,
+        1170
+      ],
+      "group": "teddy"
+    },
+    {
+      "file": "28_chest_ribbon.png",
+      "name": "28_chest_ribbon",
+      "bbox": [
+        470,
+        530,
+        635,
+        690
+      ],
+      "default_visible": true,
+      "pivot": [
+        555,
+        610
+      ],
+      "group": "body"
+    }
+  ],
+  "quality_check": {
+    "foreground_mean_rgb_diff_on_white": 0.3567465956806466,
+    "foreground_max_channel_diff_on_white": 238
+  },
+  "notes": [
+    "All layer PNG files use the same canvas as the source image and keep transparent empty regions.",
+    "Face base is inpainted under the eyes/mouth/hair so eyes and mouth do not include skin-color patches.",
+    "28_chest_ribbon is an extra reconstruction layer because the requested 27-part list omitted the green bow on the dress."
+  ]
+}

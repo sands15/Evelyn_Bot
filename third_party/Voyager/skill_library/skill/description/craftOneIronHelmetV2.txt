@@ -1,0 +1,3 @@
+async function craftOneIronHelmet(bot) {
+    // This function checks if the bot already possesses at least one iron helmet. It then verifies if there are five or more iron ingots available in the inventory. If the necessary materials are present, it searches for a nearby crafting table. Finally, it attempts to craft a single iron helmet using the crafting mechanism.
+}

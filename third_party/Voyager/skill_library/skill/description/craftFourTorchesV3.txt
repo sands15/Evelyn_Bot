@@ -1,0 +1,3 @@
+async function craftFourTorches(bot) {
+    // This function attempts to increase the number of torches by four. It first checks if at least one piece of coal is available. It then verifies if a stick is present, crafting one if necessary using planks or logs from various wood types. If the required number of torches is not met, it crafts one torch at a time until the target is reached. If any prerequisite materials are missing, it throws an error.
+}

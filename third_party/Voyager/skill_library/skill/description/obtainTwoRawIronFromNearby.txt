@@ -1,0 +1,3 @@
+async function obtainTwoRawIronFromNearby(bot) {
+    // The function attempts to gather two raw iron items if the inventory count is less than two. It first checks for and equips a suitable pickaxe, prioritizing stone, then iron, then copper. It then searches for and mines any visible iron or deepslate iron ore within a 32-block radius. If not enough is found, it performs a bounded search to locate more ore. Finally, it mines any newly reachable iron ore until the required two raw iron items are obtained or the search is exhausted.
+}

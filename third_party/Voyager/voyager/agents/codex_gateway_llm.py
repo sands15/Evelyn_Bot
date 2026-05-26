@@ -27,6 +27,8 @@ class CodexGatewayLLM:
                 "prompt": prompt,
                 "model": self.model,
                 "timeout_sec": self.timeout_sec,
+                "source": "voyager-action",
+                "priority": int(os.getenv("VOYAGER_CODEX_GATEWAY_PRIORITY", "50")),
             },
             timeout=self.timeout_sec + 10,
         )
