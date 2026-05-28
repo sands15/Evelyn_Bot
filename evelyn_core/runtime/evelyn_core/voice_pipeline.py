@@ -1,3 +1,4 @@
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -77,7 +78,102 @@ class VoiceReplyRequest:
     prompt_user_text: str
     history_user_text: str
     wake_only_turn: bool
+    turn_type: str
+    selected_path: str
+    reply_source: str
     topic_id: str
+
+
+def classify_dialogue_turn(raw_user_text: str, *, wake_only_turn: bool = False) -> str:
+    if wake_only_turn:
+        return "wake_call"
+
+    text = clean_text(raw_user_text).lower()
+    compact = re.sub(r"[\s,.!?~…？]+", "", text)
+    if not compact:
+        return "repair"
+
+    if compact in {"응", "어", "ㅇㅇ", "그래", "맞아", "아니", "ㄴㄴ", "해줘", "하지마", "멈춰"}:
+        return "short_confirm"
+
+    minecraft_markers = (
+        "마크",
+        "마인크래프트",
+        "minecraft",
+        "나무",
+        "돌",
+        "철",
+        "횃불",
+        "곡괭이",
+        "도끼",
+        "인벤",
+        "캐",
+        "만들",
+        "찾",
+    )
+    minecraft_status_markers = ("상태", "뭐 하고", "뭐해", "어디", "진행", "인벤")
+    if any(marker in text for marker in minecraft_markers):
+        if any(marker in text for marker in minecraft_status_markers):
+            return "runtime_status"
+        return "minecraft_command"
+
+    runtime_status_markers = (
+        "지금 뭐",
+        "뭐해",
+        "뭐 하고",
+        "뭐하고",
+        "상태",
+        "진행",
+        "어디까지",
+    )
+    if any(marker in text for marker in runtime_status_markers):
+        return "runtime_status"
+
+    casual_check_markers = (
+        "있어",
+        "듣고",
+        "괜찮",
+        "왜 불렀",
+        "왜불렀",
+        "부른",
+        "불렀",
+    )
+    if any(marker in text for marker in casual_check_markers):
+        return "casual_check"
+
+    knowledge_markers = (
+        "검색",
+        "찾아봐",
+        "찾아줘",
+        "인터넷",
+        "웹에서",
+        "알려줘",
+        "설명해",
+        "정리해",
+    )
+    if any(marker in text for marker in knowledge_markers):
+        return "knowledge_or_search"
+
+    if len(compact) <= 1:
+        return "repair"
+
+    return "conversation"
+
+
+def selected_path_for_turn(turn_type: str, *, wake_only_turn: bool = False) -> str:
+    if wake_only_turn or turn_type == "wake_call":
+        return "cached_audio_fast_path"
+    if turn_type in {"casual_check", "short_confirm"}:
+        return "light_dialogue_path"
+    if turn_type == "runtime_status":
+        return "runtime_status_path"
+    if turn_type == "minecraft_command":
+        return "minecraft_action_path"
+    if turn_type == "knowledge_or_search":
+        return "search_or_long_answer_path"
+    if turn_type == "repair":
+        return "repair_path"
+    return "main_conversation_path"
 
 
 def build_voice_segment(
@@ -243,6 +339,9 @@ def build_voice_reply_request(
 ) -> VoiceReplyRequest:
     raw_user_text = strip_voice_wake_word(transcript.final_text)
     wake_only_turn = not bool(clean_text(raw_user_text))
+    turn_type = classify_dialogue_turn(raw_user_text or transcript.final_text, wake_only_turn=wake_only_turn)
+    selected_path = selected_path_for_turn(turn_type, wake_only_turn=wake_only_turn)
+    reply_source = "canned_wake_reply" if wake_only_turn else "pipeline"
     history_user_text = raw_user_text or transcript.final_text
     prompt_user_text = raw_user_text or "사용자가 너를 이름만 불렀다. 아주 짧고 자연스럽게 반응해라."
     topic_id = build_topic_id(history_user_text, session_topic_seed) if build_topic_id is not None else history_user_text
@@ -254,5 +353,8 @@ def build_voice_reply_request(
         prompt_user_text=prompt_user_text,
         history_user_text=history_user_text,
         wake_only_turn=wake_only_turn,
+        turn_type=turn_type,
+        selected_path=selected_path,
+        reply_source=reply_source,
         topic_id=topic_id,
     )

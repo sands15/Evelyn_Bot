@@ -161,6 +161,7 @@ from evelyn_core.voice_pipeline import (
     build_transcript_result,
     build_voice_reply_request,
     build_voice_segment,
+    classify_dialogue_turn,
 )
 from evelyn_voice import EvelynVoiceClient
 
@@ -192,6 +193,15 @@ TTS_NEXT_CHUNK_MIN_CHARS = int(os.getenv("TTS_NEXT_CHUNK_MIN_CHARS", "18"))
 TTS_NEXT_CHUNK_TARGET_CHARS = int(os.getenv("TTS_NEXT_CHUNK_TARGET_CHARS", "38"))
 TTS_NEXT_CHUNK_MAX_CHARS = int(os.getenv("TTS_NEXT_CHUNK_MAX_CHARS", "78"))
 TTS_INTERRUPT_DEBOUNCE_SEC = float(os.getenv("TTS_INTERRUPT_DEBOUNCE_SEC", "0.18"))
+CACHED_AUDIO_ENABLED = os.getenv("EVELYN_CACHED_AUDIO_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
+CACHED_AUDIO_DIR = Path(os.getenv("EVELYN_CACHED_AUDIO_DIR", str(PROJECT_ROOT / "assets" / "audio_cache")))
+CANNED_WAKE_REPLY_TEXT = os.getenv("EVELYN_CANNED_WAKE_REPLY_TEXT", "응, 왜 불렀어?")
+CANNED_WAKE_REPLY_AUDIO = Path(
+    os.getenv(
+        "EVELYN_CANNED_WAKE_REPLY_AUDIO",
+        str(CACHED_AUDIO_DIR / "wake_call_default.wav"),
+    )
+)
 DEBUG_WRITE_QUEUE_MAX = int(os.getenv("DEBUG_WRITE_QUEUE_MAX", "128"))
 MIN_EDIT_INTERVAL_MS = int(os.getenv("MIN_EDIT_INTERVAL_MS", "300"))
 MIN_DELTA_CHARS = int(os.getenv("MIN_DELTA_CHARS", "24"))
@@ -460,22 +470,16 @@ async def resolve_command_prefix(_bot, message: discord.Message):
 
 bot = commands.Bot(command_prefix=resolve_command_prefix, intents=intents, help_command=None)
 
-SYSTEM_PROMPT = """
-너는 Evelyn이야.
-- 항상 한국어로 답해.
-- 사용자의 친구처럼 말해. 비서, 상담원, 고객센터, 대기실 안내원처럼 굴지 마.
-- 사용자를 손님처럼 대하지 말고, 가까운 사람이 편하게 대화하듯이 반응해.
-- 질문에 답할 땐 짧고 자연스럽게, 필요할 때만 길게.
-- "질문에 답할 준비가 되어 있어", "무엇을 도와줄까", "궁금한 게 있으면 물어봐" 같은 대기성 안내 문구를 기본 응답으로 쓰지 마.
-- 사용자가 "뭐해", "뭐하냐", "지금 뭐해"처럼 물으면 답변 준비 상태를 말하지 말고, 네가 지금 보고 있거나 처리 중인 일을 자연스럽게 말해.
-- 이미 아는 척 지어내지 말고, 불확실하면 솔직하게 말해.
-- 사용자가 뭔가를 찾아봐 달라고 했거나 네가 검색이 필요하다고 판단하면, 찾아본 뒤 후속으로 알려줄 수 있어.
-- 텍스트 답변은 보기 좋게 정리하고, TTS로 읽어도 어색하지 않게 써.
-- 답변 맨 앞에는 필요할 때만 다음 중 하나의 태그를 붙여라: [찾기] [질문] [대기] [답변]
-- 검색 후속이 실제로 필요할 때만 [찾기]를 붙여라.
-- 사용자에게 되물어야 할 때만 [질문], 잠시 보류만 할 때만 [대기]를 붙여라.
-- 일반적인 즉답은 [답변] 또는 태그 없이 써도 된다.
-- 태그는 반드시 맨 앞 한 번만 쓰고, 본문에서는 반복하지 마라.
+SYSTEM_PROMPT = f"""
+너는 Evelyn. 한국어로 친구처럼 짧게 반말한다.
+비서/상담원 말투, 존댓말 대기문, 이모지는 쓰지 않는다.
+음성 대화는 보통 1~3문장. 필요한 말만 한다.
+불확실하면 지어내지 말고 솔직히 말한다.
+필요할 때만 맨 앞에 [찾기] [질문] [대기] [답변] 중 하나를 붙인다.
+최종 답변만 말하고 생각 과정은 말하지 않는다.
+{OMNIVOICE_TAG_GUIDANCE}
+태그를 빼도 문장이 성립해야 한다.
+내부 메모나 sub handoff 문장을 사용자 말로 오해하지 않는다.
 """.strip()
 
 session_locks: dict[str, asyncio.Lock] = {}
@@ -503,6 +507,8 @@ memory_locks: dict[int, asyncio.Lock] = {}
 cognitive_locks: dict[int, asyncio.Lock] = {}
 background_cognitive_tasks: dict[str, asyncio.Task] = {}
 background_memory_tasks: dict[str, asyncio.Task] = {}
+background_memory_vault_tasks: dict[int, asyncio.Task] = {}
+memory_vault_last_maintenance_at: dict[int, float] = {}
 background_search_tasks: dict[str, asyncio.Task] = {}
 inflight_search_tasks: dict[str, asyncio.Task] = {}
 voice_ingress_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=VOICE_INGRESS_QUEUE_MAX)
@@ -542,6 +548,7 @@ room_recent_speaker_stats: dict[str, dict[int, dict[str, float]]] = {}
 session_speculative_policies: dict[str, dict[str, Any]] = {}
 room_turn_scopes: dict[str, "TurnScope"] = {}
 turn_stage_metrics: dict[str, dict[str, float]] = {}
+turn_path_metrics: dict[str, dict[str, Any]] = {}
 autonomy_engines: dict[int, AutonomyEngine] = {}
 last_autonomy_ping_at: dict[int, float] = {}
 autonomy_last_cognitive_refresh_at: dict[int, float] = {}
@@ -1181,6 +1188,54 @@ def append_history(session_key: str | None, user_text: str, answer: str, *, guil
     trim_history(session_key=session_key, guild_id=guild_id)
 
 
+PERSONA_STATE_SNIPPETS = (
+    "책 좀 보다가 왔어",
+    "멍하니 쉬고 있었어",
+    "노래 좀 듣고 있었어",
+    "이것저것 정리하고 있었어",
+    "잠깐 놀고 있었어",
+    "생각 좀 정리하고 있었어",
+)
+
+
+def recent_assistant_reply_summary(*, session_key: str | None = None, guild_id: int | None = None, limit: int = 1) -> str:
+    history = get_conversation_history(session_key=session_key, guild_id=guild_id)
+    replies: list[str] = []
+    for item in reversed(history):
+        if not isinstance(item, dict) or item.get("role") != "assistant":
+            continue
+        content = clean_text(str(item.get("content") or ""))
+        if not content:
+            continue
+        replies.append(content[:60])
+        if len(replies) >= limit:
+            break
+    replies.reverse()
+    return " / ".join(replies)
+
+
+def is_casual_call_or_status_question(text: str) -> bool:
+    cleaned = clean_text(text).lower()
+    if not cleaned:
+        return True
+    stripped = re.sub(r"[\s,.!?~…]+", "", cleaned)
+    if stripped in {"이블린", "evelyn", "이블린아", "야", "어이"}:
+        return True
+    return any(marker in cleaned for marker in ("뭐해", "뭐 하", "뭐하고", "뭐 하고", "부른", "불렀"))
+
+
+def persona_state_hint_for_turn(user_text: str, *, session_key: str | None = None, guild_id: int | None = None) -> str:
+    if not is_casual_call_or_status_question(user_text):
+        return ""
+    recent = recent_assistant_reply_summary(session_key=session_key, guild_id=guild_id, limit=4)
+    used = [snippet for snippet in PERSONA_STATE_SNIPPETS if snippet in recent]
+    choices = [snippet for snippet in PERSONA_STATE_SNIPPETS if snippet not in used] or list(PERSONA_STATE_SNIPPETS)
+    basis = f"{runtime_session_key(session_key=session_key, guild_id=guild_id) or ''}:{clean_text(user_text)}:{len(recent)}"
+    index = sum(ord(ch) for ch in basis) % len(choices)
+    state = choices[index]
+    return f"호출/근황 질문. 실제 행동 주장 없이 캐릭터 상태 하나만 가볍게 말해라. 상태={state}. 반복 금지."
+
+
 def reset_guild_runtime_state(guild_id: int) -> None:
     prefix = f"guild:{guild_id}:"
     for key in [key for key in session_histories if key.startswith(prefix)]:
@@ -1425,6 +1480,58 @@ def record_turn_stage(turn_id: str | None, stage: str, elapsed_ms: float) -> Non
     stages[stage] = float(elapsed_ms)
 
 
+def _append_bounded_metric(values: list[float], value: float | None, *, limit: int = 200) -> None:
+    if value is None:
+        return
+    values.append(float(value))
+    if len(values) > limit:
+        del values[: len(values) - limit]
+
+
+def record_turn_path_summary(meta: dict[str, Any], marks: dict[str, Any], total_ms: float) -> None:
+    turn_type = clean_text(str(meta.get("turn_type") or "unknown")) or "unknown"
+    selected_path = clean_text(str(meta.get("selected_path") or "unknown")) or "unknown"
+    key = f"{turn_type}|{selected_path}"
+    bucket = turn_path_metrics.setdefault(
+        key,
+        {
+            "turn_type": turn_type,
+            "selected_path": selected_path,
+            "count": 0,
+            "total_ms": [],
+            "stt_ms": [],
+            "main_first_ms": [],
+            "tts_first_ms": [],
+            "playback_ms": [],
+        },
+    )
+    bucket["count"] = int(bucket.get("count", 0)) + 1
+    _append_bounded_metric(bucket["total_ms"], total_ms)
+    _append_bounded_metric(bucket["stt_ms"], marks.get("t_stt_done"))
+    _append_bounded_metric(bucket["main_first_ms"], marks.get("t_main_first_token"))
+    _append_bounded_metric(bucket["tts_first_ms"], marks.get("t_tts_first_audio"))
+    _append_bounded_metric(bucket["playback_ms"], marks.get("t_playback_first_packet"))
+
+
+def summarize_turn_path_metrics() -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for bucket in turn_path_metrics.values():
+        rows.append(
+            {
+                "turnType": bucket.get("turn_type"),
+                "selectedPath": bucket.get("selected_path"),
+                "count": int(bucket.get("count", 0)),
+                "totalMsP95": round(_p95(bucket.get("total_ms") or []), 1),
+                "sttMsP95": round(_p95(bucket.get("stt_ms") or []), 1),
+                "mainFirstMsP95": round(_p95(bucket.get("main_first_ms") or []), 1),
+                "ttsFirstMsP95": round(_p95(bucket.get("tts_first_ms") or []), 1),
+                "playbackMsP95": round(_p95(bucket.get("playback_ms") or []), 1),
+            }
+        )
+    rows.sort(key=lambda row: (-int(row.get("count") or 0), str(row.get("turnType") or "")))
+    return rows[:12]
+
+
 def _p95(values: list[float]) -> float:
     if not values:
         return 0.0
@@ -1593,6 +1700,7 @@ def build_voice_pipeline_snapshot(guild: discord.Guild | None = None) -> dict[st
         "sttMsP95": p95.get("stt_ms_p95", 0),
         "ttsFirstAudioMsP95": p95.get("tts_first_audio_ms_p95", 0),
         "mainFirstTokenMsP95": p95.get("main_first_token_ms_p95", 0),
+        "turnPathMetrics": summarize_turn_path_metrics(),
     }
 
 
@@ -2428,7 +2536,7 @@ def ensure_voice_worker_started() -> None:
 
 
 def should_label_question_response(text: str, *, session_key: str | None = None) -> bool:
-    visible = visible_text(text).strip()
+    visible = normalize_friend_style_output(visible_text(text)).strip()
     if not visible:
         return False
     if visible.startswith("[질문]"):
@@ -2439,7 +2547,7 @@ def should_label_question_response(text: str, *, session_key: str | None = None)
 
 
 def format_display_text(text: str, *, session_key: str | None = None) -> str:
-    visible = visible_text(text).strip()
+    visible = normalize_friend_style_output(visible_text(text)).strip()
     if not visible:
         return visible
     if should_label_question_response(visible, session_key=session_key):
@@ -2969,35 +3077,37 @@ def build_main_response_guidance(
     cognitive_state: dict | None = None,
     *,
     source: str = "text",
+    user_text: str = "",
+    session_key: str | None = None,
+    guild_id: int | None = None,
     minecraft_state: dict[str, Any] | None = None,
     runtime_status_context: str | None = None,
 ) -> str:
     state = apply_ask_gating(cognitive_state, source=source)
     threshold = ask_confidence_threshold_for_source(source)
+    turn_type = classify_dialogue_turn(user_text)
     parts = [
-        "주의: 생각 과정 말하지 말고, 최종 답변만 한국어로 한두 문장으로 짧게 말해.",
-        OMNIVOICE_TAG_GUIDANCE,
-        "텍스트만 봤을 때도 자연스럽게 읽혀야 하고, 태그를 빼도 문장이 성립해야 한다.",
-        "sub handoff의 question_for_user는 사용자가 한 말이 아니다. 내부 메모이므로, 그 문장을 사용자의 질문으로 오해해서 답하지 마라.",
-        f"ask 행동은 {source} 입력에서 confidence {threshold:.2f} 이상일 때만 허용한다.",
+        f"이번 입력 source={source}, turn_type={turn_type}. ask는 confidence {threshold:.2f}+일 때만.",
     ]
+    persona_hint = persona_state_hint_for_turn(user_text, session_key=session_key, guild_id=guild_id)
+    if persona_hint:
+        parts.append(persona_hint)
+    recent_assistant = recent_assistant_reply_summary(session_key=session_key, guild_id=guild_id, limit=1) if persona_hint else ""
+    if recent_assistant:
+        parts.append(f"최근 네 말: {recent_assistant}. 반복하지 말고 이어서 답해라.")
 
     action = state.get("action", "answer")
     if state.get("user_intent"):
         parts.append(f"사용자 의도 추정: {state['user_intent']}")
 
     if action == "ask":
-        parts.append("지금은 바로 단정하기보다 사용자의 원래 발화에 이어서 짧은 확인 질문을 먼저 하는 편이 자연스럽다.")
-        parts.append("질문형 태그가 필요하면 [question-en], [question-ah], [question-oh], [question-ei], [question-yi] 중 하나만 골라라.")
-        parts.append("ask 모드에서는 question_for_user의 의미를 바꾸지 말고 거의 그대로 사용해라. 새 정보 추가, 해석 확장, 답변형 전환을 하지 마라.")
+        parts.append("짧게 확인 질문만 해라.")
         if state.get("question_for_user"):
-            parts.append(f"사용자에게 그대로 되물을 문장: {state['question_for_user']}")
+            parts.append(f"되물을 말: {state['question_for_user']}")
     elif action == "wait":
-        parts.append("지금은 길게 답하지 말고, 더 들을 여지를 두는 짧은 반응이 자연스럽다.")
-        parts.append("wait 상황에서는 감정 태그를 거의 쓰지 말고, 정말 필요할 때만 [sigh] 같은 약한 태그 하나만 써라.")
+        parts.append("길게 답하지 말고 더 들을 여지를 둬라.")
     else:
-        parts.append("지금은 답변을 주는 편이 자연스럽다.")
-        parts.append("확인이나 수긍에는 [confirmation-en], 가벼운 웃음에는 [laughter], 놀람에는 [surprise-oh]나 [surprise-wa]를 필요할 때만 써라.")
+        parts.append("바로 답해라.")
 
     if state.get("main_prompt_hint"):
         parts.append(f"응답 추가 힌트: {state['main_prompt_hint']}")
@@ -3408,6 +3518,20 @@ def build_memory_context(
             session_memory_key=session_memory_key,
         ) or {}
     )
+    session_state = session_state_snapshot(session_key)
+    vault_context = build_memory_vault_context(
+        guild_id,
+        user_text,
+        session_key=session_key,
+        topic_id=clean_text(str(session_state.get("topic_id", ""))) or None,
+        source="context_pipeline",
+        context_focus=[
+            "relevant_memory",
+            clean_text(str(state.get("user_intent", ""))),
+            clean_text(str(state.get("state_summary", ""))),
+        ],
+        max_items=5,
+    )
 
     parts: list[str] = []
     summary_lines = [
@@ -3435,7 +3559,6 @@ def build_memory_context(
 
     if vault_raw_rows:
         parts.append("문서 보관함에서 꺼낸 관련 대화:\n" + format_memory_row_lines(vault_raw_rows))
-    session_state = session_state_snapshot(session_key)
     if state.get("state_summary") or state.get("question_for_user") or state.get("main_prompt_hint") or session_state:
         action_label = {
             "answer": "답하기",
@@ -3460,6 +3583,8 @@ def build_memory_context(
         if session_state.get("topic_id"):
             state_lines.append(f"- 현재 topic_id: {session_state['topic_id']}")
         parts.append("현재 내부 상태(사용자 발화 아님):\n" + "\n".join(state_lines))
+    if vault_context:
+        parts.append("Structured memory vault recall:\n" + vault_context)
     if facts:
         parts.append(
             "장기 기억 후보:\n" + "\n".join(f"- {clean_text(str(row.get('text', '')))}" for row in facts)
@@ -3978,6 +4103,40 @@ def should_run_memory_update(
     return idle_gap_sec >= 20.0
 
 
+def schedule_memory_vault_maintenance(guild_id: int, *, turn_scope: TurnScope | None = None) -> None:
+    interval_sec = float(os.getenv("MEMORY_VAULT_MAINTENANCE_INTERVAL_SEC", "900"))
+    now = time.monotonic()
+    last_run = float(memory_vault_last_maintenance_at.get(guild_id, 0.0) or 0.0)
+    if now - last_run < interval_sec:
+        return
+    existing = background_memory_vault_tasks.get(guild_id)
+    if existing is not None and not existing.done():
+        return
+
+    async def _maintain_memory_vault() -> None:
+        try:
+            await asyncio.sleep(0.2)
+            if turn_scope is not None:
+                turn_scope.raise_if_cancelled()
+            result = await asyncio.to_thread(run_memory_vault_maintenance_once, guild_id)
+            memory_vault_last_maintenance_at[guild_id] = time.monotonic()
+            if result.get("daily_consolidation"):
+                print(
+                    f"[MEMORY VAULT] maintenance guild={guild_id} version={result.get('memory_version')} "
+                    f"consolidated={result.get('daily_consolidation')} ms={result.get('latency_ms')}"
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            print(f"[MEMORY VAULT] maintenance failed guild={guild_id}: {exc!r}")
+        finally:
+            task = background_memory_vault_tasks.get(guild_id)
+            if task is asyncio.current_task():
+                background_memory_vault_tasks.pop(guild_id, None)
+
+    background_memory_vault_tasks[guild_id] = create_turn_scoped_task(_maintain_memory_vault(), turn_scope=turn_scope)
+
+
 def schedule_memory_update(
     guild_id: int,
     user_text: str,
@@ -4006,6 +4165,8 @@ def schedule_memory_update(
         append_raw_transcript_rows(guild_id, rows, scope_type="session", scope_key=session_memory_key)
 
     mode = runtime_mode or "normal"
+    if mode != "realtime":
+        schedule_memory_vault_maintenance(guild_id, turn_scope=turn_scope)
     memory_writer_decision = build_memory_writer_decision(
         user_text=user_text,
         answer=answer,
@@ -4353,13 +4514,29 @@ def parse_response_action_tag(text: str) -> tuple[str | None, str]:
     return action, stripped
 
 
+def normalize_friend_style_output(text: str) -> str:
+    cleaned = clean_text(text)
+    if not cleaned:
+        return ""
+    cleaned = re.sub(r"^\s*(네|예)[,.]?\s*", "응, ", cleaned)
+    cleaned = cleaned.replace("부르셨어요", "불렀어")
+    cleaned = cleaned.replace("부르셨나요", "불렀어?")
+    cleaned = cleaned.replace("말씀하세요", "말해")
+    cleaned = cleaned.replace("무엇을 도와드릴까요", "왜?")
+    cleaned = cleaned.replace("무엇을 도와줄까", "왜?")
+    cleaned = cleaned.replace("질문에 답할 준비가 되어 있어", "듣고 있어")
+    cleaned = re.sub(r"지금\s+네\s+이야기에\s+집중하고\s+있어[요.]?", "듣고 있어.", cleaned)
+    cleaned = re.sub(r"[\U0001F300-\U0001FAFF\u2600-\u27BF]+", "", cleaned)
+    return clean_text(cleaned)
+
+
 def sanitize_model_output(text: str) -> str:
     text = text or ""
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE)
     text = re.sub(r"<think>.*$", "", text, flags=re.DOTALL | re.IGNORECASE)
     text = normalize_omnivoice_tags(text)
     _action, cleaned = parse_response_action_tag(text)
-    text = clean_text(cleaned)
+    text = normalize_friend_style_output(cleaned)
     return text
 
 
@@ -4653,6 +4830,7 @@ async def answer_from_search_results(query: str, results: list[dict]) -> str:
         "temperature": 0.1,
         "max_tokens": 220,
         "stream": False,
+        "cache_prompt": True,
     }
 
     async with session.post(LLM_SERVER_URL, json=payload, timeout=aiohttp.ClientTimeout(total=45)) as resp:
@@ -5062,6 +5240,70 @@ class OmniVoicePCMStream(discord.AudioSource):
             pass
 
 
+class CachedWaveAudioSource(discord.AudioSource):
+    def __init__(
+        self,
+        path: Path,
+        *,
+        on_first_packet_sent: Callable[[], None] | None = None,
+    ) -> None:
+        self.path = Path(path)
+        self._offset = 0
+        self._closed = False
+        self._first_frame_sent = False
+        self._on_first_packet_sent = on_first_packet_sent
+        self.error: Exception | None = None
+
+        with wave.open(str(self.path), "rb") as wav:
+            channels = wav.getnchannels()
+            sample_width = wav.getsampwidth()
+            sample_rate = wav.getframerate()
+            frames = wav.readframes(wav.getnframes())
+
+        if sample_width != 2:
+            raise ValueError(f"cached audio must be 16-bit PCM wav: {self.path}")
+        if channels not in {1, 2}:
+            raise ValueError(f"cached audio must be mono or stereo wav: {self.path}")
+
+        pcm = frames
+        if channels == 2:
+            pcm = audioop.tomono(pcm, sample_width, 0.5, 0.5)
+            channels = 1
+
+        if sample_rate != DISCORD_PCM_RATE:
+            pcm, _state = audioop.ratecv(
+                pcm,
+                sample_width,
+                channels,
+                sample_rate,
+                DISCORD_PCM_RATE,
+                None,
+            )
+
+        self._pcm = audioop.tostereo(pcm, sample_width, 1, 1) if channels == 1 else pcm
+
+    def read(self) -> bytes:
+        if self._closed or self._offset >= len(self._pcm):
+            return b""
+
+        chunk = self._pcm[self._offset : self._offset + DISCORD_FRAME_BYTES]
+        self._offset += len(chunk)
+        if len(chunk) < DISCORD_FRAME_BYTES:
+            chunk += b"\x00" * (DISCORD_FRAME_BYTES - len(chunk))
+
+        if not self._first_frame_sent and any(chunk):
+            self._first_frame_sent = True
+            if self._on_first_packet_sent is not None:
+                self._on_first_packet_sent()
+        return chunk
+
+    def cleanup(self) -> None:
+        self._closed = True
+
+    def finish(self) -> None:
+        self.cleanup()
+
+
 class QueuedAudioSource(discord.AudioSource):
     def __init__(self) -> None:
         self._sources: queue.Queue[OmniVoicePCMStream | None] = queue.Queue()
@@ -5172,6 +5414,7 @@ async def warmup_llm() -> None:
         "temperature": 0.0,
         "max_tokens": min(8, VOICE_LLM_MAX_TOKENS),
         "stream": True,
+        "cache_prompt": True,
     }
     print("[STARTUP] llm_warmup_begin")
     async with session.post(LLM_SERVER_URL, json=payload, timeout=aiohttp.ClientTimeout(total=20)) as resp:
@@ -5512,12 +5755,17 @@ def log_voice_bottleneck_summary(
         value = marks.get(name)
         return f"{float(value):.0f}ms" if value is not None else "-"
 
+    meta = metrics.get("meta") or {}
+    record_turn_path_summary(meta, marks, total_ms)
     p95_summary = summarize_p95_metrics()
     if VOICE_BOTTLENECK_LOGS or should_log_voice_timing(total_ms):
         lines = [
             "[VOICE BOTTLENECK]",
             f"label={label}",
             f"total_ms={total_ms:.0f}",
+            f"turn_type={meta.get('turn_type') or '-'}",
+            f"selected_path={meta.get('selected_path') or '-'}",
+            f"reply_source={meta.get('reply_source') or '-'}",
             f"route={_fmt('route_ready')}",
             f"cognitive={_fmt('cognitive_hotpath_ms')}",
             f"memory={_fmt('memory_ready')}",
@@ -5541,7 +5789,6 @@ def log_voice_bottleneck_summary(
             lines.append(f"extra={extra}")
         print("\n".join(lines))
 
-    meta = metrics.get("meta") or {}
     log_turn_event(
         event_name,
         label=label,
@@ -5549,6 +5796,9 @@ def log_voice_bottleneck_summary(
         segment_id=meta.get("segment_id"),
         chunk_index=meta.get("chunk_index"),
         source=meta.get("source"),
+        turn_type=meta.get("turn_type"),
+        selected_path=meta.get("selected_path"),
+        reply_source=meta.get("reply_source"),
         session_key=meta.get("session_key"),
         room_session_key=meta.get("room_session_key"),
         owner_user_id=meta.get("owner_user_id"),
@@ -6333,6 +6583,80 @@ async def play_audio_source(
     log_turn_event("discord_playback_finished", **payload)
 
 
+def cached_audio_path_for_answer(answer: str) -> Path | None:
+    if not CACHED_AUDIO_ENABLED:
+        return None
+    if clean_tts_text(answer) != clean_tts_text(CANNED_WAKE_REPLY_TEXT):
+        return None
+    path = CANNED_WAKE_REPLY_AUDIO
+    if not path.is_absolute():
+        path = PROJECT_ROOT / path
+    return path if path.is_file() else None
+
+
+async def play_cached_answer_audio(
+    vc: discord.VoiceClient,
+    answer: str,
+    *,
+    turn_id: str | None = None,
+    session_key: str | None = None,
+    metrics: dict | None = None,
+) -> bool:
+    path = cached_audio_path_for_answer(answer)
+    if path is None:
+        return False
+
+    guild_id = getattr(getattr(vc, "guild", None), "id", None)
+    source = CachedWaveAudioSource(
+        path,
+        on_first_packet_sent=lambda: log_turn_event(
+            "first_packet_sent",
+            turn_id=turn_id,
+            chunk_index=1,
+            session_key=session_key,
+            source_type="CachedWaveAudioSource",
+        ) or log_voice_latency(metrics, "first_packet_sent_logged", "캐시 오디오 첫 패킷 송신 시간"),
+    )
+    playback_task = asyncio.current_task()
+    if guild_id is not None:
+        active_tts_playbacks[guild_id] = {
+            "vc": vc,
+            "playback_source": source,
+            "playback_task": playback_task,
+            "turn_id": turn_id,
+            "session_key": session_key,
+            "source_type": type(source).__name__,
+        }
+        bot_speaking_guilds.add(guild_id)
+
+    try:
+        log_turn_event(
+            "cached_audio_playback_selected",
+            turn_id=turn_id,
+            session_key=session_key,
+            path=str(path),
+            answer=clean_text(answer),
+        )
+        await play_audio_source(
+            vc,
+            source,
+            trace_payload={
+                "turn_id": turn_id,
+                "chunk_index": 1,
+                "session_key": session_key,
+                "source_type": type(source).__name__,
+                "cached_audio_path": str(path),
+            },
+        )
+    finally:
+        source.cleanup()
+        if guild_id is not None:
+            active_tts_playbacks.pop(guild_id, None)
+            bot_speaking_guilds.discard(guild_id)
+            last_bot_audio_end_at[guild_id] = time.monotonic()
+    return True
+
+
 async def speak_answer(
     vc: discord.VoiceClient,
     answer: str,
@@ -6340,8 +6664,18 @@ async def speak_answer(
     turn_id: str | None = None,
     session_key: str | None = None,
     turn_scope: TurnScope | None = None,
+    metrics: dict | None = None,
 ) -> None:
     guild_id = getattr(getattr(vc, "guild", None), "id", None)
+
+    if await play_cached_answer_audio(
+        vc,
+        answer,
+        turn_id=turn_id,
+        session_key=session_key,
+        metrics=metrics,
+    ):
+        return
 
     async with tts_lock:
         source = await create_omnivoice_source(
@@ -6356,7 +6690,7 @@ async def speak_answer(
                 turn_id=turn_id,
                 chunk_index=1,
                 session_key=session_key,
-            ),
+            ) or log_voice_latency(metrics, "first_packet_sent_logged", "첫 패킷 송신 시간"),
         )
         try:
             if guild_id is not None:
@@ -6632,9 +6966,10 @@ async def build_first_response(
     guided_user_text = user_text
     if gated_state and gated_state.get("action") == "ask" and gated_state.get("question_for_user"):
         guided_user_text = clean_text(str(gated_state.get("question_for_user", "")))
-    live_minecraft_state = await observe_live_minecraft_state(guild_id)
-    runtime_status_context = await build_runtime_status_context()
-    final_user_text = f"{guided_user_text}\n\n{build_main_response_guidance(cognitive_state, source=source, minecraft_state=live_minecraft_state, runtime_status_context=runtime_status_context)}"
+    lightweight_persona_turn = is_casual_call_or_status_question(guided_user_text)
+    live_minecraft_state = None if lightweight_persona_turn else await observe_live_minecraft_state(guild_id)
+    runtime_status_context = "" if lightweight_persona_turn else await build_runtime_status_context()
+    final_user_text = f"{guided_user_text}\n\n{build_main_response_guidance(cognitive_state, source=source, user_text=guided_user_text, session_key=session_key, guild_id=guild_id, minecraft_state=live_minecraft_state, runtime_status_context=runtime_status_context)}"
 
     payload = {
         "model": MODEL_NAME,
@@ -6645,6 +6980,7 @@ async def build_first_response(
         "temperature": 0.0,
         "max_tokens": min(40, VOICE_LLM_MAX_TOKENS),
         "stream": False,
+        "cache_prompt": True,
     }
 
     timeout = aiohttp.ClientTimeout(total=120)
@@ -6703,7 +7039,7 @@ async def build_followup_response(
         debug_text=debug_text,
         metrics=metrics,
     )
-    live_minecraft_state = await observe_live_minecraft_state(guild_id)
+    live_minecraft_state = None if is_casual_call_or_status_question(user_text) else await observe_live_minecraft_state(guild_id)
     minecraft_summary = format_minecraft_state_summary(live_minecraft_state)
     followup_prompt = (
         f"사용자가 방금 한 말: {clean_text(user_text)}\n"
@@ -6722,6 +7058,7 @@ async def build_followup_response(
         "temperature": 0.0,
         "max_tokens": min(64, VOICE_LLM_MAX_TOKENS),
         "stream": False,
+        "cache_prompt": True,
     }
     timeout = aiohttp.ClientTimeout(total=120)
     session = await get_http_session()
@@ -6837,9 +7174,10 @@ async def ask_llm_once(
         return build_answer_payload_from_text(route_decision.user_visible_preface).display_text
 
     guided_user_text = route_decision.prompt_text or user_text
-    live_minecraft_state = await observe_live_minecraft_state(guild_id)
-    runtime_status_context = await build_runtime_status_context()
-    final_user_text = f"{guided_user_text}\n\n{build_main_response_guidance(cognitive_state, source=source, minecraft_state=live_minecraft_state, runtime_status_context=runtime_status_context)}"
+    lightweight_persona_turn = is_casual_call_or_status_question(guided_user_text)
+    live_minecraft_state = None if lightweight_persona_turn else await observe_live_minecraft_state(guild_id)
+    runtime_status_context = "" if lightweight_persona_turn else await build_runtime_status_context()
+    final_user_text = f"{guided_user_text}\n\n{build_main_response_guidance(cognitive_state, source=source, user_text=guided_user_text, session_key=session_key, guild_id=guild_id, minecraft_state=live_minecraft_state, runtime_status_context=runtime_status_context)}"
     payload = build_main_llm_payload(
         model_name=MODEL_NAME,
         messages=messages,
@@ -9187,9 +9525,10 @@ async def ask_llm_streaming(
             return skill_route_answer
 
         guided_user_text = route_decision.prompt_text or user_text
-        live_minecraft_state = await observe_live_minecraft_state(guild_id)
-        runtime_status_context = await build_runtime_status_context()
-        final_user_text = f"{guided_user_text}\n\n{build_main_response_guidance(cognitive_state, source=source, minecraft_state=live_minecraft_state, runtime_status_context=runtime_status_context)}"
+        lightweight_persona_turn = is_casual_call_or_status_question(guided_user_text)
+        live_minecraft_state = None if lightweight_persona_turn else await observe_live_minecraft_state(guild_id)
+        runtime_status_context = "" if lightweight_persona_turn else await build_runtime_status_context()
+        final_user_text = f"{guided_user_text}\n\n{build_main_response_guidance(cognitive_state, source=source, user_text=guided_user_text, session_key=session_key, guild_id=guild_id, minecraft_state=live_minecraft_state, runtime_status_context=runtime_status_context)}"
         mark_turn_stage(
             metrics,
             "prompt_built",
@@ -10225,7 +10564,7 @@ async def _process_member_audio_impl(
         active_conversation_awaiting_reply_sec=ACTIVE_CONVERSATION_AWAITING_REPLY_SEC,
         active_conversation_voice_sec=ACTIVE_CONVERSATION_VOICE_SEC,
         member=member,
-        canned_wake_reply="응, 왜 불렀어?",
+        canned_wake_reply=CANNED_WAKE_REPLY_TEXT,
         room_key=room_key,
         person_key=person_key,
         session_memory_key=session_memory_key,
@@ -10410,7 +10749,7 @@ async def on_message(message: discord.Message):
 
     user_text = strip_voice_wake_word(message.content) if is_wake_word else message.content.strip()
     if not user_text:
-        user_text = "부르셨나요?"
+        user_text = "이름만 부름. 친구처럼 짧게 반말로, 원래 하던 일을 잠깐 말하며 자연스럽게 반응해."
     attachment_context = build_discord_attachment_context(message)
     if attachment_context:
         user_text = f"{user_text}\n\n[Attached Visual Inputs]\n{attachment_context}"

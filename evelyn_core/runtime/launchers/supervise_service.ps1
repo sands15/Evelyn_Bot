@@ -15,9 +15,15 @@ if ($env:SUPERVISOR_RESTART_DELAY_SEC) {
 }
 
 Set-Location $Workdir
+$stopMarker = Join-Path $Workdir '.evelyn_stop_requested'
 Write-Host "[Supervisor] $Name starting"
 
 while ($true) {
+    if (Test-Path $stopMarker) {
+        Write-Host "[Supervisor] $Name stop marker present; not launching"
+        break
+    }
+
     $startedAt = Get-Date
     Write-Host "[Supervisor] launching $Name at $($startedAt.ToString('s'))"
     try {
@@ -30,6 +36,11 @@ while ($true) {
 
     if ($exitCode -eq 0) {
         Write-Host "[Supervisor] $Name exited cleanly"
+        break
+    }
+
+    if (Test-Path $stopMarker) {
+        Write-Host "[Supervisor] $Name stop marker present after exit; not restarting"
         break
     }
 

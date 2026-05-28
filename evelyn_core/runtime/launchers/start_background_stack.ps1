@@ -4,6 +4,10 @@ $projectRoot = if ($env:EVELYN_PROJECT_ROOT) { Resolve-Path $env:EVELYN_PROJECT_
 $coreRoot = Join-Path $projectRoot 'evelyn_core'
 $supervisor = Join-Path $PSScriptRoot 'supervise_service.ps1'
 $controlPageUrl = 'http://127.0.0.1:8799/'
+$stopMarker = Join-Path $projectRoot '.evelyn_stop_requested'
+if (Test-Path $stopMarker) {
+    Remove-Item -LiteralPath $stopMarker -Force -ErrorAction SilentlyContinue
+}
 
 function Test-PortListening {
     param([int]$Port)

@@ -4,11 +4,14 @@ import asyncio
 import contextlib
 import json
 import os
+import subprocess
 import time
 from pathlib import Path
 from typing import Any
 
 from aiohttp import ClientSession, ClientTimeout, web
+
+from .memory_vault import export_memory_graph
 
 
 PROJECT_ROOT = Path(os.getenv("EVELYN_PROJECT_ROOT") or Path(__file__).resolve().parents[3])
@@ -21,6 +24,7 @@ BOT_API_HOST = os.getenv("CONTROL_PAGE_BOT_API_HOST", "127.0.0.1")
 BOT_API_PORT = int(os.getenv("CONTROL_PAGE_BOT_API_PORT", "8798"))
 BOT_API_BASE = f"http://{BOT_API_HOST}:{BOT_API_PORT}"
 PROXY_TIMEOUT_SEC = float(os.getenv("CONTROL_PAGE_PROXY_TIMEOUT_SEC", "1.2"))
+LOCAL_SHUTDOWN_COMMANDS = {"/shutdown", "/quit", "/exit"}
 
 MODEL_PORTS = {
     "main": int(os.getenv("MAIN_LLM_PORT", "9820")),
@@ -166,6 +170,33 @@ def json_response(data: Any, *, status: int = 200) -> web.Response:
     return web.Response(status=status, text=json.dumps(data, ensure_ascii=False), content_type="application/json")
 
 
+def schedule_local_stack_shutdown(delay_ms: int = 1500) -> tuple[bool, str]:
+    stop_script = PROJECT_ROOT / "evelyn_core" / "runtime" / "launchers" / "stop_evelyn_stack.ps1"
+    if not stop_script.exists():
+        return False, f"shutdown helper not found: {stop_script}"
+    try:
+        subprocess.Popen(
+            [
+                "powershell.exe",
+                "-NoLogo",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(stop_script),
+                "-DelayMs",
+                str(max(0, int(delay_ms))),
+            ],
+            cwd=str(PROJECT_ROOT),
+            close_fds=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return True, "local shutdown scheduled"
+    except Exception as exc:
+        return False, repr(exc)
+
+
 @web.middleware
 async def cors_middleware(request: web.Request, handler: Any) -> web.StreamResponse:
     if request.method == "OPTIONS" and request.path.startswith("/api/control-page/"):
@@ -215,11 +246,40 @@ async def health_handler(_: web.Request) -> web.StreamResponse:
     return json_response({"ok": True, "role": "control-page", "botProxyReady": bot_ready, "botApiPort": BOT_API_PORT})
 
 
+async def memory_graph_handler(request: web.Request) -> web.StreamResponse:
+    try:
+        max_nodes = int(request.query.get("max_nodes", "160"))
+    except Exception:
+        max_nodes = 160
+    return json_response(export_memory_graph(max_nodes=max_nodes))
+
+
 async def chat_handler(request: web.Request) -> web.StreamResponse:
     try:
         payload = await request.json()
     except Exception:
         payload = {}
+    text = str((payload or {}).get("text") or "").strip()
+    if text.lower() in LOCAL_SHUTDOWN_COMMANDS:
+        ok, detail = schedule_local_stack_shutdown()
+        state = await degraded_state()
+        if ok:
+            return json_response(
+                {
+                    "ok": True,
+                    "reply": "Full Evelyn stack shutdown started locally. This works even when the bot processor is down.",
+                    "state": state,
+                }
+            )
+        return json_response(
+            {
+                "ok": False,
+                "error": "local_shutdown_failed",
+                "reply": f"Local shutdown helper failed: {detail}",
+                "state": state,
+            },
+            status=500,
+        )
     proxied = await proxy_json(request, "POST", "/api/control-page/chat", body=payload)
     if proxied is not None and proxied.status < 500:
         return proxied
@@ -248,9 +308,11 @@ def create_app() -> web.Application:
     app.router.add_get("/health", health_handler)
     app.router.add_get("/assets/{asset_path:.*}", asset_handler)
     app.router.add_get("/api/control-page/state", state_handler)
+    app.router.add_get("/api/control-page/memory-graph", memory_graph_handler)
     app.router.add_post("/api/control-page/chat", chat_handler)
     app.router.add_get("/api/control-page/minecraft-item-icon/{item_name}", icon_handler)
     app.router.add_options("/api/control-page/state", state_handler)
+    app.router.add_options("/api/control-page/memory-graph", memory_graph_handler)
     app.router.add_options("/api/control-page/chat", chat_handler)
     return app
 

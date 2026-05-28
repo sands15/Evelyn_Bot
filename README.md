@@ -1,396 +1,293 @@
 # Evelyn Bot
 
-Evelyn Bot은 디스코드에서 텍스트와 음성으로 대화하는 개인용 한국어 봇입니다. 
-지향점은 단순합니다. 말을 걸면 바로 듣고, 짧게 이해하고, 최대한 지연 없이 다시 말해주는 쪽입니다.
+Evelyn is a local-first Discord voice companion and automation bot. The project
+combines realtime voice input, local LLM routing, OmniVoice TTS, long-term
+memory, a browser/control page, and optional Minecraft/Voyager automation.
 
-이 저장소는 특히 디스코드 음성 수신, DAVE 복호화, 그리고 STT -> LLM -> TTS 흐름을 안정적으로 붙이는 데 초점을 맞춰 정리했습니다.
+The current direction is not a generic "fast assistant". Evelyn should feel like
+a familiar character that can answer naturally, remember project context, avoid
+assistant-like phrasing, and use heavier reasoning only when the turn actually
+needs it.
 
-## 이 프로젝트가 하는 일
+## Current Focus
 
-봇이 음성 채널에 들어가 있으면 사용자의 말을 직접 받아서 다음 순서로 처리합니다.
+- Character-first Korean voice conversation.
+- Strict wake/session handling for noisy Discord voice channels.
+- Main/router/sub LLM split instead of sending every turn through one model.
+- Fast cached or lightweight paths for call/status turns.
+- OmniVoice streaming with adaptive playout buffering.
+- Obsidian-style Markdown memory vault with SQLite indexes and graph view.
+- Minecraft/Voyager integration as a layered runtime, not a single black box.
 
-1. 디스코드 음성 패킷 수신
-2. RTP / Discord voice 암호화 해제
-3. DAVE inner decrypt 처리
-4. 발화 단위 PCM 조립
-5. `faster-whisper`로 STT
-6. 깨우는 말인 `이블린`이 들어간 경우에만 LLM 호출
-7. 답변을 로컬 `omnivoice-server`에 넘겨 음성으로 합성
-8. 스트리밍으로 받은 PCM을 디스코드 음성 채널에 바로 재생
+## Runtime Components
 
-핵심은 중간에 쓸데없는 저장 과정을 줄여서 가능한 한 바로 다음 단계로 넘기는 구조라는 점입니다.
+Default local services:
 
-## 현재 파일 구성
+| Component | Default |
+| --- | --- |
+| Bot/control API | `8798` |
+| Standalone control page | `8799` |
+| Main LLM | `9820` |
+| Sub/Summary LLM | `9821` |
+| Router LLM | `9822` |
+| OmniVoice TTS | `8880` |
+| Voyager service | `8765` |
+| Codex action gateway | `8787` |
+| Mineflayer bridge | `3000` |
+| Minecraft server | `25565` |
 
-- `main.py`
-  - 봇 엔트리 포인트
-  - 텍스트 응답 처리
-  - 음성 입력 처리
-  - STT -> LLM -> TTS 연결
-- `evelyn_voice/`
-  - 커스텀 Discord 음성 수신 클라이언트
-  - DAVE 처리
-  - UDP / gateway / sink 구현
+Current launcher defaults live in `evelyn_core/start_env.bat`. Check that file
+before changing model, GPU, or port assumptions.
+
+## Model Layout
+
+The current default model split is:
+
+- Main LLM: `LGAI-EXAONE/EXAONE-3.5-7.8B-Instruct-GGUF:Q4_K_M`
+  - Default endpoint: `http://127.0.0.1:9820/v1/chat/completions`
+  - Used for real conversation and longer answers.
+  - Launched through llama.cpp with prompt cache settings.
+
+- Sub/Summary LLM: `supergemma4-e4b-abliterated-Q5_K_M.gguf`
+  - Default endpoint: `http://127.0.0.1:9821/v1/chat/completions`
+  - Used for summaries, memory work, and background consolidation when
+    available.
+
+- Router LLM: Gemma E2B GGUF
+  - Default endpoint: `http://127.0.0.1:9822/v1/chat/completions`
+  - Used for lightweight routing and turn classification.
+
+- STT default: `Qwen/Qwen3-ASR-1.7B`
+  - Config keys: `STT_BACKEND=qwen_asr`, `STT_MODEL_NAME=Qwen/Qwen3-ASR-1.7B`
+  - STT quality is treated as more important than making memory/main models
+    larger.
+
+GPU convention used by the local launchers:
+
+- `GPU 0`: RTX 3090
+- `GPU 1`: RTX 4060
+
+## Voice Pipeline
+
+The voice path is built around Discord voice receive, strict wake handling, turn
+classification, and path-specific response delivery.
+
+High-level flow:
+
+1. Receive Discord voice packets.
+2. Decrypt RTP/DAVE audio.
+3. Decode Opus to PCM.
+4. Segment and resample audio for STT.
+5. Run wake probe, wake confirm, and full STT when allowed.
+6. Classify the turn type.
+7. Choose a delivery path.
+8. Generate text or use cached/lightweight output.
+9. Send TTS audio to Discord.
+
+Important policies:
+
+- Wake candidates are whitelist-first and strict.
+- Gibberish, unstable wake candidates, and confirm misses are dropped.
+- Only the active room owner gets relaxed follow-up handling.
+- Tail fragments should not re-enter wake/full-STT paths.
+- When Evelyn asks the user a question, visible text should use `[question]` or
+  the configured localized marker, but TTS should not read that label.
+
+## Turn Paths
+
+The structured voice pipeline tracks turn type and selected path metadata.
+
+Common turn types:
+
+- `wake_call`
+- `casual_check`
+- `short_confirm`
+- `runtime_status`
+- `minecraft_command`
+- `conversation`
+- `knowledge_or_search`
+- `repair`
+
+Common selected paths:
+
+- `cached_audio_fast_path`
+- `light_dialogue_path`
+- `runtime_status_path`
+- `minecraft_action_path`
+- `main_conversation_path`
+- `search_or_long_answer_path`
+- `repair_path`
+
+These fields are recorded in metrics, bottleneck logs, and turn trace events so
+latency and routing mistakes can be debugged later.
+
+## TTS
+
+Evelyn uses OmniVoice through a local HTTP service.
+
+Current default TTS settings:
+
+- Strategy: `blockwise_capped_first`
+- Follow-up strategy: `blockwise_capped_first`
+- Block size: `16`
+- First block steps: `8`
+- Later block steps: `10`
+- First immediate cap: `250ms`
+- Lookahead crossfade: `0ms`
+- Adaptive playback jitter: enabled
+- Playback buffer clamp: `700ms` to `2600ms`
+
+The current audio source uses a ring-buffer playout controller rather than a
+simple "play as soon as the first bytes arrive" queue. It tracks block arrival
+gaps, adapts the start buffer, and inserts short silence frames during temporary
+underruns instead of ending playback early.
+
+Useful trace events include:
+
+- `tts_request_start`
+- `tts_response_headers`
+- `tts_first_byte`
+- `playback_jitter_buffer_adapt`
+- `playback_jitter_buffer_ready`
+- `playback_underrun`
+
+## Memory Vault
+
+Evelyn's long-term memory is moving toward an Obsidian-compatible Markdown vault
+backed by rebuildable runtime indexes.
+
+Target shape:
+
+```text
+Markdown vault = durable human-readable memory
+SQLite metadata = note map, freshness, links, cache state
+FTS/vector index = fast recall
+Graph links = relationship navigation
+Hot context = realtime prompt memory
+Prompt block cache = reusable prompt snippets
+```
+
+Main files:
+
+- `evelyn_core/runtime/evelyn_core/memory_vault.py`
+- `docs/EVELYN_MEMORY_VAULT_ARCHITECTURE.md`
+- `tests/test_memory_vault.py`
+
+Generated runtime data is ignored by git under `bot_memory/`.
+
+Implemented memory features:
+
+- Markdown note bootstrap.
+- Legacy guild memory mirror into the vault.
+- Daily transcript mirroring.
+- SQLite metadata index.
+- FTS5 recall with scan fallback.
+- Deterministic hashing-vector recall.
+- Graph link indexing.
+- Retrieval cache.
+- Hot context generation.
+- Sub LLM dependency probing.
+- Semantic consolidation worker when the sub LLM is available.
+- Memory graph export for the control page.
+
+Current limitation: vector recall uses deterministic `hashing-v1`, not a learned
+embedding model. The schema is designed so a real embedding model can replace it
+later without changing the recall facade.
+
+## Control Page
+
+The control page includes a Memory panel backed by:
+
+- `GET /api/control-page/memory-graph`
+- `export_memory_graph()` in `memory_vault.py`
+
+The graph view renders Markdown vault notes as nodes and relationships as edges.
+Edges can come from explicit note links, shared tags/projects, retrieval cache
+co-hits, and vector similarity.
+
+The control page is also responsible for local stack controls. Shutdown/quit
+routes are handled locally by the standalone control page so the stack can still
+be stopped even when the bot API is down.
+
+## Minecraft and Voyager
+
+Voyager integration is treated as three coupled layers:
+
+1. Codex action gateway.
+2. Voyager service/runner orchestration.
+3. Mineflayer/Minecraft control plane.
+
+Do not debug it as a single LLM adapter swap.
+
+Important files:
+
+- `evelyn_core/runtime/evelyn_core/codex_gateway_server.py`
+- `evelyn_core/runtime/evelyn_core/voyager_service.py`
+- `evelyn_core/runtime/evelyn_core/upstream_voyager_runner.py`
+- `third_party/Voyager/`
+
+Runtime state and large logs live under `bot_memory/` and are ignored by git.
+
+## Startup
+
+Common entrypoints:
+
 - `start.bat`
-  - 통합 런처. LLM 서버들, OmniVoice 서버, 디스코드 봇을 함께 띄우는 배치 파일
-- `.env.example`
-  - 환경변수 예시
+- `evelyn_core/start.bat`
+- `evelyn_core/start_env.bat`
 
-## 음성 수신이 실제로 어떻게 돌아가는지
+The root launcher is a shim. The runtime defaults are defined in
+`evelyn_core/start_env.bat`.
 
-이 프로젝트에서 가장 중요한 부분은 디스코드 음성을 받아오는 경로입니다.
+Before changing live behavior, check:
 
-일반적인 디스코드 봇은 음성 재생은 쉬워도, 음성 수신은 구현이 꽤 까다롭습니다. 특히 최근 디스코드 음성 환경에서는 DAVE 쪽 처리까지 맞아야 실제 사용자 음성이 안정적으로 풀립니다.
-
-### 1) 음성 채널 접속
-
-사용자가 `!들어와` 또는 `!join`을 입력하면 봇은 일반 `VoiceClient` 대신 `EvelynVoiceClient`로 접속합니다.
-
-이 클라이언트는 음성 수신을 위해 따로 만든 커스텀 클라이언트입니다.
-
-### 2) 음성 패킷 수신
-
-`EvelynVoiceClient`는 디스코드 음성 UDP 패킷을 직접 받습니다.
-이때 패킷 안에는 RTP 헤더, 확장 헤더, 암호화된 payload, 그리고 Discord 쪽 음성 세션 상태가 얽혀 있습니다.
-
-### 3) outer decrypt
-
-먼저 기본 Discord voice 암호화 레이어를 풉니다.
-여기서 중요한 점은, outer decrypt가 끝난 평문 앞부분에 RTP header extension 데이터가 포함될 수 있다는 점입니다.
-
-이걸 그대로 DAVE decrypt에 넣으면 inner decrypt가 실패합니다.
-그래서 이 프로젝트에서는 decrypted RTP extension 길이만큼 앞부분을 잘라낸 뒤, 실제 DAVE payload만 inner decrypt로 넘기도록 수정했습니다.
-
-이 부분이 음성 수신이 정상화된 가장 큰 이유입니다.
-
-### 4) DAVE inner decrypt
-
-outer decrypt 후 잘라낸 payload를 `dave_session`에 넘겨 inner decrypt를 수행합니다.
-
-여기서는 다음 같은 보강이 들어가 있습니다.
-
-- discord.py 원본 핸들러를 먼저 실행해서 세션 상태를 먼저 맞춤
-- 너무 빨리 들어온 초기 DAVE 프레임은 잠깐 버퍼링했다가 재적용
-- user_id 매핑 재시도
-- 과한 패킷 단위 디버그 로그 제거
-
-덕분에 발화가 들어올 때 실제 Opus payload까지 안정적으로 도달할 수 있습니다.
-
-### 5) PCM 조립
-
-복호화에 성공한 Opus 패킷은 디코딩되어 PCM으로 바뀌고, 발화 단위로 묶입니다.
-이후 `process_member_audio()` 콜백으로 넘어갑니다.
-
-여기서 중요한 점은, 받은 사용자 음성을 녹음 파일로 저장하지 않는다는 것입니다.
-
-예전 디버그 버전처럼 WAV 덤프를 남기지 않고,
-받은 PCM은 메모리 안에서 바로 다음 단계인 STT로 넘깁니다.
-
-즉, 흐름은 이런 식입니다.
-
-- Discord 음성 수신
-- 복호화
-- PCM 조립
-- 메모리에서 바로 STT
-
-중간 저장 파일이 없습니다.
-
-## STT -> LLM -> TTS 흐름
-
-### STT
-
-음성으로 들어온 PCM은 `faster-whisper`로 바로 전달됩니다.
-이때 내부적으로는 다음 정도만 수행합니다.
-
-- 스테레오를 모노로 downmix
-- 48kHz를 16kHz로 resample
-- Whisper 입력으로 전달
-
-이 변환 역시 메모리 안에서 바로 처리합니다.
-사용자 음성을 `.wav`로 떨궈놓고 다시 읽는 식으로 돌리지 않습니다.
-
-### Wake word 필터링
-
-STT 결과에 `이블린`이 들어 있을 때만 응답합니다.
-아무 말에나 반응하지 않게 해서 불필요한 LLM 호출과 TTS 재생을 줄였습니다.
-
-또 아래 같은 보호 로직이 들어 있습니다.
-
-- 너무 짧은 말 무시
-- 최근 응답과 너무 비슷한 말 무시
-- 봇이 막 말한 직후에는 잠깐 무시
-- 같은 길드에서 동시 응답 방지
-
-이런 것들은 정확도도 올리지만, 쓸데없는 처리량과 레이턴시 낭비를 줄이는 데도 도움이 됩니다.
-
-### LLM
-
-STT로 얻은 문장을 정리한 뒤, OpenAI 호환 `/v1/chat/completions` 엔드포인트로 보냅니다.
-기본 응답 모델은 아래처럼 큰 모델을 사용합니다.
-
-- `http://127.0.0.1:9820/v1/chat/completions`
-
-그리고 작은 모델은 별도로 돌려서 실제 답변 대신 메모리 관리에 씁니다.
-
-- `http://127.0.0.1:9821/v1/chat/completions`
-
-즉 역할을 이렇게 나눴습니다.
-
-- 큰 모델: 실제 답변 생성
-- 작은 모델: 롤링 요약 갱신, 장기 기억 후보 추출, 열린 작업 정리
-
-큰 모델은 필요할 때 OmniVoice 감정 태그도 함께 낼 수 있습니다. 현재 허용 태그는 아래뿐입니다.
-
-- `[laughter]`
-- `[sigh]`
-- `[confirmation-en]`
-- `[question-en]`
-- `[question-ah]`
-- `[question-oh]`
-- `[question-ei]`
-- `[question-yi]`
-- `[surprise-ah]`
-- `[surprise-oh]`
-- `[surprise-wa]`
-- `[surprise-yo]`
-- `[dissatisfaction-hnn]`
-
-이 태그들은 TTS 입력에는 유지되고, 일반 텍스트 표시에는 자동으로 제거됩니다.
-
-또한 작은 모델의 `answer / ask / wait` 판단에 맞춰 태그 힌트도 달라집니다.
-
-- `ask`면 질문형 태그를 우선 고려
-- `wait`면 태그를 거의 쓰지 않음
-- `answer`면 확인, 놀람, 가벼운 웃음 태그를 필요할 때만 사용
-
-현재 라우팅은 이렇게 나뉩니다.
-
-- `main_direct`: 메인 LLM 직행, sub를 기다리지 않음
-- `sub_hint`: 저장돼 있던 sub 결과만 힌트로 참고
-- `sub_wait`: 정말 문맥이 깊거나 애매할 때만 fresh sub 판단을 잠깐 기다림
-- 음성 입력은 기본적으로 `main_direct`로 처리하고, sub는 뒤에서 raw/summary/state 저장만 갱신
-
-로컬 서버를 쓰는 이유도 결국 레이턴시 때문입니다.
-왕복이 짧고, 응답 속도를 직접 통제하기 쉽습니다.
-
-### 장기 기억 구조
-
-장기 기억은 단순히 이전 대화를 전부 프롬프트에 넣는 방식이 아니라, 작은 모델이 따로 관리하는 구조입니다.
-
-현재는 길드별로 아래 파일들이 생깁니다.
-
-- `bot_memory/guild_<id>/raw_transcript.jsonl`
-- `bot_memory/guild_<id>/rolling_summary.txt`
-- `bot_memory/guild_<id>/durable_facts.jsonl`
-- `bot_memory/guild_<id>/open_questions.jsonl`
-- `bot_memory/guild_<id>/cognitive_state.json`
-
-대화가 끝나면 작은 모델이 백그라운드에서 다음 작업을 합니다.
-
-- 최근 raw 원문 로그를 누적 저장
-- 최근 대화를 짧은 요약으로 갱신
-- 오래 기억할 만한 사실 추출
-- 아직 확인이 필요한 질문이나 가설 정리
-
-그리고 새 입력이 오면 작은 모델이 먼저 현재 상황을 보고 `answer`, `ask`, `wait` 중 어떤 태도가 자연스러운지 판단한 뒤, 그 상태를 큰 모델 프롬프트에 힌트로 붙입니다.
-이 방식이 컨텍스트를 무작정 늘리는 것보다 훨씬 안정적이고, 작은 모델을 실제로 유용하게 쓰는 방법에 가깝습니다.
-
-### TTS
-
-LLM이 답변을 만들면 `main.py`가 직접 모델을 들고 합성하는 대신, 로컬 `omnivoice-server`에 요청을 보냅니다.
-
-여기서 레이턴시를 줄이기 위해 두 가지를 같이 적용했습니다.
-
-- 요청은 `stream=true`, `response_format=pcm`으로 보냄
-- 서버가 돌려주는 24kHz mono PCM을 받아서 봇 안에서 바로 48kHz stereo PCM으로 변환해 재생함
-
-즉, 예전처럼
-
-- 임시 WAV 파일 생성
-- `ffmpeg` 프로세스 실행
-- 파일 또는 파이프를 다시 읽어서 재생
-
-이 경로를 거치지 않습니다.
-
-지금 출력 쪽 흐름은 이렇게 바뀌었습니다.
-
-- 텍스트 답변 생성
-- 로컬 OmniVoice 서버에 바로 TTS 요청
-- PCM 스트림 수신
-- 봇 안에서 바로 디스코드 재생 포맷으로 변환
-- 음성 채널로 즉시 재생
-
-중간 산출물을 파일로 남기지 않고, 별도 ffmpeg 프로세스도 쓰지 않습니다.
-
-## 레이턴시를 줄이기 위해 신경 쓴 점
-
-이 프로젝트는 "일단 되게 만드는 것"보다 "되면서도 답답하지 않게 만드는 것"을 중요하게 봤습니다.
-
-현재 레이턴시를 줄이기 위해 반영된 포인트는 아래와 같습니다.
-
-- 패킷 디버그 덤프 저장 제거
-- 사용자 음성 WAV 저장 제거
-- TTS 임시 파일 저장 제거
-- ffmpeg subprocess 제거
-- 복호화 후 바로 PCM 처리
-- PCM을 메모리에서 바로 Whisper로 전달
-- 로컬 LLM 서버 사용
-- 로컬 OmniVoice 서버 사용
-- TTS를 PCM 스트리밍으로 받아 첫 청크부터 재생 가능하게 구성
-- HTTP 세션 재사용으로 요청 연결 오버헤드 감소
-- wake word 기반 응답으로 불필요한 호출 감소
-- 너무 짧은 발화와 짧은 잡음 인식 결과 무시
-- 응답 중복 차단과 lock으로 겹치는 처리 방지
-- 작은 모델을 백그라운드 메모리 관리자 역할로 분리
-
-아직 LLM까지 토큰 스트리밍으로 끊어서 읽는 구조는 아니지만, 적어도 TTS 쪽은 파일 저장과 ffmpeg 호출을 없애고 스트리밍 재생 쪽으로 당겨서 체감 지연을 꽤 줄였고, 메모리 쪽은 작은 모델을 따로 써서 긴 대화 대응력을 보강한 상태입니다.
-
-## 주요 명령어
-
-- `!들어와` 또는 `!join`
-  - 사용자가 있는 음성 채널로 들어감
-- `!다시들어와` 또는 `!rejoin`
-  - 음성 연결을 끊고 다시 붙음
-- `!나가` 또는 `!leave`
-  - 음성 채널에서 나감
-
-## 실행 전 준비
-
-### 1) Python 패키지 설치
-
-```bash
-pip install -r requirements.txt
+```powershell
+git status --short --branch
+Get-Content evelyn_core\start_env.bat
 ```
 
-추가로 환경에 따라 아래가 준비되어 있어야 합니다.
+## Verification
 
-- 로컬 `omnivoice-server` 실행 환경
-- CUDA 가능한 GPU 환경 권장
+Useful local checks:
 
-### 2) 환경변수
-
-`.env.example`를 참고해서 최소한 아래는 준비해야 합니다.
-
-- `DISCORD_BOT_TOKEN`
-- `LLM_SERVER_URL`
-- `OMNIVOICE_SERVER_URL`
-- `OMNIVOICE_VOICE`
-
-필요하면 아래도 조정할 수 있습니다.
-
-- `SUMMARY_LLM_URL`
-- `SUMMARY_MODEL_NAME`
-- `BOT_MEMORY_DIR`
-- `OMNIVOICE_LANGUAGE`
-- `OMNIVOICE_STREAM`
-- `OMNIVOICE_TIMEOUT_SEC`
-- `STT_MODEL_NAME`
-- `WAKE_WORD`
-- `AUTO_JOIN_VOICE`
-- `VOICE_MIN_TRANSCRIBED_LEN`
-- `VOICE_MIN_AUDIO_SEC`
-
-## 실행 방법
-
-### 1) 통합 실행
-
-`start.bat`는 현재 메인 통합 런처입니다. 로컬 추론 서버들, OmniVoice 서버, 디스코드 봇을 함께 띄웁니다.
-
-현재 구성:
-
-- Main LLM (`llama-server`) 9820
-- Router LLM (`llama-server`) 9822
-- Sub/Summary LLM (`llama-server`) 9821
-- `omnivoice-server` 8880
-- Discord bot
-
-실행:
-
-```bat
-start.bat
+```powershell
+python -m py_compile main.py evelyn_core\runtime\evelyn_core\config.py
+python tests\test_memory_vault.py
+python tests\test_dialogue_turn_classifier.py
+node --check docs\assets\evelyn-page.js
+git diff --check
 ```
 
-참고로 OmniVoice 서버는 전용 Python 환경에서 실행되도록 분리했습니다.
-이유는 `qwen_tts`와 `omnivoice`가 서로 다른 `transformers` 계열을 요구할 수 있어서, 한 환경에 섞어두면 쉽게 깨지기 때문입니다.
+For runtime verification, do not rely on one signal. Check the relevant ports,
+processes, GPU holders, WSL/helper layers, and control API state for the scope
+being reported.
 
-또한 복제 음성 프로필은 아래 폴더에 저장되도록 맞춰두었습니다.
+## Documentation
 
-- `C:\Evelyn\omnivoice_profiles`
+Key architecture notes:
 
-### 1-1) OmniVoice 복제 음성 프로필 만들기
+- `CURRENT_EVELYN_ARCHITECTURE.md`
+- `CORE_ARCHITECTURE_BOUNDARY.md`
+- `ROUTE_OWNERSHIP_POLICY.md`
+- `docs/EVELYN_ASSISTANT_TARGET_ARCHITECTURE.md`
+- `docs/CONTEXT_PIPELINE_TARGET.md`
+- `docs/EVELYN_CURRENT_STRUCTURE_LAYER_MAPPING.md`
+- `docs/EVELYN_MEMORY_VAULT_ARCHITECTURE.md`
+- `docs/evelyn-dialogue-ux-fastpath-2026-05-28.md`
+- `docs/tts-streaming-architecture-2026-05-27.md`
 
-서버가 떠 있는 상태에서 아래 스크립트로 프로필을 만들 수 있습니다.
+## Repository Hygiene
 
-```bat
-create_omnivoice_profile.bat 내목소리 C:\path\to\ref_voice.wav "여기에 기준 문장"
-```
+Ignored runtime/local data includes:
 
-만들어진 프로필은 OmniVoice 서버에서 `clone:내목소리` 형태로 사용할 수 있습니다.
-기본 예시는 `OMNIVOICE_VOICE=clone:evelyn` 기준으로 잡아뒀으니, 실제로는 `evelyn` 프로필 이름으로 만들어두는 편이 가장 덜 헷갈립니다.
+- `bot_memory/`
+- `debug_audio/`
+- `guild_settings/`
+- `logs/`
+- `.env`
+- `.evelyn_bot.lock`
+- `node_modules/`
+- `.venv-voyager/`
 
-예를 들면 OpenAI 호환 요청에서:
-
-```json
-{
-  "model": "omnivoice",
-  "input": "안녕하세요, 테스트입니다.",
-  "voice": "clone:내목소리"
-}
-```
-
-처럼 호출하면 됩니다.
-
-### 2) 봇만 직접 실행하고 싶을 때
-
-기본 실행 경로는 `start.bat`입니다.
-
-봇 프로세스만 직접 실행하고 싶다면 프로젝트 루트에서 아래처럼 실행할 수 있습니다.
-
-```bash
-py -3 main.py
-```
-
-단, 이 경우 필요한 LLM/TTS 서버들이 먼저 떠 있어야 합니다.
-
-## 사용 예시
-
-### 텍스트 채널
-
-- `이블린 오늘 뭐해?`
-- 봇 메시지에 답장하기
-
-### 음성 채널
-
-1. 디스코드 음성 채널에 들어갑니다.
-2. 텍스트 채널에서 `!들어와`를 입력합니다.
-3. 그다음 `이블린`을 포함해서 말합니다.
-   - 예: `이블린 지금 몇 시야?`
-   - 예: `이블린 오늘 날씨 어때?`
-4. 봇이 음성을 받아 STT -> LLM -> TTS 순서로 처리한 뒤 답합니다.
-
-## 저장소에 포함하지 않은 것
-
-로컬 흔적이나 개인 자원은 저장소에 넣지 않도록 정리했습니다.
-
-예를 들면 아래 같은 것들입니다.
-
-- 테스트 / 실험 스크립트
-- 디버그 덤프 폴더
-- 임시 가상환경
-- `ref_voice.wav`
-- `ref_text.txt`
-- `pets-*.json`
-
-## 참고
-
-이 저장소는 개인 로컬 실행 기준으로 정리되어 있습니다.
-환경에 따라 TTS 패키지 설치 방식이나 모델 경로는 조금씩 다를 수 있습니다.
-
-그래도 핵심 구조는 같습니다.
-
-- 음성을 받는다
-- 저장하지 않고 바로 STT로 넘긴다
-- 필요한 경우만 LLM에 묻는다
-- 답변을 메모리에서 바로 TTS로 만들고 바로 재생한다
-
-즉, 최대한 짧은 경로로 듣고, 이해하고, 다시 말하는 봇입니다.
+Do not commit generated runtime logs, local memory, voice recordings, or private
+environment files.

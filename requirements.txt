@@ -1,6 +1,7 @@
 aiohttp>=3.13
 discord.py>=2.7
 qwen-asr
+transformers>=4.57
 numpy>=2.0
 requests>=2.32
 torch>=2.8

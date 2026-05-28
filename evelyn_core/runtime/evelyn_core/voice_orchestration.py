@@ -414,7 +414,22 @@ def prepare_voice_reply_for_delivery(
         session_topic_seed=session_topic_seed,
         build_topic_id=build_topic_id,
     )
-    log_voice_stage(metrics, "응답 게이트 통과", extra=f"gate={gate_mode} user_text={voice_reply.raw_user_text!r}")
+    metrics.setdefault("meta", {}).update(
+        {
+            "turn_type": voice_reply.turn_type,
+            "selected_path": voice_reply.selected_path,
+            "reply_source": voice_reply.reply_source,
+            "wake_only_turn": voice_reply.wake_only_turn,
+        }
+    )
+    log_voice_stage(
+        metrics,
+        "응답 게이트 통과",
+        extra=(
+            f"gate={gate_mode} turn_type={voice_reply.turn_type} "
+            f"path={voice_reply.selected_path} user_text={voice_reply.raw_user_text!r}"
+        ),
+    )
     return VoiceReplyPreparationResult(
         accepted=True,
         gate_mode=gate_mode,
@@ -1223,6 +1238,13 @@ async def deliver_voice_reply(
     try:
         if voice_reply.wake_only_turn:
             answer = canned_wake_reply
+            metrics.setdefault("meta", {}).update(
+                {
+                    "turn_type": voice_reply.turn_type,
+                    "selected_path": voice_reply.selected_path,
+                    "reply_source": "canned_wake_reply",
+                }
+            )
             log_voice_stage(metrics, "웨이크 전용 턴 canned reply", extra=f"answer={answer!r}")
             if on_final_answer is not None:
                 await on_final_answer(answer)
@@ -1233,12 +1255,20 @@ async def deliver_voice_reply(
                     turn_id=accepted_turn_id,
                     session_key=session_key,
                     turn_scope=turn_scope,
+                    metrics=metrics,
                 )
             except Exception as e:
                 record_voice_pipeline_failure("tts_playback_failed", e, metrics, stage="wake_only_speak_answer")
                 raise
             used_wake_only_reply = True
         else:
+            metrics.setdefault("meta", {}).update(
+                {
+                    "turn_type": voice_reply.turn_type,
+                    "selected_path": voice_reply.selected_path,
+                    "reply_source": "llm_streaming",
+                }
+            )
             try:
                 answer = await ask_llm_and_speak_streaming(
                     vc,

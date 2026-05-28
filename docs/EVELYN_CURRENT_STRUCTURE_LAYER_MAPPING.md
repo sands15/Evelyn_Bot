@@ -17,6 +17,7 @@ parts are still entangled?
 
 - target blueprint: `docs/EVELYN_ASSISTANT_TARGET_ARCHITECTURE.md`
 - current runtime snapshot: `CURRENT_EVELYN_ARCHITECTURE.md`
+- memory vault / index / cache target: `docs/EVELYN_MEMORY_VAULT_ARCHITECTURE.md`
 - voice pipeline refactor reference: `docs/plans/VOICE_PIPELINE_REFACTOR_PLAN.md`
 
 ---
@@ -224,6 +225,11 @@ Lower-level support:
 This layer exists in partial form, but its contract still lives in application
 logic instead of a dedicated memory facade.
 
+The target memory facade should converge on
+`docs/EVELYN_MEMORY_VAULT_ARCHITECTURE.md`: markdown vault as durable source,
+SQLite/vector/graph indexes for retrieval, and bounded caches for the realtime
+path.
+
 ---
 
 ## 6. Presentation Layer
@@ -335,4 +341,3 @@ highest-value near-term separation points are:
 
 Tool execution itself is not the first thing to rewrite.
 Its adapter side is already ahead of the assistant core.
-

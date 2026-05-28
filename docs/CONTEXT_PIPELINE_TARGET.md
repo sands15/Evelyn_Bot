@@ -4,6 +4,10 @@
 
 The main LLM must not be used as Evelyn's memory store. Each turn should assemble only the memory, state, and skill context that the main LLM needs for the current decision. This lets the main Gemma 4 context stay small, with a 2048-token default target, while leaving VRAM headroom for vision and Minecraft agent work.
 
+Memory storage, indexing, cache, and invalidation details are owned by
+`docs/EVELYN_MEMORY_VAULT_ARCHITECTURE.md`. This document owns the turn-time
+context policy and prompt assembly pipeline.
+
 ## Target Flow
 
 ```text
@@ -76,6 +80,10 @@ This layer replaces long raw history when context is tight.
 ### 3. Retrieved Long-Term Memory
 
 Relevant memory selected by the current turn. It should be scored by relevance, recency, and importance. It should not dump all memory into the prompt.
+
+The source should be the memory vault/index facade described in
+`docs/EVELYN_MEMORY_VAULT_ARCHITECTURE.md`, not raw file scanning during the hot
+path.
 
 ### 4. Runtime State
 

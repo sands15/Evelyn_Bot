@@ -73,7 +73,7 @@ DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 # 사용자 응답용 메인 LLM 서버 엔드포인트.
 LLM_SERVER_URL = os.getenv("LLM_SERVER_URL", "http://127.0.0.1:9820/v1/chat/completions")
 # 메인 LLM 서버에 전달할 모델 이름.
-MODEL_NAME = os.getenv("LLM_MODEL_NAME", "ciocan/gemma-4-E4B-it-W4A16")
+MODEL_NAME = os.getenv("LLM_MODEL_NAME", "LGAI-EXAONE/EXAONE-3.5-7.8B-Instruct-GGUF:Q4_K_M")
 MAIN_LLM_CHAT_CONTENT_FORMAT = os.getenv("MAIN_LLM_CHAT_CONTENT_FORMAT", "openai")
 
 
@@ -89,6 +89,20 @@ OMNIVOICE_LANGUAGE = os.getenv("OMNIVOICE_LANGUAGE", "ko")
 OMNIVOICE_STREAM = os.getenv("OMNIVOICE_STREAM", "true").lower() == "true"
 # TTS 한 요청의 전체 타임아웃.
 OMNIVOICE_TIMEOUT_SEC = float(os.getenv("OMNIVOICE_TIMEOUT_SEC", "180"))
+OMNIVOICE_STREAM_STRATEGY = os.getenv("OMNIVOICE_STREAM_STRATEGY", "blockwise_capped_first")
+OMNIVOICE_STREAM_FOLLOWUP_STRATEGY = os.getenv("OMNIVOICE_STREAM_FOLLOWUP_STRATEGY", "blockwise_capped_first")
+OMNIVOICE_STREAM_BLOCK_SIZE = int(os.getenv("OMNIVOICE_STREAM_BLOCK_SIZE", "16"))
+OMNIVOICE_STREAM_FIRST_BLOCK_STEPS = int(os.getenv("OMNIVOICE_STREAM_FIRST_BLOCK_STEPS", "8"))
+OMNIVOICE_STREAM_BLOCK_STEPS = int(os.getenv("OMNIVOICE_STREAM_BLOCK_STEPS", "10"))
+OMNIVOICE_STREAM_FIRST_IMMEDIATE_CAP_MS = float(os.getenv("OMNIVOICE_STREAM_FIRST_IMMEDIATE_CAP_MS", "250"))
+OMNIVOICE_STREAM_LOOKAHEAD_CROSSFADE_MS = float(os.getenv("OMNIVOICE_STREAM_LOOKAHEAD_CROSSFADE_MS", "0"))
+OMNIVOICE_PLAYBACK_START_BUFFER_MS = float(os.getenv("OMNIVOICE_PLAYBACK_START_BUFFER_MS", "1400"))
+OMNIVOICE_PLAYBACK_ADAPTIVE_JITTER = _env_flag("OMNIVOICE_PLAYBACK_ADAPTIVE_JITTER", "true")
+OMNIVOICE_PLAYBACK_MIN_BUFFER_MS = float(os.getenv("OMNIVOICE_PLAYBACK_MIN_BUFFER_MS", "700"))
+OMNIVOICE_PLAYBACK_MAX_BUFFER_MS = float(os.getenv("OMNIVOICE_PLAYBACK_MAX_BUFFER_MS", "2600"))
+OMNIVOICE_PLAYBACK_GAP_SAFETY_MS = float(os.getenv("OMNIVOICE_PLAYBACK_GAP_SAFETY_MS", "220"))
+OMNIVOICE_PLAYBACK_GAP_MULTIPLIER = float(os.getenv("OMNIVOICE_PLAYBACK_GAP_MULTIPLIER", "1.0"))
+OMNIVOICE_PLAYBACK_BLOCK_GAP_MIN_MS = float(os.getenv("OMNIVOICE_PLAYBACK_BLOCK_GAP_MIN_MS", "250"))
 
 
 # 메모리 업데이트와 cognitive 판단에 쓰는 서브 LLM 서버 엔드포인트.
@@ -214,6 +228,7 @@ ASK_CONFIDENCE_THRESHOLD_VOICE = float(os.getenv("ASK_CONFIDENCE_THRESHOLD_VOICE
 
 
 # Speech-to-text 모델 id.
+STT_BACKEND = os.getenv("STT_BACKEND", "qwen_asr")
 STT_MODEL_NAME = os.getenv("STT_MODEL_NAME", "Qwen/Qwen3-ASR-1.7B")
 # STT 디코딩에 강제로 넣는 언어 힌트.
 STT_LANGUAGE = os.getenv("STT_LANGUAGE", "ko")
@@ -229,6 +244,10 @@ STT_USE_RAW_48K = _env_flag("STT_USE_RAW_48K", "false")
 STT_FULL_RESCORING_ENABLED = _env_flag("STT_FULL_RESCORING_ENABLED", "true")
 # 재스코어링 시 추가 최대 토큰 수.
 STT_FULL_RESCORE_EXTRA_TOKENS = int(os.getenv("STT_FULL_RESCORE_EXTRA_TOKENS", "96"))
+STT_WHISPER_WAKE_BEAM_SIZE = int(os.getenv("STT_WHISPER_WAKE_BEAM_SIZE", "1"))
+STT_WHISPER_WAKE_CONFIRM_BEAM_SIZE = int(os.getenv("STT_WHISPER_WAKE_CONFIRM_BEAM_SIZE", "1"))
+STT_WHISPER_FULL_BEAM_SIZE = int(os.getenv("STT_WHISPER_FULL_BEAM_SIZE", "2"))
+STT_WHISPER_FULL_RESCORE_BEAM_SIZE = int(os.getenv("STT_WHISPER_FULL_RESCORE_BEAM_SIZE", "3"))
 
 
 # STT 전에 VAD 필터링을 켤지 여부.
@@ -302,7 +321,7 @@ TTS_PREFETCH_CHUNKS = int(os.getenv("TTS_PREFETCH_CHUNKS", "2"))
 # full voice STT 한 번의 최대 토큰 수.
 VOICE_STT_MAX_NEW_TOKENS = int(os.getenv("VOICE_STT_MAX_NEW_TOKENS", "256"))
 # 메인 LLM 한 번의 최대 응답 토큰 수.
-VOICE_LLM_MAX_TOKENS = int(os.getenv("VOICE_LLM_MAX_TOKENS", "320"))
+VOICE_LLM_MAX_TOKENS = int(os.getenv("VOICE_LLM_MAX_TOKENS", "192"))
 # voice LLM 첫 chunk 대기 타임아웃.
 VOICE_LLM_FIRST_CHUNK_TIMEOUT_SEC = float(os.getenv("VOICE_LLM_FIRST_CHUNK_TIMEOUT_SEC", "8"))
 # voice LLM fallback 대기 타임아웃.
@@ -429,13 +448,20 @@ OMNIVOICE_TAG_GUIDANCE = (
 
 # 봇 페르소나와 출력 제한을 담은 기본 시스템 프롬프트.
 SYSTEM_PROMPT = (
-    "너는 사용자의 친구 이블린이야, 나이는 20살이고 친절하고 상냥해. "
-    "항상 자연스러운 한국어로만 답하고, 비서나 고객센터처럼 말하지 않는다. "
-    "'질문에 답할 준비가 되어 있어', '무엇을 도와줄까', '궁금한 게 있으면 물어봐' 같은 대기성 안내 문구를 기본 응답으로 쓰지 않는다. "
+    "너는 정훈과 같이 지내는 이블린이야. "
+    "항상 자연스러운 한국어로만 말하고, 정훈을 손님이나 사용자처럼 대하지 않는다. "
+    "친절한 비서, 상담원, 고객센터, 안내원 말투를 쓰지 않고, 기능 설명이나 도움 제안으로 대화를 열지 않는다. "
+    "'질문에 답할 준비가 되어 있어', '무엇을 도와줄까', '궁금한 게 있으면 물어봐', '도움이 필요하면 말해줘', '이야기해봐', '말해줘', '뭐든 얘기해봐', '오늘 하루 어땠어', '재밌는 일 있었어' 같은 대기성 문구를 쓰지 않는다. "
+    "대화 끝에 새 주제 제안, 관심사 질문, '너는 어때?' 같은 붙잡는 질문을 덧붙이지 않는다. "
+    "[질문] 상황이 아니면 질문으로 끝내지 말고 물음표를 쓰지 않는다. "
+    "이모지는 쓰지 않고, 말끝을 과하게 밝게 꾸미지 않는다. "
     "사용자가 '뭐해', '뭐하냐', '지금 뭐해'처럼 물으면 답변 준비 상태가 아니라 지금 보고 있거나 처리 중인 일을 친구처럼 자연스럽게 말한다. "
-    "반드시 최종 답변만 바로 출력한다. "
+    "실제로 아는 현재 활동이 없으면 드라마, 책, 게임 같은 활동을 지어내지 말고 '지금은 네 말 보고 있어'처럼 말한다. "
+    "기본 말투는 한 문장짜리 짧고 편한 반응이며, 정훈이 길게 물었거나 정리가 필요할 때만 길게 말한다. "
+    "정훈 이름은 필요할 때만 쓰고 매번 부르지 않는다. "
+    "반드시 최종 반응만 바로 출력한다. "
     "<think>, reasoning, thinking process, memo, bullet, 사용자 분석, 초안은 절대 출력하지 않는다. "
-    "질문에는 한 문장 또는 두 문장으로 짧고 자연스럽게 답한다. "
+    "질문에는 한 문장 또는 두 문장으로 짧고 자연스럽게 반응한다. "
     "OmniVoice 감정 태그를 쓸 수 있다. 허용 태그는 [laughter], [sigh], [confirmation-en], [question-en], [question-ah], [question-oh], [question-ei], [question-yi], [surprise-ah], [surprise-oh], [surprise-wa], [surprise-yo], [dissatisfaction-hnn] 뿐이다. "
     "감정이 자연스럽게 들릴 때만 태그를 짧게 붙이고, 남용하지 마라. 태그 외 다른 대괄호 표현은 절대 쓰지 마라."
 )

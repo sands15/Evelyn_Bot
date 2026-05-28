@@ -18,6 +18,8 @@ This target is driven by five product goals:
 Related reference:
 
 - current runtime snapshot: `CURRENT_EVELYN_ARCHITECTURE.md`
+- memory vault / index / cache target: `docs/EVELYN_MEMORY_VAULT_ARCHITECTURE.md`
+- context assembly target: `docs/CONTEXT_PIPELINE_TARGET.md`
 
 ---
 
@@ -253,6 +255,10 @@ Rules:
 
 Recall and writeback must be separate contracts.
 The assistant must not block first audio on heavy memory work.
+
+Detailed storage, indexing, cache, invalidation, and human-editing rules live in
+`docs/EVELYN_MEMORY_VAULT_ARCHITECTURE.md`. This architecture document owns the
+assistant layer boundary; the memory vault document owns the memory substrate.
 
 ---
 

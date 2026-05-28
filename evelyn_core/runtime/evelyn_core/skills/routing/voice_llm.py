@@ -92,6 +92,7 @@ def build_main_llm_payload(
         "temperature": temperature if temperature is not None else (0.3 if source == "voice" else 0.1),
         "max_tokens": max_tokens,
         "stream": stream,
+        "cache_prompt": True,
     }
 
 

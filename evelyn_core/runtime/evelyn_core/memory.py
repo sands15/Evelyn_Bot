@@ -14,6 +14,11 @@ from .config import (
     MEMORY_WORKING_SUMMARY_MAX_CHARS,
 )
 from .text import clean_text
+from .memory_vault import (
+    append_turn_rows_to_memory_vault,
+    build_memory_vault_context,
+    run_memory_vault_maintenance_once,
+)
 
 
 def guild_memory_dir(guild_id: int) -> Path:
@@ -249,6 +254,15 @@ def append_raw_transcript_rows(guild_id: int, rows: list[dict], *, scope_type: s
             normalized,
             max(MEMORY_RAW_LIMIT * 20, 5000),
         )
+        try:
+            append_turn_rows_to_memory_vault(
+                guild_id,
+                normalized,
+                scope_type=scope_type,
+                scope_key=scope_key,
+            )
+        except Exception as exc:
+            print(f"[MEMORY VAULT] daily mirror failed: {exc!r}")
 
 
 def append_unique_memory_rows(path: Path, rows: list[dict], limit: int, *, mirror_path: Path | None = None) -> None:

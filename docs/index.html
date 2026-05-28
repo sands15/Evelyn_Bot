@@ -400,6 +400,31 @@
           </div>
         </form>
       </section>
+
+      <section class="panel memory-graph-panel" id="memory-graph-panel" aria-label="Memory vault graph">
+        <header class="memory-graph-header">
+          <div>
+            <p class="panel-eyebrow mint">MEMORY VAULT</p>
+            <strong>Memory Graph</strong>
+            <p class="panel-subcopy wide" id="memory-graph-subcopy">Markdown vault relationships and recall paths.</p>
+          </div>
+          <button type="button" class="quick-command memory-graph-refresh" id="memory-graph-refresh-button">Refresh</button>
+        </header>
+        <div class="memory-graph-stats" id="memory-graph-stats">
+          <span>Nodes <strong>0</strong></span>
+          <span>Edges <strong>0</strong></span>
+          <span>Version <strong>0</strong></span>
+        </div>
+        <div class="memory-graph-filter" id="memory-graph-filter" aria-label="Memory graph filters"></div>
+        <div class="memory-graph-shell">
+          <canvas id="memory-graph-canvas" width="800" height="520" aria-label="Memory graph canvas"></canvas>
+          <div class="memory-graph-empty" id="memory-graph-empty">Memory graph data is loading.</div>
+        </div>
+        <aside class="memory-graph-detail" id="memory-graph-detail">
+          <strong>Select a memory node</strong>
+          <p>Click a node to inspect its note path, type, tags, and why it is connected.</p>
+        </aside>
+      </section>
     </aside>
   </div>
 

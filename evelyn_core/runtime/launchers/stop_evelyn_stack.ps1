@@ -4,6 +4,13 @@ param(
 
 $ErrorActionPreference = 'Continue'
 
+$projectRoot = Resolve-Path (Join-Path $PSScriptRoot '..\..\..')
+$stopMarker = Join-Path $projectRoot '.evelyn_stop_requested'
+try {
+    Set-Content -LiteralPath $stopMarker -Value ("stop requested at " + (Get-Date).ToString('s')) -Encoding UTF8 -Force
+} catch {
+}
+
 $targetPorts = @(3000, 8765, 8787, 8798, 8799, 8880, 8912, 9820, 9821, 9822)
 $targetCommandFragments = @(
     'start_background_stack.ps1',
@@ -215,7 +222,21 @@ function Stop-TargetProcesses {
         }
     }
 
-    foreach ($row in @($rows | Sort-Object ProcessId -Descending)) {
+    $targetSet = @{}
+    foreach ($row in @($rows)) {
+        $targetSet[[int]$row.ProcessId] = $true
+    }
+    $rankedRows = foreach ($row in @($rows)) {
+        $depth = 0
+        $parentPid = [int]$row.ParentProcessId
+        while ($parentPid -gt 0 -and $targetSet.ContainsKey($parentPid) -and $ProcessTable.ContainsKey($parentPid)) {
+            $depth += 1
+            $parentPid = [int]$ProcessTable[$parentPid].ParentProcessId
+        }
+        $row | Add-Member -NotePropertyName TargetAncestorDepth -NotePropertyValue $depth -Force -PassThru
+    }
+
+    foreach ($row in @($rankedRows | Sort-Object TargetAncestorDepth, ProcessId)) {
         try {
             Stop-Process -Id $row.ProcessId -Force -ErrorAction Stop
         } catch {

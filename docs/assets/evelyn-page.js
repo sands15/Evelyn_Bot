@@ -136,6 +136,14 @@ const dom = {
   minecraftOpsInventoryBody: document.querySelector("#minecraft-ops-inventory-body"),
   minecraftOpsSurvivalTitle: document.querySelector("#minecraft-ops-survival-title"),
   minecraftOpsSurvivalBody: document.querySelector("#minecraft-ops-survival-body"),
+  memoryGraphPanel: document.querySelector("#memory-graph-panel"),
+  memoryGraphCanvas: document.querySelector("#memory-graph-canvas"),
+  memoryGraphEmpty: document.querySelector("#memory-graph-empty"),
+  memoryGraphStats: document.querySelector("#memory-graph-stats"),
+  memoryGraphFilter: document.querySelector("#memory-graph-filter"),
+  memoryGraphDetail: document.querySelector("#memory-graph-detail"),
+  memoryGraphRefreshButton: document.querySelector("#memory-graph-refresh-button"),
+  memoryGraphSubcopy: document.querySelector("#memory-graph-subcopy"),
 };
 
 const state = {
@@ -156,6 +164,13 @@ const state = {
   panelZIndex: 90,
   winboxPanels: {},
   winboxReady: false,
+  memoryGraphPayload: null,
+  memoryGraphFilterType: "all",
+  memoryGraphSelectedNodeId: "",
+  memoryGraphLoading: false,
+  memoryGraphLastLoadedAt: 0,
+  memoryGraphFrame: null,
+  memoryGraphPointer: { x: 0, y: 0, down: false, dragId: "", hoverId: "" },
 };
 
 let pollTimer = null;
@@ -171,6 +186,7 @@ const PANEL_DEFINITIONS = [
   { id: "diagnostics", label: "Diagnostics", selector: "#minecraft-telemetry-panel", handleSelector: ".panel-title-row" },
   { id: "avatar", label: "Avatar", selector: ".model-viewport", handleSelector: ".viewport-topbar" },
   { id: "chat", label: "Chat", selector: ".chat-panel", handleSelector: ".chat-header" },
+  { id: "memory", label: "Memory", selector: "#memory-graph-panel", handleSelector: ".memory-graph-header" },
 ];
 const CONTROL_PAGE_COMMAND_CATALOG = [
   { command: "/help", template: "/help", summary: "Show the control page command list" },
@@ -1642,6 +1658,324 @@ function renderChat(messages, systemText, { preserveScroll = false } = {}) {
   dom.chatThread.scrollTop = Math.max(0, previousScrollTop + delta);
 }
 
+const MEMORY_GRAPH_COLORS = {
+  core: "#fff8ea",
+  project: "#8fb7ff",
+  episode: "#bda1ff",
+  concept: "#77d6ca",
+  procedure: "#f2b46f",
+  daily: "#d7d0bd",
+  note: "#d7d0bd",
+};
+
+function memoryGraphTypeColor(type) {
+  return MEMORY_GRAPH_COLORS[String(type || "note").toLowerCase()] || MEMORY_GRAPH_COLORS.note;
+}
+
+function memoryGraphVisiblePayload() {
+  const payload = state.memoryGraphPayload || { nodes: [], edges: [] };
+  const nodes = Array.isArray(payload.nodes) ? payload.nodes : [];
+  const edges = Array.isArray(payload.edges) ? payload.edges : [];
+  const filterType = state.memoryGraphFilterType || "all";
+  const visibleNodes = filterType === "all" ? nodes : nodes.filter((node) => node.type === filterType);
+  const visibleIds = new Set(visibleNodes.map((node) => node.id));
+  return {
+    ...payload,
+    nodes: visibleNodes,
+    edges: edges.filter((edge) => visibleIds.has(edge.source) && visibleIds.has(edge.target)),
+  };
+}
+
+function prepareMemoryGraphLayout(payload) {
+  if (!payload || !Array.isArray(payload.nodes)) {
+    return payload;
+  }
+  const width = Math.max(360, dom.memoryGraphCanvas?.clientWidth || 760);
+  const height = Math.max(260, dom.memoryGraphCanvas?.clientHeight || 460);
+  const centerX = width / 2;
+  const centerY = height / 2;
+  const rings = { core: 0.12, project: 0.28, procedure: 0.44, concept: 0.58, episode: 0.72, daily: 0.86 };
+  const counts = {};
+  for (const node of payload.nodes) {
+    const type = node.type || "note";
+    counts[type] = (counts[type] || 0) + 1;
+  }
+  const seen = {};
+  for (const node of payload.nodes) {
+    const type = node.type || "note";
+    const index = seen[type] || 0;
+    seen[type] = index + 1;
+    const total = Math.max(1, counts[type] || 1);
+    const ring = rings[type] || 0.66;
+    const angle = ((index / total) * Math.PI * 2) + (type.length * 0.31);
+    const radius = Math.min(width, height) * ring * 0.5;
+    node.x = Number.isFinite(node.x) ? node.x : centerX + Math.cos(angle) * radius;
+    node.y = Number.isFinite(node.y) ? node.y : centerY + Math.sin(angle) * radius;
+    node.vx = Number.isFinite(node.vx) ? node.vx : 0;
+    node.vy = Number.isFinite(node.vy) ? node.vy : 0;
+  }
+  return payload;
+}
+
+function stepMemoryGraphSimulation(payload) {
+  if (!payload || !payload.nodes || !payload.nodes.length) {
+    return;
+  }
+  const canvas = dom.memoryGraphCanvas;
+  const width = Math.max(360, canvas?.clientWidth || 760);
+  const height = Math.max(260, canvas?.clientHeight || 460);
+  const nodeById = new Map(payload.nodes.map((node) => [node.id, node]));
+  for (const node of payload.nodes) {
+    node.vx += ((width / 2) - node.x) * 0.0009;
+    node.vy += ((height / 2) - node.y) * 0.0009;
+  }
+  for (let i = 0; i < payload.nodes.length; i += 1) {
+    const left = payload.nodes[i];
+    for (let j = i + 1; j < payload.nodes.length; j += 1) {
+      const right = payload.nodes[j];
+      const dx = right.x - left.x;
+      const dy = right.y - left.y;
+      const dist2 = Math.max(80, dx * dx + dy * dy);
+      const force = Math.min(0.7, 460 / dist2);
+      const dist = Math.sqrt(dist2);
+      const fx = (dx / dist) * force;
+      const fy = (dy / dist) * force;
+      left.vx -= fx;
+      left.vy -= fy;
+      right.vx += fx;
+      right.vy += fy;
+    }
+  }
+  for (const edge of payload.edges || []) {
+    const source = nodeById.get(edge.source);
+    const target = nodeById.get(edge.target);
+    if (!source || !target) {
+      continue;
+    }
+    const dx = target.x - source.x;
+    const dy = target.y - source.y;
+    const dist = Math.max(1, Math.sqrt(dx * dx + dy * dy));
+    const desired = 86 + Math.max(0, 9 - Number(edge.weight || 0) * 10);
+    const force = (dist - desired) * 0.0028 * Math.min(2.2, Math.max(0.4, Number(edge.weight || 1)));
+    const fx = (dx / dist) * force;
+    const fy = (dy / dist) * force;
+    source.vx += fx;
+    source.vy += fy;
+    target.vx -= fx;
+    target.vy -= fy;
+  }
+  for (const node of payload.nodes) {
+    if (state.memoryGraphPointer.dragId === node.id) {
+      node.x = state.memoryGraphPointer.x;
+      node.y = state.memoryGraphPointer.y;
+      node.vx = 0;
+      node.vy = 0;
+      continue;
+    }
+    node.vx *= 0.86;
+    node.vy *= 0.86;
+    node.x = Math.max(24, Math.min(width - 24, node.x + node.vx));
+    node.y = Math.max(24, Math.min(height - 24, node.y + node.vy));
+  }
+}
+
+function drawMemoryGraph(payload) {
+  const canvas = dom.memoryGraphCanvas;
+  if (!canvas) {
+    return;
+  }
+  const rect = canvas.getBoundingClientRect();
+  const scale = window.devicePixelRatio || 1;
+  const width = Math.max(360, Math.floor(rect.width || canvas.clientWidth || 760));
+  const height = Math.max(260, Math.floor(rect.height || canvas.clientHeight || 460));
+  if (canvas.width !== Math.floor(width * scale) || canvas.height !== Math.floor(height * scale)) {
+    canvas.width = Math.floor(width * scale);
+    canvas.height = Math.floor(height * scale);
+  }
+  const ctx = canvas.getContext("2d");
+  if (!ctx) {
+    return;
+  }
+  ctx.setTransform(scale, 0, 0, scale, 0, 0);
+  ctx.clearRect(0, 0, width, height);
+  ctx.fillStyle = "rgba(5, 10, 12, 0.72)";
+  ctx.fillRect(0, 0, width, height);
+  const nodeById = new Map((payload.nodes || []).map((node) => [node.id, node]));
+  for (const edge of payload.edges || []) {
+    const source = nodeById.get(edge.source);
+    const target = nodeById.get(edge.target);
+    if (!source || !target) {
+      continue;
+    }
+    const alpha = Math.max(0.14, Math.min(0.58, 0.16 + Number(edge.weight || 0.4) * 0.16));
+    ctx.beginPath();
+    ctx.moveTo(source.x, source.y);
+    ctx.lineTo(target.x, target.y);
+    ctx.strokeStyle = edge.type === "semantic_similarity"
+      ? "rgba(119, 214, 202, " + alpha + ")"
+      : (edge.type === "shared_tag" ? "rgba(242, 180, 111, " + alpha + ")" : "rgba(255, 248, 234, " + alpha + ")");
+    ctx.lineWidth = Math.max(0.8, Math.min(3.2, Number(edge.weight || 0.5)));
+    ctx.stroke();
+  }
+  for (const node of payload.nodes || []) {
+    const radius = Math.max(7, Math.min(24, Number(node.size || 14) * 0.58));
+    const selected = node.id === state.memoryGraphSelectedNodeId;
+    const hovered = node.id === state.memoryGraphPointer.hoverId;
+    ctx.beginPath();
+    ctx.arc(node.x, node.y, radius + (selected ? 5 : (hovered ? 3 : 0)), 0, Math.PI * 2);
+    ctx.fillStyle = selected ? "rgba(255, 248, 234, 0.20)" : (hovered ? "rgba(255, 248, 234, 0.13)" : "rgba(255, 248, 234, 0.05)");
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(node.x, node.y, radius, 0, Math.PI * 2);
+    ctx.fillStyle = memoryGraphTypeColor(node.type);
+    ctx.fill();
+    ctx.lineWidth = selected ? 2.4 : 1.2;
+    ctx.strokeStyle = "rgba(255, 255, 255, 0.72)";
+    ctx.stroke();
+    if (selected || hovered || node.type === "core" || node.type === "project") {
+      ctx.font = "600 11px IBM Plex Sans KR, sans-serif";
+      ctx.fillStyle = "rgba(255, 248, 234, 0.92)";
+      const label = String(node.title || node.id || "").slice(0, 32);
+      ctx.fillText(label, node.x + radius + 7, node.y + 4);
+    }
+  }
+}
+
+function animateMemoryGraph() {
+  const payload = memoryGraphVisiblePayload();
+  stepMemoryGraphSimulation(payload);
+  drawMemoryGraph(payload);
+  state.memoryGraphFrame = window.requestAnimationFrame(animateMemoryGraph);
+}
+
+function startMemoryGraphAnimation() {
+  if (state.memoryGraphFrame !== null) {
+    return;
+  }
+  state.memoryGraphFrame = window.requestAnimationFrame(animateMemoryGraph);
+}
+
+function nearestMemoryGraphNode(clientX, clientY) {
+  const canvas = dom.memoryGraphCanvas;
+  if (!canvas) {
+    return null;
+  }
+  const rect = canvas.getBoundingClientRect();
+  const x = clientX - rect.left;
+  const y = clientY - rect.top;
+  state.memoryGraphPointer.x = x;
+  state.memoryGraphPointer.y = y;
+  let best = null;
+  let bestDist = 999999;
+  for (const node of memoryGraphVisiblePayload().nodes || []) {
+    const dx = node.x - x;
+    const dy = node.y - y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    const radius = Math.max(10, Math.min(28, Number(node.size || 14) * 0.66));
+    if (dist < radius && dist < bestDist) {
+      best = node;
+      bestDist = dist;
+    }
+  }
+  return best;
+}
+
+function renderMemoryGraphDetail(node) {
+  if (!dom.memoryGraphDetail) {
+    return;
+  }
+  if (!node) {
+    dom.memoryGraphDetail.innerHTML = [
+      "<strong>Select a memory node</strong>",
+      "<p>Click a node to inspect its note path, type, tags, and connected memory reasons.</p>",
+    ].join("");
+    return;
+  }
+  const tags = Array.isArray(node.tags) && node.tags.length ? node.tags.slice(0, 8).join(", ") : "none";
+  const projects = Array.isArray(node.projects) && node.projects.length ? node.projects.slice(0, 5).join(", ") : "none";
+  const edges = (state.memoryGraphPayload?.edges || []).filter((edge) => edge.source === node.id || edge.target === node.id);
+  const edgeSummary = edges.slice(0, 5).map((edge) => escapeHtml(edge.type + ": " + (edge.label || ""))).join("<br>") || "No visible edges";
+  dom.memoryGraphDetail.innerHTML = [
+    "<strong>" + escapeHtml(node.title || node.id) + "</strong>",
+    '<p class="memory-node-path">' + escapeHtml(node.rel_path || "") + "</p>",
+    '<div class="memory-node-meta">',
+    "<span>Type <strong>" + escapeHtml(node.type || "note") + "</strong></span>",
+    "<span>Degree <strong>" + escapeHtml(node.degree || 0) + "</strong></span>",
+    "<span>Importance <strong>" + escapeHtml(Number(node.importance || 0).toFixed(2)) + "</strong></span>",
+    "</div>",
+    "<p><b>Tags</b> " + escapeHtml(tags) + "</p>",
+    "<p><b>Projects</b> " + escapeHtml(projects) + "</p>",
+    "<p><b>Edges</b><br>" + edgeSummary + "</p>",
+    "<p>" + escapeHtml(node.snippet || "") + "</p>",
+  ].join("");
+}
+
+function renderMemoryGraphControls(payload) {
+  if (dom.memoryGraphStats) {
+    const stats = payload?.stats || {};
+    dom.memoryGraphStats.innerHTML = [
+      "<span>Nodes <strong>" + escapeHtml(stats.node_count || 0) + "</strong></span>",
+      "<span>Edges <strong>" + escapeHtml(stats.edge_count || 0) + "</strong></span>",
+      "<span>Version <strong>" + escapeHtml(payload?.memory_version || 0) + "</strong></span>",
+    ].join("");
+  }
+  if (dom.memoryGraphSubcopy && payload) {
+    dom.memoryGraphSubcopy.textContent = "Markdown vault graph, " + (payload.latency_ms || 0) + "ms export.";
+  }
+  if (!dom.memoryGraphFilter) {
+    return;
+  }
+  const counts = (payload?.stats || {}).type_counts || {};
+  const types = ["all", ...Object.keys(counts).sort()];
+  dom.memoryGraphFilter.innerHTML = types.map((type) => {
+    const active = state.memoryGraphFilterType === type ? " is-active" : "";
+    const label = type === "all" ? "All" : type;
+    const count = type === "all" ? (payload?.stats?.node_count || 0) : counts[type];
+    return '<button type="button" class="memory-filter-button' + active + '" data-memory-filter="' + escapeHtml(type) + '">' + escapeHtml(label) + " " + escapeHtml(count) + "</button>";
+  }).join("");
+}
+
+function renderMemoryGraph(payload) {
+  state.memoryGraphPayload = prepareMemoryGraphLayout(payload || { nodes: [], edges: [] });
+  const visible = memoryGraphVisiblePayload();
+  if (dom.memoryGraphEmpty) {
+    dom.memoryGraphEmpty.classList.toggle("is-hidden", Boolean(visible.nodes && visible.nodes.length));
+    dom.memoryGraphEmpty.textContent = state.memoryGraphLoading ? "Memory graph data is loading." : "No memory graph nodes available.";
+  }
+  renderMemoryGraphControls(state.memoryGraphPayload);
+  const selected = (state.memoryGraphPayload.nodes || []).find((node) => node.id === state.memoryGraphSelectedNodeId);
+  renderMemoryGraphDetail(selected || null);
+  drawMemoryGraph(visible);
+  startMemoryGraphAnimation();
+}
+
+async function loadMemoryGraph({ force = false } = {}) {
+  if (!dom.memoryGraphCanvas || state.memoryGraphLoading) {
+    return;
+  }
+  const now = Date.now();
+  if (!force && state.memoryGraphPayload && now - state.memoryGraphLastLoadedAt < 60000) {
+    return;
+  }
+  state.memoryGraphLoading = true;
+  if (dom.memoryGraphEmpty) {
+    dom.memoryGraphEmpty.classList.remove("is-hidden");
+    dom.memoryGraphEmpty.textContent = "Memory graph data is loading.";
+  }
+  try {
+    const payload = await fetchApi("/api/control-page/memory-graph?max_nodes=160");
+    state.memoryGraphLastLoadedAt = Date.now();
+    renderMemoryGraph(payload);
+  } catch (error) {
+    if (dom.memoryGraphEmpty) {
+      dom.memoryGraphEmpty.classList.remove("is-hidden");
+      dom.memoryGraphEmpty.textContent = "Memory graph unavailable: " + error.message;
+    }
+  } finally {
+    state.memoryGraphLoading = false;
+  }
+}
+
 function isTechnicalStatusChatRow(row) {
   if (!row || row.role === "user") {
     return false;
@@ -2022,6 +2356,7 @@ function defaultWinBoxLayout(panelId, index) {
     diagnostics: { width: 430, height: 560, x: 88, y: 112 },
     avatar: { width: avatarWidth, height: avatarHeight, x: avatarX, y: 32 },
     chat: { width: chatWidth, height: chatHeight, x: chatX, y: 32 },
+    memory: { width: Math.min(860, Math.max(620, Math.round(viewportWidth * 0.52))), height: Math.min(720, viewportHeight - 96), x: 64, y: 56 },
   };
   return defaults[panelId] || { width: 420, height: 520, x: 32 + index * 36, y: 48 + index * 34 };
 }
@@ -2032,12 +2367,14 @@ function clampWinBoxLayout(layout, panelId = "") {
     diagnostics: 680,
     avatar: 920,
     chat: 580,
+    memory: 980,
   };
   const maxHeightByPanel = {
     runtime: 760,
     diagnostics: 720,
     avatar: 780,
     chat: 780,
+    memory: 820,
   };
   const widthCap = Math.min(maxWidthByPanel[panelId] || 760, Math.max(320, window.innerWidth - 24));
   const heightCap = Math.min(maxHeightByPanel[panelId] || 760, Math.max(280, window.innerHeight - 24));
@@ -2177,6 +2514,10 @@ function openWinBoxPanel(panelId) {
   });
   panel.winbox = box;
   panel.open = true;
+  if (panel.id === "memory") {
+    loadMemoryGraph({ force: false });
+    setTimeout(() => renderMemoryGraph(state.memoryGraphPayload || { nodes: [], edges: [] }), 80);
+  }
   renderWinBoxDock();
   saveWinBoxLayout();
 }
@@ -2515,6 +2856,7 @@ function renderState(payload, { preserveScroll = false } = {}) {
   renderQuickCommands();
   renderChat((payload.chat || {}).messages || [], payload.statusText || "연결 상태를 확인하는 중입니다.", { preserveScroll });
   renderSuggestions();
+  loadMemoryGraph({ force: false });
   schedulePolling();
 }
 
@@ -2722,6 +3064,51 @@ if (dom.refreshStateButton) {
   });
 }
 
+if (dom.memoryGraphRefreshButton) {
+  dom.memoryGraphRefreshButton.addEventListener("click", () => {
+    loadMemoryGraph({ force: true });
+  });
+}
+
+if (dom.memoryGraphFilter) {
+  dom.memoryGraphFilter.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-memory-filter]");
+    if (!button) {
+      return;
+    }
+    state.memoryGraphFilterType = button.getAttribute("data-memory-filter") || "all";
+    renderMemoryGraph(state.memoryGraphPayload || { nodes: [], edges: [] });
+  });
+}
+
+if (dom.memoryGraphCanvas) {
+  dom.memoryGraphCanvas.addEventListener("pointermove", (event) => {
+    const node = nearestMemoryGraphNode(event.clientX, event.clientY);
+    state.memoryGraphPointer.hoverId = node ? node.id : "";
+    dom.memoryGraphCanvas.style.cursor = state.memoryGraphPointer.dragId ? "grabbing" : (node ? "pointer" : "default");
+  });
+  dom.memoryGraphCanvas.addEventListener("pointerdown", (event) => {
+    const node = nearestMemoryGraphNode(event.clientX, event.clientY);
+    if (!node) {
+      state.memoryGraphSelectedNodeId = "";
+      renderMemoryGraphDetail(null);
+      return;
+    }
+    state.memoryGraphSelectedNodeId = node.id;
+    state.memoryGraphPointer.dragId = node.id;
+    dom.memoryGraphCanvas.setPointerCapture?.(event.pointerId);
+    renderMemoryGraphDetail(node);
+  });
+  dom.memoryGraphCanvas.addEventListener("pointerup", (event) => {
+    state.memoryGraphPointer.dragId = "";
+    dom.memoryGraphCanvas.releasePointerCapture?.(event.pointerId);
+  });
+  dom.memoryGraphCanvas.addEventListener("pointerleave", () => {
+    state.memoryGraphPointer.hoverId = "";
+    state.memoryGraphPointer.dragId = "";
+  });
+}
+
 document.addEventListener("click", (event) => {
   const winboxButton = event.target.closest("[data-winbox-panel]");
   if (winboxButton) {
@@ -2762,6 +3149,9 @@ document.addEventListener("click", (event) => {
 window.addEventListener("resize", () => {
   for (const definition of PANEL_DEFINITIONS) {
     applyPanelState(definition.id);
+  }
+  if (state.memoryGraphPayload) {
+    renderMemoryGraph(state.memoryGraphPayload);
   }
 });
 
