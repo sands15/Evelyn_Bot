@@ -52,7 +52,7 @@ if "%SUB_LLM_REASONING_BUDGET%"=="" set "SUB_LLM_REASONING_BUDGET=96"
 if "%SUB_LLM_MODEL%"=="" set "SUB_LLM_MODEL=/mnt/c/Users/Admin/llama.cpp/models/EXAONE-3.5-2.4B-Instruct-Q4_K_M.gguf"
 if "%SUB_LLM_N_GPU_LAYERS%"=="" set "SUB_LLM_N_GPU_LAYERS=999"
 if "%SUB_LLM_THREADS%"=="" set "SUB_LLM_THREADS=8"
-if "%SUB_LLM_CACHE_TYPE_K%"=="" set "SUB_LLM_CACHE_TYPE_K=q8_0"
+if "%SUB_LLM_CACHE_TYPE_K%"=="" set "SUB_LLM_CACHE_TYPE_K=f16"
 if "%SUB_LLM_CACHE_TYPE_V%"=="" set "SUB_LLM_CACHE_TYPE_V=f16"
 if "%SUMMARY_MODEL_NAME%"=="" set "SUMMARY_MODEL_NAME=EXAONE-3.5-2.4B-Instruct-Q4_K_M.gguf"
 
