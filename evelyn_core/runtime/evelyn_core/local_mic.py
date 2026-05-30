@@ -10,7 +10,19 @@ from typing import Any, Callable, Iterable
 
 import numpy as np
 
-from .audio import resample_audio_float
+from .audio import (
+    compute_voice_band_metrics,
+    compute_waveform_activity_stats,
+    is_likely_environment_noise,
+    is_probably_silent,
+    resample_audio_float,
+)
+from .config import (
+    VOICE_WAVEFORM_BODY_PEAK_MIN,
+    VOICE_WAVEFORM_BODY_RMS_MIN,
+    VOICE_WAVEFORM_MIN_RUN_MS,
+    VOICE_WAVEFORM_MIN_VOICED_MS,
+)
 
 try:
     import sounddevice as sd
@@ -146,6 +158,9 @@ class LocalMicCaptureService:
         max_segment_sec: float = 12.0,
         device: str | int | None = None,
         queue_max: int = 256,
+        vad_filter_enabled: bool = True,
+        env_noise_filter_enabled: bool = True,
+        waveform_filter_enabled: bool = True,
     ) -> None:
         self.on_segment = on_segment
         self.sample_rate = max(8000, int(sample_rate))
@@ -160,6 +175,9 @@ class LocalMicCaptureService:
         self.requested_device = device
         self.device = normalize_sounddevice_identifier(device)
         self.queue_max = max(8, int(queue_max))
+        self.vad_filter_enabled = bool(vad_filter_enabled)
+        self.env_noise_filter_enabled = bool(env_noise_filter_enabled)
+        self.waveform_filter_enabled = bool(waveform_filter_enabled)
 
         self.block_samples = max(1, int(round(self.sample_rate * (self.block_ms / 1000.0))))
         self._trailing_silence_blocks = max(1, int(round(self.max_silence_ms / self.block_ms)))
@@ -187,6 +205,9 @@ class LocalMicCaptureService:
         self.last_input_level = 0.0
         self.max_input_level = 0.0
         self.last_input_status: str | None = None
+        self.rejected_segment_count = 0
+        self.last_rejected_reason: str | None = None
+        self.last_segment_filter: dict[str, Any] | None = None
 
     @property
     def capture_ready(self) -> bool:
@@ -328,6 +349,52 @@ class LocalMicCaptureService:
         if level >= self.continue_threshold:
             self._voiced_samples += int(block.size)
 
+    def _voice_filter_result(self, segment: np.ndarray) -> tuple[bool, dict[str, Any]]:
+        band_ratio, flatness, rms = compute_voice_band_metrics(segment, sampling_rate=self.sample_rate)
+        activity = compute_waveform_activity_stats(segment, sampling_rate=self.sample_rate)
+        vad_silent = bool(
+            self.vad_filter_enabled and is_probably_silent(segment, sampling_rate=self.sample_rate)
+        )
+        environment_noise = bool(
+            self.env_noise_filter_enabled and is_likely_environment_noise(segment, sampling_rate=self.sample_rate)
+        )
+        weak_waveform = False
+        if self.waveform_filter_enabled:
+            weak_body = (
+                float(activity["body_rms"]) < VOICE_WAVEFORM_BODY_RMS_MIN * 0.65
+                and float(activity["body_peak"]) < VOICE_WAVEFORM_BODY_PEAK_MIN * 0.65
+            )
+            weak_activity = (
+                float(activity["voiced_ms"]) < max(100.0, VOICE_WAVEFORM_MIN_VOICED_MS * 0.55)
+                and float(activity["longest_voiced_ms"]) < max(60.0, VOICE_WAVEFORM_MIN_RUN_MS * 0.55)
+            )
+            weak_waveform = bool(weak_body and weak_activity)
+
+        reason: str | None = None
+        if vad_silent:
+            reason = "vad_silent"
+        elif environment_noise:
+            reason = "environment_noise"
+        elif weak_waveform:
+            reason = "weak_waveform"
+
+        meta = {
+            "enabled": bool(self.vad_filter_enabled or self.env_noise_filter_enabled or self.waveform_filter_enabled),
+            "rejected": reason is not None,
+            "reason": reason,
+            "vadSilent": vad_silent,
+            "environmentNoise": environment_noise,
+            "weakWaveform": weak_waveform,
+            "bandRatio": round(float(band_ratio), 4),
+            "flatness": round(float(flatness), 4),
+            "rms": round(float(rms), 6),
+            "voicedMs": round(float(activity["voiced_ms"]), 1),
+            "longestVoicedMs": round(float(activity["longest_voiced_ms"]), 1),
+            "bodyRms": round(float(activity["body_rms"]), 6),
+            "bodyPeak": round(float(activity["body_peak"]), 6),
+        }
+        return reason is None, meta
+
     def _flush_active_segment(self, *, force: bool) -> None:
         if not self._capture_active:
             return
@@ -346,6 +413,12 @@ class LocalMicCaptureService:
         if not force and (voiced_samples < self._min_voiced_samples or total_samples < self._min_voiced_samples):
             return
         segment = np.concatenate(blocks).astype(np.float32, copy=False)
+        filter_passed, filter_meta = self._voice_filter_result(segment)
+        self.last_segment_filter = filter_meta
+        if not filter_passed:
+            self.rejected_segment_count += 1
+            self.last_rejected_reason = str(filter_meta.get("reason") or "voice_filter")
+            return
         pcm_bytes = mono16k_float_to_discord_pcm(segment, sampling_rate=self.sample_rate)
         if not pcm_bytes:
             return
@@ -356,5 +429,6 @@ class LocalMicCaptureService:
                 "unstable": unstable,
                 "duration_sec": round(segment.size / float(self.sample_rate), 3),
                 "sampling_rate": self.sample_rate,
+                "voice_filter": filter_meta,
             },
         )

@@ -602,6 +602,8 @@ local_mic_runtime_state: dict[str, Any] = {
     "last_segment_at": None,
     "last_segment_duration_sec": None,
     "discord_suppression_active": False,
+    "last_filter": None,
+    "rejected_segment_count": 0,
 }
 control_page_runner: web.AppRunner | None = None
 control_page_site: web.TCPSite | None = None
@@ -5266,6 +5268,12 @@ def serialize_local_mic_runtime_state() -> dict[str, Any]:
         "lastInputLevel": round(float(getattr(local_mic_service, "last_input_level", 0.0) or 0.0), 6),
         "maxInputLevel": round(float(getattr(local_mic_service, "max_input_level", 0.0) or 0.0), 6),
         "lastInputStatus": getattr(local_mic_service, "last_input_status", None),
+        "rejectedSegmentCount": int(getattr(local_mic_service, "rejected_segment_count", 0) or 0),
+        "lastRejectedReason": getattr(local_mic_service, "last_rejected_reason", None),
+        "lastVoiceFilter": getattr(local_mic_service, "last_segment_filter", None) or local_mic_runtime_state.get("last_filter"),
+        "vadFilterEnabled": bool(LOCAL_MIC_VAD_FILTER_ENABLED),
+        "envNoiseFilterEnabled": bool(LOCAL_MIC_ENV_NOISE_FILTER_ENABLED),
+        "waveformFilterEnabled": bool(LOCAL_MIC_WAVEFORM_FILTER_ENABLED),
         "discordSuppressionActive": bool(local_mic_runtime_state.get("discord_suppression_active")),
         "discordSuppressAfterSegmentSec": LOCAL_MIC_DISCORD_SUPPRESS_AFTER_SEGMENT_SEC,
         "device": LOCAL_MIC_DEVICE or "default",
@@ -5299,6 +5307,7 @@ async def handle_local_mic_segment(pcm_bytes: bytes, debug_meta: dict[str, Any] 
     local_mic_runtime_state["last_segment_at"] = time.time()
     if isinstance(debug_meta, dict):
         local_mic_runtime_state["last_segment_duration_sec"] = debug_meta.get("duration_sec")
+        local_mic_runtime_state["last_filter"] = debug_meta.get("voice_filter")
     target = resolve_local_mic_target(guilds=bot.guilds, preferred_user_ids=LOCAL_MIC_DISCORD_USER_IDS)
     if target is None:
         local_mic_runtime_state["last_error"] = "no_active_discord_target_for_local_mic"
@@ -5336,6 +5345,9 @@ async def ensure_local_mic_service_started() -> None:
         max_segment_sec=LOCAL_MIC_MAX_SEGMENT_SEC,
         device=LOCAL_MIC_DEVICE,
         queue_max=LOCAL_MIC_QUEUE_MAX,
+        vad_filter_enabled=LOCAL_MIC_VAD_FILTER_ENABLED,
+        env_noise_filter_enabled=LOCAL_MIC_ENV_NOISE_FILTER_ENABLED,
+        waveform_filter_enabled=LOCAL_MIC_WAVEFORM_FILTER_ENABLED,
     )
     started = service.start()
     local_mic_runtime_state["capture_ready"] = bool(started and service.capture_ready)

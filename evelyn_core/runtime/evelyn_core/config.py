@@ -151,6 +151,9 @@ LOCAL_MIC_PREROLL_MS = int(os.getenv("LOCAL_MIC_PREROLL_MS", "180"))
 LOCAL_MIC_MAX_SEGMENT_SEC = float(os.getenv("LOCAL_MIC_MAX_SEGMENT_SEC", "12.0"))
 LOCAL_MIC_QUEUE_MAX = int(os.getenv("LOCAL_MIC_QUEUE_MAX", "256"))
 LOCAL_MIC_DISCORD_SUPPRESS_AFTER_SEGMENT_SEC = float(os.getenv("LOCAL_MIC_DISCORD_SUPPRESS_AFTER_SEGMENT_SEC", "4.0"))
+LOCAL_MIC_VAD_FILTER_ENABLED = _env_flag("LOCAL_MIC_VAD_FILTER_ENABLED", "true")
+LOCAL_MIC_ENV_NOISE_FILTER_ENABLED = _env_flag("LOCAL_MIC_ENV_NOISE_FILTER_ENABLED", "true")
+LOCAL_MIC_WAVEFORM_FILTER_ENABLED = _env_flag("LOCAL_MIC_WAVEFORM_FILTER_ENABLED", "true")
 VOICE_INPUT_MODE = os.getenv("VOICE_INPUT_MODE", "auto")
 # 자율 행동 루프 기본 활성 여부.
 AUTONOMY_ENABLED = _env_flag("AUTONOMY_ENABLED", "false")
@@ -401,7 +404,7 @@ WAKE_WORDS = [
     w.strip()
     for w in os.getenv(
         "WAKE_WORDS",
-        "이별인,이별링,이벨링,에벌링,이블린,이불린,이불링,이브린,이브링,입을린,입을링,이블닝,이블링,이별린,이벌린,에블린,에브린,에블링,에브링,에벌린,이벨린,이반린,불리읍,이블리,이별된,이벨리나,이별레인,이블레인"
+        "이별인,이별링,이벨링,에벌링,이블린,이불린,이불링,이브린,이브링,입을린,입을링,이블닝,이블링,이별린,이벌린,에브린,에블링,에브링,에벌린,이벨린,이반린,불리읍,이블리,이별된,이벨리나,이별레인,이블레인"
     ).split(",")
     if w.strip()
 ]

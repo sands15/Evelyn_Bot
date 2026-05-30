@@ -57,7 +57,7 @@ STT result
 
 Initial turn classes:
 
-- `wake_call`: "이블린", "에블린", "야", "뭐해" when used as a call.
+- `wake_call`: "이블린", "야", "뭐해" when used as a call.
 - `casual_check`: "있어?", "듣고 있어?", "괜찮아?"
 - `short_confirm`: "응", "아니", "그래", "해줘"
 - `runtime_status`: "지금 뭐 하고 있어?", "마크 상태 어때?"
@@ -179,7 +179,7 @@ Maintain a small fixed sample set for style checks. These are not only latency t
 Initial samples:
 
 - "이블린"
-- "에블린"
+- "이블린 지금 뭐 해?"
 - "야 뭐해"
 - "듣고 있어?"
 - "아까 뭐 하고 있었지?"

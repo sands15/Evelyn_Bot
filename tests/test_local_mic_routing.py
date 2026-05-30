@@ -4,6 +4,7 @@ import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 
@@ -14,6 +15,7 @@ if str(RUNTIME_ROOT) not in sys.path:
     sys.path.insert(0, str(RUNTIME_ROOT))
 
 from evelyn_core.local_mic import (  # noqa: E402
+    LocalMicCaptureService,
     mono16k_float_to_discord_pcm,
     normalize_sounddevice_identifier,
     parse_user_id_set,
@@ -102,6 +104,54 @@ class LocalMicRoutingTests(unittest.TestCase):
         pcm_bytes = mono16k_float_to_discord_pcm(audio, sampling_rate=16000)
 
         self.assertEqual(len(pcm_bytes), 48000 * 2 * 2)
+
+    def test_local_mic_voice_filter_rejects_silence(self) -> None:
+        captured: list[tuple[bytes, dict]] = []
+        service = LocalMicCaptureService(
+            on_segment=lambda pcm, meta: captured.append((pcm, meta)),
+            sample_rate=16000,
+            min_voiced_ms=200,
+            vad_filter_enabled=True,
+            env_noise_filter_enabled=True,
+            waveform_filter_enabled=True,
+        )
+        audio = np.zeros(16000 // 2, dtype=np.float32)
+        service._capture_active = True
+        service._current_blocks = [audio]
+        service._voiced_samples = audio.size
+        service._total_samples = audio.size
+
+        with patch("evelyn_core.local_mic.is_probably_silent", return_value=True):
+            service._flush_active_segment(force=False)
+
+        self.assertEqual(captured, [])
+        self.assertEqual(service.rejected_segment_count, 1)
+        self.assertEqual(service.last_rejected_reason, "vad_silent")
+
+    def test_local_mic_voice_filter_allows_speech_like_audio(self) -> None:
+        captured: list[tuple[bytes, dict]] = []
+        service = LocalMicCaptureService(
+            on_segment=lambda pcm, meta: captured.append((pcm, meta)),
+            sample_rate=16000,
+            min_voiced_ms=200,
+            vad_filter_enabled=True,
+            env_noise_filter_enabled=True,
+            waveform_filter_enabled=True,
+        )
+        t = np.arange(16000 // 2, dtype=np.float32) / 16000.0
+        audio = (0.08 * np.sin(2.0 * np.pi * 440.0 * t)).astype(np.float32)
+        service._capture_active = True
+        service._current_blocks = [audio]
+        service._voiced_samples = audio.size
+        service._total_samples = audio.size
+
+        with patch("evelyn_core.local_mic.is_probably_silent", return_value=False):
+            service._flush_active_segment(force=False)
+
+        self.assertEqual(len(captured), 1)
+        _, meta = captured[0]
+        self.assertEqual(meta["source"], "local_mic")
+        self.assertFalse(meta["voice_filter"]["rejected"])
 
 
 if __name__ == "__main__":
