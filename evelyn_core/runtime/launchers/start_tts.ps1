@@ -10,7 +10,7 @@ Set-Location $projectRoot
 $profileDir = if ($env:OMNIVOICE_PROFILE_DIR) { $env:OMNIVOICE_PROFILE_DIR } else { Join-Path $projectRoot 'omnivoice_profiles' }
 $venvDir = if ($env:OMNIVOICE_VENV) { $env:OMNIVOICE_VENV } else { 'C:\Users\Admin\omnivoice-server\.venv' }
 $ttsPort = if ($env:TTS_PORT) { $env:TTS_PORT } else { '8880' }
-$ttsGpu = if ($env:TTS_GPU) { $env:TTS_GPU } else { '0' }
+$ttsGpu = if ($env:TTS_GPU) { $env:TTS_GPU } else { '1' }
 $ttsDevice = if ($env:TTS_DEVICE) { $env:TTS_DEVICE } else { 'cuda' }
 
 $env:CUDA_VISIBLE_DEVICES = $ttsGpu
