@@ -64,7 +64,7 @@ try { `$Host.UI.RawUI.WindowTitle = '$Title' } catch {}
 $Script
 "@
     $encoded = New-EncodedCommand -Script $bootstrap
-    $startHidden = if ($env:EVELYN_START_HIDDEN) { ([string]$env:EVELYN_START_HIDDEN).ToLowerInvariant() -in @('1', 'true', 'yes', 'on') } else { $false }
+    $startHidden = if ($env:EVELYN_START_HIDDEN) { ([string]$env:EVELYN_START_HIDDEN).ToLowerInvariant() -notin @('0', 'false', 'no', 'off') } else { $true }
     $windowStyle = if ($startHidden) { 'Hidden' } else { 'Normal' }
     Start-Process -FilePath 'powershell.exe' -WorkingDirectory $projectRoot -WindowStyle $windowStyle -ArgumentList @(
         '-NoLogo',
