@@ -9,7 +9,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+KR:wght@400;500;600;700&family=Space+Grotesk:wght@500;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="./assets/vendor/winbox/winbox.min.css?v=0.2.82">
-  <link rel="stylesheet" href="./assets/evelyn-page.css?v=20260530b">
+  <link rel="stylesheet" href="./assets/evelyn-page.css?v=20260530c">
 </head>
 <body class="is-boot-splash-active">
   <section class="boot-splash" id="boot-splash" aria-live="polite" aria-label="Evelyn boot loading screen">
@@ -173,6 +173,11 @@
             <span>STT <strong id="voice-pipeline-stt">idle</strong></span>
             <span>TTS p95 <strong id="voice-pipeline-tts">0ms</strong></span>
             <span>Drops <strong id="voice-pipeline-drops">0</strong></span>
+          </div>
+          <div class="voice-input-switch" id="voice-input-switch" aria-label="Voice input source">
+            <button type="button" data-voice-input-mode="auto" aria-pressed="true">Auto</button>
+            <button type="button" data-voice-input-mode="local" aria-pressed="false">Local mic</button>
+            <button type="button" data-voice-input-mode="discord" aria-pressed="false">Discord</button>
           </div>
         </details>
 
@@ -460,6 +465,6 @@
   </div>
 
   <script src="./assets/vendor/winbox/winbox.bundle.min.js?v=0.2.82"></script>
-  <script src="./assets/evelyn-page.js?v=20260530b"></script>
+  <script src="./assets/evelyn-page.js?v=20260530c"></script>
 </body>
 </html>

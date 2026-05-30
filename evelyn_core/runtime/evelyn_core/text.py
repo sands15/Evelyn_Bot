@@ -42,6 +42,14 @@ def has_omnivoice_tag(text: str) -> bool:
     return bool(re.search(r"\[[^\[\]]+\]", normalize_omnivoice_tags(text or "")))
 
 
+def strip_tts_leading_oh(text: str) -> str:
+    """TTS가 문장 앞에서 '오!' 감탄을 별도로 읽지 않도록 제거한다."""
+    text = text or ""
+    text = re.sub(r"^\s*(?:\[(?:question|surprise)-oh\]\s*)+", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"^\s*(?:오|oh)\s*[!！,，.。…]+\s*", "", text, flags=re.IGNORECASE)
+    return clean_text(text)
+
+
 def infer_omnivoice_emotion_tag(text: str) -> str:
     plain = strip_omnivoice_tags(text)
     compact = plain.replace(" ", "")
@@ -60,7 +68,7 @@ def infer_omnivoice_emotion_tag(text: str) -> str:
 
 def clean_tts_text(text: str) -> str:
     """TTS로 보내기 전 태그와 특수문자를 정리해 읽기 쉬운 문장으로 만든다."""
-    text = normalize_omnivoice_tags(clean_text(strip_response_action_tags(text)))
+    text = strip_tts_leading_oh(normalize_omnivoice_tags(clean_text(strip_response_action_tags(text))))
     text = re.sub(r"[\U0001F300-\U0001FAFF\u2600-\u27BF\uFE0F]+", " ", text)
     text = re.sub(r"(?:\s|^)[:;=8xX]-?[)DdpP(/\\|]+\s*$", "", text)
     text = re.sub(r"(?:\s|^)(?:ㅎㅎ+|ㅋㅋ+|ㅠㅠ+|ㅜㅜ+|\^\^+|헤헤+|하하+|흐흐+)\s*$", "", text)
@@ -72,7 +80,7 @@ def clean_tts_text(text: str) -> str:
     if OMNIVOICE_AUTO_EMOTION_TAGS and not has_omnivoice_tag(text):
         tag = infer_omnivoice_emotion_tag(text)
         if tag:
-            return clean_text(f"{tag} {text}")
+            return strip_tts_leading_oh(clean_text(f"{tag} {text}"))
     return text
 
 

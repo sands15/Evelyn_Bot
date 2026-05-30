@@ -719,6 +719,39 @@ body.is-minecraft-mode .winbox-panel-content .slot-default {
   white-space: nowrap;
 }
 
+.voice-input-switch {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+  margin-top: 10px;
+  padding: 5px;
+  border: 1px solid rgba(231, 220, 184, 0.12);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.voice-input-switch button {
+  min-width: 0;
+  min-height: 30px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  font: 700 0.72rem "Space Grotesk", "IBM Plex Sans KR", sans-serif;
+  cursor: pointer;
+}
+
+.voice-input-switch button[aria-pressed="true"] {
+  border-color: rgba(240, 201, 95, 0.42);
+  background: rgba(240, 201, 95, 0.12);
+  color: #f0cb62;
+}
+
+.voice-input-switch button:hover {
+  color: var(--text-main);
+  border-color: rgba(240, 201, 95, 0.24);
+}
+
 #minecraft-telemetry-panel {
   display: flex;
   flex-direction: column;
@@ -2448,6 +2481,10 @@ body.is-default-mode .winbox-panel-content.model-viewport .avatar-annotation {
 
   .meter-main {
     grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .voice-input-switch {
+    grid-template-columns: 1fr;
   }
 
   .event-row {

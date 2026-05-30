@@ -151,6 +151,7 @@ LOCAL_MIC_PREROLL_MS = int(os.getenv("LOCAL_MIC_PREROLL_MS", "180"))
 LOCAL_MIC_MAX_SEGMENT_SEC = float(os.getenv("LOCAL_MIC_MAX_SEGMENT_SEC", "12.0"))
 LOCAL_MIC_QUEUE_MAX = int(os.getenv("LOCAL_MIC_QUEUE_MAX", "256"))
 LOCAL_MIC_DISCORD_SUPPRESS_AFTER_SEGMENT_SEC = float(os.getenv("LOCAL_MIC_DISCORD_SUPPRESS_AFTER_SEGMENT_SEC", "4.0"))
+VOICE_INPUT_MODE = os.getenv("VOICE_INPUT_MODE", "auto")
 # 자율 행동 루프 기본 활성 여부.
 AUTONOMY_ENABLED = _env_flag("AUTONOMY_ENABLED", "false")
 # 자율 행동 주기(초). 경량 상태/타이머 점검 루프의 기본 tick.

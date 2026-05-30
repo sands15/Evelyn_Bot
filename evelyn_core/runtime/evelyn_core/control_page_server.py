@@ -92,6 +92,9 @@ async def proxy_raw(request: web.Request, path: str) -> web.Response | None:
 def default_commands() -> list[dict[str, str]]:
     return [
         {"command": "/status", "template": "/status", "summary": "현재 Evelyn, 음성, TTS 상태 보기", "visibility": "always"},
+        {"command": "/voice input auto", "template": "/voice input auto", "summary": "로컬 마이크와 Discord 입력 자동 전환", "visibility": "always"},
+        {"command": "/voice input local", "template": "/voice input local", "summary": "로컬 마이크 입력 사용", "visibility": "always"},
+        {"command": "/voice input discord", "template": "/voice input discord", "summary": "Discord 음성 입력 사용", "visibility": "always"},
         {"command": "/help", "template": "/help", "summary": "페이지 명령어 보기", "visibility": "always"},
         {"command": "/autonomy status", "template": "/autonomy status", "summary": "자율 행동 상태 보기", "visibility": "always"},
         {"command": "/minecraft connect", "template": "/minecraft connect", "summary": "Minecraft 모드 시작", "visibility": "minecraft-idle"},

@@ -572,9 +572,29 @@ voice_ingress_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=VOICE
 voice_worker_task: asyncio.Task | None = None
 debug_write_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=max(8, DEBUG_WRITE_QUEUE_MAX))
 debug_write_task: asyncio.Task | None = None
+
+
+VOICE_INPUT_MODES = {"auto", "local", "discord"}
+
+
+def normalize_voice_input_mode(value: str | None) -> str:
+    mode = clean_text(str(value or "")).lower().replace("-", "_")
+    aliases = {
+        "local_mic": "local",
+        "mic": "local",
+        "microphone": "local",
+        "discord_voice": "discord",
+        "vc": "discord",
+        "voice": "discord",
+    }
+    mode = aliases.get(mode, mode)
+    return mode if mode in VOICE_INPUT_MODES else "auto"
+
+
 local_mic_service: LocalMicCaptureService | None = None
 local_mic_runtime_state: dict[str, Any] = {
     "enabled": bool(LOCAL_MIC_ENABLED),
+    "input_mode": normalize_voice_input_mode(VOICE_INPUT_MODE),
     "capture_ready": False,
     "last_error": None,
     "routed_user_ids": sorted(int(user_id) for user_id in LOCAL_MIC_DISCORD_USER_IDS),
@@ -5171,12 +5191,25 @@ def resolve_evelyn_page_url() -> str | None:
 def should_drop_discord_audio_for_local_mic(member_id: int | None, *, source: str | None = None) -> bool:
     if source == "local_mic":
         return False
+    input_mode = normalize_voice_input_mode(str(local_mic_runtime_state.get("input_mode") or "auto"))
+    local_mic_runtime_state["input_mode"] = input_mode
+    if input_mode == "discord":
+        local_mic_runtime_state["discord_suppression_active"] = False
+        return False
     capture_ready = bool(local_mic_service and local_mic_service.capture_ready)
     local_mic_runtime_state["capture_ready"] = capture_ready
     local_mic_recent = False
     last_segment_at = local_mic_runtime_state.get("last_segment_at")
     if isinstance(last_segment_at, (int, float)):
         local_mic_recent = (time.time() - float(last_segment_at)) <= LOCAL_MIC_DISCORD_SUPPRESS_AFTER_SEGMENT_SEC
+    if input_mode == "local":
+        should_suppress = should_route_discord_user_to_local_mic(
+            member_id,
+            preferred_user_ids=LOCAL_MIC_DISCORD_USER_IDS,
+            capture_ready=True,
+        )
+        local_mic_runtime_state["discord_suppression_active"] = should_suppress
+        return should_suppress
     should_suppress = bool(
         local_mic_recent
         and should_route_discord_user_to_local_mic(
@@ -5189,7 +5222,26 @@ def should_drop_discord_audio_for_local_mic(member_id: int | None, *, source: st
     return should_suppress
 
 
+def set_voice_input_mode(mode: str | None) -> str:
+    normalized = normalize_voice_input_mode(mode)
+    local_mic_runtime_state["input_mode"] = normalized
+    if normalized == "discord":
+        local_mic_runtime_state["discord_suppression_active"] = False
+    return normalized
+
+
+def voice_input_mode_status_line() -> str:
+    mode = normalize_voice_input_mode(str(local_mic_runtime_state.get("input_mode") or "auto"))
+    if mode == "local":
+        return "local mic only"
+    if mode == "discord":
+        return "discord voice only"
+    return "auto"
+
+
 def serialize_local_mic_runtime_state() -> dict[str, Any]:
+    input_mode = normalize_voice_input_mode(str(local_mic_runtime_state.get("input_mode") or "auto"))
+    local_mic_runtime_state["input_mode"] = input_mode
     capture_ready = bool(local_mic_service and local_mic_service.capture_ready)
     local_mic_runtime_state["capture_ready"] = capture_ready
     last_segment_at = local_mic_runtime_state.get("last_segment_at")
@@ -5201,6 +5253,8 @@ def serialize_local_mic_runtime_state() -> dict[str, Any]:
         last_input_age_sec = round(max(0.0, time.time() - float(local_mic_service.last_input_at)), 3)
     return {
         "enabled": bool(local_mic_runtime_state.get("enabled")),
+        "inputMode": input_mode,
+        "inputModeLabel": voice_input_mode_status_line(),
         "captureReady": capture_ready,
         "lastError": local_mic_runtime_state.get("last_error"),
         "routedUserIds": list(local_mic_runtime_state.get("routed_user_ids") or []),
@@ -5224,19 +5278,22 @@ def serialize_local_mic_runtime_state() -> dict[str, Any]:
 
 def local_mic_status_line() -> str:
     state = serialize_local_mic_runtime_state()
+    mode_text = state.get("inputModeLabel") or state.get("inputMode") or "auto"
     if not state["enabled"]:
-        return "disabled"
+        return f"{mode_text} | disabled"
     if state["captureReady"]:
         age = state.get("lastSegmentAgeSec")
         segment_text = "no segments" if age is None else f"last segment {age:.1f}s ago"
         suppress_text = "discord suppress on" if state.get("discordSuppressionActive") else "discord fallback on"
-        return f"ready | {segment_text} | {suppress_text}"
+        return f"{mode_text} | ready | {segment_text} | {suppress_text}"
     error = clean_text(str(state.get("lastError") or "capture not ready"))
-    return f"not ready | {error}"
+    return f"{mode_text} | not ready | {error}"
 
 
 async def handle_local_mic_segment(pcm_bytes: bytes, debug_meta: dict[str, Any] | None = None) -> None:
     if not pcm_bytes:
+        return
+    if normalize_voice_input_mode(str(local_mic_runtime_state.get("input_mode") or "auto")) == "discord":
         return
     local_mic_runtime_state["segment_count"] = int(local_mic_runtime_state.get("segment_count") or 0) + 1
     local_mic_runtime_state["last_segment_at"] = time.time()
@@ -7062,6 +7119,18 @@ CONTROL_PAGE_COMMANDS.insert(
 )
 CONTROL_PAGE_COMMANDS.insert(
     3,
+    {"command": "/voice input auto", "template": "/voice input auto", "summary": "Use local mic with Discord fallback", "visibility": "always"},
+)
+CONTROL_PAGE_COMMANDS.insert(
+    4,
+    {"command": "/voice input local", "template": "/voice input local", "summary": "Use the local microphone for your voice input", "visibility": "always"},
+)
+CONTROL_PAGE_COMMANDS.insert(
+    5,
+    {"command": "/voice input discord", "template": "/voice input discord", "summary": "Use Discord voice receive for your voice input", "visibility": "always"},
+)
+CONTROL_PAGE_COMMANDS.insert(
+    3,
     {"command": "/voice reconnect", "template": "/voice reconnect", "summary": "Reconnect to the last saved voice channel", "visibility": "always"},
 )
 
@@ -8188,6 +8257,7 @@ def build_control_page_status_text(guild: discord.Guild, minecraft: dict[str, An
             f"- router_model: {ROUTER_MODEL_NAME}",
             f"- summary_model: {SUMMARY_MODEL_NAME}",
             f"- stt_model: {STT_MODEL_NAME}",
+            f"- voice_input_mode: {voice_input_mode_status_line()}",
             f"- local_mic: {local_mic_status_line()}",
             f"- voyager_running: {'on' if minecraft.get('minecraft_autonomy') else 'off'}",
             f"- voyager_connected: {'on' if minecraft.get('voyager_connected') else 'off'}",
@@ -8215,6 +8285,7 @@ def build_control_page_voice_status_reply(guild: discord.Guild | None) -> str:
             "Voice pipeline",
             f"- channel: {channel_name}",
             f"- saved_channel: {saved_channel}",
+            f"- input_mode: {voice_input_mode_status_line()}",
             f"- queue: {voice['queueDepth']}/{voice['queueMax']}",
             f"- live_recent: {'yes' if voice['liveRecent'] else 'no'}",
             f"- stt_busy: {'yes' if voice['sttBusy'] else 'no'}",
@@ -8412,6 +8483,10 @@ async def execute_control_page_command(guild: discord.Guild, text: str) -> str:
         return await build_control_page_status_reply(guild)
     if normalized in {"/voice status", "/voice"}:
         return build_control_page_voice_status_reply(guild)
+    if normalized.startswith("/voice input ") or normalized.startswith("/voice source "):
+        requested = normalized.rsplit(" ", 1)[-1]
+        mode = set_voice_input_mode(requested)
+        return f"Voice input mode: {voice_input_mode_status_line()} ({mode})."
     if normalized in {"/voice reconnect", "/voice rejoin"}:
         ok, detail = await restore_last_voice_channel(guild, force=True)
         if ok:

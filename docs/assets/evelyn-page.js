@@ -79,6 +79,8 @@ const dom = {
   voicePipelineStt: document.querySelector("#voice-pipeline-stt"),
   voicePipelineTts: document.querySelector("#voice-pipeline-tts"),
   voicePipelineDrops: document.querySelector("#voice-pipeline-drops"),
+  voiceInputSwitch: document.querySelector("#voice-input-switch"),
+  voiceInputModeButtons: document.querySelectorAll("[data-voice-input-mode]"),
   guildName: document.querySelector("#guild-name"),
   modePill: document.querySelector("#mode-pill"),
   submodePill: document.querySelector("#submode-pill"),
@@ -203,6 +205,9 @@ const PANEL_DEFINITIONS = [
 const CONTROL_PAGE_COMMAND_CATALOG = [
   { command: "/help", template: "/help", summary: "Show the control page command list" },
   { command: "/status", template: "/status", summary: "Show current Evelyn, voice, and TTS status" },
+  { command: "/voice input auto", template: "/voice input auto", summary: "Use local mic with Discord fallback" },
+  { command: "/voice input local", template: "/voice input local", summary: "Use local microphone input" },
+  { command: "/voice input discord", template: "/voice input discord", summary: "Use Discord voice input" },
   { command: "/inventory", template: "/inventory", summary: "Show the current Minecraft inventory summary" },
   { command: "/voyager stats", template: "/voyager stats", summary: "Show Voyager progress and evaluator status" },
   { command: "/minecraft status", template: "/minecraft status", summary: "Show Minecraft connection and current task status" },
@@ -921,6 +926,12 @@ function commandDisplayName(item) {
   switch (command) {
     case "/status":
       return "Evelyn 상태";
+    case "/voice input auto":
+      return "Voice auto";
+    case "/voice input local":
+      return "Local mic";
+    case "/voice input discord":
+      return "Discord voice";
     case "/inventory":
       return "인벤토리";
     case "/voyager stats":
@@ -2845,6 +2856,14 @@ function renderState(payload, { preserveScroll = false } = {}) {
     const drops = Number(voicePipeline.queueFullDropCount || 0) + Number(voicePipeline.queueStaleDropCount || 0);
     dom.voicePipelineDrops.textContent = String(drops);
   }
+  const localMic = runtime.localMic || {};
+  const voiceInputMode = String(localMic.inputMode || "auto").toLowerCase();
+  if (dom.voiceInputModeButtons) {
+    dom.voiceInputModeButtons.forEach((button) => {
+      const mode = String(button.getAttribute("data-voice-input-mode") || "auto").toLowerCase();
+      button.setAttribute("aria-pressed", String(mode === voiceInputMode));
+    });
+  }
 
   if (dom.minecraftRuntimeTitle) {
     dom.minecraftRuntimeTitle.textContent = minecraftActive
@@ -3132,6 +3151,17 @@ if (dom.quickCommandRow) {
       return;
     }
     handleChatCommandTrigger(button);
+  });
+}
+
+if (dom.voiceInputSwitch) {
+  dom.voiceInputSwitch.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-voice-input-mode]");
+    if (!button) {
+      return;
+    }
+    const mode = button.getAttribute("data-voice-input-mode") || "auto";
+    sendCurrentMessage("/voice input " + mode);
   });
 }
 

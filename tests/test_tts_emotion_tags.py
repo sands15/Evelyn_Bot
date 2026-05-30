@@ -21,8 +21,11 @@ class TtsEmotionTagTests(unittest.TestCase):
     def test_clean_tts_text_drops_unknown_tags(self):
         self.assertEqual(clean_tts_text("[angry] 응"), "응")
 
-    def test_clean_tts_text_adds_question_tag_when_missing(self):
-        self.assertEqual(clean_tts_text("왜 불렀어?"), "[question-oh] 왜 불렀어?")
+    def test_clean_tts_text_removes_question_oh_tag_before_tts(self):
+        self.assertEqual(clean_tts_text("왜 불렀어?"), "왜 불렀어?")
+
+    def test_clean_tts_text_removes_leading_oh_interjection_before_tts(self):
+        self.assertEqual(clean_tts_text("오! 지금 확인할게."), "지금 확인할게.")
 
     def test_clean_tts_text_does_not_double_tag(self):
         self.assertEqual(clean_tts_text("[sigh] 하아 알겠어"), "[sigh] 하아 알겠어")
