@@ -438,6 +438,7 @@ body.is-minecraft-mode .winbox-panel-content .slot-default {
 }
 
 .winbox-panel-content.model-viewport .topbar-status-line,
+.winbox-panel-content.model-viewport .api-boot-progress,
 .winbox-panel-content.model-viewport .viewport-focus {
   display: none !important;
 }
@@ -738,6 +739,59 @@ body.is-minecraft-mode .winbox-panel-content .slot-default {
   color: var(--text-soft);
   font-size: 0.84rem;
   line-height: 1.5;
+}
+
+.api-boot-progress {
+  width: min(100%, 360px);
+  display: grid;
+  gap: 6px;
+  transition: opacity 180ms ease, transform 180ms ease;
+}
+
+.api-boot-progress.is-hidden {
+  opacity: 0;
+  transform: translateY(-4px);
+  pointer-events: none;
+}
+
+.api-boot-progress-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--text-soft);
+  font-size: 0.74rem;
+}
+
+.api-boot-progress-head span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.api-boot-progress-head strong {
+  margin: 0;
+  color: #f0cb62;
+  font: 700 0.78rem "Space Grotesk", sans-serif;
+  white-space: nowrap;
+}
+
+.api-boot-track {
+  height: 7px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.04);
+}
+
+.api-boot-track i {
+  display: block;
+  width: 0%;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #f0c95f, #91c5b8);
+  transition: width 220ms ease;
 }
 
 .viewport-hud {
