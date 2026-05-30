@@ -22,6 +22,12 @@ if ("IntersectionObserver" in window) {
 }
 
 const dom = {
+  bootSplash: document.querySelector("#boot-splash"),
+  bootSplashPhase: document.querySelector("#boot-splash-phase"),
+  bootSplashPercent: document.querySelector("#boot-splash-percent"),
+  bootSplashTrack: document.querySelector("#boot-splash-track"),
+  bootSplashBar: document.querySelector("#boot-splash-bar"),
+  bootSplashSteps: document.querySelectorAll("#boot-splash-steps li"),
   controlPageRoot: document.querySelector("#control-page-root"),
   modelViewport: document.querySelector(".model-viewport"),
   chatThread: document.querySelector("#chat-thread"),
@@ -274,9 +280,37 @@ function apiBootProgressForElapsed(elapsedMs) {
   return Math.min(92, 10 + Math.round(eased * 82));
 }
 
+function setBootSplashVisible(visible) {
+  if (!dom.bootSplash) {
+    return;
+  }
+  dom.bootSplash.classList.toggle("is-hidden", !visible);
+  dom.bootSplash.setAttribute("aria-hidden", String(!visible));
+  document.body.classList.toggle("is-boot-splash-active", visible);
+}
+
+function updateBootSplashSteps(percent) {
+  if (!dom.bootSplashSteps || dom.bootSplashSteps.length === 0) {
+    return;
+  }
+  let activeIndex = 0;
+  dom.bootSplashSteps.forEach((step, index) => {
+    const threshold = Number(step.dataset.threshold) || 0;
+    const complete = percent >= threshold;
+    if (complete) {
+      activeIndex = index;
+    }
+    step.classList.toggle("is-complete", complete);
+    step.classList.remove("is-active");
+  });
+  dom.bootSplashSteps[Math.min(activeIndex, dom.bootSplashSteps.length - 1)]?.classList.add("is-active");
+}
+
 function setApiBootProgress(percent, phase, { hide = false } = {}) {
   const nextPercent = clampPercent(percent);
+  const nextPhase = phase || "API 연결 확인 중";
   state.apiBootProgress = nextPercent;
+  setBootSplashVisible(!hide);
   if (dom.apiBootProgress) {
     dom.apiBootProgress.classList.toggle("is-hidden", Boolean(hide));
     dom.apiBootProgress.setAttribute("aria-hidden", String(Boolean(hide)));
@@ -291,8 +325,21 @@ function setApiBootProgress(percent, phase, { hide = false } = {}) {
     dom.apiBootPercent.textContent = nextPercent + "%";
   }
   if (dom.apiBootPhase) {
-    dom.apiBootPhase.textContent = phase || "API 연결 확인 중";
+    dom.apiBootPhase.textContent = nextPhase;
   }
+  if (dom.bootSplashTrack) {
+    dom.bootSplashTrack.setAttribute("aria-valuenow", String(nextPercent));
+  }
+  if (dom.bootSplashBar) {
+    dom.bootSplashBar.style.width = nextPercent + "%";
+  }
+  if (dom.bootSplashPercent) {
+    dom.bootSplashPercent.textContent = nextPercent + "%";
+  }
+  if (dom.bootSplashPhase) {
+    dom.bootSplashPhase.textContent = nextPhase;
+  }
+  updateBootSplashSteps(nextPercent);
 }
 
 function hideApiBootProgressSoon() {

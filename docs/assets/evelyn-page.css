@@ -65,6 +65,175 @@ body::after {
   opacity: 0.32;
 }
 
+body.is-boot-splash-active {
+  overflow: hidden;
+}
+
+.boot-splash {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: grid;
+  place-items: center;
+  padding: 28px;
+  color: var(--text-main);
+  background:
+    linear-gradient(180deg, rgba(4, 9, 11, 0.92), rgba(4, 9, 11, 0.98)),
+    linear-gradient(135deg, #081012 0%, #101914 48%, #060a0c 100%);
+  opacity: 1;
+  visibility: visible;
+  transition: opacity 420ms ease, visibility 420ms ease;
+}
+
+.boot-splash.is-hidden {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.boot-splash-grid {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background-image:
+    linear-gradient(rgba(255, 255, 255, 0.035) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.035) 1px, transparent 1px),
+    linear-gradient(180deg, transparent 0, rgba(255, 255, 255, 0.035) 50%, transparent 100%);
+  background-size: 48px 48px, 48px 48px, 100% 4px;
+  opacity: 0.34;
+  mask-image: linear-gradient(90deg, transparent, #000 14%, #000 86%, transparent);
+}
+
+.boot-splash-shell {
+  position: relative;
+  width: min(720px, 100%);
+  display: grid;
+  gap: 18px;
+}
+
+.boot-splash-eyebrow {
+  margin: 0;
+  color: var(--accent-amber);
+  font: 700 0.78rem "Space Grotesk", sans-serif;
+  letter-spacing: 0.18em;
+}
+
+.boot-splash-title-row {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 20px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid rgba(240, 201, 95, 0.22);
+}
+
+.boot-splash-title-row h1 {
+  margin: 0;
+  color: #fff8df;
+  font: 700 3.4rem "Space Grotesk", sans-serif;
+  letter-spacing: 0;
+}
+
+.boot-splash-title-row strong {
+  color: #f0cb62;
+  font: 700 2.2rem "Space Grotesk", sans-serif;
+  white-space: nowrap;
+}
+
+.boot-splash-phase {
+  min-height: 1.7em;
+  margin: 0;
+  color: var(--text-soft);
+  line-height: 1.7;
+  font-size: 1rem;
+}
+
+.boot-splash-track {
+  height: 16px;
+  overflow: hidden;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.07);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.035), 0 0 34px rgba(240, 201, 95, 0.12);
+}
+
+.boot-splash-track i {
+  display: block;
+  width: 0%;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #f0c95f, #91c5b8 58%, #f1b7d0);
+  transition: width 260ms ease;
+}
+
+.boot-splash-steps {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 8px;
+  margin: 6px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.boot-splash-steps li {
+  min-width: 0;
+  padding: 9px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 8px;
+  color: var(--text-muted);
+  background: rgba(255, 255, 255, 0.035);
+  font: 700 0.72rem "Space Grotesk", "IBM Plex Sans KR", sans-serif;
+  text-align: center;
+  text-transform: uppercase;
+  overflow-wrap: anywhere;
+}
+
+.boot-splash-steps li.is-active {
+  border-color: rgba(240, 201, 95, 0.46);
+  color: #f0cb62;
+  background: rgba(240, 201, 95, 0.10);
+}
+
+.boot-splash-steps li.is-complete {
+  border-color: rgba(145, 197, 184, 0.42);
+  color: #a7ded1;
+  background: rgba(145, 197, 184, 0.09);
+}
+
+@media (max-width: 760px) {
+  .boot-splash {
+    padding: 20px;
+  }
+
+  .boot-splash-title-row {
+    align-items: start;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .boot-splash-title-row h1 {
+    font-size: 2.4rem;
+  }
+
+  .boot-splash-title-row strong {
+    font-size: 1.7rem;
+  }
+
+  .boot-splash-steps {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 420px) {
+  .boot-splash-title-row h1 {
+    font-size: 2rem;
+  }
+
+  .boot-splash-steps {
+    grid-template-columns: 1fr;
+  }
+}
+
 .control-page {
   position: relative;
   display: grid;

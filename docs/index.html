@@ -9,9 +9,31 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+KR:wght@400;500;600;700&family=Space+Grotesk:wght@500;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="./assets/vendor/winbox/winbox.min.css?v=0.2.82">
-  <link rel="stylesheet" href="./assets/evelyn-page.css?v=20260530a">
+  <link rel="stylesheet" href="./assets/evelyn-page.css?v=20260530b">
 </head>
-<body>
+<body class="is-boot-splash-active">
+  <section class="boot-splash" id="boot-splash" aria-live="polite" aria-label="Evelyn boot loading screen">
+    <div class="boot-splash-grid" aria-hidden="true"></div>
+    <div class="boot-splash-shell">
+      <p class="boot-splash-eyebrow">EVELYN CONTROL</p>
+      <div class="boot-splash-title-row">
+        <h1>Evelyn Boot</h1>
+        <strong id="boot-splash-percent">0%</strong>
+      </div>
+      <p class="boot-splash-phase" id="boot-splash-phase">부팅 상태 확인 중</p>
+      <div class="boot-splash-track" id="boot-splash-track" role="progressbar" aria-label="Evelyn boot progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+        <i id="boot-splash-bar"></i>
+      </div>
+      <ol class="boot-splash-steps" id="boot-splash-steps" aria-label="Boot stages">
+        <li data-threshold="8">API 탐색</li>
+        <li data-threshold="24">Main LLM</li>
+        <li data-threshold="42">Router / Sub</li>
+        <li data-threshold="60">TTS / Voice</li>
+        <li data-threshold="78">Discord / Bot API</li>
+        <li data-threshold="100">Control Ready</li>
+      </ol>
+    </div>
+  </section>
   <div class="control-page is-default-mode" id="control-page-root">
     <aside class="side-rail left-rail reveal is-visible" aria-label="Evelyn runtime summary">
       <section class="panel context-card">
@@ -438,6 +460,6 @@
   </div>
 
   <script src="./assets/vendor/winbox/winbox.bundle.min.js?v=0.2.82"></script>
-  <script src="./assets/evelyn-page.js?v=20260530a"></script>
+  <script src="./assets/evelyn-page.js?v=20260530b"></script>
 </body>
 </html>
