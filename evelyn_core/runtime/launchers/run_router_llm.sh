@@ -8,19 +8,25 @@ ROUTER_LLM_PORT="${ROUTER_LLM_PORT:-9822}"
 ROUTER_LLM_CONTEXT="${ROUTER_LLM_CONTEXT:-1536}"
 ROUTER_LLM_REASONING="${ROUTER_LLM_REASONING:-off}"
 ROUTER_LLM_REASONING_BUDGET="${ROUTER_LLM_REASONING_BUDGET:-12}"
-ROUTER_LLM_MODEL="${ROUTER_LLM_MODEL:-/home/sands12/.cache/huggingface/hub/models--unsloth--gemma-4-E2B-it-GGUF/snapshots/f064409f340b34190993560b2168133e5dbae558/gemma-4-E2B-it-UD-Q6_K_XL.gguf}"
+ROUTER_LLM_HF="${ROUTER_LLM_HF:-Qwen/Qwen2.5-1.5B-Instruct-GGUF:qwen2.5-1.5b-instruct-q4_k_m.gguf}"
+ROUTER_LLM_MODEL="${ROUTER_LLM_MODEL:-}"
 
 eval "$VENV_ACT"
 export CUDA_VISIBLE_DEVICES="$ROUTER_LLM_GPU"
 
-if [[ ! -f "$ROUTER_LLM_MODEL" ]]; then
+model_args=()
+if [[ -n "$ROUTER_LLM_HF" ]]; then
+  model_args=(-hf "$ROUTER_LLM_HF")
+elif [[ -f "$ROUTER_LLM_MODEL" ]]; then
+  model_args=(-m "$ROUTER_LLM_MODEL")
+else
   echo "[Router-LLM] model file not found: $ROUTER_LLM_MODEL"
   exit 1
 fi
 
 cd "$LLAMA_DIR"
 exec ./build/bin/llama-server \
-  -m "$ROUTER_LLM_MODEL" \
+  "${model_args[@]}" \
   --host 0.0.0.0 \
   --port "$ROUTER_LLM_PORT" \
   --flash-attn on \
