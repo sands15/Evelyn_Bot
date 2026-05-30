@@ -114,9 +114,11 @@ class MemoryVaultTests(unittest.TestCase):
             assert path is not None
             content = path.read_text(encoding="utf-8")
 
-        self.assertIn("# 이블린 일일 대화 정리", content)
+        self.assertIn("# 이블린 일일 메모", content)
+        self.assertIn("> [!summary] 오늘 보기", content)
+        self.assertIn("> [!example]- 대화 원문 보기", content)
         self.assertIn("remember this preference", content)
-        self.assertIn("- 정훈: remember this preference", content)
+        self.assertIn("> - 정훈: remember this preference", content)
         self.assertNotIn("type: daily", content)
         self.assertNotIn("guild:123", content)
         self.assertNotIn("/user/test:", content)
@@ -337,6 +339,7 @@ class MemoryVaultTests(unittest.TestCase):
                 max_items=4,
             )
             recall = recall_memory_vault(request, root=root)
+            legacy_content = Path(result["legacy_mirror"]).read_text(encoding="utf-8")
 
         self.assertTrue(result["bootstrap_notes"])
         self.assertTrue(result["legacy_mirror"])
@@ -344,6 +347,11 @@ class MemoryVaultTests(unittest.TestCase):
         self.assertNotIn("Legacy Guild Memory", hot_context)
         self.assertTrue(recall.ok)
         self.assertIn("Obsidian-compatible Markdown", recall.context_text)
+
+        self.assertIn("# 이블린 메모리", legacy_content)
+        self.assertIn("> [!summary] 한눈에 보기", legacy_content)
+        self.assertNotIn("## guild_123", legacy_content)
+        self.assertNotIn("Legacy Guild Memory", legacy_content)
 
     def test_context_builder_includes_pinned_hot_context(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

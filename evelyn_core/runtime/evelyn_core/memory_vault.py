@@ -1222,6 +1222,30 @@ def _append_legacy_unique(target: list[str], seen: set[str], text: str, *, max_i
         target.append(cleaned)
 
 
+def _format_memory_callout(kind: str, title: str, items: list[str], *, empty_text: str | None = None) -> list[str]:
+    lines = [f"> [!{kind}] {title}"]
+    if items:
+        lines.extend(f"> - {item}" for item in items)
+    elif empty_text:
+        lines.append(f"> {empty_text}")
+    lines.append("")
+    return lines
+
+
+def _daily_intro_block(day_key: str) -> str:
+    return "\n".join(
+        [
+            f"# 이블린 일일 메모 {day_key}",
+            "",
+            "> [!summary] 오늘 보기",
+            "> 중요한 내용은 짧게 정리하고, 원문 대화는 아래 기록에 모읍니다.",
+            "",
+            "> [!example]- 대화 원문 보기",
+            "",
+        ]
+    )
+
+
 def refresh_legacy_memory_mirror(guild_id: int, *, root: Path | None = None, max_items: int = 12) -> Path | None:
     base_root = root or MEMORY_ROOT
     guild_dir = base_root / f"guild_{guild_id}"
@@ -1272,31 +1296,39 @@ def refresh_legacy_memory_mirror(guild_id: int, *, root: Path | None = None, max
     if not summaries and not any(grouped.values()):
         return None
 
-    sections: list[str] = [
-        "# 이블린 이전 메모리 정리",
-        "",
-        "> 이전 JSONL 메모리에서 사람이 읽기 좋은 항목만 모은 자동 정리본입니다. 원본 scope/session 로그는 JSONL에 보관됩니다.",
-        "",
-    ]
-    if summaries:
-        sections.append("## 요약")
-        sections.extend(f"- {item}" for item in summaries)
-        sections.append("")
-
     display_limits = {
         "기본 정보": min(max_items, 4),
         "취향": min(max_items, 5),
         "현재 맥락": min(max_items, 5),
-        "정리 필요": min(max_items, 4),
-        "기타 기억": min(max_items, 4),
+        "정리 필요": min(max_items, 2),
+        "기타 기억": min(max_items, 0),
     }
-    for title in ("기본 정보", "취향", "현재 맥락", "정리 필요", "기타 기억"):
-        items = grouped.get(title) or []
-        if not items:
-            continue
-        sections.append(f"## {title}")
-        sections.extend(f"- {item}" for item in items[: display_limits[title]])
-        sections.append("")
+    limited = {title: (grouped.get(title) or [])[: display_limits[title]] for title in grouped}
+    glance: list[str] = []
+    if limited["기본 정보"]:
+        glance.append(limited["기본 정보"][0])
+    if limited["취향"]:
+        glance.append(limited["취향"][0])
+    if limited["현재 맥락"]:
+        glance.append(limited["현재 맥락"][0])
+    if limited["정리 필요"]:
+        glance.append(f"확인 필요: {limited['정리 필요'][0]}")
+
+    sections: list[str] = [
+        "# 이블린 메모리",
+        "",
+        "> 사람이 읽기 편하도록 정리한 메모리 카드입니다. 원본 로그는 JSONL에 따로 보관됩니다.",
+        "",
+    ]
+    sections.extend(_format_memory_callout("summary", "한눈에 보기", summaries[:1] + glance[:4], empty_text="아직 정리된 핵심 기억이 없습니다."))
+    if limited["기본 정보"]:
+        sections.extend(_format_memory_callout("info", "기본 정보", limited["기본 정보"]))
+    if limited["취향"]:
+        sections.extend(_format_memory_callout("tip", "취향", limited["취향"]))
+    if limited["현재 맥락"]:
+        sections.extend(_format_memory_callout("note", "현재 맥락", limited["현재 맥락"]))
+    if limited["정리 필요"]:
+        sections.extend(_format_memory_callout("todo", "확인할 것", limited["정리 필요"]))
 
     body = "\n".join(sections).strip() + "\n"
     if target.exists():
@@ -1341,17 +1373,14 @@ def append_turn_rows_to_memory_vault(
     day_key = time.strftime("%Y-%m-%d")
     path = vault / "daily" / f"{day_key}.md"
     if not path.exists():
-        path.write_text(
-            f"# 이블린 일일 대화 정리 {day_key}\n\n"
-            + "> 사람이 훑어보기 위한 대화 기록입니다. 원본 scope/session 로그는 JSONL에 따로 보관됩니다.\n\n",
-            encoding="utf-8",
-        )
+        path.write_text(_daily_intro_block(day_key), encoding="utf-8")
 
     block = "\n".join(
         [
-            f"## {time.strftime('%H:%M:%S')}",
-            *normalized,
-            "",
+            ">",
+            f"> ### {time.strftime('%H:%M:%S')}",
+            *(f"> {line}" for line in normalized),
+            ">",
         ]
     )
     with path.open("a", encoding="utf-8") as handle:
