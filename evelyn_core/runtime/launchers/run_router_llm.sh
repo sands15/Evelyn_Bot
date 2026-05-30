@@ -3,7 +3,7 @@ set -euo pipefail
 
 VENV_ACT="${VENV_ACT:-source ~/venvs/vllm-env/bin/activate}"
 LLAMA_DIR="${LLAMA_DIR:-/mnt/c/Users/Admin/llama.cpp}"
-ROUTER_LLM_GPU="${ROUTER_LLM_GPU:-0}"
+ROUTER_LLM_GPU="${ROUTER_LLM_GPU:-GPU-a352a7f9-1fcf-3d18-9973-6f9114addf7b}"
 ROUTER_LLM_PORT="${ROUTER_LLM_PORT:-9822}"
 ROUTER_LLM_CONTEXT="${ROUTER_LLM_CONTEXT:-1536}"
 ROUTER_LLM_REASONING="${ROUTER_LLM_REASONING:-off}"

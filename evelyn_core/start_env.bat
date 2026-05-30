@@ -12,17 +12,21 @@ if defined PYTHONPATH (
 )
 
 REM ===== Shared launch settings =====
-REM CUDA/nvidia-smi observed mapping on this host:
-REM   0 = RTX 4060 Laptop GPU
-REM   1 = RTX 3090
+REM Use GPU UUIDs instead of numeric CUDA indexes. Numeric 0/1 can be
+REM interpreted differently by Windows, WSL, CUDA, and individual runtimes.
+REM Observed physical GPUs on this host:
+REM   RTX 4060 Laptop GPU = GPU-a352a7f9-1fcf-3d18-9973-6f9114addf7b
+REM   RTX 3090            = GPU-96c554e6-feef-2980-6722-efcb0af098f9
 REM Operational target:
 REM   Router/Sub only on RTX 4060 Laptop GPU, everything else on RTX 3090.
+if "%EVELYN_GPU_4060_UUID%"=="" set "EVELYN_GPU_4060_UUID=GPU-a352a7f9-1fcf-3d18-9973-6f9114addf7b"
+if "%EVELYN_GPU_3090_UUID%"=="" set "EVELYN_GPU_3090_UUID=GPU-96c554e6-feef-2980-6722-efcb0af098f9"
 if "%LLAMA_DIR%"=="" set "LLAMA_DIR=/mnt/c/Users/Admin/llama.cpp"
 if "%VENV_ACT%"=="" set "VENV_ACT=source ~/venvs/vllm-env/bin/activate"
 
 if "%MAIN_LLM_BACKEND%"=="" set "MAIN_LLM_BACKEND=llama"
 if "%MAIN_LLM_VENV_ACT%"=="" set "MAIN_LLM_VENV_ACT=source /home/sands12/venvs/evelyn-gemma4-vllm/bin/activate"
-if "%MAIN_LLM_GPU%"=="" set "MAIN_LLM_GPU=1"
+if "%MAIN_LLM_GPU%"=="" set "MAIN_LLM_GPU=%EVELYN_GPU_3090_UUID%"
 if "%MAIN_LLM_PORT%"=="" set "MAIN_LLM_PORT=9820"
 if "%MAIN_LLM_CONTEXT%"=="" set "MAIN_LLM_CONTEXT=8192"
 if "%MAIN_LLM_N_PARALLEL%"=="" set "MAIN_LLM_N_PARALLEL=1"
@@ -41,7 +45,7 @@ if "%MAIN_LLM_CHAT_CONTENT_FORMAT%"=="" set "MAIN_LLM_CHAT_CONTENT_FORMAT=openai
 if "%LLM_SERVER_URL%"=="" set "LLM_SERVER_URL=http://127.0.0.1:9820/v1/chat/completions"
 if "%LLM_MODEL_NAME%"=="" set "LLM_MODEL_NAME=LGAI-EXAONE/EXAONE-3.5-7.8B-Instruct-GGUF:Q4_K_M"
 
-if "%SUB_LLM_GPU%"=="" set "SUB_LLM_GPU=0"
+if "%SUB_LLM_GPU%"=="" set "SUB_LLM_GPU=%EVELYN_GPU_4060_UUID%"
 if "%SUB_LLM_PORT%"=="" set "SUB_LLM_PORT=9821"
 if "%SUB_LLM_CONTEXT%"=="" set "SUB_LLM_CONTEXT=8192"
 if "%SUB_LLM_REASONING_BUDGET%"=="" set "SUB_LLM_REASONING_BUDGET=96"
@@ -52,7 +56,7 @@ if "%SUB_LLM_CACHE_TYPE_K%"=="" set "SUB_LLM_CACHE_TYPE_K=q8_0"
 if "%SUB_LLM_CACHE_TYPE_V%"=="" set "SUB_LLM_CACHE_TYPE_V=f16"
 if "%SUMMARY_MODEL_NAME%"=="" set "SUMMARY_MODEL_NAME=supergemma4-e4b-abliterated-Q5_K_M.gguf"
 
-if "%ROUTER_LLM_GPU%"=="" set "ROUTER_LLM_GPU=0"
+if "%ROUTER_LLM_GPU%"=="" set "ROUTER_LLM_GPU=%EVELYN_GPU_4060_UUID%"
 if "%ROUTER_LLM_PORT%"=="" set "ROUTER_LLM_PORT=9822"
 if "%ROUTER_LLM_CONTEXT%"=="" set "ROUTER_LLM_CONTEXT=1536"
 if "%ROUTER_LLM_REASONING%"=="" set "ROUTER_LLM_REASONING=off"
@@ -62,7 +66,7 @@ if "%ROUTER_LLM_MODEL%"=="" set "ROUTER_LLM_MODEL=/home/sands12/.cache/huggingfa
 if "%OMNIVOICE_VENV%"=="" set "OMNIVOICE_VENV=C:\Users\Admin\omnivoice-server\.venv"
 if "%OMNIVOICE_PROFILE_DIR%"=="" set "OMNIVOICE_PROFILE_DIR=%~dp0..\omnivoice_profiles"
 if "%TTS_PORT%"=="" set "TTS_PORT=8880"
-if "%TTS_GPU%"=="" set "TTS_GPU=1"
+if "%TTS_GPU%"=="" set "TTS_GPU=%EVELYN_GPU_3090_UUID%"
 if "%TTS_DEVICE%"=="" set "TTS_DEVICE=cuda"
 if "%OMNIVOICE_STREAM_STRATEGY%"=="" set "OMNIVOICE_STREAM_STRATEGY=blockwise_capped_first"
 if "%OMNIVOICE_STREAM_FOLLOWUP_STRATEGY%"=="" set "OMNIVOICE_STREAM_FOLLOWUP_STRATEGY=blockwise_capped_first"
