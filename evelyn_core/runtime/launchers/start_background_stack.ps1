@@ -113,7 +113,7 @@ Start-SupervisedService -Title 'Router-LLM' -Port 9822 -Name 'Router-LLM' -Comma
 Start-SupervisedService -Title 'Sub-LLM' -Port 9821 -Name 'Sub-LLM' -Command "& '$coreRoot\start_sub_llm.bat' --inline"
 Start-SupervisedService -Title 'TTS' -Port 8880 -Name 'TTS' -Command "& '$PSScriptRoot\start_tts.ps1'"
 Start-SupervisedService -Title 'Control-Page' -Port 8799 -Name 'Control-Page' -Command "& '$PSScriptRoot\start_control_page.ps1'"
-Start-SupervisedService -Title 'Bot' -Port 8798 -Name 'Bot' -Command "`$env:CONTROL_PAGE_PORT='8798'; & '$PSScriptRoot\start_bot.ps1'"
+Start-SupervisedService -Title 'Bot' -Port 8798 -Name 'Bot' -Command "& '$PSScriptRoot\start_bot.ps1'"
 Wait-Port -HostName '127.0.0.1' -Port 8799 -Label 'Evelyn Control Page'
 Write-Host '[Evelyn] Full stack launch requested. The control page will show Main/Router/Sub/TTS/Bot boot progress.'
 Open-ChromeToControlPage
