@@ -3,7 +3,7 @@ chcp 65001 >nul
 setlocal
 call "%~dp0start_env.bat"
 
-set "WSL_CMD=%VENV_ACT% && export CUDA_VISIBLE_DEVICES='%SUB_LLM_GPU%' && if [ ! -f '%SUB_LLM_MODEL%' ]; then echo '[Sub-LLM] model file not found:' '%SUB_LLM_MODEL%'; exit 1; fi && cd %LLAMA_DIR% && ./build/bin/llama-server -m '%SUB_LLM_MODEL%' --host 0.0.0.0 --port %SUB_LLM_PORT% --flash-attn on -ngl %SUB_LLM_N_GPU_LAYERS% -c %SUB_LLM_CONTEXT% --threads %SUB_LLM_THREADS% --cache-type-k %SUB_LLM_CACHE_TYPE_K% --cache-type-v %SUB_LLM_CACHE_TYPE_V% --reasoning on --reasoning-budget %SUB_LLM_REASONING_BUDGET%"
+set "WSL_CMD=VENV_ACT='%VENV_ACT%' LLAMA_DIR='%LLAMA_DIR%' SUB_LLM_GPU='%SUB_LLM_GPU%' SUB_LLM_PORT='%SUB_LLM_PORT%' SUB_LLM_CONTEXT='%SUB_LLM_CONTEXT%' SUB_LLM_REASONING_BUDGET='%SUB_LLM_REASONING_BUDGET%' SUB_LLM_HF='%SUB_LLM_HF%' SUB_LLM_MODEL='%SUB_LLM_MODEL%' SUB_LLM_N_GPU_LAYERS='%SUB_LLM_N_GPU_LAYERS%' SUB_LLM_THREADS='%SUB_LLM_THREADS%' SUB_LLM_CACHE_TYPE_K='%SUB_LLM_CACHE_TYPE_K%' SUB_LLM_CACHE_TYPE_V='%SUB_LLM_CACHE_TYPE_V%' bash /mnt/c/Evelyn/evelyn_core/runtime/launchers/run_sub_llm.sh"
 
 call :port_ready %SUB_LLM_PORT% "Sub-LLM"
 if %ERRORLEVEL%==2 exit /b 0
