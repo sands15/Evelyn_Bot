@@ -110,11 +110,11 @@ TTS_PLAYBACK_START_LOOKAHEAD_TIMEOUT_MS = float(os.getenv("TTS_PLAYBACK_START_LO
 # 메모리 업데이트와 cognitive 판단에 쓰는 서브 LLM 서버 엔드포인트.
 SUMMARY_LLM_URL = os.getenv("SUMMARY_LLM_URL", "http://127.0.0.1:9821/v1/chat/completions")
 # 요약/상황판단용 서브 모델 이름.
-SUMMARY_MODEL_NAME = os.getenv("SUMMARY_MODEL_NAME", "qwen2.5-1.5b-instruct-q4_k_m.gguf")
+SUMMARY_MODEL_NAME = os.getenv("SUMMARY_MODEL_NAME", "supergemma4-e4b-abliterated-Q5_K_M.gguf")
 # 라우터 LLM 서버 엔드포인트.
 ROUTER_LLM_URL = os.getenv("ROUTER_LLM_URL", "http://127.0.0.1:9822/v1/chat/completions")
 # 라우터 모델 이름.
-ROUTER_MODEL_NAME = os.getenv("ROUTER_MODEL_NAME", "qwen2.5-1.5b-instruct-q4_k_m.gguf")
+ROUTER_MODEL_NAME = os.getenv("ROUTER_MODEL_NAME", "gemma-4-E2B-it-UD-Q6_K_XL.gguf")
 # router LLM 사용 여부.
 ROUTER_LLM_ENABLED = _env_flag("ROUTER_LLM_ENABLED", "true")
 # route 분류 최대 토큰 수.

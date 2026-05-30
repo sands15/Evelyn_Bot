@@ -3,7 +3,7 @@ chcp 65001 >nul
 setlocal
 call "%~dp0start_env.bat"
 
-set "WSL_CMD=VENV_ACT='%VENV_ACT%' LLAMA_DIR='%LLAMA_DIR%' ROUTER_LLM_GPU='%ROUTER_LLM_GPU%' ROUTER_LLM_PORT='%ROUTER_LLM_PORT%' ROUTER_LLM_CONTEXT='%ROUTER_LLM_CONTEXT%' ROUTER_LLM_REASONING='%ROUTER_LLM_REASONING%' ROUTER_LLM_REASONING_BUDGET='%ROUTER_LLM_REASONING_BUDGET%' ROUTER_LLM_HF='%ROUTER_LLM_HF%' ROUTER_LLM_MODEL='%ROUTER_LLM_MODEL%' bash /mnt/c/Evelyn/evelyn_core/runtime/launchers/run_router_llm.sh"
+set "WSL_CMD=%VENV_ACT% && export CUDA_VISIBLE_DEVICES=%ROUTER_LLM_GPU% && if [ ! -f '%ROUTER_LLM_MODEL%' ]; then echo '[Router-LLM] model file not found:' '%ROUTER_LLM_MODEL%'; exit 1; fi && cd %LLAMA_DIR% && ./build/bin/llama-server -m '%ROUTER_LLM_MODEL%' --host 0.0.0.0 --port %ROUTER_LLM_PORT% --flash-attn on -ngl 999 -c %ROUTER_LLM_CONTEXT% --reasoning %ROUTER_LLM_REASONING% --reasoning-budget %ROUTER_LLM_REASONING_BUDGET%"
 
 call :port_ready %ROUTER_LLM_PORT% "Router-LLM"
 if %ERRORLEVEL%==2 exit /b 0
