@@ -249,6 +249,6 @@ Phase 1 is the stable contract that later phases will wire into.
 - Minecraft context now pulls compact live state plus matching Voyager skill snippets into the skill/capability section when the policy asks for it.
 - Minecraft context also reads Odyssey-style JSON capability data when `ODYSSEY_CAPABILITY_JSON_DIR` is available, adding compact action / recipe / tool / smelt / collect snippets instead of raw library dumps.
 - Discord attachment metadata is forwarded as `[Attached Visual Inputs]`; OpenAI/vLLM content-array payloads now convert those image URLs into `image_url` entries for actual multimodal main-model calls.
-- Context pipeline benchmark rows are appended to `bot_memory/context_pipeline_benchmarks.jsonl` so router/context sections, timing marks, answer length, and Minecraft/vision usage can be compared across turns.
+- Context pipeline benchmark rows are appended to `runtime_artifacts/benchmarks/context_pipeline_benchmarks.jsonl` so router/context sections, timing marks, answer length, and Minecraft/vision usage can be compared across turns.
 - `MAIN_LLM_CONTEXT` now defaults to `2048` in the launcher environment.
 - Still incomplete: a persistent OpenHA/CrossAgent action-interface index and a benchmark dashboard/summary job are not wired yet.

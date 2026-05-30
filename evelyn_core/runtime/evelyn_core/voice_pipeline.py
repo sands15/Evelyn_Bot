@@ -4,6 +4,7 @@ from typing import Any
 
 import numpy as np
 
+from evelyn_core.query_intents import should_force_search_query
 from evelyn_core.text import clean_text, clean_tts_text, strip_voice_wake_word
 
 
@@ -43,7 +44,17 @@ class RouteDecision:
     source: str
     prompt_text: str
     user_visible_preface: str | None = None
+    needs_main_llm: bool = True
+    needs_memory: bool = True
+    needs_runtime_state: bool = True
+    needs_minecraft_state: bool = False
+    needs_vision: bool = False
+    needs_skill_graph: bool = False
+    needs_long_context: bool = False
     needs_search: bool = False
+    needs_tts: bool = True
+    response_mode: str = "normal"
+    priority: str = "latency"
     should_interrupt_delivery: bool = False
 
 
@@ -140,6 +151,9 @@ def classify_dialogue_turn(raw_user_text: str, *, wake_only_turn: bool = False) 
     )
     if any(marker in text for marker in casual_check_markers):
         return "casual_check"
+
+    if should_force_search_query(text):
+        return "knowledge_or_search"
 
     knowledge_markers = (
         "검색",
@@ -239,7 +253,17 @@ def build_route_decision(
     source: str,
     prompt_text: str,
     user_visible_preface: str | None = None,
+    needs_main_llm: bool = True,
+    needs_memory: bool = True,
+    needs_runtime_state: bool = True,
+    needs_minecraft_state: bool = False,
+    needs_vision: bool = False,
+    needs_skill_graph: bool = False,
+    needs_long_context: bool = False,
     needs_search: bool = False,
+    needs_tts: bool = True,
+    response_mode: str = "normal",
+    priority: str = "latency",
     should_interrupt_delivery: bool = False,
 ) -> RouteDecision:
     return RouteDecision(
@@ -248,9 +272,35 @@ def build_route_decision(
         source=source,
         prompt_text=prompt_text,
         user_visible_preface=user_visible_preface,
+        needs_main_llm=bool(needs_main_llm),
+        needs_memory=bool(needs_memory),
+        needs_runtime_state=bool(needs_runtime_state),
+        needs_minecraft_state=bool(needs_minecraft_state),
+        needs_vision=bool(needs_vision),
+        needs_skill_graph=bool(needs_skill_graph),
+        needs_long_context=bool(needs_long_context),
         needs_search=needs_search,
+        needs_tts=bool(needs_tts),
+        response_mode=clean_text(response_mode) or "normal",
+        priority=clean_text(priority) or "latency",
         should_interrupt_delivery=should_interrupt_delivery,
     )
+
+
+def route_decision_policy_dict(route_decision: RouteDecision) -> dict[str, Any]:
+    return {
+        "needs_main_llm": bool(route_decision.needs_main_llm),
+        "needs_memory": bool(route_decision.needs_memory),
+        "needs_runtime_state": bool(route_decision.needs_runtime_state),
+        "needs_minecraft_state": bool(route_decision.needs_minecraft_state),
+        "needs_vision": bool(route_decision.needs_vision),
+        "needs_skill_graph": bool(route_decision.needs_skill_graph),
+        "needs_long_context": bool(route_decision.needs_long_context),
+        "needs_search": bool(route_decision.needs_search),
+        "needs_tts": bool(route_decision.needs_tts),
+        "response_mode": route_decision.response_mode,
+        "priority": route_decision.priority,
+    }
 
 
 def build_answer_payload(

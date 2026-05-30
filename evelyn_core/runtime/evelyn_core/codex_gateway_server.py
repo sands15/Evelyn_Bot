@@ -17,17 +17,18 @@ from typing import Any
 
 from aiohttp import web
 
-from evelyn_core.paths import get_repo_root
+from evelyn_core.paths import get_repo_root, get_runtime_artifacts_root
 
 REPO_ROOT = get_repo_root()
+RUNTIME_ARTIFACTS_ROOT = get_runtime_artifacts_root()
 DEFAULT_HOST = os.getenv("VOYAGER_CODEX_GATEWAY_HOST", "127.0.0.1")
 DEFAULT_PORT = int(os.getenv("VOYAGER_CODEX_GATEWAY_PORT", "8787"))
 DEFAULT_MODEL = os.getenv("VOYAGER_CODEX_MODEL", "gpt-5.5")
 DEFAULT_TIMEOUT_SEC = float(os.getenv("VOYAGER_CODEX_GATEWAY_TIMEOUT_SEC", "260"))
 DEFAULT_WORKDIR = str(REPO_ROOT)
 DEFAULT_BACKEND_MODE = os.getenv("VOYAGER_CODEX_GATEWAY_BACKEND", "codex-exec").strip().lower()
-LAST_REQUEST_STATUS_PATH = REPO_ROOT / "bot_memory" / "codex_gateway_last_request.json"
-GATEWAY_ERROR_LOG_PATH = REPO_ROOT / "bot_memory" / "codex_gateway_errors.log"
+LAST_REQUEST_STATUS_PATH = RUNTIME_ARTIFACTS_ROOT / "codex_gateway" / "last_request.json"
+GATEWAY_ERROR_LOG_PATH = RUNTIME_ARTIFACTS_ROOT / "logs" / "codex_gateway_errors.log"
 _GATEWAY_STATUS_LINE_LENGTH = 0
 _VT_MODE_ENABLED: bool | None = None
 _ALT_SCREEN_ENABLED = False

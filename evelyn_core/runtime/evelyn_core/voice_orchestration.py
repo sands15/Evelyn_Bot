@@ -3,11 +3,11 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Mapping, MutableMapping
+from typing import Any, Awaitable, Callable, Mapping, MutableMapping
 
 from .assistant_contracts import AcceptedVoiceTurn, RejectedVoiceTurn
 from .text import clean_text
-from .voice_pipeline import TranscriptResult, VoiceReplyRequest, VoiceSegment
+from .voice_pipeline import AnswerPayload, DeliveryPlan, RouteDecision, TranscriptResult, VoiceReplyRequest, VoiceSegment
 
 
 @dataclass(frozen=True)
@@ -134,6 +134,200 @@ class VoiceTranscriptReplyDeps:
     get_room_turn_scope: Callable[[str | None], Any]
     detach_task: Callable[[Any, Any], None]
     clear_room_turn_scope: Callable[[str | None, Any], None]
+
+
+@dataclass(frozen=True)
+class VoiceTurnRequest:
+    user_text: str
+    guild_id: int | None = None
+    session_key: str | None = None
+    room_key: str | None = None
+    person_key: str | None = None
+    session_memory_key: str | None = None
+    source: str = "text"
+    debug_text: str | None = None
+    metrics: MutableMapping[str, Any] | None = None
+    turn_scope: Any = None
+    on_sentence: Callable[[str], Awaitable[None]] | None = None
+    on_first_chunk: Callable[[], None] | None = None
+
+
+@dataclass(frozen=True)
+class VoiceTurnRouteContext:
+    messages: list[dict[str, Any]]
+    cognitive_state: dict[str, Any] | None
+    route_decision: RouteDecision
+    gated_state: dict[str, Any] | None
+    awaiting_user_reply: bool
+
+
+@dataclass(frozen=True)
+class VoiceTurnResult:
+    answer_text: str
+    route_context: VoiceTurnRouteContext
+    handled_by: str
+
+
+@dataclass(frozen=True)
+class VoiceTurnOrchestratorDeps:
+    prepare_route_context: Callable[..., Awaitable[tuple[list[dict[str, Any]], dict | None, RouteDecision, dict | None, bool]]]
+    maybe_handle_short_circuit_route: Callable[..., Awaitable[tuple[str | None, Callable[[], None] | None]]]
+    maybe_execute_registered_route: Callable[..., Awaitable[str | None]]
+    run_main_llm_turn: Callable[..., Awaitable[str]]
+    emit_delivery_plan_chunks: Callable[..., Awaitable[Any]]
+    build_answer_payload_from_text: Callable[[str], AnswerPayload]
+    build_delivery_plan: Callable[..., DeliveryPlan]
+    split_tts_sentences: Callable[..., Any]
+
+
+def mark_voice_turn_error_layer(request: VoiceTurnRequest, layer: str, exc: BaseException) -> None:
+    metrics = request.metrics
+    if metrics is None:
+        return
+    meta = metrics.setdefault("meta", {})
+    meta["error_layer"] = layer
+    meta["error"] = repr(exc)
+
+
+class VoiceTurnOrchestrator:
+    def __init__(self, deps: VoiceTurnOrchestratorDeps) -> None:
+        self._deps = deps
+
+    async def execute(self, request: VoiceTurnRequest) -> VoiceTurnResult:
+        if request.turn_scope is not None:
+            request.turn_scope.raise_if_cancelled()
+
+        try:
+            route_context = await self._prepare_route_context(request)
+        except Exception as exc:
+            mark_voice_turn_error_layer(request, "voice_turn_orchestrator.route_context", exc)
+            raise
+
+        on_first_chunk = request.on_first_chunk
+
+        try:
+            short_circuit_answer, on_first_chunk = await self._deps.maybe_handle_short_circuit_route(
+                route_decision=route_context.route_decision,
+                source=request.source,
+                guild_id=request.guild_id,
+                user_text=request.user_text,
+                session_key=request.session_key,
+                on_sentence=request.on_sentence,
+                on_first_chunk=on_first_chunk,
+                awaiting_user_reply=route_context.awaiting_user_reply,
+                metrics=request.metrics,
+            )
+        except Exception as exc:
+            mark_voice_turn_error_layer(request, "voice_turn_orchestrator.short_circuit", exc)
+            raise
+
+        if short_circuit_answer is not None:
+            return VoiceTurnResult(
+                answer_text=short_circuit_answer,
+                route_context=route_context,
+                handled_by="short_circuit",
+            )
+
+        try:
+            skill_route_answer = await self._deps.maybe_execute_registered_route(
+                route_decision=route_context.route_decision,
+                user_text=request.user_text,
+                source=request.source,
+                guild_id=request.guild_id,
+                session_key=request.session_key,
+                room_key=request.room_key,
+                person_key=request.person_key,
+                session_memory_key=request.session_memory_key,
+                debug_text=request.debug_text,
+                metrics=request.metrics,
+                cognitive_state=route_context.cognitive_state,
+                messages=route_context.messages,
+            )
+        except Exception as exc:
+            mark_voice_turn_error_layer(request, "voice_turn_orchestrator.skill_route", exc)
+            raise
+
+        if skill_route_answer:
+            if on_first_chunk is not None:
+                on_first_chunk()
+                on_first_chunk = None
+            try:
+                await self._deps.emit_delivery_plan_chunks(
+                    self._deps.build_delivery_plan(
+                        self._deps.build_answer_payload_from_text(skill_route_answer),
+                        include_voice=request.on_sentence is not None and route_context.route_decision.needs_tts,
+                        split_chunks=self._deps.split_tts_sentences,
+                    ),
+                    on_sentence=request.on_sentence,
+                )
+            except Exception as exc:
+                mark_voice_turn_error_layer(request, "voice_turn_orchestrator.delivery", exc)
+                raise
+            return VoiceTurnResult(
+                answer_text=skill_route_answer,
+                route_context=route_context,
+                handled_by="skill_route",
+            )
+
+        if not route_context.route_decision.needs_main_llm:
+            answer = route_context.route_decision.user_visible_preface or route_context.route_decision.prompt_text
+            if on_first_chunk is not None:
+                on_first_chunk()
+                on_first_chunk = None
+            try:
+                await self._deps.emit_delivery_plan_chunks(
+                    self._deps.build_delivery_plan(
+                        self._deps.build_answer_payload_from_text(answer),
+                        include_voice=request.on_sentence is not None and route_context.route_decision.needs_tts,
+                        split_chunks=self._deps.split_tts_sentences,
+                    ),
+                    on_sentence=request.on_sentence,
+                )
+            except Exception as exc:
+                mark_voice_turn_error_layer(request, "voice_turn_orchestrator.delivery", exc)
+                raise
+            return VoiceTurnResult(
+                answer_text=answer,
+                route_context=route_context,
+                handled_by="policy_no_main_llm",
+            )
+
+        try:
+            answer = await self._deps.run_main_llm_turn(
+                request=request,
+                route_context=route_context,
+                on_first_chunk=on_first_chunk,
+            )
+        except Exception as exc:
+            mark_voice_turn_error_layer(request, "voice_turn_orchestrator.main_llm", exc)
+            raise
+
+        return VoiceTurnResult(
+            answer_text=answer,
+            route_context=route_context,
+            handled_by="main_llm",
+        )
+
+    async def _prepare_route_context(self, request: VoiceTurnRequest) -> VoiceTurnRouteContext:
+        messages, cognitive_state, route_decision, gated_state, awaiting_user_reply = await self._deps.prepare_route_context(
+            request.user_text,
+            guild_id=request.guild_id,
+            session_key=request.session_key,
+            room_key=request.room_key,
+            person_key=request.person_key,
+            session_memory_key=request.session_memory_key,
+            source=request.source,
+            debug_text=request.debug_text,
+            metrics=request.metrics,
+            turn_scope=request.turn_scope,
+        )
+        return VoiceTurnRouteContext(
+            messages=messages,
+            cognitive_state=cognitive_state,
+            route_decision=route_decision,
+            gated_state=gated_state,
+            awaiting_user_reply=awaiting_user_reply,
+        )
 
 
 def build_voice_reply_lifecycle(

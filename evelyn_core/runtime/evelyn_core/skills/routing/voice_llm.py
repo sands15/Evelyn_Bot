@@ -213,7 +213,13 @@ def build_route_decision_from_state(
         source=source,
         prompt_text=prompt_text,
         user_visible_preface=clean_text(policy_response) or None,
+        needs_main_llm=not bool(clean_text(policy_response)),
+        needs_memory=not bool(clean_text(policy_response)),
+        needs_runtime_state=True,
         needs_search=action == "search_then_answer",
+        needs_tts=True,
+        response_mode="short" if source == "voice" else "normal",
+        priority="accuracy" if action in {"ask", "wait", "search_then_answer"} else "latency",
         should_interrupt_delivery=action in {"answer", "search_then_answer"},
     )
 

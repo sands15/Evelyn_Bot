@@ -70,7 +70,7 @@ Evidence:
 - [~] Recent live run still showed `Mine 8 iron ore` failure, so this phase is not complete.
 
 Evidence:
-- `bot_memory/upstream_bridge_status.json` showed recent `Mine 8 iron ore` failure.
+- `runtime_artifacts/voyager/upstream_bridge_status.json` showed recent `Mine 8 iron ore` failure.
 
 ## 6) Prompt and validator migration
 
@@ -111,7 +111,7 @@ Evidence:
 
 Evidence:
 - `CURRENT_EVELYN_ARCHITECTURE.md`
-- `bot_memory/upstream_bridge_status.json`
+- `runtime_artifacts/voyager/upstream_bridge_status.json`
 
 ---
 

@@ -27,7 +27,9 @@ pets-*.json
 .vscode/
 .idea/
 
+.evelyn_stop_requested
 bot_memory/
+runtime_artifacts/
 debug_audio/
 guild_settings/
 omnivoice_profiles/

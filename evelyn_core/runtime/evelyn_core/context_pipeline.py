@@ -67,6 +67,8 @@ class ContextPolicy:
     needs_vision: bool = False
     needs_skill_graph: bool = False
     needs_long_context: bool = False
+    needs_search: bool = False
+    needs_tts: bool = True
     priority: str = ContextPriority.LATENCY.value
     context_focus: list[str] = field(default_factory=list)
     response_mode: str = ResponseMode.NORMAL.value
@@ -84,6 +86,8 @@ class ContextPolicy:
             "needs_vision",
             "needs_skill_graph",
             "needs_long_context",
+            "needs_search",
+            "needs_tts",
         }
         for key in (
             "intent",
@@ -94,6 +98,8 @@ class ContextPolicy:
             "needs_vision",
             "needs_skill_graph",
             "needs_long_context",
+            "needs_search",
+            "needs_tts",
             "priority",
             "response_mode",
         ):
@@ -114,6 +120,8 @@ class ContextPolicy:
             "needs_vision": bool(self.needs_vision),
             "needs_skill_graph": bool(self.needs_skill_graph),
             "needs_long_context": bool(self.needs_long_context),
+            "needs_search": bool(self.needs_search),
+            "needs_tts": bool(self.needs_tts),
             "priority": self.priority,
             "context_focus": list(self.context_focus),
             "response_mode": self.response_mode,
@@ -193,6 +201,17 @@ class MemoryWriterDecision:
             or self.store_open_questions
             or self.store_minecraft_failure
         )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "write_raw_transcript": bool(self.write_raw_transcript),
+            "update_conversation_summary": bool(self.update_conversation_summary),
+            "update_runtime_state": bool(self.update_runtime_state),
+            "store_long_term_memory": bool(self.store_long_term_memory),
+            "store_open_questions": bool(self.store_open_questions),
+            "store_minecraft_failure": bool(self.store_minecraft_failure),
+            "reason": self.reason,
+        }
 
 
 def _trim_text(value: str, max_chars: int) -> str:
@@ -347,6 +366,7 @@ def build_context_policy_for_turn(
         policy.priority = ContextPriority.ACCURACY.value
     elif action == "search_then_answer":
         policy.intent = ContextIntent.QUESTION.value
+        policy.needs_search = True
         policy.priority = ContextPriority.ACCURACY.value
     else:
         policy.intent = ContextIntent.CHAT.value
@@ -615,6 +635,22 @@ def build_minecraft_skill_context(
         "Do not dump full Odyssey/OpenHA/Voyager libraries into the main LLM context.",
     ]
     if minecraft_state:
+        runtime_snapshot = minecraft_state.get("runtime_snapshot") if isinstance(minecraft_state.get("runtime_snapshot"), dict) else {}
+        if runtime_snapshot:
+            freshness = clean_text(str(runtime_snapshot.get("freshness") or ""))
+            age_sec = runtime_snapshot.get("age_sec")
+            source = clean_text(str(runtime_snapshot.get("source") or ""))
+            details = []
+            if freshness:
+                details.append(f"freshness={freshness}")
+            if age_sec is not None:
+                details.append(f"age_sec={age_sec}")
+            if source:
+                details.append(f"source={source}")
+            if details:
+                lines.append("runtime_snapshot: " + "; ".join(details))
+            if runtime_snapshot.get("last_error"):
+                lines.append(f"runtime_snapshot_error: {clean_text(str(runtime_snapshot.get('last_error')))}")
         inventory = minecraft_state.get("inventory") if isinstance(minecraft_state.get("inventory"), dict) else {}
         inventory_summary = clean_text(str(minecraft_state.get("inventory_summary") or ""))
         if not inventory_summary:

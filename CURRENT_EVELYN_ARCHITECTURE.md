@@ -44,7 +44,7 @@ Codex gateway가 살아 있어도 runner가 정상이라는 뜻은 아니고, ru
 4. The runner boots upstream Voyager from `third_party/Voyager`.
 5. Voyager action generation routes through the Codex gateway.
 6. Voyager executes against the mineflayer bridge / Minecraft runtime.
-7. Runner writes status to `bot_memory/upstream_bridge_status.json`.
+7. Runner writes status to `runtime_artifacts/voyager/upstream_bridge_status.json`.
 8. Service serves `/health`, `/status`, and `/observe` from runner state plus live bridge telemetry.
 
 ## 3. Core local ownership boundaries
@@ -71,10 +71,10 @@ Codex gateway가 살아 있어도 runner가 정상이라는 뜻은 아니고, ru
 
 ### Live status / logs
 
-- `bot_memory/upstream_bridge_status.json`
-- `bot_memory/upstream_bridge_errors.log`
-- `bot_memory/voyager_service_errors.log`
-- `bot_memory/upstream_bridge_runner.log`
+- `runtime_artifacts/voyager/upstream_bridge_status.json`
+- `runtime_artifacts/logs/upstream_bridge_errors.log`
+- `runtime_artifacts/logs/voyager_service_errors.log`
+- `runtime_artifacts/logs/upstream_bridge_runner.log`
 
 ### Resume / checkpoint state
 

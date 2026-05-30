@@ -19,14 +19,15 @@ if os.name == "nt":
 
 from aiohttp import web
 
-from evelyn_core.paths import get_repo_root
+from evelyn_core.paths import get_repo_root, get_runtime_artifacts_root
 
 DEFAULT_VOYAGER_GOAL = "discovering as many diverse things as possible"
 REPO_ROOT = get_repo_root()
-GOAL_STATE_PATH = REPO_ROOT / "bot_memory" / "voyager_goal_state.json"
-RUNNER_STATUS_PATH = REPO_ROOT / "bot_memory" / "upstream_bridge_status.json"
-RUNNER_LOG_PATH = REPO_ROOT / "bot_memory" / "upstream_bridge_runner.log"
-SERVICE_ERROR_LOG_PATH = REPO_ROOT / "bot_memory" / "voyager_service_errors.log"
+RUNTIME_ARTIFACTS_ROOT = get_runtime_artifacts_root()
+GOAL_STATE_PATH = RUNTIME_ARTIFACTS_ROOT / "voyager" / "voyager_goal_state.json"
+RUNNER_STATUS_PATH = RUNTIME_ARTIFACTS_ROOT / "voyager" / "upstream_bridge_status.json"
+RUNNER_LOG_PATH = RUNTIME_ARTIFACTS_ROOT / "logs" / "upstream_bridge_runner.log"
+SERVICE_ERROR_LOG_PATH = RUNTIME_ARTIFACTS_ROOT / "logs" / "voyager_service_errors.log"
 VOYAGER_REPO = REPO_ROOT / "third_party" / "Voyager"
 VOYAGER_CURRICULUM_PATH = VOYAGER_REPO / "voyager" / "agents" / "curriculum.py"
 VOYAGER_VENV_PYTHON = REPO_ROOT / ".venv-voyager" / "Scripts" / "python.exe"
@@ -478,6 +479,7 @@ class UpstreamDirectBridge:
             str(RUNNER_STATUS_PATH),
         ]
         creationflags = 0
+        RUNNER_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
         log_handle = open(RUNNER_LOG_PATH, "a", encoding="utf-8")
         popen_kwargs: dict[str, Any] = {
             "cwd": str(REPO_ROOT),
@@ -949,7 +951,7 @@ async def set_goal(request: web.Request) -> web.Response:
 
 
 def _acquire_service_lock(port: int):
-    lock_path = REPO_ROOT / "bot_memory" / f"voyager_service_{port}.lock"
+    lock_path = RUNTIME_ARTIFACTS_ROOT / "locks" / f"voyager_service_{port}.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     handle = lock_path.open("a+")
     if os.name == "nt":

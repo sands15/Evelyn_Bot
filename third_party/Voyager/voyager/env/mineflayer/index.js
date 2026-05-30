@@ -37,7 +37,10 @@ const Chests = require("./lib/observation/chests");
 const { plugin: tool } = requireFromRepo("mineflayer-tool");
 
 const REPO_ROOT = path.resolve(__dirname, "../../../../../");
-const DEATH_LOG_PATH = path.join(REPO_ROOT, "bot_memory", "voyager_death_events.jsonl");
+const RUNTIME_ARTIFACTS_ROOT = process.env.EVELYN_RUNTIME_ARTIFACTS_DIR
+    || process.env.RUNTIME_ARTIFACTS_DIR
+    || path.join(REPO_ROOT, "runtime_artifacts");
+const DEATH_LOG_PATH = path.join(RUNTIME_ARTIFACTS_ROOT, "voyager", "death_events.jsonl");
 const HOSTILE_ENTITY_NAMES = new Set([
     "blaze",
     "bogged",

@@ -118,6 +118,26 @@ class MemoryVaultTests(unittest.TestCase):
         self.assertIn("remember this preference", content)
         self.assertIn("guild:123", content)
 
+    def test_append_turn_rows_can_record_combined_scopes_once(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = append_turn_rows_to_memory_vault(
+                123,
+                [{"role": "user", "speaker": "user", "source": "test", "text": "single visible daily turn"}],
+                scope_labels=[
+                    "guild",
+                    "room:text-1",
+                    "person:user-2",
+                    "session:guild-123-text-1-user-2",
+                ],
+                root=root,
+            )
+            assert path is not None
+            content = path.read_text(encoding="utf-8")
+
+        self.assertEqual(content.count("single visible daily turn"), 1)
+        self.assertIn("scopes:guild, room:text-1, person:user-2, session:guild-123-text-1-user-2", content)
+
     def test_graph_link_expands_related_note(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

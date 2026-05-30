@@ -1164,6 +1164,7 @@ def append_turn_rows_to_memory_vault(
     *,
     scope_type: str = "guild",
     scope_key: str | None = None,
+    scope_labels: list[str] | tuple[str, ...] | None = None,
     root: Path | None = None,
 ) -> Path | None:
     normalized: list[str] = []
@@ -1198,10 +1199,26 @@ def append_turn_rows_to_memory_vault(
         )
         path.write_text(front_matter + f"\n\n# Daily Memory {day_key}\n\n", encoding="utf-8")
 
-    scope_label = scope_type if not scope_key else f"{scope_type}:{_slug(scope_key, default='scope')}"
+    if scope_labels is None:
+        labels = [scope_type if not scope_key else f"{scope_type}:{_slug(scope_key, default='scope')}"]
+    else:
+        labels = []
+        seen_labels: set[str] = set()
+        for label in scope_labels:
+            cleaned = clean_text(str(label))
+            if ":" in cleaned:
+                prefix, suffix = cleaned.split(":", 1)
+                cleaned = f"{clean_text(prefix) or 'scope'}:{_slug(suffix, default='scope')}"
+            if not cleaned or cleaned in seen_labels:
+                continue
+            labels.append(cleaned)
+            seen_labels.add(cleaned)
+        if not labels:
+            labels = [scope_type if not scope_key else f"{scope_type}:{_slug(scope_key, default='scope')}"]
+    scope_label = ", ".join(labels)
     block = "\n".join(
         [
-            f"## {time.strftime('%H:%M:%S')} guild:{guild_id} scope:{scope_label}",
+            f"## {time.strftime('%H:%M:%S')} guild:{guild_id} scopes:{scope_label}",
             *normalized,
             "",
         ]

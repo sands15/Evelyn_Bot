@@ -228,7 +228,14 @@ def read_fact_rows(guild_id: int, *, scope_type: str = "guild", scope_key: str |
     )
 
 
-def append_raw_transcript_rows(guild_id: int, rows: list[dict], *, scope_type: str = "guild", scope_key: str | None = None) -> None:
+def append_raw_transcript_rows(
+    guild_id: int,
+    rows: list[dict],
+    *,
+    scope_type: str = "guild",
+    scope_key: str | None = None,
+    mirror_daily: bool = True,
+) -> None:
     """새 대화 raw transcript를 hot 파일과 일자별 vault 파일에 함께 누적한다."""
     normalized: list[dict] = []
     now = int(time.time())
@@ -254,15 +261,16 @@ def append_raw_transcript_rows(guild_id: int, rows: list[dict], *, scope_type: s
             normalized,
             max(MEMORY_RAW_LIMIT * 20, 5000),
         )
-        try:
-            append_turn_rows_to_memory_vault(
-                guild_id,
-                normalized,
-                scope_type=scope_type,
-                scope_key=scope_key,
-            )
-        except Exception as exc:
-            print(f"[MEMORY VAULT] daily mirror failed: {exc!r}")
+        if mirror_daily:
+            try:
+                append_turn_rows_to_memory_vault(
+                    guild_id,
+                    normalized,
+                    scope_type=scope_type,
+                    scope_key=scope_key,
+                )
+            except Exception as exc:
+                print(f"[MEMORY VAULT] daily mirror failed: {exc!r}")
 
 
 def append_unique_memory_rows(path: Path, rows: list[dict], limit: int, *, mirror_path: Path | None = None) -> None:

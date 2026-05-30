@@ -1,7 +1,7 @@
 import os
 from pathlib import Path
 
-from evelyn_core.paths import get_repo_root
+from evelyn_core.paths import get_repo_root, get_runtime_artifacts_root
 
 try:
     import winreg
@@ -103,6 +103,8 @@ OMNIVOICE_PLAYBACK_MAX_BUFFER_MS = float(os.getenv("OMNIVOICE_PLAYBACK_MAX_BUFFE
 OMNIVOICE_PLAYBACK_GAP_SAFETY_MS = float(os.getenv("OMNIVOICE_PLAYBACK_GAP_SAFETY_MS", "220"))
 OMNIVOICE_PLAYBACK_GAP_MULTIPLIER = float(os.getenv("OMNIVOICE_PLAYBACK_GAP_MULTIPLIER", "1.0"))
 OMNIVOICE_PLAYBACK_BLOCK_GAP_MIN_MS = float(os.getenv("OMNIVOICE_PLAYBACK_BLOCK_GAP_MIN_MS", "250"))
+TTS_PLAYBACK_START_LOOKAHEAD_CHUNKS = int(os.getenv("TTS_PLAYBACK_START_LOOKAHEAD_CHUNKS", "2"))
+TTS_PLAYBACK_START_LOOKAHEAD_TIMEOUT_MS = float(os.getenv("TTS_PLAYBACK_START_LOOKAHEAD_TIMEOUT_MS", "350"))
 
 
 # 메모리 업데이트와 cognitive 판단에 쓰는 서브 LLM 서버 엔드포인트.
@@ -121,6 +123,7 @@ ROUTER_ROUTE_MAX_TOKENS = int(os.getenv("ROUTER_ROUTE_MAX_TOKENS", "220"))
 ROUTER_ROUTE_TIMEOUT_SEC = float(os.getenv("ROUTER_ROUTE_TIMEOUT_SEC", "8"))
 # 길드별 메모리 파일을 저장하는 루트 디렉터리.
 MEMORY_ROOT = Path(os.getenv("BOT_MEMORY_DIR", str(REPO_ROOT / "bot_memory")))
+RUNTIME_ARTIFACTS_ROOT = get_runtime_artifacts_root()
 # 길드별 설정(prefix 등)을 저장하는 루트 디렉터리.
 GUILD_SETTINGS_ROOT = Path(os.getenv("GUILD_SETTINGS_DIR", str(REPO_ROOT / "guild_settings")))
 # 기본 명령어 시작 부호(prefix).
@@ -437,6 +440,7 @@ ALLOWED_OMNIVOICE_TAGS = {
     "[surprise-yo]",
     "[dissatisfaction-hnn]",
 }
+OMNIVOICE_AUTO_EMOTION_TAGS = os.getenv("OMNIVOICE_AUTO_EMOTION_TAGS", "true").lower() in {"1", "true", "yes", "on"}
 
 # 메인 LLM에게 주는 OmniVoice 태그 사용 가이드.
 OMNIVOICE_TAG_GUIDANCE = (

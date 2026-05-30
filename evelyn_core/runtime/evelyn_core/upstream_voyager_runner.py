@@ -14,7 +14,7 @@ from urllib import error as urllib_error
 from urllib import request as urllib_request
 from urllib.parse import urlparse
 
-from evelyn_core.paths import get_repo_root
+from evelyn_core.paths import get_repo_root, get_runtime_artifacts_root
 
 REPO_ROOT = get_repo_root()
 UPSTREAM_ROOT = REPO_ROOT / "third_party" / "Voyager"
@@ -36,10 +36,11 @@ from evelyn_core.config import (  # noqa: E402
 )
 
 DEFAULT_GOAL = "discovering as many diverse things as possible"
-DEFAULT_STATUS_PATH = REPO_ROOT / "bot_memory" / "upstream_bridge_status.json"
+RUNTIME_ARTIFACTS_ROOT = get_runtime_artifacts_root()
+DEFAULT_STATUS_PATH = RUNTIME_ARTIFACTS_ROOT / "voyager" / "upstream_bridge_status.json"
 DEFAULT_CKPT_DIR = REPO_ROOT / "bot_memory" / "upstream_ckpt"
 DEFAULT_SKILL_LIBRARY_DIR = REPO_ROOT / "third_party" / "Voyager" / "skill_library"
-RUNNER_ERROR_LOG_PATH = REPO_ROOT / "bot_memory" / "upstream_bridge_errors.log"
+RUNNER_ERROR_LOG_PATH = RUNTIME_ARTIFACTS_ROOT / "logs" / "upstream_bridge_errors.log"
 BRIDGE_HTTP_HOST = os.environ.get("VOYAGER_BRIDGE_HOST", "127.0.0.1")
 BRIDGE_HTTP_PORT = int(os.environ.get("VOYAGER_BRIDGE_PORT", "3000"))
 _RUNNER_STATUS_LINE_LENGTH = 0

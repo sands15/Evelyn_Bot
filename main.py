@@ -1,5 +1,4 @@
 import atexit
-import audioop
 import builtins
 import contextlib
 import hashlib
@@ -8,7 +7,6 @@ import json
 import logging
 import math
 import os
-import queue
 import re
 import shutil
 import subprocess
@@ -19,7 +17,7 @@ import asyncio
 import uuid
 import wave
 import zipfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
 from urllib.parse import parse_qs, unquote, urlparse
@@ -71,6 +69,13 @@ from evelyn_core.autonomy_router import DefaultAutonomyExecutor, RoutedAutonomyE
 from evelyn_core.config import *
 from evelyn_core.memory import *
 from evelyn_core.minecraft_autonomy_client import MinecraftAutonomyClient
+from evelyn_core.memory_writebehind import (
+    mark_memory_writer_status,
+    memory_writebehind_task_key,
+    run_memory_writebehind_steps,
+    should_replace_existing_memory_task,
+)
+from evelyn_core.minecraft_runtime_snapshot import attach_minecraft_runtime_snapshot, minecraft_runtime_status_fields
 from evelyn_core.text import (
     apply_stt_post_corrections,
     clean_text,
@@ -125,11 +130,53 @@ from evelyn_core.control_page_windows import (
     resolve_control_page_window_key,
 )
 from evelyn_core.page_urls import resolve_public_page_url
+from evelyn_core.query_intents import (
+    answer_current_datetime_query,
+    should_force_search_query,
+)
 from evelyn_core.assistant_contracts import (
     TtsSynthRequest,
     TtsSynthResult,
 )
+from evelyn_core.tts_playback import (
+    CachedWaveAudioSource,
+    ChunkWindow,
+    OmniVoicePCMStream,
+    PreparedPlaybackStarter,
+    PreparedTtsPlaybackQueue,
+    QueuedAudioSource,
+    StreamingVoiceDelivery,
+    SpeechChunker,
+    TTSQueueSink,
+    TtsPlaybackRegistry,
+    TtsPlaybackTracker,
+    add_omnivoice_stream_contract,
+    clear_tts_playback_tracking,
+    cleanup_tts_stream_tasks,
+    configure_tts_playback_logging,
+    drain_prepared_tts_playback,
+    finish_tts_playback_tracking,
+    get_tracked_tts_playback,
+    is_tracked_tts_playback_active,
+    mark_tts_playback_summary_state,
+    mark_tts_speaking,
+    play_audio_source,
+    prefetch_tts_sources,
+    resolve_cached_tts_audio_path,
+    split_tts_sentences,
+    start_tts_playback_tracking,
+    stop_tracked_tts_playback,
+    tracked_tts_playback_count,
+    tracked_tts_playback_guild_ids,
+    tts_input_suppression_reason,
+    update_tts_playback_tracking,
+)
+from evelyn_core.turn_trace import TURN_SUMMARY_EVENTS, build_turn_summary_payload
 from evelyn_core.voice_orchestration import (
+    VoiceTurnOrchestrator,
+    VoiceTurnOrchestratorDeps,
+    VoiceTurnRequest,
+    VoiceTurnRouteContext,
     VoiceTranscriptReplyContext,
     VoiceTranscriptReplyDeps,
     apply_voice_ingress_dequeue_debug_meta,
@@ -162,6 +209,7 @@ from evelyn_core.voice_pipeline import (
     build_voice_reply_request,
     build_voice_segment,
     classify_dialogue_turn,
+    route_decision_policy_dict,
 )
 from evelyn_voice import EvelynVoiceClient
 
@@ -184,7 +232,10 @@ STT_FULL_RESCORING_MIN_AUDIO_SEC = float(os.getenv("STT_FULL_RESCORING_MIN_AUDIO
 STT_FULL_RESCORING_MIN_TEXT_LEN = int(os.getenv("STT_FULL_RESCORING_MIN_TEXT_LEN", "8"))
 STT_COOLDOWN_AFTER_TIMEOUT_SEC = float(os.getenv("STT_COOLDOWN_AFTER_TIMEOUT_SEC", "6.0"))
 VOICE_REJOIN_ON_READY = os.getenv("VOICE_REJOIN_ON_READY", "true").lower() in {"1", "true", "yes", "on"}
-VOICE_LAST_CHANNEL_STATE_FILE = os.getenv("VOICE_LAST_CHANNEL_STATE_FILE", "bot_memory/voice_last_channel.json")
+VOICE_LAST_CHANNEL_STATE_FILE = os.getenv(
+    "VOICE_LAST_CHANNEL_STATE_FILE",
+    str(RUNTIME_ARTIFACTS_ROOT / "state" / "voice_last_channel.json"),
+)
 VOICE_LIVE_RECENT_SEC = float(os.getenv("VOICE_LIVE_RECENT_SEC", "90.0"))
 TTS_FIRST_CHUNK_MIN_CHARS = int(os.getenv("TTS_FIRST_CHUNK_MIN_CHARS", "14"))
 TTS_FIRST_CHUNK_TARGET_CHARS = int(os.getenv("TTS_FIRST_CHUNK_TARGET_CHARS", "22"))
@@ -217,7 +268,11 @@ ODYSSEY_CAPABILITY_JSON_DIR = Path(os.getenv(
 ))
 CONTEXT_PIPELINE_BENCHMARK_LOG = Path(os.getenv(
     "CONTEXT_PIPELINE_BENCHMARK_LOG",
-    str(PROJECT_ROOT / "bot_memory" / "context_pipeline_benchmarks.jsonl"),
+    str(RUNTIME_ARTIFACTS_ROOT / "benchmarks" / "context_pipeline_benchmarks.jsonl"),
+))
+MEMORY_WRITEBEHIND_STATUS_LOG = Path(os.getenv(
+    "MEMORY_WRITEBEHIND_STATUS_LOG",
+    str(RUNTIME_ARTIFACTS_ROOT / "memory" / "writebehind_status.jsonl"),
 ))
 CONTROL_PAGE_ENABLED = os.getenv("CONTROL_PAGE_ENABLED", "true").lower() == "true"
 CONTROL_PAGE_HOST = os.getenv("CONTROL_PAGE_HOST", "127.0.0.1")
@@ -485,7 +540,8 @@ SYSTEM_PROMPT = f"""
 session_locks: dict[str, asyncio.Lock] = {}
 reply_slot_locks: dict[str, asyncio.Lock] = {}
 tts_lock = asyncio.Lock()
-active_tts_playbacks: dict[int, dict[str, Any]] = {}
+tts_playback_tracker = TtsPlaybackTracker()
+active_tts_playbacks = tts_playback_tracker.registry
 voice_debug_counts: dict[int, int] = {}
 voice_debug_stems: dict[tuple[int, str], str] = {}
 
@@ -501,8 +557,8 @@ voice_path_warmup_done: dict[str, float] = {}
 partial_stt_cache: dict[str, dict[str, Any]] = {}
 
 room_last_voice_reply_at: dict[str, float] = {}
-last_bot_audio_end_at: dict[int, float] = {}
-bot_speaking_guilds: set[int] = set()
+last_bot_audio_end_at = tts_playback_tracker.last_audio_end_at
+bot_speaking_guilds = tts_playback_tracker.speaking_guilds
 memory_locks: dict[int, asyncio.Lock] = {}
 cognitive_locks: dict[int, asyncio.Lock] = {}
 background_cognitive_tasks: dict[str, asyncio.Task] = {}
@@ -668,7 +724,7 @@ def get_or_create_autonomy_engine(guild_id: int) -> AutonomyEngine:
                 if not content:
                     continue
                 recent_visible.append(content)
-                if "?" in content or "？" in content:
+                if "?" in content:
                     unresolved_items += 1
                 if answer_promises_search(content):
                     search_pending = True
@@ -1218,10 +1274,10 @@ def is_casual_call_or_status_question(text: str) -> bool:
     cleaned = clean_text(text).lower()
     if not cleaned:
         return True
-    stripped = re.sub(r"[\s,.!?~…]+", "", cleaned)
-    if stripped in {"이블린", "evelyn", "이블린아", "야", "어이"}:
+    stripped = re.sub(r"[\s,.!?~]+", "", cleaned)
+    if stripped in {"evelyn", "이블린", "이브"}:
         return True
-    return any(marker in cleaned for marker in ("뭐해", "뭐 하", "뭐하고", "뭐 하고", "부른", "불렀"))
+    return any(marker in cleaned for marker in ("뭐해", "뭐하고", "뭐 하는", "불러", "괜찮"))
 
 
 def persona_state_hint_for_turn(user_text: str, *, session_key: str | None = None, guild_id: int | None = None) -> str:
@@ -1273,8 +1329,10 @@ def reset_guild_runtime_state(guild_id: int) -> None:
             if task is not None and not task.done():
                 task.cancel()
             background_search_tasks.pop(key, None)
-    last_bot_audio_end_at.pop(guild_id, None)
-    bot_speaking_guilds.discard(guild_id)
+    clear_tts_playback_tracking(
+        tracker=tts_playback_tracker,
+        guild_id=guild_id,
+    )
     memory_locks.pop(guild_id, None)
     cognitive_locks.pop(guild_id, None)
     for key, task in list(background_cognitive_tasks.items()):
@@ -1313,6 +1371,7 @@ def log_turn_event(event: str, **payload) -> None:
     if not TURN_TRACE_JSON_LOG:
         return
     is_bottleneck_event = event in _BOTTLENECK_TURN_TRACE_EVENTS
+    preserve_null_fields = event in TURN_SUMMARY_EVENTS
     if VOICE_CONSOLE_ONLY_STT_AND_REPLY:
         if not is_bottleneck_event:
             return
@@ -1324,7 +1383,7 @@ def log_turn_event(event: str, **payload) -> None:
         return
     record = {"event": event, "ts": round(time.time(), 3)}
     for key, value in dict(payload).items():
-        if value is None:
+        if value is None and not preserve_null_fields:
             continue
         record[key] = value
     try:
@@ -1344,6 +1403,9 @@ def log_turn_event(event: str, **payload) -> None:
             if value is not None:
                 safe_record[key] = value
         print("[TURN TRACE]\n" + json.dumps(safe_record, ensure_ascii=False, sort_keys=True, indent=2))
+
+
+configure_tts_playback_logging(log_turn_event)
 
 
 def record_context_pipeline_benchmark(
@@ -1735,7 +1797,7 @@ async def run_blocking_stt_task(
 def compute_runtime_mode(metrics: dict | None) -> str:
     meta = (metrics or {}).get("meta") or {}
     marks = (metrics or {}).get("marks") or {}
-    tts_backlog = len(active_tts_playbacks)
+    tts_backlog = tracked_tts_playback_count(tts_playback_tracker)
     voice_queue_wait_ms = float(meta.get("voice_queue_wait_ms") or marks.get("voice_queue_wait_ms") or 0.0)
     if tts_backlog >= 2:
         return "realtime"
@@ -2069,7 +2131,7 @@ def finalize_voice_reply_side_effects(
         guild_id=guild_id,
         session_key=session_key,
     )
-    schedule_memory_update(
+    memory_writer_decision = schedule_memory_update(
         guild_id,
         voice_reply.history_user_text,
         plain_answer,
@@ -2083,6 +2145,7 @@ def finalize_voice_reply_side_effects(
         turn_scope=turn_scope,
         runtime_mode=runtime_mode,
     )
+    metrics.setdefault("meta", {})["memory_writer_decision"] = memory_writer_decision
     search_requested = bool(
         apply_ask_gating(
             read_cached_cognitive_state(
@@ -2137,34 +2200,23 @@ FAST_PATH_CONTINUE_MARKERS = (
     "아니",
     "아니야",
     "잠깐",
-    "음",
-    "어",
     "그거",
     "그건",
     "그 다음",
-    "이어서",
+    "이어",
     "계속",
 )
 
 FAST_PATH_DIRECTIVE_MARKERS = (
     "해줘",
-    "해 줘",
     "말해줘",
-    "말해 줘",
     "알려줘",
-    "알려 줘",
     "정리해줘",
-    "정리해 줘",
     "요약해줘",
-    "요약해 줘",
     "설명해줘",
-    "설명해 줘",
     "번역해줘",
-    "번역해 줘",
     "고쳐줘",
-    "고쳐 줘",
     "수정해줘",
-    "수정해 줘",
 )
 
 FAST_PATH_DEEP_ROUTE_MARKERS = (
@@ -2177,7 +2229,6 @@ FAST_PATH_DEEP_ROUTE_MARKERS = (
     "가격",
     "환율",
     "주가",
-    "날씨",
     "비교",
     "분석",
     "판단",
@@ -2186,7 +2237,7 @@ FAST_PATH_DEEP_ROUTE_MARKERS = (
     "방금",
     "전에",
     "이전",
-    "이어서",
+    "이어",
     "계속",
     "요약",
     "정리",
@@ -2197,12 +2248,14 @@ def needs_search_or_deep_routing(text: str) -> bool:
     cleaned = clean_text(text)
     if not cleaned:
         return False
+    if should_force_search_query(cleaned):
+        return True
     marker_hits = sum(1 for marker in FAST_PATH_DEEP_ROUTE_MARKERS if marker in cleaned)
     if marker_hits >= 2:
         return True
     if len(cleaned) >= 72:
         return True
-    search_markers = ("검색", "찾아", "최신", "뉴스", "날씨", "가격", "주가", "환율")
+    search_markers = ("검색", "찾아", "최신", "뉴스", "시세", "가격", "주가", "환율")
     return any(marker in cleaned for marker in search_markers)
 
 
@@ -2214,7 +2267,7 @@ def is_simple_directive(text: str) -> bool:
         return False
     if any(marker in cleaned for marker in FAST_PATH_DIRECTIVE_MARKERS):
         return True
-    return len(cleaned) <= 24 and "?" not in cleaned and "？" not in cleaned
+    return len(cleaned) <= 24 and "?" not in cleaned
 
 
 def is_obvious_continue(text: str, source: str, room_state: dict | None = None) -> bool:
@@ -2235,11 +2288,34 @@ def fast_path_policy(text: str, source: str, room_state: dict | None = None) -> 
         return {"route": "main_direct", "action": "wait", "reason_brief": "empty_input"}
     if is_obvious_continue(cleaned, source, room_state):
         return {"route": "main_direct", "action": "wait", "reason_brief": "obvious_continue"}
+    if should_force_search_query(cleaned):
+        return {"route": "search_executor", "action": "search_then_answer", "reason_brief": "search_trigger"}
     if is_simple_directive(cleaned):
         return {"route": "main_direct", "action": "answer", "reason_brief": "simple_directive"}
     if not needs_search_or_deep_routing(cleaned):
         return {"route": "main_direct", "action": "answer", "reason_brief": "light_request"}
     return None
+
+
+def context_policy_for_fast_path_policy(policy: dict | None, *, source: str) -> dict[str, Any]:
+    action = clean_text(str((policy or {}).get("action") or "answer"))
+    route = clean_text(str((policy or {}).get("route") or "main_direct"))
+    needs_search = action == "search_then_answer" or route == "search_executor"
+    return {
+        "intent": "question" if needs_search else "chat",
+        "needs_main_llm": action == "answer",
+        "needs_memory": False,
+        "needs_runtime_state": False,
+        "needs_minecraft_state": False,
+        "needs_vision": False,
+        "needs_skill_graph": False,
+        "needs_long_context": False,
+        "needs_search": needs_search,
+        "needs_tts": True,
+        "priority": "accuracy" if needs_search else "latency",
+        "context_focus": [],
+        "response_mode": "short" if source == "voice" else "normal",
+    }
 
 
 def build_fast_cognitive_state(
@@ -2332,11 +2408,14 @@ def should_reply_to_voice(
     awaiting_followup = bool(session_state.get("awaiting_user_reply")) and owner_active
     followup_allowed = owner_active and (active_session or awaiting_followup)
 
-    if guild_id in bot_speaking_guilds:
-        return False, "bot_is_speaking", "bot_is_speaking"
-
-    if now - last_bot_audio_end_at.get(guild_id, 0.0) < POST_TTS_IGNORE_SEC:
-        return False, "post_tts_ignore", "post_tts_ignore"
+    tts_suppression = tts_input_suppression_reason(
+        tracker=tts_playback_tracker,
+        guild_id=guild_id,
+        post_tts_ignore_sec=POST_TTS_IGNORE_SEC,
+        now=now,
+    )
+    if tts_suppression is not None:
+        return False, tts_suppression, tts_suppression
 
     if not text_n:
         return False, "empty", "empty"
@@ -2617,7 +2696,7 @@ class BufferedEditStreamer:
         delta_chars = max(0, len(candidate) - len(self.rendered_text))
         elapsed_ms = (now - self.last_flush_at) * 1000.0 if self.last_flush_at > 0 else 10000.0
         held_ms = (now - self.first_pending_at) * 1000.0 if self.first_pending_at > 0 else elapsed_ms
-        hard_break = candidate.endswith((".", "!", "?", "\n", "。", "！", "？"))
+        hard_break = candidate.endswith((".", "!", "?", "\n"))
         should_flush = force or hard_break or held_ms >= MAX_HOLD_MS or (delta_chars >= MIN_DELTA_CHARS and elapsed_ms >= MIN_EDIT_INTERVAL_MS)
         if not should_flush:
             return
@@ -2646,26 +2725,6 @@ class DiscordEditSink:
         await self.streamer.close(final_text)
 
 
-class TTSQueueSink:
-    def __init__(self, sentence_queue: "asyncio.Queue[str | None]"):
-        self.sentence_queue = sentence_queue
-        self.queued_sentence_count = 0
-
-    async def on_chunk(self, text: str) -> None:
-        cleaned = clean_tts_text(text)
-        print(f"[TTS QUEUE] on_chunk raw={text!r} cleaned={cleaned!r}")
-        if not cleaned:
-            print("[TTS QUEUE] drop_empty_chunk")
-            return
-        self.queued_sentence_count += 1
-        await self.sentence_queue.put(cleaned)
-        print(f"[TTS QUEUE] queued count={self.queued_sentence_count} qsize={self.sentence_queue.qsize()}")
-
-    async def close(self, _final_text: str) -> None:
-        print(f"[TTS QUEUE] close qsize_before={self.sentence_queue.qsize()}")
-        await self.sentence_queue.put(None)
-
-
 class ReplyStreamFanout:
     def __init__(self, sinks: list[Any]):
         self.sinks = [sink for sink in sinks if sink is not None]
@@ -2679,39 +2738,6 @@ class ReplyStreamFanout:
             close = getattr(sink, "close", None)
             if close is not None:
                 await close(final_text)
-
-
-class StreamingVoiceDelivery:
-    def __init__(
-        self,
-        sentence_queue: "asyncio.Queue[str | None]",
-        tts_sink: TTSQueueSink,
-        playback_task: asyncio.Task,
-        *,
-        metrics: dict,
-    ):
-        self.sentence_queue = sentence_queue
-        self.tts_sink = tts_sink
-        self.playback_task = playback_task
-        self.metrics = metrics
-
-    async def on_chunk(self, text: str) -> None:
-        await self.tts_sink.on_chunk(text)
-
-    async def close(self, final_text: str) -> None:
-        await self.tts_sink.close(final_text)
-
-    async def finalize(self) -> int:
-        log_voice_stage(self.metrics, "문장별 TTS 예약 완료", extra=f"sentence_count={self.tts_sink.queued_sentence_count} prefetch={TTS_PREFETCH_CHUNKS}")
-        await self.playback_task
-        return self.tts_sink.queued_sentence_count
-
-    async def abort(self) -> None:
-        if not self.playback_task.done():
-            await self.sentence_queue.put(None)
-            self.playback_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self.playback_task
 
 
 def read_cached_cognitive_state(
@@ -2833,6 +2859,17 @@ def format_minecraft_state_summary(state: dict[str, Any] | None) -> str:
     if not isinstance(state, dict) or not state:
         return ""
     parts: list[str] = []
+    runtime_snapshot = state.get("runtime_snapshot") if isinstance(state.get("runtime_snapshot"), dict) else {}
+    if runtime_snapshot:
+        freshness = clean_text(str(runtime_snapshot.get("freshness") or ""))
+        age_sec = runtime_snapshot.get("age_sec")
+        if freshness:
+            parts.append(f"snapshot={freshness}")
+        if age_sec is not None:
+            parts.append(f"snapshot_age={age_sec}s")
+        snapshot_error = clean_text(str(runtime_snapshot.get("last_error") or ""))
+        if snapshot_error:
+            parts.append(f"snapshot_error={snapshot_error[:120]}")
     voyager_running = state.get("minecraft_autonomy")
     voyager_connected = state.get("voyager_connected")
     if voyager_running is not None:
@@ -2961,7 +2998,7 @@ def runtime_file_age_label(path: Path) -> str:
 
 def load_runtime_recent_errors() -> list[str]:
     errors: list[str] = []
-    codex_path = PROJECT_ROOT / "bot_memory" / "codex_gateway_last_request.json"
+    codex_path = RUNTIME_ARTIFACTS_ROOT / "codex_gateway" / "last_request.json"
     try:
         codex_payload = json.loads(codex_path.read_text(encoding="utf-8"))
         codex_error = (
@@ -2978,7 +3015,7 @@ def load_runtime_recent_errors() -> list[str]:
     except Exception:
         pass
 
-    voyager_status_path = PROJECT_ROOT / "bot_memory" / "upstream_bridge_status.json"
+    voyager_status_path = RUNTIME_ARTIFACTS_ROOT / "voyager" / "upstream_bridge_status.json"
     try:
         status_payload = json.loads(voyager_status_path.read_text(encoding="utf-8"))
         voyager_error = (
@@ -2993,16 +3030,16 @@ def load_runtime_recent_errors() -> list[str]:
     except Exception:
         pass
 
-    for label, relative_path in (
-        ("voyager_service", Path("bot_memory") / "voyager_service_errors.log"),
-        ("upstream_bridge", Path("bot_memory") / "upstream_bridge_errors.log"),
+    for label, log_path in (
+        ("voyager_service", RUNTIME_ARTIFACTS_ROOT / "logs" / "voyager_service_errors.log"),
+        ("upstream_bridge", RUNTIME_ARTIFACTS_ROOT / "logs" / "upstream_bridge_errors.log"),
     ):
         if len(errors) >= 3:
             break
-        tail = read_text_tail(PROJECT_ROOT / relative_path)
+        tail = read_text_tail(log_path)
         lines = [compact_runtime_error(line) for line in tail.splitlines() if compact_runtime_error(line)]
         if lines:
-            log_age = runtime_file_age_label(PROJECT_ROOT / relative_path)
+            log_age = runtime_file_age_label(log_path)
             prefix = f"{label}({log_age})" if log_age else label
             errors.append(f"{prefix}: {lines[-1]}")
 
@@ -3142,14 +3179,32 @@ def should_force_voice_context_route(user_text: str) -> bool:
     if not text:
         return False
     voice_context_markers = [
-        "기억", "방금", "아까", "전에", "이전", "대화", "말했던", "했었던", "했던", "했었어",
-        "무슨 얘기", "뭐였", "기억나", "기억해", "이어", "계속", "정리", "요약",
-        "우리", "우리가", "하기로 했", "먹기로 했", "가기로 했", "약속", "정했",
+        "기억",
+        "방금",
+        "아까",
+        "전에",
+        "이전",
+        "말했",
+        "했던",
+        "하던",
+        "무슨 얘기",
+        "뭐지",
+        "이어",
+        "계속",
+        "정리",
+        "요약",
+        "우리",
+        "우리가",
+        "하기로",
+        "먹기로",
+        "가기로",
+        "약속",
+        "정했",
     ]
     marker_hits = sum(1 for marker in voice_context_markers if marker in text)
     if marker_hits >= 1:
         return True
-    return bool(re.search(r"(우리|우리가).*(했었|하기로 했|먹기로 했|가기로 했)", text))
+    return bool(re.search(r"(우리|우리가).*(하기로|먹기로|가기로)", text))
 
 
 def classify_llm_route_fallback(user_text: str, *, source: str = "text") -> str:
@@ -3162,8 +3217,23 @@ def classify_llm_route_fallback(user_text: str, *, source: str = "text") -> str:
         return "main_direct"
 
     context_markers = [
-        "아까", "방금", "전에", "이전", "기억", "문맥", "계속", "이어서",
-        "요약", "정리", "판단", "비교", "설명", "의견", "생각", "왜", "어떻게",
+        "아까",
+        "방금",
+        "전에",
+        "이전",
+        "기억",
+        "문맥",
+        "계속",
+        "이어",
+        "요약",
+        "정리",
+        "판단",
+        "비교",
+        "설명",
+        "의견",
+        "생각",
+        "왜",
+        "어떻게",
     ]
     marker_hits = sum(1 for marker in context_markers if marker in text)
 
@@ -3186,7 +3256,7 @@ async def prepare_llm_messages(
     debug_text: str | None = None,
     metrics: dict | None = None,
     turn_scope: TurnScope | None = None,
-) -> tuple[list[dict], dict | None, str]:
+) -> tuple[list[dict], dict | None, str, ContextPolicy]:
     if turn_scope is not None:
         turn_scope.raise_if_cancelled()
     runtime_mode = compute_runtime_mode(metrics)
@@ -3223,6 +3293,9 @@ async def prepare_llm_messages(
     )
     speculative = get_matching_speculative_policy(session_key, user_text) if source == "voice" else None
     local_fast_policy = (speculative or {}).get("policy") or fast_path_policy(user_text, source, session_state_snapshot(session_key))
+    if local_fast_policy is not None:
+        route_meta = dict(route_meta or {})
+        route_meta["context_policy"] = context_policy_for_fast_path_policy(local_fast_policy, source=source)
     should_block_on_cognitive = guild_id is not None and (cached_cognitive_state is None or route == "sub_wait")
     if local_fast_policy is not None:
         cognitive_state = build_fast_cognitive_state(
@@ -3268,8 +3341,15 @@ async def prepare_llm_messages(
     if turn_scope is not None:
         turn_scope.raise_if_cancelled()
 
+    context_policy = build_context_policy_for_turn(
+        user_text=user_text,
+        source=source,
+        route=route,
+        route_meta=route_meta,
+        cognitive_state=cognitive_state,
+    )
     memory_context = ""
-    if guild_id is not None:
+    if guild_id is not None and context_policy.needs_memory:
         memory_started_at = time.monotonic()
         memory_context = build_memory_context(
             guild_id,
@@ -3283,21 +3363,33 @@ async def prepare_llm_messages(
         if metrics is not None:
             memory_elapsed = (time.monotonic() - memory_started_at) * 1000.0
             metrics.setdefault("marks", {})["memory_ready"] = memory_elapsed
+    elif metrics is not None:
+        metrics.setdefault("meta", {})["memory_context_skipped_by_policy"] = True
 
     session_snapshot = session_state_snapshot(session_key)
-    context_policy = build_context_policy_for_turn(
-        user_text=user_text,
-        source=source,
-        route=route,
-        route_meta=route_meta,
-        cognitive_state=cognitive_state,
-    )
     live_context_minecraft_state: dict[str, Any] | None = None
     if guild_id is not None and (context_policy.needs_minecraft_state or context_policy.needs_skill_graph):
         try:
             live_context_minecraft_state = await observe_live_minecraft_state(guild_id)
         except Exception as e:
-            live_context_minecraft_state = {"last_error": clean_text(repr(e))[:160]}
+            live_context_minecraft_state = attach_minecraft_runtime_snapshot(
+                {"last_error": clean_text(repr(e))[:160]},
+                source="context_error",
+                now=time.time(),
+                observed_at=time.time(),
+                stale_after_sec=CONTROL_PAGE_MINECRAFT_CACHE_REFRESH_SEC,
+                expired_after_sec=CONTROL_PAGE_MINECRAFT_CACHE_MAX_STALE_SEC,
+                last_error=clean_text(repr(e))[:160],
+            )
+        if metrics is not None and isinstance(live_context_minecraft_state, dict):
+            runtime_snapshot = live_context_minecraft_state.get("runtime_snapshot")
+            if isinstance(runtime_snapshot, dict):
+                metrics.setdefault("meta", {})["minecraft_snapshot_age_ms"] = (
+                    None
+                    if runtime_snapshot.get("age_sec") is None
+                    else max(0.0, float(runtime_snapshot.get("age_sec") or 0.0) * 1000.0)
+                )
+                metrics.setdefault("meta", {})["minecraft_snapshot_freshness"] = runtime_snapshot.get("freshness")
     conversation_context = build_conversation_state_context(
         cognitive_state=cognitive_state,
         session_state=session_snapshot,
@@ -3379,7 +3471,7 @@ async def prepare_llm_messages(
         )
     else:
         print(f"[LLM ROUTE] source={source} route={route} via=fallback text={visible_text(route_text)!r}")
-    return messages, cognitive_state, route
+    return messages, cognitive_state, route, context_policy
 
 
 def collect_memory_layers(
@@ -4079,8 +4171,8 @@ def should_run_memory_update(
     cleaned_answer = clean_text(answer)
     merged = clean_text(f"{cleaned_user} {cleaned_answer}")
     text_len = len(cleaned_user)
-    has_open_question = ("?" in cleaned_user) or ("？" in cleaned_user) or ("?" in cleaned_answer) or ("？" in cleaned_answer)
-    explicit_fact_markers = ("내 ", "나는 ", "제가 ", "우리는 ", "설정", "결정", "기억해", "기억해줘", "해야", "하기로")
+    has_open_question = ("?" in cleaned_user) or ("?" in cleaned_answer)
+    explicit_fact_markers = ("나는 ", "내가 ", "우리는", "설정", "결정", "기억", "기억해줘", "해야", "하기로")
     has_explicit_fact = any(marker in merged for marker in explicit_fact_markers)
     is_smalltalk = (not needs_search_or_deep_routing(cleaned_user)) and len(cleaned_user) <= 14 and len(cleaned_answer) <= 32
     turn_index = 1
@@ -4151,18 +4243,32 @@ def schedule_memory_update(
     session_key: str | None = None,
     turn_scope: TurnScope | None = None,
     runtime_mode: str | None = None,
-) -> None:
+) -> dict[str, Any]:
     rows = [
         {"role": "user", "speaker": user_speaker, "source": source, "text": user_text},
         {"role": "assistant", "speaker": assistant_speaker, "source": source, "text": answer},
     ]
-    append_raw_transcript_rows(guild_id, rows)
+    append_raw_transcript_rows(guild_id, rows, mirror_daily=False)
+    daily_scope_labels = ["guild"]
     if room_key:
-        append_raw_transcript_rows(guild_id, rows, scope_type="room", scope_key=room_key)
+        append_raw_transcript_rows(guild_id, rows, scope_type="room", scope_key=room_key, mirror_daily=False)
+        daily_scope_labels.append(f"room:{room_key}")
     if person_key:
-        append_raw_transcript_rows(guild_id, rows, scope_type="person", scope_key=person_key)
+        append_raw_transcript_rows(guild_id, rows, scope_type="person", scope_key=person_key, mirror_daily=False)
+        daily_scope_labels.append(f"person:{person_key}")
     if session_memory_key:
-        append_raw_transcript_rows(guild_id, rows, scope_type="session", scope_key=session_memory_key)
+        append_raw_transcript_rows(guild_id, rows, scope_type="session", scope_key=session_memory_key, mirror_daily=False)
+        daily_scope_labels.append(f"session:{session_memory_key}")
+    vault_mirrored = True
+    try:
+        append_turn_rows_to_memory_vault(
+            guild_id,
+            rows,
+            scope_labels=daily_scope_labels,
+        )
+    except Exception as exc:
+        vault_mirrored = False
+        print(f"[MEMORY VAULT] daily mirror failed: {exc!r}")
 
     mode = runtime_mode or "normal"
     if mode != "realtime":
@@ -4180,23 +4286,87 @@ def schedule_memory_update(
         ),
         runtime_mode=mode,
     )
+    decision_payload = memory_writer_decision.to_dict()
+    decision_payload["source"] = source
+    decision_payload["session_key"] = session_key
+    decision_payload["raw_transcript_written"] = True
+    decision_payload["vault_mirrored"] = vault_mirrored
     if not memory_writer_decision.should_run_summary_llm():
-        return
+        mark_memory_writer_status(
+            decision_payload,
+            "skipped",
+            event_path=MEMORY_WRITEBEHIND_STATUS_LOG,
+            log=print,
+            writebehind_reason="summary_llm_not_needed",
+        )
+        return decision_payload
 
     if mode == "realtime":
-        return
+        mark_memory_writer_status(
+            decision_payload,
+            "deferred",
+            event_path=MEMORY_WRITEBEHIND_STATUS_LOG,
+            log=print,
+            writebehind_reason="runtime_mode_realtime",
+        )
+        return decision_payload
 
     memory_task_key = session_memory_key or room_key or session_key or runtime_session_key(guild_id=guild_id)
     if mode == "batch" and memory_task_key is not None:
+        memory_task_key = memory_writebehind_task_key(memory_task_key, decision_payload)
         existing = background_memory_tasks.get(memory_task_key)
-        if existing is not None and not existing.done():
+        if existing is not None and not existing.done() and should_replace_existing_memory_task(decision_payload):
             existing.cancel()
         async def _batched_memory_refresh() -> None:
             try:
                 await asyncio.sleep(1.5)
                 if turn_scope is not None:
                     turn_scope.raise_if_cancelled()
-                await update_long_term_memory(
+                await run_memory_writebehind_steps(
+                    decision_payload,
+                    [
+                        lambda: update_long_term_memory(
+                            guild_id,
+                            user_text,
+                            answer,
+                            room_key=room_key,
+                            person_key=person_key,
+                            session_memory_key=session_memory_key,
+                            turn_scope=turn_scope,
+                        ),
+                        lambda: update_cognitive_state(
+                            guild_id,
+                            user_text,
+                            session_key=session_key,
+                            room_key=room_key,
+                            person_key=person_key,
+                            session_memory_key=session_memory_key,
+                            source=source,
+                            turn_scope=turn_scope,
+                        ),
+                    ],
+                    log=print,
+                    event_path=MEMORY_WRITEBEHIND_STATUS_LOG,
+                )
+            finally:
+                task = background_memory_tasks.get(memory_task_key)
+                if task is asyncio.current_task():
+                    background_memory_tasks.pop(memory_task_key, None)
+        mark_memory_writer_status(
+            decision_payload,
+            "queued",
+            event_path=MEMORY_WRITEBEHIND_STATUS_LOG,
+            log=print,
+            writebehind_mode="batch",
+        )
+        background_memory_tasks[memory_task_key] = create_turn_scoped_task(_batched_memory_refresh(), turn_scope=turn_scope)
+        return decision_payload
+
+    async def _memory_writebehind() -> None:
+        await run_memory_writebehind_steps(
+            decision_payload,
+            [
+                lambda: update_long_term_memory(
                     guild_id,
                     user_text,
                     answer,
@@ -4204,8 +4374,8 @@ def schedule_memory_update(
                     person_key=person_key,
                     session_memory_key=session_memory_key,
                     turn_scope=turn_scope,
-                )
-                await update_cognitive_state(
+                ),
+                lambda: update_cognitive_state(
                     guild_id,
                     user_text,
                     session_key=session_key,
@@ -4214,299 +4384,29 @@ def schedule_memory_update(
                     session_memory_key=session_memory_key,
                     source=source,
                     turn_scope=turn_scope,
-                )
-            finally:
-                task = background_memory_tasks.get(memory_task_key)
-                if task is asyncio.current_task():
-                    background_memory_tasks.pop(memory_task_key, None)
-        background_memory_tasks[memory_task_key] = create_turn_scoped_task(_batched_memory_refresh(), turn_scope=turn_scope)
-        return
+                ),
+            ],
+            log=print,
+            event_path=MEMORY_WRITEBEHIND_STATUS_LOG,
+        )
 
-    create_turn_scoped_task(
-        update_long_term_memory(
-            guild_id,
-            user_text,
-            answer,
-            room_key=room_key,
-            person_key=person_key,
-            session_memory_key=session_memory_key,
-            turn_scope=turn_scope,
-        ),
-        turn_scope=turn_scope,
+    mark_memory_writer_status(
+        decision_payload,
+        "queued",
+        event_path=MEMORY_WRITEBEHIND_STATUS_LOG,
+        log=print,
+        writebehind_mode="normal",
     )
-    create_turn_scoped_task(
-        update_cognitive_state(
-            guild_id,
-            user_text,
-            session_key=session_key,
-            room_key=room_key,
-            person_key=person_key,
-            session_memory_key=session_memory_key,
-            source=source,
-            turn_scope=turn_scope,
-        ),
-        turn_scope=turn_scope,
-    )
+    create_turn_scoped_task(_memory_writebehind(), turn_scope=turn_scope)
+    return decision_payload
 
 
-BAD_TAIL_WORDS = (
-    "그리고",
-    "근데",
-    "하지만",
-    "다만",
-    "또",
-    "그래서",
-)
-
-BAD_TAIL_SUFFIXES = (
-    "은", "는", "이", "가", "을", "를", "에", "와", "과",
-    "도", "로", "며", "고", "서", "면", "한", "할",
-)
-
-GOOD_END_SUFFIXES = (
-    "다", "요", "지", "네", "까", "어", "아", "음",
-)
-
-
-@dataclass(frozen=True)
-class ChunkWindow:
-    min_chars: int
-    target_chars: int
-    max_chars: int
-    allow_soft_breaks: bool = True
-    soft_break_overflow_only: bool = False
-
-
-@dataclass
-class ChunkerConfig:
-    hard_breaks: tuple[str, ...] = (".", "!", "?", "\n", "。", "！", "？")
-    soft_breaks: tuple[str, ...] = (",", "，", "…", ";", "；", ":", "：")
-    hard_break_grace_chars: int = 10
-    candidate_unstable_penalty: int = 80
-    natural_end_bonus: int = 12
-    first_window: ChunkWindow = field(default_factory=lambda: ChunkWindow(18, 24, 40, True, False))
-    next_window: ChunkWindow = field(default_factory=lambda: ChunkWindow(12, 36, 72, False, True))
-    structured_first_window: ChunkWindow = field(default_factory=lambda: ChunkWindow(22, 30, 48, False, False))
-    structured_next_window: ChunkWindow = field(default_factory=lambda: ChunkWindow(18, 40, 84, False, True))
-
-
-def _normalized_tail_probe(text: str) -> str:
-    s = clean_tts_text(text).strip()
-    if not s:
-        return ""
-    while s and s[-1] in " \t\r\n,，;；:：….!?。！？)]}>'\"”’」』】":
-        s = s[:-1].rstrip()
-    return s
-
-
-def has_unbalanced_pairs(text: str) -> bool:
-    s = text or ""
-    pairs = (("(", ")"), ("[", "]"), ("{", "}"))
-    for left, right in pairs:
-        if s.count(left) != s.count(right):
-            return True
-    if s.count('"') % 2 == 1:
-        return True
-    if s.count("'") % 2 == 1:
-        return True
-    if s.count("```") % 2 == 1:
-        return True
-    return False
-
-
-def is_unstable_tail(chunk: str) -> bool:
-    s = clean_tts_text(chunk).strip()
-    if not s:
-        return True
-    if has_unbalanced_pairs(s):
-        return True
-
-    tail_probe = _normalized_tail_probe(s)
-    if not tail_probe:
-        return True
-
-    for word in BAD_TAIL_WORDS:
-        if tail_probe.endswith(word):
-            return True
-
-    for suffix in BAD_TAIL_SUFFIXES:
-        if tail_probe.endswith(suffix):
-            return True
-
-    return False
-
-
-def has_natural_end(chunk: str) -> bool:
-    tail_probe = _normalized_tail_probe(chunk)
-    if not tail_probe:
-        return False
-    return tail_probe.endswith(GOOD_END_SUFFIXES)
-
-
-def detect_output_shape(text: str) -> str:
-    s = text or ""
-    stripped = s.lstrip()
-    if not stripped:
-        return "chat"
-    if stripped.startswith(("```", "`")):
-        return "structured"
-    if re.search(r"(?m)^\s*(?:[-*•]|\d+[.)])\s+\S", stripped):
-        return "structured"
-    if re.search(r"(?m)^\s*\|.+\|\s*$", stripped):
-        return "structured"
-    return "chat"
-
-
-@dataclass
-class SpeechChunker:
-    config: ChunkerConfig = field(default_factory=ChunkerConfig)
-    buf: str = ""
-    sent_first: bool = False
-    mode: str = "chat"
-
-    def push(self, delta: str, *, max_chunks: int | None = 1) -> list[str]:
-        if delta:
-            self.buf += delta
-        self.mode = detect_output_shape(self.buf)
-
-        out: list[str] = []
-        while True:
-            cut = self._find_dispatch_point(self.buf)
-            if cut is None:
-                break
-
-            chunk = self._consume(cut)
-            if not chunk:
-                continue
-
-            out.append(chunk)
-            self.sent_first = True
-            if max_chunks is not None and len(out) >= max_chunks:
-                break
-
-        return out
-
-    def flush(self) -> list[str]:
-        tail = clean_tts_text(self.buf)
-        self.buf = ""
-        return [tail] if tail else []
-
-    def _window(self) -> ChunkWindow:
-        if self.mode == "structured":
-            return self.config.structured_next_window if self.sent_first else self.config.structured_first_window
-        return self.config.next_window if self.sent_first else self.config.first_window
-
-    def _consume(self, cut: int) -> str:
-        raw = self.buf[:cut]
-        self.buf = self.buf[cut:].lstrip()
-        return clean_tts_text(raw)
-
-    def _find_dispatch_point(self, text: str) -> int | None:
-        if not text.strip():
-            return None
-
-        window = self._window()
-        best_idx: int | None = None
-        best_score = -(10 ** 9)
-        best_kind: str | None = None
-        best_visible_len = 0
-        clean_len = len(clean_text(text))
-
-        for i, ch in enumerate(text):
-            raw_idx = i + 1
-            chunk = clean_tts_text(text[:raw_idx])
-            visible_len = len(clean_text(chunk))
-            if visible_len < window.min_chars:
-                continue
-
-            is_hard = ch in self.config.hard_breaks
-            is_soft = ch in self.config.soft_breaks
-            if not is_hard:
-                if not is_soft:
-                    continue
-                if not window.allow_soft_breaks:
-                    if not window.soft_break_overflow_only or visible_len < window.max_chars:
-                        continue
-
-            score = 100 if is_hard else 55
-            score -= abs(visible_len - window.target_chars)
-            if visible_len > window.max_chars:
-                score -= 20
-            if is_unstable_tail(chunk):
-                score -= self.config.candidate_unstable_penalty
-            if has_natural_end(chunk):
-                score += self.config.natural_end_bonus
-
-            if score > best_score:
-                best_score = score
-                best_idx = raw_idx
-                best_kind = "hard" if is_hard else "soft"
-                best_visible_len = visible_len
-
-        if best_idx is not None and best_kind == "soft":
-            for i, ch in enumerate(text):
-                raw_idx = i + 1
-                if raw_idx <= best_idx or ch not in self.config.hard_breaks:
-                    continue
-                candidate = clean_tts_text(text[:raw_idx])
-                visible_len = len(clean_text(candidate))
-                if visible_len > window.max_chars:
-                    continue
-                if visible_len - best_visible_len > self.config.hard_break_grace_chars:
-                    continue
-                if is_unstable_tail(candidate):
-                    continue
-                return raw_idx
-
-        if best_idx is None and clean_len >= window.max_chars:
-            forced_idx = self._find_forced_cut(text, window.max_chars)
-            forced_chunk = clean_tts_text(text[:forced_idx])
-            if forced_chunk and not is_unstable_tail(forced_chunk):
-                return forced_idx
-
-        return best_idx
-
-    def _find_forced_cut(self, text: str, max_chars: int) -> int:
-        visible_count = 0
-        target_raw_idx = len(text)
-
-        for i, ch in enumerate(text):
-            if not ch.isspace() or visible_count > 0:
-                visible_count += 1
-            if visible_count >= max_chars:
-                target_raw_idx = i + 1
-                break
-
-        search_start = max(1, target_raw_idx - 14)
-        window = text[search_start - 1:target_raw_idx]
-        for j in range(len(window) - 1, -1, -1):
-            ch = window[j]
-            raw_idx = (search_start - 1) + j + 1
-            if ch.isspace() or ch in self.config.soft_breaks or ch in self.config.hard_breaks:
-                return raw_idx
-        return target_raw_idx
-
-
-def split_tts_sentences(
-    buffer: str,
-    *,
-    force: bool = False,
-    emitted_chunks: int = 0,
-) -> tuple[list[str], str]:
-    chunker = SpeechChunker(sent_first=emitted_chunks > 0)
-    chunks = chunker.push(buffer or "", max_chunks=None)
-    if not force:
-        return chunks, chunker.buf
-    chunks.extend(chunker.flush())
-    return chunks, ""
-
-
-RESPONSE_ACTION_TAGS = {"찾기": "search", "질문": "ask", "대기": "wait", "답변": "answer"}
+RESPONSE_ACTION_TAGS = {"찾기": "search", "질문": "ask", "대기": "wait", "응답": "answer"}
 
 
 def parse_response_action_tag(text: str) -> tuple[str | None, str]:
     raw = text or ""
-    match = re.match(r"^\s*\[(찾기|질문|대기|답변)\]\s*", raw)
+    match = re.match(r"^\s*\[(찾기|질문|대기|응답)\]\s*", raw)
     if not match:
         return None, clean_text(raw)
     action = RESPONSE_ACTION_TAGS.get(match.group(1))
@@ -4518,14 +4418,8 @@ def normalize_friend_style_output(text: str) -> str:
     cleaned = clean_text(text)
     if not cleaned:
         return ""
-    cleaned = re.sub(r"^\s*(네|예)[,.]?\s*", "응, ", cleaned)
-    cleaned = cleaned.replace("부르셨어요", "불렀어")
     cleaned = cleaned.replace("부르셨나요", "불렀어?")
     cleaned = cleaned.replace("말씀하세요", "말해")
-    cleaned = cleaned.replace("무엇을 도와드릴까요", "왜?")
-    cleaned = cleaned.replace("무엇을 도와줄까", "왜?")
-    cleaned = cleaned.replace("질문에 답할 준비가 되어 있어", "듣고 있어")
-    cleaned = re.sub(r"지금\s+네\s+이야기에\s+집중하고\s+있어[요.]?", "듣고 있어.", cleaned)
     cleaned = re.sub(r"[\U0001F300-\U0001FAFF\u2600-\u27BF]+", "", cleaned)
     return clean_text(cleaned)
 
@@ -5116,251 +5010,6 @@ def schedule_search_followup(
         runtime_mode=runtime_mode,
     )
     background_search_tasks[task_key] = task
-class OmniVoicePCMStream(discord.AudioSource):
-    def __init__(
-        self,
-        *,
-        on_first_frame: Callable[[], None] | None = None,
-        on_first_packet_sent: Callable[[], None] | None = None,
-        trace_payload: dict[str, Any] | None = None,
-    ):
-        self._queue: queue.Queue[bytes | None] = queue.Queue()
-        self._buffer = bytearray()
-        self._done = False
-        self._closed = False
-        self._rate_state = None
-        self._input_remainder = b""
-        self._first_frame_sent = False
-        self._on_first_frame = on_first_frame
-        self._on_first_packet_sent = on_first_packet_sent
-        self._ready_event = threading.Event()
-        self._trace_payload = dict(trace_payload or {})
-        self.error: Exception | None = None
-
-    def feed_pcm24_mono(self, chunk: bytes) -> None:
-        if self._closed or not chunk:
-            return
-
-        pcm = self._input_remainder + chunk
-        if len(pcm) % 2 == 1:
-            self._input_remainder = pcm[-1:]
-            pcm = pcm[:-1]
-        else:
-            self._input_remainder = b""
-
-        if not pcm:
-            return
-
-        upsampled, self._rate_state = audioop.ratecv(
-            pcm,
-            2,
-            OMNIVOICE_PCM_CHANNELS,
-            OMNIVOICE_PCM_RATE,
-            DISCORD_PCM_RATE,
-            self._rate_state,
-        )
-        stereo = audioop.tostereo(upsampled, 2, 1, 1)
-        if stereo:
-            self._ready_event.set()
-            self._queue.put(stereo)
-            log_turn_event(
-                "playback_queue_put",
-                **merge_log_event_payload(explicit={"bytes": len(stereo)}, extra=self._trace_payload),
-            )
-
-    def finish(self) -> None:
-        self._done = True
-        self._ready_event.set()
-        self._queue.put(None)
-
-    def fail(self, err: Exception) -> None:
-        self.error = err
-        self.finish()
-
-    def has_audio_ready(self) -> bool:
-        return bool(self._buffer) or not self._queue.empty() or self._ready_event.is_set()
-
-    def is_exhausted(self) -> bool:
-        return self._done and not self._buffer and self._queue.empty()
-
-    async def wait_until_ready(self, timeout: float = 1.0) -> bool:
-        return await asyncio.to_thread(self._ready_event.wait, timeout)
-
-    def read(self) -> bytes:
-        while len(self._buffer) < DISCORD_FRAME_BYTES:
-            try:
-                item = self._queue.get(timeout=0.02)
-            except queue.Empty:
-                if self._done:
-                    break
-                continue
-
-            if item is None:
-                self._done = True
-                break
-
-            log_turn_event(
-                "playback_queue_get",
-                **merge_log_event_payload(explicit={"bytes": len(item)}, extra=self._trace_payload),
-            )
-            self._buffer.extend(item)
-
-        if len(self._buffer) >= DISCORD_FRAME_BYTES:
-            chunk = bytes(self._buffer[:DISCORD_FRAME_BYTES])
-            del self._buffer[:DISCORD_FRAME_BYTES]
-            if not self._first_frame_sent and any(chunk):
-                self._first_frame_sent = True
-                if self._on_first_frame is not None:
-                    self._on_first_frame()
-                if self._on_first_packet_sent is not None:
-                    self._on_first_packet_sent()
-            return chunk
-
-        if self._done and self._buffer:
-            chunk = bytes(self._buffer)
-            self._buffer.clear()
-            padded = chunk + (b"\x00" * (DISCORD_FRAME_BYTES - len(chunk)))
-            if not self._first_frame_sent and any(padded):
-                self._first_frame_sent = True
-                if self._on_first_frame is not None:
-                    self._on_first_frame()
-                if self._on_first_packet_sent is not None:
-                    self._on_first_packet_sent()
-            return padded
-
-        return b""
-
-    def cleanup(self) -> None:
-        self._closed = True
-        self._done = True
-        self._ready_event.set()
-        try:
-            self._queue.put_nowait(None)
-        except Exception:
-            pass
-
-
-class CachedWaveAudioSource(discord.AudioSource):
-    def __init__(
-        self,
-        path: Path,
-        *,
-        on_first_packet_sent: Callable[[], None] | None = None,
-    ) -> None:
-        self.path = Path(path)
-        self._offset = 0
-        self._closed = False
-        self._first_frame_sent = False
-        self._on_first_packet_sent = on_first_packet_sent
-        self.error: Exception | None = None
-
-        with wave.open(str(self.path), "rb") as wav:
-            channels = wav.getnchannels()
-            sample_width = wav.getsampwidth()
-            sample_rate = wav.getframerate()
-            frames = wav.readframes(wav.getnframes())
-
-        if sample_width != 2:
-            raise ValueError(f"cached audio must be 16-bit PCM wav: {self.path}")
-        if channels not in {1, 2}:
-            raise ValueError(f"cached audio must be mono or stereo wav: {self.path}")
-
-        pcm = frames
-        if channels == 2:
-            pcm = audioop.tomono(pcm, sample_width, 0.5, 0.5)
-            channels = 1
-
-        if sample_rate != DISCORD_PCM_RATE:
-            pcm, _state = audioop.ratecv(
-                pcm,
-                sample_width,
-                channels,
-                sample_rate,
-                DISCORD_PCM_RATE,
-                None,
-            )
-
-        self._pcm = audioop.tostereo(pcm, sample_width, 1, 1) if channels == 1 else pcm
-
-    def read(self) -> bytes:
-        if self._closed or self._offset >= len(self._pcm):
-            return b""
-
-        chunk = self._pcm[self._offset : self._offset + DISCORD_FRAME_BYTES]
-        self._offset += len(chunk)
-        if len(chunk) < DISCORD_FRAME_BYTES:
-            chunk += b"\x00" * (DISCORD_FRAME_BYTES - len(chunk))
-
-        if not self._first_frame_sent and any(chunk):
-            self._first_frame_sent = True
-            if self._on_first_packet_sent is not None:
-                self._on_first_packet_sent()
-        return chunk
-
-    def cleanup(self) -> None:
-        self._closed = True
-
-    def finish(self) -> None:
-        self.cleanup()
-
-
-class QueuedAudioSource(discord.AudioSource):
-    def __init__(self) -> None:
-        self._sources: queue.Queue[OmniVoicePCMStream | None] = queue.Queue()
-        self._current: OmniVoicePCMStream | None = None
-        self._closed = False
-        self._done = False
-        self.error: Exception | None = None
-
-    def add_source(self, source: OmniVoicePCMStream) -> None:
-        if self._closed:
-            source.cleanup()
-            return
-        self._sources.put(source)
-
-    def finish(self) -> None:
-        self._done = True
-        self._sources.put(None)
-
-    def read(self) -> bytes:
-        while True:
-            if self._current is None:
-                try:
-                    next_source = self._sources.get(timeout=0.02)
-                except queue.Empty:
-                    if self._done:
-                        return b""
-                    return b"\x00" * DISCORD_FRAME_BYTES
-                if next_source is None:
-                    self._done = True
-                    return b""
-                self._current = next_source
-
-            chunk = self._current.read()
-            if chunk:
-                return chunk
-
-            if self._current.error is not None and self.error is None:
-                self.error = self._current.error
-            if self._current.is_exhausted():
-                self._current.cleanup()
-                self._current = None
-                continue
-
-            return b"\x00" * DISCORD_FRAME_BYTES
-
-    def cleanup(self) -> None:
-        self._closed = True
-        if self._current is not None:
-            self._current.cleanup()
-            self._current = None
-        while True:
-            try:
-                item = self._sources.get_nowait()
-            except queue.Empty:
-                break
-            if item is not None:
-                item.cleanup()
 
 
 async def set_tts_presence(is_warming_up: bool) -> None:
@@ -5791,38 +5440,14 @@ def log_voice_bottleneck_summary(
 
     log_turn_event(
         event_name,
-        label=label,
-        turn_id=meta.get("turn_id"),
-        segment_id=meta.get("segment_id"),
-        chunk_index=meta.get("chunk_index"),
-        source=meta.get("source"),
-        turn_type=meta.get("turn_type"),
-        selected_path=meta.get("selected_path"),
-        reply_source=meta.get("reply_source"),
-        session_key=meta.get("session_key"),
-        room_session_key=meta.get("room_session_key"),
-        owner_user_id=meta.get("owner_user_id"),
-        reply_gate_passed_by=meta.get("reply_gate_passed_by"),
-        reply_gate_blocked_by=meta.get("reply_gate_blocked_by"),
-        topic_id=meta.get("topic_id"),
-        drop_reason=meta.get("drop_reason"),
-        t_ingress=marks.get("t_ingress"),
-        t_policy=marks.get("t_policy"),
-        t_context_build=marks.get("t_context_build"),
-        cognitive_hotpath_ms=marks.get("cognitive_hotpath_ms"),
-        t_main_first_token=marks.get("t_main_first_token"),
-        t_main_done=marks.get("t_main_done"),
-        t_tts_first_audio=marks.get("t_tts_first_audio"),
-        t_playback_first_packet=marks.get("t_playback_first_packet"),
-        t_stt_done=marks.get("t_stt_done"),
-        total_ms=round(total_ms, 1),
-        stt_ms_p95=p95_summary.get("stt_ms_p95"),
-        router_ms_p95=p95_summary.get("router_ms_p95"),
-        main_first_token_ms_p95=p95_summary.get("main_first_token_ms_p95"),
-        tts_first_audio_ms_p95=p95_summary.get("tts_first_audio_ms_p95"),
-        search_followup_queued_count=p95_summary.get("search_followup_queued_count"),
-        cancelled_stale_turn_count=p95_summary.get("cancelled_stale_turn_count"),
-        extra=extra or None,
+        **build_turn_summary_payload(
+            metrics,
+            label=label,
+            event_name=event_name,
+            total_ms=round(total_ms, 1),
+            p95_summary=p95_summary,
+            extra=extra or None,
+        ),
     )
 
 
@@ -6490,108 +6115,23 @@ async def restore_last_voice_channel(guild: discord.Guild | None = None, *, forc
 
 
 async def stop_active_tts_playback(guild_id: int | None, *, reason: str = "interrupt") -> None:
-    if guild_id is None:
+    stopped = await stop_tracked_tts_playback(
+        tracker=tts_playback_tracker,
+        guild_id=guild_id,
+    )
+    if not stopped:
         return
-    state = active_tts_playbacks.get(guild_id)
-    if not state:
-        return
-
-    vc = state.get("vc")
-    playback_task = state.get("playback_task")
-    prefetch_task = state.get("prefetch_task")
-    sentence_queue = state.get("sentence_queue")
-    prepared_queue = state.get("prepared_queue")
-    playback_source = state.get("playback_source")
-
-    if sentence_queue is not None:
-        with contextlib.suppress(Exception):
-            await sentence_queue.put(None)
-    if prepared_queue is not None:
-        with contextlib.suppress(Exception):
-            await prepared_queue.put(None)
-    if playback_source is not None:
-        with contextlib.suppress(Exception):
-            playback_source.finish()
-    if vc is not None and (vc.is_playing() or vc.is_paused()):
-        with contextlib.suppress(Exception):
-            vc.stop()
-    if playback_task is not None and not playback_task.done():
-        playback_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError, Exception):
-            await playback_task
-    if prefetch_task is not None and not prefetch_task.done():
-        prefetch_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError, Exception):
-            await prefetch_task
-    active_tts_playbacks.pop(guild_id, None)
-    bot_speaking_guilds.discard(guild_id)
-    last_bot_audio_end_at[guild_id] = time.monotonic()
     log_turn_event("tts_interrupt", guild_id=guild_id, reason=reason)
 
 
-async def wait_until_not_playing(vc: discord.VoiceClient) -> None:
-    while vc.is_playing() or vc.is_paused():
-        await asyncio.sleep(0.05)
-
-
-async def play_audio_source(
-    vc: discord.VoiceClient,
-    source: discord.AudioSource,
-    *,
-    on_play_start: Callable[[], None] | None = None,
-    trace_payload: dict[str, Any] | None = None,
-) -> None:
-    await wait_until_not_playing(vc)
-
-    payload = dict(trace_payload or {})
-    payload.setdefault("source_type", type(source).__name__)
-    done = asyncio.Event()
-    playback_error: list[Exception | None] = [None]
-
-    def after_play(err):
-        if err:
-            playback_error[0] = err
-        bot.loop.call_soon_threadsafe(done.set)
-
-    try:
-        if on_play_start is not None:
-            on_play_start()
-        log_turn_event("discord_playback_play_invoked", **payload)
-        vc.play(source, after=after_play)
-        await done.wait()
-    except Exception as exc:
-        log_turn_event(
-            "discord_playback_exception",
-            **merge_log_event_payload(explicit={"stage": "vc_play", "error": repr(exc)}, extra=payload),
-        )
-        raise
-
-    if playback_error[0] is not None:
-        log_turn_event(
-            "discord_playback_exception",
-            **merge_log_event_payload(explicit={"stage": "after_play", "error": repr(playback_error[0])}, extra=payload),
-        )
-        raise playback_error[0]
-
-    if isinstance(source, (OmniVoicePCMStream, QueuedAudioSource)) and source.error is not None:
-        log_turn_event(
-            "discord_playback_exception",
-            **merge_log_event_payload(explicit={"stage": "source_error", "error": repr(source.error)}, extra=payload),
-        )
-        raise source.error
-
-    log_turn_event("discord_playback_finished", **payload)
-
-
 def cached_audio_path_for_answer(answer: str) -> Path | None:
-    if not CACHED_AUDIO_ENABLED:
-        return None
-    if clean_tts_text(answer) != clean_tts_text(CANNED_WAKE_REPLY_TEXT):
-        return None
-    path = CANNED_WAKE_REPLY_AUDIO
-    if not path.is_absolute():
-        path = PROJECT_ROOT / path
-    return path if path.is_file() else None
+    return resolve_cached_tts_audio_path(
+        answer,
+        enabled=CACHED_AUDIO_ENABLED,
+        canned_text=CANNED_WAKE_REPLY_TEXT,
+        canned_audio_path=CANNED_WAKE_REPLY_AUDIO,
+        project_root=PROJECT_ROOT,
+    )
 
 
 async def play_cached_answer_audio(
@@ -6618,17 +6158,19 @@ async def play_cached_answer_audio(
         ) or log_voice_latency(metrics, "first_packet_sent_logged", "캐시 오디오 첫 패킷 송신 시간"),
     )
     playback_task = asyncio.current_task()
-    if guild_id is not None:
-        active_tts_playbacks[guild_id] = {
-            "vc": vc,
-            "playback_source": source,
-            "playback_task": playback_task,
-            "turn_id": turn_id,
-            "session_key": session_key,
-            "source_type": type(source).__name__,
-        }
-        bot_speaking_guilds.add(guild_id)
+    start_tts_playback_tracking(
+        tracker=tts_playback_tracker,
+        guild_id=guild_id,
+        mark_speaking=True,
+        vc=vc,
+        playback_source=source,
+        playback_task=playback_task,
+        turn_id=turn_id,
+        session_key=session_key,
+        source_type=type(source).__name__,
+    )
 
+    completed = False
     try:
         log_turn_event(
             "cached_audio_playback_selected",
@@ -6648,12 +6190,15 @@ async def play_cached_answer_audio(
                 "cached_audio_path": str(path),
             },
         )
+        completed = True
     finally:
         source.cleanup()
-        if guild_id is not None:
-            active_tts_playbacks.pop(guild_id, None)
-            bot_speaking_guilds.discard(guild_id)
-            last_bot_audio_end_at[guild_id] = time.monotonic()
+        mark_tts_playback_summary_state(metrics, started=completed, completed=completed)
+        finish_tts_playback_tracking(
+            tracker=tts_playback_tracker,
+            guild_id=guild_id,
+            mark_audio_end=True,
+        )
     return True
 
 
@@ -6692,9 +6237,9 @@ async def speak_answer(
                 session_key=session_key,
             ) or log_voice_latency(metrics, "first_packet_sent_logged", "첫 패킷 송신 시간"),
         )
+        completed = False
         try:
-            if guild_id is not None:
-                bot_speaking_guilds.add(guild_id)
+            mark_tts_speaking(tracker=tts_playback_tracker, guild_id=guild_id)
             await play_audio_source(
                 vc,
                 source,
@@ -6705,10 +6250,15 @@ async def speak_answer(
                     "source_type": type(source).__name__,
                 },
             )
+            completed = True
         finally:
-            if guild_id is not None:
-                bot_speaking_guilds.discard(guild_id)
-                last_bot_audio_end_at[guild_id] = time.monotonic()
+            mark_tts_playback_summary_state(metrics, started=completed, completed=completed)
+            finish_tts_playback_tracking(
+                tracker=tts_playback_tracker,
+                guild_id=guild_id,
+                mark_audio_end=True,
+                clear_registry=False,
+            )
 
 
 async def _prefetch_tts_sources(
@@ -6720,55 +6270,42 @@ async def _prefetch_tts_sources(
     session_key: str | None = None,
     turn_scope: TurnScope | None = None,
 ) -> None:
-    chunk_index = 0
     task = _attach_current_task(turn_scope)
 
-    try:
-        while True:
-            if turn_scope is not None:
-                turn_scope.raise_if_cancelled()
-            sentence = await sentence_queue.get()
-            if sentence is None:
-                await prepared_queue.put(None)
-                return
+    def check_cancelled() -> None:
+        if turn_scope is not None:
+            turn_scope.raise_if_cancelled()
 
-            sentence = clean_tts_text(sentence)
-            if not sentence:
-                continue
+    async def synthesize_source(sentence: str, chunk_index: int) -> OmniVoicePCMStream:
+        return await create_omnivoice_source(
+            sentence,
+            turn_id=turn_id,
+            chunk_index=chunk_index,
+            session_key=session_key,
+            turn_scope=turn_scope,
+            trace_payload={"source_type": "OmniVoicePCMStream"},
+            on_request_start=lambda: (
+                mark_turn_stage(metrics, "tts_request_start", event_name="tts_request_start", chunk_index=chunk_index),
+                log_voice_latency(metrics, "tts_request_logged", "TTS 요청 시작 시간")
+            ),
+            on_response_headers=lambda: log_voice_latency(metrics, "tts_response_headers_logged", "TTS 응답 헤더 도착 시간"),
+            on_first_byte=lambda: (
+                mark_turn_stage(metrics, "tts_first_byte", event_name="tts_first_byte", chunk_index=chunk_index),
+                log_voice_latency(metrics, "tts_first_byte_logged", "TTS 첫 바이트 도착 시간")
+            ),
+            on_first_frame=lambda: log_voice_latency(metrics, "tts_first_frame_logged", "TTS 첫 프레임 공급 시간"),
+            on_first_packet_sent=lambda ci=chunk_index: (
+                log_voice_latency(metrics, "first_packet_sent_logged", "첫 패킷 송신 시간"),
+                log_turn_event(
+                    "first_packet_sent",
+                    turn_id=turn_id,
+                    chunk_index=ci,
+                    session_key=session_key,
+                )
+            ),
+        )
 
-            if turn_scope is not None:
-                turn_scope.raise_if_cancelled()
-            chunk_index += 1
-            source = await create_omnivoice_source(
-                sentence,
-                turn_id=turn_id,
-                chunk_index=chunk_index,
-                session_key=session_key,
-                turn_scope=turn_scope,
-                trace_payload={"source_type": "OmniVoicePCMStream"},
-                on_request_start=lambda: (
-                    mark_turn_stage(metrics, "tts_request_start", event_name="tts_request_start", chunk_index=chunk_index),
-                    log_voice_latency(metrics, "tts_request_logged", "TTS 요청 시작 시간")
-                ),
-                on_response_headers=lambda: log_voice_latency(metrics, "tts_response_headers_logged", "TTS 응답 헤더 도착 시간"),
-                on_first_byte=lambda: (
-                    mark_turn_stage(metrics, "tts_first_byte", event_name="tts_first_byte", chunk_index=chunk_index),
-                    log_voice_latency(metrics, "tts_first_byte_logged", "TTS 첫 바이트 도착 시간")
-                ),
-                on_first_frame=lambda: log_voice_latency(metrics, "tts_first_frame_logged", "TTS 첫 프레임 공급 시간"),
-                on_first_packet_sent=lambda ci=chunk_index: (
-                    log_voice_latency(metrics, "first_packet_sent_logged", "첫 패킷 송신 시간"),
-                    log_turn_event(
-                        "first_packet_sent",
-                        turn_id=turn_id,
-                        chunk_index=ci,
-                        session_key=session_key,
-                    )
-                ),
-            )
-            await source.wait_until_ready(timeout=max(0.2, OMNIVOICE_TIMEOUT_SEC))
-            await prepared_queue.put((chunk_index, source))
-    except Exception as exc:
+    def on_failure(exc: Exception) -> None:
         record_voice_pipeline_failure(
             "tts_playback_failed",
             exc,
@@ -6777,7 +6314,16 @@ async def _prefetch_tts_sources(
             session_key=session_key,
             stage="prefetch",
         )
-        await prepared_queue.put(exc)
+
+    try:
+        await prefetch_tts_sources(
+            sentence_queue,
+            prepared_queue,
+            synthesize_source=synthesize_source,
+            ready_timeout_sec=OMNIVOICE_TIMEOUT_SEC,
+            check_cancelled=check_cancelled,
+            on_failure=on_failure,
+        )
     finally:
         _detach_task(turn_scope, task)
 
@@ -6793,12 +6339,19 @@ async def stream_tts_sentences(
 ) -> None:
     guild_id = getattr(getattr(vc, "guild", None), "id", None)
     did_speak = False
+    playback_completed = False
     task = _attach_current_task(turn_scope)
 
     try:
         async with tts_lock:
             prepared_queue: asyncio.Queue[object] = asyncio.Queue(maxsize=max(1, TTS_PREFETCH_CHUNKS))
-            playback_source = QueuedAudioSource()
+            playback_source = QueuedAudioSource(
+                trace_payload={
+                    "turn_id": turn_id,
+                    "session_key": session_key,
+                    "source_type": "QueuedAudioSource",
+                }
+            )
             prefetch_task = create_turn_scoped_task(
                 _prefetch_tts_sources(
                     sentence_queue,
@@ -6811,86 +6364,105 @@ async def stream_tts_sentences(
                 turn_scope=turn_scope,
             )
             playback_task: asyncio.Task | None = None
-            if guild_id is not None:
-                active_tts_playbacks[guild_id] = {
-                    "vc": vc,
-                    "sentence_queue": sentence_queue,
-                    "prepared_queue": prepared_queue,
-                    "playback_source": playback_source,
-                    "prefetch_task": prefetch_task,
-                    "playback_task": playback_task,
-                    "turn_id": turn_id,
-                    "session_key": session_key,
-                }
+
+            def create_playback_task() -> asyncio.Task:
+                return create_turn_scoped_task(
+                    play_audio_source(
+                        vc,
+                        playback_source,
+                        trace_payload={
+                            "turn_id": turn_id,
+                            "session_key": session_key,
+                            "source_type": type(playback_source).__name__,
+                        },
+                    ),
+                    turn_scope=turn_scope,
+                )
+
+            def on_playback_started(task: asyncio.Task) -> None:
+                nonlocal did_speak, playback_task
+                did_speak = True
+                playback_task = task
+                mark_tts_playback_summary_state(metrics, started=True)
+                update_tts_playback_tracking(
+                    tracker=tts_playback_tracker,
+                    guild_id=guild_id,
+                    playback_task=playback_task,
+                )
+
+            def on_source_ready() -> None:
+                if guild_id is not None and not did_speak:
+                    mark_tts_speaking(tracker=tts_playback_tracker, guild_id=guild_id)
+
+            def on_prepared_failure(item: Exception) -> None:
+                record_voice_pipeline_failure(
+                    "tts_playback_failed",
+                    item,
+                    metrics,
+                    turn_id=turn_id,
+                    session_key=session_key,
+                    stage="prepared_exception",
+                )
+
+            playback_queue = PreparedTtsPlaybackQueue(
+                prepared_queue,
+                playback_source,
+                turn_id=turn_id,
+                session_key=session_key,
+                lookahead_chunks=TTS_PLAYBACK_START_LOOKAHEAD_CHUNKS,
+                lookahead_timeout_ms=TTS_PLAYBACK_START_LOOKAHEAD_TIMEOUT_MS,
+                log=print,
+                on_source_ready=on_source_ready,
+                on_failure=on_prepared_failure,
+            )
+            playback_starter = PreparedPlaybackStarter(
+                playback_queue,
+                create_playback_task=create_playback_task,
+                on_started=on_playback_started,
+                log=print,
+            )
+
+            def check_cancelled() -> None:
+                if turn_scope is not None:
+                    turn_scope.raise_if_cancelled()
+
+            start_tts_playback_tracking(
+                tracker=tts_playback_tracker,
+                guild_id=guild_id,
+                vc=vc,
+                sentence_queue=sentence_queue,
+                prepared_queue=prepared_queue,
+                playback_source=playback_source,
+                prefetch_task=prefetch_task,
+                playback_task=playback_task,
+                turn_id=turn_id,
+                session_key=session_key,
+            )
             try:
-                while True:
-                    if turn_scope is not None:
-                        turn_scope.raise_if_cancelled()
-                    item = await prepared_queue.get()
-                    print(f"[TTS PLAYBACK] prepared_item type={type(item).__name__} guild_id={guild_id}")
-                    if item is None:
-                        print("[TTS PLAYBACK] received_sentinel")
-                        playback_source.finish()
-                        break
-                    if isinstance(item, Exception):
-                        print(f"[TTS PLAYBACK] prepared_exception err={item!r}")
-                        record_voice_pipeline_failure(
-                            "tts_playback_failed",
-                            item,
-                            metrics,
-                            turn_id=turn_id,
-                            session_key=session_key,
-                            stage="prepared_exception",
-                        )
-                        playback_source.finish()
-                        raise item
-
-                    _, source = item
-                    playback_source.add_source(source)
-                    print(f"[TTS PLAYBACK] source_added playback_started={playback_task is not None}")
-
-                    if guild_id is not None and not did_speak:
-                        bot_speaking_guilds.add(guild_id)
-
-                    if playback_task is None:
-                        did_speak = True
-                        print("[TTS PLAYBACK] starting_discord_playback")
-                        playback_task = create_turn_scoped_task(
-                            play_audio_source(
-                                vc,
-                                playback_source,
-                                trace_payload={
-                                    "turn_id": turn_id,
-                                    "session_key": session_key,
-                                    "source_type": type(playback_source).__name__,
-                                },
-                            ),
-                            turn_scope=turn_scope,
-                        )
-                        if guild_id is not None and guild_id in active_tts_playbacks:
-                            active_tts_playbacks[guild_id]["playback_task"] = playback_task
-
-                if playback_task is not None:
-                    await playback_task
+                await drain_prepared_tts_playback(
+                    prepared_queue,
+                    playback_queue,
+                    start_playback_once=playback_starter.start_once,
+                    get_playback_task=playback_starter.get_task,
+                    check_cancelled=check_cancelled,
+                )
+                playback_completed = did_speak
             finally:
-                playback_source.finish()
-                if playback_task is not None and not playback_task.done():
-                    playback_task.cancel()
-                    try:
-                        await playback_task
-                    except asyncio.CancelledError:
-                        pass
-                if not prefetch_task.done():
-                    prefetch_task.cancel()
-                    try:
-                        await prefetch_task
-                    except asyncio.CancelledError:
-                        pass
-                if guild_id is not None:
-                    active_tts_playbacks.pop(guild_id, None)
-                    bot_speaking_guilds.discard(guild_id)
-                    if did_speak:
-                        last_bot_audio_end_at[guild_id] = time.monotonic()
+                mark_tts_playback_summary_state(
+                    metrics,
+                    started=did_speak,
+                    completed=playback_completed,
+                )
+                await cleanup_tts_stream_tasks(
+                    playback_source=playback_source,
+                    playback_task=playback_task,
+                    prefetch_task=prefetch_task,
+                )
+                finish_tts_playback_tracking(
+                    tracker=tts_playback_tracker,
+                    guild_id=guild_id,
+                    mark_audio_end=did_speak,
+                )
     finally:
         _detach_task(turn_scope, task)
 
@@ -7028,7 +6600,7 @@ async def build_followup_response(
     metrics: dict | None = None,
 ) -> AnswerPayload:
     log_voice_stage(metrics, "2단계 followup 생성 시작", extra=f"source={source} first_len={len(clean_text(first_response))}")
-    messages, cognitive_state, _route = await prepare_llm_messages(
+    messages, cognitive_state, _route, _context_policy = await prepare_llm_messages(
         user_text,
         guild_id=guild_id,
         session_key=session_key,
@@ -7122,7 +6694,7 @@ async def ask_llm_once(
     debug_text: str | None = None,
     metrics: dict | None = None,
 ) -> str:
-    log_voice_stage(metrics, "LLM 단발 요청 시작", extra=f"source={source} user_text_len={len(clean_text(user_text))}")
+    log_voice_stage(metrics, "LLM 2단계 요청 시작", extra=f"source={source} user_text_len={len(clean_text(user_text))}")
     messages, cognitive_state, route_decision, gated_state, awaiting_user_reply = await prepare_route_context(
         user_text,
         guild_id=guild_id,
@@ -7158,7 +6730,7 @@ async def ask_llm_once(
                 answer_text=skill_route_answer,
                 user_text=user_text,
             )
-        log_voice_stage(metrics, "LLM 단발 요청 성공", extra=f"skill_route={route_decision.route} answer_len={len(skill_route_answer)}")
+        log_voice_stage(metrics, "LLM 2단계 요청 끝남", extra=f"skill_route={route_decision.route} answer_len={len(skill_route_answer)}")
         return build_answer_payload_from_text(skill_route_answer).display_text
 
     if route_decision.user_visible_preface:
@@ -7170,7 +6742,7 @@ async def ask_llm_once(
                 answer_text=route_decision.user_visible_preface,
                 user_text=user_text,
             )
-        log_voice_stage(metrics, "LLM 단발 요청 성공", extra=f"policy_len={len(route_decision.user_visible_preface)}")
+        log_voice_stage(metrics, "LLM 2단계 요청 끝남", extra=f"policy_len={len(route_decision.user_visible_preface)}")
         return build_answer_payload_from_text(route_decision.user_visible_preface).display_text
 
     guided_user_text = route_decision.prompt_text or user_text
@@ -7192,11 +6764,11 @@ async def ask_llm_once(
         user_text=user_text,
     )
     if answer_source == "reasoning":
-        log_voice_stage(metrics, "LLM 단발 요청 성공", extra=f"reasoning_len={len(answer)}")
+        log_voice_stage(metrics, "LLM 2단계 요청 끝남", extra=f"reasoning_len={len(answer)}")
     elif answer_source.startswith("fallback"):
         log_voice_stage(metrics, "LLM canned reply 사용", extra=f"reason={answer_source} fallback_len={len(answer)}")
     else:
-        log_voice_stage(metrics, "LLM 단발 요청 성공", extra=f"answer_len={len(answer)}")
+        log_voice_stage(metrics, "LLM 2단계 요청 끝남", extra=f"answer_len={len(answer)}")
     return build_answer_payload_from_text(answer).display_text
 
 
@@ -7385,14 +6957,31 @@ async def observe_live_minecraft_state(guild_id: int | None) -> dict[str, Any] |
                 or (isinstance(observed, dict) and (observed.get("connected") or observed.get("active") or observed.get("position")))
             )
             if has_context:
-                return merged
+                return attach_minecraft_runtime_snapshot(
+                    merged,
+                    source="live_status",
+                    now=time.time(),
+                    observed_at=time.time(),
+                    stale_after_sec=CONTROL_PAGE_MINECRAFT_CACHE_REFRESH_SEC,
+                    expired_after_sec=CONTROL_PAGE_MINECRAFT_CACHE_MAX_STALE_SEC,
+                )
     try:
         observed = await client.observe(ensure_service=False)
     except Exception:
         return None
     if not isinstance(observed, dict):
         return None
-    return _merge_voyager_status_into_state(None, observed) if (observed.get("connected") or observed.get("active") or observed.get("position")) else None
+    merged = _merge_voyager_status_into_state(None, observed) if (observed.get("connected") or observed.get("active") or observed.get("position")) else None
+    if isinstance(merged, dict):
+        return attach_minecraft_runtime_snapshot(
+            merged,
+            source="live_observe",
+            now=time.time(),
+            observed_at=time.time(),
+            stale_after_sec=CONTROL_PAGE_MINECRAFT_CACHE_REFRESH_SEC,
+            expired_after_sec=CONTROL_PAGE_MINECRAFT_CACHE_MAX_STALE_SEC,
+        )
+    return None
 
 
 async def wait_for_minecraft_ready(guild_id: int, *, timeout_sec: float = 12.0, poll_sec: float = 1.0) -> dict[str, Any]:
@@ -7656,7 +7245,7 @@ def select_control_page_guild(requested_guild_id: int | None = None) -> discord.
     if requested_guild_id is not None:
         return bot.get_guild(requested_guild_id)
     preferred_ids: list[int] = []
-    preferred_ids.extend(int(gid) for gid in active_tts_playbacks.keys())
+    preferred_ids.extend(tracked_tts_playback_guild_ids(tts_playback_tracker))
     for guild in bot.guilds:
         if guild.voice_client is not None:
             preferred_ids.append(guild.id)
@@ -7684,7 +7273,7 @@ def resolve_guild_member_name(guild: discord.Guild | None, user_id: int | None) 
 def current_tts_target_name(guild: discord.Guild | None) -> str:
     if guild is None:
         return "없음"
-    playback = active_tts_playbacks.get(guild.id)
+    playback = get_tracked_tts_playback(tts_playback_tracker, guild.id)
     if not isinstance(playback, dict):
         return "없음"
     session_key = clean_text(str(playback.get("session_key") or ""))
@@ -7704,7 +7293,7 @@ def format_position_short(position: Any) -> str:
     if isinstance(position, (list, tuple)) and len(position) >= 3 and all(isinstance(value, (int, float)) for value in position[:3]):
         return f"{float(position[0]):.1f}, {float(position[1]):.1f}, {float(position[2]):.1f}"
     cleaned = clean_text(str(position or ""))
-    return cleaned or "미확인"
+    return cleaned or "unknown"
 
 
 def normalize_inventory_top_entries(inventory: Any, *, limit: int = 8) -> list[dict[str, Any]]:
@@ -8129,7 +7718,7 @@ def extract_control_page_recent_activity_live(status: dict[str, Any] | None) -> 
         rows.append({
             "kind": "live",
             "label": current_task,
-            "detail": " · ".join(part for part in detail_parts if part) or "running",
+            "detail": " ? ".join(part for part in detail_parts if part) or "running",
         })
     if isinstance(rollout_iteration, int) and isinstance(max_rollout_iterations, int) and max_rollout_iterations > 0:
         rollout_label = f"rollout {rollout_iteration + 1}/{max_rollout_iterations}"
@@ -8286,7 +7875,15 @@ async def get_control_page_minecraft_snapshot(guild_id: int | None) -> dict[str,
     merged["stage"] = clean_text(str(raw_status.get("stage") or merged.get("objective_stage") or ""))
     merged["progress"] = clean_text(str(raw_status.get("last_progress_message") or merged.get("objective_progress") or ""))
     merged["position_text"] = format_position_short(merged.get("position") or observation.get("position"))
-    return merged
+    return attach_minecraft_runtime_snapshot(
+        merged,
+        source="control_page_live",
+        now=time.time(),
+        observed_at=time.time(),
+        stale_after_sec=CONTROL_PAGE_MINECRAFT_CACHE_REFRESH_SEC,
+        expired_after_sec=CONTROL_PAGE_MINECRAFT_CACHE_MAX_STALE_SEC,
+        last_error=last_error or None,
+    )
 
 
 async def safe_get_control_page_minecraft_snapshot(
@@ -8399,6 +7996,15 @@ def get_control_page_minecraft_snapshot_cache_copy() -> dict[str, Any]:
     )
     if control_page_minecraft_snapshot_last_error and not snapshot.get("last_error"):
         snapshot["last_error"] = control_page_minecraft_snapshot_last_error
+    snapshot = attach_minecraft_runtime_snapshot(
+        snapshot,
+        source="control_page_cache",
+        now=time.time(),
+        observed_at=control_page_minecraft_snapshot_cached_at or None,
+        stale_after_sec=CONTROL_PAGE_MINECRAFT_CACHE_REFRESH_SEC,
+        expired_after_sec=CONTROL_PAGE_MINECRAFT_CACHE_MAX_STALE_SEC,
+        last_error=snapshot.get("last_error") or None,
+    )
     if snapshot.get("snapshot_expired"):
         return {
             "last_error": snapshot.get("last_error") or "minecraft_snapshot_expired",
@@ -8408,6 +8014,8 @@ def get_control_page_minecraft_snapshot_cache_copy() -> dict[str, Any]:
             "snapshot_stale": True,
             "snapshot_expired": True,
             "snapshot_age_sec": snapshot.get("snapshot_age_sec"),
+            "snapshot_freshness": snapshot.get("snapshot_freshness"),
+            "runtime_snapshot": snapshot.get("runtime_snapshot"),
         }
     return snapshot
 
@@ -8520,8 +8128,11 @@ def build_control_page_status_text(guild: discord.Guild, minecraft: dict[str, An
     vc = guild.voice_client
     voice_channel_name = getattr(getattr(vc, "channel", None), "name", None) or "없음"
     listening = bool(vc and hasattr(vc, "is_listening") and vc.is_listening())
-    speaking = guild.id in active_tts_playbacks
+    speaking = is_tracked_tts_playback_active(tts_playback_tracker, guild.id)
     tts_target = current_tts_target_name(guild) if speaking else "없음"
+    runtime_snapshot = minecraft.get("runtime_snapshot") if isinstance(minecraft.get("runtime_snapshot"), dict) else {}
+    snapshot_freshness = clean_text(str(runtime_snapshot.get("freshness") or minecraft.get("snapshot_freshness") or "unknown"))
+    snapshot_age = runtime_snapshot.get("age_sec", minecraft.get("snapshot_age_sec"))
     return "\n".join(
         [
             "Evelyn 상태",
@@ -8537,6 +8148,8 @@ def build_control_page_status_text(guild: discord.Guild, minecraft: dict[str, An
             f"- local_mic: {local_mic_status_line()}",
             f"- voyager_running: {'on' if minecraft.get('minecraft_autonomy') else 'off'}",
             f"- voyager_connected: {'on' if minecraft.get('voyager_connected') else 'off'}",
+            f"- minecraft_snapshot: {snapshot_freshness}",
+            f"- minecraft_snapshot_age_sec: {snapshot_age if snapshot_age is not None else 'unknown'}",
             f"- current_task: {minecraft.get('current_task') or '없음'}",
             f"- goal: {minecraft.get('goal') or '없음'}",
         ]
@@ -8586,21 +8199,21 @@ async def build_control_page_minecraft_reply(guild: discord.Guild) -> str:
     minecraft = await safe_get_control_page_minecraft_snapshot(guild.id)
     return "\n".join(
         [
-            "Minecraft 상태",
+            "Minecraft status",
             f"- running: {'on' if minecraft.get('minecraft_autonomy') else 'off'}",
             f"- connected: {'on' if minecraft.get('voyager_connected') else 'off'}",
-            f"- goal: {minecraft.get('goal') or '없음'}",
-            f"- stage: {minecraft.get('stage') or '없음'}",
-            f"- task: {minecraft.get('current_task') or '없음'}",
-            f"- task_stage: {minecraft.get('current_task_stage') or '없음'}",
-            f"- progress: {minecraft.get('progress') or '없음'}",
-            f"- tech_tree: {clean_text(str(minecraft.get('voyager_tech_tree_highest') or '미확인'))}",
-            f"- unique_items: {minecraft.get('voyager_unique_item_count') if minecraft.get('voyager_unique_item_count') is not None else '미확인'}",
-            f"- skill_library: {minecraft.get('voyager_skill_library_size') if minecraft.get('voyager_skill_library_size') is not None else '미확인'}",
-            f"- travel_distance: {minecraft.get('voyager_travel_distance_blocks') if minecraft.get('voyager_travel_distance_blocks') is not None else '미확인'}",
-            f"- health: {minecraft.get('health') if minecraft.get('health') is not None else '미확인'}",
-            f"- hunger: {minecraft.get('hunger') if minecraft.get('hunger') is not None else '미확인'}",
-            f"- position: {minecraft.get('position_text') or '미확인'}",
+            f"- goal: {minecraft.get('goal') or 'none'}",
+            f"- stage: {minecraft.get('stage') or 'none'}",
+            f"- task: {minecraft.get('current_task') or 'none'}",
+            f"- task_stage: {minecraft.get('current_task_stage') or 'none'}",
+            f"- progress: {minecraft.get('progress') or 'none'}",
+            f"- tech_tree: {clean_text(str(minecraft.get('voyager_tech_tree_highest') or 'unknown'))}",
+            f"- unique_items: {minecraft.get('voyager_unique_item_count') if minecraft.get('voyager_unique_item_count') is not None else 'unknown'}",
+            f"- skill_library: {minecraft.get('voyager_skill_library_size') if minecraft.get('voyager_skill_library_size') is not None else 'unknown'}",
+            f"- travel_distance: {minecraft.get('voyager_travel_distance_blocks') if minecraft.get('voyager_travel_distance_blocks') is not None else 'unknown'}",
+            f"- health: {minecraft.get('health') if minecraft.get('health') is not None else 'unknown'}",
+            f"- hunger: {minecraft.get('hunger') if minecraft.get('hunger') is not None else 'unknown'}",
+            f"- position: {minecraft.get('position_text') or 'unknown'}",
         ]
     )
 
@@ -8633,7 +8246,7 @@ def build_control_page_autonomy_reply(guild: discord.Guild) -> str:
 
 
 def build_control_page_help_reply() -> str:
-    lines = ["페이지 명령어"]
+    lines = ["Page commands:"]
     for item in CONTROL_PAGE_COMMANDS:
         lines.append(f"- {item['command']}: {item['summary']}")
     return "\n".join(lines)
@@ -8875,7 +8488,7 @@ async def build_control_page_state(guild: discord.Guild | None) -> dict[str, Any
                 "summaryModel": SUMMARY_MODEL_NAME,
                 "sttModel": STT_MODEL_NAME,
                 "inflightLlmRequests": inflight_llm_requests,
-                "ttsBacklog": len(active_tts_playbacks),
+                "ttsBacklog": tracked_tts_playback_count(tts_playback_tracker),
                 "localMic": serialize_local_mic_runtime_state(),
                 "voicePipeline": build_voice_pipeline_snapshot(guild),
                 "services": runtime_services,
@@ -8887,7 +8500,7 @@ async def build_control_page_state(guild: discord.Guild | None) -> dict[str, Any
     vc = guild.voice_client
     await ensure_control_page_minecraft_snapshot(guild.id, wait=not bool(control_page_minecraft_snapshot_cache))
     minecraft = get_control_page_minecraft_snapshot_cache_copy()
-    speaking = guild.id in active_tts_playbacks
+    speaking = is_tracked_tts_playback_active(tts_playback_tracker, guild.id)
     listening = bool(vc and hasattr(vc, "is_listening") and vc.is_listening())
     tts_target_name = current_tts_target_name(guild) if speaking else "없음"
     local_mic_target = serialize_local_mic_target(
@@ -8896,6 +8509,7 @@ async def build_control_page_state(guild: discord.Guild | None) -> dict[str, Any
     minecraft_session_active = is_control_page_minecraft_session_active(minecraft)
     commands = build_control_page_commands(minecraft_session_active=minecraft_session_active)
     activity = minecraft.get("recent_activity") if isinstance(minecraft.get("recent_activity"), list) else []
+    minecraft_status_fields = minecraft_runtime_status_fields(minecraft)
     idle_summary = (
         "Voyager는 켜져 있지만 아직 Minecraft 플레이 상태는 아니야. 접속이 잡히면 위젯이 자동으로 나타나."
         if minecraft.get("minecraft_autonomy")
@@ -8931,7 +8545,7 @@ async def build_control_page_state(guild: discord.Guild | None) -> dict[str, Any
             "summaryModel": SUMMARY_MODEL_NAME,
             "sttModel": STT_MODEL_NAME,
             "inflightLlmRequests": inflight_llm_requests,
-            "ttsBacklog": len(active_tts_playbacks),
+            "ttsBacklog": tracked_tts_playback_count(tts_playback_tracker),
             "voiceDebugAudio": VOICE_DEBUG_SAVE_AUDIO,
             "localMicTarget": local_mic_target,
             "localMic": serialize_local_mic_runtime_state(),
@@ -8943,12 +8557,12 @@ async def build_control_page_state(guild: discord.Guild | None) -> dict[str, Any
             "running": bool(minecraft.get("minecraft_autonomy")),
             "connected": bool(minecraft.get("voyager_connected")),
             "sessionActive": minecraft_session_active,
-            "goal": minecraft.get("goal") or "없음",
-            "stage": minecraft.get("stage") or "없음",
-            "task": minecraft.get("current_task") or "없음",
-            "taskStage": minecraft.get("current_task_stage") or "없음",
-            "progress": minecraft.get("progress") or "없음",
-            "position": minecraft.get("position_text") or "미확인",
+            "goal": minecraft.get("goal") or "none",
+            "stage": minecraft.get("stage") or "none",
+            "task": minecraft.get("current_task") or "none",
+            "taskStage": minecraft.get("current_task_stage") or "none",
+            "progress": minecraft.get("progress") or "none",
+            "position": minecraft.get("position_text") or "unknown",
             "health": minecraft.get("health"),
             "hunger": minecraft.get("hunger"),
             "hostiles": minecraft.get("hostiles_nearby"),
@@ -8956,7 +8570,7 @@ async def build_control_page_state(guild: discord.Guild | None) -> dict[str, Any
             "travelDistanceBlocks": minecraft.get("voyager_travel_distance_blocks"),
             "techTreeHighest": minecraft.get("voyager_tech_tree_highest"),
             "skillLibrarySize": minecraft.get("voyager_skill_library_size"),
-            "inventorySummary": minecraft.get("inventory_summary") or "인벤토리 정보 없음",
+            "inventorySummary": minecraft.get("inventory_summary") or "No inventory data",
             "inventoryTop": minecraft.get("inventory_top") or [],
             "inventorySlots": minecraft.get("inventory_slots") or [],
             "inventoryUsedSlots": minecraft.get("inventory_used"),
@@ -8964,9 +8578,7 @@ async def build_control_page_state(guild: discord.Guild | None) -> dict[str, Any
             "failedCount": minecraft.get("failed_count") or 0,
             "recentActivity": activity,
             "lastError": minecraft.get("last_error") or "",
-            "snapshotStale": bool(minecraft.get("snapshot_stale")),
-            "snapshotExpired": bool(minecraft.get("snapshot_expired")),
-            "snapshotAgeSec": minecraft.get("snapshot_age_sec"),
+            **minecraft_status_fields,
             "idleSummary": "" if minecraft_session_active else idle_summary,
         },
         "statusText": build_control_page_status_text(guild, minecraft),
@@ -9146,6 +8758,7 @@ def build_skill_context(
             "prompt_text": route_decision.prompt_text,
             "user_visible_preface": route_decision.user_visible_preface,
             "needs_search": route_decision.needs_search,
+            "route_policy": route_decision_policy_dict(route_decision),
             "should_interrupt_delivery": route_decision.should_interrupt_delivery,
             "cognitive_state": cognitive_state,
             "messages": list(messages or []),
@@ -9355,7 +8968,7 @@ async def prepare_route_context(
     metrics: dict | None = None,
     turn_scope: TurnScope | None = None,
 ) -> tuple[list[dict[str, Any]], dict | None, RouteDecision, dict | None, bool]:
-    messages, cognitive_state, _route = await prepare_llm_messages(
+    messages, cognitive_state, _route, context_policy = await prepare_llm_messages(
         user_text,
         guild_id=guild_id,
         session_key=session_key,
@@ -9376,6 +8989,22 @@ async def prepare_route_context(
         apply_ask_gating=apply_ask_gating,
         build_route_decision=build_route_decision,
     )
+    route_decision = replace(
+        route_decision,
+        needs_main_llm=bool(route_decision.needs_main_llm and context_policy.needs_main_llm),
+        needs_memory=bool(context_policy.needs_memory),
+        needs_runtime_state=bool(context_policy.needs_runtime_state),
+        needs_minecraft_state=bool(context_policy.needs_minecraft_state),
+        needs_vision=bool(context_policy.needs_vision),
+        needs_skill_graph=bool(context_policy.needs_skill_graph),
+        needs_long_context=bool(context_policy.needs_long_context),
+        needs_search=bool(route_decision.needs_search or context_policy.needs_search),
+        needs_tts=bool(context_policy.needs_tts),
+        response_mode=clean_text(context_policy.response_mode) or route_decision.response_mode,
+        priority=clean_text(context_policy.priority) or route_decision.priority,
+    )
+    if metrics is not None:
+        metrics.setdefault("meta", {})["route_policy"] = route_decision_policy_dict(route_decision)
     gated_state = apply_ask_gating(cognitive_state, source=source) if cognitive_state is not None else None
     awaiting_user_reply = should_await_user_reply_for_route(
         gated_state=gated_state,
@@ -9396,18 +9025,46 @@ async def maybe_handle_short_circuit_route(
     awaiting_user_reply: bool,
     metrics: dict | None,
 ) -> tuple[str | None, Callable[[], None] | None]:
-    if route_decision.action == "search_then_answer" and source == "voice":
+    delivery_on_sentence = on_sentence if route_decision.needs_tts else None
+    if metrics is not None:
+        metrics.setdefault("meta", {})["needs_tts"] = bool(route_decision.needs_tts and on_sentence is not None)
+
+    datetime_answer = answer_current_datetime_query(user_text)
+    if datetime_answer:
         if on_first_chunk is not None:
             on_first_chunk()
             on_first_chunk = None
-        preface_text = route_decision.user_visible_preface or "금방 찾아보고 바로 알려줄게."
+        answer_payload = await emit_action_result_delivery(
+            build_action_result(
+                action="answer",
+                answer_text=datetime_answer,
+                metadata={"route": "datetime_fast_path"},
+            ),
+            on_sentence=delivery_on_sentence,
+            session_key=session_key,
+            user_text=user_text,
+            awaiting_user_reply=False,
+        )
+        if metrics is not None:
+            elapsed_ms = (time.monotonic() - float(metrics.get("started_at", time.monotonic()))) * 1000.0
+            metrics.setdefault("marks", {})["policy_short_circuit"] = elapsed_ms
+            metrics.setdefault("marks", {})["llm_done"] = elapsed_ms
+            metrics.setdefault("marks", {})["t_main_done"] = elapsed_ms
+            metrics.setdefault("meta", {})["deterministic_fast_path"] = "datetime"
+        return answer_payload.display_text, on_first_chunk
+
+    if route_decision.action == "search_then_answer":
+        if on_first_chunk is not None:
+            on_first_chunk()
+            on_first_chunk = None
+        preface_text = route_decision.user_visible_preface or "잠깐 찾아보고 바로 말해줄게."
         await emit_action_result_delivery(
             build_action_result(
                 action=route_decision.action,
                 answer_text=preface_text,
                 metadata={"route": route_decision.route, "phase": "preface"},
             ),
-            on_sentence=on_sentence,
+            on_sentence=delivery_on_sentence,
             session_key=session_key,
             user_text=user_text,
             awaiting_user_reply=awaiting_user_reply,
@@ -9418,7 +9075,7 @@ async def maybe_handle_short_circuit_route(
         )
         answer_payload = await emit_action_result_delivery(
             action_result,
-            on_sentence=on_sentence,
+            on_sentence=delivery_on_sentence,
             session_key=session_key,
             user_text=user_text,
             awaiting_user_reply=False,
@@ -9440,7 +9097,7 @@ async def maybe_handle_short_circuit_route(
                 answer_text=route_decision.user_visible_preface,
                 metadata={"route": route_decision.route},
             ),
-            on_sentence=on_sentence,
+            on_sentence=delivery_on_sentence,
             session_key=session_key,
             user_text=user_text,
             awaiting_user_reply=awaiting_user_reply,
@@ -9452,6 +9109,196 @@ async def maybe_handle_short_circuit_route(
         return policy_payload.display_text, on_first_chunk
 
     return None, on_first_chunk
+
+
+async def execute_main_llm_streaming_turn(
+    *,
+    request: VoiceTurnRequest,
+    route_context: VoiceTurnRouteContext,
+    on_first_chunk: Callable[[], None] | None,
+) -> str:
+    global inflight_llm_requests
+    user_text = request.user_text
+    guild_id = request.guild_id
+    session_key = request.session_key
+    room_key = request.room_key
+    person_key = request.person_key
+    session_memory_key = request.session_memory_key
+    source = request.source
+    debug_text = request.debug_text
+    metrics = request.metrics
+    turn_scope = request.turn_scope
+    messages = route_context.messages
+    cognitive_state = route_context.cognitive_state
+    route_decision = route_context.route_decision
+    on_sentence = request.on_sentence if route_decision.needs_tts else None
+    if metrics is not None:
+        metrics.setdefault("meta", {})["needs_tts"] = bool(route_decision.needs_tts and request.on_sentence is not None)
+
+    guided_user_text = route_decision.prompt_text or user_text
+    lightweight_persona_turn = is_casual_call_or_status_question(guided_user_text)
+    needs_live_minecraft_state = (
+        not lightweight_persona_turn
+        and (route_decision.needs_minecraft_state or route_decision.needs_skill_graph)
+    )
+    needs_runtime_status_context = not lightweight_persona_turn and route_decision.needs_runtime_state
+    live_minecraft_state = await observe_live_minecraft_state(guild_id) if needs_live_minecraft_state else None
+    runtime_status_context = await build_runtime_status_context() if needs_runtime_status_context else ""
+    final_user_text = f"{guided_user_text}\n\n{build_main_response_guidance(cognitive_state, source=source, user_text=guided_user_text, session_key=session_key, guild_id=guild_id, minecraft_state=live_minecraft_state, runtime_status_context=runtime_status_context)}"
+    mark_turn_stage(
+        metrics,
+        "prompt_built",
+        event_name="prompt_built",
+        prompt_chars=len(final_user_text),
+        source_mode=source,
+    )
+
+    payload = build_main_llm_payload(
+        model_name=MODEL_NAME,
+        messages=messages,
+        final_user_text=final_user_text,
+        source=source,
+        stream=True,
+        content_format=MAIN_LLM_CHAT_CONTENT_FORMAT,
+        max_tokens=VOICE_LLM_MAX_TOKENS,
+    )
+
+    timeout = aiohttp.ClientTimeout(total=120)
+    session = await get_http_session()
+    raw_parts: list[str] = []
+    reasoning_parts: list[str] = []
+    speech_chunker = build_stream_speech_chunker(metrics=metrics)
+    emitted_any = False
+    llm_started_at = time.monotonic()
+
+    inflight_llm_requests += 1
+    try:
+        mark_turn_stage(
+            metrics,
+            "llm_request_start",
+            event_name="llm_request_start",
+            source_mode=source,
+            prompt_chars=len(final_user_text),
+        )
+        async with session.post(LLM_SERVER_URL, json=payload, timeout=timeout) as resp:
+            if resp.status != 200:
+                error_text = await resp.text()
+                raise RuntimeError(f"LLM 서버 오류: {resp.status} / {error_text[:300]}")
+
+            content_type = resp.headers.get("Content-Type", "")
+            if "application/json" in content_type.lower():
+                if turn_scope is not None:
+                    turn_scope.raise_if_cancelled()
+                data = await resp.json()
+                choices = data.get("choices", [])
+                answer = ""
+                if choices:
+                    answer, _answer_source, _finish_reason = extract_main_llm_answer_from_choice(
+                        choices[0],
+                        user_text,
+                        sanitize_output=sanitize_model_output,
+                        parse_response_action_tag=parse_response_action_tag,
+                        extract_answer_from_reasoning=extract_answer_from_reasoning,
+                    )
+                if not answer:
+                    print("[LLM STREAM] json answer empty, retry non-stream")
+                    answer = await ask_llm_once(
+                        user_text,
+                        guild_id=guild_id,
+                        session_key=session_key,
+                        room_key=room_key,
+                        person_key=person_key,
+                        session_memory_key=session_memory_key,
+                        source=source,
+                        debug_text=debug_text,
+                    )
+                if on_first_chunk is not None:
+                    mark_turn_stage(
+                        metrics,
+                        "llm_first_chunk",
+                        event_name="llm_first_chunk",
+                        source_mode=source,
+                        since_request_ms=max(0.0, (time.monotonic() - llm_started_at) * 1000.0),
+                    )
+                    on_first_chunk()
+                    on_first_chunk = None
+                await emit_delivery_plan_chunks(
+                    build_delivery_plan(build_answer_payload_from_text(answer), include_voice=on_sentence is not None, split_chunks=split_tts_sentences),
+                    on_sentence=on_sentence,
+                )
+                if metrics is not None:
+                    metrics.setdefault("marks", {})["llm_done"] = (time.monotonic() - float(metrics.get("started_at", time.monotonic()))) * 1000.0
+                return answer
+
+            async for raw_line in resp.content:
+                if turn_scope is not None:
+                    turn_scope.raise_if_cancelled()
+                stream_event = decode_sse_stream_line(raw_line)
+                if not stream_event:
+                    continue
+                if stream_event.get("done"):
+                    break
+
+                reasoning_text = str(stream_event.get("reasoning_text") or "")
+                if reasoning_text:
+                    reasoning_parts.append(reasoning_text)
+
+                delta_text = str(stream_event.get("delta_text") or "")
+                if not delta_text:
+                    continue
+
+                if on_first_chunk is not None:
+                    mark_turn_stage(
+                        metrics,
+                        "llm_first_chunk",
+                        event_name="llm_first_chunk",
+                        source_mode=source,
+                        since_request_ms=max(0.0, (time.monotonic() - llm_started_at) * 1000.0),
+                    )
+                    on_first_chunk()
+                    on_first_chunk = None
+
+                raw_parts.append(delta_text)
+                emitted_any = (await emit_stream_delta_chunks(
+                    delta_text,
+                    speech_chunker=speech_chunker,
+                    on_sentence=on_sentence,
+                )) or emitted_any
+    finally:
+        inflight_llm_requests = max(0, inflight_llm_requests - 1)
+
+    if turn_scope is not None:
+        turn_scope.raise_if_cancelled()
+    answer = sanitize_model_output("".join(raw_parts))
+    if not answer:
+        print(
+            f"[LLM STREAM] stream 응답 본문이 비어 있음, non-stream 재시도 | raw_len={len(''.join(raw_parts))} reasoning_len={len(''.join(reasoning_parts))} emitted_any={emitted_any}"
+        )
+        answer = await ask_llm_once(
+            user_text,
+            guild_id=guild_id,
+            session_key=session_key,
+            room_key=room_key,
+            person_key=person_key,
+            session_memory_key=session_memory_key,
+            source=source,
+            debug_text=debug_text,
+        )
+
+    if turn_scope is not None:
+        turn_scope.raise_if_cancelled()
+    await flush_streamed_answer_chunks(
+        answer,
+        speech_chunker=speech_chunker,
+        on_sentence=on_sentence,
+        emitted_any=emitted_any,
+    )
+
+    if metrics is not None:
+        metrics.setdefault("marks", {})["llm_http_ms"] = (time.monotonic() - llm_started_at) * 1000.0
+        metrics.setdefault("marks", {})["llm_done"] = (time.monotonic() - float(metrics.get("started_at", time.monotonic()))) * 1000.0
+
+    return answer
 
 
 async def ask_llm_streaming(
@@ -9472,10 +9319,8 @@ async def ask_llm_streaming(
     global inflight_llm_requests
     task = _attach_current_task(turn_scope)
     try:
-        if turn_scope is not None:
-            turn_scope.raise_if_cancelled()
-        messages, cognitive_state, route_decision, gated_state, awaiting_user_reply = await prepare_route_context(
-            user_text,
+        request = VoiceTurnRequest(
+            user_text=user_text,
             guild_id=guild_id,
             session_key=session_key,
             room_key=room_key,
@@ -9485,204 +9330,24 @@ async def ask_llm_streaming(
             debug_text=debug_text,
             metrics=metrics,
             turn_scope=turn_scope,
-        )
-        short_circuit_answer, on_first_chunk = await maybe_handle_short_circuit_route(
-            route_decision=route_decision,
-            source=source,
-            guild_id=guild_id,
-            user_text=user_text,
-            session_key=session_key,
             on_sentence=on_sentence,
             on_first_chunk=on_first_chunk,
-            awaiting_user_reply=awaiting_user_reply,
-            metrics=metrics,
         )
-        if short_circuit_answer is not None:
-            return short_circuit_answer
-
-        skill_route_answer = await maybe_execute_registered_route(
-            route_decision=route_decision,
-            user_text=user_text,
-            source=source,
-            guild_id=guild_id,
-            session_key=session_key,
-            room_key=room_key,
-            person_key=person_key,
-            session_memory_key=session_memory_key,
-            debug_text=debug_text,
-            metrics=metrics,
-            cognitive_state=cognitive_state,
-            messages=messages,
-        )
-        if skill_route_answer:
-            if on_first_chunk is not None:
-                on_first_chunk()
-                on_first_chunk = None
-            await emit_delivery_plan_chunks(
-                build_delivery_plan(build_answer_payload_from_text(skill_route_answer), include_voice=on_sentence is not None, split_chunks=split_tts_sentences),
-                on_sentence=on_sentence,
+        orchestrator = VoiceTurnOrchestrator(
+            VoiceTurnOrchestratorDeps(
+                prepare_route_context=prepare_route_context,
+                maybe_handle_short_circuit_route=maybe_handle_short_circuit_route,
+                maybe_execute_registered_route=maybe_execute_registered_route,
+                run_main_llm_turn=execute_main_llm_streaming_turn,
+                emit_delivery_plan_chunks=emit_delivery_plan_chunks,
+                build_answer_payload_from_text=build_answer_payload_from_text,
+                build_delivery_plan=build_delivery_plan,
+                split_tts_sentences=split_tts_sentences,
             )
-            return skill_route_answer
-
-        guided_user_text = route_decision.prompt_text or user_text
-        lightweight_persona_turn = is_casual_call_or_status_question(guided_user_text)
-        live_minecraft_state = None if lightweight_persona_turn else await observe_live_minecraft_state(guild_id)
-        runtime_status_context = "" if lightweight_persona_turn else await build_runtime_status_context()
-        final_user_text = f"{guided_user_text}\n\n{build_main_response_guidance(cognitive_state, source=source, user_text=guided_user_text, session_key=session_key, guild_id=guild_id, minecraft_state=live_minecraft_state, runtime_status_context=runtime_status_context)}"
-        mark_turn_stage(
-            metrics,
-            "prompt_built",
-            event_name="prompt_built",
-            prompt_chars=len(final_user_text),
-            source_mode=source,
         )
+        result = await orchestrator.execute(request)
+        return result.answer_text
 
-        payload = build_main_llm_payload(
-            model_name=MODEL_NAME,
-            messages=messages,
-            final_user_text=final_user_text,
-            source=source,
-            stream=True,
-            content_format=MAIN_LLM_CHAT_CONTENT_FORMAT,
-            max_tokens=VOICE_LLM_MAX_TOKENS,
-        )
-
-        timeout = aiohttp.ClientTimeout(total=120)
-        session = await get_http_session()
-        raw_parts: list[str] = []
-        reasoning_parts: list[str] = []
-        speech_chunker = build_stream_speech_chunker(metrics=metrics)
-        emitted_any = False
-        llm_started_at = time.monotonic()
-
-        inflight_llm_requests += 1
-        try:
-            mark_turn_stage(
-                metrics,
-                "llm_request_start",
-                event_name="llm_request_start",
-                source_mode=source,
-                prompt_chars=len(final_user_text),
-            )
-            async with session.post(LLM_SERVER_URL, json=payload, timeout=timeout) as resp:
-                if resp.status != 200:
-                    error_text = await resp.text()
-                    raise RuntimeError(f"LLM 서버 오류: {resp.status} / {error_text[:300]}")
-
-                content_type = resp.headers.get("Content-Type", "")
-                if "application/json" in content_type.lower():
-                    if turn_scope is not None:
-                        turn_scope.raise_if_cancelled()
-                    data = await resp.json()
-                    choices = data.get("choices", [])
-                    answer = ""
-                    if choices:
-                        answer, _answer_source, _finish_reason = extract_main_llm_answer_from_choice(
-                            choices[0],
-                            user_text,
-                            sanitize_output=sanitize_model_output,
-                            parse_response_action_tag=parse_response_action_tag,
-                            extract_answer_from_reasoning=extract_answer_from_reasoning,
-                        )
-                    if not answer:
-                        print("[LLM STREAM] json 응답 본문 비어 있음, non-stream 재시도")
-                        answer = await ask_llm_once(
-                            user_text,
-                            guild_id=guild_id,
-                            session_key=session_key,
-                            room_key=room_key,
-                            person_key=person_key,
-                            session_memory_key=session_memory_key,
-                            source=source,
-                            debug_text=debug_text,
-                        )
-                    if on_first_chunk is not None:
-                        mark_turn_stage(
-                            metrics,
-                            "llm_first_chunk",
-                            event_name="llm_first_chunk",
-                            source_mode=source,
-                            since_request_ms=max(0.0, (time.monotonic() - llm_started_at) * 1000.0),
-                        )
-                        on_first_chunk()
-                        on_first_chunk = None
-                    await emit_delivery_plan_chunks(
-                        build_delivery_plan(build_answer_payload_from_text(answer), include_voice=on_sentence is not None, split_chunks=split_tts_sentences),
-                        on_sentence=on_sentence,
-                    )
-                    if metrics is not None:
-                        metrics.setdefault("marks", {})["llm_done"] = (time.monotonic() - float(metrics.get("started_at", time.monotonic()))) * 1000.0
-                    return answer
-
-                async for raw_line in resp.content:
-                    if turn_scope is not None:
-                        turn_scope.raise_if_cancelled()
-                    stream_event = decode_sse_stream_line(raw_line)
-                    if not stream_event:
-                        continue
-                    if stream_event.get("done"):
-                        break
-
-                    reasoning_text = str(stream_event.get("reasoning_text") or "")
-                    if reasoning_text:
-                        reasoning_parts.append(reasoning_text)
-
-                    delta_text = str(stream_event.get("delta_text") or "")
-                    if not delta_text:
-                        continue
-
-                    if on_first_chunk is not None:
-                        mark_turn_stage(
-                            metrics,
-                            "llm_first_chunk",
-                            event_name="llm_first_chunk",
-                            source_mode=source,
-                            since_request_ms=max(0.0, (time.monotonic() - llm_started_at) * 1000.0),
-                        )
-                        on_first_chunk()
-                        on_first_chunk = None
-
-                    raw_parts.append(delta_text)
-                    emitted_any = (await emit_stream_delta_chunks(
-                        delta_text,
-                        speech_chunker=speech_chunker,
-                        on_sentence=on_sentence,
-                    )) or emitted_any
-        finally:
-            inflight_llm_requests = max(0, inflight_llm_requests - 1)
-
-        if turn_scope is not None:
-            turn_scope.raise_if_cancelled()
-        answer = sanitize_model_output("".join(raw_parts))
-        if not answer:
-            print(
-                f"[LLM STREAM] stream 본문 비어 있음, non-stream 재시도 | raw_len={len(''.join(raw_parts))} reasoning_len={len(''.join(reasoning_parts))} emitted_any={emitted_any}"
-            )
-            answer = await ask_llm_once(
-                user_text,
-                guild_id=guild_id,
-                session_key=session_key,
-                room_key=room_key,
-                person_key=person_key,
-                session_memory_key=session_memory_key,
-                source=source,
-                debug_text=debug_text,
-            )
-
-        if turn_scope is not None:
-            turn_scope.raise_if_cancelled()
-        await flush_streamed_answer_chunks(
-            answer,
-            speech_chunker=speech_chunker,
-            on_sentence=on_sentence,
-            emitted_any=emitted_any,
-        )
-
-        if metrics is not None:
-            metrics.setdefault("marks", {})["llm_http_ms"] = (time.monotonic() - llm_started_at) * 1000.0
-            metrics.setdefault("marks", {})["llm_done"] = (time.monotonic() - float(metrics.get("started_at", time.monotonic()))) * 1000.0
-
-        return answer
     except Exception as exc:
         record_voice_pipeline_failure("llm_failed", exc, metrics, stage="ask_llm_streaming")
         raise
@@ -9699,7 +9364,7 @@ def start_streaming_voice_delivery(
     turn_scope: TurnScope | None,
 ) -> StreamingVoiceDelivery:
     sentence_queue: asyncio.Queue[str | None] = asyncio.Queue()
-    tts_sink = TTSQueueSink(sentence_queue)
+    tts_sink = TTSQueueSink(sentence_queue, log=print)
     playback_task = create_turn_scoped_task(
         stream_tts_sentences(
             vc,
@@ -9716,6 +9381,8 @@ def start_streaming_voice_delivery(
         tts_sink,
         playback_task,
         metrics=metrics,
+        log_stage=log_voice_stage,
+        prefetch_chunks=TTS_PREFETCH_CHUNKS,
     )
 
 
@@ -9793,6 +9460,7 @@ async def ask_llm_and_speak_streaming(
             metrics.setdefault("started_at", time.monotonic())
             metrics.setdefault("marks", {})
             metrics.setdefault("meta", {})
+        metrics.setdefault("meta", {})["needs_tts"] = True
         metrics.setdefault("tts_request_logged", False)
         metrics.setdefault("tts_response_headers_logged", False)
         metrics.setdefault("tts_first_byte_logged", False)
@@ -9842,6 +9510,27 @@ async def ask_llm_and_speak_streaming(
             event_name="voice_turn_summary",
         )
         return answer
+    except asyncio.CancelledError:
+        metrics.setdefault("meta", {})["playback_cancelled"] = True
+        metrics.setdefault("meta", {})["error_layer"] = "voice_turn"
+        metrics.setdefault("meta", {})["error"] = "cancelled"
+        log_voice_bottleneck_summary(
+            metrics,
+            label="voice_turn",
+            extra="cancelled=true mode=llm_streaming",
+            event_name="voice_turn_summary",
+        )
+        raise
+    except Exception as exc:
+        metrics.setdefault("meta", {})["error_layer"] = "voice_turn"
+        metrics.setdefault("meta", {})["error"] = repr(exc)
+        log_voice_bottleneck_summary(
+            metrics,
+            label="voice_turn",
+            extra="error=true mode=llm_streaming",
+            event_name="voice_turn_summary",
+        )
+        raise
     finally:
         _detach_task(turn_scope, task)
 
@@ -9871,6 +9560,7 @@ async def stream_text_reply(
             turn_id=turn_id,
             segment_id=0,
         )
+        metrics.setdefault("meta", {})["needs_tts"] = bool(include_voice)
 
         answer = ""
         sent_message: discord.Message | None = None
@@ -9881,7 +9571,7 @@ async def stream_text_reply(
             room_key=room_key,
             person_key=person_key,
             session_memory_key=session_memory_key,
-            on_first_chunk=lambda: log_voice_latency(metrics, "llm_first_chunk_logged", "LLM 첫 chunk 시간"),
+                on_first_chunk=lambda: log_voice_latency(metrics, "llm_first_chunk_logged", "LLM 첫 chunk 시간"),
             source=source,
             debug_text=debug_text,
             metrics=metrics,
@@ -10339,16 +10029,16 @@ async def _process_member_audio_impl(
                 return
             log_voice_stage(metrics, "웨이크 미검출이지만 본문 STT 진행", extra=f"wake_probe_text={wake_probe!r}")
 
-    now_mono = time.monotonic()
-    if guild_id in bot_speaking_guilds:
-        register_drop_reason(metrics, "bot_is_speaking", session_key=session_key, room_session_key=room_session_key, owner_user_id=owner_user_id, wake_probe_text=wake_probe, wake_detected=wake_detected)
-        log_voice_stage(metrics, "봇 재생 중 입력 무시", extra=f"speaker={member.display_name} wake_detected={wake_detected}")
-        log_voice_bottleneck_summary(metrics, label="voice_drop", extra="drop=bot_is_speaking", event_name="voice_drop_summary")
-        return
-    if now_mono - last_bot_audio_end_at.get(guild_id, 0.0) < POST_TTS_IGNORE_SEC:
-        register_drop_reason(metrics, "post_tts_ignore", session_key=session_key, room_session_key=room_session_key, owner_user_id=owner_user_id, wake_probe_text=wake_probe, wake_detected=wake_detected)
-        log_voice_stage(metrics, "TTS 직후 입력 무시", extra=f"speaker={member.display_name} wake_detected={wake_detected}")
-        log_voice_bottleneck_summary(metrics, label="voice_drop", extra="drop=post_tts_ignore", event_name="voice_drop_summary")
+    tts_suppression = tts_input_suppression_reason(
+        tracker=tts_playback_tracker,
+        guild_id=guild_id,
+        post_tts_ignore_sec=POST_TTS_IGNORE_SEC,
+    )
+    if tts_suppression is not None:
+        register_drop_reason(metrics, tts_suppression, session_key=session_key, room_session_key=room_session_key, owner_user_id=owner_user_id, wake_probe_text=wake_probe, wake_detected=wake_detected)
+        stage_label = "봇 재생 중 입력 무시" if tts_suppression == "bot_is_speaking" else "TTS 직후 입력 무시"
+        log_voice_stage(metrics, stage_label, extra=f"speaker={member.display_name} wake_detected={wake_detected}")
+        log_voice_bottleneck_summary(metrics, label="voice_drop", extra=f"drop={tts_suppression}", event_name="voice_drop_summary")
         return
 
     interrupt_meta = TtsInterruptMeta(
@@ -10361,15 +10051,16 @@ async def _process_member_audio_impl(
     )
     if should_interrupt_tts(interrupt_meta):
         await asyncio.sleep(TTS_INTERRUPT_DEBOUNCE_SEC)
-        if guild_id in bot_speaking_guilds:
-            register_drop_reason(metrics, "bot_is_speaking", session_key=session_key, room_session_key=room_session_key, owner_user_id=owner_user_id, wake_probe_text=wake_probe, wake_detected=wake_detected)
-            log_voice_stage(metrics, "디바운스 후 봇 재생 중 입력 무시", extra=f"speaker={member.display_name} wake_detected={wake_detected}")
-            log_voice_bottleneck_summary(metrics, label="voice_drop", extra="drop=bot_is_speaking", event_name="voice_drop_summary")
-            return
-        if time.monotonic() - last_bot_audio_end_at.get(guild_id, 0.0) < POST_TTS_IGNORE_SEC:
-            register_drop_reason(metrics, "post_tts_ignore", session_key=session_key, room_session_key=room_session_key, owner_user_id=owner_user_id, wake_probe_text=wake_probe, wake_detected=wake_detected)
-            log_voice_stage(metrics, "디바운스 후 TTS 직후 입력 무시", extra=f"speaker={member.display_name} wake_detected={wake_detected}")
-            log_voice_bottleneck_summary(metrics, label="voice_drop", extra="drop=post_tts_ignore", event_name="voice_drop_summary")
+        tts_suppression = tts_input_suppression_reason(
+            tracker=tts_playback_tracker,
+            guild_id=guild_id,
+            post_tts_ignore_sec=POST_TTS_IGNORE_SEC,
+        )
+        if tts_suppression is not None:
+            register_drop_reason(metrics, tts_suppression, session_key=session_key, room_session_key=room_session_key, owner_user_id=owner_user_id, wake_probe_text=wake_probe, wake_detected=wake_detected)
+            stage_label = "디바운스 후 봇 재생 중 입력 무시" if tts_suppression == "bot_is_speaking" else "디바운스 후 TTS 직후 입력 무시"
+            log_voice_stage(metrics, stage_label, extra=f"speaker={member.display_name} wake_detected={wake_detected}")
+            log_voice_bottleneck_summary(metrics, label="voice_drop", extra=f"drop={tts_suppression}", event_name="voice_drop_summary")
             return
         await stop_active_tts_playback(guild_id, reason="qualified_user_audio")
 
@@ -10759,7 +10450,7 @@ async def on_message(message: discord.Message):
     reply_lock = reply_slot_locks.setdefault(reply_slot_key, asyncio.Lock())
 
     if reply_lock.locked():
-        await message.channel.send("⏳ 지금 다른 응답을 처리 중이야. 잠깐만.")
+        await message.channel.send("\u23f3 지금 다른 응답을 처리 중이야. 잠깐만.")
         await bot.process_commands(message)
         return
 
@@ -10784,6 +10475,7 @@ async def on_message(message: discord.Message):
     plain_answer = ""
     text_metrics: dict[str, Any] = {}
     text_delivery_plan: DeliveryPlan | None = None
+    text_turn_summary_logged = False
     try:
         async with reply_lock:
             async with message.channel.typing():
@@ -10830,7 +10522,7 @@ async def on_message(message: discord.Message):
                 guild_id=message.guild.id,
                 session_key=session_key,
             )
-            schedule_memory_update(
+            memory_writer_decision = schedule_memory_update(
                 message.guild.id,
                 user_text,
                 plain_answer,
@@ -10844,6 +10536,7 @@ async def on_message(message: discord.Message):
                 turn_scope=turn_scope,
                 runtime_mode=runtime_mode,
             )
+            text_metrics.setdefault("meta", {})["memory_writer_decision"] = memory_writer_decision
             search_requested = should_force_search_followup(
                 message.guild.id,
                 room_key=room_key,
@@ -10885,11 +10578,21 @@ async def on_message(message: discord.Message):
             extra=f"chars={len(format_display_text(answer, session_key=session_key).strip())} voice_read={str(vc is not None).lower()}",
             event_name="text_turn_summary",
         )
+        text_turn_summary_logged = True
 
     except Exception as e:
         print("전체 오류:", repr(e))
         await message.channel.send(f"❌ 오류 발생: {e}")
     finally:
+        if text_metrics and not text_turn_summary_logged:
+            text_metrics.setdefault("meta", {})["error_layer"] = "text_turn"
+            text_metrics.setdefault("meta", {}).setdefault("error", "text_turn_aborted_before_summary")
+            log_voice_bottleneck_summary(
+                text_metrics,
+                label="text_turn",
+                extra="error=true",
+                event_name="text_turn_summary",
+            )
         _detach_task(turn_scope, turn_task)
         clear_room_turn_scope(session_key, turn_scope)
 

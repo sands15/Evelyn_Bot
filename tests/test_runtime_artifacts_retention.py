@@ -1,0 +1,141 @@
+import sys
+import time
+import unittest
+from contextlib import redirect_stdout
+from io import StringIO
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+RUNTIME_ROOT = REPO_ROOT / "evelyn_core" / "runtime"
+if str(RUNTIME_ROOT) not in sys.path:
+    sys.path.insert(0, str(RUNTIME_ROOT))
+
+from evelyn_core.runtime_artifacts_retention import (  # noqa: E402
+    RetentionRule,
+    apply_cleanup_plan,
+    build_cleanup_plan,
+    inventory_runtime_artifacts,
+    main,
+)
+
+
+def write_file(path: Path, text: str, *, mtime: float) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    path.touch()
+    import os
+
+    os.utime(path, (mtime, mtime))
+
+
+class RuntimeArtifactsRetentionTests(unittest.TestCase):
+    def test_inventory_stays_within_root(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_file(root / "logs" / "app.log", "hello", mtime=time.time())
+
+            artifacts = inventory_runtime_artifacts(root)
+
+        self.assertEqual([item.relative_path for item in artifacts], ["logs/app.log"])
+
+    def test_age_rule_selects_old_file_but_preserves_newest(self) -> None:
+        now = 1_000_000.0
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_file(root / "logs" / "old.log", "old", mtime=now - 10 * 86400)
+            write_file(root / "logs" / "new.log", "new", mtime=now - 1)
+
+            plan = build_cleanup_plan(
+                root,
+                rules=(RetentionRule("logs", ("logs/*.log",), max_age_days=2, preserve_newest=1),),
+                now=now,
+            )
+
+        self.assertEqual([item.relative_path for item in plan.candidates], ["logs/old.log"])
+
+    def test_size_rule_selects_oldest_until_under_limit(self) -> None:
+        now = 1_000_000.0
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_file(root / "benchmarks" / "a.jsonl", "a" * 10, mtime=now - 30)
+            write_file(root / "benchmarks" / "b.jsonl", "b" * 10, mtime=now - 20)
+            write_file(root / "benchmarks" / "c.jsonl", "c" * 10, mtime=now - 10)
+
+            plan = build_cleanup_plan(
+                root,
+                rules=(RetentionRule("bench", ("benchmarks/*.jsonl",), max_total_bytes=15, preserve_newest=1),),
+                now=now,
+            )
+
+        self.assertEqual([item.relative_path for item in plan.candidates], ["benchmarks/a.jsonl", "benchmarks/b.jsonl"])
+
+    def test_active_status_files_are_not_selected(self) -> None:
+        now = 1_000_000.0
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_file(root / "voyager" / "upstream_bridge_status.json", "{}", mtime=now - 100 * 86400)
+            write_file(root / "voyager" / "death_events.jsonl", "{}", mtime=now - 100 * 86400)
+
+            plan = build_cleanup_plan(
+                root,
+                rules=(RetentionRule("voyager", ("voyager/*",), max_age_days=1, preserve_newest=0),),
+                now=now,
+            )
+
+        self.assertEqual([item.relative_path for item in plan.candidates], ["voyager/death_events.jsonl"])
+
+    def test_dry_run_does_not_delete_files(self) -> None:
+        now = 1_000_000.0
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            old_path = root / "logs" / "old.log"
+            write_file(old_path, "old", mtime=now - 10 * 86400)
+            plan = build_cleanup_plan(
+                root,
+                rules=(RetentionRule("logs", ("logs/*.log",), max_age_days=1, preserve_newest=0),),
+                now=now,
+            )
+
+            result = apply_cleanup_plan(plan, dry_run=True)
+
+            self.assertTrue(old_path.exists())
+        self.assertEqual(result["dry_run"], True)
+        self.assertEqual(result["candidate_count"], 1)
+
+    def test_apply_plan_deletes_only_candidates(self) -> None:
+        now = 1_000_000.0
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            old_path = root / "logs" / "old.log"
+            new_path = root / "logs" / "new.log"
+            write_file(old_path, "old", mtime=now - 10 * 86400)
+            write_file(new_path, "new", mtime=now - 1)
+            plan = build_cleanup_plan(
+                root,
+                rules=(RetentionRule("logs", ("logs/*.log",), max_age_days=1, preserve_newest=1),),
+                now=now,
+            )
+
+            result = apply_cleanup_plan(plan, dry_run=False)
+
+            self.assertFalse(old_path.exists())
+            self.assertTrue(new_path.exists())
+        self.assertEqual(result["deleted"], ["logs/old.log"])
+
+    def test_cli_defaults_to_dry_run(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            old_path = root / "logs" / "old.log"
+            write_file(old_path, "old", mtime=time.time() - 10 * 86400)
+
+            with redirect_stdout(StringIO()):
+                exit_code = main(["--root", str(root)])
+
+            self.assertTrue(old_path.exists())
+        self.assertEqual(exit_code, 0)
+
+
+if __name__ == "__main__":
+    unittest.main()

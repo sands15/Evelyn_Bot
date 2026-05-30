@@ -20,7 +20,7 @@ from .config import (
     VOYAGER_CODEX_GATEWAY_PYTHON_EXE,
     VOYAGER_PYTHON_EXE,
 )
-from .paths import get_repo_root
+from .paths import get_repo_root, get_runtime_artifacts_root
 
 
 REPO_ROOT = get_repo_root()
@@ -43,7 +43,7 @@ class MinecraftAutonomyClient:
         self._python_exe = self._resolve_python_exe()
         self._gateway_python_exe = self._resolve_gateway_python_exe()
         self._startup_lock_path = Path(self._cwd) / ".voyager_service.start.lock"
-        self._goal_state_path = Path(self._cwd) / "bot_memory" / "voyager_goal_state.json"
+        self._goal_state_path = get_runtime_artifacts_root() / "voyager" / "voyager_goal_state.json"
         self._launcher_env = os.environ.copy()
 
     async def _get_session(self) -> aiohttp.ClientSession:

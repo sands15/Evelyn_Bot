@@ -48,3 +48,13 @@ def get_runtime_root() -> Path:
     if current.parent.name == "evelyn_core" and current.parent.parent.name == "runtime":
         return current.parent.parent
     return get_evelyn_core_root() / "runtime"
+
+
+def get_runtime_artifacts_root() -> Path:
+    env_root = os.getenv("EVELYN_RUNTIME_ARTIFACTS_DIR") or os.getenv("RUNTIME_ARTIFACTS_DIR")
+    if env_root:
+        try:
+            return Path(env_root).resolve()
+        except Exception:
+            pass
+    return get_repo_root() / "runtime_artifacts"
