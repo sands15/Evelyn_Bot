@@ -79,7 +79,7 @@ const dom = {
   voicePipelineStt: document.querySelector("#voice-pipeline-stt"),
   voicePipelineTts: document.querySelector("#voice-pipeline-tts"),
   voicePipelineDrops: document.querySelector("#voice-pipeline-drops"),
-  voiceInputSwitch: document.querySelector("#voice-input-switch"),
+  voiceInputSwitches: document.querySelectorAll(".voice-input-switch"),
   voiceInputModeButtons: document.querySelectorAll("[data-voice-input-mode]"),
   guildName: document.querySelector("#guild-name"),
   modePill: document.querySelector("#mode-pill"),
@@ -3154,15 +3154,15 @@ if (dom.quickCommandRow) {
   });
 }
 
-if (dom.voiceInputSwitch) {
-  dom.voiceInputSwitch.addEventListener("click", (event) => {
+if (dom.voiceInputSwitches) {
+  dom.voiceInputSwitches.forEach((switchElement) => switchElement.addEventListener("click", (event) => {
     const button = event.target.closest("[data-voice-input-mode]");
     if (!button) {
       return;
     }
     const mode = button.getAttribute("data-voice-input-mode") || "auto";
     sendCurrentMessage("/voice input " + mode);
-  });
+  }));
 }
 
 if (dom.chatShutdownButton) {

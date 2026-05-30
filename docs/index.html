@@ -9,7 +9,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+KR:wght@400;500;600;700&family=Space+Grotesk:wght@500;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="./assets/vendor/winbox/winbox.min.css?v=0.2.82">
-  <link rel="stylesheet" href="./assets/evelyn-page.css?v=20260530c">
+  <link rel="stylesheet" href="./assets/evelyn-page.css?v=20260530d">
 </head>
 <body class="is-boot-splash-active">
   <section class="boot-splash" id="boot-splash" aria-live="polite" aria-label="Evelyn boot loading screen">
@@ -209,6 +209,11 @@
             <div class="topbar-pill-row">
               <span class="topbar-pill is-default" id="mode-pill">default mode</span>
               <span class="topbar-pill topbar-pill-muted is-warmup" id="submode-pill">idle</span>
+            </div>
+            <div class="voice-input-switch is-compact" id="voice-input-switch-topbar" aria-label="Voice input source">
+              <button type="button" data-voice-input-mode="auto" aria-pressed="true">Auto</button>
+              <button type="button" data-voice-input-mode="local" aria-pressed="false">Local</button>
+              <button type="button" data-voice-input-mode="discord" aria-pressed="false">Discord</button>
             </div>
             <p class="topbar-status-line" id="topbar-status-line">Evelyn 상태를 기다리는 중입니다.</p>
             <div class="api-boot-progress is-hidden" id="api-boot-progress" aria-live="polite" aria-hidden="true">
@@ -465,6 +470,6 @@
   </div>
 
   <script src="./assets/vendor/winbox/winbox.bundle.min.js?v=0.2.82"></script>
-  <script src="./assets/evelyn-page.js?v=20260530c"></script>
+  <script src="./assets/evelyn-page.js?v=20260530d"></script>
 </body>
 </html>

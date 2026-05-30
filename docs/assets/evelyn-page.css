@@ -752,6 +752,16 @@ body.is-minecraft-mode .winbox-panel-content .slot-default {
   border-color: rgba(240, 201, 95, 0.24);
 }
 
+.voice-input-switch.is-compact {
+  width: min(100%, 320px);
+  margin-top: 0;
+}
+
+.voice-input-switch.is-compact button {
+  min-height: 26px;
+  font-size: 0.68rem;
+}
+
 #minecraft-telemetry-panel {
   display: flex;
   flex-direction: column;
