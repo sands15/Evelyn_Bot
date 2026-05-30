@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import re
 import sqlite3
 import time
@@ -24,6 +25,8 @@ INDEX_DIR_NAME = "memory_index"
 INDEX_DB_NAME = "memory.sqlite"
 RETRIEVAL_CACHE_TTL_SECONDS = 300
 DEFAULT_PROJECT = "evelyn"
+DAILY_USER_LABEL = os.getenv("MEMORY_DAILY_USER_LABEL", "정훈")
+DAILY_ASSISTANT_LABEL = os.getenv("MEMORY_DAILY_ASSISTANT_LABEL", "이블린")
 VECTOR_INDEX_MODEL = "hashing-v1"
 VECTOR_INDEX_DIMENSIONS = 384
 CONSOLIDATION_MIN_DAILY_CHARS = 1200
@@ -1168,17 +1171,19 @@ def append_turn_rows_to_memory_vault(
     root: Path | None = None,
 ) -> Path | None:
     normalized: list[str] = []
+    meaningful_user_seen = False
     for row in rows:
         text = clean_text(str(row.get("text") or ""))
         if not text:
             continue
         role = clean_text(str(row.get("role") or "memory")) or "memory"
-        speaker = clean_text(str(row.get("speaker") or role)) or role
-        source = clean_text(str(row.get("source") or "unknown")) or "unknown"
         if len(text) > MEMORY_ROW_MAX_CHARS * 2:
             text = text[: MEMORY_ROW_MAX_CHARS * 2 - 3].rstrip() + "..."
-        normalized.append(f"- {role}/{speaker}/{source}: {text}")
-    if not normalized:
+        label = _daily_display_label(role)
+        if role.lower() == "user" and _is_meaningful_daily_user_text(text):
+            meaningful_user_seen = True
+        normalized.append(f"- {label}: {text}")
+    if not normalized or not meaningful_user_seen:
         return None
 
     vault = ensure_memory_vault_layout(root)
@@ -1197,28 +1202,16 @@ def append_turn_rows_to_memory_vault(
                 "updated_at": now,
             }
         )
-        path.write_text(front_matter + f"\n\n# Daily Memory {day_key}\n\n", encoding="utf-8")
+        path.write_text(
+            front_matter
+            + f"\n\n# Daily Memory {day_key}\n\n"
+            + "> Raw transcript and scope metadata are stored in the per-scope JSONL vault files.\n\n",
+            encoding="utf-8",
+        )
 
-    if scope_labels is None:
-        labels = [scope_type if not scope_key else f"{scope_type}:{_slug(scope_key, default='scope')}"]
-    else:
-        labels = []
-        seen_labels: set[str] = set()
-        for label in scope_labels:
-            cleaned = clean_text(str(label))
-            if ":" in cleaned:
-                prefix, suffix = cleaned.split(":", 1)
-                cleaned = f"{clean_text(prefix) or 'scope'}:{_slug(suffix, default='scope')}"
-            if not cleaned or cleaned in seen_labels:
-                continue
-            labels.append(cleaned)
-            seen_labels.add(cleaned)
-        if not labels:
-            labels = [scope_type if not scope_key else f"{scope_type}:{_slug(scope_key, default='scope')}"]
-    scope_label = ", ".join(labels)
     block = "\n".join(
         [
-            f"## {time.strftime('%H:%M:%S')} guild:{guild_id} scopes:{scope_label}",
+            f"## {time.strftime('%H:%M:%S')}",
             *normalized,
             "",
         ]
@@ -1226,6 +1219,25 @@ def append_turn_rows_to_memory_vault(
     with path.open("a", encoding="utf-8") as handle:
         handle.write(block)
     return path
+
+
+def _daily_display_label(role: str) -> str:
+    normalized = clean_text(role).lower()
+    if normalized == "assistant":
+        return DAILY_ASSISTANT_LABEL
+    if normalized == "user":
+        return DAILY_USER_LABEL
+    return "기록"
+
+
+def _is_meaningful_daily_user_text(text: str) -> bool:
+    cleaned = clean_text(text).strip()
+    if not cleaned:
+        return False
+    stripped = re.sub(r"[\s.!?。！？,，~…\"'“”‘’`]+", "", cleaned).lower()
+    if stripped in {"이블린", "이블린아", "야", "응", "어", "음", "그", "소"}:
+        return False
+    return len(stripped) >= 3
 
 
 def consolidate_daily_memory_once(
