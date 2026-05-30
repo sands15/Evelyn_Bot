@@ -157,6 +157,9 @@ const dom = {
   memoryGraphDetail: document.querySelector("#memory-graph-detail"),
   memoryGraphRefreshButton: document.querySelector("#memory-graph-refresh-button"),
   memoryGraphSubcopy: document.querySelector("#memory-graph-subcopy"),
+  memoryManagerSummary: document.querySelector("#memory-manager-summary"),
+  memoryCardList: document.querySelector("#memory-card-list"),
+  memoryManagerStatus: document.querySelector("#memory-manager-status"),
 };
 
 const state = {
@@ -185,6 +188,9 @@ const state = {
   memoryGraphLastLoadedAt: 0,
   memoryGraphFrame: null,
   memoryGraphPointer: { x: 0, y: 0, down: false, dragId: "", hoverId: "" },
+  memoryCardsPayload: null,
+  memoryCardsLoading: false,
+  memoryCardsLastLoadedAt: 0,
 };
 
 let pollTimer = null;
@@ -2036,6 +2042,138 @@ function renderMemoryGraphDetail(node) {
   ].join("");
 }
 
+function memoryCardStatusLabel(card) {
+  if (card.hidden) {
+    return "숨김";
+  }
+  return card.confirmed ? "확인됨" : "확인 필요";
+}
+
+function renderMemoryCards(payload) {
+  state.memoryCardsPayload = payload || { cards: [], counts: {} };
+  const counts = state.memoryCardsPayload.counts || {};
+  if (dom.memoryManagerSummary) {
+    dom.memoryManagerSummary.innerHTML = [
+      "<span>확인됨 <strong>" + escapeHtml(counts.confirmed || 0) + "</strong></span>",
+      "<span>미확인 <strong>" + escapeHtml(counts.unconfirmed || 0) + "</strong></span>",
+      "<span>고정 <strong>" + escapeHtml(counts.pinned || 0) + "</strong></span>",
+    ].join("");
+  }
+  if (!dom.memoryCardList) {
+    return;
+  }
+  const cards = Array.isArray(state.memoryCardsPayload.cards) ? state.memoryCardsPayload.cards : [];
+  if (!cards.length) {
+    dom.memoryCardList.innerHTML = '<article class="memory-card memory-card-empty">표시할 메모리 카드가 없습니다.</article>';
+    return;
+  }
+  dom.memoryCardList.innerHTML = cards.slice(0, 12).map((card) => {
+    const statusClass = card.confirmed ? "is-confirmed" : "is-unconfirmed";
+    const pinLabel = card.pinned ? "고정 해제" : "고정";
+    const pinAction = card.pinned ? "unpin" : "pin";
+    const confirmLabel = card.confirmed ? "확인 취소" : "확인";
+    const confirmAction = card.confirmed ? "unconfirm" : "confirm";
+    return [
+      '<article class="memory-card ' + statusClass + '" data-memory-note-id="' + escapeHtml(card.id) + '">',
+      '<div class="memory-card-head">',
+      '<div>',
+      '<span class="memory-card-category">' + escapeHtml(card.category || card.type || "기억") + "</span>",
+      "<strong>" + escapeHtml(card.title || "제목 없음") + "</strong>",
+      "</div>",
+      '<span class="memory-card-status">' + escapeHtml(memoryCardStatusLabel(card)) + "</span>",
+      "</div>",
+      '<p class="memory-card-preview">' + escapeHtml(card.preview || "내용 없음") + "</p>",
+      '<div class="memory-card-meta">',
+      "<span>" + escapeHtml(card.path || "") + "</span>",
+      card.pinned ? "<span>고정됨</span>" : "",
+      card.confirmedAt ? "<span>" + escapeHtml(card.confirmedAt.slice(0, 10)) + "</span>" : "",
+      "</div>",
+      '<div class="memory-card-actions">',
+      '<button type="button" data-memory-action="' + confirmAction + '">' + confirmLabel + "</button>",
+      '<button type="button" data-memory-action="' + pinAction + '">' + pinLabel + "</button>",
+      '<button type="button" data-memory-action="edit">수정</button>',
+      '<button type="button" class="is-danger" data-memory-action="hide">숨김</button>',
+      "</div>",
+      "</article>",
+    ].join("");
+  }).join("");
+}
+
+async function loadMemoryCards({ force = false } = {}) {
+  if (!dom.memoryCardList || state.memoryCardsLoading) {
+    return;
+  }
+  const now = Date.now();
+  if (!force && state.memoryCardsPayload && now - state.memoryCardsLastLoadedAt < 45000) {
+    return;
+  }
+  state.memoryCardsLoading = true;
+  if (dom.memoryManagerStatus) {
+    dom.memoryManagerStatus.textContent = "메모리 카드를 불러오는 중입니다.";
+  }
+  try {
+    const payload = await fetchApi("/api/control-page/memory?limit=80");
+    state.memoryCardsLastLoadedAt = Date.now();
+    renderMemoryCards(payload);
+    if (dom.memoryManagerStatus) {
+      dom.memoryManagerStatus.textContent = "확인 여부와 고정 상태가 저장됩니다.";
+    }
+  } catch (error) {
+    if (dom.memoryManagerStatus) {
+      dom.memoryManagerStatus.textContent = "메모리 카드를 불러오지 못했습니다: " + error.message;
+    }
+  } finally {
+    state.memoryCardsLoading = false;
+  }
+}
+
+async function updateMemoryCardAction(noteId, action, extra = {}) {
+  if (!noteId || !action) {
+    return;
+  }
+  if (dom.memoryManagerStatus) {
+    dom.memoryManagerStatus.textContent = "메모리 상태를 저장하는 중입니다.";
+  }
+  try {
+    await fetchApi("/api/control-page/memory/" + encodeURIComponent(noteId), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action, ...extra }),
+    });
+    state.memoryCardsPayload = null;
+    state.memoryGraphPayload = null;
+    await loadMemoryCards({ force: true });
+    await loadMemoryGraph({ force: true });
+  } catch (error) {
+    if (dom.memoryManagerStatus) {
+      dom.memoryManagerStatus.textContent = "저장 실패: " + error.message;
+    }
+  }
+}
+
+function handleMemoryCardAction(button) {
+  const card = button.closest("[data-memory-note-id]");
+  const noteId = card ? card.getAttribute("data-memory-note-id") : "";
+  const action = button.getAttribute("data-memory-action") || "";
+  if (!noteId || !action) {
+    return;
+  }
+  if (action === "hide" && !window.confirm("이 기억을 메모리 화면에서 숨길까요?")) {
+    return;
+  }
+  if (action === "edit") {
+    const currentTitle = card.querySelector(".memory-card-head strong")?.textContent || "";
+    const currentBody = card.querySelector(".memory-card-preview")?.textContent || "";
+    const nextBody = window.prompt("수정할 기억 내용을 입력하세요.", currentBody);
+    if (nextBody === null) {
+      return;
+    }
+    updateMemoryCardAction(noteId, "edit", { title: currentTitle, body: nextBody });
+    return;
+  }
+  updateMemoryCardAction(noteId, action);
+}
+
 function renderMemoryGraphControls(payload) {
   if (dom.memoryGraphStats) {
     const stats = payload?.stats || {};
@@ -2994,6 +3132,7 @@ function renderState(payload, { preserveScroll = false } = {}) {
   renderQuickCommands();
   renderChat((payload.chat || {}).messages || [], payload.statusText || "연결 상태를 확인하는 중입니다.", { preserveScroll });
   renderSuggestions();
+  loadMemoryCards({ force: false });
   loadMemoryGraph({ force: false });
   schedulePolling();
 }
@@ -3215,7 +3354,19 @@ if (dom.refreshStateButton) {
 
 if (dom.memoryGraphRefreshButton) {
   dom.memoryGraphRefreshButton.addEventListener("click", () => {
+    loadMemoryCards({ force: true });
     loadMemoryGraph({ force: true });
+  });
+}
+
+if (dom.memoryCardList) {
+  dom.memoryCardList.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-memory-action]");
+    if (!button) {
+      return;
+    }
+    event.preventDefault();
+    handleMemoryCardAction(button);
   });
 }
 

@@ -11,7 +11,7 @@ from typing import Any
 
 from aiohttp import ClientSession, ClientTimeout, web
 
-from .memory_vault import export_memory_graph
+from .memory_vault import export_memory_graph, memory_vault_user_snapshot, update_memory_vault_user_note
 
 
 PROJECT_ROOT = Path(os.getenv("EVELYN_PROJECT_ROOT") or Path(__file__).resolve().parents[3])
@@ -290,6 +290,31 @@ async def memory_graph_handler(request: web.Request) -> web.StreamResponse:
     return json_response(export_memory_graph(max_nodes=max_nodes))
 
 
+async def memory_snapshot_handler(request: web.Request) -> web.StreamResponse:
+    include_hidden = str(request.query.get("include_hidden", "")).lower() in {"1", "true", "yes", "on"}
+    try:
+        limit = int(request.query.get("limit", "80"))
+    except Exception:
+        limit = 80
+    return json_response(memory_vault_user_snapshot(include_hidden=include_hidden, limit=limit))
+
+
+async def memory_note_action_handler(request: web.Request) -> web.StreamResponse:
+    note_id = request.match_info.get("note_id", "")
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    action = str((payload or {}).get("action") or "").strip()
+    result = update_memory_vault_user_note(
+        note_id,
+        action,
+        title=(payload or {}).get("title"),
+        body=(payload or {}).get("body"),
+    )
+    return json_response(result, status=200 if result.get("ok") else 404)
+
+
 async def chat_handler(request: web.Request) -> web.StreamResponse:
     try:
         payload = await request.json()
@@ -344,11 +369,15 @@ def create_app() -> web.Application:
     app.router.add_get("/health", health_handler)
     app.router.add_get("/assets/{asset_path:.*}", asset_handler)
     app.router.add_get("/api/control-page/state", state_handler)
+    app.router.add_get("/api/control-page/memory", memory_snapshot_handler)
     app.router.add_get("/api/control-page/memory-graph", memory_graph_handler)
+    app.router.add_post("/api/control-page/memory/{note_id}", memory_note_action_handler)
     app.router.add_post("/api/control-page/chat", chat_handler)
     app.router.add_get("/api/control-page/minecraft-item-icon/{item_name}", icon_handler)
     app.router.add_options("/api/control-page/state", state_handler)
+    app.router.add_options("/api/control-page/memory", memory_snapshot_handler)
     app.router.add_options("/api/control-page/memory-graph", memory_graph_handler)
+    app.router.add_options("/api/control-page/memory/{note_id}", memory_note_action_handler)
     app.router.add_options("/api/control-page/chat", chat_handler)
     return app
 

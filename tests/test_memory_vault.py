@@ -19,6 +19,7 @@ from evelyn_core.memory_vault import (  # noqa: E402
     consolidate_daily_memory_once,
     export_memory_graph,
     mark_memory_note_superseded,
+    memory_vault_user_snapshot,
     memory_vault_root,
     parse_memory_note,
     probe_sub_llm_dependency,
@@ -27,6 +28,7 @@ from evelyn_core.memory_vault import (  # noqa: E402
     run_memory_vault_maintenance_once,
     run_semantic_memory_consolidation_once,
     sync_memory_vault_index,
+    update_memory_vault_user_note,
     write_memory_vault_note,
 )
 
@@ -273,6 +275,38 @@ class MemoryVaultTests(unittest.TestCase):
 
         self.assertTrue(result.ok)
         self.assertNotIn("Old Memory Shape", result.context_text)
+
+    def test_user_memory_snapshot_tracks_confirmation_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_memory_vault_note(
+                note_type="concept",
+                title="정훈 취향",
+                body="정훈은 초코 웨이퍼 롤을 좋아한다.",
+                tags=["preference"],
+                root=root,
+            )
+            first = memory_vault_user_snapshot(root=root)
+            note_id = first["cards"][0]["id"]
+            confirmed = update_memory_vault_user_note(note_id, "confirm", root=root)
+            pinned = update_memory_vault_user_note(note_id, "pin", root=root)
+            second = memory_vault_user_snapshot(root=root)
+            hidden = update_memory_vault_user_note(note_id, "hide", root=root)
+            third = memory_vault_user_snapshot(root=root)
+            state_path = root / "memory_index" / "user_note_state.json"
+            note_raw = Path(first["vaultPath"]) / first["cards"][0]["path"]
+            state_exists = state_path.exists()
+            raw_after_actions = note_raw.read_text(encoding="utf-8")
+
+        self.assertEqual(first["counts"]["unconfirmed"], 1)
+        self.assertTrue(confirmed["ok"])
+        self.assertTrue(pinned["ok"])
+        self.assertTrue(second["cards"][0]["confirmed"])
+        self.assertTrue(second["cards"][0]["pinned"])
+        self.assertTrue(hidden["ok"])
+        self.assertEqual(third["counts"]["total"], 0)
+        self.assertTrue(state_exists)
+        self.assertNotIn("confirmed_at", raw_after_actions)
 
     def test_vector_index_metadata_and_retrieval_mode(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

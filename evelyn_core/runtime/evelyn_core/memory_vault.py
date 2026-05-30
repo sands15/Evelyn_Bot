@@ -23,6 +23,7 @@ from .text import clean_text
 VAULT_DIR_NAME = "memory_vault"
 INDEX_DIR_NAME = "memory_index"
 INDEX_DB_NAME = "memory.sqlite"
+USER_NOTE_STATE_NAME = "user_note_state.json"
 RETRIEVAL_CACHE_TTL_SECONDS = 300
 DEFAULT_PROJECT = "evelyn"
 DAILY_USER_LABEL = os.getenv("MEMORY_DAILY_USER_LABEL", "정훈")
@@ -235,25 +236,33 @@ def _format_front_matter(data: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _split_front_matter(raw: str) -> tuple[dict[str, str], str]:
+    metadata: dict[str, str] = {}
+    body = raw
+    if not raw.startswith("---"):
+        return metadata, body
+    lines = raw.splitlines()
+    if len(lines) <= 1:
+        return metadata, body
+    end_index = None
+    for index, line in enumerate(lines[1:], start=1):
+        if line.strip() == "---":
+            end_index = index
+            break
+    if end_index is None:
+        return metadata, body
+    for line in lines[1:end_index]:
+        if ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        metadata[clean_text(key).strip()] = clean_text(value).strip()
+    body = "\n".join(lines[end_index + 1 :]).strip()
+    return metadata, body
+
+
 def parse_memory_note(path: Path, text: str | None = None) -> MemoryVaultNote:
     raw = path.read_text(encoding="utf-8", errors="ignore") if text is None else text
-    metadata: dict[str, Any] = {}
-    body = raw
-    if raw.startswith("---"):
-        lines = raw.splitlines()
-        if len(lines) > 1:
-            end_index = None
-            for index, line in enumerate(lines[1:], start=1):
-                if line.strip() == "---":
-                    end_index = index
-                    break
-            if end_index is not None:
-                for line in lines[1:end_index]:
-                    if ":" not in line:
-                        continue
-                    key, value = line.split(":", 1)
-                    metadata[clean_text(key).strip()] = clean_text(value).strip()
-                body = "\n".join(lines[end_index + 1 :]).strip()
+    metadata, body = _split_front_matter(raw)
 
     title = clean_text(str(metadata.get("title") or ""))
     if not title:
@@ -1874,6 +1883,205 @@ def write_memory_vault_note(
     return path
 
 
+def _user_note_state_path(root: Path | None = None) -> Path:
+    return memory_index_dir(root) / USER_NOTE_STATE_NAME
+
+
+def _read_user_note_state(root: Path | None = None) -> dict[str, dict[str, Any]]:
+    path = _user_note_state_path(root)
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8", errors="ignore"))
+    except Exception:
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    notes = payload.get("notes", payload)
+    if not isinstance(notes, dict):
+        return {}
+    output: dict[str, dict[str, Any]] = {}
+    for key, value in notes.items():
+        note_id = clean_text(str(key))
+        if note_id and isinstance(value, dict):
+            output[note_id] = dict(value)
+    return output
+
+
+def _write_user_note_state(state: dict[str, dict[str, Any]], root: Path | None = None) -> None:
+    path = _user_note_state_path(root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({"updated_at": _utc_now_iso(), "notes": state}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def _memory_vault_note_preview(body: str, *, max_chars: int = 340) -> str:
+    lines: list[str] = []
+    for raw_line in clean_text(body).splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        line = re.sub(r"^#+\s*", "", line)
+        line = re.sub(r"^>\s*", "", line)
+        line = re.sub(r"^\[![^\]]+\]-?\s*", "", line)
+        line = re.sub(r"^[-*]\s*", "", line)
+        line = clean_text(line)
+        if line:
+            lines.append(line)
+    preview = clean_text(" ".join(lines))
+    if len(preview) > max_chars:
+        preview = preview[: max_chars - 1].rstrip() + "…"
+    return preview
+
+
+def _memory_vault_note_category(note: MemoryVaultNote) -> str:
+    rel = note.rel_path.lower()
+    note_type = note.note_type.lower()
+    if rel.startswith("core/legacy-guild-"):
+        return "핵심 기억"
+    if note_type == "daily" or rel.startswith("daily/"):
+        return "대화 기록"
+    if note_type in {"project", "projects"}:
+        return "프로젝트"
+    if note_type in {"procedure", "procedural"}:
+        return "운영 방법"
+    if note_type in {"episode", "episodes"}:
+        return "대화 요약"
+    return "지식"
+
+
+def _memory_vault_find_note(note_id_or_rel_path: str, *, root: Path | None = None) -> tuple[Path, MemoryVaultNote, str] | None:
+    vault = ensure_memory_vault_layout(root)
+    target = clean_text(note_id_or_rel_path)
+    if not target:
+        return None
+    for path in vault.rglob("*.md"):
+        try:
+            raw = path.read_text(encoding="utf-8", errors="ignore")
+            note = parse_memory_note(path, raw)
+        except Exception:
+            continue
+        rel_path = path.relative_to(vault).as_posix()
+        if target in {note.note_id, rel_path, path.stem}:
+            return path, note, raw
+    return None
+
+
+def _write_memory_vault_note_body(path: Path, raw: str, note: MemoryVaultNote, *, title: str | None = None, body: str | None = None) -> None:
+    metadata, current_body = _split_front_matter(raw)
+    next_title = clean_text(title or note.title or path.stem)
+    next_body = clean_text(body if body is not None else current_body)
+    if metadata:
+        metadata["title"] = next_title
+        metadata["updated_at"] = _utc_now_iso()
+        content = _format_front_matter(metadata) + "\n\n" + f"# {next_title}\n\n{next_body.strip()}\n"
+    else:
+        content = f"# {next_title}\n\n{next_body.strip()}\n"
+    path.write_text(content, encoding="utf-8")
+
+
+def memory_vault_user_snapshot(*, root: Path | None = None, include_hidden: bool = False, limit: int = 80) -> dict[str, Any]:
+    version = sync_memory_vault_index(root=root)
+    vault = ensure_memory_vault_layout(root)
+    state = _read_user_note_state(root)
+    cards: list[dict[str, Any]] = []
+    counts = {"total": 0, "confirmed": 0, "unconfirmed": 0, "pinned": 0, "hidden": 0}
+    for path in vault.rglob("*.md"):
+        try:
+            raw = path.read_text(encoding="utf-8", errors="ignore")
+            note = parse_memory_note(path, raw)
+        except Exception:
+            continue
+        rel_path = path.relative_to(vault).as_posix()
+        note_state = state.get(note.note_id, {})
+        hidden = bool(note_state.get("hidden")) or note.status in {"archived", "superseded"}
+        if hidden:
+            counts["hidden"] += 1
+            if not include_hidden:
+                continue
+        confirmed_at = clean_text(str(note_state.get("confirmed_at") or note.metadata.get("confirmed_at") or ""))
+        pinned = bool(note_state.get("pinned"))
+        counts["total"] += 1
+        if confirmed_at:
+            counts["confirmed"] += 1
+        else:
+            counts["unconfirmed"] += 1
+        if pinned:
+            counts["pinned"] += 1
+        cards.append(
+            {
+                "id": note.note_id,
+                "title": note.title,
+                "category": _memory_vault_note_category(note),
+                "type": note.note_type,
+                "path": rel_path,
+                "preview": _memory_vault_note_preview(note.body),
+                "confirmed": bool(confirmed_at),
+                "confirmedAt": confirmed_at,
+                "pinned": pinned,
+                "hidden": hidden,
+                "confidence": clean_text(str(note.metadata.get("confidence") or "")),
+                "importance": _front_matter_float(note.metadata, "importance", 0.5),
+                "updatedAt": clean_text(str(note.metadata.get("updated_at") or note.updated_at or "")),
+                "sourceHash": note.source_hash,
+            }
+        )
+    cards.sort(key=lambda item: (not item["pinned"], item["confirmed"], -float(item["importance"] or 0), item["title"]))
+    cards = cards[: max(1, limit)]
+    return {
+        "ok": True,
+        "memoryVersion": version,
+        "vaultPath": str(vault),
+        "counts": counts,
+        "cards": cards,
+        "checkedAt": _utc_now_iso(),
+    }
+
+
+def update_memory_vault_user_note(
+    note_id_or_rel_path: str,
+    action: str,
+    *,
+    title: str | None = None,
+    body: str | None = None,
+    root: Path | None = None,
+) -> dict[str, Any]:
+    target = _memory_vault_find_note(note_id_or_rel_path, root=root)
+    if target is None:
+        return {"ok": False, "error": "note_not_found"}
+    path, note, raw = target
+    state = _read_user_note_state(root)
+    note_state = dict(state.get(note.note_id, {}))
+    normalized_action = clean_text(action).lower()
+    now = _utc_now_iso()
+    if normalized_action == "confirm":
+        note_state["confirmed_at"] = now
+    elif normalized_action == "unconfirm":
+        note_state.pop("confirmed_at", None)
+    elif normalized_action == "pin":
+        note_state["pinned"] = True
+    elif normalized_action == "unpin":
+        note_state["pinned"] = False
+    elif normalized_action == "hide":
+        note_state["hidden"] = True
+        note_state["hidden_at"] = now
+    elif normalized_action == "unhide":
+        note_state["hidden"] = False
+    elif normalized_action == "edit":
+        _write_memory_vault_note_body(path, raw, note, title=title, body=body)
+        note_state["edited_at"] = now
+    else:
+        return {"ok": False, "error": "unsupported_action"}
+    note_state["updated_at"] = now
+    state[note.note_id] = note_state
+    _write_user_note_state(state, root)
+    if normalized_action == "edit":
+        sync_memory_vault_index(root=root)
+    return {"ok": True, "noteId": note.note_id, "action": normalized_action, "state": note_state}
+
+
 def _memory_vault_note_path(*, note_type: str, title: str, root: Path | None = None) -> Path:
     vault = ensure_memory_vault_layout(root)
     normalized_type = clean_text(note_type).lower() or "concept"
@@ -2120,6 +2328,7 @@ __all__ = [
     "export_memory_graph",
     "mark_memory_note_superseded",
     "memory_index_db_path",
+    "memory_vault_user_snapshot",
     "memory_vault_root",
     "parse_memory_note",
     "probe_sub_llm_dependency",
@@ -2132,5 +2341,6 @@ __all__ = [
     "run_memory_vault_maintenance_once",
     "run_semantic_memory_consolidation_once",
     "sync_memory_vault_index",
+    "update_memory_vault_user_note",
     "write_memory_vault_note",
 ]

@@ -9,7 +9,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+KR:wght@400;500;600;700&family=Space+Grotesk:wght@500;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="./assets/vendor/winbox/winbox.min.css?v=0.2.82">
-  <link rel="stylesheet" href="./assets/evelyn-page.css?v=20260530d">
+  <link rel="stylesheet" href="./assets/evelyn-page.css?v=20260530e">
 </head>
 <body class="is-boot-splash-active">
   <section class="boot-splash" id="boot-splash" aria-live="polite" aria-label="Evelyn boot loading screen">
@@ -442,15 +442,26 @@
         </form>
       </section>
 
-      <section class="panel memory-graph-panel" id="memory-graph-panel" aria-label="Memory vault graph">
+      <section class="panel memory-graph-panel" id="memory-graph-panel" aria-label="Memory vault manager">
         <header class="memory-graph-header">
           <div>
             <p class="panel-eyebrow mint">MEMORY VAULT</p>
-            <strong>Memory Graph</strong>
-            <p class="panel-subcopy wide" id="memory-graph-subcopy">Markdown vault relationships and recall paths.</p>
+            <strong>Memory</strong>
+            <p class="panel-subcopy wide" id="memory-graph-subcopy">정훈이 바로 확인하고 고칠 수 있는 기억 카드입니다.</p>
           </div>
           <button type="button" class="quick-command memory-graph-refresh" id="memory-graph-refresh-button">Refresh</button>
         </header>
+        <section class="memory-manager" aria-label="Memory cards">
+          <div class="memory-manager-summary" id="memory-manager-summary">
+            <span>확인됨 <strong>0</strong></span>
+            <span>미확인 <strong>0</strong></span>
+            <span>고정 <strong>0</strong></span>
+          </div>
+          <div class="memory-card-list" id="memory-card-list">
+            <article class="memory-card memory-card-empty">메모리 카드를 불러오는 중입니다.</article>
+          </div>
+          <p class="memory-manager-status" id="memory-manager-status">카드에서 확인, 고정, 숨김, 수정을 바로 처리할 수 있습니다.</p>
+        </section>
         <div class="memory-graph-stats" id="memory-graph-stats">
           <span>Nodes <strong>0</strong></span>
           <span>Edges <strong>0</strong></span>
@@ -470,6 +481,6 @@
   </div>
 
   <script src="./assets/vendor/winbox/winbox.bundle.min.js?v=0.2.82"></script>
-  <script src="./assets/evelyn-page.js?v=20260530d"></script>
+  <script src="./assets/evelyn-page.js?v=20260530e"></script>
 </body>
 </html>
