@@ -110,7 +110,7 @@ TTS_PLAYBACK_START_LOOKAHEAD_TIMEOUT_MS = float(os.getenv("TTS_PLAYBACK_START_LO
 # 메모리 업데이트와 cognitive 판단에 쓰는 서브 LLM 서버 엔드포인트.
 SUMMARY_LLM_URL = os.getenv("SUMMARY_LLM_URL", "http://127.0.0.1:9821/v1/chat/completions")
 # 요약/상황판단용 서브 모델 이름.
-SUMMARY_MODEL_NAME = os.getenv("SUMMARY_MODEL_NAME", "EXAONE-3.5-2.4B-Instruct-Q4_K_M.gguf")
+SUMMARY_MODEL_NAME = os.getenv("SUMMARY_MODEL_NAME", "EXAONE-3.5-2.4B-Instruct-Q6_K.gguf")
 # 라우터 LLM 서버 엔드포인트.
 ROUTER_LLM_URL = os.getenv("ROUTER_LLM_URL", "http://127.0.0.1:9822/v1/chat/completions")
 # 라우터 모델 이름.
