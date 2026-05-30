@@ -64,7 +64,9 @@ try { `$Host.UI.RawUI.WindowTitle = '$Title' } catch {}
 $Script
 "@
     $encoded = New-EncodedCommand -Script $bootstrap
-    Start-Process -FilePath 'powershell.exe' -WorkingDirectory $projectRoot -WindowStyle Hidden -ArgumentList @(
+    $startHidden = if ($env:EVELYN_START_HIDDEN) { ([string]$env:EVELYN_START_HIDDEN).ToLowerInvariant() -in @('1', 'true', 'yes', 'on') } else { $false }
+    $windowStyle = if ($startHidden) { 'Hidden' } else { 'Normal' }
+    Start-Process -FilePath 'powershell.exe' -WorkingDirectory $projectRoot -WindowStyle $windowStyle -ArgumentList @(
         '-NoLogo',
         '-NoProfile',
         '-ExecutionPolicy', 'Bypass',
@@ -113,4 +115,5 @@ Start-SupervisedService -Title 'TTS' -Port 8880 -Name 'TTS' -Command "& '$PSScri
 Start-SupervisedService -Title 'Control-Page' -Port 8799 -Name 'Control-Page' -Command "& '$PSScriptRoot\start_control_page.ps1'"
 Start-SupervisedService -Title 'Bot' -Port 8798 -Name 'Bot' -Command "`$env:CONTROL_PAGE_PORT='8798'; & '$PSScriptRoot\start_bot.ps1'"
 Wait-Port -HostName '127.0.0.1' -Port 8799 -Label 'Evelyn Control Page'
+Write-Host '[Evelyn] Full stack launch requested. The control page will show Main/Router/Sub/TTS/Bot boot progress.'
 Open-ChromeToControlPage

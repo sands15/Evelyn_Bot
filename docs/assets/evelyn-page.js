@@ -303,6 +303,21 @@ function hideApiBootProgressSoon() {
   }, 650);
 }
 
+function applyBootProgressPayload(payload) {
+  const progress = (payload && (payload.bootProgress || ((payload.runtime || {}).bootProgress))) || null;
+  if (!progress || typeof progress !== "object") {
+    return false;
+  }
+  const percent = clampPercent(progress.percent);
+  const phase = progress.phase || "부팅 상태 확인 중";
+  const ready = percent >= 100 && progress.ready !== false && payload.ok !== false;
+  setApiBootProgress(percent, phase, { hide: ready });
+  if (ready) {
+    hideApiBootProgressSoon();
+  }
+  return true;
+}
+
 function autosizeTextarea() {
   if (!dom.commandInput) {
     return;
@@ -1439,8 +1454,7 @@ async function connectApi() {
       setApiBootProgress(Math.max(state.apiBootProgress, 84), "API 응답 수신 중");
       const payload = await response.json();
       state.apiBase = candidate;
-      setApiBootProgress(100, "API 연결 완료");
-      hideApiBootProgressSoon();
+      applyBootProgressPayload(payload);
       return payload;
     } catch (_error) {
       // try next
@@ -2668,8 +2682,10 @@ function renderState(payload, { preserveScroll = false } = {}) {
   }
   stopApiWaitingTicker();
   state.apiWaitStartedAt = 0;
-  setApiBootProgress(100, "API 연결 완료");
-  hideApiBootProgressSoon();
+  if (!applyBootProgressPayload(payload)) {
+    setApiBootProgress(100, "API 연결 완료");
+    hideApiBootProgressSoon();
+  }
   state.appState = payload;
   state.commands = payload.commands || [];
   state.allCommands = mergedCommandCatalog(CONTROL_PAGE_COMMAND_CATALOG, state.commands, payload.allCommands || []);

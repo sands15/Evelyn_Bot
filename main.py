@@ -552,6 +552,7 @@ stt_backend: Optional[str] = None
 http_session: Optional[aiohttp.ClientSession] = None
 startup_components_ready = False
 startup_components_task: Optional[asyncio.Task] = None
+startup_component_state: dict[str, dict[str, Any]] = {}
 voice_path_warmup_locks: dict[str, asyncio.Lock] = {}
 voice_path_warmup_done: dict[str, float] = {}
 partial_stt_cache: dict[str, dict[str, Any]] = {}
@@ -5026,18 +5027,24 @@ async def set_tts_presence(is_warming_up: bool) -> None:
 
 def ensure_opus_loaded() -> None:
     if discord_opus.is_loaded():
+        mark_startup_component("opus", "done", "already loaded")
         print("[OPUS LOAD] already_loaded")
         return
+    mark_startup_component("opus", "running", "loading Opus")
     try:
         discord_opus._load_default()
     except Exception as e:
+        mark_startup_component("opus", "failed", repr(e))
         raise RuntimeError(f"Opus library load failed: {e!r}") from e
     if not discord_opus.is_loaded():
+        mark_startup_component("opus", "failed", "library did not report loaded")
         raise RuntimeError("Opus library did not report loaded after default load")
+    mark_startup_component("opus", "done")
     print("[OPUS LOAD] done")
 
 
 def warmup_stt_sync() -> None:
+    mark_startup_component("stt", "running", "STT model warmup")
     print("[STARTUP] stt_warmup_begin")
     silence = np.zeros(TARGET_RATE, dtype=np.float32)
     try:
@@ -5048,11 +5055,14 @@ def warmup_stt_sync() -> None:
             stage="warmup",
         )
     except Exception as e:
+        mark_startup_component("stt", "failed", repr(e))
         raise RuntimeError(f"STT warmup failed: {e!r}") from e
+    mark_startup_component("stt", "done")
     print("[STARTUP] stt_warmup_done")
 
 
 async def warmup_llm() -> None:
+    mark_startup_component("main_warmup", "running", "Main LLM warmup request")
     session = await get_http_session()
     payload = {
         "model": MODEL_NAME,
@@ -5069,14 +5079,17 @@ async def warmup_llm() -> None:
     async with session.post(LLM_SERVER_URL, json=payload, timeout=aiohttp.ClientTimeout(total=20)) as resp:
         if resp.status != 200:
             error_text = await resp.text()
+            mark_startup_component("main_warmup", "failed", f"{resp.status}: {error_text[:160]}")
             raise RuntimeError(f"LLM warmup failed: {resp.status} / {error_text[:300]}")
         async for raw_line in resp.content:
             event = decode_sse_stream_line(raw_line)
             if not event or event.get("done"):
                 continue
             if event.get("delta_text"):
+                mark_startup_component("main_warmup", "done")
                 print("[STARTUP] llm_warmup_done")
                 return
+    mark_startup_component("main_warmup", "done", "no streamed chunk")
     print("[STARTUP] llm_warmup_done_no_chunk")
 
 
@@ -5283,12 +5296,14 @@ async def warmup_tts_server() -> None:
     global tts_warmup_started
 
     tts_warmup_started = True
+    mark_startup_component("tts_warmup", "running", "OmniVoice health check")
 
     session = await get_http_session()
     timeout = aiohttp.ClientTimeout(total=10)
     async with session.get(f"{OMNIVOICE_SERVER_URL}/health", timeout=timeout) as resp:
         if resp.status != 200:
             text = await resp.text()
+            mark_startup_component("tts_warmup", "failed", f"health {resp.status}: {text[:160]}")
             raise RuntimeError(f"OmniVoice health check 실패: {resp.status} / {text[:200]}")
         print("OmniVoice 서버 준비 확인 완료")
 
@@ -5309,11 +5324,15 @@ async def warmup_tts_server() -> None:
     ) as resp:
         if resp.status != 200:
             text = await resp.text()
+            mark_startup_component("tts_warmup", "failed", f"warmup {resp.status}: {text[:160]}")
             raise RuntimeError(f"OmniVoice warmup 실패: {resp.status} / {text[:200]}")
         async for chunk in resp.content.iter_chunked(4096):
             if chunk:
+                mark_startup_component("tts_warmup", "done")
                 print("OmniVoice TTS 워밍업 완료")
                 break
+        if not startup_component_done("tts_warmup"):
+            mark_startup_component("tts_warmup", "done", "no audio chunk returned")
 
 
 def should_log_voice_timing(elapsed_ms: float) -> bool:
@@ -7904,6 +7923,26 @@ async def safe_get_control_page_minecraft_snapshot(
 
 async def _probe_control_page_runtime_services_once() -> dict[str, Any]:
     bot_ready = True
+    service_probe_targets: list[tuple[str, str, int]] = []
+    for label, url in (
+        ("main", LLM_SERVER_URL),
+        ("router", ROUTER_LLM_URL),
+        ("sub", SUMMARY_LLM_URL),
+        ("tts", OMNIVOICE_SERVER_URL),
+    ):
+        target = runtime_status_port_from_url(url)
+        if target is not None:
+            host, port = target
+            service_probe_targets.append((label, host, port))
+    service_results: dict[str, bool] = {}
+    if service_probe_targets:
+        probed = await asyncio.gather(
+            *(probe_runtime_tcp_service(label, host, port) for label, host, port in service_probe_targets),
+            return_exceptions=True,
+        )
+        for item in probed:
+            if isinstance(item, tuple) and len(item) == 2:
+                service_results[str(item[0])] = bool(item[1])
     voyager_ready = False
     voyager_error = ""
     try:
@@ -7933,6 +7972,10 @@ async def _probe_control_page_runtime_services_once() -> dict[str, Any]:
             codex_error = clean_text(str(exc)) or type(exc).__name__
     services = {
         "botReady": bot_ready,
+        "mainReady": bool(service_results.get("main")),
+        "routerReady": bool(service_results.get("router")),
+        "subReady": bool(service_results.get("sub")),
+        "ttsReady": bool(service_results.get("tts")),
         "voyagerReady": voyager_ready,
         "codexRequired": codex_required,
         "codexReady": codex_ready,
@@ -8456,14 +8499,93 @@ async def handle_control_page_input(guild: discord.Guild, text: str) -> str:
     return await answer_control_page_text(guild, text)
 
 
+STARTUP_BOOT_STEPS: tuple[tuple[str, str], ...] = (
+    ("main_service", "Main LLM"),
+    ("router_service", "Router LLM"),
+    ("sub_service", "Sub LLM"),
+    ("tts_service", "TTS service"),
+    ("discord_gateway", "Discord gateway"),
+    ("control_api", "Bot API"),
+    ("opus", "Opus"),
+    ("stt", "STT"),
+    ("main_warmup", "Main LLM warmup"),
+    ("tts_warmup", "TTS warmup"),
+)
+
+
+def mark_startup_component(key: str, status: str, detail: str = "") -> None:
+    startup_component_state[key] = {
+        "status": clean_text(status) or "pending",
+        "detail": clean_text(detail),
+        "updatedAt": time.time(),
+    }
+
+
+def startup_component_done(key: str) -> bool:
+    return (startup_component_state.get(key) or {}).get("status") == "done"
+
+
+def build_control_page_boot_progress(
+    runtime_services: dict[str, Any] | None,
+    *,
+    guild_available: bool,
+    listening: bool = False,
+) -> dict[str, Any]:
+    services = runtime_services or {}
+    service_done = {
+        "main_service": bool(services.get("mainReady")),
+        "router_service": bool(services.get("routerReady")),
+        "sub_service": bool(services.get("subReady")),
+        "tts_service": bool(services.get("ttsReady")),
+        "discord_gateway": bool(bot.is_ready() and guild_available),
+        "control_api": control_page_runner is not None,
+        "opus": startup_component_done("opus"),
+        "stt": startup_component_done("stt"),
+        "main_warmup": startup_component_done("main_warmup"),
+        "tts_warmup": startup_component_done("tts_warmup"),
+    }
+    if listening:
+        service_done["voice_listening"] = True
+
+    steps: list[dict[str, Any]] = []
+    for key, label in STARTUP_BOOT_STEPS:
+        component = startup_component_state.get(key) or {}
+        done = bool(service_done.get(key))
+        status = "done" if done else clean_text(str(component.get("status") or "pending"))
+        steps.append(
+            {
+                "key": key,
+                "label": label,
+                "done": done,
+                "status": status,
+                "detail": clean_text(str(component.get("detail") or "")),
+                "updatedAt": component.get("updatedAt"),
+            }
+        )
+    done_count = sum(1 for step in steps if step["done"])
+    percent = round((done_count / max(1, len(steps))) * 100)
+    current = next((step for step in steps if not step["done"]), steps[-1])
+    phase = "전체 서버 준비 완료" if percent >= 100 else f"{current['label']} 준비 중"
+    return {
+        "percent": percent,
+        "phase": phase,
+        "source": "bot_processor",
+        "ready": percent >= 100,
+        "componentsReady": bool(startup_components_ready),
+        "steps": steps,
+    }
+
+
 async def build_control_page_state(guild: discord.Guild | None) -> dict[str, Any]:
     runtime_services = await get_control_page_runtime_services()
     if guild is None:
         commands = build_control_page_commands(minecraft_session_active=False)
+        boot_progress = build_control_page_boot_progress(runtime_services, guild_available=False)
         return {
             "ok": False,
             "generatedAt": time.time(),
             "localUrl": control_page_local_url(),
+            "bootProgress": boot_progress,
             "ui": build_control_page_ui_state(
                 guild_available=False,
                 listening=False,
@@ -8493,6 +8615,7 @@ async def build_control_page_state(guild: discord.Guild | None) -> dict[str, Any
                 "voicePipeline": build_voice_pipeline_snapshot(guild),
                 "services": runtime_services,
                 "controlPagePanels": build_control_page_panel_state(),
+                "bootProgress": boot_progress,
             },
             "minecraft": {},
             "statusText": "봇이 아직 길드에 연결되지 않았어.",
@@ -8502,6 +8625,11 @@ async def build_control_page_state(guild: discord.Guild | None) -> dict[str, Any
     minecraft = get_control_page_minecraft_snapshot_cache_copy()
     speaking = is_tracked_tts_playback_active(tts_playback_tracker, guild.id)
     listening = bool(vc and hasattr(vc, "is_listening") and vc.is_listening())
+    boot_progress = build_control_page_boot_progress(
+        runtime_services,
+        guild_available=True,
+        listening=listening,
+    )
     tts_target_name = current_tts_target_name(guild) if speaking else "없음"
     local_mic_target = serialize_local_mic_target(
         resolve_local_mic_target(guilds=bot.guilds, preferred_user_ids=LOCAL_MIC_DISCORD_USER_IDS)
@@ -8528,6 +8656,7 @@ async def build_control_page_state(guild: discord.Guild | None) -> dict[str, Any
         "ok": True,
         "generatedAt": time.time(),
         "localUrl": control_page_local_url(),
+        "bootProgress": boot_progress,
         "ui": ui_state,
         "guild": {"id": guild.id, "name": guild.name},
         "commands": commands,
@@ -8552,6 +8681,7 @@ async def build_control_page_state(guild: discord.Guild | None) -> dict[str, Any
             "voicePipeline": build_voice_pipeline_snapshot(guild),
             "services": runtime_services,
             "controlPagePanels": build_control_page_panel_state(),
+            "bootProgress": boot_progress,
         },
         "minecraft": {
             "running": bool(minecraft.get("minecraft_autonomy")),
@@ -8723,6 +8853,7 @@ async def start_control_page_server() -> None:
             raise
         control_page_runner = runner
         control_page_site = site
+        mark_startup_component("control_api", "done", control_page_local_url())
         print(f"[CONTROL PAGE] live url={control_page_local_url()}")
 
 
@@ -10308,17 +10439,19 @@ async def _process_member_audio_impl(
 @bot.event
 async def on_ready():
     print(f"로그인 완료: {bot.user}")
+    mark_startup_component("discord_gateway", "done", clean_text(str(bot.user or "")))
     ensure_voice_worker_started()
+    try:
+        await start_control_page_server()
+    except Exception as e:
+        mark_startup_component("control_api", "failed", repr(e))
+        print(f"[CONTROL PAGE] start_fail err={e!r}")
     try:
         await ensure_startup_components_ready()
         await ensure_local_mic_service_started()
     except Exception as e:
         print(f"[STARTUP] init_fail err={e!r}")
         raise
-    try:
-        await start_control_page_server()
-    except Exception as e:
-        print(f"[CONTROL PAGE] start_fail err={e!r}")
     try:
         await ensure_control_page_background_tasks_started()
     except Exception as e:

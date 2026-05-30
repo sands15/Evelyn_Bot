@@ -36,6 +36,14 @@ MODEL_PORTS = {
     "bot": BOT_API_PORT,
 }
 
+BOOT_PORT_STEPS = (
+    ("main", "Main LLM"),
+    ("router", "Router LLM"),
+    ("sub", "Sub LLM"),
+    ("tts", "TTS"),
+    ("bot", "Bot API"),
+)
+
 
 async def probe_port(port: int, host: str = "127.0.0.1", timeout_sec: float = 0.18) -> bool:
     try:
@@ -98,14 +106,38 @@ def service_summary(services: dict[str, bool]) -> str:
     return "control page live | model services starting"
 
 
+def build_boot_progress_from_ports(ports: dict[str, bool]) -> dict[str, Any]:
+    steps = [
+        {
+            "key": key,
+            "label": label,
+            "done": bool(ports.get(key)),
+            "status": "done" if ports.get(key) else "pending",
+        }
+        for key, label in BOOT_PORT_STEPS
+    ]
+    done_count = sum(1 for step in steps if step["done"])
+    percent = round((done_count / max(1, len(steps))) * 100)
+    current = next((step for step in steps if not step["done"]), steps[-1])
+    phase = "전체 서버 준비 완료" if percent >= 100 else f"{current['label']} 대기 중"
+    return {
+        "percent": percent,
+        "phase": phase,
+        "source": "control_page_proxy",
+        "steps": steps,
+    }
+
+
 async def degraded_state() -> dict[str, Any]:
     names = tuple(MODEL_PORTS.keys())
     results = await asyncio.gather(*(probe_port(MODEL_PORTS[name]) for name in names))
     ports = dict(zip(names, results))
+    boot_progress = build_boot_progress_from_ports(ports)
     return {
         "ok": False,
         "generatedAt": time.time(),
         "localUrl": f"http://{HOST}:{PORT}/",
+        "bootProgress": boot_progress,
         "ui": {
             "mode": "default",
             "submode": "offline" if not ports.get("bot") else "idle",
@@ -143,6 +175,7 @@ async def degraded_state() -> dict[str, Any]:
                 "codexBackend": "codex-gateway",
                 "summary": service_summary(ports),
             },
+            "bootProgress": boot_progress,
         },
         "minecraft": {
             "running": bool(ports.get("voyager")),
