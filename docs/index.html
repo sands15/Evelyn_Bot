@@ -9,7 +9,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+KR:wght@400;500;600;700&family=Space+Grotesk:wght@500;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="./assets/vendor/winbox/winbox.min.css?v=0.2.82">
-  <link rel="stylesheet" href="./assets/evelyn-page.css?v=20260530f">
+  <link rel="stylesheet" href="./assets/evelyn-page.css?v=20260530g">
 </head>
 <body class="is-boot-splash-active">
   <section class="boot-splash" id="boot-splash" aria-live="polite" aria-label="Evelyn boot loading screen">
@@ -32,6 +32,10 @@
         <li data-threshold="78">Discord / Bot API</li>
         <li data-threshold="100">Control Ready</li>
       </ol>
+      <div class="boot-splash-actions">
+        <button type="button" class="boot-splash-shutdown" id="boot-splash-shutdown">Bot Processor Stop</button>
+        <p class="boot-splash-shutdown-status" id="boot-splash-shutdown-status" aria-live="polite"></p>
+      </div>
     </div>
   </section>
   <div class="control-page is-default-mode" id="control-page-root">
@@ -481,6 +485,6 @@
   </div>
 
   <script src="./assets/vendor/winbox/winbox.bundle.min.js?v=0.2.82"></script>
-  <script src="./assets/evelyn-page.js?v=20260530f"></script>
+  <script src="./assets/evelyn-page.js?v=20260530g"></script>
 </body>
 </html>

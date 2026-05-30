@@ -28,6 +28,8 @@ const dom = {
   bootSplashTrack: document.querySelector("#boot-splash-track"),
   bootSplashBar: document.querySelector("#boot-splash-bar"),
   bootSplashSteps: document.querySelectorAll("#boot-splash-steps li"),
+  bootSplashShutdownButton: document.querySelector("#boot-splash-shutdown"),
+  bootSplashShutdownStatus: document.querySelector("#boot-splash-shutdown-status"),
   controlPageRoot: document.querySelector("#control-page-root"),
   modelViewport: document.querySelector(".model-viewport"),
   chatThread: document.querySelector("#chat-thread"),
@@ -1573,6 +1575,27 @@ async function fetchApi(path, options = {}) {
     throw new Error("api_error:" + response.status);
   }
   return await response.json();
+}
+
+async function requestBootSplashShutdown() {
+  if (!dom.bootSplashShutdownButton || dom.bootSplashShutdownButton.disabled) {
+    return;
+  }
+  dom.bootSplashShutdownButton.disabled = true;
+  if (dom.bootSplashShutdownStatus) {
+    dom.bootSplashShutdownStatus.textContent = "Shutdown requested...";
+  }
+  try {
+    const payload = await fetchApi("/api/control-page/shutdown", { method: "POST" });
+    if (dom.bootSplashShutdownStatus) {
+      dom.bootSplashShutdownStatus.textContent = payload?.message || "Shutdown is running.";
+    }
+  } catch (error) {
+    if (dom.bootSplashShutdownStatus) {
+      dom.bootSplashShutdownStatus.textContent = "Shutdown failed: " + error.message;
+    }
+    dom.bootSplashShutdownButton.disabled = false;
+  }
 }
 
 function commandSuggestionsForInput(rawValue) {
@@ -3333,6 +3356,10 @@ if (dom.chatShutdownButton) {
   dom.chatShutdownButton.addEventListener("click", () => {
     handleChatCommandTrigger(dom.chatShutdownButton);
   });
+}
+
+if (dom.bootSplashShutdownButton) {
+  dom.bootSplashShutdownButton.addEventListener("click", requestBootSplashShutdown);
 }
 
 if (dom.inventoryToggleButton) {

@@ -321,6 +321,19 @@ async def health_handler(_: web.Request) -> web.StreamResponse:
     return json_response({"ok": True, "role": "control-page", "botProxyReady": bot_ready, "botApiPort": BOT_API_PORT})
 
 
+async def shutdown_handler(_: web.Request) -> web.StreamResponse:
+    ok, detail = schedule_local_stack_shutdown(delay_ms=500)
+    status = 200 if ok else 500
+    return json_response(
+        {
+            "ok": ok,
+            "message": "Shutdown is running." if ok else f"Shutdown failed: {detail}",
+            "detail": detail,
+        },
+        status=status,
+    )
+
+
 async def memory_graph_handler(request: web.Request) -> web.StreamResponse:
     try:
         max_nodes = int(request.query.get("max_nodes", "160"))
@@ -411,12 +424,14 @@ def create_app() -> web.Application:
     app.router.add_get("/api/control-page/memory", memory_snapshot_handler)
     app.router.add_get("/api/control-page/memory-graph", memory_graph_handler)
     app.router.add_post("/api/control-page/memory/{note_id}", memory_note_action_handler)
+    app.router.add_post("/api/control-page/shutdown", shutdown_handler)
     app.router.add_post("/api/control-page/chat", chat_handler)
     app.router.add_get("/api/control-page/minecraft-item-icon/{item_name}", icon_handler)
     app.router.add_options("/api/control-page/state", state_handler)
     app.router.add_options("/api/control-page/memory", memory_snapshot_handler)
     app.router.add_options("/api/control-page/memory-graph", memory_graph_handler)
     app.router.add_options("/api/control-page/memory/{note_id}", memory_note_action_handler)
+    app.router.add_options("/api/control-page/shutdown", shutdown_handler)
     app.router.add_options("/api/control-page/chat", chat_handler)
     return app
 

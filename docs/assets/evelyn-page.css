@@ -200,6 +200,51 @@ body.is-boot-splash-active {
   background: rgba(145, 197, 184, 0.09);
 }
 
+.boot-splash-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 38px;
+  margin-top: 2px;
+}
+
+.boot-splash-shutdown {
+  min-height: 38px;
+  padding: 0 14px;
+  border: 1px solid rgba(255, 120, 120, 0.38);
+  border-radius: 8px;
+  color: #ffd5d5;
+  background: rgba(160, 38, 38, 0.22);
+  font: 700 0.78rem "Space Grotesk", "IBM Plex Sans KR", sans-serif;
+  letter-spacing: 0;
+  cursor: pointer;
+  transition: border-color 160ms ease, background 160ms ease, color 160ms ease, transform 160ms ease;
+}
+
+.boot-splash-shutdown:hover:not(:disabled),
+.boot-splash-shutdown:focus-visible {
+  border-color: rgba(255, 160, 160, 0.74);
+  color: #fff2f2;
+  background: rgba(183, 51, 51, 0.34);
+  transform: translateY(-1px);
+}
+
+.boot-splash-shutdown:disabled {
+  cursor: wait;
+  opacity: 0.62;
+}
+
+.boot-splash-shutdown-status {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.86rem;
+  line-height: 1.5;
+  text-align: right;
+}
+
 @media (max-width: 760px) {
   .boot-splash {
     padding: 20px;
@@ -221,6 +266,15 @@ body.is-boot-splash-active {
 
   .boot-splash-steps {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .boot-splash-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .boot-splash-shutdown-status {
+    text-align: left;
   }
 }
 
