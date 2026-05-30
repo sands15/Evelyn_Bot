@@ -285,12 +285,6 @@ function clampPercent(value) {
   return Math.max(0, Math.min(100, Math.round(Number(value) || 0)));
 }
 
-function apiBootProgressForElapsed(elapsedMs) {
-  const elapsed = Math.max(0, Number(elapsedMs) || 0);
-  const eased = 1 - Math.exp(-elapsed / 8500);
-  return Math.min(92, 10 + Math.round(eased * 82));
-}
-
 function setBootSplashVisible(visible) {
   if (!dom.bootSplash) {
     return;
@@ -351,6 +345,41 @@ function setApiBootProgress(percent, phase, { hide = false } = {}) {
     dom.bootSplashPhase.textContent = nextPhase;
   }
   updateBootSplashSteps(nextPercent);
+}
+
+function setApiBootWaiting(phase) {
+  const nextPhase = phase || "API 응답 대기 중";
+  state.apiBootProgress = 0;
+  setBootSplashVisible(true);
+  if (dom.apiBootProgress) {
+    dom.apiBootProgress.classList.remove("is-hidden");
+    dom.apiBootProgress.setAttribute("aria-hidden", "false");
+  }
+  if (dom.apiBootTrack) {
+    dom.apiBootTrack.setAttribute("aria-valuenow", "0");
+  }
+  if (dom.apiBootBar) {
+    dom.apiBootBar.style.width = "0%";
+  }
+  if (dom.apiBootPercent) {
+    dom.apiBootPercent.textContent = "--";
+  }
+  if (dom.apiBootPhase) {
+    dom.apiBootPhase.textContent = nextPhase;
+  }
+  if (dom.bootSplashTrack) {
+    dom.bootSplashTrack.setAttribute("aria-valuenow", "0");
+  }
+  if (dom.bootSplashBar) {
+    dom.bootSplashBar.style.width = "0%";
+  }
+  if (dom.bootSplashPercent) {
+    dom.bootSplashPercent.textContent = "--";
+  }
+  if (dom.bootSplashPhase) {
+    dom.bootSplashPhase.textContent = nextPhase;
+  }
+  updateBootSplashSteps(0);
 }
 
 function hideApiBootProgressSoon() {
@@ -430,7 +459,6 @@ function buildApiWaitingMessages() {
   const phaseIndex = Math.floor(elapsedMs / 1600) % apiWaitingSequence.length;
   const hintIndex = Math.floor(elapsedMs / 2600) % apiWaitingHints.length;
   const elapsedLabel = formatWaitDuration(elapsedMs);
-  const bootPercent = apiBootProgressForElapsed(elapsedMs);
   return [
     {
       role: "assistant",
@@ -441,7 +469,7 @@ function buildApiWaitingMessages() {
     {
       role: "assistant",
       author: "Status",
-      text: "127.0.0.1:8799 응답 대기 중 · " + bootPercent + "% · elapsed " + elapsedLabel,
+      text: "127.0.0.1:8799 API 응답 대기 중 · elapsed " + elapsedLabel,
       at: Date.now() / 1000,
     },
     {
@@ -460,8 +488,7 @@ function renderApiWaitingState({ preserveScroll = false } = {}) {
   const elapsedMs = Date.now() - state.apiWaitStartedAt;
   const phaseIndex = Math.floor(elapsedMs / 1600) % apiWaitingSequence.length;
   const elapsedLabel = formatWaitDuration(elapsedMs);
-  const bootPercent = apiBootProgressForElapsed(elapsedMs);
-  setApiBootProgress(bootPercent, apiWaitingSequence[phaseIndex]);
+  setApiBootWaiting(apiWaitingSequence[phaseIndex]);
   renderChat(
     buildApiWaitingMessages(),
     "로컬 control page API 응답을 기다리는 중입니다.",
@@ -480,7 +507,7 @@ function renderApiWaitingState({ preserveScroll = false } = {}) {
     dom.submodePill.textContent = uiSubmodeLabel(ui.submode);
   }
   if (dom.topbarStatusLine) {
-    dom.topbarStatusLine.textContent = "로컬 control page API 응답을 기다리는 중입니다. " + bootPercent + "%";
+    dom.topbarStatusLine.textContent = "로컬 control page API 응답을 기다리는 중입니다.";
   }
   if (dom.systemSummaryPill) {
     dom.systemSummaryPill.textContent = "booting";
@@ -1507,15 +1534,14 @@ function buildApiCandidates() {
 
 async function connectApi() {
   const candidates = buildApiCandidates();
-  setApiBootProgress(Math.max(state.apiBootProgress, 6), "API 후보 주소 확인 중");
+  setApiBootWaiting("API 후보 주소 확인 중");
   for (const [index, candidate] of candidates.entries()) {
     try {
-      setApiBootProgress(Math.max(state.apiBootProgress, 18 + (index * 18)), candidate + " 확인 중");
+      setApiBootWaiting(candidate + " 확인 중");
       const response = await fetch(candidate + "/api/control-page/state", { cache: "no-store" });
       if (!response.ok) {
         continue;
       }
-      setApiBootProgress(Math.max(state.apiBootProgress, 84), "API 응답 수신 중");
       const payload = await response.json();
       state.apiBase = candidate;
       applyBootProgressPayload(payload);
@@ -1525,7 +1551,7 @@ async function connectApi() {
     }
   }
   state.apiBase = null;
-  setApiBootProgress(Math.max(state.apiBootProgress, 24), "API 응답 대기 중");
+  setApiBootWaiting("API 응답 대기 중");
   return null;
 }
 
@@ -2879,8 +2905,7 @@ function renderState(payload, { preserveScroll = false } = {}) {
   stopApiWaitingTicker();
   state.apiWaitStartedAt = 0;
   if (!applyBootProgressPayload(payload)) {
-    setApiBootProgress(100, "API 연결 완료");
-    hideApiBootProgressSoon();
+    setApiBootWaiting("부팅 진행률 수신 대기 중");
   }
   state.appState = payload;
   state.commands = payload.commands || [];

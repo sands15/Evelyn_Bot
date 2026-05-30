@@ -126,16 +126,28 @@ def build_boot_progress_from_ports(ports: dict[str, bool]) -> dict[str, Any]:
     return {
         "percent": percent,
         "phase": phase,
+        "ready": percent >= 100,
+        "done": done_count,
+        "total": len(steps),
         "source": "control_page_proxy",
         "steps": steps,
     }
 
 
-async def degraded_state() -> dict[str, Any]:
+async def current_boot_progress() -> dict[str, Any]:
     names = tuple(MODEL_PORTS.keys())
     results = await asyncio.gather(*(probe_port(MODEL_PORTS[name]) for name in names))
     ports = dict(zip(names, results))
-    boot_progress = build_boot_progress_from_ports(ports)
+    return {
+        "ports": ports,
+        "bootProgress": build_boot_progress_from_ports(ports),
+    }
+
+
+async def degraded_state() -> dict[str, Any]:
+    progress_state = await current_boot_progress()
+    ports = progress_state["ports"]
+    boot_progress = progress_state["bootProgress"]
     return {
         "ok": False,
         "generatedAt": time.time(),
@@ -273,6 +285,33 @@ async def asset_handler(request: web.Request) -> web.StreamResponse:
 async def state_handler(request: web.Request) -> web.StreamResponse:
     proxied = await proxy_json(request, "GET", "/api/control-page/state")
     if proxied is not None and proxied.status < 500:
+        try:
+            payload = json.loads(proxied.text or "{}")
+            if isinstance(payload, dict):
+                progress_state = await current_boot_progress()
+                ports = progress_state["ports"]
+                boot_progress = progress_state["bootProgress"]
+                runtime = dict(payload.get("runtime") or {})
+                services = dict(runtime.get("services") or {})
+                services.update(
+                    {
+                        "botReady": bool(ports.get("bot")),
+                        "mainReady": bool(ports.get("main")),
+                        "routerReady": bool(ports.get("router")),
+                        "subReady": bool(ports.get("sub")),
+                        "ttsReady": bool(ports.get("tts")),
+                        "voyagerReady": bool(ports.get("voyager")),
+                        "codexReady": bool(ports.get("codex")),
+                        "summary": service_summary(ports),
+                    }
+                )
+                runtime["services"] = services
+                runtime["bootProgress"] = boot_progress
+                payload["runtime"] = runtime
+                payload["bootProgress"] = boot_progress
+                return json_response(payload, status=proxied.status)
+        except Exception:
+            return proxied
         return proxied
     return json_response(await degraded_state())
 
