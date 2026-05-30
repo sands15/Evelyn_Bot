@@ -7,8 +7,8 @@ SUB_LLM_GPU="${SUB_LLM_GPU:-GPU-a352a7f9-1fcf-3d18-9973-6f9114addf7b}"
 SUB_LLM_PORT="${SUB_LLM_PORT:-9821}"
 SUB_LLM_CONTEXT="${SUB_LLM_CONTEXT:-8192}"
 SUB_LLM_REASONING_BUDGET="${SUB_LLM_REASONING_BUDGET:-96}"
-SUB_LLM_HF="${SUB_LLM_HF:-LGAI-EXAONE/EXAONE-3.5-2.4B-Instruct-GGUF:EXAONE-3.5-2.4B-Instruct-Q4_K_M.gguf}"
-SUB_LLM_MODEL="${SUB_LLM_MODEL:-}"
+SUB_LLM_HF="${SUB_LLM_HF:-}"
+SUB_LLM_MODEL="${SUB_LLM_MODEL:-/mnt/c/Users/Admin/llama.cpp/models/EXAONE-3.5-2.4B-Instruct-Q4_K_M.gguf}"
 SUB_LLM_N_GPU_LAYERS="${SUB_LLM_N_GPU_LAYERS:-999}"
 SUB_LLM_THREADS="${SUB_LLM_THREADS:-8}"
 SUB_LLM_CACHE_TYPE_K="${SUB_LLM_CACHE_TYPE_K:-q8_0}"
@@ -18,10 +18,10 @@ eval "$VENV_ACT"
 export CUDA_VISIBLE_DEVICES="$SUB_LLM_GPU"
 
 model_args=()
-if [[ -n "$SUB_LLM_HF" ]]; then
-  model_args=(-hf "$SUB_LLM_HF")
-elif [[ -f "$SUB_LLM_MODEL" ]]; then
+if [[ -f "$SUB_LLM_MODEL" ]]; then
   model_args=(-m "$SUB_LLM_MODEL")
+elif [[ -n "$SUB_LLM_HF" ]]; then
+  model_args=(-hf "$SUB_LLM_HF")
 else
   echo "[Sub-LLM] model file not found: $SUB_LLM_MODEL"
   exit 1
