@@ -114,9 +114,10 @@ class MemoryVaultTests(unittest.TestCase):
             assert path is not None
             content = path.read_text(encoding="utf-8")
 
-        self.assertIn("type: daily", content)
+        self.assertIn("# 이블린 일일 대화 정리", content)
         self.assertIn("remember this preference", content)
         self.assertIn("- 정훈: remember this preference", content)
+        self.assertNotIn("type: daily", content)
         self.assertNotIn("guild:123", content)
         self.assertNotIn("/user/test:", content)
 

@@ -1093,7 +1093,136 @@ def _write_retrieval_cache(conn: sqlite3.Connection, key: str, memory_version: i
     conn.commit()
 
 
-def refresh_legacy_memory_mirror(guild_id: int, *, root: Path | None = None, max_items: int = 80) -> Path | None:
+def _sanitize_legacy_display_text(text: str) -> str:
+    cleaned = clean_text(text)
+    replacements = {
+        "사용자(캣초코 크런치)": "사용자(정훈)",
+        "사용자(이름만 부름)": "사용자가 이름만 부를 때",
+        "캣초코 크런치": "정훈",
+        "시스템(에밀리)은": "이블린은",
+        "시스템(이블린)은": "이블린은",
+        "시스템(에밀리)": "이블린",
+        "시스템(이블린)": "이블린",
+        "에밀리(레몬에이드)": "이블린(레몬에이드)",
+        "에밀리": "이블린",
+        "에블린": "이블린",
+    }
+    for old, new in replacements.items():
+        cleaned = cleaned.replace(old, new)
+    cleaned = re.sub(r"시스템은 ['\"]이블린['\"]라는 이름으로 파일 정리 중이며", "이블린은 파일 정리 중이며", cleaned)
+    cleaned = re.sub(
+        r"시스템은 ['\"]이블린['\"]라는 이름으로 사용자에게 도움을 제공하는 역할을 수행",
+        "이블린은 사용자에게 도움을 제공하는 역할을 수행",
+        cleaned,
+    )
+    cleaned = cleaned.replace("사용자(정훈)는", "정훈은")
+    cleaned = cleaned.replace("사용자(정훈)가", "정훈이")
+    cleaned = cleaned.replace("사용자(정훈)의", "정훈의")
+    cleaned = cleaned.replace("사용자(정훈)을", "정훈을")
+    cleaned = cleaned.replace("사용자(정훈)를", "정훈을")
+    cleaned = cleaned.replace("사용자(정훈)", "정훈")
+    cleaned = cleaned.replace("사용자의 이름은 정훈입니다.", "사용자는 정훈입니다.")
+    cleaned = cleaned.replace("이블린은 사용자에게 도움을 제공하는 역할을 수행 중임.", "이블린은 정훈을 돕는 역할을 수행 중입니다.")
+    return cleaned
+
+
+def _legacy_display_group(kind: str, text: str) -> str:
+    label = clean_text(kind)
+    combined = f"{label} {text}"
+    if any(token in combined for token in ("이름", "페르소나", "역할")):
+        return "기본 정보"
+    if any(token in combined for token in ("확인", "질문", "필요", "open")):
+        return "정리 필요"
+    if any(token in combined for token in ("진행", "업무", "계획", "상태", "방문", "선택")):
+        return "현재 맥락"
+    if any(token in combined for token in ("선호", "취미", "좋아", "음료", "과자")):
+        return "취향"
+    return "기타 기억"
+
+
+def _legacy_display_key(text: str) -> str:
+    normalized = _sanitize_legacy_display_text(text).lower()
+    if "이블린" in normalized and ("도움" in normalized or "돕" in normalized):
+        return "topic:assistant-role"
+    if "정훈" in normalized and ("이름" in normalized or "사용자는" in normalized):
+        return "topic:user-name"
+    if "굼벵이" in normalized or ("농담" in normalized and ("표현" in normalized or "욕" in normalized)):
+        return "topic:joke-expression"
+    if "욕" in normalized and ("스타일" in normalized or "강도" in normalized):
+        return "topic:joke-style-question"
+    if "추가" in normalized and "요청" in normalized:
+        return "topic:followup-request"
+    topic_rules = (
+        ("user-name", ("정훈", "이름")),
+        ("persona-short-call", ("친구처럼", "반말")),
+        ("assistant-role", ("이블린", "도움")),
+        ("baguette", ("바게트",)),
+        ("caramel-macchiato", ("카라멜", "마끼아또")),
+        ("lemonade", ("레몬에이드",)),
+        ("chocolate-wafer", ("초코", "웨이퍼")),
+        ("chocolate-snack", ("초콜릿",)),
+        ("new-cafe-question", ("새로", "오픈", "카페")),
+        ("cafe-visit", ("카페", "방문")),
+        ("cafe-drinks", ("음료",)),
+        ("stranger-book", ("이방인",)),
+        ("cafe-time-question", ("구체", "시간")),
+        ("snack-question", ("과자", "확인")),
+        ("work-status", ("업무",)),
+    )
+    for topic_key, tokens in topic_rules:
+        if all(token in normalized for token in tokens):
+            return f"topic:{topic_key}"
+    normalized = re.sub(r"사용자\((정훈)\)", r"\1", normalized)
+    normalized = normalized.replace("사용자의", "사용자")
+    normalized = normalized.replace("좋아함", "선호")
+    normalized = normalized.replace("좋아하며", "선호")
+    normalized = normalized.replace("좋아한다", "선호")
+    normalized = normalized.replace("선호합니다", "선호")
+    normalized = normalized.replace("선호함", "선호")
+    normalized = normalized.replace("확정되었습니다", "확정")
+    normalized = normalized.replace("확정되었으며", "확정")
+    normalized = normalized.replace("확정되었다", "확정")
+    normalized = re.sub(r"\s+", "", normalized)
+    normalized = re.sub(r"[.!?。！？,，~…\"'“”‘’`()\[\]{}:;_-]+", "", normalized)
+    return normalized
+
+
+def _append_legacy_unique(target: list[str], seen: set[str], text: str, *, max_items: int) -> None:
+    cleaned = _sanitize_legacy_display_text(text)
+    if not cleaned:
+        return
+    if any(
+        noise in cleaned
+        for noise in (
+            "미르스페벨",
+            "나킨",
+            "쏟아냈고",
+            "과자 취향은 무엇인지 확인",
+            "우선순위가 높은 업무",
+            "특별히 지정된 업무 없이",
+            "현재 요청받은 일(",
+            "추가적인 요청 사항이나 변경 사항",
+            "추가적인 도움 요청 사항",
+            "어떤 구체적인 도움",
+            "사용자가 어떤 도움",
+            "원하시는 욕의 스타일",
+            "돕는 것을 좋아한다",
+        )
+    ):
+        return
+    if len(cleaned) > 260:
+        cleaned = cleaned[:257].rstrip() + "..."
+    key = _legacy_display_key(cleaned)
+    if not key or key in seen:
+        return
+    if any((len(key) > 16 and key in existing) or (len(existing) > 16 and existing in key) for existing in seen):
+        return
+    seen.add(key)
+    if len(target) < max_items:
+        target.append(cleaned)
+
+
+def refresh_legacy_memory_mirror(guild_id: int, *, root: Path | None = None, max_items: int = 12) -> Path | None:
     base_root = root or MEMORY_ROOT
     guild_dir = base_root / f"guild_{guild_id}"
     if not guild_dir.exists():
@@ -1101,17 +1230,25 @@ def refresh_legacy_memory_mirror(guild_id: int, *, root: Path | None = None, max
 
     vault = ensure_memory_vault_layout(root)
     target = vault / "core" / f"legacy-guild-{guild_id}.md"
-    sections: list[str] = [f"# Legacy Guild Memory {guild_id}", ""]
     scope_dirs = [guild_dir]
     for pattern in ("room_*", "person_*", "session_*"):
         scope_dirs.extend(sorted(guild_dir.glob(pattern))[:20])
 
+    summaries: list[str] = []
+    summary_seen: set[str] = set()
+    grouped: dict[str, list[str]] = {
+        "기본 정보": [],
+        "취향": [],
+        "현재 맥락": [],
+        "정리 필요": [],
+        "기타 기억": [],
+    }
+    group_seen: dict[str, set[str]] = {name: set() for name in grouped}
+
     for scope_dir in scope_dirs:
-        scope_name = scope_dir.name
-        lines: list[str] = []
         summary = (scope_dir / "rolling_summary.txt").read_text(encoding="utf-8", errors="ignore").strip() if (scope_dir / "rolling_summary.txt").exists() else ""
         if summary:
-            lines.append(f"Summary: {clean_text(summary)}")
+            _append_legacy_unique(summaries, summary_seen, summary, max_items=2)
         rows: list[dict[str, Any]] = []
         for rel in ("durable_facts.jsonl", "vault/facts.jsonl", "open_questions.jsonl", "vault/questions.jsonl"):
             path = scope_dir / rel
@@ -1124,40 +1261,54 @@ def refresh_legacy_memory_mirror(guild_id: int, *, root: Path | None = None, max
                     continue
                 if isinstance(row, dict):
                     rows.append(row)
-        for row in rows[-max_items:]:
+        for row in reversed(rows):
             text = clean_text(str(row.get("text") or ""))
             if text:
                 kind = clean_text(str(row.get("type") or "memory")) or "memory"
-                lines.append(f"- {kind}: {text}")
-        if lines:
-            sections.append(f"## {scope_name}")
-            sections.extend(lines)
-            sections.append("")
+                cleaned = _sanitize_legacy_display_text(text)
+                group = _legacy_display_group(kind, cleaned)
+                _append_legacy_unique(grouped[group], group_seen[group], cleaned, max_items=max_items)
 
-    if len(sections) <= 2:
+    if not summaries and not any(grouped.values()):
         return None
+
+    sections: list[str] = [
+        "# 이블린 이전 메모리 정리",
+        "",
+        "> 이전 JSONL 메모리에서 사람이 읽기 좋은 항목만 모은 자동 정리본입니다. 원본 scope/session 로그는 JSONL에 보관됩니다.",
+        "",
+    ]
+    if summaries:
+        sections.append("## 요약")
+        sections.extend(f"- {item}" for item in summaries)
+        sections.append("")
+
+    display_limits = {
+        "기본 정보": min(max_items, 4),
+        "취향": min(max_items, 5),
+        "현재 맥락": min(max_items, 5),
+        "정리 필요": min(max_items, 4),
+        "기타 기억": min(max_items, 4),
+    }
+    for title in ("기본 정보", "취향", "현재 맥락", "정리 필요", "기타 기억"):
+        items = grouped.get(title) or []
+        if not items:
+            continue
+        sections.append(f"## {title}")
+        sections.extend(f"- {item}" for item in items[: display_limits[title]])
+        sections.append("")
 
     body = "\n".join(sections).strip() + "\n"
     if target.exists():
         try:
             existing_note = parse_memory_note(target)
             if clean_text(existing_note.body) == clean_text(body):
-                return target
+                if not target.read_text(encoding="utf-8", errors="ignore").startswith("---"):
+                    return target
         except Exception:
             pass
 
-    front_matter = _format_front_matter(
-        {
-            "id": f"legacy-guild-{guild_id}",
-            "type": "core",
-            "title": f"Legacy Guild Memory {guild_id}",
-            "status": "active",
-            "tags": ["legacy", "memory"],
-            "projects": [DEFAULT_PROJECT],
-            "updated_at": _utc_now_iso(),
-        }
-    )
-    target.write_text(front_matter + "\n\n" + body, encoding="utf-8")
+    target.write_text(body, encoding="utf-8")
     return target
 
 
@@ -1189,23 +1340,10 @@ def append_turn_rows_to_memory_vault(
     vault = ensure_memory_vault_layout(root)
     day_key = time.strftime("%Y-%m-%d")
     path = vault / "daily" / f"{day_key}.md"
-    now = _utc_now_iso()
     if not path.exists():
-        front_matter = _format_front_matter(
-            {
-                "id": f"daily-{day_key}",
-                "type": "daily",
-                "title": f"Daily Memory {day_key}",
-                "status": "active",
-                "tags": ["daily", "conversation"],
-                "projects": [DEFAULT_PROJECT],
-                "updated_at": now,
-            }
-        )
         path.write_text(
-            front_matter
-            + f"\n\n# Daily Memory {day_key}\n\n"
-            + "> Raw transcript and scope metadata are stored in the per-scope JSONL vault files.\n\n",
+            f"# 이블린 일일 대화 정리 {day_key}\n\n"
+            + "> 사람이 훑어보기 위한 대화 기록입니다. 원본 scope/session 로그는 JSONL에 따로 보관됩니다.\n\n",
             encoding="utf-8",
         )
 
