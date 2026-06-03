@@ -85,7 +85,15 @@
   - served HTML contains `question-added-rate`, `question-removed-count`, `question-ask-mode`
   - served JS contains `runtime.questionMetrics`, `topAskMode`, `questionAddedRate`
 
+2026-06-03 follow-up verification:
+
+- Local-only runtime started from `start_local.bat` on the current `structural-change` checkout.
+- Control page API reached ready state with boot progress `100`.
+- Control page local chat still records model-call metrics: Router route rate, Router latency, Main response count, and cognitive blocking rate were populated.
+- A forced multi-question live prompt returned a final reply with `finalQuestionCount=0`.
+- Browser-rendered screenshot was captured at `runtime_artifacts/control_page/evelyn-local-20260603-visual-2.png`; the control page left the boot splash and rendered Avatar/Chat panels without obvious overlap at `1440x1200`.
+- `tests/test_question_shaping.py` now locks that streamed TTS chunks pass through question filtering before `on_sentence(chunk)`.
+
 Remaining verification gap:
 
-- browser-rendered visual screenshot
-- voice/TTS streaming chunk behavior, because final answer shaping is verified but live streamed chunks may already have been emitted before final shaping
+- live Discord voice/TTS listening pass for streamed chunk behavior, because the code path and regression test are covered but a real voice-channel playback turn was not run in this follow-up.

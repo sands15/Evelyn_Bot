@@ -36,9 +36,9 @@ if errorlevel 1 goto :fail
 
 echo [Evelyn] Launching local control process.
 if exist .venv\Scripts\python.exe (
-  .venv\Scripts\python.exe main.py
+  .venv\Scripts\python.exe "%~dp0..\main.py"
 ) else (
-  py -3 main.py
+  py -3 "%~dp0..\main.py"
 )
 
 set "EXIT_CODE=%ERRORLEVEL%"

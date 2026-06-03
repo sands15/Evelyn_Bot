@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import sys
 import unittest
 from dataclasses import dataclass
@@ -171,6 +172,25 @@ class QuestionShapingTests(unittest.TestCase):
         self.assertNotIn("def sentence_is_question(", main_py)
         self.assertNotIn("def enforce_question_limits(", main_py)
         self.assertNotIn("_enforce_question_limits", main_py)
+
+    def test_main_filters_streamed_tts_chunks_before_delivery(self) -> None:
+        main_py = (REPO_ROOT / "main.py").read_text(encoding="utf-8")
+        module = ast.parse(main_py)
+
+        function_sources = {
+            node.name: ast.get_source_segment(main_py, node) or ""
+            for node in module.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name in {"emit_stream_delta_chunks", "flush_streamed_answer_chunks"}
+        }
+
+        self.assertEqual(set(function_sources), {"emit_stream_delta_chunks", "flush_streamed_answer_chunks"})
+        for source in function_sources.values():
+            filter_pos = source.find("filter_stream_chunk_for_question_limits(")
+            delivery_pos = source.find("await on_sentence(chunk)")
+            self.assertGreaterEqual(filter_pos, 0)
+            self.assertGreater(delivery_pos, filter_pos)
+            self.assertIn("if not chunk:", source)
 
 
 if __name__ == "__main__":
