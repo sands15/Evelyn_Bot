@@ -118,6 +118,9 @@ Codex gateway가 살아 있어도 runner가 정상이라는 뜻은 아니고, ru
      completion reasons, task results, or verified bookkeeping without an explicit
      `last_success=true` as `task_unverified` / `task_result_unverified` instead of
      implicitly healthy.
+   - 2026-06-03 follow-up: upstream runner status copying now uses one helper and
+     promotes structured `success` booleans from task result/bookkeeping/critic
+     payloads into top-level `last_success` when the upstream object did not set it.
 
 3. **Health / recovery separation**
    - Service HTTP health, runner health, bridge health, and Minecraft dependency health must be represented separately.
