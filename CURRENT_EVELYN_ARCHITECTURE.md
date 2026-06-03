@@ -114,6 +114,10 @@ Codex gateway가 살아 있어도 runner가 정상이라는 뜻은 아니고, ru
 2. **Result / critic bookkeeping**
    - Action success, critic decision, rollout completion, and surfaced task result need one explicit chain.
    - `status`만 보면 task가 정말 끝났는지 판단 가능해야 한다.
+   - 2026-06-03 partial hardening: Voyager service task recovery boundary now treats
+     completion reasons, task results, or verified bookkeeping without an explicit
+     `last_success=true` as `task_unverified` / `task_result_unverified` instead of
+     implicitly healthy.
 
 3. **Health / recovery separation**
    - Service HTTP health, runner health, bridge health, and Minecraft dependency health must be represented separately.

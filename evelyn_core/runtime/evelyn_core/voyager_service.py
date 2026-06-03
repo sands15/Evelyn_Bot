@@ -161,6 +161,87 @@ def _stability_signals(*, display_stage: Any, last_phase_at: Any, execution_sess
     }
 
 
+def _task_recovery_boundary(
+    *,
+    last_recovery_boundary: Any,
+    last_completion_reason: Any,
+    last_success: Any,
+    last_task_result: Any,
+    current_task_bookkeeping: Any,
+    last_task_bookkeeping: Any,
+    last_critic_result: Any,
+) -> dict[str, Any]:
+    if isinstance(last_recovery_boundary, dict):
+        return last_recovery_boundary
+
+    completion_reason = str(last_completion_reason).strip() if isinstance(last_completion_reason, str) else None
+    success = last_success if isinstance(last_success, bool) else None
+    task_result = last_task_result if isinstance(last_task_result, dict) else None
+    current_bookkeeping = current_task_bookkeeping if isinstance(current_task_bookkeeping, dict) else {}
+    previous_bookkeeping = last_task_bookkeeping if isinstance(last_task_bookkeeping, dict) else {}
+    critic_result = last_critic_result if isinstance(last_critic_result, dict) else None
+    bookkeeping_status = str(
+        current_bookkeeping.get("status")
+        or previous_bookkeeping.get("status")
+        or ""
+    ).strip().lower()
+    metadata = {
+        "last_completion_reason": completion_reason,
+        "last_success": success,
+        "bookkeeping_status": bookkeeping_status or None,
+        "has_last_task_result": task_result is not None,
+        "has_last_critic_result": critic_result is not None,
+    }
+
+    if success is True:
+        return {
+            "scope": "task",
+            "domain": "task_completed",
+            "reason": completion_reason or "explicit success",
+            "healthy": True,
+            **metadata,
+        }
+    if success is False:
+        return {
+            "scope": "task",
+            "domain": "task_failed",
+            "reason": completion_reason or "explicit failure",
+            "healthy": False,
+            **metadata,
+        }
+    if completion_reason:
+        return {
+            "scope": "task",
+            "domain": "task_unverified",
+            "reason": f"completion reason without explicit success: {completion_reason}",
+            "healthy": False,
+            **metadata,
+        }
+    if task_result is not None:
+        return {
+            "scope": "task",
+            "domain": "task_result_unverified",
+            "reason": "last_task_result exists without explicit success",
+            "healthy": False,
+            **metadata,
+        }
+    if bookkeeping_status in {"completed", "effect_verified", "critic_passed"}:
+        return {
+            "scope": "task",
+            "domain": "task_bookkeeping_unverified",
+            "reason": f"bookkeeping status {bookkeeping_status!r} has no explicit success flag",
+            "healthy": False,
+            **metadata,
+        }
+    return {
+        "scope": "task",
+        "domain": "healthy",
+        "reason": None,
+        "healthy": True,
+        **metadata,
+    }
+
+
 def _format_position(position: dict[str, Any] | None) -> str:
     if not isinstance(position, dict):
         return "-"
@@ -714,12 +795,15 @@ class UpstreamDirectBridge:
             "reason": runtime_recovery_reason,
             "healthy": runtime_recovery_domain == "healthy",
         }
-        task_boundary = last_recovery_boundary if isinstance(last_recovery_boundary, dict) else {
-            "scope": "task",
-            "domain": "healthy" if not last_completion_reason or last_success else "unknown",
-            "reason": None if last_success else (last_completion_reason or None),
-            "healthy": bool(last_success) if last_completion_reason else True,
-        }
+        task_boundary = _task_recovery_boundary(
+            last_recovery_boundary=last_recovery_boundary,
+            last_completion_reason=last_completion_reason,
+            last_success=last_success,
+            last_task_result=last_task_result,
+            current_task_bookkeeping=current_task_bookkeeping,
+            last_task_bookkeeping=last_task_bookkeeping,
+            last_critic_result=last_critic_result,
+        )
         if not runtime_boundary["healthy"]:
             recovery_scope = "runtime"
             recovery_domain = runtime_boundary["domain"]
