@@ -34,6 +34,11 @@ class QueryIntentTests(unittest.TestCase):
         self.assertTrue(should_force_search_query("\uc624\ub298 \ub274\uc2a4 \uc54c\ub824\uc918"))
         self.assertTrue(should_force_search_query("\ud658\uc728 \ucd5c\uc2e0 \uac12 \ucc3e\uc544\ubd10"))
 
+    def test_negated_search_request_does_not_force_search(self) -> None:
+        self.assertFalse(should_force_search_query("\uac80\uc0c9 \uc5c6\uc774 \uc9e7\uac8c \ub2f5\ud574\uc918"))
+        self.assertFalse(should_force_search_query("\ucd5c\uc2e0 \uc815\ubcf4\ub97c \ucc3e\uc9c0 \ub9d0\uace0 \ub0b4 \ubb38\uc7a5\ub9cc \uc815\ub9ac\ud574\uc918"))
+        self.assertFalse(should_force_search_query("without search, answer from the current context"))
+
 
 if __name__ == "__main__":
     unittest.main()

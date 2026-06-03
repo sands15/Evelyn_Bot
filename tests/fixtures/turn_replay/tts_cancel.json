@@ -1,0 +1,7 @@
+{
+  "name": "tts_cancel",
+  "guild_id": 1001,
+  "turn_id": "turn-tts",
+  "cancel_reason": "barge_in",
+  "expected_cancelled": true
+}

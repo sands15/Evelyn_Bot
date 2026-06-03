@@ -1,5 +1,14 @@
 # CURRENT_EVELYN_ARCHITECTURE.md
 
+Status note, 2026-06-01:
+
+- This file is the current Minecraft/Voyager architecture snapshot.
+- It is not the authoritative full Evelyn assistant voice/LLM pipeline map.
+- For the current assistant pipeline, router/main/sub LLM conditions,
+  `VoiceTurnOrchestrator`, route policy, delivery, and memory write-behind, see
+  `CURRENT_EVELYN_PIPELINE.md`.
+- For documentation status, see `docs/DOCUMENTATION_INDEX.md`.
+
 Last updated: 2026-05-12  
 Branch baseline: `structural-change`
 

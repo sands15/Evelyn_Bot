@@ -38,6 +38,11 @@ class RoutePolicyTests(unittest.TestCase):
             needs_minecraft_state=True,
             response_mode="short",
             priority="accuracy",
+            ask_mode="topic_continue",
+            max_question_count=1,
+            question_hint="ask what to tune next",
+            question_reason="technical_topic",
+            question_source="fast_path",
         )
 
         policy = route_decision_policy_dict(decision)
@@ -46,6 +51,11 @@ class RoutePolicyTests(unittest.TestCase):
         self.assertEqual(policy["needs_minecraft_state"], True)
         self.assertEqual(policy["response_mode"], "short")
         self.assertEqual(policy["priority"], "accuracy")
+        self.assertEqual(policy["ask_mode"], "topic_continue")
+        self.assertEqual(policy["max_question_count"], 1)
+        self.assertEqual(policy["question_hint"], "ask what to tune next")
+        self.assertEqual(policy["question_reason"], "technical_topic")
+        self.assertEqual(policy["question_source"], "fast_path")
 
     def test_context_policy_from_old_mapping_defaults_new_flags(self) -> None:
         policy = ContextPolicy.from_mapping({"needs_memory": False})

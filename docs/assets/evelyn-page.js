@@ -81,6 +81,18 @@ const dom = {
   voicePipelineStt: document.querySelector("#voice-pipeline-stt"),
   voicePipelineTts: document.querySelector("#voice-pipeline-tts"),
   voicePipelineDrops: document.querySelector("#voice-pipeline-drops"),
+  modelCallRouterRate: document.querySelector("#model-call-router-rate"),
+  modelCallRouterLatency: document.querySelector("#model-call-router-latency"),
+  modelCallMainFirst: document.querySelector("#model-call-main-first"),
+  modelCallCognitiveRate: document.querySelector("#model-call-cognitive-rate"),
+  modelCallSummaryHot: document.querySelector("#model-call-summary-hot"),
+  modelCallTurnCount: document.querySelector("#model-call-turn-count"),
+  questionAddedRate: document.querySelector("#question-added-rate"),
+  questionRemovedCount: document.querySelector("#question-removed-count"),
+  questionCooldownRate: document.querySelector("#question-cooldown-rate"),
+  questionAskMode: document.querySelector("#question-ask-mode"),
+  questionTurnCount: document.querySelector("#question-turn-count"),
+  questionFinalCount: document.querySelector("#question-final-count"),
   voiceInputSwitches: document.querySelectorAll(".voice-input-switch"),
   voiceInputModeButtons: document.querySelectorAll("[data-voice-input-mode]"),
   guildName: document.querySelector("#guild-name"),
@@ -223,7 +235,7 @@ const CONTROL_PAGE_COMMAND_CATALOG = [
   { command: "/minecraft disconnect", template: "/minecraft disconnect", summary: "Stop Voyager Minecraft mode" },
   { command: "/minecraft goal <goal>", template: "/minecraft goal ", summary: "Change the current Minecraft goal" },
   { command: "/autonomy status", template: "/autonomy status", summary: "Show Evelyn autonomy engine status" },
-  { command: "/shutdown", template: "/shutdown", summary: "Shut down the full Evelyn stack" },
+  { command: "/shutdown", template: "/shutdown", summary: "Shut down Evelyn runtime" },
   { command: "/windows", template: "/windows", summary: "List background console windows and their state" },
   { command: "/show <window>", template: "/show ", summary: "Bring a background console window to front" },
   { command: "/ui <action> <panel>", template: "/ui ", summary: "Show, hide, toggle, focus, or reset control page panels" },
@@ -883,6 +895,37 @@ function renderInventoryWidget(summary, entries, rawSlots, usedSlots, uniqueItem
 function cleanDisplayText(value, fallback = "없음") {
   const text = value == null ? "" : String(value).trim();
   return text || fallback;
+}
+
+function formatMetricMs(value) {
+  if (value == null) {
+    return "-";
+  }
+  const numberValue = Number(value || 0);
+  if (!Number.isFinite(numberValue) || numberValue <= 0) {
+    return "0ms";
+  }
+  return Math.round(numberValue) + "ms";
+}
+
+function formatMetricPercent(value) {
+  if (value == null) {
+    return "-";
+  }
+  const numberValue = Number(value || 0);
+  if (!Number.isFinite(numberValue) || numberValue <= 0) {
+    return "0%";
+  }
+  return Math.round(numberValue * 100) + "%";
+}
+
+function topAskMode(distribution) {
+  const rows = Object.entries(distribution || {}).filter(([, count]) => Number(count || 0) > 0);
+  if (!rows.length) {
+    return "none";
+  }
+  rows.sort((a, b) => Number(b[1] || 0) - Number(a[1] || 0) || String(a[0]).localeCompare(String(b[0])));
+  return String(rows[0][0] || "none");
 }
 
 function setStateClasses(node, activeClasses, managedClasses) {
@@ -1750,14 +1793,14 @@ function defaultQuickCommands(minecraftActive) {
         { command: "/inventory", template: "/inventory", summary: "현재 Minecraft 인벤토리 요약 보기" },
         { command: "/minecraft status", template: "/minecraft status", summary: "Minecraft 연결과 현재 task 상태 보기" },
         { command: "/minecraft disconnect", template: "/minecraft disconnect", summary: "Voyager Minecraft 모드 중지" },
-        { command: "/shutdown", template: "/shutdown", summary: "Shut down the full Evelyn stack" },
+        { command: "/shutdown", template: "/shutdown", summary: "Shut down Evelyn runtime" },
         { command: "/help", template: "/help", summary: "페이지에서 지원하는 명령 목록 보기" },
       ]
     : [
         { command: "/minecraft connect", template: "/minecraft connect", summary: "Voyager Minecraft 모드 시작" },
         { command: "/status", template: "/status", summary: "현재 Evelyn, 음성, TTS 상태 보기" },
         { command: "/autonomy status", template: "/autonomy status", summary: "Evelyn 자율 행동 엔진 상태 보기" },
-        { command: "/shutdown", template: "/shutdown", summary: "Shut down the full Evelyn stack" },
+        { command: "/shutdown", template: "/shutdown", summary: "Shut down Evelyn runtime" },
         { command: "/help", template: "/help", summary: "페이지에서 지원하는 명령 목록 보기" },
       ];
 }
@@ -3041,6 +3084,44 @@ function renderState(payload, { preserveScroll = false } = {}) {
   if (dom.voicePipelineDrops) {
     const drops = Number(voicePipeline.queueFullDropCount || 0) + Number(voicePipeline.queueStaleDropCount || 0);
     dom.voicePipelineDrops.textContent = String(drops);
+  }
+  const modelCallMetrics = runtime.modelCallMetrics || {};
+  if (dom.modelCallRouterRate) {
+    dom.modelCallRouterRate.textContent = formatMetricPercent(modelCallMetrics.routerRouteCallRate);
+  }
+  if (dom.modelCallRouterLatency) {
+    dom.modelCallRouterLatency.textContent = formatMetricMs(modelCallMetrics.routerAvgLatencyMs);
+  }
+  if (dom.modelCallMainFirst) {
+    dom.modelCallMainFirst.textContent = formatMetricMs(modelCallMetrics.mainFirstTokenAvgMs);
+  }
+  if (dom.modelCallCognitiveRate) {
+    dom.modelCallCognitiveRate.textContent = formatMetricPercent(modelCallMetrics.cognitiveBlockingRate);
+  }
+  if (dom.modelCallSummaryHot) {
+    dom.modelCallSummaryHot.textContent = formatMetricPercent(modelCallMetrics.summaryHotPathRate);
+  }
+  if (dom.modelCallTurnCount) {
+    dom.modelCallTurnCount.textContent = String(modelCallMetrics.modelCallCount || 0);
+  }
+  const questionMetrics = runtime.questionMetrics || {};
+  if (dom.questionAddedRate) {
+    dom.questionAddedRate.textContent = formatMetricPercent(questionMetrics.questionAddedRate);
+  }
+  if (dom.questionRemovedCount) {
+    dom.questionRemovedCount.textContent = String(questionMetrics.questionRemovedCount || 0);
+  }
+  if (dom.questionCooldownRate) {
+    dom.questionCooldownRate.textContent = formatMetricPercent(questionMetrics.questionCooldownHitRate);
+  }
+  if (dom.questionAskMode) {
+    dom.questionAskMode.textContent = topAskMode(questionMetrics.askModeDistribution);
+  }
+  if (dom.questionTurnCount) {
+    dom.questionTurnCount.textContent = String(questionMetrics.turnCount || 0);
+  }
+  if (dom.questionFinalCount) {
+    dom.questionFinalCount.textContent = String(questionMetrics.finalQuestionCount || 0);
   }
   const localMic = runtime.localMic || {};
   const voiceInputMode = String(localMic.inputMode || "auto").toLowerCase();

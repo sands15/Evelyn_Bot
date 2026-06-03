@@ -56,6 +56,11 @@ class RouteDecision:
     response_mode: str = "normal"
     priority: str = "latency"
     should_interrupt_delivery: bool = False
+    ask_mode: str = "none"
+    max_question_count: int = 0
+    question_hint: str | None = None
+    question_reason: str | None = None
+    question_source: str = "none"
 
 
 @dataclass(frozen=True)
@@ -265,7 +270,14 @@ def build_route_decision(
     response_mode: str = "normal",
     priority: str = "latency",
     should_interrupt_delivery: bool = False,
+    ask_mode: str = "none",
+    max_question_count: int = 0,
+    question_hint: str | None = None,
+    question_reason: str | None = None,
+    question_source: str = "none",
 ) -> RouteDecision:
+    cleaned_ask_mode = clean_text(ask_mode) or "none"
+    cleaned_question_source = clean_text(question_source) or "none"
     return RouteDecision(
         action=action,
         route=route,
@@ -284,6 +296,11 @@ def build_route_decision(
         response_mode=clean_text(response_mode) or "normal",
         priority=clean_text(priority) or "latency",
         should_interrupt_delivery=should_interrupt_delivery,
+        ask_mode=cleaned_ask_mode,
+        max_question_count=max(0, int(max_question_count or 0)),
+        question_hint=clean_text(question_hint or "") or None,
+        question_reason=clean_text(question_reason or "") or None,
+        question_source=cleaned_question_source,
     )
 
 
@@ -300,6 +317,11 @@ def route_decision_policy_dict(route_decision: RouteDecision) -> dict[str, Any]:
         "needs_tts": bool(route_decision.needs_tts),
         "response_mode": route_decision.response_mode,
         "priority": route_decision.priority,
+        "ask_mode": route_decision.ask_mode,
+        "max_question_count": int(route_decision.max_question_count),
+        "question_hint": route_decision.question_hint,
+        "question_reason": route_decision.question_reason,
+        "question_source": route_decision.question_source,
     }
 
 

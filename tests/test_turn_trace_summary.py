@@ -12,6 +12,25 @@ from evelyn_core.turn_trace import TURN_SUMMARY_KEYS, build_turn_summary_payload
 
 
 class TurnTraceSummaryTests(unittest.TestCase):
+    def test_summary_keys_include_pipeline_extraction_contract(self) -> None:
+        required = {
+            "turn_id",
+            "route",
+            "needs_main_llm",
+            "needs_memory",
+            "needs_tts",
+            "playback_started",
+            "playback_completed",
+            "playback_cancelled",
+            "tts_first_audio_ms",
+            "playback_first_packet_ms",
+            "memory_writer_decision",
+            "minecraft_snapshot_freshness",
+            "error_layer",
+        }
+
+        self.assertTrue(required.issubset(set(TURN_SUMMARY_KEYS)))
+
     def test_summary_payload_keeps_stable_keys_and_nulls(self) -> None:
         payload = build_turn_summary_payload(
             {

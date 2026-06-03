@@ -950,6 +950,295 @@ class TtsPlaybackTracker:
     last_audio_end_at: dict[int, float] = field(default_factory=dict)
 
 
+@dataclass(slots=True)
+class TtsStreamingPlaybackRequest:
+    vc: Any
+    sentence_queue: "asyncio.Queue[str | None]"
+    synthesize_source: Callable[[str, int], Awaitable[Any]]
+    guild_id: int | None = None
+    turn_id: str | None = None
+    session_key: str | None = None
+    metrics: dict[str, Any] | None = None
+    ready_timeout_sec: float = 180.0
+    prefetch_chunks: int = 2
+    lookahead_chunks: int = 2
+    lookahead_timeout_ms: float = 350.0
+    create_task: Callable[[Awaitable[Any]], Any] | None = None
+    check_cancelled: Callable[[], None] | None = None
+    log: Callable[[str], None] | None = None
+    on_prefetch_failure: Callable[[Exception], Any] | None = None
+    on_prepared_failure: Callable[[Exception], Any] | None = None
+
+
+@dataclass(slots=True)
+class TtsSourcePlaybackRequest:
+    vc: Any
+    source: Any
+    guild_id: int | None = None
+    turn_id: str | None = None
+    session_key: str | None = None
+    metrics: dict[str, Any] | None = None
+    trace_payload: dict[str, Any] = field(default_factory=dict)
+    mark_speaking: bool = True
+    mark_audio_end: bool = True
+    clear_registry_on_finish: bool = True
+    cleanup_source: bool = False
+
+
+class TtsPlaybackManager:
+    """Small facade over the existing playback tracker/registry helpers."""
+
+    def __init__(self, tracker: TtsPlaybackTracker | None = None) -> None:
+        self.tracker = tracker or TtsPlaybackTracker()
+
+    def active_count(self) -> int:
+        return tracked_tts_playback_count(self.tracker)
+
+    def active_guild_ids(self) -> list[int]:
+        return tracked_tts_playback_guild_ids(self.tracker)
+
+    def is_active(self, guild_id: int | None) -> bool:
+        return is_tracked_tts_playback_active(self.tracker, guild_id)
+
+    def get(self, guild_id: int | None) -> dict[str, Any] | None:
+        return get_tracked_tts_playback(self.tracker, guild_id)
+
+    def start(self, *, guild_id: int | None, mark_speaking: bool = False, **state: Any) -> dict[str, Any] | None:
+        return start_tts_playback_tracking(
+            tracker=self.tracker,
+            guild_id=guild_id,
+            mark_speaking=mark_speaking,
+            **state,
+        )
+
+    def update(self, *, guild_id: int | None, **state: Any) -> dict[str, Any] | None:
+        return update_tts_playback_tracking(
+            tracker=self.tracker,
+            guild_id=guild_id,
+            **state,
+        )
+
+    def mark_speaking(self, guild_id: int | None) -> None:
+        mark_tts_speaking(tracker=self.tracker, guild_id=guild_id)
+
+    def finish(
+        self,
+        *,
+        guild_id: int | None,
+        mark_audio_end: bool = False,
+        now: float | None = None,
+        clear_registry: bool = True,
+    ) -> None:
+        finish_tts_playback_tracking(
+            tracker=self.tracker,
+            guild_id=guild_id,
+            mark_audio_end=mark_audio_end,
+            now=now,
+            clear_registry=clear_registry,
+        )
+
+    def clear(self, guild_id: int | None) -> None:
+        clear_tts_playback_tracking(tracker=self.tracker, guild_id=guild_id)
+
+    def input_suppression_reason(
+        self,
+        *,
+        guild_id: int | None,
+        post_tts_ignore_sec: float,
+        now: float | None = None,
+    ) -> str | None:
+        return tts_input_suppression_reason(
+            tracker=self.tracker,
+            guild_id=guild_id,
+            post_tts_ignore_sec=post_tts_ignore_sec,
+            now=now,
+        )
+
+    async def cancel_guild(self, guild_id: int | None, *, now: float | None = None) -> bool:
+        return await stop_tracked_tts_playback(
+            tracker=self.tracker,
+            guild_id=guild_id,
+            now=now,
+        )
+
+    async def cancel_turn(self, turn_id: str | None, *, now: float | None = None) -> bool:
+        if not turn_id:
+            return False
+        stopped = False
+        for guild_id in self.active_guild_ids():
+            state = self.get(guild_id)
+            if state and state.get("turn_id") == turn_id:
+                stopped = bool(await self.cancel_guild(guild_id, now=now)) or stopped
+        return stopped
+
+    def snapshot(self, guild_id: int | None = None) -> dict[str, Any]:
+        active_guild_ids = self.active_guild_ids()
+        payload: dict[str, Any] = {
+            "active_count": len(active_guild_ids),
+            "active_guild_ids": active_guild_ids,
+            "speaking_guild_ids": sorted(self.tracker.speaking_guilds),
+            "last_audio_end_guild_ids": sorted(self.tracker.last_audio_end_at.keys()),
+        }
+        if guild_id is not None:
+            payload["guild_id"] = int(guild_id)
+            payload["guild_active"] = self.is_active(guild_id)
+            payload["guild_state"] = self.get(guild_id)
+            payload["guild_speaking"] = int(guild_id) in self.tracker.speaking_guilds
+            payload["guild_last_audio_end_at"] = self.tracker.last_audio_end_at.get(int(guild_id))
+        return payload
+
+    async def play_source_once(self, request: TtsSourcePlaybackRequest) -> bool:
+        guild_id = request.guild_id
+        if guild_id is None:
+            guild_id = getattr(getattr(request.vc, "guild", None), "id", None)
+        playback_task = asyncio.current_task()
+        self.start(
+            guild_id=guild_id,
+            mark_speaking=request.mark_speaking,
+            vc=request.vc,
+            playback_source=request.source,
+            playback_task=playback_task,
+            turn_id=request.turn_id,
+            session_key=request.session_key,
+            source_type=type(request.source).__name__,
+        )
+
+        completed = False
+        try:
+            trace_payload = {
+                "turn_id": request.turn_id,
+                "chunk_index": 1,
+                "session_key": request.session_key,
+                "source_type": type(request.source).__name__,
+            }
+            trace_payload.update(request.trace_payload)
+            await play_audio_source(
+                request.vc,
+                request.source,
+                trace_payload=trace_payload,
+            )
+            completed = True
+            return True
+        finally:
+            if request.cleanup_source:
+                cleanup = getattr(request.source, "cleanup", None)
+                if cleanup is not None:
+                    with contextlib.suppress(Exception):
+                        cleanup()
+            mark_tts_playback_summary_state(request.metrics, started=completed, completed=completed)
+            self.finish(
+                guild_id=guild_id,
+                mark_audio_end=request.mark_audio_end,
+                clear_registry=request.clear_registry_on_finish,
+            )
+
+    async def stream_sentences(self, request: TtsStreamingPlaybackRequest) -> None:
+        guild_id = request.guild_id
+        if guild_id is None:
+            guild_id = getattr(getattr(request.vc, "guild", None), "id", None)
+        did_speak = False
+        playback_completed = False
+        create_task = request.create_task or asyncio.create_task
+
+        prepared_queue: asyncio.Queue[object] = asyncio.Queue(maxsize=max(1, int(request.prefetch_chunks)))
+        playback_source = QueuedAudioSource(
+            trace_payload={
+                "turn_id": request.turn_id,
+                "session_key": request.session_key,
+                "source_type": "QueuedAudioSource",
+            }
+        )
+        prefetch_task = create_task(
+            prefetch_tts_sources(
+                request.sentence_queue,
+                prepared_queue,
+                synthesize_source=request.synthesize_source,
+                ready_timeout_sec=request.ready_timeout_sec,
+                check_cancelled=request.check_cancelled,
+                on_failure=request.on_prefetch_failure,
+            )
+        )
+        playback_task: Any | None = None
+
+        def create_playback_task() -> Any:
+            return create_task(
+                play_audio_source(
+                    request.vc,
+                    playback_source,
+                    trace_payload={
+                        "turn_id": request.turn_id,
+                        "session_key": request.session_key,
+                        "source_type": type(playback_source).__name__,
+                    },
+                )
+            )
+
+        def on_playback_started(task: Any) -> None:
+            nonlocal did_speak, playback_task
+            did_speak = True
+            playback_task = task
+            mark_tts_playback_summary_state(request.metrics, started=True)
+            self.update(guild_id=guild_id, playback_task=playback_task)
+
+        def on_source_ready() -> None:
+            if guild_id is not None and not did_speak:
+                self.mark_speaking(guild_id)
+
+        playback_queue = PreparedTtsPlaybackQueue(
+            prepared_queue,
+            playback_source,
+            turn_id=request.turn_id,
+            session_key=request.session_key,
+            lookahead_chunks=request.lookahead_chunks,
+            lookahead_timeout_ms=request.lookahead_timeout_ms,
+            log=request.log,
+            on_source_ready=on_source_ready,
+            on_failure=request.on_prepared_failure,
+        )
+        playback_starter = PreparedPlaybackStarter(
+            playback_queue,
+            create_playback_task=create_playback_task,
+            on_started=on_playback_started,
+            log=request.log,
+        )
+
+        self.start(
+            guild_id=guild_id,
+            vc=request.vc,
+            sentence_queue=request.sentence_queue,
+            prepared_queue=prepared_queue,
+            playback_source=playback_source,
+            prefetch_task=prefetch_task,
+            playback_task=playback_task,
+            turn_id=request.turn_id,
+            session_key=request.session_key,
+        )
+        try:
+            await drain_prepared_tts_playback(
+                prepared_queue,
+                playback_queue,
+                start_playback_once=playback_starter.start_once,
+                get_playback_task=playback_starter.get_task,
+                check_cancelled=request.check_cancelled,
+            )
+            playback_completed = did_speak
+        finally:
+            mark_tts_playback_summary_state(
+                request.metrics,
+                started=did_speak,
+                completed=playback_completed,
+            )
+            await cleanup_tts_stream_tasks(
+                playback_source=playback_source,
+                playback_task=playback_task,
+                prefetch_task=prefetch_task,
+            )
+            self.finish(
+                guild_id=guild_id,
+                mark_audio_end=did_speak,
+            )
+
+
 def _resolve_tracker_parts(
     tracker: TtsPlaybackTracker | None = None,
     *,

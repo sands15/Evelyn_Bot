@@ -1,0 +1,7 @@
+{
+  "name": "barge_in_cancel",
+  "active_turn_id": "turn-old",
+  "incoming_turn_id": "turn-new",
+  "cancel_reason": "barge_in",
+  "expected_old_state": "cancelled"
+}

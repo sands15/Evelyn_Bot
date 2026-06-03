@@ -17,7 +17,7 @@ import asyncio
 import uuid
 import wave
 import zipfile
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
 from urllib.parse import parse_qs, unquote, urlparse
@@ -76,6 +76,10 @@ from evelyn_core.memory_writebehind import (
     should_replace_existing_memory_task,
 )
 from evelyn_core.minecraft_runtime_snapshot import attach_minecraft_runtime_snapshot, minecraft_runtime_status_fields
+from evelyn_core.question_shaping import (
+    enforce_question_limits,
+    filter_stream_chunk_for_question_limits,
+)
 from evelyn_core.text import (
     apply_stt_post_corrections,
     clean_text,
@@ -108,6 +112,39 @@ from evelyn_core.context_pipeline import (
     build_runtime_state_context,
     build_skill_context_hint,
     build_vision_context_hint,
+)
+from evelyn_core.discord_delivery import (
+    DiscordStreamingVoiceDeliveryRequest,
+    build_streaming_voice_delivery,
+    execute_streaming_voice_delivery_plan,
+    send_discord_text,
+)
+from evelyn_core.discord_ingress import (
+    build_voice_ingress_context,
+    build_text_ingress_context,
+    build_text_turn_user_text,
+    make_person_memory_key as make_discord_person_memory_key,
+    make_room_memory_key as make_discord_room_memory_key,
+    make_session_memory_key as make_discord_session_memory_key,
+    make_text_reply_slot_key as make_discord_text_reply_slot_key,
+    make_text_session_key as make_discord_text_session_key,
+    make_voice_room_session_key as make_discord_voice_room_session_key,
+    make_voice_session_key as make_discord_voice_session_key,
+    normalize_voice_debug_meta,
+    should_accept_text_turn,
+    voice_ingress_source,
+)
+from evelyn_core.discord_session_policy import (
+    DiscordRoomSessionPolicy,
+    LocalMicDiscordSuppressionInput,
+    TtsInterruptMeta,
+    VoiceReplyGateInput,
+    decide_local_mic_discord_suppression,
+    decide_voice_reply_gate,
+    is_short_followup_candidate_policy,
+    should_ignore_short_transcription_policy,
+    should_interrupt_tts,
+    should_skip_full_stt_after_wake_probe_policy,
 )
 from evelyn_core.skills import SkillContext, SkillResult, skill_registry
 from evelyn_core.skills.routing import (
@@ -142,36 +179,34 @@ from evelyn_core.tts_playback import (
     CachedWaveAudioSource,
     ChunkWindow,
     OmniVoicePCMStream,
-    PreparedPlaybackStarter,
-    PreparedTtsPlaybackQueue,
-    QueuedAudioSource,
     StreamingVoiceDelivery,
     SpeechChunker,
-    TTSQueueSink,
-    TtsPlaybackRegistry,
+    TtsPlaybackManager,
+    TtsSourcePlaybackRequest,
+    TtsStreamingPlaybackRequest,
     TtsPlaybackTracker,
     add_omnivoice_stream_contract,
     clear_tts_playback_tracking,
-    cleanup_tts_stream_tasks,
     configure_tts_playback_logging,
-    drain_prepared_tts_playback,
-    finish_tts_playback_tracking,
     get_tracked_tts_playback,
     is_tracked_tts_playback_active,
-    mark_tts_playback_summary_state,
-    mark_tts_speaking,
-    play_audio_source,
-    prefetch_tts_sources,
     resolve_cached_tts_audio_path,
     split_tts_sentences,
-    start_tts_playback_tracking,
-    stop_tracked_tts_playback,
     tracked_tts_playback_count,
     tracked_tts_playback_guild_ids,
-    tts_input_suppression_reason,
-    update_tts_playback_tracking,
 )
 from evelyn_core.turn_trace import TURN_SUMMARY_EVENTS, build_turn_summary_payload
+from evelyn_core.turn_lifecycle import TurnScope, TurnState
+from evelyn_core.turn_budget import build_turn_execution_budget
+from evelyn_core.voice_stt_flow import (
+    apply_fuzzy_wake_near_miss,
+    apply_strict_wake_confirm_policy,
+    build_final_transcript_flow,
+    decide_final_wake_veto,
+    interpret_wake_probe_result,
+    run_full_stt_with_optional_rescore,
+    run_partial_stt_flow,
+)
 from evelyn_core.voice_orchestration import (
     VoiceTurnOrchestrator,
     VoiceTurnOrchestratorDeps,
@@ -182,14 +217,9 @@ from evelyn_core.voice_orchestration import (
     apply_voice_ingress_dequeue_debug_meta,
     build_rejected_voice_turn,
     build_voice_ingress_item,
-    clear_room_owner as orchestration_clear_room_owner,
     enqueue_voice_ingress_item,
     evaluate_voice_ingress_dequeue,
-    is_room_owner_active as orchestration_is_room_owner_active,
     process_voice_reply_from_transcript_context,
-    room_state_snapshot as orchestration_room_state_snapshot,
-    set_room_owner as orchestration_set_room_owner,
-    set_room_reply_in_progress as orchestration_set_room_reply_in_progress,
 )
 from evelyn_core.voice_pipeline import (
     ActionResult,
@@ -262,6 +292,15 @@ ROUTER_MODEL_NAME = globals().get("ROUTER_MODEL_NAME", os.getenv("ROUTER_MODEL_N
 ROUTER_LLM_ENABLED = globals().get("ROUTER_LLM_ENABLED", os.getenv("ROUTER_LLM_ENABLED", "true").lower() in {"1", "true", "yes", "on"})
 ROUTER_ROUTE_MAX_TOKENS = int(globals().get("ROUTER_ROUTE_MAX_TOKENS", os.getenv("ROUTER_ROUTE_MAX_TOKENS", "220")))
 ROUTER_ROUTE_TIMEOUT_SEC = float(globals().get("ROUTER_ROUTE_TIMEOUT_SEC", os.getenv("ROUTER_ROUTE_TIMEOUT_SEC", "8")))
+DISCORD_ENABLED = os.getenv("DISCORD_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
+LOCAL_ONLY_MODE = os.getenv("LOCAL_ONLY", "false").lower() in {"1", "true", "yes", "on"} or not DISCORD_ENABLED
+LOCAL_CONTROL_GUILD_ID = int(os.getenv("LOCAL_CONTROL_GUILD_ID", "0"))
+LOCAL_CONTROL_GUILD_NAME = os.getenv("LOCAL_CONTROL_GUILD_NAME", "Evelyn Local")
+QUESTION_FEATURE_ENABLED = os.getenv("QUESTION_FEATURE_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
+QUESTION_MIN_TURN_GAP = max(0, int(os.getenv("QUESTION_MIN_TURN_GAP", "3")))
+QUESTION_MIN_SECONDS_GAP = max(0.0, float(os.getenv("QUESTION_MIN_SECONDS_GAP", "60")))
+QUESTION_MAX_PER_10_TURNS = max(0, int(os.getenv("QUESTION_MAX_PER_10_TURNS", "3")))
+QUESTION_DISABLE_AFTER_FRUSTRATION_SEC = max(0.0, float(os.getenv("QUESTION_DISABLE_AFTER_FRUSTRATION_SEC", "300")))
 ODYSSEY_CAPABILITY_JSON_DIR = Path(os.getenv(
     "ODYSSEY_CAPABILITY_JSON_DIR",
     r"C:\Users\Admin\.openclaw\workspace\research\odyssey\MC-Comprehensive-Skill-Library\json",
@@ -320,6 +359,8 @@ _BOTTLENECK_TURN_TRACE_EVENTS = {
     "policy_ready",
     "room_owner_update",
     "room_reply_state",
+    "model_call",
+    "question_trace",
     "text_turn_summary",
     "voice_turn_summary",
     "voice_drop_summary",
@@ -541,6 +582,7 @@ session_locks: dict[str, asyncio.Lock] = {}
 reply_slot_locks: dict[str, asyncio.Lock] = {}
 tts_lock = asyncio.Lock()
 tts_playback_tracker = TtsPlaybackTracker()
+tts_playback_manager = TtsPlaybackManager(tts_playback_tracker)
 active_tts_playbacks = tts_playback_tracker.registry
 voice_debug_counts: dict[int, int] = {}
 voice_debug_stems: dict[tuple[int, str], str] = {}
@@ -628,6 +670,18 @@ session_speculative_policies: dict[str, dict[str, Any]] = {}
 room_turn_scopes: dict[str, "TurnScope"] = {}
 turn_stage_metrics: dict[str, dict[str, float]] = {}
 turn_path_metrics: dict[str, dict[str, Any]] = {}
+model_call_metrics: dict[str, dict[str, Any]] = {}
+model_call_trace_replay_done = False
+model_call_replayed_turn_summary_count = 0
+question_metrics: dict[str, Any] = {
+    "turn_count": 0,
+    "added_count": 0,
+    "removed_count": 0,
+    "cooldown_hit_count": 0,
+    "final_question_count": 0,
+    "ask_modes": {},
+}
+session_question_state: dict[str, dict[str, Any]] = {}
 autonomy_engines: dict[int, AutonomyEngine] = {}
 last_autonomy_ping_at: dict[int, float] = {}
 autonomy_last_cognitive_refresh_at: dict[int, float] = {}
@@ -697,7 +751,7 @@ def get_or_create_autonomy_engine(guild_id: int) -> AutonomyEngine:
             return
         channel = await _find_followup_channel()
         if channel is not None:
-            await channel.send(text)
+            await send_discord_text(channel, text)
 
     def _pick_recent_user_text(history: list[dict[str, Any]]) -> str:
         for entry in reversed(history):
@@ -784,7 +838,7 @@ def get_or_create_autonomy_engine(guild_id: int) -> AutonomyEngine:
         channel = await _find_followup_channel()
         if channel is None:
             return {"status": "blocked", "reason": "no_followup_channel"}
-        await channel.send(text)
+        await send_discord_text(channel, text)
         session_key = runtime_session_key(guild_id=guild_id)
         append_history(session_key, "[autonomy]", text, guild_id=guild_id)
         schedule_memory_update(
@@ -916,44 +970,31 @@ def runtime_session_key(*, session_key: str | None = None, guild_id: int | None 
 
 
 def make_text_session_key(guild_id: int, channel_id: int, user_id: int | None = None, thread_id: int | None = None) -> str:
-    thread_part = f":thread:{thread_id}" if thread_id is not None else ""
-    user_part = f":user:{user_id}" if user_id is not None else ""
-    return f"guild:{guild_id}:text:{channel_id}{thread_part}{user_part}"
+    return make_discord_text_session_key(guild_id, channel_id, user_id, thread_id=thread_id)
 
 
 def make_text_reply_slot_key(guild_id: int, channel_id: int, thread_id: int | None = None) -> str:
-    thread_part = f":thread:{thread_id}" if thread_id is not None else ""
-    return f"guild:{guild_id}:reply:text:{channel_id}{thread_part}"
+    return make_discord_text_reply_slot_key(guild_id, channel_id, thread_id=thread_id)
 
 
 def make_voice_room_session_key(guild_id: int, voice_channel_id: int | None) -> str:
-    channel_part = voice_channel_id if voice_channel_id is not None else "none"
-    return f"guild:{guild_id}:voice:{channel_part}"
+    return make_discord_voice_room_session_key(guild_id, voice_channel_id)
 
 
 def make_voice_session_key(guild_id: int, voice_channel_id: int | None, user_id: int | None = None) -> str:
-    room_session_key = make_voice_room_session_key(guild_id, voice_channel_id)
-    user_part = f":user:{user_id}" if user_id is not None else ""
-    return f"{room_session_key}{user_part}"
+    return make_discord_voice_session_key(guild_id, voice_channel_id, user_id)
 
 
 def make_room_memory_key(kind: str, room_id: int | None) -> str:
-    room_part = room_id if room_id is not None else "none"
-    return f"{kind}:{room_part}"
+    return make_discord_room_memory_key(kind, room_id)
 
 
 def make_person_memory_key(user_id: int | None) -> str | None:
-    if user_id is None:
-        return None
-    return f"user:{user_id}"
+    return make_discord_person_memory_key(user_id)
 
 
 def make_session_memory_key(session_key: str | None, user_id: int | None = None) -> str | None:
-    if not session_key:
-        return None
-    if user_id is None:
-        return session_key
-    return f"{session_key}:user:{user_id}"
+    return make_discord_session_memory_key(session_key, user_id)
 
 
 def remember_session_followup_target(session_key: str, *, channel_id: int | None = None, message_id: int | None = None) -> None:
@@ -1017,24 +1058,24 @@ def session_state_snapshot(session_key: str | None) -> dict:
     }
 
 
-def _clear_room_owner(room_session_key: str | None) -> None:
-    orchestration_clear_room_owner(
-        room_session_key,
+def discord_room_session_policy() -> DiscordRoomSessionPolicy:
+    return DiscordRoomSessionPolicy(
         room_owner_user_ids=room_owner_user_ids,
         room_owner_until=room_owner_until,
+        room_reply_in_progress=room_reply_in_progress,
+        log_event=log_turn_event,
+        now_monotonic=time.monotonic,
+        pick_active_speaker=pick_active_speaker,
     )
+
+
+def _clear_room_owner(room_session_key: str | None) -> None:
+    discord_room_session_policy().clear_owner(room_session_key)
 
 
 
 def room_state_snapshot(room_session_key: str | None) -> dict:
-    return orchestration_room_state_snapshot(
-        room_session_key,
-        room_owner_user_ids=room_owner_user_ids,
-        room_owner_until=room_owner_until,
-        room_reply_in_progress=room_reply_in_progress,
-        active_speaker_user_id=pick_active_speaker(room_session_key),
-        now_monotonic=time.monotonic(),
-    )
+    return discord_room_session_policy().snapshot(room_session_key)
 
 
 
@@ -1116,15 +1157,7 @@ def pick_active_speaker(room_session_key: str | None) -> int | None:
 
 
 def is_room_owner_active(room_session_key: str | None, user_id: int | None) -> bool:
-    return orchestration_is_room_owner_active(
-        room_session_key,
-        user_id,
-        room_owner_user_ids=room_owner_user_ids,
-        room_owner_until=room_owner_until,
-        room_reply_in_progress=room_reply_in_progress,
-        active_speaker_user_id=pick_active_speaker(room_session_key),
-        now_monotonic=time.monotonic(),
-    )
+    return discord_room_session_policy().is_owner_active(room_session_key, user_id)
 
 
 
@@ -1138,15 +1171,11 @@ def set_room_owner(
     turn_id: str | None = None,
     segment_id: int | None = None,
 ) -> None:
-    orchestration_set_room_owner(
+    discord_room_session_policy().set_owner(
         room_session_key,
         user_id,
         ttl_sec=ttl_sec,
         reason=reason,
-        room_owner_user_ids=room_owner_user_ids,
-        room_owner_until=room_owner_until,
-        log_event=log_turn_event,
-        now_monotonic=time.monotonic(),
         session_key=session_key,
         turn_id=turn_id,
         segment_id=segment_id,
@@ -1155,14 +1184,7 @@ def set_room_owner(
 
 
 def set_room_reply_in_progress(room_session_key: str | None, value: bool, *, owner_user_id: int | None = None) -> None:
-    orchestration_set_room_reply_in_progress(
-        room_session_key,
-        value,
-        room_reply_in_progress=room_reply_in_progress,
-        room_owner_user_ids=room_owner_user_ids,
-        log_event=log_turn_event,
-        owner_user_id=owner_user_id,
-    )
+    discord_room_session_policy().set_reply_in_progress(room_session_key, value, owner_user_id=owner_user_id)
 
 
 
@@ -1428,6 +1450,54 @@ def log_turn_event(event: str, **payload) -> None:
         print("[TURN TRACE]\n" + json.dumps(safe_record, ensure_ascii=False, sort_keys=True, indent=2))
 
 
+def record_model_call_trace(
+    *,
+    model_role: str,
+    purpose: str,
+    hot_path: bool,
+    started_at: float,
+    success: bool,
+    metrics: dict | None = None,
+    first_token_ms: float | None = None,
+    error: BaseException | str | None = None,
+    model_name: str | None = None,
+    endpoint: str | None = None,
+    turn_id: str | None = None,
+    session_key: str | None = None,
+    source: str | None = None,
+    guild_id: int | None = None,
+) -> None:
+    meta = (metrics or {}).get("meta") if isinstance(metrics, dict) else {}
+    if not isinstance(meta, dict):
+        meta = {}
+    elapsed_ms = max(0.0, (time.monotonic() - float(started_at)) * 1000.0)
+    error_text = repr(error) if isinstance(error, BaseException) else clean_text(str(error or ""))
+    record_model_call_metric(
+        model_role=model_role,
+        purpose=purpose,
+        hot_path=hot_path,
+        success=success,
+        latency_ms=elapsed_ms,
+        first_token_ms=first_token_ms,
+    )
+    log_turn_event(
+        "model_call",
+        model_role=clean_text(model_role),
+        purpose=clean_text(purpose),
+        hot_path=bool(hot_path),
+        success=bool(success),
+        latency_ms=round(elapsed_ms, 1),
+        first_token_ms=None if first_token_ms is None else round(float(first_token_ms), 1),
+        model_name=clean_text(model_name or ""),
+        endpoint=clean_text(endpoint or ""),
+        turn_id=turn_id or meta.get("turn_id"),
+        session_key=session_key or meta.get("session_key"),
+        source=source or meta.get("source"),
+        guild_id=guild_id if guild_id is not None else meta.get("guild_id"),
+        error=clean_text(error_text)[:240] if error_text else None,
+    )
+
+
 configure_tts_playback_logging(log_turn_event)
 
 
@@ -1483,40 +1553,12 @@ def merge_log_event_payload(*, explicit: dict[str, Any], extra: dict[str, Any] |
     return merged
 
 
-@dataclass
-class TurnScope:
-    turn_id: str
-    cancelled: bool = False
-    tasks: set[asyncio.Task] = field(default_factory=set)
-
-    def cancel(self):
-        self.cancelled = True
-        for task in list(self.tasks):
-            if task is not None and not task.done():
-                task.cancel()
-
-    def raise_if_cancelled(self):
-        if self.cancelled:
-            raise asyncio.CancelledError()
-
-    def register_task(self, task: asyncio.Task | None = None) -> asyncio.Task | None:
-        task = task or asyncio.current_task()
-        if task is not None:
-            self.tasks.add(task)
-        return task
-
-    def unregister_task(self, task: asyncio.Task | None = None) -> None:
-        task = task or asyncio.current_task()
-        if task is not None:
-            self.tasks.discard(task)
-
-
 def replace_room_turn_scope(room_id: str, new_scope: TurnScope, *, cancel_old: bool = True) -> TurnScope | None:
     global cancelled_stale_turn_count
     old = room_turn_scopes.get(room_id)
     room_turn_scopes[room_id] = new_scope
     if cancel_old and old is not None and old is not new_scope:
-        old.cancel()
+        old.cancel(reason="replaced_by_new_turn")
         cancelled_stale_turn_count += 1
     return old
 
@@ -1573,6 +1615,111 @@ def _append_bounded_metric(values: list[float], value: float | None, *, limit: i
         del values[: len(values) - limit]
 
 
+def record_model_call_metric(
+    *,
+    model_role: str,
+    purpose: str,
+    hot_path: bool,
+    success: bool,
+    latency_ms: float,
+    first_token_ms: float | None = None,
+) -> None:
+    key = f"{clean_text(model_role)}|{clean_text(purpose)}|{'hot' if hot_path else 'background'}"
+    bucket = model_call_metrics.setdefault(
+        key,
+        {
+            "model_role": clean_text(model_role),
+            "purpose": clean_text(purpose),
+            "hot_path": bool(hot_path),
+            "count": 0,
+            "success_count": 0,
+            "error_count": 0,
+            "latency_ms": [],
+            "first_token_ms": [],
+        },
+    )
+    bucket["count"] = int(bucket.get("count", 0)) + 1
+    if success:
+        bucket["success_count"] = int(bucket.get("success_count", 0)) + 1
+    else:
+        bucket["error_count"] = int(bucket.get("error_count", 0)) + 1
+    _append_bounded_metric(bucket["latency_ms"], latency_ms)
+    _append_bounded_metric(bucket["first_token_ms"], first_token_ms)
+
+
+def _safe_metric_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def replay_model_call_metrics_from_turn_trace(*, max_files: int = 7, max_lines_per_file: int = 12000) -> dict[str, int]:
+    global model_call_replayed_turn_summary_count
+    if not TURN_TRACE_LOG_DIR.exists():
+        return {"files": 0, "model_calls": 0, "turn_summaries": 0}
+    files = sorted(TURN_TRACE_LOG_DIR.glob("*.jsonl"), key=lambda path: path.stat().st_mtime, reverse=True)[:max_files]
+    rows: list[dict[str, Any]] = []
+    min_model_call_ts: float | None = None
+    for path in reversed(files):
+        try:
+            with path.open("r", encoding="utf-8") as handle:
+                for index, line in enumerate(handle):
+                    if index >= max_lines_per_file:
+                        break
+                    try:
+                        row = json.loads(line)
+                    except Exception:
+                        continue
+                    if not isinstance(row, dict):
+                        continue
+                    rows.append(row)
+                    if clean_text(str(row.get("event") or "")) == "model_call":
+                        row_ts = _safe_metric_float(row.get("ts"), default=0.0)
+                        if row_ts > 0 and (min_model_call_ts is None or row_ts < min_model_call_ts):
+                            min_model_call_ts = row_ts
+        except Exception as exc:
+            print(f"[MODEL CALL METRIC REPLAY] skip path={path} err={exc!r}")
+
+    model_call_count = 0
+    turn_summary_count = 0
+    for row in rows:
+        event = clean_text(str(row.get("event") or ""))
+        if event in TURN_SUMMARY_EVENTS:
+            row_ts = _safe_metric_float(row.get("ts"), default=0.0)
+            if min_model_call_ts is not None and row_ts >= min_model_call_ts:
+                turn_summary_count += 1
+            continue
+        if event != "model_call":
+            continue
+        record_model_call_metric(
+            model_role=clean_text(str(row.get("model_role") or "unknown")) or "unknown",
+            purpose=clean_text(str(row.get("purpose") or "unknown")) or "unknown",
+            hot_path=bool(row.get("hot_path")),
+            success=bool(row.get("success", True)),
+            latency_ms=_safe_metric_float(row.get("latency_ms")),
+            first_token_ms=None if row.get("first_token_ms") is None else _safe_metric_float(row.get("first_token_ms")),
+        )
+        model_call_count += 1
+    model_call_replayed_turn_summary_count = turn_summary_count
+    return {"files": len(files), "model_calls": model_call_count, "turn_summaries": turn_summary_count}
+
+
+def ensure_model_call_metrics_replayed() -> None:
+    global model_call_trace_replay_done
+    if model_call_trace_replay_done:
+        return
+    model_call_trace_replay_done = True
+    if model_call_metrics or turn_path_metrics:
+        return
+    result = replay_model_call_metrics_from_turn_trace()
+    if result.get("files") or result.get("model_calls") or result.get("turn_summaries"):
+        print(
+            "[MODEL CALL METRIC REPLAY] "
+            f"files={result.get('files', 0)} model_calls={result.get('model_calls', 0)} turn_summaries={result.get('turn_summaries', 0)}"
+        )
+
+
 def record_turn_path_summary(meta: dict[str, Any], marks: dict[str, Any], total_ms: float) -> None:
     turn_type = clean_text(str(meta.get("turn_type") or "unknown")) or "unknown"
     selected_path = clean_text(str(meta.get("selected_path") or "unknown")) or "unknown"
@@ -1623,6 +1770,390 @@ def _p95(values: list[float]) -> float:
     ordered = sorted(float(v) for v in values)
     idx = max(0, min(len(ordered) - 1, math.ceil(len(ordered) * 0.95) - 1))
     return ordered[idx]
+
+
+def _avg(values: list[float]) -> float:
+    if not values:
+        return 0.0
+    return sum(float(v) for v in values) / max(1, len(values))
+
+
+def _avg_or_none(values: list[float]) -> float | None:
+    if not values:
+        return None
+    return round(_avg(values), 1)
+
+
+def _p95_or_none(values: list[float]) -> float | None:
+    if not values:
+        return None
+    return round(_p95(values), 1)
+
+
+def _rate_or_none(count: int, denominator: int | None) -> float | None:
+    if not denominator or denominator <= 0:
+        return None
+    return round(count / max(1, denominator), 4)
+
+
+def summarize_model_call_metrics() -> dict[str, Any]:
+    ensure_model_call_metrics_replayed()
+    total_turns = model_call_replayed_turn_summary_count + sum(int(bucket.get("count", 0)) for bucket in turn_path_metrics.values())
+    rows: list[dict[str, Any]] = []
+    for bucket in model_call_metrics.values():
+        count = int(bucket.get("count", 0))
+        latency_values = list(bucket.get("latency_ms") or [])
+        first_token_values = list(bucket.get("first_token_ms") or [])
+        rows.append(
+            {
+                "modelRole": bucket.get("model_role"),
+                "purpose": bucket.get("purpose"),
+                "hotPath": bool(bucket.get("hot_path")),
+                "count": count,
+                "successCount": int(bucket.get("success_count", 0)),
+                "errorCount": int(bucket.get("error_count", 0)),
+                "avgLatencyMs": round(_avg(latency_values), 1),
+                "p95LatencyMs": round(_p95(latency_values), 1),
+                "firstTokenSampleCount": len(first_token_values),
+                "avgFirstTokenMs": _avg_or_none(first_token_values),
+                "p95FirstTokenMs": _p95_or_none(first_token_values),
+                "callRatePerTurn": _rate_or_none(count, total_turns),
+            }
+        )
+    rows.sort(key=lambda row: (-int(row.get("count") or 0), str(row.get("modelRole") or ""), str(row.get("purpose") or "")))
+
+    def _matching(*, model_role: str | None = None, purpose: str | None = None, hot_path: bool | None = None) -> list[dict[str, Any]]:
+        matched: list[dict[str, Any]] = []
+        for row in rows:
+            if model_role is not None and row.get("modelRole") != model_role:
+                continue
+            if purpose is not None and row.get("purpose") != purpose:
+                continue
+            if hot_path is not None and bool(row.get("hotPath")) != bool(hot_path):
+                continue
+            matched.append(row)
+        return matched
+
+    def _sum_count(matched: list[dict[str, Any]]) -> int:
+        return sum(int(row.get("count") or 0) for row in matched)
+
+    def _combined_latencies(matched: list[dict[str, Any]]) -> list[float]:
+        values: list[float] = []
+        for row in matched:
+            key = f"{row.get('modelRole')}|{row.get('purpose')}|{'hot' if row.get('hotPath') else 'background'}"
+            values.extend(float(v) for v in (model_call_metrics.get(key, {}).get("latency_ms") or []))
+        return values
+
+    def _combined_first_tokens(matched: list[dict[str, Any]]) -> list[float]:
+        values: list[float] = []
+        for row in matched:
+            key = f"{row.get('modelRole')}|{row.get('purpose')}|{'hot' if row.get('hotPath') else 'background'}"
+            values.extend(float(v) for v in (model_call_metrics.get(key, {}).get("first_token_ms") or []))
+        return values
+
+    router_route = _matching(model_role="router", purpose="route")
+    cognitive_hot = _matching(model_role="router", purpose="cognitive", hot_path=True)
+    summary_hot = _matching(model_role="summary", hot_path=True)
+    summary_all = _matching(model_role="summary")
+    main_all = _matching(model_role="main", purpose="main_response")
+    router_latencies = _combined_latencies(router_route)
+    main_first_tokens = _combined_first_tokens(main_all)
+    summary_count = _sum_count(summary_all)
+    model_call_total_count = _sum_count(rows)
+
+    return {
+        "turnSummaryCount": total_turns,
+        "modelCallCount": model_call_total_count,
+        "routerRouteCallCount": _sum_count(router_route),
+        "routerRouteCallRate": _rate_or_none(_sum_count(router_route), total_turns),
+        "routerAvgLatencyMs": _avg_or_none(router_latencies),
+        "routerP95LatencyMs": _p95_or_none(router_latencies),
+        "mainResponseCallCount": _sum_count(main_all),
+        "mainFirstTokenSampleCount": len(main_first_tokens),
+        "mainFirstTokenAvgMs": _avg_or_none(main_first_tokens),
+        "mainFirstTokenP95Ms": _p95_or_none(main_first_tokens),
+        "summaryCallCount": summary_count,
+        "summaryHotPathCount": _sum_count(summary_hot),
+        "summaryHotPathRate": _rate_or_none(_sum_count(summary_hot), summary_count),
+        "cognitiveBlockingCount": _sum_count(cognitive_hot),
+        "cognitiveBlockingRate": _rate_or_none(_sum_count(cognitive_hot), total_turns),
+        "byPurpose": rows[:16],
+    }
+
+
+QUESTION_ASK_MODES = {
+    "none",
+    "clarify",
+    "soft_followup",
+    "preference_probe",
+    "topic_continue",
+    "idle_checkin",
+}
+
+
+def normalize_question_policy_mapping(value: dict[str, Any] | None, *, default_source: str = "none") -> dict[str, Any]:
+    data = value if isinstance(value, dict) else {}
+    ask_mode = clean_text(str(data.get("ask_mode") or "none")).lower()
+    if ask_mode not in QUESTION_ASK_MODES:
+        ask_mode = "none"
+    try:
+        max_question_count = int(data.get("max_question_count") or 0)
+    except (TypeError, ValueError):
+        max_question_count = 0
+    if ask_mode == "none":
+        max_question_count = 0
+    else:
+        max_question_count = max(0, min(1, max_question_count or 1))
+    question_source = clean_text(str(data.get("question_source") or default_source or "none")).lower() or "none"
+    return {
+        "ask_mode": ask_mode,
+        "max_question_count": max_question_count,
+        "question_hint": clean_text(str(data.get("question_hint") or "")) or None,
+        "question_reason": clean_text(str(data.get("question_reason") or "")) or None,
+        "question_source": question_source,
+    }
+
+
+def extract_question_policy_from_route_meta(route_meta: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(route_meta, dict):
+        return normalize_question_policy_mapping(None)
+    return normalize_question_policy_mapping(
+        {
+            "ask_mode": route_meta.get("ask_mode"),
+            "max_question_count": route_meta.get("max_question_count"),
+            "question_hint": route_meta.get("question_hint"),
+            "question_reason": route_meta.get("question_reason"),
+            "question_source": route_meta.get("question_source") or route_meta.get("source"),
+        },
+        default_source=clean_text(str(route_meta.get("source") or "none")),
+    )
+
+
+def user_wants_direct_answer(text: str) -> bool:
+    cleaned = clean_text(text).lower()
+    if not cleaned:
+        return False
+    direct_markers = (
+        "정답만",
+        "답만",
+        "질문하지",
+        "묻지 말",
+        "되묻지",
+        "그냥 답",
+        "바로 답",
+        "짧게 답",
+        "한 문장",
+        "완료 보고",
+        "보고만",
+        "여부만",
+        "only answer",
+        "just answer",
+        "no question",
+        "don't ask",
+        "do not ask",
+    )
+    return any(marker in cleaned for marker in direct_markers)
+
+
+def user_frustration_with_questions(text: str) -> bool:
+    cleaned = clean_text(text).lower()
+    markers = (
+        "질문 그만",
+        "그만 물어",
+        "왜 자꾸 물어",
+        "귀찮",
+        "짜증",
+        "답답",
+        "stop asking",
+        "too many questions",
+    )
+    return any(marker in cleaned for marker in markers)
+
+
+def is_continuable_technical_topic(text: str) -> bool:
+    cleaned = clean_text(text).lower()
+    if not cleaned or user_wants_direct_answer(cleaned):
+        return False
+    markers = (
+        "설계",
+        "구조",
+        "구현",
+        "리스크",
+        "영향",
+        "파이프라인",
+        "router",
+        "라우터",
+        "llm",
+        "hot path",
+        "핫패스",
+        "metric",
+        "메트릭",
+        "control page",
+        "컨트롤",
+        "디스코드",
+        "로컬모드",
+        "다음 단계",
+        "어떻게",
+        "왜",
+    )
+    return any(marker in cleaned for marker in markers) and len(cleaned) >= 18
+
+
+def question_cooldown_hit(session_key: str | None, *, now: float | None = None) -> bool:
+    if not session_key:
+        return False
+    state = session_question_state.setdefault(session_key, {"turn_index": 0, "question_turns": [], "frustration_until": 0.0})
+    current_time = time.monotonic() if now is None else float(now)
+    if current_time < float(state.get("frustration_until", 0.0) or 0.0):
+        return True
+    question_turns = [int(item) for item in state.get("question_turns", []) if isinstance(item, int)]
+    current_turn = int(state.get("turn_index", 0))
+    if question_turns and current_turn - question_turns[-1] < QUESTION_MIN_TURN_GAP:
+        return True
+    last_question_at = float(state.get("last_question_at", 0.0) or 0.0)
+    if last_question_at and current_time - last_question_at < QUESTION_MIN_SECONDS_GAP:
+        return True
+    recent = [turn for turn in question_turns if current_turn - turn < 10]
+    return QUESTION_MAX_PER_10_TURNS > 0 and len(recent) >= QUESTION_MAX_PER_10_TURNS
+
+
+def apply_fast_path_question_policy(
+    route_decision: RouteDecision,
+    *,
+    user_text: str,
+    session_key: str | None,
+    route_meta_question_policy: dict[str, Any] | None = None,
+) -> tuple[RouteDecision, bool]:
+    if not QUESTION_FEATURE_ENABLED:
+        policy = normalize_question_policy_mapping({"question_reason": "question_feature_disabled"})
+        return replace(route_decision, **policy), False
+
+    route_policy = normalize_question_policy_mapping(route_meta_question_policy, default_source="router")
+    if route_policy["ask_mode"] != "none":
+        return replace(route_decision, **route_policy), False
+
+    state = session_question_state.setdefault(session_key or "global", {"turn_index": 0, "question_turns": [], "frustration_until": 0.0})
+    state["turn_index"] = int(state.get("turn_index", 0)) + 1
+    if user_frustration_with_questions(user_text):
+        state["frustration_until"] = time.monotonic() + QUESTION_DISABLE_AFTER_FRUSTRATION_SEC
+
+    if user_wants_direct_answer(user_text):
+        policy = normalize_question_policy_mapping(
+            {"ask_mode": "none", "question_reason": "direct_answer_requested", "question_source": "fast_path"}
+        )
+        return replace(route_decision, **policy), False
+
+    cooldown = question_cooldown_hit(session_key or "global")
+    if cooldown:
+        policy = normalize_question_policy_mapping(
+            {"ask_mode": "none", "question_reason": "question_cooldown", "question_source": "fast_path"}
+        )
+        return replace(route_decision, **policy), True
+
+    if route_decision.action in {"ask", "wait"}:
+        policy = normalize_question_policy_mapping(
+            {
+                "ask_mode": "clarify",
+                "max_question_count": 1,
+                "question_hint": route_decision.prompt_text,
+                "question_reason": "route_action_requires_clarification",
+                "question_source": "fast_path",
+            }
+        )
+        return replace(route_decision, **policy), False
+
+    if route_decision.route in {"search_executor"} or route_decision.needs_search:
+        policy = normalize_question_policy_mapping(
+            {"ask_mode": "none", "question_reason": "search_or_action_turn", "question_source": "fast_path"}
+        )
+        return replace(route_decision, **policy), False
+
+    if is_continuable_technical_topic(user_text):
+        policy = normalize_question_policy_mapping(
+            {
+                "ask_mode": "topic_continue",
+                "max_question_count": 1,
+                "question_hint": "Ask lightly what subsystem or next step the user wants to tune next.",
+                "question_reason": "fast_path_topic_continue",
+                "question_source": "fast_path",
+            }
+        )
+        return replace(route_decision, **policy), False
+
+    policy = normalize_question_policy_mapping(
+        {"ask_mode": "none", "question_reason": "default_no_question", "question_source": "fast_path"}
+    )
+    return replace(route_decision, **policy), False
+
+
+def record_question_trace(
+    *,
+    route_decision: RouteDecision,
+    answer: str,
+    shape_meta: dict[str, Any],
+    metrics: dict | None,
+    cooldown_hit: bool = False,
+) -> None:
+    final_question_count = int(shape_meta.get("question_count_after", 0) or 0)
+    question_added = final_question_count > 0
+    question_removed = bool(shape_meta.get("question_removed"))
+    question_metrics["turn_count"] = int(question_metrics.get("turn_count", 0)) + 1
+    if question_added:
+        question_metrics["added_count"] = int(question_metrics.get("added_count", 0)) + 1
+    if question_removed:
+        question_metrics["removed_count"] = int(question_metrics.get("removed_count", 0)) + 1
+    if cooldown_hit:
+        question_metrics["cooldown_hit_count"] = int(question_metrics.get("cooldown_hit_count", 0)) + 1
+    question_metrics["final_question_count"] = int(question_metrics.get("final_question_count", 0)) + final_question_count
+    ask_modes = question_metrics.setdefault("ask_modes", {})
+    ask_modes[route_decision.ask_mode] = int(ask_modes.get(route_decision.ask_mode, 0)) + 1
+
+    meta = (metrics or {}).get("meta") if isinstance(metrics, dict) else {}
+    if not isinstance(meta, dict):
+        meta = {}
+    session_key = clean_text(str(meta.get("session_key") or ""))
+    if question_added and session_key:
+        state = session_question_state.setdefault(session_key, {"turn_index": 0, "question_turns": [], "frustration_until": 0.0})
+        turn_index = int(state.get("turn_index", 0))
+        turns = [int(item) for item in state.get("question_turns", []) if isinstance(item, int)]
+        turns.append(turn_index)
+        state["question_turns"] = turns[-10:]
+        state["last_question_at"] = time.monotonic()
+
+    log_turn_event(
+        "question_trace",
+        turn_id=meta.get("turn_id"),
+        session_key=meta.get("session_key"),
+        source=meta.get("source"),
+        guild_id=meta.get("guild_id"),
+        ask_mode=route_decision.ask_mode,
+        question_source=route_decision.question_source,
+        question_reason=route_decision.question_reason,
+        question_added=question_added,
+        question_removed=question_removed,
+        question_cooldown_hit=bool(cooldown_hit),
+        question_count=final_question_count,
+        hot_path=True,
+        answer_chars=len(clean_text(answer)),
+    )
+
+
+def summarize_question_metrics() -> dict[str, Any]:
+    total = int(question_metrics.get("turn_count", 0) or 0)
+    added = int(question_metrics.get("added_count", 0) or 0)
+    removed = int(question_metrics.get("removed_count", 0) or 0)
+    cooldown = int(question_metrics.get("cooldown_hit_count", 0) or 0)
+    ask_modes = dict(question_metrics.get("ask_modes") or {})
+    return {
+        "turnCount": total,
+        "questionAddedCount": added,
+        "questionAddedRate": _rate_or_none(added, total),
+        "questionRemovedCount": removed,
+        "questionCooldownHitCount": cooldown,
+        "questionCooldownHitRate": _rate_or_none(cooldown, total),
+        "finalQuestionCount": int(question_metrics.get("final_question_count", 0) or 0),
+        "askModeDistribution": ask_modes,
+    }
 
 
 def summarize_p95_metrics() -> dict[str, float | int]:
@@ -2100,16 +2631,6 @@ def save_voice_debug_audio(
         print(f"[VOICE DEBUG DROP] speaker={speaker} stage={clean_text(stage_label or 'ingress') or 'ingress'} reason=queue_full")
 
 
-@dataclass(frozen=True)
-class TtsInterruptMeta:
-    active_speaker_match: bool = False
-    wake_detected: bool = False
-    vad_prob: float = 0.0
-    audio_sec: float = 0.0
-    rms_ok: bool = False
-    voice_like: bool = False
-
-
 def estimate_voice_like_probability(*, voiced_ms: float, audio_sec: float, body_rms: float) -> float:
     audio_ms = max(audio_sec * 1000.0, 1.0)
     voiced_ratio = max(0.0, min(1.0, voiced_ms / audio_ms))
@@ -2117,14 +2638,6 @@ def estimate_voice_like_probability(*, voiced_ms: float, audio_sec: float, body_
     if VOICE_WAVEFORM_BODY_RMS_MIN > 0:
         rms_ratio = max(0.0, min(1.0, body_rms / VOICE_WAVEFORM_BODY_RMS_MIN))
     return max(voiced_ratio, rms_ratio)
-
-
-def should_interrupt_tts(meta: TtsInterruptMeta) -> bool:
-    if meta.wake_detected and meta.audio_sec >= 0.18:
-        return True
-    if meta.active_speaker_match and meta.voice_like and meta.audio_sec >= 0.35 and meta.vad_prob >= 0.55:
-        return True
-    return meta.vad_prob >= 0.6 and meta.audio_sec >= 0.35 and meta.rms_ok
 
 
 def finalize_voice_reply_side_effects(
@@ -2266,27 +2779,80 @@ FAST_PATH_DEEP_ROUTE_MARKERS = (
     "정리",
 )
 
+FAST_PATH_NEGATED_SEARCH_MARKERS = (
+    "검색 없이",
+    "검색은 하지 말고",
+    "검색하지 말고",
+    "검색하지마",
+    "인터넷 없이",
+    "웹 없이",
+    "찾지 말고",
+    "찾아보지 말고",
+    "without search",
+    "without searching",
+    "no search",
+    "don't search",
+    "do not search",
+    "without looking up",
+)
 
-def needs_search_or_deep_routing(text: str) -> bool:
+FAST_PATH_SEARCH_ROUTE_MARKERS = (
+    "검색",
+    "찾아봐",
+    "찾아 봐",
+    "찾아",
+)
+
+CONTROL_PAGE_LIGHT_REQUEST_MAX_CHARS = 180
+
+
+def is_control_page_source(source: str) -> bool:
+    return clean_text(source).lower() in {"control_page", "control-page", "local_control_page"}
+
+
+def deep_route_marker_count(text: str, *, ignore_search_markers: bool = False) -> int:
+    cleaned = clean_text(text)
+    ignored_markers = set(FAST_PATH_SEARCH_ROUTE_MARKERS) if ignore_search_markers else set()
+    return sum(1 for marker in FAST_PATH_DEEP_ROUTE_MARKERS if marker not in ignored_markers and marker in cleaned)
+
+
+def has_negated_search_marker(text: str) -> bool:
+    cleaned = clean_text(text).lower()
+    compact = re.sub(r"\s+", "", cleaned)
+    return any(marker in cleaned for marker in FAST_PATH_NEGATED_SEARCH_MARKERS) or any(
+        marker.replace(" ", "") in compact for marker in FAST_PATH_NEGATED_SEARCH_MARKERS
+    )
+
+
+def needs_search_or_deep_routing(text: str, *, source: str = "text") -> bool:
     cleaned = clean_text(text)
     if not cleaned:
         return False
-    if should_force_search_query(cleaned):
+    negated_search = has_negated_search_marker(cleaned)
+    if not negated_search and should_force_search_query(cleaned):
         return True
-    marker_hits = sum(1 for marker in FAST_PATH_DEEP_ROUTE_MARKERS if marker in cleaned)
+    marker_hits = deep_route_marker_count(cleaned, ignore_search_markers=negated_search)
+    search_markers = ("검색", "찾아", "최신", "뉴스", "시세", "가격", "주가", "환율")
+    if not negated_search and any(marker in cleaned for marker in search_markers):
+        return True
+    if (
+        is_control_page_source(source)
+        and marker_hits == 0
+        and len(cleaned) <= CONTROL_PAGE_LIGHT_REQUEST_MAX_CHARS
+    ):
+        return False
     if marker_hits >= 2:
         return True
     if len(cleaned) >= 72:
         return True
-    search_markers = ("검색", "찾아", "최신", "뉴스", "시세", "가격", "주가", "환율")
-    return any(marker in cleaned for marker in search_markers)
+    return False
 
 
-def is_simple_directive(text: str) -> bool:
+def is_simple_directive(text: str, *, source: str = "text") -> bool:
     cleaned = clean_text(text)
     if not cleaned:
         return False
-    if needs_search_or_deep_routing(cleaned):
+    if needs_search_or_deep_routing(cleaned, source=source):
         return False
     if any(marker in cleaned for marker in FAST_PATH_DIRECTIVE_MARKERS):
         return True
@@ -2313,10 +2879,11 @@ def fast_path_policy(text: str, source: str, room_state: dict | None = None) -> 
         return {"route": "main_direct", "action": "wait", "reason_brief": "obvious_continue"}
     if should_force_search_query(cleaned):
         return {"route": "search_executor", "action": "search_then_answer", "reason_brief": "search_trigger"}
-    if is_simple_directive(cleaned):
+    if is_simple_directive(cleaned, source=source):
         return {"route": "main_direct", "action": "answer", "reason_brief": "simple_directive"}
-    if not needs_search_or_deep_routing(cleaned):
-        return {"route": "main_direct", "action": "answer", "reason_brief": "light_request"}
+    if not needs_search_or_deep_routing(cleaned, source=source):
+        reason = "control_page_light_request" if is_control_page_source(source) else "light_request"
+        return {"route": "main_direct", "action": "answer", "reason_brief": reason}
     return None
 
 
@@ -2373,21 +2940,17 @@ def should_ignore_short_transcription(
     *,
     wake_detected: bool = False,
 ) -> bool:
-    text_n = normalize_voice_text(text)
-    if not text_n:
-        return True
-
-    if text_n in normalized_wake_words():
-        return False
-
-    if wake_detected and len(text_n) >= WAKE_SHORT_TEXT_KEEP_LEN:
-        return False
-
     audio_sec = len(pcm_bytes) / (RATE * CHANNELS * 2)
-    if audio_sec < MIN_AUDIO_SEC and len(text_n) < MIN_TRANSCRIBED_LEN:
-        return True
-
-    return False
+    return should_ignore_short_transcription_policy(
+        text=text,
+        audio_sec=audio_sec,
+        wake_detected=wake_detected,
+        normalize_voice_text=normalize_voice_text,
+        normalized_wake_words=normalized_wake_words,
+        min_audio_sec=MIN_AUDIO_SEC,
+        min_transcribed_len=MIN_TRANSCRIBED_LEN,
+        wake_short_text_keep_len=WAKE_SHORT_TEXT_KEEP_LEN,
+    )
 
 
 def is_short_followup_candidate(
@@ -2397,15 +2960,16 @@ def is_short_followup_candidate(
     wake_detected: bool = False,
     owner_followup_active: bool = False,
 ) -> bool:
-    text_n = normalize_voice_text(text)
-    if not owner_followup_active:
-        return False
-    if wake_detected:
-        return False
-    if not text_n:
-        return False
     audio_sec = len(pcm_bytes) / (RATE * CHANNELS * 2)
-    return audio_sec < max(MIN_AUDIO_SEC * 1.5, 1.2) and len(text_n) < max(MIN_TRANSCRIBED_LEN + 2, 8)
+    return is_short_followup_candidate_policy(
+        text=text,
+        audio_sec=audio_sec,
+        wake_detected=wake_detected,
+        owner_followup_active=owner_followup_active,
+        normalize_voice_text=normalize_voice_text,
+        min_audio_sec=MIN_AUDIO_SEC,
+        min_transcribed_len=MIN_TRANSCRIBED_LEN,
+    )
 
 
 def should_reply_to_voice(
@@ -2420,7 +2984,6 @@ def should_reply_to_voice(
     active_speaker_user_id: int | None = None,
 ) -> tuple[bool, str, str]:
     now = time.monotonic()
-    text_n = normalize_voice_text(text)
     session_state = session_state_snapshot(session_key)
     room_state = room_state_snapshot(room_session_key)
     owner_user_id = room_state.get("owner_user_id")
@@ -2428,56 +2991,36 @@ def should_reply_to_voice(
     active_session = session_key is not None and is_session_active_for_user(session_key, user_id)
     if active_speaker_user_id is None:
         active_speaker_user_id = room_state.get("active_speaker_user_id")
-    awaiting_followup = bool(session_state.get("awaiting_user_reply")) and owner_active
-    followup_allowed = owner_active and (active_session or awaiting_followup)
 
-    tts_suppression = tts_input_suppression_reason(
-        tracker=tts_playback_tracker,
+    tts_suppression = tts_playback_manager.input_suppression_reason(
         guild_id=guild_id,
         post_tts_ignore_sec=POST_TTS_IGNORE_SEC,
         now=now,
     )
-    if tts_suppression is not None:
-        return False, tts_suppression, tts_suppression
-
-    if not text_n:
-        return False, "empty", "empty"
-
-    if looks_like_brief_filler_text(text_n):
-        return False, "reply_gate_brief_filler", "reply_gate_brief_filler"
-
-    if looks_like_repetitive_noise_text(text_n):
-        return False, "reply_gate_noise_text", "reply_gate_noise_text"
-
-    last_stt_text = normalize_voice_text(session_state.get("last_stt_text", ""))
-    if last_stt_text and is_similar(text_n, last_stt_text):
-        return False, "duplicate", "duplicate"
-
-    if followup_allowed:
-        return True, "ok", "owner_followup"
-
-    if active_speaker_user_id is not None and user_id is not None and active_speaker_user_id != user_id and not wake_detected:
-        return False, "not_active_speaker", "not_active_speaker"
-
-    if owner_user_id is not None and user_id is not None and owner_user_id != user_id:
-        if not wake_detected:
-            return False, "owner_mismatch_needs_wake", "owner_mismatch_needs_wake"
-        if wake_match_mode != "exact":
-            return False, "owner_takeover_requires_exact_wake", "owner_takeover_requires_exact_wake"
-
-    if not wake_detected and not contains_wake_word(text_n):
-        return False, "no_wake_word", "no_wake_word"
-
-    if len(text_n) < MIN_TEXT_LEN and not wake_detected:
-        return False, "too_short", "too_short"
-
-    if room_session_key and (now - room_last_voice_reply_at.get(room_session_key, 0.0) < REPLY_COOLDOWN_SEC) and not wake_detected:
-        return False, "cooldown", "cooldown"
-
-    if wake_detected and owner_user_id is not None and owner_user_id != user_id:
-        return True, "ok", "owner_takeover"
-
-    return True, "ok", "wake_entry"
+    cooldown_active = bool(room_session_key and (now - room_last_voice_reply_at.get(room_session_key, 0.0) < REPLY_COOLDOWN_SEC))
+    decision = decide_voice_reply_gate(
+        VoiceReplyGateInput(
+            text=text,
+            wake_detected=wake_detected,
+            wake_match_mode=wake_match_mode,
+            user_id=user_id,
+            owner_user_id=owner_user_id,
+            owner_active=owner_active,
+            active_session=active_session,
+            awaiting_user_reply=bool(session_state.get("awaiting_user_reply")),
+            active_speaker_user_id=active_speaker_user_id,
+            last_stt_text=str(session_state.get("last_stt_text", "")),
+            tts_suppression=tts_suppression,
+            cooldown_active=cooldown_active,
+        ),
+        normalize_voice_text=normalize_voice_text,
+        contains_wake_word=contains_wake_word,
+        looks_like_brief_filler_text=looks_like_brief_filler_text,
+        looks_like_repetitive_noise_text=looks_like_repetitive_noise_text,
+        is_similar=is_similar,
+        min_text_len=MIN_TEXT_LEN,
+    )
+    return decision.accepted, decision.reason, decision.gate_mode
 
 
 def ask_confidence_threshold_for_source(source: str) -> float:
@@ -2485,17 +3028,15 @@ def ask_confidence_threshold_for_source(source: str) -> float:
 
 
 def should_skip_full_stt_after_wake_probe(*, wake_detected: bool, wake_probe: str, duration_sec: float) -> bool:
-    if wake_detected:
-        return False
-
-    probe = clean_text(wake_probe)
-    if not probe and duration_sec <= VOICE_NO_WAKE_MAX_CONTINUE_SEC:
-        return True
-    if looks_like_brief_filler_text(probe) and duration_sec <= VOICE_NO_WAKE_MAX_CONTINUE_SEC:
-        return True
-    if looks_like_repetitive_noise_text(probe):
-        return True
-    return False
+    return should_skip_full_stt_after_wake_probe_policy(
+        wake_detected=wake_detected,
+        wake_probe=wake_probe,
+        duration_sec=duration_sec,
+        no_wake_max_continue_sec=VOICE_NO_WAKE_MAX_CONTINUE_SEC,
+        clean_text=clean_text,
+        looks_like_brief_filler_text=looks_like_brief_filler_text,
+        looks_like_repetitive_noise_text=looks_like_repetitive_noise_text,
+    )
 
 
 def should_require_confirm_exact_for_wake(debug_meta: dict | None) -> bool:
@@ -3142,6 +3683,7 @@ def build_main_response_guidance(
     guild_id: int | None = None,
     minecraft_state: dict[str, Any] | None = None,
     runtime_status_context: str | None = None,
+    route_decision: RouteDecision | None = None,
 ) -> str:
     state = apply_ask_gating(cognitive_state, source=source)
     threshold = ask_confidence_threshold_for_source(source)
@@ -3182,6 +3724,22 @@ def build_main_response_guidance(
     if minecraft_summary:
         parts.append(f"현재 마인크래프트 실시간 상태: {minecraft_summary}")
         parts.append("마인크래프트 관련 질문이나 계획을 답할 때는 이 실시간 상태를 기준으로 말해라. 모르면 추측하지 말고 현재 상태 기준으로 짧게 설명해라.")
+
+    if route_decision is not None:
+        ask_mode = clean_text(route_decision.ask_mode)
+        max_questions = max(0, min(1, int(route_decision.max_question_count or 0)))
+        if QUESTION_FEATURE_ENABLED and ask_mode != "none" and max_questions > 0:
+            parts.append(
+                "[QUESTION_HINT] "
+                f"ask_mode={ask_mode} max_question_count={max_questions} "
+                f"question_reason={clean_text(route_decision.question_reason or '')} "
+                f"question_hint={clean_text(route_decision.question_hint or '')}. "
+                "먼저 답변한다. 질문은 마지막에 최대 1개만 자연스럽게 둔다. "
+                "억지로 묻지 않는다. 흐름상 질문이 부자연스러우면 생략한다. "
+                "사용자가 이미 준 조건을 다시 묻지 않는다."
+            )
+        else:
+            parts.append("[QUESTION_HINT] ask_mode=none max_question_count=0. 답변 끝에 새 질문을 덧붙이지 마라.")
 
     return " ".join(clean_text(part) for part in parts if clean_text(part))
 
@@ -3319,6 +3877,8 @@ async def prepare_llm_messages(
     if local_fast_policy is not None:
         route_meta = dict(route_meta or {})
         route_meta["context_policy"] = context_policy_for_fast_path_policy(local_fast_policy, source=source)
+    if metrics is not None:
+        metrics.setdefault("meta", {})["route_question_policy"] = extract_question_policy_from_route_meta(route_meta)
     should_block_on_cognitive = guild_id is not None and (cached_cognitive_state is None or route == "sub_wait")
     if local_fast_policy is not None:
         cognitive_state = build_fast_cognitive_state(
@@ -3745,6 +4305,12 @@ async def ask_summary_llm(
     *,
     max_tokens: int = 500,
     timeout_seconds: float = 90,
+    purpose: str = "memory_summary",
+    hot_path: bool = False,
+    turn_id: str | None = None,
+    session_key: str | None = None,
+    source: str | None = None,
+    guild_id: int | None = None,
 ) -> dict:
     session = await get_http_session()
     payload = {
@@ -3755,6 +4321,7 @@ async def ask_summary_llm(
         "stream": False,
     }
     timeout = aiohttp.ClientTimeout(total=timeout_seconds)
+    started_at = time.monotonic()
 
     async with session.post(SUMMARY_LLM_URL, json=payload, timeout=timeout) as resp:
         if resp.status != 200:
@@ -3764,11 +4331,39 @@ async def ask_summary_llm(
         data = await resp.json()
         choices = data.get("choices", [])
         if not choices:
-            return {}
+            result: dict = {}
+            record_model_call_trace(
+                model_role="summary",
+                purpose=purpose,
+                hot_path=hot_path,
+                started_at=started_at,
+                success=True,
+                model_name=SUMMARY_MODEL_NAME,
+                endpoint=SUMMARY_LLM_URL,
+                turn_id=turn_id,
+                session_key=session_key,
+                source=source,
+                guild_id=guild_id,
+            )
+            return result
 
         msg = choices[0].get("message", {})
         text = clean_text(msg.get("content", "") or msg.get("reasoning_content", ""))
-        return extract_json_object(text)
+        result = extract_json_object(text)
+        record_model_call_trace(
+            model_role="summary",
+            purpose=purpose,
+            hot_path=hot_path,
+            started_at=started_at,
+            success=True,
+            model_name=SUMMARY_MODEL_NAME,
+            endpoint=SUMMARY_LLM_URL,
+            turn_id=turn_id,
+            session_key=session_key,
+            source=source,
+            guild_id=guild_id,
+        )
+        return result
 
 
 async def ask_router_llm(
@@ -3776,6 +4371,12 @@ async def ask_router_llm(
     *,
     max_tokens: int,
     timeout_seconds: float,
+    purpose: str = "route",
+    hot_path: bool = True,
+    turn_id: str | None = None,
+    session_key: str | None = None,
+    source: str | None = None,
+    guild_id: int | None = None,
 ) -> dict:
     session = await get_http_session()
     payload = {
@@ -3786,6 +4387,7 @@ async def ask_router_llm(
         "stream": False,
     }
     timeout = aiohttp.ClientTimeout(total=timeout_seconds)
+    started_at = time.monotonic()
 
     async with session.post(ROUTER_LLM_URL, json=payload, timeout=timeout) as resp:
         if resp.status != 200:
@@ -3795,28 +4397,73 @@ async def ask_router_llm(
         data = await resp.json()
         choices = data.get("choices", [])
         if not choices:
-            return {}
+            result: dict = {}
+            record_model_call_trace(
+                model_role="router",
+                purpose=purpose,
+                hot_path=hot_path,
+                started_at=started_at,
+                success=True,
+                model_name=ROUTER_MODEL_NAME,
+                endpoint=ROUTER_LLM_URL,
+                turn_id=turn_id,
+                session_key=session_key,
+                source=source,
+                guild_id=guild_id,
+            )
+            return result
 
         msg = choices[0].get("message", {})
         text = clean_text(msg.get("content", "") or msg.get("reasoning_content", ""))
-        return extract_json_object(text)
+        result = extract_json_object(text)
+        record_model_call_trace(
+            model_role="router",
+            purpose=purpose,
+            hot_path=hot_path,
+            started_at=started_at,
+            success=True,
+            model_name=ROUTER_MODEL_NAME,
+            endpoint=ROUTER_LLM_URL,
+            turn_id=turn_id,
+            session_key=session_key,
+            source=source,
+            guild_id=guild_id,
+        )
+        return result
 
 
 async def classify_llm_route_async(user_text: str, *, guild_id: int | None = None, source: str = "text", session_key: str | None = None) -> tuple[str, dict | None]:
     fallback_route = classify_llm_route_fallback(user_text, source=source)
+    budget = build_turn_execution_budget(
+        router_timeout_sec=ROUTER_ROUTE_TIMEOUT_SEC,
+        context_timeout_sec=COGNITIVE_TIMEOUT_SEC,
+        memory_timeout_sec=COGNITIVE_TIMEOUT_SEC,
+        fallback_route=fallback_route,
+        router_enabled=ROUTER_LLM_ENABLED,
+    )
     fast_policy = fast_path_policy(user_text, source, session_state_snapshot(session_key))
     if fast_policy is not None:
         fast_route = normalize_route_name(str(fast_policy.get("route", fallback_route)))
+        fast_budget = build_turn_execution_budget(
+            router_timeout_sec=ROUTER_ROUTE_TIMEOUT_SEC,
+            context_timeout_sec=COGNITIVE_TIMEOUT_SEC,
+            memory_timeout_sec=COGNITIVE_TIMEOUT_SEC,
+            fallback_route=fallback_route,
+            router_enabled=False,
+            context_policy=fast_policy,
+            fallback_reason="fast_path",
+        )
         return fast_route, {
             "selected": fast_route,
             "source": "fast_path",
             "confidence": 0.92,
             "reason_brief": clean_text(str(fast_policy.get("reason_brief", "fast_path"))),
             "fallback": fallback_route,
+            "execution_budget": fast_budget.to_dict(),
         }
     force_voice_context = source == "voice" and should_force_voice_context_route(user_text)
     if (source == "voice" and not force_voice_context) or not ROUTER_LLM_ENABLED:
-        return fallback_route, {"selected": fallback_route, "source": "fallback"}
+        return fallback_route, {"selected": fallback_route, "source": "fallback", "execution_budget": budget.to_dict()}
 
     summary = compact_working_summary(read_text_file(memory_summary_path(guild_id))) if guild_id is not None else ""
     state = normalize_cognitive_state(read_json_file(cognitive_state_path(guild_id))) if guild_id is not None else normalize_cognitive_state({})
@@ -3836,10 +4483,15 @@ async def classify_llm_route_async(user_text: str, *, guild_id: int | None = Non
                 '"needs_main_llm":true,"needs_memory":true,"needs_runtime_state":true,'
                 '"needs_minecraft_state":false,"needs_vision":false,"needs_skill_graph":false,'
                 '"needs_long_context":false,"priority":"latency|accuracy|action",'
-                '"context_focus":["current_goal"],"response_mode":"short|normal|detailed|action_only"}}. '
+                '"context_focus":["current_goal"],"response_mode":"short|normal|detailed|action_only"},'
+                '"ask_mode":"none|clarify|soft_followup|preference_probe|topic_continue|idle_checkin",'
+                '"max_question_count":0,"question_reason":"short reason","question_hint":"direction only","question_source":"router"}. '
                 "Use main_direct for ordinary direct replies, voice_context when recent state/memory is important, "
                 "and sub_wait when search/wait/search_then_answer style reasoning is needed. "
-                "Set minecraft/vision/skill flags only when the current turn needs them."
+                "Set minecraft/vision/skill flags only when the current turn needs them. "
+                "Question rules: do not add a router call just for questions; if a direct answer/task/fix is requested, "
+                "use ask_mode=none and max_question_count=0. If a light follow-up is useful, allow at most one question. "
+                "question_hint is only a direction, not a final sentence."
             ),
         },
         {
@@ -3856,13 +4508,23 @@ async def classify_llm_route_async(user_text: str, *, guild_id: int | None = Non
     ]
 
     try:
-        result = await ask_router_llm(messages, max_tokens=ROUTER_ROUTE_MAX_TOKENS, timeout_seconds=ROUTER_ROUTE_TIMEOUT_SEC)
+        result = await ask_router_llm(
+            messages,
+            max_tokens=ROUTER_ROUTE_MAX_TOKENS,
+            timeout_seconds=budget.router_timeout_sec,
+            purpose="route",
+            hot_path=True,
+            turn_id=current_turn_id(session_key),
+            session_key=session_key,
+            source=source,
+            guild_id=guild_id,
+        )
     except Exception as e:
         print(f"[ROUTER] route 실패 fallback 사용: {e!r}")
-        return fallback_route, {"selected": fallback_route, "source": "fallback", "error": clean_text(repr(e))[:120]}
+        return fallback_route, {"selected": fallback_route, "source": "fallback", "error": clean_text(repr(e))[:120], "execution_budget": budget.to_dict()}
 
     if not isinstance(result, dict):
-        return fallback_route, {"selected": fallback_route, "source": "fallback", "reason_brief": "invalid_router_json"}
+        return fallback_route, {"selected": fallback_route, "source": "fallback", "reason_brief": "invalid_router_json", "execution_budget": budget.to_dict()}
 
     selected = normalize_route_name(str(result.get("selected", fallback_route)))
     meta = {
@@ -3871,7 +4533,19 @@ async def classify_llm_route_async(user_text: str, *, guild_id: int | None = Non
         "confidence": float(result.get("confidence", 0.0) or 0.0),
         "reason_brief": clean_text(str(result.get("reason_brief", ""))),
         "fallback": fallback_route,
+        "execution_budget": budget.to_dict(),
     }
+    question_policy = normalize_question_policy_mapping(
+        {
+            "ask_mode": result.get("ask_mode"),
+            "max_question_count": result.get("max_question_count"),
+            "question_hint": result.get("question_hint"),
+            "question_reason": result.get("question_reason"),
+            "question_source": result.get("question_source") or "router",
+        },
+        default_source="router",
+    )
+    meta.update(question_policy)
     raw_context_policy = result.get("context_policy")
     if isinstance(raw_context_policy, dict):
         meta["context_policy"] = ContextPolicy.from_mapping(raw_context_policy).to_dict()
@@ -3971,6 +4645,12 @@ async def update_cognitive_state(
                     messages,
                     max_tokens=COGNITIVE_MAX_TOKENS,
                     timeout_seconds=COGNITIVE_TIMEOUT_SEC,
+                    purpose="cognitive",
+                    hot_path=True,
+                    turn_id=current_turn_id(session_key),
+                    session_key=session_key,
+                    source=source,
+                    guild_id=guild_id,
                 )
             except Exception as e:
                 if is_context_size_error(e):
@@ -3991,6 +4671,12 @@ async def update_cognitive_state(
                             compact_messages,
                             max_tokens=COGNITIVE_MAX_TOKENS,
                             timeout_seconds=max(3.0, COGNITIVE_TIMEOUT_SEC - 2.0),
+                            purpose="cognitive",
+                            hot_path=True,
+                            turn_id=current_turn_id(session_key),
+                            session_key=session_key,
+                            source=source,
+                            guild_id=guild_id,
                         )
                     except Exception as e2:
                         e = e2
@@ -4111,7 +4797,15 @@ async def update_long_term_memory(
             try:
                 if turn_scope is not None:
                     turn_scope.raise_if_cancelled()
-                result = await ask_summary_llm(messages)
+                result = await ask_summary_llm(
+                    messages,
+                    purpose="memory_summary",
+                    hot_path=False,
+                    turn_id=getattr(turn_scope, "turn_id", None),
+                    session_key=session_memory_key,
+                    source="memory_writebehind",
+                    guild_id=guild_id,
+                )
             except Exception as e:
                 if is_context_size_error(e):
                     compact_messages = [
@@ -4127,7 +4821,17 @@ async def update_long_term_memory(
                     try:
                         if turn_scope is not None:
                             turn_scope.raise_if_cancelled()
-                        result = await ask_summary_llm(compact_messages, max_tokens=220, timeout_seconds=20)
+                        result = await ask_summary_llm(
+                            compact_messages,
+                            max_tokens=220,
+                            timeout_seconds=20,
+                            purpose="memory_summary",
+                            hot_path=False,
+                            turn_id=getattr(turn_scope, "turn_id", None),
+                            session_key=session_memory_key,
+                            source="memory_writebehind",
+                            guild_id=guild_id,
+                        )
                     except Exception as e2:
                         e = e2
                         print(f"[MEMORY] compact retry 실패: {e2}")
@@ -4197,7 +4901,11 @@ def should_run_memory_update(
     has_open_question = ("?" in cleaned_user) or ("?" in cleaned_answer)
     explicit_fact_markers = ("나는 ", "내가 ", "우리는", "설정", "결정", "기억", "기억해줘", "해야", "하기로")
     has_explicit_fact = any(marker in merged for marker in explicit_fact_markers)
-    is_smalltalk = (not needs_search_or_deep_routing(cleaned_user)) and len(cleaned_user) <= 14 and len(cleaned_answer) <= 32
+    is_smalltalk = (
+        not needs_search_or_deep_routing(cleaned_user, source=source)
+        and len(cleaned_user) <= 14
+        and len(cleaned_answer) <= 32
+    )
     turn_index = 1
     idle_gap_sec = 0.0
     if session_key:
@@ -4805,13 +5513,12 @@ async def deliver_proactive_followup(
         if channel is not None and hasattr(channel, "send"):
             if turn_scope is not None:
                 turn_scope.raise_if_cancelled()
-            try:
-                if reply_target_id is not None:
-                    await channel.send(format_display_text(answer, session_key=session_key), reference=discord.Object(id=int(reply_target_id)))
-                else:
-                    await channel.send(format_display_text(answer, session_key=session_key))
-            except Exception:
-                await channel.send(format_display_text(answer, session_key=session_key))
+            await send_discord_text(
+                channel,
+                format_display_text(answer, session_key=session_key),
+                reference_message_id=reply_target_id,
+                reference_factory=lambda message_id: discord.Object(id=message_id),
+            )
 
     vc = guild.voice_client if guild else None
     if vc is not None and vc.is_connected():
@@ -5191,37 +5898,29 @@ def resolve_evelyn_page_url() -> str | None:
 
 
 def should_drop_discord_audio_for_local_mic(member_id: int | None, *, source: str | None = None) -> bool:
-    if source == "local_mic":
-        return False
     input_mode = normalize_voice_input_mode(str(local_mic_runtime_state.get("input_mode") or "auto"))
     local_mic_runtime_state["input_mode"] = input_mode
-    if input_mode == "discord":
-        local_mic_runtime_state["discord_suppression_active"] = False
-        return False
     capture_ready = bool(local_mic_service and local_mic_service.capture_ready)
     local_mic_runtime_state["capture_ready"] = capture_ready
     local_mic_recent = False
     last_segment_at = local_mic_runtime_state.get("last_segment_at")
     if isinstance(last_segment_at, (int, float)):
         local_mic_recent = (time.time() - float(last_segment_at)) <= LOCAL_MIC_DISCORD_SUPPRESS_AFTER_SEGMENT_SEC
-    if input_mode == "local":
-        should_suppress = should_route_discord_user_to_local_mic(
-            member_id,
-            preferred_user_ids=LOCAL_MIC_DISCORD_USER_IDS,
-            capture_ready=True,
-        )
-        local_mic_runtime_state["discord_suppression_active"] = should_suppress
-        return should_suppress
-    should_suppress = bool(
-        local_mic_recent
-        and should_route_discord_user_to_local_mic(
-            member_id,
-            preferred_user_ids=LOCAL_MIC_DISCORD_USER_IDS,
+    decision = decide_local_mic_discord_suppression(
+        LocalMicDiscordSuppressionInput(
+            member_id=member_id,
+            source=source,
+            input_mode=input_mode,
             capture_ready=capture_ready,
-        )
+            local_mic_recent=local_mic_recent,
+            preferred_user_ids=LOCAL_MIC_DISCORD_USER_IDS,
+        ),
+        normalize_voice_input_mode=normalize_voice_input_mode,
+        should_route_discord_user_to_local_mic=should_route_discord_user_to_local_mic,
     )
-    local_mic_runtime_state["discord_suppression_active"] = should_suppress
-    return should_suppress
+    local_mic_runtime_state["input_mode"] = decision.normalized_input_mode
+    local_mic_runtime_state["discord_suppression_active"] = decision.suppress
+    return decision.suppress
 
 
 def set_voice_input_mode(mode: str | None) -> str:
@@ -6203,10 +6902,7 @@ async def restore_last_voice_channel(guild: discord.Guild | None = None, *, forc
 
 
 async def stop_active_tts_playback(guild_id: int | None, *, reason: str = "interrupt") -> None:
-    stopped = await stop_tracked_tts_playback(
-        tracker=tts_playback_tracker,
-        guild_id=guild_id,
-    )
+    stopped = await tts_playback_manager.cancel_guild(guild_id)
     if not stopped:
         return
     log_turn_event("tts_interrupt", guild_id=guild_id, reason=reason)
@@ -6245,48 +6941,27 @@ async def play_cached_answer_audio(
             source_type="CachedWaveAudioSource",
         ) or log_voice_latency(metrics, "first_packet_sent_logged", "캐시 오디오 첫 패킷 송신 시간"),
     )
-    playback_task = asyncio.current_task()
-    start_tts_playback_tracking(
-        tracker=tts_playback_tracker,
-        guild_id=guild_id,
-        mark_speaking=True,
-        vc=vc,
-        playback_source=source,
-        playback_task=playback_task,
+    log_turn_event(
+        "cached_audio_playback_selected",
         turn_id=turn_id,
         session_key=session_key,
-        source_type=type(source).__name__,
+        path=str(path),
+        answer=clean_text(answer),
     )
-
-    completed = False
-    try:
-        log_turn_event(
-            "cached_audio_playback_selected",
-            turn_id=turn_id,
-            session_key=session_key,
-            path=str(path),
-            answer=clean_text(answer),
-        )
-        await play_audio_source(
+    await tts_playback_manager.play_source_once(
+        TtsSourcePlaybackRequest(
             vc,
             source,
+            guild_id=guild_id,
+            turn_id=turn_id,
+            session_key=session_key,
+            metrics=metrics,
             trace_payload={
-                "turn_id": turn_id,
-                "chunk_index": 1,
-                "session_key": session_key,
-                "source_type": type(source).__name__,
                 "cached_audio_path": str(path),
             },
+            cleanup_source=True,
         )
-        completed = True
-    finally:
-        source.cleanup()
-        mark_tts_playback_summary_state(metrics, started=completed, completed=completed)
-        finish_tts_playback_tracking(
-            tracker=tts_playback_tracker,
-            guild_id=guild_id,
-            mark_audio_end=True,
-        )
+    )
     return True
 
 
@@ -6300,6 +6975,8 @@ async def speak_answer(
     metrics: dict | None = None,
 ) -> None:
     guild_id = getattr(getattr(vc, "guild", None), "id", None)
+    if turn_scope is not None:
+        turn_scope.transition(TurnState.TTS_RUNNING, reason="speak_answer")
 
     if await play_cached_answer_audio(
         vc,
@@ -6325,40 +7002,34 @@ async def speak_answer(
                 session_key=session_key,
             ) or log_voice_latency(metrics, "first_packet_sent_logged", "첫 패킷 송신 시간"),
         )
-        completed = False
-        try:
-            mark_tts_speaking(tracker=tts_playback_tracker, guild_id=guild_id)
-            await play_audio_source(
+        await tts_playback_manager.play_source_once(
+            TtsSourcePlaybackRequest(
                 vc,
                 source,
-                trace_payload={
-                    "turn_id": turn_id,
-                    "chunk_index": 1,
-                    "session_key": session_key,
-                    "source_type": type(source).__name__,
-                },
-            )
-            completed = True
-        finally:
-            mark_tts_playback_summary_state(metrics, started=completed, completed=completed)
-            finish_tts_playback_tracking(
-                tracker=tts_playback_tracker,
                 guild_id=guild_id,
-                mark_audio_end=True,
-                clear_registry=False,
+                turn_id=turn_id,
+                session_key=session_key,
+                metrics=metrics,
+                trace_payload={
+                },
+                clear_registry_on_finish=False,
             )
+        )
 
 
-async def _prefetch_tts_sources(
+async def stream_tts_sentences(
+    vc: discord.VoiceClient,
     sentence_queue: "asyncio.Queue[str | None]",
-    prepared_queue: "asyncio.Queue[object]",
     *,
     metrics: dict | None = None,
     turn_id: str | None = None,
     session_key: str | None = None,
     turn_scope: TurnScope | None = None,
 ) -> None:
+    guild_id = getattr(getattr(vc, "guild", None), "id", None)
     task = _attach_current_task(turn_scope)
+    if turn_scope is not None:
+        turn_scope.transition(TurnState.TTS_RUNNING, reason="stream_tts_sentences")
 
     def check_cancelled() -> None:
         if turn_scope is not None:
@@ -6374,16 +7045,16 @@ async def _prefetch_tts_sources(
             trace_payload={"source_type": "OmniVoicePCMStream"},
             on_request_start=lambda: (
                 mark_turn_stage(metrics, "tts_request_start", event_name="tts_request_start", chunk_index=chunk_index),
-                log_voice_latency(metrics, "tts_request_logged", "TTS 요청 시작 시간")
+                log_voice_latency(metrics, "tts_request_logged", "TTS request start")
             ),
-            on_response_headers=lambda: log_voice_latency(metrics, "tts_response_headers_logged", "TTS 응답 헤더 도착 시간"),
+            on_response_headers=lambda: log_voice_latency(metrics, "tts_response_headers_logged", "TTS response headers"),
             on_first_byte=lambda: (
                 mark_turn_stage(metrics, "tts_first_byte", event_name="tts_first_byte", chunk_index=chunk_index),
-                log_voice_latency(metrics, "tts_first_byte_logged", "TTS 첫 바이트 도착 시간")
+                log_voice_latency(metrics, "tts_first_byte_logged", "TTS first byte")
             ),
-            on_first_frame=lambda: log_voice_latency(metrics, "tts_first_frame_logged", "TTS 첫 프레임 공급 시간"),
+            on_first_frame=lambda: log_voice_latency(metrics, "tts_first_frame_logged", "TTS first frame"),
             on_first_packet_sent=lambda ci=chunk_index: (
-                log_voice_latency(metrics, "first_packet_sent_logged", "첫 패킷 송신 시간"),
+                log_voice_latency(metrics, "first_packet_sent_logged", "first packet sent"),
                 log_turn_event(
                     "first_packet_sent",
                     turn_id=turn_id,
@@ -6393,164 +7064,38 @@ async def _prefetch_tts_sources(
             ),
         )
 
-    def on_failure(exc: Exception) -> None:
+    def record_playback_failure(exc: Exception, *, stage: str) -> None:
         record_voice_pipeline_failure(
             "tts_playback_failed",
             exc,
             metrics,
             turn_id=turn_id,
             session_key=session_key,
-            stage="prefetch",
+            stage=stage,
         )
-
-    try:
-        await prefetch_tts_sources(
-            sentence_queue,
-            prepared_queue,
-            synthesize_source=synthesize_source,
-            ready_timeout_sec=OMNIVOICE_TIMEOUT_SEC,
-            check_cancelled=check_cancelled,
-            on_failure=on_failure,
-        )
-    finally:
-        _detach_task(turn_scope, task)
-
-
-async def stream_tts_sentences(
-    vc: discord.VoiceClient,
-    sentence_queue: "asyncio.Queue[str | None]",
-    *,
-    metrics: dict | None = None,
-    turn_id: str | None = None,
-    session_key: str | None = None,
-    turn_scope: TurnScope | None = None,
-) -> None:
-    guild_id = getattr(getattr(vc, "guild", None), "id", None)
-    did_speak = False
-    playback_completed = False
-    task = _attach_current_task(turn_scope)
 
     try:
         async with tts_lock:
-            prepared_queue: asyncio.Queue[object] = asyncio.Queue(maxsize=max(1, TTS_PREFETCH_CHUNKS))
-            playback_source = QueuedAudioSource(
-                trace_payload={
-                    "turn_id": turn_id,
-                    "session_key": session_key,
-                    "source_type": "QueuedAudioSource",
-                }
-            )
-            prefetch_task = create_turn_scoped_task(
-                _prefetch_tts_sources(
-                    sentence_queue,
-                    prepared_queue,
+            await tts_playback_manager.stream_sentences(
+                TtsStreamingPlaybackRequest(
+                    vc=vc,
+                    sentence_queue=sentence_queue,
+                    synthesize_source=synthesize_source,
+                    guild_id=guild_id,
+                    turn_id=turn_id,
+                    session_key=session_key,
                     metrics=metrics,
-                    turn_id=turn_id,
-                    session_key=session_key,
-                    turn_scope=turn_scope,
-                ),
-                turn_scope=turn_scope,
-            )
-            playback_task: asyncio.Task | None = None
-
-            def create_playback_task() -> asyncio.Task:
-                return create_turn_scoped_task(
-                    play_audio_source(
-                        vc,
-                        playback_source,
-                        trace_payload={
-                            "turn_id": turn_id,
-                            "session_key": session_key,
-                            "source_type": type(playback_source).__name__,
-                        },
-                    ),
-                    turn_scope=turn_scope,
-                )
-
-            def on_playback_started(task: asyncio.Task) -> None:
-                nonlocal did_speak, playback_task
-                did_speak = True
-                playback_task = task
-                mark_tts_playback_summary_state(metrics, started=True)
-                update_tts_playback_tracking(
-                    tracker=tts_playback_tracker,
-                    guild_id=guild_id,
-                    playback_task=playback_task,
-                )
-
-            def on_source_ready() -> None:
-                if guild_id is not None and not did_speak:
-                    mark_tts_speaking(tracker=tts_playback_tracker, guild_id=guild_id)
-
-            def on_prepared_failure(item: Exception) -> None:
-                record_voice_pipeline_failure(
-                    "tts_playback_failed",
-                    item,
-                    metrics,
-                    turn_id=turn_id,
-                    session_key=session_key,
-                    stage="prepared_exception",
-                )
-
-            playback_queue = PreparedTtsPlaybackQueue(
-                prepared_queue,
-                playback_source,
-                turn_id=turn_id,
-                session_key=session_key,
-                lookahead_chunks=TTS_PLAYBACK_START_LOOKAHEAD_CHUNKS,
-                lookahead_timeout_ms=TTS_PLAYBACK_START_LOOKAHEAD_TIMEOUT_MS,
-                log=print,
-                on_source_ready=on_source_ready,
-                on_failure=on_prepared_failure,
-            )
-            playback_starter = PreparedPlaybackStarter(
-                playback_queue,
-                create_playback_task=create_playback_task,
-                on_started=on_playback_started,
-                log=print,
-            )
-
-            def check_cancelled() -> None:
-                if turn_scope is not None:
-                    turn_scope.raise_if_cancelled()
-
-            start_tts_playback_tracking(
-                tracker=tts_playback_tracker,
-                guild_id=guild_id,
-                vc=vc,
-                sentence_queue=sentence_queue,
-                prepared_queue=prepared_queue,
-                playback_source=playback_source,
-                prefetch_task=prefetch_task,
-                playback_task=playback_task,
-                turn_id=turn_id,
-                session_key=session_key,
-            )
-            try:
-                await drain_prepared_tts_playback(
-                    prepared_queue,
-                    playback_queue,
-                    start_playback_once=playback_starter.start_once,
-                    get_playback_task=playback_starter.get_task,
+                    ready_timeout_sec=OMNIVOICE_TIMEOUT_SEC,
+                    prefetch_chunks=TTS_PREFETCH_CHUNKS,
+                    lookahead_chunks=TTS_PLAYBACK_START_LOOKAHEAD_CHUNKS,
+                    lookahead_timeout_ms=TTS_PLAYBACK_START_LOOKAHEAD_TIMEOUT_MS,
+                    create_task=lambda coro: create_turn_scoped_task(coro, turn_scope=turn_scope),
                     check_cancelled=check_cancelled,
+                    log=print,
+                    on_prefetch_failure=lambda exc: record_playback_failure(exc, stage="prefetch"),
+                    on_prepared_failure=lambda exc: record_playback_failure(exc, stage="prepared_exception"),
                 )
-                playback_completed = did_speak
-            finally:
-                mark_tts_playback_summary_state(
-                    metrics,
-                    started=did_speak,
-                    completed=playback_completed,
-                )
-                await cleanup_tts_stream_tasks(
-                    playback_source=playback_source,
-                    playback_task=playback_task,
-                    prefetch_task=prefetch_task,
-                )
-                finish_tts_playback_tracking(
-                    tracker=tts_playback_tracker,
-                    guild_id=guild_id,
-                    mark_audio_end=did_speak,
-                )
+            )
     finally:
         _detach_task(turn_scope, task)
 
@@ -6629,7 +7174,7 @@ async def build_first_response(
     lightweight_persona_turn = is_casual_call_or_status_question(guided_user_text)
     live_minecraft_state = None if lightweight_persona_turn else await observe_live_minecraft_state(guild_id)
     runtime_status_context = "" if lightweight_persona_turn else await build_runtime_status_context()
-    final_user_text = f"{guided_user_text}\n\n{build_main_response_guidance(cognitive_state, source=source, user_text=guided_user_text, session_key=session_key, guild_id=guild_id, minecraft_state=live_minecraft_state, runtime_status_context=runtime_status_context)}"
+    final_user_text = f"{guided_user_text}\n\n{build_main_response_guidance(cognitive_state, source=source, user_text=guided_user_text, session_key=session_key, guild_id=guild_id, minecraft_state=live_minecraft_state, runtime_status_context=runtime_status_context, route_decision=route_decision)}"
 
     payload = {
         "model": MODEL_NAME,
@@ -6670,6 +7215,14 @@ async def build_first_response(
             print(f"LLM 1단계 응답 본문이 비어 있어서 fallback 사용, finish_reason={finish_reason}")
             answer = fallback_answer_for(user_text)
 
+        answer, question_shape_meta = enforce_question_limits(answer, route_decision)
+        record_question_trace(
+            route_decision=route_decision,
+            answer=answer,
+            shape_meta=question_shape_meta,
+            metrics=metrics,
+            cooldown_hit=bool((metrics or {}).get("meta", {}).get("question_cooldown_hit")) if isinstance(metrics, dict) else False,
+        )
         first_response, followup_seed = split_first_response_and_followup(answer)
         return build_answer_payload_from_text(first_response or answer), followup_seed, gated_state
 
@@ -6781,6 +7334,7 @@ async def ask_llm_once(
     source: str = "text",
     debug_text: str | None = None,
     metrics: dict | None = None,
+    record_question_trace_enabled: bool = True,
 ) -> str:
     log_voice_stage(metrics, "LLM 2단계 요청 시작", extra=f"source={source} user_text_len={len(clean_text(user_text))}")
     messages, cognitive_state, route_decision, gated_state, awaiting_user_reply = await prepare_route_context(
@@ -6837,7 +7391,7 @@ async def ask_llm_once(
     lightweight_persona_turn = is_casual_call_or_status_question(guided_user_text)
     live_minecraft_state = None if lightweight_persona_turn else await observe_live_minecraft_state(guild_id)
     runtime_status_context = "" if lightweight_persona_turn else await build_runtime_status_context()
-    final_user_text = f"{guided_user_text}\n\n{build_main_response_guidance(cognitive_state, source=source, user_text=guided_user_text, session_key=session_key, guild_id=guild_id, minecraft_state=live_minecraft_state, runtime_status_context=runtime_status_context)}"
+    final_user_text = f"{guided_user_text}\n\n{build_main_response_guidance(cognitive_state, source=source, user_text=guided_user_text, session_key=session_key, guild_id=guild_id, minecraft_state=live_minecraft_state, runtime_status_context=runtime_status_context, route_decision=route_decision)}"
     payload = build_main_llm_payload(
         model_name=MODEL_NAME,
         messages=messages,
@@ -6851,6 +7405,15 @@ async def ask_llm_once(
         payload=payload,
         user_text=user_text,
     )
+    answer, question_shape_meta = enforce_question_limits(answer, route_decision)
+    if record_question_trace_enabled:
+        record_question_trace(
+            route_decision=route_decision,
+            answer=answer,
+            shape_meta=question_shape_meta,
+            metrics=metrics,
+            cooldown_hit=bool((metrics or {}).get("meta", {}).get("question_cooldown_hit")) if isinstance(metrics, dict) else False,
+        )
     if answer_source == "reasoning":
         log_voice_stage(metrics, "LLM 2단계 요청 끝남", extra=f"reasoning_len={len(answer)}")
     elif answer_source.startswith("fallback"):
@@ -6893,12 +7456,27 @@ async def emit_stream_delta_chunks(
     *,
     speech_chunker: SpeechChunker,
     on_sentence: Callable[[str], Awaitable[None]] | None,
+    question_stream_state: dict[str, int] | None = None,
 ) -> bool:
     emitted_any = False
     if on_sentence is not None:
         for chunk in speech_chunker.push(delta_text, max_chunks=1):
             if not chunk:
                 continue
+            if question_stream_state is not None:
+                chunk, question_meta = filter_stream_chunk_for_question_limits(
+                    chunk,
+                    max_question_count=int(question_stream_state.get("max_question_count", 0)),
+                    question_count_so_far=int(question_stream_state.get("question_count", 0)),
+                )
+                question_stream_state["question_count"] = int(question_stream_state.get("question_count", 0)) + int(
+                    question_meta.get("question_count_after", 0) or 0
+                )
+                question_stream_state["question_removed_count"] = int(question_stream_state.get("question_removed_count", 0)) + (
+                    1 if question_meta.get("question_removed") else 0
+                )
+                if not chunk:
+                    continue
             emitted_any = True
             await on_sentence(chunk)
     return emitted_any
@@ -6910,6 +7488,7 @@ async def flush_streamed_answer_chunks(
     speech_chunker: SpeechChunker,
     on_sentence: Callable[[str], Awaitable[None]] | None,
     emitted_any: bool,
+    question_stream_state: dict[str, int] | None = None,
 ) -> None:
     if on_sentence is None:
         return
@@ -6919,6 +7498,20 @@ async def flush_streamed_answer_chunks(
     for chunk in ready_chunks:
         if not chunk:
             continue
+        if question_stream_state is not None:
+            chunk, question_meta = filter_stream_chunk_for_question_limits(
+                chunk,
+                max_question_count=int(question_stream_state.get("max_question_count", 0)),
+                question_count_so_far=int(question_stream_state.get("question_count", 0)),
+            )
+            question_stream_state["question_count"] = int(question_stream_state.get("question_count", 0)) + int(
+                question_meta.get("question_count_after", 0) or 0
+            )
+            question_stream_state["question_removed_count"] = int(question_stream_state.get("question_removed_count", 0)) + (
+                1 if question_meta.get("question_removed") else 0
+            )
+            if not chunk:
+                continue
         await on_sentence(chunk)
 
 
@@ -7119,7 +7712,7 @@ CONTROL_PAGE_COMMANDS: list[dict[str, str]] = [
     {"command": "/minecraft disconnect", "template": "/minecraft disconnect", "summary": "Voyager Minecraft 모드 중지", "visibility": "minecraft-active"},
     {"command": "/minecraft goal <goal>", "template": "/minecraft goal ", "summary": "Minecraft 목표를 새 값으로 변경", "visibility": "minecraft-active"},
     {"command": "/autonomy status", "template": "/autonomy status", "summary": "Evelyn 자율 행동 엔진 상태 보기", "visibility": "always"},
-    {"command": "/shutdown", "template": "/shutdown", "summary": "Shut down the full Evelyn stack", "visibility": "always"},
+    {"command": "/shutdown", "template": "/shutdown", "summary": "Shut down Evelyn runtime", "visibility": "always"},
     {"command": "/windows", "template": "/windows", "summary": "List background console windows and their state", "visibility": "always"},
     {"command": "/show <window>", "template": "/show ", "summary": f"Bring one background window to front ({control_page_window_choices_text()})", "visibility": "always"},
     {"command": "/ui <action> <panel>", "template": "/ui ", "summary": "Control page panels: show, hide, toggle, focus, reset", "visibility": "always"},
@@ -7241,8 +7834,20 @@ def control_page_local_url() -> str:
     return f"http://{CONTROL_PAGE_HOST}:{CONTROL_PAGE_PORT}/"
 
 
-def control_page_session_key(guild_id: int) -> str:
+def control_page_session_key(guild_id: int | None) -> str:
+    if guild_id is None or int(guild_id) == LOCAL_CONTROL_GUILD_ID:
+        return "control-page:local"
     return f"control-page:{guild_id}"
+
+
+def control_page_effective_guild_id(guild: discord.Guild | None) -> int:
+    return int(getattr(guild, "id", LOCAL_CONTROL_GUILD_ID) or LOCAL_CONTROL_GUILD_ID)
+
+
+def control_page_effective_guild_name(guild: discord.Guild | None) -> str:
+    if guild is None:
+        return LOCAL_CONTROL_GUILD_NAME
+    return clean_text(str(getattr(guild, "name", "") or "")) or LOCAL_CONTROL_GUILD_NAME
 
 
 def build_control_page_runtime_summary(
@@ -8485,12 +9090,27 @@ def build_control_page_ui_reply(text: str) -> str:
     return f"Control page UI command queued: {normalized_action} {panel_id}."
 
 
-async def execute_control_page_command(guild: discord.Guild, text: str) -> str:
+async def execute_control_page_command(guild: discord.Guild | None, text: str) -> str:
     normalized = clean_text(text).lower()
     if normalized in {"/", "/help"}:
         return build_control_page_help_reply()
     if normalized == "/ui" or normalized.startswith("/ui "):
         return build_control_page_ui_reply(text)
+    if guild is None:
+        if normalized == "/status":
+            services = await get_control_page_runtime_services(force=True)
+            return build_control_page_runtime_summary(
+                bot_ready=True,
+                voyager_ready=bool(services.get("voyagerReady")),
+                codex_required=bool(services.get("codexRequired")),
+                codex_ready=services.get("codexReady"),
+            )
+        if normalized in {"/shutdown", "/quit", "/exit"}:
+            if schedule_evelyn_local_shutdown():
+                return "Local Evelyn shutdown started. Only Evelyn local runtime windows and ports will be stopped."
+            asyncio.create_task(shutdown_bot_process())
+            return "Local shutdown helper failed, so only the local Evelyn process is stopping."
+        return "This command needs Discord. Local mode supports /help, /ui, /status, and normal chat."
     if normalized == "/status":
         return await build_control_page_status_reply(guild)
     if normalized in {"/voice status", "/voice"}:
@@ -8506,7 +9126,7 @@ async def execute_control_page_command(guild: discord.Guild, text: str) -> str:
         return f"Voice reconnect failed: {detail}"
     if normalized in {"/shutdown", "/quit", "/exit"}:
         if schedule_evelyn_stack_shutdown():
-            return "Full Evelyn stack shutdown started. Supervisors, bot, LLM, TTS, Voyager, and WSL will stop."
+            return "Full Evelyn stack shutdown started. Supervisors, bot, LLM, TTS, Voyager, and Evelyn-owned WSL services will stop."
         asyncio.create_task(shutdown_bot_process())
         return "Full-stack shutdown helper failed, so only the bot process is stopping."
     if normalized == "/inventory":
@@ -8543,12 +9163,14 @@ async def execute_control_page_command(guild: discord.Guild, text: str) -> str:
     return "지원하지 않는 명령어야. /help 로 현재 페이지 명령어를 확인해줘."
 
 
-async def answer_control_page_text(guild: discord.Guild, user_text: str) -> str:
-    session_key = control_page_session_key(guild.id)
+async def answer_control_page_text(guild: discord.Guild | None, user_text: str) -> str:
+    guild_id = control_page_effective_guild_id(guild)
+    session_key = control_page_session_key(guild_id)
     state_lock = session_locks.setdefault(session_key, asyncio.Lock())
     topic_id = build_topic_id(user_text, session_topic_ids.get(session_key, ""))
+    turn_id = ""
     async with state_lock:
-        start_new_turn(session_key)
+        turn_id = start_new_turn(session_key)
         update_session_state(
             session_key,
             speaker="user",
@@ -8556,31 +9178,72 @@ async def answer_control_page_text(guild: discord.Guild, user_text: str) -> str:
             topic_id=topic_id,
             user_text=user_text,
         )
-        get_conversation_history(session_key=session_key, guild_id=guild.id)
-    answer = await ask_llm_streaming(
-        user_text,
-        guild_id=guild.id,
-        session_key=session_key,
-        source="text",
-        debug_text=user_text,
-    )
-    plain_answer = strip_omnivoice_tags(answer) or answer
-    awaiting_reply = bool(session_state_snapshot(session_key).get("awaiting_user_reply"))
-    async with state_lock:
-        append_history(session_key, user_text, plain_answer, guild_id=guild.id)
-        mark_session_active(
-            session_key,
-            ttl_sec=ACTIVE_CONVERSATION_TEXT_QUESTION_SEC if awaiting_reply else ACTIVE_CONVERSATION_TEXT_SEC,
-            speaker="assistant",
-            awaiting_user_reply=awaiting_reply,
-            topic_id=topic_id,
-            answer_text=plain_answer,
-            user_text=user_text,
+        get_conversation_history(session_key=session_key, guild_id=guild_id)
+    turn_scope = TurnScope(turn_id)
+    replace_room_turn_scope(session_key, turn_scope)
+    turn_task = _attach_current_task(turn_scope)
+    text_metrics: dict[str, Any] = {
+        "started_at": time.monotonic(),
+        "meta": {
+            "turn_id": turn_id,
+            "source": "control_page",
+            "session_key": session_key,
+            "guild_id": guild_id,
+            "topic_id": topic_id,
+            "turn_type": "control_page_text",
+            "selected_path": "control_page_local",
+            "needs_tts": False,
+        },
+        "marks": {},
+    }
+    answer = ""
+    text_turn_summary_logged = False
+    try:
+        answer = await ask_llm_streaming(
+            user_text,
+            guild_id=guild_id,
+            session_key=session_key,
+            source="control_page",
+            debug_text=user_text,
+            metrics=text_metrics,
+            turn_scope=turn_scope,
         )
-    return format_display_text(answer, session_key=session_key).strip() or fallback_answer_for(user_text)
+        plain_answer = strip_omnivoice_tags(answer) or answer
+        awaiting_reply = bool(session_state_snapshot(session_key).get("awaiting_user_reply"))
+        async with state_lock:
+            append_history(session_key, user_text, plain_answer, guild_id=guild_id)
+            mark_session_active(
+                session_key,
+                ttl_sec=ACTIVE_CONVERSATION_TEXT_QUESTION_SEC if awaiting_reply else ACTIVE_CONVERSATION_TEXT_SEC,
+                speaker="assistant",
+                awaiting_user_reply=awaiting_reply,
+                topic_id=topic_id,
+                answer_text=plain_answer,
+                user_text=user_text,
+            )
+        log_voice_bottleneck_summary(
+            text_metrics,
+            label="text_turn",
+            extra=f"control_page=true chars={len(format_display_text(answer, session_key=session_key).strip())}",
+            event_name="text_turn_summary",
+        )
+        text_turn_summary_logged = True
+        return format_display_text(answer, session_key=session_key).strip() or fallback_answer_for(user_text)
+    finally:
+        if text_metrics and not text_turn_summary_logged:
+            text_metrics.setdefault("meta", {})["error_layer"] = "control_page_text"
+            text_metrics.setdefault("meta", {}).setdefault("error", "control_page_text_aborted_before_summary")
+            log_voice_bottleneck_summary(
+                text_metrics,
+                label="text_turn",
+                extra="control_page=true error=true",
+                event_name="text_turn_summary",
+            )
+        _detach_task(turn_scope, turn_task)
+        clear_room_turn_scope(session_key, turn_scope)
 
 
-async def handle_control_page_input(guild: discord.Guild, text: str) -> str:
+async def handle_control_page_input(guild: discord.Guild | None, text: str) -> str:
     if clean_text(text).startswith("/"):
         return await execute_control_page_command(guild, text)
     return await answer_control_page_text(guild, text)
@@ -8624,7 +9287,7 @@ def build_control_page_boot_progress(
         "router_service": bool(services.get("routerReady")),
         "sub_service": bool(services.get("subReady")),
         "tts_service": bool(services.get("ttsReady")),
-        "discord_gateway": bool(bot.is_ready() and guild_available),
+        "discord_gateway": bool((not DISCORD_ENABLED) or (bot.is_ready() and guild_available)),
         "control_api": control_page_runner is not None,
         "opus": startup_component_done("opus"),
         "stt": startup_component_done("stt"),
@@ -8666,15 +9329,16 @@ def build_control_page_boot_progress(
 async def build_control_page_state(guild: discord.Guild | None) -> dict[str, Any]:
     runtime_services = await get_control_page_runtime_services()
     if guild is None:
+        local_mode = bool(not DISCORD_ENABLED)
         commands = build_control_page_commands(minecraft_session_active=False)
-        boot_progress = build_control_page_boot_progress(runtime_services, guild_available=False)
+        boot_progress = build_control_page_boot_progress(runtime_services, guild_available=local_mode)
         return {
-            "ok": False,
+            "ok": local_mode,
             "generatedAt": time.time(),
             "localUrl": control_page_local_url(),
             "bootProgress": boot_progress,
             "ui": build_control_page_ui_state(
-                guild_available=False,
+                guild_available=local_mode,
                 listening=False,
                 speaking=False,
                 minecraft_running=False,
@@ -8682,9 +9346,10 @@ async def build_control_page_state(guild: discord.Guild | None) -> dict[str, Any
                 minecraft_snapshot_stale=False,
                 minecraft_last_error="",
             ),
+            "guild": {"id": LOCAL_CONTROL_GUILD_ID, "name": LOCAL_CONTROL_GUILD_NAME} if local_mode else None,
             "commands": commands,
             "allCommands": build_control_page_all_commands(),
-            "chat": {"messages": []},
+            "chat": {"messages": get_control_page_chat_log(LOCAL_CONTROL_GUILD_ID) if local_mode else []},
             "voice": {
                 "channelName": "없음",
                 "listening": False,
@@ -8698,6 +9363,8 @@ async def build_control_page_state(guild: discord.Guild | None) -> dict[str, Any
                 "sttModel": STT_MODEL_NAME,
                 "inflightLlmRequests": inflight_llm_requests,
                 "ttsBacklog": tracked_tts_playback_count(tts_playback_tracker),
+                "modelCallMetrics": summarize_model_call_metrics(),
+                "questionMetrics": summarize_question_metrics(),
                 "localMic": serialize_local_mic_runtime_state(),
                 "voicePipeline": build_voice_pipeline_snapshot(guild),
                 "services": runtime_services,
@@ -8762,6 +9429,8 @@ async def build_control_page_state(guild: discord.Guild | None) -> dict[str, Any
             "sttModel": STT_MODEL_NAME,
             "inflightLlmRequests": inflight_llm_requests,
             "ttsBacklog": tracked_tts_playback_count(tts_playback_tracker),
+            "modelCallMetrics": summarize_model_call_metrics(),
+            "questionMetrics": summarize_question_metrics(),
             "voiceDebugAudio": VOICE_DEBUG_SAVE_AUDIO,
             "localMicTarget": local_mic_target,
             "localMic": serialize_local_mic_runtime_state(),
@@ -8888,22 +9557,31 @@ async def control_page_chat_handler(request: web.Request) -> web.StreamResponse:
     if not text:
         return control_page_json_response({"ok": False, "error": "empty_text"}, status=400)
     guild = select_control_page_guild(parse_control_page_guild_id((payload or {}).get("guildId")))
-    if guild is None:
+    if guild is None and DISCORD_ENABLED:
         return control_page_json_response({"ok": False, "error": "guild_not_available"}, status=503)
-    append_control_page_chat_log(guild.id, "user", "정훈", text)
+    effective_guild_id = control_page_effective_guild_id(guild)
+    append_control_page_chat_log(effective_guild_id, "user", "정훈", text)
     try:
         reply_text = await handle_control_page_input(guild, text)
     except Exception as exc:
         reply_text = f"처리 중 오류가 났어: {exc}"
-    append_control_page_chat_log(guild.id, "assistant", "Evelyn", reply_text)
+    append_control_page_chat_log(effective_guild_id, "assistant", "Evelyn", reply_text)
     normalized = clean_text(text).lower()
     needs_fresh_snapshot = (
         normalized.startswith("/minecraft")
         or normalized in {"/inventory", "/voyager stats", "/minecraft status", "/mc-status"}
     )
-    await ensure_control_page_minecraft_snapshot(guild.id, force=needs_fresh_snapshot, wait=needs_fresh_snapshot)
+    if guild is not None:
+        await ensure_control_page_minecraft_snapshot(guild.id, force=needs_fresh_snapshot, wait=needs_fresh_snapshot)
     if normalized.startswith("/minecraft"):
         await get_control_page_runtime_services(force=True)
+    state = await build_control_page_state(guild)
+    return control_page_json_response({"ok": True, "reply": reply_text, "state": state})
+
+
+async def control_page_shutdown_handler(request: web.Request) -> web.StreamResponse:
+    guild = select_control_page_guild(parse_control_page_guild_id(request.query.get("guildId")))
+    reply_text = await handle_control_page_input(guild, "/shutdown")
     state = await build_control_page_state(guild)
     return control_page_json_response({"ok": True, "reply": reply_text, "state": state})
 
@@ -8928,8 +9606,10 @@ async def start_control_page_server() -> None:
         app.router.add_get(CONTROL_PAGE_MINECRAFT_ICON_ROUTE + "/{item_name}", control_page_minecraft_item_icon_handler)
         app.router.add_get("/api/control-page/state", control_page_state_handler)
         app.router.add_post("/api/control-page/chat", control_page_chat_handler)
+        app.router.add_post("/api/control-page/shutdown", control_page_shutdown_handler)
         app.router.add_options("/api/control-page/state", control_page_state_handler)
         app.router.add_options("/api/control-page/chat", control_page_chat_handler)
+        app.router.add_options("/api/control-page/shutdown", control_page_shutdown_handler)
         runner = web.AppRunner(app, access_log=None)
         try:
             await runner.setup()
@@ -9186,6 +9866,8 @@ async def prepare_route_context(
     metrics: dict | None = None,
     turn_scope: TurnScope | None = None,
 ) -> tuple[list[dict[str, Any]], dict | None, RouteDecision, dict | None, bool]:
+    if turn_scope is not None:
+        turn_scope.transition(TurnState.ROUTING, reason="prepare_route_context")
     messages, cognitive_state, _route, context_policy = await prepare_llm_messages(
         user_text,
         guild_id=guild_id,
@@ -9221,8 +9903,28 @@ async def prepare_route_context(
         response_mode=clean_text(context_policy.response_mode) or route_decision.response_mode,
         priority=clean_text(context_policy.priority) or route_decision.priority,
     )
+    route_question_policy = None
     if metrics is not None:
+        maybe_policy = metrics.setdefault("meta", {}).get("route_question_policy")
+        route_question_policy = maybe_policy if isinstance(maybe_policy, dict) else None
+    route_decision, question_cooldown_hit = apply_fast_path_question_policy(
+        route_decision,
+        user_text=user_text,
+        session_key=session_key,
+        route_meta_question_policy=route_question_policy,
+    )
+    if metrics is not None:
+        metrics.setdefault("meta", {})["question_cooldown_hit"] = bool(question_cooldown_hit)
         metrics.setdefault("meta", {})["route_policy"] = route_decision_policy_dict(route_decision)
+        metrics.setdefault("meta", {})["execution_budget"] = build_turn_execution_budget(
+            router_timeout_sec=ROUTER_ROUTE_TIMEOUT_SEC,
+            context_timeout_sec=COGNITIVE_TIMEOUT_SEC,
+            memory_timeout_sec=COGNITIVE_TIMEOUT_SEC,
+            fallback_route=route_decision.route,
+            router_enabled=ROUTER_LLM_ENABLED,
+            context_policy=context_policy,
+            route_decision=route_decision,
+        ).to_dict()
     gated_state = apply_ask_gating(cognitive_state, source=source) if cognitive_state is not None else None
     awaiting_user_reply = should_await_user_reply_for_route(
         gated_state=gated_state,
@@ -9350,6 +10052,8 @@ async def execute_main_llm_streaming_turn(
     cognitive_state = route_context.cognitive_state
     route_decision = route_context.route_decision
     on_sentence = request.on_sentence if route_decision.needs_tts else None
+    if turn_scope is not None:
+        turn_scope.transition(TurnState.LLM_RUNNING, reason="execute_main_llm_streaming_turn")
     if metrics is not None:
         metrics.setdefault("meta", {})["needs_tts"] = bool(route_decision.needs_tts and request.on_sentence is not None)
 
@@ -9362,7 +10066,7 @@ async def execute_main_llm_streaming_turn(
     needs_runtime_status_context = not lightweight_persona_turn and route_decision.needs_runtime_state
     live_minecraft_state = await observe_live_minecraft_state(guild_id) if needs_live_minecraft_state else None
     runtime_status_context = await build_runtime_status_context() if needs_runtime_status_context else ""
-    final_user_text = f"{guided_user_text}\n\n{build_main_response_guidance(cognitive_state, source=source, user_text=guided_user_text, session_key=session_key, guild_id=guild_id, minecraft_state=live_minecraft_state, runtime_status_context=runtime_status_context)}"
+    final_user_text = f"{guided_user_text}\n\n{build_main_response_guidance(cognitive_state, source=source, user_text=guided_user_text, session_key=session_key, guild_id=guild_id, minecraft_state=live_minecraft_state, runtime_status_context=runtime_status_context, route_decision=route_decision)}"
     mark_turn_stage(
         metrics,
         "prompt_built",
@@ -9386,8 +10090,14 @@ async def execute_main_llm_streaming_turn(
     raw_parts: list[str] = []
     reasoning_parts: list[str] = []
     speech_chunker = build_stream_speech_chunker(metrics=metrics)
+    question_stream_state = {
+        "max_question_count": max(0, min(1, int(route_decision.max_question_count or 0))),
+        "question_count": 0,
+        "question_removed_count": 0,
+    } if on_sentence is not None else None
     emitted_any = False
     llm_started_at = time.monotonic()
+    main_first_token_ms: float | None = None
 
     inflight_llm_requests += 1
     try:
@@ -9429,14 +10139,24 @@ async def execute_main_llm_streaming_turn(
                         session_memory_key=session_memory_key,
                         source=source,
                         debug_text=debug_text,
+                        record_question_trace_enabled=False,
                     )
+                answer, question_shape_meta = enforce_question_limits(answer, route_decision)
+                record_question_trace(
+                    route_decision=route_decision,
+                    answer=answer,
+                    shape_meta=question_shape_meta,
+                    metrics=metrics,
+                    cooldown_hit=bool((metrics or {}).get("meta", {}).get("question_cooldown_hit")) if isinstance(metrics, dict) else False,
+                )
                 if on_first_chunk is not None:
+                    main_first_token_ms = max(0.0, (time.monotonic() - llm_started_at) * 1000.0)
                     mark_turn_stage(
                         metrics,
                         "llm_first_chunk",
                         event_name="llm_first_chunk",
                         source_mode=source,
-                        since_request_ms=max(0.0, (time.monotonic() - llm_started_at) * 1000.0),
+                        since_request_ms=main_first_token_ms,
                     )
                     on_first_chunk()
                     on_first_chunk = None
@@ -9446,6 +10166,20 @@ async def execute_main_llm_streaming_turn(
                 )
                 if metrics is not None:
                     metrics.setdefault("marks", {})["llm_done"] = (time.monotonic() - float(metrics.get("started_at", time.monotonic()))) * 1000.0
+                record_model_call_trace(
+                    model_role="main",
+                    purpose="main_response",
+                    hot_path=True,
+                    started_at=llm_started_at,
+                    success=True,
+                    metrics=metrics,
+                    first_token_ms=main_first_token_ms,
+                    model_name=MODEL_NAME,
+                    endpoint=LLM_SERVER_URL,
+                    session_key=session_key,
+                    source=source,
+                    guild_id=guild_id,
+                )
                 return answer
 
             async for raw_line in resp.content:
@@ -9466,12 +10200,13 @@ async def execute_main_llm_streaming_turn(
                     continue
 
                 if on_first_chunk is not None:
+                    main_first_token_ms = max(0.0, (time.monotonic() - llm_started_at) * 1000.0)
                     mark_turn_stage(
                         metrics,
                         "llm_first_chunk",
                         event_name="llm_first_chunk",
                         source_mode=source,
-                        since_request_ms=max(0.0, (time.monotonic() - llm_started_at) * 1000.0),
+                        since_request_ms=main_first_token_ms,
                     )
                     on_first_chunk()
                     on_first_chunk = None
@@ -9481,7 +10216,25 @@ async def execute_main_llm_streaming_turn(
                     delta_text,
                     speech_chunker=speech_chunker,
                     on_sentence=on_sentence,
+                    question_stream_state=question_stream_state,
                 )) or emitted_any
+    except Exception as e:
+        record_model_call_trace(
+            model_role="main",
+            purpose="main_response",
+            hot_path=True,
+            started_at=llm_started_at,
+            success=False,
+            metrics=metrics,
+            first_token_ms=main_first_token_ms,
+            error=e,
+            model_name=MODEL_NAME,
+            endpoint=LLM_SERVER_URL,
+            session_key=session_key,
+            source=source,
+            guild_id=guild_id,
+        )
+        raise
     finally:
         inflight_llm_requests = max(0, inflight_llm_requests - 1)
 
@@ -9501,7 +10254,18 @@ async def execute_main_llm_streaming_turn(
             session_memory_key=session_memory_key,
             source=source,
             debug_text=debug_text,
+            record_question_trace_enabled=False,
         )
+    answer, question_shape_meta = enforce_question_limits(answer, route_decision)
+    record_question_trace(
+        route_decision=route_decision,
+        answer=answer,
+        shape_meta=question_shape_meta,
+        metrics=metrics,
+        cooldown_hit=bool((metrics or {}).get("meta", {}).get("question_cooldown_hit")) if isinstance(metrics, dict) else False,
+    )
+    if question_stream_state is not None and metrics is not None:
+        metrics.setdefault("meta", {})["question_stream_removed_count"] = int(question_stream_state.get("question_removed_count", 0))
 
     if turn_scope is not None:
         turn_scope.raise_if_cancelled()
@@ -9510,12 +10274,29 @@ async def execute_main_llm_streaming_turn(
         speech_chunker=speech_chunker,
         on_sentence=on_sentence,
         emitted_any=emitted_any,
+        question_stream_state=question_stream_state,
     )
+    if question_stream_state is not None and metrics is not None:
+        metrics.setdefault("meta", {})["question_stream_removed_count"] = int(question_stream_state.get("question_removed_count", 0))
 
     if metrics is not None:
         metrics.setdefault("marks", {})["llm_http_ms"] = (time.monotonic() - llm_started_at) * 1000.0
         metrics.setdefault("marks", {})["llm_done"] = (time.monotonic() - float(metrics.get("started_at", time.monotonic()))) * 1000.0
 
+    record_model_call_trace(
+        model_role="main",
+        purpose="main_response",
+        hot_path=True,
+        started_at=llm_started_at,
+        success=True,
+        metrics=metrics,
+        first_token_ms=main_first_token_ms,
+        model_name=MODEL_NAME,
+        endpoint=LLM_SERVER_URL,
+        session_key=session_key,
+        source=source,
+        guild_id=guild_id,
+    )
     return answer
 
 
@@ -9581,26 +10362,19 @@ def start_streaming_voice_delivery(
     session_key: str | None,
     turn_scope: TurnScope | None,
 ) -> StreamingVoiceDelivery:
-    sentence_queue: asyncio.Queue[str | None] = asyncio.Queue()
-    tts_sink = TTSQueueSink(sentence_queue, log=print)
-    playback_task = create_turn_scoped_task(
-        stream_tts_sentences(
-            vc,
-            sentence_queue,
+    return build_streaming_voice_delivery(
+        DiscordStreamingVoiceDeliveryRequest(
+            voice_client=vc,
             metrics=metrics,
             turn_id=turn_id,
             session_key=session_key,
             turn_scope=turn_scope,
-        ),
-        turn_scope=turn_scope,
-    )
-    return StreamingVoiceDelivery(
-        sentence_queue,
-        tts_sink,
-        playback_task,
-        metrics=metrics,
-        log_stage=log_voice_stage,
-        prefetch_chunks=TTS_PREFETCH_CHUNKS,
+            stream_tts_sentences=stream_tts_sentences,
+            create_playback_task=lambda coro, scope: create_turn_scoped_task(coro, turn_scope=scope),
+            log_stage=log_voice_stage,
+            prefetch_chunks=TTS_PREFETCH_CHUNKS,
+            log=print,
+        )
     )
 
 
@@ -9613,23 +10387,16 @@ async def execute_voice_delivery_plan(
     session_key: str | None,
     turn_scope: TurnScope | None,
 ) -> int:
-    if not delivery_plan.should_play_voice or not delivery_plan.tts_chunks:
-        return 0
-
-    delivery = start_streaming_voice_delivery(
-        vc,
-        metrics=metrics,
-        turn_id=turn_id,
-        session_key=session_key,
-        turn_scope=turn_scope,
+    return await execute_streaming_voice_delivery_plan(
+        delivery_plan,
+        start_delivery=lambda: start_streaming_voice_delivery(
+            vc,
+            metrics=metrics,
+            turn_id=turn_id,
+            session_key=session_key,
+            turn_scope=turn_scope,
+        ),
     )
-    try:
-        for chunk in delivery_plan.tts_chunks:
-            await delivery.on_chunk(chunk)
-        await delivery.close(delivery_plan.text_message or "")
-        return await delivery.finalize()
-    finally:
-        await delivery.abort()
 
 
 async def finalize_voice_answer(
@@ -9803,7 +10570,7 @@ async def stream_text_reply(
             text_message=final_text,
             split_chunks=split_tts_sentences,
         )
-        sent_message = await channel.send(final_text)
+        sent_message = (await send_discord_text(channel, final_text)).message
         return answer, sent_message, metrics, delivery_plan
     finally:
         _detach_task(turn_scope, task)
@@ -9816,8 +10583,8 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes, 
     await ensure_startup_components_ready()
     if member is None or member.bot:
         return
-    debug_meta_input = debug_meta if isinstance(debug_meta, dict) else {}
-    source = str(debug_meta_input.get("source") or "discord_voice")
+    debug_meta_input = normalize_voice_debug_meta(debug_meta)
+    source = voice_ingress_source(debug_meta_input)
     if should_drop_discord_audio_for_local_mic(getattr(member, "id", None), source=source):
         return
 
@@ -9829,11 +10596,16 @@ async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes, 
 
     guild_id = guild.id
     voice_channel_id = getattr(getattr(guild.voice_client, "channel", None), "id", None)
-    room_session_key = make_voice_room_session_key(guild_id, voice_channel_id)
-    session_key = make_voice_session_key(guild_id, voice_channel_id, member.id)
-    room_key = make_room_memory_key("voice", voice_channel_id)
-    person_key = make_person_memory_key(member.id)
-    session_memory_key = make_session_memory_key(session_key, member.id)
+    ingress = build_voice_ingress_context(
+        guild_id=guild_id,
+        voice_channel_id=voice_channel_id,
+        user_id=member.id,
+    )
+    room_session_key = ingress.room_session_key
+    session_key = ingress.session_key
+    room_key = ingress.room_key
+    person_key = ingress.person_key
+    session_memory_key = ingress.session_memory_key
     segment_id = next_segment_id(session_key)
     turn_id = new_turn_id()
     room_state = room_state_snapshot(room_session_key)
@@ -10133,21 +10905,30 @@ async def _process_member_audio_impl(
             log_voice_bottleneck_summary(metrics, label="voice_drop", extra="drop=wake_probe_error", event_name="voice_drop_summary")
             return
 
-        wake_probe = apply_stt_post_corrections(str(wake_result.get("wake_probe_text") or ""), wake_detected=False)
-        wake_confirm = apply_stt_post_corrections(str(wake_result.get("wake_confirm_text") or ""), wake_detected=False)
-        wake_detected = bool(wake_result.get("wake_detected"))
-        wake_match_mode = str(wake_result.get("wake_match_mode") or ("exact" if wake_detected else "rejected"))
-        wake_alias = clean_text(str(wake_result.get("wake_alias") or "")) or None
-        wake_reject_reason = clean_text(str(wake_result.get("wake_reject_reason") or "")) or None
+        wake_interpretation = interpret_wake_probe_result(
+            wake_result,
+            clean_text=clean_text,
+            apply_post_corrections=apply_stt_post_corrections,
+        )
+        wake_probe = wake_interpretation.probe_text
+        wake_confirm = wake_interpretation.confirm_text
+        wake_detected = wake_interpretation.wake_detected
+        wake_match_mode = wake_interpretation.wake_match_mode
+        wake_alias = wake_interpretation.wake_alias
+        wake_reject_reason = wake_interpretation.wake_reject_reason
         print(
             f"[STT RESULT][wake] probe={wake_probe!r} confirm={wake_confirm!r} detected={wake_detected} mode={wake_match_mode} alias={wake_alias!r} reject={wake_reject_reason!r}"
         )
 
         strict_confirm_required = should_require_confirm_exact_for_wake(debug_meta)
-        if strict_confirm_required and wake_match_mode != "exact":
-            wake_detected = False
-            wake_match_mode = "rejected"
-            wake_reject_reason = "unstable_audio"
+        wake_interpretation = apply_strict_wake_confirm_policy(
+            wake_interpretation,
+            strict_confirm_required=strict_confirm_required,
+        )
+        wake_detected = wake_interpretation.wake_detected
+        wake_match_mode = wake_interpretation.wake_match_mode
+        wake_alias = wake_interpretation.wake_alias
+        wake_reject_reason = wake_interpretation.wake_reject_reason
 
         log_voice_stage(
             metrics,
@@ -10160,14 +10941,15 @@ async def _process_member_audio_impl(
         )
 
         hard_drop_reasons = {"unstable_audio", "gibberish_probe", "probe_miss", "confirm_miss", "wake_probe_low_signal", "full_text_veto", "transport_corrupted"}
-        fuzzy_probe_alias = fuzzy_leading_wake_alias(wake_probe)
-        fuzzy_confirm_alias = fuzzy_leading_wake_alias(wake_confirm)
-        near_miss_wake = bool((not wake_detected) and (fuzzy_probe_alias or fuzzy_confirm_alias))
-        if near_miss_wake:
-            wake_detected = True
-            wake_match_mode = "fuzzy"
-            wake_alias = fuzzy_probe_alias or fuzzy_confirm_alias
-            wake_reject_reason = None
+        wake_interpretation = apply_fuzzy_wake_near_miss(
+            wake_interpretation,
+            fuzzy_leading_wake_alias=fuzzy_leading_wake_alias,
+        )
+        wake_detected = wake_interpretation.wake_detected
+        wake_match_mode = wake_interpretation.wake_match_mode
+        wake_alias = wake_interpretation.wake_alias
+        wake_reject_reason = wake_interpretation.wake_reject_reason
+        if wake_interpretation.near_miss:
             log_voice_stage(metrics, "웨이크 근접오타 완화", extra=f"probe={wake_probe!r} confirm={wake_confirm!r} alias={wake_alias!r}")
         if not wake_detected:
             reject_reason = wake_reject_reason or "confirm_miss"
@@ -10247,8 +11029,7 @@ async def _process_member_audio_impl(
                 return
             log_voice_stage(metrics, "웨이크 미검출이지만 본문 STT 진행", extra=f"wake_probe_text={wake_probe!r}")
 
-    tts_suppression = tts_input_suppression_reason(
-        tracker=tts_playback_tracker,
+    tts_suppression = tts_playback_manager.input_suppression_reason(
         guild_id=guild_id,
         post_tts_ignore_sec=POST_TTS_IGNORE_SEC,
     )
@@ -10269,8 +11050,7 @@ async def _process_member_audio_impl(
     )
     if should_interrupt_tts(interrupt_meta):
         await asyncio.sleep(TTS_INTERRUPT_DEBOUNCE_SEC)
-        tts_suppression = tts_input_suppression_reason(
-            tracker=tts_playback_tracker,
+        tts_suppression = tts_playback_manager.input_suppression_reason(
             guild_id=guild_id,
             post_tts_ignore_sec=POST_TTS_IGNORE_SEC,
         )
@@ -10287,28 +11067,29 @@ async def _process_member_audio_impl(
     stt_meta: dict | None = None
     partial_text = ""
     committed_partial_text = ""
-    partial_audio = build_partial_stt_window(audio16k, sampling_rate=stt_sampling_rate)
-    partial_min_samples = max(1, int(float(stt_sampling_rate) * 0.85))
-    partial_should_run = partial_audio.size >= partial_min_samples
-    if not partial_should_run:
-        metrics.setdefault("meta", {})["partial_stt_skip_reason"] = "insufficient_audio"
     try:
-        if partial_should_run:
-            partial_text, committed_partial_text = await run_blocking_stt_task(
-                lambda: get_partial_transcript(session_key, audio16k, sampling_rate=stt_sampling_rate),
-                stage="partial",
-                timeout_sec=max(3.0, min(10.0, FULL_STT_TIMEOUT_SEC * 0.5)),
-                metrics=metrics,
-            )
-        else:
-            committed_partial_text = clean_text(session_committed_stt_text.get(session_key, ""))
+        partial_result = await run_partial_stt_flow(
+            audio16k,
+            sampling_rate=stt_sampling_rate,
+            session_key=session_key,
+            timeout_sec=max(3.0, min(10.0, FULL_STT_TIMEOUT_SEC * 0.5)),
+            build_partial_stt_window=build_partial_stt_window,
+            get_partial_transcript=get_partial_transcript,
+            read_committed_text=lambda key: session_committed_stt_text.get(key or "", ""),
+            run_blocking_stt_task=run_blocking_stt_task,
+            speculate_from_committed_stt=speculate_from_committed_stt,
+            room_state=room_state_snapshot(room_session_key),
+            clean_text=clean_text,
+            metrics=metrics,
+            print_fn=print,
+        )
+        partial_text = partial_result.partial_text
+        committed_partial_text = partial_result.committed_text
         metrics.setdefault("meta", {}).update({
             "partial_stt_text": partial_text,
             "committed_stt_text": committed_partial_text,
         })
-        if partial_text:
-            print(f"[STT RESULT][partial] text={partial_text!r} committed={committed_partial_text!r}")
-        speculative = speculate_from_committed_stt(committed_partial_text or partial_text, room_state_snapshot(room_session_key))
+        speculative = partial_result.speculative_policy
         if speculative is not None:
             remember_speculative_policy(session_key, speculative)
             metrics.setdefault("meta", {})["speculative_policy"] = dict(speculative.get("policy") or {})
@@ -10316,61 +11097,34 @@ async def _process_member_audio_impl(
         print(f"[STT PARTIAL] {e}")
 
     try:
-        primary_text = await run_blocking_stt_task(
-            lambda: transcribe_audio16k_sync(audio16k, VOICE_STT_MAX_NEW_TOKENS, sampling_rate=stt_sampling_rate, stage="full"),
-            stage="full",
-            timeout_sec=max(8.0, FULL_STT_TIMEOUT_SEC),
+        full_stt_result = await run_full_stt_with_optional_rescore(
+            audio16k,
+            sampling_rate=stt_sampling_rate,
+            duration_sec=duration_sec,
+            wake_probe=wake_probe,
+            max_new_tokens=VOICE_STT_MAX_NEW_TOKENS,
+            full_timeout_sec=FULL_STT_TIMEOUT_SEC,
+            rescore_enabled=STT_FULL_RESCORING_ENABLED,
+            rescore_extra_tokens=STT_FULL_RESCORE_EXTRA_TOKENS,
+            rescore_min_audio_sec=STT_FULL_RESCORING_MIN_AUDIO_SEC,
+            rescore_min_text_len=STT_FULL_RESCORING_MIN_TEXT_LEN,
+            rescore_timeout_sec=STT_FULL_RESCORING_TIMEOUT_SEC,
+            run_blocking_stt_task=run_blocking_stt_task,
+            transcribe_audio=transcribe_audio16k_sync,
+            choose_candidate=lambda primary, rescore: choose_full_stt_candidate(primary, rescore, wake_probe=wake_probe),
+            clean_text=clean_text,
+            log_stage=log_voice_stage,
             metrics=metrics,
+            print_fn=print,
+            speaker_name=member.display_name,
         )
     except Exception as e:
         print(f"[STT] {e}")
         log_voice_stage(metrics, "본문 STT 실패", extra=repr(e))
         return
 
-    text = primary_text
-    print(f"[STT RESULT][full-primary] text={primary_text!r}")
-    clean_primary_text = clean_text(primary_text)
-    rescore_skip_reason = ""
-    if duration_sec < STT_FULL_RESCORING_MIN_AUDIO_SEC:
-        rescore_skip_reason = "audio_too_short"
-    elif len(clean_primary_text) < STT_FULL_RESCORING_MIN_TEXT_LEN:
-        rescore_skip_reason = "text_too_short"
-
-    if STT_FULL_RESCORING_ENABLED and not rescore_skip_reason:
-        log_voice_stage(metrics, "본문 STT 2차 rescoring 시작")
-        try:
-            rescore_text = await run_blocking_stt_task(
-                lambda: transcribe_audio16k_sync(
-                    audio16k,
-                    VOICE_STT_MAX_NEW_TOKENS + max(0, STT_FULL_RESCORE_EXTRA_TOKENS),
-                    sampling_rate=stt_sampling_rate,
-                    stage="full-rescore",
-                ),
-                stage="full-rescore",
-                timeout_sec=max(4.0, STT_FULL_RESCORING_TIMEOUT_SEC),
-                metrics=metrics,
-            )
-            text, stt_meta = choose_full_stt_candidate(primary_text, rescore_text, wake_probe=wake_probe)
-            print(
-                f"[STT RESCORE] speaker={member.display_name} selected={stt_meta['selected']} primary_score={stt_meta['primary_score']:.3f} rescore_score={stt_meta['rescore_score']:.3f}"
-            )
-            print(f"[STT RESULT][full-rescore] text={rescore_text!r}")
-            if stt_meta["selected"] == "rescore":
-                print(f"[STT RESCORE PICK] primary={primary_text!r} -> rescore={rescore_text!r}")
-            log_voice_stage(metrics, "본문 STT 2차 rescoring 완료", extra=f"selected={stt_meta['selected']}")
-        except Exception as e:
-            stt_meta = {"enabled": True, "selected": "primary", "rescore_error": repr(e), "primary_text": primary_text}
-            print(f"⚠️ [STT RESCORE FAIL] {e}")
-            log_voice_stage(metrics, "본문 STT 2차 rescoring 실패", extra=repr(e))
-    else:
-        stt_meta = {
-            "enabled": bool(STT_FULL_RESCORING_ENABLED),
-            "selected": "primary",
-            "primary_text": primary_text,
-            "skipped_reason": rescore_skip_reason or "disabled",
-        }
-        if rescore_skip_reason:
-            log_voice_stage(metrics, "STT rescore skip", extra=rescore_skip_reason)
+    text = full_stt_result.text
+    stt_meta = full_stt_result.stt_meta
 
     mark_turn_stage(metrics, "stt_full_done", event_name="stt_full_done", text_len=len(text))
     log_voice_stage(metrics, "본문 STT 완료", extra=f"text_len={len(text)}", key="stt_done")
@@ -10380,28 +11134,33 @@ async def _process_member_audio_impl(
         log_voice_stage(metrics, "본문 STT 빈 결과")
         return
 
-    corrected_text = apply_stt_post_corrections(text, wake_detected=wake_detected)
-    if corrected_text != text:
-        print(f"[STT CORRECT] raw={text!r} -> corrected={corrected_text!r}")
-    text = corrected_text
-    session_partial_stt_text[session_key] = clean_text(partial_text)
-    committed_text = commit_stable_transcript(session_key, new_partial_text=text)
-    transcript_result = build_transcript_result(
+    final_transcript = build_final_transcript_flow(
+        text=text,
+        partial_text=partial_text,
+        session_key=session_key,
         wake_detected=wake_detected,
         wake_match_mode=wake_match_mode,
         wake_alias=wake_alias,
-        probe_text=wake_probe,
-        confirm_text=wake_confirm,
-        reject_reason=wake_reject_reason,
-        partial_text=clean_text(partial_text),
-        committed_text=committed_text,
-        final_text=clean_text(text),
+        wake_probe=wake_probe,
+        wake_confirm=wake_confirm,
+        wake_reject_reason=wake_reject_reason,
         speaker_user_id=member.id,
         duration_sec=duration_sec,
+        room_state=room_state_snapshot(room_session_key),
+        apply_post_corrections=apply_stt_post_corrections,
+        clean_text=clean_text,
+        set_partial_text=lambda key, value: session_partial_stt_text.__setitem__(key, value),
+        commit_stable_transcript=commit_stable_transcript,
+        build_transcript_result=build_transcript_result,
+        speculate_from_committed_stt=speculate_from_committed_stt,
     )
-    speculative = speculate_from_committed_stt(committed_text, room_state_snapshot(room_session_key))
-    if speculative is not None:
-        remember_speculative_policy(session_key, speculative)
+    if final_transcript.was_corrected:
+        print(f"[STT CORRECT] raw={text!r} -> corrected={final_transcript.corrected_text!r}")
+    text = final_transcript.corrected_text
+    committed_text = final_transcript.committed_text
+    transcript_result = final_transcript.transcript_result
+    if final_transcript.speculative_policy is not None:
+        remember_speculative_policy(session_key, final_transcript.speculative_policy)
     if committed_text and len(clean_text(text)) >= len(committed_text):
         text = clean_text(text)
     print(f"[STT RESULT][full-final] text={transcript_result.final_text!r} committed={transcript_result.committed_text!r} wake_detected={transcript_result.wake_detected}")
@@ -10423,27 +11182,31 @@ async def _process_member_audio_impl(
             log_voice_stage(metrics, "짧은 STT 무시", extra=f"text={transcript_result.final_text!r}")
             return
 
-    if not owner_followup_active:
-        final_wake_alias = extract_leading_wake_alias(transcript_result.final_text)
-        if final_wake_alias is None:
-            wake_detected = False
-            wake_match_mode = "rejected"
-            wake_reject_reason = "full_text_veto"
-            register_drop_reason(
-                metrics,
-                "full_text_veto",
-                session_key=session_key,
-                room_session_key=room_session_key,
-                owner_user_id=owner_user_id,
-                wake_probe_text=wake_probe,
-                wake_confirm_text=wake_confirm,
-                final_text=transcript_result.final_text,
-            )
-            save_voice_debug_audio(guild_id, speaker_name, pcm_bytes, audio16k, wake_probe=wake_probe, final_text=transcript_result.final_text, debug_meta=debug_meta, stt_meta=stt_meta, session_key=session_key, stage_label="drop")
-            log_voice_stage(metrics, "최종 텍스트 veto", extra=f"wake_reject_reason={wake_reject_reason} text={transcript_result.final_text!r}")
-            log_voice_bottleneck_summary(metrics, label="voice_drop", extra="drop=full_text_veto", event_name="voice_drop_summary")
-            return
-        wake_alias = final_wake_alias
+    final_wake_decision = decide_final_wake_veto(
+        final_text=transcript_result.final_text,
+        owner_followup_active=owner_followup_active,
+        extract_leading_wake_alias=extract_leading_wake_alias,
+    )
+    if not final_wake_decision.accepted:
+        wake_detected = False
+        wake_match_mode = "rejected"
+        wake_reject_reason = final_wake_decision.reject_reason or "full_text_veto"
+        register_drop_reason(
+            metrics,
+            "full_text_veto",
+            session_key=session_key,
+            room_session_key=room_session_key,
+            owner_user_id=owner_user_id,
+            wake_probe_text=wake_probe,
+            wake_confirm_text=wake_confirm,
+            final_text=transcript_result.final_text,
+        )
+        save_voice_debug_audio(guild_id, speaker_name, pcm_bytes, audio16k, wake_probe=wake_probe, final_text=transcript_result.final_text, debug_meta=debug_meta, stt_meta=stt_meta, session_key=session_key, stage_label="drop")
+        log_voice_stage(metrics, "final text veto", extra=f"wake_reject_reason={wake_reject_reason} text={transcript_result.final_text!r}")
+        log_voice_bottleneck_summary(metrics, label="voice_drop", extra="drop=full_text_veto", event_name="voice_drop_summary")
+        return
+    if final_wake_decision.wake_alias is not None:
+        wake_alias = final_wake_decision.wake_alias
 
     save_voice_debug_audio(guild_id, speaker_name, pcm_bytes, audio16k, wake_probe=wake_probe, final_text=transcript_result.final_text, debug_meta=debug_meta, stt_meta=stt_meta, session_key=session_key, stage_label="final")
     print(
@@ -10618,10 +11381,16 @@ async def on_message(message: discord.Message):
         return
 
     thread_id = getattr(message.channel, "id", None) if isinstance(getattr(message.channel, "parent", None), discord.TextChannel) else None
-    session_key = make_text_session_key(message.guild.id, message.channel.id, message.author.id, thread_id=thread_id)
-    room_key = make_room_memory_key("text", message.channel.id)
-    person_key = make_person_memory_key(message.author.id)
-    session_memory_key = make_session_memory_key(session_key, message.author.id)
+    ingress = build_text_ingress_context(
+        guild_id=message.guild.id,
+        channel_id=message.channel.id,
+        user_id=message.author.id,
+        thread_id=thread_id,
+    )
+    session_key = ingress.session_key
+    room_key = ingress.room_key
+    person_key = ingress.person_key
+    session_memory_key = ingress.session_memory_key
     remember_session_followup_target(session_key, channel_id=message.channel.id, message_id=message.id)
 
     prefix = get_guild_command_prefix(message.guild.id)
@@ -10645,7 +11414,7 @@ async def on_message(message: discord.Message):
         except Exception as e:
             print("답장 확인 오류:", repr(e))
 
-    if not (is_wake_word or is_reply or is_active_session):
+    if not should_accept_text_turn(is_wake_word=is_wake_word, is_reply=is_reply, is_active_session=is_active_session):
         log_turn_event(
             "turn_drop",
             turn_id=current_turn_id(session_key),
@@ -10658,16 +11427,20 @@ async def on_message(message: discord.Message):
         await bot.process_commands(message)
         return
 
-    user_text = strip_voice_wake_word(message.content) if is_wake_word else message.content.strip()
+    attachment_context = build_discord_attachment_context(message)
+    user_text = build_text_turn_user_text(
+        message.content,
+        is_wake_word=is_wake_word,
+        strip_wake_word=strip_voice_wake_word,
+        empty_wake_text="",
+    )
     if not user_text:
         user_text = "이름만 부름. 친구처럼 짧게 반말로, 원래 하던 일을 잠깐 말하며 자연스럽게 반응해."
-    attachment_context = build_discord_attachment_context(message)
     if attachment_context:
         user_text = f"{user_text}\n\n[Attached Visual Inputs]\n{attachment_context}"
 
     state_lock = session_locks.setdefault(session_key, asyncio.Lock())
-    reply_slot_key = make_text_reply_slot_key(message.guild.id, message.channel.id, thread_id=thread_id)
-    reply_lock = reply_slot_locks.setdefault(reply_slot_key, asyncio.Lock())
+    reply_lock = reply_slot_locks.setdefault(ingress.reply_slot_key, asyncio.Lock())
 
     if reply_lock.locked():
         await message.channel.send("\u23f3 지금 다른 응답을 처리 중이야. 잠깐만.")
@@ -10952,6 +11725,35 @@ def schedule_evelyn_stack_shutdown(delay_ms: int = 3000) -> bool:
         return False
 
 
+def schedule_evelyn_local_shutdown(delay_ms: int = 1500) -> bool:
+    stop_script = PROJECT_ROOT / "evelyn_core" / "runtime" / "launchers" / "stop_evelyn_local.ps1"
+    if not stop_script.exists():
+        logging.error("Local shutdown helper is missing: %s", stop_script)
+        return False
+    try:
+        subprocess.Popen(
+            [
+                "powershell.exe",
+                "-NoLogo",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(stop_script),
+                "-DelayMs",
+                str(max(0, int(delay_ms))),
+            ],
+            cwd=str(PROJECT_ROOT),
+            close_fds=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return True
+    except Exception:
+        logging.exception("Failed to schedule local shutdown")
+        return False
+
+
 async def shutdown_bot_process() -> None:
     await asyncio.sleep(0.5)
     stop_control_page_background_tasks()
@@ -10972,6 +11774,27 @@ async def shutdown_bot_process() -> None:
                 pass
     finally:
         os._exit(0)
+
+
+async def run_local_only_mode() -> None:
+    print("[LOCAL MODE] starting without Discord gateway")
+    mark_startup_component("discord_gateway", "done", "disabled by DISCORD_ENABLED=false")
+    try:
+        await start_control_page_server()
+    except Exception as e:
+        mark_startup_component("control_api", "failed", repr(e))
+        print(f"[CONTROL PAGE] start_fail err={e!r}")
+        raise
+    try:
+        await ensure_startup_components_ready()
+    except Exception as e:
+        print(f"[STARTUP] local_init_fail err={e!r}")
+    try:
+        await ensure_control_page_background_tasks_started()
+    except Exception as e:
+        print(f"[CONTROL PAGE] bg_tasks_fail err={e!r}")
+    print(f"[LOCAL MODE] ready url={control_page_local_url()}")
+    await asyncio.Event().wait()
 
 
 def is_control_command_authorized(ctx) -> bool:
@@ -11004,7 +11827,7 @@ async def restart_bot_command_error(ctx, error):
 @commands.check(is_control_command_authorized)
 async def shutdown_bot_command(ctx):
     if schedule_evelyn_stack_shutdown():
-        await ctx.send("Full Evelyn stack shutdown started. Supervisors, bot, LLM, TTS, Voyager, and WSL will stop.")
+        await ctx.send("Full Evelyn stack shutdown started. Supervisors, bot, LLM, TTS, Voyager, and Evelyn-owned WSL services will stop.")
         return
     await ctx.send("Full-stack shutdown helper failed, so only the bot process is stopping.")
     asyncio.create_task(shutdown_bot_process())
@@ -11379,8 +12202,14 @@ async def reset_guild_memory_error(ctx, error):
 # =========================================================
 # 실행
 # =========================================================
-if not DISCORD_BOT_TOKEN:
+if DISCORD_ENABLED and not DISCORD_BOT_TOKEN:
     raise RuntimeError("DISCORD_BOT_TOKEN 환경변수가 설정되지 않았습니다.")
 
 acquire_instance_lock()
-bot.run(DISCORD_BOT_TOKEN)
+if DISCORD_ENABLED:
+    bot.run(DISCORD_BOT_TOKEN)
+else:
+    try:
+        asyncio.run(run_local_only_mode())
+    except KeyboardInterrupt:
+        pass

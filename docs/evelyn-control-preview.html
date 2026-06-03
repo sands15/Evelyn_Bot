@@ -1,0 +1,788 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>이블린 컨트롤 프리뷰</title>
+  <style>
+    :root {
+      --bg: #111411;
+      --surface: #181c18;
+      --surface-2: #1f241f;
+      --surface-3: #252b25;
+      --line: rgba(255, 255, 255, 0.085);
+      --line-strong: rgba(255, 255, 255, 0.14);
+      --text: #f2eee6;
+      --soft: #c8c1b7;
+      --muted: #8d887f;
+      --green: #84c39b;
+      --amber: #e2bb64;
+      --red: #df7474;
+      --blue: #82abc6;
+      --shadow: 0 18px 42px rgba(0, 0, 0, 0.24);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html,
+    body {
+      width: 100%;
+      min-height: 100%;
+    }
+
+    body {
+      margin: 0;
+      color: var(--text);
+      font-family: "Segoe UI", "IBM Plex Sans KR", system-ui, sans-serif;
+      background:
+        linear-gradient(180deg, rgba(255, 255, 255, 0.025), transparent 220px),
+        radial-gradient(circle at 10% -10%, rgba(132, 195, 155, 0.14), transparent 260px),
+        radial-gradient(circle at 88% 0%, rgba(226, 187, 100, 0.10), transparent 300px),
+        var(--bg);
+      overflow: hidden;
+    }
+
+    button,
+    textarea {
+      font: inherit;
+    }
+
+    button {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      color: var(--text);
+      background: var(--surface-2);
+      cursor: pointer;
+    }
+
+    button:hover {
+      border-color: rgba(226, 187, 100, 0.46);
+      background: var(--surface-3);
+    }
+
+    .app {
+      display: grid;
+      grid-template-rows: 56px minmax(0, 1fr);
+      gap: 8px;
+      height: 100vh;
+      padding: 8px;
+    }
+
+    .topbar {
+      display: grid;
+      grid-template-columns: 260px minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 8px;
+      padding: 8px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: rgba(24, 28, 24, 0.94);
+      box-shadow: var(--shadow);
+    }
+
+    .brand {
+      display: grid;
+      grid-template-columns: 36px minmax(0, 1fr);
+      align-items: center;
+      gap: 10px;
+      min-width: 0;
+    }
+
+    .mark {
+      display: grid;
+      place-items: center;
+      width: 36px;
+      height: 36px;
+      border-radius: 8px;
+      color: #0d120e;
+      background: linear-gradient(135deg, var(--green), var(--amber));
+      font-weight: 800;
+    }
+
+    .brand strong,
+    .top-status strong,
+    .section-head strong,
+    .status-card strong,
+    .action strong,
+    .message strong {
+      display: block;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .brand span,
+    .top-status span,
+    .section-head span,
+    .status-card span,
+    .action span,
+    .hint {
+      color: var(--muted);
+      font-size: 0.76rem;
+      line-height: 1.4;
+    }
+
+    .top-status {
+      min-width: 0;
+    }
+
+    .top-status strong {
+      font-size: 0.98rem;
+      color: #fff7e5;
+    }
+
+    .top-actions {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .top-actions button {
+      min-height: 36px;
+      padding: 0 11px;
+      font-weight: 700;
+    }
+
+    .danger {
+      border-color: rgba(223, 116, 116, 0.5);
+      color: #ffdada;
+      background: rgba(98, 34, 34, 0.42);
+    }
+
+    .layout {
+      display: grid;
+      grid-template-columns: 264px minmax(520px, 1fr) 344px;
+      gap: 8px;
+      min-height: 0;
+    }
+
+    .rail,
+    .work,
+    .side {
+      display: grid;
+      gap: 8px;
+      min-width: 0;
+      min-height: 0;
+    }
+
+    .rail {
+      grid-template-rows: auto auto minmax(0, 1fr);
+    }
+
+    .work {
+      grid-template-rows: auto minmax(0, 1fr) auto;
+    }
+
+    .side {
+      grid-template-rows: auto minmax(0, 1fr) auto;
+    }
+
+    .panel {
+      min-width: 0;
+      min-height: 0;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: rgba(24, 28, 24, 0.94);
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+
+    .pad {
+      padding: 12px;
+    }
+
+    .scroll {
+      overflow: auto;
+    }
+
+    .section-head {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 8px;
+      align-items: start;
+      margin-bottom: 10px;
+      min-width: 0;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 24px;
+      padding: 0 8px;
+      border: 1px solid var(--line-strong);
+      border-radius: 999px;
+      color: var(--soft);
+      background: rgba(255, 255, 255, 0.035);
+      font-size: 0.72rem;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+
+    .pill.ok {
+      border-color: rgba(132, 195, 155, 0.45);
+      color: #bff0cc;
+      background: rgba(132, 195, 155, 0.10);
+    }
+
+    .pill.warn {
+      border-color: rgba(226, 187, 100, 0.45);
+      color: #f5d89c;
+      background: rgba(226, 187, 100, 0.10);
+    }
+
+    .avatar-card {
+      display: grid;
+      grid-template-columns: 70px minmax(0, 1fr);
+      gap: 10px;
+      align-items: center;
+    }
+
+    .avatar {
+      display: grid;
+      place-items: center;
+      height: 76px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background:
+        radial-gradient(circle at 50% 25%, rgba(132, 195, 155, 0.22), transparent 48%),
+        #121712;
+      overflow: hidden;
+    }
+
+    .avatar img {
+      width: 84px;
+      transform: translateY(8px);
+      filter: drop-shadow(0 10px 16px rgba(0, 0, 0, 0.32));
+    }
+
+    .avatar-copy {
+      min-width: 0;
+    }
+
+    .avatar-copy strong {
+      display: block;
+      margin-bottom: 4px;
+      font-size: 0.98rem;
+    }
+
+    .avatar-copy p {
+      margin: 0;
+      color: var(--soft);
+      font-size: 0.82rem;
+      line-height: 1.52;
+    }
+
+    .status-list {
+      display: grid;
+      gap: 6px;
+    }
+
+    .status-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 8px;
+      align-items: center;
+      min-height: 34px;
+      padding: 7px 8px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.022);
+    }
+
+    .status-row span {
+      color: var(--muted);
+      font-size: 0.74rem;
+    }
+
+    .status-row strong {
+      font-size: 0.82rem;
+      white-space: nowrap;
+    }
+
+    .event-list {
+      display: grid;
+      gap: 6px;
+    }
+
+    .event {
+      display: grid;
+      grid-template-columns: 42px minmax(0, 1fr);
+      gap: 8px;
+      align-items: start;
+      padding: 8px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.02);
+    }
+
+    .event time {
+      color: var(--muted);
+      font-size: 0.72rem;
+      line-height: 1.45;
+    }
+
+    .event strong {
+      display: block;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-size: 0.82rem;
+    }
+
+    .event span {
+      display: block;
+      color: var(--muted);
+      font-size: 0.72rem;
+      line-height: 1.45;
+    }
+
+    .summary-strip {
+      display: grid;
+      grid-template-columns: minmax(0, 1.4fr) repeat(3, minmax(120px, 0.7fr));
+      gap: 8px;
+    }
+
+    .status-card {
+      min-height: 76px;
+      padding: 11px 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: rgba(24, 28, 24, 0.94);
+    }
+
+    .status-card.primary {
+      border-color: rgba(132, 195, 155, 0.28);
+      background:
+        linear-gradient(135deg, rgba(132, 195, 155, 0.12), transparent 56%),
+        rgba(24, 28, 24, 0.94);
+    }
+
+    .status-card strong {
+      margin-top: 5px;
+      font-size: 1rem;
+    }
+
+    .status-card.primary strong {
+      font-size: 1.18rem;
+      white-space: normal;
+      line-height: 1.32;
+    }
+
+    .chat-panel {
+      display: grid;
+      grid-template-rows: auto minmax(0, 1fr) auto;
+    }
+
+    .chat-title {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 8px;
+      align-items: center;
+      padding: 12px 12px 0;
+    }
+
+    .chat-title .section-head {
+      margin: 0;
+    }
+
+    .chat-thread {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      padding: 12px;
+      overflow: auto;
+    }
+
+    .message {
+      display: grid;
+      gap: 5px;
+      max-width: 86%;
+      padding: 10px 11px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.026);
+    }
+
+    .message.user {
+      align-self: flex-end;
+      border-color: rgba(130, 171, 198, 0.30);
+      background: rgba(130, 171, 198, 0.10);
+    }
+
+    .message p {
+      margin: 0;
+      color: var(--soft);
+      font-size: 0.9rem;
+      line-height: 1.58;
+    }
+
+    .composer {
+      display: grid;
+      gap: 8px;
+      padding: 0 12px 12px;
+    }
+
+    .composer textarea {
+      width: 100%;
+      min-height: 68px;
+      max-height: 140px;
+      resize: vertical;
+      padding: 10px 11px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      outline: none;
+      color: var(--text);
+      background: rgba(10, 13, 10, 0.58);
+    }
+
+    .composer textarea::placeholder {
+      color: rgba(200, 193, 183, 0.52);
+    }
+
+    .composer-actions {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .send {
+      min-height: 38px;
+      min-width: 92px;
+      border-color: rgba(132, 195, 155, 0.46);
+      color: #ecfff2;
+      background: rgba(60, 104, 75, 0.55);
+      font-weight: 800;
+    }
+
+    .action-list {
+      display: grid;
+      gap: 8px;
+    }
+
+    .action {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 10px;
+      align-items: center;
+      min-height: 58px;
+      padding: 10px 11px;
+      text-align: left;
+    }
+
+    .action.primary {
+      border-color: rgba(226, 187, 100, 0.42);
+      background: linear-gradient(180deg, rgba(226, 187, 100, 0.11), rgba(31, 36, 31, 0.96));
+    }
+
+    .action code {
+      color: var(--amber);
+      font-size: 0.74rem;
+      white-space: nowrap;
+    }
+
+    .mission-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+
+    .mission-box {
+      min-height: 74px;
+      padding: 10px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.022);
+    }
+
+    .mission-box span {
+      color: var(--muted);
+      font-size: 0.74rem;
+    }
+
+    .mission-box strong {
+      display: block;
+      margin-top: 6px;
+      font-size: 0.92rem;
+      line-height: 1.35;
+    }
+
+    .tools {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+
+    .tools button {
+      min-height: 34px;
+      padding: 0 9px;
+      color: var(--soft);
+      font-size: 0.8rem;
+      font-weight: 700;
+    }
+
+    @media (max-width: 1220px) {
+      body {
+        overflow: auto;
+      }
+
+      .app {
+        height: auto;
+        min-height: 100vh;
+      }
+
+      .layout {
+        grid-template-columns: 248px minmax(0, 1fr);
+      }
+
+      .side {
+        grid-column: 1 / -1;
+        grid-template-columns: minmax(280px, 0.9fr) minmax(0, 1.1fr) auto;
+        align-items: stretch;
+      }
+    }
+
+    @media (max-width: 820px) {
+      .app {
+        padding: 8px;
+      }
+
+      .topbar,
+      .layout,
+      .side,
+      .summary-strip,
+      .mission-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .top-actions {
+        justify-content: stretch;
+      }
+
+      .top-actions button {
+        flex: 1 1 auto;
+      }
+
+      .rail,
+      .work,
+      .side {
+        grid-template-rows: none;
+      }
+
+      .chat-panel {
+        min-height: 520px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">
+        <div class="mark">E</div>
+        <div>
+          <strong>이블린 컨트롤</strong>
+          <span>운영 콘솔</span>
+        </div>
+      </div>
+      <div class="top-status">
+        <strong>대기 중 · 명령을 받을 수 있어요</strong>
+        <span>음성 입력 준비 · TTS 대기열 0 · Minecraft 세션 없음</span>
+      </div>
+      <div class="top-actions">
+        <button type="button">새로고침</button>
+        <button type="button">창 정리</button>
+        <button type="button" class="danger">종료</button>
+      </div>
+    </header>
+
+    <main class="layout">
+      <aside class="rail">
+        <section class="panel pad">
+          <div class="avatar-card">
+            <div class="avatar">
+              <img src="./assets/evelyn-avatar/model-v2/preview_composite.png" alt="이블린">
+            </div>
+            <div class="avatar-copy">
+              <strong>이블린</strong>
+              <p>최근 발화 없음. 입력을 기다리는 중입니다.</p>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel pad">
+          <div class="section-head">
+            <div>
+              <strong>상태</strong>
+              <span>핵심 연결</span>
+            </div>
+            <span class="pill ok">정상</span>
+          </div>
+          <div class="status-list">
+            <div class="status-row"><span>음성 채널</span><strong>없음</strong></div>
+            <div class="status-row"><span>입력 모드</span><strong>자동</strong></div>
+            <div class="status-row"><span>Main LLM</span><strong>연결됨</strong></div>
+            <div class="status-row"><span>Router/Sub</span><strong>연결됨</strong></div>
+            <div class="status-row"><span>TTS</span><strong>대기</strong></div>
+            <div class="status-row"><span>Voyager</span><strong>꺼짐</strong></div>
+          </div>
+        </section>
+
+        <section class="panel pad scroll">
+          <div class="section-head">
+            <div>
+              <strong>최근 흐름</strong>
+              <span>운영 이벤트</span>
+            </div>
+          </div>
+          <div class="event-list">
+            <div class="event">
+              <time>07:27</time>
+              <div><strong>여백 리듬 재정리</strong><span>LAYOUT</span></div>
+            </div>
+            <div class="event">
+              <time>07:02</time>
+              <div><strong>필수 조건 정리</strong><span>NOTE</span></div>
+            </div>
+            <div class="event">
+              <time>06:59</time>
+              <div><strong>프리뷰 페이지 생성</strong><span>READY</span></div>
+            </div>
+          </div>
+        </section>
+      </aside>
+
+      <section class="work">
+        <section class="summary-strip">
+          <article class="status-card primary">
+            <span>현재 상태</span>
+            <strong>이블린은 대기 중이고, Minecraft는 시작하지 않았습니다.</strong>
+          </article>
+          <article class="status-card">
+            <span>추천</span>
+            <strong>상태 확인</strong>
+          </article>
+          <article class="status-card">
+            <span>최근 응답</span>
+            <strong>없음</strong>
+          </article>
+          <article class="status-card">
+            <span>주의</span>
+            <strong>없음</strong>
+          </article>
+        </section>
+
+        <section class="panel chat-panel">
+          <div class="chat-title">
+            <div class="section-head">
+              <div>
+                <strong>대화와 명령</strong>
+                <span>가장 자주 쓰는 영역</span>
+              </div>
+            </div>
+            <span class="pill ok">입력 가능</span>
+          </div>
+          <div class="chat-thread">
+            <article class="message">
+              <strong>이블린</strong>
+              <p>대기 중이에요. Minecraft를 시작하거나 현재 상태를 확인할 수 있습니다.</p>
+            </article>
+            <article class="message user">
+              <strong>정훈</strong>
+              <p>UI 비율도 중요하지만 여백이 더 예쁘게 보여야 해.</p>
+            </article>
+            <article class="message">
+              <strong>이블린</strong>
+              <p>빈 공간을 크게 남기기보다, 같은 간격의 행과 작은 요약 카드로 다시 정리했습니다.</p>
+            </article>
+          </div>
+          <form class="composer">
+            <textarea placeholder="이블린에게 메시지 또는 명령 입력"></textarea>
+            <div class="composer-actions">
+              <span class="hint">명령 입력 대기</span>
+              <button type="button" class="send">보내기</button>
+            </div>
+          </form>
+        </section>
+
+        <section class="panel pad">
+          <div class="section-head">
+            <div>
+              <strong>도구</strong>
+              <span>필요할 때만 여는 보조 기능</span>
+            </div>
+          </div>
+          <div class="tools">
+            <button type="button">진단</button>
+            <button type="button">메모리</button>
+            <button type="button">창 목록</button>
+            <button type="button">로그</button>
+          </div>
+        </section>
+      </section>
+
+      <aside class="side">
+        <section class="panel pad">
+          <div class="section-head">
+            <div>
+              <strong>바로 실행</strong>
+              <span>주요 명령</span>
+            </div>
+            <span class="pill warn">4개</span>
+          </div>
+          <div class="action-list">
+            <button type="button" class="action primary">
+              <div><strong>Minecraft 시작</strong><span>Voyager 세션을 엽니다.</span></div>
+              <code>/connect</code>
+            </button>
+            <button type="button" class="action">
+              <div><strong>이블린 상태</strong><span>모델과 음성을 확인합니다.</span></div>
+              <code>/status</code>
+            </button>
+            <button type="button" class="action">
+              <div><strong>자율 상태</strong><span>현재 판단을 확인합니다.</span></div>
+              <code>/auto</code>
+            </button>
+            <button type="button" class="action">
+              <div><strong>도움말</strong><span>명령 목록을 봅니다.</span></div>
+              <code>/help</code>
+            </button>
+          </div>
+        </section>
+
+        <section class="panel pad scroll">
+          <div class="section-head">
+            <div>
+              <strong>Minecraft</strong>
+              <span>세션이 켜지면 확장</span>
+            </div>
+            <span class="pill">꺼짐</span>
+          </div>
+          <div class="mission-grid">
+            <div class="mission-box"><span>목표</span><strong>없음</strong></div>
+            <div class="mission-box"><span>단계</span><strong>없음</strong></div>
+            <div class="mission-box"><span>위치</span><strong>미확인</strong></div>
+            <div class="mission-box"><span>인벤토리</span><strong>없음</strong></div>
+          </div>
+        </section>
+
+        <section class="panel pad">
+          <div class="section-head">
+            <div>
+              <strong>위험 동작</strong>
+              <span>실수 방지</span>
+            </div>
+          </div>
+          <button type="button" class="action danger">
+            <div><strong>전체 스택 종료</strong><span>확인 후 실행합니다.</span></div>
+            <code>/shutdown</code>
+          </button>
+        </section>
+      </aside>
+    </main>
+  </div>
+</body>
+</html>

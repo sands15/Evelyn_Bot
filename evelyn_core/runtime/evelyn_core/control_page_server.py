@@ -219,7 +219,7 @@ def json_response(data: Any, *, status: int = 200) -> web.Response:
 
 
 def schedule_local_stack_shutdown(delay_ms: int = 1500) -> tuple[bool, str]:
-    stop_script = PROJECT_ROOT / "evelyn_core" / "runtime" / "launchers" / "stop_evelyn_stack.ps1"
+    stop_script = PROJECT_ROOT / "evelyn_core" / "runtime" / "launchers" / "stop_evelyn_local.ps1"
     if not stop_script.exists():
         return False, f"shutdown helper not found: {stop_script}"
     try:
@@ -327,7 +327,7 @@ async def shutdown_handler(_: web.Request) -> web.StreamResponse:
     return json_response(
         {
             "ok": ok,
-            "message": "Shutdown is running." if ok else f"Shutdown failed: {detail}",
+            "message": "Local Evelyn shutdown is running." if ok else f"Shutdown failed: {detail}",
             "detail": detail,
         },
         status=status,
@@ -380,7 +380,7 @@ async def chat_handler(request: web.Request) -> web.StreamResponse:
             return json_response(
                 {
                     "ok": True,
-                    "reply": "Full Evelyn stack shutdown started locally. This works even when the bot processor is down.",
+                    "reply": "Local Evelyn shutdown started. This works even when the bot processor is down.",
                     "state": state,
                 }
             )

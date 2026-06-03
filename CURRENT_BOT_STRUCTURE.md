@@ -1,9 +1,21 @@
 # Current Bot Structure
 
-Last reviewed: 2026-05-29
+Last reviewed: 2026-06-02
+Status: compact overview
+
+Authoritative current pipeline map:
+
+- `CURRENT_EVELYN_PIPELINE.md`
+
+Documentation index:
+
+- `docs/DOCUMENTATION_INDEX.md`
 
 This is the short operational map for the current Evelyn bot. It summarizes the
-runtime as it exists today, not the final target architecture.
+runtime as it exists today, not the final target architecture. For detailed
+router/main/sub LLM conditions, `VoiceTurnOrchestrator`, route policy flags,
+context assembly, and memory write-behind behavior, use
+`CURRENT_EVELYN_PIPELINE.md`.
 
 ## One-line Summary
 
@@ -15,25 +27,29 @@ control page, and an optional Minecraft/Voyager automation stack.
 
 ```text
 Discord text / voice / local mic
--> main.py
--> voice filtering / wake handling / session policy
--> STT
--> router / fast-path policy
--> memory + runtime context assembly
--> main LLM or action executor
--> answer shaping
--> TTS / Discord text / control-page delivery
+-> Discord ingress helpers + main.py live handlers
+-> voice filtering / wake handling / STT helpers when audio
+-> VoiceTurnRequest
+-> VoiceTurnOrchestrator
+-> runtime mode + fast-path/fallback/router policy
+-> cognitive state + ContextPolicy + RouteDecision flags
+-> short-circuit, registered skill route, policy answer, main LLM, or action executor
+-> answer shaping / delivery plan
+-> Discord delivery adapter / TTS playback manager / control-page delivery
+-> memory write-behind
 ```
 
-`main.py` is still the central application surface. It currently owns too many
-responsibilities at once:
+`main.py` is still the central application surface and live integration host.
+The 2026-06-02 extraction pass moved many pure decisions and low-level playback
+contracts into runtime modules, but `main.py` still owns process wiring and live
+side effects:
 
 - Discord bot events and command routing
-- voice session ownership, wake handling, suppression, and turn orchestration
-- STT loading and transcription calls
-- router/main/sub LLM request flow
+- live voice receive control flow and debug artifact writes
+- STT model loading and transcription calls
+- router/main/sub LLM request flow and runtime policy wiring
 - memory recall and post-turn writeback scheduling
-- OmniVoice HTTP requests and Discord playback sources
+- high-level OmniVoice HTTP request construction
 - control-page status formatting
 - Minecraft/Voyager status merge for the user-facing bot
 
@@ -62,7 +78,10 @@ Important supporting modules:
 
 - `evelyn_voice/` for custom Discord voice receive behavior
 - `evelyn_core/runtime/evelyn_core/voice_pipeline.py` for voice classification and policy helpers
-- `evelyn_core/runtime/evelyn_core/voice_orchestration.py` for some extracted turn/reply helpers
+- `evelyn_core/runtime/evelyn_core/voice_orchestration.py` for the extracted turn orchestrator
+- `evelyn_core/runtime/evelyn_core/discord_ingress.py` for Discord input normalization helpers
+- `evelyn_core/runtime/evelyn_core/discord_delivery.py` for Discord text and streaming voice delivery helpers
+- `evelyn_core/runtime/evelyn_core/discord_session_policy.py` for Discord voice/session policy helpers
 - `evelyn_core/runtime/evelyn_core/local_mic.py` for optional local mic capture
 
 ### Speech Pipeline
@@ -85,7 +104,8 @@ Current STT backend:
 
 Important files:
 
-- `main.py` for STT model loading and transcription calls
+- `main.py` for STT model loading, live wake probe execution, and debug/drop side effects
+- `evelyn_core/runtime/evelyn_core/voice_stt_flow.py` for wake interpretation, partial STT, full STT/rescore, final transcript assembly, and final wake veto
 - `evelyn_core/runtime/evelyn_core/audio.py` for resampling, denoise, VAD/noise helpers
 - `evelyn_core/runtime/evelyn_core/text.py` for transcript cleanup and wake/text normalization
 
@@ -94,8 +114,13 @@ Important files:
 Evelyn uses multiple local LLM roles:
 
 - Main LLM: final user-facing answer generation
-- Router/sub decision logic: route and cognitive policy
+- Router LLM: optional route and context-policy planning
+- Router/cognitive policy path: fast-path, fallback, cached state, blocking update, or background refresh
 - Summary/sub LLM: memory summaries, durable facts, and open-question updates
+
+The main LLM does not decide whether the router is needed. Routing happens
+before main LLM execution. The router LLM and summary/sub LLM are both
+conditional, not mandatory for every turn.
 
 The exact launcher/model values are environment-driven. `README.md` and
 `evelyn_core/start_env.bat` describe the expected local defaults.
@@ -108,22 +133,25 @@ Current TTS shape:
 answer text
 -> sentence/chunk split
 -> OmniVoice HTTP streaming request
--> PCM buffering
--> Discord AudioSource playback
+-> TTS playback manager
+-> prepared PCM buffering / Discord AudioSource playback
 ```
 
 Primary locations:
 
-- `main.py` for OmniVoice client, buffering, queueing, and playback sources
+- `main.py` for high-level OmniVoice request construction and delivery decisions
+- `evelyn_core/runtime/evelyn_core/tts_playback.py` for playback tracking, single-source playback, streaming prepared queues, and cancellation facade
+- `evelyn_core/runtime/evelyn_core/discord_delivery.py` for Discord-facing text/voice delivery setup
 - `evelyn_core/runtime/evelyn_core/config.py` for TTS stream/buffer knobs
 - OmniVoice server on `127.0.0.1:8880`
 
 Current known design pressure:
 
-- TTS request, streaming, buffering, playback, and turn cancellation are still
-  too close together in `main.py`.
-- Recent work added more explicit playback buffering and contract payloads, but
-  this area should still be treated as a sensitive hot path.
+- TTS remains a sensitive hot path, but low-level playback tracking, streaming
+  prepared queues, and single-source playback are now behind
+  `TtsPlaybackManager`.
+- `main.py` still coordinates the user-facing delivery decision and high-level
+  OmniVoice request setup.
 
 ### Memory System
 
@@ -323,6 +351,8 @@ Cleanup recommendation:
 Use these for deeper detail:
 
 - `docs/EVELYN_CURRENT_STRUCTURE_LAYER_MAPPING.md`
+- `CURRENT_EVELYN_PIPELINE.md`
+- `docs/DOCUMENTATION_INDEX.md`
 - `docs/plans/VOICE_PIPELINE_REFACTOR_PLAN.md`
 - `docs/EVELYN_MEMORY_VAULT_ARCHITECTURE.md`
 - `docs/CONTEXT_PIPELINE_TARGET.md`

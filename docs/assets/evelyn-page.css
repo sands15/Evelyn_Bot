@@ -747,14 +747,20 @@ body.is-minecraft-mode .winbox-panel-content .slot-default {
   margin-top: 12px;
 }
 
-.voice-pipeline-grid {
+.voice-pipeline-grid,
+.model-call-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
   margin-top: 12px;
 }
 
-.voice-pipeline-grid span {
+.model-call-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.voice-pipeline-grid span,
+.model-call-grid span {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -767,7 +773,8 @@ body.is-minecraft-mode .winbox-panel-content .slot-default {
   font-size: 0.74rem;
 }
 
-.voice-pipeline-grid strong {
+.voice-pipeline-grid strong,
+.model-call-grid strong {
   color: #f0cb62;
   font-size: 0.76rem;
   white-space: nowrap;
@@ -2536,6 +2543,10 @@ body.is-default-mode .winbox-panel-content.model-viewport .avatar-annotation {
   }
 
   .stat-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .model-call-grid {
     grid-template-columns: 1fr;
   }
 

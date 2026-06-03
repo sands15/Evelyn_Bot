@@ -1,0 +1,7 @@
+{
+  "name": "late_llm_chunk",
+  "scope_turn_id": "turn-old",
+  "current_turn_id": "turn-new",
+  "chunk": "late answer text",
+  "expected_stale": true
+}

@@ -98,11 +98,34 @@ VOLATILE_INFO_MARKERS = (
     "forecast",
 )
 
+NEGATED_SEARCH_MARKERS = (
+    "\uac80\uc0c9 \uc5c6\uc774",
+    "\uac80\uc0c9\uc740 \ud558\uc9c0 \ub9d0\uace0",
+    "\uac80\uc0c9\ud558\uc9c0 \ub9d0\uace0",
+    "\uac80\uc0c9\ud558\uc9c0\ub9c8",
+    "\uc778\ud130\ub137 \uc5c6\uc774",
+    "\uc6f9 \uc5c6\uc774",
+    "\ucc3e\uc9c0 \ub9d0\uace0",
+    "\ucc3e\uc544\ubcf4\uc9c0 \ub9d0\uace0",
+    "without search",
+    "without searching",
+    "no search",
+    "don't search",
+    "do not search",
+    "without looking up",
+)
+
 
 def _normalized_pair(text: str) -> tuple[str, str]:
     normalized = clean_text(text).lower()
     compact = re.sub(r"\s+", "", normalized)
     return normalized, compact
+
+
+def _has_negated_search_request(normalized: str, compact: str) -> bool:
+    return any(marker in normalized for marker in NEGATED_SEARCH_MARKERS) or any(
+        marker.replace(" ", "") in compact for marker in NEGATED_SEARCH_MARKERS
+    )
 
 
 def classify_datetime_query(text: str) -> str | None:
@@ -148,6 +171,8 @@ def answer_current_datetime_query(text: str, *, now: datetime | None = None) -> 
 def should_force_search_query(text: str) -> bool:
     normalized, compact = _normalized_pair(text)
     if not normalized:
+        return False
+    if _has_negated_search_request(normalized, compact):
         return False
 
     explicit_hit = any(marker in normalized for marker in EXPLICIT_SEARCH_MARKERS) or any(

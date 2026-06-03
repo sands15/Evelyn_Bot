@@ -1,5 +1,5 @@
 param(
-    [int]$DelayMs = 3000,
+    [int]$DelayMs = 500,
     [switch]$DryRun
 )
 
@@ -7,13 +7,13 @@ $ErrorActionPreference = 'Continue'
 
 $projectRoot = Resolve-Path (Join-Path $PSScriptRoot '..\..\..')
 $stopMarker = Join-Path $projectRoot '.evelyn_stop_requested'
-$targetPorts = @(3000, 8765, 8787, 8798, 8799, 8880, 8912, 9820, 9821, 9822)
-$targetCommandFragments = @(
+$targetPorts = @(8799, 8880, 9820, 9821, 9822)
+$evelynCommandFragments = @(
     'C:\Evelyn',
     'C:/Evelyn',
     '/mnt/c/Evelyn',
-    'start_background_stack.ps1',
-    'supervise_service.ps1',
+    '\\Evelyn\\main.py',
+    'start_local.bat',
     'start_main_llm.bat',
     'start_router_llm.bat',
     'start_sub_llm.bat',
@@ -22,22 +22,7 @@ $targetCommandFragments = @(
     'run_sub_llm.sh',
     'start_tts.ps1',
     'start_tts.bat',
-    'omnivoice_server.cli',
-    'start_control_page.ps1',
-    'start_bot.ps1',
-    'start_bot.bat',
-    '\\Evelyn\\main.py',
-    'start_voyager_service.ps1',
-    'start_voyager_service.bat',
-    'start_voyager.bat',
-    'start_codex_gateway.ps1',
-    'start_codex_gateway.bat',
-    'evelyn_core.voyager_service',
-    'evelyn_core.codex_gateway_server',
-    'evelyn_core.control_page_server',
-    'upstream_voyager_runner.py',
-    'voyager\\env\\mineflayer\\index.js',
-    'http.server 8912'
+    'evelyn_core.control_page_server'
 )
 $protectedFragments = @(
     '\.openclaw\',
@@ -48,12 +33,17 @@ $protectedFragments = @(
     '/acpx/',
     'embedded app-server',
     'app-server',
-    'stop_evelyn_local.ps1',
-    'stop_local.bat',
-    'stop_evelyn_stack.ps1'
-)
-$stopToolFragments = @(
     'stop_evelyn_stack.ps1',
+    'stop_evelyn_local.ps1',
+    'stop_local.bat'
+)
+$wslKillPatterns = @(
+    '/mnt/c/Evelyn/evelyn_core/runtime/launchers/[r]un_main_llm.sh',
+    '/mnt/c/Evelyn/evelyn_core/runtime/launchers/[r]un_router_llm.sh',
+    '/mnt/c/Evelyn/evelyn_core/runtime/launchers/[r]un_sub_llm.sh'
+)
+$protectedPids = @{}
+$stopToolFragments = @(
     '\.openclaw\',
     '/.openclaw/',
     'openclaw',
@@ -62,19 +52,10 @@ $stopToolFragments = @(
     '/acpx/',
     'embedded app-server',
     'app-server',
+    'stop_evelyn_stack.ps1',
     'stop_evelyn_local.ps1',
-    'stop_local.bat',
-    'stop_evelyn_stack.ps1'
+    'stop_local.bat'
 )
-$wslKillPatterns = @(
-    '/mnt/c/Evelyn/evelyn_core/runtime/launchers/[r]un_main_llm.sh',
-    '/mnt/c/Evelyn/evelyn_core/runtime/launchers/[r]un_router_llm.sh',
-    '/mnt/c/Evelyn/evelyn_core/runtime/launchers/[r]un_sub_llm.sh',
-    '/mnt/c/Evelyn/evelyn_core/runtime/evelyn_core/[u]pstream_voyager_runner.py',
-    '[e]velyn_core.voyager_service',
-    '[e]velyn_core.codex_gateway_server'
-)
-$protectedPids = @{}
 
 $currentPidForProtection = [int]$PID
 for ($depth = 0; $depth -lt 8; $depth++) {
@@ -129,7 +110,7 @@ function Test-EvelynCommandLine {
     if (Test-ProtectedCommandLine -CommandLine $CommandLine) {
         return $false
     }
-    return (Test-ContainsAnyFragment -Value $CommandLine -Fragments $targetCommandFragments)
+    return (Test-ContainsAnyFragment -Value $CommandLine -Fragments $evelynCommandFragments)
 }
 
 function Test-KnownPortOwner {
@@ -145,9 +126,6 @@ function Test-KnownPortOwner {
         return $true
     }
     if ($Port -eq 8880 -and $CommandLine -like '*omnivoice*') {
-        return $true
-    }
-    if ($Port -eq 8912 -and $CommandLine -like '*http.server 8912*') {
         return $true
     }
     return $false
@@ -217,7 +195,7 @@ function Add-EvelynAncestors {
     )
 
     $currentPid = $ProcessId
-    for ($depth = 0; $depth -lt 6; $depth++) {
+    for ($depth = 0; $depth -lt 5; $depth++) {
         if (-not $ProcessTable.ContainsKey($currentPid)) {
             break
         }
@@ -237,7 +215,7 @@ function Add-EvelynAncestors {
     }
 }
 
-function Collect-TargetProcesses {
+function Collect-Targets {
     $index = New-ProcessIndex
     $targets = @{}
     $visited = @{}
@@ -261,7 +239,7 @@ function Collect-TargetProcesses {
                 Add-TargetPid -ProcessId $ownerPid -Reason "listen-port:$port" -ProcessTable $index.Table -ChildrenByParent $index.Children -Targets $targets -Visited $visited
                 Add-EvelynAncestors -ProcessId $ownerPid -ProcessTable $index.Table -ChildrenByParent $index.Children -Targets $targets -Visited $visited
             } else {
-                Write-Host ("[stop_evelyn_stack] skip port {0} owner pid={1}; command line did not prove Evelyn ownership" -f $port, $ownerPid)
+                Write-Host ("[stop_evelyn_local] skip port {0} owner pid={1}; command line did not prove Evelyn ownership" -f $port, $ownerPid)
             }
         }
     }
@@ -308,55 +286,17 @@ function Get-TargetRows {
     }
 }
 
-function Stop-TargetRows {
-    param(
-        [string]$Label,
-        [object[]]$Rows
-    )
-
-    if ($DryRun) {
-        Write-Host ("[stop_evelyn_stack] {0} dry-run: {1} Windows process(es) would be stopped" -f $Label, $Rows.Count)
-        foreach ($row in @($Rows | Sort-Object @{ Expression = 'TargetAncestorDepth'; Descending = $true }, ProcessId)) {
-            Write-Host ("[stop_evelyn_stack] dry-run pid={0} name={1} reasons={2}" -f $row.ProcessId, $row.Name, $row.Reasons)
-            if (-not [string]::IsNullOrWhiteSpace($row.CommandLine)) {
-                Write-Host ("  " + $row.CommandLine)
-            }
-        }
-        return
-    }
-
-    foreach ($row in @($Rows | Sort-Object @{ Expression = 'TargetAncestorDepth'; Descending = $true }, ProcessId)) {
-        try {
-            Stop-Process -Id $row.ProcessId -Force -ErrorAction Stop
-            Write-Host ("[stop_evelyn_stack] stopped pid={0} name={1} reasons={2}" -f $row.ProcessId, $row.Name, $row.Reasons)
-        } catch {
-            Write-Host ("[stop_evelyn_stack] failed pid={0} name={1}: {2}" -f $row.ProcessId, $row.Name, $_.Exception.Message)
-        }
-    }
-    Write-Host ("[stop_evelyn_stack] {0}: targeted {1} process(es)" -f $Label, $Rows.Count)
-}
-
 function Invoke-EvelynWslKill {
+    param([switch]$DryRun)
+
     foreach ($pattern in $wslKillPatterns) {
         if ($DryRun) {
-            Write-Host ("[stop_evelyn_stack] dry-run: wsl pkill -f {0}" -f $pattern)
+            Write-Host ("[stop_evelyn_local] dry-run: wsl pkill -f {0}" -f $pattern)
             continue
         }
         try {
             & wsl.exe bash -lc ("pkill -f " + "'" + $pattern.Replace("'", "'\''") + "'") 2>$null | Out-Null
         } catch {
-        }
-    }
-}
-
-function Report-TargetPorts {
-    foreach ($port in $targetPorts) {
-        $listeners = @(Get-NetTCPConnection -State Listen -LocalPort $port -ErrorAction SilentlyContinue)
-        if ($listeners.Count -eq 0) {
-            Write-Host ("[stop_evelyn_stack] port {0}: NO_LISTENERS" -f $port)
-        } else {
-            $owners = (($listeners | Select-Object -ExpandProperty OwningProcess -Unique) -join ',')
-            Write-Host ("[stop_evelyn_stack] port {0}: still listening pid(s) {1}" -f $port, $owners)
         }
     }
 }
@@ -367,19 +307,42 @@ if ($DelayMs -gt 0) {
 
 if (-not $DryRun) {
     try {
-        Set-Content -LiteralPath $stopMarker -Value ("stack stop requested at " + (Get-Date).ToString('s')) -Encoding UTF8 -Force
+        Set-Content -LiteralPath $stopMarker -Value ("local stop requested at " + (Get-Date).ToString('s')) -Encoding UTF8 -Force
     } catch {
     }
 }
 
-$firstPass = Collect-TargetProcesses
-$firstRows = @(Get-TargetRows -ProcessTable $firstPass.Index.Table -Targets $firstPass.Targets)
-Stop-TargetRows -Label 'pass-1' -Rows $firstRows
-Invoke-EvelynWslKill
-Start-Sleep -Milliseconds 750
+$collected = Collect-Targets
+$rows = @(Get-TargetRows -ProcessTable $collected.Index.Table -Targets $collected.Targets)
 
-$secondPass = Collect-TargetProcesses
-$secondRows = @(Get-TargetRows -ProcessTable $secondPass.Index.Table -Targets $secondPass.Targets)
-Stop-TargetRows -Label 'pass-2' -Rows $secondRows
-Invoke-EvelynWslKill
-Report-TargetPorts
+if ($DryRun) {
+    Write-Host ("[stop_evelyn_local] dry-run: {0} Windows process(es) would be stopped" -f $rows.Count)
+    foreach ($row in @($rows | Sort-Object @{ Expression = 'TargetAncestorDepth'; Descending = $true }, ProcessId)) {
+        Write-Host ("[stop_evelyn_local] dry-run pid={0} name={1} reasons={2}" -f $row.ProcessId, $row.Name, $row.Reasons)
+        if (-not [string]::IsNullOrWhiteSpace($row.CommandLine)) {
+            Write-Host ("  " + $row.CommandLine)
+        }
+    }
+} else {
+    foreach ($row in @($rows | Sort-Object @{ Expression = 'TargetAncestorDepth'; Descending = $true }, ProcessId)) {
+        try {
+            Stop-Process -Id $row.ProcessId -Force -ErrorAction Stop
+            Write-Host ("[stop_evelyn_local] stopped pid={0} name={1} reasons={2}" -f $row.ProcessId, $row.Name, $row.Reasons)
+        } catch {
+            Write-Host ("[stop_evelyn_local] failed pid={0} name={1}: {2}" -f $row.ProcessId, $row.Name, $_.Exception.Message)
+        }
+    }
+}
+
+Invoke-EvelynWslKill -DryRun:$DryRun
+
+Start-Sleep -Milliseconds 500
+foreach ($port in $targetPorts) {
+    $listeners = @(Get-NetTCPConnection -State Listen -LocalPort $port -ErrorAction SilentlyContinue)
+    if ($listeners.Count -eq 0) {
+        Write-Host ("[stop_evelyn_local] port {0}: NO_LISTENERS" -f $port)
+    } else {
+        $owners = (($listeners | Select-Object -ExpandProperty OwningProcess -Unique) -join ',')
+        Write-Host ("[stop_evelyn_local] port {0}: still listening pid(s) {1}" -f $port, $owners)
+    }
+}

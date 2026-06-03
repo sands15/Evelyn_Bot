@@ -9,7 +9,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+KR:wght@400;500;600;700&family=Space+Grotesk:wght@500;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="./assets/vendor/winbox/winbox.min.css?v=0.2.82">
-  <link rel="stylesheet" href="./assets/evelyn-page.css?v=20260530g">
+  <link rel="stylesheet" href="./assets/evelyn-page.css?v=20260602a">
 </head>
 <body class="is-boot-splash-active">
   <section class="boot-splash" id="boot-splash" aria-live="polite" aria-label="Evelyn boot loading screen">
@@ -177,6 +177,22 @@
             <span>STT <strong id="voice-pipeline-stt">idle</strong></span>
             <span>TTS p95 <strong id="voice-pipeline-tts">0ms</strong></span>
             <span>Drops <strong id="voice-pipeline-drops">0</strong></span>
+          </div>
+          <div class="model-call-grid" aria-label="LLM model call metrics">
+            <span>Router <strong id="model-call-router-rate">0%</strong></span>
+            <span>Router avg <strong id="model-call-router-latency">0ms</strong></span>
+            <span>Main first <strong id="model-call-main-first">0ms</strong></span>
+            <span>Cognitive <strong id="model-call-cognitive-rate">0%</strong></span>
+            <span>Summary hot <strong id="model-call-summary-hot">0%</strong></span>
+            <span>Calls <strong id="model-call-turn-count">0</strong></span>
+          </div>
+          <div class="model-call-grid" aria-label="Question policy metrics">
+            <span>Q added <strong id="question-added-rate">0%</strong></span>
+            <span>Q removed <strong id="question-removed-count">0</strong></span>
+            <span>Cooldown <strong id="question-cooldown-rate">0%</strong></span>
+            <span>Ask mode <strong id="question-ask-mode">none</strong></span>
+            <span>Q turns <strong id="question-turn-count">0</strong></span>
+            <span>Final Q <strong id="question-final-count">0</strong></span>
           </div>
           <div class="voice-input-switch" id="voice-input-switch" aria-label="Voice input source">
             <button type="button" data-voice-input-mode="auto" aria-pressed="true">Auto</button>
@@ -485,6 +501,6 @@
   </div>
 
   <script src="./assets/vendor/winbox/winbox.bundle.min.js?v=0.2.82"></script>
-  <script src="./assets/evelyn-page.js?v=20260530g"></script>
+  <script src="./assets/evelyn-page.js?v=20260602a"></script>
 </body>
 </html>
