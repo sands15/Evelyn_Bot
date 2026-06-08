@@ -498,8 +498,8 @@
       top: 116px;
       display: none;
       grid-template-columns: 150px minmax(0, 1fr);
-      width: min(680px, calc(100vw - 46px));
-      height: min(460px, calc(100vh - 172px));
+      width: min(860px, calc(100vw - 46px));
+      height: min(560px, calc(100vh - 172px));
       min-width: 330px;
       min-height: 260px;
       border: 1px solid rgba(128, 134, 146, 0.28);
@@ -533,6 +533,12 @@
     .memory-list {
       display: grid;
       gap: 8px;
+    }
+
+    .memory-list + .memory-list {
+      margin-top: 16px;
+      padding-top: 12px;
+      border-top: 1px solid var(--line);
     }
 
     .note {
@@ -618,6 +624,97 @@
       white-space: nowrap;
     }
 
+    .memory-pages {
+      min-height: 0;
+      overflow: hidden;
+    }
+
+    .memory-page {
+      display: none;
+      min-height: 0;
+      height: 100%;
+    }
+
+    .memory-page.active {
+      display: grid;
+    }
+
+    .memory-graph {
+      position: relative;
+      display: grid;
+      min-height: 0;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background:
+        radial-gradient(circle at 25% 20%, rgba(47, 157, 104, 0.12), transparent 30%),
+        rgba(255, 255, 255, 0.34);
+      overflow: hidden;
+    }
+
+    [data-theme="dark"] .memory-graph {
+      background:
+        radial-gradient(circle at 25% 20%, rgba(80, 194, 139, 0.14), transparent 30%),
+        rgba(255, 255, 255, 0.04);
+    }
+
+    .memory-graph svg {
+      width: 100%;
+      height: 100%;
+      min-height: 360px;
+    }
+
+    .memory-graph .edge {
+      stroke: rgba(110, 117, 128, 0.34);
+      stroke-width: 1.1;
+    }
+
+    .memory-graph .node {
+      cursor: pointer;
+    }
+
+    .memory-graph .node circle {
+      stroke: rgba(255, 255, 255, 0.9);
+      stroke-width: 2;
+      filter: drop-shadow(0 6px 10px rgba(20, 24, 30, 0.2));
+    }
+
+    .memory-graph .node:hover circle,
+    .memory-graph .node.active circle {
+      stroke: var(--green);
+      stroke-width: 3;
+    }
+
+    .memory-graph .node text {
+      fill: var(--text);
+      font-size: 11px;
+      font-weight: 800;
+      paint-order: stroke;
+      stroke: var(--memory-bg);
+      stroke-width: 4px;
+      stroke-linejoin: round;
+      pointer-events: none;
+    }
+
+    .memory-graph-stats {
+      position: absolute;
+      left: 12px;
+      bottom: 10px;
+      padding: 5px 8px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      color: var(--soft);
+      background: var(--panel-strong);
+      font-size: 0.72rem;
+      backdrop-filter: blur(18px);
+    }
+
+    .memory-manager {
+      display: grid;
+      grid-template-columns: minmax(190px, 0.78fr) minmax(0, 1.22fr);
+      gap: 12px;
+      min-height: 0;
+    }
+
     .memory-cards {
       display: grid;
       align-content: start;
@@ -634,6 +731,13 @@
       border: 1px solid var(--line);
       border-radius: var(--radius);
       background: rgba(255, 255, 255, 0.46);
+      text-align: left;
+    }
+
+    .memory-card.active,
+    .memory-card:hover {
+      border-color: rgba(47, 157, 104, 0.45);
+      background: rgba(47, 157, 104, 0.1);
     }
 
     [data-theme="dark"] .memory-card {
@@ -678,6 +782,63 @@
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
+    }
+
+    .memory-editor {
+      display: grid;
+      grid-template-rows: auto minmax(0, 1fr) auto;
+      gap: 10px;
+      min-width: 0;
+      min-height: 0;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: rgba(255, 255, 255, 0.36);
+    }
+
+    [data-theme="dark"] .memory-editor {
+      background: rgba(255, 255, 255, 0.045);
+    }
+
+    .memory-editor-title {
+      width: 100%;
+      min-height: 40px;
+      padding: 9px 10px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      color: var(--text);
+      background: var(--panel);
+      outline: 0;
+    }
+
+    .memory-editor-body {
+      min-height: 0;
+      height: 100%;
+      max-height: none;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--panel);
+      resize: none;
+    }
+
+    .memory-editor-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      justify-content: end;
+    }
+
+    .memory-editor-actions button {
+      min-height: 36px;
+      padding: 0 12px;
+      font-size: 0.8rem;
+      font-weight: 900;
+    }
+
+    .memory-editor-actions .danger-action {
+      color: #fff;
+      border-color: var(--danger);
+      background: var(--danger);
     }
 
     .memory-empty {
@@ -915,6 +1076,14 @@
       .memory-content {
         border-radius: calc(var(--memory-radius) - 1px);
       }
+
+      .memory-manager {
+        grid-template-columns: 1fr;
+      }
+
+      .memory-graph svg {
+        min-height: 330px;
+      }
     }
 
     @media (max-width: 480px) {
@@ -1031,6 +1200,16 @@
       <aside class="memory-sidebar">
         <span class="memory-title">Memory</span>
         <div class="memory-list">
+          <button class="note active" type="button" data-memory-page="graph">
+            <strong>1페이지</strong>
+            <span>노드 그래프</span>
+          </button>
+          <button class="note" type="button" data-memory-page="manage">
+            <strong>2페이지</strong>
+            <span>수정 / 확인 / 삭제</span>
+          </button>
+        </div>
+        <div class="memory-list">
           <button class="note active" type="button" data-memory-filter="all">
             <strong>전체</strong>
             <span id="memoryCount">loading</span>
@@ -1053,7 +1232,7 @@
         <div class="memory-head">
           <div>
             <h2>이블린 메모리</h2>
-            <span class="memory-hint" id="memoryHint">memory_vault 노트를 불러오는 중입니다.</span>
+            <span class="memory-hint" id="memoryHint">memory_vault 노드를 불러오는 중입니다.</span>
             <span class="memory-vault-path" id="memoryVaultPath"></span>
           </div>
           <div class="memory-actions">
@@ -1061,8 +1240,28 @@
             <button id="openObsidianButton" type="button">Obsidian</button>
           </div>
         </div>
-        <div class="memory-cards" id="memoryCards">
-          <div class="memory-empty">메모리 노트를 불러오는 중입니다.</div>
+        <div class="memory-pages">
+          <section class="memory-page active" id="memoryGraphPage" data-memory-page-content="graph">
+            <div class="memory-graph" id="memoryGraph">
+              <div class="memory-empty">메모리 노드 그래프를 불러오는 중입니다.</div>
+            </div>
+          </section>
+          <section class="memory-page" id="memoryManagePage" data-memory-page-content="manage">
+            <div class="memory-manager">
+              <div class="memory-cards" id="memoryCards">
+                <div class="memory-empty">메모리 노트를 불러오는 중입니다.</div>
+              </div>
+              <div class="memory-editor" id="memoryEditor">
+                <input class="memory-editor-title" id="memoryEditTitle" type="text" placeholder="노드를 선택하세요">
+                <textarea class="memory-editor-body" id="memoryEditBody" placeholder="왼쪽 목록이나 그래프 노드를 선택하면 내용을 수정할 수 있습니다."></textarea>
+                <div class="memory-editor-actions">
+                  <button id="memoryEditSaveButton" type="button">수정</button>
+                  <button id="memoryConfirmButton" type="button">확인</button>
+                  <button class="danger-action" id="memoryDeleteButton" type="button">삭제</button>
+                </div>
+              </div>
+            </div>
+          </section>
         </div>
         <div class="memory-move" id="memoryMove" title="이동"></div>
       </div>
@@ -1109,7 +1308,17 @@
     const memoryVaultPath = document.getElementById("memoryVaultPath");
     const memoryRefreshButton = document.getElementById("memoryRefreshButton");
     const openObsidianButton = document.getElementById("openObsidianButton");
+    const memoryGraph = document.getElementById("memoryGraph");
+    const memoryEditTitle = document.getElementById("memoryEditTitle");
+    const memoryEditBody = document.getElementById("memoryEditBody");
+    const memoryEditSaveButton = document.getElementById("memoryEditSaveButton");
+    const memoryConfirmButton = document.getElementById("memoryConfirmButton");
+    const memoryDeleteButton = document.getElementById("memoryDeleteButton");
     let memorySnapshot = null;
+    let memoryGraphSnapshot = null;
+    let selectedMemoryId = "";
+    let selectedMemoryCard = null;
+    let memoryPage = "graph";
     let memoryFilter = "all";
     let memoryLoading = false;
     let memoryLoadPromise = null;
@@ -1315,12 +1524,139 @@
       return cards.filter((card) => {
         const category = String(card.category || "").toLowerCase();
         const type = String(card.type || "").toLowerCase();
-        const path = String(card.relPath || "").toLowerCase();
+        const path = String(card.relPath || card.path || "").toLowerCase();
         if (memoryFilter === "daily") return category === "daily" || type === "daily" || path.startsWith("daily/");
         if (memoryFilter === "core") return category === "core" || type === "core" || path.startsWith("core/");
         if (memoryFilter === "project") return category === "project" || type === "project" || path.startsWith("projects/");
         return true;
       });
+    }
+
+    function setMemoryPage(page) {
+      memoryPage = page === "manage" ? "manage" : "graph";
+      document.querySelectorAll("[data-memory-page]").forEach((button) => {
+        button.classList.toggle("active", button.getAttribute("data-memory-page") === memoryPage);
+      });
+      document.querySelectorAll("[data-memory-page-content]").forEach((panel) => {
+        panel.classList.toggle("active", panel.getAttribute("data-memory-page-content") === memoryPage);
+      });
+      renderMemoryGraph();
+      renderMemoryCards();
+    }
+
+    function graphNodeColor(type) {
+      const key = String(type || "").toLowerCase();
+      if (key === "core") return "#2f9d68";
+      if (key === "project") return "#3d7fc1";
+      if (key === "procedure") return "#9a6ad6";
+      if (key === "episode") return "#d18f32";
+      if (key === "daily") return "#76808f";
+      if (key === "legacy") return "#c65f73";
+      return "#5e6a76";
+    }
+
+    function shortLabel(value, max = 24) {
+      const text = String(value || "").trim();
+      return text.length > max ? text.slice(0, max - 1) + "…" : text;
+    }
+
+    function renderMemoryGraph() {
+      if (!memoryGraph) return;
+      const nodes = Array.isArray(memoryGraphSnapshot && memoryGraphSnapshot.nodes) ? memoryGraphSnapshot.nodes : [];
+      const edges = Array.isArray(memoryGraphSnapshot && memoryGraphSnapshot.edges) ? memoryGraphSnapshot.edges : [];
+      if (!nodes.length) {
+        memoryGraph.innerHTML = '<div class="memory-empty">표시할 메모리 노드가 없습니다.</div>';
+        return;
+      }
+
+      const width = 980;
+      const height = 560;
+      const centerX = width / 2;
+      const centerY = height / 2;
+      const maxRadius = Math.min(width, height) * 0.43;
+      const positions = new Map();
+      nodes.forEach((node, index) => {
+        const angle = index * 2.399963229728653;
+        const radius = Math.min(maxRadius, 30 + Math.sqrt(index + 1) * 23);
+        positions.set(node.id, {
+          x: centerX + Math.cos(angle) * radius,
+          y: centerY + Math.sin(angle) * radius
+        });
+      });
+
+      const visibleEdges = edges
+        .map((edge) => ({ edge, from: positions.get(edge.source), to: positions.get(edge.target) }))
+        .filter((item) => item.from && item.to)
+        .slice(0, 360);
+      const edgeMarkup = visibleEdges.map(({ edge, from, to }) => (
+        '<line class="edge" x1="' + from.x.toFixed(1) + '" y1="' + from.y.toFixed(1) +
+        '" x2="' + to.x.toFixed(1) + '" y2="' + to.y.toFixed(1) +
+        '" opacity="' + Math.max(0.18, Math.min(0.62, Number(edge.weight || 0.32))).toFixed(2) + '"></line>'
+      )).join("");
+
+      const nodeMarkup = nodes.map((node, index) => {
+        const point = positions.get(node.id);
+        const importance = Number(node.importance || 0.5);
+        const radius = Math.max(5, Math.min(12, 5 + importance * 7));
+        const label = index < 48 || node.id === selectedMemoryId ? shortLabel(node.title || node.id) : "";
+        const active = node.id === selectedMemoryId ? " active" : "";
+        return (
+          '<g class="node' + active + '" tabindex="0" role="button" data-memory-id="' + escapeHtml(node.id) + '">' +
+          '<title>' + escapeHtml(node.title || node.id) + '</title>' +
+          '<circle cx="' + point.x.toFixed(1) + '" cy="' + point.y.toFixed(1) + '" r="' + radius.toFixed(1) +
+          '" fill="' + graphNodeColor(node.type) + '"></circle>' +
+          (label ? '<text x="' + (point.x + radius + 5).toFixed(1) + '" y="' + (point.y + 4).toFixed(1) + '">' + escapeHtml(label) + '</text>' : '') +
+          '</g>'
+        );
+      }).join("");
+
+      const stats = memoryGraphSnapshot && memoryGraphSnapshot.stats ? memoryGraphSnapshot.stats : {};
+      memoryGraph.innerHTML =
+        '<svg viewBox="0 0 ' + width + ' ' + height + '" aria-label="메모리 노드 그래프">' +
+        '<g>' + edgeMarkup + '</g><g>' + nodeMarkup + '</g></svg>' +
+        '<div class="memory-graph-stats">' +
+        escapeHtml(`${stats.node_count || nodes.length} nodes / ${stats.edge_count || edges.length} edges`) +
+        '</div>';
+    }
+
+    function renderMemoryEditor() {
+      const hasSelection = Boolean(selectedMemoryCard && selectedMemoryId);
+      if (memoryEditTitle) {
+        memoryEditTitle.value = hasSelection ? (selectedMemoryCard.title || "") : "";
+        memoryEditTitle.disabled = !hasSelection;
+      }
+      if (memoryEditBody) {
+        memoryEditBody.value = hasSelection ? (selectedMemoryCard.body || "") : "";
+        memoryEditBody.disabled = !hasSelection;
+      }
+      [memoryEditSaveButton, memoryConfirmButton, memoryDeleteButton].forEach((button) => {
+        if (button) button.disabled = !hasSelection;
+      });
+    }
+
+    function findMemoryCard(noteId) {
+      const cards = Array.isArray(memorySnapshot && memorySnapshot.cards) ? memorySnapshot.cards : [];
+      return cards.find((card) => String(card.id) === String(noteId)) || null;
+    }
+
+    async function selectMemoryCard(noteId, { openManager = true } = {}) {
+      selectedMemoryId = String(noteId || "");
+      selectedMemoryCard = findMemoryCard(selectedMemoryId);
+      if (openManager) setMemoryPage("manage");
+      renderMemoryGraph();
+      renderMemoryCards();
+      renderMemoryEditor();
+      if (!selectedMemoryId) return;
+      try {
+        const payload = await fetchApi("/api/control-page/memory/" + encodeURIComponent(selectedMemoryId));
+        if (payload && payload.card) {
+          selectedMemoryCard = payload.card;
+          renderMemoryCards();
+          renderMemoryEditor();
+        }
+      } catch (error) {
+        setBubble(`메모리 노트를 불러오지 못했어: ${error.message}`);
+      }
     }
 
     function renderMemoryCards() {
@@ -1330,56 +1666,108 @@
       if (memoryCount) memoryCount.textContent = `${total} notes`;
       if (memoryVaultPath) memoryVaultPath.textContent = memorySnapshot && memorySnapshot.vaultPath ? memorySnapshot.vaultPath : "";
       if (memoryHint) {
-        memoryHint.textContent = total ? `memory_vault에서 ${total}개 노트를 읽었습니다.` : "memory_vault 노트를 기다리는 중입니다.";
+        const graphCount = Array.isArray(memoryGraphSnapshot && memoryGraphSnapshot.nodes) ? memoryGraphSnapshot.nodes.length : 0;
+        memoryHint.textContent = total ? `1페이지 그래프 ${graphCount || total}개 노드, 2페이지 관리 ${total}개 노트` : "memory_vault 노드를 기다리는 중입니다.";
       }
       if (!cards.length) {
         memoryCards.innerHTML = '<div class="memory-empty">표시할 메모리 노트가 없습니다.</div>';
+        selectedMemoryCard = null;
+        renderMemoryEditor();
         return;
+      }
+      if (!selectedMemoryId || !cards.some((card) => String(card.id) === selectedMemoryId)) {
+        selectedMemoryId = String(cards[0].id || "");
+        selectedMemoryCard = cards[0];
       }
       memoryCards.innerHTML = cards.map((card) => {
         const title = card.title || card.id || "Untitled";
         const badge = card.category || card.type || "note";
         const preview = card.preview || card.body || "";
         const relPath = card.relPath || card.path || card.id || "";
+        const active = String(card.id || "") === selectedMemoryId ? " active" : "";
         return (
-          '<article class="memory-card">' +
+          '<article class="memory-card' + active + '" role="button" tabindex="0" data-memory-id="' + escapeHtml(card.id || "") + '">' +
           '<div class="memory-card-head">' +
           '<strong>' + escapeHtml(title) + '</strong>' +
-          '<span class="memory-badge">' + escapeHtml(badge) + '</span>' +
+          '<span class="memory-badge">' + escapeHtml(card.confirmed ? "확인됨" : badge) + '</span>' +
           '</div>' +
           '<p class="memory-card-preview">' + escapeHtml(preview || "내용 없음") + '</p>' +
           '<div class="memory-card-meta">' + escapeHtml(relPath) + '</div>' +
           '</article>'
         );
       }).join("");
+      selectedMemoryCard = findMemoryCard(selectedMemoryId);
+      renderMemoryEditor();
     }
 
     async function loadMemoryVault({ force = false } = {}) {
       if (memoryLoading && memoryLoadPromise) return memoryLoadPromise;
-      if (memorySnapshot && !force) {
+      if (memorySnapshot && memoryGraphSnapshot && !force) {
+        renderMemoryGraph();
         renderMemoryCards();
         return;
       }
       memoryLoading = true;
-      if (memoryHint) memoryHint.textContent = "memory_vault 노트를 불러오는 중입니다.";
+      if (memoryHint) memoryHint.textContent = "memory_vault 노드를 불러오는 중입니다.";
       if (memoryCards && !memorySnapshot) {
         memoryCards.innerHTML = '<div class="memory-empty">메모리 노트를 불러오는 중입니다.</div>';
       }
+      if (memoryGraph && !memoryGraphSnapshot) {
+        memoryGraph.innerHTML = '<div class="memory-empty">메모리 노드 그래프를 불러오는 중입니다.</div>';
+      }
       memoryLoadPromise = (async () => {
-        const payload = await fetchApi("/api/control-page/memory?limit=120");
-        memorySnapshot = payload || { cards: [] };
+        const [snapshotPayload, graphPayload] = await Promise.all([
+          fetchApi("/api/control-page/memory?limit=180"),
+          fetchApi("/api/control-page/memory-graph?max_nodes=180")
+        ]);
+        memorySnapshot = snapshotPayload || { cards: [] };
+        memoryGraphSnapshot = graphPayload || { nodes: [], edges: [] };
+        renderMemoryGraph();
         renderMemoryCards();
       })();
       try {
         await memoryLoadPromise;
       } catch (error) {
         if (memoryHint) memoryHint.textContent = "memory_vault를 불러오지 못했습니다.";
+        if (memoryGraph) {
+          memoryGraph.innerHTML = '<div class="memory-empty">메모리 그래프 API 연결 실패: ' + escapeHtml(error.message) + '</div>';
+        }
         if (memoryCards) {
           memoryCards.innerHTML = '<div class="memory-empty">메모리 API 연결 실패: ' + escapeHtml(error.message) + '</div>';
         }
       } finally {
         memoryLoading = false;
         memoryLoadPromise = null;
+      }
+    }
+
+    async function postMemoryAction(action) {
+      if (!selectedMemoryId) return;
+      const payload = { action };
+      if (action === "edit") {
+        payload.title = memoryEditTitle ? memoryEditTitle.value : "";
+        payload.body = memoryEditBody ? memoryEditBody.value : "";
+      }
+      [memoryEditSaveButton, memoryConfirmButton, memoryDeleteButton].forEach((button) => {
+        if (button) button.disabled = true;
+      });
+      try {
+        const result = await fetchApi("/api/control-page/memory/" + encodeURIComponent(selectedMemoryId), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        });
+        if (!result || !result.ok) throw new Error((result && result.error) || "memory_action_failed");
+        const keepSelection = action !== "hide" ? selectedMemoryId : "";
+        memorySnapshot = null;
+        memoryGraphSnapshot = null;
+        selectedMemoryId = keepSelection;
+        selectedMemoryCard = null;
+        await loadMemoryVault({ force: true });
+        setBubble(action === "edit" ? "메모리 노드를 수정했어." : action === "confirm" ? "메모리 노드를 확인 처리했어." : "메모리 노드를 삭제 목록으로 옮겼어.");
+      } catch (error) {
+        setBubble(`메모리 작업 실패: ${error.message}`);
+        renderMemoryEditor();
       }
     }
 
@@ -1464,6 +1852,11 @@
     if (openObsidianButton) {
       openObsidianButton.addEventListener("click", openObsidianVault);
     }
+    document.querySelectorAll("[data-memory-page]").forEach((button) => {
+      button.addEventListener("click", () => {
+        setMemoryPage(button.getAttribute("data-memory-page") || "graph");
+      });
+    });
     document.querySelectorAll("[data-memory-filter]").forEach((button) => {
       button.addEventListener("click", () => {
         memoryFilter = button.getAttribute("data-memory-filter") || "all";
@@ -1473,6 +1866,47 @@
         renderMemoryCards();
       });
     });
+    if (memoryGraph) {
+      memoryGraph.addEventListener("click", (event) => {
+        const node = event.target.closest("[data-memory-id]");
+        if (!node) return;
+        selectMemoryCard(node.getAttribute("data-memory-id"));
+      });
+      memoryGraph.addEventListener("keydown", (event) => {
+        if (event.key !== "Enter" && event.key !== " ") return;
+        const node = event.target.closest("[data-memory-id]");
+        if (!node) return;
+        event.preventDefault();
+        selectMemoryCard(node.getAttribute("data-memory-id"));
+      });
+    }
+    if (memoryCards) {
+      memoryCards.addEventListener("click", (event) => {
+        const card = event.target.closest("[data-memory-id]");
+        if (!card) return;
+        selectMemoryCard(card.getAttribute("data-memory-id"), { openManager: false });
+      });
+      memoryCards.addEventListener("keydown", (event) => {
+        if (event.key !== "Enter" && event.key !== " ") return;
+        const card = event.target.closest("[data-memory-id]");
+        if (!card) return;
+        event.preventDefault();
+        selectMemoryCard(card.getAttribute("data-memory-id"), { openManager: false });
+      });
+    }
+    if (memoryEditSaveButton) {
+      memoryEditSaveButton.addEventListener("click", () => postMemoryAction("edit"));
+    }
+    if (memoryConfirmButton) {
+      memoryConfirmButton.addEventListener("click", () => postMemoryAction("confirm"));
+    }
+    if (memoryDeleteButton) {
+      memoryDeleteButton.addEventListener("click", () => {
+        if (!selectedMemoryId) return;
+        if (!window.confirm("이 메모리 노드를 삭제 목록으로 옮길까요?")) return;
+        postMemoryAction("hide");
+      });
+    }
     composer.addEventListener("input", renderSuggestions);
     composer.addEventListener("keydown", (event) => {
       if (!commandSuggestions.classList.contains("hidden") && suggestionItems.length) {
