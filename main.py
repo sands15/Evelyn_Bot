@@ -4156,6 +4156,50 @@ async def build_runtime_status_context(*, force: bool = False) -> str:
         return text
 
 
+def _collect_local_tool_diagnostic_matches(path: Path, terms: tuple[str, ...], *, max_matches: int = 5) -> list[str]:
+    if not path.exists() or not path.is_file():
+        return []
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError as exc:
+        return [f"{path.name}: read_failed={clean_text(repr(exc))[:120]}"]
+    matches: list[str] = []
+    lowered_terms = tuple(term.lower() for term in terms if term)
+    for index, line in enumerate(lines, start=1):
+        lowered = line.lower()
+        if any(term in lowered for term in lowered_terms):
+            matches.append(f"{path.name}:{index}: {clean_text(line)[:160]}")
+            if len(matches) >= max_matches:
+                break
+    return matches
+
+
+def build_local_tool_diagnostic_context(user_text: str) -> str:
+    text = clean_text(user_text).lower()
+    if not any(marker in text for marker in ("tool", "function", "llm", "도구", "툴", "호출", "메인")):
+        return ""
+    terms = (
+        "build_tool_use_decisions",
+        "render_tool_use_context",
+        "tool_use_decisions",
+        "local_file_or_log_read",
+        "runtime_status",
+        "build_main_llm_payload",
+        "prepare_llm_messages",
+        "build_main_response_guidance",
+    )
+    candidate_paths = (
+        PROJECT_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "context_pipeline.py",
+        PROJECT_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "skills" / "routing" / "voice_llm.py",
+        PROJECT_ROOT / "main.py",
+        PROJECT_ROOT / "tests" / "test_context_pipeline_tool_policy.py",
+    )
+    evidence: list[str] = ["local_tool_diagnostic_snapshot:"]
+    for path in candidate_paths:
+        evidence.extend(_collect_local_tool_diagnostic_matches(path, terms, max_matches=4))
+    return "\n".join(evidence[:18])
+
+
 def build_main_response_guidance(
     cognitive_state: dict | None = None,
     *,
@@ -4674,6 +4718,16 @@ async def prepare_llm_messages(
             runtime_status = await build_runtime_status_context(force=bool(decision.required_before_answer))
             decision.status = "executed" if clean_text(runtime_status) else "executed_empty"
             decision.evidence = clean_text(runtime_status)[:500]
+        except Exception as exc:
+            decision.status = "failed"
+            decision.evidence = clean_text(repr(exc))[:240]
+    for decision in tool_use_decisions:
+        if decision.tool_name != "local_file_or_log_read" or not decision.auto_allowed:
+            continue
+        try:
+            local_context = build_local_tool_diagnostic_context(user_text)
+            decision.status = "executed" if clean_text(local_context) else "executed_empty"
+            decision.evidence = clean_text(local_context)[:800] if clean_text(local_context) else "No matching local diagnostic snippets were selected."
         except Exception as exc:
             decision.status = "failed"
             decision.evidence = clean_text(repr(exc))[:240]

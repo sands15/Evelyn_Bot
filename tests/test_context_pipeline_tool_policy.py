@@ -98,6 +98,26 @@ class ContextPipelineToolPolicyTests(unittest.TestCase):
         self.assertIn("local_file_or_log_read", rendered)
         self.assertIn("avoid claiming tool-backed evidence", rendered)
 
+    def test_main_llm_tool_calling_complaint_requires_diagnostic_tools(self) -> None:
+        decisions = build_tool_use_decisions("메인 llm의 도구 호출이 너무 약해", ContextPolicy())
+
+        by_name = {item.tool_name: item for item in decisions}
+        self.assertIn("runtime_status", by_name)
+        self.assertIn("local_file_or_log_read", by_name)
+        self.assertTrue(by_name["runtime_status"].auto_allowed)
+        self.assertTrue(by_name["runtime_status"].required_before_answer)
+        self.assertTrue(by_name["local_file_or_log_read"].auto_allowed)
+        self.assertTrue(by_name["local_file_or_log_read"].required_before_answer)
+
+    def test_tool_context_renders_required_tool_as_hard_gate(self) -> None:
+        decisions = build_tool_use_decisions("메인 llm의 도구 호출이 너무 약해", ContextPolicy())
+
+        rendered = render_tool_use_context(decisions)
+
+        self.assertIn("Required tool evidence is a hard gate", rendered)
+        self.assertIn("do not answer from guesswork", rendered)
+        self.assertIn("local_file_or_log_read", rendered)
+
 
 if __name__ == "__main__":
     unittest.main()

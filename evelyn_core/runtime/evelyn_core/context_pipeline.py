@@ -540,6 +540,31 @@ def build_tool_use_decisions(user_text: str, policy: ContextPolicy | dict[str, A
         "법",
     )
     local_file_markers = ("log", "file", "test", "diff", "git", "로그", "파일", "테스트", "문서", "코드")
+    tool_diagnostic_markers = (
+        "tool call",
+        "tool-call",
+        "function call",
+        "function-call",
+        "tool use",
+        "main llm",
+        "main_llm",
+        "llm tool",
+        "도구 호출",
+        "툴 호출",
+        "도구콜",
+        "툴콜",
+        "도구 사용",
+        "툴 사용",
+        "메인 llm",
+        "메인 모델",
+        "메인모델",
+        "호출이",
+        "호출을",
+    )
+    asks_tool_diagnostic = _contains_any_marker(text, tool_diagnostic_markers) and _contains_any_marker(
+        text,
+        ("tool", "function", "llm", "도구", "툴", "호출", "메인"),
+    )
 
     if _contains_any_marker(text, runtime_markers):
         add(
@@ -604,6 +629,25 @@ def build_tool_use_decisions(user_text: str, policy: ContextPolicy | dict[str, A
                 evidence="Use local file/log evidence before making code or runtime claims.",
             )
         )
+    if asks_tool_diagnostic:
+        add(
+            ToolUseDecision(
+                tool_name="runtime_status",
+                reason="The user is reporting weak main-LLM tool behavior; live model/runtime state may affect tool execution.",
+                auto_allowed=True,
+                required_before_answer=True,
+            )
+        )
+        add(
+            ToolUseDecision(
+                tool_name="local_file_or_log_read",
+                reason="The user is reporting a runtime/tool-calling behavior problem; inspect implementation or logs before claiming a cause.",
+                auto_allowed=True,
+                required_before_answer=True,
+                status="planned",
+                evidence="Check the tool policy, route context, prompt assembly, and recent logs before diagnosing.",
+            )
+        )
 
     return list(decisions.values())
 
@@ -613,7 +657,9 @@ def render_tool_use_context(decisions: list[ToolUseDecision]) -> str:
         return ""
     lines = [
         "Tool-use policy for this answer.",
+        "Required tool evidence is a hard gate: do not answer from guesswork when required=true.",
         "If a required tool is unavailable, failed, or not executed, say that clearly and avoid claiming tool-backed evidence.",
+        "If status is executed, ground the answer in evidence. If status is planned/needs_local_tool/needs_permission_or_external_tool, either execute the tool in the runtime path first or state that the evidence is still missing.",
     ]
     for decision in decisions:
         item = decision.to_dict()
