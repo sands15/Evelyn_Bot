@@ -88,6 +88,13 @@ from evelyn_core.question_shaping import (
     enforce_question_limits,
     filter_stream_chunk_for_question_limits,
 )
+from evelyn_core.proactive_questions import (
+    mark_question_asked,
+    promote_open_questions,
+    resolve_pending_question_answer,
+    select_question_to_ask,
+    should_offer_proactive_question,
+)
 from evelyn_core.self_model import (
     mark_self_state_assistant_output,
     record_self_identity_turn,
@@ -2300,6 +2307,107 @@ def summarize_question_metrics() -> dict[str, Any]:
         "finalQuestionCount": int(question_metrics.get("final_question_count", 0) or 0),
         "askModeDistribution": ask_modes,
     }
+
+
+def proactive_question_scope_candidates(
+    *,
+    room_key: str | None = None,
+    person_key: str | None = None,
+    session_memory_key: str | None = None,
+) -> list[tuple[str, str | None]]:
+    scopes: list[tuple[str, str | None]] = []
+    if session_memory_key:
+        scopes.append(("session", session_memory_key))
+    if person_key:
+        scopes.append(("person", person_key))
+    if room_key:
+        scopes.append(("room", room_key))
+    scopes.append(("guild", None))
+    return scopes
+
+
+def resolve_pending_proactive_question_for_turn(
+    guild_id: int | None,
+    user_text: str,
+    *,
+    session_key: str | None = None,
+    session_memory_key: str | None = None,
+    metrics: dict | None = None,
+) -> dict[str, Any]:
+    if guild_id is None:
+        return {"resolved": False, "reason": "no_guild"}
+    session_scope_key = session_memory_key or session_key
+    if not session_scope_key:
+        return {"resolved": False, "reason": "no_session_scope"}
+    result = resolve_pending_question_answer(
+        guild_id,
+        user_text,
+        session_scope_key=session_scope_key,
+    )
+    if metrics is not None:
+        metrics.setdefault("meta", {})["proactive_question_resolution"] = result
+    return result
+
+
+def maybe_append_proactive_question(
+    answer_text: str,
+    *,
+    guild_id: int | None,
+    source: str,
+    user_text: str,
+    awaiting_user_reply: bool,
+    room_key: str | None = None,
+    person_key: str | None = None,
+    session_key: str | None = None,
+    session_memory_key: str | None = None,
+    metrics: dict | None = None,
+) -> tuple[str, bool]:
+    answer = clean_text(answer_text)
+    if guild_id is None:
+        return answer, False
+    if not should_offer_proactive_question(
+        source=source,
+        user_text=user_text,
+        answer_text=answer,
+        awaiting_user_reply=awaiting_user_reply,
+    ):
+        return answer, False
+    session_scope_key = session_memory_key or session_key
+    for scope_type, scope_key in proactive_question_scope_candidates(
+        room_key=room_key,
+        person_key=person_key,
+        session_memory_key=session_memory_key,
+    ):
+        candidate = select_question_to_ask(
+            guild_id,
+            scope_type=scope_type,
+            scope_key=scope_key,
+            session_scope_key=session_scope_key,
+        )
+        if not candidate:
+            continue
+        ask_text = clean_text(str(candidate.get("ask_text") or ""))
+        question_id = clean_text(str(candidate.get("id") or ""))
+        if not ask_text or not question_id:
+            continue
+        marked = mark_question_asked(
+            guild_id,
+            question_id,
+            scope_type=scope_type,
+            scope_key=scope_key,
+            session_scope_key=session_scope_key,
+            asked_text=ask_text,
+        )
+        if not marked:
+            continue
+        if metrics is not None:
+            metrics.setdefault("meta", {})["proactive_question_asked"] = {
+                "id": question_id,
+                "scope_type": scope_type,
+                "scope_key": scope_key,
+            }
+        return clean_text(f"{answer}\n\n{ask_text}"), True
+    return answer, False
 
 
 def summarize_p95_metrics() -> dict[str, float | int]:
@@ -5718,6 +5826,10 @@ async def update_long_term_memory(
                         MEMORY_LOOP_LIMIT,
                         mirror_path=vault_questions_path(guild_id, scope_type=scope_type, scope_key=scope_key),
                     )
+                    try:
+                        promote_open_questions(guild_id, rows, scope_type=scope_type, scope_key=scope_key)
+                    except Exception as e:
+                        print(f"[PROACTIVE QUESTIONS] promote failed guild={guild_id} scope={scope_type}:{scope_key or 'default'} err={e}")
 
             elapsed_ms = (time.monotonic() - started_at) * 1000.0
             if should_log_voice_timing(elapsed_ms):
@@ -10178,6 +10290,13 @@ async def answer_control_page_text(guild: discord.Guild | None, user_text: str) 
         },
         "marks": {},
     }
+    proactive_resolution = resolve_pending_proactive_question_for_turn(
+        guild_id,
+        user_text,
+        session_key=session_key,
+        session_memory_key=session_key,
+        metrics=text_metrics,
+    )
     answer = ""
     text_turn_summary_logged = False
     try:
@@ -10195,9 +10314,24 @@ async def answer_control_page_text(guild: discord.Guild | None, user_text: str) 
             answer = (
                 "지금 화면 캡처가 검은 프레임으로 들어와서 실제 화면 분석은 못 했어. "
                 "비전 모델 문제가 아니라 Windows 캡처 세션이 검은 이미지를 주는 상태야."
-            )
+        )
         plain_answer = strip_omnivoice_tags(answer) or answer
         awaiting_reply = bool(session_state_snapshot(session_key).get("awaiting_user_reply"))
+        proactive_asked = False
+        if not proactive_resolution.get("resolved"):
+            plain_answer, proactive_asked = maybe_append_proactive_question(
+                plain_answer,
+                guild_id=guild_id,
+                source="control_page",
+                user_text=user_text,
+                awaiting_user_reply=awaiting_reply,
+                session_key=session_key,
+                session_memory_key=session_key,
+                metrics=text_metrics,
+            )
+        if proactive_asked:
+            answer = plain_answer
+            awaiting_reply = True
         async with state_lock:
             append_history(session_key, user_text, plain_answer, guild_id=guild_id)
             mark_session_active(
@@ -10222,7 +10356,7 @@ async def answer_control_page_text(guild: discord.Guild | None, user_text: str) 
             session_key=session_key,
             turn_scope=turn_scope,
         )
-        return format_display_text(answer, session_key=session_key).strip() or fallback_answer_for(user_text)
+        return format_display_text(plain_answer, session_key=session_key).strip() or fallback_answer_for(user_text)
     finally:
         if text_metrics and not text_turn_summary_logged:
             text_metrics.setdefault("meta", {})["error_layer"] = "control_page_text"
@@ -11815,6 +11949,7 @@ async def stream_text_reply(
     debug_text: str | None = None,
     include_voice: bool = False,
     turn_scope: TurnScope | None = None,
+    proactive_resolution: dict | None = None,
 ) -> tuple[str, discord.Message | None, dict, DeliveryPlan]:
     task = _attach_current_task(turn_scope)
     try:
@@ -11843,6 +11978,31 @@ async def stream_text_reply(
             metrics=metrics,
             turn_scope=turn_scope,
         )
+        awaiting_reply = bool(session_state_snapshot(session_key).get("awaiting_user_reply"))
+        if proactive_resolution is not None:
+            metrics.setdefault("meta", {})["proactive_question_resolution"] = proactive_resolution
+        proactive_asked = False
+        if not (proactive_resolution or {}).get("resolved"):
+            answer, proactive_asked = maybe_append_proactive_question(
+                answer,
+                guild_id=guild_id,
+                source=source,
+                user_text=user_text,
+                awaiting_user_reply=awaiting_reply,
+                room_key=room_key,
+                person_key=person_key,
+                session_key=session_key,
+                session_memory_key=session_memory_key,
+                metrics=metrics,
+            )
+        if proactive_asked:
+            update_session_state(
+                session_key,
+                speaker="assistant",
+                awaiting_user_reply=True,
+                answer_text=answer,
+                user_text=user_text,
+            )
         answer_payload = build_answer_payload_from_text(answer)
         final_text = format_display_text(answer_payload.display_text, session_key=session_key).strip() or fallback_answer_for(user_text)
         delivery_plan = build_delivery_plan(
@@ -12703,6 +12863,13 @@ async def on_message(message: discord.Message):
     if attachment_context:
         user_text = f"{user_text}\n\n[Attached Visual Inputs]\n{attachment_context}"
 
+    proactive_resolution = resolve_pending_proactive_question_for_turn(
+        message.guild.id,
+        user_text,
+        session_key=session_key,
+        session_memory_key=session_memory_key,
+    )
+
     state_lock = session_locks.setdefault(session_key, asyncio.Lock())
     reply_lock = reply_slot_locks.setdefault(ingress.reply_slot_key, asyncio.Lock())
 
@@ -12752,6 +12919,7 @@ async def on_message(message: discord.Message):
                     debug_text=user_text,
                     include_voice=vc is not None,
                     turn_scope=turn_scope,
+                    proactive_resolution=proactive_resolution,
                 )
                 plain_answer = strip_omnivoice_tags(answer)
                 if not plain_answer:
