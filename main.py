@@ -10802,6 +10802,10 @@ async def handle_control_page_input(guild: discord.Guild | None, text: str) -> s
         tool_decision_raw = await decide_control_page_tool_call(text, guild_id=guild_id, session_key=session_key)
         tool_decision = control_page_tool_decision_from_llm(tool_decision_raw)
         if tool_decision:
+            router_policy_error = control_page_tool_policy_error(tool_decision, guild=guild)
+            if router_policy_error:
+                remember_control_page_tool_turn(guild, text, router_policy_error, tool_decision)
+                return router_policy_error
             execute_reply = await execute_control_page_tool(guild, tool_decision)
             reply = clean_text(str(tool_decision.get("reply") or ""))
             final_reply = reply or execute_reply
