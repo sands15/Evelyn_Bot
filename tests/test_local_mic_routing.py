@@ -153,6 +153,45 @@ class LocalMicRoutingTests(unittest.TestCase):
         self.assertEqual(meta["source"], "local_mic")
         self.assertFalse(meta["voice_filter"]["rejected"])
 
+    def test_start_local_enables_local_mic_by_default(self) -> None:
+        script = (REPO_ROOT / "evelyn_core" / "start_local.bat").read_text(encoding="utf-8")
+
+        self.assertIn('if "%LOCAL_MIC_ENABLED%"=="" set "LOCAL_MIC_ENABLED=true"', script)
+        self.assertIn('if "%LOCAL_MIC_START_THRESHOLD%"=="" set "LOCAL_MIC_START_THRESHOLD=0.002"', script)
+        self.assertIn('if "%LOCAL_MIC_CONTINUE_THRESHOLD%"=="" set "LOCAL_MIC_CONTINUE_THRESHOLD=0.001"', script)
+        self.assertIn('if "%LOCAL_MIC_MIN_VOICED_MS%"=="" set "LOCAL_MIC_MIN_VOICED_MS=160"', script)
+        self.assertIn('if "%LOCAL_MIC_WAVEFORM_FILTER_ENABLED%"=="" set "LOCAL_MIC_WAVEFORM_FILTER_ENABLED=false"', script)
+        self.assertNotIn("OMNIVOICE_SPEED", script)
+        self.assertNotIn("TTS_CHUNK_TAIL_SILENCE_MS", script)
+        self.assertNotIn("LOCAL_TTS_TAIL_SILENCE_MS", script)
+        self.assertNotIn("TTS_FIRST_CHUNK_MIN_CHARS", script)
+        self.assertNotIn("TTS_NEXT_CHUNK_MIN_CHARS", script)
+        self.assertNotIn('set "LOCAL_MIC_ENABLED=false"', script)
+
+    def test_start_local_has_lightweight_vision_profile(self) -> None:
+        script = (REPO_ROOT / "evelyn_core" / "start_local.bat").read_text(encoding="utf-8")
+
+        self.assertIn('if /I "%~1"=="--lightweight" set "LOCAL_PROFILE=lightweight"', script)
+        self.assertIn('if "%VISION_LOAD_OCR%"=="" set "VISION_LOAD_OCR=false"', script)
+        self.assertIn('if "%VISION_WATCH_RUN_OCR%"=="" set "VISION_WATCH_RUN_OCR=false"', script)
+        self.assertIn('if "%VISION_OCR_LAZY_LOAD%"=="" set "VISION_OCR_LAZY_LOAD=true"', script)
+        self.assertIn('if "%VISION_OCR_UNLOAD_AFTER_REQUEST%"=="" set "VISION_OCR_UNLOAD_AFTER_REQUEST=true"', script)
+        self.assertIn("skip Falcon-OCR startup load", script)
+        self.assertLess(
+            script.index('if /I "%LOCAL_PROFILE%"=="lightweight" ('),
+            script.index('call "%~dp0start_env.bat"'),
+        )
+
+    def test_main_routes_local_only_mic_without_discord_target(self) -> None:
+        main_py = (REPO_ROOT / "main.py").read_text(encoding="utf-8")
+
+        self.assertIn("target is None and LOCAL_ONLY_MODE", main_py)
+        self.assertIn("local_control_voice_member()", main_py)
+        self.assertIn("await ensure_local_mic_service_started()", main_py)
+        self.assertIn("is_local_speaker_voice_client(vc)", main_py)
+        self.assertIn("await ask_llm_and_speak_local(", main_py)
+        self.assertIn('normalized in {"/voice status", "/voice"}', main_py)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -31,6 +31,8 @@ const dom = {
   bootSplashShutdownButton: document.querySelector("#boot-splash-shutdown"),
   bootSplashShutdownStatus: document.querySelector("#boot-splash-shutdown-status"),
   controlPageRoot: document.querySelector("#control-page-root"),
+  controlWallpaperButton: document.querySelector("#control-wallpaper-button"),
+  controlWallpaperInput: document.querySelector("#control-wallpaper-input"),
   modelViewport: document.querySelector(".model-viewport"),
   chatThread: document.querySelector("#chat-thread"),
   chatComposer: document.querySelector("#chat-composer"),
@@ -201,10 +203,13 @@ const state = {
   memoryGraphLoading: false,
   memoryGraphLastLoadedAt: 0,
   memoryGraphFrame: null,
-  memoryGraphPointer: { x: 0, y: 0, down: false, dragId: "", hoverId: "" },
+  memoryGraphNodeScale: Number(localStorage.getItem("evelynMemoryGraphNodeScale") || 1),
+  memoryGraphPointer: { x: 0, y: 0, down: false, dragId: "", holdId: "", hoverId: "", offsetX: 0, offsetY: 0, startClientX: 0, startClientY: 0 },
   memoryCardsPayload: null,
   memoryCardsLoading: false,
   memoryCardsLastLoadedAt: 0,
+  memoryEditor: null,
+  wallpaperObjectUrl: "",
 };
 
 let pollTimer = null;
@@ -212,8 +217,12 @@ let pollIntervalMs = 0;
 let apiWaitingTicker = null;
 const PANEL_LAYOUT_STORAGE_KEY = "evelyn.controlPage.panels.v2";
 const PANEL_MANAGER_ENABLED = false;
-const WINBOX_PANEL_MANAGER_ENABLED = true;
-const WINBOX_LAYOUT_STORAGE_KEY = "evelyn.controlPage.winbox.v2";
+const WINBOX_PANEL_MANAGER_ENABLED = false;
+const WINBOX_LAYOUT_STORAGE_KEY = "evelyn.controlPage.winbox.v3";
+const WALLPAPER_DB_NAME = "evelyn-control-page";
+const WALLPAPER_DB_VERSION = 1;
+const WALLPAPER_STORE_NAME = "assets";
+const WALLPAPER_KEY = "wallpaper";
 const DEFAULT_OPEN_WINBOX_PANELS = new Set(["avatar", "chat"]);
 const PANEL_DEFINITIONS = [
   { id: "runtime", label: "Runtime", selector: ".context-card", handleSelector: ".panel-title-row" },
@@ -222,23 +231,25 @@ const PANEL_DEFINITIONS = [
   { id: "chat", label: "Chat", selector: ".chat-panel", handleSelector: ".chat-header" },
   { id: "memory", label: "Memory", selector: "#memory-graph-panel", handleSelector: ".memory-graph-header" },
 ];
+const WINBOX_RESIZE_CORNERS = ["nw", "ne", "sw", "se"];
 const CONTROL_PAGE_COMMAND_CATALOG = [
-  { command: "/help", template: "/help", summary: "Show the control page command list" },
-  { command: "/status", template: "/status", summary: "Show current Evelyn, voice, and TTS status" },
-  { command: "/voice input auto", template: "/voice input auto", summary: "Use local mic with Discord fallback" },
-  { command: "/voice input local", template: "/voice input local", summary: "Use local microphone input" },
-  { command: "/voice input discord", template: "/voice input discord", summary: "Use Discord voice input" },
-  { command: "/inventory", template: "/inventory", summary: "Show the current Minecraft inventory summary" },
-  { command: "/voyager stats", template: "/voyager stats", summary: "Show Voyager progress and evaluator status" },
-  { command: "/minecraft status", template: "/minecraft status", summary: "Show Minecraft connection and current task status" },
-  { command: "/minecraft connect", template: "/minecraft connect", summary: "Start Voyager Minecraft mode" },
-  { command: "/minecraft disconnect", template: "/minecraft disconnect", summary: "Stop Voyager Minecraft mode" },
-  { command: "/minecraft goal <goal>", template: "/minecraft goal ", summary: "Change the current Minecraft goal" },
-  { command: "/autonomy status", template: "/autonomy status", summary: "Show Evelyn autonomy engine status" },
-  { command: "/shutdown", template: "/shutdown", summary: "Shut down Evelyn runtime" },
-  { command: "/windows", template: "/windows", summary: "List background console windows and their state" },
-  { command: "/show <window>", template: "/show ", summary: "Bring a background console window to front" },
-  { command: "/ui <action> <panel>", template: "/ui ", summary: "Show, hide, toggle, focus, or reset control page panels" },
+  { command: "/help", template: "/help", summary: "명령어 목록 보기" },
+  { command: "/status", template: "/status", summary: "Evelyn, 음성, 모델, Minecraft 상태 요약" },
+  { command: "/memory", template: "/memory", summary: "메모리 패널 열기/숨기기" },
+  { command: "/obsidian", template: "/obsidian", summary: "메모리 패널 열기/숨기기" },
+  { command: "/voice status", template: "/voice status", summary: "음성 입력, STT, TTS 파이프라인 상태 보기" },
+  { command: "/voice reconnect", template: "/voice reconnect", summary: "최근 저장된 음성 채널에 다시 연결" },
+  { command: "/voice input auto", template: "/voice input auto", summary: "로컬 마이크와 Discord 입력 자동 전환" },
+  { command: "/voice input local", template: "/voice input local", summary: "로컬 마이크 입력 사용" },
+  { command: "/voice input discord", template: "/voice input discord", summary: "Discord 음성 입력 사용" },
+  { command: "/minecraft connect", template: "/minecraft connect", summary: "Voyager Minecraft 모드 시작" },
+  { command: "/minecraft status", template: "/minecraft status", summary: "Minecraft 연결과 현재 task 상태 보기" },
+  { command: "/inventory", template: "/inventory", summary: "현재 Minecraft 인벤토리 요약 보기" },
+  { command: "/voyager stats", template: "/voyager stats", summary: "Voyager 진행 상태와 평가 지표 보기" },
+  { command: "/minecraft disconnect", template: "/minecraft disconnect", summary: "Voyager Minecraft 모드 중지" },
+  { command: "/minecraft goal <goal>", template: "/minecraft goal ", summary: "Minecraft 목표 변경" },
+  { command: "/autonomy status", template: "/autonomy status", summary: "Evelyn 자율 행동 엔진 상태 보기" },
+  { command: "/shutdown", template: "/shutdown", summary: "Evelyn runtime 종료 (Shut down Evelyn runtime)" },
 ];
 const avatarState = {
   talking: false,
@@ -411,9 +422,10 @@ function applyBootProgressPayload(payload) {
   }
   const percent = clampPercent(progress.percent);
   const phase = progress.phase || "부팅 상태 확인 중";
-  const ready = percent >= 100 && progress.ready !== false && payload.ok !== false;
-  setApiBootProgress(percent, phase, { hide: ready });
-  if (ready) {
+  const apiConnected = payload.ok !== false;
+  const componentsReady = percent >= 100 && progress.ready !== false;
+  setApiBootProgress(percent, phase, { hide: apiConnected });
+  if (apiConnected || componentsReady) {
     hideApiBootProgressSoon();
   }
   return true;
@@ -581,7 +593,7 @@ function renderApiWaitingState({ preserveScroll = false } = {}) {
     dom.controlIssueBody.textContent = "127.0.0.1:8799 응답을 기다리는 중입니다.";
   }
   if (dom.quickCommandCaption) {
-    dom.quickCommandCaption.textContent = "API가 뜨면 즉시 실행 가능한 버튼으로 바뀝니다.";
+    dom.quickCommandCaption.textContent = "API가 뜨면 입력칸에 채울 수 있는 버튼으로 바뀝니다.";
   }
   if (dom.operatorRuntimeTitle) {
     dom.operatorRuntimeTitle.textContent = "연결 상태 확인 중";
@@ -1024,10 +1036,11 @@ function commandDisplayName(item) {
       return "자율 상태";
     case "/help":
       return "도움말";
+    case "/memory":
+    case "/obsidian":
+      return "메모리";
     case "/shutdown":
       return "종료";
-    case "/windows":
-      return "윈도우 목록";
     default:
       return item && (item.command || item.template) ? String(item.command || item.template) : "명령";
   }
@@ -1091,7 +1104,7 @@ function buildSupportActions(payload, commands, primaryActions) {
       return false;
     }
     const command = String(item.command || "").toLowerCase();
-    return !command.startsWith("/show ") && command !== "/shutdown" && command !== "/windows" && command !== "/minecraft goal <goal>";
+    return command !== "/shutdown" && command !== "/minecraft goal <goal>";
   });
   const merged = [];
   const seen = new Set();
@@ -1108,7 +1121,7 @@ function buildSupportActions(payload, commands, primaryActions) {
 
 function commandButtonMarkup(items) {
   return items.map((item) => (
-    '<button type="button" class="quick-command' + (((item.command || "") === "/shutdown") ? ' is-danger' : '') + '" data-chat-command="' + escapeHtml(item.template || item.command) + '" data-chat-send="' + (((item.template || item.command) === item.command) ? "1" : "0") + '" data-confirm="' + (((item.command || "") === "/shutdown") ? "Evelyn 봇을 종료할까요?" : "") + '" title="' + escapeHtml(item.summary || "") + '">' +
+    '<button type="button" class="quick-command' + (((item.command || "") === "/shutdown") ? ' is-danger' : '') + '" data-chat-command="' + escapeHtml(item.template || item.command) + '" data-chat-send="0" title="' + escapeHtml(item.summary || "") + '">' +
       escapeHtml(commandDisplayName(item)) +
     "</button>"
   )).join("");
@@ -1145,7 +1158,7 @@ function describeControlState(payload) {
       issueTitle: issues.length ? "주의" : "",
       issueBody: issues[0] || "",
       showIssue: Boolean(issues.length),
-      quickCaption: "길드가 붙으면 여기서 바로 실행 버튼이 정리됩니다.",
+      quickCaption: "길드가 붙으면 여기서 입력칸에 채울 버튼이 정리됩니다.",
     };
   }
 
@@ -1161,7 +1174,7 @@ function describeControlState(payload) {
       issueTitle: issues.length ? "주의" : "",
       issueBody: issues[0] || "",
       showIssue: Boolean(issues.length),
-      quickCaption: "지금 세션에서 바로 확인하거나 멈출 수 있는 액션입니다.",
+      quickCaption: "지금 세션에서 입력칸에 채워 확인할 수 있는 액션입니다.",
     };
   }
 
@@ -1620,6 +1633,101 @@ async function fetchApi(path, options = {}) {
   return await response.json();
 }
 
+function openWallpaperDatabase() {
+  return new Promise((resolve, reject) => {
+    if (!window.indexedDB) {
+      reject(new Error("indexeddb_unavailable"));
+      return;
+    }
+    const request = window.indexedDB.open(WALLPAPER_DB_NAME, WALLPAPER_DB_VERSION);
+    request.onupgradeneeded = () => {
+      const database = request.result;
+      if (!database.objectStoreNames.contains(WALLPAPER_STORE_NAME)) {
+        database.createObjectStore(WALLPAPER_STORE_NAME);
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error || new Error("indexeddb_open_failed"));
+  });
+}
+
+async function readStoredWallpaper() {
+  const database = await openWallpaperDatabase();
+  return await new Promise((resolve, reject) => {
+    const transaction = database.transaction(WALLPAPER_STORE_NAME, "readonly");
+    const request = transaction.objectStore(WALLPAPER_STORE_NAME).get(WALLPAPER_KEY);
+    request.onsuccess = () => resolve(request.result || null);
+    request.onerror = () => reject(request.error || new Error("wallpaper_read_failed"));
+    transaction.oncomplete = () => database.close();
+    transaction.onerror = () => {
+      database.close();
+      reject(transaction.error || new Error("wallpaper_transaction_failed"));
+    };
+  });
+}
+
+async function storeWallpaper(blob) {
+  const database = await openWallpaperDatabase();
+  return await new Promise((resolve, reject) => {
+    const transaction = database.transaction(WALLPAPER_STORE_NAME, "readwrite");
+    transaction.objectStore(WALLPAPER_STORE_NAME).put(blob, WALLPAPER_KEY);
+    transaction.oncomplete = () => {
+      database.close();
+      resolve();
+    };
+    transaction.onerror = () => {
+      database.close();
+      reject(transaction.error || new Error("wallpaper_write_failed"));
+    };
+  });
+}
+
+function applyWallpaperBlob(blob) {
+  if (!dom.controlPageRoot || !blob) {
+    return;
+  }
+  if (state.wallpaperObjectUrl) {
+    URL.revokeObjectURL(state.wallpaperObjectUrl);
+  }
+  state.wallpaperObjectUrl = URL.createObjectURL(blob);
+  dom.controlPageRoot.style.setProperty("--control-wallpaper-image", 'url("' + state.wallpaperObjectUrl + '")');
+  dom.controlPageRoot.classList.add("has-custom-wallpaper");
+}
+
+async function restoreWallpaper() {
+  try {
+    const blob = await readStoredWallpaper();
+    if (blob) {
+      applyWallpaperBlob(blob);
+    }
+  } catch (error) {
+    console.warn("Control page wallpaper restore failed.", error);
+  }
+}
+
+function initWallpaperPicker() {
+  if (!dom.controlWallpaperButton || !dom.controlWallpaperInput) {
+    return;
+  }
+  dom.controlWallpaperButton.addEventListener("click", () => {
+    dom.controlWallpaperInput.click();
+  });
+  dom.controlWallpaperInput.addEventListener("change", async () => {
+    const file = dom.controlWallpaperInput.files && dom.controlWallpaperInput.files[0];
+    dom.controlWallpaperInput.value = "";
+    if (!file || !String(file.type || "").startsWith("image/")) {
+      return;
+    }
+    applyWallpaperBlob(file);
+    try {
+      await storeWallpaper(file);
+    } catch (error) {
+      console.warn("Control page wallpaper save failed.", error);
+    }
+  });
+  restoreWallpaper();
+}
+
 async function requestBootSplashShutdown() {
   if (!dom.bootSplashShutdownButton || dom.bootSplashShutdownButton.disabled) {
     return;
@@ -1656,6 +1764,19 @@ function commandSuggestionsForInput(rawValue) {
   });
 }
 
+function isStaleControlCommand(item) {
+  const command = String((item && item.command) || "").toLowerCase();
+  const template = String((item && item.template) || "").toLowerCase();
+  return (
+    command.startsWith("/ui")
+    || command.startsWith("/windows")
+    || command.startsWith("/show")
+    || template.startsWith("/ui")
+    || template.startsWith("/windows")
+    || template.startsWith("/show")
+  );
+}
+
 function mergedCommandCatalog(...groups) {
   const byCommand = new Map();
   for (const group of groups) {
@@ -1663,7 +1784,7 @@ function mergedCommandCatalog(...groups) {
       continue;
     }
     for (const item of group) {
-      if (!item || !item.command) {
+      if (!item || !item.command || isStaleControlCommand(item)) {
         continue;
       }
       const command = String(item.command);
@@ -1685,6 +1806,32 @@ function mergedCommandCatalog(...groups) {
     }
   }
   return Array.from(byCommand.values());
+}
+
+function commandHelpGroup(item) {
+  const command = String((item && item.command) || "").toLowerCase();
+  if (command.startsWith("/voice")) return "음성";
+  if (command === "/memory" || command === "/obsidian") return "페이지";
+  if (command.startsWith("/minecraft") || command === "/inventory" || command.startsWith("/voyager")) return "Minecraft";
+  if (command.startsWith("/autonomy")) return "자율 행동";
+  if (command === "/shutdown") return "시스템";
+  return "기본";
+}
+
+function formatCommandHelp(commands) {
+  const catalog = mergedCommandCatalog(CONTROL_PAGE_COMMAND_CATALOG, commands || []);
+  const lines = ["페이지 명령어"];
+  for (const group of ["기본", "페이지", "음성", "Minecraft", "자율 행동", "시스템"]) {
+    const items = catalog.filter((item) => commandHelpGroup(item) === group);
+    if (!items.length) {
+      continue;
+    }
+    lines.push("", group);
+    for (const item of items) {
+      lines.push("- " + item.command + " - " + item.summary);
+    }
+  }
+  return lines.join("\n");
 }
 
 function renderSuggestions() {
@@ -1793,15 +1940,15 @@ function defaultQuickCommands(minecraftActive) {
         { command: "/inventory", template: "/inventory", summary: "현재 Minecraft 인벤토리 요약 보기" },
         { command: "/minecraft status", template: "/minecraft status", summary: "Minecraft 연결과 현재 task 상태 보기" },
         { command: "/minecraft disconnect", template: "/minecraft disconnect", summary: "Voyager Minecraft 모드 중지" },
-        { command: "/shutdown", template: "/shutdown", summary: "Shut down Evelyn runtime" },
-        { command: "/help", template: "/help", summary: "페이지에서 지원하는 명령 목록 보기" },
+        { command: "/shutdown", template: "/shutdown", summary: "Evelyn runtime 종료 (Shut down Evelyn runtime)" },
+        { command: "/help", template: "/help", summary: "명령어 목록 보기" },
       ]
     : [
         { command: "/minecraft connect", template: "/minecraft connect", summary: "Voyager Minecraft 모드 시작" },
-        { command: "/status", template: "/status", summary: "현재 Evelyn, 음성, TTS 상태 보기" },
+        { command: "/status", template: "/status", summary: "Evelyn, 음성, 모델, Minecraft 상태 요약" },
         { command: "/autonomy status", template: "/autonomy status", summary: "Evelyn 자율 행동 엔진 상태 보기" },
-        { command: "/shutdown", template: "/shutdown", summary: "Shut down Evelyn runtime" },
-        { command: "/help", template: "/help", summary: "페이지에서 지원하는 명령 목록 보기" },
+        { command: "/shutdown", template: "/shutdown", summary: "Evelyn runtime 종료 (Shut down Evelyn runtime)" },
+        { command: "/help", template: "/help", summary: "명령어 목록 보기" },
       ];
 }
 
@@ -1828,14 +1975,6 @@ function handleChatCommandTrigger(button) {
     return;
   }
   const command = button.getAttribute("data-chat-command") || "";
-  const confirmMessage = button.getAttribute("data-confirm") || "";
-  if (confirmMessage && !window.confirm(confirmMessage)) {
-    return;
-  }
-  if (button.getAttribute("data-chat-send") === "1") {
-    sendCurrentMessage(command);
-    return;
-  }
   if (!dom.commandInput) {
     return;
   }
@@ -1884,16 +2023,48 @@ function renderChat(messages, systemText, { preserveScroll = false } = {}) {
 
 const MEMORY_GRAPH_COLORS = {
   core: "#fff8ea",
-  project: "#8fb7ff",
-  episode: "#bda1ff",
-  concept: "#77d6ca",
-  procedure: "#f2b46f",
-  daily: "#d7d0bd",
-  note: "#d7d0bd",
+  project: "#fff8ea",
+  episode: "#fff8ea",
+  concept: "#fff8ea",
+  procedure: "#fff8ea",
+  daily: "#fff8ea",
+  note: "#fff8ea",
 };
+const MEMORY_GRAPH_RINGS = { core: 0.12, project: 0.28, procedure: 0.44, concept: 0.58, episode: 0.72, daily: 0.86, note: 0.66 };
 
 function memoryGraphTypeColor(type) {
   return MEMORY_GRAPH_COLORS[String(type || "note").toLowerCase()] || MEMORY_GRAPH_COLORS.note;
+}
+
+function compactMemoryGraphDate(value) {
+  const text = String(value || "");
+  const match = text.match(/(20\d{2})[-_.]?(\d{2})[-_.]?(\d{2})/);
+  if (!match) {
+    return "";
+  }
+  return match[2] + "." + match[3];
+}
+
+function memoryGraphNodeLabel(node) {
+  const type = String(node?.type || node?.category || "note").toLowerCase();
+  const date = compactMemoryGraphDate([
+    node?.updated_at,
+    node?.created_at,
+    node?.rel_path,
+    node?.path,
+    node?.id,
+    node?.title,
+  ].filter(Boolean).join(" "));
+  if (type === "core" || type === "episode" || type === "daily") {
+    return date || type;
+  }
+  if (type === "project") {
+    const project = Array.isArray(node?.projects) ? node.projects[0] : "";
+    return String(project || "project").slice(0, 12);
+  }
+  if (type === "procedure") return "flow";
+  if (type === "concept") return "concept";
+  return date || type || "note";
 }
 
 function memoryGraphVisiblePayload() {
@@ -1910,15 +2081,63 @@ function memoryGraphVisiblePayload() {
   };
 }
 
+function memoryGraphCanvasSize() {
+  const canvas = dom.memoryGraphCanvas;
+  const rect = canvas?.getBoundingClientRect?.();
+  return {
+    width: Math.max(360, Math.floor(rect?.width || canvas?.clientWidth || 760)),
+    height: Math.max(360, Math.floor(rect?.height || canvas?.clientHeight || 460)),
+  };
+}
+
+function memoryGraphClampPoint(x, y) {
+  const { width, height } = memoryGraphCanvasSize();
+  return {
+    x: Math.max(24, Math.min(width - 24, x)),
+    y: Math.max(24, Math.min(height - 24, y)),
+  };
+}
+
+function memoryGraphLocalPoint(clientX, clientY) {
+  const canvas = dom.memoryGraphCanvas;
+  const rect = canvas?.getBoundingClientRect?.();
+  const { width, height } = memoryGraphCanvasSize();
+  if (!rect || rect.width <= 0 || rect.height <= 0) {
+    return memoryGraphClampPoint(width / 2, height / 2);
+  }
+  return {
+    x: ((clientX - rect.left) / rect.width) * width,
+    y: ((clientY - rect.top) / rect.height) * height,
+  };
+}
+
+function memoryGraphNodeAnchor(type, index, total, width, height) {
+  const normalizedType = String(type || "note").toLowerCase();
+  const ring = MEMORY_GRAPH_RINGS[normalizedType] || MEMORY_GRAPH_RINGS.note;
+  const angle = ((index / Math.max(1, total)) * Math.PI * 2) + (normalizedType.length * 0.31);
+  const radius = Math.min(width, height) * ring * 0.5;
+  return {
+    x: (width / 2) + Math.cos(angle) * radius,
+    y: (height / 2) + Math.sin(angle) * radius,
+  };
+}
+
 function prepareMemoryGraphLayout(payload) {
   if (!payload || !Array.isArray(payload.nodes)) {
     return payload;
   }
-  const width = Math.max(360, dom.memoryGraphCanvas?.clientWidth || 760);
-  const height = Math.max(260, dom.memoryGraphCanvas?.clientHeight || 460);
+  const { width, height } = memoryGraphCanvasSize();
   const centerX = width / 2;
   const centerY = height / 2;
-  const rings = { core: 0.12, project: 0.28, procedure: 0.44, concept: 0.58, episode: 0.72, daily: 0.86 };
+  const previousWidth = Number(payload._layoutWidth || 0);
+  const previousHeight = Number(payload._layoutHeight || 0);
+  const shouldScaleExisting = previousWidth > 0
+    && previousHeight > 0
+    && (Math.abs(previousWidth - width) > 2 || Math.abs(previousHeight - height) > 2);
+  const previousCenterX = previousWidth / 2;
+  const previousCenterY = previousHeight / 2;
+  const scaleX = previousWidth > 0 ? width / previousWidth : 1;
+  const scaleY = previousHeight > 0 ? height / previousHeight : 1;
   const counts = {};
   for (const node of payload.nodes) {
     const type = node.type || "note";
@@ -1930,14 +2149,23 @@ function prepareMemoryGraphLayout(payload) {
     const index = seen[type] || 0;
     seen[type] = index + 1;
     const total = Math.max(1, counts[type] || 1);
-    const ring = rings[type] || 0.66;
-    const angle = ((index / total) * Math.PI * 2) + (type.length * 0.31);
-    const radius = Math.min(width, height) * ring * 0.5;
-    node.x = Number.isFinite(node.x) ? node.x : centerX + Math.cos(angle) * radius;
-    node.y = Number.isFinite(node.y) ? node.y : centerY + Math.sin(angle) * radius;
+    const anchor = memoryGraphNodeAnchor(type, index, total, width, height);
+    node.anchorX = anchor.x;
+    node.anchorY = anchor.y;
+    if (shouldScaleExisting && Number.isFinite(node.x) && Number.isFinite(node.y)) {
+      node.x = centerX + (node.x - previousCenterX) * scaleX;
+      node.y = centerY + (node.y - previousCenterY) * scaleY;
+    } else {
+      node.x = Number.isFinite(node.x) ? node.x : node.anchorX;
+      node.y = Number.isFinite(node.y) ? node.y : node.anchorY;
+    }
+    node.x = Math.max(30, Math.min(width - 30, node.x));
+    node.y = Math.max(30, Math.min(height - 30, node.y));
     node.vx = Number.isFinite(node.vx) ? node.vx : 0;
     node.vy = Number.isFinite(node.vy) ? node.vy : 0;
   }
+  payload._layoutWidth = width;
+  payload._layoutHeight = height;
   return payload;
 }
 
@@ -1945,13 +2173,13 @@ function stepMemoryGraphSimulation(payload) {
   if (!payload || !payload.nodes || !payload.nodes.length) {
     return;
   }
-  const canvas = dom.memoryGraphCanvas;
-  const width = Math.max(360, canvas?.clientWidth || 760);
-  const height = Math.max(260, canvas?.clientHeight || 460);
+  const { width, height } = memoryGraphCanvasSize();
   const nodeById = new Map(payload.nodes.map((node) => [node.id, node]));
   for (const node of payload.nodes) {
-    node.vx += ((width / 2) - node.x) * 0.0009;
-    node.vy += ((height / 2) - node.y) * 0.0009;
+    const anchorX = Number.isFinite(node.anchorX) ? node.anchorX : width / 2;
+    const anchorY = Number.isFinite(node.anchorY) ? node.anchorY : height / 2;
+    node.vx += (anchorX - node.x) * 0.0012;
+    node.vy += (anchorY - node.y) * 0.0012;
   }
   for (let i = 0; i < payload.nodes.length; i += 1) {
     const left = payload.nodes[i];
@@ -1989,17 +2217,23 @@ function stepMemoryGraphSimulation(payload) {
     target.vy -= fy;
   }
   for (const node of payload.nodes) {
-    if (state.memoryGraphPointer.dragId === node.id) {
-      node.x = state.memoryGraphPointer.x;
-      node.y = state.memoryGraphPointer.y;
+    if (state.memoryGraphPointer.dragId === node.id || state.memoryGraphPointer.holdId === node.id) {
+      const point = {
+        x: state.memoryGraphPointer.x,
+        y: state.memoryGraphPointer.y,
+      };
+      if (state.memoryGraphPointer.dragId === node.id) {
+        node.x = point.x;
+        node.y = point.y;
+      }
       node.vx = 0;
       node.vy = 0;
       continue;
     }
     node.vx *= 0.86;
     node.vy *= 0.86;
-    node.x = Math.max(24, Math.min(width - 24, node.x + node.vx));
-    node.y = Math.max(24, Math.min(height - 24, node.y + node.vy));
+    node.x = Math.max(-160, Math.min(width + 160, node.x + node.vx));
+    node.y = Math.max(-160, Math.min(height + 160, node.y + node.vy));
   }
 }
 
@@ -2008,10 +2242,8 @@ function drawMemoryGraph(payload) {
   if (!canvas) {
     return;
   }
-  const rect = canvas.getBoundingClientRect();
   const scale = window.devicePixelRatio || 1;
-  const width = Math.max(360, Math.floor(rect.width || canvas.clientWidth || 760));
-  const height = Math.max(260, Math.floor(rect.height || canvas.clientHeight || 460));
+  const { width, height } = memoryGraphCanvasSize();
   if (canvas.width !== Math.floor(width * scale) || canvas.height !== Math.floor(height * scale)) {
     canvas.width = Math.floor(width * scale);
     canvas.height = Math.floor(height * scale);
@@ -2042,11 +2274,12 @@ function drawMemoryGraph(payload) {
     ctx.stroke();
   }
   for (const node of payload.nodes || []) {
-    const radius = Math.max(7, Math.min(24, Number(node.size || 14) * 0.58));
+    const nodeScale = Math.max(0.7, Math.min(1.55, Number(state.memoryGraphNodeScale || 1)));
+    const radius = Math.max(4, Math.min(24, Number(node.size || 14) * 0.42 * nodeScale));
     const selected = node.id === state.memoryGraphSelectedNodeId;
     const hovered = node.id === state.memoryGraphPointer.hoverId;
     ctx.beginPath();
-    ctx.arc(node.x, node.y, radius + (selected ? 5 : (hovered ? 3 : 0)), 0, Math.PI * 2);
+    ctx.arc(node.x, node.y, radius + (selected ? 4 : (hovered ? 2 : 0)), 0, Math.PI * 2);
     ctx.fillStyle = selected ? "rgba(255, 248, 234, 0.20)" : (hovered ? "rgba(255, 248, 234, 0.13)" : "rgba(255, 248, 234, 0.05)");
     ctx.fill();
     ctx.beginPath();
@@ -2054,15 +2287,17 @@ function drawMemoryGraph(payload) {
     ctx.fillStyle = memoryGraphTypeColor(node.type);
     ctx.fill();
     ctx.lineWidth = selected ? 2.4 : 1.2;
-    ctx.strokeStyle = "rgba(255, 255, 255, 0.72)";
+    ctx.strokeStyle = selected ? "rgba(145, 197, 184, 0.88)" : "rgba(255, 255, 255, 0.72)";
     ctx.stroke();
-    if (selected || hovered || node.type === "core" || node.type === "project") {
-      ctx.font = "600 11px IBM Plex Sans KR, sans-serif";
-      ctx.fillStyle = "rgba(255, 248, 234, 0.92)";
-      const label = String(node.title || node.id || "").slice(0, 32);
-      ctx.fillText(label, node.x + radius + 7, node.y + 4);
-    }
+    ctx.font = "600 8px IBM Plex Sans KR, sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "top";
+    ctx.fillStyle = "rgba(255, 248, 234, 0.92)";
+    const label = memoryGraphNodeLabel(node);
+    ctx.fillText(label, node.x, node.y + radius + 5, Math.max(42, radius * 3.4));
   }
+  ctx.textAlign = "start";
+  ctx.textBaseline = "alphabetic";
 }
 
 function animateMemoryGraph() {
@@ -2080,13 +2315,10 @@ function startMemoryGraphAnimation() {
 }
 
 function nearestMemoryGraphNode(clientX, clientY) {
-  const canvas = dom.memoryGraphCanvas;
-  if (!canvas) {
+  if (!dom.memoryGraphCanvas) {
     return null;
   }
-  const rect = canvas.getBoundingClientRect();
-  const x = clientX - rect.left;
-  const y = clientY - rect.top;
+  const { x, y } = memoryGraphLocalPoint(clientX, clientY);
   state.memoryGraphPointer.x = x;
   state.memoryGraphPointer.y = y;
   let best = null;
@@ -2095,13 +2327,34 @@ function nearestMemoryGraphNode(clientX, clientY) {
     const dx = node.x - x;
     const dy = node.y - y;
     const dist = Math.sqrt(dx * dx + dy * dy);
-    const radius = Math.max(10, Math.min(28, Number(node.size || 14) * 0.66));
+    const nodeScale = Math.max(0.7, Math.min(1.55, Number(state.memoryGraphNodeScale || 1)));
+    const radius = Math.max(7, Math.min(30, Number(node.size || 14) * 0.48 * nodeScale));
     if (dist < radius && dist < bestDist) {
       best = node;
       bestDist = dist;
     }
   }
   return best;
+}
+
+function updateMemoryGraphDragPoint(event) {
+  const point = memoryGraphLocalPoint(event.clientX, event.clientY);
+  state.memoryGraphPointer.x = point.x - Number(state.memoryGraphPointer.offsetX || 0);
+  state.memoryGraphPointer.y = point.y - Number(state.memoryGraphPointer.offsetY || 0);
+}
+
+function centerMemoryGraphNodeOnPointer(nodeId, event) {
+  const point = memoryGraphLocalPoint(event.clientX, event.clientY);
+  state.memoryGraphPointer.x = point.x;
+  state.memoryGraphPointer.y = point.y;
+  const node = (memoryGraphVisiblePayload().nodes || []).find((item) => item.id === nodeId);
+  if (!node) {
+    return;
+  }
+  node.x = point.x;
+  node.y = point.y;
+  node.vx = 0;
+  node.vy = 0;
 }
 
 function renderMemoryGraphDetail(node) {
@@ -2221,7 +2474,7 @@ async function loadMemoryCards({ force = false } = {}) {
 
 async function updateMemoryCardAction(noteId, action, extra = {}) {
   if (!noteId || !action) {
-    return;
+    return false;
   }
   if (dom.memoryManagerStatus) {
     dom.memoryManagerStatus.textContent = "메모리 상태를 저장하는 중입니다.";
@@ -2236,11 +2489,158 @@ async function updateMemoryCardAction(noteId, action, extra = {}) {
     state.memoryGraphPayload = null;
     await loadMemoryCards({ force: true });
     await loadMemoryGraph({ force: true });
+    return true;
   } catch (error) {
     if (dom.memoryManagerStatus) {
       dom.memoryManagerStatus.textContent = "저장 실패: " + error.message;
     }
+    return false;
   }
+}
+
+function findMemoryCardPayload(noteId) {
+  const cards = Array.isArray(state.memoryCardsPayload?.cards) ? state.memoryCardsPayload.cards : [];
+  return cards.find((card) => String(card.id || "") === String(noteId || "")) || null;
+}
+
+async function fetchMemoryCardPayload(noteId) {
+  const fallback = findMemoryCardPayload(noteId);
+  if (!noteId) {
+    return fallback;
+  }
+  try {
+    const payload = await fetchApi("/api/control-page/memory/" + encodeURIComponent(noteId));
+    return payload?.card || fallback;
+  } catch (error) {
+    if (dom.memoryManagerStatus) {
+      dom.memoryManagerStatus.textContent = "전체 메모리를 다시 불러오지 못해서 현재 목록 값을 사용합니다: " + error.message;
+    }
+    return fallback;
+  }
+}
+
+function updateMemoryEditorCount(editor) {
+  if (!editor || !editor.count || !editor.bodyInput) {
+    return;
+  }
+  const length = (editor.bodyInput.value || "").trim().length;
+  editor.count.textContent = length + " chars";
+}
+
+function closeMemoryCardEditor() {
+  const editor = state.memoryEditor;
+  if (!editor || !editor.root) {
+    return;
+  }
+  editor.root.classList.add("is-hidden");
+  editor.root.setAttribute("aria-hidden", "true");
+  editor.noteId = "";
+}
+
+function ensureMemoryCardEditor() {
+  if (state.memoryEditor) {
+    return state.memoryEditor;
+  }
+  const root = document.createElement("div");
+  root.className = "memory-editor-backdrop is-hidden";
+  root.setAttribute("aria-hidden", "true");
+  root.innerHTML = [
+    '<section class="memory-editor-dialog" role="dialog" aria-modal="true" aria-labelledby="memory-editor-title">',
+    '<header class="memory-editor-header">',
+    '<div>',
+    '<p class="memory-editor-eyebrow">MEMORY EDIT</p>',
+    '<strong id="memory-editor-title">Edit Memory</strong>',
+    '<span class="memory-editor-path" data-memory-editor-path></span>',
+    '</div>',
+    '<button type="button" class="memory-editor-icon-button" data-memory-editor-close aria-label="Close">x</button>',
+    '</header>',
+    '<form class="memory-editor-form" data-memory-editor-form>',
+    '<label class="memory-editor-field">',
+    '<span>Title</span>',
+    '<input type="text" data-memory-editor-title autocomplete="off">',
+    '</label>',
+    '<label class="memory-editor-field">',
+    '<span>Body</span>',
+    '<textarea data-memory-editor-body spellcheck="false"></textarea>',
+    '</label>',
+    '<footer class="memory-editor-footer">',
+    '<span data-memory-editor-count>0 chars</span>',
+    '<div class="memory-editor-actions">',
+    '<button type="button" data-memory-editor-cancel>Cancel</button>',
+    '<button type="submit" class="is-primary">Save</button>',
+    '</div>',
+    '</footer>',
+    '</form>',
+    '</section>',
+  ].join("");
+  document.body.appendChild(root);
+  const editor = {
+    root,
+    form: root.querySelector("[data-memory-editor-form]"),
+    titleInput: root.querySelector("[data-memory-editor-title]"),
+    bodyInput: root.querySelector("[data-memory-editor-body]"),
+    pathLabel: root.querySelector("[data-memory-editor-path]"),
+    count: root.querySelector("[data-memory-editor-count]"),
+    closeButton: root.querySelector("[data-memory-editor-close]"),
+    cancelButton: root.querySelector("[data-memory-editor-cancel]"),
+    noteId: "",
+  };
+  editor.closeButton?.addEventListener("click", closeMemoryCardEditor);
+  editor.cancelButton?.addEventListener("click", closeMemoryCardEditor);
+  editor.bodyInput?.addEventListener("input", () => updateMemoryEditorCount(editor));
+  editor.form?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const noteId = editor.noteId || "";
+    if (!noteId) {
+      return;
+    }
+    const ok = await updateMemoryCardAction(noteId, "edit", {
+      title: editor.titleInput?.value || "",
+      body: editor.bodyInput?.value || "",
+    });
+    if (ok) {
+      closeMemoryCardEditor();
+    }
+  });
+  root.addEventListener("click", (event) => {
+    if (event.target === root) {
+      closeMemoryCardEditor();
+    }
+  });
+  state.memoryEditor = editor;
+  return editor;
+}
+
+async function openMemoryCardEditor(noteId) {
+  const editor = ensureMemoryCardEditor();
+  editor.noteId = noteId;
+  if (editor.titleInput) {
+    editor.titleInput.value = "불러오는 중";
+  }
+  if (editor.bodyInput) {
+    editor.bodyInput.value = "전체 메모리를 불러오는 중입니다...";
+  }
+  if (editor.pathLabel) {
+    editor.pathLabel.textContent = "";
+  }
+  updateMemoryEditorCount(editor);
+  editor.root.classList.remove("is-hidden");
+  editor.root.setAttribute("aria-hidden", "false");
+  const payload = await fetchMemoryCardPayload(noteId);
+  if (editor.noteId !== noteId) {
+    return;
+  }
+  if (editor.titleInput) {
+    editor.titleInput.value = payload?.title || "";
+  }
+  if (editor.bodyInput) {
+    editor.bodyInput.value = payload?.body || payload?.preview || "";
+  }
+  if (editor.pathLabel) {
+    editor.pathLabel.textContent = payload?.path || "";
+  }
+  updateMemoryEditorCount(editor);
+  window.setTimeout(() => editor.bodyInput?.focus(), 40);
 }
 
 function handleMemoryCardAction(button) {
@@ -2254,16 +2654,16 @@ function handleMemoryCardAction(button) {
     return;
   }
   if (action === "edit") {
-    const currentTitle = card.querySelector(".memory-card-head strong")?.textContent || "";
-    const currentBody = card.querySelector(".memory-card-preview")?.textContent || "";
-    const nextBody = window.prompt("수정할 기억 내용을 입력하세요.", currentBody);
-    if (nextBody === null) {
-      return;
-    }
-    updateMemoryCardAction(noteId, "edit", { title: currentTitle, body: nextBody });
+    openMemoryCardEditor(noteId);
     return;
   }
   updateMemoryCardAction(noteId, action);
+}
+
+function setMemoryGraphNodeScale(nextScale) {
+  state.memoryGraphNodeScale = Math.max(0.7, Math.min(1.55, Number(nextScale) || 1));
+  localStorage.setItem("evelynMemoryGraphNodeScale", String(state.memoryGraphNodeScale));
+  drawMemoryGraph(memoryGraphVisiblePayload());
 }
 
 function renderMemoryGraphControls(payload) {
@@ -2283,7 +2683,13 @@ function renderMemoryGraphControls(payload) {
   }
   const counts = (payload?.stats || {}).type_counts || {};
   const types = ["all", ...Object.keys(counts).sort()];
-  dom.memoryGraphFilter.innerHTML = types.map((type) => {
+  const scale = Math.max(0.7, Math.min(1.55, Number(state.memoryGraphNodeScale || 1)));
+  const sizeControls = [
+    '<button type="button" class="memory-filter-button" data-memory-node-size="down" title="Smaller nodes">-</button>',
+    '<button type="button" class="memory-filter-button" data-memory-node-size="reset" title="Reset node size">' + escapeHtml(scale.toFixed(1)) + "x</button>",
+    '<button type="button" class="memory-filter-button" data-memory-node-size="up" title="Larger nodes">+</button>',
+  ].join("");
+  dom.memoryGraphFilter.innerHTML = sizeControls + types.map((type) => {
     const active = state.memoryGraphFilterType === type ? " is-active" : "";
     const label = type === "all" ? "All" : type;
     const count = type === "all" ? (payload?.stats?.node_count || 0) : counts[type];
@@ -2701,18 +3107,19 @@ function saveWinBoxLayout() {
 function defaultWinBoxLayout(panelId, index) {
   const viewportWidth = Math.max(720, window.innerWidth || 1280);
   const viewportHeight = Math.max(520, window.innerHeight || 760);
-  const chatWidth = Math.min(500, Math.max(400, Math.round(viewportWidth * 0.27)));
-  const avatarWidth = Math.min(860, Math.max(560, viewportWidth - chatWidth - 88));
-  const avatarHeight = Math.min(660, viewportHeight - 104);
-  const chatHeight = Math.min(720, viewportHeight - 104);
-  const avatarX = 24;
-  const chatX = Math.max(24, Math.min(viewportWidth - chatWidth - 24, avatarX + avatarWidth + 24));
+  const chatWidth = Math.min(520, Math.max(360, Math.round(viewportWidth * 0.36)));
+  const chatHeight = Math.min(430, Math.max(320, Math.round(viewportHeight * 0.42)));
+  const avatarWidth = Math.min(620, Math.max(430, Math.round(viewportWidth * 0.36)));
+  const avatarHeight = Math.min(640, Math.max(430, viewportHeight - 184));
+  const avatarX = Math.max(24, Math.min(viewportWidth - avatarWidth - 44, Math.round(viewportWidth * 0.56)));
+  const chatX = Math.max(24, Math.min(78, viewportWidth - chatWidth - 24));
+  const chatY = Math.max(76, viewportHeight - chatHeight - 92);
   const defaults = {
-    runtime: { width: 390, height: 620, x: 32, y: 64 },
-    diagnostics: { width: 430, height: 560, x: 88, y: 112 },
-    avatar: { width: avatarWidth, height: avatarHeight, x: avatarX, y: 32 },
-    chat: { width: chatWidth, height: chatHeight, x: chatX, y: 32 },
-    memory: { width: Math.min(860, Math.max(620, Math.round(viewportWidth * 0.52))), height: Math.min(720, viewportHeight - 96), x: 64, y: 56 },
+    runtime: { width: 390, height: 620, x: 32, y: 76 },
+    diagnostics: { width: 430, height: 560, x: 88, y: 124 },
+    avatar: { width: avatarWidth, height: avatarHeight, x: avatarX, y: 86 },
+    chat: { width: chatWidth, height: chatHeight, x: chatX, y: chatY },
+    memory: { width: Math.min(860, Math.max(620, Math.round(viewportWidth * 0.52))), height: Math.min(720, viewportHeight - 112), x: 64, y: 72 },
   };
   return defaults[panelId] || { width: 420, height: 520, x: 32 + index * 36, y: 48 + index * 34 };
 }
@@ -2811,6 +3218,113 @@ function renderWinBoxDock() {
   ].join("");
 }
 
+function resizeHandleRotation(handle) {
+  if (!handle) {
+    return "0deg";
+  }
+  if (handle.classList.contains("wb-nw")) {
+    return "180deg";
+  }
+  if (handle.classList.contains("wb-ne")) {
+    return "270deg";
+  }
+  if (handle.classList.contains("wb-sw")) {
+    return "90deg";
+  }
+  return "0deg";
+}
+
+function setResizeHandleHover(handle, hovered) {
+  if (!handle) {
+    return;
+  }
+  handle.classList.toggle("is-resize-handle-hover", hovered);
+  const edgeMark = handle.querySelector(".evelyn-resize-edge-mark");
+  if (edgeMark) {
+    edgeMark.style.opacity = hovered ? "1" : "";
+    edgeMark.style.background = hovered ? "var(--winbox-resize-handle-active)" : "";
+    edgeMark.style.transform = hovered ? "translateX(-50%) scaleY(1.45)" : "";
+  }
+  const cornerMark = handle.querySelector(".evelyn-resize-corner-mark");
+  if (cornerMark) {
+    const rotation = resizeHandleRotation(handle);
+    cornerMark.style.opacity = hovered ? "1" : "";
+    cornerMark.style.color = hovered ? "var(--winbox-resize-handle-active)" : "";
+    cornerMark.style.transform = hovered ? "rotate(" + rotation + ") scale(var(--winbox-resize-corner-hover-scale))" : "";
+  }
+}
+
+function toggleMemoryPanelLocally() {
+  const panel = dom.memoryGraphPanel || document.querySelector("#memory-graph-panel");
+  if (!panel) {
+    return false;
+  }
+  if (WINBOX_PANEL_MANAGER_ENABLED && state.winboxReady) {
+    toggleWinBoxPanel("memory");
+  } else if (state.panels && state.panels.memory) {
+    setPanelVisible("memory", state.panels.memory.visible === false);
+  } else {
+    panel.classList.toggle("winbox-panel-hidden");
+    panel.setAttribute("aria-hidden", panel.classList.contains("winbox-panel-hidden") ? "true" : "false");
+  }
+  if (!panel.classList.contains("winbox-panel-hidden")) {
+    panel.setAttribute("tabindex", "-1");
+    panel.scrollIntoView({ behavior: "smooth", block: "center" });
+    window.setTimeout(() => panel.focus({ preventScroll: true }), 120);
+    loadMemoryCards({ force: false });
+    loadMemoryGraph({ force: false });
+  }
+  return true;
+}
+
+function bindResizeHandleHover(handle) {
+  if (!handle || handle.dataset.resizeHoverBound === "1") {
+    return;
+  }
+  handle.dataset.resizeHoverBound = "1";
+  handle.addEventListener("pointerenter", () => setResizeHandleHover(handle, true));
+  handle.addEventListener("pointerleave", () => setResizeHandleHover(handle, false));
+  handle.addEventListener("focusin", () => setResizeHandleHover(handle, true));
+  handle.addEventListener("focusout", () => setResizeHandleHover(handle, false));
+}
+
+function createResizeCornerMark() {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.classList.add("evelyn-resize-corner-mark");
+  svg.setAttribute("viewBox", "0 0 20 20");
+  svg.setAttribute("aria-hidden", "true");
+  svg.setAttribute("focusable", "false");
+  const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  path.setAttribute("d", "M17.5 2.5A15 15 0 0 1 2.5 17.5");
+  svg.appendChild(path);
+  return svg;
+}
+
+function ensureWinBoxResizeDecorations(boxElement) {
+  if (!boxElement) {
+    return;
+  }
+  const bottomHandle = boxElement.querySelector(".wb-s");
+  if (bottomHandle && !bottomHandle.querySelector(".evelyn-resize-edge-mark")) {
+    const mark = document.createElement("span");
+    mark.className = "evelyn-resize-edge-mark";
+    mark.setAttribute("aria-hidden", "true");
+    bottomHandle.appendChild(mark);
+  }
+  bindResizeHandleHover(bottomHandle);
+
+  for (const corner of WINBOX_RESIZE_CORNERS) {
+    const handle = boxElement.querySelector(".wb-" + corner);
+    if (!handle) {
+      continue;
+    }
+    if (!handle.querySelector(".evelyn-resize-corner-mark")) {
+      handle.appendChild(createResizeCornerMark());
+    }
+    bindResizeHandleHover(handle);
+  }
+}
+
 function openWinBoxPanel(panelId) {
   const definitionIndex = PANEL_DEFINITIONS.findIndex((item) => item.id === panelId);
   if (definitionIndex < 0 || typeof window.WinBox !== "function") {
@@ -2822,6 +3336,7 @@ function openWinBoxPanel(panelId) {
     return;
   }
   if (panel.winbox) {
+    ensureWinBoxResizeDecorations(panel.winbox.g);
     panel.winbox.focus?.();
     return;
   }
@@ -2854,6 +3369,9 @@ function openWinBoxPanel(panelId) {
       panel.width = width;
       panel.height = height;
       saveWinBoxLayout();
+      if (panel.id === "memory" && state.memoryGraphPayload) {
+        window.requestAnimationFrame(() => renderMemoryGraph(state.memoryGraphPayload));
+      }
     },
     onclose: function () {
       panel.open = false;
@@ -2869,6 +3387,7 @@ function openWinBoxPanel(panelId) {
     },
   });
   panel.winbox = box;
+  ensureWinBoxResizeDecorations(box.g);
   panel.open = true;
   if (panel.id === "memory") {
     loadMemoryGraph({ force: false });
@@ -3071,6 +3590,18 @@ function renderState(payload, { preserveScroll = false } = {}) {
     dom.operatorStatLlm.textContent = String(runtime.inflightLlmRequests || 0);
   }
   const voicePipeline = runtime.voicePipeline || {};
+  const outputMode = runtime.outputMode || voicePipeline.outputMode || "unknown";
+  const localTtsOutput = runtime.localTtsOutput || voicePipeline.localTtsOutput || {};
+  let outputLabel = outputMode === "discord_voice" ? "discord" : outputMode;
+  if (outputMode === "local_speaker") {
+    const playCount = Number(localTtsOutput.playCount || 0);
+    outputLabel = localTtsOutput.active
+      ? "local playing"
+      : (localTtsOutput.lastError ? "local error" : (playCount > 0 ? `local played ${playCount}` : "local ready"));
+  }
+  if (dom.meterTtsLabel) {
+    dom.meterTtsLabel.textContent = `${outputLabel} · ${runtime.ttsBacklog || 0}`;
+  }
   if (dom.voicePipelineQueue) {
     dom.voicePipelineQueue.textContent = `${voicePipeline.queueDepth || 0}/${voicePipeline.queueMax || 0}`;
   }
@@ -3244,7 +3775,7 @@ function renderState(payload, { preserveScroll = false } = {}) {
       : "기본 상태에서는 운영 액션과 최근 대화를 우선 보여주고, Minecraft가 붙으면 미션 제어 요약으로 바뀝니다.";
   }
   if (dom.primaryActionTitle) {
-    dom.primaryActionTitle.textContent = minecraftActive ? "미션 제어" : "바로 실행";
+    dom.primaryActionTitle.textContent = minecraftActive ? "미션 제어" : "빠른 입력";
   }
   if (dom.supportActionTitle) {
     dom.supportActionTitle.textContent = minecraftActive ? "운영 보조" : "세부 명령";
@@ -3309,6 +3840,7 @@ async function sendCurrentMessage(rawText) {
   if (!text || state.sending) {
     return;
   }
+  const normalized = text.toLowerCase();
   state.sending = true;
   state.inputHistory.unshift(text);
   state.historyIndex = -1;
@@ -3321,6 +3853,34 @@ async function sendCurrentMessage(rawText) {
     dom.composerSendButton.disabled = true;
   }
   try {
+    if (normalized === "/" || normalized === "/help") {
+      const now = Date.now() / 1000;
+      renderChat(
+        [
+          { role: "user", author: "정훈", text, at: now },
+          { role: "assistant", author: "Evelyn", text: formatCommandHelp(state.allCommands), at: now },
+        ],
+        "명령어 목록을 표시했습니다."
+      );
+      return;
+    }
+    if (normalized === "/memory" || normalized === "/obsidian") {
+      const now = Date.now() / 1000;
+      const ok = toggleMemoryPanelLocally();
+      renderChat(
+        [
+          { role: "user", author: "정훈", text, at: now },
+          {
+            role: "assistant",
+            author: "Evelyn",
+            text: ok ? "메모리 패널을 열거나 숨길게." : "메모리 패널을 찾지 못했어. 페이지를 새로고침해줘.",
+            at: now,
+          },
+        ],
+        ok ? "메모리 패널 명령을 실행했습니다." : "메모리 패널을 찾지 못했습니다."
+      );
+      return;
+    }
     const payload = await fetchApi("/api/control-page/chat", {
       method: "POST",
       headers: {
@@ -3505,6 +4065,20 @@ if (dom.memoryCardList) {
 
 if (dom.memoryGraphFilter) {
   dom.memoryGraphFilter.addEventListener("click", (event) => {
+    const sizeButton = event.target.closest("[data-memory-node-size]");
+    if (sizeButton) {
+      const action = sizeButton.getAttribute("data-memory-node-size") || "";
+      const current = Math.max(0.7, Math.min(1.55, Number(state.memoryGraphNodeScale || 1)));
+      if (action === "down") {
+        setMemoryGraphNodeScale(current - 0.1);
+      } else if (action === "up") {
+        setMemoryGraphNodeScale(current + 0.1);
+      } else if (action === "reset") {
+        setMemoryGraphNodeScale(1);
+      }
+      renderMemoryGraphControls(state.memoryGraphPayload || { nodes: [], edges: [] });
+      return;
+    }
     const button = event.target.closest("[data-memory-filter]");
     if (!button) {
       return;
@@ -3516,9 +4090,27 @@ if (dom.memoryGraphFilter) {
 
 if (dom.memoryGraphCanvas) {
   dom.memoryGraphCanvas.addEventListener("pointermove", (event) => {
+    if (state.memoryGraphPointer.holdId) {
+      const dx = event.clientX - Number(state.memoryGraphPointer.startClientX || 0);
+      const dy = event.clientY - Number(state.memoryGraphPointer.startClientY || 0);
+      if (Math.abs(dx) > 3 || Math.abs(dy) > 3) {
+        state.memoryGraphPointer.dragId = state.memoryGraphPointer.holdId;
+        state.memoryGraphPointer.holdId = "";
+        centerMemoryGraphNodeOnPointer(state.memoryGraphPointer.dragId, event);
+        state.memoryGraphPointer.hoverId = state.memoryGraphPointer.dragId;
+        dom.memoryGraphCanvas.style.cursor = "grabbing";
+      }
+      return;
+    }
+    if (state.memoryGraphPointer.dragId) {
+      updateMemoryGraphDragPoint(event);
+      state.memoryGraphPointer.hoverId = state.memoryGraphPointer.dragId;
+      dom.memoryGraphCanvas.style.cursor = "grabbing";
+      return;
+    }
     const node = nearestMemoryGraphNode(event.clientX, event.clientY);
     state.memoryGraphPointer.hoverId = node ? node.id : "";
-    dom.memoryGraphCanvas.style.cursor = state.memoryGraphPointer.dragId ? "grabbing" : (node ? "pointer" : "default");
+    dom.memoryGraphCanvas.style.cursor = node ? "pointer" : "default";
   });
   dom.memoryGraphCanvas.addEventListener("pointerdown", (event) => {
     const node = nearestMemoryGraphNode(event.clientX, event.clientY);
@@ -3528,17 +4120,43 @@ if (dom.memoryGraphCanvas) {
       return;
     }
     state.memoryGraphSelectedNodeId = node.id;
-    state.memoryGraphPointer.dragId = node.id;
+    state.memoryGraphPointer.dragId = "";
+    state.memoryGraphPointer.holdId = node.id;
+    state.memoryGraphPointer.down = true;
+    state.memoryGraphPointer.startClientX = event.clientX;
+    state.memoryGraphPointer.startClientY = event.clientY;
+    state.memoryGraphPointer.offsetX = 0;
+    state.memoryGraphPointer.offsetY = 0;
     dom.memoryGraphCanvas.setPointerCapture?.(event.pointerId);
+    dom.memoryGraphCanvas.style.cursor = "pointer";
     renderMemoryGraphDetail(node);
   });
   dom.memoryGraphCanvas.addEventListener("pointerup", (event) => {
     state.memoryGraphPointer.dragId = "";
+    state.memoryGraphPointer.holdId = "";
+    state.memoryGraphPointer.down = false;
+    state.memoryGraphPointer.offsetX = 0;
+    state.memoryGraphPointer.offsetY = 0;
+    state.memoryGraphPointer.startClientX = 0;
+    state.memoryGraphPointer.startClientY = 0;
+    dom.memoryGraphCanvas.releasePointerCapture?.(event.pointerId);
+  });
+  dom.memoryGraphCanvas.addEventListener("pointercancel", (event) => {
+    state.memoryGraphPointer.dragId = "";
+    state.memoryGraphPointer.holdId = "";
+    state.memoryGraphPointer.down = false;
+    state.memoryGraphPointer.offsetX = 0;
+    state.memoryGraphPointer.offsetY = 0;
+    state.memoryGraphPointer.startClientX = 0;
+    state.memoryGraphPointer.startClientY = 0;
     dom.memoryGraphCanvas.releasePointerCapture?.(event.pointerId);
   });
   dom.memoryGraphCanvas.addEventListener("pointerleave", () => {
     state.memoryGraphPointer.hoverId = "";
-    state.memoryGraphPointer.dragId = "";
+    if (!state.memoryGraphPointer.down) {
+      state.memoryGraphPointer.dragId = "";
+      state.memoryGraphPointer.holdId = "";
+    }
   });
 }
 
@@ -3591,6 +4209,7 @@ window.addEventListener("resize", () => {
 initPanelManager();
 initWinBoxPanelManager();
 initAvatarInteractions();
+initWallpaperPicker();
 ensureApiWaitingTicker();
 refreshState();
 schedulePolling();

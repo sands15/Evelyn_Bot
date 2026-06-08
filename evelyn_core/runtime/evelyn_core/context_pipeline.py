@@ -129,6 +129,30 @@ class ContextPolicy:
 
 
 @dataclass(slots=True)
+class ToolUseDecision:
+    tool_name: str
+    reason: str
+    risk: str = "low"
+    cost: str = "low"
+    auto_allowed: bool = False
+    required_before_answer: bool = False
+    status: str = "planned"
+    evidence: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "tool_name": clean_text(self.tool_name),
+            "reason": clean_text(self.reason),
+            "risk": clean_text(self.risk),
+            "cost": clean_text(self.cost),
+            "auto_allowed": bool(self.auto_allowed),
+            "required_before_answer": bool(self.required_before_answer),
+            "status": clean_text(self.status),
+            "evidence": clean_block_text(self.evidence),
+        }
+
+
+@dataclass(slots=True)
 class ContextSection:
     name: str
     content: str
@@ -151,6 +175,7 @@ class ContextPacket:
     conversation_state: list[ContextSection] = field(default_factory=list)
     retrieved_memory: list[ContextSection] = field(default_factory=list)
     runtime_state: list[ContextSection] = field(default_factory=list)
+    tool_context: list[ContextSection] = field(default_factory=list)
     skill_context: list[ContextSection] = field(default_factory=list)
     vision_context: list[ContextSection] = field(default_factory=list)
     recent_turns: list[dict[str, Any]] = field(default_factory=list)
@@ -164,6 +189,7 @@ class ContextPacket:
             self.conversation_state,
             self.retrieved_memory,
             self.runtime_state,
+            self.tool_context,
             self.skill_context,
             self.vision_context,
         ):
@@ -179,6 +205,7 @@ class ContextBudget:
     conversation_state_chars: int = 1600
     retrieved_memory_chars: int = 1800
     runtime_state_chars: int = 1600
+    tool_context_chars: int = 1400
     skill_context_chars: int = 1800
     vision_context_chars: int = 1600
     recent_turns_limit: int = 4
@@ -252,6 +279,7 @@ class ContextBuilder:
             _render_section_group("Conversation State", packet.conversation_state, self.budget.conversation_state_chars),
             _render_section_group("Retrieved Memory", packet.retrieved_memory, self.budget.retrieved_memory_chars),
             _render_section_group("Runtime State", packet.runtime_state, self.budget.runtime_state_chars),
+            _render_section_group("Tool Use Policy", packet.tool_context, self.budget.tool_context_chars),
             _render_section_group("Skill / Capability Context", packet.skill_context, self.budget.skill_context_chars),
             _render_section_group("Vision Context", packet.vision_context, self.budget.vision_context_chars),
         ]
@@ -288,6 +316,7 @@ def build_basic_context_packet(
     conversation_state: str = "",
     skill_context: str = "",
     vision_context: str = "",
+    tool_context: str = "",
     policy: ContextPolicy | dict[str, Any] | None = None,
 ) -> ContextPacket:
     if isinstance(policy, ContextPolicy):
@@ -302,6 +331,8 @@ def build_basic_context_packet(
         packet.runtime_state.append(ContextSection(name="runtime_state", content=runtime_state, source="runtime"))
     if conversation_state:
         packet.conversation_state.append(ContextSection(name="conversation_state", content=conversation_state, source="conversation"))
+    if tool_context:
+        packet.tool_context.append(ContextSection(name="tool_context", content=tool_context, source="tool_policy", priority=35))
     if skill_context:
         packet.skill_context.append(ContextSection(name="skill_context", content=skill_context, source="skill_graph"))
     if vision_context:
@@ -341,12 +372,57 @@ def build_context_policy_for_turn(
         "조약돌",
         "철광석",
     )
-    vision_markers = ("image", "vision", "photo", "picture", "screenshot", "사진", "이미지", "스크린샷", "화면", "보여")
+    vision_markers = (
+        "image",
+        "vision",
+        "photo",
+        "picture",
+        "screenshot",
+        "사진",
+        "이미지",
+        "스크린샷",
+        "화면",
+        "보여",
+        "보이",
+        "봐줘",
+        "읽어",
+        "글자",
+        "화면",
+        "보여",
+        "보이",
+        "보이는",
+        "사진",
+        "이미지",
+        "스크린샷",
+        "캡처",
+        "글자",
+        "읽어",
+        "비전",
+        "ocr",
+    )
     memory_markers = ("remember", "memory", "기억", "전에", "이전", "문맥", "요약")
     detailed_markers = ("자세히", "길게", "구체", "설계", "문서", "분석", "왜")
 
     is_minecraft = any(marker in text for marker in minecraft_markers)
-    is_vision = any(marker in text for marker in vision_markers)
+    korean_vision_markers = (
+        "화면",
+        "내 화면",
+        "보여",
+        "보이",
+        "보고",
+        "봐",
+        "사진",
+        "이미지",
+        "스크린샷",
+        "캡처",
+        "캡쳐",
+        "글자",
+        "읽어",
+        "비전",
+        "시각",
+        "ocr",
+    )
+    is_vision = any(marker in text for marker in vision_markers) or any(marker in text for marker in korean_vision_markers)
     asks_memory = any(marker in text for marker in memory_markers)
     wants_detail = any(marker in text for marker in detailed_markers) or len(text) >= 240
 
@@ -384,6 +460,179 @@ def build_context_policy_for_turn(
 
     policy.context_focus = list(dict.fromkeys(clean_text(item) for item in policy.context_focus if clean_text(item)))
     return policy
+
+
+def _contains_any_marker(text: str, markers: tuple[str, ...]) -> bool:
+    return any(marker and marker in text for marker in markers)
+
+
+def build_tool_use_decisions(user_text: str, policy: ContextPolicy | dict[str, Any] | None = None) -> list[ToolUseDecision]:
+    context_policy = policy if isinstance(policy, ContextPolicy) else ContextPolicy.from_mapping(policy)
+    text = clean_text(user_text).lower()
+    decisions: dict[str, ToolUseDecision] = {}
+
+    def add(decision: ToolUseDecision) -> None:
+        existing = decisions.get(decision.tool_name)
+        if existing is None:
+            decisions[decision.tool_name] = decision
+            return
+        existing.required_before_answer = existing.required_before_answer or decision.required_before_answer
+        existing.auto_allowed = existing.auto_allowed or decision.auto_allowed
+        existing.reason = clean_text(existing.reason or decision.reason)
+
+    runtime_markers = (
+        "status",
+        "health",
+        "runtime",
+        "server",
+        "port",
+        "vram",
+        "gpu",
+        "oom",
+        "process",
+        "model",
+        "tts",
+        "stt",
+        "mic",
+        "상태",
+        "서버",
+        "포트",
+        "브이램",
+        "메모리",
+        "프로세스",
+        "모델",
+        "마이크",
+        "음성",
+        "오류",
+        "에러",
+        "로딩",
+        "언로드",
+    )
+    screen_markers = (
+        "screen",
+        "screenshot",
+        "vision",
+        "capture",
+        "보이는",
+        "보고",
+        "화면",
+        "스크린",
+        "캡처",
+        "시각",
+    )
+    ocr_markers = ("ocr", "text on screen", "read text", "글자", "텍스트", "읽어", "읽고", "문자")
+    memory_markers = ("remember", "memory", "previous", "earlier", "기억", "이전", "아까", "방금", "대화")
+    web_markers = (
+        "latest",
+        "current",
+        "today",
+        "news",
+        "price",
+        "search",
+        "internet",
+        "최신",
+        "현재",
+        "오늘",
+        "뉴스",
+        "가격",
+        "검색",
+        "인터넷",
+        "법",
+    )
+    local_file_markers = ("log", "file", "test", "diff", "git", "로그", "파일", "테스트", "문서", "코드")
+
+    if _contains_any_marker(text, runtime_markers):
+        add(
+            ToolUseDecision(
+                tool_name="runtime_status",
+                reason="The answer may depend on live Evelyn process, port, model, GPU, or error state.",
+                auto_allowed=True,
+                required_before_answer=_contains_any_marker(text, runtime_markers),
+            )
+        )
+    if context_policy.needs_vision or _contains_any_marker(text, screen_markers):
+        add(
+            ToolUseDecision(
+                tool_name="vision_capture_or_watch",
+                reason="The user is asking about visible screen state or the policy requested vision context.",
+                auto_allowed=True,
+                required_before_answer=True,
+                cost="medium",
+            )
+        )
+    if _contains_any_marker(text, ocr_markers):
+        add(
+            ToolUseDecision(
+                tool_name="vision_ocr",
+                reason="The user is asking to read text from the screen.",
+                auto_allowed=True,
+                required_before_answer=True,
+                cost="high",
+                evidence="May lazy-load Falcon-OCR; first request can be slow and use extra VRAM.",
+            )
+        )
+    if _contains_any_marker(text, memory_markers):
+        add(
+            ToolUseDecision(
+                tool_name="memory_recall",
+                reason="The answer may depend on prior conversation or saved context.",
+                auto_allowed=True,
+                required_before_answer=_contains_any_marker(text, memory_markers),
+            )
+        )
+    if context_policy.needs_search or _contains_any_marker(text, web_markers):
+        add(
+            ToolUseDecision(
+                tool_name="web_current_info",
+                reason="The user may be asking for current external information.",
+                risk="external",
+                cost="medium",
+                auto_allowed=False,
+                required_before_answer=True,
+                status="needs_permission_or_external_tool",
+                evidence="Do not present current external facts as verified unless a web/search tool result is present.",
+            )
+        )
+    if _contains_any_marker(text, local_file_markers):
+        add(
+            ToolUseDecision(
+                tool_name="local_file_or_log_read",
+                reason="The user may be asking about implementation files, logs, tests, or diffs.",
+                auto_allowed=False,
+                required_before_answer=True,
+                status="needs_local_tool",
+                evidence="Use local file/log evidence before making code or runtime claims.",
+            )
+        )
+
+    return list(decisions.values())
+
+
+def render_tool_use_context(decisions: list[ToolUseDecision]) -> str:
+    if not decisions:
+        return ""
+    lines = [
+        "Tool-use policy for this answer.",
+        "If a required tool is unavailable, failed, or not executed, say that clearly and avoid claiming tool-backed evidence.",
+    ]
+    for decision in decisions:
+        item = decision.to_dict()
+        parts = [
+            f"tool={item['tool_name']}",
+            f"status={item['status'] or 'planned'}",
+            f"required={str(item['required_before_answer']).lower()}",
+            f"auto_allowed={str(item['auto_allowed']).lower()}",
+            f"risk={item['risk'] or 'low'}",
+            f"cost={item['cost'] or 'low'}",
+        ]
+        reason = item.get("reason") or ""
+        evidence = item.get("evidence") or ""
+        if reason:
+            parts.append(f"reason={reason}")
+        if evidence:
+            parts.append(f"evidence={evidence}")
+        lines.append("- " + "; ".join(parts))
+    return "\n".join(lines)
 
 
 def build_conversation_state_context(
@@ -699,7 +948,8 @@ def build_vision_context_hint(policy: ContextPolicy, *, user_text: str = "") -> 
         return ""
     lines = [
         "Vision context requested. Use attached image analysis or prepared visual observations when available. "
-        "If no visual payload is present, state that visual input is missing instead of hallucinating."
+        "If scene, OCR, or vision-tool failure text is present in this section, answer from that evidence before any generic reply. "
+        "Do not ignore this section. If no visual payload is present, state that visual input is missing instead of hallucinating."
     ]
     marker = "[Attached Visual Inputs]"
     if marker in user_text:
@@ -748,6 +998,7 @@ __all__ = [
     "ContextPolicy",
     "ContextPriority",
     "ContextSection",
+    "ToolUseDecision",
     "MemoryWriterDecision",
     "ResponseMode",
     "build_context_policy_for_turn",
@@ -757,6 +1008,8 @@ __all__ = [
     "build_minecraft_skill_context",
     "build_runtime_state_context",
     "build_skill_context_hint",
+    "build_tool_use_decisions",
     "build_vision_context_hint",
     "clean_block_text",
+    "render_tool_use_context",
 ]

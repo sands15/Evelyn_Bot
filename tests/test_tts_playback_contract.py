@@ -13,6 +13,7 @@ from evelyn_core.tts_playback import (  # noqa: E402
     PreparedPlaybackStarter,
     PreparedTtsPlaybackQueue,
     SpeechChunker,
+    OmniVoicePCMStream,
     QueuedAudioSource,
     StreamingVoiceDelivery,
     TTSQueueSink,
@@ -25,6 +26,7 @@ from evelyn_core.tts_playback import (  # noqa: E402
     clear_tts_playback_tracking,
     cleanup_tts_stream_tasks,
     configure_tts_playback_logging,
+    discord_pcm_silence_bytes,
     drain_prepared_tts_playback,
     finish_tts_playback_tracking,
     get_tracked_tts_playback,
@@ -43,6 +45,7 @@ from evelyn_core.tts_playback import (  # noqa: E402
     tts_input_suppression_reason,
     update_tts_playback_tracking,
 )
+from evelyn_core.config import TTS_CHUNK_TAIL_SILENCE_MS  # noqa: E402
 
 
 class TtsPlaybackContractTests(unittest.TestCase):
@@ -74,6 +77,14 @@ class TtsPlaybackContractTests(unittest.TestCase):
         self.assertEqual(events[0][0], "playback_underrun_silence")
         self.assertEqual(events[0][1]["turn_id"], "turn-1")
         self.assertEqual(events[0][1]["reason"], "waiting_for_prefetched_source")
+
+    def test_omnivoice_stream_finish_adds_tail_silence(self) -> None:
+        source = OmniVoicePCMStream()
+
+        source.finish()
+        frame = source.read()
+
+        self.assertEqual(frame, discord_pcm_silence_bytes(TTS_CHUNK_TAIL_SILENCE_MS)[: len(frame)])
 
     def test_resolve_cached_tts_audio_path_returns_matching_file(self) -> None:
         path = Path(__file__)

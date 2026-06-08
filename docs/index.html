@@ -1,506 +1,1617 @@
 <!DOCTYPE html>
-<html lang="ko" class="no-js">
+<html lang="ko" data-theme="light">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Evelyn Control Page</title>
-  <meta name="description" content="Evelyn runtime control page with chat, focused status, and Minecraft controls.">
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+KR:wght@400;500;600;700&family=Space+Grotesk:wght@500;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="./assets/vendor/winbox/winbox.min.css?v=0.2.82">
-  <link rel="stylesheet" href="./assets/evelyn-page.css?v=20260602a">
+  <title>이블린 라이브 컨트롤</title>
+  <style>
+    :root {
+      --bg: #f5f6f7;
+      --text: #17191d;
+      --soft: #626872;
+      --muted: #8a9099;
+      --line: rgba(23, 25, 29, 0.12);
+      --panel: rgba(255, 255, 255, 0.78);
+      --panel-strong: rgba(255, 255, 255, 0.92);
+      --shadow: 0 24px 70px rgba(20, 24, 30, 0.14);
+      --green: #2f9d68;
+      --danger: #c94747;
+      --radius: 8px;
+      --stage-bg:
+        linear-gradient(180deg, rgba(255, 255, 255, 0.28), rgba(245, 246, 247, 0.9)),
+        linear-gradient(135deg, #eef2f0 0%, #f7f3ec 46%, #e8eef4 100%);
+      --memory-bg: rgba(248, 249, 250, 0.96);
+      --memory-side: rgba(238, 240, 243, 0.74);
+      --memory-handle: rgba(255, 255, 255, 0.82);
+      --memory-handle-active: rgba(255, 255, 255, 0.94);
+      --memory-handle-thickness: 3px;
+      --memory-handle-active-thickness: 8px;
+      --memory-move-offset: 34px;
+      --memory-move-hit: 30px;
+      --memory-handle-visible-gap: 2.5px;
+      --memory-radius: 18px;
+      --resize-corner-size: 20px;
+      --resize-corner-rest: 32px;
+      --resize-corner-travel: 6px;
+      --resize-corner-hit: 44px;
+      --resize-corner-gap: var(--memory-handle-visible-gap);
+      --resize-corner-stroke: 4px;
+      --resize-corner-active-stroke: 4px;
+    }
+
+    [data-theme="dark"] {
+      --bg: #111316;
+      --text: #f2f4f6;
+      --soft: #b6bcc6;
+      --muted: #7d8490;
+      --line: rgba(255, 255, 255, 0.14);
+      --panel: rgba(19, 21, 25, 0.72);
+      --panel-strong: rgba(23, 26, 31, 0.88);
+      --shadow: 0 24px 70px rgba(0, 0, 0, 0.34);
+      --stage-bg:
+        linear-gradient(180deg, rgba(17, 19, 22, 0.22), rgba(17, 19, 22, 0.88)),
+        linear-gradient(135deg, #1b2026 0%, #24231f 48%, #171c21 100%);
+      --memory-bg: rgba(18, 19, 24, 0.96);
+      --memory-side: rgba(31, 32, 39, 0.82);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html,
+    body {
+      width: 100%;
+      min-height: 100%;
+      margin: 0;
+    }
+
+    body {
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "IBM Plex Sans KR", system-ui, sans-serif;
+      background: var(--bg);
+      overflow: hidden;
+    }
+
+    button,
+    textarea {
+      font: inherit;
+    }
+
+    button,
+    .file-button {
+      display: inline-grid;
+      place-items: center;
+      min-height: 40px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      color: var(--text);
+      background: var(--panel);
+      cursor: pointer;
+      backdrop-filter: blur(18px);
+      transition: border-color 160ms ease, background 160ms ease, transform 160ms ease;
+    }
+
+    button:hover,
+    .file-button:hover {
+      border-color: rgba(47, 157, 104, 0.34);
+      background: var(--panel-strong);
+    }
+
+    button:active,
+    .file-button:active {
+      transform: translateY(1px);
+    }
+
+    .app {
+      position: relative;
+      width: 100vw;
+      height: 100vh;
+      min-height: 680px;
+      overflow: hidden;
+      background: var(--stage-bg);
+      background-position: center;
+      background-size: cover;
+    }
+
+    .app.has-wallpaper {
+      background-image:
+        linear-gradient(180deg, rgba(245, 246, 247, 0.12), rgba(245, 246, 247, 0.74)),
+        var(--custom-wallpaper);
+    }
+
+    [data-theme="dark"] .app.has-wallpaper {
+      background-image:
+        linear-gradient(180deg, rgba(17, 19, 22, 0.1), rgba(17, 19, 22, 0.78)),
+        var(--custom-wallpaper);
+    }
+
+    .topbar {
+      position: absolute;
+      z-index: 40;
+      top: 16px;
+      left: 16px;
+      right: 16px;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 12px;
+      align-items: center;
+      pointer-events: none;
+    }
+
+    .brand,
+    .top-actions,
+    .dock,
+    .drawer,
+    .memory-window {
+      pointer-events: auto;
+    }
+
+    .brand {
+      display: inline-grid;
+      grid-template-columns: 42px minmax(0, auto);
+      gap: 10px;
+      align-items: center;
+      width: max-content;
+      max-width: 420px;
+      min-height: 56px;
+      padding: 8px 12px 8px 8px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--panel);
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(22px);
+    }
+
+    .brand-mark {
+      display: grid;
+      place-items: center;
+      width: 40px;
+      height: 40px;
+      border-radius: var(--radius);
+      color: #07351f;
+      background: #d8f5e9;
+      font-weight: 900;
+      letter-spacing: 0;
+    }
+
+    .brand strong,
+    .panel-title,
+    .line strong,
+    .bubble strong,
+    .memory-title,
+    .note strong {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .brand strong {
+      display: block;
+      font-size: 1rem;
+    }
+
+    .brand span,
+    .caption,
+    .line span,
+    .meta,
+    .note span,
+    .memory-hint {
+      color: var(--soft);
+      font-size: 0.78rem;
+      line-height: 1.45;
+    }
+
+    .bubble .caption {
+      white-space: pre-wrap;
+    }
+
+    .top-actions {
+      display: flex;
+      gap: 8px;
+      justify-content: end;
+      min-width: 0;
+    }
+
+    .icon-button,
+    .file-button {
+      width: 42px;
+      height: 42px;
+      padding: 0;
+      font-weight: 900;
+    }
+
+    .file-button input {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      opacity: 0;
+      pointer-events: none;
+    }
+
+    .stage {
+      position: absolute;
+      inset: 0;
+      display: grid;
+      grid-template-columns: minmax(330px, 0.9fr) minmax(320px, 1.1fr);
+      gap: clamp(18px, 4vw, 72px);
+      align-items: end;
+      min-width: 0;
+      padding: 96px clamp(22px, 4vw, 66px) 126px;
+    }
+
+    .stage::before {
+      content: "";
+      position: absolute;
+      inset: 78px 22px 106px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: rgba(255, 255, 255, 0.16);
+      backdrop-filter: blur(2px);
+      pointer-events: none;
+    }
+
+    [data-theme="dark"] .stage::before {
+      background: rgba(255, 255, 255, 0.04);
+    }
+
+    .model-area {
+      grid-column: 2;
+      position: relative;
+      display: grid;
+      place-items: end center;
+      min-width: 0;
+      min-height: 100%;
+    }
+
+    .model-shadow {
+      position: absolute;
+      bottom: 0;
+      width: min(380px, 38vw);
+      height: 34px;
+      border-radius: 50%;
+      background: rgba(20, 24, 30, 0.2);
+      filter: blur(14px);
+    }
+
+    .live2d-model {
+      position: relative;
+      z-index: 2;
+      width: min(470px, 38vw);
+      max-height: calc(100vh - 190px);
+      object-fit: contain;
+      object-position: bottom center;
+      filter: drop-shadow(0 28px 32px rgba(20, 24, 30, 0.22));
+      transform-origin: bottom center;
+      animation: idle 5.2s ease-in-out infinite;
+    }
+
+    @keyframes idle {
+      0%,
+      100% {
+        transform: translateY(0);
+      }
+
+      50% {
+        transform: translateY(-5px);
+      }
+    }
+
+    .dock {
+      position: absolute;
+      z-index: 18;
+      left: clamp(22px, 5vw, 78px);
+      bottom: 28px;
+      display: grid;
+      gap: 10px;
+      width: min(520px, 42vw);
+    }
+
+    .bubble {
+      display: grid;
+      gap: 6px;
+      max-width: 440px;
+      padding: 12px 14px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--panel);
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(22px);
+    }
+
+    .composer {
+      position: relative;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 8px;
+      padding: 8px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--panel-strong);
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(22px);
+    }
+
+    textarea {
+      width: 100%;
+      min-height: 46px;
+      max-height: 120px;
+      padding: 11px 10px;
+      border: 0;
+      color: var(--text);
+      background: transparent;
+      outline: 0;
+      resize: vertical;
+    }
+
+    .command-suggestions {
+      position: absolute;
+      left: 8px;
+      right: 70px;
+      bottom: calc(100% + 8px);
+      z-index: 80;
+      display: grid;
+      gap: 4px;
+      max-height: min(300px, 42vh);
+      padding: 8px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--panel-strong);
+      box-shadow: var(--shadow);
+      overflow: auto;
+      backdrop-filter: blur(22px);
+    }
+
+    .command-suggestions.hidden {
+      display: none;
+    }
+
+    .command-suggestion {
+      display: grid;
+      grid-template-columns: minmax(104px, auto) minmax(0, 1fr);
+      gap: 10px;
+      align-items: center;
+      min-height: 34px;
+      padding: 7px 8px;
+      border: 0;
+      border-radius: 7px;
+      color: var(--text);
+      background: transparent;
+      text-align: left;
+    }
+
+    .command-suggestion:hover,
+    .command-suggestion.active {
+      background: rgba(47, 157, 104, 0.14);
+    }
+
+    .command-suggestion code {
+      color: var(--green);
+      font: 800 0.86rem/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+
+    .command-suggestion span {
+      min-width: 0;
+      color: var(--soft);
+      font-size: 0.82rem;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .send {
+      align-self: end;
+      min-width: 54px;
+      height: 42px;
+      color: #ffffff;
+      background: #17191d;
+      border-color: #17191d;
+      font-weight: 900;
+    }
+
+    [data-theme="dark"] .send {
+      color: #17191d;
+      background: #f2f4f6;
+      border-color: #f2f4f6;
+    }
+
+    .drawer {
+      position: absolute;
+      z-index: 45;
+      top: 76px;
+      right: 16px;
+      display: grid;
+      gap: 14px;
+      width: min(340px, calc(100vw - 32px));
+      max-height: calc(100vh - 104px);
+      padding: 16px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--panel-strong);
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(24px);
+      overflow: auto;
+      transform: translateX(calc(100% + 28px));
+      opacity: 0;
+      pointer-events: none;
+      transition: transform 180ms ease, opacity 180ms ease;
+    }
+
+    .drawer.open {
+      transform: translateX(0);
+      opacity: 1;
+      pointer-events: auto;
+    }
+
+    .drawer-head {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 8px;
+      align-items: start;
+    }
+
+    .panel-title {
+      display: block;
+      font-size: 1rem;
+      font-weight: 900;
+    }
+
+    .status-list {
+      display: grid;
+      gap: 8px;
+    }
+
+    .line {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 10px;
+      align-items: center;
+      min-height: 42px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .line:last-child {
+      border-bottom: 0;
+    }
+
+    .line strong {
+      font-size: 0.92rem;
+    }
+
+    .drawer-note {
+      margin: 0;
+      color: var(--soft);
+      font-size: 0.82rem;
+      line-height: 1.6;
+      word-break: keep-all;
+      overflow-wrap: anywhere;
+    }
+
+    .danger {
+      color: var(--danger);
+    }
+
+    .memory-window {
+      position: absolute;
+      z-index: 55;
+      left: min(108px, 8vw);
+      top: 116px;
+      display: none;
+      grid-template-columns: 150px minmax(0, 1fr);
+      width: min(680px, calc(100vw - 46px));
+      height: min(460px, calc(100vh - 172px));
+      min-width: 330px;
+      min-height: 260px;
+      border: 1px solid rgba(128, 134, 146, 0.28);
+      border-radius: var(--memory-radius);
+      background: var(--memory-bg);
+      box-shadow: 0 28px 90px rgba(0, 0, 0, 0.22);
+      backdrop-filter: blur(26px);
+      overflow: visible;
+    }
+
+    .memory-window.open {
+      display: grid;
+    }
+
+    .memory-sidebar {
+      min-width: 0;
+      padding: 14px;
+      background: var(--memory-side);
+      border-right: 1px solid var(--line);
+      border-radius: calc(var(--memory-radius) - 1px) 0 0 calc(var(--memory-radius) - 1px);
+      overflow: hidden;
+    }
+
+    .memory-title {
+      display: block;
+      margin-bottom: 12px;
+      font-size: 0.98rem;
+      font-weight: 900;
+    }
+
+    .memory-list {
+      display: grid;
+      gap: 8px;
+    }
+
+    .note {
+      display: grid;
+      gap: 2px;
+      min-height: 44px;
+      padding: 8px;
+      border: 1px solid transparent;
+      border-radius: var(--radius);
+      text-align: left;
+      background: transparent;
+    }
+
+    .note.active,
+    .note:hover {
+      border-color: var(--line);
+      background: rgba(255, 255, 255, 0.4);
+    }
+
+    [data-theme="dark"] .note.active,
+    [data-theme="dark"] .note:hover {
+      background: rgba(255, 255, 255, 0.06);
+    }
+
+    .memory-content {
+      display: grid;
+      grid-template-rows: auto minmax(0, 1fr);
+      min-width: 0;
+      padding: 18px 20px 24px;
+      border-radius: 0 calc(var(--memory-radius) - 1px) calc(var(--memory-radius) - 1px) 0;
+      overflow: hidden;
+    }
+
+    .memory-content h2 {
+      margin: 0 0 8px;
+      font-size: 1.24rem;
+      letter-spacing: 0;
+    }
+
+    .memory-content p,
+    .memory-content li {
+      color: var(--soft);
+      font-size: 0.9rem;
+      line-height: 1.68;
+      word-break: keep-all;
+      overflow-wrap: anywhere;
+    }
+
+    .memory-content ul {
+      margin: 10px 0 0;
+      padding-left: 18px;
+    }
+
+    .memory-head {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 12px;
+      align-items: start;
+      margin-bottom: 14px;
+    }
+
+    .memory-actions {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .memory-actions button {
+      min-height: 34px;
+      padding: 0 11px;
+      font-size: 0.78rem;
+      font-weight: 800;
+    }
+
+    .memory-vault-path {
+      display: block;
+      max-width: 100%;
+      margin-top: 4px;
+      color: var(--muted);
+      font-size: 0.72rem;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .memory-cards {
+      display: grid;
+      align-content: start;
+      gap: 10px;
+      min-height: 0;
+      padding-right: 6px;
+      overflow: auto;
+    }
+
+    .memory-card {
+      display: grid;
+      gap: 6px;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: rgba(255, 255, 255, 0.46);
+    }
+
+    [data-theme="dark"] .memory-card {
+      background: rgba(255, 255, 255, 0.055);
+    }
+
+    .memory-card-head {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      justify-content: space-between;
+      min-width: 0;
+    }
+
+    .memory-card-head strong {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .memory-badge {
+      flex: 0 0 auto;
+      padding: 3px 7px;
+      border-radius: 999px;
+      color: var(--soft);
+      background: rgba(128, 134, 146, 0.14);
+      font-size: 0.68rem;
+      font-weight: 800;
+    }
+
+    .memory-card-preview {
+      margin: 0;
+      color: var(--soft);
+      font-size: 0.82rem;
+      line-height: 1.55;
+    }
+
+    .memory-card-meta {
+      color: var(--muted);
+      font-size: 0.7rem;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .memory-empty {
+      display: grid;
+      place-items: center;
+      min-height: 180px;
+      border: 1px dashed var(--line);
+      border-radius: var(--radius);
+      color: var(--soft);
+      text-align: center;
+    }
+
+    .memory-move {
+      position: absolute;
+      left: 50%;
+      bottom: calc(var(--memory-move-offset) * -1);
+      display: grid;
+      place-items: center;
+      width: 178px;
+      height: var(--memory-move-hit);
+      border-radius: 999px;
+      background: transparent;
+      cursor: grab;
+      transform: translateX(-50%);
+      touch-action: none;
+    }
+
+    .memory-move::after {
+      content: "";
+      display: block;
+      width: 128px;
+      height: var(--memory-handle-thickness);
+      border-radius: 999px;
+      background: var(--memory-handle);
+      box-shadow: 0 1px 5px rgba(0, 0, 0, 0.16);
+      transition: width 150ms ease, height 150ms ease, background 150ms ease, box-shadow 150ms ease;
+    }
+
+    .memory-move:hover::after,
+    .memory-move:focus-visible::after,
+    .memory-move:active::after {
+      width: 148px;
+      height: var(--memory-handle-active-thickness);
+      background: var(--memory-handle-active);
+      box-shadow: 0 2px 9px rgba(0, 0, 0, 0.22);
+    }
+
+    .memory-move:active {
+      cursor: grabbing;
+    }
+
+    .resize-corner {
+      position: absolute;
+      z-index: 2;
+      width: var(--resize-corner-hit);
+      height: var(--resize-corner-hit);
+      border: 0;
+      background: transparent;
+      touch-action: none;
+    }
+
+    .resize-corner-mark {
+      position: absolute;
+      z-index: -1;
+      width: var(--resize-corner-size);
+      height: var(--resize-corner-size);
+      overflow: visible;
+      opacity: 0;
+      transform: translate(0, 0);
+      transform-origin: center;
+      pointer-events: none;
+      transition: opacity 90ms ease, transform 180ms cubic-bezier(0.18, 0.9, 0.18, 1);
+    }
+
+    .resize-corner-mark path {
+      fill: none;
+      stroke: var(--memory-handle);
+      stroke-width: var(--resize-corner-stroke);
+      stroke-linecap: round;
+      vector-effect: non-scaling-stroke;
+      transition: stroke 150ms ease, stroke-width 150ms ease;
+    }
+
+    .resize-corner:hover .resize-corner-mark,
+    .resize-corner:focus-visible .resize-corner-mark {
+      opacity: 1;
+    }
+
+    .resize-corner:hover .resize-corner-mark path,
+    .resize-corner:focus-visible .resize-corner-mark path {
+      stroke: var(--memory-handle-active);
+      stroke-width: var(--resize-corner-active-stroke);
+    }
+
+    .resize-corner.nw {
+      top: calc(var(--resize-corner-rest) * -1);
+      left: calc(var(--resize-corner-rest) * -1);
+      cursor: nwse-resize;
+    }
+
+    .resize-corner.nw .resize-corner-mark {
+      top: calc(var(--resize-corner-rest) - var(--resize-corner-gap) - var(--resize-corner-size));
+      left: calc(var(--resize-corner-rest) - var(--resize-corner-gap) - var(--resize-corner-size));
+      transform: translate(var(--resize-corner-travel), var(--resize-corner-travel)) rotate(180deg);
+    }
+
+    .resize-corner.ne {
+      top: calc(var(--resize-corner-rest) * -1);
+      right: calc(var(--resize-corner-rest) * -1);
+      cursor: nesw-resize;
+    }
+
+    .resize-corner.ne .resize-corner-mark {
+      top: calc(var(--resize-corner-rest) - var(--resize-corner-gap) - var(--resize-corner-size));
+      left: calc(var(--resize-corner-hit) - var(--resize-corner-rest) + var(--resize-corner-gap));
+      transform: translate(calc(var(--resize-corner-travel) * -1), var(--resize-corner-travel)) rotate(270deg);
+    }
+
+    .resize-corner.sw {
+      bottom: calc(var(--resize-corner-rest) * -1);
+      left: calc(var(--resize-corner-rest) * -1);
+      cursor: nesw-resize;
+    }
+
+    .resize-corner.sw .resize-corner-mark {
+      top: calc(var(--resize-corner-hit) - var(--resize-corner-rest) + var(--resize-corner-gap));
+      left: calc(var(--resize-corner-rest) - var(--resize-corner-gap) - var(--resize-corner-size));
+      transform: translate(var(--resize-corner-travel), calc(var(--resize-corner-travel) * -1)) rotate(90deg);
+    }
+
+    .resize-corner.se {
+      right: calc(var(--resize-corner-rest) * -1);
+      bottom: calc(var(--resize-corner-rest) * -1);
+      cursor: nwse-resize;
+    }
+
+    .resize-corner.se .resize-corner-mark {
+      top: calc(var(--resize-corner-hit) - var(--resize-corner-rest) + var(--resize-corner-gap));
+      left: calc(var(--resize-corner-hit) - var(--resize-corner-rest) + var(--resize-corner-gap));
+      transform: translate(calc(var(--resize-corner-travel) * -1), calc(var(--resize-corner-travel) * -1)) rotate(0deg);
+    }
+
+    .resize-corner.nw:hover .resize-corner-mark,
+    .resize-corner.nw:focus-visible .resize-corner-mark {
+      transform: translate(0, 0) rotate(180deg);
+    }
+
+    .resize-corner.ne:hover .resize-corner-mark,
+    .resize-corner.ne:focus-visible .resize-corner-mark {
+      transform: translate(0, 0) rotate(270deg);
+    }
+
+    .resize-corner.sw:hover .resize-corner-mark,
+    .resize-corner.sw:focus-visible .resize-corner-mark {
+      transform: translate(0, 0) rotate(90deg);
+    }
+
+    .resize-corner.se:hover .resize-corner-mark,
+    .resize-corner.se:focus-visible .resize-corner-mark {
+      transform: translate(0, 0) rotate(0deg);
+    }
+
+    @media (max-width: 900px) {
+      body {
+        overflow: auto;
+      }
+
+      .app {
+        min-height: 100vh;
+        height: 100svh;
+      }
+
+      .topbar {
+        top: 10px;
+        left: 10px;
+        right: 10px;
+      }
+
+      .stage {
+        grid-template-columns: 1fr;
+        padding: 122px 12px 178px;
+      }
+
+      .stage::before {
+        inset: 116px 10px 166px;
+      }
+
+      .model-area {
+        grid-column: 1;
+        place-items: end center;
+      }
+
+      .live2d-model {
+        width: min(360px, 84vw);
+        max-height: calc(100svh - 286px);
+      }
+
+      .dock {
+        left: 10px;
+        right: 10px;
+        bottom: 10px;
+        width: auto;
+      }
+
+      .bubble {
+        max-width: 100%;
+      }
+
+      .composer {
+        grid-template-columns: 1fr;
+      }
+
+      .send {
+        width: 100%;
+      }
+
+      .drawer {
+        top: 66px;
+        right: 10px;
+        width: calc(100vw - 20px);
+      }
+
+      .memory-window {
+        left: 10px;
+        top: 112px;
+        width: calc(100vw - 20px);
+        height: min(520px, calc(100svh - 238px));
+        grid-template-columns: 1fr;
+      }
+
+      .memory-sidebar {
+        display: none;
+      }
+
+      .memory-content {
+        border-radius: calc(var(--memory-radius) - 1px);
+      }
+    }
+
+    @media (max-width: 480px) {
+      .topbar {
+        display: block;
+      }
+
+      .brand {
+        position: fixed;
+        top: 10px;
+        left: 10px;
+        grid-template-columns: 36px minmax(0, 1fr);
+        max-width: 136px;
+      }
+
+      .brand-mark {
+        width: 36px;
+        height: 36px;
+      }
+
+      .brand span {
+        display: none;
+      }
+
+      .top-actions {
+        position: fixed;
+        top: 70px;
+        left: 10px;
+        display: grid;
+        grid-template-columns: repeat(2, 38px);
+        width: 82px;
+        gap: 6px;
+      }
+
+      .top-actions .file-button {
+        display: none;
+      }
+
+      .icon-button,
+      .file-button {
+        width: 38px;
+        height: 38px;
+      }
+    }
+  </style>
 </head>
-<body class="is-boot-splash-active">
-  <section class="boot-splash" id="boot-splash" aria-live="polite" aria-label="Evelyn boot loading screen">
-    <div class="boot-splash-grid" aria-hidden="true"></div>
-    <div class="boot-splash-shell">
-      <p class="boot-splash-eyebrow">EVELYN CONTROL</p>
-      <div class="boot-splash-title-row">
-        <h1>Evelyn Boot</h1>
-        <strong id="boot-splash-percent">0%</strong>
+<body>
+  <div class="app" id="app">
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark">E</div>
+        <div>
+          <strong>이블린</strong>
+          <span>Live Control</span>
+        </div>
       </div>
-      <p class="boot-splash-phase" id="boot-splash-phase">부팅 상태 확인 중</p>
-      <div class="boot-splash-track" id="boot-splash-track" role="progressbar" aria-label="Evelyn boot progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
-        <i id="boot-splash-bar"></i>
+
+      <div class="top-actions">
+        <label class="file-button" title="배경 변경" aria-label="배경 변경">
+          <input id="wallpaperInput" type="file" accept="image/*">
+          ▧
+        </label>
+        <button class="icon-button" id="themeButton" type="button" title="다크모드 전환" aria-label="다크모드 전환">◐</button>
+        <button class="icon-button" id="drawerButton" type="button" title="상태" aria-label="상태">☰</button>
       </div>
-      <ol class="boot-splash-steps" id="boot-splash-steps" aria-label="Boot stages">
-        <li data-threshold="8">API 탐색</li>
-        <li data-threshold="24">Main LLM</li>
-        <li data-threshold="42">Router / Sub</li>
-        <li data-threshold="60">TTS / Voice</li>
-        <li data-threshold="78">Discord / Bot API</li>
-        <li data-threshold="100">Control Ready</li>
-      </ol>
-      <div class="boot-splash-actions">
-        <button type="button" class="boot-splash-shutdown" id="boot-splash-shutdown">Bot Processor Stop</button>
-        <p class="boot-splash-shutdown-status" id="boot-splash-shutdown-status" aria-live="polite"></p>
-      </div>
-    </div>
-  </section>
-  <div class="control-page is-default-mode" id="control-page-root">
-    <aside class="side-rail left-rail reveal is-visible" aria-label="Evelyn runtime summary">
-      <section class="panel context-card">
-        <div class="panel-title-row">
-          <span class="panel-icon" aria-hidden="true">E</span>
-          <div>
-            <p class="panel-eyebrow">RUNTIME</p>
-            <strong class="panel-dynamic-title">현재 상태</strong>
-            <p class="panel-subcopy">대화, 음성, 모델 상태를 한눈에 확인합니다.</p>
-          </div>
-        </div>
+    </header>
 
-        <div class="context-shell">
-          <div class="status-chip-box">
-            <div class="status-chip-copy">
-              <span class="chip-label">말하는 대상</span>
-              <strong id="tts-target-name">없음</strong>
-            </div>
-            <span class="presence-pill is-idle" id="voice-presence-pill">대기 중</span>
-          </div>
-
-          <div class="runtime-card slot-default" id="operator-runtime-card">
-            <div class="runtime-header">
-              <div>
-                <strong id="operator-runtime-title">Evelyn 대기 중</strong>
-                <p id="operator-runtime-subcopy">음성, TTS, LLM 상태를 확인하고 있습니다.</p>
-              </div>
-              <span class="runtime-dot" id="operator-runtime-dot"></span>
-            </div>
-            <p class="runtime-idle-note" id="operator-runtime-note">Minecraft가 꺼져 있을 때는 기본 대화와 운영 상태만 보여줍니다.</p>
-            <div class="stat-grid" id="operator-runtime-stats">
-              <article class="stat-tile">
-                <span>음성 채널</span>
-                <strong id="operator-stat-channel">없음</strong>
-              </article>
-              <article class="stat-tile">
-                <span>현재 모드</span>
-                <strong id="operator-stat-mode">default</strong>
-              </article>
-              <article class="stat-tile">
-                <span>TTS 대기열</span>
-                <strong id="operator-stat-tts">0</strong>
-              </article>
-              <article class="stat-tile">
-                <span>LLM 요청</span>
-                <strong id="operator-stat-llm">0</strong>
-              </article>
-            </div>
-          </div>
-
-          <div class="runtime-card slot-minecraft" id="minecraft-runtime-card">
-            <div class="runtime-header">
-              <div>
-                <strong id="minecraft-runtime-title">Minecraft 대기 중</strong>
-                <p id="minecraft-runtime-subcopy">Voyager 연결 상태를 확인하고 있습니다.</p>
-              </div>
-              <span class="runtime-dot" id="minecraft-runtime-dot"></span>
-            </div>
-            <p class="runtime-idle-note" id="minecraft-idle-note">Minecraft 세션이 붙으면 작업, 위치, 인벤토리가 자동으로 표시됩니다.</p>
-            <div class="stat-grid" id="minecraft-runtime-stats">
-              <article class="stat-tile">
-                <span>현재 작업</span>
-                <strong id="stat-current-task">없음</strong>
-              </article>
-              <article class="stat-tile">
-                <span>진행 단계</span>
-                <strong id="stat-stage">없음</strong>
-              </article>
-              <article class="stat-tile">
-                <span>고유 아이템</span>
-                <strong id="stat-unique-items">-</strong>
-              </article>
-              <article class="stat-tile">
-                <span>이동 거리</span>
-                <strong id="stat-travel-distance">-</strong>
-              </article>
-              <article class="stat-tile">
-                <span>체력 / 배고픔</span>
-                <strong id="stat-health-hunger">-</strong>
-              </article>
-              <article class="stat-tile">
-                <span>스킬 라이브러리</span>
-                <strong id="stat-skill-library">-</strong>
-              </article>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <section class="panel widget-card" id="minecraft-telemetry-panel">
-        <div class="panel-title-row compact-title-row">
-          <span class="panel-icon cube" aria-hidden="true">D</span>
-          <div>
-            <p class="panel-eyebrow orange" id="operations-eyebrow">DIAGNOSTICS</p>
-            <strong class="panel-dynamic-title" id="operations-title">운영 흐름</strong>
-            <p class="panel-subcopy" id="operations-subcopy">서버 상태와 최근 이벤트는 필요할 때만 확인합니다.</p>
-          </div>
-        </div>
-
-        <details class="diagnostics-details" open>
-          <summary>
-            <span>서버 상태</span>
-            <strong id="system-summary-pill" class="good-pill is-idle">기본 준비됨</strong>
-          </summary>
-          <div class="meter-list">
-            <div class="meter-row">
-              <span class="meter-name">Voyager</span>
-              <div class="meter-main">
-                <div class="meter"><i id="meter-voyager"></i></div>
-                <strong id="meter-voyager-label">idle</strong>
-              </div>
-            </div>
-            <div class="meter-row">
-              <span class="meter-name">Voice</span>
-              <div class="meter-main">
-                <div class="meter"><i id="meter-voice"></i></div>
-                <strong id="meter-voice-label">idle</strong>
-              </div>
-            </div>
-            <div class="meter-row">
-              <span class="meter-name">TTS</span>
-              <div class="meter-main">
-                <div class="meter"><i id="meter-tts"></i></div>
-                <strong id="meter-tts-label">없음</strong>
-              </div>
-            </div>
-            <div class="meter-row">
-              <span class="meter-name">LLM</span>
-              <div class="meter-main">
-                <div class="meter"><i id="meter-llm"></i></div>
-                <strong id="meter-llm-label">0 inflight</strong>
-              </div>
-            </div>
-          </div>
-          <div class="voice-pipeline-grid" aria-label="Voice pipeline health">
-            <span>Queue <strong id="voice-pipeline-queue">0/0</strong></span>
-            <span>STT <strong id="voice-pipeline-stt">idle</strong></span>
-            <span>TTS p95 <strong id="voice-pipeline-tts">0ms</strong></span>
-            <span>Drops <strong id="voice-pipeline-drops">0</strong></span>
-          </div>
-          <div class="model-call-grid" aria-label="LLM model call metrics">
-            <span>Router <strong id="model-call-router-rate">0%</strong></span>
-            <span>Router avg <strong id="model-call-router-latency">0ms</strong></span>
-            <span>Main first <strong id="model-call-main-first">0ms</strong></span>
-            <span>Cognitive <strong id="model-call-cognitive-rate">0%</strong></span>
-            <span>Summary hot <strong id="model-call-summary-hot">0%</strong></span>
-            <span>Calls <strong id="model-call-turn-count">0</strong></span>
-          </div>
-          <div class="model-call-grid" aria-label="Question policy metrics">
-            <span>Q added <strong id="question-added-rate">0%</strong></span>
-            <span>Q removed <strong id="question-removed-count">0</strong></span>
-            <span>Cooldown <strong id="question-cooldown-rate">0%</strong></span>
-            <span>Ask mode <strong id="question-ask-mode">none</strong></span>
-            <span>Q turns <strong id="question-turn-count">0</strong></span>
-            <span>Final Q <strong id="question-final-count">0</strong></span>
-          </div>
-          <div class="voice-input-switch" id="voice-input-switch" aria-label="Voice input source">
-            <button type="button" data-voice-input-mode="auto" aria-pressed="true">Auto</button>
-            <button type="button" data-voice-input-mode="local" aria-pressed="false">Local mic</button>
-            <button type="button" data-voice-input-mode="discord" aria-pressed="false">Discord</button>
-          </div>
-        </details>
-
-        <div class="subpanel" id="recent-activity-panel">
-          <div class="subpanel-head">
-            <strong>최근 흐름</strong>
-            <button type="button" class="more-link" id="refresh-state-button">새로고침</button>
-          </div>
-          <p class="subpanel-note">성공, 대기, 실패 이벤트를 최근 순서대로 표시합니다.</p>
-          <div class="event-list compact-event-list" id="recent-activity-list">
-            <div class="event-row empty-row">
-              <span>--:--</span>
-              <strong>아직 활동 기록이 없습니다.</strong>
-              <em>WAIT</em>
-            </div>
-          </div>
-        </div>
-      </section>
-    </aside>
-
-    <main class="center-stage reveal is-visible">
-      <section class="model-viewport">
-        <div class="viewport-topbar">
-          <div class="viewport-topbar-copy">
-            <p class="panel-eyebrow pink">EVELYN CONTROL</p>
-            <strong id="guild-name">Guild 미연결</strong>
-          </div>
-          <div class="viewport-topbar-status">
-            <div class="topbar-pill-row">
-              <span class="topbar-pill is-default" id="mode-pill">default mode</span>
-              <span class="topbar-pill topbar-pill-muted is-warmup" id="submode-pill">idle</span>
-            </div>
-            <div class="voice-input-switch is-compact" id="voice-input-switch-topbar" aria-label="Voice input source">
-              <button type="button" data-voice-input-mode="auto" aria-pressed="true">Auto</button>
-              <button type="button" data-voice-input-mode="local" aria-pressed="false">Local</button>
-              <button type="button" data-voice-input-mode="discord" aria-pressed="false">Discord</button>
-            </div>
-            <p class="topbar-status-line" id="topbar-status-line">Evelyn 상태를 기다리는 중입니다.</p>
-            <div class="api-boot-progress is-hidden" id="api-boot-progress" aria-live="polite" aria-hidden="true">
-              <div class="api-boot-progress-head">
-                <span id="api-boot-phase">API 연결 준비</span>
-                <strong id="api-boot-percent">0%</strong>
-              </div>
-              <div class="api-boot-track" id="api-boot-track" role="progressbar" aria-label="Bot API connection progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
-                <i id="api-boot-bar"></i>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div class="viewport-fog viewport-fog-left"></div>
-        <div class="viewport-fog viewport-fog-right"></div>
-        <div class="viewport-noise"></div>
-        <section class="viewport-illustration" aria-label="Evelyn bot illustration">
-          <div class="avatar-shell" id="avatar-shell">
-            <div class="avatar-aura avatar-aura-back"></div>
-            <div id="avatar" class="evelyn-avatar" data-talking="false">
-              <div id="avatar-model" class="avatar-model">
-                <div id="avatar-layer-underpaint" class="avatar-layer avatar-layer-underpaint" aria-hidden="true">
-                  <img class="avatar-part avatar-underpaint" src="./assets/evelyn-avatar/model-v2/preview_composite.png" alt="" draggable="false">
-                </div>
-                <div id="avatar-layer-back" class="avatar-layer avatar-layer-back">
-                  <img class="avatar-part avatar-back-hair" src="./assets/evelyn-avatar/model-v2/parts/01_back_hair.png" alt="" draggable="false">
-                </div>
-                <div id="avatar-layer-legs" class="avatar-layer avatar-layer-legs">
-                  <img class="avatar-part avatar-leg-left" src="./assets/evelyn-avatar/model-v2/parts/19_leg_L.png" alt="" draggable="false">
-                  <img class="avatar-part avatar-leg-right" src="./assets/evelyn-avatar/model-v2/parts/20_leg_R.png" alt="" draggable="false">
-                </div>
-                <div id="avatar-layer-body" class="avatar-layer avatar-layer-body">
-                  <img class="avatar-part avatar-body-base" src="./assets/evelyn-avatar/model-v2/parts/02_body_base.png" alt="Evelyn bot illustration" draggable="false">
-                  <img class="avatar-part avatar-dress" src="./assets/evelyn-avatar/model-v2/parts/12_dress.png" alt="" draggable="false">
-                  <img class="avatar-part avatar-cardigan-left" src="./assets/evelyn-avatar/model-v2/parts/13_cardigan_L.png" alt="" draggable="false">
-                  <img class="avatar-part avatar-cardigan-right" src="./assets/evelyn-avatar/model-v2/parts/14_cardigan_R.png" alt="" draggable="false">
-                  <img class="avatar-part avatar-arm-left" src="./assets/evelyn-avatar/model-v2/parts/15_arm_L.png" alt="" draggable="false">
-                  <img class="avatar-part avatar-arm-right" src="./assets/evelyn-avatar/model-v2/parts/16_arm_R.png" alt="" draggable="false">
-                  <img class="avatar-part avatar-chest-ribbon" src="./assets/evelyn-avatar/model-v2/parts/28_chest_ribbon.png" alt="" draggable="false">
-                </div>
-                <div id="avatar-volume-shadow" class="avatar-volume-shadow" aria-hidden="true"></div>
-                <div id="avatar-volume-light" class="avatar-volume-light" aria-hidden="true"></div>
-                <div id="avatar-neck-shadow" class="avatar-neck-shadow" aria-hidden="true"></div>
-                <div id="avatar-layer-teddy" class="avatar-layer avatar-layer-teddy">
-                  <img class="avatar-part avatar-teddy-limbs avatar-teddy-leg-left" src="./assets/evelyn-avatar/model-v2/parts/26_teddy_leg_L.png" alt="" draggable="false">
-                  <img class="avatar-part avatar-teddy-limbs avatar-teddy-leg-right" src="./assets/evelyn-avatar/model-v2/parts/27_teddy_leg_R.png" alt="" draggable="false">
-                  <img class="avatar-part avatar-teddy-limbs avatar-teddy-arm-left" src="./assets/evelyn-avatar/model-v2/parts/24_teddy_arm_L.png" alt="" draggable="false">
-                  <img class="avatar-part avatar-teddy-limbs avatar-teddy-arm-right" src="./assets/evelyn-avatar/model-v2/parts/25_teddy_arm_R.png" alt="" draggable="false">
-                  <img class="avatar-part avatar-teddy-body" src="./assets/evelyn-avatar/model-v2/parts/23_teddy_body.png" alt="" draggable="false">
-                </div>
-                <div id="avatar-layer-hands" class="avatar-layer avatar-layer-hands">
-                  <img class="avatar-part avatar-hand-left" src="./assets/evelyn-avatar/model-v2/parts/17_hand_L.png" alt="" draggable="false">
-                  <img class="avatar-part avatar-hand-right" src="./assets/evelyn-avatar/model-v2/parts/18_hand_R.png" alt="" draggable="false">
-                </div>
-                <div id="avatar-layer-face" class="avatar-layer avatar-layer-face">
-                  <img class="avatar-part avatar-neck" src="./assets/evelyn-avatar/model-v2/parts/03_neck.png" alt="" draggable="false">
-                  <img class="avatar-part avatar-face-base" src="./assets/evelyn-avatar/model-v2/parts/04_face_base.png" alt="" draggable="false">
-                </div>
-                <div id="avatar-layer-features" class="avatar-layer avatar-layer-features">
-                  <img id="avatar-eye-left" class="avatar-part avatar-eye avatar-eye-left" src="./assets/evelyn-avatar/model-v2/parts/05_eye_L.png" alt="" draggable="false">
-                  <img id="avatar-eye-right" class="avatar-part avatar-eye avatar-eye-right" src="./assets/evelyn-avatar/model-v2/parts/06_eye_R.png" alt="" draggable="false">
-                  <img id="avatar-mouth" class="avatar-part avatar-mouth" src="./assets/evelyn-avatar/model-v2/parts/07_mouth_idle.png" alt="" draggable="false">
-                </div>
-                <div id="avatar-layer-front" class="avatar-layer avatar-layer-front">
-                  <img class="avatar-part avatar-side-hair-left" src="./assets/evelyn-avatar/model-v2/parts/10_side_hair_L.png" alt="" draggable="false">
-                  <img class="avatar-part avatar-side-hair-right" src="./assets/evelyn-avatar/model-v2/parts/11_side_hair_R.png" alt="" draggable="false">
-                  <img class="avatar-part avatar-front-hair" src="./assets/evelyn-avatar/model-v2/parts/09_front_hair.png" alt="" draggable="false">
-                  <img class="avatar-part avatar-flower" src="./assets/evelyn-avatar/model-v2/parts/21_flower.png" alt="" draggable="false">
-                  <img class="avatar-part avatar-ribbon" src="./assets/evelyn-avatar/model-v2/parts/22_hair_ribbon.png" alt="" draggable="false">
-                </div>
-              </div>
-            </div>
-            <div class="avatar-aura avatar-aura-front"></div>
-          </div>
-          <div class="avatar-annotation">
-            <span class="avatar-tag">EVELYN</span>
-            <strong>대기 중</strong>
-            <p id="avatar-status-copy">음성 출력 중이 아니면 차분한 idle 상태를 유지합니다.</p>
-          </div>
-        </section>
-        <div class="viewport-particles" aria-hidden="true">
-          <span></span><span></span><span></span><span></span><span></span><span></span>
-        </div>
-
-        <section class="viewport-focus slot-default" id="default-viewport-panel" aria-label="Default focus panel">
-          <article class="focus-hero">
-            <span class="focus-label">CURRENT FOCUS</span>
-            <strong id="default-focus-title">연결 상태 확인 중</strong>
-            <p id="default-focus-body">Evelyn과 control page API 응답을 기다리는 중입니다.</p>
-          </article>
-          <div class="focus-grid">
-            <article class="focus-card">
-              <span class="focus-card-label">최근 응답</span>
-              <strong id="default-focus-recent-title">아직 없음</strong>
-              <p id="default-focus-recent-body">최근 assistant 응답이 생기면 여기에 요약합니다.</p>
-            </article>
-            <article class="focus-card">
-              <span class="focus-card-label">운영 컨텍스트</span>
-              <strong id="default-focus-context-title">대기 중</strong>
-              <p id="default-focus-context-body">길드, 음성, 현재 모드, 다음 액션을 묶어서 보여줍니다.</p>
-            </article>
-          </div>
-        </section>
-
-        <div class="viewport-hud slot-minecraft" id="minecraft-viewport-hud">
-          <div class="hud-card hud-card-goal">
-            <span class="hud-label">목표</span>
-            <strong id="objective-goal">없음</strong>
-            <p id="objective-progress">진행 메시지 없음</p>
-          </div>
-          <div class="hud-card hud-card-stage">
-            <span class="hud-label">작업 단계</span>
-            <strong id="objective-stage">없음</strong>
-            <p id="objective-task-stage">없음</p>
-          </div>
-          <div class="hud-position-dock" id="inventory-dock">
-            <div class="hud-card hud-card-position" id="position-card">
-              <div class="hud-card-header inventory-position-header">
-                <span class="hud-label">현재 위치</span>
-                <button type="button" class="hud-inline-button hud-inline-button-dock" id="inventory-toggle-button" aria-expanded="false" aria-controls="inventory-widget">인벤토리</button>
-              </div>
-              <strong id="position-block">미확인</strong>
-            </div>
-            <div class="inventory-widget is-hidden" id="inventory-widget" role="dialog" aria-label="현재 인벤토리" aria-hidden="true">
-              <div class="inventory-widget-header">
-                <strong>인벤토리</strong>
-                <button type="button" class="inventory-widget-close" id="inventory-widget-close" aria-label="인벤토리 닫기">닫기</button>
-              </div>
-              <p class="inventory-widget-summary" id="inventory-summary">인벤토리 정보 없음</p>
-              <div class="inventory-widget-list" id="inventory-widget-list">
-                <p class="inventory-widget-empty">표시할 인벤토리 항목이 없습니다.</p>
-              </div>
-            </div>
-          </div>
-        </div>
+    <main class="stage">
+      <section class="model-area" aria-label="이블린 라이브 모델">
+        <div class="model-shadow"></div>
+        <img class="live2d-model" src="./assets/evelyn-avatar/model-v2/preview_composite.png" alt="이블린 전신 모델">
       </section>
     </main>
 
-    <aside class="side-rail right-rail reveal is-visible" aria-label="Evelyn chat and actions">
-      <section class="panel chat-panel">
-        <header class="chat-header">
-          <div class="chat-header-mark">C</div>
-          <div class="chat-header-copy">
-            <p class="panel-eyebrow pink" id="actions-eyebrow">CONTROL ACTIONS</p>
-            <strong>Evelyn</strong>
-            <p class="panel-subcopy wide" id="actions-subcopy">자주 쓰는 명령과 최근 대화를 한곳에서 처리합니다.</p>
-          </div>
-          <div class="chat-header-actions">
-            <button type="button" class="quick-command is-danger chat-header-button" id="chat-shutdown-button" data-chat-command="/shutdown" data-chat-send="1" data-confirm="Evelyn 전체 스택을 종료할까요?">종료</button>
-          </div>
-        </header>
+    <section class="dock" aria-label="대화">
+      <div class="bubble" id="lastBubble">
+        <strong>이블린</strong>
+        <span class="caption">응. 여기 있어. 메모리는 /memory 라고 입력하면 열어둘게.</span>
+      </div>
+      <div class="composer">
+        <div class="command-suggestions hidden" id="commandSuggestions" aria-label="명령어 목록"></div>
+        <textarea id="composer" placeholder="메시지 입력"></textarea>
+        <button class="send" id="sendButton" type="button">전송</button>
+      </div>
+    </section>
 
-        <section class="minecraft-ops slot-minecraft" id="minecraft-ops-panel" aria-label="Minecraft operations summary">
-          <article class="brief-card brief-card-accent">
-            <span class="brief-label">Minecraft Overview</span>
-            <strong id="minecraft-ops-title">세션 대기 중</strong>
-            <p id="minecraft-ops-body">Minecraft 세션이 붙으면 인벤토리, 생존 상태, 진행 정보를 요약합니다.</p>
-          </article>
-          <div class="minecraft-ops-grid">
-            <article class="mini-ops-card">
-              <span class="focus-card-label">인벤토리</span>
-              <strong id="minecraft-ops-inventory-title">없음</strong>
-              <p id="minecraft-ops-inventory-body">인벤토리 정보 없음</p>
-            </article>
-            <article class="mini-ops-card">
-              <span class="focus-card-label">생존 상태</span>
-              <strong id="minecraft-ops-survival-title">미확인</strong>
-              <p id="minecraft-ops-survival-body">체력과 배고픔이 여기에 표시됩니다.</p>
-            </article>
-          </div>
-        </section>
-
-        <section class="control-brief slot-default" id="control-brief" aria-label="Current control summary">
-          <article class="brief-card">
-            <span class="brief-label">지금 상태</span>
-            <strong id="control-brief-title">연결 상태 확인 중</strong>
-            <p id="control-brief-body">Evelyn과 control page API 응답을 기다리는 중입니다.</p>
-          </article>
-          <article class="brief-card brief-card-accent">
-            <span class="brief-label">추천 액션</span>
-            <strong id="control-next-title">잠시만 기다려 주세요</strong>
-            <p id="control-next-body">API가 뜨면 현재 상태에 맞는 다음 액션을 안내합니다.</p>
-          </article>
-          <article class="brief-card brief-card-warning control-hidden" id="control-issue-card">
-            <span class="brief-label">주의</span>
-            <strong id="control-issue-title">문제 없음</strong>
-            <p id="control-issue-body">특이사항이 없습니다.</p>
-          </article>
-        </section>
-
-        <div class="quick-command-stack">
-          <section class="quick-command-block" aria-label="Primary actions">
-            <div class="quick-command-head">
-              <strong id="primary-action-title">바로 실행</strong>
-              <span id="quick-command-caption">현재 상태에 맞는 기본 액션입니다.</span>
-            </div>
-            <div class="quick-command-row quick-command-row-primary" id="primary-action-row" aria-label="Primary actions"></div>
-          </section>
-
-          <section class="quick-command-block" aria-label="Supporting commands">
-            <div class="quick-command-head">
-              <strong id="support-action-title">세부 명령</strong>
-              <span id="support-action-caption">상태 확인과 보조 제어를 모았습니다.</span>
-            </div>
-            <div class="quick-command-row" id="quick-command-row" aria-label="Quick commands"></div>
-          </section>
+    <aside class="drawer" id="drawer" aria-label="숨겨진 상태 패널">
+      <div class="drawer-head">
+        <div>
+          <span class="panel-title">상태</span>
+          <span class="meta">필요할 때만 열어봅니다.</span>
         </div>
+        <button class="icon-button" id="closeDrawer" type="button" title="닫기" aria-label="닫기">×</button>
+      </div>
 
-        <section class="chat-thread" id="chat-thread" aria-label="Local control page chat log"></section>
+      <div class="status-list">
+        <div class="line"><span>Main LLM</span><strong>연결됨</strong></div>
+        <div class="line"><span>TTS</span><strong>대기</strong></div>
+        <div class="line"><span>Minecraft</span><strong>꺼짐</strong></div>
+        <div class="line"><span>최근 학습</span><strong>v46</strong></div>
+        <div class="line"><span>GPU 기준</span><strong>RTX 3090</strong></div>
+      </div>
 
-        <form class="chat-composer" id="chat-composer">
-          <label class="composer-shell" for="command-preview">
-            <textarea id="command-preview" rows="1" placeholder="Evelyn에게 메시지를 보내거나 /minecraft connect 입력"></textarea>
-            <div class="command-suggestions is-hidden" id="command-suggestions" aria-live="polite"></div>
-          </label>
+      <label class="line" for="wallpaperInput">
+        <span>배경화면</span>
+        <strong>변경</strong>
+      </label>
 
-          <div class="composer-toolbar">
-            <span id="composer-hint-left">Enter 전송</span>
-            <span>Shift + Enter 줄바꿈</span>
-          </div>
-
-          <div class="composer-actions">
-            <button type="submit" class="composer-send" id="composer-send-button">보내기</button>
-          </div>
-        </form>
-      </section>
-
-      <section class="panel memory-graph-panel" id="memory-graph-panel" aria-label="Memory vault manager">
-        <header class="memory-graph-header">
-          <div>
-            <p class="panel-eyebrow mint">MEMORY VAULT</p>
-            <strong>Memory</strong>
-            <p class="panel-subcopy wide" id="memory-graph-subcopy">정훈이 바로 확인하고 고칠 수 있는 기억 카드입니다.</p>
-          </div>
-          <button type="button" class="quick-command memory-graph-refresh" id="memory-graph-refresh-button">Refresh</button>
-        </header>
-        <section class="memory-manager" aria-label="Memory cards">
-          <div class="memory-manager-summary" id="memory-manager-summary">
-            <span>확인됨 <strong>0</strong></span>
-            <span>미확인 <strong>0</strong></span>
-            <span>고정 <strong>0</strong></span>
-          </div>
-          <div class="memory-card-list" id="memory-card-list">
-            <article class="memory-card memory-card-empty">메모리 카드를 불러오는 중입니다.</article>
-          </div>
-          <p class="memory-manager-status" id="memory-manager-status">카드에서 확인, 고정, 숨김, 수정을 바로 처리할 수 있습니다.</p>
-        </section>
-        <div class="memory-graph-stats" id="memory-graph-stats">
-          <span>Nodes <strong>0</strong></span>
-          <span>Edges <strong>0</strong></span>
-          <span>Version <strong>0</strong></span>
-        </div>
-        <div class="memory-graph-filter" id="memory-graph-filter" aria-label="Memory graph filters"></div>
-        <div class="memory-graph-shell">
-          <canvas id="memory-graph-canvas" width="800" height="520" aria-label="Memory graph canvas"></canvas>
-          <div class="memory-graph-empty" id="memory-graph-empty">Memory graph data is loading.</div>
-        </div>
-        <aside class="memory-graph-detail" id="memory-graph-detail">
-          <strong>Select a memory node</strong>
-          <p>Click a node to inspect its note path, type, tags, and why it is connected.</p>
-        </aside>
-      </section>
+      <p class="drawer-note">재시작, 종료, 런타임 전환 같은 작업은 여기서 바로 실행하지 않습니다.</p>
+      <p class="drawer-note danger">위험 작업은 확인 후 진행.</p>
     </aside>
+
+    <section class="memory-window" id="memoryWindow" aria-label="옵시디언 메모리 공간">
+      <aside class="memory-sidebar">
+        <span class="memory-title">Memory</span>
+        <div class="memory-list">
+          <button class="note active" type="button" data-memory-filter="all">
+            <strong>전체</strong>
+            <span id="memoryCount">loading</span>
+          </button>
+          <button class="note" type="button" data-memory-filter="core">
+            <strong>코어</strong>
+            <span>identity / rules</span>
+          </button>
+          <button class="note" type="button" data-memory-filter="daily">
+            <strong>일지</strong>
+            <span>daily notes</span>
+          </button>
+          <button class="note" type="button" data-memory-filter="project">
+            <strong>프로젝트</strong>
+            <span>work memory</span>
+          </button>
+        </div>
+      </aside>
+      <div class="memory-content">
+        <div class="memory-head">
+          <div>
+            <h2>이블린 메모리</h2>
+            <span class="memory-hint" id="memoryHint">memory_vault 노트를 불러오는 중입니다.</span>
+            <span class="memory-vault-path" id="memoryVaultPath"></span>
+          </div>
+          <div class="memory-actions">
+            <button id="memoryRefreshButton" type="button">새로고침</button>
+            <button id="openObsidianButton" type="button">Obsidian</button>
+          </div>
+        </div>
+        <div class="memory-cards" id="memoryCards">
+          <div class="memory-empty">메모리 노트를 불러오는 중입니다.</div>
+        </div>
+        <div class="memory-move" id="memoryMove" title="이동"></div>
+      </div>
+      <div class="resize-corner nw" data-resize="nw">
+        <svg class="resize-corner-mark" viewBox="0 0 20 20" aria-hidden="true">
+          <path d="M17.5 2.5A15 15 0 0 1 2.5 17.5"></path>
+        </svg>
+      </div>
+      <div class="resize-corner ne" data-resize="ne">
+        <svg class="resize-corner-mark" viewBox="0 0 20 20" aria-hidden="true">
+          <path d="M17.5 2.5A15 15 0 0 1 2.5 17.5"></path>
+        </svg>
+      </div>
+      <div class="resize-corner sw" data-resize="sw">
+        <svg class="resize-corner-mark" viewBox="0 0 20 20" aria-hidden="true">
+          <path d="M17.5 2.5A15 15 0 0 1 2.5 17.5"></path>
+        </svg>
+      </div>
+      <div class="resize-corner se" data-resize="se">
+        <svg class="resize-corner-mark" viewBox="0 0 20 20" aria-hidden="true">
+          <path d="M17.5 2.5A15 15 0 0 1 2.5 17.5"></path>
+        </svg>
+      </div>
+    </section>
   </div>
 
-  <script src="./assets/vendor/winbox/winbox.bundle.min.js?v=0.2.82"></script>
-  <script src="./assets/evelyn-page.js?v=20260602a"></script>
+  <script>
+    const root = document.documentElement;
+    const app = document.getElementById("app");
+    const themeButton = document.getElementById("themeButton");
+    const drawerButton = document.getElementById("drawerButton");
+    const closeDrawer = document.getElementById("closeDrawer");
+    const drawer = document.getElementById("drawer");
+    const wallpaperInput = document.getElementById("wallpaperInput");
+    const composer = document.getElementById("composer");
+    const commandSuggestions = document.getElementById("commandSuggestions");
+    const sendButton = document.getElementById("sendButton");
+    const lastBubble = document.getElementById("lastBubble");
+    const memoryWindow = document.getElementById("memoryWindow");
+    const memoryMove = document.getElementById("memoryMove");
+    const memoryCards = document.getElementById("memoryCards");
+    const memoryHint = document.getElementById("memoryHint");
+    const memoryCount = document.getElementById("memoryCount");
+    const memoryVaultPath = document.getElementById("memoryVaultPath");
+    const memoryRefreshButton = document.getElementById("memoryRefreshButton");
+    const openObsidianButton = document.getElementById("openObsidianButton");
+    let memorySnapshot = null;
+    let memoryFilter = "all";
+    let memoryLoading = false;
+    let memoryLoadPromise = null;
+    let apiBase = "";
+    let sending = false;
+    let suggestionItems = [];
+    let selectedSuggestionIndex = 0;
+    let commandCatalog = [
+      { command: "/help", template: "/help", summary: "명령어 목록 보기", group: "기본" },
+      { command: "/status", template: "/status", summary: "Evelyn, 음성, 모델 상태 요약", group: "기본" },
+      { command: "/memory", template: "/memory", summary: "메모리 창 열기/숨기기", group: "페이지" },
+      { command: "/obsidian", template: "/obsidian", summary: "메모리 창 열기/숨기기", group: "페이지" },
+      { command: "/voice status", template: "/voice status", summary: "음성 입력, STT, TTS 상태 보기", group: "음성" },
+      { command: "/voice input auto", template: "/voice input auto", summary: "로컬 마이크와 Discord 입력 자동 전환", group: "음성" },
+      { command: "/voice input local", template: "/voice input local", summary: "로컬 마이크 입력 사용", group: "음성" },
+      { command: "/voice input discord", template: "/voice input discord", summary: "Discord 음성 입력 사용", group: "음성" },
+      { command: "/minecraft connect", template: "/minecraft connect", summary: "Voyager Minecraft 모드 시작", group: "Minecraft" },
+      { command: "/autonomy status", template: "/autonomy status", summary: "Evelyn 자율 행동 엔진 상태 보기", group: "자율 행동" },
+      { command: "/shutdown", template: "/shutdown", summary: "Evelyn runtime 종료", group: "시스템" }
+    ];
+
+    const savedTheme = localStorage.getItem("evelynControlTheme");
+    if (savedTheme === "dark" || savedTheme === "light") {
+      root.dataset.theme = savedTheme;
+    }
+
+    const savedWallpaper = localStorage.getItem("evelynControlWallpaper");
+    if (savedWallpaper) {
+      app.style.setProperty("--custom-wallpaper", `url("${savedWallpaper}")`);
+      app.classList.add("has-wallpaper");
+    }
+
+    themeButton.addEventListener("click", () => {
+      const next = root.dataset.theme === "dark" ? "light" : "dark";
+      root.dataset.theme = next;
+      localStorage.setItem("evelynControlTheme", next);
+    });
+
+    drawerButton.addEventListener("click", () => {
+      drawer.classList.toggle("open");
+    });
+
+    closeDrawer.addEventListener("click", () => {
+      drawer.classList.remove("open");
+    });
+
+    wallpaperInput.addEventListener("change", () => {
+      const file = wallpaperInput.files && wallpaperInput.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.addEventListener("load", () => {
+        const value = String(reader.result);
+        app.style.setProperty("--custom-wallpaper", `url("${value}")`);
+        app.classList.add("has-wallpaper");
+        try {
+          localStorage.setItem("evelynControlWallpaper", value);
+        } catch {
+          localStorage.removeItem("evelynControlWallpaper");
+        }
+      });
+      reader.readAsDataURL(file);
+    });
+
+    function setBubble(text) {
+      lastBubble.querySelector(".caption").textContent = text;
+    }
+
+    function escapeHtml(value) {
+      return String(value)
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;");
+    }
+
+    function commandGroup(item) {
+      const command = String((item && item.command) || "").toLowerCase();
+      if (item && item.group) return item.group;
+      if (command === "/memory" || command === "/obsidian") return "페이지";
+      if (command.startsWith("/voice")) return "음성";
+      if (command.startsWith("/minecraft") || command === "/inventory" || command.startsWith("/voyager")) return "Minecraft";
+      if (command.startsWith("/autonomy")) return "자율 행동";
+      if (command === "/shutdown") return "시스템";
+      return "기본";
+    }
+
+    function mergeCommands(...groups) {
+      const merged = new Map();
+      for (const group of groups) {
+        if (!Array.isArray(group)) continue;
+        for (const item of group) {
+          if (!item || !item.command) continue;
+          const command = String(item.command);
+          const key = command.toLowerCase();
+          if (key.startsWith("/ui") || key.startsWith("/windows") || key.startsWith("/show")) continue;
+          merged.set(key, {
+            command,
+            template: item.template || command,
+            summary: item.summary || "",
+            group: item.group || commandGroup(item)
+          });
+        }
+      }
+      return Array.from(merged.values());
+    }
+
+    function formatHelp() {
+      const lines = ["페이지 명령어"];
+      for (const group of ["기본", "페이지", "음성", "Minecraft", "자율 행동", "시스템"]) {
+        const items = commandCatalog.filter((item) => commandGroup(item) === group);
+        if (!items.length) continue;
+        lines.push("", group);
+        for (const item of items) {
+          lines.push(`- ${item.command} - ${item.summary}`);
+        }
+      }
+      return lines.join("\n");
+    }
+
+    function apiCandidates() {
+      const candidates = [];
+      if (location.protocol.startsWith("http")) candidates.push(location.origin);
+      if (location.protocol !== "https:" && location.origin !== "http://127.0.0.1:8799") candidates.push("http://127.0.0.1:8799");
+      if (location.protocol === "file:") candidates.push("http://127.0.0.1:8799");
+      return Array.from(new Set(candidates));
+    }
+
+    async function fetchApi(path, options = {}) {
+      if (!apiBase) {
+        for (const candidate of apiCandidates()) {
+          try {
+            const response = await fetch(candidate + "/api/control-page/state", { cache: "no-store" });
+            if (!response.ok) continue;
+            const state = await response.json();
+            apiBase = candidate;
+            applyState(state);
+            break;
+          } catch {
+            // try next candidate
+          }
+        }
+      }
+      if (!apiBase) {
+        throw new Error("control page API에 연결하지 못했어.");
+      }
+      const response = await fetch(apiBase + path, {
+        cache: "no-store",
+        ...options
+      });
+      if (!response.ok) {
+        throw new Error(`api_error:${response.status}`);
+      }
+      return await response.json();
+    }
+
+    function applyState(state) {
+      if (!state || typeof state !== "object") return;
+      const commands = mergeCommands(commandCatalog, state.commands || [], state.allCommands || []);
+      if (commands.length) commandCatalog = commands;
+      const runtime = state.runtime || {};
+      const services = runtime.services || {};
+      const voice = state.voice || {};
+      const minecraft = state.minecraft || {};
+      const lines = Array.from(drawer.querySelectorAll(".status-list .line strong"));
+      if (lines[0]) lines[0].textContent = services.mainReady ? "연결됨" : "대기";
+      if (lines[1]) lines[1].textContent = voice.speaking ? "재생 중" : (services.ttsReady ? "대기" : "대기 중");
+      if (lines[2]) lines[2].textContent = minecraft.sessionActive ? "연결됨" : "꺼짐";
+    }
+
+    async function refreshState() {
+      try {
+        await fetchApi("/api/control-page/state");
+      } catch (error) {
+        setBubble(`컨트롤 페이지 API 연결 확인 중: ${error.message}`);
+      }
+    }
+
+    function renderSuggestions() {
+      const value = composer.value.trim().toLowerCase();
+      if (!commandSuggestions || !value.startsWith("/")) {
+        if (commandSuggestions) commandSuggestions.classList.add("hidden");
+        return;
+      }
+      suggestionItems = commandCatalog.filter((item) => {
+        const haystack = `${item.command} ${item.summary}`.toLowerCase();
+        return value === "/" || haystack.includes(value);
+      });
+      if (!suggestionItems.length) {
+        commandSuggestions.classList.add("hidden");
+        return;
+      }
+      selectedSuggestionIndex = Math.max(0, Math.min(selectedSuggestionIndex, suggestionItems.length - 1));
+      commandSuggestions.innerHTML = suggestionItems.map((item, index) => (
+        `<button class="command-suggestion${index === selectedSuggestionIndex ? " active" : ""}" type="button" data-index="${index}">` +
+        `<code>${escapeHtml(item.command)}</code><span>${escapeHtml(item.summary)}</span></button>`
+      )).join("");
+      commandSuggestions.classList.remove("hidden");
+    }
+
+    function memoryCardsForFilter(cards) {
+      if (!Array.isArray(cards)) return [];
+      if (memoryFilter === "all") return cards;
+      return cards.filter((card) => {
+        const category = String(card.category || "").toLowerCase();
+        const type = String(card.type || "").toLowerCase();
+        const path = String(card.relPath || "").toLowerCase();
+        if (memoryFilter === "daily") return category === "daily" || type === "daily" || path.startsWith("daily/");
+        if (memoryFilter === "core") return category === "core" || type === "core" || path.startsWith("core/");
+        if (memoryFilter === "project") return category === "project" || type === "project" || path.startsWith("projects/");
+        return true;
+      });
+    }
+
+    function renderMemoryCards() {
+      if (!memoryCards) return;
+      const cards = memoryCardsForFilter(memorySnapshot && memorySnapshot.cards);
+      const total = Array.isArray(memorySnapshot && memorySnapshot.cards) ? memorySnapshot.cards.length : 0;
+      if (memoryCount) memoryCount.textContent = `${total} notes`;
+      if (memoryVaultPath) memoryVaultPath.textContent = memorySnapshot && memorySnapshot.vaultPath ? memorySnapshot.vaultPath : "";
+      if (memoryHint) {
+        memoryHint.textContent = total ? `memory_vault에서 ${total}개 노트를 읽었습니다.` : "memory_vault 노트를 기다리는 중입니다.";
+      }
+      if (!cards.length) {
+        memoryCards.innerHTML = '<div class="memory-empty">표시할 메모리 노트가 없습니다.</div>';
+        return;
+      }
+      memoryCards.innerHTML = cards.map((card) => {
+        const title = card.title || card.id || "Untitled";
+        const badge = card.category || card.type || "note";
+        const preview = card.preview || card.body || "";
+        const relPath = card.relPath || card.path || card.id || "";
+        return (
+          '<article class="memory-card">' +
+          '<div class="memory-card-head">' +
+          '<strong>' + escapeHtml(title) + '</strong>' +
+          '<span class="memory-badge">' + escapeHtml(badge) + '</span>' +
+          '</div>' +
+          '<p class="memory-card-preview">' + escapeHtml(preview || "내용 없음") + '</p>' +
+          '<div class="memory-card-meta">' + escapeHtml(relPath) + '</div>' +
+          '</article>'
+        );
+      }).join("");
+    }
+
+    async function loadMemoryVault({ force = false } = {}) {
+      if (memoryLoading && memoryLoadPromise) return memoryLoadPromise;
+      if (memorySnapshot && !force) {
+        renderMemoryCards();
+        return;
+      }
+      memoryLoading = true;
+      if (memoryHint) memoryHint.textContent = "memory_vault 노트를 불러오는 중입니다.";
+      if (memoryCards && !memorySnapshot) {
+        memoryCards.innerHTML = '<div class="memory-empty">메모리 노트를 불러오는 중입니다.</div>';
+      }
+      memoryLoadPromise = (async () => {
+        const payload = await fetchApi("/api/control-page/memory?limit=120");
+        memorySnapshot = payload || { cards: [] };
+        renderMemoryCards();
+      })();
+      try {
+        await memoryLoadPromise;
+      } catch (error) {
+        if (memoryHint) memoryHint.textContent = "memory_vault를 불러오지 못했습니다.";
+        if (memoryCards) {
+          memoryCards.innerHTML = '<div class="memory-empty">메모리 API 연결 실패: ' + escapeHtml(error.message) + '</div>';
+        }
+      } finally {
+        memoryLoading = false;
+        memoryLoadPromise = null;
+      }
+    }
+
+    function obsidianUrlForVault() {
+      const vaultPath = String((memorySnapshot && memorySnapshot.vaultPath) || "");
+      if (!vaultPath) return "";
+      return "obsidian://open?path=" + encodeURIComponent(vaultPath);
+    }
+
+    async function openObsidianVault() {
+      toggleMemoryWindow(true);
+      await loadMemoryVault({ force: false });
+      setBubble("Obsidian 메모리 vault를 여는 중이야.");
+      try {
+        const payload = await fetchApi("/api/control-page/open-memory-vault", { method: "POST" });
+        if (payload && payload.ok) {
+          setBubble(payload.message || "Obsidian 메모리 vault를 열었어.");
+          return;
+        }
+      } catch {
+        // Older running servers do not have this route yet; fall back to the local protocol.
+      }
+      const url = obsidianUrlForVault();
+      if (url) {
+        window.location.href = url;
+        setBubble("브라우저에서 Obsidian 열기 요청을 보냈어.");
+      } else {
+        setBubble("memory_vault 경로를 아직 못 받아서 Obsidian을 열 수 없어.");
+      }
+    }
+
+    function toggleMemoryWindow(forceOpen) {
+      const shouldOpen = typeof forceOpen === "boolean" ? forceOpen : !memoryWindow.classList.contains("open");
+      memoryWindow.classList.toggle("open", shouldOpen);
+      if (shouldOpen) {
+        loadMemoryVault({ force: false });
+      }
+      setBubble(shouldOpen ? "메모리 vault를 열어둘게." : "메모리 vault는 숨겨둘게.");
+    }
+
+    async function handleSubmit() {
+      const value = composer.value.trim();
+      if (!value || sending) return;
+      const normalized = value.toLowerCase();
+      composer.value = "";
+      renderSuggestions();
+      if (normalized === "/memory") {
+        toggleMemoryWindow();
+        return;
+      }
+      if (normalized === "/obsidian") {
+        await openObsidianVault();
+        return;
+      }
+      if (normalized === "/" || normalized === "/help") {
+        setBubble(formatHelp());
+        return;
+      }
+      sending = true;
+      sendButton.disabled = true;
+      setBubble("보내는 중...");
+      try {
+        const payload = await fetchApi("/api/control-page/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text: value })
+        });
+        if (payload.state) applyState(payload.state);
+        setBubble(payload.reply || "응답을 받았어.");
+      } catch (error) {
+        setBubble(`전송 실패: ${error.message}`);
+      } finally {
+        sending = false;
+        sendButton.disabled = false;
+      }
+    }
+
+    sendButton.addEventListener("click", handleSubmit);
+    if (memoryRefreshButton) {
+      memoryRefreshButton.addEventListener("click", () => loadMemoryVault({ force: true }));
+    }
+    if (openObsidianButton) {
+      openObsidianButton.addEventListener("click", openObsidianVault);
+    }
+    document.querySelectorAll("[data-memory-filter]").forEach((button) => {
+      button.addEventListener("click", () => {
+        memoryFilter = button.getAttribute("data-memory-filter") || "all";
+        document.querySelectorAll("[data-memory-filter]").forEach((item) => {
+          item.classList.toggle("active", item === button);
+        });
+        renderMemoryCards();
+      });
+    });
+    composer.addEventListener("input", renderSuggestions);
+    composer.addEventListener("keydown", (event) => {
+      if (!commandSuggestions.classList.contains("hidden") && suggestionItems.length) {
+        if (event.key === "ArrowDown") {
+          event.preventDefault();
+          selectedSuggestionIndex = (selectedSuggestionIndex + 1) % suggestionItems.length;
+          renderSuggestions();
+          return;
+        }
+        if (event.key === "ArrowUp") {
+          event.preventDefault();
+          selectedSuggestionIndex = (selectedSuggestionIndex - 1 + suggestionItems.length) % suggestionItems.length;
+          renderSuggestions();
+          return;
+        }
+        if (event.key === "Tab") {
+          event.preventDefault();
+          composer.value = suggestionItems[selectedSuggestionIndex].template || suggestionItems[selectedSuggestionIndex].command;
+          renderSuggestions();
+          return;
+        }
+        if (event.key === "Escape") {
+          commandSuggestions.classList.add("hidden");
+          return;
+        }
+      }
+      if (event.key === "Enter" && !event.shiftKey) {
+        event.preventDefault();
+        handleSubmit();
+      }
+    });
+
+    commandSuggestions.addEventListener("click", (event) => {
+      const button = event.target.closest("[data-index]");
+      if (!button) return;
+      const item = suggestionItems[Number(button.dataset.index)];
+      if (!item) return;
+      composer.value = item.template || item.command;
+      renderSuggestions();
+      composer.focus();
+    });
+
+    function clampWindow(left, top, width, height) {
+      const margin = 32;
+      const maxLeft = window.innerWidth - width - margin;
+      const maxTop = window.innerHeight - height - margin;
+      return {
+        left: Math.min(Math.max(margin, left), Math.max(margin, maxLeft)),
+        top: Math.min(Math.max(margin, top), Math.max(margin, maxTop)),
+        width: Math.min(Math.max(330, width), window.innerWidth - margin * 2),
+        height: Math.min(Math.max(260, height), window.innerHeight - margin * 2)
+      };
+    }
+
+    function applyWindowBox(box) {
+      memoryWindow.style.left = `${box.left}px`;
+      memoryWindow.style.top = `${box.top}px`;
+      memoryWindow.style.width = `${box.width}px`;
+      memoryWindow.style.height = `${box.height}px`;
+    }
+
+    function getWindowBox() {
+      const rect = memoryWindow.getBoundingClientRect();
+      return {
+        left: rect.left,
+        top: rect.top,
+        width: rect.width,
+        height: rect.height
+      };
+    }
+
+    function startDrag(event) {
+      event.preventDefault();
+      const start = getWindowBox();
+      const origin = { x: event.clientX, y: event.clientY };
+
+      function move(pointerEvent) {
+        const next = clampWindow(
+          start.left + pointerEvent.clientX - origin.x,
+          start.top + pointerEvent.clientY - origin.y,
+          start.width,
+          start.height
+        );
+        applyWindowBox(next);
+      }
+
+      function stop() {
+        window.removeEventListener("pointermove", move);
+        window.removeEventListener("pointerup", stop);
+      }
+
+      window.addEventListener("pointermove", move);
+      window.addEventListener("pointerup", stop);
+    }
+
+    function startResize(event) {
+      event.preventDefault();
+      const direction = event.currentTarget.dataset.resize;
+      const start = getWindowBox();
+      const origin = { x: event.clientX, y: event.clientY };
+
+      function move(pointerEvent) {
+        const dx = pointerEvent.clientX - origin.x;
+        const dy = pointerEvent.clientY - origin.y;
+        let left = start.left;
+        let top = start.top;
+        let width = start.width;
+        let height = start.height;
+
+        if (direction.includes("e")) width = start.width + dx;
+        if (direction.includes("s")) height = start.height + dy;
+        if (direction.includes("w")) {
+          width = start.width - dx;
+          left = start.left + dx;
+        }
+        if (direction.includes("n")) {
+          height = start.height - dy;
+          top = start.top + dy;
+        }
+
+        const next = clampWindow(left, top, width, height);
+        applyWindowBox(next);
+      }
+
+      function stop() {
+        window.removeEventListener("pointermove", move);
+        window.removeEventListener("pointerup", stop);
+      }
+
+      window.addEventListener("pointermove", move);
+      window.addEventListener("pointerup", stop);
+    }
+
+    memoryMove.addEventListener("pointerdown", startDrag);
+    document.querySelectorAll("[data-resize]").forEach((handle) => {
+      handle.addEventListener("pointerdown", startResize);
+    });
+
+    refreshState();
+  </script>
 </body>
 </html>

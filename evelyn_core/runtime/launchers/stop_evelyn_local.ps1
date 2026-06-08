@@ -7,7 +7,7 @@ $ErrorActionPreference = 'Continue'
 
 $projectRoot = Resolve-Path (Join-Path $PSScriptRoot '..\..\..')
 $stopMarker = Join-Path $projectRoot '.evelyn_stop_requested'
-$targetPorts = @(8799, 8880, 9820, 9821, 9822)
+$targetPorts = @(8799, 8880, 8891, 9820, 9821, 9822)
 $evelynCommandFragments = @(
     'C:\Evelyn',
     'C:/Evelyn',
@@ -22,6 +22,9 @@ $evelynCommandFragments = @(
     'run_sub_llm.sh',
     'start_tts.ps1',
     'start_tts.bat',
+    'start_vision.ps1',
+    'start_vision.bat',
+    'evelyn_core.vision_service',
     'evelyn_core.control_page_server'
 )
 $protectedFragments = @(
@@ -40,7 +43,8 @@ $protectedFragments = @(
 $wslKillPatterns = @(
     '/mnt/c/Evelyn/evelyn_core/runtime/launchers/[r]un_main_llm.sh',
     '/mnt/c/Evelyn/evelyn_core/runtime/launchers/[r]un_router_llm.sh',
-    '/mnt/c/Evelyn/evelyn_core/runtime/launchers/[r]un_sub_llm.sh'
+    '/mnt/c/Evelyn/evelyn_core/runtime/launchers/[r]un_sub_llm.sh',
+    '[e]velyn_core.vision_service'
 )
 $protectedPids = @{}
 $stopToolFragments = @(
@@ -126,6 +130,9 @@ function Test-KnownPortOwner {
         return $true
     }
     if ($Port -eq 8880 -and $CommandLine -like '*omnivoice*') {
+        return $true
+    }
+    if ($Port -eq 8891 -and $CommandLine -like '*evelyn_core.vision_service*') {
         return $true
     }
     return $false

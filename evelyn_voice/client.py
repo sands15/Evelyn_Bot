@@ -764,7 +764,7 @@ class EvelynVoiceClient(discord.VoiceClient):
         self.media_packet_count = 0
         self.decrypt_packet_count = 0
 
-        self.end_silence_sec = float(os.getenv("VOICE_END_SILENCE_SEC", "0.52"))
+        self.end_silence_sec = float(os.getenv("VOICE_END_SILENCE_SEC", "0.82"))
         self.voice_payload_threshold = 60
         self.preroll_packet_limit = max(0, int(round(float(os.getenv("VOICE_PREROLL_MS", "520")) / 20.0)))
 

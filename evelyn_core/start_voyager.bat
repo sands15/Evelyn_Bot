@@ -36,6 +36,7 @@ if not defined WT_READY (
         set "WT_READY=1"
     )
 )
+if /I not "%EVELYN_USE_WINDOWS_TERMINAL%"=="true" set "WT_READY="
 
 if not defined VOYAGER_SERVICE_ALREADY_RUNNING (
     if not defined WT_READY (

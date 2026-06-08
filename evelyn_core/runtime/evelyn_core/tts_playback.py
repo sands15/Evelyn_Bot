@@ -33,6 +33,7 @@ from .config import (
     OMNIVOICE_STREAM_FOLLOWUP_STRATEGY,
     OMNIVOICE_STREAM_LOOKAHEAD_CROSSFADE_MS,
     OMNIVOICE_STREAM_STRATEGY,
+    TTS_CHUNK_TAIL_SILENCE_MS,
 )
 
 TurnEventLogger = Callable[..., None]
@@ -78,6 +79,18 @@ def current_tts_playback_buffer_ms() -> float:
 def playback_buffer_bytes_for_ms(buffer_ms: float) -> int:
     stereo_bytes_per_second = DISCORD_PCM_RATE * 2 * 2
     return max(DISCORD_FRAME_BYTES, int(stereo_bytes_per_second * (max(0.0, buffer_ms) / 1000.0)))
+
+
+def discord_pcm_silence_bytes(ms: int | float) -> bytes:
+    duration_ms = max(0.0, float(ms))
+    if duration_ms <= 0.0:
+        return b""
+    stereo_bytes_per_second = DISCORD_PCM_RATE * 2 * 2
+    byte_count = int(stereo_bytes_per_second * (duration_ms / 1000.0))
+    if byte_count <= 0:
+        return b""
+    frame_aligned = ((byte_count + DISCORD_FRAME_BYTES - 1) // DISCORD_FRAME_BYTES) * DISCORD_FRAME_BYTES
+    return b"\x00" * frame_aligned
 
 
 def omnivoice_stream_contract_payload(*, chunk_index: int | None = None) -> dict[str, Any]:
@@ -202,6 +215,9 @@ class OmniVoicePCMStream(discord.AudioSource):
     def finish(self) -> None:
         self._done = True
         self._ready_event.set()
+        tail_silence = discord_pcm_silence_bytes(TTS_CHUNK_TAIL_SILENCE_MS)
+        if tail_silence:
+            self._queue.put(tail_silence)
         self._queue.put(None)
 
     def fail(self, err: Exception) -> None:

@@ -35,14 +35,20 @@ guild_settings/
 omnivoice_profiles/
 
 .venv-voyager/
+.venv-lora/
+.venv-vision/
 node_modules/
 .evelyn_bot.lock
+.trash/
 
 bot_profiles/*-cache.json
 archive/logs/
 archive/scratch/
 archive/nested-git/
 external/Voyager-upstream/
+training/**/__pycache__/
+training/**/logs/
+training/**/outputs/
 third_party/Voyager/skill_library/skill/vectordb/
 third_party/Voyager/skill_library/skill/policy_state.json
 third_party/Voyager/skill_library/*/skill/vectordb/

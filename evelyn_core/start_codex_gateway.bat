@@ -23,6 +23,7 @@ if not defined WT_READY (
         set "WT_READY=1"
     )
 )
+if /I not "%EVELYN_USE_WINDOWS_TERMINAL%"=="true" set "WT_READY="
 
 if not defined WT_READY (
     start "Codex-Gateway" powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0runtime\launchers\start_codex_gateway.ps1"

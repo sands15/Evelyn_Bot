@@ -36,6 +36,9 @@ async def execute(context: SkillContext) -> SkillResult:
     cognitive_state = extras.get("cognitive_state") if isinstance(extras.get("cognitive_state"), dict) else None
     messages = list(extras.get("messages") or [])
     model_name = str(extras.get("model_name") or "")
+    stop_tokens = extras.get("main_llm_stop_tokens")
+    if not isinstance(stop_tokens, (list, tuple)):
+        stop_tokens = None
     max_tokens = int(extras.get("voice_llm_max_tokens") or 0)
 
     final_user_text = f"{prompt_text}\n\n{build_main_response_guidance(cognitive_state, source=context.source)}"
@@ -46,6 +49,7 @@ async def execute(context: SkillContext) -> SkillResult:
         source=context.source,
         stream=False,
         max_tokens=max_tokens,
+        stop_tokens=stop_tokens,
     )
     answer, answer_source = await execute_main_llm_once(
         payload=payload,

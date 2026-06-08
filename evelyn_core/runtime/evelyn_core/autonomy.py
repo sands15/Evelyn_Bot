@@ -11,6 +11,7 @@ from typing import Any, Awaitable, Callable, Protocol
 from .memory import cognitive_state_path, read_json_file, write_json_file
 from .minecraft_threat import has_interrupting_threat, has_survival_threat, highest_threat_score, threat_count, threat_distance
 from .paths import get_repo_root
+from .self_model import update_self_state_from_observation
 from .text import clean_text
 
 
@@ -29,6 +30,16 @@ def _mc_log(prefix: str, payload: Any) -> None:
             fp.write(file_line + "\n")
     except Exception:
         pass
+
+
+def assistant_proactive_impulse_text(impulse: str, fallback: str = "") -> str:
+    text = {
+        "check_softly": "정훈, 뭔가 상태가 조금 이상해 보여서 살짝 확인해봤어.",
+        "comment_on_screen_change": "정훈, 화면이 바뀐 것 같아. 필요하면 내가 보고 같이 정리해줄게.",
+        "ask_light_question": "정훈, 지금 화면 쪽으로 뭔가 이어서 볼까?",
+        "suggest_next_step": "정훈, 방금 흐름에서 다음에 확인할 걸 같이 잡아볼까?",
+    }.get(clean_text(impulse), clean_text(fallback))
+    return text or "정훈, 필요하면 바로 이어서 볼게."
 
 
 class AutonomyExecutor(Protocol):
@@ -76,6 +87,7 @@ class AutonomyRuntimeState:
     current_plan: AutonomyPlan | None = None
     last_step_result: dict[str, Any] = field(default_factory=dict)
     last_router_refresh_result: dict[str, Any] = field(default_factory=dict)
+    drive_state: dict[str, Any] = field(default_factory=dict)
     last_error: str = ""
     failure_count: int = 0
     updated_at: float = field(default_factory=time.time)
@@ -161,6 +173,7 @@ class AutonomyEngine:
         current_plan = runtime.get("current_plan")
         last_step_result = runtime.get("last_step_result") if isinstance(runtime.get("last_step_result"), dict) else {}
         last_router_refresh_result = runtime.get("last_router_refresh_result") if isinstance(runtime.get("last_router_refresh_result"), dict) else {}
+        drive_state = runtime.get("drive_state") if isinstance(runtime.get("drive_state"), dict) else {}
         stale_plan = bool(last_step_result.get("reason") in {"retry_suppressed", "action_not_allowed"})
         self.state = AutonomyRuntimeState(
             enabled=bool(runtime.get("enabled", False)),
@@ -172,6 +185,7 @@ class AutonomyEngine:
             current_plan=None if stale_plan else (AutonomyPlan(**current_plan) if isinstance(current_plan, dict) and current_plan.get("goal_kind") else None),
             last_step_result={} if stale_plan else last_step_result,
             last_router_refresh_result=last_router_refresh_result,
+            drive_state=drive_state,
             last_error=clean_text(str(runtime.get("last_error", ""))),
             failure_count=int(runtime.get("failure_count", 0) or 0),
             updated_at=float(runtime.get("updated_at", time.time()) or time.time()),
@@ -190,6 +204,7 @@ class AutonomyEngine:
             "current_plan": asdict(self.state.current_plan) if self.state.current_plan else None,
             "last_step_result": self.state.last_step_result,
             "last_router_refresh_result": self.state.last_router_refresh_result,
+            "drive_state": self.state.drive_state,
             "last_error": self.state.last_error,
             "failure_count": self.state.failure_count,
             "updated_at": self.state.updated_at,
@@ -277,6 +292,9 @@ class AutonomyEngine:
 
     async def run_cycle(self) -> AutonomyCycleResult:
         observation = await self.observe()
+        self_state = update_self_state_from_observation(observation)
+        self.state.drive_state = asdict(self_state)
+        observation["self_state"] = dict(self.state.drive_state)
         needs = self.derive_needs(observation)
         selected_goal = self.select_goal(needs)
         if selected_goal is not None:
@@ -429,6 +447,9 @@ class AutonomyEngine:
             cognitive_stale_sec = float(observation.get("cognitive_stale_sec", 999999) or 999999)
             cognitive_refresh_needed = bool(observation.get("cognitive_refresh_needed", False))
             router_refresh_inflight = bool(observation.get("router_refresh_inflight", False))
+            self_drive = observation.get("self_state") if isinstance(observation.get("self_state"), dict) else {}
+            impulse = clean_text(str(self_drive.get("last_impulse", "stay_silent"))) or "stay_silent"
+            gate_reason = clean_text(str(self_drive.get("last_gate_reason", "")))
             if inflight_requests >= 2:
                 needs.append(AutonomyNeed("check_status", 0.42, detail="런타임 혼잡 상태를 점검할 수 있음", metadata={"domain": "assistant"}))
             if cognitive_refresh_needed and not router_refresh_inflight and active_sessions > 0 and recent_context_items > 0:
@@ -442,6 +463,15 @@ class AutonomyEngine:
                 needs.append(AutonomyNeed("maintain", 0.28, detail="미해결 문맥 후속이 필요함", metadata={"domain": "assistant", "text": "아직 덜 끝난 문맥이 있어서 이어서 챙겨볼게."}))
             if known_followup_channels > 0 and last_autonomy_ping_sec > 900 and not quiet_hours:
                 needs.append(AutonomyNeed("maintain", 0.24, detail="오랜 침묵 뒤 저위험 후속 메시지를 보낼 수 있음", metadata={"domain": "assistant", "text": "지금은 저위험 자율 보조 모드로 상태를 점검하고 있어."}))
+            if known_followup_channels > 0 and active_sessions > 0 and impulse != "stay_silent" and gate_reason not in {"quiet_hours", "answer_inflight", "proactive_cooldown", "hourly_limit"}:
+                impulse_text = {
+                    "check_softly": "정훈, 아까 뭔가 걸린 것 같아서 살짝 보고 있었어. 지금은 괜찮아?",
+                    "comment_on_screen_change": "정훈, 화면에 뭔가 바뀐 것 같아. 내가 제대로 봐줄까?",
+                    "ask_light_question": "정훈, 지금 뭐 하고 있어? 그냥 조금 궁금해졌어.",
+                    "suggest_next_step": "정훈, 아까 하던 거 이어서 잡아볼까?",
+                }.get(impulse, "정훈, 필요하면 바로 불러줘. 나 여기 있어.")
+                impulse_text = assistant_proactive_impulse_text(impulse, impulse_text)
+                needs.append(AutonomyNeed("ping", 0.18, detail="self-model proactive impulse", metadata={"domain": "assistant", "text": impulse_text, "impulse": impulse, "gate_reason": gate_reason, "drive": self_drive}))
             if known_followup_channels > 0 and inflight_requests == 0 and active_sessions > 0 and last_autonomy_ping_sec > 1800 and not quiet_hours:
                 needs.append(AutonomyNeed("ping", 0.20, detail="필요하면 사용자에게 짧게 핑할 수 있음", metadata={"domain": "assistant"}))
             if not needs:
@@ -625,6 +655,10 @@ class AutonomyEngine:
                 steps = [
                     {"domain": domain, "action": "idle"},
                 ]
+        if goal.kind == "ping" and steps:
+            ping_text = clean_text(str(goal.metadata.get("text", "")))
+            if ping_text:
+                steps[0]["text"] = ping_text
         return AutonomyPlan(goal_kind=goal.kind, summary=goal.summary, steps=steps, cursor=0)
 
     def should_replan(self, step_result: dict[str, Any] | None) -> bool:

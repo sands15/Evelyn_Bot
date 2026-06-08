@@ -19,6 +19,7 @@ from evelyn_core.memory_vault import (  # noqa: E402
     consolidate_daily_memory_once,
     export_memory_graph,
     mark_memory_note_superseded,
+    memory_vault_user_note,
     memory_vault_user_snapshot,
     memory_vault_root,
     parse_memory_note,
@@ -218,6 +219,24 @@ class MemoryVaultTests(unittest.TestCase):
         self.assertIn("Test Evelyn TTS", result.context_text)
         self.assertIn(result.metadata["retrieval_mode"], {"fts", "scan", "fts+vector", "scan+vector"})
 
+    def test_user_note_detail_returns_full_edit_body(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            long_body = "\n".join(f"Line {index}: keep this editable detail." for index in range(80))
+            write_memory_vault_note(
+                note_type="daily",
+                title="Long Editable Memory",
+                body=long_body,
+                root=root,
+            )
+            snapshot = memory_vault_user_snapshot(root=root)
+            note_id = snapshot["cards"][0]["id"]
+            detail = memory_vault_user_note(note_id, root=root)
+
+        self.assertTrue(detail["ok"])
+        self.assertGreater(len(detail["card"]["body"]), len(detail["card"]["preview"]))
+        self.assertIn("Line 79: keep this editable detail.", detail["card"]["body"])
+
     def test_export_memory_graph_includes_nodes_and_relationship_edges(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -299,6 +318,9 @@ class MemoryVaultTests(unittest.TestCase):
             raw_after_actions = note_raw.read_text(encoding="utf-8")
 
         self.assertEqual(first["counts"]["unconfirmed"], 1)
+        self.assertIn("body", first["cards"][0])
+        self.assertFalse(first["cards"][0]["body"].startswith("#"))
+        self.assertTrue(first["cards"][0]["body"])
         self.assertTrue(confirmed["ok"])
         self.assertTrue(pinned["ok"])
         self.assertTrue(second["cards"][0]["confirmed"])

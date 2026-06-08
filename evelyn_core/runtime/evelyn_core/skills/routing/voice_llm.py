@@ -81,12 +81,13 @@ def build_main_llm_payload(
     content_format: str = "plain",
     temperature: float | None = None,
     max_tokens: int | None = None,
+    stop_tokens: list[str] | tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
     final_messages = build_chat_messages(
         messages + [{"role": "user", "content": final_user_text}],
         content_format=content_format,
     )
-    return {
+    payload = {
         "model": model_name,
         "messages": final_messages,
         "temperature": temperature if temperature is not None else (0.3 if source == "voice" else 0.1),
@@ -94,6 +95,9 @@ def build_main_llm_payload(
         "stream": stream,
         "cache_prompt": True,
     }
+    if stop_tokens:
+        payload["stop"] = list(stop_tokens)
+    return payload
 
 
 def extract_main_llm_answer_from_choice(

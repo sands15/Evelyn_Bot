@@ -20,6 +20,7 @@ if not defined WT_READY (
         set "WT_READY=1"
     )
 )
+if /I not "%EVELYN_USE_WINDOWS_TERMINAL%"=="true" set "WT_READY="
 set "TERM_CMD=title Sub-LLM && wsl.exe bash /mnt/c/Evelyn/evelyn_core/runtime/launchers/run_sub_llm.sh"
 if not defined WT_READY (
     start "Sub-LLM" cmd.exe /q /d /c "%TERM_CMD%"

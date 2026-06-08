@@ -5,13 +5,21 @@ import contextlib
 import json
 import os
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from aiohttp import ClientSession, ClientTimeout, web
 
-from .memory_vault import export_memory_graph, memory_vault_user_snapshot, update_memory_vault_user_note
+from .memory_vault import (
+    ensure_memory_vault_layout,
+    export_memory_graph,
+    memory_vault_user_note,
+    memory_vault_user_snapshot,
+    update_memory_vault_user_note,
+)
 
 
 PROJECT_ROOT = Path(os.getenv("EVELYN_PROJECT_ROOT") or Path(__file__).resolve().parents[3])
@@ -24,6 +32,9 @@ BOT_API_HOST = os.getenv("CONTROL_PAGE_BOT_API_HOST", "127.0.0.1")
 BOT_API_PORT = int(os.getenv("CONTROL_PAGE_BOT_API_PORT", "8798"))
 BOT_API_BASE = f"http://{BOT_API_HOST}:{BOT_API_PORT}"
 PROXY_TIMEOUT_SEC = float(os.getenv("CONTROL_PAGE_PROXY_TIMEOUT_SEC", "1.2"))
+LOCAL_HELP_COMMANDS = {"/", "/help"}
+LOCAL_STATUS_COMMANDS = {"/status"}
+LOCAL_MEMORY_COMMANDS = {"/memory", "/obsidian"}
 LOCAL_SHUTDOWN_COMMANDS = {"/shutdown", "/quit", "/exit"}
 
 MODEL_PORTS = {
@@ -91,14 +102,28 @@ async def proxy_raw(request: web.Request, path: str) -> web.Response | None:
 
 def default_commands() -> list[dict[str, str]]:
     return [
-        {"command": "/status", "template": "/status", "summary": "현재 Evelyn, 음성, TTS 상태 보기", "visibility": "always"},
-        {"command": "/voice input auto", "template": "/voice input auto", "summary": "로컬 마이크와 Discord 입력 자동 전환", "visibility": "always"},
-        {"command": "/voice input local", "template": "/voice input local", "summary": "로컬 마이크 입력 사용", "visibility": "always"},
-        {"command": "/voice input discord", "template": "/voice input discord", "summary": "Discord 음성 입력 사용", "visibility": "always"},
-        {"command": "/help", "template": "/help", "summary": "페이지 명령어 보기", "visibility": "always"},
-        {"command": "/autonomy status", "template": "/autonomy status", "summary": "자율 행동 상태 보기", "visibility": "always"},
-        {"command": "/minecraft connect", "template": "/minecraft connect", "summary": "Minecraft 모드 시작", "visibility": "minecraft-idle"},
+        {"command": "/help", "template": "/help", "summary": "명령어 목록 보기", "visibility": "always", "group": "기본"},
+        {"command": "/status", "template": "/status", "summary": "Evelyn local runtime 상태 보기", "visibility": "always", "group": "기본"},
+        {"command": "/memory", "template": "/memory", "summary": "메모리 패널 열기/숨기기", "visibility": "always", "group": "페이지"},
+        {"command": "/obsidian", "template": "/obsidian", "summary": "메모리 패널 열기/숨기기", "visibility": "always", "group": "페이지"},
+        {"command": "/shutdown", "template": "/shutdown", "summary": "Evelyn local runtime 종료", "visibility": "always", "group": "시스템"},
     ]
+
+
+def format_command_help(commands: list[dict[str, str]]) -> str:
+    lines = ["페이지 명령어"]
+    groups = ["기본", "페이지", "음성", "Minecraft", "자율 행동", "시스템"]
+    for group in groups:
+        items = [item for item in commands if isinstance(item, dict) and item.get("group") == group]
+        if not items:
+            continue
+        lines.extend(["", group])
+        for item in items:
+            command = item.get("command")
+            summary = item.get("summary")
+            if command and summary:
+                lines.append(f"- {command} - {summary}")
+    return "\n".join(lines)
 
 
 def service_summary(services: dict[str, bool]) -> str:
@@ -334,6 +359,62 @@ async def shutdown_handler(_: web.Request) -> web.StreamResponse:
     )
 
 
+def open_path_with_system(path: Path) -> None:
+    if os.name == "nt":
+        os.startfile(str(path))  # type: ignore[attr-defined]
+        return
+    opener = "open" if sys.platform == "darwin" else "xdg-open"
+    subprocess.Popen([opener, str(path)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def open_url_with_system(url: str) -> None:
+    if os.name == "nt":
+        os.startfile(url)  # type: ignore[attr-defined]
+        return
+    opener = "open" if sys.platform == "darwin" else "xdg-open"
+    subprocess.Popen([opener, url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def open_memory_vault_payload() -> dict[str, Any]:
+    vault = ensure_memory_vault_layout()
+    obsidian_url = "obsidian://open?path=" + quote(str(vault), safe="")
+    try:
+        open_url_with_system(obsidian_url)
+        return {
+            "ok": True,
+            "message": "Obsidian memory vault open request sent.",
+            "vaultPath": str(vault),
+            "url": obsidian_url,
+        }
+    except Exception as exc:
+        try:
+            open_path_with_system(vault)
+            return {
+                "ok": True,
+                "message": f"Obsidian protocol failed, opened the vault folder instead: {exc}",
+                "vaultPath": str(vault),
+                "url": obsidian_url,
+                "fallback": "folder",
+            }
+        except Exception as fallback_exc:
+            return {
+                "ok": False,
+                "error": "open_memory_vault_failed",
+                "message": str(fallback_exc),
+                "vaultPath": str(vault),
+                "url": obsidian_url,
+            }
+
+
+async def open_memory_vault_handler(_: web.Request) -> web.StreamResponse:
+    payload = open_memory_vault_payload()
+    return json_response(payload, status=200 if payload.get("ok") else 500)
+
+
+async def open_memory_vault_options_handler(_: web.Request) -> web.StreamResponse:
+    return json_response({"ok": True, "methods": ["POST", "OPTIONS"]})
+
+
 async def memory_graph_handler(request: web.Request) -> web.StreamResponse:
     try:
         max_nodes = int(request.query.get("max_nodes", "160"))
@@ -349,6 +430,12 @@ async def memory_snapshot_handler(request: web.Request) -> web.StreamResponse:
     except Exception:
         limit = 80
     return json_response(memory_vault_user_snapshot(include_hidden=include_hidden, limit=limit))
+
+
+async def memory_note_handler(request: web.Request) -> web.StreamResponse:
+    note_id = request.match_info.get("note_id", "")
+    result = memory_vault_user_note(note_id)
+    return json_response(result, status=200 if result.get("ok") else 404)
 
 
 async def memory_note_action_handler(request: web.Request) -> web.StreamResponse:
@@ -373,7 +460,49 @@ async def chat_handler(request: web.Request) -> web.StreamResponse:
     except Exception:
         payload = {}
     text = str((payload or {}).get("text") or "").strip()
-    if text.lower() in LOCAL_SHUTDOWN_COMMANDS:
+    normalized = text.lower()
+    if normalized in LOCAL_HELP_COMMANDS:
+        state = await degraded_state()
+        commands = state.get("commands") if isinstance(state, dict) else []
+        reply = format_command_help(commands if isinstance(commands, list) else [])
+        return json_response({"ok": True, "reply": reply, "state": state})
+    if normalized in LOCAL_STATUS_COMMANDS:
+        state = await degraded_state()
+        runtime = state.get("runtime") if isinstance(state, dict) else {}
+        services = runtime.get("services") if isinstance(runtime, dict) else {}
+        summary = services.get("summary") if isinstance(services, dict) else ""
+        return json_response({"ok": True, "reply": str(summary or state.get("statusText") or "Control page live."), "state": state})
+    if normalized == "/memory":
+        state = await degraded_state()
+        state["controlPagePanels"] = {
+            "revision": int(time.time() * 1000),
+            "commands": [
+                {
+                    "id": int(time.time() * 1000),
+                    "action": "toggle",
+                    "panel": "memory",
+                    "at": time.time(),
+                }
+            ],
+            "panels": [
+                {"id": "runtime", "label": "Runtime"},
+                {"id": "diagnostics", "label": "Diagnostics"},
+                {"id": "avatar", "label": "Avatar"},
+                {"id": "chat", "label": "Chat"},
+                {"id": "memory", "label": "Memory"},
+            ],
+        }
+        return json_response({"ok": True, "reply": "메모리 패널을 열거나 숨길게.", "state": state})
+    if normalized == "/obsidian":
+        state = await degraded_state()
+        result = open_memory_vault_payload()
+        state["memoryVaultOpen"] = result
+        reply = result.get("message") if result.get("ok") else f"Obsidian open failed: {result.get('message')}"
+        return json_response(
+            {"ok": bool(result.get("ok")), "reply": reply, "state": state, "openResult": result},
+            status=200 if result.get("ok") else 500,
+        )
+    if normalized in LOCAL_SHUTDOWN_COMMANDS:
         ok, detail = schedule_local_stack_shutdown()
         state = await degraded_state()
         if ok:
@@ -423,6 +552,8 @@ def create_app() -> web.Application:
     app.router.add_get("/api/control-page/state", state_handler)
     app.router.add_get("/api/control-page/memory", memory_snapshot_handler)
     app.router.add_get("/api/control-page/memory-graph", memory_graph_handler)
+    app.router.add_get("/api/control-page/memory/{note_id}", memory_note_handler)
+    app.router.add_post("/api/control-page/open-memory-vault", open_memory_vault_handler)
     app.router.add_post("/api/control-page/memory/{note_id}", memory_note_action_handler)
     app.router.add_post("/api/control-page/shutdown", shutdown_handler)
     app.router.add_post("/api/control-page/chat", chat_handler)
@@ -430,7 +561,8 @@ def create_app() -> web.Application:
     app.router.add_options("/api/control-page/state", state_handler)
     app.router.add_options("/api/control-page/memory", memory_snapshot_handler)
     app.router.add_options("/api/control-page/memory-graph", memory_graph_handler)
-    app.router.add_options("/api/control-page/memory/{note_id}", memory_note_action_handler)
+    app.router.add_options("/api/control-page/memory/{note_id}", memory_note_handler)
+    app.router.add_options("/api/control-page/open-memory-vault", open_memory_vault_options_handler)
     app.router.add_options("/api/control-page/shutdown", shutdown_handler)
     app.router.add_options("/api/control-page/chat", chat_handler)
     return app

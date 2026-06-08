@@ -1936,6 +1936,22 @@ def _memory_vault_note_preview(body: str, *, max_chars: int = 340) -> str:
     return preview
 
 
+def _memory_vault_edit_body(note: MemoryVaultNote, raw: str | None = None) -> str:
+    if raw is not None:
+        _metadata, body = _split_front_matter(raw)
+    else:
+        body = note.body or ""
+    lines = body.strip().splitlines()
+    if not lines:
+        return ""
+    first = clean_text(lines[0]).lstrip("#").strip()
+    if first and clean_text(first).lower() == clean_text(note.title).lower():
+        lines = lines[1:]
+        while lines and not clean_text(lines[0]):
+            lines = lines[1:]
+    return "\n".join(lines).strip()
+
+
 def _memory_vault_note_category(note: MemoryVaultNote) -> str:
     rel = note.rel_path.lower()
     note_type = note.note_type.lower()
@@ -1950,6 +1966,35 @@ def _memory_vault_note_category(note: MemoryVaultNote) -> str:
     if note_type in {"episode", "episodes"}:
         return "대화 요약"
     return "지식"
+
+
+def _memory_vault_user_card(
+    path: Path,
+    note: MemoryVaultNote,
+    raw: str,
+    note_state: dict[str, Any],
+    *,
+    hidden: bool,
+    rel_path: str,
+) -> dict[str, Any]:
+    confirmed_at = clean_text(str(note_state.get("confirmed_at") or note.metadata.get("confirmed_at") or ""))
+    return {
+        "id": note.note_id,
+        "title": note.title,
+        "category": _memory_vault_note_category(note),
+        "type": note.note_type,
+        "path": rel_path,
+        "body": _memory_vault_edit_body(note, raw),
+        "preview": _memory_vault_note_preview(note.body),
+        "confirmed": bool(confirmed_at),
+        "confirmedAt": confirmed_at,
+        "pinned": bool(note_state.get("pinned")),
+        "hidden": hidden,
+        "confidence": clean_text(str(note.metadata.get("confidence") or "")),
+        "importance": _front_matter_float(note.metadata, "importance", 0.5),
+        "updatedAt": clean_text(str(note.metadata.get("updated_at") or note.updated_at or "")),
+        "sourceHash": note.source_hash,
+    }
 
 
 def _memory_vault_find_note(note_id_or_rel_path: str, *, root: Path | None = None) -> tuple[Path, MemoryVaultNote, str] | None:
@@ -2010,24 +2055,7 @@ def memory_vault_user_snapshot(*, root: Path | None = None, include_hidden: bool
             counts["unconfirmed"] += 1
         if pinned:
             counts["pinned"] += 1
-        cards.append(
-            {
-                "id": note.note_id,
-                "title": note.title,
-                "category": _memory_vault_note_category(note),
-                "type": note.note_type,
-                "path": rel_path,
-                "preview": _memory_vault_note_preview(note.body),
-                "confirmed": bool(confirmed_at),
-                "confirmedAt": confirmed_at,
-                "pinned": pinned,
-                "hidden": hidden,
-                "confidence": clean_text(str(note.metadata.get("confidence") or "")),
-                "importance": _front_matter_float(note.metadata, "importance", 0.5),
-                "updatedAt": clean_text(str(note.metadata.get("updated_at") or note.updated_at or "")),
-                "sourceHash": note.source_hash,
-            }
-        )
+        cards.append(_memory_vault_user_card(path, note, raw, note_state, hidden=hidden, rel_path=rel_path))
     cards.sort(key=lambda item: (not item["pinned"], item["confirmed"], -float(item["importance"] or 0), item["title"]))
     cards = cards[: max(1, limit)]
     return {
@@ -2036,6 +2064,23 @@ def memory_vault_user_snapshot(*, root: Path | None = None, include_hidden: bool
         "vaultPath": str(vault),
         "counts": counts,
         "cards": cards,
+        "checkedAt": _utc_now_iso(),
+    }
+
+
+def memory_vault_user_note(note_id_or_rel_path: str, *, root: Path | None = None) -> dict[str, Any]:
+    target = _memory_vault_find_note(note_id_or_rel_path, root=root)
+    if target is None:
+        return {"ok": False, "error": "note_not_found"}
+    path, note, raw = target
+    vault = ensure_memory_vault_layout(root)
+    rel_path = path.relative_to(vault).as_posix()
+    state = _read_user_note_state(root)
+    note_state = state.get(note.note_id, {})
+    hidden = bool(note_state.get("hidden")) or note.status in {"archived", "superseded"}
+    return {
+        "ok": True,
+        "card": _memory_vault_user_card(path, note, raw, note_state, hidden=hidden, rel_path=rel_path),
         "checkedAt": _utc_now_iso(),
     }
 

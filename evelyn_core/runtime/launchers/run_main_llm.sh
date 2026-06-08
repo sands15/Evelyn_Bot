@@ -12,8 +12,14 @@ MAIN_LLM_N_PARALLEL="${MAIN_LLM_N_PARALLEL:-1}"
 MAIN_LLM_CACHE_REUSE="${MAIN_LLM_CACHE_REUSE:-256}"
 MAIN_LLM_REASONING="${MAIN_LLM_REASONING:-off}"
 MAIN_LLM_REASONING_BUDGET="${MAIN_LLM_REASONING_BUDGET:-0}"
-MAIN_LLM_HF="${MAIN_LLM_HF:-LGAI-EXAONE/EXAONE-3.5-7.8B-Instruct-GGUF:Q4_K_M}"
-MAIN_LLM_MODEL="${MAIN_LLM_MODEL:-LGAI-EXAONE/EXAONE-3.5-7.8B-Instruct-GGUF:Q4_K_M}"
+MAIN_LLM_HF="${MAIN_LLM_HF:-off}"
+MAIN_LLM_MODEL="${MAIN_LLM_MODEL:-/mnt/c/Users/Admin/llama.cpp/models/kanana-1.5-8b-instruct-2505-q4_k_m.gguf}"
+MAIN_LLM_LORA="${MAIN_LLM_LORA:-/mnt/c/Evelyn/training/evelyn_lora_kanana_v1/outputs/kanana_evelyn_core_clean_v46_lora.gguf}"
+MAIN_LLM_LORA_SCALE="${MAIN_LLM_LORA_SCALE:-1.0}"
+MAIN_LLM_REPEAT_LAST_N="${MAIN_LLM_REPEAT_LAST_N:-256}"
+MAIN_LLM_REPEAT_PENALTY="${MAIN_LLM_REPEAT_PENALTY:-1.10}"
+MAIN_LLM_PRESENCE_PENALTY="${MAIN_LLM_PRESENCE_PENALTY:-0.00}"
+MAIN_LLM_FREQUENCY_PENALTY="${MAIN_LLM_FREQUENCY_PENALTY:-0.20}"
 MAIN_LLM_QUANTIZATION="${MAIN_LLM_QUANTIZATION:-gptq}"
 MAIN_LLM_DTYPE="${MAIN_LLM_DTYPE:-bfloat16}"
 MAIN_LLM_GPU_MEMORY_UTILIZATION="${MAIN_LLM_GPU_MEMORY_UTILIZATION:-0.60}"
@@ -48,6 +54,10 @@ eval "$VENV_ACT"
 cd "$LLAMA_DIR"
 
 model_args=()
+if [[ "${MAIN_LLM_HF,,}" == "off" || "${MAIN_LLM_HF,,}" == "none" || "$MAIN_LLM_HF" == "0" ]]; then
+  MAIN_LLM_HF=""
+fi
+
 if [[ -n "$MAIN_LLM_HF" ]]; then
   model_args=(-hf "$MAIN_LLM_HF")
 elif [[ -f "$MAIN_LLM_MODEL" ]]; then
@@ -57,8 +67,24 @@ else
   exit 1
 fi
 
+lora_args=()
+if [[ "${MAIN_LLM_LORA,,}" == "off" || "${MAIN_LLM_LORA,,}" == "none" || "$MAIN_LLM_LORA" == "0" ]]; then
+  MAIN_LLM_LORA=""
+fi
+if [[ -n "$MAIN_LLM_LORA" ]]; then
+  if [[ "$MAIN_LLM_LORA" =~ ^[A-Za-z]:\\ ]]; then
+    MAIN_LLM_LORA="$(wslpath -a "$MAIN_LLM_LORA")"
+  fi
+  if [[ ! -f "$MAIN_LLM_LORA" ]]; then
+    echo "[Main-LLM] LoRA adapter file not found: $MAIN_LLM_LORA"
+    exit 1
+  fi
+  lora_args=(--lora-scaled "${MAIN_LLM_LORA}:${MAIN_LLM_LORA_SCALE}")
+fi
+
 exec ./build/bin/llama-server \
   "${model_args[@]}" \
+  "${lora_args[@]}" \
   --host 0.0.0.0 \
   --port "$MAIN_LLM_PORT" \
   --flash-attn on \
@@ -68,5 +94,9 @@ exec ./build/bin/llama-server \
   --cache-prompt \
   --cache-reuse "$MAIN_LLM_CACHE_REUSE" \
   --metrics \
+  --repeat-last-n "$MAIN_LLM_REPEAT_LAST_N" \
+  --repeat-penalty "$MAIN_LLM_REPEAT_PENALTY" \
+  --presence-penalty "$MAIN_LLM_PRESENCE_PENALTY" \
+  --frequency-penalty "$MAIN_LLM_FREQUENCY_PENALTY" \
   --reasoning "$MAIN_LLM_REASONING" \
   --reasoning-budget "$MAIN_LLM_REASONING_BUDGET"
