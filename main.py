@@ -10184,18 +10184,23 @@ def control_page_ui_tool_action_from_decision(decision: dict[str, Any] | None) -
     if not isinstance(decision, dict):
         return None
     tool_call = decision.get("tool_call")
+    if tool_call is None and isinstance(decision.get("tool_calls"), list) and decision["tool_calls"]:
+        tool_call = decision["tool_calls"][0]
     if not isinstance(tool_call, dict):
         return None
     if clean_text(str(tool_call.get("name") or "")).lower() != "control_page.memory_panel":
         return None
     arguments = tool_call.get("arguments")
+    if isinstance(arguments, str):
+        try:
+            parsed_arguments = json.loads(arguments)
+            arguments = parsed_arguments if isinstance(parsed_arguments, dict) else {}
+        except Exception:
+            arguments = {}
     if not isinstance(arguments, dict):
         return None
     action = clean_text(str(arguments.get("action") or "")).lower()
     if action not in {"open", "close", "toggle"}:
-        return None
-    confidence = float(decision.get("confidence", 0.0) or 0.0)
-    if confidence < 0.55:
         return None
     return action
 
@@ -10217,7 +10222,7 @@ async def decide_control_page_ui_tool_call(text: str, *, guild_id: int | None, s
                 '[{"name":"control_page.memory_panel","description":"Open, close, or toggle the memory panel on the control page.",'
                 '"arguments":{"action":"open|close|toggle"}}]. '
                 "If the user is asking to manipulate the control page UI, return "
-                '{"tool_call":{"name":"control_page.memory_panel","arguments":{"action":"open"}},"confidence":0.0,"reply":"short Korean confirmation"}. '
+                '{"tool_call":{"name":"control_page.memory_panel","arguments":{"action":"open"}},"confidence":0.92,"reply":"short Korean confirmation"}. '
                 "If no UI tool should be called, return "
                 '{"tool_call":null,"confidence":0.0,"reply":""}. '
                 "Choose close when the user wants the memory panel/window hidden, open when they want it visible, "
