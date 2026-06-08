@@ -41,6 +41,9 @@ class ControlPageMemoryPanelCommandTests(unittest.TestCase):
         self.assertIn('if normalized == "/memory":', self.local_server)
         self.assertIn('with_memory_panel_command(state, "toggle")', self.local_server)
 
+    def test_main_exposes_panel_commands_at_top_level_for_frontend(self) -> None:
+        self.assertGreaterEqual(self.main_py.count('"controlPagePanels": build_control_page_panel_state(),'), 4)
+
 
 if __name__ == "__main__":
     unittest.main()

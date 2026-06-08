@@ -10575,6 +10575,7 @@ async def build_control_page_state(guild: discord.Guild | None) -> dict[str, Any
             "commands": commands,
             "allCommands": build_control_page_all_commands(),
             "chat": {"messages": get_control_page_chat_log(LOCAL_CONTROL_GUILD_ID) if local_mode else []},
+            "controlPagePanels": build_control_page_panel_state(),
             "voice": {
                 "channelName": "없음",
                 "listening": local_listening,
@@ -10646,6 +10647,7 @@ async def build_control_page_state(guild: discord.Guild | None) -> dict[str, Any
         "commands": commands,
         "allCommands": build_control_page_all_commands(),
         "chat": {"messages": get_control_page_chat_log(guild.id)},
+        "controlPagePanels": build_control_page_panel_state(),
         "voice": {
             "channelName": getattr(getattr(vc, "channel", None), "name", None) or "없음",
             "listening": listening,
