@@ -541,6 +541,10 @@
       border-top: 1px solid var(--line);
     }
 
+    .memory-list[hidden] {
+      display: none;
+    }
+
     .note {
       display: grid;
       gap: 2px;
@@ -661,6 +665,7 @@
       width: 100%;
       height: 100%;
       min-height: 360px;
+      touch-action: none;
     }
 
     .memory-graph .edge {
@@ -669,7 +674,11 @@
     }
 
     .memory-graph .node {
-      cursor: pointer;
+      cursor: grab;
+    }
+
+    .memory-graph .node.dragging {
+      cursor: grabbing;
     }
 
     .memory-graph .node circle {
@@ -679,7 +688,8 @@
     }
 
     .memory-graph .node:hover circle,
-    .memory-graph .node.active circle {
+    .memory-graph .node.active circle,
+    .memory-graph .node.dragging circle {
       stroke: var(--green);
       stroke-width: 3;
     }
@@ -1201,15 +1211,15 @@
         <span class="memory-title">Memory</span>
         <div class="memory-list">
           <button class="note active" type="button" data-memory-page="graph">
-            <strong>1페이지</strong>
-            <span>노드 그래프</span>
+            <strong>그래프</strong>
+            <span>노드 보기</span>
           </button>
           <button class="note" type="button" data-memory-page="manage">
-            <strong>2페이지</strong>
-            <span>수정 / 확인 / 삭제</span>
+            <strong>수정</strong>
+            <span>확인 / 삭제</span>
           </button>
         </div>
-        <div class="memory-list">
+        <div class="memory-list" data-memory-filter-list hidden>
           <button class="note active" type="button" data-memory-filter="all">
             <strong>전체</strong>
             <span id="memoryCount">loading</span>
@@ -1318,6 +1328,7 @@
     let memoryGraphSnapshot = null;
     let memoryGraphMotionFrame = 0;
     let memoryGraphMotionState = null;
+    let memoryGraphDragSuppressClick = false;
     let selectedMemoryId = "";
     let selectedMemoryCard = null;
     let memoryPage = "graph";
@@ -1542,6 +1553,9 @@
       document.querySelectorAll("[data-memory-page-content]").forEach((panel) => {
         panel.classList.toggle("active", panel.getAttribute("data-memory-page-content") === memoryPage);
       });
+      document.querySelectorAll("[data-memory-filter-list]").forEach((list) => {
+        list.hidden = memoryPage !== "manage";
+      });
       if (memoryPage === "graph") {
         renderMemoryGraph();
       } else {
@@ -1552,11 +1566,11 @@
 
     function graphNodeColor(type) {
       const key = String(type || "").toLowerCase();
-      if (key === "core" || key === "project") return "#2f8f68";
-      if (key === "procedure" || key === "concept") return "#5f6fa8";
-      if (key === "daily" || key === "episode") return "#7b8790";
-      if (key === "legacy") return "#b46a78";
-      return "#65707a";
+      if (key === "core" || key === "project") return "hsl(154 30% 42%)";
+      if (key === "procedure" || key === "concept") return "hsl(228 30% 52%)";
+      if (key === "daily" || key === "episode") return "hsl(206 30% 50%)";
+      if (key === "legacy") return "hsl(350 30% 54%)";
+      return "hsl(210 30% 45%)";
     }
 
     function shortLabel(value, max = 16) {
@@ -1595,6 +1609,97 @@
       }
       memoryGraphMotionFrame = 0;
       memoryGraphMotionState = null;
+    }
+
+    function graphPointerPoint(event, svg) {
+      const point = svg.createSVGPoint();
+      point.x = event.clientX;
+      point.y = event.clientY;
+      const matrix = svg.getScreenCTM();
+      return matrix ? point.matrixTransform(matrix.inverse()) : point;
+    }
+
+    function clampGraphNodePosition(node, width, height) {
+      node.x = Math.max(24, Math.min(width - 120, node.x));
+      node.y = Math.max(24, Math.min(height - 24, node.y));
+    }
+
+    function applyMemoryGraphLayout(motionState) {
+      if (!motionState) return;
+      const { state, nodeElements, edgeElements } = motionState;
+      edgeElements.forEach(({ element, source, target }) => {
+        const left = state.get(source);
+        const right = state.get(target);
+        if (!left || !right) return;
+        element.setAttribute("x1", left.x.toFixed(1));
+        element.setAttribute("y1", left.y.toFixed(1));
+        element.setAttribute("x2", right.x.toFixed(1));
+        element.setAttribute("y2", right.y.toFixed(1));
+      });
+
+      nodeElements.forEach(({ id, circle, text }) => {
+        const node = state.get(id);
+        if (!node) return;
+        circle.setAttribute("cx", node.x.toFixed(1));
+        circle.setAttribute("cy", node.y.toFixed(1));
+        if (text) {
+          text.setAttribute("x", (node.x + node.radius + 5).toFixed(1));
+          text.setAttribute("y", (node.y + 4).toFixed(1));
+        }
+      });
+    }
+
+    function startMemoryGraphNodeDrag(event) {
+      if (!memoryGraphMotionState || event.button !== 0) return;
+      const element = event.target.closest(".node[data-memory-id]");
+      if (!element) return;
+      const svg = element.ownerSVGElement;
+      const id = String(element.getAttribute("data-memory-id") || "");
+      const node = memoryGraphMotionState.state.get(id);
+      if (!svg || !node) return;
+
+      const width = 980;
+      const height = 560;
+      const origin = graphPointerPoint(event, svg);
+      const start = { x: node.x, y: node.y };
+      let moved = false;
+      node.dragging = true;
+      node.vx = 0;
+      node.vy = 0;
+      element.classList.add("dragging");
+      element.setPointerCapture?.(event.pointerId);
+      event.preventDefault();
+
+      function move(pointerEvent) {
+        if (pointerEvent.pointerId !== event.pointerId) return;
+        const point = graphPointerPoint(pointerEvent, svg);
+        const dx = point.x - origin.x;
+        const dy = point.y - origin.y;
+        if (Math.hypot(dx, dy) > 2) moved = true;
+        node.x = start.x + dx;
+        node.y = start.y + dy;
+        clampGraphNodePosition(node, width, height);
+        node.homeX = node.x;
+        node.homeY = node.y;
+        node.vx = 0;
+        node.vy = 0;
+        applyMemoryGraphLayout(memoryGraphMotionState);
+      }
+
+      function stop(pointerEvent) {
+        if (pointerEvent.pointerId !== event.pointerId) return;
+        node.dragging = false;
+        element.classList.remove("dragging");
+        element.releasePointerCapture?.(event.pointerId);
+        if (moved) memoryGraphDragSuppressClick = true;
+        window.removeEventListener("pointermove", move);
+        window.removeEventListener("pointerup", stop);
+        window.removeEventListener("pointercancel", stop);
+      }
+
+      window.addEventListener("pointermove", move);
+      window.addEventListener("pointerup", stop);
+      window.addEventListener("pointercancel", stop);
     }
 
     function startMemoryGraphMotion(nodes, visibleEdges, positions) {
@@ -1669,13 +1774,18 @@
           const force = Math.max(-0.018, Math.min(0.018, (distance - 94) * 0.00028));
           const fx = (dx / distance) * force;
           const fy = (dy / distance) * force;
-          left.vx += fx;
-          left.vy += fy;
-          right.vx -= fx;
-          right.vy -= fy;
+          if (!left.dragging) {
+            left.vx += fx;
+            left.vy += fy;
+          }
+          if (!right.dragging) {
+            right.vx -= fx;
+            right.vy -= fy;
+          }
         });
 
         state.forEach((node) => {
+          if (node.dragging) return;
           const orbitX = Math.sin(time * 0.42 + node.phase) * 12;
           const orbitY = Math.cos(time * 0.36 + node.phase * 0.8) * 9;
           node.vx += (node.homeX + orbitX - node.x) * 0.010;
@@ -1684,30 +1794,12 @@
           node.vy += (centerY - node.y) * 0.0008;
           node.vx *= 0.86;
           node.vy *= 0.86;
-          node.x = Math.max(24, Math.min(width - 120, node.x + node.vx));
-          node.y = Math.max(24, Math.min(height - 24, node.y + node.vy));
+          node.x += node.vx;
+          node.y += node.vy;
+          clampGraphNodePosition(node, width, height);
         });
 
-        edgeElements.forEach(({ element, source, target }) => {
-          const left = state.get(source);
-          const right = state.get(target);
-          if (!left || !right) return;
-          element.setAttribute("x1", left.x.toFixed(1));
-          element.setAttribute("y1", left.y.toFixed(1));
-          element.setAttribute("x2", right.x.toFixed(1));
-          element.setAttribute("y2", right.y.toFixed(1));
-        });
-
-        nodeElements.forEach(({ id, circle, text }) => {
-          const node = state.get(id);
-          if (!node) return;
-          circle.setAttribute("cx", node.x.toFixed(1));
-          circle.setAttribute("cy", node.y.toFixed(1));
-          if (text) {
-            text.setAttribute("x", (node.x + node.radius + 5).toFixed(1));
-            text.setAttribute("y", (node.y + 4).toFixed(1));
-          }
-        });
+        applyMemoryGraphLayout(motionState);
       }
 
       memoryGraphMotionFrame = requestAnimationFrame(step);
@@ -1822,7 +1914,7 @@
       if (memoryVaultPath) memoryVaultPath.textContent = memorySnapshot && memorySnapshot.vaultPath ? memorySnapshot.vaultPath : "";
       if (memoryHint) {
         const graphCount = Array.isArray(memoryGraphSnapshot && memoryGraphSnapshot.nodes) ? memoryGraphSnapshot.nodes.length : 0;
-        memoryHint.textContent = total ? `1페이지 그래프 ${graphCount || total}개 노드, 2페이지 관리 ${total}개 노트` : "memory_vault 노드를 기다리는 중입니다.";
+        memoryHint.textContent = total ? `그래프 ${graphCount || total}개 노드, 수정 ${total}개 노트` : "memory_vault 노드를 기다리는 중입니다.";
       }
       if (!cards.length) {
         memoryCards.innerHTML = '<div class="memory-empty">표시할 메모리 노트가 없습니다.</div>';
@@ -2024,7 +2116,12 @@
       });
     });
     if (memoryGraph) {
+      memoryGraph.addEventListener("pointerdown", startMemoryGraphNodeDrag);
       memoryGraph.addEventListener("click", (event) => {
+        if (memoryGraphDragSuppressClick) {
+          memoryGraphDragSuppressClick = false;
+          return;
+        }
         const node = event.target.closest("[data-memory-id]");
         if (!node) return;
         selectMemoryCard(node.getAttribute("data-memory-id"));
