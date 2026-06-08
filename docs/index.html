@@ -2423,13 +2423,18 @@
 
     function clampWindow(left, top, width, height) {
       const margin = 32;
-      const maxLeft = window.innerWidth - width - margin;
-      const maxTop = window.innerHeight - height - margin;
+      const topMargin = 0;
+      const maxWidth = window.innerWidth - margin * 2;
+      const maxHeight = window.innerHeight - topMargin - margin;
+      const clampedWidth = Math.min(Math.max(330, width), maxWidth);
+      const clampedHeight = Math.min(Math.max(260, height), maxHeight);
+      const maxLeft = window.innerWidth - clampedWidth - margin;
+      const maxTop = window.innerHeight - clampedHeight - margin;
       return {
         left: Math.min(Math.max(margin, left), Math.max(margin, maxLeft)),
-        top: Math.min(Math.max(margin, top), Math.max(margin, maxTop)),
-        width: Math.min(Math.max(330, width), window.innerWidth - margin * 2),
-        height: Math.min(Math.max(260, height), window.innerHeight - margin * 2)
+        top: Math.min(Math.max(topMargin, top), Math.max(topMargin, maxTop)),
+        width: clampedWidth,
+        height: clampedHeight
       };
     }
 

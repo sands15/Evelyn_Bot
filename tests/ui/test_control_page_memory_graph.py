@@ -25,6 +25,11 @@ class ControlPageMemoryGraphTests(unittest.TestCase):
         self.assertNotIn("const width = 980;", self.html)
         self.assertNotIn("const height = 560;", self.html)
 
+    def test_memory_window_can_resize_to_page_top(self) -> None:
+        self.assertIn("const topMargin = 0;", self.html)
+        self.assertIn("window.innerHeight - topMargin - margin", self.html)
+        self.assertIn("Math.max(topMargin, top)", self.html)
+
 
 if __name__ == "__main__":
     unittest.main()
