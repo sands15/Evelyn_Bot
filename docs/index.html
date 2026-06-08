@@ -307,6 +307,15 @@
       width: min(520px, 42vw);
     }
 
+    .chat-log {
+      display: grid;
+      gap: 8px;
+      max-height: min(300px, 34vh);
+      overflow-y: auto;
+      padding-right: 4px;
+      overscroll-behavior: contain;
+    }
+
     .bubble {
       display: grid;
       gap: 6px;
@@ -317,6 +326,20 @@
       background: var(--panel);
       box-shadow: var(--shadow);
       backdrop-filter: blur(22px);
+    }
+
+    .bubble.assistant,
+    .bubble.system {
+      justify-self: start;
+    }
+
+    .bubble.user {
+      justify-self: end;
+      background: rgba(255, 255, 255, 0.78);
+    }
+
+    [data-theme="dark"] .bubble.user {
+      background: rgba(17, 24, 39, 0.78);
     }
 
     .composer {
@@ -1053,6 +1076,7 @@
         width: auto;
       }
 
+      .chat-log,
       .bubble {
         max-width: 100%;
       }
@@ -1169,9 +1193,11 @@
     </main>
 
     <section class="dock" aria-label="대화">
-      <div class="bubble" id="lastBubble">
-        <strong>이블린</strong>
-        <span class="caption">응. 여기 있어. 메모리는 /memory 라고 입력하면 열어둘게.</span>
+      <div class="chat-log" id="chatLog" aria-live="polite" aria-label="대화 기록">
+        <div class="bubble assistant" id="lastBubble">
+          <strong>이블린</strong>
+          <span class="caption">응. 여기 있어. 메모리는 /memory 라고 입력하면 열어둘게.</span>
+        </div>
       </div>
       <div class="composer">
         <div class="command-suggestions hidden" id="commandSuggestions" aria-label="명령어 목록"></div>
@@ -1309,7 +1335,8 @@
     const composer = document.getElementById("composer");
     const commandSuggestions = document.getElementById("commandSuggestions");
     const sendButton = document.getElementById("sendButton");
-    const lastBubble = document.getElementById("lastBubble");
+    const chatLog = document.getElementById("chatLog");
+    let lastBubble = document.getElementById("lastBubble");
     const memoryWindow = document.getElementById("memoryWindow");
     const memoryMove = document.getElementById("memoryMove");
     const memoryCards = document.getElementById("memoryCards");
@@ -1339,6 +1366,7 @@
     let sending = false;
     let suggestionItems = [];
     let selectedSuggestionIndex = 0;
+    let renderedChatSignature = "";
     let commandCatalog = [
       { command: "/help", template: "/help", summary: "명령어 목록 보기", group: "기본" },
       { command: "/status", template: "/status", summary: "Evelyn, 음성, 모델 상태 요약", group: "기본" },
@@ -1395,8 +1423,90 @@
       reader.readAsDataURL(file);
     });
 
+    function formatChatTime(value) {
+      const seconds = Number(value);
+      if (!Number.isFinite(seconds) || seconds <= 0) return "";
+      const date = new Date(seconds * 1000);
+      if (Number.isNaN(date.getTime())) return "";
+      return date.toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" });
+    }
+
+    function normalizeChatMessage(message) {
+      if (!message || typeof message !== "object") return null;
+      const text = String(message.text || "").trim();
+      if (!text) return null;
+      const role = String(message.role || "assistant").toLowerCase();
+      const normalizedRole = role === "user" ? "user" : (role === "system" ? "system" : "assistant");
+      const fallbackAuthor = normalizedRole === "user" ? "정훈" : "이블린";
+      return {
+        role: normalizedRole,
+        author: String(message.author || fallbackAuthor).trim() || fallbackAuthor,
+        text,
+        at: Number(message.at) || 0
+      };
+    }
+
+    function chatSignature(messages) {
+      return JSON.stringify(messages.map((message) => [
+        message.role,
+        message.author,
+        message.text,
+        message.at
+      ]));
+    }
+
+    function isChatScrolledNearBottom() {
+      return chatLog.scrollHeight - chatLog.scrollTop - chatLog.clientHeight < 48;
+    }
+
+    function buildChatBubble(message) {
+      const bubble = document.createElement("div");
+      bubble.className = `bubble ${message.role}`;
+      const author = document.createElement("strong");
+      const time = formatChatTime(message.at);
+      author.textContent = time ? `${message.author} · ${time}` : message.author;
+      const caption = document.createElement("span");
+      caption.className = "caption";
+      caption.textContent = message.text;
+      bubble.append(author, caption);
+      return bubble;
+    }
+
+    function renderChatMessages(messages) {
+      if (!Array.isArray(messages)) return;
+      const normalized = messages.map(normalizeChatMessage).filter(Boolean);
+      if (!normalized.length) return;
+      const signature = chatSignature(normalized);
+      if (signature === renderedChatSignature) return;
+      const shouldStick = isChatScrolledNearBottom();
+      chatLog.replaceChildren(...normalized.map(buildChatBubble));
+      lastBubble = chatLog.lastElementChild || lastBubble;
+      renderedChatSignature = signature;
+      if (shouldStick) {
+        chatLog.scrollTop = chatLog.scrollHeight;
+      }
+    }
+
+    function appendChatMessage(message) {
+      const normalized = normalizeChatMessage(message);
+      if (!normalized) return;
+      const shouldStick = isChatScrolledNearBottom();
+      const bubble = buildChatBubble(normalized);
+      chatLog.appendChild(bubble);
+      lastBubble = bubble;
+      renderedChatSignature = "";
+      if (shouldStick) {
+        chatLog.scrollTop = chatLog.scrollHeight;
+      }
+    }
+
     function setBubble(text) {
-      lastBubble.querySelector(".caption").textContent = text;
+      appendChatMessage({
+        role: "assistant",
+        author: "이블린",
+        text,
+        at: Date.now() / 1000
+      });
     }
 
     function escapeHtml(value) {
@@ -1495,6 +1605,9 @@
       const services = runtime.services || {};
       const voice = state.voice || {};
       const minecraft = state.minecraft || {};
+      if (state.chat && Array.isArray(state.chat.messages)) {
+        renderChatMessages(state.chat.messages);
+      }
       const lines = Array.from(drawer.querySelectorAll(".status-list .line strong"));
       if (lines[0]) lines[0].textContent = services.mainReady ? "연결됨" : "대기";
       if (lines[1]) lines[1].textContent = voice.speaking ? "재생 중" : (services.ttsReady ? "대기" : "대기 중");
@@ -2080,6 +2193,12 @@
       }
       sending = true;
       sendButton.disabled = true;
+      appendChatMessage({
+        role: "user",
+        author: "정훈",
+        text: value,
+        at: Date.now() / 1000
+      });
       setBubble("보내는 중...");
       try {
         const payload = await fetchApi("/api/control-page/chat", {
@@ -2087,8 +2206,11 @@
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ text: value })
         });
-        if (payload.state) applyState(payload.state);
-        setBubble(payload.reply || "응답을 받았어.");
+        if (payload.state) {
+          applyState(payload.state);
+        } else {
+          setBubble(payload.reply || "응답을 받았어.");
+        }
       } catch (error) {
         setBubble(`전송 실패: ${error.message}`);
       } finally {
