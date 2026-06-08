@@ -1874,8 +1874,8 @@
         circle.setAttribute("cx", node.x.toFixed(1));
         circle.setAttribute("cy", node.y.toFixed(1));
         if (text) {
-          text.setAttribute("x", (node.x + node.radius + 5).toFixed(1));
-          text.setAttribute("y", (node.y + 4).toFixed(1));
+          text.setAttribute("x", node.x.toFixed(1));
+          text.setAttribute("y", (node.y + node.radius + 7).toFixed(1));
         }
       });
     }
@@ -2476,6 +2476,7 @@
       memoryWindow.style.top = `${box.top}px`;
       memoryWindow.style.width = `${box.width}px`;
       memoryWindow.style.height = `${box.height}px`;
+      applyMemoryGraphLayout(memoryGraphMotionState);
     }
 
     function getWindowBox() {

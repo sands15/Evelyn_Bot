@@ -30,7 +30,14 @@ class ControlPageMemoryGraphTests(unittest.TestCase):
         self.assertIn("font-weight: 600;", self.html)
         self.assertIn("dominant-baseline: hanging;", self.html)
         self.assertIn('" y="\' + (point.y + radius + 7).toFixed(1) + \'" text-anchor="middle"', self.html)
+        self.assertIn('text.setAttribute("x", node.x.toFixed(1));', self.html)
+        self.assertIn('text.setAttribute("y", (node.y + node.radius + 7).toFixed(1));', self.html)
         self.assertNotIn("stroke-width: 4px;", self.html)
+        self.assertNotIn("node.x + node.radius + 5", self.html)
+
+    def test_graph_layout_updates_when_memory_window_moves(self) -> None:
+        self.assertIn("function applyWindowBox(box)", self.html)
+        self.assertIn("applyMemoryGraphLayout(memoryGraphMotionState);", self.html)
 
 
 if __name__ == "__main__":
