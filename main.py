@@ -10181,7 +10181,118 @@ def execute_control_page_memory_panel_action(action: str) -> str:
     return "메모리 패널을 열거나 숨길게."
 
 
-def control_page_ui_tool_action_from_decision(decision: dict[str, Any] | None) -> str | None:
+@dataclass(frozen=True)
+class ControlPageToolSpec:
+    name: str
+    risk: str
+    description: str
+    router_enabled: bool = True
+    requires_guild: bool = False
+
+
+CONTROL_PAGE_TOOL_SPECS: dict[str, ControlPageToolSpec] = {
+    "control_page.help": ControlPageToolSpec("control_page.help", "low", "Show the control page command list.", router_enabled=False),
+    "runtime.status": ControlPageToolSpec("runtime.status", "low", "Show Evelyn runtime status."),
+    "control_page.memory_panel": ControlPageToolSpec("control_page.memory_panel", "low", "Open, close, or toggle the memory panel."),
+    "memory.open_vault": ControlPageToolSpec("memory.open_vault", "low", "Open the Obsidian memory vault."),
+    "voice.status": ControlPageToolSpec("voice.status", "low", "Show voice, STT, and TTS status."),
+    "voice.input_mode": ControlPageToolSpec("voice.input_mode", "medium", "Set voice input mode.", router_enabled=False),
+    "voice.reconnect": ControlPageToolSpec("voice.reconnect", "medium", "Reconnect to the last voice channel.", requires_guild=True),
+    "runtime.restart_bot": ControlPageToolSpec("runtime.restart_bot", "medium", "Restart the Evelyn bot process."),
+    "runtime.shutdown_stack": ControlPageToolSpec("runtime.shutdown_stack", "high", "Shut down the Evelyn runtime stack.", router_enabled=False),
+    "minecraft.inventory": ControlPageToolSpec("minecraft.inventory", "low", "Show Minecraft inventory.", requires_guild=True),
+    "minecraft.status": ControlPageToolSpec("minecraft.status", "low", "Show Minecraft/Voyager status.", requires_guild=True),
+    "minecraft.connect": ControlPageToolSpec("minecraft.connect", "medium", "Start Voyager Minecraft mode.", requires_guild=True),
+    "minecraft.disconnect": ControlPageToolSpec("minecraft.disconnect", "medium", "Stop Voyager Minecraft mode.", requires_guild=True),
+    "minecraft.set_goal": ControlPageToolSpec("minecraft.set_goal", "medium", "Set a Minecraft goal.", router_enabled=False, requires_guild=True),
+    "autonomy.status": ControlPageToolSpec("autonomy.status", "low", "Show autonomy engine status.", requires_guild=True),
+}
+
+CONTROL_PAGE_SLASH_TOOL_ALIASES: dict[str, str] = {
+    "/": "control_page.help",
+    "/help": "control_page.help",
+    "/status": "runtime.status",
+    "/memory": "control_page.memory_panel",
+    "/obsidian": "memory.open_vault",
+    "/voice": "voice.status",
+    "/voice status": "voice.status",
+    "/voice reconnect": "voice.reconnect",
+    "/voice rejoin": "voice.reconnect",
+    "/restart": "runtime.restart_bot",
+    "/재시작": "runtime.restart_bot",
+    "/shutdown": "runtime.shutdown_stack",
+    "/quit": "runtime.shutdown_stack",
+    "/exit": "runtime.shutdown_stack",
+    "/inventory": "minecraft.inventory",
+    "/voyager stats": "minecraft.status",
+    "/minecraft status": "minecraft.status",
+    "/mc-status": "minecraft.status",
+    "/minecraft connect": "minecraft.connect",
+    "/mc-connect": "minecraft.connect",
+    "/minecraft disconnect": "minecraft.disconnect",
+    "/mc-disconnect": "minecraft.disconnect",
+    "/autonomy status": "autonomy.status",
+}
+
+
+def control_page_tool_registry_prompt() -> str:
+    tools: list[dict[str, Any]] = []
+    for spec in CONTROL_PAGE_TOOL_SPECS.values():
+        if not spec.router_enabled:
+            continue
+        tools.append(
+            {
+                "name": spec.name,
+                "risk": spec.risk,
+                "description": spec.description,
+            }
+        )
+    return json.dumps(tools, ensure_ascii=False, separators=(",", ":"))
+
+
+def normalize_control_page_tool_arguments(tool_name: str, arguments: Any) -> dict[str, Any]:
+    if isinstance(arguments, str):
+        try:
+            parsed = json.loads(arguments)
+            arguments = parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            arguments = {}
+    if not isinstance(arguments, dict):
+        arguments = {}
+    cleaned: dict[str, Any] = {}
+    if tool_name == "control_page.memory_panel":
+        action = clean_text(str(arguments.get("action") or "")).lower()
+        cleaned["action"] = action if action in {"open", "close", "toggle"} else "toggle"
+    elif tool_name == "voice.input_mode":
+        mode = clean_text(str(arguments.get("mode") or "")).lower()
+        cleaned["mode"] = mode if mode in {"auto", "local", "discord"} else "auto"
+    elif tool_name == "minecraft.set_goal":
+        cleaned["goal"] = clean_text(str(arguments.get("goal") or ""))
+    return cleaned
+
+
+def control_page_tool_decision(
+    tool_name: str,
+    *,
+    arguments: dict[str, Any] | None = None,
+    confidence: float = 1.0,
+    source: str = "cheap",
+    reply: str = "",
+) -> dict[str, Any] | None:
+    spec = CONTROL_PAGE_TOOL_SPECS.get(clean_text(tool_name))
+    if spec is None:
+        return None
+    return {
+        "tool": spec.name,
+        "risk": spec.risk,
+        "arguments": normalize_control_page_tool_arguments(spec.name, arguments or {}),
+        "confidence": max(0.0, min(1.0, float(confidence or 0.0))),
+        "source": source,
+        "reply": clean_text(reply),
+    }
+
+
+def control_page_tool_decision_from_llm(decision: dict[str, Any] | None) -> dict[str, Any] | None:
     if not isinstance(decision, dict):
         return None
     tool_call = decision.get("tool_call")
@@ -10189,21 +10300,28 @@ def control_page_ui_tool_action_from_decision(decision: dict[str, Any] | None) -
         tool_call = decision["tool_calls"][0]
     if not isinstance(tool_call, dict):
         return None
-    if clean_text(str(tool_call.get("name") or "")).lower() != "control_page.memory_panel":
+    tool_name = clean_text(str(tool_call.get("name") or tool_call.get("tool") or "")).lower()
+    if tool_name not in CONTROL_PAGE_TOOL_SPECS:
         return None
-    arguments = tool_call.get("arguments")
-    if isinstance(arguments, str):
-        try:
-            parsed_arguments = json.loads(arguments)
-            arguments = parsed_arguments if isinstance(parsed_arguments, dict) else {}
-        except Exception:
-            arguments = {}
-    if not isinstance(arguments, dict):
+    spec = CONTROL_PAGE_TOOL_SPECS[tool_name]
+    if not spec.router_enabled:
         return None
-    action = clean_text(str(arguments.get("action") or "")).lower()
-    if action not in {"open", "close", "toggle"}:
+    confidence = decision.get("confidence", tool_call.get("confidence", 0.0))
+    return control_page_tool_decision(
+        tool_name,
+        arguments=normalize_control_page_tool_arguments(tool_name, tool_call.get("arguments")),
+        confidence=float(confidence or 0.0),
+        source="router",
+        reply=clean_text(str(decision.get("reply") or "")),
+    )
+
+
+def control_page_ui_tool_action_from_decision(decision: dict[str, Any] | None) -> str | None:
+    tool_decision = control_page_tool_decision_from_llm(decision)
+    if not tool_decision or tool_decision.get("tool") != "control_page.memory_panel":
         return None
-    return action
+    action = clean_text(str((tool_decision.get("arguments") or {}).get("action") or "")).lower()
+    return action if action in {"open", "close", "toggle"} else None
 
 
 def is_explicit_control_page_restart_request(text: str) -> bool:
@@ -10262,7 +10380,137 @@ def execute_control_page_restart_command() -> str:
     return "응, 이블린 다시 시작할게. 잠깐만 기다려줘."
 
 
-async def decide_control_page_ui_tool_call(text: str, *, guild_id: int | None, session_key: str) -> dict[str, Any] | None:
+def is_control_page_question_text(text: str) -> bool:
+    normalized = clean_text(text).lower().strip()
+    if not normalized:
+        return False
+    if "?" in normalized:
+        return True
+    return normalized.startswith(("왜", "어떻게", "언제", "뭐", "무엇", "혹시", "설명", "알려줘"))
+
+
+def cheap_control_page_tool_decision(text: str) -> dict[str, Any] | None:
+    normalized = clean_text(text).lower().strip()
+    if not normalized:
+        return None
+    if normalized.startswith("/minecraft goal "):
+        return control_page_tool_decision(
+            "minecraft.set_goal",
+            arguments={"goal": clean_text(text[len("/minecraft goal "):])},
+            source="slash",
+        )
+    if normalized.startswith("/voice input ") or normalized.startswith("/voice source "):
+        return control_page_tool_decision(
+            "voice.input_mode",
+            arguments={"mode": normalized.rsplit(" ", 1)[-1]},
+            source="slash",
+        )
+    slash_tool = CONTROL_PAGE_SLASH_TOOL_ALIASES.get(normalized)
+    if slash_tool:
+        args = {"action": "toggle"} if slash_tool == "control_page.memory_panel" else {}
+        return control_page_tool_decision(slash_tool, arguments=args, source="slash")
+    if normalized.startswith("/"):
+        return None
+    if is_control_page_question_text(normalized):
+        return None
+    compact = re.sub(r"\s+", "", normalized)
+    if is_explicit_control_page_restart_request(normalized):
+        return control_page_tool_decision("runtime.restart_bot", source="cheap")
+    if any(key in normalized for key in ("메모리", "memory", "패널", "panel")):
+        if any(key in compact for key in ("열어", "켜", "보여", "open")):
+            return control_page_tool_decision("control_page.memory_panel", arguments={"action": "open"}, source="cheap")
+        if any(key in compact for key in ("닫아", "닫어", "숨겨", "꺼", "close", "hide")):
+            return control_page_tool_decision("control_page.memory_panel", arguments={"action": "close"}, source="cheap")
+        if any(key in compact for key in ("토글", "전환", "toggle")):
+            return control_page_tool_decision("control_page.memory_panel", arguments={"action": "toggle"}, source="cheap")
+    if ("옵시디언" in normalized or "obsidian" in normalized) and any(key in compact for key in ("열어", "켜", "open")):
+        return control_page_tool_decision("memory.open_vault", source="cheap")
+    if "음성" in normalized or "voice" in normalized:
+        if any(key in compact for key in ("상태", "status", "봐", "보여")):
+            return control_page_tool_decision("voice.status", source="cheap")
+        if any(key in compact for key in ("재연결", "다시연결", "reconnect", "rejoin")):
+            return control_page_tool_decision("voice.reconnect", source="cheap")
+    if any(key in normalized for key in ("마크", "minecraft", "voyager", "인벤", "inventory")):
+        if any(key in compact for key in ("인벤", "inventory")):
+            return control_page_tool_decision("minecraft.inventory", source="cheap")
+        if any(key in compact for key in ("상태", "status", "봐", "보여")):
+            return control_page_tool_decision("minecraft.status", source="cheap")
+        if any(key in compact for key in ("연결해", "시작", "connect")):
+            return control_page_tool_decision("minecraft.connect", source="cheap")
+        if any(key in compact for key in ("끊어", "종료", "중지", "disconnect")):
+            return control_page_tool_decision("minecraft.disconnect", source="cheap")
+    if ("자율" in normalized or "autonomy" in normalized) and any(key in compact for key in ("상태", "status", "봐", "보여")):
+        return control_page_tool_decision("autonomy.status", source="cheap")
+    if any(key in compact for key in ("상태보여", "상태봐", "status")) and not any(key in normalized for key in ("날씨", "비", "weather")):
+        return control_page_tool_decision("runtime.status", source="cheap")
+    return None
+
+
+def should_route_control_page_tool_candidate(text: str) -> bool:
+    normalized = clean_text(text).lower().strip()
+    if not normalized or normalized.startswith("/") or len(normalized) > 80:
+        return False
+    if is_control_page_question_text(normalized):
+        return False
+    compact = re.sub(r"\s+", "", normalized)
+    actionish = any(key in compact for key in ("열어", "닫아", "숨겨", "꺼", "켜", "다시", "적용", "실행", "해줘", "보여줘", "연결"))
+    reference = any(key in normalized for key in ("그거", "이거", "아까", "방금", "패널", "창", "상태", "메모리", "음성", "마크", "봇", "이블린"))
+    return actionish and reference
+
+
+def recent_control_page_history_for_router(*, session_key: str, guild_id: int | None, limit: int = 6) -> str:
+    rows = get_conversation_history(session_key=session_key, guild_id=guild_id)[-limit:]
+    lines: list[str] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        role = clean_text(str(row.get("role") or ""))
+        content = clean_text(str(row.get("content") or ""))
+        if role and content:
+            lines.append(f"{role}: {content[:180]}")
+    return "\n".join(lines)
+
+
+def control_page_tool_policy_error(decision: dict[str, Any], *, guild: discord.Guild | None) -> str | None:
+    tool_name = clean_text(str(decision.get("tool") or ""))
+    spec = CONTROL_PAGE_TOOL_SPECS.get(tool_name)
+    if spec is None:
+        return "그 명령은 등록된 도구가 아니라서 실행하지 않을게."
+    if spec.requires_guild and guild is None:
+        return "그 명령은 Discord 연결이 필요해."
+    source = clean_text(str(decision.get("source") or ""))
+    confidence = float(decision.get("confidence") or 0.0)
+    if spec.risk == "high" and source != "slash":
+        return "그건 위험한 명령이라 명확한 /shutdown 명령으로만 받을게."
+    if spec.risk == "medium" and source == "router" and confidence < 0.86:
+        return "그 명령은 조금 애매해. 한 번만 더 정확히 말해줘."
+    return None
+
+
+def remember_control_page_tool_turn(
+    guild: discord.Guild | None,
+    user_text: str,
+    reply_text: str,
+    decision: dict[str, Any],
+) -> None:
+    guild_id = control_page_effective_guild_id(guild)
+    session_key = control_page_session_key(guild_id)
+    tool_name = clean_text(str(decision.get("tool") or ""))
+    topic_id = build_topic_id(user_text, tool_name, reply_text)
+    history_answer = f"도구 실행: {tool_name}\n결과: {clean_text(reply_text)}"
+    append_history(session_key, user_text, history_answer, guild_id=guild_id)
+    mark_session_active(
+        session_key,
+        ttl_sec=ACTIVE_CONVERSATION_TEXT_SEC,
+        speaker="assistant",
+        awaiting_user_reply=False,
+        topic_id=topic_id,
+        answer_text=reply_text,
+        user_text=user_text,
+    )
+
+
+async def decide_control_page_tool_call(text: str, *, guild_id: int | None, session_key: str) -> dict[str, Any] | None:
     if not ROUTER_LLM_ENABLED:
         return None
     user_text = clean_text(text)
@@ -10273,21 +10521,25 @@ async def decide_control_page_ui_tool_call(text: str, *, guild_id: int | None, s
             "role": "system",
             "content": (
                 "You are Evelyn's control-page tool router. "
-                "Decide whether the user's message should call a UI tool. "
+                "Only classify ambiguous short control-page commands. "
                 "Return exactly one JSON object and no other text. "
-                "Available tools: "
-                '[{"name":"control_page.memory_panel","description":"Open, close, or toggle the memory panel on the control page.",'
-                '"arguments":{"action":"open|close|toggle"}}]. '
-                "If the user is asking to manipulate the control page UI, return "
+                "Available allowlisted tools: "
+                f"{control_page_tool_registry_prompt()}. "
+                "The router may choose only these tools; never invent tools, shell commands, paths, or code. "
+                "For control_page.memory_panel, arguments must be {\"action\":\"open|close|toggle\"}. "
+                "If the user is clearly asking for a tool, return "
                 '{"tool_call":{"name":"control_page.memory_panel","arguments":{"action":"open"}},"confidence":0.92,"reply":"응, 메모리 패널 열어둘게."}. '
                 "If no UI tool should be called, return "
                 '{"tool_call":null,"confidence":0.0,"reply":""}. '
-                "Choose close when the user wants the memory panel/window hidden, open when they want it visible, "
-                "and toggle only when they explicitly ask to switch/toggle it. "
-                "Do not call a tool for ordinary questions, styling requests, implementation requests, or discussion. "
+                "Do not call a tool for ordinary questions, explanations, styling requests, implementation requests, or discussion. "
+                "Never call high-risk tools; ask for explicit slash commands instead. "
                 "When you do call a UI tool, write reply in Evelyn's style: Korean, warm and sharp, casual 반말, "
                 "one short sentence, no stiff '~습니다' or '~입니다' endings, no extra explanation."
             ),
+        },
+        {
+            "role": "system",
+            "content": "Recent conversation:\n" + (recent_control_page_history_for_router(session_key=session_key, guild_id=guild_id) or "(none)"),
         },
         {
             "role": "user",
@@ -10311,13 +10563,31 @@ async def decide_control_page_ui_tool_call(text: str, *, guild_id: int | None, s
         return None
 
 
-async def execute_control_page_command(guild: discord.Guild | None, text: str) -> str:
-    normalized = clean_text(text).lower()
-    if normalized in {"/", "/help"}:
+async def decide_control_page_ui_tool_call(text: str, *, guild_id: int | None, session_key: str) -> dict[str, Any] | None:
+    return await decide_control_page_tool_call(text, guild_id=guild_id, session_key=session_key)
+
+
+async def execute_control_page_tool(guild: discord.Guild | None, decision: dict[str, Any]) -> str:
+    policy_error = control_page_tool_policy_error(decision, guild=guild)
+    if policy_error:
+        return policy_error
+    tool_name = clean_text(str(decision.get("tool") or ""))
+    arguments = decision.get("arguments") if isinstance(decision.get("arguments"), dict) else {}
+    if tool_name == "control_page.help":
         return build_control_page_help_reply()
-    if normalized == "/memory":
-        return execute_control_page_memory_panel_action("toggle")
-    if normalized == "/obsidian":
+    if tool_name == "runtime.status":
+        if guild is None:
+            services = await get_control_page_runtime_services(force=True)
+            return build_control_page_runtime_summary(
+                bot_ready=True,
+                voyager_ready=bool(services.get("voyagerReady")),
+                codex_required=bool(services.get("codexRequired")),
+                codex_ready=services.get("codexReady"),
+            )
+        return await build_control_page_status_reply(guild)
+    if tool_name == "control_page.memory_panel":
+        return execute_control_page_memory_panel_action(clean_text(str(arguments.get("action") or "toggle")))
+    if tool_name == "memory.open_vault":
         enqueue_control_page_ui_command("toggle", panel_id="memory")
         vault = ensure_memory_vault_layout()
         obsidian_url = "obsidian://open?path=" + quote(str(vault), safe="")
@@ -10330,54 +10600,42 @@ async def execute_control_page_command(guild: discord.Guild | None, text: str) -
                 return f"Obsidian protocol이 실패해서 vault 폴더를 대신 열었어: {exc}"
             except Exception as fallback_exc:
                 return f"Obsidian 메모리 vault를 열지 못했어: {fallback_exc}"
-    if guild is None:
-        if normalized == "/status":
-            services = await get_control_page_runtime_services(force=True)
-            return build_control_page_runtime_summary(
-                bot_ready=True,
-                voyager_ready=bool(services.get("voyagerReady")),
-                codex_required=bool(services.get("codexRequired")),
-                codex_ready=services.get("codexReady"),
-            )
-        if normalized in {"/voice status", "/voice"}:
-            return build_control_page_voice_status_reply(None)
-        if normalized.startswith("/voice input ") or normalized.startswith("/voice source "):
-            requested = normalized.rsplit(" ", 1)[-1]
-            mode = set_voice_input_mode(requested)
-            return f"음성 입력 모드: {voice_input_mode_status_line()} ({mode})"
-        if normalized in {"/restart", "/재시작"}:
-            return execute_control_page_restart_command()
-        if normalized in {"/shutdown", "/quit", "/exit"}:
-            if schedule_evelyn_local_shutdown():
-                return "Local Evelyn shutdown started. Only Evelyn local runtime windows and ports will be stopped."
-            asyncio.create_task(shutdown_bot_process())
-            return "Local shutdown helper failed, so only the local Evelyn process is stopping."
-        return "이 명령은 Discord 연결이 필요해. 로컬 모드에서는 /help, /status, /voice status, /voice input, /shutdown, 일반 대화를 쓸 수 있어."
-    if normalized == "/status":
-        return await build_control_page_status_reply(guild)
-    if normalized in {"/voice status", "/voice"}:
+    if tool_name == "voice.status":
         return build_control_page_voice_status_reply(guild)
-    if normalized.startswith("/voice input ") or normalized.startswith("/voice source "):
-        requested = normalized.rsplit(" ", 1)[-1]
+    if tool_name == "voice.input_mode":
+        requested = clean_text(str(arguments.get("mode") or "auto"))
         mode = set_voice_input_mode(requested)
         return f"음성 입력 모드: {voice_input_mode_status_line()} ({mode})"
-    if normalized in {"/voice reconnect", "/voice rejoin"}:
+    if tool_name == "voice.reconnect":
+        if guild is None:
+            return "그 명령은 Discord 연결이 필요해."
         ok, detail = await restore_last_voice_channel(guild, force=True)
         if ok:
             return f"음성 채널에 다시 연결했어: {detail}"
         return f"음성 재연결 실패: {detail}"
-    if normalized in {"/restart", "/재시작"}:
+    if tool_name == "runtime.restart_bot":
         return execute_control_page_restart_command()
-    if normalized in {"/shutdown", "/quit", "/exit"}:
+    if tool_name == "runtime.shutdown_stack":
+        if guild is None:
+            if schedule_evelyn_local_shutdown():
+                return "Local Evelyn shutdown started. Only Evelyn local runtime windows and ports will be stopped."
+            asyncio.create_task(shutdown_bot_process())
+            return "Local shutdown helper failed, so only the local Evelyn process is stopping."
         if schedule_evelyn_stack_shutdown():
             return "Evelyn runtime 종료를 시작했어. supervisors, bot, LLM, TTS, Voyager, Evelyn-owned WSL services를 정리해."
         asyncio.create_task(shutdown_bot_process())
         return "종료 helper 실행에 실패해서 bot process만 정리할게."
-    if normalized == "/inventory":
+    if tool_name == "minecraft.inventory":
+        if guild is None:
+            return "그 명령은 Discord 연결이 필요해."
         return await build_control_page_inventory_reply(guild)
-    if normalized in {"/voyager stats", "/minecraft status", "/mc-status"}:
+    if tool_name == "minecraft.status":
+        if guild is None:
+            return "그 명령은 Discord 연결이 필요해."
         return await build_control_page_minecraft_reply(guild)
-    if normalized in {"/minecraft connect", "/mc-connect"}:
+    if tool_name == "minecraft.connect":
+        if guild is None:
+            return "그 명령은 Discord 연결이 필요해."
         observed = await enable_minecraft_mode(guild.id)
         return (
             "Voyager Minecraft 모드를 시작했어.\n"
@@ -10385,11 +10643,15 @@ async def execute_control_page_command(guild: discord.Guild | None, text: str) -
             f"- stage: {clean_text(str(observed.get('objective_stage') or observed.get('stage') or '없음')) or '없음'}\n"
             f"- position: {format_position_short(observed.get('position'))}"
         )
-    if normalized in {"/minecraft disconnect", "/mc-disconnect"}:
+    if tool_name == "minecraft.disconnect":
+        if guild is None:
+            return "그 명령은 Discord 연결이 필요해."
         await disable_minecraft_mode(guild.id)
         return "Voyager Minecraft 모드를 중지했어."
-    if normalized.startswith("/minecraft goal "):
-        goal_text = clean_text(text[len("/minecraft goal "):])
+    if tool_name == "minecraft.set_goal":
+        if guild is None:
+            return "그 명령은 Discord 연결이 필요해."
+        goal_text = clean_text(str(arguments.get("goal") or ""))
         if not goal_text:
             return "목표를 같이 적어줘. 예: /minecraft goal progress_to_diamond"
         status = await get_minecraft_client().set_goal(goal_text)
@@ -10398,8 +10660,17 @@ async def execute_control_page_command(guild: discord.Guild | None, text: str) -
             f"- goal: {goal_text}\n"
             f"- stage: {clean_text(str(status.get('stage') or 'unknown')) or 'unknown'}"
         )
-    if normalized == "/autonomy status":
+    if tool_name == "autonomy.status":
+        if guild is None:
+            return "그 명령은 Discord 연결이 필요해."
         return build_control_page_autonomy_reply(guild)
+    return "그 명령은 등록만 되어 있고 실행기가 아직 없어."
+
+
+async def execute_control_page_command(guild: discord.Guild | None, text: str) -> str:
+    decision = cheap_control_page_tool_decision(text)
+    if decision is not None:
+        return await execute_control_page_tool(guild, decision)
     return "지원하지 않는 명령어야. /help 로 현재 페이지 명령어를 확인해줘."
 
 
@@ -10518,18 +10789,28 @@ async def answer_control_page_text(guild: discord.Guild | None, user_text: str) 
 
 
 async def handle_control_page_input(guild: discord.Guild | None, text: str) -> str:
-    if clean_text(text).startswith("/"):
-        return await execute_control_page_command(guild, text)
-    if is_explicit_control_page_restart_request(text):
-        return execute_control_page_restart_command()
     guild_id = control_page_effective_guild_id(guild)
     session_key = control_page_session_key(guild_id)
-    tool_decision = await decide_control_page_ui_tool_call(text, guild_id=guild_id, session_key=session_key)
-    memory_panel_action = control_page_ui_tool_action_from_decision(tool_decision)
-    if memory_panel_action:
-        reply = clean_text(str((tool_decision or {}).get("reply") or ""))
-        execute_reply = execute_control_page_memory_panel_action(memory_panel_action)
-        return reply or execute_reply
+    cheap_decision = cheap_control_page_tool_decision(text)
+    if cheap_decision is not None:
+        reply = await execute_control_page_tool(guild, cheap_decision)
+        remember_control_page_tool_turn(guild, text, reply, cheap_decision)
+        return reply
+    if clean_text(text).startswith("/"):
+        return "지원하지 않는 명령어야. /help 로 현재 페이지 명령어를 확인해줘."
+    if should_route_control_page_tool_candidate(text):
+        tool_decision_raw = await decide_control_page_tool_call(text, guild_id=guild_id, session_key=session_key)
+        tool_decision = control_page_tool_decision_from_llm(tool_decision_raw)
+        if tool_decision:
+            execute_reply = await execute_control_page_tool(guild, tool_decision)
+            reply = clean_text(str(tool_decision.get("reply") or ""))
+            final_reply = reply or execute_reply
+            remember_control_page_tool_turn(guild, text, final_reply, tool_decision)
+            return final_reply
+        if isinstance(tool_decision_raw, dict):
+            router_reply = clean_text(str(tool_decision_raw.get("reply") or ""))
+            if router_reply:
+                return router_reply
     return await answer_control_page_text(guild, text)
 
 

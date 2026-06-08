@@ -25,13 +25,16 @@ class ControlPageRestartCommandTests(unittest.TestCase):
     def test_control_page_slash_restart_runs_restart_path(self) -> None:
         self.assertIn("def execute_control_page_restart_command() -> str:", self.main_py)
         self.assertIn("asyncio.create_task(restart_bot_process())", self.main_py)
-        self.assertIn('if normalized in {"/restart", "/재시작"}:', self.main_py)
+        self.assertIn('"/restart": "runtime.restart_bot"', self.main_py)
+        self.assertIn('"/재시작": "runtime.restart_bot"', self.main_py)
+        self.assertIn('if tool_name == "runtime.restart_bot":', self.main_py)
         self.assertIn("return execute_control_page_restart_command()", self.main_py)
 
     def test_natural_language_restart_is_routed_before_general_llm(self) -> None:
-        restart_check = self.main_py.index("if is_explicit_control_page_restart_request(text):")
-        tool_router = self.main_py.index("tool_decision = await decide_control_page_ui_tool_call(")
+        restart_check = self.main_py.index("if is_explicit_control_page_restart_request(normalized):")
+        tool_router = self.main_py.index("tool_decision_raw = await decide_control_page_tool_call(")
         self.assertLess(restart_check, tool_router)
+        self.assertIn("cheap_decision = cheap_control_page_tool_decision(text)", self.main_py)
         self.assertIn("def is_explicit_control_page_restart_request(text: str) -> bool:", self.main_py)
         self.assertIn('"재시작해줘"', self.main_py)
         self.assertIn('"restartnow"', self.main_py)

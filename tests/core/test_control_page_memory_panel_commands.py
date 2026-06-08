@@ -16,13 +16,16 @@ class ControlPageMemoryPanelCommandTests(unittest.TestCase):
         cls.local_server = LOCAL_SERVER.read_text(encoding="utf-8")
 
     def test_main_routes_memory_panel_commands_through_llm_tool_router(self) -> None:
+        self.assertIn("async def decide_control_page_tool_call(", self.main_py)
         self.assertIn("async def decide_control_page_ui_tool_call(", self.main_py)
         self.assertIn("def control_page_ui_tool_action_from_decision(decision: dict[str, Any] | None) -> str | None:", self.main_py)
         self.assertIn("def execute_control_page_memory_panel_action(action: str) -> str:", self.main_py)
+        self.assertIn("class ControlPageToolSpec", self.main_py)
+        self.assertIn('"control_page.memory_panel": ControlPageToolSpec', self.main_py)
         self.assertIn("You are Evelyn's control-page tool router.", self.main_py)
         self.assertIn('"name":"control_page.memory_panel"', self.main_py)
         self.assertIn('decision.get("tool_calls")', self.main_py)
-        self.assertIn("parsed_arguments = json.loads(arguments)", self.main_py)
+        self.assertIn("parsed = json.loads(arguments)", self.main_py)
         self.assertIn('{"tool_call":null,"confidence":0.0,"reply":""}', self.main_py)
         self.assertIn('"confidence":0.92', self.main_py)
         self.assertIn('"reply":"응, 메모리 패널 열어둘게."', self.main_py)
@@ -31,10 +34,11 @@ class ControlPageMemoryPanelCommandTests(unittest.TestCase):
         self.assertIn("no stiff '~습니다' or '~입니다' endings", self.main_py)
         self.assertIn('purpose="control_page_ui_tool"', self.main_py)
         self.assertIn('enqueue_control_page_ui_command(cleaned_action, panel_id="memory")', self.main_py)
-        self.assertIn("tool_decision = await decide_control_page_ui_tool_call(", self.main_py)
-        self.assertIn("memory_panel_action = control_page_ui_tool_action_from_decision(tool_decision)", self.main_py)
-        self.assertIn("execute_reply = execute_control_page_memory_panel_action(memory_panel_action)", self.main_py)
-        self.assertIn("return reply or execute_reply", self.main_py)
+        self.assertIn("cheap_decision = cheap_control_page_tool_decision(text)", self.main_py)
+        self.assertIn("if should_route_control_page_tool_candidate(text):", self.main_py)
+        self.assertIn("tool_decision_raw = await decide_control_page_tool_call(", self.main_py)
+        self.assertIn("tool_decision = control_page_tool_decision_from_llm(tool_decision_raw)", self.main_py)
+        self.assertIn("remember_control_page_tool_turn(guild, text, final_reply, tool_decision)", self.main_py)
         self.assertNotIn("def control_page_memory_panel_action(text: str) -> str | None:", self.main_py)
 
     def test_local_server_only_falls_back_for_explicit_memory_command(self) -> None:

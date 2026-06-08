@@ -190,7 +190,9 @@ class LocalMicRoutingTests(unittest.TestCase):
         self.assertIn("await ensure_local_mic_service_started()", main_py)
         self.assertIn("is_local_speaker_voice_client(vc)", main_py)
         self.assertIn("await ask_llm_and_speak_local(", main_py)
-        self.assertIn('normalized in {"/voice status", "/voice"}', main_py)
+        self.assertIn('"/voice": "voice.status"', main_py)
+        self.assertIn('"/voice status": "voice.status"', main_py)
+        self.assertIn('if tool_name == "voice.status":', main_py)
 
 
 if __name__ == "__main__":
