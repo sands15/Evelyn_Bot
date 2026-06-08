@@ -22,11 +22,15 @@ class ControlPageChatTests(unittest.TestCase):
         self.assertIn("appendChatMessage({", self.html)
         self.assertNotIn('lastBubble.querySelector(".caption").textContent = text;', self.html)
 
-    def test_chat_surface_uses_translucent_theme_scrollbars(self) -> None:
-        self.assertIn("--chat-panel:", self.html)
+    def test_chat_surface_uses_transparent_bubbles_and_themed_scrollbars(self) -> None:
+        self.assertIn("--chat-panel: transparent;", self.html)
         self.assertIn("--chat-input:", self.html)
+        self.assertIn("--scrollbar-track: transparent;", self.html)
         self.assertIn("--scrollbar-thumb:", self.html)
+        self.assertIn("--stage-bg: var(--bg);", self.html)
         self.assertIn("background: var(--chat-panel);", self.html)
+        self.assertIn("box-shadow: none;", self.html)
+        self.assertIn("backdrop-filter: none;", self.html)
         self.assertIn("background: var(--chat-input);", self.html)
         self.assertIn("scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);", self.html)
         self.assertIn(".chat-log::-webkit-scrollbar-thumb", self.html)
