@@ -48,7 +48,9 @@ class ControlPageChatTests(unittest.TestCase):
 
     def test_control_panel_commands_drive_memory_window(self) -> None:
         self.assertIn("let lastControlPanelCommandId = 0;", self.html)
-        self.assertIn("function applyControlPanelCommands(state)", self.html)
+        self.assertIn("function applyControlPanelCommands(state, options = {})", self.html)
+        self.assertIn("runInitialPanelCommands", self.html)
+        self.assertIn("applyState(payload.state, { runInitialPanelCommands: true });", self.html)
         self.assertIn('String(command.panel || "") !== "memory"', self.html)
         self.assertIn('action === "open"', self.html)
         self.assertIn("toggleMemoryWindow(true, options);", self.html)

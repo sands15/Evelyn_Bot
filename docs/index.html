@@ -1625,15 +1625,17 @@
       }
     }
 
-    function applyControlPanelCommands(state) {
+    function applyControlPanelCommands(state, options = {}) {
       const panelState = state && state.controlPagePanels;
       const commands = panelState && Array.isArray(panelState.commands) ? panelState.commands : [];
       const ids = commands.map((command) => Number(command && command.id) || 0);
       const maxId = ids.length ? Math.max(...ids) : lastControlPanelCommandId;
       if (!controlPanelCommandCursorReady) {
-        lastControlPanelCommandId = maxId;
         controlPanelCommandCursorReady = true;
-        return;
+        if (!options.runInitialPanelCommands) {
+          lastControlPanelCommandId = maxId;
+          return;
+        }
       }
       for (const command of commands) {
         const commandId = Number(command && command.id) || 0;
@@ -1679,7 +1681,7 @@
       return await response.json();
     }
 
-    function applyState(state) {
+    function applyState(state, options = {}) {
       if (!state || typeof state !== "object") return;
       const commands = mergeCommands(commandCatalog, state.commands || [], state.allCommands || []);
       if (commands.length) commandCatalog = commands;
@@ -1690,7 +1692,7 @@
       if (state.chat && Array.isArray(state.chat.messages)) {
         renderChatMessages(state.chat.messages);
       }
-      applyControlPanelCommands(state);
+      applyControlPanelCommands(state, options);
       const lines = Array.from(drawer.querySelectorAll(".status-list .line strong"));
       if (lines[0]) lines[0].textContent = services.mainReady ? "연결됨" : "대기";
       if (lines[1]) lines[1].textContent = voice.speaking ? "재생 중" : (services.ttsReady ? "대기" : "대기 중");
@@ -2329,7 +2331,7 @@
           body: JSON.stringify({ text: value })
         });
         if (payload.state) {
-          applyState(payload.state);
+          applyState(payload.state, { runInitialPanelCommands: true });
         } else {
           setBubble(payload.reply || "응답을 받았어.");
         }
