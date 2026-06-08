@@ -1546,18 +1546,41 @@
 
     function graphNodeColor(type) {
       const key = String(type || "").toLowerCase();
-      if (key === "core") return "#2f9d68";
-      if (key === "project") return "#3d7fc1";
-      if (key === "procedure") return "#9a6ad6";
-      if (key === "episode") return "#d18f32";
-      if (key === "daily") return "#76808f";
-      if (key === "legacy") return "#c65f73";
-      return "#5e6a76";
+      if (key === "core" || key === "project") return "#2f8f68";
+      if (key === "procedure" || key === "concept") return "#5f6fa8";
+      if (key === "daily" || key === "episode") return "#7b8790";
+      if (key === "legacy") return "#b46a78";
+      return "#65707a";
     }
 
-    function shortLabel(value, max = 24) {
+    function shortLabel(value, max = 16) {
       const text = String(value || "").trim();
-      return text.length > max ? text.slice(0, max - 1) + "…" : text;
+      return text.length > max ? text.slice(0, max - 3) + "..." : text;
+    }
+
+    function extractGraphDate(value) {
+      const match = String(value || "").match(/\b(20\d{2})[-./](\d{1,2})[-./](\d{1,2})\b/);
+      if (!match) return "";
+      return `${match[1]}-${match[2].padStart(2, "0")}-${match[3].padStart(2, "0")}`;
+    }
+
+    function acronymLabel(value) {
+      const text = String(value || "").replace(/[`"'()[\]{}]/g, " ").trim();
+      if (!text) return "";
+      const words = text
+        .split(/[^0-9A-Za-z가-힣]+/)
+        .map((word) => word.trim())
+        .filter(Boolean)
+        .filter((word) => !/^(and|for|the|with|from|node|note|memory)$/i.test(word));
+      if (!words.length) return shortLabel(text, 10).toUpperCase();
+      if (words.length === 1) return shortLabel(words[0], 8).toUpperCase();
+      return words.slice(0, 4).map((word) => word[0]).join("").toUpperCase();
+    }
+
+    function graphNodeLabel(node) {
+      const date = extractGraphDate(node.updated_at || node.updatedAt || node.title || node.rel_path || node.id);
+      if (date) return date;
+      return acronymLabel(node.title || node.id);
     }
 
     function renderMemoryGraph() {
@@ -1598,7 +1621,7 @@
         const point = positions.get(node.id);
         const importance = Number(node.importance || 0.5);
         const radius = Math.max(5, Math.min(12, 5 + importance * 7));
-        const label = index < 48 || node.id === selectedMemoryId ? shortLabel(node.title || node.id) : "";
+        const label = index < 64 || node.id === selectedMemoryId ? graphNodeLabel(node) : "";
         const active = node.id === selectedMemoryId ? " active" : "";
         return (
           '<g class="node' + active + '" tabindex="0" role="button" data-memory-id="' + escapeHtml(node.id) + '">' +
