@@ -10487,6 +10487,14 @@ def control_page_tool_policy_error(decision: dict[str, Any], *, guild: discord.G
     return None
 
 
+def control_page_tool_reply_from_execution(decision: dict[str, Any], execute_reply: str) -> str:
+    tool_name = clean_text(str(decision.get("tool") or ""))
+    router_reply = clean_text(str(decision.get("reply") or ""))
+    if tool_name == "control_page.memory_panel" and router_reply:
+        return router_reply
+    return clean_text(execute_reply)
+
+
 def remember_control_page_tool_turn(
     guild: discord.Guild | None,
     user_text: str,
@@ -10807,8 +10815,7 @@ async def handle_control_page_input(guild: discord.Guild | None, text: str) -> s
                 remember_control_page_tool_turn(guild, text, router_policy_error, tool_decision)
                 return router_policy_error
             execute_reply = await execute_control_page_tool(guild, tool_decision)
-            reply = clean_text(str(tool_decision.get("reply") or ""))
-            final_reply = reply or execute_reply
+            final_reply = control_page_tool_reply_from_execution(tool_decision, execute_reply)
             remember_control_page_tool_turn(guild, text, final_reply, tool_decision)
             return final_reply
         if isinstance(tool_decision_raw, dict):

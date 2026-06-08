@@ -41,11 +41,17 @@ class ControlPageToolRegistryTests(unittest.TestCase):
 
     def test_router_policy_blocks_before_router_reply_is_used(self) -> None:
         policy_index = self.main_py.index("router_policy_error = control_page_tool_policy_error(tool_decision, guild=guild)")
-        reply_index = self.main_py.index("final_reply = reply or execute_reply")
+        reply_index = self.main_py.index("final_reply = control_page_tool_reply_from_execution(tool_decision, execute_reply)")
         self.assertLess(policy_index, reply_index)
         self.assertIn("if router_policy_error:", self.main_py)
         self.assertIn("return router_policy_error", self.main_py)
         self.assertIn("remember_control_page_tool_turn(guild, text, router_policy_error, tool_decision)", self.main_py)
+
+    def test_router_reply_only_masks_execution_for_memory_panel(self) -> None:
+        self.assertIn("def control_page_tool_reply_from_execution(decision: dict[str, Any], execute_reply: str) -> str:", self.main_py)
+        self.assertIn('if tool_name == "control_page.memory_panel" and router_reply:', self.main_py)
+        self.assertIn("return clean_text(execute_reply)", self.main_py)
+        self.assertNotIn("final_reply = reply or execute_reply", self.main_py)
 
     def test_router_prompt_is_allowlist_based(self) -> None:
         self.assertIn("def control_page_tool_registry_prompt() -> str:", self.main_py)
