@@ -24,7 +24,7 @@ control page.
 - `evelyn_core/runtime/evelyn_core/` - runtime modules for config, memory,
   voice routing, control page, and integrations.
 - `docs/` - architecture notes and design documents.
-- `tests/` - regression tests for memory and dialogue routing.
+- `tests/` - grouped regression tests for routing, memory, voice, vision, and runtime behavior.
 
 ## Memory
 
@@ -64,8 +64,9 @@ private tokens, generated logs, local memory, or runtime state.
 Useful development checks:
 
 ```powershell
-python tests\test_memory_vault.py
-python tests\test_dialogue_turn_classifier.py
+python -m unittest discover -s tests
+python tests\memory\test_memory_vault.py
+python tests\core\test_dialogue_turn_classifier.py
 python -m py_compile main.py evelyn_core\runtime\evelyn_core\config.py
 node --check docs\assets\evelyn-page.js
 git diff --check
