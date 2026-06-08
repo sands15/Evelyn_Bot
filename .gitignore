@@ -46,6 +46,7 @@ archive/logs/
 archive/scratch/
 archive/nested-git/
 external/Voyager-upstream/
+training/
 training/**/__pycache__/
 training/**/logs/
 training/**/outputs/

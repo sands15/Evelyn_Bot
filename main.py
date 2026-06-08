@@ -2362,7 +2362,7 @@ def maybe_append_proactive_question(
     session_memory_key: str | None = None,
     metrics: dict | None = None,
 ) -> tuple[str, bool]:
-    answer = clean_text(answer_text)
+    answer = (answer_text or "").strip()
     if guild_id is None:
         return answer, False
     if not should_offer_proactive_question(
