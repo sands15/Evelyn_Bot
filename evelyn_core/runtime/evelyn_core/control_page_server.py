@@ -137,6 +137,7 @@ def default_commands() -> list[dict[str, str]]:
         {"command": "/status", "template": "/status", "summary": "Evelyn local runtime 상태 보기", "visibility": "always", "group": "기본"},
         {"command": "/memory", "template": "/memory", "summary": "메모리 패널 열기/숨기기", "visibility": "always", "group": "페이지"},
         {"command": "/obsidian", "template": "/obsidian", "summary": "메모리 패널 열기/숨기기", "visibility": "always", "group": "페이지"},
+        {"command": "/restart", "template": "/restart", "summary": "Evelyn bot process 재시작", "visibility": "always", "group": "시스템"},
         {"command": "/shutdown", "template": "/shutdown", "summary": "Evelyn local runtime 종료", "visibility": "always", "group": "시스템"},
     ]
 

@@ -8884,6 +8884,7 @@ CONTROL_PAGE_COMMANDS: list[dict[str, str]] = [
     {"command": "/minecraft disconnect", "template": "/minecraft disconnect", "summary": "Voyager Minecraft 모드 중지", "visibility": "minecraft-active", "group": "Minecraft"},
     {"command": "/minecraft goal <goal>", "template": "/minecraft goal ", "summary": "Minecraft 목표 변경", "visibility": "minecraft-active", "group": "Minecraft"},
     {"command": "/autonomy status", "template": "/autonomy status", "summary": "Evelyn 자율 행동 엔진 상태 보기", "visibility": "always", "group": "자율 행동"},
+    {"command": "/restart", "template": "/restart", "summary": "Evelyn bot process 재시작", "visibility": "always", "group": "시스템"},
     {"command": "/shutdown", "template": "/shutdown", "summary": "Evelyn runtime 종료 (Shut down Evelyn runtime)", "visibility": "always", "group": "시스템"},
 ]
 
@@ -10205,6 +10206,62 @@ def control_page_ui_tool_action_from_decision(decision: dict[str, Any] | None) -
     return action
 
 
+def is_explicit_control_page_restart_request(text: str) -> bool:
+    normalized = clean_text(text).lower().strip()
+    if not normalized:
+        return False
+    compact = re.sub(r"\s+", "", normalized)
+    if compact in {
+        "/restart",
+        "/재시작",
+        "restart",
+        "restartnow",
+        "reload",
+        "재시작",
+        "재시작해",
+        "재시작해줘",
+        "다시시작",
+        "다시시작해",
+        "다시시작해줘",
+        "다시켜",
+        "다시켜줘",
+        "재기동",
+        "재기동해",
+        "재기동해줘",
+        "리로드",
+        "리로드해",
+        "리로드해줘",
+    }:
+        return True
+    question_starts = (
+        "왜",
+        "어떻게",
+        "언제",
+        "뭐",
+        "무엇",
+        "혹시",
+        "재시작 왜",
+        "재시작하면",
+        "재시작 해야",
+        "재시작해야",
+    )
+    if normalized.startswith(question_starts) or "?" in normalized:
+        return False
+    polite_suffix = r"(?:해|해줘|해라|하자|시켜|시켜줘|부탁해|해둘래|해줄래|ㄱㄱ|now|please|pls)"
+    restart_pattern = rf"^(?:이제|지금|그럼|바로|적용하려고|적용되게|please|pls)?\s*(?:이블린|봇|bot|evelyn)?\s*(?:재시작|재기동|restart|reload)\s*{polite_suffix}?[.!]*$"
+    if re.search(restart_pattern, normalized):
+        return True
+    restart_tail_pattern = rf"(?:이제|지금|그럼|바로|적용하려고|적용되게)\s*(?:이블린|봇|bot|evelyn)?\s*(?:재시작|재기동|restart|reload)\s*{polite_suffix}?[.!]*$"
+    if re.search(restart_tail_pattern, normalized):
+        return True
+    return bool(re.search(r"^(?:이제|지금|그럼|바로)?\s*(?:다시\s*(?:시작|켜|띄워|올려))\s*(?:줘|해줘|해|라|둘래|줄래|부탁해)?[.!]*$", normalized))
+
+
+def execute_control_page_restart_command() -> str:
+    asyncio.create_task(restart_bot_process())
+    return "응, 이블린 다시 시작할게. 잠깐만 기다려줘."
+
+
 async def decide_control_page_ui_tool_call(text: str, *, guild_id: int | None, session_key: str) -> dict[str, Any] | None:
     if not ROUTER_LLM_ENABLED:
         return None
@@ -10288,6 +10345,8 @@ async def execute_control_page_command(guild: discord.Guild | None, text: str) -
             requested = normalized.rsplit(" ", 1)[-1]
             mode = set_voice_input_mode(requested)
             return f"음성 입력 모드: {voice_input_mode_status_line()} ({mode})"
+        if normalized in {"/restart", "/재시작"}:
+            return execute_control_page_restart_command()
         if normalized in {"/shutdown", "/quit", "/exit"}:
             if schedule_evelyn_local_shutdown():
                 return "Local Evelyn shutdown started. Only Evelyn local runtime windows and ports will be stopped."
@@ -10307,6 +10366,8 @@ async def execute_control_page_command(guild: discord.Guild | None, text: str) -
         if ok:
             return f"음성 채널에 다시 연결했어: {detail}"
         return f"음성 재연결 실패: {detail}"
+    if normalized in {"/restart", "/재시작"}:
+        return execute_control_page_restart_command()
     if normalized in {"/shutdown", "/quit", "/exit"}:
         if schedule_evelyn_stack_shutdown():
             return "Evelyn runtime 종료를 시작했어. supervisors, bot, LLM, TTS, Voyager, Evelyn-owned WSL services를 정리해."
@@ -10459,6 +10520,8 @@ async def answer_control_page_text(guild: discord.Guild | None, user_text: str) 
 async def handle_control_page_input(guild: discord.Guild | None, text: str) -> str:
     if clean_text(text).startswith("/"):
         return await execute_control_page_command(guild, text)
+    if is_explicit_control_page_restart_request(text):
+        return execute_control_page_restart_command()
     guild_id = control_page_effective_guild_id(guild)
     session_key = control_page_session_key(guild_id)
     tool_decision = await decide_control_page_ui_tool_call(text, guild_id=guild_id, session_key=session_key)
