@@ -10168,29 +10168,6 @@ def build_control_page_help_reply() -> str:
     return "\n".join(lines)
 
 
-def control_page_memory_panel_action(text: str) -> str | None:
-    normalized = clean_text(text).lower()
-    if normalized == "/memory":
-        return "toggle"
-    compact = re.sub(r"\s+", "", normalized)
-    if not re.search(r"메모리|memory|obsidian|옵시디언", compact):
-        return None
-    if not re.search(r"패널|창|vault|볼트|그래프|panel|window|graph|obsidian|옵시디언", compact):
-        return None
-    patterns = {
-        "open": r"열어줘|열어|열기|보여줘|보여|띄워줘|띄워|켜줘|켜|open|show",
-        "close": r"닫아줘|닫아|닫기|숨겨줘|숨겨|숨기|꺼줘|꺼|close|hide",
-        "toggle": r"토글|전환|toggle",
-    }
-    matches: list[tuple[int, str]] = []
-    for action, pattern in patterns.items():
-        matches.extend((match.start(), action) for match in re.finditer(pattern, compact))
-    if not matches:
-        return None
-    matches.sort(key=lambda item: item[0], reverse=True)
-    return matches[0][1]
-
-
 def execute_control_page_memory_panel_action(action: str) -> str:
     cleaned_action = clean_text(action).lower()
     if cleaned_action not in {"open", "close", "toggle"}:
@@ -10201,6 +10178,73 @@ def execute_control_page_memory_panel_action(action: str) -> str:
     if cleaned_action == "close":
         return "메모리 패널은 숨겨둘게."
     return "메모리 패널을 열거나 숨길게."
+
+
+def control_page_ui_tool_action_from_decision(decision: dict[str, Any] | None) -> str | None:
+    if not isinstance(decision, dict):
+        return None
+    tool_call = decision.get("tool_call")
+    if not isinstance(tool_call, dict):
+        return None
+    if clean_text(str(tool_call.get("name") or "")).lower() != "control_page.memory_panel":
+        return None
+    arguments = tool_call.get("arguments")
+    if not isinstance(arguments, dict):
+        return None
+    action = clean_text(str(arguments.get("action") or "")).lower()
+    if action not in {"open", "close", "toggle"}:
+        return None
+    confidence = float(decision.get("confidence", 0.0) or 0.0)
+    if confidence < 0.55:
+        return None
+    return action
+
+
+async def decide_control_page_ui_tool_call(text: str, *, guild_id: int | None, session_key: str) -> dict[str, Any] | None:
+    if not ROUTER_LLM_ENABLED:
+        return None
+    user_text = clean_text(text)
+    if not user_text:
+        return None
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are Evelyn's control-page tool router. "
+                "Decide whether the user's message should call a UI tool. "
+                "Return exactly one JSON object and no other text. "
+                "Available tools: "
+                '[{"name":"control_page.memory_panel","description":"Open, close, or toggle the memory panel on the control page.",'
+                '"arguments":{"action":"open|close|toggle"}}]. '
+                "If the user is asking to manipulate the control page UI, return "
+                '{"tool_call":{"name":"control_page.memory_panel","arguments":{"action":"open"}},"confidence":0.0,"reply":"short Korean confirmation"}. '
+                "If no UI tool should be called, return "
+                '{"tool_call":null,"confidence":0.0,"reply":""}. '
+                "Choose close when the user wants the memory panel/window hidden, open when they want it visible, "
+                "and toggle only when they explicitly ask to switch/toggle it. "
+                "Do not call a tool for ordinary questions, styling requests, implementation requests, or discussion."
+            ),
+        },
+        {
+            "role": "user",
+            "content": user_text,
+        },
+    ]
+    try:
+        return await ask_router_llm(
+            messages,
+            max_tokens=180,
+            timeout_seconds=min(ROUTER_ROUTE_TIMEOUT_SEC, 2.0),
+            purpose="control_page_ui_tool",
+            hot_path=True,
+            turn_id=current_turn_id(session_key),
+            session_key=session_key,
+            source="control_page",
+            guild_id=guild_id,
+        )
+    except Exception as exc:
+        print(f"[CONTROL PAGE TOOL ROUTER] failed: {exc!r}")
+        return None
 
 
 async def execute_control_page_command(guild: discord.Guild | None, text: str) -> str:
@@ -10408,9 +10452,14 @@ async def answer_control_page_text(guild: discord.Guild | None, user_text: str) 
 async def handle_control_page_input(guild: discord.Guild | None, text: str) -> str:
     if clean_text(text).startswith("/"):
         return await execute_control_page_command(guild, text)
-    memory_panel_action = control_page_memory_panel_action(text)
+    guild_id = control_page_effective_guild_id(guild)
+    session_key = control_page_session_key(guild_id)
+    tool_decision = await decide_control_page_ui_tool_call(text, guild_id=guild_id, session_key=session_key)
+    memory_panel_action = control_page_ui_tool_action_from_decision(tool_decision)
     if memory_panel_action:
-        return execute_control_page_memory_panel_action(memory_panel_action)
+        reply = clean_text(str((tool_decision or {}).get("reply") or ""))
+        execute_reply = execute_control_page_memory_panel_action(memory_panel_action)
+        return reply or execute_reply
     return await answer_control_page_text(guild, text)
 
 

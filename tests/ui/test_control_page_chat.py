@@ -40,13 +40,11 @@ class ControlPageChatTests(unittest.TestCase):
         self.assertIn("max-height: calc(100svh - 274px);", self.html)
         self.assertNotIn("max-height: min(300px, 34vh);", self.html)
 
-    def test_natural_memory_panel_commands_are_handled_locally(self) -> None:
-        self.assertIn("function memoryPanelActionFromText(value)", self.html)
-        self.assertIn("메모리|memory|obsidian|옵시디언", self.html)
-        self.assertIn("닫아줘|닫아|닫기|숨겨줘|숨겨|숨기|꺼줘|꺼|close|hide", self.html)
-        self.assertIn("열어줘|열어|열기|보여줘|보여|띄워줘|띄워|켜줘|켜|open|show", self.html)
-        self.assertIn("const memoryPanelAction = memoryPanelActionFromText(value);", self.html)
-        self.assertIn('applyControlPanelCommand({ action: memoryPanelAction, panel: "memory" });', self.html)
+    def test_natural_memory_panel_commands_go_through_backend_tool_router(self) -> None:
+        self.assertNotIn("function memoryPanelActionFromText(value)", self.html)
+        self.assertNotIn("const memoryPanelAction = memoryPanelActionFromText(value);", self.html)
+        self.assertNotIn('applyControlPanelCommand({ action: memoryPanelAction, panel: "memory" });', self.html)
+        self.assertIn('fetchApi("/api/control-page/chat"', self.html)
 
     def test_control_panel_commands_drive_memory_window(self) -> None:
         self.assertIn("let lastControlPanelCommandId = 0;", self.html)

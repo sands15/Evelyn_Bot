@@ -4,7 +4,6 @@ import asyncio
 import contextlib
 import json
 import os
-import re
 import subprocess
 import sys
 import time
@@ -47,29 +46,6 @@ MODEL_PORTS = {
     "codex": int(os.getenv("VOYAGER_CODEX_GATEWAY_PORT", "8787")),
     "bot": BOT_API_PORT,
 }
-
-
-def local_memory_panel_action(text: str) -> str | None:
-    normalized = str(text or "").lower().strip()
-    if normalized == "/memory":
-        return "toggle"
-    compact = re.sub(r"\s+", "", normalized)
-    if not re.search(r"메모리|memory|obsidian|옵시디언", compact):
-        return None
-    if not re.search(r"패널|창|vault|볼트|그래프|panel|window|graph|obsidian|옵시디언", compact):
-        return None
-    patterns = {
-        "open": r"열어줘|열어|열기|보여줘|보여|띄워줘|띄워|켜줘|켜|open|show",
-        "close": r"닫아줘|닫아|닫기|숨겨줘|숨겨|숨기|꺼줘|꺼|close|hide",
-        "toggle": r"토글|전환|toggle",
-    }
-    matches: list[tuple[int, str]] = []
-    for action, pattern in patterns.items():
-        matches.extend((match.start(), action) for match in re.finditer(pattern, compact))
-    if not matches:
-        return None
-    matches.sort(key=lambda item: item[0], reverse=True)
-    return matches[0][1]
 
 
 def with_memory_panel_command(state: dict[str, Any], action: str) -> dict[str, Any]:
@@ -527,11 +503,9 @@ async def chat_handler(request: web.Request) -> web.StreamResponse:
         services = runtime.get("services") if isinstance(runtime, dict) else {}
         summary = services.get("summary") if isinstance(services, dict) else ""
         return json_response({"ok": True, "reply": str(summary or state.get("statusText") or "Control page live."), "state": state})
-    memory_action = local_memory_panel_action(text)
     if normalized == "/memory":
         state = await degraded_state()
-        action = memory_action or "toggle"
-        return json_response({"ok": True, "reply": memory_panel_reply(action), "state": with_memory_panel_command(state, action)})
+        return json_response({"ok": True, "reply": memory_panel_reply("toggle"), "state": with_memory_panel_command(state, "toggle")})
     if normalized == "/obsidian":
         state = await degraded_state()
         result = open_memory_vault_payload()
@@ -561,9 +535,6 @@ async def chat_handler(request: web.Request) -> web.StreamResponse:
             },
             status=500,
         )
-    if memory_action:
-        state = await degraded_state()
-        return json_response({"ok": True, "reply": memory_panel_reply(memory_action), "state": with_memory_panel_command(state, memory_action)})
     proxied = await proxy_json(request, "POST", "/api/control-page/chat", body=payload)
     if proxied is not None and proxied.status < 500:
         return proxied

@@ -1613,32 +1613,6 @@
       return lines.join("\n");
     }
 
-    function lastPatternIndex(text, pattern) {
-      let lastIndex = -1;
-      for (const match of text.matchAll(pattern)) {
-        lastIndex = match.index || 0;
-      }
-      return lastIndex;
-    }
-
-    function memoryPanelActionFromText(value) {
-      const text = String(value || "").toLowerCase().trim();
-      if (!text) return "";
-      if (text === "/memory") return "toggle";
-      const compact = text.replace(/\s+/g, "");
-      const mentionsMemory = /메모리|memory|obsidian|옵시디언/.test(compact);
-      const mentionsPanel = /패널|창|vault|볼트|그래프|panel|window|graph|obsidian|옵시디언/.test(compact);
-      if (!mentionsMemory || !mentionsPanel) return "";
-      const candidates = [
-        { action: "open", index: lastPatternIndex(compact, /(열어줘|열어|열기|보여줘|보여|띄워줘|띄워|켜줘|켜|open|show)/g) },
-        { action: "close", index: lastPatternIndex(compact, /(닫아줘|닫아|닫기|숨겨줘|숨겨|숨기|꺼줘|꺼|close|hide)/g) },
-        { action: "toggle", index: lastPatternIndex(compact, /(토글|전환|toggle)/g) }
-      ].filter((candidate) => candidate.index >= 0);
-      if (!candidates.length) return "";
-      candidates.sort((a, b) => b.index - a.index);
-      return candidates[0].action;
-    }
-
     function applyControlPanelCommand(command, options = {}) {
       if (!command || String(command.panel || "") !== "memory") return;
       const action = String(command.action || "").toLowerCase();
@@ -2325,7 +2299,6 @@
       const value = composer.value.trim();
       if (!value || sending) return;
       const normalized = value.toLowerCase();
-      const memoryPanelAction = memoryPanelActionFromText(value);
       composer.value = "";
       renderSuggestions();
       if (normalized === "/memory") {
@@ -2338,16 +2311,6 @@
       }
       if (normalized === "/" || normalized === "/help") {
         setBubble(formatHelp());
-        return;
-      }
-      if (memoryPanelAction) {
-        appendChatMessage({
-          role: "user",
-          author: "정훈",
-          text: value,
-          at: Date.now() / 1000
-        });
-        applyControlPanelCommand({ action: memoryPanelAction, panel: "memory" });
         return;
       }
       sending = true;
