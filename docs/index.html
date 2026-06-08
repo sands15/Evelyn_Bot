@@ -318,7 +318,7 @@
     .chat-log {
       display: grid;
       gap: 8px;
-      max-height: min(300px, 34vh);
+      max-height: min(620px, calc(100vh - 214px));
       overflow-y: auto;
       padding-right: 4px;
       overscroll-behavior: contain;
@@ -1120,6 +1120,10 @@
       .chat-log,
       .bubble {
         max-width: 100%;
+      }
+
+      .chat-log {
+        max-height: calc(100svh - 274px);
       }
 
       .composer {
@@ -2423,18 +2427,13 @@
 
     function clampWindow(left, top, width, height) {
       const margin = 32;
-      const topMargin = 0;
-      const maxWidth = window.innerWidth - margin * 2;
-      const maxHeight = window.innerHeight - topMargin - margin;
-      const clampedWidth = Math.min(Math.max(330, width), maxWidth);
-      const clampedHeight = Math.min(Math.max(260, height), maxHeight);
-      const maxLeft = window.innerWidth - clampedWidth - margin;
-      const maxTop = window.innerHeight - clampedHeight - margin;
+      const maxLeft = window.innerWidth - width - margin;
+      const maxTop = window.innerHeight - height - margin;
       return {
         left: Math.min(Math.max(margin, left), Math.max(margin, maxLeft)),
-        top: Math.min(Math.max(topMargin, top), Math.max(topMargin, maxTop)),
-        width: clampedWidth,
-        height: clampedHeight
+        top: Math.min(Math.max(margin, top), Math.max(margin, maxTop)),
+        width: Math.min(Math.max(330, width), window.innerWidth - margin * 2),
+        height: Math.min(Math.max(260, height), window.innerHeight - margin * 2)
       };
     }
 

@@ -35,6 +35,11 @@ class ControlPageChatTests(unittest.TestCase):
         self.assertIn("scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);", self.html)
         self.assertIn(".chat-log::-webkit-scrollbar-thumb", self.html)
 
+    def test_chat_log_can_grow_toward_page_top(self) -> None:
+        self.assertIn("max-height: min(620px, calc(100vh - 214px));", self.html)
+        self.assertIn("max-height: calc(100svh - 274px);", self.html)
+        self.assertNotIn("max-height: min(300px, 34vh);", self.html)
+
 
 if __name__ == "__main__":
     unittest.main()
