@@ -759,13 +759,10 @@
     }
 
     .memory-graph .node text {
-      fill: var(--text);
+      fill: var(--soft);
       font-size: 11px;
-      font-weight: 800;
-      paint-order: stroke;
-      stroke: var(--memory-bg);
-      stroke-width: 4px;
-      stroke-linejoin: round;
+      font-weight: 600;
+      dominant-baseline: hanging;
       pointer-events: none;
     }
 
@@ -2089,7 +2086,7 @@
           '<title>' + escapeHtml(node.title || node.id) + '</title>' +
           '<circle cx="' + point.x.toFixed(1) + '" cy="' + point.y.toFixed(1) + '" r="' + radius.toFixed(1) +
           '" fill="' + graphNodeColor(node.type) + '"></circle>' +
-          (label ? '<text x="' + (point.x + radius + 5).toFixed(1) + '" y="' + (point.y + 4).toFixed(1) + '">' + escapeHtml(label) + '</text>' : '') +
+          (label ? '<text x="' + point.x.toFixed(1) + '" y="' + (point.y + radius + 7).toFixed(1) + '" text-anchor="middle">' + escapeHtml(label) + '</text>' : '') +
           '</g>'
         );
       }).join("");

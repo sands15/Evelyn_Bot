@@ -25,6 +25,13 @@ class ControlPageMemoryGraphTests(unittest.TestCase):
         self.assertNotIn("const width = 980;", self.html)
         self.assertNotIn("const height = 560;", self.html)
 
+    def test_graph_labels_are_below_nodes_without_heavy_stroke(self) -> None:
+        self.assertIn("fill: var(--soft);", self.html)
+        self.assertIn("font-weight: 600;", self.html)
+        self.assertIn("dominant-baseline: hanging;", self.html)
+        self.assertIn('" y="\' + (point.y + radius + 7).toFixed(1) + \'" text-anchor="middle"', self.html)
+        self.assertNotIn("stroke-width: 4px;", self.html)
+
 
 if __name__ == "__main__":
     unittest.main()
