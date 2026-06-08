@@ -10222,12 +10222,14 @@ async def decide_control_page_ui_tool_call(text: str, *, guild_id: int | None, s
                 '[{"name":"control_page.memory_panel","description":"Open, close, or toggle the memory panel on the control page.",'
                 '"arguments":{"action":"open|close|toggle"}}]. '
                 "If the user is asking to manipulate the control page UI, return "
-                '{"tool_call":{"name":"control_page.memory_panel","arguments":{"action":"open"}},"confidence":0.92,"reply":"short Korean confirmation"}. '
+                '{"tool_call":{"name":"control_page.memory_panel","arguments":{"action":"open"}},"confidence":0.92,"reply":"응, 메모리 패널 열어둘게."}. '
                 "If no UI tool should be called, return "
                 '{"tool_call":null,"confidence":0.0,"reply":""}. '
                 "Choose close when the user wants the memory panel/window hidden, open when they want it visible, "
                 "and toggle only when they explicitly ask to switch/toggle it. "
-                "Do not call a tool for ordinary questions, styling requests, implementation requests, or discussion."
+                "Do not call a tool for ordinary questions, styling requests, implementation requests, or discussion. "
+                "When you do call a UI tool, write reply in Evelyn's style: Korean, warm and sharp, casual 반말, "
+                "one short sentence, no stiff '~습니다' or '~입니다' endings, no extra explanation."
             ),
         },
         {
