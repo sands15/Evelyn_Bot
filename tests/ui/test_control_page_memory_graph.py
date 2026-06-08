@@ -39,6 +39,12 @@ class ControlPageMemoryGraphTests(unittest.TestCase):
         self.assertIn("function applyWindowBox(box)", self.html)
         self.assertIn("applyMemoryGraphLayout(memoryGraphMotionState);", self.html)
 
+    def test_graph_nodes_do_not_highlight_on_hover(self) -> None:
+        self.assertNotIn(".memory-graph .node:hover circle", self.html)
+        self.assertNotIn("stroke: var(--green);", self.html)
+        self.assertNotIn("stroke-width: 3;", self.html)
+        self.assertIn("stroke: rgba(88, 96, 108, 0.52);", self.html)
+
 
 if __name__ == "__main__":
     unittest.main()
