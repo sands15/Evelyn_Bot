@@ -1316,6 +1316,8 @@
     const memoryDeleteButton = document.getElementById("memoryDeleteButton");
     let memorySnapshot = null;
     let memoryGraphSnapshot = null;
+    let memoryGraphMotionFrame = 0;
+    let memoryGraphMotionState = null;
     let selectedMemoryId = "";
     let selectedMemoryCard = null;
     let memoryPage = "graph";
@@ -1540,7 +1542,11 @@
       document.querySelectorAll("[data-memory-page-content]").forEach((panel) => {
         panel.classList.toggle("active", panel.getAttribute("data-memory-page-content") === memoryPage);
       });
-      renderMemoryGraph();
+      if (memoryPage === "graph") {
+        renderMemoryGraph();
+      } else {
+        stopMemoryGraphMotion();
+      }
       renderMemoryCards();
     }
 
@@ -1583,11 +1589,136 @@
       return acronymLabel(node.title || node.id);
     }
 
+    function stopMemoryGraphMotion() {
+      if (memoryGraphMotionFrame) {
+        cancelAnimationFrame(memoryGraphMotionFrame);
+      }
+      memoryGraphMotionFrame = 0;
+      memoryGraphMotionState = null;
+    }
+
+    function startMemoryGraphMotion(nodes, visibleEdges, positions) {
+      stopMemoryGraphMotion();
+      const svg = memoryGraph ? memoryGraph.querySelector("svg") : null;
+      if (!svg || !nodes.length) return;
+
+      const width = 980;
+      const height = 560;
+      const state = new Map();
+      nodes.forEach((node, index) => {
+        const point = positions.get(node.id) || { x: width / 2, y: height / 2 };
+        const importance = Number(node.importance || 0.5);
+        state.set(String(node.id), {
+          x: point.x,
+          y: point.y,
+          homeX: point.x,
+          homeY: point.y,
+          vx: 0,
+          vy: 0,
+          phase: index * 0.67,
+          radius: Math.max(5, Math.min(12, 5 + importance * 7))
+        });
+      });
+
+      const nodeElements = Array.from(svg.querySelectorAll(".node")).map((element) => {
+        const id = String(element.getAttribute("data-memory-id") || "");
+        return {
+          id,
+          circle: element.querySelector("circle"),
+          text: element.querySelector("text")
+        };
+      }).filter((item) => item.id && item.circle);
+
+      const edgeElements = Array.from(svg.querySelectorAll(".edge")).map((element, index) => {
+        const edge = visibleEdges[index] && visibleEdges[index].edge;
+        return {
+          element,
+          source: edge ? String(edge.source || "") : "",
+          target: edge ? String(edge.target || "") : ""
+        };
+      }).filter((item) => item.source && item.target);
+
+      const motionState = { state, nodeElements, edgeElements };
+      memoryGraphMotionState = motionState;
+      let lastTick = 0;
+
+      function step(now) {
+        memoryGraphMotionFrame = requestAnimationFrame(step);
+        if (
+          document.hidden ||
+          memoryPage !== "graph" ||
+          !memoryWindow.classList.contains("open") ||
+          memoryGraphMotionState !== motionState
+        ) {
+          lastTick = now;
+          return;
+        }
+        if (now - lastTick < 32) return;
+        lastTick = now;
+
+        const time = now / 1000;
+        const centerX = width / 2;
+        const centerY = height / 2;
+        edgeElements.forEach(({ source, target }) => {
+          const left = state.get(source);
+          const right = state.get(target);
+          if (!left || !right) return;
+          const dx = right.x - left.x;
+          const dy = right.y - left.y;
+          const distance = Math.max(1, Math.hypot(dx, dy));
+          const force = Math.max(-0.018, Math.min(0.018, (distance - 94) * 0.00028));
+          const fx = (dx / distance) * force;
+          const fy = (dy / distance) * force;
+          left.vx += fx;
+          left.vy += fy;
+          right.vx -= fx;
+          right.vy -= fy;
+        });
+
+        state.forEach((node) => {
+          const orbitX = Math.sin(time * 0.42 + node.phase) * 12;
+          const orbitY = Math.cos(time * 0.36 + node.phase * 0.8) * 9;
+          node.vx += (node.homeX + orbitX - node.x) * 0.010;
+          node.vy += (node.homeY + orbitY - node.y) * 0.010;
+          node.vx += (centerX - node.x) * 0.0008;
+          node.vy += (centerY - node.y) * 0.0008;
+          node.vx *= 0.86;
+          node.vy *= 0.86;
+          node.x = Math.max(24, Math.min(width - 120, node.x + node.vx));
+          node.y = Math.max(24, Math.min(height - 24, node.y + node.vy));
+        });
+
+        edgeElements.forEach(({ element, source, target }) => {
+          const left = state.get(source);
+          const right = state.get(target);
+          if (!left || !right) return;
+          element.setAttribute("x1", left.x.toFixed(1));
+          element.setAttribute("y1", left.y.toFixed(1));
+          element.setAttribute("x2", right.x.toFixed(1));
+          element.setAttribute("y2", right.y.toFixed(1));
+        });
+
+        nodeElements.forEach(({ id, circle, text }) => {
+          const node = state.get(id);
+          if (!node) return;
+          circle.setAttribute("cx", node.x.toFixed(1));
+          circle.setAttribute("cy", node.y.toFixed(1));
+          if (text) {
+            text.setAttribute("x", (node.x + node.radius + 5).toFixed(1));
+            text.setAttribute("y", (node.y + 4).toFixed(1));
+          }
+        });
+      }
+
+      memoryGraphMotionFrame = requestAnimationFrame(step);
+    }
+
     function renderMemoryGraph() {
       if (!memoryGraph) return;
       const nodes = Array.isArray(memoryGraphSnapshot && memoryGraphSnapshot.nodes) ? memoryGraphSnapshot.nodes : [];
       const edges = Array.isArray(memoryGraphSnapshot && memoryGraphSnapshot.edges) ? memoryGraphSnapshot.edges : [];
       if (!nodes.length) {
+        stopMemoryGraphMotion();
         memoryGraph.innerHTML = '<div class="memory-empty">표시할 메모리 노드가 없습니다.</div>';
         return;
       }
@@ -1640,6 +1771,7 @@
         '<div class="memory-graph-stats">' +
         escapeHtml(`${stats.node_count || nodes.length} nodes / ${stats.edge_count || edges.length} edges`) +
         '</div>';
+      startMemoryGraphMotion(nodes, visibleEdges, positions);
     }
 
     function renderMemoryEditor() {
@@ -1827,6 +1959,8 @@
       memoryWindow.classList.toggle("open", shouldOpen);
       if (shouldOpen) {
         loadMemoryVault({ force: false });
+      } else {
+        stopMemoryGraphMotion();
       }
       setBubble(shouldOpen ? "메모리 vault를 열어둘게." : "메모리 vault는 숨겨둘게.");
     }
