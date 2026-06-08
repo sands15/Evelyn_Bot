@@ -131,7 +131,7 @@ def memory_index_db_path(root: Path | None = None) -> Path:
 
 def ensure_memory_vault_layout(root: Path | None = None) -> Path:
     vault = memory_vault_root(root)
-    for name in ("core", "daily", "episodes", "concepts", "procedures", "projects"):
+    for name in ("core", "daily", "episodes", "concepts", "procedures", "projects", "legacy"):
         (vault / name).mkdir(parents=True, exist_ok=True)
     memory_index_dir(root).mkdir(parents=True, exist_ok=True)
     return vault
@@ -1353,6 +1353,177 @@ def refresh_legacy_memory_mirror(guild_id: int, *, root: Path | None = None, max
     return target
 
 
+def _legacy_scope_dirs(guild_dir: Path, *, max_scope_dirs: int = 24) -> list[Path]:
+    scope_dirs = [guild_dir]
+    for pattern in ("room_*", "person_*", "session_*"):
+        scope_dirs.extend(sorted(guild_dir.glob(pattern))[:max_scope_dirs])
+    return list(dict.fromkeys(scope_dirs))
+
+
+def _legacy_source_updated_at(path: Path) -> str:
+    try:
+        return datetime.utcfromtimestamp(path.stat().st_mtime).replace(microsecond=0).isoformat() + "Z"
+    except Exception:
+        return ""
+
+
+def _legacy_node_title(guild_id: int, scope_dir: Path, source_label: str) -> str:
+    scope_label = scope_dir.name if scope_dir.name != f"guild_{guild_id}" else "guild"
+    scope_label = scope_label.replace("_", " ")
+    source_label = source_label.replace("_", " ").replace("/", " ")
+    return f"Legacy {scope_label} {source_label}".strip()
+
+
+def _legacy_node_path(vault: Path, guild_id: int, scope_dir: Path, source_label: str) -> Path:
+    key = f"{guild_id}:{scope_dir.as_posix()}:{source_label}"
+    digest = _stable_id(key)
+    slug = _slug(f"{scope_dir.name}-{source_label}", default="legacy-memory")
+    return vault / "legacy" / f"guild-{guild_id}" / f"{slug}-{digest}.md"
+
+
+def _legacy_jsonl_preview(path: Path, *, max_items: int = 16) -> list[str]:
+    lines: list[str] = []
+    for raw_line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        if len(lines) >= max_items:
+            break
+        try:
+            row = json.loads(raw_line)
+        except Exception:
+            continue
+        if not isinstance(row, dict):
+            continue
+        text = clean_text(str(row.get("text") or row.get("content") or row.get("message") or ""))
+        if not text:
+            continue
+        label = clean_text(str(row.get("type") or row.get("role") or row.get("speaker") or "entry"))
+        if len(text) > 220:
+            text = text[:217].rstrip() + "..."
+        lines.append(f"- **{label or 'entry'}**: {text}")
+    return lines
+
+
+def _legacy_text_preview(path: Path, *, max_chars: int = 1200) -> list[str]:
+    text = clean_text(path.read_text(encoding="utf-8", errors="ignore"))
+    if not text:
+        return []
+    if len(text) > max_chars:
+        text = text[: max_chars - 3].rstrip() + "..."
+    return [text]
+
+
+def _legacy_json_preview(path: Path, *, max_chars: int = 1200) -> list[str]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8", errors="ignore"))
+    except Exception:
+        return []
+    text = json.dumps(data, ensure_ascii=False, indent=2)
+    if len(text) > max_chars:
+        text = text[: max_chars - 3].rstrip() + "..."
+    return ["```json", text, "```"]
+
+
+def _write_legacy_node_note(
+    target: Path,
+    *,
+    guild_id: int,
+    title: str,
+    source_path: Path,
+    source_label: str,
+    body_lines: list[str],
+) -> Path | None:
+    if not body_lines:
+        return None
+    target.parent.mkdir(parents=True, exist_ok=True)
+    note_id = f"legacy-{_stable_id(str(source_path))}"
+    source_rel = source_path.as_posix()
+    front_matter = _format_front_matter(
+        {
+            "id": note_id,
+            "type": "legacy",
+            "title": title,
+            "tags": ["legacy-memory", source_label.replace("/", "-"), f"guild-{guild_id}"],
+            "projects": [DEFAULT_PROJECT],
+            "links": [f"legacy-guild-{guild_id}"],
+            "source": "legacy-memory-node-mirror",
+            "importance": "0.42",
+            "confidence": "medium",
+            "updated_at": _legacy_source_updated_at(source_path),
+        }
+    )
+    content = "\n".join(
+        [
+            front_matter,
+            "",
+            f"# {title}",
+            "",
+            f"Source: `{source_rel}`",
+            "",
+            "## Entries",
+            "",
+            *body_lines,
+            "",
+        ]
+    )
+    if target.exists() and target.read_text(encoding="utf-8", errors="ignore") == content:
+        return target
+    target.write_text(content, encoding="utf-8")
+    return target
+
+
+def refresh_legacy_memory_node_notes(
+    guild_id: int,
+    *,
+    root: Path | None = None,
+    max_scope_dirs: int = 24,
+    max_items_per_note: int = 16,
+) -> list[Path]:
+    """Mirror legacy scoped memory files as individual Obsidian graph nodes."""
+    base_root = root or MEMORY_ROOT
+    guild_dir = base_root / f"guild_{guild_id}"
+    if not guild_dir.exists():
+        return []
+
+    vault = ensure_memory_vault_layout(root)
+    created_or_existing: list[Path] = []
+    for scope_dir in _legacy_scope_dirs(guild_dir, max_scope_dirs=max_scope_dirs):
+        sources: list[tuple[str, Path, str]] = [
+            ("summary", scope_dir / "rolling_summary.txt", "text"),
+            ("facts", scope_dir / "vault" / "facts.jsonl", "jsonl"),
+            ("questions", scope_dir / "vault" / "questions.jsonl", "jsonl"),
+            ("state", scope_dir / "cognitive_state.json", "json"),
+        ]
+        raw_dir = scope_dir / "vault" / "raw"
+        if raw_dir.exists():
+            for raw_path in sorted(raw_dir.glob("*.jsonl")):
+                sources.append((f"raw-{raw_path.stem}", raw_path, "jsonl"))
+
+        for source_label, source_path, source_kind in sources:
+            if not source_path.exists() or not source_path.is_file():
+                continue
+            if source_kind == "jsonl":
+                body_lines = _legacy_jsonl_preview(source_path, max_items=max_items_per_note)
+            elif source_kind == "json":
+                body_lines = _legacy_json_preview(source_path)
+            else:
+                body_lines = _legacy_text_preview(source_path)
+            title = _legacy_node_title(guild_id, scope_dir, source_label)
+            target = _legacy_node_path(vault, guild_id, scope_dir, source_label)
+            path = _write_legacy_node_note(
+                target,
+                guild_id=guild_id,
+                title=title,
+                source_path=source_path,
+                source_label=source_label,
+                body_lines=body_lines,
+            )
+            if path is not None:
+                created_or_existing.append(path)
+
+    if created_or_existing:
+        sync_memory_vault_index(root=root)
+    return created_or_existing
+
+
 def append_turn_rows_to_memory_vault(
     guild_id: int,
     rows: list[dict[str, Any]],
@@ -1652,6 +1823,7 @@ def run_memory_vault_maintenance_once(guild_id: int, *, root: Path | None = None
     sub_llm = probe_sub_llm_dependency()
     bootstrap_paths = bootstrap_memory_vault_source(root=root)
     legacy_path = refresh_legacy_memory_mirror(guild_id, root=root)
+    legacy_nodes = refresh_legacy_memory_node_notes(guild_id, root=root)
     consolidated_path = consolidate_daily_memory_once(guild_id, root=root)
     semantic_consolidation = run_semantic_memory_consolidation_once(
         guild_id,
@@ -1667,6 +1839,7 @@ def run_memory_vault_maintenance_once(guild_id: int, *, root: Path | None = None
         "index_path": str(memory_index_db_path(root)),
         "bootstrap_notes": [str(path) for path in bootstrap_paths],
         "legacy_mirror": str(legacy_path) if legacy_path else "",
+        "legacy_nodes": [str(path) for path in legacy_nodes],
         "daily_consolidation": str(consolidated_path) if consolidated_path else "",
         "semantic_consolidation": semantic_consolidation,
         "hot_context_sources": hot_context.get("sources", []),
@@ -1687,6 +1860,7 @@ def recall_memory_vault(
     try:
         if request.guild_id is not None:
             refresh_legacy_memory_mirror(request.guild_id, root=root)
+            refresh_legacy_memory_node_notes(request.guild_id, root=root)
         version = sync_memory_vault_index(root=root, db_path=db_path)
         index_path = db_path or memory_index_db_path(root)
         metadata = request.metadata if isinstance(request.metadata, dict) else {}
@@ -2306,6 +2480,7 @@ def activate_memory_vault_for_guild(guild_id: int, *, root: Path | None = None) 
     sub_llm = probe_sub_llm_dependency()
     bootstrap_paths = bootstrap_memory_vault_source(root=root)
     legacy_path = refresh_legacy_memory_mirror(guild_id, root=root)
+    legacy_nodes = refresh_legacy_memory_node_notes(guild_id, root=root)
     consolidated_path = consolidate_daily_memory_once(guild_id, root=root)
     semantic_consolidation = run_semantic_memory_consolidation_once(
         guild_id,
@@ -2320,6 +2495,7 @@ def activate_memory_vault_for_guild(guild_id: int, *, root: Path | None = None) 
         "index_path": str(memory_index_db_path(root)),
         "bootstrap_notes": [str(path) for path in bootstrap_paths],
         "legacy_mirror": str(legacy_path) if legacy_path else "",
+        "legacy_nodes": [str(path) for path in legacy_nodes],
         "daily_consolidation": str(consolidated_path) if consolidated_path else "",
         "semantic_consolidation": semantic_consolidation,
         "memory_version": version,
@@ -2381,6 +2557,7 @@ __all__ = [
     "read_memory_hot_context",
     "request_sub_llm_json",
     "refresh_legacy_memory_mirror",
+    "refresh_legacy_memory_node_notes",
     "refresh_memory_hot_context",
     "consolidate_daily_memory_once",
     "run_memory_vault_maintenance_once",

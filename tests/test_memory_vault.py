@@ -26,6 +26,7 @@ from evelyn_core.memory_vault import (  # noqa: E402
     probe_sub_llm_dependency,
     read_memory_hot_context,
     recall_memory_vault,
+    refresh_legacy_memory_node_notes,
     run_memory_vault_maintenance_once,
     run_semantic_memory_consolidation_once,
     sync_memory_vault_index,
@@ -408,6 +409,27 @@ class MemoryVaultTests(unittest.TestCase):
         self.assertIn("> [!summary] 한눈에 보기", legacy_content)
         self.assertNotIn("## guild_123", legacy_content)
         self.assertNotIn("Legacy Guild Memory", legacy_content)
+
+    def test_legacy_memory_node_notes_restore_graph_nodes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            guild_dir = root / "guild_123"
+            vault_dir = guild_dir / "vault"
+            vault_dir.mkdir(parents=True)
+            (guild_dir / "rolling_summary.txt").write_text("User prefers conservative progress reports.", encoding="utf-8")
+            (vault_dir / "facts.jsonl").write_text(
+                '{"type":"preference","text":"Keep Obsidian memory nodes visible."}\n',
+                encoding="utf-8",
+            )
+
+            nodes = refresh_legacy_memory_node_notes(123, root=root)
+            graph = export_memory_graph(root=root, max_nodes=80)
+
+        self.assertGreaterEqual(len(nodes), 2)
+        legacy_nodes = [node for node in graph["nodes"] if node["type"] == "legacy"]
+        self.assertGreaterEqual(len(legacy_nodes), 2)
+        self.assertTrue(any("facts" in node["title"].lower() for node in legacy_nodes))
+        self.assertTrue(any("Keep Obsidian memory nodes visible." in node["snippet"] for node in legacy_nodes))
 
     def test_context_builder_includes_pinned_hot_context(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
