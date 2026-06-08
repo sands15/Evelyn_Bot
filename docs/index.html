@@ -1272,6 +1272,7 @@
             <span class="memory-vault-path" id="memoryVaultPath"></span>
           </div>
           <div class="memory-actions">
+            <button id="memoryNodeGrowButton" type="button">노드 +</button>
             <button id="memoryRefreshButton" type="button">새로고침</button>
             <button id="openObsidianButton" type="button">Obsidian</button>
           </div>
@@ -1344,6 +1345,7 @@
     const memoryCount = document.getElementById("memoryCount");
     const memoryVaultPath = document.getElementById("memoryVaultPath");
     const memoryRefreshButton = document.getElementById("memoryRefreshButton");
+    const memoryNodeGrowButton = document.getElementById("memoryNodeGrowButton");
     const openObsidianButton = document.getElementById("openObsidianButton");
     const memoryGraph = document.getElementById("memoryGraph");
     const memoryEditTitle = document.getElementById("memoryEditTitle");
@@ -1356,6 +1358,7 @@
     let memoryGraphMotionFrame = 0;
     let memoryGraphMotionState = null;
     let memoryGraphDragSuppressClick = false;
+    let memoryGraphResizeFrame = 0;
     let selectedMemoryId = "";
     let selectedMemoryCard = null;
     let memoryPage = "graph";
@@ -1367,6 +1370,8 @@
     let suggestionItems = [];
     let selectedSuggestionIndex = 0;
     let renderedChatSignature = "";
+    let memoryGraphNodeScale = Number(localStorage.getItem("evelynMemoryGraphNodeScale") || "1") || 1;
+    memoryGraphNodeScale = Math.max(1, Math.min(2, memoryGraphNodeScale));
     let commandCatalog = [
       { command: "/help", template: "/help", summary: "명령어 목록 보기", group: "기본" },
       { command: "/status", template: "/status", summary: "Evelyn, 음성, 모델 상태 요약", group: "기본" },
@@ -1686,6 +1691,41 @@
       return "hsl(210 28% 76%)";
     }
 
+    function graphDimensions() {
+      const rect = memoryGraph ? memoryGraph.getBoundingClientRect() : null;
+      return {
+        width: Math.max(360, Math.round((rect && rect.width) || 720)),
+        height: Math.max(300, Math.round((rect && rect.height) || 420))
+      };
+    }
+
+    function graphNodeRadius(importance) {
+      const base = Math.max(5, Math.min(12, 5 + Number(importance || 0.5) * 7));
+      return base * memoryGraphNodeScale;
+    }
+
+    function updateMemoryNodeGrowButton() {
+      if (!memoryNodeGrowButton) return;
+      memoryNodeGrowButton.textContent = memoryGraphNodeScale >= 1.95 ? "노드 1x" : `노드 ${memoryGraphNodeScale.toFixed(2)}x`;
+      memoryNodeGrowButton.title = memoryGraphNodeScale >= 1.95 ? "노드 크기를 기본값으로 되돌리기" : "노드만 크게 보기";
+    }
+
+    function growMemoryGraphNodes() {
+      memoryGraphNodeScale = memoryGraphNodeScale >= 1.95 ? 1 : Math.min(2, Number((memoryGraphNodeScale + 0.25).toFixed(2)));
+      localStorage.setItem("evelynMemoryGraphNodeScale", String(memoryGraphNodeScale));
+      updateMemoryNodeGrowButton();
+      renderMemoryGraph();
+    }
+
+    function scheduleMemoryGraphRender() {
+      if (!memoryGraph || memoryPage !== "graph" || !memoryGraphSnapshot) return;
+      if (memoryGraphResizeFrame) cancelAnimationFrame(memoryGraphResizeFrame);
+      memoryGraphResizeFrame = requestAnimationFrame(() => {
+        memoryGraphResizeFrame = 0;
+        renderMemoryGraph();
+      });
+    }
+
     function shortLabel(value, max = 16) {
       const text = String(value || "").trim();
       return text.length > max ? text.slice(0, max - 3) + "..." : text;
@@ -1733,8 +1773,9 @@
     }
 
     function clampGraphNodePosition(node, width, height) {
-      node.x = Math.max(24, Math.min(width - 120, node.x));
-      node.y = Math.max(24, Math.min(height - 24, node.y));
+      const margin = Math.max(18, Number(node.radius || 8) + 8);
+      node.x = Math.max(margin, Math.min(Math.max(margin, width - 120), node.x));
+      node.y = Math.max(margin, Math.min(Math.max(margin, height - margin), node.y));
     }
 
     function applyMemoryGraphLayout(motionState) {
@@ -1771,8 +1812,8 @@
       const node = memoryGraphMotionState.state.get(id);
       if (!svg || !node) return;
 
-      const width = 980;
-      const height = 560;
+      const width = memoryGraphMotionState.width;
+      const height = memoryGraphMotionState.height;
       const origin = graphPointerPoint(event, svg);
       const start = { x: node.x, y: node.y };
       let moved = false;
@@ -1815,13 +1856,13 @@
       window.addEventListener("pointercancel", stop);
     }
 
-    function startMemoryGraphMotion(nodes, visibleEdges, positions) {
+    function startMemoryGraphMotion(nodes, visibleEdges, positions, dimensions) {
       stopMemoryGraphMotion();
       const svg = memoryGraph ? memoryGraph.querySelector("svg") : null;
       if (!svg || !nodes.length) return;
 
-      const width = 980;
-      const height = 560;
+      const width = dimensions.width;
+      const height = dimensions.height;
       const state = new Map();
       nodes.forEach((node, index) => {
         const point = positions.get(node.id) || { x: width / 2, y: height / 2 };
@@ -1834,7 +1875,7 @@
           vx: 0,
           vy: 0,
           phase: index * 0.67,
-          radius: Math.max(5, Math.min(12, 5 + importance * 7))
+          radius: graphNodeRadius(importance)
         });
       });
 
@@ -1856,7 +1897,7 @@
         };
       }).filter((item) => item.source && item.target);
 
-      const motionState = { state, nodeElements, edgeElements };
+      const motionState = { state, nodeElements, edgeElements, width, height };
       memoryGraphMotionState = motionState;
       let lastTick = 0;
 
@@ -1931,8 +1972,9 @@
         return;
       }
 
-      const width = 980;
-      const height = 560;
+      const dimensions = graphDimensions();
+      const width = dimensions.width;
+      const height = dimensions.height;
       const centerX = width / 2;
       const centerY = height / 2;
       const maxRadius = Math.min(width, height) * 0.43;
@@ -1959,7 +2001,7 @@
       const nodeMarkup = nodes.map((node, index) => {
         const point = positions.get(node.id);
         const importance = Number(node.importance || 0.5);
-        const radius = Math.max(5, Math.min(12, 5 + importance * 7));
+        const radius = graphNodeRadius(importance);
         const label = index < 64 || node.id === selectedMemoryId ? graphNodeLabel(node) : "";
         const active = node.id === selectedMemoryId ? " active" : "";
         return (
@@ -1979,7 +2021,7 @@
         '<div class="memory-graph-stats">' +
         escapeHtml(`${stats.node_count || nodes.length} nodes / ${stats.edge_count || edges.length} edges`) +
         '</div>';
-      startMemoryGraphMotion(nodes, visibleEdges, positions);
+      startMemoryGraphMotion(nodes, visibleEdges, positions, dimensions);
     }
 
     function renderMemoryEditor() {
@@ -2220,6 +2262,10 @@
     }
 
     sendButton.addEventListener("click", handleSubmit);
+    updateMemoryNodeGrowButton();
+    if (memoryNodeGrowButton) {
+      memoryNodeGrowButton.addEventListener("click", growMemoryGraphNodes);
+    }
     if (memoryRefreshButton) {
       memoryRefreshButton.addEventListener("click", () => loadMemoryVault({ force: true }));
     }
@@ -2241,6 +2287,12 @@
       });
     });
     if (memoryGraph) {
+      if ("ResizeObserver" in window) {
+        const memoryGraphResizeObserver = new ResizeObserver(scheduleMemoryGraphRender);
+        memoryGraphResizeObserver.observe(memoryGraph);
+      } else {
+        window.addEventListener("resize", scheduleMemoryGraphRender);
+      }
       memoryGraph.addEventListener("pointerdown", startMemoryGraphNodeDrag);
       memoryGraph.addEventListener("click", (event) => {
         if (memoryGraphDragSuppressClick) {
