@@ -8,7 +8,7 @@ from ..registry import skill_registry
 
 name = "search"
 routes = ("search_executor",)
-sources = ("text", "voice")
+sources = ("text", "voice", "control_page")
 description = "External search and search-then-answer flow."
 
 

@@ -8,7 +8,7 @@ from ..registry import skill_registry
 
 name = "delivery"
 routes = ("delivery",)
-sources = ("text", "voice")
+sources = ("text", "voice", "control_page")
 description = "Text delivery, TTS preparation, and playback-oriented response emission."
 
 
