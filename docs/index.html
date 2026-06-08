@@ -1415,6 +1415,8 @@
     let suggestionItems = [];
     let selectedSuggestionIndex = 0;
     let renderedChatSignature = "";
+    let lastControlPanelCommandId = 0;
+    let controlPanelCommandCursorReady = false;
     let memoryGraphNodeScale = Number(localStorage.getItem("evelynMemoryGraphNodeScale") || "1") || 1;
     memoryGraphNodeScale = Math.max(1, Math.min(2, memoryGraphNodeScale));
     let commandCatalog = [
@@ -1611,6 +1613,62 @@
       return lines.join("\n");
     }
 
+    function lastPatternIndex(text, pattern) {
+      let lastIndex = -1;
+      for (const match of text.matchAll(pattern)) {
+        lastIndex = match.index || 0;
+      }
+      return lastIndex;
+    }
+
+    function memoryPanelActionFromText(value) {
+      const text = String(value || "").toLowerCase().trim();
+      if (!text) return "";
+      if (text === "/memory") return "toggle";
+      const compact = text.replace(/\s+/g, "");
+      const mentionsMemory = /메모리|memory|obsidian|옵시디언/.test(compact);
+      const mentionsPanel = /패널|창|vault|볼트|그래프|panel|window|graph|obsidian|옵시디언/.test(compact);
+      if (!mentionsMemory || !mentionsPanel) return "";
+      const candidates = [
+        { action: "open", index: lastPatternIndex(compact, /(열어줘|열어|열기|보여줘|보여|띄워줘|띄워|켜줘|켜|open|show)/g) },
+        { action: "close", index: lastPatternIndex(compact, /(닫아줘|닫아|닫기|숨겨줘|숨겨|숨기|꺼줘|꺼|close|hide)/g) },
+        { action: "toggle", index: lastPatternIndex(compact, /(토글|전환|toggle)/g) }
+      ].filter((candidate) => candidate.index >= 0);
+      if (!candidates.length) return "";
+      candidates.sort((a, b) => b.index - a.index);
+      return candidates[0].action;
+    }
+
+    function applyControlPanelCommand(command, options = {}) {
+      if (!command || String(command.panel || "") !== "memory") return;
+      const action = String(command.action || "").toLowerCase();
+      if (action === "open") {
+        toggleMemoryWindow(true, options);
+      } else if (action === "close") {
+        toggleMemoryWindow(false, options);
+      } else if (action === "toggle") {
+        toggleMemoryWindow(undefined, options);
+      }
+    }
+
+    function applyControlPanelCommands(state) {
+      const panelState = state && state.controlPagePanels;
+      const commands = panelState && Array.isArray(panelState.commands) ? panelState.commands : [];
+      const ids = commands.map((command) => Number(command && command.id) || 0);
+      const maxId = ids.length ? Math.max(...ids) : lastControlPanelCommandId;
+      if (!controlPanelCommandCursorReady) {
+        lastControlPanelCommandId = maxId;
+        controlPanelCommandCursorReady = true;
+        return;
+      }
+      for (const command of commands) {
+        const commandId = Number(command && command.id) || 0;
+        if (commandId <= lastControlPanelCommandId) continue;
+        applyControlPanelCommand(command, { silent: true });
+      }
+      lastControlPanelCommandId = Math.max(lastControlPanelCommandId, maxId);
+    }
+
     function apiCandidates() {
       const candidates = [];
       if (location.protocol.startsWith("http")) candidates.push(location.origin);
@@ -1658,6 +1716,7 @@
       if (state.chat && Array.isArray(state.chat.messages)) {
         renderChatMessages(state.chat.messages);
       }
+      applyControlPanelCommands(state);
       const lines = Array.from(drawer.querySelectorAll(".status-list .line strong"));
       if (lines[0]) lines[0].textContent = services.mainReady ? "연결됨" : "대기";
       if (lines[1]) lines[1].textContent = voice.speaking ? "재생 중" : (services.ttsReady ? "대기" : "대기 중");
@@ -2249,7 +2308,7 @@
       }
     }
 
-    function toggleMemoryWindow(forceOpen) {
+    function toggleMemoryWindow(forceOpen, options = {}) {
       const shouldOpen = typeof forceOpen === "boolean" ? forceOpen : !memoryWindow.classList.contains("open");
       memoryWindow.classList.toggle("open", shouldOpen);
       if (shouldOpen) {
@@ -2257,13 +2316,16 @@
       } else {
         stopMemoryGraphMotion();
       }
-      setBubble(shouldOpen ? "메모리 vault를 열어둘게." : "메모리 vault는 숨겨둘게.");
+      if (!options.silent) {
+        setBubble(shouldOpen ? "메모리 vault를 열어둘게." : "메모리 vault는 숨겨둘게.");
+      }
     }
 
     async function handleSubmit() {
       const value = composer.value.trim();
       if (!value || sending) return;
       const normalized = value.toLowerCase();
+      const memoryPanelAction = memoryPanelActionFromText(value);
       composer.value = "";
       renderSuggestions();
       if (normalized === "/memory") {
@@ -2276,6 +2338,16 @@
       }
       if (normalized === "/" || normalized === "/help") {
         setBubble(formatHelp());
+        return;
+      }
+      if (memoryPanelAction) {
+        appendChatMessage({
+          role: "user",
+          author: "정훈",
+          text: value,
+          at: Date.now() / 1000
+        });
+        applyControlPanelCommand({ action: memoryPanelAction, panel: "memory" });
         return;
       }
       sending = true;

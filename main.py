@@ -10168,13 +10168,47 @@ def build_control_page_help_reply() -> str:
     return "\n".join(lines)
 
 
+def control_page_memory_panel_action(text: str) -> str | None:
+    normalized = clean_text(text).lower()
+    if normalized == "/memory":
+        return "toggle"
+    compact = re.sub(r"\s+", "", normalized)
+    if not re.search(r"메모리|memory|obsidian|옵시디언", compact):
+        return None
+    if not re.search(r"패널|창|vault|볼트|그래프|panel|window|graph|obsidian|옵시디언", compact):
+        return None
+    patterns = {
+        "open": r"열어줘|열어|열기|보여줘|보여|띄워줘|띄워|켜줘|켜|open|show",
+        "close": r"닫아줘|닫아|닫기|숨겨줘|숨겨|숨기|꺼줘|꺼|close|hide",
+        "toggle": r"토글|전환|toggle",
+    }
+    matches: list[tuple[int, str]] = []
+    for action, pattern in patterns.items():
+        matches.extend((match.start(), action) for match in re.finditer(pattern, compact))
+    if not matches:
+        return None
+    matches.sort(key=lambda item: item[0], reverse=True)
+    return matches[0][1]
+
+
+def execute_control_page_memory_panel_action(action: str) -> str:
+    cleaned_action = clean_text(action).lower()
+    if cleaned_action not in {"open", "close", "toggle"}:
+        cleaned_action = "toggle"
+    enqueue_control_page_ui_command(cleaned_action, panel_id="memory")
+    if cleaned_action == "open":
+        return "메모리 패널을 열어둘게."
+    if cleaned_action == "close":
+        return "메모리 패널은 숨겨둘게."
+    return "메모리 패널을 열거나 숨길게."
+
+
 async def execute_control_page_command(guild: discord.Guild | None, text: str) -> str:
     normalized = clean_text(text).lower()
     if normalized in {"/", "/help"}:
         return build_control_page_help_reply()
     if normalized == "/memory":
-        enqueue_control_page_ui_command("toggle", panel_id="memory")
-        return "메모리 패널을 열거나 숨길게."
+        return execute_control_page_memory_panel_action("toggle")
     if normalized == "/obsidian":
         enqueue_control_page_ui_command("toggle", panel_id="memory")
         vault = ensure_memory_vault_layout()
@@ -10374,6 +10408,9 @@ async def answer_control_page_text(guild: discord.Guild | None, user_text: str) 
 async def handle_control_page_input(guild: discord.Guild | None, text: str) -> str:
     if clean_text(text).startswith("/"):
         return await execute_control_page_command(guild, text)
+    memory_panel_action = control_page_memory_panel_action(text)
+    if memory_panel_action:
+        return execute_control_page_memory_panel_action(memory_panel_action)
     return await answer_control_page_text(guild, text)
 
 
