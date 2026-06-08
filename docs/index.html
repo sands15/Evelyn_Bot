@@ -1771,7 +1771,10 @@
           const dx = right.x - left.x;
           const dy = right.y - left.y;
           const distance = Math.max(1, Math.hypot(dx, dy));
-          const force = Math.max(-0.018, Math.min(0.018, (distance - 94) * 0.00028));
+          const isPulled = Boolean(left.dragging || right.dragging);
+          const stiffness = isPulled ? 0.0012 : 0.00028;
+          const maxForce = isPulled ? 0.082 : 0.018;
+          const force = Math.max(-maxForce, Math.min(maxForce, (distance - 94) * stiffness));
           const fx = (dx / distance) * force;
           const fy = (dy / distance) * force;
           if (!left.dragging) {
