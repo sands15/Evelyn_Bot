@@ -49,8 +49,8 @@ class RuntimeRepairTests(unittest.TestCase):
         self.assertIn("bot_api", service_ids)
         self.assertIn("main_llm", service_ids)
         self.assertIn("tts", service_ids)
-        self.assertNotIn("voyager", service_ids)
-        self.assertNotIn("codex_gateway", service_ids)
+        self.assertIn("voyager", service_ids)
+        self.assertIn("codex_gateway", service_ids)
 
     def test_down_allowed_service_returns_dry_run_command_preview(self) -> None:
         manifest = load_service_manifest(force=True)
@@ -97,13 +97,30 @@ class RuntimeRepairTests(unittest.TestCase):
         self.assertFalse(plan["eligible"])
         self.assertEqual(plan["planStatus"], "not_needed")
 
-    def test_disallowed_service_is_rejected(self) -> None:
+    def test_optional_voyager_stack_services_return_dry_run_command_preview(self) -> None:
         manifest = load_service_manifest(force=True)
-        plan = build_runtime_repair_plan(service_id="voyager", manifest=manifest, health=self.health({"voyager": "down"}))
+        voyager = build_runtime_repair_plan(service_id="voyager", manifest=manifest, health=self.health({"voyager": "down"}))
+        codex = build_runtime_repair_plan(
+            service_id="codex_gateway",
+            manifest=manifest,
+            health=self.health({"codex_gateway": "down"}),
+        )
 
-        self.assertFalse(plan["ok"])
-        self.assertFalse(plan["eligible"])
-        self.assertEqual(plan["error"], "repair_not_allowed")
+        self.assertTrue(voyager["ok"])
+        self.assertTrue(voyager["eligible"])
+        self.assertEqual(voyager["planStatus"], "ready")
+        self.assertEqual(voyager["serviceId"], "voyager")
+        self.assertIn("start_voyager_service.ps1", voyager["launcherPath"])
+        self.assertFalse(voyager["required"])
+        self.assertFalse(voyager["safety"]["willExecute"])
+
+        self.assertTrue(codex["ok"])
+        self.assertTrue(codex["eligible"])
+        self.assertEqual(codex["planStatus"], "ready")
+        self.assertEqual(codex["serviceId"], "codex_gateway")
+        self.assertIn("start_codex_gateway.ps1", codex["launcherPath"])
+        self.assertFalse(codex["required"])
+        self.assertFalse(codex["safety"]["willExecute"])
 
     def test_unknown_and_unsupported_actions_are_rejected(self) -> None:
         manifest = load_service_manifest(force=True)

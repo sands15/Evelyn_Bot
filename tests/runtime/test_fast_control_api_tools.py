@@ -163,6 +163,131 @@ class FastControlApiToolTests(unittest.TestCase):
         self.assertEqual(control_plane["botApi"]["port"], fast_api.PORT)
         self.assertIn("Bot API", state["statusText"])
 
+    def test_state_handler_returns_expected_control_page_schema(self) -> None:
+        async def fake_collect_runtime_health(*, manifest, probe_runner):
+            return {
+                "legacyServices": {
+                    "botReady": True,
+                    "mainReady": True,
+                    "routerReady": True,
+                    "subReady": True,
+                    "ttsReady": True,
+                    "sttReady": True,
+                },
+                "services": [{"id": "bot_api", "state": "up", "ready": True}],
+                "summary": "all ready",
+            }
+
+        original_collect = fast_api.collect_runtime_health
+        fast_api.collect_runtime_health = fake_collect_runtime_health
+        try:
+            response = asyncio.run(fast_api.state_handler(object()))
+        finally:
+            fast_api.collect_runtime_health = original_collect
+
+        payload = fast_api.json.loads(response.text or "{}")
+        self.assertTrue(payload["ok"])
+        self.assertIn("generatedAt", payload)
+        self.assertIn("voice", payload)
+        self.assertIn("restart", payload)
+        self.assertIn("shutdown", payload)
+        self.assertIn("runtime", payload)
+        self.assertIn("controlPlane", payload["runtime"])
+        self.assertIn("services", payload["runtime"])
+        self.assertTrue(payload["runtime"]["services"]["botReady"])
+        self.assertTrue(payload["runtime"]["services"]["chatReady"])
+        self.assertTrue(payload["runtime"]["services"]["voiceReady"])
+        self.assertEqual(payload["runtime"]["controlPlane"]["controlPage"]["port"], fast_api.PUBLIC_CONTROL_PORT)
+        self.assertEqual(payload["runtime"]["controlPlane"]["botApi"]["port"], fast_api.PORT)
+
+    def test_control_state_preserves_local_bridge_tts_warmup_status(self) -> None:
+        fast_api.LOCAL_BRIDGE_STATUS.update(
+            {
+                "enabled": True,
+                "ready": True,
+                "lastError": "",
+                "updatedAt": fast_api.time.time(),
+                "ttsWarmup": {"enabled": True, "done": True, "error": "", "ms": 512.3},
+            }
+        )
+
+        state = fast_api.build_control_state(
+            {
+                "legacyServices": {"botReady": True, "ttsReady": True, "sttReady": True},
+                "services": [{"id": "bot_api", "state": "up", "ready": True}],
+            }
+        )
+
+        bridge = state["voice"]["localBridge"]
+        self.assertEqual(state["voice"]["outputMode"], "windows_local_bridge")
+        self.assertFalse(bridge["stale"])
+        self.assertTrue(bridge["ttsWarmup"]["enabled"])
+        self.assertTrue(bridge["ttsWarmup"]["done"])
+        self.assertEqual(bridge["ttsWarmup"]["ms"], 512.3)
+
+    def test_local_bridge_status_post_drains_speak_requests_once(self) -> None:
+        class _Request:
+            method = "POST"
+
+            async def json(self):
+                return {
+                    "enabled": True,
+                    "ready": True,
+                    "lastError": "",
+                    "ttsWarmup": {"enabled": True, "done": True, "error": "", "ms": 400.0},
+                }
+
+        fast_api.LOCAL_BRIDGE_STATUS.update(
+            {
+                "enabled": True,
+                "ready": True,
+                "lastError": "",
+                "updatedAt": fast_api.time.time(),
+            }
+        )
+        queued = fast_api.queue_local_bridge_speech("hello bridge", source="unit")
+        self.assertIsNotNone(queued)
+
+        first = asyncio.run(fast_api.local_bridge_status_handler(_Request()))
+        second = asyncio.run(fast_api.local_bridge_status_handler(_Request()))
+
+        first_payload = fast_api.json.loads(first.text or "{}")
+        second_payload = fast_api.json.loads(second.text or "{}")
+        self.assertEqual([item["text"] for item in first_payload["speakRequests"]], ["hello bridge"])
+        self.assertEqual(second_payload["speakRequests"], [])
+        self.assertTrue(first_payload["localBridge"]["ttsWarmup"]["done"])
+
+    def test_local_bridge_status_get_does_not_drain_speak_requests(self) -> None:
+        class _GetRequest:
+            method = "GET"
+
+        class _PostRequest:
+            method = "POST"
+
+            async def json(self):
+                return {"enabled": True, "ready": True, "lastError": ""}
+
+        fast_api.LOCAL_BRIDGE_STATUS.update(
+            {
+                "enabled": True,
+                "ready": True,
+                "lastError": "",
+                "updatedAt": fast_api.time.time(),
+            }
+        )
+        queued = fast_api.queue_local_bridge_speech("do not drain on get", source="unit")
+        self.assertIsNotNone(queued)
+
+        get_response = asyncio.run(fast_api.local_bridge_status_handler(_GetRequest()))
+        get_payload = fast_api.json.loads(get_response.text or "{}")
+        self.assertEqual(get_payload["speakRequests"], [])
+        self.assertEqual(len(fast_api.LOCAL_BRIDGE_SPEAK_QUEUE), 1)
+
+        post_response = asyncio.run(fast_api.local_bridge_status_handler(_PostRequest()))
+        post_payload = fast_api.json.loads(post_response.text or "{}")
+        self.assertEqual([item["text"] for item in post_payload["speakRequests"]], ["do not drain on get"])
+        self.assertEqual(fast_api.LOCAL_BRIDGE_SPEAK_QUEUE, [])
+
     def test_boot_progress_marks_components_ready_at_one_hundred_percent(self) -> None:
         health = {
             "services": [

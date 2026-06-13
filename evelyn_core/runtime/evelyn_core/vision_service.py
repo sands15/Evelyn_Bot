@@ -19,6 +19,8 @@ from PIL import Image
 from huggingface_hub import snapshot_download
 from transformers import AutoModelForCausalLM, AutoModelForImageTextToText, AutoProcessor, PreTrainedTokenizerFast
 
+from .vision_quality import build_vision_quality
+
 
 SMOL_MODEL_ID = os.getenv("VISION_SMOL_MODEL", "HuggingFaceTB/SmolVLM2-500M-Video-Instruct")
 OCR_MODEL_ID = os.getenv("VISION_OCR_MODEL", "tiiuae/Falcon-OCR")
@@ -430,6 +432,7 @@ def analyze(request: AnalyzeRequest) -> dict[str, Any]:
             ocr_model = None
             cleanup_ocr_after_request()
             result["ocr_status"] = ocr_status()
+    result["quality"] = build_vision_quality(result)
     result["gpu"] = gpu_snapshot()
     return result
 

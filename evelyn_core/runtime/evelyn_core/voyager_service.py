@@ -9,6 +9,7 @@ import subprocess
 import sys
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from urllib import error as urllib_error
@@ -239,6 +240,49 @@ def _task_recovery_boundary(
         "reason": None,
         "healthy": True,
         **metadata,
+    }
+
+
+def _parse_death_event_timestamp(event: dict[str, Any]) -> float | None:
+    for key in ("respawn_observed_at", "recorded_at", "at"):
+        value = event.get(key)
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, str) and value.strip():
+            try:
+                return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+            except Exception:
+                continue
+    return None
+
+
+def _death_recovery_boundary(last_death_event: Any, *, now_ts: float | None = None, max_age_sec: float = 180.0) -> dict[str, Any]:
+    if not isinstance(last_death_event, dict):
+        return {"scope": "task", "domain": "healthy", "reason": None, "healthy": True}
+    now = float(now_ts if now_ts is not None else time.time())
+    event_ts = _parse_death_event_timestamp(last_death_event)
+    age_seconds = max(0.0, now - event_ts) if event_ts is not None else None
+    stale = bool(age_seconds is not None and age_seconds > max_age_sec)
+    if stale:
+        return {
+            "scope": "task",
+            "domain": "healthy",
+            "reason": "death event is stale",
+            "healthy": True,
+            "age_seconds": age_seconds,
+        }
+    cause = (
+        last_death_event.get("death_message")
+        or last_death_event.get("cause")
+        or last_death_event.get("likely_reason")
+        or "recent death event"
+    )
+    return {
+        "scope": "task",
+        "domain": "death_recovery_required",
+        "reason": f"recent death event requires recovery: {cause}",
+        "healthy": False,
+        "age_seconds": age_seconds,
     }
 
 
@@ -804,6 +848,7 @@ class UpstreamDirectBridge:
             last_task_bookkeeping=last_task_bookkeeping,
             last_critic_result=last_critic_result,
         )
+        death_boundary = _death_recovery_boundary(observation.get("last_death_event") if isinstance(observation, dict) else None)
         if not runtime_boundary["healthy"]:
             recovery_scope = "runtime"
             recovery_domain = runtime_boundary["domain"]
@@ -816,6 +861,10 @@ class UpstreamDirectBridge:
             recovery_scope = "task"
             recovery_domain = task_boundary.get("domain")
             recovery_reason = task_boundary.get("reason")
+        elif not death_boundary.get("healthy", True):
+            recovery_scope = "task"
+            recovery_domain = death_boundary.get("domain")
+            recovery_reason = death_boundary.get("reason")
         else:
             recovery_scope = "healthy"
             recovery_domain = "healthy"
@@ -864,6 +913,7 @@ class UpstreamDirectBridge:
             "recovery_boundaries": {
                 "runtime_boundary": runtime_boundary,
                 "task_boundary": task_boundary,
+                "death_boundary": death_boundary,
             },
             "stability_signals": stability_signals,
             "evaluation": voyager_evaluation,
@@ -949,6 +999,7 @@ class UpstreamDirectBridge:
                 "healthy": recovery_domain == "healthy",
                 "runtime_boundary": runtime_boundary,
                 "task_boundary": task_boundary,
+                "death_boundary": death_boundary,
                 "stability_signals": stability_signals,
             },
             "agent_models": {

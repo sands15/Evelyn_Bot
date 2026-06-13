@@ -190,6 +190,8 @@ if (-not `$env:LOCAL_MIC_CONTINUE_THRESHOLD) { `$env:LOCAL_MIC_CONTINUE_THRESHOL
 if (-not `$env:LOCAL_MIC_MIN_VOICED_MS) { `$env:LOCAL_MIC_MIN_VOICED_MS = '160' }
 if (-not `$env:LOCAL_MIC_WAVEFORM_FILTER_ENABLED) { `$env:LOCAL_MIC_WAVEFORM_FILTER_ENABLED = 'false' }
 if (-not `$env:LOCAL_BRIDGE_STATUS_INTERVAL_SEC) { `$env:LOCAL_BRIDGE_STATUS_INTERVAL_SEC = '0.25' }
+if (-not `$env:LOCAL_BRIDGE_TTS_WARMUP_ENABLED) { `$env:LOCAL_BRIDGE_TTS_WARMUP_ENABLED = 'true' }
+if (-not `$env:LOCAL_BRIDGE_TTS_WARMUP_DELAY_SEC) { `$env:LOCAL_BRIDGE_TTS_WARMUP_DELAY_SEC = '0.5' }
 if (Test-Path '.venv\Scripts\python.exe') {
     & '.venv\Scripts\python.exe' -m evelyn_core.local_io_bridge --project-root '$projectRoot' *>> '$bridgeLog'
 } else {

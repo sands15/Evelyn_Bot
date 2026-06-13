@@ -97,6 +97,10 @@ class VisionContextCleanupTests(unittest.TestCase):
         self.assertIn("delete_request_vision_image", source)
         self.assertIn("redact_vision_text_for_memory", source)
         self.assertIn("VISION_MEMORY_WRITE_ENABLED", source)
+        self.assertIn("vision_confidence=", source)
+        self.assertIn("vision_actionable=false", source)
+        self.assertIn("vision_actionable=", source)
+        self.assertIn('metrics.setdefault("meta", {})["vision_quality"] = dict(quality)', source)
 
     def test_start_env_declares_vision_cleanup_defaults(self) -> None:
         source = START_ENV.read_text(encoding="utf-8")

@@ -38,7 +38,8 @@ SEMANTIC_CONSOLIDATION_MAX_NOTES = 6
 MEMORY_GRAPH_MAX_NODES = 160
 MEMORY_GRAPH_MAX_GROUP_EDGES = 180
 MEMORY_GRAPH_MAX_VECTOR_EDGES = 220
-MEMORY_INTERNAL_NOTE_TYPES = {"procedure", "internal", "system"}
+MEMORY_INTERNAL_NOTE_TYPES = {"procedure", "internal", "system", "debug", "runtime", "tool"}
+MEMORY_GRAPH_INTERNAL_NOTE_TYPES = frozenset(MEMORY_INTERNAL_NOTE_TYPES)
 MEMORY_ADMIN_RECALL_MARKERS = (
     "memory vault",
     "memory system",
@@ -729,20 +730,27 @@ def export_memory_graph(
     *,
     root: Path | None = None,
     max_nodes: int = MEMORY_GRAPH_MAX_NODES,
+    include_internal: bool = False,
 ) -> dict[str, Any]:
     """Export a rebuildable graph JSON view for the control page."""
     started = time.monotonic()
     version = sync_memory_vault_index(root=root)
     max_nodes = max(20, min(500, int(max_nodes or MEMORY_GRAPH_MAX_NODES)))
+    hidden_types = sorted(MEMORY_GRAPH_INTERNAL_NOTE_TYPES) if not include_internal else []
+    hidden_filter = ""
+    hidden_params: list[str] = []
+    if hidden_types:
+        hidden_filter = f"AND lower(note_type) NOT IN ({','.join('?' for _ in hidden_types)})"
+        hidden_params = hidden_types
 
     with closing(_connect_index(memory_index_db_path(root))) as conn:
         _ensure_schema(conn)
         rows = conn.execute(
-            """
+            f"""
             SELECT *
             FROM notes
             WHERE status NOT IN ('archived', 'superseded')
-              AND note_type NOT IN ('procedure', 'internal', 'system')
+              {hidden_filter}
             ORDER BY
                 CASE note_type
                     WHEN 'core' THEN 0
@@ -757,7 +765,7 @@ def export_memory_graph(
                 title ASC
             LIMIT ?
             """,
-            (max_nodes,),
+            (*hidden_params, max_nodes),
         ).fetchall()
         row_by_id = {clean_text(str(row["note_id"])): row for row in rows}
         if not row_by_id:
@@ -769,7 +777,13 @@ def export_memory_graph(
                 "index_path": str(memory_index_db_path(root)),
                 "nodes": [],
                 "edges": [],
-                "stats": {"node_count": 0, "edge_count": 0, "type_counts": {}},
+                "stats": {
+                    "node_count": 0,
+                    "edge_count": 0,
+                    "type_counts": {},
+                    "include_internal": bool(include_internal),
+                    "hidden_types": hidden_types,
+                },
                 "latency_ms": round((time.monotonic() - started) * 1000.0, 1),
             }
 
@@ -931,6 +945,8 @@ def export_memory_graph(
             "type_counts": type_counts,
             "memory_version": version,
             "vector_model": VECTOR_INDEX_MODEL,
+            "include_internal": bool(include_internal),
+            "hidden_types": hidden_types,
         }
         return {
             "ok": True,
@@ -969,6 +985,10 @@ def _allows_internal_memory_recall(request: MemoryRecallRequest, focus_items: li
 
 def _is_internal_memory_note(row: sqlite3.Row) -> bool:
     return clean_text(str(row["note_type"])).lower() in MEMORY_INTERNAL_NOTE_TYPES
+
+
+def _is_internal_memory_note_type(note_type: str) -> bool:
+    return clean_text(note_type).lower() in MEMORY_INTERNAL_NOTE_TYPES
 
 
 def _note_score(row: sqlite3.Row, query_tokens: set[str], focus_tokens: set[str], active_project: str) -> int:
@@ -2281,7 +2301,13 @@ def _write_memory_vault_note_body(path: Path, raw: str, note: MemoryVaultNote, *
     path.write_text(content, encoding="utf-8")
 
 
-def memory_vault_user_snapshot(*, root: Path | None = None, include_hidden: bool = False, limit: int = 80) -> dict[str, Any]:
+def memory_vault_user_snapshot(
+    *,
+    root: Path | None = None,
+    include_hidden: bool = False,
+    include_internal: bool = False,
+    limit: int = 80,
+) -> dict[str, Any]:
     version = sync_memory_vault_index(root=root)
     vault = ensure_memory_vault_layout(root)
     state = _read_user_note_state(root)
@@ -2294,6 +2320,8 @@ def memory_vault_user_snapshot(*, root: Path | None = None, include_hidden: bool
         except Exception:
             continue
         rel_path = path.relative_to(vault).as_posix()
+        if not include_internal and _is_internal_memory_note_type(note.note_type):
+            continue
         note_state = state.get(note.note_id, {})
         hidden = bool(note_state.get("hidden")) or note.status in {"archived", "superseded"}
         if hidden:
@@ -2318,15 +2346,24 @@ def memory_vault_user_snapshot(*, root: Path | None = None, include_hidden: bool
         "vaultPath": str(vault),
         "counts": counts,
         "cards": cards,
+        "includeInternal": bool(include_internal),
+        "hiddenTypes": sorted(MEMORY_INTERNAL_NOTE_TYPES) if not include_internal else [],
         "checkedAt": _utc_now_iso(),
     }
 
 
-def memory_vault_user_note(note_id_or_rel_path: str, *, root: Path | None = None) -> dict[str, Any]:
+def memory_vault_user_note(
+    note_id_or_rel_path: str,
+    *,
+    root: Path | None = None,
+    include_internal: bool = False,
+) -> dict[str, Any]:
     target = _memory_vault_find_note(note_id_or_rel_path, root=root)
     if target is None:
         return {"ok": False, "error": "note_not_found"}
     path, note, raw = target
+    if not include_internal and _is_internal_memory_note_type(note.note_type):
+        return {"ok": False, "error": "note_not_found"}
     vault = ensure_memory_vault_layout(root)
     rel_path = path.relative_to(vault).as_posix()
     state = _read_user_note_state(root)

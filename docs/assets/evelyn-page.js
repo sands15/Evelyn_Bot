@@ -208,6 +208,7 @@ const state = {
   memoryGraphLastLoadedAt: 0,
   memoryGraphFrame: null,
   memoryGraphNodeScale: Number(localStorage.getItem("evelynMemoryGraphNodeScale") || 1),
+  memoryGraphIncludeInternal: false,
   memoryGraphPointer: { x: 0, y: 0, down: false, dragId: "", holdId: "", hoverId: "", offsetX: 0, offsetY: 0, startClientX: 0, startClientY: 0 },
   memoryCardsPayload: null,
   memoryCardsLoading: false,
@@ -256,6 +257,7 @@ const CONTROL_PAGE_COMMAND_CATALOG = [
   { command: "/minecraft disconnect", template: "/minecraft disconnect", summary: "Stop Voyager Minecraft mode" },
   { command: "/minecraft goal <goal>", template: "/minecraft goal ", summary: "Change Minecraft goal" },
   { command: "/autonomy status", template: "/autonomy status", summary: "Show Evelyn autonomy engine status" },
+  { command: "/restart", template: "/restart", summary: "Restart Evelyn runtime" },
   { command: "/shutdown", template: "/shutdown", summary: "Shut down Evelyn runtime" },
 ];
 const avatarState = {
@@ -850,6 +852,17 @@ function cleanDisplayText(value, fallback = "None") {
   return text || fallback;
 }
 
+function controlPlaneBotTimestampText(controlPlane) {
+  const botApi = (controlPlane && controlPlane.botApi) || {};
+  if (botApi.lastSuccessfulStateAt) {
+    return "Bot API state last OK " + formatTimestamp(botApi.lastSuccessfulStateAt);
+  }
+  if (botApi.lastCheckedAt) {
+    return "Bot API checked " + formatTimestamp(botApi.lastCheckedAt);
+  }
+  return "";
+}
+
 const RUNTIME_HEALTH_DIAGNOSIS_TEXT = {
   CP_UP_BOT_DOWN: {
     issue: "Control-Page is up, but Bot API is down.",
@@ -898,6 +911,30 @@ const RUNTIME_HEALTH_DIAGNOSIS_TEXT = {
     detail: "Voice output is unavailable until TTS recovers.",
     repairActionLabel: "Preview TTS repair",
     repairActionSummary: "Preview TTS repair before starting anything.",
+  },
+  VISION_DOWN: {
+    issue: "Vision is not responding.",
+    detail: "Screen perception is limited until Vision recovers.",
+    repairActionLabel: "Preview Vision repair",
+    repairActionSummary: "Preview Vision repair before starting anything.",
+  },
+  VOYAGER_DOWN: {
+    issue: "Voyager is not responding.",
+    detail: "Minecraft autonomy is limited until the Voyager service recovers.",
+    repairActionLabel: "Preview Voyager repair",
+    repairActionSummary: "Preview Voyager repair before sending Minecraft automation tasks.",
+  },
+  CODEX_GATEWAY_DOWN: {
+    issue: "Codex Gateway is not responding.",
+    detail: "Voyager code execution is limited until the Codex Gateway recovers.",
+    repairActionLabel: "Preview Codex Gateway repair",
+    repairActionSummary: "Preview Codex Gateway repair before relying on Voyager action generation.",
+  },
+  CODEX_GATEWAY_ACTION_FAILED: {
+    issue: "Codex Gateway action execution failed.",
+    detail: "Voyager action generation may be unavailable until Codex CLI authentication or execution is fixed.",
+    repairActionLabel: "Check Codex Gateway",
+    repairActionSummary: "Check Codex Gateway and Codex CLI authentication before running Voyager tasks.",
   },
 };
 
@@ -2019,6 +2056,7 @@ function defaultQuickCommands(minecraftActive) {
         { command: "/inventory", template: "/inventory", summary: "Show Minecraft inventory" },
         { command: "/minecraft status", template: "/minecraft status", summary: "Show Minecraft status and current task" },
         { command: "/minecraft disconnect", template: "/minecraft disconnect", summary: "Stop Voyager Minecraft mode" },
+        { command: "/restart", template: "/restart", summary: "Restart Evelyn runtime" },
         { command: "/shutdown", template: "/shutdown", summary: "Shut down Evelyn runtime" },
         { command: "/help", template: "/help", summary: "Show available commands" },
       ]
@@ -2026,6 +2064,7 @@ function defaultQuickCommands(minecraftActive) {
         { command: "/minecraft connect", template: "/minecraft connect", summary: "Start Voyager Minecraft mode" },
         { command: "/status", template: "/status", summary: "Show Evelyn, voice, and Minecraft status" },
         { command: "/autonomy status", template: "/autonomy status", summary: "Show autonomy status" },
+        { command: "/restart", template: "/restart", summary: "Restart Evelyn runtime" },
         { command: "/shutdown", template: "/shutdown", summary: "Shut down Evelyn runtime" },
         { command: "/help", template: "/help", summary: "Show available commands" },
       ];
@@ -2998,7 +3037,8 @@ function renderMemoryGraphControls(payload) {
     '<button type="button" class="memory-filter-button memory-filter-value" data-memory-node-size="reset" title="Reset node size" aria-live="polite" aria-label="Reset node scale to 1.00x">' + escapeHtml(scale.toFixed(2)) + "x</button>",
     '<button type="button" class="memory-filter-button" data-memory-node-size="up" title="Larger nodes">+</button>',
   ].join("");
-  dom.memoryGraphFilter.innerHTML = sizeControls + types.map((type) => {
+  const managementToggle = '<button type="button" class="memory-filter-button memory-management-toggle' + (state.memoryGraphIncludeInternal ? " is-active" : "") + '" data-memory-include-internal="toggle" aria-pressed="' + (state.memoryGraphIncludeInternal ? "true" : "false") + '" title="Toggle management graph nodes">관리 그래프</button>';
+  dom.memoryGraphFilter.innerHTML = sizeControls + managementToggle + types.map((type) => {
     const active = state.memoryGraphFilterType === type ? " is-active" : "";
     const label = memoryTypeDisplayLabel(type);
     const count = type === "all" ? (payload?.stats?.node_count || 0) : counts[type];
@@ -3034,7 +3074,8 @@ async function loadMemoryGraph({ force = false } = {}) {
     dom.memoryGraphEmpty.textContent = "Memory graph data is loading.";
   }
   try {
-    const payload = await fetchApi("/api/control-page/memory-graph?max_nodes=160");
+    const graphUrl = "/api/control-page/memory-graph?max_nodes=160" + (state.memoryGraphIncludeInternal ? "&include_internal=true" : "");
+    const payload = await fetchApi(graphUrl);
     state.memoryGraphLastLoadedAt = Date.now();
     renderMemoryGraph(payload);
   } catch (error) {
@@ -3839,7 +3880,9 @@ function renderState(payload, { preserveScroll = false } = {}) {
     setStateClasses(dom.submodePill, [summaryPillState(ui, hasIssue)], ["is-default", "is-minecraft", "is-warmup", "is-issue", "is-offline"]);
   }
   if (dom.topbarStatusLine) {
-    dom.topbarStatusLine.textContent = cleanDisplayText(runtimeIssueText || controlPlane.statusText || payload.statusText, "Checking runtime state.");
+    const statusText = cleanDisplayText(runtimeIssueText || controlPlane.statusText || payload.statusText, "Checking runtime state.");
+    const botTimestampText = controlPlaneBotTimestampText(controlPlane);
+    dom.topbarStatusLine.textContent = botTimestampText ? statusText + " " + botTimestampText : statusText;
   }
 
   if (dom.avatarStatusCopy) {
@@ -4294,6 +4337,15 @@ if (dom.memoryCardList) {
 
 if (dom.memoryGraphFilter) {
   dom.memoryGraphFilter.addEventListener("click", (event) => {
+    const managementButton = event.target.closest("[data-memory-include-internal]");
+    if (managementButton) {
+      state.memoryGraphIncludeInternal = !state.memoryGraphIncludeInternal;
+      state.memoryGraphPayload = null;
+      state.memoryGraphLastLoadedAt = 0;
+      state.memoryGraphFilterType = "all";
+      loadMemoryGraph({ force: true });
+      return;
+    }
     const sizeButton = event.target.closest("[data-memory-node-size]");
     if (sizeButton) {
       const action = sizeButton.getAttribute("data-memory-node-size") || "";
@@ -4443,7 +4495,7 @@ ensureApiWaitingTicker();
 refreshState();
 schedulePolling();
 
-const RUNTIME_REPAIR_SERVICE_PRIORITY = ["main_llm", "router_llm", "sub_llm", "tts", "bot_api", "control_page"];
+const RUNTIME_REPAIR_SERVICE_PRIORITY = ["main_llm", "router_llm", "sub_llm", "tts", "bot_api", "control_page", "voyager", "codex_gateway"];
 const RUNTIME_REPAIR_SERVICE_LABEL = {
   main_llm: "Main LLM",
   router_llm: "Router LLM",
@@ -4451,6 +4503,8 @@ const RUNTIME_REPAIR_SERVICE_LABEL = {
   tts: "TTS",
   bot_api: "Bot API",
   control_page: "Control-Page",
+  voyager: "Voyager",
+  codex_gateway: "Codex Gateway",
 };
 const RUNTIME_REPAIR_SERVICE_ACTION_LABEL = {
   main_llm: "Preview Main LLM repair",
@@ -4459,6 +4513,8 @@ const RUNTIME_REPAIR_SERVICE_ACTION_LABEL = {
   tts: "Preview TTS repair",
   bot_api: "Preview Bot API repair",
   control_page: "Preview Control-Page repair",
+  voyager: "Preview Voyager repair",
+  codex_gateway: "Preview Codex Gateway repair",
 };
 
 function runtimeRepairServiceLabel(serviceId) {

@@ -25,6 +25,9 @@ class VisionQualityTests(unittest.TestCase):
         self.assertTrue(quality["scene_unreliable"])
         self.assertTrue(quality["ocr_corrupt"])
         self.assertTrue(quality["no_usable_evidence"])
+        self.assertEqual(quality["confidence"], "none")
+        self.assertFalse(quality["actionable"])
+        self.assertIn("unusable", quality["guidance"])
 
     def test_normal_screen_summary_is_usable(self) -> None:
         quality = build_vision_quality(
@@ -37,6 +40,24 @@ class VisionQualityTests(unittest.TestCase):
         self.assertFalse(quality["scene_unreliable"])
         self.assertFalse(quality["ocr_corrupt"])
         self.assertFalse(quality["no_usable_evidence"])
+        self.assertEqual(quality["confidence"], "normal")
+        self.assertTrue(quality["actionable"])
+
+    def test_weak_evidence_is_context_only_not_actionable(self) -> None:
+        quality = build_vision_quality(
+            {
+                "scene": "아이콘 아이콘 아이콘 아이콘 아이콘 아이콘",
+                "ocr": "Settings General Display",
+            }
+        )
+
+        self.assertTrue(quality["scene_unreliable"])
+        self.assertFalse(quality["ocr_corrupt"])
+        self.assertFalse(quality["no_usable_evidence"])
+        self.assertTrue(quality["weak"])
+        self.assertEqual(quality["confidence"], "low")
+        self.assertFalse(quality["actionable"])
+        self.assertIn("sole basis for actions", quality["guidance"])
 
     def test_replacement_character_marks_ocr_corrupt(self) -> None:
         self.assertTrue(vision_text_looks_corrupt("OpenClaw Ign�집random"))

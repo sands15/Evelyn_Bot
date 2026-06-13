@@ -115,6 +115,17 @@ class ControlPageMemoryGraphTests(unittest.TestCase):
         self.assertNotIn("stroke-width: 3;", self.html)
         self.assertIn("stroke: rgba(88, 96, 108, 0.52);", self.html)
 
+    def test_management_graph_requires_explicit_toggle(self) -> None:
+        self.assertIn("memoryGraphIncludeInternal", self.js)
+        self.assertIn('data-memory-include-internal="toggle"', self.js)
+        self.assertIn("include_internal=true", self.js)
+        self.assertIn('state.memoryGraphIncludeInternal ? "&include_internal=true" : ""', self.js)
+        self.assertIn("loadMemoryGraph({ force: true });", self.js)
+        self.assertIn('id="memoryManagementGraphButton"', self.html)
+        self.assertIn("let memoryGraphIncludeInternal = false;", self.html)
+        self.assertIn('memoryGraphIncludeInternal ? "&include_internal=true" : ""', self.html)
+        self.assertIn("updateMemoryManagementGraphButton();", self.html)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -65,6 +65,7 @@ runtime_health_cache: dict[str, Any] | None = None
 runtime_health_cache_at = 0.0
 runtime_health_cache_lock: asyncio.Lock | None = None
 runtime_health_overrides: dict[str, dict[str, Any]] = {}
+bot_state_last_success_at = 0.0
 
 
 STATIC_UTF8_CONTENT_TYPES = {
@@ -272,17 +273,45 @@ def last_proxy_failure(request: web.Request) -> dict[str, Any] | None:
     return dict(failure) if isinstance(failure, dict) else None
 
 
-def control_plane_status_text(*, ports: dict[str, bool], proxy_failure: dict[str, Any] | None = None) -> str:
+def runtime_health_cache_stale(cache_age_sec: float | None) -> bool:
+    return bool(
+        cache_age_sec is not None
+        and RUNTIME_HEALTH_CACHE_TTL_SEC > 0
+        and cache_age_sec > RUNTIME_HEALTH_CACHE_TTL_SEC
+    )
+
+
+def runtime_service_checked_at(service_health: dict[str, Any] | None, service_id: str) -> float | None:
+    if not isinstance(service_health, dict):
+        return None
+    for service in service_health.get("services") or []:
+        if not isinstance(service, dict) or service.get("id") != service_id:
+            continue
+        try:
+            checked_at = float(service.get("checkedAt") or 0.0)
+        except (TypeError, ValueError):
+            return None
+        return checked_at if checked_at > 0 else None
+    return None
+
+
+def control_plane_status_text(
+    *,
+    ports: dict[str, bool],
+    proxy_failure: dict[str, Any] | None = None,
+    cache_age_sec: float | None = None,
+) -> str:
+    cache_note = " Runtime health data is stale; refresh before trusting readiness." if runtime_health_cache_stale(cache_age_sec) else ""
     if not ports.get("bot"):
-        return f"Control-Page is live on {PORT}; Bot API is not reachable on {BOT_API_PORT}."
+        return f"Control-Page is live on {PORT}; Bot API is not reachable on {BOT_API_PORT}.{cache_note}"
     if proxy_failure:
         kind = str(proxy_failure.get("kind") or "proxy_error")
         if kind == "http_timeout":
-            return f"Control-Page is live; Bot API port {BOT_API_PORT} is open but the proxy timed out."
+            return f"Control-Page is live; Bot API port {BOT_API_PORT} is open but the proxy timed out.{cache_note}"
         if kind == "json_parse_failed":
-            return f"Control-Page is live; Bot API responded but returned invalid state JSON."
-        return f"Control-Page is live; Bot API port {BOT_API_PORT} is open but proxying failed."
-    return "Control-Page and Bot API are both responding."
+            return f"Control-Page is live; Bot API responded but returned invalid state JSON.{cache_note}"
+        return f"Control-Page is live; Bot API port {BOT_API_PORT} is open but proxying failed.{cache_note}"
+    return f"Control-Page and Bot API are both responding.{cache_note}"
 
 
 def build_control_plane_state(
@@ -290,8 +319,11 @@ def build_control_plane_state(
     ports: dict[str, bool],
     proxy_failure: dict[str, Any] | None = None,
     cache_age_sec: float | None = None,
+    bot_checked_at: float | None = None,
+    bot_state_success_at: float | None = None,
 ) -> dict[str, Any]:
     bot_port_open = bool(ports.get("bot"))
+    cache_stale = runtime_health_cache_stale(cache_age_sec)
     return {
         "controlPage": {
             "ready": True,
@@ -306,13 +338,16 @@ def build_control_plane_state(
             "port": BOT_API_PORT,
             "role": "Bot API",
             "state": "ready" if bot_port_open and not proxy_failure else ("proxy_failed" if bot_port_open else "down"),
+            "lastCheckedAt": bot_checked_at,
+            "lastSuccessfulStateAt": bot_state_success_at,
         },
         "lastProxyFailure": dict(proxy_failure or {}),
         "healthCache": {
             "ageSec": round(float(cache_age_sec or 0.0), 1),
-            "stale": bool(cache_age_sec is not None and RUNTIME_HEALTH_CACHE_TTL_SEC > 0 and cache_age_sec > RUNTIME_HEALTH_CACHE_TTL_SEC),
+            "stale": cache_stale,
+            "ttlSec": RUNTIME_HEALTH_CACHE_TTL_SEC,
         },
-        "statusText": control_plane_status_text(ports=ports, proxy_failure=proxy_failure),
+        "statusText": control_plane_status_text(ports=ports, proxy_failure=proxy_failure, cache_age_sec=cache_age_sec),
     }
 
 
@@ -359,19 +394,26 @@ async def current_boot_progress() -> dict[str, Any]:
         "bootProgress": build_boot_progress_from_ports(ports),
         "serviceHealth": service_health,
         "healthCacheAgeSec": max(0.0, time.time() - runtime_health_cache_at) if runtime_health_cache_at > 0 else None,
+        "botApiCheckedAt": runtime_service_checked_at(service_health, "bot_api"),
+        "botStateLastSuccessAt": bot_state_last_success_at if bot_state_last_success_at > 0 else None,
     }
 
 
 async def degraded_state(*, proxy_failure: dict[str, Any] | None = None) -> dict[str, Any]:
     progress_state = await current_boot_progress()
-    ports = progress_state["ports"]
-    boot_progress = progress_state["bootProgress"]
+    ports = dict(progress_state["ports"])
+    inferred_bot_port_open = bool(proxy_failure and str(proxy_failure.get("kind") or "") != "port_closed")
+    if inferred_bot_port_open:
+        ports["bot"] = True
+    boot_progress = build_boot_progress_from_ports(ports) if inferred_bot_port_open else progress_state["bootProgress"]
     service_health = progress_state.get("serviceHealth")
     legacy_services = dict(service_health.get("legacyServices") or {}) if isinstance(service_health, dict) else {}
     control_plane = build_control_plane_state(
         ports=ports,
         proxy_failure=proxy_failure,
         cache_age_sec=progress_state.get("healthCacheAgeSec"),
+        bot_checked_at=progress_state.get("botApiCheckedAt"),
+        bot_state_success_at=progress_state.get("botStateLastSuccessAt"),
     )
     return {
         "ok": False,
@@ -549,11 +591,14 @@ async def asset_handler(request: web.Request) -> web.StreamResponse:
 
 
 async def state_handler(request: web.Request) -> web.StreamResponse:
+    global bot_state_last_success_at
     proxied = await proxy_json(request, "GET", "/api/control-page/state")
     if proxied is not None and proxied.status < 500:
         try:
             payload = json.loads(proxied.text or "{}")
             if isinstance(payload, dict):
+                if 200 <= proxied.status < 300:
+                    bot_state_last_success_at = time.time()
                 progress_state = await current_boot_progress()
                 ports = progress_state["ports"]
                 boot_progress = progress_state["bootProgress"]
@@ -562,6 +607,8 @@ async def state_handler(request: web.Request) -> web.StreamResponse:
                 control_plane = build_control_plane_state(
                     ports=ports,
                     cache_age_sec=progress_state.get("healthCacheAgeSec"),
+                    bot_checked_at=progress_state.get("botApiCheckedAt"),
+                    bot_state_success_at=bot_state_last_success_at if bot_state_last_success_at > 0 else None,
                 )
                 runtime = dict(payload.get("runtime") or {})
                 services = dict(runtime.get("services") or {})
@@ -824,21 +871,24 @@ async def memory_graph_handler(request: web.Request) -> web.StreamResponse:
         max_nodes = int(request.query.get("max_nodes", "160"))
     except Exception:
         max_nodes = 160
-    return json_response(export_memory_graph(max_nodes=max_nodes))
+    include_internal = str(request.query.get("include_internal", "")).lower() in {"1", "true", "yes", "on"}
+    return json_response(export_memory_graph(max_nodes=max_nodes, include_internal=include_internal))
 
 
 async def memory_snapshot_handler(request: web.Request) -> web.StreamResponse:
     include_hidden = str(request.query.get("include_hidden", "")).lower() in {"1", "true", "yes", "on"}
+    include_internal = str(request.query.get("include_internal", "")).lower() in {"1", "true", "yes", "on"}
     try:
         limit = int(request.query.get("limit", "80"))
     except Exception:
         limit = 80
-    return json_response(memory_vault_user_snapshot(include_hidden=include_hidden, limit=limit))
+    return json_response(memory_vault_user_snapshot(include_hidden=include_hidden, include_internal=include_internal, limit=limit))
 
 
 async def memory_note_handler(request: web.Request) -> web.StreamResponse:
     note_id = request.match_info.get("note_id", "")
-    result = memory_vault_user_note(note_id)
+    include_internal = str(request.query.get("include_internal", "")).lower() in {"1", "true", "yes", "on"}
+    result = memory_vault_user_note(note_id, include_internal=include_internal)
     return json_response(result, status=200 if result.get("ok") else 404)
 
 

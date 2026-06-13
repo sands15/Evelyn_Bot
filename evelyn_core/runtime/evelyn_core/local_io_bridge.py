@@ -33,6 +33,12 @@ from .config import (
     OMNIVOICE_MODEL,
     OMNIVOICE_NUM_STEP,
     OMNIVOICE_SPEED,
+    OMNIVOICE_STREAM_BLOCK_SIZE,
+    OMNIVOICE_STREAM_BLOCK_STEPS,
+    OMNIVOICE_STREAM_FIRST_BLOCK_STEPS,
+    OMNIVOICE_STREAM_FIRST_IMMEDIATE_CAP_MS,
+    OMNIVOICE_STREAM_LOOKAHEAD_CROSSFADE_MS,
+    OMNIVOICE_STREAM_STRATEGY,
     OMNIVOICE_VOICE,
     TARGET_RATE,
 )
@@ -56,6 +62,10 @@ LOCAL_BRIDGE_MIN_TEXT_CHARS = max(1, int(os.getenv("LOCAL_BRIDGE_MIN_TEXT_CHARS"
 LOCAL_BRIDGE_STATUS_INTERVAL_SEC = max(0.2, float(os.getenv("LOCAL_BRIDGE_STATUS_INTERVAL_SEC", "0.25")))
 LOCAL_BRIDGE_EXIT_AFTER_SHUTDOWN = os.getenv("LOCAL_BRIDGE_EXIT_AFTER_SHUTDOWN", "true").strip().lower() in {"1", "true", "yes", "on"}
 LOCAL_BRIDGE_SHUTDOWN_EXIT_DELAY_SEC = max(0.2, float(os.getenv("LOCAL_BRIDGE_SHUTDOWN_EXIT_DELAY_SEC", "1.5")))
+LOCAL_BRIDGE_TTS_WARMUP_ENABLED = os.getenv("LOCAL_BRIDGE_TTS_WARMUP_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+LOCAL_BRIDGE_TTS_WARMUP_TEXT = os.getenv("LOCAL_BRIDGE_TTS_WARMUP_TEXT", "\uc751.")
+LOCAL_BRIDGE_TTS_WARMUP_DELAY_SEC = max(0.0, float(os.getenv("LOCAL_BRIDGE_TTS_WARMUP_DELAY_SEC", "0.5")))
+LOCAL_BRIDGE_TTS_WARMUP_TIMEOUT_SEC = max(1.0, float(os.getenv("LOCAL_BRIDGE_TTS_WARMUP_TIMEOUT_SEC", "30")))
 TTS_PCM_RATE = int(os.getenv("OMNIVOICE_PCM_RATE", "24000"))
 TTS_PCM_CHANNELS = int(os.getenv("OMNIVOICE_PCM_CHANNELS", "1"))
 TTS_SAMPLE_WIDTH_BYTES = 2
@@ -95,6 +105,10 @@ class LocalIoBridge:
         self.restart_started = False
         self.speak_request_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=8)
         self.speak_worker_task: asyncio.Task | None = None
+        self.tts_warmup_task: asyncio.Task | None = None
+        self.tts_warmup_done = False
+        self.tts_warmup_error = ""
+        self.tts_warmup_ms: float | None = None
 
     async def run(self) -> None:
         timeout = aiohttp.ClientTimeout(total=None, connect=10, sock_connect=10)
@@ -102,6 +116,7 @@ class LocalIoBridge:
             self.session = session
             await self._start_mic()
             await self._post_status()
+            self._ensure_tts_warmup()
             while True:
                 try:
                     pcm_bytes, meta = await asyncio.wait_for(self.queue.get(), timeout=LOCAL_BRIDGE_STATUS_INTERVAL_SEC)
@@ -305,19 +320,74 @@ class LocalIoBridge:
         tts_text = clean_tts_text(text)
         if not tts_text:
             return
+        await self._speak_with_payload(self._build_tts_payload(tts_text))
+
+    def _build_tts_payload(self, text: str) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "model": OMNIVOICE_MODEL,
-            "input": tts_text,
+            "input": text,
             "voice": OMNIVOICE_VOICE if OMNIVOICE_VOICE else "auto",
             "response_format": "pcm",
             "stream": True,
             "num_step": OMNIVOICE_NUM_STEP,
+            "stream_strategy": OMNIVOICE_STREAM_STRATEGY,
+            "stream_block_size": OMNIVOICE_STREAM_BLOCK_SIZE,
+            "stream_first_block_steps": OMNIVOICE_STREAM_FIRST_BLOCK_STEPS,
+            "stream_block_steps": OMNIVOICE_STREAM_BLOCK_STEPS,
+            "stream_first_immediate_cap_ms": OMNIVOICE_STREAM_FIRST_IMMEDIATE_CAP_MS,
+            "stream_lookahead_crossfade_ms": OMNIVOICE_STREAM_LOOKAHEAD_CROSSFADE_MS,
         }
         if OMNIVOICE_LANGUAGE:
             payload["language"] = OMNIVOICE_LANGUAGE
         if OMNIVOICE_SPEED > 0 and abs(OMNIVOICE_SPEED - 1.0) > 0.001:
             payload["speed"] = OMNIVOICE_SPEED
-        await self._speak_with_payload(payload)
+        return payload
+
+    def _ensure_tts_warmup(self) -> None:
+        if not LOCAL_BRIDGE_TTS_ENABLED or not LOCAL_BRIDGE_TTS_WARMUP_ENABLED:
+            return
+        if self.tts_warmup_task is not None and not self.tts_warmup_task.done():
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self.tts_warmup_task = loop.create_task(self._warmup_tts_after_delay())
+
+    async def _warmup_tts_after_delay(self) -> None:
+        await asyncio.sleep(LOCAL_BRIDGE_TTS_WARMUP_DELAY_SEC)
+        text = clean_tts_text(LOCAL_BRIDGE_TTS_WARMUP_TEXT)
+        if not text or self.session is None:
+            return
+        started = time.perf_counter()
+        try:
+            audio_bytes = await self._drain_tts_payload(self._build_tts_payload(text))
+            if audio_bytes <= 0:
+                raise RuntimeError("tts_warmup_empty_audio")
+            self.tts_warmup_ms = round((time.perf_counter() - started) * 1000.0, 1)
+            self.tts_warmup_done = True
+            self.tts_warmup_error = ""
+            print(f"[LOCAL BRIDGE] tts_warmup_done bytes={audio_bytes} ms={self.tts_warmup_ms}", flush=True)
+        except Exception as exc:
+            self.tts_warmup_error = repr(exc)
+            print(f"[LOCAL BRIDGE] tts_warmup_failed err={exc!r}", flush=True)
+        finally:
+            await self._post_status()
+
+    async def _drain_tts_payload(self, payload: dict[str, Any]) -> int:
+        assert self.session is not None
+        async with self.session.post(
+            f"{OMNIVOICE_SERVER_URL}/v1/audio/speech",
+            json=payload,
+            timeout=aiohttp.ClientTimeout(total=LOCAL_BRIDGE_TTS_WARMUP_TIMEOUT_SEC),
+        ) as resp:
+            if resp.status != 200:
+                detail = await resp.text()
+                raise RuntimeError(f"tts_warmup_failed {resp.status}: {detail[:300]}")
+            audio_bytes = 0
+            async for chunk in resp.content.iter_chunked(4096):
+                audio_bytes += len(chunk)
+            return audio_bytes
 
     async def _speak_with_payload(self, payload: dict[str, Any]) -> None:
         assert self.session is not None
@@ -462,6 +532,12 @@ class LocalIoBridge:
             "mic": mic_stats,
             "lastLatency": dict(self.last_latency),
             "lastTtsPlayback": dict(self.last_tts_playback),
+            "ttsWarmup": {
+                "enabled": LOCAL_BRIDGE_TTS_ENABLED and LOCAL_BRIDGE_TTS_WARMUP_ENABLED,
+                "done": self.tts_warmup_done,
+                "error": self.tts_warmup_error,
+                "ms": self.tts_warmup_ms,
+            },
         }
         if extra:
             payload.update(extra)

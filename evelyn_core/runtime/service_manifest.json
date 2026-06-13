@@ -284,8 +284,8 @@
       ],
       "launcher": "launchers/start_voyager_service.ps1",
       "repair": {
-        "allowed": false,
-        "strategy": "none",
+        "allowed": true,
+        "strategy": "start_if_down",
         "requires_confirm": true,
         "cooldown_sec": 120
       }
@@ -315,8 +315,8 @@
       ],
       "launcher": "launchers/start_codex_gateway.ps1",
       "repair": {
-        "allowed": false,
-        "strategy": "none",
+        "allowed": true,
+        "strategy": "start_if_down",
         "requires_confirm": true,
         "cooldown_sec": 120
       }

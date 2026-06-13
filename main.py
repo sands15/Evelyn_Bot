@@ -492,7 +492,7 @@ room_owner_until: dict[str, float] = {}
 room_reply_in_progress: dict[str, bool] = {}
 voice_connect_locks: dict[int, asyncio.Lock] = {}
 instance_lock_handle = None
-instance_lock_path = Path(__file__).resolve().with_name(".evelyn_bot.lock")
+instance_lock_path = Path(os.getenv("EVELYN_INSTANCE_LOCK_PATH", str(Path(__file__).resolve().with_name(".evelyn_bot.lock"))))
 
 
 def release_instance_lock() -> None:
@@ -4773,13 +4773,20 @@ def format_vision_observation(
     ]
     if quality["no_usable_evidence"]:
         lines.append("vision_quality=unreliable")
+        lines.append(f"vision_confidence={quality.get('confidence', 'none')}")
+        lines.append("vision_actionable=false")
         lines.append(
             "The screen capture was taken, but the vision/OCR result is too weak or garbled to identify the screen contents. "
             "Do not claim what is on screen; tell the user the capture/analysis result is unreliable and needs a better vision pass."
         )
     elif quality["weak"]:
         lines.append("vision_quality=low_confidence")
+        lines.append(f"vision_confidence={quality.get('confidence', 'low')}")
+        lines.append("vision_actionable=false")
         lines.append("Use only the evidence below, and explicitly hedge uncertainty.")
+    else:
+        lines.append(f"vision_confidence={quality.get('confidence', 'normal')}")
+        lines.append(f"vision_actionable={str(bool(quality.get('actionable'))).lower()}")
     if scene and not quality["scene_unreliable"]:
         lines.append("scene: " + scene[:900])
     elif scene and quality["scene_unreliable"]:
@@ -12241,16 +12248,18 @@ async def control_page_memory_graph_handler(request: web.Request) -> web.StreamR
 
 async def control_page_memory_snapshot_handler(request: web.Request) -> web.StreamResponse:
     include_hidden = str(request.query.get("include_hidden", "")).lower() in {"1", "true", "yes", "on"}
+    include_internal = str(request.query.get("include_internal", "")).lower() in {"1", "true", "yes", "on"}
     try:
         limit = int(request.query.get("limit", "80"))
     except Exception:
         limit = 80
-    return control_page_json_response(memory_vault_user_snapshot(include_hidden=include_hidden, limit=limit))
+    return control_page_json_response(memory_vault_user_snapshot(include_hidden=include_hidden, include_internal=include_internal, limit=limit))
 
 
 async def control_page_memory_note_handler(request: web.Request) -> web.StreamResponse:
     note_id = request.match_info.get("note_id", "")
-    result = memory_vault_user_note(note_id)
+    include_internal = str(request.query.get("include_internal", "")).lower() in {"1", "true", "yes", "on"}
+    result = memory_vault_user_note(note_id, include_internal=include_internal)
     return control_page_json_response(result, status=200 if result.get("ok") else 404)
 
 
@@ -12275,6 +12284,19 @@ async def control_page_shutdown_handler(request: web.Request) -> web.StreamRespo
     reply_text = await handle_control_page_input(guild, "/shutdown")
     state = await build_control_page_state(guild)
     return control_page_json_response({"ok": True, "reply": reply_text, "state": state})
+
+
+async def control_page_health_handler(_: web.Request) -> web.StreamResponse:
+    return control_page_json_response(
+        {
+            "ok": True,
+            "role": "bot-api",
+            "controlPage": True,
+            "localOnly": bool(LOCAL_ONLY_MODE),
+            "discordEnabled": bool(DISCORD_ENABLED),
+            "port": CONTROL_PAGE_PORT,
+        }
+    )
 
 
 def open_control_page_path_with_system(path: Path) -> None:
@@ -12352,6 +12374,7 @@ async def start_control_page_server() -> None:
             print(f"[CONTROL PAGE] docs_missing path={CONTROL_PAGE_DOCS_DIR}")
             return
         app = web.Application(middlewares=[control_page_cors_middleware])
+        app.router.add_get("/health", control_page_health_handler)
         app.router.add_get("/", control_page_index_handler)
         app.router.add_get("/assets/{asset_path:.*}", control_page_asset_handler)
         app.router.add_get(CONTROL_PAGE_MINECRAFT_ICON_ROUTE + "/{item_name}", control_page_minecraft_item_icon_handler)

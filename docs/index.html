@@ -1747,6 +1747,7 @@
               <button class="node-scale-value" id="memoryNodeScaleValue" type="button" title="노드 크기 1.00배로 되돌리기" aria-live="polite" aria-label="노드 크기 1.00배로 되돌리기">⦿ 1.00x</button>
               <button class="node-scale-button" id="memoryNodeGrowButton" type="button" title="노드 크게" aria-label="노드 크게">+</button>
             </div>
+            <button id="memoryManagementGraphButton" type="button" aria-pressed="false" title="관리 메모리 노드 보기">관리 그래프</button>
             <button id="memoryRefreshButton" type="button">새로고침</button>
             <button id="openObsidianButton" type="button">Obsidian</button>
           </div>
@@ -1845,6 +1846,7 @@
     const memoryNodeGrowButton = document.getElementById("memoryNodeGrowButton");
     const memoryNodeShrinkButton = document.getElementById("memoryNodeShrinkButton");
     const memoryNodeScaleValue = document.getElementById("memoryNodeScaleValue");
+    const memoryManagementGraphButton = document.getElementById("memoryManagementGraphButton");
     const openObsidianButton = document.getElementById("openObsidianButton");
     const memoryGraph = document.getElementById("memoryGraph");
     const memoryEditTitle = document.getElementById("memoryEditTitle");
@@ -1862,6 +1864,7 @@
     let selectedMemoryCard = null;
     let memoryPage = "graph";
     let memoryFilter = "all";
+    let memoryGraphIncludeInternal = false;
     let memoryLoading = false;
     let memoryLoadPromise = null;
     let apiBase = "";
@@ -2637,6 +2640,12 @@
       if (memoryNodeGrowButton) memoryNodeGrowButton.disabled = memoryGraphNodeScale >= 2;
     }
 
+    function updateMemoryManagementGraphButton() {
+      if (!memoryManagementGraphButton) return;
+      memoryManagementGraphButton.classList.toggle("active", memoryGraphIncludeInternal);
+      memoryManagementGraphButton.setAttribute("aria-pressed", memoryGraphIncludeInternal ? "true" : "false");
+    }
+
     function refreshMemoryGraphNodeScale() {
       updateMemoryNodeGrowButton();
       if (!memoryGraphMotionState) return;
@@ -3101,7 +3110,7 @@
       memoryLoadPromise = (async () => {
         const [snapshotPayload, graphPayload] = await Promise.all([
           fetchApi("/api/control-page/memory?limit=180"),
-          fetchApi("/api/control-page/memory-graph?max_nodes=180")
+          fetchApi("/api/control-page/memory-graph?max_nodes=160" + (memoryGraphIncludeInternal ? "&include_internal=true" : ""))
         ]);
         memorySnapshot = snapshotPayload || { cards: [] };
         memoryGraphSnapshot = graphPayload || { nodes: [], edges: [] };
@@ -3322,6 +3331,7 @@
       });
     }
     updateMemoryNodeGrowButton();
+    updateMemoryManagementGraphButton();
     if (memoryNodeShrinkButton) {
       memoryNodeShrinkButton.addEventListener("click", () => {
         setMemoryGraphNodeScale(Number((memoryGraphNodeScale - 0.25).toFixed(2)));
@@ -3339,6 +3349,15 @@
     }
     if (memoryRefreshButton) {
       memoryRefreshButton.addEventListener("click", () => loadMemoryVault({ force: true }));
+    }
+    if (memoryManagementGraphButton) {
+      memoryManagementGraphButton.addEventListener("click", () => {
+        memoryGraphIncludeInternal = !memoryGraphIncludeInternal;
+        memoryGraphSnapshot = null;
+        memoryFilter = "all";
+        updateMemoryManagementGraphButton();
+        loadMemoryVault({ force: true });
+      });
     }
     if (openObsidianButton) {
       openObsidianButton.addEventListener("click", openObsidianVault);

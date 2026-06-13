@@ -10,7 +10,7 @@ RUNTIME_ROOT = REPO_ROOT / "evelyn_core" / "runtime"
 if str(RUNTIME_ROOT) not in sys.path:
     sys.path.insert(0, str(RUNTIME_ROOT))
 
-from evelyn_core.voyager_service import _task_recovery_boundary  # noqa: E402
+from evelyn_core.voyager_service import _death_recovery_boundary, _task_recovery_boundary  # noqa: E402
 
 
 class VoyagerStatusBoundaryTests(unittest.TestCase):
@@ -85,6 +85,32 @@ class VoyagerStatusBoundaryTests(unittest.TestCase):
         )
 
         self.assertIs(boundary, existing)
+
+    def test_recent_death_event_requires_recovery_even_without_phase_signal(self) -> None:
+        boundary = _death_recovery_boundary(
+            {
+                "recorded_at": "2026-06-13T12:00:00Z",
+                "death_message": "Evelyn was slain by Zombie",
+            },
+            now_ts=1781352060.0,
+        )
+
+        self.assertFalse(boundary["healthy"])
+        self.assertEqual(boundary["domain"], "death_recovery_required")
+        self.assertIn("Zombie", boundary["reason"])
+
+    def test_stale_death_event_does_not_keep_recovery_active(self) -> None:
+        boundary = _death_recovery_boundary(
+            {
+                "recorded_at": "2026-06-13T12:00:00Z",
+                "death_message": "Evelyn fell from a high place",
+            },
+            now_ts=1781352600.0,
+        )
+
+        self.assertTrue(boundary["healthy"])
+        self.assertEqual(boundary["domain"], "healthy")
+        self.assertEqual(boundary["reason"], "death event is stale")
 
 
 if __name__ == "__main__":

@@ -208,6 +208,10 @@ class ControlPageChatTests(unittest.TestCase):
             "ROUTER_LLM_DOWN",
             "SUB_LLM_DOWN",
             "TTS_DOWN",
+            "VISION_DOWN",
+            "VOYAGER_DOWN",
+            "CODEX_GATEWAY_DOWN",
+            "CODEX_GATEWAY_ACTION_FAILED",
         ):
             self.assertIn(f"{code}:", self.js)
         self.assertIn("runtimeHealthCodeText(health)", self.js)
@@ -221,6 +225,10 @@ class ControlPageChatTests(unittest.TestCase):
         self.assertIn("Router LLM is not responding.", self.js)
         self.assertIn("Sub LLM is not responding.", self.js)
         self.assertIn("TTS is not responding.", self.js)
+        self.assertIn("Vision is not responding.", self.js)
+        self.assertIn("Voyager is not responding.", self.js)
+        self.assertIn("Codex Gateway is not responding.", self.js)
+        self.assertIn("Codex Gateway action execution failed.", self.js)
 
     def test_runtime_status_summary_uses_readable_text(self) -> None:
         self.assertIn('issues.push("Runtime: " + runtimeIssue);', self.js)
@@ -229,6 +237,10 @@ class ControlPageChatTests(unittest.TestCase):
         self.assertIn('dom.operatorRuntimeTitle.textContent = runtimeIssue', self.js)
         self.assertIn("const controlPlane = runtime.controlPlane || {};", self.js)
         self.assertIn("runtimeIssueText || controlPlane.statusText || payload.statusText", self.js)
+        self.assertIn("function controlPlaneBotTimestampText(controlPlane)", self.js)
+        self.assertIn("Bot API state last OK", self.js)
+        self.assertIn("Bot API checked", self.js)
+        self.assertIn("botTimestampText ? statusText +", self.js)
 
     def test_control_page_asset_has_readable_fallback_copy(self) -> None:
         self.assertIn("No inventory snapshot yet.", self.js)
@@ -255,7 +267,11 @@ class ControlPageChatTests(unittest.TestCase):
         self.assertIn('repairActionLabel: "Preview Router LLM repair"', self.js)
         self.assertIn('repairActionLabel: "Preview Sub LLM repair"', self.js)
         self.assertIn('repairActionLabel: "Preview TTS repair"', self.js)
+        self.assertIn('repairActionLabel: "Preview Voyager repair"', self.js)
+        self.assertIn('repairActionLabel: "Preview Codex Gateway repair"', self.js)
         self.assertIn('main_llm: "Preview Main LLM repair"', self.js)
+        self.assertIn('voyager: "Preview Voyager repair"', self.js)
+        self.assertIn('codex_gateway: "Preview Codex Gateway repair"', self.js)
         self.assertIn("is-repair-preview", self.js)
         self.assertIn("requestRuntimeRepairPreview(button)", self.js)
         self.assertIn("requestRuntimeRepairApply(button)", self.js)
@@ -283,6 +299,8 @@ class ControlPageChatTests(unittest.TestCase):
         self.assertIn('"tts"', self.js)
         self.assertIn('"bot_api"', self.js)
         self.assertIn('"control_page"', self.js)
+        self.assertIn('"voyager"', self.js)
+        self.assertIn('"codex_gateway"', self.js)
         self.assertIn("function runtimeRepairBlockingServices(health)", self.js)
         self.assertIn("const blockingServices = runtimeRepairBlockingServices(health);", self.js)
         self.assertIn("const preferred = blockingServices[0];", self.js)

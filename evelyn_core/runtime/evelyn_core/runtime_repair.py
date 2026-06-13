@@ -19,7 +19,7 @@ ALLOWED_LAUNCHER_ROOTS = (PROJECT_ROOT, CORE_ROOT, RUNTIME_ROOT)
 DEFAULT_REPAIR_LOG_PATH = get_runtime_artifacts_root() / "runtime_health" / "repair_log.jsonl"
 RepairRunner = Callable[[list[str], str], dict[str, Any]]
 
-REPAIR_PRIORITY_SERVICE_IDS = ("main_llm", "router_llm", "sub_llm", "tts", "bot_api", "control_page")
+REPAIR_PRIORITY_SERVICE_IDS = ("main_llm", "router_llm", "sub_llm", "tts", "bot_api", "control_page", "voyager", "codex_gateway")
 BLOCKING_SERVICE_STATES = {"down", "partial", "unknown"}
 
 

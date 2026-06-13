@@ -259,10 +259,16 @@ class LocalMicRoutingTests(unittest.TestCase):
         self.assertIn("LOCAL_MIC_WAVEFORM_FILTER_ENABLED = 'false'", script)
         self.assertNotIn("py -3 main.py", script)
         self.assertIn("LOCAL_BRIDGE_STREAMING_TTS_ENABLED", bridge_source)
+        self.assertIn("LOCAL_BRIDGE_TTS_WARMUP_ENABLED = 'true'", script)
+        self.assertIn("LOCAL_BRIDGE_TTS_WARMUP_DELAY_SEC = '0.5'", script)
+        self.assertIn("LOCAL_BRIDGE_TTS_WARMUP_TEXT", bridge_source)
+        self.assertIn("tts_warmup_done", bridge_source)
         self.assertIn("/api/control-page/chat-stream", bridge_source)
         self.assertIn("_play_streaming_pcm_response", bridge_source)
         self.assertIn("tts_played_streaming", bridge_source)
         self.assertIn('"num_step": OMNIVOICE_NUM_STEP', bridge_source)
+        self.assertIn('"stream_strategy": OMNIVOICE_STREAM_STRATEGY', bridge_source)
+        self.assertIn('"stream_first_block_steps": OMNIVOICE_STREAM_FIRST_BLOCK_STEPS', bridge_source)
         self.assertIn('"mic": mic_stats', bridge_source)
 
     def test_start_local_has_lightweight_vision_profile(self) -> None:

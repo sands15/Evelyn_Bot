@@ -3,6 +3,15 @@ from __future__ import annotations
 from typing import Any
 
 from .text import clean_text
+
+
+VISION_ACTIONABLE_GUIDANCE = {
+    "normal": "Vision evidence is usable as supporting context.",
+    "low": "Vision evidence is weak; mention uncertainty and do not use it as the sole basis for actions.",
+    "none": "Vision evidence is unusable; do not claim screen contents or base actions on it.",
+}
+
+
 def vision_scene_looks_unreliable(scene: str) -> bool:
     text = clean_text(scene)
     if not text:
@@ -47,7 +56,7 @@ def vision_text_looks_corrupt(text: str) -> bool:
     return bad_count >= 2 or (bad_count / visible_count) >= 0.015
 
 
-def build_vision_quality(data: dict[str, Any]) -> dict[str, bool]:
+def build_vision_quality(data: dict[str, Any]) -> dict[str, Any]:
     scene = clean_text(str(data.get("scene") or ""))
     ocr = clean_text(str(data.get("ocr") or ""))
     scene_unreliable = bool(scene and vision_scene_looks_unreliable(scene))
@@ -55,10 +64,15 @@ def build_vision_quality(data: dict[str, Any]) -> dict[str, bool]:
     ocr_empty = not bool(ocr)
     weak = scene_unreliable or ocr_corrupt or (not scene and ocr_empty)
     no_usable_evidence = (not scene or scene_unreliable) and (ocr_empty or ocr_corrupt)
+    confidence = "none" if no_usable_evidence else ("low" if weak else "normal")
+    actionable = confidence == "normal"
     return {
         "scene_unreliable": scene_unreliable,
         "ocr_corrupt": ocr_corrupt,
         "ocr_empty": ocr_empty,
         "weak": weak,
         "no_usable_evidence": no_usable_evidence,
+        "confidence": confidence,
+        "actionable": actionable,
+        "guidance": VISION_ACTIONABLE_GUIDANCE[confidence],
     }

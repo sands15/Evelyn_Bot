@@ -279,7 +279,15 @@ def _diagnose(services: dict[str, dict[str, Any]]) -> list[Diagnostic]:
     ):
         service = services.get(service_id) or {}
         if service and service.get("state") in {"down", "partial", "unknown"}:
-            diagnostics.append(Diagnostic(code=code, severity="warning", message=message, service_ids=(service_id,)))
+            diagnostics.append(
+                Diagnostic(
+                    code=code,
+                    severity="warning",
+                    message=message,
+                    service_ids=(service_id,),
+                    suggested_actions=tuple(service.get("suggestedActions") or ()),
+                )
+            )
     codex_gateway = services.get("codex_gateway") or {}
     if codex_gateway.get("state") == "up":
         payload = next(
@@ -476,7 +484,7 @@ def legacy_services_from_health(services: dict[str, dict[str, Any]]) -> dict[str
     required_keys = {"botReady", "mainReady", "routerReady", "subReady", "ttsReady", "sttReady"}
     if required_keys.issubset(legacy):
         if not legacy.get("botReady"):
-            legacy["summary"] = "control page live | bot processor down"
+            legacy["summary"] = "Control-Page is open; Bot API is not ready."
         elif (
             legacy.get("mainReady")
             and legacy.get("routerReady")
@@ -484,7 +492,7 @@ def legacy_services_from_health(services: dict[str, dict[str, Any]]) -> dict[str
             and legacy.get("ttsReady")
             and legacy.get("sttReady")
         ):
-            legacy["summary"] = "control page live | bot processor ready"
+            legacy["summary"] = "Control-Page and Evelyn runtime are ready."
         else:
-            legacy["summary"] = "control page live | model services starting"
+            legacy["summary"] = "Control-Page is open; model or voice services are still starting."
     return legacy

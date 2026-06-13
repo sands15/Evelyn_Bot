@@ -89,6 +89,20 @@ class ShutdownScriptContractTests(unittest.TestCase):
         self.assertIn("Wait-Port -HostName '127.0.0.1' -Port $controlPagePublicPort -Label 'Docker Control Page'", script)
         self.assertNotIn("function Start-LocalControlService", script)
 
+    def test_local_launcher_does_not_treat_control_page_only_start_as_ready(self) -> None:
+        script = self.read_script("start_local_background.ps1")
+
+        start_index = script.index("Start-DockerCore")
+        bot_wait_index = script.index("Wait-Port -HostName '127.0.0.1' -Port $botApiPort -Label 'Docker Bot API'")
+        page_wait_index = script.index("Wait-Port -HostName '127.0.0.1' -Port $controlPagePublicPort -Label 'Docker Control Page'")
+        bridge_index = script.index("Start-LocalIoBridge", page_wait_index)
+        ready_index = script.index('Write-Host "[Evelyn] Docker local core is ready. Control page: $controlPageUrl"')
+
+        self.assertLess(start_index, bot_wait_index)
+        self.assertLess(bot_wait_index, page_wait_index)
+        self.assertLess(page_wait_index, bridge_index)
+        self.assertLess(bridge_index, ready_index)
+
     def test_bot_launcher_prefers_explicit_bot_api_port_env(self) -> None:
         script = self.read_script("start_bot.ps1")
 
@@ -100,6 +114,20 @@ class ShutdownScriptContractTests(unittest.TestCase):
         self.assertIn("$targetPorts = @(3000, 8765, 8787, 8798, 8799, 8880, 8891, 8912, 9820, 9821, 9822)", script)
         self.assertNotIn(" 22,", script)
         self.assertNotIn(" 3389,", script)
+
+    def test_full_stack_launcher_waits_for_bot_api_before_opening_control_page(self) -> None:
+        script = self.read_script("start_background_stack.ps1")
+
+        bot_start_index = script.index("Start-SupervisedService -Title 'Bot' -Port 8798")
+        bot_wait_index = script.index("Wait-Port -HostName '127.0.0.1' -Port 8798 -Label 'Evelyn Bot API'")
+        page_wait_index = script.index("Wait-Port -HostName '127.0.0.1' -Port 8799 -Label 'Evelyn Control Page'")
+        ready_index = script.index("Write-Host '[Evelyn] Full stack launch requested.")
+        open_index = script.index("Open-ChromeToControlPage", ready_index)
+
+        self.assertLess(bot_start_index, bot_wait_index)
+        self.assertLess(bot_wait_index, page_wait_index)
+        self.assertLess(page_wait_index, ready_index)
+        self.assertLess(ready_index, open_index)
 
     def test_local_stop_shims_delegate_to_local_script(self) -> None:
         root_shim = (REPO_ROOT / "stop_local.bat").read_text(encoding="utf-8")

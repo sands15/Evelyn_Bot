@@ -30,6 +30,8 @@ class VisionServiceLazyOcrTests(unittest.TestCase):
         self.assertIn("EVELYN_CONTAINER_PROJECT_ROOT", source)
         self.assertIn("def map_host_project_path(", source)
         self.assertIn("map_host_project_path(image_path)", source)
+        self.assertIn("from .vision_quality import build_vision_quality", source)
+        self.assertIn('result["quality"] = build_vision_quality(result)', source)
 
     def test_start_vision_passes_lazy_ocr_env_to_wsl_and_windows(self) -> None:
         source = START_VISION.read_text(encoding="utf-8")

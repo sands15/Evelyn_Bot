@@ -49,6 +49,23 @@ class RuntimeHealthTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(health["legacyServices"]["subReady"])
         self.assertTrue(health["legacyServices"]["ttsReady"])
         self.assertTrue(health["legacyServices"]["sttReady"])
+        self.assertEqual(health["legacyServices"]["summary"], "Control-Page and Evelyn runtime are ready.")
+
+    async def test_legacy_summary_uses_operator_facing_language(self) -> None:
+        manifest = load_service_manifest(force=True)
+        bot_down = await collect_runtime_health(manifest=manifest, probe_runner=fake_probe({"bot_api": "down"}))
+        model_starting = await collect_runtime_health(manifest=manifest, probe_runner=fake_probe({"main_llm": "down"}))
+
+        for health in (bot_down, model_starting):
+            summary = str(health["legacyServices"]["summary"])
+            self.assertNotIn("bot processor", summary.lower())
+            self.assertNotIn("control page live |", summary.lower())
+
+        self.assertEqual(bot_down["legacyServices"]["summary"], "Control-Page is open; Bot API is not ready.")
+        self.assertEqual(
+            model_starting["legacyServices"]["summary"],
+            "Control-Page is open; model or voice services are still starting.",
+        )
 
     async def test_stt_down_is_required_voice_input_diagnostic(self) -> None:
         manifest = load_service_manifest(force=True)
@@ -117,6 +134,25 @@ class RuntimeHealthTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(services["codex_gateway"]["ready"])
         self.assertIn("CODEX_GATEWAY_ACTION_FAILED", codes)
+
+    async def test_optional_voyager_stack_failures_are_warning_diagnostics(self) -> None:
+        manifest = load_service_manifest(force=True)
+        health = await collect_runtime_health(
+            manifest=manifest,
+            probe_runner=fake_probe({"voyager": "down", "codex_gateway": "down"}),
+        )
+        services = {service["id"]: service for service in health["services"]}
+        diagnostics = {diagnostic["code"]: diagnostic for diagnostic in health["diagnostics"]}
+
+        self.assertEqual(health["overallState"], "degraded")
+        self.assertEqual(services["voyager"]["state"], "down")
+        self.assertEqual(services["codex_gateway"]["state"], "down")
+        self.assertEqual(diagnostics["VOYAGER_DOWN"]["severity"], "warning")
+        self.assertEqual(diagnostics["CODEX_GATEWAY_DOWN"]["severity"], "warning")
+        self.assertIn("Minecraft autonomy", diagnostics["VOYAGER_DOWN"]["message"])
+        self.assertIn("Voyager code execution", diagnostics["CODEX_GATEWAY_DOWN"]["message"])
+        self.assertEqual(diagnostics["VOYAGER_DOWN"]["suggestedActions"][0]["id"], "start_voyager")
+        self.assertEqual(diagnostics["CODEX_GATEWAY_DOWN"]["suggestedActions"][0]["id"], "start_codex_gateway")
 
 
 if __name__ == "__main__":

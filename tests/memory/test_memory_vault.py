@@ -247,6 +247,72 @@ class MemoryVaultTests(unittest.TestCase):
         self.assertIn("Test Evelyn TTS", result.context_text)
         self.assertIn("[Procedural Memory]", result.context_text)
 
+    def test_general_recall_hides_runtime_management_notes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_memory_vault_note(
+                note_type="concept",
+                title="Visible TTS Latency Note",
+                body="Public memory says TTS latency uses prefetch and short chunks.",
+                tags=["tts", "latency"],
+                projects=["evelyn"],
+                root=root,
+            )
+            for note_type in ("debug", "runtime", "tool", "internal", "system"):
+                write_memory_vault_note(
+                    note_type=note_type,
+                    title=f"Hidden {note_type.title()} Diagnostic",
+                    body="Internal diagnostic says restart private runtime probes before reporting.",
+                    tags=["tts", "latency", "diagnostic"],
+                    projects=["evelyn"],
+                    root=root,
+                )
+            request = MemoryRecallRequest(
+                turn_id="turn-general-runtime-hidden",
+                session_key=None,
+                guild_id=None,
+                user_text="tts latency diagnostic",
+                topic_id=None,
+                source="test",
+                max_items=6,
+                metadata={"active_project": "evelyn"},
+            )
+            result = recall_memory_vault(request, root=root)
+
+        self.assertTrue(result.ok)
+        self.assertIn("Visible TTS Latency Note", result.context_text)
+        self.assertNotIn("Hidden Debug Diagnostic", result.context_text)
+        self.assertNotIn("Hidden Runtime Diagnostic", result.context_text)
+        self.assertNotIn("Hidden Tool Diagnostic", result.context_text)
+        self.assertNotIn("Hidden Internal Diagnostic", result.context_text)
+        self.assertNotIn("Hidden System Diagnostic", result.context_text)
+
+    def test_explicit_admin_recall_can_include_runtime_management_notes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_memory_vault_note(
+                note_type="runtime",
+                title="Runtime Diagnostic Note",
+                body="Internal diagnostic says restart private runtime probes before reporting.",
+                tags=["tts", "latency", "diagnostic"],
+                projects=["evelyn"],
+                root=root,
+            )
+            request = MemoryRecallRequest(
+                turn_id="turn-admin-runtime-visible",
+                session_key=None,
+                guild_id=None,
+                user_text="tts latency diagnostic",
+                topic_id=None,
+                source="test",
+                max_items=3,
+                metadata={"active_project": "evelyn", "allow_internal_memory": True},
+            )
+            result = recall_memory_vault(request, root=root)
+
+        self.assertTrue(result.ok)
+        self.assertIn("Runtime Diagnostic Note", result.context_text)
+
     def test_user_note_detail_returns_full_edit_body(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -308,6 +374,72 @@ class MemoryVaultTests(unittest.TestCase):
         self.assertNotIn("procedure", graph["stats"]["type_counts"])
         self.assertTrue({"related", "shared_tag", "semantic_similarity"} & edge_types)
 
+    def test_export_memory_graph_hides_internal_management_types_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_memory_vault_note(
+                note_type="core",
+                title="Visible User Memory",
+                body="This note should remain visible in the public graph.",
+                tags=["memory"],
+                root=root,
+            )
+            for note_type in ("procedure", "internal", "system", "debug", "runtime", "tool"):
+                write_memory_vault_note(
+                    note_type=note_type,
+                    title=f"Hidden {note_type.title()} Memory",
+                    body="This operational note should stay out of the public memory graph.",
+                    tags=["memory"],
+                    root=root,
+                )
+
+            graph = export_memory_graph(root=root)
+
+        node_types = {node["type"] for node in graph["nodes"]}
+        node_titles = {node["title"] for node in graph["nodes"]}
+        self.assertIn("Visible User Memory", node_titles)
+        self.assertFalse({"procedure", "internal", "system", "debug", "runtime", "tool"} & node_types)
+        self.assertFalse({"procedure", "internal", "system", "debug", "runtime", "tool"} & set(graph["stats"]["type_counts"]))
+        self.assertFalse(graph["stats"]["include_internal"])
+        self.assertIn("runtime", graph["stats"]["hidden_types"])
+
+    def test_export_memory_graph_can_include_internal_management_types_explicitly(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_memory_vault_note(
+                note_type="core",
+                title="Visible User Memory",
+                body="This note should remain visible in the public graph.",
+                tags=["memory"],
+                links=["Memory Procedure"],
+                root=root,
+            )
+            write_memory_vault_note(
+                note_type="procedure",
+                title="Memory Procedure",
+                body="This procedure should only appear in an explicit management graph.",
+                tags=["memory"],
+                root=root,
+            )
+            write_memory_vault_note(
+                note_type="runtime",
+                title="Runtime Diagnostic Note",
+                body="This runtime note should only appear in an explicit management graph.",
+                tags=["memory"],
+                root=root,
+            )
+
+            graph = export_memory_graph(root=root, include_internal=True)
+
+        node_types = {node["type"] for node in graph["nodes"]}
+        node_titles = {node["title"] for node in graph["nodes"]}
+        self.assertIn("Memory Procedure", node_titles)
+        self.assertIn("Runtime Diagnostic Note", node_titles)
+        self.assertIn("procedure", node_types)
+        self.assertIn("runtime", node_types)
+        self.assertTrue(graph["stats"]["include_internal"])
+        self.assertEqual(graph["stats"]["hidden_types"], [])
+
     def test_write_and_supersede_note(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -368,6 +500,42 @@ class MemoryVaultTests(unittest.TestCase):
         self.assertEqual(third["counts"]["total"], 0)
         self.assertTrue(state_exists)
         self.assertNotIn("confirmed_at", raw_after_actions)
+
+    def test_user_memory_snapshot_hides_internal_management_notes_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_memory_vault_note(
+                note_type="concept",
+                title="Visible User Preference",
+                body="Public memory card should remain visible.",
+                tags=["memory"],
+                root=root,
+            )
+            runtime_path = write_memory_vault_note(
+                note_type="runtime",
+                title="Runtime Diagnostic Card",
+                body="Internal runtime diagnostic should not appear in public cards.",
+                tags=["runtime"],
+                root=root,
+            )
+            runtime_note = parse_memory_note(runtime_path)
+
+            public_snapshot = memory_vault_user_snapshot(root=root)
+            internal_snapshot = memory_vault_user_snapshot(root=root, include_internal=True)
+            public_detail = memory_vault_user_note(runtime_note.note_id, root=root)
+            internal_detail = memory_vault_user_note(runtime_note.note_id, root=root, include_internal=True)
+
+        self.assertIn("Visible User Preference", {card["title"] for card in public_snapshot["cards"]})
+        self.assertNotIn("Runtime Diagnostic Card", {card["title"] for card in public_snapshot["cards"]})
+        self.assertIn("runtime", public_snapshot["hiddenTypes"])
+        self.assertFalse(public_snapshot["includeInternal"])
+        self.assertIn("Runtime Diagnostic Card", {card["title"] for card in internal_snapshot["cards"]})
+        self.assertTrue(internal_snapshot["includeInternal"])
+        self.assertEqual(internal_snapshot["hiddenTypes"], [])
+        self.assertFalse(public_detail["ok"])
+        self.assertEqual(public_detail["error"], "note_not_found")
+        self.assertTrue(internal_detail["ok"])
+        self.assertEqual(internal_detail["card"]["title"], "Runtime Diagnostic Card")
 
     def test_vector_index_metadata_and_retrieval_mode(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
