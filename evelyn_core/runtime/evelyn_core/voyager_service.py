@@ -162,6 +162,167 @@ def _stability_signals(*, display_stage: Any, last_phase_at: Any, execution_sess
     }
 
 
+_TASK_RECOVERY_GUIDANCE: dict[str, dict[str, Any]] = {
+    "pathfinding": {
+        "recommended_action": "replan_route",
+        "next_steps": [
+            "Refresh the current observation and bot position before retrying movement.",
+            "Replan the route with a closer waypoint or alternate target block.",
+            "If movement fails again, reset the current Voyager task instead of repeating the same path.",
+        ],
+    },
+    "mining": {
+        "recommended_action": "verify_target_block_and_tool",
+        "next_steps": [
+            "Verify the target block is still visible and reachable from the current position.",
+            "Confirm the required tool is equipped or available before retrying the mining action.",
+            "If the block is blocked or missing, select a nearby replacement target.",
+        ],
+    },
+    "recovery": {
+        "recommended_action": "stabilize_before_retry",
+        "next_steps": [
+            "Pause the current task and refresh health, hunger, and nearby threat observations.",
+            "Move to a safer nearby position or recover resources before retrying the task.",
+            "Resume only after the runtime reports a healthy Minecraft connection and stable bot state.",
+        ],
+    },
+    "goal_reset": {
+        "recommended_action": "replan_task",
+        "next_steps": [
+            "Stop repeating the same failed task boundary.",
+            "Choose a smaller or safer replacement goal from the current observation.",
+            "Record the reset reason so the next Voyager loop does not immediately select the same failing plan.",
+        ],
+    },
+    "generic_task": {
+        "recommended_action": "inspect_task_failure",
+        "next_steps": [
+            "Inspect the completion reason, critic result, and last task bookkeeping.",
+            "Retry only after the failed precondition is clear.",
+            "If the reason remains unclear, reset the task with a smaller verifiable objective.",
+        ],
+    },
+}
+
+
+_TASK_RECOVERY_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    (
+        "goal_reset",
+        (
+            "goal_reset",
+            "reset_goal",
+            "reset loop",
+            "reset_loop",
+            "replan",
+            "plan_churn",
+            "between_tasks",
+            "current_node_failed",
+            "task_contract",
+        ),
+    ),
+    (
+        "mining",
+        (
+            "mine",
+            "mining",
+            "dig",
+            "block",
+            "ore",
+            "coal",
+            "stone",
+            "resource_gather",
+            "gather_failed",
+            "target_block",
+        ),
+    ),
+    (
+        "pathfinding",
+        (
+            "path",
+            "move",
+            "movement",
+            "navigate",
+            "navigation",
+            "distance",
+            "unreachable",
+            "stuck",
+            "blocked",
+            "approach",
+            "waypoint",
+        ),
+    ),
+    (
+        "recovery",
+        (
+            "recover",
+            "recovery",
+            "heal",
+            "health",
+            "hunger",
+            "food",
+            "safe",
+            "escape",
+            "threat",
+            "damage",
+            "low_health",
+            "low hunger",
+        ),
+    ),
+)
+
+
+def _flatten_recovery_text(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        stripped = value.strip()
+        return [stripped] if stripped else []
+    if isinstance(value, (int, float, bool)):
+        return [str(value)]
+    if isinstance(value, dict):
+        texts: list[str] = []
+        for key, item in value.items():
+            texts.extend(_flatten_recovery_text(key))
+            texts.extend(_flatten_recovery_text(item))
+        return texts
+    if isinstance(value, (list, tuple, set)):
+        texts: list[str] = []
+        for item in value:
+            texts.extend(_flatten_recovery_text(item))
+        return texts
+    return []
+
+
+def _task_recovery_subdomain(*evidence: Any) -> str:
+    joined = " ".join(_flatten_recovery_text(evidence)).lower()
+    for subdomain, needles in _TASK_RECOVERY_PATTERNS:
+        if any(needle in joined for needle in needles):
+            return subdomain
+    return "generic_task"
+
+
+def _with_task_recovery_guidance(boundary: dict[str, Any], *evidence: Any) -> dict[str, Any]:
+    if boundary.get("healthy") is True:
+        boundary.setdefault("subdomain", "healthy")
+        boundary.setdefault("recommended_action", None)
+        boundary.setdefault("next_steps", [])
+        return boundary
+
+    existing_subdomain = boundary.get("subdomain")
+    if isinstance(existing_subdomain, str) and existing_subdomain in _TASK_RECOVERY_GUIDANCE:
+        subdomain = existing_subdomain
+    else:
+        subdomain = _task_recovery_subdomain(boundary, evidence)
+    guidance = _TASK_RECOVERY_GUIDANCE.get(subdomain, _TASK_RECOVERY_GUIDANCE["generic_task"])
+    boundary["subdomain"] = subdomain
+    boundary.setdefault("recommended_action", guidance["recommended_action"])
+    next_steps = boundary.get("next_steps")
+    if not isinstance(next_steps, list) or not all(isinstance(item, str) for item in next_steps):
+        boundary["next_steps"] = list(guidance["next_steps"])
+    return boundary
+
+
 def _task_recovery_boundary(
     *,
     last_recovery_boundary: Any,
@@ -173,7 +334,7 @@ def _task_recovery_boundary(
     last_critic_result: Any,
 ) -> dict[str, Any]:
     if isinstance(last_recovery_boundary, dict):
-        return last_recovery_boundary
+        return _with_task_recovery_guidance(last_recovery_boundary, last_completion_reason)
 
     completion_reason = str(last_completion_reason).strip() if isinstance(last_completion_reason, str) else None
     success = last_success if isinstance(last_success, bool) else None
@@ -195,52 +356,52 @@ def _task_recovery_boundary(
     }
 
     if success is True:
-        return {
+        return _with_task_recovery_guidance({
             "scope": "task",
             "domain": "task_completed",
             "reason": completion_reason or "explicit success",
             "healthy": True,
             **metadata,
-        }
+        })
     if success is False:
-        return {
+        return _with_task_recovery_guidance({
             "scope": "task",
             "domain": "task_failed",
             "reason": completion_reason or "explicit failure",
             "healthy": False,
             **metadata,
-        }
+        }, completion_reason, task_result, current_bookkeeping, previous_bookkeeping, critic_result)
     if completion_reason:
-        return {
+        return _with_task_recovery_guidance({
             "scope": "task",
             "domain": "task_unverified",
             "reason": f"completion reason without explicit success: {completion_reason}",
             "healthy": False,
             **metadata,
-        }
+        }, completion_reason, task_result, current_bookkeeping, previous_bookkeeping, critic_result)
     if task_result is not None:
-        return {
+        return _with_task_recovery_guidance({
             "scope": "task",
             "domain": "task_result_unverified",
             "reason": "last_task_result exists without explicit success",
             "healthy": False,
             **metadata,
-        }
+        }, completion_reason, task_result, current_bookkeeping, previous_bookkeeping, critic_result)
     if bookkeeping_status in {"completed", "effect_verified", "critic_passed"}:
-        return {
+        return _with_task_recovery_guidance({
             "scope": "task",
             "domain": "task_bookkeeping_unverified",
             "reason": f"bookkeeping status {bookkeeping_status!r} has no explicit success flag",
             "healthy": False,
             **metadata,
-        }
-    return {
+        }, completion_reason, task_result, current_bookkeeping, previous_bookkeeping, critic_result)
+    return _with_task_recovery_guidance({
         "scope": "task",
         "domain": "healthy",
         "reason": None,
         "healthy": True,
         **metadata,
-    }
+    })
 
 
 def _parse_death_event_timestamp(event: dict[str, Any]) -> float | None:
@@ -849,26 +1010,37 @@ class UpstreamDirectBridge:
             last_critic_result=last_critic_result,
         )
         death_boundary = _death_recovery_boundary(observation.get("last_death_event") if isinstance(observation, dict) else None)
+        active_recovery_boundary: dict[str, Any] | None = None
         if not runtime_boundary["healthy"]:
             recovery_scope = "runtime"
             recovery_domain = runtime_boundary["domain"]
             recovery_reason = runtime_boundary["reason"]
+            active_recovery_boundary = runtime_boundary
         elif not stability_signals.get("healthy", True):
             recovery_scope = "runtime"
             recovery_domain = "runtime_stability"
             recovery_reason = ", ".join(stability_signals.get("alerts") or []) or "stability alerts detected"
+            active_recovery_boundary = None
         elif not task_boundary.get("healthy", True):
             recovery_scope = "task"
             recovery_domain = task_boundary.get("domain")
             recovery_reason = task_boundary.get("reason")
+            active_recovery_boundary = task_boundary
         elif not death_boundary.get("healthy", True):
             recovery_scope = "task"
             recovery_domain = death_boundary.get("domain")
             recovery_reason = death_boundary.get("reason")
+            active_recovery_boundary = death_boundary
         else:
             recovery_scope = "healthy"
             recovery_domain = "healthy"
             recovery_reason = None
+            active_recovery_boundary = None
+        recovery_subdomain = active_recovery_boundary.get("subdomain") if isinstance(active_recovery_boundary, dict) else None
+        recommended_action = active_recovery_boundary.get("recommended_action") if isinstance(active_recovery_boundary, dict) else None
+        next_steps = active_recovery_boundary.get("next_steps") if isinstance(active_recovery_boundary, dict) else []
+        if not isinstance(next_steps, list) or not all(isinstance(item, str) for item in next_steps):
+            next_steps = []
         status_summary = {
             "loop_running": running,
             "activity": {"code": "running" if running else "idle", "text": activity_text},
@@ -995,7 +1167,10 @@ class UpstreamDirectBridge:
             "recovery_state": {
                 "scope": recovery_scope,
                 "domain": recovery_domain,
+                "subdomain": recovery_subdomain,
                 "reason": recovery_reason,
+                "recommended_action": recommended_action,
+                "next_steps": next_steps,
                 "healthy": recovery_domain == "healthy",
                 "runtime_boundary": runtime_boundary,
                 "task_boundary": task_boundary,

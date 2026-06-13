@@ -1,10 +1,11 @@
 ﻿from __future__ import annotations
 
+import asyncio
 import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import numpy as np
 
@@ -154,6 +155,25 @@ class LocalMicRoutingTests(unittest.TestCase):
 
         self.assertEqual(bridge.speak_request_queue.qsize(), 1)
         self.assertEqual(bridge.speak_request_queue.get_nowait()["text"], "hello from page")
+
+    def test_local_io_bridge_tts_warmup_retries_until_ready(self) -> None:
+        bridge = LocalIoBridge()
+        bridge.session = object()
+        bridge._drain_tts_payload = AsyncMock(side_effect=[RuntimeError("server disconnected"), 1234])  # type: ignore[method-assign]
+        bridge._post_status = AsyncMock()  # type: ignore[method-assign]
+
+        with (
+            patch("evelyn_core.local_io_bridge.LOCAL_BRIDGE_TTS_WARMUP_DELAY_SEC", 0),
+            patch("evelyn_core.local_io_bridge.LOCAL_BRIDGE_TTS_WARMUP_ATTEMPTS", 2),
+            patch("evelyn_core.local_io_bridge.LOCAL_BRIDGE_TTS_WARMUP_RETRY_DELAY_SEC", 0),
+            patch("evelyn_core.local_io_bridge.asyncio.sleep", new=AsyncMock()),
+        ):
+            asyncio.run(bridge._warmup_tts_after_delay())
+
+        self.assertTrue(bridge.tts_warmup_done)
+        self.assertEqual(bridge.tts_warmup_error, "")
+        self.assertEqual(bridge._drain_tts_payload.await_count, 2)
+        bridge._post_status.assert_awaited_once()
 
     def test_local_mic_short_segments_are_reported_as_rejected(self) -> None:
         captured: list[tuple[bytes, dict]] = []

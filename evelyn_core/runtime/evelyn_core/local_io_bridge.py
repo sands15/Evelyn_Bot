@@ -66,6 +66,8 @@ LOCAL_BRIDGE_TTS_WARMUP_ENABLED = os.getenv("LOCAL_BRIDGE_TTS_WARMUP_ENABLED", "
 LOCAL_BRIDGE_TTS_WARMUP_TEXT = os.getenv("LOCAL_BRIDGE_TTS_WARMUP_TEXT", "\uc751.")
 LOCAL_BRIDGE_TTS_WARMUP_DELAY_SEC = max(0.0, float(os.getenv("LOCAL_BRIDGE_TTS_WARMUP_DELAY_SEC", "0.5")))
 LOCAL_BRIDGE_TTS_WARMUP_TIMEOUT_SEC = max(1.0, float(os.getenv("LOCAL_BRIDGE_TTS_WARMUP_TIMEOUT_SEC", "30")))
+LOCAL_BRIDGE_TTS_WARMUP_ATTEMPTS = max(1, int(os.getenv("LOCAL_BRIDGE_TTS_WARMUP_ATTEMPTS", "6")))
+LOCAL_BRIDGE_TTS_WARMUP_RETRY_DELAY_SEC = max(0.2, float(os.getenv("LOCAL_BRIDGE_TTS_WARMUP_RETRY_DELAY_SEC", "2.0")))
 TTS_PCM_RATE = int(os.getenv("OMNIVOICE_PCM_RATE", "24000"))
 TTS_PCM_CHANNELS = int(os.getenv("OMNIVOICE_PCM_CHANNELS", "1"))
 TTS_SAMPLE_WIDTH_BYTES = 2
@@ -360,19 +362,27 @@ class LocalIoBridge:
         if not text or self.session is None:
             return
         started = time.perf_counter()
-        try:
-            audio_bytes = await self._drain_tts_payload(self._build_tts_payload(text))
-            if audio_bytes <= 0:
-                raise RuntimeError("tts_warmup_empty_audio")
-            self.tts_warmup_ms = round((time.perf_counter() - started) * 1000.0, 1)
-            self.tts_warmup_done = True
-            self.tts_warmup_error = ""
-            print(f"[LOCAL BRIDGE] tts_warmup_done bytes={audio_bytes} ms={self.tts_warmup_ms}", flush=True)
-        except Exception as exc:
-            self.tts_warmup_error = repr(exc)
-            print(f"[LOCAL BRIDGE] tts_warmup_failed err={exc!r}", flush=True)
-        finally:
-            await self._post_status()
+        last_error = ""
+        for attempt in range(1, LOCAL_BRIDGE_TTS_WARMUP_ATTEMPTS + 1):
+            try:
+                audio_bytes = await self._drain_tts_payload(self._build_tts_payload(text))
+                if audio_bytes <= 0:
+                    raise RuntimeError("tts_warmup_empty_audio")
+                self.tts_warmup_ms = round((time.perf_counter() - started) * 1000.0, 1)
+                self.tts_warmup_done = True
+                self.tts_warmup_error = ""
+                print(f"[LOCAL BRIDGE] tts_warmup_done attempt={attempt} bytes={audio_bytes} ms={self.tts_warmup_ms}", flush=True)
+                await self._post_status()
+                return
+            except Exception as exc:
+                last_error = repr(exc)
+                if attempt >= LOCAL_BRIDGE_TTS_WARMUP_ATTEMPTS:
+                    break
+                print(f"[LOCAL BRIDGE] tts_warmup_retry attempt={attempt} err={exc!r}", flush=True)
+                await asyncio.sleep(LOCAL_BRIDGE_TTS_WARMUP_RETRY_DELAY_SEC)
+        self.tts_warmup_error = last_error
+        print(f"[LOCAL BRIDGE] tts_warmup_failed err={last_error}", flush=True)
+        await self._post_status()
 
     async def _drain_tts_payload(self, payload: dict[str, Any]) -> int:
         assert self.session is not None
