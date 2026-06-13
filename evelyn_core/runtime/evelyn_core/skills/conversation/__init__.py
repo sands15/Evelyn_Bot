@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 from typing import Any
 
+from ...text import is_user_echo_answer
 from ..base import SkillContext, SkillResult, require_callback
 from ..registry import skill_registry
 
@@ -19,7 +20,7 @@ async def execute(context: SkillContext) -> SkillResult:
     prompt_text = str(extras.get("prompt_text") or user_text)
     preface = str(extras.get("user_visible_preface") or "")
 
-    if preface:
+    if preface and not is_user_echo_answer(user_text, preface):
         return SkillResult(
             skill=name,
             route=route,

@@ -1,0 +1,325 @@
+{
+  "schema_version": "1.0",
+  "runtime_name": "evelyn-local",
+  "services": [
+    {
+      "id": "control_page",
+      "label": "Control-Page",
+      "kind": "python_http",
+      "required": true,
+      "host": "127.0.0.1",
+      "port": 8799,
+      "env": {
+        "host": "CONTROL_PAGE_SERVICE_HOST",
+        "port": "CONTROL_PAGE_PUBLIC_PORT"
+      },
+      "checks": [
+        {
+          "kind": "tcp",
+          "timeout_ms": 300
+        },
+        {
+          "kind": "http",
+          "path": "/health",
+          "timeout_ms": 1000,
+          "expect_status": 200,
+          "expect_json": {
+            "ok": true
+          }
+        }
+      ],
+      "launcher": "launchers/start_control_page.ps1",
+      "repair": {
+        "allowed": true,
+        "strategy": "start_if_down",
+        "requires_confirm": true,
+        "cooldown_sec": 30
+      }
+    },
+    {
+      "id": "bot_api",
+      "label": "Bot API",
+      "kind": "python_http",
+      "required": true,
+      "host": "127.0.0.1",
+      "port": 8798,
+      "env": {
+        "host": "CONTROL_PAGE_BOT_API_HOST",
+        "port": "CONTROL_PAGE_BOT_API_PORT"
+      },
+      "checks": [
+        {
+          "kind": "tcp",
+          "timeout_ms": 300
+        },
+        {
+          "kind": "http",
+          "path": "/api/control-page/state",
+          "timeout_ms": 6000,
+          "expect_status": 200
+        }
+      ],
+      "launcher": "launchers/start_bot.ps1",
+      "repair": {
+        "allowed": true,
+        "strategy": "start_if_down",
+        "requires_confirm": true,
+        "cooldown_sec": 30
+      }
+    },
+    {
+      "id": "main_llm",
+      "label": "Main LLM",
+      "kind": "openai_compatible_llm",
+      "required": true,
+      "host": "127.0.0.1",
+      "port": 9820,
+      "env": {
+        "host": "MAIN_LLM_HOST",
+        "port": "MAIN_LLM_PORT"
+      },
+      "checks": [
+        {
+          "kind": "tcp",
+          "timeout_ms": 350
+        },
+        {
+          "kind": "http",
+          "path": "/v1/models",
+          "timeout_ms": 1200,
+          "expect_status": 200
+        }
+      ],
+      "launcher": "../start_main_llm.bat",
+      "repair": {
+        "allowed": true,
+        "strategy": "start_if_down",
+        "requires_confirm": true,
+        "cooldown_sec": 60
+      }
+    },
+    {
+      "id": "sub_llm",
+      "label": "Sub LLM",
+      "kind": "openai_compatible_llm",
+      "required": true,
+      "host": "127.0.0.1",
+      "port": 9821,
+      "env": {
+        "host": "SUB_LLM_HOST",
+        "port": "SUB_LLM_PORT"
+      },
+      "checks": [
+        {
+          "kind": "tcp",
+          "timeout_ms": 350
+        },
+        {
+          "kind": "http",
+          "path": "/v1/models",
+          "timeout_ms": 1200,
+          "expect_status": 200
+        }
+      ],
+      "launcher": "../start_sub_llm.bat",
+      "repair": {
+        "allowed": true,
+        "strategy": "start_if_down",
+        "requires_confirm": true,
+        "cooldown_sec": 60
+      }
+    },
+    {
+      "id": "router_llm",
+      "label": "Router LLM",
+      "kind": "openai_compatible_llm",
+      "required": true,
+      "host": "127.0.0.1",
+      "port": 9822,
+      "env": {
+        "host": "ROUTER_LLM_HOST",
+        "port": "ROUTER_LLM_PORT"
+      },
+      "checks": [
+        {
+          "kind": "tcp",
+          "timeout_ms": 350
+        },
+        {
+          "kind": "http",
+          "path": "/v1/models",
+          "timeout_ms": 1200,
+          "expect_status": 200
+        }
+      ],
+      "launcher": "../start_router_llm.bat",
+      "repair": {
+        "allowed": true,
+        "strategy": "start_if_down",
+        "requires_confirm": true,
+        "cooldown_sec": 60
+      }
+    },
+    {
+      "id": "tts",
+      "label": "TTS",
+      "kind": "omnivoice",
+      "required": true,
+      "host": "127.0.0.1",
+      "port": 8880,
+      "env": {
+        "host": "TTS_HOST",
+        "port": "TTS_PORT"
+      },
+      "checks": [
+        {
+          "kind": "tcp",
+          "timeout_ms": 350
+        },
+        {
+          "kind": "http",
+          "path": "/health",
+          "timeout_ms": 1200,
+          "expect_status": 200
+        }
+      ],
+      "launcher": "launchers/start_tts.ps1",
+      "repair": {
+        "allowed": true,
+        "strategy": "start_if_down",
+        "requires_confirm": true,
+        "cooldown_sec": 60
+      }
+    },
+    {
+      "id": "vision",
+      "label": "Vision",
+      "kind": "vision",
+      "required": false,
+      "host": "127.0.0.1",
+      "port": 8891,
+      "env": {
+        "host": "VISION_HOST",
+        "port": "VISION_PORT"
+      },
+      "checks": [
+        {
+          "kind": "tcp",
+          "timeout_ms": 350
+        },
+        {
+          "kind": "http",
+          "path": "/health",
+          "timeout_ms": 1200,
+          "expect_status": 200
+        }
+      ],
+      "launcher": "launchers/start_vision.ps1",
+      "repair": {
+        "allowed": true,
+        "strategy": "start_if_down",
+        "requires_confirm": true,
+        "cooldown_sec": 60
+      }
+    },
+    {
+      "id": "stt",
+      "label": "STT",
+      "kind": "qwen_asr",
+      "required": true,
+      "host": "127.0.0.1",
+      "port": 8892,
+      "env": {
+        "host": "STT_HOST",
+        "port": "STT_PORT"
+      },
+      "checks": [
+        {
+          "kind": "tcp",
+          "timeout_ms": 350
+        },
+        {
+          "kind": "http",
+          "path": "/health",
+          "timeout_ms": 2000,
+          "expect_status": 200,
+          "expect_json": {
+            "ok": true
+          }
+        }
+      ],
+      "launcher": "",
+      "repair": {
+        "allowed": false,
+        "strategy": "none",
+        "requires_confirm": true,
+        "cooldown_sec": 60
+      }
+    },
+    {
+      "id": "voyager",
+      "label": "Voyager",
+      "kind": "minecraft",
+      "required": false,
+      "host": "127.0.0.1",
+      "port": 8765,
+      "env": {
+        "host": "MINECRAFT_AUTONOMY_SERVICE_HOST",
+        "port": "MINECRAFT_AUTONOMY_SERVICE_PORT"
+      },
+      "checks": [
+        {
+          "kind": "tcp",
+          "timeout_ms": 350
+        },
+        {
+          "kind": "http",
+          "path": "/health",
+          "timeout_ms": 1200,
+          "expect_status": 200,
+          "expect_json": {
+            "ok": true
+          }
+        }
+      ],
+      "launcher": "launchers/start_voyager_service.ps1",
+      "repair": {
+        "allowed": false,
+        "strategy": "none",
+        "requires_confirm": true,
+        "cooldown_sec": 120
+      }
+    },
+    {
+      "id": "codex_gateway",
+      "label": "Codex Gateway",
+      "kind": "codex_gateway",
+      "required": false,
+      "host": "127.0.0.1",
+      "port": 8787,
+      "env": {
+        "host": "VOYAGER_CODEX_GATEWAY_HOST",
+        "port": "VOYAGER_CODEX_GATEWAY_PORT"
+      },
+      "checks": [
+        {
+          "kind": "tcp",
+          "timeout_ms": 350
+        },
+        {
+          "kind": "http",
+          "path": "/health",
+          "timeout_ms": 1200,
+          "expect_status": 200
+        }
+      ],
+      "launcher": "launchers/start_codex_gateway.ps1",
+      "repair": {
+        "allowed": false,
+        "strategy": "none",
+        "requires_confirm": true,
+        "cooldown_sec": 120
+      }
+    }
+  ]
+}

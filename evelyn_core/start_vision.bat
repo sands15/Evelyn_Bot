@@ -6,6 +6,13 @@ call "%~dp0start_env.bat"
 if /I "%~1"=="--help" goto :usage
 if /I "%~1"=="-h" goto :usage
 if /I "%~1"=="/?" goto :usage
+if /I "%~1"=="--inline" if /I not "%EVELYN_ALLOW_LEGACY_HOST_START%"=="true" goto :run_docker
+if /I not "%~1"=="--legacy-host" if /I not "%~1"=="--inline" goto :run_docker
+if /I "%~1"=="--legacy-host" if /I not "%EVELYN_ALLOW_LEGACY_HOST_START%"=="true" (
+    echo [Evelyn] Legacy host Vision launch is blocked by default.
+    echo [Evelyn] Set EVELYN_ALLOW_LEGACY_HOST_START=true only for explicit host-attached debugging.
+    endlocal & exit /b 2
+)
 
 call :port_ready %VISION_PORT% "Vision"
 if %ERRORLEVEL%==2 exit /b 0
@@ -56,3 +63,8 @@ echo   - default port: %VISION_PORT%
 echo   - models: %VISION_SMOL_MODEL% + %VISION_OCR_MODEL%
 echo.
 endlocal & exit /b 0
+
+:run_docker
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0runtime\launchers\start_docker_compose_services.ps1" -Profiles vision -Services vision
+set "EXIT_CODE=%ERRORLEVEL%"
+endlocal & exit /b %EXIT_CODE%

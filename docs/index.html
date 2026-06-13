@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>이블린 라이브 컨트롤</title>
+  <title>E.V.E.L.Y.N</title>
   <style>
     :root {
       --bg: #f5f6f7;
@@ -88,8 +88,9 @@
 
     button,
     .file-button {
-      display: inline-grid;
-      place-items: center;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
       min-height: 40px;
       border: 1px solid var(--line);
       border-radius: var(--radius);
@@ -109,6 +110,223 @@
     button:active,
     .file-button:active {
       transform: translateY(1px);
+    }
+
+    body.is-boot-splash-active {
+      overflow: hidden;
+    }
+
+    .boot-splash {
+      position: fixed;
+      inset: 0;
+      z-index: 1000;
+      display: grid;
+      place-items: center;
+      padding: 24px;
+      color: var(--text);
+      background:
+        linear-gradient(180deg, rgba(245, 246, 247, 0.96), rgba(245, 246, 247, 0.88)),
+        var(--bg);
+      opacity: 1;
+      visibility: visible;
+      transition: opacity 220ms ease, visibility 220ms ease;
+    }
+
+    [data-theme="dark"] .boot-splash {
+      background:
+        linear-gradient(180deg, rgba(17, 19, 22, 0.96), rgba(17, 19, 22, 0.88)),
+        var(--bg);
+    }
+
+    .boot-splash.is-hidden {
+      opacity: 0;
+      visibility: hidden;
+      pointer-events: none;
+    }
+
+    .boot-splash-grid {
+      position: absolute;
+      inset: 0;
+      background-image:
+        linear-gradient(rgba(47, 157, 104, 0.08) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(47, 157, 104, 0.08) 1px, transparent 1px);
+      background-size: 44px 44px;
+      mask-image: radial-gradient(circle at center, black 0%, transparent 72%);
+    }
+
+    .boot-splash-shell {
+      position: relative;
+      width: min(520px, 100%);
+      padding: 24px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--panel-strong);
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(22px);
+    }
+
+    .boot-splash-eyebrow {
+      margin: 0 0 10px;
+      color: var(--soft);
+      font-size: 0.74rem;
+      font-weight: 800;
+      letter-spacing: 0.08em;
+    }
+
+    .boot-splash-title-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+    }
+
+    .boot-splash-title-row h1 {
+      margin: 0;
+      font-size: clamp(1.8rem, 4vw, 2.6rem);
+      line-height: 1;
+      letter-spacing: 0;
+    }
+
+    .boot-splash-title-row strong {
+      font-size: 1.15rem;
+      color: var(--green);
+      white-space: nowrap;
+    }
+
+    .boot-splash-phase {
+      min-height: 22px;
+      margin: 14px 0 16px;
+      color: var(--soft);
+      line-height: 1.45;
+    }
+
+    .boot-splash-track {
+      width: 100%;
+      height: 10px;
+      overflow: hidden;
+      border-radius: 999px;
+      background: rgba(47, 157, 104, 0.14);
+    }
+
+    .boot-splash-track i {
+      display: block;
+      width: 0%;
+      height: 100%;
+      border-radius: inherit;
+      background: var(--green);
+      transition: width 220ms ease;
+    }
+
+    .boot-splash-steps {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+      margin: 18px 0 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .boot-splash-steps li {
+      min-height: 34px;
+      padding: 8px 10px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      color: var(--soft);
+      background: var(--panel);
+      font-size: 0.8rem;
+    }
+
+    .boot-splash-steps li.is-active {
+      border-color: rgba(47, 157, 104, 0.48);
+      color: var(--text);
+    }
+
+    .boot-splash-steps li.is-complete {
+      color: var(--green);
+    }
+
+    .boot-splash-actions {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-top: 18px;
+    }
+
+    .boot-splash-shutdown {
+      min-height: 36px;
+      padding: 0 12px;
+      color: var(--danger);
+    }
+
+    .boot-splash-shutdown-status {
+      min-width: 0;
+      margin: 0;
+      color: var(--soft);
+      font-size: 0.78rem;
+      line-height: 1.35;
+    }
+
+    .boot-splash-repair {
+      display: none;
+      gap: 8px;
+      margin-top: 16px;
+      padding: 12px;
+      border: 1px solid rgba(201, 71, 71, 0.24);
+      border-radius: var(--radius);
+      background: rgba(201, 71, 71, 0.08);
+    }
+
+    .boot-splash-repair.is-visible {
+      display: grid;
+    }
+
+    .boot-splash-repair strong {
+      font-size: 0.9rem;
+    }
+
+    .boot-splash-repair p {
+      margin: 0;
+      color: var(--soft);
+      font-size: 0.78rem;
+      line-height: 1.45;
+    }
+
+    .boot-splash-repair-status {
+      padding: 8px 10px;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: calc(var(--radius) - 4px);
+      background: rgba(8, 13, 22, 0.28);
+      color: var(--text) !important;
+    }
+
+    .boot-splash-repair-status.is-previewed {
+      border-color: rgba(47, 157, 104, 0.36);
+      background: rgba(47, 157, 104, 0.12);
+    }
+
+    .boot-splash-repair-status.is-blocked {
+      border-color: rgba(201, 71, 71, 0.34);
+      background: rgba(201, 71, 71, 0.12);
+    }
+
+    .boot-splash-repair-button {
+      justify-self: start;
+      min-height: 36px;
+      padding: 0 12px;
+      color: #ffffff;
+      border-color: rgba(47, 157, 104, 0.58);
+      background: #2f9d68;
+      font-weight: 800;
+    }
+
+    .boot-splash-repair-button.is-repair-apply {
+      border-color: rgba(38, 128, 84, 0.7);
+      background: #268054;
+    }
+
+    .boot-splash-repair-button.is-previewed {
+      border-color: rgba(47, 119, 157, 0.7);
+      background: #2f779d;
     }
 
     .app {
@@ -161,7 +379,7 @@
       gap: 10px;
       align-items: center;
       width: max-content;
-      max-width: 420px;
+      max-width: 560px;
       min-height: 56px;
       padding: 8px 12px 8px 8px;
       border: 1px solid var(--line);
@@ -176,11 +394,36 @@
       place-items: center;
       width: 40px;
       height: 40px;
+      overflow: hidden;
       border-radius: var(--radius);
-      color: #07351f;
-      background: #d8f5e9;
-      font-weight: 900;
-      letter-spacing: 0;
+      border: 1px solid rgba(23, 25, 29, 0.16);
+      background: rgba(255, 255, 255, 0.78);
+      box-shadow: 0 14px 34px rgba(20, 24, 30, 0.12);
+    }
+
+    [data-theme="dark"] .brand-mark {
+      border-color: rgba(255, 255, 255, 0.16);
+      background: rgba(19, 21, 25, 0.78);
+      box-shadow: 0 14px 34px rgba(0, 0, 0, 0.2);
+    }
+
+    .brand-logo {
+      display: block;
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
+
+    .brand-logo-dark {
+      display: none;
+    }
+
+    [data-theme="dark"] .brand-logo-light {
+      display: none;
+    }
+
+    [data-theme="dark"] .brand-logo-dark {
+      display: block;
     }
 
     .brand strong,
@@ -210,12 +453,25 @@
       line-height: 1.45;
     }
 
+    .brand-acronym {
+      display: block;
+      max-width: 440px;
+      white-space: normal;
+    }
+
+    .brand-acronym em {
+      color: var(--ink);
+      font-style: normal;
+      font-weight: 800;
+    }
+
     .bubble .caption {
       white-space: pre-wrap;
     }
 
     .top-actions {
       display: flex;
+      align-items: center;
       gap: 8px;
       justify-content: end;
       min-width: 0;
@@ -226,6 +482,7 @@
       width: 42px;
       height: 42px;
       padding: 0;
+      line-height: 1;
       font-weight: 900;
     }
 
@@ -315,6 +572,13 @@
       width: min(520px, 42vw);
     }
 
+    body,
+    .drawer,
+    .memory-cards {
+      scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+      scrollbar-width: thin;
+    }
+
     .chat-log {
       display: grid;
       gap: 8px;
@@ -326,6 +590,9 @@
       scrollbar-width: thin;
     }
 
+    body::-webkit-scrollbar,
+    .drawer::-webkit-scrollbar,
+    .memory-cards::-webkit-scrollbar,
     .chat-log::-webkit-scrollbar,
     .command-suggestions::-webkit-scrollbar,
     textarea::-webkit-scrollbar {
@@ -333,6 +600,9 @@
       height: 9px;
     }
 
+    body::-webkit-scrollbar-track,
+    .drawer::-webkit-scrollbar-track,
+    .memory-cards::-webkit-scrollbar-track,
     .chat-log::-webkit-scrollbar-track,
     .command-suggestions::-webkit-scrollbar-track,
     textarea::-webkit-scrollbar-track {
@@ -340,6 +610,9 @@
       border-radius: 999px;
     }
 
+    body::-webkit-scrollbar-thumb,
+    .drawer::-webkit-scrollbar-thumb,
+    .memory-cards::-webkit-scrollbar-thumb,
     .chat-log::-webkit-scrollbar-thumb,
     .command-suggestions::-webkit-scrollbar-thumb,
     textarea::-webkit-scrollbar-thumb {
@@ -350,6 +623,9 @@
       background-clip: padding-box;
     }
 
+    body::-webkit-scrollbar-thumb:hover,
+    .drawer::-webkit-scrollbar-thumb:hover,
+    .memory-cards::-webkit-scrollbar-thumb:hover,
     .chat-log::-webkit-scrollbar-thumb:hover,
     .command-suggestions::-webkit-scrollbar-thumb:hover,
     textarea::-webkit-scrollbar-thumb:hover {
@@ -461,6 +737,80 @@
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
+    }
+
+    .quick-command-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+      margin: 0 2px;
+    }
+
+    .quick-command-row[hidden] {
+      display: none;
+    }
+
+    .chat-new-message-row {
+      margin: 4px 2px 0;
+      display: flex;
+      align-items: center;
+      justify-content: flex-start;
+    }
+
+    .chat-new-message-row[hidden] {
+      display: none;
+    }
+
+    .chat-new-message-button {
+      min-height: 26px;
+      padding: 4px 10px;
+      border-radius: 9px;
+      border-color: rgba(154, 203, 178, 0.45);
+      background: rgba(47, 157, 104, 0.16);
+      color: var(--text);
+      font: 700 0.74rem/1.2 inherit;
+      opacity: 0.95;
+    }
+
+    .chat-new-message-button:hover {
+      border-color: rgba(154, 203, 178, 0.72);
+      background: rgba(47, 157, 104, 0.22);
+    }
+
+    .quick-command {
+      min-height: 32px;
+      padding: 7px 10px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      color: var(--text);
+      background: var(--panel-strong);
+      font: 800 0.82rem/1.1 inherit;
+    }
+
+    .quick-command.is-repair-preview {
+      color: #ffffff;
+      border-color: rgba(47, 157, 104, 0.58);
+      background: #2f9d68;
+    }
+
+    .quick-command.is-repair-apply {
+      color: #ffffff;
+      border-color: rgba(38, 128, 84, 0.7);
+      background: #268054;
+    }
+
+    .quick-command:disabled {
+      cursor: wait;
+      opacity: 0.68;
+    }
+
+    .quick-command-caption {
+      min-height: 18px;
+      margin: -2px 4px 0;
+      color: var(--muted);
+      font-size: 0.76rem;
+      line-height: 1.35;
     }
 
     .send {
@@ -674,11 +1024,43 @@
       align-items: center;
     }
 
+    .node-scale-control {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+
     .memory-actions button {
       min-height: 34px;
       padding: 0 11px;
       font-size: 0.78rem;
       font-weight: 800;
+    }
+
+    .memory-actions .node-scale-button {
+      width: 34px;
+      min-width: 34px;
+      padding: 0;
+      font-size: 1rem;
+      line-height: 1;
+    }
+
+    .node-scale-value {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 94px;
+      min-height: 34px;
+      padding: 0 12px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      color: var(--text);
+      background: var(--panel-strong);
+      font-size: 0.78rem;
+      font-weight: 900;
+      line-height: 1;
+      white-space: nowrap;
+      backdrop-filter: blur(18px);
     }
 
     .memory-vault-path {
@@ -1193,7 +1575,8 @@
         gap: 6px;
       }
 
-      .top-actions .file-button {
+      .top-actions .file-button,
+      .top-actions .wallpaper-reset-button {
         display: none;
       }
 
@@ -1205,18 +1588,56 @@
     }
   </style>
 </head>
-<body>
+<body class="is-boot-splash-active">
+  <section class="boot-splash" id="boot-splash" aria-live="polite" aria-label="E.V.E.L.Y.N boot loading screen">
+    <div class="boot-splash-grid" aria-hidden="true"></div>
+    <div class="boot-splash-shell">
+      <p class="boot-splash-eyebrow">EVELYN CONTROL</p>
+      <div class="boot-splash-title-row">
+        <h1>E.V.E.L.Y.N</h1>
+        <strong id="boot-splash-percent">0%</strong>
+      </div>
+      <p class="boot-splash-phase" id="boot-splash-phase">부팅 상태 확인 중</p>
+      <div class="boot-splash-track" id="boot-splash-track" role="progressbar" aria-label="E.V.E.L.Y.N boot progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+        <i id="boot-splash-bar"></i>
+      </div>
+      <ol class="boot-splash-steps" id="boot-splash-steps" aria-label="Boot stages">
+        <li data-threshold="8">API 탐색</li>
+        <li data-threshold="24">Main LLM</li>
+        <li data-threshold="42">Router / Sub</li>
+        <li data-threshold="60">TTS / Voice</li>
+        <li data-threshold="78">Discord / Bot API</li>
+        <li data-threshold="100">Control Ready</li>
+      </ol>
+      <div class="boot-splash-actions">
+        <button type="button" class="boot-splash-shutdown" id="boot-splash-shutdown">Bot Processor Stop</button>
+        <p class="boot-splash-shutdown-status" id="boot-splash-shutdown-status" aria-live="polite"></p>
+      </div>
+      <div class="boot-splash-repair" id="boot-splash-repair" hidden>
+        <strong id="boot-splash-repair-title">Repair available</strong>
+        <p id="boot-splash-repair-copy">Preview the repair plan before starting anything.</p>
+        <button type="button" class="boot-splash-repair-button" id="boot-splash-repair-button">Repair preview</button>
+        <p class="boot-splash-repair-status" id="boot-splash-repair-status" aria-live="polite">Preview only. No process starts from the first click.</p>
+      </div>
+    </div>
+  </section>
   <div class="app" id="app">
     <header class="topbar">
       <div class="brand">
-        <div class="brand-mark">E</div>
+        <div class="brand-mark" aria-hidden="true">
+          <img class="brand-logo brand-logo-light" src="./assets/evelyn-logo-light-mark.png" alt="">
+          <img class="brand-logo brand-logo-dark" src="./assets/evelyn-logo-dark-mark.png" alt="">
+        </div>
         <div>
-          <strong>이블린</strong>
-          <span>Live Control</span>
+          <strong>E.V.E.L.Y.N</strong>
+          <span class="brand-acronym">
+            <em>E</em>veryday <em>V</em>irtual <em>E</em>ntity <em>L</em>earning <em>Y</em>our <em>N</em>eeds
+          </span>
         </div>
       </div>
 
       <div class="top-actions">
+        <button class="icon-button wallpaper-reset-button" id="wallpaperResetButton" type="button" title="기본 배경으로 되돌리기" aria-label="기본 배경으로 되돌리기">↺</button>
         <label class="file-button" title="배경 변경" aria-label="배경 변경">
           <input id="wallpaperInput" type="file" accept="image/*">
           ▧
@@ -1237,9 +1658,16 @@
       <div class="chat-log" id="chatLog" aria-live="polite" aria-label="대화 기록">
         <div class="bubble assistant" id="lastBubble">
           <strong>이블린</strong>
-          <span class="caption">응. 여기 있어. 메모리는 /memory 라고 입력하면 열어둘게.</span>
+          <span class="caption">...</span>
         </div>
       </div>
+      <div class="chat-new-message-row" id="chatNewMessageRow" hidden>
+        <button class="quick-command chat-new-message-button" id="chatNewMessageButton" type="button">새 메시지</button>
+      </div>
+      <div class="quick-command-row" id="quick-command-row" hidden>
+        <button class="quick-command is-repair-preview" id="runtimeRepairPreviewButton" type="button" data-runtime-repair-preview="1">Repair preview</button>
+      </div>
+      <p class="quick-command-caption" id="quick-command-caption">Dry-run preview only.</p>
       <div class="composer">
         <div class="command-suggestions hidden" id="commandSuggestions" aria-label="명령어 목록"></div>
         <textarea id="composer" placeholder="메시지 입력"></textarea>
@@ -1259,6 +1687,7 @@
       <div class="status-list">
         <div class="line"><span>Main LLM</span><strong>연결됨</strong></div>
         <div class="line"><span>TTS</span><strong>대기</strong></div>
+        <div class="line"><span>Runtime</span><strong id="runtimeHealthLine">checking</strong></div>
         <div class="line"><span>Minecraft</span><strong>꺼짐</strong></div>
         <div class="line"><span>최근 학습</span><strong>v46</strong></div>
         <div class="line"><span>GPU 기준</span><strong>RTX 3090</strong></div>
@@ -1313,7 +1742,11 @@
             <span class="memory-vault-path" id="memoryVaultPath"></span>
           </div>
           <div class="memory-actions">
-            <button id="memoryNodeGrowButton" type="button">노드 +</button>
+            <div class="node-scale-control" aria-label="메모리 노드 크기">
+              <button class="node-scale-button" id="memoryNodeShrinkButton" type="button" title="노드 작게" aria-label="노드 작게">-</button>
+              <button class="node-scale-value" id="memoryNodeScaleValue" type="button" title="노드 크기 1.00배로 되돌리기" aria-live="polite" aria-label="노드 크기 1.00배로 되돌리기">⦿ 1.00x</button>
+              <button class="node-scale-button" id="memoryNodeGrowButton" type="button" title="노드 크게" aria-label="노드 크게">+</button>
+            </div>
             <button id="memoryRefreshButton" type="button">새로고침</button>
             <button id="openObsidianButton" type="button">Obsidian</button>
           </div>
@@ -1366,6 +1799,7 @@
     </section>
   </div>
 
+  <script src="./assets/evelyn-boot-progress.js"></script>
   <script>
     const root = document.documentElement;
     const app = document.getElementById("app");
@@ -1374,11 +1808,33 @@
     const closeDrawer = document.getElementById("closeDrawer");
     const drawer = document.getElementById("drawer");
     const wallpaperInput = document.getElementById("wallpaperInput");
+    const wallpaperResetButton = document.getElementById("wallpaperResetButton");
     const composer = document.getElementById("composer");
     const commandSuggestions = document.getElementById("commandSuggestions");
     const sendButton = document.getElementById("sendButton");
     const chatLog = document.getElementById("chatLog");
+    const chatNewMessageRow = document.getElementById("chatNewMessageRow");
+    const chatNewMessageButton = document.getElementById("chatNewMessageButton");
     let lastBubble = document.getElementById("lastBubble");
+    const runtimeHealthLine = document.getElementById("runtimeHealthLine");
+    const quickCommandRow = document.getElementById("quick-command-row");
+    const quickCommandCaption = document.getElementById("quick-command-caption");
+    const runtimeRepairPreviewButton = document.getElementById("runtimeRepairPreviewButton");
+    const bootSplash = document.getElementById("boot-splash");
+    const bootSplashPhase = document.getElementById("boot-splash-phase");
+    const bootSplashPercent = document.getElementById("boot-splash-percent");
+    const bootSplashTrack = document.getElementById("boot-splash-track");
+    const bootSplashBar = document.getElementById("boot-splash-bar");
+    const bootSplashSteps = document.querySelectorAll("#boot-splash-steps li");
+    const bootSplashRepairPanel = document.getElementById("boot-splash-repair");
+    const bootSplashRepairTitle = document.getElementById("boot-splash-repair-title");
+    const bootSplashRepairCopy = document.getElementById("boot-splash-repair-copy");
+    const bootSplashRepairButton = document.getElementById("boot-splash-repair-button");
+    const bootSplashRepairStatus = document.getElementById("boot-splash-repair-status");
+    const BOOT_PROGRESS_POLL_MS = 1200;
+    const STATE_POLL_MS = 1500;
+    let bootProgressPollTimer = null;
+    let statePollTimer = null;
     const memoryWindow = document.getElementById("memoryWindow");
     const memoryMove = document.getElementById("memoryMove");
     const memoryCards = document.getElementById("memoryCards");
@@ -1387,6 +1843,8 @@
     const memoryVaultPath = document.getElementById("memoryVaultPath");
     const memoryRefreshButton = document.getElementById("memoryRefreshButton");
     const memoryNodeGrowButton = document.getElementById("memoryNodeGrowButton");
+    const memoryNodeShrinkButton = document.getElementById("memoryNodeShrinkButton");
+    const memoryNodeScaleValue = document.getElementById("memoryNodeScaleValue");
     const openObsidianButton = document.getElementById("openObsidianButton");
     const memoryGraph = document.getElementById("memoryGraph");
     const memoryEditTitle = document.getElementById("memoryEditTitle");
@@ -1408,26 +1866,34 @@
     let memoryLoadPromise = null;
     let apiBase = "";
     let sending = false;
+    let initialStateLoaded = false;
     let suggestionItems = [];
     let selectedSuggestionIndex = 0;
     let renderedChatSignature = "";
+    let renderedChatMessageCount = 0;
     let lastControlPanelCommandId = 0;
     let controlPanelCommandCursorReady = false;
+    let runtimeRepairAction = null;
+    let runtimeRepairPreviewPlan = null;
+    let runtimeRepairPreviewBusy = false;
+    let runtimeRepairApplyBusy = false;
     let memoryGraphNodeScale = Number(localStorage.getItem("evelynMemoryGraphNodeScale") || "1") || 1;
-    memoryGraphNodeScale = Math.max(1, Math.min(2, memoryGraphNodeScale));
+    memoryGraphNodeScale = Math.max(0.25, Math.min(2, memoryGraphNodeScale));
     let commandCatalog = [
-      { command: "/help", template: "/help", summary: "명령어 목록 보기", group: "기본" },
-      { command: "/status", template: "/status", summary: "Evelyn, 음성, 모델 상태 요약", group: "기본" },
-      { command: "/memory", template: "/memory", summary: "메모리 창 열기/숨기기", group: "페이지" },
-      { command: "/obsidian", template: "/obsidian", summary: "메모리 창 열기/숨기기", group: "페이지" },
-      { command: "/voice status", template: "/voice status", summary: "음성 입력, STT, TTS 상태 보기", group: "음성" },
-      { command: "/voice input auto", template: "/voice input auto", summary: "로컬 마이크와 Discord 입력 자동 전환", group: "음성" },
-      { command: "/voice input local", template: "/voice input local", summary: "로컬 마이크 입력 사용", group: "음성" },
-      { command: "/voice input discord", template: "/voice input discord", summary: "Discord 음성 입력 사용", group: "음성" },
-      { command: "/minecraft connect", template: "/minecraft connect", summary: "Voyager Minecraft 모드 시작", group: "Minecraft" },
-      { command: "/autonomy status", template: "/autonomy status", summary: "Evelyn 자율 행동 엔진 상태 보기", group: "자율 행동" },
-      { command: "/restart", template: "/restart", summary: "Evelyn bot process 재시작", group: "시스템" },
-      { command: "/shutdown", template: "/shutdown", summary: "Evelyn runtime 종료", group: "시스템" }
+      { command: "/help", template: "/help", summary: "Show command list", group: "Basic" },
+      { command: "/status", template: "/status", summary: "Show Evelyn runtime status", group: "Basic" },
+      { command: "/memory", template: "/memory", summary: "Open or hide memory panel", group: "Page" },
+      { command: "/obsidian", template: "/obsidian", summary: "Open or hide memory panel", group: "Page" },
+      { command: "/voice status", template: "/voice status", summary: "Show voice pipeline status", group: "Voice" },
+      { command: "/voice input auto", template: "/voice input auto", summary: "Use automatic voice input routing", group: "Voice" },
+      { command: "/voice input local", template: "/voice input local", summary: "Use local microphone input", group: "Voice" },
+      { command: "/voice input discord", template: "/voice input discord", summary: "Use Discord voice input", group: "Voice" },
+      { command: "/minecraft connect", template: "/minecraft connect", summary: "Start Voyager Minecraft mode", group: "Minecraft" },
+      { command: "/repair preview", template: "/repair preview", summary: "Preview the current runtime repair plan", group: "시스템" },
+      { command: "/repair start", template: "/repair start", summary: "Start the previewed runtime repair launcher", group: "시스템" },
+      { command: "/autonomy status", template: "/autonomy status", summary: "Show autonomy engine status", group: "Autonomy" },
+      { command: "/restart", template: "/restart", summary: "Restart Evelyn bot process", group: "System" },
+      { command: "/shutdown", template: "/shutdown", summary: "Shut down Evelyn runtime", group: "System" }
     ];
 
     const savedTheme = localStorage.getItem("evelynControlTheme");
@@ -1439,6 +1905,301 @@
     if (savedWallpaper) {
       app.style.setProperty("--custom-wallpaper", `url("${savedWallpaper}")`);
       app.classList.add("has-wallpaper");
+    }
+
+    function clampPercent(value) {
+      return window.EvelynBootProgress.clampPercent(value);
+    }
+
+    function setBootSplashVisible(visible) {
+      if (!bootSplash) return;
+      bootSplash.classList.toggle("is-hidden", !visible);
+      bootSplash.setAttribute("aria-hidden", String(!visible));
+      document.body.classList.toggle("is-boot-splash-active", visible);
+    }
+
+    function updateBootSplashSteps(percent) {
+      if (!bootSplashSteps || bootSplashSteps.length === 0) return;
+      let activeIndex = 0;
+      bootSplashSteps.forEach((step, index) => {
+        const threshold = Number(step.dataset.threshold) || 0;
+        const complete = percent >= threshold;
+        if (complete) activeIndex = index;
+        step.classList.toggle("is-complete", complete);
+        step.classList.remove("is-active");
+      });
+      bootSplashSteps[Math.min(activeIndex, bootSplashSteps.length - 1)]?.classList.add("is-active");
+    }
+
+    function setBootProgress(percent, phase, { hide = false } = {}) {
+      const nextPercent = clampPercent(percent);
+      if (bootSplashTrack) bootSplashTrack.setAttribute("aria-valuenow", String(nextPercent));
+      if (bootSplashBar) bootSplashBar.style.width = nextPercent + "%";
+      if (bootSplashPercent) bootSplashPercent.textContent = nextPercent + "%";
+      if (bootSplashPhase) bootSplashPhase.textContent = phase || "Checking boot progress";
+      updateBootSplashSteps(nextPercent);
+      setBootSplashVisible(!hide);
+    }
+
+    function hasReadyRuntimeServices(payload) {
+      return window.EvelynBootProgress.hasReadyRuntimeServices(payload);
+    }
+
+    function bootProgressFromRuntimeServices(payload) {
+      return window.EvelynBootProgress.fromRuntimeServices(payload);
+    }
+
+    function bootProgressReady(payload) {
+      return window.EvelynBootProgress.isReady(payload);
+    }
+
+    function runtimeHealthText(payload) {
+      const runtime = (payload && payload.runtime) || {};
+      const health = runtime.serviceHealth || payload.serviceHealth || null;
+      if (!health || typeof health !== "object") return "unknown";
+      const diagnostics = Array.isArray(health.diagnostics) ? health.diagnostics : [];
+      const primary = diagnostics.find((item) => item && item.severity === "error")
+        || diagnostics.find((item) => item && item.severity === "warning")
+        || diagnostics[0];
+      if (primary && (primary.message || primary.code)) {
+        return String(primary.message || primary.code);
+      }
+      return String(health.summary || health.overallState || "ready");
+    }
+
+    function runtimeHealthObject(payload) {
+      const runtime = (payload && payload.runtime) || {};
+      const health = runtime.serviceHealth || payload.serviceHealth || null;
+      return health && typeof health === "object" ? health : null;
+    }
+
+    function primaryRuntimeDiagnosticForLegacy(health) {
+      const diagnostics = Array.isArray((health || {}).diagnostics) ? health.diagnostics : [];
+      return diagnostics.find((item) => item && item.severity === "error")
+        || diagnostics.find((item) => item && item.severity === "warning")
+        || diagnostics[0]
+        || null;
+    }
+
+    function runtimeRepairActionFromLegacyState(state) {
+      const health = runtimeHealthObject(state);
+      const primary = primaryRuntimeDiagnosticForLegacy(health);
+      const suggested = Array.isArray((primary || {}).suggestedActions) ? primary.suggestedActions[0] : null;
+      const actionId = suggested && (suggested.actionId || suggested.action_id || suggested.id)
+        ? (suggested.actionId || suggested.action_id || suggested.id)
+        : "";
+      const serviceFromAction = String(actionId).startsWith("start_") ? String(actionId).slice("start_".length) : "";
+      const serviceId = serviceFromAction
+        || (suggested && (suggested.serviceId || suggested.service_id))
+        || (primary && (primary.serviceId || primary.service_id))
+        || (Array.isArray(primary && primary.serviceIds) ? primary.serviceIds[0] : "")
+        || (Array.isArray(primary && primary.service_ids) ? primary.service_ids[0] : "");
+      const inferredServiceId = serviceId;
+      const inferredActionId = actionId || (serviceId ? `start_${serviceId}` : "");
+      if (!inferredServiceId || !inferredActionId) return null;
+      return {
+        serviceId: inferredServiceId,
+        actionId: inferredActionId,
+        summary: String((primary && (primary.message || primary.code)) || "Runtime repair preview")
+      };
+    }
+
+    function setRuntimeRepairPreviewStatus(text, kind = "") {
+      const nextText = text || "Use /repair preview to inspect the plan.";
+      if (quickCommandCaption) quickCommandCaption.textContent = nextText;
+      if (bootSplashRepairStatus) {
+        bootSplashRepairStatus.textContent = nextText;
+        bootSplashRepairStatus.classList.remove("is-previewed", "is-blocked");
+        if (kind) bootSplashRepairStatus.classList.add(kind);
+      }
+    }
+
+    function resetRuntimeRepairButton(button) {
+      if (!button) return;
+      button.classList.remove("is-repair-apply", "is-previewed");
+      delete button.dataset.runtimeRepairApply;
+      delete button.dataset.repairConfirmToken;
+      button.textContent = "Repair preview";
+    }
+
+    function runtimeRepairPlanMatchesAction(plan, action) {
+      if (!plan || !action) return false;
+      return String(plan.serviceId || "") === String(action.serviceId || "")
+        && String(plan.actionId || "") === String(action.actionId || "");
+    }
+
+    function runtimeRepairPreviewStatusText(plan, commandText) {
+      if (!plan || !plan.ok) {
+        const message = plan && (plan.message || plan.error) ? (plan.message || plan.error) : "unknown error";
+        return `Preview failed: ${message}`;
+      }
+      const planStatus = String(plan.planStatus || "").replace(/_/g, " ");
+      if (plan.confirmToken) {
+        return `Ready to start: ${commandText}`;
+      }
+      const prefix = planStatus ? `Preview checked (${planStatus})` : "Preview checked";
+      return `${prefix}: ${plan.message || commandText}`;
+    }
+
+    function applyRuntimeRepairPlanToButton(button, plan) {
+      if (!button || !plan) return;
+      resetRuntimeRepairButton(button);
+      if (plan.ok && plan.confirmToken) {
+        button.dataset.runtimeRepairApply = "1";
+        button.dataset.repairConfirmToken = plan.confirmToken;
+        button.classList.add("is-repair-apply");
+        button.textContent = `Start ${plan.label || "service"}`;
+        return;
+      }
+      if (plan.ok) {
+        button.classList.add("is-previewed");
+        button.textContent = "Preview checked";
+        button.title = plan.message || "Preview completed without opening execution.";
+        return;
+      }
+      button.textContent = "Preview failed";
+    }
+
+    function prepareRuntimeRepairButton(button, action) {
+      if (!button || !action) return;
+      button.dataset.repairActionId = action.actionId;
+      button.dataset.repairServiceId = action.serviceId;
+      button.title = action.summary;
+      button.disabled = runtimeRepairPreviewBusy || runtimeRepairApplyBusy;
+      resetRuntimeRepairButton(button);
+    }
+
+    function setBootRepairVisible(visible, action = null) {
+      if (!bootSplashRepairPanel) return;
+      bootSplashRepairPanel.hidden = !visible;
+      bootSplashRepairPanel.classList.toggle("is-visible", visible);
+      if (!visible) return;
+      const serviceId = action && action.serviceId ? action.serviceId : "service";
+      if (bootSplashRepairTitle) bootSplashRepairTitle.textContent = `Repair available: ${serviceId}`;
+      if (bootSplashRepairCopy) {
+        bootSplashRepairCopy.textContent = "Boot is waiting on a required service. Preview the repair plan here before anything can start.";
+      }
+      prepareRuntimeRepairButton(bootSplashRepairButton, action);
+    }
+
+    function renderRuntimeRepairPreview(payload) {
+      runtimeRepairAction = runtimeRepairActionFromLegacyState(payload);
+      const visible = Boolean(runtimeRepairAction);
+      setBootRepairVisible(visible, runtimeRepairAction);
+      if (quickCommandRow) quickCommandRow.hidden = true;
+      if (visible && runtimeRepairPlanMatchesAction(runtimeRepairPreviewPlan, runtimeRepairAction)) {
+        applyRuntimeRepairPlanToButton(bootSplashRepairButton, runtimeRepairPreviewPlan);
+        const commandText = runtimeRepairPreviewPlan.commandText
+          || (((runtimeRepairPreviewPlan.commandPreview || {}).argv || []).join(" "))
+          || runtimeRepairPreviewPlan.message
+          || "Preview ready";
+        setRuntimeRepairPreviewStatus(
+          runtimeRepairPreviewStatusText(runtimeRepairPreviewPlan, commandText),
+          runtimeRepairPreviewPlan.ok ? "is-previewed" : "is-blocked"
+        );
+        return;
+      }
+      if (!runtimeRepairPreviewButton) {
+        setRuntimeRepairPreviewStatus(visible ? "Use /repair preview or the boot repair button." : "No runtime repair action is available.");
+        return;
+      }
+      runtimeRepairPreviewButton.disabled = true;
+      if (!visible) {
+        runtimeRepairPreviewPlan = null;
+        resetRuntimeRepairButton(runtimeRepairPreviewButton);
+        setRuntimeRepairPreviewStatus("No runtime repair action is available.");
+        return;
+      }
+      prepareRuntimeRepairButton(runtimeRepairPreviewButton, runtimeRepairAction);
+      setRuntimeRepairPreviewStatus("Use /repair preview or the boot repair button. No process starts from preview.");
+    }
+
+    async function requestRuntimeRepairPreview() {
+      const button = arguments.length > 0 ? arguments[0] : null;
+      const actionOverride = arguments.length > 1 ? arguments[1] : null;
+      const action = actionOverride || runtimeRepairAction;
+      if (!action || runtimeRepairPreviewBusy) return null;
+      runtimeRepairPreviewBusy = true;
+      if (button) button.disabled = true;
+      setRuntimeRepairPreviewStatus("Loading dry-run repair preview...");
+      const actionId = action.actionId;
+      const serviceId = action.serviceId;
+      try {
+        const plan = await fetchApi("/api/control-page/runtime-repair/preview", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ actionId, serviceId, dryRun: true })
+        });
+        const commandText = plan.commandText
+          || (((plan.commandPreview || {}).argv || []).join(" "))
+          || plan.message
+          || "Preview ready";
+        runtimeRepairPreviewPlan = plan;
+        if (button) applyRuntimeRepairPlanToButton(button, plan);
+        setRuntimeRepairPreviewStatus(
+          runtimeRepairPreviewStatusText(plan, commandText),
+          plan && plan.ok ? "is-previewed" : "is-blocked"
+        );
+        if (runtimeHealthLine) runtimeHealthLine.textContent = String(plan.summary || "repair preview ready");
+        return plan;
+      } catch (error) {
+        setRuntimeRepairPreviewStatus(`Preview failed: ${error.message}`, "is-blocked");
+        return null;
+      } finally {
+        runtimeRepairPreviewBusy = false;
+        if (button) button.disabled = false;
+      }
+    }
+
+    async function requestRuntimeRepairApply() {
+      const button = arguments.length > 0 ? arguments[0] : null;
+      const actionOverride = arguments.length > 1 ? arguments[1] : null;
+      const action = actionOverride || runtimeRepairAction;
+      if (!action || runtimeRepairApplyBusy || !runtimeRepairPreviewPlan) return null;
+      const confirmToken = (button ? button.dataset.repairConfirmToken || "" : "") || runtimeRepairPreviewPlan.confirmToken || "";
+      if (!confirmToken) {
+        setRuntimeRepairPreviewStatus("Repair confirmation token is missing.");
+        return null;
+      }
+      if (!window.confirm(`Start ${action.serviceId} repair launcher?`)) {
+        return null;
+      }
+      runtimeRepairApplyBusy = true;
+      if (button) button.disabled = true;
+      setRuntimeRepairPreviewStatus("Starting repair launcher...");
+      const actionId = action.actionId;
+      const serviceId = action.serviceId;
+      try {
+        const result = await fetchApi("/api/control-page/runtime-repair/apply", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            actionId,
+            serviceId,
+            confirmToken,
+            reason: "operator confirmed runtime repair from legacy Control-Page"
+          })
+        });
+        setRuntimeRepairPreviewStatus(result.message || "Repair launcher started.");
+        setTimeout(() => refreshState(), 1200);
+        return result;
+      } catch (error) {
+        setRuntimeRepairPreviewStatus(`Repair start failed: ${error.message}`);
+        return null;
+      } finally {
+        runtimeRepairApplyBusy = false;
+        if (button) button.disabled = false;
+      }
+    }
+
+    function applyBootProgressPayload(payload) {
+      const progress = window.EvelynBootProgress.progressFromPayload(payload);
+      if (!progress || typeof progress !== "object") return false;
+      const percent = clampPercent(progress.percent);
+      const phase = progress.phase || "Checking boot progress";
+      const ready = bootProgressReady(payload);
+      setBootProgress(ready ? 100 : percent, ready ? "Control Ready" : phase, { hide: ready });
+      return true;
     }
 
     themeButton.addEventListener("click", () => {
@@ -1472,12 +2233,29 @@
       reader.readAsDataURL(file);
     });
 
+    if (wallpaperResetButton) {
+      wallpaperResetButton.addEventListener("click", () => {
+        app.style.removeProperty("--custom-wallpaper");
+        app.classList.remove("has-wallpaper");
+        localStorage.removeItem("evelynControlWallpaper");
+        if (wallpaperInput) wallpaperInput.value = "";
+      });
+    }
+
     function formatChatTime(value) {
       const seconds = Number(value);
       if (!Number.isFinite(seconds) || seconds <= 0) return "";
       const date = new Date(seconds * 1000);
       if (Number.isNaN(date.getTime())) return "";
       return date.toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" });
+    }
+
+    function normalizeChatAuthor(author, role) {
+      const fallback = role === "user" ? "정훈" : (role === "system" ? "System" : "이블린");
+      const value = String(author || "").trim();
+      if (!value) return fallback;
+      if (/[?�ìíîïð뺥썕툝]/.test(value)) return fallback;
+      return value;
     }
 
     function normalizeChatMessage(message) {
@@ -1489,7 +2267,7 @@
       const fallbackAuthor = normalizedRole === "user" ? "정훈" : "이블린";
       return {
         role: normalizedRole,
-        author: String(message.author || fallbackAuthor).trim() || fallbackAuthor,
+        author: normalizeChatAuthor(message.author || fallbackAuthor, normalizedRole),
         text,
         at: Number(message.at) || 0
       };
@@ -1506,6 +2284,16 @@
 
     function isChatScrolledNearBottom() {
       return chatLog.scrollHeight - chatLog.scrollTop - chatLog.clientHeight < 48;
+    }
+
+    function hideNewChatMessageNotice() {
+      if (!chatNewMessageRow) return;
+      chatNewMessageRow.hidden = true;
+    }
+
+    function showNewChatMessageNotice() {
+      if (!chatNewMessageButton || !chatNewMessageRow) return;
+      chatNewMessageRow.hidden = false;
     }
 
     function buildChatBubble(message) {
@@ -1528,11 +2316,19 @@
       const signature = chatSignature(normalized);
       if (signature === renderedChatSignature) return;
       const shouldStick = isChatScrolledNearBottom();
+      const previousCount = renderedChatMessageCount;
+      const hasNewMessages = normalized.length > previousCount;
       chatLog.replaceChildren(...normalized.map(buildChatBubble));
       lastBubble = chatLog.lastElementChild || lastBubble;
       renderedChatSignature = signature;
+      renderedChatMessageCount = normalized.length;
       if (shouldStick) {
         chatLog.scrollTop = chatLog.scrollHeight;
+        hideNewChatMessageNotice();
+        return;
+      }
+      if (previousCount > 0 && hasNewMessages) {
+        showNewChatMessageNotice();
       }
     }
 
@@ -1544,9 +2340,26 @@
       chatLog.appendChild(bubble);
       lastBubble = bubble;
       renderedChatSignature = "";
+      renderedChatMessageCount = Math.max(0, renderedChatMessageCount) + 1;
       if (shouldStick) {
         chatLog.scrollTop = chatLog.scrollHeight;
+        hideNewChatMessageNotice();
       }
+    }
+
+    if (chatLog) {
+      chatLog.addEventListener("scroll", () => {
+        if (isChatScrolledNearBottom()) {
+          hideNewChatMessageNotice();
+        }
+      });
+    }
+
+    if (chatNewMessageButton) {
+      chatNewMessageButton.addEventListener("click", () => {
+        chatLog.scrollTop = chatLog.scrollHeight;
+        hideNewChatMessageNotice();
+      });
     }
 
     function setBubble(text) {
@@ -1573,7 +2386,7 @@
       if (command.startsWith("/voice")) return "음성";
       if (command.startsWith("/minecraft") || command === "/inventory" || command.startsWith("/voyager")) return "Minecraft";
       if (command.startsWith("/autonomy")) return "자율 행동";
-      if (command === "/shutdown") return "시스템";
+      if (command === "/shutdown" || command.startsWith("/repair")) return "시스템";
       return "기본";
     }
 
@@ -1680,6 +2493,7 @@
 
     function applyState(state, options = {}) {
       if (!state || typeof state !== "object") return;
+      applyBootProgressPayload(state);
       const commands = mergeCommands(commandCatalog, state.commands || [], state.allCommands || []);
       if (commands.length) commandCatalog = commands;
       const runtime = state.runtime || {};
@@ -1693,14 +2507,47 @@
       const lines = Array.from(drawer.querySelectorAll(".status-list .line strong"));
       if (lines[0]) lines[0].textContent = services.mainReady ? "연결됨" : "대기";
       if (lines[1]) lines[1].textContent = voice.speaking ? "재생 중" : (services.ttsReady ? "대기" : "대기 중");
-      if (lines[2]) lines[2].textContent = minecraft.sessionActive ? "연결됨" : "꺼짐";
+      if (runtimeHealthLine) runtimeHealthLine.textContent = runtimeHealthText(state);
+      renderRuntimeRepairPreview(state);
+      if (lines[3]) lines[3].textContent = minecraft.sessionActive ? "연결됨" : "꺼짐";
     }
 
-    async function refreshState() {
+    function scheduleBootProgressPolling(payload) {
+      if (bootProgressPollTimer) {
+        clearTimeout(bootProgressPollTimer);
+        bootProgressPollTimer = null;
+      }
+      if (bootProgressReady(payload)) return;
+      bootProgressPollTimer = window.setTimeout(() => {
+        bootProgressPollTimer = null;
+        refreshState({ runInitialPanelCommands: false });
+      }, BOOT_PROGRESS_POLL_MS);
+    }
+
+    function scheduleStatePolling() {
+      if (statePollTimer) return;
+      statePollTimer = window.setInterval(() => {
+        if (!sending) {
+          refreshState({ runInitialPanelCommands: false, showConnectionErrors: false });
+        }
+      }, STATE_POLL_MS);
+    }
+
+    async function refreshState({ runInitialPanelCommands = true, showConnectionErrors = true } = {}) {
       try {
-        await fetchApi("/api/control-page/state");
+        const payload = await fetchApi("/api/control-page/state");
+        initialStateLoaded = true;
+        applyState(payload, { runInitialPanelCommands });
+        scheduleBootProgressPolling(payload);
+        if (bootProgressReady(payload)) {
+          scheduleStatePolling();
+        }
       } catch (error) {
-        setBubble(`컨트롤 페이지 API 연결 확인 중: ${error.message}`);
+        if (showConnectionErrors || !initialStateLoaded) {
+          setBootProgress(0, `API 연결 확인 중: ${error.message}`);
+          setBubble(`컨트롤 페이지 API 연결 확인 중: ${error.message}`);
+        }
+        scheduleBootProgressPolling(null);
       }
     }
 
@@ -1782,16 +2629,37 @@
     }
 
     function updateMemoryNodeGrowButton() {
-      if (!memoryNodeGrowButton) return;
-      memoryNodeGrowButton.textContent = memoryGraphNodeScale >= 1.95 ? "노드 1x" : `노드 ${memoryGraphNodeScale.toFixed(2)}x`;
-      memoryNodeGrowButton.title = memoryGraphNodeScale >= 1.95 ? "노드 크기를 기본값으로 되돌리기" : "노드만 크게 보기";
+      if (memoryNodeScaleValue) {
+        memoryNodeScaleValue.textContent = `⦿ ${memoryGraphNodeScale.toFixed(2)}x`;
+        memoryNodeScaleValue.setAttribute("aria-label", `노드 크기 ${memoryGraphNodeScale.toFixed(2)}배, 클릭하면 1.00배로 되돌리기`);
+      }
+      if (memoryNodeShrinkButton) memoryNodeShrinkButton.disabled = memoryGraphNodeScale <= 0.25;
+      if (memoryNodeGrowButton) memoryNodeGrowButton.disabled = memoryGraphNodeScale >= 2;
     }
 
-    function growMemoryGraphNodes() {
-      memoryGraphNodeScale = memoryGraphNodeScale >= 1.95 ? 1 : Math.min(2, Number((memoryGraphNodeScale + 0.25).toFixed(2)));
-      localStorage.setItem("evelynMemoryGraphNodeScale", String(memoryGraphNodeScale));
+    function refreshMemoryGraphNodeScale() {
       updateMemoryNodeGrowButton();
-      renderMemoryGraph();
+      if (!memoryGraphMotionState) return;
+      const { state, nodeElements, width, height } = memoryGraphMotionState;
+      state.forEach((node) => {
+        node.radius = graphNodeRadius(node.importance);
+        clampGraphNodePosition(node, width, height);
+      });
+      nodeElements.forEach(({ id, circle, text }) => {
+        const node = state.get(id);
+        if (!node) return;
+        circle.setAttribute("r", node.radius.toFixed(1));
+        if (text) {
+          text.setAttribute("y", (node.y + node.radius + 7).toFixed(1));
+        }
+      });
+      applyMemoryGraphLayout(memoryGraphMotionState);
+    }
+
+    function setMemoryGraphNodeScale(nextScale) {
+      memoryGraphNodeScale = Math.max(0.25, Math.min(2, Number(nextScale) || 1));
+      localStorage.setItem("evelynMemoryGraphNodeScale", String(memoryGraphNodeScale));
+      refreshMemoryGraphNodeScale();
     }
 
     function scheduleMemoryGraphRender() {
@@ -1809,9 +2677,19 @@
     }
 
     function extractGraphDate(value) {
-      const match = String(value || "").match(/\b(20\d{2})[-./](\d{1,2})[-./](\d{1,2})\b/);
+      const match = String(value || "").match(/\b(20\d{2})[-./_]?(\d{1,2})[-./_]?(\d{1,2})\b/);
       if (!match) return "";
-      return `${match[1]}-${match[2].padStart(2, "0")}-${match[3].padStart(2, "0")}`;
+      return {
+        year: match[1],
+        month: match[2].padStart(2, "0"),
+        day: match[3].padStart(2, "0")
+      };
+    }
+
+    function formatGraphDate(date, format = "full") {
+      if (!date) return "";
+      if (format === "daily") return `${date.year.slice(-2)}.${date.day}`;
+      return `${date.year}-${date.month}-${date.day}`;
     }
 
     function acronymLabel(value) {
@@ -1828,9 +2706,23 @@
     }
 
     function graphNodeLabel(node) {
-      const date = extractGraphDate(node.updated_at || node.updatedAt || node.title || node.rel_path || node.id);
-      if (date) return date;
-      return acronymLabel(node.title || node.id);
+      const type = String(node.type || node.category || "note").toLowerCase();
+      if (type === "legacy") return "";
+      const date = extractGraphDate([
+        node.updated_at,
+        node.updatedAt,
+        node.created_at,
+        node.createdAt,
+        node.rel_path,
+        node.path,
+        node.id,
+        node.title
+      ].filter(Boolean).join(" "));
+      if (type === "daily") return formatGraphDate(date, "daily") || "daily";
+      if (type === "core") return "core";
+      if (type === "project") return "Project";
+      if (date) return formatGraphDate(date);
+      return shortLabel(type || "note", 12).toLowerCase();
     }
 
     function stopMemoryGraphMotion() {
@@ -1952,6 +2844,7 @@
           vx: 0,
           vy: 0,
           phase: index * 0.67,
+          importance,
           radius: graphNodeRadius(importance)
         });
       });
@@ -2080,10 +2973,12 @@
         const importance = Number(node.importance || 0.5);
         const radius = graphNodeRadius(importance);
         const label = index < 64 || node.id === selectedMemoryId ? graphNodeLabel(node) : "";
+        const nodeLocked = Boolean(node.locked || node.canEdit === false || node.contentHidden);
+        const nodeTitle = nodeLocked ? "Archived memory" : (node.title || node.id);
         const active = node.id === selectedMemoryId ? " active" : "";
         return (
           '<g class="node' + active + '" tabindex="0" role="button" data-memory-id="' + escapeHtml(node.id) + '">' +
-          '<title>' + escapeHtml(node.title || node.id) + '</title>' +
+          '<title>' + escapeHtml(nodeTitle) + '</title>' +
           '<circle cx="' + point.x.toFixed(1) + '" cy="' + point.y.toFixed(1) + '" r="' + radius.toFixed(1) +
           '" fill="' + graphNodeColor(node.type) + '"></circle>' +
           (label ? '<text x="' + point.x.toFixed(1) + '" y="' + (point.y + radius + 7).toFixed(1) + '" text-anchor="middle">' + escapeHtml(label) + '</text>' : '') +
@@ -2103,15 +2998,19 @@
 
     function renderMemoryEditor() {
       const hasSelection = Boolean(selectedMemoryCard && selectedMemoryId);
+      const locked = Boolean(selectedMemoryCard && (selectedMemoryCard.locked || selectedMemoryCard.canEdit === false || selectedMemoryCard.contentHidden));
       if (memoryEditTitle) {
-        memoryEditTitle.value = hasSelection ? (selectedMemoryCard.title || "") : "";
-        memoryEditTitle.disabled = !hasSelection;
+        memoryEditTitle.value = hasSelection ? (locked ? "Archived memory" : (selectedMemoryCard.title || "")) : "";
+        memoryEditTitle.disabled = !hasSelection || locked;
       }
       if (memoryEditBody) {
-        memoryEditBody.value = hasSelection ? (selectedMemoryCard.body || "") : "";
-        memoryEditBody.disabled = !hasSelection;
+        memoryEditBody.value = hasSelection
+          ? (locked ? (selectedMemoryCard.preview || "Archived memory is locked.") : (selectedMemoryCard.body || ""))
+          : "";
+        memoryEditBody.disabled = !hasSelection || locked;
       }
-      [memoryEditSaveButton, memoryConfirmButton, memoryDeleteButton].forEach((button) => {
+      if (memoryEditSaveButton) memoryEditSaveButton.disabled = !hasSelection || locked;
+      [memoryConfirmButton, memoryDeleteButton].forEach((button) => {
         if (button) button.disabled = !hasSelection;
       });
     }
@@ -2149,10 +3048,10 @@
       if (memoryVaultPath) memoryVaultPath.textContent = memorySnapshot && memorySnapshot.vaultPath ? memorySnapshot.vaultPath : "";
       if (memoryHint) {
         const graphCount = Array.isArray(memoryGraphSnapshot && memoryGraphSnapshot.nodes) ? memoryGraphSnapshot.nodes.length : 0;
-        memoryHint.textContent = total ? `그래프 ${graphCount || total}개 노드, 수정 ${total}개 노트` : "memory_vault 노드를 기다리는 중입니다.";
+        memoryHint.textContent = total ? `Graph ${graphCount || total} nodes, ${total} notes` : "Waiting for memory_vault nodes.";
       }
       if (!cards.length) {
-        memoryCards.innerHTML = '<div class="memory-empty">표시할 메모리 노트가 없습니다.</div>';
+        memoryCards.innerHTML = '<div class="memory-empty">No memory notes to display.</div>';
         selectedMemoryCard = null;
         renderMemoryEditor();
         return;
@@ -2164,16 +3063,18 @@
       memoryCards.innerHTML = cards.map((card) => {
         const title = card.title || card.id || "Untitled";
         const badge = card.category || card.type || "note";
-        const preview = card.preview || card.body || "";
-        const relPath = card.relPath || card.path || card.id || "";
+        const locked = Boolean(card.locked || card.canEdit === false || card.contentHidden);
+        const displayTitle = locked ? "Archived memory" : title;
+        const preview = locked ? (card.preview || "Archived memory is locked.") : (card.preview || card.body || "");
+        const relPath = locked ? "Archived" : (card.relPath || card.path || card.id || "");
         const active = String(card.id || "") === selectedMemoryId ? " active" : "";
         return (
-          '<article class="memory-card' + active + '" role="button" tabindex="0" data-memory-id="' + escapeHtml(card.id || "") + '">' +
+          '<article class="memory-card' + active + (locked ? ' is-locked' : '') + '" role="button" tabindex="0" data-memory-id="' + escapeHtml(card.id || "") + '">' +
           '<div class="memory-card-head">' +
-          '<strong>' + escapeHtml(title) + '</strong>' +
-          '<span class="memory-badge">' + escapeHtml(card.confirmed ? "확인됨" : badge) + '</span>' +
+          '<strong>' + escapeHtml(displayTitle) + '</strong>' +
+          '<span class="memory-badge">' + escapeHtml(locked ? "Archived" : (card.confirmed ? "confirmed" : badge)) + '</span>' +
           '</div>' +
-          '<p class="memory-card-preview">' + escapeHtml(preview || "내용 없음") + '</p>' +
+          '<p class="memory-card-preview">' + escapeHtml(preview || "No content") + '</p>' +
           '<div class="memory-card-meta">' + escapeHtml(relPath) + '</div>' +
           '</article>'
         );
@@ -2225,6 +3126,11 @@
 
     async function postMemoryAction(action) {
       if (!selectedMemoryId) return;
+      if (action === "edit" && selectedMemoryCard && (selectedMemoryCard.locked || selectedMemoryCard.canEdit === false || selectedMemoryCard.contentHidden)) {
+        setBubble("Archived memory is locked, so its contents cannot be viewed or edited here.");
+        renderMemoryEditor();
+        return;
+      }
       const payload = { action };
       if (action === "edit") {
         payload.title = memoryEditTitle ? memoryEditTitle.value : "";
@@ -2246,9 +3152,9 @@
         selectedMemoryId = keepSelection;
         selectedMemoryCard = null;
         await loadMemoryVault({ force: true });
-        setBubble(action === "edit" ? "메모리 노드를 수정했어." : action === "confirm" ? "메모리 노드를 확인 처리했어." : "메모리 노드를 삭제 목록으로 옮겼어.");
+        setBubble(action === "edit" ? "Memory node updated." : action === "confirm" ? "Memory node confirmed." : "Memory node hidden.");
       } catch (error) {
-        setBubble(`메모리 작업 실패: ${error.message}`);
+        setBubble(`Memory action failed: ${error.message}`);
         renderMemoryEditor();
       }
     }
@@ -2294,6 +3200,59 @@
       }
     }
 
+    function repairActionForCommand(serviceId = "") {
+      const normalizedService = String(serviceId || "").trim();
+      if (!normalizedService) return runtimeRepairAction;
+      if (runtimeRepairAction && runtimeRepairAction.serviceId === normalizedService) return runtimeRepairAction;
+      return {
+        serviceId: normalizedService,
+        actionId: `start_${normalizedService}`,
+        summary: `Runtime repair preview for ${normalizedService}`
+      };
+    }
+
+    function parseRepairCommand(value) {
+      const parts = String(value || "").trim().toLowerCase().split(/\s+/).filter(Boolean);
+      if (parts[0] !== "/repair") return null;
+      let mode = "preview";
+      let serviceId = "";
+      for (const part of parts.slice(1)) {
+        if (part === "preview" || part === "dry-run") {
+          mode = "preview";
+        } else if (part === "start" || part === "apply" || part === "run") {
+          mode = "start";
+        } else if (!serviceId) {
+          serviceId = part;
+        }
+      }
+      return { mode, serviceId };
+    }
+
+    async function handleRepairCommand(value) {
+      const parsed = parseRepairCommand(value);
+      if (!parsed) return false;
+      const action = repairActionForCommand(parsed.serviceId);
+      if (!action) {
+        setRuntimeRepairPreviewStatus("No runtime repair action is available right now.");
+        setBubble("지금은 실행 가능한 repair 대상이 없어.");
+        return true;
+      }
+      if (parsed.mode === "preview") {
+        await requestRuntimeRepairPreview(null, action);
+        return true;
+      }
+      let plan = runtimeRepairPreviewPlan;
+      if (!plan || plan.serviceId !== action.serviceId || !plan.confirmToken) {
+        plan = await requestRuntimeRepairPreview(null, action);
+      }
+      if (!plan || !plan.confirmToken) {
+        setBubble("repair preview만 가능해. simulated 상태거나 실행 조건이 아직 안 맞아.");
+        return true;
+      }
+      await requestRuntimeRepairApply(null, action);
+      return true;
+    }
+
     async function handleSubmit() {
       const value = composer.value.trim();
       if (!value || sending) return;
@@ -2310,6 +3269,9 @@
       }
       if (normalized === "/" || normalized === "/help") {
         setBubble(formatHelp());
+        return;
+      }
+      if (await handleRepairCommand(normalized)) {
         return;
       }
       sending = true;
@@ -2341,9 +3303,39 @@
     }
 
     sendButton.addEventListener("click", handleSubmit);
+    if (runtimeRepairPreviewButton) {
+      runtimeRepairPreviewButton.addEventListener("click", () => {
+        if (runtimeRepairPreviewButton.dataset.runtimeRepairApply) {
+          requestRuntimeRepairApply(runtimeRepairPreviewButton);
+          return;
+        }
+        requestRuntimeRepairPreview(runtimeRepairPreviewButton);
+      });
+    }
+    if (bootSplashRepairButton) {
+      bootSplashRepairButton.addEventListener("click", () => {
+        if (bootSplashRepairButton.dataset.runtimeRepairApply) {
+          requestRuntimeRepairApply(bootSplashRepairButton);
+          return;
+        }
+        requestRuntimeRepairPreview(bootSplashRepairButton);
+      });
+    }
     updateMemoryNodeGrowButton();
+    if (memoryNodeShrinkButton) {
+      memoryNodeShrinkButton.addEventListener("click", () => {
+        setMemoryGraphNodeScale(Number((memoryGraphNodeScale - 0.25).toFixed(2)));
+      });
+    }
+    if (memoryNodeScaleValue) {
+      memoryNodeScaleValue.addEventListener("click", () => {
+        setMemoryGraphNodeScale(1);
+      });
+    }
     if (memoryNodeGrowButton) {
-      memoryNodeGrowButton.addEventListener("click", growMemoryGraphNodes);
+      memoryNodeGrowButton.addEventListener("click", () => {
+        setMemoryGraphNodeScale(Number((memoryGraphNodeScale + 0.25).toFixed(2)));
+      });
     }
     if (memoryRefreshButton) {
       memoryRefreshButton.addEventListener("click", () => loadMemoryVault({ force: true }));
@@ -2471,12 +3463,14 @@
       };
     }
 
-    function applyWindowBox(box) {
+    function applyWindowBox(box, { resize = true } = {}) {
       memoryWindow.style.left = `${box.left}px`;
       memoryWindow.style.top = `${box.top}px`;
-      memoryWindow.style.width = `${box.width}px`;
-      memoryWindow.style.height = `${box.height}px`;
-      applyMemoryGraphLayout(memoryGraphMotionState);
+      if (resize) {
+        memoryWindow.style.width = `${box.width}px`;
+        memoryWindow.style.height = `${box.height}px`;
+        applyMemoryGraphLayout(memoryGraphMotionState);
+      }
     }
 
     function getWindowBox() {
@@ -2501,7 +3495,7 @@
           start.width,
           start.height
         );
-        applyWindowBox(next);
+        applyWindowBox(next, { resize: false });
       }
 
       function stop() {

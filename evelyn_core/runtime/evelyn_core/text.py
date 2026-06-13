@@ -11,6 +11,14 @@ from .config import (
 )
 
 
+def is_user_echo_answer(user_text: str, answer_text: str | None) -> bool:
+    user_clean = clean_text(user_text)
+    answer_clean = clean_text(answer_text or "")
+    if not user_clean or not answer_clean:
+        return False
+    return user_clean == answer_clean
+
+
 def clean_text(text: str) -> str:
     """여러 공백을 하나로 줄이고 앞뒤 공백을 정리한다."""
     return re.sub(r"\s+", " ", (text or "").strip())
@@ -21,9 +29,44 @@ def strip_response_action_tags(text: str) -> str:
     return re.sub(r"^\s*\[(?:찾기|질문|대기|답변)\]\s*", "", text or "", flags=re.IGNORECASE)
 
 
+def strip_model_channel_tags(text: str) -> str:
+    """Gemma-style channel markers are transport metadata, not user-visible text."""
+    text = text or ""
+    text = re.sub(
+        r"<\|channel\>\s*(?:thought|analysis|reasoning)\b.*?<channel\|>\s*<\|channel\>\s*(?:final|model|answer|content)\b\s*<channel\|>",
+        " ",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    text = re.sub(
+        r"<\|channel\>\s*(?:thought|analysis|reasoning)\b.*?<channel\|>\s*<\|channel\>\s*(?:final|model|answer|content)\b\s*",
+        " ",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    text = re.sub(
+        r"<\|channel\>\s*(?:thought|analysis|reasoning)\s*<channel\|>.*?<\|channel\>\s*(?:final|model|answer|content)\s*<channel\|>",
+        " ",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    text = re.sub(
+        r"<\|channel\>\s*(?:thought|analysis|reasoning)\s*<channel\|>.*?<\|channel\>\s*(?:final|model|answer|content)\s*",
+        " ",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    text = re.sub(r"<\|channel\>\s*(?:thought|analysis|reasoning)\s*<channel\|>", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"<\|channel\>\s*(?:final|model|answer|content)\s*<channel\|>", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"<\|channel\>\s*(?:final|model|answer|content)\s*", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"<channel\|>", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"</?think>", " ", text, flags=re.IGNORECASE)
+    return clean_text(text)
+
+
 def normalize_omnivoice_tags(text: str) -> str:
     """허용된 OmniVoice 태그만 남기고 표기를 정규화한다."""
-    text = strip_response_action_tags(text or "")
+    text = strip_model_channel_tags(strip_response_action_tags(text or ""))
 
     def repl(match: re.Match) -> str:
         tag = f"[{clean_text(match.group(1)).lower()}]"
@@ -85,7 +128,7 @@ def clean_tts_text(text: str) -> str:
 
 
 def visible_text(text: str) -> str:
-    text = strip_omnivoice_tags(strip_response_action_tags(text))
+    text = strip_omnivoice_tags(strip_model_channel_tags(strip_response_action_tags(text)))
     if len(text) > MAX_VISIBLE_TEXT:
         return text[:MAX_VISIBLE_TEXT] + "..."
     return text

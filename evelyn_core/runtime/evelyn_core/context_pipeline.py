@@ -527,6 +527,9 @@ def build_tool_use_decisions(user_text: str, policy: ContextPolicy | dict[str, A
         "current",
         "today",
         "news",
+        "weather",
+        "forecast",
+        "rain",
         "price",
         "search",
         "internet",
@@ -534,6 +537,10 @@ def build_tool_use_decisions(user_text: str, policy: ContextPolicy | dict[str, A
         "현재",
         "오늘",
         "뉴스",
+        "날씨",
+        "예보",
+        "강수",
+        "우산",
         "가격",
         "검색",
         "인터넷",
@@ -694,9 +701,6 @@ def build_conversation_state_context(
     for label, key in (
         ("action", "action"),
         ("user_intent", "user_intent"),
-        ("state_summary", "state_summary"),
-        ("question_for_user", "question_for_user"),
-        ("main_prompt_hint", "main_prompt_hint"),
     ):
         value = clean_text(str(state.get(key) or ""))
         if value:

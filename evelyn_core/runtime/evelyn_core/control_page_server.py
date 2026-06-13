@@ -11,8 +11,13 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-from aiohttp import ClientSession, ClientTimeout, web
+from aiohttp import ClientConnectorError, ClientSession, ClientTimeout, web
 
+from .control_page_contracts import (
+    build_control_page_panel_state_payload,
+    local_restart_requested_reply,
+    memory_panel_reply as shared_memory_panel_reply,
+)
 from .memory_vault import (
     ensure_memory_vault_layout,
     export_memory_graph,
@@ -20,6 +25,14 @@ from .memory_vault import (
     memory_vault_user_snapshot,
     update_memory_vault_user_note,
 )
+from .runtime_health import apply_runtime_health_overrides, collect_runtime_health
+from .runtime_repair import (
+    append_repair_event,
+    build_runtime_repair_plan,
+    execute_runtime_repair_plan,
+    runtime_repair_capabilities,
+)
+from .runtime_services import load_service_manifest, manifest_to_dict
 
 
 PROJECT_ROOT = Path(os.getenv("EVELYN_PROJECT_ROOT") or Path(__file__).resolve().parents[3])
@@ -31,10 +44,11 @@ PORT = int(os.getenv("CONTROL_PAGE_PUBLIC_PORT", os.getenv("CONTROL_PAGE_PORT", 
 BOT_API_HOST = os.getenv("CONTROL_PAGE_BOT_API_HOST", "127.0.0.1")
 BOT_API_PORT = int(os.getenv("CONTROL_PAGE_BOT_API_PORT", "8798"))
 BOT_API_BASE = f"http://{BOT_API_HOST}:{BOT_API_PORT}"
-PROXY_TIMEOUT_SEC = float(os.getenv("CONTROL_PAGE_PROXY_TIMEOUT_SEC", "1.2"))
+PROXY_TIMEOUT_SEC = float(os.getenv("CONTROL_PAGE_PROXY_TIMEOUT_SEC", "6.0"))
 LOCAL_HELP_COMMANDS = {"/", "/help"}
 LOCAL_STATUS_COMMANDS = {"/status"}
 LOCAL_MEMORY_COMMANDS = {"/memory", "/obsidian"}
+LOCAL_RESTART_COMMANDS = {"/restart", "restart"}
 LOCAL_SHUTDOWN_COMMANDS = {"/shutdown", "/quit", "/exit"}
 
 MODEL_PORTS = {
@@ -46,13 +60,46 @@ MODEL_PORTS = {
     "codex": int(os.getenv("VOYAGER_CODEX_GATEWAY_PORT", "8787")),
     "bot": BOT_API_PORT,
 }
+RUNTIME_HEALTH_CACHE_TTL_SEC = float(os.getenv("CONTROL_PAGE_RUNTIME_HEALTH_CACHE_TTL_SEC", "1.5"))
+runtime_health_cache: dict[str, Any] | None = None
+runtime_health_cache_at = 0.0
+runtime_health_cache_lock: asyncio.Lock | None = None
+runtime_health_overrides: dict[str, dict[str, Any]] = {}
+
+
+STATIC_UTF8_CONTENT_TYPES = {
+    ".css": "text/css; charset=utf-8",
+    ".html": "text/html; charset=utf-8",
+    ".js": "application/javascript; charset=utf-8",
+    ".json": "application/json; charset=utf-8",
+    ".svg": "image/svg+xml; charset=utf-8",
+}
+
+
+def static_content_type(path: Path) -> str | None:
+    return STATIC_UTF8_CONTENT_TYPES.get(path.suffix.lower())
+
+
+def request_is_loopback(request: web.Request) -> bool:
+    remote = str(request.remote or "")
+    return remote in {"127.0.0.1", "::1", "localhost"}
+
+
+def prune_runtime_health_overrides() -> None:
+    now = time.time()
+    expired = [
+        service_id
+        for service_id, override in runtime_health_overrides.items()
+        if float(override.get("expiresAt") or 0) <= now
+    ]
+    for service_id in expired:
+        runtime_health_overrides.pop(service_id, None)
 
 
 def with_memory_panel_command(state: dict[str, Any], action: str) -> dict[str, Any]:
     command_id = int(time.time() * 1000)
-    state["controlPagePanels"] = {
-        "revision": command_id,
-        "commands": [
+    state["controlPagePanels"] = build_control_page_panel_state_payload(
+        [
             {
                 "id": command_id,
                 "action": action if action in {"open", "close", "toggle"} else "toggle",
@@ -60,23 +107,13 @@ def with_memory_panel_command(state: dict[str, Any], action: str) -> dict[str, A
                 "at": time.time(),
             }
         ],
-        "panels": [
-            {"id": "runtime", "label": "Runtime"},
-            {"id": "diagnostics", "label": "Diagnostics"},
-            {"id": "avatar", "label": "Avatar"},
-            {"id": "chat", "label": "Chat"},
-            {"id": "memory", "label": "Memory"},
-        ],
-    }
+        revision=command_id,
+    )
     return state
 
 
 def memory_panel_reply(action: str) -> str:
-    if action == "open":
-        return "메모리 패널을 열어둘게."
-    if action == "close":
-        return "메모리 패널은 숨겨둘게."
-    return "메모리 패널을 열거나 숨길게."
+    return shared_memory_panel_reply(action)
 
 BOOT_PORT_STEPS = (
     ("main", "Main LLM"),
@@ -98,6 +135,39 @@ async def probe_port(port: int, host: str = "127.0.0.1", timeout_sec: float = 0.
         return False
 
 
+async def cached_runtime_health(*, force: bool = False) -> dict[str, Any]:
+    global runtime_health_cache
+    global runtime_health_cache_at
+    global runtime_health_cache_lock
+
+    now = time.time()
+    if (
+        not force
+        and runtime_health_cache is not None
+        and RUNTIME_HEALTH_CACHE_TTL_SEC > 0
+        and now - runtime_health_cache_at < RUNTIME_HEALTH_CACHE_TTL_SEC
+    ):
+        return dict(runtime_health_cache)
+    if runtime_health_cache_lock is None:
+        runtime_health_cache_lock = asyncio.Lock()
+    async with runtime_health_cache_lock:
+        now = time.time()
+        if (
+            not force
+            and runtime_health_cache is not None
+            and RUNTIME_HEALTH_CACHE_TTL_SEC > 0
+            and now - runtime_health_cache_at < RUNTIME_HEALTH_CACHE_TTL_SEC
+        ):
+            return dict(runtime_health_cache)
+        manifest = load_service_manifest()
+        health = await collect_runtime_health(manifest=manifest)
+        prune_runtime_health_overrides()
+        health = apply_runtime_health_overrides(health, runtime_health_overrides, manifest=manifest)
+        runtime_health_cache = dict(health)
+        runtime_health_cache_at = time.time()
+        return dict(runtime_health_cache)
+
+
 async def proxy_json(request: web.Request, method: str, path: str, *, body: Any = None) -> web.Response | None:
     query = request.query_string
     url = f"{BOT_API_BASE}{path}" + (f"?{query}" if query else "")
@@ -111,7 +181,8 @@ async def proxy_json(request: web.Request, method: str, path: str, *, body: Any 
             async with session.get(url) as response:
                 text = await response.text()
                 return web.Response(status=response.status, text=text, content_type=response.content_type or "application/json")
-    except Exception:
+    except Exception as exc:
+        remember_proxy_failure(request, proxy_failure_payload(classify_proxy_exception(exc), url=url, detail=repr(exc)))
         return None
 
 
@@ -160,10 +231,89 @@ def format_command_help(commands: list[dict[str, str]]) -> str:
 
 def service_summary(services: dict[str, bool]) -> str:
     if not services.get("bot"):
-        return "control page live | bot processor down"
+        return "Control-Page is live; Bot API is down."
     if services.get("main") and services.get("router") and services.get("sub") and services.get("tts"):
-        return "control page live | bot processor ready"
-    return "control page live | model services starting"
+        return "Control-Page and Bot API are ready."
+    return "Control-Page is live; model services are still starting."
+
+
+def classify_proxy_exception(exc: BaseException) -> str:
+    if isinstance(exc, asyncio.TimeoutError):
+        return "http_timeout"
+    if isinstance(exc, (ClientConnectorError, ConnectionRefusedError, OSError)):
+        return "port_closed"
+    return "proxy_error"
+
+
+def proxy_failure_payload(kind: str, *, url: str, detail: str = "") -> dict[str, Any]:
+    detail_text = str(detail or "")
+    return {
+        "kind": kind,
+        "target": url,
+        "botApiHost": BOT_API_HOST,
+        "botApiPort": BOT_API_PORT,
+        "detail": detail_text[:240],
+        "at": time.time(),
+    }
+
+
+def remember_proxy_failure(request: web.Request, failure: dict[str, Any]) -> None:
+    try:
+        request["lastProxyFailure"] = failure
+    except Exception:
+        pass
+
+
+def last_proxy_failure(request: web.Request) -> dict[str, Any] | None:
+    try:
+        failure = request.get("lastProxyFailure")
+    except Exception:
+        failure = None
+    return dict(failure) if isinstance(failure, dict) else None
+
+
+def control_plane_status_text(*, ports: dict[str, bool], proxy_failure: dict[str, Any] | None = None) -> str:
+    if not ports.get("bot"):
+        return f"Control-Page is live on {PORT}; Bot API is not reachable on {BOT_API_PORT}."
+    if proxy_failure:
+        kind = str(proxy_failure.get("kind") or "proxy_error")
+        if kind == "http_timeout":
+            return f"Control-Page is live; Bot API port {BOT_API_PORT} is open but the proxy timed out."
+        if kind == "json_parse_failed":
+            return f"Control-Page is live; Bot API responded but returned invalid state JSON."
+        return f"Control-Page is live; Bot API port {BOT_API_PORT} is open but proxying failed."
+    return "Control-Page and Bot API are both responding."
+
+
+def build_control_plane_state(
+    *,
+    ports: dict[str, bool],
+    proxy_failure: dict[str, Any] | None = None,
+    cache_age_sec: float | None = None,
+) -> dict[str, Any]:
+    bot_port_open = bool(ports.get("bot"))
+    return {
+        "controlPage": {
+            "ready": True,
+            "host": HOST,
+            "port": PORT,
+            "role": "Control-Page",
+        },
+        "botApi": {
+            "ready": bool(bot_port_open and not proxy_failure),
+            "portOpen": bot_port_open,
+            "host": BOT_API_HOST,
+            "port": BOT_API_PORT,
+            "role": "Bot API",
+            "state": "ready" if bot_port_open and not proxy_failure else ("proxy_failed" if bot_port_open else "down"),
+        },
+        "lastProxyFailure": dict(proxy_failure or {}),
+        "healthCache": {
+            "ageSec": round(float(cache_age_sec or 0.0), 1),
+            "stale": bool(cache_age_sec is not None and RUNTIME_HEALTH_CACHE_TTL_SEC > 0 and cache_age_sec > RUNTIME_HEALTH_CACHE_TTL_SEC),
+        },
+        "statusText": control_plane_status_text(ports=ports, proxy_failure=proxy_failure),
+    }
 
 
 def build_boot_progress_from_ports(ports: dict[str, bool]) -> dict[str, Any]:
@@ -184,6 +334,7 @@ def build_boot_progress_from_ports(ports: dict[str, bool]) -> dict[str, Any]:
         "percent": percent,
         "phase": phase,
         "ready": percent >= 100,
+        "componentsReady": percent >= 100,
         "done": done_count,
         "total": len(steps),
         "source": "control_page_proxy",
@@ -192,19 +343,36 @@ def build_boot_progress_from_ports(ports: dict[str, bool]) -> dict[str, Any]:
 
 
 async def current_boot_progress() -> dict[str, Any]:
-    names = tuple(MODEL_PORTS.keys())
-    results = await asyncio.gather(*(probe_port(MODEL_PORTS[name]) for name in names))
-    ports = dict(zip(names, results))
+    service_health = await cached_runtime_health()
+    legacy = dict(service_health.get("legacyServices") or {})
+    ports = {
+        "main": bool(legacy.get("mainReady")),
+        "router": bool(legacy.get("routerReady")),
+        "sub": bool(legacy.get("subReady")),
+        "tts": bool(legacy.get("ttsReady")),
+        "voyager": bool(legacy.get("voyagerReady")),
+        "codex": bool(legacy.get("codexReady")),
+        "bot": bool(legacy.get("botReady")),
+    }
     return {
         "ports": ports,
         "bootProgress": build_boot_progress_from_ports(ports),
+        "serviceHealth": service_health,
+        "healthCacheAgeSec": max(0.0, time.time() - runtime_health_cache_at) if runtime_health_cache_at > 0 else None,
     }
 
 
-async def degraded_state() -> dict[str, Any]:
+async def degraded_state(*, proxy_failure: dict[str, Any] | None = None) -> dict[str, Any]:
     progress_state = await current_boot_progress()
     ports = progress_state["ports"]
     boot_progress = progress_state["bootProgress"]
+    service_health = progress_state.get("serviceHealth")
+    legacy_services = dict(service_health.get("legacyServices") or {}) if isinstance(service_health, dict) else {}
+    control_plane = build_control_plane_state(
+        ports=ports,
+        proxy_failure=proxy_failure,
+        cache_age_sec=progress_state.get("healthCacheAgeSec"),
+    )
     return {
         "ok": False,
         "generatedAt": time.time(),
@@ -213,7 +381,7 @@ async def degraded_state() -> dict[str, Any]:
         "ui": {
             "mode": "default",
             "submode": "offline" if not ports.get("bot") else "idle",
-            "reason": "bot_processor_unavailable" if not ports.get("bot") else "bot_processor_proxy_pending",
+            "reason": "bot_api_unavailable" if not ports.get("bot") else "bot_api_proxy_pending",
         },
         "commands": default_commands(),
         "allCommands": default_commands(),
@@ -222,7 +390,7 @@ async def degraded_state() -> dict[str, Any]:
                 {
                     "role": "assistant",
                     "author": "Control",
-                    "text": "Control page는 살아 있지만 Discord bot processor API가 아직 응답하지 않습니다.",
+                    "text": control_plane["statusText"],
                     "at": time.time(),
                 }
             ]
@@ -243,11 +411,14 @@ async def degraded_state() -> dict[str, Any]:
                 "ttsReady": bool(ports.get("tts")),
                 "voyagerReady": bool(ports.get("voyager")),
                 "codexReady": bool(ports.get("codex")),
-                "codexRequired": True,
-                "codexBackend": "codex-gateway",
-                "summary": service_summary(ports),
+                "codexRequired": bool(legacy_services.get("codexRequired", True)),
+                "codexBackend": str(legacy_services.get("codexBackend") or "codex-gateway"),
+                "summary": str(legacy_services.get("summary") or service_summary(ports)),
             },
+            "controlPlane": control_plane,
             "bootProgress": boot_progress,
+            "manifestVersion": service_health.get("manifestVersion") if isinstance(service_health, dict) else None,
+            "serviceHealth": service_health,
         },
         "minecraft": {
             "running": bool(ports.get("voyager")),
@@ -257,7 +428,7 @@ async def degraded_state() -> dict[str, Any]:
             "stage": "없음",
             "task": "없음",
             "taskStage": "없음",
-            "progress": "Bot processor API 대기 중",
+            "progress": "Bot API waiting",
             "position": "미확인",
             "inventorySummary": "인벤토리 정보 없음",
             "inventoryTop": [],
@@ -265,9 +436,9 @@ async def degraded_state() -> dict[str, Any]:
             "recentActivity": [],
             "snapshotStale": True,
             "snapshotExpired": False,
-            "idleSummary": "Control page는 살아 있지만 bot processor가 아직 붙지 않았습니다.",
+            "idleSummary": control_plane["statusText"],
         },
-        "statusText": "Control page live. Discord bot processor API is unavailable.",
+        "statusText": control_plane["statusText"],
     }
 
 
@@ -302,6 +473,40 @@ def schedule_local_stack_shutdown(delay_ms: int = 1500) -> tuple[bool, str]:
         return False, repr(exc)
 
 
+def schedule_local_stack_restart(delay_ms: int = 500) -> tuple[bool, str]:
+    stop_script = PROJECT_ROOT / "evelyn_core" / "runtime" / "launchers" / "stop_evelyn_local.ps1"
+    start_script = PROJECT_ROOT / "evelyn_core" / "start_local.bat"
+    if not stop_script.exists():
+        return False, f"restart stop helper not found: {stop_script}"
+    if not start_script.exists():
+        return False, f"restart start helper not found: {start_script}"
+    try:
+        restart_script = (
+            "$ErrorActionPreference = 'Continue'; "
+            f"& '{stop_script}' -DelayMs {max(0, int(delay_ms))}; "
+            "Start-Sleep -Seconds 2; "
+            f"& '{start_script}' --background"
+        )
+        subprocess.Popen(
+            [
+                "powershell.exe",
+                "-NoLogo",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                restart_script,
+            ],
+            cwd=str(PROJECT_ROOT),
+            close_fds=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return True, "local restart scheduled"
+    except Exception as exc:
+        return False, repr(exc)
+
+
 @web.middleware
 async def cors_middleware(request: web.Request, handler: Any) -> web.StreamResponse:
     if request.method == "OPTIONS" and request.path.startswith("/api/control-page/"):
@@ -321,6 +526,7 @@ async def index_handler(_: web.Request) -> web.StreamResponse:
         raise web.HTTPNotFound(text="control page index not found")
     response = web.FileResponse(index_path)
     response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    response.headers["Content-Type"] = static_content_type(index_path) or "text/html; charset=utf-8"
     return response
 
 
@@ -336,6 +542,9 @@ async def asset_handler(request: web.Request) -> web.StreamResponse:
         raise web.HTTPNotFound(text="asset not found")
     response = web.FileResponse(asset_path)
     response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    content_type = static_content_type(asset_path)
+    if content_type:
+        response.headers["Content-Type"] = content_type
     return response
 
 
@@ -348,6 +557,12 @@ async def state_handler(request: web.Request) -> web.StreamResponse:
                 progress_state = await current_boot_progress()
                 ports = progress_state["ports"]
                 boot_progress = progress_state["bootProgress"]
+                service_health = progress_state.get("serviceHealth")
+                legacy_services = dict(service_health.get("legacyServices") or {}) if isinstance(service_health, dict) else {}
+                control_plane = build_control_plane_state(
+                    ports=ports,
+                    cache_age_sec=progress_state.get("healthCacheAgeSec"),
+                )
                 runtime = dict(payload.get("runtime") or {})
                 services = dict(runtime.get("services") or {})
                 services.update(
@@ -359,26 +574,183 @@ async def state_handler(request: web.Request) -> web.StreamResponse:
                         "ttsReady": bool(ports.get("tts")),
                         "voyagerReady": bool(ports.get("voyager")),
                         "codexReady": bool(ports.get("codex")),
-                        "summary": service_summary(ports),
+                        "summary": str(legacy_services.get("summary") or service_summary(ports)),
                     }
                 )
+                for key, value in legacy_services.items():
+                    services[key] = value
                 runtime["services"] = services
+                runtime["controlPlane"] = control_plane
                 runtime["bootProgress"] = boot_progress
+                runtime["manifestVersion"] = service_health.get("manifestVersion") if isinstance(service_health, dict) else None
+                runtime["serviceHealth"] = service_health
                 payload["runtime"] = runtime
                 payload["bootProgress"] = boot_progress
+                payload["statusText"] = control_plane["statusText"]
                 return json_response(payload, status=proxied.status)
         except Exception:
-            return proxied
+            remember_proxy_failure(
+                request,
+                proxy_failure_payload("json_parse_failed", url=f"{BOT_API_BASE}/api/control-page/state", detail="Bot API returned invalid state JSON."),
+            )
+            return json_response(await degraded_state(proxy_failure=last_proxy_failure(request)))
         return proxied
-    return json_response(await degraded_state())
+    if proxied is not None:
+        remember_proxy_failure(
+            request,
+            proxy_failure_payload(
+                "http_error",
+                url=f"{BOT_API_BASE}/api/control-page/state",
+                detail=f"status={proxied.status}",
+            ),
+        )
+    return json_response(await degraded_state(proxy_failure=last_proxy_failure(request)))
 
 
 async def health_handler(_: web.Request) -> web.StreamResponse:
-    bot_ready = await probe_port(BOT_API_PORT)
+    bot_ready = await probe_port(BOT_API_PORT, host=BOT_API_HOST)
     return json_response({"ok": True, "role": "control-page", "botProxyReady": bot_ready, "botApiPort": BOT_API_PORT})
 
 
+async def runtime_health_handler(_: web.Request) -> web.StreamResponse:
+    return json_response(await cached_runtime_health(force=True))
+
+
+async def runtime_health_override_handler(request: web.Request) -> web.StreamResponse:
+    global runtime_health_cache
+    global runtime_health_cache_at
+
+    if not request_is_loopback(request):
+        return json_response({"ok": False, "error": "loopback_only"}, status=403)
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    service_id = str((payload or {}).get("serviceId") or (payload or {}).get("service_id") or "").strip()
+    if not service_id:
+        return json_response({"ok": False, "error": "service_id_required"}, status=400)
+    manifest = load_service_manifest()
+    service_ids = {service.id for service in manifest.services}
+    if service_id not in service_ids:
+        return json_response({"ok": False, "error": "unknown_service", "serviceId": service_id}, status=400)
+    state = str((payload or {}).get("state") or "down").lower()
+    if state in {"clear", "up", "none"}:
+        runtime_health_overrides.pop(service_id, None)
+    else:
+        if state not in {"down", "partial", "unknown"}:
+            return json_response({"ok": False, "error": "unsupported_override_state", "state": state}, status=400)
+        ttl_sec = max(1, min(900, int((payload or {}).get("ttlSec") or (payload or {}).get("ttl_sec") or 300)))
+        runtime_health_overrides[service_id] = {
+            "serviceId": service_id,
+            "state": state,
+            "reason": str((payload or {}).get("reason") or "operator_simulated_down"),
+            "message": str((payload or {}).get("message") or f"{service_id} is safely simulated as {state}."),
+            "expiresAt": time.time() + ttl_sec,
+        }
+    runtime_health_cache = None
+    runtime_health_cache_at = 0.0
+    health = await cached_runtime_health(force=True)
+    return json_response(
+        {
+            "ok": True,
+            "serviceId": service_id,
+            "overrides": list(runtime_health_overrides.values()),
+            "serviceHealth": health,
+        }
+    )
+
+
+async def runtime_manifest_handler(_: web.Request) -> web.StreamResponse:
+    manifest = load_service_manifest()
+    return json_response(manifest_to_dict(manifest))
+
+
+async def runtime_repair_handler(_: web.Request) -> web.StreamResponse:
+    manifest = load_service_manifest()
+    health = await cached_runtime_health()
+    return json_response(runtime_repair_capabilities(manifest=manifest, health=health))
+
+
+async def runtime_repair_preview_handler(request: web.Request) -> web.StreamResponse:
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    if isinstance(payload, dict) and payload.get("dryRun") is False:
+        return json_response(
+            {
+                "ok": False,
+                "dryRun": True,
+                "dryRunOnly": True,
+                "error": "repair_execution_not_enabled",
+                "message": "Runtime repair execution is not enabled in this phase. Use dryRun=true.",
+            },
+            status=409,
+        )
+    service_id = str((payload or {}).get("serviceId") or (payload or {}).get("service_id") or "").strip()
+    action_id = str((payload or {}).get("actionId") or (payload or {}).get("action_id") or "").strip()
+    refresh_health = bool((payload or {}).get("refreshHealth", True))
+    manifest = load_service_manifest()
+    health = await cached_runtime_health(force=refresh_health)
+    plan = build_runtime_repair_plan(
+        service_id=service_id or None,
+        action_id=action_id or None,
+        manifest=manifest,
+        health=health,
+    )
+    return json_response(plan, status=200 if plan.get("ok") else 400)
+
+
+async def runtime_repair_apply_handler(request: web.Request) -> web.StreamResponse:
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    service_id = str((payload or {}).get("serviceId") or (payload or {}).get("service_id") or "").strip()
+    action_id = str((payload or {}).get("actionId") or (payload or {}).get("action_id") or "").strip()
+    confirm_token = str((payload or {}).get("confirmToken") or (payload or {}).get("confirm_token") or "").strip()
+    reason = str((payload or {}).get("reason") or "").strip()
+    manifest = load_service_manifest()
+    health = await cached_runtime_health(force=True)
+    plan = build_runtime_repair_plan(
+        service_id=service_id or None,
+        action_id=action_id or None,
+        manifest=manifest,
+        health=health,
+    )
+    response = execute_runtime_repair_plan(
+        plan=plan,
+        confirm_token=confirm_token,
+        reason=reason,
+    )
+    try:
+        log_result = append_repair_event(
+            {
+                "event": "apply_response",
+                "serviceId": response.get("serviceId") or service_id,
+                "actionId": response.get("actionId") or action_id,
+                "ok": bool(response.get("ok")),
+                "error": response.get("error"),
+                "reason": reason,
+                "remote": request.remote,
+                "planOk": bool(plan.get("ok")),
+                "planStatus": plan.get("planStatus"),
+            }
+        )
+        response["repairLog"] = {"ok": True, "path": log_result.get("logPath")}
+    except Exception as exc:
+        response["repairLog"] = {"ok": False, "error": str(exc)}
+    if response.get("ok"):
+        return json_response(response, status=202)
+    error = response.get("error")
+    status = 409 if error in {"repair_cooldown_active", "confirm_token_required"} else 400
+    return json_response(response, status=status)
+
+
 async def shutdown_handler(_: web.Request) -> web.StreamResponse:
+    proxied = await proxy_json(_, "POST", "/api/control-page/shutdown", body={"source": "control_page", "reason": "shutdown_button"})
+    if proxied is not None and proxied.status < 500:
+        return proxied
     ok, detail = schedule_local_stack_shutdown(delay_ms=500)
     status = 200 if ok else 500
     return json_response(
@@ -503,9 +875,9 @@ async def chat_handler(request: web.Request) -> web.StreamResponse:
         runtime = state.get("runtime") if isinstance(state, dict) else {}
         services = runtime.get("services") if isinstance(runtime, dict) else {}
         summary = services.get("summary") if isinstance(services, dict) else ""
-        return json_response({"ok": True, "reply": str(summary or state.get("statusText") or "Control page live."), "state": state})
+        return json_response({"ok": True, "reply": str(summary or state.get("statusText") or "Control-Page is live."), "state": state})
     if normalized == "/memory":
-        state = await degraded_state()
+        state = await degraded_state(proxy_failure=last_proxy_failure(request))
         return json_response({"ok": True, "reply": memory_panel_reply("toggle"), "state": with_memory_panel_command(state, "toggle")})
     if normalized == "/obsidian":
         state = await degraded_state()
@@ -516,14 +888,40 @@ async def chat_handler(request: web.Request) -> web.StreamResponse:
             {"ok": bool(result.get("ok")), "reply": reply, "state": state, "openResult": result},
             status=200 if result.get("ok") else 500,
         )
+    if normalized in LOCAL_RESTART_COMMANDS:
+        proxied = await proxy_json(request, "POST", "/api/control-page/chat", body=payload)
+        if proxied is not None and proxied.status < 500:
+            return proxied
+        ok, detail = schedule_local_stack_restart()
+        state = await degraded_state()
+        if ok:
+            return json_response(
+                {
+                    "ok": True,
+                    "reply": local_restart_requested_reply(),
+                    "state": state,
+                }
+            )
+        return json_response(
+            {
+                "ok": False,
+                "error": "local_restart_failed",
+                "reply": f"Local restart helper failed: {detail}",
+                "state": state,
+            },
+            status=500,
+        )
     if normalized in LOCAL_SHUTDOWN_COMMANDS:
+        proxied = await proxy_json(request, "POST", "/api/control-page/chat", body=payload)
+        if proxied is not None and proxied.status < 500:
+            return proxied
         ok, detail = schedule_local_stack_shutdown()
         state = await degraded_state()
         if ok:
             return json_response(
                 {
                     "ok": True,
-                    "reply": "Local Evelyn shutdown started. This works even when the bot processor is down.",
+                    "reply": "Local Evelyn shutdown started. This works even when Bot API is down.",
                     "state": state,
                 }
             )
@@ -539,12 +937,12 @@ async def chat_handler(request: web.Request) -> web.StreamResponse:
     proxied = await proxy_json(request, "POST", "/api/control-page/chat", body=payload)
     if proxied is not None and proxied.status < 500:
         return proxied
-    state = await degraded_state()
+    state = await degraded_state(proxy_failure=last_proxy_failure(request))
     return json_response(
         {
             "ok": False,
-            "error": "bot_processor_unavailable",
-            "reply": "Discord bot processor API가 꺼져 있어서 명령을 전달할 수 없습니다.",
+            "error": "bot_api_unavailable",
+            "reply": state.get("statusText") or "Control-Page is live, but Bot API is unavailable.",
             "state": state,
         }
     )
@@ -564,6 +962,12 @@ def create_app() -> web.Application:
     app.router.add_get("/health", health_handler)
     app.router.add_get("/assets/{asset_path:.*}", asset_handler)
     app.router.add_get("/api/control-page/state", state_handler)
+    app.router.add_get("/api/control-page/runtime-health", runtime_health_handler)
+    app.router.add_post("/api/control-page/runtime-health/override", runtime_health_override_handler)
+    app.router.add_get("/api/control-page/runtime-manifest", runtime_manifest_handler)
+    app.router.add_get("/api/control-page/runtime-repair", runtime_repair_handler)
+    app.router.add_post("/api/control-page/runtime-repair/preview", runtime_repair_preview_handler)
+    app.router.add_post("/api/control-page/runtime-repair/apply", runtime_repair_apply_handler)
     app.router.add_get("/api/control-page/memory", memory_snapshot_handler)
     app.router.add_get("/api/control-page/memory-graph", memory_graph_handler)
     app.router.add_get("/api/control-page/memory/{note_id}", memory_note_handler)

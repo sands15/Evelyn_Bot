@@ -262,18 +262,24 @@ def _write_last_request_status(payload: dict[str, Any]) -> None:
 
 def _gateway_status() -> dict[str, Any]:
     queue = _QUEUE
+    backend_status = _backend_readiness()
+    last_request = _load_last_request_status()
+    last_action_ready = _last_action_ready(last_request)
     return {
         "ok": True,
         "service": "voyager_codex_gateway",
         "configured": True,
         "backend": _backend_label(),
+        "backendReady": bool(backend_status.get("ready")),
+        "backendStatus": backend_status,
+        "lastActionReady": last_action_ready,
         "route": "/codex/action",
         "queue": {
             "mode": "priority-serial",
             "size": queue.qsize() if queue is not None else 0,
             "active": _ACTIVE_QUEUE_ITEM,
         },
-        "last_request": _load_last_request_status(),
+        "last_request": last_request,
     }
 
 
@@ -301,6 +307,43 @@ def _resolve_codex_cli() -> str:
     raise RuntimeError(
         "Codex CLI executable not found. Install Codex or set VOYAGER_CODEX_CLI to the full path."
     )
+
+
+def _backend_readiness() -> dict[str, Any]:
+    command = _backend_command()
+    if command:
+        return {
+            "ready": True,
+            "backend": "shell-command",
+            "commandConfigured": True,
+            "detail": "VOYAGER_CODEX_GATEWAY_COMMAND is configured.",
+        }
+    try:
+        cli = _resolve_codex_cli()
+    except Exception as exc:
+        return {
+            "ready": False,
+            "backend": _backend_mode(),
+            "commandConfigured": False,
+            "error": str(exc),
+        }
+    return {
+        "ready": True,
+        "backend": _backend_mode(),
+        "commandConfigured": False,
+        "cli": cli,
+    }
+
+
+def _last_action_ready(last_request: dict[str, Any] | None) -> bool | None:
+    if not last_request:
+        return None
+    phase = str(last_request.get("phase") or "").strip().lower()
+    if phase == "success":
+        return True
+    if phase in {"error", "timeout", "empty_output", "handler_exception"}:
+        return False
+    return None
 
 
 def _strip_outer_fence(text: str) -> str:
@@ -361,6 +404,8 @@ async def _run_backend(prompt: str, model: str, timeout_sec: float, cwd: str) ->
         proc = await asyncio.create_subprocess_exec(
             codex_cli,
             "exec",
+            "-m",
+            model,
             "--sandbox",
             "read-only",
             "--skip-git-repo-check",

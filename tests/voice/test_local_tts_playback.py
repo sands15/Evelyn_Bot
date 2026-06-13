@@ -107,6 +107,27 @@ class LocalTtsPlaybackTests(unittest.TestCase):
         self.assertEqual(source.writes_seen_before_second_read, [b"first"])
         self.assertEqual(FakeRawOutputStream.writes[:2], [b"first", b"second"])
 
+    def test_manager_reports_first_playback_after_first_write(self) -> None:
+        original_sd = local_tts_playback.sd
+        FakeRawOutputStream.writes = []
+        callback_writes: list[list[bytes]] = []
+        local_tts_playback.sd = FakeSoundDevice()
+        try:
+            manager = LocalTtsPlaybackManager(enabled=True, device="default")
+            source = FakeSource([b"first", b"second"])
+            ok = asyncio.run(
+                manager.play_source(
+                    source,
+                    on_first_playback=lambda: callback_writes.append(list(FakeRawOutputStream.writes)),
+                )
+            )
+        finally:
+            local_tts_playback.sd = original_sd
+
+        self.assertTrue(ok)
+        self.assertEqual(callback_writes, [[b"first"]])
+        self.assertEqual(FakeRawOutputStream.writes[:2], [b"first", b"second"])
+
 
 if __name__ == "__main__":
     unittest.main()

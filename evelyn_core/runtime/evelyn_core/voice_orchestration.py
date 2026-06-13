@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Mapping, MutableMapping
 
 from .assistant_contracts import AcceptedVoiceTurn, RejectedVoiceTurn
-from .text import clean_text
+from .text import clean_text, is_user_echo_answer
 from .voice_pipeline import AnswerPayload, DeliveryPlan, RouteDecision, TranscriptResult, VoiceReplyRequest, VoiceSegment
 
 
@@ -212,16 +212,22 @@ class VoiceTurnOrchestrator:
                 guild_id=request.guild_id,
                 user_text=request.user_text,
                 session_key=request.session_key,
+                room_key=request.room_key,
+                person_key=request.person_key,
+                session_memory_key=request.session_memory_key,
+                debug_text=request.debug_text,
                 on_sentence=request.on_sentence,
                 on_first_chunk=on_first_chunk,
                 awaiting_user_reply=route_context.awaiting_user_reply,
                 metrics=request.metrics,
+                messages=route_context.messages,
+                cognitive_state=route_context.cognitive_state,
             )
         except Exception as exc:
             mark_voice_turn_error_layer(request, "voice_turn_orchestrator.short_circuit", exc)
             raise
 
-        if short_circuit_answer is not None:
+        if short_circuit_answer is not None and not is_user_echo_answer(request.user_text, short_circuit_answer):
             return VoiceTurnResult(
                 answer_text=short_circuit_answer,
                 route_context=route_context,
@@ -247,7 +253,7 @@ class VoiceTurnOrchestrator:
             mark_voice_turn_error_layer(request, "voice_turn_orchestrator.skill_route", exc)
             raise
 
-        if skill_route_answer:
+        if skill_route_answer and not is_user_echo_answer(request.user_text, skill_route_answer):
             if on_first_chunk is not None:
                 on_first_chunk()
                 on_first_chunk = None
@@ -270,7 +276,10 @@ class VoiceTurnOrchestrator:
             )
 
         if not route_context.route_decision.needs_main_llm:
-            answer = route_context.route_decision.user_visible_preface or route_context.route_decision.prompt_text
+            answer = route_context.route_decision.user_visible_preface
+            if not answer or is_user_echo_answer(request.user_text, answer):
+                answer = ""
+        if not route_context.route_decision.needs_main_llm and answer:
             if on_first_chunk is not None:
                 on_first_chunk()
                 on_first_chunk = None

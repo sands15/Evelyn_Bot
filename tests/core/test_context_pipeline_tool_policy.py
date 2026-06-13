@@ -87,6 +87,14 @@ class ContextPipelineToolPolicyTests(unittest.TestCase):
         self.assertEqual(web.risk, "external")
         self.assertTrue(web.required_before_answer)
 
+    def test_korean_weather_question_requests_current_info_tool(self) -> None:
+        decisions = build_tool_use_decisions("날씨 알려줘", ContextPolicy())
+
+        web = next((item for item in decisions if item.tool_name == "web_current_info"), None)
+        self.assertIsNotNone(web)
+        assert web is not None
+        self.assertTrue(web.required_before_answer)
+
     def test_tool_context_renders_into_context_packet(self) -> None:
         decisions = build_tool_use_decisions("로그 파일 확인해줘", ContextPolicy())
         tool_context = render_tool_use_context(decisions)

@@ -38,6 +38,22 @@ SEMANTIC_CONSOLIDATION_MAX_NOTES = 6
 MEMORY_GRAPH_MAX_NODES = 160
 MEMORY_GRAPH_MAX_GROUP_EDGES = 180
 MEMORY_GRAPH_MAX_VECTOR_EDGES = 220
+MEMORY_INTERNAL_NOTE_TYPES = {"procedure", "internal", "system"}
+MEMORY_ADMIN_RECALL_MARKERS = (
+    "memory vault",
+    "memory system",
+    "vault maintenance",
+    "memory maintenance",
+    "메모리 vault",
+    "메모리 보관함",
+    "메모리 금고",
+    "메모리 시스템",
+    "메모리 관리",
+    "메모리 정리",
+    "메모리 유지보수",
+    "보관함 관리",
+    "보관함 정리",
+)
 
 BOOTSTRAP_NOTES: tuple[dict[str, Any], ...] = (
     {
@@ -623,6 +639,28 @@ def _graph_node_size(row: sqlite3.Row, degree: int = 0) -> float:
     return round(12.0 + min(12.0, importance * 10.0) + min(14.0, degree * 1.4) + type_bonus, 2)
 
 
+def _is_legacy_memory_note_type(note_type: str, rel_path: str = "") -> bool:
+    normalized_type = clean_text(note_type).lower()
+    normalized_rel = clean_text(rel_path).lower()
+    return (
+        normalized_type == "legacy"
+        or normalized_rel.startswith("legacy/")
+        or normalized_rel.startswith("core/legacy-guild-")
+    )
+
+
+def _legacy_to_public_title(note_type: str, rel_path: str, title: str) -> str:
+    if _is_legacy_memory_note_type(note_type, rel_path):
+        return "Archived memory"
+    return clean_text(title)
+
+
+def _locked_memory_preview(note_type: str, rel_path: str = "") -> str:
+    if _is_legacy_memory_note_type(note_type, rel_path):
+        return "Archived memory is visible as a locked node. Its contents are hidden in public views."
+    return ""
+
+
 def _graph_edge_key(source: str, target: str, edge_type: str) -> tuple[str, str, str]:
     left = clean_text(source)
     right = clean_text(target)
@@ -704,11 +742,11 @@ def export_memory_graph(
             SELECT *
             FROM notes
             WHERE status NOT IN ('archived', 'superseded')
+              AND note_type NOT IN ('procedure', 'internal', 'system')
             ORDER BY
                 CASE note_type
                     WHEN 'core' THEN 0
                     WHEN 'project' THEN 1
-                    WHEN 'procedure' THEN 2
                     WHEN 'concept' THEN 3
                     WHEN 'episode' THEN 4
                     WHEN 'daily' THEN 5
@@ -858,13 +896,15 @@ def export_memory_graph(
         for row in rows:
             note_id = clean_text(str(row["note_id"]))
             note_type = clean_text(str(row["note_type"] or "note")).lower()
+            rel_path = clean_text(str(row["rel_path"]))
+            is_locked_legacy = _is_legacy_memory_note_type(note_type, rel_path)
             type_counts[note_type] = type_counts.get(note_type, 0) + 1
             nodes.append(
                 {
                     "id": note_id,
-                    "title": clean_text(str(row["title"])),
+                    "title": _legacy_to_public_title(note_type, rel_path, str(row["title"])),
                     "type": note_type,
-                    "rel_path": clean_text(str(row["rel_path"])),
+                    "rel_path": rel_path,
                     "tags": _safe_json_list(clean_text(str(row["tags"]))),
                     "projects": _safe_json_list(clean_text(str(row["projects"]))),
                     "links": _safe_json_list(clean_text(str(row["links"]))),
@@ -874,7 +914,10 @@ def export_memory_graph(
                     "confidence": clean_text(str(row["confidence"])),
                     "degree": degrees.get(note_id, 0),
                     "size": _graph_node_size(row, degrees.get(note_id, 0)),
-                    "snippet": clean_text(str(row["body"]))[:260],
+                    "snippet": "" if is_locked_legacy else clean_text(str(row["body"]))[:260],
+                    "locked": is_locked_legacy,
+                    "canEdit": not is_locked_legacy,
+                    "contentHidden": is_locked_legacy,
                 }
             )
 
@@ -905,6 +948,27 @@ def export_memory_graph(
 
 def _tokenize(text: str) -> set[str]:
     return set(re.findall(r"[A-Za-z0-9_]+|[가-힣]{2,}", clean_text(text).lower()))
+
+
+def _allows_internal_memory_recall(request: MemoryRecallRequest, focus_items: list[Any] | None = None) -> bool:
+    metadata = request.metadata if isinstance(request.metadata, dict) else {}
+    if metadata.get("allow_internal_memory") is True:
+        return True
+    haystack = clean_text(
+        " ".join(
+            [
+                request.user_text,
+                request.topic_id or "",
+                request.source or "",
+                " ".join(clean_text(str(item)) for item in (focus_items or [])),
+            ]
+        )
+    ).lower()
+    return any(marker in haystack for marker in MEMORY_ADMIN_RECALL_MARKERS)
+
+
+def _is_internal_memory_note(row: sqlite3.Row) -> bool:
+    return clean_text(str(row["note_type"])).lower() in MEMORY_INTERNAL_NOTE_TYPES
 
 
 def _note_score(row: sqlite3.Row, query_tokens: set[str], focus_tokens: set[str], active_project: str) -> int:
@@ -1075,6 +1139,10 @@ def _cache_key(request: MemoryRecallRequest, memory_version: int) -> str:
         "max_items": request.max_items,
         "active_project": clean_text(str(metadata.get("active_project") or DEFAULT_PROJECT)).lower(),
         "context_focus": metadata.get("context_focus") if isinstance(metadata.get("context_focus"), list) else [],
+        "allow_internal_memory": _allows_internal_memory_recall(
+            request,
+            metadata.get("context_focus") if isinstance(metadata.get("context_focus"), list) else [],
+        ),
     }
     return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
 
@@ -1866,6 +1934,7 @@ def recall_memory_vault(
         metadata = request.metadata if isinstance(request.metadata, dict) else {}
         active_project = clean_text(str(metadata.get("active_project") or DEFAULT_PROJECT)).lower()
         focus_items = metadata.get("context_focus") if isinstance(metadata.get("context_focus"), list) else []
+        allow_internal_memory = _allows_internal_memory_recall(request, focus_items)
         query_tokens = _tokenize(request.user_text)
         focus_tokens = _tokenize(" ".join(clean_text(str(item)) for item in focus_items))
         cache_key = _cache_key(request, version)
@@ -1895,6 +1964,8 @@ def recall_memory_vault(
                 focus_tokens=focus_tokens,
                 limit=max(80, request.max_items * 20),
             )
+            if not allow_internal_memory:
+                rows = [row for row in rows if not _is_internal_memory_note(row)]
             vector_scores = _fetch_vector_scores(
                 conn,
                 " ".join([request.user_text, " ".join(clean_text(str(item)) for item in focus_items)]),
@@ -1905,6 +1976,8 @@ def recall_memory_vault(
                 missing_vector_ids = [note_id for note_id in vector_scores if note_id not in existing_note_ids]
                 if missing_vector_ids:
                     rows.extend(_fetch_notes_by_ids(conn, missing_vector_ids))
+                if not allow_internal_memory:
+                    rows = [row for row in rows if not _is_internal_memory_note(row)]
                 retrieval_mode = f"{retrieval_mode}+vector"
             scored: list[tuple[int, int, sqlite3.Row]] = []
             for recency, row in enumerate(rows):
@@ -1921,13 +1994,15 @@ def recall_memory_vault(
                 selected,
                 max_extra=max(0, request.max_items - len(selected)),
             )
+            if not allow_internal_memory:
+                graph_neighbors = [row for row in graph_neighbors if not _is_internal_memory_note(row)]
             if graph_neighbors:
                 selected.extend(graph_neighbors)
             snippets = [_truncate_note(row) for row in selected]
             sources = [clean_text(str(row["rel_path"])) for row in selected]
             procedure_rows = [
                 row for _, _, row in scored
-                if clean_text(str(row["note_type"])) == "procedure"
+                if allow_internal_memory and clean_text(str(row["note_type"])) == "procedure"
             ][:2]
             procedure_snippets = [_truncate_note(row, max_chars=300) for row in procedure_rows]
 
@@ -2152,18 +2227,23 @@ def _memory_vault_user_card(
     rel_path: str,
 ) -> dict[str, Any]:
     confirmed_at = clean_text(str(note_state.get("confirmed_at") or note.metadata.get("confirmed_at") or ""))
+    is_locked_legacy = _is_legacy_memory_note_type(note.note_type, rel_path)
+    locked_preview = _locked_memory_preview(note.note_type, rel_path)
     return {
         "id": note.note_id,
-        "title": note.title,
+        "title": _legacy_to_public_title(note.note_type, rel_path, note.title),
         "category": _memory_vault_note_category(note),
         "type": note.note_type,
         "path": rel_path,
-        "body": _memory_vault_edit_body(note, raw),
-        "preview": _memory_vault_note_preview(note.body),
+        "body": "" if is_locked_legacy else _memory_vault_edit_body(note, raw),
+        "preview": locked_preview if is_locked_legacy else _memory_vault_note_preview(note.body),
         "confirmed": bool(confirmed_at),
         "confirmedAt": confirmed_at,
         "pinned": bool(note_state.get("pinned")),
         "hidden": hidden,
+        "locked": is_locked_legacy,
+        "canEdit": not is_locked_legacy,
+        "contentHidden": is_locked_legacy,
         "confidence": clean_text(str(note.metadata.get("confidence") or "")),
         "importance": _front_matter_float(note.metadata, "importance", 0.5),
         "updatedAt": clean_text(str(note.metadata.get("updated_at") or note.updated_at or "")),
@@ -2289,6 +2369,10 @@ def update_memory_vault_user_note(
     elif normalized_action == "unhide":
         note_state["hidden"] = False
     elif normalized_action == "edit":
+        vault = ensure_memory_vault_layout(root)
+        rel_path = path.relative_to(vault).as_posix()
+        if _is_legacy_memory_note_type(note.note_type, rel_path):
+            return {"ok": False, "error": "locked_legacy_note"}
         _write_memory_vault_note_body(path, raw, note, title=title, body=body)
         note_state["edited_at"] = now
     else:

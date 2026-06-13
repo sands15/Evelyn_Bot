@@ -9,9 +9,28 @@ if (Test-Path $stopMarker) {
     Remove-Item -LiteralPath $stopMarker -Force -ErrorAction SilentlyContinue
 }
 
-function Test-PortListening {
-    param([int]$Port)
-    return $null -ne (Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1)
+function Test-PortConnect {
+    param(
+        [string]$HostName = '127.0.0.1',
+        [int]$Port,
+        [int]$TimeoutMs = 1000
+    )
+
+    $client = $null
+    try {
+        $client = [System.Net.Sockets.TcpClient]::new()
+        $iar = $client.BeginConnect($HostName, $Port, $null, $null)
+        if ($iar.AsyncWaitHandle.WaitOne($TimeoutMs)) {
+            $client.EndConnect($iar)
+            return $true
+        }
+    } catch {
+    } finally {
+        if ($client) {
+            $client.Close()
+        }
+    }
+    return $false
 }
 
 function Wait-Port {
@@ -26,20 +45,8 @@ function Wait-Port {
     $deadline = (Get-Date).AddSeconds($timeoutSec)
 
     while ((Get-Date) -lt $deadline) {
-        $client = $null
-        try {
-            $client = [System.Net.Sockets.TcpClient]::new()
-            $iar = $client.BeginConnect($HostName, $Port, $null, $null)
-            if ($iar.AsyncWaitHandle.WaitOne(1000)) {
-                $client.EndConnect($iar)
-                $client.Close()
-                return
-            }
-        } catch {
-        } finally {
-            if ($client) {
-                $client.Close()
-            }
+        if (Test-PortConnect -HostName $HostName -Port $Port -TimeoutMs 1000) {
+            return
         }
         Start-Sleep -Milliseconds $intervalMs
     }
@@ -82,7 +89,7 @@ function Start-SupervisedService {
         [string]$Command
     )
 
-    if (Test-PortListening -Port $Port) {
+    if (Test-PortConnect -HostName '127.0.0.1' -Port $Port) {
         return
     }
 

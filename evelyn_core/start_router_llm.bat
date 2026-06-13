@@ -3,6 +3,10 @@ chcp 65001 >nul
 setlocal
 call "%~dp0start_env.bat"
 
+if /I "%~1"=="--inline" if /I not "%EVELYN_ALLOW_LEGACY_HOST_START%"=="true" goto :run_docker
+if /I "%~1"=="--legacy-host" set "EVELYN_ALLOW_LEGACY_HOST_START=true"
+if /I not "%~1"=="--inline" if /I not "%~1"=="--legacy-host" goto :run_docker
+
 set "WSL_CMD=VENV_ACT='%VENV_ACT%' LLAMA_DIR='%LLAMA_DIR%' ROUTER_LLM_GPU='%ROUTER_LLM_GPU%' ROUTER_LLM_PORT='%ROUTER_LLM_PORT%' ROUTER_LLM_CONTEXT='%ROUTER_LLM_CONTEXT%' ROUTER_LLM_REASONING='%ROUTER_LLM_REASONING%' ROUTER_LLM_REASONING_BUDGET='%ROUTER_LLM_REASONING_BUDGET%' ROUTER_LLM_HF='%ROUTER_LLM_HF%' ROUTER_LLM_MODEL='%ROUTER_LLM_MODEL%' bash /mnt/c/Evelyn/evelyn_core/runtime/launchers/run_router_llm.sh"
 
 call :port_ready %ROUTER_LLM_PORT% "Router-LLM"
@@ -42,3 +46,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "if (Get-NetTCPConnection
 if errorlevel 1 exit /b 1
 
 exit /b 2
+
+:run_docker
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0runtime\launchers\start_docker_compose_services.ps1" -Profiles llm -Services router_llm
+set "EXIT_CODE=%ERRORLEVEL%"
+endlocal & exit /b %EXIT_CODE%

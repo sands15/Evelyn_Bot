@@ -239,6 +239,151 @@ def render_self_identity_context(
     return "\n".join(line for line in lines if clean_text(line))
 
 
+def _policy_flag(policy: Any | None, name: str) -> bool:
+    if policy is None:
+        return False
+    if isinstance(policy, dict):
+        return bool(policy.get(name, False))
+    return bool(getattr(policy, name, False))
+
+
+def _detect_self_judgment_topics(user_text: str, context_policy: Any | None = None) -> tuple[str, ...]:
+    text = clean_text(user_text).lower()
+    topics: list[str] = []
+    if any(
+        marker in text
+        for marker in (
+            "identity",
+            "self",
+            "opinion",
+            "stance",
+            "value",
+            "ideology",
+            "preference",
+            "\uc815\uccb4\uc131",
+            "\uc0dd\uac01",
+            "\uc8fc\uc7a5",
+            "\uac00\uce58\uad00",
+            "\uc774\ub150",
+            "\ucde8\ud5a5",
+        )
+    ):
+        topics.append("identity_or_stance")
+    if _policy_flag(context_policy, "needs_vision") or any(
+        marker in text
+        for marker in (
+            "screen",
+            "vision",
+            "ocr",
+            "screenshot",
+            "\ud654\uba74",
+            "\ubcf4\uc5ec",
+            "\ubd84\uc11d",
+            "\uc77d",
+            "\ube44\uc804",
+        )
+    ):
+        topics.append("vision_evidence")
+    if any(
+        marker in text
+        for marker in (
+            "fast path",
+            "tool",
+            "long",
+            "wait",
+            "\uc624\ub798",
+            "\uae30\ub2e4",
+            "\uc7a0\uae50",
+            "\ud655\uc778",
+        )
+    ):
+        topics.append("prelude_needed")
+    if any(
+        marker in text
+        for marker in (
+            "bug",
+            "wrong",
+            "broken",
+            "design",
+            "fix",
+            "\ubc84\uadf8",
+            "\uc774\uc0c1",
+            "\ubb38\uc81c",
+            "\uc124\uacc4",
+            "\uc2eb",
+            "\ud2c0\ub838",
+            "\uc544\ub2c8",
+            "\uace0\uccd0",
+        )
+    ):
+        topics.append("design_judgment")
+    if not topics:
+        topics.append("ordinary_chat")
+    return tuple(dict.fromkeys(topics))
+
+
+def build_self_judgment(
+    user_text: str,
+    *,
+    source: str = "text",
+    state: EvelynSelfState | None = None,
+    route: str = "",
+    context_policy: Any | None = None,
+) -> dict[str, Any]:
+    state = state or load_self_state()
+    topics = _detect_self_judgment_topics(user_text, context_policy)
+    return {
+        "source": clean_text(source) or "text",
+        "route": clean_text(route) or "unknown",
+        "topics": list(topics),
+        "mood": state.mood,
+        "confidence": round(float(state.confidence or 0.0), 3),
+        "curiosity": round(float(state.curiosity or 0.0), 3),
+        "restraint": round(float(state.restraint or 0.0), 3),
+        "posture": "state a grounded opinion when useful; keep it conversational",
+        "evidence_rule": "be explicit about weak evidence; do not guess screen/tool results",
+        "conversation_rule": "preserve useful follow-up questions instead of closing the conversation too early",
+    }
+
+
+def render_self_judgment_context(
+    user_text: str,
+    *,
+    source: str = "text",
+    state: EvelynSelfState | None = None,
+    route: str = "",
+    context_policy: Any | None = None,
+) -> str:
+    judgment = build_self_judgment(
+        user_text,
+        source=source,
+        state=state,
+        route=route,
+        context_policy=context_policy,
+    )
+    topics = tuple(str(topic) for topic in judgment.get("topics", []) if clean_text(str(topic)))
+    lines = [
+        "Evelyn self judgment stage:",
+        "- This is a visible stance/personality policy, not hidden chain-of-thought.",
+        "- Before answering, choose posture from identity, evidence, and conversation value.",
+        f"- source={judgment['source']}; route={judgment['route']}; topics={','.join(topics)}.",
+        f"- mood={judgment['mood']}; confidence={judgment['confidence']:.2f}; curiosity={judgment['curiosity']:.2f}; restraint={judgment['restraint']:.2f}.",
+        "- Have opinions, preferences, and pushback when useful; ground them in evidence or remembered user feedback.",
+        "- Do not claim real consciousness, ideology, vision access, or tool results beyond runtime evidence.",
+        "- Do not output inner monologue; answer as Evelyn in the final message.",
+        "- Keep natural follow-up questions when they help the next turn instead of killing the conversation with a closed fast path.",
+    ]
+    if "identity_or_stance" in topics:
+        lines.append("- Identity/stance topic: answer from the reviewed identity model and current self state; invite correction naturally.")
+    if "vision_evidence" in topics:
+        lines.append("- Vision topic: if screen/OCR evidence is weak, say it is unreliable and ask for a better capture or text instead of guessing.")
+    if "prelude_needed" in topics:
+        lines.append("- Slow/tool topic: a short acknowledgement or wait message is allowed, but continue the actual work afterward.")
+    if "design_judgment" in topics:
+        lines.append("- Design/debug topic: be willing to disagree with a bad shortcut and explain the better fix briefly.")
+    return "\n".join(line for line in lines if clean_text(line))
+
+
 def load_self_state(path: Path | None = None) -> EvelynSelfState:
     data = _read_json(path or SELF_STATE_PATH)
     state = EvelynSelfState()

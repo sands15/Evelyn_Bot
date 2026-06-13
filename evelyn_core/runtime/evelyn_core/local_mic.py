@@ -411,6 +411,16 @@ class LocalMicCaptureService:
         if not blocks:
             return
         if not force and (voiced_samples < self._min_voiced_samples or total_samples < self._min_voiced_samples):
+            self.rejected_segment_count += 1
+            self.last_rejected_reason = "too_short"
+            self.last_segment_filter = {
+                "enabled": True,
+                "rejected": True,
+                "reason": "too_short",
+                "voicedMs": round((voiced_samples / float(self.sample_rate)) * 1000.0, 1),
+                "durationSec": round(total_samples / float(self.sample_rate), 3),
+                "minVoicedMs": self.min_voiced_ms,
+            }
             return
         segment = np.concatenate(blocks).astype(np.float32, copy=False)
         filter_passed, filter_meta = self._voice_filter_result(segment)

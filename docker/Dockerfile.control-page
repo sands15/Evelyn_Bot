@@ -1,0 +1,21 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONPATH=/app/evelyn_core/runtime
+
+COPY requirements.txt /app/requirements.txt
+RUN python -m pip install --upgrade pip && \
+    pip install --no-cache-dir aiohttp==3.13.* fastapi==0.115.* uvicorn==0.32.* requests==2.32.* numpy>=2.0
+
+COPY . /app
+
+ENV EVELYN_CORE_RUNTIME=/app/evelyn_core/runtime
+ENV EVELYN_CORE_ROOT=/app/evelyn_core
+ENV EVELYN_PROJECT_ROOT=/app
+
+EXPOSE 8799
+
+CMD ["python", "-m", "evelyn_core.control_page_server"]

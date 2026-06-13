@@ -23,6 +23,7 @@ from evelyn_core.local_mic import (  # noqa: E402
     serialize_local_mic_target,
     should_route_discord_user_to_local_mic,
 )
+from evelyn_core.local_io_bridge import LocalIoBridge, iter_pcm_aligned_chunks  # noqa: E402
 
 
 class LocalMicRoutingTests(unittest.TestCase):
@@ -105,6 +106,75 @@ class LocalMicRoutingTests(unittest.TestCase):
 
         self.assertEqual(len(pcm_bytes), 48000 * 2 * 2)
 
+    def test_local_io_bridge_aligns_streamed_pcm_chunks(self) -> None:
+        chunks = list(iter_pcm_aligned_chunks([b"abc", b"defg", b"h"]))
+
+        self.assertEqual(chunks, [b"ab", b"cdef", b"gh"])
+        self.assertTrue(all(len(chunk) % 2 == 0 for chunk in chunks))
+
+    def test_local_io_bridge_shutdown_starts_script_and_exits_once(self) -> None:
+        bridge = LocalIoBridge()
+
+        with (
+            patch.object(bridge, "_start_shutdown_script") as start_shutdown,
+            patch.object(bridge, "_schedule_bridge_exit") as schedule_exit,
+        ):
+            bridge._handle_control_response({"shutdown": {"requested": True}})
+            bridge._handle_control_response({"shutdown": {"requested": True}})
+
+        self.assertTrue(bridge.shutdown_started)
+        start_shutdown.assert_called_once_with()
+        schedule_exit.assert_called_once_with()
+
+    def test_local_io_bridge_restart_starts_script_and_exits_once(self) -> None:
+        bridge = LocalIoBridge()
+
+        with (
+            patch.object(bridge, "_start_restart_script") as start_restart,
+            patch.object(bridge, "_schedule_bridge_exit") as schedule_exit,
+        ):
+            bridge._handle_control_response({"restart": {"requested": True}})
+            bridge._handle_control_response({"restart": {"requested": True}})
+
+        self.assertTrue(bridge.restart_started)
+        start_restart.assert_called_once_with()
+        schedule_exit.assert_called_once_with()
+
+    def test_local_io_bridge_enqueues_control_page_speak_requests(self) -> None:
+        bridge = LocalIoBridge()
+
+        bridge._handle_control_response(
+            {
+                "speakRequests": [
+                    {"id": "speak-1", "text": " hello from page ", "source": "control_page"},
+                    {"id": "empty", "text": " "},
+                ]
+            }
+        )
+
+        self.assertEqual(bridge.speak_request_queue.qsize(), 1)
+        self.assertEqual(bridge.speak_request_queue.get_nowait()["text"], "hello from page")
+
+    def test_local_mic_short_segments_are_reported_as_rejected(self) -> None:
+        captured: list[tuple[bytes, dict]] = []
+        service = LocalMicCaptureService(
+            on_segment=lambda pcm, meta: captured.append((pcm, meta)),
+            sample_rate=16000,
+            min_voiced_ms=200,
+        )
+        audio = np.full(16000 // 20, 0.1, dtype=np.float32)
+        service._capture_active = True
+        service._current_blocks = [audio]
+        service._voiced_samples = audio.size
+        service._total_samples = audio.size
+
+        service._flush_active_segment(force=False)
+
+        self.assertEqual(captured, [])
+        self.assertEqual(service.rejected_segment_count, 1)
+        self.assertEqual(service.last_rejected_reason, "too_short")
+        self.assertEqual((service.last_segment_filter or {}).get("reason"), "too_short")
+
     def test_local_mic_voice_filter_rejects_silence(self) -> None:
         captured: list[tuple[bytes, dict]] = []
         service = LocalMicCaptureService(
@@ -168,6 +238,33 @@ class LocalMicRoutingTests(unittest.TestCase):
         self.assertNotIn("TTS_NEXT_CHUNK_MIN_CHARS", script)
         self.assertNotIn('set "LOCAL_MIC_ENABLED=false"', script)
 
+    def test_background_local_mode_uses_docker_core_and_windows_io_bridge(self) -> None:
+        script = (REPO_ROOT / "evelyn_core" / "runtime" / "launchers" / "start_local_background.ps1").read_text(encoding="utf-8")
+        bridge_source = (REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "local_io_bridge.py").read_text(encoding="utf-8")
+
+        self.assertIn("Invoke-DockerCommand -Arguments (@('compose') + $composeArgs)", script)
+        self.assertIn("'--profile', 'llm'", script)
+        self.assertIn("'--profile', 'tts'", script)
+        self.assertIn("'--profile', 'stt'", script)
+        self.assertIn("EVELYN_DOCKER_BUILD", script)
+        self.assertIn("@('up', '-d')", script)
+        self.assertIn("'stop', 'discord_bot'", script)
+        self.assertIn("EVELYN_LOCAL_KEEP_DISCORD_BOT", script)
+        self.assertIn("evelyn_core.local_io_bridge", script)
+        self.assertIn("--project-root '$projectRoot'", script)
+        self.assertIn("LOCAL_BRIDGE_BOT_API_BASE", script)
+        self.assertIn("LOCAL_MIC_START_THRESHOLD = '0.002'", script)
+        self.assertIn("LOCAL_MIC_CONTINUE_THRESHOLD = '0.001'", script)
+        self.assertIn("LOCAL_MIC_MIN_VOICED_MS = '160'", script)
+        self.assertIn("LOCAL_MIC_WAVEFORM_FILTER_ENABLED = 'false'", script)
+        self.assertNotIn("py -3 main.py", script)
+        self.assertIn("LOCAL_BRIDGE_STREAMING_TTS_ENABLED", bridge_source)
+        self.assertIn("/api/control-page/chat-stream", bridge_source)
+        self.assertIn("_play_streaming_pcm_response", bridge_source)
+        self.assertIn("tts_played_streaming", bridge_source)
+        self.assertIn('"num_step": OMNIVOICE_NUM_STEP', bridge_source)
+        self.assertIn('"mic": mic_stats', bridge_source)
+
     def test_start_local_has_lightweight_vision_profile(self) -> None:
         script = (REPO_ROOT / "evelyn_core" / "start_local.bat").read_text(encoding="utf-8")
 
@@ -193,6 +290,21 @@ class LocalMicRoutingTests(unittest.TestCase):
         self.assertIn('"/voice": "voice.status"', main_py)
         self.assertIn('"/voice status": "voice.status"', main_py)
         self.assertIn('if tool_name == "voice.status":', main_py)
+
+    def test_local_speaker_uses_streaming_sentence_tts_with_full_answer_fallback(self) -> None:
+        main_py = (REPO_ROOT / "main.py").read_text(encoding="utf-8")
+
+        self.assertIn("def start_streaming_local_voice_delivery(", main_py)
+        self.assertIn("async def stream_local_tts_sentences(", main_py)
+        self.assertIn('metrics.setdefault("meta", {})["delivery_mode"] = "llm_sentence_stream"', main_py)
+        self.assertIn("on_sentence=fanout.on_chunk", main_py)
+        self.assertIn("prefetch_tts_sources(", main_py)
+        self.assertIn("on_first_playback=", main_py)
+        self.assertIn('"local_first_playback_logged"', main_py)
+        self.assertIn('"local_tts_first_playback"', main_py)
+        self.assertIn('"num_step": OMNIVOICE_NUM_STEP', main_py)
+        self.assertIn("await speak_answer_local(", main_py)
+        self.assertIn('metrics.setdefault("meta", {})["local_streaming_tts_fallback_used"] = True', main_py)
 
 
 if __name__ == "__main__":

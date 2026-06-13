@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from .memory import memory_questions_path, read_json_file, read_jsonl, write_json_file, write_jsonl
-from .text import clean_text
+from .text import clean_text, is_user_echo_answer
 
 
 QUESTION_QUEUE_LIMIT = 120
@@ -14,6 +15,17 @@ QUESTION_PENDING_TTL_SEC = 15 * 60
 QUESTION_DEFAULT_EXPIRE_SEC = 7 * 24 * 60 * 60
 QUESTION_COOLDOWN_SEC = 60 * 60
 QUESTION_MAX_ASK_COUNT = 2
+
+PROACTIVE_QUESTION_SOURCES = {"text", "control_page", "autonomy"}
+PROACTIVE_QUESTION_BLOCK_MARKERS = (
+    "\ubb3b\uc9c0",
+    "\uc9c8\ubb38\ud558\uc9c0",
+    "\ubcf4\uace0\ub9cc",
+    "\ub300\ub2f5\ub9cc",
+    "\ub2f5\ub9cc",
+    "no question",
+    "don't ask",
+)
 
 DECLINE_MARKERS = (
     "\uc544\ub2c8",
@@ -28,6 +40,24 @@ DECLINE_MARKERS = (
     "skip",
     "never mind",
 )
+
+
+@dataclass(frozen=True)
+class ProactiveQuestionGateDecision:
+    allowed: bool
+    reason: str
+    source: str = ""
+    pending_active: bool = False
+    session_cooldown_hit: bool = False
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "allowed": self.allowed,
+            "reason": self.reason,
+            "source": self.source,
+            "pending_active": self.pending_active,
+            "session_cooldown_hit": self.session_cooldown_hit,
+        }
 
 
 def proactive_questions_path(guild_id: int, *, scope_type: str = "guild", scope_key: str | None = None) -> Path:
@@ -163,6 +193,62 @@ def has_active_pending_question(guild_id: int, *, session_scope_key: str | None,
     return float(pending.get("expires_at") or 0.0) > float(now or time.time())
 
 
+def _answer_already_contains_question(answer_text: str) -> bool:
+    answer = clean_text(answer_text)
+    return bool(answer and (answer.count("?") + answer.count("\uae4c") > 0))
+
+
+def evaluate_proactive_question_gate(
+    *,
+    guild_id: int | None,
+    source: str,
+    user_text: str,
+    answer_text: str = "",
+    awaiting_user_reply: bool = False,
+    session_scope_key: str | None = None,
+    session_cooldown_hit: bool = False,
+    runtime_block_reason: str = "",
+    candidate_text: str = "",
+    now: float | None = None,
+) -> ProactiveQuestionGateDecision:
+    normalized_source = clean_text(source).lower()
+    if guild_id is None:
+        return ProactiveQuestionGateDecision(False, "no_guild", source=normalized_source)
+    if normalized_source not in PROACTIVE_QUESTION_SOURCES:
+        return ProactiveQuestionGateDecision(False, "unsupported_source", source=normalized_source)
+    if awaiting_user_reply:
+        return ProactiveQuestionGateDecision(False, "awaiting_user_reply", source=normalized_source)
+
+    pending_active = has_active_pending_question(guild_id, session_scope_key=session_scope_key, now=now)
+    if pending_active:
+        return ProactiveQuestionGateDecision(False, "pending_question_active", source=normalized_source, pending_active=True)
+
+    if session_cooldown_hit:
+        return ProactiveQuestionGateDecision(
+            False,
+            "session_question_cooldown",
+            source=normalized_source,
+            session_cooldown_hit=True,
+        )
+
+    block_reason = clean_text(runtime_block_reason)
+    if block_reason:
+        return ProactiveQuestionGateDecision(False, block_reason, source=normalized_source)
+
+    merged = clean_text(f"{user_text} {answer_text}").lower()
+    if any(marker in merged for marker in PROACTIVE_QUESTION_BLOCK_MARKERS):
+        return ProactiveQuestionGateDecision(False, "user_requested_no_questions", source=normalized_source)
+
+    if _answer_already_contains_question(answer_text):
+        return ProactiveQuestionGateDecision(False, "answer_already_has_question", source=normalized_source)
+
+    candidate = clean_text(candidate_text)
+    if candidate and is_user_echo_answer(user_text, candidate):
+        return ProactiveQuestionGateDecision(False, "candidate_echoes_user", source=normalized_source)
+
+    return ProactiveQuestionGateDecision(True, "allowed", source=normalized_source)
+
+
 def _eligible_question(row: dict[str, Any], now: float) -> bool:
     status = clean_text(str(row.get("status", "pending"))) or "pending"
     if status not in {"pending", "asked"}:
@@ -295,11 +381,11 @@ def should_offer_proactive_question(
 ) -> bool:
     if source not in {"text", "control_page"}:
         return False
-    if awaiting_user_reply:
-        return False
-    merged = clean_text(f"{user_text} {answer_text}").lower()
-    if any(marker in merged for marker in ("\ubb3b\uc9c0", "\uc9c8\ubb38\ud558\uc9c0", "\ubcf4\uace0\ub9cc", "\ub300\ub2f5\ub9cc", "\ub2f5\ub9cc", "no question", "don't ask")):
-        return False
-    if answer_text.count("?") + answer_text.count("\uae4c") > 0:
-        return False
-    return True
+    decision = evaluate_proactive_question_gate(
+        guild_id=0,
+        source=source,
+        user_text=user_text,
+        answer_text=answer_text,
+        awaiting_user_reply=awaiting_user_reply,
+    )
+    return decision.allowed

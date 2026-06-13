@@ -1,0 +1,11 @@
+FROM nvidia/cuda:12.6.3-runtime-ubuntu24.04
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ca-certificates libgomp1 && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /llama
+
+ENV LD_LIBRARY_PATH=/llama/build/bin:/usr/local/cuda/lib64
+
+CMD ["./build/bin/llama-server", "--version"]

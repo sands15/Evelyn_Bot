@@ -1,0 +1,497 @@
+﻿name: evelyn-fast-control
+
+services:
+  bot_api:
+    container_name: evelyn-bot-api
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.bot-api
+    restart: "no"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      EVELYN_FAST_BOOT: "1"
+      DISCORD_ENABLED: "false"
+      LOCAL_ONLY: "true"
+      CONTROL_PAGE_HOST: "0.0.0.0"
+      CONTROL_PAGE_PORT: "8798"
+      CONTROL_PAGE_SERVICE_HOST: "control_page"
+      CONTROL_PAGE_BOT_API_HOST: "127.0.0.1"
+      CONTROL_PAGE_BOT_API_PORT: "8798"
+      CONTROL_PAGE_PUBLIC_PORT: "8799"
+      MAIN_LLM_HOST: "main_llm"
+      ROUTER_LLM_HOST: "router_llm"
+      SUB_LLM_HOST: "sub_llm"
+      TTS_HOST: "tts"
+      STT_HOST: "stt"
+      VISION_HOST: "vision"
+      LLM_SERVER_URL: "http://main_llm:9820/v1/chat/completions"
+      MAIN_LLM_URL: "http://main_llm:9820/v1/chat/completions"
+      SUMMARY_LLM_URL: "http://sub_llm:9821/v1/chat/completions"
+      ROUTER_LLM_URL: "http://router_llm:9822/v1/chat/completions"
+      OMNIVOICE_SERVER_URL: "http://tts:8880"
+      STT_SERVICE_URL: "http://stt:8892"
+      VISION_SERVICE_URL: "http://vision:8891"
+      VOYAGER_CODEX_GATEWAY_URL: "http://codex_gateway:8787/codex/action"
+      VOYAGER_CODEX_GATEWAY_HOST: "codex_gateway"
+      MINECRAFT_AUTONOMY_SERVICE_HOST: "voyager"
+      VOYAGER_CODEX_GATEWAY_PORT: "8787"
+      MINECRAFT_AUTONOMY_SERVICE_PORT: "8765"
+      BOT_API_PORT: "8798"
+      START_WAIT_TIMEOUT_SEC: "8"
+      START_WAIT_INTERVAL_SEC: "1"
+      OPUS_ERROR_TO_SILENCE: "false"
+      STT_USE_RAW_48K: "false"
+    volumes:
+      - ./bot_memory:/app/bot_memory
+      - ./bot_profiles:/app/bot_profiles
+      - ./guild_settings:/app/guild_settings
+      - ./runtime_artifacts:/app/runtime_artifacts
+      - ./logs:/app/logs
+      - ./external:/app/external
+      - ./assets:/app/assets
+      - ./docs:/app/docs
+    ports:
+      - "127.0.0.1:8798:8798"
+    healthcheck:
+      test: >-
+        python -c "from urllib.request import urlopen; import sys; resp = urlopen('http://127.0.0.1:8798/api/control-page/state', timeout=3); sys.exit(0 if resp.getcode() == 200 else 1)"
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  control_page:
+    container_name: evelyn-control-page
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.control-page
+    restart: "no"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      CONTROL_PAGE_HOST: "0.0.0.0"
+      CONTROL_PAGE_PUBLIC_PORT: "8799"
+      CONTROL_PAGE_BOT_API_PORT: "8798"
+      CONTROL_PAGE_BOT_API_HOST: "bot_api"
+      CONTROL_PAGE_SERVICE_HOST: "127.0.0.1"
+      EVELYN_PROJECT_ROOT: /app
+      EVELYN_CORE_ROOT: /app/evelyn_core
+      EVELYN_CORE_RUNTIME: /app/evelyn_core/runtime
+      MAIN_LLM_HOST: "main_llm"
+      ROUTER_LLM_HOST: "router_llm"
+      SUB_LLM_HOST: "sub_llm"
+      TTS_HOST: "tts"
+      STT_HOST: "stt"
+      VISION_HOST: "vision"
+      VOYAGER_CODEX_GATEWAY_HOST: "codex_gateway"
+      MINECRAFT_AUTONOMY_SERVICE_HOST: "voyager"
+      MAIN_LLM_PORT: "9820"
+      ROUTER_LLM_PORT: "9822"
+      SUB_LLM_PORT: "9821"
+      TTS_PORT: "8880"
+      STT_PORT: "8892"
+      VOYAGER_CODEX_GATEWAY_PORT: "8787"
+      MINECRAFT_AUTONOMY_SERVICE_PORT: "8765"
+      LLM_SERVER_URL: "http://main_llm:9820/v1/chat/completions"
+      MAIN_LLM_URL: "http://main_llm:9820/v1/chat/completions"
+      SUMMARY_LLM_URL: "http://sub_llm:9821/v1/chat/completions"
+      ROUTER_LLM_URL: "http://router_llm:9822/v1/chat/completions"
+      OMNIVOICE_SERVER_URL: "http://tts:8880"
+      STT_SERVICE_URL: "http://stt:8892"
+      VISION_SERVICE_URL: "http://vision:8891"
+      VOYAGER_CODEX_GATEWAY_URL: "http://codex_gateway:8787/codex/action"
+    volumes:
+      - ./bot_memory:/app/bot_memory
+      - ./guild_settings:/app/guild_settings
+      - ./runtime_artifacts:/app/runtime_artifacts
+      - ./logs:/app/logs
+      - ./external:/app/external
+      - ./assets:/app/assets
+      - ./docs:/app/docs
+    ports:
+      - "127.0.0.1:8799:8799"
+    healthcheck:
+      test: >-
+        python -c "from urllib.request import urlopen; import json,sys; resp = urlopen('http://127.0.0.1:8799/health', timeout=3); payload = json.loads(resp.read() or b'{}'); sys.exit(0 if resp.getcode() == 200 and payload.get('ok') is True else 1)"
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  discord_bot:
+    container_name: evelyn-discord-bot
+    profiles: ["discord"]
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.discord-bot
+    restart: "no"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      DISCORD_ENABLED: "true"
+      LOCAL_ONLY: "false"
+      DISCORD_BOT_TOKEN: "${DISCORD_BOT_TOKEN:?Set DISCORD_BOT_TOKEN before starting discord_bot}"
+      CONTROL_PAGE_ENABLED: "false"
+      CONTROL_PAGE_HOST: "0.0.0.0"
+      CONTROL_PAGE_PORT: "8797"
+      CONTROL_PAGE_PUBLIC_PORT: "8799"
+      CONTROL_PAGE_SERVICE_HOST: "control_page"
+      CONTROL_PAGE_BOT_API_HOST: "bot_api"
+      CONTROL_PAGE_BOT_API_PORT: "8798"
+      MAIN_LLM_HOST: "main_llm"
+      ROUTER_LLM_HOST: "router_llm"
+      SUB_LLM_HOST: "sub_llm"
+      TTS_HOST: "tts"
+      STT_HOST: "stt"
+      VISION_HOST: "vision"
+      LLM_SERVER_URL: "http://main_llm:9820/v1/chat/completions"
+      MAIN_LLM_URL: "http://main_llm:9820/v1/chat/completions"
+      SUMMARY_LLM_URL: "http://sub_llm:9821/v1/chat/completions"
+      ROUTER_LLM_URL: "http://router_llm:9822/v1/chat/completions"
+      OMNIVOICE_SERVER_URL: "http://tts:8880"
+      STT_SERVICE_URL: "http://stt:8892"
+      STT_SERVICE_FALLBACK_LOCAL: "false"
+      VISION_SERVICE_URL: "http://vision:8891"
+      VISION_WATCH_ENABLED: "false"
+      VOYAGER_CODEX_GATEWAY_URL: "http://codex_gateway:8787/codex/action"
+      VOYAGER_CODEX_GATEWAY_HOST: "codex_gateway"
+      MINECRAFT_AUTONOMY_SERVICE_HOST: "voyager"
+      VOYAGER_CODEX_GATEWAY_PORT: "8787"
+      MINECRAFT_AUTONOMY_SERVICE_PORT: "8765"
+      LOCAL_MIC_ENABLED: "false"
+      LOCAL_TTS_OUTPUT_ENABLED: "false"
+      VOICE_INPUT_MODE: "discord"
+      VOICE_CONSOLE_ONLY_STT_AND_REPLY: "false"
+      OPUS_ERROR_TO_SILENCE: "false"
+      STT_USE_RAW_48K: "false"
+      PYTHONUNBUFFERED: "1"
+    depends_on:
+      bot_api:
+        condition: service_healthy
+      control_page:
+        condition: service_healthy
+      main_llm:
+        condition: service_healthy
+      router_llm:
+        condition: service_healthy
+      sub_llm:
+        condition: service_healthy
+      tts:
+        condition: service_healthy
+      stt:
+        condition: service_healthy
+    volumes:
+      - ./bot_memory:/app/bot_memory
+      - ./bot_profiles:/app/bot_profiles
+      - ./guild_settings:/app/guild_settings
+      - ./runtime_artifacts:/app/runtime_artifacts
+      - ./logs:/app/logs
+      - ./external:/app/external
+      - ./assets:/app/assets
+      - ./docs:/app/docs
+    command: ["python", "main.py"]
+
+  main_llm:
+    container_name: evelyn-main-llm
+    profiles: ["llm"]
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.llama
+    restart: "no"
+    gpus: all
+    environment:
+      NVIDIA_VISIBLE_DEVICES: "GPU-96c554e6-feef-2980-6722-efcb0af098f9"
+      NVIDIA_DRIVER_CAPABILITIES: "compute,utility"
+      CUDA_VISIBLE_DEVICES: "GPU-96c554e6-feef-2980-6722-efcb0af098f9"
+      MAIN_LLM_PORT: "9820"
+    volumes:
+      - C:/Users/Admin/llama.cpp:/llama
+    ports:
+      - "127.0.0.1:9820:9820"
+    command:
+      - bash
+      - -lc
+      - >-
+        export LD_LIBRARY_PATH=/llama/build/bin:/usr/local/cuda/lib64:$$LD_LIBRARY_PATH;
+        exec ./build/bin/llama-server
+        -m /llama/models/gemma4-12b-batiai-iq4xs/google-gemma-4-12B-it-IQ4_XS.gguf
+        --host 0.0.0.0
+        --port 9820
+        --flash-attn on
+        -ngl 999
+        -c 8192
+        -np 1
+        --cache-prompt
+        --cache-reuse 256
+        --metrics
+        --repeat-last-n 256
+        --repeat-penalty 1.10
+        --presence-penalty 0.00
+        --frequency-penalty 0.20
+        --reasoning off
+        --reasoning-budget 0
+        --reasoning-format none
+        --jinja
+        --no-mmproj
+    healthcheck:
+      test: >-
+        bash -lc "cat < /dev/null > /dev/tcp/127.0.0.1/9820"
+      interval: 15s
+      timeout: 8s
+      retries: 40
+      start_period: 90s
+
+  router_llm:
+    container_name: evelyn-router-llm
+    profiles: ["llm"]
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.llama
+    restart: "no"
+    gpus: all
+    environment:
+      NVIDIA_VISIBLE_DEVICES: "GPU-a352a7f9-1fcf-3d18-9973-6f9114addf7b"
+      NVIDIA_DRIVER_CAPABILITIES: "compute,utility"
+      CUDA_VISIBLE_DEVICES: "GPU-a352a7f9-1fcf-3d18-9973-6f9114addf7b"
+      ROUTER_LLM_PORT: "9822"
+    volumes:
+      - C:/Users/Admin/llama.cpp:/llama
+    ports:
+      - "127.0.0.1:9822:9822"
+    command:
+      - bash
+      - -lc
+      - >-
+        export LD_LIBRARY_PATH=/llama/build/bin:/usr/local/cuda/lib64:$$LD_LIBRARY_PATH;
+        exec ./build/bin/llama-server
+        -m /llama/models/EXAONE-3.5-2.4B-Instruct-Q4_K_M.gguf
+        --host 0.0.0.0
+        --port 9822
+        --flash-attn on
+        -ngl 999
+        -c 1536
+        --reasoning off
+        --reasoning-budget 12
+    healthcheck:
+      test: >-
+        bash -lc "cat < /dev/null > /dev/tcp/127.0.0.1/9822"
+      interval: 15s
+      timeout: 8s
+      retries: 40
+      start_period: 60s
+
+  sub_llm:
+    container_name: evelyn-sub-llm
+    profiles: ["llm"]
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.llama
+    restart: "no"
+    gpus: all
+    environment:
+      NVIDIA_VISIBLE_DEVICES: "GPU-a352a7f9-1fcf-3d18-9973-6f9114addf7b"
+      NVIDIA_DRIVER_CAPABILITIES: "compute,utility"
+      CUDA_VISIBLE_DEVICES: "GPU-a352a7f9-1fcf-3d18-9973-6f9114addf7b"
+      SUB_LLM_PORT: "9821"
+    volumes:
+      - C:/Users/Admin/llama.cpp:/llama
+    ports:
+      - "127.0.0.1:9821:9821"
+    command:
+      - bash
+      - -lc
+      - >-
+        export LD_LIBRARY_PATH=/llama/build/bin:/usr/local/cuda/lib64:$$LD_LIBRARY_PATH;
+        exec ./build/bin/llama-server
+        -m /llama/models/EXAONE-3.5-7.8B-Instruct-IQ4_XS.gguf
+        --host 0.0.0.0
+        --port 9821
+        --flash-attn on
+        -ngl 999
+        -c 4096
+        --threads 8
+        --cache-type-k f16
+        --cache-type-v f16
+        --reasoning on
+        --reasoning-budget 1
+    healthcheck:
+      test: >-
+        bash -lc "cat < /dev/null > /dev/tcp/127.0.0.1/9821"
+      interval: 15s
+      timeout: 8s
+      retries: 40
+      start_period: 90s
+
+  tts:
+    container_name: evelyn-tts
+    profiles: ["tts"]
+    build:
+      context: C:/Users/Admin/omnivoice-server
+      dockerfile: Dockerfile.cuda
+    restart: "no"
+    gpus: all
+    environment:
+      NVIDIA_VISIBLE_DEVICES: "GPU-96c554e6-feef-2980-6722-efcb0af098f9"
+      NVIDIA_DRIVER_CAPABILITIES: "compute,utility"
+      CUDA_VISIBLE_DEVICES: "GPU-96c554e6-feef-2980-6722-efcb0af098f9"
+      OMNIVOICE_HOST: "0.0.0.0"
+      OMNIVOICE_PORT: "8880"
+      OMNIVOICE_DEVICE: "cuda"
+      OMNIVOICE_PROFILE_DIR: "/home/ubuntu/app/profiles"
+      OMNIVOICE_NUM_STEP: "32"
+      OMNIVOICE_MAX_CONCURRENT: "2"
+      OMNIVOICE_LOG_LEVEL: "info"
+    volumes:
+      - C:/Evelyn/omnivoice_profiles:/home/ubuntu/app/profiles
+      - C:/Users/Admin/omnivoice-server:/home/ubuntu/.cache/huggingface
+    ports:
+      - "127.0.0.1:8880:8880"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8880/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 90s
+
+  vision:
+    container_name: evelyn-vision
+    profiles: ["vision"]
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.vision
+    restart: "no"
+    gpus: all
+    environment:
+      NVIDIA_VISIBLE_DEVICES: "GPU-96c554e6-feef-2980-6722-efcb0af098f9"
+      NVIDIA_DRIVER_CAPABILITIES: "compute,utility"
+      CUDA_VISIBLE_DEVICES: "GPU-96c554e6-feef-2980-6722-efcb0af098f9"
+      VISION_HOST: "0.0.0.0"
+      VISION_PORT: "8891"
+      VISION_DEVICE: "cuda:0"
+      VISION_DTYPE: "float16"
+      VISION_LOAD_SMOL: "true"
+      VISION_LOAD_OCR: "false"
+      VISION_OCR_LAZY_LOAD: "true"
+      VISION_OCR_IDLE_UNLOAD_SEC: "600"
+      VISION_OCR_UNLOAD_AFTER_REQUEST: "true"
+      VISION_OCR_DTYPE: "auto"
+      VISION_WATCH_RUN_OCR: "false"
+      EVELYN_HOST_PROJECT_ROOT: "C:/Evelyn"
+      EVELYN_CONTAINER_PROJECT_ROOT: "/app"
+    volumes:
+      - ./runtime_artifacts:/app/runtime_artifacts
+      - ./logs:/app/logs
+      - C:/Users/Admin/.cache/huggingface:/root/.cache/huggingface
+    ports:
+      - "127.0.0.1:8891:8891"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8891/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 8
+      start_period: 180s
+
+  stt:
+    container_name: evelyn-stt
+    profiles: ["stt"]
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.stt
+    restart: "no"
+    gpus: all
+    environment:
+      NVIDIA_VISIBLE_DEVICES: "GPU-96c554e6-feef-2980-6722-efcb0af098f9"
+      NVIDIA_DRIVER_CAPABILITIES: "compute,utility"
+      CUDA_VISIBLE_DEVICES: "GPU-96c554e6-feef-2980-6722-efcb0af098f9"
+      STT_HOST: "0.0.0.0"
+      STT_PORT: "8892"
+      STT_MODEL_NAME: "Qwen/Qwen3-ASR-1.7B"
+      STT_LANGUAGE: "ko"
+      STT_FORCE_LANGUAGE: "true"
+      STT_COMPUTE_TYPE: "float16"
+      STT_LOAD_ON_START: "true"
+      STT_MAX_AUDIO_SEC: "30"
+    volumes:
+      - ./logs:/app/logs
+      - C:/Users/Admin/.cache/huggingface:/root/.cache/huggingface
+    ports:
+      - "127.0.0.1:8892:8892"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import json,urllib.request; payload=json.loads(urllib.request.urlopen('http://127.0.0.1:8892/health', timeout=5).read() or b'{}'); raise SystemExit(0 if payload.get('ok') and payload.get('ready') else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 240s
+
+  codex_gateway:
+    container_name: evelyn-codex-gateway
+    profiles: ["voyager"]
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.voyager
+    restart: "no"
+    environment:
+      VOYAGER_CODEX_GATEWAY_HOST: "0.0.0.0"
+      VOYAGER_CODEX_GATEWAY_PORT: "8787"
+      VOYAGER_CODEX_MODEL: "gpt-5.5"
+      VOYAGER_CODEX_GATEWAY_BACKEND: "codex-exec"
+      VOYAGER_CODEX_GATEWAY_WORKDIR: "/app"
+      CODEX_HOME: "/root/.codex"
+      EVELYN_PROJECT_ROOT: /app
+      EVELYN_CORE_ROOT: /app/evelyn_core
+      EVELYN_CORE_RUNTIME: /app/evelyn_core/runtime
+    volumes:
+      - ./runtime_artifacts:/app/runtime_artifacts
+      - ./logs:/app/logs
+      - C:/Users/Admin/.codex/auth.json:/root/.codex/auth.json:ro
+      - C:/Users/Admin/.codex/config.toml:/root/.codex/config.toml:ro
+    ports:
+      - "127.0.0.1:8787:8787"
+    command: ["python", "-m", "evelyn_core.codex_gateway_server", "--host", "0.0.0.0", "--port", "8787"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import json,urllib.request; payload=json.loads(urllib.request.urlopen('http://127.0.0.1:8787/health', timeout=3).read() or b'{}'); raise SystemExit(0 if payload.get('ok') else 1)"]
+      interval: 20s
+      timeout: 8s
+      retries: 8
+      start_period: 20s
+
+  voyager:
+    container_name: evelyn-voyager
+    profiles: ["voyager"]
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.voyager
+    restart: "no"
+    environment:
+      MINECRAFT_AUTONOMY_SERVICE_HOST: "0.0.0.0"
+      MINECRAFT_AUTONOMY_SERVICE_PORT: "8765"
+      VOYAGER_CODEX_GATEWAY_URL: "http://codex_gateway:8787/codex/action"
+      VOYAGER_CODEX_GATEWAY_HOST: "codex_gateway"
+      VOYAGER_CODEX_GATEWAY_PORT: "8787"
+      VOYAGER_ACTION_BACKEND: "codex-gateway"
+      VOYAGER_BRIDGE_HOST: "host.docker.internal"
+      VOYAGER_BRIDGE_PORT: "3000"
+      MINEFLAYER_HOST: "host.docker.internal"
+      MINEFLAYER_PORT: "25565"
+      EVELYN_PROJECT_ROOT: /app
+      EVELYN_CORE_ROOT: /app/evelyn_core
+      EVELYN_CORE_RUNTIME: /app/evelyn_core/runtime
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      codex_gateway:
+        condition: service_healthy
+    volumes:
+      - ./runtime_artifacts:/app/runtime_artifacts
+      - ./logs:/app/logs
+      - ./third_party:/app/third_party:ro
+    ports:
+      - "127.0.0.1:8765:8765"
+    command: ["python", "-m", "evelyn_core.voyager_service", "--host", "0.0.0.0", "--port", "8765"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import json,urllib.request; payload=json.loads(urllib.request.urlopen('http://127.0.0.1:8765/health', timeout=3).read() or b'{}'); raise SystemExit(0 if payload.get('ok') else 1)"]
+      interval: 20s
+      timeout: 8s
+      retries: 8
+      start_period: 20s

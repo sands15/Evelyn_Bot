@@ -124,6 +124,25 @@ NEGATED_SEARCH_MARKERS = (
     "without looking up",
 )
 
+WEATHER_MARKERS = (
+    "\ub0a0\uc528",
+    "\uc608\ubcf4",
+    "\uac15\uc218",
+    "\uc6b0\uc0b0",
+    "\ube44 \uc624",
+    "\ube44 \uc640",
+    "\ube44\uac00 \uc624",
+    "\ube44\uac00 \uc62c",
+    "weather",
+    "forecast",
+    "rain",
+    "raining",
+)
+
+KOREAN_LOCATION_RE = re.compile(
+    r"([가-힣]{2,}(?:특별자치시|특별자치도|광역시|특별시|자치도|시|군|구|도))"
+)
+
 
 def _normalized_pair(text: str) -> tuple[str, str]:
     normalized = clean_text(text).lower()
@@ -135,6 +154,33 @@ def _has_negated_search_request(normalized: str, compact: str) -> bool:
     return any(marker in normalized for marker in NEGATED_SEARCH_MARKERS) or any(
         marker.replace(" ", "") in compact for marker in NEGATED_SEARCH_MARKERS
     )
+
+
+def is_weather_query(text: str) -> bool:
+    normalized, compact = _normalized_pair(text)
+    if not normalized:
+        return False
+    return any(marker in normalized for marker in WEATHER_MARKERS) or any(
+        marker.replace(" ", "") in compact for marker in WEATHER_MARKERS
+    )
+
+
+def extract_korean_location_hint(text: str) -> str:
+    cleaned = clean_text(text)
+    if not cleaned:
+        return ""
+    matches = [match.group(1) for match in KOREAN_LOCATION_RE.finditer(cleaned)]
+    if not matches:
+        return ""
+    return clean_text(matches[-1])
+
+
+def resolve_recent_weather_location(recent_texts: list[str] | tuple[str, ...]) -> str:
+    for text in reversed(list(recent_texts or [])):
+        location = extract_korean_location_hint(text)
+        if location:
+            return location
+    return ""
 
 
 def classify_datetime_query(text: str) -> str | None:

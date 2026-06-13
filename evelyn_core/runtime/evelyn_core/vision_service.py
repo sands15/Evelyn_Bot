@@ -34,6 +34,8 @@ VISION_OCR_IDLE_UNLOAD_SEC = max(0.0, float(os.getenv("VISION_OCR_IDLE_UNLOAD_SE
 VISION_OCR_UNLOAD_AFTER_REQUEST = os.getenv("VISION_OCR_UNLOAD_AFTER_REQUEST", "false").lower() in {"1", "true", "yes", "on"}
 VISION_OCR_EMPTY_CACHE_ON_UNLOAD = os.getenv("VISION_OCR_EMPTY_CACHE_ON_UNLOAD", "true").lower() in {"1", "true", "yes", "on"}
 VISION_OCR_COMPILE = os.getenv("VISION_OCR_COMPILE", "false").lower() == "true"
+EVELYN_HOST_PROJECT_ROOT = os.getenv("EVELYN_HOST_PROJECT_ROOT", "")
+EVELYN_CONTAINER_PROJECT_ROOT = os.getenv("EVELYN_CONTAINER_PROJECT_ROOT", "")
 WINDOWS_DRIVE_RE = re.compile(r"^([A-Za-z]):[\\/](.*)$")
 
 
@@ -77,12 +79,35 @@ def gpu_snapshot() -> dict[str, Any]:
 
 
 def normalize_image_path(image_path: str) -> Path:
+    mapped = map_host_project_path(image_path)
+    if mapped is not None:
+        return mapped
     match = WINDOWS_DRIVE_RE.match(image_path)
     if match and os.name != "nt":
         drive = match.group(1).lower()
         rest = match.group(2).replace("\\", "/")
         return Path(f"/mnt/{drive}/{rest}")
     return Path(image_path).expanduser()
+
+
+def normalize_path_text(value: str) -> str:
+    return value.replace("\\", "/").rstrip("/")
+
+
+def map_host_project_path(image_path: str) -> Path | None:
+    if not EVELYN_HOST_PROJECT_ROOT or not EVELYN_CONTAINER_PROJECT_ROOT:
+        return None
+    raw = normalize_path_text(image_path)
+    host_root = normalize_path_text(EVELYN_HOST_PROJECT_ROOT)
+    raw_lower = raw.lower()
+    host_lower = host_root.lower()
+    if raw_lower == host_lower:
+        relative = ""
+    elif raw_lower.startswith(host_lower + "/"):
+        relative = raw[len(host_root) + 1 :]
+    else:
+        return None
+    return Path(EVELYN_CONTAINER_PROJECT_ROOT, *[part for part in relative.split("/") if part])
 
 
 def load_image(*, image_path: str | None = None, image_base64: str | None = None) -> Image.Image:

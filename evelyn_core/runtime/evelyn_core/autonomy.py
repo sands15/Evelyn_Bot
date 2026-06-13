@@ -450,6 +450,7 @@ class AutonomyEngine:
             self_drive = observation.get("self_state") if isinstance(observation.get("self_state"), dict) else {}
             impulse = clean_text(str(self_drive.get("last_impulse", "stay_silent"))) or "stay_silent"
             gate_reason = clean_text(str(self_drive.get("last_gate_reason", "")))
+            queued_question_available = bool(observation.get("queued_proactive_question_available", False))
             if inflight_requests >= 2:
                 needs.append(AutonomyNeed("check_status", 0.42, detail="런타임 혼잡 상태를 점검할 수 있음", metadata={"domain": "assistant"}))
             if cognitive_refresh_needed and not router_refresh_inflight and active_sessions > 0 and recent_context_items > 0:
@@ -461,9 +462,7 @@ class AutonomyEngine:
                 needs.append(AutonomyNeed("maintain", 0.34, detail="검색 후속 응답이 필요함", metadata={"domain": "assistant", "text": "아까 이어서 실제로 찾아본 결과를 정리해볼게."}))
             if unresolved_items > 0 and known_followup_channels > 0 and not quiet_hours:
                 needs.append(AutonomyNeed("maintain", 0.28, detail="미해결 문맥 후속이 필요함", metadata={"domain": "assistant", "text": "아직 덜 끝난 문맥이 있어서 이어서 챙겨볼게."}))
-            if known_followup_channels > 0 and last_autonomy_ping_sec > 900 and not quiet_hours:
-                needs.append(AutonomyNeed("maintain", 0.24, detail="오랜 침묵 뒤 저위험 후속 메시지를 보낼 수 있음", metadata={"domain": "assistant", "text": "지금은 저위험 자율 보조 모드로 상태를 점검하고 있어."}))
-            if known_followup_channels > 0 and active_sessions > 0 and impulse != "stay_silent" and gate_reason not in {"quiet_hours", "answer_inflight", "proactive_cooldown", "hourly_limit"}:
+            if queued_question_available and known_followup_channels > 0 and active_sessions > 0 and impulse != "stay_silent" and gate_reason not in {"quiet_hours", "answer_inflight", "proactive_cooldown", "hourly_limit"}:
                 impulse_text = {
                     "check_softly": "정훈, 아까 뭔가 걸린 것 같아서 살짝 보고 있었어. 지금은 괜찮아?",
                     "comment_on_screen_change": "정훈, 화면에 뭔가 바뀐 것 같아. 내가 제대로 봐줄까?",
@@ -472,7 +471,7 @@ class AutonomyEngine:
                 }.get(impulse, "정훈, 필요하면 바로 불러줘. 나 여기 있어.")
                 impulse_text = assistant_proactive_impulse_text(impulse, impulse_text)
                 needs.append(AutonomyNeed("ping", 0.18, detail="self-model proactive impulse", metadata={"domain": "assistant", "text": impulse_text, "impulse": impulse, "gate_reason": gate_reason, "drive": self_drive}))
-            if known_followup_channels > 0 and inflight_requests == 0 and active_sessions > 0 and last_autonomy_ping_sec > 1800 and not quiet_hours:
+            if queued_question_available and known_followup_channels > 0 and inflight_requests == 0 and active_sessions > 0 and last_autonomy_ping_sec > 1800 and not quiet_hours:
                 needs.append(AutonomyNeed("ping", 0.20, detail="필요하면 사용자에게 짧게 핑할 수 있음", metadata={"domain": "assistant"}))
             if not needs:
                 needs.append(AutonomyNeed("idle", 0.10, detail="대기", metadata={"domain": "assistant"}))
@@ -643,10 +642,12 @@ class AutonomyEngine:
                     {"domain": domain, "action": "summarize_notifications"},
                 ]
             elif goal.kind == "maintain":
-                followup_text = clean_text(str(goal.metadata.get("text", ""))) or "지금은 저위험 자율 보조 모드로 상태를 점검하고 있어."
-                steps = [
-                    {"domain": domain, "action": "send_followup", "text": followup_text},
-                ]
+                followup_text = clean_text(str(goal.metadata.get("text", "")))
+                steps = (
+                    [{"domain": domain, "action": "send_followup", "text": followup_text}]
+                    if followup_text
+                    else [{"domain": domain, "action": "idle"}]
+                )
             elif goal.kind == "ping":
                 steps = [
                     {"domain": domain, "action": "maybe_ping_user", "text": "필요한 게 있으면 바로 불러줘. 지금 대기 중이야."},

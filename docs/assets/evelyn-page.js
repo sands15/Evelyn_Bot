@@ -35,6 +35,8 @@ const dom = {
   controlWallpaperInput: document.querySelector("#control-wallpaper-input"),
   modelViewport: document.querySelector(".model-viewport"),
   chatThread: document.querySelector("#chat-thread"),
+  chatNewMessageRow: document.querySelector("#chat-new-message-row"),
+  chatNewMessageButton: document.querySelector("#chat-new-message-button"),
   chatComposer: document.querySelector("#chat-composer"),
   commandInput: document.querySelector("#command-preview"),
   commandSuggestions: document.querySelector("#command-suggestions"),
@@ -190,6 +192,8 @@ const state = {
   sending: false,
   apiWaitStartedAt: 0,
   apiBootProgress: 0,
+  renderedChatSignature: "",
+  renderedChatMessageCount: 0,
   inventoryWidgetOpen: false,
   panelsReady: false,
   panels: {},
@@ -209,6 +213,9 @@ const state = {
   memoryCardsLoading: false,
   memoryCardsLastLoadedAt: 0,
   memoryEditor: null,
+  runtimeRepairPreview: null,
+  runtimeRepairPreviewBusy: false,
+  runtimeRepairApplyBusy: false,
   wallpaperObjectUrl: "",
 };
 
@@ -233,23 +240,23 @@ const PANEL_DEFINITIONS = [
 ];
 const WINBOX_RESIZE_CORNERS = ["nw", "ne", "sw", "se"];
 const CONTROL_PAGE_COMMAND_CATALOG = [
-  { command: "/help", template: "/help", summary: "명령어 목록 보기" },
-  { command: "/status", template: "/status", summary: "Evelyn, 음성, 모델, Minecraft 상태 요약" },
-  { command: "/memory", template: "/memory", summary: "메모리 패널 열기/숨기기" },
-  { command: "/obsidian", template: "/obsidian", summary: "메모리 패널 열기/숨기기" },
-  { command: "/voice status", template: "/voice status", summary: "음성 입력, STT, TTS 파이프라인 상태 보기" },
-  { command: "/voice reconnect", template: "/voice reconnect", summary: "최근 저장된 음성 채널에 다시 연결" },
-  { command: "/voice input auto", template: "/voice input auto", summary: "로컬 마이크와 Discord 입력 자동 전환" },
-  { command: "/voice input local", template: "/voice input local", summary: "로컬 마이크 입력 사용" },
-  { command: "/voice input discord", template: "/voice input discord", summary: "Discord 음성 입력 사용" },
-  { command: "/minecraft connect", template: "/minecraft connect", summary: "Voyager Minecraft 모드 시작" },
-  { command: "/minecraft status", template: "/minecraft status", summary: "Minecraft 연결과 현재 task 상태 보기" },
-  { command: "/inventory", template: "/inventory", summary: "현재 Minecraft 인벤토리 요약 보기" },
-  { command: "/voyager stats", template: "/voyager stats", summary: "Voyager 진행 상태와 평가 지표 보기" },
-  { command: "/minecraft disconnect", template: "/minecraft disconnect", summary: "Voyager Minecraft 모드 중지" },
-  { command: "/minecraft goal <goal>", template: "/minecraft goal ", summary: "Minecraft 목표 변경" },
-  { command: "/autonomy status", template: "/autonomy status", summary: "Evelyn 자율 행동 엔진 상태 보기" },
-  { command: "/shutdown", template: "/shutdown", summary: "Evelyn runtime 종료 (Shut down Evelyn runtime)" },
+  { command: "/help", template: "/help", summary: "Show command list" },
+  { command: "/status", template: "/status", summary: "Show Evelyn, voice, model, and Minecraft status" },
+  { command: "/memory", template: "/memory", summary: "Open or hide the memory panel" },
+  { command: "/obsidian", template: "/obsidian", summary: "Open the memory vault" },
+  { command: "/voice status", template: "/voice status", summary: "Show voice, STT, and TTS pipeline status" },
+  { command: "/voice reconnect", template: "/voice reconnect", summary: "Reconnect to the recent voice channel" },
+  { command: "/voice input auto", template: "/voice input auto", summary: "Auto switch local mic and Discord input" },
+  { command: "/voice input local", template: "/voice input local", summary: "Use local mic input" },
+  { command: "/voice input discord", template: "/voice input discord", summary: "Use Discord voice input" },
+  { command: "/minecraft connect", template: "/minecraft connect", summary: "Start Voyager Minecraft mode" },
+  { command: "/minecraft status", template: "/minecraft status", summary: "Show Minecraft connection and current task status" },
+  { command: "/inventory", template: "/inventory", summary: "Show current Minecraft inventory summary" },
+  { command: "/voyager stats", template: "/voyager stats", summary: "Show Voyager progress and metrics" },
+  { command: "/minecraft disconnect", template: "/minecraft disconnect", summary: "Stop Voyager Minecraft mode" },
+  { command: "/minecraft goal <goal>", template: "/minecraft goal ", summary: "Change Minecraft goal" },
+  { command: "/autonomy status", template: "/autonomy status", summary: "Show Evelyn autonomy engine status" },
+  { command: "/shutdown", template: "/shutdown", summary: "Shut down Evelyn runtime" },
 ];
 const avatarState = {
   talking: false,
@@ -293,21 +300,21 @@ const avatarRigLayers = [
 ].filter((layer) => layer.el);
 
 const apiWaitingSequence = [
-  "Evelyn 봇이 응답하기를 기다리고 있습니다.",
-  "로컬 control page API 연결을 다시 확인하는 중입니다.",
-  "Voyager, voice, runtime 상태를 순서대로 깨우는 중입니다.",
-  "연결되면 최근 상태와 명령 버튼을 바로 불러옵니다.",
+  "Waiting for Evelyn bot response.",
+  "Checking the local Control-Page API connection again.",
+  "Waking Voyager, voice, and runtime status in order.",
+  "Recent status and command buttons will load after connection.",
 ];
 
 const apiWaitingHints = [
-  "보통 start.bat 실행 직후 수 초 안에 자동 연결됩니다.",
-  "창이 여러 개 떠도 괜찮습니다. API가 먼저 응답하면 페이지가 자동 전환됩니다.",
-  "직접 열 경우 기본 주소는 http://127.0.0.1:8799/ 입니다.",
-  "초기 부팅 중에는 모델, 음성, Minecraft 상태가 순차적으로 붙습니다.",
+  "Usually connects automatically a few seconds after start.bat runs.",
+  "Multiple windows are okay. The page switches when the API responds first.",
+  "If opened manually, the default address is http://127.0.0.1:8799/.",
+  "During initial boot, model, voice, and Minecraft status attach in sequence.",
 ];
 
 function clampPercent(value) {
-  return Math.max(0, Math.min(100, Math.round(Number(value) || 0)));
+  return window.EvelynBootProgress.clampPercent(value);
 }
 
 function setBootSplashVisible(visible) {
@@ -338,7 +345,7 @@ function updateBootSplashSteps(percent) {
 
 function setApiBootProgress(percent, phase, { hide = false } = {}) {
   const nextPercent = clampPercent(percent);
-  const nextPhase = phase || "API 연결 확인 중";
+  const nextPhase = phase || "Checking API connection";
   state.apiBootProgress = nextPercent;
   setBootSplashVisible(!hide);
   if (dom.apiBootProgress) {
@@ -373,7 +380,7 @@ function setApiBootProgress(percent, phase, { hide = false } = {}) {
 }
 
 function setApiBootWaiting(phase) {
-  const nextPhase = phase || "API 응답 대기 중";
+  const nextPhase = phase || "Waiting for API response";
   state.apiBootProgress = 0;
   setBootSplashVisible(true);
   if (dom.apiBootProgress) {
@@ -410,22 +417,33 @@ function setApiBootWaiting(phase) {
 function hideApiBootProgressSoon() {
   window.setTimeout(() => {
     if (state.apiBase) {
-      setApiBootProgress(100, "API 연결 완료", { hide: true });
+      setApiBootProgress(100, "API connection complete", { hide: true });
     }
   }, 650);
 }
 
+function hasReadyRuntimeServices(payload) {
+  return window.EvelynBootProgress.hasReadyRuntimeServices(payload);
+}
+
+function bootProgressFromRuntimeServices(payload) {
+  return window.EvelynBootProgress.fromRuntimeServices(payload);
+}
+
+function shouldRevealControlSurfaceDuringBoot(payload) {
+  return window.EvelynBootProgress.isReady(payload);
+}
+
 function applyBootProgressPayload(payload) {
-  const progress = (payload && (payload.bootProgress || ((payload.runtime || {}).bootProgress))) || null;
+  const progress = window.EvelynBootProgress.progressFromPayload(payload);
   if (!progress || typeof progress !== "object") {
     return false;
   }
   const percent = clampPercent(progress.percent);
-  const phase = progress.phase || "부팅 상태 확인 중";
-  const apiConnected = payload.ok !== false;
-  const componentsReady = percent >= 100 && progress.ready !== false;
-  setApiBootProgress(percent, phase, { hide: apiConnected });
-  if (apiConnected || componentsReady) {
+  const phase = progress.phase || "Checking boot progress";
+  const componentsReady = shouldRevealControlSurfaceDuringBoot(payload);
+  setApiBootProgress(componentsReady ? 100 : percent, componentsReady ? "Control Ready" : phase, { hide: componentsReady });
+  if (componentsReady) {
     hideApiBootProgressSoon();
   }
   return true;
@@ -495,7 +513,7 @@ function buildApiWaitingMessages() {
     {
       role: "assistant",
       author: "Status",
-      text: "127.0.0.1:8799 API 응답 대기 중 · elapsed " + elapsedLabel,
+      text: "127.0.0.1:8799 API waiting - elapsed " + elapsedLabel,
       at: Date.now() / 1000,
     },
     {
@@ -517,7 +535,7 @@ function renderApiWaitingState({ preserveScroll = false } = {}) {
   setApiBootWaiting(apiWaitingSequence[phaseIndex]);
   renderChat(
     buildApiWaitingMessages(),
-    "로컬 control page API 응답을 기다리는 중입니다.",
+    "Waiting for the local Control-Page API response.",
     { preserveScroll }
   );
   const ui = { mode: "default", submode: "booting", reason: "api_waiting" };
@@ -526,114 +544,42 @@ function renderApiWaitingState({ preserveScroll = false } = {}) {
   setStateClasses(dom.submodePill, ["is-warmup"], ["is-default", "is-minecraft", "is-warmup", "is-issue", "is-offline"]);
   setStateClasses(dom.systemSummaryPill, ["is-warmup"], ["is-idle", "is-active", "is-warmup", "is-issue", "is-offline"]);
   setStateClasses(dom.voicePresencePill, ["is-warmup"], ["is-idle", "is-active", "is-warmup", "is-issue", "is-offline"]);
-  if (dom.modePill) {
-    dom.modePill.textContent = uiModeLabel(ui.mode);
-  }
-  if (dom.submodePill) {
-    dom.submodePill.textContent = uiSubmodeLabel(ui.submode);
-  }
-  if (dom.topbarStatusLine) {
-    dom.topbarStatusLine.textContent = "로컬 control page API 응답을 기다리는 중입니다.";
-  }
-  if (dom.systemSummaryPill) {
-    dom.systemSummaryPill.textContent = "booting";
-  }
-  if (dom.voicePresencePill) {
-    dom.voicePresencePill.textContent = "준비 중";
-  }
-  if (dom.operationsEyebrow) {
-    dom.operationsEyebrow.textContent = "OPERATIONS FEED";
-  }
-  if (dom.operationsTitle) {
-    dom.operationsTitle.textContent = "부팅 흐름";
-  }
-  if (dom.operationsSubcopy) {
-    dom.operationsSubcopy.textContent = "Evelyn 운영 상태와 로컬 API 연결을 먼저 올리는 중입니다.";
-  }
-  if (dom.actionsEyebrow) {
-    dom.actionsEyebrow.textContent = "CONTROL ACTIONS";
-  }
-  if (dom.actionsSubcopy) {
-    dom.actionsSubcopy.textContent = "API 응답이 붙으면 운영 액션과 대화 입력이 현재 상태에 맞게 채워집니다.";
-  }
-  if (dom.primaryActionTitle) {
-    dom.primaryActionTitle.textContent = "부팅 중";
-  }
-  if (dom.supportActionTitle) {
-    dom.supportActionTitle.textContent = "대기 중";
-  }
-  if (dom.supportActionCaption) {
-    dom.supportActionCaption.textContent = "API가 붙기 전까지는 실제 제어 버튼 대신 상태 확인 힌트만 보여줍니다.";
-  }
-  if (dom.avatarStatusCopy) {
-    dom.avatarStatusCopy.textContent = "Evelyn control page가 로컬 API 응답을 기다리는 동안 상태를 계속 다시 확인합니다.";
-  }
-  if (dom.composerHintLeft) {
-    dom.composerHintLeft.textContent = "API 연결 대기 중";
-  }
-  if (dom.controlBriefTitle) {
-    dom.controlBriefTitle.textContent = "연결 상태 확인 중";
-  }
-  if (dom.controlBriefBody) {
-    dom.controlBriefBody.textContent = "Evelyn과 control page API가 아직 응답하지 않았습니다.";
-  }
-  if (dom.controlNextTitle) {
-    dom.controlNextTitle.textContent = "지금 확인할 것";
-  }
-  if (dom.controlNextBody) {
-    dom.controlNextBody.textContent = "start.bat과 control page API가 모두 올라오면 현재 상태에 맞는 추천 액션을 바로 안내합니다.";
-  }
-  if (dom.controlIssueCard) {
-    dom.controlIssueCard.classList.remove("control-hidden");
-  }
-  if (dom.controlIssueTitle) {
-    dom.controlIssueTitle.textContent = "대기 상태";
-  }
-  if (dom.controlIssueBody) {
-    dom.controlIssueBody.textContent = "127.0.0.1:8799 응답을 기다리는 중입니다.";
-  }
-  if (dom.quickCommandCaption) {
-    dom.quickCommandCaption.textContent = "API가 뜨면 입력칸에 채울 수 있는 버튼으로 바뀝니다.";
-  }
-  if (dom.operatorRuntimeTitle) {
-    dom.operatorRuntimeTitle.textContent = "연결 상태 확인 중";
-  }
-  if (dom.operatorRuntimeSubcopy) {
-    dom.operatorRuntimeSubcopy.textContent = "control page API 응답을 기다리는 중입니다.";
-  }
-  if (dom.operatorRuntimeNote) {
-    dom.operatorRuntimeNote.textContent = "Evelyn, voice, Voyager, runtime 순서로 상태를 다시 확인합니다.";
-  }
-  if (dom.operatorStatChannel) {
-    dom.operatorStatChannel.textContent = "없음";
-  }
-  if (dom.operatorStatMode) {
-    dom.operatorStatMode.textContent = "booting";
-  }
-  if (dom.operatorStatTts) {
-    dom.operatorStatTts.textContent = "0";
-  }
-  if (dom.operatorStatLlm) {
-    dom.operatorStatLlm.textContent = "0";
-  }
-  if (dom.defaultFocusTitle) {
-    dom.defaultFocusTitle.textContent = "연결 상태 확인 중";
-  }
-  if (dom.defaultFocusBody) {
-    dom.defaultFocusBody.textContent = "Evelyn과 control page API 응답이 붙으면 기본 운영 화면이 자동으로 완성됩니다.";
-  }
-  if (dom.defaultFocusRecentTitle) {
-    dom.defaultFocusRecentTitle.textContent = "아직 없음";
-  }
-  if (dom.defaultFocusRecentBody) {
-    dom.defaultFocusRecentBody.textContent = "최근 assistant 응답이 생기면 여기서 바로 요약합니다.";
-  }
-  if (dom.defaultFocusContextTitle) {
-    dom.defaultFocusContextTitle.textContent = "부팅 중";
-  }
-  if (dom.defaultFocusContextBody) {
-    dom.defaultFocusContextBody.textContent = "mode booting · API 응답 대기 · 추천 액션 준비 중";
-  }
+  if (dom.modePill) dom.modePill.textContent = uiModeLabel(ui.mode);
+  if (dom.submodePill) dom.submodePill.textContent = uiSubmodeLabel(ui.submode);
+  if (dom.topbarStatusLine) dom.topbarStatusLine.textContent = "Waiting for the local Control-Page API response.";
+  if (dom.systemSummaryPill) dom.systemSummaryPill.textContent = "booting";
+  if (dom.voicePresencePill) dom.voicePresencePill.textContent = "preparing";
+  if (dom.operationsEyebrow) dom.operationsEyebrow.textContent = "OPERATIONS FEED";
+  if (dom.operationsTitle) dom.operationsTitle.textContent = "Boot flow";
+  if (dom.operationsSubcopy) dom.operationsSubcopy.textContent = "Evelyn is bringing local runtime services online.";
+  if (dom.actionsEyebrow) dom.actionsEyebrow.textContent = "CONTROL ACTIONS";
+  if (dom.actionsSubcopy) dom.actionsSubcopy.textContent = "Controls and chat will update when the API responds.";
+  if (dom.primaryActionTitle) dom.primaryActionTitle.textContent = "Booting";
+  if (dom.supportActionTitle) dom.supportActionTitle.textContent = "Waiting";
+  if (dom.supportActionCaption) dom.supportActionCaption.textContent = "Live controls are disabled until the API is ready.";
+  if (dom.avatarStatusCopy) dom.avatarStatusCopy.textContent = "Control-Page is checking local API readiness.";
+  if (dom.composerHintLeft) dom.composerHintLeft.textContent = "Waiting for API";
+  if (dom.controlBriefTitle) dom.controlBriefTitle.textContent = "Checking connection";
+  if (dom.controlBriefBody) dom.controlBriefBody.textContent = "Evelyn and the Control-Page API have not responded yet.";
+  if (dom.controlNextTitle) dom.controlNextTitle.textContent = "Current check";
+  if (dom.controlNextBody) dom.controlNextBody.textContent = "When start.bat and the API are ready, recommended actions will appear here.";
+  if (dom.controlIssueCard) dom.controlIssueCard.classList.remove("control-hidden");
+  if (dom.controlIssueTitle) dom.controlIssueTitle.textContent = "Waiting state";
+  if (dom.controlIssueBody) dom.controlIssueBody.textContent = "Waiting for 127.0.0.1:8799 to respond.";
+  if (dom.quickCommandCaption) dom.quickCommandCaption.textContent = "Command buttons will be available after the API is ready.";
+  if (dom.operatorRuntimeTitle) dom.operatorRuntimeTitle.textContent = "Checking connection";
+  if (dom.operatorRuntimeSubcopy) dom.operatorRuntimeSubcopy.textContent = "Waiting for the Control-Page API response.";
+  if (dom.operatorRuntimeNote) dom.operatorRuntimeNote.textContent = "Evelyn, voice, Voyager, and runtime status are being checked.";
+  if (dom.operatorStatChannel) dom.operatorStatChannel.textContent = "standby";
+  if (dom.operatorStatMode) dom.operatorStatMode.textContent = "booting";
+  if (dom.operatorStatTts) dom.operatorStatTts.textContent = "0";
+  if (dom.operatorStatLlm) dom.operatorStatLlm.textContent = "0";
+  if (dom.defaultFocusTitle) dom.defaultFocusTitle.textContent = "Checking connection";
+  if (dom.defaultFocusBody) dom.defaultFocusBody.textContent = "Evelyn is waiting for the local API before loading controls.";
+  if (dom.defaultFocusRecentTitle) dom.defaultFocusRecentTitle.textContent = "Recent activity";
+  if (dom.defaultFocusRecentBody) dom.defaultFocusRecentBody.textContent = "Recent assistant replies will appear after connection.";
+  if (dom.defaultFocusContextTitle) dom.defaultFocusContextTitle.textContent = "Booting";
+  if (dom.defaultFocusContextBody) dom.defaultFocusContextBody.textContent = "Mode booting - waiting for API and runtime context.";
   setMeter(dom.meterVoyager, dom.meterVoyagerLabel, 26 + (phaseIndex * 12), "waiting");
   setMeter(dom.meterVoice, dom.meterVoiceLabel, 18, "standby");
   setMeter(dom.meterTts, dom.meterTtsLabel, 8, "idle");
@@ -649,14 +595,9 @@ function renderApiWaitingState({ preserveScroll = false } = {}) {
     '<button type="button" class="quick-command" disabled>voyager</button>',
     '<button type="button" class="quick-command" disabled>control api</button>',
   ].join("");
-  if (dom.primaryActionRow) {
-    dom.primaryActionRow.innerHTML = waitingButtons;
-  }
-  if (dom.quickCommandRow) {
-    dom.quickCommandRow.innerHTML = waitingButtons;
-  }
+  if (dom.primaryActionRow) dom.primaryActionRow.innerHTML = waitingButtons;
+  if (dom.quickCommandRow) dom.quickCommandRow.innerHTML = waitingButtons;
 }
-
 function ensureApiWaitingTicker() {
   if (!state.apiWaitStartedAt) {
     state.apiWaitStartedAt = Date.now();
@@ -694,7 +635,7 @@ function initializeInventoryWidget() {
   }
   dom.inventoryCard.classList.add("has-inventory-widget");
   if (!dom.inventoryWidgetList.children.length) {
-    dom.inventoryWidgetList.innerHTML = '<p class="inventory-widget-empty">표시할 인벤토리 항목이 없습니다.</p>';
+    dom.inventoryWidgetList.innerHTML = '<p class="inventory-widget-empty">No inventory snapshot yet.</p>';
   }
 }
 
@@ -846,7 +787,7 @@ function renderInventoryLedger(entries) {
 
 function renderInventoryWidget(summary, entries, rawSlots, usedSlots, uniqueItemCount) {
   if (dom.inventorySummary) {
-    dom.inventorySummary.textContent = summary || "인벤토리 정보 없음";
+    dom.inventorySummary.textContent = summary || "No inventory info";
   }
   if (!dom.inventoryWidgetList) {
     return;
@@ -872,31 +813,31 @@ function renderInventoryWidget(summary, entries, rawSlots, usedSlots, uniqueItem
     : entries.length;
   if (dom.inventorySummary) {
     dom.inventorySummary.textContent = hasSlotLayout
-      ? (hasAnyItem ? (String(normalizedUsed) + "/36 사용 중") : "0/36 사용 중 · 비어 있음")
-      : "인벤토리 정보 없음";
+      ? (hasAnyItem ? (String(normalizedUsed) + "/36 used") : "0/36 used - empty")
+      : "No inventory info";
   }
   if ((!Array.isArray(entries) || !entries.length) && !hasSlotLayout) {
-    dom.inventoryWidgetList.innerHTML = '<p class="inventory-widget-empty">표시할 인벤토리 항목이 없습니다.</p>';
+    dom.inventoryWidgetList.innerHTML = '<p class="inventory-widget-empty">No inventory items to show.</p>';
     return;
   }
   dom.inventoryWidgetList.innerHTML = [
     '<div class="inventory-widget-meta">',
-    '<span class="inventory-widget-stat">' + escapeHtml(String(normalizedUsed)) + '/36 사용 중</span>',
-    '<span class="inventory-widget-stat">' + escapeHtml(String(normalizedUnique)) + '종류</span>',
+    '<span class="inventory-widget-stat">' + escapeHtml(String(normalizedUsed)) + '/36 used</span>',
+    '<span class="inventory-widget-stat">' + escapeHtml(String(normalizedUnique)) + ' types</span>',
     '</div>',
     '<div class="inventory-board">',
     '<div class="inventory-side-column">',
-    '<p class="inventory-section-title">방어구</p>',
+    '<p class="inventory-section-title">Armor</p>',
     '<div class="inventory-grid inventory-grid-armor">' + sections.armor.map(renderInventorySlot).join("") + '</div>',
     '</div>',
     '<div class="inventory-main-column">',
-    '<p class="inventory-section-title">인벤토리</p>',
+    '<p class="inventory-section-title">Inventory</p>',
     '<div class="inventory-grid inventory-grid-main">' + sections.main.map(renderInventorySlot).join("") + '</div>',
-    '<p class="inventory-section-title inventory-section-title-hotbar">핫바</p>',
+    '<p class="inventory-section-title inventory-section-title-hotbar">Hotbar</p>',
     '<div class="inventory-grid inventory-grid-hotbar">' + sections.hotbar.map(renderInventorySlot).join("") + '</div>',
     '</div>',
     '<div class="inventory-side-column inventory-side-column-offhand">',
-    '<p class="inventory-section-title">보조 손</p>',
+    '<p class="inventory-section-title">Offhand</p>',
     '<div class="inventory-grid inventory-grid-offhand">' + sections.offhand.map(renderInventorySlot).join("") + '</div>',
     '</div>',
     '</div>',
@@ -904,9 +845,147 @@ function renderInventoryWidget(summary, entries, rawSlots, usedSlots, uniqueItem
   ].join("");
 }
 
-function cleanDisplayText(value, fallback = "없음") {
+function cleanDisplayText(value, fallback = "None") {
   const text = value == null ? "" : String(value).trim();
   return text || fallback;
+}
+
+const RUNTIME_HEALTH_DIAGNOSIS_TEXT = {
+  CP_UP_BOT_DOWN: {
+    issue: "Control-Page is up, but Bot API is down.",
+    detail: "The page can load, but chat, memory commands, and runtime commands can fail.",
+    repairActionLabel: "Preview Bot API restart",
+    repairActionSummary: "Preview the Bot API repair plan before starting anything.",
+  },
+  BOT_API_DOWN_WITH_CONTROL_PAGE_UP: {
+    issue: "Control-Page is open, but Bot API is not responding.",
+    detail: "Chat, memory, and runtime commands are limited until Bot API responds.",
+    repairActionLabel: "Preview Bot API restart",
+    repairActionSummary: "Preview the Bot API repair plan before starting anything.",
+  },
+  BOT_API_PARTIAL: {
+    issue: "Bot API is partially responding or failing some requests.",
+    detail: "Some features may work intermittently until Bot API stabilizes.",
+    repairActionLabel: "Preview Bot API health repair",
+    repairActionSummary: "Check Bot API health and preview repair if needed.",
+  },
+  CONTROL_PAGE_DOWN: {
+    issue: "Control-Page server is not responding.",
+    detail: "The UI and command input can be unavailable until Control-Page recovers.",
+    repairActionLabel: "Preview Control-Page restart",
+    repairActionSummary: "Preview Control-Page repair before starting anything.",
+  },
+  MAIN_LLM_DOWN: {
+    issue: "Main LLM is not responding.",
+    detail: "Main conversation generation is limited until Main LLM recovers.",
+    repairActionLabel: "Preview Main LLM repair",
+    repairActionSummary: "Preview Main LLM repair before starting anything.",
+  },
+  ROUTER_LLM_DOWN: {
+    issue: "Router LLM is not responding.",
+    detail: "Routing decisions may be limited until Router LLM recovers.",
+    repairActionLabel: "Preview Router LLM repair",
+    repairActionSummary: "Preview Router LLM repair before starting anything.",
+  },
+  SUB_LLM_DOWN: {
+    issue: "Sub LLM is not responding.",
+    detail: "Support judgment and summarization may be limited until Sub LLM recovers.",
+    repairActionLabel: "Preview Sub LLM repair",
+    repairActionSummary: "Preview Sub LLM repair before starting anything.",
+  },
+  TTS_DOWN: {
+    issue: "TTS is not responding.",
+    detail: "Voice output is unavailable until TTS recovers.",
+    repairActionLabel: "Preview TTS repair",
+    repairActionSummary: "Preview TTS repair before starting anything.",
+  },
+};
+
+const RUNTIME_STATE_TEXT_BY_NAME = {
+  up: "up",
+  degraded: "degraded",
+  down: "down",
+  recovering: "recovering",
+  startup: "starting",
+};
+
+function normalizedRuntimeCode(code) {
+  return String(code || "").toUpperCase();
+}
+
+function runtimeHealthCodeText(health) {
+  const diagnostic = primaryRuntimeDiagnostic(health);
+  const issueCode = normalizedRuntimeCode(diagnostic && diagnostic.code);
+  return RUNTIME_HEALTH_DIAGNOSIS_TEXT[issueCode] || null;
+}
+
+function runtimeHealthFromPayload(payload) {
+  const runtime = (payload && payload.runtime) || {};
+  const health = runtime.serviceHealth || payload.serviceHealth || null;
+  return health && typeof health === "object" ? health : null;
+}
+
+function runtimeHealthDiagnostics(health) {
+  return Array.isArray(health && health.diagnostics) ? health.diagnostics : [];
+}
+
+function primaryRuntimeDiagnostic(health) {
+  const diagnostics = runtimeHealthDiagnostics(health).filter((item) => item && typeof item === "object");
+  const severityRank = { error: 0, warning: 1, info: 2 };
+  diagnostics.sort((a, b) => {
+    const left = severityRank[String(a.severity || "info").toLowerCase()] ?? 3;
+    const right = severityRank[String(b.severity || "info").toLowerCase()] ?? 3;
+    return left - right;
+  });
+  return diagnostics[0] || null;
+}
+
+function runtimeHealthHasIssue(health) {
+  if (!health || typeof health !== "object") {
+    return false;
+  }
+  const stateName = String(health.overallState || "").toLowerCase();
+  if (stateName === "down" || stateName === "degraded") {
+    return true;
+  }
+  return runtimeHealthDiagnostics(health).some((item) => {
+    const severity = String((item && item.severity) || "").toLowerCase();
+    return severity === "error" || severity === "warning";
+  });
+}
+
+function runtimeHealthIssueText(health) {
+  const diagnostic = primaryRuntimeDiagnostic(health);
+  const codeText = runtimeHealthCodeText(health);
+  if (codeText && codeText.issue) {
+    return cleanDisplayText(codeText.issue, "Runtime status needs attention.");
+  }
+  if (diagnostic && (diagnostic.message || diagnostic.code)) {
+    return "Runtime diagnosis: " + cleanDisplayText(diagnostic.message || diagnostic.code, "No diagnosis message.");
+  }
+  if (health && health.overallState) {
+    const stateName = String(health.overallState || "").toLowerCase();
+    return RUNTIME_STATE_TEXT_BY_NAME[stateName] || ("Runtime state: " + cleanDisplayText(health.overallState, "unknown"));
+  }
+  if (health && health.summary) {
+    return "Runtime state: " + cleanDisplayText(health.summary, "unknown");
+  }
+  return "";
+}
+
+function runtimeHealthDetailText(health) {
+  const diagnostic = primaryRuntimeDiagnostic(health);
+  const codeText = runtimeHealthCodeText(health);
+  if (codeText && codeText.detail) {
+    return cleanDisplayText(codeText.detail, "No runtime detail is available.");
+  }
+  if (diagnostic && (diagnostic.details || diagnostic.message || diagnostic.code)) {
+    return "Detail: " + cleanDisplayText(diagnostic.details || diagnostic.message || diagnostic.code, "No diagnosis detail.");
+  }
+  if (health && health.summary) {
+    return "Summary: " + cleanDisplayText(health.summary, "No summary.");
+  }
+  return "";
 }
 
 function formatMetricMs(value) {
@@ -1015,7 +1094,7 @@ function commandDisplayName(item) {
   const command = String((item && item.command) || "").toLowerCase();
   switch (command) {
     case "/status":
-      return "Evelyn 상태";
+      return "Evelyn status";
     case "/voice input auto":
       return "Voice auto";
     case "/voice input local":
@@ -1023,26 +1102,26 @@ function commandDisplayName(item) {
     case "/voice input discord":
       return "Discord voice";
     case "/inventory":
-      return "인벤토리";
+      return "Inventory";
     case "/voyager stats":
-      return "Voyager 지표";
+      return "Voyager stats";
     case "/minecraft status":
-      return "Minecraft 상태";
+      return "Minecraft status";
     case "/minecraft connect":
-      return "Minecraft 시작";
+      return "Minecraft connect";
     case "/minecraft disconnect":
-      return "Minecraft 중지";
+      return "Minecraft disconnect";
     case "/autonomy status":
-      return "자율 상태";
+      return "Autonomy status";
     case "/help":
-      return "도움말";
+      return "Help";
     case "/memory":
     case "/obsidian":
-      return "메모리";
+      return "Memory";
     case "/shutdown":
-      return "종료";
+      return "Shutdown";
     default:
-      return item && (item.command || item.template) ? String(item.command || item.template) : "명령";
+      return item && (item.command || item.template) ? String(item.command || item.template) : "Command";
   }
 }
 
@@ -1121,9 +1200,17 @@ function buildSupportActions(payload, commands, primaryActions) {
 
 function commandButtonMarkup(items) {
   return items.map((item) => (
-    '<button type="button" class="quick-command' + (((item.command || "") === "/shutdown") ? ' is-danger' : '') + '" data-chat-command="' + escapeHtml(item.template || item.command) + '" data-chat-send="0" title="' + escapeHtml(item.summary || "") + '">' +
-      escapeHtml(commandDisplayName(item)) +
-    "</button>"
+    item.repairPreview
+      ? (
+        '<button type="button" class="quick-command is-repair-preview" data-runtime-repair-preview="1" data-repair-action-id="' + escapeHtml(item.actionId || "") + '" data-repair-service-id="' + escapeHtml(item.serviceId || "") + '" title="' + escapeHtml(item.summary || "") + '">' +
+          escapeHtml(item.label || "Preview repair") +
+        "</button>"
+      )
+      : (
+        '<button type="button" class="quick-command' + (((item.command || "") === "/shutdown") ? ' is-danger' : '') + '" data-chat-command="' + escapeHtml(item.template || item.command) + '" data-chat-send="0" title="' + escapeHtml(item.summary || "") + '">' +
+          escapeHtml(commandDisplayName(item)) +
+        "</button>"
+      )
   )).join("");
 }
 
@@ -1132,15 +1219,21 @@ function describeControlState(payload) {
   const voice = (payload && payload.voice) || {};
   const runtime = (payload && payload.runtime) || {};
   const services = runtime.services || {};
+  const controlPlane = runtime.controlPlane || {};
+  const serviceHealth = runtimeHealthFromPayload(payload);
   const minecraft = (payload && payload.minecraft) || {};
   const issues = [];
+  const runtimeIssue = runtimeHealthIssueText(serviceHealth);
+  if (runtimeIssue) {
+    issues.push("Runtime: " + runtimeIssue);
+  }
   if (minecraft.lastError) {
-    issues.push("Minecraft 오류: " + cleanDisplayText(minecraft.lastError, "-"));
+    issues.push("Minecraft error: " + cleanDisplayText(minecraft.lastError, "-"));
   }
   if (minecraft.snapshotExpired) {
-    issues.push("Minecraft 스냅샷이 오래되어 실제 상태와 다를 수 있습니다.");
+    issues.push("Minecraft snapshot expired. Refresh the session state.");
   } else if (minecraft.snapshotStale) {
-    issues.push("Minecraft 상태가 잠시 늦게 갱신되고 있습니다.");
+    issues.push("Minecraft snapshot is stale. Waiting for a fresh state update.");
   }
   if (services.voyagerError) {
     issues.push("Voyager: " + cleanDisplayText(services.voyagerError, "-"));
@@ -1149,72 +1242,64 @@ function describeControlState(payload) {
     issues.push("Codex: " + cleanDisplayText(services.codexError, "-"));
   }
 
+  const base = {
+    issueTitle: issues.length ? "Issue" : "",
+    issueBody: issues[0] || "",
+    showIssue: Boolean(issues.length),
+  };
+
   if (!guild.name) {
     return {
-      title: "연결된 길드 없음",
-      body: "Evelyn이 아직 활성 길드에 연결되지 않았습니다.",
-      nextTitle: "추천 액션",
-      nextBody: "봇 실행 상태를 먼저 확인한 뒤 /status 로 현재 런타임을 확인하세요.",
-      issueTitle: issues.length ? "주의" : "",
-      issueBody: issues[0] || "",
-      showIssue: Boolean(issues.length),
-      quickCaption: "길드가 붙으면 여기서 입력칸에 채울 버튼이 정리됩니다.",
+      ...base,
+      title: "Waiting for Discord connection",
+      body: "Evelyn is waiting for guild and runtime state.",
+      nextTitle: "Next",
+      nextBody: "Check status or send a command when the connection is ready.",
+      quickCaption: "Use a quick command to inspect the runtime.",
     };
   }
 
   if (minecraft.sessionActive) {
-    const focus = cleanDisplayText(minecraft.task, "") || cleanDisplayText(minecraft.goal, "없음");
+    const focus = cleanDisplayText(minecraft.task, "") || cleanDisplayText(minecraft.goal, "idle");
     return {
-      title: "Minecraft 세션 진행 중",
-      body: focus === "없음"
-        ? "Minecraft 세션은 연결되어 있고, 최근 스냅샷을 계속 반영하는 중입니다."
-        : "현재 집중 대상은 " + focus + " 입니다.",
-      nextTitle: "추천 액션",
-      nextBody: "인벤토리와 Minecraft 상태를 먼저 확인하고, 필요하면 목표를 조정하거나 세션을 정리하세요.",
-      issueTitle: issues.length ? "주의" : "",
-      issueBody: issues[0] || "",
-      showIssue: Boolean(issues.length),
-      quickCaption: "지금 세션에서 입력칸에 채워 확인할 수 있는 액션입니다.",
+      ...base,
+      title: "Minecraft session active",
+      body: focus === "idle" ? "Minecraft is connected and waiting for the next task." : "Current task: " + focus,
+      nextTitle: "Next",
+      nextBody: "Use inventory, status, or Voyager stats to inspect the session.",
+      quickCaption: "Minecraft controls are ready.",
     };
   }
 
   if (minecraft.running) {
     return {
-      title: "Voyager 준비 중",
-      body: "Voyager는 올라와 있지만 아직 실제 Minecraft 플레이 스냅샷은 완전히 붙지 않았습니다.",
-      nextTitle: "추천 액션",
-      nextBody: "Minecraft 상태를 다시 확인하고, 연결이 늦으면 최근 흐름과 오류를 먼저 보세요.",
-      issueTitle: issues.length ? "주의" : "",
-      issueBody: issues[0] || "",
-      showIssue: Boolean(issues.length),
-      quickCaption: "세션 연결 직전이나 워밍업 단계에서 자주 쓰는 액션입니다.",
+      ...base,
+      title: "Voyager preparing",
+      body: "Voyager is running while Minecraft session state is still warming up.",
+      nextTitle: "Next",
+      nextBody: "Check Minecraft status before issuing live session commands.",
+      quickCaption: "Voyager and Minecraft checks are available.",
     };
   }
 
   if (voice.speaking) {
     return {
-      title: "Evelyn 응답 중",
-      body: cleanDisplayText(voice.ttsTargetName, "대상 없음") + "에게 TTS 출력 중입니다.",
-      nextTitle: "추천 액션",
-      nextBody: "지금은 응답이 끝날 때까지 상태 확인 위주로 보는 편이 안전합니다.",
-      issueTitle: issues.length ? "주의" : "",
-      issueBody: issues[0] || "",
-      showIssue: Boolean(issues.length),
-      quickCaption: "응답 중에도 안전하게 확인 가능한 액션입니다.",
+      ...base,
+      title: "Evelyn speaking",
+      body: cleanDisplayText(voice.ttsTargetName, "voice output") + " is receiving TTS output.",
+      nextTitle: "Next",
+      nextBody: "Wait for speech to finish or check voice status.",
+      quickCaption: "Voice controls are available.",
     };
   }
 
   return {
-    title: "Evelyn 대기 중",
-    body: voice.listening
-      ? "음성 입력을 들을 준비는 되어 있고, Minecraft 세션은 아직 비활성입니다."
-      : "현재는 유휴 상태입니다. 필요한 작업을 여기서 바로 시작할 수 있습니다.",
-    nextTitle: "추천 액션",
-    nextBody: "Minecraft를 시작하거나, 먼저 Evelyn 상태와 자율 상태를 확인하세요.",
-    issueTitle: issues.length ? "주의" : "",
-    issueBody: issues[0] || "",
-    showIssue: Boolean(issues.length),
-    quickCaption: "지금 상태에서 가장 자주 쓰는 기본 액션입니다.",
+    ...base,
+    title: "Evelyn ready",
+    body: voice.listening ? "Voice input is listening." : "Runtime is ready for commands.",
+    nextTitle: "Next",
+    nextBody: "Use status, memory, or Minecraft commands from the command bar.",
+    quickCaption: "Quick commands are ready.",
   };
 }
 
@@ -1239,10 +1324,10 @@ function renderControlBrief(payload) {
     dom.controlIssueCard.classList.toggle("control-hidden", !brief.showIssue);
   }
   if (dom.controlIssueTitle) {
-    dom.controlIssueTitle.textContent = brief.issueTitle || "주의";
+    dom.controlIssueTitle.textContent = brief.issueTitle || "Attention";
   }
   if (dom.controlIssueBody) {
-    dom.controlIssueBody.textContent = brief.issueBody || "특이사항이 없습니다.";
+    dom.controlIssueBody.textContent = brief.issueBody || "No issue details available.";
   }
 }
 
@@ -1309,19 +1394,13 @@ function renderDefaultViewport(payload, ui) {
     dom.defaultFocusBody.textContent = brief.body;
   }
   if (dom.defaultFocusRecentTitle) {
-    dom.defaultFocusRecentTitle.textContent = latestAssistant
-      ? cleanDisplayText(latestAssistant.author, "Evelyn")
-      : "아직 없음";
+    dom.defaultFocusRecentTitle.textContent = latestAssistant ? cleanDisplayText(latestAssistant.author, "Evelyn") : "No recent assistant message";
   }
   if (dom.defaultFocusRecentBody) {
-    dom.defaultFocusRecentBody.textContent = latestAssistant
-      ? cleanDisplayText(latestAssistant.text, "최근 assistant 응답이 없습니다.")
-      : "최근 assistant 응답이 생기면 여기서 바로 요약합니다.";
+    dom.defaultFocusRecentBody.textContent = latestAssistant ? cleanDisplayText(latestAssistant.text, "No assistant reply yet.") : "Recent assistant replies will appear here.";
   }
   if (dom.defaultFocusContextTitle) {
-    dom.defaultFocusContextTitle.textContent = guild.name
-      ? cleanDisplayText(guild.name, "Guild 미연결")
-      : "Guild 미연결";
+    dom.defaultFocusContextTitle.textContent = guild.name ? cleanDisplayText(guild.name, "Guild") : "Guild not connected";
   }
   if (dom.defaultFocusContextBody) {
     const contextParts = [
@@ -1338,34 +1417,34 @@ function renderDefaultViewport(payload, ui) {
     if (services.codexError) {
       contextParts.push("Codex issue");
     }
-    dom.defaultFocusContextBody.textContent = contextParts.filter(Boolean).join(" · ");
+    dom.defaultFocusContextBody.textContent = contextParts.filter(Boolean).join(" / ");
   }
 }
 
 function renderMinecraftOpsPanel(payload) {
   const minecraft = (payload && payload.minecraft) || {};
   if (dom.minecraftOpsTitle) {
-    dom.minecraftOpsTitle.textContent = minecraft.task || minecraft.goal || "Minecraft 세션 진행 중";
+    dom.minecraftOpsTitle.textContent = minecraft.task || minecraft.goal || "Minecraft session";
   }
   if (dom.minecraftOpsBody) {
-    dom.minecraftOpsBody.textContent = minecraft.progress || minecraft.idleSummary || "진행 메시지를 기다리는 중입니다.";
+    dom.minecraftOpsBody.textContent = minecraft.progress || minecraft.idleSummary || "Waiting for Minecraft progress.";
   }
   if (dom.minecraftOpsInventoryTitle) {
-    dom.minecraftOpsInventoryTitle.textContent = minecraft.inventorySummary || "인벤토리 정보 없음";
+    dom.minecraftOpsInventoryTitle.textContent = minecraft.inventorySummary || "Inventory summary";
   }
   if (dom.minecraftOpsInventoryBody) {
     const inventoryTop = Array.isArray(minecraft.inventoryTop) ? minecraft.inventoryTop.slice(0, 3) : [];
     dom.minecraftOpsInventoryBody.textContent = inventoryTop.length
       ? inventoryTop.map((item) => cleanDisplayText(item.name, "item") + " x" + String(item.count || 0)).join(", ")
-      : "상위 인벤토리 항목이 아직 없습니다.";
+      : "No inventory items are available yet.";
   }
   if (dom.minecraftOpsSurvivalTitle) {
     dom.minecraftOpsSurvivalTitle.textContent = formatHealthHunger(minecraft.health, minecraft.hunger);
   }
   if (dom.minecraftOpsSurvivalBody) {
-    const position = cleanDisplayText(minecraft.position, "미확인");
-    const hostiles = minecraft.hostiles == null ? "미확인" : String(minecraft.hostiles);
-    dom.minecraftOpsSurvivalBody.textContent = "위치 " + position + " · hostiles " + hostiles;
+    const position = cleanDisplayText(minecraft.position, "unknown");
+    const hostiles = minecraft.hostiles == null ? "unknown" : String(minecraft.hostiles);
+    dom.minecraftOpsSurvivalBody.textContent = "position " + position + " / hostiles " + hostiles;
   }
 }
 
@@ -1592,10 +1671,10 @@ function buildApiCandidates() {
 
 async function connectApi() {
   const candidates = buildApiCandidates();
-  setApiBootWaiting("API 후보 주소 확인 중");
+  setApiBootWaiting("Checking API connection...");
   for (const [index, candidate] of candidates.entries()) {
     try {
-      setApiBootWaiting(candidate + " 확인 중");
+      setApiBootWaiting("Checking " + candidate + "...");
       const response = await fetch(candidate + "/api/control-page/state", { cache: "no-store" });
       if (!response.ok) {
         continue;
@@ -1605,11 +1684,11 @@ async function connectApi() {
       applyBootProgressPayload(payload);
       return payload;
     } catch (_error) {
-      // try next
+      // try next candidate
     }
   }
   state.apiBase = null;
-  setApiBootWaiting("API 응답 대기 중");
+  setApiBootWaiting("Waiting for API response...");
   return null;
 }
 
@@ -1810,18 +1889,18 @@ function mergedCommandCatalog(...groups) {
 
 function commandHelpGroup(item) {
   const command = String((item && item.command) || "").toLowerCase();
-  if (command.startsWith("/voice")) return "음성";
-  if (command === "/memory" || command === "/obsidian") return "페이지";
+  if (command.startsWith("/voice")) return "Voice";
+  if (command === "/memory" || command === "/obsidian") return "Memory";
   if (command.startsWith("/minecraft") || command === "/inventory" || command.startsWith("/voyager")) return "Minecraft";
-  if (command.startsWith("/autonomy")) return "자율 행동";
-  if (command === "/shutdown") return "시스템";
-  return "기본";
+  if (command.startsWith("/autonomy")) return "Autonomy";
+  if (command === "/shutdown") return "Danger";
+  return "General";
 }
 
 function formatCommandHelp(commands) {
   const catalog = mergedCommandCatalog(CONTROL_PAGE_COMMAND_CATALOG, commands || []);
-  const lines = ["페이지 명령어"];
-  for (const group of ["기본", "페이지", "음성", "Minecraft", "자율 행동", "시스템"]) {
+  const lines = ["Available commands"];
+  for (const group of ["General", "Memory", "Voice", "Minecraft", "Autonomy", "Danger"]) {
     const items = catalog.filter((item) => commandHelpGroup(item) === group);
     if (!items.length) {
       continue;
@@ -1900,7 +1979,7 @@ function renderActivityRows(items) {
     dom.recentActivityList.innerHTML = [
       '<div class="event-row empty-row">',
       "<span>--:--</span>",
-      "<strong>아직 활동 기록이 없습니다.</strong>",
+      "<strong>No recent activity yet.</strong>",
       "<em>WAIT</em>",
       "</div>",
     ].join("");
@@ -1937,18 +2016,18 @@ function meterLevel(state) {
 function defaultQuickCommands(minecraftActive) {
   return minecraftActive
     ? [
-        { command: "/inventory", template: "/inventory", summary: "현재 Minecraft 인벤토리 요약 보기" },
-        { command: "/minecraft status", template: "/minecraft status", summary: "Minecraft 연결과 현재 task 상태 보기" },
-        { command: "/minecraft disconnect", template: "/minecraft disconnect", summary: "Voyager Minecraft 모드 중지" },
-        { command: "/shutdown", template: "/shutdown", summary: "Evelyn runtime 종료 (Shut down Evelyn runtime)" },
-        { command: "/help", template: "/help", summary: "명령어 목록 보기" },
+        { command: "/inventory", template: "/inventory", summary: "Show Minecraft inventory" },
+        { command: "/minecraft status", template: "/minecraft status", summary: "Show Minecraft status and current task" },
+        { command: "/minecraft disconnect", template: "/minecraft disconnect", summary: "Stop Voyager Minecraft mode" },
+        { command: "/shutdown", template: "/shutdown", summary: "Shut down Evelyn runtime" },
+        { command: "/help", template: "/help", summary: "Show available commands" },
       ]
     : [
-        { command: "/minecraft connect", template: "/minecraft connect", summary: "Voyager Minecraft 모드 시작" },
-        { command: "/status", template: "/status", summary: "Evelyn, 음성, 모델, Minecraft 상태 요약" },
-        { command: "/autonomy status", template: "/autonomy status", summary: "Evelyn 자율 행동 엔진 상태 보기" },
-        { command: "/shutdown", template: "/shutdown", summary: "Evelyn runtime 종료 (Shut down Evelyn runtime)" },
-        { command: "/help", template: "/help", summary: "명령어 목록 보기" },
+        { command: "/minecraft connect", template: "/minecraft connect", summary: "Start Voyager Minecraft mode" },
+        { command: "/status", template: "/status", summary: "Show Evelyn, voice, and Minecraft status" },
+        { command: "/autonomy status", template: "/autonomy status", summary: "Show autonomy status" },
+        { command: "/shutdown", template: "/shutdown", summary: "Shut down Evelyn runtime" },
+        { command: "/help", template: "/help", summary: "Show available commands" },
       ];
 }
 
@@ -1962,11 +2041,18 @@ function renderQuickCommands() {
   const sourceCommands = commands.length ? commands : defaultQuickCommands(minecraftActive);
   const primaryActions = buildPrimaryActions(payload, sourceCommands);
   const supportActions = buildSupportActions(payload, sourceCommands, primaryActions);
+  const repairAction = runtimeRepairActionFromPayload(payload);
+  if (repairAction) {
+    const hasRepair = supportActions.some((item) => item && item.repairPreview && item.actionId === repairAction.actionId && item.serviceId === repairAction.serviceId);
+    if (!hasRepair) {
+      supportActions.unshift(repairAction);
+    }
+  }
   if (dom.primaryActionRow) {
     dom.primaryActionRow.innerHTML = commandButtonMarkup(primaryActions);
   }
   if (dom.quickCommandRow) {
-    dom.quickCommandRow.innerHTML = commandButtonMarkup(supportActions);
+    dom.quickCommandRow.innerHTML = commandButtonMarkup(supportActions.slice(0, 4));
   }
 }
 
@@ -1985,6 +2071,161 @@ function handleChatCommandTrigger(button) {
   renderSuggestions();
 }
 
+function applyRuntimeRepairPreview(plan, button = null) {
+  state.runtimeRepairPreview = plan || null;
+  const ok = Boolean(plan && plan.ok);
+  const text = ok
+    ? (plan.confirmToken
+       ? "Ready to start: " + cleanDisplayText(plan.label, "service") + " -> " + cleanDisplayText(plan.commandText, "No command preview available")
+       : "Preview only: " + cleanDisplayText(plan.message, "No repair command is required."))
+    : "Repair preview failed: " + cleanDisplayText((plan && (plan.message || plan.error)) || "", "Unknown error");
+  if (button && ok && plan.confirmToken) {
+    button.dataset.runtimeRepairApply = "1";
+    button.dataset.repairConfirmToken = plan.confirmToken;
+    button.textContent = "Start: " + cleanDisplayText(plan.label, "service");
+    button.classList.add("is-repair-apply");
+    button.title = cleanDisplayText(plan.label, "service") + " repair confirmation";
+  }
+  if (dom.operatorRuntimeNote) {
+    dom.operatorRuntimeNote.textContent = text;
+  }
+  if (dom.topbarStatusLine) {
+    dom.topbarStatusLine.textContent = text;
+  }
+  if (dom.systemSummaryPill) {
+    dom.systemSummaryPill.textContent = ok ? "Ready" : "Preview failed";
+    dom.systemSummaryPill.title = text;
+  }
+}
+
+async function requestRuntimeRepairPreview(button) {
+  if (!button || state.runtimeRepairPreviewBusy) {
+    return;
+  }
+  const actionId = button.getAttribute("data-repair-action-id") || "";
+  const serviceId = button.getAttribute("data-repair-service-id") || "";
+  state.runtimeRepairPreviewBusy = true;
+  button.disabled = true;
+  const previousText = button.textContent;
+  button.textContent = "Previewing...";
+  try {
+    const plan = await fetchApi("/api/control-page/runtime-repair/preview", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ actionId, serviceId, dryRun: true }),
+    });
+    applyRuntimeRepairPreview(plan, button);
+  } catch (error) {
+    applyRuntimeRepairPreview({
+      ok: false,
+      error: "preview_request_failed",
+      message: error.message,
+    });
+  } finally {
+    state.runtimeRepairPreviewBusy = false;
+    button.disabled = false;
+    if (!button.dataset.runtimeRepairApply) {
+      button.textContent = previousText || "Preview repair";
+    }
+  }
+}
+
+async function requestRuntimeRepairApply(button) {
+  if (!button || state.runtimeRepairApplyBusy) {
+    return;
+  }
+  const actionId = button.getAttribute("data-repair-action-id") || "";
+  const serviceId = button.getAttribute("data-repair-service-id") || "";
+  const confirmToken = button.getAttribute("data-repair-confirm-token") || "";
+  if (!actionId || !serviceId || !confirmToken) {
+    applyRuntimeRepairPreview({ ok: false, message: "Missing repair confirmation data." });
+    return;
+  }
+  if (!window.confirm("Start repair for " + serviceId + "?")) {
+    return;
+  }
+  state.runtimeRepairApplyBusy = true;
+  button.disabled = true;
+  const previousText = button.textContent;
+  button.textContent = "Starting...";
+  try {
+    const result = await fetchApi("/api/control-page/runtime-repair/apply", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        actionId,
+        serviceId,
+        confirmToken,
+        reason: "operator confirmed runtime repair from Control-Page",
+      }),
+    });
+    const text = cleanDisplayText(result.message, "Repair command was requested.");
+    if (dom.operatorRuntimeNote) dom.operatorRuntimeNote.textContent = text;
+    if (dom.topbarStatusLine) dom.topbarStatusLine.textContent = text;
+    if (dom.systemSummaryPill) {
+      dom.systemSummaryPill.textContent = result.ok ? "Repair started" : "Repair failed";
+      dom.systemSummaryPill.title = text;
+    }
+    setTimeout(() => refreshState({ silent: true }), 1200);
+  } catch (error) {
+    const text = "Repair failed: " + error.message;
+    if (dom.operatorRuntimeNote) dom.operatorRuntimeNote.textContent = text;
+    if (dom.topbarStatusLine) dom.topbarStatusLine.textContent = text;
+  } finally {
+    state.runtimeRepairApplyBusy = false;
+    button.disabled = false;
+    button.textContent = previousText || "Start repair";
+  }
+}
+
+function handleQuickActionClick(event) {
+  const applyButton = event.target.closest("[data-runtime-repair-apply]");
+  if (applyButton) {
+    requestRuntimeRepairApply(applyButton);
+    return;
+  }
+  const repairButton = event.target.closest("[data-runtime-repair-preview]");
+  if (repairButton) {
+    requestRuntimeRepairPreview(repairButton);
+    return;
+  }
+  const commandButton = event.target.closest("[data-chat-command]");
+  if (commandButton) {
+    handleChatCommandTrigger(commandButton);
+  }
+}
+function normalizeDisplayAuthor(author, role) {
+  const fallback = role === "user" ? "정훈" : "Evelyn";
+  const value = String(author || "").trim();
+  if (!value) return fallback;
+  if (/[?�ìíîïð뺥썕툝]/.test(value)) return fallback;
+  return value;
+}
+
+function chatSignature(messages) {
+  return JSON.stringify(messages.map((row) => [
+    row.role,
+    row.author,
+    row.text,
+    row.at,
+  ]));
+}
+
+function isChatScrolledNearBottom() {
+  if (!dom.chatThread) return false;
+  return (dom.chatThread.scrollHeight - dom.chatThread.scrollTop - dom.chatThread.clientHeight) < 28;
+}
+
+function showNewChatMessageNotice() {
+  if (!dom.chatNewMessageButton || !dom.chatNewMessageRow) return;
+  dom.chatNewMessageRow.hidden = false;
+}
+
+function hideNewChatMessageNotice() {
+  if (!dom.chatNewMessageRow) return;
+  dom.chatNewMessageRow.hidden = true;
+}
+
 function renderChat(messages, systemText, { preserveScroll = false } = {}) {
   if (!dom.chatThread) {
     return;
@@ -1996,6 +2237,12 @@ function renderChat(messages, systemText, { preserveScroll = false } = {}) {
   const rows = Array.isArray(messages)
     ? messages.filter((row) => !isTechnicalStatusChatRow(row))
     : [];
+  const signature = chatSignature(rows);
+  if (signature === state.renderedChatSignature) {
+    return;
+  }
+  const previousMessageCount = state.renderedChatMessageCount;
+  const hasNewMessages = rows.length > previousMessageCount;
   dom.chatThread.innerHTML = rows.map((row) => {
     const role = row.role === "user" ? "user" : "assistant";
     const avatar = role === "assistant" ? "E" : "J";
@@ -2004,7 +2251,7 @@ function renderChat(messages, systemText, { preserveScroll = false } = {}) {
       '<div class="chat-avatar">' + avatar + "</div>",
       '<div class="chat-bubble">',
       '<div class="chat-meta">',
-      "<strong>" + escapeHtml(row.author || (role === "assistant" ? "Evelyn" : "정훈")) + "</strong>",
+      "<strong>" + escapeHtml(normalizeDisplayAuthor(row.author, role)) + "</strong>",
       "<span>" + escapeHtml(formatTimestamp(row.at)) + "</span>",
       "</div>",
       "<p>" + escapeHtml(row.text || "") + "</p>",
@@ -2014,11 +2261,19 @@ function renderChat(messages, systemText, { preserveScroll = false } = {}) {
   }).join("");
   if (!preserveScroll || wasNearBottom) {
     dom.chatThread.scrollTop = dom.chatThread.scrollHeight;
+    state.renderedChatSignature = signature;
+    state.renderedChatMessageCount = rows.length;
+    hideNewChatMessageNotice();
     return;
   }
   const nextScrollHeight = dom.chatThread.scrollHeight;
   const delta = nextScrollHeight - previousScrollHeight;
   dom.chatThread.scrollTop = Math.max(0, previousScrollTop + delta);
+  state.renderedChatSignature = signature;
+  state.renderedChatMessageCount = rows.length;
+  if (previousMessageCount > 0 && hasNewMessages) {
+    showNewChatMessageNotice();
+  }
 }
 
 const MEMORY_GRAPH_COLORS = {
@@ -2031,7 +2286,6 @@ const MEMORY_GRAPH_COLORS = {
   note: "#fff8ea",
 };
 const MEMORY_GRAPH_RINGS = { core: 0.12, project: 0.28, procedure: 0.44, concept: 0.58, episode: 0.72, daily: 0.86, note: 0.66 };
-
 function memoryGraphTypeColor(type) {
   return MEMORY_GRAPH_COLORS[String(type || "note").toLowerCase()] || MEMORY_GRAPH_COLORS.note;
 }
@@ -2040,9 +2294,23 @@ function compactMemoryGraphDate(value) {
   const text = String(value || "");
   const match = text.match(/(20\d{2})[-_.]?(\d{2})[-_.]?(\d{2})/);
   if (!match) {
+    return null;
+  }
+  return {
+    year: match[1],
+    month: match[2],
+    day: match[3],
+  };
+}
+
+function formatMemoryGraphDate(date, format = "compact") {
+  if (!date) {
     return "";
   }
-  return match[2] + "." + match[3];
+  if (format === "daily") {
+    return date.year.slice(-2) + "." + date.day;
+  }
+  return date.month + "." + date.day;
 }
 
 function memoryGraphNodeLabel(node) {
@@ -2055,16 +2323,11 @@ function memoryGraphNodeLabel(node) {
     node?.id,
     node?.title,
   ].filter(Boolean).join(" "));
-  if (type === "core" || type === "episode" || type === "daily") {
-    return date || type;
-  }
-  if (type === "project") {
-    const project = Array.isArray(node?.projects) ? node.projects[0] : "";
-    return String(project || "project").slice(0, 12);
-  }
-  if (type === "procedure") return "flow";
-  if (type === "concept") return "concept";
-  return date || type || "note";
+  if (type === "legacy") return "";
+  if (type === "daily") return formatMemoryGraphDate(date, "daily") || "daily";
+  if (type === "core") return "core";
+  if (type === "project") return "Project";
+  return formatMemoryGraphDate(date) || type || "note";
 }
 
 function memoryGraphVisiblePayload() {
@@ -2274,7 +2537,7 @@ function drawMemoryGraph(payload) {
     ctx.stroke();
   }
   for (const node of payload.nodes || []) {
-    const nodeScale = Math.max(0.7, Math.min(1.55, Number(state.memoryGraphNodeScale || 1)));
+    const nodeScale = Math.max(0.25, Math.min(2, Number(state.memoryGraphNodeScale || 1)));
     const radius = Math.max(4, Math.min(24, Number(node.size || 14) * 0.42 * nodeScale));
     const selected = node.id === state.memoryGraphSelectedNodeId;
     const hovered = node.id === state.memoryGraphPointer.hoverId;
@@ -2327,7 +2590,7 @@ function nearestMemoryGraphNode(clientX, clientY) {
     const dx = node.x - x;
     const dy = node.y - y;
     const dist = Math.sqrt(dx * dx + dy * dy);
-    const nodeScale = Math.max(0.7, Math.min(1.55, Number(state.memoryGraphNodeScale || 1)));
+    const nodeScale = Math.max(0.25, Math.min(2, Number(state.memoryGraphNodeScale || 1)));
     const radius = Math.max(7, Math.min(30, Number(node.size || 14) * 0.48 * nodeScale));
     if (dist < radius && dist < bestDist) {
       best = node;
@@ -2372,6 +2635,19 @@ function renderMemoryGraphDetail(node) {
   const projects = Array.isArray(node.projects) && node.projects.length ? node.projects.slice(0, 5).join(", ") : "none";
   const edges = (state.memoryGraphPayload?.edges || []).filter((edge) => edge.source === node.id || edge.target === node.id);
   const edgeSummary = edges.slice(0, 5).map((edge) => escapeHtml(edge.type + ": " + (edge.label || ""))).join("<br>") || "No visible edges";
+  const locked = Boolean(node.locked || node.canEdit === false || node.contentHidden);
+  if (locked) {
+    dom.memoryGraphDetail.innerHTML = [
+      "<strong>Archived memory</strong>",
+      '<div class="memory-node-meta">',
+      "<span>Status <strong>Archived</strong></span>",
+      "<span>Degree <strong>" + escapeHtml(node.degree || 0) + "</strong></span>",
+      "<span>Importance <strong>" + escapeHtml(Number(node.importance || 0).toFixed(2)) + "</strong></span>",
+      "</div>",
+      "<p>Archived memory is locked. Contents are hidden in public views.</p>",
+    ].join("");
+    return;
+  }
   dom.memoryGraphDetail.innerHTML = [
     "<strong>" + escapeHtml(node.title || node.id) + "</strong>",
     '<p class="memory-node-path">' + escapeHtml(node.rel_path || "") + "</p>",
@@ -2389,9 +2665,23 @@ function renderMemoryGraphDetail(node) {
 
 function memoryCardStatusLabel(card) {
   if (card.hidden) {
-    return "숨김";
+    return "Hidden";
   }
-  return card.confirmed ? "확인됨" : "확인 필요";
+  if (card.locked || card.canEdit === false || card.contentHidden) {
+    return "Locked";
+  }
+  return card.confirmed ? "Confirmed" : "Needs review";
+}
+
+function memoryTypeDisplayLabel(type) {
+  const normalized = String(type || "note").toLowerCase();
+  if (normalized === "legacy") {
+    return "Archived";
+  }
+  if (normalized === "all") {
+    return "All";
+  }
+  return type || "note";
 }
 
 function renderMemoryCards(payload) {
@@ -2399,9 +2689,9 @@ function renderMemoryCards(payload) {
   const counts = state.memoryCardsPayload.counts || {};
   if (dom.memoryManagerSummary) {
     dom.memoryManagerSummary.innerHTML = [
-      "<span>확인됨 <strong>" + escapeHtml(counts.confirmed || 0) + "</strong></span>",
-      "<span>미확인 <strong>" + escapeHtml(counts.unconfirmed || 0) + "</strong></span>",
-      "<span>고정 <strong>" + escapeHtml(counts.pinned || 0) + "</strong></span>",
+      "<span>Confirmed <strong>" + escapeHtml(counts.confirmed || 0) + "</strong></span>",
+      "<span>Unconfirmed <strong>" + escapeHtml(counts.unconfirmed || 0) + "</strong></span>",
+      "<span>Pinned <strong>" + escapeHtml(counts.pinned || 0) + "</strong></span>",
     ].join("");
   }
   if (!dom.memoryCardList) {
@@ -2409,35 +2699,40 @@ function renderMemoryCards(payload) {
   }
   const cards = Array.isArray(state.memoryCardsPayload.cards) ? state.memoryCardsPayload.cards : [];
   if (!cards.length) {
-    dom.memoryCardList.innerHTML = '<article class="memory-card memory-card-empty">표시할 메모리 카드가 없습니다.</article>';
+    dom.memoryCardList.innerHTML = '<article class="memory-card memory-card-empty">No memory cards are available.</article>';
     return;
   }
   dom.memoryCardList.innerHTML = cards.slice(0, 12).map((card) => {
     const statusClass = card.confirmed ? "is-confirmed" : "is-unconfirmed";
-    const pinLabel = card.pinned ? "고정 해제" : "고정";
+    const locked = Boolean(card.locked || card.canEdit === false || card.contentHidden);
+    const pinLabel = card.pinned ? "Unpin" : "Pin";
     const pinAction = card.pinned ? "unpin" : "pin";
-    const confirmLabel = card.confirmed ? "확인 취소" : "확인";
+    const confirmLabel = card.confirmed ? "Unconfirm" : "Confirm";
     const confirmAction = card.confirmed ? "unconfirm" : "confirm";
+    const preview = locked ? (card.preview || "Archived memory is locked.") : (card.preview || "No preview");
+    const category = locked ? "Archived" : (card.category || card.type || "note");
+    const metaPath = locked ? "Archived" : (card.path || "");
+    const title = locked ? "Archived memory" : (card.title || "Untitled memory");
     return [
-      '<article class="memory-card ' + statusClass + '" data-memory-note-id="' + escapeHtml(card.id) + '">',
+      '<article class="memory-card ' + statusClass + (locked ? ' is-locked' : '') + '" data-memory-note-id="' + escapeHtml(card.id) + '">',
       '<div class="memory-card-head">',
       '<div>',
-      '<span class="memory-card-category">' + escapeHtml(card.category || card.type || "기억") + "</span>",
-      "<strong>" + escapeHtml(card.title || "제목 없음") + "</strong>",
+      '<span class="memory-card-category">' + escapeHtml(category) + "</span>",
+      "<strong>" + escapeHtml(title) + "</strong>",
       "</div>",
       '<span class="memory-card-status">' + escapeHtml(memoryCardStatusLabel(card)) + "</span>",
       "</div>",
-      '<p class="memory-card-preview">' + escapeHtml(card.preview || "내용 없음") + "</p>",
+      '<p class="memory-card-preview">' + escapeHtml(preview) + "</p>",
       '<div class="memory-card-meta">',
-      "<span>" + escapeHtml(card.path || "") + "</span>",
-      card.pinned ? "<span>고정됨</span>" : "",
+      "<span>" + escapeHtml(metaPath) + "</span>",
+      card.pinned ? "<span>Pinned</span>" : "",
       card.confirmedAt ? "<span>" + escapeHtml(card.confirmedAt.slice(0, 10)) + "</span>" : "",
       "</div>",
       '<div class="memory-card-actions">',
       '<button type="button" data-memory-action="' + confirmAction + '">' + confirmLabel + "</button>",
       '<button type="button" data-memory-action="' + pinAction + '">' + pinLabel + "</button>",
-      '<button type="button" data-memory-action="edit">수정</button>',
-      '<button type="button" class="is-danger" data-memory-action="hide">숨김</button>',
+      locked ? "" : '<button type="button" data-memory-action="edit">Edit</button>',
+      '<button type="button" class="is-danger" data-memory-action="hide">Hide</button>',
       "</div>",
       "</article>",
     ].join("");
@@ -2454,18 +2749,18 @@ async function loadMemoryCards({ force = false } = {}) {
   }
   state.memoryCardsLoading = true;
   if (dom.memoryManagerStatus) {
-    dom.memoryManagerStatus.textContent = "메모리 카드를 불러오는 중입니다.";
+    dom.memoryManagerStatus.textContent = "Loading memory cards...";
   }
   try {
     const payload = await fetchApi("/api/control-page/memory?limit=80");
     state.memoryCardsLastLoadedAt = Date.now();
     renderMemoryCards(payload);
     if (dom.memoryManagerStatus) {
-      dom.memoryManagerStatus.textContent = "확인 여부와 고정 상태가 저장됩니다.";
+      dom.memoryManagerStatus.textContent = "Memory cards loaded.";
     }
   } catch (error) {
     if (dom.memoryManagerStatus) {
-      dom.memoryManagerStatus.textContent = "메모리 카드를 불러오지 못했습니다: " + error.message;
+      dom.memoryManagerStatus.textContent = "Failed to load memory cards: " + error.message;
     }
   } finally {
     state.memoryCardsLoading = false;
@@ -2477,7 +2772,7 @@ async function updateMemoryCardAction(noteId, action, extra = {}) {
     return false;
   }
   if (dom.memoryManagerStatus) {
-    dom.memoryManagerStatus.textContent = "메모리 상태를 저장하는 중입니다.";
+    dom.memoryManagerStatus.textContent = "Updating memory card...";
   }
   try {
     await fetchApi("/api/control-page/memory/" + encodeURIComponent(noteId), {
@@ -2492,7 +2787,7 @@ async function updateMemoryCardAction(noteId, action, extra = {}) {
     return true;
   } catch (error) {
     if (dom.memoryManagerStatus) {
-      dom.memoryManagerStatus.textContent = "저장 실패: " + error.message;
+      dom.memoryManagerStatus.textContent = "Memory action failed: " + error.message;
     }
     return false;
   }
@@ -2513,7 +2808,7 @@ async function fetchMemoryCardPayload(noteId) {
     return payload?.card || fallback;
   } catch (error) {
     if (dom.memoryManagerStatus) {
-      dom.memoryManagerStatus.textContent = "전체 메모리를 다시 불러오지 못해서 현재 목록 값을 사용합니다: " + error.message;
+      dom.memoryManagerStatus.textContent = "Failed to load memory card detail: " + error.message;
     }
     return fallback;
   }
@@ -2615,10 +2910,10 @@ async function openMemoryCardEditor(noteId) {
   const editor = ensureMemoryCardEditor();
   editor.noteId = noteId;
   if (editor.titleInput) {
-    editor.titleInput.value = "불러오는 중";
+    editor.titleInput.value = "Loading...";
   }
   if (editor.bodyInput) {
-    editor.bodyInput.value = "전체 메모리를 불러오는 중입니다...";
+    editor.bodyInput.value = "Loading memory card...";
   }
   if (editor.pathLabel) {
     editor.pathLabel.textContent = "";
@@ -2630,17 +2925,24 @@ async function openMemoryCardEditor(noteId) {
   if (editor.noteId !== noteId) {
     return;
   }
+  const locked = Boolean(payload?.locked || payload?.canEdit === false || payload?.contentHidden);
   if (editor.titleInput) {
-    editor.titleInput.value = payload?.title || "";
+    editor.titleInput.value = locked ? "Archived memory" : (payload?.title || "");
+    editor.titleInput.disabled = locked;
   }
   if (editor.bodyInput) {
-    editor.bodyInput.value = payload?.body || payload?.preview || "";
+    editor.bodyInput.value = locked ? (payload?.preview || "This archived memory is locked.") : (payload?.body || payload?.preview || "");
+    editor.bodyInput.disabled = locked;
   }
   if (editor.pathLabel) {
-    editor.pathLabel.textContent = payload?.path || "";
+    editor.pathLabel.textContent = locked ? "Archived" : (payload?.path || "");
+  }
+  const saveButton = editor.form?.querySelector('button[type="submit"]');
+  if (saveButton) {
+    saveButton.disabled = locked;
   }
   updateMemoryEditorCount(editor);
-  window.setTimeout(() => editor.bodyInput?.focus(), 40);
+  window.setTimeout(() => (locked ? editor.titleInput : editor.bodyInput)?.focus(), 40);
 }
 
 function handleMemoryCardAction(button) {
@@ -2650,10 +2952,17 @@ function handleMemoryCardAction(button) {
   if (!noteId || !action) {
     return;
   }
-  if (action === "hide" && !window.confirm("이 기억을 메모리 화면에서 숨길까요?")) {
+  if (action === "hide" && !window.confirm("Hide this memory card?")) {
     return;
   }
   if (action === "edit") {
+    const payload = findMemoryCardPayload(noteId);
+    if (payload && (payload.locked || payload.canEdit === false || payload.contentHidden)) {
+      if (dom.memoryManagerStatus) {
+        dom.memoryManagerStatus.textContent = "Archived memory is locked and cannot be edited.";
+      }
+      return;
+    }
     openMemoryCardEditor(noteId);
     return;
   }
@@ -2661,7 +2970,7 @@ function handleMemoryCardAction(button) {
 }
 
 function setMemoryGraphNodeScale(nextScale) {
-  state.memoryGraphNodeScale = Math.max(0.7, Math.min(1.55, Number(nextScale) || 1));
+  state.memoryGraphNodeScale = Math.max(0.25, Math.min(2, Number(nextScale) || 1));
   localStorage.setItem("evelynMemoryGraphNodeScale", String(state.memoryGraphNodeScale));
   drawMemoryGraph(memoryGraphVisiblePayload());
 }
@@ -2683,15 +2992,15 @@ function renderMemoryGraphControls(payload) {
   }
   const counts = (payload?.stats || {}).type_counts || {};
   const types = ["all", ...Object.keys(counts).sort()];
-  const scale = Math.max(0.7, Math.min(1.55, Number(state.memoryGraphNodeScale || 1)));
+  const scale = Math.max(0.25, Math.min(2, Number(state.memoryGraphNodeScale || 1)));
   const sizeControls = [
     '<button type="button" class="memory-filter-button" data-memory-node-size="down" title="Smaller nodes">-</button>',
-    '<button type="button" class="memory-filter-button" data-memory-node-size="reset" title="Reset node size">' + escapeHtml(scale.toFixed(1)) + "x</button>",
+    '<button type="button" class="memory-filter-button memory-filter-value" data-memory-node-size="reset" title="Reset node size" aria-live="polite" aria-label="Reset node scale to 1.00x">' + escapeHtml(scale.toFixed(2)) + "x</button>",
     '<button type="button" class="memory-filter-button" data-memory-node-size="up" title="Larger nodes">+</button>',
   ].join("");
   dom.memoryGraphFilter.innerHTML = sizeControls + types.map((type) => {
     const active = state.memoryGraphFilterType === type ? " is-active" : "";
-    const label = type === "all" ? "All" : type;
+    const label = memoryTypeDisplayLabel(type);
     const count = type === "all" ? (payload?.stats?.node_count || 0) : counts[type];
     return '<button type="button" class="memory-filter-button' + active + '" data-memory-filter="' + escapeHtml(type) + '">' + escapeHtml(label) + " " + escapeHtml(count) + "</button>";
   }).join("");
@@ -2743,7 +3052,7 @@ function isTechnicalStatusChatRow(row) {
     return false;
   }
   const text = String(row.text || "");
-  if (!text.includes("Evelyn 상태")) {
+  if (!text.includes("Evelyn status")) {
     return false;
   }
   return [
@@ -3490,7 +3799,7 @@ function renderState(payload, { preserveScroll = false } = {}) {
   stopApiWaitingTicker();
   state.apiWaitStartedAt = 0;
   if (!applyBootProgressPayload(payload)) {
-    setApiBootWaiting("부팅 진행률 수신 대기 중");
+    setApiBootWaiting("Runtime state received.");
   }
   state.appState = payload;
   state.commands = payload.commands || [];
@@ -3499,16 +3808,21 @@ function renderState(payload, { preserveScroll = false } = {}) {
   const voice = payload.voice || {};
   const runtime = payload.runtime || {};
   const services = runtime.services || {};
+  const serviceHealth = runtimeHealthFromPayload(payload);
+  const runtimeIssue = runtimeHealthHasIssue(serviceHealth);
+  const runtimeIssueText = runtimeHealthIssueText(serviceHealth);
+  const runtimeIssueDetail = runtimeHealthDetailText(serviceHealth);
   const minecraft = payload.minecraft || {};
   const guild = payload.guild || {};
   applyPanelCommands(runtime.controlPagePanels);
   const ui = resolveUiMode(payload);
   const minecraftActive = ui.mode === "minecraft";
-  const minecraftIdleSummary = minecraft.idleSummary || "지금은 Minecraft 플레이 전입니다. 연결되면 위젯이 자동으로 나타납니다.";
+  const minecraftIdleSummary = minecraft.idleSummary || "Minecraft is idle. Connect when ready.";
   const minecraftSnapshotStale = Boolean(minecraft.snapshotStale);
   const minecraftStartupExpected = Boolean(minecraftActive || minecraft.running || ui.submode === "voyager-warmup");
   const hasIssue = Boolean(
-    minecraft.lastError
+    runtimeIssue
+      || minecraft.lastError
       || minecraft.snapshotExpired
       || minecraft.snapshotStale
       || (minecraftStartupExpected && (services.voyagerError || services.codexError))
@@ -3525,16 +3839,16 @@ function renderState(payload, { preserveScroll = false } = {}) {
     setStateClasses(dom.submodePill, [summaryPillState(ui, hasIssue)], ["is-default", "is-minecraft", "is-warmup", "is-issue", "is-offline"]);
   }
   if (dom.topbarStatusLine) {
-    dom.topbarStatusLine.textContent = cleanDisplayText(payload.statusText, "운영 상태를 확인하는 중입니다.");
+    dom.topbarStatusLine.textContent = cleanDisplayText(runtimeIssueText || controlPlane.statusText || payload.statusText, "Checking runtime state.");
   }
 
   if (dom.avatarStatusCopy) {
     if (voice.speaking) {
-      dom.avatarStatusCopy.textContent = cleanDisplayText(voice.ttsTargetName, "현재 대상") + "에게 말하는 중입니다.";
+      dom.avatarStatusCopy.textContent = cleanDisplayText(voice.ttsTargetName, "voice output") + " is speaking.";
     } else if (ui.submode === "voyager-warmup") {
-      dom.avatarStatusCopy.textContent = "Voyager는 올라와 있고, Minecraft 세션 연결을 마저 기다리는 중입니다.";
+      dom.avatarStatusCopy.textContent = "Voyager is warming up for Minecraft.";
     } else {
-      dom.avatarStatusCopy.textContent = "음성 출력 중이 아니면 차분한 idle 상태를 유지합니다.";
+      dom.avatarStatusCopy.textContent = "Voice and runtime status are idle.";
     }
   }
 
@@ -3542,14 +3856,12 @@ function renderState(payload, { preserveScroll = false } = {}) {
     dom.avatarShell.classList.toggle("is-speaking", Boolean(voice.speaking));
   }
   if (dom.ttsTargetName) {
-    dom.ttsTargetName.textContent = voice.speaking ? (voice.ttsTargetName || "없음") : "없음";
+    dom.ttsTargetName.textContent = voice.speaking ? (voice.ttsTargetName || "active") : "idle";
   }
   if (dom.voicePresencePill) {
     dom.voicePresencePill.textContent = ui.submode === "offline"
-      ? "오프라인"
-      : (ui.submode === "voyager-warmup"
-        ? "준비 중"
-        : (voice.speaking ? "대화 중" : (voice.listening ? "듣는 중" : "대기 중")));
+      ? "offline"
+      : (ui.submode === "voyager-warmup" ? "warming" : (voice.speaking ? "speaking" : (voice.listening ? "listening" : "idle")));
     setStateClasses(dom.voicePresencePill, [presencePillState(ui, voice)], ["is-idle", "is-active", "is-warmup", "is-issue", "is-offline"]);
   }
   if (voice.speaking) {
@@ -3559,101 +3871,72 @@ function renderState(payload, { preserveScroll = false } = {}) {
   }
 
   if (dom.operatorRuntimeTitle) {
-    dom.operatorRuntimeTitle.textContent = ui.submode === "voyager-warmup"
-      ? "Voyager 준비 중"
-      : (voice.speaking ? "Evelyn 응답 중" : (voice.listening ? "Evelyn 듣는 중" : "Evelyn 대기 중"));
+    dom.operatorRuntimeTitle.textContent = runtimeIssue
+      ? (String((serviceHealth || {}).overallState || "").toLowerCase() === "down" ? "Runtime down" : "Runtime issue")
+      : ui.submode === "voyager-warmup"
+      ? "Voyager warming"
+      : (voice.speaking ? "Evelyn speaking" : (voice.listening ? "Evelyn listening" : "Evelyn ready"));
   }
   if (dom.operatorRuntimeSubcopy) {
-    dom.operatorRuntimeSubcopy.textContent = ui.submode === "voyager-warmup"
-      ? "Minecraft HUD로 완전히 전환되기 전 단계입니다."
-      : "음성, TTS, LLM, Voyager 상태를 여기서 먼저 확인합니다.";
+    dom.operatorRuntimeSubcopy.textContent = runtimeIssue
+      ? cleanDisplayText(runtimeIssueText, "Check runtime state.")
+      : ui.submode === "voyager-warmup"
+      ? "Minecraft setup is preparing."
+      : "Voice, TTS, LLM, and Voyager state are being monitored.";
   }
   if (dom.operatorRuntimeNote) {
-    dom.operatorRuntimeNote.textContent = ui.submode === "voyager-warmup"
-      ? "세션이 실제로 붙으면 화면이 Minecraft mode로 전환됩니다."
-      : "Minecraft를 아직 열지 않았다면 기본 운영 상태와 다음 추천 액션을 먼저 보여줍니다.";
+    dom.operatorRuntimeNote.textContent = runtimeIssue
+      ? cleanDisplayText(runtimeIssueDetail, "Check runtime diagnosis.")
+      : ui.submode === "voyager-warmup"
+      ? "Waiting for Minecraft mode to attach."
+      : "Runtime controls are ready.";
   }
   if (dom.operatorRuntimeDot) {
     dom.operatorRuntimeDot.classList.toggle("is-offline", ui.submode === "offline");
     dom.operatorRuntimeDot.classList.toggle("is-warmup", ui.submode === "voyager-warmup");
+    dom.operatorRuntimeDot.classList.toggle("is-issue", runtimeIssue);
   }
-  if (dom.operatorStatChannel) {
-    dom.operatorStatChannel.textContent = cleanDisplayText(voice.channelName, "없음");
-  }
-  if (dom.operatorStatMode) {
-    dom.operatorStatMode.textContent = cleanDisplayText(ui.submode || ui.mode, "default");
-  }
-  if (dom.operatorStatTts) {
-    dom.operatorStatTts.textContent = String(runtime.ttsBacklog || 0);
-  }
-  if (dom.operatorStatLlm) {
-    dom.operatorStatLlm.textContent = String(runtime.inflightLlmRequests || 0);
-  }
+  if (dom.operatorStatChannel) dom.operatorStatChannel.textContent = cleanDisplayText(voice.channelName, "none");
+  if (dom.operatorStatMode) dom.operatorStatMode.textContent = cleanDisplayText(ui.submode || ui.mode, "default");
+  if (dom.operatorStatTts) dom.operatorStatTts.textContent = String(runtime.ttsBacklog || 0);
+  if (dom.operatorStatLlm) dom.operatorStatLlm.textContent = String(runtime.inflightLlmRequests || 0);
+
   const voicePipeline = runtime.voicePipeline || {};
   const outputMode = runtime.outputMode || voicePipeline.outputMode || "unknown";
   const localTtsOutput = runtime.localTtsOutput || voicePipeline.localTtsOutput || {};
   let outputLabel = outputMode === "discord_voice" ? "discord" : outputMode;
   if (outputMode === "local_speaker") {
     const playCount = Number(localTtsOutput.playCount || 0);
-    outputLabel = localTtsOutput.active
-      ? "local playing"
-      : (localTtsOutput.lastError ? "local error" : (playCount > 0 ? `local played ${playCount}` : "local ready"));
+    outputLabel = localTtsOutput.active ? "local playing" : (localTtsOutput.lastError ? "local error" : (playCount > 0 ? `local played ${playCount}` : "local ready"));
   }
-  if (dom.meterTtsLabel) {
-    dom.meterTtsLabel.textContent = `${outputLabel} · ${runtime.ttsBacklog || 0}`;
-  }
-  if (dom.voicePipelineQueue) {
-    dom.voicePipelineQueue.textContent = `${voicePipeline.queueDepth || 0}/${voicePipeline.queueMax || 0}`;
-  }
+  if (dom.meterTtsLabel) dom.meterTtsLabel.textContent = `${outputLabel} / ${runtime.ttsBacklog || 0}`;
+  if (dom.voicePipelineQueue) dom.voicePipelineQueue.textContent = `${voicePipeline.queueDepth || 0}/${voicePipeline.queueMax || 0}`;
   if (dom.voicePipelineStt) {
     const cooldown = Number(voicePipeline.sttCooldownRemainingSec || 0);
     dom.voicePipelineStt.textContent = voicePipeline.sttBusy ? "busy" : (cooldown > 0 ? `${cooldown.toFixed(1)}s` : "idle");
   }
-  if (dom.voicePipelineTts) {
-    dom.voicePipelineTts.textContent = `${Math.round(Number(voicePipeline.ttsFirstAudioMsP95 || 0))}ms`;
-  }
+  if (dom.voicePipelineTts) dom.voicePipelineTts.textContent = `${Math.round(Number(voicePipeline.ttsFirstAudioMsP95 || 0))}ms`;
   if (dom.voicePipelineDrops) {
     const drops = Number(voicePipeline.queueFullDropCount || 0) + Number(voicePipeline.queueStaleDropCount || 0);
     dom.voicePipelineDrops.textContent = String(drops);
   }
+
   const modelCallMetrics = runtime.modelCallMetrics || {};
-  if (dom.modelCallRouterRate) {
-    dom.modelCallRouterRate.textContent = formatMetricPercent(modelCallMetrics.routerRouteCallRate);
-  }
-  if (dom.modelCallRouterLatency) {
-    dom.modelCallRouterLatency.textContent = formatMetricMs(modelCallMetrics.routerAvgLatencyMs);
-  }
-  if (dom.modelCallMainFirst) {
-    dom.modelCallMainFirst.textContent = formatMetricMs(modelCallMetrics.mainFirstTokenAvgMs);
-  }
-  if (dom.modelCallCognitiveRate) {
-    dom.modelCallCognitiveRate.textContent = formatMetricPercent(modelCallMetrics.cognitiveBlockingRate);
-  }
-  if (dom.modelCallSummaryHot) {
-    dom.modelCallSummaryHot.textContent = formatMetricPercent(modelCallMetrics.summaryHotPathRate);
-  }
-  if (dom.modelCallTurnCount) {
-    dom.modelCallTurnCount.textContent = String(modelCallMetrics.modelCallCount || 0);
-  }
+  if (dom.modelCallRouterRate) dom.modelCallRouterRate.textContent = formatMetricPercent(modelCallMetrics.routerRouteCallRate);
+  if (dom.modelCallRouterLatency) dom.modelCallRouterLatency.textContent = formatMetricMs(modelCallMetrics.routerAvgLatencyMs);
+  if (dom.modelCallMainFirst) dom.modelCallMainFirst.textContent = formatMetricMs(modelCallMetrics.mainFirstTokenAvgMs);
+  if (dom.modelCallCognitiveRate) dom.modelCallCognitiveRate.textContent = formatMetricPercent(modelCallMetrics.cognitiveBlockingRate);
+  if (dom.modelCallSummaryHot) dom.modelCallSummaryHot.textContent = formatMetricPercent(modelCallMetrics.summaryHotPathRate);
+  if (dom.modelCallTurnCount) dom.modelCallTurnCount.textContent = String(modelCallMetrics.modelCallCount || 0);
+
   const questionMetrics = runtime.questionMetrics || {};
-  if (dom.questionAddedRate) {
-    dom.questionAddedRate.textContent = formatMetricPercent(questionMetrics.questionAddedRate);
-  }
-  if (dom.questionRemovedCount) {
-    dom.questionRemovedCount.textContent = String(questionMetrics.questionRemovedCount || 0);
-  }
-  if (dom.questionCooldownRate) {
-    dom.questionCooldownRate.textContent = formatMetricPercent(questionMetrics.questionCooldownHitRate);
-  }
-  if (dom.questionAskMode) {
-    dom.questionAskMode.textContent = topAskMode(questionMetrics.askModeDistribution);
-  }
-  if (dom.questionTurnCount) {
-    dom.questionTurnCount.textContent = String(questionMetrics.turnCount || 0);
-  }
-  if (dom.questionFinalCount) {
-    dom.questionFinalCount.textContent = String(questionMetrics.finalQuestionCount || 0);
-  }
+  if (dom.questionAddedRate) dom.questionAddedRate.textContent = formatMetricPercent(questionMetrics.questionAddedRate);
+  if (dom.questionRemovedCount) dom.questionRemovedCount.textContent = String(questionMetrics.questionRemovedCount || 0);
+  if (dom.questionCooldownRate) dom.questionCooldownRate.textContent = formatMetricPercent(questionMetrics.questionCooldownHitRate);
+  if (dom.questionAskMode) dom.questionAskMode.textContent = topAskMode(questionMetrics.askModeDistribution);
+  if (dom.questionTurnCount) dom.questionTurnCount.textContent = String(questionMetrics.turnCount || 0);
+  if (dom.questionFinalCount) dom.questionFinalCount.textContent = String(questionMetrics.finalQuestionCount || 0);
+
   const localMic = runtime.localMic || {};
   const voiceInputMode = String(localMic.inputMode || "auto").toLowerCase();
   if (dom.voiceInputModeButtons) {
@@ -3664,133 +3947,65 @@ function renderState(payload, { preserveScroll = false } = {}) {
   }
 
   if (dom.minecraftRuntimeTitle) {
-    dom.minecraftRuntimeTitle.textContent = minecraftActive
-      ? "Minecraft 플레이 중"
-      : (minecraft.running ? "Minecraft 연결 대기" : "Minecraft 비활성");
+    dom.minecraftRuntimeTitle.textContent = minecraftActive ? "Minecraft connected" : (minecraft.running ? "Minecraft starting" : "Minecraft idle");
   }
   if (dom.minecraftRuntimeSubcopy) {
-    const liveCopy = minecraft.task || minecraft.goal || minecraft.progress || "실시간 플레이 상태를 추적하는 중입니다.";
-    dom.minecraftRuntimeSubcopy.textContent = minecraftActive
-      ? (minecraftSnapshotStale ? (liveCopy + " 실시간 갱신이 잠시 늦어지고 있습니다.") : liveCopy)
-      : minecraftIdleSummary;
+    const liveCopy = minecraft.task || minecraft.goal || minecraft.progress || "Waiting for live Minecraft state.";
+    dom.minecraftRuntimeSubcopy.textContent = minecraftActive ? (minecraftSnapshotStale ? (liveCopy + " Fresh state is pending.") : liveCopy) : minecraftIdleSummary;
   }
-  if (dom.minecraftRuntimeDot) {
-    dom.minecraftRuntimeDot.classList.toggle("is-offline", !minecraftActive);
-  }
-  if (dom.minecraftIdleNote) {
-    dom.minecraftIdleNote.textContent = minecraftIdleSummary;
-  }
+  if (dom.minecraftRuntimeDot) dom.minecraftRuntimeDot.classList.toggle("is-offline", !minecraftActive);
+  if (dom.minecraftIdleNote) dom.minecraftIdleNote.textContent = minecraftIdleSummary;
 
-  if (dom.statCurrentTask) dom.statCurrentTask.textContent = minecraft.task || "없음";
-  if (dom.statStage) dom.statStage.textContent = minecraft.stage || "없음";
+  if (dom.statCurrentTask) dom.statCurrentTask.textContent = minecraft.task || "idle";
+  if (dom.statStage) dom.statStage.textContent = minecraft.stage || "idle";
   if (dom.statUniqueItems) dom.statUniqueItems.textContent = minecraft.uniqueItemCount ?? "-";
   if (dom.statTravelDistance) dom.statTravelDistance.textContent = formatDistance(minecraft.travelDistanceBlocks);
   if (dom.statHealthHunger) dom.statHealthHunger.textContent = formatHealthHunger(minecraft.health, minecraft.hunger);
   if (dom.statSkillLibrary) dom.statSkillLibrary.textContent = minecraft.skillLibrarySize ?? "-";
-
   renderActivityRows(minecraft.recentActivity || []);
 
-  if (dom.operationsEyebrow) {
-    dom.operationsEyebrow.textContent = minecraftActive ? "LIVE TELEMETRY" : "OPERATIONS FEED";
-  }
-  if (dom.operationsTitle) {
-    dom.operationsTitle.textContent = minecraftActive ? "Minecraft 흐름" : "운영 흐름";
-  }
-  if (dom.operationsSubcopy) {
-    dom.operationsSubcopy.textContent = minecraftActive
-      ? "목표, 최근 활동, 서비스 지표를 live session 기준으로 묶어 보여줍니다."
-      : (ui.submode === "voyager-warmup"
-        ? "지금은 운영 대시보드를 유지한 채 Minecraft 세션 연결이 실제로 붙는지 기다립니다."
-        : "기본 상태에서는 Evelyn 운영 흐름과 서비스 상태를 먼저 보여줍니다.");
-  }
+  if (dom.operationsEyebrow) dom.operationsEyebrow.textContent = minecraftActive ? "LIVE TELEMETRY" : "OPERATIONS FEED";
+  if (dom.operationsTitle) dom.operationsTitle.textContent = minecraftActive ? "Minecraft operations" : "Runtime operations";
+  if (dom.operationsSubcopy) dom.operationsSubcopy.textContent = minecraftActive ? "Live session telemetry is shown here." : "Runtime status and recent activity are shown here.";
 
   if (dom.systemSummaryPill) {
     dom.systemSummaryPill.textContent = minecraftActive
-      ? (minecraftSnapshotStale ? "플레이 중 · 지연" : "플레이 중")
-      : (ui.submode === "voyager-warmup"
-        ? "연결 준비 중"
-        : (ui.submode === "offline" ? "오프라인" : (hasIssue ? "주의 필요" : "기본 준비됨")));
-    dom.systemSummaryPill.title = services.codexError || services.voyagerError || "";
+      ? (minecraftSnapshotStale ? "Live / stale" : "Live")
+      : (ui.submode === "voyager-warmup" ? "Warming" : (ui.submode === "offline" ? "Offline" : (runtimeIssue ? "Runtime issue" : (hasIssue ? "Issue" : "Ready"))));
+    dom.systemSummaryPill.title = runtimeIssueDetail || services.codexError || services.voyagerError || "";
     setStateClasses(dom.systemSummaryPill, [summaryPillState(ui, hasIssue)], ["is-idle", "is-active", "is-warmup", "is-issue", "is-offline"]);
   }
 
-  setMeter(
-    dom.meterVoyager,
-    dom.meterVoyagerLabel,
-    meterLevel(minecraftActive ? "active" : (minecraft.running ? "warm" : "idle")),
-    minecraftActive ? "connected" : (minecraft.running ? "starting" : "idle")
-  );
-  setMeter(
-    dom.meterVoice,
-    dom.meterVoiceLabel,
-    meterLevel(voice.listening ? "active" : "idle"),
-    voice.listening ? "listening" : "idle"
-  );
-  setMeter(
-    dom.meterTts,
-    dom.meterTtsLabel,
-    voice.speaking ? 100 : 8,
-    voice.speaking ? (voice.ttsTargetName || "active") : "없음"
-  );
-  setMeter(
-    dom.meterLlm,
-    dom.meterLlmLabel,
-    Math.min(100, (runtime.inflightLlmRequests || 0) * 32),
-    String(runtime.inflightLlmRequests || 0) + " inflight"
-  );
+  setMeter(dom.meterVoyager, dom.meterVoyagerLabel, meterLevel(minecraftActive ? "active" : (minecraft.running ? "warm" : "idle")), minecraftActive ? "connected" : (minecraft.running ? "starting" : "idle"));
+  setMeter(dom.meterVoice, dom.meterVoiceLabel, meterLevel(voice.listening ? "active" : "idle"), voice.listening ? "listening" : "idle");
+  setMeter(dom.meterTts, dom.meterTtsLabel, voice.speaking ? 100 : 8, voice.speaking ? (voice.ttsTargetName || "active") : "idle");
+  setMeter(dom.meterLlm, dom.meterLlmLabel, Math.min(100, (runtime.inflightLlmRequests || 0) * 32), String(runtime.inflightLlmRequests || 0) + " inflight");
 
-  if (dom.guildName) {
-    dom.guildName.textContent = guild.name || "Guild 미연결";
-  }
-  if (dom.objectiveGoal) dom.objectiveGoal.textContent = minecraft.goal || "없음";
-  if (dom.objectiveProgress) dom.objectiveProgress.textContent = minecraft.progress || "진행 메시지 없음";
-  if (dom.objectiveStage) dom.objectiveStage.textContent = minecraft.stage || "없음";
-  if (dom.objectiveTaskStage) dom.objectiveTaskStage.textContent = minecraft.taskStage || "없음";
-  if (dom.positionBlock) dom.positionBlock.textContent = minecraft.position || "미확인";
-  if (dom.inventorySummary) dom.inventorySummary.textContent = minecraft.inventorySummary || "인벤토리 정보 없음";
-  renderInventoryWidget(
-    minecraft.inventorySummary,
-    minecraft.inventoryTop || [],
-    minecraft.inventorySlots || [],
-    minecraft.inventoryUsedSlots,
-    minecraft.uniqueItemCount,
-  );
-  if (!minecraftActive) {
-    setInventoryWidgetOpen(false);
-  }
+  if (dom.guildName) dom.guildName.textContent = guild.name || "Guild not connected";
+  if (dom.objectiveGoal) dom.objectiveGoal.textContent = minecraft.goal || "idle";
+  if (dom.objectiveProgress) dom.objectiveProgress.textContent = minecraft.progress || "No progress message";
+  if (dom.objectiveStage) dom.objectiveStage.textContent = minecraft.stage || "idle";
+  if (dom.objectiveTaskStage) dom.objectiveTaskStage.textContent = minecraft.taskStage || "idle";
+  if (dom.positionBlock) dom.positionBlock.textContent = minecraft.position || "unknown";
+  if (dom.inventorySummary) dom.inventorySummary.textContent = minecraft.inventorySummary || "No inventory summary";
+  renderInventoryWidget(minecraft.inventorySummary, minecraft.inventoryTop || [], minecraft.inventorySlots || [], minecraft.inventoryUsedSlots, minecraft.uniqueItemCount);
+  if (!minecraftActive) setInventoryWidgetOpen(false);
+
   if (dom.commandInput) {
-    dom.commandInput.placeholder = minecraftActive
-      ? "Evelyn에게 메시지 보내기"
-      : "메시지를 보내거나 /minecraft connect 입력";
+    dom.commandInput.placeholder = minecraftActive ? "Message Evelyn" : "Send a message or type /minecraft connect";
   }
-  if (dom.composerHintLeft) {
-    dom.composerHintLeft.textContent = "Enter 전송";
-  }
-  if (dom.actionsEyebrow) {
-    dom.actionsEyebrow.textContent = minecraftActive ? "MISSION ACTIONS" : "CONTROL ACTIONS";
-  }
-  if (dom.actionsSubcopy) {
-    dom.actionsSubcopy.textContent = minecraftActive
-      ? "Minecraft 미션 제어, 인벤토리 확인, 최근 대화를 한 자리에서 이어갈 수 있습니다."
-      : "기본 상태에서는 운영 액션과 최근 대화를 우선 보여주고, Minecraft가 붙으면 미션 제어 요약으로 바뀝니다.";
-  }
-  if (dom.primaryActionTitle) {
-    dom.primaryActionTitle.textContent = minecraftActive ? "미션 제어" : "빠른 입력";
-  }
-  if (dom.supportActionTitle) {
-    dom.supportActionTitle.textContent = minecraftActive ? "운영 보조" : "세부 명령";
-  }
-  if (dom.supportActionCaption) {
-    dom.supportActionCaption.textContent = minecraftActive
-      ? "미션 중에도 기본 상태 확인과 보조 제어를 바로 열 수 있습니다."
-      : "자주 쓰는 상태 확인과 보조 제어입니다.";
-  }
+  if (dom.composerHintLeft) dom.composerHintLeft.textContent = "Enter to send";
+  if (dom.actionsEyebrow) dom.actionsEyebrow.textContent = minecraftActive ? "MISSION ACTIONS" : "CONTROL ACTIONS";
+  if (dom.actionsSubcopy) dom.actionsSubcopy.textContent = minecraftActive ? "Mission controls are available." : "Common status and support controls are available.";
+  if (dom.primaryActionTitle) dom.primaryActionTitle.textContent = minecraftActive ? "Mission controls" : "Start here";
+  if (dom.supportActionTitle) dom.supportActionTitle.textContent = minecraftActive ? "Runtime support" : "More commands";
+  if (dom.supportActionCaption) dom.supportActionCaption.textContent = minecraftActive ? "Use support actions while the mission is running." : "Use support actions for status and diagnostics.";
 
   renderControlBrief(payload);
   renderDefaultViewport(payload, ui);
   renderMinecraftOpsPanel(payload);
   renderQuickCommands();
-  renderChat((payload.chat || {}).messages || [], payload.statusText || "연결 상태를 확인하는 중입니다.", { preserveScroll });
+  renderChat((payload.chat || {}).messages || [], payload.statusText || "Checking connection.", { preserveScroll });
   renderSuggestions();
   loadMemoryCards({ force: false });
   loadMemoryGraph({ force: false });
@@ -3836,7 +4051,7 @@ function schedulePolling() {
 }
 
 async function sendCurrentMessage(rawText) {
-  const text = rawText.trim();
+  const text = (rawText || "").trim();
   if (!text || state.sending) {
     return;
   }
@@ -3860,7 +4075,7 @@ async function sendCurrentMessage(rawText) {
           { role: "user", author: "정훈", text, at: now },
           { role: "assistant", author: "Evelyn", text: formatCommandHelp(state.allCommands), at: now },
         ],
-        "명령어 목록을 표시했습니다."
+        "Command list is ready."
       );
       return;
     }
@@ -3873,11 +4088,11 @@ async function sendCurrentMessage(rawText) {
           {
             role: "assistant",
             author: "Evelyn",
-            text: ok ? "메모리 패널을 열거나 숨길게." : "메모리 패널을 찾지 못했어. 페이지를 새로고침해줘.",
+            text: ok ? "Memory panel opened." : "Memory panel is not available in this layout.",
             at: now,
           },
         ],
-        ok ? "메모리 패널 명령을 실행했습니다." : "메모리 패널을 찾지 못했습니다."
+        ok ? "Memory panel opened." : "Memory panel unavailable."
       );
       return;
     }
@@ -3894,7 +4109,7 @@ async function sendCurrentMessage(rawText) {
       await refreshState();
     }
   } catch (error) {
-    renderChat([], "메시지 전송에 실패했습니다: " + error.message);
+    renderChat([], "Message send failed: " + error.message);
   } finally {
     state.sending = false;
     if (dom.composerSendButton) {
@@ -3972,14 +4187,28 @@ if (dom.chatComposer) {
   });
 }
 
-if (dom.quickCommandRow) {
-  dom.quickCommandRow.addEventListener("click", (event) => {
-    const button = event.target.closest("[data-chat-command]");
-    if (!button) {
-      return;
+if (dom.chatThread) {
+  dom.chatThread.addEventListener("scroll", () => {
+    if (isChatScrolledNearBottom()) {
+      hideNewChatMessageNotice();
     }
-    handleChatCommandTrigger(button);
   });
+}
+
+if (dom.chatNewMessageButton) {
+  dom.chatNewMessageButton.textContent = "새 메시지";
+  dom.chatNewMessageButton.addEventListener("click", () => {
+    dom.chatThread.scrollTop = dom.chatThread.scrollHeight;
+    hideNewChatMessageNotice();
+  });
+}
+
+if (dom.quickCommandRow) {
+  dom.quickCommandRow.addEventListener("click", handleQuickActionClick);
+}
+
+if (dom.primaryActionRow) {
+  dom.primaryActionRow.addEventListener("click", handleQuickActionClick);
 }
 
 if (dom.voiceInputSwitches) {
@@ -4068,11 +4297,11 @@ if (dom.memoryGraphFilter) {
     const sizeButton = event.target.closest("[data-memory-node-size]");
     if (sizeButton) {
       const action = sizeButton.getAttribute("data-memory-node-size") || "";
-      const current = Math.max(0.7, Math.min(1.55, Number(state.memoryGraphNodeScale || 1)));
+      const current = Math.max(0.25, Math.min(2, Number(state.memoryGraphNodeScale || 1)));
       if (action === "down") {
-        setMemoryGraphNodeScale(current - 0.1);
+        setMemoryGraphNodeScale(Number((current - 0.25).toFixed(2)));
       } else if (action === "up") {
-        setMemoryGraphNodeScale(current + 0.1);
+        setMemoryGraphNodeScale(Number((current + 0.25).toFixed(2)));
       } else if (action === "reset") {
         setMemoryGraphNodeScale(1);
       }
@@ -4213,3 +4442,135 @@ initWallpaperPicker();
 ensureApiWaitingTicker();
 refreshState();
 schedulePolling();
+
+const RUNTIME_REPAIR_SERVICE_PRIORITY = ["main_llm", "router_llm", "sub_llm", "tts", "bot_api", "control_page"];
+const RUNTIME_REPAIR_SERVICE_LABEL = {
+  main_llm: "Main LLM",
+  router_llm: "Router LLM",
+  sub_llm: "Sub LLM",
+  tts: "TTS",
+  bot_api: "Bot API",
+  control_page: "Control-Page",
+};
+const RUNTIME_REPAIR_SERVICE_ACTION_LABEL = {
+  main_llm: "Preview Main LLM repair",
+  router_llm: "Preview Router LLM repair",
+  sub_llm: "Preview Sub LLM repair",
+  tts: "Preview TTS repair",
+  bot_api: "Preview Bot API repair",
+  control_page: "Preview Control-Page repair",
+};
+
+function runtimeRepairServiceLabel(serviceId) {
+  return RUNTIME_REPAIR_SERVICE_LABEL[String(serviceId || "")] || String(serviceId || "Unknown service");
+}
+
+function runtimeRepairServiceActionLabel(serviceId, fallback) {
+  return RUNTIME_REPAIR_SERVICE_ACTION_LABEL[String(serviceId || "")] || fallback || "Preview runtime repair";
+}
+
+function runtimeRepairActionIdFromServiceRow(row) {
+  const serviceId = String(row && row.id || "").trim();
+  if (!serviceId) {
+    return "";
+  }
+  const actions = Array.isArray(row.suggestedActions) ? row.suggestedActions : [];
+  const action = actions.find((item) => item && item.id);
+  return action && action.id ? String(action.id) : `start_${serviceId}`;
+}
+
+function runtimeRepairBlockingServices(health) {
+  const services = Array.isArray(health && health.services) ? health.services : [];
+  const serviceById = {};
+  for (const service of services) {
+    const serviceId = String(service && service.id || "").trim();
+    if (!serviceId) {
+      continue;
+    }
+    serviceById[serviceId] = service;
+  }
+  const isBlockingState = (value) => {
+    const state = String(value || "").toLowerCase();
+    return state === "down" || state === "partial" || state === "unknown";
+  };
+  const candidates = [];
+  const seen = new Set();
+
+  const addService = (serviceId) => {
+    if (!serviceId || seen.has(serviceId)) {
+      return;
+    }
+    const service = serviceById[serviceId];
+    seen.add(serviceId);
+    if (!service || !service.required || !isBlockingState(service.state)) {
+      return;
+    }
+    const actionId = runtimeRepairActionIdFromServiceRow(service);
+    if (!actionId) {
+      return;
+    }
+    candidates.push({
+      serviceId,
+      label: runtimeRepairServiceLabel(service.label || serviceId),
+      state: String(service.state || "").toLowerCase(),
+      actionId,
+      required: true,
+    });
+  };
+
+  for (const serviceId of RUNTIME_REPAIR_SERVICE_PRIORITY) {
+    addService(serviceId);
+  }
+  for (const service of services) {
+    addService(String(service && service.id || "").trim());
+  }
+  return candidates;
+}
+
+function runtimeRepairSummaryForBlockingServices(blockingServices) {
+  if (!Array.isArray(blockingServices) || !blockingServices.length) {
+    return "";
+  }
+  const first = blockingServices[0];
+  const firstName = String(first && first.label || "").trim() || "first repair target";
+  const followUp = blockingServices.slice(1).map((service) => String(service && service.label || "").trim()).filter(Boolean);
+  if (!followUp.length) {
+    return `Health check recommends repairing ${firstName} first.`;
+  }
+  return `Health check recommends repairing ${firstName} first. Recheck ${followUp[0]} after ${firstName}.`;
+}
+
+function runtimeRepairActionFromPayload(payload) {
+  const health = runtimeHealthFromPayload(payload);
+  if (!runtimeHealthHasIssue(health)) {
+    return null;
+  }
+  const blockingServices = runtimeRepairBlockingServices(health);
+  const preferred = blockingServices[0];
+  const diagnostic = primaryRuntimeDiagnostic(health);
+  const diagnosticActions = Array.isArray(diagnostic && diagnostic.suggestedActions) ? diagnostic.suggestedActions : [];
+  const codeText = runtimeHealthCodeText(health);
+  const action = preferred
+    ? { id: preferred.actionId, serviceId: preferred.serviceId }
+    : (diagnosticActions[0] || null);
+  if (!action || !action.id) {
+    return null;
+  }
+  const actionId = String(action.id);
+  const serviceId = String(action.serviceId || (actionId.startsWith("start_") ? actionId.slice("start_".length) : ""));
+  const summary = runtimeRepairSummaryForBlockingServices(blockingServices)
+    || codeText?.repairActionSummary
+    || "Preview the runtime repair plan before starting anything.";
+  return {
+    repairPreview: true,
+    actionId,
+    serviceId,
+    command: "repair-preview",
+    template: "repair-preview",
+    label: runtimeRepairServiceActionLabel(serviceId, codeText?.repairActionLabel),
+    summary,
+    blockingServices,
+    recommendedOrder: blockingServices,
+    runtimeHealthSummary: runtimeHealthIssueText(health),
+  };
+}

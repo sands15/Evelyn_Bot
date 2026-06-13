@@ -20,6 +20,8 @@ async def execute(context: SkillContext) -> SkillResult:
     action_result = await execute_search_then_answer_action(
         guild_id=context.guild_id,
         user_text=user_text,
+        session_key=context.session_key,
+        messages=list(extras.get("messages") or []),
     )
     answer_text = str(getattr(action_result, "answer_text", "") or "")
     metadata = getattr(action_result, "metadata", {})
@@ -30,8 +32,14 @@ async def execute(context: SkillContext) -> SkillResult:
         answer_text=answer_text,
         metadata=dict(metadata) if isinstance(metadata, dict) else {},
         dedupe_key=f"search|{user_text}",
-        followup_route="delivery",
-        followup_payload={"answer_text": answer_text, "source": context.source},
+        followup_route="main_synthesis",
+        followup_payload={
+            "answer_text": answer_text,
+            "tool_name": "search",
+            "tool_result_text": answer_text,
+            "source": context.source,
+            "search_metadata": dict(metadata) if isinstance(metadata, dict) else {},
+        },
     )
 
 

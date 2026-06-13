@@ -48,10 +48,12 @@ try:
 except ImportError:
     fcntl = None
 
+QWEN_ASR_IMPORT_ERROR: Exception | None = None
 try:
     from qwen_asr import Qwen3ASRModel
-except ImportError:
+except Exception as exc:
     Qwen3ASRModel = None
+    QWEN_ASR_IMPORT_ERROR = exc
 
 from evelyn_core.audio import (
     apply_light_denoise,
@@ -89,6 +91,7 @@ from evelyn_core.question_shaping import (
     filter_stream_chunk_for_question_limits,
 )
 from evelyn_core.proactive_questions import (
+    evaluate_proactive_question_gate,
     mark_question_asked,
     promote_open_questions,
     resolve_pending_question_answer,
@@ -98,6 +101,7 @@ from evelyn_core.proactive_questions import (
 from evelyn_core.self_model import (
     mark_self_state_assistant_output,
     record_self_identity_turn,
+    render_self_judgment_context,
     render_self_state_context,
     update_self_state_for_turn,
 )
@@ -108,6 +112,7 @@ from evelyn_core.vision_watch import (
     update_vision_watch_analysis,
     vision_watch_scene_is_unreliable,
 )
+from evelyn_core.vision_quality import build_vision_quality
 from evelyn_core.text import (
     apply_stt_post_corrections,
     clean_text,
@@ -116,6 +121,7 @@ from evelyn_core.text import (
     contains_wake_word,
     extract_leading_wake_alias,
     fuzzy_leading_wake_alias,
+    is_user_echo_answer,
     is_similar,
     looks_like_brief_filler_text,
     looks_like_gibberish_probe,
@@ -124,6 +130,7 @@ from evelyn_core.text import (
     normalize_voice_text,
     normalized_wake_words,
     strip_leading_voice_fillers,
+    strip_model_channel_tags,
     strip_omnivoice_tags,
     strip_response_action_tags,
     strip_voice_wake_word,
@@ -195,18 +202,24 @@ from evelyn_core.local_tts_playback import LocalTtsPlaybackManager
 from evelyn_core.page_urls import resolve_public_page_url
 from evelyn_core.query_intents import (
     answer_current_datetime_query,
+    extract_korean_location_hint,
+    is_weather_query,
+    resolve_recent_weather_location,
     should_force_search_query,
 )
 from evelyn_core.assistant_contracts import (
     TtsSynthRequest,
     TtsSynthResult,
 )
+from evelyn_core.assistant_prompt_contract import build_evelyn_system_prompt
+from evelyn_core.control_page_contracts import CONTROL_PAGE_UI_PANELS as SHARED_CONTROL_PAGE_UI_PANELS
 from evelyn_core.tts_playback import (
     CachedWaveAudioSource,
     ChunkWindow,
     OmniVoicePCMStream,
     StreamingVoiceDelivery,
     SpeechChunker,
+    TTSQueueSink,
     TtsPlaybackManager,
     TtsSourcePlaybackRequest,
     TtsStreamingPlaybackRequest,
@@ -216,6 +229,7 @@ from evelyn_core.tts_playback import (
     configure_tts_playback_logging,
     get_tracked_tts_playback,
     is_tracked_tts_playback_active,
+    prefetch_tts_sources,
     resolve_cached_tts_audio_path,
     split_tts_sentences,
     tracked_tts_playback_count,
@@ -233,6 +247,7 @@ from evelyn_core.voice_stt_flow import (
     run_full_stt_with_optional_rescore,
     run_partial_stt_flow,
 )
+from evelyn_core.stt_client import transcribe_audio16k_via_service
 from evelyn_core.voice_utterance import (
     UtteranceAssemblyConfig,
     discord_pcm_seconds,
@@ -374,6 +389,11 @@ CONTROL_PAGE_ENABLED = os.getenv("CONTROL_PAGE_ENABLED", "true").lower() == "tru
 CONTROL_PAGE_HOST = os.getenv("CONTROL_PAGE_HOST", "127.0.0.1")
 CONTROL_PAGE_PORT = int(os.getenv("CONTROL_PAGE_PORT", "8799"))
 CONTROL_PAGE_CHAT_LOG_LIMIT = int(os.getenv("CONTROL_PAGE_CHAT_LOG_LIMIT", "40"))
+CONTROL_PAGE_WELCOME_LLM_TIMEOUT_SEC = float(os.getenv("CONTROL_PAGE_WELCOME_LLM_TIMEOUT_SEC", "18.0"))
+CONTROL_PAGE_WELCOME_FALLBACK = os.getenv(
+    "CONTROL_PAGE_WELCOME_FALLBACK",
+    "왔어? 오늘도 이상한 건 내가 정리하고, 재밌는 건 같이 키워볼게.",
+)
 CONTROL_PAGE_DOCS_DIR = PROJECT_ROOT / "docs"
 CONTROL_PAGE_ASSETS_DIR = CONTROL_PAGE_DOCS_DIR / "assets"
 CONTROL_PAGE_MINECRAFT_ICON_ROUTE = "/api/control-page/minecraft-item-icon"
@@ -623,25 +643,7 @@ async def resolve_command_prefix(_bot, message: discord.Message):
 
 bot = commands.Bot(command_prefix=resolve_command_prefix, intents=intents, help_command=None)
 
-SYSTEM_PROMPT = f"""
-너는 Evelyn. 한국어로 친구처럼 짧게 반말한다.
-비서/상담원 말투, 존댓말 대기문, 이모지는 쓰지 않는다.
-음성 대화는 보통 1~3문장. 필요한 말만 한다.
-불확실하면 지어내지 말고 솔직히 말한다.
-필요할 때만 맨 앞에 [찾기] [질문] [대기] [답변] 중 하나를 붙인다.
-최종 답변만 말하고 생각 과정은 말하지 않는다.
-{OMNIVOICE_TAG_GUIDANCE}
-태그를 빼도 문장이 성립해야 한다.
-내부 메모나 sub handoff 문장을 사용자 말로 오해하지 않는다.
-""".strip()
-
-SYSTEM_PROMPT = (
-    SYSTEM_PROMPT
-    + "\nDomain rule: Minecraft/Voyager/block/coordinate/pathfinding talk is allowed only when the user explicitly asks about Minecraft, Voyager, game state, or visible screen content that actually contains it."
-    + "\nFor ordinary chat, runtime work, feelings, scheduling, or status questions, never mention blocks, coordinates, inventory, pathfinding, mining, or Minecraft tasks."
-    + "\nIf unsure whether Minecraft is relevant, assume it is not relevant and answer naturally about the user's actual request."
-    + "\nVision rule: Do not claim you can see the user's screen unless explicit vision or screenshot context is provided in the current turn."
-)
+SYSTEM_PROMPT = build_evelyn_system_prompt(omnivoice_tag_guidance=OMNIVOICE_TAG_GUIDANCE)
 
 session_locks: dict[str, asyncio.Lock] = {}
 reply_slot_locks: dict[str, asyncio.Lock] = {}
@@ -783,6 +785,7 @@ control_page_runtime_services_cached_at = 0.0
 control_page_runtime_services_lock: asyncio.Lock | None = None
 control_page_ui_commands: list[dict[str, Any]] = []
 control_page_ui_command_seq = 0
+control_page_welcome_locks: dict[int, asyncio.Lock] = {}
 runtime_status_context_cache: dict[str, Any] = {"text": "", "cached_at": 0.0}
 runtime_status_context_lock: asyncio.Lock | None = None
 room_recent_speaker_stats: dict[str, dict[int, dict[str, float]]] = {}
@@ -886,6 +889,30 @@ def get_or_create_autonomy_engine(guild_id: int) -> AutonomyEngine:
                 return text
         return ""
 
+    def _has_queued_proactive_question(session_key: str, latest_user_text: str) -> bool:
+        if question_cooldown_hit(session_key):
+            return False
+        gate = evaluate_proactive_question_gate(
+            guild_id=guild_id,
+            source="autonomy",
+            user_text=latest_user_text,
+            answer_text="",
+            awaiting_user_reply=False,
+            session_scope_key=session_key,
+            session_cooldown_hit=False,
+        )
+        if not gate.allowed:
+            return False
+        for scope_type, scope_key in proactive_question_scope_candidates(session_memory_key=session_key):
+            if select_question_to_ask(
+                guild_id,
+                scope_type=scope_type,
+                scope_key=scope_key,
+                session_scope_key=session_key,
+            ):
+                return True
+        return False
+
     async def _default_observe() -> dict[str, Any]:
         channel = await _find_followup_channel()
         session_key = runtime_session_key(guild_id=guild_id)
@@ -964,6 +991,9 @@ def get_or_create_autonomy_engine(guild_id: int) -> AutonomyEngine:
             local_mic_recent = last_input_age_sec is not None and float(last_input_age_sec) <= 5.0
         except Exception:
             local_mic_recent = False
+        queued_proactive_question_available = bool(
+            session_key and _has_queued_proactive_question(session_key, latest_user_text)
+        )
         return {
             "connected": channel is not None,
             "known_followup_channels": len([v for v in session_followup_targets.values() if isinstance(v, dict) and v.get("channel_id")]),
@@ -991,18 +1021,24 @@ def get_or_create_autonomy_engine(guild_id: int) -> AutonomyEngine:
             "vision_unreliable": vision_unreliable,
             "vision_fingerprint": vision_fingerprint,
             "vision_analysis_recent": bool(vision_analyzed_at > 0 and (time.time() - vision_analyzed_at) <= 600),
+            "queued_proactive_question_available": queued_proactive_question_available,
         }
 
-    async def _default_send_followup(text: str) -> dict[str, Any]:
+    async def _default_send_followup(
+        text: str,
+        *,
+        awaiting_user_reply: bool = False,
+        user_text: str = "[autonomy]",
+    ) -> dict[str, Any]:
         channel = await _find_followup_channel()
         if channel is None:
             return {"status": "blocked", "reason": "no_followup_channel"}
         await send_discord_text(channel, text)
         session_key = runtime_session_key(guild_id=guild_id)
-        append_history(session_key, "[autonomy]", text, guild_id=guild_id)
+        append_history(session_key, user_text or "[autonomy]", text, guild_id=guild_id)
         schedule_memory_update(
             guild_id,
-            "[autonomy]",
+            user_text or "[autonomy]",
             text,
             source="autonomy",
             assistant_speaker="Evelyn-Autonomy",
@@ -1011,12 +1047,12 @@ def get_or_create_autonomy_engine(guild_id: int) -> AutonomyEngine:
         )
         mark_session_active(
             session_key,
-            ttl_sec=ACTIVE_CONVERSATION_TEXT_SEC,
+            ttl_sec=ACTIVE_CONVERSATION_TEXT_QUESTION_SEC if awaiting_user_reply else ACTIVE_CONVERSATION_TEXT_SEC,
             speaker="assistant",
-            awaiting_user_reply=False,
+            awaiting_user_reply=awaiting_user_reply,
             topic_id=build_topic_id("autonomy", text),
             answer_text=text,
-            user_text="[autonomy]",
+            user_text=user_text or "[autonomy]",
         )
         last_autonomy_ping_at[guild_id] = time.monotonic()
         mark_self_state_assistant_output(proactive=True)
@@ -1058,7 +1094,25 @@ def get_or_create_autonomy_engine(guild_id: int) -> AutonomyEngine:
         last_ping_at = float(last_autonomy_ping_at.get(guild_id, 0.0) or 0.0)
         if last_ping_at > 0 and (time.monotonic() - last_ping_at) < 900:
             return {"status": "blocked", "reason": "ping_cooldown"}
-        return await _default_send_followup(text)
+        session_key = runtime_session_key(guild_id=guild_id)
+        history = get_conversation_history(session_key=session_key, guild_id=guild_id)
+        latest_user_text = _pick_recent_user_text(history)
+        marked = select_and_mark_proactive_question(
+            guild_id=guild_id,
+            source="autonomy",
+            user_text=latest_user_text,
+            answer_text="",
+            awaiting_user_reply=False,
+            session_key=session_key,
+            session_memory_key=session_key,
+        )
+        if not marked:
+            return {"status": "ok", "reason": "no_queued_proactive_question", "skipped": True}
+        return await _default_send_followup(
+            marked["ask_text"],
+            awaiting_user_reply=True,
+            user_text=latest_user_text or "[autonomy]",
+        )
 
     async def _default_refresh_cognitive_state() -> dict[str, Any]:
         existing = autonomy_cognitive_refresh_tasks.get(guild_id)
@@ -1895,7 +1949,7 @@ def record_turn_path_summary(meta: dict[str, Any], marks: dict[str, Any], total_
     _append_bounded_metric(bucket["stt_ms"], marks.get("t_stt_done"))
     _append_bounded_metric(bucket["main_first_ms"], marks.get("t_main_first_token"))
     _append_bounded_metric(bucket["tts_first_ms"], marks.get("t_tts_first_audio"))
-    _append_bounded_metric(bucket["playback_ms"], marks.get("t_playback_first_packet"))
+    _append_bounded_metric(bucket["playback_ms"], marks.get("t_local_first_playback") or marks.get("t_playback_first_packet"))
 
 
 def summarize_turn_path_metrics() -> list[dict[str, Any]]:
@@ -2326,6 +2380,16 @@ def proactive_question_scope_candidates(
     return scopes
 
 
+def record_session_question_asked(session_key: str | None, *, now: float | None = None) -> None:
+    key = session_key or "global"
+    state = session_question_state.setdefault(key, {"turn_index": 0, "question_turns": [], "frustration_until": 0.0})
+    turn_index = int(state.get("turn_index", 0))
+    turns = [int(item) for item in state.get("question_turns", []) if isinstance(item, int)]
+    turns.append(turn_index)
+    state["question_turns"] = turns[-10:]
+    state["last_question_at"] = time.monotonic() if now is None else float(now)
+
+
 def resolve_pending_proactive_question_for_turn(
     guild_id: int | None,
     user_text: str,
@@ -2349,30 +2413,40 @@ def resolve_pending_proactive_question_for_turn(
     return result
 
 
-def maybe_append_proactive_question(
-    answer_text: str,
+def select_and_mark_proactive_question(
     *,
     guild_id: int | None,
     source: str,
     user_text: str,
-    awaiting_user_reply: bool,
+    answer_text: str = "",
+    awaiting_user_reply: bool = False,
     room_key: str | None = None,
     person_key: str | None = None,
     session_key: str | None = None,
     session_memory_key: str | None = None,
+    runtime_block_reason: str = "",
     metrics: dict | None = None,
-) -> tuple[str, bool]:
-    answer = (answer_text or "").strip()
+) -> dict[str, Any] | None:
     if guild_id is None:
-        return answer, False
-    if not should_offer_proactive_question(
+        return None
+    session_scope_key = session_memory_key or session_key
+    cooldown_key = session_key or session_scope_key or "global"
+    session_cooldown = question_cooldown_hit(cooldown_key)
+    base_gate = evaluate_proactive_question_gate(
+        guild_id=guild_id,
         source=source,
         user_text=user_text,
-        answer_text=answer,
+        answer_text=answer_text,
         awaiting_user_reply=awaiting_user_reply,
-    ):
-        return answer, False
-    session_scope_key = session_memory_key or session_key
+        session_scope_key=session_scope_key,
+        session_cooldown_hit=session_cooldown,
+        runtime_block_reason=runtime_block_reason,
+    )
+    if metrics is not None:
+        metrics.setdefault("meta", {})["proactive_question_gate"] = base_gate.as_dict()
+    if not base_gate.allowed:
+        return None
+
     for scope_type, scope_key in proactive_question_scope_candidates(
         room_key=room_key,
         person_key=person_key,
@@ -2390,6 +2464,20 @@ def maybe_append_proactive_question(
         question_id = clean_text(str(candidate.get("id") or ""))
         if not ask_text or not question_id:
             continue
+        candidate_gate = evaluate_proactive_question_gate(
+            guild_id=guild_id,
+            source=source,
+            user_text=user_text,
+            answer_text=answer_text,
+            awaiting_user_reply=awaiting_user_reply,
+            session_scope_key=session_scope_key,
+            session_cooldown_hit=False,
+            candidate_text=ask_text,
+        )
+        if metrics is not None:
+            metrics.setdefault("meta", {})["proactive_question_candidate_gate"] = candidate_gate.as_dict()
+        if not candidate_gate.allowed:
+            continue
         marked = mark_question_asked(
             guild_id,
             question_id,
@@ -2400,13 +2488,59 @@ def maybe_append_proactive_question(
         )
         if not marked:
             continue
+        record_session_question_asked(cooldown_key)
+        result = {
+            "id": question_id,
+            "ask_text": ask_text,
+            "scope_type": scope_type,
+            "scope_key": scope_key,
+            "source": source,
+        }
         if metrics is not None:
-            metrics.setdefault("meta", {})["proactive_question_asked"] = {
-                "id": question_id,
-                "scope_type": scope_type,
-                "scope_key": scope_key,
-            }
-        return clean_text(f"{answer}\n\n{ask_text}"), True
+            metrics.setdefault("meta", {})["proactive_question_asked"] = result
+        return result
+    if metrics is not None:
+        metrics.setdefault("meta", {})["proactive_question_no_candidate"] = True
+    return None
+
+
+def maybe_append_proactive_question(
+    answer_text: str,
+    *,
+    guild_id: int | None,
+    source: str,
+    user_text: str,
+    awaiting_user_reply: bool,
+    room_key: str | None = None,
+    person_key: str | None = None,
+    session_key: str | None = None,
+    session_memory_key: str | None = None,
+    metrics: dict | None = None,
+) -> tuple[str, bool]:
+    answer = (answer_text or "").strip()
+    if guild_id is None:
+        return answer, False
+    if source in {"text", "control_page"} and not should_offer_proactive_question(
+        source=source,
+        user_text=user_text,
+        answer_text=answer,
+        awaiting_user_reply=awaiting_user_reply,
+    ):
+        return answer, False
+    marked = select_and_mark_proactive_question(
+        guild_id=guild_id,
+        source=source,
+        user_text=user_text,
+        answer_text=answer,
+        awaiting_user_reply=awaiting_user_reply,
+        room_key=room_key,
+        person_key=person_key,
+        session_key=session_key,
+        session_memory_key=session_memory_key,
+        metrics=metrics,
+    )
+    if marked:
+        return clean_text(f"{answer}\n\n{marked['ask_text']}"), True
     return answer, False
 
 
@@ -3137,6 +3271,8 @@ def fast_path_policy(text: str, source: str, room_state: dict | None = None) -> 
     cleaned = clean_text(text)
     if not cleaned:
         return {"route": "main_direct", "action": "wait", "reason_brief": "empty_input"}
+    if is_control_page_source(source):
+        return None
     if is_obvious_continue(cleaned, source, room_state):
         return {"route": "main_direct", "action": "wait", "reason_brief": "obvious_continue"}
     if should_force_search_query(cleaned):
@@ -3144,8 +3280,7 @@ def fast_path_policy(text: str, source: str, room_state: dict | None = None) -> 
     if is_simple_directive(cleaned, source=source):
         return {"route": "main_direct", "action": "answer", "reason_brief": "simple_directive"}
     if not needs_search_or_deep_routing(cleaned, source=source):
-        reason = "control_page_light_request" if is_control_page_source(source) else "light_request"
-        return {"route": "main_direct", "action": "answer", "reason_brief": reason}
+        return {"route": "main_direct", "action": "answer", "reason_brief": "light_request"}
     return None
 
 
@@ -3182,15 +3317,16 @@ def build_fast_cognitive_state(
     hint = "짧고 자연스럽게 답해라."
     if action == "wait":
         hint = "지금은 더 듣는 쪽이 자연스럽다. 아주 짧게 반응해라."
+    previous_ids = base.get("retrieved_context_ids") or []
     state = {
         "action": action if action in {"answer", "ask", "wait", "search_then_answer"} else "answer",
         "confidence": 0.92 if action == "answer" else 0.82,
         "user_intent": cleaned,
-        "state_summary": base.get("state_summary") or cleaned,
+        "state_summary": cleaned,
         "question_for_user": "",
-        "main_prompt_hint": base.get("main_prompt_hint") or hint,
+        "main_prompt_hint": hint,
         "reason_brief": reason_brief,
-        "retrieved_context_ids": base.get("retrieved_context_ids") or [],
+        "retrieved_context_ids": previous_ids if isinstance(previous_ids, list) else [],
         "updated_at": int(time.time()),
     }
     return normalize_cognitive_state(state)
@@ -3384,13 +3520,18 @@ def apply_ask_gating(cognitive_state: dict | None = None, *, source: str = "text
     return state
 
 
-def policy_response_for_state(cognitive_state: dict | None = None, *, source: str = "text") -> str | None:
+def policy_response_for_state(
+    cognitive_state: dict | None = None,
+    *,
+    source: str = "text",
+    user_text: str = "",
+) -> str | None:
     state = apply_ask_gating(cognitive_state, source=source)
     action = state.get("action", "answer")
 
     if action == "ask":
         question = clean_text(str(state.get("question_for_user", "")))
-        if question:
+        if question and not is_user_echo_answer(user_text, question):
             return question
         return None
 
@@ -4308,6 +4449,100 @@ def build_local_tool_diagnostic_context(user_text: str) -> str:
     return "\n".join(evidence[:18])
 
 
+def _skill_route_available(route_name: str, *, source: str) -> bool:
+    try:
+        return bool(skill_registry.find_by_route(route_name, source=source))
+    except Exception:
+        return False
+
+
+def _text_has_any_marker(text: str, markers: tuple[str, ...]) -> bool:
+    lowered = clean_text(text).lower()
+    compact = re.sub(r"\s+", "", lowered)
+    return any(marker in lowered or marker.replace(" ", "") in compact for marker in markers)
+
+
+def build_tool_awareness_context(
+    user_text: str,
+    *,
+    source: str = "text",
+    route_decision: RouteDecision | None = None,
+) -> str:
+    text = clean_text(user_text)
+    tools: list[str] = []
+    search_markers = (
+        "search",
+        "look up",
+        "find",
+        "check",
+        "weather",
+        "news",
+        "price",
+        "검색",
+        "찾아",
+        "찾아봐",
+        "확인",
+        "날씨",
+        "뉴스",
+        "가격",
+        "시세",
+        "환율",
+        "주가",
+        "최신",
+    )
+    runtime_markers = (
+        "runtime",
+        "status",
+        "voice",
+        "model",
+        "llm",
+        "evelyn",
+        "이블린",
+        "상태",
+        "음성",
+        "모델",
+        "서버",
+        "켜져",
+        "오류",
+        "에러",
+    )
+    minecraft_markers = (
+        "minecraft",
+        "voyager",
+        "inventory",
+        "마크",
+        "마인크래프트",
+        "보이저",
+        "인벤",
+    )
+
+    needs_search = bool(route_decision and (route_decision.needs_search or route_decision.action == "search_then_answer"))
+    needs_search = needs_search or _text_has_any_marker(text, search_markers)
+    if needs_search and _skill_route_available("search_executor", source=source):
+        tools.append("- search: use for current info, weather, prices, news, web lookup, and explicit find/check/search requests.")
+
+    if _text_has_any_marker(text, minecraft_markers):
+        tools.append("- minecraft.status: use runtime Minecraft/Voyager state when a Minecraft status or inventory question is asked.")
+
+    if _text_has_any_marker(text, runtime_markers):
+        tools.append("- runtime.status: use live Evelyn runtime/service status when the user asks about Evelyn, voice, model, server, or errors.")
+
+    if not tools and _skill_route_available("search_executor", source=source):
+        tools.append("- search: available if the user asks for current info, weather, prices, news, or explicit web lookup.")
+
+    if not tools:
+        return ""
+
+    return clean_text(
+        "TOOL_AWARENESS: Runtime, not memory, is the source of truth for tools. "
+        "Available tool shortlist for this turn: "
+        + " ".join(tools[:4])
+        + " Contract: if a tool is needed, do not give only a promise such as 'I'll look it up' as the final answer. "
+        "Route to the tool executor or produce a short preface that the runtime can escalate. "
+        "After a tool result exists, answer in the final phase grounded in that result."
+    )
+
+
 def build_main_response_guidance(
     cognitive_state: dict | None = None,
     *,
@@ -4336,15 +4571,11 @@ def build_main_response_guidance(
 
     if action == "ask":
         parts.append("짧게 확인 질문만 해라.")
-        if state.get("question_for_user"):
-            parts.append(f"되물을 말: {state['question_for_user']}")
     elif action == "wait":
         parts.append("길게 답하지 말고 더 들을 여지를 둬라.")
     else:
         parts.append("바로 답해라.")
 
-    if state.get("main_prompt_hint"):
-        parts.append(f"응답 추가 힌트: {state['main_prompt_hint']}")
     if runtime_status_context:
         parts.append(f"현재 Evelyn 런타임 상태 요약: {runtime_status_context}")
         parts.append("사용자가 Evelyn의 상태, 오류, 연결, 지연, 서버 상황을 물을 때만 이 런타임 상태를 근거로 답해라. 일반 대화에서는 먼저 꺼내지 마라.")
@@ -4355,6 +4586,14 @@ def build_main_response_guidance(
             "If `current_oom_signal=no`, do not say current OOM. "
             "If `recent_errors_are_historical=true`, treat recent_errors as historical logs, not proof of current OOM."
         )
+
+    tool_awareness_context = build_tool_awareness_context(
+        user_text,
+        source=source,
+        route_decision=route_decision,
+    )
+    if tool_awareness_context:
+        parts.append(tool_awareness_context)
 
     minecraft_summary = format_minecraft_state_summary(minecraft_state)
     if minecraft_summary:
@@ -4525,16 +4764,30 @@ def format_vision_observation(
     scene = clean_text(str(data.get("scene") or ""))
     ocr = clean_text(str(data.get("ocr") or ""))
     ocr_error = clean_text(str(data.get("ocr_error") or ""))
+    quality = build_vision_quality(data)
     lines = [
         "Local screen vision observation is available.",
         "This is the user's local screen capture, not authoritative Minecraft bot inventory/state.",
         "captured_image=discarded_after_analysis" if image_deleted else f"captured_image={image_path}",
         f"image_size={image_size[0]}x{image_size[1]}",
     ]
-    if scene:
+    if quality["no_usable_evidence"]:
+        lines.append("vision_quality=unreliable")
+        lines.append(
+            "The screen capture was taken, but the vision/OCR result is too weak or garbled to identify the screen contents. "
+            "Do not claim what is on screen; tell the user the capture/analysis result is unreliable and needs a better vision pass."
+        )
+    elif quality["weak"]:
+        lines.append("vision_quality=low_confidence")
+        lines.append("Use only the evidence below, and explicitly hedge uncertainty.")
+    if scene and not quality["scene_unreliable"]:
         lines.append("scene: " + scene[:900])
-    if ocr:
+    elif scene and quality["scene_unreliable"]:
+        lines.append("scene_omitted: repeated or unreliable vision output")
+    if ocr and not quality["ocr_corrupt"]:
         lines.append("ocr_text: " + ocr[:900])
+    elif ocr and quality["ocr_corrupt"]:
+        lines.append("ocr_text_omitted: OCR output looked corrupted or mixed with invalid characters")
     if ocr_error:
         lines.append("ocr_error: " + ocr_error[:300])
     lines.append("When answering, use this observation naturally. If the observation is weak, say only what is visible.")
@@ -4587,12 +4840,14 @@ async def build_live_vision_context(user_text: str, *, metrics: dict | None = No
 
     deleted = delete_request_vision_image(image_path)
     observation = format_vision_observation(image_path=image_path, image_size=image_size, data=data, image_deleted=deleted)
+    quality = build_vision_quality(data)
     if metrics is not None:
         metrics.setdefault("marks", {})["vision_ready"] = (time.monotonic() - started_at) * 1000.0
         metrics.setdefault("meta", {})["vision_capture_path"] = "" if deleted else str(image_path)
         metrics.setdefault("meta", {})["vision_capture_deleted"] = deleted
         metrics.setdefault("meta", {})["vision_ocr_chars"] = len(clean_text(str(data.get("ocr") or "")))
         metrics.setdefault("meta", {})["vision_scene_chars"] = len(clean_text(str(data.get("scene") or "")))
+        metrics.setdefault("meta", {})["vision_quality"] = dict(quality)
     return observation
 
 
@@ -4911,7 +5166,24 @@ async def prepare_llm_messages(
         session_state=session_snapshot,
     )
     dependency_context = build_evelyn_runtime_dependency_context()
-    runtime_context = "\n".join(part for part in (runtime_context, render_self_state_context(self_state), render_vision_watch_context(), dependency_context) if clean_text(part))
+    self_judgment_context = render_self_judgment_context(
+        user_text,
+        source=source,
+        state=self_state,
+        route=route,
+        context_policy=context_policy,
+    )
+    runtime_context = "\n".join(
+        part
+        for part in (
+            runtime_context,
+            render_self_state_context(self_state),
+            self_judgment_context,
+            render_vision_watch_context(),
+            dependency_context,
+        )
+        if clean_text(part)
+    )
     skill_context = build_minecraft_skill_context(
         context_policy,
         user_text=user_text,
@@ -4969,6 +5241,7 @@ async def prepare_llm_messages(
             },
             "minecraft_context": bool(live_context_minecraft_state),
             "vision_context": bool(vision_context),
+            "self_judgment_context": bool(self_judgment_context),
         }
 
     if cognitive_state is not None:
@@ -5180,7 +5453,7 @@ def build_memory_context(
 
     if vault_raw_rows:
         parts.append("문서 보관함에서 꺼낸 관련 대화:\n" + format_memory_row_lines(vault_raw_rows))
-    if state.get("state_summary") or state.get("question_for_user") or state.get("main_prompt_hint") or session_state:
+    if session_state:
         action_label = {
             "answer": "답하기",
             "ask": "질문하기",
@@ -5189,12 +5462,6 @@ def build_memory_context(
         state_lines = [f"- 권장 행동: {action_label}"]
         if state.get("user_intent"):
             state_lines.append(f"- 사용자 의도: {state['user_intent']}")
-        if state.get("state_summary"):
-            state_lines.append(f"- 현재 판단: {state['state_summary']}")
-        if state.get("question_for_user"):
-            state_lines.append(f"- 사용자에게 되물을 내부 질문 초안: {state['question_for_user']}")
-        if state.get("main_prompt_hint"):
-            state_lines.append(f"- 응답 힌트: {state['main_prompt_hint']}")
         if state.get("retrieved_context_ids"):
             state_lines.append(f"- 참고 문맥 ID: {', '.join(state['retrieved_context_ids'][:4])}")
         if session_state.get("last_speaker"):
@@ -6141,6 +6408,7 @@ def normalize_friend_style_output(text: str) -> str:
 
 def sanitize_model_output(text: str) -> str:
     text = text or ""
+    text = strip_model_channel_tags(text)
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE)
     text = re.sub(r"<think>.*$", "", text, flags=re.DOTALL | re.IGNORECASE)
     for stop_token in MAIN_LLM_STOP_TOKENS:
@@ -6292,15 +6560,166 @@ def answer_promises_search(answer_text: str) -> bool:
         "찾아보고 있어",
         "자료 찾아볼게",
     ]
-    return any(marker in text for marker in promise_markers)
+    promise_regexes = (
+        r"(찾아|검색|확인|알아|조사).{0,8}(볼게|볼께|보고|해볼게|해볼께|해서)",
+        r"(찾아서|검색해서|확인해서|알아봐서).{0,8}(알려줄게|말해줄게)",
+        r"(찾는 중|찾아보고 있어|자료 찾아볼게)",
+        r"(i'?ll|i will).{0,20}(search|look up|check|find)",
+    )
+    return any(marker in text for marker in promise_markers) or any(
+        re.search(pattern, text, flags=re.I) for pattern in promise_regexes
+    )
 
 
-def build_search_query(guild_id: int, user_text: str) -> str:
+def strip_search_answer_sources(answer_text: str) -> str:
+    text = str(answer_text or "")
+    if not text:
+        return ""
+
+    kept_lines: list[str] = []
+    source_prefixes = ("출처", "참고", "근거", "source", "sources", "reference", "references")
+    for line in text.splitlines():
+        cleaned_line = clean_text(line)
+        if not cleaned_line:
+            continue
+        lowered = cleaned_line.lower()
+        if any(lowered.startswith(prefix) for prefix in source_prefixes):
+            continue
+        kept_lines.append(cleaned_line)
+
+    text = "\n".join(kept_lines)
+    text = re.sub(r"\s*\([^)]*(?:https?://|www\.)[^)]*\)", "", text, flags=re.I)
+    text = re.sub(r"\s*\[[^\]]*(?:https?://|www\.)[^\]]*\]", "", text, flags=re.I)
+    text = re.sub(r"https?://\S+|www\.\S+", "", text, flags=re.I)
+    text = re.sub(r"\s*\((?:출처|참고|근거|source|sources|reference|references)\s*[:：]?[^\)]*\)", "", text, flags=re.I)
+    text = re.sub(r"\s*\[(?:출처|참고|근거|source|sources|reference|references)\s*[:：]?[^\]]*\]", "", text, flags=re.I)
+    text = re.sub(r"(?:^|\s)(?:출처|참고|근거|source|sources|reference|references)\s*[:：]\s*[^.!?。！？\n]+", "", text, flags=re.I)
+    return clean_text(text)
+
+
+def is_generic_search_followup_text(text: str) -> bool:
+    compact = re.sub(r"\s+", "", clean_text(strip_omnivoice_tags(text)).lower())
+    if not compact:
+        return False
+    return compact in {
+        "검색",
+        "검색해",
+        "검색해봐",
+        "찾아봐",
+        "찾아줘",
+        "찾아볼래",
+        "확인해",
+        "확인해봐",
+        "알아봐",
+        "알아봐줘",
+        "찾아보고말해줘",
+        "검색해서알려줘",
+    }
+
+
+def is_underspecified_weather_query(text: str) -> bool:
+    compact = re.sub(r"\s+", "", clean_text(strip_omnivoice_tags(text)).lower())
+    if not compact or "날씨" not in compact:
+        return False
+    return compact in {
+        "날씨",
+        "날씨알려줘",
+        "날씨알려줘요",
+        "날씨검색",
+        "날씨검색해",
+        "날씨검색해봐",
+        "날씨찾아봐",
+        "날씨찾아줘",
+        "오늘날씨",
+        "오늘날씨알려줘",
+        "지금날씨",
+        "지금날씨알려줘",
+        "weather",
+    }
+
+
+def recent_user_text_candidates(messages: list[dict[str, Any]] | None, *, exclude_text: str = "", limit: int = 8) -> list[str]:
+    excluded = clean_text(exclude_text).lower()
+    candidates: list[str] = []
+    for item in reversed(list(messages or [])):
+        if not isinstance(item, dict) or item.get("role") != "user":
+            continue
+        content = clean_text(str(item.get("content") or ""))
+        if not content or content.lower() == excluded:
+            continue
+        candidates.append(content)
+        if len(candidates) >= limit:
+            break
+    return candidates
+
+
+def resolve_contextual_search_query(
+    user_text: str,
+    *,
+    messages: list[dict[str, Any]] | None = None,
+) -> str:
     text = clean_text(strip_omnivoice_tags(user_text))
+    recent_users = recent_user_text_candidates(messages, exclude_text=text)
+    if is_generic_search_followup_text(text):
+        for candidate in recent_users:
+            if is_generic_search_followup_text(candidate):
+                continue
+            return candidate
+    if is_underspecified_weather_query(text):
+        for candidate in recent_users:
+            if "날씨" in candidate and not is_underspecified_weather_query(candidate):
+                return candidate
+    return text
+
+
+def enrich_weather_search_query_from_context(
+    user_text: str,
+    *,
+    messages: list[dict[str, Any]] | None = None,
+    memory_summary: str = "",
+) -> str:
+    text = clean_text(strip_omnivoice_tags(user_text))
+    if not is_weather_query(text) or extract_korean_location_hint(text):
+        return text
+    recent_users = recent_user_text_candidates(messages, exclude_text=text, limit=10)
+    location = resolve_recent_weather_location(recent_users)
+    if not location and memory_summary:
+        location = extract_korean_location_hint(memory_summary)
+    if not location:
+        return text
+    return clean_text(f"{location} {text}")
+
+
+def build_search_query(
+    guild_id: int | None,
+    user_text: str,
+    *,
+    session_key: str | None = None,
+    messages: list[dict[str, Any]] | None = None,
+) -> str:
+    text = clean_text(strip_omnivoice_tags(user_text))
+    context_messages = list(messages or [])
+    if not context_messages and session_key is not None:
+        context_messages = list(get_conversation_history(session_key=session_key, guild_id=guild_id))
+    contextual = resolve_contextual_search_query(text, messages=context_messages)
+    if contextual and contextual != text:
+        return contextual
+    summary = ""
+    if guild_id is not None:
+        summary = compact_working_summary(read_text_file(memory_summary_path(guild_id)))
+    weather_contextual = enrich_weather_search_query_from_context(
+        text,
+        messages=context_messages,
+        memory_summary=summary,
+    )
+    if weather_contextual and weather_contextual != text:
+        return weather_contextual
     if len(text) >= 8:
         return text
 
-    summary = compact_working_summary(read_text_file(memory_summary_path(guild_id)))
+    if guild_id is None:
+        return text
+
     if summary:
         return clean_text(f"{text} {summary}")
     return text
@@ -6425,7 +6844,7 @@ async def answer_from_search_results(query: str, results: list[dict]) -> str:
                 "content": (
                     "너는 검색 결과를 짧게 정리하는 비서다. 검색은 이미 끝났다. "
                     "'찾아볼게', '찾는 중', '확인해볼게' 같은 표현은 절대 쓰지 마라. "
-                    "찾은 내용만 한국어로 바로 말하고, 한두 문장 뒤에 필요하면 출처 1~2개를 괄호로 덧붙여라."
+                    "찾은 내용만 한국어로 바로 말해라. 출처, 링크, URL, 참고자료 목록, 괄호 citation은 절대 출력하지 마라."
                 ),
             },
             {
@@ -6434,7 +6853,7 @@ async def answer_from_search_results(query: str, results: list[dict]) -> str:
                     f"사용자 질문:\n{query}\n\n"
                     + "검색 결과:\n"
                     + "\n".join(
-                        f"- {clean_text(row.get('title', ''))} | {clean_text(row.get('snippet', ''))} | {clean_text(row.get('url', ''))}"
+                        f"- {clean_text(row.get('title', ''))} | {clean_text(row.get('snippet', ''))}"
                         for row in results[:5]
                     )
                 ),
@@ -6456,15 +6875,15 @@ async def answer_from_search_results(query: str, results: list[dict]) -> str:
     choices = data.get("choices", [])
     if not choices:
         first = results[0]
-        return clean_text(f"찾아보니까 {first.get('snippet', '')} ({first.get('url', '')})")
+        return strip_search_answer_sources(f"찾아보니까 {first.get('snippet', '')}")
 
     message = choices[0].get("message", {})
     answer = sanitize_model_output(message.get("content", ""))
     if answer:
-        return answer
+        return strip_search_answer_sources(answer)
 
     first = results[0]
-    return clean_text(f"찾아보니까 {first.get('snippet', '')} ({first.get('url', '')})")
+    return strip_search_answer_sources(f"찾아보니까 {first.get('snippet', '')}")
 
 
 async def deliver_proactive_followup(
@@ -6681,16 +7100,16 @@ def schedule_search_followup(
     if not guild_id:
         return
     opts = apply_runtime_mode(runtime_mode or "normal")
-    if opts.get("skip_search_followup") and not force:
-        return
     tagged_action, stripped_answer = parse_response_action_tag(answer)
     wants_search_by_tag = tagged_action == "search"
     wants_search_by_fallback = answer_promises_search(stripped_answer)
     if wants_search_by_tag:
         wants_search_by_fallback = False
+    if opts.get("skip_search_followup") and not force and not wants_search_by_tag and not wants_search_by_fallback:
+        return
     if not force and not wants_search_by_tag and not wants_search_by_fallback:
         return
-    query = build_search_query(guild_id, user_text)
+    query = build_search_query(guild_id, user_text, session_key=session_key)
     if len(query) < 2:
         return
     task_key = runtime_session_key(session_key=session_key, guild_id=guild_id)
@@ -6820,7 +7239,8 @@ async def warmup_voice_path(*, reason: str, key: str | None = None, include_stt:
             return
         print(f"[STARTUP] voice_path_warmup_begin reason={reason} key={lock_key}")
         if include_stt:
-            await asyncio.to_thread(get_stt_model)
+            if not STT_SERVICE_URL:
+                await asyncio.to_thread(get_stt_model)
             await asyncio.to_thread(warmup_stt_sync)
         if include_llm:
             await warmup_llm()
@@ -7171,6 +7591,7 @@ def log_voice_latency(metrics: dict | None, key: str, label: str) -> None:
         "tts_first_byte_logged": ["t_tts_first_byte", "t_tts_first_audio"],
         "tts_first_frame_logged": ["t_tts_first_frame"],
         "first_packet_sent_logged": ["t_playback_first_packet"],
+        "local_first_playback_logged": ["t_local_first_playback"],
     }
     aliases = alias_map.get(key, [])
     for alias in aliases:
@@ -7261,6 +7682,7 @@ def log_voice_bottleneck_summary(
             f"tts_first={_fmt('tts_first_byte_logged')}",
             f"tts_frame={_fmt('tts_first_frame_logged')}",
             f"playback={_fmt('first_packet_sent_logged')}",
+            f"local_playback={_fmt('local_first_playback_logged')}",
             f"p95_stt={p95_summary['stt_ms_p95']:.0f}ms",
             f"p95_router={p95_summary['router_ms_p95']:.0f}ms",
             f"p95_main_first={p95_summary['main_first_token_ms_p95']:.0f}ms",
@@ -7348,6 +7770,7 @@ async def create_omnivoice_source(
                 "voice": tts_request.voice,
                 "response_format": tts_request.response_format,
                 "stream": tts_request.stream,
+                "num_step": OMNIVOICE_NUM_STEP,
             }
             if OMNIVOICE_SPEED > 0 and abs(OMNIVOICE_SPEED - 1.0) > 0.001:
                 payload["speed"] = OMNIVOICE_SPEED
@@ -7415,6 +7838,22 @@ async def create_omnivoice_source(
                                 ),
                             )
                         source.feed_pcm24_mono(chunk)
+                if not first_pcm_logged:
+                    return TtsSynthResult(
+                        request_id=tts_request.request_id,
+                        turn_id=tts_request.turn_id,
+                        backend="omnivoice_http",
+                        ok=False,
+                        response_format=tts_request.response_format,
+                        sample_rate_hz=tts_request.sample_rate_hz,
+                        profile_resolved=tts_request.voice,
+                        status_code=resp.status,
+                        latency_ms=(time.monotonic() - request_started_mono) * 1000.0,
+                        first_audio_ms=first_audio_ms,
+                        error_code="empty_audio",
+                        error_text="OmniVoice returned no PCM bytes.",
+                        metadata=tts_request.metadata,
+                    )
                 return TtsSynthResult(
                     request_id=tts_request.request_id,
                     turn_id=tts_request.turn_id,
@@ -7501,7 +7940,8 @@ def get_stt_model() -> tuple[str, Any, Any]:
         return stt_backend, stt_processor, stt_model
 
     if Qwen3ASRModel is None:
-        raise RuntimeError("qwen-asr 패키지가 설치되지 않았습니다. `pip install -r requirements.txt` 후 다시 실행하세요.")
+        detail = f" ({type(QWEN_ASR_IMPORT_ERROR).__name__}: {QWEN_ASR_IMPORT_ERROR})" if QWEN_ASR_IMPORT_ERROR else ""
+        raise RuntimeError(f"qwen-asr를 불러오지 못했습니다{detail}. STT 의존성을 확인한 뒤 다시 실행하세요.")
 
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
     token = os.getenv("HF_TOKEN")
@@ -7534,6 +7974,26 @@ def transcribe_audio16k_sync(audio16k: np.ndarray, max_new_tokens: int = 256, *,
 
     effective_rate = max(1, int(sampling_rate))
     print(f"[STT INPUT][{stage}] sampling_rate={effective_rate} samples={audio16k.size} sec={audio16k.size / float(effective_rate):.2f}")
+    if STT_SERVICE_URL:
+        try:
+            language = normalize_stt_language() if STT_FORCE_LANGUAGE else None
+            result = transcribe_audio16k_via_service(
+                audio16k,
+                service_url=STT_SERVICE_URL,
+                timeout_sec=STT_SERVICE_TIMEOUT_SEC,
+                sampling_rate=effective_rate,
+                max_new_tokens=max_new_tokens,
+                stage=stage,
+                language=language,
+            )
+            text = clean_text(str(result.get("text") or ""))
+            print(f"[STT REMOTE DONE][{stage}] text={text!r}")
+            return text
+        except Exception as exc:
+            print(f"[STT REMOTE FAIL][{stage}] {exc!r}")
+            if not STT_SERVICE_FALLBACK_LOCAL:
+                raise
+
     backend, _processor, model = get_stt_model()
     stt_audio = np.asarray(audio16k, dtype=np.float32)
 
@@ -8207,7 +8667,16 @@ async def speak_answer_local(
             wait_until_ready = getattr(source, "wait_until_ready", None)
             if wait_until_ready is not None:
                 await wait_until_ready(timeout=max(0.2, OMNIVOICE_TIMEOUT_SEC))
-            return await local_tts_playback_manager.play_source(source, cleanup_source=True)
+            return await local_tts_playback_manager.play_source(
+                source,
+                cleanup_source=True,
+                on_first_playback=lambda: _mark_local_tts_first_playback(
+                    metrics,
+                    turn_id=turn_id,
+                    chunk_index=1,
+                    session_key=session_key,
+                ),
+            )
     except asyncio.CancelledError:
         raise
     except Exception as exc:
@@ -8215,6 +8684,194 @@ async def speak_answer_local(
         return False
     finally:
         _detach_task(turn_scope, task)
+
+
+def _cleanup_prepared_tts_item(item: object) -> None:
+    if isinstance(item, tuple) and len(item) >= 2:
+        cleanup = getattr(item[1], "cleanup", None)
+        if cleanup is not None:
+            with contextlib.suppress(Exception):
+                cleanup()
+
+
+def _mark_local_tts_first_playback(
+    metrics: dict | None,
+    *,
+    turn_id: str | None,
+    chunk_index: int,
+    session_key: str | None,
+) -> None:
+    if not metrics or "local_tts_first_playback" not in (metrics.get("marks") or {}):
+        mark_turn_stage(
+            metrics,
+            "local_tts_first_playback",
+            event_name="local_tts_first_playback",
+            turn_id=turn_id,
+            chunk_index=chunk_index,
+            session_key=session_key,
+            output_mode="local_speaker",
+        )
+    log_voice_latency(metrics, "local_first_playback_logged", "Local speaker first playback")
+
+
+async def stream_local_tts_sentences(
+    sentence_queue: "asyncio.Queue[str | None]",
+    *,
+    metrics: dict | None = None,
+    turn_id: str | None = None,
+    session_key: str | None = None,
+    turn_scope: TurnScope | None = None,
+) -> int:
+    if not local_tts_playback_manager.enabled:
+        return 0
+
+    task = _attach_current_task(turn_scope)
+    if turn_scope is not None:
+        turn_scope.transition(TurnState.TTS_RUNNING, reason="local_speaker_stream_tts")
+
+    def check_cancelled() -> None:
+        if turn_scope is not None:
+            turn_scope.raise_if_cancelled()
+
+    async def synthesize_source(sentence: str, chunk_index: int) -> OmniVoicePCMStream:
+        text = clean_tts_text(strip_omnivoice_tags(sentence) or sentence)
+        return await create_omnivoice_source(
+            text,
+            turn_id=turn_id,
+            chunk_index=chunk_index,
+            session_key=session_key,
+            turn_scope=turn_scope,
+            trace_payload={
+                "source_type": "LocalSpeakerOmniVoicePCMStream",
+                "output_mode": "local_speaker",
+                "delivery_mode": "llm_sentence_stream",
+            },
+            on_request_start=lambda ci=chunk_index: (
+                mark_turn_stage(metrics, "tts_request_start", event_name="local_tts_request_start", chunk_index=ci),
+                log_voice_latency(metrics, "tts_request_logged", "Local TTS request start"),
+            ),
+            on_response_headers=lambda: log_voice_latency(metrics, "tts_response_headers_logged", "Local TTS response headers"),
+            on_first_byte=lambda ci=chunk_index: (
+                mark_turn_stage(metrics, "tts_first_byte", event_name="local_tts_first_byte", chunk_index=ci),
+                log_voice_latency(metrics, "tts_first_byte_logged", "Local TTS first byte"),
+            ),
+            on_first_frame=lambda: log_voice_latency(metrics, "tts_first_frame_logged", "Local TTS first frame"),
+            on_first_packet_sent=lambda ci=chunk_index: (
+                log_voice_latency(metrics, "first_packet_sent_logged", "Local speaker first packet"),
+                log_turn_event(
+                    "local_tts_first_packet_sent",
+                    turn_id=turn_id,
+                    chunk_index=ci,
+                    session_key=session_key,
+                ),
+            ),
+        )
+
+    def record_prefetch_failure(exc: Exception) -> None:
+        record_voice_pipeline_failure(
+            "tts_request_failed",
+            exc,
+            metrics,
+            turn_id=turn_id,
+            session_key=session_key,
+            stage="local_speaker_stream_prefetch",
+        )
+
+    played_chunks = 0
+    prepared_queue: asyncio.Queue[object] | None = None
+    prefetch_task: asyncio.Task | None = None
+    try:
+        async with tts_lock:
+            prepared_queue = asyncio.Queue(maxsize=max(1, int(TTS_PREFETCH_CHUNKS)))
+            prefetch_task = create_turn_scoped_task(
+                prefetch_tts_sources(
+                    sentence_queue,
+                    prepared_queue,
+                    synthesize_source=synthesize_source,
+                    ready_timeout_sec=OMNIVOICE_TIMEOUT_SEC,
+                    check_cancelled=check_cancelled,
+                    on_failure=record_prefetch_failure,
+                ),
+                turn_scope=turn_scope,
+            )
+            while True:
+                check_cancelled()
+                item = await prepared_queue.get()
+                if item is None:
+                    break
+                if isinstance(item, Exception):
+                    raise item
+                if not isinstance(item, tuple) or len(item) < 2:
+                    continue
+                chunk_index, source = item
+                try:
+                    ok = await local_tts_playback_manager.play_source(
+                        source,
+                        cleanup_source=True,
+                        on_first_playback=lambda ci=int(chunk_index or 0): _mark_local_tts_first_playback(
+                            metrics,
+                            turn_id=turn_id,
+                            chunk_index=ci,
+                            session_key=session_key,
+                        ),
+                    )
+                except Exception as exc:
+                    record_voice_pipeline_failure(
+                        "tts_playback_failed",
+                        exc,
+                        metrics,
+                        turn_id=turn_id,
+                        session_key=session_key,
+                        stage="local_speaker_stream",
+                        chunk_index=int(chunk_index or 0),
+                    )
+                    raise
+                if ok:
+                    played_chunks += 1
+    finally:
+        if prefetch_task is not None and not prefetch_task.done():
+            prefetch_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await prefetch_task
+        if prepared_queue is not None:
+            while True:
+                try:
+                    leftover = prepared_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                _cleanup_prepared_tts_item(leftover)
+        _detach_task(turn_scope, task)
+
+    return played_chunks
+
+
+def start_streaming_local_voice_delivery(
+    *,
+    metrics: dict,
+    turn_id: str | None,
+    session_key: str | None,
+    turn_scope: TurnScope | None,
+) -> StreamingVoiceDelivery:
+    sentence_queue: asyncio.Queue[str | None] = asyncio.Queue()
+    tts_sink = TTSQueueSink(sentence_queue, log=print)
+    playback_task = create_turn_scoped_task(
+        stream_local_tts_sentences(
+            sentence_queue,
+            metrics=metrics,
+            turn_id=turn_id,
+            session_key=session_key,
+            turn_scope=turn_scope,
+        ),
+        turn_scope=turn_scope,
+    )
+    return StreamingVoiceDelivery(
+        sentence_queue,
+        tts_sink,
+        playback_task,
+        metrics=metrics,
+        log_stage=log_voice_stage,
+        prefetch_chunks=TTS_PREFETCH_CHUNKS,
+    )
 
 
 def schedule_local_control_tts(
@@ -8325,12 +8982,10 @@ async def build_first_response(
         debug_text=debug_text,
         metrics=metrics,
     )
-    if route_decision.user_visible_preface:
+    if route_decision.user_visible_preface and not is_user_echo_answer(user_text, route_decision.user_visible_preface):
         return build_answer_payload_from_text(route_decision.user_visible_preface), "", gated_state
 
     guided_user_text = user_text
-    if gated_state and gated_state.get("action") == "ask" and gated_state.get("question_for_user"):
-        guided_user_text = clean_text(str(gated_state.get("question_for_user", "")))
     lightweight_persona_turn = is_casual_call_or_status_question(guided_user_text)
     live_minecraft_state = None if lightweight_persona_turn else await observe_live_minecraft_state(guild_id)
     runtime_status_context = await build_runtime_status_context(force=bool(route_decision.needs_runtime_state))
@@ -8486,6 +9141,161 @@ async def execute_main_llm_once(
     return fallback_answer_for(user_text), "fallback_empty_body"
 
 
+def render_tool_synthesis_recent_context(
+    messages: list[dict[str, Any]] | None,
+    *,
+    user_text: str,
+    max_items: int = 6,
+    max_chars: int = 900,
+) -> str:
+    current = clean_text(user_text).lower()
+    rendered: list[str] = []
+    for item in list(messages or [])[-max_items:]:
+        if not isinstance(item, dict):
+            continue
+        role = clean_text(str(item.get("role") or ""))
+        if role not in {"user", "assistant"}:
+            continue
+        content = clean_text(str(item.get("content") or ""))
+        if not content or content.lower() == current:
+            continue
+        label = "user" if role == "user" else "assistant"
+        rendered.append(f"{label}: {compact_memory_text(content, max_chars=180)}")
+    context = "\n".join(rendered)
+    return compact_memory_text(context, max_chars=max_chars)
+
+
+def tool_synthesis_answer_drifted(answer: str, *, user_text: str, tool_result_text: str) -> bool:
+    cleaned_answer = clean_text(answer)
+    if not cleaned_answer:
+        return False
+    anchor = f"{clean_text(user_text)}\n{clean_text(tool_result_text)}"
+    suspicious_terms = ("동물", "버튼", "좌표", "클릭")
+    if any(term in cleaned_answer and term not in anchor for term in suspicious_terms):
+        return True
+    if any(phrase in cleaned_answer for phrase in ("질문했을 때", "요청했습니다", "요청했어")):
+        if "날씨" in anchor and "날씨" in cleaned_answer:
+            return True
+    return False
+
+
+async def synthesize_tool_result_with_main_llm(
+    *,
+    user_text: str,
+    tool_name: str,
+    tool_result_text: str,
+    guild_id: int | None = None,
+    session_key: str | None = None,
+    source: str = "text",
+    messages: list[dict[str, Any]] | None = None,
+    cognitive_state: dict | None = None,
+    route_decision: RouteDecision | None = None,
+    metrics: dict | None = None,
+) -> str:
+    cleaned_user = clean_text(user_text)
+    cleaned_result = clean_text(tool_result_text)
+    if not cleaned_user or not cleaned_result:
+        return cleaned_result
+    if metrics is not None:
+        metrics.setdefault("meta", {})["main_synthesis_requested"] = {
+            "tool_name": clean_text(tool_name) or "tool",
+            "tool_result_chars": len(cleaned_result),
+        }
+    recent_context = render_tool_synthesis_recent_context(messages, user_text=cleaned_user)
+    synthesis_prompt = (
+        "A tool result is now available. Produce the final answer to the user in Korean.\n"
+        "This is the final answer phase, not a preface. Do not say that you will look it up now.\n"
+        "Use Evelyn's normal conversational tone. If the tool result is weak or incomplete, say so plainly and give the best next step.\n"
+        "Treat recent context only as a way to resolve short follow-ups like 'search it' or 'tell me the weather'.\n"
+        "Do not introduce unrelated objects, buttons, coordinates, animals, or old topics unless they appear in the original request or tool result.\n"
+        "Ground the final answer in the tool result below.\n\n"
+        f"Original user request:\n{cleaned_user}\n\n"
+        f"Recent conversation context for ellipsis resolution only:\n{recent_context or '(none)'}\n\n"
+        f"Tool name:\n{clean_text(tool_name) or 'tool'}\n\n"
+        f"Tool result:\n{cleaned_result}"
+    )
+    final_user_text = (
+        f"{synthesis_prompt}\n\n"
+        f"{build_main_response_guidance(cognitive_state, source=source, user_text=cleaned_user, session_key=session_key, guild_id=guild_id, route_decision=route_decision)}"
+    )
+    payload = build_main_llm_payload(
+        model_name=MODEL_NAME,
+        messages=[],
+        final_user_text=final_user_text,
+        source=source,
+        stream=False,
+        content_format=MAIN_LLM_CHAT_CONTENT_FORMAT,
+        max_tokens=VOICE_LLM_MAX_TOKENS,
+        stop_tokens=MAIN_LLM_STOP_TOKENS,
+    )
+    answer, answer_source = await execute_main_llm_once(
+        payload=payload,
+        user_text=cleaned_user,
+    )
+    answer = strip_search_answer_sources(sanitize_model_output(answer))
+    if tool_synthesis_answer_drifted(answer, user_text=cleaned_user, tool_result_text=cleaned_result):
+        if metrics is not None:
+            metrics.setdefault("meta", {})["main_synthesis_drift_guard"] = True
+        answer = cleaned_result
+    if route_decision is not None:
+        answer, question_shape_meta = enforce_question_limits(answer, route_decision)
+        record_question_trace(
+            route_decision=route_decision,
+            answer=answer,
+            shape_meta=question_shape_meta,
+            metrics=metrics,
+            cooldown_hit=bool((metrics or {}).get("meta", {}).get("question_cooldown_hit")) if isinstance(metrics, dict) else False,
+        )
+    if metrics is not None:
+        metrics.setdefault("meta", {})["main_synthesis_answer_source"] = answer_source
+    return clean_text(answer) or cleaned_result
+
+
+async def resolve_promised_search_final_answer(
+    *,
+    user_text: str,
+    answer_text: str,
+    guild_id: int | None = None,
+    session_key: str | None = None,
+    source: str = "text",
+    messages: list[dict[str, Any]] | None = None,
+    cognitive_state: dict | None = None,
+    route_decision: RouteDecision | None = None,
+    metrics: dict | None = None,
+) -> str:
+    answer = clean_text(answer_text)
+    if not answer or not answer_promises_search(answer):
+        return answer
+    if has_negated_search_marker(user_text):
+        if metrics is not None:
+            metrics.setdefault("meta", {})["promised_search_escalation_skipped"] = "negated_search"
+        return answer
+    if metrics is not None:
+        metrics.setdefault("meta", {})["promised_search_escalated"] = True
+
+    action_result = await execute_search_then_answer_action(
+        guild_id=guild_id,
+        user_text=user_text,
+        session_key=session_key,
+        messages=messages,
+    )
+    final_answer = await synthesize_tool_result_with_main_llm(
+        user_text=user_text,
+        tool_name="search",
+        tool_result_text=action_result.answer_text,
+        guild_id=guild_id,
+        session_key=session_key,
+        source=source,
+        messages=messages,
+        cognitive_state=cognitive_state,
+        route_decision=route_decision,
+        metrics=metrics,
+    )
+    if final_answer and not answer_promises_search(final_answer):
+        return final_answer
+    return clean_text(action_result.answer_text) or answer
+
+
 async def ask_llm_once(
     user_text: str,
     guild_id: int | None = None,
@@ -8526,7 +9336,7 @@ async def ask_llm_once(
         messages=messages,
         allow_internal_routes={"main_direct", "policy_short_circuit", "search_executor"},
     )
-    if skill_route_answer:
+    if skill_route_answer and not is_user_echo_answer(user_text, skill_route_answer):
         if session_key is not None:
             update_session_state(
                 session_key,
@@ -8538,7 +9348,7 @@ async def ask_llm_once(
         log_voice_stage(metrics, "LLM 2단계 요청 끝남", extra=f"skill_route={route_decision.route} answer_len={len(skill_route_answer)}")
         return build_answer_payload_from_text(skill_route_answer).display_text
 
-    if route_decision.user_visible_preface:
+    if route_decision.user_visible_preface and not is_user_echo_answer(user_text, route_decision.user_visible_preface):
         if session_key is not None:
             update_session_state(
                 session_key,
@@ -8570,6 +9380,17 @@ async def ask_llm_once(
         user_text=user_text,
     )
     answer = sanitize_unrequested_minecraft_leak(guided_user_text, answer)
+    answer = await resolve_promised_search_final_answer(
+        user_text=user_text,
+        answer_text=answer,
+        guild_id=guild_id,
+        session_key=session_key,
+        source=source,
+        messages=messages,
+        cognitive_state=cognitive_state,
+        route_decision=route_decision,
+        metrics=metrics,
+    )
     answer, question_shape_meta = enforce_question_limits(answer, route_decision)
     if record_question_trace_enabled:
         record_question_trace(
@@ -8888,13 +9709,7 @@ CONTROL_PAGE_COMMANDS: list[dict[str, str]] = [
     {"command": "/shutdown", "template": "/shutdown", "summary": "Evelyn runtime 종료 (Shut down Evelyn runtime)", "visibility": "always", "group": "시스템"},
 ]
 
-CONTROL_PAGE_UI_PANELS: dict[str, str] = {
-    "runtime": "Runtime",
-    "diagnostics": "Diagnostics",
-    "avatar": "Avatar",
-    "chat": "Chat",
-    "memory": "Memory",
-}
+CONTROL_PAGE_UI_PANELS: dict[str, str] = dict(SHARED_CONTROL_PAGE_UI_PANELS)
 
 CONTROL_PAGE_UI_PANEL_ALIASES: dict[str, str] = {
     "status": "runtime",
@@ -9101,6 +9916,108 @@ def append_control_page_chat_log(guild_id: int, role: str, author: str, text: st
 
 def get_control_page_chat_log(guild_id: int) -> list[dict[str, Any]]:
     return [dict(row) for row in control_page_chat_logs.get(guild_id, [])]
+
+
+def sanitize_control_page_welcome_text(text: str) -> str:
+    cleaned = clean_text(text).strip().strip("\"'“”‘’")
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    if not cleaned:
+        return clean_text(CONTROL_PAGE_WELCOME_FALLBACK)
+    if len(cleaned) > 120:
+        cleaned = cleaned[:120].rstrip(" ,.!?…") + "..."
+    return cleaned
+
+
+async def generate_control_page_welcome_text(guild: discord.Guild | None) -> str:
+    guild_name = control_page_effective_guild_name(guild)
+    user_text = "컨트롤 페이지 첫 화면에 띄울 짧은 환영문구를 하나만 만들어줘."
+    prompt = (
+        "너는 이블린(E.V.E.L.Y.N)이다. 정훈이 컨트롤 페이지를 처음 열었을 때 보일 첫 말풍선을 만든다.\n"
+        "조건:\n"
+        "- 한국어 한 문장만 출력한다.\n"
+        "- 18~55자 정도로 짧게 쓴다.\n"
+        "- 살짝 재치있고 따뜻하지만 과장하지 않는다.\n"
+        "- 명령어 설명, /memory 안내, 기능 소개, 마크다운, 따옴표, 이모지는 쓰지 않는다.\n"
+        "- 현재 상태를 확인한 척하지 않는다.\n"
+        f"- 현재 공간 이름: {guild_name}\n"
+    )
+    payload = build_main_llm_payload(
+        model_name=MODEL_NAME,
+        messages=[],
+        final_user_text=prompt,
+        source="control_page",
+        stream=False,
+        content_format=MAIN_LLM_CHAT_CONTENT_FORMAT,
+        temperature=0.65,
+        max_tokens=72,
+        stop_tokens=MAIN_LLM_STOP_TOKENS,
+    )
+    started_at = time.monotonic()
+    try:
+        session = await get_http_session()
+        timeout = aiohttp.ClientTimeout(total=CONTROL_PAGE_WELCOME_LLM_TIMEOUT_SEC)
+        async with session.post(LLM_SERVER_URL, json=payload, timeout=timeout) as resp:
+            if resp.status != 200:
+                error_text = await resp.text()
+                raise RuntimeError(f"LLM 서버 오류: {resp.status} / {error_text[:300]}")
+            data = await resp.json()
+        choices = data.get("choices", [])
+        if not choices:
+            raise RuntimeError("LLM returned empty choices")
+        answer, _answer_source, _finish_reason = extract_main_llm_answer_from_choice(
+            choices[0],
+            user_text,
+            sanitize_output=sanitize_model_output,
+            parse_response_action_tag=parse_response_action_tag,
+            extract_answer_from_reasoning=extract_answer_from_reasoning,
+        )
+        welcome = sanitize_control_page_welcome_text(answer)
+        record_model_call_trace(
+            model_role="main_llm",
+            purpose="control_page_welcome",
+            hot_path=False,
+            started_at=started_at,
+            success=True,
+            model_name=MODEL_NAME,
+            endpoint=LLM_SERVER_URL,
+            source="control_page",
+            guild_id=control_page_effective_guild_id(guild),
+        )
+        return welcome
+    except Exception as exc:
+        record_model_call_trace(
+            model_role="main_llm",
+            purpose="control_page_welcome",
+            hot_path=False,
+            started_at=started_at,
+            success=False,
+            error=exc,
+            model_name=MODEL_NAME,
+            endpoint=LLM_SERVER_URL,
+            source="control_page",
+            guild_id=control_page_effective_guild_id(guild),
+        )
+        print(f"[CONTROL PAGE] welcome_generation_failed err={exc!r}")
+        return clean_text(CONTROL_PAGE_WELCOME_FALLBACK)
+
+
+async def ensure_control_page_welcome_message(
+    guild: discord.Guild | None,
+    *,
+    runtime_services: dict[str, Any] | None = None,
+) -> None:
+    services = runtime_services or {}
+    if not bool(services.get("mainReady")):
+        return
+    guild_id = control_page_effective_guild_id(guild)
+    if get_control_page_chat_log(guild_id):
+        return
+    lock = control_page_welcome_locks.setdefault(guild_id, asyncio.Lock())
+    async with lock:
+        if get_control_page_chat_log(guild_id):
+            return
+        welcome = await generate_control_page_welcome_text(guild)
+        append_control_page_chat_log(guild_id, "assistant", "Evelyn", welcome)
 
 
 def select_control_page_guild(requested_guild_id: int | None = None) -> discord.Guild | None:
@@ -10046,6 +10963,39 @@ def build_control_page_status_text(guild: discord.Guild, minecraft: dict[str, An
     )
 
 
+def build_control_page_local_status_text(runtime_services: dict[str, Any] | None = None) -> str:
+    services = dict(runtime_services or {})
+    local_tts = local_tts_playback_manager.snapshot()
+    local_mic = serialize_local_mic_runtime_state()
+    local_speaking = bool(local_tts.get("active"))
+    local_listening = bool(local_mic.get("enabled") and local_mic.get("captureReady"))
+    codex_required = bool(services.get("codexRequired"))
+    codex_ready = bool(services.get("codexReady")) if services.get("codexReady") is not None else False
+    lines = [
+        "Evelyn 로컬 상태",
+        f"- 모드: local-only ({'Discord 꺼짐' if not DISCORD_ENABLED else 'Discord 켜짐'})",
+        f"- Bot API: {control_page_local_url()}",
+        f"- Main LLM: {command_status(bool(services.get('mainReady')))} / {MODEL_NAME}",
+        f"- Router LLM: {command_status(bool(services.get('routerReady')))} / {ROUTER_MODEL_NAME}",
+        f"- Summary LLM: {command_status(bool(services.get('subReady')))} / {SUMMARY_MODEL_NAME}",
+        f"- TTS: {command_status(bool(services.get('ttsReady')))}",
+        f"- STT: {STT_MODEL_NAME}",
+        f"- 로컬 스피커: {command_status(local_speaking)}",
+        f"- 로컬 마이크: {local_mic_status_line()}",
+        f"- 로컬 듣기: {command_status(local_listening)}",
+        f"- Minecraft/Voyager: {command_status(bool(services.get('voyagerReady')))}",
+    ]
+    if codex_required:
+        lines.append(f"- Codex gateway: {command_status(codex_ready)}")
+    summary = clean_text(str(services.get("summary") or ""))
+    if summary:
+        lines.append(f"- 요약: {summary}")
+    codex_error = clean_text(str(services.get("codexError") or ""))
+    if codex_error:
+        lines.append(f"- Codex 상태: {codex_error}")
+    return "\n".join(lines)
+
+
 async def build_control_page_status_reply(guild: discord.Guild) -> str:
     minecraft = await safe_get_control_page_minecraft_snapshot(guild.id)
     return build_control_page_status_text(guild, minecraft)
@@ -10363,16 +11313,16 @@ def is_explicit_control_page_restart_request(text: str) -> bool:
         "재시작 해야",
         "재시작해야",
     )
-    if normalized.startswith(question_starts) or "?" in normalized:
+    if normalized.startswith(question_starts):
         return False
-    polite_suffix = r"(?:해|해줘|해라|하자|시켜|시켜줘|부탁해|해둘래|해줄래|ㄱㄱ|now|please|pls)"
-    restart_pattern = rf"^(?:이제|지금|그럼|바로|적용하려고|적용되게|please|pls)?\s*(?:이블린|봇|bot|evelyn)?\s*(?:재시작|재기동|restart|reload)\s*{polite_suffix}?[.!]*$"
+    polite_suffix = r"(?:해|해줘|해라|하자|시켜|시켜줘|부탁해|해둘래|해줄래|해줄수있어|해줄수있니|가능해|ㄱㄱ|now|please|pls)"
+    restart_pattern = rf"^(?:이제|지금|그럼|바로|적용하려고|적용되게|please|pls)?\s*(?:이블린|봇|bot|evelyn)?\s*(?:재시작|재기동|restart|reload)\s*{polite_suffix}?[.!?]*$"
     if re.search(restart_pattern, normalized):
         return True
-    restart_tail_pattern = rf"(?:이제|지금|그럼|바로|적용하려고|적용되게)\s*(?:이블린|봇|bot|evelyn)?\s*(?:재시작|재기동|restart|reload)\s*{polite_suffix}?[.!]*$"
+    restart_tail_pattern = rf"(?:이제|지금|그럼|바로|적용하려고|적용되게)\s*(?:이블린|봇|bot|evelyn)?\s*(?:재시작|재기동|restart|reload)\s*{polite_suffix}?[.!?]*$"
     if re.search(restart_tail_pattern, normalized):
         return True
-    return bool(re.search(r"^(?:이제|지금|그럼|바로)?\s*(?:다시\s*(?:시작|켜|띄워|올려))\s*(?:줘|해줘|해|라|둘래|줄래|부탁해)?[.!]*$", normalized))
+    return bool(re.search(r"^(?:이제|지금|그럼|바로)?\s*(?:다시\s*(?:시작|켜|띄워|올려))\s*(?:줘|해줘|해|라|둘래|줄래|해줄수있어|해줄수있니|부탁해)?[.!?]*$", normalized))
 
 
 def execute_control_page_restart_command() -> str:
@@ -10387,6 +11337,26 @@ def is_control_page_question_text(text: str) -> bool:
     if "?" in normalized:
         return True
     return normalized.startswith(("왜", "어떻게", "언제", "뭐", "무엇", "혹시", "설명", "알려줘"))
+
+
+def is_control_page_runtime_status_request(text: str) -> bool:
+    normalized = clean_text(text).lower().strip()
+    if not normalized:
+        return False
+    compact = re.sub(r"\s+", "", normalized)
+    if any(key in normalized for key in ("날씨", "비", "weather")):
+        return False
+    if "status" in normalized:
+        return True
+    if "상태" in compact:
+        return True
+    subjectish = any(key in normalized for key in ("이블린", "evelyn", "봇", "bot", "너", "니", "네", "런타임", "runtime", "llm", "모델", "서버"))
+    statusish = any(key in compact for key in ("어때", "어떄", "어떠", "괜찮", "문제", "오류", "에러", "로딩", "살아", "떠있", "켜져", "준비"))
+    return subjectish and statusish
+
+
+def control_page_compact_has_any(compact: str, keys: tuple[str, ...]) -> bool:
+    return any(key in compact for key in keys)
 
 
 def cheap_control_page_tool_decision(text: str) -> dict[str, Any] | None:
@@ -10411,11 +11381,38 @@ def cheap_control_page_tool_decision(text: str) -> dict[str, Any] | None:
         return control_page_tool_decision(slash_tool, arguments=args, source="slash")
     if normalized.startswith("/"):
         return None
-    if is_control_page_question_text(normalized):
-        return None
     compact = re.sub(r"\s+", "", normalized)
     if is_explicit_control_page_restart_request(normalized):
         return control_page_tool_decision("runtime.restart_bot", source="cheap")
+    if any(key in normalized for key in ("메모리", "memory", "패널", "panel")):
+        if control_page_compact_has_any(compact, ("열어", "켜", "보여", "open")):
+            return control_page_tool_decision("control_page.memory_panel", arguments={"action": "open"}, source="cheap")
+        if control_page_compact_has_any(compact, ("닫아", "닫어", "숨겨", "꺼", "close", "hide")):
+            return control_page_tool_decision("control_page.memory_panel", arguments={"action": "close"}, source="cheap")
+        if control_page_compact_has_any(compact, ("토글", "전환", "toggle")):
+            return control_page_tool_decision("control_page.memory_panel", arguments={"action": "toggle"}, source="cheap")
+    if ("옵시디언" in normalized or "obsidian" in normalized) and control_page_compact_has_any(compact, ("열어", "켜", "open")):
+        return control_page_tool_decision("memory.open_vault", source="cheap")
+    if "음성" in normalized or "voice" in normalized:
+        if control_page_compact_has_any(compact, ("상태", "status", "봐", "보여")):
+            return control_page_tool_decision("voice.status", source="cheap")
+        if control_page_compact_has_any(compact, ("재연결", "다시연결", "reconnect", "rejoin")):
+            return control_page_tool_decision("voice.reconnect", source="cheap")
+    if any(key in normalized for key in ("마크", "minecraft", "voyager", "인벤", "inventory")):
+        if control_page_compact_has_any(compact, ("인벤", "inventory")):
+            return control_page_tool_decision("minecraft.inventory", source="cheap")
+        if control_page_compact_has_any(compact, ("상태", "status", "봐", "보여")):
+            return control_page_tool_decision("minecraft.status", source="cheap")
+        if control_page_compact_has_any(compact, ("연결해", "시작", "connect")):
+            return control_page_tool_decision("minecraft.connect", source="cheap")
+        if control_page_compact_has_any(compact, ("끊어", "종료", "중지", "disconnect")):
+            return control_page_tool_decision("minecraft.disconnect", source="cheap")
+    if ("자율" in normalized or "autonomy" in normalized) and control_page_compact_has_any(compact, ("상태", "status", "봐", "보여")):
+        return control_page_tool_decision("autonomy.status", source="cheap")
+    if is_control_page_runtime_status_request(normalized):
+        return control_page_tool_decision("runtime.status", source="cheap")
+    if is_control_page_question_text(normalized):
+        return None
     if any(key in normalized for key in ("메모리", "memory", "패널", "panel")):
         if any(key in compact for key in ("열어", "켜", "보여", "open")):
             return control_page_tool_decision("control_page.memory_panel", arguments={"action": "open"}, source="cheap")
@@ -10586,12 +11583,7 @@ async def execute_control_page_tool(guild: discord.Guild | None, decision: dict[
     if tool_name == "runtime.status":
         if guild is None:
             services = await get_control_page_runtime_services(force=True)
-            return build_control_page_runtime_summary(
-                bot_ready=True,
-                voyager_ready=bool(services.get("voyagerReady")),
-                codex_required=bool(services.get("codexRequired")),
-                codex_ready=services.get("codexReady"),
-            )
+            return build_control_page_local_status_text(services)
         return await build_control_page_status_reply(guild)
     if tool_name == "control_page.memory_panel":
         return execute_control_page_memory_panel_action(clean_text(str(arguments.get("action") or "toggle")))
@@ -10680,6 +11672,68 @@ async def execute_control_page_command(guild: discord.Guild | None, text: str) -
     if decision is not None:
         return await execute_control_page_tool(guild, decision)
     return "지원하지 않는 명령어야. /help 로 현재 페이지 명령어를 확인해줘."
+
+
+async def answer_control_page_search_text(guild: discord.Guild | None, user_text: str) -> str:
+    guild_id = control_page_effective_guild_id(guild)
+    session_key = control_page_session_key(guild_id)
+    messages = list(get_conversation_history(session_key=session_key, guild_id=guild_id))
+    route_decision = build_route_decision(
+        action="search_then_answer",
+        route="search_executor",
+        source="control_page",
+        prompt_text=user_text,
+        needs_main_llm=False,
+        needs_search=True,
+        needs_tts=False,
+        priority="accuracy",
+    )
+    metrics: dict[str, Any] = {
+        "started_at": time.monotonic(),
+        "meta": {
+            "source": "control_page",
+            "session_key": session_key,
+            "guild_id": guild_id,
+            "selected_path": "control_page_search_direct",
+        },
+        "marks": {},
+    }
+    action_result = await execute_search_then_answer_action(
+        guild_id=guild_id,
+        user_text=user_text,
+        session_key=session_key,
+        messages=messages,
+    )
+    final_answer = await synthesize_tool_result_with_main_llm(
+        user_text=user_text,
+        tool_name="search",
+        tool_result_text=action_result.answer_text,
+        guild_id=guild_id,
+        session_key=session_key,
+        source="control_page",
+        messages=messages,
+        cognitive_state={"action": "search_then_answer", "user_intent": user_text},
+        route_decision=route_decision,
+        metrics=metrics,
+    )
+    reply = clean_text(final_answer) or clean_text(action_result.answer_text) or "지금 검색 결과를 정리하지 못했어. 잠깐 뒤에 다시 시도해줘."
+    async with session_locks.setdefault(session_key, asyncio.Lock()):
+        append_history(session_key, user_text, reply, guild_id=guild_id)
+        mark_session_active(
+            session_key,
+            ttl_sec=ACTIVE_CONVERSATION_TEXT_SEC,
+            speaker="assistant",
+            awaiting_user_reply=False,
+            topic_id=build_topic_id(user_text, "search_executor", reply),
+            answer_text=reply,
+            user_text=user_text,
+        )
+    schedule_local_control_tts(
+        reply,
+        turn_id=current_turn_id(session_key),
+        session_key=session_key,
+    )
+    return format_display_text(reply, session_key=session_key).strip() or fallback_answer_for(user_text)
 
 
 async def answer_control_page_text(guild: discord.Guild | None, user_text: str) -> str:
@@ -10822,6 +11876,8 @@ async def handle_control_page_input(guild: discord.Guild | None, text: str) -> s
             router_reply = clean_text(str(tool_decision_raw.get("reply") or ""))
             if router_reply:
                 return router_reply
+    if should_force_search_query(text):
+        return await answer_control_page_search_text(guild, text)
     return await answer_control_page_text(guild, text)
 
 
@@ -10858,17 +11914,19 @@ def build_control_page_boot_progress(
     listening: bool = False,
 ) -> dict[str, Any]:
     services = runtime_services or {}
+    main_ready = bool(services.get("mainReady"))
+    tts_ready = bool(services.get("ttsReady"))
     service_done = {
-        "main_service": bool(services.get("mainReady")),
+        "main_service": main_ready,
         "router_service": bool(services.get("routerReady")),
         "sub_service": bool(services.get("subReady")),
-        "tts_service": bool(services.get("ttsReady")),
+        "tts_service": tts_ready,
         "discord_gateway": bool((not DISCORD_ENABLED) or (bot.is_ready() and guild_available)),
         "control_api": control_page_runner is not None,
         "opus": startup_component_done("opus"),
         "stt": startup_component_done("stt"),
-        "main_warmup": startup_component_done("main_warmup"),
-        "tts_warmup": startup_component_done("tts_warmup"),
+        "main_warmup": startup_component_done("main_warmup") or main_ready,
+        "tts_warmup": startup_component_done("tts_warmup") or tts_ready,
     }
     if listening:
         service_done["voice_listening"] = True
@@ -10906,6 +11964,7 @@ async def build_control_page_state(guild: discord.Guild | None) -> dict[str, Any
     runtime_services = await get_control_page_runtime_services()
     if guild is None:
         local_mode = bool(not DISCORD_ENABLED)
+        await ensure_control_page_welcome_message(None, runtime_services=runtime_services)
         commands = build_control_page_commands(minecraft_session_active=False)
         boot_progress = build_control_page_boot_progress(runtime_services, guild_available=local_mode)
         local_tts = local_tts_playback_manager.snapshot()
@@ -10958,8 +12017,9 @@ async def build_control_page_state(guild: discord.Guild | None) -> dict[str, Any
                 "bootProgress": boot_progress,
             },
             "minecraft": {},
-            "statusText": "봇이 아직 길드에 연결되지 않았어.",
+            "statusText": build_control_page_local_status_text(runtime_services),
         }
+    await ensure_control_page_welcome_message(guild, runtime_services=runtime_services)
     vc = guild.voice_client
     await ensure_control_page_minecraft_snapshot(guild.id, wait=not bool(control_page_minecraft_snapshot_cache))
     minecraft = get_control_page_minecraft_snapshot_cache_copy()
@@ -11367,6 +12427,7 @@ def build_skill_context(
             "build_main_response_guidance_fn": build_main_response_guidance,
             "build_main_llm_payload_fn": build_main_llm_payload,
             "execute_main_llm_once_fn": execute_main_llm_once,
+            "synthesize_tool_result_with_main_llm_fn": synthesize_tool_result_with_main_llm,
             "execute_search_then_answer_action_fn": execute_search_then_answer_action,
             "build_answer_payload_from_text_fn": build_answer_payload_from_text,
             "build_delivery_plan_fn": build_delivery_plan,
@@ -11496,6 +12557,13 @@ async def maybe_execute_registered_route(
                     "user_text": user_text,
                     "answer_text": result.answer_text or result.display_text,
                     **dict(result.followup_payload or {}),
+                    "route": result.followup_route,
+                    "messages": list(messages or []),
+                    "cognitive_state": cognitive_state,
+                    "synthesize_tool_result_with_main_llm_fn": synthesize_tool_result_with_main_llm,
+                    "build_main_response_guidance_fn": build_main_response_guidance,
+                    "build_main_llm_payload_fn": build_main_llm_payload,
+                    "execute_main_llm_once_fn": execute_main_llm_once,
                     "build_answer_payload_from_text_fn": build_answer_payload_from_text,
                     "build_delivery_plan_fn": build_delivery_plan,
                     "split_tts_sentences_fn": split_tts_sentences,
@@ -11536,8 +12604,15 @@ async def execute_search_then_answer_action(
     *,
     guild_id: int | None,
     user_text: str,
+    session_key: str | None = None,
+    messages: list[dict[str, Any]] | None = None,
 ) -> ActionResult:
-    search_query = build_search_query(guild_id, user_text) if guild_id is not None else clean_text(user_text)
+    search_query = build_search_query(
+        guild_id,
+        user_text,
+        session_key=session_key,
+        messages=messages,
+    )
     try:
         results = await search_duckduckgo(search_query)
         answer = await answer_from_search_results(search_query, results)
@@ -11581,7 +12656,7 @@ async def prepare_route_context(
         metrics=metrics,
         turn_scope=turn_scope,
     )
-    policy_response = policy_response_for_state(cognitive_state, source=source)
+    policy_response = policy_response_for_state(cognitive_state, source=source, user_text=user_text)
     route_decision = build_route_decision_from_state(
         cognitive_state=cognitive_state,
         source=source,
@@ -11590,20 +12665,39 @@ async def prepare_route_context(
         apply_ask_gating=apply_ask_gating,
         build_route_decision=build_route_decision,
     )
-    route_decision = replace(
-        route_decision,
-        needs_main_llm=bool(route_decision.needs_main_llm and context_policy.needs_main_llm),
-        needs_memory=bool(context_policy.needs_memory),
-        needs_runtime_state=bool(context_policy.needs_runtime_state),
-        needs_minecraft_state=bool(context_policy.needs_minecraft_state),
-        needs_vision=bool(context_policy.needs_vision),
-        needs_skill_graph=bool(context_policy.needs_skill_graph),
-        needs_long_context=bool(context_policy.needs_long_context),
-        needs_search=bool(route_decision.needs_search or context_policy.needs_search),
-        needs_tts=bool(context_policy.needs_tts),
-        response_mode=clean_text(context_policy.response_mode) or route_decision.response_mode,
-        priority=clean_text(context_policy.priority) or route_decision.priority,
-    )
+    search_needed = bool(route_decision.needs_search or context_policy.needs_search)
+    if search_needed:
+        route_decision = replace(
+            route_decision,
+            action="search_then_answer",
+            route="search_executor",
+            needs_main_llm=False,
+            needs_memory=bool(context_policy.needs_memory),
+            needs_runtime_state=bool(context_policy.needs_runtime_state),
+            needs_minecraft_state=bool(context_policy.needs_minecraft_state),
+            needs_vision=bool(context_policy.needs_vision),
+            needs_skill_graph=bool(context_policy.needs_skill_graph),
+            needs_long_context=bool(context_policy.needs_long_context),
+            needs_search=True,
+            needs_tts=bool(context_policy.needs_tts),
+            response_mode=clean_text(context_policy.response_mode) or route_decision.response_mode,
+            priority="accuracy",
+        )
+    else:
+        route_decision = replace(
+            route_decision,
+            needs_main_llm=bool(route_decision.needs_main_llm and context_policy.needs_main_llm),
+            needs_memory=bool(context_policy.needs_memory),
+            needs_runtime_state=bool(context_policy.needs_runtime_state),
+            needs_minecraft_state=bool(context_policy.needs_minecraft_state),
+            needs_vision=bool(context_policy.needs_vision),
+            needs_skill_graph=bool(context_policy.needs_skill_graph),
+            needs_long_context=bool(context_policy.needs_long_context),
+            needs_search=False,
+            needs_tts=bool(context_policy.needs_tts),
+            response_mode=clean_text(context_policy.response_mode) or route_decision.response_mode,
+            priority=clean_text(context_policy.priority) or route_decision.priority,
+        )
     route_question_policy = None
     if metrics is not None:
         maybe_policy = metrics.setdefault("meta", {}).get("route_question_policy")
@@ -11641,10 +12735,16 @@ async def maybe_handle_short_circuit_route(
     guild_id: int | None,
     user_text: str,
     session_key: str | None,
-    on_sentence: Callable[[str], Awaitable[None]] | None,
-    on_first_chunk: Callable[[], None] | None,
-    awaiting_user_reply: bool,
-    metrics: dict | None,
+    room_key: str | None = None,
+    person_key: str | None = None,
+    session_memory_key: str | None = None,
+    debug_text: str | None = None,
+    on_sentence: Callable[[str], Awaitable[None]] | None = None,
+    on_first_chunk: Callable[[], None] | None = None,
+    awaiting_user_reply: bool = False,
+    metrics: dict | None = None,
+    messages: list[dict[str, Any]] | None = None,
+    cognitive_state: dict | None = None,
 ) -> tuple[str | None, Callable[[], None] | None]:
     delivery_on_sentence = on_sentence if route_decision.needs_tts else None
     if metrics is not None:
@@ -11726,7 +12826,9 @@ async def maybe_handle_short_circuit_route(
         if on_first_chunk is not None:
             on_first_chunk()
             on_first_chunk = None
-        preface_text = route_decision.user_visible_preface or "잠깐 찾아보고 바로 말해줄게."
+        preface_text = route_decision.user_visible_preface
+        if not preface_text or is_user_echo_answer(user_text, preface_text):
+            preface_text = "잠깐 찾아보고 바로 말해줄게."
         await emit_action_result_delivery(
             build_action_result(
                 action=route_decision.action,
@@ -11741,9 +12843,31 @@ async def maybe_handle_short_circuit_route(
         action_result = await execute_search_then_answer_action(
             guild_id=guild_id,
             user_text=user_text,
+            session_key=session_key,
+            messages=messages,
+        )
+        final_answer = await synthesize_tool_result_with_main_llm(
+            user_text=user_text,
+            tool_name="search",
+            tool_result_text=action_result.answer_text,
+            guild_id=guild_id,
+            session_key=session_key,
+            source=source,
+            messages=messages,
+            cognitive_state=cognitive_state,
+            route_decision=route_decision,
+            metrics=metrics,
         )
         answer_payload = await emit_action_result_delivery(
-            action_result,
+            build_action_result(
+                action=route_decision.action,
+                answer_text=final_answer,
+                metadata={
+                    **(dict(action_result.metadata) if isinstance(action_result.metadata, dict) else {}),
+                    "route": route_decision.route,
+                    "phase": "main_synthesis",
+                },
+            ),
             on_sentence=delivery_on_sentence,
             session_key=session_key,
             user_text=user_text,
@@ -11756,7 +12880,7 @@ async def maybe_handle_short_circuit_route(
             metrics.setdefault("marks", {})["t_main_done"] = elapsed_ms
         return answer_payload.display_text, on_first_chunk
 
-    if route_decision.user_visible_preface:
+    if route_decision.user_visible_preface and not is_user_echo_answer(user_text, route_decision.user_visible_preface):
         if on_first_chunk is not None:
             on_first_chunk()
             on_first_chunk = None
@@ -11893,6 +13017,17 @@ async def execute_main_llm_streaming_turn(
                         debug_text=debug_text,
                         record_question_trace_enabled=False,
                     )
+                answer = await resolve_promised_search_final_answer(
+                    user_text=user_text,
+                    answer_text=answer,
+                    guild_id=guild_id,
+                    session_key=session_key,
+                    source=source,
+                    messages=messages,
+                    cognitive_state=cognitive_state,
+                    route_decision=route_decision,
+                    metrics=metrics,
+                )
                 answer, question_shape_meta = enforce_question_limits(answer, route_decision)
                 record_question_trace(
                     route_decision=route_decision,
@@ -12016,6 +13151,20 @@ async def execute_main_llm_streaming_turn(
             record_question_trace_enabled=False,
         )
     answer = sanitize_unrequested_minecraft_leak(guided_user_text, answer)
+    pre_escalation_answer = answer
+    answer = await resolve_promised_search_final_answer(
+        user_text=user_text,
+        answer_text=answer,
+        guild_id=guild_id,
+        session_key=session_key,
+        source=source,
+        messages=messages,
+        cognitive_state=cognitive_state,
+        route_decision=route_decision,
+        metrics=metrics,
+    )
+    if clean_text(answer) != clean_text(pre_escalation_answer):
+        emitted_any = False
     answer, question_shape_meta = enforce_question_limits(answer, route_decision)
     record_question_trace(
         route_decision=route_decision,
@@ -12207,35 +13356,85 @@ async def ask_llm_and_speak_local(
             metrics.setdefault("meta", {})
         metrics.setdefault("meta", {})["needs_tts"] = True
         metrics.setdefault("meta", {})["output_mode"] = "local_speaker"
-        log_voice_stage(metrics, "LLM/local TTS pipeline start", extra=f"source={source} mode=local_speaker")
-        answer = await ask_llm_streaming(
-            user_text,
-            guild_id=guild_id,
-            session_key=session_key,
-            room_key=room_key,
-            person_key=person_key,
-            session_memory_key=session_memory_key,
-            on_first_chunk=lambda: log_voice_latency(metrics, "llm_first_chunk_logged", "LLM first chunk"),
-            source=source,
-            debug_text=debug_text,
+        metrics.setdefault("meta", {})["delivery_mode"] = "llm_sentence_stream"
+        metrics.setdefault("tts_request_logged", False)
+        metrics.setdefault("tts_response_headers_logged", False)
+        metrics.setdefault("tts_first_byte_logged", False)
+        metrics.setdefault("tts_first_frame_logged", False)
+        metrics.setdefault("first_packet_sent_logged", False)
+        metrics.setdefault("local_first_playback_logged", False)
+        turn_id = metrics.get("meta", {}).get("turn_id") or current_turn_id(session_key)
+        log_voice_stage(metrics, "LLM/local streaming TTS pipeline start", extra=f"source={source} mode=local_speaker_stream")
+
+        delivery = start_streaming_local_voice_delivery(
             metrics=metrics,
-            turn_scope=turn_scope,
-        )
-        cleaned_answer = clean_text(answer)
-        log_voice_stage(metrics, "LLM done", extra=f"chars={len(cleaned_answer)}", key="llm_done")
-        if cleaned_answer and on_final_answer is not None:
-            await on_final_answer(cleaned_answer)
-        await speak_answer_local(
-            cleaned_answer,
-            turn_id=metrics.get("meta", {}).get("turn_id") or current_turn_id(session_key),
+            turn_id=turn_id,
             session_key=session_key,
             turn_scope=turn_scope,
-            metrics=metrics,
         )
+        fanout = ReplyStreamFanout([delivery])
+        answer = ""
+        cleaned_answer = ""
+        queued_sentence_count = 0
+        fallback_needed = False
+        playback_count_before = int(local_tts_playback_manager.snapshot().get("playCount") or 0)
+        try:
+            answer = await ask_llm_streaming(
+                user_text,
+                guild_id=guild_id,
+                session_key=session_key,
+                room_key=room_key,
+                person_key=person_key,
+                session_memory_key=session_memory_key,
+                on_sentence=fanout.on_chunk,
+                on_first_chunk=lambda: log_voice_latency(metrics, "llm_first_chunk_logged", "LLM first chunk"),
+                source=source,
+                debug_text=debug_text,
+                metrics=metrics,
+                turn_scope=turn_scope,
+            )
+            try:
+                cleaned_answer, queued_sentence_count = await finalize_voice_answer(
+                    answer,
+                    on_final_answer=on_final_answer,
+                    delivery=delivery,
+                    metrics=metrics,
+                )
+            except Exception as exc:
+                cleaned_answer = clean_text(answer)
+                metrics.setdefault("meta", {})["local_streaming_tts_error"] = repr(exc)
+                record_voice_pipeline_failure(
+                    "tts_playback_failed",
+                    exc,
+                    metrics,
+                    turn_id=turn_id,
+                    session_key=session_key,
+                    stage="local_speaker_stream_finalize",
+                )
+                fallback_needed = True
+            playback_count_after = int(local_tts_playback_manager.snapshot().get("playCount") or 0)
+            if queued_sentence_count <= 0 or playback_count_after <= playback_count_before:
+                fallback_needed = True
+                metrics.setdefault("meta", {})["local_streaming_tts_fallback_reason"] = (
+                    "no_sentence_queued" if queued_sentence_count <= 0 else "no_local_playback"
+                )
+        finally:
+            await delivery.abort()
+
+        if fallback_needed and cleaned_answer:
+            metrics.setdefault("meta", {})["local_streaming_tts_fallback_used"] = True
+            await speak_answer_local(
+                cleaned_answer,
+                turn_id=turn_id,
+                session_key=session_key,
+                turn_scope=turn_scope,
+                metrics=metrics,
+            )
+
         log_voice_bottleneck_summary(
             metrics,
             label="voice_turn",
-            extra=f"source={source} chars={len(cleaned_answer)} mode=local_speaker",
+            extra=f"source={source} chars={len(cleaned_answer)} mode=local_speaker_stream sentences={queued_sentence_count} fallback={fallback_needed}",
             event_name="voice_turn_summary",
         )
         return cleaned_answer
@@ -12316,6 +13515,7 @@ async def ask_llm_and_speak_streaming(
         metrics.setdefault("tts_first_byte_logged", False)
         metrics.setdefault("tts_first_frame_logged", False)
         metrics.setdefault("first_packet_sent_logged", False)
+        metrics.setdefault("local_first_playback_logged", False)
         log_voice_stage(metrics, "LLM/TTS 파이프라인 시작", extra=f"source={source} mode=llm_streaming")
 
         delivery = start_streaming_voice_delivery(
@@ -13547,23 +14747,25 @@ async def restart_bot_process() -> None:
     stop_local_mic_service()
     script_path = Path(__file__).resolve()
     project_dir = script_path.parent
-    start_bot_bat = project_dir / "evelyn_core" / "start_bot.bat"
-    start_bat = project_dir / "evelyn_core" / "start.bat"
+    restart_bat, env_overrides, restart_mode = restart_launcher_for_current_mode(project_dir)
+    fallback_bat = project_dir / "evelyn_core" / "start.bat"
 
     env = os.environ.copy()
-    env.setdefault("STT_USE_RAW_48K", "false")
+    env.update(env_overrides)
 
-    if start_bot_bat.exists():
+    if restart_bat.exists():
+        print(f"[RESTART] mode={restart_mode} launcher={restart_bat}")
         subprocess.Popen(
-            ["cmd.exe", "/c", str(start_bot_bat)],
+            ["cmd.exe", "/c", str(restart_bat)],
             cwd=str(project_dir),
             env=env,
             close_fds=True,
             creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
         )
-    elif start_bat.exists():
+    elif fallback_bat.exists():
+        print(f"[RESTART] mode=fallback launcher={fallback_bat}")
         subprocess.Popen(
-            ["cmd.exe", "/c", str(start_bat)],
+            ["cmd.exe", "/c", str(fallback_bat)],
             cwd=str(project_dir),
             env=env,
             close_fds=True,
@@ -13635,6 +14837,25 @@ def schedule_evelyn_local_shutdown(delay_ms: int = 1500) -> bool:
     except Exception:
         logging.exception("Failed to schedule local shutdown")
         return False
+
+
+def current_runtime_prefers_local_restart() -> bool:
+    return bool(LOCAL_ONLY_MODE or not DISCORD_ENABLED)
+
+
+def restart_launcher_for_current_mode(project_dir: Path) -> tuple[Path, dict[str, str], str]:
+    env_overrides: dict[str, str] = {"STT_USE_RAW_48K": "false"}
+    if current_runtime_prefers_local_restart():
+        env_overrides.update(
+            {
+                "DISCORD_ENABLED": "false",
+                "LOCAL_ONLY": "true",
+                "LOCAL_MIC_ENABLED": os.getenv("LOCAL_MIC_ENABLED", "true"),
+                "CONTROL_PAGE_PORT": os.getenv("CONTROL_PAGE_PORT", str(CONTROL_PAGE_PORT)),
+            }
+        )
+        return project_dir / "evelyn_core" / "start_local.bat", env_overrides, "local"
+    return project_dir / "evelyn_core" / "start_bot.bat", env_overrides, "discord"
 
 
 async def shutdown_bot_process() -> None:

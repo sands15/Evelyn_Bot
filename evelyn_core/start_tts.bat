@@ -3,6 +3,13 @@ chcp 65001 >nul
 setlocal
 call "%~dp0start_env.bat"
 
+if /I not "%~1"=="--legacy-host" goto :run_docker
+if /I not "%EVELYN_ALLOW_LEGACY_HOST_START%"=="true" (
+    echo [Evelyn] Legacy host TTS launch is blocked by default.
+    echo [Evelyn] Set EVELYN_ALLOW_LEGACY_HOST_START=true only for explicit host-attached debugging.
+    endlocal & exit /b 2
+)
+
 if not exist "%OMNIVOICE_PROFILE_DIR%" mkdir "%OMNIVOICE_PROFILE_DIR%"
 
 call :port_ready %TTS_PORT% "OmniVoice-TTS"
@@ -34,3 +41,8 @@ if errorlevel 1 exit /b 1
 
 echo [Evelyn] %~2 already listening on port %~1, skipping new launch
 exit /b 2
+
+:run_docker
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0runtime\launchers\start_docker_compose_services.ps1" -Profiles tts -Services tts
+set "EXIT_CODE=%ERRORLEVEL%"
+endlocal & exit /b %EXIT_CODE%

@@ -25,9 +25,11 @@ set "DISCORD_ENABLED=false"
 set "LOCAL_ONLY=true"
 if "%LOCAL_BACKGROUND%"=="" set "LOCAL_BACKGROUND=true"
 if /I "%~1"=="--background" set "LOCAL_BACKGROUND=true"
-if /I "%~1"=="--foreground" set "LOCAL_BACKGROUND=false"
+if /I "%~1"=="--foreground" set "LOCAL_FOREGROUND_REQUESTED=true"
+if /I "%~1"=="--legacy-host" set "LOCAL_BACKGROUND=false"
 if /I "%~2"=="--background" set "LOCAL_BACKGROUND=true"
-if /I "%~2"=="--foreground" set "LOCAL_BACKGROUND=false"
+if /I "%~2"=="--foreground" set "LOCAL_FOREGROUND_REQUESTED=true"
+if /I "%~2"=="--legacy-host" set "LOCAL_BACKGROUND=false"
 if "%LOCAL_MIC_ENABLED%"=="" set "LOCAL_MIC_ENABLED=true"
 if "%LOCAL_MIC_START_THRESHOLD%"=="" set "LOCAL_MIC_START_THRESHOLD=0.002"
 if "%LOCAL_MIC_CONTINUE_THRESHOLD%"=="" set "LOCAL_MIC_CONTINUE_THRESHOLD=0.001"
@@ -38,6 +40,7 @@ if "%CONTROL_PAGE_AUTO_OPEN%"=="" set "CONTROL_PAGE_AUTO_OPEN=true"
 
 echo [Evelyn] Starting local mode without Discord.
 echo [Evelyn] Local profile: %LOCAL_PROFILE%
+if /I "%LOCAL_FOREGROUND_REQUESTED%"=="true" echo [Evelyn] --foreground no longer switches to host services; Docker core remains the default.
 if /I "%LOCAL_PROFILE%"=="lightweight" echo [Evelyn] Lightweight profile: Vision OCR is not loaded at startup.
 echo [Evelyn] Control page: http://127.0.0.1:%CONTROL_PAGE_PORT%/
 
@@ -47,11 +50,17 @@ if /I "%LOCAL_BACKGROUND%"=="true" (
   endlocal & exit /b %EXIT_CODE%
 )
 
-call "%~dp0start_main_llm.bat"
-call "%~dp0start_router_llm.bat"
-call "%~dp0start_sub_llm.bat"
-call "%~dp0start_tts.bat"
-call "%~dp0start_vision.bat"
+if /I not "%EVELYN_ALLOW_LEGACY_HOST_START%"=="true" (
+  echo [Evelyn] Legacy host foreground launch is blocked by default.
+  echo [Evelyn] Use the Docker default, or set EVELYN_ALLOW_LEGACY_HOST_START=true with --legacy-host for explicit debugging.
+  endlocal & exit /b 2
+)
+
+call "%~dp0start_main_llm.bat" --legacy-host
+call "%~dp0start_router_llm.bat" --legacy-host
+call "%~dp0start_sub_llm.bat" --legacy-host
+call "%~dp0start_tts.bat" --legacy-host
+call "%~dp0start_vision.bat" --legacy-host
 
 pushd "%~dp0.."
 
@@ -125,10 +134,10 @@ echo Usage: start_local.bat [--background^|--foreground] [--lightweight]
 echo.
 echo Starts Evelyn in local-only mode:
 echo   - Discord gateway disabled
-echo   - Control page served by main.py
-echo   - Main/Router/Sub/TTS services started if needed
-echo   - Default: hidden background stack plus automatic control page open
-echo   - Use --foreground to keep the bot process attached to this console
+echo   - Default background mode uses Docker core services
+echo   - Windows keeps only the local microphone/speaker I/O bridge
+echo   - Control page served by Docker control_page + bot_api
+echo   - --foreground keeps Docker core; legacy host debug requires EVELYN_ALLOW_LEGACY_HOST_START=true --legacy-host
 echo   - Use --lightweight to skip Falcon-OCR startup load for safer VRAM use
 echo.
 endlocal & exit /b 0

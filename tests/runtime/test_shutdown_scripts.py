@@ -71,10 +71,28 @@ class ShutdownScriptContractTests(unittest.TestCase):
     def test_local_stop_targets_only_local_runtime_ports(self) -> None:
         script = self.read_script("stop_evelyn_local.ps1")
 
-        self.assertIn("$targetPorts = @(8799, 8880, 8891, 9820, 9821, 9822)", script)
+        self.assertIn("$targetPorts = @(8798, 8799, 8880, 8891, 9820, 9821, 9822)", script)
         self.assertNotIn("$targetPorts = @(3000", script)
         self.assertNotIn("8787", script)
         self.assertNotIn("8912", script)
+
+    def test_local_launcher_keeps_control_page_and_bot_api_ports_separate(self) -> None:
+        script = self.read_script("start_local_background.ps1")
+
+        self.assertIn("$controlPagePublicPort = if ($env:CONTROL_PAGE_PUBLIC_PORT)", script)
+        self.assertIn("$botApiPort = if ($env:CONTROL_PAGE_BOT_API_PORT)", script)
+        self.assertIn("docker-compose.fast-control.yml", script)
+        self.assertIn("'bot_api'", script)
+        self.assertIn("'control_page'", script)
+        self.assertIn("LOCAL_BRIDGE_BOT_API_BASE = 'http://127.0.0.1:$botApiPort'", script)
+        self.assertIn("Wait-Port -HostName '127.0.0.1' -Port $botApiPort -Label 'Docker Bot API'", script)
+        self.assertIn("Wait-Port -HostName '127.0.0.1' -Port $controlPagePublicPort -Label 'Docker Control Page'", script)
+        self.assertNotIn("function Start-LocalControlService", script)
+
+    def test_bot_launcher_prefers_explicit_bot_api_port_env(self) -> None:
+        script = self.read_script("start_bot.ps1")
+
+        self.assertIn("elseif ($env:CONTROL_PAGE_BOT_API_PORT) { $env:CONTROL_PAGE_BOT_API_PORT }", script)
 
     def test_stack_stop_targets_stack_ports_without_ssh_or_system_ports(self) -> None:
         script = self.read_script("stop_evelyn_stack.ps1")
@@ -96,6 +114,15 @@ class ShutdownScriptContractTests(unittest.TestCase):
 
         self.assertIn("stop_evelyn_local.ps1", server)
         self.assertNotIn('"stop_evelyn_stack.ps1"', server)
+
+    def test_control_page_shutdown_chat_proxies_before_container_fallback(self) -> None:
+        server = (REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "control_page_server.py").read_text(encoding="utf-8")
+
+        shutdown_branch = server[server.index("if normalized in LOCAL_SHUTDOWN_COMMANDS:") :]
+        proxy_index = shutdown_branch.index('proxy_json(request, "POST", "/api/control-page/chat", body=payload)')
+        fallback_index = shutdown_branch.index("ok, detail = schedule_local_stack_shutdown()")
+
+        self.assertLess(proxy_index, fallback_index)
 
     def test_main_control_page_exposes_shutdown_endpoint(self) -> None:
         main_py = (REPO_ROOT / "main.py").read_text(encoding="utf-8")

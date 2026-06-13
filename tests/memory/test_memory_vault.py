@@ -75,7 +75,7 @@ class MemoryVaultTests(unittest.TestCase):
                     [
                         "---",
                         "id: stone-tools",
-                        "type: procedure",
+                        "type: concept",
                         "title: Minecraft Stone Tools",
                         "tags: [minecraft, tools]",
                         "projects: [evelyn]",
@@ -162,7 +162,7 @@ class MemoryVaultTests(unittest.TestCase):
 
         self.assertIsNone(path)
 
-    def test_graph_link_expands_related_note(self) -> None:
+    def test_graph_link_does_not_pull_procedure_into_general_recall(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             concepts = memory_vault_root(root) / "concepts"
@@ -217,8 +217,35 @@ class MemoryVaultTests(unittest.TestCase):
 
         self.assertTrue(result.ok)
         self.assertIn("TTS Latency", result.context_text)
-        self.assertIn("Test Evelyn TTS", result.context_text)
+        self.assertNotIn("Test Evelyn TTS", result.context_text)
         self.assertIn(result.metadata["retrieval_mode"], {"fts", "scan", "fts+vector", "scan+vector"})
+
+    def test_memory_admin_query_can_recall_procedure_notes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_memory_vault_note(
+                note_type="procedure",
+                title="Test Evelyn TTS",
+                body="After tests, clean up launched TTS services.",
+                tags=["verify"],
+                projects=["evelyn"],
+                root=root,
+            )
+            request = MemoryRecallRequest(
+                turn_id="turn-admin-procedure",
+                session_key=None,
+                guild_id=None,
+                user_text="memory vault maintenance test evelyn tts procedure",
+                topic_id=None,
+                source="test",
+                max_items=3,
+                metadata={"active_project": "evelyn"},
+            )
+            result = recall_memory_vault(request, root=root)
+
+        self.assertTrue(result.ok)
+        self.assertIn("Test Evelyn TTS", result.context_text)
+        self.assertIn("[Procedural Memory]", result.context_text)
 
     def test_user_note_detail_returns_full_edit_body(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -258,6 +285,15 @@ class MemoryVaultTests(unittest.TestCase):
                 importance=0.7,
                 root=root,
             )
+            write_memory_vault_note(
+                note_type="concept",
+                title="Memory Graph Concept",
+                body="Concept note connected through explicit wiki style relationships and shared graph tags.",
+                tags=["memory", "graph"],
+                links=["Memory Graph Core"],
+                importance=0.75,
+                root=root,
+            )
 
             graph = export_memory_graph(root=root)
 
@@ -267,7 +303,9 @@ class MemoryVaultTests(unittest.TestCase):
         node_titles = {node["title"] for node in graph["nodes"]}
         edge_types = {edge["type"] for edge in graph["edges"]}
         self.assertIn("Memory Graph Core", node_titles)
-        self.assertIn("Memory Graph Procedure", node_titles)
+        self.assertIn("Memory Graph Concept", node_titles)
+        self.assertNotIn("Memory Graph Procedure", node_titles)
+        self.assertNotIn("procedure", graph["stats"]["type_counts"])
         self.assertTrue({"related", "shared_tag", "semantic_similarity"} & edge_types)
 
     def test_write_and_supersede_note(self) -> None:
@@ -424,12 +462,42 @@ class MemoryVaultTests(unittest.TestCase):
 
             nodes = refresh_legacy_memory_node_notes(123, root=root)
             graph = export_memory_graph(root=root, max_nodes=80)
+            snapshot = memory_vault_user_snapshot(root=root, limit=80)
+            legacy_card = next(card for card in snapshot["cards"] if card["type"] == "legacy")
+            detail = memory_vault_user_note(legacy_card["id"], root=root)
+            edit = update_memory_vault_user_note(
+                legacy_card["id"],
+                "edit",
+                title="Edited Legacy",
+                body="This edit must not be written.",
+                root=root,
+            )
 
         self.assertGreaterEqual(len(nodes), 2)
         legacy_nodes = [node for node in graph["nodes"] if node["type"] == "legacy"]
         self.assertGreaterEqual(len(legacy_nodes), 2)
-        self.assertTrue(any("facts" in node["title"].lower() for node in legacy_nodes))
-        self.assertTrue(any("Keep Obsidian memory nodes visible." in node["snippet"] for node in legacy_nodes))
+        self.assertTrue(all(node["title"] == "Archived memory" for node in legacy_nodes))
+        self.assertTrue(all(node["locked"] for node in legacy_nodes))
+        self.assertTrue(all(node["contentHidden"] for node in legacy_nodes))
+        self.assertTrue(all(node["canEdit"] is False for node in legacy_nodes))
+        self.assertTrue(all(node["snippet"] == "" for node in legacy_nodes))
+        self.assertGreaterEqual(len([card for card in snapshot["cards"] if card["type"] == "legacy"]), 2)
+        self.assertTrue(legacy_card["locked"])
+        self.assertFalse(legacy_card["canEdit"])
+        self.assertTrue(legacy_card["contentHidden"])
+        self.assertEqual(legacy_card["body"], "")
+        self.assertEqual(legacy_card["title"], "Archived memory")
+        self.assertIn("Archived memory", legacy_card["preview"])
+        self.assertNotIn("Legacy memory", legacy_card["preview"])
+        self.assertNotIn("Keep Obsidian memory nodes visible.", legacy_card["preview"])
+        self.assertTrue(detail["ok"])
+        self.assertEqual(detail["card"]["title"], "Archived memory")
+        self.assertEqual(detail["card"]["body"], "")
+        self.assertIn("Archived memory", detail["card"]["preview"])
+        self.assertNotIn("Legacy memory", detail["card"]["preview"])
+        self.assertNotIn("Keep Obsidian memory nodes visible.", detail["card"]["preview"])
+        self.assertFalse(edit["ok"])
+        self.assertEqual(edit["error"], "locked_legacy_note")
 
     def test_context_builder_includes_pinned_hot_context(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

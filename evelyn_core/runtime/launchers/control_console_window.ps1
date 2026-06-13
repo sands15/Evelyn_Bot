@@ -78,9 +78,28 @@ function Get-WindowHandleByTitle {
     return $script:matched
 }
 
-function Test-PortListening {
-    param([int]$Port)
-    return $null -ne (Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1)
+function Test-PortConnect {
+    param(
+        [string]$HostName = '127.0.0.1',
+        [int]$Port,
+        [int]$TimeoutMs = 1000
+    )
+
+    $client = $null
+    try {
+        $client = [System.Net.Sockets.TcpClient]::new()
+        $iar = $client.BeginConnect($HostName, $Port, $null, $null)
+        if ($iar.AsyncWaitHandle.WaitOne($TimeoutMs)) {
+            $client.EndConnect($iar)
+            return $true
+        }
+    } catch {
+    } finally {
+        if ($client) {
+            $client.Close()
+        }
+    }
+    return $false
 }
 
 if ($Action -eq 'list') {
@@ -90,7 +109,7 @@ if ($Action -eq 'list') {
             key = $spec.key
             title = $spec.title
             port = $spec.port
-            running = (Test-PortListening -Port $spec.port)
+            running = (Test-PortConnect -HostName '127.0.0.1' -Port $spec.port)
             windowFound = ($hWnd -ne [IntPtr]::Zero)
         }
     }
@@ -119,7 +138,7 @@ if ($handle -eq [IntPtr]::Zero) {
         error = 'window_not_found'
         key = $spec.key
         title = $spec.title
-        running = (Test-PortListening -Port $spec.port)
+        running = (Test-PortConnect -HostName '127.0.0.1' -Port $spec.port)
     } | ConvertTo-Json -Depth 4 -Compress
     exit 1
 }

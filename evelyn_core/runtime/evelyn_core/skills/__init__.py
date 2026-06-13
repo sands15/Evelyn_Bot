@@ -6,7 +6,7 @@ from pathlib import Path
 from .base import RegisteredSkill, SkillContext, SkillResult, SkillSpec
 from .loader import load_skill_file, load_skill_module, load_skills_from_directory
 from .registry import SkillRegistry, skill_registry
-from . import conversation, delivery, routing, search
+from . import conversation, delivery, main_synthesis, routing, search
 
 
 def _autoload_external_skills() -> None:
@@ -43,6 +43,7 @@ __all__ = [
     "load_skills_from_directory",
     "conversation",
     "delivery",
+    "main_synthesis",
     "routing",
     "search",
 ]

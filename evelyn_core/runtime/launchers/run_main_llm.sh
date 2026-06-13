@@ -13,8 +13,8 @@ MAIN_LLM_CACHE_REUSE="${MAIN_LLM_CACHE_REUSE:-256}"
 MAIN_LLM_REASONING="${MAIN_LLM_REASONING:-off}"
 MAIN_LLM_REASONING_BUDGET="${MAIN_LLM_REASONING_BUDGET:-0}"
 MAIN_LLM_HF="${MAIN_LLM_HF:-off}"
-MAIN_LLM_MODEL="${MAIN_LLM_MODEL:-/mnt/c/Users/Admin/llama.cpp/models/kanana-1.5-8b-instruct-2505-q4_k_m.gguf}"
-MAIN_LLM_LORA="${MAIN_LLM_LORA:-/mnt/c/Evelyn/training/evelyn_lora_kanana_v1/outputs/kanana_evelyn_core_clean_v46_lora.gguf}"
+MAIN_LLM_MODEL="${MAIN_LLM_MODEL:-/mnt/c/Users/Admin/llama.cpp/models/gemma4-12b-batiai-iq4xs/google-gemma-4-12B-it-IQ4_XS.gguf}"
+MAIN_LLM_LORA="${MAIN_LLM_LORA:-off}"
 MAIN_LLM_LORA_SCALE="${MAIN_LLM_LORA_SCALE:-1.0}"
 MAIN_LLM_REPEAT_LAST_N="${MAIN_LLM_REPEAT_LAST_N:-256}"
 MAIN_LLM_REPEAT_PENALTY="${MAIN_LLM_REPEAT_PENALTY:-1.10}"
@@ -26,9 +26,14 @@ MAIN_LLM_GPU_MEMORY_UTILIZATION="${MAIN_LLM_GPU_MEMORY_UTILIZATION:-0.60}"
 MAIN_LLM_CHAT_TEMPLATE_CONTENT_FORMAT="${MAIN_LLM_CHAT_TEMPLATE_CONTENT_FORMAT:-openai}"
 MAIN_LLM_FLASHINFER_SAMPLER="${MAIN_LLM_FLASHINFER_SAMPLER:-0}"
 MAIN_LLM_ENFORCE_EAGER="${MAIN_LLM_ENFORCE_EAGER:-true}"
+MAIN_LLM_JINJA="${MAIN_LLM_JINJA:-true}"
+MAIN_LLM_MMPROJ="${MAIN_LLM_MMPROJ:-off}"
+MAIN_LLM_CHAT_TEMPLATE_KWARGS="${MAIN_LLM_CHAT_TEMPLATE_KWARGS:-{\"enable_thinking\":false}}"
+MAIN_LLM_REASONING_FORMAT="${MAIN_LLM_REASONING_FORMAT:-none}"
 
 export CUDA_DEVICE_ORDER="${CUDA_DEVICE_ORDER:-PCI_BUS_ID}"
 export CUDA_VISIBLE_DEVICES="$MAIN_LLM_GPU"
+export LLAMA_CHAT_TEMPLATE_KWARGS="$MAIN_LLM_CHAT_TEMPLATE_KWARGS"
 
 if [[ "$MAIN_LLM_BACKEND" == "vllm" ]]; then
   eval "$MAIN_LLM_VENV_ACT"
@@ -82,9 +87,18 @@ if [[ -n "$MAIN_LLM_LORA" ]]; then
   lora_args=(--lora-scaled "${MAIN_LLM_LORA}:${MAIN_LLM_LORA_SCALE}")
 fi
 
+template_args=()
+if [[ "${MAIN_LLM_JINJA,,}" == "true" || "$MAIN_LLM_JINJA" == "1" || "${MAIN_LLM_JINJA,,}" == "yes" ]]; then
+  template_args+=(--jinja)
+fi
+if [[ "${MAIN_LLM_MMPROJ,,}" == "off" || "${MAIN_LLM_MMPROJ,,}" == "none" || "$MAIN_LLM_MMPROJ" == "0" ]]; then
+  template_args+=(--no-mmproj)
+fi
+
 exec ./build/bin/llama-server \
   "${model_args[@]}" \
   "${lora_args[@]}" \
+  "${template_args[@]}" \
   --host 0.0.0.0 \
   --port "$MAIN_LLM_PORT" \
   --flash-attn on \
@@ -99,4 +113,5 @@ exec ./build/bin/llama-server \
   --presence-penalty "$MAIN_LLM_PRESENCE_PENALTY" \
   --frequency-penalty "$MAIN_LLM_FREQUENCY_PENALTY" \
   --reasoning "$MAIN_LLM_REASONING" \
-  --reasoning-budget "$MAIN_LLM_REASONING_BUDGET"
+  --reasoning-budget "$MAIN_LLM_REASONING_BUDGET" \
+  --reasoning-format "$MAIN_LLM_REASONING_FORMAT"

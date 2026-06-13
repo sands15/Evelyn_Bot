@@ -1,6 +1,6 @@
 # Evelyn Documentation Index
 
-Last reviewed: 2026-06-08
+Last reviewed: 2026-06-12
 
 Use this file to choose the right document before editing Evelyn. Current runtime
 facts still need to be verified against code before reporting them as
@@ -34,7 +34,30 @@ implemented behavior.
 - `docs/RUNTIME_ARTIFACTS_RETENTION.md`
   - Current retention guidance for runtime artifacts.
 
+- `docs/EVELYN_COMPLETENESS_EVALUATION_2026-06-09.md`
+  - Detailed completeness evaluation and redesign-priority reference.
+  - Use when deciding what to stabilize before adding major new features.
+
+- `docs/RUNTIME_SERVICE_MANIFEST_HEALTH_REPAIR_BLUEPRINT.md`
+  - Temporary design blueprint for `Runtime Service Manifest + Health/Repair Layer`.
+  - Use before implementing runtime service manifest, structured health, diagnostics, and repair actions.
+
+- `docs/EVELYN_FAST_BOOT_ARCHITECTURE.md`
+  - Fast Boot 우선 구현 전략과 상태 모델(`controlReady`, `botApiReady`, `chatReady`, `voiceReady`, `fullReady`),
+    라우트별 degraded response, 검증 순서를 정리한 운영 설계 문서.
+
+- `docs/EVELYN_FINAL_READINESS_JUDGMENT_BLUEPRINT.md`
+  - Final readiness judgment blueprint focused on final-operability criteria.
+  - Defines status taxonomy, diagnosis matrix, and 65/75/85 completion gates.
+
+- `docs/EVELYN_DOCKER_COMPOSE_MIGRATION_BLUEPRINT.md`
+  - Docker/Compose 전환 장단점, 단계별 로드맵, 서비스별 컨테이너화 적합도, GPU 주의 항목을 정리한
+    운영 이동 계획.
+
 ## Consolidated Plans
+
+- `docs/EVELYN_DOCKER_RUNTIME_QUICKSTART.md`
+  - 1차 Compose 전환용 control-page + bot-api 실행 가이드와 검증 항목 정리.
 
 - `docs/plans/EVELYN_PLANS_CONSOLIDATED.md`
   - Single combined reference for the previous `docs/plans/*.md` files.

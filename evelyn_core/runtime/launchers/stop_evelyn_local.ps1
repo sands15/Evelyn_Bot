@@ -6,8 +6,9 @@ param(
 $ErrorActionPreference = 'Continue'
 
 $projectRoot = Resolve-Path (Join-Path $PSScriptRoot '..\..\..')
+$composeFile = Join-Path $projectRoot 'docker-compose.fast-control.yml'
 $stopMarker = Join-Path $projectRoot '.evelyn_stop_requested'
-$targetPorts = @(8799, 8880, 8891, 9820, 9821, 9822)
+$targetPorts = @(8798, 8799, 8880, 8891, 9820, 9821, 9822)
 $evelynCommandFragments = @(
     'C:\Evelyn',
     'C:/Evelyn',
@@ -308,6 +309,43 @@ function Invoke-EvelynWslKill {
     }
 }
 
+function Invoke-EvelynDockerComposeStop {
+    param([switch]$DryRun)
+
+    if (-not (Test-Path -LiteralPath $composeFile)) {
+        Write-Host ("[stop_evelyn_local] compose file not found: {0}" -f $composeFile)
+        return
+    }
+    $composeArgs = @(
+        'compose',
+        '-f', [string]$composeFile,
+        '--profile', 'llm',
+        '--profile', 'tts',
+        '--profile', 'vision',
+        '--profile', 'stt',
+        '--profile', 'voyager',
+        '--profile', 'discord',
+        'stop'
+    )
+    if ($DryRun) {
+        Write-Host ("[stop_evelyn_local] dry-run: docker {0}" -f ($composeArgs -join ' '))
+        return
+    }
+    try {
+        $output = & docker @composeArgs 2>&1
+        if ($output) {
+            $output | ForEach-Object { Write-Host $_ }
+        }
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "[stop_evelyn_local] docker compose services stopped"
+        } else {
+            Write-Host ("[stop_evelyn_local] docker compose stop failed with exit code {0}" -f $LASTEXITCODE)
+        }
+    } catch {
+        Write-Host ("[stop_evelyn_local] docker compose stop failed: {0}" -f $_.Exception.Message)
+    }
+}
+
 if ($DelayMs -gt 0) {
     Start-Sleep -Milliseconds $DelayMs
 }
@@ -318,6 +356,8 @@ if (-not $DryRun) {
     } catch {
     }
 }
+
+Invoke-EvelynDockerComposeStop -DryRun:$DryRun
 
 $collected = Collect-Targets
 $rows = @(Get-TargetRows -ProcessTable $collected.Index.Table -Targets $collected.Targets)

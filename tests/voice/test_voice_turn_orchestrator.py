@@ -212,6 +212,42 @@ class VoiceTurnOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(spoken_chunks, ["policy answer"])
         self.assertNotIn("main_llm", [event[0] for event in events])
 
+    async def test_policy_no_main_llm_without_preface_falls_through_to_main_llm(self) -> None:
+        events: list[Any] = []
+        orchestrator = self.make_orchestrator(
+            route_decision_kwargs={
+                "needs_main_llm": False,
+            },
+            events=events,
+        )
+
+        result = await orchestrator.execute(VoiceTurnRequest(user_text="hello"))
+
+        self.assertEqual(result.answer_text, "main answer")
+        self.assertEqual(result.handled_by, "main_llm")
+        self.assertIn("main_llm", [event[0] for event in events])
+        self.assertNotIn("policy_no_main_llm", result.handled_by)
+
+    async def test_user_echo_short_circuit_falls_through_to_main_llm(self) -> None:
+        events: list[Any] = []
+        orchestrator = self.make_orchestrator(short_circuit_answer="hello", events=events)
+
+        result = await orchestrator.execute(VoiceTurnRequest(user_text="hello"))
+
+        self.assertEqual(result.answer_text, "main answer")
+        self.assertEqual(result.handled_by, "main_llm")
+        self.assertEqual([event[0] for event in events], ["prepare_route_context", "short_circuit", "skill_route", "main_llm"])
+
+    async def test_user_echo_skill_route_falls_through_to_main_llm(self) -> None:
+        events: list[Any] = []
+        orchestrator = self.make_orchestrator(skill_route_answer="hello", events=events)
+
+        result = await orchestrator.execute(VoiceTurnRequest(user_text="hello"))
+
+        self.assertEqual(result.answer_text, "main answer")
+        self.assertEqual(result.handled_by, "main_llm")
+        self.assertIn("main_llm", [event[0] for event in events])
+
     async def test_skill_route_respects_needs_tts_false(self) -> None:
         events: list[Any] = []
         spoken_chunks: list[str] = []

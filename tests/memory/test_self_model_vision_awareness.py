@@ -17,10 +17,12 @@ from evelyn_core.autonomy import AutonomyEngine, AutonomyGoal, assistant_proacti
 from evelyn_core.self_model import (
     IDLE_ACTIVITY_TTL_SEC,
     EvelynSelfState,
+    build_self_judgment,
     ensure_idle_activity,
     ensure_self_identity_profile,
     record_self_identity_turn,
     render_self_identity_context,
+    render_self_judgment_context,
     render_self_state_context,
     select_self_impulse,
     update_self_state_from_observation,
@@ -39,6 +41,10 @@ class DummyExecutor:
 
     async def execute_step(self, step: dict[str, Any]) -> dict[str, Any]:
         return {"status": "ok", "step": step}
+
+
+class DummyVisionPolicy:
+    needs_vision = True
 
 
 class SelfModelVisionAwarenessTests(unittest.TestCase):
@@ -86,6 +92,24 @@ class SelfModelVisionAwarenessTests(unittest.TestCase):
         assert plan is not None
         self.assertEqual(plan.steps[0]["action"], "maybe_ping_user")
         self.assertEqual(plan.steps[0]["text"], text)
+
+    def test_autonomy_ping_need_requires_queued_question(self) -> None:
+        engine = AutonomyEngine(guild_id=1, executor=DummyExecutor())
+        base_observation = {
+            "active_sessions": 1,
+            "known_followup_channels": 1,
+            "inflight_llm_requests": 0,
+            "recent_context_items": 0,
+            "last_autonomy_ping_sec": 999999,
+            "quiet_hours": False,
+            "self_state": {"last_impulse": "ask_light_question", "last_gate_reason": "curiosity"},
+        }
+
+        no_queue = engine.derive_needs(dict(base_observation))
+        with_queue = engine.derive_needs({**base_observation, "queued_proactive_question_available": True})
+
+        self.assertNotIn("ping", [need.kind for need in no_queue])
+        self.assertIn("ping", [need.kind for need in with_queue])
 
     def test_idle_activity_persists_within_ttl(self) -> None:
         state = EvelynSelfState(mood="calm")
@@ -150,6 +174,37 @@ class SelfModelVisionAwarenessTests(unittest.TestCase):
             self.assertIn("tone_feedback", context)
             self.assertIn("suffix_balance", context)
             self.assertIn("말투가 아직 친근하지 않아", context)
+
+    def test_self_judgment_detects_identity_and_stance_topic(self) -> None:
+        state = EvelynSelfState(mood="curious", curiosity=0.7, restraint=0.35)
+
+        judgment = build_self_judgment(
+            "대화하면서 정체성을 가지게 할 수 있잖아",
+            state=state,
+            route="main_llm",
+        )
+        context = render_self_judgment_context(
+            "대화하면서 정체성을 가지게 할 수 있잖아",
+            state=state,
+            route="main_llm",
+        )
+
+        self.assertIn("identity_or_stance", judgment["topics"])
+        self.assertIn("Evelyn self judgment stage:", context)
+        self.assertIn("not hidden chain-of-thought", context)
+        self.assertIn("Have opinions", context)
+        self.assertIn("Identity/stance topic", context)
+
+    def test_self_judgment_treats_screen_reading_as_evidence_limited(self) -> None:
+        context = render_self_judgment_context(
+            "내 화면 분석해줘",
+            state=EvelynSelfState(),
+            context_policy=DummyVisionPolicy(),
+        )
+
+        self.assertIn("vision_evidence", context)
+        self.assertIn("if screen/OCR evidence is weak", context)
+        self.assertIn("instead of guessing", context)
 
 
 if __name__ == "__main__":

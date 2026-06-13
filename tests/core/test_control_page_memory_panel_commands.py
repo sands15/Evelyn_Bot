@@ -52,6 +52,9 @@ class ControlPageMemoryPanelCommandTests(unittest.TestCase):
     def test_main_exposes_panel_commands_at_top_level_for_frontend(self) -> None:
         self.assertGreaterEqual(self.main_py.count('"controlPagePanels": build_control_page_panel_state(),'), 4)
 
+    def test_local_server_proxy_timeout_allows_full_bot_state_payload(self) -> None:
+        self.assertIn('PROXY_TIMEOUT_SEC = float(os.getenv("CONTROL_PAGE_PROXY_TIMEOUT_SEC", "6.0"))', self.local_server)
+
 
 if __name__ == "__main__":
     unittest.main()

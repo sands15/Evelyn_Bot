@@ -13,6 +13,7 @@ if str(RUNTIME_ROOT) not in sys.path:
 
 import evelyn_core.memory as memory  # noqa: E402
 from evelyn_core.proactive_questions import (  # noqa: E402
+    evaluate_proactive_question_gate,
     load_proactive_questions,
     mark_question_asked,
     promote_open_questions,
@@ -127,6 +128,54 @@ class ProactiveQuestionTests(unittest.TestCase):
                 awaiting_user_reply=False,
             )
         )
+
+    def test_gate_blocks_active_pending_question(self) -> None:
+        with TemporaryMemoryRoot(self):
+            promote_open_questions(123, [{"type": "detail", "text": "pending gate check"}], now=1000)
+            selected = select_question_to_ask(123, scope_type="guild", session_scope_key="session-a", now=1001)
+            assert selected is not None
+            mark_question_asked(
+                123,
+                selected["id"],
+                scope_type="guild",
+                session_scope_key="session-a",
+                asked_text=selected["ask_text"],
+                now=1002,
+            )
+
+            decision = evaluate_proactive_question_gate(
+                guild_id=123,
+                source="autonomy",
+                user_text="latest user text",
+                session_scope_key="session-a",
+                now=1003,
+            )
+
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.reason, "pending_question_active")
+        self.assertTrue(decision.pending_active)
+
+    def test_gate_blocks_session_cooldown_and_candidate_echo(self) -> None:
+        cooldown = evaluate_proactive_question_gate(
+            guild_id=123,
+            source="autonomy",
+            user_text="latest user text",
+            session_scope_key="session-a",
+            session_cooldown_hit=True,
+        )
+        echo = evaluate_proactive_question_gate(
+            guild_id=123,
+            source="autonomy",
+            user_text="same question?",
+            session_scope_key="session-a",
+            candidate_text="same question?",
+        )
+
+        self.assertFalse(cooldown.allowed)
+        self.assertEqual(cooldown.reason, "session_question_cooldown")
+        self.assertTrue(cooldown.session_cooldown_hit)
+        self.assertFalse(echo.allowed)
+        self.assertEqual(echo.reason, "candidate_echoes_user")
 
 
 if __name__ == "__main__":

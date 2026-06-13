@@ -3,6 +3,14 @@ chcp 65001 >nul
 setlocal
 call "%~dp0start_env.bat"
 
+if /I "%~1"=="--inline" if /I not "%EVELYN_ALLOW_LEGACY_HOST_START%"=="true" goto :run_docker
+if /I not "%~1"=="--legacy-host" if /I not "%~1"=="--inline" goto :run_docker
+if /I "%~1"=="--legacy-host" if /I not "%EVELYN_ALLOW_LEGACY_HOST_START%"=="true" (
+    echo [Evelyn] Legacy host Voyager launch is blocked by default.
+    echo [Evelyn] Set EVELYN_ALLOW_LEGACY_HOST_START=true only for explicit host-attached debugging.
+    endlocal & exit /b 2
+)
+
 if "%MINECRAFT_AUTONOMY_SERVICE_HOST%"=="" set "MINECRAFT_AUTONOMY_SERVICE_HOST=127.0.0.1"
 if "%MINECRAFT_AUTONOMY_SERVICE_PORT%"=="" set "MINECRAFT_AUTONOMY_SERVICE_PORT=8765"
 if "%VOYAGER_PYTHON_EXE%"=="" set "VOYAGER_PYTHON_EXE=%~dp0..\.venv-voyager\Scripts\python.exe"
@@ -83,3 +91,8 @@ set "WAIT_SECONDS=%~2"
 if "%WAIT_SECONDS%"=="" set "WAIT_SECONDS=30"
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$deadline=(Get-Date).AddSeconds(%WAIT_SECONDS%); while((Get-Date) -lt $deadline){ if(Get-NetTCPConnection -State Listen -LocalPort %WAIT_PORT% -ErrorAction SilentlyContinue){ exit 0 }; Start-Sleep -Milliseconds 500 }; exit 1"
 exit /b %ERRORLEVEL%
+
+:run_docker
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0runtime\launchers\start_docker_compose_services.ps1" -Profiles voyager -Services codex_gateway,voyager
+set "EXIT_CODE=%ERRORLEVEL%"
+endlocal & exit /b %EXIT_CODE%

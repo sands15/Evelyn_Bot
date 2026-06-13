@@ -3,6 +3,14 @@ chcp 65001 >nul
 setlocal
 call "%~dp0start_env.bat"
 
+if /I "%~1"=="--inline" if /I not "%EVELYN_ALLOW_LEGACY_HOST_START%"=="true" goto :run_docker
+if /I not "%~1"=="--legacy-host" if /I not "%~1"=="--inline" goto :run_docker
+if /I "%~1"=="--legacy-host" if /I not "%EVELYN_ALLOW_LEGACY_HOST_START%"=="true" (
+    echo [Evelyn] Legacy host Voyager service launch is blocked by default.
+    echo [Evelyn] Set EVELYN_ALLOW_LEGACY_HOST_START=true only for explicit host-attached debugging.
+    endlocal & exit /b 2
+)
+
 if "%MINECRAFT_AUTONOMY_SERVICE_HOST%"=="" set "MINECRAFT_AUTONOMY_SERVICE_HOST=127.0.0.1"
 if "%MINECRAFT_AUTONOMY_SERVICE_PORT%"=="" set "MINECRAFT_AUTONOMY_SERVICE_PORT=8765"
 
@@ -41,4 +49,9 @@ if exist .venv-voyager\Scripts\python.exe (
 
 set "EXIT_CODE=%ERRORLEVEL%"
 popd
+endlocal & exit /b %EXIT_CODE%
+
+:run_docker
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0runtime\launchers\start_docker_compose_services.ps1" -Profiles voyager -Services voyager
+set "EXIT_CODE=%ERRORLEVEL%"
 endlocal & exit /b %EXIT_CODE%

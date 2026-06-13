@@ -3,6 +3,14 @@ chcp 65001 >nul
 setlocal
 call "%~dp0start_env.bat"
 
+if /I "%~1"=="--inline" if /I not "%EVELYN_ALLOW_LEGACY_HOST_START%"=="true" goto :run_docker
+if /I not "%~1"=="--legacy-host" if /I not "%~1"=="--inline" goto :run_docker
+if /I "%~1"=="--legacy-host" if /I not "%EVELYN_ALLOW_LEGACY_HOST_START%"=="true" (
+    echo [Evelyn] Legacy host Bot launch is blocked by default.
+    echo [Evelyn] Set EVELYN_ALLOW_LEGACY_HOST_START=true only for explicit host-attached debugging.
+    endlocal & exit /b 2
+)
+
 if /I "%~1"=="--inline" goto :run_inline
 
 set "WT_EXE=%LOCALAPPDATA%\Microsoft\WindowsApps\wt.exe"
@@ -92,3 +100,8 @@ if errorlevel 1 (
 
 echo [Evelyn] %WAIT_LABEL% is ready
 endlocal & exit /b 0
+
+:run_docker
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0runtime\launchers\start_docker_compose_services.ps1" -Profiles llm,tts,stt,vision,voyager,discord -Services discord_bot
+set "EXIT_CODE=%ERRORLEVEL%"
+endlocal & exit /b %EXIT_CODE%

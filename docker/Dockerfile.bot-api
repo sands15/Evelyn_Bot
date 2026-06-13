@@ -1,0 +1,21 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONPATH=/app/evelyn_core/runtime
+
+COPY docker/requirements.bot-api.txt /app/docker/requirements.bot-api.txt
+RUN python -m pip install --upgrade pip && \
+    pip install --no-cache-dir -r /app/docker/requirements.bot-api.txt
+
+COPY . /app
+
+ENV EVELYN_CORE_RUNTIME=/app/evelyn_core/runtime
+ENV EVELYN_CORE_ROOT=/app/evelyn_core
+ENV EVELYN_PROJECT_ROOT=/app
+
+EXPOSE 8798
+
+CMD ["python", "-m", "evelyn_core.fast_control_api"]

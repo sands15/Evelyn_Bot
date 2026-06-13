@@ -95,7 +95,13 @@ class LocalTtsPlaybackManager:
             last_finished_at=self.last_finished_at,
         ).to_dict()
 
-    async def play_source(self, source: Any, *, cleanup_source: bool = True) -> bool:
+    async def play_source(
+        self,
+        source: Any,
+        *,
+        cleanup_source: bool = True,
+        on_first_playback: Callable[[], None] | None = None,
+    ) -> bool:
         if not self.enabled:
             return False
         if sd is None:
@@ -111,7 +117,11 @@ class LocalTtsPlaybackManager:
             self.last_started_at = time.time()
             self._log(f"[LOCAL TTS] start device={self.device if self.device is not None else 'default'}")
             try:
-                played = await asyncio.to_thread(self._play_source_sync, source)
+                played = await asyncio.to_thread(
+                    self._play_source_sync,
+                    source,
+                    on_first_playback=on_first_playback,
+                )
                 self.played_bytes += played
                 self.play_count += 1
                 if played > 0:
@@ -132,7 +142,7 @@ class LocalTtsPlaybackManager:
                 self.last_finished_at = time.time()
                 self.active = False
 
-    def _play_source_sync(self, source: Any) -> int:
+    def _play_source_sync(self, source: Any, *, on_first_playback: Callable[[], None] | None = None) -> int:
         first_chunk = source.read()
         source_error = getattr(source, "error", None)
         if source_error is not None:
@@ -149,6 +159,11 @@ class LocalTtsPlaybackManager:
             blocksize=max(1, DISCORD_FRAME_BYTES // (DISCORD_PCM_CHANNELS * 2)),
         ) as stream:
             stream.write(first_chunk)
+            if on_first_playback is not None:
+                try:
+                    on_first_playback()
+                except Exception:
+                    pass
             played += len(first_chunk)
             while True:
                 chunk = source.read()

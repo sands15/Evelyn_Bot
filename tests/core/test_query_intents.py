@@ -12,6 +12,8 @@ if str(RUNTIME_ROOT) not in sys.path:
 from evelyn_core.query_intents import (  # noqa: E402
     answer_current_datetime_query,
     classify_datetime_query,
+    extract_korean_location_hint,
+    resolve_recent_weather_location,
     should_force_search_query,
 )
 
@@ -38,6 +40,17 @@ class QueryIntentTests(unittest.TestCase):
         self.assertTrue(should_force_search_query("\uc624\ub298 \uad11\uc8fc\uad11\uc5ed\uc2dc\uc5d0 \ube44\uac00 \uc62c\uae4c?"))
         self.assertTrue(should_force_search_query("\ub0b4\uc77c \uc11c\uc6b8 \ube44 \uc640?"))
         self.assertTrue(should_force_search_query("\uc624\ub298 \ubd80\uc0b0 \uac15\uc218 \uc608\ubcf4 \uc54c\ub824\uc918"))
+        self.assertTrue(should_force_search_query("\uadf8\ub7fc \uc624\ub298 \ub0a0\uc528 \uc54c\ub824\uc918"))
+        self.assertTrue(should_force_search_query("\ub0a0\uc528 \uc54c\ub824\uc918"))
+
+    def test_recent_korean_location_hint_can_ground_weather_followup(self) -> None:
+        self.assertEqual(extract_korean_location_hint("\ud55c\uad6d, \uad11\uc8fc\uad11\uc5ed\uc2dc\uc57c \uae30\uc5b5\ud574"), "\uad11\uc8fc\uad11\uc5ed\uc2dc")
+        self.assertEqual(
+            resolve_recent_weather_location([
+                "\uc54c\uc558\uc5b4 \uad11\uc8fc\uad11\uc5ed\uc2dc\ub77c\uace0 \uae30\uc5b5\ud574\ub458\uac8c.",
+            ]),
+            "\uad11\uc8fc\uad11\uc5ed\uc2dc",
+        )
 
     def test_negated_search_request_does_not_force_search(self) -> None:
         self.assertFalse(should_force_search_query("\uac80\uc0c9 \uc5c6\uc774 \uc9e7\uac8c \ub2f5\ud574\uc918"))

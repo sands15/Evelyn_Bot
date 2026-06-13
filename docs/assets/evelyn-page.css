@@ -365,6 +365,103 @@ body.is-minecraft-mode .winbox-panel-content .slot-default {
   overflow: auto;
 }
 
+body,
+.left-rail,
+.right-rail,
+.panel,
+#minecraft-telemetry-panel,
+.compact-event-list,
+.inventory-widget,
+.panel-dock,
+.memory-card-list,
+.memory-graph-detail,
+.memory-editor-field textarea,
+.winbox-panel-content.context-card,
+.winbox-panel-content.widget-card,
+.winbox-panel-content.chat-panel,
+.winbox-panel-content.memory-graph-panel {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(230, 192, 99, 0.88) rgba(7, 11, 14, 0.72);
+}
+
+body::-webkit-scrollbar,
+.left-rail::-webkit-scrollbar,
+.right-rail::-webkit-scrollbar,
+.panel::-webkit-scrollbar,
+#minecraft-telemetry-panel::-webkit-scrollbar,
+.compact-event-list::-webkit-scrollbar,
+.inventory-widget::-webkit-scrollbar,
+.panel-dock::-webkit-scrollbar,
+.memory-card-list::-webkit-scrollbar,
+.memory-graph-detail::-webkit-scrollbar,
+.memory-editor-field textarea::-webkit-scrollbar,
+.winbox-panel-content.context-card::-webkit-scrollbar,
+.winbox-panel-content.widget-card::-webkit-scrollbar,
+.winbox-panel-content.chat-panel::-webkit-scrollbar,
+.winbox-panel-content.memory-graph-panel::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+body::-webkit-scrollbar-track,
+.left-rail::-webkit-scrollbar-track,
+.right-rail::-webkit-scrollbar-track,
+.panel::-webkit-scrollbar-track,
+#minecraft-telemetry-panel::-webkit-scrollbar-track,
+.compact-event-list::-webkit-scrollbar-track,
+.inventory-widget::-webkit-scrollbar-track,
+.panel-dock::-webkit-scrollbar-track,
+.memory-card-list::-webkit-scrollbar-track,
+.memory-graph-detail::-webkit-scrollbar-track,
+.memory-editor-field textarea::-webkit-scrollbar-track,
+.winbox-panel-content.context-card::-webkit-scrollbar-track,
+.winbox-panel-content.widget-card::-webkit-scrollbar-track,
+.winbox-panel-content.chat-panel::-webkit-scrollbar-track,
+.winbox-panel-content.memory-graph-panel::-webkit-scrollbar-track {
+  border-radius: 999px;
+  background: rgba(7, 11, 14, 0.72);
+}
+
+body::-webkit-scrollbar-thumb,
+.left-rail::-webkit-scrollbar-thumb,
+.right-rail::-webkit-scrollbar-thumb,
+.panel::-webkit-scrollbar-thumb,
+#minecraft-telemetry-panel::-webkit-scrollbar-thumb,
+.compact-event-list::-webkit-scrollbar-thumb,
+.inventory-widget::-webkit-scrollbar-thumb,
+.panel-dock::-webkit-scrollbar-thumb,
+.memory-card-list::-webkit-scrollbar-thumb,
+.memory-graph-detail::-webkit-scrollbar-thumb,
+.memory-editor-field textarea::-webkit-scrollbar-thumb,
+.winbox-panel-content.context-card::-webkit-scrollbar-thumb,
+.winbox-panel-content.widget-card::-webkit-scrollbar-thumb,
+.winbox-panel-content.chat-panel::-webkit-scrollbar-thumb,
+.winbox-panel-content.memory-graph-panel::-webkit-scrollbar-thumb {
+  border: 2px solid rgba(7, 11, 14, 0.72);
+  border-radius: 999px;
+  background: linear-gradient(180deg, rgba(230, 192, 99, 0.92), rgba(116, 145, 137, 0.9));
+  background-clip: padding-box;
+}
+
+body::-webkit-scrollbar-thumb:hover,
+.left-rail::-webkit-scrollbar-thumb:hover,
+.right-rail::-webkit-scrollbar-thumb:hover,
+.panel::-webkit-scrollbar-thumb:hover,
+#minecraft-telemetry-panel::-webkit-scrollbar-thumb:hover,
+.compact-event-list::-webkit-scrollbar-thumb:hover,
+.inventory-widget::-webkit-scrollbar-thumb:hover,
+.panel-dock::-webkit-scrollbar-thumb:hover,
+.memory-card-list::-webkit-scrollbar-thumb:hover,
+.memory-graph-detail::-webkit-scrollbar-thumb:hover,
+.memory-editor-field textarea::-webkit-scrollbar-thumb:hover,
+.winbox-panel-content.context-card::-webkit-scrollbar-thumb:hover,
+.winbox-panel-content.widget-card::-webkit-scrollbar-thumb:hover,
+.winbox-panel-content.chat-panel::-webkit-scrollbar-thumb:hover,
+.winbox-panel-content.memory-graph-panel::-webkit-scrollbar-thumb:hover {
+  background: linear-gradient(180deg, rgba(244, 201, 95, 0.96), rgba(145, 197, 184, 0.94));
+  background-clip: padding-box;
+}
+
 .center-stage {
   display: grid;
   padding: 2px;
@@ -688,6 +785,11 @@ body.is-minecraft-mode .winbox-panel-content .slot-default {
 .runtime-dot.is-offline {
   background: radial-gradient(circle, #e19a86 0%, #8b3d35 100%);
   box-shadow: 0 0 14px rgba(225, 154, 134, 0.32);
+}
+
+.runtime-dot.is-issue {
+  background: radial-gradient(circle, #f0a37e 0%, #9e4e38 100%);
+  box-shadow: 0 0 14px rgba(240, 163, 126, 0.36);
 }
 
 .stat-grid {
@@ -2055,6 +2157,18 @@ body.is-default-mode .winbox-panel-content.model-viewport .avatar-annotation {
   background: rgba(84, 14, 18, 0.34);
 }
 
+.quick-command.is-repair-preview {
+  color: #f6d982;
+  border-color: rgba(240, 203, 98, 0.46);
+  background: rgba(240, 203, 98, 0.12);
+}
+
+.quick-command.is-repair-apply {
+  color: #dffbea;
+  border-color: rgba(66, 190, 117, 0.56);
+  background: rgba(47, 157, 104, 0.18);
+}
+
 .quick-command:hover {
   background: rgba(var(--context-neon-rgb), 0.08);
 }
@@ -3255,6 +3369,9 @@ body.is-panel-dragging-active {
 }
 
 .memory-filter-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   min-height: 30px;
   padding: 6px 10px;
   border: 1px solid rgba(145, 197, 184, 0.18);
@@ -3263,6 +3380,21 @@ body.is-panel-dragging-active {
   background: rgba(145, 197, 184, 0.07);
   font: 600 0.75rem/1 "IBM Plex Sans KR", sans-serif;
   cursor: pointer;
+}
+
+.memory-filter-value {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 30px;
+  min-width: 86px;
+  padding: 6px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 8px;
+  color: var(--text-soft);
+  background: rgba(255, 255, 255, 0.05);
+  font: 700 0.75rem/1 "IBM Plex Sans KR", sans-serif;
+  white-space: nowrap;
 }
 
 .memory-filter-button.is-active {
@@ -4017,6 +4149,18 @@ body::after {
   color: #ffffff;
   border-color: #17191d;
   background: #17191d;
+}
+
+.quick-command.is-repair-preview {
+  color: #6f5412;
+  border-color: rgba(240, 203, 98, 0.5);
+  background: rgba(240, 203, 98, 0.18);
+}
+
+.quick-command.is-repair-apply {
+  color: #115f37;
+  border-color: rgba(47, 157, 104, 0.52);
+  background: rgba(47, 157, 104, 0.16);
 }
 
 .quick-command,

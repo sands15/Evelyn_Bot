@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 from typing import Any
 
+from ...text import clean_text
 from ..base import SkillContext, SkillResult, require_callback
 from ..registry import skill_registry
 
@@ -14,7 +15,16 @@ description = "Text delivery, TTS preparation, and playback-oriented response em
 
 async def execute(context: SkillContext) -> SkillResult:
     extras = context.extras or {}
-    answer_text = str(extras.get("answer_text") or extras.get("user_text") or "")
+    answer_text = clean_text(str(extras.get("answer_text") or ""))
+    if not answer_text:
+        return SkillResult(
+            skill=name,
+            route="delivery",
+            handled=False,
+            status="empty_answer",
+            should_emit=False,
+            metadata={"reason": "missing_answer_text"},
+        )
     build_answer_payload_from_text = require_callback(extras, "build_answer_payload_from_text_fn")
     build_delivery_plan = require_callback(extras, "build_delivery_plan_fn")
     split_tts_sentences = require_callback(extras, "split_tts_sentences_fn")

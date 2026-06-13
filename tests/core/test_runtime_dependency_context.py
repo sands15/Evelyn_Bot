@@ -12,6 +12,9 @@ class RuntimeDependencyContextTests(unittest.TestCase):
         main_py = (REPO_ROOT / "main.py").read_text(encoding="utf-8")
 
         self.assertIn("def build_evelyn_runtime_dependency_context", main_py)
+        self.assertIn("render_self_judgment_context", main_py)
+        self.assertIn("self_judgment_context = render_self_judgment_context", main_py)
+        self.assertIn("self_judgment_context", main_py)
         self.assertIn("Evelyn dependency topology:", main_py)
         self.assertIn("role=primary answer text generation", main_py)
         self.assertIn("role=route/cognitive policy before the main answer", main_py)
@@ -31,8 +34,12 @@ class RuntimeDependencyContextTests(unittest.TestCase):
 
     def test_main_llm_blocks_unrequested_minecraft_domain_leaks(self) -> None:
         main_py = (REPO_ROOT / "main.py").read_text(encoding="utf-8")
+        prompt_contract = (
+            REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "assistant_prompt_contract.py"
+        ).read_text(encoding="utf-8")
 
-        self.assertIn("Domain rule: Minecraft/Voyager/block/coordinate/pathfinding", main_py)
+        self.assertIn("build_evelyn_system_prompt", main_py)
+        self.assertIn("Domain rule: Minecraft/Voyager/block/coordinate/pathfinding", prompt_contract)
         self.assertIn("def user_explicitly_mentions_minecraft", main_py)
         self.assertIn("def answer_contains_minecraft_leak", main_py)
         self.assertIn("def sanitize_unrequested_minecraft_leak", main_py)
@@ -47,7 +54,7 @@ class RuntimeDependencyContextTests(unittest.TestCase):
         self.assertIn("응답 규칙: 짧게 바로 답해라", main_py)
         self.assertIn("답변 끝에 새 질문을 덧붙이지 마라", main_py)
         self.assertNotIn("[QUESTION_HINT]", main_py)
-        self.assertIn("Vision rule: Do not claim you can see the user's screen", main_py)
+        self.assertIn("Vision rule: Do not claim you can see the user's screen", prompt_contract)
 
 
 if __name__ == "__main__":
