@@ -34,6 +34,16 @@ class FakeSource:
         self.cleanup_called = True
 
 
+class StoppableSource(FakeSource):
+    def __init__(self, chunks: list[bytes]) -> None:
+        super().__init__(chunks)
+        self.finish_called = False
+
+    def finish(self) -> None:
+        self.finish_called = True
+        self.chunks = []
+
+
 class ObservingSource(FakeSource):
     def __init__(self, chunks: list[bytes]) -> None:
         super().__init__(chunks)
@@ -49,6 +59,8 @@ class ObservingSource(FakeSource):
 
 class FakeRawOutputStream:
     writes: list[bytes] = []
+    abort_count = 0
+    stop_count = 0
 
     def __init__(self, **kwargs) -> None:
         self.kwargs = kwargs
@@ -61,6 +73,12 @@ class FakeRawOutputStream:
 
     def write(self, chunk: bytes) -> None:
         self.writes.append(bytes(chunk))
+
+    def abort(self) -> None:
+        type(self).abort_count += 1
+
+    def stop(self) -> None:
+        type(self).stop_count += 1
 
 
 class FakeSoundDevice:
@@ -127,6 +145,32 @@ class LocalTtsPlaybackTests(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(callback_writes, [[b"first"]])
         self.assertEqual(FakeRawOutputStream.writes[:2], [b"first", b"second"])
+
+    def test_request_stop_interrupts_active_local_playback(self) -> None:
+        original_sd = local_tts_playback.sd
+        FakeRawOutputStream.writes = []
+        FakeRawOutputStream.abort_count = 0
+        FakeRawOutputStream.stop_count = 0
+        stop_results: list[bool] = []
+        local_tts_playback.sd = FakeSoundDevice()
+        try:
+            manager = LocalTtsPlaybackManager(enabled=True, device="default")
+            source = StoppableSource([b"first", b"second"])
+            ok = asyncio.run(
+                manager.play_source(
+                    source,
+                    on_first_playback=lambda: stop_results.append(manager.request_stop(reason="test")),
+                )
+            )
+        finally:
+            local_tts_playback.sd = original_sd
+
+        self.assertTrue(ok)
+        self.assertEqual(stop_results, [True])
+        self.assertTrue(source.finish_called)
+        self.assertTrue(source.cleanup_called)
+        self.assertEqual(FakeRawOutputStream.writes, [b"first"])
+        self.assertEqual(FakeRawOutputStream.abort_count, 1)
 
 
 if __name__ == "__main__":

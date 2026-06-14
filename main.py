@@ -248,6 +248,16 @@ from evelyn_core.voice_stt_flow import (
     run_partial_stt_flow,
 )
 from evelyn_core.stt_client import transcribe_audio16k_via_service
+from evelyn_core.speaker_verification import (
+    SpeakerVerificationConfig,
+    SpeakerVerificationResult,
+    SpeakerVerifier,
+    speaker_verification_applies,
+)
+from evelyn_core.voice_barge_in import (
+    VoiceUtteranceMergeRecord,
+    maybe_merge_barge_in_utterance,
+)
 from evelyn_core.voice_utterance import (
     UtteranceAssemblyConfig,
     discord_pcm_seconds,
@@ -484,6 +494,7 @@ session_turn_ids: dict[str, str] = {}
 session_segment_counters: dict[str, int] = {}
 session_last_turn_accepted_at: dict[str, float] = {}
 session_last_stt_text: dict[str, str] = {}
+room_last_voice_utterance_for_merge: dict[str, VoiceUtteranceMergeRecord] = {}
 session_partial_stt_text: dict[str, str] = {}
 session_committed_stt_text: dict[str, str] = {}
 session_bad_audio_counts: dict[str, int] = {}
@@ -653,6 +664,19 @@ tts_playback_manager = TtsPlaybackManager(tts_playback_tracker)
 local_tts_playback_manager = LocalTtsPlaybackManager(
     enabled=LOCAL_TTS_OUTPUT_ENABLED,
     device=LOCAL_TTS_OUTPUT_DEVICE,
+    log=print,
+)
+speaker_verifier = SpeakerVerifier(
+    SpeakerVerificationConfig(
+        enabled=SPEAKER_VERIFICATION_ENABLED,
+        enroll_dir=SPEAKER_VERIFICATION_ENROLL_DIR,
+        threshold=SPEAKER_VERIFICATION_THRESHOLD,
+        min_audio_sec=SPEAKER_VERIFICATION_MIN_AUDIO_SEC,
+        max_audio_sec=SPEAKER_VERIFICATION_MAX_AUDIO_SEC,
+        model=SPEAKER_VERIFICATION_MODEL,
+        cache_dir=SPEAKER_VERIFICATION_CACHE_DIR,
+        device=SPEAKER_VERIFICATION_DEVICE,
+    ),
     log=print,
 )
 active_tts_playbacks = tts_playback_tracker.registry
@@ -1561,6 +1585,9 @@ def reset_guild_runtime_state(guild_id: int) -> None:
         session_segment_counters.pop(key, None)
         session_last_turn_accepted_at.pop(key, None)
         session_last_stt_text.pop(key, None)
+        for room_key, record in list(room_last_voice_utterance_for_merge.items()):
+            if record.session_key == key:
+                room_last_voice_utterance_for_merge.pop(room_key, None)
         session_partial_stt_text.pop(key, None)
         session_committed_stt_text.pop(key, None)
         session_bad_audio_counts.pop(key, None)
@@ -3380,6 +3407,7 @@ def should_reply_to_voice(
     room_session_key: str | None = None,
     user_id: int | None = None,
     active_speaker_user_id: int | None = None,
+    ignore_tts_suppression: bool = False,
 ) -> tuple[bool, str, str]:
     now = time.monotonic()
     session_state = session_state_snapshot(session_key)
@@ -3390,11 +3418,13 @@ def should_reply_to_voice(
     if active_speaker_user_id is None:
         active_speaker_user_id = room_state.get("active_speaker_user_id")
 
-    tts_suppression = tts_playback_manager.input_suppression_reason(
-        guild_id=guild_id,
-        post_tts_ignore_sec=POST_TTS_IGNORE_SEC,
-        now=now,
-    )
+    tts_suppression = None
+    if not ignore_tts_suppression:
+        tts_suppression = tts_playback_manager.input_suppression_reason(
+            guild_id=guild_id,
+            post_tts_ignore_sec=POST_TTS_IGNORE_SEC,
+            now=now,
+        )
     cooldown_active = bool(room_session_key and (now - room_last_voice_reply_at.get(room_session_key, 0.0) < REPLY_COOLDOWN_SEC))
     decision = decide_voice_reply_gate(
         VoiceReplyGateInput(
@@ -7384,6 +7414,7 @@ def serialize_local_mic_runtime_state() -> dict[str, Any]:
         "lastInputLevel": round(float(getattr(local_mic_service, "last_input_level", 0.0) or 0.0), 6),
         "maxInputLevel": round(float(getattr(local_mic_service, "max_input_level", 0.0) or 0.0), 6),
         "lastInputStatus": getattr(local_mic_service, "last_input_status", None),
+        "effectiveMaxSilenceMs": int(getattr(local_mic_service, "last_effective_max_silence_ms", LOCAL_MIC_MAX_SILENCE_MS) or LOCAL_MIC_MAX_SILENCE_MS),
         "rejectedSegmentCount": int(getattr(local_mic_service, "rejected_segment_count", 0) or 0),
         "lastRejectedReason": getattr(local_mic_service, "last_rejected_reason", None),
         "lastVoiceFilter": getattr(local_mic_service, "last_segment_filter", None) or local_mic_runtime_state.get("last_filter"),
@@ -7453,9 +7484,6 @@ async def handle_local_mic_segment(pcm_bytes: bytes, debug_meta: dict[str, Any] 
         return
     if normalize_voice_input_mode(str(local_mic_runtime_state.get("input_mode") or "auto")) == "discord":
         return
-    if LOCAL_ONLY_MODE and local_tts_playback_manager.snapshot().get("active"):
-        local_mic_runtime_state["last_error"] = "local_tts_active_input_suppressed"
-        return
     local_mic_runtime_state["segment_count"] = int(local_mic_runtime_state.get("segment_count") or 0) + 1
     local_mic_runtime_state["last_segment_at"] = time.time()
     if isinstance(debug_meta, dict):
@@ -7481,6 +7509,12 @@ async def handle_local_mic_segment(pcm_bytes: bytes, debug_meta: dict[str, Any] 
     local_mic_runtime_state["last_error"] = None
     routed_meta["routed_discord_user_id"] = int(getattr(target.member, "id", 0) or 0)
     await process_member_audio(target.member, pcm_bytes, routed_meta)
+
+
+def local_mic_effective_max_silence_ms() -> int:
+    if local_tts_playback_manager.snapshot().get("active"):
+        return LOCAL_MIC_TTS_ACTIVE_MAX_SILENCE_MS
+    return LOCAL_MIC_MAX_SILENCE_MS
 
 
 async def ensure_local_mic_service_started() -> None:
@@ -7510,6 +7544,7 @@ async def ensure_local_mic_service_started() -> None:
         start_consecutive=LOCAL_MIC_START_CONSECUTIVE,
         min_voiced_ms=LOCAL_MIC_MIN_VOICED_MS,
         max_silence_ms=LOCAL_MIC_MAX_SILENCE_MS,
+        max_silence_ms_provider=local_mic_effective_max_silence_ms,
         preroll_ms=LOCAL_MIC_PREROLL_MS,
         max_segment_sec=LOCAL_MIC_MAX_SEGMENT_SEC,
         device=LOCAL_MIC_DEVICE,
@@ -8417,11 +8452,32 @@ async def restore_last_voice_channel(guild: discord.Guild | None = None, *, forc
     return True, getattr(channel, "name", str(channel_id))
 
 
-async def stop_active_tts_playback(guild_id: int | None, *, reason: str = "interrupt") -> None:
+async def stop_active_tts_playback(guild_id: int | None, *, reason: str = "interrupt") -> bool:
     stopped = await tts_playback_manager.cancel_guild(guild_id)
     if not stopped:
-        return
+        return False
     log_turn_event("tts_interrupt", guild_id=guild_id, reason=reason)
+    return True
+
+
+async def verify_speaker_for_tts_interrupt(
+    audio: np.ndarray,
+    *,
+    sampling_rate: int,
+    source: str | None,
+    metrics: dict | None = None,
+) -> SpeakerVerificationResult:
+    if not speaker_verification_applies(source=source, apply_to=SPEAKER_VERIFICATION_APPLY_TO):
+        result = SpeakerVerificationResult("skipped", threshold=SPEAKER_VERIFICATION_THRESHOLD, detail=f"source={source or ''}")
+    else:
+        result = await asyncio.to_thread(speaker_verifier.verify, audio, sampling_rate=sampling_rate)
+    if metrics is not None:
+        metrics.setdefault("meta", {})["speaker_verification"] = result.to_dict()
+    return result
+
+
+def speaker_verification_allows_tts_interrupt(result: SpeakerVerificationResult) -> bool:
+    return result.matched is not False
 
 
 def cached_audio_path_for_answer(answer: str) -> Path | None:
@@ -14125,17 +14181,6 @@ async def _process_member_audio_impl(
                 return
             log_voice_stage(metrics, "웨이크 미검출이지만 본문 STT 진행", extra=f"wake_probe_text={wake_probe!r}")
 
-    tts_suppression = tts_playback_manager.input_suppression_reason(
-        guild_id=guild_id,
-        post_tts_ignore_sec=POST_TTS_IGNORE_SEC,
-    )
-    if tts_suppression is not None:
-        register_drop_reason(metrics, tts_suppression, session_key=session_key, room_session_key=room_session_key, owner_user_id=owner_user_id, wake_probe_text=wake_probe, wake_detected=wake_detected)
-        stage_label = "봇 재생 중 입력 무시" if tts_suppression == "bot_is_speaking" else "TTS 직후 입력 무시"
-        log_voice_stage(metrics, stage_label, extra=f"speaker={member.display_name} wake_detected={wake_detected}")
-        log_voice_bottleneck_summary(metrics, label="voice_drop", extra=f"drop={tts_suppression}", event_name="voice_drop_summary")
-        return
-
     interrupt_meta = TtsInterruptMeta(
         active_speaker_match=active_speaker_user_id == member.id,
         wake_detected=wake_detected,
@@ -14144,19 +14189,83 @@ async def _process_member_audio_impl(
         rms_ok=body_rms >= VOICE_WAVEFORM_BODY_RMS_MIN,
         voice_like=voice_like_prob >= 0.45,
     )
-    if should_interrupt_tts(interrupt_meta):
+    qualified_tts_interrupt = should_interrupt_tts(interrupt_meta)
+    local_tts_active = bool(LOCAL_ONLY_MODE and local_tts_playback_manager.snapshot().get("active"))
+    tts_suppression = tts_playback_manager.input_suppression_reason(
+        guild_id=guild_id,
+        post_tts_ignore_sec=POST_TTS_IGNORE_SEC,
+    )
+    if qualified_tts_interrupt and (local_tts_active or tts_suppression == "bot_is_speaking"):
+        speaker_verification = await verify_speaker_for_tts_interrupt(
+            audio16k,
+            sampling_rate=stt_sampling_rate,
+            source=str(metrics.setdefault("meta", {}).get("ingress_source") or "discord_voice"),
+            metrics=metrics,
+        )
+        if not speaker_verification_allows_tts_interrupt(speaker_verification):
+            qualified_tts_interrupt = False
+            register_drop_reason(
+                metrics,
+                "speaker_verification_rejected",
+                session_key=session_key,
+                room_session_key=room_session_key,
+                owner_user_id=owner_user_id,
+                wake_probe_text=wake_probe,
+                wake_detected=wake_detected,
+                speaker_verification=speaker_verification.to_dict(),
+            )
+            log_voice_stage(
+                metrics,
+                "speaker verification rejected TTS interrupt",
+                extra=f"speaker={member.display_name} score={speaker_verification.score}",
+            )
+            log_voice_bottleneck_summary(
+                metrics,
+                label="voice_drop",
+                extra="drop=speaker_verification_rejected",
+                event_name="voice_drop_summary",
+            )
+            return
+    if local_tts_active:
+        if qualified_tts_interrupt:
+            stopped = local_tts_playback_manager.request_stop(reason="qualified_user_audio")
+            metrics.setdefault("meta", {})["local_tts_interrupted_by_user_audio"] = bool(stopped)
+            if stopped:
+                metrics.setdefault("meta", {})["tts_interrupted_at"] = time.monotonic()
+                log_turn_event("tts_interrupt", guild_id=guild_id, reason="qualified_user_audio", output_mode="local_speaker")
+                log_voice_stage(metrics, "로컬 TTS 사용자 발화로 중단", extra=f"speaker={member.display_name} wake_detected={wake_detected}")
+        else:
+            register_drop_reason(metrics, "local_tts_active_input_suppressed", session_key=session_key, room_session_key=room_session_key, owner_user_id=owner_user_id, wake_probe_text=wake_probe, wake_detected=wake_detected)
+            log_voice_stage(metrics, "로컬 TTS 재생 중 약한 입력 무시", extra=f"speaker={member.display_name} wake_detected={wake_detected}")
+            log_voice_bottleneck_summary(metrics, label="voice_drop", extra="drop=local_tts_active_input_suppressed", event_name="voice_drop_summary")
+            return
+
+    if tts_suppression == "bot_is_speaking" and qualified_tts_interrupt:
         await asyncio.sleep(TTS_INTERRUPT_DEBOUNCE_SEC)
         tts_suppression = tts_playback_manager.input_suppression_reason(
             guild_id=guild_id,
             post_tts_ignore_sec=POST_TTS_IGNORE_SEC,
         )
-        if tts_suppression is not None:
+        if tts_suppression == "bot_is_speaking":
+            stopped = await stop_active_tts_playback(guild_id, reason="qualified_user_audio")
+            if stopped:
+                metrics.setdefault("meta", {}).update({
+                    "tts_interrupted_by_user_audio": True,
+                    "tts_interrupted_at": time.monotonic(),
+                })
+            tts_suppression = None
+        elif tts_suppression is not None:
             register_drop_reason(metrics, tts_suppression, session_key=session_key, room_session_key=room_session_key, owner_user_id=owner_user_id, wake_probe_text=wake_probe, wake_detected=wake_detected)
-            stage_label = "디바운스 후 봇 재생 중 입력 무시" if tts_suppression == "bot_is_speaking" else "디바운스 후 TTS 직후 입력 무시"
+            stage_label = "디바운스 후 TTS 직후 입력 무시"
             log_voice_stage(metrics, stage_label, extra=f"speaker={member.display_name} wake_detected={wake_detected}")
             log_voice_bottleneck_summary(metrics, label="voice_drop", extra=f"drop={tts_suppression}", event_name="voice_drop_summary")
             return
-        await stop_active_tts_playback(guild_id, reason="qualified_user_audio")
+    elif tts_suppression is not None:
+        register_drop_reason(metrics, tts_suppression, session_key=session_key, room_session_key=room_session_key, owner_user_id=owner_user_id, wake_probe_text=wake_probe, wake_detected=wake_detected)
+        stage_label = "봇 재생 중 약한 입력 무시" if tts_suppression == "bot_is_speaking" else "TTS 직후 입력 무시"
+        log_voice_stage(metrics, stage_label, extra=f"speaker={member.display_name} wake_detected={wake_detected}")
+        log_voice_bottleneck_summary(metrics, label="voice_drop", extra=f"drop={tts_suppression}", event_name="voice_drop_summary")
+        return
 
     print(f"[FULL STT ENTER] speaker={member.display_name} sampling_rate={stt_sampling_rate} samples={audio16k.size} wake_detected={wake_detected}")
     log_voice_stage(metrics, "본문 STT 시작", extra=f"samples={audio16k.size}")
@@ -14259,6 +14368,44 @@ async def _process_member_audio_impl(
         remember_speculative_policy(session_key, final_transcript.speculative_policy)
     if committed_text and len(clean_text(text)) >= len(committed_text):
         text = clean_text(text)
+    meta = metrics.setdefault("meta", {})
+    interrupted_at_raw = meta.get("tts_interrupted_at")
+    interrupted_at = None
+    if interrupted_at_raw is not None:
+        try:
+            interrupted_at = float(interrupted_at_raw)
+        except (TypeError, ValueError):
+            interrupted_at = None
+    if meta.get("tts_interrupted_by_user_audio") or meta.get("local_tts_interrupted_by_user_audio"):
+        merged_text, merge_meta = maybe_merge_barge_in_utterance(
+            room_last_voice_utterance_for_merge,
+            room_session_key=room_session_key,
+            session_key=session_key,
+            user_id=member.id,
+            current_text=transcript_result.final_text,
+            current_turn_id=turn_id,
+            interrupted_at=interrupted_at,
+            merge_window_sec=VOICE_BARGE_IN_MERGE_WINDOW_SEC,
+            tts_interrupted_window_sec=VOICE_BARGE_IN_TTS_INTERRUPTED_WINDOW_SEC,
+            incomplete_window_sec=VOICE_BARGE_IN_INCOMPLETE_UTTERANCE_WINDOW_SEC,
+            complete_question_window_sec=VOICE_BARGE_IN_QUESTION_WINDOW_SEC,
+            adaptive_window_enabled=VOICE_BARGE_IN_ADAPTIVE_MERGE_ENABLED,
+            clean_text=clean_text,
+        )
+        if merge_meta:
+            transcript_result = replace(
+                transcript_result,
+                final_text=merged_text,
+                committed_text=merged_text,
+            )
+            text = merged_text
+            committed_text = merged_text
+            meta["barge_in_utterance_merge"] = merge_meta
+            log_voice_stage(
+                metrics,
+                "TTS barge-in utterance merged",
+                extra=f"delta={merge_meta.get('delta_sec')} text={merged_text!r}",
+            )
     print(f"[STT RESULT][full-final] text={transcript_result.final_text!r} committed={transcript_result.committed_text!r} wake_detected={transcript_result.wake_detected}")
 
     short_followup_candidate = is_short_followup_candidate(
@@ -14347,6 +14494,7 @@ async def _process_member_audio_impl(
         build_topic_id=build_topic_id,
         session_last_stt_text=session_last_stt_text,
         room_last_voice_reply_at=room_last_voice_reply_at,
+        room_last_voice_utterance_for_merge=room_last_voice_utterance_for_merge,
         update_room_speaker_activity=update_room_speaker_activity,
         pick_active_speaker=pick_active_speaker,
         start_new_turn=start_new_turn,

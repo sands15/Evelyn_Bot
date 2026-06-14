@@ -154,6 +154,7 @@ class LocalMicCaptureService:
         start_consecutive: int = 2,
         min_voiced_ms: int = 280,
         max_silence_ms: int = 650,
+        max_silence_ms_provider: Callable[[], int | None] | None = None,
         preroll_ms: int = 180,
         max_segment_sec: float = 12.0,
         device: str | int | None = None,
@@ -170,6 +171,7 @@ class LocalMicCaptureService:
         self.start_consecutive = max(1, int(start_consecutive))
         self.min_voiced_ms = max(80, int(min_voiced_ms))
         self.max_silence_ms = max(self.block_ms, int(max_silence_ms))
+        self.max_silence_ms_provider = max_silence_ms_provider
         self.preroll_ms = max(0, int(preroll_ms))
         self.max_segment_sec = max(1.0, float(max_segment_sec))
         self.requested_device = device
@@ -205,6 +207,7 @@ class LocalMicCaptureService:
         self.last_input_level = 0.0
         self.max_input_level = 0.0
         self.last_input_status: str | None = None
+        self.last_effective_max_silence_ms = self.max_silence_ms
         self.rejected_segment_count = 0
         self.last_rejected_reason: str | None = None
         self.last_segment_filter: dict[str, Any] | None = None
@@ -331,8 +334,20 @@ class LocalMicCaptureService:
             self._trailing_silence = 0
             return
         self._trailing_silence += 1
-        if self._trailing_silence >= self._trailing_silence_blocks:
+        if self._trailing_silence >= self._effective_trailing_silence_blocks():
             self._flush_active_segment(force=False)
+
+    def _effective_trailing_silence_blocks(self) -> int:
+        max_silence_ms = self.max_silence_ms
+        if self.max_silence_ms_provider is not None:
+            try:
+                provided = self.max_silence_ms_provider()
+            except Exception:
+                provided = None
+            if provided is not None:
+                max_silence_ms = max(self.block_ms, int(provided))
+        self.last_effective_max_silence_ms = max_silence_ms
+        return max(1, int(round(max_silence_ms / self.block_ms)))
 
     def _begin_capture(self, *, meta: dict[str, Any]) -> None:
         self._capture_active = True

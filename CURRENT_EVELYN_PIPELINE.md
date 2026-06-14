@@ -1,6 +1,6 @@
 # Current Evelyn Pipeline
 
-Last reviewed: 2026-06-02
+Last reviewed: 2026-06-15
 Scope: live Evelyn assistant pipeline in `C:\Evelyn`
 Status: authoritative current-runtime map
 
@@ -8,7 +8,9 @@ This document is the current reference for Evelyn's live assistant pipeline. It
 describes the code shape after the 2026-06-02 extraction pass that wrapped TTS
 playback, split Discord delivery/ingress/session policy helpers, extended turn
 lifecycle/budget contracts, and moved voice STT execution contracts out of
-`main.py`.
+`main.py`. The 2026-06-15 update also reflects the first local TTS barge-in
+path, local speaker stop support, speaker verification gate, and barge-in
+utterance merge helpers.
 
 For Minecraft/Voyager-specific architecture, see `CURRENT_EVELYN_ARCHITECTURE.md`.
 For target architecture ideas, see the docs listed in `docs/DOCUMENTATION_INDEX.md`.
@@ -88,6 +90,15 @@ summary/sub LLM is also optional.
   partial STT, full STT/rescore, and final transcript assembly as focused
   helpers; `main.py` still owns the live wake probe, audio preprocessing, and
   drop/followup flow.
+- `evelyn_core/runtime/evelyn_core/voice_barge_in.py` owns the pure helper
+  logic for qualified barge-in utterance merge/replay. `main.py` still decides
+  when a live utterance is strong enough to stop an active output path.
+- `evelyn_core/runtime/evelyn_core/speaker_verification.py` owns the optional
+  SpeechBrain-based speaker-verification gate used before allowing local-mic
+  input to interrupt active TTS when enrolled voiceprints are available.
+- `evelyn_core/runtime/evelyn_core/local_tts_playback.py` now supports
+  cooperative local speaker stop requests so qualified user speech can stop
+  local playback instead of being dropped only because TTS is active.
 
 ## Extraction Status
 
@@ -110,6 +121,13 @@ Implemented slices:
   short follow-up candidate, and room-owner/reply facade.
 - Voice STT flow helpers for wake interpretation, partial STT, full STT/rescore,
   final transcript assembly, and final wake-veto decision.
+- Local TTS barge-in path: strong user speech during active local TTS can stop
+  the local speaker stream and keep the accepted utterance from being suppressed.
+- Optional speaker verification for barge-in: enrolled local voiceprints can
+  reject non-owner interruptions, with missing enrollment/dependency falling
+  back to the existing barge-in behavior.
+- Dynamic local-mic trailing silence while TTS is active, so barge-in segments
+  can close faster without changing the normal end-of-utterance threshold.
 
 Intentionally still in `main.py`:
 

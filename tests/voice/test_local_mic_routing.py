@@ -243,6 +243,24 @@ class LocalMicRoutingTests(unittest.TestCase):
         self.assertEqual(meta["source"], "local_mic")
         self.assertFalse(meta["voice_filter"]["rejected"])
 
+    def test_local_mic_uses_dynamic_max_silence_provider(self) -> None:
+        flush_calls: list[bool] = []
+        service = LocalMicCaptureService(
+            on_segment=lambda _pcm, _meta: None,
+            sample_rate=16000,
+            block_ms=100,
+            max_silence_ms=500,
+            max_silence_ms_provider=lambda: 200,
+        )
+        service._capture_active = True
+        service._trailing_silence = 1
+        service._flush_active_segment = lambda *, force: flush_calls.append(force)  # type: ignore[method-assign]
+
+        service._consume_block(np.zeros(1600, dtype=np.float32), {})
+
+        self.assertEqual(flush_calls, [False])
+        self.assertEqual(service.last_effective_max_silence_ms, 200)
+
     def test_start_local_enables_local_mic_by_default(self) -> None:
         script = (REPO_ROOT / "evelyn_core" / "start_local.bat").read_text(encoding="utf-8")
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 from dataclasses import dataclass
 from typing import Any, Callable
@@ -82,6 +83,10 @@ class LocalTtsPlaybackManager:
         self.last_error = ""
         self.last_started_at: float | None = None
         self.last_finished_at: float | None = None
+        self._state_lock = threading.Lock()
+        self._current_source: Any | None = None
+        self._current_stream: Any | None = None
+        self._stop_requested = False
 
     def snapshot(self) -> dict[str, Any]:
         return LocalTtsPlaybackSnapshot(
@@ -94,6 +99,40 @@ class LocalTtsPlaybackManager:
             last_started_at=self.last_started_at,
             last_finished_at=self.last_finished_at,
         ).to_dict()
+
+    def request_stop(self, *, reason: str = "interrupt") -> bool:
+        with self._state_lock:
+            was_active = bool(self.active or self._current_source is not None or self._current_stream is not None)
+            if not was_active:
+                return False
+            self._stop_requested = True
+            source = self._current_source
+            stream = self._current_stream
+
+        if source is not None:
+            finish = getattr(source, "finish", None)
+            cleanup = getattr(source, "cleanup", None)
+            try:
+                if finish is not None:
+                    finish()
+                elif cleanup is not None:
+                    cleanup()
+            except Exception:
+                pass
+
+        if stream is not None:
+            for method_name in ("abort", "stop"):
+                method = getattr(stream, method_name, None)
+                if method is None:
+                    continue
+                try:
+                    method()
+                except Exception:
+                    pass
+                break
+
+        self._log(f"[LOCAL TTS] stop_requested reason={reason}")
+        return True
 
     async def play_source(
         self,
@@ -112,9 +151,13 @@ class LocalTtsPlaybackManager:
             return False
 
         async with self._lock:
-            self.active = True
-            self.last_error = ""
-            self.last_started_at = time.time()
+            with self._state_lock:
+                self._stop_requested = False
+                self._current_source = source
+                self._current_stream = None
+                self.active = True
+                self.last_error = ""
+                self.last_started_at = time.time()
             self._log(f"[LOCAL TTS] start device={self.device if self.device is not None else 'default'}")
             try:
                 played = await asyncio.to_thread(
@@ -139,10 +182,16 @@ class LocalTtsPlaybackManager:
             finally:
                 if cleanup_source:
                     self._cleanup_source(source)
-                self.last_finished_at = time.time()
-                self.active = False
+                with self._state_lock:
+                    self.last_finished_at = time.time()
+                    self.active = False
+                    self._current_source = None
+                    self._current_stream = None
+                    self._stop_requested = False
 
     def _play_source_sync(self, source: Any, *, on_first_playback: Callable[[], None] | None = None) -> int:
+        if self._is_stop_requested():
+            return 0
         first_chunk = source.read()
         source_error = getattr(source, "error", None)
         if source_error is not None:
@@ -158,6 +207,10 @@ class LocalTtsPlaybackManager:
             device=self.device,
             blocksize=max(1, DISCORD_FRAME_BYTES // (DISCORD_PCM_CHANNELS * 2)),
         ) as stream:
+            with self._state_lock:
+                self._current_stream = stream
+            if self._is_stop_requested():
+                return played
             stream.write(first_chunk)
             if on_first_playback is not None:
                 try:
@@ -166,8 +219,12 @@ class LocalTtsPlaybackManager:
                     pass
             played += len(first_chunk)
             while True:
+                if self._is_stop_requested():
+                    break
                 chunk = source.read()
                 if not chunk:
+                    break
+                if self._is_stop_requested():
                     break
                 stream.write(chunk)
                 played += len(chunk)
@@ -175,10 +232,14 @@ class LocalTtsPlaybackManager:
             if source_error is not None:
                 raise source_error
             tail_silence = local_tts_tail_silence_bytes()
-            if played > 0 and tail_silence:
+            if played > 0 and tail_silence and not self._is_stop_requested():
                 stream.write(tail_silence)
                 played += len(tail_silence)
         return played
+
+    def _is_stop_requested(self) -> bool:
+        with self._state_lock:
+            return self._stop_requested
 
     @staticmethod
     def _cleanup_source(source: Any) -> None:

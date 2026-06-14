@@ -42,6 +42,7 @@ node_modules/
 .trash/
 
 bot_profiles/*-cache.json
+bot_profiles/voiceprints/
 archive/logs/
 archive/scratch/
 archive/nested-git/

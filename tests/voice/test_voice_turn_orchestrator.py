@@ -3,6 +3,8 @@ import unittest
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 
 REPO_ROOT = next(path for path in Path(__file__).resolve().parents if (path / "main.py").exists())
 RUNTIME_ROOT = REPO_ROOT / "evelyn_core" / "runtime"
@@ -13,9 +15,13 @@ from evelyn_core.voice_orchestration import (  # noqa: E402
     VoiceTurnOrchestrator,
     VoiceTurnOrchestratorDeps,
     VoiceTurnRequest,
+    prepare_voice_reply_for_delivery,
 )
 from evelyn_core.voice_pipeline import (  # noqa: E402
     DeliveryPlan,
+    TranscriptResult,
+    VoiceReplyRequest,
+    VoiceSegment,
     build_answer_payload_from_text,
     build_delivery_plan,
     build_route_decision,
@@ -180,6 +186,78 @@ class VoiceTurnOrchestratorTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(metrics["meta"]["error_layer"], "voice_turn_orchestrator.skill_route")
         self.assertIn("route exploded", metrics["meta"]["error"])
+
+    def test_prepare_voice_reply_skips_tts_suppression_after_interrupt(self) -> None:
+        captured_kwargs: dict[str, Any] = {}
+        transcript = TranscriptResult(
+            wake_detected=True,
+            wake_match_mode="exact",
+            wake_alias="evelyn",
+            probe_text="evelyn",
+            confirm_text="evelyn",
+            reject_reason=None,
+            partial_text="",
+            committed_text="",
+            final_text="evelyn stop",
+            speaker_user_id=10,
+            duration_sec=0.6,
+        )
+        segment = VoiceSegment(
+            guild_id=123,
+            room_session_key="room-1",
+            session_key="session-1",
+            speaker_user_id=10,
+            speaker_name="tester",
+            audio16k=np.zeros(1600, dtype=np.float32),
+            sampling_rate=16000,
+            duration_sec=0.6,
+            segment_id=1,
+            owner_user_id=None,
+        )
+
+        def should_reply_to_voice(*args: Any, **kwargs: Any) -> tuple[bool, str, str]:
+            captured_kwargs.update(kwargs)
+            return True, "ok", "wake_entry"
+
+        def build_voice_reply_request(**kwargs: Any) -> VoiceReplyRequest:
+            return VoiceReplyRequest(
+                transcript=kwargs["transcript"],
+                segment=kwargs["segment"],
+                gate_mode=kwargs["gate_mode"],
+                raw_user_text="evelyn stop",
+                prompt_user_text="stop",
+                history_user_text="stop",
+                wake_only_turn=False,
+                turn_type="normal",
+                selected_path="main",
+                reply_source="voice",
+                topic_id="topic-1",
+            )
+
+        result = prepare_voice_reply_for_delivery(
+            guild_id=123,
+            transcript=transcript,
+            voice_segment=segment,
+            session_key="session-1",
+            room_session_key="room-1",
+            owner_user_id=None,
+            active_speaker_user_id=10,
+            metrics={"meta": {"tts_interrupted_by_user_audio": True}},
+            session_topic_seed="",
+            now_monotonic=1.0,
+            should_reply_to_voice=should_reply_to_voice,
+            register_drop_reason=lambda *args, **kwargs: None,
+            log_voice_stage=lambda *args, **kwargs: None,
+            log_voice_bottleneck_summary=lambda *args, **kwargs: None,
+            reset_session_bad_audio=lambda _session_key: None,
+            build_voice_reply_request=build_voice_reply_request,
+            build_topic_id=lambda _seed: "topic-1",
+            session_last_stt_text={},
+            room_last_voice_reply_at={},
+        )
+
+        self.assertTrue(result.accepted)
+        self.assertTrue(captured_kwargs["ignore_tts_suppression"])
 
     async def test_policy_no_main_llm_delivers_preface_without_main_llm(self) -> None:
         events: list[Any] = []

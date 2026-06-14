@@ -1,6 +1,6 @@
 # Evelyn Documentation Index
 
-Last reviewed: 2026-06-12
+Last reviewed: 2026-06-15
 
 Use this file to choose the right document before editing Evelyn. Current runtime
 facts still need to be verified against code before reporting them as
@@ -36,6 +36,8 @@ implemented behavior.
 
 - `docs/EVELYN_COMPLETENESS_EVALUATION_2026-06-09.md`
   - Detailed completeness evaluation and redesign-priority reference.
+  - Includes the 2026-06-15 update for local TTS barge-in, speaker
+    verification, and remaining live-verification gaps.
   - Use when deciding what to stabilize before adding major new features.
 
 - `docs/RUNTIME_SERVICE_MANIFEST_HEALTH_REPAIR_BLUEPRINT.md`

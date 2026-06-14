@@ -153,7 +153,7 @@ class LocalIoBridge:
             continue_threshold=LOCAL_MIC_CONTINUE_THRESHOLD,
             start_consecutive=LOCAL_MIC_START_CONSECUTIVE,
             min_voiced_ms=LOCAL_MIC_MIN_VOICED_MS,
-            max_silence_ms=int(os.getenv("LOCAL_MIC_MAX_SILENCE_MS", "950")),
+            max_silence_ms=int(os.getenv("LOCAL_MIC_MAX_SILENCE_MS", "500")),
             preroll_ms=LOCAL_MIC_PREROLL_MS,
             max_segment_sec=LOCAL_MIC_MAX_SEGMENT_SEC,
             device=LOCAL_MIC_DEVICE,

@@ -8,6 +8,7 @@ from typing import Any, Awaitable, Callable, Mapping, MutableMapping
 from .assistant_contracts import AcceptedVoiceTurn, RejectedVoiceTurn
 from .text import clean_text, is_user_echo_answer
 from .voice_pipeline import AnswerPayload, DeliveryPlan, RouteDecision, TranscriptResult, VoiceReplyRequest, VoiceSegment
+from .voice_barge_in import remember_voice_utterance_for_merge
 
 
 @dataclass(frozen=True)
@@ -134,6 +135,7 @@ class VoiceTranscriptReplyDeps:
     get_room_turn_scope: Callable[[str | None], Any]
     detach_task: Callable[[Any, Any], None]
     clear_room_turn_scope: Callable[[str | None, Any], None]
+    room_last_voice_utterance_for_merge: MutableMapping[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -386,8 +388,26 @@ def activate_accepted_voice_turn(
     session_partial_stt_text: MutableMapping[str, str],
     session_committed_stt_text: MutableMapping[str, str],
     partial_stt_cache: MutableMapping[str, Any],
+    room_last_voice_utterance_for_merge: MutableMapping[str, Any] | None = None,
 ) -> VoiceAcceptedTurnActivation:
     accepted_turn_id = start_new_turn(session_key, turn_id=source_turn_id)
+    if (
+        room_last_voice_utterance_for_merge is not None
+        and session_key is not None
+        and room_session_key is not None
+        and user_id is not None
+    ):
+        remember_voice_utterance_for_merge(
+            room_last_voice_utterance_for_merge,
+            room_session_key=room_session_key,
+            session_key=session_key,
+            user_id=user_id,
+            text=transcript.final_text,
+            accepted_at=time.monotonic(),
+            turn_id=accepted_turn_id,
+            segment_id=segment_id,
+            clean_text=clean_text,
+        )
     lifecycle = build_voice_reply_lifecycle(
         accepted_turn_id=accepted_turn_id,
         gate_mode=gate_mode,
@@ -493,6 +513,7 @@ def accept_voice_reply_execution(
     replace_room_turn_scope: Callable[..., Any],
     attach_current_task: Callable[[Any], Any],
     set_room_reply_in_progress: Callable[..., Any],
+    room_last_voice_utterance_for_merge: MutableMapping[str, Any] | None = None,
 ) -> VoiceAcceptedReplyExecution:
     activation = activate_accepted_voice_turn(
         session_key=session_key,
@@ -515,6 +536,7 @@ def accept_voice_reply_execution(
         session_partial_stt_text=session_partial_stt_text,
         session_committed_stt_text=session_committed_stt_text,
         partial_stt_cache=partial_stt_cache,
+        room_last_voice_utterance_for_merge=room_last_voice_utterance_for_merge,
     )
     metrics.setdefault("meta", {})["accepted_turn_contract"] = activation.accepted_turn
     metrics.setdefault("meta", {}).update(
@@ -574,6 +596,10 @@ def prepare_voice_reply_for_delivery(
         room_session_key=voice_segment.room_session_key,
         user_id=voice_segment.speaker_user_id,
         active_speaker_user_id=active_speaker_user_id,
+        ignore_tts_suppression=bool(
+            metrics.get("meta", {}).get("tts_interrupted_by_user_audio")
+            or metrics.get("meta", {}).get("local_tts_interrupted_by_user_audio")
+        ),
     )
     metrics.setdefault("meta", {}).update(
         {
@@ -795,6 +821,7 @@ def prepare_accepted_voice_reply_delivery_runtime(
     speaker_display_name: str,
     visible_text: Callable[[str], str],
     print_fn: Callable[..., Any],
+    room_last_voice_utterance_for_merge: MutableMapping[str, Any] | None = None,
 ) -> VoiceReplyDeliveryRuntime:
     accepted_execution = accept_voice_reply_execution(
         session_key=session_key,
@@ -818,6 +845,7 @@ def prepare_accepted_voice_reply_delivery_runtime(
         session_partial_stt_text=session_partial_stt_text,
         session_committed_stt_text=session_committed_stt_text,
         partial_stt_cache=partial_stt_cache,
+        room_last_voice_utterance_for_merge=room_last_voice_utterance_for_merge,
         owner_user_id=owner_user_id,
         make_turn_scope=make_turn_scope,
         replace_room_turn_scope=replace_room_turn_scope,
@@ -1034,6 +1062,7 @@ async def prepare_and_execute_accepted_voice_reply(
     get_room_turn_scope: Callable[[str | None], Any],
     detach_task: Callable[[Any, Any], None],
     clear_room_turn_scope: Callable[[str | None, Any], None],
+    room_last_voice_utterance_for_merge: MutableMapping[str, Any] | None = None,
 ) -> VoiceReplyDeliveryResult | None:
     delivery_runtime = prepare_accepted_voice_reply_delivery_runtime(
         session_key=session_key,
@@ -1195,6 +1224,7 @@ async def handle_prepared_voice_reply(
         finalize_voice_reply_side_effects=finalize_voice_reply_side_effects,
         log_voice_stage=log_voice_stage,
         strip_omnivoice_tags=strip_omnivoice_tags,
+        room_last_voice_utterance_for_merge=room_last_voice_utterance_for_merge,
         get_room_turn_scope=get_room_turn_scope,
         detach_task=detach_task,
         clear_room_turn_scope=clear_room_turn_scope,
@@ -1264,6 +1294,7 @@ async def process_voice_reply_from_transcript(
     get_room_turn_scope: Callable[[str | None], Any],
     detach_task: Callable[[Any, Any], None],
     clear_room_turn_scope: Callable[[str | None, Any], None],
+    room_last_voice_utterance_for_merge: MutableMapping[str, Any] | None = None,
 ) -> VoiceReplyDeliveryResult | None:
     active_speaker_user_id = update_active_speaker_for_voice_reply(
         room_session_key=room_session_key,
@@ -1341,6 +1372,7 @@ async def process_voice_reply_from_transcript(
         finalize_voice_reply_side_effects=finalize_voice_reply_side_effects,
         log_voice_stage=log_voice_stage,
         strip_omnivoice_tags=strip_omnivoice_tags,
+        room_last_voice_utterance_for_merge=room_last_voice_utterance_for_merge,
         get_room_turn_scope=get_room_turn_scope,
         detach_task=detach_task,
         clear_room_turn_scope=clear_room_turn_scope,
@@ -1411,6 +1443,7 @@ async def process_voice_reply_from_transcript_context(
         record_voice_pipeline_failure=deps.record_voice_pipeline_failure,
         finalize_voice_reply_side_effects=deps.finalize_voice_reply_side_effects,
         strip_omnivoice_tags=deps.strip_omnivoice_tags,
+        room_last_voice_utterance_for_merge=deps.room_last_voice_utterance_for_merge,
         get_room_turn_scope=deps.get_room_turn_scope,
         detach_task=deps.detach_task,
         clear_room_turn_scope=deps.clear_room_turn_scope,

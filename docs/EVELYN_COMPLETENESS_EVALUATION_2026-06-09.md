@@ -544,3 +544,78 @@ Minecraft/Voyager 연동은 이블린의 가장 야심 찬 모듈 중 하나다.
 현재 점수는 65 / 100이다.
 
 다음 목표는 75점이다. 그 목표를 위해서는 실행/종료/재시작 계약 정리, Control-Page 상태 설명력 강화, 로컬 TTS 스트리밍화가 가장 중요하다.
+
+---
+
+## 2026-06-15 업데이트: 로컬 음성 바지인 / 화자 검증 반영
+
+업데이트 시각: 2026-06-15 KST
+범위: 2026-06-14 이후 로컬 마이크, 로컬 TTS playback, TTS barge-in, speaker verification 변경사항
+검증 상태: 코드/테스트 기준 반영. 실제 장시간 라이브 음성 세션 검증은 아직 필요함.
+
+### 반영된 개선점
+
+이번 변경으로 기존 평가서에서 낮게 보던 "음성/STT/TTS 경험" 영역에 의미 있는 개선이 들어갔다.
+
+- 로컬 TTS가 재생 중일 때 모든 로컬 마이크 입력을 일괄 차단하지 않고, 충분히 강한 사용자 발화는 barge-in 후보로 평가한다.
+- barge-in 조건을 통과한 발화는 로컬 speaker playback을 중단할 수 있다.
+- `LocalTtsPlaybackManager.request_stop()`이 추가되어 로컬 스피커 스트림을 협조적으로 멈출 수 있다.
+- TTS 재생 중에는 로컬 마이크의 trailing silence 기준을 더 짧게 적용할 수 있어, 끼어드는 발화가 끝나기를 너무 오래 기다리지 않는다.
+- barge-in 직후 입력이 기존 `bot_is_speaking` / post-TTS suppression에 다시 버려지지 않도록 우회 플래그와 utterance merge 흐름이 추가되었다.
+- 선택적 SpeechBrain 기반 speaker verification이 추가되었다. 등록된 정훈 음성 샘플이 있으면, 로컬 마이크 barge-in이 실제 정훈 발화인지 먼저 확인할 수 있다.
+- speaker verification이 `rejected`를 반환하면 TTS interruption을 막고 입력을 drop한다.
+- voiceprint 미등록, `speechbrain` 미설치, verification 오류 같은 경우에는 기존 barge-in 동작으로 fallback한다.
+- 관련 설정이 `.env.example`, config, requirements에 추가되었고, voice/local mic/local playback 테스트가 보강되었다.
+
+### 평가 점수 영향
+
+이 변경은 "음성/STT/TTS 경험" 점수에 직접적인 개선이다.
+
+기존 평가:
+
+- 음성/STT/TTS 경험: 55 / 100
+- 종합 점수: 65 / 100
+
+업데이트 후 문서상 후보 평가:
+
+- 음성/STT/TTS 경험: 60 / 100 후보
+- 종합 점수: 68 / 100 후보
+
+단, 이 점수는 아직 확정값이 아니다. 이유는 다음과 같다.
+
+- 실제 로컬 마이크 입력으로 TTS 재생 중 barge-in이 반복적으로 잘 되는지 장시간 검증이 필요하다.
+- speaker verification은 등록된 voiceprint 품질과 현장 소음에 크게 영향을 받는다.
+- `speechbrain` 의존성 설치, 모델 캐시, GPU/CPU 선택에 따른 첫 실행 지연을 실제 환경에서 확인해야 한다.
+- TTS를 멈춘 뒤 이어지는 STT/LLM/TTS turn이 자연스럽게 이어지는지는 라이브 턴 로그로 다시 확인해야 한다.
+
+따라서 현재 공식 점수는 보수적으로 **65 / 100 유지**, 단 최근 음성 변경이 실제 환경에서 통과하면 **68 / 100으로 상향 가능**으로 기록한다.
+
+### 남은 개선점
+
+이번 변경으로 "말하는 중 끼어들기"의 첫 구조는 생겼지만, 아직 제품 수준이라고 보기는 이르다.
+
+우선순위가 높은 남은 작업:
+
+1. 실제 로컬 스피커 재생 중 정훈 발화로 TTS가 끊기고, 그 발화가 다음 turn으로 정상 처리되는지 라이브 검증한다.
+2. 등록된 `bot_profiles/voiceprints/junghoon` 샘플 품질을 기준으로 speaker verification threshold를 조정한다.
+3. speaker verification 실패/미설치/미등록 상태가 control page와 로그에 명확히 보이게 한다.
+4. TTS interruption 후 첫 STT 결과가 이전 TTS 잔향/에코와 섞이지 않는지 확인한다.
+5. 로컬 speaker playback과 Discord voice playback의 interruption 정책을 하나의 공통 계약으로 더 정리한다.
+6. 실제 검증이 끝나면 음성/STT/TTS 점수를 확정하고, 종합 점수도 68 또는 그 이상으로 다시 산정한다.
+
+### 커밋/보안 주의
+
+speaker verification 코드와 테스트는 커밋 대상이다. 하지만 실제 정훈 음성 샘플은 개인정보성 로컬 데이터이므로 커밋 대상이 아니다.
+
+`bot_profiles/voiceprints/`는 로컬 enrollment 데이터로 취급하고 `.gitignore`에 추가한다.
+
+### 다음 판정 기준
+
+다음 평가 갱신 때는 다음 기준으로 점수를 확정한다.
+
+- 5회 이상 연속으로 "이블린이 말하는 중 정훈이 말함 -> TTS 중단 -> 정훈 발화 처리 -> 새 답변 시작" 흐름이 성공한다.
+- 오인식/잡음으로 TTS가 끊기는 빈도가 낮다.
+- 정훈이 아닌 소리 또는 약한 입력은 speaker verification 또는 barge-in gate에서 안전하게 차단된다.
+- control page나 로그에서 왜 끊겼는지, 왜 차단됐는지 확인 가능하다.
+
+이 조건을 통과하면 "음성/STT/TTS 경험"은 60점대 초반으로 올릴 수 있고, 전체 완성도도 68점 이상으로 상향할 수 있다.
