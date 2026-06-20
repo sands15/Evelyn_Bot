@@ -1,51 +1,26 @@
 from __future__ import annotations
 
-import ast
-import re
+import sys
 import unittest
 from pathlib import Path
-from typing import Any
 
 
 REPO_ROOT = next(path for path in Path(__file__).resolve().parents if (path / "main.py").exists())
-MAIN_PY = REPO_ROOT / "main.py"
+RUNTIME_ROOT = REPO_ROOT / "evelyn_core" / "runtime"
+if str(RUNTIME_ROOT) not in sys.path:
+    sys.path.insert(0, str(RUNTIME_ROOT))
 
-
-def load_control_page_classifier() -> dict[str, Any]:
-    source = MAIN_PY.read_text(encoding="utf-8")
-    module = ast.parse(source)
-    namespace: dict[str, Any] = {
-        "Any": Any,
-        "re": re,
-        "clean_text": lambda value: " ".join(str(value or "").strip().split()),
-    }
-
-    def control_page_tool_decision(tool_name: str, **kwargs: Any) -> dict[str, Any]:
-        return {"tool": tool_name, **kwargs}
-
-    namespace["control_page_tool_decision"] = control_page_tool_decision
-    wanted_functions = {
-        "control_page_compact_has_any",
-        "is_control_page_question_text",
-        "is_control_page_runtime_status_request",
-        "is_explicit_control_page_restart_request",
-        "cheap_control_page_tool_decision",
-        "should_route_control_page_tool_candidate",
-    }
-    for node in module.body:
-        if isinstance(node, (ast.Assign, ast.AnnAssign)):
-            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-            if any(isinstance(target, ast.Name) and target.id == "CONTROL_PAGE_SLASH_TOOL_ALIASES" for target in targets):
-                exec(compile(ast.Module([node], []), str(MAIN_PY), "exec"), namespace)
-        if isinstance(node, ast.FunctionDef) and node.name in wanted_functions:
-            exec(compile(ast.Module([node], []), str(MAIN_PY), "exec"), namespace)
-    return namespace
+from evelyn_core.control_page_tools import (  # noqa: E402
+    cheap_control_page_tool_decision,
+    control_page_tool_policy_error,
+    control_page_tool_reply_from_execution,
+)
 
 
 class ControlPageNaturalToolCommandTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls.classifier = staticmethod(load_control_page_classifier()["cheap_control_page_tool_decision"])
+        cls.classifier = staticmethod(cheap_control_page_tool_decision)
 
     def assertRoutes(self, text: str, tool_name: str) -> None:
         decision = self.classifier(text)
@@ -71,6 +46,30 @@ class ControlPageNaturalToolCommandTests(unittest.TestCase):
         self.assertRoutes("llm 로딩 안돼?", "runtime.status")
         self.assertIsNone(self.classifier("날씨 어때?"))
         self.assertIsNone(self.classifier("왜 재시작해야 해?"))
+
+    def test_tool_policy_and_reply_postprocessing(self) -> None:
+        self.assertEqual(
+            control_page_tool_policy_error({"tool": "minecraft.status"}, guild_available=False),
+            "그 명령은 Discord 연결이 필요해.",
+        )
+        self.assertEqual(
+            control_page_tool_policy_error(
+                {"tool": "runtime.restart_bot", "risk": "medium", "source": "router", "confidence": 0.3},
+                guild_available=True,
+            ),
+            "그 명령은 조금 애매해. 한 번만 더 정확히 말해줘.",
+        )
+        self.assertEqual(
+            control_page_tool_reply_from_execution(
+                {"tool": "control_page.memory_panel", "reply": "응, 열어둘게."},
+                "메모리 패널을 열어둘게.",
+            ),
+            "응, 열어둘게.",
+        )
+        self.assertEqual(
+            control_page_tool_reply_from_execution({"tool": "runtime.status", "reply": "router"}, "runtime"),
+            "runtime",
+        )
 
 
 if __name__ == "__main__":

@@ -6,6 +6,8 @@ from pathlib import Path
 
 REPO_ROOT = next(path for path in Path(__file__).resolve().parents if (path / "main.py").exists())
 MAIN_PY = REPO_ROOT / "main.py"
+TOOL_AWARENESS_POLICY = REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "tool_awareness_policy.py"
+SEARCH_FOLLOWUP_POLICY = REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "search_followup_policy.py"
 BLUEPRINT = REPO_ROOT / "docs" / "tool_awareness_blueprint.md"
 
 
@@ -13,6 +15,8 @@ class ToolAwarenessJudgmentTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.main_py = MAIN_PY.read_text(encoding="utf-8")
+        cls.tool_awareness_policy = TOOL_AWARENESS_POLICY.read_text(encoding="utf-8")
+        cls.search_followup_policy = SEARCH_FOLLOWUP_POLICY.read_text(encoding="utf-8")
         cls.blueprint = BLUEPRINT.read_text(encoding="utf-8")
 
     def test_blueprint_exists_for_implementation_contract(self) -> None:
@@ -21,18 +25,20 @@ class ToolAwarenessJudgmentTests(unittest.TestCase):
         self.assertIn("Tool Selection Rules", self.blueprint)
 
     def test_main_guidance_gets_runtime_tool_awareness_context(self) -> None:
-        self.assertIn("def build_tool_awareness_context", self.main_py)
-        self.assertIn("TOOL_AWARENESS: Runtime, not memory, is the source of truth for tools.", self.main_py)
-        self.assertIn("Available tool shortlist for this turn", self.main_py)
-        self.assertIn("do not give only a promise", self.main_py)
+        self.assertIn("from evelyn_core.tool_awareness_policy import build_tool_awareness_context", self.main_py)
+        self.assertIn("TOOL_AWARENESS: Runtime, not memory, is the source of truth for tools.", self.tool_awareness_policy)
+        self.assertIn("Available tool shortlist for this turn", self.tool_awareness_policy)
+        self.assertIn("do not give only a promise", self.tool_awareness_policy)
         self.assertIn("tool_awareness_context = build_tool_awareness_context", self.main_py)
+        self.assertIn("route_available=_skill_route_available", self.main_py)
         self.assertIn("parts.append(tool_awareness_context)", self.main_py)
 
     def test_tool_awareness_uses_runtime_skill_registry_for_search(self) -> None:
         self.assertIn("def _skill_route_available", self.main_py)
         self.assertIn('skill_registry.find_by_route(route_name, source=source)', self.main_py)
-        self.assertIn('_skill_route_available("search_executor", source=source)', self.main_py)
-        self.assertIn("- search: use for current info, weather, prices, news", self.main_py)
+        self.assertIn('route_available(route_name, source=source)', self.tool_awareness_policy)
+        self.assertIn('_route_available(route_available, "search_executor", source=source)', self.tool_awareness_policy)
+        self.assertIn("- search: use for current info, weather, prices, news", self.tool_awareness_policy)
 
     def test_promised_search_is_escalated_to_tool_result_synthesis(self) -> None:
         self.assertIn("async def resolve_promised_search_final_answer", self.main_py)
@@ -54,9 +60,9 @@ class ToolAwarenessJudgmentTests(unittest.TestCase):
         self.assertIn("route_decision=route_decision", self.main_py)
 
     def test_promise_detector_has_plain_korean_and_english_fallbacks(self) -> None:
-        self.assertIn("promise_regexes = (", self.main_py)
-        self.assertIn("찾아|검색|확인|알아|조사", self.main_py)
-        self.assertIn("search|look up|check|find", self.main_py)
+        self.assertIn("promise_regexes = (", self.search_followup_policy)
+        self.assertIn("찾아|검색|확인|알아|조사", self.search_followup_policy)
+        self.assertIn("search|look up|check|find", self.search_followup_policy)
 
 
 if __name__ == "__main__":

@@ -142,6 +142,24 @@ WEATHER_MARKERS = (
 KOREAN_LOCATION_RE = re.compile(
     r"([가-힣]{2,}(?:특별자치시|특별자치도|광역시|특별시|자치도|시|군|구|도))"
 )
+KOREAN_BARE_LOCATION_HINTS = (
+    "서울",
+    "부산",
+    "대구",
+    "인천",
+    "광주",
+    "대전",
+    "울산",
+    "세종",
+    "제주",
+    "수원",
+    "성남",
+    "고양",
+    "용인",
+    "청주",
+    "전주",
+    "천안",
+)
 
 
 def _normalized_pair(text: str) -> tuple[str, str]:
@@ -171,7 +189,10 @@ def extract_korean_location_hint(text: str) -> str:
         return ""
     matches = [match.group(1) for match in KOREAN_LOCATION_RE.finditer(cleaned)]
     if not matches:
-        return ""
+        bare_matches = [(cleaned.rfind(location), location) for location in KOREAN_BARE_LOCATION_HINTS if location in cleaned]
+        if not bare_matches:
+            return ""
+        return max(bare_matches, key=lambda item: item[0])[1]
     return clean_text(matches[-1])
 
 

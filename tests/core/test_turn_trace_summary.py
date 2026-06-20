@@ -1,6 +1,9 @@
 ﻿import sys
 import unittest
 from pathlib import Path
+import json
+import tempfile
+import threading
 
 
 REPO_ROOT = next(path for path in Path(__file__).resolve().parents if (path / "main.py").exists())
@@ -8,7 +11,7 @@ RUNTIME_ROOT = REPO_ROOT / "evelyn_core" / "runtime"
 if str(RUNTIME_ROOT) not in sys.path:
     sys.path.insert(0, str(RUNTIME_ROOT))
 
-from evelyn_core.turn_trace import TURN_SUMMARY_KEYS, build_turn_summary_payload  # noqa: E402
+from evelyn_core.turn_trace import TURN_SUMMARY_KEYS, build_turn_summary_payload, write_turn_trace_event  # noqa: E402
 
 
 class TurnTraceSummaryTests(unittest.TestCase):
@@ -135,6 +138,66 @@ class TurnTraceSummaryTests(unittest.TestCase):
         self.assertEqual(payload["playback_started"], True)
         self.assertEqual(payload["playback_completed"], False)
         self.assertEqual(payload["playback_cancelled"], True)
+
+    def test_writer_filters_events_and_writes_jsonl(self) -> None:
+        printed: list[str] = []
+        with tempfile.TemporaryDirectory() as tmpdir:
+            skipped = write_turn_trace_event(
+                "ignored",
+                {"turn_id": "turn-skip"},
+                turn_trace_json_log=True,
+                bottleneck_events={"model_call"},
+                console_only_stt_and_reply=True,
+                voice_bottleneck_logs=True,
+                voice_trace_all_events=False,
+                log_dir=Path(tmpdir),
+                file_lock=threading.Lock(),
+                original_print=printed.append,
+                trace_print=printed.append,
+            )
+            written = write_turn_trace_event(
+                "model_call",
+                {"turn_id": "turn-1", "empty": None},
+                turn_trace_json_log=True,
+                bottleneck_events={"model_call"},
+                console_only_stt_and_reply=True,
+                voice_bottleneck_logs=True,
+                voice_trace_all_events=False,
+                log_dir=Path(tmpdir),
+                file_lock=threading.Lock(),
+                original_print=printed.append,
+                trace_print=printed.append,
+            )
+            files = list(Path(tmpdir).glob("*.jsonl"))
+            record = json.loads(files[0].read_text(encoding="utf-8").splitlines()[0])
+
+        self.assertIsNone(skipped)
+        self.assertIsNotNone(written)
+        self.assertEqual(len(files), 1)
+        self.assertEqual(record["event"], "model_call")
+        self.assertEqual(record["turn_id"], "turn-1")
+        self.assertNotIn("empty", record)
+        self.assertTrue(any("[TURN TRACE]" in item for item in printed))
+
+    def test_writer_preserves_summary_null_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            record = write_turn_trace_event(
+                "voice_turn_summary",
+                {"turn_id": "turn-1", "playback_completed": None},
+                turn_trace_json_log=True,
+                bottleneck_events={"voice_turn_summary"},
+                console_only_stt_and_reply=True,
+                voice_bottleneck_logs=True,
+                voice_trace_all_events=False,
+                log_dir=Path(tmpdir),
+                file_lock=threading.Lock(),
+                original_print=lambda _text: None,
+                trace_print=lambda _text: None,
+            )
+
+        self.assertIsNotNone(record)
+        self.assertIn("playback_completed", record)
+        self.assertIsNone(record["playback_completed"])
 
 
 if __name__ == "__main__":

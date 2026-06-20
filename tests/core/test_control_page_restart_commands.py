@@ -10,6 +10,8 @@ LOCAL_SERVER = REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "control_
 FAST_API = REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "fast_control_api.py"
 INDEX_HTML = REPO_ROOT / "docs" / "index.html"
 CONTROL_PAGE_JS = REPO_ROOT / "docs" / "assets" / "evelyn-page.js"
+RUNTIME_LIFECYCLE = REPO_ROOT / "runtime_lifecycle.py"
+CONTROL_PAGE_TOOLS = REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "control_page_tools.py"
 
 
 class ControlPageRestartCommandTests(unittest.TestCase):
@@ -20,9 +22,11 @@ class ControlPageRestartCommandTests(unittest.TestCase):
         cls.fast_api = FAST_API.read_text(encoding="utf-8")
         cls.index_html = INDEX_HTML.read_text(encoding="utf-8")
         cls.control_page_js = CONTROL_PAGE_JS.read_text(encoding="utf-8")
+        cls.runtime_lifecycle = RUNTIME_LIFECYCLE.read_text(encoding="utf-8")
+        cls.control_page_tools = CONTROL_PAGE_TOOLS.read_text(encoding="utf-8")
 
     def test_control_page_exposes_restart_command(self) -> None:
-        self.assertIn('{"command": "/restart", "template": "/restart"', self.main_py)
+        self.assertIn('{"command": "/restart", "template": "/restart"', self.control_page_tools)
         self.assertIn('{"command": "/restart", "template": "/restart"', self.local_server)
         self.assertIn('{ command: "/restart", template: "/restart"', self.index_html)
         self.assertIn('{ command: "/restart", template: "/restart"', self.control_page_js)
@@ -31,8 +35,8 @@ class ControlPageRestartCommandTests(unittest.TestCase):
     def test_control_page_slash_restart_runs_restart_path(self) -> None:
         self.assertIn("def execute_control_page_restart_command() -> str:", self.main_py)
         self.assertIn("asyncio.create_task(restart_bot_process())", self.main_py)
-        self.assertIn('"/restart": "runtime.restart_bot"', self.main_py)
-        self.assertIn('"/재시작": "runtime.restart_bot"', self.main_py)
+        self.assertIn('"/restart": "runtime.restart_bot"', self.control_page_tools)
+        self.assertIn('"/재시작": "runtime.restart_bot"', self.control_page_tools)
         self.assertIn('if tool_name == "runtime.restart_bot":', self.main_py)
         self.assertIn("return execute_control_page_restart_command()", self.main_py)
 
@@ -52,31 +56,32 @@ class ControlPageRestartCommandTests(unittest.TestCase):
         self.assertLess(proxy_index, fallback_index)
 
     def test_local_runtime_restart_uses_local_launcher(self) -> None:
-        self.assertIn("def current_runtime_prefers_local_restart() -> bool:", self.main_py)
-        self.assertIn("return bool(LOCAL_ONLY_MODE or not DISCORD_ENABLED)", self.main_py)
-        self.assertIn('project_dir / "evelyn_core" / "start_local.bat"', self.main_py)
-        self.assertIn('"DISCORD_ENABLED": "false"', self.main_py)
-        self.assertIn('"LOCAL_ONLY": "true"', self.main_py)
-        self.assertIn("restart_launcher_for_current_mode(project_dir)", self.main_py)
+        self.assertIn("from runtime_lifecycle import (", self.main_py)
+        self.assertIn("def runtime_prefers_local_restart(", self.runtime_lifecycle)
+        self.assertIn("return bool(local_only_mode or not discord_enabled)", self.runtime_lifecycle)
+        self.assertIn('project_dir / "evelyn_core" / "start_local.bat"', self.runtime_lifecycle)
+        self.assertIn('"DISCORD_ENABLED": "false"', self.runtime_lifecycle)
+        self.assertIn('"LOCAL_ONLY": "true"', self.runtime_lifecycle)
+        self.assertIn("launch_runtime_restart_sequence(", self.main_py)
 
     def test_natural_language_restart_is_routed_before_general_llm(self) -> None:
-        restart_check = self.main_py.index("if is_explicit_control_page_restart_request(normalized):")
-        tool_router = self.main_py.index("tool_decision_raw = await decide_control_page_tool_call(")
-        self.assertLess(restart_check, tool_router)
         self.assertIn("cheap_decision = cheap_control_page_tool_decision(text)", self.main_py)
-        self.assertIn("def is_explicit_control_page_restart_request(text: str) -> bool:", self.main_py)
-        self.assertIn('"재시작해줘"', self.main_py)
-        self.assertIn('"restartnow"', self.main_py)
-        self.assertIn('"다시켜줘"', self.main_py)
+        cheap_index = self.main_py.index("cheap_decision = cheap_control_page_tool_decision(text)")
+        tool_router = self.main_py.index("tool_decision_raw = await decide_control_page_tool_call(")
+        self.assertLess(cheap_index, tool_router)
+        self.assertIn("def is_explicit_control_page_restart_request(text: str) -> bool:", self.control_page_tools)
+        self.assertIn('"재시작해줘"', self.control_page_tools)
+        self.assertIn('"restartnow"', self.control_page_tools)
+        self.assertIn('"다시켜줘"', self.control_page_tools)
 
     def test_restart_questions_are_not_treated_as_restart_commands(self) -> None:
-        self.assertIn("question_starts = (", self.main_py)
-        self.assertIn('"왜"', self.main_py)
-        self.assertIn('"재시작하면"', self.main_py)
-        self.assertIn('"재시작해야"', self.main_py)
-        self.assertIn('if normalized.startswith(question_starts):', self.main_py)
-        self.assertIn("[.!?]*", self.main_py)
-        self.assertIn("해줄수있어", self.main_py)
+        self.assertIn("question_starts = (", self.control_page_tools)
+        self.assertIn('"왜"', self.control_page_tools)
+        self.assertIn('"재시작하면"', self.control_page_tools)
+        self.assertIn('"재시작해야"', self.control_page_tools)
+        self.assertIn('if normalized.startswith(question_starts):', self.control_page_tools)
+        self.assertIn("[.!?]*", self.control_page_tools)
+        self.assertIn("해줄수있어", self.control_page_tools)
 
 
 if __name__ == "__main__":

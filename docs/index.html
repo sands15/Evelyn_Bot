@@ -892,6 +892,100 @@
       font-size: 0.92rem;
     }
 
+    .contract-timeline {
+      display: grid;
+      gap: 8px;
+      padding-top: 4px;
+    }
+
+    .contract-timeline-head {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .contract-timeline-head strong {
+      font-size: 0.9rem;
+    }
+
+    .contract-timeline-head span,
+    .contract-event p,
+    .contract-event em {
+      color: var(--soft);
+      font-size: 0.74rem;
+      line-height: 1.35;
+      overflow-wrap: anywhere;
+    }
+
+    .contract-event-list {
+      display: grid;
+      gap: 6px;
+    }
+
+    .contract-event {
+      display: grid;
+      gap: 4px;
+      padding: 8px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: rgba(255, 255, 255, 0.36);
+    }
+
+    [data-theme="dark"] .contract-event {
+      background: rgba(255, 255, 255, 0.055);
+    }
+
+    .contract-event-row {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr) auto;
+      gap: 6px;
+      align-items: center;
+    }
+
+    .contract-event-badge {
+      width: 8px;
+      height: 8px;
+      border-radius: 999px;
+      background: var(--muted);
+    }
+
+    .contract-event.is-error .contract-event-badge {
+      background: var(--danger);
+    }
+
+    .contract-event.is-warning .contract-event-badge {
+      background: #d4982f;
+    }
+
+    .contract-event.is-ok .contract-event-badge {
+      background: var(--green);
+    }
+
+    .contract-event-row strong {
+      min-width: 0;
+      font-size: 0.8rem;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .contract-event-row span {
+      color: var(--muted);
+      font-size: 0.68rem;
+      font-weight: 800;
+      text-transform: uppercase;
+    }
+
+    .contract-event p {
+      margin: 0;
+    }
+
+    .contract-event em {
+      font-style: normal;
+      color: var(--muted);
+    }
+
     .drawer-note {
       margin: 0;
       color: var(--soft);
@@ -1687,11 +1781,29 @@
       <div class="status-list">
         <div class="line"><span>Main LLM</span><strong>연결됨</strong></div>
         <div class="line"><span>TTS</span><strong>대기</strong></div>
+        <div class="line"><span>바리인 연속성</span><strong id="voiceBargeInContinuityLine">-</strong></div>
         <div class="line"><span>Runtime</span><strong id="runtimeHealthLine">checking</strong></div>
         <div class="line"><span>Minecraft</span><strong>꺼짐</strong></div>
         <div class="line"><span>최근 학습</span><strong>v46</strong></div>
         <div class="line"><span>GPU 기준</span><strong>RTX 3090</strong></div>
       </div>
+
+      <section class="contract-timeline" aria-label="Voyager 계약 추적 타임라인">
+        <div class="contract-timeline-head">
+          <strong>계약 추적</strong>
+          <span id="contractTimelineStatus">대기</span>
+        </div>
+        <div class="contract-event-list" id="contractTimelineList">
+          <div class="contract-event is-ok">
+            <div class="contract-event-row">
+              <i class="contract-event-badge" aria-hidden="true"></i>
+              <strong>계약 이슈 없음</strong>
+              <span>OK</span>
+            </div>
+            <p>Voyager 계약/복구 진단이 감지되면 여기에 표시됩니다.</p>
+          </div>
+        </div>
+      </section>
 
       <label class="line" for="wallpaperInput">
         <span>배경화면</span>
@@ -1817,7 +1929,10 @@
     const chatNewMessageRow = document.getElementById("chatNewMessageRow");
     const chatNewMessageButton = document.getElementById("chatNewMessageButton");
     let lastBubble = document.getElementById("lastBubble");
+    const voiceBargeInContinuityLine = document.getElementById("voiceBargeInContinuityLine");
     const runtimeHealthLine = document.getElementById("runtimeHealthLine");
+    const contractTimelineStatus = document.getElementById("contractTimelineStatus");
+    const contractTimelineList = document.getElementById("contractTimelineList");
     const quickCommandRow = document.getElementById("quick-command-row");
     const quickCommandCaption = document.getElementById("quick-command-caption");
     const runtimeRepairPreviewButton = document.getElementById("runtimeRepairPreviewButton");
@@ -1888,6 +2003,9 @@
       { command: "/memory", template: "/memory", summary: "Open or hide memory panel", group: "Page" },
       { command: "/obsidian", template: "/obsidian", summary: "Open or hide memory panel", group: "Page" },
       { command: "/voice status", template: "/voice status", summary: "Show voice pipeline status", group: "Voice" },
+      { command: "/voice continuity", template: "/voice continuity", summary: "Show barge-in continuity summary", group: "Voice" },
+      { command: "/voice continuity reset", template: "/voice continuity reset", summary: "Reset barge-in continuity counters", group: "Voice" },
+      { command: "/voice continuity reset confirm", template: "/voice continuity reset confirm", summary: "Confirm barge-in continuity reset", group: "Voice" },
       { command: "/voice input auto", template: "/voice input auto", summary: "Use automatic voice input routing", group: "Voice" },
       { command: "/voice input local", template: "/voice input local", summary: "Use local microphone input", group: "Voice" },
       { command: "/voice input discord", template: "/voice input discord", summary: "Use Discord voice input", group: "Voice" },
@@ -1908,6 +2026,29 @@
     if (savedWallpaper) {
       app.style.setProperty("--custom-wallpaper", `url("${savedWallpaper}")`);
       app.classList.add("has-wallpaper");
+    }
+
+    function cleanDisplayText(value, fallback = "None") {
+      const text = value == null ? "" : String(value).trim();
+      return text || fallback;
+    }
+
+    function formatBargeInContinuitySummary(continuity, options = {}) {
+      const compact = Boolean(options.compact);
+      const target = Number(continuity && continuity.targetCount || 0);
+      if (target <= 0) return "미설정";
+      const current = Number(continuity.currentSuccessStreak || 0);
+      const attemptCount = Number(continuity.attemptCount || 0);
+      const successCount = Number(continuity.successCount || 0);
+      const failureCount = Number(continuity.failureCount || 0);
+      const successRate = attemptCount > 0 ? ((successCount / attemptCount) * 100).toFixed(1) : "0.0";
+      const reached = Boolean(continuity.targetReached);
+      const tag = reached ? "완료" : "진행";
+      const lastReason = cleanDisplayText(String(continuity.lastReasonLabel || continuity.lastReason || ""), "없음");
+      if (compact) {
+        return `${tag} ${current}/${target} · ${successRate}% · 시도 ${attemptCount}(실패 ${failureCount})`;
+      }
+      return `${tag} ${current}/${target} · 성공률 ${successRate}% · 시도 ${attemptCount}(성공 ${successCount}/실패 ${failureCount}) · 마지막 ${lastReason}`;
     }
 
     function clampPercent(value) {
@@ -1956,6 +2097,224 @@
       return window.EvelynBootProgress.isReady(payload);
     }
 
+    const RUNTIME_HEALTH_DIAGNOSIS_TEXT = {
+      CP_CONTROL_RUNTIME_EXPIRED: {
+        issue: "Runtime health is stale and expired.",
+        detail: "Control-Plane service status cache exceeded max staleness; a hard refresh will run on next check.",
+        repairActionLabel: "Preview Bot API restart",
+        repairActionSummary: "Force a fresh Bot API probe and check Bot API/LLM endpoints.",
+      },
+      CP_CONTROL_RUNTIME_STALE: {
+        issue: "Runtime health cache is stale.",
+        detail: "Runtime service status is being refreshed in background.",
+        repairActionLabel: "Preview status refresh",
+        repairActionSummary: "Wait for background refresh and re-check runtime health.",
+      },
+      CP_RUNTIME_REFRESH_ERROR: {
+        issue: "Control-Page runtime health refresh failed.",
+        detail: "Runtime service state could not be refreshed; retrying may recover the cache.",
+        repairActionLabel: "Preview Control-Page restart",
+        repairActionSummary: "Retry the runtime refresh path and restart Control-Page if unavailable.",
+      },
+      CP_UP_BOT_DOWN: {
+        issue: "Control-Page is up, but Bot API is down.",
+        detail: "The page can load, but chat, memory commands, and runtime commands can fail.",
+        repairActionLabel: "Preview Bot API restart",
+        repairActionSummary: "Check Bot API status and preview repair if needed.",
+      },
+      CP_BOT_PROXY_ERROR: {
+        issue: "Bot API contract request failed.",
+        detail: "The Bot API endpoint could not be queried (network, timeout, or server error).",
+        repairActionLabel: "Preview Bot API restart",
+        repairActionSummary: "Check Bot API status and preview repair if needed.",
+      },
+      CP_BOT_PROXY_TIMEOUT: {
+        issue: "Bot API contract check timed out.",
+        detail: "Bot API response took longer than the probe timeout.",
+        repairActionLabel: "Preview Bot API repair",
+        repairActionSummary: "Increase check stability or restart Bot API.",
+      },
+      CP_BOT_STATE_NOT_READY: {
+        issue: "Bot API is reachable but not in ready state.",
+        detail: "Bot API returned a state value that is not considered ready.",
+        repairActionLabel: "Preview Bot API restart",
+        repairActionSummary: "Check Bot API state and restart if initialization has stalled.",
+      },
+      CP_BOT_STATE_NOT_DICT: {
+        issue: "Bot API contract returned unexpected payload.",
+        detail: "Bot API contract response is not in the expected dictionary format.",
+        repairActionLabel: "Check Bot API contract",
+        repairActionSummary: "Check Bot API response schema and compatibility.",
+      },
+      CP_BOT_HTTP_401: {
+        issue: "Bot API contract unauthorized (401).",
+        detail: "The Bot API control endpoint returned unauthorized.",
+        repairActionLabel: "Check Bot API auth",
+        repairActionSummary: "Verify Bot API auth/session state before retry.",
+      },
+      CP_BOT_HTTP_403: {
+        issue: "Bot API contract forbidden (403).",
+        detail: "The Bot API control endpoint returned forbidden.",
+        repairActionLabel: "Check Bot API access",
+        repairActionSummary: "Verify Bot API host/port and permission settings.",
+      },
+      CP_BOT_HTTP_404: {
+        issue: "Bot API contract endpoint not found (404).",
+        detail: "The Bot API control endpoint path appears incorrect or not deployed.",
+        repairActionLabel: "Check Bot API path",
+        repairActionSummary: "Verify CONTROL_PAGE_BOT_API_STATE_PATH and API route.",
+      },
+      CP_BOT_HTTP_500: {
+        issue: "Bot API contract returned internal server error (500).",
+        detail: "The Bot API control endpoint returned server error.",
+        repairActionLabel: "Preview Bot API repair",
+        repairActionSummary: "Check Bot API logs for startup/runtime failures.",
+      },
+      CP_MAIN_LLM_DOWN: {
+        issue: "Main LLM is not responding.",
+        detail: "Main conversation generation is limited until Main LLM recovers.",
+        repairActionLabel: "Preview Main LLM repair",
+        repairActionSummary: "Preview Main LLM repair before starting anything.",
+      },
+      CP_ROUTER_LLM_DOWN: {
+        issue: "Router LLM is not responding.",
+        detail: "Routing decisions may be limited until Router LLM recovers.",
+        repairActionLabel: "Preview Router LLM repair",
+        repairActionSummary: "Preview Router LLM repair before starting anything.",
+      },
+      CP_SUB_LLM_DOWN: {
+        issue: "Sub LLM is not responding.",
+        detail: "Support judgment and summarization may be limited until Sub LLM recovers.",
+        repairActionLabel: "Preview Sub LLM repair",
+        repairActionSummary: "Preview Sub LLM repair before starting anything.",
+      },
+      CP_TTS_DOWN: {
+        issue: "TTS is not responding.",
+        detail: "Voice output is unavailable until TTS recovers.",
+        repairActionLabel: "Preview TTS repair",
+        repairActionSummary: "Preview TTS repair before starting anything.",
+      },
+      CP_CODEX_GATEWAY_DOWN: {
+        issue: "Codex Gateway is not responding.",
+        detail: "Voyager code execution is limited until the Codex Gateway recovers.",
+        repairActionLabel: "Preview Codex Gateway repair",
+        repairActionSummary: "Preview Codex Gateway repair before relying on Voyager action generation.",
+      },
+      VOYAGER_TASK_CONTRACT_UNVERIFIED: {
+        issue: "Voyager task contract is unverified.",
+        detail: "Task progress exists, but explicit success verification is missing.",
+        repairActionLabel: "Inspect Voyager contract",
+        repairActionSummary: "Review task bookkeeping, world-effect verification, and critic evidence.",
+      },
+      VOYAGER_TASK_CONTRACT_FAILED: {
+        issue: "Voyager task contract failed.",
+        detail: "A task contract, bookkeeping entry, effect check, or critic signal reported failure.",
+        repairActionLabel: "Inspect Voyager contract",
+        repairActionSummary: "Review failed contract evidence before retrying the task.",
+      },
+      VOYAGER_TASK_RECOVERY_REQUIRED: {
+        issue: "Voyager task recovery is required.",
+        detail: "The task boundary needs recovery before the same objective is retried.",
+        repairActionLabel: "Inspect Voyager recovery",
+        repairActionSummary: "Review the recommended recovery action and next steps.",
+      },
+      VOYAGER_RUNTIME_RECOVERY_REQUIRED: {
+        issue: "Voyager runtime recovery is required.",
+        detail: "Voyager is reachable, but one of its runtime boundaries is unhealthy.",
+        repairActionLabel: "Inspect Voyager runtime",
+        repairActionSummary: "Review bridge, Minecraft connection, and runner status before retrying.",
+      },
+      CODEX_GATEWAY_DOWN: {
+        issue: "Codex Gateway is not responding.",
+        detail: "Voyager code execution is limited until the Codex Gateway recovers.",
+        repairActionLabel: "Preview Codex Gateway repair",
+        repairActionSummary: "Preview Codex Gateway repair before relying on Voyager action generation.",
+      },
+      CONTROL_PAGE_DOWN: {
+        issue: "Control-Page server is not responding.",
+        detail: "The UI and command input can be unavailable until Control-Page recovers.",
+        repairActionLabel: "Preview Control-Page restart",
+        repairActionSummary: "Preview Control-Page repair before starting anything.",
+      },
+      MAIN_LLM_DOWN: {
+        issue: "Main LLM is not responding.",
+        detail: "Main conversation generation is limited until Main LLM recovers.",
+        repairActionLabel: "Preview Main LLM repair",
+        repairActionSummary: "Preview Main LLM repair before starting anything.",
+      },
+      ROUTER_LLM_DOWN: {
+        issue: "Router LLM is not responding.",
+        detail: "Routing decisions may be limited until Router LLM recovers.",
+        repairActionLabel: "Preview Router LLM repair",
+        repairActionSummary: "Preview Router LLM repair before starting anything.",
+      },
+      SUB_LLM_DOWN: {
+        issue: "Sub LLM is not responding.",
+        detail: "Support judgment and summarization may be limited until Sub LLM recovers.",
+        repairActionLabel: "Preview Sub LLM repair",
+        repairActionSummary: "Preview Sub LLM repair before starting anything.",
+      },
+      TTS_DOWN: {
+        issue: "TTS is not responding.",
+        detail: "Voice output is unavailable until TTS recovers.",
+        repairActionLabel: "Preview TTS repair",
+        repairActionSummary: "Preview TTS repair before starting anything.",
+      },
+      VISION_DOWN: {
+        issue: "Vision is not responding.",
+        detail: "Screen perception is limited until Vision recovers.",
+        repairActionLabel: "Preview Vision repair",
+        repairActionSummary: "Preview Vision repair before starting anything.",
+      },
+      VOYAGER_DOWN: {
+        issue: "Voyager is not responding.",
+        detail: "Minecraft autonomy is limited until the Voyager service recovers.",
+        repairActionLabel: "Preview Voyager repair",
+        repairActionSummary: "Preview Voyager repair before sending Minecraft automation tasks.",
+      },
+      CODEX_GATEWAY_ACTION_FAILED: {
+        issue: "Codex Gateway action execution failed.",
+        detail: "Voyager action generation may be unavailable until Codex CLI authentication or execution is fixed.",
+        repairActionLabel: "Check Codex Gateway",
+        repairActionSummary: "Check Codex Gateway and Codex CLI authentication before running Voyager tasks.",
+      },
+      BOT_API_PARTIAL: {
+        issue: "Bot API is partially responding or failing some requests.",
+        detail: "Some features may work intermittently until Bot API stabilizes.",
+        repairActionLabel: "Preview Bot API health repair",
+        repairActionSummary: "Check Bot API health and preview repair if needed.",
+      },
+      BOT_API_DOWN_WITH_CONTROL_PAGE_UP: {
+        issue: "Control-Page is open, but Bot API is not responding.",
+        detail: "Chat, memory, and runtime commands are limited until Bot API responds.",
+        repairActionLabel: "Preview Bot API restart",
+        repairActionSummary: "Preview the Bot API repair plan before starting anything.",
+      },
+    };
+
+    function runtimeHealthCodeTextFromCode(code) {
+      const normalized = String(code || "").trim().toUpperCase();
+      if (!normalized) {
+        return null;
+      }
+      if (RUNTIME_HEALTH_DIAGNOSIS_TEXT[normalized]) {
+        return RUNTIME_HEALTH_DIAGNOSIS_TEXT[normalized];
+      }
+      if (normalized.startsWith("CP_") && RUNTIME_HEALTH_DIAGNOSIS_TEXT[normalized.slice(3)]) {
+        return RUNTIME_HEALTH_DIAGNOSIS_TEXT[normalized.slice(3)];
+      }
+      if (normalized.startsWith("CP_BOT_HTTP_")) {
+        const httpCode = normalized.slice("CP_BOT_HTTP_".length);
+        return {
+          issue: `Bot API contract returned HTTP ${httpCode}.`,
+          detail: "The Bot API control endpoint responded with a non-200 status.",
+          repairActionLabel: "Preview Bot API repair",
+          repairActionSummary: "Check Bot API control endpoint and contract path.",
+        };
+      }
+      return null;
+    }
+
     function runtimeHealthText(payload) {
       const runtime = (payload && payload.runtime) || {};
       const health = runtime.serviceHealth || payload.serviceHealth || null;
@@ -1964,8 +2323,14 @@
       const primary = diagnostics.find((item) => item && item.severity === "error")
         || diagnostics.find((item) => item && item.severity === "warning")
         || diagnostics[0];
-      if (primary && (primary.message || primary.code)) {
-        return String(primary.message || primary.code);
+      if (primary) {
+        const mapped = runtimeHealthCodeTextFromCode(primary.code);
+        if (mapped && mapped.issue) {
+          return String(mapped.issue);
+        }
+        if (primary.message || primary.code) {
+          return String(primary.message || primary.code);
+        }
       }
       return String(health.summary || health.overallState || "ready");
     }
@@ -1974,6 +2339,62 @@
       const runtime = (payload && payload.runtime) || {};
       const health = runtime.serviceHealth || payload.serviceHealth || null;
       return health && typeof health === "object" ? health : null;
+    }
+
+    function compactTimelineText(value, fallback = "-") {
+      const text = String(value || "").replace(/\s+/g, " ").trim();
+      if (!text) return fallback;
+      return text.length > 150 ? text.slice(0, 149).trim() + "…" : text;
+    }
+
+    function contractTimelineDiagnostics(payload) {
+      const health = runtimeHealthObject(payload);
+      const diagnostics = Array.isArray((health || {}).diagnostics) ? health.diagnostics : [];
+      return diagnostics.filter((item) => {
+        const code = String((item && item.code) || "").toUpperCase();
+        return code.startsWith("VOYAGER_TASK_CONTRACT")
+          || code === "VOYAGER_TASK_RECOVERY_REQUIRED"
+          || code === "VOYAGER_RUNTIME_RECOVERY_REQUIRED";
+      });
+    }
+
+    function renderContractTimeline(payload) {
+      if (!contractTimelineList) return;
+      const diagnostics = contractTimelineDiagnostics(payload).slice(0, 4);
+      if (contractTimelineStatus) {
+        contractTimelineStatus.textContent = diagnostics.length ? `${diagnostics.length}건` : "정상";
+      }
+      if (!diagnostics.length) {
+        contractTimelineList.innerHTML = [
+          '<div class="contract-event is-ok">',
+          '<div class="contract-event-row">',
+          '<i class="contract-event-badge" aria-hidden="true"></i>',
+          "<strong>계약 이슈 없음</strong>",
+          "<span>OK</span>",
+          "</div>",
+          "<p>Voyager 계약/복구 진단이 감지되면 여기에 표시됩니다.</p>",
+          "</div>",
+        ].join("");
+        return;
+      }
+      contractTimelineList.innerHTML = diagnostics.map((item) => {
+        const severity = String(item.severity || "warning").toLowerCase();
+        const code = compactTimelineText(item.code, "VOYAGER_CONTRACT");
+        const message = compactTimelineText(item.message || item.code, "계약 진단 감지");
+        const details = compactTimelineText(item.details || "", "");
+        const stateClass = severity === "error" ? "is-error" : "is-warning";
+        return [
+          `<div class="contract-event ${stateClass}">`,
+          '<div class="contract-event-row">',
+          '<i class="contract-event-badge" aria-hidden="true"></i>',
+          `<strong>${escapeHtml(message)}</strong>`,
+          `<span>${escapeHtml(severity)}</span>`,
+          "</div>",
+          details ? `<p>${escapeHtml(details)}</p>` : "",
+          `<em>${escapeHtml(code)}</em>`,
+          "</div>",
+        ].join("");
+      }).join("");
     }
 
     function primaryRuntimeDiagnosticForLegacy(health) {
@@ -2499,19 +2920,25 @@
       applyBootProgressPayload(state);
       const commands = mergeCommands(commandCatalog, state.commands || [], state.allCommands || []);
       if (commands.length) commandCatalog = commands;
-      const runtime = state.runtime || {};
-      const services = runtime.services || {};
-      const voice = state.voice || {};
-      const minecraft = state.minecraft || {};
-      if (state.chat && Array.isArray(state.chat.messages)) {
-        renderChatMessages(state.chat.messages);
-      }
+    const runtime = state.runtime || {};
+    const services = runtime.services || {};
+    const voice = state.voice || {};
+    const minecraft = state.minecraft || {};
+    const voicePipeline = runtime.voicePipeline || {};
+    const bargeInContinuity = voicePipeline.bargeInContinuity || {};
+    if (state.chat && Array.isArray(state.chat.messages)) {
+      renderChatMessages(state.chat.messages);
+    }
       applyControlPanelCommands(state, options);
       const lines = Array.from(drawer.querySelectorAll(".status-list .line strong"));
       if (lines[0]) lines[0].textContent = services.mainReady ? "연결됨" : "대기";
-      if (lines[1]) lines[1].textContent = voice.speaking ? "재생 중" : (services.ttsReady ? "대기" : "대기 중");
-      if (runtimeHealthLine) runtimeHealthLine.textContent = runtimeHealthText(state);
-      renderRuntimeRepairPreview(state);
+    if (lines[1]) lines[1].textContent = voice.speaking ? "재생 중" : (services.ttsReady ? "대기" : "대기 중");
+    if (runtimeHealthLine) runtimeHealthLine.textContent = runtimeHealthText(state);
+    renderContractTimeline(state);
+    if (voiceBargeInContinuityLine) {
+      voiceBargeInContinuityLine.textContent = formatBargeInContinuitySummary(bargeInContinuity, { compact: true });
+    }
+    renderRuntimeRepairPreview(state);
       if (lines[3]) lines[3].textContent = minecraft.sessionActive ? "연결됨" : "꺼짐";
     }
 

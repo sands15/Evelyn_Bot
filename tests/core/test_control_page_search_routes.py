@@ -53,10 +53,14 @@ class ControlPageSearchRouteTests(unittest.TestCase):
         self.assertIn('"phase": "main_synthesis"', self.main_py)
 
     def test_short_search_followups_use_recent_context(self) -> None:
-        self.assertIn("def is_generic_search_followup_text", self.main_py)
-        self.assertIn("def is_underspecified_weather_query", self.main_py)
-        self.assertIn("def resolve_contextual_search_query", self.main_py)
-        self.assertIn("contextual = resolve_contextual_search_query", self.main_py)
+        policy_py = (REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "search_followup_policy.py").read_text(encoding="utf-8")
+        query_context_py = (REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "search_query_context.py").read_text(encoding="utf-8")
+
+        self.assertIn("def is_generic_search_followup_text", policy_py)
+        self.assertIn("def is_underspecified_weather_query", policy_py)
+        self.assertIn("def resolve_contextual_search_query", query_context_py)
+        self.assertIn("contextual = resolve_contextual_search_query", query_context_py)
+        self.assertIn("build_search_query_from_context", self.main_py)
         self.assertIn("messages=list(extras.get(\"messages\") or [])", search_py := (REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "skills" / "search" / "__init__.py").read_text(encoding="utf-8"))
         self.assertIn("session_key=context.session_key", search_py)
 
@@ -77,9 +81,11 @@ class ControlPageSearchRouteTests(unittest.TestCase):
         self.assertIn("if should_force_search_query(text):\n        return await answer_control_page_search_text(guild, text)", self.main_py)
 
     def test_weather_search_query_can_use_recent_location_memory(self) -> None:
-        self.assertIn("def enrich_weather_search_query_from_context", self.main_py)
-        self.assertIn("resolve_recent_weather_location(recent_users)", self.main_py)
-        self.assertIn('return clean_text(f"{location} {text}")', self.main_py)
+        query_context_py = (REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "search_query_context.py").read_text(encoding="utf-8")
+
+        self.assertIn("def enrich_weather_search_query_from_context", query_context_py)
+        self.assertIn("resolve_recent_weather_location(recent_users)", query_context_py)
+        self.assertIn('return clean_text(f"{location} {text}")', query_context_py)
 
 
 if __name__ == "__main__":

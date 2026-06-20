@@ -2,10 +2,8 @@ import atexit
 import builtins
 import contextlib
 import hashlib
-import html
 import json
 import logging
-import math
 import os
 import re
 import shutil
@@ -16,11 +14,9 @@ import time
 import asyncio
 import uuid
 import wave
-import zipfile
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
-from urllib.parse import parse_qs, quote, unquote, urlparse
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 EVELYN_CORE_RUNTIME = PROJECT_ROOT / "evelyn_core" / "runtime"
@@ -67,6 +63,13 @@ from evelyn_core.audio import (
     slice_audio_window,
 )
 from evelyn_core.autonomy import AutonomyEngine
+from evelyn_core.autonomy_observation_state import (
+    build_autonomy_recent_context_payload,
+    build_autonomy_status_payload,
+    build_autonomy_summary_payload,
+    build_default_autonomy_observation,
+    pick_recent_user_text,
+)
 from evelyn_core.autonomy_router import DefaultAutonomyExecutor, RoutedAutonomyExecutor
 from evelyn_core.config import *
 from evelyn_core.memory import *
@@ -77,6 +80,7 @@ from evelyn_core.memory_writebehind import (
     run_memory_writebehind_steps,
     should_replace_existing_memory_task,
 )
+from evelyn_core.minecraft_assets import MinecraftItemIconLoader
 from evelyn_core.memory_vault import (
     ensure_memory_vault_layout,
     export_memory_graph,
@@ -85,18 +89,36 @@ from evelyn_core.memory_vault import (
     update_memory_vault_user_note,
 )
 from evelyn_core.json_safety import safe_json_dumps, safe_json_value
-from evelyn_core.minecraft_runtime_snapshot import attach_minecraft_runtime_snapshot, minecraft_runtime_status_fields
+from evelyn_core.minecraft_runtime_snapshot import (
+    attach_minecraft_runtime_snapshot,
+    extract_minecraft_recent_activity_live,
+    format_minecraft_state_summary,
+    format_position_short,
+    normalize_inventory_slot_entries,
+    normalize_inventory_top_entries,
+    normalize_inventory_used_slots,
+    normalize_minecraft_item_name,
+    merge_voyager_status_into_state,
+    minecraft_runtime_status_fields,
+    summarize_inventory_top,
+)
 from evelyn_core.question_shaping import (
     enforce_question_limits,
     filter_stream_chunk_for_question_limits,
 )
 from evelyn_core.proactive_questions import (
     evaluate_proactive_question_gate,
-    mark_question_asked,
-    promote_open_questions,
-    resolve_pending_question_answer,
     select_question_to_ask,
-    should_offer_proactive_question,
+)
+from evelyn_core.cognitive_policy_state import (
+    apply_ask_gating,
+    ask_confidence_threshold_for_source,
+    build_cognitive_fallback_state,
+    build_fast_cognitive_state,
+    finalize_cognitive_state,
+    policy_response_for_state,
+    read_cached_cognitive_state,
+    read_layered_cognitive_state,
 )
 from evelyn_core.self_model import (
     mark_self_state_assistant_output,
@@ -136,6 +158,77 @@ from evelyn_core.text import (
     strip_voice_wake_word,
     visible_text,
 )
+from evelyn_core.session_memory_state import (
+    SessionStateStore,
+    build_topic_id as build_session_topic_id,
+    is_casual_call_or_status_question as session_is_casual_call_or_status_question,
+    new_conversation_history as new_session_conversation_history,
+    new_turn_id as new_session_turn_id,
+    runtime_session_key as resolve_runtime_session_key,
+)
+from evelyn_core.room_speaker_activity import RoomSpeakerActivityStore
+from evelyn_core.response_output_policy import (
+    answer_contains_minecraft_leak as answer_contains_minecraft_leak_payload,
+    answer_simple_local_chat_query as answer_simple_local_chat_query_payload,
+    cleanup_assistant_display_artifacts as cleanup_assistant_display_artifacts_payload,
+    extract_answer_from_reasoning as extract_answer_from_reasoning_payload,
+    fallback_for_unrequested_minecraft_leak as fallback_for_unrequested_minecraft_leak_payload,
+    format_display_text as format_display_text_payload,
+    normalize_friend_style_output,
+    parse_response_action_tag,
+    sanitize_model_output as sanitize_model_output_payload,
+    sanitize_unrequested_minecraft_leak as sanitize_unrequested_minecraft_leak_payload,
+    user_explicitly_mentions_minecraft as user_explicitly_mentions_minecraft_payload,
+)
+from evelyn_core.search_followup_policy import (
+    answer_promises_search,
+    strip_search_answer_sources,
+)
+from evelyn_core.search_query_context import build_search_query_from_context
+from evelyn_core.search_tools import search_duckduckgo as search_duckduckgo_payload
+from evelyn_core.runtime_status_context import (
+    answer_gpu_runtime_status_query,
+    compact_runtime_error,
+    load_runtime_gpu_status,
+    load_runtime_recent_errors,
+    probe_runtime_tcp_service,
+    runtime_status_port_from_url,
+)
+from evelyn_core.route_fallback_policy import (
+    classify_llm_route_fallback,
+    normalize_route_name,
+    should_force_voice_context_route,
+)
+from evelyn_core.tool_awareness_policy import build_tool_awareness_context
+from evelyn_core.local_tool_diagnostic_context import build_local_tool_diagnostic_context
+from evelyn_core.memory_context_state import build_memory_context
+from evelyn_core.memory_layers import collect_memory_layers
+from evelyn_core.memory_llm_context import (
+    build_cognitive_state_messages,
+    build_compact_cognitive_state_messages,
+    layered_summary_text,
+    recent_memory_groups,
+)
+from evelyn_core.memory_update_policy import (
+    build_memory_writer_decision_for_turn,
+    build_memory_writer_decision_payload,
+    memory_refresh_inputs_for_turn,
+    plan_memory_writebehind_schedule,
+    redact_vision_text_for_memory as redact_vision_text_for_memory_payload,
+    write_memory_turn_records,
+)
+from evelyn_core.memory_writeback_state import (
+    run_long_term_memory_update,
+)
+from control_page_runtime_health import (
+    build_control_page_runtime_health,
+    is_control_api_ready_from_runtime_services,
+)
+from runtime_lifecycle import (
+    launch_runtime_restart_sequence,
+    schedule_evelyn_local_shutdown as runtime_schedule_evelyn_local_shutdown,
+    schedule_evelyn_stack_shutdown as runtime_schedule_evelyn_stack_shutdown,
+)
 from evelyn_core.context_pipeline import (
     ContextBuilder,
     ContextPolicy,
@@ -156,10 +249,44 @@ from evelyn_core.discord_delivery import (
     execute_streaming_voice_delivery_plan,
     send_discord_text,
 )
+from evelyn_core.discord_commands import (
+    build_autonomy_status_command_text,
+    build_channel_setting_list_reply,
+    build_command_channel_usage,
+    build_help_command_text,
+    build_minecraft_connect_reply,
+    build_minecraft_goal_missing_reply,
+    build_minecraft_goal_updated_reply,
+    build_minecraft_status_command_text,
+    build_observe_channel_usage,
+    build_prefix_current_reply,
+    build_prefix_reset_reply,
+    build_prefix_saved_reply,
+    build_reset_guild_memory_reply,
+    build_status_command_text,
+    control_command_check_failure_message,
+    guild_only_command_message,
+    is_control_command_authorized_payload,
+    normalize_channel_setting_action,
+)
+from evelyn_core.discord_settings import (
+    add_guild_channel_setting as add_guild_channel_setting_payload,
+    get_guild_command_only_channel_ids as get_guild_command_only_channel_ids_payload,
+    get_guild_command_prefix as get_guild_command_prefix_payload,
+    get_guild_observe_channel_ids as get_guild_observe_channel_ids_payload,
+    normalize_command_prefix as normalize_command_prefix_payload,
+    remove_guild_channel_setting as remove_guild_channel_setting_payload,
+    save_guild_channel_list as save_guild_channel_list_payload,
+    save_guild_command_prefix as save_guild_command_prefix_payload,
+)
 from evelyn_core.discord_ingress import (
+    build_discord_attachment_context,
+    build_text_turn_decision,
     build_voice_ingress_context,
-    build_text_ingress_context,
-    build_text_turn_user_text,
+    build_text_ingress_context_from_message,
+    decide_text_message_precheck,
+    is_reply_to_target_user,
+    resolve_text_thread_id,
     make_person_memory_key as make_discord_person_memory_key,
     make_room_memory_key as make_discord_room_memory_key,
     make_session_memory_key as make_discord_session_memory_key,
@@ -168,7 +295,6 @@ from evelyn_core.discord_ingress import (
     make_voice_room_session_key as make_discord_voice_room_session_key,
     make_voice_session_key as make_discord_voice_session_key,
     normalize_voice_debug_meta,
-    should_accept_text_turn,
     voice_ingress_source,
 )
 from evelyn_core.discord_session_policy import (
@@ -198,21 +324,96 @@ from evelyn_core.local_mic import (
     serialize_local_mic_target,
     should_route_discord_user_to_local_mic,
 )
+from evelyn_core.local_mic_state import (
+    build_local_mic_runtime_state,
+    local_mic_status_line_from_payload,
+    normalize_voice_input_mode,
+    serialize_local_mic_runtime_state_payload,
+    set_voice_input_mode_state,
+    voice_input_mode_status_line_from_mode,
+)
 from evelyn_core.local_tts_playback import LocalTtsPlaybackManager
+from evelyn_core.observability_metrics import (
+    ModelCallMetricsStore,
+    summarize_voice_p95_metrics,
+)
 from evelyn_core.page_urls import resolve_public_page_url
 from evelyn_core.query_intents import (
     answer_current_datetime_query,
-    extract_korean_location_hint,
-    is_weather_query,
-    resolve_recent_weather_location,
     should_force_search_query,
+)
+from evelyn_core.question_policy_state import (
+    QuestionPolicyState,
+    default_question_metrics,
+    extract_question_policy_from_route_meta as extract_question_policy_from_route_meta_payload,
+    is_continuable_technical_topic as is_continuable_technical_topic_payload,
+    normalize_question_policy_mapping as normalize_question_policy_mapping_payload,
+    user_frustration_with_questions as user_frustration_with_questions_payload,
+    user_wants_direct_answer as user_wants_direct_answer_payload,
 )
 from evelyn_core.assistant_contracts import (
     TtsSynthRequest,
     TtsSynthResult,
 )
 from evelyn_core.assistant_prompt_contract import build_evelyn_system_prompt
-from evelyn_core.control_page_contracts import CONTROL_PAGE_UI_PANELS as SHARED_CONTROL_PAGE_UI_PANELS
+from evelyn_core.control_page_contracts import memory_panel_reply
+from evelyn_core.control_page_state import (
+    ControlPageChatLogStore,
+    ControlPageMinecraftSnapshotCache,
+    ControlPageRuntimeServicesCache,
+    ControlPageUiCommandStore,
+    build_control_page_autonomy_reply_payload,
+    build_control_page_boot_progress_payload,
+    build_control_page_guild_state_view,
+    build_control_page_inventory_reply_payload,
+    build_control_page_local_state_view,
+    build_control_page_local_status_text_payload,
+    build_control_page_minecraft_connect_reply_payload,
+    build_control_page_minecraft_disconnect_reply,
+    build_control_page_minecraft_goal_missing_reply,
+    build_control_page_minecraft_goal_updated_reply,
+    build_control_page_minecraft_reply_payload,
+    build_control_page_runtime_diagnostics,
+    build_control_page_runtime_services_error_payload,
+    build_control_page_shutdown_reply,
+    build_control_page_status_text_payload,
+    build_control_page_voice_continuity_reply_payload,
+    build_control_page_voice_continuity_reset_reply,
+    build_control_page_voice_continuity_reset_required_reply,
+    build_control_page_voice_input_mode_reply,
+    build_control_page_voice_reconnect_reply,
+    build_control_page_voice_status_reply_payload,
+    command_status,
+    control_page_open_memory_vault_payload,
+    control_page_chat_refresh_plan,
+    is_control_page_minecraft_session_active,
+    memory_vault_obsidian_url,
+    memory_vault_open_tool_reply,
+    parse_control_page_chat_payload,
+    parse_control_page_guild_id,
+    parse_control_page_memory_graph_query,
+    parse_control_page_memory_note_action_payload,
+    parse_control_page_memory_note_query,
+    parse_control_page_memory_snapshot_query,
+    sanitize_control_page_welcome_text_payload,
+)
+from evelyn_core.control_page_runtime_probe import probe_control_page_runtime_services
+from evelyn_core.control_page_tools import (
+    CONTROL_PAGE_COMMANDS,
+    build_control_page_all_commands,
+    build_control_page_commands,
+    build_control_page_help_reply,
+    cheap_control_page_tool_decision,
+    control_page_tool_decision,
+    control_page_tool_decision_from_llm,
+    control_page_tool_policy_error,
+    control_page_tool_reply_from_execution,
+    control_page_tool_registry_prompt,
+    control_page_ui_tool_action_from_decision,
+    is_control_page_question_text,
+    is_explicit_control_page_restart_request,
+    should_route_control_page_tool_candidate,
+)
 from evelyn_core.tts_playback import (
     CachedWaveAudioSource,
     ChunkWindow,
@@ -235,8 +436,8 @@ from evelyn_core.tts_playback import (
     tracked_tts_playback_count,
     tracked_tts_playback_guild_ids,
 )
-from evelyn_core.turn_trace import TURN_SUMMARY_EVENTS, build_turn_summary_payload
-from evelyn_core.turn_lifecycle import TurnScope, TurnState
+from evelyn_core.turn_trace import TURN_SUMMARY_EVENTS, build_turn_summary_payload, write_turn_trace_event
+from evelyn_core.turn_lifecycle import TurnScope, TurnScopeRegistry, TurnState
 from evelyn_core.turn_budget import build_turn_execution_budget
 from evelyn_core.voice_stt_flow import (
     apply_fuzzy_wake_near_miss,
@@ -257,6 +458,17 @@ from evelyn_core.speaker_verification import (
 from evelyn_core.voice_barge_in import (
     VoiceUtteranceMergeRecord,
     maybe_merge_barge_in_utterance,
+)
+from evelyn_core.voice_barge_in_continuity import (
+    VOICE_BARGE_IN_EVENT_FINISH,
+    VOICE_BARGE_IN_REASON_CODE,
+    VOICE_BARGE_IN_REASON_LABEL,
+    VoiceBargeInContinuityTracker,
+)
+from evelyn_core.voice_debug_audio import (
+    build_voice_debug_audio_item,
+    save_voice_debug_audio_now as save_voice_debug_audio_now_payload,
+    voice_debug_drop_message,
 )
 from evelyn_core.voice_utterance import (
     UtteranceAssemblyConfig,
@@ -297,6 +509,17 @@ from evelyn_core.voice_pipeline import (
     build_voice_segment,
     classify_dialogue_turn,
     route_decision_policy_dict,
+)
+from evelyn_core.voice_pipeline_state import (
+    build_voice_pipeline_snapshot_payload,
+    default_voice_pipeline_counters,
+    default_voice_pipeline_state,
+    increment_voice_counter,
+    load_last_voice_channel_state as load_last_voice_channel_state_payload,
+    mark_last_voice_manual_disconnect,
+    record_voice_failure_state,
+    save_last_voice_channel_state as save_last_voice_channel_state_payload,
+    voice_last_channel_state_path as resolve_voice_last_channel_state_path,
 )
 from evelyn_voice import EvelynVoiceClient
 
@@ -411,11 +634,16 @@ CONTROL_PAGE_MINECRAFT_CACHE_REFRESH_SEC = float(os.getenv("CONTROL_PAGE_MINECRA
 CONTROL_PAGE_MINECRAFT_CACHE_MAX_STALE_SEC = float(os.getenv("CONTROL_PAGE_MINECRAFT_CACHE_MAX_STALE_SEC", "20.0"))
 CONTROL_PAGE_MINECRAFT_SNAPSHOT_TIMEOUT_SEC = float(os.getenv("CONTROL_PAGE_MINECRAFT_SNAPSHOT_TIMEOUT_SEC", "2.5"))
 CONTROL_PAGE_RUNTIME_CACHE_REFRESH_SEC = float(os.getenv("CONTROL_PAGE_RUNTIME_CACHE_REFRESH_SEC", "2.0"))
+CONTROL_PAGE_BOT_API_HOST = os.getenv("CONTROL_PAGE_BOT_API_HOST", "127.0.0.1")
+CONTROL_PAGE_BOT_API_PORT = int(os.getenv("CONTROL_PAGE_BOT_API_PORT", "8798"))
+CONTROL_PAGE_BOT_API_STATE_PATH = os.getenv("CONTROL_PAGE_BOT_API_STATE_PATH", "/api/control-page/state")
+CONTROL_PAGE_BOT_API_PROBE_TIMEOUT_SEC = float(os.getenv("CONTROL_PAGE_BOT_API_PROBE_TIMEOUT_SEC", "0.75"))
+CONTROL_PAGE_RUNTIME_CACHE_WARN_STALE_SEC = float(os.getenv("CONTROL_PAGE_RUNTIME_CACHE_WARN_STALE_SEC", "6.0"))
+CONTROL_PAGE_RUNTIME_CACHE_MAX_STALE_SEC = float(os.getenv("CONTROL_PAGE_RUNTIME_CACHE_MAX_STALE_SEC", "25.0"))
+CONTROL_PAGE_RUNTIME_CACHE_REFRESH_MIN_INTERVAL_SEC = float(os.getenv("CONTROL_PAGE_RUNTIME_CACHE_REFRESH_MIN_INTERVAL_SEC", "2.5"))
 RUNTIME_STATUS_CONTEXT_ENABLED = os.getenv("RUNTIME_STATUS_CONTEXT_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
 RUNTIME_STATUS_CONTEXT_REFRESH_SEC = float(os.getenv("RUNTIME_STATUS_CONTEXT_REFRESH_SEC", "4.0"))
-RUNTIME_STATUS_CONTEXT_CONNECT_TIMEOUT_SEC = float(os.getenv("RUNTIME_STATUS_CONTEXT_CONNECT_TIMEOUT_SEC", "0.18"))
-RUNTIME_STATUS_CONTEXT_MAX_ERROR_CHARS = int(os.getenv("RUNTIME_STATUS_CONTEXT_MAX_ERROR_CHARS", "160"))
-control_page_minecraft_item_icon_cache: dict[str, bytes | None] = {}
+control_page_minecraft_item_icon_loader = MinecraftItemIconLoader(PROJECT_ROOT)
 _ORIGINAL_PRINT = builtins.print
 _ALLOWED_CONSOLE_PREFIXES = (
     "🎤 [",
@@ -451,6 +679,7 @@ _BOTTLENECK_TURN_TRACE_EVENTS = {
     "text_turn_summary",
     "voice_turn_summary",
     "voice_drop_summary",
+    "barge_in_continuity",
 }
 turn_trace_file_lock = threading.Lock()
 
@@ -498,6 +727,23 @@ room_last_voice_utterance_for_merge: dict[str, VoiceUtteranceMergeRecord] = {}
 session_partial_stt_text: dict[str, str] = {}
 session_committed_stt_text: dict[str, str] = {}
 session_bad_audio_counts: dict[str, int] = {}
+session_state_store = SessionStateStore(
+    histories=session_histories,
+    followup_targets=session_followup_targets,
+    active_until=active_session_until,
+    active_user_ids=active_session_user_ids,
+    last_active_at=session_last_active_at,
+    awaiting_user_reply=session_awaiting_user_reply,
+    last_speaker=session_last_speaker,
+    topic_ids=session_topic_ids,
+    turn_ids=session_turn_ids,
+    segment_counters=session_segment_counters,
+    last_turn_accepted_at=session_last_turn_accepted_at,
+    last_stt_text=session_last_stt_text,
+    partial_stt_text=session_partial_stt_text,
+    committed_stt_text=session_committed_stt_text,
+    bad_audio_counts=session_bad_audio_counts,
+)
 room_owner_user_ids: dict[str, int] = {}
 room_owner_until: dict[str, float] = {}
 room_reply_in_progress: dict[str, bool] = {}
@@ -565,86 +811,44 @@ atexit.register(release_instance_lock)
 
 
 def normalize_command_prefix(prefix: str | None) -> str:
-    prefix = (prefix or "").strip()
-    if not prefix:
-        return DEFAULT_COMMAND_PREFIX
-    if any(ch.isspace() for ch in prefix):
-        raise ValueError("명령어 시작 부호에는 공백을 넣을 수 없어.")
-    if len(prefix) > 5:
-        raise ValueError("명령어 시작 부호는 5자 이하로 해줘.")
-    return prefix
+    return normalize_command_prefix_payload(prefix, default_prefix=DEFAULT_COMMAND_PREFIX)
 
 
 def get_guild_command_prefix(guild_id: int | None) -> str:
-    if guild_id is None:
-        return DEFAULT_COMMAND_PREFIX
-    cached = guild_prefix_cache.get(guild_id)
-    if cached:
-        return cached
-
-    settings = read_json_file(guild_settings_path(guild_id))
-    prefix = normalize_command_prefix(str(settings.get("command_prefix", DEFAULT_COMMAND_PREFIX)))
-    guild_prefix_cache[guild_id] = prefix
-    return prefix
+    return get_guild_command_prefix_payload(
+        guild_id,
+        prefix_cache=guild_prefix_cache,
+        default_prefix=DEFAULT_COMMAND_PREFIX,
+    )
 
 
 def save_guild_command_prefix(guild_id: int, prefix: str) -> str:
-    prefix = normalize_command_prefix(prefix)
-    settings_path = guild_settings_path(guild_id)
-    settings = read_json_file(settings_path)
-    settings["command_prefix"] = prefix
-    settings["updated_at"] = int(time.time())
-    write_json_file(settings_path, settings)
-    guild_prefix_cache[guild_id] = prefix
-    return prefix
-
-
-def _normalize_channel_id_list(values: list[Any] | None) -> list[int]:
-    normalized: list[int] = []
-    for value in values or []:
-        try:
-            channel_id = int(value)
-        except (TypeError, ValueError):
-            continue
-        if channel_id not in normalized:
-            normalized.append(channel_id)
-    return normalized
+    return save_guild_command_prefix_payload(
+        guild_id,
+        prefix,
+        prefix_cache=guild_prefix_cache,
+        default_prefix=DEFAULT_COMMAND_PREFIX,
+    )
 
 
 def get_guild_observe_channel_ids(guild_id: int | None) -> list[int]:
-    if guild_id is None:
-        return []
-    settings = read_json_file(guild_settings_path(guild_id))
-    return _normalize_channel_id_list(settings.get("observe_channel_ids"))
+    return get_guild_observe_channel_ids_payload(guild_id)
 
 
 def get_guild_command_only_channel_ids(guild_id: int | None) -> list[int]:
-    if guild_id is None:
-        return []
-    settings = read_json_file(guild_settings_path(guild_id))
-    return _normalize_channel_id_list(settings.get("command_only_channel_ids"))
+    return get_guild_command_only_channel_ids_payload(guild_id)
 
 
 def save_guild_channel_list(guild_id: int, key: str, channel_ids: list[int]) -> list[int]:
-    settings_path = guild_settings_path(guild_id)
-    settings = read_json_file(settings_path)
-    normalized = _normalize_channel_id_list(channel_ids)
-    settings[key] = normalized
-    settings["updated_at"] = int(time.time())
-    write_json_file(settings_path, settings)
-    return normalized
+    return save_guild_channel_list_payload(guild_id, key, channel_ids)
 
 
 def add_guild_channel_setting(guild_id: int, key: str, channel_id: int) -> list[int]:
-    existing = get_guild_observe_channel_ids(guild_id) if key == "observe_channel_ids" else get_guild_command_only_channel_ids(guild_id)
-    if channel_id not in existing:
-        existing.append(channel_id)
-    return save_guild_channel_list(guild_id, key, existing)
+    return add_guild_channel_setting_payload(guild_id, key, channel_id)
 
 
 def remove_guild_channel_setting(guild_id: int, key: str, channel_id: int) -> list[int]:
-    existing = get_guild_observe_channel_ids(guild_id) if key == "observe_channel_ids" else get_guild_command_only_channel_ids(guild_id)
-    return save_guild_channel_list(guild_id, key, [value for value in existing if value != channel_id])
+    return remove_guild_channel_setting_payload(guild_id, key, channel_id)
 
 
 async def resolve_command_prefix(_bot, message: discord.Message):
@@ -681,7 +885,7 @@ speaker_verifier = SpeakerVerifier(
 )
 active_tts_playbacks = tts_playback_tracker.registry
 voice_debug_counts: dict[int, int] = {}
-voice_debug_stems: dict[tuple[int, str], str] = {}
+voice_debug_stems: dict[tuple[int, str, str, str], str] = {}
 
 tts_warmup_started = False
 stt_processor: Optional[Any] = None
@@ -721,37 +925,12 @@ debug_write_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=max(8, 
 debug_write_task: asyncio.Task | None = None
 
 
-VOICE_INPUT_MODES = {"auto", "local", "discord"}
-
-
-def normalize_voice_input_mode(value: str | None) -> str:
-    mode = clean_text(str(value or "")).lower().replace("-", "_")
-    aliases = {
-        "local_mic": "local",
-        "mic": "local",
-        "microphone": "local",
-        "discord_voice": "discord",
-        "vc": "discord",
-        "voice": "discord",
-    }
-    mode = aliases.get(mode, mode)
-    return mode if mode in VOICE_INPUT_MODES else "auto"
-
-
 local_mic_service: LocalMicCaptureService | None = None
-local_mic_runtime_state: dict[str, Any] = {
-    "enabled": bool(LOCAL_MIC_ENABLED),
-    "input_mode": normalize_voice_input_mode(VOICE_INPUT_MODE),
-    "capture_ready": False,
-    "last_error": None,
-    "routed_user_ids": sorted(int(user_id) for user_id in LOCAL_MIC_DISCORD_USER_IDS),
-    "segment_count": 0,
-    "last_segment_at": None,
-    "last_segment_duration_sec": None,
-    "discord_suppression_active": False,
-    "last_filter": None,
-    "rejected_segment_count": 0,
-}
+local_mic_runtime_state: dict[str, Any] = build_local_mic_runtime_state(
+    enabled=LOCAL_MIC_ENABLED,
+    input_mode=VOICE_INPUT_MODE,
+    routed_user_ids=LOCAL_MIC_DISCORD_USER_IDS,
+)
 
 
 @dataclass(slots=True)
@@ -796,71 +975,67 @@ def is_local_speaker_voice_client(vc: Any) -> bool:
 control_page_runner: web.AppRunner | None = None
 control_page_site: web.TCPSite | None = None
 control_page_start_lock: asyncio.Lock | None = None
-control_page_chat_logs: dict[int, list[dict[str, Any]]] = {}
-control_page_minecraft_snapshot_cache: dict[str, Any] = {}
-control_page_minecraft_snapshot_cached_at = 0.0
-control_page_minecraft_snapshot_stale = True
-control_page_minecraft_snapshot_last_error = ""
+control_page_chat_log_store = ControlPageChatLogStore(limit=CONTROL_PAGE_CHAT_LOG_LIMIT)
+control_page_minecraft_snapshot_cache = ControlPageMinecraftSnapshotCache(
+    stale_after_sec=CONTROL_PAGE_MINECRAFT_CACHE_REFRESH_SEC,
+    expired_after_sec=CONTROL_PAGE_MINECRAFT_CACHE_MAX_STALE_SEC,
+)
 control_page_minecraft_snapshot_lock: asyncio.Lock | None = None
 control_page_minecraft_snapshot_refresh_task: asyncio.Task | None = None
 control_page_minecraft_snapshot_poll_task: asyncio.Task | None = None
-control_page_runtime_services_cache: dict[str, Any] = {}
-control_page_runtime_services_cached_at = 0.0
+control_page_runtime_services_cache = ControlPageRuntimeServicesCache(
+    stale_after_sec=CONTROL_PAGE_RUNTIME_CACHE_REFRESH_SEC,
+    expired_after_sec=CONTROL_PAGE_RUNTIME_CACHE_MAX_STALE_SEC,
+    refresh_min_interval_sec=CONTROL_PAGE_RUNTIME_CACHE_REFRESH_MIN_INTERVAL_SEC,
+)
 control_page_runtime_services_lock: asyncio.Lock | None = None
-control_page_ui_commands: list[dict[str, Any]] = []
-control_page_ui_command_seq = 0
+control_page_runtime_services_refresh_task: asyncio.Task | None = None
+control_page_ui_command_store = ControlPageUiCommandStore(limit=40)
 control_page_welcome_locks: dict[int, asyncio.Lock] = {}
 runtime_status_context_cache: dict[str, Any] = {"text": "", "cached_at": 0.0}
 runtime_status_context_lock: asyncio.Lock | None = None
 room_recent_speaker_stats: dict[str, dict[int, dict[str, float]]] = {}
+room_speaker_activity_store = RoomSpeakerActivityStore(
+    recent_speaker_stats=room_recent_speaker_stats,
+    room_owner_user_ids=room_owner_user_ids,
+    room_owner_until=room_owner_until,
+)
 session_speculative_policies: dict[str, dict[str, Any]] = {}
 room_turn_scopes: dict[str, "TurnScope"] = {}
+turn_scope_registry = TurnScopeRegistry(room_turn_scopes=room_turn_scopes)
 turn_stage_metrics: dict[str, dict[str, float]] = {}
 turn_path_metrics: dict[str, dict[str, Any]] = {}
 model_call_metrics: dict[str, dict[str, Any]] = {}
-model_call_trace_replay_done = False
-model_call_replayed_turn_summary_count = 0
-question_metrics: dict[str, Any] = {
-    "turn_count": 0,
-    "added_count": 0,
-    "removed_count": 0,
-    "cooldown_hit_count": 0,
-    "final_question_count": 0,
-    "ask_modes": {},
-}
+model_call_metrics_store = ModelCallMetricsStore(
+    model_call_metrics=model_call_metrics,
+    turn_path_metrics=turn_path_metrics,
+    summary_events=TURN_SUMMARY_EVENTS,
+    trace_log_dir=TURN_TRACE_LOG_DIR,
+    print_fn=print,
+)
+question_metrics: dict[str, Any] = default_question_metrics()
 session_question_state: dict[str, dict[str, Any]] = {}
+question_policy_state = QuestionPolicyState(
+    question_metrics=question_metrics,
+    session_question_state=session_question_state,
+    log_turn_event=lambda event, **payload: log_turn_event(event, **payload),
+    question_feature_enabled=QUESTION_FEATURE_ENABLED,
+    min_turn_gap=QUESTION_MIN_TURN_GAP,
+    min_seconds_gap=QUESTION_MIN_SECONDS_GAP,
+    max_per_10_turns=QUESTION_MAX_PER_10_TURNS,
+    disable_after_frustration_sec=QUESTION_DISABLE_AFTER_FRUSTRATION_SEC,
+)
 autonomy_engines: dict[int, AutonomyEngine] = {}
 last_autonomy_ping_at: dict[int, float] = {}
 autonomy_last_cognitive_refresh_at: dict[int, float] = {}
 autonomy_cognitive_refresh_tasks: dict[int, asyncio.Task] = {}
 search_followup_queued_count = 0
-cancelled_stale_turn_count = 0
 inflight_llm_requests = 0
 stt_inference_lock: asyncio.Lock | None = None
 stt_cooldown_until = 0.0
-voice_pipeline_counters: dict[str, int] = {
-    "queue_full_drop_count": 0,
-    "queue_stale_drop_count": 0,
-    "utterance_assembly_merge_count": 0,
-    "utterance_assembly_flush_count": 0,
-    "stt_busy_drop_count": 0,
-    "stt_timeout_count": 0,
-    "tts_request_failed_count": 0,
-    "tts_producer_cancelled_count": 0,
-    "tts_playback_failed_count": 0,
-    "llm_failed_count": 0,
-    "voice_delivery_failed_count": 0,
-    "voice_rejoin_attempts": 0,
-    "voice_rejoin_success": 0,
-    "voice_rejoin_fail": 0,
-}
-voice_pipeline_state: dict[str, Any] = {
-    "last_voice_segment_at": None,
-    "last_voice_channel": None,
-    "last_voice_rejoin_at": None,
-    "last_voice_rejoin_error": None,
-    "last_failure": None,
-}
+voice_pipeline_counters: dict[str, int] = default_voice_pipeline_counters()
+VOICE_BARGE_IN_CONTINUITY_TARGET = 5
+voice_pipeline_state: dict[str, Any] = default_voice_pipeline_state()
 recent_skill_dispatches: dict[str, float] = {}
 SKILL_DISPATCH_CACHE_TTL_SEC = 300.0
 SKILL_DISPATCH_REPEAT_WINDOW_SEC = 5.0
@@ -871,7 +1046,7 @@ SKILL_DISPATCH_CACHE_MAX = 1024
 # 유틸
 # =========================================================
 def new_conversation_history() -> list[dict]:
-    return [{"role": "system", "content": SYSTEM_PROMPT}]
+    return new_session_conversation_history(SYSTEM_PROMPT)
 
 
 def get_or_create_autonomy_engine(guild_id: int) -> AutonomyEngine:
@@ -902,17 +1077,6 @@ def get_or_create_autonomy_engine(guild_id: int) -> AutonomyEngine:
         if channel is not None:
             await send_discord_text(channel, text)
 
-    def _pick_recent_user_text(history: list[dict[str, Any]]) -> str:
-        for entry in reversed(history):
-            if not isinstance(entry, dict):
-                continue
-            if clean_text(str(entry.get("role", ""))) != "user":
-                continue
-            text = clean_text(str(entry.get("content", "")))
-            if text and text != "[autonomy]":
-                return text
-        return ""
-
     def _has_queued_proactive_question(session_key: str, latest_user_text: str) -> bool:
         if question_cooldown_hit(session_key):
             return False
@@ -941,10 +1105,7 @@ def get_or_create_autonomy_engine(guild_id: int) -> AutonomyEngine:
         channel = await _find_followup_channel()
         session_key = runtime_session_key(guild_id=guild_id)
         history = get_conversation_history(session_key=session_key, guild_id=guild_id)
-        recent_context_items = max(0, min(len(history) - 1, 6))
-        latest_user_text = _pick_recent_user_text(history)
-        last_ping_at = float(last_autonomy_ping_at.get(guild_id, 0.0) or 0.0)
-        last_ping_gap = 999999.0 if last_ping_at <= 0 else max(0.0, time.monotonic() - last_ping_at)
+        latest_user_text = pick_recent_user_text(history)
         observe_channel_ids = get_guild_observe_channel_ids(guild_id)
         command_only_channel_ids = get_guild_command_only_channel_ids(guild_id)
         observed_channels: list[dict[str, Any]] = []
@@ -952,101 +1113,45 @@ def get_or_create_autonomy_engine(guild_id: int) -> AutonomyEngine:
         now_local = time.localtime()
         quiet_hours = now_local.tm_hour < 8 or now_local.tm_hour >= 23
         last_result = (autonomy_engines.get(guild_id).state.last_step_result if autonomy_engines.get(guild_id) is not None else {}) or {}
-        repeated_blocked_action = str(last_result.get("reason", "")) in {"retry_suppressed", "action_not_allowed", "unsupported_default_action"}
         cached_cognitive = read_cached_cognitive_state(guild_id)
-        cognitive_updated_at = float((cached_cognitive or {}).get("updated_at", 0.0) or 0.0)
-        cognitive_stale_sec = 999999.0 if cognitive_updated_at <= 0 else max(0.0, time.time() - cognitive_updated_at)
         last_refresh_at = float(autonomy_last_cognitive_refresh_at.get(guild_id, 0.0) or 0.0)
-        refresh_gap_sec = 999999.0 if last_refresh_at <= 0 else max(0.0, time.monotonic() - last_refresh_at)
         router_refresh_inflight = bool((task := autonomy_cognitive_refresh_tasks.get(guild_id)) is not None and not task.done())
-        unresolved_items = 0
-        search_pending = False
-        recent_visible = []
         if guild is not None:
             for channel_id in observe_channel_ids[:8]:
                 channel_obj = guild.get_channel(channel_id)
                 channel_name = getattr(channel_obj, "name", str(channel_id)) if channel_obj is not None else str(channel_id)
                 observed_channels.append({"id": channel_id, "name": channel_name})
-            for entry in history[-8:]:
-                if not isinstance(entry, dict):
-                    continue
-                content = clean_text(str(entry.get("content", "")))
-                if not content:
-                    continue
-                recent_visible.append(content)
-                if "?" in content:
-                    unresolved_items += 1
-                if answer_promises_search(content):
-                    search_pending = True
-        active_recent_context = bool(latest_user_text) and recent_context_items > 0
-        cognitive_refresh_needed = active_recent_context and not router_refresh_inflight and (
-            cognitive_stale_sec >= AUTONOMY_COGNITIVE_STALE_SEC
-            and refresh_gap_sec >= AUTONOMY_COGNITIVE_MIN_INTERVAL_SEC
-        )
-        if active_recent_context and cognitive_stale_sec >= AUTONOMY_COGNITIVE_FORCE_REFRESH_SEC:
-            cognitive_refresh_needed = not router_refresh_inflight and refresh_gap_sec >= AUTONOMY_COGNITIVE_MIN_INTERVAL_SEC
         vision_watch = read_vision_watch_state()
-        vision_captured_at = float(vision_watch.get("captured_at", 0.0) or 0.0) if isinstance(vision_watch, dict) else 0.0
-        vision_analyzed_at = float(vision_watch.get("analyzed_at", 0.0) or 0.0) if isinstance(vision_watch, dict) else 0.0
-        vision_unreliable = bool(
-            isinstance(vision_watch, dict)
-            and (
-                vision_watch.get("capture_black")
-                or vision_watch.get("scene_unreliable")
-                or clean_text(str(vision_watch.get("analysis_error") or ""))
-            )
-        )
-        vision_fingerprint = (
-            clean_text(str(vision_watch.get("scene_fingerprint") or vision_watch.get("image_fingerprint") or ""))
-            if isinstance(vision_watch, dict)
-            else ""
-        )
-        vision_change_recent = bool(
-            isinstance(vision_watch, dict)
-            and vision_watch.get("changed")
-            and not vision_unreliable
-            and vision_captured_at > 0
-            and (time.time() - vision_captured_at) <= max(60.0, VISION_WATCH_INTERVAL_SEC * 3)
-        )
         local_tts_state = local_tts_playback_manager.snapshot()
         local_mic_state = serialize_local_mic_runtime_state()
-        last_input_age_sec = local_mic_state.get("lastInputAgeSec")
-        try:
-            local_mic_recent = last_input_age_sec is not None and float(last_input_age_sec) <= 5.0
-        except Exception:
-            local_mic_recent = False
         queued_proactive_question_available = bool(
             session_key and _has_queued_proactive_question(session_key, latest_user_text)
         )
-        return {
-            "connected": channel is not None,
-            "known_followup_channels": len([v for v in session_followup_targets.values() if isinstance(v, dict) and v.get("channel_id")]),
-            "inflight_llm_requests": inflight_llm_requests,
-            "active_sessions": len(active_session_until),
-            "recent_context_items": recent_context_items,
-            "last_autonomy_ping_sec": last_ping_gap,
-            "observe_channel_ids": observe_channel_ids,
-            "command_only_channel_ids": command_only_channel_ids,
-            "observed_channels": observed_channels,
-            "quiet_hours": quiet_hours,
-            "repeated_blocked_action": repeated_blocked_action,
-            "unresolved_items": unresolved_items,
-            "search_pending": search_pending,
-            "recent_visible": recent_visible[-6:],
-            "latest_user_text": latest_user_text,
-            "cognitive_stale_sec": cognitive_stale_sec,
-            "cognitive_refresh_gap_sec": refresh_gap_sec,
-            "cognitive_refresh_needed": cognitive_refresh_needed,
-            "router_refresh_inflight": router_refresh_inflight,
-            "local_tts_active": bool(local_tts_state.get("active")),
-            "local_mic_recent": bool(local_mic_recent),
-            "vision_watch": vision_watch if isinstance(vision_watch, dict) else {},
-            "vision_change_recent": vision_change_recent,
-            "vision_unreliable": vision_unreliable,
-            "vision_fingerprint": vision_fingerprint,
-            "vision_analysis_recent": bool(vision_analyzed_at > 0 and (time.time() - vision_analyzed_at) <= 600),
-            "queued_proactive_question_available": queued_proactive_question_available,
-        }
+        return build_default_autonomy_observation(
+            connected=channel is not None,
+            known_followup_channels=len([v for v in session_followup_targets.values() if isinstance(v, dict) and v.get("channel_id")]),
+            inflight_llm_requests=inflight_llm_requests,
+            active_sessions=len(active_session_until),
+            history=history,
+            last_autonomy_ping_at=float(last_autonomy_ping_at.get(guild_id, 0.0) or 0.0),
+            observe_channel_ids=observe_channel_ids,
+            command_only_channel_ids=command_only_channel_ids,
+            observed_channels=observed_channels,
+            quiet_hours=quiet_hours,
+            last_result=last_result,
+            cached_cognitive=cached_cognitive,
+            last_cognitive_refresh_at=last_refresh_at,
+            router_refresh_inflight=router_refresh_inflight,
+            autonomy_cognitive_stale_sec=AUTONOMY_COGNITIVE_STALE_SEC,
+            autonomy_cognitive_min_interval_sec=AUTONOMY_COGNITIVE_MIN_INTERVAL_SEC,
+            autonomy_cognitive_force_refresh_sec=AUTONOMY_COGNITIVE_FORCE_REFRESH_SEC,
+            vision_watch=vision_watch,
+            vision_watch_interval_sec=VISION_WATCH_INTERVAL_SEC,
+            local_tts_state=local_tts_state,
+            local_mic_state=local_mic_state,
+            queued_proactive_question_available=queued_proactive_question_available,
+            answer_promises_search_fn=answer_promises_search,
+        )
 
     async def _default_send_followup(
         text: str,
@@ -1084,35 +1189,24 @@ def get_or_create_autonomy_engine(guild_id: int) -> AutonomyEngine:
 
     async def _default_summarize() -> dict[str, Any]:
         history = get_conversation_history(session_key=runtime_session_key(guild_id=guild_id), guild_id=guild_id)
-        recent = history[-4:] if len(history) > 4 else history[1:]
-        summary = " | ".join(clean_text(str(item.get("content", "")))[:80] for item in recent if isinstance(item, dict) and clean_text(str(item.get("content", ""))))
-        return {
-            "status": "ok",
-            "reason": "summary_ready",
-            "summary": summary or f"active_sessions={len(active_session_until)} inflight_llm={inflight_llm_requests}",
-        }
+        return build_autonomy_summary_payload(
+            history,
+            active_sessions=len(active_session_until),
+            inflight_llm_requests=inflight_llm_requests,
+        )
 
     async def _default_check_status() -> dict[str, Any]:
         channel = await _find_followup_channel()
-        return {
-            "status": "ok",
-            "reason": "status_checked",
-            "connected": channel is not None,
-            "active_sessions": len(active_session_until),
-            "inflight_llm_requests": inflight_llm_requests,
-            "known_followup_channels": len([v for v in session_followup_targets.values() if isinstance(v, dict) and v.get("channel_id")]),
-        }
+        return build_autonomy_status_payload(
+            connected=channel is not None,
+            active_sessions=len(active_session_until),
+            inflight_llm_requests=inflight_llm_requests,
+            known_followup_channels=len([v for v in session_followup_targets.values() if isinstance(v, dict) and v.get("channel_id")]),
+        )
 
     async def _default_summarize_recent_context() -> dict[str, Any]:
         history = get_conversation_history(session_key=runtime_session_key(guild_id=guild_id), guild_id=guild_id)
-        recent = history[-6:] if len(history) > 6 else history[1:]
-        items = [clean_text(str(item.get("content", "")))[:120] for item in recent if isinstance(item, dict) and clean_text(str(item.get("content", "")))]
-        return {
-            "status": "ok",
-            "reason": "recent_context_summarized",
-            "summary": " / ".join(items) if items else "최근 문맥 없음",
-            "count": len(items),
-        }
+        return build_autonomy_recent_context_payload(history)
 
     async def _default_maybe_ping_user(text: str) -> dict[str, Any]:
         last_ping_at = float(last_autonomy_ping_at.get(guild_id, 0.0) or 0.0)
@@ -1120,7 +1214,7 @@ def get_or_create_autonomy_engine(guild_id: int) -> AutonomyEngine:
             return {"status": "blocked", "reason": "ping_cooldown"}
         session_key = runtime_session_key(guild_id=guild_id)
         history = get_conversation_history(session_key=session_key, guild_id=guild_id)
-        latest_user_text = _pick_recent_user_text(history)
+        latest_user_text = pick_recent_user_text(history)
         marked = select_and_mark_proactive_question(
             guild_id=guild_id,
             source="autonomy",
@@ -1144,7 +1238,7 @@ def get_or_create_autonomy_engine(guild_id: int) -> AutonomyEngine:
             return {"status": "blocked", "reason": "router_refresh_inflight"}
         session_key = runtime_session_key(guild_id=guild_id)
         history = get_conversation_history(session_key=session_key, guild_id=guild_id)
-        latest_user_text = _pick_recent_user_text(history)
+        latest_user_text = pick_recent_user_text(history)
         if not latest_user_text:
             return {"status": "blocked", "reason": "no_recent_user_text"}
 
@@ -1200,11 +1294,7 @@ def get_or_create_autonomy_engine(guild_id: int) -> AutonomyEngine:
 
 
 def runtime_session_key(*, session_key: str | None = None, guild_id: int | None = None) -> str | None:
-    if session_key:
-        return session_key
-    if guild_id is None:
-        return None
-    return f"guild:{guild_id}:default"
+    return resolve_runtime_session_key(session_key=session_key, guild_id=guild_id)
 
 
 def make_text_session_key(guild_id: int, channel_id: int, user_id: int | None = None, thread_id: int | None = None) -> str:
@@ -1236,64 +1326,75 @@ def make_session_memory_key(session_key: str | None, user_id: int | None = None)
 
 
 def remember_session_followup_target(session_key: str, *, channel_id: int | None = None, message_id: int | None = None) -> None:
-    if channel_id is None and message_id is None:
-        return
-    existing = session_followup_targets.get(session_key, {}).copy()
-    if channel_id is not None:
-        existing["channel_id"] = channel_id
-    if message_id is not None:
-        existing["message_id"] = message_id
-    session_followup_targets[session_key] = existing
+    session_state_store.remember_followup_target(session_key, channel_id=channel_id, message_id=message_id)
 
 
 def build_topic_id(*texts: str) -> str:
-    material = "\n".join(clean_text(text) for text in texts if clean_text(text))
-    if not material:
-        material = "idle"
-    return hashlib.sha1(material.encode("utf-8", errors="ignore")).hexdigest()[:12]
+    return build_session_topic_id(*texts)
 
 
 def new_turn_id() -> str:
-    return uuid.uuid4().hex[:12]
+    return new_session_turn_id()
 
 
 def current_turn_id(session_key: str | None) -> str | None:
-    if not session_key:
-        return None
-    return session_turn_ids.get(session_key)
+    return session_state_store.current_turn_id(session_key)
 
 
 def next_segment_id(session_key: str | None) -> int:
-    if not session_key:
-        return 1
-    next_value = session_segment_counters.get(session_key, 0) + 1
-    session_segment_counters[session_key] = next_value
-    return next_value
+    return session_state_store.next_segment_id(session_key)
 
 
 def start_new_turn(session_key: str | None, *, turn_id: str | None = None) -> str:
-    turn_id = turn_id or new_turn_id()
-    if session_key:
-        session_turn_ids[session_key] = turn_id
-        session_last_turn_accepted_at[session_key] = time.monotonic()
-    return turn_id
+    return session_state_store.start_new_turn(session_key, turn_id=turn_id)
+
+
+def begin_user_text_turn(
+    session_key: str,
+    user_text: str,
+    *,
+    guild_id: int | None = None,
+    user_id: int | None = None,
+) -> Any:
+    return session_state_store.begin_user_text_turn(
+        session_key,
+        user_text,
+        system_prompt=SYSTEM_PROMPT,
+        active_conversation_awaiting_reply_sec=ACTIVE_CONVERSATION_TEXT_QUESTION_SEC,
+        max_history_items=MAX_HISTORY_ITEMS,
+        guild_id=guild_id,
+        user_id=user_id,
+        previous_topic_id=session_topic_ids.get(session_key, ""),
+    )
+
+
+def finish_assistant_text_turn(
+    session_key: str,
+    user_text: str,
+    answer_text: str,
+    *,
+    guild_id: int | None = None,
+    user_id: int | None = None,
+    awaiting_user_reply: bool,
+    topic_id: str | None = None,
+) -> Any:
+    return session_state_store.finish_assistant_text_turn(
+        session_key,
+        user_text,
+        answer_text,
+        system_prompt=SYSTEM_PROMPT,
+        max_history_items=MAX_HISTORY_ITEMS,
+        guild_id=guild_id,
+        user_id=user_id,
+        awaiting_user_reply=awaiting_user_reply,
+        normal_ttl_sec=ACTIVE_CONVERSATION_TEXT_SEC,
+        question_ttl_sec=ACTIVE_CONVERSATION_TEXT_QUESTION_SEC,
+        topic_id=topic_id,
+    )
 
 
 def session_state_snapshot(session_key: str | None) -> dict:
-    if not session_key:
-        return {}
-    return {
-        "active_until": active_session_until.get(session_key, 0.0),
-        "awaiting_user_reply": session_awaiting_user_reply.get(session_key, False),
-        "last_speaker": session_last_speaker.get(session_key, ""),
-        "topic_id": session_topic_ids.get(session_key, ""),
-        "turn_id": session_turn_ids.get(session_key, ""),
-        "last_turn_accepted_at": session_last_turn_accepted_at.get(session_key, 0.0),
-        "last_stt_text": session_last_stt_text.get(session_key, ""),
-        "partial_stt_text": session_partial_stt_text.get(session_key, ""),
-        "committed_stt_text": session_committed_stt_text.get(session_key, ""),
-        "bad_audio_count": session_bad_audio_counts.get(session_key, 0),
-    }
+    return session_state_store.snapshot(session_key)
 
 
 def discord_room_session_policy() -> DiscordRoomSessionPolicy:
@@ -1318,20 +1419,7 @@ def room_state_snapshot(room_session_key: str | None) -> dict:
 
 
 def _prune_room_speaker_stats(room_session_key: str | None, *, now: float | None = None) -> dict[int, dict[str, float]]:
-    if not room_session_key:
-        return {}
-    now_mono = now if now is not None else time.monotonic()
-    stats = room_recent_speaker_stats.get(room_session_key, {})
-    keep: dict[int, dict[str, float]] = {}
-    for user_id, data in stats.items():
-        last_packet_at = float(data.get("last_packet_at") or 0.0)
-        if now_mono - last_packet_at <= 2.5:
-            keep[int(user_id)] = data
-    if keep:
-        room_recent_speaker_stats[room_session_key] = keep
-    else:
-        room_recent_speaker_stats.pop(room_session_key, None)
-    return keep
+    return room_speaker_activity_store.prune(room_session_key, now=now)
 
 
 
@@ -1344,53 +1432,19 @@ def update_room_speaker_activity(
     rms: float,
     wake_detected: bool = False,
 ) -> dict[str, float]:
-    if not room_session_key or user_id is None:
-        return {}
-    now_mono = time.monotonic()
-    stats = _prune_room_speaker_stats(room_session_key, now=now_mono)
-    entry = stats.setdefault(int(user_id), {})
-    entry["last_packet_at"] = now_mono
-    entry["recent_voiced_ms"] = max(float(entry.get("recent_voiced_ms") or 0.0) * 0.55, float(voiced_ms))
-    entry["recent_raw_ms"] = max(float(entry.get("recent_raw_ms") or 0.0) * 0.55, float(raw_seconds) * 1000.0)
-    entry["body_rms"] = max(float(entry.get("body_rms") or 0.0) * 0.6, float(rms))
-    if wake_detected:
-        entry["wake_priority"] = now_mono
-    else:
-        entry["wake_priority"] = float(entry.get("wake_priority") or 0.0)
-    room_recent_speaker_stats[room_session_key] = stats
-    return entry
+    return room_speaker_activity_store.update(
+        room_session_key,
+        user_id,
+        voiced_ms=voiced_ms,
+        raw_seconds=raw_seconds,
+        rms=rms,
+        wake_detected=wake_detected,
+    )
 
 
 
 def pick_active_speaker(room_session_key: str | None) -> int | None:
-    if not room_session_key:
-        return None
-    now_mono = time.monotonic()
-    stats = _prune_room_speaker_stats(room_session_key, now=now_mono)
-    if not stats:
-        return None
-
-    owner_user_id = room_owner_user_ids.get(room_session_key)
-    owner_until = float(room_owner_until.get(room_session_key, 0.0) or 0.0)
-    owner_active = owner_user_id is not None and owner_until > now_mono
-    if owner_active:
-        owner_stats = stats.get(int(owner_user_id))
-        if owner_stats and now_mono - float(owner_stats.get("last_packet_at") or 0.0) <= 0.5:
-            return int(owner_user_id)
-
-    scored: list[tuple[tuple[float, float, float, float], int]] = []
-    for user_id, data in stats.items():
-        scored.append((
-            (
-                float(data.get("wake_priority") or 0.0),
-                float(data.get("recent_voiced_ms") or 0.0),
-                float(data.get("body_rms") or 0.0),
-                float(data.get("last_packet_at") or 0.0),
-            ),
-            int(user_id),
-        ))
-    scored.sort(reverse=True)
-    return scored[0][1] if scored else None
+    return room_speaker_activity_store.pick_active_speaker(room_session_key)
 
 
 
@@ -1427,18 +1481,12 @@ def set_room_reply_in_progress(room_session_key: str | None, value: bool, *, own
 
 
 def increment_session_bad_audio(session_key: str | None) -> int:
-    if not session_key:
-        return 0
-    count = session_bad_audio_counts.get(session_key, 0) + 1
-    session_bad_audio_counts[session_key] = count
-    return count
+    return session_state_store.increment_bad_audio(session_key)
 
 
 
 def reset_session_bad_audio(session_key: str | None) -> None:
-    if not session_key:
-        return
-    session_bad_audio_counts[session_key] = 0
+    session_state_store.reset_bad_audio(session_key)
 
 
 def update_session_state(
@@ -1452,25 +1500,17 @@ def update_session_state(
     answer_text: str | None = None,
     user_text: str | None = None,
 ) -> None:
-    if not session_key:
-        return
-    if ttl_sec is not None:
-        active_session_until[session_key] = time.monotonic() + ttl_sec
-    session_last_active_at[session_key] = time.monotonic()
-    if user_id is not None:
-        active_session_user_ids[session_key] = user_id
-    if speaker is not None:
-        session_last_speaker[session_key] = speaker
-    if awaiting_user_reply is not None:
-        session_awaiting_user_reply[session_key] = awaiting_user_reply
-        if awaiting_user_reply and ttl_sec is None:
-            active_session_until[session_key] = time.monotonic() + ACTIVE_CONVERSATION_AWAITING_REPLY_SEC
-    if topic_id:
-        session_topic_ids[session_key] = topic_id
-    elif user_text or answer_text:
-        session_topic_ids[session_key] = build_topic_id(user_text or "", answer_text or "")
-    if session_key and session_key not in session_turn_ids:
-        session_turn_ids[session_key] = new_turn_id()
+    session_state_store.update_session_state(
+        session_key,
+        user_id=user_id,
+        speaker=speaker,
+        ttl_sec=ttl_sec,
+        awaiting_user_reply=awaiting_user_reply,
+        topic_id=topic_id,
+        answer_text=answer_text,
+        user_text=user_text,
+        active_conversation_awaiting_reply_sec=ACTIVE_CONVERSATION_AWAITING_REPLY_SEC,
+    )
 
 
 def mark_session_active(
@@ -1484,7 +1524,7 @@ def mark_session_active(
     answer_text: str | None = None,
     user_text: str | None = None,
 ) -> None:
-    update_session_state(
+    session_state_store.mark_active(
         session_key,
         user_id=user_id,
         speaker=speaker,
@@ -1493,79 +1533,62 @@ def mark_session_active(
         topic_id=topic_id,
         answer_text=answer_text,
         user_text=user_text,
+        active_conversation_awaiting_reply_sec=ACTIVE_CONVERSATION_AWAITING_REPLY_SEC,
     )
 
 
 def is_session_active_for_user(session_key: str, user_id: int | None = None) -> bool:
-    expires_at = active_session_until.get(session_key, 0.0)
-    awaiting_user_reply = session_awaiting_user_reply.get(session_key, False)
-    if expires_at <= time.monotonic() and not awaiting_user_reply:
-        return False
-    remembered_user = active_session_user_ids.get(session_key)
-    if remembered_user is not None and user_id is not None and remembered_user != user_id:
-        return False
-    return True
+    return session_state_store.is_active_for_user(session_key, user_id)
 
 
 def get_conversation_history(*, session_key: str | None = None, guild_id: int | None = None) -> list[dict]:
-    resolved = runtime_session_key(session_key=session_key, guild_id=guild_id)
-    if resolved is None:
-        return new_conversation_history()
-    return session_histories.setdefault(resolved, new_conversation_history())
+    return session_state_store.get_conversation_history(
+        system_prompt=SYSTEM_PROMPT,
+        session_key=session_key,
+        guild_id=guild_id,
+    )
 
 
 def trim_history(*, session_key: str | None = None, guild_id: int | None = None) -> None:
-    history = get_conversation_history(session_key=session_key, guild_id=guild_id)
-    if len(history) > 1 + MAX_HISTORY_ITEMS:
-        del history[1:-MAX_HISTORY_ITEMS]
+    session_state_store.trim_history(
+        system_prompt=SYSTEM_PROMPT,
+        max_history_items=MAX_HISTORY_ITEMS,
+        session_key=session_key,
+        guild_id=guild_id,
+    )
 
 
 def append_history(session_key: str | None, user_text: str, answer: str, *, guild_id: int | None = None) -> None:
-    history = get_conversation_history(session_key=session_key, guild_id=guild_id)
-    history.append({"role": "user", "content": clean_text(user_text)})
-    history.append({"role": "assistant", "content": clean_text(answer)})
-    trim_history(session_key=session_key, guild_id=guild_id)
+    session_state_store.append_history(
+        session_key,
+        user_text,
+        answer,
+        system_prompt=SYSTEM_PROMPT,
+        max_history_items=MAX_HISTORY_ITEMS,
+        guild_id=guild_id,
+    )
 
 
 def recent_assistant_reply_summary(*, session_key: str | None = None, guild_id: int | None = None, limit: int = 1) -> str:
-    history = get_conversation_history(session_key=session_key, guild_id=guild_id)
-    replies: list[str] = []
-    for item in reversed(history):
-        if not isinstance(item, dict) or item.get("role") != "assistant":
-            continue
-        content = clean_text(str(item.get("content") or ""))
-        if not content:
-            continue
-        replies.append(content[:60])
-        if len(replies) >= limit:
-            break
-    replies.reverse()
-    return " / ".join(replies)
+    return session_state_store.recent_assistant_reply_summary(
+        system_prompt=SYSTEM_PROMPT,
+        session_key=session_key,
+        guild_id=guild_id,
+        limit=limit,
+    )
 
 
 def is_casual_call_or_status_question(text: str) -> bool:
-    cleaned = clean_text(text).lower()
-    if not cleaned:
-        return True
-    stripped = re.sub(r"[\s,.!?~]+", "", cleaned)
-    if stripped in {"evelyn", "이블린", "이브"}:
-        return True
-    return any(marker in cleaned for marker in ("뭐해", "뭐하고", "뭐 하는", "불러", "괜찮"))
+    return session_is_casual_call_or_status_question(text)
 
 
 def persona_state_hint_for_turn(user_text: str, *, session_key: str | None = None, guild_id: int | None = None) -> str:
-    if not is_casual_call_or_status_question(user_text):
-        return ""
-    recent = recent_assistant_reply_summary(session_key=session_key, guild_id=guild_id, limit=4)
-    guidance = [
-        "호출/근황 질문. 실제 진행 중인 작업이나 사용자가 맡긴 일이 있으면 먼저 그것을 짧게 말해라.",
-        "실제 작업이 없으면 Evelyn self model의 ambient_idle_activity label을 생활감 있는 현재 상태처럼 자연스럽게 사용해라.",
-        "ambient 상태는 대화용 지속 상태다. 실제 화면을 봤다, 음악을 재생했다, 웹을 열었다, 물리적으로 조작했다처럼 도구 사용을 꾸며 말하지 마라.",
-        "같은 상태나 같은 수습 문장을 반복하지 말고, 사용자가 이어서 물어볼 만한 작은 소재를 한 가지 남겨라.",
-    ]
-    if recent:
-        guidance.append(f"최근 네 말: {recent}. 같은 표현을 반복하지 말고 이어지는 느낌으로 말해라.")
-    return " ".join(guidance)
+    return session_state_store.persona_state_hint_for_turn(
+        user_text,
+        system_prompt=SYSTEM_PROMPT,
+        session_key=session_key,
+        guild_id=guild_id,
+    )
 
 
 def reset_guild_runtime_state(guild_id: int) -> None:
@@ -1596,11 +1619,7 @@ def reset_guild_runtime_state(guild_id: int) -> None:
         room_owner_until.pop(key, None)
         room_reply_in_progress.pop(key, None)
         room_last_voice_reply_at.pop(key, None)
-    for key, scope in list(room_turn_scopes.items()):
-        if key.startswith(prefix):
-            if scope is not None:
-                scope.cancel()
-            room_turn_scopes.pop(key, None)
+    turn_scope_registry.cancel_matching_prefix(prefix)
     for key in [key for key in session_locks if key.startswith(prefix)]:
         session_locks.pop(key, None)
     for key, task in list(background_search_tasks.items()):
@@ -1625,63 +1644,21 @@ def reset_guild_runtime_state(guild_id: int) -> None:
         refresh_task.cancel()
 
 
-def _sanitize_debug_label(value: str | None, *, fallback: str = "unknown") -> str:
-    text = (value or "").strip()
-    text = re.sub(r"[^0-9A-Za-z가-힣._-]+", "_", text)
-    text = text.strip("._-")
-    return text or fallback
-
-
-def _trim_voice_debug_dir(guild_dir: Path) -> None:
-    if VOICE_DEBUG_MAX_FILES_PER_GUILD <= 0 or not guild_dir.exists():
-        return
-    wavs = sorted(guild_dir.glob("*.wav"), key=lambda p: p.stat().st_mtime)
-    overflow = len(wavs) - VOICE_DEBUG_MAX_FILES_PER_GUILD
-    if overflow <= 0:
-        return
-    for path in wavs[:overflow]:
-        try:
-            path.unlink()
-        except Exception:
-            pass
-
-
 def log_turn_event(event: str, **payload) -> None:
-    if not TURN_TRACE_JSON_LOG:
-        return
-    is_bottleneck_event = event in _BOTTLENECK_TURN_TRACE_EVENTS
-    preserve_null_fields = event in TURN_SUMMARY_EVENTS
-    if VOICE_CONSOLE_ONLY_STT_AND_REPLY:
-        if not is_bottleneck_event:
-            return
-    elif (
-        VOICE_BOTTLENECK_LOGS
-        and not VOICE_TRACE_ALL_EVENTS
-        and not is_bottleneck_event
-    ):
-        return
-    record = {"event": event, "ts": round(time.time(), 3)}
-    for key, value in dict(payload).items():
-        if value is None and not preserve_null_fields:
-            continue
-        record[key] = value
-    try:
-        TURN_TRACE_LOG_DIR.mkdir(parents=True, exist_ok=True)
-        trace_path = TURN_TRACE_LOG_DIR / f"{time.strftime('%Y%m%d')}.jsonl"
-        with turn_trace_file_lock:
-            with trace_path.open("a", encoding="utf-8") as f:
-                f.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
-    except Exception as exc:
-        _ORIGINAL_PRINT(f"[TURN TRACE FILE ERROR] {exc!r}")
-    try:
-        print("[TURN TRACE]\n" + json.dumps(record, ensure_ascii=False, sort_keys=True, indent=2))
-    except Exception as exc:
-        safe_record = {"event": event, "ts": record.get("ts"), "trace_error": repr(exc)}
-        for key in ("turn_id", "chunk_index", "session_key", "source_type", "stage", "error"):
-            value = record.get(key)
-            if value is not None:
-                safe_record[key] = value
-        print("[TURN TRACE]\n" + json.dumps(safe_record, ensure_ascii=False, sort_keys=True, indent=2))
+    write_turn_trace_event(
+        event,
+        payload,
+        turn_trace_json_log=TURN_TRACE_JSON_LOG,
+        bottleneck_events=_BOTTLENECK_TURN_TRACE_EVENTS,
+        summary_events=TURN_SUMMARY_EVENTS,
+        console_only_stt_and_reply=VOICE_CONSOLE_ONLY_STT_AND_REPLY,
+        voice_bottleneck_logs=VOICE_BOTTLENECK_LOGS,
+        voice_trace_all_events=VOICE_TRACE_ALL_EVENTS,
+        log_dir=TURN_TRACE_LOG_DIR,
+        file_lock=turn_trace_file_lock,
+        original_print=_ORIGINAL_PRINT,
+        trace_print=print,
+    )
 
 
 def record_model_call_trace(
@@ -1788,50 +1765,27 @@ def merge_log_event_payload(*, explicit: dict[str, Any], extra: dict[str, Any] |
 
 
 def replace_room_turn_scope(room_id: str, new_scope: TurnScope, *, cancel_old: bool = True) -> TurnScope | None:
-    global cancelled_stale_turn_count
-    old = room_turn_scopes.get(room_id)
-    room_turn_scopes[room_id] = new_scope
-    if cancel_old and old is not None and old is not new_scope:
-        old.cancel(reason="replaced_by_new_turn")
-        cancelled_stale_turn_count += 1
-    return old
+    return turn_scope_registry.replace_room_scope(room_id, new_scope, cancel_old=cancel_old)
 
 
 def get_room_turn_scope(room_id: str | None) -> TurnScope | None:
-    if not room_id:
-        return None
-    return room_turn_scopes.get(room_id)
+    return turn_scope_registry.get_room_scope(room_id)
 
 
 def _attach_current_task(turn_scope: TurnScope | None) -> asyncio.Task | None:
-    if turn_scope is None:
-        return None
-    return turn_scope.register_task(asyncio.current_task())
+    return turn_scope_registry.attach_current_task(turn_scope)
 
 
 def _detach_task(turn_scope: TurnScope | None, task: asyncio.Task | None) -> None:
-    if turn_scope is None:
-        return
-    turn_scope.unregister_task(task)
+    turn_scope_registry.detach_task(turn_scope, task)
 
 
 def create_turn_scoped_task(coro: Awaitable[Any], turn_scope: TurnScope | None = None) -> asyncio.Task:
-    task = asyncio.create_task(coro)
-    if turn_scope is not None:
-        turn_scope.register_task(task)
-        task.add_done_callback(lambda done, scope=turn_scope: scope.unregister_task(done))
-    return task
+    return turn_scope_registry.create_scoped_task(coro, turn_scope=turn_scope)
 
 
 def clear_room_turn_scope(room_id: str | None, turn_scope: TurnScope | None = None) -> None:
-    if not room_id:
-        return
-    current = room_turn_scopes.get(room_id)
-    if current is None:
-        return
-    if turn_scope is not None and current is not turn_scope:
-        return
-    room_turn_scopes.pop(room_id, None)
+    turn_scope_registry.clear_room_scope(room_id, turn_scope)
 
 
 def record_turn_stage(turn_id: str | None, stage: str, elapsed_ms: float) -> None:
@@ -1839,14 +1793,6 @@ def record_turn_stage(turn_id: str | None, stage: str, elapsed_ms: float) -> Non
         return
     stages = turn_stage_metrics.setdefault(turn_id, {})
     stages[stage] = float(elapsed_ms)
-
-
-def _append_bounded_metric(values: list[float], value: float | None, *, limit: int = 200) -> None:
-    if value is None:
-        return
-    values.append(float(value))
-    if len(values) > limit:
-        del values[: len(values) - limit]
 
 
 def record_model_call_metric(
@@ -1858,397 +1804,61 @@ def record_model_call_metric(
     latency_ms: float,
     first_token_ms: float | None = None,
 ) -> None:
-    key = f"{clean_text(model_role)}|{clean_text(purpose)}|{'hot' if hot_path else 'background'}"
-    bucket = model_call_metrics.setdefault(
-        key,
-        {
-            "model_role": clean_text(model_role),
-            "purpose": clean_text(purpose),
-            "hot_path": bool(hot_path),
-            "count": 0,
-            "success_count": 0,
-            "error_count": 0,
-            "latency_ms": [],
-            "first_token_ms": [],
-        },
+    model_call_metrics_store.record_model_call(
+        model_role=model_role,
+        purpose=purpose,
+        hot_path=hot_path,
+        success=success,
+        latency_ms=latency_ms,
+        first_token_ms=first_token_ms,
     )
-    bucket["count"] = int(bucket.get("count", 0)) + 1
-    if success:
-        bucket["success_count"] = int(bucket.get("success_count", 0)) + 1
-    else:
-        bucket["error_count"] = int(bucket.get("error_count", 0)) + 1
-    _append_bounded_metric(bucket["latency_ms"], latency_ms)
-    _append_bounded_metric(bucket["first_token_ms"], first_token_ms)
-
-
-def _safe_metric_float(value: Any, default: float = 0.0) -> float:
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return default
 
 
 def replay_model_call_metrics_from_turn_trace(*, max_files: int = 7, max_lines_per_file: int = 12000) -> dict[str, int]:
-    global model_call_replayed_turn_summary_count
-    if not TURN_TRACE_LOG_DIR.exists():
-        return {"files": 0, "model_calls": 0, "turn_summaries": 0}
-    files = sorted(TURN_TRACE_LOG_DIR.glob("*.jsonl"), key=lambda path: path.stat().st_mtime, reverse=True)[:max_files]
-    rows: list[dict[str, Any]] = []
-    min_model_call_ts: float | None = None
-    for path in reversed(files):
-        try:
-            with path.open("r", encoding="utf-8") as handle:
-                for index, line in enumerate(handle):
-                    if index >= max_lines_per_file:
-                        break
-                    try:
-                        row = json.loads(line)
-                    except Exception:
-                        continue
-                    if not isinstance(row, dict):
-                        continue
-                    rows.append(row)
-                    if clean_text(str(row.get("event") or "")) == "model_call":
-                        row_ts = _safe_metric_float(row.get("ts"), default=0.0)
-                        if row_ts > 0 and (min_model_call_ts is None or row_ts < min_model_call_ts):
-                            min_model_call_ts = row_ts
-        except Exception as exc:
-            print(f"[MODEL CALL METRIC REPLAY] skip path={path} err={exc!r}")
-
-    model_call_count = 0
-    turn_summary_count = 0
-    for row in rows:
-        event = clean_text(str(row.get("event") or ""))
-        if event in TURN_SUMMARY_EVENTS:
-            row_ts = _safe_metric_float(row.get("ts"), default=0.0)
-            if min_model_call_ts is not None and row_ts >= min_model_call_ts:
-                turn_summary_count += 1
-            continue
-        if event != "model_call":
-            continue
-        record_model_call_metric(
-            model_role=clean_text(str(row.get("model_role") or "unknown")) or "unknown",
-            purpose=clean_text(str(row.get("purpose") or "unknown")) or "unknown",
-            hot_path=bool(row.get("hot_path")),
-            success=bool(row.get("success", True)),
-            latency_ms=_safe_metric_float(row.get("latency_ms")),
-            first_token_ms=None if row.get("first_token_ms") is None else _safe_metric_float(row.get("first_token_ms")),
-        )
-        model_call_count += 1
-    model_call_replayed_turn_summary_count = turn_summary_count
-    return {"files": len(files), "model_calls": model_call_count, "turn_summaries": turn_summary_count}
+    return model_call_metrics_store.replay_model_calls_from_turn_trace(
+        max_files=max_files,
+        max_lines_per_file=max_lines_per_file,
+    )
 
 
 def ensure_model_call_metrics_replayed() -> None:
-    global model_call_trace_replay_done
-    if model_call_trace_replay_done:
-        return
-    model_call_trace_replay_done = True
-    if model_call_metrics or turn_path_metrics:
-        return
-    result = replay_model_call_metrics_from_turn_trace()
-    if result.get("files") or result.get("model_calls") or result.get("turn_summaries"):
-        print(
-            "[MODEL CALL METRIC REPLAY] "
-            f"files={result.get('files', 0)} model_calls={result.get('model_calls', 0)} turn_summaries={result.get('turn_summaries', 0)}"
-        )
+    model_call_metrics_store.ensure_replayed()
 
 
 def record_turn_path_summary(meta: dict[str, Any], marks: dict[str, Any], total_ms: float) -> None:
-    turn_type = clean_text(str(meta.get("turn_type") or "unknown")) or "unknown"
-    selected_path = clean_text(str(meta.get("selected_path") or "unknown")) or "unknown"
-    key = f"{turn_type}|{selected_path}"
-    bucket = turn_path_metrics.setdefault(
-        key,
-        {
-            "turn_type": turn_type,
-            "selected_path": selected_path,
-            "count": 0,
-            "total_ms": [],
-            "stt_ms": [],
-            "main_first_ms": [],
-            "tts_first_ms": [],
-            "playback_ms": [],
-        },
-    )
-    bucket["count"] = int(bucket.get("count", 0)) + 1
-    _append_bounded_metric(bucket["total_ms"], total_ms)
-    _append_bounded_metric(bucket["stt_ms"], marks.get("t_stt_done"))
-    _append_bounded_metric(bucket["main_first_ms"], marks.get("t_main_first_token"))
-    _append_bounded_metric(bucket["tts_first_ms"], marks.get("t_tts_first_audio"))
-    _append_bounded_metric(bucket["playback_ms"], marks.get("t_local_first_playback") or marks.get("t_playback_first_packet"))
+    model_call_metrics_store.record_turn_path_summary(meta, marks, total_ms)
 
 
 def summarize_turn_path_metrics() -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    for bucket in turn_path_metrics.values():
-        rows.append(
-            {
-                "turnType": bucket.get("turn_type"),
-                "selectedPath": bucket.get("selected_path"),
-                "count": int(bucket.get("count", 0)),
-                "totalMsP95": round(_p95(bucket.get("total_ms") or []), 1),
-                "sttMsP95": round(_p95(bucket.get("stt_ms") or []), 1),
-                "mainFirstMsP95": round(_p95(bucket.get("main_first_ms") or []), 1),
-                "ttsFirstMsP95": round(_p95(bucket.get("tts_first_ms") or []), 1),
-                "playbackMsP95": round(_p95(bucket.get("playback_ms") or []), 1),
-            }
-        )
-    rows.sort(key=lambda row: (-int(row.get("count") or 0), str(row.get("turnType") or "")))
-    return rows[:12]
-
-
-def _p95(values: list[float]) -> float:
-    if not values:
-        return 0.0
-    ordered = sorted(float(v) for v in values)
-    idx = max(0, min(len(ordered) - 1, math.ceil(len(ordered) * 0.95) - 1))
-    return ordered[idx]
-
-
-def _avg(values: list[float]) -> float:
-    if not values:
-        return 0.0
-    return sum(float(v) for v in values) / max(1, len(values))
-
-
-def _avg_or_none(values: list[float]) -> float | None:
-    if not values:
-        return None
-    return round(_avg(values), 1)
-
-
-def _p95_or_none(values: list[float]) -> float | None:
-    if not values:
-        return None
-    return round(_p95(values), 1)
-
-
-def _rate_or_none(count: int, denominator: int | None) -> float | None:
-    if not denominator or denominator <= 0:
-        return None
-    return round(count / max(1, denominator), 4)
+    return model_call_metrics_store.summarize_turn_paths()
 
 
 def summarize_model_call_metrics() -> dict[str, Any]:
-    ensure_model_call_metrics_replayed()
-    total_turns = model_call_replayed_turn_summary_count + sum(int(bucket.get("count", 0)) for bucket in turn_path_metrics.values())
-    rows: list[dict[str, Any]] = []
-    for bucket in model_call_metrics.values():
-        count = int(bucket.get("count", 0))
-        latency_values = list(bucket.get("latency_ms") or [])
-        first_token_values = list(bucket.get("first_token_ms") or [])
-        rows.append(
-            {
-                "modelRole": bucket.get("model_role"),
-                "purpose": bucket.get("purpose"),
-                "hotPath": bool(bucket.get("hot_path")),
-                "count": count,
-                "successCount": int(bucket.get("success_count", 0)),
-                "errorCount": int(bucket.get("error_count", 0)),
-                "avgLatencyMs": round(_avg(latency_values), 1),
-                "p95LatencyMs": round(_p95(latency_values), 1),
-                "firstTokenSampleCount": len(first_token_values),
-                "avgFirstTokenMs": _avg_or_none(first_token_values),
-                "p95FirstTokenMs": _p95_or_none(first_token_values),
-                "callRatePerTurn": _rate_or_none(count, total_turns),
-            }
-        )
-    rows.sort(key=lambda row: (-int(row.get("count") or 0), str(row.get("modelRole") or ""), str(row.get("purpose") or "")))
-
-    def _matching(*, model_role: str | None = None, purpose: str | None = None, hot_path: bool | None = None) -> list[dict[str, Any]]:
-        matched: list[dict[str, Any]] = []
-        for row in rows:
-            if model_role is not None and row.get("modelRole") != model_role:
-                continue
-            if purpose is not None and row.get("purpose") != purpose:
-                continue
-            if hot_path is not None and bool(row.get("hotPath")) != bool(hot_path):
-                continue
-            matched.append(row)
-        return matched
-
-    def _sum_count(matched: list[dict[str, Any]]) -> int:
-        return sum(int(row.get("count") or 0) for row in matched)
-
-    def _combined_latencies(matched: list[dict[str, Any]]) -> list[float]:
-        values: list[float] = []
-        for row in matched:
-            key = f"{row.get('modelRole')}|{row.get('purpose')}|{'hot' if row.get('hotPath') else 'background'}"
-            values.extend(float(v) for v in (model_call_metrics.get(key, {}).get("latency_ms") or []))
-        return values
-
-    def _combined_first_tokens(matched: list[dict[str, Any]]) -> list[float]:
-        values: list[float] = []
-        for row in matched:
-            key = f"{row.get('modelRole')}|{row.get('purpose')}|{'hot' if row.get('hotPath') else 'background'}"
-            values.extend(float(v) for v in (model_call_metrics.get(key, {}).get("first_token_ms") or []))
-        return values
-
-    router_route = _matching(model_role="router", purpose="route")
-    cognitive_hot = _matching(model_role="router", purpose="cognitive", hot_path=True)
-    summary_hot = _matching(model_role="summary", hot_path=True)
-    summary_all = _matching(model_role="summary")
-    main_all = _matching(model_role="main", purpose="main_response")
-    router_latencies = _combined_latencies(router_route)
-    main_first_tokens = _combined_first_tokens(main_all)
-    summary_count = _sum_count(summary_all)
-    model_call_total_count = _sum_count(rows)
-
-    return {
-        "turnSummaryCount": total_turns,
-        "modelCallCount": model_call_total_count,
-        "routerRouteCallCount": _sum_count(router_route),
-        "routerRouteCallRate": _rate_or_none(_sum_count(router_route), total_turns),
-        "routerAvgLatencyMs": _avg_or_none(router_latencies),
-        "routerP95LatencyMs": _p95_or_none(router_latencies),
-        "mainResponseCallCount": _sum_count(main_all),
-        "mainFirstTokenSampleCount": len(main_first_tokens),
-        "mainFirstTokenAvgMs": _avg_or_none(main_first_tokens),
-        "mainFirstTokenP95Ms": _p95_or_none(main_first_tokens),
-        "summaryCallCount": summary_count,
-        "summaryHotPathCount": _sum_count(summary_hot),
-        "summaryHotPathRate": _rate_or_none(_sum_count(summary_hot), summary_count),
-        "cognitiveBlockingCount": _sum_count(cognitive_hot),
-        "cognitiveBlockingRate": _rate_or_none(_sum_count(cognitive_hot), total_turns),
-        "byPurpose": rows[:16],
-    }
-
-
-QUESTION_ASK_MODES = {
-    "none",
-    "clarify",
-    "soft_followup",
-    "preference_probe",
-    "topic_continue",
-    "idle_checkin",
-}
+    return model_call_metrics_store.summarize_model_calls()
 
 
 def normalize_question_policy_mapping(value: dict[str, Any] | None, *, default_source: str = "none") -> dict[str, Any]:
-    data = value if isinstance(value, dict) else {}
-    ask_mode = clean_text(str(data.get("ask_mode") or "none")).lower()
-    if ask_mode not in QUESTION_ASK_MODES:
-        ask_mode = "none"
-    try:
-        max_question_count = int(data.get("max_question_count") or 0)
-    except (TypeError, ValueError):
-        max_question_count = 0
-    if ask_mode == "none":
-        max_question_count = 0
-    else:
-        max_question_count = max(0, min(1, max_question_count or 1))
-    question_source = clean_text(str(data.get("question_source") or default_source or "none")).lower() or "none"
-    return {
-        "ask_mode": ask_mode,
-        "max_question_count": max_question_count,
-        "question_hint": clean_text(str(data.get("question_hint") or "")) or None,
-        "question_reason": clean_text(str(data.get("question_reason") or "")) or None,
-        "question_source": question_source,
-    }
+    return normalize_question_policy_mapping_payload(value, default_source=default_source)
 
 
 def extract_question_policy_from_route_meta(route_meta: dict[str, Any] | None) -> dict[str, Any]:
-    if not isinstance(route_meta, dict):
-        return normalize_question_policy_mapping(None)
-    return normalize_question_policy_mapping(
-        {
-            "ask_mode": route_meta.get("ask_mode"),
-            "max_question_count": route_meta.get("max_question_count"),
-            "question_hint": route_meta.get("question_hint"),
-            "question_reason": route_meta.get("question_reason"),
-            "question_source": route_meta.get("question_source") or route_meta.get("source"),
-        },
-        default_source=clean_text(str(route_meta.get("source") or "none")),
-    )
+    return extract_question_policy_from_route_meta_payload(route_meta)
 
 
 def user_wants_direct_answer(text: str) -> bool:
-    cleaned = clean_text(text).lower()
-    if not cleaned:
-        return False
-    direct_markers = (
-        "정답만",
-        "답만",
-        "질문하지",
-        "묻지 말",
-        "되묻지",
-        "그냥 답",
-        "바로 답",
-        "짧게 답",
-        "한 문장",
-        "완료 보고",
-        "보고만",
-        "여부만",
-        "only answer",
-        "just answer",
-        "no question",
-        "don't ask",
-        "do not ask",
-    )
-    return any(marker in cleaned for marker in direct_markers)
+    return user_wants_direct_answer_payload(text)
 
 
 def user_frustration_with_questions(text: str) -> bool:
-    cleaned = clean_text(text).lower()
-    markers = (
-        "질문 그만",
-        "그만 물어",
-        "왜 자꾸 물어",
-        "귀찮",
-        "짜증",
-        "답답",
-        "stop asking",
-        "too many questions",
-    )
-    return any(marker in cleaned for marker in markers)
+    return user_frustration_with_questions_payload(text)
 
 
 def is_continuable_technical_topic(text: str) -> bool:
-    cleaned = clean_text(text).lower()
-    if not cleaned or user_wants_direct_answer(cleaned):
-        return False
-    markers = (
-        "설계",
-        "구조",
-        "구현",
-        "리스크",
-        "영향",
-        "파이프라인",
-        "router",
-        "라우터",
-        "llm",
-        "hot path",
-        "핫패스",
-        "metric",
-        "메트릭",
-        "control page",
-        "컨트롤",
-        "디스코드",
-        "로컬모드",
-        "다음 단계",
-        "어떻게",
-        "왜",
-    )
-    return any(marker in cleaned for marker in markers) and len(cleaned) >= 18
+    return is_continuable_technical_topic_payload(text)
 
 
 def question_cooldown_hit(session_key: str | None, *, now: float | None = None) -> bool:
-    if not session_key:
-        return False
-    state = session_question_state.setdefault(session_key, {"turn_index": 0, "question_turns": [], "frustration_until": 0.0})
-    current_time = time.monotonic() if now is None else float(now)
-    if current_time < float(state.get("frustration_until", 0.0) or 0.0):
-        return True
-    question_turns = [int(item) for item in state.get("question_turns", []) if isinstance(item, int)]
-    current_turn = int(state.get("turn_index", 0))
-    if question_turns and current_turn - question_turns[-1] < QUESTION_MIN_TURN_GAP:
-        return True
-    last_question_at = float(state.get("last_question_at", 0.0) or 0.0)
-    if last_question_at and current_time - last_question_at < QUESTION_MIN_SECONDS_GAP:
-        return True
-    recent = [turn for turn in question_turns if current_turn - turn < 10]
-    return QUESTION_MAX_PER_10_TURNS > 0 and len(recent) >= QUESTION_MAX_PER_10_TURNS
+    return question_policy_state.question_cooldown_hit(session_key, now=now)
 
 
 def apply_fast_path_question_policy(
@@ -2258,66 +1868,12 @@ def apply_fast_path_question_policy(
     session_key: str | None,
     route_meta_question_policy: dict[str, Any] | None = None,
 ) -> tuple[RouteDecision, bool]:
-    if not QUESTION_FEATURE_ENABLED:
-        policy = normalize_question_policy_mapping({"question_reason": "question_feature_disabled"})
-        return replace(route_decision, **policy), False
-
-    route_policy = normalize_question_policy_mapping(route_meta_question_policy, default_source="router")
-    if route_policy["ask_mode"] != "none":
-        return replace(route_decision, **route_policy), False
-
-    state = session_question_state.setdefault(session_key or "global", {"turn_index": 0, "question_turns": [], "frustration_until": 0.0})
-    state["turn_index"] = int(state.get("turn_index", 0)) + 1
-    if user_frustration_with_questions(user_text):
-        state["frustration_until"] = time.monotonic() + QUESTION_DISABLE_AFTER_FRUSTRATION_SEC
-
-    if user_wants_direct_answer(user_text):
-        policy = normalize_question_policy_mapping(
-            {"ask_mode": "none", "question_reason": "direct_answer_requested", "question_source": "fast_path"}
-        )
-        return replace(route_decision, **policy), False
-
-    cooldown = question_cooldown_hit(session_key or "global")
-    if cooldown:
-        policy = normalize_question_policy_mapping(
-            {"ask_mode": "none", "question_reason": "question_cooldown", "question_source": "fast_path"}
-        )
-        return replace(route_decision, **policy), True
-
-    if route_decision.action in {"ask", "wait"}:
-        policy = normalize_question_policy_mapping(
-            {
-                "ask_mode": "clarify",
-                "max_question_count": 1,
-                "question_hint": route_decision.prompt_text,
-                "question_reason": "route_action_requires_clarification",
-                "question_source": "fast_path",
-            }
-        )
-        return replace(route_decision, **policy), False
-
-    if route_decision.route in {"search_executor"} or route_decision.needs_search:
-        policy = normalize_question_policy_mapping(
-            {"ask_mode": "none", "question_reason": "search_or_action_turn", "question_source": "fast_path"}
-        )
-        return replace(route_decision, **policy), False
-
-    if is_continuable_technical_topic(user_text):
-        policy = normalize_question_policy_mapping(
-            {
-                "ask_mode": "topic_continue",
-                "max_question_count": 1,
-                "question_hint": "Ask lightly what subsystem or next step the user wants to tune next.",
-                "question_reason": "fast_path_topic_continue",
-                "question_source": "fast_path",
-            }
-        )
-        return replace(route_decision, **policy), False
-
-    policy = normalize_question_policy_mapping(
-        {"ask_mode": "none", "question_reason": "default_no_question", "question_source": "fast_path"}
+    return question_policy_state.apply_fast_path_policy(
+        route_decision,
+        user_text=user_text,
+        session_key=session_key,
+        route_meta_question_policy=route_meta_question_policy,
     )
-    return replace(route_decision, **policy), False
 
 
 def record_question_trace(
@@ -2328,66 +1884,17 @@ def record_question_trace(
     metrics: dict | None,
     cooldown_hit: bool = False,
 ) -> None:
-    final_question_count = int(shape_meta.get("question_count_after", 0) or 0)
-    question_added = final_question_count > 0
-    question_removed = bool(shape_meta.get("question_removed"))
-    question_metrics["turn_count"] = int(question_metrics.get("turn_count", 0)) + 1
-    if question_added:
-        question_metrics["added_count"] = int(question_metrics.get("added_count", 0)) + 1
-    if question_removed:
-        question_metrics["removed_count"] = int(question_metrics.get("removed_count", 0)) + 1
-    if cooldown_hit:
-        question_metrics["cooldown_hit_count"] = int(question_metrics.get("cooldown_hit_count", 0)) + 1
-    question_metrics["final_question_count"] = int(question_metrics.get("final_question_count", 0)) + final_question_count
-    ask_modes = question_metrics.setdefault("ask_modes", {})
-    ask_modes[route_decision.ask_mode] = int(ask_modes.get(route_decision.ask_mode, 0)) + 1
-
-    meta = (metrics or {}).get("meta") if isinstance(metrics, dict) else {}
-    if not isinstance(meta, dict):
-        meta = {}
-    session_key = clean_text(str(meta.get("session_key") or ""))
-    if question_added and session_key:
-        state = session_question_state.setdefault(session_key, {"turn_index": 0, "question_turns": [], "frustration_until": 0.0})
-        turn_index = int(state.get("turn_index", 0))
-        turns = [int(item) for item in state.get("question_turns", []) if isinstance(item, int)]
-        turns.append(turn_index)
-        state["question_turns"] = turns[-10:]
-        state["last_question_at"] = time.monotonic()
-
-    log_turn_event(
-        "question_trace",
-        turn_id=meta.get("turn_id"),
-        session_key=meta.get("session_key"),
-        source=meta.get("source"),
-        guild_id=meta.get("guild_id"),
-        ask_mode=route_decision.ask_mode,
-        question_source=route_decision.question_source,
-        question_reason=route_decision.question_reason,
-        question_added=question_added,
-        question_removed=question_removed,
-        question_cooldown_hit=bool(cooldown_hit),
-        question_count=final_question_count,
-        hot_path=True,
-        answer_chars=len(clean_text(answer)),
+    question_policy_state.record_question_trace(
+        route_decision=route_decision,
+        answer=answer,
+        shape_meta=shape_meta,
+        metrics=metrics,
+        cooldown_hit=cooldown_hit,
     )
 
 
 def summarize_question_metrics() -> dict[str, Any]:
-    total = int(question_metrics.get("turn_count", 0) or 0)
-    added = int(question_metrics.get("added_count", 0) or 0)
-    removed = int(question_metrics.get("removed_count", 0) or 0)
-    cooldown = int(question_metrics.get("cooldown_hit_count", 0) or 0)
-    ask_modes = dict(question_metrics.get("ask_modes") or {})
-    return {
-        "turnCount": total,
-        "questionAddedCount": added,
-        "questionAddedRate": _rate_or_none(added, total),
-        "questionRemovedCount": removed,
-        "questionCooldownHitCount": cooldown,
-        "questionCooldownHitRate": _rate_or_none(cooldown, total),
-        "finalQuestionCount": int(question_metrics.get("final_question_count", 0) or 0),
-        "askModeDistribution": ask_modes,
-    }
+    return question_policy_state.summarize_question_metrics()
 
 
 def proactive_question_scope_candidates(
@@ -2396,25 +1903,15 @@ def proactive_question_scope_candidates(
     person_key: str | None = None,
     session_memory_key: str | None = None,
 ) -> list[tuple[str, str | None]]:
-    scopes: list[tuple[str, str | None]] = []
-    if session_memory_key:
-        scopes.append(("session", session_memory_key))
-    if person_key:
-        scopes.append(("person", person_key))
-    if room_key:
-        scopes.append(("room", room_key))
-    scopes.append(("guild", None))
-    return scopes
+    return question_policy_state.proactive_scope_candidates(
+        room_key=room_key,
+        person_key=person_key,
+        session_memory_key=session_memory_key,
+    )
 
 
 def record_session_question_asked(session_key: str | None, *, now: float | None = None) -> None:
-    key = session_key or "global"
-    state = session_question_state.setdefault(key, {"turn_index": 0, "question_turns": [], "frustration_until": 0.0})
-    turn_index = int(state.get("turn_index", 0))
-    turns = [int(item) for item in state.get("question_turns", []) if isinstance(item, int)]
-    turns.append(turn_index)
-    state["question_turns"] = turns[-10:]
-    state["last_question_at"] = time.monotonic() if now is None else float(now)
+    question_policy_state.record_session_question_asked(session_key, now=now)
 
 
 def resolve_pending_proactive_question_for_turn(
@@ -2425,19 +1922,13 @@ def resolve_pending_proactive_question_for_turn(
     session_memory_key: str | None = None,
     metrics: dict | None = None,
 ) -> dict[str, Any]:
-    if guild_id is None:
-        return {"resolved": False, "reason": "no_guild"}
-    session_scope_key = session_memory_key or session_key
-    if not session_scope_key:
-        return {"resolved": False, "reason": "no_session_scope"}
-    result = resolve_pending_question_answer(
+    return question_policy_state.resolve_pending_proactive_question_for_turn(
         guild_id,
         user_text,
-        session_scope_key=session_scope_key,
+        session_key=session_key,
+        session_memory_key=session_memory_key,
+        metrics=metrics,
     )
-    if metrics is not None:
-        metrics.setdefault("meta", {})["proactive_question_resolution"] = result
-    return result
 
 
 def select_and_mark_proactive_question(
@@ -2454,81 +1945,19 @@ def select_and_mark_proactive_question(
     runtime_block_reason: str = "",
     metrics: dict | None = None,
 ) -> dict[str, Any] | None:
-    if guild_id is None:
-        return None
-    session_scope_key = session_memory_key or session_key
-    cooldown_key = session_key or session_scope_key or "global"
-    session_cooldown = question_cooldown_hit(cooldown_key)
-    base_gate = evaluate_proactive_question_gate(
+    return question_policy_state.select_and_mark_proactive_question(
         guild_id=guild_id,
         source=source,
         user_text=user_text,
         answer_text=answer_text,
         awaiting_user_reply=awaiting_user_reply,
-        session_scope_key=session_scope_key,
-        session_cooldown_hit=session_cooldown,
-        runtime_block_reason=runtime_block_reason,
-    )
-    if metrics is not None:
-        metrics.setdefault("meta", {})["proactive_question_gate"] = base_gate.as_dict()
-    if not base_gate.allowed:
-        return None
-
-    for scope_type, scope_key in proactive_question_scope_candidates(
         room_key=room_key,
         person_key=person_key,
+        session_key=session_key,
         session_memory_key=session_memory_key,
-    ):
-        candidate = select_question_to_ask(
-            guild_id,
-            scope_type=scope_type,
-            scope_key=scope_key,
-            session_scope_key=session_scope_key,
-        )
-        if not candidate:
-            continue
-        ask_text = clean_text(str(candidate.get("ask_text") or ""))
-        question_id = clean_text(str(candidate.get("id") or ""))
-        if not ask_text or not question_id:
-            continue
-        candidate_gate = evaluate_proactive_question_gate(
-            guild_id=guild_id,
-            source=source,
-            user_text=user_text,
-            answer_text=answer_text,
-            awaiting_user_reply=awaiting_user_reply,
-            session_scope_key=session_scope_key,
-            session_cooldown_hit=False,
-            candidate_text=ask_text,
-        )
-        if metrics is not None:
-            metrics.setdefault("meta", {})["proactive_question_candidate_gate"] = candidate_gate.as_dict()
-        if not candidate_gate.allowed:
-            continue
-        marked = mark_question_asked(
-            guild_id,
-            question_id,
-            scope_type=scope_type,
-            scope_key=scope_key,
-            session_scope_key=session_scope_key,
-            asked_text=ask_text,
-        )
-        if not marked:
-            continue
-        record_session_question_asked(cooldown_key)
-        result = {
-            "id": question_id,
-            "ask_text": ask_text,
-            "scope_type": scope_type,
-            "scope_key": scope_key,
-            "source": source,
-        }
-        if metrics is not None:
-            metrics.setdefault("meta", {})["proactive_question_asked"] = result
-        return result
-    if metrics is not None:
-        metrics.setdefault("meta", {})["proactive_question_no_candidate"] = True
-    return None
+        runtime_block_reason=runtime_block_reason,
+        metrics=metrics,
+    )
 
 
 def maybe_append_proactive_question(
@@ -2544,21 +1973,11 @@ def maybe_append_proactive_question(
     session_memory_key: str | None = None,
     metrics: dict | None = None,
 ) -> tuple[str, bool]:
-    answer = (answer_text or "").strip()
-    if guild_id is None:
-        return answer, False
-    if source in {"text", "control_page"} and not should_offer_proactive_question(
-        source=source,
-        user_text=user_text,
-        answer_text=answer,
-        awaiting_user_reply=awaiting_user_reply,
-    ):
-        return answer, False
-    marked = select_and_mark_proactive_question(
+    return question_policy_state.maybe_append_proactive_question(
+        answer_text,
         guild_id=guild_id,
         source=source,
         user_text=user_text,
-        answer_text=answer,
         awaiting_user_reply=awaiting_user_reply,
         room_key=room_key,
         person_key=person_key,
@@ -2566,28 +1985,71 @@ def maybe_append_proactive_question(
         session_memory_key=session_memory_key,
         metrics=metrics,
     )
-    if marked:
-        return clean_text(f"{answer}\n\n{marked['ask_text']}"), True
-    return answer, False
 
 
 def summarize_p95_metrics() -> dict[str, float | int]:
-    all_stt_ms = [row.get("t_stt_done") for row in turn_stage_metrics.values() if row.get("t_stt_done") is not None]
-    all_router_ms = [row.get("route_ready") for row in turn_stage_metrics.values() if row.get("route_ready") is not None]
-    all_main_first_token_ms = [row.get("t_main_first_token") for row in turn_stage_metrics.values() if row.get("t_main_first_token") is not None]
-    all_tts_first_audio_ms = [row.get("t_tts_first_audio") for row in turn_stage_metrics.values() if row.get("t_tts_first_audio") is not None]
-    return {
-        "stt_ms_p95": round(_p95(all_stt_ms), 1),
-        "router_ms_p95": round(_p95(all_router_ms), 1),
-        "main_first_token_ms_p95": round(_p95(all_main_first_token_ms), 1),
-        "tts_first_audio_ms_p95": round(_p95(all_tts_first_audio_ms), 1),
-        "search_followup_queued_count": search_followup_queued_count,
-        "cancelled_stale_turn_count": cancelled_stale_turn_count,
-    }
+    return summarize_voice_p95_metrics(
+        turn_stage_metrics,
+        search_followup_queued_count=search_followup_queued_count,
+        cancelled_stale_turn_count=turn_scope_registry.cancelled_stale_turn_count,
+    )
 
 
 def increment_voice_pipeline_counter(name: str, amount: int = 1) -> None:
-    voice_pipeline_counters[name] = int(voice_pipeline_counters.get(name, 0)) + int(amount)
+    increment_voice_counter(voice_pipeline_counters, name, amount)
+
+
+voice_barge_in_continuity_tracker = VoiceBargeInContinuityTracker(
+    target_count=VOICE_BARGE_IN_CONTINUITY_TARGET,
+    clean_text=clean_text,
+    log_enabled=lambda: VOICE_BOTTLENECK_LOGS,
+    event_logger=log_turn_event,
+)
+
+
+def _parse_barge_in_reason_label(raw_reason_code: str) -> str:
+    return voice_barge_in_continuity_tracker.parse_reason_label(raw_reason_code)
+
+
+def _format_voice_barge_in_continuity_summary(continuity: dict[str, Any]) -> str:
+    return voice_barge_in_continuity_tracker.format_summary(continuity)
+
+
+def _format_voice_barge_in_continuity_detail_lines(continuity: dict[str, Any]) -> list[str]:
+    return voice_barge_in_continuity_tracker.format_detail_lines(continuity, command_status=command_status)
+
+
+def start_voice_barge_in_continuity_probe(metrics: dict, *, source: str) -> None:
+    voice_barge_in_continuity_tracker.start_probe(metrics, source=source)
+
+
+def _build_voice_barge_in_continuity_snapshot() -> dict[str, Any]:
+    return voice_barge_in_continuity_tracker.snapshot()
+
+
+def reset_voice_barge_in_continuity_probe(*, reason: str = "") -> None:
+    voice_barge_in_continuity_tracker.reset(reason=reason)
+
+
+def _mark_voice_barge_in_continuity_probe(
+    metrics: dict,
+    *,
+    success: bool,
+    reason: str,
+    queued_sentence_count: int = 0,
+    reason_code: str | None = None,
+    reason_label: str | None = None,
+    event: str = VOICE_BARGE_IN_EVENT_FINISH,
+) -> None:
+    voice_barge_in_continuity_tracker.mark_probe(
+        metrics,
+        success=success,
+        reason=reason,
+        queued_sentence_count=queued_sentence_count,
+        reason_code=reason_code,
+        reason_label=reason_label,
+        event=event,
+    )
 
 
 def get_stt_inference_lock() -> asyncio.Lock:
@@ -2598,21 +2060,11 @@ def get_stt_inference_lock() -> asyncio.Lock:
 
 
 def voice_last_channel_state_path() -> Path:
-    path = Path(VOICE_LAST_CHANNEL_STATE_FILE)
-    if not path.is_absolute():
-        path = PROJECT_ROOT / path
-    return path
+    return resolve_voice_last_channel_state_path(PROJECT_ROOT, VOICE_LAST_CHANNEL_STATE_FILE)
 
 
 def load_last_voice_channel_state() -> dict[str, Any]:
-    path = voice_last_channel_state_path()
-    if not path.exists():
-        return {}
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-    return data if isinstance(data, dict) else {}
+    return load_last_voice_channel_state_payload(PROJECT_ROOT, VOICE_LAST_CHANNEL_STATE_FILE)
 
 
 def save_last_voice_channel_state(
@@ -2622,59 +2074,35 @@ def save_last_voice_channel_state(
     reason: str,
     manual_disconnect: bool = False,
 ) -> None:
-    payload = {
-        "guild_id": int(guild.id),
-        "guild_name": clean_text(getattr(guild, "name", "") or ""),
-        "channel_id": int(channel.id),
-        "channel_name": clean_text(getattr(channel, "name", "") or ""),
-        "updated_at": time.time(),
-        "reason": reason,
-        "manual_disconnect": bool(manual_disconnect),
-    }
-    path = voice_last_channel_state_path()
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        voice_pipeline_state["last_voice_channel"] = dict(payload)
+        save_last_voice_channel_state_payload(
+            PROJECT_ROOT,
+            VOICE_LAST_CHANNEL_STATE_FILE,
+            voice_pipeline_state,
+            guild,
+            channel,
+            reason=reason,
+            manual_disconnect=manual_disconnect,
+        )
     except Exception as exc:
         print(f"[VOICE STATE SAVE FAIL] err={exc!r}")
 
 
 def mark_voice_manual_disconnect(guild: discord.Guild | None, *, reason: str) -> None:
-    if guild is None:
-        return
-    data = load_last_voice_channel_state()
-    if not data or int(data.get("guild_id") or 0) != int(guild.id):
-        return
-    data["manual_disconnect"] = True
-    data["reason"] = reason
-    data["updated_at"] = time.time()
-    path = voice_last_channel_state_path()
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-        voice_pipeline_state["last_voice_channel"] = dict(data)
+        mark_last_voice_manual_disconnect(
+            PROJECT_ROOT,
+            VOICE_LAST_CHANNEL_STATE_FILE,
+            voice_pipeline_state,
+            guild,
+            reason=reason,
+        )
     except Exception as exc:
         print(f"[VOICE STATE SAVE FAIL] err={exc!r}")
 
 
 def record_voice_pipeline_failure(kind: str, err: BaseException | str, metrics: dict | None = None, **extra: Any) -> None:
-    counter_map = {
-        "llm_failed": "llm_failed_count",
-        "tts_request_failed": "tts_request_failed_count",
-        "tts_producer_cancelled": "tts_producer_cancelled_count",
-        "tts_playback_failed": "tts_playback_failed_count",
-        "voice_delivery_failed": "voice_delivery_failed_count",
-    }
-    counter = counter_map.get(kind)
-    if counter:
-        increment_voice_pipeline_counter(counter)
-    error_text = repr(err) if isinstance(err, BaseException) else clean_text(str(err))
-    voice_pipeline_state["last_failure"] = {
-        "kind": kind,
-        "error": error_text[:260],
-        "at": time.time(),
-    }
+    error_text = record_voice_failure_state(voice_pipeline_counters, voice_pipeline_state, kind, err)
     meta = (metrics or {}).get("meta") or {}
     log_turn_event(
         kind,
@@ -2697,50 +2125,28 @@ def record_voice_pipeline_failure(kind: str, err: BaseException | str, metrics: 
 def build_voice_pipeline_snapshot(guild: discord.Guild | None = None) -> dict[str, Any]:
     p95 = summarize_p95_metrics()
     lock = stt_inference_lock
-    now_mono = time.monotonic()
-    last_segment_at = voice_pipeline_state.get("last_voice_segment_at")
-    last_segment_age_sec = None
-    if isinstance(last_segment_at, (int, float)):
-        last_segment_age_sec = round(max(0.0, time.time() - float(last_segment_at)), 3)
-    cooldown_remaining = max(0.0, stt_cooldown_until - now_mono)
     state_file = load_last_voice_channel_state()
-    if state_file:
-        voice_pipeline_state["last_voice_channel"] = dict(state_file)
     output_mode = "local_speaker" if LOCAL_ONLY_MODE and local_tts_playback_manager.enabled else "discord_voice"
-    return {
-        "outputMode": output_mode,
-        "localTtsOutput": local_tts_playback_manager.snapshot(),
-        "queueDepth": voice_ingress_queue.qsize(),
-        "queueMax": VOICE_INGRESS_QUEUE_MAX,
-        "liveRecent": last_segment_age_sec is not None and last_segment_age_sec <= VOICE_LIVE_RECENT_SEC,
-        "lastVoiceSegmentAgeSec": last_segment_age_sec,
-        "sttBusy": bool(lock and lock.locked()),
-        "sttCooldownRemainingSec": round(cooldown_remaining, 3),
-        "sttTimeoutCount": voice_pipeline_counters.get("stt_timeout_count", 0),
-        "sttBusyDropCount": voice_pipeline_counters.get("stt_busy_drop_count", 0),
-        "queueFullDropCount": voice_pipeline_counters.get("queue_full_drop_count", 0),
-        "queueStaleDropCount": voice_pipeline_counters.get("queue_stale_drop_count", 0),
-        "utteranceAssemblyEnabled": voice_utterance_assembly_config.enabled,
-        "utteranceAssemblyPendingCount": len(voice_utterance_buffers),
-        "utteranceAssemblyCommitWaitSec": round(voice_utterance_assembly_config.commit_wait_sec, 3),
-        "utteranceAssemblyMergeCount": voice_pipeline_counters.get("utterance_assembly_merge_count", 0),
-        "utteranceAssemblyFlushCount": voice_pipeline_counters.get("utterance_assembly_flush_count", 0),
-        "ttsRequestFailedCount": voice_pipeline_counters.get("tts_request_failed_count", 0),
-        "ttsPlaybackFailedCount": voice_pipeline_counters.get("tts_playback_failed_count", 0),
-        "llmFailedCount": voice_pipeline_counters.get("llm_failed_count", 0),
-        "voiceDeliveryFailedCount": voice_pipeline_counters.get("voice_delivery_failed_count", 0),
-        "rejoinAttempts": voice_pipeline_counters.get("voice_rejoin_attempts", 0),
-        "rejoinSuccess": voice_pipeline_counters.get("voice_rejoin_success", 0),
-        "rejoinFail": voice_pipeline_counters.get("voice_rejoin_fail", 0),
-        "lastVoiceChannel": voice_pipeline_state.get("last_voice_channel"),
-        "lastVoiceRejoinAt": voice_pipeline_state.get("last_voice_rejoin_at"),
-        "lastVoiceRejoinError": voice_pipeline_state.get("last_voice_rejoin_error"),
-        "lastFailure": voice_pipeline_state.get("last_failure"),
-        "sttMsP95": p95.get("stt_ms_p95", 0),
-        "ttsFirstAudioMsP95": p95.get("tts_first_audio_ms_p95", 0),
-        "mainFirstTokenMsP95": p95.get("main_first_token_ms_p95", 0),
-        "turnPathMetrics": summarize_turn_path_metrics(),
-    }
+    return build_voice_pipeline_snapshot_payload(
+        counters=voice_pipeline_counters,
+        state=voice_pipeline_state,
+        p95=p95,
+        now_time=time.time(),
+        now_mono=time.monotonic(),
+        stt_lock_locked=bool(lock and lock.locked()),
+        stt_cooldown_until=stt_cooldown_until,
+        last_channel_state=state_file,
+        output_mode=output_mode,
+        local_tts_output=local_tts_playback_manager.snapshot(),
+        queue_depth=voice_ingress_queue.qsize(),
+        queue_max=VOICE_INGRESS_QUEUE_MAX,
+        live_recent_sec=VOICE_LIVE_RECENT_SEC,
+        utterance_assembly_enabled=voice_utterance_assembly_config.enabled,
+        utterance_pending_count=len(voice_utterance_buffers),
+        utterance_commit_wait_sec=voice_utterance_assembly_config.commit_wait_sec,
+        barge_in_continuity=_build_voice_barge_in_continuity_snapshot(),
+        turn_path_metrics=summarize_turn_path_metrics(),
+    )
 
 
 async def run_blocking_stt_task(
@@ -2922,82 +2328,28 @@ def _save_voice_debug_audio_now(
     session_key: str | None = None,
     stage_label: str | None = None,
 ) -> None:
-    try:
-        base_dir = Path(VOICE_DEBUG_AUDIO_DIR)
-        if not base_dir.is_absolute():
-            base_dir = Path(__file__).resolve().parent / base_dir
-        guild_dir = base_dir / str(guild_id)
-        guild_dir.mkdir(parents=True, exist_ok=True)
-
-        meta_turn_id = None
-        meta_segment_id = None
-        if isinstance(debug_meta, dict):
-            meta_turn_id = clean_text(str(debug_meta.get("turn_id") or "")) or None
-            raw_segment_id = debug_meta.get("segment_id")
-            if raw_segment_id is not None:
-                try:
-                    meta_segment_id = int(raw_segment_id)
-                except (TypeError, ValueError):
-                    meta_segment_id = clean_text(str(raw_segment_id)) or None
-
-        stamp = time.strftime("%Y%m%d-%H%M%S")
-        stem_key = (guild_id, session_key or "", meta_turn_id or "", str(meta_segment_id or ""))
-        stem = voice_debug_stems.get(stem_key)
-        if stem is None:
-            idx = voice_debug_counts.get(guild_id, 0) + 1
-            voice_debug_counts[guild_id] = idx
-            speaker_label = _sanitize_debug_label(speaker)
-            stem = f"{stamp}_{idx:04d}_{speaker_label}"
-            voice_debug_stems[stem_key] = stem
-
-        raw_path = guild_dir / f"{stem}_raw48k.wav"
-        stt_path = guild_dir / f"{stem}_stt16k.wav"
-        meta_path = guild_dir / f"{stem}.json"
-
-        with wave.open(str(raw_path), "wb") as wf:
-            wf.setnchannels(CHANNELS)
-            wf.setsampwidth(2)
-            wf.setframerate(RATE)
-            wf.writeframes(pcm_bytes)
-
-        if save_stt_audio:
-            audio16k_int16 = np.clip(audio16k, -1.0, 1.0)
-            audio16k_int16 = (audio16k_int16 * 32767.0).astype(np.int16)
-            with wave.open(str(stt_path), "wb") as wf:
-                wf.setnchannels(1)
-                wf.setsampwidth(2)
-                wf.setframerate(TARGET_RATE)
-                wf.writeframes(audio16k_int16.tobytes())
-
-        stage = clean_text(stage_label or "ingress") or "ingress"
-        meta = {
-            "saved_at": stamp,
-            "guild_id": guild_id,
-            "speaker": speaker,
-            "raw_path": str(raw_path),
-            "stt_path": str(stt_path) if save_stt_audio else None,
-            "stt_saved": bool(save_stt_audio),
-            "raw_bytes": len(pcm_bytes),
-            "raw_seconds": round(len(pcm_bytes) / float(RATE * CHANNELS * 2), 3),
-            "stt_samples": int(audio16k.size),
-            "stt_seconds": round(audio16k.size / float(TARGET_RATE), 3),
-            "wake_probe": wake_probe,
-            "final_text": final_text,
-            "session_key": session_key,
-            "turn_id": meta_turn_id,
-            "segment_id": meta_segment_id,
-            "stage_label": stage,
-        }
-        if debug_meta is not None:
-            meta["voice_receive"] = safe_json_value(debug_meta)
-        if stt_meta is not None:
-            meta["stt"] = safe_json_value(stt_meta)
-        meta_path.write_text(safe_json_dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
-        _trim_voice_debug_dir(guild_dir)
-        stt_log = str(stt_path) if save_stt_audio else "[SKIPPED]"
-        print(f"[VOICE DEBUG SAVE] speaker={speaker} stage={stage} raw={raw_path} stt={stt_log}")
-    except Exception as e:
-        print(f"[VOICE DEBUG SAVE FAIL] speaker={speaker} err={e!r}")
+    save_voice_debug_audio_now_payload(
+        project_root=PROJECT_ROOT,
+        configured_dir=VOICE_DEBUG_AUDIO_DIR,
+        max_files_per_guild=VOICE_DEBUG_MAX_FILES_PER_GUILD,
+        raw_channels=CHANNELS,
+        raw_rate=RATE,
+        stt_rate=TARGET_RATE,
+        counts=voice_debug_counts,
+        stems=voice_debug_stems,
+        log=print,
+        guild_id=guild_id,
+        speaker=speaker,
+        pcm_bytes=pcm_bytes,
+        audio16k=audio16k,
+        wake_probe=wake_probe,
+        final_text=final_text,
+        debug_meta=debug_meta,
+        save_stt_audio=save_stt_audio,
+        stt_meta=stt_meta,
+        session_key=session_key,
+        stage_label=stage_label,
+    )
 
 
 async def debug_write_worker() -> None:
@@ -3035,23 +2387,23 @@ def save_voice_debug_audio(
     if not VOICE_DEBUG_SAVE_AUDIO:
         return
     ensure_debug_write_worker_started()
-    item = {
-        "guild_id": guild_id,
-        "speaker": speaker,
-        "pcm_bytes": pcm_bytes,
-        "audio16k": np.array(audio16k, copy=True),
-        "wake_probe": wake_probe,
-        "final_text": final_text,
-        "debug_meta": dict(debug_meta) if isinstance(debug_meta, dict) else debug_meta,
-        "save_stt_audio": save_stt_audio,
-        "stt_meta": dict(stt_meta) if isinstance(stt_meta, dict) else stt_meta,
-        "session_key": session_key,
-        "stage_label": stage_label,
-    }
+    item = build_voice_debug_audio_item(
+        guild_id=guild_id,
+        speaker=speaker,
+        pcm_bytes=pcm_bytes,
+        audio16k=audio16k,
+        wake_probe=wake_probe,
+        final_text=final_text,
+        debug_meta=debug_meta,
+        save_stt_audio=save_stt_audio,
+        stt_meta=stt_meta,
+        session_key=session_key,
+        stage_label=stage_label,
+    )
     try:
         debug_write_queue.put_nowait(item)
     except asyncio.QueueFull:
-        print(f"[VOICE DEBUG DROP] speaker={speaker} stage={clean_text(stage_label or 'ingress') or 'ingress'} reason=queue_full")
+        print(voice_debug_drop_message(speaker=speaker, stage_label=stage_label))
 
 
 def estimate_voice_like_probability(*, voiced_ms: float, audio_sec: float, body_rms: float) -> float:
@@ -3332,33 +2684,6 @@ def context_policy_for_fast_path_policy(policy: dict | None, *, source: str) -> 
     }
 
 
-def build_fast_cognitive_state(
-    user_text: str,
-    *,
-    action: str,
-    current_state: dict | None = None,
-    reason_brief: str = "fast_path",
-) -> dict:
-    base = normalize_cognitive_state(current_state or {})
-    cleaned = clean_text(user_text)
-    hint = "짧고 자연스럽게 답해라."
-    if action == "wait":
-        hint = "지금은 더 듣는 쪽이 자연스럽다. 아주 짧게 반응해라."
-    previous_ids = base.get("retrieved_context_ids") or []
-    state = {
-        "action": action if action in {"answer", "ask", "wait", "search_then_answer"} else "answer",
-        "confidence": 0.92 if action == "answer" else 0.82,
-        "user_intent": cleaned,
-        "state_summary": cleaned,
-        "question_for_user": "",
-        "main_prompt_hint": hint,
-        "reason_brief": reason_brief,
-        "retrieved_context_ids": previous_ids if isinstance(previous_ids, list) else [],
-        "updated_at": int(time.time()),
-    }
-    return normalize_cognitive_state(state)
-
-
 def should_ignore_short_transcription(
     text: str,
     pcm_bytes: bytes,
@@ -3451,10 +2776,6 @@ def should_reply_to_voice(
     return decision.accepted, decision.reason, decision.gate_mode
 
 
-def ask_confidence_threshold_for_source(source: str) -> float:
-    return ASK_CONFIDENCE_THRESHOLD_VOICE if source == "voice" else ASK_CONFIDENCE_THRESHOLD_TEXT
-
-
 def should_skip_full_stt_after_wake_probe(*, wake_detected: bool, wake_probe: str, duration_sec: float) -> bool:
     return should_skip_full_stt_after_wake_probe_policy(
         wake_detected=wake_detected,
@@ -3530,48 +2851,6 @@ def is_tail_fragment_candidate(
     if longest_voiced_ms > TAIL_FRAGMENT_MAX_LONGEST_MS:
         return False
     return unstable or raw_seconds <= (TAIL_FRAGMENT_MAX_RAW_SEC * 0.6)
-
-
-def apply_ask_gating(cognitive_state: dict | None = None, *, source: str = "text") -> dict:
-    state = normalize_cognitive_state(cognitive_state or {})
-    threshold = ask_confidence_threshold_for_source(source)
-
-    if state.get("action") == "ask":
-        question_for_user = clean_text(str(state.get("question_for_user", "")))
-        confidence = float(state.get("confidence", 0.0) or 0.0)
-        if not question_for_user or confidence < threshold:
-            gated = dict(state)
-            gated["action"] = "wait" if source == "voice" else "answer"
-            reason = clean_text(str(gated.get("reason_brief", "")))
-            gate_note = f"ask_gated_{source}_{confidence:.2f}_lt_{threshold:.2f}"
-            gated["reason_brief"] = clean_text(f"{reason} {gate_note}") if reason else gate_note
-            return gated
-
-    return state
-
-
-def policy_response_for_state(
-    cognitive_state: dict | None = None,
-    *,
-    source: str = "text",
-    user_text: str = "",
-) -> str | None:
-    state = apply_ask_gating(cognitive_state, source=source)
-    action = state.get("action", "answer")
-
-    if action == "ask":
-        question = clean_text(str(state.get("question_for_user", "")))
-        if question and not is_user_echo_answer(user_text, question):
-            return question
-        return None
-
-    if action == "wait":
-        return "응, 계속 말해줘." if source == "voice" else "잠깐, 이어서 말해줘."
-
-    if action == "search_then_answer":
-        return "금방 찾아보고 바로 알려줄게."
-
-    return None
 
 
 async def voice_ingress_worker() -> None:
@@ -3733,161 +3012,42 @@ def should_label_question_response(text: str, *, session_key: str | None = None)
 
 
 def cleanup_assistant_display_artifacts(text: str) -> str:
-    cleaned = clean_text(text)
-    if not cleaned:
-        return ""
-    blocked_fragments = (
-        "Ready to tackle this directly now",
-        "나는 지금 여기서 제대로 대답할 거야",
-        "그 말투는 버릴게",
-        "문서처럼 말하지 않을래",
-        "방금 문장은 내려놓고",
-        "직접 누른 척하면",
-    )
-    for fragment in blocked_fragments:
-        cleaned = cleaned.replace(fragment, " ")
-    extra_blocked_fragments = (
-        "나는 지금 여기서 제대로 대답할 거야",
-        "그 말투는 버릴게",
-        "문서처럼 말하지 않을래",
-        "방금 문장은 내려놓고",
-        "직접 누른 척하면",
-        "whispers too much",
-        "just a little bit more confirmation needed here",
-        "문 닫듯이 끝내고",
-    )
-    for fragment in extra_blocked_fragments:
-        cleaned = cleaned.replace(fragment, " ")
-    cleaned = re.sub(r"\bwhispers\b[^.?!。！？]*[.?!。！？]?", " ", cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r"\(?\s*정리\s*\)?", " ", cleaned)
-    cleaned = re.sub(r"\s*[,:;]\s*[!)]*\s*", " ", cleaned)
-    cleaned = re.sub(r"\*{1,3}", " ", cleaned)
-    cleaned = re.sub(r"\s+\)+\s*$", "", cleaned)
-    cleaned = re.sub(r"!\s*!\s*", "! ", cleaned)
-    lines: list[str] = []
-    for line in re.split(r"[\r\n]+", cleaned):
-        line = clean_text(line)
-        if not line:
-            continue
-        latin = len(re.findall(r"[A-Za-z]", line))
-        hangul = len(re.findall(r"[\uac00-\ud7a3]", line))
-        if latin >= 12 and hangul == 0:
-            continue
-        lines.append(line)
-    cleaned = clean_text(" ".join(lines))
-    return cleaned.strip(" ,:;!*)(")
+    return cleanup_assistant_display_artifacts_payload(text)
 
 
 def user_explicitly_mentions_minecraft(user_text: str) -> bool:
-    text = clean_text(user_text).lower()
-    if not text:
-        return False
-    markers = (
-        "minecraft",
-        "voyager",
-        "마인크래프트",
-        "마크",
-        "블록",
-        "좌표",
-        "인벤토리",
-        "채굴",
-        "길찾",
-        "길 찾",
-        "광질",
-    )
-    if not any(marker in text for marker in markers):
-        return False
-    negative_or_meta_markers = (
-        "하지 마",
-        "하지마",
-        "말하지",
-        "말고",
-        "빼고",
-        "제외",
-        "금지",
-        "아니",
-        "이상한 답",
-        "계속",
-        "달라고 하는데",
-    )
-    if any(marker in text for marker in negative_or_meta_markers):
-        return False
-    return True
+    return user_explicitly_mentions_minecraft_payload(user_text)
 
 
 def answer_contains_minecraft_leak(answer: str) -> bool:
-    text = clean_text(answer).lower()
-    markers = (
-        "minecraft",
-        "voyager",
-        "마인크래프트",
-        "마크",
-        "블록",
-        "좌표",
-        "인벤토리",
-        "채굴",
-        "길찾",
-        "길 찾",
-        "광질",
-        "block",
-        "coordinate",
-        "pathfinding",
-        "inventory",
-        "mining",
-    )
-    return any(marker in text for marker in markers)
+    return answer_contains_minecraft_leak_payload(answer)
 
 
 def fallback_for_unrequested_minecraft_leak(user_text: str) -> str:
-    text = clean_text(user_text)
-    lowered = text.lower()
-    if "작업 상황" in text or "오늘 작업" in text:
-        return "지금은 이블린 런타임 안정화랑 응답 품질 확인을 보고 있어."
-    if "인사" in text or "안녕" in text:
-        return "응, 안녕. 짧게 말할게."
-    if "말이 별로" in text or "조용" in text:
-        return "알겠어. 딱 필요한 만큼만 말할게."
-    if any(marker in lowered for marker in ("vram", "oom", "gpu")):
-        return answer_gpu_runtime_status_query(text) or "지금 GPU 상태를 다시 확인해야 해."
-    return "그쪽 얘기는 빼고, 지금 요청에 맞춰 짧게 답할게."
+    return fallback_for_unrequested_minecraft_leak_payload(
+        user_text,
+        gpu_status_answer_fn=answer_gpu_runtime_status_query,
+    )
 
 
 def sanitize_unrequested_minecraft_leak(user_text: str, answer: str) -> str:
-    cleaned = clean_text(answer)
-    if not cleaned:
-        return cleaned
-    if user_explicitly_mentions_minecraft(user_text):
-        return cleaned
-    if not answer_contains_minecraft_leak(cleaned):
-        return cleaned
-    return fallback_for_unrequested_minecraft_leak(user_text)
+    return sanitize_unrequested_minecraft_leak_payload(
+        user_text,
+        answer,
+        gpu_status_answer_fn=answer_gpu_runtime_status_query,
+    )
 
 
 def answer_simple_local_chat_query(user_text: str) -> str | None:
-    text = clean_text(user_text)
-    lowered = text.lower()
-    if not text or user_explicitly_mentions_minecraft(text):
-        return None
-    if "작업 상황" in text or "오늘 작업" in text:
-        return "지금은 이블린 응답 품질이랑 로컬 런타임 안정화를 확인 중이야."
-    if "말이 별로" in text or "조용" in text:
-        return "알겠어. 필요한 만큼만 말할게."
-    if text in {"안녕", "안녕.", "하이", "ㅎㅇ"} or "인사만" in text:
-        return "응, 안녕."
-    if ("짧게" in text or "한마디" in text) and ("자연스럽게" in text or "말해줘" in text):
-        return "응, 지금은 짧게 갈게."
-    if lowered in {"hello", "hi", "hey"}:
-        return "응, 안녕."
-    return None
+    return answer_simple_local_chat_query_payload(user_text)
 
 
 def format_display_text(text: str, *, session_key: str | None = None) -> str:
-    visible = cleanup_assistant_display_artifacts(normalize_friend_style_output(visible_text(text))).strip()
-    if not visible:
-        return visible
-    if should_label_question_response(visible, session_key=session_key):
-        return f"[질문] {visible}"
-    return visible
+    return format_display_text_payload(
+        text,
+        session_key=session_key,
+        should_label_question_response_fn=should_label_question_response,
+    )
 
 
 def speculate_from_committed_stt(committed_text: str, room_state: dict | None) -> dict | None:
@@ -3996,23 +3156,6 @@ class ReplyStreamFanout:
                 await close(final_text)
 
 
-def read_cached_cognitive_state(
-    guild_id: int | None,
-    *,
-    room_key: str | None = None,
-    person_key: str | None = None,
-    session_memory_key: str | None = None,
-) -> dict | None:
-    if guild_id is None:
-        return None
-    return read_layered_cognitive_state(
-        guild_id,
-        room_key=room_key,
-        person_key=person_key,
-        session_memory_key=session_memory_key,
-    )
-
-
 def should_force_search_followup(
     guild_id: int | None,
     *,
@@ -4111,249 +3254,6 @@ def schedule_cognitive_refresh(
     )
 
 
-def format_minecraft_state_summary(state: dict[str, Any] | None) -> str:
-    if not isinstance(state, dict) or not state:
-        return ""
-    parts: list[str] = []
-    runtime_snapshot = state.get("runtime_snapshot") if isinstance(state.get("runtime_snapshot"), dict) else {}
-    if runtime_snapshot:
-        freshness = clean_text(str(runtime_snapshot.get("freshness") or ""))
-        age_sec = runtime_snapshot.get("age_sec")
-        if freshness:
-            parts.append(f"snapshot={freshness}")
-        if age_sec is not None:
-            parts.append(f"snapshot_age={age_sec}s")
-        snapshot_error = clean_text(str(runtime_snapshot.get("last_error") or ""))
-        if snapshot_error:
-            parts.append(f"snapshot_error={snapshot_error[:120]}")
-    voyager_running = state.get("minecraft_autonomy")
-    voyager_connected = state.get("voyager_connected")
-    if voyager_running is not None:
-        parts.append(f"Voyager={'on' if bool(voyager_running) else 'off'}")
-    if voyager_connected is not None:
-        parts.append(f"연결={'on' if bool(voyager_connected) else 'off'}")
-    objective_goal = clean_text(str(state.get("objective_goal") or state.get("goal") or ""))
-    objective_stage = clean_text(str(state.get("objective_stage") or state.get("stage") or ""))
-    objective_task = clean_text(str(state.get("objective_task") or state.get("current_task") or ""))
-    if objective_goal:
-        parts.append(f"Voyager목표={objective_goal}")
-    if objective_stage:
-        parts.append(f"Voyager단계={objective_stage}")
-    if objective_task:
-        parts.append(f"Voyager작업={objective_task}")
-    voyager_evaluation = state.get("voyager_evaluation") if isinstance(state.get("voyager_evaluation"), dict) else {}
-    unique_item_count = voyager_evaluation.get("unique_item_count") if voyager_evaluation else state.get("voyager_unique_item_count")
-    tech_tree_highest = clean_text(str((voyager_evaluation.get("tech_tree") or {}).get("highest_unlocked") if voyager_evaluation else state.get("voyager_tech_tree_highest") or ""))
-    travel_distance_blocks = voyager_evaluation.get("travel_distance_blocks") if voyager_evaluation else state.get("voyager_travel_distance_blocks")
-    skill_library_size = ((voyager_evaluation.get("skill_library") or {}).get("size") if voyager_evaluation else state.get("voyager_skill_library_size"))
-    if unique_item_count is not None:
-        parts.append(f"유니크아이템={unique_item_count}")
-    if tech_tree_highest:
-        parts.append(f"테크={tech_tree_highest}")
-    if travel_distance_blocks is not None:
-        parts.append(f"이동거리={travel_distance_blocks}b")
-    if skill_library_size is not None:
-        parts.append(f"스킬라이브러리={skill_library_size}")
-    position = state.get("position") or state.get("position_block")
-    if isinstance(position, dict):
-        x = position.get("x")
-        y = position.get("y")
-        z = position.get("z")
-        if x is not None and y is not None and z is not None:
-            parts.append(f"위치=({x},{y},{z})")
-    health = state.get("health")
-    hunger = state.get("hunger")
-    if health is not None:
-        parts.append(f"체력={health}")
-    if hunger is not None:
-        parts.append(f"허기={hunger}")
-    hostiles = state.get("hostiles_nearby")
-    if hostiles is not None:
-        parts.append(f"근처 적대몹={hostiles}")
-    inventory = state.get("inventory") or {}
-    if isinstance(inventory, dict) and inventory:
-        top_items = []
-        for name, count in sorted(inventory.items(), key=lambda item: (-int(item[1] or 0), str(item[0])))[:6]:
-            top_items.append(f"{name}x{count}")
-        if top_items:
-            parts.append("인벤토리=" + ", ".join(top_items))
-    nearby_blocks = state.get("nearby_blocks") or []
-    if nearby_blocks:
-        parts.append("주변블록=" + ", ".join(str(value) for value in list(nearby_blocks)[:6]))
-    nearby_entities = state.get("nearby_entities") or []
-    if nearby_entities:
-        parts.append("주변엔티티=" + ", ".join(str(value) for value in list(nearby_entities)[:6]))
-    active_environment = clean_text(str(state.get("active_environment") or ""))
-    if active_environment:
-        parts.append(f"활성환경={active_environment}")
-    return clean_text(" / ".join(parts))
-
-
-def runtime_status_port_from_url(url: str) -> tuple[str, int] | None:
-    parsed = urlparse(clean_text(str(url or "")))
-    if not parsed.hostname:
-        return None
-    if parsed.port is not None:
-        return parsed.hostname, int(parsed.port)
-    if parsed.scheme == "https":
-        return parsed.hostname, 443
-    if parsed.scheme == "http":
-        return parsed.hostname, 80
-    return None
-
-
-async def probe_runtime_tcp_service(label: str, host: str, port: int) -> tuple[str, bool]:
-    try:
-        _reader, writer = await asyncio.wait_for(
-            asyncio.open_connection(host, port),
-            timeout=RUNTIME_STATUS_CONTEXT_CONNECT_TIMEOUT_SEC,
-        )
-        writer.close()
-        with contextlib.suppress(Exception):
-            await writer.wait_closed()
-        return label, True
-    except Exception:
-        return label, False
-
-
-def read_text_tail(path: Path, *, max_bytes: int = 4096) -> str:
-    try:
-        with path.open("rb") as handle:
-            handle.seek(0, os.SEEK_END)
-            size = handle.tell()
-            handle.seek(max(0, size - max_bytes), os.SEEK_SET)
-            return handle.read(max_bytes).decode("utf-8", errors="replace")
-    except Exception:
-        return ""
-
-
-def compact_runtime_error(value: Any, *, max_chars: int | None = None) -> str:
-    limit = max_chars if max_chars is not None else RUNTIME_STATUS_CONTEXT_MAX_ERROR_CHARS
-    text = clean_text(str(value or ""))
-    if not text:
-        return ""
-    text = re.sub(r"\s+", " ", text).strip()
-    if len(text) > limit:
-        return text[: max(0, limit - 3)].rstrip() + "..."
-    return text
-
-
-def runtime_file_age_label(path: Path) -> str:
-    try:
-        age_sec = max(0.0, time.time() - path.stat().st_mtime)
-    except Exception:
-        return ""
-    if age_sec < 60:
-        return f"{int(age_sec)}s ago"
-    if age_sec < 3600:
-        return f"{int(age_sec // 60)}m ago"
-    if age_sec < 86400:
-        return f"{int(age_sec // 3600)}h ago"
-    return f"{int(age_sec // 86400)}d ago"
-
-
-def load_runtime_recent_errors() -> list[str]:
-    errors: list[str] = []
-    codex_path = RUNTIME_ARTIFACTS_ROOT / "codex_gateway" / "last_request.json"
-    try:
-        codex_payload = json.loads(codex_path.read_text(encoding="utf-8"))
-        codex_error = (
-            codex_payload.get("error")
-            or codex_payload.get("stderr_tail")
-            or codex_payload.get("message")
-        )
-        codex_status = clean_text(str(codex_payload.get("status") or codex_payload.get("phase") or ""))
-        if codex_error:
-            codex_age = runtime_file_age_label(codex_path)
-            codex_meta = ", ".join(part for part in (codex_status, codex_age) if part)
-            prefix = f"codex({codex_meta})" if codex_meta else "codex"
-            errors.append(f"{prefix}: {compact_runtime_error(codex_error)}")
-    except Exception:
-        pass
-
-    voyager_status_path = RUNTIME_ARTIFACTS_ROOT / "voyager" / "upstream_bridge_status.json"
-    try:
-        status_payload = json.loads(voyager_status_path.read_text(encoding="utf-8"))
-        voyager_error = (
-            status_payload.get("last_error")
-            or status_payload.get("last_critique")
-            or status_payload.get("last_completion_reason")
-        )
-        if voyager_error:
-            voyager_age = runtime_file_age_label(voyager_status_path)
-            prefix = f"voyager({voyager_age})" if voyager_age else "voyager"
-            errors.append(f"{prefix}: {compact_runtime_error(voyager_error)}")
-    except Exception:
-        pass
-
-    for label, log_path in (
-        ("voyager_service", RUNTIME_ARTIFACTS_ROOT / "logs" / "voyager_service_errors.log"),
-        ("upstream_bridge", RUNTIME_ARTIFACTS_ROOT / "logs" / "upstream_bridge_errors.log"),
-    ):
-        if len(errors) >= 3:
-            break
-        tail = read_text_tail(log_path)
-        lines = [compact_runtime_error(line) for line in tail.splitlines() if compact_runtime_error(line)]
-        if lines:
-            log_age = runtime_file_age_label(log_path)
-            prefix = f"{label}({log_age})" if log_age else label
-            errors.append(f"{prefix}: {lines[-1]}")
-
-    return errors[:3]
-
-
-def load_runtime_gpu_status() -> tuple[str, bool]:
-    try:
-        completed = subprocess.run(
-            [
-                "nvidia-smi",
-                "--query-gpu=index,name,memory.used,memory.total",
-                "--format=csv,noheader,nounits",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=False,
-        )
-    except Exception:
-        return "", False
-    if completed.returncode != 0:
-        return "", False
-
-    rows: list[str] = []
-    near_full = False
-    for line in completed.stdout.splitlines():
-        parts = [part.strip() for part in line.split(",")]
-        if len(parts) < 4:
-            continue
-        index, name, used_text, total_text = parts[:4]
-        try:
-            used_mb = int(float(used_text))
-            total_mb = int(float(total_text))
-        except Exception:
-            continue
-        if total_mb <= 0:
-            continue
-        pct = (used_mb / total_mb) * 100.0
-        free_mb = max(0, total_mb - used_mb)
-        if pct >= 95.0 or free_mb < 512:
-            near_full = True
-        rows.append(f"gpu{index} {name} used={used_mb}/{total_mb}MB ({pct:.1f}%), free={free_mb}MB")
-    return " | ".join(rows), near_full
-
-
-def answer_gpu_runtime_status_query(user_text: str) -> str:
-    text = clean_text(user_text).lower()
-    if not any(marker in text for marker in ("vram", "oom", "gpu", "브이램")):
-        return ""
-    gpu_status, gpu_near_full = load_runtime_gpu_status()
-    if not gpu_status:
-        return "지금 GPU VRAM 상태를 읽지 못했어. `nvidia-smi` 결과를 확인해야 해."
-    if gpu_near_full:
-        return f"현재 GPU 여유가 매우 낮아서 OOM 위험이 있어: {gpu_status}"
-    return f"현재 OOM 신호는 없어. GPU 상태: {gpu_status}"
-
-
 async def build_runtime_status_context(*, force: bool = False) -> str:
     global runtime_status_context_lock
     if not RUNTIME_STATUS_CONTEXT_ENABLED:
@@ -4404,6 +3304,10 @@ async def build_runtime_status_context(*, force: bool = False) -> str:
         try:
             services = await get_control_page_runtime_services()
             service_summary = compact_runtime_error(services.get("summary"), max_chars=120)
+            bot_api_ready = is_control_api_ready_from_runtime_services(services)
+            if services and not bot_api_ready:
+                bot_api_reason = clean_text(str(services.get("botApiReason") or services.get("botApiState") or "unknown"))
+                service_down_labels.append("bot_api" if not bot_api_reason else f"bot_api:{bot_api_reason}")
         except Exception:
             service_summary = ""
         if service_summary:
@@ -4435,142 +3339,11 @@ async def build_runtime_status_context(*, force: bool = False) -> str:
         return text
 
 
-def _collect_local_tool_diagnostic_matches(path: Path, terms: tuple[str, ...], *, max_matches: int = 5) -> list[str]:
-    if not path.exists() or not path.is_file():
-        return []
-    try:
-        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-    except OSError as exc:
-        return [f"{path.name}: read_failed={clean_text(repr(exc))[:120]}"]
-    matches: list[str] = []
-    lowered_terms = tuple(term.lower() for term in terms if term)
-    for index, line in enumerate(lines, start=1):
-        lowered = line.lower()
-        if any(term in lowered for term in lowered_terms):
-            matches.append(f"{path.name}:{index}: {clean_text(line)[:160]}")
-            if len(matches) >= max_matches:
-                break
-    return matches
-
-
-def build_local_tool_diagnostic_context(user_text: str) -> str:
-    text = clean_text(user_text).lower()
-    if not any(marker in text for marker in ("tool", "function", "llm", "도구", "툴", "호출", "메인")):
-        return ""
-    terms = (
-        "build_tool_use_decisions",
-        "render_tool_use_context",
-        "tool_use_decisions",
-        "local_file_or_log_read",
-        "runtime_status",
-        "build_main_llm_payload",
-        "prepare_llm_messages",
-        "build_main_response_guidance",
-    )
-    candidate_paths = (
-        PROJECT_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "context_pipeline.py",
-        PROJECT_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "skills" / "routing" / "voice_llm.py",
-        PROJECT_ROOT / "main.py",
-        PROJECT_ROOT / "tests" / "test_context_pipeline_tool_policy.py",
-    )
-    evidence: list[str] = ["local_tool_diagnostic_snapshot:"]
-    for path in candidate_paths:
-        evidence.extend(_collect_local_tool_diagnostic_matches(path, terms, max_matches=4))
-    return "\n".join(evidence[:18])
-
-
 def _skill_route_available(route_name: str, *, source: str) -> bool:
     try:
         return bool(skill_registry.find_by_route(route_name, source=source))
     except Exception:
         return False
-
-
-def _text_has_any_marker(text: str, markers: tuple[str, ...]) -> bool:
-    lowered = clean_text(text).lower()
-    compact = re.sub(r"\s+", "", lowered)
-    return any(marker in lowered or marker.replace(" ", "") in compact for marker in markers)
-
-
-def build_tool_awareness_context(
-    user_text: str,
-    *,
-    source: str = "text",
-    route_decision: RouteDecision | None = None,
-) -> str:
-    text = clean_text(user_text)
-    tools: list[str] = []
-    search_markers = (
-        "search",
-        "look up",
-        "find",
-        "check",
-        "weather",
-        "news",
-        "price",
-        "검색",
-        "찾아",
-        "찾아봐",
-        "확인",
-        "날씨",
-        "뉴스",
-        "가격",
-        "시세",
-        "환율",
-        "주가",
-        "최신",
-    )
-    runtime_markers = (
-        "runtime",
-        "status",
-        "voice",
-        "model",
-        "llm",
-        "evelyn",
-        "이블린",
-        "상태",
-        "음성",
-        "모델",
-        "서버",
-        "켜져",
-        "오류",
-        "에러",
-    )
-    minecraft_markers = (
-        "minecraft",
-        "voyager",
-        "inventory",
-        "마크",
-        "마인크래프트",
-        "보이저",
-        "인벤",
-    )
-
-    needs_search = bool(route_decision and (route_decision.needs_search or route_decision.action == "search_then_answer"))
-    needs_search = needs_search or _text_has_any_marker(text, search_markers)
-    if needs_search and _skill_route_available("search_executor", source=source):
-        tools.append("- search: use for current info, weather, prices, news, web lookup, and explicit find/check/search requests.")
-
-    if _text_has_any_marker(text, minecraft_markers):
-        tools.append("- minecraft.status: use runtime Minecraft/Voyager state when a Minecraft status or inventory question is asked.")
-
-    if _text_has_any_marker(text, runtime_markers):
-        tools.append("- runtime.status: use live Evelyn runtime/service status when the user asks about Evelyn, voice, model, server, or errors.")
-
-    if not tools and _skill_route_available("search_executor", source=source):
-        tools.append("- search: available if the user asks for current info, weather, prices, news, or explicit web lookup.")
-
-    if not tools:
-        return ""
-
-    return clean_text(
-        "TOOL_AWARENESS: Runtime, not memory, is the source of truth for tools. "
-        "Available tool shortlist for this turn: "
-        + " ".join(tools[:4])
-        + " Contract: if a tool is needed, do not give only a promise such as 'I'll look it up' as the final answer. "
-        "Route to the tool executor or produce a short preface that the runtime can escalate. "
-        "After a tool result exists, answer in the final phase grounded in that result."
-    )
 
 
 def build_main_response_guidance(
@@ -4621,6 +3394,7 @@ def build_main_response_guidance(
         user_text,
         source=source,
         route_decision=route_decision,
+        route_available=_skill_route_available,
     )
     if tool_awareness_context:
         parts.append(tool_awareness_context)
@@ -4652,87 +3426,6 @@ def build_main_response_guidance(
             parts.append("답변 끝에 새 질문을 덧붙이지 마라.")
 
     return " ".join(clean_text(part) for part in parts if clean_text(part))
-
-
-def normalize_route_name(value: str) -> str:
-    route = clean_text(value).lower()
-    if route in {"subwait", "sub_wait", "wait", "fresh_sub", "fresh-sub"}:
-        return "sub_wait"
-    if route in {"subhint", "sub_hint", "hint", "cached_sub", "cached-sub"}:
-        return "sub_hint"
-    if route in {"voice_context", "voice-context", "context", "memory_context"}:
-        return "sub_hint"
-    return "main_direct"
-
-
-def should_force_voice_context_route(user_text: str) -> bool:
-    text = clean_text(user_text)
-    if not text:
-        return False
-    voice_context_markers = [
-        "기억",
-        "방금",
-        "아까",
-        "전에",
-        "이전",
-        "말했",
-        "했던",
-        "하던",
-        "무슨 얘기",
-        "뭐지",
-        "이어",
-        "계속",
-        "정리",
-        "요약",
-        "우리",
-        "우리가",
-        "하기로",
-        "먹기로",
-        "가기로",
-        "약속",
-        "정했",
-    ]
-    marker_hits = sum(1 for marker in voice_context_markers if marker in text)
-    if marker_hits >= 1:
-        return True
-    return bool(re.search(r"(우리|우리가).*(하기로|먹기로|가기로)", text))
-
-
-def classify_llm_route_fallback(user_text: str, *, source: str = "text") -> str:
-    text = clean_text(user_text)
-    if source == "voice" and not should_force_voice_context_route(text):
-        return "main_direct"
-
-    short_text = len(text) <= 18 or len(text.split()) <= 4
-    if short_text and source != "voice":
-        return "main_direct"
-
-    context_markers = [
-        "아까",
-        "방금",
-        "전에",
-        "이전",
-        "기억",
-        "문맥",
-        "계속",
-        "이어",
-        "요약",
-        "정리",
-        "판단",
-        "비교",
-        "설명",
-        "의견",
-        "생각",
-        "왜",
-        "어떻게",
-    ]
-    marker_hits = sum(1 for marker in context_markers if marker in text)
-
-    if len(text) >= 60 or marker_hits >= 2:
-        return "sub_wait"
-    if len(text) >= 24 or marker_hits >= 1:
-        return "sub_hint"
-    return "main_direct"
 
 
 def build_vision_observation_prompt(user_text: str) -> str:
@@ -5125,7 +3818,7 @@ async def prepare_llm_messages(
         if decision.tool_name != "local_file_or_log_read" or not decision.auto_allowed:
             continue
         try:
-            local_context = build_local_tool_diagnostic_context(user_text)
+            local_context = build_local_tool_diagnostic_context(user_text, project_root=PROJECT_ROOT)
             decision.status = "executed" if clean_text(local_context) else "executed_empty"
             decision.evidence = clean_text(local_context)[:800] if clean_text(local_context) else "No matching local diagnostic snippets were selected."
         except Exception as exc:
@@ -5140,6 +3833,7 @@ async def prepare_llm_messages(
             user_text,
             cognitive_state=cognitive_state,
             session_key=session_key,
+            session_state=session_state_snapshot(session_key),
             room_key=room_key,
             person_key=person_key,
             session_memory_key=session_memory_key,
@@ -5311,221 +4005,6 @@ async def prepare_llm_messages(
     else:
         print(f"[LLM ROUTE] source={source} route={route} via=fallback text={visible_text(route_text)!r}")
     return messages, cognitive_state, route, context_policy
-
-
-def collect_memory_layers(
-    guild_id: int,
-    *,
-    room_key: str | None = None,
-    person_key: str | None = None,
-    session_memory_key: str | None = None,
-) -> dict[str, dict]:
-    layers: dict[str, dict] = {
-        "guild": {
-            "label": "공용 방 기억",
-            "scope_type": "guild",
-            "scope_key": None,
-            "summary": compact_working_summary(read_text_file(memory_summary_path(guild_id))),
-            "raw": read_jsonl(memory_raw_path(guild_id)),
-            "vault_raw": read_vault_raw_rows(guild_id),
-            "facts": read_fact_rows(guild_id),
-            "questions": read_question_rows(guild_id),
-        }
-    }
-
-    if room_key:
-        layers["room"] = {
-            "label": "방 기억",
-            "scope_type": "room",
-            "scope_key": room_key,
-            "summary": compact_working_summary(read_text_file(memory_summary_path(guild_id, scope_type="room", scope_key=room_key))),
-            "raw": read_jsonl(memory_raw_path(guild_id, scope_type="room", scope_key=room_key)),
-            "vault_raw": read_vault_raw_rows(guild_id, scope_type="room", scope_key=room_key),
-            "facts": read_fact_rows(guild_id, scope_type="room", scope_key=room_key),
-            "questions": read_question_rows(guild_id, scope_type="room", scope_key=room_key),
-        }
-
-    if person_key:
-        layers["person"] = {
-            "label": "이 사람 기억",
-            "scope_type": "person",
-            "scope_key": person_key,
-            "summary": compact_working_summary(read_text_file(memory_summary_path(guild_id, scope_type="person", scope_key=person_key))),
-            "raw": read_jsonl(memory_raw_path(guild_id, scope_type="person", scope_key=person_key)),
-            "vault_raw": read_vault_raw_rows(guild_id, scope_type="person", scope_key=person_key),
-            "facts": read_fact_rows(guild_id, scope_type="person", scope_key=person_key),
-            "questions": read_question_rows(guild_id, scope_type="person", scope_key=person_key),
-        }
-
-    if session_memory_key:
-        layers["session"] = {
-            "label": "현재 세션 기억",
-            "scope_type": "session",
-            "scope_key": session_memory_key,
-            "summary": compact_working_summary(read_text_file(memory_summary_path(guild_id, scope_type="session", scope_key=session_memory_key))),
-            "raw": read_jsonl(memory_raw_path(guild_id, scope_type="session", scope_key=session_memory_key)),
-            "vault_raw": read_vault_raw_rows(guild_id, scope_type="session", scope_key=session_memory_key),
-            "facts": read_fact_rows(guild_id, scope_type="session", scope_key=session_memory_key),
-            "questions": read_question_rows(guild_id, scope_type="session", scope_key=session_memory_key),
-        }
-
-    return layers
-
-
-def merge_recent_memory_rows(*row_groups: list[dict], limit: int) -> list[dict]:
-    merged = merge_memory_rows(*row_groups)
-    merged.sort(key=lambda row: int(row.get("saved_at", 0) or 0))
-    return merged[-limit:]
-
-
-def read_layered_cognitive_state(
-    guild_id: int,
-    *,
-    room_key: str | None = None,
-    person_key: str | None = None,
-    session_memory_key: str | None = None,
-) -> dict | None:
-    if session_memory_key:
-        session_state = read_json_file(cognitive_state_path(guild_id, scope_type="session", scope_key=session_memory_key))
-        if session_state:
-            return normalize_cognitive_state(session_state)
-    if person_key:
-        person_state = read_json_file(cognitive_state_path(guild_id, scope_type="person", scope_key=person_key))
-        if person_state:
-            return normalize_cognitive_state(person_state)
-    if room_key:
-        room_state = read_json_file(cognitive_state_path(guild_id, scope_type="room", scope_key=room_key))
-        if room_state:
-            return normalize_cognitive_state(room_state)
-    guild_state = read_json_file(cognitive_state_path(guild_id))
-    return normalize_cognitive_state(guild_state) if guild_state else None
-
-
-def format_memory_row_lines(rows: list[dict]) -> str:
-    return "\n".join(
-        f"- {clean_text(str(row.get('speaker', row.get('role', 'unknown')))) or 'unknown'}"
-        f" ({clean_text(str(row.get('source', 'unknown'))) or 'unknown'}): {clean_text(str(row.get('text', '')))}"
-        for row in rows
-        if clean_text(str(row.get('text', '')))
-    )
-
-
-def build_memory_context(
-    guild_id: int,
-    user_text: str,
-    cognitive_state: dict | None = None,
-    *,
-    session_key: str | None = None,
-    room_key: str | None = None,
-    person_key: str | None = None,
-    session_memory_key: str | None = None,
-) -> str:
-    layers = collect_memory_layers(
-        guild_id,
-        room_key=room_key,
-        person_key=person_key,
-        session_memory_key=session_memory_key,
-    )
-    facts = select_relevant_memory_rows(
-        user_text,
-        merge_memory_rows(*(layer["facts"] for layer in layers.values())),
-        MEMORY_RETRIEVE_LIMIT,
-    )
-    questions = select_relevant_memory_rows(
-        user_text,
-        merge_memory_rows(*(layer["questions"] for layer in layers.values())),
-        4,
-    )
-    vault_raw_rows = select_relevant_memory_rows(
-        user_text,
-        merge_memory_rows(*(layer["vault_raw"] for layer in layers.values())),
-        MEMORY_VAULT_RAW_RETRIEVE_LIMIT,
-    )
-    state = normalize_cognitive_state(
-        cognitive_state or read_layered_cognitive_state(
-            guild_id,
-            room_key=room_key,
-            person_key=person_key,
-            session_memory_key=session_memory_key,
-        ) or {}
-    )
-    session_state = session_state_snapshot(session_key)
-    vault_context = build_memory_vault_context(
-        guild_id,
-        user_text,
-        session_key=session_key,
-        topic_id=clean_text(str(session_state.get("topic_id", ""))) or None,
-        source="context_pipeline",
-        context_focus=[
-            "relevant_memory",
-            clean_text(str(state.get("user_intent", ""))),
-            clean_text(str(state.get("state_summary", ""))),
-        ],
-        max_items=5,
-    )
-
-    parts: list[str] = []
-    summary_lines = [
-        f"- {layer['label']}: {layer['summary']}"
-        for layer in (layers.get("session"), layers.get("person"), layers.get("room"), layers.get("guild"))
-        if layer and layer.get("summary")
-    ]
-    if summary_lines:
-        parts.append("현재 작업 요약:\n" + "\n".join(summary_lines))
-
-    session_rows = merge_recent_memory_rows(*(layer["raw"] for layer in (layers.get("session"),) if layer), limit=4)
-    if session_rows:
-        parts.append("현재 세션 최근 대화:\n" + format_memory_row_lines(session_rows))
-
-    person_rows = merge_recent_memory_rows(*(layer["raw"] for layer in (layers.get("person"),) if layer), limit=4)
-    if person_rows:
-        parts.append("이 사람과의 최근 대화:\n" + format_memory_row_lines(person_rows))
-
-    room_rows = merge_recent_memory_rows(
-        *(layer["raw"] for layer in (layers.get("room"), layers.get("guild")) if layer),
-        limit=MEMORY_RAW_CONTEXT_LIMIT,
-    )
-    if room_rows:
-        parts.append("방 최근 대화:\n" + format_memory_row_lines(room_rows))
-
-    if vault_raw_rows:
-        parts.append("문서 보관함에서 꺼낸 관련 대화:\n" + format_memory_row_lines(vault_raw_rows))
-    if session_state:
-        action_label = {
-            "answer": "답하기",
-            "ask": "질문하기",
-            "wait": "더 듣기",
-        }.get(state.get("action", "answer"), "답하기")
-        state_lines = [f"- 권장 행동: {action_label}"]
-        if state.get("user_intent"):
-            state_lines.append(f"- 사용자 의도: {state['user_intent']}")
-        if state.get("retrieved_context_ids"):
-            state_lines.append(f"- 참고 문맥 ID: {', '.join(state['retrieved_context_ids'][:4])}")
-        if session_state.get("last_speaker"):
-            state_lines.append(f"- 마지막 화자: {session_state['last_speaker']}")
-        if session_state.get("awaiting_user_reply"):
-            state_lines.append("- 사용자 후속 응답 대기 중")
-        if session_state.get("topic_id"):
-            state_lines.append(f"- 현재 topic_id: {session_state['topic_id']}")
-        parts.append("현재 내부 상태(사용자 발화 아님):\n" + "\n".join(state_lines))
-    if vault_context:
-        parts.append("Structured memory vault recall:\n" + vault_context)
-    if facts:
-        parts.append(
-            "장기 기억 후보:\n" + "\n".join(f"- {clean_text(str(row.get('text', '')))}" for row in facts)
-        )
-    if questions:
-        parts.append(
-            "열린 질문/가설:\n" + "\n".join(f"- {clean_text(str(row.get('text', '')))}" for row in questions)
-        )
-
-    if not parts:
-        return ""
-
-    return (
-        "다음은 이전 대화에서 정리한 참고 메모다. 사실처럼 단정하지 말고, 현재 질문과 맞는 경우에만 자연스럽게 반영해라.\n\n"
-        + "\n\n".join(parts)
-    )
 
 
 def extract_json_object(text: str) -> dict:
@@ -5826,12 +4305,7 @@ async def update_cognitive_state(
                 person_key=person_key,
                 session_memory_key=session_memory_key,
             )
-            summary_lines = [
-                f"- {layer['label']}: {layer['summary']}"
-                for layer in (layers.get("session"), layers.get("person"), layers.get("room"), layers.get("guild"))
-                if layer and layer.get("summary")
-            ]
-            current_summary = "\n".join(summary_lines)
+            current_summary = layered_summary_text(layers)
             current_state = normalize_cognitive_state(
                 read_layered_cognitive_state(
                     guild_id,
@@ -5851,42 +4325,22 @@ async def update_cognitive_state(
                 )
                 write_json_file(cognitive_state_path(guild_id, scope_type=scope_type, scope_key=scope_key), state)
                 return state
-            recent_raw = merge_recent_memory_rows(
-                *(layer["raw"] for layer in layers.values()),
-                limit=MEMORY_COGNITIVE_RAW_LIMIT,
-            )
-            recent_facts = merge_recent_memory_rows(
-                *(layer["facts"] for layer in layers.values()),
-                limit=4,
-            )
-            recent_questions = merge_recent_memory_rows(
-                *(layer["questions"] for layer in layers.values()),
-                limit=4,
+            recent = recent_memory_groups(
+                layers,
+                raw_limit=MEMORY_COGNITIVE_RAW_LIMIT,
+                facts_limit=4,
+                questions_limit=4,
             )
 
-            messages = [
-                {
-                    "role": "system",
-                    "content": (
-                        '너는 실시간 대화 조율자다. 반드시 JSON 객체 하나만 출력한다. '
-                        '형식은 {"action": "answer|ask|wait|search_then_answer", "confidence": number, "user_intent": string, "state_summary": string, "question_for_user": string, "main_prompt_hint": string, "reason_brief": string, "retrieved_context_ids": string[]}. '
-                        'answer는 지금 답하면 되는 경우다. ask는 사용자의 원래 발화에 이어서 짧게 되묻거나 확인 질문을 하는 편이 자연스러운 경우다. wait는 아직 단정하지 말고 더 듣거나 짧게 여지를 두는 편이 자연스러운 경우다. search_then_answer는 최신 정보나 외부 확인이 필요해서 먼저 짧게 알리고 뒤이어 검색 결과를 전해야 하는 경우다. '
-                        'question_for_user는 사용자가 한 말이 아니라, 메인 LLM이 사용자에게 되물을 내부 질문 초안이다. 절대로 사용자의 질문을 베껴 쓰거나 사용자가 이미 한 말처럼 적지 마라. '
-                        'user_intent에는 사용자가 진짜로 하려는 말을 아주 짧게 적어라. state_summary에는 현재 상황을 한두 문장으로 적어라. main_prompt_hint에는 메인 LLM이 말할 때 지켜야 할 한 줄 힌트를 적어라. confidence는 0~1, reason_brief는 아주 짧게 써라. JSON 외 다른 텍스트는 절대 출력하지 마라.'
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": (
-                        f"이전 cognitive_state:\n{json.dumps(current_state, ensure_ascii=False)}\n\n"
-                        f"현재 layered_summary:\n{current_summary or '(없음)'}\n\n"
-                        f"최근 raw_transcript:\n{format_memory_rows_for_llm(recent_raw, max_items=MEMORY_COGNITIVE_RAW_LIMIT)}\n\n"
-                        f"최근 durable_facts:\n{format_memory_rows_for_llm(recent_facts, max_items=4)}\n\n"
-                        f"최근 open_questions:\n{format_memory_rows_for_llm(recent_questions, max_items=4)}\n\n"
-                        f"현재 사용자 입력:\n{compact_memory_text(user_text, max_chars=160)}"
-                    ),
-                },
-            ]
+            messages = build_cognitive_state_messages(
+                current_state=current_state,
+                current_summary=current_summary,
+                recent_raw=recent["raw"],
+                recent_facts=recent["facts"],
+                recent_questions=recent["questions"],
+                user_text=user_text,
+                raw_limit=MEMORY_COGNITIVE_RAW_LIMIT,
+            )
 
             try:
                 if turn_scope is not None:
@@ -5904,16 +4358,10 @@ async def update_cognitive_state(
                 )
             except Exception as e:
                 if is_context_size_error(e):
-                    compact_messages = [
-                        messages[0],
-                        {
-                            "role": "user",
-                            "content": (
-                                f"현재 layered_summary:\n{current_summary or '(없음)'}\n\n"
-                                f"현재 사용자 입력:\n{compact_memory_text(user_text, max_chars=120)}"
-                            ),
-                        },
-                    ]
+                    compact_messages = build_compact_cognitive_state_messages(
+                        current_summary=current_summary,
+                        user_text=user_text,
+                    )
                     try:
                         if turn_scope is not None:
                             turn_scope.raise_if_cancelled()
@@ -5938,28 +4386,20 @@ async def update_cognitive_state(
                     elapsed_ms = (time.monotonic() - started_at) * 1000.0
                     if should_log_voice_timing(elapsed_ms):
                         print(f"[COGNITIVE LATENCY] guild={guild_id} scope={scope_type}:{scope_key or 'default'} failed_after_ms={elapsed_ms:.0f}")
-                    fallback = current_state or {
-                        "action": "answer",
-                        "confidence": 0.5,
-                        "user_intent": clean_text(user_text),
-                        "state_summary": clean_text(user_text),
-                        "question_for_user": "",
-                        "main_prompt_hint": "짧고 자연스럽게 답해라.",
-                        "reason_brief": "fallback",
-                        "retrieved_context_ids": [],
-                        "updated_at": int(time.time()),
-                    }
+                    fallback = build_cognitive_fallback_state(
+                        current_state=current_state,
+                        user_text=user_text,
+                    )
                     write_json_file(cognitive_state_path(guild_id, scope_type=scope_type, scope_key=scope_key), fallback)
                     return fallback
 
             if turn_scope is not None:
                 turn_scope.raise_if_cancelled()
-            state = normalize_cognitive_state(result)
-            if not state.get("state_summary"):
-                state["state_summary"] = current_state.get("state_summary", "") or clean_text(user_text)
-            if not state.get("main_prompt_hint"):
-                state["main_prompt_hint"] = "짧고 자연스럽게 답해라."
-            state["updated_at"] = int(time.time())
+            state = finalize_cognitive_state(
+                result,
+                current_state=current_state,
+                user_text=user_text,
+            )
             write_json_file(cognitive_state_path(guild_id, scope_type=scope_type, scope_key=scope_key), state)
             elapsed_ms = (time.monotonic() - started_at) * 1000.0
             if should_log_voice_timing(elapsed_ms):
@@ -5987,199 +4427,29 @@ async def update_long_term_memory(
     session_memory_key: str | None = None,
     turn_scope: TurnScope | None = None,
 ) -> None:
-    started_at = time.monotonic()
     task = _attach_current_task(turn_scope)
     lock = memory_locks.setdefault(guild_id, asyncio.Lock())
-    scope_note = session_memory_key or room_key or "guild"
     try:
         async with lock:
-            if turn_scope is not None:
-                turn_scope.raise_if_cancelled()
-            layers = collect_memory_layers(
+            await run_long_term_memory_update(
                 guild_id,
+                user_text,
+                answer,
                 room_key=room_key,
                 person_key=person_key,
                 session_memory_key=session_memory_key,
+                turn_scope=turn_scope,
+                collect_layers=collect_memory_layers,
+                ask_summary_llm=ask_summary_llm,
+                is_context_size_error=is_context_size_error,
+                should_log_latency=should_log_voice_timing,
+                memory_fact_limit=MEMORY_FACT_LIMIT,
+                memory_loop_limit=MEMORY_LOOP_LIMIT,
+                raw_limit=MEMORY_LONGTERM_RAW_LIMIT,
+                log=print,
             )
-            summary_lines = [
-                f"- {layer['label']}: {layer['summary']}"
-                for layer in (layers.get("session"), layers.get("person"), layers.get("room"), layers.get("guild"))
-                if layer and layer.get("summary")
-            ]
-            current_summary = "\n".join(summary_lines)
-            recent_raw = merge_recent_memory_rows(
-                *(layer["raw"] for layer in layers.values()),
-                limit=MEMORY_LONGTERM_RAW_LIMIT,
-            )
-            recent_facts = merge_recent_memory_rows(
-                *(layer["facts"] for layer in layers.values()),
-                limit=6,
-            )
-            recent_questions = merge_recent_memory_rows(
-                *(layer["questions"] for layer in layers.values()),
-                limit=4,
-            )
-
-            messages = [
-                {
-                    "role": "system",
-                    "content": (
-                        '너는 대화 장기기억 관리자이자 상황 정리자다. 반드시 JSON 객체 하나만 출력한다. '
-                        '형식은 {"summary_update": string, "durable_facts": [{"type": string, "text": string}], "open_questions": [{"type": string, "text": string}]}. '
-                        'summary_update는 지금 상황을 짧고 자연스러운 한국어로 압축한 누적 요약이다. '
-                        'durable_facts에는 오래 기억할 만한 선호, 설정, 프로젝트 결정, 반복되는 사실만 넣어라. '
-                        'open_questions에는 아직 확정되지 않은 추정, 확인이 필요한 질문, 다음에 물어볼 만한 포인트만 넣어라. '
-                        '잡담, 일회성 노이즈, 이미 해결된 내용은 넣지 마라. JSON 외 다른 텍스트는 절대 출력하지 마라.'
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": (
-                        f"현재 layered_summary:\n{current_summary or '(없음)'}\n\n"
-                        f"최근 raw_transcript:\n{format_memory_rows_for_llm(recent_raw, max_items=MEMORY_LONGTERM_RAW_LIMIT)}\n\n"
-                        f"최근 durable_facts:\n{format_memory_rows_for_llm(recent_facts, max_items=6)}\n\n"
-                        f"최근 open_questions:\n{format_memory_rows_for_llm(recent_questions, max_items=4)}\n\n"
-                        f"새 대화:\n- user: {compact_memory_text(user_text, max_chars=120)}\n- assistant: {compact_memory_text(answer, max_chars=120)}"
-                    ),
-                },
-            ]
-
-            try:
-                if turn_scope is not None:
-                    turn_scope.raise_if_cancelled()
-                result = await ask_summary_llm(
-                    messages,
-                    purpose="memory_summary",
-                    hot_path=False,
-                    turn_id=getattr(turn_scope, "turn_id", None),
-                    session_key=session_memory_key,
-                    source="memory_writebehind",
-                    guild_id=guild_id,
-                )
-            except Exception as e:
-                if is_context_size_error(e):
-                    compact_messages = [
-                        messages[0],
-                        {
-                            "role": "user",
-                            "content": (
-                                f"현재 layered_summary:\n{current_summary or '(없음)'}\n\n"
-                                f"새 대화:\n- user: {compact_memory_text(user_text, max_chars=100)}\n- assistant: {compact_memory_text(answer, max_chars=100)}"
-                            ),
-                        },
-                    ]
-                    try:
-                        if turn_scope is not None:
-                            turn_scope.raise_if_cancelled()
-                        result = await ask_summary_llm(
-                            compact_messages,
-                            max_tokens=220,
-                            timeout_seconds=20,
-                            purpose="memory_summary",
-                            hot_path=False,
-                            turn_id=getattr(turn_scope, "turn_id", None),
-                            session_key=session_memory_key,
-                            source="memory_writebehind",
-                            guild_id=guild_id,
-                        )
-                    except Exception as e2:
-                        e = e2
-                        print(f"[MEMORY] compact retry 실패: {e2}")
-                    else:
-                        print("[MEMORY] compact retry 성공")
-                if "result" not in locals() or not isinstance(result, dict):
-                    print(f"[MEMORY] 요약 업데이트 실패: {e}")
-                    elapsed_ms = (time.monotonic() - started_at) * 1000.0
-                    if should_log_voice_timing(elapsed_ms):
-                        print(f"[MEMORY LATENCY] guild={guild_id} scope={scope_note} failed_after_ms={elapsed_ms:.0f}")
-                    return
-
-            if turn_scope is not None:
-                turn_scope.raise_if_cancelled()
-            scope_targets: list[tuple[str, str | None]] = [("guild", None)]
-            if room_key:
-                scope_targets.append(("room", room_key))
-            if person_key:
-                scope_targets.append(("person", person_key))
-            if session_memory_key:
-                scope_targets.append(("session", session_memory_key))
-
-            summary_update = compact_working_summary(str(result.get("summary_update", "")))
-            if summary_update:
-                for scope_type, scope_key in scope_targets:
-                    write_text_file(memory_summary_path(guild_id, scope_type=scope_type, scope_key=scope_key), summary_update)
-
-            durable_facts = result.get("durable_facts", [])
-            if isinstance(durable_facts, list):
-                rows = [row for row in durable_facts if isinstance(row, dict)]
-                for scope_type, scope_key in scope_targets:
-                    append_unique_memory_rows(
-                        memory_facts_path(guild_id, scope_type=scope_type, scope_key=scope_key),
-                        rows,
-                        MEMORY_FACT_LIMIT,
-                        mirror_path=vault_facts_path(guild_id, scope_type=scope_type, scope_key=scope_key),
-                    )
-
-            open_questions = result.get("open_questions", [])
-            if isinstance(open_questions, list):
-                rows = [row for row in open_questions if isinstance(row, dict)]
-                for scope_type, scope_key in scope_targets:
-                    append_unique_memory_rows(
-                        memory_questions_path(guild_id, scope_type=scope_type, scope_key=scope_key),
-                        rows,
-                        MEMORY_LOOP_LIMIT,
-                        mirror_path=vault_questions_path(guild_id, scope_type=scope_type, scope_key=scope_key),
-                    )
-                    try:
-                        promote_open_questions(guild_id, rows, scope_type=scope_type, scope_key=scope_key)
-                    except Exception as e:
-                        print(f"[PROACTIVE QUESTIONS] promote failed guild={guild_id} scope={scope_type}:{scope_key or 'default'} err={e}")
-
-            elapsed_ms = (time.monotonic() - started_at) * 1000.0
-            if should_log_voice_timing(elapsed_ms):
-                print(f"[MEMORY LATENCY] guild={guild_id} scope={scope_note} ms={elapsed_ms:.0f}")
     finally:
         _detach_task(turn_scope, task)
-def should_run_memory_update(
-    *,
-    guild_id: int,
-    user_text: str,
-    answer: str,
-    source: str,
-    session_key: str | None = None,
-) -> bool:
-    cleaned_user = clean_text(user_text)
-    cleaned_answer = clean_text(answer)
-    merged = clean_text(f"{cleaned_user} {cleaned_answer}")
-    text_len = len(cleaned_user)
-    has_open_question = ("?" in cleaned_user) or ("?" in cleaned_answer)
-    explicit_fact_markers = ("나는 ", "내가 ", "우리는", "설정", "결정", "기억", "기억해줘", "해야", "하기로")
-    has_explicit_fact = any(marker in merged for marker in explicit_fact_markers)
-    is_smalltalk = (
-        not needs_search_or_deep_routing(cleaned_user, source=source)
-        and len(cleaned_user) <= 14
-        and len(cleaned_answer) <= 32
-    )
-    turn_index = 1
-    idle_gap_sec = 0.0
-    if session_key:
-        history_len = len(get_conversation_history(session_key=session_key, guild_id=guild_id))
-        turn_index = max(1, (history_len + 1) // 2)
-        idle_gap_sec = max(0.0, time.monotonic() - float(session_last_active_at.get(session_key, 0.0) or 0.0))
-
-    if has_explicit_fact:
-        return True
-    if has_open_question:
-        return True
-    if turn_index % 4 == 0:
-        return True
-    if source == "voice" and text_len < 12:
-        return False
-    if is_smalltalk:
-        return False
-    return idle_gap_sec >= 20.0
-
-
 def schedule_memory_vault_maintenance(guild_id: int, *, turn_scope: TurnScope | None = None) -> None:
     interval_sec = float(os.getenv("MEMORY_VAULT_MAINTENANCE_INTERVAL_SEC", "900"))
     now = time.monotonic()
@@ -6214,30 +4484,11 @@ def schedule_memory_vault_maintenance(guild_id: int, *, turn_scope: TurnScope | 
     background_memory_vault_tasks[guild_id] = create_turn_scoped_task(_maintain_memory_vault(), turn_scope=turn_scope)
 
 
-VISION_MEMORY_LINE_RE = re.compile(
-    r"(?im)^\s*(?:captured_image|image_size|scene|ocr_text|ocr_error|analysis_error)\s*:\s?.*$"
-    r"|^\s*(?:captured_image|image_size)\s*=.*$"
-)
-
-
 def redact_vision_text_for_memory(text: str) -> str:
-    if VISION_MEMORY_WRITE_ENABLED:
-        return text
-    cleaned = clean_text(text)
-    if not cleaned:
-        return ""
-    markers = (
-        "Local screen vision observation is available.",
-        "Background local screen observation:",
-        "ocr_text:",
-        "captured_image=",
+    return redact_vision_text_for_memory_payload(
+        text,
+        vision_memory_write_enabled=VISION_MEMORY_WRITE_ENABLED,
     )
-    if not any(marker in cleaned for marker in markers):
-        return cleaned
-    redacted = VISION_MEMORY_LINE_RE.sub("[vision context redacted]", cleaned)
-    redacted = redacted.replace("Local screen vision observation is available.", "[vision context redacted]")
-    redacted = redacted.replace("Background local screen observation:", "[vision context redacted]")
-    return clean_text(redacted)
 
 
 def schedule_memory_update(
@@ -6255,86 +4506,89 @@ def schedule_memory_update(
     turn_scope: TurnScope | None = None,
     runtime_mode: str | None = None,
 ) -> dict[str, Any]:
-    memory_user_text = redact_vision_text_for_memory(user_text)
-    memory_answer = redact_vision_text_for_memory(answer)
-    rows = [
-        {"role": "user", "speaker": user_speaker, "source": source, "text": memory_user_text},
-        {"role": "assistant", "speaker": assistant_speaker, "source": source, "text": memory_answer},
-    ]
-    identity_record_decision = record_self_identity_turn(
-        memory_user_text,
-        memory_answer,
+    turn_write = write_memory_turn_records(
+        guild_id,
+        user_text,
+        answer,
+        room_key=room_key,
+        person_key=person_key,
+        session_memory_key=session_memory_key,
         source=source,
+        user_speaker=user_speaker,
+        assistant_speaker=assistant_speaker,
+        vision_memory_write_enabled=VISION_MEMORY_WRITE_ENABLED,
+        record_identity_turn=record_self_identity_turn,
+        append_raw_rows=append_raw_transcript_rows,
+        append_vault_rows=append_turn_rows_to_memory_vault,
+        log=print,
     )
-    append_raw_transcript_rows(guild_id, rows, mirror_daily=False)
-    daily_scope_labels = ["guild"]
-    if room_key:
-        append_raw_transcript_rows(guild_id, rows, scope_type="room", scope_key=room_key, mirror_daily=False)
-        daily_scope_labels.append(f"room:{room_key}")
-    if person_key:
-        append_raw_transcript_rows(guild_id, rows, scope_type="person", scope_key=person_key, mirror_daily=False)
-        daily_scope_labels.append(f"person:{person_key}")
-    if session_memory_key:
-        append_raw_transcript_rows(guild_id, rows, scope_type="session", scope_key=session_memory_key, mirror_daily=False)
-        daily_scope_labels.append(f"session:{session_memory_key}")
-    vault_mirrored = True
-    try:
-        append_turn_rows_to_memory_vault(
-            guild_id,
-            rows,
-            scope_labels=daily_scope_labels,
-        )
-    except Exception as exc:
-        vault_mirrored = False
-        print(f"[MEMORY VAULT] daily mirror failed: {exc!r}")
+    memory_user_text = turn_write.memory_user_text
+    memory_answer = turn_write.memory_answer
 
     mode = runtime_mode or "normal"
     if mode != "realtime":
         schedule_memory_vault_maintenance(guild_id, turn_scope=turn_scope)
-    memory_writer_decision = build_memory_writer_decision(
+    refresh_inputs = memory_refresh_inputs_for_turn(
+        user_text=memory_user_text,
+        source=source,
+        session_key=session_key,
+        guild_id=guild_id,
+        history_reader=get_conversation_history,
+        last_active_at=session_last_active_at,
+        deep_routing_needed=needs_search_or_deep_routing,
+    )
+    memory_writer_decision = build_memory_writer_decision_for_turn(
         user_text=memory_user_text,
         answer=memory_answer,
         source=source,
-        should_refresh_memory=should_run_memory_update(
-            guild_id=guild_id,
-            user_text=memory_user_text,
-            answer=memory_answer,
-            source=source,
-            session_key=session_key,
-        ),
         runtime_mode=mode,
+        refresh_inputs=refresh_inputs,
+        decision_builder=build_memory_writer_decision,
     )
-    decision_payload = memory_writer_decision.to_dict()
-    decision_payload["source"] = source
-    decision_payload["session_key"] = session_key
-    decision_payload["raw_transcript_written"] = True
-    decision_payload["vault_mirrored"] = vault_mirrored
-    decision_payload["identity_review_candidate"] = identity_record_decision
-    if not memory_writer_decision.should_run_summary_llm():
+    decision_payload = build_memory_writer_decision_payload(
+        memory_writer_decision,
+        source=source,
+        session_key=session_key,
+        raw_transcript_written=True,
+        vault_mirrored=turn_write.vault_mirrored,
+        identity_record_decision=turn_write.identity_record_decision,
+    )
+    schedule_plan = plan_memory_writebehind_schedule(
+        memory_writer_decision,
+        mode=mode,
+        guild_id=guild_id,
+        session_memory_key=session_memory_key,
+        room_key=room_key,
+        session_key=session_key,
+        decision_payload=decision_payload,
+        runtime_session_key=runtime_session_key,
+        task_key_builder=memory_writebehind_task_key,
+        should_replace_task=should_replace_existing_memory_task,
+    )
+    if schedule_plan.action == "skip":
         mark_memory_writer_status(
             decision_payload,
-            "skipped",
+            schedule_plan.status,
             event_path=MEMORY_WRITEBEHIND_STATUS_LOG,
             log=print,
-            writebehind_reason="summary_llm_not_needed",
+            writebehind_reason=schedule_plan.writebehind_reason,
         )
         return decision_payload
 
-    if mode == "realtime":
+    if schedule_plan.action == "defer":
         mark_memory_writer_status(
             decision_payload,
-            "deferred",
+            schedule_plan.status,
             event_path=MEMORY_WRITEBEHIND_STATUS_LOG,
             log=print,
-            writebehind_reason="runtime_mode_realtime",
+            writebehind_reason=schedule_plan.writebehind_reason,
         )
         return decision_payload
 
-    memory_task_key = session_memory_key or room_key or session_key or runtime_session_key(guild_id=guild_id)
-    if mode == "batch" and memory_task_key is not None:
-        memory_task_key = memory_writebehind_task_key(memory_task_key, decision_payload)
+    if schedule_plan.action == "batch" and schedule_plan.task_key is not None:
+        memory_task_key = schedule_plan.task_key
         existing = background_memory_tasks.get(memory_task_key)
-        if existing is not None and not existing.done() and should_replace_existing_memory_task(decision_payload):
+        if existing is not None and not existing.done() and schedule_plan.replace_existing:
             existing.cancel()
         async def _batched_memory_refresh() -> None:
             try:
@@ -6373,10 +4627,10 @@ def schedule_memory_update(
                     background_memory_tasks.pop(memory_task_key, None)
         mark_memory_writer_status(
             decision_payload,
-            "queued",
+            schedule_plan.status,
             event_path=MEMORY_WRITEBEHIND_STATUS_LOG,
             log=print,
-            writebehind_mode="batch",
+            writebehind_mode=schedule_plan.writebehind_mode,
         )
         background_memory_tasks[memory_task_key] = create_turn_scoped_task(_batched_memory_refresh(), turn_scope=turn_scope)
         return decision_payload
@@ -6411,138 +4665,29 @@ def schedule_memory_update(
 
     mark_memory_writer_status(
         decision_payload,
-        "queued",
+        schedule_plan.status,
         event_path=MEMORY_WRITEBEHIND_STATUS_LOG,
         log=print,
-        writebehind_mode="normal",
+        writebehind_mode=schedule_plan.writebehind_mode,
     )
     create_turn_scoped_task(_memory_writebehind(), turn_scope=turn_scope)
     return decision_payload
 
 
-RESPONSE_ACTION_TAGS = {"찾기": "search", "질문": "ask", "대기": "wait", "응답": "answer"}
-
-
-def parse_response_action_tag(text: str) -> tuple[str | None, str]:
-    raw = text or ""
-    match = re.match(r"^\s*\[(찾기|질문|대기|응답)\]\s*", raw)
-    if not match:
-        return None, clean_text(raw)
-    action = RESPONSE_ACTION_TAGS.get(match.group(1))
-    stripped = clean_text(raw[match.end():])
-    return action, stripped
-
-
-def normalize_friend_style_output(text: str) -> str:
-    cleaned = clean_text(text)
-    if not cleaned:
-        return ""
-    cleaned = cleaned.replace("부르셨나요", "불렀어?")
-    cleaned = cleaned.replace("말씀하세요", "말해")
-    cleaned = re.sub(r"[\U0001F300-\U0001FAFF\u2600-\u27BF]+", "", cleaned)
-    return clean_text(cleaned)
-
-
 def sanitize_model_output(text: str) -> str:
-    text = text or ""
-    text = strip_model_channel_tags(text)
-    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE)
-    text = re.sub(r"<think>.*$", "", text, flags=re.DOTALL | re.IGNORECASE)
-    for stop_token in MAIN_LLM_STOP_TOKENS:
-        if stop_token:
-            text = text.replace(stop_token, "")
-    text = normalize_omnivoice_tags(text)
-    _action, cleaned = parse_response_action_tag(text)
-    text = normalize_friend_style_output(cleaned)
-    text = cleanup_assistant_display_artifacts(text)
-    return text
-
-
-def strip_markdown_noise(text: str) -> str:
-    text = re.sub(r"[*_`#]+", "", text)
-    text = re.sub(r"^[\-\*\d\.\)\s]+", "", text)
-    return clean_text(text)
-
-
-def looks_like_meta_line(text: str) -> bool:
-    t = text.strip().lower()
-    blocked_prefixes = (
-        "thinking process",
-        "analyze the request",
-        "determine the",
-        "draft",
-        "option",
-        "selecting",
-        "refining",
-        "final polish",
-        "final output generation",
-        "role:",
-        "language:",
-        "format:",
-        "length:",
-        "tone:",
-        "content:",
-        "input:",
-        "wait",
-        "let's",
-        "let’s",
-        "or:",
+    return sanitize_model_output_payload(
+        text,
+        stop_tokens=MAIN_LLM_STOP_TOKENS,
+        cleanup_artifacts_fn=cleanup_assistant_display_artifacts,
     )
-    if any(t.startswith(p) for p in blocked_prefixes):
-        return True
-    if "**" in text:
-        return True
-    if len(re.findall(r"[A-Za-z]", text)) > len(re.findall(r"[가-힣]", text)) * 2:
-        return True
-    return False
 
 
 def extract_answer_from_reasoning(reasoning: str, user_text: str) -> str:
-    text = sanitize_model_output(reasoning)
-    if not text:
-        return ""
-
-    text = text.replace("\r", "\n")
-    candidates: list[str] = []
-
-    quoted = re.findall(r"[\"“”'‘’]([^\"“”'‘’]{4,120})[\"“”'‘’]", text)
-    for q in quoted:
-        q = strip_markdown_noise(q)
-        if not q or not re.search(r"[가-힣]", q):
-            continue
-        if looks_like_meta_line(q):
-            continue
-        if clean_text(q) == clean_text(user_text):
-            continue
-        candidates.append(q)
-
-    explicit_patterns = [
-        r"(?:최종\s*답변|답변|response|assistant)\s*[:：]\s*([^\n]{4,120})",
-        r"(?:최종\s*출력|final\s*answer)\s*[:：]\s*([^\n]{4,120})",
-    ]
-    for pattern in explicit_patterns:
-        for match in re.findall(pattern, text, flags=re.IGNORECASE):
-            candidate = strip_markdown_noise(match)
-            if not candidate or not re.search(r"[가-힣]", candidate):
-                continue
-            if looks_like_meta_line(candidate):
-                continue
-            if clean_text(candidate) == clean_text(user_text):
-                continue
-            candidates.append(candidate)
-
-    seen = set()
-    filtered: list[str] = []
-    for c in candidates:
-        c = clean_text(c).strip("\"'“”‘’")
-        if not c or c in seen:
-            continue
-        seen.add(c)
-        if len(c) < 6 or len(c) > 120:
-            continue
-        filtered.append(c)
-
-    return filtered[-1] if filtered else ""
+    return extract_answer_from_reasoning_payload(
+        reasoning,
+        user_text,
+        sanitize_output_fn=sanitize_model_output,
+    )
 
 
 async def get_http_session() -> aiohttp.ClientSession:
@@ -6553,180 +4698,6 @@ async def get_http_session() -> aiohttp.ClientSession:
     return http_session
 
 
-def answer_promises_search(answer_text: str) -> bool:
-    action, stripped = parse_response_action_tag(answer_text)
-    if action == "search":
-        return True
-    text = clean_text(strip_omnivoice_tags(stripped)).lower()
-    if not text:
-        return False
-
-    completed_markers = [
-        "찾아봤",
-        "검색해봤",
-        "확인해봤",
-        "알아봤",
-        "찾아보니",
-        "검색해보니",
-        "결과는",
-    ]
-    if any(marker in text for marker in completed_markers):
-        return False
-
-    promise_markers = [
-        "찾아볼게",
-        "찾아볼께",
-        "찾아보고",
-        "찾아보고 올게",
-        "찾아서 알려줄게",
-        "찾아서 말해줄게",
-        "검색해볼게",
-        "검색해볼께",
-        "검색해서 알려줄게",
-        "검색해서 말해줄게",
-        "확인해볼게",
-        "확인해줄게",
-        "확인해서 알려줄게",
-        "확인해서 말해줄게",
-        "알아볼게",
-        "알아봐서 알려줄게",
-        "알아봐서 말해줄게",
-        "조사해볼게",
-        "조사해서 알려줄게",
-        "찾는 중",
-        "찾아보고 있어",
-        "자료 찾아볼게",
-    ]
-    promise_regexes = (
-        r"(찾아|검색|확인|알아|조사).{0,8}(볼게|볼께|보고|해볼게|해볼께|해서)",
-        r"(찾아서|검색해서|확인해서|알아봐서).{0,8}(알려줄게|말해줄게)",
-        r"(찾는 중|찾아보고 있어|자료 찾아볼게)",
-        r"(i'?ll|i will).{0,20}(search|look up|check|find)",
-    )
-    return any(marker in text for marker in promise_markers) or any(
-        re.search(pattern, text, flags=re.I) for pattern in promise_regexes
-    )
-
-
-def strip_search_answer_sources(answer_text: str) -> str:
-    text = str(answer_text or "")
-    if not text:
-        return ""
-
-    kept_lines: list[str] = []
-    source_prefixes = ("출처", "참고", "근거", "source", "sources", "reference", "references")
-    for line in text.splitlines():
-        cleaned_line = clean_text(line)
-        if not cleaned_line:
-            continue
-        lowered = cleaned_line.lower()
-        if any(lowered.startswith(prefix) for prefix in source_prefixes):
-            continue
-        kept_lines.append(cleaned_line)
-
-    text = "\n".join(kept_lines)
-    text = re.sub(r"\s*\([^)]*(?:https?://|www\.)[^)]*\)", "", text, flags=re.I)
-    text = re.sub(r"\s*\[[^\]]*(?:https?://|www\.)[^\]]*\]", "", text, flags=re.I)
-    text = re.sub(r"https?://\S+|www\.\S+", "", text, flags=re.I)
-    text = re.sub(r"\s*\((?:출처|참고|근거|source|sources|reference|references)\s*[:：]?[^\)]*\)", "", text, flags=re.I)
-    text = re.sub(r"\s*\[(?:출처|참고|근거|source|sources|reference|references)\s*[:：]?[^\]]*\]", "", text, flags=re.I)
-    text = re.sub(r"(?:^|\s)(?:출처|참고|근거|source|sources|reference|references)\s*[:：]\s*[^.!?。！？\n]+", "", text, flags=re.I)
-    return clean_text(text)
-
-
-def is_generic_search_followup_text(text: str) -> bool:
-    compact = re.sub(r"\s+", "", clean_text(strip_omnivoice_tags(text)).lower())
-    if not compact:
-        return False
-    return compact in {
-        "검색",
-        "검색해",
-        "검색해봐",
-        "찾아봐",
-        "찾아줘",
-        "찾아볼래",
-        "확인해",
-        "확인해봐",
-        "알아봐",
-        "알아봐줘",
-        "찾아보고말해줘",
-        "검색해서알려줘",
-    }
-
-
-def is_underspecified_weather_query(text: str) -> bool:
-    compact = re.sub(r"\s+", "", clean_text(strip_omnivoice_tags(text)).lower())
-    if not compact or "날씨" not in compact:
-        return False
-    return compact in {
-        "날씨",
-        "날씨알려줘",
-        "날씨알려줘요",
-        "날씨검색",
-        "날씨검색해",
-        "날씨검색해봐",
-        "날씨찾아봐",
-        "날씨찾아줘",
-        "오늘날씨",
-        "오늘날씨알려줘",
-        "지금날씨",
-        "지금날씨알려줘",
-        "weather",
-    }
-
-
-def recent_user_text_candidates(messages: list[dict[str, Any]] | None, *, exclude_text: str = "", limit: int = 8) -> list[str]:
-    excluded = clean_text(exclude_text).lower()
-    candidates: list[str] = []
-    for item in reversed(list(messages or [])):
-        if not isinstance(item, dict) or item.get("role") != "user":
-            continue
-        content = clean_text(str(item.get("content") or ""))
-        if not content or content.lower() == excluded:
-            continue
-        candidates.append(content)
-        if len(candidates) >= limit:
-            break
-    return candidates
-
-
-def resolve_contextual_search_query(
-    user_text: str,
-    *,
-    messages: list[dict[str, Any]] | None = None,
-) -> str:
-    text = clean_text(strip_omnivoice_tags(user_text))
-    recent_users = recent_user_text_candidates(messages, exclude_text=text)
-    if is_generic_search_followup_text(text):
-        for candidate in recent_users:
-            if is_generic_search_followup_text(candidate):
-                continue
-            return candidate
-    if is_underspecified_weather_query(text):
-        for candidate in recent_users:
-            if "날씨" in candidate and not is_underspecified_weather_query(candidate):
-                return candidate
-    return text
-
-
-def enrich_weather_search_query_from_context(
-    user_text: str,
-    *,
-    messages: list[dict[str, Any]] | None = None,
-    memory_summary: str = "",
-) -> str:
-    text = clean_text(strip_omnivoice_tags(user_text))
-    if not is_weather_query(text) or extract_korean_location_hint(text):
-        return text
-    recent_users = recent_user_text_candidates(messages, exclude_text=text, limit=10)
-    location = resolve_recent_weather_location(recent_users)
-    if not location and memory_summary:
-        location = extract_korean_location_hint(memory_summary)
-    if not location:
-        return text
-    return clean_text(f"{location} {text}")
-
-
 def build_search_query(
     guild_id: int | None,
     user_text: str,
@@ -6734,138 +4705,22 @@ def build_search_query(
     session_key: str | None = None,
     messages: list[dict[str, Any]] | None = None,
 ) -> str:
-    text = clean_text(strip_omnivoice_tags(user_text))
     context_messages = list(messages or [])
     if not context_messages and session_key is not None:
         context_messages = list(get_conversation_history(session_key=session_key, guild_id=guild_id))
-    contextual = resolve_contextual_search_query(text, messages=context_messages)
-    if contextual and contextual != text:
-        return contextual
     summary = ""
     if guild_id is not None:
         summary = compact_working_summary(read_text_file(memory_summary_path(guild_id)))
-    weather_contextual = enrich_weather_search_query_from_context(
-        text,
+    return build_search_query_from_context(
+        user_text,
         messages=context_messages,
         memory_summary=summary,
+        has_memory_scope=guild_id is not None,
     )
-    if weather_contextual and weather_contextual != text:
-        return weather_contextual
-    if len(text) >= 8:
-        return text
-
-    if guild_id is None:
-        return text
-
-    if summary:
-        return clean_text(f"{text} {summary}")
-    return text
-
-
-def decode_duckduckgo_url(url: str) -> str:
-    parsed = urlparse(url)
-    if "duckduckgo.com" in parsed.netloc and parsed.path.startswith("/l/"):
-        target = parse_qs(parsed.query).get("uddg", [""])[0]
-        if target:
-            return unquote(target)
-    return html.unescape(url)
-
-
-def strip_html_tags(text: str) -> str:
-    return clean_text(html.unescape(re.sub(r"<[^>]+>", " ", text or "")))
 
 
 async def search_duckduckgo(query: str, *, limit: int = 5) -> list[dict]:
-    session = await get_http_session()
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36"}
-    results: list[dict] = []
-    seen_urls: set[str] = set()
-
-    try:
-        async with session.get(
-            "https://api.duckduckgo.com/",
-            params={
-                "q": query,
-                "format": "json",
-                "no_html": "1",
-                "skip_disambig": "0",
-            },
-            headers=headers,
-            timeout=aiohttp.ClientTimeout(total=12),
-        ) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                abstract = clean_text(str(data.get("AbstractText", "")))
-                abstract_url = clean_text(str(data.get("AbstractURL", "")))
-                abstract_source = clean_text(str(data.get("AbstractSource", "DuckDuckGo"))) or "DuckDuckGo"
-                if abstract and abstract_url:
-                    results.append({
-                        "title": abstract_source,
-                        "snippet": abstract,
-                        "url": abstract_url,
-                    })
-                    seen_urls.add(abstract_url)
-
-                def collect_topics(items):
-                    for item in items or []:
-                        if not isinstance(item, dict):
-                            continue
-                        if "Topics" in item:
-                            collect_topics(item.get("Topics"))
-                            continue
-                        snippet = clean_text(str(item.get("Text", "")))
-                        url = clean_text(str(item.get("FirstURL", "")))
-                        if not snippet or not url or url in seen_urls:
-                            continue
-                        results.append({
-                            "title": snippet.split(" - ", 1)[0][:80],
-                            "snippet": snippet,
-                            "url": url,
-                        })
-                        seen_urls.add(url)
-                        if len(results) >= limit:
-                            return
-
-                collect_topics(data.get("RelatedTopics", []))
-    except Exception as e:
-        print(f"[SEARCH] instant API 실패: {e!r}")
-
-    if len(results) >= limit:
-        return results[:limit]
-
-    try:
-        async with session.post(
-            "https://html.duckduckgo.com/html/",
-            data={"q": query, "kl": "kr-ko"},
-            headers=headers,
-            timeout=aiohttp.ClientTimeout(total=15),
-        ) as resp:
-            if resp.status != 200:
-                return results[:limit]
-            page = await resp.text()
-    except Exception as e:
-        print(f"[SEARCH] html search 실패: {e!r}")
-        return results[:limit]
-
-    pattern = re.compile(
-        r'<a[^>]+class="result__a"[^>]+href="(?P<url>[^"]+)"[^>]*>(?P<title>.*?)</a>(?P<rest>.*?)</div>',
-        re.S,
-    )
-    for match in pattern.finditer(page):
-        url = decode_duckduckgo_url(match.group("url"))
-        if not url or url in seen_urls:
-            continue
-        title = strip_html_tags(match.group("title"))
-        snippet_match = re.search(r'class="result__snippet"[^>]*>(.*?)</a>|class="result__snippet"[^>]*>(.*?)</div>', match.group("rest"), re.S)
-        snippet = strip_html_tags((snippet_match.group(1) or snippet_match.group(2)) if snippet_match else "")
-        if not title and not snippet:
-            continue
-        results.append({"title": title or url, "snippet": snippet, "url": url})
-        seen_urls.add(url)
-        if len(results) >= limit:
-            break
-
-    return results[:limit]
+    return [result.to_dict() for result in await search_duckduckgo_payload(query, limit=limit)]
 
 
 async def answer_from_search_results(query: str, results: list[dict]) -> str:
@@ -7371,78 +5226,31 @@ def should_drop_discord_audio_for_local_mic(member_id: int | None, *, source: st
 
 
 def set_voice_input_mode(mode: str | None) -> str:
-    normalized = normalize_voice_input_mode(mode)
-    local_mic_runtime_state["input_mode"] = normalized
-    if normalized == "discord":
-        local_mic_runtime_state["discord_suppression_active"] = False
-    return normalized
+    return set_voice_input_mode_state(local_mic_runtime_state, mode)
 
 
 def voice_input_mode_status_line() -> str:
-    mode = normalize_voice_input_mode(str(local_mic_runtime_state.get("input_mode") or "auto"))
-    if mode == "local":
-        return "local mic only"
-    if mode == "discord":
-        return "discord voice only"
-    return "auto"
+    return voice_input_mode_status_line_from_mode(str(local_mic_runtime_state.get("input_mode") or "auto"))
 
 
 def serialize_local_mic_runtime_state() -> dict[str, Any]:
-    input_mode = normalize_voice_input_mode(str(local_mic_runtime_state.get("input_mode") or "auto"))
-    local_mic_runtime_state["input_mode"] = input_mode
-    capture_ready = bool(local_mic_service and local_mic_service.capture_ready)
-    local_mic_runtime_state["capture_ready"] = capture_ready
-    last_segment_at = local_mic_runtime_state.get("last_segment_at")
-    last_segment_age_sec = None
-    if isinstance(last_segment_at, (int, float)):
-        last_segment_age_sec = round(max(0.0, time.time() - float(last_segment_at)), 3)
-    last_input_age_sec = None
-    if local_mic_service is not None and isinstance(local_mic_service.last_input_at, (int, float)):
-        last_input_age_sec = round(max(0.0, time.time() - float(local_mic_service.last_input_at)), 3)
-    return {
-        "enabled": bool(local_mic_runtime_state.get("enabled")),
-        "inputMode": input_mode,
-        "inputModeLabel": voice_input_mode_status_line(),
-        "captureReady": capture_ready,
-        "lastError": local_mic_runtime_state.get("last_error"),
-        "routedUserIds": list(local_mic_runtime_state.get("routed_user_ids") or []),
-        "segmentCount": int(local_mic_runtime_state.get("segment_count") or 0),
-        "lastSegmentAgeSec": last_segment_age_sec,
-        "lastSegmentDurationSec": local_mic_runtime_state.get("last_segment_duration_sec"),
-        "inputBlockCount": int(getattr(local_mic_service, "input_block_count", 0) or 0),
-        "lastInputAgeSec": last_input_age_sec,
-        "lastInputLevel": round(float(getattr(local_mic_service, "last_input_level", 0.0) or 0.0), 6),
-        "maxInputLevel": round(float(getattr(local_mic_service, "max_input_level", 0.0) or 0.0), 6),
-        "lastInputStatus": getattr(local_mic_service, "last_input_status", None),
-        "effectiveMaxSilenceMs": int(getattr(local_mic_service, "last_effective_max_silence_ms", LOCAL_MIC_MAX_SILENCE_MS) or LOCAL_MIC_MAX_SILENCE_MS),
-        "rejectedSegmentCount": int(getattr(local_mic_service, "rejected_segment_count", 0) or 0),
-        "lastRejectedReason": getattr(local_mic_service, "last_rejected_reason", None),
-        "lastVoiceFilter": getattr(local_mic_service, "last_segment_filter", None) or local_mic_runtime_state.get("last_filter"),
-        "vadFilterEnabled": bool(LOCAL_MIC_VAD_FILTER_ENABLED),
-        "envNoiseFilterEnabled": bool(LOCAL_MIC_ENV_NOISE_FILTER_ENABLED),
-        "waveformFilterEnabled": bool(LOCAL_MIC_WAVEFORM_FILTER_ENABLED),
-        "discordSuppressionActive": bool(local_mic_runtime_state.get("discord_suppression_active")),
-        "discordSuppressAfterSegmentSec": LOCAL_MIC_DISCORD_SUPPRESS_AFTER_SEGMENT_SEC,
-        "device": LOCAL_MIC_DEVICE or "default",
-        "sampleRate": LOCAL_MIC_SAMPLE_RATE,
-        "captureSampleRate": int(getattr(local_mic_service, "sample_rate", LOCAL_MIC_SAMPLE_RATE) or LOCAL_MIC_SAMPLE_RATE),
-        "startThreshold": LOCAL_MIC_START_THRESHOLD,
-        "continueThreshold": LOCAL_MIC_CONTINUE_THRESHOLD,
-    }
+    return serialize_local_mic_runtime_state_payload(
+        local_mic_runtime_state,
+        service=local_mic_service,
+        max_silence_ms=LOCAL_MIC_MAX_SILENCE_MS,
+        vad_filter_enabled=LOCAL_MIC_VAD_FILTER_ENABLED,
+        env_noise_filter_enabled=LOCAL_MIC_ENV_NOISE_FILTER_ENABLED,
+        waveform_filter_enabled=LOCAL_MIC_WAVEFORM_FILTER_ENABLED,
+        discord_suppress_after_segment_sec=LOCAL_MIC_DISCORD_SUPPRESS_AFTER_SEGMENT_SEC,
+        device=LOCAL_MIC_DEVICE,
+        sample_rate=LOCAL_MIC_SAMPLE_RATE,
+        start_threshold=LOCAL_MIC_START_THRESHOLD,
+        continue_threshold=LOCAL_MIC_CONTINUE_THRESHOLD,
+    )
 
 
 def local_mic_status_line() -> str:
-    state = serialize_local_mic_runtime_state()
-    mode_text = state.get("inputModeLabel") or state.get("inputMode") or "auto"
-    if not state["enabled"]:
-        return f"{mode_text} | disabled"
-    if state["captureReady"]:
-        age = state.get("lastSegmentAgeSec")
-        segment_text = "no segments" if age is None else f"last segment {age:.1f}s ago"
-        suppress_text = "discord suppress on" if state.get("discordSuppressionActive") else "discord fallback on"
-        return f"{mode_text} | ready | {segment_text} | {suppress_text}"
-    error = clean_text(str(state.get("lastError") or "capture not ready"))
-    return f"{mode_text} | not ready | {error}"
+    return local_mic_status_line_from_payload(serialize_local_mic_runtime_state())
 
 
 def build_evelyn_runtime_dependency_context() -> str:
@@ -9601,62 +7409,6 @@ def get_minecraft_client() -> MinecraftAutonomyClient:
     return client
 
 
-def _merge_voyager_status_into_state(status: dict[str, Any] | None, observed: dict[str, Any] | None) -> dict[str, Any] | None:
-    if not isinstance(status, dict) and not isinstance(observed, dict):
-        return None
-    merged: dict[str, Any] = dict(observed or {})
-    if isinstance(status, dict):
-        merged["minecraft_autonomy"] = bool(status.get("running"))
-        merged["voyager_connected"] = bool(status.get("connected"))
-        goal = clean_text(str(status.get("goal") or ""))
-        stage = clean_text(str(status.get("stage") or ""))
-        current_task = clean_text(str(status.get("current_task") or ""))
-        current_task_stage = clean_text(str(status.get("current_task_stage") or ""))
-        last_action = clean_text(str(status.get("last_action") or ""))
-        last_progress_message = clean_text(str(status.get("last_progress_message") or ""))
-        last_error = clean_text(str(status.get("last_error") or ""))
-        if goal:
-            merged["objective_goal"] = goal
-        if stage:
-            merged["objective_stage"] = stage
-        if current_task:
-            merged["objective_task"] = current_task
-        if current_task_stage:
-            merged["objective_task_stage"] = current_task_stage
-        if last_action:
-            merged["objective_last_action"] = last_action
-        if last_progress_message:
-            merged["objective_progress"] = last_progress_message
-        if last_error and not merged.get("last_error"):
-            merged["last_error"] = last_error
-        current_execution = status.get("autonomy_current_execution")
-        if isinstance(current_execution, dict):
-            execution_desc = clean_text(str(current_execution.get("description") or current_execution.get("action") or ""))
-            execution_stage = clean_text(str(current_execution.get("stage") or ""))
-            if execution_desc and not merged.get("objective_task"):
-                merged["objective_task"] = execution_desc
-            if execution_stage and not merged.get("objective_task_stage"):
-                merged["objective_task_stage"] = execution_stage
-        voyager_evaluation = status.get("voyager_evaluation") if isinstance(status.get("voyager_evaluation"), dict) else None
-        if isinstance(voyager_evaluation, dict):
-            merged["voyager_evaluation"] = voyager_evaluation
-            unique_item_count = voyager_evaluation.get("unique_item_count")
-            if unique_item_count is not None:
-                merged["voyager_unique_item_count"] = unique_item_count
-            travel_distance_blocks = voyager_evaluation.get("travel_distance_blocks")
-            if travel_distance_blocks is not None:
-                merged["voyager_travel_distance_blocks"] = travel_distance_blocks
-            tech_tree = voyager_evaluation.get("tech_tree") if isinstance(voyager_evaluation.get("tech_tree"), dict) else {}
-            tech_tree_highest = clean_text(str(tech_tree.get("highest_unlocked") or ""))
-            if tech_tree_highest:
-                merged["voyager_tech_tree_highest"] = tech_tree_highest
-            skill_library = voyager_evaluation.get("skill_library") if isinstance(voyager_evaluation.get("skill_library"), dict) else {}
-            skill_library_size = skill_library.get("size")
-            if skill_library_size is not None:
-                merged["voyager_skill_library_size"] = skill_library_size
-    return merged if merged else None
-
-
 def get_routed_autonomy_executor(guild_id: int | None) -> RoutedAutonomyExecutor | None:
     if guild_id is None:
         return None
@@ -9676,7 +7428,7 @@ async def observe_live_minecraft_state(guild_id: int | None) -> dict[str, Any] |
         status = None
     if isinstance(status, dict):
         observed = status.get("observation") if isinstance(status.get("observation"), dict) else None
-        merged = _merge_voyager_status_into_state(status, observed)
+        merged = merge_voyager_status_into_state(status, observed)
         if isinstance(merged, dict):
             has_context = bool(
                 status.get("running")
@@ -9701,7 +7453,7 @@ async def observe_live_minecraft_state(guild_id: int | None) -> dict[str, Any] |
         return None
     if not isinstance(observed, dict):
         return None
-    merged = _merge_voyager_status_into_state(None, observed) if (observed.get("connected") or observed.get("active") or observed.get("position")) else None
+    merged = merge_voyager_status_into_state(None, observed) if (observed.get("connected") or observed.get("active") or observed.get("position")) else None
     if isinstance(merged, dict):
         return attach_minecraft_runtime_snapshot(
             merged,
@@ -9723,7 +7475,7 @@ async def wait_for_minecraft_ready(guild_id: int, *, timeout_sec: float = 12.0, 
         status = await client.status()
         observed = status.get("observation") if isinstance(status.get("observation"), dict) else status
         if isinstance(observed, dict):
-            last_observed = _merge_voyager_status_into_state(status, observed) or dict(observed)
+            last_observed = merge_voyager_status_into_state(status, observed) or dict(observed)
             if status.get("connected") or observed.get("connected") or observed.get("active") or observed.get("position"):
                 return last_observed
             last_error = clean_text(str(status.get("last_error") or observed.get("last_error") or ""))
@@ -9740,7 +7492,7 @@ async def enable_minecraft_mode(guild_id: int, goal: str | None = None) -> dict[
     client = get_minecraft_client()
     started = await client.start(goal=goal)
     observed = await wait_for_minecraft_ready(guild_id)
-    merged = _merge_voyager_status_into_state(started if isinstance(started, dict) else None, observed if isinstance(observed, dict) else None) or {}
+    merged = merge_voyager_status_into_state(started if isinstance(started, dict) else None, observed if isinstance(observed, dict) else None) or {}
     merged["voyager_repo_present"] = started.get("voyager_repo_present") if isinstance(started, dict) else None
     return merged
 
@@ -9751,118 +7503,12 @@ async def disable_minecraft_mode(guild_id: int) -> None:
     await client.stop()
 
 
-CONTROL_PAGE_COMMANDS: list[dict[str, str]] = [
-    {"command": "/help", "template": "/help", "summary": "명령어 목록 보기", "visibility": "always", "group": "기본"},
-    {"command": "/status", "template": "/status", "summary": "Evelyn, 음성, 모델, Minecraft 상태 요약", "visibility": "always", "group": "기본"},
-    {"command": "/memory", "template": "/memory", "summary": "메모리 패널 열기/숨기기", "visibility": "always", "group": "페이지"},
-    {"command": "/obsidian", "template": "/obsidian", "summary": "메모리 패널 열기/숨기기", "visibility": "always", "group": "페이지"},
-    {"command": "/voice status", "template": "/voice status", "summary": "음성 입력, STT, TTS 파이프라인 상태 보기", "visibility": "always", "group": "음성"},
-    {"command": "/voice reconnect", "template": "/voice reconnect", "summary": "최근 저장된 음성 채널에 다시 연결", "visibility": "always", "group": "음성"},
-    {"command": "/voice input auto", "template": "/voice input auto", "summary": "로컬 마이크와 Discord 입력 자동 전환", "visibility": "always", "group": "음성"},
-    {"command": "/voice input local", "template": "/voice input local", "summary": "로컬 마이크 입력 사용", "visibility": "always", "group": "음성"},
-    {"command": "/voice input discord", "template": "/voice input discord", "summary": "Discord 음성 입력 사용", "visibility": "always", "group": "음성"},
-    {"command": "/minecraft connect", "template": "/minecraft connect", "summary": "Voyager Minecraft 모드 시작", "visibility": "minecraft-idle", "group": "Minecraft"},
-    {"command": "/minecraft status", "template": "/minecraft status", "summary": "Minecraft 연결과 현재 task 상태 보기", "visibility": "minecraft-active", "group": "Minecraft"},
-    {"command": "/inventory", "template": "/inventory", "summary": "현재 Minecraft 인벤토리 요약 보기", "visibility": "minecraft-active", "group": "Minecraft"},
-    {"command": "/voyager stats", "template": "/voyager stats", "summary": "Voyager 진행 상태와 평가 지표 보기", "visibility": "minecraft-active", "group": "Minecraft"},
-    {"command": "/minecraft disconnect", "template": "/minecraft disconnect", "summary": "Voyager Minecraft 모드 중지", "visibility": "minecraft-active", "group": "Minecraft"},
-    {"command": "/minecraft goal <goal>", "template": "/minecraft goal ", "summary": "Minecraft 목표 변경", "visibility": "minecraft-active", "group": "Minecraft"},
-    {"command": "/autonomy status", "template": "/autonomy status", "summary": "Evelyn 자율 행동 엔진 상태 보기", "visibility": "always", "group": "자율 행동"},
-    {"command": "/restart", "template": "/restart", "summary": "Evelyn bot process 재시작", "visibility": "always", "group": "시스템"},
-    {"command": "/shutdown", "template": "/shutdown", "summary": "Evelyn runtime 종료 (Shut down Evelyn runtime)", "visibility": "always", "group": "시스템"},
-]
-
-CONTROL_PAGE_UI_PANELS: dict[str, str] = dict(SHARED_CONTROL_PAGE_UI_PANELS)
-
-CONTROL_PAGE_UI_PANEL_ALIASES: dict[str, str] = {
-    "status": "runtime",
-    "state": "runtime",
-    "diag": "diagnostics",
-    "diagnostic": "diagnostics",
-    "logs": "diagnostics",
-    "model": "avatar",
-    "center": "avatar",
-    "main": "avatar",
-    "evelyn": "avatar",
-    "control": "chat",
-    "commands": "chat",
-    "command": "chat",
-    "memory": "memory",
-    "mem": "memory",
-    "obsidian": "memory",
-}
-
-
-def normalize_control_page_ui_panel(value: str | None) -> str | None:
-    key = clean_text(str(value or "")).lower().strip()
-    if not key:
-        return None
-    if key in CONTROL_PAGE_UI_PANELS:
-        return key
-    return CONTROL_PAGE_UI_PANEL_ALIASES.get(key)
-
-
 def enqueue_control_page_ui_command(action: str, *, panel_id: str | None = None) -> dict[str, Any]:
-    global control_page_ui_command_seq
-    cleaned_action = clean_text(action).lower()
-    control_page_ui_command_seq += 1
-    command = {
-        "id": control_page_ui_command_seq,
-        "action": cleaned_action,
-        "panel": panel_id,
-        "at": time.time(),
-    }
-    control_page_ui_commands.append(command)
-    if len(control_page_ui_commands) > 40:
-        del control_page_ui_commands[:-40]
-    return dict(command)
+    return control_page_ui_command_store.enqueue(action, panel_id=panel_id)
 
 
 def build_control_page_panel_state() -> dict[str, Any]:
-    return {
-        "revision": control_page_ui_command_seq,
-        "commands": [dict(command) for command in control_page_ui_commands[-40:]],
-        "panels": [
-            {"id": panel_id, "label": label}
-            for panel_id, label in CONTROL_PAGE_UI_PANELS.items()
-        ],
-    }
-
-
-def is_control_page_minecraft_session_active(snapshot: dict[str, Any] | None) -> bool:
-    if not isinstance(snapshot, dict):
-        return False
-    if snapshot.get("voyager_connected") or snapshot.get("connected") or snapshot.get("active"):
-        return True
-    position = snapshot.get("position")
-    if isinstance(position, dict) and any(value is not None for value in position.values()):
-        return True
-    if snapshot.get("health") is not None or snapshot.get("hunger") is not None:
-        return True
-    return False
-
-
-def build_control_page_commands(*, minecraft_session_active: bool) -> list[dict[str, str]]:
-    commands: list[dict[str, str]] = []
-    for item in CONTROL_PAGE_COMMANDS:
-        visibility = item.get("visibility", "always")
-        if visibility == "minecraft-active" and not minecraft_session_active:
-            continue
-        if visibility == "minecraft-idle" and minecraft_session_active:
-            continue
-        commands.append({key: value for key, value in item.items() if key != "visibility"})
-    return commands
-
-
-def build_control_page_all_commands() -> list[dict[str, str]]:
-    return [
-        {key: value for key, value in item.items() if key != "visibility"}
-        for item in CONTROL_PAGE_COMMANDS
-    ]
-
-
-def command_status(value: bool) -> str:
-    return "켜짐" if value else "꺼짐"
+    return control_page_ui_command_store.panel_state()
 
 
 def control_page_local_url() -> str:
@@ -9885,110 +7531,16 @@ def control_page_effective_guild_name(guild: discord.Guild | None) -> str:
     return clean_text(str(getattr(guild, "name", "") or "")) or LOCAL_CONTROL_GUILD_NAME
 
 
-def build_control_page_runtime_summary(
-    *,
-    bot_ready: bool,
-    voyager_ready: bool,
-    codex_required: bool,
-    codex_ready: bool | None,
-) -> str:
-    parts = [
-        "bot ready" if bot_ready else "bot down",
-        "voyager ready" if voyager_ready else "minecraft idle",
-    ]
-    if codex_required:
-        parts.append("codex ready" if codex_ready else "codex standby")
-    return " | ".join(parts)
-
-
-def build_control_page_ui_state(
-    *,
-    guild_available: bool,
-    listening: bool,
-    speaking: bool,
-    minecraft_running: bool,
-    minecraft_session_active: bool,
-    minecraft_snapshot_stale: bool,
-    minecraft_last_error: str | None,
-) -> dict[str, Any]:
-    if not guild_available:
-        return {
-            "mode": "default",
-            "submode": "offline",
-            "reason": "guild_not_available",
-        }
-    if minecraft_session_active:
-        return {
-            "mode": "minecraft",
-            "submode": "minecraft-live",
-            "reason": "minecraft_session_active",
-        }
-    if minecraft_running:
-        return {
-            "mode": "default",
-            "submode": "voyager-warmup",
-            "reason": "voyager_running_without_live_session",
-        }
-    if speaking:
-        return {
-            "mode": "default",
-            "submode": "voice-speaking",
-            "reason": "tts_speaking",
-        }
-    if listening:
-        return {
-            "mode": "default",
-            "submode": "voice-listening",
-            "reason": "voice_listening",
-        }
-    if minecraft_snapshot_stale:
-        return {
-            "mode": "default",
-            "submode": "stale",
-            "reason": "minecraft_snapshot_stale",
-        }
-    if clean_text(str(minecraft_last_error or "")):
-        return {
-            "mode": "default",
-            "submode": "issue",
-            "reason": "minecraft_last_error",
-        }
-    return {
-        "mode": "default",
-        "submode": "idle",
-        "reason": "default_idle",
-    }
-
-
 def append_control_page_chat_log(guild_id: int, role: str, author: str, text: str) -> None:
-    cleaned_text = clean_text(text)
-    if not cleaned_text:
-        return
-    rows = control_page_chat_logs.setdefault(guild_id, [])
-    rows.append(
-        {
-            "role": role,
-            "author": clean_text(author) or ("Evelyn" if role == "assistant" else "User"),
-            "text": cleaned_text,
-            "at": time.time(),
-        }
-    )
-    if len(rows) > CONTROL_PAGE_CHAT_LOG_LIMIT:
-        del rows[:-CONTROL_PAGE_CHAT_LOG_LIMIT]
+    control_page_chat_log_store.append(guild_id, role, author, text)
 
 
 def get_control_page_chat_log(guild_id: int) -> list[dict[str, Any]]:
-    return [dict(row) for row in control_page_chat_logs.get(guild_id, [])]
+    return control_page_chat_log_store.get(guild_id)
 
 
 def sanitize_control_page_welcome_text(text: str) -> str:
-    cleaned = clean_text(text).strip().strip("\"'“”‘’")
-    cleaned = re.sub(r"\s+", " ", cleaned).strip()
-    if not cleaned:
-        return clean_text(CONTROL_PAGE_WELCOME_FALLBACK)
-    if len(cleaned) > 120:
-        cleaned = cleaned[:120].rstrip(" ,.!?…") + "..."
-    return cleaned
+    return sanitize_control_page_welcome_text_payload(text, fallback=CONTROL_PAGE_WELCOME_FALLBACK)
 
 
 async def generate_control_page_welcome_text(guild: discord.Guild | None) -> str:
@@ -10125,563 +7677,6 @@ def current_tts_target_name(guild: discord.Guild | None) -> str:
     return resolve_guild_member_name(guild, target_user_id)
 
 
-def format_position_short(position: Any) -> str:
-    if isinstance(position, dict):
-        x = position.get("x")
-        y = position.get("y")
-        z = position.get("z")
-        if all(isinstance(value, (int, float)) for value in (x, y, z)):
-            return f"{x:.1f}, {y:.1f}, {z:.1f}"
-    if isinstance(position, (list, tuple)) and len(position) >= 3 and all(isinstance(value, (int, float)) for value in position[:3]):
-        return f"{float(position[0]):.1f}, {float(position[1]):.1f}, {float(position[2]):.1f}"
-    cleaned = clean_text(str(position or ""))
-    return cleaned or "unknown"
-
-
-def normalize_inventory_top_entries(inventory: Any, *, limit: int = 8) -> list[dict[str, Any]]:
-    entries: list[tuple[str, int]] = []
-    if isinstance(inventory, dict):
-        for name, count in inventory.items():
-            cleaned_name = clean_text(str(name or ""))
-            if not cleaned_name:
-                continue
-            try:
-                count_int = int(count)
-            except (TypeError, ValueError):
-                continue
-            if count_int > 0:
-                entries.append((cleaned_name, count_int))
-    elif isinstance(inventory, list):
-        for row in inventory:
-            if not isinstance(row, dict):
-                continue
-            cleaned_name = clean_text(str(row.get("name") or row.get("item") or ""))
-            if not cleaned_name:
-                continue
-            try:
-                count_int = int(row.get("count") or row.get("quantity") or 0)
-            except (TypeError, ValueError):
-                continue
-            if count_int > 0:
-                entries.append((cleaned_name, count_int))
-    entries.sort(key=lambda item: (-item[1], item[0]))
-    return [{"name": name, "count": count} for name, count in entries[:limit]]
-
-
-def summarize_inventory_top(entries: list[dict[str, Any]]) -> str:
-    if not entries:
-        return "인벤토리 정보 없음"
-    return ", ".join(f"{row['name']} x{row['count']}" for row in entries)
-
-
-def normalize_minecraft_item_name(value: Any) -> str:
-    cleaned = clean_text(str(value or "")).strip().lower().replace("minecraft:", "").replace(" ", "_")
-    return re.sub(r"[^a-z0-9_]", "", cleaned)
-
-
-def humanize_minecraft_item_name(value: Any) -> str:
-    item_name = normalize_minecraft_item_name(value)
-    if not item_name:
-        return "Unknown"
-    return item_name.replace("_", " ")
-
-
-def build_inventory_slot_templates() -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    armor_labels = ["helmet", "chestplate", "leggings", "boots"]
-    for slot_index in range(5, 9):
-        rows.append(
-            {
-                "slot": slot_index,
-                "section": "armor",
-                "sectionIndex": slot_index - 5,
-                "label": armor_labels[slot_index - 5],
-                "selected": False,
-                "item": None,
-                "count": 0,
-                "displayName": "",
-            }
-        )
-    for slot_index in range(9, 36):
-        rows.append(
-            {
-                "slot": slot_index,
-                "section": "main",
-                "sectionIndex": slot_index - 9,
-                "label": str(slot_index - 8),
-                "selected": False,
-                "item": None,
-                "count": 0,
-                "displayName": "",
-            }
-        )
-    for slot_index in range(36, 45):
-        rows.append(
-            {
-                "slot": slot_index,
-                "section": "hotbar",
-                "sectionIndex": slot_index - 36,
-                "label": str(slot_index - 35),
-                "selected": False,
-                "item": None,
-                "count": 0,
-                "displayName": "",
-            }
-        )
-    rows.append(
-        {
-            "slot": 45,
-            "section": "offhand",
-            "sectionIndex": 0,
-            "label": "offhand",
-            "selected": False,
-            "item": None,
-            "count": 0,
-            "displayName": "",
-        }
-    )
-    return rows
-
-
-def normalize_inventory_slot_entries(raw_slots: Any, *, inventory: Any = None) -> list[dict[str, Any]]:
-    templates = build_inventory_slot_templates()
-    slot_map = {int(row["slot"]): dict(row) for row in templates}
-    filled = False
-    if isinstance(raw_slots, list):
-        for row in raw_slots:
-            if not isinstance(row, dict):
-                continue
-            try:
-                slot_index = int(row.get("slot"))
-            except (TypeError, ValueError):
-                continue
-            target = slot_map.get(slot_index)
-            if target is None:
-                continue
-            item_name = normalize_minecraft_item_name(row.get("item") or row.get("name"))
-            try:
-                count = int(row.get("count") or 0)
-            except (TypeError, ValueError):
-                count = 0
-            display_name = clean_text(str(row.get("displayName") or row.get("display_name") or "")) or humanize_minecraft_item_name(item_name)
-            target.update(
-                {
-                    "item": item_name or None,
-                    "count": count if count > 0 else 0,
-                    "displayName": display_name if item_name else "",
-                    "selected": bool(row.get("selected")),
-                }
-            )
-            filled = True
-    if not filled:
-        fallback_entries = normalize_inventory_top_entries(inventory, limit=36)
-        fallback_slots = [row for row in templates if row["section"] in {"main", "hotbar"}]
-        for target, source in zip(fallback_slots, fallback_entries):
-            item_name = normalize_minecraft_item_name(source.get("name"))
-            target.update(
-                {
-                    "item": item_name or None,
-                    "count": int(source.get("count") or 0),
-                    "displayName": humanize_minecraft_item_name(item_name) if item_name else "",
-                    "selected": False,
-                }
-            )
-    return sorted(slot_map.values(), key=lambda row: int(row["slot"]))
-
-
-def normalize_inventory_used_slots(value: Any, slots: list[dict[str, Any]]) -> int:
-    try:
-        normalized = int(value)
-        if normalized >= 0:
-            return normalized
-    except (TypeError, ValueError):
-        pass
-    return sum(1 for row in slots if row.get("section") in {"main", "hotbar"} and row.get("item"))
-
-
-def discover_control_page_minecraft_version_jar() -> Path | None:
-    candidates: list[Path] = []
-    appdata = os.getenv("APPDATA")
-    if appdata:
-        candidates.append(Path(appdata) / ".minecraft")
-    candidates.append(Path.home() / ".minecraft")
-    candidates.append(PROJECT_ROOT / ".minecraft")
-    version_jars: list[Path] = []
-    seen_roots: set[str] = set()
-    for root in candidates:
-        root = root.expanduser()
-        key = str(root).lower()
-        if key in seen_roots:
-            continue
-        seen_roots.add(key)
-        versions_dir = root / "versions"
-        if not versions_dir.exists():
-            continue
-        for entry in versions_dir.iterdir():
-            if not entry.is_dir():
-                continue
-            jar_path = entry / f"{entry.name}.jar"
-            if jar_path.is_file():
-                version_jars.append(jar_path)
-    if not version_jars:
-        return None
-    return max(version_jars, key=lambda path: path.stat().st_mtime)
-
-
-def read_minecraft_asset_bytes(archive: zipfile.ZipFile, asset_path: str) -> bytes | None:
-    try:
-        return archive.read(asset_path)
-    except KeyError:
-        return None
-
-
-def read_minecraft_asset_json(archive: zipfile.ZipFile, asset_path: str) -> dict[str, Any] | list[Any] | None:
-    payload = read_minecraft_asset_bytes(archive, asset_path)
-    if payload is None:
-        return None
-    try:
-        return json.loads(payload.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        return None
-
-
-def minecraft_texture_ref_to_asset_path(texture_ref: str) -> str | None:
-    normalized = clean_text(str(texture_ref or "")).strip()
-    if not normalized:
-        return None
-    normalized = normalized.replace("minecraft:", "")
-    if normalized.startswith("textures/"):
-        normalized = normalized[len("textures/"):]
-    normalized = normalized.lstrip("/")
-    if not normalized:
-        return None
-    if not normalized.endswith(".png"):
-        normalized = normalized + ".png"
-    return f"assets/minecraft/textures/{normalized}"
-
-
-def resolve_texture_alias(texture_ref: str, textures: dict[str, Any]) -> str | None:
-    current = clean_text(str(texture_ref or "")).strip()
-    seen: set[str] = set()
-    while current.startswith("#"):
-        key = current[1:]
-        if key in seen:
-            return None
-        seen.add(key)
-        next_value = textures.get(key)
-        if not isinstance(next_value, str):
-            return None
-        current = next_value
-    return current or None
-
-
-def pick_model_texture_ref(textures: dict[str, Any]) -> str | None:
-    for key in ("layer0", "all", "side", "top", "front", "end", "particle", "north"):
-        value = textures.get(key)
-        if isinstance(value, str) and value:
-            return resolve_texture_alias(value, textures)
-    return None
-
-
-def normalize_model_reference(model_ref: str, *, default_kind: str = "item") -> str:
-    normalized = clean_text(str(model_ref or "")).strip().replace("minecraft:", "").lstrip("/")
-    if normalized.startswith("models/"):
-        normalized = normalized[len("models/"):]
-    if normalized.endswith(".json"):
-        normalized = normalized[:-5]
-    if "/" not in normalized:
-        normalized = f"{default_kind}/{normalized}"
-    return normalized
-
-
-def resolve_model_texture_path(
-    archive: zipfile.ZipFile,
-    model_ref: str,
-    *,
-    inherited_textures: dict[str, Any] | None = None,
-    seen_models: set[str] | None = None,
-    default_kind: str = "item",
-) -> str | None:
-    normalized_ref = normalize_model_reference(model_ref, default_kind=default_kind)
-    if not normalized_ref:
-        return None
-    seen = seen_models or set()
-    if normalized_ref in seen:
-        return None
-    seen.add(normalized_ref)
-    model_path = f"assets/minecraft/models/{normalized_ref}.json"
-    model_json = read_minecraft_asset_json(archive, model_path)
-    fallback_name = normalized_ref.split("/", 1)[1] if "/" in normalized_ref else normalized_ref
-    if not isinstance(model_json, dict):
-        for direct_ref in (f"item/{fallback_name}", f"block/{fallback_name}"):
-            direct_path = minecraft_texture_ref_to_asset_path(direct_ref)
-            if direct_path and read_minecraft_asset_bytes(archive, direct_path) is not None:
-                return direct_path
-        return None
-    textures = dict(inherited_textures or {})
-    own_textures = model_json.get("textures") if isinstance(model_json.get("textures"), dict) else {}
-    for key, value in own_textures.items():
-        if isinstance(value, str):
-            textures[key] = value
-    texture_ref = pick_model_texture_ref(textures)
-    if texture_ref:
-        asset_path = minecraft_texture_ref_to_asset_path(texture_ref)
-        if asset_path and read_minecraft_asset_bytes(archive, asset_path) is not None:
-            return asset_path
-    parent_ref = model_json.get("parent")
-    if isinstance(parent_ref, str) and parent_ref:
-        parent_path = resolve_model_texture_path(
-            archive,
-            parent_ref,
-            inherited_textures=textures,
-            seen_models=seen,
-        )
-        if parent_path:
-            return parent_path
-    for direct_ref in (f"item/{fallback_name}", f"block/{fallback_name}"):
-        direct_path = minecraft_texture_ref_to_asset_path(direct_ref)
-        if direct_path and read_minecraft_asset_bytes(archive, direct_path) is not None:
-            return direct_path
-    return None
-
-
-def collect_item_definition_model_refs(node: Any) -> list[str]:
-    refs: list[str] = []
-    if isinstance(node, dict):
-        node_type = clean_text(str(node.get("type") or "")).strip()
-        model_value = node.get("model")
-        if node_type == "minecraft:model" and isinstance(model_value, str) and model_value:
-            refs.append(model_value)
-        for value in node.values():
-            refs.extend(collect_item_definition_model_refs(value))
-    elif isinstance(node, list):
-        for value in node:
-            refs.extend(collect_item_definition_model_refs(value))
-    deduped: list[str] = []
-    seen: set[str] = set()
-    for ref in refs:
-        normalized = clean_text(ref)
-        if not normalized or normalized in seen:
-            continue
-        seen.add(normalized)
-        deduped.append(normalized)
-    return deduped
-
-
-def resolve_minecraft_item_texture_path(archive: zipfile.ZipFile, item_name: str) -> str | None:
-    normalized_name = normalize_minecraft_item_name(item_name)
-    if not normalized_name:
-        return None
-    for direct_ref in (f"item/{normalized_name}", f"block/{normalized_name}"):
-        direct_path = minecraft_texture_ref_to_asset_path(direct_ref)
-        if direct_path and read_minecraft_asset_bytes(archive, direct_path) is not None:
-            return direct_path
-    item_definition = read_minecraft_asset_json(archive, f"assets/minecraft/items/{normalized_name}.json")
-    for model_ref in collect_item_definition_model_refs(item_definition):
-        resolved = resolve_model_texture_path(archive, model_ref)
-        if resolved:
-            return resolved
-    legacy_item_model = resolve_model_texture_path(archive, f"item/{normalized_name}")
-    if legacy_item_model:
-        return legacy_item_model
-    legacy_block_model = resolve_model_texture_path(archive, f"block/{normalized_name}", default_kind="block")
-    if legacy_block_model:
-        return legacy_block_model
-    return None
-
-
-def load_control_page_minecraft_item_icon(item_name: str) -> bytes | None:
-    normalized_name = normalize_minecraft_item_name(item_name)
-    if not normalized_name:
-        return None
-    if normalized_name in control_page_minecraft_item_icon_cache:
-        return control_page_minecraft_item_icon_cache[normalized_name]
-    jar_path = discover_control_page_minecraft_version_jar()
-    if jar_path is None:
-        control_page_minecraft_item_icon_cache[normalized_name] = None
-        return None
-    icon_bytes: bytes | None = None
-    try:
-        with zipfile.ZipFile(jar_path) as archive:
-            texture_path = resolve_minecraft_item_texture_path(archive, normalized_name)
-            if texture_path:
-                icon_bytes = read_minecraft_asset_bytes(archive, texture_path)
-    except (OSError, zipfile.BadZipFile):
-        icon_bytes = None
-    control_page_minecraft_item_icon_cache[normalized_name] = icon_bytes
-    return icon_bytes
-
-
-def extract_control_page_recent_activity(status: dict[str, Any] | None) -> list[dict[str, str]]:
-    if not isinstance(status, dict):
-        return []
-    rows: list[dict[str, str]] = []
-    completed = status.get("completed_tasks") if isinstance(status.get("completed_tasks"), list) else []
-    failed = status.get("failed_tasks") if isinstance(status.get("failed_tasks"), list) else []
-    for task in completed[-3:]:
-        label = clean_text(str(task or ""))
-        if label:
-            rows.append({"kind": "completed", "label": label, "detail": "완료"})
-    for item in failed[-3:]:
-        if not isinstance(item, dict):
-            continue
-        label = clean_text(str(item.get("task") or ""))
-        detail = clean_text(str(item.get("reason") or item.get("evidence") or "실패"))
-        if label:
-            rows.append({"kind": "failed", "label": label, "detail": detail or "실패"})
-    return rows[-6:]
-
-
-def extract_control_page_recent_activity_live(status: dict[str, Any] | None) -> list[dict[str, str]]:
-    base_rows = extract_control_page_recent_activity(status)
-    if not isinstance(status, dict):
-        return base_rows
-    rows: list[dict[str, str]] = []
-    current_task = clean_text(str(status.get("current_task") or ""))
-    current_stage = clean_text(str(status.get("current_task_stage") or status.get("display_stage") or status.get("last_phase") or ""))
-    last_progress_message = clean_text(str(status.get("last_progress_message") or ""))
-    progress_messages = status.get("progress_messages") if isinstance(status.get("progress_messages"), list) else []
-    stability = status.get("stability_signals") if isinstance(status.get("stability_signals"), dict) else {}
-    phase_age_seconds = stability.get("phase_age_seconds")
-    task_bookkeeping = status.get("current_task_bookkeeping") if isinstance(status.get("current_task_bookkeeping"), dict) else {}
-    rollout_iteration = task_bookkeeping.get("rollout_iteration")
-    max_rollout_iterations = task_bookkeeping.get("max_rollout_iterations")
-    program_name = clean_text(str(task_bookkeeping.get("program_name") or ""))
-    verification_state = clean_text(str(task_bookkeeping.get("verification_state") or ""))
-    last_search_metrics = status.get("last_search_metrics") if isinstance(status.get("last_search_metrics"), dict) else {}
-    world_effect = status.get("last_world_effect_verification") if isinstance(status.get("last_world_effect_verification"), dict) else {}
-    critic_result = status.get("last_critic_result") if isinstance(status.get("last_critic_result"), dict) else {}
-    if current_task:
-        detail_parts: list[str] = []
-        if current_stage:
-            detail_parts.append(current_stage)
-        if isinstance(phase_age_seconds, (int, float)):
-            detail_parts.append(f"{max(0.0, float(phase_age_seconds)):.0f}s")
-        rows.append({
-            "kind": "live",
-            "label": current_task,
-            "detail": " ? ".join(part for part in detail_parts if part) or "running",
-        })
-    if isinstance(rollout_iteration, int) and isinstance(max_rollout_iterations, int) and max_rollout_iterations > 0:
-        rollout_label = f"rollout {rollout_iteration + 1}/{max_rollout_iterations}"
-        rollout_detail = verification_state or program_name or "task session"
-        rows.append({"kind": "live", "label": rollout_label, "detail": rollout_detail})
-    if last_progress_message:
-        rows.append({"kind": "live", "label": last_progress_message, "detail": "progress"})
-    else:
-        for message in progress_messages[-2:]:
-            clean = clean_text(str(message or ""))
-            if clean:
-                rows.append({"kind": "live", "label": clean, "detail": "progress"})
-    if last_search_metrics:
-        helper = clean_text(str(last_search_metrics.get("helper") or ""))
-        goal_type = clean_text(str(last_search_metrics.get("goal_type") or ""))
-        completion_reason = clean_text(str(last_search_metrics.get("completion_reason") or last_search_metrics.get("failure_reason") or ""))
-        search_label = " ".join(part for part in [helper, goal_type] if part) or "search helper"
-        search_detail = completion_reason or "active"
-        rows.append({"kind": "live", "label": search_label, "detail": search_detail})
-    if world_effect:
-        summary = clean_text(str(world_effect.get("summary") or ""))
-        reason_code = clean_text(str(world_effect.get("reason_code") or ""))
-        outcome = clean_text(str(world_effect.get("outcome") or ""))
-        if summary:
-            rows.append({
-                "kind": "failed" if outcome == "fail" else "live",
-                "label": summary,
-                "detail": reason_code or outcome or "world effect",
-            })
-    elif critic_result:
-        critique = clean_text(str(critic_result.get("critique") or ""))
-        reason_code = clean_text(str(critic_result.get("reason_code") or ""))
-        if critique:
-            rows.append({"kind": "failed", "label": critique, "detail": reason_code or "critic"})
-    rows.extend(base_rows)
-    deduped: list[dict[str, str]] = []
-    seen: set[tuple[str, str, str]] = set()
-    for row in rows:
-        key = (str(row.get("kind") or ""), str(row.get("label") or ""), str(row.get("detail") or ""))
-        if key in seen:
-            continue
-        seen.add(key)
-        deduped.append(row)
-    return deduped[:6]
-
-
-def extract_control_page_recent_activity_live_v2(status: dict[str, Any] | None) -> list[dict[str, str]]:
-    base_rows = extract_control_page_recent_activity(status)[-2:]
-    if not isinstance(status, dict):
-        return base_rows
-    rows: list[dict[str, str]] = []
-    current_task = clean_text(str(status.get("current_task") or ""))
-    current_stage = clean_text(str(status.get("current_task_stage") or status.get("display_stage") or status.get("last_phase") or ""))
-    last_progress_message = clean_text(str(status.get("last_progress_message") or ""))
-    progress_messages = status.get("progress_messages") if isinstance(status.get("progress_messages"), list) else []
-    stability = status.get("stability_signals") if isinstance(status.get("stability_signals"), dict) else {}
-    phase_age_seconds = stability.get("phase_age_seconds")
-    task_bookkeeping = status.get("current_task_bookkeeping") if isinstance(status.get("current_task_bookkeeping"), dict) else {}
-    rollout_iteration = task_bookkeeping.get("rollout_iteration")
-    max_rollout_iterations = task_bookkeeping.get("max_rollout_iterations")
-    program_name = clean_text(str(task_bookkeeping.get("program_name") or ""))
-    verification_state = clean_text(str(task_bookkeeping.get("verification_state") or ""))
-    last_search_metrics = status.get("last_search_metrics") if isinstance(status.get("last_search_metrics"), dict) else {}
-    world_effect = status.get("last_world_effect_verification") if isinstance(status.get("last_world_effect_verification"), dict) else {}
-    critic_result = status.get("last_critic_result") if isinstance(status.get("last_critic_result"), dict) else {}
-    if current_task:
-        detail_parts: list[str] = []
-        if current_stage:
-            detail_parts.append(current_stage)
-        if isinstance(phase_age_seconds, (int, float)):
-            detail_parts.append(f"{max(0.0, float(phase_age_seconds)):.0f}s")
-        rows.append({
-            "kind": "live",
-            "label": current_task,
-            "detail": " / ".join(part for part in detail_parts if part) or "running",
-        })
-    if isinstance(rollout_iteration, int) and isinstance(max_rollout_iterations, int) and max_rollout_iterations > 0:
-        rollout_label = f"rollout {rollout_iteration + 1}/{max_rollout_iterations}"
-        rollout_detail = verification_state or program_name or "task session"
-        rows.append({"kind": "live", "label": rollout_label, "detail": rollout_detail})
-    if last_progress_message:
-        rows.append({"kind": "live", "label": last_progress_message, "detail": "progress"})
-    else:
-        for message in progress_messages[-2:]:
-            clean = clean_text(str(message or ""))
-            if clean:
-                rows.append({"kind": "live", "label": clean, "detail": "progress"})
-    if last_search_metrics:
-        helper = clean_text(str(last_search_metrics.get("helper") or ""))
-        goal_type = clean_text(str(last_search_metrics.get("goal_type") or ""))
-        completion_reason = clean_text(str(last_search_metrics.get("completion_reason") or last_search_metrics.get("failure_reason") or ""))
-        search_label = " ".join(part for part in [helper, goal_type] if part) or "search helper"
-        search_detail = completion_reason or "active"
-        rows.append({"kind": "live", "label": search_label, "detail": search_detail})
-    if world_effect:
-        summary = clean_text(str(world_effect.get("summary") or ""))
-        reason_code = clean_text(str(world_effect.get("reason_code") or ""))
-        outcome = clean_text(str(world_effect.get("outcome") or ""))
-        if summary:
-            rows.append({
-                "kind": "failed" if outcome == "fail" else "live",
-                "label": summary,
-                "detail": reason_code or outcome or "world effect",
-            })
-    elif critic_result:
-        critique = clean_text(str(critic_result.get("critique") or ""))
-        reason_code = clean_text(str(critic_result.get("reason_code") or ""))
-        if critique:
-            rows.append({"kind": "failed", "label": critique, "detail": reason_code or "critic"})
-    rows.extend(base_rows)
-    deduped: list[dict[str, str]] = []
-    seen: set[tuple[str, str, str]] = set()
-    for row in rows:
-        key = (str(row.get("kind") or ""), str(row.get("label") or ""), str(row.get("detail") or ""))
-        if key in seen:
-            continue
-        seen.add(key)
-        deduped.append(row)
-    return deduped[:6]
-
-
 async def get_control_page_minecraft_snapshot(guild_id: int | None) -> dict[str, Any]:
     client = get_minecraft_client()
     raw_status: dict[str, Any] = {}
@@ -10693,7 +7688,7 @@ async def get_control_page_minecraft_snapshot(guild_id: int | None) -> dict[str,
     except Exception as exc:
         last_error = repr(exc)
     observation = raw_status.get("observation") if isinstance(raw_status.get("observation"), dict) else {}
-    merged = _merge_voyager_status_into_state(raw_status, observation) or {}
+    merged = merge_voyager_status_into_state(raw_status, observation) or {}
     if not merged:
         merged = await observe_live_minecraft_state(guild_id) or {}
     if last_error and not merged.get("last_error"):
@@ -10708,7 +7703,7 @@ async def get_control_page_minecraft_snapshot(guild_id: int | None) -> dict[str,
         observation.get("inventory_used") or observation.get("inventoryUsed"),
         merged["inventory_slots"],
     )
-    merged["recent_activity"] = extract_control_page_recent_activity_live_v2(raw_status)
+    merged["recent_activity"] = extract_minecraft_recent_activity_live(raw_status, base_limit=2)
     merged["completed_count"] = len(raw_status.get("completed_tasks") or [])
     merged["failed_count"] = len(raw_status.get("failed_tasks") or [])
     merged["current_task"] = clean_text(str(raw_status.get("current_task") or merged.get("objective_task") or ""))
@@ -10745,153 +7740,96 @@ async def safe_get_control_page_minecraft_snapshot(
 
 
 async def _probe_control_page_runtime_services_once() -> dict[str, Any]:
-    bot_ready = True
-    service_probe_targets: list[tuple[str, str, int]] = []
-    for label, url in (
-        ("main", LLM_SERVER_URL),
-        ("router", ROUTER_LLM_URL),
-        ("sub", SUMMARY_LLM_URL),
-        ("tts", OMNIVOICE_SERVER_URL),
-    ):
-        target = runtime_status_port_from_url(url)
-        if target is not None:
-            host, port = target
-            service_probe_targets.append((label, host, port))
-    service_results: dict[str, bool] = {}
-    if service_probe_targets:
-        probed = await asyncio.gather(
-            *(probe_runtime_tcp_service(label, host, port) for label, host, port in service_probe_targets),
-            return_exceptions=True,
-        )
-        for item in probed:
-            if isinstance(item, tuple) and len(item) == 2:
-                service_results[str(item[0])] = bool(item[1])
-    voyager_ready = False
-    voyager_error = ""
-    try:
-        voyager_ready = await get_minecraft_client().is_service_alive(timeout_sec=0.45)
-    except Exception as exc:
-        voyager_error = clean_text(str(exc)) or type(exc).__name__
-    codex_required = clean_text(str(VOYAGER_ACTION_BACKEND or "")).lower() == "codex-gateway"
-    codex_ready: bool | None = None
-    codex_error = ""
-    codex_backend = clean_text(str(VOYAGER_ACTION_BACKEND or "")) or "unknown"
-    if codex_required:
-        codex_ready = False
-        codex_health_url = f"http://127.0.0.1:{VOYAGER_CODEX_GATEWAY_PORT}/health"
-        timeout = aiohttp.ClientTimeout(total=0.45)
-        try:
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.get(codex_health_url) as resp:
-                    payload = await resp.json(content_type=None)
-                    if isinstance(payload, dict):
-                        codex_backend = clean_text(str(payload.get("backend") or codex_backend)) or codex_backend
-                        codex_ready = resp.status == 200 and bool(payload.get("ok", True))
-                        if not codex_ready:
-                            codex_error = clean_text(str(payload.get("error") or payload.get("codex_login_message") or "")) or codex_error
-                    else:
-                        codex_ready = resp.status == 200
-        except Exception as exc:
-            codex_error = clean_text(str(exc)) or type(exc).__name__
-    services = {
-        "botReady": bot_ready,
-        "mainReady": bool(service_results.get("main")),
-        "routerReady": bool(service_results.get("router")),
-        "subReady": bool(service_results.get("sub")),
-        "ttsReady": bool(service_results.get("tts")),
-        "voyagerReady": voyager_ready,
-        "codexRequired": codex_required,
-        "codexReady": codex_ready,
-        "codexBackend": codex_backend,
-        "summary": build_control_page_runtime_summary(
-            bot_ready=bot_ready,
-            voyager_ready=voyager_ready,
-            codex_required=codex_required,
-            codex_ready=codex_ready,
+    async def _voyager_alive() -> bool:
+        return bool(await get_minecraft_client().is_service_alive(timeout_sec=0.45))
+
+    return await probe_control_page_runtime_services(
+        service_urls={
+            "main": LLM_SERVER_URL,
+            "router": ROUTER_LLM_URL,
+            "sub": SUMMARY_LLM_URL,
+            "tts": OMNIVOICE_SERVER_URL,
+        },
+        bot_api_host=CONTROL_PAGE_BOT_API_HOST,
+        bot_api_port=CONTROL_PAGE_BOT_API_PORT,
+        bot_api_state_path=CONTROL_PAGE_BOT_API_STATE_PATH,
+        bot_api_probe_timeout_sec=CONTROL_PAGE_BOT_API_PROBE_TIMEOUT_SEC,
+        action_backend=VOYAGER_ACTION_BACKEND,
+        codex_gateway_port=VOYAGER_CODEX_GATEWAY_PORT,
+        voyager_alive_probe=_voyager_alive,
+    )
+
+
+def _build_control_plane_runtime_services_snapshot(*, now: float | None = None) -> dict[str, Any]:
+    return control_page_runtime_services_cache.snapshot_copy(
+        refreshing=bool(
+            control_page_runtime_services_refresh_task is not None
+            and not control_page_runtime_services_refresh_task.done()
         ),
-    }
-    if voyager_error:
-        services["voyagerError"] = voyager_error
-    if codex_error:
-        services["codexError"] = codex_error
-    return services
+        now=now,
+    )
+
+
+def _can_schedule_control_page_runtime_services_refresh(*, now: float | None = None) -> bool:
+    return control_page_runtime_services_cache.can_schedule_refresh(
+        refreshing=bool(
+            control_page_runtime_services_refresh_task is not None
+            and not control_page_runtime_services_refresh_task.done()
+        ),
+        now=now,
+    )
+
+
+def _mark_control_page_runtime_services_refresh_request(*, now: float | None = None) -> None:
+    control_page_runtime_services_cache.mark_refresh_request(now=now)
+
+
+async def _refresh_control_page_runtime_services_cache_once() -> None:
+    try:
+        services = await _probe_control_page_runtime_services_once()
+    except Exception as exc:
+        error_text = clean_text(str(exc)) or type(exc).__name__
+        services = build_control_page_runtime_services_error_payload(
+            error_text,
+            action_backend=VOYAGER_ACTION_BACKEND,
+        )
+    control_page_runtime_services_cache.store_success(services)
+
+
+def _start_control_page_runtime_services_background_refresh(*, now: float | None = None) -> None:
+    now_ts = time.time() if now is None else float(now)
+    global control_page_runtime_services_refresh_task
+
+    if not _can_schedule_control_page_runtime_services_refresh(now=now_ts):
+        return
+    _mark_control_page_runtime_services_refresh_request(now=now_ts)
+    control_page_runtime_services_refresh_task = asyncio.create_task(
+        _refresh_control_page_runtime_services_cache_once()
+    )
 
 
 async def get_control_page_runtime_services(*, force: bool = False) -> dict[str, Any]:
-    global control_page_runtime_services_cache
-    global control_page_runtime_services_cached_at
     global control_page_runtime_services_lock
+    global control_page_runtime_services_refresh_task
 
-    age_seconds = (time.time() - control_page_runtime_services_cached_at) if control_page_runtime_services_cached_at else None
-    is_fresh = (
-        control_page_runtime_services_cache
-        and age_seconds is not None
-        and age_seconds <= CONTROL_PAGE_RUNTIME_CACHE_REFRESH_SEC
-    )
-    if is_fresh and not force:
-        return dict(control_page_runtime_services_cache)
     if control_page_runtime_services_lock is None:
         control_page_runtime_services_lock = asyncio.Lock()
     async with control_page_runtime_services_lock:
-        age_seconds = (time.time() - control_page_runtime_services_cached_at) if control_page_runtime_services_cached_at else None
-        is_fresh = (
-            control_page_runtime_services_cache
-            and age_seconds is not None
-            and age_seconds <= CONTROL_PAGE_RUNTIME_CACHE_REFRESH_SEC
-        )
-        if is_fresh and not force:
-            return dict(control_page_runtime_services_cache)
-        services = await _probe_control_page_runtime_services_once()
-        control_page_runtime_services_cache = dict(services)
-        control_page_runtime_services_cached_at = time.time()
-        return dict(control_page_runtime_services_cache)
+        now_ts = time.time()
+        if control_page_runtime_services_cache.is_fresh(now=now_ts) and not force:
+            return _build_control_plane_runtime_services_snapshot()
+        if (not force) and control_page_runtime_services_cache.is_stale_not_expired(now=now_ts):
+            _start_control_page_runtime_services_background_refresh(now=now_ts)
+            return _build_control_plane_runtime_services_snapshot()
+        await _refresh_control_page_runtime_services_cache_once()
+        return _build_control_plane_runtime_services_snapshot()
 
 
 def get_control_page_minecraft_snapshot_cache_copy() -> dict[str, Any]:
-    snapshot = dict(control_page_minecraft_snapshot_cache) if isinstance(control_page_minecraft_snapshot_cache, dict) else {}
-    age_seconds = (time.time() - control_page_minecraft_snapshot_cached_at) if control_page_minecraft_snapshot_cached_at else None
-    if age_seconds is not None:
-        snapshot["snapshot_age_sec"] = round(max(0.0, age_seconds), 3)
-    else:
-        snapshot["snapshot_age_sec"] = None
-    snapshot["snapshot_stale"] = bool(control_page_minecraft_snapshot_stale)
-    snapshot["snapshot_expired"] = bool(
-        snapshot["snapshot_stale"]
-        and age_seconds is not None
-        and age_seconds > CONTROL_PAGE_MINECRAFT_CACHE_MAX_STALE_SEC
-    )
-    if control_page_minecraft_snapshot_last_error and not snapshot.get("last_error"):
-        snapshot["last_error"] = control_page_minecraft_snapshot_last_error
-    snapshot = attach_minecraft_runtime_snapshot(
-        snapshot,
-        source="control_page_cache",
-        now=time.time(),
-        observed_at=control_page_minecraft_snapshot_cached_at or None,
-        stale_after_sec=CONTROL_PAGE_MINECRAFT_CACHE_REFRESH_SEC,
-        expired_after_sec=CONTROL_PAGE_MINECRAFT_CACHE_MAX_STALE_SEC,
-        last_error=snapshot.get("last_error") or None,
-    )
-    if snapshot.get("snapshot_expired"):
-        return {
-            "last_error": snapshot.get("last_error") or "minecraft_snapshot_expired",
-            "inventory_top": [],
-            "inventory_summary": "inventory unavailable",
-            "recent_activity": [],
-            "snapshot_stale": True,
-            "snapshot_expired": True,
-            "snapshot_age_sec": snapshot.get("snapshot_age_sec"),
-            "snapshot_freshness": snapshot.get("snapshot_freshness"),
-            "runtime_snapshot": snapshot.get("runtime_snapshot"),
-        }
-    return snapshot
+    return control_page_minecraft_snapshot_cache.snapshot_copy()
 
 
 async def _refresh_control_page_minecraft_snapshot_once(guild_id: int | None) -> dict[str, Any]:
-    global control_page_minecraft_snapshot_cache
-    global control_page_minecraft_snapshot_cached_at
-    global control_page_minecraft_snapshot_stale
-    global control_page_minecraft_snapshot_last_error
-
     try:
         snapshot = await asyncio.wait_for(
             get_control_page_minecraft_snapshot(guild_id),
@@ -10899,24 +7837,9 @@ async def _refresh_control_page_minecraft_snapshot_once(guild_id: int | None) ->
         )
     except Exception as exc:
         error_text = clean_text(str(exc)) or repr(exc)
-        control_page_minecraft_snapshot_last_error = error_text
-        control_page_minecraft_snapshot_stale = True
-        if not control_page_minecraft_snapshot_cache:
-            control_page_minecraft_snapshot_cache = {
-                "last_error": error_text,
-                "inventory_top": [],
-                "inventory_summary": "inventory unavailable",
-                "recent_activity": [],
-            }
-        else:
-            control_page_minecraft_snapshot_cache["last_error"] = error_text
-        return get_control_page_minecraft_snapshot_cache_copy()
+        return control_page_minecraft_snapshot_cache.store_error(error_text)
 
-    control_page_minecraft_snapshot_cache = dict(snapshot)
-    control_page_minecraft_snapshot_cached_at = time.time()
-    control_page_minecraft_snapshot_stale = False
-    control_page_minecraft_snapshot_last_error = clean_text(str(snapshot.get("last_error") or ""))
-    return get_control_page_minecraft_snapshot_cache_copy()
+    return control_page_minecraft_snapshot_cache.store_success(snapshot)
 
 
 async def ensure_control_page_minecraft_snapshot(
@@ -10934,14 +7857,7 @@ async def ensure_control_page_minecraft_snapshot(
         control_page_minecraft_snapshot_lock = asyncio.Lock()
 
     async with control_page_minecraft_snapshot_lock:
-        age_seconds = (time.time() - control_page_minecraft_snapshot_cached_at) if control_page_minecraft_snapshot_cached_at else None
-        is_fresh = (
-            control_page_minecraft_snapshot_cache
-            and not control_page_minecraft_snapshot_stale
-            and age_seconds is not None
-            and age_seconds <= CONTROL_PAGE_MINECRAFT_CACHE_REFRESH_SEC
-        )
-        if not force and is_fresh:
+        if not force and control_page_minecraft_snapshot_cache.is_fresh():
             return get_control_page_minecraft_snapshot_cache_copy()
         if control_page_minecraft_snapshot_refresh_task is None or control_page_minecraft_snapshot_refresh_task.done():
             control_page_minecraft_snapshot_refresh_task = asyncio.create_task(
@@ -10983,11 +7899,17 @@ async def ensure_control_page_background_tasks_started() -> None:
 def stop_control_page_background_tasks() -> None:
     global control_page_minecraft_snapshot_poll_task
     global control_page_minecraft_snapshot_refresh_task
-    for task in (control_page_minecraft_snapshot_poll_task, control_page_minecraft_snapshot_refresh_task):
+    global control_page_runtime_services_refresh_task
+    for task in (
+        control_page_minecraft_snapshot_poll_task,
+        control_page_minecraft_snapshot_refresh_task,
+        control_page_runtime_services_refresh_task,
+    ):
         if task is not None and not task.done():
             task.cancel()
     control_page_minecraft_snapshot_poll_task = None
     control_page_minecraft_snapshot_refresh_task = None
+    control_page_runtime_services_refresh_task = None
 
 
 def build_control_page_status_text(guild: discord.Guild, minecraft: dict[str, Any]) -> str:
@@ -10996,67 +7918,41 @@ def build_control_page_status_text(guild: discord.Guild, minecraft: dict[str, An
     listening = bool(vc and hasattr(vc, "is_listening") and vc.is_listening())
     speaking = is_tracked_tts_playback_active(tts_playback_tracker, guild.id)
     tts_target = current_tts_target_name(guild) if speaking else "없음"
-    runtime_snapshot = minecraft.get("runtime_snapshot") if isinstance(minecraft.get("runtime_snapshot"), dict) else {}
-    snapshot_freshness = clean_text(str(runtime_snapshot.get("freshness") or minecraft.get("snapshot_freshness") or "unknown"))
-    snapshot_age = runtime_snapshot.get("age_sec", minecraft.get("snapshot_age_sec"))
-    return "\n".join(
-        [
-            "Evelyn 상태",
-            f"- 서버: {guild.name}",
-            f"- 음성 채널: {voice_channel_name}",
-            f"- 듣기: {command_status(listening)}",
-            f"- TTS 발화: {command_status(speaking)}",
-            f"- 발화 대상: {tts_target}",
-            f"- 입력 모드: {voice_input_mode_status_line()}",
-            f"- 로컬 마이크: {local_mic_status_line()}",
-            "",
-            "모델",
-            f"- Main: {MODEL_NAME}",
-            f"- Router: {ROUTER_MODEL_NAME}",
-            f"- Summary: {SUMMARY_MODEL_NAME}",
-            f"- STT: {STT_MODEL_NAME}",
-            "",
-            "Minecraft",
-            f"- Voyager 실행: {command_status(bool(minecraft.get('minecraft_autonomy')))}",
-            f"- 연결: {command_status(bool(minecraft.get('voyager_connected')))}",
-            f"- 스냅샷: {snapshot_freshness} ({snapshot_age if snapshot_age is not None else 'unknown'}s)",
-            f"- 현재 task: {minecraft.get('current_task') or '없음'}",
-            f"- 목표: {minecraft.get('goal') or '없음'}",
-        ]
+    return build_control_page_status_text_payload(
+        guild_name=guild.name,
+        voice_channel_name=voice_channel_name,
+        listening=listening,
+        speaking=speaking,
+        tts_target=tts_target,
+        voice_input_mode=voice_input_mode_status_line(),
+        local_mic_status=local_mic_status_line(),
+        main_model=MODEL_NAME,
+        router_model=ROUTER_MODEL_NAME,
+        summary_model=SUMMARY_MODEL_NAME,
+        stt_model=STT_MODEL_NAME,
+        minecraft=minecraft,
     )
 
 
 def build_control_page_local_status_text(runtime_services: dict[str, Any] | None = None) -> str:
-    services = dict(runtime_services or {})
     local_tts = local_tts_playback_manager.snapshot()
     local_mic = serialize_local_mic_runtime_state()
     local_speaking = bool(local_tts.get("active"))
     local_listening = bool(local_mic.get("enabled") and local_mic.get("captureReady"))
-    codex_required = bool(services.get("codexRequired"))
-    codex_ready = bool(services.get("codexReady")) if services.get("codexReady") is not None else False
-    lines = [
-        "Evelyn 로컬 상태",
-        f"- 모드: local-only ({'Discord 꺼짐' if not DISCORD_ENABLED else 'Discord 켜짐'})",
-        f"- Bot API: {control_page_local_url()}",
-        f"- Main LLM: {command_status(bool(services.get('mainReady')))} / {MODEL_NAME}",
-        f"- Router LLM: {command_status(bool(services.get('routerReady')))} / {ROUTER_MODEL_NAME}",
-        f"- Summary LLM: {command_status(bool(services.get('subReady')))} / {SUMMARY_MODEL_NAME}",
-        f"- TTS: {command_status(bool(services.get('ttsReady')))}",
-        f"- STT: {STT_MODEL_NAME}",
-        f"- 로컬 스피커: {command_status(local_speaking)}",
-        f"- 로컬 마이크: {local_mic_status_line()}",
-        f"- 로컬 듣기: {command_status(local_listening)}",
-        f"- Minecraft/Voyager: {command_status(bool(services.get('voyagerReady')))}",
-    ]
-    if codex_required:
-        lines.append(f"- Codex gateway: {command_status(codex_ready)}")
-    summary = clean_text(str(services.get("summary") or ""))
-    if summary:
-        lines.append(f"- 요약: {summary}")
-    codex_error = clean_text(str(services.get("codexError") or ""))
-    if codex_error:
-        lines.append(f"- Codex 상태: {codex_error}")
-    return "\n".join(lines)
+    return build_control_page_local_status_text_payload(
+        runtime_services,
+        discord_enabled=DISCORD_ENABLED,
+        local_url=control_page_local_url(),
+        bot_api_host=CONTROL_PAGE_BOT_API_HOST,
+        bot_api_port=CONTROL_PAGE_BOT_API_PORT,
+        main_model=MODEL_NAME,
+        router_model=ROUTER_MODEL_NAME,
+        summary_model=SUMMARY_MODEL_NAME,
+        stt_model=STT_MODEL_NAME,
+        local_speaking=local_speaking,
+        local_listening=local_listening,
+        local_mic_status=local_mic_status_line(),
+    )
 
 
 async def build_control_page_status_reply(guild: discord.Guild) -> str:
@@ -11068,68 +7964,32 @@ def build_control_page_voice_status_reply(guild: discord.Guild | None) -> str:
     vc = guild.voice_client if guild is not None else None
     voice = build_voice_pipeline_snapshot(guild)
     channel_name = getattr(getattr(vc, "channel", None), "name", None) or "none"
-    saved = voice.get("lastVoiceChannel") if isinstance(voice.get("lastVoiceChannel"), dict) else {}
-    saved_channel = clean_text(str((saved or {}).get("channel_name") or "")) or "none"
-    local_tts = voice.get("localTtsOutput") if isinstance(voice.get("localTtsOutput"), dict) else {}
-    return "\n".join(
-        [
-            "음성 상태",
-            f"- 현재 채널: {channel_name}",
-            f"- 저장된 채널: {saved_channel}",
-            f"- 출력 모드: {voice.get('outputMode') or 'unknown'}",
-            f"- 로컬 출력: enabled={local_tts.get('enabled')} active={local_tts.get('active')} device={local_tts.get('device') or 'default'}",
-            f"- 입력 모드: {voice_input_mode_status_line()}",
-            f"- 로컬 마이크: {local_mic_status_line()}",
-            "",
-            "파이프라인",
-            f"- 큐: {voice['queueDepth']}/{voice['queueMax']}",
-            f"- 최근 음성: {'있음' if voice['liveRecent'] else '없음'}",
-            f"- STT 처리 중: {command_status(bool(voice['sttBusy']))}",
-            f"- STT 쿨다운: {voice['sttCooldownRemainingSec']}s",
-            f"- STT timeout: {voice['sttTimeoutCount']}",
-            f"- 큐 drop: full={voice['queueFullDropCount']} stale={voice['queueStaleDropCount']}",
-            f"- 실패: llm={voice['llmFailedCount']} tts_req={voice['ttsRequestFailedCount']} playback={voice['ttsPlaybackFailedCount']} delivery={voice['voiceDeliveryFailedCount']}",
-            f"- p95: stt={voice['sttMsP95']}ms tts_first={voice['ttsFirstAudioMsP95']}ms main_first={voice['mainFirstTokenMsP95']}ms",
-        ]
+    continuity = voice.get("bargeInContinuity") if isinstance(voice.get("bargeInContinuity"), dict) else {}
+    return build_control_page_voice_status_reply_payload(
+        voice,
+        channel_name=channel_name,
+        voice_input_mode=voice_input_mode_status_line(),
+        local_mic_status=local_mic_status_line(),
+        continuity_detail_lines=_format_voice_barge_in_continuity_detail_lines(continuity),
+    )
+
+
+def build_control_page_voice_continuity_reply(guild: discord.Guild | None) -> str:
+    _ = guild
+    continuity = _build_voice_barge_in_continuity_snapshot()
+    return build_control_page_voice_continuity_reply_payload(
+        _format_voice_barge_in_continuity_detail_lines(continuity)
     )
 
 
 async def build_control_page_inventory_reply(guild: discord.Guild) -> str:
     minecraft = await safe_get_control_page_minecraft_snapshot(guild.id)
-    entries = minecraft.get("inventory_top") if isinstance(minecraft.get("inventory_top"), list) else []
-    if not entries:
-        return "현재 인벤토리 정보를 아직 받지 못했어."
-    lines = ["Minecraft 인벤토리 요약"]
-    for row in entries:
-        lines.append(f"- {row['name']}: {row['count']}")
-    return "\n".join(lines)
+    return build_control_page_inventory_reply_payload(minecraft)
 
 
 async def build_control_page_minecraft_reply(guild: discord.Guild) -> str:
     minecraft = await safe_get_control_page_minecraft_snapshot(guild.id)
-    return "\n".join(
-        [
-            "Minecraft 상태",
-            f"- Voyager 실행: {command_status(bool(minecraft.get('minecraft_autonomy')))}",
-            f"- 연결: {command_status(bool(minecraft.get('voyager_connected')))}",
-            f"- 목표: {minecraft.get('goal') or '없음'}",
-            f"- stage: {minecraft.get('stage') or '없음'}",
-            f"- task: {minecraft.get('current_task') or '없음'}",
-            f"- task_stage: {minecraft.get('current_task_stage') or '없음'}",
-            f"- 진행: {minecraft.get('progress') or '없음'}",
-            "",
-            "Voyager 지표",
-            f"- tech_tree: {clean_text(str(minecraft.get('voyager_tech_tree_highest') or 'unknown'))}",
-            f"- unique_items: {minecraft.get('voyager_unique_item_count') if minecraft.get('voyager_unique_item_count') is not None else 'unknown'}",
-            f"- skill_library: {minecraft.get('voyager_skill_library_size') if minecraft.get('voyager_skill_library_size') is not None else 'unknown'}",
-            f"- travel_distance: {minecraft.get('voyager_travel_distance_blocks') if minecraft.get('voyager_travel_distance_blocks') is not None else 'unknown'}",
-            "",
-            "현재 상태",
-            f"- health: {minecraft.get('health') if minecraft.get('health') is not None else 'unknown'}",
-            f"- hunger: {minecraft.get('hunger') if minecraft.get('hunger') is not None else 'unknown'}",
-            f"- position: {minecraft.get('position_text') or 'unknown'}",
-        ]
-    )
+    return build_control_page_minecraft_reply_payload(minecraft)
 
 
 def build_control_page_autonomy_reply(guild: discord.Guild) -> str:
@@ -11137,49 +7997,18 @@ def build_control_page_autonomy_reply(guild: discord.Guild) -> str:
     if engine is None:
         return "자율 행동 엔진이 아직 만들어지지 않았어."
     state = engine.state
-    drive = state.drive_state if isinstance(state.drive_state, dict) else {}
-    drive_line = (
-        f"mood={clean_text(str(drive.get('mood') or 'unknown'))} "
-        f"impulse={clean_text(str(drive.get('last_impulse') or 'unknown'))} "
-        f"gate={clean_text(str(drive.get('last_gate_reason') or 'unknown'))} "
-        f"curiosity={float(drive.get('curiosity', 0.0) or 0.0):.2f} "
-        f"concern={float(drive.get('concern', 0.0) or 0.0):.2f} "
-        f"restraint={float(drive.get('restraint', 0.0) or 0.0):.2f}"
-    ) if drive else "not initialized"
-    goal = state.current_goal.summary if state.current_goal else "없음"
-    plan = state.current_plan.summary if state.current_plan else "없음"
-    allowed = ", ".join(state.allowed_actions[:6]) or "없음"
-    if len(state.allowed_actions) > 6:
-        allowed += ", ..."
     router = get_routed_autonomy_executor(guild.id)
-    minecraft_enabled = bool(router and router.is_domain_enabled("minecraft"))
-    return "\n".join(
-        [
-            "자율 행동 상태",
-            f"- 상태: {state.status}",
-            f"- 안전 모드: {state.safety_mode}",
-            f"- 목표: {goal}",
-            f"- 계획: {plan}",
-            f"- drive: {drive_line}",
-            f"- 실패 횟수: {state.failure_count}",
-            f"- 마지막 오류: {state.last_error or '없음'}",
-            f"- Minecraft 자율 행동: {command_status(minecraft_enabled)}",
-            f"- 허용 액션: {allowed}",
-        ]
+    return build_control_page_autonomy_reply_payload(
+        status=state.status,
+        safety_mode=state.safety_mode,
+        goal=state.current_goal.summary if state.current_goal else "없음",
+        plan=state.current_plan.summary if state.current_plan else "없음",
+        drive=state.drive_state if isinstance(state.drive_state, dict) else {},
+        failure_count=state.failure_count,
+        last_error=state.last_error,
+        minecraft_enabled=bool(router and router.is_domain_enabled("minecraft")),
+        allowed_actions=list(state.allowed_actions or []),
     )
-
-
-def build_control_page_help_reply() -> str:
-    lines = ["페이지 명령어"]
-    groups = ["기본", "페이지", "음성", "Minecraft", "자율 행동", "시스템"]
-    for group in groups:
-        items = [item for item in CONTROL_PAGE_COMMANDS if item.get("group") == group]
-        if not items:
-            continue
-        lines.extend(["", group])
-        for item in items:
-            lines.append(f"- {item['command']} - {item['summary']}")
-    return "\n".join(lines)
 
 
 def execute_control_page_memory_panel_action(action: str) -> str:
@@ -11187,205 +8016,7 @@ def execute_control_page_memory_panel_action(action: str) -> str:
     if cleaned_action not in {"open", "close", "toggle"}:
         cleaned_action = "toggle"
     enqueue_control_page_ui_command(cleaned_action, panel_id="memory")
-    if cleaned_action == "open":
-        return "메모리 패널을 열어둘게."
-    if cleaned_action == "close":
-        return "메모리 패널은 숨겨둘게."
-    return "메모리 패널을 열거나 숨길게."
-
-
-@dataclass(frozen=True)
-class ControlPageToolSpec:
-    name: str
-    risk: str
-    description: str
-    router_enabled: bool = True
-    requires_guild: bool = False
-
-
-CONTROL_PAGE_TOOL_SPECS: dict[str, ControlPageToolSpec] = {
-    "control_page.help": ControlPageToolSpec("control_page.help", "low", "Show the control page command list.", router_enabled=False),
-    "runtime.status": ControlPageToolSpec("runtime.status", "low", "Show Evelyn runtime status."),
-    "control_page.memory_panel": ControlPageToolSpec("control_page.memory_panel", "low", "Open, close, or toggle the memory panel."),
-    "memory.open_vault": ControlPageToolSpec("memory.open_vault", "low", "Open the Obsidian memory vault."),
-    "voice.status": ControlPageToolSpec("voice.status", "low", "Show voice, STT, and TTS status."),
-    "voice.input_mode": ControlPageToolSpec("voice.input_mode", "medium", "Set voice input mode.", router_enabled=False),
-    "voice.reconnect": ControlPageToolSpec("voice.reconnect", "medium", "Reconnect to the last voice channel.", requires_guild=True),
-    "runtime.restart_bot": ControlPageToolSpec("runtime.restart_bot", "medium", "Restart the Evelyn bot process."),
-    "runtime.shutdown_stack": ControlPageToolSpec("runtime.shutdown_stack", "high", "Shut down the Evelyn runtime stack.", router_enabled=False),
-    "minecraft.inventory": ControlPageToolSpec("minecraft.inventory", "low", "Show Minecraft inventory.", requires_guild=True),
-    "minecraft.status": ControlPageToolSpec("minecraft.status", "low", "Show Minecraft/Voyager status.", requires_guild=True),
-    "minecraft.connect": ControlPageToolSpec("minecraft.connect", "medium", "Start Voyager Minecraft mode.", requires_guild=True),
-    "minecraft.disconnect": ControlPageToolSpec("minecraft.disconnect", "medium", "Stop Voyager Minecraft mode.", requires_guild=True),
-    "minecraft.set_goal": ControlPageToolSpec("minecraft.set_goal", "medium", "Set a Minecraft goal.", router_enabled=False, requires_guild=True),
-    "autonomy.status": ControlPageToolSpec("autonomy.status", "low", "Show autonomy engine status.", requires_guild=True),
-}
-
-CONTROL_PAGE_SLASH_TOOL_ALIASES: dict[str, str] = {
-    "/": "control_page.help",
-    "/help": "control_page.help",
-    "/status": "runtime.status",
-    "/memory": "control_page.memory_panel",
-    "/obsidian": "memory.open_vault",
-    "/voice": "voice.status",
-    "/voice status": "voice.status",
-    "/voice reconnect": "voice.reconnect",
-    "/voice rejoin": "voice.reconnect",
-    "/restart": "runtime.restart_bot",
-    "/재시작": "runtime.restart_bot",
-    "/shutdown": "runtime.shutdown_stack",
-    "/quit": "runtime.shutdown_stack",
-    "/exit": "runtime.shutdown_stack",
-    "/inventory": "minecraft.inventory",
-    "/voyager stats": "minecraft.status",
-    "/minecraft status": "minecraft.status",
-    "/mc-status": "minecraft.status",
-    "/minecraft connect": "minecraft.connect",
-    "/mc-connect": "minecraft.connect",
-    "/minecraft disconnect": "minecraft.disconnect",
-    "/mc-disconnect": "minecraft.disconnect",
-    "/autonomy status": "autonomy.status",
-}
-
-
-def control_page_tool_registry_prompt() -> str:
-    tools: list[dict[str, Any]] = []
-    for spec in CONTROL_PAGE_TOOL_SPECS.values():
-        if not spec.router_enabled:
-            continue
-        tools.append(
-            {
-                "name": spec.name,
-                "risk": spec.risk,
-                "description": spec.description,
-            }
-        )
-    return json.dumps(tools, ensure_ascii=False, separators=(",", ":"))
-
-
-def normalize_control_page_tool_arguments(tool_name: str, arguments: Any) -> dict[str, Any]:
-    if isinstance(arguments, str):
-        try:
-            parsed = json.loads(arguments)
-            arguments = parsed if isinstance(parsed, dict) else {}
-        except Exception:
-            arguments = {}
-    if not isinstance(arguments, dict):
-        arguments = {}
-    cleaned: dict[str, Any] = {}
-    if tool_name == "control_page.memory_panel":
-        action = clean_text(str(arguments.get("action") or "")).lower()
-        cleaned["action"] = action if action in {"open", "close", "toggle"} else "toggle"
-    elif tool_name == "voice.input_mode":
-        mode = clean_text(str(arguments.get("mode") or "")).lower()
-        cleaned["mode"] = mode if mode in {"auto", "local", "discord"} else "auto"
-    elif tool_name == "minecraft.set_goal":
-        cleaned["goal"] = clean_text(str(arguments.get("goal") or ""))
-    return cleaned
-
-
-def control_page_tool_decision(
-    tool_name: str,
-    *,
-    arguments: dict[str, Any] | None = None,
-    confidence: float = 1.0,
-    source: str = "cheap",
-    reply: str = "",
-) -> dict[str, Any] | None:
-    spec = CONTROL_PAGE_TOOL_SPECS.get(clean_text(tool_name))
-    if spec is None:
-        return None
-    return {
-        "tool": spec.name,
-        "risk": spec.risk,
-        "arguments": normalize_control_page_tool_arguments(spec.name, arguments or {}),
-        "confidence": max(0.0, min(1.0, float(confidence or 0.0))),
-        "source": source,
-        "reply": clean_text(reply),
-    }
-
-
-def control_page_tool_decision_from_llm(decision: dict[str, Any] | None) -> dict[str, Any] | None:
-    if not isinstance(decision, dict):
-        return None
-    tool_call = decision.get("tool_call")
-    if tool_call is None and isinstance(decision.get("tool_calls"), list) and decision["tool_calls"]:
-        tool_call = decision["tool_calls"][0]
-    if not isinstance(tool_call, dict):
-        return None
-    tool_name = clean_text(str(tool_call.get("name") or tool_call.get("tool") or "")).lower()
-    if tool_name not in CONTROL_PAGE_TOOL_SPECS:
-        return None
-    spec = CONTROL_PAGE_TOOL_SPECS[tool_name]
-    if not spec.router_enabled:
-        return None
-    confidence = decision.get("confidence", tool_call.get("confidence", 0.0))
-    return control_page_tool_decision(
-        tool_name,
-        arguments=normalize_control_page_tool_arguments(tool_name, tool_call.get("arguments")),
-        confidence=float(confidence or 0.0),
-        source="router",
-        reply=clean_text(str(decision.get("reply") or "")),
-    )
-
-
-def control_page_ui_tool_action_from_decision(decision: dict[str, Any] | None) -> str | None:
-    tool_decision = control_page_tool_decision_from_llm(decision)
-    if not tool_decision or tool_decision.get("tool") != "control_page.memory_panel":
-        return None
-    action = clean_text(str((tool_decision.get("arguments") or {}).get("action") or "")).lower()
-    return action if action in {"open", "close", "toggle"} else None
-
-
-def is_explicit_control_page_restart_request(text: str) -> bool:
-    normalized = clean_text(text).lower().strip()
-    if not normalized:
-        return False
-    compact = re.sub(r"\s+", "", normalized)
-    if compact in {
-        "/restart",
-        "/재시작",
-        "restart",
-        "restartnow",
-        "reload",
-        "재시작",
-        "재시작해",
-        "재시작해줘",
-        "다시시작",
-        "다시시작해",
-        "다시시작해줘",
-        "다시켜",
-        "다시켜줘",
-        "재기동",
-        "재기동해",
-        "재기동해줘",
-        "리로드",
-        "리로드해",
-        "리로드해줘",
-    }:
-        return True
-    question_starts = (
-        "왜",
-        "어떻게",
-        "언제",
-        "뭐",
-        "무엇",
-        "혹시",
-        "재시작 왜",
-        "재시작하면",
-        "재시작 해야",
-        "재시작해야",
-    )
-    if normalized.startswith(question_starts):
-        return False
-    polite_suffix = r"(?:해|해줘|해라|하자|시켜|시켜줘|부탁해|해둘래|해줄래|해줄수있어|해줄수있니|가능해|ㄱㄱ|now|please|pls)"
-    restart_pattern = rf"^(?:이제|지금|그럼|바로|적용하려고|적용되게|please|pls)?\s*(?:이블린|봇|bot|evelyn)?\s*(?:재시작|재기동|restart|reload)\s*{polite_suffix}?[.!?]*$"
-    if re.search(restart_pattern, normalized):
-        return True
-    restart_tail_pattern = rf"(?:이제|지금|그럼|바로|적용하려고|적용되게)\s*(?:이블린|봇|bot|evelyn)?\s*(?:재시작|재기동|restart|reload)\s*{polite_suffix}?[.!?]*$"
-    if re.search(restart_tail_pattern, normalized):
-        return True
-    return bool(re.search(r"^(?:이제|지금|그럼|바로)?\s*(?:다시\s*(?:시작|켜|띄워|올려))\s*(?:줘|해줘|해|라|둘래|줄래|해줄수있어|해줄수있니|부탁해)?[.!?]*$", normalized))
+    return memory_panel_reply(cleaned_action)
 
 
 def execute_control_page_restart_command() -> str:
@@ -11393,166 +8024,13 @@ def execute_control_page_restart_command() -> str:
     return "응, 이블린 다시 시작할게. 잠깐만 기다려줘."
 
 
-def is_control_page_question_text(text: str) -> bool:
-    normalized = clean_text(text).lower().strip()
-    if not normalized:
-        return False
-    if "?" in normalized:
-        return True
-    return normalized.startswith(("왜", "어떻게", "언제", "뭐", "무엇", "혹시", "설명", "알려줘"))
-
-
-def is_control_page_runtime_status_request(text: str) -> bool:
-    normalized = clean_text(text).lower().strip()
-    if not normalized:
-        return False
-    compact = re.sub(r"\s+", "", normalized)
-    if any(key in normalized for key in ("날씨", "비", "weather")):
-        return False
-    if "status" in normalized:
-        return True
-    if "상태" in compact:
-        return True
-    subjectish = any(key in normalized for key in ("이블린", "evelyn", "봇", "bot", "너", "니", "네", "런타임", "runtime", "llm", "모델", "서버"))
-    statusish = any(key in compact for key in ("어때", "어떄", "어떠", "괜찮", "문제", "오류", "에러", "로딩", "살아", "떠있", "켜져", "준비"))
-    return subjectish and statusish
-
-
-def control_page_compact_has_any(compact: str, keys: tuple[str, ...]) -> bool:
-    return any(key in compact for key in keys)
-
-
-def cheap_control_page_tool_decision(text: str) -> dict[str, Any] | None:
-    normalized = clean_text(text).lower().strip()
-    if not normalized:
-        return None
-    if normalized.startswith("/minecraft goal "):
-        return control_page_tool_decision(
-            "minecraft.set_goal",
-            arguments={"goal": clean_text(text[len("/minecraft goal "):])},
-            source="slash",
-        )
-    if normalized.startswith("/voice input ") or normalized.startswith("/voice source "):
-        return control_page_tool_decision(
-            "voice.input_mode",
-            arguments={"mode": normalized.rsplit(" ", 1)[-1]},
-            source="slash",
-        )
-    slash_tool = CONTROL_PAGE_SLASH_TOOL_ALIASES.get(normalized)
-    if slash_tool:
-        args = {"action": "toggle"} if slash_tool == "control_page.memory_panel" else {}
-        return control_page_tool_decision(slash_tool, arguments=args, source="slash")
-    if normalized.startswith("/"):
-        return None
-    compact = re.sub(r"\s+", "", normalized)
-    if is_explicit_control_page_restart_request(normalized):
-        return control_page_tool_decision("runtime.restart_bot", source="cheap")
-    if any(key in normalized for key in ("메모리", "memory", "패널", "panel")):
-        if control_page_compact_has_any(compact, ("열어", "켜", "보여", "open")):
-            return control_page_tool_decision("control_page.memory_panel", arguments={"action": "open"}, source="cheap")
-        if control_page_compact_has_any(compact, ("닫아", "닫어", "숨겨", "꺼", "close", "hide")):
-            return control_page_tool_decision("control_page.memory_panel", arguments={"action": "close"}, source="cheap")
-        if control_page_compact_has_any(compact, ("토글", "전환", "toggle")):
-            return control_page_tool_decision("control_page.memory_panel", arguments={"action": "toggle"}, source="cheap")
-    if ("옵시디언" in normalized or "obsidian" in normalized) and control_page_compact_has_any(compact, ("열어", "켜", "open")):
-        return control_page_tool_decision("memory.open_vault", source="cheap")
-    if "음성" in normalized or "voice" in normalized:
-        if control_page_compact_has_any(compact, ("상태", "status", "봐", "보여")):
-            return control_page_tool_decision("voice.status", source="cheap")
-        if control_page_compact_has_any(compact, ("재연결", "다시연결", "reconnect", "rejoin")):
-            return control_page_tool_decision("voice.reconnect", source="cheap")
-    if any(key in normalized for key in ("마크", "minecraft", "voyager", "인벤", "inventory")):
-        if control_page_compact_has_any(compact, ("인벤", "inventory")):
-            return control_page_tool_decision("minecraft.inventory", source="cheap")
-        if control_page_compact_has_any(compact, ("상태", "status", "봐", "보여")):
-            return control_page_tool_decision("minecraft.status", source="cheap")
-        if control_page_compact_has_any(compact, ("연결해", "시작", "connect")):
-            return control_page_tool_decision("minecraft.connect", source="cheap")
-        if control_page_compact_has_any(compact, ("끊어", "종료", "중지", "disconnect")):
-            return control_page_tool_decision("minecraft.disconnect", source="cheap")
-    if ("자율" in normalized or "autonomy" in normalized) and control_page_compact_has_any(compact, ("상태", "status", "봐", "보여")):
-        return control_page_tool_decision("autonomy.status", source="cheap")
-    if is_control_page_runtime_status_request(normalized):
-        return control_page_tool_decision("runtime.status", source="cheap")
-    if is_control_page_question_text(normalized):
-        return None
-    if any(key in normalized for key in ("메모리", "memory", "패널", "panel")):
-        if any(key in compact for key in ("열어", "켜", "보여", "open")):
-            return control_page_tool_decision("control_page.memory_panel", arguments={"action": "open"}, source="cheap")
-        if any(key in compact for key in ("닫아", "닫어", "숨겨", "꺼", "close", "hide")):
-            return control_page_tool_decision("control_page.memory_panel", arguments={"action": "close"}, source="cheap")
-        if any(key in compact for key in ("토글", "전환", "toggle")):
-            return control_page_tool_decision("control_page.memory_panel", arguments={"action": "toggle"}, source="cheap")
-    if ("옵시디언" in normalized or "obsidian" in normalized) and any(key in compact for key in ("열어", "켜", "open")):
-        return control_page_tool_decision("memory.open_vault", source="cheap")
-    if "음성" in normalized or "voice" in normalized:
-        if any(key in compact for key in ("상태", "status", "봐", "보여")):
-            return control_page_tool_decision("voice.status", source="cheap")
-        if any(key in compact for key in ("재연결", "다시연결", "reconnect", "rejoin")):
-            return control_page_tool_decision("voice.reconnect", source="cheap")
-    if any(key in normalized for key in ("마크", "minecraft", "voyager", "인벤", "inventory")):
-        if any(key in compact for key in ("인벤", "inventory")):
-            return control_page_tool_decision("minecraft.inventory", source="cheap")
-        if any(key in compact for key in ("상태", "status", "봐", "보여")):
-            return control_page_tool_decision("minecraft.status", source="cheap")
-        if any(key in compact for key in ("연결해", "시작", "connect")):
-            return control_page_tool_decision("minecraft.connect", source="cheap")
-        if any(key in compact for key in ("끊어", "종료", "중지", "disconnect")):
-            return control_page_tool_decision("minecraft.disconnect", source="cheap")
-    if ("자율" in normalized or "autonomy" in normalized) and any(key in compact for key in ("상태", "status", "봐", "보여")):
-        return control_page_tool_decision("autonomy.status", source="cheap")
-    if any(key in compact for key in ("상태보여", "상태봐", "status")) and not any(key in normalized for key in ("날씨", "비", "weather")):
-        return control_page_tool_decision("runtime.status", source="cheap")
-    return None
-
-
-def should_route_control_page_tool_candidate(text: str) -> bool:
-    normalized = clean_text(text).lower().strip()
-    if not normalized or normalized.startswith("/") or len(normalized) > 80:
-        return False
-    if is_control_page_question_text(normalized):
-        return False
-    compact = re.sub(r"\s+", "", normalized)
-    actionish = any(key in compact for key in ("열어", "닫아", "숨겨", "꺼", "켜", "다시", "적용", "실행", "해줘", "보여줘", "연결"))
-    reference = any(key in normalized for key in ("그거", "이거", "아까", "방금", "패널", "창", "상태", "메모리", "음성", "마크", "봇", "이블린"))
-    return actionish and reference
-
-
 def recent_control_page_history_for_router(*, session_key: str, guild_id: int | None, limit: int = 6) -> str:
-    rows = get_conversation_history(session_key=session_key, guild_id=guild_id)[-limit:]
-    lines: list[str] = []
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        role = clean_text(str(row.get("role") or ""))
-        content = clean_text(str(row.get("content") or ""))
-        if role and content:
-            lines.append(f"{role}: {content[:180]}")
-    return "\n".join(lines)
-
-
-def control_page_tool_policy_error(decision: dict[str, Any], *, guild: discord.Guild | None) -> str | None:
-    tool_name = clean_text(str(decision.get("tool") or ""))
-    spec = CONTROL_PAGE_TOOL_SPECS.get(tool_name)
-    if spec is None:
-        return "그 명령은 등록된 도구가 아니라서 실행하지 않을게."
-    if spec.requires_guild and guild is None:
-        return "그 명령은 Discord 연결이 필요해."
-    source = clean_text(str(decision.get("source") or ""))
-    confidence = float(decision.get("confidence") or 0.0)
-    if spec.risk == "high" and source != "slash":
-        return "그건 위험한 명령이라 명확한 /shutdown 명령으로만 받을게."
-    if spec.risk == "medium" and source == "router" and confidence < 0.86:
-        return "그 명령은 조금 애매해. 한 번만 더 정확히 말해줘."
-    return None
-
-
-def control_page_tool_reply_from_execution(decision: dict[str, Any], execute_reply: str) -> str:
-    tool_name = clean_text(str(decision.get("tool") or ""))
-    router_reply = clean_text(str(decision.get("reply") or ""))
-    if tool_name == "control_page.memory_panel" and router_reply:
-        return router_reply
-    return clean_text(execute_reply)
+    return session_state_store.recent_history_for_router(
+        system_prompt=SYSTEM_PROMPT,
+        session_key=session_key,
+        guild_id=guild_id,
+        limit=limit,
+    )
 
 
 def remember_control_page_tool_turn(
@@ -11636,7 +8114,7 @@ async def decide_control_page_ui_tool_call(text: str, *, guild_id: int | None, s
 
 
 async def execute_control_page_tool(guild: discord.Guild | None, decision: dict[str, Any]) -> str:
-    policy_error = control_page_tool_policy_error(decision, guild=guild)
+    policy_error = control_page_tool_policy_error(decision, guild_available=guild is not None)
     if policy_error:
         return policy_error
     tool_name = clean_text(str(decision.get("tool") or ""))
@@ -11653,41 +8131,49 @@ async def execute_control_page_tool(guild: discord.Guild | None, decision: dict[
     if tool_name == "memory.open_vault":
         enqueue_control_page_ui_command("toggle", panel_id="memory")
         vault = ensure_memory_vault_layout()
-        obsidian_url = "obsidian://open?path=" + quote(str(vault), safe="")
+        obsidian_url = memory_vault_obsidian_url(vault)
         try:
             open_control_page_url_with_system(obsidian_url)
-            return "Obsidian 메모리 vault를 열게."
+            return memory_vault_open_tool_reply(outcome="obsidian")
         except Exception as exc:
             try:
                 open_control_page_path_with_system(vault)
-                return f"Obsidian protocol이 실패해서 vault 폴더를 대신 열었어: {exc}"
+                return memory_vault_open_tool_reply(outcome="folder", error=exc)
             except Exception as fallback_exc:
-                return f"Obsidian 메모리 vault를 열지 못했어: {fallback_exc}"
+                return memory_vault_open_tool_reply(outcome="failed", error=fallback_exc)
     if tool_name == "voice.status":
         return build_control_page_voice_status_reply(guild)
     if tool_name == "voice.input_mode":
         requested = clean_text(str(arguments.get("mode") or "auto"))
         mode = set_voice_input_mode(requested)
-        return f"음성 입력 모드: {voice_input_mode_status_line()} ({mode})"
+        return build_control_page_voice_input_mode_reply(
+            voice_input_mode=voice_input_mode_status_line(),
+            mode=mode,
+        )
     if tool_name == "voice.reconnect":
         if guild is None:
             return "그 명령은 Discord 연결이 필요해."
         ok, detail = await restore_last_voice_channel(guild, force=True)
-        if ok:
-            return f"음성 채널에 다시 연결했어: {detail}"
-        return f"음성 재연결 실패: {detail}"
+        return build_control_page_voice_reconnect_reply(ok=ok, detail=detail)
+    if tool_name == "voice.continuity":
+        return build_control_page_voice_continuity_reply(guild)
+    if tool_name == "voice.continuity_reset":
+        if not bool(arguments.get("confirm")):
+            return build_control_page_voice_continuity_reset_required_reply()
+        reset_voice_barge_in_continuity_probe(reason=clean_text(str(arguments.get("reason") or "")))
+        return build_control_page_voice_continuity_reset_reply(build_control_page_voice_continuity_reply(guild))
     if tool_name == "runtime.restart_bot":
         return execute_control_page_restart_command()
     if tool_name == "runtime.shutdown_stack":
         if guild is None:
             if schedule_evelyn_local_shutdown():
-                return "Local Evelyn shutdown started. Only Evelyn local runtime windows and ports will be stopped."
+                return build_control_page_shutdown_reply(local_mode=True, helper_started=True)
             asyncio.create_task(shutdown_bot_process())
-            return "Local shutdown helper failed, so only the local Evelyn process is stopping."
+            return build_control_page_shutdown_reply(local_mode=True, helper_started=False)
         if schedule_evelyn_stack_shutdown():
-            return "Evelyn runtime 종료를 시작했어. supervisors, bot, LLM, TTS, Voyager, Evelyn-owned WSL services를 정리해."
+            return build_control_page_shutdown_reply(local_mode=False, helper_started=True)
         asyncio.create_task(shutdown_bot_process())
-        return "종료 helper 실행에 실패해서 bot process만 정리할게."
+        return build_control_page_shutdown_reply(local_mode=False, helper_started=False)
     if tool_name == "minecraft.inventory":
         if guild is None:
             return "그 명령은 Discord 연결이 필요해."
@@ -11700,29 +8186,23 @@ async def execute_control_page_tool(guild: discord.Guild | None, decision: dict[
         if guild is None:
             return "그 명령은 Discord 연결이 필요해."
         observed = await enable_minecraft_mode(guild.id)
-        return (
-            "Voyager Minecraft 모드를 시작했어.\n"
-            f"- goal: {clean_text(str(observed.get('objective_goal') or observed.get('goal') or '없음')) or '없음'}\n"
-            f"- stage: {clean_text(str(observed.get('objective_stage') or observed.get('stage') or '없음')) or '없음'}\n"
-            f"- position: {format_position_short(observed.get('position'))}"
+        return build_control_page_minecraft_connect_reply_payload(
+            observed,
+            position_text=format_position_short(observed.get("position")),
         )
     if tool_name == "minecraft.disconnect":
         if guild is None:
             return "그 명령은 Discord 연결이 필요해."
         await disable_minecraft_mode(guild.id)
-        return "Voyager Minecraft 모드를 중지했어."
+        return build_control_page_minecraft_disconnect_reply()
     if tool_name == "minecraft.set_goal":
         if guild is None:
             return "그 명령은 Discord 연결이 필요해."
         goal_text = clean_text(str(arguments.get("goal") or ""))
         if not goal_text:
-            return "목표를 같이 적어줘. 예: /minecraft goal progress_to_diamond"
+            return build_control_page_minecraft_goal_missing_reply()
         status = await get_minecraft_client().set_goal(goal_text)
-        return (
-            "Minecraft 목표를 바꿨어.\n"
-            f"- goal: {goal_text}\n"
-            f"- stage: {clean_text(str(status.get('stage') or 'unknown')) or 'unknown'}"
-        )
+        return build_control_page_minecraft_goal_updated_reply(goal_text, status)
     if tool_name == "autonomy.status":
         if guild is None:
             return "그 명령은 Discord 연결이 필요해."
@@ -11803,18 +8283,12 @@ async def answer_control_page_text(guild: discord.Guild | None, user_text: str) 
     guild_id = control_page_effective_guild_id(guild)
     session_key = control_page_session_key(guild_id)
     state_lock = session_locks.setdefault(session_key, asyncio.Lock())
-    topic_id = build_topic_id(user_text, session_topic_ids.get(session_key, ""))
     turn_id = ""
+    topic_id = ""
     async with state_lock:
-        turn_id = start_new_turn(session_key)
-        update_session_state(
-            session_key,
-            speaker="user",
-            awaiting_user_reply=False,
-            topic_id=topic_id,
-            user_text=user_text,
-        )
-        get_conversation_history(session_key=session_key, guild_id=guild_id)
+        started_turn = begin_user_text_turn(session_key, user_text, guild_id=guild_id)
+        turn_id = started_turn.turn_id
+        topic_id = started_turn.topic_id
     turn_scope = TurnScope(turn_id)
     replace_room_turn_scope(session_key, turn_scope)
     turn_task = _attach_current_task(turn_scope)
@@ -11875,15 +8349,13 @@ async def answer_control_page_text(guild: discord.Guild | None, user_text: str) 
             answer = plain_answer
             awaiting_reply = True
         async with state_lock:
-            append_history(session_key, user_text, plain_answer, guild_id=guild_id)
-            mark_session_active(
+            finish_assistant_text_turn(
                 session_key,
-                ttl_sec=ACTIVE_CONVERSATION_TEXT_QUESTION_SEC if awaiting_reply else ACTIVE_CONVERSATION_TEXT_SEC,
-                speaker="assistant",
+                user_text,
+                plain_answer,
+                guild_id=guild_id,
                 awaiting_user_reply=awaiting_reply,
                 topic_id=topic_id,
-                answer_text=plain_answer,
-                user_text=user_text,
             )
         log_voice_bottleneck_summary(
             text_metrics,
@@ -11927,7 +8399,7 @@ async def handle_control_page_input(guild: discord.Guild | None, text: str) -> s
         tool_decision_raw = await decide_control_page_tool_call(text, guild_id=guild_id, session_key=session_key)
         tool_decision = control_page_tool_decision_from_llm(tool_decision_raw)
         if tool_decision:
-            router_policy_error = control_page_tool_policy_error(tool_decision, guild=guild)
+            router_policy_error = control_page_tool_policy_error(tool_decision, guild_available=guild is not None)
             if router_policy_error:
                 remember_control_page_tool_turn(guild, text, router_policy_error, tool_decision)
                 return router_policy_error
@@ -11976,115 +8448,69 @@ def build_control_page_boot_progress(
     guild_available: bool,
     listening: bool = False,
 ) -> dict[str, Any]:
-    services = runtime_services or {}
-    main_ready = bool(services.get("mainReady"))
-    tts_ready = bool(services.get("ttsReady"))
-    service_done = {
-        "main_service": main_ready,
-        "router_service": bool(services.get("routerReady")),
-        "sub_service": bool(services.get("subReady")),
-        "tts_service": tts_ready,
-        "discord_gateway": bool((not DISCORD_ENABLED) or (bot.is_ready() and guild_available)),
-        "control_api": control_page_runner is not None,
-        "opus": startup_component_done("opus"),
-        "stt": startup_component_done("stt"),
-        "main_warmup": startup_component_done("main_warmup") or main_ready,
-        "tts_warmup": startup_component_done("tts_warmup") or tts_ready,
-    }
-    if listening:
-        service_done["voice_listening"] = True
-
-    steps: list[dict[str, Any]] = []
-    for key, label in STARTUP_BOOT_STEPS:
-        component = startup_component_state.get(key) or {}
-        done = bool(service_done.get(key))
-        status = "done" if done else clean_text(str(component.get("status") or "pending"))
-        steps.append(
-            {
-                "key": key,
-                "label": label,
-                "done": done,
-                "status": status,
-                "detail": clean_text(str(component.get("detail") or "")),
-                "updatedAt": component.get("updatedAt"),
-            }
-        )
-    done_count = sum(1 for step in steps if step["done"])
-    percent = round((done_count / max(1, len(steps))) * 100)
-    current = next((step for step in steps if not step["done"]), steps[-1])
-    phase = "전체 서버 준비 완료" if percent >= 100 else f"{current['label']} 준비 중"
-    return {
-        "percent": percent,
-        "phase": phase,
-        "source": "bot_processor",
-        "ready": percent >= 100,
-        "componentsReady": bool(startup_components_ready),
-        "steps": steps,
-    }
+    return build_control_page_boot_progress_payload(
+        runtime_services,
+        startup_steps=STARTUP_BOOT_STEPS,
+        startup_component_state=startup_component_state,
+        startup_components_ready=startup_components_ready,
+        discord_enabled=DISCORD_ENABLED,
+        discord_ready=bot.is_ready(),
+        guild_available=guild_available,
+        control_api_available=control_page_runner is not None,
+        listening=listening,
+    )
 
 
 async def build_control_page_state(guild: discord.Guild | None) -> dict[str, Any]:
     runtime_services = await get_control_page_runtime_services()
+    runtime_diagnostics = build_control_page_runtime_diagnostics(
+        runtime_services,
+        control_api_ready=is_control_api_ready_from_runtime_services(runtime_services),
+    )
+    runtime_health = build_control_page_runtime_health(services=runtime_services)
     if guild is None:
         local_mode = bool(not DISCORD_ENABLED)
         await ensure_control_page_welcome_message(None, runtime_services=runtime_services)
         commands = build_control_page_commands(minecraft_session_active=False)
         boot_progress = build_control_page_boot_progress(runtime_services, guild_available=local_mode)
         local_tts = local_tts_playback_manager.snapshot()
-        local_speaking = bool(local_tts.get("active"))
         local_mic = serialize_local_mic_runtime_state()
         local_listening = bool(local_mic.get("enabled") and local_mic.get("captureReady"))
-        local_tts_target = "로컬 스피커" if local_speaking else "없음"
         vision_watch = read_vision_watch_state()
-        return {
-            "ok": local_mode,
-            "generatedAt": time.time(),
-            "localUrl": control_page_local_url(),
-            "bootProgress": boot_progress,
-            "ui": build_control_page_ui_state(
-                guild_available=local_mode,
-                listening=local_listening,
-                speaking=False,
-                minecraft_running=False,
-                minecraft_session_active=False,
-                minecraft_snapshot_stale=False,
-                minecraft_last_error="",
-            ),
-            "guild": {"id": LOCAL_CONTROL_GUILD_ID, "name": LOCAL_CONTROL_GUILD_NAME} if local_mode else None,
-            "commands": commands,
-            "allCommands": build_control_page_all_commands(),
-            "chat": {"messages": get_control_page_chat_log(LOCAL_CONTROL_GUILD_ID) if local_mode else []},
-            "controlPagePanels": build_control_page_panel_state(),
-            "voice": {
-                "channelName": "없음",
-                "listening": local_listening,
-                "speaking": local_speaking,
-                "ttsTargetName": local_tts_target,
-            },
-            "runtime": {
-                "mainModel": MODEL_NAME,
-                "routerModel": ROUTER_MODEL_NAME,
-                "summaryModel": SUMMARY_MODEL_NAME,
-                "sttModel": STT_MODEL_NAME,
-                "inflightLlmRequests": inflight_llm_requests,
-                "ttsBacklog": tracked_tts_playback_count(tts_playback_tracker) + (1 if local_speaking else 0),
-                "outputMode": "local_speaker" if LOCAL_ONLY_MODE and local_tts_playback_manager.enabled else "none",
-                "localTtsOutput": local_tts,
-                "modelCallMetrics": summarize_model_call_metrics(),
-                "questionMetrics": summarize_question_metrics(),
-                "localMic": local_mic,
-                "voicePipeline": build_voice_pipeline_snapshot(guild),
-                "visionWatch": vision_watch,
-                "services": runtime_services,
-                "controlPagePanels": build_control_page_panel_state(),
-                "bootProgress": boot_progress,
-            },
-            "minecraft": {},
-            "statusText": build_control_page_local_status_text(runtime_services),
-        }
+        panel_state = build_control_page_panel_state()
+        return build_control_page_local_state_view(
+            generated_at=time.time(),
+            local_url=control_page_local_url(),
+            local_mode=local_mode,
+            local_guild_id=LOCAL_CONTROL_GUILD_ID,
+            local_guild_name=LOCAL_CONTROL_GUILD_NAME,
+            commands=commands,
+            all_commands=build_control_page_all_commands(),
+            chat_messages=get_control_page_chat_log(LOCAL_CONTROL_GUILD_ID),
+            panel_state=panel_state,
+            runtime_services=runtime_services,
+            runtime_diagnostics=runtime_diagnostics,
+            runtime_health=runtime_health,
+            boot_progress=boot_progress,
+            local_tts=local_tts,
+            local_mic=local_mic,
+            local_listening=local_listening,
+            voice_pipeline=build_voice_pipeline_snapshot(guild),
+            vision_watch=vision_watch,
+            main_model=MODEL_NAME,
+            router_model=ROUTER_MODEL_NAME,
+            summary_model=SUMMARY_MODEL_NAME,
+            stt_model=STT_MODEL_NAME,
+            inflight_llm_requests=inflight_llm_requests,
+            tracked_tts_count=tracked_tts_playback_count(tts_playback_tracker),
+            output_mode="local_speaker" if LOCAL_ONLY_MODE and local_tts_playback_manager.enabled else "none",
+            model_call_metrics=summarize_model_call_metrics(),
+            question_metrics=summarize_question_metrics(),
+            status_text=build_control_page_local_status_text(runtime_services),
+        )
     await ensure_control_page_welcome_message(guild, runtime_services=runtime_services)
     vc = guild.voice_client
-    await ensure_control_page_minecraft_snapshot(guild.id, wait=not bool(control_page_minecraft_snapshot_cache))
+    await ensure_control_page_minecraft_snapshot(guild.id, wait=not control_page_minecraft_snapshot_cache.has_snapshot())
     minecraft = get_control_page_minecraft_snapshot_cache_copy()
     speaking = is_tracked_tts_playback_active(tts_playback_tracker, guild.id)
     listening = bool(vc and hasattr(vc, "is_listening") and vc.is_listening())
@@ -12101,89 +8527,45 @@ async def build_control_page_state(guild: discord.Guild | None) -> dict[str, Any
     )
     minecraft_session_active = is_control_page_minecraft_session_active(minecraft)
     commands = build_control_page_commands(minecraft_session_active=minecraft_session_active)
-    activity = minecraft.get("recent_activity") if isinstance(minecraft.get("recent_activity"), list) else []
     minecraft_status_fields = minecraft_runtime_status_fields(minecraft)
-    idle_summary = (
-        "Voyager는 켜져 있지만 아직 Minecraft 플레이 상태는 아니야. 접속이 잡히면 위젯이 자동으로 나타나."
-        if minecraft.get("minecraft_autonomy")
-        else "지금은 Minecraft 플레이 전이야. /minecraft connect 를 실행하면 플레이 상태 위젯이 자동으로 나타나."
-    )
-    ui_state = build_control_page_ui_state(
-        guild_available=True,
+    panel_state = build_control_page_panel_state()
+    return build_control_page_guild_state_view(
+        generated_at=time.time(),
+        local_url=control_page_local_url(),
+        guild_id=guild.id,
+        guild_name=guild.name,
+        voice_channel_name=getattr(getattr(vc, "channel", None), "name", None) or "없음",
         listening=listening,
         speaking=speaking,
-        minecraft_running=bool(minecraft.get("minecraft_autonomy")),
+        tts_target_name=tts_target_name,
+        commands=commands,
+        all_commands=build_control_page_all_commands(),
+        chat_messages=get_control_page_chat_log(guild.id),
+        panel_state=panel_state,
+        runtime_services=runtime_services,
+        runtime_diagnostics=runtime_diagnostics,
+        runtime_health=runtime_health,
+        boot_progress=boot_progress,
+        local_tts=local_tts,
+        local_mic=serialize_local_mic_runtime_state(),
+        voice_pipeline=build_voice_pipeline_snapshot(guild),
+        vision_watch=vision_watch,
+        main_model=MODEL_NAME,
+        router_model=ROUTER_MODEL_NAME,
+        summary_model=SUMMARY_MODEL_NAME,
+        stt_model=STT_MODEL_NAME,
+        inflight_llm_requests=inflight_llm_requests,
+        tracked_tts_count=tracked_tts_playback_count(tts_playback_tracker),
+        output_mode="discord_voice" if DISCORD_ENABLED else "local_speaker",
+        model_call_metrics=summarize_model_call_metrics(),
+        question_metrics=summarize_question_metrics(),
+        minecraft=minecraft,
         minecraft_session_active=minecraft_session_active,
-        minecraft_snapshot_stale=bool(minecraft.get("snapshot_stale")),
-        minecraft_last_error=minecraft.get("last_error"),
+        minecraft_status_fields=minecraft_status_fields,
+        voice_debug_audio=VOICE_DEBUG_SAVE_AUDIO,
+        local_mic_target=local_mic_target,
+        status_text=build_control_page_status_text(guild, minecraft),
     )
-    return {
-        "ok": True,
-        "generatedAt": time.time(),
-        "localUrl": control_page_local_url(),
-        "bootProgress": boot_progress,
-        "ui": ui_state,
-        "guild": {"id": guild.id, "name": guild.name},
-        "commands": commands,
-        "allCommands": build_control_page_all_commands(),
-        "chat": {"messages": get_control_page_chat_log(guild.id)},
-        "controlPagePanels": build_control_page_panel_state(),
-        "voice": {
-            "channelName": getattr(getattr(vc, "channel", None), "name", None) or "없음",
-            "listening": listening,
-            "speaking": speaking,
-            "ttsTargetName": tts_target_name,
-        },
-        "runtime": {
-            "mainModel": MODEL_NAME,
-            "routerModel": ROUTER_MODEL_NAME,
-            "summaryModel": SUMMARY_MODEL_NAME,
-            "sttModel": STT_MODEL_NAME,
-            "inflightLlmRequests": inflight_llm_requests,
-            "ttsBacklog": tracked_tts_playback_count(tts_playback_tracker) + (1 if local_tts.get("active") else 0),
-            "outputMode": "discord_voice" if DISCORD_ENABLED else "local_speaker",
-            "localTtsOutput": local_tts,
-            "modelCallMetrics": summarize_model_call_metrics(),
-            "questionMetrics": summarize_question_metrics(),
-            "voiceDebugAudio": VOICE_DEBUG_SAVE_AUDIO,
-            "localMicTarget": local_mic_target,
-            "localMic": serialize_local_mic_runtime_state(),
-            "voicePipeline": build_voice_pipeline_snapshot(guild),
-            "visionWatch": vision_watch,
-            "services": runtime_services,
-            "controlPagePanels": build_control_page_panel_state(),
-            "bootProgress": boot_progress,
-        },
-        "minecraft": {
-            "running": bool(minecraft.get("minecraft_autonomy")),
-            "connected": bool(minecraft.get("voyager_connected")),
-            "sessionActive": minecraft_session_active,
-            "goal": minecraft.get("goal") or "none",
-            "stage": minecraft.get("stage") or "none",
-            "task": minecraft.get("current_task") or "none",
-            "taskStage": minecraft.get("current_task_stage") or "none",
-            "progress": minecraft.get("progress") or "none",
-            "position": minecraft.get("position_text") or "unknown",
-            "health": minecraft.get("health"),
-            "hunger": minecraft.get("hunger"),
-            "hostiles": minecraft.get("hostiles_nearby"),
-            "uniqueItemCount": minecraft.get("voyager_unique_item_count"),
-            "travelDistanceBlocks": minecraft.get("voyager_travel_distance_blocks"),
-            "techTreeHighest": minecraft.get("voyager_tech_tree_highest"),
-            "skillLibrarySize": minecraft.get("voyager_skill_library_size"),
-            "inventorySummary": minecraft.get("inventory_summary") or "No inventory data",
-            "inventoryTop": minecraft.get("inventory_top") or [],
-            "inventorySlots": minecraft.get("inventory_slots") or [],
-            "inventoryUsedSlots": minecraft.get("inventory_used"),
-            "completedCount": minecraft.get("completed_count") or 0,
-            "failedCount": minecraft.get("failed_count") or 0,
-            "recentActivity": activity,
-            "lastError": minecraft.get("last_error") or "",
-            **minecraft_status_fields,
-            "idleSummary": "" if minecraft_session_active else idle_summary,
-        },
-        "statusText": build_control_page_status_text(guild, minecraft),
-    }
 
 
 def control_page_json_response(data: Any, *, status: int = 200) -> web.Response:
@@ -12239,7 +8621,7 @@ async def control_page_minecraft_item_icon_handler(request: web.Request) -> web.
     item_name = normalize_minecraft_item_name(request.match_info.get("item_name", ""))
     if not item_name:
         raise web.HTTPNotFound(text="item icon not found")
-    icon_bytes = load_control_page_minecraft_item_icon(item_name)
+    icon_bytes = control_page_minecraft_item_icon_loader.load_icon(item_name)
     if not icon_bytes:
         raise web.HTTPNotFound(text="item icon not found")
     response = web.Response(body=icon_bytes, content_type="image/png")
@@ -12247,15 +8629,6 @@ async def control_page_minecraft_item_icon_handler(request: web.Request) -> web.
     response.headers["Pragma"] = "no-cache"
     response.headers["Expires"] = "0"
     return response
-
-
-def parse_control_page_guild_id(value: str | None) -> int | None:
-    if value is None:
-        return None
-    try:
-        return int(str(value).strip())
-    except (TypeError, ValueError):
-        return None
 
 
 async def control_page_state_handler(request: web.Request) -> web.StreamResponse:
@@ -12268,10 +8641,14 @@ async def control_page_chat_handler(request: web.Request) -> web.StreamResponse:
         payload = await request.json()
     except Exception:
         return control_page_json_response({"ok": False, "error": "invalid_json"}, status=400)
-    text = clean_text(str((payload or {}).get("text") or ""))
-    if not text:
-        return control_page_json_response({"ok": False, "error": "empty_text"}, status=400)
-    guild = select_control_page_guild(parse_control_page_guild_id((payload or {}).get("guildId")))
+    chat_request = parse_control_page_chat_payload(payload)
+    if not chat_request.get("ok"):
+        return control_page_json_response(
+            {"ok": False, "error": chat_request.get("error") or "invalid_request"},
+            status=int(chat_request.get("status") or 400),
+        )
+    text = str(chat_request.get("text") or "")
+    guild = select_control_page_guild(chat_request.get("guild_id"))
     if guild is None and DISCORD_ENABLED:
         return control_page_json_response({"ok": False, "error": "guild_not_available"}, status=503)
     effective_guild_id = control_page_effective_guild_id(guild)
@@ -12281,41 +8658,28 @@ async def control_page_chat_handler(request: web.Request) -> web.StreamResponse:
     except Exception as exc:
         reply_text = f"처리 중 오류가 났어: {exc}"
     append_control_page_chat_log(effective_guild_id, "assistant", "Evelyn", reply_text)
-    normalized = clean_text(text).lower()
-    needs_fresh_snapshot = (
-        normalized.startswith("/minecraft")
-        or normalized in {"/inventory", "/voyager stats", "/minecraft status", "/mc-status"}
-    )
+    refresh_plan = control_page_chat_refresh_plan(text)
+    needs_fresh_snapshot = bool(refresh_plan.get("needs_fresh_snapshot"))
     if guild is not None:
         await ensure_control_page_minecraft_snapshot(guild.id, force=needs_fresh_snapshot, wait=needs_fresh_snapshot)
-    if normalized.startswith("/minecraft"):
+    if refresh_plan.get("needs_runtime_refresh"):
         await get_control_page_runtime_services(force=True)
     state = await build_control_page_state(guild)
     return control_page_json_response({"ok": True, "reply": reply_text, "state": state})
 
 
 async def control_page_memory_graph_handler(request: web.Request) -> web.StreamResponse:
-    try:
-        max_nodes = int(request.query.get("max_nodes", "160"))
-    except Exception:
-        max_nodes = 160
-    return control_page_json_response(export_memory_graph(max_nodes=max_nodes))
+    params = parse_control_page_memory_graph_query(request.query)
+    return control_page_json_response(export_memory_graph(**params))
 
 
 async def control_page_memory_snapshot_handler(request: web.Request) -> web.StreamResponse:
-    include_hidden = str(request.query.get("include_hidden", "")).lower() in {"1", "true", "yes", "on"}
-    include_internal = str(request.query.get("include_internal", "")).lower() in {"1", "true", "yes", "on"}
-    try:
-        limit = int(request.query.get("limit", "80"))
-    except Exception:
-        limit = 80
-    return control_page_json_response(memory_vault_user_snapshot(include_hidden=include_hidden, include_internal=include_internal, limit=limit))
+    return control_page_json_response(memory_vault_user_snapshot(**parse_control_page_memory_snapshot_query(request.query)))
 
 
 async def control_page_memory_note_handler(request: web.Request) -> web.StreamResponse:
     note_id = request.match_info.get("note_id", "")
-    include_internal = str(request.query.get("include_internal", "")).lower() in {"1", "true", "yes", "on"}
-    result = memory_vault_user_note(note_id, include_internal=include_internal)
+    result = memory_vault_user_note(note_id, **parse_control_page_memory_note_query(request.query))
     return control_page_json_response(result, status=200 if result.get("ok") else 404)
 
 
@@ -12325,12 +8689,12 @@ async def control_page_memory_note_action_handler(request: web.Request) -> web.S
         payload = await request.json()
     except Exception:
         payload = {}
-    action = str((payload or {}).get("action") or "").strip()
+    note_action = parse_control_page_memory_note_action_payload(payload)
     result = update_memory_vault_user_note(
         note_id,
-        action,
-        title=(payload or {}).get("title"),
-        body=(payload or {}).get("body"),
+        note_action.get("action"),
+        title=note_action.get("title"),
+        body=note_action.get("body"),
     )
     return control_page_json_response(result, status=200 if result.get("ok") else 404)
 
@@ -12374,38 +8738,31 @@ def open_control_page_url_with_system(url: str) -> None:
 async def control_page_open_memory_vault_handler(request: web.Request) -> web.StreamResponse:
     _ = request
     vault = ensure_memory_vault_layout()
-    obsidian_url = "obsidian://open?path=" + quote(str(vault), safe="")
+    obsidian_url = memory_vault_obsidian_url(vault)
     try:
         open_control_page_url_with_system(obsidian_url)
-        return control_page_json_response(
-            {
-                "ok": True,
-                "message": "Obsidian memory vault open request sent.",
-                "vaultPath": str(vault),
-                "url": obsidian_url,
-            }
-        )
+        return control_page_json_response(control_page_open_memory_vault_payload(
+            vault_path=vault,
+            obsidian_url=obsidian_url,
+            outcome="obsidian",
+        ))
     except Exception as exc:
         try:
             open_control_page_path_with_system(vault)
-            return control_page_json_response(
-                {
-                    "ok": True,
-                    "message": f"Obsidian protocol failed, opened the vault folder instead: {exc}",
-                    "vaultPath": str(vault),
-                    "url": obsidian_url,
-                    "fallback": "folder",
-                }
-            )
+            return control_page_json_response(control_page_open_memory_vault_payload(
+                vault_path=vault,
+                obsidian_url=obsidian_url,
+                outcome="folder",
+                error=exc,
+            ))
         except Exception as fallback_exc:
             return control_page_json_response(
-                {
-                    "ok": False,
-                    "error": "open_memory_vault_failed",
-                    "message": str(fallback_exc),
-                    "vaultPath": str(vault),
-                    "url": obsidian_url,
-                },
+                control_page_open_memory_vault_payload(
+                    vault_path=vault,
+                    obsidian_url=obsidian_url,
+                    outcome="failed",
+                    error=fallback_exc,
+                ),
                 status=500,
             )
 
@@ -13398,8 +9755,34 @@ async def finalize_voice_answer(
     log_voice_stage(metrics, "LLM 완료", extra=f"chars={len(cleaned_answer)}", key="llm_done")
     if cleaned_answer and on_final_answer is not None:
         await on_final_answer(cleaned_answer)
-    await delivery.close(cleaned_answer)
-    queued_sentence_count = await delivery.finalize()
+    try:
+        await delivery.close(cleaned_answer)
+        queued_sentence_count = await delivery.finalize()
+        if cleaned_answer:
+            _mark_voice_barge_in_continuity_probe(
+                metrics,
+                success=True,
+                reason="finalize_complete",
+                queued_sentence_count=queued_sentence_count,
+            )
+        else:
+            _mark_voice_barge_in_continuity_probe(
+                metrics,
+                success=False,
+                reason="finalize_empty_answer",
+                queued_sentence_count=queued_sentence_count,
+                reason_code=VOICE_BARGE_IN_REASON_CODE["FALSE_TRIGGER"],
+                reason_label=VOICE_BARGE_IN_REASON_LABEL[VOICE_BARGE_IN_REASON_CODE["FALSE_TRIGGER"]],
+            )
+    except Exception as exc:
+        error_text = f"{type(exc).__name__}:{clean_text(str(exc))}"
+        _mark_voice_barge_in_continuity_probe(
+            metrics,
+            success=False,
+            reason=f"finalize_exception:{error_text}",
+            queued_sentence_count=0,
+        )
+        raise
     return cleaned_answer, queued_sentence_count
 
 
@@ -14231,6 +10614,7 @@ async def _process_member_audio_impl(
             stopped = local_tts_playback_manager.request_stop(reason="qualified_user_audio")
             metrics.setdefault("meta", {})["local_tts_interrupted_by_user_audio"] = bool(stopped)
             if stopped:
+                start_voice_barge_in_continuity_probe(metrics, source="local_tts")
                 metrics.setdefault("meta", {})["tts_interrupted_at"] = time.monotonic()
                 log_turn_event("tts_interrupt", guild_id=guild_id, reason="qualified_user_audio", output_mode="local_speaker")
                 log_voice_stage(metrics, "로컬 TTS 사용자 발화로 중단", extra=f"speaker={member.display_name} wake_detected={wake_detected}")
@@ -14249,6 +10633,7 @@ async def _process_member_audio_impl(
         if tts_suppression == "bot_is_speaking":
             stopped = await stop_active_tts_playback(guild_id, reason="qualified_user_audio")
             if stopped:
+                start_voice_barge_in_continuity_probe(metrics, source="discord_voice")
                 metrics.setdefault("meta", {}).update({
                     "tts_interrupted_by_user_audio": True,
                     "tts_interrupted_at": time.monotonic(),
@@ -14596,26 +10981,6 @@ async def on_voice_state_update(member, before, after):
         print(f"[VOICE STATE REARM FAIL] guild={guild.id} err={e!r}")
 
 
-def build_discord_attachment_context(message: discord.Message, *, limit: int = 4) -> str:
-    attachments = list(getattr(message, "attachments", []) or [])[: max(0, limit)]
-    rows: list[str] = []
-    for attachment in attachments:
-        content_type = clean_text(str(getattr(attachment, "content_type", "") or ""))
-        filename = clean_text(str(getattr(attachment, "filename", "") or "attachment"))
-        url = clean_text(str(getattr(attachment, "url", "") or ""))
-        width = getattr(attachment, "width", None)
-        height = getattr(attachment, "height", None)
-        is_image = content_type.startswith("image/") or filename.lower().endswith((".png", ".jpg", ".jpeg", ".webp", ".gif"))
-        label = "image" if is_image else "attachment"
-        size_bits = []
-        if width and height:
-            size_bits.append(f"{width}x{height}")
-        if content_type:
-            size_bits.append(content_type)
-        rows.append(f"- {label}: filename={filename}; meta={', '.join(size_bits) or 'unknown'}; url={url}")
-    return "\n".join(rows)
-
-
 @bot.event
 async def on_message(message: discord.Message):
     if message.author.bot:
@@ -14625,12 +10990,9 @@ async def on_message(message: discord.Message):
         await bot.process_commands(message)
         return
 
-    thread_id = getattr(message.channel, "id", None) if isinstance(getattr(message.channel, "parent", None), discord.TextChannel) else None
-    ingress = build_text_ingress_context(
-        guild_id=message.guild.id,
-        channel_id=message.channel.id,
-        user_id=message.author.id,
-        thread_id=thread_id,
+    ingress = build_text_ingress_context_from_message(
+        message,
+        is_thread_parent=lambda parent: isinstance(parent, discord.TextChannel),
     )
     session_key = ingress.session_key
     room_key = ingress.room_key
@@ -14639,50 +11001,47 @@ async def on_message(message: discord.Message):
     remember_session_followup_target(session_key, channel_id=message.channel.id, message_id=message.id)
 
     prefix = get_guild_command_prefix(message.guild.id)
-    content_stripped = (message.content or "").lstrip()
-    command_only_channel_ids = set(get_guild_command_only_channel_ids(message.guild.id))
-    if content_stripped.startswith(prefix):
+    precheck = decide_text_message_precheck(
+        content=message.content,
+        prefix=prefix,
+        channel_id=message.channel.id,
+        command_only_channel_ids=get_guild_command_only_channel_ids(message.guild.id),
+    )
+    if precheck.action == "process_commands":
         await bot.process_commands(message)
         return
-    if message.channel.id in command_only_channel_ids:
+    if precheck.action == "ignore":
         return
 
     is_wake_word = contains_wake_word(message.content)
-    is_reply = False
     is_active_session = is_session_active_for_user(session_key, message.author.id)
+    is_reply = await is_reply_to_target_user(message, bot.user, log=print)
 
-    if message.reference:
-        try:
-            replied_msg = await message.channel.fetch_message(message.reference.message_id)
-            if replied_msg.author == bot.user:
-                is_reply = True
-        except Exception as e:
-            print("답장 확인 오류:", repr(e))
+    attachment_context = build_discord_attachment_context(message)
+    text_turn_decision = build_text_turn_decision(
+        message.content,
+        is_wake_word=is_wake_word,
+        is_reply=is_reply,
+        is_active_session=is_active_session,
+        strip_wake_word=strip_voice_wake_word,
+        empty_wake_text="이름만 부름. 친구처럼 짧게 반말로, 원래 하던 일을 잠깐 말하며 자연스럽게 반응해.",
+        attachment_context=attachment_context,
+    )
 
-    if not should_accept_text_turn(is_wake_word=is_wake_word, is_reply=is_reply, is_active_session=is_active_session):
+    if not text_turn_decision.accepted:
         log_turn_event(
             "turn_drop",
             turn_id=current_turn_id(session_key),
             segment_id=0,
             source="text",
             session_key=session_key,
-            reason="text_gate_not_open",
+            reason=text_turn_decision.reason or "text_gate_not_open",
             user_id=message.author.id,
         )
         await bot.process_commands(message)
         return
 
-    attachment_context = build_discord_attachment_context(message)
-    user_text = build_text_turn_user_text(
-        message.content,
-        is_wake_word=is_wake_word,
-        strip_wake_word=strip_voice_wake_word,
-        empty_wake_text="",
-    )
-    if not user_text:
-        user_text = "이름만 부름. 친구처럼 짧게 반말로, 원래 하던 일을 잠깐 말하며 자연스럽게 반응해."
-    if attachment_context:
-        user_text = f"{user_text}\n\n[Attached Visual Inputs]\n{attachment_context}"
+    user_text = text_turn_decision.user_text
 
     proactive_resolution = resolve_pending_proactive_question_for_turn(
         message.guild.id,
@@ -14700,17 +11059,14 @@ async def on_message(message: discord.Message):
         return
 
     async with state_lock:
-        topic_id = build_topic_id(user_text, session_topic_ids.get(session_key, ""))
-        turn_id = start_new_turn(session_key)
-        update_session_state(
+        started_turn = begin_user_text_turn(
             session_key,
+            user_text,
+            guild_id=message.guild.id,
             user_id=message.author.id,
-            speaker="user",
-            awaiting_user_reply=False,
-            topic_id=topic_id,
-            user_text=user_text,
         )
-        get_conversation_history(session_key=session_key, guild_id=message.guild.id)
+        topic_id = started_turn.topic_id
+        turn_id = started_turn.turn_id
 
     turn_scope = TurnScope(turn_id)
     replace_room_turn_scope(session_key, turn_scope)
@@ -14758,7 +11114,6 @@ async def on_message(message: discord.Message):
 
         async with state_lock:
             session_speculative_policies.pop(session_key, None)
-            append_history(session_key, user_text, plain_answer, guild_id=message.guild.id)
             runtime_mode = ((text_metrics.get("meta") or {}).get("runtime_mode")) or compute_runtime_mode(text_metrics)
             record_context_pipeline_benchmark(
                 metrics=text_metrics,
@@ -14807,15 +11162,14 @@ async def on_message(message: discord.Message):
             )
 
             awaiting_reply = bool(session_state_snapshot(session_key).get("awaiting_user_reply"))
-            mark_session_active(
+            finish_assistant_text_turn(
                 session_key,
+                user_text,
+                plain_answer,
+                guild_id=message.guild.id,
                 user_id=message.author.id,
-                ttl_sec=ACTIVE_CONVERSATION_TEXT_QUESTION_SEC if awaiting_reply else ACTIVE_CONVERSATION_TEXT_SEC,
-                speaker="assistant",
                 awaiting_user_reply=awaiting_reply,
                 topic_id=topic_id,
-                answer_text=plain_answer,
-                user_text=user_text,
             )
 
         log_voice_bottleneck_summary(
@@ -14918,115 +11272,22 @@ async def restart_bot_process() -> None:
     stop_local_mic_service()
     script_path = Path(__file__).resolve()
     project_dir = script_path.parent
-    restart_bat, env_overrides, restart_mode = restart_launcher_for_current_mode(project_dir)
-    fallback_bat = project_dir / "evelyn_core" / "start.bat"
-
-    env = os.environ.copy()
-    env.update(env_overrides)
-
-    if restart_bat.exists():
-        print(f"[RESTART] mode={restart_mode} launcher={restart_bat}")
-        subprocess.Popen(
-            ["cmd.exe", "/c", str(restart_bat)],
-            cwd=str(project_dir),
-            env=env,
-            close_fds=True,
-            creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
-        )
-    elif fallback_bat.exists():
-        print(f"[RESTART] mode=fallback launcher={fallback_bat}")
-        subprocess.Popen(
-            ["cmd.exe", "/c", str(fallback_bat)],
-            cwd=str(project_dir),
-            env=env,
-            close_fds=True,
-            creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
-        )
-    else:
-        subprocess.Popen(
-            [sys.executable, str(script_path)],
-            cwd=str(project_dir),
-            env=env,
-            close_fds=True,
-        )
+    launch_runtime_restart_sequence(
+        project_dir,
+        local_only_mode=LOCAL_ONLY_MODE,
+        discord_enabled=DISCORD_ENABLED,
+        control_page_port=CONTROL_PAGE_PORT,
+        fallback_target=project_dir / "evelyn_core" / "start.bat",
+    )
     os._exit(0)
 
 
 def schedule_evelyn_stack_shutdown(delay_ms: int = 3000) -> bool:
-    stop_script = PROJECT_ROOT / "evelyn_core" / "runtime" / "launchers" / "stop_evelyn_stack.ps1"
-    if not stop_script.exists():
-        logging.error("Full-stack shutdown helper is missing: %s", stop_script)
-        return False
-    try:
-        subprocess.Popen(
-            [
-                "powershell.exe",
-                "-NoLogo",
-                "-NoProfile",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
-                str(stop_script),
-                "-DelayMs",
-                str(max(0, int(delay_ms))),
-            ],
-            cwd=str(PROJECT_ROOT),
-            close_fds=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        return True
-    except Exception:
-        logging.exception("Failed to schedule full-stack shutdown")
-        return False
+    return runtime_schedule_evelyn_stack_shutdown(PROJECT_ROOT, delay_ms=delay_ms)
 
 
 def schedule_evelyn_local_shutdown(delay_ms: int = 1500) -> bool:
-    stop_script = PROJECT_ROOT / "evelyn_core" / "runtime" / "launchers" / "stop_evelyn_local.ps1"
-    if not stop_script.exists():
-        logging.error("Local shutdown helper is missing: %s", stop_script)
-        return False
-    try:
-        subprocess.Popen(
-            [
-                "powershell.exe",
-                "-NoLogo",
-                "-NoProfile",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
-                str(stop_script),
-                "-DelayMs",
-                str(max(0, int(delay_ms))),
-            ],
-            cwd=str(PROJECT_ROOT),
-            close_fds=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        return True
-    except Exception:
-        logging.exception("Failed to schedule local shutdown")
-        return False
-
-
-def current_runtime_prefers_local_restart() -> bool:
-    return bool(LOCAL_ONLY_MODE or not DISCORD_ENABLED)
-
-
-def restart_launcher_for_current_mode(project_dir: Path) -> tuple[Path, dict[str, str], str]:
-    env_overrides: dict[str, str] = {"STT_USE_RAW_48K": "false"}
-    if current_runtime_prefers_local_restart():
-        env_overrides.update(
-            {
-                "DISCORD_ENABLED": "false",
-                "LOCAL_ONLY": "true",
-                "LOCAL_MIC_ENABLED": os.getenv("LOCAL_MIC_ENABLED", "true"),
-                "CONTROL_PAGE_PORT": os.getenv("CONTROL_PAGE_PORT", str(CONTROL_PAGE_PORT)),
-            }
-        )
-        return project_dir / "evelyn_core" / "start_local.bat", env_overrides, "local"
-    return project_dir / "evelyn_core" / "start_bot.bat", env_overrides, "discord"
+    return runtime_schedule_evelyn_local_shutdown(PROJECT_ROOT, delay_ms=delay_ms)
 
 
 async def shutdown_bot_process() -> None:
@@ -15075,15 +11336,17 @@ async def run_local_only_mode() -> None:
 
 
 def is_control_command_authorized(ctx) -> bool:
-    if getattr(ctx.author, "id", None) in ALLOWED_RESTART_USER_IDS:
-        return True
     perms = getattr(ctx.author, "guild_permissions", None)
-    return bool(perms and getattr(perms, "administrator", False))
+    return is_control_command_authorized_payload(
+        author_id=getattr(ctx.author, "id", None),
+        is_administrator=bool(perms and getattr(perms, "administrator", False)),
+        allowed_user_ids=ALLOWED_RESTART_USER_IDS,
+    )
 
 
 async def handle_control_command_error(ctx, error):
     if isinstance(error, commands.CheckFailure):
-        await ctx.send("이 명령은 허용된 Discord ID이거나 서버 관리자 권한이 있어야 쓸 수 있어.")
+        await ctx.send(control_command_check_failure_message())
         return
     raise error
 
@@ -15122,7 +11385,6 @@ async def status_command(ctx):
     vc = guild.voice_client if guild else None
     voice_channel_name = getattr(getattr(vc, "channel", None), "name", None) or "없음"
     listening = bool(vc and hasattr(vc, "is_listening") and vc.is_listening())
-    debug_audio_state = "on" if VOICE_DEBUG_SAVE_AUDIO else "off"
     opus_env_state = os.getenv("OPUS_ERROR_TO_SILENCE")
     try:
         from evelyn_voice.client import OPUS_ERROR_TO_SILENCE as OPUS_RUNTIME_VALUE
@@ -15130,18 +11392,19 @@ async def status_command(ctx):
         OPUS_RUNTIME_VALUE = None
 
     await ctx.send(
-        "\n".join([
-            f"모델: {MODEL_NAME}",
-            f"라우터모델: {ROUTER_MODEL_NAME}",
-            f"서브모델: {SUMMARY_MODEL_NAME}",
-            f"STT: {STT_MODEL_NAME}",
-            f"음성채널: {voice_channel_name}",
-            f"리스닝: {'on' if listening else 'off'}",
-            f"디버그 오디오 저장: {debug_audio_state}",
-            f"OPUS_ERROR_TO_SILENCE(env): {opus_env_state if opus_env_state is not None else 'unset'}",
-            f"OPUS_ERROR_TO_SILENCE(runtime): {OPUS_RUNTIME_VALUE}",
-            f"VAD: {'on' if VAD_ENABLED else 'off'} ({VAD_PROVIDER})",
-        ])
+        build_status_command_text(
+            model_name=MODEL_NAME,
+            router_model_name=ROUTER_MODEL_NAME,
+            summary_model_name=SUMMARY_MODEL_NAME,
+            stt_model_name=STT_MODEL_NAME,
+            voice_channel_name=voice_channel_name,
+            listening=listening,
+            voice_debug_save_audio=VOICE_DEBUG_SAVE_AUDIO,
+            opus_env_state=opus_env_state,
+            opus_runtime_value=OPUS_RUNTIME_VALUE,
+            vad_enabled=VAD_ENABLED,
+            vad_provider=VAD_PROVIDER,
+        )
     )
 
 
@@ -15158,21 +11421,19 @@ async def evelyn_page_command(ctx):
 @commands.check(is_control_command_authorized)
 async def set_guild_prefix(ctx, new_prefix: str | None = None):
     if ctx.guild is None:
-        await ctx.send("이 명령은 길드에서만 쓸 수 있어.")
+        await ctx.send(guild_only_command_message())
         return
 
     guild_id = ctx.guild.id
     current_prefix = get_guild_command_prefix(guild_id)
 
     if not new_prefix:
-        await ctx.send(
-            f"현재 이 길드 명령어 시작 부호는 `{current_prefix}` 야. 바꾸려면 `{current_prefix}접두사 ?` 처럼 써줘. 기본값으로 돌리려면 `{current_prefix}접두사 기본`"
-        )
+        await ctx.send(build_prefix_current_reply(current_prefix))
         return
 
     if new_prefix.lower() in {"기본", "default", "reset"}:
         saved_prefix = save_guild_command_prefix(guild_id, DEFAULT_COMMAND_PREFIX)
-        await ctx.send(f"✅ 명령어 시작 부호를 기본값 `{saved_prefix}` 로 되돌렸어.")
+        await ctx.send(build_prefix_reset_reply(saved_prefix))
         return
 
     try:
@@ -15181,7 +11442,7 @@ async def set_guild_prefix(ctx, new_prefix: str | None = None):
         await ctx.send(f"❌ {e}")
         return
 
-    await ctx.send(f"✅ 이 길드 명령어 시작 부호를 `{saved_prefix}` 로 저장했어. 이제 `{saved_prefix}초기화`, `{saved_prefix}들어와` 처럼 쓰면 돼.")
+    await ctx.send(build_prefix_saved_reply(saved_prefix))
 
 
 @set_guild_prefix.error
@@ -15192,7 +11453,7 @@ async def set_guild_prefix_error(ctx, error):
 @bot.command(name="자율시작", aliases=["autonomy-on"])
 async def autonomy_start_command(ctx):
     if ctx.guild is None:
-        await ctx.send("이 명령은 길드에서만 쓸 수 있어.")
+        await ctx.send(guild_only_command_message())
         return
     try:
         await get_or_create_autonomy_engine(ctx.guild.id).start()
@@ -15204,7 +11465,7 @@ async def autonomy_start_command(ctx):
 @bot.command(name="자율정지", aliases=["autonomy-off"])
 async def autonomy_stop_command(ctx):
     if ctx.guild is None:
-        await ctx.send("이 명령은 길드에서만 쓸 수 있어.")
+        await ctx.send(guild_only_command_message())
         return
     engine = autonomy_engines.get(ctx.guild.id)
     if engine is None:
@@ -15220,29 +11481,21 @@ async def autonomy_stop_command(ctx):
 @bot.command(name="자율상태", aliases=["autonomy-status"])
 async def autonomy_status_command(ctx):
     if ctx.guild is None:
-        await ctx.send("이 명령은 길드에서만 쓸 수 있어.")
+        await ctx.send(guild_only_command_message())
         return
     engine = autonomy_engines.get(ctx.guild.id)
     if engine is None:
         await ctx.send("자율 행동 엔진이 아직 만들어지지 않았어.")
         return
-    state = engine.state
-    goal = state.current_goal.summary if state.current_goal else "없음"
-    plan = state.current_plan.summary if state.current_plan else "없음"
-    allowed = ", ".join(state.allowed_actions[:6])
-    if len(state.allowed_actions) > 6:
-        allowed += ", ..."
     router = get_routed_autonomy_executor(ctx.guild.id)
     minecraft_enabled = bool(router and router.is_domain_enabled("minecraft"))
-    await ctx.send(
-        f"🤖 자율상태\n- status: {state.status}\n- safety: {state.safety_mode}\n- goal: {goal}\n- plan: {plan}\n- failures: {state.failure_count}\n- last_error: {state.last_error or '없음'}\n- minecraft_autonomy: {'on' if minecraft_enabled else 'off'}\n- allowed: {allowed or '없음'}"
-    )
+    await ctx.send(build_autonomy_status_command_text(engine.state, minecraft_enabled=minecraft_enabled))
 
 
 def _mark_text_session_from_command(ctx, user_text: str, answer_text: str, *, awaiting_user_reply: bool = False) -> None:
     if ctx.guild is None:
         return
-    thread_id = getattr(ctx.channel, "id", None) if isinstance(getattr(ctx.channel, "parent", None), discord.TextChannel) else None
+    thread_id = resolve_text_thread_id(ctx.channel, is_thread_parent=lambda parent: isinstance(parent, discord.TextChannel))
     session_key = make_text_session_key(ctx.guild.id, ctx.channel.id, ctx.author.id, thread_id=thread_id)
     remember_session_followup_target(session_key, channel_id=ctx.channel.id, message_id=getattr(ctx.message, "id", None))
     append_history(session_key, user_text, answer_text, guild_id=ctx.guild.id)
@@ -15261,20 +11514,11 @@ def _mark_text_session_from_command(ctx, user_text: str, answer_text: str, *, aw
 @bot.command(name="마크접속", aliases=["mc-connect", "minecraft-connect"])
 async def minecraft_connect_command(ctx):
     if ctx.guild is None:
-        await ctx.send("이 명령은 길드에서만 쓸 수 있어.")
+        await ctx.send(guild_only_command_message())
         return
     try:
         observed = await enable_minecraft_mode(ctx.guild.id)
-        connected = bool(observed.get("connected") or observed.get("active") or observed.get("position"))
-        target = f"{observed.get('position')}" if observed.get("position") else "위치 미확인"
-        stage = clean_text(str(observed.get("objective_stage") or "")) or "unknown"
-        goal = clean_text(str(observed.get("objective_goal") or "")) or "progress_to_diamond"
-        last_error = clean_text(str(observed.get("last_error") or observed.get("wait_last_error") or ""))
-        if connected:
-            reply_text = "✅ Voyager 기반 마인크래프트 자율 모드 시작 완료." + f"\n- goal: {goal}\n- stage: {stage}\n- position: {target}"
-        else:
-            detail = f" last_error={last_error}" if last_error else ""
-            reply_text = "❌ 마인크래프트 접속 실패: Voyager 서비스는 올라왔지만 게임 연결 확인에 실패했어." + detail
+        reply_text = build_minecraft_connect_reply(observed)
         await ctx.send(reply_text)
         _mark_text_session_from_command(ctx, ctx.message.content or "마크접속", reply_text)
     except Exception as e:
@@ -15286,7 +11530,7 @@ async def minecraft_connect_command(ctx):
 @bot.command(name="마크종료", aliases=["mc-disconnect", "minecraft-disconnect"])
 async def minecraft_disconnect_command(ctx):
     if ctx.guild is None:
-        await ctx.send("이 명령은 길드에서만 쓸 수 있어.")
+        await ctx.send(guild_only_command_message())
         return
     try:
         await disable_minecraft_mode(ctx.guild.id)
@@ -15302,39 +11546,12 @@ async def minecraft_disconnect_command(ctx):
 @bot.command(name="마크상태", aliases=["mc-status", "minecraft-status"])
 async def minecraft_status_command(ctx):
     if ctx.guild is None:
-        await ctx.send("이 명령은 길드에서만 쓸 수 있어.")
+        await ctx.send(guild_only_command_message())
         return
     client = get_minecraft_client()
     try:
         status = await client.status()
-        observed = status.get("observation") if isinstance(status.get("observation"), dict) else {}
-        evaluation = status.get("voyager_evaluation") if isinstance(status.get("voyager_evaluation"), dict) else {}
-        position = observed.get("position") if isinstance(observed, dict) else None
-        hunger = observed.get("hunger") if isinstance(observed, dict) else None
-        health = observed.get("health") if isinstance(observed, dict) else None
-        hostiles = observed.get("hostiles_nearby") if isinstance(observed, dict) else None
-        tech_tree = evaluation.get("tech_tree") if isinstance(evaluation.get("tech_tree"), dict) else {}
-        skill_library = evaluation.get("skill_library") if isinstance(evaluation.get("skill_library"), dict) else {}
-        reply_text = (
-            "⛏️ 마인크래프트 상태\n"
-            f"- service: voyager\n"
-            f"- running: {'on' if status.get('running') else 'off'}\n"
-            f"- connected: {'on' if status.get('connected') else 'off'}\n"
-            f"- goal: {status.get('goal') or 'none'}\n"
-            f"- stage: {status.get('stage') or 'unknown'}\n"
-            f"- task: {status.get('current_task') or 'none'}\n"
-            f"- task_stage: {status.get('current_task_stage') or 'unknown'}\n"
-            f"- progress: {status.get('last_progress_message') or 'none'}\n"
-            f"- eval_goal: {evaluation.get('goal') or status.get('goal') or 'none'}\n"
-            f"- unique_items: {evaluation.get('unique_item_count') if evaluation.get('unique_item_count') is not None else 'unknown'}\n"
-            f"- tech_tree: {tech_tree.get('highest_unlocked') or 'unknown'}\n"
-            f"- travel_distance: {evaluation.get('travel_distance_blocks') if evaluation.get('travel_distance_blocks') is not None else 'unknown'}\n"
-            f"- skill_library: {skill_library.get('size') if skill_library.get('size') is not None else 'unknown'}\n"
-            f"- health: {health if health is not None else 'unknown'}\n"
-            f"- hunger: {hunger if hunger is not None else 'unknown'}\n"
-            f"- hostiles: {hostiles if hostiles is not None else 'unknown'}\n"
-            f"- position: {position if position is not None else 'unknown'}"
-        )
+        reply_text = build_minecraft_status_command_text(status)
         await ctx.send(reply_text)
         _mark_text_session_from_command(ctx, ctx.message.content or "마크상태", reply_text)
     except Exception as e:
@@ -15346,18 +11563,18 @@ async def minecraft_status_command(ctx):
 @bot.command(name="마크목표", aliases=["mc-goal", "minecraft-goal"])
 async def minecraft_goal_command(ctx, *, goal: str | None = None):
     if ctx.guild is None:
-        await ctx.send("이 명령은 길드에서만 쓸 수 있어.")
+        await ctx.send(guild_only_command_message())
         return
     goal_text = clean_text(str(goal or ""))
     if not goal_text:
-        reply_text = "목표를 같이 적어줘. 예: 마크목표 diamond 또는 마크목표 iron_pickaxe"
+        reply_text = build_minecraft_goal_missing_reply()
         await ctx.send(reply_text)
         _mark_text_session_from_command(ctx, ctx.message.content or "마크목표", reply_text)
         return
     client = get_minecraft_client()
     try:
         status = await client.set_goal(goal_text)
-        reply_text = f"🎯 마인크래프트 목표를 바꿨어.\n- goal: {goal_text}\n- stage: {status.get('stage') or 'unknown'}"
+        reply_text = build_minecraft_goal_updated_reply(goal_text, status)
         await ctx.send(reply_text)
         _mark_text_session_from_command(ctx, ctx.message.content or "마크목표", reply_text)
     except Exception as e:
@@ -15371,16 +11588,12 @@ async def minecraft_goal_command(ctx, *, goal: str | None = None):
 @commands.check(is_control_command_authorized)
 async def observe_channel_command(ctx, action: str | None = None, channel: discord.TextChannel | None = None):
     if ctx.guild is None:
-        await ctx.send("이 명령은 길드에서만 쓸 수 있어.")
+        await ctx.send(guild_only_command_message())
         return
-    action = clean_text(str(action or "목록")).lower()
+    action = normalize_channel_setting_action(action)
     current = get_guild_observe_channel_ids(ctx.guild.id)
     if action in {"목록", "list"}:
-        names = []
-        for channel_id in current:
-            target = ctx.guild.get_channel(channel_id)
-            names.append(target.mention if target is not None else f"#{channel_id}")
-        await ctx.send("👀 관찰채널: " + (", ".join(names) if names else "없음"))
+        await ctx.send(build_channel_setting_list_reply(label="👀 관찰채널", channel_ids=current, resolve_channel=ctx.guild.get_channel))
         return
     if channel is None:
         await ctx.send("채널을 같이 지정해줘. 예: `!관찰채널 추가 #general`")
@@ -15393,7 +11606,7 @@ async def observe_channel_command(ctx, action: str | None = None, channel: disco
         updated = remove_guild_channel_setting(ctx.guild.id, "observe_channel_ids", channel.id)
         await ctx.send(f"🗑️ 관찰채널에서 {channel.mention} 뺐어. (총 {len(updated)}개)")
         return
-    await ctx.send("사용법: `!관찰채널 목록` / `!관찰채널 추가 #채널` / `!관찰채널 제거 #채널`")
+    await ctx.send(build_observe_channel_usage(get_guild_command_prefix(ctx.guild.id)))
 
 
 @observe_channel_command.error
@@ -15405,16 +11618,12 @@ async def observe_channel_command_error(ctx, error):
 @commands.check(is_control_command_authorized)
 async def command_channel_command(ctx, action: str | None = None, channel: discord.TextChannel | None = None):
     if ctx.guild is None:
-        await ctx.send("이 명령은 길드에서만 쓸 수 있어.")
+        await ctx.send(guild_only_command_message())
         return
-    action = clean_text(str(action or "목록")).lower()
+    action = normalize_channel_setting_action(action)
     current = get_guild_command_only_channel_ids(ctx.guild.id)
     if action in {"목록", "list"}:
-        names = []
-        for channel_id in current:
-            target = ctx.guild.get_channel(channel_id)
-            names.append(target.mention if target is not None else f"#{channel_id}")
-        await ctx.send("🧭 명령채널: " + (", ".join(names) if names else "없음"))
+        await ctx.send(build_channel_setting_list_reply(label="🧭 명령채널", channel_ids=current, resolve_channel=ctx.guild.get_channel))
         return
     if channel is None:
         await ctx.send("채널을 같이 지정해줘. 예: `!명령채널 추가 #bot-control`")
@@ -15427,7 +11636,7 @@ async def command_channel_command(ctx, action: str | None = None, channel: disco
         updated = remove_guild_channel_setting(ctx.guild.id, "command_only_channel_ids", channel.id)
         await ctx.send(f"🗑️ 명령채널에서 {channel.mention} 뺐어. (총 {len(updated)}개)")
         return
-    await ctx.send("사용법: `!명령채널 목록` / `!명령채널 추가 #채널` / `!명령채널 제거 #채널`")
+    await ctx.send(build_command_channel_usage(get_guild_command_prefix(ctx.guild.id)))
 
 
 @command_channel_command.error
@@ -15438,26 +11647,14 @@ async def command_channel_command_error(ctx, error):
 @bot.command(name="도움말", aliases=["help"])
 async def help_command(ctx):
     prefix = get_guild_command_prefix(ctx.guild.id if ctx.guild else None)
-    lines = [
-        "📘 Evelyn 명령어",
-        f"- {prefix}들어와 / {prefix}다시들어와 / {prefix}나가",
-        f"- {prefix}이블린페이지",
-        f"- {prefix}상태 / {prefix}접두사",
-        f"- {prefix}자율시작 / {prefix}자율정지 / {prefix}자율상태",
-        f"- {prefix}관찰채널 목록|추가 #채널|제거 #채널",
-        f"- {prefix}명령채널 목록|추가 #채널|제거 #채널",
-        f"- {prefix}초기화",
-    ]
-    if is_control_command_authorized(ctx):
-        lines.append(f"- {prefix}재시작 / {prefix}종료")
-    await ctx.send("\n".join(lines))
+    await ctx.send(build_help_command_text(prefix=prefix, control_authorized=is_control_command_authorized(ctx)))
 
 
 @bot.command(name="초기화", aliases=["reset"])
 @commands.check(is_control_command_authorized)
 async def reset_guild_memory(ctx):
     if ctx.guild is None:
-        await ctx.send("이 명령은 길드에서만 쓸 수 있어.")
+        await ctx.send(guild_only_command_message())
         return
 
     guild_id = ctx.guild.id
@@ -15468,7 +11665,7 @@ async def reset_guild_memory(ctx):
     if memory_dir.exists():
         shutil.rmtree(memory_dir)
 
-    await ctx.send(f"🧹 {ctx.guild.name} 메모리와 대화 히스토리를 이 길드만 초기화했어. 명령어 시작 부호 `{current_prefix}` 설정은 유지했어.")
+    await ctx.send(build_reset_guild_memory_reply(guild_name=ctx.guild.name, current_prefix=current_prefix))
 
 
 @reset_guild_memory.error

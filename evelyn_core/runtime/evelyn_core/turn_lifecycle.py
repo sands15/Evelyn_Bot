@@ -4,7 +4,7 @@ import asyncio
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any
+from typing import Any, Awaitable
 
 
 class TurnState(str, Enum):
@@ -97,3 +97,68 @@ class TurnScope:
                 for transition in self.transition_log
             ],
         }
+
+
+@dataclass(slots=True)
+class TurnScopeRegistry:
+    room_turn_scopes: dict[str, TurnScope] = field(default_factory=dict)
+    cancelled_stale_turn_count: int = 0
+
+    def replace_room_scope(self, room_id: str, new_scope: TurnScope, *, cancel_old: bool = True) -> TurnScope | None:
+        old = self.room_turn_scopes.get(room_id)
+        self.room_turn_scopes[room_id] = new_scope
+        if cancel_old and old is not None and old is not new_scope:
+            old.cancel(reason="replaced_by_new_turn")
+            self.cancelled_stale_turn_count += 1
+        return old
+
+    def get_room_scope(self, room_id: str | None) -> TurnScope | None:
+        if not room_id:
+            return None
+        return self.room_turn_scopes.get(room_id)
+
+    def attach_current_task(self, turn_scope: TurnScope | None) -> asyncio.Task | None:
+        if turn_scope is None:
+            return None
+        return turn_scope.register_task(asyncio.current_task())
+
+    def detach_task(self, turn_scope: TurnScope | None, task: asyncio.Task | None) -> None:
+        if turn_scope is None:
+            return
+        turn_scope.unregister_task(task)
+
+    def create_scoped_task(self, coro: Awaitable[Any], turn_scope: TurnScope | None = None) -> asyncio.Task:
+        task = asyncio.create_task(coro)
+        if turn_scope is not None:
+            turn_scope.register_task(task)
+            task.add_done_callback(lambda done, scope=turn_scope: scope.unregister_task(done))
+        return task
+
+    def clear_room_scope(self, room_id: str | None, turn_scope: TurnScope | None = None) -> None:
+        if not room_id:
+            return
+        current = self.room_turn_scopes.get(room_id)
+        if current is None:
+            return
+        if turn_scope is not None and current is not turn_scope:
+            return
+        self.room_turn_scopes.pop(room_id, None)
+
+    def cancel_matching_prefix(self, prefix: str) -> int:
+        cancelled = 0
+        for key, scope in list(self.room_turn_scopes.items()):
+            if not key.startswith(prefix):
+                continue
+            if scope is not None:
+                scope.cancel()
+                cancelled += 1
+            self.room_turn_scopes.pop(key, None)
+        return cancelled
+
+
+__all__ = [
+    "TurnScope",
+    "TurnScopeRegistry",
+    "TurnState",
+    "TurnTransition",
+]

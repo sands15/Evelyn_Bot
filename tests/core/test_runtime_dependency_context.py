@@ -22,14 +22,17 @@ class RuntimeDependencyContextTests(unittest.TestCase):
 
     def test_runtime_status_context_includes_current_gpu_oom_signal(self) -> None:
         main_py = (REPO_ROOT / "main.py").read_text(encoding="utf-8")
+        runtime_status_context = (
+            REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "runtime_status_context.py"
+        ).read_text(encoding="utf-8")
 
-        self.assertIn("def load_runtime_gpu_status", main_py)
+        self.assertIn("def load_runtime_gpu_status", runtime_status_context)
         self.assertIn("current_gpu_snapshot=", main_py)
         self.assertIn("current_oom_signal=", main_py)
         self.assertIn("recent_errors_are_historical=true", main_py)
         self.assertIn("RUNTIME_STATUS_RULE", main_py)
         self.assertIn("needs_runtime_status_context = route_decision.needs_runtime_state", main_py)
-        self.assertIn("def answer_gpu_runtime_status_query", main_py)
+        self.assertIn("def answer_gpu_runtime_status_query", runtime_status_context)
         self.assertIn("gpu_runtime_status_fast_path", main_py)
 
     def test_main_llm_blocks_unrequested_minecraft_domain_leaks(self) -> None:
@@ -37,19 +40,22 @@ class RuntimeDependencyContextTests(unittest.TestCase):
         prompt_contract = (
             REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "assistant_prompt_contract.py"
         ).read_text(encoding="utf-8")
+        response_policy = (
+            REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "response_output_policy.py"
+        ).read_text(encoding="utf-8")
 
         self.assertIn("build_evelyn_system_prompt", main_py)
         self.assertIn("Domain rule: Minecraft/Voyager/block/coordinate/pathfinding", prompt_contract)
-        self.assertIn("def user_explicitly_mentions_minecraft", main_py)
-        self.assertIn("def answer_contains_minecraft_leak", main_py)
-        self.assertIn("def sanitize_unrequested_minecraft_leak", main_py)
-        self.assertIn("fallback_for_unrequested_minecraft_leak", main_py)
-        self.assertIn("negative_or_meta_markers", main_py)
-        self.assertIn("하지 마", main_py)
-        self.assertIn("def answer_simple_local_chat_query", main_py)
+        self.assertIn("def user_explicitly_mentions_minecraft", response_policy)
+        self.assertIn("def answer_contains_minecraft_leak", response_policy)
+        self.assertIn("def sanitize_unrequested_minecraft_leak", response_policy)
+        self.assertIn("fallback_for_unrequested_minecraft_leak", response_policy)
+        self.assertIn("negative_or_meta_markers", response_policy)
+        self.assertIn("하지 마", response_policy)
+        self.assertIn("def answer_simple_local_chat_query", response_policy)
         self.assertIn("simple_local_chat_fast_path", main_py)
         self.assertIn("suppressed_minecraft_leak_stream", main_py)
-        self.assertIn("그쪽 얘기는 빼고", main_py)
+        self.assertIn("그쪽 얘기는 빼고", response_policy)
         self.assertNotIn("return \"마크 얘기는 빼고", main_py)
         self.assertIn("응답 규칙: 짧게 바로 답해라", main_py)
         self.assertIn("답변 끝에 새 질문을 덧붙이지 마라", main_py)

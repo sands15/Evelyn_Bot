@@ -161,12 +161,14 @@ class ShutdownScriptContractTests(unittest.TestCase):
         self.assertIn('handle_control_page_input(guild, "/shutdown")', main_py)
 
     def test_shutdown_command_copy_is_runtime_scoped(self) -> None:
-        main_py = (REPO_ROOT / "main.py").read_text(encoding="utf-8")
+        control_page_tools = (
+            REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "control_page_tools.py"
+        ).read_text(encoding="utf-8")
         page_js = (REPO_ROOT / "docs" / "assets" / "evelyn-page.js").read_text(encoding="utf-8")
-        combined = main_py + page_js
+        combined = control_page_tools + page_js
 
         self.assertNotIn("Shut down the full Evelyn stack", combined)
-        self.assertIn("Shut down Evelyn runtime", main_py)
+        self.assertIn("Shut down Evelyn runtime", control_page_tools)
         self.assertIn("Shut down Evelyn runtime", page_js)
 
     def test_stack_shutdown_reply_does_not_claim_whole_wsl_stops(self) -> None:

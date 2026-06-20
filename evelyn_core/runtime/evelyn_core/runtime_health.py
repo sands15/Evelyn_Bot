@@ -177,6 +177,88 @@ def service_spec_by_id(manifest: ServiceManifest) -> dict[str, ServiceSpec]:
     return {service.id: service for service in manifest.services}
 
 
+def _compact_detail(value: Any, *, max_chars: int = 220) -> str:
+    text = str(value or "").replace("\r", " ").replace("\n", " ").strip()
+    if len(text) <= max_chars:
+        return text
+    return text[: max_chars - 1].rstrip() + "..."
+
+
+def _first_http_payload(service: dict[str, Any], *, path_suffix: str | None = None) -> dict[str, Any] | None:
+    for check in service.get("checks") or []:
+        if not isinstance(check, dict) or check.get("kind") != "http":
+            continue
+        if path_suffix:
+            target = str(check.get("target") or "")
+            if not target.endswith(path_suffix):
+                continue
+        payload = check.get("payload")
+        if isinstance(payload, dict):
+            return payload
+    return None
+
+
+def _status_text(value: Any) -> str:
+    if isinstance(value, dict):
+        for key in ("status", "state", "outcome", "decision", "reason_code", "reason"):
+            raw = value.get(key)
+            if isinstance(raw, (str, int, float, bool)) and str(raw).strip():
+                return str(raw).strip()
+    return ""
+
+
+def _contract_failure_signal(value: Any) -> str:
+    if not isinstance(value, dict):
+        return ""
+    explicit_success = value.get("success")
+    if explicit_success is False:
+        return "success=false"
+    explicit_ok = value.get("ok")
+    if explicit_ok is False:
+        return "ok=false"
+    status = _status_text(value).lower()
+    failed_words = (
+        "fail",
+        "failed",
+        "blocked",
+        "reject",
+        "rejected",
+        "invalid",
+        "missing",
+        "unmet",
+        "unsafe",
+        "recovery_required",
+    )
+    if status and any(word in status for word in failed_words):
+        return status
+    return ""
+
+
+def _voyager_contract_evidence(status_payload: dict[str, Any]) -> tuple[str, bool]:
+    last_step = status_payload.get("status_summary", {}).get("last_step") if isinstance(status_payload.get("status_summary"), dict) else {}
+    if not isinstance(last_step, dict):
+        last_step = {}
+    evidence_sources = {
+        "contract": status_payload.get("last_task_contract_decision") or last_step.get("last_task_contract_decision"),
+        "bookkeeping": status_payload.get("current_task_bookkeeping")
+        or status_payload.get("last_task_bookkeeping")
+        or last_step.get("current_task_bookkeeping")
+        or last_step.get("last_task_bookkeeping"),
+        "effect": status_payload.get("last_world_effect_verification") or last_step.get("last_world_effect_verification"),
+        "critic": status_payload.get("last_critic_result") or last_step.get("last_critic_result"),
+    }
+    parts: list[str] = []
+    has_failure = False
+    for label, value in evidence_sources.items():
+        if not isinstance(value, dict):
+            continue
+        signal = _contract_failure_signal(value)
+        has_failure = has_failure or bool(signal)
+        summary = signal or _status_text(value) or "present"
+        parts.append(f"{label}={_compact_detail(summary, max_chars=80)}")
+    return "; ".join(parts), has_failure
+
+
 async def check_service(service: ServiceSpec, *, probe_runner: ProbeRunner | None = None) -> dict[str, Any]:
     runner = probe_runner or default_probe_runner
     started = time.monotonic()
@@ -286,6 +368,51 @@ def _diagnose(services: dict[str, dict[str, Any]]) -> list[Diagnostic]:
                     message=message,
                     service_ids=(service_id,),
                     suggested_actions=tuple(service.get("suggestedActions") or ()),
+                )
+            )
+    voyager = services.get("voyager") or {}
+    if voyager.get("state") == "up":
+        status_payload = _first_http_payload(voyager, path_suffix="/status") or _first_http_payload(voyager)
+        recovery_state = status_payload.get("recovery_state") if isinstance(status_payload, dict) else None
+        if isinstance(recovery_state, dict) and recovery_state.get("healthy") is False:
+            scope = str(recovery_state.get("scope") or "unknown")
+            domain = str(recovery_state.get("domain") or "unknown")
+            subdomain = str(recovery_state.get("subdomain") or "")
+            reason = _compact_detail(recovery_state.get("reason"))
+            action = str(recovery_state.get("recommended_action") or "")
+            evidence, contract_failed = _voyager_contract_evidence(status_payload)
+            if scope == "runtime":
+                code = "VOYAGER_RUNTIME_RECOVERY_REQUIRED"
+                message = "Voyager is reachable, but its runtime boundary needs recovery."
+            elif domain in {"task_unverified", "task_result_unverified", "task_bookkeeping_unverified"}:
+                code = "VOYAGER_TASK_CONTRACT_UNVERIFIED"
+                message = "Voyager reported task progress without an explicit verified success contract."
+            elif contract_failed:
+                code = "VOYAGER_TASK_CONTRACT_FAILED"
+                message = "Voyager reported a failed task contract or verification signal."
+            else:
+                code = "VOYAGER_TASK_RECOVERY_REQUIRED"
+                message = "Voyager is reachable, but the current task boundary needs recovery."
+            details = "; ".join(
+                part
+                for part in (
+                    f"scope={scope}",
+                    f"domain={domain}",
+                    f"subdomain={subdomain}" if subdomain else "",
+                    f"reason={reason}" if reason else "",
+                    f"recommended_action={action}" if action else "",
+                    f"evidence={evidence}" if evidence else "",
+                )
+                if part
+            )
+            diagnostics.append(
+                Diagnostic(
+                    code=code,
+                    severity="warning",
+                    message=message,
+                    details=details,
+                    service_ids=("voyager",),
+                    suggested_actions=tuple(voyager.get("suggestedActions") or ()),
                 )
             )
     codex_gateway = services.get("codex_gateway") or {}

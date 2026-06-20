@@ -43,6 +43,11 @@ implemented behavior.
 - `docs/RUNTIME_SERVICE_MANIFEST_HEALTH_REPAIR_BLUEPRINT.md`
   - Temporary design blueprint for `Runtime Service Manifest + Health/Repair Layer`.
   - Use before implementing runtime service manifest, structured health, diagnostics, and repair actions.
+- `docs/EVELYN_CONTROL_PAGE_OPERATION_GUIDE_KR.md`
+  - 한글 운영 가이드: 상태코드 사전, 재시작 기준, 8798 계약 가드, 사용자 안내 문구.
+
+- `docs/MAIN_PY_DECOMPOSITION_TARGET_KR.md`
+  - `main.py`를 엔트리포인트/배선 파일로 줄이기 위한 최종 책임 경계와 단계별 분리 순서.
 
 - `docs/EVELYN_FAST_BOOT_ARCHITECTURE.md`
   - Fast Boot 우선 구현 전략과 상태 모델(`controlReady`, `botApiReady`, `chatReady`, `voiceReady`, `fullReady`),

@@ -6,12 +6,14 @@ from pathlib import Path
 
 REPO_ROOT = next(path for path in Path(__file__).resolve().parents if (path / "main.py").exists())
 MAIN_PY = REPO_ROOT / "main.py"
+CONTROL_PAGE_STATE = REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "control_page_state.py"
 
 
 class ControlPageWelcomeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.main_py = MAIN_PY.read_text(encoding="utf-8")
+        cls.control_page_state = CONTROL_PAGE_STATE.read_text(encoding="utf-8")
 
     def test_initial_welcome_uses_main_llm_once_per_chat_log(self) -> None:
         self.assertIn("CONTROL_PAGE_WELCOME_LLM_TIMEOUT_SEC", self.main_py)
@@ -37,10 +39,11 @@ class ControlPageWelcomeTests(unittest.TestCase):
         self.assertIn("현재 상태를 확인한 척하지 않는다.", self.main_py)
 
     def test_boot_progress_does_not_block_on_stale_warmup_failure(self) -> None:
-        self.assertIn('main_ready = bool(services.get("mainReady"))', self.main_py)
-        self.assertIn('tts_ready = bool(services.get("ttsReady"))', self.main_py)
-        self.assertIn('"main_warmup": startup_component_done("main_warmup") or main_ready', self.main_py)
-        self.assertIn('"tts_warmup": startup_component_done("tts_warmup") or tts_ready', self.main_py)
+        self.assertIn("return build_control_page_boot_progress_payload(", self.main_py)
+        self.assertIn('main_ready = bool(services.get("mainReady"))', self.control_page_state)
+        self.assertIn('tts_ready = bool(services.get("ttsReady"))', self.control_page_state)
+        self.assertIn('"main_warmup": (startup_component_state.get("main_warmup") or {}).get("status") == "done" or main_ready', self.control_page_state)
+        self.assertIn('"tts_warmup": (startup_component_state.get("tts_warmup") or {}).get("status") == "done" or tts_ready', self.control_page_state)
 
 
 if __name__ == "__main__":

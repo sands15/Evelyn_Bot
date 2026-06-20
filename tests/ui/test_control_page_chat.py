@@ -212,6 +212,10 @@ class ControlPageChatTests(unittest.TestCase):
             "VOYAGER_DOWN",
             "CODEX_GATEWAY_DOWN",
             "CODEX_GATEWAY_ACTION_FAILED",
+            "VOYAGER_TASK_CONTRACT_UNVERIFIED",
+            "VOYAGER_TASK_CONTRACT_FAILED",
+            "VOYAGER_TASK_RECOVERY_REQUIRED",
+            "VOYAGER_RUNTIME_RECOVERY_REQUIRED",
         ):
             self.assertIn(f"{code}:", self.js)
         self.assertIn("runtimeHealthCodeText(health)", self.js)
@@ -229,6 +233,25 @@ class ControlPageChatTests(unittest.TestCase):
         self.assertIn("Voyager is not responding.", self.js)
         self.assertIn("Codex Gateway is not responding.", self.js)
         self.assertIn("Codex Gateway action execution failed.", self.js)
+        self.assertIn("Voyager task contract is unverified.", self.js)
+        self.assertIn("Voyager task contract failed.", self.js)
+        self.assertIn("Voyager task recovery is required.", self.js)
+        self.assertIn("Voyager runtime recovery is required.", self.js)
+
+    def test_contract_timeline_renders_voyager_contract_diagnostics(self) -> None:
+        self.assertIn('id="contractTimelineStatus"', self.html)
+        self.assertIn('id="contractTimelineList"', self.html)
+        self.assertIn("Voyager 계약 추적 타임라인", self.html)
+        self.assertIn(".contract-timeline", self.html)
+        self.assertIn("function contractTimelineDiagnostics(payload)", self.html)
+        self.assertIn("function renderContractTimeline(payload)", self.html)
+        self.assertIn("renderContractTimeline(state);", self.html)
+        self.assertIn("contractTimelineDiagnostics(health)", self.js)
+        self.assertIn("function renderContractTimeline(health)", self.js)
+        self.assertIn("renderContractTimeline(serviceHealth);", self.js)
+        self.assertIn('code.startsWith("VOYAGER_TASK_CONTRACT")', self.js)
+        self.assertIn('code === "VOYAGER_RUNTIME_RECOVERY_REQUIRED"', self.js)
+        self.assertIn("dom.contractTimelineList", self.js)
 
     def test_runtime_status_summary_uses_readable_text(self) -> None:
         self.assertIn('issues.push("Runtime: " + runtimeIssue);', self.js)

@@ -325,14 +325,17 @@ class LocalMicRoutingTests(unittest.TestCase):
 
     def test_main_routes_local_only_mic_without_discord_target(self) -> None:
         main_py = (REPO_ROOT / "main.py").read_text(encoding="utf-8")
+        control_page_tools = (
+            REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "control_page_tools.py"
+        ).read_text(encoding="utf-8")
 
         self.assertIn("target is None and LOCAL_ONLY_MODE", main_py)
         self.assertIn("local_control_voice_member()", main_py)
         self.assertIn("await ensure_local_mic_service_started()", main_py)
         self.assertIn("is_local_speaker_voice_client(vc)", main_py)
         self.assertIn("await ask_llm_and_speak_local(", main_py)
-        self.assertIn('"/voice": "voice.status"', main_py)
-        self.assertIn('"/voice status": "voice.status"', main_py)
+        self.assertIn('"/voice": "voice.status"', control_page_tools)
+        self.assertIn('"/voice status": "voice.status"', control_page_tools)
         self.assertIn('if tool_name == "voice.status":', main_py)
 
     def test_local_speaker_uses_streaming_sentence_tts_with_full_answer_fallback(self) -> None:

@@ -10,7 +10,7 @@ RUNTIME_ROOT = REPO_ROOT / "evelyn_core" / "runtime"
 if str(RUNTIME_ROOT) not in sys.path:
     sys.path.insert(0, str(RUNTIME_ROOT))
 
-from evelyn_core.turn_lifecycle import TurnScope, TurnState  # noqa: E402
+from evelyn_core.turn_lifecycle import TurnScope, TurnScopeRegistry, TurnState  # noqa: E402
 
 
 class TurnLifecycleTests(unittest.IsolatedAsyncioTestCase):
@@ -57,6 +57,51 @@ class TurnLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(scope.is_current("turn-1"))
         self.assertTrue(scope.is_stale("turn-1"))
+
+    async def test_registry_replaces_scope_and_counts_stale_cancel(self) -> None:
+        registry = TurnScopeRegistry()
+        old_scope = TurnScope("old")
+        new_scope = TurnScope("new")
+
+        self.assertIsNone(registry.replace_room_scope("room-1", old_scope))
+        replaced = registry.replace_room_scope("room-1", new_scope)
+
+        self.assertIs(replaced, old_scope)
+        self.assertTrue(old_scope.cancelled)
+        self.assertEqual(old_scope.cancel_reason, "replaced_by_new_turn")
+        self.assertIs(registry.get_room_scope("room-1"), new_scope)
+        self.assertEqual(registry.cancelled_stale_turn_count, 1)
+
+    async def test_registry_scoped_task_unregisters_on_completion(self) -> None:
+        registry = TurnScopeRegistry()
+        scope = TurnScope("turn-1")
+
+        async def finish_soon() -> str:
+            await asyncio.sleep(0)
+            return "done"
+
+        task = registry.create_scoped_task(finish_soon(), turn_scope=scope)
+        self.assertIn(task, scope.tasks)
+
+        result = await task
+        await asyncio.sleep(0)
+
+        self.assertEqual(result, "done")
+        self.assertNotIn(task, scope.tasks)
+
+    async def test_registry_cancel_matching_prefix_cancels_and_removes(self) -> None:
+        registry = TurnScopeRegistry()
+        matching = TurnScope("turn-1")
+        other = TurnScope("turn-2")
+        registry.replace_room_scope("guild:1:voice", matching)
+        registry.replace_room_scope("guild:2:voice", other)
+
+        cancelled = registry.cancel_matching_prefix("guild:1:")
+
+        self.assertEqual(cancelled, 1)
+        self.assertTrue(matching.cancelled)
+        self.assertIsNone(registry.get_room_scope("guild:1:voice"))
+        self.assertIs(registry.get_room_scope("guild:2:voice"), other)
 
 
 if __name__ == "__main__":

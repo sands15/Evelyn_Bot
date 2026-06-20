@@ -45,6 +45,7 @@ class QueryIntentTests(unittest.TestCase):
 
     def test_recent_korean_location_hint_can_ground_weather_followup(self) -> None:
         self.assertEqual(extract_korean_location_hint("\ud55c\uad6d, \uad11\uc8fc\uad11\uc5ed\uc2dc\uc57c \uae30\uc5b5\ud574"), "\uad11\uc8fc\uad11\uc5ed\uc2dc")
+        self.assertEqual(extract_korean_location_hint("\uc11c\uc6b8 \ub0b4\uc77c \ub0a0\uc528 \uc54c\ub824\uc918"), "\uc11c\uc6b8")
         self.assertEqual(
             resolve_recent_weather_location([
                 "\uc54c\uc558\uc5b4 \uad11\uc8fc\uad11\uc5ed\uc2dc\ub77c\uace0 \uae30\uc5b5\ud574\ub458\uac8c.",

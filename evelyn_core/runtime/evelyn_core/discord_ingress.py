@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any
+
+from .text import clean_text
 
 
 @dataclass(frozen=True)
@@ -27,6 +30,17 @@ class DiscordVoiceIngressContext:
     room_key: str
     person_key: str | None
     session_memory_key: str | None
+
+
+@dataclass(frozen=True)
+class DiscordTextTurnDecision:
+    action: str
+    reason: str = ""
+    user_text: str = ""
+
+    @property
+    def accepted(self) -> bool:
+        return self.action == "accept"
 
 
 def make_text_session_key(guild_id: int, channel_id: int, user_id: int | None = None, thread_id: int | None = None) -> str:
@@ -91,6 +105,31 @@ def build_text_ingress_context(
     )
 
 
+def resolve_text_thread_id(channel: object, *, is_thread_parent: Callable[[Any], bool] | None = None) -> int | None:
+    parent = getattr(channel, "parent", None)
+    if parent is None:
+        return None
+    if is_thread_parent is not None and not is_thread_parent(parent):
+        return None
+    return getattr(channel, "id", None)
+
+
+def build_text_ingress_context_from_message(
+    message: object,
+    *,
+    is_thread_parent: Callable[[Any], bool] | None = None,
+) -> DiscordTextIngressContext:
+    guild = getattr(message, "guild")
+    channel = getattr(message, "channel")
+    author = getattr(message, "author")
+    return build_text_ingress_context(
+        guild_id=int(getattr(guild, "id")),
+        channel_id=int(getattr(channel, "id")),
+        user_id=int(getattr(author, "id")),
+        thread_id=resolve_text_thread_id(channel, is_thread_parent=is_thread_parent),
+    )
+
+
 def build_voice_ingress_context(
     *,
     guild_id: int,
@@ -113,6 +152,64 @@ def build_voice_ingress_context(
 
 def should_accept_text_turn(*, is_wake_word: bool, is_reply: bool, is_active_session: bool) -> bool:
     return bool(is_wake_word or is_reply or is_active_session)
+
+
+def decide_text_message_precheck(
+    *,
+    content: str | None,
+    prefix: str,
+    channel_id: int,
+    command_only_channel_ids: set[int] | list[int] | tuple[int, ...],
+) -> DiscordTextTurnDecision:
+    content_stripped = (content or "").lstrip()
+    if prefix and content_stripped.startswith(prefix):
+        return DiscordTextTurnDecision("process_commands", "command_prefix")
+    if int(channel_id) in {int(item) for item in command_only_channel_ids}:
+        return DiscordTextTurnDecision("ignore", "command_only_channel")
+    return DiscordTextTurnDecision("continue")
+
+
+def build_text_turn_decision(
+    content: str | None,
+    *,
+    is_wake_word: bool,
+    is_reply: bool,
+    is_active_session: bool,
+    strip_wake_word: Callable[[str], str],
+    empty_wake_text: str,
+    attachment_context: str = "",
+) -> DiscordTextTurnDecision:
+    if not should_accept_text_turn(is_wake_word=is_wake_word, is_reply=is_reply, is_active_session=is_active_session):
+        return DiscordTextTurnDecision("drop", "text_gate_not_open")
+    user_text = build_text_turn_user_text(
+        content,
+        is_wake_word=is_wake_word,
+        strip_wake_word=strip_wake_word,
+        empty_wake_text=empty_wake_text,
+        attachment_context=attachment_context,
+    )
+    return DiscordTextTurnDecision("accept", user_text=user_text)
+
+
+async def is_reply_to_target_user(message: object, target_user: object | None, *, log: Callable[[str], None] | None = None) -> bool:
+    if target_user is None:
+        return False
+    reference = getattr(message, "reference", None)
+    if not reference:
+        return False
+    message_id = getattr(reference, "message_id", None)
+    if message_id is None:
+        return False
+    channel = getattr(message, "channel", None)
+    if channel is None or not hasattr(channel, "fetch_message"):
+        return False
+    try:
+        replied_msg = await channel.fetch_message(message_id)
+        return getattr(replied_msg, "author", None) == target_user
+    except Exception as exc:
+        if log is not None:
+            log(f"답장 확인 오류: {exc!r}")
+        return False
 
 
 def normalize_voice_debug_meta(debug_meta: dict | None) -> dict:
@@ -139,3 +236,23 @@ def build_text_turn_user_text(
     if attachment_context:
         user_text = f"{user_text}\n\n[Attached Visual Inputs]\n{attachment_context}"
     return user_text
+
+
+def build_discord_attachment_context(message: object, *, limit: int = 4) -> str:
+    attachments = list(getattr(message, "attachments", []) or [])[: max(0, limit)]
+    rows: list[str] = []
+    for attachment in attachments:
+        content_type = clean_text(str(getattr(attachment, "content_type", "") or ""))
+        filename = clean_text(str(getattr(attachment, "filename", "") or "attachment"))
+        url = clean_text(str(getattr(attachment, "url", "") or ""))
+        width = getattr(attachment, "width", None)
+        height = getattr(attachment, "height", None)
+        is_image = content_type.startswith("image/") or filename.lower().endswith((".png", ".jpg", ".jpeg", ".webp", ".gif"))
+        label = "image" if is_image else "attachment"
+        size_bits = []
+        if width and height:
+            size_bits.append(f"{width}x{height}")
+        if content_type:
+            size_bits.append(content_type)
+        rows.append(f"- {label}: filename={filename}; meta={', '.join(size_bits) or 'unknown'}; url={url}")
+    return "\n".join(rows)

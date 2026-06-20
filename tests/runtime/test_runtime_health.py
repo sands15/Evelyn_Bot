@@ -24,6 +24,45 @@ def fake_probe(states: dict[str, str]):
         if state == "partial" and check.kind == "http":
             return {"kind": "http", "ok": False, "reason": "timeout", "target": target, "status": None}
         payload = {"lastActionReady": False} if service.id == "codex_gateway" and state == "action_failed" and check.kind == "http" else None
+        if service.id == "voyager" and check.kind == "http" and check.path == "/status":
+            if state == "task_unverified":
+                payload = {
+                    "recovery_state": {
+                        "scope": "task",
+                        "domain": "task_bookkeeping_unverified",
+                        "subdomain": "mining",
+                        "reason": "bookkeeping status 'effect_verified' has no explicit success flag",
+                        "recommended_action": "verify_target_block_and_tool",
+                        "healthy": False,
+                    },
+                    "last_task_contract_decision": {"contract": "mine_coal", "status": "accepted"},
+                    "current_task_bookkeeping": {"status": "effect_verified"},
+                    "last_world_effect_verification": {"outcome": "present"},
+                    "last_critic_result": {"reason": "not checked"},
+                }
+            elif state == "contract_failed":
+                payload = {
+                    "recovery_state": {
+                        "scope": "task",
+                        "domain": "task_failed",
+                        "subdomain": "pathfinding",
+                        "reason": "move_distance_unmet",
+                        "recommended_action": "replan_route",
+                        "healthy": False,
+                    },
+                    "last_task_contract_decision": {"contract": "move_to_tree", "success": False, "reason": "distance_unmet"},
+                    "current_task_bookkeeping": {"status": "failed", "success": False},
+                    "last_critic_result": {"success": False, "reason": "target not reached"},
+                }
+            elif state == "runtime_recovery":
+                payload = {
+                    "recovery_state": {
+                        "scope": "runtime",
+                        "domain": "bridge_http",
+                        "reason": "Runner is up but the bridge HTTP port is not reachable.",
+                        "healthy": False,
+                    }
+                }
         return {
             "kind": check.kind,
             "ok": True,
@@ -153,6 +192,39 @@ class RuntimeHealthTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Voyager code execution", diagnostics["CODEX_GATEWAY_DOWN"]["message"])
         self.assertEqual(diagnostics["VOYAGER_DOWN"]["suggestedActions"][0]["id"], "start_voyager")
         self.assertEqual(diagnostics["CODEX_GATEWAY_DOWN"]["suggestedActions"][0]["id"], "start_codex_gateway")
+
+    async def test_voyager_status_contract_unverified_is_warning_diagnostic(self) -> None:
+        manifest = load_service_manifest(force=True)
+        health = await collect_runtime_health(manifest=manifest, probe_runner=fake_probe({"voyager": "task_unverified"}))
+        services = {service["id"]: service for service in health["services"]}
+        diagnostics = {diagnostic["code"]: diagnostic for diagnostic in health["diagnostics"]}
+
+        self.assertEqual(health["overallState"], "degraded")
+        self.assertTrue(services["voyager"]["ready"])
+        self.assertIn("VOYAGER_TASK_CONTRACT_UNVERIFIED", diagnostics)
+        self.assertEqual(diagnostics["VOYAGER_TASK_CONTRACT_UNVERIFIED"]["severity"], "warning")
+        self.assertIn("task_bookkeeping_unverified", diagnostics["VOYAGER_TASK_CONTRACT_UNVERIFIED"]["details"])
+        self.assertIn("contract=accepted", diagnostics["VOYAGER_TASK_CONTRACT_UNVERIFIED"]["details"])
+        self.assertIn("bookkeeping=effect_verified", diagnostics["VOYAGER_TASK_CONTRACT_UNVERIFIED"]["details"])
+
+    async def test_voyager_status_contract_failure_is_warning_diagnostic(self) -> None:
+        manifest = load_service_manifest(force=True)
+        health = await collect_runtime_health(manifest=manifest, probe_runner=fake_probe({"voyager": "contract_failed"}))
+        diagnostics = {diagnostic["code"]: diagnostic for diagnostic in health["diagnostics"]}
+
+        self.assertEqual(health["overallState"], "degraded")
+        self.assertIn("VOYAGER_TASK_CONTRACT_FAILED", diagnostics)
+        self.assertIn("pathfinding", diagnostics["VOYAGER_TASK_CONTRACT_FAILED"]["details"])
+        self.assertIn("contract=success=false", diagnostics["VOYAGER_TASK_CONTRACT_FAILED"]["details"])
+
+    async def test_voyager_status_runtime_recovery_is_warning_diagnostic(self) -> None:
+        manifest = load_service_manifest(force=True)
+        health = await collect_runtime_health(manifest=manifest, probe_runner=fake_probe({"voyager": "runtime_recovery"}))
+        diagnostics = {diagnostic["code"]: diagnostic for diagnostic in health["diagnostics"]}
+
+        self.assertEqual(health["overallState"], "degraded")
+        self.assertIn("VOYAGER_RUNTIME_RECOVERY_REQUIRED", diagnostics)
+        self.assertIn("bridge_http", diagnostics["VOYAGER_RUNTIME_RECOVERY_REQUIRED"]["details"])
 
 
 if __name__ == "__main__":

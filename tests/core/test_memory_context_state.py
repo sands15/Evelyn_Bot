@@ -1,0 +1,120 @@
+import sys
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+
+REPO_ROOT = next(path for path in Path(__file__).resolve().parents if (path / "main.py").exists())
+RUNTIME_ROOT = REPO_ROOT / "evelyn_core" / "runtime"
+if str(RUNTIME_ROOT) not in sys.path:
+    sys.path.insert(0, str(RUNTIME_ROOT))
+
+from evelyn_core.memory_context_state import (  # noqa: E402
+    build_memory_context,
+    build_memory_context_payload,
+    format_memory_row_lines,
+    merge_recent_memory_rows,
+)
+
+
+class MemoryContextStateTests(unittest.TestCase):
+    def test_merge_recent_memory_rows_sorts_and_limits(self) -> None:
+        rows = merge_recent_memory_rows(
+            [{"text": "old", "saved_at": 1}, {"text": "new", "saved_at": 3}],
+            [{"text": "mid", "saved_at": 2}],
+            limit=2,
+        )
+
+        self.assertEqual([row["text"] for row in rows], ["mid", "new"])
+
+    def test_format_memory_row_lines_keeps_speaker_source_and_text(self) -> None:
+        text = format_memory_row_lines(
+            [
+                {"speaker": "정훈", "source": "voice", "text": " 안녕 "},
+                {"role": "assistant", "text": ""},
+            ]
+        )
+
+        self.assertEqual(text, "- 정훈 (voice): 안녕")
+
+    def test_build_memory_context_payload_renders_layered_sections(self) -> None:
+        context = build_memory_context_payload(
+            layers={
+                "session": {
+                    "label": "현재 세션 기억",
+                    "summary": "작업 중",
+                    "raw": [{"speaker": "user", "source": "text", "text": "main.py 분리", "saved_at": 2}],
+                },
+                "guild": {
+                    "label": "서버 기억",
+                    "summary": "이블린 프로젝트",
+                    "raw": [{"speaker": "assistant", "source": "text", "text": "테스트 확인", "saved_at": 1}],
+                },
+            },
+            state={
+                "action": "ask",
+                "user_intent": "분리 계속",
+                "retrieved_context_ids": ["a", "b", "c", "d", "e"],
+            },
+            session_state={"last_speaker": "정훈", "awaiting_user_reply": True, "topic_id": "topic-1"},
+            vault_context="vault hit",
+            facts=[{"text": "주요 결정"}],
+            questions=[{"text": "남은 후보"}],
+            vault_raw_rows=[{"speaker": "user", "source": "vault", "text": "이전 기록", "saved_at": 3}],
+        )
+
+        self.assertIn("현재 작업 요약:", context)
+        self.assertIn("현재 세션 최근 대화:", context)
+        self.assertIn("방 최근 대화:", context)
+        self.assertIn("현재 내부 상태(사용자 발화 아님):", context)
+        self.assertIn("- 권장 행동: 질문하기", context)
+        self.assertIn("Structured memory vault recall:\nvault hit", context)
+        self.assertIn("장기 기억 후보:\n- 주요 결정", context)
+        self.assertIn("열린 질문/가설:\n- 남은 후보", context)
+
+    def test_build_memory_context_collects_sources_and_vault_recall(self) -> None:
+        layers = {
+            "guild": {
+                "label": "서버 기억",
+                "summary": "이블린 프로젝트",
+                "raw": [{"speaker": "assistant", "source": "text", "text": "테스트 확인", "saved_at": 1}],
+                "facts": [{"text": "작업은 작게 분리한다", "saved_at": 2}],
+                "questions": [{"text": "다음 작업 후보 확인", "saved_at": 3}],
+                "vault_raw": [{"speaker": "user", "source": "vault", "text": "작업 기록", "saved_at": 4}],
+            }
+        }
+
+        with patch("evelyn_core.memory_context_state.collect_memory_layers", return_value=layers):
+            with patch("evelyn_core.memory_context_state.build_memory_vault_context", return_value="vault ctx") as vault:
+                context = build_memory_context(
+                    123,
+                    "작업 계속",
+                    cognitive_state={"action": "answer", "user_intent": "작업 계속", "state_summary": "분리 중"},
+                    session_key="session-1",
+                    session_state={"topic_id": "topic-1", "last_speaker": "정훈"},
+                )
+
+        self.assertIn("Structured memory vault recall:\nvault ctx", context)
+        self.assertIn("장기 기억 후보:\n- 작업은 작게 분리한다", context)
+        self.assertIn("열린 질문/가설:\n- 다음 작업 후보 확인", context)
+        self.assertIn("문서 보관함에서 꺼낸 관련 대화:\n- user (vault): 작업 기록", context)
+        self.assertIn("- 현재 topic_id: topic-1", context)
+        vault.assert_called_once()
+
+    def test_empty_payload_returns_empty_string(self) -> None:
+        self.assertEqual(
+            build_memory_context_payload(
+                layers={},
+                state={},
+                session_state={},
+                vault_context="",
+                facts=[],
+                questions=[],
+                vault_raw_rows=[],
+            ),
+            "",
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()

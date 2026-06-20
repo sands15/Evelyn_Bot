@@ -51,6 +51,8 @@ const dom = {
   operatorRuntimeSubcopy: document.querySelector("#operator-runtime-subcopy"),
   operatorRuntimeDot: document.querySelector("#operator-runtime-dot"),
   operatorRuntimeNote: document.querySelector("#operator-runtime-note"),
+  contractTimelineStatus: document.querySelector("#contractTimelineStatus"),
+  contractTimelineList: document.querySelector("#contractTimelineList"),
   operatorStatChannel: document.querySelector("#operator-stat-channel"),
   operatorStatMode: document.querySelector("#operator-stat-mode"),
   operatorStatTts: document.querySelector("#operator-stat-tts"),
@@ -85,6 +87,7 @@ const dom = {
   voicePipelineStt: document.querySelector("#voice-pipeline-stt"),
   voicePipelineTts: document.querySelector("#voice-pipeline-tts"),
   voicePipelineDrops: document.querySelector("#voice-pipeline-drops"),
+  voicePipelineBargeInContinuity: document.querySelector("#voice-pipeline-barge-in") || document.querySelector("#voiceBargeInContinuityLine"),
   modelCallRouterRate: document.querySelector("#model-call-router-rate"),
   modelCallRouterLatency: document.querySelector("#model-call-router-latency"),
   modelCallMainFirst: document.querySelector("#model-call-main-first"),
@@ -246,6 +249,9 @@ const CONTROL_PAGE_COMMAND_CATALOG = [
   { command: "/memory", template: "/memory", summary: "Open or hide the memory panel" },
   { command: "/obsidian", template: "/obsidian", summary: "Open the memory vault" },
   { command: "/voice status", template: "/voice status", summary: "Show voice, STT, and TTS pipeline status" },
+  { command: "/voice continuity", template: "/voice continuity", summary: "Show barge-in continuity summary" },
+  { command: "/voice continuity reset", template: "/voice continuity reset", summary: "Reset barge-in continuity counters" },
+  { command: "/voice continuity reset confirm", template: "/voice continuity reset confirm", summary: "Confirm barge-in continuity reset" },
   { command: "/voice reconnect", template: "/voice reconnect", summary: "Reconnect to the recent voice channel" },
   { command: "/voice input auto", template: "/voice input auto", summary: "Auto switch local mic and Discord input" },
   { command: "/voice input local", template: "/voice input local", summary: "Use local mic input" },
@@ -852,6 +858,24 @@ function cleanDisplayText(value, fallback = "None") {
   return text || fallback;
 }
 
+function formatBargeInContinuitySummary(continuity, options = {}) {
+  const compact = Boolean(options.compact);
+  const target = Number(continuity && continuity.targetCount || 0);
+  if (target <= 0) return "미설정";
+  const current = Number(continuity.currentSuccessStreak || 0);
+  const attemptCount = Number(continuity.attemptCount || 0);
+  const successCount = Number(continuity.successCount || 0);
+  const failureCount = Number(continuity.failureCount || 0);
+  const successRate = attemptCount > 0 ? ((successCount / attemptCount) * 100).toFixed(1) : "0.0";
+  const reached = Boolean(continuity.targetReached);
+  const tag = reached ? "완료" : "진행";
+  const lastReason = cleanDisplayText(String(continuity.lastReasonLabel || continuity.lastReason || ""), "없음");
+  if (compact) {
+    return `${tag} ${current}/${target} · ${successRate}% · 시도 ${attemptCount}(실패 ${failureCount})`;
+  }
+  return `${tag} ${current}/${target} · 성공률 ${successRate}% · 시도 ${attemptCount}(성공 ${successCount}/실패 ${failureCount}) · 마지막 ${lastReason}`;
+}
+
 function controlPlaneBotTimestampText(controlPlane) {
   const botApi = (controlPlane && controlPlane.botApi) || {};
   if (botApi.lastSuccessfulStateAt) {
@@ -864,11 +888,53 @@ function controlPlaneBotTimestampText(controlPlane) {
 }
 
 const RUNTIME_HEALTH_DIAGNOSIS_TEXT = {
+  CP_CONTROL_RUNTIME_EXPIRED: {
+    issue: "Runtime health is stale and expired.",
+    detail: "Control-Plane service status cache exceeded max staleness; a hard refresh will run on next check.",
+    repairActionLabel: "Preview Bot API restart",
+    repairActionSummary: "Force a fresh Bot API probe and check Bot API/LLM endpoints.",
+  },
+  CP_CONTROL_RUNTIME_STALE: {
+    issue: "Runtime health cache is stale.",
+    detail: "Runtime service status is being refreshed in background.",
+    repairActionLabel: "Preview status refresh",
+    repairActionSummary: "Wait for background refresh and re-check runtime health.",
+  },
+  CP_RUNTIME_REFRESH_ERROR: {
+    issue: "Control-Page runtime health refresh failed.",
+    detail: "Runtime service state could not be refreshed; retrying may recover the cache.",
+    repairActionLabel: "Preview Control-Page restart",
+    repairActionSummary: "Retry the runtime refresh path and restart Control-Page if unavailable.",
+  },
   CP_UP_BOT_DOWN: {
     issue: "Control-Page is up, but Bot API is down.",
     detail: "The page can load, but chat, memory commands, and runtime commands can fail.",
     repairActionLabel: "Preview Bot API restart",
     repairActionSummary: "Preview the Bot API repair plan before starting anything.",
+  },
+  CP_BOT_PROXY_ERROR: {
+    issue: "Bot API contract request failed.",
+    detail: "The Bot API endpoint could not be queried (network, timeout, or server error).",
+    repairActionLabel: "Preview Bot API restart",
+    repairActionSummary: "Check Bot API status and preview repair if needed.",
+  },
+  CP_BOT_PROXY_TIMEOUT: {
+    issue: "Bot API contract check timed out.",
+    detail: "Bot API response took longer than the probe timeout.",
+    repairActionLabel: "Preview Bot API repair",
+    repairActionSummary: "Increase check stability or restart Bot API.",
+  },
+  CP_BOT_STATE_NOT_READY: {
+    issue: "Bot API is reachable but not in ready state.",
+    detail: "Bot API returned a state value that is not considered ready.",
+    repairActionLabel: "Preview Bot API restart",
+    repairActionSummary: "Check Bot API state and restart if initialization has stalled.",
+  },
+  CP_BOT_STATE_NOT_DICT: {
+    issue: "Bot API contract returned unexpected payload.",
+    detail: "Bot API contract response is not in the expected dictionary format.",
+    repairActionLabel: "Check Bot API contract",
+    repairActionSummary: "Check Bot API response schema and compatibility.",
   },
   BOT_API_DOWN_WITH_CONTROL_PAGE_UP: {
     issue: "Control-Page is open, but Bot API is not responding.",
@@ -882,6 +948,30 @@ const RUNTIME_HEALTH_DIAGNOSIS_TEXT = {
     repairActionLabel: "Preview Bot API health repair",
     repairActionSummary: "Check Bot API health and preview repair if needed.",
   },
+  CP_BOT_HTTP_401: {
+    issue: "Bot API contract unauthorized (401).",
+    detail: "The Bot API control endpoint returned unauthorized.",
+    repairActionLabel: "Check Bot API auth",
+    repairActionSummary: "Verify Bot API auth/session state before retry.",
+  },
+  CP_BOT_HTTP_403: {
+    issue: "Bot API contract forbidden (403).",
+    detail: "The Bot API control endpoint returned forbidden.",
+    repairActionLabel: "Check Bot API access",
+    repairActionSummary: "Verify Bot API host/port and permission settings.",
+  },
+  CP_BOT_HTTP_404: {
+    issue: "Bot API contract endpoint not found (404).",
+    detail: "The Bot API control endpoint path appears incorrect or not deployed.",
+    repairActionLabel: "Check Bot API path",
+    repairActionSummary: "Verify CONTROL_PAGE_BOT_API_STATE_PATH and API route.",
+  },
+  CP_BOT_HTTP_500: {
+    issue: "Bot API contract returned internal server error (500).",
+    detail: "The Bot API control endpoint returned server error.",
+    repairActionLabel: "Preview Bot API repair",
+    repairActionSummary: "Check Bot API logs for startup/runtime failures.",
+  },
   CONTROL_PAGE_DOWN: {
     issue: "Control-Page server is not responding.",
     detail: "The UI and command input can be unavailable until Control-Page recovers.",
@@ -894,7 +984,19 @@ const RUNTIME_HEALTH_DIAGNOSIS_TEXT = {
     repairActionLabel: "Preview Main LLM repair",
     repairActionSummary: "Preview Main LLM repair before starting anything.",
   },
+  CP_MAIN_LLM_DOWN: {
+    issue: "Main LLM is not responding.",
+    detail: "Main conversation generation is limited until Main LLM recovers.",
+    repairActionLabel: "Preview Main LLM repair",
+    repairActionSummary: "Preview Main LLM repair before starting anything.",
+  },
   ROUTER_LLM_DOWN: {
+    issue: "Router LLM is not responding.",
+    detail: "Routing decisions may be limited until Router LLM recovers.",
+    repairActionLabel: "Preview Router LLM repair",
+    repairActionSummary: "Preview Router LLM repair before starting anything.",
+  },
+  CP_ROUTER_LLM_DOWN: {
     issue: "Router LLM is not responding.",
     detail: "Routing decisions may be limited until Router LLM recovers.",
     repairActionLabel: "Preview Router LLM repair",
@@ -906,7 +1008,19 @@ const RUNTIME_HEALTH_DIAGNOSIS_TEXT = {
     repairActionLabel: "Preview Sub LLM repair",
     repairActionSummary: "Preview Sub LLM repair before starting anything.",
   },
+  CP_SUB_LLM_DOWN: {
+    issue: "Sub LLM is not responding.",
+    detail: "Support judgment and summarization may be limited until Sub LLM recovers.",
+    repairActionLabel: "Preview Sub LLM repair",
+    repairActionSummary: "Preview Sub LLM repair before starting anything.",
+  },
   TTS_DOWN: {
+    issue: "TTS is not responding.",
+    detail: "Voice output is unavailable until TTS recovers.",
+    repairActionLabel: "Preview TTS repair",
+    repairActionSummary: "Preview TTS repair before starting anything.",
+  },
+  CP_TTS_DOWN: {
     issue: "TTS is not responding.",
     detail: "Voice output is unavailable until TTS recovers.",
     repairActionLabel: "Preview TTS repair",
@@ -924,7 +1038,37 @@ const RUNTIME_HEALTH_DIAGNOSIS_TEXT = {
     repairActionLabel: "Preview Voyager repair",
     repairActionSummary: "Preview Voyager repair before sending Minecraft automation tasks.",
   },
+  VOYAGER_TASK_CONTRACT_UNVERIFIED: {
+    issue: "Voyager task contract is unverified.",
+    detail: "Task progress exists, but explicit success verification is missing.",
+    repairActionLabel: "Inspect Voyager contract",
+    repairActionSummary: "Review task bookkeeping, world-effect verification, and critic evidence.",
+  },
+  VOYAGER_TASK_CONTRACT_FAILED: {
+    issue: "Voyager task contract failed.",
+    detail: "A task contract, bookkeeping entry, effect check, or critic signal reported failure.",
+    repairActionLabel: "Inspect Voyager contract",
+    repairActionSummary: "Review failed contract evidence before retrying the task.",
+  },
+  VOYAGER_TASK_RECOVERY_REQUIRED: {
+    issue: "Voyager task recovery is required.",
+    detail: "The task boundary needs recovery before the same objective is retried.",
+    repairActionLabel: "Inspect Voyager recovery",
+    repairActionSummary: "Review the recommended recovery action and next steps.",
+  },
+  VOYAGER_RUNTIME_RECOVERY_REQUIRED: {
+    issue: "Voyager runtime recovery is required.",
+    detail: "Voyager is reachable, but one of its runtime boundaries is unhealthy.",
+    repairActionLabel: "Inspect Voyager runtime",
+    repairActionSummary: "Review bridge, Minecraft connection, and runner status before retrying.",
+  },
   CODEX_GATEWAY_DOWN: {
+    issue: "Codex Gateway is not responding.",
+    detail: "Voyager code execution is limited until the Codex Gateway recovers.",
+    repairActionLabel: "Preview Codex Gateway repair",
+    repairActionSummary: "Preview Codex Gateway repair before relying on Voyager action generation.",
+  },
+  CP_CODEX_GATEWAY_DOWN: {
     issue: "Codex Gateway is not responding.",
     detail: "Voyager code execution is limited until the Codex Gateway recovers.",
     repairActionLabel: "Preview Codex Gateway repair",
@@ -952,8 +1096,27 @@ function normalizedRuntimeCode(code) {
 
 function runtimeHealthCodeText(health) {
   const diagnostic = primaryRuntimeDiagnostic(health);
-  const issueCode = normalizedRuntimeCode(diagnostic && diagnostic.code);
-  return RUNTIME_HEALTH_DIAGNOSIS_TEXT[issueCode] || null;
+  const rawCode = String((diagnostic && diagnostic.code) || "");
+  if (!rawCode) {
+    return null;
+  }
+  const issueCode = normalizedRuntimeCode(rawCode);
+  if (RUNTIME_HEALTH_DIAGNOSIS_TEXT[issueCode]) {
+    return RUNTIME_HEALTH_DIAGNOSIS_TEXT[issueCode];
+  }
+  if (issueCode.startsWith("CP_") && RUNTIME_HEALTH_DIAGNOSIS_TEXT[issueCode.slice(3)]) {
+    return RUNTIME_HEALTH_DIAGNOSIS_TEXT[issueCode.slice(3)];
+  }
+  if (issueCode.startsWith("CP_BOT_HTTP_")) {
+    const httpCode = issueCode.slice("CP_BOT_HTTP_".length);
+    return {
+      issue: `Bot API contract returned HTTP ${httpCode}.`,
+      detail: "The Bot API control endpoint responded with a non-200 status.",
+      repairActionLabel: "Preview Bot API repair",
+      repairActionSummary: "Check Bot API control endpoint and contract path.",
+    };
+  }
+  return null;
 }
 
 function runtimeHealthFromPayload(payload) {
@@ -1023,6 +1186,64 @@ function runtimeHealthDetailText(health) {
     return "Summary: " + cleanDisplayText(health.summary, "No summary.");
   }
   return "";
+}
+
+function compactTimelineText(value, fallback = "-") {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  if (!text) {
+    return fallback;
+  }
+  return text.length > 150 ? text.slice(0, 149).trim() + "..." : text;
+}
+
+function contractTimelineDiagnostics(health) {
+  return runtimeHealthDiagnostics(health).filter((item) => {
+    const code = normalizedRuntimeCode(item && item.code);
+    return code.startsWith("VOYAGER_TASK_CONTRACT")
+      || code === "VOYAGER_TASK_RECOVERY_REQUIRED"
+      || code === "VOYAGER_RUNTIME_RECOVERY_REQUIRED";
+  });
+}
+
+function renderContractTimeline(health) {
+  if (!dom.contractTimelineList) {
+    return;
+  }
+  const diagnostics = contractTimelineDiagnostics(health).slice(0, 4);
+  if (dom.contractTimelineStatus) {
+    dom.contractTimelineStatus.textContent = diagnostics.length ? diagnostics.length + " items" : "clear";
+  }
+  if (!diagnostics.length) {
+    dom.contractTimelineList.innerHTML = [
+      '<div class="contract-event is-ok">',
+      '<div class="contract-event-row">',
+      '<i class="contract-event-badge" aria-hidden="true"></i>',
+      "<strong>No contract issue</strong>",
+      "<span>OK</span>",
+      "</div>",
+      "<p>Voyager contract and recovery diagnostics will appear here.</p>",
+      "</div>",
+    ].join("");
+    return;
+  }
+  dom.contractTimelineList.innerHTML = diagnostics.map((item) => {
+    const severity = String(item.severity || "warning").toLowerCase();
+    const code = compactTimelineText(item.code, "VOYAGER_CONTRACT");
+    const message = compactTimelineText(item.message || item.code, "Contract diagnostic detected");
+    const details = compactTimelineText(item.details || "", "");
+    const stateClass = severity === "error" ? "is-error" : "is-warning";
+    return [
+      '<div class="contract-event ' + stateClass + '">',
+      '<div class="contract-event-row">',
+      '<i class="contract-event-badge" aria-hidden="true"></i>',
+      "<strong>" + escapeHtml(message) + "</strong>",
+      "<span>" + escapeHtml(severity) + "</span>",
+      "</div>",
+      details ? "<p>" + escapeHtml(details) + "</p>" : "",
+      "<em>" + escapeHtml(code) + "</em>",
+      "</div>",
+    ].join("");
+  }).join("");
 }
 
 function formatMetricMs(value) {
@@ -3853,6 +4074,7 @@ function renderState(payload, { preserveScroll = false } = {}) {
   const runtimeIssue = runtimeHealthHasIssue(serviceHealth);
   const runtimeIssueText = runtimeHealthIssueText(serviceHealth);
   const runtimeIssueDetail = runtimeHealthDetailText(serviceHealth);
+  renderContractTimeline(serviceHealth);
   const minecraft = payload.minecraft || {};
   const guild = payload.guild || {};
   applyPanelCommands(runtime.controlPagePanels);
@@ -3962,6 +4184,11 @@ function renderState(payload, { preserveScroll = false } = {}) {
   if (dom.voicePipelineDrops) {
     const drops = Number(voicePipeline.queueFullDropCount || 0) + Number(voicePipeline.queueStaleDropCount || 0);
     dom.voicePipelineDrops.textContent = String(drops);
+  }
+  const bargeInContinuity = voicePipeline.bargeInContinuity || {};
+  if (dom.voicePipelineBargeInContinuity) {
+    const compact = dom.voicePipelineBargeInContinuity.id === "voiceBargeInContinuityLine";
+    dom.voicePipelineBargeInContinuity.textContent = formatBargeInContinuitySummary(bargeInContinuity, { compact });
   }
 
   const modelCallMetrics = runtime.modelCallMetrics || {};

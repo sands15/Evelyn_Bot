@@ -92,11 +92,16 @@ class VisionContextCleanupTests(unittest.TestCase):
 
     def test_main_contains_request_image_delete_and_memory_redaction_hooks(self) -> None:
         source = MAIN_PY.read_text(encoding="utf-8")
+        memory_policy = (
+            REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "memory_update_policy.py"
+        ).read_text(encoding="utf-8")
 
         self.assertIn("VISION_DELETE_REQUEST_IMAGES", source)
         self.assertIn("delete_request_vision_image", source)
         self.assertIn("redact_vision_text_for_memory", source)
         self.assertIn("VISION_MEMORY_WRITE_ENABLED", source)
+        self.assertIn("def redact_vision_text_for_memory", memory_policy)
+        self.assertIn("VISION_MEMORY_LINE_RE", memory_policy)
         self.assertIn("vision_confidence=", source)
         self.assertIn("vision_actionable=false", source)
         self.assertIn("vision_actionable=", source)

@@ -7,6 +7,9 @@ from pathlib import Path
 REPO_ROOT = next(path for path in Path(__file__).resolve().parents if (path / "main.py").exists())
 MAIN_PY = REPO_ROOT / "main.py"
 LOCAL_SERVER = REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "control_page_server.py"
+CONTROL_PAGE_TOOLS = REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "control_page_tools.py"
+CONTROL_PAGE_STATE = REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "control_page_state.py"
+CONTROL_PAGE_CONTRACTS = REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "control_page_contracts.py"
 
 
 class ControlPageMemoryPanelCommandTests(unittest.TestCase):
@@ -14,18 +17,24 @@ class ControlPageMemoryPanelCommandTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.main_py = MAIN_PY.read_text(encoding="utf-8")
         cls.local_server = LOCAL_SERVER.read_text(encoding="utf-8")
+        cls.control_page_tools = CONTROL_PAGE_TOOLS.read_text(encoding="utf-8")
+        cls.control_page_state = CONTROL_PAGE_STATE.read_text(encoding="utf-8")
+        cls.control_page_contracts = CONTROL_PAGE_CONTRACTS.read_text(encoding="utf-8")
 
     def test_main_routes_memory_panel_commands_through_llm_tool_router(self) -> None:
         self.assertIn("async def decide_control_page_tool_call(", self.main_py)
         self.assertIn("async def decide_control_page_ui_tool_call(", self.main_py)
-        self.assertIn("def control_page_ui_tool_action_from_decision(decision: dict[str, Any] | None) -> str | None:", self.main_py)
+        self.assertIn("def control_page_ui_tool_action_from_decision(decision: dict[str, Any] | None) -> str | None:", self.control_page_tools)
         self.assertIn("def execute_control_page_memory_panel_action(action: str) -> str:", self.main_py)
-        self.assertIn("class ControlPageToolSpec", self.main_py)
-        self.assertIn('"control_page.memory_panel": ControlPageToolSpec', self.main_py)
+        self.assertIn("return memory_panel_reply(cleaned_action)", self.main_py)
+        self.assertIn("def memory_panel_reply(action: str) -> str:", self.control_page_contracts)
+        self.assertIn("class ControlPageToolSpec", self.control_page_tools)
+        self.assertIn('"control_page.memory_panel": ControlPageToolSpec', self.control_page_tools)
         self.assertIn("You are Evelyn's control-page tool router.", self.main_py)
-        self.assertIn('"name":"control_page.memory_panel"', self.main_py)
-        self.assertIn('decision.get("tool_calls")', self.main_py)
-        self.assertIn("parsed = json.loads(arguments)", self.main_py)
+        self.assertIn('"name": spec.name', self.control_page_tools)
+        self.assertIn('return json.dumps(tools, ensure_ascii=False, separators=(",", ":"))', self.control_page_tools)
+        self.assertIn('decision.get("tool_calls")', self.control_page_tools)
+        self.assertIn("parsed = json.loads(arguments)", self.control_page_tools)
         self.assertIn('{"tool_call":null,"confidence":0.0,"reply":""}', self.main_py)
         self.assertIn('"confidence":0.92', self.main_py)
         self.assertIn('"reply":"응, 메모리 패널 열어둘게."', self.main_py)
@@ -50,7 +59,12 @@ class ControlPageMemoryPanelCommandTests(unittest.TestCase):
         self.assertIn('with_memory_panel_command(state, "toggle")', self.local_server)
 
     def test_main_exposes_panel_commands_at_top_level_for_frontend(self) -> None:
-        self.assertGreaterEqual(self.main_py.count('"controlPagePanels": build_control_page_panel_state(),'), 4)
+        self.assertIn("return build_control_page_local_state_view(", self.main_py)
+        self.assertIn("return build_control_page_guild_state_view(", self.main_py)
+        self.assertIn("def build_control_page_local_state_view(", self.control_page_state)
+        self.assertIn("def build_control_page_guild_state_view(", self.control_page_state)
+        self.assertGreaterEqual(self.control_page_state.count('"controlPagePanels": dict(control_page_panels or {}),'), 2)
+        self.assertIn('"controlPagePanels": dict(control_page_panels or {}),', self.control_page_state)
 
     def test_local_server_proxy_timeout_allows_full_bot_state_payload(self) -> None:
         self.assertIn('PROXY_TIMEOUT_SEC = float(os.getenv("CONTROL_PAGE_PROXY_TIMEOUT_SEC", "6.0"))', self.local_server)

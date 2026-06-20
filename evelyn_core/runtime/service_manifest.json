@@ -280,6 +280,12 @@
           "expect_json": {
             "ok": true
           }
+        },
+        {
+          "kind": "http",
+          "path": "/status",
+          "timeout_ms": 1500,
+          "expect_status": 200
         }
       ],
       "launcher": "launchers/start_voyager_service.ps1",
