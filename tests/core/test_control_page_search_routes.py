@@ -8,6 +8,7 @@ from pathlib import Path
 REPO_ROOT = next(path for path in Path(__file__).resolve().parents if (path / "main.py").exists())
 RUNTIME_ROOT = REPO_ROOT / "evelyn_core" / "runtime"
 MAIN_PY = REPO_ROOT / "main.py"
+ROUTE_EXECUTION_PY = REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "voice_route_execution.py"
 if str(RUNTIME_ROOT) not in sys.path:
     sys.path.insert(0, str(RUNTIME_ROOT))
 
@@ -19,6 +20,7 @@ class ControlPageSearchRouteTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.main_py = MAIN_PY.read_text(encoding="utf-8")
+        cls.route_execution_py = ROUTE_EXECUTION_PY.read_text(encoding="utf-8")
 
     def test_control_page_can_use_search_and_delivery_skills(self) -> None:
         self.assertIn("control_page", search.sources)
@@ -30,12 +32,12 @@ class ControlPageSearchRouteTests(unittest.TestCase):
         self.assertTrue(skill_registry.find_by_route("delivery", source="control_page"))
 
     def test_search_needed_promotes_route_to_search_executor(self) -> None:
-        self.assertIn("search_needed = bool(route_decision.needs_search or context_policy.needs_search)", self.main_py)
-        self.assertIn("if search_needed:", self.main_py)
-        self.assertIn('action="search_then_answer"', self.main_py)
-        self.assertIn('route="search_executor"', self.main_py)
-        self.assertIn("needs_main_llm=False", self.main_py)
-        self.assertIn("needs_search=True", self.main_py)
+        self.assertIn("search_needed = bool(route_decision.needs_search or context_policy.needs_search)", self.route_execution_py)
+        self.assertIn("if search_needed:", self.route_execution_py)
+        self.assertIn('action="search_then_answer"', self.route_execution_py)
+        self.assertIn('route="search_executor"', self.route_execution_py)
+        self.assertIn("needs_main_llm=False", self.route_execution_py)
+        self.assertIn("needs_search=True", self.route_execution_py)
 
     def test_search_answers_do_not_prompt_or_fallback_with_sources(self) -> None:
         self.assertIn("strip_search_answer_sources", self.main_py)
@@ -49,8 +51,8 @@ class ControlPageSearchRouteTests(unittest.TestCase):
         self.assertIn('followup_route="main_synthesis"', search_py)
         self.assertIn('"tool_result_text": answer_text', search_py)
         self.assertIn("def synthesize_tool_result_with_main_llm", self.main_py)
-        self.assertIn("final_answer = await synthesize_tool_result_with_main_llm", self.main_py)
-        self.assertIn('"phase": "main_synthesis"', self.main_py)
+        self.assertIn("final_answer = await deps.synthesize_tool_result_with_main_llm", self.route_execution_py)
+        self.assertIn('"phase": "main_synthesis"', self.route_execution_py)
 
     def test_short_search_followups_use_recent_context(self) -> None:
         policy_py = (REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "search_followup_policy.py").read_text(encoding="utf-8")
