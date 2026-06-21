@@ -48,6 +48,7 @@ from evelyn_core.control_page_state import (  # noqa: E402
     control_page_chat_refresh_plan,
     control_page_open_memory_vault_payload,
     control_page_open_memory_vault_result,
+    control_page_open_memory_vault_tool_reply,
     control_page_query_flag,
     control_page_result_status,
     handle_control_page_chat_request,
@@ -655,6 +656,39 @@ class ControlPageStateModuleTests(unittest.TestCase):
         self.assertEqual(failed_status, 500)
         self.assertFalse(failed_payload["ok"])
         self.assertEqual(failed_payload["error"], "open_memory_vault_failed")
+
+    def test_memory_vault_open_tool_reply_uses_same_fallback_order(self) -> None:
+        calls: list[tuple[str, str]] = []
+
+        def fail_url(url: str) -> None:
+            calls.append(("url", url))
+            raise RuntimeError("protocol blocked")
+
+        def ok_path(path: str) -> None:
+            calls.append(("path", path))
+
+        reply = control_page_open_memory_vault_tool_reply(
+            vault_path="C:/Vault",
+            obsidian_url="obsidian://open?path=C%3A%2FVault",
+            open_url=fail_url,
+            open_path=ok_path,
+        )
+
+        self.assertIn("vault 폴더를 대신 열었어", reply)
+        self.assertEqual(calls, [("url", "obsidian://open?path=C%3A%2FVault"), ("path", "C:/Vault")])
+
+        def fail_path(path: str) -> None:
+            calls.append(("path", path))
+            raise RuntimeError("no opener")
+
+        failed_reply = control_page_open_memory_vault_tool_reply(
+            vault_path="C:/Vault",
+            obsidian_url="obsidian://open?path=C%3A%2FVault",
+            open_url=fail_url,
+            open_path=fail_path,
+        )
+
+        self.assertIn("열지 못했어", failed_reply)
 
     def test_status_text_payloads_format_live_state_summaries(self) -> None:
         guild_text = build_control_page_status_text_payload(

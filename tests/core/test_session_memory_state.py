@@ -193,6 +193,35 @@ class SessionMemoryStateTests(unittest.TestCase):
         self.assertEqual(store.active_until["s1"], 110.0)
         self.assertEqual(store.topic_ids["s1"], build_topic_id("마크상태", "status reply"))
 
+    def test_record_tool_assistant_turn_tracks_tool_history_and_reply_activity(self) -> None:
+        store = make_store()
+
+        finished = store.record_tool_assistant_turn(
+            "s1",
+            "메모리 열어줘",
+            "응, 열게.",
+            tool_name="memory.open_vault",
+            system_prompt="system",
+            max_history_items=10,
+            guild_id=1,
+            ttl_sec=90.0,
+            now_monotonic=30.0,
+        )
+
+        history = store.get_conversation_history(system_prompt="system", session_key="s1", guild_id=1)
+        self.assertEqual(
+            history[-2:],
+            [
+                {"role": "user", "content": "메모리 열어줘"},
+                {"role": "assistant", "content": "도구 실행: memory.open_vault 결과: 응, 열게."},
+            ],
+        )
+        self.assertFalse(finished.awaiting_user_reply)
+        self.assertEqual(finished.ttl_sec, 90.0)
+        self.assertEqual(store.active_until["s1"], 120.0)
+        self.assertFalse(store.awaiting_user_reply["s1"])
+        self.assertEqual(store.topic_ids["s1"], build_topic_id("메모리 열어줘", "memory.open_vault", "응, 열게."))
+
     def test_followup_target_merges_partial_updates(self) -> None:
         store = make_store()
 

@@ -7,6 +7,7 @@ from pathlib import Path
 REPO_ROOT = next(path for path in Path(__file__).resolve().parents if (path / "main.py").exists())
 MAIN_PY = REPO_ROOT / "main.py"
 CONTROL_PAGE_TOOLS = REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "control_page_tools.py"
+SESSION_MEMORY_STATE = REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "session_memory_state.py"
 
 
 class ControlPageToolRegistryTests(unittest.TestCase):
@@ -14,6 +15,7 @@ class ControlPageToolRegistryTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.main_py = MAIN_PY.read_text(encoding="utf-8")
         cls.control_page_tools = CONTROL_PAGE_TOOLS.read_text(encoding="utf-8")
+        cls.session_memory_state = SESSION_MEMORY_STATE.read_text(encoding="utf-8")
 
     def test_tool_registry_and_risk_policy_exist(self) -> None:
         self.assertIn("from evelyn_core.control_page_tools import (", self.main_py)
@@ -37,9 +39,11 @@ class ControlPageToolRegistryTests(unittest.TestCase):
 
     def test_tool_results_are_recorded_for_followup_context(self) -> None:
         self.assertIn("def remember_control_page_tool_turn(", self.main_py)
-        self.assertIn('history_answer = f"도구 실행: {tool_name}\\n결과: {clean_text(reply_text)}"', self.main_py)
-        self.assertIn("append_history(session_key, user_text, history_answer", self.main_py)
-        self.assertIn("mark_session_active(", self.main_py)
+        self.assertIn("session_state_store.record_tool_assistant_turn(", self.main_py)
+        self.assertIn("def record_tool_assistant_turn(", self.session_memory_state)
+        self.assertIn('history_answer = f"도구 실행: {cleaned_tool}\\n결과: {clean_text(reply_text)}"', self.session_memory_state)
+        self.assertIn("self.append_history(", self.session_memory_state)
+        self.assertIn("self.mark_active(", self.session_memory_state)
         self.assertIn("remember_control_page_tool_turn(guild, text, reply, cheap_decision)", self.main_py)
 
     def test_router_policy_blocks_before_router_reply_is_used(self) -> None:

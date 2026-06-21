@@ -89,7 +89,7 @@ Last reviewed: 2026-06-20
   - Control Page command catalog, cheap/router tool decision, restart/status 질문 guard, UI action mapping, tool risk policy.
 - `control_page_state.py`
   - Control Page local/guild state payload/view builder, runtime/voice/minecraft/boot payload builder, local/guild status text formatter, route query/body parser, chat refresh plan, memory vault open payload/reply helper, Control Page command/tool execution reply formatter, chat log/UI command store, Minecraft snapshot cache store, runtime services cache/payload store, welcome text sanitizer.
-  - Control Page chat/shutdown/memory-note route orchestration helpers with live dependencies injected from `main.py`.
+  - Control Page chat/shutdown/memory-note route orchestration helpers and memory vault open fallback helpers with live dependencies injected from `main.py`.
 - `voice_pipeline_state.py`
   - voice pipeline counters, last channel state file, failure state, Control Page voice pipeline snapshot.
 - `voice_debug_audio.py`
@@ -127,7 +127,7 @@ Last reviewed: 2026-06-20
 - `search_query_context.py`
   - 최근 user search context 후보 수집, generic search follow-up 해소, 날씨 위치 문맥 보강, 짧은 query memory fallback.
 - `session_memory_state.py`
-  - session key, follow-up target, turn/segment id, user text turn start, assistant text turn finish, active session snapshot, conversation history, router history rendering, persona status hint.
+  - session key, follow-up target, turn/segment id, user text turn start, assistant/command/tool text turn finish, active session snapshot, conversation history, router history rendering, persona status hint.
 - `room_speaker_activity.py`
   - voice room 최근 발화자 pruning, activity decay, active speaker 선택.
 - `turn_trace.py`

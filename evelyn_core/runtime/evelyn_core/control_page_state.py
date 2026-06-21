@@ -1030,6 +1030,24 @@ def memory_vault_open_tool_reply(*, outcome: str, error: Any = "") -> str:
     return f"Obsidian 메모리 vault를 열지 못했어: {error}"
 
 
+def control_page_open_memory_vault_tool_reply(
+    *,
+    vault_path: Any,
+    obsidian_url: str,
+    open_url: Any,
+    open_path: Any,
+) -> str:
+    try:
+        open_url(obsidian_url)
+        return memory_vault_open_tool_reply(outcome="obsidian")
+    except Exception as exc:
+        try:
+            open_path(vault_path)
+            return memory_vault_open_tool_reply(outcome="folder", error=exc)
+        except Exception as fallback_exc:
+            return memory_vault_open_tool_reply(outcome="failed", error=fallback_exc)
+
+
 def control_page_open_memory_vault_payload(
     *,
     vault_path: Any,
@@ -1407,6 +1425,7 @@ __all__ = [
     "control_page_chat_refresh_plan",
     "control_page_open_memory_vault_payload",
     "control_page_open_memory_vault_result",
+    "control_page_open_memory_vault_tool_reply",
     "control_page_query_flag",
     "control_page_result_status",
     "handle_control_page_chat_request",

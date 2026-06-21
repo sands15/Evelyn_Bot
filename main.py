@@ -393,13 +393,13 @@ from evelyn_core.control_page_state import (
     build_control_page_voice_status_reply_payload,
     command_status,
     control_page_open_memory_vault_result,
+    control_page_open_memory_vault_tool_reply,
     control_page_result_status,
     handle_control_page_chat_request,
     handle_control_page_memory_note_action_request,
     handle_control_page_shutdown_request,
     is_control_page_minecraft_session_active,
     memory_vault_obsidian_url,
-    memory_vault_open_tool_reply,
     parse_control_page_guild_id,
     parse_control_page_memory_graph_query,
     parse_control_page_memory_note_query,
@@ -8050,18 +8050,15 @@ def remember_control_page_tool_turn(
 ) -> None:
     guild_id = control_page_effective_guild_id(guild)
     session_key = control_page_session_key(guild_id)
-    tool_name = clean_text(str(decision.get("tool") or ""))
-    topic_id = build_topic_id(user_text, tool_name, reply_text)
-    history_answer = f"도구 실행: {tool_name}\n결과: {clean_text(reply_text)}"
-    append_history(session_key, user_text, history_answer, guild_id=guild_id)
-    mark_session_active(
+    session_state_store.record_tool_assistant_turn(
         session_key,
+        user_text,
+        reply_text,
+        tool_name=clean_text(str(decision.get("tool") or "")),
+        system_prompt=SYSTEM_PROMPT,
+        max_history_items=MAX_HISTORY,
+        guild_id=guild_id,
         ttl_sec=ACTIVE_CONVERSATION_TEXT_SEC,
-        speaker="assistant",
-        awaiting_user_reply=False,
-        topic_id=topic_id,
-        answer_text=reply_text,
-        user_text=user_text,
     )
 
 
@@ -8140,16 +8137,12 @@ async def execute_control_page_tool(guild: discord.Guild | None, decision: dict[
     if tool_name == "memory.open_vault":
         enqueue_control_page_ui_command("toggle", panel_id="memory")
         vault = ensure_memory_vault_layout()
-        obsidian_url = memory_vault_obsidian_url(vault)
-        try:
-            open_control_page_url_with_system(obsidian_url)
-            return memory_vault_open_tool_reply(outcome="obsidian")
-        except Exception as exc:
-            try:
-                open_control_page_path_with_system(vault)
-                return memory_vault_open_tool_reply(outcome="folder", error=exc)
-            except Exception as fallback_exc:
-                return memory_vault_open_tool_reply(outcome="failed", error=fallback_exc)
+        return control_page_open_memory_vault_tool_reply(
+            vault_path=vault,
+            obsidian_url=memory_vault_obsidian_url(vault),
+            open_url=open_control_page_url_with_system,
+            open_path=open_control_page_path_with_system,
+        )
     if tool_name == "voice.status":
         return build_control_page_voice_status_reply(guild)
     if tool_name == "voice.input_mode":

@@ -310,6 +310,42 @@ class SessionStateStore:
             now_monotonic=now_monotonic,
         )
 
+    def record_tool_assistant_turn(
+        self,
+        session_key: str,
+        user_text: str,
+        reply_text: str,
+        *,
+        tool_name: str,
+        system_prompt: str,
+        max_history_items: int,
+        guild_id: int | None,
+        ttl_sec: float,
+        now_monotonic: float | None = None,
+    ) -> AssistantTextTurnFinish:
+        cleaned_tool = clean_text(tool_name)
+        history_answer = f"도구 실행: {cleaned_tool}\n결과: {clean_text(reply_text)}"
+        self.append_history(
+            session_key,
+            user_text,
+            history_answer,
+            system_prompt=system_prompt,
+            max_history_items=max_history_items,
+            guild_id=guild_id,
+        )
+        self.mark_active(
+            session_key,
+            ttl_sec=ttl_sec,
+            speaker="assistant",
+            awaiting_user_reply=False,
+            topic_id=build_topic_id(user_text, cleaned_tool, reply_text),
+            answer_text=reply_text,
+            user_text=user_text,
+            active_conversation_awaiting_reply_sec=ttl_sec,
+            now_monotonic=now_monotonic,
+        )
+        return AssistantTextTurnFinish(awaiting_user_reply=False, ttl_sec=float(ttl_sec))
+
     def is_active_for_user(
         self,
         session_key: str,
