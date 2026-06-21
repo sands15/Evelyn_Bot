@@ -10,15 +10,18 @@ REPO_ROOT = next(path for path in Path(__file__).resolve().parents if (path / "m
 class RuntimeDependencyContextTests(unittest.TestCase):
     def test_main_llm_receives_runtime_dependency_topology(self) -> None:
         main_py = (REPO_ROOT / "main.py").read_text(encoding="utf-8")
+        context_assembly_py = (
+            REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "llm_context_assembly.py"
+        ).read_text(encoding="utf-8")
 
         self.assertIn("def build_evelyn_runtime_dependency_context", main_py)
         self.assertIn("render_self_judgment_context", main_py)
-        self.assertIn("self_judgment_context = render_self_judgment_context", main_py)
-        self.assertIn("self_judgment_context", main_py)
+        self.assertIn("self_judgment_context = deps.render_self_judgment_context", context_assembly_py)
+        self.assertIn("self_judgment_context", context_assembly_py)
         self.assertIn("Evelyn dependency topology:", main_py)
         self.assertIn("role=primary answer text generation", main_py)
         self.assertIn("role=route/cognitive policy before the main answer", main_py)
-        self.assertIn("runtime_state=runtime_context if context_policy.needs_runtime_state else dependency_context", main_py)
+        self.assertIn("runtime_state=runtime_context if context_policy.needs_runtime_state else dependency_context", context_assembly_py)
 
     def test_runtime_status_context_includes_current_gpu_oom_signal(self) -> None:
         main_py = (REPO_ROOT / "main.py").read_text(encoding="utf-8")
