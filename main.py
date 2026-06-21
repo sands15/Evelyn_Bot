@@ -280,12 +280,7 @@ from evelyn_core.discord_settings import (
     save_guild_command_prefix as save_guild_command_prefix_payload,
 )
 from evelyn_core.discord_ingress import (
-    build_discord_attachment_context,
-    build_text_turn_decision,
     build_voice_ingress_context,
-    build_text_ingress_context_from_message,
-    decide_text_message_precheck,
-    is_reply_to_target_user,
     resolve_text_thread_id,
     make_person_memory_key as make_discord_person_memory_key,
     make_room_memory_key as make_discord_room_memory_key,
@@ -297,6 +292,7 @@ from evelyn_core.discord_ingress import (
     normalize_voice_debug_meta,
     voice_ingress_source,
 )
+from evelyn_core.discord_text_turn import DiscordTextMessageHandlerDeps, handle_discord_text_message
 from evelyn_core.discord_session_policy import (
     DiscordRoomSessionPolicy,
     LocalMicDiscordSuppressionInput,
@@ -10877,222 +10873,50 @@ async def on_voice_state_update(member, before, after):
         print(f"[VOICE STATE REARM FAIL] guild={guild.id} err={e!r}")
 
 
+def build_discord_text_message_handler_deps() -> DiscordTextMessageHandlerDeps:
+    return DiscordTextMessageHandlerDeps(
+        process_commands=bot.process_commands,
+        bot_user=bot.user,
+        is_thread_parent=lambda parent: isinstance(parent, discord.TextChannel),
+        remember_session_followup_target=remember_session_followup_target,
+        get_guild_command_prefix=get_guild_command_prefix,
+        get_guild_command_only_channel_ids=get_guild_command_only_channel_ids,
+        contains_wake_word=contains_wake_word,
+        is_session_active_for_user=is_session_active_for_user,
+        strip_voice_wake_word=strip_voice_wake_word,
+        empty_wake_text="이름만 부름. 친구처럼 짧게 반말로, 원래 하던 일을 잠깐 말하며 자연스럽게 반응해.",
+        log_turn_event=log_turn_event,
+        current_turn_id=current_turn_id,
+        resolve_pending_proactive_question_for_turn=resolve_pending_proactive_question_for_turn,
+        session_locks=session_locks,
+        reply_slot_locks=reply_slot_locks,
+        begin_user_text_turn=begin_user_text_turn,
+        replace_room_turn_scope=replace_room_turn_scope,
+        attach_current_task=_attach_current_task,
+        auto_join_voice=AUTO_JOIN_VOICE,
+        ensure_voice_client=ensure_voice_client,
+        stream_text_reply=stream_text_reply,
+        strip_omnivoice_tags=strip_omnivoice_tags,
+        execute_voice_delivery_plan=execute_voice_delivery_plan,
+        detach_task=_detach_task,
+        clear_room_turn_scope=clear_room_turn_scope,
+        session_speculative_policies=session_speculative_policies,
+        compute_runtime_mode=compute_runtime_mode,
+        record_context_pipeline_benchmark=record_context_pipeline_benchmark,
+        schedule_memory_update=schedule_memory_update,
+        should_force_search_followup=should_force_search_followup,
+        schedule_search_followup=schedule_search_followup,
+        session_state_snapshot=session_state_snapshot,
+        finish_assistant_text_turn=finish_assistant_text_turn,
+        log_voice_bottleneck_summary=log_voice_bottleneck_summary,
+        format_display_text=format_display_text,
+        log=print,
+    )
+
+
 @bot.event
 async def on_message(message: discord.Message):
-    if message.author.bot:
-        return
-
-    if not message.guild:
-        await bot.process_commands(message)
-        return
-
-    ingress = build_text_ingress_context_from_message(
-        message,
-        is_thread_parent=lambda parent: isinstance(parent, discord.TextChannel),
-    )
-    session_key = ingress.session_key
-    room_key = ingress.room_key
-    person_key = ingress.person_key
-    session_memory_key = ingress.session_memory_key
-    remember_session_followup_target(session_key, channel_id=message.channel.id, message_id=message.id)
-
-    prefix = get_guild_command_prefix(message.guild.id)
-    precheck = decide_text_message_precheck(
-        content=message.content,
-        prefix=prefix,
-        channel_id=message.channel.id,
-        command_only_channel_ids=get_guild_command_only_channel_ids(message.guild.id),
-    )
-    if precheck.action == "process_commands":
-        await bot.process_commands(message)
-        return
-    if precheck.action == "ignore":
-        return
-
-    is_wake_word = contains_wake_word(message.content)
-    is_active_session = is_session_active_for_user(session_key, message.author.id)
-    is_reply = await is_reply_to_target_user(message, bot.user, log=print)
-
-    attachment_context = build_discord_attachment_context(message)
-    text_turn_decision = build_text_turn_decision(
-        message.content,
-        is_wake_word=is_wake_word,
-        is_reply=is_reply,
-        is_active_session=is_active_session,
-        strip_wake_word=strip_voice_wake_word,
-        empty_wake_text="이름만 부름. 친구처럼 짧게 반말로, 원래 하던 일을 잠깐 말하며 자연스럽게 반응해.",
-        attachment_context=attachment_context,
-    )
-
-    if not text_turn_decision.accepted:
-        log_turn_event(
-            "turn_drop",
-            turn_id=current_turn_id(session_key),
-            segment_id=0,
-            source="text",
-            session_key=session_key,
-            reason=text_turn_decision.reason or "text_gate_not_open",
-            user_id=message.author.id,
-        )
-        await bot.process_commands(message)
-        return
-
-    user_text = text_turn_decision.user_text
-
-    proactive_resolution = resolve_pending_proactive_question_for_turn(
-        message.guild.id,
-        user_text,
-        session_key=session_key,
-        session_memory_key=session_memory_key,
-    )
-
-    state_lock = session_locks.setdefault(session_key, asyncio.Lock())
-    reply_lock = reply_slot_locks.setdefault(ingress.reply_slot_key, asyncio.Lock())
-
-    if reply_lock.locked():
-        await message.channel.send("\u23f3 지금 다른 응답을 처리 중이야. 잠깐만.")
-        await bot.process_commands(message)
-        return
-
-    async with state_lock:
-        started_turn = begin_user_text_turn(
-            session_key,
-            user_text,
-            guild_id=message.guild.id,
-            user_id=message.author.id,
-        )
-        topic_id = started_turn.topic_id
-        turn_id = started_turn.turn_id
-
-    turn_scope = TurnScope(turn_id)
-    replace_room_turn_scope(session_key, turn_scope)
-    turn_task = _attach_current_task(turn_scope)
-    vc = None
-    answer = ""
-    plain_answer = ""
-    text_metrics: dict[str, Any] = {}
-    text_delivery_plan: DeliveryPlan | None = None
-    text_turn_summary_logged = False
-    try:
-        async with reply_lock:
-            async with message.channel.typing():
-                if AUTO_JOIN_VOICE:
-                    vc = await ensure_voice_client(message)
-
-                answer, _sent_message, text_metrics, text_delivery_plan = await stream_text_reply(
-                    message.channel,
-                    user_text,
-                    guild_id=message.guild.id,
-                    session_key=session_key,
-                    turn_id=turn_id,
-                    room_key=room_key,
-                    person_key=person_key,
-                    session_memory_key=session_memory_key,
-                    source="text",
-                    debug_text=user_text,
-                    include_voice=vc is not None,
-                    turn_scope=turn_scope,
-                    proactive_resolution=proactive_resolution,
-                )
-                plain_answer = strip_omnivoice_tags(answer)
-                if not plain_answer:
-                    plain_answer = answer
-
-            if vc is not None and text_delivery_plan is not None and text_delivery_plan.should_play_voice:
-                await execute_voice_delivery_plan(
-                    vc,
-                    text_delivery_plan,
-                    metrics=text_metrics,
-                    turn_id=turn_id or current_turn_id(session_key),
-                    session_key=session_key,
-                    turn_scope=turn_scope,
-                )
-
-        async with state_lock:
-            session_speculative_policies.pop(session_key, None)
-            runtime_mode = ((text_metrics.get("meta") or {}).get("runtime_mode")) or compute_runtime_mode(text_metrics)
-            record_context_pipeline_benchmark(
-                metrics=text_metrics,
-                user_text=user_text,
-                answer=plain_answer,
-                source="text",
-                guild_id=message.guild.id,
-                session_key=session_key,
-            )
-            memory_writer_decision = schedule_memory_update(
-                message.guild.id,
-                user_text,
-                plain_answer,
-                room_key=room_key,
-                person_key=person_key,
-                session_memory_key=session_memory_key,
-                source="text",
-                user_speaker=message.author.display_name,
-                assistant_speaker="Evelyn",
-                session_key=session_key,
-                turn_scope=turn_scope,
-                runtime_mode=runtime_mode,
-            )
-            text_metrics.setdefault("meta", {})["memory_writer_decision"] = memory_writer_decision
-            search_requested = should_force_search_followup(
-                message.guild.id,
-                room_key=room_key,
-                person_key=person_key,
-                session_memory_key=session_memory_key,
-                source="text",
-            )
-            schedule_search_followup(
-                message.guild.id,
-                session_key,
-                user_text,
-                plain_answer,
-                room_key=room_key,
-                person_key=person_key,
-                session_memory_key=session_memory_key,
-                channel_id=message.channel.id,
-                reply_to_message_id=message.id,
-                source="search-followup-text",
-                force=search_requested,
-                turn_scope=None,
-                runtime_mode=runtime_mode,
-            )
-
-            awaiting_reply = bool(session_state_snapshot(session_key).get("awaiting_user_reply"))
-            finish_assistant_text_turn(
-                session_key,
-                user_text,
-                plain_answer,
-                guild_id=message.guild.id,
-                user_id=message.author.id,
-                awaiting_user_reply=awaiting_reply,
-                topic_id=topic_id,
-            )
-
-        log_voice_bottleneck_summary(
-            text_metrics,
-            label="text_turn",
-            extra=f"chars={len(format_display_text(answer, session_key=session_key).strip())} voice_read={str(vc is not None).lower()}",
-            event_name="text_turn_summary",
-        )
-        text_turn_summary_logged = True
-
-    except Exception as e:
-        print("전체 오류:", repr(e))
-        await message.channel.send(f"❌ 오류 발생: {e}")
-    finally:
-        if text_metrics and not text_turn_summary_logged:
-            text_metrics.setdefault("meta", {})["error_layer"] = "text_turn"
-            text_metrics.setdefault("meta", {}).setdefault("error", "text_turn_aborted_before_summary")
-            log_voice_bottleneck_summary(
-                text_metrics,
-                label="text_turn",
-                extra="error=true",
-                event_name="text_turn_summary",
-            )
-        _detach_task(turn_scope, turn_task)
-        clear_room_turn_scope(session_key, turn_scope)
-
-    await bot.process_commands(message)
+    await handle_discord_text_message(message, build_discord_text_message_handler_deps())
 
 
 # =========================================================

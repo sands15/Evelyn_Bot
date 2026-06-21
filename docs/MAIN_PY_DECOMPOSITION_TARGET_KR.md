@@ -136,6 +136,8 @@ Last reviewed: 2026-06-20
   - `TurnScope`에 더해 room turn scope registry, stale turn cancel count, scoped task attach/detach/create/clear helper.
 - `discord_ingress.py`
   - text/voice ingress key builder, Discord message/thread context builder, reply-target check, attachment context builder, text message precheck/turn decision.
+- `discord_text_turn.py`
+  - Discord `on_message` text-turn orchestration, command-only/prefix precheck handoff, wake/reply/active-session gate, reply slot locking, text reply streaming, optional voice delivery, memory/search follow-up scheduling, assistant turn finalization, and text-turn summary/error logging with live dependencies injected from `main.py`.
 - `discord_commands.py`
   - Discord command 권한/상태/접두사/채널 목록/도움말/자율상태/마인크래프트 명령/길드 초기화 응답 formatter.
 - `discord_settings.py`
