@@ -99,7 +99,6 @@ from evelyn_core.minecraft_runtime_snapshot import (
     normalize_inventory_used_slots,
     normalize_minecraft_item_name,
     merge_voyager_status_into_state,
-    minecraft_runtime_status_fields,
     summarize_inventory_top,
 )
 from evelyn_core.question_shaping import (
@@ -387,12 +386,9 @@ from evelyn_core.control_page_state import (
     ControlPageUiCommandStore,
     build_control_page_autonomy_reply_payload,
     build_control_page_boot_progress_payload,
-    build_control_page_guild_state_view,
     build_control_page_inventory_reply_payload,
-    build_control_page_local_state_view,
     build_control_page_local_status_text_payload,
     build_control_page_minecraft_reply_payload,
-    build_control_page_runtime_diagnostics,
     build_control_page_runtime_services_error_payload,
     build_control_page_status_text_payload,
     build_control_page_voice_continuity_reply_payload,
@@ -408,7 +404,6 @@ from evelyn_core.control_page_state import (
     handle_control_page_chat_request,
     handle_control_page_memory_note_action_request,
     handle_control_page_shutdown_request,
-    is_control_page_minecraft_session_active,
     memory_vault_obsidian_url,
     parse_control_page_guild_id,
     parse_control_page_memory_graph_query,
@@ -416,6 +411,7 @@ from evelyn_core.control_page_state import (
     parse_control_page_memory_snapshot_query,
     sanitize_control_page_welcome_text_payload,
 )
+from evelyn_core.control_page_state_handler import ControlPageStateDeps, build_control_page_state_from_runtime
 from evelyn_core.control_page_runtime_probe import probe_control_page_runtime_services
 from evelyn_core.control_page_tools import (
     CONTROL_PAGE_COMMANDS,
@@ -8445,109 +8441,49 @@ def build_control_page_boot_progress(
 
 
 async def build_control_page_state(guild: discord.Guild | None) -> dict[str, Any]:
-    runtime_services = await get_control_page_runtime_services()
-    runtime_diagnostics = build_control_page_runtime_diagnostics(
-        runtime_services,
-        control_api_ready=is_control_api_ready_from_runtime_services(runtime_services),
-    )
-    runtime_health = build_control_page_runtime_health(services=runtime_services)
-    if guild is None:
-        local_mode = bool(not DISCORD_ENABLED)
-        await ensure_control_page_welcome_message(None, runtime_services=runtime_services)
-        commands = build_control_page_commands(minecraft_session_active=False)
-        boot_progress = build_control_page_boot_progress(runtime_services, guild_available=local_mode)
-        local_tts = local_tts_playback_manager.snapshot()
-        local_mic = serialize_local_mic_runtime_state()
-        local_listening = bool(local_mic.get("enabled") and local_mic.get("captureReady"))
-        vision_watch = read_vision_watch_state()
-        panel_state = build_control_page_panel_state()
-        return build_control_page_local_state_view(
-            generated_at=time.time(),
-            local_url=control_page_local_url(),
-            local_mode=local_mode,
-            local_guild_id=LOCAL_CONTROL_GUILD_ID,
-            local_guild_name=LOCAL_CONTROL_GUILD_NAME,
-            commands=commands,
-            all_commands=build_control_page_all_commands(),
-            chat_messages=get_control_page_chat_log(LOCAL_CONTROL_GUILD_ID),
-            panel_state=panel_state,
-            runtime_services=runtime_services,
-            runtime_diagnostics=runtime_diagnostics,
-            runtime_health=runtime_health,
-            boot_progress=boot_progress,
-            local_tts=local_tts,
-            local_mic=local_mic,
-            local_listening=local_listening,
-            voice_pipeline=build_voice_pipeline_snapshot(guild),
-            vision_watch=vision_watch,
+    return await build_control_page_state_from_runtime(
+        guild,
+        ControlPageStateDeps(
+            get_runtime_services=get_control_page_runtime_services,
+            is_control_api_ready=is_control_api_ready_from_runtime_services,
+            build_runtime_health=build_control_page_runtime_health,
+            discord_enabled=DISCORD_ENABLED,
+            local_only_mode=LOCAL_ONLY_MODE,
+            local_control_guild_id=LOCAL_CONTROL_GUILD_ID,
+            local_control_guild_name=LOCAL_CONTROL_GUILD_NAME,
+            ensure_welcome_message=ensure_control_page_welcome_message,
+            build_commands=build_control_page_commands,
+            build_all_commands=build_control_page_all_commands,
+            build_boot_progress=build_control_page_boot_progress,
+            local_tts_snapshot=local_tts_playback_manager.snapshot,
+            serialize_local_mic_state=serialize_local_mic_runtime_state,
+            read_vision_watch_state=read_vision_watch_state,
+            build_panel_state=build_control_page_panel_state,
+            local_url=control_page_local_url,
+            get_chat_log=get_control_page_chat_log,
+            build_voice_pipeline_snapshot=build_voice_pipeline_snapshot,
             main_model=MODEL_NAME,
             router_model=ROUTER_MODEL_NAME,
             summary_model=SUMMARY_MODEL_NAME,
             stt_model=STT_MODEL_NAME,
             inflight_llm_requests=inflight_llm_requests,
-            tracked_tts_count=tracked_tts_playback_count(tts_playback_tracker),
-            output_mode="local_speaker" if LOCAL_ONLY_MODE and local_tts_playback_manager.enabled else "none",
-            model_call_metrics=summarize_model_call_metrics(),
-            question_metrics=summarize_question_metrics(),
-            status_text=build_control_page_local_status_text(runtime_services),
-        )
-    await ensure_control_page_welcome_message(guild, runtime_services=runtime_services)
-    vc = guild.voice_client
-    await ensure_control_page_minecraft_snapshot(guild.id, wait=not control_page_minecraft_snapshot_cache.has_snapshot())
-    minecraft = get_control_page_minecraft_snapshot_cache_copy()
-    speaking = is_tracked_tts_playback_active(tts_playback_tracker, guild.id)
-    listening = bool(vc and hasattr(vc, "is_listening") and vc.is_listening())
-    boot_progress = build_control_page_boot_progress(
-        runtime_services,
-        guild_available=True,
-        listening=listening,
-    )
-    tts_target_name = current_tts_target_name(guild) if speaking else "없음"
-    local_tts = local_tts_playback_manager.snapshot()
-    vision_watch = read_vision_watch_state()
-    local_mic_target = serialize_local_mic_target(
-        resolve_local_mic_target(guilds=bot.guilds, preferred_user_ids=LOCAL_MIC_DISCORD_USER_IDS)
-    )
-    minecraft_session_active = is_control_page_minecraft_session_active(minecraft)
-    commands = build_control_page_commands(minecraft_session_active=minecraft_session_active)
-    minecraft_status_fields = minecraft_runtime_status_fields(minecraft)
-    panel_state = build_control_page_panel_state()
-    return build_control_page_guild_state_view(
-        generated_at=time.time(),
-        local_url=control_page_local_url(),
-        guild_id=guild.id,
-        guild_name=guild.name,
-        voice_channel_name=getattr(getattr(vc, "channel", None), "name", None) or "없음",
-        listening=listening,
-        speaking=speaking,
-        tts_target_name=tts_target_name,
-        commands=commands,
-        all_commands=build_control_page_all_commands(),
-        chat_messages=get_control_page_chat_log(guild.id),
-        panel_state=panel_state,
-        runtime_services=runtime_services,
-        runtime_diagnostics=runtime_diagnostics,
-        runtime_health=runtime_health,
-        boot_progress=boot_progress,
-        local_tts=local_tts,
-        local_mic=serialize_local_mic_runtime_state(),
-        voice_pipeline=build_voice_pipeline_snapshot(guild),
-        vision_watch=vision_watch,
-        main_model=MODEL_NAME,
-        router_model=ROUTER_MODEL_NAME,
-        summary_model=SUMMARY_MODEL_NAME,
-        stt_model=STT_MODEL_NAME,
-        inflight_llm_requests=inflight_llm_requests,
-        tracked_tts_count=tracked_tts_playback_count(tts_playback_tracker),
-        output_mode="discord_voice" if DISCORD_ENABLED else "local_speaker",
-        model_call_metrics=summarize_model_call_metrics(),
-        question_metrics=summarize_question_metrics(),
-        minecraft=minecraft,
-        minecraft_session_active=minecraft_session_active,
-        minecraft_status_fields=minecraft_status_fields,
-        voice_debug_audio=VOICE_DEBUG_SAVE_AUDIO,
-        local_mic_target=local_mic_target,
-        status_text=build_control_page_status_text(guild, minecraft),
+            tracked_tts_count=lambda: tracked_tts_playback_count(tts_playback_tracker),
+            local_tts_enabled=lambda: local_tts_playback_manager.enabled,
+            summarize_model_call_metrics=summarize_model_call_metrics,
+            summarize_question_metrics=summarize_question_metrics,
+            build_local_status_text=build_control_page_local_status_text,
+            ensure_minecraft_snapshot=ensure_control_page_minecraft_snapshot,
+            minecraft_snapshot_has_value=control_page_minecraft_snapshot_cache.has_snapshot,
+            minecraft_snapshot_copy=get_control_page_minecraft_snapshot_cache_copy,
+            is_tts_active=lambda guild_id: is_tracked_tts_playback_active(tts_playback_tracker, guild_id),
+            current_tts_target_name=current_tts_target_name,
+            serialize_local_mic_target=serialize_local_mic_target,
+            resolve_local_mic_target=resolve_local_mic_target,
+            guilds=bot.guilds,
+            local_mic_discord_user_ids=LOCAL_MIC_DISCORD_USER_IDS,
+            voice_debug_audio=VOICE_DEBUG_SAVE_AUDIO,
+            build_status_text=build_control_page_status_text,
+        ),
     )
 
 

@@ -7,6 +7,7 @@ from pathlib import Path
 REPO_ROOT = next(path for path in Path(__file__).resolve().parents if (path / "main.py").exists())
 MAIN_PY = REPO_ROOT / "main.py"
 CONTROL_PAGE_STATE = REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "control_page_state.py"
+CONTROL_PAGE_STATE_HANDLER = REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "control_page_state_handler.py"
 
 
 class ControlPageWelcomeTests(unittest.TestCase):
@@ -14,6 +15,7 @@ class ControlPageWelcomeTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.main_py = MAIN_PY.read_text(encoding="utf-8")
         cls.control_page_state = CONTROL_PAGE_STATE.read_text(encoding="utf-8")
+        cls.control_page_state_handler = CONTROL_PAGE_STATE_HANDLER.read_text(encoding="utf-8")
 
     def test_initial_welcome_uses_main_llm_once_per_chat_log(self) -> None:
         self.assertIn("CONTROL_PAGE_WELCOME_LLM_TIMEOUT_SEC", self.main_py)
@@ -30,8 +32,8 @@ class ControlPageWelcomeTests(unittest.TestCase):
 
     def test_state_generation_waits_for_main_service_ready(self) -> None:
         self.assertIn('if not bool(services.get("mainReady")):', self.main_py)
-        self.assertIn("await ensure_control_page_welcome_message(None, runtime_services=runtime_services)", self.main_py)
-        self.assertIn("await ensure_control_page_welcome_message(guild, runtime_services=runtime_services)", self.main_py)
+        self.assertIn("await deps.ensure_welcome_message(None, runtime_services=runtime_services)", self.control_page_state_handler)
+        self.assertIn("await deps.ensure_welcome_message(guild, runtime_services=runtime_services)", self.control_page_state_handler)
 
     def test_prompt_avoids_command_hint_replacement(self) -> None:
         self.assertIn("명령어 설명, /memory 안내, 기능 소개", self.main_py)

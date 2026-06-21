@@ -90,6 +90,8 @@ Last reviewed: 2026-06-20
 - `control_page_state.py`
   - Control Page local/guild state payload/view builder, runtime/voice/minecraft/boot payload builder, local/guild status text formatter, route query/body parser, chat refresh plan, memory vault open payload/reply helper, Control Page command/tool execution reply formatter, chat log/UI command store, Minecraft snapshot cache store, runtime services cache/payload store, welcome text sanitizer.
   - Control Page chat/shutdown/memory-note route orchestration helpers, memory vault open fallback helpers, Discord-required reply, and shutdown tool fallback policy with live dependencies injected from `main.py`.
+- `control_page_state_handler.py`
+  - Control Page `/api/control-page/state` live dependency collection and local/guild state orchestration, with live runtime callbacks/config injected from `main.py`.
 - `voice_pipeline_state.py`
   - voice pipeline counters, last channel state file, failure state, Control Page voice pipeline snapshot.
 - `voice_debug_audio.py`

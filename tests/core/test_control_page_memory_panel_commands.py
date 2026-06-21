@@ -9,6 +9,7 @@ MAIN_PY = REPO_ROOT / "main.py"
 LOCAL_SERVER = REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "control_page_server.py"
 CONTROL_PAGE_TOOLS = REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "control_page_tools.py"
 CONTROL_PAGE_STATE = REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "control_page_state.py"
+CONTROL_PAGE_STATE_HANDLER = REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "control_page_state_handler.py"
 CONTROL_PAGE_CONTRACTS = REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "control_page_contracts.py"
 
 
@@ -19,6 +20,7 @@ class ControlPageMemoryPanelCommandTests(unittest.TestCase):
         cls.local_server = LOCAL_SERVER.read_text(encoding="utf-8")
         cls.control_page_tools = CONTROL_PAGE_TOOLS.read_text(encoding="utf-8")
         cls.control_page_state = CONTROL_PAGE_STATE.read_text(encoding="utf-8")
+        cls.control_page_state_handler = CONTROL_PAGE_STATE_HANDLER.read_text(encoding="utf-8")
         cls.control_page_contracts = CONTROL_PAGE_CONTRACTS.read_text(encoding="utf-8")
 
     def test_main_routes_memory_panel_commands_through_llm_tool_router(self) -> None:
@@ -59,8 +61,9 @@ class ControlPageMemoryPanelCommandTests(unittest.TestCase):
         self.assertIn('with_memory_panel_command(state, "toggle")', self.local_server)
 
     def test_main_exposes_panel_commands_at_top_level_for_frontend(self) -> None:
-        self.assertIn("return build_control_page_local_state_view(", self.main_py)
-        self.assertIn("return build_control_page_guild_state_view(", self.main_py)
+        self.assertIn("build_control_page_state_from_runtime(", self.main_py)
+        self.assertIn("return build_control_page_local_state_view(", self.control_page_state_handler)
+        self.assertIn("return build_control_page_guild_state_view(", self.control_page_state_handler)
         self.assertIn("def build_control_page_local_state_view(", self.control_page_state)
         self.assertIn("def build_control_page_guild_state_view(", self.control_page_state)
         self.assertGreaterEqual(self.control_page_state.count('"controlPagePanels": dict(control_page_panels or {}),'), 2)
