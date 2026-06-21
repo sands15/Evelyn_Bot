@@ -376,26 +376,20 @@ from evelyn_core.control_page_state import (
     build_control_page_inventory_reply_payload,
     build_control_page_local_state_view,
     build_control_page_local_status_text_payload,
-    build_control_page_minecraft_connect_reply_payload,
-    build_control_page_minecraft_disconnect_reply,
-    build_control_page_minecraft_goal_missing_reply,
-    build_control_page_minecraft_goal_updated_reply,
     build_control_page_minecraft_reply_payload,
     build_control_page_runtime_diagnostics,
     build_control_page_runtime_services_error_payload,
     build_control_page_shutdown_tool_reply,
     build_control_page_status_text_payload,
     build_control_page_voice_continuity_reply_payload,
-    build_control_page_voice_continuity_reset_reply,
-    build_control_page_voice_continuity_reset_required_reply,
-    build_control_page_voice_input_mode_reply,
-    build_control_page_voice_reconnect_reply,
     build_control_page_voice_status_reply_payload,
     command_status,
     control_page_discord_required_reply,
     control_page_open_memory_vault_result,
     control_page_open_memory_vault_tool_reply,
     control_page_result_status,
+    execute_control_page_minecraft_tool,
+    execute_control_page_voice_tool,
     handle_control_page_chat_request,
     handle_control_page_memory_note_action_request,
     handle_control_page_shutdown_request,
@@ -8144,27 +8138,19 @@ async def execute_control_page_tool(guild: discord.Guild | None, decision: dict[
             open_url=open_control_page_url_with_system,
             open_path=open_control_page_path_with_system,
         )
-    if tool_name == "voice.status":
-        return build_control_page_voice_status_reply(guild)
-    if tool_name == "voice.input_mode":
-        requested = clean_text(str(arguments.get("mode") or "auto"))
-        mode = set_voice_input_mode(requested)
-        return build_control_page_voice_input_mode_reply(
-            voice_input_mode=voice_input_mode_status_line(),
-            mode=mode,
-        )
-    if tool_name == "voice.reconnect":
-        if guild is None:
-            return control_page_discord_required_reply()
-        ok, detail = await restore_last_voice_channel(guild, force=True)
-        return build_control_page_voice_reconnect_reply(ok=ok, detail=detail)
-    if tool_name == "voice.continuity":
-        return build_control_page_voice_continuity_reply(guild)
-    if tool_name == "voice.continuity_reset":
-        if not bool(arguments.get("confirm")):
-            return build_control_page_voice_continuity_reset_required_reply()
-        reset_voice_barge_in_continuity_probe(reason=clean_text(str(arguments.get("reason") or "")))
-        return build_control_page_voice_continuity_reset_reply(build_control_page_voice_continuity_reply(guild))
+    voice_reply = await execute_control_page_voice_tool(
+        tool_name,
+        arguments,
+        guild=guild,
+        build_voice_status_reply=build_control_page_voice_status_reply,
+        set_input_mode=set_voice_input_mode,
+        input_mode_status_line=voice_input_mode_status_line,
+        restore_voice_channel=restore_last_voice_channel,
+        build_voice_continuity_reply=build_control_page_voice_continuity_reply,
+        reset_continuity_probe=reset_voice_barge_in_continuity_probe,
+    )
+    if voice_reply is not None:
+        return voice_reply
     if tool_name == "runtime.restart_bot":
         return execute_control_page_restart_command()
     if tool_name == "runtime.shutdown_stack":
@@ -8174,35 +8160,19 @@ async def execute_control_page_tool(guild: discord.Guild | None, decision: dict[
             schedule_stack_shutdown=schedule_evelyn_stack_shutdown,
             schedule_bot_shutdown=lambda: asyncio.create_task(shutdown_bot_process()),
         )
-    if tool_name == "minecraft.inventory":
-        if guild is None:
-            return control_page_discord_required_reply()
-        return await build_control_page_inventory_reply(guild)
-    if tool_name == "minecraft.status":
-        if guild is None:
-            return control_page_discord_required_reply()
-        return await build_control_page_minecraft_reply(guild)
-    if tool_name == "minecraft.connect":
-        if guild is None:
-            return control_page_discord_required_reply()
-        observed = await enable_minecraft_mode(guild.id)
-        return build_control_page_minecraft_connect_reply_payload(
-            observed,
-            position_text=format_position_short(observed.get("position")),
-        )
-    if tool_name == "minecraft.disconnect":
-        if guild is None:
-            return control_page_discord_required_reply()
-        await disable_minecraft_mode(guild.id)
-        return build_control_page_minecraft_disconnect_reply()
-    if tool_name == "minecraft.set_goal":
-        if guild is None:
-            return control_page_discord_required_reply()
-        goal_text = clean_text(str(arguments.get("goal") or ""))
-        if not goal_text:
-            return build_control_page_minecraft_goal_missing_reply()
-        status = await get_minecraft_client().set_goal(goal_text)
-        return build_control_page_minecraft_goal_updated_reply(goal_text, status)
+    minecraft_reply = await execute_control_page_minecraft_tool(
+        tool_name,
+        arguments,
+        guild=guild,
+        build_inventory_reply=build_control_page_inventory_reply,
+        build_minecraft_reply=build_control_page_minecraft_reply,
+        enable_mode=enable_minecraft_mode,
+        disable_mode=disable_minecraft_mode,
+        get_client=get_minecraft_client,
+        format_position=format_position_short,
+    )
+    if minecraft_reply is not None:
+        return minecraft_reply
     if tool_name == "autonomy.status":
         if guild is None:
             return control_page_discord_required_reply()

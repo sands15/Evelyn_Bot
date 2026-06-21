@@ -328,6 +328,9 @@ class LocalMicRoutingTests(unittest.TestCase):
         control_page_tools = (
             REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "control_page_tools.py"
         ).read_text(encoding="utf-8")
+        control_page_state = (
+            REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "control_page_state.py"
+        ).read_text(encoding="utf-8")
 
         self.assertIn("target is None and LOCAL_ONLY_MODE", main_py)
         self.assertIn("local_control_voice_member()", main_py)
@@ -336,7 +339,8 @@ class LocalMicRoutingTests(unittest.TestCase):
         self.assertIn("await ask_llm_and_speak_local(", main_py)
         self.assertIn('"/voice": "voice.status"', control_page_tools)
         self.assertIn('"/voice status": "voice.status"', control_page_tools)
-        self.assertIn('if tool_name == "voice.status":', main_py)
+        self.assertIn("execute_control_page_voice_tool(", main_py)
+        self.assertIn('if tool_name == "voice.status":', control_page_state)
 
     def test_local_speaker_uses_streaming_sentence_tts_with_full_answer_fallback(self) -> None:
         main_py = (REPO_ROOT / "main.py").read_text(encoding="utf-8")

@@ -53,6 +53,8 @@ from evelyn_core.control_page_state import (  # noqa: E402
     control_page_open_memory_vault_tool_reply,
     control_page_query_flag,
     control_page_result_status,
+    execute_control_page_minecraft_tool,
+    execute_control_page_voice_tool,
     handle_control_page_chat_request,
     handle_control_page_memory_note_action_request,
     handle_control_page_shutdown_request,
@@ -893,6 +895,241 @@ class ControlPageStateModuleTests(unittest.TestCase):
         self.assertEqual(
             build_control_page_minecraft_goal_updated_reply("diamond", {"stage": "mine"}),
             "Minecraft 목표를 바꿨어.\n- goal: diamond\n- stage: mine",
+        )
+
+    def test_execute_control_page_voice_tool_routes_callbacks(self) -> None:
+        calls: list[tuple[str, object]] = []
+
+        async def restore_voice_channel(guild, *, force: bool = False):
+            calls.append(("restore", (guild.id, force)))
+            return True, "General"
+
+        def reset_probe(*, reason: str) -> None:
+            calls.append(("reset", reason))
+
+        guild = SimpleNamespace(id=7)
+
+        status_reply = asyncio.run(
+            execute_control_page_voice_tool(
+                "voice.status",
+                {},
+                guild=guild,
+                build_voice_status_reply=lambda selected_guild: f"status:{selected_guild.id}",
+                set_input_mode=lambda mode: mode,
+                input_mode_status_line=lambda: "auto",
+                restore_voice_channel=restore_voice_channel,
+                build_voice_continuity_reply=lambda selected_guild: f"continuity:{selected_guild.id}",
+                reset_continuity_probe=reset_probe,
+            )
+        )
+        input_reply = asyncio.run(
+            execute_control_page_voice_tool(
+                "voice.input_mode",
+                {"mode": "push_to_talk"},
+                guild=guild,
+                build_voice_status_reply=lambda _guild: "status",
+                set_input_mode=lambda mode: "ptt" if mode == "push_to_talk" else mode,
+                input_mode_status_line=lambda: "push-to-talk",
+                restore_voice_channel=restore_voice_channel,
+                build_voice_continuity_reply=lambda _guild: "continuity",
+                reset_continuity_probe=reset_probe,
+            )
+        )
+        reconnect_reply = asyncio.run(
+            execute_control_page_voice_tool(
+                "voice.reconnect",
+                {},
+                guild=guild,
+                build_voice_status_reply=lambda _guild: "status",
+                set_input_mode=lambda mode: mode,
+                input_mode_status_line=lambda: "auto",
+                restore_voice_channel=restore_voice_channel,
+                build_voice_continuity_reply=lambda _guild: "continuity",
+                reset_continuity_probe=reset_probe,
+            )
+        )
+        reset_required = asyncio.run(
+            execute_control_page_voice_tool(
+                "voice.continuity_reset",
+                {},
+                guild=guild,
+                build_voice_status_reply=lambda _guild: "status",
+                set_input_mode=lambda mode: mode,
+                input_mode_status_line=lambda: "auto",
+                restore_voice_channel=restore_voice_channel,
+                build_voice_continuity_reply=lambda _guild: "continuity",
+                reset_continuity_probe=reset_probe,
+            )
+        )
+        reset_reply = asyncio.run(
+            execute_control_page_voice_tool(
+                "voice.continuity_reset",
+                {"confirm": True, "reason": "test"},
+                guild=guild,
+                build_voice_status_reply=lambda _guild: "status",
+                set_input_mode=lambda mode: mode,
+                input_mode_status_line=lambda: "auto",
+                restore_voice_channel=restore_voice_channel,
+                build_voice_continuity_reply=lambda _guild: "바리인 연속성\n- ok",
+                reset_continuity_probe=reset_probe,
+            )
+        )
+        missing_guild_reply = asyncio.run(
+            execute_control_page_voice_tool(
+                "voice.reconnect",
+                {},
+                guild=None,
+                build_voice_status_reply=lambda _guild: "status",
+                set_input_mode=lambda mode: mode,
+                input_mode_status_line=lambda: "auto",
+                restore_voice_channel=restore_voice_channel,
+                build_voice_continuity_reply=lambda _guild: "continuity",
+                reset_continuity_probe=reset_probe,
+            )
+        )
+
+        self.assertEqual(status_reply, "status:7")
+        self.assertEqual(input_reply, "음성 입력 모드: push-to-talk (ptt)")
+        self.assertEqual(reconnect_reply, "음성 채널에 다시 연결했어: General")
+        self.assertEqual(
+            reset_required,
+            "바리인 연속성 리셋은 확인이 필요해. `/voice continuity reset confirm`로 실행해줘.",
+        )
+        self.assertEqual(reset_reply, "바리인 연속성 카운터를 리셋했어.\n바리인 연속성\n- ok")
+        self.assertEqual(missing_guild_reply, "그 명령은 Discord 연결이 필요해.")
+        self.assertEqual(calls, [("restore", (7, True)), ("reset", "test")])
+
+    def test_execute_control_page_minecraft_tool_routes_callbacks(self) -> None:
+        calls: list[tuple[str, object]] = []
+
+        async def inventory_reply(guild):
+            calls.append(("inventory", guild.id))
+            return "inventory"
+
+        async def minecraft_reply(guild):
+            calls.append(("status", guild.id))
+            return "status"
+
+        async def enable_mode(guild_id: int):
+            calls.append(("enable", guild_id))
+            return {"objective_goal": "diamond", "objective_stage": "mine", "position": {"x": 1, "y": 2, "z": 3}}
+
+        async def disable_mode(guild_id: int):
+            calls.append(("disable", guild_id))
+
+        class FakeClient:
+            async def set_goal(self, goal: str):
+                calls.append(("goal", goal))
+                return {"stage": "plan"}
+
+        guild = SimpleNamespace(id=7)
+        not_minecraft = asyncio.run(
+            execute_control_page_minecraft_tool(
+                "voice.status",
+                {},
+                guild=guild,
+                build_inventory_reply=inventory_reply,
+                build_minecraft_reply=minecraft_reply,
+                enable_mode=enable_mode,
+                disable_mode=disable_mode,
+                get_client=FakeClient,
+                format_position=lambda position: "1, 2, 3",
+            )
+        )
+        missing_guild_reply = asyncio.run(
+            execute_control_page_minecraft_tool(
+                "minecraft.status",
+                {},
+                guild=None,
+                build_inventory_reply=inventory_reply,
+                build_minecraft_reply=minecraft_reply,
+                enable_mode=enable_mode,
+                disable_mode=disable_mode,
+                get_client=FakeClient,
+                format_position=lambda position: "1, 2, 3",
+            )
+        )
+        inventory = asyncio.run(
+            execute_control_page_minecraft_tool(
+                "minecraft.inventory",
+                {},
+                guild=guild,
+                build_inventory_reply=inventory_reply,
+                build_minecraft_reply=minecraft_reply,
+                enable_mode=enable_mode,
+                disable_mode=disable_mode,
+                get_client=FakeClient,
+                format_position=lambda position: "1, 2, 3",
+            )
+        )
+        connect = asyncio.run(
+            execute_control_page_minecraft_tool(
+                "minecraft.connect",
+                {},
+                guild=guild,
+                build_inventory_reply=inventory_reply,
+                build_minecraft_reply=minecraft_reply,
+                enable_mode=enable_mode,
+                disable_mode=disable_mode,
+                get_client=FakeClient,
+                format_position=lambda position: "1, 2, 3",
+            )
+        )
+        missing_goal = asyncio.run(
+            execute_control_page_minecraft_tool(
+                "minecraft.set_goal",
+                {},
+                guild=guild,
+                build_inventory_reply=inventory_reply,
+                build_minecraft_reply=minecraft_reply,
+                enable_mode=enable_mode,
+                disable_mode=disable_mode,
+                get_client=FakeClient,
+                format_position=lambda position: "1, 2, 3",
+            )
+        )
+        goal = asyncio.run(
+            execute_control_page_minecraft_tool(
+                "minecraft.set_goal",
+                {"goal": "diamond"},
+                guild=guild,
+                build_inventory_reply=inventory_reply,
+                build_minecraft_reply=minecraft_reply,
+                enable_mode=enable_mode,
+                disable_mode=disable_mode,
+                get_client=FakeClient,
+                format_position=lambda position: "1, 2, 3",
+            )
+        )
+        disconnect = asyncio.run(
+            execute_control_page_minecraft_tool(
+                "minecraft.disconnect",
+                {},
+                guild=guild,
+                build_inventory_reply=inventory_reply,
+                build_minecraft_reply=minecraft_reply,
+                enable_mode=enable_mode,
+                disable_mode=disable_mode,
+                get_client=FakeClient,
+                format_position=lambda position: "1, 2, 3",
+            )
+        )
+
+        self.assertIsNone(not_minecraft)
+        self.assertEqual(missing_guild_reply, "그 명령은 Discord 연결이 필요해.")
+        self.assertEqual(inventory, "inventory")
+        self.assertEqual(connect, "Voyager Minecraft 모드를 시작했어.\n- goal: diamond\n- stage: mine\n- position: 1, 2, 3")
+        self.assertEqual(missing_goal, "목표를 같이 적어줘. 예: /minecraft goal progress_to_diamond")
+        self.assertEqual(goal, "Minecraft 목표를 바꿨어.\n- goal: diamond\n- stage: plan")
+        self.assertEqual(disconnect, "Voyager Minecraft 모드를 중지했어.")
+        self.assertEqual(
+            calls,
+            [
+                ("inventory", 7),
+                ("enable", 7),
+                ("goal", "diamond"),
+                ("disable", 7),
+            ],
         )
 
 
