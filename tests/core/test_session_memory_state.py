@@ -164,6 +164,35 @@ class SessionMemoryStateTests(unittest.TestCase):
         self.assertEqual(store.last_speaker["s1"], "assistant")
         self.assertEqual(store.topic_ids["s1"], "topic-1")
 
+    def test_record_command_assistant_turn_tracks_followup_history_and_activity(self) -> None:
+        store = make_store()
+
+        finished = store.record_command_assistant_turn(
+            "s1",
+            "마크상태",
+            "status reply",
+            system_prompt="system",
+            max_history_items=10,
+            guild_id=1,
+            user_id=7,
+            channel_id=22,
+            message_id=33,
+            awaiting_user_reply=False,
+            normal_ttl_sec=90.0,
+            question_ttl_sec=300.0,
+            now_monotonic=20.0,
+        )
+
+        self.assertFalse(finished.awaiting_user_reply)
+        self.assertEqual(finished.ttl_sec, 90.0)
+        self.assertEqual(store.followup_targets["s1"], {"channel_id": 22, "message_id": 33})
+        self.assertEqual(
+            store.get_conversation_history(system_prompt="system", session_key="s1", guild_id=1)[-2:],
+            [{"role": "user", "content": "마크상태"}, {"role": "assistant", "content": "status reply"}],
+        )
+        self.assertEqual(store.active_until["s1"], 110.0)
+        self.assertEqual(store.topic_ids["s1"], build_topic_id("마크상태", "status reply"))
+
     def test_followup_target_merges_partial_updates(self) -> None:
         store = make_store()
 

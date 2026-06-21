@@ -277,6 +277,39 @@ class SessionStateStore:
         )
         return AssistantTextTurnFinish(awaiting_user_reply=bool(awaiting_user_reply), ttl_sec=ttl_sec)
 
+    def record_command_assistant_turn(
+        self,
+        session_key: str,
+        user_text: str,
+        answer_text: str,
+        *,
+        system_prompt: str,
+        max_history_items: int,
+        guild_id: int | None,
+        user_id: int | None,
+        channel_id: int | None = None,
+        message_id: int | None = None,
+        awaiting_user_reply: bool = False,
+        normal_ttl_sec: float,
+        question_ttl_sec: float,
+        now_monotonic: float | None = None,
+    ) -> AssistantTextTurnFinish:
+        self.remember_followup_target(session_key, channel_id=channel_id, message_id=message_id)
+        return self.finish_assistant_text_turn(
+            session_key,
+            user_text,
+            answer_text,
+            system_prompt=system_prompt,
+            max_history_items=max_history_items,
+            guild_id=guild_id,
+            user_id=user_id,
+            awaiting_user_reply=awaiting_user_reply,
+            normal_ttl_sec=normal_ttl_sec,
+            question_ttl_sec=question_ttl_sec,
+            topic_id=build_topic_id(user_text, answer_text),
+            now_monotonic=now_monotonic,
+        )
+
     def is_active_for_user(
         self,
         session_key: str,

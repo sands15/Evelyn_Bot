@@ -11497,17 +11497,19 @@ def _mark_text_session_from_command(ctx, user_text: str, answer_text: str, *, aw
         return
     thread_id = resolve_text_thread_id(ctx.channel, is_thread_parent=lambda parent: isinstance(parent, discord.TextChannel))
     session_key = make_text_session_key(ctx.guild.id, ctx.channel.id, ctx.author.id, thread_id=thread_id)
-    remember_session_followup_target(session_key, channel_id=ctx.channel.id, message_id=getattr(ctx.message, "id", None))
-    append_history(session_key, user_text, answer_text, guild_id=ctx.guild.id)
-    mark_session_active(
+    session_state_store.record_command_assistant_turn(
         session_key,
+        user_text,
+        answer_text,
+        system_prompt=SYSTEM_PROMPT,
+        max_history_items=MAX_HISTORY,
+        guild_id=ctx.guild.id,
         user_id=ctx.author.id,
-        ttl_sec=ACTIVE_CONVERSATION_TEXT_QUESTION_SEC if awaiting_user_reply else ACTIVE_CONVERSATION_TEXT_SEC,
-        speaker="assistant",
+        channel_id=ctx.channel.id,
+        message_id=getattr(ctx.message, "id", None),
         awaiting_user_reply=awaiting_user_reply,
-        topic_id=build_topic_id(user_text, answer_text),
-        answer_text=answer_text,
-        user_text=user_text,
+        normal_ttl_sec=ACTIVE_CONVERSATION_TEXT_SEC,
+        question_ttl_sec=ACTIVE_CONVERSATION_TEXT_QUESTION_SEC,
     )
 
 
