@@ -218,6 +218,7 @@ from evelyn_core.memory_update_policy import (
     redact_vision_text_for_memory as redact_vision_text_for_memory_payload,
     write_memory_turn_records,
 )
+from evelyn_core.memory_update_runtime import MemoryUpdateRuntimeDeps, schedule_memory_update_from_runtime
 from evelyn_core.memory_writeback_state import (
     run_long_term_memory_update,
 )
@@ -4189,6 +4190,36 @@ def redact_vision_text_for_memory(text: str) -> str:
     )
 
 
+def build_memory_update_runtime_deps() -> MemoryUpdateRuntimeDeps:
+    return MemoryUpdateRuntimeDeps(
+        write_memory_turn_records=write_memory_turn_records,
+        vision_memory_write_enabled=VISION_MEMORY_WRITE_ENABLED,
+        record_self_identity_turn=record_self_identity_turn,
+        append_raw_transcript_rows=append_raw_transcript_rows,
+        append_turn_rows_to_memory_vault=append_turn_rows_to_memory_vault,
+        schedule_memory_vault_maintenance=schedule_memory_vault_maintenance,
+        memory_refresh_inputs_for_turn=memory_refresh_inputs_for_turn,
+        get_conversation_history=get_conversation_history,
+        session_last_active_at=session_last_active_at,
+        needs_search_or_deep_routing=needs_search_or_deep_routing,
+        build_memory_writer_decision_for_turn=build_memory_writer_decision_for_turn,
+        build_memory_writer_decision=build_memory_writer_decision,
+        build_memory_writer_decision_payload=build_memory_writer_decision_payload,
+        plan_memory_writebehind_schedule=plan_memory_writebehind_schedule,
+        runtime_session_key=runtime_session_key,
+        memory_writebehind_task_key=memory_writebehind_task_key,
+        should_replace_existing_memory_task=should_replace_existing_memory_task,
+        mark_memory_writer_status=mark_memory_writer_status,
+        memory_writebehind_status_log=MEMORY_WRITEBEHIND_STATUS_LOG,
+        background_memory_tasks=background_memory_tasks,
+        create_turn_scoped_task=create_turn_scoped_task,
+        run_memory_writebehind_steps=run_memory_writebehind_steps,
+        update_long_term_memory=update_long_term_memory,
+        update_cognitive_state=update_cognitive_state,
+        log=print,
+    )
+
+
 def schedule_memory_update(
     guild_id: int,
     user_text: str,
@@ -4204,173 +4235,21 @@ def schedule_memory_update(
     turn_scope: TurnScope | None = None,
     runtime_mode: str | None = None,
 ) -> dict[str, Any]:
-    turn_write = write_memory_turn_records(
+    return schedule_memory_update_from_runtime(
         guild_id,
         user_text,
         answer,
+        deps=build_memory_update_runtime_deps(),
         room_key=room_key,
         person_key=person_key,
         session_memory_key=session_memory_key,
         source=source,
         user_speaker=user_speaker,
         assistant_speaker=assistant_speaker,
-        vision_memory_write_enabled=VISION_MEMORY_WRITE_ENABLED,
-        record_identity_turn=record_self_identity_turn,
-        append_raw_rows=append_raw_transcript_rows,
-        append_vault_rows=append_turn_rows_to_memory_vault,
-        log=print,
-    )
-    memory_user_text = turn_write.memory_user_text
-    memory_answer = turn_write.memory_answer
-
-    mode = runtime_mode or "normal"
-    if mode != "realtime":
-        schedule_memory_vault_maintenance(guild_id, turn_scope=turn_scope)
-    refresh_inputs = memory_refresh_inputs_for_turn(
-        user_text=memory_user_text,
-        source=source,
         session_key=session_key,
-        guild_id=guild_id,
-        history_reader=get_conversation_history,
-        last_active_at=session_last_active_at,
-        deep_routing_needed=needs_search_or_deep_routing,
+        turn_scope=turn_scope,
+        runtime_mode=runtime_mode,
     )
-    memory_writer_decision = build_memory_writer_decision_for_turn(
-        user_text=memory_user_text,
-        answer=memory_answer,
-        source=source,
-        runtime_mode=mode,
-        refresh_inputs=refresh_inputs,
-        decision_builder=build_memory_writer_decision,
-    )
-    decision_payload = build_memory_writer_decision_payload(
-        memory_writer_decision,
-        source=source,
-        session_key=session_key,
-        raw_transcript_written=True,
-        vault_mirrored=turn_write.vault_mirrored,
-        identity_record_decision=turn_write.identity_record_decision,
-    )
-    schedule_plan = plan_memory_writebehind_schedule(
-        memory_writer_decision,
-        mode=mode,
-        guild_id=guild_id,
-        session_memory_key=session_memory_key,
-        room_key=room_key,
-        session_key=session_key,
-        decision_payload=decision_payload,
-        runtime_session_key=runtime_session_key,
-        task_key_builder=memory_writebehind_task_key,
-        should_replace_task=should_replace_existing_memory_task,
-    )
-    if schedule_plan.action == "skip":
-        mark_memory_writer_status(
-            decision_payload,
-            schedule_plan.status,
-            event_path=MEMORY_WRITEBEHIND_STATUS_LOG,
-            log=print,
-            writebehind_reason=schedule_plan.writebehind_reason,
-        )
-        return decision_payload
-
-    if schedule_plan.action == "defer":
-        mark_memory_writer_status(
-            decision_payload,
-            schedule_plan.status,
-            event_path=MEMORY_WRITEBEHIND_STATUS_LOG,
-            log=print,
-            writebehind_reason=schedule_plan.writebehind_reason,
-        )
-        return decision_payload
-
-    if schedule_plan.action == "batch" and schedule_plan.task_key is not None:
-        memory_task_key = schedule_plan.task_key
-        existing = background_memory_tasks.get(memory_task_key)
-        if existing is not None and not existing.done() and schedule_plan.replace_existing:
-            existing.cancel()
-        async def _batched_memory_refresh() -> None:
-            try:
-                await asyncio.sleep(1.5)
-                if turn_scope is not None:
-                    turn_scope.raise_if_cancelled()
-                await run_memory_writebehind_steps(
-                    decision_payload,
-                    [
-                        lambda: update_long_term_memory(
-                            guild_id,
-                            memory_user_text,
-                            memory_answer,
-                            room_key=room_key,
-                            person_key=person_key,
-                            session_memory_key=session_memory_key,
-                            turn_scope=turn_scope,
-                        ),
-                        lambda: update_cognitive_state(
-                            guild_id,
-                            memory_user_text,
-                            session_key=session_key,
-                            room_key=room_key,
-                            person_key=person_key,
-                            session_memory_key=session_memory_key,
-                            source=source,
-                            turn_scope=turn_scope,
-                        ),
-                    ],
-                    log=print,
-                    event_path=MEMORY_WRITEBEHIND_STATUS_LOG,
-                )
-            finally:
-                task = background_memory_tasks.get(memory_task_key)
-                if task is asyncio.current_task():
-                    background_memory_tasks.pop(memory_task_key, None)
-        mark_memory_writer_status(
-            decision_payload,
-            schedule_plan.status,
-            event_path=MEMORY_WRITEBEHIND_STATUS_LOG,
-            log=print,
-            writebehind_mode=schedule_plan.writebehind_mode,
-        )
-        background_memory_tasks[memory_task_key] = create_turn_scoped_task(_batched_memory_refresh(), turn_scope=turn_scope)
-        return decision_payload
-
-    async def _memory_writebehind() -> None:
-        await run_memory_writebehind_steps(
-            decision_payload,
-            [
-                lambda: update_long_term_memory(
-                    guild_id,
-                    memory_user_text,
-                    memory_answer,
-                    room_key=room_key,
-                    person_key=person_key,
-                    session_memory_key=session_memory_key,
-                    turn_scope=turn_scope,
-                ),
-                lambda: update_cognitive_state(
-                    guild_id,
-                    memory_user_text,
-                    session_key=session_key,
-                    room_key=room_key,
-                    person_key=person_key,
-                    session_memory_key=session_memory_key,
-                    source=source,
-                    turn_scope=turn_scope,
-                ),
-            ],
-            log=print,
-            event_path=MEMORY_WRITEBEHIND_STATUS_LOG,
-        )
-
-    mark_memory_writer_status(
-        decision_payload,
-        schedule_plan.status,
-        event_path=MEMORY_WRITEBEHIND_STATUS_LOG,
-        log=print,
-        writebehind_mode=schedule_plan.writebehind_mode,
-    )
-    create_turn_scoped_task(_memory_writebehind(), turn_scope=turn_scope)
-    return decision_payload
-
 
 def sanitize_model_output(text: str) -> str:
     return sanitize_model_output_payload(
