@@ -177,9 +177,12 @@ class ShutdownScriptContractTests(unittest.TestCase):
 
     def test_stack_shutdown_reply_does_not_claim_whole_wsl_stops(self) -> None:
         main_py = (REPO_ROOT / "main.py").read_text(encoding="utf-8")
+        command_handlers = (
+            REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "discord_command_handlers.py"
+        ).read_text(encoding="utf-8")
 
-        self.assertNotIn("and WSL will stop", main_py)
-        self.assertIn("Evelyn-owned WSL services will stop", main_py)
+        self.assertNotIn("and WSL will stop", main_py + command_handlers)
+        self.assertIn("Evelyn-owned WSL services will stop", command_handlers)
 
 
 if __name__ == "__main__":

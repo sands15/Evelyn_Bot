@@ -138,6 +138,8 @@ Last reviewed: 2026-06-20
   - text/voice ingress key builder, Discord message/thread context builder, reply-target check, attachment context builder, text message precheck/turn decision.
 - `discord_text_turn.py`
   - Discord `on_message` text-turn orchestration, command-only/prefix precheck handoff, wake/reply/active-session gate, reply slot locking, text reply streaming, optional voice delivery, memory/search follow-up scheduling, assistant turn finalization, and text-turn summary/error logging with live dependencies injected from `main.py`.
+- `discord_command_handlers.py`
+  - Discord command decorator bodies for voice join/rejoin/leave, restart/shutdown/status/page/prefix, autonomy, Minecraft, channel settings, and guild reset. `main.py` keeps decorators and injects live callbacks/config.
 - `discord_commands.py`
   - Discord command 권한/상태/접두사/채널 목록/도움말/자율상태/마인크래프트 명령/길드 초기화 응답 formatter.
 - `discord_settings.py`

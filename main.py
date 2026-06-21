@@ -269,6 +269,25 @@ from evelyn_core.discord_commands import (
     is_control_command_authorized_payload,
     normalize_channel_setting_action,
 )
+from evelyn_core.discord_command_handlers import (
+    handle_autonomy_start_command,
+    handle_autonomy_status_command,
+    handle_autonomy_stop_command,
+    handle_channel_setting_command,
+    handle_evelyn_page_command,
+    handle_join_voice_command,
+    handle_leave_voice_command,
+    handle_minecraft_connect_command,
+    handle_minecraft_disconnect_command,
+    handle_minecraft_goal_command,
+    handle_minecraft_status_command,
+    handle_prefix_command,
+    handle_rejoin_voice_command,
+    handle_reset_guild_memory_command,
+    handle_restart_bot_command,
+    handle_shutdown_bot_command,
+    handle_status_command,
+)
 from evelyn_core.discord_settings import (
     add_guild_channel_setting as add_guild_channel_setting_payload,
     get_guild_command_only_channel_ids as get_guild_command_only_channel_ids_payload,
@@ -10924,65 +10943,17 @@ async def on_message(message: discord.Message):
 # =========================================================
 @bot.command(name="들어와", aliases=["join"])
 async def join_voice(ctx):
-    voice_state = getattr(ctx.author, "voice", None)
-    if not voice_state or not voice_state.channel:
-        await ctx.send("먼저 음성 채널에 들어가줘.")
-        return
-
-    try:
-        vc = await ensure_listening_voice_client(ctx.guild, voice_state.channel)
-        if vc is None:
-            await ctx.send("❌ 음성 연결에 실패했어.")
-            return
-        await ctx.send(f"🔊 {voice_state.channel.name}에 들어왔어. 이제 듣고 말할게.")
-    except Exception as e:
-        print("음성 연결 오류:", repr(e))
-        await ctx.send(f"❌ 음성 연결 실패: {e}")
+    await handle_join_voice_command(ctx, ensure_listening_voice_client=ensure_listening_voice_client, log=print)
 
 
 @bot.command(name="다시들어와", aliases=["rejoin"])
 async def rejoin_voice(ctx):
-    channel = ctx.author.voice.channel if ctx.author.voice else None
-    if channel is None:
-        await ctx.send("먼저 음성 채널에 들어가줘.")
-        return
-
-    vc = ctx.guild.voice_client
-    if vc is not None:
-        try:
-            if hasattr(vc, "stop_listening"):
-                vc.stop_listening()
-        except Exception:
-            pass
-        await vc.disconnect(force=True)
-
-    try:
-        new_vc = await ensure_listening_voice_client(ctx.guild, channel)
-        if new_vc is None:
-            await ctx.send("❌ 재연결 실패")
-            return
-        await ctx.send("🔄 다시 붙었어. 이제 계속 들을게.")
-    except Exception as e:
-        print("재연결 오류:", repr(e))
-        await ctx.send(f"❌ 재연결 실패: {e}")
+    await handle_rejoin_voice_command(ctx, ensure_listening_voice_client=ensure_listening_voice_client, log=print)
 
 
 @bot.command(name="나가", aliases=["leave"])
 async def leave_voice(ctx):
-    vc = ctx.guild.voice_client
-    if vc is None:
-        await ctx.send("이미 나와 있어.")
-        return
-
-    try:
-        if hasattr(vc, "stop_listening"):
-            vc.stop_listening()
-    except Exception:
-        pass
-
-    mark_voice_manual_disconnect(ctx.guild, reason="leave_command")
-    await vc.disconnect()
-    await ctx.send("👋 나갔어.")
+    await handle_leave_voice_command(ctx, mark_manual_disconnect=mark_voice_manual_disconnect)
 
 
 async def restart_bot_process() -> None:
@@ -11074,8 +11045,7 @@ async def handle_control_command_error(ctx, error):
 @bot.command(name="재시작", aliases=["restart"])
 @commands.check(is_control_command_authorized)
 async def restart_bot_command(ctx):
-    await ctx.send("🔄 봇을 재시작할게. 잠깐만 기다려줘.")
-    asyncio.create_task(restart_bot_process())
+    await handle_restart_bot_command(ctx, create_task=asyncio.create_task, restart_bot_process=restart_bot_process)
 
 
 @restart_bot_command.error
@@ -11086,12 +11056,12 @@ async def restart_bot_command_error(ctx, error):
 @bot.command(name="종료", aliases=["shutdown", "quit", "exit"])
 @commands.check(is_control_command_authorized)
 async def shutdown_bot_command(ctx):
-    if schedule_evelyn_stack_shutdown():
-        await ctx.send("Full Evelyn stack shutdown started. Supervisors, bot, LLM, TTS, Voyager, and Evelyn-owned WSL services will stop.")
-        return
-    await ctx.send("Full-stack shutdown helper failed, so only the bot process is stopping.")
-    asyncio.create_task(shutdown_bot_process())
-    return
+    await handle_shutdown_bot_command(
+        ctx,
+        schedule_stack_shutdown=schedule_evelyn_stack_shutdown,
+        create_task=asyncio.create_task,
+        shutdown_bot_process=shutdown_bot_process,
+    )
 
 
 @shutdown_bot_command.error
@@ -11101,68 +11071,38 @@ async def shutdown_bot_command_error(ctx, error):
 
 @bot.command(name="상태", aliases=["status"])
 async def status_command(ctx):
-    guild = ctx.guild
-    vc = guild.voice_client if guild else None
-    voice_channel_name = getattr(getattr(vc, "channel", None), "name", None) or "없음"
-    listening = bool(vc and hasattr(vc, "is_listening") and vc.is_listening())
-    opus_env_state = os.getenv("OPUS_ERROR_TO_SILENCE")
-    try:
-        from evelyn_voice.client import OPUS_ERROR_TO_SILENCE as OPUS_RUNTIME_VALUE
-    except Exception:
-        OPUS_RUNTIME_VALUE = None
-
-    await ctx.send(
-        build_status_command_text(
-            model_name=MODEL_NAME,
-            router_model_name=ROUTER_MODEL_NAME,
-            summary_model_name=SUMMARY_MODEL_NAME,
-            stt_model_name=STT_MODEL_NAME,
-            voice_channel_name=voice_channel_name,
-            listening=listening,
-            voice_debug_save_audio=VOICE_DEBUG_SAVE_AUDIO,
-            opus_env_state=opus_env_state,
-            opus_runtime_value=OPUS_RUNTIME_VALUE,
-            vad_enabled=VAD_ENABLED,
-            vad_provider=VAD_PROVIDER,
-        )
+    await handle_status_command(
+        ctx,
+        build_reply=build_status_command_text,
+        model_name=MODEL_NAME,
+        router_model_name=ROUTER_MODEL_NAME,
+        summary_model_name=SUMMARY_MODEL_NAME,
+        stt_model_name=STT_MODEL_NAME,
+        voice_debug_save_audio=VOICE_DEBUG_SAVE_AUDIO,
+        vad_enabled=VAD_ENABLED,
+        vad_provider=VAD_PROVIDER,
     )
 
 
 @bot.command(name="이블린페이지", aliases=["page", "homepage", "website", "landing"])
 async def evelyn_page_command(ctx):
-    page_url = resolve_evelyn_page_url()
-    if not page_url:
-        await ctx.send("아직 공개 이블린 페이지 URL을 못 찾았어. EVELYN_PAGE_URL을 설정하거나 GitHub Pages 배포를 먼저 붙여줘.")
-        return
-    await ctx.send(f"이블린 페이지: {page_url}")
+    await handle_evelyn_page_command(ctx, resolve_page_url=resolve_evelyn_page_url)
 
 
 @bot.command(name="접두사", aliases=["prefix"])
 @commands.check(is_control_command_authorized)
 async def set_guild_prefix(ctx, new_prefix: str | None = None):
-    if ctx.guild is None:
-        await ctx.send(guild_only_command_message())
-        return
-
-    guild_id = ctx.guild.id
-    current_prefix = get_guild_command_prefix(guild_id)
-
-    if not new_prefix:
-        await ctx.send(build_prefix_current_reply(current_prefix))
-        return
-
-    if new_prefix.lower() in {"기본", "default", "reset"}:
-        saved_prefix = save_guild_command_prefix(guild_id, DEFAULT_COMMAND_PREFIX)
-        await ctx.send(build_prefix_reset_reply(saved_prefix))
-        return
-
-    try:
-        saved_prefix = save_guild_command_prefix(guild_id, new_prefix)
-    except ValueError as e:
-        await ctx.send(f"❌ {e}")
-        return
-
-    await ctx.send(build_prefix_saved_reply(saved_prefix))
+    await handle_prefix_command(
+        ctx,
+        new_prefix,
+        default_prefix=DEFAULT_COMMAND_PREFIX,
+        get_guild_command_prefix=get_guild_command_prefix,
+        save_guild_command_prefix=save_guild_command_prefix,
+        build_current_reply=build_prefix_current_reply,
+        build_reset_reply=build_prefix_reset_reply,
+        build_saved_reply=build_prefix_saved_reply,
+        guild_only_message=guild_only_command_message,
+    )
 
 
 @set_guild_prefix.error
@@ -11172,44 +11112,31 @@ async def set_guild_prefix_error(ctx, error):
 
 @bot.command(name="자율시작", aliases=["autonomy-on"])
 async def autonomy_start_command(ctx):
-    if ctx.guild is None:
-        await ctx.send(guild_only_command_message())
-        return
-    try:
-        await get_or_create_autonomy_engine(ctx.guild.id).start()
-        await ctx.send("🤖 자율 행동 루프를 시작했어.")
-    except Exception as e:
-        await ctx.send(f"❌ 자율 행동 시작 실패: {e}")
+    await handle_autonomy_start_command(
+        ctx,
+        get_or_create_autonomy_engine=get_or_create_autonomy_engine,
+        guild_only_message=guild_only_command_message,
+    )
 
 
 @bot.command(name="자율정지", aliases=["autonomy-off"])
 async def autonomy_stop_command(ctx):
-    if ctx.guild is None:
-        await ctx.send(guild_only_command_message())
-        return
-    engine = autonomy_engines.get(ctx.guild.id)
-    if engine is None:
-        await ctx.send("이미 자율 행동이 꺼져 있어.")
-        return
-    try:
-        await engine.stop()
-        await ctx.send("🛑 자율 행동 루프를 멈췄어.")
-    except Exception as e:
-        await ctx.send(f"❌ 자율 행동 정지 실패: {e}")
+    await handle_autonomy_stop_command(
+        ctx,
+        autonomy_engines=autonomy_engines,
+        guild_only_message=guild_only_command_message,
+    )
 
 
 @bot.command(name="자율상태", aliases=["autonomy-status"])
 async def autonomy_status_command(ctx):
-    if ctx.guild is None:
-        await ctx.send(guild_only_command_message())
-        return
-    engine = autonomy_engines.get(ctx.guild.id)
-    if engine is None:
-        await ctx.send("자율 행동 엔진이 아직 만들어지지 않았어.")
-        return
-    router = get_routed_autonomy_executor(ctx.guild.id)
-    minecraft_enabled = bool(router and router.is_domain_enabled("minecraft"))
-    await ctx.send(build_autonomy_status_command_text(engine.state, minecraft_enabled=minecraft_enabled))
+    await handle_autonomy_status_command(
+        ctx,
+        autonomy_engines=autonomy_engines,
+        get_routed_autonomy_executor=get_routed_autonomy_executor,
+        build_reply=build_autonomy_status_command_text,
+        guild_only_message=guild_only_command_message,
+    )
 
 
 def _mark_text_session_from_command(ctx, user_text: str, answer_text: str, *, awaiting_user_reply: bool = False) -> None:
@@ -11235,100 +11162,70 @@ def _mark_text_session_from_command(ctx, user_text: str, answer_text: str, *, aw
 
 @bot.command(name="마크접속", aliases=["mc-connect", "minecraft-connect"])
 async def minecraft_connect_command(ctx):
-    if ctx.guild is None:
-        await ctx.send(guild_only_command_message())
-        return
-    try:
-        observed = await enable_minecraft_mode(ctx.guild.id)
-        reply_text = build_minecraft_connect_reply(observed)
-        await ctx.send(reply_text)
-        _mark_text_session_from_command(ctx, ctx.message.content or "마크접속", reply_text)
-    except Exception as e:
-        reply_text = f"❌ 마인크래프트 접속 실패: {e}"
-        await ctx.send(reply_text)
-        _mark_text_session_from_command(ctx, ctx.message.content or "마크접속", reply_text)
+    await handle_minecraft_connect_command(
+        ctx,
+        enable_minecraft_mode=enable_minecraft_mode,
+        build_reply=build_minecraft_connect_reply,
+        mark_text_session_from_command=_mark_text_session_from_command,
+        guild_only_message=guild_only_command_message,
+    )
 
 
 @bot.command(name="마크종료", aliases=["mc-disconnect", "minecraft-disconnect"])
 async def minecraft_disconnect_command(ctx):
-    if ctx.guild is None:
-        await ctx.send(guild_only_command_message())
-        return
-    try:
-        await disable_minecraft_mode(ctx.guild.id)
-        reply_text = "🛑 Voyager 기반 마인크래프트 자율 모드를 중지했어."
-        await ctx.send(reply_text)
-        _mark_text_session_from_command(ctx, ctx.message.content or "마크종료", reply_text)
-    except Exception as e:
-        reply_text = f"❌ 마인크래프트 연결 종료 실패: {e}"
-        await ctx.send(reply_text)
-        _mark_text_session_from_command(ctx, ctx.message.content or "마크종료", reply_text)
+    await handle_minecraft_disconnect_command(
+        ctx,
+        disable_minecraft_mode=disable_minecraft_mode,
+        mark_text_session_from_command=_mark_text_session_from_command,
+        guild_only_message=guild_only_command_message,
+    )
 
 
 @bot.command(name="마크상태", aliases=["mc-status", "minecraft-status"])
 async def minecraft_status_command(ctx):
-    if ctx.guild is None:
-        await ctx.send(guild_only_command_message())
-        return
-    client = get_minecraft_client()
-    try:
-        status = await client.status()
-        reply_text = build_minecraft_status_command_text(status)
-        await ctx.send(reply_text)
-        _mark_text_session_from_command(ctx, ctx.message.content or "마크상태", reply_text)
-    except Exception as e:
-        reply_text = f"❌ 마인크래프트 상태 확인 실패: {e}"
-        await ctx.send(reply_text)
-        _mark_text_session_from_command(ctx, ctx.message.content or "마크상태", reply_text)
+    await handle_minecraft_status_command(
+        ctx,
+        get_minecraft_client=get_minecraft_client,
+        build_reply=build_minecraft_status_command_text,
+        mark_text_session_from_command=_mark_text_session_from_command,
+        guild_only_message=guild_only_command_message,
+    )
 
 
 @bot.command(name="마크목표", aliases=["mc-goal", "minecraft-goal"])
 async def minecraft_goal_command(ctx, *, goal: str | None = None):
-    if ctx.guild is None:
-        await ctx.send(guild_only_command_message())
-        return
-    goal_text = clean_text(str(goal or ""))
-    if not goal_text:
-        reply_text = build_minecraft_goal_missing_reply()
-        await ctx.send(reply_text)
-        _mark_text_session_from_command(ctx, ctx.message.content or "마크목표", reply_text)
-        return
-    client = get_minecraft_client()
-    try:
-        status = await client.set_goal(goal_text)
-        reply_text = build_minecraft_goal_updated_reply(goal_text, status)
-        await ctx.send(reply_text)
-        _mark_text_session_from_command(ctx, ctx.message.content or "마크목표", reply_text)
-    except Exception as e:
-        reply_text = f"❌ 마인크래프트 목표 변경 실패: {e}"
-        await ctx.send(reply_text)
-        _mark_text_session_from_command(ctx, ctx.message.content or "마크목표", reply_text)
+    await handle_minecraft_goal_command(
+        ctx,
+        goal=goal,
+        get_minecraft_client=get_minecraft_client,
+        build_missing_reply=build_minecraft_goal_missing_reply,
+        build_updated_reply=build_minecraft_goal_updated_reply,
+        mark_text_session_from_command=_mark_text_session_from_command,
+        guild_only_message=guild_only_command_message,
+    )
 
 
 
 @bot.command(name="관찰채널", aliases=["observe-channel"])
 @commands.check(is_control_command_authorized)
 async def observe_channel_command(ctx, action: str | None = None, channel: discord.TextChannel | None = None):
-    if ctx.guild is None:
-        await ctx.send(guild_only_command_message())
-        return
-    action = normalize_channel_setting_action(action)
-    current = get_guild_observe_channel_ids(ctx.guild.id)
-    if action in {"목록", "list"}:
-        await ctx.send(build_channel_setting_list_reply(label="👀 관찰채널", channel_ids=current, resolve_channel=ctx.guild.get_channel))
-        return
-    if channel is None:
-        await ctx.send("채널을 같이 지정해줘. 예: `!관찰채널 추가 #general`")
-        return
-    if action in {"추가", "add"}:
-        updated = add_guild_channel_setting(ctx.guild.id, "observe_channel_ids", channel.id)
-        await ctx.send(f"✅ 관찰채널에 {channel.mention} 추가했어. (총 {len(updated)}개)")
-        return
-    if action in {"제거", "remove", "삭제"}:
-        updated = remove_guild_channel_setting(ctx.guild.id, "observe_channel_ids", channel.id)
-        await ctx.send(f"🗑️ 관찰채널에서 {channel.mention} 뺐어. (총 {len(updated)}개)")
-        return
-    await ctx.send(build_observe_channel_usage(get_guild_command_prefix(ctx.guild.id)))
+    await handle_channel_setting_command(
+        ctx,
+        action,
+        channel,
+        setting_key="observe_channel_ids",
+        label="👀 관찰채널",
+        add_success="✅ 관찰채널에 {channel.mention} 추가했어. (총 {count}개)",
+        remove_success="🗑️ 관찰채널에서 {channel.mention} 뺐어. (총 {count}개)",
+        normalize_action=normalize_channel_setting_action,
+        get_channel_ids=get_guild_observe_channel_ids,
+        add_channel_setting=add_guild_channel_setting,
+        remove_channel_setting=remove_guild_channel_setting,
+        get_guild_command_prefix=get_guild_command_prefix,
+        build_list_reply=build_channel_setting_list_reply,
+        build_usage_reply=build_observe_channel_usage,
+        guild_only_message=guild_only_command_message,
+    )
 
 
 @observe_channel_command.error
@@ -11339,26 +11236,23 @@ async def observe_channel_command_error(ctx, error):
 @bot.command(name="명령채널", aliases=["command-channel"])
 @commands.check(is_control_command_authorized)
 async def command_channel_command(ctx, action: str | None = None, channel: discord.TextChannel | None = None):
-    if ctx.guild is None:
-        await ctx.send(guild_only_command_message())
-        return
-    action = normalize_channel_setting_action(action)
-    current = get_guild_command_only_channel_ids(ctx.guild.id)
-    if action in {"목록", "list"}:
-        await ctx.send(build_channel_setting_list_reply(label="🧭 명령채널", channel_ids=current, resolve_channel=ctx.guild.get_channel))
-        return
-    if channel is None:
-        await ctx.send("채널을 같이 지정해줘. 예: `!명령채널 추가 #bot-control`")
-        return
-    if action in {"추가", "add"}:
-        updated = add_guild_channel_setting(ctx.guild.id, "command_only_channel_ids", channel.id)
-        await ctx.send(f"✅ 명령채널에 {channel.mention} 추가했어. 이제 여기선 명령어만 읽어.")
-        return
-    if action in {"제거", "remove", "삭제"}:
-        updated = remove_guild_channel_setting(ctx.guild.id, "command_only_channel_ids", channel.id)
-        await ctx.send(f"🗑️ 명령채널에서 {channel.mention} 뺐어. (총 {len(updated)}개)")
-        return
-    await ctx.send(build_command_channel_usage(get_guild_command_prefix(ctx.guild.id)))
+    await handle_channel_setting_command(
+        ctx,
+        action,
+        channel,
+        setting_key="command_only_channel_ids",
+        label="🧭 명령채널",
+        add_success="✅ 명령채널에 {channel.mention} 추가했어. 이제 여기선 명령어만 읽어.",
+        remove_success="🗑️ 명령채널에서 {channel.mention} 뺐어. (총 {count}개)",
+        normalize_action=normalize_channel_setting_action,
+        get_channel_ids=get_guild_command_only_channel_ids,
+        add_channel_setting=add_guild_channel_setting,
+        remove_channel_setting=remove_guild_channel_setting,
+        get_guild_command_prefix=get_guild_command_prefix,
+        build_list_reply=build_channel_setting_list_reply,
+        build_usage_reply=build_command_channel_usage,
+        guild_only_message=guild_only_command_message,
+    )
 
 
 @command_channel_command.error
@@ -11375,19 +11269,15 @@ async def help_command(ctx):
 @bot.command(name="초기화", aliases=["reset"])
 @commands.check(is_control_command_authorized)
 async def reset_guild_memory(ctx):
-    if ctx.guild is None:
-        await ctx.send(guild_only_command_message())
-        return
-
-    guild_id = ctx.guild.id
-    memory_dir = MEMORY_ROOT / f"guild_{guild_id}"
-    current_prefix = get_guild_command_prefix(guild_id)
-
-    reset_guild_runtime_state(guild_id)
-    if memory_dir.exists():
-        shutil.rmtree(memory_dir)
-
-    await ctx.send(build_reset_guild_memory_reply(guild_name=ctx.guild.name, current_prefix=current_prefix))
+    await handle_reset_guild_memory_command(
+        ctx,
+        memory_root=MEMORY_ROOT,
+        reset_guild_runtime_state=reset_guild_runtime_state,
+        remove_tree=shutil.rmtree,
+        get_guild_command_prefix=get_guild_command_prefix,
+        build_reply=build_reset_guild_memory_reply,
+        guild_only_message=guild_only_command_message,
+    )
 
 
 @reset_guild_memory.error
