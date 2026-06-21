@@ -36,6 +36,7 @@ from evelyn_core.control_page_state import (  # noqa: E402
     build_control_page_runtime_services_error_payload,
     build_control_page_runtime_services_payload,
     build_control_page_shutdown_reply,
+    build_control_page_shutdown_tool_reply,
     build_control_page_status_text_payload,
     build_control_page_ui_state,
     build_control_page_voice_continuity_reply_payload,
@@ -46,6 +47,7 @@ from evelyn_core.control_page_state import (  # noqa: E402
     build_control_page_voice_reconnect_reply,
     build_control_page_voice_status_reply_payload,
     control_page_chat_refresh_plan,
+    control_page_discord_required_reply,
     control_page_open_memory_vault_payload,
     control_page_open_memory_vault_result,
     control_page_open_memory_vault_tool_reply,
@@ -826,6 +828,7 @@ class ControlPageStateModuleTests(unittest.TestCase):
         self.assertIn("- 허용 액션: observe, speak, move, search, remember, wait, ...", text)
 
     def test_control_page_tool_execution_reply_payloads(self) -> None:
+        self.assertEqual(control_page_discord_required_reply(), "그 명령은 Discord 연결이 필요해.")
         self.assertEqual(
             build_control_page_voice_input_mode_reply(voice_input_mode="자동", mode="auto"),
             "음성 입력 모드: 자동 (auto)",
@@ -854,6 +857,27 @@ class ControlPageStateModuleTests(unittest.TestCase):
             build_control_page_shutdown_reply(local_mode=False, helper_started=False),
             "종료 helper 실행에 실패해서 bot process만 정리할게.",
         )
+        scheduled: list[str] = []
+        self.assertEqual(
+            build_control_page_shutdown_tool_reply(
+                guild_available=False,
+                schedule_local_shutdown=lambda: True,
+                schedule_stack_shutdown=lambda: False,
+                schedule_bot_shutdown=lambda: scheduled.append("bot"),
+            ),
+            "Local Evelyn shutdown started. Only Evelyn local runtime windows and ports will be stopped.",
+        )
+        self.assertEqual(scheduled, [])
+        self.assertEqual(
+            build_control_page_shutdown_tool_reply(
+                guild_available=True,
+                schedule_local_shutdown=lambda: False,
+                schedule_stack_shutdown=lambda: False,
+                schedule_bot_shutdown=lambda: scheduled.append("bot"),
+            ),
+            "종료 helper 실행에 실패해서 bot process만 정리할게.",
+        )
+        self.assertEqual(scheduled, ["bot"])
         self.assertEqual(
             build_control_page_minecraft_connect_reply_payload(
                 {"objective_goal": "diamond", "objective_stage": "mine"},

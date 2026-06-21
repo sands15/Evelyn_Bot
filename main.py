@@ -383,7 +383,7 @@ from evelyn_core.control_page_state import (
     build_control_page_minecraft_reply_payload,
     build_control_page_runtime_diagnostics,
     build_control_page_runtime_services_error_payload,
-    build_control_page_shutdown_reply,
+    build_control_page_shutdown_tool_reply,
     build_control_page_status_text_payload,
     build_control_page_voice_continuity_reply_payload,
     build_control_page_voice_continuity_reset_reply,
@@ -392,6 +392,7 @@ from evelyn_core.control_page_state import (
     build_control_page_voice_reconnect_reply,
     build_control_page_voice_status_reply_payload,
     command_status,
+    control_page_discord_required_reply,
     control_page_open_memory_vault_result,
     control_page_open_memory_vault_tool_reply,
     control_page_result_status,
@@ -8154,7 +8155,7 @@ async def execute_control_page_tool(guild: discord.Guild | None, decision: dict[
         )
     if tool_name == "voice.reconnect":
         if guild is None:
-            return "그 명령은 Discord 연결이 필요해."
+            return control_page_discord_required_reply()
         ok, detail = await restore_last_voice_channel(guild, force=True)
         return build_control_page_voice_reconnect_reply(ok=ok, detail=detail)
     if tool_name == "voice.continuity":
@@ -8167,26 +8168,23 @@ async def execute_control_page_tool(guild: discord.Guild | None, decision: dict[
     if tool_name == "runtime.restart_bot":
         return execute_control_page_restart_command()
     if tool_name == "runtime.shutdown_stack":
-        if guild is None:
-            if schedule_evelyn_local_shutdown():
-                return build_control_page_shutdown_reply(local_mode=True, helper_started=True)
-            asyncio.create_task(shutdown_bot_process())
-            return build_control_page_shutdown_reply(local_mode=True, helper_started=False)
-        if schedule_evelyn_stack_shutdown():
-            return build_control_page_shutdown_reply(local_mode=False, helper_started=True)
-        asyncio.create_task(shutdown_bot_process())
-        return build_control_page_shutdown_reply(local_mode=False, helper_started=False)
+        return build_control_page_shutdown_tool_reply(
+            guild_available=guild is not None,
+            schedule_local_shutdown=schedule_evelyn_local_shutdown,
+            schedule_stack_shutdown=schedule_evelyn_stack_shutdown,
+            schedule_bot_shutdown=lambda: asyncio.create_task(shutdown_bot_process()),
+        )
     if tool_name == "minecraft.inventory":
         if guild is None:
-            return "그 명령은 Discord 연결이 필요해."
+            return control_page_discord_required_reply()
         return await build_control_page_inventory_reply(guild)
     if tool_name == "minecraft.status":
         if guild is None:
-            return "그 명령은 Discord 연결이 필요해."
+            return control_page_discord_required_reply()
         return await build_control_page_minecraft_reply(guild)
     if tool_name == "minecraft.connect":
         if guild is None:
-            return "그 명령은 Discord 연결이 필요해."
+            return control_page_discord_required_reply()
         observed = await enable_minecraft_mode(guild.id)
         return build_control_page_minecraft_connect_reply_payload(
             observed,
@@ -8194,12 +8192,12 @@ async def execute_control_page_tool(guild: discord.Guild | None, decision: dict[
         )
     if tool_name == "minecraft.disconnect":
         if guild is None:
-            return "그 명령은 Discord 연결이 필요해."
+            return control_page_discord_required_reply()
         await disable_minecraft_mode(guild.id)
         return build_control_page_minecraft_disconnect_reply()
     if tool_name == "minecraft.set_goal":
         if guild is None:
-            return "그 명령은 Discord 연결이 필요해."
+            return control_page_discord_required_reply()
         goal_text = clean_text(str(arguments.get("goal") or ""))
         if not goal_text:
             return build_control_page_minecraft_goal_missing_reply()
@@ -8207,7 +8205,7 @@ async def execute_control_page_tool(guild: discord.Guild | None, decision: dict[
         return build_control_page_minecraft_goal_updated_reply(goal_text, status)
     if tool_name == "autonomy.status":
         if guild is None:
-            return "그 명령은 Discord 연결이 필요해."
+            return control_page_discord_required_reply()
         return build_control_page_autonomy_reply(guild)
     return "그 명령은 등록만 되어 있고 실행기가 아직 없어."
 

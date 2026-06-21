@@ -1263,6 +1263,10 @@ def build_control_page_voice_reconnect_reply(*, ok: bool, detail: str) -> str:
     return f"음성 재연결 실패: {clean_text(detail)}"
 
 
+def control_page_discord_required_reply() -> str:
+    return "그 명령은 Discord 연결이 필요해."
+
+
 def build_control_page_voice_continuity_reset_required_reply() -> str:
     return "바리인 연속성 리셋은 확인이 필요해. `/voice continuity reset confirm`로 실행해줘."
 
@@ -1316,6 +1320,24 @@ def build_control_page_shutdown_reply(*, local_mode: bool, helper_started: bool)
     if helper_started:
         return "Evelyn runtime 종료를 시작했어. supervisors, bot, LLM, TTS, Voyager, Evelyn-owned WSL services를 정리해."
     return "종료 helper 실행에 실패해서 bot process만 정리할게."
+
+
+def build_control_page_shutdown_tool_reply(
+    *,
+    guild_available: bool,
+    schedule_local_shutdown: Any,
+    schedule_stack_shutdown: Any,
+    schedule_bot_shutdown: Any,
+) -> str:
+    if not guild_available:
+        if schedule_local_shutdown():
+            return build_control_page_shutdown_reply(local_mode=True, helper_started=True)
+        schedule_bot_shutdown()
+        return build_control_page_shutdown_reply(local_mode=True, helper_started=False)
+    if schedule_stack_shutdown():
+        return build_control_page_shutdown_reply(local_mode=False, helper_started=True)
+    schedule_bot_shutdown()
+    return build_control_page_shutdown_reply(local_mode=False, helper_started=False)
 
 
 def build_control_page_minecraft_connect_reply_payload(observed: dict[str, Any], *, position_text: str) -> str:
@@ -1413,6 +1435,7 @@ __all__ = [
     "build_control_page_runtime_payload",
     "build_control_page_status_text_payload",
     "build_control_page_shutdown_reply",
+    "build_control_page_shutdown_tool_reply",
     "build_control_page_ui_state",
     "build_control_page_voice_continuity_reply_payload",
     "build_control_page_voice_continuity_reset_reply",
@@ -1422,6 +1445,7 @@ __all__ = [
     "build_control_page_voice_reconnect_reply",
     "build_control_page_voice_status_reply_payload",
     "command_status",
+    "control_page_discord_required_reply",
     "control_page_chat_refresh_plan",
     "control_page_open_memory_vault_payload",
     "control_page_open_memory_vault_result",
