@@ -1372,6 +1372,66 @@ def build_control_page_minecraft_goal_updated_reply(goal_text: str, status: dict
     )
 
 
+async def execute_control_page_memory_tool(
+    tool_name: str,
+    arguments: dict[str, Any],
+    *,
+    execute_memory_panel_action: Any,
+    enqueue_ui_command: Any,
+    ensure_vault_layout: Any,
+    open_vault_tool_reply: Any,
+    vault_obsidian_url: Any,
+    open_url: Any,
+    open_path: Any,
+) -> str | None:
+    if tool_name == "control_page.memory_panel":
+        return execute_memory_panel_action(clean_text(str(arguments.get("action") or "toggle")))
+    if tool_name == "memory.open_vault":
+        enqueue_ui_command("toggle", panel_id="memory")
+        vault = ensure_vault_layout()
+        return open_vault_tool_reply(
+            vault_path=vault,
+            obsidian_url=vault_obsidian_url(vault),
+            open_url=open_url,
+            open_path=open_path,
+        )
+    return None
+
+
+async def execute_control_page_runtime_tool(
+    tool_name: str,
+    *,
+    guild: Any,
+    get_runtime_services: Any,
+    build_local_status_text: Any,
+    build_status_reply: Any,
+    execute_restart_command: Any,
+    schedule_local_shutdown: Any,
+    schedule_stack_shutdown: Any,
+    schedule_bot_shutdown: Any,
+    build_autonomy_reply: Any,
+) -> str | None:
+    if tool_name == "runtime.status":
+        if guild is None:
+            services = await get_runtime_services(force=True)
+            return build_local_status_text(services)
+        return await build_status_reply(guild)
+    if tool_name == "runtime.restart_bot":
+        return execute_restart_command()
+    if tool_name == "runtime.shutdown_stack":
+        return build_control_page_shutdown_tool_reply(
+            guild_available=guild is not None,
+            schedule_local_shutdown=schedule_local_shutdown,
+            schedule_stack_shutdown=schedule_stack_shutdown,
+            schedule_bot_shutdown=schedule_bot_shutdown,
+        )
+    if tool_name == "autonomy.status":
+        if guild is None:
+            return control_page_discord_required_reply()
+        return build_autonomy_reply(guild)
+    return None
+
+
 async def execute_control_page_voice_tool(
     tool_name: str,
     arguments: dict[str, Any],
@@ -1526,7 +1586,9 @@ __all__ = [
     "control_page_open_memory_vault_tool_reply",
     "control_page_query_flag",
     "control_page_result_status",
+    "execute_control_page_memory_tool",
     "execute_control_page_minecraft_tool",
+    "execute_control_page_runtime_tool",
     "execute_control_page_voice_tool",
     "handle_control_page_chat_request",
     "handle_control_page_memory_note_action_request",

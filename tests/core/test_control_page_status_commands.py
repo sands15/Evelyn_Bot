@@ -36,7 +36,8 @@ class ControlPageStatusCommandTests(unittest.TestCase):
         self.assertIn("Router LLM", self.control_page_state)
         self.assertIn("Summary LLM", self.control_page_state)
         self.assertIn("local_mic_status_line()", self.main_py)
-        self.assertIn("return build_control_page_local_status_text(services)", self.main_py)
+        self.assertIn("build_local_status_text=build_control_page_local_status_text", self.main_py)
+        self.assertIn("return build_local_status_text(services)", self.control_page_state)
         self.assertIn("status_text=build_control_page_local_status_text(runtime_services)", self.main_py)
         self.assertIn('"statusText": clean_text(status_text)', self.control_page_state)
 

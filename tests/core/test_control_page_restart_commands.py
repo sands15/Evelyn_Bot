@@ -12,6 +12,7 @@ INDEX_HTML = REPO_ROOT / "docs" / "index.html"
 CONTROL_PAGE_JS = REPO_ROOT / "docs" / "assets" / "evelyn-page.js"
 RUNTIME_LIFECYCLE = REPO_ROOT / "runtime_lifecycle.py"
 CONTROL_PAGE_TOOLS = REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "control_page_tools.py"
+CONTROL_PAGE_STATE = REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "control_page_state.py"
 
 
 class ControlPageRestartCommandTests(unittest.TestCase):
@@ -24,6 +25,7 @@ class ControlPageRestartCommandTests(unittest.TestCase):
         cls.control_page_js = CONTROL_PAGE_JS.read_text(encoding="utf-8")
         cls.runtime_lifecycle = RUNTIME_LIFECYCLE.read_text(encoding="utf-8")
         cls.control_page_tools = CONTROL_PAGE_TOOLS.read_text(encoding="utf-8")
+        cls.control_page_state = CONTROL_PAGE_STATE.read_text(encoding="utf-8")
 
     def test_control_page_exposes_restart_command(self) -> None:
         self.assertIn('{"command": "/restart", "template": "/restart"', self.control_page_tools)
@@ -37,8 +39,10 @@ class ControlPageRestartCommandTests(unittest.TestCase):
         self.assertIn("asyncio.create_task(restart_bot_process())", self.main_py)
         self.assertIn('"/restart": "runtime.restart_bot"', self.control_page_tools)
         self.assertIn('"/재시작": "runtime.restart_bot"', self.control_page_tools)
-        self.assertIn('if tool_name == "runtime.restart_bot":', self.main_py)
-        self.assertIn("return execute_control_page_restart_command()", self.main_py)
+        self.assertIn("execute_control_page_runtime_tool(", self.main_py)
+        self.assertIn("execute_restart_command=execute_control_page_restart_command", self.main_py)
+        self.assertIn('if tool_name == "runtime.restart_bot":', self.control_page_state)
+        self.assertIn("return execute_restart_command()", self.control_page_state)
 
     def test_fast_control_api_slash_restart_requests_local_bridge_restart(self) -> None:
         self.assertIn("build_fast_control_default_commands", self.fast_api)

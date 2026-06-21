@@ -379,16 +379,16 @@ from evelyn_core.control_page_state import (
     build_control_page_minecraft_reply_payload,
     build_control_page_runtime_diagnostics,
     build_control_page_runtime_services_error_payload,
-    build_control_page_shutdown_tool_reply,
     build_control_page_status_text_payload,
     build_control_page_voice_continuity_reply_payload,
     build_control_page_voice_status_reply_payload,
     command_status,
-    control_page_discord_required_reply,
     control_page_open_memory_vault_result,
     control_page_open_memory_vault_tool_reply,
     control_page_result_status,
+    execute_control_page_memory_tool,
     execute_control_page_minecraft_tool,
+    execute_control_page_runtime_tool,
     execute_control_page_voice_tool,
     handle_control_page_chat_request,
     handle_control_page_memory_note_action_request,
@@ -8122,22 +8122,33 @@ async def execute_control_page_tool(guild: discord.Guild | None, decision: dict[
     arguments = decision.get("arguments") if isinstance(decision.get("arguments"), dict) else {}
     if tool_name == "control_page.help":
         return build_control_page_help_reply()
-    if tool_name == "runtime.status":
-        if guild is None:
-            services = await get_control_page_runtime_services(force=True)
-            return build_control_page_local_status_text(services)
-        return await build_control_page_status_reply(guild)
-    if tool_name == "control_page.memory_panel":
-        return execute_control_page_memory_panel_action(clean_text(str(arguments.get("action") or "toggle")))
-    if tool_name == "memory.open_vault":
-        enqueue_control_page_ui_command("toggle", panel_id="memory")
-        vault = ensure_memory_vault_layout()
-        return control_page_open_memory_vault_tool_reply(
-            vault_path=vault,
-            obsidian_url=memory_vault_obsidian_url(vault),
-            open_url=open_control_page_url_with_system,
-            open_path=open_control_page_path_with_system,
-        )
+    memory_reply = await execute_control_page_memory_tool(
+        tool_name,
+        arguments,
+        execute_memory_panel_action=execute_control_page_memory_panel_action,
+        enqueue_ui_command=enqueue_control_page_ui_command,
+        ensure_vault_layout=ensure_memory_vault_layout,
+        open_vault_tool_reply=control_page_open_memory_vault_tool_reply,
+        vault_obsidian_url=memory_vault_obsidian_url,
+        open_url=open_control_page_url_with_system,
+        open_path=open_control_page_path_with_system,
+    )
+    if memory_reply is not None:
+        return memory_reply
+    runtime_reply = await execute_control_page_runtime_tool(
+        tool_name,
+        guild=guild,
+        get_runtime_services=get_control_page_runtime_services,
+        build_local_status_text=build_control_page_local_status_text,
+        build_status_reply=build_control_page_status_reply,
+        execute_restart_command=execute_control_page_restart_command,
+        schedule_local_shutdown=schedule_evelyn_local_shutdown,
+        schedule_stack_shutdown=schedule_evelyn_stack_shutdown,
+        schedule_bot_shutdown=lambda: asyncio.create_task(shutdown_bot_process()),
+        build_autonomy_reply=build_control_page_autonomy_reply,
+    )
+    if runtime_reply is not None:
+        return runtime_reply
     voice_reply = await execute_control_page_voice_tool(
         tool_name,
         arguments,
@@ -8151,15 +8162,6 @@ async def execute_control_page_tool(guild: discord.Guild | None, decision: dict[
     )
     if voice_reply is not None:
         return voice_reply
-    if tool_name == "runtime.restart_bot":
-        return execute_control_page_restart_command()
-    if tool_name == "runtime.shutdown_stack":
-        return build_control_page_shutdown_tool_reply(
-            guild_available=guild is not None,
-            schedule_local_shutdown=schedule_evelyn_local_shutdown,
-            schedule_stack_shutdown=schedule_evelyn_stack_shutdown,
-            schedule_bot_shutdown=lambda: asyncio.create_task(shutdown_bot_process()),
-        )
     minecraft_reply = await execute_control_page_minecraft_tool(
         tool_name,
         arguments,
@@ -8173,10 +8175,6 @@ async def execute_control_page_tool(guild: discord.Guild | None, decision: dict[
     )
     if minecraft_reply is not None:
         return minecraft_reply
-    if tool_name == "autonomy.status":
-        if guild is None:
-            return control_page_discord_required_reply()
-        return build_control_page_autonomy_reply(guild)
     return "그 명령은 등록만 되어 있고 실행기가 아직 없어."
 
 

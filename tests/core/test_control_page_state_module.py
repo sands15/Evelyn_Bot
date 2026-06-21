@@ -53,7 +53,9 @@ from evelyn_core.control_page_state import (  # noqa: E402
     control_page_open_memory_vault_tool_reply,
     control_page_query_flag,
     control_page_result_status,
+    execute_control_page_memory_tool,
     execute_control_page_minecraft_tool,
+    execute_control_page_runtime_tool,
     execute_control_page_voice_tool,
     handle_control_page_chat_request,
     handle_control_page_memory_note_action_request,
@@ -896,6 +898,173 @@ class ControlPageStateModuleTests(unittest.TestCase):
             build_control_page_minecraft_goal_updated_reply("diamond", {"stage": "mine"}),
             "Minecraft 목표를 바꿨어.\n- goal: diamond\n- stage: mine",
         )
+
+    def test_execute_control_page_memory_tool_routes_panel_and_vault_callbacks(self) -> None:
+        calls: list[tuple[str, object]] = []
+
+        def execute_memory_panel_action(action: str) -> str:
+            calls.append(("panel", action))
+            return f"panel:{action}"
+
+        def enqueue_ui_command(action: str, *, panel_id: str | None = None) -> None:
+            calls.append(("enqueue", (action, panel_id)))
+
+        def open_vault_tool_reply(**kwargs) -> str:
+            calls.append(("open", kwargs["obsidian_url"]))
+            return "vault opened"
+
+        panel_reply = asyncio.run(
+            execute_control_page_memory_tool(
+                "control_page.memory_panel",
+                {"action": "open"},
+                execute_memory_panel_action=execute_memory_panel_action,
+                enqueue_ui_command=enqueue_ui_command,
+                ensure_vault_layout=lambda: "C:/Vault",
+                open_vault_tool_reply=open_vault_tool_reply,
+                vault_obsidian_url=lambda path: f"obsidian://{path}",
+                open_url=lambda url: None,
+                open_path=lambda path: None,
+            )
+        )
+        vault_reply = asyncio.run(
+            execute_control_page_memory_tool(
+                "memory.open_vault",
+                {},
+                execute_memory_panel_action=execute_memory_panel_action,
+                enqueue_ui_command=enqueue_ui_command,
+                ensure_vault_layout=lambda: "C:/Vault",
+                open_vault_tool_reply=open_vault_tool_reply,
+                vault_obsidian_url=lambda path: f"obsidian://{path}",
+                open_url=lambda url: None,
+                open_path=lambda path: None,
+            )
+        )
+        unrelated = asyncio.run(
+            execute_control_page_memory_tool(
+                "voice.status",
+                {},
+                execute_memory_panel_action=execute_memory_panel_action,
+                enqueue_ui_command=enqueue_ui_command,
+                ensure_vault_layout=lambda: "C:/Vault",
+                open_vault_tool_reply=open_vault_tool_reply,
+                vault_obsidian_url=lambda path: f"obsidian://{path}",
+                open_url=lambda url: None,
+                open_path=lambda path: None,
+            )
+        )
+
+        self.assertEqual(panel_reply, "panel:open")
+        self.assertEqual(vault_reply, "vault opened")
+        self.assertIsNone(unrelated)
+        self.assertEqual(calls, [("panel", "open"), ("enqueue", ("toggle", "memory")), ("open", "obsidian://C:/Vault")])
+
+    def test_execute_control_page_runtime_tool_routes_runtime_shutdown_and_autonomy(self) -> None:
+        calls: list[tuple[str, object]] = []
+
+        async def get_runtime_services(*, force: bool = False):
+            calls.append(("services", force))
+            return {"botReady": True}
+
+        async def build_status_reply(guild):
+            calls.append(("status", guild.id))
+            return f"guild status:{guild.id}"
+
+        guild = SimpleNamespace(id=7)
+        local_status = asyncio.run(
+            execute_control_page_runtime_tool(
+                "runtime.status",
+                guild=None,
+                get_runtime_services=get_runtime_services,
+                build_local_status_text=lambda services: f"local:{services['botReady']}",
+                build_status_reply=build_status_reply,
+                execute_restart_command=lambda: "restart",
+                schedule_local_shutdown=lambda: True,
+                schedule_stack_shutdown=lambda: False,
+                schedule_bot_shutdown=lambda: calls.append(("bot_shutdown", True)),
+                build_autonomy_reply=lambda selected_guild: f"autonomy:{selected_guild.id}",
+            )
+        )
+        guild_status = asyncio.run(
+            execute_control_page_runtime_tool(
+                "runtime.status",
+                guild=guild,
+                get_runtime_services=get_runtime_services,
+                build_local_status_text=lambda services: f"local:{services['botReady']}",
+                build_status_reply=build_status_reply,
+                execute_restart_command=lambda: "restart",
+                schedule_local_shutdown=lambda: True,
+                schedule_stack_shutdown=lambda: False,
+                schedule_bot_shutdown=lambda: calls.append(("bot_shutdown", True)),
+                build_autonomy_reply=lambda selected_guild: f"autonomy:{selected_guild.id}",
+            )
+        )
+        restart = asyncio.run(
+            execute_control_page_runtime_tool(
+                "runtime.restart_bot",
+                guild=guild,
+                get_runtime_services=get_runtime_services,
+                build_local_status_text=lambda services: "local",
+                build_status_reply=build_status_reply,
+                execute_restart_command=lambda: "restart",
+                schedule_local_shutdown=lambda: True,
+                schedule_stack_shutdown=lambda: False,
+                schedule_bot_shutdown=lambda: calls.append(("bot_shutdown", True)),
+                build_autonomy_reply=lambda selected_guild: f"autonomy:{selected_guild.id}",
+            )
+        )
+        local_shutdown = asyncio.run(
+            execute_control_page_runtime_tool(
+                "runtime.shutdown_stack",
+                guild=None,
+                get_runtime_services=get_runtime_services,
+                build_local_status_text=lambda services: "local",
+                build_status_reply=build_status_reply,
+                execute_restart_command=lambda: "restart",
+                schedule_local_shutdown=lambda: True,
+                schedule_stack_shutdown=lambda: False,
+                schedule_bot_shutdown=lambda: calls.append(("bot_shutdown", True)),
+                build_autonomy_reply=lambda selected_guild: f"autonomy:{selected_guild.id}",
+            )
+        )
+        autonomy = asyncio.run(
+            execute_control_page_runtime_tool(
+                "autonomy.status",
+                guild=guild,
+                get_runtime_services=get_runtime_services,
+                build_local_status_text=lambda services: "local",
+                build_status_reply=build_status_reply,
+                execute_restart_command=lambda: "restart",
+                schedule_local_shutdown=lambda: True,
+                schedule_stack_shutdown=lambda: False,
+                schedule_bot_shutdown=lambda: calls.append(("bot_shutdown", True)),
+                build_autonomy_reply=lambda selected_guild: f"autonomy:{selected_guild.id}",
+            )
+        )
+        autonomy_missing_guild = asyncio.run(
+            execute_control_page_runtime_tool(
+                "autonomy.status",
+                guild=None,
+                get_runtime_services=get_runtime_services,
+                build_local_status_text=lambda services: "local",
+                build_status_reply=build_status_reply,
+                execute_restart_command=lambda: "restart",
+                schedule_local_shutdown=lambda: True,
+                schedule_stack_shutdown=lambda: False,
+                schedule_bot_shutdown=lambda: calls.append(("bot_shutdown", True)),
+                build_autonomy_reply=lambda selected_guild: f"autonomy:{selected_guild.id}",
+            )
+        )
+
+        self.assertEqual(local_status, "local:True")
+        self.assertEqual(guild_status, "guild status:7")
+        self.assertEqual(restart, "restart")
+        self.assertEqual(
+            local_shutdown,
+            "Local Evelyn shutdown started. Only Evelyn local runtime windows and ports will be stopped.",
+        )
+        self.assertEqual(autonomy, "autonomy:7")
+        self.assertEqual(autonomy_missing_guild, "그 명령은 Discord 연결이 필요해.")
+        self.assertEqual(calls, [("services", True), ("status", 7)])
 
     def test_execute_control_page_voice_tool_routes_callbacks(self) -> None:
         calls: list[tuple[str, object]] = []
