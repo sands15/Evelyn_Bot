@@ -357,6 +357,14 @@ from evelyn_core.assistant_contracts import (
 )
 from evelyn_core.assistant_prompt_contract import build_evelyn_system_prompt
 from evelyn_core.control_page_contracts import memory_panel_reply
+from evelyn_core.control_page_http import (
+    add_control_page_no_store_headers,
+    build_control_page_health_payload,
+    control_page_cors_middleware,
+    control_page_file_response,
+    control_page_json_response,
+    resolve_control_page_asset_path,
+)
 from evelyn_core.control_page_state import (
     ControlPageChatLogStore,
     ControlPageMinecraftSnapshotCache,
@@ -8568,53 +8576,18 @@ async def build_control_page_state(guild: discord.Guild | None) -> dict[str, Any
     )
 
 
-def control_page_json_response(data: Any, *, status: int = 200) -> web.Response:
-    return web.Response(
-        status=status,
-        text=json.dumps(data, ensure_ascii=False),
-        content_type="application/json",
+async def control_page_index_handler(_: web.Request) -> web.StreamResponse:
+    return control_page_file_response(
+        CONTROL_PAGE_DOCS_DIR / "index.html",
+        not_found_text="control page index not found",
     )
 
 
-@web.middleware
-async def control_page_cors_middleware(request: web.Request, handler: Callable[[web.Request], Awaitable[web.StreamResponse]]) -> web.StreamResponse:
-    if request.method == "OPTIONS" and request.path.startswith("/api/control-page/"):
-        response: web.StreamResponse = web.Response(status=204)
-    else:
-        response = await handler(request)
-    if request.path.startswith("/api/control-page/"):
-        response.headers["Access-Control-Allow-Origin"] = "*"
-        response.headers["Access-Control-Allow-Methods"] = "GET,POST,OPTIONS"
-        response.headers["Access-Control-Allow-Headers"] = "Content-Type"
-    return response
-
-
-async def control_page_index_handler(_: web.Request) -> web.StreamResponse:
-    index_path = CONTROL_PAGE_DOCS_DIR / "index.html"
-    if not index_path.exists():
-        raise web.HTTPNotFound(text="control page index not found")
-    response = web.FileResponse(index_path)
-    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
-    response.headers["Pragma"] = "no-cache"
-    response.headers["Expires"] = "0"
-    return response
-
-
 async def control_page_asset_handler(request: web.Request) -> web.StreamResponse:
-    requested = Path(request.match_info.get("asset_path", ""))
-    asset_path = (CONTROL_PAGE_ASSETS_DIR / requested).resolve()
-    assets_root = CONTROL_PAGE_ASSETS_DIR.resolve()
-    try:
-        asset_path.relative_to(assets_root)
-    except ValueError as exc:
-        raise web.HTTPForbidden(text="invalid asset path") from exc
-    if not asset_path.exists() or not asset_path.is_file():
-        raise web.HTTPNotFound(text="asset not found")
-    response = web.FileResponse(asset_path)
-    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
-    response.headers["Pragma"] = "no-cache"
-    response.headers["Expires"] = "0"
-    return response
+    return control_page_file_response(
+        resolve_control_page_asset_path(CONTROL_PAGE_ASSETS_DIR, request.match_info.get("asset_path", "")),
+        not_found_text="asset not found",
+    )
 
 
 async def control_page_minecraft_item_icon_handler(request: web.Request) -> web.StreamResponse:
@@ -8625,10 +8598,7 @@ async def control_page_minecraft_item_icon_handler(request: web.Request) -> web.
     if not icon_bytes:
         raise web.HTTPNotFound(text="item icon not found")
     response = web.Response(body=icon_bytes, content_type="image/png")
-    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
-    response.headers["Pragma"] = "no-cache"
-    response.headers["Expires"] = "0"
-    return response
+    return add_control_page_no_store_headers(response)
 
 
 async def control_page_state_handler(request: web.Request) -> web.StreamResponse:
@@ -8708,14 +8678,11 @@ async def control_page_shutdown_handler(request: web.Request) -> web.StreamRespo
 
 async def control_page_health_handler(_: web.Request) -> web.StreamResponse:
     return control_page_json_response(
-        {
-            "ok": True,
-            "role": "bot-api",
-            "controlPage": True,
-            "localOnly": bool(LOCAL_ONLY_MODE),
-            "discordEnabled": bool(DISCORD_ENABLED),
-            "port": CONTROL_PAGE_PORT,
-        }
+        build_control_page_health_payload(
+            local_only_mode=LOCAL_ONLY_MODE,
+            discord_enabled=DISCORD_ENABLED,
+            port=CONTROL_PAGE_PORT,
+        )
     )
 
 

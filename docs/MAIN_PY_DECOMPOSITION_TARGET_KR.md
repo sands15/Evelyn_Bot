@@ -22,6 +22,9 @@ Last reviewed: 2026-06-20
   - 8799 Control Page와 8798 Bot API 계약 해석
   - `runtime.serviceHealth` 요약과 Control Page용 진단 payload
 
+- `evelyn_core.runtime.evelyn_core.control_page_http`
+  - Control Page JSON 응답, no-store 파일/바이너리 응답, CORS, asset path guard, health payload.
+
 - `evelyn_core.runtime.evelyn_core.control_page.*`
   - aiohttp route, Control Page state payload, command catalog, tool registry, UI contracts
 
@@ -142,6 +145,8 @@ Last reviewed: 2026-06-20
   - 런타임 상태 문맥용 URL port 추출, TCP probe, 로그 tail/오류 compact, 최근 런타임 오류 수집, GPU VRAM/OOM 상태 답변.
 - `control_page_runtime_probe.py`
   - Control Page runtime services TCP/HTTP probe orchestration, Bot API state probing, Codex gateway health 판정.
+- `control_page_http.py`
+  - Control Page JSON 응답, no-store cache header, CORS middleware, asset path guard, Bot API health payload.
 - `minecraft_runtime_snapshot.py`
   - Minecraft runtime snapshot freshness/status fields, Voyager status/observation merge, inventory/position normalization, Control Page recent activity extraction, Main LLM용 Minecraft 상태 요약.
 - `minecraft_assets.py`
