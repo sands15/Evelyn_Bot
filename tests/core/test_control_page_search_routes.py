@@ -9,6 +9,7 @@ REPO_ROOT = next(path for path in Path(__file__).resolve().parents if (path / "m
 RUNTIME_ROOT = REPO_ROOT / "evelyn_core" / "runtime"
 MAIN_PY = REPO_ROOT / "main.py"
 ROUTE_EXECUTION_PY = REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "voice_route_execution.py"
+MAIN_LLM_RUNTIME_PY = REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "main_llm_runtime.py"
 if str(RUNTIME_ROOT) not in sys.path:
     sys.path.insert(0, str(RUNTIME_ROOT))
 
@@ -21,6 +22,7 @@ class ControlPageSearchRouteTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.main_py = MAIN_PY.read_text(encoding="utf-8")
         cls.route_execution_py = ROUTE_EXECUTION_PY.read_text(encoding="utf-8")
+        cls.main_llm_runtime_py = MAIN_LLM_RUNTIME_PY.read_text(encoding="utf-8")
 
     def test_control_page_can_use_search_and_delivery_skills(self) -> None:
         self.assertIn("control_page", search.sources)
@@ -67,11 +69,11 @@ class ControlPageSearchRouteTests(unittest.TestCase):
         self.assertIn("session_key=context.session_key", search_py)
 
     def test_main_synthesis_is_isolated_from_raw_history(self) -> None:
-        self.assertIn("def render_tool_synthesis_recent_context", self.main_py)
-        self.assertIn("Ground the final answer in the tool result below.", self.main_py)
-        self.assertIn("messages=[]", self.main_py)
-        self.assertIn("def tool_synthesis_answer_drifted", self.main_py)
-        self.assertIn("main_synthesis_drift_guard", self.main_py)
+        self.assertIn("def render_tool_synthesis_recent_context", self.main_llm_runtime_py)
+        self.assertIn("Ground the final answer in the tool result below.", self.main_llm_runtime_py)
+        self.assertIn("messages=[]", self.main_llm_runtime_py)
+        self.assertIn("def tool_synthesis_answer_drifted", self.main_llm_runtime_py)
+        self.assertIn("main_synthesis_drift_guard", self.main_llm_runtime_py)
 
     def test_control_page_chat_does_not_use_broad_fast_path(self) -> None:
         self.assertIn("if is_control_page_source(source):\n        return None", self.main_py)

@@ -7,6 +7,7 @@ from pathlib import Path
 REPO_ROOT = next(path for path in Path(__file__).resolve().parents if (path / "main.py").exists())
 MAIN_PY = REPO_ROOT / "main.py"
 ROUTE_EXECUTION_PY = REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "voice_route_execution.py"
+MAIN_LLM_RUNTIME_PY = REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "main_llm_runtime.py"
 TOOL_AWARENESS_POLICY = REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "tool_awareness_policy.py"
 SEARCH_FOLLOWUP_POLICY = REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "search_followup_policy.py"
 BLUEPRINT = REPO_ROOT / "docs" / "tool_awareness_blueprint.md"
@@ -17,6 +18,7 @@ class ToolAwarenessJudgmentTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.main_py = MAIN_PY.read_text(encoding="utf-8")
         cls.route_execution_py = ROUTE_EXECUTION_PY.read_text(encoding="utf-8")
+        cls.main_llm_runtime_py = MAIN_LLM_RUNTIME_PY.read_text(encoding="utf-8")
         cls.tool_awareness_policy = TOOL_AWARENESS_POLICY.read_text(encoding="utf-8")
         cls.search_followup_policy = SEARCH_FOLLOWUP_POLICY.read_text(encoding="utf-8")
         cls.blueprint = BLUEPRINT.read_text(encoding="utf-8")
@@ -44,11 +46,11 @@ class ToolAwarenessJudgmentTests(unittest.TestCase):
 
     def test_promised_search_is_escalated_to_tool_result_synthesis(self) -> None:
         self.assertIn("async def resolve_promised_search_final_answer", self.main_py)
-        self.assertIn("answer_promises_search(answer)", self.main_py)
-        self.assertIn("promised_search_escalated", self.main_py)
-        self.assertIn("action_result = await execute_search_then_answer_action", self.main_py)
-        self.assertIn("final_answer = await synthesize_tool_result_with_main_llm", self.main_py)
-        self.assertIn("return clean_text(action_result.answer_text) or answer", self.main_py)
+        self.assertIn("deps.answer_promises_search(answer)", self.main_llm_runtime_py)
+        self.assertIn("promised_search_escalated", self.main_llm_runtime_py)
+        self.assertIn("action_result = await deps.execute_search_then_answer_action", self.main_llm_runtime_py)
+        self.assertIn("final_answer = await synthesize_tool_result_with_main_llm_from_runtime", self.main_llm_runtime_py)
+        self.assertIn("return clean_text(action_result.answer_text) or answer", self.main_llm_runtime_py)
 
     def test_realtime_skip_does_not_drop_search_promises(self) -> None:
         skip_index = self.main_py.index('opts.get("skip_search_followup")')

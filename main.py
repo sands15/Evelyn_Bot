@@ -202,6 +202,14 @@ from evelyn_core.route_fallback_policy import (
 from evelyn_core.tool_awareness_policy import build_tool_awareness_context
 from evelyn_core.local_tool_diagnostic_context import build_local_tool_diagnostic_context
 from evelyn_core.llm_context_assembly import LlmContextAssemblyDeps, prepare_llm_messages_from_runtime
+from evelyn_core.main_llm_runtime import (
+    MainLlmRuntimeDeps,
+    execute_main_llm_once_from_runtime,
+    render_tool_synthesis_recent_context as render_tool_synthesis_recent_context_with_deps,
+    resolve_promised_search_final_answer_from_runtime,
+    synthesize_tool_result_with_main_llm_from_runtime,
+    tool_synthesis_answer_drifted as tool_synthesis_answer_drifted_payload,
+)
 from evelyn_core.memory_context_state import build_memory_context
 from evelyn_core.memory_layers import collect_memory_layers
 from evelyn_core.memory_llm_context import (
@@ -6561,32 +6569,42 @@ async def build_followup_response(
     return build_answer_payload_from_text(cleaned_answer)
 
 
+def build_main_llm_runtime_deps() -> MainLlmRuntimeDeps:
+    return MainLlmRuntimeDeps(
+        model_name=MODEL_NAME,
+        llm_server_url=LLM_SERVER_URL,
+        main_llm_chat_content_format=MAIN_LLM_CHAT_CONTENT_FORMAT,
+        main_llm_stop_tokens=tuple(MAIN_LLM_STOP_TOKENS),
+        voice_llm_max_tokens=VOICE_LLM_MAX_TOKENS,
+        get_http_session=get_http_session,
+        fallback_answer_for=fallback_answer_for,
+        extract_main_llm_answer_from_choice=extract_main_llm_answer_from_choice,
+        sanitize_model_output=sanitize_model_output,
+        parse_response_action_tag=parse_response_action_tag,
+        extract_answer_from_reasoning=extract_answer_from_reasoning,
+        compact_memory_text=compact_memory_text,
+        build_main_response_guidance=build_main_response_guidance,
+        build_main_llm_payload=build_main_llm_payload,
+        strip_search_answer_sources=strip_search_answer_sources,
+        enforce_question_limits=enforce_question_limits,
+        record_question_trace=record_question_trace,
+        answer_promises_search=answer_promises_search,
+        has_negated_search_marker=has_negated_search_marker,
+        execute_search_then_answer_action=execute_search_then_answer_action,
+        log=print,
+    )
+
+
 async def execute_main_llm_once(
     *,
     payload: dict[str, Any],
     user_text: str,
 ) -> tuple[str, str]:
-    timeout = aiohttp.ClientTimeout(total=120)
-    session = await get_http_session()
-    async with session.post(LLM_SERVER_URL, json=payload, timeout=timeout) as resp:
-        if resp.status != 200:
-            error_text = await resp.text()
-            raise RuntimeError(f"LLM 서버 오류: {resp.status} / {error_text[:300]}")
-        data = await resp.json()
-    choices = data.get("choices", [])
-    if not choices:
-        return fallback_answer_for(user_text), "fallback_empty_choices"
-    answer, answer_source, finish_reason = extract_main_llm_answer_from_choice(
-        choices[0],
-        user_text,
-        sanitize_output=sanitize_model_output,
-        parse_response_action_tag=parse_response_action_tag,
-        extract_answer_from_reasoning=extract_answer_from_reasoning,
+    return await execute_main_llm_once_from_runtime(
+        deps=build_main_llm_runtime_deps(),
+        payload=payload,
+        user_text=user_text,
     )
-    if answer:
-        return answer, answer_source
-    print(f"LLM 응답 본문이 비어 있어서 fallback 사용, finish_reason={finish_reason}")
-    return fallback_answer_for(user_text), "fallback_empty_body"
 
 
 def render_tool_synthesis_recent_context(
@@ -6596,35 +6614,21 @@ def render_tool_synthesis_recent_context(
     max_items: int = 6,
     max_chars: int = 900,
 ) -> str:
-    current = clean_text(user_text).lower()
-    rendered: list[str] = []
-    for item in list(messages or [])[-max_items:]:
-        if not isinstance(item, dict):
-            continue
-        role = clean_text(str(item.get("role") or ""))
-        if role not in {"user", "assistant"}:
-            continue
-        content = clean_text(str(item.get("content") or ""))
-        if not content or content.lower() == current:
-            continue
-        label = "user" if role == "user" else "assistant"
-        rendered.append(f"{label}: {compact_memory_text(content, max_chars=180)}")
-    context = "\n".join(rendered)
-    return compact_memory_text(context, max_chars=max_chars)
+    return render_tool_synthesis_recent_context_with_deps(
+        messages,
+        deps=build_main_llm_runtime_deps(),
+        user_text=user_text,
+        max_items=max_items,
+        max_chars=max_chars,
+    )
 
 
 def tool_synthesis_answer_drifted(answer: str, *, user_text: str, tool_result_text: str) -> bool:
-    cleaned_answer = clean_text(answer)
-    if not cleaned_answer:
-        return False
-    anchor = f"{clean_text(user_text)}\n{clean_text(tool_result_text)}"
-    suspicious_terms = ("동물", "버튼", "좌표", "클릭")
-    if any(term in cleaned_answer and term not in anchor for term in suspicious_terms):
-        return True
-    if any(phrase in cleaned_answer for phrase in ("질문했을 때", "요청했습니다", "요청했어")):
-        if "날씨" in anchor and "날씨" in cleaned_answer:
-            return True
-    return False
+    return tool_synthesis_answer_drifted_payload(
+        answer,
+        user_text=user_text,
+        tool_result_text=tool_result_text,
+    )
 
 
 async def synthesize_tool_result_with_main_llm(
@@ -6640,63 +6644,19 @@ async def synthesize_tool_result_with_main_llm(
     route_decision: RouteDecision | None = None,
     metrics: dict | None = None,
 ) -> str:
-    cleaned_user = clean_text(user_text)
-    cleaned_result = clean_text(tool_result_text)
-    if not cleaned_user or not cleaned_result:
-        return cleaned_result
-    if metrics is not None:
-        metrics.setdefault("meta", {})["main_synthesis_requested"] = {
-            "tool_name": clean_text(tool_name) or "tool",
-            "tool_result_chars": len(cleaned_result),
-        }
-    recent_context = render_tool_synthesis_recent_context(messages, user_text=cleaned_user)
-    synthesis_prompt = (
-        "A tool result is now available. Produce the final answer to the user in Korean.\n"
-        "This is the final answer phase, not a preface. Do not say that you will look it up now.\n"
-        "Use Evelyn's normal conversational tone. If the tool result is weak or incomplete, say so plainly and give the best next step.\n"
-        "Treat recent context only as a way to resolve short follow-ups like 'search it' or 'tell me the weather'.\n"
-        "Do not introduce unrelated objects, buttons, coordinates, animals, or old topics unless they appear in the original request or tool result.\n"
-        "Ground the final answer in the tool result below.\n\n"
-        f"Original user request:\n{cleaned_user}\n\n"
-        f"Recent conversation context for ellipsis resolution only:\n{recent_context or '(none)'}\n\n"
-        f"Tool name:\n{clean_text(tool_name) or 'tool'}\n\n"
-        f"Tool result:\n{cleaned_result}"
-    )
-    final_user_text = (
-        f"{synthesis_prompt}\n\n"
-        f"{build_main_response_guidance(cognitive_state, source=source, user_text=cleaned_user, session_key=session_key, guild_id=guild_id, route_decision=route_decision)}"
-    )
-    payload = build_main_llm_payload(
-        model_name=MODEL_NAME,
-        messages=[],
-        final_user_text=final_user_text,
+    return await synthesize_tool_result_with_main_llm_from_runtime(
+        deps=build_main_llm_runtime_deps(),
+        user_text=user_text,
+        tool_name=tool_name,
+        tool_result_text=tool_result_text,
+        guild_id=guild_id,
+        session_key=session_key,
         source=source,
-        stream=False,
-        content_format=MAIN_LLM_CHAT_CONTENT_FORMAT,
-        max_tokens=VOICE_LLM_MAX_TOKENS,
-        stop_tokens=MAIN_LLM_STOP_TOKENS,
+        messages=messages,
+        cognitive_state=cognitive_state,
+        route_decision=route_decision,
+        metrics=metrics,
     )
-    answer, answer_source = await execute_main_llm_once(
-        payload=payload,
-        user_text=cleaned_user,
-    )
-    answer = strip_search_answer_sources(sanitize_model_output(answer))
-    if tool_synthesis_answer_drifted(answer, user_text=cleaned_user, tool_result_text=cleaned_result):
-        if metrics is not None:
-            metrics.setdefault("meta", {})["main_synthesis_drift_guard"] = True
-        answer = cleaned_result
-    if route_decision is not None:
-        answer, question_shape_meta = enforce_question_limits(answer, route_decision)
-        record_question_trace(
-            route_decision=route_decision,
-            answer=answer,
-            shape_meta=question_shape_meta,
-            metrics=metrics,
-            cooldown_hit=bool((metrics or {}).get("meta", {}).get("question_cooldown_hit")) if isinstance(metrics, dict) else False,
-        )
-    if metrics is not None:
-        metrics.setdefault("meta", {})["main_synthesis_answer_source"] = answer_source
-    return clean_text(answer) or cleaned_result
 
 
 async def resolve_promised_search_final_answer(
@@ -6711,26 +6671,10 @@ async def resolve_promised_search_final_answer(
     route_decision: RouteDecision | None = None,
     metrics: dict | None = None,
 ) -> str:
-    answer = clean_text(answer_text)
-    if not answer or not answer_promises_search(answer):
-        return answer
-    if has_negated_search_marker(user_text):
-        if metrics is not None:
-            metrics.setdefault("meta", {})["promised_search_escalation_skipped"] = "negated_search"
-        return answer
-    if metrics is not None:
-        metrics.setdefault("meta", {})["promised_search_escalated"] = True
-
-    action_result = await execute_search_then_answer_action(
-        guild_id=guild_id,
+    return await resolve_promised_search_final_answer_from_runtime(
+        deps=build_main_llm_runtime_deps(),
         user_text=user_text,
-        session_key=session_key,
-        messages=messages,
-    )
-    final_answer = await synthesize_tool_result_with_main_llm(
-        user_text=user_text,
-        tool_name="search",
-        tool_result_text=action_result.answer_text,
+        answer_text=answer_text,
         guild_id=guild_id,
         session_key=session_key,
         source=source,
@@ -6739,10 +6683,6 @@ async def resolve_promised_search_final_answer(
         route_decision=route_decision,
         metrics=metrics,
     )
-    if final_answer and not answer_promises_search(final_answer):
-        return final_answer
-    return clean_text(action_result.answer_text) or answer
-
 
 async def ask_llm_once(
     user_text: str,
