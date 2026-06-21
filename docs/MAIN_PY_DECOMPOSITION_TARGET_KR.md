@@ -166,6 +166,8 @@ Last reviewed: 2026-06-20
   - Main LLM one-shot call, tool result synthesis, promised-search escalation and synthesis answer drift guard.
 - `voice_response_runtime.py`
   - first/follow-up response split, low-latency first response LLM call, follow-up response LLM call, duplicate follow-up suppression.
+- `voice_stream_chunks.py`
+  - streaming speech chunker construction, streamed delta/flush question filtering, delivery-plan TTS chunk emission.
 - `cognitive_state_runtime.py`
   - cognitive state refresh runtime orchestration, layered scope writeback, background task cleanup.
 - `memory_update_runtime.py`

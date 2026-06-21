@@ -174,11 +174,13 @@ class QuestionShapingTests(unittest.TestCase):
         self.assertNotIn("_enforce_question_limits", main_py)
 
     def test_main_filters_streamed_tts_chunks_before_delivery(self) -> None:
-        main_py = (REPO_ROOT / "main.py").read_text(encoding="utf-8")
-        module = ast.parse(main_py)
+        stream_chunks_py = (
+            REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "voice_stream_chunks.py"
+        ).read_text(encoding="utf-8")
+        module = ast.parse(stream_chunks_py)
 
         function_sources = {
-            node.name: ast.get_source_segment(main_py, node) or ""
+            node.name: ast.get_source_segment(stream_chunks_py, node) or ""
             for node in module.body
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
             and node.name in {"emit_stream_delta_chunks", "flush_streamed_answer_chunks"}

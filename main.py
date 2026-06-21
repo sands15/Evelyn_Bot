@@ -103,7 +103,6 @@ from evelyn_core.minecraft_runtime_snapshot import (
 )
 from evelyn_core.question_shaping import (
     enforce_question_limits,
-    filter_stream_chunk_for_question_limits,
 )
 from evelyn_core.proactive_questions import (
     evaluate_proactive_question_gate,
@@ -450,7 +449,6 @@ from evelyn_core.control_page_tools import (
 )
 from evelyn_core.tts_playback import (
     CachedWaveAudioSource,
-    ChunkWindow,
     OmniVoicePCMStream,
     StreamingVoiceDelivery,
     SpeechChunker,
@@ -540,6 +538,13 @@ from evelyn_core.voice_response_runtime import (
     is_duplicate_followup as is_duplicate_followup_payload,
     normalize_compare_text as normalize_compare_text_payload,
     split_first_response_and_followup as split_first_response_and_followup_with_deps,
+)
+from evelyn_core.voice_stream_chunks import (
+    VoiceStreamChunkDeps,
+    build_stream_speech_chunker_from_runtime,
+    emit_delivery_plan_chunks as emit_delivery_plan_chunks_payload,
+    emit_stream_delta_chunks as emit_stream_delta_chunks_payload,
+    flush_streamed_answer_chunks as flush_streamed_answer_chunks_payload,
 )
 from evelyn_core.voice_pipeline import (
     ActionResult,
@@ -6629,32 +6634,19 @@ async def ask_llm_once(
     return build_answer_payload_from_text(answer).display_text
 
 
+def build_voice_stream_chunk_deps() -> VoiceStreamChunkDeps:
+    return VoiceStreamChunkDeps(
+        tts_first_chunk_min_chars=TTS_FIRST_CHUNK_MIN_CHARS,
+        tts_first_chunk_target_chars=TTS_FIRST_CHUNK_TARGET_CHARS,
+        tts_first_chunk_max_chars=TTS_FIRST_CHUNK_MAX_CHARS,
+        tts_next_chunk_min_chars=TTS_NEXT_CHUNK_MIN_CHARS,
+        tts_next_chunk_target_chars=TTS_NEXT_CHUNK_TARGET_CHARS,
+        tts_next_chunk_max_chars=TTS_NEXT_CHUNK_MAX_CHARS,
+    )
+
+
 def build_stream_speech_chunker(*, metrics: dict | None) -> SpeechChunker:
-    speech_chunker = SpeechChunker()
-    speech_chunker.config.first_window = ChunkWindow(
-        max(1, TTS_FIRST_CHUNK_MIN_CHARS),
-        max(TTS_FIRST_CHUNK_MIN_CHARS, TTS_FIRST_CHUNK_TARGET_CHARS),
-        max(TTS_FIRST_CHUNK_TARGET_CHARS, TTS_FIRST_CHUNK_MAX_CHARS),
-        True,
-        False,
-    )
-    speech_chunker.config.next_window = ChunkWindow(
-        max(1, TTS_NEXT_CHUNK_MIN_CHARS),
-        max(TTS_NEXT_CHUNK_MIN_CHARS, TTS_NEXT_CHUNK_TARGET_CHARS),
-        max(TTS_NEXT_CHUNK_TARGET_CHARS, TTS_NEXT_CHUNK_MAX_CHARS),
-        False,
-        True,
-    )
-    runtime_opts = ((metrics or {}).get("meta") or {}).get("runtime_opts") or {}
-    if runtime_opts.get("tts_chunk_min_chars"):
-        speech_chunker.config.next_window = ChunkWindow(
-            int(runtime_opts.get("tts_chunk_min_chars") or speech_chunker.config.next_window.min_chars),
-            speech_chunker.config.next_window.target_chars,
-            speech_chunker.config.next_window.max_chars,
-            speech_chunker.config.next_window.allow_soft_breaks,
-            speech_chunker.config.next_window.soft_break_overflow_only,
-        )
-    return speech_chunker
+    return build_stream_speech_chunker_from_runtime(metrics=metrics, deps=build_voice_stream_chunk_deps())
 
 
 async def emit_stream_delta_chunks(
@@ -6664,28 +6656,12 @@ async def emit_stream_delta_chunks(
     on_sentence: Callable[[str], Awaitable[None]] | None,
     question_stream_state: dict[str, int] | None = None,
 ) -> bool:
-    emitted_any = False
-    if on_sentence is not None:
-        for chunk in speech_chunker.push(delta_text, max_chunks=1):
-            if not chunk:
-                continue
-            if question_stream_state is not None:
-                chunk, question_meta = filter_stream_chunk_for_question_limits(
-                    chunk,
-                    max_question_count=int(question_stream_state.get("max_question_count", 0)),
-                    question_count_so_far=int(question_stream_state.get("question_count", 0)),
-                )
-                question_stream_state["question_count"] = int(question_stream_state.get("question_count", 0)) + int(
-                    question_meta.get("question_count_after", 0) or 0
-                )
-                question_stream_state["question_removed_count"] = int(question_stream_state.get("question_removed_count", 0)) + (
-                    1 if question_meta.get("question_removed") else 0
-                )
-                if not chunk:
-                    continue
-            emitted_any = True
-            await on_sentence(chunk)
-    return emitted_any
+    return await emit_stream_delta_chunks_payload(
+        delta_text,
+        speech_chunker=speech_chunker,
+        on_sentence=on_sentence,
+        question_stream_state=question_stream_state,
+    )
 
 
 async def flush_streamed_answer_chunks(
@@ -6696,29 +6672,13 @@ async def flush_streamed_answer_chunks(
     emitted_any: bool,
     question_stream_state: dict[str, int] | None = None,
 ) -> None:
-    if on_sentence is None:
-        return
-    ready_chunks = speech_chunker.flush()
-    if not ready_chunks and answer and not emitted_any:
-        ready_chunks = [clean_tts_text(answer)]
-    for chunk in ready_chunks:
-        if not chunk:
-            continue
-        if question_stream_state is not None:
-            chunk, question_meta = filter_stream_chunk_for_question_limits(
-                chunk,
-                max_question_count=int(question_stream_state.get("max_question_count", 0)),
-                question_count_so_far=int(question_stream_state.get("question_count", 0)),
-            )
-            question_stream_state["question_count"] = int(question_stream_state.get("question_count", 0)) + int(
-                question_meta.get("question_count_after", 0) or 0
-            )
-            question_stream_state["question_removed_count"] = int(question_stream_state.get("question_removed_count", 0)) + (
-                1 if question_meta.get("question_removed") else 0
-            )
-            if not chunk:
-                continue
-        await on_sentence(chunk)
+    await flush_streamed_answer_chunks_payload(
+        answer,
+        speech_chunker=speech_chunker,
+        on_sentence=on_sentence,
+        emitted_any=emitted_any,
+        question_stream_state=question_stream_state,
+    )
 
 
 async def emit_delivery_plan_chunks(
@@ -6726,12 +6686,7 @@ async def emit_delivery_plan_chunks(
     *,
     on_sentence: Callable[[str], Awaitable[None]] | None,
 ) -> None:
-    if on_sentence is None:
-        return
-    for chunk in delivery_plan.tts_chunks:
-        if not chunk:
-            continue
-        await on_sentence(chunk)
+    await emit_delivery_plan_chunks_payload(delivery_plan, on_sentence=on_sentence)
 
 
 DEFAULT_INTERNAL_ROUTES = {"main_direct", "policy_short_circuit", "search_executor", "routing", "delivery"}
