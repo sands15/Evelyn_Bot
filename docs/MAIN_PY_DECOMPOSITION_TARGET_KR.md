@@ -89,6 +89,7 @@ Last reviewed: 2026-06-20
   - Control Page command catalog, cheap/router tool decision, restart/status 질문 guard, UI action mapping, tool risk policy.
 - `control_page_state.py`
   - Control Page local/guild state payload/view builder, runtime/voice/minecraft/boot payload builder, local/guild status text formatter, route query/body parser, chat refresh plan, memory vault open payload/reply helper, Control Page command/tool execution reply formatter, chat log/UI command store, Minecraft snapshot cache store, runtime services cache/payload store, welcome text sanitizer.
+  - Control Page chat/shutdown/memory-note route orchestration helpers with live dependencies injected from `main.py`.
 - `voice_pipeline_state.py`
   - voice pipeline counters, last channel state file, failure state, Control Page voice pipeline snapshot.
 - `voice_debug_audio.py`
@@ -159,4 +160,4 @@ Last reviewed: 2026-06-20
 - memory vault bridge와 cognitive update wiring
 - autonomy executor의 남은 side-effect wiring
 - Control Page route handler의 남은 live dependency 수집부
-  - runtime services probe orchestration, local/guild state view 조립, route query/body parser는 이동 완료. 남은 부분은 route handler live wiring.
+  - runtime services probe orchestration, local/guild state view 조립, route query/body parser, chat/shutdown/memory-note route orchestration은 이동 완료. 남은 부분은 state handler의 live dependency 수집부와 일부 file/open side-effect wiring.

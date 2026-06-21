@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 
 REPO_ROOT = next(path for path in Path(__file__).resolve().parents if (path / "main.py").exists())
@@ -45,7 +47,12 @@ from evelyn_core.control_page_state import (  # noqa: E402
     build_control_page_voice_status_reply_payload,
     control_page_chat_refresh_plan,
     control_page_open_memory_vault_payload,
+    control_page_open_memory_vault_result,
     control_page_query_flag,
+    control_page_result_status,
+    handle_control_page_chat_request,
+    handle_control_page_memory_note_action_request,
+    handle_control_page_shutdown_request,
     is_control_page_minecraft_session_active,
     memory_vault_obsidian_url,
     memory_vault_open_tool_reply,
@@ -445,6 +452,138 @@ class ControlPageStateModuleTests(unittest.TestCase):
         )
         self.assertEqual(parse_control_page_chat_payload({})["error"], "empty_text")
 
+    def test_memory_note_action_handler_helper_parses_payload_and_status(self) -> None:
+        calls: list[tuple[str, str, str, str]] = []
+
+        def update_note(note_id: str, action: str, *, title: str | None = None, body: str | None = None) -> dict:
+            calls.append((note_id, action, title or "", body or ""))
+            return {"ok": action == "edit", "noteId": note_id}
+
+        ok_result, ok_status = handle_control_page_memory_note_action_request(
+            "note-1",
+            {"action": " edit ", "title": "Title", "body": "Body"},
+            update_note=update_note,
+        )
+        fail_result, fail_status = handle_control_page_memory_note_action_request(
+            "note-2",
+            {"action": "missing"},
+            update_note=update_note,
+        )
+
+        self.assertEqual(ok_status, 200)
+        self.assertEqual(fail_status, 404)
+        self.assertTrue(ok_result["ok"])
+        self.assertFalse(fail_result["ok"])
+        self.assertEqual(
+            calls,
+            [
+                ("note-1", "edit", "Title", "Body"),
+                ("note-2", "missing", "", ""),
+            ],
+        )
+        self.assertEqual(control_page_result_status({"ok": True}), 200)
+        self.assertEqual(control_page_result_status({"ok": False}, error_status=409), 409)
+
+    def test_control_page_chat_request_handler_orchestrates_logs_refresh_and_state(self) -> None:
+        guild = SimpleNamespace(id=7)
+        logs: list[tuple[int, str, str, str]] = []
+        snapshots: list[tuple[int, bool, bool]] = []
+        refreshes: list[bool] = []
+
+        async def handle_input(_guild, text: str) -> str:
+            return f"reply:{text}"
+
+        async def ensure_snapshot(guild_id: int, *, force: bool, wait: bool) -> None:
+            snapshots.append((guild_id, force, wait))
+
+        async def refresh_runtime_services(*, force: bool = False) -> dict:
+            refreshes.append(force)
+            return {"ok": True}
+
+        async def build_state(_guild) -> dict:
+            return {"state": "ok"}
+
+        payload, status = asyncio.run(
+            handle_control_page_chat_request(
+                {"text": " /minecraft status ", "guildId": "7"},
+                discord_enabled=True,
+                select_guild=lambda guild_id: guild if guild_id == 7 else None,
+                effective_guild_id=lambda value: value.id if value is not None else 0,
+                append_chat_log=lambda *args: logs.append(args),
+                handle_input=handle_input,
+                ensure_minecraft_snapshot=ensure_snapshot,
+                refresh_runtime_services=refresh_runtime_services,
+                build_state=build_state,
+            )
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(payload, {"ok": True, "reply": "reply:/minecraft status", "state": {"state": "ok"}})
+        self.assertEqual(logs[0], (7, "user", "정훈", "/minecraft status"))
+        self.assertEqual(logs[1], (7, "assistant", "Evelyn", "reply:/minecraft status"))
+        self.assertEqual(snapshots, [(7, True, True)])
+        self.assertEqual(refreshes, [True])
+
+    def test_control_page_chat_request_handler_reports_invalid_and_missing_guild(self) -> None:
+        async def noop(*args, **kwargs):
+            return {}
+
+        empty_payload, empty_status = asyncio.run(
+            handle_control_page_chat_request(
+                {},
+                discord_enabled=False,
+                select_guild=lambda _guild_id: None,
+                effective_guild_id=lambda _guild: 0,
+                append_chat_log=lambda *args: None,
+                handle_input=noop,
+                ensure_minecraft_snapshot=noop,
+                refresh_runtime_services=noop,
+                build_state=noop,
+            )
+        )
+        missing_payload, missing_status = asyncio.run(
+            handle_control_page_chat_request(
+                {"text": "hi", "guildId": "99"},
+                discord_enabled=True,
+                select_guild=lambda _guild_id: None,
+                effective_guild_id=lambda _guild: 0,
+                append_chat_log=lambda *args: None,
+                handle_input=noop,
+                ensure_minecraft_snapshot=noop,
+                refresh_runtime_services=noop,
+                build_state=noop,
+            )
+        )
+
+        self.assertEqual(empty_status, 400)
+        self.assertEqual(empty_payload["error"], "empty_text")
+        self.assertEqual(missing_status, 503)
+        self.assertEqual(missing_payload["error"], "guild_not_available")
+
+    def test_control_page_shutdown_request_handler_routes_shutdown_command(self) -> None:
+        guild = SimpleNamespace(id=7)
+        handled: list[tuple[object, str]] = []
+
+        async def handle_input(selected_guild, text: str) -> str:
+            handled.append((selected_guild, text))
+            return "shutdown started"
+
+        async def build_state(selected_guild) -> dict:
+            return {"guild": selected_guild.id if selected_guild is not None else None}
+
+        payload, status = asyncio.run(
+            handle_control_page_shutdown_request(
+                "7",
+                select_guild=lambda guild_id: guild if guild_id == 7 else None,
+                handle_input=handle_input,
+                build_state=build_state,
+            )
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(payload, {"ok": True, "reply": "shutdown started", "state": {"guild": 7}})
+        self.assertEqual(handled, [(guild, "/shutdown")])
+
     def test_memory_vault_open_helpers_build_tool_replies_and_http_payloads(self) -> None:
         url = memory_vault_obsidian_url("C:/Evelyn Memory/Vault")
         obsidian_payload = control_page_open_memory_vault_payload(
@@ -471,6 +610,49 @@ class ControlPageStateModuleTests(unittest.TestCase):
         self.assertIn("열지 못했어", memory_vault_open_tool_reply(outcome="failed", error="no opener"))
         self.assertTrue(obsidian_payload["ok"])
         self.assertEqual(folder_payload["fallback"], "folder")
+        self.assertFalse(failed_payload["ok"])
+        self.assertEqual(failed_payload["error"], "open_memory_vault_failed")
+
+    def test_memory_vault_open_result_uses_obsidian_then_folder_fallback(self) -> None:
+        calls: list[tuple[str, str]] = []
+
+        obsidian_payload, obsidian_status = control_page_open_memory_vault_result(
+            vault_path="C:/Vault",
+            obsidian_url="obsidian://open?path=C%3A%2FVault",
+            open_url=lambda url: calls.append(("url", str(url))),
+            open_path=lambda path: calls.append(("path", str(path))),
+        )
+        self.assertEqual(obsidian_status, 200)
+        self.assertTrue(obsidian_payload["ok"])
+        self.assertEqual(calls, [("url", "obsidian://open?path=C%3A%2FVault")])
+
+        calls.clear()
+
+        def fail_url(url: str) -> None:
+            calls.append(("url", url))
+            raise RuntimeError("protocol blocked")
+
+        folder_payload, folder_status = control_page_open_memory_vault_result(
+            vault_path="C:/Vault",
+            obsidian_url="obsidian://open?path=C%3A%2FVault",
+            open_url=fail_url,
+            open_path=lambda path: calls.append(("path", str(path))),
+        )
+        self.assertEqual(folder_status, 200)
+        self.assertEqual(folder_payload["fallback"], "folder")
+        self.assertEqual(calls, [("url", "obsidian://open?path=C%3A%2FVault"), ("path", "C:/Vault")])
+
+        def fail_path(path: str) -> None:
+            calls.append(("path", path))
+            raise RuntimeError("no opener")
+
+        failed_payload, failed_status = control_page_open_memory_vault_result(
+            vault_path="C:/Vault",
+            obsidian_url="obsidian://open?path=C%3A%2FVault",
+            open_url=fail_url,
+            open_path=fail_path,
+        )
+        self.assertEqual(failed_status, 500)
         self.assertFalse(failed_payload["ok"])
         self.assertEqual(failed_payload["error"], "open_memory_vault_failed")
 

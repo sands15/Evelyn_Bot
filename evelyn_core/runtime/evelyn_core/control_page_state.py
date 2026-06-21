@@ -918,6 +918,26 @@ def parse_control_page_memory_note_action_payload(payload: Any) -> dict[str, Any
     }
 
 
+def control_page_result_status(result: dict[str, Any], *, ok_status: int = 200, error_status: int = 404) -> int:
+    return int(ok_status if result.get("ok") else error_status)
+
+
+def handle_control_page_memory_note_action_request(
+    note_id: str,
+    payload: Any,
+    *,
+    update_note: Any,
+) -> tuple[dict[str, Any], int]:
+    note_action = parse_control_page_memory_note_action_payload(payload)
+    result = update_note(
+        note_id,
+        note_action.get("action"),
+        title=note_action.get("title"),
+        body=note_action.get("body"),
+    )
+    return result, control_page_result_status(result)
+
+
 def parse_control_page_chat_payload(payload: Any) -> dict[str, Any]:
     body = payload if isinstance(payload, dict) else {}
     text = clean_text(str(body.get("text") or ""))
@@ -936,6 +956,66 @@ def parse_control_page_chat_payload(payload: Any) -> dict[str, Any]:
         "text": text,
         "guild_id": parse_control_page_guild_id(body.get("guildId")),
     }
+
+
+async def handle_control_page_chat_request(
+    payload: Any,
+    *,
+    discord_enabled: bool,
+    select_guild: Any,
+    effective_guild_id: Any,
+    append_chat_log: Any,
+    handle_input: Any,
+    ensure_minecraft_snapshot: Any,
+    refresh_runtime_services: Any,
+    build_state: Any,
+    user_author: str = "정훈",
+    assistant_author: str = "Evelyn",
+) -> tuple[dict[str, Any], int]:
+    chat_request = parse_control_page_chat_payload(payload)
+    if not chat_request.get("ok"):
+        return (
+            {"ok": False, "error": chat_request.get("error") or "invalid_request"},
+            int(chat_request.get("status") or 400),
+        )
+    text = str(chat_request.get("text") or "")
+    guild = select_guild(chat_request.get("guild_id"))
+    if guild is None and discord_enabled:
+        return {"ok": False, "error": "guild_not_available"}, 503
+
+    guild_id = int(effective_guild_id(guild))
+    append_chat_log(guild_id, "user", user_author, text)
+    try:
+        reply_text = await handle_input(guild, text)
+    except Exception as exc:
+        reply_text = f"처리 중 오류가 났어: {exc}"
+    append_chat_log(guild_id, "assistant", assistant_author, reply_text)
+
+    refresh_plan = control_page_chat_refresh_plan(text)
+    needs_fresh_snapshot = bool(refresh_plan.get("needs_fresh_snapshot"))
+    if guild is not None:
+        await ensure_minecraft_snapshot(
+            getattr(guild, "id", None),
+            force=needs_fresh_snapshot,
+            wait=needs_fresh_snapshot,
+        )
+    if refresh_plan.get("needs_runtime_refresh"):
+        await refresh_runtime_services(force=True)
+    state = await build_state(guild)
+    return {"ok": True, "reply": reply_text, "state": state}, 200
+
+
+async def handle_control_page_shutdown_request(
+    guild_id_value: Any,
+    *,
+    select_guild: Any,
+    handle_input: Any,
+    build_state: Any,
+) -> tuple[dict[str, Any], int]:
+    guild = select_guild(parse_control_page_guild_id(guild_id_value))
+    reply_text = await handle_input(guild, "/shutdown")
+    state = await build_state(guild)
+    return {"ok": True, "reply": reply_text, "state": state}, 200
 
 
 def memory_vault_obsidian_url(vault_path: Any) -> str:
@@ -979,6 +1059,47 @@ def control_page_open_memory_vault_payload(
         "vaultPath": str(vault_path),
         "url": obsidian_url,
     }
+
+
+def control_page_open_memory_vault_result(
+    *,
+    vault_path: Any,
+    obsidian_url: str,
+    open_url: Any,
+    open_path: Any,
+) -> tuple[dict[str, Any], int]:
+    try:
+        open_url(obsidian_url)
+        return (
+            control_page_open_memory_vault_payload(
+                vault_path=vault_path,
+                obsidian_url=obsidian_url,
+                outcome="obsidian",
+            ),
+            200,
+        )
+    except Exception as exc:
+        try:
+            open_path(vault_path)
+            return (
+                control_page_open_memory_vault_payload(
+                    vault_path=vault_path,
+                    obsidian_url=obsidian_url,
+                    outcome="folder",
+                    error=exc,
+                ),
+                200,
+            )
+        except Exception as fallback_exc:
+            return (
+                control_page_open_memory_vault_payload(
+                    vault_path=vault_path,
+                    obsidian_url=obsidian_url,
+                    outcome="failed",
+                    error=fallback_exc,
+                ),
+                500,
+            )
 
 
 def build_control_page_status_text_payload(
@@ -1283,6 +1404,22 @@ __all__ = [
     "build_control_page_voice_reconnect_reply",
     "build_control_page_voice_status_reply_payload",
     "command_status",
+    "control_page_chat_refresh_plan",
+    "control_page_open_memory_vault_payload",
+    "control_page_open_memory_vault_result",
+    "control_page_query_flag",
+    "control_page_result_status",
+    "handle_control_page_chat_request",
+    "handle_control_page_memory_note_action_request",
+    "handle_control_page_shutdown_request",
     "is_control_page_minecraft_session_active",
+    "memory_vault_obsidian_url",
+    "memory_vault_open_tool_reply",
+    "parse_control_page_chat_payload",
+    "parse_control_page_guild_id",
+    "parse_control_page_memory_graph_query",
+    "parse_control_page_memory_note_action_payload",
+    "parse_control_page_memory_note_query",
+    "parse_control_page_memory_snapshot_query",
     "sanitize_control_page_welcome_text_payload",
 ]

@@ -154,11 +154,15 @@ class ShutdownScriptContractTests(unittest.TestCase):
 
     def test_main_control_page_exposes_shutdown_endpoint(self) -> None:
         main_py = (REPO_ROOT / "main.py").read_text(encoding="utf-8")
+        control_page_state = (
+            REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "control_page_state.py"
+        ).read_text(encoding="utf-8")
 
         self.assertIn("async def control_page_shutdown_handler", main_py)
         self.assertIn('app.router.add_post("/api/control-page/shutdown", control_page_shutdown_handler)', main_py)
         self.assertIn('app.router.add_options("/api/control-page/shutdown", control_page_shutdown_handler)', main_py)
-        self.assertIn('handle_control_page_input(guild, "/shutdown")', main_py)
+        self.assertIn("handle_control_page_shutdown_request", main_py)
+        self.assertIn('handle_input(guild, "/shutdown")', control_page_state)
 
     def test_shutdown_command_copy_is_runtime_scoped(self) -> None:
         control_page_tools = (

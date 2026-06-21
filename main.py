@@ -392,15 +392,16 @@ from evelyn_core.control_page_state import (
     build_control_page_voice_reconnect_reply,
     build_control_page_voice_status_reply_payload,
     command_status,
-    control_page_open_memory_vault_payload,
-    control_page_chat_refresh_plan,
+    control_page_open_memory_vault_result,
+    control_page_result_status,
+    handle_control_page_chat_request,
+    handle_control_page_memory_note_action_request,
+    handle_control_page_shutdown_request,
     is_control_page_minecraft_session_active,
     memory_vault_obsidian_url,
     memory_vault_open_tool_reply,
-    parse_control_page_chat_payload,
     parse_control_page_guild_id,
     parse_control_page_memory_graph_query,
-    parse_control_page_memory_note_action_payload,
     parse_control_page_memory_note_query,
     parse_control_page_memory_snapshot_query,
     sanitize_control_page_welcome_text_payload,
@@ -8611,31 +8612,18 @@ async def control_page_chat_handler(request: web.Request) -> web.StreamResponse:
         payload = await request.json()
     except Exception:
         return control_page_json_response({"ok": False, "error": "invalid_json"}, status=400)
-    chat_request = parse_control_page_chat_payload(payload)
-    if not chat_request.get("ok"):
-        return control_page_json_response(
-            {"ok": False, "error": chat_request.get("error") or "invalid_request"},
-            status=int(chat_request.get("status") or 400),
-        )
-    text = str(chat_request.get("text") or "")
-    guild = select_control_page_guild(chat_request.get("guild_id"))
-    if guild is None and DISCORD_ENABLED:
-        return control_page_json_response({"ok": False, "error": "guild_not_available"}, status=503)
-    effective_guild_id = control_page_effective_guild_id(guild)
-    append_control_page_chat_log(effective_guild_id, "user", "정훈", text)
-    try:
-        reply_text = await handle_control_page_input(guild, text)
-    except Exception as exc:
-        reply_text = f"처리 중 오류가 났어: {exc}"
-    append_control_page_chat_log(effective_guild_id, "assistant", "Evelyn", reply_text)
-    refresh_plan = control_page_chat_refresh_plan(text)
-    needs_fresh_snapshot = bool(refresh_plan.get("needs_fresh_snapshot"))
-    if guild is not None:
-        await ensure_control_page_minecraft_snapshot(guild.id, force=needs_fresh_snapshot, wait=needs_fresh_snapshot)
-    if refresh_plan.get("needs_runtime_refresh"):
-        await get_control_page_runtime_services(force=True)
-    state = await build_control_page_state(guild)
-    return control_page_json_response({"ok": True, "reply": reply_text, "state": state})
+    response_payload, status = await handle_control_page_chat_request(
+        payload,
+        discord_enabled=DISCORD_ENABLED,
+        select_guild=select_control_page_guild,
+        effective_guild_id=control_page_effective_guild_id,
+        append_chat_log=append_control_page_chat_log,
+        handle_input=handle_control_page_input,
+        ensure_minecraft_snapshot=ensure_control_page_minecraft_snapshot,
+        refresh_runtime_services=get_control_page_runtime_services,
+        build_state=build_control_page_state,
+    )
+    return control_page_json_response(response_payload, status=status)
 
 
 async def control_page_memory_graph_handler(request: web.Request) -> web.StreamResponse:
@@ -8650,7 +8638,7 @@ async def control_page_memory_snapshot_handler(request: web.Request) -> web.Stre
 async def control_page_memory_note_handler(request: web.Request) -> web.StreamResponse:
     note_id = request.match_info.get("note_id", "")
     result = memory_vault_user_note(note_id, **parse_control_page_memory_note_query(request.query))
-    return control_page_json_response(result, status=200 if result.get("ok") else 404)
+    return control_page_json_response(result, status=control_page_result_status(result))
 
 
 async def control_page_memory_note_action_handler(request: web.Request) -> web.StreamResponse:
@@ -8659,21 +8647,22 @@ async def control_page_memory_note_action_handler(request: web.Request) -> web.S
         payload = await request.json()
     except Exception:
         payload = {}
-    note_action = parse_control_page_memory_note_action_payload(payload)
-    result = update_memory_vault_user_note(
+    result, status = handle_control_page_memory_note_action_request(
         note_id,
-        note_action.get("action"),
-        title=note_action.get("title"),
-        body=note_action.get("body"),
+        payload,
+        update_note=update_memory_vault_user_note,
     )
-    return control_page_json_response(result, status=200 if result.get("ok") else 404)
+    return control_page_json_response(result, status=status)
 
 
 async def control_page_shutdown_handler(request: web.Request) -> web.StreamResponse:
-    guild = select_control_page_guild(parse_control_page_guild_id(request.query.get("guildId")))
-    reply_text = await handle_control_page_input(guild, "/shutdown")
-    state = await build_control_page_state(guild)
-    return control_page_json_response({"ok": True, "reply": reply_text, "state": state})
+    response_payload, status = await handle_control_page_shutdown_request(
+        request.query.get("guildId"),
+        select_guild=select_control_page_guild,
+        handle_input=handle_control_page_input,
+        build_state=build_control_page_state,
+    )
+    return control_page_json_response(response_payload, status=status)
 
 
 async def control_page_health_handler(_: web.Request) -> web.StreamResponse:
@@ -8706,32 +8695,13 @@ async def control_page_open_memory_vault_handler(request: web.Request) -> web.St
     _ = request
     vault = ensure_memory_vault_layout()
     obsidian_url = memory_vault_obsidian_url(vault)
-    try:
-        open_control_page_url_with_system(obsidian_url)
-        return control_page_json_response(control_page_open_memory_vault_payload(
-            vault_path=vault,
-            obsidian_url=obsidian_url,
-            outcome="obsidian",
-        ))
-    except Exception as exc:
-        try:
-            open_control_page_path_with_system(vault)
-            return control_page_json_response(control_page_open_memory_vault_payload(
-                vault_path=vault,
-                obsidian_url=obsidian_url,
-                outcome="folder",
-                error=exc,
-            ))
-        except Exception as fallback_exc:
-            return control_page_json_response(
-                control_page_open_memory_vault_payload(
-                    vault_path=vault,
-                    obsidian_url=obsidian_url,
-                    outcome="failed",
-                    error=fallback_exc,
-                ),
-                status=500,
-            )
+    payload, status = control_page_open_memory_vault_result(
+        vault_path=vault,
+        obsidian_url=obsidian_url,
+        open_url=open_control_page_url_with_system,
+        open_path=open_control_page_path_with_system,
+    )
+    return control_page_json_response(payload, status=status)
 
 
 async def control_page_open_memory_vault_options_handler(request: web.Request) -> web.StreamResponse:
