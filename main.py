@@ -533,6 +533,14 @@ from evelyn_core.voice_route_execution import (
     maybe_handle_short_circuit_route as maybe_handle_short_circuit_route_with_deps,
     prepare_route_context as prepare_route_context_with_deps,
 )
+from evelyn_core.voice_response_runtime import (
+    VoiceResponseRuntimeDeps,
+    build_first_response_from_runtime,
+    build_followup_response_from_runtime,
+    is_duplicate_followup as is_duplicate_followup_payload,
+    normalize_compare_text as normalize_compare_text_payload,
+    split_first_response_and_followup as split_first_response_and_followup_with_deps,
+)
 from evelyn_core.voice_pipeline import (
     ActionResult,
     AnswerPayload,
@@ -6296,35 +6304,47 @@ def fallback_answer_for(user_text: str) -> str:
     return "응, 잠깐만."
 
 
+def build_voice_response_runtime_deps() -> VoiceResponseRuntimeDeps:
+    return VoiceResponseRuntimeDeps(
+        model_name=MODEL_NAME,
+        llm_server_url=LLM_SERVER_URL,
+        main_llm_chat_content_format=MAIN_LLM_CHAT_CONTENT_FORMAT,
+        main_llm_stop_tokens=tuple(MAIN_LLM_STOP_TOKENS),
+        voice_llm_max_tokens=VOICE_LLM_MAX_TOKENS,
+        get_http_session=get_http_session,
+        build_chat_messages=build_chat_messages,
+        fallback_answer_for=fallback_answer_for,
+        split_tts_sentences=split_tts_sentences,
+        build_answer_payload_from_text=build_answer_payload_from_text,
+        log_voice_stage=log_voice_stage,
+        prepare_route_context=prepare_route_context,
+        prepare_llm_messages=prepare_llm_messages,
+        is_user_echo_answer=is_user_echo_answer,
+        is_casual_call_or_status_question=is_casual_call_or_status_question,
+        observe_live_minecraft_state=observe_live_minecraft_state,
+        build_runtime_status_context=build_runtime_status_context,
+        build_main_response_guidance=build_main_response_guidance,
+        sanitize_model_output=sanitize_model_output,
+        parse_response_action_tag=parse_response_action_tag,
+        extract_answer_from_reasoning=extract_answer_from_reasoning,
+        sanitize_unrequested_minecraft_leak=sanitize_unrequested_minecraft_leak,
+        enforce_question_limits=enforce_question_limits,
+        record_question_trace=record_question_trace,
+        format_minecraft_state_summary=format_minecraft_state_summary,
+        log=print,
+    )
+
+
 def split_first_response_and_followup(answer: str) -> tuple[str, str]:
-    cleaned = clean_text(answer)
-    if not cleaned:
-        return "", ""
-    sentences, _tail = split_tts_sentences(cleaned, force=True)
-    sentences = [clean_tts_text(sentence) for sentence in sentences if clean_tts_text(sentence)]
-    if not sentences:
-        return cleaned, ""
-    first = sentences[0]
-    followup = clean_text(" ".join(sentences[1:])) if len(sentences) > 1 else ""
-    return first, followup
+    return split_first_response_and_followup_with_deps(answer, deps=build_voice_response_runtime_deps())
 
 
 def normalize_compare_text(text: str) -> str:
-    cleaned = clean_text(text).lower()
-    return "".join(ch for ch in cleaned if ch.isalnum() or ch.isspace()).strip()
+    return normalize_compare_text_payload(text)
 
 
 def is_duplicate_followup(first_response: str, followup_text: str) -> bool:
-    first_norm = normalize_compare_text(first_response)
-    follow_norm = normalize_compare_text(followup_text)
-    if not first_norm or not follow_norm:
-        return False
-    if follow_norm == first_norm:
-        return True
-    if follow_norm.startswith(first_norm):
-        remainder = follow_norm[len(first_norm):].strip()
-        return len(remainder) <= 8
-    return False
+    return is_duplicate_followup_payload(first_response, followup_text)
 
 
 async def build_first_response(
@@ -6339,9 +6359,9 @@ async def build_first_response(
     debug_text: str | None = None,
     metrics: dict | None = None,
 ) -> tuple[AnswerPayload, str, dict | None]:
-    log_voice_stage(metrics, "1단계 first response 생성 시작", extra=f"source={source} user_text_len={len(clean_text(user_text))}")
-    messages, cognitive_state, route_decision, gated_state, _awaiting_user_reply = await prepare_route_context(
+    return await build_first_response_from_runtime(
         user_text,
+        deps=build_voice_response_runtime_deps(),
         guild_id=guild_id,
         session_key=session_key,
         room_key=room_key,
@@ -6351,66 +6371,6 @@ async def build_first_response(
         debug_text=debug_text,
         metrics=metrics,
     )
-    if route_decision.user_visible_preface and not is_user_echo_answer(user_text, route_decision.user_visible_preface):
-        return build_answer_payload_from_text(route_decision.user_visible_preface), "", gated_state
-
-    guided_user_text = user_text
-    lightweight_persona_turn = is_casual_call_or_status_question(guided_user_text)
-    live_minecraft_state = None if lightweight_persona_turn else await observe_live_minecraft_state(guild_id)
-    runtime_status_context = await build_runtime_status_context(force=bool(route_decision.needs_runtime_state))
-    final_user_text = f"{guided_user_text}\n\n{build_main_response_guidance(cognitive_state, source=source, user_text=guided_user_text, session_key=session_key, guild_id=guild_id, minecraft_state=live_minecraft_state, runtime_status_context=runtime_status_context, route_decision=route_decision)}"
-
-    payload = {
-        "model": MODEL_NAME,
-        "messages": build_chat_messages(
-            messages + [{"role": "user", "content": final_user_text}],
-            content_format=MAIN_LLM_CHAT_CONTENT_FORMAT,
-        ),
-        "temperature": 0.0,
-        "max_tokens": min(40, VOICE_LLM_MAX_TOKENS),
-        "stream": False,
-        "cache_prompt": True,
-        "stop": list(MAIN_LLM_STOP_TOKENS),
-    }
-
-    timeout = aiohttp.ClientTimeout(total=120)
-    session = await get_http_session()
-
-    async with session.post(LLM_SERVER_URL, json=payload, timeout=timeout) as resp:
-        if resp.status != 200:
-            error_text = await resp.text()
-            raise RuntimeError(f"LLM 서버 오류: {resp.status} / {error_text[:300]}")
-
-        data = await resp.json()
-        choices = data.get("choices", [])
-        if not choices:
-            answer = fallback_answer_for(user_text)
-            return build_answer_payload_from_text(answer), "", gated_state
-
-        choice = choices[0]
-        msg = choice.get("message", {})
-        raw_answer = msg.get("content", "")
-        _response_action, answer = parse_response_action_tag(sanitize_model_output(raw_answer))
-        reasoning = msg.get("reasoning_content", "")
-        finish_reason = choice.get("finish_reason", "")
-
-        if not answer:
-            answer = extract_answer_from_reasoning(reasoning, user_text)
-        if not answer:
-            print(f"LLM 1단계 응답 본문이 비어 있어서 fallback 사용, finish_reason={finish_reason}")
-            answer = fallback_answer_for(user_text)
-
-        answer = sanitize_unrequested_minecraft_leak(guided_user_text, answer)
-        answer, question_shape_meta = enforce_question_limits(answer, route_decision)
-        record_question_trace(
-            route_decision=route_decision,
-            answer=answer,
-            shape_meta=question_shape_meta,
-            metrics=metrics,
-            cooldown_hit=bool((metrics or {}).get("meta", {}).get("question_cooldown_hit")) if isinstance(metrics, dict) else False,
-        )
-        first_response, followup_seed = split_first_response_and_followup(answer)
-        return build_answer_payload_from_text(first_response or answer), followup_seed, gated_state
 
 
 async def build_followup_response(
@@ -6426,9 +6386,10 @@ async def build_followup_response(
     debug_text: str | None = None,
     metrics: dict | None = None,
 ) -> AnswerPayload:
-    log_voice_stage(metrics, "2단계 followup 생성 시작", extra=f"source={source} first_len={len(clean_text(first_response))}")
-    messages, cognitive_state, _route, _context_policy = await prepare_llm_messages(
+    return await build_followup_response_from_runtime(
         user_text,
+        first_response,
+        deps=build_voice_response_runtime_deps(),
         guild_id=guild_id,
         session_key=session_key,
         room_key=room_key,
@@ -6438,48 +6399,6 @@ async def build_followup_response(
         debug_text=debug_text,
         metrics=metrics,
     )
-    live_minecraft_state = None if is_casual_call_or_status_question(user_text) else await observe_live_minecraft_state(guild_id)
-    minecraft_summary = format_minecraft_state_summary(live_minecraft_state)
-    followup_prompt = (
-        f"사용자가 방금 한 말: {clean_text(user_text)}\n"
-        f"이미 먼저 말한 첫 응답: {clean_text(first_response)}\n"
-        + (f"현재 마인크래프트 상태: {minecraft_summary}\n" if minecraft_summary else "")
-        + "\n"
-        + "할 일: 첫 응답과 겹치지 않는 보충 설명만 1~2문장으로 이어서 말해. "
-        + "첫 문장을 반복하거나 비슷하게 다시 시작하지 마. 새 정보가 없으면 빈 응답을 반환해."
-    )
-    payload = {
-        "model": MODEL_NAME,
-        "messages": build_chat_messages(
-            messages + [{"role": "user", "content": followup_prompt}],
-            content_format=MAIN_LLM_CHAT_CONTENT_FORMAT,
-        ),
-        "temperature": 0.0,
-        "max_tokens": min(64, VOICE_LLM_MAX_TOKENS),
-        "stream": False,
-        "cache_prompt": True,
-        "stop": list(MAIN_LLM_STOP_TOKENS),
-    }
-    timeout = aiohttp.ClientTimeout(total=120)
-    session = await get_http_session()
-    async with session.post(LLM_SERVER_URL, json=payload, timeout=timeout) as resp:
-        if resp.status != 200:
-            error_text = await resp.text()
-            raise RuntimeError(f"LLM 서버 오류: {resp.status} / {error_text[:300]}")
-        data = await resp.json()
-        choices = data.get("choices", [])
-        if not choices:
-            return build_answer_payload_from_text("")
-        msg = choices[0].get("message", {})
-        raw_answer = msg.get("content", "")
-        _response_action, answer = parse_response_action_tag(sanitize_model_output(raw_answer))
-    first, followup = split_first_response_and_followup(answer)
-    if clean_text(first) == clean_text(first_response):
-        return build_answer_payload_from_text(followup)
-    cleaned_answer = clean_text(answer)
-    if is_duplicate_followup(first_response, cleaned_answer):
-        return build_answer_payload_from_text("")
-    return build_answer_payload_from_text(cleaned_answer)
 
 
 def build_main_llm_runtime_deps() -> MainLlmRuntimeDeps:

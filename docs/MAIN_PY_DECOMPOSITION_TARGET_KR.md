@@ -164,6 +164,8 @@ Last reviewed: 2026-06-20
   - Main LLM messages/context assembly, runtime/memory/cognitive/local-tool/Minecraft/tool-awareness context 조립.
 - `main_llm_runtime.py`
   - Main LLM one-shot call, tool result synthesis, promised-search escalation and synthesis answer drift guard.
+- `voice_response_runtime.py`
+  - first/follow-up response split, low-latency first response LLM call, follow-up response LLM call, duplicate follow-up suppression.
 - `cognitive_state_runtime.py`
   - cognitive state refresh runtime orchestration, layered scope writeback, background task cleanup.
 - `memory_update_runtime.py`
@@ -173,8 +175,8 @@ Last reviewed: 2026-06-20
 
 현재 `main.py`에 남은 주요 다음 후보:
 
-- First/follow-up response split과 voice answer payload assembly
-  - `build_first_response`, `build_followup_response`, answer payload parsing/normalization이 아직 `main.py`에 있음.
+- voice answer payload assembly와 delivery planning side-effect wiring
+  - answer payload 자체의 primitive는 모듈화되어 있지만, voice path별 delivery orchestration 일부는 아직 `main.py`에 있음.
 - memory vault bridge와 cognitive update wiring
 - autonomy executor의 남은 side-effect wiring
 - remaining voice pipeline side-effect wiring
