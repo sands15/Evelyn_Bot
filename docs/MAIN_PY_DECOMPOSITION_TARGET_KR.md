@@ -158,12 +158,24 @@ Last reviewed: 2026-06-20
   - Minecraft runtime snapshot freshness/status fields, Voyager status/observation merge, inventory/position normalization, Control Page recent activity extraction, Main LLM용 Minecraft 상태 요약.
 - `minecraft_assets.py`
   - Minecraft jar asset bytes/json reader, item/model texture path normalization, model parent/alias texture resolution, Control Page item icon jar discovery/cache loader.
+- `voice_route_execution.py`
+  - voice route action 실행, skill dispatch/follow-up execution, Minecraft/vision/runtime/local-tool routing callbacks.
+- `llm_context_assembly.py`
+  - Main LLM messages/context assembly, runtime/memory/cognitive/local-tool/Minecraft/tool-awareness context 조립.
+- `main_llm_runtime.py`
+  - Main LLM one-shot call, tool result synthesis, promised-search escalation and synthesis answer drift guard.
+- `cognitive_state_runtime.py`
+  - cognitive state refresh runtime orchestration, layered scope writeback, background task cleanup.
+- `memory_update_runtime.py`
+  - memory writer decision 기록과 writebehind scheduling runtime orchestration.
+- `search_followup_runtime.py`
+  - promised/proactive search follow-up scheduling, singleflight cancellation, cognitive completion state writeback, Discord/TTS delivery, memory update scheduling.
 
 현재 `main.py`에 남은 주요 다음 후보:
 
-- Discord command/event handler 내부 구현
-  - attachment context builder와 일부 command reply formatter는 이동 완료. 남은 handler 본문과 side-effect wiring은 아직 `main.py`에 있음.
+- First/follow-up response split과 voice answer payload assembly
+  - `build_first_response`, `build_followup_response`, answer payload parsing/normalization이 아직 `main.py`에 있음.
 - memory vault bridge와 cognitive update wiring
 - autonomy executor의 남은 side-effect wiring
-- Control Page route handler의 남은 live dependency 수집부
-  - runtime services probe orchestration, local/guild state view 조립, route query/body parser, chat/shutdown/memory-note route orchestration은 이동 완료. 남은 부분은 state handler의 live dependency 수집부와 일부 file/open side-effect wiring.
+- remaining voice pipeline side-effect wiring
+  - STT/route/LLM/TTS 연결부와 speaker/session state mutation 일부가 아직 `main.py`에 있음.

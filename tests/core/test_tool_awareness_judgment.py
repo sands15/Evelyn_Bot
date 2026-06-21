@@ -8,6 +8,7 @@ REPO_ROOT = next(path for path in Path(__file__).resolve().parents if (path / "m
 MAIN_PY = REPO_ROOT / "main.py"
 ROUTE_EXECUTION_PY = REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "voice_route_execution.py"
 MAIN_LLM_RUNTIME_PY = REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "main_llm_runtime.py"
+SEARCH_FOLLOWUP_RUNTIME_PY = REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "search_followup_runtime.py"
 TOOL_AWARENESS_POLICY = REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "tool_awareness_policy.py"
 SEARCH_FOLLOWUP_POLICY = REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "search_followup_policy.py"
 BLUEPRINT = REPO_ROOT / "docs" / "tool_awareness_blueprint.md"
@@ -19,6 +20,7 @@ class ToolAwarenessJudgmentTests(unittest.TestCase):
         cls.main_py = MAIN_PY.read_text(encoding="utf-8")
         cls.route_execution_py = ROUTE_EXECUTION_PY.read_text(encoding="utf-8")
         cls.main_llm_runtime_py = MAIN_LLM_RUNTIME_PY.read_text(encoding="utf-8")
+        cls.search_followup_runtime_py = SEARCH_FOLLOWUP_RUNTIME_PY.read_text(encoding="utf-8")
         cls.tool_awareness_policy = TOOL_AWARENESS_POLICY.read_text(encoding="utf-8")
         cls.search_followup_policy = SEARCH_FOLLOWUP_POLICY.read_text(encoding="utf-8")
         cls.blueprint = BLUEPRINT.read_text(encoding="utf-8")
@@ -53,10 +55,10 @@ class ToolAwarenessJudgmentTests(unittest.TestCase):
         self.assertIn("return clean_text(action_result.answer_text) or answer", self.main_llm_runtime_py)
 
     def test_realtime_skip_does_not_drop_search_promises(self) -> None:
-        skip_index = self.main_py.index('opts.get("skip_search_followup")')
-        fallback_index = self.main_py.index("wants_search_by_fallback = answer_promises_search")
+        skip_index = self.search_followup_runtime_py.index('opts.get("skip_search_followup")')
+        fallback_index = self.search_followup_runtime_py.index("wants_search_by_fallback = deps.answer_promises_search")
         self.assertGreater(skip_index, fallback_index)
-        self.assertIn("and not wants_search_by_tag and not wants_search_by_fallback", self.main_py)
+        self.assertIn("and not wants_search_by_tag and not wants_search_by_fallback", self.search_followup_runtime_py)
 
     def test_main_paths_call_promise_escalation(self) -> None:
         combined = self.main_py + self.route_execution_py

@@ -210,6 +210,14 @@ from evelyn_core.main_llm_runtime import (
     synthesize_tool_result_with_main_llm_from_runtime,
     tool_synthesis_answer_drifted as tool_synthesis_answer_drifted_payload,
 )
+from evelyn_core.search_followup_runtime import (
+    SearchFollowupRuntimeDeps,
+    deliver_proactive_followup_from_runtime,
+    normalize_search_key as normalize_search_key_payload,
+    run_search_followup_from_runtime,
+    schedule_search_followup_from_runtime,
+    schedule_search_followup_singleflight_from_runtime,
+)
 from evelyn_core.memory_context_state import build_memory_context
 from evelyn_core.memory_layers import collect_memory_layers
 from evelyn_core.memory_llm_context import (
@@ -4363,6 +4371,43 @@ async def answer_from_search_results(query: str, results: list[dict]) -> str:
     return strip_search_answer_sources(f"찾아보니까 {first.get('snippet', '')}")
 
 
+def record_search_followup_queued() -> None:
+    global search_followup_queued_count
+    search_followup_queued_count += 1
+
+
+def build_search_followup_runtime_deps() -> SearchFollowupRuntimeDeps:
+    return SearchFollowupRuntimeDeps(
+        bot=bot,
+        discord_object_factory=discord.Object,
+        session_followup_targets=session_followup_targets,
+        background_search_tasks=background_search_tasks,
+        inflight_search_tasks=inflight_search_tasks,
+        apply_runtime_mode=apply_runtime_mode,
+        parse_response_action_tag=parse_response_action_tag,
+        answer_promises_search=answer_promises_search,
+        build_search_query=build_search_query,
+        runtime_session_key=runtime_session_key,
+        remember_session_followup_target=remember_session_followup_target,
+        search_duckduckgo=search_duckduckgo,
+        answer_from_search_results=answer_from_search_results,
+        resolve_open_question_rows=resolve_open_question_rows,
+        write_json_file=write_json_file,
+        cognitive_state_path=cognitive_state_path,
+        send_discord_text=send_discord_text,
+        format_display_text=format_display_text,
+        speak_answer=speak_answer,
+        current_turn_id=current_turn_id,
+        append_history=append_history,
+        schedule_memory_update=schedule_memory_update,
+        create_turn_scoped_task=create_turn_scoped_task,
+        attach_current_task=_attach_current_task,
+        detach_task=_detach_task,
+        record_search_followup_queued=record_search_followup_queued,
+        log=print,
+    )
+
+
 async def deliver_proactive_followup(
     guild_id: int,
     query: str,
@@ -4378,62 +4423,25 @@ async def deliver_proactive_followup(
     turn_scope: TurnScope | None = None,
     runtime_mode: str | None = None,
 ) -> None:
-    if turn_scope is not None:
-        turn_scope.raise_if_cancelled()
-    plain_answer = strip_omnivoice_tags(answer) or answer
-    guild = bot.get_guild(guild_id)
-    target_channel_id = channel_id
-    stored_target = session_followup_targets.get(session_key, {}) if session_key is not None else {}
-    if target_channel_id is None and session_key is not None:
-        target_channel_id = stored_target.get("channel_id")
-    reply_target_id = reply_to_message_id if reply_to_message_id is not None else stored_target.get("message_id")
-
-    if target_channel_id is not None:
-        channel = bot.get_channel(target_channel_id)
-        if channel is None:
-            try:
-                channel = await bot.fetch_channel(target_channel_id)
-            except Exception:
-                channel = None
-        if channel is not None and hasattr(channel, "send"):
-            if turn_scope is not None:
-                turn_scope.raise_if_cancelled()
-            await send_discord_text(
-                channel,
-                format_display_text(answer, session_key=session_key),
-                reference_message_id=reply_target_id,
-                reference_factory=lambda message_id: discord.Object(id=message_id),
-            )
-
-    vc = guild.voice_client if guild else None
-    if vc is not None and vc.is_connected():
-        try:
-            if turn_scope is not None:
-                turn_scope.raise_if_cancelled()
-            await speak_answer(vc, answer, turn_id=current_turn_id(session_key), session_key=session_key, turn_scope=turn_scope)
-        except Exception as e:
-            print(f"[SEARCH] proactive TTS 실패: {e!r}")
-
-    if turn_scope is not None:
-        turn_scope.raise_if_cancelled()
-    append_history(session_key, query, plain_answer, guild_id=guild_id)
-    schedule_memory_update(
+    await deliver_proactive_followup_from_runtime(
         guild_id,
         query,
-        plain_answer,
+        answer,
+        deps=build_search_followup_runtime_deps(),
+        session_key=session_key,
         room_key=room_key,
         person_key=person_key,
         session_memory_key=session_memory_key,
+        channel_id=channel_id,
+        reply_to_message_id=reply_to_message_id,
         source=source,
-        user_speaker="search_task",
-        assistant_speaker="Evelyn",
         turn_scope=turn_scope,
         runtime_mode=runtime_mode,
     )
 
 
 def normalize_search_key(session_key: str, query: str) -> str:
-    return f"{session_key}:{clean_text(query).lower()}"
+    return normalize_search_key_payload(session_key, query)
 
 
 def schedule_search_followup_singleflight(
@@ -4450,29 +4458,20 @@ def schedule_search_followup_singleflight(
     turn_scope: TurnScope | None = None,
     runtime_mode: str | None = None,
 ) -> asyncio.Task:
-    search_key = normalize_search_key(session_key, query)
-    existing = inflight_search_tasks.get(search_key)
-    if existing is not None and not existing.done():
-        return existing
-    task = create_turn_scoped_task(
-        run_search_followup(
-            guild_id,
-            query,
-            session_key=session_key,
-            room_key=room_key,
-            person_key=person_key,
-            session_memory_key=session_memory_key,
-            channel_id=channel_id,
-            reply_to_message_id=reply_to_message_id,
-            source=source,
-            turn_scope=turn_scope,
-            runtime_mode=runtime_mode,
-            search_key=search_key,
-        ),
+    return schedule_search_followup_singleflight_from_runtime(
+        guild_id,
+        query,
+        deps=build_search_followup_runtime_deps(),
+        session_key=session_key,
+        room_key=room_key,
+        person_key=person_key,
+        session_memory_key=session_memory_key,
+        channel_id=channel_id,
+        reply_to_message_id=reply_to_message_id,
+        source=source,
         turn_scope=turn_scope,
+        runtime_mode=runtime_mode,
     )
-    inflight_search_tasks[search_key] = task
-    return task
 
 
 async def run_search_followup(
@@ -4490,71 +4489,21 @@ async def run_search_followup(
     runtime_mode: str | None = None,
     search_key: str | None = None,
 ) -> None:
-    task = _attach_current_task(turn_scope)
-    try:
-        if turn_scope is not None:
-            turn_scope.raise_if_cancelled()
-        results = await search_duckduckgo(query)
-        if turn_scope is not None:
-            turn_scope.raise_if_cancelled()
-        answer = await answer_from_search_results(query, results)
-        removed = resolve_open_question_rows(guild_id, query, answer)
-        if room_key:
-            removed += resolve_open_question_rows(guild_id, query, answer, scope_type="room", scope_key=room_key)
-        if person_key:
-            removed += resolve_open_question_rows(guild_id, query, answer, scope_type="person", scope_key=person_key)
-        if session_memory_key:
-            removed += resolve_open_question_rows(guild_id, query, answer, scope_type="session", scope_key=session_memory_key)
-        if removed:
-            print(f"[SEARCH] resolved_open_questions guild={guild_id} removed={removed}")
-        completed_state = {
-            "action": "answer",
-            "confidence": 1.0,
-            "user_intent": clean_text(query),
-            "state_summary": "검색을 마쳤고 결과를 사용자에게 전달했다.",
-            "question_for_user": "",
-            "main_prompt_hint": "찾은 내용을 바로 전달해라.",
-            "reason_brief": "search_completed",
-            "retrieved_context_ids": [],
-            "updated_at": int(time.time()),
-        }
-        write_json_file(cognitive_state_path(guild_id), completed_state)
-        if room_key:
-            write_json_file(cognitive_state_path(guild_id, scope_type="room", scope_key=room_key), completed_state)
-        if person_key:
-            write_json_file(cognitive_state_path(guild_id, scope_type="person", scope_key=person_key), completed_state)
-        if session_memory_key:
-            write_json_file(cognitive_state_path(guild_id, scope_type="session", scope_key=session_memory_key), completed_state)
-        if turn_scope is not None:
-            turn_scope.raise_if_cancelled()
-        await deliver_proactive_followup(
-            guild_id,
-            query,
-            answer,
-            session_key=session_key,
-            room_key=room_key,
-            person_key=person_key,
-            session_memory_key=session_memory_key,
-            channel_id=channel_id,
-            reply_to_message_id=reply_to_message_id,
-            source=source,
-            turn_scope=turn_scope,
-            runtime_mode=runtime_mode,
-        )
-    except asyncio.CancelledError:
-        raise
-    except Exception as e:
-        print(f"[SEARCH] follow-up 실패 guild={guild_id} query={query!r} err={e!r}")
-    finally:
-        task_key = runtime_session_key(session_key=session_key, guild_id=guild_id)
-        task_ref = background_search_tasks.get(task_key) if task_key is not None else None
-        if task_ref is asyncio.current_task() and task_key is not None:
-            background_search_tasks.pop(task_key, None)
-        if search_key:
-            inflight = inflight_search_tasks.get(search_key)
-            if inflight is asyncio.current_task():
-                inflight_search_tasks.pop(search_key, None)
-        _detach_task(turn_scope, task)
+    await run_search_followup_from_runtime(
+        guild_id,
+        query,
+        deps=build_search_followup_runtime_deps(),
+        session_key=session_key,
+        room_key=room_key,
+        person_key=person_key,
+        session_memory_key=session_memory_key,
+        channel_id=channel_id,
+        reply_to_message_id=reply_to_message_id,
+        source=source,
+        turn_scope=turn_scope,
+        runtime_mode=runtime_mode,
+        search_key=search_key,
+    )
 
 
 def schedule_search_followup(
@@ -4573,58 +4522,22 @@ def schedule_search_followup(
     turn_scope: TurnScope | None = None,
     runtime_mode: str | None = None,
 ) -> None:
-    global search_followup_queued_count
-    if not guild_id:
-        return
-    opts = apply_runtime_mode(runtime_mode or "normal")
-    tagged_action, stripped_answer = parse_response_action_tag(answer)
-    wants_search_by_tag = tagged_action == "search"
-    wants_search_by_fallback = answer_promises_search(stripped_answer)
-    if wants_search_by_tag:
-        wants_search_by_fallback = False
-    if opts.get("skip_search_followup") and not force and not wants_search_by_tag and not wants_search_by_fallback:
-        return
-    if not force and not wants_search_by_tag and not wants_search_by_fallback:
-        return
-    query = build_search_query(guild_id, user_text, session_key=session_key)
-    if len(query) < 2:
-        return
-    task_key = runtime_session_key(session_key=session_key, guild_id=guild_id)
-    if task_key is None:
-        return
-    if channel_id is not None or reply_to_message_id is not None:
-        remember_session_followup_target(task_key, channel_id=channel_id, message_id=reply_to_message_id)
-    search_key = normalize_search_key(task_key, query)
-    for existing_key, existing_task in list(inflight_search_tasks.items()):
-        if not existing_key.startswith(f"{task_key}:"):
-            continue
-        prior_query = existing_key.split(":", 1)[1]
-        if existing_key == search_key:
-            if existing_task is not None and not existing_task.done():
-                return
-            continue
-        if is_similar(prior_query, clean_text(query).lower()) and existing_task is not None and not existing_task.done():
-            existing_task.cancel()
-            inflight_search_tasks.pop(existing_key, None)
-    existing = background_search_tasks.get(task_key)
-    if existing is not None and not existing.done():
-        existing.cancel()
-    print(f"[SEARCH] scheduled guild={guild_id} session={task_key!r} query={query!r} source={source}")
-    search_followup_queued_count += 1
-    task = schedule_search_followup_singleflight(
+    schedule_search_followup_from_runtime(
         guild_id,
-        query,
-        session_key=task_key,
+        session_key,
+        user_text,
+        answer,
+        deps=build_search_followup_runtime_deps(),
         room_key=room_key,
         person_key=person_key,
         session_memory_key=session_memory_key,
         channel_id=channel_id,
         reply_to_message_id=reply_to_message_id,
         source=source,
+        force=force,
         turn_scope=turn_scope,
         runtime_mode=runtime_mode,
     )
-    background_search_tasks[task_key] = task
 
 
 async def set_tts_presence(is_warming_up: bool) -> None:
