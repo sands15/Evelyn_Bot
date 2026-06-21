@@ -119,6 +119,7 @@ from evelyn_core.cognitive_policy_state import (
     read_cached_cognitive_state,
     read_layered_cognitive_state,
 )
+from evelyn_core.cognitive_state_runtime import CognitiveStateRuntimeDeps, update_cognitive_state_from_runtime
 from evelyn_core.self_model import (
     mark_self_state_assistant_output,
     record_self_identity_turn,
@@ -4060,6 +4061,37 @@ async def classify_llm_route_async(user_text: str, *, guild_id: int | None = Non
     if isinstance(raw_context_policy, dict):
         meta["context_policy"] = ContextPolicy.from_mapping(raw_context_policy).to_dict()
     return selected, meta
+def build_cognitive_state_runtime_deps() -> CognitiveStateRuntimeDeps:
+    return CognitiveStateRuntimeDeps(
+        attach_current_task=_attach_current_task,
+        detach_task=_detach_task,
+        cognitive_locks=cognitive_locks,
+        collect_memory_layers=collect_memory_layers,
+        layered_summary_text=layered_summary_text,
+        normalize_cognitive_state=normalize_cognitive_state,
+        read_layered_cognitive_state=read_layered_cognitive_state,
+        get_matching_speculative_policy=get_matching_speculative_policy,
+        fast_path_policy=fast_path_policy,
+        session_state_snapshot=session_state_snapshot,
+        build_fast_cognitive_state=build_fast_cognitive_state,
+        write_json_file=write_json_file,
+        cognitive_state_path=cognitive_state_path,
+        recent_memory_groups=recent_memory_groups,
+        memory_cognitive_raw_limit=MEMORY_COGNITIVE_RAW_LIMIT,
+        build_cognitive_state_messages=build_cognitive_state_messages,
+        ask_router_llm=ask_router_llm,
+        cognitive_max_tokens=COGNITIVE_MAX_TOKENS,
+        cognitive_timeout_sec=COGNITIVE_TIMEOUT_SEC,
+        current_turn_id=current_turn_id,
+        is_context_size_error=is_context_size_error,
+        build_compact_cognitive_state_messages=build_compact_cognitive_state_messages,
+        should_log_voice_timing=should_log_voice_timing,
+        build_cognitive_fallback_state=build_cognitive_fallback_state,
+        finalize_cognitive_state=finalize_cognitive_state,
+        log=print,
+    )
+
+
 async def update_cognitive_state(
     guild_id: int,
     user_text: str,
@@ -4071,133 +4103,18 @@ async def update_cognitive_state(
     source: str = "text",
     turn_scope: TurnScope | None = None,
 ) -> dict:
-    started_at = time.monotonic()
-    task = _attach_current_task(turn_scope)
-    lock = cognitive_locks.setdefault(guild_id, asyncio.Lock())
-    scope_type = "session" if session_memory_key else "person" if person_key else "room" if room_key else "guild"
-    scope_key = session_memory_key if session_memory_key else person_key if person_key else room_key
-    try:
-        async with lock:
-            if turn_scope is not None:
-                turn_scope.raise_if_cancelled()
-            layers = collect_memory_layers(
-                guild_id,
-                room_key=room_key,
-                person_key=person_key,
-                session_memory_key=session_memory_key,
-            )
-            current_summary = layered_summary_text(layers)
-            current_state = normalize_cognitive_state(
-                read_layered_cognitive_state(
-                    guild_id,
-                    room_key=room_key,
-                    person_key=person_key,
-                    session_memory_key=session_memory_key,
-                ) or {}
-            )
-            speculative = get_matching_speculative_policy(session_key, user_text) if source == "voice" else None
-            fast_policy = (speculative or {}).get("policy") or fast_path_policy(user_text, source, session_state_snapshot(session_key))
-            if fast_policy is not None:
-                state = build_fast_cognitive_state(
-                    user_text,
-                    action=str(fast_policy.get("action", "answer")),
-                    current_state=current_state,
-                    reason_brief=str(fast_policy.get("reason_brief", "fast_path")),
-                )
-                write_json_file(cognitive_state_path(guild_id, scope_type=scope_type, scope_key=scope_key), state)
-                return state
-            recent = recent_memory_groups(
-                layers,
-                raw_limit=MEMORY_COGNITIVE_RAW_LIMIT,
-                facts_limit=4,
-                questions_limit=4,
-            )
+    return await update_cognitive_state_from_runtime(
+        guild_id,
+        user_text,
+        deps=build_cognitive_state_runtime_deps(),
+        session_key=session_key,
+        room_key=room_key,
+        person_key=person_key,
+        session_memory_key=session_memory_key,
+        source=source,
+        turn_scope=turn_scope,
+    )
 
-            messages = build_cognitive_state_messages(
-                current_state=current_state,
-                current_summary=current_summary,
-                recent_raw=recent["raw"],
-                recent_facts=recent["facts"],
-                recent_questions=recent["questions"],
-                user_text=user_text,
-                raw_limit=MEMORY_COGNITIVE_RAW_LIMIT,
-            )
-
-            try:
-                if turn_scope is not None:
-                    turn_scope.raise_if_cancelled()
-                result = await ask_router_llm(
-                    messages,
-                    max_tokens=COGNITIVE_MAX_TOKENS,
-                    timeout_seconds=COGNITIVE_TIMEOUT_SEC,
-                    purpose="cognitive",
-                    hot_path=True,
-                    turn_id=current_turn_id(session_key),
-                    session_key=session_key,
-                    source=source,
-                    guild_id=guild_id,
-                )
-            except Exception as e:
-                if is_context_size_error(e):
-                    compact_messages = build_compact_cognitive_state_messages(
-                        current_summary=current_summary,
-                        user_text=user_text,
-                    )
-                    try:
-                        if turn_scope is not None:
-                            turn_scope.raise_if_cancelled()
-                        result = await ask_router_llm(
-                            compact_messages,
-                            max_tokens=COGNITIVE_MAX_TOKENS,
-                            timeout_seconds=max(3.0, COGNITIVE_TIMEOUT_SEC - 2.0),
-                            purpose="cognitive",
-                            hot_path=True,
-                            turn_id=current_turn_id(session_key),
-                            session_key=session_key,
-                            source=source,
-                            guild_id=guild_id,
-                        )
-                    except Exception as e2:
-                        e = e2
-                        print(f"[COGNITIVE] compact retry 실패: {e2}")
-                    else:
-                        print("[COGNITIVE] compact retry 성공")
-                if "result" not in locals() or not isinstance(result, dict):
-                    print(f"[COGNITIVE] 상태 업데이트 실패 또는 timeout: {e}")
-                    elapsed_ms = (time.monotonic() - started_at) * 1000.0
-                    if should_log_voice_timing(elapsed_ms):
-                        print(f"[COGNITIVE LATENCY] guild={guild_id} scope={scope_type}:{scope_key or 'default'} failed_after_ms={elapsed_ms:.0f}")
-                    fallback = build_cognitive_fallback_state(
-                        current_state=current_state,
-                        user_text=user_text,
-                    )
-                    write_json_file(cognitive_state_path(guild_id, scope_type=scope_type, scope_key=scope_key), fallback)
-                    return fallback
-
-            if turn_scope is not None:
-                turn_scope.raise_if_cancelled()
-            state = finalize_cognitive_state(
-                result,
-                current_state=current_state,
-                user_text=user_text,
-            )
-            write_json_file(cognitive_state_path(guild_id, scope_type=scope_type, scope_key=scope_key), state)
-            elapsed_ms = (time.monotonic() - started_at) * 1000.0
-            if should_log_voice_timing(elapsed_ms):
-                print(f"[COGNITIVE LATENCY] guild={guild_id} scope={scope_type}:{scope_key or 'default'} action={state.get('action')} ms={elapsed_ms:.0f}")
-
-            if state.get("action") == "ask" and state.get("question_for_user"):
-                print(
-                    f"[COGNITIVE ASK] guild={guild_id} scope={scope_type}:{scope_key or 'default'} question={state['question_for_user']!r} reason={state.get('reason_brief', '')!r} confidence={state.get('confidence', 0.0):.2f}"
-                )
-            elif state.get("action") == "search_then_answer":
-                print(
-                    f"[COGNITIVE SEARCH] guild={guild_id} scope={scope_type}:{scope_key or 'default'} intent={state.get('user_intent', '')!r} reason={state.get('reason_brief', '')!r}"
-                )
-
-            return state
-    finally:
-        _detach_task(turn_scope, task)
 async def update_long_term_memory(
     guild_id: int,
     user_text: str,
