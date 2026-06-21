@@ -6,6 +6,7 @@ from pathlib import Path
 
 REPO_ROOT = next(path for path in Path(__file__).resolve().parents if (path / "main.py").exists())
 MAIN_PY = REPO_ROOT / "main.py"
+ROUTE_EXECUTION_PY = REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "voice_route_execution.py"
 TOOL_AWARENESS_POLICY = REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "tool_awareness_policy.py"
 SEARCH_FOLLOWUP_POLICY = REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "search_followup_policy.py"
 BLUEPRINT = REPO_ROOT / "docs" / "tool_awareness_blueprint.md"
@@ -15,6 +16,7 @@ class ToolAwarenessJudgmentTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.main_py = MAIN_PY.read_text(encoding="utf-8")
+        cls.route_execution_py = ROUTE_EXECUTION_PY.read_text(encoding="utf-8")
         cls.tool_awareness_policy = TOOL_AWARENESS_POLICY.read_text(encoding="utf-8")
         cls.search_followup_policy = SEARCH_FOLLOWUP_POLICY.read_text(encoding="utf-8")
         cls.blueprint = BLUEPRINT.read_text(encoding="utf-8")
@@ -55,9 +57,14 @@ class ToolAwarenessJudgmentTests(unittest.TestCase):
         self.assertIn("and not wants_search_by_tag and not wants_search_by_fallback", self.main_py)
 
     def test_main_paths_call_promise_escalation(self) -> None:
-        self.assertGreaterEqual(self.main_py.count("await resolve_promised_search_final_answer"), 3)
-        self.assertIn("messages=messages", self.main_py)
-        self.assertIn("route_decision=route_decision", self.main_py)
+        combined = self.main_py + self.route_execution_py
+        self.assertGreaterEqual(
+            self.main_py.count("await resolve_promised_search_final_answer")
+            + self.route_execution_py.count("await deps.resolve_promised_search_final_answer"),
+            3,
+        )
+        self.assertIn("messages=messages", combined)
+        self.assertIn("route_decision=route_decision", combined)
 
     def test_promise_detector_has_plain_korean_and_english_fallbacks(self) -> None:
         self.assertIn("promise_regexes = (", self.search_followup_policy)

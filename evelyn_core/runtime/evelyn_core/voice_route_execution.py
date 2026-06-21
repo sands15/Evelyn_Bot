@@ -4,6 +4,8 @@ import time
 from dataclasses import dataclass, replace
 from typing import Any, Awaitable, Callable, MutableMapping
 
+import aiohttp
+
 from .skills import SkillContext, SkillResult
 from .text import clean_text, is_user_echo_answer
 from .turn_budget import build_turn_execution_budget
@@ -58,6 +60,45 @@ class VoiceRouteExecutionDeps:
     router_route_timeout_sec: float
     cognitive_timeout_sec: float
     router_llm_enabled: bool
+    log: Callable[..., Any] = print
+
+
+@dataclass(frozen=True)
+class VoiceMainLlmStreamingDeps:
+    model_name: str
+    llm_server_url: str
+    main_llm_chat_content_format: str
+    voice_llm_max_tokens: int
+    main_llm_stop_tokens: tuple[str, ...] | list[str]
+    get_http_session: Callable[..., Awaitable[Any]]
+    is_casual_call_or_status_question: Callable[[str], bool]
+    observe_live_minecraft_state: Callable[..., Awaitable[dict[str, Any] | None]]
+    build_runtime_status_context: Callable[..., Awaitable[str]]
+    build_main_response_guidance: Callable[..., str]
+    mark_turn_stage: Callable[..., Any]
+    build_main_llm_payload: Callable[..., Any]
+    build_stream_speech_chunker: Callable[..., Any]
+    user_explicitly_mentions_minecraft: Callable[[str], bool]
+    extract_main_llm_answer_from_choice: Callable[..., tuple[str, str, str]]
+    sanitize_model_output: Callable[[str], str]
+    parse_response_action_tag: Callable[[str], Any]
+    extract_answer_from_reasoning: Callable[[str, str], str]
+    ask_llm_once: Callable[..., Awaitable[str]]
+    resolve_promised_search_final_answer: Callable[..., Awaitable[str]]
+    enforce_question_limits: Callable[..., tuple[str, dict[str, Any]]]
+    record_question_trace: Callable[..., Any]
+    emit_delivery_plan_chunks: Callable[..., Awaitable[Any]]
+    build_delivery_plan: Callable[..., Any]
+    build_answer_payload_from_text: Callable[[str], Any]
+    split_tts_sentences: Callable[..., Any]
+    decode_sse_stream_line: Callable[[bytes], dict[str, Any] | None]
+    answer_contains_minecraft_leak: Callable[[str], bool]
+    emit_stream_delta_chunks: Callable[..., Awaitable[bool]]
+    record_model_call_trace: Callable[..., Any]
+    sanitize_unrequested_minecraft_leak: Callable[[str, str], str]
+    flush_streamed_answer_chunks: Callable[..., Awaitable[Any]]
+    increment_inflight_llm_requests: Callable[[], Any]
+    decrement_inflight_llm_requests: Callable[[], Any]
     log: Callable[..., Any] = print
 
 
@@ -595,3 +636,307 @@ async def maybe_handle_short_circuit_route(
 
     return None, on_first_chunk
 
+
+async def execute_main_llm_streaming_turn(
+    *,
+    deps: VoiceMainLlmStreamingDeps,
+    request: VoiceTurnRequest,
+    route_context: VoiceTurnRouteContext,
+    on_first_chunk: Callable[[], None] | None,
+) -> str:
+    user_text = request.user_text
+    guild_id = request.guild_id
+    session_key = request.session_key
+    room_key = request.room_key
+    person_key = request.person_key
+    session_memory_key = request.session_memory_key
+    source = request.source
+    debug_text = request.debug_text
+    metrics = request.metrics
+    turn_scope = request.turn_scope
+    messages = route_context.messages
+    cognitive_state = route_context.cognitive_state
+    route_decision = route_context.route_decision
+    on_sentence = request.on_sentence if route_decision.needs_tts else None
+    if turn_scope is not None:
+        turn_scope.transition(TurnState.LLM_RUNNING, reason="execute_main_llm_streaming_turn")
+    if metrics is not None:
+        metrics.setdefault("meta", {})["needs_tts"] = bool(route_decision.needs_tts and request.on_sentence is not None)
+
+    guided_user_text = route_decision.prompt_text or user_text
+    lightweight_persona_turn = deps.is_casual_call_or_status_question(guided_user_text)
+    needs_live_minecraft_state = (
+        not lightweight_persona_turn
+        and (route_decision.needs_minecraft_state or route_decision.needs_skill_graph)
+    )
+    needs_runtime_status_context = route_decision.needs_runtime_state
+    live_minecraft_state = await deps.observe_live_minecraft_state(guild_id) if needs_live_minecraft_state else None
+    runtime_status_context = await deps.build_runtime_status_context(force=needs_runtime_status_context) if needs_runtime_status_context else ""
+    final_user_text = f"{guided_user_text}\n\n{deps.build_main_response_guidance(cognitive_state, source=source, user_text=guided_user_text, session_key=session_key, guild_id=guild_id, minecraft_state=live_minecraft_state, runtime_status_context=runtime_status_context, route_decision=route_decision)}"
+    deps.mark_turn_stage(
+        metrics,
+        "prompt_built",
+        event_name="prompt_built",
+        prompt_chars=len(final_user_text),
+        source_mode=source,
+    )
+
+    payload = deps.build_main_llm_payload(
+        model_name=deps.model_name,
+        messages=messages,
+        final_user_text=final_user_text,
+        source=source,
+        stream=True,
+        content_format=deps.main_llm_chat_content_format,
+        max_tokens=deps.voice_llm_max_tokens,
+        stop_tokens=deps.main_llm_stop_tokens,
+    )
+
+    timeout = aiohttp.ClientTimeout(total=120)
+    session = await deps.get_http_session()
+    raw_parts: list[str] = []
+    reasoning_parts: list[str] = []
+    speech_chunker = deps.build_stream_speech_chunker(metrics=metrics)
+    question_stream_state = {
+        "max_question_count": max(0, min(1, int(route_decision.max_question_count or 0))),
+        "question_count": 0,
+        "question_removed_count": 0,
+    } if on_sentence is not None else None
+    emitted_any = False
+    allow_minecraft_domain = deps.user_explicitly_mentions_minecraft(guided_user_text)
+    suppressed_minecraft_leak_stream = False
+    llm_started_at = time.monotonic()
+    main_first_token_ms: float | None = None
+
+    deps.increment_inflight_llm_requests()
+    try:
+        deps.mark_turn_stage(
+            metrics,
+            "llm_request_start",
+            event_name="llm_request_start",
+            source_mode=source,
+            prompt_chars=len(final_user_text),
+        )
+        async with session.post(deps.llm_server_url, json=payload, timeout=timeout) as resp:
+            if resp.status != 200:
+                error_text = await resp.text()
+                raise RuntimeError(f"LLM 서버 오류: {resp.status} / {error_text[:300]}")
+
+            content_type = resp.headers.get("Content-Type", "")
+            if "application/json" in content_type.lower():
+                if turn_scope is not None:
+                    turn_scope.raise_if_cancelled()
+                data = await resp.json()
+                choices = data.get("choices", [])
+                answer = ""
+                if choices:
+                    answer, _answer_source, _finish_reason = deps.extract_main_llm_answer_from_choice(
+                        choices[0],
+                        user_text,
+                        sanitize_output=deps.sanitize_model_output,
+                        parse_response_action_tag=deps.parse_response_action_tag,
+                        extract_answer_from_reasoning=deps.extract_answer_from_reasoning,
+                    )
+                if not answer:
+                    deps.log("[LLM STREAM] json answer empty, retry non-stream")
+                    answer = await deps.ask_llm_once(
+                        user_text,
+                        guild_id=guild_id,
+                        session_key=session_key,
+                        room_key=room_key,
+                        person_key=person_key,
+                        session_memory_key=session_memory_key,
+                        source=source,
+                        debug_text=debug_text,
+                        record_question_trace_enabled=False,
+                    )
+                answer = await deps.resolve_promised_search_final_answer(
+                    user_text=user_text,
+                    answer_text=answer,
+                    guild_id=guild_id,
+                    session_key=session_key,
+                    source=source,
+                    messages=messages,
+                    cognitive_state=cognitive_state,
+                    route_decision=route_decision,
+                    metrics=metrics,
+                )
+                answer, question_shape_meta = deps.enforce_question_limits(answer, route_decision)
+                deps.record_question_trace(
+                    route_decision=route_decision,
+                    answer=answer,
+                    shape_meta=question_shape_meta,
+                    metrics=metrics,
+                    cooldown_hit=bool((metrics or {}).get("meta", {}).get("question_cooldown_hit")) if isinstance(metrics, dict) else False,
+                )
+                if on_first_chunk is not None:
+                    main_first_token_ms = max(0.0, (time.monotonic() - llm_started_at) * 1000.0)
+                    deps.mark_turn_stage(
+                        metrics,
+                        "llm_first_chunk",
+                        event_name="llm_first_chunk",
+                        source_mode=source,
+                        since_request_ms=main_first_token_ms,
+                    )
+                    on_first_chunk()
+                    on_first_chunk = None
+                await deps.emit_delivery_plan_chunks(
+                    deps.build_delivery_plan(deps.build_answer_payload_from_text(answer), include_voice=on_sentence is not None, split_chunks=deps.split_tts_sentences),
+                    on_sentence=on_sentence,
+                )
+                if metrics is not None:
+                    metrics.setdefault("marks", {})["llm_done"] = (time.monotonic() - float(metrics.get("started_at", time.monotonic()))) * 1000.0
+                deps.record_model_call_trace(
+                    model_role="main",
+                    purpose="main_response",
+                    hot_path=True,
+                    started_at=llm_started_at,
+                    success=True,
+                    metrics=metrics,
+                    first_token_ms=main_first_token_ms,
+                    model_name=deps.model_name,
+                    endpoint=deps.llm_server_url,
+                    session_key=session_key,
+                    source=source,
+                    guild_id=guild_id,
+                )
+                return answer
+
+            async for raw_line in resp.content:
+                if turn_scope is not None:
+                    turn_scope.raise_if_cancelled()
+                stream_event = deps.decode_sse_stream_line(raw_line)
+                if not stream_event:
+                    continue
+                if stream_event.get("done"):
+                    break
+
+                reasoning_text = str(stream_event.get("reasoning_text") or "")
+                if reasoning_text:
+                    reasoning_parts.append(reasoning_text)
+
+                delta_text = str(stream_event.get("delta_text") or "")
+                if not delta_text:
+                    continue
+
+                if on_first_chunk is not None:
+                    main_first_token_ms = max(0.0, (time.monotonic() - llm_started_at) * 1000.0)
+                    deps.mark_turn_stage(
+                        metrics,
+                        "llm_first_chunk",
+                        event_name="llm_first_chunk",
+                        source_mode=source,
+                        since_request_ms=main_first_token_ms,
+                    )
+                    on_first_chunk()
+                    on_first_chunk = None
+
+                raw_parts.append(delta_text)
+                if not allow_minecraft_domain and deps.answer_contains_minecraft_leak(deps.sanitize_model_output("".join(raw_parts))):
+                    suppressed_minecraft_leak_stream = True
+                    if metrics is not None:
+                        metrics.setdefault("meta", {})["suppressed_minecraft_leak_stream"] = True
+                    continue
+                emitted_any = (await deps.emit_stream_delta_chunks(
+                    delta_text,
+                    speech_chunker=speech_chunker,
+                    on_sentence=on_sentence,
+                    question_stream_state=question_stream_state,
+                )) or emitted_any
+    except Exception as e:
+        deps.record_model_call_trace(
+            model_role="main",
+            purpose="main_response",
+            hot_path=True,
+            started_at=llm_started_at,
+            success=False,
+            metrics=metrics,
+            first_token_ms=main_first_token_ms,
+            error=e,
+            model_name=deps.model_name,
+            endpoint=deps.llm_server_url,
+            session_key=session_key,
+            source=source,
+            guild_id=guild_id,
+        )
+        raise
+    finally:
+        deps.decrement_inflight_llm_requests()
+
+    if turn_scope is not None:
+        turn_scope.raise_if_cancelled()
+    answer = deps.sanitize_model_output("".join(raw_parts))
+    if suppressed_minecraft_leak_stream:
+        emitted_any = False
+    if not answer:
+        deps.log(
+            f"[LLM STREAM] stream 응답 본문이 비어 있음, non-stream 재시도 | raw_len={len(''.join(raw_parts))} reasoning_len={len(''.join(reasoning_parts))} emitted_any={emitted_any}"
+        )
+        answer = await deps.ask_llm_once(
+            user_text,
+            guild_id=guild_id,
+            session_key=session_key,
+            room_key=room_key,
+            person_key=person_key,
+            session_memory_key=session_memory_key,
+            source=source,
+            debug_text=debug_text,
+            record_question_trace_enabled=False,
+        )
+    answer = deps.sanitize_unrequested_minecraft_leak(guided_user_text, answer)
+    pre_escalation_answer = answer
+    answer = await deps.resolve_promised_search_final_answer(
+        user_text=user_text,
+        answer_text=answer,
+        guild_id=guild_id,
+        session_key=session_key,
+        source=source,
+        messages=messages,
+        cognitive_state=cognitive_state,
+        route_decision=route_decision,
+        metrics=metrics,
+    )
+    if clean_text(answer) != clean_text(pre_escalation_answer):
+        emitted_any = False
+    answer, question_shape_meta = deps.enforce_question_limits(answer, route_decision)
+    deps.record_question_trace(
+        route_decision=route_decision,
+        answer=answer,
+        shape_meta=question_shape_meta,
+        metrics=metrics,
+        cooldown_hit=bool((metrics or {}).get("meta", {}).get("question_cooldown_hit")) if isinstance(metrics, dict) else False,
+    )
+    if question_stream_state is not None and metrics is not None:
+        metrics.setdefault("meta", {})["question_stream_removed_count"] = int(question_stream_state.get("question_removed_count", 0))
+
+    if turn_scope is not None:
+        turn_scope.raise_if_cancelled()
+    await deps.flush_streamed_answer_chunks(
+        answer,
+        speech_chunker=speech_chunker,
+        on_sentence=on_sentence,
+        emitted_any=emitted_any,
+        question_stream_state=question_stream_state,
+    )
+    if question_stream_state is not None and metrics is not None:
+        metrics.setdefault("meta", {})["question_stream_removed_count"] = int(question_stream_state.get("question_removed_count", 0))
+
+    if metrics is not None:
+        metrics.setdefault("marks", {})["llm_http_ms"] = (time.monotonic() - llm_started_at) * 1000.0
+        metrics.setdefault("marks", {})["llm_done"] = (time.monotonic() - float(metrics.get("started_at", time.monotonic()))) * 1000.0
+
+    deps.record_model_call_trace(
+        model_role="main",
+        purpose="main_response",
+        hot_path=True,
+        started_at=llm_started_at,
+        success=True,
+        metrics=metrics,
+        first_token_ms=main_first_token_ms,
+        model_name=deps.model_name,
+        endpoint=deps.llm_server_url,
+        session_key=session_key,
+        source=source,
+        guild_id=guild_id,
+    )
+    return answer

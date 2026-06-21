@@ -34,7 +34,7 @@ class RuntimeDependencyContextTests(unittest.TestCase):
         self.assertIn("current_oom_signal=", main_py)
         self.assertIn("recent_errors_are_historical=true", main_py)
         self.assertIn("RUNTIME_STATUS_RULE", main_py)
-        self.assertIn("needs_runtime_status_context = route_decision.needs_runtime_state", main_py)
+        self.assertIn("needs_runtime_status_context = route_decision.needs_runtime_state", route_execution_py)
         self.assertIn("def answer_gpu_runtime_status_query", runtime_status_context)
         self.assertIn("gpu_runtime_status_fast_path", route_execution_py)
 
@@ -60,7 +60,7 @@ class RuntimeDependencyContextTests(unittest.TestCase):
         self.assertIn("하지 마", response_policy)
         self.assertIn("def answer_simple_local_chat_query", response_policy)
         self.assertIn("simple_local_chat_fast_path", route_execution_py)
-        self.assertIn("suppressed_minecraft_leak_stream", main_py)
+        self.assertIn("suppressed_minecraft_leak_stream", route_execution_py)
         self.assertIn("그쪽 얘기는 빼고", response_policy)
         self.assertNotIn("return \"마크 얘기는 빼고", main_py)
         self.assertIn("응답 규칙: 짧게 바로 답해라", main_py)
