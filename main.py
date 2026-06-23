@@ -546,6 +546,12 @@ from evelyn_core.voice_stream_chunks import (
     emit_stream_delta_chunks as emit_stream_delta_chunks_payload,
     flush_streamed_answer_chunks as flush_streamed_answer_chunks_payload,
 )
+from evelyn_core.voice_delivery_runtime import (
+    VoiceDeliveryRuntimeDeps,
+    ask_llm_and_speak_local_from_runtime,
+    ask_llm_and_speak_streaming_from_runtime,
+    finalize_voice_answer_from_runtime,
+)
 from evelyn_core.voice_pipeline import (
     ActionResult,
     AnswerPayload,
@@ -3192,21 +3198,6 @@ class DiscordEditSink:
 
     async def close(self, final_text: str) -> None:
         await self.streamer.close(final_text)
-
-
-class ReplyStreamFanout:
-    def __init__(self, sinks: list[Any]):
-        self.sinks = [sink for sink in sinks if sink is not None]
-
-    async def on_chunk(self, text: str) -> None:
-        for sink in self.sinks:
-            await sink.on_chunk(text)
-
-    async def close(self, final_text: str) -> None:
-        for sink in self.sinks:
-            close = getattr(sink, "close", None)
-            if close is not None:
-                await close(final_text)
 
 
 def should_force_search_followup(
@@ -8276,6 +8267,29 @@ async def execute_voice_delivery_plan(
     )
 
 
+def build_voice_delivery_runtime_deps() -> VoiceDeliveryRuntimeDeps:
+    return VoiceDeliveryRuntimeDeps(
+        attach_current_task=_attach_current_task,
+        detach_task=_detach_task,
+        current_turn_id=current_turn_id,
+        session_topic_id=lambda session_key: session_topic_ids.get(session_key),
+        new_turn_metrics=new_turn_metrics,
+        is_local_speaker_voice_client=is_local_speaker_voice_client,
+        start_streaming_voice_delivery=start_streaming_voice_delivery,
+        start_streaming_local_voice_delivery=start_streaming_local_voice_delivery,
+        ask_llm_streaming=ask_llm_streaming,
+        speak_answer_local=speak_answer_local,
+        local_playback_count=lambda: int(local_tts_playback_manager.snapshot().get("playCount") or 0),
+        mark_barge_in_continuity_probe=_mark_voice_barge_in_continuity_probe,
+        record_voice_pipeline_failure=record_voice_pipeline_failure,
+        log_voice_latency=log_voice_latency,
+        log_voice_stage=log_voice_stage,
+        log_voice_bottleneck_summary=log_voice_bottleneck_summary,
+        false_trigger_reason_code=VOICE_BARGE_IN_REASON_CODE["FALSE_TRIGGER"],
+        false_trigger_reason_label=VOICE_BARGE_IN_REASON_LABEL[VOICE_BARGE_IN_REASON_CODE["FALSE_TRIGGER"]],
+    )
+
+
 async def finalize_voice_answer(
     answer: str,
     *,
@@ -8283,39 +8297,13 @@ async def finalize_voice_answer(
     delivery: StreamingVoiceDelivery,
     metrics: dict,
 ) -> tuple[str, int]:
-    cleaned_answer = clean_text(answer)
-    log_voice_stage(metrics, "LLM 완료", extra=f"chars={len(cleaned_answer)}", key="llm_done")
-    if cleaned_answer and on_final_answer is not None:
-        await on_final_answer(cleaned_answer)
-    try:
-        await delivery.close(cleaned_answer)
-        queued_sentence_count = await delivery.finalize()
-        if cleaned_answer:
-            _mark_voice_barge_in_continuity_probe(
-                metrics,
-                success=True,
-                reason="finalize_complete",
-                queued_sentence_count=queued_sentence_count,
-            )
-        else:
-            _mark_voice_barge_in_continuity_probe(
-                metrics,
-                success=False,
-                reason="finalize_empty_answer",
-                queued_sentence_count=queued_sentence_count,
-                reason_code=VOICE_BARGE_IN_REASON_CODE["FALSE_TRIGGER"],
-                reason_label=VOICE_BARGE_IN_REASON_LABEL[VOICE_BARGE_IN_REASON_CODE["FALSE_TRIGGER"]],
-            )
-    except Exception as exc:
-        error_text = f"{type(exc).__name__}:{clean_text(str(exc))}"
-        _mark_voice_barge_in_continuity_probe(
-            metrics,
-            success=False,
-            reason=f"finalize_exception:{error_text}",
-            queued_sentence_count=0,
-        )
-        raise
-    return cleaned_answer, queued_sentence_count
+    return await finalize_voice_answer_from_runtime(
+        answer,
+        on_final_answer=on_final_answer,
+        delivery=delivery,
+        metrics=metrics,
+        deps=build_voice_delivery_runtime_deps(),
+    )
 
 
 async def ask_llm_and_speak_local(
@@ -8333,128 +8321,21 @@ async def ask_llm_and_speak_local(
     metrics: dict | None = None,
     turn_scope: TurnScope | None = None,
 ) -> str:
-    task = _attach_current_task(turn_scope)
-    try:
-        if metrics is None:
-            metrics = new_turn_metrics(
-                source=source,
-                session_key=session_key,
-                guild_id=guild_id,
-                topic_id=session_topic_ids.get(session_key),
-                turn_id=current_turn_id(session_key),
-                segment_id=0,
-            )
-        else:
-            metrics.setdefault("started_at", time.monotonic())
-            metrics.setdefault("marks", {})
-            metrics.setdefault("meta", {})
-        metrics.setdefault("meta", {})["needs_tts"] = True
-        metrics.setdefault("meta", {})["output_mode"] = "local_speaker"
-        metrics.setdefault("meta", {})["delivery_mode"] = "llm_sentence_stream"
-        metrics.setdefault("tts_request_logged", False)
-        metrics.setdefault("tts_response_headers_logged", False)
-        metrics.setdefault("tts_first_byte_logged", False)
-        metrics.setdefault("tts_first_frame_logged", False)
-        metrics.setdefault("first_packet_sent_logged", False)
-        metrics.setdefault("local_first_playback_logged", False)
-        turn_id = metrics.get("meta", {}).get("turn_id") or current_turn_id(session_key)
-        log_voice_stage(metrics, "LLM/local streaming TTS pipeline start", extra=f"source={source} mode=local_speaker_stream")
-
-        delivery = start_streaming_local_voice_delivery(
-            metrics=metrics,
-            turn_id=turn_id,
-            session_key=session_key,
-            turn_scope=turn_scope,
-        )
-        fanout = ReplyStreamFanout([delivery])
-        answer = ""
-        cleaned_answer = ""
-        queued_sentence_count = 0
-        fallback_needed = False
-        playback_count_before = int(local_tts_playback_manager.snapshot().get("playCount") or 0)
-        try:
-            answer = await ask_llm_streaming(
-                user_text,
-                guild_id=guild_id,
-                session_key=session_key,
-                room_key=room_key,
-                person_key=person_key,
-                session_memory_key=session_memory_key,
-                on_sentence=fanout.on_chunk,
-                on_first_chunk=lambda: log_voice_latency(metrics, "llm_first_chunk_logged", "LLM first chunk"),
-                source=source,
-                debug_text=debug_text,
-                metrics=metrics,
-                turn_scope=turn_scope,
-            )
-            try:
-                cleaned_answer, queued_sentence_count = await finalize_voice_answer(
-                    answer,
-                    on_final_answer=on_final_answer,
-                    delivery=delivery,
-                    metrics=metrics,
-                )
-            except Exception as exc:
-                cleaned_answer = clean_text(answer)
-                metrics.setdefault("meta", {})["local_streaming_tts_error"] = repr(exc)
-                record_voice_pipeline_failure(
-                    "tts_playback_failed",
-                    exc,
-                    metrics,
-                    turn_id=turn_id,
-                    session_key=session_key,
-                    stage="local_speaker_stream_finalize",
-                )
-                fallback_needed = True
-            playback_count_after = int(local_tts_playback_manager.snapshot().get("playCount") or 0)
-            if queued_sentence_count <= 0 or playback_count_after <= playback_count_before:
-                fallback_needed = True
-                metrics.setdefault("meta", {})["local_streaming_tts_fallback_reason"] = (
-                    "no_sentence_queued" if queued_sentence_count <= 0 else "no_local_playback"
-                )
-        finally:
-            await delivery.abort()
-
-        if fallback_needed and cleaned_answer:
-            metrics.setdefault("meta", {})["local_streaming_tts_fallback_used"] = True
-            await speak_answer_local(
-                cleaned_answer,
-                turn_id=turn_id,
-                session_key=session_key,
-                turn_scope=turn_scope,
-                metrics=metrics,
-            )
-
-        log_voice_bottleneck_summary(
-            metrics,
-            label="voice_turn",
-            extra=f"source={source} chars={len(cleaned_answer)} mode=local_speaker_stream sentences={queued_sentence_count} fallback={fallback_needed}",
-            event_name="voice_turn_summary",
-        )
-        return cleaned_answer
-    except asyncio.CancelledError:
-        metrics.setdefault("meta", {})["playback_cancelled"] = True
-        metrics.setdefault("meta", {})["error_layer"] = "voice_turn"
-        metrics.setdefault("meta", {})["error"] = "cancelled"
-        log_voice_bottleneck_summary(
-            metrics,
-            label="voice_turn",
-            extra="cancelled=true mode=local_speaker",
-            event_name="voice_turn_summary",
-        )
-        raise
-    except Exception as exc:
-        metrics.setdefault("meta", {})["error_layer"] = "voice_turn"
-        metrics.setdefault("meta", {})["error"] = repr(exc)
-        log_voice_bottleneck_summary(
-            metrics,
-            label="voice_turn",
-            extra="error=true mode=local_speaker",
-            event_name="voice_turn_summary",
-        )
-        raise
-    finally:
-        _detach_task(turn_scope, task)
+    return await ask_llm_and_speak_local_from_runtime(
+        _vc,
+        user_text,
+        deps=build_voice_delivery_runtime_deps(),
+        guild_id=guild_id,
+        on_final_answer=on_final_answer,
+        session_key=session_key,
+        room_key=room_key,
+        person_key=person_key,
+        session_memory_key=session_memory_key,
+        source=source,
+        debug_text=debug_text,
+        metrics=metrics,
+        turn_scope=turn_scope,
+    )
 
 
 async def ask_llm_and_speak_streaming(
@@ -8472,111 +8353,21 @@ async def ask_llm_and_speak_streaming(
     metrics: dict | None = None,
     turn_scope: TurnScope | None = None,
 ) -> str:
-    if is_local_speaker_voice_client(vc):
-        return await ask_llm_and_speak_local(
-            vc,
-            user_text,
-            guild_id=guild_id,
-            on_final_answer=on_final_answer,
-            session_key=session_key,
-            room_key=room_key,
-            person_key=person_key,
-            session_memory_key=session_memory_key,
-            source=source,
-            debug_text=debug_text,
-            metrics=metrics,
-            turn_scope=turn_scope,
-        )
-
-    task = _attach_current_task(turn_scope)
-    try:
-        if metrics is None:
-            metrics = new_turn_metrics(
-                source=source,
-                session_key=session_key,
-                guild_id=guild_id,
-                topic_id=session_topic_ids.get(session_key),
-                turn_id=current_turn_id(session_key),
-                segment_id=0,
-            )
-        else:
-            metrics.setdefault("started_at", time.monotonic())
-            metrics.setdefault("marks", {})
-            metrics.setdefault("meta", {})
-        metrics.setdefault("meta", {})["needs_tts"] = True
-        metrics.setdefault("tts_request_logged", False)
-        metrics.setdefault("tts_response_headers_logged", False)
-        metrics.setdefault("tts_first_byte_logged", False)
-        metrics.setdefault("tts_first_frame_logged", False)
-        metrics.setdefault("first_packet_sent_logged", False)
-        metrics.setdefault("local_first_playback_logged", False)
-        log_voice_stage(metrics, "LLM/TTS 파이프라인 시작", extra=f"source={source} mode=llm_streaming")
-
-        delivery = start_streaming_voice_delivery(
-            vc,
-            metrics=metrics,
-            turn_id=metrics.get("meta", {}).get("turn_id") or current_turn_id(session_key),
-            session_key=session_key,
-            turn_scope=turn_scope,
-        )
-        fanout = ReplyStreamFanout([delivery])
-
-        answer = ""
-        queued_sentence_count = 0
-        try:
-            answer = await ask_llm_streaming(
-                user_text,
-                guild_id=guild_id,
-                session_key=session_key,
-                room_key=room_key,
-                person_key=person_key,
-                session_memory_key=session_memory_key,
-                on_sentence=fanout.on_chunk,
-                on_first_chunk=lambda: log_voice_latency(metrics, "llm_first_chunk_logged", "LLM 첫 chunk 시간"),
-                source=source,
-                debug_text=debug_text,
-                metrics=metrics,
-                turn_scope=turn_scope,
-            )
-            answer, queued_sentence_count = await finalize_voice_answer(
-                answer,
-                on_final_answer=on_final_answer,
-                delivery=delivery,
-                metrics=metrics,
-            )
-        finally:
-            await delivery.abort()
-
-        log_voice_bottleneck_summary(
-            metrics,
-            label="voice_turn",
-            extra=f"source={source} chars={len(answer)} mode=llm_streaming sentences={queued_sentence_count}",
-            event_name="voice_turn_summary",
-        )
-        return answer
-    except asyncio.CancelledError:
-        metrics.setdefault("meta", {})["playback_cancelled"] = True
-        metrics.setdefault("meta", {})["error_layer"] = "voice_turn"
-        metrics.setdefault("meta", {})["error"] = "cancelled"
-        log_voice_bottleneck_summary(
-            metrics,
-            label="voice_turn",
-            extra="cancelled=true mode=llm_streaming",
-            event_name="voice_turn_summary",
-        )
-        raise
-    except Exception as exc:
-        metrics.setdefault("meta", {})["error_layer"] = "voice_turn"
-        metrics.setdefault("meta", {})["error"] = repr(exc)
-        log_voice_bottleneck_summary(
-            metrics,
-            label="voice_turn",
-            extra="error=true mode=llm_streaming",
-            event_name="voice_turn_summary",
-        )
-        raise
-    finally:
-        _detach_task(turn_scope, task)
+    return await ask_llm_and_speak_streaming_from_runtime(
+        vc,
+        user_text,
+        deps=build_voice_delivery_runtime_deps(),
+        guild_id=guild_id,
+        on_final_answer=on_final_answer,
+        session_key=session_key,
+        room_key=room_key,
+        person_key=person_key,
+        session_memory_key=session_memory_key,
+        source=source,
+        debug_text=debug_text,
+        metrics=metrics,
+        turn_scope=turn_scope,
+    )
 
 
 async def stream_text_reply(

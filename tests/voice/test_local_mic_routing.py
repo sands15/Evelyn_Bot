@@ -336,7 +336,7 @@ class LocalMicRoutingTests(unittest.TestCase):
         self.assertIn("local_control_voice_member()", main_py)
         self.assertIn("await ensure_local_mic_service_started()", main_py)
         self.assertIn("is_local_speaker_voice_client(vc)", main_py)
-        self.assertIn("await ask_llm_and_speak_local(", main_py)
+        self.assertIn("ask_llm_and_speak_local_from_runtime(", main_py)
         self.assertIn('"/voice": "voice.status"', control_page_tools)
         self.assertIn('"/voice status": "voice.status"', control_page_tools)
         self.assertIn("execute_control_page_voice_tool(", main_py)
@@ -344,18 +344,21 @@ class LocalMicRoutingTests(unittest.TestCase):
 
     def test_local_speaker_uses_streaming_sentence_tts_with_full_answer_fallback(self) -> None:
         main_py = (REPO_ROOT / "main.py").read_text(encoding="utf-8")
+        voice_delivery_runtime = (
+            REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "voice_delivery_runtime.py"
+        ).read_text(encoding="utf-8")
 
         self.assertIn("def start_streaming_local_voice_delivery(", main_py)
         self.assertIn("async def stream_local_tts_sentences(", main_py)
-        self.assertIn('metrics.setdefault("meta", {})["delivery_mode"] = "llm_sentence_stream"', main_py)
-        self.assertIn("on_sentence=fanout.on_chunk", main_py)
+        self.assertIn('"delivery_mode"] = "llm_sentence_stream"', voice_delivery_runtime)
+        self.assertIn("on_sentence=fanout.on_chunk", voice_delivery_runtime)
         self.assertIn("prefetch_tts_sources(", main_py)
         self.assertIn("on_first_playback=", main_py)
-        self.assertIn('"local_first_playback_logged"', main_py)
+        self.assertIn('"local_first_playback_logged"', voice_delivery_runtime)
         self.assertIn('"local_tts_first_playback"', main_py)
         self.assertIn('"num_step": OMNIVOICE_NUM_STEP', main_py)
-        self.assertIn("await speak_answer_local(", main_py)
-        self.assertIn('metrics.setdefault("meta", {})["local_streaming_tts_fallback_used"] = True', main_py)
+        self.assertIn("await deps.speak_answer_local(", voice_delivery_runtime)
+        self.assertIn('metrics.setdefault("meta", {})["local_streaming_tts_fallback_used"] = True', voice_delivery_runtime)
 
 
 if __name__ == "__main__":

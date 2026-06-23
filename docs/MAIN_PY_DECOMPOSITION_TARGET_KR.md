@@ -168,6 +168,8 @@ Last reviewed: 2026-06-20
   - first/follow-up response split, low-latency first response LLM call, follow-up response LLM call, duplicate follow-up suppression.
 - `voice_stream_chunks.py`
   - streaming speech chunker construction, streamed delta/flush question filtering, delivery-plan TTS chunk emission.
+- `voice_delivery_runtime.py`
+  - streaming voice/local-speaker answer finalization, delivery fanout, local full-answer fallback, voice-turn cancellation/error summary, with delivery/runtime callbacks injected from `main.py`.
 - `cognitive_state_runtime.py`
   - cognitive state refresh runtime orchestration, layered scope writeback, background task cleanup.
 - `memory_update_runtime.py`
@@ -178,7 +180,7 @@ Last reviewed: 2026-06-20
 현재 `main.py`에 남은 주요 다음 후보:
 
 - voice answer payload assembly와 delivery planning side-effect wiring
-  - answer payload 자체의 primitive는 모듈화되어 있지만, voice path별 delivery orchestration 일부는 아직 `main.py`에 있음.
+  - streaming delivery orchestration은 `voice_delivery_runtime.py`로 분리됨. answer payload assembly와 일부 delivery entrypoint wiring은 아직 `main.py`에 있음.
 - memory vault bridge와 cognitive update wiring
 - autonomy executor의 남은 side-effect wiring
 - remaining voice pipeline side-effect wiring
