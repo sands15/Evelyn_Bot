@@ -282,20 +282,7 @@ const avatarState = {
   velocityX: 0,
   velocityY: 0,
 };
-const avatarFrames = {
-  mouth: {
-    idle: "./assets/evelyn-avatar/model-v2/parts/07_mouth_idle.png",
-    closed: "./assets/evelyn-avatar/model-v2/parts/07_mouth_idle.png",
-    open: "./assets/evelyn-avatar/model-v2/parts/08_mouth_open.png",
-    o: "./assets/evelyn-avatar/model-v2/parts/08_mouth_open.png",
-  },
-  eyes: {
-    leftOpen: "./assets/evelyn-avatar/model-v2/parts/05_eye_L.png",
-    leftBlink: "./assets/evelyn-avatar/model-v2/parts/05_eye_L.png",
-    rightOpen: "./assets/evelyn-avatar/model-v2/parts/06_eye_R.png",
-    rightBlink: "./assets/evelyn-avatar/model-v2/parts/06_eye_R.png",
-  },
-};
+const avatarFrames = null;
 const avatarRigLayers = [
   { el: dom.avatarLayerUnderpaint, x: 0.15, y: 0.10, z: -10, rx: 0.02, ry: 0.03, rz: 0.0, scale: 1.003, lag: 0.030, sx: 0, sy: 0, svx: 0, svy: 0 },
   { el: dom.avatarLayerBack, x: 0.35, y: 0.20, z: -6, rx: 0.05, ry: 0.08, rz: 0.02, scale: 1.001, lag: 0.040, sx: 0, sy: 0, svx: 0, svy: 0 },
@@ -1708,7 +1695,7 @@ function renderMinecraftOpsPanel(payload) {
 }
 
 function avatarTalkStart() {
-  if (!dom.avatarRoot || !dom.avatarMouth || avatarState.talking) {
+  if (!avatarFrames || !dom.avatarRoot || !dom.avatarMouth || avatarState.talking) {
     return;
   }
   const frames = [
@@ -1728,7 +1715,7 @@ function avatarTalkStart() {
 }
 
 function avatarTalkStop() {
-  if (!dom.avatarRoot || !dom.avatarMouth) {
+  if (!avatarFrames || !dom.avatarRoot || !dom.avatarMouth) {
     return;
   }
   avatarState.talking = false;
@@ -1741,7 +1728,7 @@ function avatarTalkStop() {
 }
 
 function avatarBlink(duration = 130) {
-  if (!dom.avatarRoot || !dom.avatarEyeLeft || !dom.avatarEyeRight) {
+  if (!avatarFrames || !dom.avatarRoot || !dom.avatarEyeLeft || !dom.avatarEyeRight) {
     return;
   }
   dom.avatarRoot.classList.add("is-blinking");

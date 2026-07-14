@@ -49,6 +49,20 @@ class ControlPageLive2DAssetTests(unittest.TestCase):
         self.assertIn("function latestAssistantChatText(messages)", html)
         self.assertIn("window.EvelynLive2D.setSpeaking(voiceSpeaking, latestAssistantChatText(chatMessages))", html)
 
+    def test_legacy_model_fallback_and_assets_are_removed(self) -> None:
+        html = (DOCS_ROOT / "index.html").read_text(encoding="utf-8-sig")
+        audio_preview = (DOCS_ROOT / "evelyn-audio-device-preview.html").read_text(encoding="utf-8-sig")
+        legacy_controller = (DOCS_ROOT / "assets" / "evelyn-page.js").read_text(encoding="utf-8-sig")
+        legacy_root = DOCS_ROOT / "assets" / "evelyn-avatar"
+
+        self.assertNotIn("evelynLive2dFallback", html)
+        self.assertNotIn('class="live2d-model"', html)
+        self.assertNotIn("model-v2", html)
+        self.assertNotIn("model-v2", audio_preview)
+        self.assertNotIn("model-v2", legacy_controller)
+        self.assertFalse((legacy_root / "model-v2").exists())
+        self.assertFalse((legacy_root / "parts").exists())
+
     def test_live2d_preview_mode_does_not_poll_the_control_api(self) -> None:
         html = (DOCS_ROOT / "index.html").read_text(encoding="utf-8-sig")
         self.assertIn('get("live2dPreview") === "1"', html)

@@ -99,22 +99,6 @@
       overflow: hidden;
     }
 
-    .avatar-glass {
-      position: absolute;
-      inset: -2% -6% auto 12%;
-      height: min(62vh, 500px);
-      display: grid;
-      place-items: center;
-      opacity: 0.88;
-      filter: drop-shadow(0 34px 54px rgba(0, 0, 0, 0.42));
-    }
-
-    .avatar-glass img {
-      width: min(78%, 430px);
-      max-height: 100%;
-      object-fit: contain;
-    }
-
     .ambient-copy {
       position: relative;
       width: min(440px, 100%);
@@ -486,19 +470,6 @@
         padding: 0;
       }
 
-      .avatar-glass {
-        inset: -60px -34px auto auto;
-        width: 260px;
-        height: 300px;
-        opacity: 0.42;
-        place-items: start end;
-      }
-
-      .avatar-glass img {
-        width: 260px;
-        max-height: none;
-      }
-
       .ambient-copy {
         width: min(460px, 100%);
       }
@@ -556,9 +527,6 @@
 <body>
   <main class="preview-shell">
     <section class="ambient-panel" aria-label="Evelyn preview background">
-      <div class="avatar-glass" aria-hidden="true">
-        <img src="assets/evelyn-avatar/model-v2/preview_composite.png" alt="">
-      </div>
       <div class="ambient-copy">
         <p class="brand-kicker">E.V.E.L.Y.N</p>
         <h2 class="ambient-title">Audio<br>Route</h2>

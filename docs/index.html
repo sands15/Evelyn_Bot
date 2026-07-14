@@ -540,18 +540,6 @@
       filter: blur(14px);
     }
 
-    .live2d-model {
-      position: relative;
-      z-index: 2;
-      width: min(470px, 38vw);
-      max-height: calc(100vh - 190px);
-      object-fit: contain;
-      object-position: bottom center;
-      filter: drop-shadow(0 28px 32px rgba(20, 24, 30, 0.22));
-      transform-origin: bottom center;
-      animation: idle 5.2s ease-in-out infinite;
-    }
-
     .evelyn-live2d-stage {
       position: absolute;
       z-index: 3;
@@ -570,12 +558,6 @@
 
     .model-area.live2d-ready .evelyn-live2d-stage {
       opacity: 1;
-    }
-
-    .model-area.live2d-ready .live2d-model {
-      opacity: 0;
-      visibility: hidden;
-      animation: none;
     }
 
     .live2d-runtime-status {
@@ -1782,11 +1764,6 @@
         place-items: end center;
       }
 
-      .live2d-model {
-        width: min(360px, 84vw);
-        max-height: calc(100svh - 286px);
-      }
-
       .dock {
         left: 10px;
         right: 10px;
@@ -1961,7 +1938,6 @@
         <div class="evelyn-live2d-stage" aria-label="이블린 Live2D 모델">
           <canvas id="evelynLive2dCanvas" role="img" aria-label="이블린 Live2D 모델"></canvas>
         </div>
-        <img class="live2d-model" src="./assets/evelyn-avatar/model-v2/preview_composite.png" alt="이블린 전신 모델" id="evelynLive2dFallback">
         <span class="live2d-runtime-status" id="evelynLive2dStatus" data-kind="loading">Live2D 준비 중</span>
       </section>
     </main>
