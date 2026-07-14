@@ -9,7 +9,6 @@ MAIN_PY = REPO_ROOT / "main.py"
 LOCAL_SERVER = REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "control_page_server.py"
 FAST_API = REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "fast_control_api.py"
 INDEX_HTML = REPO_ROOT / "docs" / "index.html"
-CONTROL_PAGE_JS = REPO_ROOT / "docs" / "assets" / "evelyn-page.js"
 RUNTIME_LIFECYCLE = REPO_ROOT / "runtime_lifecycle.py"
 CONTROL_PAGE_TOOLS = REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "control_page_tools.py"
 CONTROL_PAGE_STATE = REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "control_page_state.py"
@@ -23,7 +22,6 @@ class ControlPageRestartCommandTests(unittest.TestCase):
         cls.local_server = LOCAL_SERVER.read_text(encoding="utf-8")
         cls.fast_api = FAST_API.read_text(encoding="utf-8")
         cls.index_html = INDEX_HTML.read_text(encoding="utf-8")
-        cls.control_page_js = CONTROL_PAGE_JS.read_text(encoding="utf-8")
         cls.runtime_lifecycle = RUNTIME_LIFECYCLE.read_text(encoding="utf-8")
         cls.control_page_tools = CONTROL_PAGE_TOOLS.read_text(encoding="utf-8")
         cls.control_page_state = CONTROL_PAGE_STATE.read_text(encoding="utf-8")
@@ -33,8 +31,6 @@ class ControlPageRestartCommandTests(unittest.TestCase):
         self.assertIn('{"command": "/restart", "template": "/restart"', self.control_page_tools)
         self.assertIn('{"command": "/restart", "template": "/restart"', self.local_server)
         self.assertIn('{ command: "/restart", template: "/restart"', self.index_html)
-        self.assertIn('{ command: "/restart", template: "/restart"', self.control_page_js)
-        self.assertIn('summary: "Restart Evelyn runtime"', self.control_page_js)
 
     def test_control_page_slash_restart_runs_restart_path(self) -> None:
         self.assertIn("def execute_control_page_restart_command() -> str:", self.main_py)

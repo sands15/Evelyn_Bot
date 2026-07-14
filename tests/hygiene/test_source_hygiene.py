@@ -11,7 +11,8 @@ class SourceHygieneTests(unittest.TestCase):
     def test_primary_source_files_do_not_start_with_utf8_bom(self) -> None:
         for relative_path in (
             "main.py",
-            "docs/assets/evelyn-page.js",
+            "docs/index.html",
+            "docs/assets/evelyn-live2d.js",
             "tests/runtime/test_shutdown_scripts.py",
         ):
             with self.subTest(path=relative_path):
