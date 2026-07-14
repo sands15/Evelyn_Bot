@@ -2,6 +2,11 @@
   "use strict";
 
   const MODEL_URL = "./assets/evelyn-avatar/live2d/evelin.model3.json";
+  // Calibrated from the center of both eyes inside the visible character bounds.
+  const HEAD_FOCUS_X_RATIO = 0.482;
+  const HEAD_FOCUS_Y_RATIO = 0.276;
+  const HEAD_FOCUS_FULL_DISTANCE_HEIGHT_RATIO = 0.18;
+  const HEAD_FOCUS_MIN_DISTANCE_PX = 72;
   const EXPRESSION_PARAMETERS = Object.freeze({
     ulmak: "ParamHairBack75",
     "cat ear": "ParamHairBack65",
@@ -52,6 +57,9 @@
     mouthOpen: 0,
     gazeX: 0,
     gazeY: 0,
+    pointerClientX: null,
+    pointerClientY: null,
+    pointerActive: false,
     activeExpression: null,
     lastExpressionValue: null,
     lastMouthParameter: 0,
@@ -91,6 +99,7 @@
     state.model.scale.set(scale);
     state.model.x = width * 0.52;
     state.model.y = height - (modelHeight * scale * 0.5) + height * 0.01;
+    if (state.pointerActive) updateGazeFromPointer();
   }
 
   function scheduleNextBlink(now) {
@@ -213,15 +222,59 @@
     state.model.internalModel.focusController.focus(state.gazeX, state.gazeY);
   }
 
-  function onPointerMove(event) {
-    const width = window.innerWidth || 1;
-    const height = window.innerHeight || 1;
-    state.gazeX = clamp((event.clientX / width - 0.5) * 2.1, -1, 1);
-    state.gazeY = clamp((0.5 - event.clientY / height) * 1.8, -1, 1);
+  function getModelHeadClientPoint() {
+    if (!state.model || !state.app || !state.area) return null;
+    const rect = state.area.getBoundingClientRect();
+    const screen = state.app.screen || {};
+    const screenWidth = Math.max(1, Number(screen.width) || Math.round(rect.width) || 1);
+    const screenHeight = Math.max(1, Number(screen.height) || Math.round(rect.height) || 1);
+    const modelWidth = Math.max(1, Number(state.model.width) || 1);
+    const modelHeight = Math.max(1, Number(state.model.height) || 1);
+    const anchorX = state.model.anchor ? Number(state.model.anchor.x) : 0.5;
+    const anchorY = state.model.anchor ? Number(state.model.anchor.y) : 0.5;
+    const headStageX = state.model.x + (HEAD_FOCUS_X_RATIO - anchorX) * modelWidth;
+    const headStageY = state.model.y + (HEAD_FOCUS_Y_RATIO - anchorY) * modelHeight;
+    const cssScaleX = rect.width / screenWidth;
+    const cssScaleY = rect.height / screenHeight;
+    return {
+      clientX: rect.left + headStageX * cssScaleX,
+      clientY: rect.top + headStageY * cssScaleY,
+      fullDistance: Math.max(
+        HEAD_FOCUS_MIN_DISTANCE_PX,
+        modelHeight * cssScaleY * HEAD_FOCUS_FULL_DISTANCE_HEIGHT_RATIO
+      ),
+    };
+  }
+
+  function updateGazeFromPointer() {
+    if (!state.pointerActive) return;
+    const head = getModelHeadClientPoint();
+    if (!head) return;
+    const dx = state.pointerClientX - head.clientX;
+    const dy = head.clientY - state.pointerClientY;
+    const distance = Math.hypot(dx, dy);
+    if (distance < 0.5) {
+      state.gazeX = 0;
+      state.gazeY = 0;
+    } else {
+      const strength = clamp(distance / head.fullDistance, 0, 1);
+      state.gazeX = clamp((dx / distance) * strength, -1, 1);
+      state.gazeY = clamp((dy / distance) * strength, -1, 1);
+    }
     updateFocus();
   }
 
+  function onPointerMove(event) {
+    state.pointerClientX = event.clientX;
+    state.pointerClientY = event.clientY;
+    state.pointerActive = true;
+    updateGazeFromPointer();
+  }
+
   function resetFocus() {
+    state.pointerClientX = null;
+    state.pointerClientY = null;
+    state.pointerActive = false;
     state.gazeX = 0;
     state.gazeY = 0;
     updateFocus();
@@ -378,6 +431,7 @@
       return Object.keys(EXPRESSION_PARAMETERS);
     },
     snapshot: function () {
+      const headFocus = getModelHeadClientPoint();
       return {
         ready: state.ready,
         speaking: state.speaking,
@@ -391,6 +445,13 @@
         expressionParameter: state.lastExpressionValue == null
           ? null
           : Number(state.lastExpressionValue.toFixed(3)),
+        gaze: {
+          x: Number(state.gazeX.toFixed(3)),
+          y: Number(state.gazeY.toFixed(3)),
+          pointerActive: state.pointerActive,
+          headClientX: headFocus ? Number(headFocus.clientX.toFixed(1)) : null,
+          headClientY: headFocus ? Number(headFocus.clientY.toFixed(1)) : null,
+        },
         modelUrl: MODEL_URL,
         canvas: state.canvas ? {
           width: state.canvas.width,

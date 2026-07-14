@@ -65,6 +65,20 @@ class ControlPageLive2DAssetTests(unittest.TestCase):
         self.assertIn('Digit1: "heart eye"', controller)
         self.assertIn('F2: "ulmak"', controller)
 
+    def test_pointer_focus_is_centered_on_the_rendered_head(self) -> None:
+        controller = (DOCS_ROOT / "assets" / "evelyn-live2d.js").read_text(encoding="utf-8-sig")
+        self.assertIn("const HEAD_FOCUS_X_RATIO = 0.482", controller)
+        self.assertIn("const HEAD_FOCUS_Y_RATIO = 0.276", controller)
+        self.assertIn("function getModelHeadClientPoint()", controller)
+        self.assertIn("state.pointerClientX - head.clientX", controller)
+        self.assertIn("head.clientY - state.pointerClientY", controller)
+        self.assertIn("Math.hypot(dx, dy)", controller)
+        self.assertIn("if (state.pointerActive) updateGazeFromPointer()", controller)
+        self.assertNotIn("event.clientX / width", controller)
+        self.assertNotIn("event.clientY / height", controller)
+        self.assertNotIn("window.innerWidth", controller)
+        self.assertNotIn("window.innerHeight", controller)
+
     def test_idle_tail_uses_all_seven_tail_rotation_parameters(self) -> None:
         controller = (DOCS_ROOT / "assets" / "evelyn-live2d.js").read_text(encoding="utf-8-sig")
         expected = [
