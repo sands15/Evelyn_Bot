@@ -41,10 +41,17 @@ Source branch: `stabilization/evaluation-findings-2026-07-15`
 
 ## Verification state
 
+검증 시각: 2026-07-15 06:00 KST
+검증한 코드 기준점: `56e1180` 직후 작업 트리
+
 - `pip check`: 통과
 - `docker compose config --quiet`: 통과(검증용 Discord token 사용)
-- UI/Compose/Codex Gateway 집중 테스트: 통과
-- 전체 회귀선과 최종 Git bundle 검증 결과는 이 브랜치의 최종 체크포인트에서 다시 기록한다.
+- Python `compileall`: 통과
+- 활성 Live2D/boot JavaScript `node --check`: 통과
+- 전체 unittest: 950개 통과, 실패 0, 오류 0, 건너뜀 0
+- `EVELYN_RUN_REAL_MAIN_INTEGRATION=1`: 실제 `main.py` 프로세스 smoke 포함
+- `PYTHONWARNINGS=error::ResourceWarning`: 통과
+- Codex Gateway 테스트 서버: 무토큰/오토큰 `401`, 정상 bearer token `200`
 
 ## Operational boundaries
 
