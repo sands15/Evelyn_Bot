@@ -1,12 +1,20 @@
 # Evelyn Documentation Index
 
-Last reviewed: 2026-06-15
+Last reviewed: 2026-07-15
 
 Use this file to choose the right document before editing Evelyn. Current runtime
 facts still need to be verified against code before reporting them as
 implemented behavior.
 
 ## Current Runtime References
+
+- `docs/CURRENT_STATE.md`
+  - 현재 브랜치, 배포 여부, 마지막 런타임 증거와 검증 상태만 유지한다.
+  - 현재 사실을 확인할 때 가장 먼저 읽는다.
+
+- `docs/ACTIVE_RISKS.md`
+  - 해결되지 않은 위험, 검증 공백, 다음 조치와 재검토일만 유지한다.
+  - 완료된 작업이나 낙관적 전망을 기록하지 않는다.
 
 - `CURRENT_EVELYN_PIPELINE.md`
   - Authoritative current assistant pipeline map.
@@ -114,10 +122,11 @@ These are runtime/control-page assets, not architecture docs.
 
 When answering "what is current?", start with:
 
-1. `CURRENT_EVELYN_PIPELINE.md`
-2. `CURRENT_BOT_STRUCTURE.md`
-3. `docs/plans/EVELYN_PLANS_CONSOLIDATED.md`
-4. code
+1. `docs/CURRENT_STATE.md`
+2. `docs/ACTIVE_RISKS.md`
+3. `CURRENT_EVELYN_PIPELINE.md`
+4. `CURRENT_BOT_STRUCTURE.md`
+5. code
 
 When answering "where are we going?", use target and consolidated plan docs,
 then verify against code before reporting it as implemented.
