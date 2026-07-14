@@ -136,6 +136,18 @@ class RuntimeArtifactsRetentionTests(unittest.TestCase):
             self.assertTrue(old_path.exists())
         self.assertEqual(exit_code, 0)
 
+    def test_log_backup_pattern_is_included_by_default(self) -> None:
+        now = time.time()
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            backup = root / "logs" / "service.log.1"
+            write_file(backup, "old", mtime=now - 20 * 86400)
+            write_file(root / "logs" / "service.log", "new", mtime=now)
+
+            plan = build_cleanup_plan(root, now=now)
+
+        self.assertEqual([item.relative_path for item in plan.candidates], ["logs/service.log.1"])
+
 
 if __name__ == "__main__":
     unittest.main()

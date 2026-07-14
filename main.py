@@ -850,9 +850,12 @@ VOICE_CONSOLE_ONLY_STT_AND_REPLY = os.getenv("VOICE_CONSOLE_ONLY_STT_AND_REPLY",
 VOICE_BOTTLENECK_LOGS = os.getenv("VOICE_BOTTLENECK_LOGS", "true").lower() == "true"
 VOICE_TRACE_ALL_EVENTS = os.getenv("VOICE_TRACE_ALL_EVENTS", "true").lower() == "true"
 TURN_TRACE_LOG_DIR = Path(os.getenv("TURN_TRACE_LOG_DIR", str(PROJECT_ROOT / "logs" / "turn_trace")))
-VOICE_DEBUG_SAVE_AUDIO = os.getenv("VOICE_DEBUG_SAVE_AUDIO", "true").lower() == "true"
+VOICE_DEBUG_SAVE_AUDIO = os.getenv("VOICE_DEBUG_SAVE_AUDIO", "false").lower() == "true"
 VOICE_DEBUG_AUDIO_DIR = os.getenv("VOICE_DEBUG_AUDIO_DIR", "debug_audio")
 VOICE_DEBUG_MAX_FILES_PER_GUILD = int(os.getenv("VOICE_DEBUG_MAX_FILES_PER_GUILD", "200"))
+VOICE_DEBUG_MAX_AGE_DAYS = float(os.getenv("VOICE_DEBUG_MAX_AGE_DAYS", "7"))
+VOICE_DEBUG_MAX_TOTAL_MB_PER_GUILD = int(os.getenv("VOICE_DEBUG_MAX_TOTAL_MB_PER_GUILD", "256"))
+VOICE_DEBUG_PRESERVE_NEWEST = int(os.getenv("VOICE_DEBUG_PRESERVE_NEWEST", "10"))
 WAKE_STT_TIMEOUT_SEC = float(os.getenv("WAKE_STT_TIMEOUT_SEC", "20"))
 FULL_STT_TIMEOUT_SEC = float(os.getenv("FULL_STT_TIMEOUT_SEC", "30"))
 VOICE_INGRESS_QUEUE_MAX = max(1, int(os.getenv("VOICE_INGRESS_QUEUE_MAX", "16")))
@@ -2554,6 +2557,9 @@ def _save_voice_debug_audio_now(
         project_root=PROJECT_ROOT,
         configured_dir=VOICE_DEBUG_AUDIO_DIR,
         max_files_per_guild=VOICE_DEBUG_MAX_FILES_PER_GUILD,
+        max_age_days=VOICE_DEBUG_MAX_AGE_DAYS,
+        max_total_bytes_per_guild=VOICE_DEBUG_MAX_TOTAL_MB_PER_GUILD * 1024 * 1024,
+        preserve_newest=VOICE_DEBUG_PRESERVE_NEWEST,
         raw_channels=CHANNELS,
         raw_rate=RATE,
         stt_rate=TARGET_RATE,

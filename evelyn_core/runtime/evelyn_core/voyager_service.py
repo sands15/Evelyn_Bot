@@ -20,6 +20,7 @@ if os.name == "nt":
 
 from aiohttp import web
 
+from evelyn_core.bounded_logs import append_bounded_log, rotate_log_if_needed
 from evelyn_core.paths import get_repo_root, get_runtime_artifacts_root
 
 DEFAULT_VOYAGER_GOAL = "discovering as many diverse things as possible"
@@ -38,6 +39,10 @@ _STATUS_LINE_LOCK = threading.Lock()
 _STATUS_LINE_LENGTH = 0
 _VT_MODE_ENABLED: bool | None = None
 _ALT_SCREEN_ENABLED = False
+_FILE_STATUS_LAST_EMIT_AT = 0.0
+_FILE_STATUS_INTERVAL_SEC = max(1.0, float(os.environ.get("EVELYN_STATUS_LOG_INTERVAL_SEC", "30")))
+_LOG_MAX_BYTES = max(1024, int(os.environ.get("EVELYN_LOG_MAX_BYTES", str(25 * 1024 * 1024))))
+_LOG_BACKUP_COUNT = max(1, int(os.environ.get("EVELYN_LOG_BACKUP_COUNT", "4")))
 _SERVICE_NOTICE = "Waiting for Voyager /start request"
 _SERVICE_LOCK_HANDLE: Any | None = None
 _SERVICE_MUTEX_HANDLE: Any | None = None
@@ -54,13 +59,11 @@ def _set_console_title(text: str) -> None:
 
 def _append_error_log(path: Path, source: str, message: str, details: str | None = None) -> None:
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as handle:
-            stamp = time.strftime("%Y-%m-%d %H:%M:%S")
-            handle.write(f"[{stamp}] {source}: {message}\n")
-            if details:
-                handle.write(f"{details}\n")
-            handle.write("\n")
+        stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        payload = f"[{stamp}] {source}: {message}\n"
+        if details:
+            payload += f"{details}\n"
+        append_bounded_log(path, payload + "\n", max_bytes=_LOG_MAX_BYTES, backup_count=_LOG_BACKUP_COUNT)
     except Exception:
         pass
 
@@ -507,8 +510,16 @@ def _tcp_probe(host: str, port: int, timeout_sec: float = 0.35) -> bool:
 
 
 def _write_status_line(block: str) -> None:
-    global _STATUS_LINE_LENGTH
+    global _FILE_STATUS_LAST_EMIT_AT, _STATUS_LINE_LENGTH
     with _STATUS_LINE_LOCK:
+        if not sys.stdout.isatty():
+            now = time.monotonic()
+            if now - _FILE_STATUS_LAST_EMIT_AT < _FILE_STATUS_INTERVAL_SEC:
+                return
+            _FILE_STATUS_LAST_EMIT_AT = now
+            sys.stdout.write(block.rstrip("\n") + "\n")
+            sys.stdout.flush()
+            return
         if _enable_vt_mode():
             _enter_alternate_screen()
             sys.stdout.write("\033[H\033[2J" + block.rstrip("\n"))
@@ -766,6 +777,11 @@ class UpstreamDirectBridge:
         ]
         creationflags = 0
         RUNNER_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        rotate_log_if_needed(
+            RUNNER_LOG_PATH,
+            max_bytes=_LOG_MAX_BYTES,
+            backup_count=_LOG_BACKUP_COUNT,
+        )
         log_handle = open(RUNNER_LOG_PATH, "a", encoding="utf-8")
         popen_kwargs: dict[str, Any] = {
             "cwd": str(REPO_ROOT),

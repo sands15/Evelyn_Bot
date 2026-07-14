@@ -23,9 +23,11 @@ try:
         debug_write_worker_from_runtime,
         enqueue_voice_debug_audio_from_runtime,
         ensure_debug_write_worker_started_from_runtime,
+        inventory_voice_debug_bundles,
         sanitize_debug_label,
         save_voice_debug_audio_now,
         trim_voice_debug_dir,
+        trim_voice_debug_root,
         voice_debug_drop_message,
     )
 
@@ -104,22 +106,73 @@ class VoiceDebugAudioTests(unittest.TestCase):
             self.assertEqual(meta["segment_id"], 7)
             self.assertIn("[VOICE DEBUG SAVE]", logs[-1])
 
-    def test_trim_voice_debug_dir_removes_oldest_wavs_only(self) -> None:
+    def test_trim_voice_debug_dir_removes_complete_oldest_bundles(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             guild_dir = Path(temp_dir)
             for idx in range(4):
-                path = guild_dir / f"{idx}.wav"
-                path.write_bytes(b"x")
                 old_time = time.time() - (10 - idx)
-                path.touch()
-                os.utime(path, (old_time, old_time))
-            keep_json = guild_dir / "meta.json"
-            keep_json.write_text("{}", encoding="utf-8")
+                for suffix in ("_raw48k.wav", "_stt16k.wav", ".json"):
+                    path = guild_dir / f"{idx}{suffix}"
+                    path.write_bytes(b"x")
+                    os.utime(path, (old_time, old_time))
 
-            trim_voice_debug_dir(guild_dir, max_files=2)
+            result = trim_voice_debug_dir(guild_dir, max_files=2)
 
-            self.assertEqual(sorted(path.name for path in guild_dir.glob("*.wav")), ["2.wav", "3.wav"])
-            self.assertTrue(keep_json.exists())
+            self.assertEqual([item.stem for item in inventory_voice_debug_bundles(guild_dir)], ["2", "3"])
+            self.assertEqual(result.candidate_count, 2)
+            self.assertEqual(result.deleted_count, 2)
+            self.assertEqual(sorted(path.name for path in guild_dir.iterdir()), [
+                "2.json", "2_raw48k.wav", "2_stt16k.wav",
+                "3.json", "3_raw48k.wav", "3_stt16k.wav",
+            ])
+
+    def test_trim_voice_debug_dir_dry_run_applies_age_without_deleting(self) -> None:
+        now = 1_000_000.0
+        with tempfile.TemporaryDirectory() as temp_dir:
+            guild_dir = Path(temp_dir)
+            for stem, mtime in (("old", now - 8 * 86400), ("new", now - 1)):
+                for suffix in ("_raw48k.wav", ".json"):
+                    path = guild_dir / f"{stem}{suffix}"
+                    path.write_bytes(b"1234")
+                    os.utime(path, (mtime, mtime))
+
+            result = trim_voice_debug_dir(
+                guild_dir,
+                max_files=200,
+                max_age_days=7,
+                preserve_newest=1,
+                dry_run=True,
+                now=now,
+            )
+
+            self.assertEqual(result.candidate_count, 1)
+            self.assertEqual(result.candidate_bytes, 8)
+            self.assertEqual(result.deleted_count, 0)
+            self.assertTrue((guild_dir / "old.json").exists())
+
+    def test_trim_voice_debug_root_reports_each_guild_without_deleting(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            for guild in ("1", "2"):
+                guild_dir = root / guild
+                guild_dir.mkdir()
+                for idx in range(3):
+                    path = guild_dir / f"{idx}.json"
+                    path.write_text("{}", encoding="utf-8")
+                    os.utime(path, (100 + idx, 100 + idx))
+
+            result = trim_voice_debug_root(
+                root,
+                max_files=1,
+                max_age_days=None,
+                max_total_bytes_per_guild=None,
+                preserve_newest=1,
+                dry_run=True,
+            )
+
+            self.assertEqual(result["candidate_count"], 4)
+            self.assertEqual(result["deleted_count"], 0)
+            self.assertEqual(len(list(root.rglob("*.json"))), 6)
 
     def test_drop_message_is_stable(self) -> None:
         self.assertEqual(
