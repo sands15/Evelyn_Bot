@@ -343,13 +343,13 @@
 
     .app.has-wallpaper {
       background-image:
-        linear-gradient(180deg, rgba(245, 246, 247, 0.12), rgba(245, 246, 247, 0.74)),
+        linear-gradient(180deg, rgba(245, 246, 247, 0.08), rgba(245, 246, 247, 0.52)),
         var(--custom-wallpaper);
     }
 
     [data-theme="dark"] .app.has-wallpaper {
       background-image:
-        linear-gradient(180deg, rgba(17, 19, 22, 0.1), rgba(17, 19, 22, 0.78)),
+        linear-gradient(180deg, rgba(17, 19, 22, 0.08), rgba(17, 19, 22, 0.58)),
         var(--custom-wallpaper);
     }
 
@@ -1946,7 +1946,7 @@
 
       <div class="top-actions">
         <button class="icon-button wallpaper-reset-button" id="wallpaperResetButton" type="button" title="기본 배경으로 되돌리기" aria-label="기본 배경으로 되돌리기">↺</button>
-        <label class="file-button" title="배경 변경" aria-label="배경 변경">
+        <label class="file-button" id="wallpaperPicker" title="배경 변경" aria-label="배경 변경">
           <input id="wallpaperInput" type="file" accept="image/*">
           ▧
         </label>
@@ -2173,6 +2173,7 @@
     const drawer = document.getElementById("drawer");
     const wallpaperInput = document.getElementById("wallpaperInput");
     const wallpaperResetButton = document.getElementById("wallpaperResetButton");
+    const wallpaperPicker = document.getElementById("wallpaperPicker");
     const composer = document.getElementById("composer");
     const commandSuggestions = document.getElementById("commandSuggestions");
     const sendButton = document.getElementById("sendButton");
@@ -2206,6 +2207,10 @@
     const bootSplashRepairStatus = document.getElementById("boot-splash-repair-status");
     const BOOT_PROGRESS_POLL_MS = 1200;
     const STATE_POLL_MS = 1500;
+    const WALLPAPER_DB_NAME = "evelynControlPage";
+    const WALLPAPER_DB_VERSION = 1;
+    const WALLPAPER_STORE_NAME = "preferences";
+    const WALLPAPER_STORE_KEY = "wallpaper";
     const LIVE2D_PREVIEW_MODE = new URLSearchParams(window.location.search).get("live2dPreview") === "1";
     let bootProgressPollTimer = null;
     let statePollTimer = null;
@@ -2282,11 +2287,150 @@
       root.dataset.theme = savedTheme;
     }
 
-    const savedWallpaper = localStorage.getItem("evelynControlWallpaper");
-    if (savedWallpaper) {
-      app.style.setProperty("--custom-wallpaper", `url("${savedWallpaper}")`);
+    let wallpaperObjectUrl = "";
+
+    function setWallpaperControlState(state, message) {
+      if (!wallpaperPicker) return;
+      wallpaperPicker.dataset.state = state || "idle";
+      wallpaperPicker.title = message || "배경 변경";
+      wallpaperPicker.setAttribute("aria-label", message || "배경 변경");
+    }
+
+    function openWallpaperDatabase() {
+      return new Promise((resolve, reject) => {
+        if (!window.indexedDB) {
+          reject(new Error("indexeddb_unavailable"));
+          return;
+        }
+        const request = window.indexedDB.open(WALLPAPER_DB_NAME, WALLPAPER_DB_VERSION);
+        request.addEventListener("upgradeneeded", () => {
+          const database = request.result;
+          if (!database.objectStoreNames.contains(WALLPAPER_STORE_NAME)) {
+            database.createObjectStore(WALLPAPER_STORE_NAME);
+          }
+        });
+        request.addEventListener("success", () => resolve(request.result));
+        request.addEventListener("error", () => reject(request.error || new Error("wallpaper_db_open_failed")));
+        request.addEventListener("blocked", () => reject(new Error("wallpaper_db_blocked")));
+      });
+    }
+
+    async function readStoredWallpaper() {
+      const database = await openWallpaperDatabase();
+      try {
+        return await new Promise((resolve, reject) => {
+          const transaction = database.transaction(WALLPAPER_STORE_NAME, "readonly");
+          const request = transaction.objectStore(WALLPAPER_STORE_NAME).get(WALLPAPER_STORE_KEY);
+          request.addEventListener("success", () => resolve(request.result || null));
+          request.addEventListener("error", () => reject(request.error || new Error("wallpaper_read_failed")));
+        });
+      } finally {
+        database.close();
+      }
+    }
+
+    async function storeWallpaper(file) {
+      const database = await openWallpaperDatabase();
+      try {
+        await new Promise((resolve, reject) => {
+          const transaction = database.transaction(WALLPAPER_STORE_NAME, "readwrite");
+          transaction.objectStore(WALLPAPER_STORE_NAME).put({
+            version: 1,
+            blob: file,
+            name: String(file.name || "wallpaper"),
+            type: String(file.type || ""),
+            savedAt: Date.now()
+          }, WALLPAPER_STORE_KEY);
+          transaction.addEventListener("complete", resolve);
+          transaction.addEventListener("error", () => reject(transaction.error || new Error("wallpaper_write_failed")));
+          transaction.addEventListener("abort", () => reject(transaction.error || new Error("wallpaper_write_aborted")));
+        });
+      } finally {
+        database.close();
+      }
+    }
+
+    async function deleteStoredWallpaper() {
+      const database = await openWallpaperDatabase();
+      try {
+        await new Promise((resolve, reject) => {
+          const transaction = database.transaction(WALLPAPER_STORE_NAME, "readwrite");
+          transaction.objectStore(WALLPAPER_STORE_NAME).delete(WALLPAPER_STORE_KEY);
+          transaction.addEventListener("complete", resolve);
+          transaction.addEventListener("error", () => reject(transaction.error || new Error("wallpaper_delete_failed")));
+          transaction.addEventListener("abort", () => reject(transaction.error || new Error("wallpaper_delete_aborted")));
+        });
+      } finally {
+        database.close();
+      }
+    }
+
+    function decodedWallpaperUrl(blob) {
+      return new Promise((resolve, reject) => {
+        const objectUrl = URL.createObjectURL(blob);
+        const image = new Image();
+        image.addEventListener("load", () => resolve(objectUrl), { once: true });
+        image.addEventListener("error", () => {
+          URL.revokeObjectURL(objectUrl);
+          reject(new Error("wallpaper_decode_failed"));
+        }, { once: true });
+        image.src = objectUrl;
+      });
+    }
+
+    async function applyWallpaperBlob(blob) {
+      if (!(blob instanceof Blob) || (blob.type && !blob.type.startsWith("image/"))) {
+        throw new Error("wallpaper_invalid_image");
+      }
+      const nextObjectUrl = await decodedWallpaperUrl(blob);
+      if (wallpaperObjectUrl) URL.revokeObjectURL(wallpaperObjectUrl);
+      wallpaperObjectUrl = nextObjectUrl;
+      app.style.setProperty("--custom-wallpaper", `url("${wallpaperObjectUrl}")`);
       app.classList.add("has-wallpaper");
     }
+
+    function clearAppliedWallpaper() {
+      app.style.removeProperty("--custom-wallpaper");
+      app.classList.remove("has-wallpaper");
+      if (wallpaperObjectUrl) URL.revokeObjectURL(wallpaperObjectUrl);
+      wallpaperObjectUrl = "";
+    }
+
+    async function restoreWallpaper() {
+      try {
+        const stored = await readStoredWallpaper();
+        const blob = stored instanceof Blob ? stored : stored && stored.blob;
+        if (blob instanceof Blob) {
+          await applyWallpaperBlob(blob);
+          setWallpaperControlState("saved", "배경 변경 · 저장된 배경 적용됨");
+          return;
+        }
+      } catch (error) {
+        console.warn("[Evelyn wallpaper] restore failed", error);
+      }
+
+      let legacyWallpaper = "";
+      try {
+        legacyWallpaper = String(localStorage.getItem("evelynControlWallpaper") || "");
+      } catch (_error) {
+        // Legacy storage may be unavailable; IndexedDB remains the primary store.
+      }
+      if (!legacyWallpaper) return;
+
+      try {
+        const response = await fetch(legacyWallpaper);
+        const blob = await response.blob();
+        await applyWallpaperBlob(blob);
+        await storeWallpaper(blob);
+        localStorage.removeItem("evelynControlWallpaper");
+        setWallpaperControlState("saved", "배경 변경 · 기존 배경 이전 완료");
+      } catch (error) {
+        console.warn("[Evelyn wallpaper] legacy migration failed", error);
+        setWallpaperControlState("error", "배경 변경 · 저장된 배경을 불러오지 못함");
+      }
+    }
+
+    restoreWallpaper();
 
     function cleanDisplayText(value, fallback = "None") {
       const text = value == null ? "" : String(value).trim();
@@ -2910,28 +3054,45 @@
       ttsOutputDeviceTestButton.addEventListener("click", requestTtsOutputTest);
     }
 
-    wallpaperInput.addEventListener("change", () => {
+    wallpaperInput.addEventListener("change", async () => {
       const file = wallpaperInput.files && wallpaperInput.files[0];
       if (!file) return;
-      const reader = new FileReader();
-      reader.addEventListener("load", () => {
-        const value = String(reader.result);
-        app.style.setProperty("--custom-wallpaper", `url("${value}")`);
-        app.classList.add("has-wallpaper");
+      setWallpaperControlState("loading", "배경 불러오는 중");
+      try {
+        await applyWallpaperBlob(file);
+        await storeWallpaper(file);
         try {
-          localStorage.setItem("evelynControlWallpaper", value);
-        } catch {
           localStorage.removeItem("evelynControlWallpaper");
+        } catch (_error) {
+          // The legacy Base64 value is optional and may already exceed its quota.
         }
-      });
-      reader.readAsDataURL(file);
+        if (navigator.storage && typeof navigator.storage.persist === "function") {
+          navigator.storage.persist().catch(() => false);
+        }
+        setWallpaperControlState("saved", "배경 변경 · 저장 완료");
+      } catch (error) {
+        console.warn("[Evelyn wallpaper] apply failed", error);
+        setWallpaperControlState("error", "배경 변경 · 이미지 적용 실패");
+      } finally {
+        wallpaperInput.value = "";
+      }
     });
 
     if (wallpaperResetButton) {
-      wallpaperResetButton.addEventListener("click", () => {
-        app.style.removeProperty("--custom-wallpaper");
-        app.classList.remove("has-wallpaper");
-        localStorage.removeItem("evelynControlWallpaper");
+      wallpaperResetButton.addEventListener("click", async () => {
+        clearAppliedWallpaper();
+        try {
+          localStorage.removeItem("evelynControlWallpaper");
+        } catch (_error) {
+          // Continue clearing IndexedDB when legacy storage is unavailable.
+        }
+        try {
+          await deleteStoredWallpaper();
+          setWallpaperControlState("idle", "배경 변경");
+        } catch (error) {
+          console.warn("[Evelyn wallpaper] reset persistence failed", error);
+          setWallpaperControlState("error", "배경 변경 · 저장된 배경 삭제 실패");
+        }
         if (wallpaperInput) wallpaperInput.value = "";
       });
     }

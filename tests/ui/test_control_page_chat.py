@@ -156,6 +156,19 @@ class ControlPageChatTests(unittest.TestCase):
         self.assertIn("app.style.removeProperty(\"--custom-wallpaper\");", self.html)
         self.assertIn("localStorage.removeItem(\"evelynControlWallpaper\");", self.html)
 
+    def test_wallpaper_uses_persistent_blob_storage_and_validates_images(self) -> None:
+        self.assertIn('id="wallpaperPicker"', self.html)
+        self.assertIn('const WALLPAPER_DB_NAME = "evelynControlPage"', self.html)
+        self.assertIn('const WALLPAPER_STORE_KEY = "wallpaper"', self.html)
+        self.assertIn("function openWallpaperDatabase()", self.html)
+        self.assertIn("async function storeWallpaper(file)", self.html)
+        self.assertIn("async function restoreWallpaper()", self.html)
+        self.assertIn("async function applyWallpaperBlob(blob)", self.html)
+        self.assertIn("await decodedWallpaperUrl(blob)", self.html)
+        self.assertIn("URL.createObjectURL(blob)", self.html)
+        self.assertIn("await storeWallpaper(file)", self.html)
+        self.assertIn("await deleteStoredWallpaper()", self.html)
+
     def test_boot_splash_hides_only_when_components_are_ready(self) -> None:
         self.assertIn('<script src="./assets/evelyn-boot-progress.js"></script>', self.html)
         self.assertIn("window.EvelynBootProgress =", self.boot_js)
