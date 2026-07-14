@@ -99,6 +99,19 @@ class ControlPageLive2DAssetTests(unittest.TestCase):
         self.assertIn("catTailPartOpacity", controller)
         self.assertIn("catAccessoriesVisible", controller)
 
+    def test_user_selected_model_state_persists_across_page_reloads(self) -> None:
+        controller = (DOCS_ROOT / "assets" / "evelyn-live2d.js").read_text(encoding="utf-8-sig")
+        self.assertIn('const MODEL_STATE_STORAGE_KEY = "evelynLive2dModelStateV1"', controller)
+        self.assertIn("function restorePersistedModelState()", controller)
+        self.assertIn("function persistModelState()", controller)
+        self.assertIn("window.localStorage.getItem(MODEL_STATE_STORAGE_KEY)", controller)
+        self.assertIn("window.localStorage.setItem(MODEL_STATE_STORAGE_KEY", controller)
+        self.assertIn("activeExpression: state.activeExpression", controller)
+        self.assertIn("catAccessoriesVisible: state.catAccessoriesVisible", controller)
+        self.assertIn("restorePersistedModelState();", controller)
+        self.assertIn("function applyActiveExpression()", controller)
+        self.assertGreaterEqual(controller.count("persistModelState();"), 3)
+
     def test_idle_tail_uses_all_seven_tail_rotation_parameters(self) -> None:
         controller = (DOCS_ROOT / "assets" / "evelyn-live2d.js").read_text(encoding="utf-8-sig")
         expected = [

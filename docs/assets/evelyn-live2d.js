@@ -11,6 +11,7 @@
   const CAT_EAR_PART = "ear";
   const CAT_TAIL_PART = "Part2";
   const CAT_ACCESSORY_HOTKEY = "Digit7";
+  const MODEL_STATE_STORAGE_KEY = "evelynLive2dModelStateV1";
   const EXPRESSION_PARAMETERS = Object.freeze({
     ulmak: "ParamHairBack75",
     "cat ear": "ParamHairBack65",
@@ -90,6 +91,40 @@
     if (!state.status) return;
     state.status.textContent = message;
     state.status.dataset.kind = kind || "loading";
+  }
+
+  function restorePersistedModelState() {
+    try {
+      const raw = window.localStorage.getItem(MODEL_STATE_STORAGE_KEY);
+      if (!raw) return;
+      const saved = JSON.parse(raw);
+      if (!saved || typeof saved !== "object" || saved.version !== 1) return;
+      state.catAccessoriesVisible = typeof saved.catAccessoriesVisible === "boolean"
+        ? saved.catAccessoriesVisible
+        : true;
+      state.activeExpression = typeof saved.activeExpression === "string"
+        && Object.prototype.hasOwnProperty.call(EXPRESSION_PARAMETERS, saved.activeExpression)
+        ? saved.activeExpression
+        : null;
+    } catch (_error) {
+      try {
+        window.localStorage.removeItem(MODEL_STATE_STORAGE_KEY);
+      } catch (_storageError) {
+        // Storage may be unavailable in private or restricted browser contexts.
+      }
+    }
+  }
+
+  function persistModelState() {
+    try {
+      window.localStorage.setItem(MODEL_STATE_STORAGE_KEY, JSON.stringify({
+        version: 1,
+        activeExpression: state.activeExpression,
+        catAccessoriesVisible: state.catAccessoriesVisible,
+      }));
+    } catch (_error) {
+      // Persistence is optional; model controls must keep working without storage.
+    }
   }
 
   function fitModel() {
@@ -191,6 +226,14 @@
     } catch (_error) {
       // Keep supporting model revisions that expose the parameter without named parts.
     }
+  }
+
+  function applyActiveExpression() {
+    if (state.area) state.area.dataset.live2dExpression = state.activeExpression || "none";
+    if (!state.model || !state.activeExpression) return;
+    state.model.expression(state.activeExpression).catch((error) => {
+      console.warn("[Evelyn Live2D] expression failed", state.activeExpression, error);
+    });
   }
 
   function updateModelParameters() {
@@ -354,6 +397,7 @@
 
   async function initialize() {
     if (state.loading || state.ready) return state.ready;
+    restorePersistedModelState();
     state.area = document.getElementById("evelynLive2dArea");
     state.canvas = document.getElementById("evelynLive2dCanvas");
     state.status = document.getElementById("evelynLive2dStatus");
@@ -397,8 +441,9 @@
       state.ready = true;
       state.area.classList.remove("live2d-error");
       state.area.classList.add("live2d-ready");
-      state.area.dataset.live2dExpression = "none";
-      state.area.dataset.live2dCatAccessories = "visible";
+      state.area.dataset.live2dCatAccessories = state.catAccessoriesVisible ? "visible" : "hidden";
+      enforceCatAccessoryVisibility(state.model.internalModel.coreModel);
+      applyActiveExpression();
       fitModel();
       bindInteractions();
       scheduleNextBlink(performance.now());
@@ -435,6 +480,7 @@
       }
       const coreModel = state.model && state.model.internalModel && state.model.internalModel.coreModel;
       if (coreModel) enforceCatAccessoryVisibility(coreModel);
+      persistModelState();
       return state.catAccessoriesVisible;
     },
     setExpression: function (name) {
@@ -445,12 +491,8 @@
         return true;
       }
       state.activeExpression = normalized;
-      if (state.area) state.area.dataset.live2dExpression = state.activeExpression || "none";
-      if (state.model) {
-        state.model.expression(normalized).catch((error) => {
-          console.warn("[Evelyn Live2D] expression failed", normalized, error);
-        });
-      }
+      applyActiveExpression();
+      persistModelState();
       return true;
     },
     clearExpression: function () {
@@ -464,6 +506,7 @@
         manager.resetExpression();
         manager.currentExpression = manager.defaultExpression;
       }
+      persistModelState();
     },
     availableExpressions: function () {
       return Object.keys(EXPRESSION_PARAMETERS);
