@@ -66,7 +66,7 @@ class DockerComposeContractTests(unittest.TestCase):
         check_script = CHECK_SCRIPT.read_text(encoding="utf-8")
 
         self.assertIn("npm install -g @openai/codex@0.128.0", (DOCKER_DIR / "Dockerfile.voyager").read_text(encoding="utf-8"))
-        self.assertIn("C:/Users/Admin/.codex/auth.json:/root/.codex/auth.json:ro", compose)
+        self.assertIn("${EVELYN_CODEX_AUTH_FILE:-${USERPROFILE}/.codex/auth.json}:/root/.codex/auth.json:ro", compose)
         self.assertIn("backendReady", source)
         self.assertIn("lastActionReady", source)
         self.assertIn("actionAuthRequired", source)
@@ -77,6 +77,20 @@ class DockerComposeContractTests(unittest.TestCase):
         self.assertIn('"exec",\n            "-m",\n            model,', source)
         self.assertIn("$json.backendReady -eq $true", check_script)
         self.assertIn("IncludeCodexAction", check_script)
+
+    def test_host_specific_compose_paths_are_configurable(self) -> None:
+        source = COMPOSE.read_text(encoding="utf-8")
+
+        self.assertNotIn("C:/Users/Admin", source)
+        for variable in (
+            "EVELYN_LLAMA_CPP_DIR",
+            "EVELYN_OMNIVOICE_SERVER_DIR",
+            "EVELYN_OMNIVOICE_PROFILES_DIR",
+            "EVELYN_HUGGINGFACE_CACHE_DIR",
+            "EVELYN_CODEX_AUTH_FILE",
+            "EVELYN_CODEX_CONFIG_FILE",
+        ):
+            self.assertIn(variable, source)
 
     def test_fast_control_api_supports_local_bridge_chat_contract(self) -> None:
         source = (REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "fast_control_api.py").read_text(encoding="utf-8")
