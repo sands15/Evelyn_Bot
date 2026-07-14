@@ -74,3 +74,17 @@ No files were deleted. Before/after counts and byte totals were identical.
 - `logs`: 6 turn-trace candidates, 3,631,909 bytes.
 
 The largest individual candidate is the stale `runtime_artifacts/logs/upstream_bridge_runner.log` at 189,955,706 bytes. Its growth source was a full status-board redraw written to redirected stdout every second; the 30-second redirected-output limit addresses that cause.
+
+## 2026-07-15 Applied Cleanup
+
+After explicit approval, the new bounds were deployed by rebuilding and recreating only `evelyn-bot-api` and `evelyn-voyager`. The other eight Evelyn containers were not recreated.
+
+The dry-run plan was recalculated immediately before deletion. Candidate counts and byte totals matched the recorded plan, the stale Voyager logs were not changing, the Voyager runner reported `runner_alive=false`, and the voice-debug file count remained stable during the pre-delete observation.
+
+- `debug_audio`: deleted 2,066 logical bundles and 342,672,040 bytes.
+- `runtime_artifacts`: deleted 12 files and 196,367,554 bytes.
+- `logs`: deleted 6 turn-trace files and 3,631,909 bytes.
+- Total: deleted 2,084 planned items or bundles and 542,671,503 bytes.
+- Failures: 0.
+
+A second dry run after deletion returned zero candidates and zero candidate bytes for all three roots. The voice cleanup retained the newest 10 bundles in each populated guild directory. All ten Evelyn containers remained healthy, and Control-Page boot progress remained 100%.

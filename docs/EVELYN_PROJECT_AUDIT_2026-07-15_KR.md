@@ -495,6 +495,62 @@ OK (skipped=1)
 
 현재 실행 중인 컨테이너와 프로세스는 재시작하지 않았다. 따라서 새 기본값과 출력 제한은 다음 승인된 재배포/재시작 이후 적용된다. 기존 후보 삭제도 별도 승인 전에는 수행하지 않는다.
 
+### 2026-07-15: P1-1 운영 반영과 기존 후보 정리 완료
+
+사용자 승인 후 다음 범위만 운영에 반영했다.
+
+1. `evelyn-bot-api`, `evelyn-voyager` 이미지만 재빌드하고 `--no-deps --force-recreate`로 재생성했다.
+2. 나머지 8개 이블린 컨테이너의 시작 시각은 유지됐다.
+3. 새 이미지에서 음성 저장 기본값 `false`, Voyager 로그 25MiB/백업 4개, 파일 상태판 30초 제한을 직접 확인했다.
+
+삭제 직전 dry-run은 기존 기록과 동일했다. 가장 큰 로그 2개의 크기·수정 시각은 관찰 중 변하지 않았고, Voyager health는 `runner_alive=false`, 음성 파일 수도 변하지 않았다.
+
+- 음성: 2,066묶음 / 342,672,040바이트 삭제
+- `runtime_artifacts`: 12개 / 196,367,554바이트 삭제
+- `logs/turn_trace`: 6개 / 3,631,909바이트 삭제
+- 합계: 2,084개 항목 또는 묶음 / 542,671,503바이트 삭제
+- 삭제 실패: 0
+
+삭제 후 세 경로의 dry-run은 모두 후보 0개·0바이트였다. 각 유효 길드의 최신 음성 10묶음은 보존됐고, 이블린 컨테이너 10개는 모두 healthy, Control-Page boot progress는 100%였다.
+
+### 2026-07-15: P1-2 Node/Minecraft 의존성 안전 갱신
+
+실제 Mineflayer 실행 기준은 루트 `package.json`과 `package-lock.json`이다. vendored Voyager manifest에는 lock과 `node_modules`가 없고, Mineflayer entrypoint가 루트 package 기준 `require` fallback을 사용한다.
+
+갱신 전 루트 `npm audit` 기준선:
+
+- 의존성 96개
+- high 4개
+- moderate 6개
+- critical 0개
+- `npm audit fix` 자동 수정 가능 항목 0개
+
+강제 override 없이 현재 semver 범위 안에서 lock을 갱신했다.
+
+- `minecraft-data`: `3.109.1` -> `3.111.0`
+- `minecraft-protocol`: `1.66.0` -> `1.66.2`
+- `prismarine-auth`: `2.7.0` -> `3.1.1`
+- `@xboxreplay/xboxlive-auth`: `3.3.3` -> `5.1.0`
+- 취약한 `axios 0.21.4` 체인은 제거됐다.
+
+갱신 후:
+
+- 의존성 93개
+- high 0개
+- moderate 8개
+- critical 0개
+- `npm ci --ignore-scripts` 재현 설치 성공
+- Node `v24.18.0`에서 Mineflayer, Minecraft data, pathfinder, collectblock, tool 플러그인 로딩 계약 성공
+- vendored Mineflayer entrypoint `node --check` 성공
+- 관련 보존/Voyager/Minecraft 집중 테스트 61개 통과
+- 전체 회귀 937개 통과(`OK`, 건너뜀 1)
+
+남은 8개 moderate는 최신 공개 Mineflayer `4.37.1`의 인증 체인에서 `@azure/msal-node`와 `yggdrasil`이 오래된 `uuid`를 요구해 발생한다. npm은 모두 `fixAvailable=false`로 판정했다. 강제 `uuid` override나 `npm audit fix --force`는 Microsoft/Xbox 로그인 경로를 깨뜨릴 수 있어 적용하지 않았다.
+
+별도 격리 설치로 vendored Voyager manifest도 감사했다. 생산 설치 기준 12개 취약점(high 1, moderate 11)이 나왔지만, 해당 디렉터리는 현재 운영 설치 경로가 아니다. 이 manifest의 개발 도구·선택 플러그인 재분류와 upstream 동기화는 별도 작업으로 남긴다.
+
+Minecraft 서버와 Voyager runner가 비활성인 상태였으므로 실제 게임 접속·Microsoft/Xbox 로그인·인게임 행동 E2E는 이번 갱신에서 실행하지 않았다. 대신 현재 운영 Node 버전, 재현 설치, 모듈·플러그인 로딩, Python 전체 회귀를 안전 검증 범위로 사용했다.
+
 ### 감사 후 보수적 임시 점수
 
 체크포인트, Control-Page 보안 운영 반영, 전체 테스트 녹색화를 반영한 임시 점수는 **69 / 100**이다. 원 감사의 66점은 당시 상태를 보존하며, 이 값은 전체 재감사가 아닌 세 P0 개선 항목만 보수적으로 반영한 값이다.
