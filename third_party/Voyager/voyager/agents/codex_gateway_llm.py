@@ -6,6 +6,8 @@ from typing import Any
 import requests
 from langchain.schema import AIMessage
 
+from evelyn_core.codex_gateway_auth import gateway_auth_headers
+
 
 class CodexGatewayLLM:
     def __init__(
@@ -23,6 +25,7 @@ class CodexGatewayLLM:
         prompt = self._messages_to_prompt(messages)
         response = requests.post(
             self.url,
+            headers=gateway_auth_headers(),
             json={
                 "prompt": prompt,
                 "model": self.model,
