@@ -53,6 +53,13 @@ class ControlPageChatTests(unittest.TestCase):
         self.assertIn("appendChatMessage({", self.html)
         self.assertNotIn('lastBubble.querySelector(".caption").textContent = text;', self.html)
 
+    def test_mutating_requests_use_control_page_csrf_session(self) -> None:
+        for source in (self.html, self.js):
+            self.assertIn('"/api/control-page/session"', source)
+            self.assertIn('"X-Evelyn-CSRF-Token"', source)
+            self.assertIn('"Content-Type"] =', source)
+            self.assertIn('response.status === 403 && mutating', source)
+
     def test_user_display_name_is_not_mojibake(self) -> None:
         self.assertIn('author: "정훈"', self.html)
         self.assertIn('"정훈"', self.js)

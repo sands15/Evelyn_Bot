@@ -8,6 +8,7 @@ from typing import Any, AsyncIterator
 
 from aiohttp import ClientSession, ClientTimeout, web
 
+from .control_page_http import reject_browser_origin_middleware
 from .assistant_prompt_contract import (
     FAST_MAIN_LLM_USER_PREFIX,
     build_evelyn_system_prompt,
@@ -827,7 +828,7 @@ async def shutdown_handler(request: web.Request) -> web.StreamResponse:
 
 
 def create_app() -> web.Application:
-    app = web.Application()
+    app = web.Application(middlewares=[reject_browser_origin_middleware])
     app.router.add_get("/health", health_handler)
     app.router.add_get("/api/control-page/state", state_handler)
     app.router.add_post("/api/control-page/chat", chat_handler)

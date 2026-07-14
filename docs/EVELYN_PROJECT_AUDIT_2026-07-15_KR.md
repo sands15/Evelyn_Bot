@@ -397,3 +397,36 @@ Compose 서비스의 `restart` 정책은 모두 `no`다. 보이는 수동 런처
 ## 14. 한 줄 결론
 
 **이블린은 기능적으로 80점대지만, 복구·보안·테스트·릴리스 공학이 30~50점대라 종합 66점이다. 다음 기능보다 기준점 고정과 안전 경계 보강이 우선이다.**
+
+## 15. 감사 후 개선 이력
+
+### 2026-07-15: P0-1 복구 기준점 완료
+
+- 브랜치: `checkpoint/evelyn-audit-2026-07-15`
+- 커밋: `cbec7ec986874df51a517a4fa8106881c3b00440`
+- 태그: `evelyn-checkpoint-2026-07-15`
+- 외부 Git bundle과 SHA-256 검증본을 별도 보관했다.
+
+### 2026-07-15: P0-2 Control-Page 보안 소스 보강 완료
+
+작업 브랜치: `hardening/control-page-security-2026-07-15`
+
+적용 내용:
+
+1. `Access-Control-Allow-Origin: *`를 제거하고, 실제로 허용된 Origin만 응답에 반영한다.
+2. 기본 Host/Origin을 loopback으로 제한하고 DNS rebinding 형태의 비-loopback Host를 차단한다.
+3. `/api/control-page/session`에서 프로세스별 난수 CSRF 토큰을 발급한다.
+4. 모든 Control-Page 변경 요청은 `X-Evelyn-CSRF-Token`과 `application/json`을 요구한다.
+5. 프런트엔드는 변경 요청 전에 토큰을 가져오며, 서버 재시작으로 토큰이 바뀐 경우 403에서 한 번 갱신 후 재시도한다.
+6. 내부 Bot API `8798`은 브라우저 Origin 요청과 비-JSON 변경 요청을 거부한다. 서버 프록시와 Local Bridge의 Origin 없는 JSON 호출은 유지한다.
+7. 추가 Origin이 꼭 필요할 때만 `CONTROL_PAGE_ALLOWED_ORIGINS`에 정확한 Origin을 쉼표로 지정한다. 기본값은 비워 둔다.
+
+검증 범위:
+
+- 같은 Origin 읽기와 CSRF 포함 변경 요청 성공
+- 외부 Origin, 누락 토큰, 비-JSON 변경 요청 차단
+- DNS rebinding Host 차단
+- 실제 public/internal 앱 wiring 검사
+- 프런트엔드 토큰 갱신 계약과 JavaScript 구문 검사
+
+주의: 이 항목은 소스와 격리 테스트 기준으로 완료됐다. 실행 중 컨테이너에는 아직 재빌드·재시작하지 않았으므로, 운영 `8799/8798`에는 재시작 승인 전까지 기존 정책이 남아 있다. 또한 로컬 악성 프로세스 자체를 막는 서비스 간 비밀키 인증은 별도 후속 과제다.

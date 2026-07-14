@@ -563,6 +563,7 @@ from evelyn_core.control_page_http import (
     control_page_cors_middleware,
     control_page_file_response,
     control_page_json_response,
+    control_page_session_handler,
     resolve_control_page_asset_path,
 )
 from evelyn_core.control_page_server import open_path_with_system, open_url_with_system
@@ -7072,6 +7073,7 @@ async def start_control_page_server() -> None:
         app.router.add_get("/assets/{asset_path:.*}", control_page_asset_handler)
         app.router.add_get(CONTROL_PAGE_MINECRAFT_ICON_ROUTE + "/{item_name}", control_page_minecraft_item_icon_handler)
         app.router.add_get("/api/control-page/state", control_page_state_handler)
+        app.router.add_get("/api/control-page/session", control_page_session_handler)
         app.router.add_get("/api/control-page/memory", control_page_memory_snapshot_handler)
         app.router.add_get("/api/control-page/memory-graph", control_page_memory_graph_handler)
         app.router.add_get("/api/control-page/memory/{note_id}", control_page_memory_note_handler)

@@ -2241,6 +2241,7 @@
     let memoryLoading = false;
     let memoryLoadPromise = null;
     let apiBase = "";
+    let csrfToken = "";
     let sending = false;
     let initialStateLoaded = false;
     let suggestionItems = [];
@@ -3300,6 +3301,17 @@
       return Array.from(new Set(candidates));
     }
 
+    async function ensureCsrfToken() {
+      if (csrfToken) return csrfToken;
+      if (!apiBase) throw new Error("control page API에 연결하지 못했어.");
+      const response = await fetch(apiBase + "/api/control-page/session", { cache: "no-store" });
+      if (!response.ok) throw new Error(`csrf_session_error:${response.status}`);
+      const payload = await response.json();
+      csrfToken = String(payload.csrfToken || "");
+      if (!csrfToken) throw new Error("csrf_session_missing");
+      return csrfToken;
+    }
+
     async function fetchApi(path, options = {}) {
       if (!apiBase) {
         for (const candidate of apiCandidates()) {
@@ -3318,10 +3330,24 @@
       if (!apiBase) {
         throw new Error("control page API에 연결하지 못했어.");
       }
-      const response = await fetch(apiBase + path, {
+      const method = String(options.method || "GET").toUpperCase();
+      const mutating = ["POST", "PUT", "PATCH", "DELETE"].includes(method);
+      const requestOptions = {
         cache: "no-store",
-        ...options
-      });
+        ...options,
+        headers: { ...(options.headers || {}) }
+      };
+      if (mutating) {
+        requestOptions.headers["Content-Type"] = requestOptions.headers["Content-Type"] || "application/json";
+        if (requestOptions.body === undefined) requestOptions.body = "{}";
+        requestOptions.headers["X-Evelyn-CSRF-Token"] = await ensureCsrfToken();
+      }
+      let response = await fetch(apiBase + path, requestOptions);
+      if (response.status === 403 && mutating) {
+        csrfToken = "";
+        requestOptions.headers["X-Evelyn-CSRF-Token"] = await ensureCsrfToken();
+        response = await fetch(apiBase + path, requestOptions);
+      }
       if (!response.ok) {
         throw new Error(`api_error:${response.status}`);
       }

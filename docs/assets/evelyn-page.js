@@ -185,6 +185,7 @@ const dom = {
 
 const state = {
   apiBase: null,
+  csrfToken: "",
   commands: [],
   allCommands: [],
   appState: null,
@@ -1950,6 +1951,25 @@ async function connectApi() {
   return null;
 }
 
+async function ensureCsrfToken() {
+  if (state.csrfToken) {
+    return state.csrfToken;
+  }
+  if (!state.apiBase) {
+    throw new Error("api_unavailable");
+  }
+  const response = await fetch(state.apiBase + "/api/control-page/session", { cache: "no-store" });
+  if (!response.ok) {
+    throw new Error("csrf_session_error:" + response.status);
+  }
+  const payload = await response.json();
+  state.csrfToken = String(payload.csrfToken || "");
+  if (!state.csrfToken) {
+    throw new Error("csrf_session_missing");
+  }
+  return state.csrfToken;
+}
+
 async function fetchApi(path, options = {}) {
   if (!state.apiBase) {
     const payload = await connectApi();
@@ -1960,10 +1980,26 @@ async function fetchApi(path, options = {}) {
       return payload;
     }
   }
-  const response = await fetch(state.apiBase + path, {
+  const method = String(options.method || "GET").toUpperCase();
+  const mutating = ["POST", "PUT", "PATCH", "DELETE"].includes(method);
+  const requestOptions = {
     cache: "no-store",
     ...options,
-  });
+    headers: { ...(options.headers || {}) },
+  };
+  if (mutating) {
+    requestOptions.headers["Content-Type"] = requestOptions.headers["Content-Type"] || "application/json";
+    if (requestOptions.body === undefined) {
+      requestOptions.body = "{}";
+    }
+    requestOptions.headers["X-Evelyn-CSRF-Token"] = await ensureCsrfToken();
+  }
+  let response = await fetch(state.apiBase + path, requestOptions);
+  if (response.status === 403 && mutating) {
+    state.csrfToken = "";
+    requestOptions.headers["X-Evelyn-CSRF-Token"] = await ensureCsrfToken();
+    response = await fetch(state.apiBase + path, requestOptions);
+  }
   if (!response.ok) {
     throw new Error("api_error:" + response.status);
   }
