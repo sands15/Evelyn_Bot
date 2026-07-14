@@ -1,10 +1,17 @@
 ﻿from __future__ import annotations
 
 import unittest
+import sys
 from pathlib import Path
 
 
 REPO_ROOT = next(path for path in Path(__file__).resolve().parents if (path / "main.py").exists())
+RUNTIME_ROOT = REPO_ROOT / "evelyn_core" / "runtime"
+VOICE_RESPONSE_RUNTIME = REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "voice_response_runtime.py"
+if str(RUNTIME_ROOT) not in sys.path:
+    sys.path.insert(0, str(RUNTIME_ROOT))
+
+from evelyn_core.local_runtime_context import build_evelyn_runtime_dependency_context_from_payload  # noqa: E402
 
 
 class RuntimeDependencyContextTests(unittest.TestCase):
@@ -13,18 +20,48 @@ class RuntimeDependencyContextTests(unittest.TestCase):
         context_assembly_py = (
             REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "llm_context_assembly.py"
         ).read_text(encoding="utf-8")
+        local_runtime_context_py = (
+            REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "local_runtime_context.py"
+        ).read_text(encoding="utf-8")
 
-        self.assertIn("def build_evelyn_runtime_dependency_context", main_py)
+        self.assertIn("build_evelyn_runtime_dependency_context=lambda: build_evelyn_runtime_dependency_context_from_payload", main_py)
+        self.assertIn("def build_evelyn_runtime_dependency_context_from_payload", local_runtime_context_py)
+        self.assertIn("build_evelyn_runtime_dependency_context_from_payload", main_py)
         self.assertIn("render_self_judgment_context", main_py)
         self.assertIn("self_judgment_context = deps.render_self_judgment_context", context_assembly_py)
         self.assertIn("self_judgment_context", context_assembly_py)
-        self.assertIn("Evelyn dependency topology:", main_py)
-        self.assertIn("role=primary answer text generation", main_py)
-        self.assertIn("role=route/cognitive policy before the main answer", main_py)
+        self.assertIn("Evelyn dependency topology:", local_runtime_context_py)
+        self.assertIn("role=primary answer text generation", local_runtime_context_py)
+        self.assertIn("role=route/cognitive policy before the main answer", local_runtime_context_py)
         self.assertIn("runtime_state=runtime_context if context_policy.needs_runtime_state else dependency_context", context_assembly_py)
+
+    def test_runtime_dependency_context_renderer_uses_live_payloads(self) -> None:
+        text = build_evelyn_runtime_dependency_context_from_payload(
+            local_tts={"enabled": True, "active": False, "device": "", "playCount": 3, "lastError": ""},
+            local_mic={"enabled": True, "captureReady": True, "device": "mic-1", "segmentCount": 5, "lastError": ""},
+            local_only_mode=True,
+            discord_enabled=False,
+            model_name="main-model",
+            llm_server_url="http://llm",
+            router_model_name="router-model",
+            summary_model_name="summary-model",
+            stt_model_name="stt-model",
+            stt_backend="backend",
+            omnivoice_server_url="http://tts",
+            omnivoice_voice=None,
+            omnivoice_speed=1.0,
+            voice_input_mode_status_line="auto",
+        )
+
+        self.assertIn("Evelyn dependency topology:", text)
+        self.assertIn("main-model", text)
+        self.assertIn("output_mode=local_speaker", text)
+        self.assertIn("capture_ready=True", text)
+        self.assertIn("play_count=3", text)
 
     def test_runtime_status_context_includes_current_gpu_oom_signal(self) -> None:
         main_py = (REPO_ROOT / "main.py").read_text(encoding="utf-8")
+        voice_response_runtime = VOICE_RESPONSE_RUNTIME.read_text(encoding="utf-8")
         route_execution_py = (
             REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "voice_route_execution.py"
         ).read_text(encoding="utf-8")
@@ -36,13 +73,14 @@ class RuntimeDependencyContextTests(unittest.TestCase):
         self.assertIn("current_gpu_snapshot=", main_py)
         self.assertIn("current_oom_signal=", main_py)
         self.assertIn("recent_errors_are_historical=true", main_py)
-        self.assertIn("RUNTIME_STATUS_RULE", main_py)
+        self.assertIn("RUNTIME_STATUS_RULE", voice_response_runtime)
         self.assertIn("needs_runtime_status_context = route_decision.needs_runtime_state", route_execution_py)
         self.assertIn("def answer_gpu_runtime_status_query", runtime_status_context)
         self.assertIn("gpu_runtime_status_fast_path", route_execution_py)
 
     def test_main_llm_blocks_unrequested_minecraft_domain_leaks(self) -> None:
         main_py = (REPO_ROOT / "main.py").read_text(encoding="utf-8")
+        voice_response_runtime = VOICE_RESPONSE_RUNTIME.read_text(encoding="utf-8")
         route_execution_py = (
             REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "voice_route_execution.py"
         ).read_text(encoding="utf-8")
@@ -66,8 +104,8 @@ class RuntimeDependencyContextTests(unittest.TestCase):
         self.assertIn("suppressed_minecraft_leak_stream", route_execution_py)
         self.assertIn("그쪽 얘기는 빼고", response_policy)
         self.assertNotIn("return \"마크 얘기는 빼고", main_py)
-        self.assertIn("응답 규칙: 짧게 바로 답해라", main_py)
-        self.assertIn("답변 끝에 새 질문을 덧붙이지 마라", main_py)
+        self.assertIn("응답 규칙: 짧게 바로 답해라", voice_response_runtime)
+        self.assertIn("답변 끝에 새 질문을 덧붙이지 마라", voice_response_runtime)
         self.assertNotIn("[QUESTION_HINT]", main_py)
         self.assertIn("Vision rule: Do not claim you can see the user's screen", prompt_contract)
 

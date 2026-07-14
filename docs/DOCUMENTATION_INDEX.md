@@ -40,6 +40,11 @@ implemented behavior.
     verification, and remaining live-verification gaps.
   - Use when deciding what to stabilize before adding major new features.
 
+- `docs/EVELYN_PROJECT_AUDIT_2026-07-15_KR.md`
+  - Current whole-project audit with weighted scores, verified runtime/test
+    evidence, security and reproducibility risks, and a prioritized roadmap.
+  - Use this as the latest conservative engineering-quality baseline.
+
 - `docs/RUNTIME_SERVICE_MANIFEST_HEALTH_REPAIR_BLUEPRINT.md`
   - Temporary design blueprint for `Runtime Service Manifest + Health/Repair Layer`.
   - Use before implementing runtime service manifest, structured health, diagnostics, and repair actions.

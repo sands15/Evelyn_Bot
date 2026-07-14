@@ -7,6 +7,7 @@ from pathlib import Path
 REPO_ROOT = next(path for path in Path(__file__).resolve().parents if (path / "main.py").exists())
 MAIN_PY = REPO_ROOT / "main.py"
 CONTROL_PAGE_TOOLS = REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "control_page_tools.py"
+CONTROL_PAGE_TOOL_RUNTIME = REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "control_page_tool_runtime.py"
 SESSION_MEMORY_STATE = REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "session_memory_state.py"
 
 
@@ -15,6 +16,7 @@ class ControlPageToolRegistryTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.main_py = MAIN_PY.read_text(encoding="utf-8")
         cls.control_page_tools = CONTROL_PAGE_TOOLS.read_text(encoding="utf-8")
+        cls.control_page_tool_runtime = CONTROL_PAGE_TOOL_RUNTIME.read_text(encoding="utf-8")
         cls.session_memory_state = SESSION_MEMORY_STATE.read_text(encoding="utf-8")
 
     def test_tool_registry_and_risk_policy_exist(self) -> None:
@@ -29,9 +31,9 @@ class ControlPageToolRegistryTests(unittest.TestCase):
         self.assertIn('if spec.risk == "medium" and source == "router" and confidence < 0.86:', self.control_page_tools)
 
     def test_input_flow_uses_cheap_classifier_before_router_and_main(self) -> None:
-        cheap_index = self.main_py.index("cheap_decision = cheap_control_page_tool_decision(text)")
-        router_gate_index = self.main_py.index("if should_route_control_page_tool_candidate(text):")
-        main_index = self.main_py.index("return await answer_control_page_text(guild, text)")
+        cheap_index = self.control_page_tool_runtime.index("cheap_decision = deps.cheap_control_page_tool_decision(text)")
+        router_gate_index = self.control_page_tool_runtime.index("if deps.should_route_control_page_tool_candidate(text):")
+        main_index = self.control_page_tool_runtime.index("return await deps.answer_control_page_text(guild, text)")
         self.assertLess(cheap_index, router_gate_index)
         self.assertLess(router_gate_index, main_index)
         self.assertIn("def should_route_control_page_tool_candidate(text: str) -> bool:", self.control_page_tools)
@@ -39,20 +41,20 @@ class ControlPageToolRegistryTests(unittest.TestCase):
 
     def test_tool_results_are_recorded_for_followup_context(self) -> None:
         self.assertIn("def remember_control_page_tool_turn(", self.main_py)
-        self.assertIn("session_state_store.record_tool_assistant_turn(", self.main_py)
+        self.assertIn("record_tool_assistant_turn=session_state_store.record_tool_assistant_turn", self.main_py)
         self.assertIn("def record_tool_assistant_turn(", self.session_memory_state)
         self.assertIn('history_answer = f"도구 실행: {cleaned_tool}\\n결과: {clean_text(reply_text)}"', self.session_memory_state)
         self.assertIn("self.append_history(", self.session_memory_state)
         self.assertIn("self.mark_active(", self.session_memory_state)
-        self.assertIn("remember_control_page_tool_turn(guild, text, reply, cheap_decision)", self.main_py)
+        self.assertIn("deps.remember_control_page_tool_turn(guild, text, reply, cheap_decision)", self.control_page_tool_runtime)
 
     def test_router_policy_blocks_before_router_reply_is_used(self) -> None:
-        policy_index = self.main_py.index("router_policy_error = control_page_tool_policy_error(tool_decision, guild_available=guild is not None)")
-        reply_index = self.main_py.index("final_reply = control_page_tool_reply_from_execution(tool_decision, execute_reply)")
+        policy_index = self.control_page_tool_runtime.index("router_policy_error = deps.control_page_tool_policy_error(tool_decision, guild_available=guild is not None)")
+        reply_index = self.control_page_tool_runtime.index("final_reply = deps.control_page_tool_reply_from_execution(tool_decision, execute_reply)")
         self.assertLess(policy_index, reply_index)
-        self.assertIn("if router_policy_error:", self.main_py)
-        self.assertIn("return router_policy_error", self.main_py)
-        self.assertIn("remember_control_page_tool_turn(guild, text, router_policy_error, tool_decision)", self.main_py)
+        self.assertIn("if router_policy_error:", self.control_page_tool_runtime)
+        self.assertIn("return router_policy_error", self.control_page_tool_runtime)
+        self.assertIn("deps.remember_control_page_tool_turn(guild, text, router_policy_error, tool_decision)", self.control_page_tool_runtime)
 
     def test_router_reply_only_masks_execution_for_memory_panel(self) -> None:
         self.assertIn("def control_page_tool_reply_from_execution(decision: dict[str, Any], execute_reply: str) -> str:", self.control_page_tools)
@@ -62,10 +64,10 @@ class ControlPageToolRegistryTests(unittest.TestCase):
 
     def test_router_prompt_is_allowlist_based(self) -> None:
         self.assertIn("def control_page_tool_registry_prompt() -> str:", self.control_page_tools)
-        self.assertIn("Available allowlisted tools:", self.main_py)
-        self.assertIn("never invent tools, shell commands, paths, or code", self.main_py)
-        self.assertIn("Never call high-risk tools", self.main_py)
-        self.assertIn("Recent conversation:", self.main_py)
+        self.assertIn("Available allowlisted tools:", self.control_page_tool_runtime)
+        self.assertIn("never invent tools, shell commands, paths, or code", self.control_page_tool_runtime)
+        self.assertIn("Never call high-risk tools", self.control_page_tool_runtime)
+        self.assertIn("Recent conversation:", self.control_page_tool_runtime)
 
 
 if __name__ == "__main__":

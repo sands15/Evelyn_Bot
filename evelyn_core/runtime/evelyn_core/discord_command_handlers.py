@@ -3,7 +3,22 @@ from __future__ import annotations
 import os
 from typing import Any
 
+try:
+    from discord.ext import commands
+except Exception:  # pragma: no cover
+    class _FallbackCheckFailure(Exception):
+        """discord.py이 없는 환경에서 체크 실패 예외 대체."""
+
+    class _FallbackCommands:
+        CheckFailure = _FallbackCheckFailure
+
+    commands = _FallbackCommands()
+
 from .text import clean_text
+from .discord_commands import (
+    control_command_check_failure_message,
+    is_control_command_authorized_payload,
+)
 
 
 async def handle_join_voice_command(
@@ -409,6 +424,27 @@ async def handle_minecraft_goal_command(
     mark_text_session_from_command(ctx, getattr(ctx.message, "content", None) or "마크목표", reply_text)
 
 
+def make_control_command_authorized_checker(*, allowed_user_ids: set[int] | frozenset[int]) -> Any:
+    allowed = set(allowed_user_ids)
+
+    def is_authorized(ctx: Any) -> bool:
+        perms = getattr(ctx.author, "guild_permissions", None)
+        return is_control_command_authorized_payload(
+            author_id=getattr(ctx.author, "id", None),
+            is_administrator=bool(perms and getattr(perms, "administrator", False)),
+            allowed_user_ids=allowed,
+        )
+
+    return is_authorized
+
+
+async def handle_control_command_error(ctx: Any, error: BaseException) -> None:
+    if isinstance(error, commands.CheckFailure):
+        await ctx.send(control_command_check_failure_message())
+        return
+    raise error
+
+
 __all__ = [
     "handle_autonomy_start_command",
     "handle_autonomy_status_command",
@@ -423,9 +459,11 @@ __all__ = [
     "handle_minecraft_status_command",
     "handle_prefix_command",
     "handle_rejoin_voice_command",
+    "handle_control_command_error",
     "handle_reset_guild_memory_command",
     "handle_restart_bot_command",
     "handle_shutdown_bot_command",
     "handle_status_command",
+    "make_control_command_authorized_checker",
     "resolve_opus_runtime_value",
 ]

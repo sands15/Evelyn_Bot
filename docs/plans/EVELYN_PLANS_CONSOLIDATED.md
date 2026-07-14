@@ -1782,10 +1782,12 @@ Standalone verification result:
 - Cached generation speed observed around `92-96 tok/s`.
 - Standalone RTX 3090 VRAM for Kanana+LoRA was about `7.9 GB`.
 
-Previous EXAONE main baseline:
+Previous non-Gemma baseline:
 
-- `EXAONE 3.5 7.8B + Evelyn LoRA v1` standalone was about `7.0-7.5 GB`.
-- Speed was about `66 tok/s`.
+- Removed from the active Evelyn plan because its license does not fit
+  commercial-use-safe defaults.
+- Keep new router/sub/main LLM planning on Gemma 4 text-only models unless the
+  replacement license is checked first.
 
 ### Full Stack VRAM Failure
 

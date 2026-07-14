@@ -124,6 +124,30 @@ async def finalize_voice_answer_from_runtime(
     return cleaned_answer, queued_sentence_count
 
 
+async def execute_voice_delivery_plan_from_runtime(
+    vc: Any,
+    delivery_plan,
+    *,
+    deps: VoiceDeliveryRuntimeDeps,
+    metrics: dict[str, Any],
+    turn_id: str | None,
+    session_key: str | None,
+    turn_scope: Any = None,
+) -> int:
+    from evelyn_core.discord_delivery import execute_streaming_voice_delivery_plan
+
+    return await execute_streaming_voice_delivery_plan(
+        delivery_plan,
+        start_delivery=lambda: deps.start_streaming_voice_delivery(
+            vc,
+            metrics=metrics,
+            turn_id=turn_id,
+            session_key=session_key,
+            turn_scope=turn_scope,
+        ),
+    )
+
+
 async def ask_llm_and_speak_local_from_runtime(
     _vc: Any,
     user_text: str,

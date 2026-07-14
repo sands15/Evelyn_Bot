@@ -22,6 +22,7 @@ from .control_page_contracts import (
     memory_panel_reply,
 )
 from .fast_context_contract import build_fast_main_llm_messages
+from .paths import get_runtime_artifacts_root
 from .runtime_health import collect_runtime_health, default_probe_runner
 from .runtime_services import HealthProbeSpec, ServiceSpec, load_service_manifest
 from .text import visible_text as shared_visible_text
@@ -62,6 +63,7 @@ LOCAL_BRIDGE_STATUS: dict[str, Any] = {
 }
 LOCAL_BRIDGE_SPEAK_QUEUE: list[dict[str, Any]] = []
 LOCAL_BRIDGE_SPEAK_SEQ = 0
+LOCAL_AUDIO_DEVICE_STATE_PATH = get_runtime_artifacts_root() / "state" / "local_audio_devices.json"
 SHUTDOWN_REQUEST: dict[str, Any] = {
     "requested": False,
     "requestedAt": None,
@@ -74,6 +76,35 @@ RESTART_REQUEST: dict[str, Any] = {
     "source": "",
     "reason": "",
 }
+
+
+def load_local_audio_device_state() -> dict[str, Any]:
+    try:
+        with LOCAL_AUDIO_DEVICE_STATE_PATH.open("r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except Exception:
+        return {"outputDevice": "", "requestedAt": None, "source": "", "revision": 0}
+    if not isinstance(data, dict):
+        return {"outputDevice": "", "requestedAt": None, "source": "", "revision": 0}
+    try:
+        revision = int(data.get("revision") or 0)
+    except Exception:
+        revision = 0
+    return {
+        "outputDevice": re.sub(r"\s+", " ", str(data.get("outputDevice") or "").strip()),
+        "requestedAt": data.get("requestedAt") if isinstance(data.get("requestedAt"), (int, float)) else None,
+        "source": re.sub(r"\s+", " ", str(data.get("source") or "").strip()),
+        "revision": max(0, revision),
+    }
+
+
+def save_local_audio_device_state(state: dict[str, Any]) -> None:
+    LOCAL_AUDIO_DEVICE_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with LOCAL_AUDIO_DEVICE_STATE_PATH.open("w", encoding="utf-8") as handle:
+        json.dump(state, handle, ensure_ascii=False, indent=2)
+
+
+LOCAL_BRIDGE_OUTPUT_DEVICE_REQUEST: dict[str, Any] = load_local_audio_device_state()
 
 
 def json_response(payload: dict[str, Any], *, status: int = 200) -> web.Response:
@@ -114,6 +145,8 @@ def append_chat_message(role: str, author: str, text: str, *, source: str | None
 
 def local_bridge_status_snapshot(*, now: float | None = None) -> dict[str, Any]:
     snapshot = dict(LOCAL_BRIDGE_STATUS)
+    if LOCAL_BRIDGE_OUTPUT_DEVICE_REQUEST.get("outputDevice"):
+        snapshot["outputDeviceSelection"] = dict(LOCAL_BRIDGE_OUTPUT_DEVICE_REQUEST)
     updated_at = snapshot.get("updatedAt")
     if not snapshot.get("enabled") or not isinstance(updated_at, (int, float)):
         return snapshot
@@ -152,6 +185,21 @@ def drain_local_bridge_speak_requests() -> list[dict[str, Any]]:
     requests = list(LOCAL_BRIDGE_SPEAK_QUEUE)
     LOCAL_BRIDGE_SPEAK_QUEUE.clear()
     return requests
+
+
+def set_local_bridge_output_device(output_device: str, *, source: str = "control_page") -> dict[str, Any]:
+    current_revision = int(LOCAL_BRIDGE_OUTPUT_DEVICE_REQUEST.get("revision") or 0)
+    requested_device = clean_text(output_device) or "default"
+    LOCAL_BRIDGE_OUTPUT_DEVICE_REQUEST.update(
+        {
+            "outputDevice": requested_device,
+            "requestedAt": time.time(),
+            "source": clean_text(source) or "control_page",
+            "revision": current_revision + 1,
+        }
+    )
+    save_local_audio_device_state(LOCAL_BRIDGE_OUTPUT_DEVICE_REQUEST)
+    return dict(LOCAL_BRIDGE_OUTPUT_DEVICE_REQUEST)
 
 
 def should_queue_local_bridge_speech(source: str) -> bool:
@@ -479,6 +527,9 @@ def build_control_state(health: dict[str, Any]) -> dict[str, Any]:
     commands = build_default_commands()
     summary = str(health.get("summary") or health.get("overallState") or "unknown")
     bridge_status = local_bridge_status_snapshot()
+    bridge_mic = dict(bridge_status.get("mic") or {})
+    bridge_speaking = bool(bridge_status.get("speaking"))
+    bridge_listening = bool(bridge_mic.get("captureActive"))
     control_plane = build_control_plane_state(bot_ready=bot_ready)
     return {
         "ok": True,
@@ -488,7 +539,15 @@ def build_control_state(health: dict[str, Any]) -> dict[str, Any]:
         "bootProgress": boot_progress,
         "ui": {
             "mode": "default",
-            "submode": "idle" if bot_ready else "booting",
+            "submode": (
+                "voice-speaking"
+                if bridge_speaking
+                else "voice-listening"
+                if bridge_listening
+                else "idle"
+                if bot_ready
+                else "booting"
+            ),
             "reason": "docker_fast_control",
         },
         "commands": commands,
@@ -500,6 +559,10 @@ def build_control_state(health: dict[str, Any]) -> dict[str, Any]:
         },
         "voice": {
             "outputMode": "windows_local_bridge" if bridge_status.get("enabled") else "docker_service",
+            "channelName": "로컬 마이크" if bridge_listening else "없음",
+            "listening": bridge_listening,
+            "speaking": bridge_speaking,
+            "ttsTargetName": "로컬 스피커" if bridge_speaking else "없음",
             "localBridge": bridge_status,
         },
         "restart": dict(RESTART_REQUEST),
@@ -703,10 +766,54 @@ async def local_bridge_status_handler(request: web.Request) -> web.StreamRespons
             "ok": True,
             "localBridge": local_bridge_status_snapshot(),
             "speakRequests": speak_requests,
+            "outputDeviceRequest": dict(LOCAL_BRIDGE_OUTPUT_DEVICE_REQUEST)
+            if LOCAL_BRIDGE_OUTPUT_DEVICE_REQUEST.get("outputDevice")
+            else {},
             "restart": dict(RESTART_REQUEST),
             "shutdown": dict(SHUTDOWN_REQUEST),
         }
     )
+
+
+async def local_bridge_output_device_handler(request: web.Request) -> web.StreamResponse:
+    if request.method == "GET":
+        return json_response(
+            {
+                "ok": True,
+                "selection": dict(LOCAL_BRIDGE_OUTPUT_DEVICE_REQUEST),
+                "localBridge": local_bridge_status_snapshot(),
+            }
+        )
+    try:
+        payload = await request.json()
+    except Exception:
+        return json_response({"ok": False, "error": "invalid_json"}, status=400)
+    output_device = clean_text((payload or {}).get("outputDevice"))
+    if not output_device:
+        return json_response({"ok": False, "error": "missing_output_device"}, status=400)
+    selection = set_local_bridge_output_device(
+        output_device,
+        source=clean_text((payload or {}).get("source")) or "control_page",
+    )
+    return json_response(
+        {
+            "ok": True,
+            "selection": selection,
+            "localBridge": local_bridge_status_snapshot(),
+        }
+    )
+
+
+async def local_bridge_test_tts_handler(request: web.Request) -> web.StreamResponse:
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    text = clean_text((payload or {}).get("text")) or "이블린 오디오 테스트입니다."
+    queued = queue_local_bridge_speech(text, source="control_page_audio_test")
+    if queued is None:
+        return json_response({"ok": False, "error": "local_bridge_not_ready"}, status=409)
+    return json_response({"ok": True, "request": queued, "localBridge": local_bridge_status_snapshot()})
 
 
 async def shutdown_handler(request: web.Request) -> web.StreamResponse:
@@ -728,6 +835,9 @@ def create_app() -> web.Application:
     app.router.add_post("/api/control-page/shutdown", shutdown_handler)
     app.router.add_get("/api/local-bridge/status", local_bridge_status_handler)
     app.router.add_post("/api/local-bridge/status", local_bridge_status_handler)
+    app.router.add_get("/api/local-bridge/output-device", local_bridge_output_device_handler)
+    app.router.add_post("/api/local-bridge/output-device", local_bridge_output_device_handler)
+    app.router.add_post("/api/local-bridge/test-tts", local_bridge_test_tts_handler)
     return app
 
 

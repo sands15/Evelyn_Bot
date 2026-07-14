@@ -1,0 +1,79 @@
+{
+	"Version": 3,
+	"FileReferences": {
+		"Moc": "evelin.moc3",
+		"Textures": [
+			"evelin.4096/texture_00.png",
+			"evelin.4096/texture_01.png",
+			"evelin.4096/texture_02.png",
+			"evelin.4096/texture_03.png",
+			"evelin.4096/texture_04.png",
+			"evelin.4096/texture_05.png"
+		],
+		"Physics": "evelin.physics3.json",
+		"DisplayInfo": "evelin.cdi3.json",
+		"Expressions": [
+			{
+				"Name": "ulmak",
+				"File": "ulmak.exp3.json"
+			},
+			{
+				"Name": "cat ear",
+				"File": "cat ear.exp3.json"
+			},
+			{
+				"Name": "cheek1",
+				"File": "cheek1.exp3.json"
+			},
+			{
+				"Name": "cheek2",
+				"File": "cheek2.exp3.json"
+			},
+			{
+				"Name": "dia",
+				"File": "dia.exp3.json"
+			},
+			{
+				"Name": "heart eye",
+				"File": "heart eye.exp3.json"
+			},
+			{
+				"Name": "mostach",
+				"File": "mostach.exp3.json"
+			},
+			{
+				"Name": "pale",
+				"File": "pale.exp3.json"
+			},
+			{
+				"Name": "puff",
+				"File": "puff.exp3.json"
+			},
+			{
+				"Name": "tail down",
+				"File": "tail down.exp3.json"
+			},
+			{
+				"Name": "tear",
+				"File": "tear.exp3.json"
+			},
+			{
+				"Name": "tiered",
+				"File": "tiered.exp3.json"
+			}
+		]
+	},
+	"Groups": [
+		{
+			"Target": "Parameter",
+			"Name": "EyeBlink",
+			"Ids": []
+		},
+		{
+			"Target": "Parameter",
+			"Name": "LipSync",
+			"Ids": []
+		}
+	],
+	"HitAreas": []
+}

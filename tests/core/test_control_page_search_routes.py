@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 
 REPO_ROOT = next(path for path in Path(__file__).resolve().parents if (path / "main.py").exists())
@@ -10,8 +11,13 @@ RUNTIME_ROOT = REPO_ROOT / "evelyn_core" / "runtime"
 MAIN_PY = REPO_ROOT / "main.py"
 ROUTE_EXECUTION_PY = REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "voice_route_execution.py"
 MAIN_LLM_RUNTIME_PY = REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "main_llm_runtime.py"
+SEARCH_FOLLOWUP_RUNTIME_PY = REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "search_followup_runtime.py"
+CONTROL_PAGE_TOOL_RUNTIME_PY = REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "control_page_tool_runtime.py"
+CONTROL_PAGE_SEARCH_RUNTIME_PY = REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "control_page_search_runtime.py"
+FAST_PATH_POLICY_PY = REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "fast_path_policy.py"
 if str(RUNTIME_ROOT) not in sys.path:
     sys.path.insert(0, str(RUNTIME_ROOT))
+sys.modules.setdefault("numpy", SimpleNamespace(ndarray=object))
 
 from evelyn_core.skills import delivery, main_synthesis, search  # noqa: E402
 from evelyn_core.skills.registry import skill_registry  # noqa: E402
@@ -23,6 +29,10 @@ class ControlPageSearchRouteTests(unittest.TestCase):
         cls.main_py = MAIN_PY.read_text(encoding="utf-8")
         cls.route_execution_py = ROUTE_EXECUTION_PY.read_text(encoding="utf-8")
         cls.main_llm_runtime_py = MAIN_LLM_RUNTIME_PY.read_text(encoding="utf-8")
+        cls.search_followup_runtime_py = SEARCH_FOLLOWUP_RUNTIME_PY.read_text(encoding="utf-8")
+        cls.control_page_tool_runtime_py = CONTROL_PAGE_TOOL_RUNTIME_PY.read_text(encoding="utf-8")
+        cls.control_page_search_runtime_py = CONTROL_PAGE_SEARCH_RUNTIME_PY.read_text(encoding="utf-8")
+        cls.fast_path_policy_py = FAST_PATH_POLICY_PY.read_text(encoding="utf-8")
 
     def test_control_page_can_use_search_and_delivery_skills(self) -> None:
         self.assertIn("control_page", search.sources)
@@ -64,7 +74,7 @@ class ControlPageSearchRouteTests(unittest.TestCase):
         self.assertIn("def is_underspecified_weather_query", policy_py)
         self.assertIn("def resolve_contextual_search_query", query_context_py)
         self.assertIn("contextual = resolve_contextual_search_query", query_context_py)
-        self.assertIn("build_search_query_from_context", self.main_py)
+        self.assertIn("build_search_query_from_context", self.search_followup_runtime_py)
         self.assertIn("messages=list(extras.get(\"messages\") or [])", search_py := (REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "skills" / "search" / "__init__.py").read_text(encoding="utf-8"))
         self.assertIn("session_key=context.session_key", search_py)
 
@@ -76,13 +86,14 @@ class ControlPageSearchRouteTests(unittest.TestCase):
         self.assertIn("main_synthesis_drift_guard", self.main_llm_runtime_py)
 
     def test_control_page_chat_does_not_use_broad_fast_path(self) -> None:
-        self.assertIn("if is_control_page_source(source):\n        return None", self.main_py)
-        self.assertNotIn("control_page_light_request", self.main_py)
+        self.assertIn("if is_control_page_source_from_runtime(source, deps=deps):\n        return None", self.fast_path_policy_py)
+        self.assertIn("control_page_light_request_max_chars", self.fast_path_policy_py)
 
     def test_control_page_current_info_bypasses_main_llm_guessing(self) -> None:
         self.assertIn("async def answer_control_page_search_text", self.main_py)
-        self.assertIn("selected_path\": \"control_page_search_direct", self.main_py)
-        self.assertIn("if should_force_search_query(text):\n        return await answer_control_page_search_text(guild, text)", self.main_py)
+        self.assertIn("selected_path\": \"control_page_search_direct", self.control_page_search_runtime_py)
+        self.assertIn("if deps.should_force_search_query(text):", self.control_page_tool_runtime_py)
+        self.assertIn("return await deps.answer_control_page_search_text(guild, text)", self.control_page_tool_runtime_py)
 
     def test_weather_search_query_can_use_recent_location_memory(self) -> None:
         query_context_py = (REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "search_query_context.py").read_text(encoding="utf-8")

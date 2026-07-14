@@ -7,25 +7,35 @@ import tempfile
 import time
 import unittest
 import wave
+import asyncio
 from pathlib import Path
-
-import numpy as np
-
 
 REPO_ROOT = next(path for path in Path(__file__).resolve().parents if (path / "main.py").exists())
 RUNTIME_ROOT = REPO_ROOT / "evelyn_core" / "runtime"
 if str(RUNTIME_ROOT) not in sys.path:
     sys.path.insert(0, str(RUNTIME_ROOT))
 
-from evelyn_core.voice_debug_audio import (  # noqa: E402
-    build_voice_debug_audio_item,
-    sanitize_debug_label,
-    save_voice_debug_audio_now,
-    trim_voice_debug_dir,
-    voice_debug_drop_message,
-)
+try:
+    import numpy as np
+
+    from evelyn_core.voice_debug_audio import (  # noqa: E402
+        build_voice_debug_audio_item,
+        debug_write_worker_from_runtime,
+        enqueue_voice_debug_audio_from_runtime,
+        ensure_debug_write_worker_started_from_runtime,
+        sanitize_debug_label,
+        save_voice_debug_audio_now,
+        trim_voice_debug_dir,
+        voice_debug_drop_message,
+    )
+
+    NUMPY_AVAILABLE = True
+except ModuleNotFoundError:
+    np = None
+    NUMPY_AVAILABLE = False
 
 
+@unittest.skipUnless(NUMPY_AVAILABLE, "numpy is required for voice debug audio tests")
 class VoiceDebugAudioTests(unittest.TestCase):
     def test_sanitize_debug_label_keeps_filename_safe_text(self) -> None:
         self.assertEqual(sanitize_debug_label(" 정훈 / mic? "), "정훈_mic")
@@ -116,6 +126,94 @@ class VoiceDebugAudioTests(unittest.TestCase):
             voice_debug_drop_message(speaker="user", stage_label="drop"),
             "[VOICE DEBUG DROP] speaker=user stage=drop reason=queue_full",
         )
+
+    def test_ensure_worker_reuses_live_task_and_creates_done_task(self) -> None:
+        class FakeTask:
+            def __init__(self, done: bool) -> None:
+                self._done = done
+
+            def done(self) -> bool:
+                return self._done
+
+        created: list[object] = []
+        live_task = FakeTask(done=False)
+        done_task = FakeTask(done=True)
+
+        self.assertIs(
+            ensure_debug_write_worker_started_from_runtime(
+                current_task=live_task,
+                create_task=lambda coro: created.append(coro) or "new",
+                worker_coro_factory=lambda: "worker",
+            ),
+            live_task,
+        )
+        self.assertEqual(
+            ensure_debug_write_worker_started_from_runtime(
+                current_task=done_task,
+                create_task=lambda coro: created.append(coro) or "new",
+                worker_coro_factory=lambda: "worker",
+            ),
+            "new",
+        )
+        self.assertEqual(created, ["worker"])
+
+    def test_enqueue_voice_debug_audio_respects_enabled_and_queue_full(self) -> None:
+        class FullQueue:
+            def put_nowait(self, _item: dict) -> None:
+                raise asyncio.QueueFull()
+
+        started: list[bool] = []
+        logs: list[str] = []
+        disabled = enqueue_voice_debug_audio_from_runtime(
+            enabled=False,
+            ensure_worker_started=lambda: started.append(True),
+            queue=FullQueue(),
+            log=logs.append,
+            guild_id=1,
+            speaker="user",
+            pcm_bytes=b"12",
+            audio16k=np.array([0.0], dtype=np.float32),
+            stage_label="stage",
+        )
+        dropped = enqueue_voice_debug_audio_from_runtime(
+            enabled=True,
+            ensure_worker_started=lambda: started.append(True),
+            queue=FullQueue(),
+            log=logs.append,
+            guild_id=1,
+            speaker="user",
+            pcm_bytes=b"12",
+            audio16k=np.array([0.0], dtype=np.float32),
+            stage_label="stage",
+        )
+
+        self.assertFalse(disabled)
+        self.assertFalse(dropped)
+        self.assertEqual(started, [True])
+        self.assertEqual(logs, ["[VOICE DEBUG DROP] speaker=user stage=stage reason=queue_full"])
+
+
+@unittest.skipUnless(NUMPY_AVAILABLE, "numpy is required for voice debug audio tests")
+class VoiceDebugAudioWorkerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_debug_worker_saves_item_and_marks_done(self) -> None:
+        queue: asyncio.Queue = asyncio.Queue()
+        saved: list[dict] = []
+        await queue.put({"guild_id": 1})
+
+        async def fake_to_thread(save_now, **item):
+            saved.append(dict(item))
+            raise asyncio.CancelledError()
+
+        with self.assertRaises(asyncio.CancelledError):
+            await debug_write_worker_from_runtime(
+                queue=queue,
+                save_now=lambda **_item: None,
+                to_thread=fake_to_thread,
+                log=lambda _message: None,
+            )
+
+        self.assertEqual(saved, [{"guild_id": 1}])
+        self.assertEqual(queue._unfinished_tasks, 0)
 
 
 if __name__ == "__main__":

@@ -4,7 +4,7 @@ import json
 import math
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .text import clean_text
 
@@ -75,6 +75,147 @@ def summarize_turn_path_metrics_payload(turn_path_metrics: dict[str, dict[str, A
     return rows[:12]
 
 
+def record_turn_stage_metric(
+    turn_stage_metrics: dict[str, dict[str, float]],
+    turn_id: str | None,
+    stage: str,
+    elapsed_ms: float,
+) -> None:
+    if not turn_id or not stage:
+        return
+    stages = turn_stage_metrics.setdefault(turn_id, {})
+    stages[stage] = float(elapsed_ms)
+
+
+def mark_turn_stage_from_runtime(
+    metrics: dict | None,
+    key: str,
+    *,
+    monotonic: Callable[[], float],
+    record_turn_stage: Callable[[str | None, str, float], Any],
+    merge_log_event_payload: Callable[..., dict[str, Any]],
+    log_turn_event: Callable[..., Any],
+    event_name: str | None = None,
+    **extra: Any,
+) -> None:
+    if not metrics:
+        return
+    started_at = metrics.get("started_at")
+    if started_at is None:
+        return
+    elapsed_ms = (monotonic() - float(started_at)) * 1000.0
+    marks = metrics.setdefault("marks", {})
+    marks[key] = elapsed_ms
+    meta = metrics.get("meta") or {}
+    turn_id = meta.get("turn_id")
+    if turn_id:
+        record_turn_stage(turn_id, key, elapsed_ms)
+    if event_name:
+        explicit = {
+            "turn_id": meta.get("turn_id"),
+            "segment_id": meta.get("segment_id"),
+            "chunk_index": meta.get("chunk_index"),
+            "session_key": meta.get("session_key"),
+            "room_session_key": meta.get("room_session_key"),
+            "guild_id": meta.get("guild_id"),
+            "user_id": meta.get("user_id"),
+            "owner_user_id": meta.get("owner_user_id"),
+            "source": meta.get("source"),
+            "elapsed_ms": elapsed_ms,
+        }
+        log_turn_event(
+            event_name,
+            **merge_log_event_payload(explicit=explicit, extra=extra),
+        )
+
+
+def new_turn_metrics_from_runtime(
+    *,
+    source: str,
+    monotonic: Callable[[], float],
+    log_turn_event: Callable[..., Any],
+    session_key: str | None = None,
+    room_session_key: str | None = None,
+    guild_id: int | None = None,
+    user_id: int | None = None,
+    owner_user_id: int | None = None,
+    topic_id: str | None = None,
+    turn_id: str | None = None,
+    segment_id: int | None = None,
+    chunk_index: int | None = None,
+) -> dict:
+    metrics = {
+        "started_at": monotonic(),
+        "marks": {"t_ingress": 0.0},
+        "meta": {
+            "source": source,
+            "session_key": session_key,
+            "guild_id": guild_id,
+            "user_id": user_id,
+            "owner_user_id": owner_user_id,
+            "room_session_key": room_session_key,
+            "topic_id": topic_id,
+            "turn_id": turn_id,
+            "segment_id": segment_id,
+            "chunk_index": chunk_index,
+        },
+    }
+    log_turn_event(
+        "turn_ingress",
+        source=source,
+        session_key=session_key,
+        guild_id=guild_id,
+        user_id=user_id,
+        owner_user_id=owner_user_id,
+        room_session_key=room_session_key,
+        topic_id=topic_id,
+        turn_id=turn_id,
+        segment_id=segment_id,
+        chunk_index=chunk_index,
+    )
+    return metrics
+
+
+def register_drop_reason_from_runtime(
+    metrics: dict | None,
+    reason: str,
+    *,
+    build_rejected_voice_turn: Callable[..., Any],
+    merge_log_event_payload: Callable[..., dict[str, Any]],
+    log_turn_event: Callable[..., Any],
+    **extra: Any,
+) -> None:
+    if not metrics:
+        return
+    meta = metrics.setdefault("meta", {})
+    meta["drop_reason"] = reason
+    voice_segment = meta.get("voice_segment_contract")
+    if voice_segment is not None and meta.get("rejected_turn_contract") is None:
+        meta["rejected_turn_contract"] = build_rejected_voice_turn(
+            segment=voice_segment,
+            ingress_source=str(meta.get("ingress_source") or meta.get("source") or "voice"),
+            drop_reason=reason,
+            queue_wait_ms=float(meta.get("voice_queue_wait_ms") or 0.0),
+            topic_id=meta.get("topic_id"),
+            gate_mode=meta.get("reply_gate_blocked_by"),
+            owner_user_id=extra.get("owner_user_id") if extra.get("owner_user_id") is not None else meta.get("owner_user_id"),
+            detail_text=str(extra.get("text") or extra.get("final_text") or extra.get("wake_probe_text") or ""),
+        )
+    explicit = {
+        "turn_id": meta.get("turn_id"),
+        "segment_id": meta.get("segment_id"),
+        "chunk_index": meta.get("chunk_index"),
+        "session_key": extra.get("session_key") if extra.get("session_key") is not None else meta.get("session_key"),
+        "room_session_key": extra.get("room_session_key") if extra.get("room_session_key") is not None else meta.get("room_session_key"),
+        "owner_user_id": extra.get("owner_user_id") if extra.get("owner_user_id") is not None else meta.get("owner_user_id"),
+        "reason": reason,
+    }
+    log_turn_event(
+        "turn_drop",
+        **merge_log_event_payload(explicit=explicit, extra=extra),
+    )
+
+
 def summarize_question_metrics_payload(question_metrics: dict[str, Any]) -> dict[str, Any]:
     total = int(question_metrics.get("turn_count", 0) or 0)
     added = int(question_metrics.get("added_count", 0) or 0)
@@ -91,6 +232,105 @@ def summarize_question_metrics_payload(question_metrics: dict[str, Any]) -> dict
         "finalQuestionCount": int(question_metrics.get("final_question_count", 0) or 0),
         "askModeDistribution": ask_modes,
     }
+
+
+def record_model_call_trace_from_runtime(
+    *,
+    model_role: str,
+    purpose: str,
+    hot_path: bool,
+    started_at: float,
+    success: bool,
+    monotonic: Callable[[], float],
+    record_model_call_metric: Callable[..., Any],
+    log_turn_event: Callable[..., Any],
+    metrics: dict | None = None,
+    first_token_ms: float | None = None,
+    error: BaseException | str | None = None,
+    model_name: str | None = None,
+    endpoint: str | None = None,
+    turn_id: str | None = None,
+    session_key: str | None = None,
+    source: str | None = None,
+    guild_id: int | None = None,
+) -> None:
+    meta = (metrics or {}).get("meta") if isinstance(metrics, dict) else {}
+    if not isinstance(meta, dict):
+        meta = {}
+    elapsed_ms = max(0.0, (monotonic() - float(started_at)) * 1000.0)
+    error_text = repr(error) if isinstance(error, BaseException) else clean_text(str(error or ""))
+    record_model_call_metric(
+        model_role=model_role,
+        purpose=purpose,
+        hot_path=hot_path,
+        success=success,
+        latency_ms=elapsed_ms,
+        first_token_ms=first_token_ms,
+    )
+    log_turn_event(
+        "model_call",
+        model_role=clean_text(model_role),
+        purpose=clean_text(purpose),
+        hot_path=bool(hot_path),
+        success=bool(success),
+        latency_ms=round(elapsed_ms, 1),
+        first_token_ms=None if first_token_ms is None else round(float(first_token_ms), 1),
+        model_name=clean_text(model_name or ""),
+        endpoint=clean_text(endpoint or ""),
+        turn_id=turn_id or meta.get("turn_id"),
+        session_key=session_key or meta.get("session_key"),
+        source=source or meta.get("source"),
+        guild_id=guild_id if guild_id is not None else meta.get("guild_id"),
+        error=clean_text(error_text)[:240] if error_text else None,
+    )
+
+
+def record_context_pipeline_benchmark_from_runtime(
+    *,
+    metrics: dict | None,
+    user_text: str,
+    answer: str,
+    source: str,
+    guild_id: int | None,
+    session_key: str | None,
+    now: Callable[[], float],
+    benchmark_log_path: Path,
+    project_root: Path,
+    log: Callable[[str], Any],
+) -> None:
+    meta = (metrics or {}).get("meta") if isinstance(metrics, dict) else {}
+    context_meta = meta.get("context_pipeline") if isinstance(meta, dict) else None
+    if not isinstance(context_meta, dict):
+        return
+    record = {
+        "ts": round(now(), 3),
+        "source": clean_text(source),
+        "guild_id": guild_id,
+        "session_key": session_key,
+        "turn_id": meta.get("turn_id") if isinstance(meta, dict) else None,
+        "route": context_meta.get("route") or meta.get("route") if isinstance(meta, dict) else None,
+        "policy": context_meta.get("policy"),
+        "sections": context_meta.get("sections"),
+        "section_chars": context_meta.get("section_chars"),
+        "minecraft_context": bool(context_meta.get("minecraft_context")),
+        "vision_context": "vision" in set(context_meta.get("sections") or []),
+        "user_text_len": len(clean_text(user_text)),
+        "answer_len": len(clean_text(answer)),
+        "marks": {
+            key: value
+            for key, value in ((metrics or {}).get("marks") or {}).items()
+            if key in {"route_ready", "memory_ready", "t_context_build", "llm_done", "t_main_done", "llm_http_ms"}
+        },
+    }
+    try:
+        path = benchmark_log_path
+        if not path.is_absolute():
+            path = project_root / path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+    except Exception as exc:
+        log(f"[CONTEXT PIPELINE BENCHMARK] write_failed err={exc!r}")
 
 
 @dataclass(slots=True)
@@ -339,6 +579,11 @@ def summarize_voice_p95_metrics(
 
 __all__ = [
     "ModelCallMetricsStore",
+    "record_model_call_trace_from_runtime",
+    "record_context_pipeline_benchmark_from_runtime",
+    "new_turn_metrics_from_runtime",
+    "register_drop_reason_from_runtime",
+    "record_turn_stage_metric",
     "append_bounded_metric",
     "average",
     "average_or_none",

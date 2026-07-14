@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .text import clean_text
 
@@ -68,6 +68,37 @@ def record_voice_failure_state(
     return error_text
 
 
+def record_voice_pipeline_failure_from_runtime(
+    counters: dict[str, int],
+    state: dict[str, Any],
+    kind: str,
+    err: BaseException | str,
+    *,
+    merge_log_event_payload: Callable[..., dict[str, Any]],
+    log_turn_event: Callable[..., Any],
+    metrics: dict | None = None,
+    **extra: Any,
+) -> None:
+    error_text = record_voice_failure_state(counters, state, kind, err)
+    meta = (metrics or {}).get("meta") or {}
+    log_turn_event(
+        kind,
+        **merge_log_event_payload(
+            explicit={
+                "turn_id": meta.get("turn_id"),
+                "segment_id": meta.get("segment_id"),
+                "chunk_index": meta.get("chunk_index"),
+                "session_key": meta.get("session_key"),
+                "room_session_key": meta.get("room_session_key"),
+                "guild_id": meta.get("guild_id"),
+                "source": meta.get("source"),
+                "error": error_text[:500],
+            },
+            extra=extra,
+        ),
+    )
+
+
 def voice_last_channel_state_path(project_root: Path, configured_path: str) -> Path:
     path = Path(configured_path)
     if not path.is_absolute():
@@ -110,6 +141,34 @@ def save_last_voice_channel_state(
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     state["last_voice_channel"] = dict(payload)
+
+
+def save_last_voice_channel_state_from_runtime(
+    project_root: Path,
+    configured_path: str,
+    state: dict[str, Any],
+    guild: Any,
+    channel: Any,
+    *,
+    reason: str,
+    manual_disconnect: bool = False,
+    log: Callable[..., Any] | None = None,
+) -> bool:
+    try:
+        save_last_voice_channel_state(
+            project_root,
+            configured_path,
+            state,
+            guild,
+            channel,
+            reason=reason,
+            manual_disconnect=manual_disconnect,
+        )
+    except Exception as exc:
+        if log is not None:
+            log(f"[VOICE STATE SAVE FAIL] err={exc!r}")
+        return False
+    return True
 
 
 def mark_last_voice_manual_disconnect(
@@ -208,6 +267,8 @@ __all__ = [
     "load_last_voice_channel_state",
     "mark_last_voice_manual_disconnect",
     "record_voice_failure_state",
+    "record_voice_pipeline_failure_from_runtime",
     "save_last_voice_channel_state",
+    "save_last_voice_channel_state_from_runtime",
     "voice_last_channel_state_path",
 ]

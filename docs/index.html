@@ -4,6 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>E.V.E.L.Y.N</title>
+  <link rel="icon" type="image/png" href="./assets/evelyn-logo-light-mark.png">
   <style>
     :root {
       --bg: #f5f6f7;
@@ -551,6 +552,66 @@
       animation: idle 5.2s ease-in-out infinite;
     }
 
+    .evelyn-live2d-stage {
+      position: absolute;
+      z-index: 3;
+      inset: 0;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 260ms ease;
+    }
+
+    .evelyn-live2d-stage canvas {
+      display: block;
+      width: 100%;
+      height: 100%;
+      filter: drop-shadow(0 28px 32px rgba(20, 24, 30, 0.22));
+    }
+
+    .model-area.live2d-ready .evelyn-live2d-stage {
+      opacity: 1;
+    }
+
+    .model-area.live2d-ready .live2d-model {
+      opacity: 0;
+      visibility: hidden;
+      animation: none;
+    }
+
+    .live2d-runtime-status {
+      position: absolute;
+      z-index: 4;
+      right: 10px;
+      bottom: 10px;
+      max-width: calc(100% - 20px);
+      padding: 5px 9px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      color: var(--soft);
+      background: var(--panel);
+      box-shadow: 0 8px 24px rgba(20, 24, 30, 0.08);
+      font-size: 0.68rem;
+      font-weight: 800;
+      line-height: 1.2;
+      text-align: right;
+      pointer-events: none;
+      transition: opacity 220ms ease;
+    }
+
+    .live2d-runtime-status[data-kind="ready"] {
+      opacity: 0.56;
+    }
+
+    .live2d-runtime-status[data-kind="error"] {
+      color: var(--danger);
+      opacity: 1;
+    }
+
+    .model-area.live2d-speaking .live2d-runtime-status[data-kind="ready"] {
+      color: var(--green);
+      opacity: 0.88;
+    }
+
     @keyframes idle {
       0%,
       100% {
@@ -890,6 +951,150 @@
 
     .line strong {
       font-size: 0.92rem;
+    }
+
+    .audio-device-panel {
+      display: grid;
+      gap: 10px;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background:
+        linear-gradient(135deg, rgba(47, 157, 104, 0.10), transparent 72%),
+        rgba(255, 255, 255, 0.34);
+    }
+
+    [data-theme="dark"] .audio-device-panel {
+      background:
+        linear-gradient(135deg, rgba(145, 197, 184, 0.12), transparent 72%),
+        rgba(255, 255, 255, 0.055);
+    }
+
+    .audio-device-head {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 8px;
+      align-items: start;
+    }
+
+    .audio-device-head strong {
+      display: block;
+      font-size: 0.92rem;
+    }
+
+    .audio-device-head span,
+    .audio-device-status,
+    .audio-device-meta {
+      color: var(--soft);
+      font-size: 0.74rem;
+      line-height: 1.35;
+      overflow-wrap: anywhere;
+    }
+
+    .audio-device-pill {
+      min-width: 64px;
+      padding: 4px 8px;
+      border: 1px solid rgba(47, 157, 104, 0.34);
+      border-radius: 999px;
+      color: var(--text);
+      background: rgba(47, 157, 104, 0.12);
+      font-size: 0.7rem;
+      font-weight: 900;
+      text-align: center;
+      white-space: nowrap;
+    }
+
+    .audio-device-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 42px;
+      gap: 8px;
+      align-items: end;
+      min-width: 0;
+    }
+
+    .audio-device-field {
+      display: grid;
+      gap: 5px;
+      min-width: 0;
+    }
+
+    .audio-device-field label {
+      color: var(--soft);
+      font-size: 0.72rem;
+      font-weight: 800;
+    }
+
+    .audio-device-field select {
+      width: 100%;
+      min-width: 0;
+      min-height: 38px;
+      padding: 0 10px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      color: var(--text);
+      background: var(--panel-strong);
+      font: 800 0.8rem/1.2 inherit;
+    }
+
+    .audio-device-test {
+      width: 42px;
+      min-width: 42px;
+      height: 38px;
+      border: 1px solid rgba(47, 157, 104, 0.46);
+      border-radius: 7px;
+      color: var(--text);
+      background: rgba(47, 157, 104, 0.16);
+      font-weight: 900;
+    }
+
+    .audio-device-test:disabled,
+    .audio-device-field select:disabled {
+      cursor: wait;
+      opacity: 0.62;
+    }
+
+    .audio-device-list {
+      display: grid;
+      gap: 6px;
+    }
+
+    .audio-device-option {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 8px;
+      align-items: center;
+      min-height: 42px;
+      padding: 8px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: rgba(255, 255, 255, 0.28);
+    }
+
+    [data-theme="dark"] .audio-device-option {
+      background: rgba(255, 255, 255, 0.045);
+    }
+
+    .audio-device-option.is-selected {
+      border-color: rgba(47, 157, 104, 0.54);
+      background: rgba(47, 157, 104, 0.14);
+    }
+
+    .audio-device-name {
+      display: block;
+      min-width: 0;
+      font-size: 0.82rem;
+      font-weight: 900;
+      overflow-wrap: anywhere;
+    }
+
+    .audio-device-badge {
+      padding: 3px 7px;
+      border-radius: 999px;
+      color: var(--text);
+      background: rgba(47, 157, 104, 0.13);
+      font-size: 0.68rem;
+      font-weight: 900;
+      white-space: nowrap;
     }
 
     .contract-timeline {
@@ -1679,6 +1884,15 @@
         width: 38px;
         height: 38px;
       }
+
+      .audio-device-row {
+        grid-template-columns: 1fr;
+      }
+
+      .audio-device-test {
+        width: 100%;
+        min-width: 0;
+      }
     }
   </style>
 </head>
@@ -1742,9 +1956,13 @@
     </header>
 
     <main class="stage">
-      <section class="model-area" aria-label="이블린 라이브 모델">
+      <section class="model-area" id="evelynLive2dArea" aria-label="이블린 라이브 모델">
         <div class="model-shadow"></div>
-        <img class="live2d-model" src="./assets/evelyn-avatar/model-v2/preview_composite.png" alt="이블린 전신 모델">
+        <div class="evelyn-live2d-stage" aria-label="이블린 Live2D 모델">
+          <canvas id="evelynLive2dCanvas" role="img" aria-label="이블린 Live2D 모델"></canvas>
+        </div>
+        <img class="live2d-model" src="./assets/evelyn-avatar/model-v2/preview_composite.png" alt="이블린 전신 모델" id="evelynLive2dFallback">
+        <span class="live2d-runtime-status" id="evelynLive2dStatus" data-kind="loading">Live2D 준비 중</span>
       </section>
     </main>
 
@@ -1787,6 +2005,35 @@
         <div class="line"><span>최근 학습</span><strong>v46</strong></div>
         <div class="line"><span>GPU 기준</span><strong>RTX 3090</strong></div>
       </div>
+
+      <section class="audio-device-panel" aria-label="TTS 출력 장치 선택">
+        <div class="audio-device-head">
+          <div>
+            <strong>TTS 출력 장치</strong>
+            <span id="ttsOutputDeviceSummary">Local I/O Bridge 대기</span>
+          </div>
+          <span class="audio-device-pill" id="ttsOutputDevicePill">대기</span>
+        </div>
+        <div class="audio-device-row">
+          <div class="audio-device-field">
+            <label for="ttsOutputDeviceSelect">Output device</label>
+            <select id="ttsOutputDeviceSelect" disabled>
+              <option>Bridge 대기</option>
+            </select>
+          </div>
+          <button class="audio-device-test" id="ttsOutputDeviceTestButton" type="button" title="테스트 재생" aria-label="테스트 재생" disabled>▶</button>
+        </div>
+        <div class="audio-device-list" id="ttsOutputDeviceList">
+          <div class="audio-device-option">
+            <div>
+              <strong class="audio-device-name">장치 목록 대기</strong>
+              <span class="audio-device-meta">브리지가 연결되면 실제 출력 후보만 표시합니다.</span>
+            </div>
+            <span class="audio-device-badge">wait</span>
+          </div>
+        </div>
+        <p class="audio-device-status" id="ttsOutputDeviceStatus">선택하면 브리지에 저장됩니다.</p>
+      </section>
 
       <section class="contract-timeline" aria-label="Voyager 계약 추적 타임라인">
         <div class="contract-timeline-head">
@@ -1912,6 +2159,10 @@
     </section>
   </div>
 
+  <script src="./assets/vendor/live2d/pixi-8.13.1.min.js"></script>
+  <script src="./assets/vendor/live2d/live2dcubismcore-5.0.0.min.js"></script>
+  <script src="./assets/vendor/live2d/untitled-pixi-live2d-engine-cubism-1.3.1.js"></script>
+  <script src="./assets/evelyn-live2d.js"></script>
   <script src="./assets/evelyn-boot-progress.js"></script>
   <script>
     const root = document.documentElement;
@@ -1936,6 +2187,12 @@
     const quickCommandRow = document.getElementById("quick-command-row");
     const quickCommandCaption = document.getElementById("quick-command-caption");
     const runtimeRepairPreviewButton = document.getElementById("runtimeRepairPreviewButton");
+    const ttsOutputDeviceSummary = document.getElementById("ttsOutputDeviceSummary");
+    const ttsOutputDevicePill = document.getElementById("ttsOutputDevicePill");
+    const ttsOutputDeviceSelect = document.getElementById("ttsOutputDeviceSelect");
+    const ttsOutputDeviceTestButton = document.getElementById("ttsOutputDeviceTestButton");
+    const ttsOutputDeviceList = document.getElementById("ttsOutputDeviceList");
+    const ttsOutputDeviceStatus = document.getElementById("ttsOutputDeviceStatus");
     const bootSplash = document.getElementById("boot-splash");
     const bootSplashPhase = document.getElementById("boot-splash-phase");
     const bootSplashPercent = document.getElementById("boot-splash-percent");
@@ -1949,6 +2206,7 @@
     const bootSplashRepairStatus = document.getElementById("boot-splash-repair-status");
     const BOOT_PROGRESS_POLL_MS = 1200;
     const STATE_POLL_MS = 1500;
+    const LIVE2D_PREVIEW_MODE = new URLSearchParams(window.location.search).get("live2dPreview") === "1";
     let bootProgressPollTimer = null;
     let statePollTimer = null;
     const memoryWindow = document.getElementById("memoryWindow");
@@ -1995,6 +2253,7 @@
     let runtimeRepairPreviewPlan = null;
     let runtimeRepairPreviewBusy = false;
     let runtimeRepairApplyBusy = false;
+    let ttsOutputDeviceBusy = false;
     let memoryGraphNodeScale = Number(localStorage.getItem("evelynMemoryGraphNodeScale") || "1") || 1;
     memoryGraphNodeScale = Math.max(0.25, Math.min(2, memoryGraphNodeScale));
     let commandCatalog = [
@@ -2640,6 +2899,16 @@
       drawer.classList.remove("open");
     });
 
+    if (ttsOutputDeviceSelect) {
+      ttsOutputDeviceSelect.addEventListener("change", () => {
+        saveTtsOutputDevice(ttsOutputDeviceSelect.value);
+      });
+    }
+
+    if (ttsOutputDeviceTestButton) {
+      ttsOutputDeviceTestButton.addEventListener("click", requestTtsOutputTest);
+    }
+
     wallpaperInput.addEventListener("change", () => {
       const file = wallpaperInput.files && wallpaperInput.files[0];
       if (!file) return;
@@ -2803,6 +3072,150 @@
         .replaceAll('"', "&quot;");
     }
 
+    function audioDeviceApiLabel(device) {
+      const api = String((device && device.api) || "").replace(/^Windows\s+/i, "Windows ").trim();
+      return api || "Windows";
+    }
+
+    function audioDeviceOptions(bridge) {
+      const devices = Array.isArray(bridge && bridge.outputDevices) ? bridge.outputDevices : [];
+      const filtered = devices.filter((device) => {
+        const api = String((device && device.api) || "").trim().toUpperCase();
+        return api !== "MME";
+      });
+      const options = [
+        {
+          id: "default",
+          name: "Windows 기본 출력",
+          api: "fallback",
+          label: "Windows 기본 출력",
+          default: false
+        }
+      ];
+      for (const device of filtered) {
+        const id = String(device.id || "").trim();
+        const name = String(device.name || "").trim();
+        if (!id || !name) continue;
+        options.push({
+          id,
+          name,
+          api: audioDeviceApiLabel(device),
+          label: String(device.label || `${name} · ${audioDeviceApiLabel(device)}`).trim(),
+          default: Boolean(device.default)
+        });
+      }
+      return options;
+    }
+
+    function selectedAudioDeviceId(bridge) {
+      const selection = bridge && bridge.outputDeviceSelection;
+      const saved = selection && String(selection.outputDevice || "").trim();
+      if (saved) return saved;
+      const current = bridge && String(bridge.outputDevice || "").trim();
+      return current || "default";
+    }
+
+    function audioDeviceStatusText(bridge, selectedOption) {
+      if (!bridge || !bridge.enabled) return "Local I/O Bridge 대기";
+      if (bridge.stale) return `Bridge stale ${bridge.ageSec || "?"}s`;
+      if (!bridge.ready) return "Bridge 연결 중";
+      if (!selectedOption || selectedOption.id === "default") return "Windows 기본 출력 사용";
+      return `${selectedOption.name} · ${selectedOption.api}`;
+    }
+
+    function renderAudioDevicePanel(payload) {
+      if (!ttsOutputDeviceSelect || !ttsOutputDeviceList) return;
+      const voice = payload && payload.voice || {};
+      const bridge = voice.localBridge || {};
+      const options = audioDeviceOptions(bridge);
+      const selectedId = selectedAudioDeviceId(bridge);
+      const selectedOption = options.find((option) => option.id === selectedId)
+        || (selectedId && selectedId !== "default" ? { id: selectedId, name: "저장된 장치", api: "Bridge", label: "저장된 장치", default: false } : options[0]);
+      const enabled = Boolean(bridge.enabled && !bridge.stale && options.length);
+      ttsOutputDeviceSelect.disabled = ttsOutputDeviceBusy || !enabled;
+      ttsOutputDeviceTestButton.disabled = ttsOutputDeviceBusy || !bridge.ready || bridge.stale;
+      ttsOutputDeviceSelect.innerHTML = options.map((option) => (
+        `<option value="${escapeHtml(option.id)}"${option.id === selectedOption.id ? " selected" : ""}>${escapeHtml(option.label)}</option>`
+      )).join("");
+      if (selectedOption && !options.some((option) => option.id === selectedOption.id)) {
+        ttsOutputDeviceSelect.insertAdjacentHTML(
+          "beforeend",
+          `<option value="${escapeHtml(selectedOption.id)}" selected>${escapeHtml(selectedOption.label)}</option>`
+        );
+      }
+      const statusText = audioDeviceStatusText(bridge, selectedOption);
+      if (ttsOutputDeviceSummary) ttsOutputDeviceSummary.textContent = statusText;
+      if (ttsOutputDevicePill) {
+        ttsOutputDevicePill.textContent = bridge.ready && !bridge.stale ? "ready" : "대기";
+      }
+      if (ttsOutputDeviceStatus && !ttsOutputDeviceBusy) {
+        ttsOutputDeviceStatus.textContent = bridge.lastError ? `최근 오류: ${bridge.lastError}` : "선택하면 브리지에 저장됩니다.";
+      }
+      const visibleOptions = options.filter((option) => option.id !== "default").slice(0, 4);
+      if (!visibleOptions.length) {
+        ttsOutputDeviceList.innerHTML = [
+          '<div class="audio-device-option">',
+          '<div><strong class="audio-device-name">장치 목록 대기</strong>',
+          '<span class="audio-device-meta">브리지가 연결되면 실제 출력 후보만 표시합니다.</span></div>',
+          '<span class="audio-device-badge">wait</span></div>'
+        ].join("");
+        return;
+      }
+      ttsOutputDeviceList.innerHTML = visibleOptions.map((option) => {
+        const selected = option.id === selectedOption.id;
+        const badge = selected ? "selected" : (option.default ? "default" : "available");
+        return [
+          `<div class="audio-device-option${selected ? " is-selected" : ""}">`,
+          '<div>',
+          `<strong class="audio-device-name">${escapeHtml(option.name)}</strong>`,
+          `<span class="audio-device-meta">${escapeHtml(option.api)}${option.default ? " · Windows 기본" : ""}</span>`,
+          '</div>',
+          `<span class="audio-device-badge">${badge}</span>`,
+          '</div>'
+        ].join("");
+      }).join("");
+    }
+
+    async function saveTtsOutputDevice(outputDevice) {
+      if (!outputDevice || ttsOutputDeviceBusy) return;
+      ttsOutputDeviceBusy = true;
+      if (ttsOutputDeviceStatus) ttsOutputDeviceStatus.textContent = "저장 중...";
+      if (ttsOutputDeviceSelect) ttsOutputDeviceSelect.disabled = true;
+      try {
+        const payload = await fetchApi("/api/local-bridge/output-device", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ outputDevice, source: "control_page" })
+        });
+        renderAudioDevicePanel({ voice: { localBridge: payload.localBridge || {} } });
+        if (ttsOutputDeviceStatus) ttsOutputDeviceStatus.textContent = "저장됨. 브리지가 다음 상태 갱신에서 적용합니다.";
+      } catch (error) {
+        if (ttsOutputDeviceStatus) ttsOutputDeviceStatus.textContent = `저장 실패: ${error.message}`;
+      } finally {
+        ttsOutputDeviceBusy = false;
+        setTimeout(() => refreshState({ runInitialPanelCommands: false, showConnectionErrors: false }), 500);
+      }
+    }
+
+    async function requestTtsOutputTest() {
+      if (ttsOutputDeviceBusy) return;
+      ttsOutputDeviceBusy = true;
+      if (ttsOutputDeviceStatus) ttsOutputDeviceStatus.textContent = "테스트 재생 요청 중...";
+      try {
+        await fetchApi("/api/local-bridge/test-tts", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text: "이블린 오디오 테스트입니다." })
+        });
+        if (ttsOutputDeviceStatus) ttsOutputDeviceStatus.textContent = "테스트 재생 요청됨.";
+      } catch (error) {
+        if (ttsOutputDeviceStatus) ttsOutputDeviceStatus.textContent = `테스트 실패: ${error.message}`;
+      } finally {
+        ttsOutputDeviceBusy = false;
+        setTimeout(() => refreshState({ runInitialPanelCommands: false, showConnectionErrors: false }), 500);
+      }
+    }
+
     function commandGroup(item) {
       const command = String((item && item.command) || "").toLowerCase();
       if (item && item.group) return item.group;
@@ -2923,6 +3336,13 @@
     const runtime = state.runtime || {};
     const services = runtime.services || {};
     const voice = state.voice || {};
+    const localBridge = voice.localBridge || {};
+    const voiceSpeaking = typeof voice.speaking === "boolean"
+      ? voice.speaking
+      : Boolean(localBridge.speaking);
+    if (window.EvelynLive2D) {
+      window.EvelynLive2D.setSpeaking(voiceSpeaking);
+    }
     const minecraft = state.minecraft || {};
     const voicePipeline = runtime.voicePipeline || {};
     const bargeInContinuity = voicePipeline.bargeInContinuity || {};
@@ -2932,9 +3352,10 @@
       applyControlPanelCommands(state, options);
       const lines = Array.from(drawer.querySelectorAll(".status-list .line strong"));
       if (lines[0]) lines[0].textContent = services.mainReady ? "연결됨" : "대기";
-    if (lines[1]) lines[1].textContent = voice.speaking ? "재생 중" : (services.ttsReady ? "대기" : "대기 중");
+    if (lines[1]) lines[1].textContent = voiceSpeaking ? "재생 중" : (services.ttsReady ? "대기" : "대기 중");
     if (runtimeHealthLine) runtimeHealthLine.textContent = runtimeHealthText(state);
     renderContractTimeline(state);
+    renderAudioDevicePanel(state);
     if (voiceBargeInContinuityLine) {
       voiceBargeInContinuityLine.textContent = formatBargeInContinuitySummary(bargeInContinuity, { compact: true });
     }
@@ -2964,6 +3385,18 @@
     }
 
     async function refreshState({ runInitialPanelCommands = true, showConnectionErrors = true } = {}) {
+      if (LIVE2D_PREVIEW_MODE) {
+        if (!initialStateLoaded) {
+          initialStateLoaded = true;
+          setBootProgress(100, "Live2D 미리보기 준비 완료", { hide: true });
+          setBubble("Live2D 미리보기 모드 · API 명령은 실행하지 않아.");
+          composer.disabled = true;
+          composer.placeholder = "Live2D 미리보기 모드";
+          sendButton.disabled = true;
+          if (quickCommandCaption) quickCommandCaption.textContent = "Live2D preview only.";
+        }
+        return;
+      }
       try {
         const payload = await fetchApi("/api/control-page/state");
         initialStateLoaded = true;

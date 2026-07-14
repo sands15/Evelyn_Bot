@@ -15,7 +15,11 @@ from evelyn_core.discord_session_policy import (  # noqa: E402
     VoiceReplyGateInput,
     decide_local_mic_discord_suppression,
     decide_voice_reply_gate,
+    estimate_voice_like_probability_policy,
     is_short_followup_candidate_policy,
+    is_tail_fragment_candidate_policy,
+    is_transport_corrupted_audio_policy,
+    should_require_confirm_exact_for_wake_policy,
     should_ignore_short_transcription_policy,
     should_interrupt_tts,
     should_skip_full_stt_after_wake_probe_policy,
@@ -245,6 +249,73 @@ class DiscordSessionPolicyTests(unittest.TestCase):
         self.assertFalse(candidate("short", wake_detected=True))
         self.assertFalse(candidate(""))
         self.assertFalse(candidate("this is a long followup", audio_sec=0.8))
+
+    def test_voice_like_probability_uses_voiced_or_rms_ratio(self) -> None:
+        self.assertAlmostEqual(
+            estimate_voice_like_probability_policy(
+                voiced_ms=250.0,
+                audio_sec=1.0,
+                body_rms=0.01,
+                body_rms_min=0.02,
+            ),
+            0.5,
+        )
+        self.assertEqual(
+            estimate_voice_like_probability_policy(
+                voiced_ms=2000.0,
+                audio_sec=1.0,
+                body_rms=0.0,
+                body_rms_min=0.02,
+            ),
+            1.0,
+        )
+
+    def test_transport_debug_meta_policies_detect_corruption_and_confirm_requirement(self) -> None:
+        weak_meta = {"opus_fail": 1}
+        corrupt_meta = {
+            "opus_fail": 4,
+            "plc_packets": 2,
+            "fec_packets": 2,
+            "front_burst_detected": True,
+            "trim_ms": 220.0,
+            "burst_trim_ms": 140.0,
+        }
+        corrupt_reason_meta = {
+            "reasons": [
+                "opus_fail",
+                "plc",
+                "fec",
+                "front_burst_detected",
+                "heavy_trim_ms",
+                "burst_trim_ms",
+            ],
+        }
+
+        self.assertTrue(should_require_confirm_exact_for_wake_policy(weak_meta))
+        self.assertFalse(is_transport_corrupted_audio_policy(weak_meta))
+        self.assertTrue(is_transport_corrupted_audio_policy(corrupt_meta))
+        self.assertTrue(is_transport_corrupted_audio_policy(corrupt_reason_meta))
+
+    def test_tail_fragment_candidate_policy_checks_recent_low_energy_audio(self) -> None:
+        base = dict(
+            has_session_key=True,
+            accepted_age_sec=0.5,
+            raw_seconds=0.4,
+            voiced_ms=50.0,
+            longest_voiced_ms=40.0,
+            unstable=False,
+            window_sec=1.0,
+            max_raw_sec=0.8,
+            max_voiced_ms=120.0,
+            max_longest_ms=100.0,
+        )
+
+        self.assertTrue(is_tail_fragment_candidate_policy(**base))
+        self.assertTrue(is_tail_fragment_candidate_policy(**{**base, "raw_seconds": 0.7, "unstable": True}))
+        self.assertFalse(is_tail_fragment_candidate_policy(**{**base, "accepted_age_sec": 2.0}))
+        self.assertFalse(is_tail_fragment_candidate_policy(**{**base, "raw_seconds": 1.0}))
+        self.assertFalse(is_tail_fragment_candidate_policy(**{**base, "voiced_ms": 200.0}))
+        self.assertFalse(is_tail_fragment_candidate_policy(**{**base, "has_session_key": False}))
 
     def test_room_session_policy_facade_wraps_owner_and_reply_state(self) -> None:
         owner_ids: dict[str, int] = {}

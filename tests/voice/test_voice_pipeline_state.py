@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 
 REPO_ROOT = next(path for path in Path(__file__).resolve().parents if (path / "main.py").exists())
@@ -20,8 +21,11 @@ from evelyn_core.voice_pipeline_state import (  # noqa: E402
     load_last_voice_channel_state,
     mark_last_voice_manual_disconnect,
     record_voice_failure_state,
+    record_voice_pipeline_failure_from_runtime,
     save_last_voice_channel_state,
+    save_last_voice_channel_state_from_runtime,
 )
+import evelyn_core.voice_pipeline_state as voice_pipeline_state_module  # noqa: E402
 
 
 class VoicePipelineStateTests(unittest.TestCase):
@@ -62,6 +66,42 @@ class VoicePipelineStateTests(unittest.TestCase):
         self.assertEqual(snapshot["lastVoiceChannel"]["channel_id"], 2)
         self.assertEqual(snapshot["bargeInContinuity"]["active"], True)
 
+    def test_record_voice_pipeline_failure_updates_state_and_logs_event(self) -> None:
+        counters = default_voice_pipeline_counters()
+        state = default_voice_pipeline_state()
+        metrics = {
+            "meta": {
+                "turn_id": "turn-1",
+                "segment_id": 2,
+                "chunk_index": 3,
+                "session_key": "session-1",
+                "room_session_key": "room-1",
+                "guild_id": 7,
+                "source": "voice",
+            }
+        }
+        events: list[tuple[str, dict]] = []
+
+        record_voice_pipeline_failure_from_runtime(
+            counters,
+            state,
+            "tts_request_failed",
+            RuntimeError("boom"),
+            merge_log_event_payload=lambda *, explicit, extra=None: {**explicit, **(extra or {})},
+            log_turn_event=lambda event, **payload: events.append((event, payload)),
+            metrics=metrics,
+            stage="tts",
+        )
+
+        self.assertEqual(counters["tts_request_failed_count"], 1)
+        self.assertEqual(state["last_failure"]["kind"], "tts_request_failed")
+        self.assertIn("boom", state["last_failure"]["error"])
+        self.assertEqual(events[0][0], "tts_request_failed")
+        self.assertEqual(events[0][1]["turn_id"], "turn-1")
+        self.assertEqual(events[0][1]["room_session_key"], "room-1")
+        self.assertEqual(events[0][1]["stage"], "tts")
+        self.assertIn("boom", events[0][1]["error"])
+
     def test_last_voice_channel_state_file_round_trip(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -94,6 +134,30 @@ class VoicePipelineStateTests(unittest.TestCase):
             self.assertTrue(marked["manual_disconnect"])
             self.assertEqual(marked["reason"], "manual")
             self.assertEqual(state["last_voice_channel"]["updated_at"], 11.0)
+
+    def test_save_last_voice_channel_state_from_runtime_reports_failures(self) -> None:
+        state = default_voice_pipeline_state()
+        logs: list[str] = []
+
+        with patch.object(
+            voice_pipeline_state_module,
+            "save_last_voice_channel_state",
+            side_effect=RuntimeError("disk full"),
+        ):
+            ok = save_last_voice_channel_state_from_runtime(
+                Path("root"),
+                "state/voice_last_channel.json",
+                state,
+                SimpleNamespace(id=1, name="Guild"),
+                SimpleNamespace(id=2, name="Voice"),
+                reason="test",
+                log=logs.append,
+            )
+
+        self.assertFalse(ok)
+        self.assertEqual(len(logs), 1)
+        self.assertIn("[VOICE STATE SAVE FAIL]", logs[0])
+        self.assertIn("disk full", logs[0])
 
 
 if __name__ == "__main__":

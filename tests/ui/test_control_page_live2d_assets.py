@@ -1,0 +1,102 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+import unittest
+
+
+REPO_ROOT = next(path for path in Path(__file__).resolve().parents if (path / "main.py").exists())
+DOCS_ROOT = REPO_ROOT / "docs"
+MODEL_ROOT = DOCS_ROOT / "assets" / "evelyn-avatar" / "live2d"
+VENDOR_ROOT = DOCS_ROOT / "assets" / "vendor" / "live2d"
+
+
+class ControlPageLive2DAssetTests(unittest.TestCase):
+    def test_model_manifest_references_exist(self) -> None:
+        manifest_path = MODEL_ROOT / "evelin.model3.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
+        references = manifest["FileReferences"]
+        paths = [references["Moc"], references["Physics"], references["DisplayInfo"]]
+        paths.extend(references["Textures"])
+        paths.extend(item["File"] for item in references["Expressions"])
+        missing = [path for path in paths if not (MODEL_ROOT / path).is_file()]
+        self.assertEqual(missing, [])
+        self.assertEqual(len(references["Textures"]), 6)
+        self.assertEqual(len(references["Expressions"]), 12)
+
+    def test_local_runtime_and_controller_are_present(self) -> None:
+        expected = [
+            VENDOR_ROOT / "pixi-8.13.1.min.js",
+            VENDOR_ROOT / "live2dcubismcore-5.0.0.min.js",
+            VENDOR_ROOT / "untitled-pixi-live2d-engine-cubism-1.3.1.js",
+            DOCS_ROOT / "assets" / "evelyn-live2d.js",
+        ]
+        self.assertTrue(all(path.is_file() and path.stat().st_size > 0 for path in expected))
+
+    def test_control_page_loads_live2d_before_controller(self) -> None:
+        html = (DOCS_ROOT / "index.html").read_text(encoding="utf-8-sig")
+        scripts = [
+            "pixi-8.13.1.min.js",
+            "live2dcubismcore-5.0.0.min.js",
+            "untitled-pixi-live2d-engine-cubism-1.3.1.js",
+            "evelyn-live2d.js",
+        ]
+        positions = [html.index(script) for script in scripts]
+        self.assertEqual(positions, sorted(positions))
+        self.assertIn('id="evelynLive2dCanvas"', html)
+        self.assertIn('typeof voice.speaking === "boolean"', html)
+        self.assertIn("Boolean(localBridge.speaking)", html)
+        self.assertIn("window.EvelynLive2D.setSpeaking(voiceSpeaking)", html)
+
+    def test_live2d_preview_mode_does_not_poll_the_control_api(self) -> None:
+        html = (DOCS_ROOT / "index.html").read_text(encoding="utf-8-sig")
+        self.assertIn('get("live2dPreview") === "1"', html)
+        self.assertIn("if (LIVE2D_PREVIEW_MODE)", html)
+        self.assertIn('setBootProgress(100, "Live2D 미리보기 준비 완료", { hide: true })', html)
+        self.assertIn("composer.disabled = true", html)
+
+    def test_controller_drives_model_on_the_pixi_ticker(self) -> None:
+        controller = (DOCS_ROOT / "assets" / "evelyn-live2d.js").read_text(encoding="utf-8-sig")
+        self.assertIn("state.app.ticker.maxFPS = 60", controller)
+        self.assertIn("state.app.ticker.add(updateLive2DFrame)", controller)
+        self.assertIn("autoHitTest: false", controller)
+        self.assertIn("autoFocus: false", controller)
+        self.assertNotIn("autoInteract:", controller)
+        self.assertIn('Digit1: "heart eye"', controller)
+        self.assertIn('F2: "ulmak"', controller)
+
+    def test_idle_tail_uses_all_seven_tail_rotation_parameters(self) -> None:
+        controller = (DOCS_ROOT / "assets" / "evelyn-live2d.js").read_text(encoding="utf-8-sig")
+        expected = [
+            "Param_Angle_Rotation15",
+            "Param_Angle_Rotation9",
+            "Param_Angle_Rotation10",
+            "Param_Angle_Rotation11",
+            "Param_Angle_Rotation12",
+            "Param_Angle_Rotation13",
+            "Param_Angle_Rotation14",
+        ]
+        self.assertTrue(all(parameter in controller for parameter in expected))
+        self.assertIn("const targetWeight = state.speaking ? 0 : 1", controller)
+        self.assertIn("updateIdleTail(coreModel, now, elapsed)", controller)
+        self.assertIn("idleTailAngles", controller)
+        self.assertIn("idleTailVelocities", controller)
+        self.assertIn("const rootTarget", controller)
+        self.assertIn("const springForce", controller)
+        self.assertIn("Math.exp(-parameter.damping * frameSeconds)", controller)
+        self.assertIn("previousAngle * parameter.follow + travelingBend", controller)
+        self.assertNotIn("tipFlick", controller)
+        self.assertRegex(controller, r'Rotation15", follow: 0\.00')
+        self.assertRegex(controller, r'Rotation14", follow: 0\.78')
+        self.assertIn("tailTipParameter", controller)
+
+    def test_pixi_8_texture_binding_compatibility_patch_is_present(self) -> None:
+        engine = (
+            VENDOR_ROOT / "untitled-pixi-live2d-engine-cubism-1.3.1.js"
+        ).read_text(encoding="utf-8-sig")
+        self.assertIn("renderer.texture.bind(texture, 0)", engine)
+        self.assertNotIn("texture.source._gpuData[renderer.uid]", engine)
+
+
+if __name__ == "__main__":
+    unittest.main()

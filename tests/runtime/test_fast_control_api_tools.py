@@ -225,6 +225,30 @@ class FastControlApiToolTests(unittest.TestCase):
         self.assertTrue(bridge["ttsWarmup"]["done"])
         self.assertEqual(bridge["ttsWarmup"]["ms"], 512.3)
 
+    def test_control_state_promotes_local_bridge_voice_activity(self) -> None:
+        fast_api.LOCAL_BRIDGE_STATUS.update(
+            {
+                "enabled": True,
+                "ready": True,
+                "speaking": True,
+                "lastError": "",
+                "updatedAt": fast_api.time.time(),
+                "mic": {"captureActive": True},
+            }
+        )
+
+        state = fast_api.build_control_state(
+            {
+                "legacyServices": {"botReady": True, "ttsReady": True, "sttReady": True},
+                "services": [{"id": "bot_api", "state": "up", "ready": True}],
+            }
+        )
+
+        self.assertTrue(state["voice"]["speaking"])
+        self.assertTrue(state["voice"]["listening"])
+        self.assertEqual(state["voice"]["ttsTargetName"], "로컬 스피커")
+        self.assertEqual(state["ui"]["submode"], "voice-speaking")
+
     def test_local_bridge_status_post_drains_speak_requests_once(self) -> None:
         class _Request:
             method = "POST"

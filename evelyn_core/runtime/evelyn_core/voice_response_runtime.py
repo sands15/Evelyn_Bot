@@ -39,6 +39,18 @@ class VoiceResponseRuntimeDeps:
     log: Callable[..., Any] = print
 
 
+@dataclass(frozen=True)
+class MainResponseGuidanceRuntimeDeps:
+    clean_text: Callable[[str], str]
+    apply_ask_gating: Callable[[dict[str, Any] | None, str], dict[str, Any]]
+    persona_state_hint_for_turn: Callable[..., str]
+    recent_assistant_reply_summary: Callable[..., str]
+    build_tool_awareness_context: Callable[..., str]
+    route_available: Callable[[str, str], bool]
+    format_minecraft_state_summary: Callable[[dict[str, Any] | None], str]
+    question_feature_enabled: bool
+
+
 def split_first_response_and_followup(answer: str, *, deps: VoiceResponseRuntimeDeps) -> tuple[str, str]:
     cleaned = clean_text(answer)
     if not cleaned:
@@ -68,6 +80,95 @@ def is_duplicate_followup(first_response: str, followup_text: str) -> bool:
         remainder = follow_norm[len(first_norm):].strip()
         return len(remainder) <= 8
     return False
+
+
+def build_main_response_guidance_from_runtime(
+    cognitive_state: dict[str, Any] | None = None,
+    *,
+    source: str = "text",
+    user_text: str = "",
+    session_key: str | None = None,
+    guild_id: int | None = None,
+    minecraft_state: dict[str, Any] | None = None,
+    runtime_status_context: str | None = None,
+    route_decision: Any | None = None,
+    deps: MainResponseGuidanceRuntimeDeps,
+) -> str:
+    state = deps.apply_ask_gating(cognitive_state, source=source)
+    parts = [
+        "응답 규칙: 짧게 바로 답해라. 이 규칙을 설명하거나 언급하지 마라.",
+    ]
+    persona_hint = deps.persona_state_hint_for_turn(
+        user_text,
+        session_key=session_key,
+        guild_id=guild_id,
+    )
+    if persona_hint:
+        parts.append(persona_hint)
+    recent_assistant = deps.recent_assistant_reply_summary(session_key=session_key, guild_id=guild_id, limit=1) if persona_hint else ""
+    if recent_assistant:
+        parts.append(f"최근 네 말: {recent_assistant}. 반복하지 말고 이어서 답해라.")
+
+    action = state.get("action", "answer")
+    if state.get("user_intent"):
+        parts.append(f"사용자 의도 추정: {state.get('user_intent')}")
+
+    if action == "ask":
+        parts.append("짧게 확인 질문만 해라.")
+    elif action == "wait":
+        parts.append("길게 답하지 말고 더 들을 여지를 둬라.")
+    else:
+        parts.append("바로 답해라.")
+
+    if runtime_status_context:
+        parts.append(f"현재 Evelyn 런타임 상태 요약: {runtime_status_context}")
+        parts.append(
+            "사용자가 Evelyn의 상태, 오류, 연결, 지연, 서버 상황을 물을 때만 이 런타임 상태를 근거로 답해라. 일반 대화에서는 먼저 꺼내지 마라."
+        )
+        parts.append(
+            "RUNTIME_STATUS_RULE: Use `current_gpu_snapshot` first, including exact GPU names and used/total VRAM. "
+            "If `current_oom_signal=no`, do not say current OOM. "
+            "If `recent_errors_are_historical=true`, treat recent_errors as historical logs, not proof of current OOM."
+        )
+
+    tool_awareness_context = deps.build_tool_awareness_context(
+        user_text,
+        source=source,
+        route_decision=route_decision,
+        route_available=deps.route_available,
+    )
+    if tool_awareness_context:
+        parts.append(tool_awareness_context)
+
+    minecraft_summary = deps.format_minecraft_state_summary(minecraft_state)
+    if minecraft_summary:
+        parts.append(f"현재 마인크래프트 실시간 상태: {minecraft_summary}")
+        parts.append(
+            "마인크래프트 관련 질문이나 계획을 답할 때는 이 실시간 상태를 기준으로 말해라. 모르면 추측하지 말고 현재 상태 기준으로 짧게 설명해라."
+        )
+
+    if route_decision is not None:
+        ask_mode = deps.clean_text(route_decision.ask_mode)
+        max_questions = max(0, min(1, int(route_decision.max_question_count or 0)))
+        if deps.question_feature_enabled and ask_mode != "none" and max_questions > 0:
+            hint = deps.clean_text(route_decision.question_hint or "")
+            reason = deps.clean_text(route_decision.question_reason or "")
+            question_parts = [
+                "먼저 답변한다.",
+                "질문은 마지막에 최대 1개만 자연스럽게 둔다.",
+                "억지로 묻지 않는다.",
+                "흐름상 질문이 부자연스러우면 생략한다.",
+                "사용자가 이미 준 조건을 다시 묻지 않는다.",
+            ]
+            if hint:
+                question_parts.append(f"질문 방향: {hint}")
+            if reason:
+                question_parts.append(f"질문이 필요한 이유: {reason}")
+            parts.append(" ".join(question_parts))
+        else:
+            parts.append("답변 끝에 새 질문을 덧붙이지 마라.")
+
+    return " ".join(deps.clean_text(part) for part in parts if deps.clean_text(part))
 
 
 async def build_first_response_from_runtime(
@@ -225,4 +326,3 @@ async def build_followup_response_from_runtime(
     if is_duplicate_followup(first_response, cleaned_answer):
         return deps.build_answer_payload_from_text("")
     return deps.build_answer_payload_from_text(cleaned_answer)
-

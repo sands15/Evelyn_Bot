@@ -9,6 +9,7 @@ MAIN_PY = REPO_ROOT / "main.py"
 ROUTE_EXECUTION_PY = REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "voice_route_execution.py"
 MAIN_LLM_RUNTIME_PY = REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "main_llm_runtime.py"
 SEARCH_FOLLOWUP_RUNTIME_PY = REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "search_followup_runtime.py"
+VOICE_RESPONSE_RUNTIME_PY = REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "voice_response_runtime.py"
 TOOL_AWARENESS_POLICY = REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "tool_awareness_policy.py"
 SEARCH_FOLLOWUP_POLICY = REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "search_followup_policy.py"
 BLUEPRINT = REPO_ROOT / "docs" / "tool_awareness_blueprint.md"
@@ -21,6 +22,7 @@ class ToolAwarenessJudgmentTests(unittest.TestCase):
         cls.route_execution_py = ROUTE_EXECUTION_PY.read_text(encoding="utf-8")
         cls.main_llm_runtime_py = MAIN_LLM_RUNTIME_PY.read_text(encoding="utf-8")
         cls.search_followup_runtime_py = SEARCH_FOLLOWUP_RUNTIME_PY.read_text(encoding="utf-8")
+        cls.voice_response_runtime_py = VOICE_RESPONSE_RUNTIME_PY.read_text(encoding="utf-8")
         cls.tool_awareness_policy = TOOL_AWARENESS_POLICY.read_text(encoding="utf-8")
         cls.search_followup_policy = SEARCH_FOLLOWUP_POLICY.read_text(encoding="utf-8")
         cls.blueprint = BLUEPRINT.read_text(encoding="utf-8")
@@ -35,9 +37,9 @@ class ToolAwarenessJudgmentTests(unittest.TestCase):
         self.assertIn("TOOL_AWARENESS: Runtime, not memory, is the source of truth for tools.", self.tool_awareness_policy)
         self.assertIn("Available tool shortlist for this turn", self.tool_awareness_policy)
         self.assertIn("do not give only a promise", self.tool_awareness_policy)
-        self.assertIn("tool_awareness_context = build_tool_awareness_context", self.main_py)
+        self.assertIn("tool_awareness_context = deps.build_tool_awareness_context", self.voice_response_runtime_py)
         self.assertIn("route_available=_skill_route_available", self.main_py)
-        self.assertIn("parts.append(tool_awareness_context)", self.main_py)
+        self.assertIn("parts.append(tool_awareness_context)", self.voice_response_runtime_py)
 
     def test_tool_awareness_uses_runtime_skill_registry_for_search(self) -> None:
         self.assertIn("def _skill_route_available", self.main_py)

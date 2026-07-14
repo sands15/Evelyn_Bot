@@ -44,13 +44,6 @@ try:
 except ImportError:
     fcntl = None
 
-QWEN_ASR_IMPORT_ERROR: Exception | None = None
-try:
-    from qwen_asr import Qwen3ASRModel
-except Exception as exc:
-    Qwen3ASRModel = None
-    QWEN_ASR_IMPORT_ERROR = exc
-
 from evelyn_core.audio import (
     apply_light_denoise,
     compute_voice_band_metrics,
@@ -70,8 +63,19 @@ from evelyn_core.autonomy_observation_state import (
     build_default_autonomy_observation,
     pick_recent_user_text,
 )
-from evelyn_core.autonomy_router import DefaultAutonomyExecutor, RoutedAutonomyExecutor
+from evelyn_core.autonomy_router import (
+    DefaultAutonomyExecutor,
+    ResolveRouteExecutorRuntimeDeps,
+    RoutedAutonomyExecutor,
+    resolve_route_executor_from_runtime,
+)
 from evelyn_core.config import *
+from evelyn_core.instance_lock_runtime import (
+    acquire_instance_lock_from_main,
+    release_instance_lock_from_main,
+)
+from evelyn_core.guild_runtime_reset import GuildRuntimeResetDeps, reset_guild_runtime_state_from_runtime
+from evelyn_core.guild_runtime_reset import build_guild_runtime_reset_deps as build_guild_runtime_reset_deps_from_runtime
 from evelyn_core.memory import *
 from evelyn_core.minecraft_autonomy_client import MinecraftAutonomyClient
 from evelyn_core.memory_writebehind import (
@@ -118,6 +122,10 @@ from evelyn_core.cognitive_policy_state import (
     read_cached_cognitive_state,
     read_layered_cognitive_state,
 )
+from evelyn_core.cognitive_followup_policy import (
+    ShouldForceSearchFollowupRuntimeDeps,
+    should_force_search_followup_from_runtime,
+)
 from evelyn_core.cognitive_state_runtime import CognitiveStateRuntimeDeps, update_cognitive_state_from_runtime
 from evelyn_core.self_model import (
     mark_self_state_assistant_output,
@@ -134,6 +142,13 @@ from evelyn_core.vision_watch import (
     vision_watch_scene_is_unreliable,
 )
 from evelyn_core.vision_quality import build_vision_quality
+from evelyn_core.vision_runtime import (
+    VisionRuntimeDeps,
+    build_vision_observation_prompt_from_runtime,
+    build_vision_watch_prompt_from_runtime,
+    format_vision_observation_from_runtime,
+    vision_watch_scene_looks_bad_from_runtime,
+)
 from evelyn_core.text import (
     apply_stt_post_corrections,
     clean_text,
@@ -161,29 +176,48 @@ from evelyn_core.session_memory_state import (
     SessionStateStore,
     build_topic_id as build_session_topic_id,
     is_casual_call_or_status_question as session_is_casual_call_or_status_question,
-    new_conversation_history as new_session_conversation_history,
     new_turn_id as new_session_turn_id,
-    runtime_session_key as resolve_runtime_session_key,
+)
+from evelyn_core.session_turn_runtime import (
+    SessionTurnRuntimeDeps,
+    append_history_from_runtime,
+    begin_user_text_turn_from_runtime,
+    build_topic_id_from_runtime,
+    current_turn_id_from_runtime,
+    finish_assistant_text_turn_from_runtime,
+    get_conversation_history_from_runtime,
+    increment_session_bad_audio_from_runtime,
+    is_session_active_for_user_from_runtime,
+    mark_session_active_from_runtime,
+    new_conversation_history_from_runtime,
+    new_turn_id_from_runtime,
+    next_segment_id_from_runtime,
+    persona_state_hint_for_turn_from_runtime,
+    remember_session_followup_target_from_runtime,
+    recent_assistant_reply_summary_from_runtime,
+    reset_session_bad_audio_from_runtime,
+    session_state_snapshot_from_runtime,
+    start_new_turn_from_runtime,
+    trim_history_from_runtime,
+    update_session_state_from_runtime,
 )
 from evelyn_core.room_speaker_activity import RoomSpeakerActivityStore
 from evelyn_core.response_output_policy import (
-    answer_contains_minecraft_leak as answer_contains_minecraft_leak_payload,
-    answer_simple_local_chat_query as answer_simple_local_chat_query_payload,
-    cleanup_assistant_display_artifacts as cleanup_assistant_display_artifacts_payload,
-    extract_answer_from_reasoning as extract_answer_from_reasoning_payload,
-    fallback_for_unrequested_minecraft_leak as fallback_for_unrequested_minecraft_leak_payload,
-    format_display_text as format_display_text_payload,
+    ResponseOutputPolicyRuntimeDeps,
+    extract_json_object_from_runtime,
+    fallback_for_unrequested_minecraft_leak_from_runtime,
+    format_display_text_from_runtime,
     normalize_friend_style_output,
     parse_response_action_tag,
-    sanitize_model_output as sanitize_model_output_payload,
-    sanitize_unrequested_minecraft_leak as sanitize_unrequested_minecraft_leak_payload,
-    user_explicitly_mentions_minecraft as user_explicitly_mentions_minecraft_payload,
+    sanitize_model_output_from_runtime,
+    extract_answer_from_reasoning_from_runtime,
+    sanitize_unrequested_minecraft_leak_from_runtime,
+    should_label_question_response_from_runtime,
 )
 from evelyn_core.search_followup_policy import (
     answer_promises_search,
     strip_search_answer_sources,
 )
-from evelyn_core.search_query_context import build_search_query_from_context
 from evelyn_core.search_tools import search_duckduckgo as search_duckduckgo_payload
 from evelyn_core.runtime_status_context import (
     answer_gpu_runtime_status_query,
@@ -193,14 +227,28 @@ from evelyn_core.runtime_status_context import (
     probe_runtime_tcp_service,
     runtime_status_port_from_url,
 )
+from evelyn_core.runtime_mode_policy import compute_runtime_mode_from_state, apply_runtime_mode_policy
 from evelyn_core.route_fallback_policy import (
     classify_llm_route_fallback,
     normalize_route_name,
     should_force_voice_context_route,
 )
+from evelyn_core.fast_path_policy import (
+    FastPathPolicyRuntimeDeps,
+    context_policy_for_fast_path_policy_from_runtime,
+    deep_route_marker_count_from_runtime,
+    fast_path_policy_from_runtime,
+    has_negated_search_marker_from_runtime,
+    is_control_page_source_from_runtime,
+    is_obvious_continue_from_runtime,
+    is_simple_directive_from_runtime,
+    needs_search_or_deep_routing_from_runtime,
+)
 from evelyn_core.tool_awareness_policy import build_tool_awareness_context
 from evelyn_core.local_tool_diagnostic_context import build_local_tool_diagnostic_context
+from evelyn_core.http_session_runtime import ensure_http_session_from_runtime
 from evelyn_core.llm_context_assembly import LlmContextAssemblyDeps, prepare_llm_messages_from_runtime
+from evelyn_core.llm_warmup_runtime import LlmWarmupRuntimeDeps, warmup_llm_from_runtime
 from evelyn_core.main_llm_runtime import (
     MainLlmRuntimeDeps,
     execute_main_llm_once_from_runtime,
@@ -210,14 +258,37 @@ from evelyn_core.main_llm_runtime import (
     tool_synthesis_answer_drifted as tool_synthesis_answer_drifted_payload,
 )
 from evelyn_core.search_followup_runtime import (
+    build_search_query_from_runtime,
     SearchFollowupRuntimeDeps,
     deliver_proactive_followup_from_runtime,
-    normalize_search_key as normalize_search_key_payload,
     run_search_followup_from_runtime,
     schedule_search_followup_from_runtime,
     schedule_search_followup_singleflight_from_runtime,
 )
 from evelyn_core.memory_context_state import build_memory_context
+from evelyn_core.startup_audio_runtime import (
+    OpusStartupRuntimeDeps,
+    SttWarmupRuntimeDeps,
+    ensure_opus_loaded_from_runtime,
+    warmup_stt_sync_from_runtime,
+)
+from evelyn_core.startup_component_state import (
+    STARTUP_BOOT_STEPS,
+    StartupComponentRuntimeDeps,
+    mark_startup_component_from_runtime,
+    startup_component_done_from_runtime,
+)
+from evelyn_core.stt_task_runtime import run_blocking_stt_task_from_runtime
+from evelyn_core.stt_text_runtime import (
+    build_stt_text_runtime_deps,
+    build_partial_stt_window_from_runtime,
+    choose_full_stt_candidate_from_runtime,
+    commit_stable_transcript_from_runtime,
+    detect_wake_word_sync_from_runtime,
+    get_partial_transcript_from_runtime,
+    longest_common_prefix_text_from_runtime,
+    score_stt_candidate_from_runtime,
+)
 from evelyn_core.memory_layers import collect_memory_layers
 from evelyn_core.memory_llm_context import (
     build_cognitive_state_messages,
@@ -266,6 +337,19 @@ from evelyn_core.discord_delivery import (
     execute_streaming_voice_delivery_plan,
     send_discord_text,
 )
+from evelyn_core.discord_settings_runtime import (
+    DiscordSettingsRuntimeDeps,
+    build_discord_settings_runtime_deps as build_discord_settings_runtime_deps_from_main,
+    resolve_command_prefix_from_runtime,
+    add_guild_channel_setting_from_runtime,
+    get_guild_command_only_channel_ids_from_runtime,
+    get_guild_command_prefix_from_runtime,
+    get_guild_observe_channel_ids_from_runtime,
+    normalize_command_prefix_from_runtime,
+    remove_guild_channel_setting_from_runtime,
+    save_guild_channel_list_from_runtime,
+    save_guild_command_prefix_from_runtime,
+)
 from evelyn_core.discord_commands import (
     build_autonomy_status_command_text,
     build_channel_setting_list_reply,
@@ -281,9 +365,7 @@ from evelyn_core.discord_commands import (
     build_prefix_saved_reply,
     build_reset_guild_memory_reply,
     build_status_command_text,
-    control_command_check_failure_message,
     guild_only_command_message,
-    is_control_command_authorized_payload,
     normalize_channel_setting_action,
 )
 from evelyn_core.discord_command_handlers import (
@@ -303,43 +385,50 @@ from evelyn_core.discord_command_handlers import (
     handle_reset_guild_memory_command,
     handle_restart_bot_command,
     handle_shutdown_bot_command,
+    handle_control_command_error,
     handle_status_command,
+    make_control_command_authorized_checker,
 )
-from evelyn_core.discord_settings import (
-    add_guild_channel_setting as add_guild_channel_setting_payload,
-    get_guild_command_only_channel_ids as get_guild_command_only_channel_ids_payload,
-    get_guild_command_prefix as get_guild_command_prefix_payload,
-    get_guild_observe_channel_ids as get_guild_observe_channel_ids_payload,
-    normalize_command_prefix as normalize_command_prefix_payload,
-    remove_guild_channel_setting as remove_guild_channel_setting_payload,
-    save_guild_channel_list as save_guild_channel_list_payload,
-    save_guild_command_prefix as save_guild_command_prefix_payload,
+from evelyn_core.discord_command_session_runtime import (
+    DiscordCommandSessionRuntimeDeps,
+    mark_text_session_from_command_runtime,
 )
 from evelyn_core.discord_ingress import (
     build_voice_ingress_context,
     resolve_text_thread_id,
-    make_person_memory_key as make_discord_person_memory_key,
-    make_room_memory_key as make_discord_room_memory_key,
-    make_session_memory_key as make_discord_session_memory_key,
-    make_text_reply_slot_key as make_discord_text_reply_slot_key,
-    make_text_session_key as make_discord_text_session_key,
-    make_voice_room_session_key as make_discord_voice_room_session_key,
-    make_voice_session_key as make_discord_voice_session_key,
     normalize_voice_debug_meta,
     voice_ingress_source,
 )
 from evelyn_core.discord_text_turn import DiscordTextMessageHandlerDeps, handle_discord_text_message
+from evelyn_core.session_key_runtime import (
+    make_person_memory_key,
+    make_room_memory_key,
+    make_session_memory_key,
+    make_text_reply_slot_key,
+    make_text_session_key,
+    make_voice_room_session_key,
+    make_voice_session_key,
+    runtime_session_key,
+)
+from evelyn_core.discord_text_reply_runtime import (
+    DiscordTextReplyRuntimeDeps,
+    stream_text_reply_from_runtime,
+)
 from evelyn_core.discord_session_policy import (
     DiscordRoomSessionPolicy,
-    LocalMicDiscordSuppressionInput,
     TtsInterruptMeta,
-    VoiceReplyGateInput,
-    decide_local_mic_discord_suppression,
-    decide_voice_reply_gate,
-    is_short_followup_candidate_policy,
-    should_ignore_short_transcription_policy,
+    estimate_voice_like_probability_policy,
+    is_transport_corrupted_audio_policy,
     should_interrupt_tts,
-    should_skip_full_stt_after_wake_probe_policy,
+)
+from evelyn_core.discord_session_policy_runtime import (
+    DiscordSessionPolicyRuntimeDeps,
+    is_short_followup_candidate_from_runtime,
+    is_tail_fragment_candidate_from_runtime,
+    is_transport_corrupted_audio_from_runtime,
+    should_ignore_short_transcription_from_runtime,
+    should_require_confirm_exact_for_wake_from_runtime,
+    should_skip_full_stt_after_wake_probe_from_runtime,
 )
 from evelyn_core.skills import skill_registry
 from evelyn_core.skills.routing import (
@@ -364,12 +453,62 @@ from evelyn_core.local_mic_state import (
     set_voice_input_mode_state,
     voice_input_mode_status_line_from_mode,
 )
+from evelyn_core.local_runtime_context import build_evelyn_runtime_dependency_context_from_payload
+from evelyn_core.local_control_tts_runtime import (
+    build_local_control_tts_runtime_deps,
+    schedule_local_control_tts_from_runtime,
+)
+from evelyn_core.local_control_voice_runtime import (
+    LocalControlVoiceMember,
+    build_local_control_voice_member_from_runtime,
+    is_local_speaker_voice_client_from_runtime,
+)
+from evelyn_core.local_mic_segment_runtime import (
+    LocalMicDiscordSuppressionRuntimeDeps,
+    LocalMicSegmentRuntimeDeps,
+    LocalMicServiceRuntimeDeps,
+    ensure_local_mic_service_started_from_runtime,
+    handle_local_mic_segment_from_runtime,
+    local_mic_effective_max_silence_ms_from_runtime,
+    should_drop_discord_audio_for_local_mic_from_runtime,
+    stop_local_mic_service_from_runtime,
+)
+from evelyn_core.tts_warmup_runtime import TtsWarmupRuntimeDeps, warmup_tts_server_from_runtime
+from evelyn_core.tts_interrupt_runtime import (
+    TtsInterruptRuntimeDeps,
+    speaker_verification_allows_tts_interrupt_from_runtime,
+    stop_active_tts_playback_from_runtime,
+    verify_speaker_for_tts_interrupt_from_runtime,
+)
+from evelyn_core.voice_timing_runtime import (
+    build_voice_timing_runtime_deps as build_voice_timing_runtime_deps_from_runtime,
+    VoiceTimingRuntimeDeps,
+    log_voice_bottleneck_summary_from_runtime,
+    log_voice_latency_from_runtime,
+    log_voice_stage_from_runtime,
+    should_log_voice_timing_from_runtime,
+)
 from evelyn_core.local_tts_playback import LocalTtsPlaybackManager
 from evelyn_core.observability_metrics import (
     ModelCallMetricsStore,
+    mark_turn_stage_from_runtime,
+    new_turn_metrics_from_runtime,
+    record_context_pipeline_benchmark_from_runtime,
+    record_model_call_trace_from_runtime,
+    record_turn_stage_metric,
+    register_drop_reason_from_runtime,
     summarize_voice_p95_metrics,
 )
-from evelyn_core.page_urls import resolve_public_page_url
+from evelyn_core.omnivoice_request_runtime import (
+    OmniVoiceRequestRuntimeDeps,
+    build_omnivoice_tts_request_bundle_from_runtime,
+    build_omnivoice_tts_result_from_runtime,
+    run_omnivoice_tts_with_fallback_from_runtime,
+)
+from evelyn_core.page_urls import (
+    build_evelyn_page_url_runtime_deps,
+    resolve_evelyn_page_url_from_runtime,
+)
 from evelyn_core.query_intents import (
     answer_current_datetime_query,
     should_force_search_query,
@@ -383,11 +522,40 @@ from evelyn_core.question_policy_state import (
     user_frustration_with_questions as user_frustration_with_questions_payload,
     user_wants_direct_answer as user_wants_direct_answer_payload,
 )
+from evelyn_core.question_policy_runtime import (
+    QuestionPolicyRuntimeDeps,
+    extract_question_policy_from_route_meta_from_runtime,
+    QuestionPolicyStateRuntimeDeps,
+    is_continuable_technical_topic_from_runtime,
+    normalize_question_policy_mapping_from_runtime,
+    apply_fast_path_question_policy_from_runtime,
+    proactive_question_scope_candidates_from_runtime,
+    user_frustration_with_questions_from_runtime,
+    question_cooldown_hit_from_runtime,
+    user_wants_direct_answer_from_runtime,
+    record_question_trace_from_runtime,
+    summarize_question_metrics_from_runtime,
+    record_session_question_asked_from_runtime,
+    resolve_pending_proactive_question_for_turn_from_runtime,
+    select_and_mark_proactive_question_from_runtime,
+    maybe_append_proactive_question_from_runtime,
+)
 from evelyn_core.assistant_contracts import (
     TtsSynthRequest,
     TtsSynthResult,
 )
 from evelyn_core.assistant_prompt_contract import build_evelyn_system_prompt
+from evelyn_core.cached_tts_runtime import (
+    CachedTtsRuntimeDeps,
+    cached_audio_path_for_answer_from_runtime,
+    play_cached_answer_audio_from_runtime,
+)
+from evelyn_core.stt_model_runtime import (
+    SttModelRuntimeDeps,
+    build_stt_model_runtime_deps as build_stt_model_runtime_deps_from_runtime,
+    get_stt_model_from_runtime,
+    normalize_stt_language_from_runtime,
+)
 from evelyn_core.control_page_contracts import memory_panel_reply
 from evelyn_core.control_page_http import (
     add_control_page_no_store_headers,
@@ -397,6 +565,7 @@ from evelyn_core.control_page_http import (
     control_page_json_response,
     resolve_control_page_asset_path,
 )
+from evelyn_core.control_page_server import open_path_with_system, open_url_with_system
 from evelyn_core.control_page_state import (
     ControlPageChatLogStore,
     ControlPageMinecraftSnapshotCache,
@@ -429,8 +598,67 @@ from evelyn_core.control_page_state import (
     parse_control_page_memory_snapshot_query,
     sanitize_control_page_welcome_text_payload,
 )
+from evelyn_core.control_page_guild_runtime import (
+    ControlPageGuildSelectionRuntimeDeps,
+    current_tts_target_name_from_runtime,
+    resolve_guild_member_name_from_runtime,
+    select_control_page_guild_from_runtime,
+)
 from evelyn_core.control_page_state_handler import ControlPageStateDeps, build_control_page_state_from_runtime
 from evelyn_core.control_page_runtime_probe import probe_control_page_runtime_services
+from evelyn_core.control_page_minecraft_snapshot_runtime import (
+    ControlPageBackgroundTasksRuntimeDeps,
+    ControlPageMinecraftSnapshotRuntimeDeps,
+    ensure_control_page_background_tasks_started_from_runtime,
+    ensure_control_page_minecraft_snapshot_from_runtime,
+    safe_get_control_page_minecraft_snapshot_from_runtime,
+    get_control_page_minecraft_snapshot_cache_copy_from_runtime,
+    stop_control_page_background_tasks_from_runtime,
+)
+from evelyn_core.control_page_runtime_services_runtime import (
+    ControlPageRuntimeServicesRuntimeDeps,
+    ControlPageRuntimeServicesProbeDeps,
+    probe_control_page_runtime_services_once_from_runtime,
+    get_control_page_runtime_services_from_runtime,
+)
+from evelyn_core.control_page_status_runtime import (
+    ControlPageStatusRuntimeDeps,
+    build_control_page_autonomy_reply_from_runtime,
+    build_control_page_inventory_reply_from_runtime,
+    build_control_page_minecraft_reply_from_runtime,
+    build_control_page_status_reply_from_runtime,
+    build_control_page_local_status_text_from_runtime,
+    build_control_page_status_text_from_runtime,
+    build_control_page_voice_continuity_reply_from_runtime,
+    build_control_page_voice_status_reply_from_runtime,
+)
+from evelyn_core.control_page_search_runtime import (
+    ControlPageSearchRuntimeDeps,
+    answer_control_page_search_text_from_runtime,
+)
+from evelyn_core.control_page_tool_runtime import (
+    ControlPageInputRuntimeDeps,
+    ControlPageToolRuntimeDeps,
+    decide_control_page_tool_call_from_runtime,
+    execute_control_page_tool_from_runtime,
+    execute_control_page_memory_panel_action_from_runtime,
+    execute_control_page_restart_command_from_runtime,
+    handle_control_page_input_from_runtime,
+    recent_control_page_history_for_router_from_runtime,
+    remember_control_page_tool_turn_from_runtime,
+)
+from evelyn_core.control_page_ui_runtime import (
+    ControlPageUiRuntimeDeps,
+    append_control_page_chat_log_from_runtime,
+    build_control_page_panel_state_from_runtime,
+    control_page_effective_guild_id_from_runtime,
+    control_page_effective_guild_name_from_runtime,
+    control_page_local_url_from_runtime,
+    control_page_session_key_from_runtime,
+    enqueue_control_page_ui_command_from_runtime,
+    get_control_page_chat_log_from_runtime,
+    sanitize_control_page_welcome_text_from_runtime,
+)
 from evelyn_core.control_page_tools import (
     CONTROL_PAGE_COMMANDS,
     build_control_page_all_commands,
@@ -476,9 +704,12 @@ from evelyn_core.voice_stt_flow import (
     apply_strict_wake_confirm_policy,
     build_final_transcript_flow,
     decide_final_wake_veto,
+    get_matching_speculative_policy_from_runtime,
     interpret_wake_probe_result,
+    remember_speculative_policy_from_runtime,
     run_full_stt_with_optional_rescore,
     run_partial_stt_flow,
+    speculate_from_committed_stt_from_runtime,
 )
 from evelyn_core.stt_client import transcribe_audio16k_via_service
 from evelyn_core.speaker_verification import (
@@ -495,18 +726,24 @@ from evelyn_core.voice_barge_in_continuity import (
     VOICE_BARGE_IN_EVENT_FINISH,
     VOICE_BARGE_IN_REASON_CODE,
     VOICE_BARGE_IN_REASON_LABEL,
+    VoiceBargeInContinuityRuntimeDeps,
+    build_voice_barge_in_continuity_snapshot_from_runtime,
+    format_voice_barge_in_continuity_detail_lines_from_runtime,
+    format_voice_barge_in_continuity_summary_from_runtime,
+    mark_voice_barge_in_continuity_probe_from_runtime,
+    parse_barge_in_reason_label_from_runtime,
+    reset_voice_barge_in_continuity_probe_from_runtime,
+    start_voice_barge_in_continuity_probe_from_runtime,
     VoiceBargeInContinuityTracker,
 )
 from evelyn_core.voice_debug_audio import (
-    build_voice_debug_audio_item,
+    debug_write_worker_from_runtime,
+    enqueue_voice_debug_audio_from_runtime,
+    ensure_debug_write_worker_started_from_runtime,
     save_voice_debug_audio_now as save_voice_debug_audio_now_payload,
-    voice_debug_drop_message,
 )
 from evelyn_core.voice_utterance import (
     UtteranceAssemblyConfig,
-    discord_pcm_seconds,
-    merge_debug_meta,
-    merge_discord_pcm_segments,
 )
 from evelyn_core.voice_orchestration import (
     VoiceTurnOrchestrator,
@@ -527,6 +764,7 @@ from evelyn_core.voice_route_execution import (
     VoiceRouteExecutionDeps,
     execute_main_llm_streaming_turn as execute_main_llm_streaming_turn_with_deps,
     execute_search_then_answer_action as execute_search_then_answer_action_with_deps,
+    build_voice_main_llm_streaming_deps as build_voice_main_llm_streaming_deps_from_runtime,
     maybe_execute_registered_route as maybe_execute_registered_route_with_deps,
     maybe_handle_short_circuit_route as maybe_handle_short_circuit_route_with_deps,
     prepare_route_context as prepare_route_context_with_deps,
@@ -535,6 +773,8 @@ from evelyn_core.voice_response_runtime import (
     VoiceResponseRuntimeDeps,
     build_first_response_from_runtime,
     build_followup_response_from_runtime,
+    MainResponseGuidanceRuntimeDeps,
+    build_main_response_guidance_from_runtime,
     is_duplicate_followup as is_duplicate_followup_payload,
     normalize_compare_text as normalize_compare_text_payload,
     split_first_response_and_followup as split_first_response_and_followup_with_deps,
@@ -546,11 +786,31 @@ from evelyn_core.voice_stream_chunks import (
     emit_stream_delta_chunks as emit_stream_delta_chunks_payload,
     flush_streamed_answer_chunks as flush_streamed_answer_chunks_payload,
 )
+from evelyn_core.voice_ingress_runtime import (
+    VoiceIngressEntrypointDeps,
+    VoiceIngressRuntimeDeps,
+    delayed_voice_utterance_flush_from_runtime,
+    enqueue_voice_ingress_for_processing_from_runtime,
+    flush_voice_utterance_buffer_from_runtime,
+    process_member_audio_from_runtime,
+    schedule_voice_utterance_item_from_runtime,
+    voice_ingress_worker_from_runtime,
+    voice_utterance_buffer_key as voice_utterance_buffer_key_payload,
+)
+from evelyn_core.voice_reply_side_effects import (
+    VoiceReplySideEffectDeps,
+    finalize_voice_reply_side_effects_from_runtime,
+)
+from evelyn_core.voice_reply_gate_runtime import (
+    VoiceReplyGateRuntimeDeps,
+    should_reply_to_voice_from_runtime,
+)
 from evelyn_core.voice_delivery_runtime import (
     VoiceDeliveryRuntimeDeps,
     ask_llm_and_speak_local_from_runtime,
     ask_llm_and_speak_streaming_from_runtime,
     finalize_voice_answer_from_runtime,
+    execute_voice_delivery_plan_from_runtime,
 )
 from evelyn_core.voice_pipeline import (
     ActionResult,
@@ -576,8 +836,9 @@ from evelyn_core.voice_pipeline_state import (
     increment_voice_counter,
     load_last_voice_channel_state as load_last_voice_channel_state_payload,
     mark_last_voice_manual_disconnect,
-    record_voice_failure_state,
+    record_voice_pipeline_failure_from_runtime,
     save_last_voice_channel_state as save_last_voice_channel_state_payload,
+    save_last_voice_channel_state_from_runtime,
     voice_last_channel_state_path as resolve_voice_last_channel_state_path,
 )
 from evelyn_voice import EvelynVoiceClient
@@ -811,111 +1072,167 @@ instance_lock_handle = None
 instance_lock_path = Path(os.getenv("EVELYN_INSTANCE_LOCK_PATH", str(Path(__file__).resolve().with_name(".evelyn_bot.lock"))))
 
 
+def build_discord_settings_runtime_deps() -> DiscordSettingsRuntimeDeps:
+    return build_discord_settings_runtime_deps_from_main(
+        default_command_prefix=DEFAULT_COMMAND_PREFIX,
+        prefix_cache=guild_prefix_cache,
+        now=time.time,
+    )
+
+
+def build_question_policy_runtime_deps() -> QuestionPolicyRuntimeDeps:
+    return QuestionPolicyRuntimeDeps(
+        normalize_question_policy_mapping_payload=normalize_question_policy_mapping_payload,
+        extract_question_policy_from_route_meta_payload=extract_question_policy_from_route_meta_payload,
+        user_wants_direct_answer_payload=user_wants_direct_answer_payload,
+        user_frustration_with_questions_payload=user_frustration_with_questions_payload,
+        is_continuable_technical_topic_payload=is_continuable_technical_topic_payload,
+    )
+
+
+def build_question_policy_state_runtime_deps() -> QuestionPolicyStateRuntimeDeps:
+    return QuestionPolicyStateRuntimeDeps(
+        question_cooldown_hit_payload=question_policy_state.question_cooldown_hit,
+        apply_fast_path_question_policy_payload=question_policy_state.apply_fast_path_policy,
+        record_question_trace_payload=question_policy_state.record_question_trace,
+        summarize_question_metrics_payload=question_policy_state.summarize_question_metrics,
+        proactive_scope_candidates_payload=question_policy_state.proactive_scope_candidates,
+        record_session_question_asked_payload=question_policy_state.record_session_question_asked,
+        resolve_pending_proactive_question_for_turn_payload=question_policy_state.resolve_pending_proactive_question_for_turn,
+        select_and_mark_proactive_question_payload=question_policy_state.select_and_mark_proactive_question,
+        maybe_append_proactive_question_payload=question_policy_state.maybe_append_proactive_question,
+    )
+
+
+def build_session_turn_runtime_deps() -> SessionTurnRuntimeDeps:
+    return SessionTurnRuntimeDeps(
+        session_state_store=session_state_store,
+        system_prompt=SYSTEM_PROMPT,
+        active_conversation_awaiting_reply_sec=ACTIVE_CONVERSATION_AWAITING_REPLY_SEC,
+        active_conversation_text_question_sec=ACTIVE_CONVERSATION_TEXT_QUESTION_SEC,
+        active_conversation_text_sec=ACTIVE_CONVERSATION_TEXT_SEC,
+        max_history_items=MAX_HISTORY_ITEMS,
+        session_topic_ids=session_topic_ids,
+        build_topic_id_fn=build_session_topic_id,
+        new_turn_id_fn=new_session_turn_id,
+    )
+
+
 def release_instance_lock() -> None:
     global instance_lock_handle
-    handle = instance_lock_handle
-    if handle is None:
-        return
-    try:
-        handle.seek(0)
-        if msvcrt is not None:
-            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-        elif fcntl is not None:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-    except Exception:
-        pass
-    try:
-        handle.close()
-    except Exception:
-        pass
+    release_instance_lock_from_main(instance_lock_handle, lock_path=instance_lock_path)
     instance_lock_handle = None
 
 
 def acquire_instance_lock(wait_sec: float = 15.0, poll_sec: float = 0.25) -> None:
     global instance_lock_handle
-    if instance_lock_handle is not None:
-        return
+    instance_lock_handle = acquire_instance_lock_from_main(
+        instance_lock_handle,
+        lock_path=instance_lock_path,
+        wait_sec=wait_sec,
+        poll_sec=poll_sec,
+    )
 
-    instance_lock_path.parent.mkdir(parents=True, exist_ok=True)
-    handle = open(instance_lock_path, "a+", encoding="utf-8")
-    handle.seek(0)
-    handle.write("0")
-    handle.flush()
-    deadline = time.monotonic() + max(0.0, wait_sec)
 
-    while True:
-        try:
-            handle.seek(0)
-            if msvcrt is not None:
-                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
-            elif fcntl is not None:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            handle.seek(0)
-            handle.truncate()
-            handle.write(str(os.getpid()))
-            handle.flush()
-            instance_lock_handle = handle
-            return
-        except OSError:
-            if time.monotonic() >= deadline:
-                try:
-                    handle.close()
-                except Exception:
-                    pass
-                raise RuntimeError("Another Evelyn bot instance is already running.")
-            time.sleep(max(0.05, poll_sec))
+def build_discord_session_policy_runtime_deps() -> DiscordSessionPolicyRuntimeDeps:
+    return DiscordSessionPolicyRuntimeDeps(
+        session_last_turn_accepted_at_get=lambda session_key: session_last_turn_accepted_at.get(session_key, 0.0),
+        monotonic_fn=time.monotonic,
+        should_require_confirm_exact_for_wake_payload=should_require_confirm_exact_for_wake_policy,
+        is_transport_corrupted_audio_payload=is_transport_corrupted_audio_policy,
+        no_wake_max_continue_sec=VOICE_NO_WAKE_MAX_CONTINUE_SEC,
+        clean_text=clean_text,
+        looks_like_brief_filler_text=looks_like_brief_filler_text,
+        looks_like_repetitive_noise_text=looks_like_repetitive_noise_text,
+        tail_fragment_window_sec=TAIL_FRAGMENT_WINDOW_SEC,
+        tail_fragment_max_raw_sec=TAIL_FRAGMENT_MAX_RAW_SEC,
+        tail_fragment_max_voiced_ms=TAIL_FRAGMENT_MAX_VOICED_MS,
+        tail_fragment_max_longest_ms=TAIL_FRAGMENT_MAX_LONGEST_MS,
+        normalize_voice_text=normalize_voice_text,
+        normalized_wake_words=normalized_wake_words,
+        min_audio_sec=MIN_AUDIO_SEC,
+        min_transcribed_len=MIN_TRANSCRIBED_LEN,
+        wake_short_text_keep_len=WAKE_SHORT_TEXT_KEEP_LEN,
+        audio_duration_fn=lambda pcm_bytes: len(pcm_bytes or b"") / (RATE * CHANNELS * 2),
+    )
 
 
 atexit.register(release_instance_lock)
 
 
 def normalize_command_prefix(prefix: str | None) -> str:
-    return normalize_command_prefix_payload(prefix, default_prefix=DEFAULT_COMMAND_PREFIX)
+    return normalize_command_prefix_from_runtime(
+        prefix,
+        deps=build_discord_settings_runtime_deps(),
+    )
 
 
 def get_guild_command_prefix(guild_id: int | None) -> str:
-    return get_guild_command_prefix_payload(
+    return get_guild_command_prefix_from_runtime(
         guild_id,
-        prefix_cache=guild_prefix_cache,
-        default_prefix=DEFAULT_COMMAND_PREFIX,
+        deps=build_discord_settings_runtime_deps(),
     )
 
 
 def save_guild_command_prefix(guild_id: int, prefix: str) -> str:
-    return save_guild_command_prefix_payload(
+    return save_guild_command_prefix_from_runtime(
         guild_id,
         prefix,
-        prefix_cache=guild_prefix_cache,
-        default_prefix=DEFAULT_COMMAND_PREFIX,
+        deps=build_discord_settings_runtime_deps(),
     )
 
 
 def get_guild_observe_channel_ids(guild_id: int | None) -> list[int]:
-    return get_guild_observe_channel_ids_payload(guild_id)
+    return get_guild_observe_channel_ids_from_runtime(
+        guild_id,
+        deps=build_discord_settings_runtime_deps(),
+    )
 
 
 def get_guild_command_only_channel_ids(guild_id: int | None) -> list[int]:
-    return get_guild_command_only_channel_ids_payload(guild_id)
+    return get_guild_command_only_channel_ids_from_runtime(
+        guild_id,
+        deps=build_discord_settings_runtime_deps(),
+    )
 
 
 def save_guild_channel_list(guild_id: int, key: str, channel_ids: list[int]) -> list[int]:
-    return save_guild_channel_list_payload(guild_id, key, channel_ids)
+    return save_guild_channel_list_from_runtime(
+        guild_id,
+        key,
+        channel_ids,
+        deps=build_discord_settings_runtime_deps(),
+    )
 
 
 def add_guild_channel_setting(guild_id: int, key: str, channel_id: int) -> list[int]:
-    return add_guild_channel_setting_payload(guild_id, key, channel_id)
+    return add_guild_channel_setting_from_runtime(
+        guild_id,
+        key,
+        channel_id,
+        deps=build_discord_settings_runtime_deps(),
+    )
 
 
 def remove_guild_channel_setting(guild_id: int, key: str, channel_id: int) -> list[int]:
-    return remove_guild_channel_setting_payload(guild_id, key, channel_id)
+    return remove_guild_channel_setting_from_runtime(
+        guild_id,
+        key,
+        channel_id,
+        deps=build_discord_settings_runtime_deps(),
+    )
 
 
-async def resolve_command_prefix(_bot, message: discord.Message):
-    prefix = get_guild_command_prefix(message.guild.id if message.guild else None)
-    return commands.when_mentioned_or(prefix)(_bot, message)
-
-
-bot = commands.Bot(command_prefix=resolve_command_prefix, intents=intents, help_command=None)
+bot = commands.Bot(
+    command_prefix=lambda _bot, message: commands.when_mentioned_or(
+        resolve_command_prefix_from_runtime(
+            message.guild.id if message.guild else None,
+            get_guild_command_prefix=get_guild_command_prefix,
+        ),
+    )(_bot, message),
+    intents=intents,
+    help_command=None,
+)
 
 SYSTEM_PROMPT = build_evelyn_system_prompt(omnivoice_tag_guidance=OMNIVOICE_TAG_GUIDANCE)
 
@@ -947,9 +1264,6 @@ voice_debug_counts: dict[int, int] = {}
 voice_debug_stems: dict[tuple[int, str, str, str], str] = {}
 
 tts_warmup_started = False
-stt_processor: Optional[Any] = None
-stt_model: Optional[Any] = None
-stt_backend: Optional[str] = None
 http_session: Optional[aiohttp.ClientSession] = None
 startup_components_ready = False
 startup_components_task: Optional[asyncio.Task] = None
@@ -992,43 +1306,17 @@ local_mic_runtime_state: dict[str, Any] = build_local_mic_runtime_state(
 )
 
 
-@dataclass(slots=True)
-class LocalControlVoiceGuild:
-    id: int = LOCAL_CONTROL_GUILD_ID
-    name: str = LOCAL_CONTROL_GUILD_NAME
-    voice_client: Any = None
-
-
-@dataclass(slots=True)
-class LocalControlVoiceClient:
-    guild: LocalControlVoiceGuild
-    local_speaker_output: bool = True
-    channel: Any = None
-
-
-@dataclass(slots=True)
-class LocalControlVoiceMember:
-    id: int
-    display_name: str
-    name: str
-    guild: LocalControlVoiceGuild
-    bot: bool = False
-
-
 def local_control_voice_member() -> LocalControlVoiceMember:
-    user_id = min(LOCAL_MIC_DISCORD_USER_IDS) if LOCAL_MIC_DISCORD_USER_IDS else LOCAL_CONTROL_GUILD_ID
-    guild = LocalControlVoiceGuild()
-    guild.voice_client = LocalControlVoiceClient(guild=guild)
-    return LocalControlVoiceMember(
-        id=int(user_id),
-        display_name=os.getenv("LOCAL_MIC_USER_NAME", "정훈"),
-        name=os.getenv("LOCAL_MIC_USER_NAME", "정훈"),
-        guild=guild,
+    return build_local_control_voice_member_from_runtime(
+        local_control_guild_id=LOCAL_CONTROL_GUILD_ID,
+        local_control_guild_name=LOCAL_CONTROL_GUILD_NAME,
+        local_mic_discord_user_ids=set(LOCAL_MIC_DISCORD_USER_IDS),
+        local_mic_user_name=os.getenv("LOCAL_MIC_USER_NAME", "정훈"),
     )
 
 
 def is_local_speaker_voice_client(vc: Any) -> bool:
-    return bool(getattr(vc, "local_speaker_output", False))
+    return is_local_speaker_voice_client_from_runtime(vc)
 
 
 control_page_runner: web.AppRunner | None = None
@@ -1105,7 +1393,7 @@ SKILL_DISPATCH_CACHE_MAX = 1024
 # 유틸
 # =========================================================
 def new_conversation_history() -> list[dict]:
-    return new_session_conversation_history(SYSTEM_PROMPT)
+    return new_conversation_history_from_runtime(build_session_turn_runtime_deps())
 
 
 def get_or_create_autonomy_engine(guild_id: int) -> AutonomyEngine:
@@ -1351,61 +1639,33 @@ def get_or_create_autonomy_engine(guild_id: int) -> AutonomyEngine:
     autonomy_engines[guild_id] = engine
     return engine
 
-
-def runtime_session_key(*, session_key: str | None = None, guild_id: int | None = None) -> str | None:
-    return resolve_runtime_session_key(session_key=session_key, guild_id=guild_id)
-
-
-def make_text_session_key(guild_id: int, channel_id: int, user_id: int | None = None, thread_id: int | None = None) -> str:
-    return make_discord_text_session_key(guild_id, channel_id, user_id, thread_id=thread_id)
-
-
-def make_text_reply_slot_key(guild_id: int, channel_id: int, thread_id: int | None = None) -> str:
-    return make_discord_text_reply_slot_key(guild_id, channel_id, thread_id=thread_id)
-
-
-def make_voice_room_session_key(guild_id: int, voice_channel_id: int | None) -> str:
-    return make_discord_voice_room_session_key(guild_id, voice_channel_id)
-
-
-def make_voice_session_key(guild_id: int, voice_channel_id: int | None, user_id: int | None = None) -> str:
-    return make_discord_voice_session_key(guild_id, voice_channel_id, user_id)
-
-
-def make_room_memory_key(kind: str, room_id: int | None) -> str:
-    return make_discord_room_memory_key(kind, room_id)
-
-
-def make_person_memory_key(user_id: int | None) -> str | None:
-    return make_discord_person_memory_key(user_id)
-
-
-def make_session_memory_key(session_key: str | None, user_id: int | None = None) -> str | None:
-    return make_discord_session_memory_key(session_key, user_id)
-
-
 def remember_session_followup_target(session_key: str, *, channel_id: int | None = None, message_id: int | None = None) -> None:
-    session_state_store.remember_followup_target(session_key, channel_id=channel_id, message_id=message_id)
+    remember_session_followup_target_from_runtime(
+        session_key,
+        channel_id=channel_id,
+        message_id=message_id,
+        deps=build_session_turn_runtime_deps(),
+    )
 
 
 def build_topic_id(*texts: str) -> str:
-    return build_session_topic_id(*texts)
+    return build_topic_id_from_runtime(*texts, deps=build_session_turn_runtime_deps())
 
 
 def new_turn_id() -> str:
-    return new_session_turn_id()
+    return new_turn_id_from_runtime(build_session_turn_runtime_deps())
 
 
 def current_turn_id(session_key: str | None) -> str | None:
-    return session_state_store.current_turn_id(session_key)
+    return current_turn_id_from_runtime(session_key, deps=build_session_turn_runtime_deps())
 
 
 def next_segment_id(session_key: str | None) -> int:
-    return session_state_store.next_segment_id(session_key)
+    return next_segment_id_from_runtime(session_key, deps=build_session_turn_runtime_deps())
 
 
 def start_new_turn(session_key: str | None, *, turn_id: str | None = None) -> str:
-    return session_state_store.start_new_turn(session_key, turn_id=turn_id)
+    return start_new_turn_from_runtime(session_key, turn_id=turn_id, deps=build_session_turn_runtime_deps())
 
 
 def begin_user_text_turn(
@@ -1415,15 +1675,12 @@ def begin_user_text_turn(
     guild_id: int | None = None,
     user_id: int | None = None,
 ) -> Any:
-    return session_state_store.begin_user_text_turn(
+    return begin_user_text_turn_from_runtime(
         session_key,
         user_text,
-        system_prompt=SYSTEM_PROMPT,
-        active_conversation_awaiting_reply_sec=ACTIVE_CONVERSATION_TEXT_QUESTION_SEC,
-        max_history_items=MAX_HISTORY_ITEMS,
         guild_id=guild_id,
         user_id=user_id,
-        previous_topic_id=session_topic_ids.get(session_key, ""),
+        deps=build_session_turn_runtime_deps(),
     )
 
 
@@ -1437,23 +1694,20 @@ def finish_assistant_text_turn(
     awaiting_user_reply: bool,
     topic_id: str | None = None,
 ) -> Any:
-    return session_state_store.finish_assistant_text_turn(
+    return finish_assistant_text_turn_from_runtime(
         session_key,
         user_text,
         answer_text,
-        system_prompt=SYSTEM_PROMPT,
-        max_history_items=MAX_HISTORY_ITEMS,
+        awaiting_user_reply=awaiting_user_reply,
+        topic_id=topic_id,
         guild_id=guild_id,
         user_id=user_id,
-        awaiting_user_reply=awaiting_user_reply,
-        normal_ttl_sec=ACTIVE_CONVERSATION_TEXT_SEC,
-        question_ttl_sec=ACTIVE_CONVERSATION_TEXT_QUESTION_SEC,
-        topic_id=topic_id,
+        deps=build_session_turn_runtime_deps(),
     )
 
 
 def session_state_snapshot(session_key: str | None) -> dict:
-    return session_state_store.snapshot(session_key)
+    return session_state_snapshot_from_runtime(session_key, deps=build_session_turn_runtime_deps())
 
 
 def discord_room_session_policy() -> DiscordRoomSessionPolicy:
@@ -1540,12 +1794,12 @@ def set_room_reply_in_progress(room_session_key: str | None, value: bool, *, own
 
 
 def increment_session_bad_audio(session_key: str | None) -> int:
-    return session_state_store.increment_bad_audio(session_key)
+    return increment_session_bad_audio_from_runtime(session_key, deps=build_session_turn_runtime_deps())
 
 
 
 def reset_session_bad_audio(session_key: str | None) -> None:
-    session_state_store.reset_bad_audio(session_key)
+    reset_session_bad_audio_from_runtime(session_key, deps=build_session_turn_runtime_deps())
 
 
 def update_session_state(
@@ -1559,7 +1813,7 @@ def update_session_state(
     answer_text: str | None = None,
     user_text: str | None = None,
 ) -> None:
-    session_state_store.update_session_state(
+    update_session_state_from_runtime(
         session_key,
         user_id=user_id,
         speaker=speaker,
@@ -1568,7 +1822,7 @@ def update_session_state(
         topic_id=topic_id,
         answer_text=answer_text,
         user_text=user_text,
-        active_conversation_awaiting_reply_sec=ACTIVE_CONVERSATION_AWAITING_REPLY_SEC,
+        deps=build_session_turn_runtime_deps(),
     )
 
 
@@ -1583,7 +1837,7 @@ def mark_session_active(
     answer_text: str | None = None,
     user_text: str | None = None,
 ) -> None:
-    session_state_store.mark_active(
+    mark_session_active_from_runtime(
         session_key,
         user_id=user_id,
         speaker=speaker,
@@ -1592,115 +1846,95 @@ def mark_session_active(
         topic_id=topic_id,
         answer_text=answer_text,
         user_text=user_text,
-        active_conversation_awaiting_reply_sec=ACTIVE_CONVERSATION_AWAITING_REPLY_SEC,
+        deps=build_session_turn_runtime_deps(),
     )
 
 
 def is_session_active_for_user(session_key: str, user_id: int | None = None) -> bool:
-    return session_state_store.is_active_for_user(session_key, user_id)
+    return is_session_active_for_user_from_runtime(session_key, user_id=user_id, deps=build_session_turn_runtime_deps())
 
 
 def get_conversation_history(*, session_key: str | None = None, guild_id: int | None = None) -> list[dict]:
-    return session_state_store.get_conversation_history(
-        system_prompt=SYSTEM_PROMPT,
+    return get_conversation_history_from_runtime(
         session_key=session_key,
         guild_id=guild_id,
+        deps=build_session_turn_runtime_deps(),
     )
 
 
 def trim_history(*, session_key: str | None = None, guild_id: int | None = None) -> None:
-    session_state_store.trim_history(
-        system_prompt=SYSTEM_PROMPT,
-        max_history_items=MAX_HISTORY_ITEMS,
+    trim_history_from_runtime(
         session_key=session_key,
         guild_id=guild_id,
+        deps=build_session_turn_runtime_deps(),
     )
 
 
 def append_history(session_key: str | None, user_text: str, answer: str, *, guild_id: int | None = None) -> None:
-    session_state_store.append_history(
+    append_history_from_runtime(
         session_key,
         user_text,
         answer,
-        system_prompt=SYSTEM_PROMPT,
-        max_history_items=MAX_HISTORY_ITEMS,
         guild_id=guild_id,
+        deps=build_session_turn_runtime_deps(),
     )
 
 
 def recent_assistant_reply_summary(*, session_key: str | None = None, guild_id: int | None = None, limit: int = 1) -> str:
-    return session_state_store.recent_assistant_reply_summary(
-        system_prompt=SYSTEM_PROMPT,
+    return recent_assistant_reply_summary_from_runtime(
         session_key=session_key,
         guild_id=guild_id,
         limit=limit,
+        deps=build_session_turn_runtime_deps(),
     )
 
 
-def is_casual_call_or_status_question(text: str) -> bool:
-    return session_is_casual_call_or_status_question(text)
-
-
 def persona_state_hint_for_turn(user_text: str, *, session_key: str | None = None, guild_id: int | None = None) -> str:
-    return session_state_store.persona_state_hint_for_turn(
+    return persona_state_hint_for_turn_from_runtime(
         user_text,
-        system_prompt=SYSTEM_PROMPT,
         session_key=session_key,
         guild_id=guild_id,
+        deps=build_session_turn_runtime_deps(),
+    )
+
+
+def build_guild_runtime_reset_deps() -> GuildRuntimeResetDeps:
+    return build_guild_runtime_reset_deps_from_runtime(
+        session_histories=session_histories,
+        session_followup_targets=session_followup_targets,
+        active_session_until=active_session_until,
+        active_session_user_ids=active_session_user_ids,
+        session_last_active_at=session_last_active_at,
+        session_awaiting_user_reply=session_awaiting_user_reply,
+        session_last_speaker=session_last_speaker,
+        session_topic_ids=session_topic_ids,
+        session_turn_ids=session_turn_ids,
+        session_segment_counters=session_segment_counters,
+        session_last_turn_accepted_at=session_last_turn_accepted_at,
+        session_last_stt_text=session_last_stt_text,
+        room_last_voice_utterance_for_merge=room_last_voice_utterance_for_merge,
+        session_partial_stt_text=session_partial_stt_text,
+        session_committed_stt_text=session_committed_stt_text,
+        session_bad_audio_counts=session_bad_audio_counts,
+        room_owner_user_ids=room_owner_user_ids,
+        room_owner_until=room_owner_until,
+        room_reply_in_progress=room_reply_in_progress,
+        room_last_voice_reply_at=room_last_voice_reply_at,
+        turn_scope_registry=turn_scope_registry,
+        session_locks=session_locks,
+        background_search_tasks=background_search_tasks,
+        clear_tts_playback_tracking=clear_tts_playback_tracking,
+        tts_playback_tracker=tts_playback_tracker,
+        memory_locks=memory_locks,
+        cognitive_locks=cognitive_locks,
+        background_cognitive_tasks=background_cognitive_tasks,
+        autonomy_last_cognitive_refresh_at=autonomy_last_cognitive_refresh_at,
+        autonomy_cognitive_refresh_tasks=autonomy_cognitive_refresh_tasks,
     )
 
 
 def reset_guild_runtime_state(guild_id: int) -> None:
-    prefix = f"guild:{guild_id}:"
-    for key in [key for key in session_histories if key.startswith(prefix)]:
-        session_histories.pop(key, None)
-    for key in [key for key in session_followup_targets if key.startswith(prefix)]:
-        session_followup_targets.pop(key, None)
-    for key in [key for key in active_session_until if key.startswith(prefix)]:
-        active_session_until.pop(key, None)
-        active_session_user_ids.pop(key, None)
-        session_last_active_at.pop(key, None)
-        session_awaiting_user_reply.pop(key, None)
-        session_last_speaker.pop(key, None)
-        session_topic_ids.pop(key, None)
-        session_turn_ids.pop(key, None)
-        session_segment_counters.pop(key, None)
-        session_last_turn_accepted_at.pop(key, None)
-        session_last_stt_text.pop(key, None)
-        for room_key, record in list(room_last_voice_utterance_for_merge.items()):
-            if record.session_key == key:
-                room_last_voice_utterance_for_merge.pop(room_key, None)
-        session_partial_stt_text.pop(key, None)
-        session_committed_stt_text.pop(key, None)
-        session_bad_audio_counts.pop(key, None)
-    for key in [key for key in room_owner_user_ids if key.startswith(prefix)]:
-        room_owner_user_ids.pop(key, None)
-        room_owner_until.pop(key, None)
-        room_reply_in_progress.pop(key, None)
-        room_last_voice_reply_at.pop(key, None)
-    turn_scope_registry.cancel_matching_prefix(prefix)
-    for key in [key for key in session_locks if key.startswith(prefix)]:
-        session_locks.pop(key, None)
-    for key, task in list(background_search_tasks.items()):
-        if key.startswith(prefix):
-            if task is not None and not task.done():
-                task.cancel()
-            background_search_tasks.pop(key, None)
-    clear_tts_playback_tracking(
-        tracker=tts_playback_tracker,
-        guild_id=guild_id,
-    )
-    memory_locks.pop(guild_id, None)
-    cognitive_locks.pop(guild_id, None)
-    for key, task in list(background_cognitive_tasks.items()):
-        if key.startswith(prefix):
-            if task is not None and not task.done():
-                task.cancel()
-            background_cognitive_tasks.pop(key, None)
-    autonomy_last_cognitive_refresh_at.pop(guild_id, None)
-    refresh_task = autonomy_cognitive_refresh_tasks.pop(guild_id, None)
-    if refresh_task is not None and not refresh_task.done():
-        refresh_task.cancel()
+    reset_guild_runtime_state_from_runtime(guild_id, deps=build_guild_runtime_reset_deps())
 
 
 def log_turn_event(event: str, **payload) -> None:
@@ -1737,34 +1971,24 @@ def record_model_call_trace(
     source: str | None = None,
     guild_id: int | None = None,
 ) -> None:
-    meta = (metrics or {}).get("meta") if isinstance(metrics, dict) else {}
-    if not isinstance(meta, dict):
-        meta = {}
-    elapsed_ms = max(0.0, (time.monotonic() - float(started_at)) * 1000.0)
-    error_text = repr(error) if isinstance(error, BaseException) else clean_text(str(error or ""))
-    record_model_call_metric(
+    record_model_call_trace_from_runtime(
         model_role=model_role,
         purpose=purpose,
         hot_path=hot_path,
+        started_at=started_at,
         success=success,
-        latency_ms=elapsed_ms,
+        monotonic=time.monotonic,
+        record_model_call_metric=record_model_call_metric,
+        log_turn_event=log_turn_event,
+        metrics=metrics,
         first_token_ms=first_token_ms,
-    )
-    log_turn_event(
-        "model_call",
-        model_role=clean_text(model_role),
-        purpose=clean_text(purpose),
-        hot_path=bool(hot_path),
-        success=bool(success),
-        latency_ms=round(elapsed_ms, 1),
-        first_token_ms=None if first_token_ms is None else round(float(first_token_ms), 1),
-        model_name=clean_text(model_name or ""),
-        endpoint=clean_text(endpoint or ""),
-        turn_id=turn_id or meta.get("turn_id"),
-        session_key=session_key or meta.get("session_key"),
-        source=source or meta.get("source"),
-        guild_id=guild_id if guild_id is not None else meta.get("guild_id"),
-        error=clean_text(error_text)[:240] if error_text else None,
+        error=error,
+        model_name=model_name,
+        endpoint=endpoint,
+        turn_id=turn_id,
+        session_key=session_key,
+        source=source,
+        guild_id=guild_id,
     )
 
 
@@ -1780,39 +2004,18 @@ def record_context_pipeline_benchmark(
     guild_id: int | None,
     session_key: str | None,
 ) -> None:
-    meta = (metrics or {}).get("meta") if isinstance(metrics, dict) else {}
-    context_meta = meta.get("context_pipeline") if isinstance(meta, dict) else None
-    if not isinstance(context_meta, dict):
-        return
-    record = {
-        "ts": round(time.time(), 3),
-        "source": clean_text(source),
-        "guild_id": guild_id,
-        "session_key": session_key,
-        "turn_id": meta.get("turn_id") if isinstance(meta, dict) else None,
-        "route": context_meta.get("route") or meta.get("route") if isinstance(meta, dict) else None,
-        "policy": context_meta.get("policy"),
-        "sections": context_meta.get("sections"),
-        "section_chars": context_meta.get("section_chars"),
-        "minecraft_context": bool(context_meta.get("minecraft_context")),
-        "vision_context": "vision" in set(context_meta.get("sections") or []),
-        "user_text_len": len(clean_text(user_text)),
-        "answer_len": len(clean_text(answer)),
-        "marks": {
-            key: value
-            for key, value in ((metrics or {}).get("marks") or {}).items()
-            if key in {"route_ready", "memory_ready", "t_context_build", "llm_done", "t_main_done", "llm_http_ms"}
-        },
-    }
-    try:
-        path = CONTEXT_PIPELINE_BENCHMARK_LOG
-        if not path.is_absolute():
-            path = PROJECT_ROOT / path
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
-    except Exception as exc:
-        print(f"[CONTEXT PIPELINE BENCHMARK] write_failed err={exc!r}")
+    record_context_pipeline_benchmark_from_runtime(
+        metrics=metrics,
+        user_text=user_text,
+        answer=answer,
+        source=source,
+        guild_id=guild_id,
+        session_key=session_key,
+        now=time.time,
+        benchmark_log_path=CONTEXT_PIPELINE_BENCHMARK_LOG,
+        project_root=PROJECT_ROOT,
+        log=print,
+    )
 
 
 def merge_log_event_payload(*, explicit: dict[str, Any], extra: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -1848,10 +2051,7 @@ def clear_room_turn_scope(room_id: str | None, turn_scope: TurnScope | None = No
 
 
 def record_turn_stage(turn_id: str | None, stage: str, elapsed_ms: float) -> None:
-    if not turn_id or not stage:
-        return
-    stages = turn_stage_metrics.setdefault(turn_id, {})
-    stages[stage] = float(elapsed_ms)
+    record_turn_stage_metric(turn_stage_metrics, turn_id, stage, elapsed_ms)
 
 
 def record_model_call_metric(
@@ -1897,27 +2097,35 @@ def summarize_model_call_metrics() -> dict[str, Any]:
 
 
 def normalize_question_policy_mapping(value: dict[str, Any] | None, *, default_source: str = "none") -> dict[str, Any]:
-    return normalize_question_policy_mapping_payload(value, default_source=default_source)
+    return normalize_question_policy_mapping_from_runtime(
+        value,
+        default_source=default_source,
+        deps=build_question_policy_runtime_deps(),
+    )
 
 
 def extract_question_policy_from_route_meta(route_meta: dict[str, Any] | None) -> dict[str, Any]:
-    return extract_question_policy_from_route_meta_payload(route_meta)
+    return extract_question_policy_from_route_meta_from_runtime(route_meta, deps=build_question_policy_runtime_deps())
 
 
 def user_wants_direct_answer(text: str) -> bool:
-    return user_wants_direct_answer_payload(text)
+    return user_wants_direct_answer_from_runtime(text, deps=build_question_policy_runtime_deps())
 
 
 def user_frustration_with_questions(text: str) -> bool:
-    return user_frustration_with_questions_payload(text)
+    return user_frustration_with_questions_from_runtime(text, deps=build_question_policy_runtime_deps())
 
 
 def is_continuable_technical_topic(text: str) -> bool:
-    return is_continuable_technical_topic_payload(text)
+    return is_continuable_technical_topic_from_runtime(text, deps=build_question_policy_runtime_deps())
 
 
 def question_cooldown_hit(session_key: str | None, *, now: float | None = None) -> bool:
-    return question_policy_state.question_cooldown_hit(session_key, now=now)
+    return question_cooldown_hit_from_runtime(
+        session_key,
+        now=now,
+        deps=build_question_policy_state_runtime_deps(),
+    )
 
 
 def apply_fast_path_question_policy(
@@ -1927,11 +2135,12 @@ def apply_fast_path_question_policy(
     session_key: str | None,
     route_meta_question_policy: dict[str, Any] | None = None,
 ) -> tuple[RouteDecision, bool]:
-    return question_policy_state.apply_fast_path_policy(
+    return apply_fast_path_question_policy_from_runtime(
         route_decision,
         user_text=user_text,
         session_key=session_key,
         route_meta_question_policy=route_meta_question_policy,
+        deps=build_question_policy_state_runtime_deps(),
     )
 
 
@@ -1943,17 +2152,20 @@ def record_question_trace(
     metrics: dict | None,
     cooldown_hit: bool = False,
 ) -> None:
-    question_policy_state.record_question_trace(
+    record_question_trace_from_runtime(
         route_decision=route_decision,
         answer=answer,
         shape_meta=shape_meta,
         metrics=metrics,
         cooldown_hit=cooldown_hit,
+        deps=build_question_policy_state_runtime_deps(),
     )
 
 
 def summarize_question_metrics() -> dict[str, Any]:
-    return question_policy_state.summarize_question_metrics()
+    return summarize_question_metrics_from_runtime(
+        deps=build_question_policy_state_runtime_deps(),
+    )
 
 
 def proactive_question_scope_candidates(
@@ -1962,15 +2174,20 @@ def proactive_question_scope_candidates(
     person_key: str | None = None,
     session_memory_key: str | None = None,
 ) -> list[tuple[str, str | None]]:
-    return question_policy_state.proactive_scope_candidates(
+    return proactive_question_scope_candidates_from_runtime(
         room_key=room_key,
         person_key=person_key,
         session_memory_key=session_memory_key,
+        deps=build_question_policy_state_runtime_deps(),
     )
 
 
 def record_session_question_asked(session_key: str | None, *, now: float | None = None) -> None:
-    question_policy_state.record_session_question_asked(session_key, now=now)
+    record_session_question_asked_from_runtime(
+        session_key,
+        now=now,
+        deps=build_question_policy_state_runtime_deps(),
+    )
 
 
 def resolve_pending_proactive_question_for_turn(
@@ -1981,12 +2198,13 @@ def resolve_pending_proactive_question_for_turn(
     session_memory_key: str | None = None,
     metrics: dict | None = None,
 ) -> dict[str, Any]:
-    return question_policy_state.resolve_pending_proactive_question_for_turn(
+    return resolve_pending_proactive_question_for_turn_from_runtime(
         guild_id,
         user_text,
         session_key=session_key,
         session_memory_key=session_memory_key,
         metrics=metrics,
+        deps=build_question_policy_state_runtime_deps(),
     )
 
 
@@ -2004,7 +2222,7 @@ def select_and_mark_proactive_question(
     runtime_block_reason: str = "",
     metrics: dict | None = None,
 ) -> dict[str, Any] | None:
-    return question_policy_state.select_and_mark_proactive_question(
+    return select_and_mark_proactive_question_from_runtime(
         guild_id=guild_id,
         source=source,
         user_text=user_text,
@@ -2016,6 +2234,7 @@ def select_and_mark_proactive_question(
         session_memory_key=session_memory_key,
         runtime_block_reason=runtime_block_reason,
         metrics=metrics,
+        deps=build_question_policy_state_runtime_deps(),
     )
 
 
@@ -2032,7 +2251,7 @@ def maybe_append_proactive_question(
     session_memory_key: str | None = None,
     metrics: dict | None = None,
 ) -> tuple[str, bool]:
-    return question_policy_state.maybe_append_proactive_question(
+    return maybe_append_proactive_question_from_runtime(
         answer_text,
         guild_id=guild_id,
         source=source,
@@ -2043,6 +2262,7 @@ def maybe_append_proactive_question(
         session_key=session_key,
         session_memory_key=session_memory_key,
         metrics=metrics,
+        deps=build_question_policy_state_runtime_deps(),
     )
 
 
@@ -2066,28 +2286,53 @@ voice_barge_in_continuity_tracker = VoiceBargeInContinuityTracker(
 )
 
 
+def build_voice_barge_in_continuity_runtime_deps() -> VoiceBargeInContinuityRuntimeDeps:
+    return VoiceBargeInContinuityRuntimeDeps(
+        tracker=voice_barge_in_continuity_tracker,
+        command_status=command_status,
+    )
+
+
 def _parse_barge_in_reason_label(raw_reason_code: str) -> str:
-    return voice_barge_in_continuity_tracker.parse_reason_label(raw_reason_code)
+    return parse_barge_in_reason_label_from_runtime(
+        raw_reason_code,
+        deps=build_voice_barge_in_continuity_runtime_deps(),
+    )
 
 
 def _format_voice_barge_in_continuity_summary(continuity: dict[str, Any]) -> str:
-    return voice_barge_in_continuity_tracker.format_summary(continuity)
+    return format_voice_barge_in_continuity_summary_from_runtime(
+        continuity,
+        deps=build_voice_barge_in_continuity_runtime_deps(),
+    )
 
 
 def _format_voice_barge_in_continuity_detail_lines(continuity: dict[str, Any]) -> list[str]:
-    return voice_barge_in_continuity_tracker.format_detail_lines(continuity, command_status=command_status)
+    return format_voice_barge_in_continuity_detail_lines_from_runtime(
+        continuity,
+        deps=build_voice_barge_in_continuity_runtime_deps(),
+    )
 
 
 def start_voice_barge_in_continuity_probe(metrics: dict, *, source: str) -> None:
-    voice_barge_in_continuity_tracker.start_probe(metrics, source=source)
+    start_voice_barge_in_continuity_probe_from_runtime(
+        metrics,
+        source=source,
+        deps=build_voice_barge_in_continuity_runtime_deps(),
+    )
 
 
 def _build_voice_barge_in_continuity_snapshot() -> dict[str, Any]:
-    return voice_barge_in_continuity_tracker.snapshot()
+    return build_voice_barge_in_continuity_snapshot_from_runtime(
+        deps=build_voice_barge_in_continuity_runtime_deps(),
+    )
 
 
 def reset_voice_barge_in_continuity_probe(*, reason: str = "") -> None:
-    voice_barge_in_continuity_tracker.reset(reason=reason)
+    reset_voice_barge_in_continuity_probe_from_runtime(
+        reason=reason,
+        deps=build_voice_barge_in_continuity_runtime_deps(),
+    )
 
 
 def _mark_voice_barge_in_continuity_probe(
@@ -2100,7 +2345,7 @@ def _mark_voice_barge_in_continuity_probe(
     reason_label: str | None = None,
     event: str = VOICE_BARGE_IN_EVENT_FINISH,
 ) -> None:
-    voice_barge_in_continuity_tracker.mark_probe(
+    mark_voice_barge_in_continuity_probe_from_runtime(
         metrics,
         success=success,
         reason=reason,
@@ -2108,6 +2353,7 @@ def _mark_voice_barge_in_continuity_probe(
         reason_code=reason_code,
         reason_label=reason_label,
         event=event,
+        deps=build_voice_barge_in_continuity_runtime_deps(),
     )
 
 
@@ -2133,18 +2379,16 @@ def save_last_voice_channel_state(
     reason: str,
     manual_disconnect: bool = False,
 ) -> None:
-    try:
-        save_last_voice_channel_state_payload(
-            PROJECT_ROOT,
-            VOICE_LAST_CHANNEL_STATE_FILE,
-            voice_pipeline_state,
-            guild,
-            channel,
-            reason=reason,
-            manual_disconnect=manual_disconnect,
-        )
-    except Exception as exc:
-        print(f"[VOICE STATE SAVE FAIL] err={exc!r}")
+    save_last_voice_channel_state_from_runtime(
+        PROJECT_ROOT,
+        VOICE_LAST_CHANNEL_STATE_FILE,
+        voice_pipeline_state,
+        guild,
+        channel,
+        reason=reason,
+        manual_disconnect=manual_disconnect,
+        log=print,
+    )
 
 
 def mark_voice_manual_disconnect(guild: discord.Guild | None, *, reason: str) -> None:
@@ -2161,23 +2405,15 @@ def mark_voice_manual_disconnect(guild: discord.Guild | None, *, reason: str) ->
 
 
 def record_voice_pipeline_failure(kind: str, err: BaseException | str, metrics: dict | None = None, **extra: Any) -> None:
-    error_text = record_voice_failure_state(voice_pipeline_counters, voice_pipeline_state, kind, err)
-    meta = (metrics or {}).get("meta") or {}
-    log_turn_event(
+    record_voice_pipeline_failure_from_runtime(
+        voice_pipeline_counters,
+        voice_pipeline_state,
         kind,
-        **merge_log_event_payload(
-            explicit={
-                "turn_id": meta.get("turn_id"),
-                "segment_id": meta.get("segment_id"),
-                "chunk_index": meta.get("chunk_index"),
-                "session_key": meta.get("session_key"),
-                "room_session_key": meta.get("room_session_key"),
-                "guild_id": meta.get("guild_id"),
-                "source": meta.get("source"),
-                "error": error_text[:500],
-            },
-            extra=extra,
-        ),
+        err,
+        merge_log_event_payload=merge_log_event_payload,
+        log_turn_event=log_turn_event,
+        metrics=metrics,
+        **extra,
     )
 
 
@@ -2215,56 +2451,35 @@ async def run_blocking_stt_task(
     timeout_sec: float,
     metrics: dict | None = None,
 ) -> Any:
-    global stt_cooldown_until
-    now_mono = time.monotonic()
-    if now_mono < stt_cooldown_until:
-        increment_voice_pipeline_counter("stt_busy_drop_count")
-        raise TimeoutError(f"stt_cooldown:{stage}:{stt_cooldown_until - now_mono:.2f}s")
+    def set_stt_cooldown_until(value: float) -> None:
+        global stt_cooldown_until
+        stt_cooldown_until = value
 
-    lock = get_stt_inference_lock()
-    if lock.locked():
-        increment_voice_pipeline_counter("stt_busy_drop_count")
-        raise RuntimeError(f"stt_busy:{stage}")
-
-    async with lock:
-        try:
-            return await asyncio.wait_for(asyncio.to_thread(func), timeout=max(0.5, timeout_sec))
-        except asyncio.TimeoutError:
-            stt_cooldown_until = time.monotonic() + max(0.0, STT_COOLDOWN_AFTER_TIMEOUT_SEC)
-            increment_voice_pipeline_counter("stt_timeout_count")
-            record_voice_pipeline_failure("stt_timeout", f"{stage} timed out after {timeout_sec:.1f}s", metrics, stage=stage)
-            raise
+    return await run_blocking_stt_task_from_runtime(
+        func,
+        stage=stage,
+        timeout_sec=timeout_sec,
+        metrics=metrics,
+        get_stt_cooldown_until=lambda: stt_cooldown_until,
+        set_stt_cooldown_until=set_stt_cooldown_until,
+        stt_cooldown_after_timeout_sec=STT_COOLDOWN_AFTER_TIMEOUT_SEC,
+        monotonic=time.monotonic,
+        get_stt_inference_lock=get_stt_inference_lock,
+        increment_voice_pipeline_counter=increment_voice_pipeline_counter,
+        record_voice_pipeline_failure=record_voice_pipeline_failure,
+    )
 
 
 def compute_runtime_mode(metrics: dict | None) -> str:
-    meta = (metrics or {}).get("meta") or {}
-    marks = (metrics or {}).get("marks") or {}
-    tts_backlog = tracked_tts_playback_count(tts_playback_tracker)
-    voice_queue_wait_ms = float(meta.get("voice_queue_wait_ms") or marks.get("voice_queue_wait_ms") or 0.0)
-    if tts_backlog >= 2:
-        return "realtime"
-    if voice_queue_wait_ms >= 250.0:
-        return "realtime"
-    if inflight_llm_requests >= 2:
-        return "congested"
-    return "normal"
+    return compute_runtime_mode_from_state(
+        metrics,
+        tts_backlog=tracked_tts_playback_count(tts_playback_tracker),
+        inflight_llm_requests=inflight_llm_requests,
+    )
 
 
 def apply_runtime_mode(mode: str, opts: dict[str, Any] | None = None) -> dict[str, Any]:
-    merged = dict(opts or {})
-    merged.setdefault("skip_router", False)
-    merged.setdefault("skip_search_followup", False)
-    merged.setdefault("memory_update_mode", "normal")
-    merged.setdefault("tts_chunk_min_chars", 12)
-    if mode == "realtime":
-        merged["skip_router"] = True
-        merged["skip_search_followup"] = True
-        merged["memory_update_mode"] = "defer"
-        merged["tts_chunk_min_chars"] = 18
-    elif mode == "congested":
-        merged["skip_router"] = False
-        merged["memory_update_mode"] = "batch"
-    return merged
+    return apply_runtime_mode_policy(mode, opts)
 
 
 def new_turn_metrics(
@@ -2280,97 +2495,44 @@ def new_turn_metrics(
     segment_id: int | None = None,
     chunk_index: int | None = None,
 ) -> dict:
-    metrics = {
-        "started_at": time.monotonic(),
-        "marks": {"t_ingress": 0.0},
-        "meta": {
-            "source": source,
-            "session_key": session_key,
-            "guild_id": guild_id,
-            "user_id": user_id,
-            "owner_user_id": owner_user_id,
-            "room_session_key": room_session_key,
-            "topic_id": topic_id,
-            "turn_id": turn_id,
-            "segment_id": segment_id,
-            "chunk_index": chunk_index,
-        },
-    }
-    log_turn_event(
-        "turn_ingress",
+    return new_turn_metrics_from_runtime(
         source=source,
+        monotonic=time.monotonic,
+        log_turn_event=log_turn_event,
         session_key=session_key,
+        room_session_key=room_session_key,
         guild_id=guild_id,
         user_id=user_id,
         owner_user_id=owner_user_id,
-        room_session_key=room_session_key,
         topic_id=topic_id,
         turn_id=turn_id,
         segment_id=segment_id,
         chunk_index=chunk_index,
     )
-    return metrics
 
 
 def mark_turn_stage(metrics: dict | None, key: str, *, event_name: str | None = None, **extra) -> None:
-    if not metrics:
-        return
-    started_at = metrics.get("started_at")
-    if started_at is None:
-        return
-    elapsed_ms = (time.monotonic() - float(started_at)) * 1000.0
-    marks = metrics.setdefault("marks", {})
-    marks[key] = elapsed_ms
-    meta = metrics.get("meta") or {}
-    turn_id = meta.get("turn_id")
-    if turn_id:
-        record_turn_stage(turn_id, key, elapsed_ms)
-    if event_name:
-        explicit = {
-            "turn_id": meta.get("turn_id"),
-            "segment_id": meta.get("segment_id"),
-            "chunk_index": meta.get("chunk_index"),
-            "session_key": meta.get("session_key"),
-            "room_session_key": meta.get("room_session_key"),
-            "guild_id": meta.get("guild_id"),
-            "user_id": meta.get("user_id"),
-            "owner_user_id": meta.get("owner_user_id"),
-            "source": meta.get("source"),
-            "elapsed_ms": elapsed_ms,
-        }
-        log_turn_event(
-            event_name,
-            **merge_log_event_payload(explicit=explicit, extra=extra),
-        )
+    mark_turn_stage_from_runtime(
+        metrics,
+        key,
+        monotonic=time.monotonic,
+        record_turn_stage=record_turn_stage,
+        merge_log_event_payload=merge_log_event_payload,
+        log_turn_event=log_turn_event,
+        event_name=event_name,
+        **extra,
+    )
 
 
 def register_drop_reason(metrics: dict | None, reason: str, **extra) -> None:
-    if not metrics:
-        return
-    meta = metrics.setdefault("meta", {})
-    meta["drop_reason"] = reason
-    voice_segment = meta.get("voice_segment_contract")
-    if voice_segment is not None and meta.get("rejected_turn_contract") is None:
-        meta["rejected_turn_contract"] = build_rejected_voice_turn(
-            segment=voice_segment,
-            ingress_source=str(meta.get("ingress_source") or meta.get("source") or "voice"),
-            drop_reason=reason,
-            queue_wait_ms=float(meta.get("voice_queue_wait_ms") or 0.0),
-            topic_id=meta.get("topic_id"),
-            gate_mode=meta.get("reply_gate_blocked_by"),
-            owner_user_id=extra.get("owner_user_id") if extra.get("owner_user_id") is not None else meta.get("owner_user_id"),
-            detail_text=str(extra.get("text") or extra.get("final_text") or extra.get("wake_probe_text") or ""),
-        )
-    explicit = {
-        "turn_id": meta.get("turn_id"),
-        "segment_id": meta.get("segment_id"),
-        "chunk_index": meta.get("chunk_index"),
-        "session_key": extra.get("session_key") if extra.get("session_key") is not None else meta.get("session_key"),
-        "room_session_key": extra.get("room_session_key") if extra.get("room_session_key") is not None else meta.get("room_session_key"),
-        "owner_user_id": extra.get("owner_user_id") if extra.get("owner_user_id") is not None else meta.get("owner_user_id"),
-        "reason": reason,
-    }
-    log_turn_event("turn_drop", **merge_log_event_payload(explicit=explicit, extra=extra))
+    register_drop_reason_from_runtime(
+        metrics,
+        reason,
+        build_rejected_voice_turn=build_rejected_voice_turn,
+        merge_log_event_payload=merge_log_event_payload,
+        log_turn_event=log_turn_event,
+        **extra,
+    )
 
 
 def _save_voice_debug_audio_now(
@@ -2412,21 +2574,21 @@ def _save_voice_debug_audio_now(
 
 
 async def debug_write_worker() -> None:
-    while True:
-        item = await debug_write_queue.get()
-        try:
-            await asyncio.to_thread(_save_voice_debug_audio_now, **item)
-        except Exception as e:
-            print(f"[VOICE DEBUG WORKER FAIL] err={e!r}")
-        finally:
-            debug_write_queue.task_done()
+    await debug_write_worker_from_runtime(
+        queue=debug_write_queue,
+        save_now=_save_voice_debug_audio_now,
+        to_thread=asyncio.to_thread,
+        log=print,
+    )
 
 
 def ensure_debug_write_worker_started() -> None:
     global debug_write_task
-    if debug_write_task is not None and not debug_write_task.done():
-        return
-    debug_write_task = asyncio.create_task(debug_write_worker())
+    debug_write_task = ensure_debug_write_worker_started_from_runtime(
+        current_task=debug_write_task,
+        create_task=asyncio.create_task,
+        worker_coro_factory=debug_write_worker,
+    )
 
 
 def save_voice_debug_audio(
@@ -2443,10 +2605,11 @@ def save_voice_debug_audio(
     session_key: str | None = None,
     stage_label: str | None = None,
 ) -> None:
-    if not VOICE_DEBUG_SAVE_AUDIO:
-        return
-    ensure_debug_write_worker_started()
-    item = build_voice_debug_audio_item(
+    enqueue_voice_debug_audio_from_runtime(
+        enabled=VOICE_DEBUG_SAVE_AUDIO,
+        ensure_worker_started=ensure_debug_write_worker_started,
+        queue=debug_write_queue,
+        log=print,
         guild_id=guild_id,
         speaker=speaker,
         pcm_bytes=pcm_bytes,
@@ -2459,19 +2622,34 @@ def save_voice_debug_audio(
         session_key=session_key,
         stage_label=stage_label,
     )
-    try:
-        debug_write_queue.put_nowait(item)
-    except asyncio.QueueFull:
-        print(voice_debug_drop_message(speaker=speaker, stage_label=stage_label))
 
 
 def estimate_voice_like_probability(*, voiced_ms: float, audio_sec: float, body_rms: float) -> float:
-    audio_ms = max(audio_sec * 1000.0, 1.0)
-    voiced_ratio = max(0.0, min(1.0, voiced_ms / audio_ms))
-    rms_ratio = 0.0
-    if VOICE_WAVEFORM_BODY_RMS_MIN > 0:
-        rms_ratio = max(0.0, min(1.0, body_rms / VOICE_WAVEFORM_BODY_RMS_MIN))
-    return max(voiced_ratio, rms_ratio)
+    return estimate_voice_like_probability_policy(
+        voiced_ms=voiced_ms,
+        audio_sec=audio_sec,
+        body_rms=body_rms,
+        body_rms_min=VOICE_WAVEFORM_BODY_RMS_MIN,
+    )
+
+
+def build_voice_reply_side_effect_deps() -> VoiceReplySideEffectDeps:
+    return VoiceReplySideEffectDeps(
+        session_speculative_policies=session_speculative_policies,
+        append_history=append_history,
+        compute_runtime_mode=compute_runtime_mode,
+        record_context_pipeline_benchmark=record_context_pipeline_benchmark,
+        schedule_memory_update=schedule_memory_update,
+        read_cached_cognitive_state=read_cached_cognitive_state,
+        apply_ask_gating=apply_ask_gating,
+        schedule_search_followup=schedule_search_followup,
+        session_state_snapshot=session_state_snapshot,
+        mark_session_active=mark_session_active,
+        set_room_owner=set_room_owner,
+        active_conversation_voice_question_sec=ACTIVE_CONVERSATION_VOICE_QUESTION_SEC,
+        active_conversation_voice_sec=ACTIVE_CONVERSATION_VOICE_SEC,
+        active_conversation_awaiting_reply_sec=ACTIVE_CONVERSATION_AWAITING_REPLY_SEC,
+    )
 
 
 def finalize_voice_reply_side_effects(
@@ -2490,257 +2668,137 @@ def finalize_voice_reply_side_effects(
     accepted_turn_id: str,
     segment_id: int,
 ) -> None:
-    session_speculative_policies.pop(session_key, None)
-    append_history(session_key, voice_reply.history_user_text, plain_answer, guild_id=guild_id)
-    runtime_mode = ((metrics.get("meta") or {}).get("runtime_mode")) or compute_runtime_mode(metrics)
-    record_context_pipeline_benchmark(
-        metrics=metrics,
-        user_text=voice_reply.history_user_text,
-        answer=plain_answer,
-        source="voice",
+    finalize_voice_reply_side_effects_from_runtime(
         guild_id=guild_id,
+        member=member,
         session_key=session_key,
-    )
-    memory_writer_decision = schedule_memory_update(
-        guild_id,
-        voice_reply.history_user_text,
-        plain_answer,
+        room_session_key=room_session_key,
         room_key=room_key,
         person_key=person_key,
         session_memory_key=session_memory_key,
-        source="voice",
-        user_speaker=member.display_name,
-        assistant_speaker="Evelyn",
-        session_key=session_key,
+        voice_reply=voice_reply,
+        plain_answer=plain_answer,
+        metrics=metrics,
         turn_scope=turn_scope,
-        runtime_mode=runtime_mode,
-    )
-    metrics.setdefault("meta", {})["memory_writer_decision"] = memory_writer_decision
-    search_requested = bool(
-        apply_ask_gating(
-            read_cached_cognitive_state(
-                guild_id,
-                room_key=room_key,
-                person_key=person_key,
-                session_memory_key=session_memory_key,
-            ),
-            source="voice",
-        ).get("action") == "search_then_answer"
-    )
-    schedule_search_followup(
-        guild_id,
-        session_key,
-        voice_reply.history_user_text,
-        plain_answer,
-        room_key=room_key,
-        person_key=person_key,
-        session_memory_key=session_memory_key,
-        channel_id=None,
-        source="search-followup-voice",
-        force=search_requested,
-        turn_scope=None,
-        runtime_mode=runtime_mode,
-    )
-    awaiting_reply = bool(session_state_snapshot(session_key).get("awaiting_user_reply"))
-    followup_ttl = ACTIVE_CONVERSATION_VOICE_QUESTION_SEC if awaiting_reply else ACTIVE_CONVERSATION_VOICE_SEC
-    mark_session_active(
-        session_key,
-        user_id=member.id,
-        ttl_sec=followup_ttl,
-        speaker="assistant",
-        awaiting_user_reply=awaiting_reply,
-        topic_id=voice_reply.topic_id,
-        answer_text=plain_answer,
-        user_text=voice_reply.history_user_text,
-    )
-    set_room_owner(
-        room_session_key,
-        member.id,
-        ttl_sec=ACTIVE_CONVERSATION_AWAITING_REPLY_SEC if awaiting_reply else followup_ttl,
-        reason="assistant_reply",
-        session_key=session_key,
-        turn_id=accepted_turn_id,
+        accepted_turn_id=accepted_turn_id,
         segment_id=segment_id,
+        deps=build_voice_reply_side_effect_deps(),
     )
 
 
-FAST_PATH_CONTINUE_MARKERS = (
-    "그리고",
-    "근데",
-    "아니",
-    "아니야",
-    "잠깐",
-    "그거",
-    "그건",
-    "그 다음",
-    "이어",
-    "계속",
-)
-
-FAST_PATH_DIRECTIVE_MARKERS = (
-    "해줘",
-    "말해줘",
-    "알려줘",
-    "정리해줘",
-    "요약해줘",
-    "설명해줘",
-    "번역해줘",
-    "고쳐줘",
-    "수정해줘",
-)
-
-FAST_PATH_DEEP_ROUTE_MARKERS = (
-    "검색",
-    "찾아봐",
-    "찾아 봐",
-    "최신",
-    "뉴스",
-    "시세",
-    "가격",
-    "환율",
-    "주가",
-    "비교",
-    "분석",
-    "판단",
-    "기억",
-    "아까",
-    "방금",
-    "전에",
-    "이전",
-    "이어",
-    "계속",
-    "요약",
-    "정리",
-)
-
-FAST_PATH_NEGATED_SEARCH_MARKERS = (
-    "검색 없이",
-    "검색은 하지 말고",
-    "검색하지 말고",
-    "검색하지마",
-    "인터넷 없이",
-    "웹 없이",
-    "찾지 말고",
-    "찾아보지 말고",
-    "without search",
-    "without searching",
-    "no search",
-    "don't search",
-    "do not search",
-    "without looking up",
-)
-
-FAST_PATH_SEARCH_ROUTE_MARKERS = (
-    "검색",
-    "찾아봐",
-    "찾아 봐",
-    "찾아",
-)
-
-CONTROL_PAGE_LIGHT_REQUEST_MAX_CHARS = 180
+def build_fast_path_policy_runtime_deps() -> FastPathPolicyRuntimeDeps:
+    return FastPathPolicyRuntimeDeps(
+        clean_text=clean_text,
+        normalize_voice_text=normalize_voice_text,
+        should_force_search_query=should_force_search_query,
+        control_page_source_aliases=("control_page", "control-page", "local_control_page"),
+        control_page_light_request_max_chars=180,
+        fast_path_continue_markers=(
+            "그리고",
+            "근데",
+            "아니",
+            "아니야",
+            "잠깐",
+            "그거",
+            "그건",
+            "그 다음",
+            "이어",
+            "계속",
+        ),
+        fast_path_directive_markers=(
+            "해줘",
+            "말해줘",
+            "알려줘",
+            "정리해줘",
+            "요약해줘",
+            "설명해줘",
+            "번역해줘",
+            "고쳐줘",
+            "수정해줘",
+        ),
+        fast_path_deep_route_markers=(
+            "검색",
+            "찾아봐",
+            "찾아 봐",
+            "최신",
+            "뉴스",
+            "시세",
+            "가격",
+            "환율",
+            "주가",
+            "비교",
+            "분석",
+            "판단",
+            "기억",
+            "아까",
+            "방금",
+            "전에",
+            "이전",
+            "이어",
+            "계속",
+            "요약",
+            "정리",
+        ),
+        fast_path_negated_search_markers=(
+            "검색 없이",
+            "검색은 하지 말고",
+            "검색하지 말고",
+            "검색하지마",
+            "인터넷 없이",
+            "웹 없이",
+            "찾지 말고",
+            "찾아보지 말고",
+            "without search",
+            "without searching",
+            "no search",
+            "don't search",
+            "do not search",
+            "without looking up",
+        ),
+        fast_path_search_markers=("검색", "찾아", "최신", "뉴스", "시세", "가격", "환율"),
+        fast_path_search_route_markers=("검색", "찾아봐", "찾아 봐", "찾아"),
+    )
 
 
 def is_control_page_source(source: str) -> bool:
-    return clean_text(source).lower() in {"control_page", "control-page", "local_control_page"}
+    return is_control_page_source_from_runtime(source, deps=build_fast_path_policy_runtime_deps())
 
 
 def deep_route_marker_count(text: str, *, ignore_search_markers: bool = False) -> int:
-    cleaned = clean_text(text)
-    ignored_markers = set(FAST_PATH_SEARCH_ROUTE_MARKERS) if ignore_search_markers else set()
-    return sum(1 for marker in FAST_PATH_DEEP_ROUTE_MARKERS if marker not in ignored_markers and marker in cleaned)
-
-
-def has_negated_search_marker(text: str) -> bool:
-    cleaned = clean_text(text).lower()
-    compact = re.sub(r"\s+", "", cleaned)
-    return any(marker in cleaned for marker in FAST_PATH_NEGATED_SEARCH_MARKERS) or any(
-        marker.replace(" ", "") in compact for marker in FAST_PATH_NEGATED_SEARCH_MARKERS
+    return deep_route_marker_count_from_runtime(
+        text,
+        ignore_search_markers=ignore_search_markers,
+        deps=build_fast_path_policy_runtime_deps(),
     )
 
 
+def has_negated_search_marker(text: str) -> bool:
+    return has_negated_search_marker_from_runtime(text, deps=build_fast_path_policy_runtime_deps())
+
+
 def needs_search_or_deep_routing(text: str, *, source: str = "text") -> bool:
-    cleaned = clean_text(text)
-    if not cleaned:
-        return False
-    negated_search = has_negated_search_marker(cleaned)
-    if not negated_search and should_force_search_query(cleaned):
-        return True
-    marker_hits = deep_route_marker_count(cleaned, ignore_search_markers=negated_search)
-    search_markers = ("검색", "찾아", "최신", "뉴스", "시세", "가격", "주가", "환율")
-    if not negated_search and any(marker in cleaned for marker in search_markers):
-        return True
-    if (
-        is_control_page_source(source)
-        and marker_hits == 0
-        and len(cleaned) <= CONTROL_PAGE_LIGHT_REQUEST_MAX_CHARS
-    ):
-        return False
-    if marker_hits >= 2:
-        return True
-    if len(cleaned) >= 72:
-        return True
-    return False
+    return needs_search_or_deep_routing_from_runtime(text, source=source, deps=build_fast_path_policy_runtime_deps())
 
 
 def is_simple_directive(text: str, *, source: str = "text") -> bool:
-    cleaned = clean_text(text)
-    if not cleaned:
-        return False
-    if needs_search_or_deep_routing(cleaned, source=source):
-        return False
-    if any(marker in cleaned for marker in FAST_PATH_DIRECTIVE_MARKERS):
-        return True
-    return len(cleaned) <= 24 and "?" not in cleaned
+    return is_simple_directive_from_runtime(text, source=source, deps=build_fast_path_policy_runtime_deps())
 
 
 def is_obvious_continue(text: str, source: str, room_state: dict | None = None) -> bool:
-    cleaned = normalize_voice_text(text) if source == "voice" else clean_text(text)
-    if not cleaned:
-        return True
-    state = room_state or {}
-    if not (state.get("reply_in_progress") or state.get("awaiting_user_reply") or state.get("owner_user_id")):
-        return False
-    if len(cleaned) > 12 and len(cleaned.split()) > 3:
-        return False
-    return any(cleaned == marker or cleaned.startswith(marker) for marker in FAST_PATH_CONTINUE_MARKERS)
+    return is_obvious_continue_from_runtime(
+        text,
+        source,
+        room_state=room_state,
+        deps=build_fast_path_policy_runtime_deps(),
+    )
 
 
 def fast_path_policy(text: str, source: str, room_state: dict | None = None) -> dict | None:
-    cleaned = clean_text(text)
-    if not cleaned:
-        return {"route": "main_direct", "action": "wait", "reason_brief": "empty_input"}
-    if is_control_page_source(source):
-        return None
-    if is_obvious_continue(cleaned, source, room_state):
-        return {"route": "main_direct", "action": "wait", "reason_brief": "obvious_continue"}
-    if should_force_search_query(cleaned):
-        return {"route": "search_executor", "action": "search_then_answer", "reason_brief": "search_trigger"}
-    if is_simple_directive(cleaned, source=source):
-        return {"route": "main_direct", "action": "answer", "reason_brief": "simple_directive"}
-    if not needs_search_or_deep_routing(cleaned, source=source):
-        return {"route": "main_direct", "action": "answer", "reason_brief": "light_request"}
-    return None
+    return fast_path_policy_from_runtime(text, source, room_state=room_state, deps=build_fast_path_policy_runtime_deps())
 
 
 def context_policy_for_fast_path_policy(policy: dict | None, *, source: str) -> dict[str, Any]:
-    action = clean_text(str((policy or {}).get("action") or "answer"))
-    route = clean_text(str((policy or {}).get("route") or "main_direct"))
-    needs_search = action == "search_then_answer" or route == "search_executor"
-    return {
-        "intent": "question" if needs_search else "chat",
-        "needs_main_llm": action == "answer",
-        "needs_memory": False,
-        "needs_runtime_state": False,
-        "needs_minecraft_state": False,
-        "needs_vision": False,
-        "needs_skill_graph": False,
-        "needs_long_context": False,
-        "needs_search": needs_search,
-        "needs_tts": True,
-        "priority": "accuracy" if needs_search else "latency",
-        "context_focus": [],
-        "response_mode": "short" if source == "voice" else "normal",
-    }
+    return context_policy_for_fast_path_policy_from_runtime(policy, source=source, deps=build_fast_path_policy_runtime_deps())
 
 
 def should_ignore_short_transcription(
@@ -2749,16 +2807,11 @@ def should_ignore_short_transcription(
     *,
     wake_detected: bool = False,
 ) -> bool:
-    audio_sec = len(pcm_bytes) / (RATE * CHANNELS * 2)
-    return should_ignore_short_transcription_policy(
+    return should_ignore_short_transcription_from_runtime(
         text=text,
-        audio_sec=audio_sec,
+        pcm_bytes=pcm_bytes,
         wake_detected=wake_detected,
-        normalize_voice_text=normalize_voice_text,
-        normalized_wake_words=normalized_wake_words,
-        min_audio_sec=MIN_AUDIO_SEC,
-        min_transcribed_len=MIN_TRANSCRIBED_LEN,
-        wake_short_text_keep_len=WAKE_SHORT_TEXT_KEEP_LEN,
+        deps=build_discord_session_policy_runtime_deps(),
     )
 
 
@@ -2769,15 +2822,32 @@ def is_short_followup_candidate(
     wake_detected: bool = False,
     owner_followup_active: bool = False,
 ) -> bool:
-    audio_sec = len(pcm_bytes) / (RATE * CHANNELS * 2)
-    return is_short_followup_candidate_policy(
+    return is_short_followup_candidate_from_runtime(
         text=text,
-        audio_sec=audio_sec,
+        pcm_bytes=pcm_bytes,
         wake_detected=wake_detected,
         owner_followup_active=owner_followup_active,
+        deps=build_discord_session_policy_runtime_deps(),
+    )
+
+
+def build_voice_reply_gate_runtime_deps() -> VoiceReplyGateRuntimeDeps:
+    return VoiceReplyGateRuntimeDeps(
+        session_state_snapshot=session_state_snapshot,
+        room_state_snapshot=room_state_snapshot,
+        is_room_owner_active=is_room_owner_active,
+        is_session_active_for_user=is_session_active_for_user,
+        tts_input_suppression_reason=tts_playback_manager.input_suppression_reason,
+        room_last_voice_reply_at=room_last_voice_reply_at,
+        post_tts_ignore_sec=POST_TTS_IGNORE_SEC,
+        reply_cooldown_sec=REPLY_COOLDOWN_SEC,
         normalize_voice_text=normalize_voice_text,
-        min_audio_sec=MIN_AUDIO_SEC,
-        min_transcribed_len=MIN_TRANSCRIBED_LEN,
+        contains_wake_word=contains_wake_word,
+        looks_like_brief_filler_text=looks_like_brief_filler_text,
+        looks_like_repetitive_noise_text=looks_like_repetitive_noise_text,
+        is_similar=is_similar,
+        min_text_len=MIN_TEXT_LEN,
+        monotonic=time.monotonic,
     )
 
 
@@ -2793,99 +2863,35 @@ def should_reply_to_voice(
     active_speaker_user_id: int | None = None,
     ignore_tts_suppression: bool = False,
 ) -> tuple[bool, str, str]:
-    now = time.monotonic()
-    session_state = session_state_snapshot(session_key)
-    room_state = room_state_snapshot(room_session_key)
-    owner_user_id = room_state.get("owner_user_id")
-    owner_active = is_room_owner_active(room_session_key, user_id)
-    active_session = session_key is not None and is_session_active_for_user(session_key, user_id)
-    if active_speaker_user_id is None:
-        active_speaker_user_id = room_state.get("active_speaker_user_id")
-
-    tts_suppression = None
-    if not ignore_tts_suppression:
-        tts_suppression = tts_playback_manager.input_suppression_reason(
-            guild_id=guild_id,
-            post_tts_ignore_sec=POST_TTS_IGNORE_SEC,
-            now=now,
-        )
-    cooldown_active = bool(room_session_key and (now - room_last_voice_reply_at.get(room_session_key, 0.0) < REPLY_COOLDOWN_SEC))
-    decision = decide_voice_reply_gate(
-        VoiceReplyGateInput(
-            text=text,
-            wake_detected=wake_detected,
-            wake_match_mode=wake_match_mode,
-            user_id=user_id,
-            owner_user_id=owner_user_id,
-            owner_active=owner_active,
-            active_session=active_session,
-            awaiting_user_reply=bool(session_state.get("awaiting_user_reply")),
-            active_speaker_user_id=active_speaker_user_id,
-            last_stt_text=str(session_state.get("last_stt_text", "")),
-            tts_suppression=tts_suppression,
-            cooldown_active=cooldown_active,
-        ),
-        normalize_voice_text=normalize_voice_text,
-        contains_wake_word=contains_wake_word,
-        looks_like_brief_filler_text=looks_like_brief_filler_text,
-        looks_like_repetitive_noise_text=looks_like_repetitive_noise_text,
-        is_similar=is_similar,
-        min_text_len=MIN_TEXT_LEN,
+    return should_reply_to_voice_from_runtime(
+        guild_id=guild_id,
+        text=text,
+        wake_detected=wake_detected,
+        wake_match_mode=wake_match_mode,
+        session_key=session_key,
+        room_session_key=room_session_key,
+        user_id=user_id,
+        active_speaker_user_id=active_speaker_user_id,
+        ignore_tts_suppression=ignore_tts_suppression,
+        deps=build_voice_reply_gate_runtime_deps(),
     )
-    return decision.accepted, decision.reason, decision.gate_mode
 
 
 def should_skip_full_stt_after_wake_probe(*, wake_detected: bool, wake_probe: str, duration_sec: float) -> bool:
-    return should_skip_full_stt_after_wake_probe_policy(
+    return should_skip_full_stt_after_wake_probe_from_runtime(
         wake_detected=wake_detected,
         wake_probe=wake_probe,
         duration_sec=duration_sec,
-        no_wake_max_continue_sec=VOICE_NO_WAKE_MAX_CONTINUE_SEC,
-        clean_text=clean_text,
-        looks_like_brief_filler_text=looks_like_brief_filler_text,
-        looks_like_repetitive_noise_text=looks_like_repetitive_noise_text,
+        deps=build_discord_session_policy_runtime_deps(),
     )
 
 
 def should_require_confirm_exact_for_wake(debug_meta: dict | None) -> bool:
-    if not debug_meta:
-        return False
-    reasons = [str(reason) for reason in (debug_meta.get("reasons") or [])]
-    if any(
-        marker in reason
-        for reason in reasons
-        for marker in ("opus_fail", "plc", "fec", "front_burst_detected", "heavy_trim_ms", "burst_trim_ms")
-    ):
-        return True
-    if debug_meta.get("front_burst_detected"):
-        return True
-    if int(debug_meta.get("opus_fail") or 0) > 0:
-        return True
-    if int(debug_meta.get("plc_packets") or 0) > 0:
-        return True
-    if int(debug_meta.get("fec_packets") or 0) > 0:
-        return True
-    if float(debug_meta.get("trim_ms") or 0.0) >= 220.0:
-        return True
-    if float(debug_meta.get("burst_trim_ms") or 0.0) >= 140.0:
-        return True
-    return False
+    return should_require_confirm_exact_for_wake_from_runtime(debug_meta=debug_meta, deps=build_discord_session_policy_runtime_deps())
 
 
 def is_transport_corrupted_audio(debug_meta: dict | None) -> bool:
-    if not debug_meta:
-        return False
-    reasons = [str(reason) for reason in (debug_meta.get("reasons") or [])]
-    required_markers = ("opus_fail", "plc", "fec", "front_burst_detected", "heavy_trim_ms", "burst_trim_ms")
-    reason_hits = {marker: any(marker in reason for reason in reasons) for marker in required_markers}
-    return (
-        (reason_hits["opus_fail"] or int(debug_meta.get("opus_fail") or 0) >= 4)
-        and (reason_hits["plc"] or int(debug_meta.get("plc_packets") or 0) >= 2)
-        and (reason_hits["fec"] or int(debug_meta.get("fec_packets") or 0) >= 2)
-        and (reason_hits["front_burst_detected"] or bool(debug_meta.get("front_burst_detected")))
-        and (reason_hits["heavy_trim_ms"] or float(debug_meta.get("trim_ms") or 0.0) >= 220.0)
-        and (reason_hits["burst_trim_ms"] or float(debug_meta.get("burst_trim_ms") or 0.0) >= 140.0)
-    )
+    return is_transport_corrupted_audio_from_runtime(debug_meta=debug_meta, deps=build_discord_session_policy_runtime_deps())
 
 
 def is_tail_fragment_candidate(
@@ -2896,49 +2902,55 @@ def is_tail_fragment_candidate(
     longest_voiced_ms: float,
     unstable: bool,
 ) -> bool:
-    if not session_key:
-        return False
-    accepted_at = session_last_turn_accepted_at.get(session_key, 0.0)
-    if accepted_at <= 0.0:
-        return False
-    if (time.monotonic() - accepted_at) > TAIL_FRAGMENT_WINDOW_SEC:
-        return False
-    if raw_seconds > TAIL_FRAGMENT_MAX_RAW_SEC:
-        return False
-    if voiced_ms > TAIL_FRAGMENT_MAX_VOICED_MS:
-        return False
-    if longest_voiced_ms > TAIL_FRAGMENT_MAX_LONGEST_MS:
-        return False
-    return unstable or raw_seconds <= (TAIL_FRAGMENT_MAX_RAW_SEC * 0.6)
+    return is_tail_fragment_candidate_from_runtime(
+        session_key=session_key,
+        raw_seconds=raw_seconds,
+        voiced_ms=voiced_ms,
+        longest_voiced_ms=longest_voiced_ms,
+        unstable=unstable,
+        deps=build_discord_session_policy_runtime_deps(),
+    )
+
+
+def build_voice_ingress_runtime_deps() -> VoiceIngressRuntimeDeps:
+    return VoiceIngressRuntimeDeps(
+        voice_ingress_queue=voice_ingress_queue,
+        voice_utterance_buffers=voice_utterance_buffers,
+        voice_utterance_flush_tasks=voice_utterance_flush_tasks,
+        voice_utterance_assembly_config=voice_utterance_assembly_config,
+        voice_ingress_max_age_sec=VOICE_INGRESS_MAX_AGE_SEC,
+        voice_ingress_drop_oldest_on_full=VOICE_INGRESS_DROP_OLDEST_ON_FULL,
+        voice_ingress_queue_max=VOICE_INGRESS_QUEUE_MAX,
+        evaluate_voice_ingress_dequeue=evaluate_voice_ingress_dequeue,
+        apply_voice_ingress_dequeue_debug_meta=apply_voice_ingress_dequeue_debug_meta,
+        enqueue_voice_ingress_item=enqueue_voice_ingress_item,
+        increment_voice_pipeline_counter=increment_voice_pipeline_counter,
+        process_member_audio=_process_member_audio_impl,
+        create_task=asyncio.create_task,
+        log=print,
+    )
+
+
+def build_voice_ingress_entrypoint_deps() -> VoiceIngressEntrypointDeps:
+    return VoiceIngressEntrypointDeps(
+        ensure_startup_components_ready=ensure_startup_components_ready,
+        normalize_voice_debug_meta=normalize_voice_debug_meta,
+        voice_ingress_source=voice_ingress_source,
+        should_drop_discord_audio_for_local_mic=should_drop_discord_audio_for_local_mic,
+        ensure_voice_worker_started=ensure_voice_worker_started,
+        build_voice_ingress_context=build_voice_ingress_context,
+        next_segment_id=next_segment_id,
+        new_turn_id=new_turn_id,
+        room_state_snapshot=room_state_snapshot,
+        build_voice_ingress_item=build_voice_ingress_item,
+        voice_ingress_queue_depth=voice_ingress_queue.qsize,
+        schedule_voice_utterance_item=_schedule_voice_utterance_item,
+        monotonic=time.monotonic,
+    )
 
 
 async def voice_ingress_worker() -> None:
-    while True:
-        item = await voice_ingress_queue.get()
-        try:
-            dequeue_plan = evaluate_voice_ingress_dequeue(
-                item,
-                now_monotonic=time.monotonic(),
-                max_age_sec=VOICE_INGRESS_MAX_AGE_SEC,
-                queue_depth_at_dequeue=voice_ingress_queue.qsize(),
-            )
-            if dequeue_plan.should_drop_stale:
-                increment_voice_pipeline_counter("queue_stale_drop_count")
-                member = item.get("member")
-                apply_voice_ingress_dequeue_debug_meta(item, dequeue_plan)
-                print(
-                    f"[VOICE QUEUE DROP] reason=stale wait_ms={dequeue_plan.queue_wait_ms:.1f} "
-                    f"max_age_ms={dequeue_plan.max_age_ms:.1f} speaker={getattr(member, 'display_name', None)}"
-                )
-                continue
-            apply_voice_ingress_dequeue_debug_meta(item, dequeue_plan)
-            process_item = dict(item)
-            process_item.pop("enqueued_at", None)
-            await _process_member_audio_impl(**process_item)
-        except Exception as e:
-            print(f"[VOICE WORKER] 실패: {e!r}")
-        finally:
-            voice_ingress_queue.task_done()
+    await voice_ingress_worker_from_runtime(deps=build_voice_ingress_runtime_deps())
 
 
 def ensure_voice_worker_started() -> None:
@@ -2950,254 +2962,101 @@ def ensure_voice_worker_started() -> None:
 
 
 def _voice_utterance_buffer_key(item: dict[str, Any]) -> str:
-    return str(item.get("session_key") or "")
+    return voice_utterance_buffer_key_payload(item)
 
 
 async def _enqueue_voice_ingress_for_processing(item: dict[str, Any]) -> None:
-    debug_meta = item.get("debug_meta")
-    if isinstance(debug_meta, dict):
-        debug_meta["voice_queue_depth_at_enqueue"] = voice_ingress_queue.qsize()
-    item["enqueued_at"] = time.monotonic()
-    enqueue_result = enqueue_voice_ingress_item(
-        voice_ingress_queue,
+    await enqueue_voice_ingress_for_processing_from_runtime(
         item,
-        drop_oldest_on_full=VOICE_INGRESS_DROP_OLDEST_ON_FULL,
+        deps=build_voice_ingress_runtime_deps(),
     )
-    if not enqueue_result.accepted:
-        increment_voice_pipeline_counter("queue_full_drop_count")
-        member = item.get("member")
-        print(
-            f"[VOICE QUEUE DROP] reason=queue_full speaker={getattr(member, 'display_name', None)} "
-            f"qsize={voice_ingress_queue.qsize()} qmax={VOICE_INGRESS_QUEUE_MAX}"
-        )
-        return
-    dropped = enqueue_result.dropped_oldest_item
-    if dropped is not None:
-        dropped_member = dropped.get("member") if isinstance(dropped, dict) else None
-        print(
-            f"[VOICE QUEUE DROP] reason=queue_full_drop_oldest "
-            f"speaker={getattr(dropped_member, 'display_name', None)} qmax={VOICE_INGRESS_QUEUE_MAX}"
-        )
 
 
 async def _flush_voice_utterance_buffer(key: str) -> None:
-    buffer = voice_utterance_buffers.pop(key, None)
-    voice_utterance_flush_tasks.pop(key, None)
-    if not buffer:
-        return
-    base_item = dict(buffer["base_item"])
-    segments = list(buffer.get("segments") or [])
-    merged_pcm = merge_discord_pcm_segments(segments, pad_ms=voice_utterance_assembly_config.pad_ms)
-    if not merged_pcm:
-        return
-    segment_count = len(segments)
-    base_item["pcm_bytes"] = merged_pcm
-    base_item["ingress_during_reply"] = bool(buffer.get("ingress_during_reply"))
-    base_item["owner_user_id_on_ingress"] = buffer.get("owner_user_id_on_ingress")
-    base_meta = dict(base_item.get("debug_meta") or {})
-    base_meta["assembled_segment_ids"] = list(buffer.get("segment_ids") or [])
-    base_item["debug_meta"] = merge_debug_meta(
-        base_meta,
-        segment_count=segment_count,
-        added_pad_ms=max(0, segment_count - 1) * voice_utterance_assembly_config.pad_ms,
-        total_audio_sec=discord_pcm_seconds(merged_pcm),
+    await flush_voice_utterance_buffer_from_runtime(
+        key,
+        deps=build_voice_ingress_runtime_deps(),
     )
-    increment_voice_pipeline_counter("utterance_assembly_flush_count")
-    if segment_count > 1:
-        increment_voice_pipeline_counter("utterance_assembly_merge_count")
-        print(f"[VOICE UTTERANCE MERGE] session={key} segments={segment_count} sec={discord_pcm_seconds(merged_pcm):.2f}")
-    await _enqueue_voice_ingress_for_processing(base_item)
 
 
 async def _delayed_voice_utterance_flush(key: str, delay_sec: float) -> None:
-    try:
-        await asyncio.sleep(max(0.0, delay_sec))
-        await _flush_voice_utterance_buffer(key)
-    except asyncio.CancelledError:
-        pass
+    await delayed_voice_utterance_flush_from_runtime(
+        key,
+        delay_sec,
+        deps=build_voice_ingress_runtime_deps(),
+    )
 
 
 async def _schedule_voice_utterance_item(item: dict[str, Any]) -> None:
-    if not voice_utterance_assembly_config.enabled or voice_utterance_assembly_config.commit_wait_sec <= 0.0:
-        await _enqueue_voice_ingress_for_processing(item)
-        return
-
-    key = _voice_utterance_buffer_key(item)
-    if not key:
-        await _enqueue_voice_ingress_for_processing(item)
-        return
-
-    existing_task = voice_utterance_flush_tasks.pop(key, None)
-    if existing_task is not None and not existing_task.done():
-        existing_task.cancel()
-
-    pcm_bytes = bytes(item.get("pcm_bytes") or b"")
-    buffer = voice_utterance_buffers.get(key)
-    if buffer is None:
-        buffer = {
-            "base_item": dict(item),
-            "segments": [],
-            "segment_ids": [],
-            "ingress_during_reply": bool(item.get("ingress_during_reply")),
-            "owner_user_id_on_ingress": item.get("owner_user_id_on_ingress"),
-        }
-        voice_utterance_buffers[key] = buffer
-
-    buffer["segments"].append(pcm_bytes)
-    buffer["segment_ids"].append(item.get("segment_id"))
-    buffer["ingress_during_reply"] = bool(buffer.get("ingress_during_reply") or item.get("ingress_during_reply"))
-    if buffer.get("owner_user_id_on_ingress") is None:
-        buffer["owner_user_id_on_ingress"] = item.get("owner_user_id_on_ingress")
-
-    current_sec = sum(discord_pcm_seconds(segment) for segment in buffer.get("segments") or [])
-    if current_sec >= voice_utterance_assembly_config.max_audio_sec:
-        await _flush_voice_utterance_buffer(key)
-        return
-
-    voice_utterance_flush_tasks[key] = asyncio.create_task(
-        _delayed_voice_utterance_flush(key, voice_utterance_assembly_config.commit_wait_sec)
+    await schedule_voice_utterance_item_from_runtime(
+        item,
+        deps=build_voice_ingress_runtime_deps(),
     )
 
 
 def should_label_question_response(text: str, *, session_key: str | None = None) -> bool:
-    visible = normalize_friend_style_output(visible_text(text)).strip()
-    if not visible:
-        return False
-    if visible.startswith("[질문]"):
-        return False
-    if session_key is not None and session_state_snapshot(session_key).get("awaiting_user_reply"):
-        return True
-    return False
+    return should_label_question_response_from_runtime(
+        text,
+        session_key=session_key,
+        deps=build_response_output_policy_runtime_deps(),
+    )
 
 
-def cleanup_assistant_display_artifacts(text: str) -> str:
-    return cleanup_assistant_display_artifacts_payload(text)
-
-
-def user_explicitly_mentions_minecraft(user_text: str) -> bool:
-    return user_explicitly_mentions_minecraft_payload(user_text)
-
-
-def answer_contains_minecraft_leak(answer: str) -> bool:
-    return answer_contains_minecraft_leak_payload(answer)
+def build_response_output_policy_runtime_deps() -> ResponseOutputPolicyRuntimeDeps:
+    return ResponseOutputPolicyRuntimeDeps(
+        session_state_snapshot_fn=session_state_snapshot,
+        answer_gpu_status_answer_fn=answer_gpu_runtime_status_query,
+        model_output_stop_tokens=tuple(MAIN_LLM_STOP_TOKENS),
+        sanitize_model_output_cleanup_fn=cleanup_assistant_display_artifacts,
+    )
 
 
 def fallback_for_unrequested_minecraft_leak(user_text: str) -> str:
-    return fallback_for_unrequested_minecraft_leak_payload(
+    return fallback_for_unrequested_minecraft_leak_from_runtime(
         user_text,
-        gpu_status_answer_fn=answer_gpu_runtime_status_query,
+        deps=build_response_output_policy_runtime_deps(),
     )
 
 
 def sanitize_unrequested_minecraft_leak(user_text: str, answer: str) -> str:
-    return sanitize_unrequested_minecraft_leak_payload(
+    return sanitize_unrequested_minecraft_leak_from_runtime(
         user_text,
         answer,
-        gpu_status_answer_fn=answer_gpu_runtime_status_query,
+        deps=build_response_output_policy_runtime_deps(),
     )
 
 
-def answer_simple_local_chat_query(user_text: str) -> str | None:
-    return answer_simple_local_chat_query_payload(user_text)
-
-
 def format_display_text(text: str, *, session_key: str | None = None) -> str:
-    return format_display_text_payload(
+    return format_display_text_from_runtime(
         text,
         session_key=session_key,
-        should_label_question_response_fn=should_label_question_response,
+        deps=build_response_output_policy_runtime_deps(),
     )
 
 
 def speculate_from_committed_stt(committed_text: str, room_state: dict | None) -> dict | None:
-    cleaned = clean_text(committed_text)
-    state = room_state or {}
-    if len(cleaned) < 8:
-        return None
-    if not (state.get("active_speaker_user_id") or state.get("owner_user_id")):
-        return None
-    policy = fast_path_policy(cleaned, "voice", state)
-    if policy is None:
-        return None
-    return {
-        "text": cleaned,
-        "policy": policy,
-        "prepared_at": time.monotonic(),
-    }
+    return speculate_from_committed_stt_from_runtime(
+        committed_text,
+        room_state,
+        clean_text=clean_text,
+        fast_path_policy=fast_path_policy,
+        monotonic=time.monotonic,
+    )
 
 
 def remember_speculative_policy(session_key: str | None, speculative: dict | None) -> None:
-    if not session_key or not speculative:
-        return
-    session_speculative_policies[session_key] = speculative
+    remember_speculative_policy_from_runtime(session_speculative_policies, session_key, speculative)
 
 
 def get_matching_speculative_policy(session_key: str | None, user_text: str) -> dict | None:
-    if not session_key:
-        return None
-    speculative = session_speculative_policies.get(session_key)
-    if not speculative:
-        return None
-    if (time.monotonic() - float(speculative.get("prepared_at") or 0.0)) > 20.0:
-        session_speculative_policies.pop(session_key, None)
-        return None
-    speculative_text = clean_text(str(speculative.get("text") or ""))
-    current_text = clean_text(user_text)
-    if not speculative_text or not current_text:
-        return None
-    if current_text.startswith(speculative_text) or speculative_text.startswith(current_text) or is_similar(current_text, speculative_text):
-        return speculative
-    return None
-
-
-class BufferedEditStreamer:
-    def __init__(self, message: discord.Message, *, session_key: str | None = None):
-        self.message = message
-        self.session_key = session_key
-        self.rendered_text = clean_text(message.content or "")
-        self.pending_text = self.rendered_text
-        self.last_flush_at = 0.0
-        self.first_pending_at = 0.0
-
-    async def push(self, full_text: str, *, force: bool = False) -> None:
-        candidate = format_display_text(full_text, session_key=self.session_key).strip()
-        if not candidate or candidate == self.rendered_text:
-            return
-        now = time.monotonic()
-        if self.pending_text != candidate:
-            self.pending_text = candidate
-            if self.first_pending_at <= 0.0:
-                self.first_pending_at = now
-        delta_chars = max(0, len(candidate) - len(self.rendered_text))
-        elapsed_ms = (now - self.last_flush_at) * 1000.0 if self.last_flush_at > 0 else 10000.0
-        held_ms = (now - self.first_pending_at) * 1000.0 if self.first_pending_at > 0 else elapsed_ms
-        hard_break = candidate.endswith((".", "!", "?", "\n"))
-        should_flush = force or hard_break or held_ms >= MAX_HOLD_MS or (delta_chars >= MIN_DELTA_CHARS and elapsed_ms >= MIN_EDIT_INTERVAL_MS)
-        if not should_flush:
-            return
-        await self.message.edit(content=candidate)
-        self.rendered_text = candidate
-        self.pending_text = candidate
-        self.last_flush_at = now
-        self.first_pending_at = 0.0
-
-    async def close(self, final_text: str) -> None:
-        await self.push(final_text, force=True)
-
-
-class DiscordEditSink:
-    def __init__(self, streamer: BufferedEditStreamer):
-        self.streamer = streamer
-        self.parts: list[str] = []
-
-    async def on_chunk(self, text: str) -> None:
-        if not text:
-            return
-        self.parts.append(text)
-        await self.streamer.push("".join(self.parts))
-
-    async def close(self, final_text: str) -> None:
-        await self.streamer.close(final_text)
+    return get_matching_speculative_policy_from_runtime(
+        session_speculative_policies,
+        session_key,
+        user_text,
+        clean_text=clean_text,
+        is_similar=is_similar,
+        monotonic=time.monotonic,
+    )
 
 
 def should_force_search_followup(
@@ -3208,16 +3067,22 @@ def should_force_search_followup(
     session_memory_key: str | None = None,
     source: str,
 ) -> bool:
-    state = read_cached_cognitive_state(
+    return should_force_search_followup_from_runtime(
         guild_id,
         room_key=room_key,
         person_key=person_key,
         session_memory_key=session_memory_key,
+        source=source,
+        deps=build_cognitive_followup_runtime_deps(),
     )
-    if not state:
-        return False
-    gated = apply_ask_gating(state, source=source)
-    return clean_text(str(gated.get("action") or "")) == "search_then_answer"
+
+
+def build_cognitive_followup_runtime_deps() -> ShouldForceSearchFollowupRuntimeDeps:
+    return ShouldForceSearchFollowupRuntimeDeps(
+        read_cached_cognitive_state_fn=read_cached_cognitive_state,
+        apply_ask_gating_fn=apply_ask_gating,
+        clean_text_fn=clean_text,
+    )
 
 
 async def refresh_cognitive_state_in_background(
@@ -3401,85 +3266,42 @@ def build_main_response_guidance(
     runtime_status_context: str | None = None,
     route_decision: RouteDecision | None = None,
 ) -> str:
-    state = apply_ask_gating(cognitive_state, source=source)
-    parts = [
-        "응답 규칙: 짧게 바로 답해라. 이 규칙을 설명하거나 언급하지 마라.",
-    ]
-    persona_hint = persona_state_hint_for_turn(user_text, session_key=session_key, guild_id=guild_id)
-    if persona_hint:
-        parts.append(persona_hint)
-    recent_assistant = recent_assistant_reply_summary(session_key=session_key, guild_id=guild_id, limit=1) if persona_hint else ""
-    if recent_assistant:
-        parts.append(f"최근 네 말: {recent_assistant}. 반복하지 말고 이어서 답해라.")
-
-    action = state.get("action", "answer")
-    if state.get("user_intent"):
-        parts.append(f"사용자 의도 추정: {state['user_intent']}")
-
-    if action == "ask":
-        parts.append("짧게 확인 질문만 해라.")
-    elif action == "wait":
-        parts.append("길게 답하지 말고 더 들을 여지를 둬라.")
-    else:
-        parts.append("바로 답해라.")
-
-    if runtime_status_context:
-        parts.append(f"현재 Evelyn 런타임 상태 요약: {runtime_status_context}")
-        parts.append("사용자가 Evelyn의 상태, 오류, 연결, 지연, 서버 상황을 물을 때만 이 런타임 상태를 근거로 답해라. 일반 대화에서는 먼저 꺼내지 마라.")
-
-    if runtime_status_context:
-        parts.append(
-            "RUNTIME_STATUS_RULE: Use `current_gpu_snapshot` first, including exact GPU names and used/total VRAM. "
-            "If `current_oom_signal=no`, do not say current OOM. "
-            "If `recent_errors_are_historical=true`, treat recent_errors as historical logs, not proof of current OOM."
-        )
-
-    tool_awareness_context = build_tool_awareness_context(
-        user_text,
+    return build_main_response_guidance_from_runtime(
+        cognitive_state,
         source=source,
+        user_text=user_text,
+        session_key=session_key,
+        guild_id=guild_id,
+        minecraft_state=minecraft_state,
+        runtime_status_context=runtime_status_context,
         route_decision=route_decision,
-        route_available=_skill_route_available,
+        deps=build_main_response_guidance_runtime_deps(),
     )
-    if tool_awareness_context:
-        parts.append(tool_awareness_context)
 
-    minecraft_summary = format_minecraft_state_summary(minecraft_state)
-    if minecraft_summary:
-        parts.append(f"현재 마인크래프트 실시간 상태: {minecraft_summary}")
-        parts.append("마인크래프트 관련 질문이나 계획을 답할 때는 이 실시간 상태를 기준으로 말해라. 모르면 추측하지 말고 현재 상태 기준으로 짧게 설명해라.")
 
-    if route_decision is not None:
-        ask_mode = clean_text(route_decision.ask_mode)
-        max_questions = max(0, min(1, int(route_decision.max_question_count or 0)))
-        if QUESTION_FEATURE_ENABLED and ask_mode != "none" and max_questions > 0:
-            hint = clean_text(route_decision.question_hint or "")
-            reason = clean_text(route_decision.question_reason or "")
-            question_parts = [
-                "먼저 답변한다.",
-                "질문은 마지막에 최대 1개만 자연스럽게 둔다.",
-                "억지로 묻지 않는다.",
-                "흐름상 질문이 부자연스러우면 생략한다.",
-                "사용자가 이미 준 조건을 다시 묻지 않는다.",
-            ]
-            if hint:
-                question_parts.append(f"질문 방향: {hint}")
-            if reason:
-                question_parts.append(f"질문이 필요한 이유: {reason}")
-            parts.append(" ".join(question_parts))
-        else:
-            parts.append("답변 끝에 새 질문을 덧붙이지 마라.")
+def build_main_response_guidance_runtime_deps() -> MainResponseGuidanceRuntimeDeps:
+    return MainResponseGuidanceRuntimeDeps(
+        clean_text=clean_text,
+        apply_ask_gating=apply_ask_gating,
+        persona_state_hint_for_turn=persona_state_hint_for_turn,
+        recent_assistant_reply_summary=recent_assistant_reply_summary,
+        build_tool_awareness_context=build_tool_awareness_context,
+        route_available=_skill_route_available,
+        format_minecraft_state_summary=format_minecraft_state_summary,
+        question_feature_enabled=QUESTION_FEATURE_ENABLED,
+    )
 
-    return " ".join(clean_text(part) for part in parts if clean_text(part))
+
+def build_vision_watch_runtime_deps() -> VisionRuntimeDeps:
+    return VisionRuntimeDeps(
+        clean_text=clean_text,
+        build_vision_quality=build_vision_quality,
+        vision_watch_scene_is_unreliable=vision_watch_scene_is_unreliable,
+    )
 
 
 def build_vision_observation_prompt(user_text: str) -> str:
-    request = clean_text(user_text)[:240]
-    return (
-        "Look at this local screen capture for Evelyn. "
-        "Answer in concise Korean. Describe the visible scene and include clear UI/OCR text. "
-        "Do not guess hidden state. User request: "
-        + request
-    )
+    return build_vision_observation_prompt_from_runtime(user_text, deps=build_vision_watch_runtime_deps())
 
 
 def _capture_local_screen_sync() -> tuple[Path, tuple[int, int]]:
@@ -3528,44 +3350,13 @@ def format_vision_observation(
     data: dict[str, Any],
     image_deleted: bool = False,
 ) -> str:
-    scene = clean_text(str(data.get("scene") or ""))
-    ocr = clean_text(str(data.get("ocr") or ""))
-    ocr_error = clean_text(str(data.get("ocr_error") or ""))
-    quality = build_vision_quality(data)
-    lines = [
-        "Local screen vision observation is available.",
-        "This is the user's local screen capture, not authoritative Minecraft bot inventory/state.",
-        "captured_image=discarded_after_analysis" if image_deleted else f"captured_image={image_path}",
-        f"image_size={image_size[0]}x{image_size[1]}",
-    ]
-    if quality["no_usable_evidence"]:
-        lines.append("vision_quality=unreliable")
-        lines.append(f"vision_confidence={quality.get('confidence', 'none')}")
-        lines.append("vision_actionable=false")
-        lines.append(
-            "The screen capture was taken, but the vision/OCR result is too weak or garbled to identify the screen contents. "
-            "Do not claim what is on screen; tell the user the capture/analysis result is unreliable and needs a better vision pass."
-        )
-    elif quality["weak"]:
-        lines.append("vision_quality=low_confidence")
-        lines.append(f"vision_confidence={quality.get('confidence', 'low')}")
-        lines.append("vision_actionable=false")
-        lines.append("Use only the evidence below, and explicitly hedge uncertainty.")
-    else:
-        lines.append(f"vision_confidence={quality.get('confidence', 'normal')}")
-        lines.append(f"vision_actionable={str(bool(quality.get('actionable'))).lower()}")
-    if scene and not quality["scene_unreliable"]:
-        lines.append("scene: " + scene[:900])
-    elif scene and quality["scene_unreliable"]:
-        lines.append("scene_omitted: repeated or unreliable vision output")
-    if ocr and not quality["ocr_corrupt"]:
-        lines.append("ocr_text: " + ocr[:900])
-    elif ocr and quality["ocr_corrupt"]:
-        lines.append("ocr_text_omitted: OCR output looked corrupted or mixed with invalid characters")
-    if ocr_error:
-        lines.append("ocr_error: " + ocr_error[:300])
-    lines.append("When answering, use this observation naturally. If the observation is weak, say only what is visible.")
-    return "\n".join(lines)
+    return format_vision_observation_from_runtime(
+        image_path=image_path,
+        image_size=image_size,
+        data=data,
+        image_deleted=image_deleted,
+        deps=build_vision_watch_runtime_deps(),
+    )
 
 
 async def build_live_vision_context(user_text: str, *, metrics: dict | None = None) -> str:
@@ -3626,28 +3417,11 @@ async def build_live_vision_context(user_text: str, *, metrics: dict | None = No
 
 
 def build_vision_watch_prompt() -> str:
-    return (
-        "You are Evelyn's lightweight background screen observer. "
-        "Describe only clearly visible changes on the user's local screen in Korean. "
-        "Be concise. Mention app/window/menu/error/text only if visible. "
-        "Do not infer Minecraft bot inventory or bot state from this user screen."
-    )
+    return build_vision_watch_prompt_from_runtime()
 
 
 def vision_watch_scene_looks_bad(scene: str) -> bool:
-    text = clean_text(scene)
-    if not text:
-        return True
-    if vision_watch_scene_is_unreliable(text):
-        return True
-    digit_count = len(re.findall(r"\d", text))
-    latin_count = len(re.findall(r"[A-Za-z]", text))
-    hangul_count = len(re.findall(r"[\uac00-\ud7a3]", text))
-    if re.search(r"\d{1,3}[./:]\d{1,3}[./:]\d{1,3}", text) and digit_count > max(20, latin_count + hangul_count):
-        return True
-    if digit_count >= 30 and latin_count + hangul_count < 12:
-        return True
-    return False
+    return vision_watch_scene_looks_bad_from_runtime(scene, deps=build_vision_watch_runtime_deps())
 
 
 async def run_vision_watch_once() -> dict[str, Any]:
@@ -3764,7 +3538,22 @@ def build_llm_context_assembly_deps() -> LlmContextAssemblyDeps:
         control_page_minecraft_cache_max_stale_sec=CONTROL_PAGE_MINECRAFT_CACHE_MAX_STALE_SEC,
         build_conversation_state_context=build_conversation_state_context,
         build_runtime_state_context=build_runtime_state_context,
-        build_evelyn_runtime_dependency_context=build_evelyn_runtime_dependency_context,
+        build_evelyn_runtime_dependency_context=lambda: build_evelyn_runtime_dependency_context_from_payload(
+            local_tts=local_tts_playback_manager.snapshot(),
+            local_mic=serialize_local_mic_runtime_state(),
+            local_only_mode=LOCAL_ONLY_MODE,
+            discord_enabled=DISCORD_ENABLED,
+            model_name=MODEL_NAME,
+            llm_server_url=LLM_SERVER_URL,
+            router_model_name=ROUTER_MODEL_NAME,
+            summary_model_name=SUMMARY_MODEL_NAME,
+            stt_model_name=STT_MODEL_NAME,
+            stt_backend=STT_BACKEND,
+            omnivoice_server_url=OMNIVOICE_SERVER_URL,
+            omnivoice_voice=OMNIVOICE_VOICE,
+            omnivoice_speed=OMNIVOICE_SPEED,
+            voice_input_mode_status_line=voice_input_mode_status_line(),
+        ),
         render_self_judgment_context=render_self_judgment_context,
         render_self_state_context=render_self_state_context,
         render_vision_watch_context=render_vision_watch_context,
@@ -3811,25 +3600,7 @@ async def prepare_llm_messages(
     )
 
 def extract_json_object(text: str) -> dict:
-    text = text.strip()
-    try:
-        data = json.loads(text)
-        if isinstance(data, dict):
-            return data
-    except Exception:
-        pass
-
-    start = text.find("{")
-    end = text.rfind("}")
-    if start != -1 and end != -1 and end > start:
-        try:
-            data = json.loads(text[start : end + 1])
-            if isinstance(data, dict):
-                return data
-        except Exception:
-            pass
-
-    return {}
+    return extract_json_object_from_runtime(text)
 
 
 async def ask_summary_llm(
@@ -3881,7 +3652,7 @@ async def ask_summary_llm(
 
         msg = choices[0].get("message", {})
         text = clean_text(msg.get("content", "") or msg.get("reasoning_content", ""))
-        result = extract_json_object(text)
+        result = extract_json_object_from_runtime(text)
         record_model_call_trace(
             model_role="summary",
             purpose=purpose,
@@ -3947,7 +3718,7 @@ async def ask_router_llm(
 
         msg = choices[0].get("message", {})
         text = clean_text(msg.get("content", "") or msg.get("reasoning_content", ""))
-        result = extract_json_object(text)
+        result = extract_json_object_from_runtime(text)
         record_model_call_trace(
             model_role="router",
             purpose=purpose,
@@ -4272,26 +4043,27 @@ def schedule_memory_update(
     )
 
 def sanitize_model_output(text: str) -> str:
-    return sanitize_model_output_payload(
+    return sanitize_model_output_from_runtime(
         text,
-        stop_tokens=MAIN_LLM_STOP_TOKENS,
-        cleanup_artifacts_fn=cleanup_assistant_display_artifacts,
+        deps=build_response_output_policy_runtime_deps(),
     )
 
 
 def extract_answer_from_reasoning(reasoning: str, user_text: str) -> str:
-    return extract_answer_from_reasoning_payload(
+    return extract_answer_from_reasoning_from_runtime(
         reasoning,
         user_text,
-        sanitize_output_fn=sanitize_model_output,
+        deps=build_response_output_policy_runtime_deps(),
     )
 
 
 async def get_http_session() -> aiohttp.ClientSession:
     global http_session
-    if http_session is None or http_session.closed:
-        timeout = aiohttp.ClientTimeout(total=None, connect=10, sock_connect=10)
-        http_session = aiohttp.ClientSession(timeout=timeout)
+    http_session = ensure_http_session_from_runtime(
+        http_session,
+        client_timeout_factory=aiohttp.ClientTimeout,
+        client_session_factory=aiohttp.ClientSession,
+    )
     return http_session
 
 
@@ -4302,17 +4074,12 @@ def build_search_query(
     session_key: str | None = None,
     messages: list[dict[str, Any]] | None = None,
 ) -> str:
-    context_messages = list(messages or [])
-    if not context_messages and session_key is not None:
-        context_messages = list(get_conversation_history(session_key=session_key, guild_id=guild_id))
-    summary = ""
-    if guild_id is not None:
-        summary = compact_working_summary(read_text_file(memory_summary_path(guild_id)))
-    return build_search_query_from_context(
+    return build_search_query_from_runtime(
+        guild_id,
         user_text,
-        messages=context_messages,
-        memory_summary=summary,
-        has_memory_scope=guild_id is not None,
+        session_key=session_key,
+        messages=messages,
+        deps=build_search_followup_runtime_deps(),
     )
 
 
@@ -4393,6 +4160,10 @@ def build_search_followup_runtime_deps() -> SearchFollowupRuntimeDeps:
         build_search_query=build_search_query,
         runtime_session_key=runtime_session_key,
         remember_session_followup_target=remember_session_followup_target,
+        get_conversation_history=get_conversation_history,
+        memory_summary_path=memory_summary_path,
+        read_text_file=read_text_file,
+        compact_working_summary=compact_working_summary,
         search_duckduckgo=search_duckduckgo,
         answer_from_search_results=answer_from_search_results,
         resolve_open_question_rows=resolve_open_question_rows,
@@ -4442,10 +4213,6 @@ async def deliver_proactive_followup(
         turn_scope=turn_scope,
         runtime_mode=runtime_mode,
     )
-
-
-def normalize_search_key(session_key: str, query: str) -> str:
-    return normalize_search_key_payload(session_key, query)
 
 
 def schedule_search_followup_singleflight(
@@ -4556,73 +4323,52 @@ async def set_tts_presence(is_warming_up: bool) -> None:
         print("Presence 변경 실패:", repr(e))
 
 
+def build_opus_startup_runtime_deps() -> OpusStartupRuntimeDeps:
+    return OpusStartupRuntimeDeps(
+        opus_is_loaded=discord_opus.is_loaded,
+        load_default_opus=discord_opus._load_default,
+        mark_startup_component=mark_startup_component,
+        log=print,
+    )
+
+
 def ensure_opus_loaded() -> None:
-    if discord_opus.is_loaded():
-        mark_startup_component("opus", "done", "already loaded")
-        print("[OPUS LOAD] already_loaded")
-        return
-    mark_startup_component("opus", "running", "loading Opus")
-    try:
-        discord_opus._load_default()
-    except Exception as e:
-        mark_startup_component("opus", "failed", repr(e))
-        raise RuntimeError(f"Opus library load failed: {e!r}") from e
-    if not discord_opus.is_loaded():
-        mark_startup_component("opus", "failed", "library did not report loaded")
-        raise RuntimeError("Opus library did not report loaded after default load")
-    mark_startup_component("opus", "done")
-    print("[OPUS LOAD] done")
+    ensure_opus_loaded_from_runtime(deps=build_opus_startup_runtime_deps())
+
+
+def build_stt_warmup_runtime_deps() -> SttWarmupRuntimeDeps:
+    return SttWarmupRuntimeDeps(
+        mark_startup_component=mark_startup_component,
+        zeros=lambda size: np.zeros(size, dtype=np.float32),
+        transcribe_audio16k_sync=transcribe_audio16k_sync,
+        target_rate=TARGET_RATE,
+        wake_max_tokens=WAKE_MAX_TOKENS,
+        log=print,
+    )
 
 
 def warmup_stt_sync() -> None:
-    mark_startup_component("stt", "running", "STT model warmup")
-    print("[STARTUP] stt_warmup_begin")
-    silence = np.zeros(TARGET_RATE, dtype=np.float32)
-    try:
-        _ = transcribe_audio16k_sync(
-            silence,
-            max_new_tokens=min(32, max(8, WAKE_MAX_TOKENS)),
-            sampling_rate=TARGET_RATE,
-            stage="warmup",
-        )
-    except Exception as e:
-        mark_startup_component("stt", "failed", repr(e))
-        raise RuntimeError(f"STT warmup failed: {e!r}") from e
-    mark_startup_component("stt", "done")
-    print("[STARTUP] stt_warmup_done")
+    warmup_stt_sync_from_runtime(deps=build_stt_warmup_runtime_deps())
+
+
+def build_llm_warmup_runtime_deps() -> LlmWarmupRuntimeDeps:
+    return LlmWarmupRuntimeDeps(
+        get_http_session=get_http_session,
+        client_timeout=aiohttp.ClientTimeout,
+        mark_startup_component=mark_startup_component,
+        llm_server_url=LLM_SERVER_URL,
+        model_name=MODEL_NAME,
+        main_llm_chat_content_format=MAIN_LLM_CHAT_CONTENT_FORMAT,
+        voice_llm_max_tokens=VOICE_LLM_MAX_TOKENS,
+        main_llm_stop_tokens=MAIN_LLM_STOP_TOKENS,
+        build_chat_messages=build_chat_messages,
+        decode_sse_stream_line=decode_sse_stream_line,
+        log=print,
+    )
 
 
 async def warmup_llm() -> None:
-    mark_startup_component("main_warmup", "running", "Main LLM warmup request")
-    session = await get_http_session()
-    payload = {
-        "model": MODEL_NAME,
-        "messages": build_chat_messages(
-            [{"role": "user", "content": "짧게: 준비됐으면 '응'만 답해."}],
-            content_format=MAIN_LLM_CHAT_CONTENT_FORMAT,
-        ),
-        "temperature": 0.0,
-        "max_tokens": min(8, VOICE_LLM_MAX_TOKENS),
-        "stream": True,
-        "cache_prompt": True,
-        "stop": list(MAIN_LLM_STOP_TOKENS),
-    }
-    print("[STARTUP] llm_warmup_begin")
-    async with session.post(LLM_SERVER_URL, json=payload, timeout=aiohttp.ClientTimeout(total=20)) as resp:
-        if resp.status != 200:
-            error_text = await resp.text()
-            mark_startup_component("main_warmup", "failed", f"{resp.status}: {error_text[:160]}")
-            raise RuntimeError(f"LLM warmup failed: {resp.status} / {error_text[:300]}")
-        async for raw_line in resp.content:
-            event = decode_sse_stream_line(raw_line)
-            if not event or event.get("done"):
-                continue
-            if event.get("delta_text"):
-                mark_startup_component("main_warmup", "done")
-                print("[STARTUP] llm_warmup_done")
-                return
-    mark_startup_component("main_warmup", "done", "no streamed chunk")
-    print("[STARTUP] llm_warmup_done_no_chunk")
+    await warmup_llm_from_runtime(deps=build_llm_warmup_runtime_deps())
 
 
 async def warmup_voice_path(*, reason: str, key: str | None = None, include_stt: bool = True, include_llm: bool = True, include_tts: bool = True) -> None:
@@ -4669,62 +4415,35 @@ async def ensure_startup_components_ready() -> None:
 
 def stop_local_mic_service() -> None:
     global local_mic_service
-    service = local_mic_service
-    if service is None:
-        local_mic_runtime_state["capture_ready"] = False
-        return
-    try:
-        service.stop()
-    finally:
-        local_mic_runtime_state["capture_ready"] = False
-        local_mic_service = None
+    local_mic_service = stop_local_mic_service_from_runtime(
+        current_service=local_mic_service,
+        local_mic_runtime_state=local_mic_runtime_state,
+    )
 
 
 atexit.register(stop_local_mic_service)
 
 
 def resolve_evelyn_page_url() -> str | None:
-    try:
-        completed = subprocess.run(
-            ["git", "config", "--get", "remote.origin.url"],
-            cwd=str(PROJECT_ROOT),
-            capture_output=True,
-            text=True,
-            timeout=2,
-            check=False,
+    return resolve_evelyn_page_url_from_runtime(
+        deps=build_evelyn_page_url_runtime_deps(
+            project_root=PROJECT_ROOT,
+            configured_page_url=EVELYN_PAGE_URL,
+            run_git_config=subprocess.run,
         )
-    except Exception:
-        return None
-    return resolve_public_page_url(
-        configured_url=EVELYN_PAGE_URL,
-        remote_origin_url=completed.stdout,
     )
 
 
-def should_drop_discord_audio_for_local_mic(member_id: int | None, *, source: str | None = None) -> bool:
-    input_mode = normalize_voice_input_mode(str(local_mic_runtime_state.get("input_mode") or "auto"))
-    local_mic_runtime_state["input_mode"] = input_mode
-    capture_ready = bool(local_mic_service and local_mic_service.capture_ready)
-    local_mic_runtime_state["capture_ready"] = capture_ready
-    local_mic_recent = False
-    last_segment_at = local_mic_runtime_state.get("last_segment_at")
-    if isinstance(last_segment_at, (int, float)):
-        local_mic_recent = (time.time() - float(last_segment_at)) <= LOCAL_MIC_DISCORD_SUPPRESS_AFTER_SEGMENT_SEC
-    decision = decide_local_mic_discord_suppression(
-        LocalMicDiscordSuppressionInput(
-            member_id=member_id,
-            source=source,
-            input_mode=input_mode,
-            capture_ready=capture_ready,
-            local_mic_recent=local_mic_recent,
-            preferred_user_ids=LOCAL_MIC_DISCORD_USER_IDS,
-        ),
+def build_local_mic_discord_suppression_runtime_deps() -> LocalMicDiscordSuppressionRuntimeDeps:
+    return LocalMicDiscordSuppressionRuntimeDeps(
+        local_mic_runtime_state=local_mic_runtime_state,
+        local_mic_capture_ready=lambda: bool(local_mic_service and local_mic_service.capture_ready),
+        preferred_user_ids=lambda: set(LOCAL_MIC_DISCORD_USER_IDS),
         normalize_voice_input_mode=normalize_voice_input_mode,
         should_route_discord_user_to_local_mic=should_route_discord_user_to_local_mic,
+        suppress_after_segment_sec=LOCAL_MIC_DISCORD_SUPPRESS_AFTER_SEGMENT_SEC,
+        time=time.time,
     )
-    local_mic_runtime_state["input_mode"] = decision.normalized_input_mode
-    local_mic_runtime_state["discord_suppression_active"] = decision.suppress
-    return decision.suppress
 
 
 def set_voice_input_mode(mode: str | None) -> str:
@@ -4755,98 +4474,44 @@ def local_mic_status_line() -> str:
     return local_mic_status_line_from_payload(serialize_local_mic_runtime_state())
 
 
-def build_evelyn_runtime_dependency_context() -> str:
-    local_tts = local_tts_playback_manager.snapshot()
-    local_mic = serialize_local_mic_runtime_state()
-    output_mode = "local_speaker" if LOCAL_ONLY_MODE and local_tts_playback_manager.enabled else (
-        "discord_voice" if DISCORD_ENABLED else "none"
+def build_local_mic_segment_runtime_deps() -> LocalMicSegmentRuntimeDeps:
+    return LocalMicSegmentRuntimeDeps(
+        local_mic_runtime_state=local_mic_runtime_state,
+        normalize_voice_input_mode=normalize_voice_input_mode,
+        resolve_local_mic_target=resolve_local_mic_target,
+        guilds=lambda: list(bot.guilds),
+        preferred_user_ids=lambda: set(LOCAL_MIC_DISCORD_USER_IDS),
+        local_only_mode=LOCAL_ONLY_MODE,
+        local_control_voice_member=local_control_voice_member,
+        process_member_audio=process_member_audio,
+        log=print,
+        time=time.time,
     )
-    lines = [
-        "Evelyn dependency topology:",
-        f"- self_runtime: main.py control/runtime process; local_only={LOCAL_ONLY_MODE}; discord_enabled={DISCORD_ENABLED}.",
-        f"- main_llm: {MODEL_NAME}; endpoint={LLM_SERVER_URL}; role=primary answer text generation.",
-        f"- router_llm: {ROUTER_MODEL_NAME}; role=route/cognitive policy before the main answer.",
-        f"- summary_llm: {SUMMARY_MODEL_NAME}; role=memory summaries/background consolidation.",
-        f"- stt: {STT_MODEL_NAME}; backend={STT_BACKEND}; role=voice input -> transcript before main_llm.",
-        f"- tts: OmniVoice endpoint={OMNIVOICE_SERVER_URL}; voice={OMNIVOICE_VOICE or 'auto'}; speed={OMNIVOICE_SPEED}; role=text -> spoken audio after main_llm.",
-        f"- voice_io: input_mode={voice_input_mode_status_line()}; output_mode={output_mode}.",
-        (
-            "- local_mic: "
-            f"enabled={local_mic.get('enabled')} capture_ready={local_mic.get('captureReady')} "
-            f"device={local_mic.get('device')} segments={local_mic.get('segmentCount')} "
-            f"last_error={local_mic.get('lastError') or 'none'}."
-        ),
-        (
-            "- local_tts_output: "
-            f"enabled={local_tts.get('enabled')} active={local_tts.get('active')} "
-            f"device={local_tts.get('device') or 'default'} play_count={local_tts.get('playCount')} "
-            f"last_error={local_tts.get('lastError') or 'none'}."
-        ),
-        "- minecraft_voyager: optional downstream game/autonomy service; use live runtime status before claiming current game state.",
-        "- codex_gateway: optional external coding/control helper; if status says standby/not ready, say so instead of assuming it is available.",
-        "Rule: when the user asks about your own state, dependencies, voice path, or local/Discord mode, answer from this runtime topology and status, not from persona guesses.",
-    ]
-    return "\n".join(lines)
 
 
 async def handle_local_mic_segment(pcm_bytes: bytes, debug_meta: dict[str, Any] | None = None) -> None:
-    if not pcm_bytes:
-        return
-    if normalize_voice_input_mode(str(local_mic_runtime_state.get("input_mode") or "auto")) == "discord":
-        return
-    local_mic_runtime_state["segment_count"] = int(local_mic_runtime_state.get("segment_count") or 0) + 1
-    local_mic_runtime_state["last_segment_at"] = time.time()
-    if isinstance(debug_meta, dict):
-        local_mic_runtime_state["last_segment_duration_sec"] = debug_meta.get("duration_sec")
-        local_mic_runtime_state["last_filter"] = debug_meta.get("voice_filter")
-    target = resolve_local_mic_target(guilds=bot.guilds, preferred_user_ids=LOCAL_MIC_DISCORD_USER_IDS)
-    routed_meta = dict(debug_meta or {})
-    routed_meta["source"] = "local_mic"
-    if target is None and LOCAL_ONLY_MODE:
-        member = local_control_voice_member()
-        local_mic_runtime_state["last_error"] = None
-        routed_meta["routed_local_control"] = True
-        routed_meta["routed_discord_user_id"] = int(getattr(member, "id", 0) or 0)
-        print(
-            f"[LOCAL MIC] segment routed=local_control user_id={member.id} "
-            f"duration={routed_meta.get('duration_sec')}"
-        )
-        await process_member_audio(member, pcm_bytes, routed_meta)
-        return
-    if target is None:
-        local_mic_runtime_state["last_error"] = "no_active_discord_target_for_local_mic"
-        return
-    local_mic_runtime_state["last_error"] = None
-    routed_meta["routed_discord_user_id"] = int(getattr(target.member, "id", 0) or 0)
-    await process_member_audio(target.member, pcm_bytes, routed_meta)
+    await handle_local_mic_segment_from_runtime(
+        pcm_bytes,
+        debug_meta,
+        deps=build_local_mic_segment_runtime_deps(),
+    )
 
 
-def local_mic_effective_max_silence_ms() -> int:
-    if local_tts_playback_manager.snapshot().get("active"):
-        return LOCAL_MIC_TTS_ACTIVE_MAX_SILENCE_MS
-    return LOCAL_MIC_MAX_SILENCE_MS
-
-
-async def ensure_local_mic_service_started() -> None:
-    global local_mic_service
-    if not LOCAL_MIC_ENABLED:
-        local_mic_runtime_state["capture_ready"] = False
-        return
-    if not LOCAL_ONLY_MODE and not LOCAL_MIC_DISCORD_USER_IDS:
-        local_mic_runtime_state["capture_ready"] = False
-        local_mic_runtime_state["last_error"] = "no_local_mic_user_ids"
-        return
-    if local_mic_service is not None and local_mic_service.capture_ready:
-        local_mic_runtime_state["capture_ready"] = True
-        return
-
-    loop = asyncio.get_running_loop()
-
-    def _dispatch_local_segment(pcm_bytes: bytes, meta: dict[str, Any]) -> None:
-        loop.call_soon_threadsafe(asyncio.create_task, handle_local_mic_segment(pcm_bytes, meta))
-
-    service = LocalMicCaptureService(
-        on_segment=_dispatch_local_segment,
+def build_local_mic_service_runtime_deps() -> LocalMicServiceRuntimeDeps:
+    return LocalMicServiceRuntimeDeps(
+        local_mic_runtime_state=local_mic_runtime_state,
+        local_mic_enabled=LOCAL_MIC_ENABLED,
+        local_only_mode=LOCAL_ONLY_MODE,
+        discord_user_ids=lambda: set(LOCAL_MIC_DISCORD_USER_IDS),
+        service_factory=LocalMicCaptureService,
+        get_running_loop=asyncio.get_running_loop,
+        create_task=asyncio.create_task,
+        handle_local_mic_segment=handle_local_mic_segment,
+        max_silence_ms_provider=lambda: local_mic_effective_max_silence_ms_from_runtime(
+            local_tts_playback_snapshot=local_tts_playback_manager.snapshot,
+            tts_active_max_silence_ms=LOCAL_MIC_TTS_ACTIVE_MAX_SILENCE_MS,
+            default_max_silence_ms=LOCAL_MIC_MAX_SILENCE_MS,
+        ),
         sample_rate=LOCAL_MIC_SAMPLE_RATE,
         block_ms=LOCAL_MIC_BLOCK_MS,
         start_threshold=LOCAL_MIC_START_THRESHOLD,
@@ -4854,7 +4519,6 @@ async def ensure_local_mic_service_started() -> None:
         start_consecutive=LOCAL_MIC_START_CONSECUTIVE,
         min_voiced_ms=LOCAL_MIC_MIN_VOICED_MS,
         max_silence_ms=LOCAL_MIC_MAX_SILENCE_MS,
-        max_silence_ms_provider=local_mic_effective_max_silence_ms,
         preroll_ms=LOCAL_MIC_PREROLL_MS,
         max_segment_sec=LOCAL_MIC_MAX_SEGMENT_SEC,
         device=LOCAL_MIC_DEVICE,
@@ -4862,133 +4526,70 @@ async def ensure_local_mic_service_started() -> None:
         vad_filter_enabled=LOCAL_MIC_VAD_FILTER_ENABLED,
         env_noise_filter_enabled=LOCAL_MIC_ENV_NOISE_FILTER_ENABLED,
         waveform_filter_enabled=LOCAL_MIC_WAVEFORM_FILTER_ENABLED,
+        log=print,
     )
-    started = service.start()
-    local_mic_runtime_state["capture_ready"] = bool(started and service.capture_ready)
-    local_mic_runtime_state["last_error"] = service.last_error
-    if local_mic_runtime_state["capture_ready"]:
-        local_mic_service = service
-        print(
-            f"[LOCAL MIC] ready user_ids={sorted(LOCAL_MIC_DISCORD_USER_IDS)} sample_rate={LOCAL_MIC_SAMPLE_RATE} device={LOCAL_MIC_DEVICE or 'default'}"
-        )
-        return
-    print(f"[LOCAL MIC] unavailable err={service.last_error or 'capture_not_ready'}")
+
+
+async def ensure_local_mic_service_started() -> None:
+    global local_mic_service
+    local_mic_service = await ensure_local_mic_service_started_from_runtime(
+        current_service=local_mic_service,
+        deps=build_local_mic_service_runtime_deps(),
+    )
+
+
+def build_tts_warmup_runtime_deps() -> TtsWarmupRuntimeDeps:
+    return TtsWarmupRuntimeDeps(
+        get_http_session=get_http_session,
+        client_timeout=aiohttp.ClientTimeout,
+        mark_startup_component=mark_startup_component,
+        startup_component_done=startup_component_done,
+        omnivoice_server_url=OMNIVOICE_SERVER_URL,
+        omnivoice_model=OMNIVOICE_MODEL,
+        omnivoice_voice=OMNIVOICE_VOICE,
+        omnivoice_language=OMNIVOICE_LANGUAGE,
+        getenv=os.getenv,
+        log=print,
+    )
 
 
 async def warmup_tts_server() -> None:
     global tts_warmup_started
 
     tts_warmup_started = True
-    mark_startup_component("tts_warmup", "running", "OmniVoice health check")
+    await warmup_tts_server_from_runtime(deps=build_tts_warmup_runtime_deps())
 
-    session = await get_http_session()
-    timeout = aiohttp.ClientTimeout(total=10)
-    async with session.get(f"{OMNIVOICE_SERVER_URL}/health", timeout=timeout) as resp:
-        if resp.status != 200:
-            text = await resp.text()
-            mark_startup_component("tts_warmup", "failed", f"health {resp.status}: {text[:160]}")
-            raise RuntimeError(f"OmniVoice health check 실패: {resp.status} / {text[:200]}")
-        print("OmniVoice 서버 준비 확인 완료")
 
-    if os.getenv("TTS_WARMUP_GENERATE_ENABLED", "false").lower() not in {"1", "true", "yes", "on"}:
-        mark_startup_component("tts_warmup", "done", "health check only")
-        return
-
-    payload = {
-        "model": OMNIVOICE_MODEL,
-        "input": "안녕",
-        "voice": OMNIVOICE_VOICE if OMNIVOICE_VOICE else "auto",
-        "response_format": "pcm",
-        "stream": True,
-    }
-    if OMNIVOICE_LANGUAGE:
-        payload["language"] = OMNIVOICE_LANGUAGE
-
-    async with session.post(
-        f"{OMNIVOICE_SERVER_URL}/v1/audio/speech",
-        json=payload,
-        timeout=aiohttp.ClientTimeout(total=20),
-    ) as resp:
-        if resp.status != 200:
-            text = await resp.text()
-            mark_startup_component("tts_warmup", "failed", f"warmup {resp.status}: {text[:160]}")
-            raise RuntimeError(f"OmniVoice warmup 실패: {resp.status} / {text[:200]}")
-        async for chunk in resp.content.iter_chunked(4096):
-            if chunk:
-                mark_startup_component("tts_warmup", "done")
-                print("OmniVoice TTS 워밍업 완료")
-                break
-        if not startup_component_done("tts_warmup"):
-            mark_startup_component("tts_warmup", "done", "no audio chunk returned")
+def build_voice_timing_runtime_deps() -> VoiceTimingRuntimeDeps:
+    return build_voice_timing_runtime_deps_from_runtime(
+        monotonic=time.monotonic,
+        voice_timing_log_threshold_ms=VOICE_TIMING_LOG_THRESHOLD_MS,
+        voice_bottleneck_logs=VOICE_BOTTLENECK_LOGS,
+        record_turn_stage=record_turn_stage,
+        record_turn_path_summary=record_turn_path_summary,
+        summarize_p95_metrics=summarize_p95_metrics,
+        build_turn_summary_payload=build_turn_summary_payload,
+        log_turn_event=log_turn_event,
+        log=print,
+    )
 
 
 def should_log_voice_timing(elapsed_ms: float) -> bool:
-    return elapsed_ms >= VOICE_TIMING_LOG_THRESHOLD_MS
+    return should_log_voice_timing_from_runtime(elapsed_ms, deps=build_voice_timing_runtime_deps())
 
 
 def log_voice_latency(metrics: dict | None, key: str, label: str) -> None:
-    if not metrics or metrics.get(key):
-        return
-
-    started_at = metrics.get("started_at")
-    if started_at is None:
-        return
-
-    elapsed_ms = (time.monotonic() - float(started_at)) * 1000.0
-    metrics[key] = True
-    metrics.setdefault("marks", {})[key] = elapsed_ms
-    record_turn_stage((metrics.get("meta") or {}).get("turn_id"), key, elapsed_ms)
-    alias_map = {
-        "llm_first_chunk_logged": ["t_main_first_token"],
-        "tts_first_byte_logged": ["t_tts_first_byte", "t_tts_first_audio"],
-        "tts_first_frame_logged": ["t_tts_first_frame"],
-        "first_packet_sent_logged": ["t_playback_first_packet"],
-        "local_first_playback_logged": ["t_local_first_playback"],
-    }
-    aliases = alias_map.get(key, [])
-    for alias in aliases:
-        metrics.setdefault("marks", {})[alias] = elapsed_ms
-        record_turn_stage((metrics.get("meta") or {}).get("turn_id"), alias, elapsed_ms)
-    if VOICE_BOTTLENECK_LOGS or should_log_voice_timing(elapsed_ms):
-        print(
-            "[VOICE LATENCY]\n"
-            f"label={label}\n"
-            f"elapsed_ms={elapsed_ms:.0f}\n"
-            f"metric_key={key}"
-        )
+    log_voice_latency_from_runtime(metrics, key, label, deps=build_voice_timing_runtime_deps())
 
 
 def log_voice_stage(metrics: dict | None, label: str, *, extra: str = "", key: str | None = None) -> None:
-    if not metrics:
-        return
-    started_at = metrics.get("started_at")
-    if started_at is None:
-        return
-    elapsed_ms = (time.monotonic() - float(started_at)) * 1000.0
-    if key:
-        metrics.setdefault("marks", {})[key] = elapsed_ms
-        record_turn_stage((metrics.get("meta") or {}).get("turn_id"), key, elapsed_ms)
-    stage_alias = {
-        "route_ready": "t_policy",
-        "memory_ready": "t_context_build",
-        "stt_done": "t_stt_done",
-        "llm_done": "t_main_done",
-    }
-    if key and key in stage_alias:
-        metrics.setdefault("marks", {})[stage_alias[key]] = elapsed_ms
-        record_turn_stage((metrics.get("meta") or {}).get("turn_id"), stage_alias[key], elapsed_ms)
-    if not (VOICE_BOTTLENECK_LOGS or should_log_voice_timing(elapsed_ms)):
-        return
-    lines = [
-        "[VOICE STAGE]",
-        f"label={label}",
-        f"elapsed_ms={elapsed_ms:.0f}",
-    ]
-    if key:
-        lines.append(f"metric_key={key}")
-    if extra:
-        lines.append(f"extra={extra}")
-    print("\n".join(lines))
+    log_voice_stage_from_runtime(
+        metrics,
+        label,
+        deps=build_voice_timing_runtime_deps(),
+        extra=extra,
+        key=key,
+    )
 
 
 def log_voice_bottleneck_summary(
@@ -4998,64 +4599,26 @@ def log_voice_bottleneck_summary(
     extra: str = "",
     event_name: str = "turn_summary",
 ) -> None:
-    if not metrics:
-        return
-    started_at = metrics.get("started_at")
-    if started_at is None:
-        return
+    log_voice_bottleneck_summary_from_runtime(
+        metrics,
+        deps=build_voice_timing_runtime_deps(),
+        label=label,
+        extra=extra,
+        event_name=event_name,
+    )
 
-    total_ms = (time.monotonic() - float(started_at)) * 1000.0
-    marks = metrics.get("marks") or {}
 
-    def _fmt(name: str) -> str:
-        value = marks.get(name)
-        return f"{float(value):.0f}ms" if value is not None else "-"
-
-    meta = metrics.get("meta") or {}
-    record_turn_path_summary(meta, marks, total_ms)
-    p95_summary = summarize_p95_metrics()
-    if VOICE_BOTTLENECK_LOGS or should_log_voice_timing(total_ms):
-        lines = [
-            "[VOICE BOTTLENECK]",
-            f"label={label}",
-            f"total_ms={total_ms:.0f}",
-            f"turn_type={meta.get('turn_type') or '-'}",
-            f"selected_path={meta.get('selected_path') or '-'}",
-            f"reply_source={meta.get('reply_source') or '-'}",
-            f"route={_fmt('route_ready')}",
-            f"cognitive={_fmt('cognitive_hotpath_ms')}",
-            f"memory={_fmt('memory_ready')}",
-            f"wake_probe_ms={_fmt('wake_done')}",
-            f"stt={_fmt('stt_done')}",
-            f"llm_first={_fmt('llm_first_chunk_logged')}",
-            f"llm_done={_fmt('llm_done')}",
-            f"tts_req={_fmt('tts_request_logged')}",
-            f"tts_headers={_fmt('tts_response_headers_logged')}",
-            f"tts_first={_fmt('tts_first_byte_logged')}",
-            f"tts_frame={_fmt('tts_first_frame_logged')}",
-            f"playback={_fmt('first_packet_sent_logged')}",
-            f"local_playback={_fmt('local_first_playback_logged')}",
-            f"p95_stt={p95_summary['stt_ms_p95']:.0f}ms",
-            f"p95_router={p95_summary['router_ms_p95']:.0f}ms",
-            f"p95_main_first={p95_summary['main_first_token_ms_p95']:.0f}ms",
-            f"p95_tts_first={p95_summary['tts_first_audio_ms_p95']:.0f}ms",
-            f"search_q={p95_summary['search_followup_queued_count']}",
-            f"cancelled_turns={p95_summary['cancelled_stale_turn_count']}",
-        ]
-        if extra:
-            lines.append(f"extra={extra}")
-        print("\n".join(lines))
-
-    log_turn_event(
-        event_name,
-        **build_turn_summary_payload(
-            metrics,
-            label=label,
-            event_name=event_name,
-            total_ms=round(total_ms, 1),
-            p95_summary=p95_summary,
-            extra=extra or None,
-        ),
+def build_omnivoice_request_runtime_deps() -> OmniVoiceRequestRuntimeDeps:
+    return OmniVoiceRequestRuntimeDeps(
+        request_id_suffix=lambda: uuid.uuid4().hex[:10],
+        tts_synth_request_factory=TtsSynthRequest,
+        tts_synth_result_factory=TtsSynthResult,
+        omnivoice_model=OMNIVOICE_MODEL,
+        omnivoice_pcm_rate=OMNIVOICE_PCM_RATE,
+        omnivoice_stream=OMNIVOICE_STREAM,
+        omnivoice_num_step=OMNIVOICE_NUM_STEP,
+        omnivoice_speed=OMNIVOICE_SPEED,
+        omnivoice_language=OMNIVOICE_LANGUAGE,
     )
 
 
@@ -5103,35 +4666,16 @@ async def create_omnivoice_source(
         log_turn_event("playback_task_started", **trace)
 
         async def stream_with_voice(voice_name: str) -> TtsSynthResult:
-            request_id = f"{turn_id or 'turnless'}:{chunk_index or 0}:{uuid.uuid4().hex[:10]}"
-            tts_request = TtsSynthRequest(
-                request_id=request_id,
-                turn_id=turn_id or "",
+            request_bundle = build_omnivoice_tts_request_bundle_from_runtime(
                 text=text,
-                voice=voice_name,
-                voice_profile=voice_name.split(":", 1)[1] if voice_name.startswith("clone:") else None,
-                response_format="pcm",
-                sample_rate_hz=OMNIVOICE_PCM_RATE,
-                stream=OMNIVOICE_STREAM,
-                chunk_index=int(chunk_index or 0),
-                metadata={"session_key": session_key or "", "text_len": len(text)},
+                voice_name=voice_name,
+                deps=build_omnivoice_request_runtime_deps(),
+                turn_id=turn_id,
+                chunk_index=chunk_index,
+                session_key=session_key,
             )
-            payload = {
-                "model": OMNIVOICE_MODEL,
-                "input": text,
-                "voice": tts_request.voice,
-                "response_format": tts_request.response_format,
-                "stream": tts_request.stream,
-                "num_step": OMNIVOICE_NUM_STEP,
-            }
-            if OMNIVOICE_SPEED > 0 and abs(OMNIVOICE_SPEED - 1.0) > 0.001:
-                payload["speed"] = OMNIVOICE_SPEED
-            if OMNIVOICE_LANGUAGE:
-                payload["language"] = OMNIVOICE_LANGUAGE
-            if turn_id:
-                payload["turn_id"] = turn_id
-            if session_key:
-                payload["session_key"] = session_key
+            tts_request = request_bundle.request
+            payload = request_bundle.payload
 
             nonlocal first_pcm_logged
             request_started_mono = time.monotonic()
@@ -5159,20 +4703,15 @@ async def create_omnivoice_source(
                     on_response_headers()
                 if resp.status != 200:
                     error_text = await resp.text()
-                    return TtsSynthResult(
-                        request_id=tts_request.request_id,
-                        turn_id=tts_request.turn_id,
-                        backend="omnivoice_http",
+                    return build_omnivoice_tts_result_from_runtime(
+                        tts_request,
+                        deps=build_omnivoice_request_runtime_deps(),
                         ok=False,
-                        response_format=tts_request.response_format,
-                        sample_rate_hz=tts_request.sample_rate_hz,
-                        profile_resolved=tts_request.voice,
                         status_code=resp.status,
                         latency_ms=(time.monotonic() - request_started_mono) * 1000.0,
                         first_audio_ms=first_audio_ms,
                         error_code="http_error",
                         error_text=error_text,
-                        metadata=tts_request.metadata,
                     )
 
                 async for chunk in resp.content.iter_chunked(8192):
@@ -5191,44 +4730,31 @@ async def create_omnivoice_source(
                             )
                         source.feed_pcm24_mono(chunk)
                 if not first_pcm_logged:
-                    return TtsSynthResult(
-                        request_id=tts_request.request_id,
-                        turn_id=tts_request.turn_id,
-                        backend="omnivoice_http",
+                    return build_omnivoice_tts_result_from_runtime(
+                        tts_request,
+                        deps=build_omnivoice_request_runtime_deps(),
                         ok=False,
-                        response_format=tts_request.response_format,
-                        sample_rate_hz=tts_request.sample_rate_hz,
-                        profile_resolved=tts_request.voice,
                         status_code=resp.status,
                         latency_ms=(time.monotonic() - request_started_mono) * 1000.0,
                         first_audio_ms=first_audio_ms,
                         error_code="empty_audio",
                         error_text="OmniVoice returned no PCM bytes.",
-                        metadata=tts_request.metadata,
                     )
-                return TtsSynthResult(
-                    request_id=tts_request.request_id,
-                    turn_id=tts_request.turn_id,
-                    backend="omnivoice_http",
+                return build_omnivoice_tts_result_from_runtime(
+                    tts_request,
+                    deps=build_omnivoice_request_runtime_deps(),
                     ok=True,
-                    response_format=tts_request.response_format,
-                    sample_rate_hz=tts_request.sample_rate_hz,
-                    profile_resolved=tts_request.voice,
                     status_code=resp.status,
                     latency_ms=(time.monotonic() - request_started_mono) * 1000.0,
                     first_audio_ms=first_audio_ms,
-                    metadata=tts_request.metadata,
                 )
 
         try:
-            tts_result = await stream_with_voice(OMNIVOICE_VOICE)
-            if not tts_result.ok:
-                if OMNIVOICE_VOICE.startswith("clone:"):
-                    error_text = tts_result.error_text or ""
-                    print(f"[TTS FALLBACK] clone voice 실패 -> auto 사용 | voice={OMNIVOICE_VOICE} err={error_text[:200]}")
-                    tts_result = await stream_with_voice("auto")
-                if not tts_result.ok:
-                    raise RuntimeError(f"OmniVoice 서버 오류: {(tts_result.error_text or '')[:300]}")
+            await run_omnivoice_tts_with_fallback_from_runtime(
+                primary_voice=OMNIVOICE_VOICE,
+                stream_with_voice=stream_with_voice,
+                log=print,
+            )
         except asyncio.CancelledError:
             record_voice_pipeline_failure("tts_producer_cancelled", "cancelled", None, **trace)
             source.cleanup()
@@ -5247,77 +4773,33 @@ async def create_omnivoice_source(
 # =========================================================
 # STT
 # =========================================================
-def resolve_stt_torch_dtype() -> torch.dtype:
-    value = str(STT_COMPUTE_TYPE).strip().lower()
-    mapping = {
-        "float16": torch.float16,
-        "fp16": torch.float16,
-        "half": torch.float16,
-        "bfloat16": torch.bfloat16,
-        "bf16": torch.bfloat16,
-        "float32": torch.float32,
-        "fp32": torch.float32,
-        "float": torch.float32,
-    }
-    return mapping.get(value, torch.float32)
-
-
-def normalize_stt_language(language: str | None = None) -> str | None:
-    value = str(language if language is not None else STT_LANGUAGE).strip()
-    if not value:
-        return None
-
-    lowered = value.lower()
-    aliases = {
-        "korean": "Korean",
-        "kor": "Korean",
-        "kr": "Korean",
-        "ko": "Korean",
-        "ko-kr": "Korean",
-        "ko_kr": "Korean",
-        "english": "English",
-        "en": "English",
-        "chinese": "Chinese",
-        "zh": "Chinese",
-        "japanese": "Japanese",
-        "ja": "Japanese",
-    }
-    return aliases.get(lowered, value)
-
-
 def get_stt_model() -> tuple[str, Any, Any]:
-    global stt_processor, stt_model, stt_backend
-
-    if stt_backend == "qwen_asr" and stt_model is not None:
-        return stt_backend, stt_processor, stt_model
-
-    if Qwen3ASRModel is None:
-        detail = f" ({type(QWEN_ASR_IMPORT_ERROR).__name__}: {QWEN_ASR_IMPORT_ERROR})" if QWEN_ASR_IMPORT_ERROR else ""
-        raise RuntimeError(f"qwen-asr를 불러오지 못했습니다{detail}. STT 의존성을 확인한 뒤 다시 실행하세요.")
-
-    device = "cuda:0" if torch.cuda.is_available() else "cpu"
-    token = os.getenv("HF_TOKEN")
-    torch_dtype = resolve_stt_torch_dtype()
-
-    print(f"[STT LOAD] start model={STT_MODEL_NAME} device={device} dtype={torch_dtype}")
-
-    stt_backend = "qwen_asr"
-    stt_processor = None
-    load_kwargs: dict[str, Any] = {
-        "dtype": torch_dtype,
-        "device_map": device,
-        "max_inference_batch_size": 1,
-        "max_new_tokens": max(VOICE_STT_MAX_NEW_TOKENS, 256),
-    }
-    if token:
-        load_kwargs["token"] = token
-
-    stt_model = Qwen3ASRModel.from_pretrained(
-        STT_MODEL_NAME,
-        **load_kwargs,
+    return get_stt_model_from_runtime(
+        deps=build_stt_model_runtime_deps_from_runtime(
+            stt_compute_type=STT_COMPUTE_TYPE,
+            stt_model_name=STT_MODEL_NAME,
+            stt_language=STT_LANGUAGE,
+            stt_force_language=STT_FORCE_LANGUAGE,
+            stt_max_new_tokens=max(VOICE_STT_MAX_NEW_TOKENS, 256),
+            get_env_token=lambda: os.getenv("HF_TOKEN"),
+            torch_device=lambda: "cuda:0" if torch.cuda.is_available() else "cpu",
+            log=print,
+        )
     )
-    print("[STT LOAD] done backend=Qwen3-ASR")
-    return stt_backend, stt_processor, stt_model
+
+
+def _build_stt_text_runtime_deps() -> Any:
+    return build_stt_text_runtime_deps(
+        clean_text=clean_text,
+        normalize_voice_text=normalize_voice_text,
+        contains_wake_word=contains_wake_word,
+        looks_like_brief_filler_text=looks_like_brief_filler_text,
+        looks_like_repetitive_noise_text=looks_like_repetitive_noise_text,
+        is_similar=is_similar,
+        session_partial_stt_text=session_partial_stt_text,
+        session_committed_stt_text=session_committed_stt_text,
+        partial_stt_cache=partial_stt_cache,
+    )
 
 
 def transcribe_audio16k_sync(audio16k: np.ndarray, max_new_tokens: int = 256, *, sampling_rate: int = TARGET_RATE, stage: str = "full") -> str:
@@ -5328,7 +4810,11 @@ def transcribe_audio16k_sync(audio16k: np.ndarray, max_new_tokens: int = 256, *,
     print(f"[STT INPUT][{stage}] sampling_rate={effective_rate} samples={audio16k.size} sec={audio16k.size / float(effective_rate):.2f}")
     if STT_SERVICE_URL:
         try:
-            language = normalize_stt_language() if STT_FORCE_LANGUAGE else None
+            language = (
+                normalize_stt_language_from_runtime(None, default_language=STT_LANGUAGE)
+                if STT_FORCE_LANGUAGE
+                else None
+            )
             result = transcribe_audio16k_via_service(
                 audio16k,
                 service_url=STT_SERVICE_URL,
@@ -5354,7 +4840,11 @@ def transcribe_audio16k_sync(audio16k: np.ndarray, max_new_tokens: int = 256, *,
         effective_rate = TARGET_RATE
         print(f"[STT RESAMPLE][{stage}] {sampling_rate} -> {TARGET_RATE} samples={stt_audio.size}")
 
-    language = normalize_stt_language() if STT_FORCE_LANGUAGE else None
+    language = (
+        normalize_stt_language_from_runtime(None, default_language=STT_LANGUAGE)
+        if STT_FORCE_LANGUAGE
+        else None
+    )
     results = model.transcribe(
         audio=(stt_audio, effective_rate),
         language=language,
@@ -5370,230 +4860,65 @@ def transcribe_audio16k_sync(audio16k: np.ndarray, max_new_tokens: int = 256, *,
 
 
 def build_partial_stt_window(audio16k: np.ndarray, *, sampling_rate: int = TARGET_RATE) -> np.ndarray:
-    if audio16k.size == 0:
-        return audio16k
-    rate = max(1, int(sampling_rate))
-    max_samples = int(rate * 1.2)
-    overlap_samples = int(rate * 0.3)
-    if audio16k.size <= max_samples:
-        return np.asarray(audio16k, dtype=np.float32)
-    start = max(0, audio16k.size - max_samples)
-    if start > overlap_samples:
-        start -= overlap_samples
-    return np.asarray(audio16k[start:], dtype=np.float32)
+    return build_partial_stt_window_from_runtime(audio16k, sampling_rate=sampling_rate)
 
 
 def longest_common_prefix_text(a: str, b: str) -> str:
-    left = clean_text(a)
-    right = clean_text(b)
-    limit = min(len(left), len(right))
-    idx = 0
-    while idx < limit and left[idx] == right[idx]:
-        idx += 1
-    return left[:idx]
+    return longest_common_prefix_text_from_runtime(a, b, clean_text=clean_text)
 
 
 def commit_stable_transcript(session_key: str | None, *, new_partial_text: str) -> str:
-    if not session_key:
-        return clean_text(new_partial_text)
-    prev_partial = clean_text(session_partial_stt_text.get(session_key, ""))
-    committed = clean_text(session_committed_stt_text.get(session_key, ""))
-    current_partial = clean_text(new_partial_text)
-    session_partial_stt_text[session_key] = current_partial
-    if not current_partial:
-        return committed
-    stable = longest_common_prefix_text(prev_partial, current_partial) if prev_partial else current_partial
-    safe = stable[:-3].strip() if len(stable) > 3 else ""
-    if not safe and current_partial == prev_partial:
-        safe = current_partial
-    if safe and len(safe) > len(committed):
-        committed = clean_text(safe)
-        session_committed_stt_text[session_key] = committed
-    elif not committed:
-        session_committed_stt_text[session_key] = committed
-    return committed
+    return commit_stable_transcript_from_runtime(
+        session_key,
+        new_partial_text=new_partial_text,
+        deps=_build_stt_text_runtime_deps(),
+    )
 
 
 def get_partial_transcript(session_key: str | None, audio16k: np.ndarray, *, sampling_rate: int = TARGET_RATE) -> tuple[str, str]:
-    partial_audio = build_partial_stt_window(audio16k, sampling_rate=sampling_rate)
-    partial_samples = int(partial_audio.size)
-    min_partial_samples = max(1, int(float(sampling_rate) * 0.85))
-    if partial_samples < min_partial_samples:
-        committed_text = clean_text(session_committed_stt_text.get(session_key or "", ""))
-        return "", committed_text
-
-    audio_hash = hashlib.sha1(np.asarray(partial_audio, dtype=np.float32).tobytes()).hexdigest()
-    cache_key = session_key or "__global__"
-    cached = partial_stt_cache.get(cache_key)
-    if cached and cached.get("hash") == audio_hash:
-        partial_text = clean_text(cached.get("partial_text", ""))
-        committed_text = commit_stable_transcript(session_key, new_partial_text=partial_text)
-        return partial_text, committed_text
-
-    partial_text = transcribe_audio16k_sync(
-        partial_audio,
-        max_new_tokens=max(64, min(VOICE_STT_MAX_NEW_TOKENS, 128)),
+    return get_partial_transcript_from_runtime(
+        session_key,
+        audio16k,
         sampling_rate=sampling_rate,
-        stage="partial",
+        max_new_tokens=max(64, min(VOICE_STT_MAX_NEW_TOKENS, 128)),
+        transcribe_audio16k_sync=transcribe_audio16k_sync,
+        deps=_build_stt_text_runtime_deps(),
     )
-    partial_stt_cache[cache_key] = {
-        "hash": audio_hash,
-        "partial_text": partial_text,
-        "samples": partial_samples,
-        "updated_at": time.monotonic(),
-    }
-    committed_text = commit_stable_transcript(session_key, new_partial_text=partial_text)
-    return partial_text, committed_text
 
 
 def score_stt_candidate(text: str, *, wake_probe: str = "") -> float:
-    text = clean_text(text)
-    if not text:
-        return -100.0
-
-    normalized = normalize_voice_text(text)
-    if not normalized:
-        return -80.0
-
-    compact = normalized.replace(" ", "")
-    token_count = len([t for t in normalized.split() if t])
-    hangul_alnum_count = len(re.findall(r"[가-힣A-Za-z0-9]", text))
-    unique_chars = len(set(compact))
-    unique_ratio = unique_chars / max(1, len(compact))
-
-    score = 0.0
-    score += min(24.0, len(compact) * 0.75)
-    score += min(6.0, token_count * 0.6)
-    score += min(8.0, hangul_alnum_count * 0.15)
-    score += unique_ratio * 2.0
-
-    if contains_wake_word(text):
-        score += 10.0
-    if wake_probe:
-        wake_probe_n = normalize_voice_text(wake_probe)
-        if wake_probe_n and wake_probe_n in normalized:
-            score += 2.0
-
-    if looks_like_brief_filler_text(text):
-        score -= 14.0
-    if looks_like_repetitive_noise_text(text):
-        score -= 16.0
-    if re.search(r"(.)\1{3,}", compact):
-        score -= 6.0
-    if len(compact) <= 2:
-        score -= 4.0
-
-    return score
+    return score_stt_candidate_from_runtime(
+        text,
+        wake_probe=wake_probe,
+        deps=_build_stt_text_runtime_deps(),
+    )
 
 
 def choose_full_stt_candidate(primary_text: str, rescore_text: str, *, wake_probe: str = "") -> tuple[str, dict]:
-    primary = clean_text(primary_text)
-    rescore = clean_text(rescore_text)
-    primary_score = score_stt_candidate(primary, wake_probe=wake_probe)
-    rescore_score = score_stt_candidate(rescore, wake_probe=wake_probe)
-
-    choice = "primary"
-    chosen_text = primary
-
-    if not primary and rescore:
-        choice = "rescore"
-        chosen_text = rescore
-    elif rescore and not is_similar(primary, rescore):
-        if rescore_score >= primary_score + 1.5:
-            choice = "rescore"
-            chosen_text = rescore
-        elif contains_wake_word(rescore) and not contains_wake_word(primary) and rescore_score >= primary_score:
-            choice = "rescore"
-            chosen_text = rescore
-        elif len(normalize_voice_text(rescore).replace(" ", "")) >= len(normalize_voice_text(primary).replace(" ", "")) + 3 and rescore_score > primary_score:
-            choice = "rescore"
-            chosen_text = rescore
-
-    return chosen_text, {
-        "enabled": True,
-        "primary_text": primary,
-        "primary_score": round(primary_score, 3),
-        "rescore_text": rescore,
-        "rescore_score": round(rescore_score, 3),
-        "selected": choice,
-    }
+    return choose_full_stt_candidate_from_runtime(
+        primary_text,
+        rescore_text,
+        wake_probe=wake_probe,
+        deps=_build_stt_text_runtime_deps(),
+    )
 
 
 def detect_wake_word_sync(audio: np.ndarray, *, sampling_rate: int = TARGET_RATE) -> dict[str, str | bool | None]:
-    wake_audio = slice_audio_window(audio, WAKE_AUDIO_SEC, sampling_rate=sampling_rate)
-    wake_raw_text = transcribe_audio16k_sync(
-        wake_audio,
-        max_new_tokens=WAKE_MAX_TOKENS,
+    return detect_wake_word_sync_from_runtime(
+        audio,
         sampling_rate=sampling_rate,
-        stage="wake",
+        wake_audio_sec=WAKE_AUDIO_SEC,
+        wake_confirm_audio_sec=WAKE_CONFIRM_AUDIO_SEC,
+        wake_max_tokens=WAKE_MAX_TOKENS,
+        wake_confirm_max_tokens=WAKE_CONFIRM_MAX_TOKENS,
+        transcribe_audio16k_sync=transcribe_audio16k_sync,
+        apply_stt_post_corrections=apply_stt_post_corrections,
+        strip_leading_voice_fillers=strip_leading_voice_fillers,
+        extract_leading_wake_alias=extract_leading_wake_alias,
+        fuzzy_leading_wake_alias=fuzzy_leading_wake_alias,
+        looks_like_gibberish_probe=looks_like_gibberish_probe,
+        slice_audio_window=slice_audio_window,
     )
-    wake_text = apply_stt_post_corrections(wake_raw_text, wake_detected=False)
-
-    probe_text = strip_leading_voice_fillers(wake_text)
-    probe_alias = extract_leading_wake_alias(probe_text)
-    probe_fuzzy_alias = fuzzy_leading_wake_alias(probe_text) if probe_alias is None else None
-    confirm_text = ""
-
-    if probe_alias is None and looks_like_gibberish_probe(probe_text):
-        return {
-            "wake_detected": False,
-            "wake_probe_text": wake_text,
-            "wake_confirm_text": "",
-            "wake_match_mode": "rejected",
-            "wake_alias": None,
-            "wake_reject_reason": "gibberish_probe",
-        }
-
-    if probe_alias is None and probe_fuzzy_alias is None:
-        return {
-            "wake_detected": False,
-            "wake_probe_text": wake_text,
-            "wake_confirm_text": "",
-            "wake_match_mode": "rejected",
-            "wake_alias": None,
-            "wake_reject_reason": "probe_miss",
-        }
-
-    confirm_audio = slice_audio_window(audio, WAKE_CONFIRM_AUDIO_SEC, sampling_rate=sampling_rate)
-    confirm_raw_text = transcribe_audio16k_sync(
-        confirm_audio,
-        max_new_tokens=WAKE_CONFIRM_MAX_TOKENS,
-        sampling_rate=sampling_rate,
-        stage="wake-confirm",
-    )
-    confirm_text = apply_stt_post_corrections(confirm_raw_text, wake_detected=False)
-    confirm_probe = strip_leading_voice_fillers(confirm_text)
-    confirm_alias = extract_leading_wake_alias(confirm_probe)
-
-    if probe_alias is not None and confirm_alias == probe_alias:
-        return {
-            "wake_detected": True,
-            "wake_probe_text": wake_text,
-            "wake_confirm_text": confirm_text,
-            "wake_match_mode": "exact",
-            "wake_alias": probe_alias,
-            "wake_reject_reason": None,
-        }
-
-    confirm_fuzzy_alias = fuzzy_leading_wake_alias(confirm_probe) if confirm_alias is None else None
-    if probe_alias is None and probe_fuzzy_alias is not None and confirm_fuzzy_alias == probe_fuzzy_alias:
-        return {
-            "wake_detected": True,
-            "wake_probe_text": wake_text,
-            "wake_confirm_text": confirm_text,
-            "wake_match_mode": "fuzzy",
-            "wake_alias": probe_fuzzy_alias,
-            "wake_reject_reason": None,
-        }
-
-    return {
-        "wake_detected": False,
-        "wake_probe_text": wake_text,
-        "wake_confirm_text": confirm_text,
-        "wake_match_mode": "rejected",
-        "wake_alias": probe_alias or probe_fuzzy_alias,
-        "wake_reject_reason": "confirm_miss",
-    }
 
 
 # =========================================================
@@ -5762,12 +5087,25 @@ async def restore_last_voice_channel(guild: discord.Guild | None = None, *, forc
     return True, getattr(channel, "name", str(channel_id))
 
 
+def build_tts_interrupt_runtime_deps() -> TtsInterruptRuntimeDeps:
+    return TtsInterruptRuntimeDeps(
+        tts_playback_manager=tts_playback_manager,
+        log_turn_event=log_turn_event,
+        speaker_verification_applies=speaker_verification_applies,
+        speaker_verification_result_factory=SpeakerVerificationResult,
+        speaker_verifier=speaker_verifier,
+        speaker_verification_apply_to=SPEAKER_VERIFICATION_APPLY_TO,
+        speaker_verification_threshold=SPEAKER_VERIFICATION_THRESHOLD,
+        to_thread=asyncio.to_thread,
+    )
+
+
 async def stop_active_tts_playback(guild_id: int | None, *, reason: str = "interrupt") -> bool:
-    stopped = await tts_playback_manager.cancel_guild(guild_id)
-    if not stopped:
-        return False
-    log_turn_event("tts_interrupt", guild_id=guild_id, reason=reason)
-    return True
+    return await stop_active_tts_playback_from_runtime(
+        guild_id,
+        deps=build_tts_interrupt_runtime_deps(),
+        reason=reason,
+    )
 
 
 async def verify_speaker_for_tts_interrupt(
@@ -5777,27 +5115,37 @@ async def verify_speaker_for_tts_interrupt(
     source: str | None,
     metrics: dict | None = None,
 ) -> SpeakerVerificationResult:
-    if not speaker_verification_applies(source=source, apply_to=SPEAKER_VERIFICATION_APPLY_TO):
-        result = SpeakerVerificationResult("skipped", threshold=SPEAKER_VERIFICATION_THRESHOLD, detail=f"source={source or ''}")
-    else:
-        result = await asyncio.to_thread(speaker_verifier.verify, audio, sampling_rate=sampling_rate)
-    if metrics is not None:
-        metrics.setdefault("meta", {})["speaker_verification"] = result.to_dict()
-    return result
+    return await verify_speaker_for_tts_interrupt_from_runtime(
+        audio,
+        deps=build_tts_interrupt_runtime_deps(),
+        sampling_rate=sampling_rate,
+        source=source,
+        metrics=metrics,
+    )
 
 
 def speaker_verification_allows_tts_interrupt(result: SpeakerVerificationResult) -> bool:
-    return result.matched is not False
+    return speaker_verification_allows_tts_interrupt_from_runtime(result)
+
+
+def build_cached_tts_runtime_deps() -> CachedTtsRuntimeDeps:
+    return CachedTtsRuntimeDeps(
+        resolve_cached_tts_audio_path=resolve_cached_tts_audio_path,
+        cached_audio_enabled=CACHED_AUDIO_ENABLED,
+        canned_wake_reply_text=CANNED_WAKE_REPLY_TEXT,
+        canned_wake_reply_audio=CANNED_WAKE_REPLY_AUDIO,
+        project_root=PROJECT_ROOT,
+        cached_wave_audio_source_factory=CachedWaveAudioSource,
+        tts_source_playback_request_factory=TtsSourcePlaybackRequest,
+        tts_playback_manager=tts_playback_manager,
+        clean_text=clean_text,
+        log_turn_event=log_turn_event,
+        log_voice_latency=log_voice_latency,
+    )
 
 
 def cached_audio_path_for_answer(answer: str) -> Path | None:
-    return resolve_cached_tts_audio_path(
-        answer,
-        enabled=CACHED_AUDIO_ENABLED,
-        canned_text=CANNED_WAKE_REPLY_TEXT,
-        canned_audio_path=CANNED_WAKE_REPLY_AUDIO,
-        project_root=PROJECT_ROOT,
-    )
+    return cached_audio_path_for_answer_from_runtime(answer, deps=build_cached_tts_runtime_deps())
 
 
 async def play_cached_answer_audio(
@@ -5808,43 +5156,14 @@ async def play_cached_answer_audio(
     session_key: str | None = None,
     metrics: dict | None = None,
 ) -> bool:
-    path = cached_audio_path_for_answer(answer)
-    if path is None:
-        return False
-
-    guild_id = getattr(getattr(vc, "guild", None), "id", None)
-    source = CachedWaveAudioSource(
-        path,
-        on_first_packet_sent=lambda: log_turn_event(
-            "first_packet_sent",
-            turn_id=turn_id,
-            chunk_index=1,
-            session_key=session_key,
-            source_type="CachedWaveAudioSource",
-        ) or log_voice_latency(metrics, "first_packet_sent_logged", "캐시 오디오 첫 패킷 송신 시간"),
-    )
-    log_turn_event(
-        "cached_audio_playback_selected",
+    return await play_cached_answer_audio_from_runtime(
+        vc,
+        answer,
+        deps=build_cached_tts_runtime_deps(),
         turn_id=turn_id,
         session_key=session_key,
-        path=str(path),
-        answer=clean_text(answer),
+        metrics=metrics,
     )
-    await tts_playback_manager.play_source_once(
-        TtsSourcePlaybackRequest(
-            vc,
-            source,
-            guild_id=guild_id,
-            turn_id=turn_id,
-            session_key=session_key,
-            metrics=metrics,
-            trace_payload={
-                "cached_audio_path": str(path),
-            },
-            cleanup_source=True,
-        )
-    )
-    return True
 
 
 async def speak_answer(
@@ -6254,40 +5573,20 @@ def schedule_local_control_tts(
     session_key: str | None = None,
     turn_scope: TurnScope | None = None,
 ) -> asyncio.Task | None:
-    if not LOCAL_ONLY_MODE or not local_tts_playback_manager.enabled:
-        return None
-    metrics: dict[str, Any] = {
-        "started_at": time.monotonic(),
-        "meta": {
-            "turn_id": turn_id,
-            "source": "control_page",
-            "session_key": session_key,
-            "turn_type": "control_page_local_tts",
-            "selected_path": "local_speaker",
-            "needs_tts": True,
-        },
-        "marks": {},
-    }
-
-    async def _runner() -> None:
-        ok = False
-        try:
-            ok = await speak_answer_local(
-                answer,
-                turn_id=turn_id,
-                session_key=session_key,
-                turn_scope=turn_scope,
-                metrics=metrics,
-            )
-        finally:
-            log_voice_bottleneck_summary(
-                metrics,
-                label="local_tts",
-                extra=f"control_page=true playback={'ok' if ok else 'skipped_or_failed'}",
-                event_name="local_tts_summary",
-            )
-
-    return create_turn_scoped_task(_runner(), turn_scope=turn_scope)
+    return schedule_local_control_tts_from_runtime(
+        answer,
+        turn_id=turn_id,
+        session_key=session_key,
+        turn_scope=turn_scope,
+        deps=build_local_control_tts_runtime_deps(
+            local_only_mode=LOCAL_ONLY_MODE,
+            local_tts_enabled=lambda: bool(local_tts_playback_manager.enabled),
+            speak_answer_local=speak_answer_local,
+            create_turn_scoped_task=create_turn_scoped_task,
+            log_voice_bottleneck_summary=log_voice_bottleneck_summary,
+            monotonic=time.monotonic,
+        ),
+    )
 
 
 # =========================================================
@@ -6316,7 +5615,7 @@ def build_voice_response_runtime_deps() -> VoiceResponseRuntimeDeps:
         prepare_route_context=prepare_route_context,
         prepare_llm_messages=prepare_llm_messages,
         is_user_echo_answer=is_user_echo_answer,
-        is_casual_call_or_status_question=is_casual_call_or_status_question,
+        is_casual_call_or_status_question=session_is_casual_call_or_status_question,
         observe_live_minecraft_state=observe_live_minecraft_state,
         build_runtime_status_context=build_runtime_status_context,
         build_main_response_guidance=build_main_response_guidance,
@@ -6577,7 +5876,7 @@ async def ask_llm_once(
         return build_answer_payload_from_text(route_decision.user_visible_preface).display_text
 
     guided_user_text = route_decision.prompt_text or user_text
-    lightweight_persona_turn = is_casual_call_or_status_question(guided_user_text)
+    lightweight_persona_turn = session_is_casual_call_or_status_question(guided_user_text)
     live_minecraft_state = None if lightweight_persona_turn else await observe_live_minecraft_state(guild_id)
     runtime_status_context = await build_runtime_status_context(force=bool(route_decision.needs_runtime_state))
     final_user_text = f"{guided_user_text}\n\n{build_main_response_guidance(cognitive_state, source=source, user_text=guided_user_text, session_key=session_key, guild_id=guild_id, minecraft_state=live_minecraft_state, runtime_status_context=runtime_status_context, route_decision=route_decision)}"
@@ -6684,15 +5983,19 @@ DEFAULT_INTERNAL_ROUTES = {"main_direct", "policy_short_circuit", "search_execut
 DISABLED_MAIN_APP_SKILL_ROUTES = {"minecraft"}
 
 
+def build_route_executor_runtime_deps() -> ResolveRouteExecutorRuntimeDeps:
+    return ResolveRouteExecutorRuntimeDeps(
+        get_autonomy_engine=lambda guild_id: autonomy_engines.get(guild_id),
+        create_autonomy_engine=get_or_create_autonomy_engine,
+    )
+
+
 def resolve_route_executor(*, guild_id: int | None, route_name: str) -> Any:
-    if guild_id is None:
-        return None
-    engine = autonomy_engines.get(guild_id)
-    if engine is None:
-        if route_name != "minecraft":
-            return None
-        engine = get_or_create_autonomy_engine(guild_id)
-    return getattr(engine.executor, "executors", {}).get(route_name)
+    return resolve_route_executor_from_runtime(
+        guild_id,
+        route_name,
+        deps=build_route_executor_runtime_deps(),
+    )
 
 
 def get_minecraft_client() -> MinecraftAutonomyClient:
@@ -6798,45 +6101,76 @@ async def disable_minecraft_mode(guild_id: int) -> None:
     await client.stop()
 
 
+def build_control_page_ui_runtime_deps() -> ControlPageUiRuntimeDeps:
+    return ControlPageUiRuntimeDeps(
+        control_page_host=CONTROL_PAGE_HOST,
+        control_page_port=CONTROL_PAGE_PORT,
+        local_control_guild_id=LOCAL_CONTROL_GUILD_ID,
+        local_control_guild_name=LOCAL_CONTROL_GUILD_NAME,
+        control_page_welcome_fallback=CONTROL_PAGE_WELCOME_FALLBACK,
+        clean_text=clean_text,
+        sanitize_control_page_welcome_text_payload=sanitize_control_page_welcome_text_payload,
+        control_page_ui_command_store=control_page_ui_command_store,
+        control_page_chat_log_store=control_page_chat_log_store,
+    )
+
+
 def enqueue_control_page_ui_command(action: str, *, panel_id: str | None = None) -> dict[str, Any]:
-    return control_page_ui_command_store.enqueue(action, panel_id=panel_id)
+    return enqueue_control_page_ui_command_from_runtime(
+        action,
+        panel_id=panel_id,
+        deps=build_control_page_ui_runtime_deps(),
+    )
 
 
 def build_control_page_panel_state() -> dict[str, Any]:
-    return control_page_ui_command_store.panel_state()
+    return build_control_page_panel_state_from_runtime(deps=build_control_page_ui_runtime_deps())
 
 
 def control_page_local_url() -> str:
-    return f"http://{CONTROL_PAGE_HOST}:{CONTROL_PAGE_PORT}/"
+    return control_page_local_url_from_runtime(deps=build_control_page_ui_runtime_deps())
 
 
 def control_page_session_key(guild_id: int | None) -> str:
-    if guild_id is None or int(guild_id) == LOCAL_CONTROL_GUILD_ID:
-        return "control-page:local"
-    return f"control-page:{guild_id}"
+    return control_page_session_key_from_runtime(guild_id, deps=build_control_page_ui_runtime_deps())
 
 
 def control_page_effective_guild_id(guild: discord.Guild | None) -> int:
-    return int(getattr(guild, "id", LOCAL_CONTROL_GUILD_ID) or LOCAL_CONTROL_GUILD_ID)
+    return control_page_effective_guild_id_from_runtime(guild, deps=build_control_page_ui_runtime_deps())
 
 
 def control_page_effective_guild_name(guild: discord.Guild | None) -> str:
-    if guild is None:
-        return LOCAL_CONTROL_GUILD_NAME
-    return clean_text(str(getattr(guild, "name", "") or "")) or LOCAL_CONTROL_GUILD_NAME
+    return control_page_effective_guild_name_from_runtime(guild, deps=build_control_page_ui_runtime_deps())
 
 
 def append_control_page_chat_log(guild_id: int, role: str, author: str, text: str) -> None:
-    control_page_chat_log_store.append(guild_id, role, author, text)
+    append_control_page_chat_log_from_runtime(
+        guild_id,
+        role,
+        author,
+        text,
+        deps=build_control_page_ui_runtime_deps(),
+    )
 
 
 def get_control_page_chat_log(guild_id: int) -> list[dict[str, Any]]:
-    return control_page_chat_log_store.get(guild_id)
+    return get_control_page_chat_log_from_runtime(guild_id, deps=build_control_page_ui_runtime_deps())
 
 
 def sanitize_control_page_welcome_text(text: str) -> str:
-    return sanitize_control_page_welcome_text_payload(text, fallback=CONTROL_PAGE_WELCOME_FALLBACK)
+    return sanitize_control_page_welcome_text_from_runtime(text, deps=build_control_page_ui_runtime_deps())
 
+
+def build_control_page_guild_selection_runtime_deps() -> ControlPageGuildSelectionRuntimeDeps:
+    return ControlPageGuildSelectionRuntimeDeps(
+        get_requested_guild=lambda guild_id: bot.get_guild(int(guild_id)),
+        bot_guilds=lambda: bot.guilds,
+        tracked_tts_playback_guild_ids=lambda: tracked_tts_playback_guild_ids(tts_playback_tracker),
+        get_tracked_tts_playback=lambda guild_id: get_tracked_tts_playback(tts_playback_tracker, int(guild_id)),
+        get_active_session_user_id=lambda session_key: active_session_user_ids.get(str(session_key)),
+        get_guild_member=lambda guild, user_id: guild.get_member(int(user_id)),
+        clean_text=clean_text,
+    )
 
 async def generate_control_page_welcome_text(guild: discord.Guild | None) -> str:
     guild_name = control_page_effective_guild_name(guild)
@@ -6931,45 +6265,19 @@ async def ensure_control_page_welcome_message(
 
 
 def select_control_page_guild(requested_guild_id: int | None = None) -> discord.Guild | None:
-    if requested_guild_id is not None:
-        return bot.get_guild(requested_guild_id)
-    preferred_ids: list[int] = []
-    preferred_ids.extend(tracked_tts_playback_guild_ids(tts_playback_tracker))
-    for guild in bot.guilds:
-        if guild.voice_client is not None:
-            preferred_ids.append(guild.id)
-    preferred_ids.extend(guild.id for guild in bot.guilds)
-    seen: set[int] = set()
-    for guild_id in preferred_ids:
-        if guild_id in seen:
-            continue
-        seen.add(guild_id)
-        guild = bot.get_guild(guild_id)
-        if guild is not None:
-            return guild
-    return None
+    return select_control_page_guild_from_runtime(requested_guild_id, deps=build_control_page_guild_selection_runtime_deps())
 
 
 def resolve_guild_member_name(guild: discord.Guild | None, user_id: int | None) -> str:
-    if guild is None or user_id is None:
-        return "없음"
-    member = guild.get_member(int(user_id))
-    if member is None:
-        return f"user:{int(user_id)}"
-    return clean_text(member.display_name or member.name or str(member.id)) or f"user:{member.id}"
+    return resolve_guild_member_name_from_runtime(
+        guild,
+        user_id,
+        deps=build_control_page_guild_selection_runtime_deps(),
+    )
 
 
 def current_tts_target_name(guild: discord.Guild | None) -> str:
-    if guild is None:
-        return "없음"
-    playback = get_tracked_tts_playback(tts_playback_tracker, guild.id)
-    if not isinstance(playback, dict):
-        return "없음"
-    session_key = clean_text(str(playback.get("session_key") or ""))
-    if not session_key:
-        return "없음"
-    target_user_id = active_session_user_ids.get(session_key)
-    return resolve_guild_member_name(guild, target_user_id)
+    return current_tts_target_name_from_runtime(guild, deps=build_control_page_guild_selection_runtime_deps())
 
 
 async def get_control_page_minecraft_snapshot(guild_id: int | None) -> dict[str, Any]:
@@ -7023,22 +6331,34 @@ async def safe_get_control_page_minecraft_snapshot(
     *,
     timeout_seconds: float = 0.75,
 ) -> dict[str, Any]:
-    try:
-        return await asyncio.wait_for(get_control_page_minecraft_snapshot(guild_id), timeout=timeout_seconds)
-    except Exception as exc:
-        return {
-            "last_error": clean_text(str(exc)) or repr(exc),
-            "inventory_top": [],
-            "inventory_summary": "inventory unavailable",
-            "recent_activity": [],
-        }
+    return await safe_get_control_page_minecraft_snapshot_from_runtime(
+        guild_id,
+        timeout_seconds=timeout_seconds,
+        deps=build_control_page_minecraft_snapshot_runtime_deps(),
+    )
 
 
-async def _probe_control_page_runtime_services_once() -> dict[str, Any]:
-    async def _voyager_alive() -> bool:
-        return bool(await get_minecraft_client().is_service_alive(timeout_sec=0.45))
+def build_control_page_runtime_services_runtime_deps() -> ControlPageRuntimeServicesRuntimeDeps:
+    return ControlPageRuntimeServicesRuntimeDeps(
+        cache=control_page_runtime_services_cache,
+        get_refresh_task=lambda: control_page_runtime_services_refresh_task,
+        set_refresh_task=_set_control_page_runtime_services_refresh_task,
+        get_lock=lambda: control_page_runtime_services_lock,
+        set_lock=_set_control_page_runtime_services_lock,
+        lock_factory=asyncio.Lock,
+        create_task=asyncio.create_task,
+        probe_runtime_services_once=lambda: probe_control_page_runtime_services_once_from_runtime(
+            deps=build_control_page_runtime_services_probe_runtime_deps(),
+        ),
+        build_runtime_services_error_payload=build_control_page_runtime_services_error_payload,
+        clean_text=clean_text,
+        action_backend=VOYAGER_ACTION_BACKEND,
+        now=time.time,
+    )
 
-    return await probe_control_page_runtime_services(
+
+def build_control_page_runtime_services_probe_runtime_deps() -> ControlPageRuntimeServicesProbeDeps:
+    return ControlPageRuntimeServicesProbeDeps(
         service_urls={
             "main": LLM_SERVER_URL,
             "router": ROUTER_LLM_URL,
@@ -7051,90 +6371,80 @@ async def _probe_control_page_runtime_services_once() -> dict[str, Any]:
         bot_api_probe_timeout_sec=CONTROL_PAGE_BOT_API_PROBE_TIMEOUT_SEC,
         action_backend=VOYAGER_ACTION_BACKEND,
         codex_gateway_port=VOYAGER_CODEX_GATEWAY_PORT,
-        voyager_alive_probe=_voyager_alive,
+        voyager_alive_probe=lambda: get_minecraft_client().is_service_alive(timeout_sec=0.45),
+        probe_runtime_services_once=probe_control_page_runtime_services,
     )
 
 
-def _build_control_plane_runtime_services_snapshot(*, now: float | None = None) -> dict[str, Any]:
-    return control_page_runtime_services_cache.snapshot_copy(
-        refreshing=bool(
-            control_page_runtime_services_refresh_task is not None
-            and not control_page_runtime_services_refresh_task.done()
-        ),
-        now=now,
-    )
-
-
-def _can_schedule_control_page_runtime_services_refresh(*, now: float | None = None) -> bool:
-    return control_page_runtime_services_cache.can_schedule_refresh(
-        refreshing=bool(
-            control_page_runtime_services_refresh_task is not None
-            and not control_page_runtime_services_refresh_task.done()
-        ),
-        now=now,
-    )
-
-
-def _mark_control_page_runtime_services_refresh_request(*, now: float | None = None) -> None:
-    control_page_runtime_services_cache.mark_refresh_request(now=now)
-
-
-async def _refresh_control_page_runtime_services_cache_once() -> None:
-    try:
-        services = await _probe_control_page_runtime_services_once()
-    except Exception as exc:
-        error_text = clean_text(str(exc)) or type(exc).__name__
-        services = build_control_page_runtime_services_error_payload(
-            error_text,
-            action_backend=VOYAGER_ACTION_BACKEND,
-        )
-    control_page_runtime_services_cache.store_success(services)
-
-
-def _start_control_page_runtime_services_background_refresh(*, now: float | None = None) -> None:
-    now_ts = time.time() if now is None else float(now)
+def _set_control_page_runtime_services_refresh_task(task: asyncio.Task | None) -> None:
     global control_page_runtime_services_refresh_task
+    control_page_runtime_services_refresh_task = task
 
-    if not _can_schedule_control_page_runtime_services_refresh(now=now_ts):
-        return
-    _mark_control_page_runtime_services_refresh_request(now=now_ts)
-    control_page_runtime_services_refresh_task = asyncio.create_task(
-        _refresh_control_page_runtime_services_cache_once()
-    )
+
+def _set_control_page_runtime_services_lock(lock: asyncio.Lock) -> None:
+    global control_page_runtime_services_lock
+    control_page_runtime_services_lock = lock
 
 
 async def get_control_page_runtime_services(*, force: bool = False) -> dict[str, Any]:
-    global control_page_runtime_services_lock
-    global control_page_runtime_services_refresh_task
-
-    if control_page_runtime_services_lock is None:
-        control_page_runtime_services_lock = asyncio.Lock()
-    async with control_page_runtime_services_lock:
-        now_ts = time.time()
-        if control_page_runtime_services_cache.is_fresh(now=now_ts) and not force:
-            return _build_control_plane_runtime_services_snapshot()
-        if (not force) and control_page_runtime_services_cache.is_stale_not_expired(now=now_ts):
-            _start_control_page_runtime_services_background_refresh(now=now_ts)
-            return _build_control_plane_runtime_services_snapshot()
-        await _refresh_control_page_runtime_services_cache_once()
-        return _build_control_plane_runtime_services_snapshot()
+    return await get_control_page_runtime_services_from_runtime(
+        deps=build_control_page_runtime_services_runtime_deps(),
+        force=force,
+    )
 
 
 def get_control_page_minecraft_snapshot_cache_copy() -> dict[str, Any]:
-    return control_page_minecraft_snapshot_cache.snapshot_copy()
+    return get_control_page_minecraft_snapshot_cache_copy_from_runtime(
+        deps=build_control_page_minecraft_snapshot_runtime_deps(),
+    )
 
 
-async def _refresh_control_page_minecraft_snapshot_once(guild_id: int | None) -> dict[str, Any]:
-    try:
-        snapshot = await asyncio.wait_for(
-            get_control_page_minecraft_snapshot(guild_id),
-            timeout=max(0.5, CONTROL_PAGE_MINECRAFT_SNAPSHOT_TIMEOUT_SEC),
-        )
-    except Exception as exc:
-        error_text = clean_text(str(exc)) or repr(exc)
-        return control_page_minecraft_snapshot_cache.store_error(error_text)
+def build_control_page_minecraft_snapshot_runtime_deps() -> ControlPageMinecraftSnapshotRuntimeDeps:
+    return ControlPageMinecraftSnapshotRuntimeDeps(
+        cache=control_page_minecraft_snapshot_cache,
+        get_refresh_task=lambda: control_page_minecraft_snapshot_refresh_task,
+        set_refresh_task=_set_control_page_minecraft_snapshot_refresh_task,
+        get_lock=lambda: control_page_minecraft_snapshot_lock,
+        set_lock=_set_control_page_minecraft_snapshot_lock,
+        lock_factory=asyncio.Lock,
+        create_task=asyncio.create_task,
+        wait_for=asyncio.wait_for,
+        get_snapshot=get_control_page_minecraft_snapshot,
+        clean_text=clean_text,
+        timeout_sec=CONTROL_PAGE_MINECRAFT_SNAPSHOT_TIMEOUT_SEC,
+    )
 
-    return control_page_minecraft_snapshot_cache.store_success(snapshot)
+
+def _set_control_page_minecraft_snapshot_refresh_task(task: asyncio.Task | None) -> None:
+    global control_page_minecraft_snapshot_refresh_task
+    control_page_minecraft_snapshot_refresh_task = task
+
+
+def _set_control_page_minecraft_snapshot_lock(lock: asyncio.Lock) -> None:
+    global control_page_minecraft_snapshot_lock
+    control_page_minecraft_snapshot_lock = lock
+
+
+def build_control_page_background_tasks_runtime_deps() -> ControlPageBackgroundTasksRuntimeDeps:
+    return ControlPageBackgroundTasksRuntimeDeps(
+        get_poll_task=lambda: control_page_minecraft_snapshot_poll_task,
+        set_poll_task=_set_control_page_minecraft_snapshot_poll_task,
+        get_snapshot_refresh_task=lambda: control_page_minecraft_snapshot_refresh_task,
+        set_snapshot_refresh_task=_set_control_page_minecraft_snapshot_refresh_task,
+        get_runtime_services_refresh_task=lambda: control_page_runtime_services_refresh_task,
+        set_runtime_services_refresh_task=_set_control_page_runtime_services_refresh_task,
+        create_task=asyncio.create_task,
+        select_control_page_guild=select_control_page_guild,
+        ensure_minecraft_snapshot=ensure_control_page_minecraft_snapshot,
+        sleep=asyncio.sleep,
+        log=print,
+        refresh_interval_sec=CONTROL_PAGE_MINECRAFT_CACHE_REFRESH_SEC,
+    )
+
+
+def _set_control_page_minecraft_snapshot_poll_task(task: asyncio.Task | None) -> None:
+    global control_page_minecraft_snapshot_poll_task
+    control_page_minecraft_snapshot_poll_task = task
 
 
 async def ensure_control_page_minecraft_snapshot(
@@ -7143,188 +6453,188 @@ async def ensure_control_page_minecraft_snapshot(
     force: bool = False,
     wait: bool = False,
 ) -> dict[str, Any]:
-    global control_page_minecraft_snapshot_lock
-    global control_page_minecraft_snapshot_refresh_task
-
-    if guild_id is None:
-        return get_control_page_minecraft_snapshot_cache_copy()
-    if control_page_minecraft_snapshot_lock is None:
-        control_page_minecraft_snapshot_lock = asyncio.Lock()
-
-    async with control_page_minecraft_snapshot_lock:
-        if not force and control_page_minecraft_snapshot_cache.is_fresh():
-            return get_control_page_minecraft_snapshot_cache_copy()
-        if control_page_minecraft_snapshot_refresh_task is None or control_page_minecraft_snapshot_refresh_task.done():
-            control_page_minecraft_snapshot_refresh_task = asyncio.create_task(
-                _refresh_control_page_minecraft_snapshot_once(guild_id)
-            )
-        task = control_page_minecraft_snapshot_refresh_task
-
-    if wait:
-        try:
-            await task
-        except Exception:
-            pass
-    return get_control_page_minecraft_snapshot_cache_copy()
-
-
-async def control_page_minecraft_snapshot_poller() -> None:
-    while True:
-        try:
-            guild = select_control_page_guild()
-            if guild is not None:
-                await ensure_control_page_minecraft_snapshot(guild.id, force=True, wait=True)
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            print(f"[CONTROL PAGE] minecraft_snapshot_poll_failed err={exc!r}")
-        await asyncio.sleep(max(0.5, CONTROL_PAGE_MINECRAFT_CACHE_REFRESH_SEC))
+    return await ensure_control_page_minecraft_snapshot_from_runtime(
+        guild_id,
+        deps=build_control_page_minecraft_snapshot_runtime_deps(),
+        force=force,
+        wait=wait,
+    )
 
 
 async def ensure_control_page_background_tasks_started() -> None:
-    global control_page_minecraft_snapshot_poll_task
-    if control_page_minecraft_snapshot_poll_task is not None and not control_page_minecraft_snapshot_poll_task.done():
-        return
-    guild = select_control_page_guild()
-    if guild is not None:
-        await ensure_control_page_minecraft_snapshot(guild.id, force=True, wait=True)
-    control_page_minecraft_snapshot_poll_task = asyncio.create_task(control_page_minecraft_snapshot_poller())
+    await ensure_control_page_background_tasks_started_from_runtime(
+        deps=build_control_page_background_tasks_runtime_deps(),
+    )
 
 
 def stop_control_page_background_tasks() -> None:
-    global control_page_minecraft_snapshot_poll_task
-    global control_page_minecraft_snapshot_refresh_task
-    global control_page_runtime_services_refresh_task
-    for task in (
-        control_page_minecraft_snapshot_poll_task,
-        control_page_minecraft_snapshot_refresh_task,
-        control_page_runtime_services_refresh_task,
-    ):
-        if task is not None and not task.done():
-            task.cancel()
-    control_page_minecraft_snapshot_poll_task = None
-    control_page_minecraft_snapshot_refresh_task = None
-    control_page_runtime_services_refresh_task = None
+    stop_control_page_background_tasks_from_runtime(
+        deps=build_control_page_background_tasks_runtime_deps(),
+    )
+
+
+def build_control_page_status_runtime_deps() -> ControlPageStatusRuntimeDeps:
+    return ControlPageStatusRuntimeDeps(
+        model_name=MODEL_NAME,
+        router_model_name=ROUTER_MODEL_NAME,
+        summary_model_name=SUMMARY_MODEL_NAME,
+        stt_model_name=STT_MODEL_NAME,
+        discord_enabled=DISCORD_ENABLED,
+        bot_api_host=CONTROL_PAGE_BOT_API_HOST,
+        bot_api_port=CONTROL_PAGE_BOT_API_PORT,
+        control_page_local_url=control_page_local_url,
+        voice_input_mode_status_line=voice_input_mode_status_line,
+        local_mic_status_line=local_mic_status_line,
+        current_tts_target_name=current_tts_target_name,
+        is_tracked_tts_playback_active=lambda guild_id: is_tracked_tts_playback_active(tts_playback_tracker, guild_id),
+        local_tts_snapshot=local_tts_playback_manager.snapshot,
+        local_mic_runtime_state=serialize_local_mic_runtime_state,
+        build_voice_pipeline_snapshot=build_voice_pipeline_snapshot,
+        format_voice_continuity_detail_lines=_format_voice_barge_in_continuity_detail_lines,
+        build_status_text_payload=build_control_page_status_text_payload,
+        build_local_status_text_payload=build_control_page_local_status_text_payload,
+        build_voice_status_reply_payload=build_control_page_voice_status_reply_payload,
+        build_voice_continuity_reply_payload=build_control_page_voice_continuity_reply_payload,
+        get_control_page_minecraft_snapshot=safe_get_control_page_minecraft_snapshot,
+        build_control_page_inventory_reply_payload=build_control_page_inventory_reply_payload,
+        build_control_page_minecraft_reply_payload=build_control_page_minecraft_reply_payload,
+        get_autonomy_engine=autonomy_engines.get,
+        get_routed_autonomy_executor=get_routed_autonomy_executor,
+        build_control_page_autonomy_reply_payload=build_control_page_autonomy_reply_payload,
+    )
 
 
 def build_control_page_status_text(guild: discord.Guild, minecraft: dict[str, Any]) -> str:
-    vc = guild.voice_client
-    voice_channel_name = getattr(getattr(vc, "channel", None), "name", None) or "없음"
-    listening = bool(vc and hasattr(vc, "is_listening") and vc.is_listening())
-    speaking = is_tracked_tts_playback_active(tts_playback_tracker, guild.id)
-    tts_target = current_tts_target_name(guild) if speaking else "없음"
-    return build_control_page_status_text_payload(
-        guild_name=guild.name,
-        voice_channel_name=voice_channel_name,
-        listening=listening,
-        speaking=speaking,
-        tts_target=tts_target,
-        voice_input_mode=voice_input_mode_status_line(),
-        local_mic_status=local_mic_status_line(),
-        main_model=MODEL_NAME,
-        router_model=ROUTER_MODEL_NAME,
-        summary_model=SUMMARY_MODEL_NAME,
-        stt_model=STT_MODEL_NAME,
-        minecraft=minecraft,
+    return build_control_page_status_text_from_runtime(
+        guild,
+        minecraft,
+        deps=build_control_page_status_runtime_deps(),
     )
 
 
 def build_control_page_local_status_text(runtime_services: dict[str, Any] | None = None) -> str:
-    local_tts = local_tts_playback_manager.snapshot()
-    local_mic = serialize_local_mic_runtime_state()
-    local_speaking = bool(local_tts.get("active"))
-    local_listening = bool(local_mic.get("enabled") and local_mic.get("captureReady"))
-    return build_control_page_local_status_text_payload(
+    return build_control_page_local_status_text_from_runtime(
         runtime_services,
-        discord_enabled=DISCORD_ENABLED,
-        local_url=control_page_local_url(),
-        bot_api_host=CONTROL_PAGE_BOT_API_HOST,
-        bot_api_port=CONTROL_PAGE_BOT_API_PORT,
-        main_model=MODEL_NAME,
-        router_model=ROUTER_MODEL_NAME,
-        summary_model=SUMMARY_MODEL_NAME,
-        stt_model=STT_MODEL_NAME,
-        local_speaking=local_speaking,
-        local_listening=local_listening,
-        local_mic_status=local_mic_status_line(),
+        deps=build_control_page_status_runtime_deps(),
     )
 
 
 async def build_control_page_status_reply(guild: discord.Guild) -> str:
-    minecraft = await safe_get_control_page_minecraft_snapshot(guild.id)
-    return build_control_page_status_text(guild, minecraft)
+    return await build_control_page_status_reply_from_runtime(
+        guild,
+        deps=build_control_page_status_runtime_deps(),
+    )
 
 
 def build_control_page_voice_status_reply(guild: discord.Guild | None) -> str:
-    vc = guild.voice_client if guild is not None else None
-    voice = build_voice_pipeline_snapshot(guild)
-    channel_name = getattr(getattr(vc, "channel", None), "name", None) or "none"
-    continuity = voice.get("bargeInContinuity") if isinstance(voice.get("bargeInContinuity"), dict) else {}
-    return build_control_page_voice_status_reply_payload(
-        voice,
-        channel_name=channel_name,
-        voice_input_mode=voice_input_mode_status_line(),
-        local_mic_status=local_mic_status_line(),
-        continuity_detail_lines=_format_voice_barge_in_continuity_detail_lines(continuity),
+    return build_control_page_voice_status_reply_from_runtime(
+        guild,
+        deps=build_control_page_status_runtime_deps(),
     )
 
 
 def build_control_page_voice_continuity_reply(guild: discord.Guild | None) -> str:
     _ = guild
     continuity = _build_voice_barge_in_continuity_snapshot()
-    return build_control_page_voice_continuity_reply_payload(
-        _format_voice_barge_in_continuity_detail_lines(continuity)
+    return build_control_page_voice_continuity_reply_from_runtime(
+        continuity,
+        deps=build_control_page_status_runtime_deps(),
     )
 
 
 async def build_control_page_inventory_reply(guild: discord.Guild) -> str:
-    minecraft = await safe_get_control_page_minecraft_snapshot(guild.id)
-    return build_control_page_inventory_reply_payload(minecraft)
+    return await build_control_page_inventory_reply_from_runtime(
+        guild,
+        deps=build_control_page_status_runtime_deps(),
+    )
 
 
 async def build_control_page_minecraft_reply(guild: discord.Guild) -> str:
-    minecraft = await safe_get_control_page_minecraft_snapshot(guild.id)
-    return build_control_page_minecraft_reply_payload(minecraft)
+    return await build_control_page_minecraft_reply_from_runtime(
+        guild,
+        deps=build_control_page_status_runtime_deps(),
+    )
 
 
 def build_control_page_autonomy_reply(guild: discord.Guild) -> str:
-    engine = autonomy_engines.get(guild.id)
-    if engine is None:
-        return "자율 행동 엔진이 아직 만들어지지 않았어."
-    state = engine.state
-    router = get_routed_autonomy_executor(guild.id)
-    return build_control_page_autonomy_reply_payload(
-        status=state.status,
-        safety_mode=state.safety_mode,
-        goal=state.current_goal.summary if state.current_goal else "없음",
-        plan=state.current_plan.summary if state.current_plan else "없음",
-        drive=state.drive_state if isinstance(state.drive_state, dict) else {},
-        failure_count=state.failure_count,
-        last_error=state.last_error,
-        minecraft_enabled=bool(router and router.is_domain_enabled("minecraft")),
-        allowed_actions=list(state.allowed_actions or []),
+    return build_control_page_autonomy_reply_from_runtime(
+        guild,
+        deps=build_control_page_status_runtime_deps(),
+    )
+
+
+def build_control_page_tool_runtime_deps() -> ControlPageToolRuntimeDeps:
+    return ControlPageToolRuntimeDeps(
+        clean_text=clean_text,
+        enqueue_control_page_ui_command=enqueue_control_page_ui_command,
+        memory_panel_reply=memory_panel_reply,
+        create_task=asyncio.create_task,
+        restart_bot_process=restart_bot_process,
+        recent_history_for_router=session_state_store.recent_history_for_router,
+        record_tool_assistant_turn=session_state_store.record_tool_assistant_turn,
+        control_page_effective_guild_id=control_page_effective_guild_id,
+        control_page_session_key=control_page_session_key,
+        system_prompt=SYSTEM_PROMPT,
+        max_history_items=MAX_HISTORY,
+        active_conversation_text_sec=ACTIVE_CONVERSATION_TEXT_SEC,
+        router_llm_enabled=ROUTER_LLM_ENABLED,
+        route_timeout_sec=ROUTER_ROUTE_TIMEOUT_SEC,
+        control_page_tool_registry_prompt=control_page_tool_registry_prompt,
+        ask_router_llm=ask_router_llm,
+        current_turn_id=current_turn_id,
+        log=print,
+        control_page_tool_policy_error=control_page_tool_policy_error,
+        build_control_page_help_reply=build_control_page_help_reply,
+        execute_control_page_memory_tool=execute_control_page_memory_tool,
+        execute_control_page_runtime_tool=execute_control_page_runtime_tool,
+        execute_control_page_voice_tool=execute_control_page_voice_tool,
+        execute_control_page_minecraft_tool=execute_control_page_minecraft_tool,
+        ensure_vault_layout=ensure_memory_vault_layout,
+        open_vault_tool_reply=control_page_open_memory_vault_tool_reply,
+        vault_obsidian_url=memory_vault_obsidian_url,
+        open_url=open_control_page_url_with_system,
+        open_path=open_control_page_path_with_system,
+        guild_getter_runtime={
+            "get_runtime_services": get_control_page_runtime_services,
+            "build_local_status_text": build_control_page_local_status_text,
+            "build_status_reply": build_control_page_status_reply,
+            "schedule_local_shutdown": schedule_evelyn_local_shutdown,
+            "schedule_stack_shutdown": schedule_evelyn_stack_shutdown,
+            "schedule_bot_shutdown": lambda: asyncio.create_task(shutdown_bot_process()),
+            "build_autonomy_reply": build_control_page_autonomy_reply,
+            "build_voice_status_reply": build_control_page_voice_status_reply,
+            "set_input_mode": set_voice_input_mode,
+            "input_mode_status_line": voice_input_mode_status_line,
+            "restore_voice_channel": restore_last_voice_channel,
+            "build_voice_continuity_reply": build_control_page_voice_continuity_reply,
+            "reset_continuity_probe": reset_voice_barge_in_continuity_probe,
+            "build_inventory_reply": build_control_page_inventory_reply,
+            "build_minecraft_reply": build_control_page_minecraft_reply,
+            "enable_mode": enable_minecraft_mode,
+            "disable_mode": disable_minecraft_mode,
+            "get_client": get_minecraft_client,
+            "format_position": format_position_short,
+        },
     )
 
 
 def execute_control_page_memory_panel_action(action: str) -> str:
-    cleaned_action = clean_text(action).lower()
-    if cleaned_action not in {"open", "close", "toggle"}:
-        cleaned_action = "toggle"
-    enqueue_control_page_ui_command(cleaned_action, panel_id="memory")
-    return memory_panel_reply(cleaned_action)
+    return execute_control_page_memory_panel_action_from_runtime(
+        action,
+        deps=build_control_page_tool_runtime_deps(),
+    )
 
 
 def execute_control_page_restart_command() -> str:
-    asyncio.create_task(restart_bot_process())
-    return "응, 이블린 다시 시작할게. 잠깐만 기다려줘."
+    return execute_control_page_restart_command_from_runtime(deps=build_control_page_tool_runtime_deps())
 
 
 def recent_control_page_history_for_router(*, session_key: str, guild_id: int | None, limit: int = 6) -> str:
-    return session_state_store.recent_history_for_router(
-        system_prompt=SYSTEM_PROMPT,
+    return recent_control_page_history_for_router_from_runtime(
         session_key=session_key,
         guild_id=guild_id,
         limit=limit,
+        deps=build_control_page_tool_runtime_deps(),
     )
 
 
@@ -7334,71 +6644,22 @@ def remember_control_page_tool_turn(
     reply_text: str,
     decision: dict[str, Any],
 ) -> None:
-    guild_id = control_page_effective_guild_id(guild)
-    session_key = control_page_session_key(guild_id)
-    session_state_store.record_tool_assistant_turn(
-        session_key,
+    remember_control_page_tool_turn_from_runtime(
+        guild,
         user_text,
         reply_text,
-        tool_name=clean_text(str(decision.get("tool") or "")),
-        system_prompt=SYSTEM_PROMPT,
-        max_history_items=MAX_HISTORY,
-        guild_id=guild_id,
-        ttl_sec=ACTIVE_CONVERSATION_TEXT_SEC,
+        decision,
+        deps=build_control_page_tool_runtime_deps(),
     )
 
 
 async def decide_control_page_tool_call(text: str, *, guild_id: int | None, session_key: str) -> dict[str, Any] | None:
-    if not ROUTER_LLM_ENABLED:
-        return None
-    user_text = clean_text(text)
-    if not user_text:
-        return None
-    messages = [
-        {
-            "role": "system",
-            "content": (
-                "You are Evelyn's control-page tool router. "
-                "Only classify ambiguous short control-page commands. "
-                "Return exactly one JSON object and no other text. "
-                "Available allowlisted tools: "
-                f"{control_page_tool_registry_prompt()}. "
-                "The router may choose only these tools; never invent tools, shell commands, paths, or code. "
-                "For control_page.memory_panel, arguments must be {\"action\":\"open|close|toggle\"}. "
-                "If the user is clearly asking for a tool, return "
-                '{"tool_call":{"name":"control_page.memory_panel","arguments":{"action":"open"}},"confidence":0.92,"reply":"응, 메모리 패널 열어둘게."}. '
-                "If no UI tool should be called, return "
-                '{"tool_call":null,"confidence":0.0,"reply":""}. '
-                "Do not call a tool for ordinary questions, explanations, styling requests, implementation requests, or discussion. "
-                "Never call high-risk tools; ask for explicit slash commands instead. "
-                "When you do call a UI tool, write reply in Evelyn's style: Korean, warm and sharp, casual 반말, "
-                "one short sentence, no stiff '~습니다' or '~입니다' endings, no extra explanation."
-            ),
-        },
-        {
-            "role": "system",
-            "content": "Recent conversation:\n" + (recent_control_page_history_for_router(session_key=session_key, guild_id=guild_id) or "(none)"),
-        },
-        {
-            "role": "user",
-            "content": user_text,
-        },
-    ]
-    try:
-        return await ask_router_llm(
-            messages,
-            max_tokens=180,
-            timeout_seconds=min(ROUTER_ROUTE_TIMEOUT_SEC, 2.0),
-            purpose="control_page_ui_tool",
-            hot_path=True,
-            turn_id=current_turn_id(session_key),
-            session_key=session_key,
-            source="control_page",
-            guild_id=guild_id,
-        )
-    except Exception as exc:
-        print(f"[CONTROL PAGE TOOL ROUTER] failed: {exc!r}")
-        return None
+    return await decide_control_page_tool_call_from_runtime(
+        text,
+        guild_id=guild_id,
+        session_key=session_key,
+        deps=build_control_page_tool_runtime_deps(),
+    )
 
 
 async def decide_control_page_ui_tool_call(text: str, *, guild_id: int | None, session_key: str) -> dict[str, Any] | None:
@@ -7406,67 +6667,11 @@ async def decide_control_page_ui_tool_call(text: str, *, guild_id: int | None, s
 
 
 async def execute_control_page_tool(guild: discord.Guild | None, decision: dict[str, Any]) -> str:
-    policy_error = control_page_tool_policy_error(decision, guild_available=guild is not None)
-    if policy_error:
-        return policy_error
-    tool_name = clean_text(str(decision.get("tool") or ""))
-    arguments = decision.get("arguments") if isinstance(decision.get("arguments"), dict) else {}
-    if tool_name == "control_page.help":
-        return build_control_page_help_reply()
-    memory_reply = await execute_control_page_memory_tool(
-        tool_name,
-        arguments,
-        execute_memory_panel_action=execute_control_page_memory_panel_action,
-        enqueue_ui_command=enqueue_control_page_ui_command,
-        ensure_vault_layout=ensure_memory_vault_layout,
-        open_vault_tool_reply=control_page_open_memory_vault_tool_reply,
-        vault_obsidian_url=memory_vault_obsidian_url,
-        open_url=open_control_page_url_with_system,
-        open_path=open_control_page_path_with_system,
+    return await execute_control_page_tool_from_runtime(
+        guild,
+        decision,
+        deps=build_control_page_tool_runtime_deps(),
     )
-    if memory_reply is not None:
-        return memory_reply
-    runtime_reply = await execute_control_page_runtime_tool(
-        tool_name,
-        guild=guild,
-        get_runtime_services=get_control_page_runtime_services,
-        build_local_status_text=build_control_page_local_status_text,
-        build_status_reply=build_control_page_status_reply,
-        execute_restart_command=execute_control_page_restart_command,
-        schedule_local_shutdown=schedule_evelyn_local_shutdown,
-        schedule_stack_shutdown=schedule_evelyn_stack_shutdown,
-        schedule_bot_shutdown=lambda: asyncio.create_task(shutdown_bot_process()),
-        build_autonomy_reply=build_control_page_autonomy_reply,
-    )
-    if runtime_reply is not None:
-        return runtime_reply
-    voice_reply = await execute_control_page_voice_tool(
-        tool_name,
-        arguments,
-        guild=guild,
-        build_voice_status_reply=build_control_page_voice_status_reply,
-        set_input_mode=set_voice_input_mode,
-        input_mode_status_line=voice_input_mode_status_line,
-        restore_voice_channel=restore_last_voice_channel,
-        build_voice_continuity_reply=build_control_page_voice_continuity_reply,
-        reset_continuity_probe=reset_voice_barge_in_continuity_probe,
-    )
-    if voice_reply is not None:
-        return voice_reply
-    minecraft_reply = await execute_control_page_minecraft_tool(
-        tool_name,
-        arguments,
-        guild=guild,
-        build_inventory_reply=build_control_page_inventory_reply,
-        build_minecraft_reply=build_control_page_minecraft_reply,
-        enable_mode=enable_minecraft_mode,
-        disable_mode=disable_minecraft_mode,
-        get_client=get_minecraft_client,
-        format_position=format_position_short,
-    )
-    if minecraft_reply is not None:
-        return minecraft_reply
-    return "그 명령은 등록만 되어 있고 실행기가 아직 없어."
 
 
 async def execute_control_page_command(guild: discord.Guild | None, text: str) -> str:
@@ -7476,66 +6681,34 @@ async def execute_control_page_command(guild: discord.Guild | None, text: str) -
     return "지원하지 않는 명령어야. /help 로 현재 페이지 명령어를 확인해줘."
 
 
+def build_control_page_search_runtime_deps() -> ControlPageSearchRuntimeDeps:
+    return ControlPageSearchRuntimeDeps(
+        control_page_effective_guild_id=control_page_effective_guild_id,
+        control_page_session_key=control_page_session_key,
+        get_conversation_history=get_conversation_history,
+        build_route_decision=build_route_decision,
+        monotonic=time.monotonic,
+        execute_search_then_answer_action=execute_search_then_answer_action,
+        synthesize_tool_result_with_main_llm=synthesize_tool_result_with_main_llm,
+        clean_text=clean_text,
+        get_session_lock=lambda session_key: session_locks.setdefault(session_key, asyncio.Lock()),
+        append_history=append_history,
+        mark_session_active=mark_session_active,
+        active_conversation_text_sec=ACTIVE_CONVERSATION_TEXT_SEC,
+        build_topic_id=build_topic_id,
+        schedule_local_control_tts=schedule_local_control_tts,
+        current_turn_id=current_turn_id,
+        format_display_text=format_display_text,
+        fallback_answer_for=fallback_answer_for,
+    )
+
+
 async def answer_control_page_search_text(guild: discord.Guild | None, user_text: str) -> str:
-    guild_id = control_page_effective_guild_id(guild)
-    session_key = control_page_session_key(guild_id)
-    messages = list(get_conversation_history(session_key=session_key, guild_id=guild_id))
-    route_decision = build_route_decision(
-        action="search_then_answer",
-        route="search_executor",
-        source="control_page",
-        prompt_text=user_text,
-        needs_main_llm=False,
-        needs_search=True,
-        needs_tts=False,
-        priority="accuracy",
+    return await answer_control_page_search_text_from_runtime(
+        guild,
+        user_text,
+        deps=build_control_page_search_runtime_deps(),
     )
-    metrics: dict[str, Any] = {
-        "started_at": time.monotonic(),
-        "meta": {
-            "source": "control_page",
-            "session_key": session_key,
-            "guild_id": guild_id,
-            "selected_path": "control_page_search_direct",
-        },
-        "marks": {},
-    }
-    action_result = await execute_search_then_answer_action(
-        guild_id=guild_id,
-        user_text=user_text,
-        session_key=session_key,
-        messages=messages,
-    )
-    final_answer = await synthesize_tool_result_with_main_llm(
-        user_text=user_text,
-        tool_name="search",
-        tool_result_text=action_result.answer_text,
-        guild_id=guild_id,
-        session_key=session_key,
-        source="control_page",
-        messages=messages,
-        cognitive_state={"action": "search_then_answer", "user_intent": user_text},
-        route_decision=route_decision,
-        metrics=metrics,
-    )
-    reply = clean_text(final_answer) or clean_text(action_result.answer_text) or "지금 검색 결과를 정리하지 못했어. 잠깐 뒤에 다시 시도해줘."
-    async with session_locks.setdefault(session_key, asyncio.Lock()):
-        append_history(session_key, user_text, reply, guild_id=guild_id)
-        mark_session_active(
-            session_key,
-            ttl_sec=ACTIVE_CONVERSATION_TEXT_SEC,
-            speaker="assistant",
-            awaiting_user_reply=False,
-            topic_id=build_topic_id(user_text, "search_executor", reply),
-            answer_text=reply,
-            user_text=user_text,
-        )
-    schedule_local_control_tts(
-        reply,
-        turn_id=current_turn_id(session_key),
-        session_key=session_key,
-    )
-    return format_display_text(reply, session_key=session_key).strip() or fallback_answer_for(user_text)
 
 
 async def answer_control_page_text(guild: discord.Guild | None, user_text: str) -> str:
@@ -7644,61 +6817,53 @@ async def answer_control_page_text(guild: discord.Guild | None, user_text: str) 
         clear_room_turn_scope(session_key, turn_scope)
 
 
+def build_control_page_input_runtime_deps() -> ControlPageInputRuntimeDeps:
+    return ControlPageInputRuntimeDeps(
+        clean_text=clean_text,
+        control_page_effective_guild_id=control_page_effective_guild_id,
+        control_page_session_key=control_page_session_key,
+        cheap_control_page_tool_decision=cheap_control_page_tool_decision,
+        execute_control_page_tool=execute_control_page_tool,
+        remember_control_page_tool_turn=remember_control_page_tool_turn,
+        should_route_control_page_tool_candidate=should_route_control_page_tool_candidate,
+        decide_control_page_tool_call=decide_control_page_tool_call,
+        control_page_tool_decision_from_llm=control_page_tool_decision_from_llm,
+        control_page_tool_policy_error=control_page_tool_policy_error,
+        control_page_tool_reply_from_execution=control_page_tool_reply_from_execution,
+        should_force_search_query=should_force_search_query,
+        answer_control_page_search_text=answer_control_page_search_text,
+        answer_control_page_text=answer_control_page_text,
+    )
+
+
 async def handle_control_page_input(guild: discord.Guild | None, text: str) -> str:
-    guild_id = control_page_effective_guild_id(guild)
-    session_key = control_page_session_key(guild_id)
-    cheap_decision = cheap_control_page_tool_decision(text)
-    if cheap_decision is not None:
-        reply = await execute_control_page_tool(guild, cheap_decision)
-        remember_control_page_tool_turn(guild, text, reply, cheap_decision)
-        return reply
-    if clean_text(text).startswith("/"):
-        return "지원하지 않는 명령어야. /help 로 현재 페이지 명령어를 확인해줘."
-    if should_route_control_page_tool_candidate(text):
-        tool_decision_raw = await decide_control_page_tool_call(text, guild_id=guild_id, session_key=session_key)
-        tool_decision = control_page_tool_decision_from_llm(tool_decision_raw)
-        if tool_decision:
-            router_policy_error = control_page_tool_policy_error(tool_decision, guild_available=guild is not None)
-            if router_policy_error:
-                remember_control_page_tool_turn(guild, text, router_policy_error, tool_decision)
-                return router_policy_error
-            execute_reply = await execute_control_page_tool(guild, tool_decision)
-            final_reply = control_page_tool_reply_from_execution(tool_decision, execute_reply)
-            remember_control_page_tool_turn(guild, text, final_reply, tool_decision)
-            return final_reply
-        if isinstance(tool_decision_raw, dict):
-            router_reply = clean_text(str(tool_decision_raw.get("reply") or ""))
-            if router_reply:
-                return router_reply
-    if should_force_search_query(text):
-        return await answer_control_page_search_text(guild, text)
-    return await answer_control_page_text(guild, text)
-
-
-STARTUP_BOOT_STEPS: tuple[tuple[str, str], ...] = (
-    ("main_service", "Main LLM"),
-    ("router_service", "Router LLM"),
-    ("sub_service", "Sub LLM"),
-    ("tts_service", "TTS service"),
-    ("discord_gateway", "Discord gateway"),
-    ("control_api", "Bot API"),
-    ("opus", "Opus"),
-    ("stt", "STT"),
-    ("main_warmup", "Main LLM warmup"),
-    ("tts_warmup", "TTS warmup"),
-)
+    return await handle_control_page_input_from_runtime(
+        guild,
+        text,
+        deps=build_control_page_input_runtime_deps(),
+    )
 
 
 def mark_startup_component(key: str, status: str, detail: str = "") -> None:
-    startup_component_state[key] = {
-        "status": clean_text(status) or "pending",
-        "detail": clean_text(detail),
-        "updatedAt": time.time(),
-    }
+    mark_startup_component_from_runtime(
+        key,
+        status,
+        detail,
+        deps=StartupComponentRuntimeDeps(
+            startup_component_state=startup_component_state,
+            now=time.time,
+        ),
+    )
 
 
 def startup_component_done(key: str) -> bool:
-    return (startup_component_state.get(key) or {}).get("status") == "done"
+    return startup_component_done_from_runtime(
+        key,
+        deps=StartupComponentRuntimeDeps(
+            startup_component_state=startup_component_state,
+            now=time.time,
+        ),
+    )
 
 
 def build_control_page_boot_progress(
@@ -7865,20 +7030,8 @@ async def control_page_health_handler(_: web.Request) -> web.StreamResponse:
     )
 
 
-def open_control_page_path_with_system(path: Path) -> None:
-    if os.name == "nt":
-        os.startfile(str(path))  # type: ignore[attr-defined]
-        return
-    opener = "open" if sys.platform == "darwin" else "xdg-open"
-    subprocess.Popen([opener, str(path)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-
-def open_control_page_url_with_system(url: str) -> None:
-    if os.name == "nt":
-        os.startfile(url)  # type: ignore[attr-defined]
-        return
-    opener = "open" if sys.platform == "darwin" else "xdg-open"
-    subprocess.Popen([opener, url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+open_control_page_path_with_system = open_path_with_system
+open_control_page_url_with_system = open_url_with_system
 
 
 async def control_page_open_memory_vault_handler(request: web.Request) -> web.StreamResponse:
@@ -8116,14 +7269,14 @@ def decrement_inflight_llm_requests() -> None:
 
 
 def build_voice_main_llm_streaming_deps() -> VoiceMainLlmStreamingDeps:
-    return VoiceMainLlmStreamingDeps(
+    return build_voice_main_llm_streaming_deps_from_runtime(
         model_name=MODEL_NAME,
         llm_server_url=LLM_SERVER_URL,
         main_llm_chat_content_format=MAIN_LLM_CHAT_CONTENT_FORMAT,
         voice_llm_max_tokens=VOICE_LLM_MAX_TOKENS,
         main_llm_stop_tokens=tuple(MAIN_LLM_STOP_TOKENS),
         get_http_session=get_http_session,
-        is_casual_call_or_status_question=is_casual_call_or_status_question,
+        is_casual_call_or_status_question=session_is_casual_call_or_status_question,
         observe_live_minecraft_state=observe_live_minecraft_state,
         build_runtime_status_context=build_runtime_status_context,
         build_main_response_guidance=build_main_response_guidance,
@@ -8255,15 +7408,14 @@ async def execute_voice_delivery_plan(
     session_key: str | None,
     turn_scope: TurnScope | None,
 ) -> int:
-    return await execute_streaming_voice_delivery_plan(
+    return await execute_voice_delivery_plan_from_runtime(
+        vc,
         delivery_plan,
-        start_delivery=lambda: start_streaming_voice_delivery(
-            vc,
-            metrics=metrics,
-            turn_id=turn_id,
-            session_key=session_key,
-            turn_scope=turn_scope,
-        ),
+        deps=build_voice_delivery_runtime_deps(),
+        metrics=metrics,
+        turn_id=turn_id,
+        session_key=session_key,
+        turn_scope=turn_scope,
     )
 
 
@@ -8370,6 +7522,26 @@ async def ask_llm_and_speak_streaming(
     )
 
 
+def build_discord_text_reply_runtime_deps() -> DiscordTextReplyRuntimeDeps:
+    return DiscordTextReplyRuntimeDeps(
+        attach_current_task=_attach_current_task,
+        detach_task=_detach_task,
+        new_turn_metrics=new_turn_metrics,
+        session_topic_id=lambda session_key: session_topic_ids.get(session_key),
+        ask_llm_streaming=ask_llm_streaming,
+        log_llm_first_chunk=lambda metrics: log_voice_latency(metrics, "llm_first_chunk_logged", "LLM 첫 chunk 시간"),
+        session_state_snapshot=session_state_snapshot,
+        maybe_append_proactive_question=maybe_append_proactive_question,
+        update_session_state=update_session_state,
+        build_answer_payload_from_text=build_answer_payload_from_text,
+        format_display_text=format_display_text,
+        fallback_answer_for=fallback_answer_for,
+        build_delivery_plan=build_delivery_plan,
+        split_tts_sentences=split_tts_sentences,
+        send_discord_text=send_discord_text,
+    )
+
+
 async def stream_text_reply(
     channel: discord.abc.Messageable,
     user_text: str,
@@ -8386,122 +7558,34 @@ async def stream_text_reply(
     turn_scope: TurnScope | None = None,
     proactive_resolution: dict | None = None,
 ) -> tuple[str, discord.Message | None, dict, DeliveryPlan]:
-    task = _attach_current_task(turn_scope)
-    try:
-        metrics = new_turn_metrics(
-            source=source,
-            session_key=session_key,
-            guild_id=guild_id,
-            topic_id=session_topic_ids.get(session_key),
-            turn_id=turn_id,
-            segment_id=0,
-        )
-        metrics.setdefault("meta", {})["needs_tts"] = bool(include_voice)
-
-        answer = ""
-        sent_message: discord.Message | None = None
-        answer = await ask_llm_streaming(
-            user_text,
-            guild_id=guild_id,
-            session_key=session_key,
-            room_key=room_key,
-            person_key=person_key,
-            session_memory_key=session_memory_key,
-                on_first_chunk=lambda: log_voice_latency(metrics, "llm_first_chunk_logged", "LLM 첫 chunk 시간"),
-            source=source,
-            debug_text=debug_text,
-            metrics=metrics,
-            turn_scope=turn_scope,
-        )
-        awaiting_reply = bool(session_state_snapshot(session_key).get("awaiting_user_reply"))
-        if proactive_resolution is not None:
-            metrics.setdefault("meta", {})["proactive_question_resolution"] = proactive_resolution
-        proactive_asked = False
-        if not (proactive_resolution or {}).get("resolved"):
-            answer, proactive_asked = maybe_append_proactive_question(
-                answer,
-                guild_id=guild_id,
-                source=source,
-                user_text=user_text,
-                awaiting_user_reply=awaiting_reply,
-                room_key=room_key,
-                person_key=person_key,
-                session_key=session_key,
-                session_memory_key=session_memory_key,
-                metrics=metrics,
-            )
-        if proactive_asked:
-            update_session_state(
-                session_key,
-                speaker="assistant",
-                awaiting_user_reply=True,
-                answer_text=answer,
-                user_text=user_text,
-            )
-        answer_payload = build_answer_payload_from_text(answer)
-        final_text = format_display_text(answer_payload.display_text, session_key=session_key).strip() or fallback_answer_for(user_text)
-        delivery_plan = build_delivery_plan(
-            answer_payload,
-            include_voice=include_voice,
-            text_message=final_text,
-            split_chunks=split_tts_sentences,
-        )
-        sent_message = (await send_discord_text(channel, final_text)).message
-        return answer, sent_message, metrics, delivery_plan
-    finally:
-        _detach_task(turn_scope, task)
+    return await stream_text_reply_from_runtime(
+        channel,
+        user_text,
+        guild_id=guild_id,
+        session_key=session_key,
+        turn_id=turn_id,
+        room_key=room_key,
+        person_key=person_key,
+        session_memory_key=session_memory_key,
+        source=source,
+        debug_text=debug_text,
+        include_voice=include_voice,
+        turn_scope=turn_scope,
+        proactive_resolution=proactive_resolution,
+        deps=build_discord_text_reply_runtime_deps(),
+    )
 
 
 # =========================================================
 # 음성 입력 처리
 # =========================================================
 async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes, debug_meta: dict | None = None) -> None:
-    await ensure_startup_components_ready()
-    if member is None or member.bot:
-        return
-    debug_meta_input = normalize_voice_debug_meta(debug_meta)
-    source = voice_ingress_source(debug_meta_input)
-    if should_drop_discord_audio_for_local_mic(getattr(member, "id", None), source=source):
-        return
-
-    guild = getattr(member, "guild", None)
-    if guild is None:
-        return
-
-    ensure_voice_worker_started()
-
-    guild_id = guild.id
-    voice_channel_id = getattr(getattr(guild.voice_client, "channel", None), "id", None)
-    ingress = build_voice_ingress_context(
-        guild_id=guild_id,
-        voice_channel_id=voice_channel_id,
-        user_id=member.id,
-    )
-    room_session_key = ingress.room_session_key
-    session_key = ingress.session_key
-    room_key = ingress.room_key
-    person_key = ingress.person_key
-    session_memory_key = ingress.session_memory_key
-    segment_id = next_segment_id(session_key)
-    turn_id = new_turn_id()
-    room_state = room_state_snapshot(room_session_key)
-    item = build_voice_ingress_item(
+    await process_member_audio_from_runtime(
         member=member,
         pcm_bytes=pcm_bytes,
-        debug_meta=debug_meta_input,
-        session_key=session_key,
-        room_session_key=room_session_key,
-        room_key=room_key,
-        person_key=person_key,
-        session_memory_key=session_memory_key,
-        turn_id=turn_id,
-        segment_id=segment_id,
-        ingress_during_reply=bool(room_state.get("reply_in_progress")),
-        owner_user_id_on_ingress=room_state.get("owner_user_id"),
-        queue_depth_at_enqueue=voice_ingress_queue.qsize(),
-        enqueued_at=time.monotonic(),
+        debug_meta=debug_meta,
+        deps=build_voice_ingress_entrypoint_deps(),
     )
-    await _schedule_voice_utterance_item(item)
 
 
 async def _process_member_audio_impl(
@@ -9437,21 +8521,7 @@ async def run_local_only_mode() -> None:
     print(f"[LOCAL MODE] ready url={control_page_local_url()}")
     await asyncio.Event().wait()
 
-
-def is_control_command_authorized(ctx) -> bool:
-    perms = getattr(ctx.author, "guild_permissions", None)
-    return is_control_command_authorized_payload(
-        author_id=getattr(ctx.author, "id", None),
-        is_administrator=bool(perms and getattr(perms, "administrator", False)),
-        allowed_user_ids=ALLOWED_RESTART_USER_IDS,
-    )
-
-
-async def handle_control_command_error(ctx, error):
-    if isinstance(error, commands.CheckFailure):
-        await ctx.send(control_command_check_failure_message())
-        return
-    raise error
+is_control_command_authorized = make_control_command_authorized_checker(allowed_user_ids=ALLOWED_RESTART_USER_IDS)
 
 
 @bot.command(name="재시작", aliases=["restart"])
@@ -9551,24 +8621,26 @@ async def autonomy_status_command(ctx):
     )
 
 
-def _mark_text_session_from_command(ctx, user_text: str, answer_text: str, *, awaiting_user_reply: bool = False) -> None:
-    if ctx.guild is None:
-        return
-    thread_id = resolve_text_thread_id(ctx.channel, is_thread_parent=lambda parent: isinstance(parent, discord.TextChannel))
-    session_key = make_text_session_key(ctx.guild.id, ctx.channel.id, ctx.author.id, thread_id=thread_id)
-    session_state_store.record_command_assistant_turn(
-        session_key,
-        user_text,
-        answer_text,
+def build_discord_command_session_runtime_deps() -> DiscordCommandSessionRuntimeDeps:
+    return DiscordCommandSessionRuntimeDeps(
+        resolve_text_thread_id=resolve_text_thread_id,
+        is_text_thread_parent=lambda parent: isinstance(parent, discord.TextChannel),
+        make_text_session_key=make_text_session_key,
+        record_command_assistant_turn=session_state_store.record_command_assistant_turn,
         system_prompt=SYSTEM_PROMPT,
         max_history_items=MAX_HISTORY,
-        guild_id=ctx.guild.id,
-        user_id=ctx.author.id,
-        channel_id=ctx.channel.id,
-        message_id=getattr(ctx.message, "id", None),
-        awaiting_user_reply=awaiting_user_reply,
         normal_ttl_sec=ACTIVE_CONVERSATION_TEXT_SEC,
         question_ttl_sec=ACTIVE_CONVERSATION_TEXT_QUESTION_SEC,
+    )
+
+
+def _mark_text_session_from_command(ctx, user_text: str, answer_text: str, *, awaiting_user_reply: bool = False) -> None:
+    mark_text_session_from_command_runtime(
+        ctx,
+        user_text,
+        answer_text,
+        awaiting_user_reply=awaiting_user_reply,
+        deps=build_discord_command_session_runtime_deps(),
     )
 
 

@@ -31,7 +31,7 @@ class ControlPageStatusCommandTests(unittest.TestCase):
 
     def test_local_status_uses_real_local_runtime_summary(self) -> None:
         self.assertIn("def build_control_page_local_status_text", self.main_py)
-        self.assertIn("build_control_page_local_status_text_payload(", self.main_py)
+        self.assertIn("build_control_page_local_status_text_from_runtime(", self.main_py)
         self.assertIn('"Evelyn 로컬 상태"', self.control_page_state)
         self.assertIn("control_page_local_url()", self.main_py)
         self.assertIn("Main LLM", self.control_page_state)

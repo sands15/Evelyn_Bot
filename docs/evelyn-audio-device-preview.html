@@ -1,0 +1,654 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>E.V.E.L.Y.N Audio Device Preview</title>
+  <style>
+    :root {
+      --bg-black: #04090b;
+      --bg-deep: #0c1418;
+      --text-main: #f1ece2;
+      --text-soft: rgba(230, 224, 214, 0.74);
+      --text-muted: rgba(213, 208, 197, 0.54);
+      --wire-rose: rgba(236, 178, 206, 0.68);
+      --accent-amber: #f0c95f;
+      --accent-orange: #f4a35d;
+      --accent-pink: #f1b7d0;
+      --accent-mint: #91c5b8;
+      --good: #7bc28f;
+      --danger: #dd7777;
+      --panel: rgba(12, 18, 21, 0.76);
+      --panel-strong: rgba(15, 23, 26, 0.9);
+      --line: rgba(255, 255, 255, 0.12);
+      --line-strong: rgba(240, 201, 95, 0.3);
+      --shadow-deep: 0 28px 70px rgba(0, 0, 0, 0.38);
+      --glow-soft: 0 0 0 1px rgba(240, 201, 95, 0.12), 0 0 22px rgba(240, 201, 95, 0.14), 0 0 58px rgba(145, 197, 184, 0.08);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html,
+    body {
+      width: 100%;
+      min-height: 100%;
+      margin: 0;
+    }
+
+    body {
+      min-height: 100vh;
+      overflow: hidden;
+      color: var(--text-main);
+      font-family: "IBM Plex Sans KR", "Segoe UI", system-ui, sans-serif;
+      background:
+        radial-gradient(circle at 20% 18%, rgba(53, 99, 88, 0.24), transparent 24%),
+        radial-gradient(circle at 54% 92%, rgba(225, 214, 188, 0.18), transparent 22%),
+        radial-gradient(circle at 86% 16%, rgba(158, 139, 112, 0.12), transparent 18%),
+        linear-gradient(138deg, #091112 0%, #0b1618 26%, #0a0f12 52%, #04080a 100%);
+    }
+
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      background-image:
+        linear-gradient(rgba(255, 255, 255, 0.024) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255, 255, 255, 0.024) 1px, transparent 1px);
+      background-size: 54px 54px;
+      opacity: 0.48;
+      mask-image: radial-gradient(circle at center, rgba(0, 0, 0, 0.72), transparent 92%);
+    }
+
+    body::after {
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      background:
+        radial-gradient(circle at 50% 104%, rgba(236, 229, 209, 0.12), transparent 18%),
+        radial-gradient(circle at 50% 108%, rgba(204, 166, 72, 0.06), transparent 30%);
+      opacity: 0.32;
+    }
+
+    button,
+    select {
+      font: inherit;
+    }
+
+    .preview-shell {
+      position: relative;
+      z-index: 1;
+      width: 100%;
+      min-height: 100vh;
+      display: grid;
+      grid-template-columns: minmax(0, 0.88fr) minmax(520px, 1.12fr);
+      gap: clamp(28px, 4vw, 58px);
+      align-items: center;
+      padding: clamp(22px, 4vw, 56px);
+    }
+
+    .ambient-panel {
+      position: relative;
+      min-height: min(74vh, 720px);
+      display: grid;
+      align-items: end;
+      padding: 0 0 clamp(22px, 4vw, 46px);
+      overflow: hidden;
+    }
+
+    .avatar-glass {
+      position: absolute;
+      inset: -2% -6% auto 12%;
+      height: min(62vh, 500px);
+      display: grid;
+      place-items: center;
+      opacity: 0.88;
+      filter: drop-shadow(0 34px 54px rgba(0, 0, 0, 0.42));
+    }
+
+    .avatar-glass img {
+      width: min(78%, 430px);
+      max-height: 100%;
+      object-fit: contain;
+    }
+
+    .ambient-copy {
+      position: relative;
+      width: min(440px, 100%);
+      padding: 18px 0 0;
+      border-top: 1px solid rgba(240, 201, 95, 0.22);
+    }
+
+    .brand-kicker {
+      margin: 0 0 9px;
+      color: var(--accent-amber);
+      font-size: 0.78rem;
+      font-weight: 800;
+      letter-spacing: 0.18em;
+    }
+
+    .ambient-title {
+      margin: 0;
+      color: #fff8df;
+      font-size: clamp(2.4rem, 5vw, 4.2rem);
+      line-height: 0.95;
+      letter-spacing: 0;
+    }
+
+    .ambient-status {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 18px;
+    }
+
+    .status-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      min-height: 30px;
+      padding: 0 10px;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 999px;
+      color: var(--text-soft);
+      background: rgba(255, 255, 255, 0.045);
+      font-size: 0.82rem;
+      white-space: nowrap;
+    }
+
+    .status-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--good);
+      box-shadow: 0 0 18px rgba(123, 194, 143, 0.54);
+    }
+
+    .device-card {
+      width: min(760px, 100%);
+      justify-self: end;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background:
+        linear-gradient(180deg, rgba(255, 255, 255, 0.065), rgba(255, 255, 255, 0.025)),
+        var(--panel);
+      box-shadow: var(--shadow-deep), var(--glow-soft);
+      backdrop-filter: blur(24px);
+      overflow: hidden;
+    }
+
+    .card-topline {
+      height: 3px;
+      background: linear-gradient(90deg, var(--accent-amber), var(--accent-mint) 54%, var(--accent-pink));
+    }
+
+    .device-card-inner {
+      padding: clamp(20px, 3vw, 30px);
+    }
+
+    .card-header {
+      display: flex;
+      align-items: start;
+      justify-content: space-between;
+      gap: 20px;
+      padding-bottom: 18px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+    }
+
+    .card-header h1 {
+      margin: 0;
+      color: #fff8df;
+      font-size: clamp(1.55rem, 3vw, 2.15rem);
+      line-height: 1.12;
+      letter-spacing: 0;
+    }
+
+    .card-header p {
+      max-width: 510px;
+      margin: 9px 0 0;
+      color: var(--text-soft);
+      font-size: 0.96rem;
+      line-height: 1.6;
+    }
+
+    .state-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      min-height: 34px;
+      padding: 0 11px;
+      border: 1px solid rgba(145, 197, 184, 0.36);
+      border-radius: 999px;
+      color: #c7f2e6;
+      background: rgba(145, 197, 184, 0.09);
+      font-size: 0.82rem;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+
+    .device-summary {
+      display: grid;
+      grid-template-columns: 1.1fr 0.9fr;
+      gap: 14px;
+      margin-top: 18px;
+    }
+
+    .summary-box {
+      min-width: 0;
+      padding: 16px;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.04);
+    }
+
+    .summary-label {
+      display: block;
+      margin-bottom: 8px;
+      color: var(--text-muted);
+      font-size: 0.74rem;
+      font-weight: 800;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+    }
+
+    .summary-value {
+      display: flex;
+      align-items: center;
+      min-height: 28px;
+      color: var(--text-main);
+      font-size: 1rem;
+      font-weight: 750;
+      overflow-wrap: anywhere;
+    }
+
+    .summary-meta {
+      margin-top: 6px;
+      color: var(--text-muted);
+      font-size: 0.82rem;
+      line-height: 1.45;
+    }
+
+    .device-select-row {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 12px;
+      align-items: end;
+      margin-top: 18px;
+    }
+
+    .field label {
+      display: block;
+      margin-bottom: 8px;
+      color: var(--text-soft);
+      font-size: 0.86rem;
+      font-weight: 750;
+    }
+
+    select {
+      width: 100%;
+      min-height: 46px;
+      padding: 0 42px 0 13px;
+      border: 1px solid var(--line-strong);
+      border-radius: 8px;
+      color: var(--text-main);
+      background:
+        linear-gradient(180deg, rgba(255, 255, 255, 0.07), rgba(255, 255, 255, 0.035)),
+        #111a1d;
+      outline: none;
+      appearance: none;
+    }
+
+    .select-shell {
+      position: relative;
+    }
+
+    .select-shell::after {
+      content: "";
+      position: absolute;
+      right: 16px;
+      top: 50%;
+      width: 8px;
+      height: 8px;
+      border-right: 2px solid var(--accent-amber);
+      border-bottom: 2px solid var(--accent-amber);
+      pointer-events: none;
+      transform: translateY(-64%) rotate(45deg);
+    }
+
+    .icon-button,
+    .primary-button {
+      min-height: 46px;
+      border: 1px solid rgba(240, 201, 95, 0.32);
+      border-radius: 8px;
+      color: #fff4cf;
+      background: rgba(240, 201, 95, 0.11);
+      cursor: pointer;
+      transition: transform 150ms ease, border-color 150ms ease, background 150ms ease;
+    }
+
+    .icon-button {
+      width: 46px;
+      padding: 0;
+    }
+
+    .icon-button:hover,
+    .primary-button:hover {
+      border-color: rgba(240, 201, 95, 0.58);
+      background: rgba(240, 201, 95, 0.17);
+      transform: translateY(-1px);
+    }
+
+    .icon-button svg {
+      display: block;
+      width: 20px;
+      height: 20px;
+      margin: auto;
+      fill: none;
+      stroke: currentColor;
+      stroke-width: 2;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+
+    .device-list {
+      display: grid;
+      gap: 10px;
+      margin-top: 18px;
+    }
+
+    .device-option {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr) auto;
+      gap: 13px;
+      align-items: center;
+      min-height: 66px;
+      padding: 12px 14px;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.038);
+    }
+
+    .device-option.is-selected {
+      border-color: rgba(240, 201, 95, 0.46);
+      background: rgba(240, 201, 95, 0.095);
+      box-shadow: inset 0 0 0 1px rgba(240, 201, 95, 0.08);
+    }
+
+    .device-radio {
+      width: 18px;
+      height: 18px;
+      border: 2px solid rgba(255, 255, 255, 0.25);
+      border-radius: 50%;
+      background: rgba(255, 255, 255, 0.03);
+    }
+
+    .is-selected .device-radio {
+      border-color: var(--accent-amber);
+      box-shadow: inset 0 0 0 4px #101718, 0 0 18px rgba(240, 201, 95, 0.28);
+      background: var(--accent-amber);
+    }
+
+    .device-name {
+      min-width: 0;
+      margin: 0;
+      color: var(--text-main);
+      font-size: 0.98rem;
+      font-weight: 760;
+      overflow-wrap: anywhere;
+    }
+
+    .device-meta {
+      margin: 4px 0 0;
+      color: var(--text-muted);
+      font-size: 0.82rem;
+      line-height: 1.35;
+    }
+
+    .device-badge {
+      display: inline-flex;
+      align-items: center;
+      min-height: 26px;
+      padding: 0 8px;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 999px;
+      color: var(--text-soft);
+      background: rgba(255, 255, 255, 0.04);
+      font-size: 0.76rem;
+      font-weight: 760;
+      white-space: nowrap;
+    }
+
+    .is-selected .device-badge {
+      border-color: rgba(145, 197, 184, 0.34);
+      color: #c8efe3;
+      background: rgba(145, 197, 184, 0.09);
+    }
+
+    .action-row {
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 10px;
+      margin-top: 20px;
+    }
+
+    .secondary-button,
+    .primary-button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      min-width: 118px;
+      padding: 0 16px;
+      font-weight: 800;
+    }
+
+    .secondary-button {
+      min-height: 46px;
+      border: 1px solid rgba(255, 255, 255, 0.13);
+      border-radius: 8px;
+      color: var(--text-soft);
+      background: rgba(255, 255, 255, 0.045);
+      cursor: pointer;
+    }
+
+    .primary-button {
+      border-color: rgba(145, 197, 184, 0.48);
+      color: #e3fff7;
+      background: rgba(145, 197, 184, 0.16);
+    }
+
+    .preview-note {
+      margin: 14px 0 0;
+      color: var(--text-muted);
+      font-size: 0.78rem;
+      line-height: 1.45;
+      text-align: right;
+    }
+
+    @media (max-width: 980px) {
+      body {
+        overflow: auto;
+      }
+
+      .preview-shell {
+        min-height: 100vh;
+        grid-template-columns: 1fr;
+        gap: 22px;
+        padding: 24px;
+      }
+
+      .ambient-panel {
+        min-height: 220px;
+        padding: 0;
+      }
+
+      .avatar-glass {
+        inset: -60px -34px auto auto;
+        width: 260px;
+        height: 300px;
+        opacity: 0.42;
+        place-items: start end;
+      }
+
+      .avatar-glass img {
+        width: 260px;
+        max-height: none;
+      }
+
+      .ambient-copy {
+        width: min(460px, 100%);
+      }
+
+      .device-card {
+        justify-self: stretch;
+      }
+    }
+
+    @media (max-width: 640px) {
+      .preview-shell {
+        padding: 16px;
+      }
+
+      .card-header,
+      .device-select-row,
+      .device-summary,
+      .device-summary {
+        grid-template-columns: 1fr;
+      }
+
+      .card-header {
+        display: grid;
+      }
+
+      .state-pill {
+        justify-self: start;
+      }
+
+      .device-option {
+        grid-template-columns: auto minmax(0, 1fr);
+      }
+
+      .device-badge {
+        grid-column: 2;
+        justify-self: start;
+      }
+
+      .action-row {
+        display: grid;
+        grid-template-columns: 1fr;
+      }
+
+      .secondary-button,
+      .primary-button {
+        width: 100%;
+      }
+
+      .preview-note {
+        text-align: left;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="preview-shell">
+    <section class="ambient-panel" aria-label="Evelyn preview background">
+      <div class="avatar-glass" aria-hidden="true">
+        <img src="assets/evelyn-avatar/model-v2/preview_composite.png" alt="">
+      </div>
+      <div class="ambient-copy">
+        <p class="brand-kicker">E.V.E.L.Y.N</p>
+        <h2 class="ambient-title">Audio<br>Route</h2>
+        <div class="ambient-status" aria-label="runtime state">
+          <span class="status-chip"><i class="status-dot"></i>Local I/O Bridge</span>
+          <span class="status-chip">TTS output</span>
+          <span class="status-chip">Preview</span>
+        </div>
+      </div>
+    </section>
+
+    <section class="device-card" aria-label="TTS output device selection">
+      <div class="card-topline"></div>
+      <div class="device-card-inner">
+        <header class="card-header">
+          <div>
+            <h1>TTS 출력 장치</h1>
+            <p>이블린의 로컬 목소리가 나갈 장치를 선택합니다. 저장된 장치가 없거나 사라지면 기본 출력으로 돌아갑니다.</p>
+          </div>
+          <span class="state-pill"><i class="status-dot"></i>Bridge ready</span>
+        </header>
+
+        <div class="device-summary">
+          <div class="summary-box">
+            <span class="summary-label">selected</span>
+            <strong class="summary-value">FIIO KA11</strong>
+            <div class="summary-meta">Windows WASAPI · stereo output</div>
+          </div>
+          <div class="summary-box">
+            <span class="summary-label">fallback</span>
+            <strong class="summary-value">LG ULTRAGEAR+</strong>
+            <div class="summary-meta">Windows 기본 출력</div>
+          </div>
+        </div>
+
+        <div class="device-select-row">
+          <div class="field">
+            <label for="tts-output">Output device</label>
+            <div class="select-shell">
+              <select id="tts-output">
+                <option>FIIO KA11 · Windows WASAPI</option>
+                <option>스피커(fifine Microphone) · Windows WASAPI</option>
+                <option>LG ULTRAGEAR+(NVIDIA High Definition Audio)</option>
+                <option>default · Windows 기본 출력</option>
+              </select>
+            </div>
+          </div>
+          <button class="icon-button" type="button" aria-label="테스트 재생">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M11 5 6 9H3v6h3l5 4V5Z"></path>
+              <path d="M15.5 8.5a5 5 0 0 1 0 7"></path>
+              <path d="M18.5 5.5a9 9 0 0 1 0 13"></path>
+            </svg>
+          </button>
+        </div>
+
+        <div class="device-list">
+          <article class="device-option is-selected">
+            <span class="device-radio" aria-hidden="true"></span>
+            <div>
+              <h3 class="device-name">FIIO KA11</h3>
+              <p class="device-meta">Windows WASAPI · 실제 청취 장치 후보</p>
+            </div>
+            <span class="device-badge">selected</span>
+          </article>
+          <article class="device-option">
+            <span class="device-radio" aria-hidden="true"></span>
+            <div>
+              <h3 class="device-name">스피커(fifine Microphone)</h3>
+              <p class="device-meta">Windows WASAPI · USB 장치 출력</p>
+            </div>
+            <span class="device-badge">available</span>
+          </article>
+          <article class="device-option">
+            <span class="device-radio" aria-hidden="true"></span>
+            <div>
+              <h3 class="device-name">LG ULTRAGEAR+(NVIDIA High Definition Audio)</h3>
+              <p class="device-meta">현재 Windows 기본 출력</p>
+            </div>
+            <span class="device-badge">default</span>
+          </article>
+        </div>
+
+        <div class="action-row">
+          <button class="secondary-button" type="button">닫기</button>
+          <button class="primary-button" type="button">저장</button>
+        </div>
+        <p class="preview-note">Preview only · no runtime changes</p>
+      </div>
+    </section>
+  </main>
+</body>
+</html>

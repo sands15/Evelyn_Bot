@@ -132,6 +132,67 @@ def apply_fuzzy_wake_near_miss(
     )
 
 
+def speculate_from_committed_stt_from_runtime(
+    committed_text: str,
+    room_state: dict | None,
+    *,
+    clean_text: Callable[[str], str],
+    fast_path_policy: Callable[[str, str, dict | None], dict | None],
+    monotonic: Callable[[], float],
+) -> dict | None:
+    cleaned = clean_text(committed_text)
+    state = room_state or {}
+    if len(cleaned) < 8:
+        return None
+    if not (state.get("active_speaker_user_id") or state.get("owner_user_id")):
+        return None
+    policy = fast_path_policy(cleaned, "voice", state)
+    if policy is None:
+        return None
+    return {
+        "text": cleaned,
+        "policy": policy,
+        "prepared_at": monotonic(),
+    }
+
+
+def remember_speculative_policy_from_runtime(
+    session_speculative_policies: dict[str, dict[str, Any]],
+    session_key: str | None,
+    speculative: dict | None,
+) -> None:
+    if not session_key or not speculative:
+        return
+    session_speculative_policies[session_key] = speculative
+
+
+def get_matching_speculative_policy_from_runtime(
+    session_speculative_policies: dict[str, dict[str, Any]],
+    session_key: str | None,
+    user_text: str,
+    *,
+    clean_text: Callable[[str], str],
+    is_similar: Callable[[str, str], bool],
+    monotonic: Callable[[], float],
+    max_age_sec: float = 20.0,
+) -> dict | None:
+    if not session_key:
+        return None
+    speculative = session_speculative_policies.get(session_key)
+    if not speculative:
+        return None
+    if (monotonic() - float(speculative.get("prepared_at") or 0.0)) > max_age_sec:
+        session_speculative_policies.pop(session_key, None)
+        return None
+    speculative_text = clean_text(str(speculative.get("text") or ""))
+    current_text = clean_text(user_text)
+    if not speculative_text or not current_text:
+        return None
+    if current_text.startswith(speculative_text) or speculative_text.startswith(current_text) or is_similar(current_text, speculative_text):
+        return speculative
+    return None
+
+
 def decide_final_wake_veto(
     *,
     final_text: str,

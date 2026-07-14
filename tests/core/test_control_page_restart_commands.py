@@ -13,6 +13,7 @@ CONTROL_PAGE_JS = REPO_ROOT / "docs" / "assets" / "evelyn-page.js"
 RUNTIME_LIFECYCLE = REPO_ROOT / "runtime_lifecycle.py"
 CONTROL_PAGE_TOOLS = REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "control_page_tools.py"
 CONTROL_PAGE_STATE = REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "control_page_state.py"
+CONTROL_PAGE_TOOL_RUNTIME = REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "control_page_tool_runtime.py"
 
 
 class ControlPageRestartCommandTests(unittest.TestCase):
@@ -26,6 +27,7 @@ class ControlPageRestartCommandTests(unittest.TestCase):
         cls.runtime_lifecycle = RUNTIME_LIFECYCLE.read_text(encoding="utf-8")
         cls.control_page_tools = CONTROL_PAGE_TOOLS.read_text(encoding="utf-8")
         cls.control_page_state = CONTROL_PAGE_STATE.read_text(encoding="utf-8")
+        cls.control_page_tool_runtime = CONTROL_PAGE_TOOL_RUNTIME.read_text(encoding="utf-8")
 
     def test_control_page_exposes_restart_command(self) -> None:
         self.assertIn('{"command": "/restart", "template": "/restart"', self.control_page_tools)
@@ -36,11 +38,13 @@ class ControlPageRestartCommandTests(unittest.TestCase):
 
     def test_control_page_slash_restart_runs_restart_path(self) -> None:
         self.assertIn("def execute_control_page_restart_command() -> str:", self.main_py)
-        self.assertIn("asyncio.create_task(restart_bot_process())", self.main_py)
+        self.assertIn("deps.create_task(deps.restart_bot_process())", self.control_page_tool_runtime)
+        self.assertIn("create_task=asyncio.create_task", self.main_py)
+        self.assertIn("restart_bot_process=restart_bot_process", self.main_py)
         self.assertIn('"/restart": "runtime.restart_bot"', self.control_page_tools)
         self.assertIn('"/재시작": "runtime.restart_bot"', self.control_page_tools)
-        self.assertIn("execute_control_page_runtime_tool(", self.main_py)
-        self.assertIn("execute_restart_command=execute_control_page_restart_command", self.main_py)
+        self.assertIn("execute_control_page_runtime_tool(", self.control_page_tool_runtime)
+        self.assertIn("execute_restart_command=lambda: execute_control_page_restart_command_from_runtime(deps=deps)", self.control_page_tool_runtime)
         self.assertIn('if tool_name == "runtime.restart_bot":', self.control_page_state)
         self.assertIn("return execute_restart_command()", self.control_page_state)
 
@@ -69,9 +73,9 @@ class ControlPageRestartCommandTests(unittest.TestCase):
         self.assertIn("launch_runtime_restart_sequence(", self.main_py)
 
     def test_natural_language_restart_is_routed_before_general_llm(self) -> None:
-        self.assertIn("cheap_decision = cheap_control_page_tool_decision(text)", self.main_py)
-        cheap_index = self.main_py.index("cheap_decision = cheap_control_page_tool_decision(text)")
-        tool_router = self.main_py.index("tool_decision_raw = await decide_control_page_tool_call(")
+        self.assertIn("cheap_decision = deps.cheap_control_page_tool_decision(text)", self.control_page_tool_runtime)
+        cheap_index = self.control_page_tool_runtime.index("cheap_decision = deps.cheap_control_page_tool_decision(text)")
+        tool_router = self.control_page_tool_runtime.index("tool_decision_raw = await deps.decide_control_page_tool_call(")
         self.assertLess(cheap_index, tool_router)
         self.assertIn("def is_explicit_control_page_restart_request(text: str) -> bool:", self.control_page_tools)
         self.assertIn('"재시작해줘"', self.control_page_tools)

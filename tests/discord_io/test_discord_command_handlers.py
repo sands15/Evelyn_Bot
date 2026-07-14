@@ -13,6 +13,7 @@ if str(RUNTIME_ROOT) not in sys.path:
     sys.path.insert(0, str(RUNTIME_ROOT))
 
 from evelyn_core.discord_command_handlers import (  # noqa: E402
+    handle_control_command_error,
     handle_autonomy_start_command,
     handle_autonomy_status_command,
     handle_autonomy_stop_command,
@@ -27,6 +28,7 @@ from evelyn_core.discord_command_handlers import (  # noqa: E402
     handle_rejoin_voice_command,
     handle_reset_guild_memory_command,
     handle_restart_bot_command,
+    make_control_command_authorized_checker,
     handle_shutdown_bot_command,
     handle_status_command,
 )
@@ -56,6 +58,33 @@ class FakeVoiceClient:
 
 
 class DiscordCommandHandlerTests(unittest.TestCase):
+    def test_control_command_authorized_checker_accepts_allowlisted_or_admin_users(self) -> None:
+        checker = make_control_command_authorized_checker(allowed_user_ids={7})
+        allowed_ctx = FakeContext()
+        allowed_ctx.author.id = 7
+        self.assertTrue(checker(allowed_ctx))
+
+        denied_ctx = FakeContext()
+        denied_ctx.author.id = 8
+        self.assertFalse(checker(denied_ctx))
+
+        admin_ctx = FakeContext()
+        admin_ctx.author = SimpleNamespace(id=9, guild_permissions=SimpleNamespace(administrator=True), voice=None)
+        self.assertTrue(checker(admin_ctx))
+
+    def test_control_command_error_handler_shows_message_for_check_failure(self) -> None:
+        ctx = FakeContext()
+        import evelyn_core.discord_command_handlers as handlers
+
+        asyncio.run(handle_control_command_error(ctx, handlers.commands.CheckFailure("no")))
+        self.assertEqual(ctx.sent, ["이 명령은 허용된 Discord ID이거나 서버 관리자 권한이 있어야 쓸 수 있어."])
+
+        class _Error(Exception):
+            pass
+
+        with self.assertRaises(_Error):
+            asyncio.run(handle_control_command_error(ctx, _Error("boom")))
+
     def test_join_voice_command_connects_or_reports_missing_channel(self) -> None:
         channel = SimpleNamespace(name="General")
         guild = SimpleNamespace(id=1)
