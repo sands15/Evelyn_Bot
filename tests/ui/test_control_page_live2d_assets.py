@@ -46,7 +46,8 @@ class ControlPageLive2DAssetTests(unittest.TestCase):
         self.assertIn('id="evelynLive2dCanvas"', html)
         self.assertIn('typeof voice.speaking === "boolean"', html)
         self.assertIn("Boolean(localBridge.speaking)", html)
-        self.assertIn("window.EvelynLive2D.setSpeaking(voiceSpeaking)", html)
+        self.assertIn("function latestAssistantChatText(messages)", html)
+        self.assertIn("window.EvelynLive2D.setSpeaking(voiceSpeaking, latestAssistantChatText(chatMessages))", html)
 
     def test_live2d_preview_mode_does_not_poll_the_control_api(self) -> None:
         html = (DOCS_ROOT / "index.html").read_text(encoding="utf-8-sig")
@@ -111,6 +112,18 @@ class ControlPageLive2DAssetTests(unittest.TestCase):
         self.assertIn("restorePersistedModelState();", controller)
         self.assertIn("function applyActiveExpression()", controller)
         self.assertGreaterEqual(controller.count("persistModelState();"), 3)
+
+    def test_speech_uses_content_aware_temporary_expressions(self) -> None:
+        controller = (DOCS_ROOT / "assets" / "evelyn-live2d.js").read_text(encoding="utf-8-sig")
+        self.assertIn("const SPEECH_EXPRESSION_PARAMETERS", controller)
+        self.assertIn("function chooseSpeechExpression(text)", controller)
+        self.assertIn("function beginSpeechExpression(text)", controller)
+        self.assertIn("function updateSpeechExpression(coreModel, elapsed)", controller)
+        self.assertIn("updateSpeechExpression(coreModel, elapsed)", controller)
+        self.assertIn("setSpeaking: function (speaking, speechText)", controller)
+        self.assertIn("state.activeExpression === name", controller)
+        self.assertIn("speechExpression: state.speechExpression", controller)
+        self.assertIn("speechExpressionWeight", controller)
 
     def test_idle_tail_uses_all_seven_tail_rotation_parameters(self) -> None:
         controller = (DOCS_ROOT / "assets" / "evelyn-live2d.js").read_text(encoding="utf-8-sig")

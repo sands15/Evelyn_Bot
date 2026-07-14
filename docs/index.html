@@ -2967,6 +2967,15 @@
       };
     }
 
+    function latestAssistantChatText(messages) {
+      if (!Array.isArray(messages)) return "";
+      for (let index = messages.length - 1; index >= 0; index -= 1) {
+        const normalized = normalizeChatMessage(messages[index]);
+        if (normalized && normalized.role === "assistant") return normalized.text;
+      }
+      return "";
+    }
+
     function chatSignature(messages) {
       return JSON.stringify(messages.map((message) => [
         message.role,
@@ -3366,8 +3375,9 @@
     const voiceSpeaking = typeof voice.speaking === "boolean"
       ? voice.speaking
       : Boolean(localBridge.speaking);
+    const chatMessages = state.chat && Array.isArray(state.chat.messages) ? state.chat.messages : [];
     if (window.EvelynLive2D) {
-      window.EvelynLive2D.setSpeaking(voiceSpeaking);
+      window.EvelynLive2D.setSpeaking(voiceSpeaking, latestAssistantChatText(chatMessages));
     }
     const minecraft = state.minecraft || {};
     const voicePipeline = runtime.voicePipeline || {};

@@ -12,6 +12,15 @@
   const CAT_TAIL_PART = "Part2";
   const CAT_ACCESSORY_HOTKEY = "Digit7";
   const MODEL_STATE_STORAGE_KEY = "evelynLive2dModelStateV1";
+  const SPEECH_EXPRESSION_PARAMETERS = Object.freeze({
+    "heart eye": "ParamHairBack14",
+    dia: "ParamHairBack74",
+    cheek1: "ParamCheek3",
+    cheek2: "ParamCheek4",
+    pale: "ParamCheek2",
+    puff: "ParamHairBack35",
+    tear: "ParamCheek5",
+  });
   const EXPRESSION_PARAMETERS = Object.freeze({
     ulmak: "ParamHairBack75",
     "cat ear": "ParamHairBack65",
@@ -58,6 +67,10 @@
     ready: false,
     loading: false,
     speaking: false,
+    speechExpression: null,
+    speechExpressionWeight: 0,
+    speechExpressionSequence: 0,
+    lastSpeechText: "",
     mouthOpen: 0,
     gazeX: 0,
     gazeY: 0,
@@ -236,6 +249,54 @@
     });
   }
 
+  function chooseSpeechExpression(text) {
+    const normalized = String(text || "").trim().toLowerCase();
+    if (/(해결|완료|성공|정상|고쳤|해냈|축하|resolved|fixed|success|complete)/i.test(normalized)) {
+      return "dia";
+    }
+    if (/(사랑|좋아해|소중|보고 싶|❤|♥|💕|😍|love|adore)/i.test(normalized)) {
+      return "heart eye";
+    }
+    if (/(기뻐|행복|최고|멋지|고마|반가|잘했|ㅋㅋ|ㅎㅎ|하하|😊|happy|great|awesome|thank|glad)/i.test(normalized)) {
+      return "dia";
+    }
+    if (/(슬프|미안|죄송|울고|눈물|속상|아프다|아파|sad|sorry|cry|hurt)/i.test(normalized)) {
+      return "tear";
+    }
+    if (/(싫어|화나|짜증|흥[.!?… ]|삐졌|답답|annoy|angry|mad|upset)/i.test(normalized)) {
+      return "puff";
+    }
+    if (/(걱정|불안|무서|위험|실패|오류|문제|경고|못 찾|안 돼|worry|afraid|danger|error|failed|warning)/i.test(normalized)) {
+      return "pale";
+    }
+    return state.speechExpressionSequence % 2 === 0 ? "cheek1" : "cheek2";
+  }
+
+  function beginSpeechExpression(text) {
+    state.speechExpressionSequence += 1;
+    state.lastSpeechText = String(text || "").trim();
+    state.speechExpression = chooseSpeechExpression(state.lastSpeechText);
+  }
+
+  function updateSpeechExpression(coreModel, elapsed) {
+    const target = state.speaking && state.speechExpression ? 1 : 0;
+    const smoothing = 1 - Math.pow(target > state.speechExpressionWeight ? 0.82 : 0.88, elapsed);
+    state.speechExpressionWeight += (target - state.speechExpressionWeight) * smoothing;
+    if (target === 0 && state.speechExpressionWeight < 0.002) {
+      state.speechExpressionWeight = 0;
+    }
+
+    Object.entries(SPEECH_EXPRESSION_PARAMETERS).forEach(function ([name, parameterId]) {
+      if (state.activeExpression === name) return;
+      const value = name === state.speechExpression ? state.speechExpressionWeight : 0;
+      setCoreParameter(coreModel, parameterId, value);
+    });
+
+    if (target === 0 && state.speechExpressionWeight === 0) {
+      state.speechExpression = null;
+    }
+  }
+
   function updateModelParameters() {
     if (!state.model || !state.model.internalModel) return;
     const now = performance.now();
@@ -254,6 +315,7 @@
       setCoreParameter(coreModel, "ParamMouthForm", 0.18);
     }
     updateIdleTail(coreModel, now, elapsed);
+    updateSpeechExpression(coreModel, elapsed);
     // Expressions and pose updates run before this hook, so apply the paired toggle last.
     enforceCatAccessoryVisibility(coreModel);
 
@@ -469,8 +531,14 @@
     isReady: function () {
       return state.ready;
     },
-    setSpeaking: function (speaking) {
-      state.speaking = Boolean(speaking);
+    setSpeaking: function (speaking, speechText) {
+      const nextSpeaking = Boolean(speaking);
+      const nextSpeechText = String(speechText || "").trim();
+      if (nextSpeaking && (!state.speaking || (nextSpeechText && nextSpeechText !== state.lastSpeechText))) {
+        beginSpeechExpression(nextSpeechText);
+      }
+      state.speaking = nextSpeaking;
+      if (!state.speaking) state.lastSpeechText = "";
       if (state.area) state.area.classList.toggle("live2d-speaking", state.speaking);
     },
     toggleCatAccessories: function () {
@@ -516,6 +584,8 @@
       return {
         ready: state.ready,
         speaking: state.speaking,
+        speechExpression: state.speechExpression,
+        speechExpressionWeight: Number(state.speechExpressionWeight.toFixed(3)),
         mouthOpen: Number(state.mouthOpen.toFixed(3)),
         mouthParameter: Number(state.lastMouthParameter.toFixed(3)),
         eyeOpenParameter: Number(state.lastEyeOpenParameter.toFixed(3)),
