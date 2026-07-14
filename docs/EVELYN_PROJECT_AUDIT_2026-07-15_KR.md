@@ -429,4 +429,11 @@ Compose 서비스의 `restart` 정책은 모두 `no`다. 보이는 수동 런처
 - 실제 public/internal 앱 wiring 검사
 - 프런트엔드 토큰 갱신 계약과 JavaScript 구문 검사
 
-주의: 이 항목은 소스와 격리 테스트 기준으로 완료됐다. 실행 중 컨테이너에는 아직 재빌드·재시작하지 않았으므로, 운영 `8799/8798`에는 재시작 승인 전까지 기존 정책이 남아 있다. 또한 로컬 악성 프로세스 자체를 막는 서비스 간 비밀키 인증은 별도 후속 과제다.
+운영 반영:
+
+- 사용자 승인 후 `evelyn-bot-api`, `evelyn-control-page` 두 이미지만 재빌드하고 컨테이너를 재생성했다.
+- 실제 `8799`에서 정상 Origin GET 200과 정확한 Origin 반영, 외부 Origin 403, DNS rebinding Host 403, CSRF 누락 POST 403, 정상 CSRF dry-run POST 200을 확인했다.
+- 실제 `8798`에서 Origin 없는 서버 GET 200, 브라우저 Origin GET 403, 비-JSON POST 415를 확인했다.
+- 재배포 후 이블린 컨테이너 10개가 모두 healthy이고 Control-Page boot progress가 100%임을 확인했다.
+
+P0-2의 브라우저 기반 localhost 공격 경계는 운영에도 반영됐다. 다만 로컬 악성 프로세스 자체를 막는 서비스 간 비밀키 인증은 별도 후속 과제다.
