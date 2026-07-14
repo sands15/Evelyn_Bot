@@ -326,6 +326,9 @@ class LocalMicRoutingTests(unittest.TestCase):
 
     def test_main_routes_local_only_mic_without_discord_target(self) -> None:
         main_py = (REPO_ROOT / "main.py").read_text(encoding="utf-8")
+        local_mic_segment_runtime = (
+            REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "local_mic_segment_runtime.py"
+        ).read_text(encoding="utf-8")
         control_page_tools = (
             REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "control_page_tools.py"
         ).read_text(encoding="utf-8")
@@ -333,14 +336,16 @@ class LocalMicRoutingTests(unittest.TestCase):
             REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "control_page_state.py"
         ).read_text(encoding="utf-8")
 
-        self.assertIn("target is None and LOCAL_ONLY_MODE", main_py)
-        self.assertIn("local_control_voice_member()", main_py)
+        self.assertIn("if target is None and deps.local_only_mode", local_mic_segment_runtime)
+        self.assertIn("local_only_mode=LOCAL_ONLY_MODE", main_py)
+        self.assertIn("local_control_voice_member=local_control_voice_member", main_py)
+        self.assertIn("handle_local_mic_segment_from_runtime(", main_py)
         self.assertIn("await ensure_local_mic_service_started()", main_py)
         self.assertIn("is_local_speaker_voice_client(vc)", main_py)
         self.assertIn("ask_llm_and_speak_local_from_runtime(", main_py)
         self.assertIn('"/voice": "voice.status"', control_page_tools)
         self.assertIn('"/voice status": "voice.status"', control_page_tools)
-        self.assertIn("execute_control_page_voice_tool(", main_py)
+        self.assertIn("execute_control_page_voice_tool=execute_control_page_voice_tool", main_py)
         self.assertIn('if tool_name == "voice.status":', control_page_state)
 
     def test_local_speaker_uses_streaming_sentence_tts_with_full_answer_fallback(self) -> None:
@@ -357,7 +362,7 @@ class LocalMicRoutingTests(unittest.TestCase):
         self.assertIn("on_first_playback=", main_py)
         self.assertIn('"local_first_playback_logged"', voice_delivery_runtime)
         self.assertIn('"local_tts_first_playback"', main_py)
-        self.assertIn('"num_step": OMNIVOICE_NUM_STEP', main_py)
+        self.assertIn("omnivoice_num_step=OMNIVOICE_NUM_STEP", main_py)
         self.assertIn("await deps.speak_answer_local(", voice_delivery_runtime)
         self.assertIn('metrics.setdefault("meta", {})["local_streaming_tts_fallback_used"] = True', voice_delivery_runtime)
 

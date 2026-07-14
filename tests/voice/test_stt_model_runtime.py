@@ -57,7 +57,7 @@ class SttModelRuntimeTests(unittest.TestCase):
 
     def test_normalize_stt_language(self) -> None:
         self.assertEqual(normalize_stt_language_from_runtime("ko-kr", default_language="en"), "Korean")
-        self.assertEqual(normalize_stt_language_from_runtime(None, default_language="en"), "en")
+        self.assertEqual(normalize_stt_language_from_runtime(None, default_language="en"), "English")
 
     def test_get_stt_model_from_runtime_caches_model(self) -> None:
         FakeQwen3ASRModel.calls.clear()
