@@ -5,6 +5,7 @@ transformers>=4.57
 numpy>=2.0
 Pillow>=11.0
 requests>=2.32
+psutil>=5.9
 torch>=2.8
 fastapi>=0.115
 uvicorn>=0.32
