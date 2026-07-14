@@ -503,7 +503,7 @@ def build_boot_progress(health: dict[str, Any]) -> dict[str, Any]:
     current = next((step for step in steps if not step["done"]), steps[-1])
     return {
         "percent": percent,
-        "phase": "all services ready" if percent >= 100 else f"waiting for {current['label']}",
+        "phase": "core services ready" if percent >= 100 else f"waiting for {current['label']}",
         "ready": percent >= 100,
         "componentsReady": percent >= 100,
         "done": done_count,
@@ -525,6 +525,18 @@ def build_control_state(health: dict[str, Any]) -> dict[str, Any]:
     bot_ready = bool(legacy.get("botReady"))
     chat_ready = bool(legacy.get("mainReady") and legacy.get("routerReady"))
     voice_ready = bool(legacy.get("ttsReady") and legacy.get("sttReady"))
+    core_ready = bool(
+        health.get(
+            "ok",
+            legacy.get("botReady")
+            and legacy.get("mainReady")
+            and legacy.get("routerReady")
+            and legacy.get("subReady")
+            and legacy.get("ttsReady")
+            and legacy.get("sttReady"),
+        )
+    )
+    fully_healthy = bool(health.get("fullyHealthy", str(health.get("overallState") or "up") == "up"))
     commands = build_default_commands()
     summary = str(health.get("summary") or health.get("overallState") or "unknown")
     bridge_status = local_bridge_status_snapshot()
@@ -533,7 +545,7 @@ def build_control_state(health: dict[str, Any]) -> dict[str, Any]:
     bridge_listening = bool(bridge_mic.get("captureActive"))
     control_plane = build_control_plane_state(bot_ready=bot_ready)
     return {
-        "ok": True,
+        "ok": core_ready,
         "generatedAt": time.time(),
         "mode": "docker_fast_control",
         "localUrl": f"http://127.0.0.1:{PUBLIC_CONTROL_PORT}/",
@@ -581,6 +593,11 @@ def build_control_state(health: dict[str, Any]) -> dict[str, Any]:
                 "visionReady": bool(legacy.get("visionReady")),
                 "chatReady": chat_ready,
                 "voiceReady": voice_ready,
+                "coreReady": core_ready,
+                "fullReady": fully_healthy,
+                "optionalDegraded": bool(health.get("optionalDegraded", not fully_healthy and core_ready)),
+                "voyagerHttpReady": bool(legacy.get("voyagerHttpReady")),
+                "voyagerRuntimeReady": bool(legacy.get("voyagerRuntimeReady")),
             },
             "controlPlane": control_plane,
             "bootProgress": boot_progress,

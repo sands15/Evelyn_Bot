@@ -365,7 +365,7 @@ def build_boot_progress_from_ports(ports: dict[str, bool]) -> dict[str, Any]:
     done_count = sum(1 for step in steps if step["done"])
     percent = round((done_count / max(1, len(steps))) * 100)
     current = next((step for step in steps if not step["done"]), steps[-1])
-    phase = "전체 서버 준비 완료" if percent >= 100 else f"{current['label']} 대기 중"
+    phase = "핵심 서비스 준비 완료" if percent >= 100 else f"{current['label']} 대기 중"
     return {
         "percent": percent,
         "phase": phase,

@@ -198,6 +198,30 @@ def _first_http_payload(service: dict[str, Any], *, path_suffix: str | None = No
     return None
 
 
+def _annotate_functional_readiness(services: dict[str, dict[str, Any]]) -> None:
+    voyager = services.get("voyager")
+    if not isinstance(voyager, dict):
+        return
+
+    http_ready = voyager.get("state") == "up"
+    runtime_ready = http_ready
+    if http_ready:
+        status_payload = _first_http_payload(voyager, path_suffix="/status") or _first_http_payload(voyager)
+        recovery_state = status_payload.get("recovery_state") if isinstance(status_payload, dict) else None
+        if (
+            isinstance(recovery_state, dict)
+            and str(recovery_state.get("scope") or "").strip().lower() == "runtime"
+            and recovery_state.get("healthy") is False
+        ):
+            runtime_ready = False
+
+    voyager["httpReady"] = http_ready
+    voyager["runtimeReady"] = runtime_ready
+    if http_ready and not runtime_ready:
+        voyager["ready"] = False
+        voyager["reason"] = "runtime_recovery_required"
+
+
 def _status_text(value: Any) -> str:
     if isinstance(value, dict):
         for key in ("status", "state", "outcome", "decision", "reason_code", "reason"):
@@ -520,6 +544,7 @@ def apply_runtime_health_overrides(
         return health
 
     service_map = {str(service.get("id")): service for service in services}
+    _annotate_functional_readiness(service_map)
     required_failed = any(
         bool(service.get("required")) and service.get("state") != "up"
         for service in services
@@ -534,7 +559,10 @@ def apply_runtime_health_overrides(
         overall_state = "degraded"
     else:
         overall_state = "up"
-    next_health["ok"] = overall_state == "up"
+    next_health["ok"] = not required_failed
+    next_health["fullyHealthy"] = overall_state == "up"
+    next_health["coreState"] = "down" if required_failed else "up"
+    next_health["optionalDegraded"] = overall_state == "degraded"
     next_health["overallState"] = overall_state
     next_health["summary"] = str(diagnostics[0].get("message") if diagnostics else _summary(overall_state, []))
     next_health["services"] = services
@@ -573,6 +601,7 @@ async def collect_runtime_health(
             }
         else:
             services[service.id] = dict(result)
+    _annotate_functional_readiness(services)
     diagnostics = _diagnose(services)
     required_failed = any(
         bool(service.get("required")) and service.get("state") != "up"
@@ -589,7 +618,10 @@ async def collect_runtime_health(
     else:
         overall_state = "up"
     return {
-        "ok": overall_state == "up",
+        "ok": not required_failed,
+        "fullyHealthy": overall_state == "up",
+        "coreState": "down" if required_failed else "up",
+        "optionalDegraded": overall_state == "degraded",
         "overallState": overall_state,
         "summary": _summary(overall_state, diagnostics),
         "manifestVersion": manifest.schema_version,
@@ -605,7 +637,15 @@ def legacy_services_from_health(services: dict[str, dict[str, Any]]) -> dict[str
     legacy: dict[str, Any] = {}
     for service_id, key in LEGACY_SERVICE_READY_KEYS.items():
         if service_id in services:
-            legacy[key] = services[service_id].get("state") == "up"
+            service = services[service_id]
+            if service_id == "voyager":
+                http_ready = service.get("state") == "up"
+                runtime_ready = bool(service.get("runtimeReady", http_ready))
+                legacy["voyagerHttpReady"] = http_ready
+                legacy["voyagerRuntimeReady"] = runtime_ready
+                legacy[key] = runtime_ready
+            else:
+                legacy[key] = service.get("state") == "up"
     legacy["codexRequired"] = "codex_gateway" in services
     legacy["codexBackend"] = "codex-gateway"
     required_keys = {"botReady", "mainReady", "routerReady", "subReady", "ttsReady", "sttReady"}

@@ -199,6 +199,10 @@ class RuntimeHealthTests(unittest.IsolatedAsyncioTestCase):
         services = {service["id"]: service for service in health["services"]}
         diagnostics = {diagnostic["code"]: diagnostic for diagnostic in health["diagnostics"]}
 
+        self.assertTrue(health["ok"])
+        self.assertFalse(health["fullyHealthy"])
+        self.assertEqual(health["coreState"], "up")
+        self.assertTrue(health["optionalDegraded"])
         self.assertEqual(health["overallState"], "degraded")
         self.assertTrue(services["voyager"]["ready"])
         self.assertIn("VOYAGER_TASK_CONTRACT_UNVERIFIED", diagnostics)
@@ -220,9 +224,18 @@ class RuntimeHealthTests(unittest.IsolatedAsyncioTestCase):
     async def test_voyager_status_runtime_recovery_is_warning_diagnostic(self) -> None:
         manifest = load_service_manifest(force=True)
         health = await collect_runtime_health(manifest=manifest, probe_runner=fake_probe({"voyager": "runtime_recovery"}))
+        services = {service["id"]: service for service in health["services"]}
         diagnostics = {diagnostic["code"]: diagnostic for diagnostic in health["diagnostics"]}
 
+        self.assertTrue(health["ok"])
+        self.assertFalse(health["fullyHealthy"])
         self.assertEqual(health["overallState"], "degraded")
+        self.assertTrue(services["voyager"]["httpReady"])
+        self.assertFalse(services["voyager"]["runtimeReady"])
+        self.assertFalse(services["voyager"]["ready"])
+        self.assertTrue(health["legacyServices"]["voyagerHttpReady"])
+        self.assertFalse(health["legacyServices"]["voyagerRuntimeReady"])
+        self.assertFalse(health["legacyServices"]["voyagerReady"])
         self.assertIn("VOYAGER_RUNTIME_RECOVERY_REQUIRED", diagnostics)
         self.assertIn("bridge_http", diagnostics["VOYAGER_RUNTIME_RECOVERY_REQUIRED"]["details"])
 

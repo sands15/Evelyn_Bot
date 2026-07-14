@@ -323,8 +323,42 @@ class FastControlApiToolTests(unittest.TestCase):
         progress = fast_api.build_boot_progress(health)
 
         self.assertEqual(progress["percent"], 100)
+        self.assertEqual(progress["phase"], "core services ready")
         self.assertTrue(progress["ready"])
         self.assertTrue(progress["componentsReady"])
+
+    def test_control_state_separates_core_readiness_from_optional_health(self) -> None:
+        state = fast_api.build_control_state(
+            {
+                "ok": True,
+                "fullyHealthy": False,
+                "overallState": "degraded",
+                "optionalDegraded": True,
+                "legacyServices": {
+                    "botReady": True,
+                    "mainReady": True,
+                    "routerReady": True,
+                    "subReady": True,
+                    "ttsReady": True,
+                    "sttReady": True,
+                    "voyagerReady": False,
+                    "voyagerHttpReady": True,
+                    "voyagerRuntimeReady": False,
+                },
+                "services": [
+                    {"id": service_id, "state": "up", "ready": True}
+                    for service_id, _label in fast_api.BOOT_STEPS
+                ],
+                "summary": "Voyager runtime boundary needs recovery.",
+            }
+        )
+
+        self.assertTrue(state["ok"])
+        self.assertTrue(state["runtime"]["services"]["coreReady"])
+        self.assertFalse(state["runtime"]["services"]["fullReady"])
+        self.assertTrue(state["runtime"]["services"]["optionalDegraded"])
+        self.assertTrue(state["runtime"]["services"]["voyagerHttpReady"])
+        self.assertFalse(state["runtime"]["services"]["voyagerRuntimeReady"])
 
 
 if __name__ == "__main__":
