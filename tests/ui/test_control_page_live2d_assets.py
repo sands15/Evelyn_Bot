@@ -79,6 +79,26 @@ class ControlPageLive2DAssetTests(unittest.TestCase):
         self.assertNotIn("window.innerWidth", controller)
         self.assertNotIn("window.innerHeight", controller)
 
+    def test_digit_seven_toggles_cat_ears_and_tail_together(self) -> None:
+        controller = (DOCS_ROOT / "assets" / "evelyn-live2d.js").read_text(encoding="utf-8-sig")
+        self.assertIn('const CAT_EAR_PARAMETER = "ParamHairBack65"', controller)
+        self.assertIn('const CAT_EAR_PART = "ear"', controller)
+        self.assertIn('const CAT_TAIL_PART = "Part2"', controller)
+        self.assertIn('const CAT_ACCESSORY_HOTKEY = "Digit7"', controller)
+        self.assertNotIn('Digit7: "cat ear"', controller)
+        self.assertIn("function enforceCatAccessoryVisibility(coreModel)", controller)
+        self.assertIn("const opacity = state.catAccessoriesVisible ? 1 : 0", controller)
+        self.assertIn("setCoreParameter(coreModel, CAT_EAR_PARAMETER, opacity)", controller)
+        self.assertIn("coreModel.setPartOpacityById(resolveCoreParameterId(CAT_EAR_PART), opacity)", controller)
+        self.assertIn("coreModel.setPartOpacityById(resolveCoreParameterId(CAT_TAIL_PART), opacity)", controller)
+        self.assertIn("controller.toggleCatAccessories()", controller)
+        self.assertIn("toggleCatAccessories: function ()", controller)
+        self.assertIn("enforceCatAccessoryVisibility(coreModel)", controller)
+        self.assertIn("catEarParameter", controller)
+        self.assertIn("catEarPartOpacity", controller)
+        self.assertIn("catTailPartOpacity", controller)
+        self.assertIn("catAccessoriesVisible", controller)
+
     def test_idle_tail_uses_all_seven_tail_rotation_parameters(self) -> None:
         controller = (DOCS_ROOT / "assets" / "evelyn-live2d.js").read_text(encoding="utf-8-sig")
         expected = [

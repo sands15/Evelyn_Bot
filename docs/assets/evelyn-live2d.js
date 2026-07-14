@@ -7,6 +7,10 @@
   const HEAD_FOCUS_Y_RATIO = 0.276;
   const HEAD_FOCUS_FULL_DISTANCE_HEIGHT_RATIO = 0.18;
   const HEAD_FOCUS_MIN_DISTANCE_PX = 72;
+  const CAT_EAR_PARAMETER = "ParamHairBack65";
+  const CAT_EAR_PART = "ear";
+  const CAT_TAIL_PART = "Part2";
+  const CAT_ACCESSORY_HOTKEY = "Digit7";
   const EXPRESSION_PARAMETERS = Object.freeze({
     ulmak: "ParamHairBack75",
     "cat ear": "ParamHairBack65",
@@ -28,7 +32,6 @@
     Digit4: "tiered",
     Digit5: "cheek1",
     Digit6: "cheek2",
-    Digit7: "cat ear",
     Digit8: "pale",
     Digit9: "puff",
     Digit0: "tear",
@@ -60,10 +63,14 @@
     pointerClientX: null,
     pointerClientY: null,
     pointerActive: false,
+    catAccessoriesVisible: true,
     activeExpression: null,
     lastExpressionValue: null,
     lastMouthParameter: 0,
     lastEyeOpenParameter: 1,
+    lastCatEarParameter: 1,
+    lastCatEarPartOpacity: 1,
+    lastCatTailPartOpacity: 1,
     idleTailWeight: 1,
     idleTailAngles: IDLE_TAIL_PARAMETERS.map(function () { return 0; }),
     idleTailVelocities: IDLE_TAIL_PARAMETERS.map(function () { return 0; }),
@@ -175,6 +182,17 @@
       : id;
   }
 
+  function enforceCatAccessoryVisibility(coreModel) {
+    const opacity = state.catAccessoriesVisible ? 1 : 0;
+    setCoreParameter(coreModel, CAT_EAR_PARAMETER, opacity);
+    try {
+      coreModel.setPartOpacityById(resolveCoreParameterId(CAT_EAR_PART), opacity);
+      coreModel.setPartOpacityById(resolveCoreParameterId(CAT_TAIL_PART), opacity);
+    } catch (_error) {
+      // Keep supporting model revisions that expose the parameter without named parts.
+    }
+  }
+
   function updateModelParameters() {
     if (!state.model || !state.model.internalModel) return;
     const now = performance.now();
@@ -193,10 +211,15 @@
       setCoreParameter(coreModel, "ParamMouthForm", 0.18);
     }
     updateIdleTail(coreModel, now, elapsed);
+    // Expressions and pose updates run before this hook, so apply the paired toggle last.
+    enforceCatAccessoryVisibility(coreModel);
 
     try {
       state.lastMouthParameter = coreModel.getParameterValueById(resolveCoreParameterId("ParamMouthOpenY"));
       state.lastEyeOpenParameter = coreModel.getParameterValueById(resolveCoreParameterId("ParamEyeLOpen"));
+      state.lastCatEarParameter = coreModel.getParameterValueById(resolveCoreParameterId(CAT_EAR_PARAMETER));
+      state.lastCatEarPartOpacity = coreModel.getPartOpacityById(resolveCoreParameterId(CAT_EAR_PART));
+      state.lastCatTailPartOpacity = coreModel.getPartOpacityById(resolveCoreParameterId(CAT_TAIL_PART));
       state.lastTailRootParameter = coreModel.getParameterValueById(
         resolveCoreParameterId(IDLE_TAIL_PARAMETERS[0].id)
       );
@@ -292,6 +315,11 @@
       controller.clearExpression();
       return;
     }
+    if (event.code === CAT_ACCESSORY_HOTKEY) {
+      event.preventDefault();
+      controller.toggleCatAccessories();
+      return;
+    }
     const expression = HOTKEY_EXPRESSIONS[event.code];
     if (!expression) return;
     event.preventDefault();
@@ -370,6 +398,7 @@
       state.area.classList.remove("live2d-error");
       state.area.classList.add("live2d-ready");
       state.area.dataset.live2dExpression = "none";
+      state.area.dataset.live2dCatAccessories = "visible";
       fitModel();
       bindInteractions();
       scheduleNextBlink(performance.now());
@@ -398,6 +427,15 @@
     setSpeaking: function (speaking) {
       state.speaking = Boolean(speaking);
       if (state.area) state.area.classList.toggle("live2d-speaking", state.speaking);
+    },
+    toggleCatAccessories: function () {
+      state.catAccessoriesVisible = !state.catAccessoriesVisible;
+      if (state.area) {
+        state.area.dataset.live2dCatAccessories = state.catAccessoriesVisible ? "visible" : "hidden";
+      }
+      const coreModel = state.model && state.model.internalModel && state.model.internalModel.coreModel;
+      if (coreModel) enforceCatAccessoryVisibility(coreModel);
+      return state.catAccessoriesVisible;
     },
     setExpression: function (name) {
       const normalized = String(name || "").trim().toLowerCase();
@@ -438,6 +476,10 @@
         mouthOpen: Number(state.mouthOpen.toFixed(3)),
         mouthParameter: Number(state.lastMouthParameter.toFixed(3)),
         eyeOpenParameter: Number(state.lastEyeOpenParameter.toFixed(3)),
+        catEarParameter: Number(state.lastCatEarParameter.toFixed(3)),
+        catEarPartOpacity: Number(state.lastCatEarPartOpacity.toFixed(3)),
+        catTailPartOpacity: Number(state.lastCatTailPartOpacity.toFixed(3)),
+        catAccessoriesVisible: state.catAccessoriesVisible,
         idleTailWeight: Number(state.idleTailWeight.toFixed(3)),
         tailRootParameter: Number(state.lastTailRootParameter.toFixed(3)),
         tailTipParameter: Number(state.lastTailTipParameter.toFixed(3)),
