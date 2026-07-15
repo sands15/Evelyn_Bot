@@ -13,7 +13,8 @@ Source branch: `refactor/main-py-decomposition-2026-07-15`
   TTS interrupt/input suppression gate, partial/full STT 실행, transcript/barge-in merge를 런타임 모듈로 옮겼다.
   short transcript/final wake session gate와 reply context dispatch도 분리했다.
   상위 `voice_member_audio_pipeline_runtime.py`가 모든 단계를 연결하며 `_process_member_audio_impl`은 30줄 wrapper다.
-  runtime dependency builder 군은 아직 `main.py` 전역에 남아 있다.
+  autonomy engine factory도 `autonomy_runtime_factory.py`로 이동했다.
+  runtime dependency builder 군과 OmniVoice/로컬 TTS/LLM route 대형 함수는 아직 `main.py`에 남아 있다.
 - 핵심 준비 상태와 선택 기능 준비 상태를 분리했다.
   - `ok`: 필수 핵심 서비스 준비 여부
   - `fullyHealthy`: 선택 기능을 포함한 전체 건강 여부
@@ -45,14 +46,14 @@ Source branch: `refactor/main-py-decomposition-2026-07-15`
 
 ## Verification state
 
-검증 시각: 2026-07-15 20:46 KST
-검증한 코드 기준점: `refactor/main-py-decomposition-2026-07-15` 여덟 번째 상위 voice pipeline 분리 작업 트리
+검증 시각: 2026-07-15 21:05 KST
+검증한 코드 기준점: `refactor/main-py-decomposition-2026-07-15` 아홉 번째 autonomy factory 분리 작업 트리
 
 - `pip check`: 통과
 - `docker compose config --quiet`: 통과(검증용 Discord token 사용)
 - Python `compileall`: 통과
 - 활성 Live2D/boot JavaScript `node --check`: 통과
-- 전체 unittest: 1,013개 통과, 실패 0, 오류 0, 건너뜀 0
+- 전체 unittest: 1,021개 통과, 실패 0, 오류 0, 건너뜀 0
 - `EVELYN_RUN_REAL_MAIN_INTEGRATION=1`: 실제 `main.py` 프로세스 smoke 포함
 - `PYTHONWARNINGS=error::ResourceWarning`: 통과
 - Codex Gateway 테스트 서버: 무토큰/오토큰 `401`, 정상 bearer token `200`

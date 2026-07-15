@@ -57,17 +57,16 @@ from evelyn_core.audio import (
 )
 from evelyn_core.autonomy import AutonomyEngine
 from evelyn_core.autonomy_observation_state import (
-    build_autonomy_recent_context_payload,
-    build_autonomy_status_payload,
-    build_autonomy_summary_payload,
-    build_default_autonomy_observation,
     pick_recent_user_text,
 )
 from evelyn_core.autonomy_router import (
-    DefaultAutonomyExecutor,
     ResolveRouteExecutorRuntimeDeps,
     RoutedAutonomyExecutor,
     resolve_route_executor_from_runtime,
+)
+from evelyn_core.autonomy_runtime_factory import (
+    AutonomyRuntimeFactoryDeps,
+    get_or_create_autonomy_engine_from_runtime,
 )
 from evelyn_core.config import *
 from evelyn_core.instance_lock_runtime import (
@@ -1428,248 +1427,56 @@ def new_conversation_history() -> list[dict]:
     return new_conversation_history_from_runtime(build_session_turn_runtime_deps())
 
 
-def get_or_create_autonomy_engine(guild_id: int) -> AutonomyEngine:
-    engine = autonomy_engines.get(guild_id)
-    if engine is not None:
-        return engine
-
-    async def _find_followup_channel() -> discord.abc.Messageable | None:
-        guild = bot.get_guild(guild_id)
-        if guild is None:
-            return None
-        preferred_channels = get_guild_observe_channel_ids(guild_id)
-        for channel_id in preferred_channels:
-            channel = guild.get_channel(channel_id)
-            if channel is not None and hasattr(channel, "send"):
-                return channel
-        for channel_id in reversed([v.get("channel_id") for v in session_followup_targets.values() if isinstance(v, dict) and v.get("channel_id")]):
-            channel = guild.get_channel(channel_id)
-            if channel is not None and hasattr(channel, "send"):
-                return channel
-        return None
-
-    async def _notify(text: str) -> None:
-        text = clean_text(text)
-        if not text:
-            return
-        channel = await _find_followup_channel()
-        if channel is not None:
-            await send_discord_text(channel, text)
-
-    def _has_queued_proactive_question(session_key: str, latest_user_text: str) -> bool:
-        if question_cooldown_hit(session_key):
-            return False
-        gate = evaluate_proactive_question_gate(
-            guild_id=guild_id,
-            source="autonomy",
-            user_text=latest_user_text,
-            answer_text="",
-            awaiting_user_reply=False,
-            session_scope_key=session_key,
-            session_cooldown_hit=False,
-        )
-        if not gate.allowed:
-            return False
-        for scope_type, scope_key in proactive_question_scope_candidates(session_memory_key=session_key):
-            if select_question_to_ask(
-                guild_id,
-                scope_type=scope_type,
-                scope_key=scope_key,
-                session_scope_key=session_key,
-            ):
-                return True
-        return False
-
-    async def _default_observe() -> dict[str, Any]:
-        channel = await _find_followup_channel()
-        session_key = runtime_session_key(guild_id=guild_id)
-        history = get_conversation_history(session_key=session_key, guild_id=guild_id)
-        latest_user_text = pick_recent_user_text(history)
-        observe_channel_ids = get_guild_observe_channel_ids(guild_id)
-        command_only_channel_ids = get_guild_command_only_channel_ids(guild_id)
-        observed_channels: list[dict[str, Any]] = []
-        guild = bot.get_guild(guild_id)
-        now_local = time.localtime()
-        quiet_hours = now_local.tm_hour < 8 or now_local.tm_hour >= 23
-        last_result = (autonomy_engines.get(guild_id).state.last_step_result if autonomy_engines.get(guild_id) is not None else {}) or {}
-        cached_cognitive = read_cached_cognitive_state(guild_id)
-        last_refresh_at = float(autonomy_last_cognitive_refresh_at.get(guild_id, 0.0) or 0.0)
-        router_refresh_inflight = bool((task := autonomy_cognitive_refresh_tasks.get(guild_id)) is not None and not task.done())
-        if guild is not None:
-            for channel_id in observe_channel_ids[:8]:
-                channel_obj = guild.get_channel(channel_id)
-                channel_name = getattr(channel_obj, "name", str(channel_id)) if channel_obj is not None else str(channel_id)
-                observed_channels.append({"id": channel_id, "name": channel_name})
-        vision_watch = read_vision_watch_state()
-        local_tts_state = local_tts_playback_manager.snapshot()
-        local_mic_state = serialize_local_mic_runtime_state()
-        queued_proactive_question_available = bool(
-            session_key and _has_queued_proactive_question(session_key, latest_user_text)
-        )
-        return build_default_autonomy_observation(
-            connected=channel is not None,
-            known_followup_channels=len([v for v in session_followup_targets.values() if isinstance(v, dict) and v.get("channel_id")]),
-            inflight_llm_requests=inflight_llm_requests,
-            active_sessions=len(active_session_until),
-            history=history,
-            last_autonomy_ping_at=float(last_autonomy_ping_at.get(guild_id, 0.0) or 0.0),
-            observe_channel_ids=observe_channel_ids,
-            command_only_channel_ids=command_only_channel_ids,
-            observed_channels=observed_channels,
-            quiet_hours=quiet_hours,
-            last_result=last_result,
-            cached_cognitive=cached_cognitive,
-            last_cognitive_refresh_at=last_refresh_at,
-            router_refresh_inflight=router_refresh_inflight,
-            autonomy_cognitive_stale_sec=AUTONOMY_COGNITIVE_STALE_SEC,
-            autonomy_cognitive_min_interval_sec=AUTONOMY_COGNITIVE_MIN_INTERVAL_SEC,
-            autonomy_cognitive_force_refresh_sec=AUTONOMY_COGNITIVE_FORCE_REFRESH_SEC,
-            vision_watch=vision_watch,
-            vision_watch_interval_sec=VISION_WATCH_INTERVAL_SEC,
-            local_tts_state=local_tts_state,
-            local_mic_state=local_mic_state,
-            queued_proactive_question_available=queued_proactive_question_available,
-            answer_promises_search_fn=answer_promises_search,
-        )
-
-    async def _default_send_followup(
-        text: str,
-        *,
-        awaiting_user_reply: bool = False,
-        user_text: str = "[autonomy]",
-    ) -> dict[str, Any]:
-        channel = await _find_followup_channel()
-        if channel is None:
-            return {"status": "blocked", "reason": "no_followup_channel"}
-        await send_discord_text(channel, text)
-        session_key = runtime_session_key(guild_id=guild_id)
-        append_history(session_key, user_text or "[autonomy]", text, guild_id=guild_id)
-        schedule_memory_update(
-            guild_id,
-            user_text or "[autonomy]",
-            text,
-            source="autonomy",
-            assistant_speaker="Evelyn-Autonomy",
-            session_key=session_key,
-            runtime_mode="batch",
-        )
-        mark_session_active(
-            session_key,
-            ttl_sec=ACTIVE_CONVERSATION_TEXT_QUESTION_SEC if awaiting_user_reply else ACTIVE_CONVERSATION_TEXT_SEC,
-            speaker="assistant",
-            awaiting_user_reply=awaiting_user_reply,
-            topic_id=build_topic_id("autonomy", text),
-            answer_text=text,
-            user_text=user_text or "[autonomy]",
-        )
-        last_autonomy_ping_at[guild_id] = time.monotonic()
-        mark_self_state_assistant_output(proactive=True)
-        return {"status": "ok", "reason": "sent_followup", "text": text}
-
-    async def _default_summarize() -> dict[str, Any]:
-        history = get_conversation_history(session_key=runtime_session_key(guild_id=guild_id), guild_id=guild_id)
-        return build_autonomy_summary_payload(
-            history,
-            active_sessions=len(active_session_until),
-            inflight_llm_requests=inflight_llm_requests,
-        )
-
-    async def _default_check_status() -> dict[str, Any]:
-        channel = await _find_followup_channel()
-        return build_autonomy_status_payload(
-            connected=channel is not None,
-            active_sessions=len(active_session_until),
-            inflight_llm_requests=inflight_llm_requests,
-            known_followup_channels=len([v for v in session_followup_targets.values() if isinstance(v, dict) and v.get("channel_id")]),
-        )
-
-    async def _default_summarize_recent_context() -> dict[str, Any]:
-        history = get_conversation_history(session_key=runtime_session_key(guild_id=guild_id), guild_id=guild_id)
-        return build_autonomy_recent_context_payload(history)
-
-    async def _default_maybe_ping_user(text: str) -> dict[str, Any]:
-        last_ping_at = float(last_autonomy_ping_at.get(guild_id, 0.0) or 0.0)
-        if last_ping_at > 0 and (time.monotonic() - last_ping_at) < 900:
-            return {"status": "blocked", "reason": "ping_cooldown"}
-        session_key = runtime_session_key(guild_id=guild_id)
-        history = get_conversation_history(session_key=session_key, guild_id=guild_id)
-        latest_user_text = pick_recent_user_text(history)
-        marked = select_and_mark_proactive_question(
-            guild_id=guild_id,
-            source="autonomy",
-            user_text=latest_user_text,
-            answer_text="",
-            awaiting_user_reply=False,
-            session_key=session_key,
-            session_memory_key=session_key,
-        )
-        if not marked:
-            return {"status": "ok", "reason": "no_queued_proactive_question", "skipped": True}
-        return await _default_send_followup(
-            marked["ask_text"],
-            awaiting_user_reply=True,
-            user_text=latest_user_text or "[autonomy]",
-        )
-
-    async def _default_refresh_cognitive_state() -> dict[str, Any]:
-        existing = autonomy_cognitive_refresh_tasks.get(guild_id)
-        if existing is not None and not existing.done():
-            return {"status": "blocked", "reason": "router_refresh_inflight"}
-        session_key = runtime_session_key(guild_id=guild_id)
-        history = get_conversation_history(session_key=session_key, guild_id=guild_id)
-        latest_user_text = pick_recent_user_text(history)
-        if not latest_user_text:
-            return {"status": "blocked", "reason": "no_recent_user_text"}
-
-        async def _run_refresh() -> dict[str, Any]:
-            started_mono = time.monotonic()
-            autonomy_last_cognitive_refresh_at[guild_id] = started_mono
-            state = await update_cognitive_state(
-                guild_id,
-                latest_user_text,
-                session_key=session_key,
-                source="text",
-                turn_scope=None,
-            )
-            elapsed_ms = round((time.monotonic() - started_mono) * 1000.0, 1)
-            return {
-                "status": "ok",
-                "reason": "router_refreshed",
-                "updated_at": state.get("updated_at"),
-                "action": state.get("action"),
-                "confidence": state.get("confidence"),
-                "elapsed_ms": elapsed_ms,
-                "text": latest_user_text[:120],
-            }
-
-        task = asyncio.create_task(_run_refresh())
-        autonomy_cognitive_refresh_tasks[guild_id] = task
-        try:
-            return await task
-        finally:
-            current = autonomy_cognitive_refresh_tasks.get(guild_id)
-            if current is task:
-                autonomy_cognitive_refresh_tasks.pop(guild_id, None)
-
-    engine = AutonomyEngine(
-        guild_id=guild_id,
-        executor=RoutedAutonomyExecutor(
-            default_executor=DefaultAutonomyExecutor(
-                observe_fn=_default_observe,
-                send_followup_fn=_default_send_followup,
-                summarize_fn=_default_summarize,
-                check_status_fn=_default_check_status,
-                summarize_recent_context_fn=_default_summarize_recent_context,
-                maybe_ping_user_fn=_default_maybe_ping_user,
-                refresh_cognitive_state_fn=_default_refresh_cognitive_state,
-            ),
-            executors={},
-        ),
-        notify=_notify,
-        poll_interval_sec=AUTONOMY_POLL_INTERVAL_SEC,
+def build_autonomy_runtime_factory_deps() -> AutonomyRuntimeFactoryDeps:
+    return AutonomyRuntimeFactoryDeps(
+        autonomy_engines=autonomy_engines,
+        get_guild=bot.get_guild,
+        get_observe_channel_ids=get_guild_observe_channel_ids,
+        get_command_only_channel_ids=get_guild_command_only_channel_ids,
+        session_followup_targets=session_followup_targets,
+        clean_text=clean_text,
+        send_discord_text=send_discord_text,
+        question_cooldown_hit=question_cooldown_hit,
+        evaluate_proactive_question_gate=evaluate_proactive_question_gate,
+        proactive_question_scope_candidates=proactive_question_scope_candidates,
+        select_question_to_ask=select_question_to_ask,
+        runtime_session_key=runtime_session_key,
+        get_conversation_history=get_conversation_history,
+        pick_recent_user_text=pick_recent_user_text,
+        localtime=time.localtime,
+        monotonic=time.monotonic,
+        autonomy_last_cognitive_refresh_at=autonomy_last_cognitive_refresh_at,
+        autonomy_cognitive_refresh_tasks=autonomy_cognitive_refresh_tasks,
+        read_cached_cognitive_state=read_cached_cognitive_state,
+        read_vision_watch_state=read_vision_watch_state,
+        local_tts_snapshot=local_tts_playback_manager.snapshot,
+        serialize_local_mic_runtime_state=serialize_local_mic_runtime_state,
+        get_active_session_count=lambda: len(active_session_until),
+        get_inflight_llm_requests=lambda: inflight_llm_requests,
+        last_autonomy_ping_at=last_autonomy_ping_at,
+        answer_promises_search=answer_promises_search,
+        append_history=append_history,
+        schedule_memory_update=schedule_memory_update,
+        mark_session_active=mark_session_active,
+        build_topic_id=build_topic_id,
+        mark_self_state_assistant_output=mark_self_state_assistant_output,
+        select_and_mark_proactive_question=select_and_mark_proactive_question,
+        update_cognitive_state=update_cognitive_state,
+        autonomy_cognitive_stale_sec=AUTONOMY_COGNITIVE_STALE_SEC,
+        autonomy_cognitive_min_interval_sec=AUTONOMY_COGNITIVE_MIN_INTERVAL_SEC,
+        autonomy_cognitive_force_refresh_sec=AUTONOMY_COGNITIVE_FORCE_REFRESH_SEC,
+        vision_watch_interval_sec=VISION_WATCH_INTERVAL_SEC,
+        active_conversation_text_question_sec=ACTIVE_CONVERSATION_TEXT_QUESTION_SEC,
+        active_conversation_text_sec=ACTIVE_CONVERSATION_TEXT_SEC,
+        autonomy_poll_interval_sec=AUTONOMY_POLL_INTERVAL_SEC,
     )
-    autonomy_engines[guild_id] = engine
-    return engine
+
+
+def get_or_create_autonomy_engine(guild_id: int) -> AutonomyEngine:
+    return get_or_create_autonomy_engine_from_runtime(
+        guild_id,
+        deps=build_autonomy_runtime_factory_deps(),
+    )
 
 def remember_session_followup_target(session_key: str, *, channel_id: int | None = None, message_id: int | None = None) -> None:
     remember_session_followup_target_from_runtime(

@@ -140,6 +140,23 @@ Last reviewed: 2026-07-15
 - 런타임/컨테이너 재시작과 외부 push는 하지 않았다.
 - 음성 hot path의 실행 orchestration 분리는 완료했다. 다음 구조 작업은 `main.py` 전역의
   runtime dependency builder 군을 기능별 composition root로 묶는 별도 단계다.
+- 아홉 번째 배치에서 비음성 최대 함수였던 autonomy engine factory를 분리했다.
+  - 새 모듈: `evelyn_core/runtime/evelyn_core/autonomy_runtime_factory.py`
+  - 새 계약: `AutonomyRuntimeFactoryDeps`
+  - 이동 책임: follow-up 채널 선택/알림, autonomy observation, proactive question,
+    follow-up session/memory 기록, summary/status, cognitive refresh task, engine 생성과 캐시.
+  - `get_or_create_autonomy_engine`은 runtime factory에 typed deps를 주입하는 thin wrapper가 됐다.
+- 아홉 번째 배치 뒤 정확한 누적 크기 변화:
+  - `main.py`: 8,793줄 → 8,153줄
+  - 최대 함수: `get_or_create_autonomy_engine` 242줄 제거 후 `create_omnivoice_source` 146줄
+- 아홉 번째 배치 검증:
+  - 새 autonomy factory 테스트 8개 통과
+  - CI와 같은 discovery 명령으로 전체 unittest 1,021개 통과
+  - 실제 `main.py` 프로세스 smoke와 `PYTHONWARNINGS=error::ResourceWarning`를 함께 적용한 전체 unittest 1,021개 통과
+  - Python `compileall` 통과
+- 런타임/컨테이너 재시작과 외부 push는 하지 않았다.
+- 다음 대형 함수 위험 순위는 `create_omnivoice_source` 146줄,
+  `stream_local_tts_sentences` 129줄, `classify_llm_route_async` 118줄이다.
 
 - [22:59 KST] cron checkpoint: `build_guild_runtime_reset_deps` 빌더 본문을
   `evelyn_core/runtime/evelyn_core/guild_runtime_reset.py`로 이전.

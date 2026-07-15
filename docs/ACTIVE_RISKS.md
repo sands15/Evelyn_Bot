@@ -46,9 +46,9 @@ CI의 실제 프로세스 smoke는 `main.py`가 기동 가능한지만 확인한
 
 ## P1 — `main.py` 구조 부채
 
-음성 hot path의 ingress, wake, TTS interrupt, STT, transcript, session gate, reply dispatch와 상위 실행 순서는 런타임 모듈로 이동했다. `_process_member_audio_impl`은 30줄 wrapper가 됐지만, 다수의 runtime dependency builder와 다른 기능 영역의 composition 책임은 여전히 `main.py` 전역에 남아 있다. 음성 함수 하나를 줄였다고 파일 전체 구조 위험이 해결된 상태는 아니다.
+음성 hot path의 실행 순서는 런타임 모듈로 이동했고 `_process_member_audio_impl`은 30줄 wrapper가 됐다. 242줄 autonomy factory도 분리했지만 `main.py`는 여전히 8,153줄이며, `create_omnivoice_source` 146줄, `stream_local_tts_sentences` 129줄, `classify_llm_route_async` 118줄과 다수의 dependency builder가 남아 있다. 일부 대형 함수를 줄였다고 파일 전체 구조 위험이 해결된 상태는 아니다.
 
-다음 조치: 전역을 숨기는 namespace/globals 우회 없이 runtime dependency builder 군을 기능별 composition root로 묶고, `main.py`의 다른 대형 함수도 별도 위험 순위로 다시 측정한다.
+다음 조치: OmniVoice source/로컬 TTS streaming/LLM route 순으로 실행 경계를 분리하고, 전역을 숨기는 namespace/globals 우회 없이 dependency builder 군을 기능별 composition root로 묶는다.
 
 ## P2 — 설정과 예외 처리의 잔여 분산
 
