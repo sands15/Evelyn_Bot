@@ -210,6 +210,33 @@ Last reviewed: 2026-07-15
 - 런타임/컨테이너 재시작과 외부 push는 하지 않았다.
 - 다음 최대 함수는 `build_runtime_status_context` 83줄, `stream_tts_sentences` 81줄,
   `build_fast_path_policy_runtime_deps` 72줄이다.
+- 열다섯 번째 배치에서 83줄 `build_runtime_status_context`와 상태 소유권을 분리했다.
+  - 확장 모듈/계약: `runtime_status_context.py`, `RuntimeStatusContextDeps`, `RuntimeStatusContextState`
+  - 이동 책임: TTL/force cache, lazy lock, TCP probe, Control API 상태, GPU/OOM/recent error 요약.
+  - `main.py`의 cache dict와 lock 전역을 제거하고 상태 객체 하나만 composition root에 유지했다.
+  - 새 테스트 6개: disabled/cache/force, service+GPU+error 조합, service failure, main 위임.
+- 열여섯 번째 배치에서 81줄 `stream_tts_sentences`를 분리했다.
+  - 새 모듈/계약: `discord_tts_stream_runtime.py`, `DiscordTtsStreamRuntimeDeps`
+  - 이동 책임: source callback/trace, playback request, prefetch/prepared failure stage, turn-scope cleanup.
+  - 새 테스트 4개: 정상 request/callback, failure stage, playback 예외 cleanup, main 위임.
+- 열일곱 번째 배치에서 71줄 `generate_control_page_welcome_text`를 분리했다.
+  - 확장 모듈/계약: `control_page_ui_runtime.py`, `ControlPageWelcomeRuntimeDeps`
+  - 이동 책임: welcome prompt/payload, HTTP 응답, sanitize, 성공/실패 model trace와 fallback.
+  - 새 테스트 4개: 정상 생성, HTTP 실패, empty choices, main 위임.
+- 열일곱 번째 배치 뒤 정확한 누적 크기 변화:
+  - `main.py`: 8,793줄 → 7,631줄
+  - 현재 최대 함수는 `build_fast_path_policy_runtime_deps` 72줄이며,
+    최대 실행 함수는 `speak_answer_local` 65줄이다.
+- 열다섯 번째~열일곱 번째 배치 통합 검증:
+  - 새 테스트 14개와 관련 테스트 70개 통과
+  - 일반 discovery 전체 unittest 1,064개 통과(실제 `main.py` opt-in 1개 의도적 skip)
+  - 실제 `main.py` smoke와 `PYTHONWARNINGS=error::ResourceWarning`를 함께 적용한 전체 unittest 1,064개 통과
+  - Python `compileall`, `git diff --check` 통과
+- 첫 전체 회귀에서 runtime status 문자열 위치를 `main.py`로 고정한 정적 테스트 1개가 실패했고,
+  새 소유 모듈을 검사하도록 수정한 뒤 두 전체 회귀를 처음부터 재통과했다.
+- 런타임/컨테이너 재시작과 외부 push는 하지 않았다.
+- 다음 후보는 `speak_answer_local` 65줄, `ask_summary_llm` 64줄,
+  `ask_router_llm` 64줄과 dependency builder composition root 정리다.
 
 - [22:59 KST] cron checkpoint: `build_guild_runtime_reset_deps` 빌더 본문을
   `evelyn_core/runtime/evelyn_core/guild_runtime_reset.py`로 이전.
@@ -669,7 +696,7 @@ Last reviewed: 2026-07-15
 - `search_tools.py`
   - DuckDuckGo/API/HTML search, weather query normalization, wttr weather result, search result rendering.
 - `runtime_status_context.py`
-  - 런타임 상태 문맥용 URL port 추출, TCP probe, 로그 tail/오류 compact, 최근 런타임 오류 수집, GPU VRAM/OOM 상태 답변.
+  - 런타임 상태 문맥용 TTL cache/lazy lock 상태, URL port/TCP probe, Control API/GPU VRAM/OOM/최근 오류 요약과 GPU 상태 답변.
 - `runtime_mode_policy.py`
   - realtime/congested/normal runtime mode selection and mode option application from queue/backlog/inflight pressure.
 - `control_page_runtime_probe.py`
@@ -684,6 +711,8 @@ Last reviewed: 2026-07-15
   - Control Page forced-search answer path, search action execution, main synthesis, session state update, and local TTS scheduling with live callbacks injected from `main.py`.
 - `control_page_text_runtime.py`
   - Control Page 일반 text turn/scope lifecycle, streaming answer, black-frame 오류 치환, proactive question, session finalize, local TTS와 summary cleanup.
+- `control_page_ui_runtime.py`
+  - Control Page URL/session/guild/chat UI helpers와 welcome LLM prompt/HTTP/trace/fallback 생성.
 - `control_page_tool_runtime.py`
   - Control Page memory-panel action, restart command scheduling, router-history retrieval, tool-turn recording, UI-tool router LLM request assembly, command execution dispatch to memory/runtime/voice/Minecraft tool handlers, and Control Page input routing between cheap tools/router/search/main text.
 - `control_page_http.py`
@@ -738,6 +767,8 @@ Last reviewed: 2026-07-15
   - OmniVoice HTTP PCM streaming, trace callback, source lifecycle, clone fallback 실행과 turn-scope producer cleanup.
 - `local_tts_stream_runtime.py`
   - 로컬 스피커 sentence source prefetch, 순차 재생, latency trace, 실패 기록과 leftover source cleanup.
+- `discord_tts_stream_runtime.py`
+  - Discord sentence TTS source callback/trace, streaming playback request, prefetch/prepared failure stage와 turn-scope cleanup.
 - `startup_audio_runtime.py`
   - Opus startup load checks and STT silence warmup orchestration with runtime dependencies injected from `main.py`.
 - `stt_task_runtime.py`

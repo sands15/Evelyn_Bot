@@ -17,7 +17,9 @@ Source branch: `refactor/main-py-decomposition-2026-07-15`
   `omnivoice_source_runtime.py`, 로컬 TTS sentence streaming은 `local_tts_stream_runtime.py`로 이동했다.
   LLM route는 `llm_route_runtime.py`, 단일 Main LLM 실행 orchestration은 `main_llm_runtime.py`,
   Control Page 일반 답변 turn은 `control_page_text_runtime.py`로 이동했다.
-  runtime dependency builder 군과 runtime status/Discord TTS streaming 등은 아직 `main.py`에 남아 있다.
+  runtime status context/cache/lock은 `runtime_status_context.py`, Discord sentence TTS는
+  `discord_tts_stream_runtime.py`, Control Page welcome 생성은 `control_page_ui_runtime.py`로 이동했다.
+  runtime dependency builder 군과 단일/로컬 TTS 진입점 등은 아직 `main.py`에 남아 있다.
 - 핵심 준비 상태와 선택 기능 준비 상태를 분리했다.
   - `ok`: 필수 핵심 서비스 준비 여부
   - `fullyHealthy`: 선택 기능을 포함한 전체 건강 여부
@@ -49,14 +51,14 @@ Source branch: `refactor/main-py-decomposition-2026-07-15`
 
 ## Verification state
 
-검증 시각: 2026-07-15 22:37 KST
-검증한 코드 기준점: `refactor/main-py-decomposition-2026-07-15` 열네 번째 Control Page text turn 분리 작업 트리
+검증 시각: 2026-07-15 23:45 KST
+검증한 코드 기준점: `refactor/main-py-decomposition-2026-07-15` 열일곱 번째 Control Page welcome 분리 작업 트리
 
 - `pip check`: 통과
 - `docker compose config --quiet`: 통과(검증용 Discord token 사용)
 - Python `compileall`: 통과
 - 활성 Live2D/boot JavaScript `node --check`: 통과
-- 전체 unittest: 일반 모드 1,050개 통과(실제 `main.py` opt-in 1개 의도적 건너뜀), 엄격 모드 1,050개 통과
+- 전체 unittest: 일반 모드 1,064개 통과(실제 `main.py` opt-in 1개 의도적 건너뜀), 엄격 모드 1,064개 통과
 - `EVELYN_RUN_REAL_MAIN_INTEGRATION=1`: 실제 `main.py` 프로세스 smoke 포함
 - `PYTHONWARNINGS=error::ResourceWarning`: 통과
 - Codex Gateway 테스트 서버: 무토큰/오토큰 `401`, 정상 bearer token `200`

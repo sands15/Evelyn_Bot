@@ -219,12 +219,13 @@ from evelyn_core.search_followup_policy import (
 )
 from evelyn_core.search_tools import search_duckduckgo as search_duckduckgo_payload
 from evelyn_core.runtime_status_context import (
+    RuntimeStatusContextDeps,
+    RuntimeStatusContextState,
     answer_gpu_runtime_status_query,
-    compact_runtime_error,
+    build_runtime_status_context_from_runtime,
     load_runtime_gpu_status,
     load_runtime_recent_errors,
     probe_runtime_tcp_service,
-    runtime_status_port_from_url,
 )
 from evelyn_core.runtime_mode_policy import compute_runtime_mode_from_state, apply_runtime_mode_policy
 from evelyn_core.route_fallback_policy import (
@@ -336,6 +337,10 @@ from evelyn_core.discord_delivery import (
     build_streaming_voice_delivery,
     execute_streaming_voice_delivery_plan,
     send_discord_text,
+)
+from evelyn_core.discord_tts_stream_runtime import (
+    DiscordTtsStreamRuntimeDeps,
+    stream_tts_sentences_from_runtime,
 )
 from evelyn_core.discord_settings_runtime import (
     DiscordSettingsRuntimeDeps,
@@ -660,6 +665,7 @@ from evelyn_core.control_page_tool_runtime import (
 )
 from evelyn_core.control_page_ui_runtime import (
     ControlPageUiRuntimeDeps,
+    ControlPageWelcomeRuntimeDeps,
     append_control_page_chat_log_from_runtime,
     build_control_page_panel_state_from_runtime,
     control_page_effective_guild_id_from_runtime,
@@ -668,6 +674,7 @@ from evelyn_core.control_page_ui_runtime import (
     control_page_session_key_from_runtime,
     enqueue_control_page_ui_command_from_runtime,
     get_control_page_chat_log_from_runtime,
+    generate_control_page_welcome_text_from_runtime,
     sanitize_control_page_welcome_text_from_runtime,
 )
 from evelyn_core.control_page_tools import (
@@ -1379,8 +1386,7 @@ control_page_runtime_services_lock: asyncio.Lock | None = None
 control_page_runtime_services_refresh_task: asyncio.Task | None = None
 control_page_ui_command_store = ControlPageUiCommandStore(limit=40)
 control_page_welcome_locks: dict[int, asyncio.Lock] = {}
-runtime_status_context_cache: dict[str, Any] = {"text": "", "cached_at": 0.0}
-runtime_status_context_lock: asyncio.Lock | None = None
+runtime_status_context_state = RuntimeStatusContextState()
 room_recent_speaker_stats: dict[str, dict[int, dict[str, float]]] = {}
 room_speaker_activity_store = RoomSpeakerActivityStore(
     recent_speaker_stats=room_recent_speaker_stats,
@@ -3014,89 +3020,34 @@ def schedule_cognitive_refresh(
     )
 
 
+def build_runtime_status_context_deps() -> RuntimeStatusContextDeps:
+    return RuntimeStatusContextDeps(
+        enabled=RUNTIME_STATUS_CONTEXT_ENABLED,
+        refresh_sec=RUNTIME_STATUS_CONTEXT_REFRESH_SEC,
+        control_page_host=CONTROL_PAGE_HOST,
+        control_page_port=CONTROL_PAGE_PORT,
+        llm_server_url=LLM_SERVER_URL,
+        router_llm_url=ROUTER_LLM_URL,
+        summary_llm_url=SUMMARY_LLM_URL,
+        omnivoice_server_url=OMNIVOICE_SERVER_URL,
+        minecraft_autonomy_service_port=MINECRAFT_AUTONOMY_SERVICE_PORT,
+        voyager_action_backend=VOYAGER_ACTION_BACKEND,
+        voyager_codex_gateway_port=VOYAGER_CODEX_GATEWAY_PORT,
+        get_control_page_runtime_services=get_control_page_runtime_services,
+        is_control_api_ready_from_runtime_services=is_control_api_ready_from_runtime_services,
+        probe_runtime_tcp_service=probe_runtime_tcp_service,
+        load_runtime_gpu_status=load_runtime_gpu_status,
+        load_runtime_recent_errors=load_runtime_recent_errors,
+        now=time.time,
+    )
+
+
 async def build_runtime_status_context(*, force: bool = False) -> str:
-    global runtime_status_context_lock
-    if not RUNTIME_STATUS_CONTEXT_ENABLED:
-        return ""
-
-    cached_at = float(runtime_status_context_cache.get("cached_at") or 0.0)
-    if not force and runtime_status_context_cache.get("text") and (time.time() - cached_at) <= RUNTIME_STATUS_CONTEXT_REFRESH_SEC:
-        return str(runtime_status_context_cache.get("text") or "")
-
-    if runtime_status_context_lock is None:
-        runtime_status_context_lock = asyncio.Lock()
-
-    async with runtime_status_context_lock:
-        cached_at = float(runtime_status_context_cache.get("cached_at") or 0.0)
-        if not force and runtime_status_context_cache.get("text") and (time.time() - cached_at) <= RUNTIME_STATUS_CONTEXT_REFRESH_SEC:
-            return str(runtime_status_context_cache.get("text") or "")
-
-        probes: list[tuple[str, str, int]] = [
-            ("bot/control", CONTROL_PAGE_HOST, CONTROL_PAGE_PORT),
-        ]
-        for label, url in (
-            ("main_llm", LLM_SERVER_URL),
-            ("router_llm", ROUTER_LLM_URL),
-            ("sub_llm", SUMMARY_LLM_URL),
-            ("tts", OMNIVOICE_SERVER_URL),
-        ):
-            target = runtime_status_port_from_url(url)
-            if target is not None:
-                probes.append((label, target[0], target[1]))
-        probes.append(("voyager_service", "127.0.0.1", MINECRAFT_AUTONOMY_SERVICE_PORT))
-        if clean_text(str(VOYAGER_ACTION_BACKEND or "")).lower() == "codex-gateway":
-            probes.append(("codex_gateway", "127.0.0.1", VOYAGER_CODEX_GATEWAY_PORT))
-
-        results = await asyncio.gather(
-            *(probe_runtime_tcp_service(label, host, port) for label, host, port in probes),
-            return_exceptions=True,
-        )
-        status_parts: list[str] = []
-        service_down_labels: list[str] = []
-        for result in results:
-            if isinstance(result, tuple) and len(result) == 2:
-                label, ok = result
-                status_parts.append(f"{label}={'up' if ok else 'down'}")
-                if not ok:
-                    service_down_labels.append(label)
-
-        service_summary = ""
-        try:
-            services = await get_control_page_runtime_services()
-            service_summary = compact_runtime_error(services.get("summary"), max_chars=120)
-            bot_api_ready = is_control_api_ready_from_runtime_services(services)
-            if services and not bot_api_ready:
-                bot_api_reason = clean_text(str(services.get("botApiReason") or services.get("botApiState") or "unknown"))
-                service_down_labels.append("bot_api" if not bot_api_reason else f"bot_api:{bot_api_reason}")
-        except Exception:
-            service_summary = ""
-        if service_summary:
-            status_parts.append(f"summary={service_summary}")
-
-        gpu_status, gpu_near_full = await asyncio.to_thread(load_runtime_gpu_status)
-        if gpu_status:
-            status_parts.append("current_gpu_snapshot=" + gpu_status)
-        oom_signal = "yes" if gpu_near_full or service_down_labels else "no"
-        oom_reason = []
-        if gpu_near_full:
-            oom_reason.append("gpu_near_full")
-        if service_down_labels:
-            oom_reason.append("service_down=" + ",".join(service_down_labels[:4]))
-        status_parts.append("current_oom_signal=" + oom_signal + (f" ({'; '.join(oom_reason)})" if oom_reason else ""))
-
-        recent_errors = load_runtime_recent_errors()
-        if recent_errors:
-            status_parts.append("recent_errors=" + " | ".join(recent_errors))
-            status_parts.append(
-                "recent_errors_are_historical=true; do_not_claim_current_oom_from_recent_errors_without_current_oom_signal=yes"
-            )
-        else:
-            status_parts.append("recent_errors=none")
-
-        text = "; ".join(part for part in status_parts if part)
-        runtime_status_context_cache["text"] = text
-        runtime_status_context_cache["cached_at"] = time.time()
-        return text
+    return await build_runtime_status_context_from_runtime(
+        deps=build_runtime_status_context_deps(),
+        state=runtime_status_context_state,
+        force=force,
+    )
 
 
 def _skill_route_available(route_name: str, *, source: str) -> bool:
@@ -4900,6 +4851,28 @@ async def speak_answer(
         )
 
 
+def build_discord_tts_stream_runtime_deps() -> DiscordTtsStreamRuntimeDeps:
+    return DiscordTtsStreamRuntimeDeps(
+        attach_current_task=_attach_current_task,
+        detach_task=_detach_task,
+        tts_running_state=TurnState.TTS_RUNNING,
+        create_omnivoice_source=create_omnivoice_source,
+        mark_turn_stage=mark_turn_stage,
+        log_voice_latency=log_voice_latency,
+        log_turn_event=log_turn_event,
+        record_voice_pipeline_failure=record_voice_pipeline_failure,
+        tts_lock=tts_lock,
+        playback_manager=tts_playback_manager,
+        streaming_playback_request_factory=TtsStreamingPlaybackRequest,
+        omnivoice_timeout_sec=OMNIVOICE_TIMEOUT_SEC,
+        tts_prefetch_chunks=TTS_PREFETCH_CHUNKS,
+        playback_start_lookahead_chunks=TTS_PLAYBACK_START_LOOKAHEAD_CHUNKS,
+        playback_start_lookahead_timeout_ms=TTS_PLAYBACK_START_LOOKAHEAD_TIMEOUT_MS,
+        create_turn_scoped_task=create_turn_scoped_task,
+        log=print,
+    )
+
+
 async def stream_tts_sentences(
     vc: discord.VoiceClient,
     sentence_queue: "asyncio.Queue[str | None]",
@@ -4909,78 +4882,15 @@ async def stream_tts_sentences(
     session_key: str | None = None,
     turn_scope: TurnScope | None = None,
 ) -> None:
-    guild_id = getattr(getattr(vc, "guild", None), "id", None)
-    task = _attach_current_task(turn_scope)
-    if turn_scope is not None:
-        turn_scope.transition(TurnState.TTS_RUNNING, reason="stream_tts_sentences")
-
-    def check_cancelled() -> None:
-        if turn_scope is not None:
-            turn_scope.raise_if_cancelled()
-
-    async def synthesize_source(sentence: str, chunk_index: int) -> OmniVoicePCMStream:
-        return await create_omnivoice_source(
-            sentence,
-            turn_id=turn_id,
-            chunk_index=chunk_index,
-            session_key=session_key,
-            turn_scope=turn_scope,
-            trace_payload={"source_type": "OmniVoicePCMStream"},
-            on_request_start=lambda: (
-                mark_turn_stage(metrics, "tts_request_start", event_name="tts_request_start", chunk_index=chunk_index),
-                log_voice_latency(metrics, "tts_request_logged", "TTS request start")
-            ),
-            on_response_headers=lambda: log_voice_latency(metrics, "tts_response_headers_logged", "TTS response headers"),
-            on_first_byte=lambda: (
-                mark_turn_stage(metrics, "tts_first_byte", event_name="tts_first_byte", chunk_index=chunk_index),
-                log_voice_latency(metrics, "tts_first_byte_logged", "TTS first byte")
-            ),
-            on_first_frame=lambda: log_voice_latency(metrics, "tts_first_frame_logged", "TTS first frame"),
-            on_first_packet_sent=lambda ci=chunk_index: (
-                log_voice_latency(metrics, "first_packet_sent_logged", "first packet sent"),
-                log_turn_event(
-                    "first_packet_sent",
-                    turn_id=turn_id,
-                    chunk_index=ci,
-                    session_key=session_key,
-                )
-            ),
-        )
-
-    def record_playback_failure(exc: Exception, *, stage: str) -> None:
-        record_voice_pipeline_failure(
-            "tts_playback_failed",
-            exc,
-            metrics,
-            turn_id=turn_id,
-            session_key=session_key,
-            stage=stage,
-        )
-
-    try:
-        async with tts_lock:
-            await tts_playback_manager.stream_sentences(
-                TtsStreamingPlaybackRequest(
-                    vc=vc,
-                    sentence_queue=sentence_queue,
-                    synthesize_source=synthesize_source,
-                    guild_id=guild_id,
-                    turn_id=turn_id,
-                    session_key=session_key,
-                    metrics=metrics,
-                    ready_timeout_sec=OMNIVOICE_TIMEOUT_SEC,
-                    prefetch_chunks=TTS_PREFETCH_CHUNKS,
-                    lookahead_chunks=TTS_PLAYBACK_START_LOOKAHEAD_CHUNKS,
-                    lookahead_timeout_ms=TTS_PLAYBACK_START_LOOKAHEAD_TIMEOUT_MS,
-                    create_task=lambda coro: create_turn_scoped_task(coro, turn_scope=turn_scope),
-                    check_cancelled=check_cancelled,
-                    log=print,
-                    on_prefetch_failure=lambda exc: record_playback_failure(exc, stage="prefetch"),
-                    on_prepared_failure=lambda exc: record_playback_failure(exc, stage="prepared_exception"),
-                )
-            )
-    finally:
-        _detach_task(turn_scope, task)
+    await stream_tts_sentences_from_runtime(
+        vc,
+        sentence_queue,
+        deps=build_discord_tts_stream_runtime_deps(),
+        metrics=metrics,
+        turn_id=turn_id,
+        session_key=session_key,
+        turn_scope=turn_scope,
+    )
 
 
 async def speak_answer_local(
@@ -5695,77 +5605,36 @@ def build_control_page_guild_selection_runtime_deps() -> ControlPageGuildSelecti
         clean_text=clean_text,
     )
 
-async def generate_control_page_welcome_text(guild: discord.Guild | None) -> str:
-    guild_name = control_page_effective_guild_name(guild)
-    user_text = "컨트롤 페이지 첫 화면에 띄울 짧은 환영문구를 하나만 만들어줘."
-    prompt = (
-        "너는 이블린(E.V.E.L.Y.N)이다. 정훈이 컨트롤 페이지를 처음 열었을 때 보일 첫 말풍선을 만든다.\n"
-        "조건:\n"
-        "- 한국어 한 문장만 출력한다.\n"
-        "- 18~55자 정도로 짧게 쓴다.\n"
-        "- 살짝 재치있고 따뜻하지만 과장하지 않는다.\n"
-        "- 명령어 설명, /memory 안내, 기능 소개, 마크다운, 따옴표, 이모지는 쓰지 않는다.\n"
-        "- 현재 상태를 확인한 척하지 않는다.\n"
-        f"- 현재 공간 이름: {guild_name}\n"
-    )
-    payload = build_main_llm_payload(
+def build_control_page_welcome_runtime_deps() -> ControlPageWelcomeRuntimeDeps:
+    return ControlPageWelcomeRuntimeDeps(
+        effective_guild_name=control_page_effective_guild_name,
+        effective_guild_id=control_page_effective_guild_id,
+        build_main_llm_payload=build_main_llm_payload,
         model_name=MODEL_NAME,
-        messages=[],
-        final_user_text=prompt,
-        source="control_page",
-        stream=False,
-        content_format=MAIN_LLM_CHAT_CONTENT_FORMAT,
-        temperature=0.65,
-        max_tokens=72,
-        stop_tokens=MAIN_LLM_STOP_TOKENS,
+        main_llm_chat_content_format=MAIN_LLM_CHAT_CONTENT_FORMAT,
+        main_llm_stop_tokens=MAIN_LLM_STOP_TOKENS,
+        get_http_session=get_http_session,
+        client_timeout_factory=aiohttp.ClientTimeout,
+        welcome_llm_timeout_sec=CONTROL_PAGE_WELCOME_LLM_TIMEOUT_SEC,
+        llm_server_url=LLM_SERVER_URL,
+        extract_main_llm_answer_from_choice=extract_main_llm_answer_from_choice,
+        sanitize_model_output=sanitize_model_output,
+        parse_response_action_tag=parse_response_action_tag,
+        extract_answer_from_reasoning=extract_answer_from_reasoning,
+        sanitize_welcome_text=sanitize_control_page_welcome_text,
+        record_model_call_trace=record_model_call_trace,
+        monotonic=time.monotonic,
+        welcome_fallback=CONTROL_PAGE_WELCOME_FALLBACK,
+        clean_text=clean_text,
+        log=print,
     )
-    started_at = time.monotonic()
-    try:
-        session = await get_http_session()
-        timeout = aiohttp.ClientTimeout(total=CONTROL_PAGE_WELCOME_LLM_TIMEOUT_SEC)
-        async with session.post(LLM_SERVER_URL, json=payload, timeout=timeout) as resp:
-            if resp.status != 200:
-                error_text = await resp.text()
-                raise RuntimeError(f"LLM 서버 오류: {resp.status} / {error_text[:300]}")
-            data = await resp.json()
-        choices = data.get("choices", [])
-        if not choices:
-            raise RuntimeError("LLM returned empty choices")
-        answer, _answer_source, _finish_reason = extract_main_llm_answer_from_choice(
-            choices[0],
-            user_text,
-            sanitize_output=sanitize_model_output,
-            parse_response_action_tag=parse_response_action_tag,
-            extract_answer_from_reasoning=extract_answer_from_reasoning,
-        )
-        welcome = sanitize_control_page_welcome_text(answer)
-        record_model_call_trace(
-            model_role="main_llm",
-            purpose="control_page_welcome",
-            hot_path=False,
-            started_at=started_at,
-            success=True,
-            model_name=MODEL_NAME,
-            endpoint=LLM_SERVER_URL,
-            source="control_page",
-            guild_id=control_page_effective_guild_id(guild),
-        )
-        return welcome
-    except Exception as exc:
-        record_model_call_trace(
-            model_role="main_llm",
-            purpose="control_page_welcome",
-            hot_path=False,
-            started_at=started_at,
-            success=False,
-            error=exc,
-            model_name=MODEL_NAME,
-            endpoint=LLM_SERVER_URL,
-            source="control_page",
-            guild_id=control_page_effective_guild_id(guild),
-        )
-        print(f"[CONTROL PAGE] welcome_generation_failed err={exc!r}")
-        return clean_text(CONTROL_PAGE_WELCOME_FALLBACK)
+
+
+async def generate_control_page_welcome_text(guild: discord.Guild | None) -> str:
+    return await generate_control_page_welcome_text_from_runtime(
+        guild,
+        deps=build_control_page_welcome_runtime_deps(),
+    )
 
 
 async def ensure_control_page_welcome_message(
