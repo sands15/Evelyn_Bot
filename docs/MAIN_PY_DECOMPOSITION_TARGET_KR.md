@@ -119,7 +119,27 @@ Last reviewed: 2026-07-15
   - CI와 같은 discovery 명령으로 전체 unittest 1,005개 통과
   - 실제 `main.py` 프로세스 smoke와 `PYTHONWARNINGS=error::ResourceWarning`를 함께 적용한 전체 unittest 1,005개 통과
 - 런타임/컨테이너 재시작과 외부 push는 하지 않았다.
-- 다음 구조 작업은 `main.py`에 남은 runtime dependency builder 군의 구성 경계를 정리하는 것이다.
+- 여덟 번째 배치에서 분리된 모든 음성 단계를 상위 pipeline으로 묶었다.
+  - 새 모듈: `evelyn_core/runtime/evelyn_core/voice_member_audio_pipeline_runtime.py`
+  - 새 계약: `VoiceMemberAudioPipelineDeps`
+  - 이동 책임: ingress → wake → TTS interrupt → STT → transcript → session gate → reply dispatch
+    순서와 각 단계의 short-circuit 반환.
+  - `_process_member_audio_impl`은 typed pipeline dependency를 조립해 한 번 호출하는 thin wrapper가 됐다.
+  - 기존 단계별 source-contract 테스트 7개도 직접 호출 위치가 아니라
+    `main builder → pipeline stage` 연결을 검사하도록 갱신했다.
+- 여덟 번째 배치 뒤 정확한 누적 크기 변화:
+  - `main.py`: 8,793줄 → 8,346줄
+  - `_process_member_audio_impl`: 729줄 → 30줄
+- 여덟 번째 배치 검증:
+  - 새 상위 pipeline 테스트 8개 통과
+  - `tests/voice` 292개 통과
+  - `tests/discord_io` 78개 통과
+  - CI와 같은 discovery 명령으로 전체 unittest 1,013개 통과
+  - 실제 `main.py` 프로세스 smoke와 `PYTHONWARNINGS=error::ResourceWarning`를 함께 적용한 전체 unittest 1,013개 통과
+  - Python `compileall`, `git diff --check` 통과(`git diff --check`는 기존 LF/CRLF 안내만 출력)
+- 런타임/컨테이너 재시작과 외부 push는 하지 않았다.
+- 음성 hot path의 실행 orchestration 분리는 완료했다. 다음 구조 작업은 `main.py` 전역의
+  runtime dependency builder 군을 기능별 composition root로 묶는 별도 단계다.
 
 - [22:59 KST] cron checkpoint: `build_guild_runtime_reset_deps` 빌더 본문을
   `evelyn_core/runtime/evelyn_core/guild_runtime_reset.py`로 이전.

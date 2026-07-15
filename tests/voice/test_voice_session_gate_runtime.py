@@ -143,8 +143,12 @@ class VoiceSessionGateRuntimeTests(unittest.TestCase):
         source = (REPO_ROOT / "main.py").read_text(encoding="utf-8")
         start = source.index("async def _process_member_audio_impl(")
         function_source = source[start : source.index("# 이벤트", start)]
+        builder_source = source[
+            source.index("def build_voice_member_audio_pipeline_deps(") : source.index("async def process_member_audio(")
+        ]
 
-        self.assertIn("run_voice_session_gate_from_runtime(", function_source)
+        self.assertIn("run_session_gate=run_voice_session_gate_from_runtime", builder_source)
+        self.assertIn("process_member_audio_pipeline_from_runtime(", function_source)
         self.assertNotIn("should_ignore_short_transcription(", function_source)
         self.assertNotIn("decide_final_wake_veto(", function_source)
         self.assertNotIn("[SHORT FOLLOWUP CANDIDATE]", function_source)

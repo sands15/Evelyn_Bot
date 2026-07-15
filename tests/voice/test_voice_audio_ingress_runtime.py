@@ -201,8 +201,12 @@ class VoiceAudioIngressRuntimeTests(unittest.TestCase):
         function_source = source[
             source.index("async def _process_member_audio_impl(") : source.index("# 이벤트", source.index("async def _process_member_audio_impl("))
         ]
+        builder_source = source[
+            source.index("def build_voice_member_audio_pipeline_deps(") : source.index("async def process_member_audio(")
+        ]
 
-        self.assertIn("prepare_voice_audio_ingress_from_runtime(", function_source)
+        self.assertIn("prepare_audio_ingress=prepare_voice_audio_ingress_from_runtime", builder_source)
+        self.assertIn("process_member_audio_pipeline_from_runtime(", function_source)
         self.assertNotIn("compute_waveform_activity_stats(", function_source)
         self.assertNotIn("if VAD_ENABLED and is_probably_silent", function_source)
 

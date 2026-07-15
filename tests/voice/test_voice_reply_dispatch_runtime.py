@@ -110,8 +110,12 @@ class VoiceReplyDispatchRuntimeTests(unittest.IsolatedAsyncioTestCase):
         source = (REPO_ROOT / "main.py").read_text(encoding="utf-8")
         start = source.index("async def _process_member_audio_impl(")
         function_source = source[start : source.index("# 이벤트", start)]
+        builder_source = source[
+            source.index("def build_voice_member_audio_pipeline_deps(") : source.index("async def process_member_audio(")
+        ]
 
-        self.assertIn("dispatch_voice_reply_from_runtime(", function_source)
+        self.assertIn("dispatch_voice_reply=dispatch_voice_reply_from_runtime", builder_source)
+        self.assertIn("process_member_audio_pipeline_from_runtime(", function_source)
         self.assertNotIn("VoiceTranscriptReplyContext(", function_source)
         self.assertNotIn("VoiceTranscriptReplyDeps(", function_source)
         self.assertNotIn("process_voice_reply_from_transcript_context(", function_source)
