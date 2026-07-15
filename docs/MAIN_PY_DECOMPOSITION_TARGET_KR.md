@@ -182,6 +182,34 @@ Last reviewed: 2026-07-15
 - 런타임/컨테이너 재시작과 외부 push는 하지 않았다.
 - 다음 대형 함수 위험 순위는 `classify_llm_route_async` 118줄,
   `ask_llm_once` 111줄, `answer_control_page_text` 104줄이다.
+- 열두 번째 배치에서 118줄 `classify_llm_route_async`를 분리했다.
+  - 새 모듈/계약: `llm_route_runtime.py`, `LlmRouteRuntimeDeps`
+  - 이동 책임: fast-path, voice/router-disabled fallback, memory/cognitive router prompt,
+    router 실패/invalid JSON fallback, question/context policy 정규화.
+  - 새 테스트 7개: fast-path, voice fallback, disabled router, 정상 router, 예외, invalid 결과, main 위임.
+- 열세 번째 배치에서 111줄 `ask_llm_once` orchestration을 `main_llm_runtime.py`로 이동했다.
+  - 새 계약: `AskLlmOnceRuntimeDeps`
+  - 이동 책임: route context 준비, skill/policy short-circuit, Minecraft/runtime context,
+    Main LLM payload/실행, promised-search 보정, question trace와 latency logging.
+  - 새 테스트 6개: skill/policy short-circuit, 정상 실행, casual Minecraft skip,
+    question trace 비활성, echo fallthrough, main 위임.
+- 열네 번째 배치에서 104줄 `answer_control_page_text`를 분리했다.
+  - 새 모듈/계약: `control_page_text_runtime.py`, `ControlPageTextRuntimeDeps`
+  - 이동 책임: text turn/scope lifecycle, streaming answer, black-frame 오류 치환,
+    proactive question, session finalize, local TTS schedule, 성공/실패 summary와 cleanup.
+  - 새 테스트 5개: 정상/proactive, resolved question, black frame, 실패 cleanup, main 위임.
+- 열네 번째 배치 뒤 정확한 누적 크기 변화:
+  - `main.py`: 8,793줄 → 7,762줄
+  - 최대 함수: 118줄 LLM route → 111줄 single LLM → 104줄 Control Page text →
+    현재 `build_runtime_status_context` 83줄
+- 열두 번째~열네 번째 배치 통합 검증:
+  - 새 테스트 18개와 관련 테스트 32개 통과
+  - 일반 discovery 전체 unittest 1,050개 통과(실제 `main.py` opt-in 1개 의도적 skip)
+  - 실제 `main.py` smoke와 `PYTHONWARNINGS=error::ResourceWarning`를 함께 적용한 전체 unittest 1,050개 통과
+  - Python `compileall`, `git diff --check` 통과
+- 런타임/컨테이너 재시작과 외부 push는 하지 않았다.
+- 다음 최대 함수는 `build_runtime_status_context` 83줄, `stream_tts_sentences` 81줄,
+  `build_fast_path_policy_runtime_deps` 72줄이다.
 
 - [22:59 KST] cron checkpoint: `build_guild_runtime_reset_deps` 빌더 본문을
   `evelyn_core/runtime/evelyn_core/guild_runtime_reset.py`로 이전.
@@ -654,6 +682,8 @@ Last reviewed: 2026-07-15
   - Control Page guild/local/voice status reply live-data assembly with payload builders injected from `main.py`.
 - `control_page_search_runtime.py`
   - Control Page forced-search answer path, search action execution, main synthesis, session state update, and local TTS scheduling with live callbacks injected from `main.py`.
+- `control_page_text_runtime.py`
+  - Control Page 일반 text turn/scope lifecycle, streaming answer, black-frame 오류 치환, proactive question, session finalize, local TTS와 summary cleanup.
 - `control_page_tool_runtime.py`
   - Control Page memory-panel action, restart command scheduling, router-history retrieval, tool-turn recording, UI-tool router LLM request assembly, command execution dispatch to memory/runtime/voice/Minecraft tool handlers, and Control Page input routing between cheap tools/router/search/main text.
 - `control_page_http.py`
@@ -666,8 +696,10 @@ Last reviewed: 2026-07-15
   - voice route action 실행, skill dispatch/follow-up execution, Minecraft/vision/runtime/local-tool routing callbacks.
 - `llm_context_assembly.py`
   - Main LLM messages/context assembly, runtime/memory/cognitive/local-tool/Minecraft/tool-awareness context 조립.
+- `llm_route_runtime.py`
+  - fast-path/router/fallback route 선택, memory/cognitive router prompt, question/context policy 정규화.
 - `main_llm_runtime.py`
-  - Main LLM one-shot call, tool result synthesis, promised-search escalation and synthesis answer drift guard.
+  - Main LLM one-shot HTTP call과 turn orchestration, skill/policy short-circuit, tool result synthesis, promised-search escalation and synthesis answer drift guard.
 - `voice_response_runtime.py`
   - first/follow-up response split, low-latency first response LLM call, follow-up response LLM call, duplicate follow-up suppression.
 - `voice_stream_chunks.py`

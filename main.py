@@ -229,9 +229,8 @@ from evelyn_core.runtime_status_context import (
 from evelyn_core.runtime_mode_policy import compute_runtime_mode_from_state, apply_runtime_mode_policy
 from evelyn_core.route_fallback_policy import (
     classify_llm_route_fallback,
-    normalize_route_name,
-    should_force_voice_context_route,
 )
+from evelyn_core.llm_route_runtime import LlmRouteRuntimeDeps, classify_llm_route_from_runtime
 from evelyn_core.fast_path_policy import (
     FastPathPolicyRuntimeDeps,
     context_policy_for_fast_path_policy_from_runtime,
@@ -249,7 +248,9 @@ from evelyn_core.http_session_runtime import ensure_http_session_from_runtime
 from evelyn_core.llm_context_assembly import LlmContextAssemblyDeps, prepare_llm_messages_from_runtime
 from evelyn_core.llm_warmup_runtime import LlmWarmupRuntimeDeps, warmup_llm_from_runtime
 from evelyn_core.main_llm_runtime import (
+    AskLlmOnceRuntimeDeps,
     MainLlmRuntimeDeps,
+    ask_llm_once_from_runtime,
     execute_main_llm_once_from_runtime,
     render_tool_synthesis_recent_context as render_tool_synthesis_recent_context_with_deps,
     resolve_promised_search_final_answer_from_runtime,
@@ -642,6 +643,10 @@ from evelyn_core.control_page_search_runtime import (
     ControlPageSearchRuntimeDeps,
     answer_control_page_search_text_from_runtime,
 )
+from evelyn_core.control_page_text_runtime import (
+    ControlPageTextRuntimeDeps,
+    answer_control_page_text_from_runtime,
+)
 from evelyn_core.control_page_tool_runtime import (
     ControlPageInputRuntimeDeps,
     ControlPageToolRuntimeDeps,
@@ -704,7 +709,6 @@ from evelyn_core.tts_playback import (
 )
 from evelyn_core.turn_trace import TURN_SUMMARY_EVENTS, build_turn_summary_payload, write_turn_trace_event
 from evelyn_core.turn_lifecycle import TurnScope, TurnScopeRegistry, TurnState
-from evelyn_core.turn_budget import build_turn_execution_budget
 from evelyn_core.voice_stt_flow import (
     apply_fuzzy_wake_near_miss,
     apply_strict_wake_confirm_policy,
@@ -3582,124 +3586,42 @@ async def ask_router_llm(
         return result
 
 
+def build_llm_route_runtime_deps() -> LlmRouteRuntimeDeps:
+    return LlmRouteRuntimeDeps(
+        classify_llm_route_fallback=classify_llm_route_fallback,
+        fast_path_policy=fast_path_policy,
+        session_state_snapshot=session_state_snapshot,
+        load_working_summary=lambda guild_id: compact_working_summary(
+            read_text_file(memory_summary_path(guild_id))
+        ),
+        load_cognitive_state=lambda guild_id: normalize_cognitive_state(
+            read_json_file(cognitive_state_path(guild_id))
+        ),
+        normalize_cognitive_state=normalize_cognitive_state,
+        load_recent_raw=lambda guild_id: read_jsonl(memory_raw_path(guild_id)),
+        load_recent_facts=read_fact_rows,
+        format_memory_rows_for_llm=format_memory_rows_for_llm,
+        compact_memory_text=compact_memory_text,
+        ask_router_llm=ask_router_llm,
+        current_turn_id=current_turn_id,
+        clean_text=clean_text,
+        normalize_question_policy_mapping=normalize_question_policy_mapping,
+        router_route_timeout_sec=ROUTER_ROUTE_TIMEOUT_SEC,
+        cognitive_timeout_sec=COGNITIVE_TIMEOUT_SEC,
+        router_llm_enabled=ROUTER_LLM_ENABLED,
+        router_route_max_tokens=ROUTER_ROUTE_MAX_TOKENS,
+        log=print,
+    )
+
+
 async def classify_llm_route_async(user_text: str, *, guild_id: int | None = None, source: str = "text", session_key: str | None = None) -> tuple[str, dict | None]:
-    fallback_route = classify_llm_route_fallback(user_text, source=source)
-    budget = build_turn_execution_budget(
-        router_timeout_sec=ROUTER_ROUTE_TIMEOUT_SEC,
-        context_timeout_sec=COGNITIVE_TIMEOUT_SEC,
-        memory_timeout_sec=COGNITIVE_TIMEOUT_SEC,
-        fallback_route=fallback_route,
-        router_enabled=ROUTER_LLM_ENABLED,
+    return await classify_llm_route_from_runtime(
+        user_text,
+        deps=build_llm_route_runtime_deps(),
+        guild_id=guild_id,
+        source=source,
+        session_key=session_key,
     )
-    fast_policy = fast_path_policy(user_text, source, session_state_snapshot(session_key))
-    if fast_policy is not None:
-        fast_route = normalize_route_name(str(fast_policy.get("route", fallback_route)))
-        fast_budget = build_turn_execution_budget(
-            router_timeout_sec=ROUTER_ROUTE_TIMEOUT_SEC,
-            context_timeout_sec=COGNITIVE_TIMEOUT_SEC,
-            memory_timeout_sec=COGNITIVE_TIMEOUT_SEC,
-            fallback_route=fallback_route,
-            router_enabled=False,
-            context_policy=fast_policy,
-            fallback_reason="fast_path",
-        )
-        return fast_route, {
-            "selected": fast_route,
-            "source": "fast_path",
-            "confidence": 0.92,
-            "reason_brief": clean_text(str(fast_policy.get("reason_brief", "fast_path"))),
-            "fallback": fallback_route,
-            "execution_budget": fast_budget.to_dict(),
-        }
-    force_voice_context = source == "voice" and should_force_voice_context_route(user_text)
-    if (source == "voice" and not force_voice_context) or not ROUTER_LLM_ENABLED:
-        return fallback_route, {"selected": fallback_route, "source": "fallback", "execution_budget": budget.to_dict()}
-
-    summary = compact_working_summary(read_text_file(memory_summary_path(guild_id))) if guild_id is not None else ""
-    state = normalize_cognitive_state(read_json_file(cognitive_state_path(guild_id))) if guild_id is not None else normalize_cognitive_state({})
-    recent_raw = read_jsonl(memory_raw_path(guild_id))[-3:] if guild_id is not None else []
-    recent_facts = read_fact_rows(guild_id)[-3:] if guild_id is not None else []
-
-    messages = [
-        {
-            "role": "system",
-            "content": (
-                "You are Evelyn's lightweight router and context policy planner. "
-                "Return exactly one JSON object and no other text. "
-                "Required shape: "
-                '{"selected":"main_direct|voice_context|sub_wait","confidence":0.0,'
-                '"reason_brief":"short reason","context_policy":{'
-                '"intent":"chat|question|minecraft_task|vision_question|memory_update|control",'
-                '"needs_main_llm":true,"needs_memory":true,"needs_runtime_state":true,'
-                '"needs_minecraft_state":false,"needs_vision":false,"needs_skill_graph":false,'
-                '"needs_long_context":false,"priority":"latency|accuracy|action",'
-                '"context_focus":["current_goal"],"response_mode":"short|normal|detailed|action_only"},'
-                '"ask_mode":"none|clarify|soft_followup|preference_probe|topic_continue|idle_checkin",'
-                '"max_question_count":0,"question_reason":"short reason","question_hint":"direction only","question_source":"router"}. '
-                "Use main_direct for ordinary direct replies, voice_context when recent state/memory is important, "
-                "and sub_wait when search/wait/search_then_answer style reasoning is needed. "
-                "Set minecraft/vision/skill flags only when the current turn needs them. "
-                "Question rules: do not add a router call just for questions; if a direct answer/task/fix is requested, "
-                "use ask_mode=none and max_question_count=0. If a light follow-up is useful, allow at most one question. "
-                "question_hint is only a direction, not a final sentence."
-            ),
-        },
-        {
-            "role": "user",
-            "content": (
-                f"최근 요약:\n{summary or '(없음)'}\n\n"
-                f"현재 cognitive_state:\n{json.dumps(state, ensure_ascii=False)}\n\n"
-                f"최근 raw_transcript:\n{format_memory_rows_for_llm(recent_raw, max_items=3)}\n\n"
-                f"최근 durable_facts:\n{format_memory_rows_for_llm(recent_facts, max_items=3)}\n\n"
-                f"현재 사용자 입력:\n{compact_memory_text(user_text, max_chars=160)}\n\n"
-                f"fallback_route={fallback_route}\nsource={source}"
-            ),
-        },
-    ]
-
-    try:
-        result = await ask_router_llm(
-            messages,
-            max_tokens=ROUTER_ROUTE_MAX_TOKENS,
-            timeout_seconds=budget.router_timeout_sec,
-            purpose="route",
-            hot_path=True,
-            turn_id=current_turn_id(session_key),
-            session_key=session_key,
-            source=source,
-            guild_id=guild_id,
-        )
-    except Exception as e:
-        print(f"[ROUTER] route 실패 fallback 사용: {e!r}")
-        return fallback_route, {"selected": fallback_route, "source": "fallback", "error": clean_text(repr(e))[:120], "execution_budget": budget.to_dict()}
-
-    if not isinstance(result, dict):
-        return fallback_route, {"selected": fallback_route, "source": "fallback", "reason_brief": "invalid_router_json", "execution_budget": budget.to_dict()}
-
-    selected = normalize_route_name(str(result.get("selected", fallback_route)))
-    meta = {
-        "selected": selected,
-        "source": "router",
-        "confidence": float(result.get("confidence", 0.0) or 0.0),
-        "reason_brief": clean_text(str(result.get("reason_brief", ""))),
-        "fallback": fallback_route,
-        "execution_budget": budget.to_dict(),
-    }
-    question_policy = normalize_question_policy_mapping(
-        {
-            "ask_mode": result.get("ask_mode"),
-            "max_question_count": result.get("max_question_count"),
-            "question_hint": result.get("question_hint"),
-            "question_reason": result.get("question_reason"),
-            "question_source": result.get("question_source") or "router",
-        },
-        default_source="router",
-    )
-    meta.update(question_policy)
-    raw_context_policy = result.get("context_policy")
-    if isinstance(raw_context_policy, dict):
-        meta["context_policy"] = ContextPolicy.from_mapping(raw_context_policy).to_dict()
-    return selected, meta
 def build_cognitive_state_runtime_deps() -> CognitiveStateRuntimeDeps:
     return CognitiveStateRuntimeDeps(
         attach_current_task=_attach_current_task,
@@ -5471,6 +5393,32 @@ async def resolve_promised_search_final_answer(
         metrics=metrics,
     )
 
+def build_ask_llm_once_runtime_deps() -> AskLlmOnceRuntimeDeps:
+    return AskLlmOnceRuntimeDeps(
+        log_voice_stage=log_voice_stage,
+        clean_text=clean_text,
+        prepare_route_context=prepare_route_context,
+        maybe_execute_registered_route=maybe_execute_registered_route,
+        is_user_echo_answer=is_user_echo_answer,
+        update_session_state=update_session_state,
+        build_answer_payload_from_text=build_answer_payload_from_text,
+        session_is_casual_call_or_status_question=session_is_casual_call_or_status_question,
+        observe_live_minecraft_state=observe_live_minecraft_state,
+        build_runtime_status_context=build_runtime_status_context,
+        build_main_response_guidance=build_main_response_guidance,
+        build_main_llm_payload=build_main_llm_payload,
+        execute_main_llm_once=execute_main_llm_once,
+        sanitize_unrequested_minecraft_leak=sanitize_unrequested_minecraft_leak,
+        resolve_promised_search_final_answer=resolve_promised_search_final_answer,
+        enforce_question_limits=enforce_question_limits,
+        record_question_trace=record_question_trace,
+        model_name=MODEL_NAME,
+        main_llm_chat_content_format=MAIN_LLM_CHAT_CONTENT_FORMAT,
+        voice_llm_max_tokens=VOICE_LLM_MAX_TOKENS,
+        main_llm_stop_tokens=MAIN_LLM_STOP_TOKENS,
+    )
+
+
 async def ask_llm_once(
     user_text: str,
     guild_id: int | None = None,
@@ -5484,9 +5432,9 @@ async def ask_llm_once(
     metrics: dict | None = None,
     record_question_trace_enabled: bool = True,
 ) -> str:
-    log_voice_stage(metrics, "LLM 2단계 요청 시작", extra=f"source={source} user_text_len={len(clean_text(user_text))}")
-    messages, cognitive_state, route_decision, gated_state, awaiting_user_reply = await prepare_route_context(
+    return await ask_llm_once_from_runtime(
         user_text,
+        deps=build_ask_llm_once_runtime_deps(),
         guild_id=guild_id,
         session_key=session_key,
         room_key=room_key,
@@ -5495,93 +5443,8 @@ async def ask_llm_once(
         source=source,
         debug_text=debug_text,
         metrics=metrics,
+        record_question_trace_enabled=record_question_trace_enabled,
     )
-    skill_route_answer = await maybe_execute_registered_route(
-        route_decision=route_decision,
-        user_text=user_text,
-        source=source,
-        guild_id=guild_id,
-        session_key=session_key,
-        room_key=room_key,
-        person_key=person_key,
-        session_memory_key=session_memory_key,
-        debug_text=debug_text,
-        metrics=metrics,
-        cognitive_state=cognitive_state,
-        messages=messages,
-        allow_internal_routes={"main_direct", "policy_short_circuit", "search_executor"},
-    )
-    if skill_route_answer and not is_user_echo_answer(user_text, skill_route_answer):
-        if session_key is not None:
-            update_session_state(
-                session_key,
-                speaker="assistant",
-                awaiting_user_reply=awaiting_user_reply,
-                answer_text=skill_route_answer,
-                user_text=user_text,
-            )
-        log_voice_stage(metrics, "LLM 2단계 요청 끝남", extra=f"skill_route={route_decision.route} answer_len={len(skill_route_answer)}")
-        return build_answer_payload_from_text(skill_route_answer).display_text
-
-    if route_decision.user_visible_preface and not is_user_echo_answer(user_text, route_decision.user_visible_preface):
-        if session_key is not None:
-            update_session_state(
-                session_key,
-                speaker="assistant",
-                awaiting_user_reply=awaiting_user_reply,
-                answer_text=route_decision.user_visible_preface,
-                user_text=user_text,
-            )
-        log_voice_stage(metrics, "LLM 2단계 요청 끝남", extra=f"policy_len={len(route_decision.user_visible_preface)}")
-        return build_answer_payload_from_text(route_decision.user_visible_preface).display_text
-
-    guided_user_text = route_decision.prompt_text or user_text
-    lightweight_persona_turn = session_is_casual_call_or_status_question(guided_user_text)
-    live_minecraft_state = None if lightweight_persona_turn else await observe_live_minecraft_state(guild_id)
-    runtime_status_context = await build_runtime_status_context(force=bool(route_decision.needs_runtime_state))
-    final_user_text = f"{guided_user_text}\n\n{build_main_response_guidance(cognitive_state, source=source, user_text=guided_user_text, session_key=session_key, guild_id=guild_id, minecraft_state=live_minecraft_state, runtime_status_context=runtime_status_context, route_decision=route_decision)}"
-    payload = build_main_llm_payload(
-        model_name=MODEL_NAME,
-        messages=messages,
-        final_user_text=final_user_text,
-        source=source,
-        stream=False,
-        content_format=MAIN_LLM_CHAT_CONTENT_FORMAT,
-        max_tokens=VOICE_LLM_MAX_TOKENS,
-        stop_tokens=MAIN_LLM_STOP_TOKENS,
-    )
-    answer, answer_source = await execute_main_llm_once(
-        payload=payload,
-        user_text=user_text,
-    )
-    answer = sanitize_unrequested_minecraft_leak(guided_user_text, answer)
-    answer = await resolve_promised_search_final_answer(
-        user_text=user_text,
-        answer_text=answer,
-        guild_id=guild_id,
-        session_key=session_key,
-        source=source,
-        messages=messages,
-        cognitive_state=cognitive_state,
-        route_decision=route_decision,
-        metrics=metrics,
-    )
-    answer, question_shape_meta = enforce_question_limits(answer, route_decision)
-    if record_question_trace_enabled:
-        record_question_trace(
-            route_decision=route_decision,
-            answer=answer,
-            shape_meta=question_shape_meta,
-            metrics=metrics,
-            cooldown_hit=bool((metrics or {}).get("meta", {}).get("question_cooldown_hit")) if isinstance(metrics, dict) else False,
-        )
-    if answer_source == "reasoning":
-        log_voice_stage(metrics, "LLM 2단계 요청 끝남", extra=f"reasoning_len={len(answer)}")
-    elif answer_source.startswith("fallback"):
-        log_voice_stage(metrics, "LLM canned reply 사용", extra=f"reason={answer_source} fallback_len={len(answer)}")
-    else:
-        log_voice_stage(metrics, "LLM 2단계 요청 끝남", extra=f"answer_len={len(answer)}")
-    return build_answer_payload_from_text(answer).display_text
 
 
 def build_voice_stream_chunk_deps() -> VoiceStreamChunkDeps:
@@ -6371,110 +6234,38 @@ async def answer_control_page_search_text(guild: discord.Guild | None, user_text
     )
 
 
-async def answer_control_page_text(guild: discord.Guild | None, user_text: str) -> str:
-    guild_id = control_page_effective_guild_id(guild)
-    session_key = control_page_session_key(guild_id)
-    state_lock = session_locks.setdefault(session_key, asyncio.Lock())
-    turn_id = ""
-    topic_id = ""
-    async with state_lock:
-        started_turn = begin_user_text_turn(session_key, user_text, guild_id=guild_id)
-        turn_id = started_turn.turn_id
-        topic_id = started_turn.topic_id
-    turn_scope = TurnScope(turn_id)
-    replace_room_turn_scope(session_key, turn_scope)
-    turn_task = _attach_current_task(turn_scope)
-    text_metrics: dict[str, Any] = {
-        "started_at": time.monotonic(),
-        "meta": {
-            "turn_id": turn_id,
-            "source": "control_page",
-            "session_key": session_key,
-            "guild_id": guild_id,
-            "topic_id": topic_id,
-            "turn_type": "control_page_text",
-            "selected_path": "control_page_local",
-            "needs_tts": False,
-        },
-        "marks": {},
-    }
-    proactive_resolution = resolve_pending_proactive_question_for_turn(
-        guild_id,
-        user_text,
-        session_key=session_key,
-        session_memory_key=session_key,
-        metrics=text_metrics,
+def build_control_page_text_runtime_deps() -> ControlPageTextRuntimeDeps:
+    return ControlPageTextRuntimeDeps(
+        effective_guild_id=control_page_effective_guild_id,
+        session_key_for_guild=control_page_session_key,
+        get_session_lock=lambda session_key: session_locks.setdefault(session_key, asyncio.Lock()),
+        begin_user_text_turn=begin_user_text_turn,
+        turn_scope_factory=TurnScope,
+        replace_room_turn_scope=replace_room_turn_scope,
+        attach_current_task=_attach_current_task,
+        monotonic=time.monotonic,
+        resolve_pending_proactive_question_for_turn=resolve_pending_proactive_question_for_turn,
+        ask_llm_streaming=ask_llm_streaming,
+        clean_text=clean_text,
+        strip_omnivoice_tags=strip_omnivoice_tags,
+        session_state_snapshot=session_state_snapshot,
+        maybe_append_proactive_question=maybe_append_proactive_question,
+        finish_assistant_text_turn=finish_assistant_text_turn,
+        log_voice_bottleneck_summary=log_voice_bottleneck_summary,
+        schedule_local_control_tts=schedule_local_control_tts,
+        format_display_text=format_display_text,
+        fallback_answer_for=fallback_answer_for,
+        detach_task=_detach_task,
+        clear_room_turn_scope=clear_room_turn_scope,
     )
-    answer = ""
-    text_turn_summary_logged = False
-    try:
-        answer = await ask_llm_streaming(
-            user_text,
-            guild_id=guild_id,
-            session_key=session_key,
-            source="control_page",
-            debug_text=user_text,
-            metrics=text_metrics,
-            turn_scope=turn_scope,
-        )
-        vision_capture_error = clean_text(str(text_metrics.get("meta", {}).get("vision_capture_error") or ""))
-        if "black frame" in vision_capture_error.lower():
-            answer = (
-                "지금 화면 캡처가 검은 프레임으로 들어와서 실제 화면 분석은 못 했어. "
-                "비전 모델 문제가 아니라 Windows 캡처 세션이 검은 이미지를 주는 상태야."
-        )
-        plain_answer = strip_omnivoice_tags(answer) or answer
-        awaiting_reply = bool(session_state_snapshot(session_key).get("awaiting_user_reply"))
-        proactive_asked = False
-        if not proactive_resolution.get("resolved"):
-            plain_answer, proactive_asked = maybe_append_proactive_question(
-                plain_answer,
-                guild_id=guild_id,
-                source="control_page",
-                user_text=user_text,
-                awaiting_user_reply=awaiting_reply,
-                session_key=session_key,
-                session_memory_key=session_key,
-                metrics=text_metrics,
-            )
-        if proactive_asked:
-            answer = plain_answer
-            awaiting_reply = True
-        async with state_lock:
-            finish_assistant_text_turn(
-                session_key,
-                user_text,
-                plain_answer,
-                guild_id=guild_id,
-                awaiting_user_reply=awaiting_reply,
-                topic_id=topic_id,
-            )
-        log_voice_bottleneck_summary(
-            text_metrics,
-            label="text_turn",
-            extra=f"control_page=true chars={len(format_display_text(answer, session_key=session_key).strip())}",
-            event_name="text_turn_summary",
-        )
-        text_turn_summary_logged = True
-        schedule_local_control_tts(
-            plain_answer,
-            turn_id=turn_id,
-            session_key=session_key,
-            turn_scope=turn_scope,
-        )
-        return format_display_text(plain_answer, session_key=session_key).strip() or fallback_answer_for(user_text)
-    finally:
-        if text_metrics and not text_turn_summary_logged:
-            text_metrics.setdefault("meta", {})["error_layer"] = "control_page_text"
-            text_metrics.setdefault("meta", {}).setdefault("error", "control_page_text_aborted_before_summary")
-            log_voice_bottleneck_summary(
-                text_metrics,
-                label="text_turn",
-                extra="control_page=true error=true",
-                event_name="text_turn_summary",
-            )
-        _detach_task(turn_scope, turn_task)
-        clear_room_turn_scope(session_key, turn_scope)
+
+
+async def answer_control_page_text(guild: discord.Guild | None, user_text: str) -> str:
+    return await answer_control_page_text_from_runtime(
+        guild,
+        user_text,
+        deps=build_control_page_text_runtime_deps(),
+    )
 
 
 def build_control_page_input_runtime_deps() -> ControlPageInputRuntimeDeps:

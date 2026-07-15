@@ -33,6 +33,162 @@ class MainLlmRuntimeDeps:
     log: Callable[..., Any] = print
 
 
+@dataclass(frozen=True)
+class AskLlmOnceRuntimeDeps:
+    log_voice_stage: Callable[..., None]
+    clean_text: Callable[[str], str]
+    prepare_route_context: Callable[..., Awaitable[tuple[Any, Any, Any, Any, bool]]]
+    maybe_execute_registered_route: Callable[..., Awaitable[str | None]]
+    is_user_echo_answer: Callable[[str, str], bool]
+    update_session_state: Callable[..., None]
+    build_answer_payload_from_text: Callable[[str], Any]
+    session_is_casual_call_or_status_question: Callable[[str], bool]
+    observe_live_minecraft_state: Callable[[int | None], Awaitable[Any]]
+    build_runtime_status_context: Callable[..., Awaitable[Any]]
+    build_main_response_guidance: Callable[..., str]
+    build_main_llm_payload: Callable[..., dict[str, Any]]
+    execute_main_llm_once: Callable[..., Awaitable[tuple[str, str]]]
+    sanitize_unrequested_minecraft_leak: Callable[[str, str], str]
+    resolve_promised_search_final_answer: Callable[..., Awaitable[str]]
+    enforce_question_limits: Callable[[str, Any], tuple[str, dict[str, Any]]]
+    record_question_trace: Callable[..., None]
+    model_name: str
+    main_llm_chat_content_format: str
+    voice_llm_max_tokens: int
+    main_llm_stop_tokens: tuple[str, ...] | list[str]
+
+
+async def ask_llm_once_from_runtime(
+    user_text: str,
+    *,
+    deps: AskLlmOnceRuntimeDeps,
+    guild_id: int | None = None,
+    session_key: str | None = None,
+    room_key: str | None = None,
+    person_key: str | None = None,
+    session_memory_key: str | None = None,
+    source: str = "text",
+    debug_text: str | None = None,
+    metrics: dict | None = None,
+    record_question_trace_enabled: bool = True,
+) -> str:
+    deps.log_voice_stage(
+        metrics,
+        "LLM 2단계 요청 시작",
+        extra=f"source={source} user_text_len={len(deps.clean_text(user_text))}",
+    )
+    messages, cognitive_state, route_decision, _gated_state, awaiting_user_reply = await deps.prepare_route_context(
+        user_text,
+        guild_id=guild_id,
+        session_key=session_key,
+        room_key=room_key,
+        person_key=person_key,
+        session_memory_key=session_memory_key,
+        source=source,
+        debug_text=debug_text,
+        metrics=metrics,
+    )
+    skill_route_answer = await deps.maybe_execute_registered_route(
+        route_decision=route_decision,
+        user_text=user_text,
+        source=source,
+        guild_id=guild_id,
+        session_key=session_key,
+        room_key=room_key,
+        person_key=person_key,
+        session_memory_key=session_memory_key,
+        debug_text=debug_text,
+        metrics=metrics,
+        cognitive_state=cognitive_state,
+        messages=messages,
+        allow_internal_routes={"main_direct", "policy_short_circuit", "search_executor"},
+    )
+    if skill_route_answer and not deps.is_user_echo_answer(user_text, skill_route_answer):
+        if session_key is not None:
+            deps.update_session_state(
+                session_key,
+                speaker="assistant",
+                awaiting_user_reply=awaiting_user_reply,
+                answer_text=skill_route_answer,
+                user_text=user_text,
+            )
+        deps.log_voice_stage(
+            metrics,
+            "LLM 2단계 요청 끝남",
+            extra=f"skill_route={route_decision.route} answer_len={len(skill_route_answer)}",
+        )
+        return deps.build_answer_payload_from_text(skill_route_answer).display_text
+
+    if route_decision.user_visible_preface and not deps.is_user_echo_answer(
+        user_text,
+        route_decision.user_visible_preface,
+    ):
+        if session_key is not None:
+            deps.update_session_state(
+                session_key,
+                speaker="assistant",
+                awaiting_user_reply=awaiting_user_reply,
+                answer_text=route_decision.user_visible_preface,
+                user_text=user_text,
+            )
+        deps.log_voice_stage(
+            metrics,
+            "LLM 2단계 요청 끝남",
+            extra=f"policy_len={len(route_decision.user_visible_preface)}",
+        )
+        return deps.build_answer_payload_from_text(route_decision.user_visible_preface).display_text
+
+    guided_user_text = route_decision.prompt_text or user_text
+    lightweight_persona_turn = deps.session_is_casual_call_or_status_question(guided_user_text)
+    live_minecraft_state = None if lightweight_persona_turn else await deps.observe_live_minecraft_state(guild_id)
+    runtime_status_context = await deps.build_runtime_status_context(force=bool(route_decision.needs_runtime_state))
+    final_user_text = (
+        f"{guided_user_text}\n\n"
+        f"{deps.build_main_response_guidance(cognitive_state, source=source, user_text=guided_user_text, session_key=session_key, guild_id=guild_id, minecraft_state=live_minecraft_state, runtime_status_context=runtime_status_context, route_decision=route_decision)}"
+    )
+    payload = deps.build_main_llm_payload(
+        model_name=deps.model_name,
+        messages=messages,
+        final_user_text=final_user_text,
+        source=source,
+        stream=False,
+        content_format=deps.main_llm_chat_content_format,
+        max_tokens=deps.voice_llm_max_tokens,
+        stop_tokens=deps.main_llm_stop_tokens,
+    )
+    answer, answer_source = await deps.execute_main_llm_once(payload=payload, user_text=user_text)
+    answer = deps.sanitize_unrequested_minecraft_leak(guided_user_text, answer)
+    answer = await deps.resolve_promised_search_final_answer(
+        user_text=user_text,
+        answer_text=answer,
+        guild_id=guild_id,
+        session_key=session_key,
+        source=source,
+        messages=messages,
+        cognitive_state=cognitive_state,
+        route_decision=route_decision,
+        metrics=metrics,
+    )
+    answer, question_shape_meta = deps.enforce_question_limits(answer, route_decision)
+    if record_question_trace_enabled:
+        deps.record_question_trace(
+            route_decision=route_decision,
+            answer=answer,
+            shape_meta=question_shape_meta,
+            metrics=metrics,
+            cooldown_hit=bool((metrics or {}).get("meta", {}).get("question_cooldown_hit"))
+            if isinstance(metrics, dict)
+            else False,
+        )
+    if answer_source == "reasoning":
+        deps.log_voice_stage(metrics, "LLM 2단계 요청 끝남", extra=f"reasoning_len={len(answer)}")
+    elif answer_source.startswith("fallback"):
+        deps.log_voice_stage(metrics, "LLM canned reply 사용", extra=f"reason={answer_source} fallback_len={len(answer)}")
+    else:
+        deps.log_voice_stage(metrics, "LLM 2단계 요청 끝남", extra=f"answer_len={len(answer)}")
+    return deps.build_answer_payload_from_text(answer).display_text
+
+
 async def execute_main_llm_once_from_runtime(
     *,
     deps: MainLlmRuntimeDeps,
