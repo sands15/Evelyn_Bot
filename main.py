@@ -807,6 +807,10 @@ from evelyn_core.voice_wake_probe_runtime import (
     VoiceWakeProbeDeps,
     run_voice_wake_probe_from_runtime,
 )
+from evelyn_core.voice_stt_execution_runtime import (
+    VoiceSttExecutionDeps,
+    run_voice_stt_execution_from_runtime,
+)
 from evelyn_core.voice_reply_side_effects import (
     VoiceReplySideEffectDeps,
     finalize_voice_reply_side_effects_from_runtime,
@@ -7685,6 +7689,34 @@ def build_voice_tts_interrupt_gate_deps() -> VoiceTtsInterruptGateDeps:
     )
 
 
+def build_voice_stt_execution_deps() -> VoiceSttExecutionDeps:
+    return VoiceSttExecutionDeps(
+        run_partial_stt_flow=run_partial_stt_flow,
+        run_full_stt_with_optional_rescore=run_full_stt_with_optional_rescore,
+        build_partial_stt_window=build_partial_stt_window,
+        get_partial_transcript=get_partial_transcript,
+        read_committed_text=lambda key: session_committed_stt_text.get(key or "", ""),
+        run_blocking_stt_task=run_blocking_stt_task,
+        speculate_from_committed_stt=speculate_from_committed_stt,
+        room_state_snapshot=room_state_snapshot,
+        clean_text=clean_text,
+        remember_speculative_policy=remember_speculative_policy,
+        transcribe_audio=transcribe_audio16k_sync,
+        choose_full_stt_candidate=choose_full_stt_candidate,
+        log_voice_stage=log_voice_stage,
+        mark_turn_stage=mark_turn_stage,
+        save_voice_debug_audio=save_voice_debug_audio,
+        print_fn=print,
+        full_stt_timeout_sec=FULL_STT_TIMEOUT_SEC,
+        voice_stt_max_new_tokens=VOICE_STT_MAX_NEW_TOKENS,
+        rescore_enabled=STT_FULL_RESCORING_ENABLED,
+        rescore_extra_tokens=STT_FULL_RESCORE_EXTRA_TOKENS,
+        rescore_min_audio_sec=STT_FULL_RESCORING_MIN_AUDIO_SEC,
+        rescore_min_text_len=STT_FULL_RESCORING_MIN_TEXT_LEN,
+        rescore_timeout_sec=STT_FULL_RESCORING_TIMEOUT_SEC,
+    )
+
+
 async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes, debug_meta: dict | None = None) -> None:
     await process_member_audio_from_runtime(
         member=member,
@@ -7789,77 +7821,28 @@ async def _process_member_audio_impl(
     if interrupt_gate is None:
         return
 
-    print(f"[FULL STT ENTER] speaker={member.display_name} sampling_rate={stt_sampling_rate} samples={audio16k.size} wake_detected={wake_detected}")
-    log_voice_stage(metrics, "본문 STT 시작", extra=f"samples={audio16k.size}")
-    stt_meta: dict | None = None
-    partial_text = ""
-    committed_partial_text = ""
-    try:
-        partial_result = await run_partial_stt_flow(
-            audio16k,
-            sampling_rate=stt_sampling_rate,
-            session_key=session_key,
-            timeout_sec=max(3.0, min(10.0, FULL_STT_TIMEOUT_SEC * 0.5)),
-            build_partial_stt_window=build_partial_stt_window,
-            get_partial_transcript=get_partial_transcript,
-            read_committed_text=lambda key: session_committed_stt_text.get(key or "", ""),
-            run_blocking_stt_task=run_blocking_stt_task,
-            speculate_from_committed_stt=speculate_from_committed_stt,
-            room_state=room_state_snapshot(room_session_key),
-            clean_text=clean_text,
-            metrics=metrics,
-            print_fn=print,
-        )
-        partial_text = partial_result.partial_text
-        committed_partial_text = partial_result.committed_text
-        metrics.setdefault("meta", {}).update({
-            "partial_stt_text": partial_text,
-            "committed_stt_text": committed_partial_text,
-        })
-        speculative = partial_result.speculative_policy
-        if speculative is not None:
-            remember_speculative_policy(session_key, speculative)
-            metrics.setdefault("meta", {})["speculative_policy"] = dict(speculative.get("policy") or {})
-    except Exception as e:
-        print(f"[STT PARTIAL] {e}")
-
-    try:
-        full_stt_result = await run_full_stt_with_optional_rescore(
-            audio16k,
-            sampling_rate=stt_sampling_rate,
-            duration_sec=duration_sec,
-            wake_probe=wake_probe,
-            max_new_tokens=VOICE_STT_MAX_NEW_TOKENS,
-            full_timeout_sec=FULL_STT_TIMEOUT_SEC,
-            rescore_enabled=STT_FULL_RESCORING_ENABLED,
-            rescore_extra_tokens=STT_FULL_RESCORE_EXTRA_TOKENS,
-            rescore_min_audio_sec=STT_FULL_RESCORING_MIN_AUDIO_SEC,
-            rescore_min_text_len=STT_FULL_RESCORING_MIN_TEXT_LEN,
-            rescore_timeout_sec=STT_FULL_RESCORING_TIMEOUT_SEC,
-            run_blocking_stt_task=run_blocking_stt_task,
-            transcribe_audio=transcribe_audio16k_sync,
-            choose_candidate=lambda primary, rescore: choose_full_stt_candidate(primary, rescore, wake_probe=wake_probe),
-            clean_text=clean_text,
-            log_stage=log_voice_stage,
-            metrics=metrics,
-            print_fn=print,
-            speaker_name=member.display_name,
-        )
-    except Exception as e:
-        print(f"[STT] {e}")
-        log_voice_stage(metrics, "본문 STT 실패", extra=repr(e))
+    stt_execution = await run_voice_stt_execution_from_runtime(
+        member=member,
+        guild_id=guild_id,
+        speaker_name=speaker_name,
+        pcm_bytes=pcm_bytes,
+        debug_meta=debug_meta,
+        session_key=session_key,
+        room_session_key=room_session_key,
+        audio16k=audio16k,
+        stt_sampling_rate=stt_sampling_rate,
+        duration_sec=duration_sec,
+        wake_probe=wake_probe,
+        wake_detected=wake_detected,
+        metrics=metrics,
+        deps=build_voice_stt_execution_deps(),
+    )
+    if stt_execution is None:
         return
 
-    text = full_stt_result.text
-    stt_meta = full_stt_result.stt_meta
-
-    mark_turn_stage(metrics, "stt_full_done", event_name="stt_full_done", text_len=len(text))
-    log_voice_stage(metrics, "본문 STT 완료", extra=f"text_len={len(text)}", key="stt_done")
-
-    if not text:
-        save_voice_debug_audio(guild_id, speaker_name, pcm_bytes, audio16k, wake_probe=wake_probe, final_text="[EMPTY STT]", debug_meta=debug_meta, stt_meta=stt_meta, session_key=session_key, stage_label="drop")
-        log_voice_stage(metrics, "본문 STT 빈 결과")
-        return
+    text = stt_execution.text
+    stt_meta = stt_execution.stt_meta
+    partial_text = stt_execution.partial_text
 
     final_transcript = build_final_transcript_flow(
         text=text,

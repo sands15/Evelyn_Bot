@@ -57,7 +57,23 @@ Last reviewed: 2026-07-15
   - CI와 같은 discovery 명령으로 전체 unittest 978개 통과
   - 실제 `main.py` 프로세스 smoke와 `PYTHONWARNINGS=error::ResourceWarning`를 함께 적용한 전체 unittest 978개 통과
 - 런타임/컨테이너 재시작과 외부 push는 하지 않았다.
-- 다음 절개 경계는 같은 함수의 partial/full STT와 transcript 확정, reply context 조립 순서다.
+- 네 번째 절개에서 partial/full STT 실행을 분리했다.
+  - 새 모듈: `evelyn_core/runtime/evelyn_core/voice_stt_execution_runtime.py`
+  - 새 계약: `VoiceSttExecutionDeps`, `VoiceSttExecutionResult`
+  - 이동 책임: partial STT와 committed/speculative 상태 기록, full STT/rescore 실행,
+    후보 선택 wake context 전달, full STT 실패·빈 결과 처리와 debug 저장.
+  - partial STT 실패는 기존처럼 full STT 진행을 막지 않는다.
+- 네 번째 절개 뒤 정확한 누적 크기 변화:
+  - `main.py`: 8,793줄 → 8,498줄
+  - `_process_member_audio_impl`: 729줄 → 304줄
+- 네 번째 절개 검증:
+  - 새 STT 실행 경계 테스트 7개 통과
+  - `tests/voice` 264개 통과
+  - `tests/discord_io` 78개 통과
+  - CI와 같은 discovery 명령으로 전체 unittest 985개 통과
+  - 실제 `main.py` 프로세스 smoke와 `PYTHONWARNINGS=error::ResourceWarning`를 함께 적용한 전체 unittest 985개 통과
+- 런타임/컨테이너 재시작과 외부 push는 하지 않았다.
+- 다음 절개 경계는 같은 함수의 transcript 확정/barge-in merge, session gate, reply context 조립 순서다.
 
 - [22:59 KST] cron checkpoint: `build_guild_runtime_reset_deps` 빌더 본문을
   `evelyn_core/runtime/evelyn_core/guild_runtime_reset.py`로 이전.
