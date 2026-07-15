@@ -23,7 +23,25 @@ Last reviewed: 2026-07-15
   - 실제 `main.py` 프로세스 smoke를 포함한 전체 unittest 958개 통과, 실패/오류/건너뜀 0
   - `PYTHONWARNINGS=error::ResourceWarning`, `py_compile`, `git diff --check` 통과
 - 런타임/컨테이너 재시작과 외부 push는 하지 않았다.
-- 다음 절개 경계는 같은 함수의 wake probe/환경음 판정, TTS interrupt, full STT/transcript 확정 순서다.
+- 두 번째 절개에서 wake probe와 본문 STT 이전 조기 차단을 분리했다.
+  - 새 모듈: `evelyn_core/runtime/evelyn_core/voice_wake_probe_runtime.py`
+  - 새 계약: `VoiceWakeProbeDeps`, `VoiceWakeProbeResult`
+  - 이동 책임: owner follow-up probe 생략, wake STT 실행/해석, strict confirm, fuzzy near-miss,
+    hard reject, 환경음·짧은 필러·반복 소음·저신호 조기 차단 및 관련 debug/drop 기록.
+  - `main.py`는 live 콜백을 조립하는 `build_voice_wake_probe_runtime_deps()`와
+    `run_voice_wake_probe_from_runtime(...)` 호출 및 결과 전달만 유지한다.
+- 두 번째 절개 뒤 정확한 누적 크기 변화:
+  - `main.py`: 8,793줄 → 8,560줄
+  - `_process_member_audio_impl`: 729줄 → 421줄
+- 두 번째 절개 검증:
+  - 새 경계 단위 테스트 12개 통과
+  - `tests/voice` 249개 통과
+  - `tests/discord_io` 78개 통과
+  - CI와 같은 discovery 명령으로 전체 unittest 970개 통과
+  - 실제 `main.py` 프로세스 smoke와 `PYTHONWARNINGS=error::ResourceWarning`를 함께 적용한 전체 unittest 970개 통과
+  - `py_compile`, `git diff --check` 통과(`git diff --check`는 기존 LF/CRLF 안내만 출력)
+- 런타임/컨테이너 재시작과 외부 push는 하지 않았다.
+- 다음 절개 경계는 같은 함수의 TTS interrupt, full STT/transcript 확정, reply context 조립 순서다.
 
 - [22:59 KST] cron checkpoint: `build_guild_runtime_reset_deps` 빌더 본문을
   `evelyn_core/runtime/evelyn_core/guild_runtime_reset.py`로 이전.

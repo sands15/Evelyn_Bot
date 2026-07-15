@@ -802,6 +802,10 @@ from evelyn_core.voice_audio_ingress_runtime import (
     VoiceAudioIngressDeps,
     prepare_voice_audio_ingress_from_runtime,
 )
+from evelyn_core.voice_wake_probe_runtime import (
+    VoiceWakeProbeDeps,
+    run_voice_wake_probe_from_runtime,
+)
 from evelyn_core.voice_reply_side_effects import (
     VoiceReplySideEffectDeps,
     finalize_voice_reply_side_effects_from_runtime,
@@ -7628,6 +7632,36 @@ def build_voice_audio_ingress_runtime_deps() -> VoiceAudioIngressDeps:
     )
 
 
+def build_voice_wake_probe_runtime_deps() -> VoiceWakeProbeDeps:
+    return VoiceWakeProbeDeps(
+        is_room_owner_active=is_room_owner_active,
+        is_session_active_for_user=is_session_active_for_user,
+        pick_active_speaker=pick_active_speaker,
+        log_voice_stage=log_voice_stage,
+        run_blocking_stt_task=run_blocking_stt_task,
+        detect_wake_word_sync=detect_wake_word_sync,
+        interpret_wake_probe_result=interpret_wake_probe_result,
+        clean_text=clean_text,
+        apply_stt_post_corrections=apply_stt_post_corrections,
+        should_require_confirm_exact_for_wake=should_require_confirm_exact_for_wake,
+        apply_strict_wake_confirm_policy=apply_strict_wake_confirm_policy,
+        apply_fuzzy_wake_near_miss=apply_fuzzy_wake_near_miss,
+        fuzzy_leading_wake_alias=fuzzy_leading_wake_alias,
+        register_drop_reason=register_drop_reason,
+        log_voice_bottleneck_summary=log_voice_bottleneck_summary,
+        is_likely_environment_noise=is_likely_environment_noise,
+        looks_like_brief_filler_text=looks_like_brief_filler_text,
+        looks_like_repetitive_noise_text=looks_like_repetitive_noise_text,
+        compute_voice_band_metrics=compute_voice_band_metrics,
+        save_voice_debug_audio=save_voice_debug_audio,
+        increment_session_bad_audio=increment_session_bad_audio,
+        should_skip_full_stt_after_wake_probe=should_skip_full_stt_after_wake_probe,
+        print_fn=print,
+        wake_stt_timeout_sec=WAKE_STT_TIMEOUT_SEC,
+        voice_no_wake_max_continue_sec=VOICE_NO_WAKE_MAX_CONTINUE_SEC,
+    )
+
+
 async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes, debug_meta: dict | None = None) -> None:
     await process_member_audio_from_runtime(
         member=member,
@@ -7683,161 +7717,34 @@ async def _process_member_audio_impl(
     body_rms = ingress.body_rms
     voice_like_prob = ingress.voice_like_prob
 
-    owner_followup_active = is_room_owner_active(room_session_key, member.id) and is_session_active_for_user(session_key, member.id)
-    active_speaker_user_id = pick_active_speaker(room_session_key)
-    wake_probe = ""
-    wake_confirm = ""
-    wake_detected = False
-    wake_match_mode = "owner_followup_active" if owner_followup_active else "rejected"
-    wake_alias = None
-    wake_reject_reason = None
+    wake = await run_voice_wake_probe_from_runtime(
+        member=member,
+        pcm_bytes=pcm_bytes,
+        debug_meta=debug_meta,
+        session_key=session_key,
+        room_session_key=room_session_key,
+        owner_user_id=owner_user_id,
+        guild_id=guild_id,
+        speaker_name=speaker_name,
+        audio16k=audio16k,
+        audio_for_wake=audio_for_wake,
+        wake_sampling_rate=wake_sampling_rate,
+        raw_seconds=raw_seconds,
+        duration_sec=duration_sec,
+        metrics=metrics,
+        deps=build_voice_wake_probe_runtime_deps(),
+    )
+    if wake is None:
+        return
 
-    if owner_followup_active:
-        log_voice_stage(
-            metrics,
-            "active owner follow-up, wake probe 생략",
-            extra=f"owner_user_id={member.id}",
-            key="wake_done",
-        )
-    else:
-        log_voice_stage(metrics, "웨이크 프로브 시작", extra=f"samples={audio_for_wake.size} sampling_rate={wake_sampling_rate}")
-        try:
-            wake_result = await run_blocking_stt_task(
-                lambda: detect_wake_word_sync(audio_for_wake, sampling_rate=wake_sampling_rate),
-                stage="wake",
-                timeout_sec=max(5.0, WAKE_STT_TIMEOUT_SEC),
-                metrics=metrics,
-            )
-        except Exception as e:
-            print(f"[WAKE STT] {e}")
-            register_drop_reason(metrics, "wake_probe_error", session_key=session_key, room_session_key=room_session_key, owner_user_id=owner_user_id, error=repr(e))
-            log_voice_stage(metrics, "웨이크 프로브 실패", extra=repr(e))
-            log_voice_bottleneck_summary(metrics, label="voice_drop", extra="drop=wake_probe_error", event_name="voice_drop_summary")
-            return
-
-        wake_interpretation = interpret_wake_probe_result(
-            wake_result,
-            clean_text=clean_text,
-            apply_post_corrections=apply_stt_post_corrections,
-        )
-        wake_probe = wake_interpretation.probe_text
-        wake_confirm = wake_interpretation.confirm_text
-        wake_detected = wake_interpretation.wake_detected
-        wake_match_mode = wake_interpretation.wake_match_mode
-        wake_alias = wake_interpretation.wake_alias
-        wake_reject_reason = wake_interpretation.wake_reject_reason
-        print(
-            f"[STT RESULT][wake] probe={wake_probe!r} confirm={wake_confirm!r} detected={wake_detected} mode={wake_match_mode} alias={wake_alias!r} reject={wake_reject_reason!r}"
-        )
-
-        strict_confirm_required = should_require_confirm_exact_for_wake(debug_meta)
-        wake_interpretation = apply_strict_wake_confirm_policy(
-            wake_interpretation,
-            strict_confirm_required=strict_confirm_required,
-        )
-        wake_detected = wake_interpretation.wake_detected
-        wake_match_mode = wake_interpretation.wake_match_mode
-        wake_alias = wake_interpretation.wake_alias
-        wake_reject_reason = wake_interpretation.wake_reject_reason
-
-        log_voice_stage(
-            metrics,
-            "웨이크 프로브 완료",
-            extra=(
-                f"wake_detected={wake_detected} wake_match_mode={wake_match_mode} wake_alias={wake_alias!r} "
-                f"wake_probe_text={wake_probe!r} wake_confirm_text={wake_confirm!r} wake_reject_reason={wake_reject_reason!r}"
-            ),
-            key="wake_done",
-        )
-
-        hard_drop_reasons = {"unstable_audio", "gibberish_probe", "probe_miss", "confirm_miss", "wake_probe_low_signal", "full_text_veto", "transport_corrupted"}
-        wake_interpretation = apply_fuzzy_wake_near_miss(
-            wake_interpretation,
-            fuzzy_leading_wake_alias=fuzzy_leading_wake_alias,
-        )
-        wake_detected = wake_interpretation.wake_detected
-        wake_match_mode = wake_interpretation.wake_match_mode
-        wake_alias = wake_interpretation.wake_alias
-        wake_reject_reason = wake_interpretation.wake_reject_reason
-        if wake_interpretation.near_miss:
-            log_voice_stage(metrics, "웨이크 근접오타 완화", extra=f"probe={wake_probe!r} confirm={wake_confirm!r} alias={wake_alias!r}")
-        if not wake_detected:
-            reject_reason = wake_reject_reason or "confirm_miss"
-            if reject_reason in hard_drop_reasons:
-                register_drop_reason(
-                    metrics,
-                    reject_reason,
-                    session_key=session_key,
-                    room_session_key=room_session_key,
-                    owner_user_id=owner_user_id,
-                    wake_probe_text=wake_probe,
-                    wake_confirm_text=wake_confirm,
-                    wake_match_mode=wake_match_mode,
-                    wake_alias=wake_alias,
-                )
-                log_voice_stage(metrics, "웨이크 거부", extra=f"wake_reject_reason={reject_reason} wake_match_mode={wake_match_mode}")
-                log_voice_bottleneck_summary(metrics, label="voice_drop", extra=f"drop={reject_reason}", event_name="voice_drop_summary")
-                return
-        env_noise_candidate = is_likely_environment_noise(audio_for_wake, sampling_rate=wake_sampling_rate)
-        filler_candidate = looks_like_brief_filler_text(wake_probe)
-        repetitive_noise_candidate = looks_like_repetitive_noise_text(wake_probe)
-
-        if env_noise_candidate:
-            band_ratio, flatness, rms = compute_voice_band_metrics(audio_for_wake, sampling_rate=wake_sampling_rate)
-            if not wake_detected and raw_seconds <= VOICE_NO_WAKE_MAX_CONTINUE_SEC:
-                print(f"[FULL STT SKIP] reason=env_ignore speaker={member.display_name} probe={wake_probe!r}")
-                print(
-                    f"[ENV IGNORE] speaker={member.display_name} band_ratio={band_ratio:.3f} flatness={flatness:.3f} rms={rms:.4f} probe={wake_probe!r}"
-                )
-                save_voice_debug_audio(guild_id, speaker_name, pcm_bytes, audio16k, wake_probe=wake_probe, final_text="[ENV IGNORE]", debug_meta=debug_meta, session_key=session_key, stage_label="drop")
-                bad_audio_count = increment_session_bad_audio(session_key)
-                register_drop_reason(metrics, "env_ignore", session_key=session_key, room_session_key=room_session_key, owner_user_id=owner_user_id, wake_probe_text=wake_probe, bad_audio_count=bad_audio_count)
-                log_voice_stage(metrics, "환경음 후보 조기 종료", extra=f"wake_probe_text={wake_probe!r}")
-                log_voice_bottleneck_summary(metrics, label="voice_drop", extra="drop=env_ignore", event_name="voice_drop_summary")
-                return
-            print(f"[FULL STT CONTINUE] reason=env_ignore speaker={member.display_name} probe={wake_probe!r}")
-            print(
-                f"[ENV IGNORE] speaker={member.display_name} band_ratio={band_ratio:.3f} flatness={flatness:.3f} rms={rms:.4f} probe={wake_probe!r}"
-            )
-            log_voice_stage(metrics, "환경음 후보지만 본문 STT 진행", extra=f"wake_probe_text={wake_probe!r}")
-
-        if filler_candidate:
-            if not wake_detected and raw_seconds <= VOICE_NO_WAKE_MAX_CONTINUE_SEC:
-                print(f"[FULL STT SKIP] reason=filler_ignore speaker={member.display_name} probe={wake_probe!r}")
-                print(f"[FILLER IGNORE] speaker={member.display_name} probe={wake_probe!r}")
-                save_voice_debug_audio(guild_id, speaker_name, pcm_bytes, audio16k, wake_probe=wake_probe, final_text="[FILLER IGNORE]", debug_meta=debug_meta, session_key=session_key, stage_label="drop")
-                register_drop_reason(metrics, "filler_ignore", session_key=session_key, room_session_key=room_session_key, owner_user_id=owner_user_id, wake_probe_text=wake_probe)
-                log_voice_stage(metrics, "짧은 필러 후보 조기 종료", extra=f"wake_probe_text={wake_probe!r}")
-                log_voice_bottleneck_summary(metrics, label="voice_drop", extra="drop=filler_ignore", event_name="voice_drop_summary")
-                return
-            print(f"[FULL STT CONTINUE] reason=filler_ignore speaker={member.display_name} probe={wake_probe!r}")
-            print(f"[FILLER IGNORE] speaker={member.display_name} probe={wake_probe!r}")
-            log_voice_stage(metrics, "짧은 필러 후보지만 본문 STT 진행", extra=f"wake_probe_text={wake_probe!r}")
-
-        if repetitive_noise_candidate:
-            if not wake_detected:
-                print(f"[FULL STT SKIP] reason=noise_text_ignore speaker={member.display_name} probe={wake_probe!r}")
-                print(f"[NOISE TEXT IGNORE] speaker={member.display_name} probe={wake_probe!r}")
-                save_voice_debug_audio(guild_id, speaker_name, pcm_bytes, audio16k, wake_probe=wake_probe, final_text="[NOISE TEXT IGNORE]", debug_meta=debug_meta, session_key=session_key, stage_label="drop")
-                register_drop_reason(metrics, "noise_text_ignore", session_key=session_key, room_session_key=room_session_key, owner_user_id=owner_user_id, wake_probe_text=wake_probe)
-                log_voice_stage(metrics, "반복 소음 후보 조기 종료", extra=f"wake_probe_text={wake_probe!r}")
-                log_voice_bottleneck_summary(metrics, label="voice_drop", extra="drop=noise_text_ignore", event_name="voice_drop_summary")
-                return
-            print(f"[FULL STT CONTINUE] reason=noise_text_ignore speaker={member.display_name} probe={wake_probe!r}")
-            print(f"[NOISE TEXT IGNORE] speaker={member.display_name} probe={wake_probe!r}")
-            log_voice_stage(metrics, "반복 소음 후보지만 본문 STT 진행", extra=f"wake_probe_text={wake_probe!r}")
-
-        if not wake_detected:
-            print(f"[FULL STT CONTINUE] reason=wake_ignore speaker={member.display_name} probe={wake_probe!r}")
-            if wake_probe:
-                print(f"[WAKE IGNORE] {member.display_name}: {wake_probe!r}")
-            if should_skip_full_stt_after_wake_probe(wake_detected=wake_detected, wake_probe=wake_probe, duration_sec=duration_sec):
-                print(f"[FULL STT SKIP] reason=wake_probe_low_signal speaker={member.display_name} probe={wake_probe!r} sec={duration_sec:.2f}")
-                save_voice_debug_audio(guild_id, speaker_name, pcm_bytes, audio16k, wake_probe=wake_probe, final_text="[WAKE PROBE SKIP]", debug_meta=debug_meta, session_key=session_key, stage_label="drop")
-                register_drop_reason(metrics, "wake_probe_low_signal", session_key=session_key, room_session_key=room_session_key, owner_user_id=owner_user_id, wake_probe_text=wake_probe, wake_detected=wake_detected)
-                log_voice_stage(metrics, "웨이크 프로브 기반 조기 종료", extra=f"wake_probe_text={wake_probe!r} sec={duration_sec:.2f}")
-                return
-            log_voice_stage(metrics, "웨이크 미검출이지만 본문 STT 진행", extra=f"wake_probe_text={wake_probe!r}")
+    owner_followup_active = wake.owner_followup_active
+    active_speaker_user_id = wake.active_speaker_user_id
+    wake_probe = wake.wake_probe
+    wake_confirm = wake.wake_confirm
+    wake_detected = wake.wake_detected
+    wake_match_mode = wake.wake_match_mode
+    wake_alias = wake.wake_alias
+    wake_reject_reason = wake.wake_reject_reason
 
     interrupt_meta = TtsInterruptMeta(
         active_speaker_match=active_speaker_user_id == member.id,
