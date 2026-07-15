@@ -281,6 +281,10 @@ from evelyn_core.startup_component_state import (
     startup_component_done_from_runtime,
 )
 from evelyn_core.stt_task_runtime import run_blocking_stt_task_from_runtime
+from evelyn_core.stt_transcription_runtime import (
+    SttTranscriptionRuntimeDeps,
+    transcribe_audio16k_from_runtime,
+)
 from evelyn_core.stt_text_runtime import (
     build_stt_text_runtime_deps,
     build_partial_stt_window_from_runtime,
@@ -340,8 +344,15 @@ from evelyn_core.discord_delivery import (
     send_discord_text,
 )
 from evelyn_core.discord_tts_stream_runtime import (
+    DiscordTtsSingleRuntimeDeps,
     DiscordTtsStreamRuntimeDeps,
+    speak_answer_from_runtime,
     stream_tts_sentences_from_runtime,
+)
+from evelyn_core.discord_voice_connection_runtime import (
+    DiscordVoiceConnectionRuntimeDeps,
+    connect_evelyn_voice_client_from_runtime,
+    wait_for_internal_voice_reconnect_from_runtime,
 )
 from evelyn_core.discord_settings_runtime import (
     DiscordSettingsRuntimeDeps,
@@ -4378,61 +4389,32 @@ def _build_stt_text_runtime_deps() -> Any:
     )
 
 
+def build_stt_transcription_runtime_deps() -> SttTranscriptionRuntimeDeps:
+    return SttTranscriptionRuntimeDeps(
+        stt_service_url=STT_SERVICE_URL,
+        stt_service_timeout_sec=STT_SERVICE_TIMEOUT_SEC,
+        stt_service_fallback_local=STT_SERVICE_FALLBACK_LOCAL,
+        stt_language=STT_LANGUAGE,
+        stt_force_language=STT_FORCE_LANGUAGE,
+        target_rate=TARGET_RATE,
+        normalize_stt_language=normalize_stt_language_from_runtime,
+        transcribe_via_service=transcribe_audio16k_via_service,
+        get_stt_model=get_stt_model,
+        as_float32_array=lambda audio: np.asarray(audio, dtype=np.float32),
+        resample_audio_float=resample_audio_float,
+        clean_text=clean_text,
+        log=print,
+    )
+
+
 def transcribe_audio16k_sync(audio16k: np.ndarray, max_new_tokens: int = 256, *, sampling_rate: int = TARGET_RATE, stage: str = "full") -> str:
-    if audio16k.size == 0:
-        return ""
-
-    effective_rate = max(1, int(sampling_rate))
-    print(f"[STT INPUT][{stage}] sampling_rate={effective_rate} samples={audio16k.size} sec={audio16k.size / float(effective_rate):.2f}")
-    if STT_SERVICE_URL:
-        try:
-            language = (
-                normalize_stt_language_from_runtime(None, default_language=STT_LANGUAGE)
-                if STT_FORCE_LANGUAGE
-                else None
-            )
-            result = transcribe_audio16k_via_service(
-                audio16k,
-                service_url=STT_SERVICE_URL,
-                timeout_sec=STT_SERVICE_TIMEOUT_SEC,
-                sampling_rate=effective_rate,
-                max_new_tokens=max_new_tokens,
-                stage=stage,
-                language=language,
-            )
-            text = clean_text(str(result.get("text") or ""))
-            print(f"[STT REMOTE DONE][{stage}] text={text!r}")
-            return text
-        except Exception as exc:
-            print(f"[STT REMOTE FAIL][{stage}] {exc!r}")
-            if not STT_SERVICE_FALLBACK_LOCAL:
-                raise
-
-    backend, _processor, model = get_stt_model()
-    stt_audio = np.asarray(audio16k, dtype=np.float32)
-
-    if effective_rate != TARGET_RATE:
-        stt_audio = resample_audio_float(stt_audio, effective_rate, TARGET_RATE)
-        effective_rate = TARGET_RATE
-        print(f"[STT RESAMPLE][{stage}] {sampling_rate} -> {TARGET_RATE} samples={stt_audio.size}")
-
-    language = (
-        normalize_stt_language_from_runtime(None, default_language=STT_LANGUAGE)
-        if STT_FORCE_LANGUAGE
-        else None
+    return transcribe_audio16k_from_runtime(
+        audio16k,
+        max_new_tokens,
+        deps=build_stt_transcription_runtime_deps(),
+        sampling_rate=sampling_rate,
+        stage=stage,
     )
-    results = model.transcribe(
-        audio=(stt_audio, effective_rate),
-        language=language,
-        return_time_stamps=False,
-    )
-    if not results:
-        print(f"[STT DONE][{stage}] empty_result")
-        return ""
-
-    text = clean_text(getattr(results[0], "text", "") or "")
-    print(f"[STT DONE][{stage}] text={text!r}")
-    return text
 
 
 def build_partial_stt_window(audio16k: np.ndarray, *, sampling_rate: int = TARGET_RATE) -> np.ndarray:
@@ -4500,77 +4482,31 @@ def detect_wake_word_sync(audio: np.ndarray, *, sampling_rate: int = TARGET_RATE
 # =========================================================
 # 디스코드 음성
 # =========================================================
-async def _wait_for_internal_voice_reconnect(target_channel: discord.VoiceChannel) -> EvelynVoiceClient | None:
-    existing_vc = target_channel.guild.voice_client
-    if not isinstance(existing_vc, EvelynVoiceClient):
-        return None
-    if not existing_vc.is_internal_voice_reconnect_active():
-        return None
+def build_discord_voice_connection_runtime_deps() -> DiscordVoiceConnectionRuntimeDeps:
+    return DiscordVoiceConnectionRuntimeDeps(
+        voice_client_type=EvelynVoiceClient,
+        voice_connect_locks=voice_connect_locks,
+        voice_connect_timeout=VOICE_CONNECT_TIMEOUT,
+        voice_connect_retries=VOICE_CONNECT_RETRIES,
+        voice_connect_retry_delay_sec=VOICE_CONNECT_RETRY_DELAY_SEC,
+        process_member_audio=process_member_audio,
+        sleep=asyncio.sleep,
+        log=print,
+    )
 
-    resumed = await existing_vc.wait_for_internal_voice_reconnect(timeout=max(VOICE_CONNECT_TIMEOUT, 5.0))
-    if resumed and existing_vc.channel == target_channel:
-        return existing_vc
-    refreshed_vc = target_channel.guild.voice_client
-    if isinstance(refreshed_vc, EvelynVoiceClient) and refreshed_vc.is_connected() and refreshed_vc.channel == target_channel:
-        return refreshed_vc
-    return None
+
+async def _wait_for_internal_voice_reconnect(target_channel: discord.VoiceChannel) -> EvelynVoiceClient | None:
+    return await wait_for_internal_voice_reconnect_from_runtime(
+        target_channel,
+        deps=build_discord_voice_connection_runtime_deps(),
+    )
 
 
 async def connect_evelyn_voice_client(target_channel: discord.VoiceChannel) -> EvelynVoiceClient:
-    guild_id = target_channel.guild.id
-    lock = voice_connect_locks.setdefault(guild_id, asyncio.Lock())
-
-    async with lock:
-        reused_vc = await _wait_for_internal_voice_reconnect(target_channel)
-        if reused_vc is not None:
-            return reused_vc
-
-        last_error: Exception | None = None
-
-        for attempt in range(1, VOICE_CONNECT_RETRIES + 1):
-            try:
-                print(
-                    f"[VOICE CONNECT] attempt={attempt}/{VOICE_CONNECT_RETRIES} channel={target_channel.name} timeout={VOICE_CONNECT_TIMEOUT}"
-                )
-                vc = await target_channel.connect(
-                    cls=EvelynVoiceClient,
-                    timeout=VOICE_CONNECT_TIMEOUT,
-                    reconnect=False,
-                )
-                if not isinstance(vc, EvelynVoiceClient):
-                    raise RuntimeError(f"unexpected voice client type: {type(vc)!r}")
-                vc.on_user_audio = process_member_audio
-                if not vc.is_listener_healthy():
-                    vc.listen()
-                    print(f"[VOICE CONNECT ARM] guild={guild_id} channel={target_channel.name}")
-                return vc
-            except Exception as e:
-                last_error = e
-                print(
-                    f"[VOICE CONNECT FAIL] attempt={attempt}/{VOICE_CONNECT_RETRIES} channel={target_channel.name} err={e!r}"
-                )
-
-                reused_vc = await _wait_for_internal_voice_reconnect(target_channel)
-                if reused_vc is not None:
-                    return reused_vc
-
-                stale_vc = target_channel.guild.voice_client
-                if stale_vc is not None:
-                    try:
-                        await stale_vc.disconnect(force=True)
-                    except Exception:
-                        pass
-
-                try:
-                    await target_channel.guild.change_voice_state(channel=None, self_deaf=False, self_mute=False)
-                except Exception:
-                    pass
-
-                if attempt < VOICE_CONNECT_RETRIES:
-                    await asyncio.sleep(VOICE_CONNECT_RETRY_DELAY_SEC)
-
-        assert last_error is not None
-        raise last_error
+    return await connect_evelyn_voice_client_from_runtime(
+        target_channel,
+        deps=build_discord_voice_connection_runtime_deps(),
+    )
 
 
 async def ensure_listening_voice_client(guild: discord.Guild, target_channel: discord.VoiceChannel) -> Optional[EvelynVoiceClient]:
@@ -4742,6 +4678,21 @@ async def play_cached_answer_audio(
     )
 
 
+def build_discord_tts_single_runtime_deps() -> DiscordTtsSingleRuntimeDeps:
+    return DiscordTtsSingleRuntimeDeps(
+        is_local_speaker_voice_client=is_local_speaker_voice_client,
+        speak_answer_local=speak_answer_local,
+        tts_running_state=TurnState.TTS_RUNNING,
+        play_cached_answer_audio=play_cached_answer_audio,
+        tts_lock=tts_lock,
+        create_omnivoice_source=create_omnivoice_source,
+        log_turn_event=log_turn_event,
+        log_voice_latency=log_voice_latency,
+        playback_manager=tts_playback_manager,
+        source_playback_request_factory=TtsSourcePlaybackRequest,
+    )
+
+
 async def speak_answer(
     vc: discord.VoiceClient,
     answer: str,
@@ -4751,57 +4702,15 @@ async def speak_answer(
     turn_scope: TurnScope | None = None,
     metrics: dict | None = None,
 ) -> None:
-    if is_local_speaker_voice_client(vc):
-        await speak_answer_local(
-            answer,
-            turn_id=turn_id,
-            session_key=session_key,
-            turn_scope=turn_scope,
-            metrics=metrics,
-        )
-        return
-
-    guild_id = getattr(getattr(vc, "guild", None), "id", None)
-    if turn_scope is not None:
-        turn_scope.transition(TurnState.TTS_RUNNING, reason="speak_answer")
-
-    if await play_cached_answer_audio(
+    await speak_answer_from_runtime(
         vc,
         answer,
+        deps=build_discord_tts_single_runtime_deps(),
         turn_id=turn_id,
         session_key=session_key,
+        turn_scope=turn_scope,
         metrics=metrics,
-    ):
-        return
-
-    async with tts_lock:
-        source = await create_omnivoice_source(
-            answer,
-            turn_id=turn_id,
-            chunk_index=1,
-            session_key=session_key,
-            turn_scope=turn_scope,
-            trace_payload={"source_type": "OmniVoicePCMStream"},
-            on_first_packet_sent=lambda: log_turn_event(
-                "first_packet_sent",
-                turn_id=turn_id,
-                chunk_index=1,
-                session_key=session_key,
-            ) or log_voice_latency(metrics, "first_packet_sent_logged", "첫 패킷 송신 시간"),
-        )
-        await tts_playback_manager.play_source_once(
-            TtsSourcePlaybackRequest(
-                vc,
-                source,
-                guild_id=guild_id,
-                turn_id=turn_id,
-                session_key=session_key,
-                metrics=metrics,
-                trace_payload={
-                },
-                clear_registry_on_finish=False,
-            )
-        )
+    )
 
 
 def build_discord_tts_stream_runtime_deps() -> DiscordTtsStreamRuntimeDeps:

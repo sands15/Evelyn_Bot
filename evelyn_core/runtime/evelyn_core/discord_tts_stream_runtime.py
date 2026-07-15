@@ -5,6 +5,20 @@ from typing import Any, Awaitable, Callable
 
 
 @dataclass(frozen=True)
+class DiscordTtsSingleRuntimeDeps:
+    is_local_speaker_voice_client: Callable[[Any], bool]
+    speak_answer_local: Callable[..., Awaitable[None]]
+    tts_running_state: Any
+    play_cached_answer_audio: Callable[..., Awaitable[bool]]
+    tts_lock: Any
+    create_omnivoice_source: Callable[..., Awaitable[Any]]
+    log_turn_event: Callable[..., Any]
+    log_voice_latency: Callable[..., Any]
+    playback_manager: Any
+    source_playback_request_factory: Callable[..., Any]
+
+
+@dataclass(frozen=True)
 class DiscordTtsStreamRuntimeDeps:
     attach_current_task: Callable[[Any], Any]
     detach_task: Callable[[Any, Any], None]
@@ -23,6 +37,72 @@ class DiscordTtsStreamRuntimeDeps:
     playback_start_lookahead_timeout_ms: int
     create_turn_scoped_task: Callable[..., Any]
     log: Callable[[str], Any]
+
+
+async def speak_answer_from_runtime(
+    vc: Any,
+    answer: str,
+    *,
+    deps: DiscordTtsSingleRuntimeDeps,
+    turn_id: str | None = None,
+    session_key: str | None = None,
+    turn_scope: Any = None,
+    metrics: dict | None = None,
+) -> None:
+    if deps.is_local_speaker_voice_client(vc):
+        await deps.speak_answer_local(
+            answer,
+            turn_id=turn_id,
+            session_key=session_key,
+            turn_scope=turn_scope,
+            metrics=metrics,
+        )
+        return
+
+    guild_id = getattr(getattr(vc, "guild", None), "id", None)
+    if turn_scope is not None:
+        turn_scope.transition(deps.tts_running_state, reason="speak_answer")
+
+    if await deps.play_cached_answer_audio(
+        vc,
+        answer,
+        turn_id=turn_id,
+        session_key=session_key,
+        metrics=metrics,
+    ):
+        return
+
+    async with deps.tts_lock:
+        source = await deps.create_omnivoice_source(
+            answer,
+            turn_id=turn_id,
+            chunk_index=1,
+            session_key=session_key,
+            turn_scope=turn_scope,
+            trace_payload={"source_type": "OmniVoicePCMStream"},
+            on_first_packet_sent=lambda: deps.log_turn_event(
+                "first_packet_sent",
+                turn_id=turn_id,
+                chunk_index=1,
+                session_key=session_key,
+            ) or deps.log_voice_latency(
+                metrics,
+                "first_packet_sent_logged",
+                "첫 패킷 송신 시간",
+            ),
+        )
+        await deps.playback_manager.play_source_once(
+            deps.source_playback_request_factory(
+                vc,
+                source,
+                guild_id=guild_id,
+                turn_id=turn_id,
+                session_key=session_key,
+                metrics=metrics,
+                trace_payload={},
+                clear_registry_on_finish=False,
+            )
+        )
 
 
 async def stream_tts_sentences_from_runtime(

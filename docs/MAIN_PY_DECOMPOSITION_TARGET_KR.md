@@ -261,6 +261,37 @@ Last reviewed: 2026-07-15
 - 런타임/컨테이너 재시작과 외부 push는 하지 않았다.
 - 다음 후보는 `speak_answer` 60줄, `transcribe_audio16k_sync` 55줄,
   `connect_evelyn_voice_client` 55줄과 dependency builder composition root 정리다.
+- 스물한 번째 배치에서 60줄 Discord 단일 `speak_answer`를 분리했다.
+  - 확장 모듈/계약: `discord_tts_stream_runtime.py`, `DiscordTtsSingleRuntimeDeps`
+  - 이동 책임: local speaker 분기, turn state 전환, cached audio short-circuit,
+    OmniVoice source/first-packet callback, single playback request.
+  - 새 테스트 4개: local 위임, cached short-circuit, source/playback request, main 위임.
+- 스물두 번째 배치에서 55줄 `transcribe_audio16k_sync`를 분리했다.
+  - 새 모듈/계약: `stt_transcription_runtime.py`, `SttTranscriptionRuntimeDeps`
+  - 이동 책임: remote STT request/fallback, language 결정, float32 변환/resample,
+    local Qwen ASR 실행과 결과 정제/로그.
+  - 새 테스트 5개: empty, remote 계약, fallback 차단, local resample, main 위임.
+- 스물세 번째 배치에서 55줄 `connect_evelyn_voice_client`와 내부 reconnect 대기를 분리했다.
+  - 새 모듈/계약: `discord_voice_connection_runtime.py`, `DiscordVoiceConnectionRuntimeDeps`
+  - 이동 책임: guild별 connect lock, 내부 reconnect 재사용, listener arm,
+    실패 시 stale disconnect/voice-state 정리와 bounded retry.
+  - 새 테스트 4개: reconnect 재사용, 정상 연결/arm, 실패 정리/재시도, main 위임.
+- 스물세 번째 배치 뒤 정확한 누적 크기 변화:
+  - `main.py`: 8,793줄 → 7,463줄
+  - 현재 최대 함수는 `build_fast_path_policy_runtime_deps` 72줄이며,
+    최대 실행 함수는 `build_live_vision_context` 55줄이다.
+- 스물한 번째~스물세 번째 배치 통합 검증:
+  - 새 테스트 13개, 관련 테스트 21개 통과(선택 의존성 조건에 따른 5개 skip)
+  - 일반 discovery 전체 unittest 1,088개 통과(실제 `main.py` opt-in 1개 의도적 skip)
+  - 실제 `main.py` smoke와 `PYTHONWARNINGS=error::ResourceWarning`를 함께 적용한 전체 unittest 1,088개 통과
+  - Python `py_compile`, `git diff --check` 통과
+- 첫 전체 회귀에서 소유권 이동 전 문자열 위치를 `main.py`로 고정한 정적 테스트 2개가 실패했고,
+  새 Discord TTS/STT 소유 모듈을 검사하도록 수정한 뒤 두 전체 회귀를 처음부터 재통과했다.
+- 검증 명령에 `-t .`이 없거나 Voyager 가상환경 경로가 빠지면 `tests.voyager`와 외부
+  `voyager` 패키지 충돌 또는 `gymnasium` 누락이 발생하므로 정식 discovery 계약을 사용했다.
+- 런타임/컨테이너 재시작과 외부 push는 하지 않았다.
+- 다음 후보는 `build_live_vision_context` 55줄, `answer_from_search_results` 53줄,
+  `ask_llm_streaming` 52줄과 dependency builder composition root 정리다.
 
 - [22:59 KST] cron checkpoint: `build_guild_runtime_reset_deps` 빌더 본문을
   `evelyn_core/runtime/evelyn_core/guild_runtime_reset.py`로 이전.
