@@ -157,6 +157,31 @@ Last reviewed: 2026-07-15
 - 런타임/컨테이너 재시작과 외부 push는 하지 않았다.
 - 다음 대형 함수 위험 순위는 `create_omnivoice_source` 146줄,
   `stream_local_tts_sentences` 129줄, `classify_llm_route_async` 118줄이다.
+- 열 번째 배치에서 146줄 `create_omnivoice_source`를 분리했다.
+  - 새 모듈: `evelyn_core/runtime/evelyn_core/omnivoice_source_runtime.py`
+  - 새 계약: `OmniVoiceSourceRuntimeDeps`
+  - 이동 책임: HTTP PCM streaming, 첫 byte/PCM trace, clone voice→auto fallback 연결,
+    source finish/fail, turn-scope task 생성과 취소 cleanup.
+  - 새 테스트 6개: 빈 입력, 정상 PCM, trace callback, clone fallback, 최종 HTTP 실패, 취소 cleanup, main 위임.
+- 열한 번째 배치에서 129줄 `stream_local_tts_sentences`를 분리했다.
+  - 새 모듈: `evelyn_core/runtime/evelyn_core/local_tts_stream_runtime.py`
+  - 새 계약: `LocalTtsStreamRuntimeDeps`
+  - 이동 책임: sentence source prefetch, local speaker 순차 재생, 첫 재생/latency trace,
+    playback/prefetch 실패 기록, leftover source cleanup, turn-scope attach/detach.
+  - 새 테스트 5개: disabled gate, 정상 streaming/callback, playback 실패/leftover cleanup,
+    prefetch 실패 stage, main 위임.
+- 열한 번째 배치 뒤 정확한 누적 크기 변화:
+  - `main.py`: 8,793줄 → 7,971줄
+  - 최대 함수: 242줄 autonomy factory → 146줄 OmniVoice source → 129줄 local TTS stream →
+    현재 `classify_llm_route_async` 118줄
+- 열 번째·열한 번째 배치 통합 검증:
+  - 관련 OmniVoice/local TTS 테스트 93개 통과
+  - 일반 discovery 전체 unittest 1,032개 통과(실제 `main.py` opt-in 1개 의도적 skip)
+  - 실제 `main.py` smoke와 `PYTHONWARNINGS=error::ResourceWarning`를 함께 적용한 전체 unittest 1,032개 통과
+  - Python `py_compile`, `git diff --check` 통과
+- 런타임/컨테이너 재시작과 외부 push는 하지 않았다.
+- 다음 대형 함수 위험 순위는 `classify_llm_route_async` 118줄,
+  `ask_llm_once` 111줄, `answer_control_page_text` 104줄이다.
 
 - [22:59 KST] cron checkpoint: `build_guild_runtime_reset_deps` 빌더 본문을
   `evelyn_core/runtime/evelyn_core/guild_runtime_reset.py`로 이전.
@@ -677,6 +702,10 @@ Last reviewed: 2026-07-15
   - Main LLM startup warmup payload construction, SSE warmup response handling, and startup component state marking.
 - `omnivoice_request_runtime.py`
   - OmniVoice TTS request id, voice profile, request metadata, HTTP payload construction, `TtsSynthResult` construction, and clone-to-auto fallback handling with factory injection to keep tests lightweight.
+- `omnivoice_source_runtime.py`
+  - OmniVoice HTTP PCM streaming, trace callback, source lifecycle, clone fallback 실행과 turn-scope producer cleanup.
+- `local_tts_stream_runtime.py`
+  - 로컬 스피커 sentence source prefetch, 순차 재생, latency trace, 실패 기록과 leftover source cleanup.
 - `startup_audio_runtime.py`
   - Opus startup load checks and STT silence warmup orchestration with runtime dependencies injected from `main.py`.
 - `stt_task_runtime.py`

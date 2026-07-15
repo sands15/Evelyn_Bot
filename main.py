@@ -489,6 +489,10 @@ from evelyn_core.voice_timing_runtime import (
     should_log_voice_timing_from_runtime,
 )
 from evelyn_core.local_tts_playback import LocalTtsPlaybackManager
+from evelyn_core.local_tts_stream_runtime import (
+    LocalTtsStreamRuntimeDeps,
+    stream_local_tts_sentences_from_runtime,
+)
 from evelyn_core.observability_metrics import (
     ModelCallMetricsStore,
     mark_turn_stage_from_runtime,
@@ -501,9 +505,10 @@ from evelyn_core.observability_metrics import (
 )
 from evelyn_core.omnivoice_request_runtime import (
     OmniVoiceRequestRuntimeDeps,
-    build_omnivoice_tts_request_bundle_from_runtime,
-    build_omnivoice_tts_result_from_runtime,
-    run_omnivoice_tts_with_fallback_from_runtime,
+)
+from evelyn_core.omnivoice_source_runtime import (
+    OmniVoiceSourceRuntimeDeps,
+    create_omnivoice_source_from_runtime,
 )
 from evelyn_core.page_urls import (
     build_evelyn_page_url_runtime_deps,
@@ -4464,6 +4469,25 @@ def build_omnivoice_request_runtime_deps() -> OmniVoiceRequestRuntimeDeps:
     )
 
 
+def build_omnivoice_source_runtime_deps() -> OmniVoiceSourceRuntimeDeps:
+    return OmniVoiceSourceRuntimeDeps(
+        clean_tts_text=clean_tts_text,
+        merge_log_event_payload=merge_log_event_payload,
+        source_factory=OmniVoicePCMStream,
+        get_http_session=get_http_session,
+        client_timeout_factory=aiohttp.ClientTimeout,
+        omnivoice_timeout_sec=OMNIVOICE_TIMEOUT_SEC,
+        omnivoice_server_url=OMNIVOICE_SERVER_URL,
+        omnivoice_voice=OMNIVOICE_VOICE,
+        request_runtime_deps_factory=build_omnivoice_request_runtime_deps,
+        monotonic=time.monotonic,
+        log_turn_event=log_turn_event,
+        record_voice_pipeline_failure=record_voice_pipeline_failure,
+        create_turn_scoped_task=create_turn_scoped_task,
+        log=print,
+    )
+
+
 async def create_omnivoice_source(
     text: str,
     *,
@@ -4479,137 +4503,21 @@ async def create_omnivoice_source(
     turn_scope: TurnScope | None = None,
     trace_payload: dict[str, Any] | None = None,
 ) -> OmniVoicePCMStream:
-    text = clean_tts_text(text)
-    if not text:
-        raise ValueError("TTS 텍스트가 비어 있습니다.")
-
-    trace = merge_log_event_payload(
-        explicit={
-            "turn_id": turn_id,
-            "chunk_index": chunk_index,
-            "session_key": session_key,
-        },
-        extra=trace_payload,
-    )
-
-    source = OmniVoicePCMStream(
+    return await create_omnivoice_source_from_runtime(
+        text,
+        deps=build_omnivoice_source_runtime_deps(),
+        on_task_started=on_task_started,
+        on_request_start=on_request_start,
+        on_response_headers=on_response_headers,
+        on_first_byte=on_first_byte,
         on_first_frame=on_first_frame,
         on_first_packet_sent=on_first_packet_sent,
-        trace_payload=trace,
+        turn_id=turn_id,
+        chunk_index=chunk_index,
+        session_key=session_key,
+        turn_scope=turn_scope,
+        trace_payload=trace_payload,
     )
-
-    async def producer() -> None:
-        session = await get_http_session()
-        timeout = aiohttp.ClientTimeout(total=OMNIVOICE_TIMEOUT_SEC)
-        first_pcm_logged = False
-
-        if on_task_started is not None:
-            on_task_started()
-        log_turn_event("playback_task_started", **trace)
-
-        async def stream_with_voice(voice_name: str) -> TtsSynthResult:
-            request_bundle = build_omnivoice_tts_request_bundle_from_runtime(
-                text=text,
-                voice_name=voice_name,
-                deps=build_omnivoice_request_runtime_deps(),
-                turn_id=turn_id,
-                chunk_index=chunk_index,
-                session_key=session_key,
-            )
-            tts_request = request_bundle.request
-            payload = request_bundle.payload
-
-            nonlocal first_pcm_logged
-            request_started_mono = time.monotonic()
-            first_audio_ms: float | None = None
-
-            if on_request_start is not None:
-                on_request_start()
-            log_turn_event(
-                "tts_request_started",
-                **merge_log_event_payload(
-                    explicit={
-                        "request_id": tts_request.request_id,
-                        "voice": tts_request.voice,
-                        "voice_profile": tts_request.voice_profile,
-                    },
-                    extra=trace,
-                ),
-            )
-            async with session.post(
-                f"{OMNIVOICE_SERVER_URL}/v1/audio/speech",
-                json=payload,
-                timeout=timeout,
-            ) as resp:
-                if on_response_headers is not None:
-                    on_response_headers()
-                if resp.status != 200:
-                    error_text = await resp.text()
-                    return build_omnivoice_tts_result_from_runtime(
-                        tts_request,
-                        deps=build_omnivoice_request_runtime_deps(),
-                        ok=False,
-                        status_code=resp.status,
-                        latency_ms=(time.monotonic() - request_started_mono) * 1000.0,
-                        first_audio_ms=first_audio_ms,
-                        error_code="http_error",
-                        error_text=error_text,
-                    )
-
-                async for chunk in resp.content.iter_chunked(8192):
-                    if chunk:
-                        if on_first_byte is not None and not first_pcm_logged:
-                            on_first_byte()
-                        if not first_pcm_logged:
-                            first_pcm_logged = True
-                            first_audio_ms = (time.monotonic() - request_started_mono) * 1000.0
-                            log_turn_event(
-                                "tts_first_pcm_received",
-                                **merge_log_event_payload(
-                                    explicit={"request_id": tts_request.request_id, "bytes": len(chunk)},
-                                    extra=trace,
-                                ),
-                            )
-                        source.feed_pcm24_mono(chunk)
-                if not first_pcm_logged:
-                    return build_omnivoice_tts_result_from_runtime(
-                        tts_request,
-                        deps=build_omnivoice_request_runtime_deps(),
-                        ok=False,
-                        status_code=resp.status,
-                        latency_ms=(time.monotonic() - request_started_mono) * 1000.0,
-                        first_audio_ms=first_audio_ms,
-                        error_code="empty_audio",
-                        error_text="OmniVoice returned no PCM bytes.",
-                    )
-                return build_omnivoice_tts_result_from_runtime(
-                    tts_request,
-                    deps=build_omnivoice_request_runtime_deps(),
-                    ok=True,
-                    status_code=resp.status,
-                    latency_ms=(time.monotonic() - request_started_mono) * 1000.0,
-                    first_audio_ms=first_audio_ms,
-                )
-
-        try:
-            await run_omnivoice_tts_with_fallback_from_runtime(
-                primary_voice=OMNIVOICE_VOICE,
-                stream_with_voice=stream_with_voice,
-                log=print,
-            )
-        except asyncio.CancelledError:
-            record_voice_pipeline_failure("tts_producer_cancelled", "cancelled", None, **trace)
-            source.cleanup()
-            raise
-        except Exception as e:
-            record_voice_pipeline_failure("tts_request_failed", e, None, **trace)
-            source.fail(e)
-            return
-
-        source.finish()
-
-    create_turn_scoped_task(producer(), turn_scope=turn_scope)
-    return source
 
 
 # =========================================================
@@ -5248,6 +5156,29 @@ def _mark_local_tts_first_playback(
     log_voice_latency(metrics, "local_first_playback_logged", "Local speaker first playback")
 
 
+def build_local_tts_stream_runtime_deps() -> LocalTtsStreamRuntimeDeps:
+    return LocalTtsStreamRuntimeDeps(
+        playback_manager=local_tts_playback_manager,
+        attach_current_task=_attach_current_task,
+        detach_task=_detach_task,
+        tts_running_state=TurnState.TTS_RUNNING,
+        clean_tts_text=clean_tts_text,
+        strip_omnivoice_tags=strip_omnivoice_tags,
+        create_omnivoice_source=create_omnivoice_source,
+        mark_turn_stage=mark_turn_stage,
+        log_voice_latency=log_voice_latency,
+        log_turn_event=log_turn_event,
+        record_voice_pipeline_failure=record_voice_pipeline_failure,
+        tts_lock=tts_lock,
+        tts_prefetch_chunks=TTS_PREFETCH_CHUNKS,
+        create_turn_scoped_task=create_turn_scoped_task,
+        prefetch_tts_sources=prefetch_tts_sources,
+        omnivoice_timeout_sec=OMNIVOICE_TIMEOUT_SEC,
+        cleanup_prepared_tts_item=_cleanup_prepared_tts_item,
+        mark_local_tts_first_playback=_mark_local_tts_first_playback,
+    )
+
+
 async def stream_local_tts_sentences(
     sentence_queue: "asyncio.Queue[str | None]",
     *,
@@ -5256,127 +5187,14 @@ async def stream_local_tts_sentences(
     session_key: str | None = None,
     turn_scope: TurnScope | None = None,
 ) -> int:
-    if not local_tts_playback_manager.enabled:
-        return 0
-
-    task = _attach_current_task(turn_scope)
-    if turn_scope is not None:
-        turn_scope.transition(TurnState.TTS_RUNNING, reason="local_speaker_stream_tts")
-
-    def check_cancelled() -> None:
-        if turn_scope is not None:
-            turn_scope.raise_if_cancelled()
-
-    async def synthesize_source(sentence: str, chunk_index: int) -> OmniVoicePCMStream:
-        text = clean_tts_text(strip_omnivoice_tags(sentence) or sentence)
-        return await create_omnivoice_source(
-            text,
-            turn_id=turn_id,
-            chunk_index=chunk_index,
-            session_key=session_key,
-            turn_scope=turn_scope,
-            trace_payload={
-                "source_type": "LocalSpeakerOmniVoicePCMStream",
-                "output_mode": "local_speaker",
-                "delivery_mode": "llm_sentence_stream",
-            },
-            on_request_start=lambda ci=chunk_index: (
-                mark_turn_stage(metrics, "tts_request_start", event_name="local_tts_request_start", chunk_index=ci),
-                log_voice_latency(metrics, "tts_request_logged", "Local TTS request start"),
-            ),
-            on_response_headers=lambda: log_voice_latency(metrics, "tts_response_headers_logged", "Local TTS response headers"),
-            on_first_byte=lambda ci=chunk_index: (
-                mark_turn_stage(metrics, "tts_first_byte", event_name="local_tts_first_byte", chunk_index=ci),
-                log_voice_latency(metrics, "tts_first_byte_logged", "Local TTS first byte"),
-            ),
-            on_first_frame=lambda: log_voice_latency(metrics, "tts_first_frame_logged", "Local TTS first frame"),
-            on_first_packet_sent=lambda ci=chunk_index: (
-                log_voice_latency(metrics, "first_packet_sent_logged", "Local speaker first packet"),
-                log_turn_event(
-                    "local_tts_first_packet_sent",
-                    turn_id=turn_id,
-                    chunk_index=ci,
-                    session_key=session_key,
-                ),
-            ),
-        )
-
-    def record_prefetch_failure(exc: Exception) -> None:
-        record_voice_pipeline_failure(
-            "tts_request_failed",
-            exc,
-            metrics,
-            turn_id=turn_id,
-            session_key=session_key,
-            stage="local_speaker_stream_prefetch",
-        )
-
-    played_chunks = 0
-    prepared_queue: asyncio.Queue[object] | None = None
-    prefetch_task: asyncio.Task | None = None
-    try:
-        async with tts_lock:
-            prepared_queue = asyncio.Queue(maxsize=max(1, int(TTS_PREFETCH_CHUNKS)))
-            prefetch_task = create_turn_scoped_task(
-                prefetch_tts_sources(
-                    sentence_queue,
-                    prepared_queue,
-                    synthesize_source=synthesize_source,
-                    ready_timeout_sec=OMNIVOICE_TIMEOUT_SEC,
-                    check_cancelled=check_cancelled,
-                    on_failure=record_prefetch_failure,
-                ),
-                turn_scope=turn_scope,
-            )
-            while True:
-                check_cancelled()
-                item = await prepared_queue.get()
-                if item is None:
-                    break
-                if isinstance(item, Exception):
-                    raise item
-                if not isinstance(item, tuple) or len(item) < 2:
-                    continue
-                chunk_index, source = item
-                try:
-                    ok = await local_tts_playback_manager.play_source(
-                        source,
-                        cleanup_source=True,
-                        on_first_playback=lambda ci=int(chunk_index or 0): _mark_local_tts_first_playback(
-                            metrics,
-                            turn_id=turn_id,
-                            chunk_index=ci,
-                            session_key=session_key,
-                        ),
-                    )
-                except Exception as exc:
-                    record_voice_pipeline_failure(
-                        "tts_playback_failed",
-                        exc,
-                        metrics,
-                        turn_id=turn_id,
-                        session_key=session_key,
-                        stage="local_speaker_stream",
-                        chunk_index=int(chunk_index or 0),
-                    )
-                    raise
-                if ok:
-                    played_chunks += 1
-    finally:
-        if prefetch_task is not None and not prefetch_task.done():
-            prefetch_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await prefetch_task
-        if prepared_queue is not None:
-            while True:
-                try:
-                    leftover = prepared_queue.get_nowait()
-                except asyncio.QueueEmpty:
-                    break
-                _cleanup_prepared_tts_item(leftover)
-        _detach_task(turn_scope, task)
-
-    return played_chunks
+    return await stream_local_tts_sentences_from_runtime(
+        sentence_queue,
+        deps=build_local_tts_stream_runtime_deps(),
+        metrics=metrics,
+        turn_id=turn_id,
+        session_key=session_key,
+        turn_scope=turn_scope,
+    )
 
 
 def start_streaming_local_voice_delivery(
