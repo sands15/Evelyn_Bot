@@ -12,6 +12,7 @@ MAIN_PY = REPO_ROOT / "main.py"
 ROUTE_EXECUTION_PY = REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "voice_route_execution.py"
 MAIN_LLM_RUNTIME_PY = REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "main_llm_runtime.py"
 SEARCH_FOLLOWUP_RUNTIME_PY = REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "search_followup_runtime.py"
+SEARCH_ANSWER_RUNTIME_PY = REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "search_answer_runtime.py"
 CONTROL_PAGE_TOOL_RUNTIME_PY = REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "control_page_tool_runtime.py"
 CONTROL_PAGE_SEARCH_RUNTIME_PY = REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "control_page_search_runtime.py"
 FAST_PATH_POLICY_PY = REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "fast_path_policy.py"
@@ -30,6 +31,7 @@ class ControlPageSearchRouteTests(unittest.TestCase):
         cls.route_execution_py = ROUTE_EXECUTION_PY.read_text(encoding="utf-8")
         cls.main_llm_runtime_py = MAIN_LLM_RUNTIME_PY.read_text(encoding="utf-8")
         cls.search_followup_runtime_py = SEARCH_FOLLOWUP_RUNTIME_PY.read_text(encoding="utf-8")
+        cls.search_answer_runtime_py = SEARCH_ANSWER_RUNTIME_PY.read_text(encoding="utf-8")
         cls.control_page_tool_runtime_py = CONTROL_PAGE_TOOL_RUNTIME_PY.read_text(encoding="utf-8")
         cls.control_page_search_runtime_py = CONTROL_PAGE_SEARCH_RUNTIME_PY.read_text(encoding="utf-8")
         cls.fast_path_policy_py = FAST_PATH_POLICY_PY.read_text(encoding="utf-8")
@@ -52,10 +54,10 @@ class ControlPageSearchRouteTests(unittest.TestCase):
         self.assertIn("needs_search=True", self.route_execution_py)
 
     def test_search_answers_do_not_prompt_or_fallback_with_sources(self) -> None:
-        self.assertIn("strip_search_answer_sources", self.main_py)
-        self.assertIn("출처, 링크, URL, 참고자료 목록, 괄호 citation은 절대 출력하지 마라.", self.main_py)
-        self.assertNotIn("출처 1~2개를 괄호로 덧붙여라", self.main_py)
-        self.assertNotIn("({first.get('url', '')})", self.main_py)
+        self.assertIn("strip_search_answer_sources", self.search_answer_runtime_py)
+        self.assertIn("출처, 링크, URL, 참고자료 목록, 괄호 citation은 절대 출력하지 마라.", self.search_answer_runtime_py)
+        self.assertNotIn("출처 1~2개를 괄호로 덧붙여라", self.search_answer_runtime_py)
+        self.assertNotIn("({first.get('url', '')})", self.search_answer_runtime_py)
 
     def test_search_result_recurses_through_main_synthesis(self) -> None:
         search_py = (REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "skills" / "search" / "__init__.py").read_text(encoding="utf-8")

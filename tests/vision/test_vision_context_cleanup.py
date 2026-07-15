@@ -108,7 +108,7 @@ class VisionContextCleanupTests(unittest.TestCase):
         self.assertIn("vision_confidence=", vision_runtime)
         self.assertIn("vision_actionable=false", vision_runtime)
         self.assertIn("vision_actionable=", vision_runtime)
-        self.assertIn('metrics.setdefault("meta", {})["vision_quality"] = dict(quality)', source)
+        self.assertIn('metrics.setdefault("meta", {})["vision_quality"] = dict(quality)', vision_runtime)
 
     def test_start_env_declares_vision_cleanup_defaults(self) -> None:
         source = START_ENV.read_text(encoding="utf-8")

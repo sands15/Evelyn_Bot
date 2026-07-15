@@ -292,6 +292,37 @@ Last reviewed: 2026-07-15
 - 런타임/컨테이너 재시작과 외부 push는 하지 않았다.
 - 다음 후보는 `build_live_vision_context` 55줄, `answer_from_search_results` 53줄,
   `ask_llm_streaming` 52줄과 dependency builder composition root 정리다.
+- 스물네 번째 배치에서 55줄 `build_live_vision_context`를 분리했다.
+  - 확장 모듈/계약: `vision_runtime.py`, `LiveVisionContextRuntimeDeps`
+  - 이동 책임: capture disabled/error/black-frame 처리, vision HTTP 분석, 요청 이미지 삭제,
+    관찰 포맷과 quality/latency/문자 수 metrics 기록.
+  - 새 테스트 5개: disabled, black frame, 분석 실패 삭제, 정상 metrics/payload, main 위임.
+- 스물다섯 번째 배치에서 53줄 `answer_from_search_results`를 분리했다.
+  - 새 모듈/계약: `search_answer_runtime.py`, `SearchAnswerRuntimeDeps`
+  - 이동 책임: 검색 결과 prompt/payload, HTTP 오류, model answer sanitize/source 제거,
+    empty choices/answer의 첫 snippet fallback.
+  - 새 테스트 5개: empty results, 정상 request, HTTP 오류, fallback/source 제거, main 위임.
+- 스물여섯 번째 배치에서 52줄 `ask_llm_streaming` 진입 경계를 분리했다.
+  - 새 모듈/계약: `voice_turn_entry_runtime.py`, `VoiceTurnEntryRuntimeDeps`
+  - 이동 책임: `VoiceTurnRequest` 생성, orchestrator dependency 조립/실행,
+    pipeline failure 기록과 turn-scope task detach.
+  - 새 테스트 3개: request/orchestrator 실행, 실패 기록/cleanup, main 위임.
+- 스물여섯 번째 배치 뒤 정확한 누적 크기 변화:
+  - `main.py`: 8,793줄 → 7,402줄
+  - 현재 최대 함수는 `build_fast_path_policy_runtime_deps` 72줄이며,
+    최대 실행 함수는 `start_control_page_server` 47줄이다.
+- 스물네 번째~스물여섯 번째 배치 통합 검증:
+  - 새 테스트 13개, 관련 테스트 32개 통과
+  - 일반 discovery 전체 unittest 1,101개 통과(실제 `main.py` opt-in 1개 의도적 skip)
+  - 실제 `main.py` smoke와 `PYTHONWARNINGS=error::ResourceWarning`를 함께 적용한 전체 unittest 1,101개 통과
+  - Python `compileall`, `git diff --check` 통과
+- 첫 관련 테스트에서 test double turn scope의 취소 계약 누락 2개와 이전 vision 소유 위치를
+  고정한 정적 테스트 1개가 실패했고 실제 계약/새 모듈 기준으로 수정했다.
+- 첫 전체 회귀에서 검색 정책 문구 위치를 `main.py`로 고정한 정적 테스트 1개가 실패했고,
+  `search_answer_runtime.py` 기준으로 수정한 뒤 일반·엄격 전체 회귀를 처음부터 재통과했다.
+- 런타임/컨테이너 재시작과 외부 push는 하지 않았다.
+- 다음 후보는 `start_control_page_server` 47줄, `observe_live_minecraft_state` 45줄,
+  `get_control_page_minecraft_snapshot` 44줄과 dependency builder composition root 정리다.
 
 - [22:59 KST] cron checkpoint: `build_guild_runtime_reset_deps` 빌더 본문을
   `evelyn_core/runtime/evelyn_core/guild_runtime_reset.py`로 이전.

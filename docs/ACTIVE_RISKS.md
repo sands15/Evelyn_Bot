@@ -46,9 +46,9 @@ CI의 실제 프로세스 smoke는 `main.py`가 기동 가능한지만 확인한
 
 ## P1 — `main.py` 구조 부채
 
-음성 hot path의 실행 순서는 런타임 모듈로 이동했고 `_process_member_audio_impl`은 30줄 wrapper가 됐다. 로컬/Discord 단일 TTS, summary/router JSON HTTP, 동기 STT 변환, Discord 음성 연결까지 분리했지만 `main.py`는 여전히 7,463줄이며, 최대 함수는 `build_fast_path_policy_runtime_deps` 72줄이다. 실행 함수로는 live vision context 55줄, search answer/LLM streaming 등이 남아 있고 dependency builder도 다수다. 일부 대형 함수를 줄였다고 파일 전체 구조 위험이 해결된 상태는 아니다.
+음성 hot path의 실행 순서는 런타임 모듈로 이동했고 `_process_member_audio_impl`은 30줄 wrapper가 됐다. 로컬/Discord 단일 TTS, summary/router JSON HTTP, 동기 STT, Discord 음성 연결, live vision, 검색 요약, streaming turn 진입까지 분리했지만 `main.py`는 여전히 7,402줄이며, 최대 함수는 `build_fast_path_policy_runtime_deps` 72줄이다. 실행 함수로는 Control Page server 시작 47줄, live Minecraft 관찰 45줄 등이 남아 있고 dependency builder도 다수다. 일부 대형 함수를 줄였다고 파일 전체 구조 위험이 해결된 상태는 아니다.
 
-다음 조치: live vision context와 남은 search/LLM 실행 경계를 검토하고, 전역을 숨기는 namespace/globals 우회 없이 dependency builder 군을 기능별 composition root로 묶는다.
+다음 조치: Control Page server/state와 live Minecraft 관찰 실행 경계를 검토하고, 전역을 숨기는 namespace/globals 우회 없이 dependency builder 군을 기능별 composition root로 묶는다.
 
 ## P2 — 설정과 예외 처리의 잔여 분산
 

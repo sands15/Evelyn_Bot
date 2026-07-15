@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable
 
 
 @dataclass(frozen=True)
@@ -10,6 +10,93 @@ class VisionRuntimeDeps:
     clean_text: Callable[[str], str]
     build_vision_quality: Callable[[dict[str, Any]], dict[str, Any]]
     vision_watch_scene_is_unreliable: Callable[[str], bool]
+
+
+@dataclass(frozen=True)
+class LiveVisionContextRuntimeDeps:
+    auto_capture_enabled: bool
+    analyze_timeout_sec: float
+    service_url: str
+    capture_local_screen: Callable[[], Awaitable[tuple[Any, tuple[int, int]]]]
+    build_observation_prompt: Callable[[str], str]
+    get_http_session: Callable[[], Awaitable[Any]]
+    client_timeout_factory: Callable[..., Any]
+    delete_request_image: Callable[[Any], bool]
+    format_observation: Callable[..., str]
+    build_vision_quality: Callable[[dict[str, Any]], dict[str, Any]]
+    clean_text: Callable[[str], str]
+    monotonic: Callable[[], float]
+
+
+async def build_live_vision_context_from_runtime(
+    user_text: str,
+    *,
+    deps: LiveVisionContextRuntimeDeps,
+    metrics: dict | None = None,
+) -> str:
+    if not deps.auto_capture_enabled:
+        return "Local screen vision was requested, but automatic capture is disabled."
+    started_at = deps.monotonic()
+    try:
+        image_path, image_size = await deps.capture_local_screen()
+    except Exception as exc:
+        error = deps.clean_text(repr(exc))[:240]
+        if metrics is not None:
+            metrics.setdefault("meta", {})["vision_capture_error"] = error
+        if "black frame" in error.lower():
+            return (
+                "Local screen vision was requested, but the Windows screen capture returned a black frame. "
+                "Do not claim the screen was analyzed. Tell the user the capture itself is black and needs capture-session fixing. "
+                f"capture_error: {error}"
+            )
+        return f"Local screen vision was requested, but screen capture failed: {error}"
+
+    payload = {
+        "image_path": str(image_path),
+        "prompt": deps.build_observation_prompt(user_text),
+        "run_ocr": True,
+        "ocr_category": "plain",
+        "max_new_tokens": 128,
+    }
+    try:
+        timeout = deps.client_timeout_factory(total=deps.analyze_timeout_sec)
+        session = await deps.get_http_session()
+        async with session.post(
+            f"{deps.service_url.rstrip('/')}/v1/vision/analyze",
+            json=payload,
+            timeout=timeout,
+        ) as resp:
+            if resp.status != 200:
+                error_text = await resp.text()
+                raise RuntimeError(f"vision service {resp.status}: {error_text[:240]}")
+            data = await resp.json()
+    except Exception as exc:
+        error = deps.clean_text(repr(exc))[:240]
+        deleted = deps.delete_request_image(image_path)
+        if metrics is not None:
+            metrics.setdefault("meta", {})["vision_analyze_error"] = error
+            metrics.setdefault("meta", {})["vision_capture_path"] = "" if deleted else str(image_path)
+            metrics.setdefault("meta", {})["vision_capture_deleted"] = deleted
+        if deleted:
+            return f"Local screen capture was discarded after vision analysis failed: {error}"
+        return f"Local screen capture was saved at {image_path}, but vision analysis failed: {error}"
+
+    deleted = deps.delete_request_image(image_path)
+    observation = deps.format_observation(
+        image_path=image_path,
+        image_size=image_size,
+        data=data,
+        image_deleted=deleted,
+    )
+    quality = deps.build_vision_quality(data)
+    if metrics is not None:
+        metrics.setdefault("marks", {})["vision_ready"] = (deps.monotonic() - started_at) * 1000.0
+        metrics.setdefault("meta", {})["vision_capture_path"] = "" if deleted else str(image_path)
+        metrics.setdefault("meta", {})["vision_capture_deleted"] = deleted
+        metrics.setdefault("meta", {})["vision_ocr_chars"] = len(deps.clean_text(str(data.get("ocr") or "")))
+        metrics.setdefault("meta", {})["vision_scene_chars"] = len(deps.clean_text(str(data.get("scene") or "")))
+        metrics.setdefault("meta", {})["vision_quality"] = dict(quality)
+    return observation
 
 
 def build_vision_observation_prompt_from_runtime(user_text: str, *, deps: VisionRuntimeDeps) -> str:
@@ -96,7 +183,9 @@ def vision_watch_scene_looks_bad_from_runtime(scene: str, *, deps: VisionRuntime
 
 
 __all__ = [
+    "LiveVisionContextRuntimeDeps",
     "VisionRuntimeDeps",
+    "build_live_vision_context_from_runtime",
     "build_vision_observation_prompt_from_runtime",
     "build_vision_watch_prompt_from_runtime",
     "format_vision_observation_from_runtime",

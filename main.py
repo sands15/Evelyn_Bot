@@ -142,7 +142,9 @@ from evelyn_core.vision_watch import (
 )
 from evelyn_core.vision_quality import build_vision_quality
 from evelyn_core.vision_runtime import (
+    LiveVisionContextRuntimeDeps,
     VisionRuntimeDeps,
+    build_live_vision_context_from_runtime,
     build_vision_observation_prompt_from_runtime,
     build_vision_watch_prompt_from_runtime,
     format_vision_observation_from_runtime,
@@ -266,6 +268,10 @@ from evelyn_core.search_followup_runtime import (
     run_search_followup_from_runtime,
     schedule_search_followup_from_runtime,
     schedule_search_followup_singleflight_from_runtime,
+)
+from evelyn_core.search_answer_runtime import (
+    SearchAnswerRuntimeDeps,
+    answer_from_search_results_from_runtime,
 )
 from evelyn_core.memory_context_state import build_memory_context
 from evelyn_core.startup_audio_runtime import (
@@ -777,8 +783,6 @@ from evelyn_core.voice_utterance import (
     UtteranceAssemblyConfig,
 )
 from evelyn_core.voice_orchestration import (
-    VoiceTurnOrchestrator,
-    VoiceTurnOrchestratorDeps,
     VoiceTurnRequest,
     VoiceTurnRouteContext,
     VoiceTranscriptReplyDeps,
@@ -788,6 +792,10 @@ from evelyn_core.voice_orchestration import (
     enqueue_voice_ingress_item,
     evaluate_voice_ingress_dequeue,
     process_voice_reply_from_transcript_context,
+)
+from evelyn_core.voice_turn_entry_runtime import (
+    VoiceTurnEntryRuntimeDeps,
+    ask_llm_streaming_from_runtime,
 )
 from evelyn_core.voice_reply_dispatch_runtime import (
     VoiceReplyDispatchDeps,
@@ -3175,61 +3183,29 @@ def format_vision_observation(
     )
 
 
+def build_live_vision_context_runtime_deps() -> LiveVisionContextRuntimeDeps:
+    return LiveVisionContextRuntimeDeps(
+        auto_capture_enabled=VISION_AUTO_CAPTURE_ENABLED,
+        analyze_timeout_sec=VISION_ANALYZE_TIMEOUT_SEC,
+        service_url=VISION_SERVICE_URL,
+        capture_local_screen=capture_local_screen,
+        build_observation_prompt=build_vision_observation_prompt,
+        get_http_session=get_http_session,
+        client_timeout_factory=aiohttp.ClientTimeout,
+        delete_request_image=delete_request_vision_image,
+        format_observation=format_vision_observation,
+        build_vision_quality=build_vision_quality,
+        clean_text=clean_text,
+        monotonic=time.monotonic,
+    )
+
+
 async def build_live_vision_context(user_text: str, *, metrics: dict | None = None) -> str:
-    if not VISION_AUTO_CAPTURE_ENABLED:
-        return "Local screen vision was requested, but automatic capture is disabled."
-    started_at = time.monotonic()
-    try:
-        image_path, image_size = await capture_local_screen()
-    except Exception as exc:
-        error = clean_text(repr(exc))[:240]
-        if metrics is not None:
-            metrics.setdefault("meta", {})["vision_capture_error"] = error
-        if "black frame" in error.lower():
-            return (
-                "Local screen vision was requested, but the Windows screen capture returned a black frame. "
-                "Do not claim the screen was analyzed. Tell the user the capture itself is black and needs capture-session fixing. "
-                f"capture_error: {error}"
-            )
-        return f"Local screen vision was requested, but screen capture failed: {error}"
-
-    payload = {
-        "image_path": str(image_path),
-        "prompt": build_vision_observation_prompt(user_text),
-        "run_ocr": True,
-        "ocr_category": "plain",
-        "max_new_tokens": 128,
-    }
-    try:
-        timeout = aiohttp.ClientTimeout(total=VISION_ANALYZE_TIMEOUT_SEC)
-        session = await get_http_session()
-        async with session.post(f"{VISION_SERVICE_URL.rstrip('/')}/v1/vision/analyze", json=payload, timeout=timeout) as resp:
-            if resp.status != 200:
-                error_text = await resp.text()
-                raise RuntimeError(f"vision service {resp.status}: {error_text[:240]}")
-            data = await resp.json()
-    except Exception as exc:
-        error = clean_text(repr(exc))[:240]
-        deleted = delete_request_vision_image(image_path)
-        if metrics is not None:
-            metrics.setdefault("meta", {})["vision_analyze_error"] = error
-            metrics.setdefault("meta", {})["vision_capture_path"] = "" if deleted else str(image_path)
-            metrics.setdefault("meta", {})["vision_capture_deleted"] = deleted
-        if deleted:
-            return f"Local screen capture was discarded after vision analysis failed: {error}"
-        return f"Local screen capture was saved at {image_path}, but vision analysis failed: {error}"
-
-    deleted = delete_request_vision_image(image_path)
-    observation = format_vision_observation(image_path=image_path, image_size=image_size, data=data, image_deleted=deleted)
-    quality = build_vision_quality(data)
-    if metrics is not None:
-        metrics.setdefault("marks", {})["vision_ready"] = (time.monotonic() - started_at) * 1000.0
-        metrics.setdefault("meta", {})["vision_capture_path"] = "" if deleted else str(image_path)
-        metrics.setdefault("meta", {})["vision_capture_deleted"] = deleted
-        metrics.setdefault("meta", {})["vision_ocr_chars"] = len(clean_text(str(data.get("ocr") or "")))
-        metrics.setdefault("meta", {})["vision_scene_chars"] = len(clean_text(str(data.get("scene") or "")))
-        metrics.setdefault("meta", {})["vision_quality"] = dict(quality)
-    return observation
+    return await build_live_vision_context_from_runtime(
+        user_text,
+        deps=build_live_vision_context_runtime_deps(),
+        metrics=metrics,
+    )
 
 
 def build_vision_watch_prompt() -> str:
@@ -3771,59 +3747,27 @@ async def search_duckduckgo(query: str, *, limit: int = 5) -> list[dict]:
     return [result.to_dict() for result in await search_duckduckgo_payload(query, limit=limit)]
 
 
+def build_search_answer_runtime_deps() -> SearchAnswerRuntimeDeps:
+    return SearchAnswerRuntimeDeps(
+        model_name=MODEL_NAME,
+        llm_server_url=LLM_SERVER_URL,
+        chat_content_format=MAIN_LLM_CHAT_CONTENT_FORMAT,
+        stop_tokens=MAIN_LLM_STOP_TOKENS,
+        get_http_session=get_http_session,
+        build_chat_messages=build_chat_messages,
+        client_timeout_factory=aiohttp.ClientTimeout,
+        clean_text=clean_text,
+        sanitize_model_output=sanitize_model_output,
+        strip_search_answer_sources=strip_search_answer_sources,
+    )
+
+
 async def answer_from_search_results(query: str, results: list[dict]) -> str:
-    if not results:
-        return "찾아봤는데 지금 바로 쓸 만한 결과를 못 찾았어. 검색어를 조금 더 구체적으로 말해주면 다시 찾아볼게."
-
-    session = await get_http_session()
-    payload = {
-        "model": MODEL_NAME,
-        "messages": build_chat_messages([
-            {
-                "role": "system",
-                "content": (
-                    "너는 검색 결과를 짧게 정리하는 비서다. 검색은 이미 끝났다. "
-                    "'찾아볼게', '찾는 중', '확인해볼게' 같은 표현은 절대 쓰지 마라. "
-                    "찾은 내용만 한국어로 바로 말해라. 출처, 링크, URL, 참고자료 목록, 괄호 citation은 절대 출력하지 마라."
-                ),
-            },
-            {
-                "role": "user",
-                "content": (
-                    f"사용자 질문:\n{query}\n\n"
-                    + "검색 결과:\n"
-                    + "\n".join(
-                        f"- {clean_text(row.get('title', ''))} | {clean_text(row.get('snippet', ''))}"
-                        for row in results[:5]
-                    )
-                ),
-            },
-        ], content_format=MAIN_LLM_CHAT_CONTENT_FORMAT),
-        "temperature": 0.1,
-        "max_tokens": 220,
-        "stream": False,
-        "cache_prompt": True,
-        "stop": list(MAIN_LLM_STOP_TOKENS),
-    }
-
-    async with session.post(LLM_SERVER_URL, json=payload, timeout=aiohttp.ClientTimeout(total=45)) as resp:
-        if resp.status != 200:
-            error_text = await resp.text()
-            raise RuntimeError(f"검색 정리 LLM 오류: {resp.status} / {error_text[:300]}")
-        data = await resp.json()
-
-    choices = data.get("choices", [])
-    if not choices:
-        first = results[0]
-        return strip_search_answer_sources(f"찾아보니까 {first.get('snippet', '')}")
-
-    message = choices[0].get("message", {})
-    answer = sanitize_model_output(message.get("content", ""))
-    if answer:
-        return strip_search_answer_sources(answer)
-
-    first = results[0]
-    return strip_search_answer_sources(f"찾아보니까 {first.get('snippet', '')}")
+    return await answer_from_search_results_from_runtime(
+        query,
+        results,
+        deps=build_search_answer_runtime_deps(),
+    )
 
 
 def record_search_followup_queued() -> None:
@@ -6474,6 +6418,23 @@ async def execute_main_llm_streaming_turn(
         on_first_chunk=on_first_chunk,
     )
 
+
+def build_voice_turn_entry_runtime_deps() -> VoiceTurnEntryRuntimeDeps:
+    return VoiceTurnEntryRuntimeDeps(
+        attach_current_task=_attach_current_task,
+        detach_task=_detach_task,
+        prepare_route_context=prepare_route_context,
+        maybe_handle_short_circuit_route=maybe_handle_short_circuit_route,
+        maybe_execute_registered_route=maybe_execute_registered_route,
+        run_main_llm_turn=execute_main_llm_streaming_turn,
+        emit_delivery_plan_chunks=emit_delivery_plan_chunks,
+        build_answer_payload_from_text=build_answer_payload_from_text,
+        build_delivery_plan=build_delivery_plan,
+        split_tts_sentences=split_tts_sentences,
+        record_voice_pipeline_failure=record_voice_pipeline_failure,
+    )
+
+
 async def ask_llm_streaming(
     user_text: str,
     guild_id: int | None = None,
@@ -6489,43 +6450,21 @@ async def ask_llm_streaming(
     metrics: dict | None = None,
     turn_scope: TurnScope | None = None,
 ) -> str:
-    global inflight_llm_requests
-    task = _attach_current_task(turn_scope)
-    try:
-        request = VoiceTurnRequest(
-            user_text=user_text,
-            guild_id=guild_id,
-            session_key=session_key,
-            room_key=room_key,
-            person_key=person_key,
-            session_memory_key=session_memory_key,
-            source=source,
-            debug_text=debug_text,
-            metrics=metrics,
-            turn_scope=turn_scope,
-            on_sentence=on_sentence,
-            on_first_chunk=on_first_chunk,
-        )
-        orchestrator = VoiceTurnOrchestrator(
-            VoiceTurnOrchestratorDeps(
-                prepare_route_context=prepare_route_context,
-                maybe_handle_short_circuit_route=maybe_handle_short_circuit_route,
-                maybe_execute_registered_route=maybe_execute_registered_route,
-                run_main_llm_turn=execute_main_llm_streaming_turn,
-                emit_delivery_plan_chunks=emit_delivery_plan_chunks,
-                build_answer_payload_from_text=build_answer_payload_from_text,
-                build_delivery_plan=build_delivery_plan,
-                split_tts_sentences=split_tts_sentences,
-            )
-        )
-        result = await orchestrator.execute(request)
-        return result.answer_text
-
-    except Exception as exc:
-        record_voice_pipeline_failure("llm_failed", exc, metrics, stage="ask_llm_streaming")
-        raise
-    finally:
-        _detach_task(turn_scope, task)
+    return await ask_llm_streaming_from_runtime(
+        user_text,
+        deps=build_voice_turn_entry_runtime_deps(),
+        guild_id=guild_id,
+        on_sentence=on_sentence,
+        on_first_chunk=on_first_chunk,
+        session_key=session_key,
+        room_key=room_key,
+        person_key=person_key,
+        session_memory_key=session_memory_key,
+        source=source,
+        debug_text=debug_text,
+        metrics=metrics,
+        turn_scope=turn_scope,
+    )
 
 
 def start_streaming_voice_delivery(
