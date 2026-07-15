@@ -107,7 +107,6 @@ from evelyn_core.minecraft_runtime_snapshot import (
 from evelyn_core.minecraft_live_state_runtime import (
     ControlPageMinecraftLiveSnapshotRuntimeDeps,
     MinecraftLiveObservationRuntimeDeps,
-    get_control_page_minecraft_snapshot_from_runtime,
     observe_live_minecraft_state_from_runtime,
 )
 from evelyn_core.question_shaping import (
@@ -288,9 +287,6 @@ from evelyn_core.startup_audio_runtime import (
 )
 from evelyn_core.startup_component_state import (
     STARTUP_BOOT_STEPS,
-    StartupComponentRuntimeDeps,
-    mark_startup_component_from_runtime,
-    startup_component_done_from_runtime,
 )
 from evelyn_core.stt_task_runtime import run_blocking_stt_task_from_runtime
 from evelyn_core.stt_transcription_runtime import (
@@ -595,18 +591,17 @@ from evelyn_core.stt_model_runtime import (
 )
 from evelyn_core.control_page_contracts import memory_panel_reply
 from evelyn_core.control_page_http import (
-    add_control_page_no_store_headers,
-    build_control_page_health_payload,
     control_page_cors_middleware,
-    control_page_file_response,
-    control_page_json_response,
-    control_page_session_handler,
-    resolve_control_page_asset_path,
 )
 from evelyn_core.control_page_server import open_path_with_system, open_url_with_system
 from evelyn_core.control_page_server_start_runtime import (
     ControlPageServerStartRuntimeDeps,
-    start_control_page_server_from_runtime,
+)
+from evelyn_core.control_page_composition_runtime import (
+    ControlPageComposition,
+    ControlPageCompositionDeps,
+    ControlPageHttpComposition,
+    ControlPageHttpCompositionDeps,
 )
 from evelyn_core.control_page_state import (
     ControlPageChatLogStore,
@@ -614,7 +609,6 @@ from evelyn_core.control_page_state import (
     ControlPageRuntimeServicesCache,
     ControlPageUiCommandStore,
     build_control_page_autonomy_reply_payload,
-    build_control_page_boot_progress_payload,
     build_control_page_inventory_reply_payload,
     build_control_page_local_status_text_payload,
     build_control_page_minecraft_reply_payload,
@@ -623,104 +617,54 @@ from evelyn_core.control_page_state import (
     build_control_page_voice_continuity_reply_payload,
     build_control_page_voice_status_reply_payload,
     command_status,
-    control_page_open_memory_vault_result,
     control_page_open_memory_vault_tool_reply,
-    control_page_result_status,
     execute_control_page_memory_tool,
     execute_control_page_minecraft_tool,
     execute_control_page_runtime_tool,
     execute_control_page_voice_tool,
-    handle_control_page_chat_request,
-    handle_control_page_memory_note_action_request,
-    handle_control_page_shutdown_request,
     memory_vault_obsidian_url,
-    parse_control_page_guild_id,
-    parse_control_page_memory_graph_query,
-    parse_control_page_memory_note_query,
-    parse_control_page_memory_snapshot_query,
     sanitize_control_page_welcome_text_payload,
 )
 from evelyn_core.control_page_guild_runtime import (
     ControlPageGuildSelectionRuntimeDeps,
-    current_tts_target_name_from_runtime,
-    resolve_guild_member_name_from_runtime,
-    select_control_page_guild_from_runtime,
 )
 from evelyn_core.control_page_state_handler import ControlPageStateDeps, build_control_page_state_from_runtime
 from evelyn_core.control_page_runtime_probe import probe_control_page_runtime_services
 from evelyn_core.control_page_minecraft_snapshot_runtime import (
     ControlPageBackgroundTasksRuntimeDeps,
     ControlPageMinecraftSnapshotRuntimeDeps,
-    ensure_control_page_background_tasks_started_from_runtime,
-    ensure_control_page_minecraft_snapshot_from_runtime,
-    safe_get_control_page_minecraft_snapshot_from_runtime,
-    get_control_page_minecraft_snapshot_cache_copy_from_runtime,
-    stop_control_page_background_tasks_from_runtime,
 )
 from evelyn_core.control_page_runtime_services_runtime import (
     ControlPageRuntimeServicesRuntimeDeps,
     ControlPageRuntimeServicesProbeDeps,
     probe_control_page_runtime_services_once_from_runtime,
-    get_control_page_runtime_services_from_runtime,
 )
 from evelyn_core.control_page_status_runtime import (
     ControlPageStatusRuntimeDeps,
-    build_control_page_autonomy_reply_from_runtime,
-    build_control_page_inventory_reply_from_runtime,
-    build_control_page_minecraft_reply_from_runtime,
-    build_control_page_status_reply_from_runtime,
-    build_control_page_local_status_text_from_runtime,
-    build_control_page_status_text_from_runtime,
-    build_control_page_voice_continuity_reply_from_runtime,
-    build_control_page_voice_status_reply_from_runtime,
 )
 from evelyn_core.control_page_search_runtime import (
     ControlPageSearchRuntimeDeps,
-    answer_control_page_search_text_from_runtime,
 )
 from evelyn_core.control_page_text_runtime import (
     ControlPageTextRuntimeDeps,
-    answer_control_page_text_from_runtime,
 )
 from evelyn_core.control_page_tool_runtime import (
     ControlPageInputRuntimeDeps,
     ControlPageToolRuntimeDeps,
-    decide_control_page_tool_call_from_runtime,
-    execute_control_page_tool_from_runtime,
-    execute_control_page_memory_panel_action_from_runtime,
-    execute_control_page_restart_command_from_runtime,
-    handle_control_page_input_from_runtime,
-    recent_control_page_history_for_router_from_runtime,
-    remember_control_page_tool_turn_from_runtime,
 )
 from evelyn_core.control_page_ui_runtime import (
     ControlPageUiRuntimeDeps,
     ControlPageWelcomeRuntimeDeps,
-    append_control_page_chat_log_from_runtime,
-    build_control_page_panel_state_from_runtime,
-    control_page_effective_guild_id_from_runtime,
-    control_page_effective_guild_name_from_runtime,
-    control_page_local_url_from_runtime,
-    control_page_session_key_from_runtime,
-    enqueue_control_page_ui_command_from_runtime,
-    get_control_page_chat_log_from_runtime,
-    generate_control_page_welcome_text_from_runtime,
-    sanitize_control_page_welcome_text_from_runtime,
 )
 from evelyn_core.control_page_tools import (
-    CONTROL_PAGE_COMMANDS,
     build_control_page_all_commands,
     build_control_page_commands,
     build_control_page_help_reply,
     cheap_control_page_tool_decision,
-    control_page_tool_decision,
     control_page_tool_decision_from_llm,
     control_page_tool_policy_error,
     control_page_tool_reply_from_execution,
     control_page_tool_registry_prompt,
-    control_page_ui_tool_action_from_decision,
-    is_control_page_question_text,
-    is_explicit_control_page_restart_request,
     should_route_control_page_tool_candidate,
 )
 from evelyn_core.tts_playback import (
@@ -5306,52 +5250,6 @@ def build_control_page_ui_runtime_deps() -> ControlPageUiRuntimeDeps:
     )
 
 
-def enqueue_control_page_ui_command(action: str, *, panel_id: str | None = None) -> dict[str, Any]:
-    return enqueue_control_page_ui_command_from_runtime(
-        action,
-        panel_id=panel_id,
-        deps=build_control_page_ui_runtime_deps(),
-    )
-
-
-def build_control_page_panel_state() -> dict[str, Any]:
-    return build_control_page_panel_state_from_runtime(deps=build_control_page_ui_runtime_deps())
-
-
-def control_page_local_url() -> str:
-    return control_page_local_url_from_runtime(deps=build_control_page_ui_runtime_deps())
-
-
-def control_page_session_key(guild_id: int | None) -> str:
-    return control_page_session_key_from_runtime(guild_id, deps=build_control_page_ui_runtime_deps())
-
-
-def control_page_effective_guild_id(guild: discord.Guild | None) -> int:
-    return control_page_effective_guild_id_from_runtime(guild, deps=build_control_page_ui_runtime_deps())
-
-
-def control_page_effective_guild_name(guild: discord.Guild | None) -> str:
-    return control_page_effective_guild_name_from_runtime(guild, deps=build_control_page_ui_runtime_deps())
-
-
-def append_control_page_chat_log(guild_id: int, role: str, author: str, text: str) -> None:
-    append_control_page_chat_log_from_runtime(
-        guild_id,
-        role,
-        author,
-        text,
-        deps=build_control_page_ui_runtime_deps(),
-    )
-
-
-def get_control_page_chat_log(guild_id: int) -> list[dict[str, Any]]:
-    return get_control_page_chat_log_from_runtime(guild_id, deps=build_control_page_ui_runtime_deps())
-
-
-def sanitize_control_page_welcome_text(text: str) -> str:
-    return sanitize_control_page_welcome_text_from_runtime(text, deps=build_control_page_ui_runtime_deps())
-
-
 def build_control_page_guild_selection_runtime_deps() -> ControlPageGuildSelectionRuntimeDeps:
     return ControlPageGuildSelectionRuntimeDeps(
         get_requested_guild=lambda guild_id: bot.get_guild(int(guild_id)),
@@ -5365,7 +5263,7 @@ def build_control_page_guild_selection_runtime_deps() -> ControlPageGuildSelecti
 
 def build_control_page_welcome_runtime_deps() -> ControlPageWelcomeRuntimeDeps:
     return ControlPageWelcomeRuntimeDeps(
-        effective_guild_name=control_page_effective_guild_name,
+        effective_guild_name=control_page_composition.effective_guild_name,
         effective_guild_id=control_page_effective_guild_id,
         build_main_llm_payload=build_main_llm_payload,
         model_name=MODEL_NAME,
@@ -5379,55 +5277,13 @@ def build_control_page_welcome_runtime_deps() -> ControlPageWelcomeRuntimeDeps:
         sanitize_model_output=sanitize_model_output,
         parse_response_action_tag=parse_response_action_tag,
         extract_answer_from_reasoning=extract_answer_from_reasoning,
-        sanitize_welcome_text=sanitize_control_page_welcome_text,
+        sanitize_welcome_text=control_page_composition.sanitize_welcome_text,
         record_model_call_trace=record_model_call_trace,
         monotonic=time.monotonic,
         welcome_fallback=CONTROL_PAGE_WELCOME_FALLBACK,
         clean_text=clean_text,
         log=print,
     )
-
-
-async def generate_control_page_welcome_text(guild: discord.Guild | None) -> str:
-    return await generate_control_page_welcome_text_from_runtime(
-        guild,
-        deps=build_control_page_welcome_runtime_deps(),
-    )
-
-
-async def ensure_control_page_welcome_message(
-    guild: discord.Guild | None,
-    *,
-    runtime_services: dict[str, Any] | None = None,
-) -> None:
-    services = runtime_services or {}
-    if not bool(services.get("mainReady")):
-        return
-    guild_id = control_page_effective_guild_id(guild)
-    if get_control_page_chat_log(guild_id):
-        return
-    lock = control_page_welcome_locks.setdefault(guild_id, asyncio.Lock())
-    async with lock:
-        if get_control_page_chat_log(guild_id):
-            return
-        welcome = await generate_control_page_welcome_text(guild)
-        append_control_page_chat_log(guild_id, "assistant", "Evelyn", welcome)
-
-
-def select_control_page_guild(requested_guild_id: int | None = None) -> discord.Guild | None:
-    return select_control_page_guild_from_runtime(requested_guild_id, deps=build_control_page_guild_selection_runtime_deps())
-
-
-def resolve_guild_member_name(guild: discord.Guild | None, user_id: int | None) -> str:
-    return resolve_guild_member_name_from_runtime(
-        guild,
-        user_id,
-        deps=build_control_page_guild_selection_runtime_deps(),
-    )
-
-
-def current_tts_target_name(guild: discord.Guild | None) -> str:
-    return current_tts_target_name_from_runtime(guild, deps=build_control_page_guild_selection_runtime_deps())
 
 
 def build_control_page_minecraft_live_snapshot_runtime_deps() -> ControlPageMinecraftLiveSnapshotRuntimeDeps:
@@ -5446,25 +5302,6 @@ def build_control_page_minecraft_live_snapshot_runtime_deps() -> ControlPageMine
         now=time.time,
         stale_after_sec=CONTROL_PAGE_MINECRAFT_CACHE_REFRESH_SEC,
         expired_after_sec=CONTROL_PAGE_MINECRAFT_CACHE_MAX_STALE_SEC,
-    )
-
-
-async def get_control_page_minecraft_snapshot(guild_id: int | None) -> dict[str, Any]:
-    return await get_control_page_minecraft_snapshot_from_runtime(
-        guild_id,
-        deps=build_control_page_minecraft_live_snapshot_runtime_deps(),
-    )
-
-
-async def safe_get_control_page_minecraft_snapshot(
-    guild_id: int | None,
-    *,
-    timeout_seconds: float = 0.75,
-) -> dict[str, Any]:
-    return await safe_get_control_page_minecraft_snapshot_from_runtime(
-        guild_id,
-        timeout_seconds=timeout_seconds,
-        deps=build_control_page_minecraft_snapshot_runtime_deps(),
     )
 
 
@@ -5516,19 +5353,6 @@ def _set_control_page_runtime_services_lock(lock: asyncio.Lock) -> None:
     control_page_runtime_services_lock = lock
 
 
-async def get_control_page_runtime_services(*, force: bool = False) -> dict[str, Any]:
-    return await get_control_page_runtime_services_from_runtime(
-        deps=build_control_page_runtime_services_runtime_deps(),
-        force=force,
-    )
-
-
-def get_control_page_minecraft_snapshot_cache_copy() -> dict[str, Any]:
-    return get_control_page_minecraft_snapshot_cache_copy_from_runtime(
-        deps=build_control_page_minecraft_snapshot_runtime_deps(),
-    )
-
-
 def build_control_page_minecraft_snapshot_runtime_deps() -> ControlPageMinecraftSnapshotRuntimeDeps:
     return ControlPageMinecraftSnapshotRuntimeDeps(
         cache=control_page_minecraft_snapshot_cache,
@@ -5564,7 +5388,7 @@ def build_control_page_background_tasks_runtime_deps() -> ControlPageBackgroundT
         get_runtime_services_refresh_task=lambda: control_page_runtime_services_refresh_task,
         set_runtime_services_refresh_task=_set_control_page_runtime_services_refresh_task,
         create_task=asyncio.create_task,
-        select_control_page_guild=select_control_page_guild,
+        select_control_page_guild=control_page_composition.select_guild,
         ensure_minecraft_snapshot=ensure_control_page_minecraft_snapshot,
         sleep=asyncio.sleep,
         log=print,
@@ -5575,32 +5399,6 @@ def build_control_page_background_tasks_runtime_deps() -> ControlPageBackgroundT
 def _set_control_page_minecraft_snapshot_poll_task(task: asyncio.Task | None) -> None:
     global control_page_minecraft_snapshot_poll_task
     control_page_minecraft_snapshot_poll_task = task
-
-
-async def ensure_control_page_minecraft_snapshot(
-    guild_id: int | None,
-    *,
-    force: bool = False,
-    wait: bool = False,
-) -> dict[str, Any]:
-    return await ensure_control_page_minecraft_snapshot_from_runtime(
-        guild_id,
-        deps=build_control_page_minecraft_snapshot_runtime_deps(),
-        force=force,
-        wait=wait,
-    )
-
-
-async def ensure_control_page_background_tasks_started() -> None:
-    await ensure_control_page_background_tasks_started_from_runtime(
-        deps=build_control_page_background_tasks_runtime_deps(),
-    )
-
-
-def stop_control_page_background_tasks() -> None:
-    stop_control_page_background_tasks_from_runtime(
-        deps=build_control_page_background_tasks_runtime_deps(),
-    )
 
 
 def build_control_page_status_runtime_deps() -> ControlPageStatusRuntimeDeps:
@@ -5625,7 +5423,7 @@ def build_control_page_status_runtime_deps() -> ControlPageStatusRuntimeDeps:
         build_local_status_text_payload=build_control_page_local_status_text_payload,
         build_voice_status_reply_payload=build_control_page_voice_status_reply_payload,
         build_voice_continuity_reply_payload=build_control_page_voice_continuity_reply_payload,
-        get_control_page_minecraft_snapshot=safe_get_control_page_minecraft_snapshot,
+        get_control_page_minecraft_snapshot=control_page_composition.safe_get_minecraft_snapshot,
         build_control_page_inventory_reply_payload=build_control_page_inventory_reply_payload,
         build_control_page_minecraft_reply_payload=build_control_page_minecraft_reply_payload,
         get_autonomy_engine=autonomy_engines.get,
@@ -5634,69 +5432,10 @@ def build_control_page_status_runtime_deps() -> ControlPageStatusRuntimeDeps:
     )
 
 
-def build_control_page_status_text(guild: discord.Guild, minecraft: dict[str, Any]) -> str:
-    return build_control_page_status_text_from_runtime(
-        guild,
-        minecraft,
-        deps=build_control_page_status_runtime_deps(),
-    )
-
-
-def build_control_page_local_status_text(runtime_services: dict[str, Any] | None = None) -> str:
-    return build_control_page_local_status_text_from_runtime(
-        runtime_services,
-        deps=build_control_page_status_runtime_deps(),
-    )
-
-
-async def build_control_page_status_reply(guild: discord.Guild) -> str:
-    return await build_control_page_status_reply_from_runtime(
-        guild,
-        deps=build_control_page_status_runtime_deps(),
-    )
-
-
-def build_control_page_voice_status_reply(guild: discord.Guild | None) -> str:
-    return build_control_page_voice_status_reply_from_runtime(
-        guild,
-        deps=build_control_page_status_runtime_deps(),
-    )
-
-
-def build_control_page_voice_continuity_reply(guild: discord.Guild | None) -> str:
-    _ = guild
-    continuity = _build_voice_barge_in_continuity_snapshot()
-    return build_control_page_voice_continuity_reply_from_runtime(
-        continuity,
-        deps=build_control_page_status_runtime_deps(),
-    )
-
-
-async def build_control_page_inventory_reply(guild: discord.Guild) -> str:
-    return await build_control_page_inventory_reply_from_runtime(
-        guild,
-        deps=build_control_page_status_runtime_deps(),
-    )
-
-
-async def build_control_page_minecraft_reply(guild: discord.Guild) -> str:
-    return await build_control_page_minecraft_reply_from_runtime(
-        guild,
-        deps=build_control_page_status_runtime_deps(),
-    )
-
-
-def build_control_page_autonomy_reply(guild: discord.Guild) -> str:
-    return build_control_page_autonomy_reply_from_runtime(
-        guild,
-        deps=build_control_page_status_runtime_deps(),
-    )
-
-
 def build_control_page_tool_runtime_deps() -> ControlPageToolRuntimeDeps:
     return ControlPageToolRuntimeDeps(
         clean_text=clean_text,
-        enqueue_control_page_ui_command=enqueue_control_page_ui_command,
+        enqueue_control_page_ui_command=control_page_composition.enqueue_ui_command,
         memory_panel_reply=memory_panel_reply,
         create_task=asyncio.create_task,
         restart_bot_process=restart_bot_process,
@@ -5726,89 +5465,26 @@ def build_control_page_tool_runtime_deps() -> ControlPageToolRuntimeDeps:
         open_path=open_control_page_path_with_system,
         guild_getter_runtime={
             "get_runtime_services": get_control_page_runtime_services,
-            "build_local_status_text": build_control_page_local_status_text,
-            "build_status_reply": build_control_page_status_reply,
+            "build_local_status_text": control_page_composition.build_local_status_text,
+            "build_status_reply": control_page_composition.build_status_reply,
             "schedule_local_shutdown": schedule_evelyn_local_shutdown,
             "schedule_stack_shutdown": schedule_evelyn_stack_shutdown,
             "schedule_bot_shutdown": lambda: asyncio.create_task(shutdown_bot_process()),
-            "build_autonomy_reply": build_control_page_autonomy_reply,
-            "build_voice_status_reply": build_control_page_voice_status_reply,
+            "build_autonomy_reply": control_page_composition.build_autonomy_reply,
+            "build_voice_status_reply": control_page_composition.build_voice_status_reply,
             "set_input_mode": set_voice_input_mode,
             "input_mode_status_line": voice_input_mode_status_line,
             "restore_voice_channel": restore_last_voice_channel,
-            "build_voice_continuity_reply": build_control_page_voice_continuity_reply,
+            "build_voice_continuity_reply": control_page_composition.build_voice_continuity_reply,
             "reset_continuity_probe": reset_voice_barge_in_continuity_probe,
-            "build_inventory_reply": build_control_page_inventory_reply,
-            "build_minecraft_reply": build_control_page_minecraft_reply,
+            "build_inventory_reply": control_page_composition.build_inventory_reply,
+            "build_minecraft_reply": control_page_composition.build_minecraft_reply,
             "enable_mode": enable_minecraft_mode,
             "disable_mode": disable_minecraft_mode,
             "get_client": get_minecraft_client,
             "format_position": format_position_short,
         },
     )
-
-
-def execute_control_page_memory_panel_action(action: str) -> str:
-    return execute_control_page_memory_panel_action_from_runtime(
-        action,
-        deps=build_control_page_tool_runtime_deps(),
-    )
-
-
-def execute_control_page_restart_command() -> str:
-    return execute_control_page_restart_command_from_runtime(deps=build_control_page_tool_runtime_deps())
-
-
-def recent_control_page_history_for_router(*, session_key: str, guild_id: int | None, limit: int = 6) -> str:
-    return recent_control_page_history_for_router_from_runtime(
-        session_key=session_key,
-        guild_id=guild_id,
-        limit=limit,
-        deps=build_control_page_tool_runtime_deps(),
-    )
-
-
-def remember_control_page_tool_turn(
-    guild: discord.Guild | None,
-    user_text: str,
-    reply_text: str,
-    decision: dict[str, Any],
-) -> None:
-    remember_control_page_tool_turn_from_runtime(
-        guild,
-        user_text,
-        reply_text,
-        decision,
-        deps=build_control_page_tool_runtime_deps(),
-    )
-
-
-async def decide_control_page_tool_call(text: str, *, guild_id: int | None, session_key: str) -> dict[str, Any] | None:
-    return await decide_control_page_tool_call_from_runtime(
-        text,
-        guild_id=guild_id,
-        session_key=session_key,
-        deps=build_control_page_tool_runtime_deps(),
-    )
-
-
-async def decide_control_page_ui_tool_call(text: str, *, guild_id: int | None, session_key: str) -> dict[str, Any] | None:
-    return await decide_control_page_tool_call(text, guild_id=guild_id, session_key=session_key)
-
-
-async def execute_control_page_tool(guild: discord.Guild | None, decision: dict[str, Any]) -> str:
-    return await execute_control_page_tool_from_runtime(
-        guild,
-        decision,
-        deps=build_control_page_tool_runtime_deps(),
-    )
-
-
-async def execute_control_page_command(guild: discord.Guild | None, text: str) -> str:
-    decision = cheap_control_page_tool_decision(text)
-    if decision is not None:
-        return await execute_control_page_tool(guild, decision)
-    return "지원하지 않는 명령어야. /help 로 현재 페이지 명령어를 확인해줘."
 
 
 def build_control_page_search_runtime_deps() -> ControlPageSearchRuntimeDeps:
@@ -5830,14 +5506,6 @@ def build_control_page_search_runtime_deps() -> ControlPageSearchRuntimeDeps:
         current_turn_id=current_turn_id,
         format_display_text=format_display_text,
         fallback_answer_for=fallback_answer_for,
-    )
-
-
-async def answer_control_page_search_text(guild: discord.Guild | None, user_text: str) -> str:
-    return await answer_control_page_search_text_from_runtime(
-        guild,
-        user_text,
-        deps=build_control_page_search_runtime_deps(),
     )
 
 
@@ -5867,79 +5535,22 @@ def build_control_page_text_runtime_deps() -> ControlPageTextRuntimeDeps:
     )
 
 
-async def answer_control_page_text(guild: discord.Guild | None, user_text: str) -> str:
-    return await answer_control_page_text_from_runtime(
-        guild,
-        user_text,
-        deps=build_control_page_text_runtime_deps(),
-    )
-
-
 def build_control_page_input_runtime_deps() -> ControlPageInputRuntimeDeps:
     return ControlPageInputRuntimeDeps(
         clean_text=clean_text,
         control_page_effective_guild_id=control_page_effective_guild_id,
         control_page_session_key=control_page_session_key,
         cheap_control_page_tool_decision=cheap_control_page_tool_decision,
-        execute_control_page_tool=execute_control_page_tool,
-        remember_control_page_tool_turn=remember_control_page_tool_turn,
+        execute_control_page_tool=control_page_composition.execute_tool,
+        remember_control_page_tool_turn=control_page_composition.remember_tool_turn,
         should_route_control_page_tool_candidate=should_route_control_page_tool_candidate,
-        decide_control_page_tool_call=decide_control_page_tool_call,
+        decide_control_page_tool_call=control_page_composition.decide_tool_call,
         control_page_tool_decision_from_llm=control_page_tool_decision_from_llm,
         control_page_tool_policy_error=control_page_tool_policy_error,
         control_page_tool_reply_from_execution=control_page_tool_reply_from_execution,
         should_force_search_query=should_force_search_query,
-        answer_control_page_search_text=answer_control_page_search_text,
-        answer_control_page_text=answer_control_page_text,
-    )
-
-
-async def handle_control_page_input(guild: discord.Guild | None, text: str) -> str:
-    return await handle_control_page_input_from_runtime(
-        guild,
-        text,
-        deps=build_control_page_input_runtime_deps(),
-    )
-
-
-def mark_startup_component(key: str, status: str, detail: str = "") -> None:
-    mark_startup_component_from_runtime(
-        key,
-        status,
-        detail,
-        deps=StartupComponentRuntimeDeps(
-            startup_component_state=startup_component_state,
-            now=time.time,
-        ),
-    )
-
-
-def startup_component_done(key: str) -> bool:
-    return startup_component_done_from_runtime(
-        key,
-        deps=StartupComponentRuntimeDeps(
-            startup_component_state=startup_component_state,
-            now=time.time,
-        ),
-    )
-
-
-def build_control_page_boot_progress(
-    runtime_services: dict[str, Any] | None,
-    *,
-    guild_available: bool,
-    listening: bool = False,
-) -> dict[str, Any]:
-    return build_control_page_boot_progress_payload(
-        runtime_services,
-        startup_steps=STARTUP_BOOT_STEPS,
-        startup_component_state=startup_component_state,
-        startup_components_ready=startup_components_ready,
-        discord_enabled=DISCORD_ENABLED,
-        discord_ready=bot.is_ready(),
-        guild_available=guild_available,
-        control_api_available=control_page_runner is not None,
-        listening=listening,
+        answer_control_page_search_text=control_page_composition.answer_search_text,
+        answer_control_page_text=control_page_composition.answer_text,
     )
 
 
@@ -5954,16 +5565,16 @@ async def build_control_page_state(guild: discord.Guild | None) -> dict[str, Any
             local_only_mode=LOCAL_ONLY_MODE,
             local_control_guild_id=LOCAL_CONTROL_GUILD_ID,
             local_control_guild_name=LOCAL_CONTROL_GUILD_NAME,
-            ensure_welcome_message=ensure_control_page_welcome_message,
+            ensure_welcome_message=control_page_composition.ensure_welcome_message,
             build_commands=build_control_page_commands,
             build_all_commands=build_control_page_all_commands,
-            build_boot_progress=build_control_page_boot_progress,
+            build_boot_progress=control_page_composition.build_boot_progress,
             local_tts_snapshot=local_tts_playback_manager.snapshot,
             serialize_local_mic_state=serialize_local_mic_runtime_state,
             read_vision_watch_state=read_vision_watch_state,
-            build_panel_state=build_control_page_panel_state,
+            build_panel_state=control_page_composition.build_panel_state,
             local_url=control_page_local_url,
-            get_chat_log=get_control_page_chat_log,
+            get_chat_log=control_page_composition.get_chat_log,
             build_voice_pipeline_snapshot=build_voice_pipeline_snapshot,
             main_model=MODEL_NAME,
             router_model=ROUTER_MODEL_NAME,
@@ -5974,10 +5585,10 @@ async def build_control_page_state(guild: discord.Guild | None) -> dict[str, Any
             local_tts_enabled=lambda: local_tts_playback_manager.enabled,
             summarize_model_call_metrics=summarize_model_call_metrics,
             summarize_question_metrics=summarize_question_metrics,
-            build_local_status_text=build_control_page_local_status_text,
+            build_local_status_text=control_page_composition.build_local_status_text,
             ensure_minecraft_snapshot=ensure_control_page_minecraft_snapshot,
             minecraft_snapshot_has_value=control_page_minecraft_snapshot_cache.has_snapshot,
-            minecraft_snapshot_copy=get_control_page_minecraft_snapshot_cache_copy,
+            minecraft_snapshot_copy=control_page_composition.get_minecraft_snapshot_cache_copy,
             is_tts_active=lambda guild_id: is_tracked_tts_playback_active(tts_playback_tracker, guild_id),
             current_tts_target_name=current_tts_target_name,
             serialize_local_mic_target=serialize_local_mic_target,
@@ -5985,129 +5596,13 @@ async def build_control_page_state(guild: discord.Guild | None) -> dict[str, Any
             guilds=bot.guilds,
             local_mic_discord_user_ids=LOCAL_MIC_DISCORD_USER_IDS,
             voice_debug_audio=VOICE_DEBUG_SAVE_AUDIO,
-            build_status_text=build_control_page_status_text,
+            build_status_text=control_page_composition.build_status_text,
         ),
-    )
-
-
-async def control_page_index_handler(_: web.Request) -> web.StreamResponse:
-    return control_page_file_response(
-        CONTROL_PAGE_DOCS_DIR / "index.html",
-        not_found_text="control page index not found",
-    )
-
-
-async def control_page_asset_handler(request: web.Request) -> web.StreamResponse:
-    return control_page_file_response(
-        resolve_control_page_asset_path(CONTROL_PAGE_ASSETS_DIR, request.match_info.get("asset_path", "")),
-        not_found_text="asset not found",
-    )
-
-
-async def control_page_minecraft_item_icon_handler(request: web.Request) -> web.StreamResponse:
-    item_name = normalize_minecraft_item_name(request.match_info.get("item_name", ""))
-    if not item_name:
-        raise web.HTTPNotFound(text="item icon not found")
-    icon_bytes = control_page_minecraft_item_icon_loader.load_icon(item_name)
-    if not icon_bytes:
-        raise web.HTTPNotFound(text="item icon not found")
-    response = web.Response(body=icon_bytes, content_type="image/png")
-    return add_control_page_no_store_headers(response)
-
-
-async def control_page_state_handler(request: web.Request) -> web.StreamResponse:
-    guild = select_control_page_guild(parse_control_page_guild_id(request.query.get("guildId")))
-    return control_page_json_response(await build_control_page_state(guild))
-
-
-async def control_page_chat_handler(request: web.Request) -> web.StreamResponse:
-    try:
-        payload = await request.json()
-    except Exception:
-        return control_page_json_response({"ok": False, "error": "invalid_json"}, status=400)
-    response_payload, status = await handle_control_page_chat_request(
-        payload,
-        discord_enabled=DISCORD_ENABLED,
-        select_guild=select_control_page_guild,
-        effective_guild_id=control_page_effective_guild_id,
-        append_chat_log=append_control_page_chat_log,
-        handle_input=handle_control_page_input,
-        ensure_minecraft_snapshot=ensure_control_page_minecraft_snapshot,
-        refresh_runtime_services=get_control_page_runtime_services,
-        build_state=build_control_page_state,
-    )
-    return control_page_json_response(response_payload, status=status)
-
-
-async def control_page_memory_graph_handler(request: web.Request) -> web.StreamResponse:
-    params = parse_control_page_memory_graph_query(request.query)
-    return control_page_json_response(export_memory_graph(**params))
-
-
-async def control_page_memory_snapshot_handler(request: web.Request) -> web.StreamResponse:
-    return control_page_json_response(memory_vault_user_snapshot(**parse_control_page_memory_snapshot_query(request.query)))
-
-
-async def control_page_memory_note_handler(request: web.Request) -> web.StreamResponse:
-    note_id = request.match_info.get("note_id", "")
-    result = memory_vault_user_note(note_id, **parse_control_page_memory_note_query(request.query))
-    return control_page_json_response(result, status=control_page_result_status(result))
-
-
-async def control_page_memory_note_action_handler(request: web.Request) -> web.StreamResponse:
-    note_id = request.match_info.get("note_id", "")
-    try:
-        payload = await request.json()
-    except Exception:
-        payload = {}
-    result, status = handle_control_page_memory_note_action_request(
-        note_id,
-        payload,
-        update_note=update_memory_vault_user_note,
-    )
-    return control_page_json_response(result, status=status)
-
-
-async def control_page_shutdown_handler(request: web.Request) -> web.StreamResponse:
-    response_payload, status = await handle_control_page_shutdown_request(
-        request.query.get("guildId"),
-        select_guild=select_control_page_guild,
-        handle_input=handle_control_page_input,
-        build_state=build_control_page_state,
-    )
-    return control_page_json_response(response_payload, status=status)
-
-
-async def control_page_health_handler(_: web.Request) -> web.StreamResponse:
-    return control_page_json_response(
-        build_control_page_health_payload(
-            local_only_mode=LOCAL_ONLY_MODE,
-            discord_enabled=DISCORD_ENABLED,
-            port=CONTROL_PAGE_PORT,
-        )
     )
 
 
 open_control_page_path_with_system = open_path_with_system
 open_control_page_url_with_system = open_url_with_system
-
-
-async def control_page_open_memory_vault_handler(request: web.Request) -> web.StreamResponse:
-    _ = request
-    vault = ensure_memory_vault_layout()
-    obsidian_url = memory_vault_obsidian_url(vault)
-    payload, status = control_page_open_memory_vault_result(
-        vault_path=vault,
-        obsidian_url=obsidian_url,
-        open_url=open_control_page_url_with_system,
-        open_path=open_control_page_path_with_system,
-    )
-    return control_page_json_response(payload, status=status)
-
-
-async def control_page_open_memory_vault_options_handler(request: web.Request) -> web.StreamResponse:
-    _ = request
-    return control_page_json_response({"ok": True, "methods": ["POST", "OPTIONS"]})
 
 
 def _set_control_page_runner(runner: web.AppRunner) -> None:
@@ -6126,33 +5621,63 @@ def _set_control_page_start_lock(lock: asyncio.Lock) -> None:
 
 
 def build_control_page_server_start_runtime_deps() -> ControlPageServerStartRuntimeDeps:
-    return ControlPageServerStartRuntimeDeps(
-        enabled=CONTROL_PAGE_ENABLED,
+    return control_page_http_composition.build_server_start_deps()
+
+
+control_page_composition = ControlPageComposition(
+    ControlPageCompositionDeps(
+        ui=lambda: build_control_page_ui_runtime_deps(),
+        guild_selection=lambda: build_control_page_guild_selection_runtime_deps(),
+        welcome=lambda: build_control_page_welcome_runtime_deps(),
+        minecraft_live_snapshot=lambda: build_control_page_minecraft_live_snapshot_runtime_deps(),
+        minecraft_snapshot=lambda: build_control_page_minecraft_snapshot_runtime_deps(),
+        background_tasks=lambda: build_control_page_background_tasks_runtime_deps(),
+        runtime_services=lambda: build_control_page_runtime_services_runtime_deps(),
+        status=lambda: build_control_page_status_runtime_deps(),
+        tool=lambda: build_control_page_tool_runtime_deps(),
+        search=lambda: build_control_page_search_runtime_deps(),
+        text=lambda: build_control_page_text_runtime_deps(),
+        input=lambda: build_control_page_input_runtime_deps(),
+        server_start=lambda: build_control_page_server_start_runtime_deps(),
+        build_voice_continuity_snapshot=_build_voice_barge_in_continuity_snapshot,
+        cheap_tool_decision=cheap_control_page_tool_decision,
+        welcome_locks=control_page_welcome_locks,
+        startup_component_state=startup_component_state,
+        startup_steps=STARTUP_BOOT_STEPS,
+        startup_components_ready=startup_components_ready,
+        discord_enabled=DISCORD_ENABLED,
+        discord_ready=bot.is_ready,
+        control_api_available=lambda: control_page_runner is not None,
+        now=time.time,
+    )
+)
+control_page_http_composition = ControlPageHttpComposition(
+    ControlPageHttpCompositionDeps(
         docs_dir=CONTROL_PAGE_DOCS_DIR,
-        host=CONTROL_PAGE_HOST,
+        assets_dir=CONTROL_PAGE_ASSETS_DIR,
+        minecraft_item_icon_loader=control_page_minecraft_item_icon_loader,
+        normalize_minecraft_item_name=normalize_minecraft_item_name,
+        select_guild=control_page_composition.select_guild,
+        build_state=build_control_page_state,
+        discord_enabled=DISCORD_ENABLED,
+        effective_guild_id=control_page_composition.effective_guild_id,
+        append_chat_log=control_page_composition.append_chat_log,
+        handle_input=control_page_composition.handle_input,
+        ensure_minecraft_snapshot=control_page_composition.ensure_minecraft_snapshot,
+        refresh_runtime_services=control_page_composition.get_runtime_services,
+        export_memory_graph=export_memory_graph,
+        memory_vault_user_snapshot=memory_vault_user_snapshot,
+        memory_vault_user_note=memory_vault_user_note,
+        update_memory_vault_user_note=update_memory_vault_user_note,
+        local_only_mode=LOCAL_ONLY_MODE,
         port=CONTROL_PAGE_PORT,
-        routes=(
-            ("GET", "/health", control_page_health_handler),
-            ("GET", "/", control_page_index_handler),
-            ("GET", "/assets/{asset_path:.*}", control_page_asset_handler),
-            ("GET", CONTROL_PAGE_MINECRAFT_ICON_ROUTE + "/{item_name}", control_page_minecraft_item_icon_handler),
-            ("GET", "/api/control-page/state", control_page_state_handler),
-            ("GET", "/api/control-page/session", control_page_session_handler),
-            ("GET", "/api/control-page/memory", control_page_memory_snapshot_handler),
-            ("GET", "/api/control-page/memory-graph", control_page_memory_graph_handler),
-            ("GET", "/api/control-page/memory/{note_id}", control_page_memory_note_handler),
-            ("POST", "/api/control-page/open-memory-vault", control_page_open_memory_vault_handler),
-            ("POST", "/api/control-page/chat", control_page_chat_handler),
-            ("POST", "/api/control-page/memory/{note_id}", control_page_memory_note_action_handler),
-            ("POST", "/api/control-page/shutdown", control_page_shutdown_handler),
-            ("OPTIONS", "/api/control-page/state", control_page_state_handler),
-            ("OPTIONS", "/api/control-page/memory", control_page_memory_snapshot_handler),
-            ("OPTIONS", "/api/control-page/memory-graph", control_page_memory_graph_handler),
-            ("OPTIONS", "/api/control-page/memory/{note_id}", control_page_memory_note_handler),
-            ("OPTIONS", "/api/control-page/open-memory-vault", control_page_open_memory_vault_options_handler),
-            ("OPTIONS", "/api/control-page/chat", control_page_chat_handler),
-            ("OPTIONS", "/api/control-page/shutdown", control_page_shutdown_handler),
-        ),
+        ensure_memory_vault_layout=ensure_memory_vault_layout,
+        memory_vault_obsidian_url=memory_vault_obsidian_url,
+        open_url=open_control_page_url_with_system,
+        open_path=open_control_page_path_with_system,
+        enabled=CONTROL_PAGE_ENABLED,
+        host=CONTROL_PAGE_HOST,
+        minecraft_icon_route=CONTROL_PAGE_MINECRAFT_ICON_ROUTE,
         middleware=control_page_cors_middleware,
         get_runner=lambda: control_page_runner,
         set_runner=_set_control_page_runner,
@@ -6163,16 +5688,25 @@ def build_control_page_server_start_runtime_deps() -> ControlPageServerStartRunt
         application_factory=web.Application,
         app_runner_factory=web.AppRunner,
         tcp_site_factory=web.TCPSite,
-        mark_startup_component=mark_startup_component,
-        local_url=control_page_local_url,
+        mark_startup_component=control_page_composition.mark_startup_component,
+        local_url=control_page_composition.local_url,
         log=print,
     )
+)
 
-
-async def start_control_page_server() -> None:
-    await start_control_page_server_from_runtime(
-        deps=build_control_page_server_start_runtime_deps(),
-    )
+control_page_local_url = control_page_composition.local_url
+control_page_session_key = control_page_composition.session_key
+control_page_effective_guild_id = control_page_composition.effective_guild_id
+current_tts_target_name = control_page_composition.current_tts_target_name
+get_control_page_minecraft_snapshot = control_page_composition.get_minecraft_snapshot
+get_control_page_runtime_services = control_page_composition.get_runtime_services
+ensure_control_page_minecraft_snapshot = control_page_composition.ensure_minecraft_snapshot
+ensure_control_page_background_tasks_started = control_page_composition.ensure_background_tasks_started
+stop_control_page_background_tasks = control_page_composition.stop_background_tasks
+mark_startup_component = control_page_composition.mark_startup_component
+startup_component_done = control_page_composition.startup_component_done
+build_control_page_boot_progress = control_page_composition.build_boot_progress
+start_control_page_server = control_page_composition.start_server
 
 
 def build_voice_route_execution_deps() -> VoiceRouteExecutionDeps:

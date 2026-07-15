@@ -354,6 +354,34 @@ Last reviewed: 2026-07-15
 - 다음 후보는 `build_control_page_state` 45줄, Discord `on_ready` 43줄,
   `run_vision_watch_once` 40줄과 dependency builder composition root 정리다.
 
+## 2026-07-16 대형 배치 전환: Control Page composition 일괄 분리
+
+- 서른 번째 배치부터 작은 함수 2~3개 단위가 아니라 도메인 전체를 한 번에 이동하는 방식으로 전환했다.
+- 새 모듈/계약:
+  - `control_page_composition_runtime.py`
+  - `ControlPageCompositionDeps`, `ControlPageComposition`
+  - `ControlPageHttpCompositionDeps`, `ControlPageHttpComposition`
+- 이동 책임:
+  - UI command/chat/welcome/guild 선택 adapter
+  - Minecraft snapshot/cache/background adapter
+  - runtime service/status/tool/search/text/input adapter
+  - welcome single-flight와 startup component/boot progress adapter
+  - Control Page HTTP handler 13개와 서버 route tuple 조립
+  - Control Page 서버 시작 위임
+- `main.py`의 Control Page 구간은 명시적 dependency builder와 composition root만 남겼고,
+  동적 `globals()`/namespace 주입은 사용하지 않았다.
+- 정확한 크기 변화:
+  - `main.py`: 7,380줄 → 6,914줄
+  - 이번 배치 순감축: 466줄
+- 검증:
+  - 관련 회귀 29개 통과(기존 실프로세스 opt-in 1개 skip)
+  - CI와 동일한 `-s tests -t .` discovery 전체 unittest 1,112개 통과
+  - 실제 `main.py` smoke + `PYTHONWARNINGS=error::ResourceWarning` 전체 unittest 1,112개 통과
+  - `py_compile`, `git diff --check` 통과
+- 런타임/컨테이너 재시작과 외부 push는 하지 않았다.
+- 다음 대형 후보는 LLM/route composition 영역이며, Control Page에 남은 dependency builder는
+  해당 조립 root를 별도 모듈로 옮길 때 함께 정리한다.
+
 - [22:59 KST] cron checkpoint: `build_guild_runtime_reset_deps` 빌더 본문을
   `evelyn_core/runtime/evelyn_core/guild_runtime_reset.py`로 이전.
   - 변경 파일: `main.py`, `evelyn_core/runtime/evelyn_core/guild_runtime_reset.py`,

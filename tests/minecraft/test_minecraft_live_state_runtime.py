@@ -152,17 +152,21 @@ class MinecraftLiveStateRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
     def test_main_delegates_minecraft_observation_and_snapshot_to_runtime_module(self) -> None:
         source = (REPO_ROOT / "main.py").read_text(encoding="utf-8")
+        composition = (
+            REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "control_page_composition_runtime.py"
+        ).read_text(encoding="utf-8")
         observe_start = source.index("async def observe_live_minecraft_state(")
         observe_end = source.index("async def wait_for_minecraft_ready", observe_start)
-        snapshot_start = source.index("async def get_control_page_minecraft_snapshot(")
-        snapshot_end = source.index("async def safe_get_control_page_minecraft_snapshot", snapshot_start)
+        snapshot_start = composition.index("async def get_minecraft_snapshot(")
+        snapshot_end = composition.index("async def safe_get_minecraft_snapshot", snapshot_start)
 
         observe_source = source[observe_start:observe_end]
-        snapshot_source = source[snapshot_start:snapshot_end]
+        snapshot_source = composition[snapshot_start:snapshot_end]
         self.assertIn("observe_live_minecraft_state_from_runtime(", observe_source)
         self.assertNotIn("client.status()", observe_source)
         self.assertIn("get_control_page_minecraft_snapshot_from_runtime(", snapshot_source)
         self.assertNotIn("normalize_inventory_top_entries(", snapshot_source)
+        self.assertIn("async def get_minecraft_snapshot(", composition)
 
 
 if __name__ == "__main__":

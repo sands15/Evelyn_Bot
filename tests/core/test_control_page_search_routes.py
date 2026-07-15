@@ -92,7 +92,10 @@ class ControlPageSearchRouteTests(unittest.TestCase):
         self.assertIn("control_page_light_request_max_chars", self.fast_path_policy_py)
 
     def test_control_page_current_info_bypasses_main_llm_guessing(self) -> None:
-        self.assertIn("async def answer_control_page_search_text", self.main_py)
+        composition = (
+            REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "control_page_composition_runtime.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn("async def answer_search_text", composition)
         self.assertIn("selected_path\": \"control_page_search_direct", self.control_page_search_runtime_py)
         self.assertIn("if deps.should_force_search_query(text):", self.control_page_tool_runtime_py)
         self.assertIn("return await deps.answer_control_page_search_text(guild, text)", self.control_page_tool_runtime_py)

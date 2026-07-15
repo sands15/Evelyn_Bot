@@ -126,9 +126,11 @@ class ControlPageTextRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.cleared), 1)
 
     def test_main_delegates_control_page_answer_to_runtime_module(self) -> None:
-        source = (REPO_ROOT / "main.py").read_text(encoding="utf-8")
-        start = source.index("async def answer_control_page_text(")
-        end = source.index("def build_control_page_input_runtime_deps(", start)
+        source = (
+            REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "control_page_composition_runtime.py"
+        ).read_text(encoding="utf-8")
+        start = source.index("async def answer_text(")
+        end = source.index("async def handle_input(", start)
         function_source = source[start:end]
 
         self.assertIn("answer_control_page_text_from_runtime(", function_source)

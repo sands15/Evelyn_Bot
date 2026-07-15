@@ -172,9 +172,11 @@ class ControlPageServerStartRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.runner)
 
     def test_main_delegates_control_page_server_start_to_runtime_module(self) -> None:
-        source = (REPO_ROOT / "main.py").read_text(encoding="utf-8")
-        start = source.index("async def start_control_page_server(")
-        end = source.index("def build_voice_route_execution_deps", start)
+        source = (
+            REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "control_page_composition_runtime.py"
+        ).read_text(encoding="utf-8")
+        start = source.index("async def start_server(")
+        end = source.index("class ControlPageHttpComposition", start)
         function_source = source[start:end]
 
         self.assertIn("start_control_page_server_from_runtime(", function_source)

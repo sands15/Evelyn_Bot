@@ -40,7 +40,10 @@ class ControlPageToolRegistryTests(unittest.TestCase):
         self.assertIn("def is_control_page_question_text(text: str) -> bool:", self.control_page_tools)
 
     def test_tool_results_are_recorded_for_followup_context(self) -> None:
-        self.assertIn("def remember_control_page_tool_turn(", self.main_py)
+        composition = (
+            REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "control_page_composition_runtime.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn("def remember_tool_turn(", composition)
         self.assertIn("record_tool_assistant_turn=session_state_store.record_tool_assistant_turn", self.main_py)
         self.assertIn("def record_tool_assistant_turn(", self.session_memory_state)
         self.assertIn('history_answer = f"도구 실행: {cleaned_tool}\\n결과: {clean_text(reply_text)}"', self.session_memory_state)

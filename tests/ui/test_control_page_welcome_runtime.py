@@ -119,9 +119,11 @@ class ControlPageWelcomeRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("empty choices", repr(self.traces[0]["error"]))
 
     def test_main_delegates_welcome_generation_to_ui_runtime(self) -> None:
-        source = (REPO_ROOT / "main.py").read_text(encoding="utf-8")
-        start = source.index("async def generate_control_page_welcome_text(")
-        end = source.index("async def ensure_control_page_welcome_message(", start)
+        source = (
+            REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "control_page_composition_runtime.py"
+        ).read_text(encoding="utf-8")
+        start = source.index("async def generate_welcome_text(")
+        end = source.index("async def ensure_welcome_message(", start)
         function_source = source[start:end]
 
         self.assertIn("generate_control_page_welcome_text_from_runtime(", function_source)

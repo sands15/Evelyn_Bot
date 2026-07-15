@@ -12,6 +12,7 @@ CONTROL_PAGE_STATE = REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "co
 CONTROL_PAGE_STATE_HANDLER = REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "control_page_state_handler.py"
 CONTROL_PAGE_CONTRACTS = REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "control_page_contracts.py"
 CONTROL_PAGE_TOOL_RUNTIME = REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "control_page_tool_runtime.py"
+CONTROL_PAGE_COMPOSITION = REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "control_page_composition_runtime.py"
 
 
 class ControlPageMemoryPanelCommandTests(unittest.TestCase):
@@ -24,12 +25,13 @@ class ControlPageMemoryPanelCommandTests(unittest.TestCase):
         cls.control_page_state_handler = CONTROL_PAGE_STATE_HANDLER.read_text(encoding="utf-8")
         cls.control_page_contracts = CONTROL_PAGE_CONTRACTS.read_text(encoding="utf-8")
         cls.control_page_tool_runtime = CONTROL_PAGE_TOOL_RUNTIME.read_text(encoding="utf-8")
+        cls.control_page_composition = CONTROL_PAGE_COMPOSITION.read_text(encoding="utf-8")
 
     def test_main_routes_memory_panel_commands_through_llm_tool_router(self) -> None:
         self.assertIn("async def decide_control_page_tool_call_from_runtime(", self.control_page_tool_runtime)
-        self.assertIn("async def decide_control_page_ui_tool_call(", self.main_py)
+        self.assertIn("async def decide_tool_call(", self.control_page_composition)
         self.assertIn("def control_page_ui_tool_action_from_decision(decision: dict[str, Any] | None) -> str | None:", self.control_page_tools)
-        self.assertIn("def execute_control_page_memory_panel_action(action: str) -> str:", self.main_py)
+        self.assertIn("def execute_memory_panel_action(self, action: str) -> str:", self.control_page_composition)
         self.assertIn("return deps.memory_panel_reply(cleaned_action)", self.control_page_tool_runtime)
         self.assertIn("def memory_panel_reply(action: str) -> str:", self.control_page_contracts)
         self.assertIn("class ControlPageToolSpec", self.control_page_tools)

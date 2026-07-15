@@ -30,15 +30,18 @@ class ControlPageStatusCommandTests(unittest.TestCase):
         self.assertIn('return control_page_tool_decision("runtime.status", source="cheap")', self.control_page_tools)
 
     def test_local_status_uses_real_local_runtime_summary(self) -> None:
-        self.assertIn("def build_control_page_local_status_text", self.main_py)
-        self.assertIn("build_control_page_local_status_text_from_runtime(", self.main_py)
+        composition = (
+            REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "control_page_composition_runtime.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn("def build_local_status_text", composition)
+        self.assertIn("build_control_page_local_status_text_from_runtime(", composition)
         self.assertIn('"Evelyn 로컬 상태"', self.control_page_state)
         self.assertIn("control_page_local_url()", self.main_py)
         self.assertIn("Main LLM", self.control_page_state)
         self.assertIn("Router LLM", self.control_page_state)
         self.assertIn("Summary LLM", self.control_page_state)
         self.assertIn("local_mic_status_line()", self.main_py)
-        self.assertIn("build_local_status_text=build_control_page_local_status_text", self.main_py)
+        self.assertIn("build_local_status_text=control_page_composition.build_local_status_text", self.main_py)
         self.assertIn("status_text=deps.build_local_status_text(runtime_services)", self.control_page_state_handler)
         self.assertIn('"statusText": clean_text(status_text)', self.control_page_state)
 
