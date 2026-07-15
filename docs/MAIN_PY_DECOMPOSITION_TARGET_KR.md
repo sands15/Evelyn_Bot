@@ -1,6 +1,29 @@
 # main.py 분리 목표
 
-Last reviewed: 2026-06-29
+Last reviewed: 2026-07-15
+
+## 2026-07-15 분해 재개
+
+- 기준 브랜치 `stabilization/evaluation-findings-2026-07-15`의 검증 완료 커밋 `8ec01e3`에서
+  `refactor/main-py-decomposition-2026-07-15` 브랜치를 만들었다.
+- 감사에서 가장 큰 단일 hot path로 지적된 `_process_member_audio_impl`의 첫 단계를 분리했다.
+  - 새 모듈: `evelyn_core/runtime/evelyn_core/voice_audio_ingress_runtime.py`
+  - 새 계약: `VoiceAudioIngressDeps`, `VoiceAudioIngressResult`
+  - 이동 책임: member/guild 검증, ingress raw debug 저장, turn metrics 생성, reply 중 다른 화자 차단,
+    STT 입력 리샘플링, 최소 길이 판정, transport/tail fragment 판정, waveform 통계, VAD override/drop.
+  - `main.py`는 live 설정/콜백을 조립하는 `build_voice_audio_ingress_runtime_deps()`와
+    `prepare_voice_audio_ingress_from_runtime(...)` 호출만 유지한다.
+- 정확한 크기 변화:
+  - `main.py`: 8,793줄 → 8,653줄
+  - `_process_member_audio_impl`: 729줄 → 548줄
+- 검증:
+  - 새 경계 단위 테스트 8개 통과
+  - `tests/voice` 237개 통과
+  - `tests/discord_io` 78개 통과
+  - 실제 `main.py` 프로세스 smoke를 포함한 전체 unittest 958개 통과, 실패/오류/건너뜀 0
+  - `PYTHONWARNINGS=error::ResourceWarning`, `py_compile`, `git diff --check` 통과
+- 런타임/컨테이너 재시작과 외부 push는 하지 않았다.
+- 다음 절개 경계는 같은 함수의 wake probe/환경음 판정, TTS interrupt, full STT/transcript 확정 순서다.
 
 - [22:59 KST] cron checkpoint: `build_guild_runtime_reset_deps` 빌더 본문을
   `evelyn_core/runtime/evelyn_core/guild_runtime_reset.py`로 이전.

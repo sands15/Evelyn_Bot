@@ -798,6 +798,10 @@ from evelyn_core.voice_ingress_runtime import (
     voice_ingress_worker_from_runtime,
     voice_utterance_buffer_key as voice_utterance_buffer_key_payload,
 )
+from evelyn_core.voice_audio_ingress_runtime import (
+    VoiceAudioIngressDeps,
+    prepare_voice_audio_ingress_from_runtime,
+)
 from evelyn_core.voice_reply_side_effects import (
     VoiceReplySideEffectDeps,
     finalize_voice_reply_side_effects_from_runtime,
@@ -7587,6 +7591,43 @@ async def stream_text_reply(
 # =========================================================
 # 음성 입력 처리
 # =========================================================
+def build_voice_audio_ingress_runtime_deps() -> VoiceAudioIngressDeps:
+    return VoiceAudioIngressDeps(
+        voice_pipeline_state=voice_pipeline_state,
+        prepare_stt_audio=prepare_stt_audio,
+        save_voice_debug_audio=save_voice_debug_audio,
+        room_state_snapshot=room_state_snapshot,
+        session_topic_ids=session_topic_ids,
+        build_topic_id=build_topic_id,
+        new_turn_metrics=new_turn_metrics,
+        log_voice_stage=log_voice_stage,
+        register_drop_reason=register_drop_reason,
+        log_voice_bottleneck_summary=log_voice_bottleneck_summary,
+        downmix_int16_stereo_to_mono_float=downmix_int16_stereo_to_mono_float,
+        apply_light_denoise=apply_light_denoise,
+        is_transport_corrupted_audio=is_transport_corrupted_audio,
+        build_voice_segment=build_voice_segment,
+        compute_waveform_activity_stats=compute_waveform_activity_stats,
+        estimate_voice_like_probability=estimate_voice_like_probability,
+        update_room_speaker_activity=update_room_speaker_activity,
+        increment_session_bad_audio=increment_session_bad_audio,
+        is_tail_fragment_candidate=is_tail_fragment_candidate,
+        is_probably_silent=is_probably_silent,
+        print_fn=print,
+        stt_use_raw_48k=STT_USE_RAW_48K,
+        rate=RATE,
+        channels=CHANNELS,
+        target_rate=TARGET_RATE,
+        voice_min_total_sec=VOICE_MIN_TOTAL_SEC,
+        tail_fragment_max_raw_sec=TAIL_FRAGMENT_MAX_RAW_SEC,
+        vad_enabled=VAD_ENABLED,
+        voice_waveform_min_voiced_ms=VOICE_WAVEFORM_MIN_VOICED_MS,
+        voice_waveform_min_run_ms=VOICE_WAVEFORM_MIN_RUN_MS,
+        voice_waveform_body_rms_min=VOICE_WAVEFORM_BODY_RMS_MIN,
+        voice_waveform_body_peak_min=VOICE_WAVEFORM_BODY_PEAK_MIN,
+    )
+
+
 async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes, debug_meta: dict | None = None) -> None:
     await process_member_audio_from_runtime(
         member=member,
@@ -7611,217 +7652,36 @@ async def _process_member_audio_impl(
     ingress_during_reply: bool = False,
     owner_user_id_on_ingress: int | None = None,
 ) -> None:
-    if member is None:
-        return
-
-    if member.bot:
-        return
-
-    guild = getattr(member, "guild", None)
-    if guild is None:
-        return
-
-    guild_id = guild.id
-    voice_pipeline_state["last_voice_segment_at"] = time.time()
-    speaker_name = member.display_name or str(member.id)
-    audio16k_ingress = prepare_stt_audio(pcm_bytes)
-    save_voice_debug_audio(
-        guild_id,
-        speaker_name,
+    ingress = prepare_voice_audio_ingress_from_runtime(
+        member,
         pcm_bytes,
-        audio16k_ingress,
-        final_text="[INGRESS RAW]",
-        debug_meta=debug_meta,
-        save_stt_audio=True,
-        session_key=session_key,
-        stage_label="ingress",
-    )
-    room_state = room_state_snapshot(room_session_key)
-    owner_user_id = room_state.get("owner_user_id")
-    topic_id = session_topic_ids.get(session_key) or build_topic_id(member.display_name or str(member.id))
-    metrics = new_turn_metrics(
-        source="voice",
+        debug_meta,
         session_key=session_key,
         room_session_key=room_session_key,
-        guild_id=guild_id,
-        user_id=member.id,
-        owner_user_id=owner_user_id,
-        topic_id=topic_id,
         turn_id=turn_id,
         segment_id=segment_id,
+        ingress_during_reply=ingress_during_reply,
+        owner_user_id_on_ingress=owner_user_id_on_ingress,
+        deps=build_voice_audio_ingress_runtime_deps(),
     )
-    if isinstance(debug_meta, dict):
-        queue_wait_ms = debug_meta.get("queue_wait_ms")
-        if queue_wait_ms is not None:
-            try:
-                queue_wait_ms = float(queue_wait_ms)
-            except (TypeError, ValueError):
-                queue_wait_ms = None
-            else:
-                metrics.setdefault("meta", {})["voice_queue_wait_ms"] = queue_wait_ms
-                metrics.setdefault("marks", {})["voice_queue_wait_ms"] = queue_wait_ms
-        metrics.setdefault("meta", {})["ingress_source"] = str(debug_meta.get("source") or "discord_voice")
-    log_voice_stage(metrics, "voice_worker_turn 시작", extra=f"speaker={member.display_name} pcm_bytes={len(pcm_bytes)} owner={owner_user_id}")
-
-    if ingress_during_reply and owner_user_id_on_ingress is not None and owner_user_id_on_ingress != member.id:
-        register_drop_reason(
-            metrics,
-            "other_speaker_during_reply",
-            session_key=session_key,
-            room_session_key=room_session_key,
-            owner_user_id=owner_user_id_on_ingress,
-        )
-        log_voice_stage(metrics, "다른 화자 중복 진입 차단", extra=f"owner_user_id={owner_user_id_on_ingress}")
-        log_voice_bottleneck_summary(metrics, label="voice_drop", extra="drop=other_speaker_during_reply", event_name="voice_drop_summary")
+    if ingress is None:
         return
 
-    if STT_USE_RAW_48K:
-        audio16k = downmix_int16_stereo_to_mono_float(pcm_bytes)
-        audio_for_wake = apply_light_denoise(audio16k, sampling_rate=RATE)
-        stt_sampling_rate = RATE
-        wake_sampling_rate = RATE
-    else:
-        audio16k = prepare_stt_audio(pcm_bytes)
-        audio_for_wake = audio16k
-        stt_sampling_rate = TARGET_RATE
-        wake_sampling_rate = TARGET_RATE
-    if audio16k.size == 0:
-        register_drop_reason(metrics, "empty_audio", session_key=session_key)
-        log_voice_stage(metrics, "오디오 비어있음")
-        log_voice_bottleneck_summary(metrics, label="voice_drop", extra="drop=empty_audio", event_name="voice_drop_summary")
-        return
-
-    raw_seconds = len(pcm_bytes) / float(RATE * CHANNELS * 2)
-    if raw_seconds <= VOICE_MIN_TOTAL_SEC:
-        print(f"[FULL STT SKIP] reason=too_short_total speaker={member.display_name} raw_seconds={raw_seconds:.3f}")
-        print(f"[SHORT AUDIO IGNORE] speaker={member.display_name} raw_seconds={raw_seconds:.3f}")
-        save_voice_debug_audio(
-            guild_id,
-            speaker_name,
-            pcm_bytes,
-            audio16k,
-            final_text="[SHORT AUDIO IGNORE]",
-            debug_meta=debug_meta,
-            save_stt_audio=False,
-            session_key=session_key,
-            stage_label="drop",
-        )
-        register_drop_reason(metrics, "too_short_total", session_key=session_key, raw_seconds=round(raw_seconds, 3))
-        log_voice_stage(metrics, "전체 길이 너무 짧아서 제외", extra=f"raw_seconds={raw_seconds:.3f}")
-        log_voice_bottleneck_summary(metrics, label="voice_drop", extra="drop=too_short_total", event_name="voice_drop_summary")
-        return
-
-    unstable_audio = bool(debug_meta and debug_meta.get("unstable"))
-    transport_corrupted = is_transport_corrupted_audio(debug_meta)
-    if unstable_audio:
-        reasons = ",".join(str(r) for r in debug_meta.get("reasons", []))
-        print(f"[UNSTABLE AUDIO] speaker={member.display_name} reasons={reasons}")
-        log_voice_stage(metrics, "불안정 음성 감지", extra=f"reasons={reasons}")
-
-    duration_sec = len(audio16k) / float(max(1, stt_sampling_rate))
-    voice_segment = build_voice_segment(
-        guild_id=guild_id,
-        room_session_key=room_session_key,
-        session_key=session_key,
-        speaker_user_id=member.id,
-        speaker_name=speaker_name,
-        audio16k=audio16k,
-        sampling_rate=stt_sampling_rate,
-        duration_sec=duration_sec,
-        segment_id=segment_id,
-        owner_user_id=owner_user_id,
-    )
-    metrics.setdefault("meta", {})["voice_segment_contract"] = voice_segment
-    waveform_stats = compute_waveform_activity_stats(audio16k, sampling_rate=stt_sampling_rate)
-    voiced_ms = float(waveform_stats.get("voiced_ms") or 0.0)
-    longest_voiced_ms = float(waveform_stats.get("longest_voiced_ms") or 0.0)
-    body_rms = float(waveform_stats.get("body_rms") or 0.0)
-    voice_like_prob = estimate_voice_like_probability(voiced_ms=voiced_ms, audio_sec=duration_sec, body_rms=body_rms)
-    update_room_speaker_activity(
-        room_session_key,
-        member.id,
-        voiced_ms=voiced_ms,
-        raw_seconds=raw_seconds,
-        rms=body_rms,
-        wake_detected=False,
-    )
-    if transport_corrupted and raw_seconds <= max(1.4, TAIL_FRAGMENT_MAX_RAW_SEC + 0.5):
-        bad_audio_count = increment_session_bad_audio(session_key)
-        register_drop_reason(
-            metrics,
-            "transport_corrupted",
-            session_key=session_key,
-            room_session_key=room_session_key,
-            owner_user_id=owner_user_id,
-            raw_seconds=round(raw_seconds, 3),
-            voiced_ms=round(voiced_ms, 1),
-            longest_voiced_ms=round(longest_voiced_ms, 1),
-            bad_audio_count=bad_audio_count,
-        )
-        log_voice_stage(
-            metrics,
-            "transport corrupted 조기 종료",
-            extra=f"raw_seconds={raw_seconds:.3f} voiced_ms={voiced_ms:.0f} longest_ms={longest_voiced_ms:.0f}",
-        )
-        log_voice_bottleneck_summary(metrics, label="voice_drop", extra="drop=transport_corrupted", event_name="voice_drop_summary")
-        return
-    if is_tail_fragment_candidate(
-        session_key=session_key,
-        raw_seconds=raw_seconds,
-        voiced_ms=voiced_ms,
-        longest_voiced_ms=longest_voiced_ms,
-        unstable=unstable_audio,
-    ):
-        bad_audio_count = increment_session_bad_audio(session_key)
-        register_drop_reason(
-            metrics,
-            "tail_fragment_drop",
-            session_key=session_key,
-            room_session_key=room_session_key,
-            owner_user_id=owner_user_id,
-            raw_seconds=round(raw_seconds, 3),
-            voiced_ms=round(voiced_ms, 1),
-            longest_voiced_ms=round(longest_voiced_ms, 1),
-            bad_audio_count=bad_audio_count,
-        )
-        log_voice_stage(
-            metrics,
-            "tail fragment 조기 종료",
-            extra=f"raw_seconds={raw_seconds:.3f} voiced_ms={voiced_ms:.0f} longest_ms={longest_voiced_ms:.0f}",
-        )
-        log_voice_bottleneck_summary(metrics, label="voice_drop", extra="drop=tail_fragment_drop", event_name="voice_drop_summary")
-        return
-    if VAD_ENABLED and is_probably_silent(audio16k, sampling_rate=stt_sampling_rate):
-        duration_sec = len(audio16k) / float(max(1, stt_sampling_rate))
-        peak = float(np.max(np.abs(audio16k))) if audio16k.size else 0.0
-        rms = float(np.sqrt(np.mean(np.square(audio16k)))) if audio16k.size else 0.0
-        voiced_ms = float(waveform_stats.get("voiced_ms") or 0.0)
-        longest_voiced_ms = float(waveform_stats.get("longest_voiced_ms") or 0.0)
-        body_rms = float(waveform_stats.get("body_rms") or 0.0)
-        body_peak = float(waveform_stats.get("body_peak") or 0.0)
-        waveform_override = (not transport_corrupted) and voiced_ms >= VOICE_WAVEFORM_MIN_VOICED_MS and (
-            longest_voiced_ms >= VOICE_WAVEFORM_MIN_RUN_MS
-            or body_rms >= VOICE_WAVEFORM_BODY_RMS_MIN
-            or body_peak >= VOICE_WAVEFORM_BODY_PEAK_MIN
-        )
-        if waveform_override:
-            print(
-                f"[VAD OVERRIDE] speaker={member.display_name} sec={duration_sec:.2f} voiced_ms={voiced_ms:.0f} longest_ms={longest_voiced_ms:.0f} body_rms={body_rms:.4f} body_peak={body_peak:.4f}"
-            )
-            log_voice_stage(
-                metrics,
-                "VAD override",
-                extra=f"voiced_ms={voiced_ms:.0f} longest_ms={longest_voiced_ms:.0f} body_rms={body_rms:.4f} body_peak={body_peak:.4f}",
-            )
-        else:
-            print(f"[FULL STT SKIP] reason=vad_ignore speaker={member.display_name} sampling_rate={stt_sampling_rate} sec={duration_sec:.2f} peak={peak:.4f} rms={rms:.4f} voiced_ms={voiced_ms:.0f} longest_ms={longest_voiced_ms:.0f} body_rms={body_rms:.4f}")
-            print(f"[VAD IGNORE] speaker={member.display_name} sampling_rate={stt_sampling_rate} sec={duration_sec:.2f} peak={peak:.4f} rms={rms:.4f}")
-            save_voice_debug_audio(guild_id, speaker_name, pcm_bytes, audio16k, final_text="[VAD IGNORE]", debug_meta=debug_meta, session_key=session_key, stage_label="drop")
-            bad_audio_count = increment_session_bad_audio(session_key)
-            register_drop_reason(metrics, "vad_ignore", session_key=session_key, room_session_key=room_session_key, owner_user_id=owner_user_id, voiced_ms=round(voiced_ms, 1), bad_audio_count=bad_audio_count)
-            log_voice_stage(metrics, "VAD 무시 처리", extra=f"sampling_rate={stt_sampling_rate} sec={duration_sec:.2f} peak={peak:.4f} rms={rms:.4f} voiced_ms={voiced_ms:.0f} longest_ms={longest_voiced_ms:.0f} body_rms={body_rms:.4f}")
-            log_voice_bottleneck_summary(metrics, label="voice_drop", extra="drop=vad_ignore", event_name="voice_drop_summary")
-            return
+    guild = ingress.guild
+    guild_id = ingress.guild_id
+    speaker_name = ingress.speaker_name
+    owner_user_id = ingress.owner_user_id
+    metrics = ingress.metrics
+    audio16k = ingress.audio16k
+    audio_for_wake = ingress.audio_for_wake
+    stt_sampling_rate = ingress.stt_sampling_rate
+    wake_sampling_rate = ingress.wake_sampling_rate
+    raw_seconds = ingress.raw_seconds
+    duration_sec = ingress.duration_sec
+    voice_segment = ingress.voice_segment
+    voiced_ms = ingress.voiced_ms
+    body_rms = ingress.body_rms
+    voice_like_prob = ingress.voice_like_prob
 
     owner_followup_active = is_room_owner_active(room_session_key, member.id) and is_session_active_for_user(session_key, member.id)
     active_speaker_user_id = pick_active_speaker(room_session_key)

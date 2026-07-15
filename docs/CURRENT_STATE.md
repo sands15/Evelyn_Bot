@@ -2,14 +2,15 @@
 
 Document status: **Current**
 Last reviewed: 2026-07-15 KST
-Source branch: `stabilization/evaluation-findings-2026-07-15`
+Source branch: `refactor/main-py-decomposition-2026-07-15`
 
 이 문서는 현재 확인된 사실만 기록한다. 목표 구조와 과거 계획은 다른 설계/계획 문서를 사용한다.
 
 ## Source state
 
 - 전체 프로젝트 감사의 즉시 항목을 별도 안정화 브랜치에서 처리 중이다.
-- `main.py` 분해는 정훈 요청에 따라 이번 안정화 범위에서 제외했다.
+- `main.py` 분해를 재개했다. 음성 hot path의 ingress/audio filtering 단계를
+  `voice_audio_ingress_runtime.py`로 옮겼고, 나머지 wake/STT/TTS/session/reply 구간은 아직 남아 있다.
 - 핵심 준비 상태와 선택 기능 준비 상태를 분리했다.
   - `ok`: 필수 핵심 서비스 준비 여부
   - `fullyHealthy`: 선택 기능을 포함한 전체 건강 여부
@@ -41,14 +42,14 @@ Source branch: `stabilization/evaluation-findings-2026-07-15`
 
 ## Verification state
 
-검증 시각: 2026-07-15 06:00 KST
-검증한 코드 기준점: `56e1180` 직후 작업 트리
+검증 시각: 2026-07-15 18:49 KST
+검증한 코드 기준점: `refactor/main-py-decomposition-2026-07-15` 첫 음성 ingress 분리 작업 트리
 
 - `pip check`: 통과
 - `docker compose config --quiet`: 통과(검증용 Discord token 사용)
 - Python `compileall`: 통과
 - 활성 Live2D/boot JavaScript `node --check`: 통과
-- 전체 unittest: 950개 통과, 실패 0, 오류 0, 건너뜀 0
+- 전체 unittest: 958개 통과, 실패 0, 오류 0, 건너뜀 0
 - `EVELYN_RUN_REAL_MAIN_INTEGRATION=1`: 실제 `main.py` 프로세스 smoke 포함
 - `PYTHONWARNINGS=error::ResourceWarning`: 통과
 - Codex Gateway 테스트 서버: 무토큰/오토큰 `401`, 정상 bearer token `200`
