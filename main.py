@@ -416,7 +416,6 @@ from evelyn_core.discord_text_reply_runtime import (
 )
 from evelyn_core.discord_session_policy import (
     DiscordRoomSessionPolicy,
-    TtsInterruptMeta,
     estimate_voice_like_probability_policy,
     is_transport_corrupted_audio_policy,
     should_interrupt_tts,
@@ -476,6 +475,8 @@ from evelyn_core.local_mic_segment_runtime import (
 from evelyn_core.tts_warmup_runtime import TtsWarmupRuntimeDeps, warmup_tts_server_from_runtime
 from evelyn_core.tts_interrupt_runtime import (
     TtsInterruptRuntimeDeps,
+    VoiceTtsInterruptGateDeps,
+    run_voice_tts_interrupt_gate_from_runtime,
     speaker_verification_allows_tts_interrupt_from_runtime,
     stop_active_tts_playback_from_runtime,
     verify_speaker_for_tts_interrupt_from_runtime,
@@ -7662,6 +7663,28 @@ def build_voice_wake_probe_runtime_deps() -> VoiceWakeProbeDeps:
     )
 
 
+def build_voice_tts_interrupt_gate_deps() -> VoiceTtsInterruptGateDeps:
+    return VoiceTtsInterruptGateDeps(
+        should_interrupt_tts=should_interrupt_tts,
+        local_tts_playback_manager=local_tts_playback_manager,
+        tts_playback_manager=tts_playback_manager,
+        verify_speaker_for_tts_interrupt=verify_speaker_for_tts_interrupt,
+        speaker_verification_allows_tts_interrupt=speaker_verification_allows_tts_interrupt,
+        stop_active_tts_playback=stop_active_tts_playback,
+        register_drop_reason=register_drop_reason,
+        log_voice_stage=log_voice_stage,
+        log_voice_bottleneck_summary=log_voice_bottleneck_summary,
+        start_voice_barge_in_continuity_probe=start_voice_barge_in_continuity_probe,
+        log_turn_event=log_turn_event,
+        sleep=asyncio.sleep,
+        monotonic=time.monotonic,
+        local_only_mode=LOCAL_ONLY_MODE,
+        post_tts_ignore_sec=POST_TTS_IGNORE_SEC,
+        tts_interrupt_debounce_sec=TTS_INTERRUPT_DEBOUNCE_SEC,
+        voice_waveform_body_rms_min=VOICE_WAVEFORM_BODY_RMS_MIN,
+    )
+
+
 async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes, debug_meta: dict | None = None) -> None:
     await process_member_audio_from_runtime(
         member=member,
@@ -7746,92 +7769,24 @@ async def _process_member_audio_impl(
     wake_alias = wake.wake_alias
     wake_reject_reason = wake.wake_reject_reason
 
-    interrupt_meta = TtsInterruptMeta(
-        active_speaker_match=active_speaker_user_id == member.id,
-        wake_detected=wake_detected,
-        vad_prob=voice_like_prob,
-        audio_sec=duration_sec,
-        rms_ok=body_rms >= VOICE_WAVEFORM_BODY_RMS_MIN,
-        voice_like=voice_like_prob >= 0.45,
-    )
-    qualified_tts_interrupt = should_interrupt_tts(interrupt_meta)
-    local_tts_active = bool(LOCAL_ONLY_MODE and local_tts_playback_manager.snapshot().get("active"))
-    tts_suppression = tts_playback_manager.input_suppression_reason(
+    interrupt_gate = await run_voice_tts_interrupt_gate_from_runtime(
+        member=member,
         guild_id=guild_id,
-        post_tts_ignore_sec=POST_TTS_IGNORE_SEC,
+        session_key=session_key,
+        room_session_key=room_session_key,
+        owner_user_id=owner_user_id,
+        active_speaker_user_id=active_speaker_user_id,
+        wake_probe=wake_probe,
+        wake_detected=wake_detected,
+        voice_like_prob=voice_like_prob,
+        duration_sec=duration_sec,
+        body_rms=body_rms,
+        audio16k=audio16k,
+        stt_sampling_rate=stt_sampling_rate,
+        metrics=metrics,
+        deps=build_voice_tts_interrupt_gate_deps(),
     )
-    if qualified_tts_interrupt and (local_tts_active or tts_suppression == "bot_is_speaking"):
-        speaker_verification = await verify_speaker_for_tts_interrupt(
-            audio16k,
-            sampling_rate=stt_sampling_rate,
-            source=str(metrics.setdefault("meta", {}).get("ingress_source") or "discord_voice"),
-            metrics=metrics,
-        )
-        if not speaker_verification_allows_tts_interrupt(speaker_verification):
-            qualified_tts_interrupt = False
-            register_drop_reason(
-                metrics,
-                "speaker_verification_rejected",
-                session_key=session_key,
-                room_session_key=room_session_key,
-                owner_user_id=owner_user_id,
-                wake_probe_text=wake_probe,
-                wake_detected=wake_detected,
-                speaker_verification=speaker_verification.to_dict(),
-            )
-            log_voice_stage(
-                metrics,
-                "speaker verification rejected TTS interrupt",
-                extra=f"speaker={member.display_name} score={speaker_verification.score}",
-            )
-            log_voice_bottleneck_summary(
-                metrics,
-                label="voice_drop",
-                extra="drop=speaker_verification_rejected",
-                event_name="voice_drop_summary",
-            )
-            return
-    if local_tts_active:
-        if qualified_tts_interrupt:
-            stopped = local_tts_playback_manager.request_stop(reason="qualified_user_audio")
-            metrics.setdefault("meta", {})["local_tts_interrupted_by_user_audio"] = bool(stopped)
-            if stopped:
-                start_voice_barge_in_continuity_probe(metrics, source="local_tts")
-                metrics.setdefault("meta", {})["tts_interrupted_at"] = time.monotonic()
-                log_turn_event("tts_interrupt", guild_id=guild_id, reason="qualified_user_audio", output_mode="local_speaker")
-                log_voice_stage(metrics, "로컬 TTS 사용자 발화로 중단", extra=f"speaker={member.display_name} wake_detected={wake_detected}")
-        else:
-            register_drop_reason(metrics, "local_tts_active_input_suppressed", session_key=session_key, room_session_key=room_session_key, owner_user_id=owner_user_id, wake_probe_text=wake_probe, wake_detected=wake_detected)
-            log_voice_stage(metrics, "로컬 TTS 재생 중 약한 입력 무시", extra=f"speaker={member.display_name} wake_detected={wake_detected}")
-            log_voice_bottleneck_summary(metrics, label="voice_drop", extra="drop=local_tts_active_input_suppressed", event_name="voice_drop_summary")
-            return
-
-    if tts_suppression == "bot_is_speaking" and qualified_tts_interrupt:
-        await asyncio.sleep(TTS_INTERRUPT_DEBOUNCE_SEC)
-        tts_suppression = tts_playback_manager.input_suppression_reason(
-            guild_id=guild_id,
-            post_tts_ignore_sec=POST_TTS_IGNORE_SEC,
-        )
-        if tts_suppression == "bot_is_speaking":
-            stopped = await stop_active_tts_playback(guild_id, reason="qualified_user_audio")
-            if stopped:
-                start_voice_barge_in_continuity_probe(metrics, source="discord_voice")
-                metrics.setdefault("meta", {}).update({
-                    "tts_interrupted_by_user_audio": True,
-                    "tts_interrupted_at": time.monotonic(),
-                })
-            tts_suppression = None
-        elif tts_suppression is not None:
-            register_drop_reason(metrics, tts_suppression, session_key=session_key, room_session_key=room_session_key, owner_user_id=owner_user_id, wake_probe_text=wake_probe, wake_detected=wake_detected)
-            stage_label = "디바운스 후 TTS 직후 입력 무시"
-            log_voice_stage(metrics, stage_label, extra=f"speaker={member.display_name} wake_detected={wake_detected}")
-            log_voice_bottleneck_summary(metrics, label="voice_drop", extra=f"drop={tts_suppression}", event_name="voice_drop_summary")
-            return
-    elif tts_suppression is not None:
-        register_drop_reason(metrics, tts_suppression, session_key=session_key, room_session_key=room_session_key, owner_user_id=owner_user_id, wake_probe_text=wake_probe, wake_detected=wake_detected)
-        stage_label = "봇 재생 중 약한 입력 무시" if tts_suppression == "bot_is_speaking" else "TTS 직후 입력 무시"
-        log_voice_stage(metrics, stage_label, extra=f"speaker={member.display_name} wake_detected={wake_detected}")
-        log_voice_bottleneck_summary(metrics, label="voice_drop", extra=f"drop={tts_suppression}", event_name="voice_drop_summary")
+    if interrupt_gate is None:
         return
 
     print(f"[FULL STT ENTER] speaker={member.display_name} sampling_rate={stt_sampling_rate} samples={audio16k.size} wake_detected={wake_detected}")

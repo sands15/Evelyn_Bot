@@ -41,7 +41,23 @@ Last reviewed: 2026-07-15
   - 실제 `main.py` 프로세스 smoke와 `PYTHONWARNINGS=error::ResourceWarning`를 함께 적용한 전체 unittest 970개 통과
   - `py_compile`, `git diff --check` 통과(`git diff --check`는 기존 LF/CRLF 안내만 출력)
 - 런타임/컨테이너 재시작과 외부 push는 하지 않았다.
-- 다음 절개 경계는 같은 함수의 TTS interrupt, full STT/transcript 확정, reply context 조립 순서다.
+- 세 번째 절개에서 TTS interrupt와 입력 억제 gate를 기존 `tts_interrupt_runtime.py`로 이동했다.
+  - 새 계약: `VoiceTtsInterruptGateDeps`, `VoiceTtsInterruptGateResult`
+  - 이동 책임: interrupt 자격 판정, local/Discord TTS 상태 조회, 화자 검증, local playback 중단,
+    Discord playback debounce/중단, post-TTS 입력 억제, barge-in 연속성 기록.
+  - `main.py`는 `build_voice_tts_interrupt_gate_deps()`와
+    `run_voice_tts_interrupt_gate_from_runtime(...)` 호출만 유지한다.
+- 세 번째 절개 뒤 정확한 누적 크기 변화:
+  - `main.py`: 8,793줄 → 8,515줄
+  - `_process_member_audio_impl`: 729줄 → 353줄
+- 세 번째 절개 검증:
+  - TTS interrupt runtime 테스트 12개 통과(새 gate 테스트 8개 포함)
+  - `tests/voice` 257개 통과
+  - `tests/discord_io` 78개 통과
+  - CI와 같은 discovery 명령으로 전체 unittest 978개 통과
+  - 실제 `main.py` 프로세스 smoke와 `PYTHONWARNINGS=error::ResourceWarning`를 함께 적용한 전체 unittest 978개 통과
+- 런타임/컨테이너 재시작과 외부 push는 하지 않았다.
+- 다음 절개 경계는 같은 함수의 partial/full STT와 transcript 확정, reply context 조립 순서다.
 
 - [22:59 KST] cron checkpoint: `build_guild_runtime_reset_deps` 빌더 본문을
   `evelyn_core/runtime/evelyn_core/guild_runtime_reset.py`로 이전.

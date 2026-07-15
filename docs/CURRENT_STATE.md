@@ -9,9 +9,9 @@ Source branch: `refactor/main-py-decomposition-2026-07-15`
 ## Source state
 
 - 전체 프로젝트 감사의 즉시 항목을 별도 안정화 브랜치에서 처리 중이다.
-- `main.py` 분해를 재개했다. 음성 hot path의 ingress/audio filtering과 wake probe/환경음 조기 차단을
-  각각 `voice_audio_ingress_runtime.py`, `voice_wake_probe_runtime.py`로 옮겼다.
-  TTS interrupt, full STT, transcript/session, reply context 구간은 아직 남아 있다.
+- `main.py` 분해를 재개했다. 음성 hot path의 ingress/audio filtering, wake probe/환경음 조기 차단,
+  TTS interrupt/input suppression gate를 런타임 모듈로 옮겼다.
+  partial/full STT, transcript/session, reply context 구간은 아직 남아 있다.
 - 핵심 준비 상태와 선택 기능 준비 상태를 분리했다.
   - `ok`: 필수 핵심 서비스 준비 여부
   - `fullyHealthy`: 선택 기능을 포함한 전체 건강 여부
@@ -43,14 +43,14 @@ Source branch: `refactor/main-py-decomposition-2026-07-15`
 
 ## Verification state
 
-검증 시각: 2026-07-15 19:12 KST
-검증한 코드 기준점: `refactor/main-py-decomposition-2026-07-15` 두 번째 wake probe 분리 작업 트리
+검증 시각: 2026-07-15 19:18 KST
+검증한 코드 기준점: `refactor/main-py-decomposition-2026-07-15` 세 번째 TTS interrupt gate 분리 작업 트리
 
 - `pip check`: 통과
 - `docker compose config --quiet`: 통과(검증용 Discord token 사용)
 - Python `compileall`: 통과
 - 활성 Live2D/boot JavaScript `node --check`: 통과
-- 전체 unittest: 970개 통과, 실패 0, 오류 0, 건너뜀 0
+- 전체 unittest: 978개 통과, 실패 0, 오류 0, 건너뜀 0
 - `EVELYN_RUN_REAL_MAIN_INTEGRATION=1`: 실제 `main.py` 프로세스 smoke 포함
 - `PYTHONWARNINGS=error::ResourceWarning`: 통과
 - Codex Gateway 테스트 서버: 무토큰/오토큰 `401`, 정상 bearer token `200`
