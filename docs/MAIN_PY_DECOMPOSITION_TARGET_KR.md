@@ -103,7 +103,23 @@ Last reviewed: 2026-07-15
   - CI와 같은 discovery 명령으로 전체 unittest 999개 통과
   - 실제 `main.py` 프로세스 smoke와 `PYTHONWARNINGS=error::ResourceWarning`를 함께 적용한 전체 unittest 999개 통과
 - 런타임/컨테이너 재시작과 외부 push는 하지 않았다.
-- 다음 절개 경계는 같은 함수의 reply context/dependency 조립이다.
+- 일곱 번째 절개에서 reply context 생성과 dispatch를 분리했다.
+  - 새 모듈: `evelyn_core/runtime/evelyn_core/voice_reply_dispatch_runtime.py`
+  - 새 계약: `VoiceReplyDispatchDeps`
+  - 이동 책임: room reply 상태, topic seed, ingress/queue metadata, memory key를 포함한
+    `VoiceTranscriptReplyContext` 생성과 기존 reply orchestrator 호출.
+  - `VoiceTranscriptReplyDeps` 조립은 전역을 숨기는 방식 없이 명시적 builder로 `main.py`에 유지했다.
+- 일곱 번째 절개 뒤 정확한 누적 크기 변화:
+  - `main.py`: 8,793줄 → 8,478줄(직전 8,470줄보다 builder/import로 8줄 증가)
+  - `_process_member_audio_impl`: 729줄 → 185줄
+- 일곱 번째 절개 검증:
+  - 새 reply dispatch 테스트 6개 통과
+  - `tests/voice` 284개 통과
+  - `tests/discord_io` 78개 통과
+  - CI와 같은 discovery 명령으로 전체 unittest 1,005개 통과
+  - 실제 `main.py` 프로세스 smoke와 `PYTHONWARNINGS=error::ResourceWarning`를 함께 적용한 전체 unittest 1,005개 통과
+- 런타임/컨테이너 재시작과 외부 push는 하지 않았다.
+- 다음 구조 작업은 `main.py`에 남은 runtime dependency builder 군의 구성 경계를 정리하는 것이다.
 
 - [22:59 KST] cron checkpoint: `build_guild_runtime_reset_deps` 빌더 본문을
   `evelyn_core/runtime/evelyn_core/guild_runtime_reset.py`로 이전.

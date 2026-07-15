@@ -752,7 +752,6 @@ from evelyn_core.voice_orchestration import (
     VoiceTurnOrchestratorDeps,
     VoiceTurnRequest,
     VoiceTurnRouteContext,
-    VoiceTranscriptReplyContext,
     VoiceTranscriptReplyDeps,
     apply_voice_ingress_dequeue_debug_meta,
     build_rejected_voice_turn,
@@ -760,6 +759,10 @@ from evelyn_core.voice_orchestration import (
     enqueue_voice_ingress_item,
     evaluate_voice_ingress_dequeue,
     process_voice_reply_from_transcript_context,
+)
+from evelyn_core.voice_reply_dispatch_runtime import (
+    VoiceReplyDispatchDeps,
+    dispatch_voice_reply_from_runtime,
 )
 from evelyn_core.voice_route_execution import (
     VoiceMainLlmStreamingDeps,
@@ -7762,6 +7765,57 @@ def build_voice_session_gate_deps() -> VoiceSessionGateDeps:
     )
 
 
+def build_voice_reply_dispatch_deps() -> VoiceReplyDispatchDeps:
+    return VoiceReplyDispatchDeps(
+        room_state_snapshot=room_state_snapshot,
+        session_topic_ids=session_topic_ids,
+        monotonic=time.monotonic,
+        process_voice_reply=process_voice_reply_from_transcript_context,
+        active_conversation_awaiting_reply_sec=ACTIVE_CONVERSATION_AWAITING_REPLY_SEC,
+        active_conversation_voice_sec=ACTIVE_CONVERSATION_VOICE_SEC,
+        canned_wake_reply=CANNED_WAKE_REPLY_TEXT,
+    )
+
+
+def build_voice_transcript_reply_deps(guild: Any) -> VoiceTranscriptReplyDeps:
+    return VoiceTranscriptReplyDeps(
+        should_reply_to_voice=should_reply_to_voice,
+        register_drop_reason=register_drop_reason,
+        log_voice_stage=log_voice_stage,
+        log_voice_bottleneck_summary=log_voice_bottleneck_summary,
+        reset_session_bad_audio=reset_session_bad_audio,
+        build_voice_reply_request=build_voice_reply_request,
+        build_topic_id=build_topic_id,
+        session_last_stt_text=session_last_stt_text,
+        room_last_voice_reply_at=room_last_voice_reply_at,
+        room_last_voice_utterance_for_merge=room_last_voice_utterance_for_merge,
+        update_room_speaker_activity=update_room_speaker_activity,
+        pick_active_speaker=pick_active_speaker,
+        start_new_turn=start_new_turn,
+        update_session_state=update_session_state,
+        set_room_owner=set_room_owner,
+        session_partial_stt_text=session_partial_stt_text,
+        session_committed_stt_text=session_committed_stt_text,
+        partial_stt_cache=partial_stt_cache,
+        make_turn_scope=TurnScope,
+        replace_room_turn_scope=replace_room_turn_scope,
+        attach_current_task=_attach_current_task,
+        set_room_reply_in_progress=set_room_reply_in_progress,
+        session_locks=session_locks,
+        visible_text=visible_text,
+        print_fn=print,
+        get_voice_client=lambda: guild.voice_client,
+        speak_answer=speak_answer,
+        ask_llm_and_speak_streaming=ask_llm_and_speak_streaming,
+        record_voice_pipeline_failure=record_voice_pipeline_failure,
+        finalize_voice_reply_side_effects=finalize_voice_reply_side_effects,
+        strip_omnivoice_tags=strip_omnivoice_tags,
+        get_room_turn_scope=get_room_turn_scope,
+        detach_task=_detach_task,
+        clear_room_turn_scope=clear_room_turn_scope,
+    )
+
+
 async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes, debug_meta: dict | None = None) -> None:
     await process_member_audio_from_runtime(
         member=member,
@@ -7934,7 +7988,7 @@ async def _process_member_audio_impl(
         return
     wake_alias = session_gate.wake_alias
 
-    voice_reply_context = VoiceTranscriptReplyContext(
+    await dispatch_voice_reply_from_runtime(
         guild_id=guild_id,
         transcript=transcript_result,
         voice_segment=voice_segment,
@@ -7947,59 +8001,13 @@ async def _process_member_audio_impl(
         raw_seconds=raw_seconds,
         rms=body_rms,
         wake_detected=wake_detected,
-        reply_in_progress=bool(room_state_snapshot(room_session_key).get("reply_in_progress")),
         metrics=metrics,
-        session_topic_seed=session_topic_ids.get(session_key, ""),
-        now_monotonic=time.monotonic(),
-        ingress_source=str(metrics.setdefault("meta", {}).get("ingress_source") or "discord_voice"),
-        queue_wait_ms=float(metrics.setdefault("meta", {}).get("voice_queue_wait_ms") or 0.0),
-        active_conversation_awaiting_reply_sec=ACTIVE_CONVERSATION_AWAITING_REPLY_SEC,
-        active_conversation_voice_sec=ACTIVE_CONVERSATION_VOICE_SEC,
         member=member,
-        canned_wake_reply=CANNED_WAKE_REPLY_TEXT,
         room_key=room_key,
         person_key=person_key,
         session_memory_key=session_memory_key,
-    )
-    voice_reply_deps = VoiceTranscriptReplyDeps(
-        should_reply_to_voice=should_reply_to_voice,
-        register_drop_reason=register_drop_reason,
-        log_voice_stage=log_voice_stage,
-        log_voice_bottleneck_summary=log_voice_bottleneck_summary,
-        reset_session_bad_audio=reset_session_bad_audio,
-        build_voice_reply_request=build_voice_reply_request,
-        build_topic_id=build_topic_id,
-        session_last_stt_text=session_last_stt_text,
-        room_last_voice_reply_at=room_last_voice_reply_at,
-        room_last_voice_utterance_for_merge=room_last_voice_utterance_for_merge,
-        update_room_speaker_activity=update_room_speaker_activity,
-        pick_active_speaker=pick_active_speaker,
-        start_new_turn=start_new_turn,
-        update_session_state=update_session_state,
-        set_room_owner=set_room_owner,
-        session_partial_stt_text=session_partial_stt_text,
-        session_committed_stt_text=session_committed_stt_text,
-        partial_stt_cache=partial_stt_cache,
-        make_turn_scope=TurnScope,
-        replace_room_turn_scope=replace_room_turn_scope,
-        attach_current_task=_attach_current_task,
-        set_room_reply_in_progress=set_room_reply_in_progress,
-        session_locks=session_locks,
-        visible_text=visible_text,
-        print_fn=print,
-        get_voice_client=lambda: guild.voice_client,
-        speak_answer=speak_answer,
-        ask_llm_and_speak_streaming=ask_llm_and_speak_streaming,
-        record_voice_pipeline_failure=record_voice_pipeline_failure,
-        finalize_voice_reply_side_effects=finalize_voice_reply_side_effects,
-        strip_omnivoice_tags=strip_omnivoice_tags,
-        get_room_turn_scope=get_room_turn_scope,
-        detach_task=_detach_task,
-        clear_room_turn_scope=clear_room_turn_scope,
-    )
-    await process_voice_reply_from_transcript_context(
-        context=voice_reply_context,
-        deps=voice_reply_deps,
+        reply_deps=build_voice_transcript_reply_deps(guild),
+        deps=build_voice_reply_dispatch_deps(),
     )
     return
 
