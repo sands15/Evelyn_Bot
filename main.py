@@ -14,7 +14,7 @@ import time
 import asyncio
 import uuid
 import wave
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
 
@@ -810,6 +810,10 @@ from evelyn_core.voice_wake_probe_runtime import (
 from evelyn_core.voice_stt_execution_runtime import (
     VoiceSttExecutionDeps,
     run_voice_stt_execution_from_runtime,
+)
+from evelyn_core.voice_transcript_finalize_runtime import (
+    VoiceTranscriptFinalizeDeps,
+    finalize_voice_transcript_from_runtime,
 )
 from evelyn_core.voice_reply_side_effects import (
     VoiceReplySideEffectDeps,
@@ -7717,6 +7721,29 @@ def build_voice_stt_execution_deps() -> VoiceSttExecutionDeps:
     )
 
 
+def build_voice_transcript_finalize_deps() -> VoiceTranscriptFinalizeDeps:
+    return VoiceTranscriptFinalizeDeps(
+        build_final_transcript_flow=build_final_transcript_flow,
+        room_state_snapshot=room_state_snapshot,
+        apply_stt_post_corrections=apply_stt_post_corrections,
+        clean_text=clean_text,
+        set_partial_text=lambda key, value: session_partial_stt_text.__setitem__(key, value),
+        commit_stable_transcript=commit_stable_transcript,
+        build_transcript_result=build_transcript_result,
+        speculate_from_committed_stt=speculate_from_committed_stt,
+        remember_speculative_policy=remember_speculative_policy,
+        room_last_voice_utterance_for_merge=room_last_voice_utterance_for_merge,
+        maybe_merge_barge_in_utterance=maybe_merge_barge_in_utterance,
+        log_voice_stage=log_voice_stage,
+        print_fn=print,
+        merge_window_sec=VOICE_BARGE_IN_MERGE_WINDOW_SEC,
+        tts_interrupted_window_sec=VOICE_BARGE_IN_TTS_INTERRUPTED_WINDOW_SEC,
+        incomplete_window_sec=VOICE_BARGE_IN_INCOMPLETE_UTTERANCE_WINDOW_SEC,
+        complete_question_window_sec=VOICE_BARGE_IN_QUESTION_WINDOW_SEC,
+        adaptive_window_enabled=VOICE_BARGE_IN_ADAPTIVE_MERGE_ENABLED,
+    )
+
+
 async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes, debug_meta: dict | None = None) -> None:
     await process_member_audio_from_runtime(
         member=member,
@@ -7844,74 +7871,25 @@ async def _process_member_audio_impl(
     stt_meta = stt_execution.stt_meta
     partial_text = stt_execution.partial_text
 
-    final_transcript = build_final_transcript_flow(
+    transcript_finalization = finalize_voice_transcript_from_runtime(
+        member=member,
         text=text,
         partial_text=partial_text,
         session_key=session_key,
+        room_session_key=room_session_key,
+        turn_id=turn_id,
         wake_detected=wake_detected,
         wake_match_mode=wake_match_mode,
         wake_alias=wake_alias,
         wake_probe=wake_probe,
         wake_confirm=wake_confirm,
         wake_reject_reason=wake_reject_reason,
-        speaker_user_id=member.id,
         duration_sec=duration_sec,
-        room_state=room_state_snapshot(room_session_key),
-        apply_post_corrections=apply_stt_post_corrections,
-        clean_text=clean_text,
-        set_partial_text=lambda key, value: session_partial_stt_text.__setitem__(key, value),
-        commit_stable_transcript=commit_stable_transcript,
-        build_transcript_result=build_transcript_result,
-        speculate_from_committed_stt=speculate_from_committed_stt,
+        metrics=metrics,
+        deps=build_voice_transcript_finalize_deps(),
     )
-    if final_transcript.was_corrected:
-        print(f"[STT CORRECT] raw={text!r} -> corrected={final_transcript.corrected_text!r}")
-    text = final_transcript.corrected_text
-    committed_text = final_transcript.committed_text
-    transcript_result = final_transcript.transcript_result
-    if final_transcript.speculative_policy is not None:
-        remember_speculative_policy(session_key, final_transcript.speculative_policy)
-    if committed_text and len(clean_text(text)) >= len(committed_text):
-        text = clean_text(text)
-    meta = metrics.setdefault("meta", {})
-    interrupted_at_raw = meta.get("tts_interrupted_at")
-    interrupted_at = None
-    if interrupted_at_raw is not None:
-        try:
-            interrupted_at = float(interrupted_at_raw)
-        except (TypeError, ValueError):
-            interrupted_at = None
-    if meta.get("tts_interrupted_by_user_audio") or meta.get("local_tts_interrupted_by_user_audio"):
-        merged_text, merge_meta = maybe_merge_barge_in_utterance(
-            room_last_voice_utterance_for_merge,
-            room_session_key=room_session_key,
-            session_key=session_key,
-            user_id=member.id,
-            current_text=transcript_result.final_text,
-            current_turn_id=turn_id,
-            interrupted_at=interrupted_at,
-            merge_window_sec=VOICE_BARGE_IN_MERGE_WINDOW_SEC,
-            tts_interrupted_window_sec=VOICE_BARGE_IN_TTS_INTERRUPTED_WINDOW_SEC,
-            incomplete_window_sec=VOICE_BARGE_IN_INCOMPLETE_UTTERANCE_WINDOW_SEC,
-            complete_question_window_sec=VOICE_BARGE_IN_QUESTION_WINDOW_SEC,
-            adaptive_window_enabled=VOICE_BARGE_IN_ADAPTIVE_MERGE_ENABLED,
-            clean_text=clean_text,
-        )
-        if merge_meta:
-            transcript_result = replace(
-                transcript_result,
-                final_text=merged_text,
-                committed_text=merged_text,
-            )
-            text = merged_text
-            committed_text = merged_text
-            meta["barge_in_utterance_merge"] = merge_meta
-            log_voice_stage(
-                metrics,
-                "TTS barge-in utterance merged",
-                extra=f"delta={merge_meta.get('delta_sec')} text={merged_text!r}",
-            )
-    print(f"[STT RESULT][full-final] text={transcript_result.final_text!r} committed={transcript_result.committed_text!r} wake_detected={transcript_result.wake_detected}")
+    text = transcript_finalization.text
+    transcript_result = transcript_finalization.transcript_result
 
     short_followup_candidate = is_short_followup_candidate(
         transcript_result.final_text,

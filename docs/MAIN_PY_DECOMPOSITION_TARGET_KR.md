@@ -73,7 +73,22 @@ Last reviewed: 2026-07-15
   - CI와 같은 discovery 명령으로 전체 unittest 985개 통과
   - 실제 `main.py` 프로세스 smoke와 `PYTHONWARNINGS=error::ResourceWarning`를 함께 적용한 전체 unittest 985개 통과
 - 런타임/컨테이너 재시작과 외부 push는 하지 않았다.
-- 다음 절개 경계는 같은 함수의 transcript 확정/barge-in merge, session gate, reply context 조립 순서다.
+- 다섯 번째 절개에서 transcript 확정과 TTS barge-in 문장 병합을 분리했다.
+  - 새 모듈: `evelyn_core/runtime/evelyn_core/voice_transcript_finalize_runtime.py`
+  - 새 계약: `VoiceTranscriptFinalizeDeps`, `VoiceTranscriptFinalizeResult`
+  - 이동 책임: 최종 transcript 보정/commit/speculative 기록, interrupt 시각 정규화,
+    barge-in 문장 병합과 transcript 교체, 병합 metadata 기록.
+- 다섯 번째 절개 뒤 정확한 누적 크기 변화:
+  - `main.py`: 8,793줄 → 8,476줄
+  - `_process_member_audio_impl`: 729줄 → 255줄
+- 다섯 번째 절개 검증:
+  - 새 transcript 확정 경계 테스트 7개 통과
+  - `tests/voice` 271개 통과
+  - `tests/discord_io` 78개 통과
+  - CI와 같은 discovery 명령으로 전체 unittest 992개 통과
+  - 실제 `main.py` 프로세스 smoke와 `PYTHONWARNINGS=error::ResourceWarning`를 함께 적용한 전체 unittest 992개 통과
+- 런타임/컨테이너 재시작과 외부 push는 하지 않았다.
+- 다음 절개 경계는 같은 함수의 short transcript/final wake session gate와 reply context 조립 순서다.
 
 - [22:59 KST] cron checkpoint: `build_guild_runtime_reset_deps` 빌더 본문을
   `evelyn_core/runtime/evelyn_core/guild_runtime_reset.py`로 이전.
