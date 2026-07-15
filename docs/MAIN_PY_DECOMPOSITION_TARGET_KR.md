@@ -88,7 +88,22 @@ Last reviewed: 2026-07-15
   - CI와 같은 discovery 명령으로 전체 unittest 992개 통과
   - 실제 `main.py` 프로세스 smoke와 `PYTHONWARNINGS=error::ResourceWarning`를 함께 적용한 전체 unittest 992개 통과
 - 런타임/컨테이너 재시작과 외부 push는 하지 않았다.
-- 다음 절개 경계는 같은 함수의 short transcript/final wake session gate와 reply context 조립 순서다.
+- 여섯 번째 절개에서 short transcript와 final wake session gate를 분리했다.
+  - 새 모듈: `evelyn_core/runtime/evelyn_core/voice_session_gate_runtime.py`
+  - 새 계약: `VoiceSessionGateDeps`, `VoiceSessionGateResult`
+  - 이동 책임: short follow-up 후보 보존, short noise 차단, final-text wake veto,
+    accepted transcript debug 저장과 최종 STT trace.
+- 여섯 번째 절개 뒤 정확한 누적 크기 변화:
+  - `main.py`: 8,793줄 → 8,470줄
+  - `_process_member_audio_impl`: 729줄 → 231줄
+- 여섯 번째 절개 검증:
+  - 새 session gate 테스트 7개 통과
+  - `tests/voice` 278개 통과
+  - `tests/discord_io` 78개 통과
+  - CI와 같은 discovery 명령으로 전체 unittest 999개 통과
+  - 실제 `main.py` 프로세스 smoke와 `PYTHONWARNINGS=error::ResourceWarning`를 함께 적용한 전체 unittest 999개 통과
+- 런타임/컨테이너 재시작과 외부 push는 하지 않았다.
+- 다음 절개 경계는 같은 함수의 reply context/dependency 조립이다.
 
 - [22:59 KST] cron checkpoint: `build_guild_runtime_reset_deps` 빌더 본문을
   `evelyn_core/runtime/evelyn_core/guild_runtime_reset.py`로 이전.

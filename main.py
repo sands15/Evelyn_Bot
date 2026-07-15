@@ -815,6 +815,10 @@ from evelyn_core.voice_transcript_finalize_runtime import (
     VoiceTranscriptFinalizeDeps,
     finalize_voice_transcript_from_runtime,
 )
+from evelyn_core.voice_session_gate_runtime import (
+    VoiceSessionGateDeps,
+    run_voice_session_gate_from_runtime,
+)
 from evelyn_core.voice_reply_side_effects import (
     VoiceReplySideEffectDeps,
     finalize_voice_reply_side_effects_from_runtime,
@@ -7744,6 +7748,20 @@ def build_voice_transcript_finalize_deps() -> VoiceTranscriptFinalizeDeps:
     )
 
 
+def build_voice_session_gate_deps() -> VoiceSessionGateDeps:
+    return VoiceSessionGateDeps(
+        is_short_followup_candidate=is_short_followup_candidate,
+        should_ignore_short_transcription=should_ignore_short_transcription,
+        decide_final_wake_veto=decide_final_wake_veto,
+        extract_leading_wake_alias=extract_leading_wake_alias,
+        register_drop_reason=register_drop_reason,
+        save_voice_debug_audio=save_voice_debug_audio,
+        log_voice_stage=log_voice_stage,
+        log_voice_bottleneck_summary=log_voice_bottleneck_summary,
+        print_fn=print,
+    )
+
+
 async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes, debug_meta: dict | None = None) -> None:
     await process_member_audio_from_runtime(
         member=member,
@@ -7891,54 +7909,30 @@ async def _process_member_audio_impl(
     text = transcript_finalization.text
     transcript_result = transcript_finalization.transcript_result
 
-    short_followup_candidate = is_short_followup_candidate(
-        transcript_result.final_text,
-        pcm_bytes,
-        wake_detected=transcript_result.wake_detected,
+    session_gate = run_voice_session_gate_from_runtime(
+        member=member,
+        transcript_result=transcript_result,
+        text=text,
+        pcm_bytes=pcm_bytes,
+        audio16k=audio16k,
+        debug_meta=debug_meta,
+        stt_meta=stt_meta,
+        guild_id=guild_id,
+        speaker_name=speaker_name,
+        session_key=session_key,
+        room_session_key=room_session_key,
+        owner_user_id=owner_user_id,
         owner_followup_active=owner_followup_active,
+        wake_probe=wake_probe,
+        wake_confirm=wake_confirm,
+        wake_detected=wake_detected,
+        wake_alias=wake_alias,
+        metrics=metrics,
+        deps=build_voice_session_gate_deps(),
     )
-    if should_ignore_short_transcription(transcript_result.final_text, pcm_bytes, wake_detected=transcript_result.wake_detected):
-        if short_followup_candidate:
-            print(f"[SHORT FOLLOWUP CANDIDATE] text={transcript_result.final_text!r}")
-            metrics.setdefault("meta", {})["short_followup_candidate"] = True
-            save_voice_debug_audio(guild_id, speaker_name, pcm_bytes, audio16k, wake_probe=wake_probe, final_text=f"[SHORT FOLLOWUP CANDIDATE] {text}", debug_meta=debug_meta, stt_meta=stt_meta, session_key=session_key, stage_label="drop")
-        else:
-            print(f"[STT IGNORE] short_noise: {transcript_result.final_text!r}")
-            save_voice_debug_audio(guild_id, speaker_name, pcm_bytes, audio16k, wake_probe=wake_probe, final_text=transcript_result.final_text, debug_meta=debug_meta, stt_meta=stt_meta, session_key=session_key, stage_label="drop")
-            log_voice_stage(metrics, "짧은 STT 무시", extra=f"text={transcript_result.final_text!r}")
-            return
-
-    final_wake_decision = decide_final_wake_veto(
-        final_text=transcript_result.final_text,
-        owner_followup_active=owner_followup_active,
-        extract_leading_wake_alias=extract_leading_wake_alias,
-    )
-    if not final_wake_decision.accepted:
-        wake_detected = False
-        wake_match_mode = "rejected"
-        wake_reject_reason = final_wake_decision.reject_reason or "full_text_veto"
-        register_drop_reason(
-            metrics,
-            "full_text_veto",
-            session_key=session_key,
-            room_session_key=room_session_key,
-            owner_user_id=owner_user_id,
-            wake_probe_text=wake_probe,
-            wake_confirm_text=wake_confirm,
-            final_text=transcript_result.final_text,
-        )
-        save_voice_debug_audio(guild_id, speaker_name, pcm_bytes, audio16k, wake_probe=wake_probe, final_text=transcript_result.final_text, debug_meta=debug_meta, stt_meta=stt_meta, session_key=session_key, stage_label="drop")
-        log_voice_stage(metrics, "final text veto", extra=f"wake_reject_reason={wake_reject_reason} text={transcript_result.final_text!r}")
-        log_voice_bottleneck_summary(metrics, label="voice_drop", extra="drop=full_text_veto", event_name="voice_drop_summary")
+    if session_gate is None:
         return
-    if final_wake_decision.wake_alias is not None:
-        wake_alias = final_wake_decision.wake_alias
-
-    save_voice_debug_audio(guild_id, speaker_name, pcm_bytes, audio16k, wake_probe=wake_probe, final_text=transcript_result.final_text, debug_meta=debug_meta, stt_meta=stt_meta, session_key=session_key, stage_label="final")
-    print(
-        f"🎤 [{member.display_name}] wake_detected={transcript_result.wake_detected} wake_match_mode={transcript_result.wake_match_mode} wake_alias={transcript_result.wake_alias!r} "
-        f"wake_probe_text={transcript_result.probe_text!r} wake_confirm_text={transcript_result.confirm_text!r} wake_reject_reason={transcript_result.reject_reason!r} text={transcript_result.final_text}"
-    )
+    wake_alias = session_gate.wake_alias
 
     voice_reply_context = VoiceTranscriptReplyContext(
         guild_id=guild_id,

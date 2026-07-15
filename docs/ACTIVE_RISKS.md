@@ -46,9 +46,9 @@ CI의 실제 프로세스 smoke는 `main.py`가 기동 가능한지만 확인한
 
 ## P1 — `main.py` 구조 부채
 
-`main.py` 분해를 시작해 음성 ingress/audio filtering, wake probe/환경음 조기 차단, TTS interrupt/input suppression gate, partial/full STT 실행, transcript 확정/barge-in merge는 런타임 모듈로 이동했다. 그러나 `_process_member_audio_impl`은 여전히 255줄이며 short transcript/final wake session gate와 reply context 조립을 한 함수에서 연결한다. 파일이 줄었다고 구조 위험이 해결된 상태는 아니다.
+`main.py` 분해를 시작해 음성 ingress/audio filtering, wake probe/환경음 조기 차단, TTS interrupt/input suppression gate, partial/full STT 실행, transcript 확정/barge-in merge, short transcript/final wake session gate는 런타임 모듈로 이동했다. 그러나 `_process_member_audio_impl`은 여전히 231줄이며 reply context와 대규모 dependency 조립을 직접 수행한다. 파일이 줄었다고 구조 위험이 해결된 상태는 아니다.
 
-다음 조치: short transcript/final wake session gate와 reply context 경계를 결과 객체 기반으로 순서대로 분리하고 각 단계 뒤 전체 회귀를 유지한다.
+다음 조치: reply context/dependency 조립 경계를 분리하고 전체 회귀를 유지한다.
 
 ## P2 — 설정과 예외 처리의 잔여 분산
 
