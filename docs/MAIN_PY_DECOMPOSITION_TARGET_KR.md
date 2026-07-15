@@ -237,6 +237,30 @@ Last reviewed: 2026-07-15
 - 런타임/컨테이너 재시작과 외부 push는 하지 않았다.
 - 다음 후보는 `speak_answer_local` 65줄, `ask_summary_llm` 64줄,
   `ask_router_llm` 64줄과 dependency builder composition root 정리다.
+- 열여덟 번째 배치에서 65줄 `speak_answer_local`을 분리했다.
+  - 확장 모듈/계약: `local_tts_stream_runtime.py`, `LocalTtsSingleRuntimeDeps`
+  - 이동 책임: enabled/empty gate, source callback/ready wait, local playback, 취소 전파, 실패 기록과 task detach.
+  - 새 테스트 6개: disabled, empty, 정상 callback/playback, 실패, 취소, main 위임.
+- 열아홉 번째·스무 번째 배치에서 각 64줄 `ask_summary_llm`과 `ask_router_llm`을 공통화했다.
+  - 새 모듈/계약: `json_llm_request_runtime.py`, `JsonLlmRequestRuntimeDeps`
+  - 이동 책임: non-streaming JSON payload/timeout/HTTP 오류, content/reasoning JSON 추출,
+    empty choices와 성공 model trace.
+  - `main.py`는 summary/router별 model/endpoint/role/error label만 조립한다.
+  - 새 테스트 5개: content, reasoning, empty choices, role별 HTTP 오류, 두 main wrapper 위임.
+- 스무 번째 배치 뒤 정확한 누적 크기 변화:
+  - `main.py`: 8,793줄 → 7,554줄
+  - 현재 최대 함수는 `build_fast_path_policy_runtime_deps` 72줄,
+    최대 실행 함수는 Discord 단일 `speak_answer` 60줄이다.
+- 열여덟 번째~스무 번째 배치 통합 검증:
+  - 새 테스트 11개와 관련 테스트 35개 통과
+  - 일반 discovery 전체 unittest 1,075개 통과(실제 `main.py` opt-in 1개 의도적 skip)
+  - 실제 `main.py` smoke와 `PYTHONWARNINGS=error::ResourceWarning`를 함께 적용한 전체 unittest 1,075개 통과
+  - Python `compileall`, `git diff --check` 통과
+- 신규 local TTS empty 테스트의 첫 실행에서 test double이 실제 `clean_tts_text`와 달리
+  OmniVoice 태그를 제거하지 않아 1개가 실패했고, 실제 계약으로 수정 후 관련/전체 회귀를 재통과했다.
+- 런타임/컨테이너 재시작과 외부 push는 하지 않았다.
+- 다음 후보는 `speak_answer` 60줄, `transcribe_audio16k_sync` 55줄,
+  `connect_evelyn_voice_client` 55줄과 dependency builder composition root 정리다.
 
 - [22:59 KST] cron checkpoint: `build_guild_runtime_reset_deps` 빌더 본문을
   `evelyn_core/runtime/evelyn_core/guild_runtime_reset.py`로 이전.
@@ -766,9 +790,11 @@ Last reviewed: 2026-07-15
 - `omnivoice_source_runtime.py`
   - OmniVoice HTTP PCM streaming, trace callback, source lifecycle, clone fallback 실행과 turn-scope producer cleanup.
 - `local_tts_stream_runtime.py`
-  - 로컬 스피커 sentence source prefetch, 순차 재생, latency trace, 실패 기록과 leftover source cleanup.
+  - 로컬 스피커 단일/sentence source 합성, ready wait/prefetch, 순차 재생, latency trace, 실패 기록과 cleanup.
 - `discord_tts_stream_runtime.py`
   - Discord sentence TTS source callback/trace, streaming playback request, prefetch/prepared failure stage와 turn-scope cleanup.
+- `json_llm_request_runtime.py`
+  - summary/router 공통 non-streaming JSON LLM payload/HTTP/timeout, content/reasoning 추출과 성공 trace.
 - `startup_audio_runtime.py`
   - Opus startup load checks and STT silence warmup orchestration with runtime dependencies injected from `main.py`.
 - `stt_task_runtime.py`

@@ -28,6 +28,124 @@ class LocalTtsStreamRuntimeDeps:
     mark_local_tts_first_playback: Callable[..., None]
 
 
+@dataclass(frozen=True)
+class LocalTtsSingleRuntimeDeps:
+    playback_manager: Any
+    clean_tts_text: Callable[[str], str]
+    strip_omnivoice_tags: Callable[[str], str]
+    attach_current_task: Callable[[Any], Any]
+    detach_task: Callable[[Any, Any], None]
+    tts_running_state: Any
+    tts_lock: Any
+    create_omnivoice_source: Callable[..., Awaitable[Any]]
+    mark_turn_stage: Callable[..., None]
+    log_voice_latency: Callable[..., None]
+    log_turn_event: Callable[..., None]
+    mark_local_tts_first_playback: Callable[..., None]
+    record_voice_pipeline_failure: Callable[..., None]
+    omnivoice_timeout_sec: float
+
+
+async def speak_answer_local_from_runtime(
+    answer: str,
+    *,
+    deps: LocalTtsSingleRuntimeDeps,
+    turn_id: str | None = None,
+    session_key: str | None = None,
+    turn_scope: Any = None,
+    metrics: dict | None = None,
+) -> bool:
+    if not deps.playback_manager.enabled:
+        return False
+    text = deps.clean_tts_text(deps.strip_omnivoice_tags(answer) or answer)
+    if not text:
+        return False
+    task = deps.attach_current_task(turn_scope)
+    if turn_scope is not None:
+        turn_scope.transition(deps.tts_running_state, reason="local_speaker_tts")
+    try:
+        async with deps.tts_lock:
+            source = await deps.create_omnivoice_source(
+                text,
+                turn_id=turn_id,
+                chunk_index=1,
+                session_key=session_key,
+                turn_scope=turn_scope,
+                trace_payload={
+                    "source_type": "LocalSpeakerOmniVoicePCMStream",
+                    "output_mode": "local_speaker",
+                },
+                on_request_start=lambda: (
+                    deps.mark_turn_stage(
+                        metrics,
+                        "tts_request_start",
+                        event_name="local_tts_request_start",
+                        chunk_index=1,
+                    ),
+                    deps.log_voice_latency(metrics, "tts_request_logged", "Local TTS request start"),
+                ),
+                on_response_headers=lambda: deps.log_voice_latency(
+                    metrics,
+                    "tts_response_headers_logged",
+                    "Local TTS response headers",
+                ),
+                on_first_byte=lambda: (
+                    deps.mark_turn_stage(
+                        metrics,
+                        "tts_first_byte",
+                        event_name="local_tts_first_byte",
+                        chunk_index=1,
+                    ),
+                    deps.log_voice_latency(metrics, "tts_first_byte_logged", "Local TTS first byte"),
+                ),
+                on_first_frame=lambda: deps.log_voice_latency(
+                    metrics,
+                    "tts_first_frame_logged",
+                    "Local TTS first frame",
+                ),
+                on_first_packet_sent=lambda: (
+                    deps.log_voice_latency(
+                        metrics,
+                        "first_packet_sent_logged",
+                        "Local speaker first packet",
+                    ),
+                    deps.log_turn_event(
+                        "local_tts_first_packet_sent",
+                        turn_id=turn_id,
+                        chunk_index=1,
+                        session_key=session_key,
+                    ),
+                ),
+            )
+            wait_until_ready = getattr(source, "wait_until_ready", None)
+            if wait_until_ready is not None:
+                await wait_until_ready(timeout=max(0.2, deps.omnivoice_timeout_sec))
+            return await deps.playback_manager.play_source(
+                source,
+                cleanup_source=True,
+                on_first_playback=lambda: deps.mark_local_tts_first_playback(
+                    metrics,
+                    turn_id=turn_id,
+                    chunk_index=1,
+                    session_key=session_key,
+                ),
+            )
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        deps.record_voice_pipeline_failure(
+            "tts_playback_failed",
+            exc,
+            metrics,
+            turn_id=turn_id,
+            session_key=session_key,
+            stage="local_speaker",
+        )
+        return False
+    finally:
+        deps.detach_task(turn_scope, task)
+
+
 async def stream_local_tts_sentences_from_runtime(
     sentence_queue: "asyncio.Queue[str | None]",
     *,

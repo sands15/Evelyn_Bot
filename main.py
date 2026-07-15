@@ -232,6 +232,7 @@ from evelyn_core.route_fallback_policy import (
     classify_llm_route_fallback,
 )
 from evelyn_core.llm_route_runtime import LlmRouteRuntimeDeps, classify_llm_route_from_runtime
+from evelyn_core.json_llm_request_runtime import JsonLlmRequestRuntimeDeps, ask_json_llm_from_runtime
 from evelyn_core.fast_path_policy import (
     FastPathPolicyRuntimeDeps,
     context_policy_for_fast_path_policy_from_runtime,
@@ -496,7 +497,9 @@ from evelyn_core.voice_timing_runtime import (
 )
 from evelyn_core.local_tts_playback import LocalTtsPlaybackManager
 from evelyn_core.local_tts_stream_runtime import (
+    LocalTtsSingleRuntimeDeps,
     LocalTtsStreamRuntimeDeps,
+    speak_answer_local_from_runtime,
     stream_local_tts_sentences_from_runtime,
 )
 from evelyn_core.observability_metrics import (
@@ -3405,6 +3408,21 @@ def extract_json_object(text: str) -> dict:
     return extract_json_object_from_runtime(text)
 
 
+def build_summary_json_llm_runtime_deps() -> JsonLlmRequestRuntimeDeps:
+    return JsonLlmRequestRuntimeDeps(
+        model_name=SUMMARY_MODEL_NAME,
+        endpoint=SUMMARY_LLM_URL,
+        model_role="summary",
+        error_label="요약 LLM",
+        get_http_session=get_http_session,
+        client_timeout_factory=aiohttp.ClientTimeout,
+        monotonic=time.monotonic,
+        clean_text=clean_text,
+        extract_json_object=extract_json_object_from_runtime,
+        record_model_call_trace=record_model_call_trace,
+    )
+
+
 async def ask_summary_llm(
     messages: list[dict],
     *,
@@ -3417,58 +3435,33 @@ async def ask_summary_llm(
     source: str | None = None,
     guild_id: int | None = None,
 ) -> dict:
-    session = await get_http_session()
-    payload = {
-        "model": SUMMARY_MODEL_NAME,
-        "messages": messages,
-        "temperature": 0.1,
-        "max_tokens": max_tokens,
-        "stream": False,
-    }
-    timeout = aiohttp.ClientTimeout(total=timeout_seconds)
-    started_at = time.monotonic()
+    return await ask_json_llm_from_runtime(
+        messages,
+        deps=build_summary_json_llm_runtime_deps(),
+        max_tokens=max_tokens,
+        timeout_seconds=timeout_seconds,
+        purpose=purpose,
+        hot_path=hot_path,
+        turn_id=turn_id,
+        session_key=session_key,
+        source=source,
+        guild_id=guild_id,
+    )
 
-    async with session.post(SUMMARY_LLM_URL, json=payload, timeout=timeout) as resp:
-        if resp.status != 200:
-            error_text = await resp.text()
-            raise RuntimeError(f"요약 LLM 서버 오류: {resp.status} / {error_text[:300]}")
 
-        data = await resp.json()
-        choices = data.get("choices", [])
-        if not choices:
-            result: dict = {}
-            record_model_call_trace(
-                model_role="summary",
-                purpose=purpose,
-                hot_path=hot_path,
-                started_at=started_at,
-                success=True,
-                model_name=SUMMARY_MODEL_NAME,
-                endpoint=SUMMARY_LLM_URL,
-                turn_id=turn_id,
-                session_key=session_key,
-                source=source,
-                guild_id=guild_id,
-            )
-            return result
-
-        msg = choices[0].get("message", {})
-        text = clean_text(msg.get("content", "") or msg.get("reasoning_content", ""))
-        result = extract_json_object_from_runtime(text)
-        record_model_call_trace(
-            model_role="summary",
-            purpose=purpose,
-            hot_path=hot_path,
-            started_at=started_at,
-            success=True,
-            model_name=SUMMARY_MODEL_NAME,
-            endpoint=SUMMARY_LLM_URL,
-            turn_id=turn_id,
-            session_key=session_key,
-            source=source,
-            guild_id=guild_id,
-        )
-        return result
+def build_router_json_llm_runtime_deps() -> JsonLlmRequestRuntimeDeps:
+    return JsonLlmRequestRuntimeDeps(
+        model_name=ROUTER_MODEL_NAME,
+        endpoint=ROUTER_LLM_URL,
+        model_role="router",
+        error_label="router LLM",
+        get_http_session=get_http_session,
+        client_timeout_factory=aiohttp.ClientTimeout,
+        monotonic=time.monotonic,
+        clean_text=clean_text,
+        extract_json_object=extract_json_object_from_runtime,
+        record_model_call_trace=record_model_call_trace,
+    )
 
 
 async def ask_router_llm(
@@ -3483,58 +3476,18 @@ async def ask_router_llm(
     source: str | None = None,
     guild_id: int | None = None,
 ) -> dict:
-    session = await get_http_session()
-    payload = {
-        "model": ROUTER_MODEL_NAME,
-        "messages": messages,
-        "temperature": 0.1,
-        "max_tokens": max_tokens,
-        "stream": False,
-    }
-    timeout = aiohttp.ClientTimeout(total=timeout_seconds)
-    started_at = time.monotonic()
-
-    async with session.post(ROUTER_LLM_URL, json=payload, timeout=timeout) as resp:
-        if resp.status != 200:
-            error_text = await resp.text()
-            raise RuntimeError(f"router LLM 서버 오류: {resp.status} / {error_text[:300]}")
-
-        data = await resp.json()
-        choices = data.get("choices", [])
-        if not choices:
-            result: dict = {}
-            record_model_call_trace(
-                model_role="router",
-                purpose=purpose,
-                hot_path=hot_path,
-                started_at=started_at,
-                success=True,
-                model_name=ROUTER_MODEL_NAME,
-                endpoint=ROUTER_LLM_URL,
-                turn_id=turn_id,
-                session_key=session_key,
-                source=source,
-                guild_id=guild_id,
-            )
-            return result
-
-        msg = choices[0].get("message", {})
-        text = clean_text(msg.get("content", "") or msg.get("reasoning_content", ""))
-        result = extract_json_object_from_runtime(text)
-        record_model_call_trace(
-            model_role="router",
-            purpose=purpose,
-            hot_path=hot_path,
-            started_at=started_at,
-            success=True,
-            model_name=ROUTER_MODEL_NAME,
-            endpoint=ROUTER_LLM_URL,
-            turn_id=turn_id,
-            session_key=session_key,
-            source=source,
-            guild_id=guild_id,
-        )
-        return result
+    return await ask_json_llm_from_runtime(
+        messages,
+        deps=build_router_json_llm_runtime_deps(),
+        max_tokens=max_tokens,
+        timeout_seconds=timeout_seconds,
+        purpose=purpose,
+        hot_path=hot_path,
+        turn_id=turn_id,
+        session_key=session_key,
+        source=source,
+        guild_id=guild_id,
+    )
 
 
 def build_llm_route_runtime_deps() -> LlmRouteRuntimeDeps:
@@ -4893,6 +4846,25 @@ async def stream_tts_sentences(
     )
 
 
+def build_local_tts_single_runtime_deps() -> LocalTtsSingleRuntimeDeps:
+    return LocalTtsSingleRuntimeDeps(
+        playback_manager=local_tts_playback_manager,
+        clean_tts_text=clean_tts_text,
+        strip_omnivoice_tags=strip_omnivoice_tags,
+        attach_current_task=_attach_current_task,
+        detach_task=_detach_task,
+        tts_running_state=TurnState.TTS_RUNNING,
+        tts_lock=tts_lock,
+        create_omnivoice_source=create_omnivoice_source,
+        mark_turn_stage=mark_turn_stage,
+        log_voice_latency=log_voice_latency,
+        log_turn_event=log_turn_event,
+        mark_local_tts_first_playback=_mark_local_tts_first_playback,
+        record_voice_pipeline_failure=record_voice_pipeline_failure,
+        omnivoice_timeout_sec=OMNIVOICE_TIMEOUT_SEC,
+    )
+
+
 async def speak_answer_local(
     answer: str,
     *,
@@ -4901,63 +4873,14 @@ async def speak_answer_local(
     turn_scope: TurnScope | None = None,
     metrics: dict | None = None,
 ) -> bool:
-    if not local_tts_playback_manager.enabled:
-        return False
-    text = clean_tts_text(strip_omnivoice_tags(answer) or answer)
-    if not text:
-        return False
-    task = _attach_current_task(turn_scope)
-    if turn_scope is not None:
-        turn_scope.transition(TurnState.TTS_RUNNING, reason="local_speaker_tts")
-    try:
-        async with tts_lock:
-            source = await create_omnivoice_source(
-                text,
-                turn_id=turn_id,
-                chunk_index=1,
-                session_key=session_key,
-                turn_scope=turn_scope,
-                trace_payload={"source_type": "LocalSpeakerOmniVoicePCMStream", "output_mode": "local_speaker"},
-                on_request_start=lambda: (
-                    mark_turn_stage(metrics, "tts_request_start", event_name="local_tts_request_start", chunk_index=1),
-                    log_voice_latency(metrics, "tts_request_logged", "Local TTS request start"),
-                ),
-                on_response_headers=lambda: log_voice_latency(metrics, "tts_response_headers_logged", "Local TTS response headers"),
-                on_first_byte=lambda: (
-                    mark_turn_stage(metrics, "tts_first_byte", event_name="local_tts_first_byte", chunk_index=1),
-                    log_voice_latency(metrics, "tts_first_byte_logged", "Local TTS first byte"),
-                ),
-                on_first_frame=lambda: log_voice_latency(metrics, "tts_first_frame_logged", "Local TTS first frame"),
-                on_first_packet_sent=lambda: (
-                    log_voice_latency(metrics, "first_packet_sent_logged", "Local speaker first packet"),
-                    log_turn_event(
-                        "local_tts_first_packet_sent",
-                        turn_id=turn_id,
-                        chunk_index=1,
-                        session_key=session_key,
-                    ),
-                ),
-            )
-            wait_until_ready = getattr(source, "wait_until_ready", None)
-            if wait_until_ready is not None:
-                await wait_until_ready(timeout=max(0.2, OMNIVOICE_TIMEOUT_SEC))
-            return await local_tts_playback_manager.play_source(
-                source,
-                cleanup_source=True,
-                on_first_playback=lambda: _mark_local_tts_first_playback(
-                    metrics,
-                    turn_id=turn_id,
-                    chunk_index=1,
-                    session_key=session_key,
-                ),
-            )
-    except asyncio.CancelledError:
-        raise
-    except Exception as exc:
-        record_voice_pipeline_failure("tts_playback_failed", exc, metrics, turn_id=turn_id, session_key=session_key, stage="local_speaker")
-        return False
-    finally:
-        _detach_task(turn_scope, task)
+    return await speak_answer_local_from_runtime(
+        answer,
+        deps=build_local_tts_single_runtime_deps(),
+        turn_id=turn_id,
+        session_key=session_key,
+        turn_scope=turn_scope,
+        metrics=metrics,
+    )
 
 
 def _cleanup_prepared_tts_item(item: object) -> None:
