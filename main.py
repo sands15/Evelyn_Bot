@@ -62,7 +62,6 @@ from evelyn_core.autonomy_observation_state import (
 from evelyn_core.autonomy_router import (
     ResolveRouteExecutorRuntimeDeps,
     RoutedAutonomyExecutor,
-    resolve_route_executor_from_runtime,
 )
 from evelyn_core.autonomy_runtime_factory import (
     AutonomyRuntimeFactoryDeps,
@@ -213,10 +212,7 @@ from evelyn_core.response_output_policy import (
     extract_json_object_from_runtime,
     fallback_for_unrequested_minecraft_leak_from_runtime,
     format_display_text_from_runtime,
-    normalize_friend_style_output,
     parse_response_action_tag,
-    sanitize_model_output_from_runtime,
-    extract_answer_from_reasoning_from_runtime,
     sanitize_unrequested_minecraft_leak_from_runtime,
     should_label_question_response_from_runtime,
 )
@@ -238,45 +234,26 @@ from evelyn_core.runtime_mode_policy import compute_runtime_mode_from_state, app
 from evelyn_core.route_fallback_policy import (
     classify_llm_route_fallback,
 )
-from evelyn_core.llm_route_runtime import LlmRouteRuntimeDeps, classify_llm_route_from_runtime
-from evelyn_core.json_llm_request_runtime import JsonLlmRequestRuntimeDeps, ask_json_llm_from_runtime
+from evelyn_core.llm_route_runtime import LlmRouteRuntimeDeps
+from evelyn_core.json_llm_request_runtime import JsonLlmRequestRuntimeDeps
 from evelyn_core.fast_path_policy import (
     FastPathPolicyRuntimeDeps,
-    context_policy_for_fast_path_policy_from_runtime,
-    deep_route_marker_count_from_runtime,
-    fast_path_policy_from_runtime,
-    has_negated_search_marker_from_runtime,
-    is_control_page_source_from_runtime,
-    is_obvious_continue_from_runtime,
-    is_simple_directive_from_runtime,
-    needs_search_or_deep_routing_from_runtime,
 )
 from evelyn_core.tool_awareness_policy import build_tool_awareness_context
 from evelyn_core.local_tool_diagnostic_context import build_local_tool_diagnostic_context
 from evelyn_core.http_session_runtime import ensure_http_session_from_runtime
-from evelyn_core.llm_context_assembly import LlmContextAssemblyDeps, prepare_llm_messages_from_runtime
-from evelyn_core.llm_warmup_runtime import LlmWarmupRuntimeDeps, warmup_llm_from_runtime
+from evelyn_core.llm_context_assembly import LlmContextAssemblyDeps
+from evelyn_core.llm_warmup_runtime import LlmWarmupRuntimeDeps
+from evelyn_core.llm_route_composition_runtime import LlmRouteComposition, LlmRouteCompositionDeps
 from evelyn_core.main_llm_runtime import (
     AskLlmOnceRuntimeDeps,
     MainLlmRuntimeDeps,
-    ask_llm_once_from_runtime,
-    execute_main_llm_once_from_runtime,
-    render_tool_synthesis_recent_context as render_tool_synthesis_recent_context_with_deps,
-    resolve_promised_search_final_answer_from_runtime,
-    synthesize_tool_result_with_main_llm_from_runtime,
-    tool_synthesis_answer_drifted as tool_synthesis_answer_drifted_payload,
 )
 from evelyn_core.search_followup_runtime import (
-    build_search_query_from_runtime,
     SearchFollowupRuntimeDeps,
-    deliver_proactive_followup_from_runtime,
-    run_search_followup_from_runtime,
-    schedule_search_followup_from_runtime,
-    schedule_search_followup_singleflight_from_runtime,
 )
 from evelyn_core.search_answer_runtime import (
     SearchAnswerRuntimeDeps,
-    answer_from_search_results_from_runtime,
 )
 from evelyn_core.memory_context_state import build_memory_context
 from evelyn_core.startup_audio_runtime import (
@@ -333,7 +310,6 @@ from runtime_lifecycle import (
 )
 from evelyn_core.context_pipeline import (
     ContextBuilder,
-    ContextPolicy,
     build_basic_context_packet,
     build_context_policy_for_turn,
     build_conversation_state_context,
@@ -737,8 +713,6 @@ from evelyn_core.voice_utterance import (
     UtteranceAssemblyConfig,
 )
 from evelyn_core.voice_orchestration import (
-    VoiceTurnRequest,
-    VoiceTurnRouteContext,
     VoiceTranscriptReplyDeps,
     apply_voice_ingress_dequeue_debug_meta,
     build_rejected_voice_turn,
@@ -749,7 +723,6 @@ from evelyn_core.voice_orchestration import (
 )
 from evelyn_core.voice_turn_entry_runtime import (
     VoiceTurnEntryRuntimeDeps,
-    ask_llm_streaming_from_runtime,
 )
 from evelyn_core.voice_reply_dispatch_runtime import (
     VoiceReplyDispatchDeps,
@@ -762,12 +735,7 @@ from evelyn_core.voice_member_audio_pipeline_runtime import (
 from evelyn_core.voice_route_execution import (
     VoiceMainLlmStreamingDeps,
     VoiceRouteExecutionDeps,
-    execute_main_llm_streaming_turn as execute_main_llm_streaming_turn_with_deps,
-    execute_search_then_answer_action as execute_search_then_answer_action_with_deps,
     build_voice_main_llm_streaming_deps as build_voice_main_llm_streaming_deps_from_runtime,
-    maybe_execute_registered_route as maybe_execute_registered_route_with_deps,
-    maybe_handle_short_circuit_route as maybe_handle_short_circuit_route_with_deps,
-    prepare_route_context as prepare_route_context_with_deps,
 )
 from evelyn_core.voice_response_runtime import (
     VoiceResponseRuntimeDeps,
@@ -833,7 +801,6 @@ from evelyn_core.voice_delivery_runtime import (
     execute_voice_delivery_plan_from_runtime,
 )
 from evelyn_core.voice_pipeline import (
-    ActionResult,
     AnswerPayload,
     DeliveryPlan,
     RouteDecision,
@@ -2593,47 +2560,6 @@ def build_fast_path_policy_runtime_deps() -> FastPathPolicyRuntimeDeps:
     )
 
 
-def is_control_page_source(source: str) -> bool:
-    return is_control_page_source_from_runtime(source, deps=build_fast_path_policy_runtime_deps())
-
-
-def deep_route_marker_count(text: str, *, ignore_search_markers: bool = False) -> int:
-    return deep_route_marker_count_from_runtime(
-        text,
-        ignore_search_markers=ignore_search_markers,
-        deps=build_fast_path_policy_runtime_deps(),
-    )
-
-
-def has_negated_search_marker(text: str) -> bool:
-    return has_negated_search_marker_from_runtime(text, deps=build_fast_path_policy_runtime_deps())
-
-
-def needs_search_or_deep_routing(text: str, *, source: str = "text") -> bool:
-    return needs_search_or_deep_routing_from_runtime(text, source=source, deps=build_fast_path_policy_runtime_deps())
-
-
-def is_simple_directive(text: str, *, source: str = "text") -> bool:
-    return is_simple_directive_from_runtime(text, source=source, deps=build_fast_path_policy_runtime_deps())
-
-
-def is_obvious_continue(text: str, source: str, room_state: dict | None = None) -> bool:
-    return is_obvious_continue_from_runtime(
-        text,
-        source,
-        room_state=room_state,
-        deps=build_fast_path_policy_runtime_deps(),
-    )
-
-
-def fast_path_policy(text: str, source: str, room_state: dict | None = None) -> dict | None:
-    return fast_path_policy_from_runtime(text, source, room_state=room_state, deps=build_fast_path_policy_runtime_deps())
-
-
-def context_policy_for_fast_path_policy(policy: dict | None, *, source: str) -> dict[str, Any]:
-    return context_policy_for_fast_path_policy_from_runtime(policy, source=source, deps=build_fast_path_policy_runtime_deps())
-
-
 def should_ignore_short_transcription(
     text: str,
     pcm_bytes: bytes,
@@ -3318,37 +3244,6 @@ def build_llm_context_assembly_deps() -> LlmContextAssemblyDeps:
     )
 
 
-async def prepare_llm_messages(
-    user_text: str,
-    *,
-    guild_id: int | None = None,
-    session_key: str | None = None,
-    room_key: str | None = None,
-    person_key: str | None = None,
-    session_memory_key: str | None = None,
-    source: str = "text",
-    debug_text: str | None = None,
-    metrics: dict | None = None,
-    turn_scope: TurnScope | None = None,
-) -> tuple[list[dict], dict | None, str, ContextPolicy]:
-    return await prepare_llm_messages_from_runtime(
-        user_text,
-        deps=build_llm_context_assembly_deps(),
-        guild_id=guild_id,
-        session_key=session_key,
-        room_key=room_key,
-        person_key=person_key,
-        session_memory_key=session_memory_key,
-        source=source,
-        debug_text=debug_text,
-        metrics=metrics,
-        turn_scope=turn_scope,
-    )
-
-def extract_json_object(text: str) -> dict:
-    return extract_json_object_from_runtime(text)
-
-
 def build_summary_json_llm_runtime_deps() -> JsonLlmRequestRuntimeDeps:
     return JsonLlmRequestRuntimeDeps(
         model_name=SUMMARY_MODEL_NAME,
@@ -3364,32 +3259,6 @@ def build_summary_json_llm_runtime_deps() -> JsonLlmRequestRuntimeDeps:
     )
 
 
-async def ask_summary_llm(
-    messages: list[dict],
-    *,
-    max_tokens: int = 500,
-    timeout_seconds: float = 90,
-    purpose: str = "memory_summary",
-    hot_path: bool = False,
-    turn_id: str | None = None,
-    session_key: str | None = None,
-    source: str | None = None,
-    guild_id: int | None = None,
-) -> dict:
-    return await ask_json_llm_from_runtime(
-        messages,
-        deps=build_summary_json_llm_runtime_deps(),
-        max_tokens=max_tokens,
-        timeout_seconds=timeout_seconds,
-        purpose=purpose,
-        hot_path=hot_path,
-        turn_id=turn_id,
-        session_key=session_key,
-        source=source,
-        guild_id=guild_id,
-    )
-
-
 def build_router_json_llm_runtime_deps() -> JsonLlmRequestRuntimeDeps:
     return JsonLlmRequestRuntimeDeps(
         model_name=ROUTER_MODEL_NAME,
@@ -3402,32 +3271,6 @@ def build_router_json_llm_runtime_deps() -> JsonLlmRequestRuntimeDeps:
         clean_text=clean_text,
         extract_json_object=extract_json_object_from_runtime,
         record_model_call_trace=record_model_call_trace,
-    )
-
-
-async def ask_router_llm(
-    messages: list[dict],
-    *,
-    max_tokens: int,
-    timeout_seconds: float,
-    purpose: str = "route",
-    hot_path: bool = True,
-    turn_id: str | None = None,
-    session_key: str | None = None,
-    source: str | None = None,
-    guild_id: int | None = None,
-) -> dict:
-    return await ask_json_llm_from_runtime(
-        messages,
-        deps=build_router_json_llm_runtime_deps(),
-        max_tokens=max_tokens,
-        timeout_seconds=timeout_seconds,
-        purpose=purpose,
-        hot_path=hot_path,
-        turn_id=turn_id,
-        session_key=session_key,
-        source=source,
-        guild_id=guild_id,
     )
 
 
@@ -3459,14 +3302,6 @@ def build_llm_route_runtime_deps() -> LlmRouteRuntimeDeps:
     )
 
 
-async def classify_llm_route_async(user_text: str, *, guild_id: int | None = None, source: str = "text", session_key: str | None = None) -> tuple[str, dict | None]:
-    return await classify_llm_route_from_runtime(
-        user_text,
-        deps=build_llm_route_runtime_deps(),
-        guild_id=guild_id,
-        source=source,
-        session_key=session_key,
-    )
 def build_cognitive_state_runtime_deps() -> CognitiveStateRuntimeDeps:
     return CognitiveStateRuntimeDeps(
         attach_current_task=_attach_current_task,
@@ -3656,21 +3491,6 @@ def schedule_memory_update(
         runtime_mode=runtime_mode,
     )
 
-def sanitize_model_output(text: str) -> str:
-    return sanitize_model_output_from_runtime(
-        text,
-        deps=build_response_output_policy_runtime_deps(),
-    )
-
-
-def extract_answer_from_reasoning(reasoning: str, user_text: str) -> str:
-    return extract_answer_from_reasoning_from_runtime(
-        reasoning,
-        user_text,
-        deps=build_response_output_policy_runtime_deps(),
-    )
-
-
 async def get_http_session() -> aiohttp.ClientSession:
     global http_session
     http_session = ensure_http_session_from_runtime(
@@ -3679,26 +3499,6 @@ async def get_http_session() -> aiohttp.ClientSession:
         client_session_factory=aiohttp.ClientSession,
     )
     return http_session
-
-
-def build_search_query(
-    guild_id: int | None,
-    user_text: str,
-    *,
-    session_key: str | None = None,
-    messages: list[dict[str, Any]] | None = None,
-) -> str:
-    return build_search_query_from_runtime(
-        guild_id,
-        user_text,
-        session_key=session_key,
-        messages=messages,
-        deps=build_search_followup_runtime_deps(),
-    )
-
-
-async def search_duckduckgo(query: str, *, limit: int = 5) -> list[dict]:
-    return [result.to_dict() for result in await search_duckduckgo_payload(query, limit=limit)]
 
 
 def build_search_answer_runtime_deps() -> SearchAnswerRuntimeDeps:
@@ -3713,14 +3513,6 @@ def build_search_answer_runtime_deps() -> SearchAnswerRuntimeDeps:
         clean_text=clean_text,
         sanitize_model_output=sanitize_model_output,
         strip_search_answer_sources=strip_search_answer_sources,
-    )
-
-
-async def answer_from_search_results(query: str, results: list[dict]) -> str:
-    return await answer_from_search_results_from_runtime(
-        query,
-        results,
-        deps=build_search_answer_runtime_deps(),
     )
 
 
@@ -3762,134 +3554,6 @@ def build_search_followup_runtime_deps() -> SearchFollowupRuntimeDeps:
         detach_task=_detach_task,
         record_search_followup_queued=record_search_followup_queued,
         log=print,
-    )
-
-
-async def deliver_proactive_followup(
-    guild_id: int,
-    query: str,
-    answer: str,
-    *,
-    session_key: str | None,
-    room_key: str | None,
-    person_key: str | None,
-    session_memory_key: str | None,
-    channel_id: int | None,
-    reply_to_message_id: int | None = None,
-    source: str,
-    turn_scope: TurnScope | None = None,
-    runtime_mode: str | None = None,
-) -> None:
-    await deliver_proactive_followup_from_runtime(
-        guild_id,
-        query,
-        answer,
-        deps=build_search_followup_runtime_deps(),
-        session_key=session_key,
-        room_key=room_key,
-        person_key=person_key,
-        session_memory_key=session_memory_key,
-        channel_id=channel_id,
-        reply_to_message_id=reply_to_message_id,
-        source=source,
-        turn_scope=turn_scope,
-        runtime_mode=runtime_mode,
-    )
-
-
-def schedule_search_followup_singleflight(
-    guild_id: int,
-    query: str,
-    *,
-    session_key: str,
-    room_key: str | None,
-    person_key: str | None,
-    session_memory_key: str | None,
-    channel_id: int | None,
-    reply_to_message_id: int | None,
-    source: str,
-    turn_scope: TurnScope | None = None,
-    runtime_mode: str | None = None,
-) -> asyncio.Task:
-    return schedule_search_followup_singleflight_from_runtime(
-        guild_id,
-        query,
-        deps=build_search_followup_runtime_deps(),
-        session_key=session_key,
-        room_key=room_key,
-        person_key=person_key,
-        session_memory_key=session_memory_key,
-        channel_id=channel_id,
-        reply_to_message_id=reply_to_message_id,
-        source=source,
-        turn_scope=turn_scope,
-        runtime_mode=runtime_mode,
-    )
-
-
-async def run_search_followup(
-    guild_id: int,
-    query: str,
-    *,
-    session_key: str | None,
-    room_key: str | None,
-    person_key: str | None,
-    session_memory_key: str | None,
-    channel_id: int | None,
-    reply_to_message_id: int | None = None,
-    source: str,
-    turn_scope: TurnScope | None = None,
-    runtime_mode: str | None = None,
-    search_key: str | None = None,
-) -> None:
-    await run_search_followup_from_runtime(
-        guild_id,
-        query,
-        deps=build_search_followup_runtime_deps(),
-        session_key=session_key,
-        room_key=room_key,
-        person_key=person_key,
-        session_memory_key=session_memory_key,
-        channel_id=channel_id,
-        reply_to_message_id=reply_to_message_id,
-        source=source,
-        turn_scope=turn_scope,
-        runtime_mode=runtime_mode,
-        search_key=search_key,
-    )
-
-
-def schedule_search_followup(
-    guild_id: int,
-    session_key: str | None,
-    user_text: str,
-    answer: str,
-    *,
-    room_key: str | None = None,
-    person_key: str | None = None,
-    session_memory_key: str | None = None,
-    channel_id: int | None,
-    reply_to_message_id: int | None = None,
-    source: str,
-    force: bool = False,
-    turn_scope: TurnScope | None = None,
-    runtime_mode: str | None = None,
-) -> None:
-    schedule_search_followup_from_runtime(
-        guild_id,
-        session_key,
-        user_text,
-        answer,
-        deps=build_search_followup_runtime_deps(),
-        room_key=room_key,
-        person_key=person_key,
-        session_memory_key=session_memory_key,
-        channel_id=channel_id,
-        reply_to_message_id=reply_to_message_id,
-        source=source,
-        force=force,
-        turn_scope=turn_scope,
-        runtime_mode=runtime_mode,
     )
 
 
@@ -3947,10 +3611,6 @@ def build_llm_warmup_runtime_deps() -> LlmWarmupRuntimeDeps:
         decode_sse_stream_line=decode_sse_stream_line,
         log=print,
     )
-
-
-async def warmup_llm() -> None:
-    await warmup_llm_from_runtime(deps=build_llm_warmup_runtime_deps())
 
 
 async def warmup_voice_path(*, reason: str, key: str | None = None, include_stt: bool = True, include_llm: bool = True, include_tts: bool = True) -> None:
@@ -4944,95 +4604,6 @@ def build_main_llm_runtime_deps() -> MainLlmRuntimeDeps:
     )
 
 
-async def execute_main_llm_once(
-    *,
-    payload: dict[str, Any],
-    user_text: str,
-) -> tuple[str, str]:
-    return await execute_main_llm_once_from_runtime(
-        deps=build_main_llm_runtime_deps(),
-        payload=payload,
-        user_text=user_text,
-    )
-
-
-def render_tool_synthesis_recent_context(
-    messages: list[dict[str, Any]] | None,
-    *,
-    user_text: str,
-    max_items: int = 6,
-    max_chars: int = 900,
-) -> str:
-    return render_tool_synthesis_recent_context_with_deps(
-        messages,
-        deps=build_main_llm_runtime_deps(),
-        user_text=user_text,
-        max_items=max_items,
-        max_chars=max_chars,
-    )
-
-
-def tool_synthesis_answer_drifted(answer: str, *, user_text: str, tool_result_text: str) -> bool:
-    return tool_synthesis_answer_drifted_payload(
-        answer,
-        user_text=user_text,
-        tool_result_text=tool_result_text,
-    )
-
-
-async def synthesize_tool_result_with_main_llm(
-    *,
-    user_text: str,
-    tool_name: str,
-    tool_result_text: str,
-    guild_id: int | None = None,
-    session_key: str | None = None,
-    source: str = "text",
-    messages: list[dict[str, Any]] | None = None,
-    cognitive_state: dict | None = None,
-    route_decision: RouteDecision | None = None,
-    metrics: dict | None = None,
-) -> str:
-    return await synthesize_tool_result_with_main_llm_from_runtime(
-        deps=build_main_llm_runtime_deps(),
-        user_text=user_text,
-        tool_name=tool_name,
-        tool_result_text=tool_result_text,
-        guild_id=guild_id,
-        session_key=session_key,
-        source=source,
-        messages=messages,
-        cognitive_state=cognitive_state,
-        route_decision=route_decision,
-        metrics=metrics,
-    )
-
-
-async def resolve_promised_search_final_answer(
-    *,
-    user_text: str,
-    answer_text: str,
-    guild_id: int | None = None,
-    session_key: str | None = None,
-    source: str = "text",
-    messages: list[dict[str, Any]] | None = None,
-    cognitive_state: dict | None = None,
-    route_decision: RouteDecision | None = None,
-    metrics: dict | None = None,
-) -> str:
-    return await resolve_promised_search_final_answer_from_runtime(
-        deps=build_main_llm_runtime_deps(),
-        user_text=user_text,
-        answer_text=answer_text,
-        guild_id=guild_id,
-        session_key=session_key,
-        source=source,
-        messages=messages,
-        cognitive_state=cognitive_state,
-        route_decision=route_decision,
-        metrics=metrics,
-    )
-
 def build_ask_llm_once_runtime_deps() -> AskLlmOnceRuntimeDeps:
     return AskLlmOnceRuntimeDeps(
         log_voice_stage=log_voice_stage,
@@ -5056,34 +4627,6 @@ def build_ask_llm_once_runtime_deps() -> AskLlmOnceRuntimeDeps:
         main_llm_chat_content_format=MAIN_LLM_CHAT_CONTENT_FORMAT,
         voice_llm_max_tokens=VOICE_LLM_MAX_TOKENS,
         main_llm_stop_tokens=MAIN_LLM_STOP_TOKENS,
-    )
-
-
-async def ask_llm_once(
-    user_text: str,
-    guild_id: int | None = None,
-    *,
-    session_key: str | None = None,
-    room_key: str | None = None,
-    person_key: str | None = None,
-    session_memory_key: str | None = None,
-    source: str = "text",
-    debug_text: str | None = None,
-    metrics: dict | None = None,
-    record_question_trace_enabled: bool = True,
-) -> str:
-    return await ask_llm_once_from_runtime(
-        user_text,
-        deps=build_ask_llm_once_runtime_deps(),
-        guild_id=guild_id,
-        session_key=session_key,
-        room_key=room_key,
-        person_key=person_key,
-        session_memory_key=session_memory_key,
-        source=source,
-        debug_text=debug_text,
-        metrics=metrics,
-        record_question_trace_enabled=record_question_trace_enabled,
     )
 
 
@@ -5150,14 +4693,6 @@ def build_route_executor_runtime_deps() -> ResolveRouteExecutorRuntimeDeps:
     return ResolveRouteExecutorRuntimeDeps(
         get_autonomy_engine=lambda guild_id: autonomy_engines.get(guild_id),
         create_autonomy_engine=get_or_create_autonomy_engine,
-    )
-
-
-def resolve_route_executor(*, guild_id: int | None, route_name: str) -> Any:
-    return resolve_route_executor_from_runtime(
-        guild_id,
-        route_name,
-        deps=build_route_executor_runtime_deps(),
     )
 
 
@@ -5752,121 +5287,6 @@ def build_voice_route_execution_deps() -> VoiceRouteExecutionDeps:
     )
 
 
-async def execute_search_then_answer_action(
-    *,
-    guild_id: int | None,
-    user_text: str,
-    session_key: str | None = None,
-    messages: list[dict[str, Any]] | None = None,
-) -> ActionResult:
-    return await execute_search_then_answer_action_with_deps(
-        deps=build_voice_route_execution_deps(),
-        guild_id=guild_id,
-        user_text=user_text,
-        session_key=session_key,
-        messages=messages,
-    )
-
-
-async def prepare_route_context(
-    user_text: str,
-    guild_id: int | None = None,
-    *,
-    session_key: str | None = None,
-    room_key: str | None = None,
-    person_key: str | None = None,
-    session_memory_key: str | None = None,
-    source: str = "text",
-    debug_text: str | None = None,
-    metrics: dict | None = None,
-    turn_scope: TurnScope | None = None,
-) -> tuple[list[dict[str, Any]], dict | None, RouteDecision, dict | None, bool]:
-    return await prepare_route_context_with_deps(
-        user_text,
-        guild_id,
-        deps=build_voice_route_execution_deps(),
-        session_key=session_key,
-        room_key=room_key,
-        person_key=person_key,
-        session_memory_key=session_memory_key,
-        source=source,
-        debug_text=debug_text,
-        metrics=metrics,
-        turn_scope=turn_scope,
-    )
-
-
-async def maybe_handle_short_circuit_route(
-    *,
-    route_decision: RouteDecision,
-    source: str,
-    guild_id: int | None,
-    user_text: str,
-    session_key: str | None,
-    room_key: str | None = None,
-    person_key: str | None = None,
-    session_memory_key: str | None = None,
-    debug_text: str | None = None,
-    on_sentence: Callable[[str], Awaitable[None]] | None = None,
-    on_first_chunk: Callable[[], None] | None = None,
-    awaiting_user_reply: bool = False,
-    metrics: dict | None = None,
-    messages: list[dict[str, Any]] | None = None,
-    cognitive_state: dict | None = None,
-) -> tuple[str | None, Callable[[], None] | None]:
-    return await maybe_handle_short_circuit_route_with_deps(
-        deps=build_voice_route_execution_deps(),
-        route_decision=route_decision,
-        source=source,
-        guild_id=guild_id,
-        user_text=user_text,
-        session_key=session_key,
-        room_key=room_key,
-        person_key=person_key,
-        session_memory_key=session_memory_key,
-        debug_text=debug_text,
-        on_sentence=on_sentence,
-        on_first_chunk=on_first_chunk,
-        awaiting_user_reply=awaiting_user_reply,
-        metrics=metrics,
-        messages=messages,
-        cognitive_state=cognitive_state,
-    )
-
-
-async def maybe_execute_registered_route(
-    *,
-    route_decision: RouteDecision,
-    user_text: str,
-    source: str,
-    guild_id: int | None,
-    session_key: str | None,
-    room_key: str | None,
-    person_key: str | None,
-    session_memory_key: str | None,
-    debug_text: str | None,
-    metrics: dict | None,
-    cognitive_state: dict | None,
-    messages: list[dict[str, Any]] | None = None,
-    allow_internal_routes: set[str] | None = None,
-) -> str | None:
-    return await maybe_execute_registered_route_with_deps(
-        deps=build_voice_route_execution_deps(),
-        route_decision=route_decision,
-        user_text=user_text,
-        source=source,
-        guild_id=guild_id,
-        session_key=session_key,
-        room_key=room_key,
-        person_key=person_key,
-        session_memory_key=session_memory_key,
-        debug_text=debug_text,
-        metrics=metrics,
-        cognitive_state=cognitive_state,
-        messages=messages,
-        allow_internal_routes=allow_internal_routes,
-    )
-
 def increment_inflight_llm_requests() -> None:
     global inflight_llm_requests
     inflight_llm_requests += 1
@@ -5917,20 +5337,6 @@ def build_voice_main_llm_streaming_deps() -> VoiceMainLlmStreamingDeps:
     )
 
 
-async def execute_main_llm_streaming_turn(
-    *,
-    request: VoiceTurnRequest,
-    route_context: VoiceTurnRouteContext,
-    on_first_chunk: Callable[[], None] | None,
-) -> str:
-    return await execute_main_llm_streaming_turn_with_deps(
-        deps=build_voice_main_llm_streaming_deps(),
-        request=request,
-        route_context=route_context,
-        on_first_chunk=on_first_chunk,
-    )
-
-
 def build_voice_turn_entry_runtime_deps() -> VoiceTurnEntryRuntimeDeps:
     return VoiceTurnEntryRuntimeDeps(
         attach_current_task=_attach_current_task,
@@ -5947,36 +5353,63 @@ def build_voice_turn_entry_runtime_deps() -> VoiceTurnEntryRuntimeDeps:
     )
 
 
-async def ask_llm_streaming(
-    user_text: str,
-    guild_id: int | None = None,
-    on_sentence: Callable[[str], Awaitable[None]] | None = None,
-    on_first_chunk: Callable[[], None] | None = None,
-    *,
-    session_key: str | None = None,
-    room_key: str | None = None,
-    person_key: str | None = None,
-    session_memory_key: str | None = None,
-    source: str = "text",
-    debug_text: str | None = None,
-    metrics: dict | None = None,
-    turn_scope: TurnScope | None = None,
-) -> str:
-    return await ask_llm_streaming_from_runtime(
-        user_text,
-        deps=build_voice_turn_entry_runtime_deps(),
-        guild_id=guild_id,
-        on_sentence=on_sentence,
-        on_first_chunk=on_first_chunk,
-        session_key=session_key,
-        room_key=room_key,
-        person_key=person_key,
-        session_memory_key=session_memory_key,
-        source=source,
-        debug_text=debug_text,
-        metrics=metrics,
-        turn_scope=turn_scope,
+llm_route_composition = LlmRouteComposition(
+    LlmRouteCompositionDeps(
+        fast_path=lambda: build_fast_path_policy_runtime_deps(),
+        llm_context=lambda: build_llm_context_assembly_deps(),
+        summary_json=lambda: build_summary_json_llm_runtime_deps(),
+        router_json=lambda: build_router_json_llm_runtime_deps(),
+        llm_route=lambda: build_llm_route_runtime_deps(),
+        response_output=lambda: build_response_output_policy_runtime_deps(),
+        search_answer=lambda: build_search_answer_runtime_deps(),
+        search_followup=lambda: build_search_followup_runtime_deps(),
+        llm_warmup=lambda: build_llm_warmup_runtime_deps(),
+        main_llm=lambda: build_main_llm_runtime_deps(),
+        ask_llm_once=lambda: build_ask_llm_once_runtime_deps(),
+        route_executor=lambda: build_route_executor_runtime_deps(),
+        voice_route_execution=lambda: build_voice_route_execution_deps(),
+        voice_main_streaming=lambda: build_voice_main_llm_streaming_deps(),
+        voice_turn_entry=lambda: build_voice_turn_entry_runtime_deps(),
+        search_payload=search_duckduckgo_payload,
     )
+)
+
+is_control_page_source = llm_route_composition.is_control_page_source
+deep_route_marker_count = llm_route_composition.deep_route_marker_count
+has_negated_search_marker = llm_route_composition.has_negated_search_marker
+needs_search_or_deep_routing = llm_route_composition.needs_search_or_deep_routing
+is_simple_directive = llm_route_composition.is_simple_directive
+is_obvious_continue = llm_route_composition.is_obvious_continue
+fast_path_policy = llm_route_composition.fast_path_policy
+context_policy_for_fast_path_policy = llm_route_composition.context_policy_for_fast_path_policy
+prepare_llm_messages = llm_route_composition.prepare_llm_messages
+extract_json_object = llm_route_composition.extract_json_object
+ask_summary_llm = llm_route_composition.ask_summary_llm
+ask_router_llm = llm_route_composition.ask_router_llm
+classify_llm_route_async = llm_route_composition.classify_llm_route
+sanitize_model_output = llm_route_composition.sanitize_model_output
+extract_answer_from_reasoning = llm_route_composition.extract_answer_from_reasoning
+build_search_query = llm_route_composition.build_search_query
+search_duckduckgo = llm_route_composition.search_duckduckgo
+answer_from_search_results = llm_route_composition.answer_from_search_results
+deliver_proactive_followup = llm_route_composition.deliver_proactive_followup
+schedule_search_followup_singleflight = llm_route_composition.schedule_search_followup_singleflight
+run_search_followup = llm_route_composition.run_search_followup
+schedule_search_followup = llm_route_composition.schedule_search_followup
+warmup_llm = llm_route_composition.warmup_llm
+execute_main_llm_once = llm_route_composition.execute_main_llm_once
+render_tool_synthesis_recent_context = llm_route_composition.render_tool_synthesis_recent_context
+tool_synthesis_answer_drifted = llm_route_composition.tool_synthesis_answer_drifted
+synthesize_tool_result_with_main_llm = llm_route_composition.synthesize_tool_result_with_main_llm
+resolve_promised_search_final_answer = llm_route_composition.resolve_promised_search_final_answer
+ask_llm_once = llm_route_composition.ask_llm_once
+resolve_route_executor = llm_route_composition.resolve_route_executor
+execute_search_then_answer_action = llm_route_composition.execute_search_then_answer_action
+prepare_route_context = llm_route_composition.prepare_route_context
+maybe_handle_short_circuit_route = llm_route_composition.maybe_handle_short_circuit_route
+maybe_execute_registered_route = llm_route_composition.maybe_execute_registered_route
+execute_main_llm_streaming_turn = llm_route_composition.execute_main_llm_streaming_turn
+ask_llm_streaming = llm_route_composition.ask_llm_streaming
 
 
 def start_streaming_voice_delivery(

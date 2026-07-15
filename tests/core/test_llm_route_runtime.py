@@ -170,9 +170,11 @@ class LlmRouteRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.question_calls, [])
 
     def test_main_delegates_route_classification_to_runtime_module(self) -> None:
-        source = (REPO_ROOT / "main.py").read_text(encoding="utf-8")
-        start = source.index("async def classify_llm_route_async(")
-        end = source.index("def build_cognitive_state_runtime_deps(", start)
+        source = (
+            REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "llm_route_composition_runtime.py"
+        ).read_text(encoding="utf-8")
+        start = source.index("async def classify_llm_route(")
+        end = source.index("def sanitize_model_output(", start)
         function_source = source[start:end]
 
         self.assertIn("classify_llm_route_from_runtime(", function_source)

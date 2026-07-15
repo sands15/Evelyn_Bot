@@ -125,13 +125,14 @@ class JsonLlmRequestRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.traces, [])
 
     def test_main_summary_and_router_wrappers_delegate_to_common_runtime(self) -> None:
-        source = (REPO_ROOT / "main.py").read_text(encoding="utf-8")
+        source = (
+            REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "llm_route_composition_runtime.py"
+        ).read_text(encoding="utf-8")
         summary_start = source.index("async def ask_summary_llm(")
-        router_builder = source.index("def build_router_json_llm_runtime_deps(", summary_start)
-        router_start = source.index("async def ask_router_llm(", router_builder)
-        route_builder = source.index("def build_llm_route_runtime_deps(", router_start)
+        router_start = source.index("async def ask_router_llm(", summary_start)
+        route_builder = source.index("async def classify_llm_route(", router_start)
 
-        self.assertIn("ask_json_llm_from_runtime(", source[summary_start:router_builder])
+        self.assertIn("ask_json_llm_from_runtime(", source[summary_start:router_start])
         self.assertIn("ask_json_llm_from_runtime(", source[router_start:route_builder])
         self.assertNotIn("session.post(", source[summary_start:route_builder])
 

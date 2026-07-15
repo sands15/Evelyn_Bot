@@ -61,10 +61,13 @@ class ControlPageSearchRouteTests(unittest.TestCase):
 
     def test_search_result_recurses_through_main_synthesis(self) -> None:
         search_py = (REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "skills" / "search" / "__init__.py").read_text(encoding="utf-8")
+        composition = (
+            REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "llm_route_composition_runtime.py"
+        ).read_text(encoding="utf-8")
 
         self.assertIn('followup_route="main_synthesis"', search_py)
         self.assertIn('"tool_result_text": answer_text', search_py)
-        self.assertIn("def synthesize_tool_result_with_main_llm", self.main_py)
+        self.assertIn("def synthesize_tool_result_with_main_llm", composition)
         self.assertIn("final_answer = await deps.synthesize_tool_result_with_main_llm", self.route_execution_py)
         self.assertIn('"phase": "main_synthesis"', self.route_execution_py)
 

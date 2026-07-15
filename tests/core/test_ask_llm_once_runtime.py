@@ -166,9 +166,11 @@ class AskLlmOnceRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.execute_calls), 1)
 
     def test_main_delegates_once_orchestration_to_runtime_module(self) -> None:
-        source = (REPO_ROOT / "main.py").read_text(encoding="utf-8")
+        source = (
+            REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "llm_route_composition_runtime.py"
+        ).read_text(encoding="utf-8")
         start = source.index("async def ask_llm_once(")
-        end = source.index("def build_voice_stream_chunk_deps(", start)
+        end = source.index("def resolve_route_executor(", start)
         function_source = source[start:end]
 
         self.assertIn("ask_llm_once_from_runtime(", function_source)

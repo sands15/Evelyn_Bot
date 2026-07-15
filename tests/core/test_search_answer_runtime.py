@@ -116,9 +116,11 @@ class SearchAnswerRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, "찾아보니까 첫 내용")
 
     def test_main_delegates_search_answer_to_runtime_module(self) -> None:
-        source = (REPO_ROOT / "main.py").read_text(encoding="utf-8")
+        source = (
+            REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "llm_route_composition_runtime.py"
+        ).read_text(encoding="utf-8")
         start = source.index("async def answer_from_search_results(")
-        end = source.index("def record_search_followup_queued", start)
+        end = source.index("async def deliver_proactive_followup", start)
         function_source = source[start:end]
 
         self.assertIn("answer_from_search_results_from_runtime(", function_source)

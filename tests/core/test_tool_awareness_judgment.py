@@ -49,7 +49,10 @@ class ToolAwarenessJudgmentTests(unittest.TestCase):
         self.assertIn("- search: use for current info, weather, prices, news", self.tool_awareness_policy)
 
     def test_promised_search_is_escalated_to_tool_result_synthesis(self) -> None:
-        self.assertIn("async def resolve_promised_search_final_answer", self.main_py)
+        composition = (
+            REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "llm_route_composition_runtime.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn("async def resolve_promised_search_final_answer", composition)
         self.assertIn("deps.answer_promises_search(answer)", self.main_llm_runtime_py)
         self.assertIn("promised_search_escalated", self.main_llm_runtime_py)
         self.assertIn("action_result = await deps.execute_search_then_answer_action", self.main_llm_runtime_py)
@@ -63,9 +66,9 @@ class ToolAwarenessJudgmentTests(unittest.TestCase):
         self.assertIn("and not wants_search_by_tag and not wants_search_by_fallback", self.search_followup_runtime_py)
 
     def test_main_paths_call_promise_escalation(self) -> None:
-        combined = self.main_py + self.route_execution_py
+        combined = self.main_llm_runtime_py + self.route_execution_py
         self.assertGreaterEqual(
-            self.main_py.count("await resolve_promised_search_final_answer")
+            self.main_llm_runtime_py.count("await deps.resolve_promised_search_final_answer")
             + self.route_execution_py.count("await deps.resolve_promised_search_final_answer"),
             3,
         )

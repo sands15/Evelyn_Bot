@@ -118,9 +118,11 @@ class VoiceTurnEntryRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.detached), 1)
 
     def test_main_delegates_streaming_entry_to_runtime_module(self) -> None:
-        source = (REPO_ROOT / "main.py").read_text(encoding="utf-8")
+        source = (
+            REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "llm_route_composition_runtime.py"
+        ).read_text(encoding="utf-8")
         start = source.index("async def ask_llm_streaming(")
-        end = source.index("def start_streaming_voice_delivery", start)
+        end = source.index("__all__", start)
         function_source = source[start:end]
 
         self.assertIn("ask_llm_streaming_from_runtime(", function_source)

@@ -382,6 +382,34 @@ Last reviewed: 2026-07-15
 - 다음 대형 후보는 LLM/route composition 영역이며, Control Page에 남은 dependency builder는
   해당 조립 root를 별도 모듈로 옮길 때 함께 정리한다.
 
+## 2026-07-16 LLM/route composition 일괄 분리
+
+- 서른한 번째 배치는 LLM·검색·라우팅·스트리밍 진입 adapter를 한 번에 이동했다.
+- 새 모듈/계약:
+  - `llm_route_composition_runtime.py`
+  - `LlmRouteCompositionDeps`, `LlmRouteComposition`
+- 이동 책임:
+  - fast-path 판정 adapter 8개
+  - LLM context 조립, summary/router JSON 요청, route classification adapter
+  - model output 정제와 reasoning answer 추출
+  - search query/answer, proactive follow-up, single-flight scheduling adapter
+  - main LLM 단일 요청, tool synthesis, promised-search escalation adapter
+  - route executor, short-circuit/registered route, main streaming turn, streaming entry adapter
+- 기존 공개 호출 시그니처를 composition 메서드에 명시적으로 보존했고,
+  `main.py`에는 dependency builder와 composition root/호환 alias만 남겼다.
+- 동적 `globals()`/namespace 주입은 사용하지 않았다.
+- 정확한 크기 변화:
+  - `main.py`: 6,914줄 → 6,347줄
+  - 이번 배치 순감축: 567줄
+  - 대형 배치 2회 누적: 7,380줄 → 6,347줄, 1,033줄 순감축
+- 검증:
+  - 관련 LLM/route/search 회귀 62개 통과
+  - 일반 discovery 전체 unittest 1,112개 통과(실제 main opt-in 1개 skip)
+  - 실제 `main.py` smoke + `PYTHONWARNINGS=error::ResourceWarning` 전체 unittest 1,112개 통과
+  - `py_compile`, `git diff --check` 통과
+- 런타임/컨테이너 재시작과 외부 push는 하지 않았다.
+- 다음 대형 후보는 voice/STT/전달 adapter 영역이다.
+
 - [22:59 KST] cron checkpoint: `build_guild_runtime_reset_deps` 빌더 본문을
   `evelyn_core/runtime/evelyn_core/guild_runtime_reset.py`로 이전.
   - 변경 파일: `main.py`, `evelyn_core/runtime/evelyn_core/guild_runtime_reset.py`,
