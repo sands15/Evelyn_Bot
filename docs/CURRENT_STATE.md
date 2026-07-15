@@ -26,7 +26,9 @@ Source branch: `refactor/main-py-decomposition-2026-07-15`
   `discord_voice_connection_runtime.py`로 이동했다.
   live vision 요청 실행은 `vision_runtime.py`, 검색 결과 요약은 `search_answer_runtime.py`,
   streaming voice turn 진입/실패 정리는 `voice_turn_entry_runtime.py`로 이동했다.
-  runtime dependency builder 군과 Control Page server/state 조립 등은 아직 `main.py`에 남아 있다.
+  Control Page aiohttp 시작/cleanup은 `control_page_server_start_runtime.py`, Minecraft live
+  status/observe 및 Control Page snapshot 조립은 `minecraft_live_state_runtime.py`로 이동했다.
+  runtime dependency builder 군과 Control Page state 조립 등은 아직 `main.py`에 남아 있다.
 - 핵심 준비 상태와 선택 기능 준비 상태를 분리했다.
   - `ok`: 필수 핵심 서비스 준비 여부
   - `fullyHealthy`: 선택 기능을 포함한 전체 건강 여부
@@ -58,14 +60,14 @@ Source branch: `refactor/main-py-decomposition-2026-07-15`
 
 ## Verification state
 
-검증 시각: 2026-07-16 01:08 KST
-검증한 코드 기준점: `refactor/main-py-decomposition-2026-07-15` 스물여섯 번째 vision/search/turn entry 분리 작업 트리
+검증 시각: 2026-07-16 02:12 KST
+검증한 코드 기준점: `refactor/main-py-decomposition-2026-07-15` 스물아홉 번째 Control Page/Minecraft runtime 분리 작업 트리
 
 - `pip check`: 통과
 - `docker compose config --quiet`: 통과(검증용 Discord token 사용)
 - Python `compileall`: 통과
 - 활성 Live2D/boot JavaScript `node --check`: 통과
-- 전체 unittest: 일반 모드 1,101개 통과(실제 `main.py` opt-in 1개 의도적 건너뜀), 엄격 모드 1,101개 통과
+- 전체 unittest: 일반 모드 1,112개 통과(실제 `main.py` opt-in 1개 의도적 건너뜀), 엄격 모드 1,112개 통과
 - `EVELYN_RUN_REAL_MAIN_INTEGRATION=1`: 실제 `main.py` 프로세스 smoke 포함
 - `PYTHONWARNINGS=error::ResourceWarning`: 통과
 - Codex Gateway 테스트 서버: 무토큰/오토큰 `401`, 정상 bearer token `200`

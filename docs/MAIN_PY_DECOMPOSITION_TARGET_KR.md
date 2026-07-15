@@ -323,6 +323,36 @@ Last reviewed: 2026-07-15
 - 런타임/컨테이너 재시작과 외부 push는 하지 않았다.
 - 다음 후보는 `start_control_page_server` 47줄, `observe_live_minecraft_state` 45줄,
   `get_control_page_minecraft_snapshot` 44줄과 dependency builder composition root 정리다.
+- 스물일곱 번째 배치에서 47줄 `start_control_page_server` 실행 경계를 분리했다.
+  - 새 모듈/계약: `control_page_server_start_runtime.py`, `ControlPageServerStartRuntimeDeps`
+  - 이동 책임: enabled/duplicate/docs gate, lazy start lock, route registrar,
+    AppRunner/TCPSite setup과 실패 cleanup, runner/site 게시 및 startup 상태 기록.
+  - 라우트 목록과 handler 조합은 `main.py` composition root에 유지했다.
+  - 새 테스트 5개: disabled/existing, docs missing, 정상 route/start, setup cleanup, main 위임.
+- 스물여덟 번째 배치에서 45줄 `observe_live_minecraft_state`를 분리했다.
+  - 새 모듈/계약: `minecraft_live_state_runtime.py`, `MinecraftLiveObservationRuntimeDeps`
+  - 이동 책임: status 우선 조회, 실제 context 판정, observe fallback, snapshot freshness metadata.
+- 스물아홉 번째 배치에서 44줄 `get_control_page_minecraft_snapshot`을 같은 모듈로 분리했다.
+  - 계약: `ControlPageMinecraftLiveSnapshotRuntimeDeps`
+  - 이동 책임: status error/fallback, inventory/slot/activity/task/progress/position 정규화,
+    Control Page live snapshot metadata.
+  - Minecraft 새 테스트 6개: status context, observe fallback, 이중 실패, snapshot 정규화,
+    status error 보존, 두 main wrapper 위임.
+- 스물아홉 번째 배치 뒤 정확한 누적 크기 변화:
+  - `main.py`: 8,793줄 → 7,380줄
+  - 현재 최대 함수는 `build_fast_path_policy_runtime_deps` 72줄이며,
+    최대 실행/조립 함수는 `build_control_page_state` 45줄이다.
+- 스물일곱 번째~스물아홉 번째 배치 통합 검증:
+  - 새 테스트 11개, 관련 테스트 19개 통과
+  - 일반 discovery 전체 unittest 1,112개 통과(실제 `main.py` opt-in 1개 의도적 skip)
+  - 실제 `main.py` smoke와 `PYTHONWARNINGS=error::ResourceWarning`를 함께 적용한 전체 unittest 1,112개 통과
+  - Python `compileall`, `git diff --check` 통과
+- 첫 전체 회귀에서 `/health`와 `/shutdown` route를 직접 `app.router` 호출 위치로 고정한
+  정적 테스트 2개가 실패했고, main route tuple과 runtime registrar 계약을 검사하도록 수정한 뒤
+  일반·엄격 전체 회귀를 처음부터 재통과했다.
+- 런타임/컨테이너 재시작과 외부 push는 하지 않았다.
+- 다음 후보는 `build_control_page_state` 45줄, Discord `on_ready` 43줄,
+  `run_vision_watch_once` 40줄과 dependency builder composition root 정리다.
 
 - [22:59 KST] cron checkpoint: `build_guild_runtime_reset_deps` 빌더 본문을
   `evelyn_core/runtime/evelyn_core/guild_runtime_reset.py`로 이전.

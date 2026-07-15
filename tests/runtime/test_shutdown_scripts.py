@@ -159,8 +159,8 @@ class ShutdownScriptContractTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
 
         self.assertIn("async def control_page_shutdown_handler", main_py)
-        self.assertIn('app.router.add_post("/api/control-page/shutdown", control_page_shutdown_handler)', main_py)
-        self.assertIn('app.router.add_options("/api/control-page/shutdown", control_page_shutdown_handler)', main_py)
+        self.assertIn('("POST", "/api/control-page/shutdown", control_page_shutdown_handler)', main_py)
+        self.assertIn('("OPTIONS", "/api/control-page/shutdown", control_page_shutdown_handler)', main_py)
         self.assertIn("handle_control_page_shutdown_request", main_py)
         self.assertIn('handle_input(guild, "/shutdown")', control_page_state)
 

@@ -104,6 +104,12 @@ from evelyn_core.minecraft_runtime_snapshot import (
     merge_voyager_status_into_state,
     summarize_inventory_top,
 )
+from evelyn_core.minecraft_live_state_runtime import (
+    ControlPageMinecraftLiveSnapshotRuntimeDeps,
+    MinecraftLiveObservationRuntimeDeps,
+    get_control_page_minecraft_snapshot_from_runtime,
+    observe_live_minecraft_state_from_runtime,
+)
 from evelyn_core.question_shaping import (
     enforce_question_limits,
 )
@@ -598,6 +604,10 @@ from evelyn_core.control_page_http import (
     resolve_control_page_asset_path,
 )
 from evelyn_core.control_page_server import open_path_with_system, open_url_with_system
+from evelyn_core.control_page_server_start_runtime import (
+    ControlPageServerStartRuntimeDeps,
+    start_control_page_server_from_runtime,
+)
 from evelyn_core.control_page_state import (
     ControlPageChatLogStore,
     ControlPageMinecraftSnapshotCache,
@@ -5226,51 +5236,23 @@ def get_routed_autonomy_executor(guild_id: int | None) -> RoutedAutonomyExecutor
     return executor if isinstance(executor, RoutedAutonomyExecutor) else None
 
 
+def build_minecraft_live_observation_runtime_deps() -> MinecraftLiveObservationRuntimeDeps:
+    return MinecraftLiveObservationRuntimeDeps(
+        get_minecraft_client=get_minecraft_client,
+        merge_voyager_status_into_state=merge_voyager_status_into_state,
+        attach_minecraft_runtime_snapshot=attach_minecraft_runtime_snapshot,
+        clean_text=clean_text,
+        now=time.time,
+        stale_after_sec=CONTROL_PAGE_MINECRAFT_CACHE_REFRESH_SEC,
+        expired_after_sec=CONTROL_PAGE_MINECRAFT_CACHE_MAX_STALE_SEC,
+    )
+
+
 async def observe_live_minecraft_state(guild_id: int | None) -> dict[str, Any] | None:
-    _ = guild_id
-    client = get_minecraft_client()
-    try:
-        status = await client.status()
-    except Exception:
-        status = None
-    if isinstance(status, dict):
-        observed = status.get("observation") if isinstance(status.get("observation"), dict) else None
-        merged = merge_voyager_status_into_state(status, observed)
-        if isinstance(merged, dict):
-            has_context = bool(
-                status.get("running")
-                or status.get("connected")
-                or clean_text(str(status.get("goal") or ""))
-                or clean_text(str(status.get("stage") or ""))
-                or clean_text(str(status.get("current_task") or ""))
-                or (isinstance(observed, dict) and (observed.get("connected") or observed.get("active") or observed.get("position")))
-            )
-            if has_context:
-                return attach_minecraft_runtime_snapshot(
-                    merged,
-                    source="live_status",
-                    now=time.time(),
-                    observed_at=time.time(),
-                    stale_after_sec=CONTROL_PAGE_MINECRAFT_CACHE_REFRESH_SEC,
-                    expired_after_sec=CONTROL_PAGE_MINECRAFT_CACHE_MAX_STALE_SEC,
-                )
-    try:
-        observed = await client.observe(ensure_service=False)
-    except Exception:
-        return None
-    if not isinstance(observed, dict):
-        return None
-    merged = merge_voyager_status_into_state(None, observed) if (observed.get("connected") or observed.get("active") or observed.get("position")) else None
-    if isinstance(merged, dict):
-        return attach_minecraft_runtime_snapshot(
-            merged,
-            source="live_observe",
-            now=time.time(),
-            observed_at=time.time(),
-            stale_after_sec=CONTROL_PAGE_MINECRAFT_CACHE_REFRESH_SEC,
-            expired_after_sec=CONTROL_PAGE_MINECRAFT_CACHE_MAX_STALE_SEC,
-        )
-    return None
+    return await observe_live_minecraft_state_from_runtime(
+        guild_id,
+        deps=build_minecraft_live_observation_runtime_deps(),
+    )
 
 
 async def wait_for_minecraft_ready(guild_id: int, *, timeout_sec: float = 12.0, poll_sec: float = 1.0) -> dict[str, Any]:
@@ -5448,49 +5430,29 @@ def current_tts_target_name(guild: discord.Guild | None) -> str:
     return current_tts_target_name_from_runtime(guild, deps=build_control_page_guild_selection_runtime_deps())
 
 
-async def get_control_page_minecraft_snapshot(guild_id: int | None) -> dict[str, Any]:
-    client = get_minecraft_client()
-    raw_status: dict[str, Any] = {}
-    last_error = ""
-    try:
-        maybe_status = await client.status()
-        if isinstance(maybe_status, dict):
-            raw_status = maybe_status
-    except Exception as exc:
-        last_error = repr(exc)
-    observation = raw_status.get("observation") if isinstance(raw_status.get("observation"), dict) else {}
-    merged = merge_voyager_status_into_state(raw_status, observation) or {}
-    if not merged:
-        merged = await observe_live_minecraft_state(guild_id) or {}
-    if last_error and not merged.get("last_error"):
-        merged["last_error"] = last_error
-    merged["inventory_top"] = normalize_inventory_top_entries(merged.get("inventory") or observation.get("inventory"))
-    merged["inventory_summary"] = summarize_inventory_top(merged["inventory_top"])
-    merged["inventory_slots"] = normalize_inventory_slot_entries(
-        observation.get("inventory_slots") or observation.get("inventorySlots"),
-        inventory=merged.get("inventory") or observation.get("inventory"),
-    )
-    merged["inventory_used"] = normalize_inventory_used_slots(
-        observation.get("inventory_used") or observation.get("inventoryUsed"),
-        merged["inventory_slots"],
-    )
-    merged["recent_activity"] = extract_minecraft_recent_activity_live(raw_status, base_limit=2)
-    merged["completed_count"] = len(raw_status.get("completed_tasks") or [])
-    merged["failed_count"] = len(raw_status.get("failed_tasks") or [])
-    merged["current_task"] = clean_text(str(raw_status.get("current_task") or merged.get("objective_task") or ""))
-    merged["current_task_stage"] = clean_text(str(raw_status.get("current_task_stage") or merged.get("objective_task_stage") or ""))
-    merged["goal"] = clean_text(str(raw_status.get("goal") or merged.get("objective_goal") or ""))
-    merged["stage"] = clean_text(str(raw_status.get("stage") or merged.get("objective_stage") or ""))
-    merged["progress"] = clean_text(str(raw_status.get("last_progress_message") or merged.get("objective_progress") or ""))
-    merged["position_text"] = format_position_short(merged.get("position") or observation.get("position"))
-    return attach_minecraft_runtime_snapshot(
-        merged,
-        source="control_page_live",
-        now=time.time(),
-        observed_at=time.time(),
+def build_control_page_minecraft_live_snapshot_runtime_deps() -> ControlPageMinecraftLiveSnapshotRuntimeDeps:
+    return ControlPageMinecraftLiveSnapshotRuntimeDeps(
+        get_minecraft_client=get_minecraft_client,
+        observe_live_minecraft_state=observe_live_minecraft_state,
+        merge_voyager_status_into_state=merge_voyager_status_into_state,
+        normalize_inventory_top_entries=normalize_inventory_top_entries,
+        summarize_inventory_top=summarize_inventory_top,
+        normalize_inventory_slot_entries=normalize_inventory_slot_entries,
+        normalize_inventory_used_slots=normalize_inventory_used_slots,
+        extract_recent_activity=extract_minecraft_recent_activity_live,
+        format_position_short=format_position_short,
+        attach_minecraft_runtime_snapshot=attach_minecraft_runtime_snapshot,
+        clean_text=clean_text,
+        now=time.time,
         stale_after_sec=CONTROL_PAGE_MINECRAFT_CACHE_REFRESH_SEC,
         expired_after_sec=CONTROL_PAGE_MINECRAFT_CACHE_MAX_STALE_SEC,
-        last_error=last_error or None,
+    )
+
+
+async def get_control_page_minecraft_snapshot(guild_id: int | None) -> dict[str, Any]:
+    return await get_control_page_minecraft_snapshot_from_runtime(
+        guild_id,
+        deps=build_control_page_minecraft_live_snapshot_runtime_deps(),
     )
 
 
@@ -6148,53 +6110,69 @@ async def control_page_open_memory_vault_options_handler(request: web.Request) -
     return control_page_json_response({"ok": True, "methods": ["POST", "OPTIONS"]})
 
 
+def _set_control_page_runner(runner: web.AppRunner) -> None:
+    global control_page_runner
+    control_page_runner = runner
+
+
+def _set_control_page_site(site: web.TCPSite) -> None:
+    global control_page_site
+    control_page_site = site
+
+
+def _set_control_page_start_lock(lock: asyncio.Lock) -> None:
+    global control_page_start_lock
+    control_page_start_lock = lock
+
+
+def build_control_page_server_start_runtime_deps() -> ControlPageServerStartRuntimeDeps:
+    return ControlPageServerStartRuntimeDeps(
+        enabled=CONTROL_PAGE_ENABLED,
+        docs_dir=CONTROL_PAGE_DOCS_DIR,
+        host=CONTROL_PAGE_HOST,
+        port=CONTROL_PAGE_PORT,
+        routes=(
+            ("GET", "/health", control_page_health_handler),
+            ("GET", "/", control_page_index_handler),
+            ("GET", "/assets/{asset_path:.*}", control_page_asset_handler),
+            ("GET", CONTROL_PAGE_MINECRAFT_ICON_ROUTE + "/{item_name}", control_page_minecraft_item_icon_handler),
+            ("GET", "/api/control-page/state", control_page_state_handler),
+            ("GET", "/api/control-page/session", control_page_session_handler),
+            ("GET", "/api/control-page/memory", control_page_memory_snapshot_handler),
+            ("GET", "/api/control-page/memory-graph", control_page_memory_graph_handler),
+            ("GET", "/api/control-page/memory/{note_id}", control_page_memory_note_handler),
+            ("POST", "/api/control-page/open-memory-vault", control_page_open_memory_vault_handler),
+            ("POST", "/api/control-page/chat", control_page_chat_handler),
+            ("POST", "/api/control-page/memory/{note_id}", control_page_memory_note_action_handler),
+            ("POST", "/api/control-page/shutdown", control_page_shutdown_handler),
+            ("OPTIONS", "/api/control-page/state", control_page_state_handler),
+            ("OPTIONS", "/api/control-page/memory", control_page_memory_snapshot_handler),
+            ("OPTIONS", "/api/control-page/memory-graph", control_page_memory_graph_handler),
+            ("OPTIONS", "/api/control-page/memory/{note_id}", control_page_memory_note_handler),
+            ("OPTIONS", "/api/control-page/open-memory-vault", control_page_open_memory_vault_options_handler),
+            ("OPTIONS", "/api/control-page/chat", control_page_chat_handler),
+            ("OPTIONS", "/api/control-page/shutdown", control_page_shutdown_handler),
+        ),
+        middleware=control_page_cors_middleware,
+        get_runner=lambda: control_page_runner,
+        set_runner=_set_control_page_runner,
+        set_site=_set_control_page_site,
+        get_start_lock=lambda: control_page_start_lock,
+        set_start_lock=_set_control_page_start_lock,
+        lock_factory=asyncio.Lock,
+        application_factory=web.Application,
+        app_runner_factory=web.AppRunner,
+        tcp_site_factory=web.TCPSite,
+        mark_startup_component=mark_startup_component,
+        local_url=control_page_local_url,
+        log=print,
+    )
+
+
 async def start_control_page_server() -> None:
-    global control_page_runner, control_page_site, control_page_start_lock
-    if not CONTROL_PAGE_ENABLED:
-        return
-    if control_page_runner is not None:
-        return
-    if control_page_start_lock is None:
-        control_page_start_lock = asyncio.Lock()
-    async with control_page_start_lock:
-        if control_page_runner is not None:
-            return
-        if not CONTROL_PAGE_DOCS_DIR.exists():
-            print(f"[CONTROL PAGE] docs_missing path={CONTROL_PAGE_DOCS_DIR}")
-            return
-        app = web.Application(middlewares=[control_page_cors_middleware])
-        app.router.add_get("/health", control_page_health_handler)
-        app.router.add_get("/", control_page_index_handler)
-        app.router.add_get("/assets/{asset_path:.*}", control_page_asset_handler)
-        app.router.add_get(CONTROL_PAGE_MINECRAFT_ICON_ROUTE + "/{item_name}", control_page_minecraft_item_icon_handler)
-        app.router.add_get("/api/control-page/state", control_page_state_handler)
-        app.router.add_get("/api/control-page/session", control_page_session_handler)
-        app.router.add_get("/api/control-page/memory", control_page_memory_snapshot_handler)
-        app.router.add_get("/api/control-page/memory-graph", control_page_memory_graph_handler)
-        app.router.add_get("/api/control-page/memory/{note_id}", control_page_memory_note_handler)
-        app.router.add_post("/api/control-page/open-memory-vault", control_page_open_memory_vault_handler)
-        app.router.add_post("/api/control-page/chat", control_page_chat_handler)
-        app.router.add_post("/api/control-page/memory/{note_id}", control_page_memory_note_action_handler)
-        app.router.add_post("/api/control-page/shutdown", control_page_shutdown_handler)
-        app.router.add_options("/api/control-page/state", control_page_state_handler)
-        app.router.add_options("/api/control-page/memory", control_page_memory_snapshot_handler)
-        app.router.add_options("/api/control-page/memory-graph", control_page_memory_graph_handler)
-        app.router.add_options("/api/control-page/memory/{note_id}", control_page_memory_note_handler)
-        app.router.add_options("/api/control-page/open-memory-vault", control_page_open_memory_vault_options_handler)
-        app.router.add_options("/api/control-page/chat", control_page_chat_handler)
-        app.router.add_options("/api/control-page/shutdown", control_page_shutdown_handler)
-        runner = web.AppRunner(app, access_log=None)
-        try:
-            await runner.setup()
-            site = web.TCPSite(runner, host=CONTROL_PAGE_HOST, port=CONTROL_PAGE_PORT)
-            await site.start()
-        except Exception:
-            await runner.cleanup()
-            raise
-        control_page_runner = runner
-        control_page_site = site
-        mark_startup_component("control_api", "done", control_page_local_url())
-        print(f"[CONTROL PAGE] live url={control_page_local_url()}")
+    await start_control_page_server_from_runtime(
+        deps=build_control_page_server_start_runtime_deps(),
+    )
 
 
 def build_voice_route_execution_deps() -> VoiceRouteExecutionDeps:

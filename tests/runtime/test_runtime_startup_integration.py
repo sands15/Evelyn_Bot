@@ -224,7 +224,11 @@ class RealMainProcessStartupSmokeTests(unittest.TestCase):
         main_source = (REPO_ROOT / "main.py").read_text(encoding="utf-8")
         self.assertIn("EVELYN_INSTANCE_LOCK_PATH", main_source)
         self.assertIn("async def control_page_health_handler", main_source)
-        self.assertIn('app.router.add_get("/health", control_page_health_handler)', main_source)
+        self.assertIn('("GET", "/health", control_page_health_handler)', main_source)
+        server_runtime_source = (
+            REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "control_page_server_start_runtime.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn('"GET": app.router.add_get', server_runtime_source)
 
     def start_main_process(self, port: int) -> subprocess.Popen[str]:
         temp_dir = tempfile.TemporaryDirectory()
