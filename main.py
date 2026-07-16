@@ -241,6 +241,10 @@ from evelyn_core.conversation_session_composition import (
     ConversationSessionComposition,
     ConversationSessionCompositionDeps,
 )
+from evelyn_core.conversation_observability_composition import (
+    ConversationObservabilityComposition,
+    ConversationObservabilityCompositionDeps,
+)
 from evelyn_core.runtime_lifecycle_composition import (
     RuntimeLifecycleComposition,
     RuntimeLifecycleCompositionDeps,
@@ -430,12 +434,7 @@ from evelyn_core.local_tts_stream_runtime import (
 )
 from evelyn_core.observability_metrics import (
     ModelCallMetricsStore,
-    mark_turn_stage_from_runtime,
-    new_turn_metrics_from_runtime,
-    record_context_pipeline_benchmark_from_runtime,
-    record_model_call_trace_from_runtime,
     record_turn_stage_metric,
-    register_drop_reason_from_runtime,
     summarize_voice_p95_metrics,
 )
 from evelyn_core.omnivoice_request_runtime import (
@@ -461,21 +460,7 @@ from evelyn_core.question_policy_state import (
 )
 from evelyn_core.question_policy_runtime import (
     QuestionPolicyRuntimeDeps,
-    extract_question_policy_from_route_meta_from_runtime,
     QuestionPolicyStateRuntimeDeps,
-    is_continuable_technical_topic_from_runtime,
-    normalize_question_policy_mapping_from_runtime,
-    apply_fast_path_question_policy_from_runtime,
-    proactive_question_scope_candidates_from_runtime,
-    user_frustration_with_questions_from_runtime,
-    question_cooldown_hit_from_runtime,
-    user_wants_direct_answer_from_runtime,
-    record_question_trace_from_runtime,
-    summarize_question_metrics_from_runtime,
-    record_session_question_asked_from_runtime,
-    resolve_pending_proactive_question_for_turn_from_runtime,
-    select_and_mark_proactive_question_from_runtime,
-    maybe_append_proactive_question_from_runtime,
 )
 from evelyn_core.assistant_contracts import (
     TtsSynthRequest,
@@ -1246,6 +1231,84 @@ append_history = conversation_session_composition.append_history
 recent_assistant_reply_summary = conversation_session_composition.recent_assistant_reply_summary
 persona_state_hint_for_turn = conversation_session_composition.persona_state_hint_for_turn
 
+conversation_observability_composition = ConversationObservabilityComposition(
+    ConversationObservabilityCompositionDeps(
+        question_policy=build_question_policy_runtime_deps,
+        question_policy_state=build_question_policy_state_runtime_deps,
+        turn_scope_registry=turn_scope_registry,
+        turn_stage_metrics=turn_stage_metrics,
+        model_call_metrics_store=model_call_metrics_store,
+        write_turn_trace_event=write_turn_trace_event,
+        turn_trace_json_log=TURN_TRACE_JSON_LOG,
+        bottleneck_events=_BOTTLENECK_TURN_TRACE_EVENTS,
+        summary_events=TURN_SUMMARY_EVENTS,
+        console_only_stt_and_reply=VOICE_CONSOLE_ONLY_STT_AND_REPLY,
+        voice_bottleneck_logs=VOICE_BOTTLENECK_LOGS,
+        voice_trace_all_events=VOICE_TRACE_ALL_EVENTS,
+        turn_trace_log_dir=TURN_TRACE_LOG_DIR,
+        turn_trace_file_lock=turn_trace_file_lock,
+        original_print=_ORIGINAL_PRINT,
+        trace_print=print,
+        monotonic=time.monotonic,
+        now=time.time,
+        benchmark_log_path=CONTEXT_PIPELINE_BENCHMARK_LOG,
+        project_root=PROJECT_ROOT,
+        log=print,
+        record_turn_stage_metric=record_turn_stage_metric,
+        summarize_voice_p95_metrics=summarize_voice_p95_metrics,
+        get_search_followup_queued_count=lambda: search_followup_queued_count,
+        build_rejected_voice_turn=build_rejected_voice_turn,
+    )
+)
+
+log_turn_event = conversation_observability_composition.log_turn_event
+record_model_call_trace = conversation_observability_composition.record_model_call_trace
+record_context_pipeline_benchmark = conversation_observability_composition.record_context_pipeline_benchmark
+merge_log_event_payload = conversation_observability_composition.merge_log_event_payload
+replace_room_turn_scope = conversation_observability_composition.replace_room_turn_scope
+get_room_turn_scope = conversation_observability_composition.get_room_turn_scope
+_attach_current_task = conversation_observability_composition.attach_current_task
+_detach_task = conversation_observability_composition.detach_task
+create_turn_scoped_task = conversation_observability_composition.create_turn_scoped_task
+clear_room_turn_scope = conversation_observability_composition.clear_room_turn_scope
+record_turn_stage = conversation_observability_composition.record_turn_stage
+record_model_call_metric = conversation_observability_composition.record_model_call_metric
+replay_model_call_metrics_from_turn_trace = (
+    conversation_observability_composition.replay_model_call_metrics_from_turn_trace
+)
+ensure_model_call_metrics_replayed = conversation_observability_composition.ensure_model_call_metrics_replayed
+record_turn_path_summary = conversation_observability_composition.record_turn_path_summary
+summarize_turn_path_metrics = conversation_observability_composition.summarize_turn_path_metrics
+summarize_model_call_metrics = conversation_observability_composition.summarize_model_call_metrics
+normalize_question_policy_mapping = conversation_observability_composition.normalize_question_policy_mapping
+extract_question_policy_from_route_meta = (
+    conversation_observability_composition.extract_question_policy_from_route_meta
+)
+user_wants_direct_answer = conversation_observability_composition.user_wants_direct_answer
+user_frustration_with_questions = conversation_observability_composition.user_frustration_with_questions
+is_continuable_technical_topic = conversation_observability_composition.is_continuable_technical_topic
+question_cooldown_hit = conversation_observability_composition.question_cooldown_hit
+apply_fast_path_question_policy = conversation_observability_composition.apply_fast_path_question_policy
+record_question_trace = conversation_observability_composition.record_question_trace
+summarize_question_metrics = conversation_observability_composition.summarize_question_metrics
+proactive_question_scope_candidates = (
+    conversation_observability_composition.proactive_question_scope_candidates
+)
+record_session_question_asked = conversation_observability_composition.record_session_question_asked
+resolve_pending_proactive_question_for_turn = (
+    conversation_observability_composition.resolve_pending_proactive_question_for_turn
+)
+select_and_mark_proactive_question = (
+    conversation_observability_composition.select_and_mark_proactive_question
+)
+maybe_append_proactive_question = conversation_observability_composition.maybe_append_proactive_question
+summarize_p95_metrics = conversation_observability_composition.summarize_p95_metrics
+new_turn_metrics = conversation_observability_composition.new_turn_metrics
+mark_turn_stage = conversation_observability_composition.mark_turn_stage
+register_drop_reason = conversation_observability_composition.register_drop_reason
+
+configure_tts_playback_logging(log_turn_event)
+
 
 # =========================================================
 # 유틸
@@ -1340,343 +1403,6 @@ def reset_guild_runtime_state(guild_id: int) -> None:
     reset_guild_runtime_state_from_runtime(guild_id, deps=build_guild_runtime_reset_deps())
 
 
-def log_turn_event(event: str, **payload) -> None:
-    write_turn_trace_event(
-        event,
-        payload,
-        turn_trace_json_log=TURN_TRACE_JSON_LOG,
-        bottleneck_events=_BOTTLENECK_TURN_TRACE_EVENTS,
-        summary_events=TURN_SUMMARY_EVENTS,
-        console_only_stt_and_reply=VOICE_CONSOLE_ONLY_STT_AND_REPLY,
-        voice_bottleneck_logs=VOICE_BOTTLENECK_LOGS,
-        voice_trace_all_events=VOICE_TRACE_ALL_EVENTS,
-        log_dir=TURN_TRACE_LOG_DIR,
-        file_lock=turn_trace_file_lock,
-        original_print=_ORIGINAL_PRINT,
-        trace_print=print,
-    )
-
-
-def record_model_call_trace(
-    *,
-    model_role: str,
-    purpose: str,
-    hot_path: bool,
-    started_at: float,
-    success: bool,
-    metrics: dict | None = None,
-    first_token_ms: float | None = None,
-    error: BaseException | str | None = None,
-    model_name: str | None = None,
-    endpoint: str | None = None,
-    turn_id: str | None = None,
-    session_key: str | None = None,
-    source: str | None = None,
-    guild_id: int | None = None,
-) -> None:
-    record_model_call_trace_from_runtime(
-        model_role=model_role,
-        purpose=purpose,
-        hot_path=hot_path,
-        started_at=started_at,
-        success=success,
-        monotonic=time.monotonic,
-        record_model_call_metric=record_model_call_metric,
-        log_turn_event=log_turn_event,
-        metrics=metrics,
-        first_token_ms=first_token_ms,
-        error=error,
-        model_name=model_name,
-        endpoint=endpoint,
-        turn_id=turn_id,
-        session_key=session_key,
-        source=source,
-        guild_id=guild_id,
-    )
-
-
-configure_tts_playback_logging(log_turn_event)
-
-
-def record_context_pipeline_benchmark(
-    *,
-    metrics: dict | None,
-    user_text: str,
-    answer: str,
-    source: str,
-    guild_id: int | None,
-    session_key: str | None,
-) -> None:
-    record_context_pipeline_benchmark_from_runtime(
-        metrics=metrics,
-        user_text=user_text,
-        answer=answer,
-        source=source,
-        guild_id=guild_id,
-        session_key=session_key,
-        now=time.time,
-        benchmark_log_path=CONTEXT_PIPELINE_BENCHMARK_LOG,
-        project_root=PROJECT_ROOT,
-        log=print,
-    )
-
-
-def merge_log_event_payload(*, explicit: dict[str, Any], extra: dict[str, Any] | None = None) -> dict[str, Any]:
-    merged = dict(extra or {})
-    for key in explicit.keys():
-        merged.pop(key, None)
-    merged.update(explicit)
-    return merged
-
-
-def replace_room_turn_scope(room_id: str, new_scope: TurnScope, *, cancel_old: bool = True) -> TurnScope | None:
-    return turn_scope_registry.replace_room_scope(room_id, new_scope, cancel_old=cancel_old)
-
-
-def get_room_turn_scope(room_id: str | None) -> TurnScope | None:
-    return turn_scope_registry.get_room_scope(room_id)
-
-
-def _attach_current_task(turn_scope: TurnScope | None) -> asyncio.Task | None:
-    return turn_scope_registry.attach_current_task(turn_scope)
-
-
-def _detach_task(turn_scope: TurnScope | None, task: asyncio.Task | None) -> None:
-    turn_scope_registry.detach_task(turn_scope, task)
-
-
-def create_turn_scoped_task(coro: Awaitable[Any], turn_scope: TurnScope | None = None) -> asyncio.Task:
-    return turn_scope_registry.create_scoped_task(coro, turn_scope=turn_scope)
-
-
-def clear_room_turn_scope(room_id: str | None, turn_scope: TurnScope | None = None) -> None:
-    turn_scope_registry.clear_room_scope(room_id, turn_scope)
-
-
-def record_turn_stage(turn_id: str | None, stage: str, elapsed_ms: float) -> None:
-    record_turn_stage_metric(turn_stage_metrics, turn_id, stage, elapsed_ms)
-
-
-def record_model_call_metric(
-    *,
-    model_role: str,
-    purpose: str,
-    hot_path: bool,
-    success: bool,
-    latency_ms: float,
-    first_token_ms: float | None = None,
-) -> None:
-    model_call_metrics_store.record_model_call(
-        model_role=model_role,
-        purpose=purpose,
-        hot_path=hot_path,
-        success=success,
-        latency_ms=latency_ms,
-        first_token_ms=first_token_ms,
-    )
-
-
-def replay_model_call_metrics_from_turn_trace(*, max_files: int = 7, max_lines_per_file: int = 12000) -> dict[str, int]:
-    return model_call_metrics_store.replay_model_calls_from_turn_trace(
-        max_files=max_files,
-        max_lines_per_file=max_lines_per_file,
-    )
-
-
-def ensure_model_call_metrics_replayed() -> None:
-    model_call_metrics_store.ensure_replayed()
-
-
-def record_turn_path_summary(meta: dict[str, Any], marks: dict[str, Any], total_ms: float) -> None:
-    model_call_metrics_store.record_turn_path_summary(meta, marks, total_ms)
-
-
-def summarize_turn_path_metrics() -> list[dict[str, Any]]:
-    return model_call_metrics_store.summarize_turn_paths()
-
-
-def summarize_model_call_metrics() -> dict[str, Any]:
-    return model_call_metrics_store.summarize_model_calls()
-
-
-def normalize_question_policy_mapping(value: dict[str, Any] | None, *, default_source: str = "none") -> dict[str, Any]:
-    return normalize_question_policy_mapping_from_runtime(
-        value,
-        default_source=default_source,
-        deps=build_question_policy_runtime_deps(),
-    )
-
-
-def extract_question_policy_from_route_meta(route_meta: dict[str, Any] | None) -> dict[str, Any]:
-    return extract_question_policy_from_route_meta_from_runtime(route_meta, deps=build_question_policy_runtime_deps())
-
-
-def user_wants_direct_answer(text: str) -> bool:
-    return user_wants_direct_answer_from_runtime(text, deps=build_question_policy_runtime_deps())
-
-
-def user_frustration_with_questions(text: str) -> bool:
-    return user_frustration_with_questions_from_runtime(text, deps=build_question_policy_runtime_deps())
-
-
-def is_continuable_technical_topic(text: str) -> bool:
-    return is_continuable_technical_topic_from_runtime(text, deps=build_question_policy_runtime_deps())
-
-
-def question_cooldown_hit(session_key: str | None, *, now: float | None = None) -> bool:
-    return question_cooldown_hit_from_runtime(
-        session_key,
-        now=now,
-        deps=build_question_policy_state_runtime_deps(),
-    )
-
-
-def apply_fast_path_question_policy(
-    route_decision: RouteDecision,
-    *,
-    user_text: str,
-    session_key: str | None,
-    route_meta_question_policy: dict[str, Any] | None = None,
-) -> tuple[RouteDecision, bool]:
-    return apply_fast_path_question_policy_from_runtime(
-        route_decision,
-        user_text=user_text,
-        session_key=session_key,
-        route_meta_question_policy=route_meta_question_policy,
-        deps=build_question_policy_state_runtime_deps(),
-    )
-
-
-def record_question_trace(
-    *,
-    route_decision: RouteDecision,
-    answer: str,
-    shape_meta: dict[str, Any],
-    metrics: dict | None,
-    cooldown_hit: bool = False,
-) -> None:
-    record_question_trace_from_runtime(
-        route_decision=route_decision,
-        answer=answer,
-        shape_meta=shape_meta,
-        metrics=metrics,
-        cooldown_hit=cooldown_hit,
-        deps=build_question_policy_state_runtime_deps(),
-    )
-
-
-def summarize_question_metrics() -> dict[str, Any]:
-    return summarize_question_metrics_from_runtime(
-        deps=build_question_policy_state_runtime_deps(),
-    )
-
-
-def proactive_question_scope_candidates(
-    *,
-    room_key: str | None = None,
-    person_key: str | None = None,
-    session_memory_key: str | None = None,
-) -> list[tuple[str, str | None]]:
-    return proactive_question_scope_candidates_from_runtime(
-        room_key=room_key,
-        person_key=person_key,
-        session_memory_key=session_memory_key,
-        deps=build_question_policy_state_runtime_deps(),
-    )
-
-
-def record_session_question_asked(session_key: str | None, *, now: float | None = None) -> None:
-    record_session_question_asked_from_runtime(
-        session_key,
-        now=now,
-        deps=build_question_policy_state_runtime_deps(),
-    )
-
-
-def resolve_pending_proactive_question_for_turn(
-    guild_id: int | None,
-    user_text: str,
-    *,
-    session_key: str | None = None,
-    session_memory_key: str | None = None,
-    metrics: dict | None = None,
-) -> dict[str, Any]:
-    return resolve_pending_proactive_question_for_turn_from_runtime(
-        guild_id,
-        user_text,
-        session_key=session_key,
-        session_memory_key=session_memory_key,
-        metrics=metrics,
-        deps=build_question_policy_state_runtime_deps(),
-    )
-
-
-def select_and_mark_proactive_question(
-    *,
-    guild_id: int | None,
-    source: str,
-    user_text: str,
-    answer_text: str = "",
-    awaiting_user_reply: bool = False,
-    room_key: str | None = None,
-    person_key: str | None = None,
-    session_key: str | None = None,
-    session_memory_key: str | None = None,
-    runtime_block_reason: str = "",
-    metrics: dict | None = None,
-) -> dict[str, Any] | None:
-    return select_and_mark_proactive_question_from_runtime(
-        guild_id=guild_id,
-        source=source,
-        user_text=user_text,
-        answer_text=answer_text,
-        awaiting_user_reply=awaiting_user_reply,
-        room_key=room_key,
-        person_key=person_key,
-        session_key=session_key,
-        session_memory_key=session_memory_key,
-        runtime_block_reason=runtime_block_reason,
-        metrics=metrics,
-        deps=build_question_policy_state_runtime_deps(),
-    )
-
-
-def maybe_append_proactive_question(
-    answer_text: str,
-    *,
-    guild_id: int | None,
-    source: str,
-    user_text: str,
-    awaiting_user_reply: bool,
-    room_key: str | None = None,
-    person_key: str | None = None,
-    session_key: str | None = None,
-    session_memory_key: str | None = None,
-    metrics: dict | None = None,
-) -> tuple[str, bool]:
-    return maybe_append_proactive_question_from_runtime(
-        answer_text,
-        guild_id=guild_id,
-        source=source,
-        user_text=user_text,
-        awaiting_user_reply=awaiting_user_reply,
-        room_key=room_key,
-        person_key=person_key,
-        session_key=session_key,
-        session_memory_key=session_memory_key,
-        metrics=metrics,
-        deps=build_question_policy_state_runtime_deps(),
-    )
-
-
-def summarize_p95_metrics() -> dict[str, float | int]:
-    return summarize_voice_p95_metrics(
-        turn_stage_metrics,
-        search_followup_queued_count=search_followup_queued_count,
-        cancelled_stale_turn_count=turn_scope_registry.cancelled_stale_turn_count,
-    )
-
-
 voice_barge_in_continuity_tracker = VoiceBargeInContinuityTracker(
     target_count=VOICE_BARGE_IN_CONTINUITY_TARGET,
     clean_text=clean_text,
@@ -1702,59 +1428,6 @@ def compute_runtime_mode(metrics: dict | None) -> str:
 
 def apply_runtime_mode(mode: str, opts: dict[str, Any] | None = None) -> dict[str, Any]:
     return apply_runtime_mode_policy(mode, opts)
-
-
-def new_turn_metrics(
-    *,
-    source: str,
-    session_key: str | None = None,
-    room_session_key: str | None = None,
-    guild_id: int | None = None,
-    user_id: int | None = None,
-    owner_user_id: int | None = None,
-    topic_id: str | None = None,
-    turn_id: str | None = None,
-    segment_id: int | None = None,
-    chunk_index: int | None = None,
-) -> dict:
-    return new_turn_metrics_from_runtime(
-        source=source,
-        monotonic=time.monotonic,
-        log_turn_event=log_turn_event,
-        session_key=session_key,
-        room_session_key=room_session_key,
-        guild_id=guild_id,
-        user_id=user_id,
-        owner_user_id=owner_user_id,
-        topic_id=topic_id,
-        turn_id=turn_id,
-        segment_id=segment_id,
-        chunk_index=chunk_index,
-    )
-
-
-def mark_turn_stage(metrics: dict | None, key: str, *, event_name: str | None = None, **extra) -> None:
-    mark_turn_stage_from_runtime(
-        metrics,
-        key,
-        monotonic=time.monotonic,
-        record_turn_stage=record_turn_stage,
-        merge_log_event_payload=merge_log_event_payload,
-        log_turn_event=log_turn_event,
-        event_name=event_name,
-        **extra,
-    )
-
-
-def register_drop_reason(metrics: dict | None, reason: str, **extra) -> None:
-    register_drop_reason_from_runtime(
-        metrics,
-        reason,
-        build_rejected_voice_turn=build_rejected_voice_turn,
-        merge_log_event_payload=merge_log_event_payload,
-        log_turn_event=log_turn_event,
-        **extra,
-    )
 
 
 def estimate_voice_like_probability(*, voiced_ms: float, audio_sec: float, body_rms: float) -> float:

@@ -196,7 +196,7 @@ class ConversationSessionCompositionTests(unittest.TestCase):
         }
         old_tree = ast.parse(
             subprocess.check_output(
-                ["git", "show", "HEAD:main.py"], text=True, encoding="utf-8"
+                ["git", "show", "5136ea8:main.py"], text=True, encoding="utf-8"
             )
         )
         new_tree = ast.parse(
