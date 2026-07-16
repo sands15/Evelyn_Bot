@@ -427,7 +427,10 @@ from evelyn_core.local_mic_state import (
 from evelyn_core.local_runtime_context import build_evelyn_runtime_dependency_context_from_payload
 from evelyn_core.local_control_tts_runtime import (
     build_local_control_tts_runtime_deps,
-    schedule_local_control_tts_from_runtime,
+)
+from evelyn_core.delivery_entry_composition import (
+    DeliveryEntryComposition,
+    LocalDeliveryEntryDeps,
 )
 from evelyn_core.tts_warmup_runtime import TtsWarmupRuntimeDeps
 from evelyn_core.tts_interrupt_runtime import (
@@ -2793,24 +2796,36 @@ def _cleanup_prepared_tts_item(item: object) -> None:
                 cleanup()
 
 
-def _mark_local_tts_first_playback(
-    metrics: dict | None,
-    *,
-    turn_id: str | None,
-    chunk_index: int,
-    session_key: str | None,
-) -> None:
-    if not metrics or "local_tts_first_playback" not in (metrics.get("marks") or {}):
-        mark_turn_stage(
-            metrics,
-            "local_tts_first_playback",
-            event_name="local_tts_first_playback",
-            turn_id=turn_id,
-            chunk_index=chunk_index,
-            session_key=session_key,
-            output_mode="local_speaker",
-        )
-    log_voice_latency(metrics, "local_first_playback_logged", "Local speaker first playback")
+delivery_entry_composition = DeliveryEntryComposition(
+    LocalDeliveryEntryDeps(
+        queue_factory=lambda: asyncio.Queue(),
+        sink_factory=TTSQueueSink,
+        stream_local_tts_sentences=(
+            lambda *args, **kwargs: stream_local_tts_sentences(*args, **kwargs)
+        ),
+        create_scoped_task=create_turn_scoped_task,
+        streaming_delivery_factory=StreamingVoiceDelivery,
+        log_voice_stage=log_voice_stage,
+        mark_turn_stage=mark_turn_stage,
+        log_voice_latency=log_voice_latency,
+        local_control_tts=lambda: build_local_control_tts_runtime_deps(
+            local_only_mode=LOCAL_ONLY_MODE,
+            local_tts_enabled=lambda: bool(local_tts_playback_manager.enabled),
+            speak_answer_local=lambda *args, **kwargs: speak_answer_local(*args, **kwargs),
+            create_turn_scoped_task=create_turn_scoped_task,
+            log_voice_bottleneck_summary=log_voice_bottleneck_summary,
+            monotonic=time.monotonic,
+        ),
+        prefetch_chunks=TTS_PREFETCH_CHUNKS,
+        log=print,
+    )
+)
+
+_mark_local_tts_first_playback = delivery_entry_composition.mark_local_tts_first_playback
+start_streaming_local_voice_delivery = (
+    delivery_entry_composition.start_streaming_local_voice_delivery
+)
+schedule_local_control_tts = delivery_entry_composition.schedule_local_control_tts
 
 
 def build_local_tts_stream_runtime_deps() -> LocalTtsStreamRuntimeDeps:
@@ -2833,58 +2848,6 @@ def build_local_tts_stream_runtime_deps() -> LocalTtsStreamRuntimeDeps:
         omnivoice_timeout_sec=OMNIVOICE_TIMEOUT_SEC,
         cleanup_prepared_tts_item=_cleanup_prepared_tts_item,
         mark_local_tts_first_playback=_mark_local_tts_first_playback,
-    )
-
-
-def start_streaming_local_voice_delivery(
-    *,
-    metrics: dict,
-    turn_id: str | None,
-    session_key: str | None,
-    turn_scope: TurnScope | None,
-) -> StreamingVoiceDelivery:
-    sentence_queue: asyncio.Queue[str | None] = asyncio.Queue()
-    tts_sink = TTSQueueSink(sentence_queue, log=print)
-    playback_task = create_turn_scoped_task(
-        stream_local_tts_sentences(
-            sentence_queue,
-            metrics=metrics,
-            turn_id=turn_id,
-            session_key=session_key,
-            turn_scope=turn_scope,
-        ),
-        turn_scope=turn_scope,
-    )
-    return StreamingVoiceDelivery(
-        sentence_queue,
-        tts_sink,
-        playback_task,
-        metrics=metrics,
-        log_stage=log_voice_stage,
-        prefetch_chunks=TTS_PREFETCH_CHUNKS,
-    )
-
-
-def schedule_local_control_tts(
-    answer: str,
-    *,
-    turn_id: str | None = None,
-    session_key: str | None = None,
-    turn_scope: TurnScope | None = None,
-) -> asyncio.Task | None:
-    return schedule_local_control_tts_from_runtime(
-        answer,
-        turn_id=turn_id,
-        session_key=session_key,
-        turn_scope=turn_scope,
-        deps=build_local_control_tts_runtime_deps(
-            local_only_mode=LOCAL_ONLY_MODE,
-            local_tts_enabled=lambda: bool(local_tts_playback_manager.enabled),
-            speak_answer_local=speak_answer_local,
-            create_turn_scoped_task=create_turn_scoped_task,
-            log_voice_bottleneck_summary=log_voice_bottleneck_summary,
-            monotonic=time.monotonic,
-        ),
     )
 
 
