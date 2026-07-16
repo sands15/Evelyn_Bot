@@ -98,9 +98,16 @@ class VisionContextCleanupTests(unittest.TestCase):
         vision_runtime = (
             REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "vision_runtime.py"
         ).read_text(encoding="utf-8")
+        vision_request_composition = (
+            REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "vision_request_composition.py"
+        ).read_text(encoding="utf-8")
 
         self.assertIn("VISION_DELETE_REQUEST_IMAGES", source)
-        self.assertIn("delete_request_vision_image", source)
+        self.assertIn("delete_request_vision_image", vision_request_composition)
+        self.assertIn(
+            "delete_request_vision_image = vision_request_composition.delete_request_vision_image",
+            source,
+        )
         self.assertIn("redact_vision_text_for_memory", source)
         self.assertIn("VISION_MEMORY_WRITE_ENABLED", source)
         self.assertIn("def redact_vision_text_for_memory", memory_policy)

@@ -153,14 +153,9 @@ from evelyn_core.vision_watch import (
     vision_watch_scene_is_unreliable,
 )
 from evelyn_core.vision_quality import build_vision_quality
-from evelyn_core.vision_runtime import (
-    LiveVisionContextRuntimeDeps,
-    VisionRuntimeDeps,
-    build_live_vision_context_from_runtime,
-    build_vision_observation_prompt_from_runtime,
-    build_vision_watch_prompt_from_runtime,
-    format_vision_observation_from_runtime,
-    vision_watch_scene_looks_bad_from_runtime,
+from evelyn_core.vision_request_composition import (
+    VisionRequestComposition,
+    VisionRequestCompositionDeps,
 )
 from evelyn_core.vision_watch_composition import (
     VisionWatchComposition,
@@ -1747,104 +1742,37 @@ build_main_response_guidance_runtime_deps = (
 )
 
 
-def build_vision_watch_runtime_deps() -> VisionRuntimeDeps:
-    return VisionRuntimeDeps(
-        clean_text=clean_text,
-        build_vision_quality=build_vision_quality,
-        vision_watch_scene_is_unreliable=vision_watch_scene_is_unreliable,
-    )
-
-
-def build_vision_observation_prompt(user_text: str) -> str:
-    return build_vision_observation_prompt_from_runtime(user_text, deps=build_vision_watch_runtime_deps())
-
-
-def _capture_local_screen_sync() -> tuple[Path, tuple[int, int]]:
-    from PIL import ImageGrab
-
-    VISION_SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
-    image = ImageGrab.grab(all_screens=VISION_CAPTURE_ALL_SCREENS).convert("RGB")
-    path = VISION_SCREENSHOT_DIR / f"screen_{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}.png"
-    image.save(path)
-    extrema = image.getextrema()
-    if extrema and all(int(high) <= 2 for _low, high in extrema):
-        raise RuntimeError(f"screen capture returned a black frame: {path}")
-    return path, image.size
-
-
-async def capture_local_screen() -> tuple[Path, tuple[int, int]]:
-    return await asyncio.to_thread(_capture_local_screen_sync)
-
-
-def _delete_file_quietly(path: Path | None) -> bool:
-    if path is None:
-        return False
-    try:
-        resolved = path.resolve()
-        screenshot_root = VISION_SCREENSHOT_DIR.resolve()
-        if screenshot_root not in (resolved, *resolved.parents):
-            return False
-        if not resolved.exists() or not resolved.is_file():
-            return False
-        resolved.unlink()
-        return True
-    except Exception:
-        return False
-
-
-def delete_request_vision_image(path: Path | None) -> bool:
-    if not VISION_DELETE_REQUEST_IMAGES:
-        return False
-    return _delete_file_quietly(path)
-
-
-def format_vision_observation(
-    *,
-    image_path: Path,
-    image_size: tuple[int, int],
-    data: dict[str, Any],
-    image_deleted: bool = False,
-) -> str:
-    return format_vision_observation_from_runtime(
-        image_path=image_path,
-        image_size=image_size,
-        data=data,
-        image_deleted=image_deleted,
-        deps=build_vision_watch_runtime_deps(),
-    )
-
-
-def build_live_vision_context_runtime_deps() -> LiveVisionContextRuntimeDeps:
-    return LiveVisionContextRuntimeDeps(
+vision_request_composition = VisionRequestComposition(
+    VisionRequestCompositionDeps(
+        screenshot_dir=VISION_SCREENSHOT_DIR,
+        capture_all_screens=VISION_CAPTURE_ALL_SCREENS,
+        delete_request_images=VISION_DELETE_REQUEST_IMAGES,
         auto_capture_enabled=VISION_AUTO_CAPTURE_ENABLED,
         analyze_timeout_sec=VISION_ANALYZE_TIMEOUT_SEC,
         service_url=VISION_SERVICE_URL,
-        capture_local_screen=capture_local_screen,
-        build_observation_prompt=build_vision_observation_prompt,
+        build_vision_quality=build_vision_quality,
+        vision_watch_scene_is_unreliable=vision_watch_scene_is_unreliable,
         get_http_session=lambda: get_http_session(),
         client_timeout_factory=aiohttp.ClientTimeout,
-        delete_request_image=delete_request_vision_image,
-        format_observation=format_vision_observation,
-        build_vision_quality=build_vision_quality,
         clean_text=clean_text,
+        to_thread=asyncio.to_thread,
         monotonic=time.monotonic,
     )
+)
 
-
-async def build_live_vision_context(user_text: str, *, metrics: dict | None = None) -> str:
-    return await build_live_vision_context_from_runtime(
-        user_text,
-        deps=build_live_vision_context_runtime_deps(),
-        metrics=metrics,
-    )
-
-
-def build_vision_watch_prompt() -> str:
-    return build_vision_watch_prompt_from_runtime()
-
-
-def vision_watch_scene_looks_bad(scene: str) -> bool:
-    return vision_watch_scene_looks_bad_from_runtime(scene, deps=build_vision_watch_runtime_deps())
+build_vision_watch_runtime_deps = vision_request_composition.build_vision_watch_runtime_deps
+build_vision_observation_prompt = vision_request_composition.build_vision_observation_prompt
+_capture_local_screen_sync = vision_request_composition.capture_local_screen_sync
+capture_local_screen = vision_request_composition.capture_local_screen
+_delete_file_quietly = vision_request_composition.delete_file_quietly
+delete_request_vision_image = vision_request_composition.delete_request_vision_image
+format_vision_observation = vision_request_composition.format_vision_observation
+build_live_vision_context_runtime_deps = (
+    vision_request_composition.build_live_vision_context_runtime_deps
+)
+build_live_vision_context = vision_request_composition.build_live_vision_context
+build_vision_watch_prompt = vision_request_composition.build_vision_watch_prompt
+vision_watch_scene_looks_bad = vision_request_composition.vision_watch_scene_looks_bad
 
 
 vision_watch_composition = VisionWatchComposition(

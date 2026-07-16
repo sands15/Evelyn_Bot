@@ -143,7 +143,9 @@ class LiveVisionContextRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(metrics["meta"]["vision_quality"]["confidence"], "high")
 
     def test_main_delegates_live_vision_context_to_runtime_module(self) -> None:
-        source = (REPO_ROOT / "main.py").read_text(encoding="utf-8")
+        source = (
+            REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "vision_request_composition.py"
+        ).read_text(encoding="utf-8")
         start = source.index("async def build_live_vision_context(")
         end = source.index("def build_vision_watch_prompt", start)
         function_source = source[start:end]
