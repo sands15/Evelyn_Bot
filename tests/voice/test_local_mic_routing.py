@@ -379,8 +379,17 @@ class LocalMicRoutingTests(unittest.TestCase):
         voice_io_composition = (
             REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "voice_io_composition_runtime.py"
         ).read_text(encoding="utf-8")
+        delivery_entry_composition = (
+            REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "delivery_entry_composition.py"
+        ).read_text(encoding="utf-8")
 
-        self.assertIn("def start_streaming_local_voice_delivery(", main_py)
+        self.assertIn("def start_streaming_local_voice_delivery(", delivery_entry_composition)
+        self.assertIn(
+            "start_streaming_local_voice_delivery = (\n"
+            "    delivery_entry_composition.start_streaming_local_voice_delivery\n"
+            ")",
+            main_py,
+        )
         self.assertIn("async def stream_local_tts_sentences(", voice_io_composition)
         self.assertIn('"delivery_mode"] = "llm_sentence_stream"', voice_delivery_runtime)
         self.assertIn("on_sentence=fanout.on_chunk", voice_delivery_runtime)
@@ -388,7 +397,7 @@ class LocalMicRoutingTests(unittest.TestCase):
         self.assertIn("prefetch_tts_sources(", local_tts_stream_runtime)
         self.assertIn("on_first_playback=", local_tts_stream_runtime)
         self.assertIn('"local_first_playback_logged"', voice_delivery_runtime)
-        self.assertIn('"local_tts_first_playback"', main_py)
+        self.assertIn('"local_tts_first_playback"', delivery_entry_composition)
         self.assertIn("omnivoice_num_step=OMNIVOICE_NUM_STEP", main_py)
         self.assertIn("await deps.speak_answer_local(", voice_delivery_runtime)
         self.assertIn('metrics.setdefault("meta", {})["local_streaming_tts_fallback_used"] = True', voice_delivery_runtime)
