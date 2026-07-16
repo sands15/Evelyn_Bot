@@ -196,9 +196,11 @@ class VoiceMemberAudioPipelineRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(dispatch["deps"], "dispatch-deps")
 
     def test_main_process_impl_is_a_thin_pipeline_wrapper(self) -> None:
-        source = (REPO_ROOT / "main.py").read_text(encoding="utf-8")
-        start = source.index("async def _process_member_audio_impl(")
-        function_source = source[start : source.index("# 이벤트", start)]
+        source = (
+            REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "voice_io_composition_runtime.py"
+        ).read_text(encoding="utf-8")
+        start = source.index("    async def process_member_audio_impl(")
+        function_source = source[start:]
 
         self.assertIn("process_member_audio_pipeline_from_runtime(", function_source)
         self.assertNotIn("prepare_voice_audio_ingress_from_runtime(", function_source)

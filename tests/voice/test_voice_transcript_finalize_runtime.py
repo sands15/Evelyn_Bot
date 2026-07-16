@@ -162,10 +162,13 @@ class VoiceTranscriptFinalizeRuntimeTests(unittest.TestCase):
 
     def test_main_delegates_transcript_finalization_to_runtime_module(self) -> None:
         source = (REPO_ROOT / "main.py").read_text(encoding="utf-8")
-        start = source.index("async def _process_member_audio_impl(")
-        function_source = source[start : source.index("# 이벤트", start)]
+        composition_source = (
+            REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "voice_io_composition_runtime.py"
+        ).read_text(encoding="utf-8")
+        start = composition_source.index("    async def process_member_audio_impl(")
+        function_source = composition_source[start:]
         builder_source = source[
-            source.index("def build_voice_member_audio_pipeline_deps(") : source.index("async def process_member_audio(")
+            source.index("def build_voice_member_audio_pipeline_deps(") : source.index("voice_io_composition =", source.index("def build_voice_member_audio_pipeline_deps("))
         ]
 
         self.assertIn("finalize_transcript=finalize_voice_transcript_from_runtime", builder_source)

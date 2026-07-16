@@ -157,9 +157,11 @@ class LocalTtsSingleRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.detached), 1)
 
     def test_main_delegates_local_single_playback_to_runtime_module(self) -> None:
-        source = (REPO_ROOT / "main.py").read_text(encoding="utf-8")
-        start = source.index("async def speak_answer_local(")
-        end = source.index("def _cleanup_prepared_tts_item(", start)
+        source = (
+            REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "voice_io_composition_runtime.py"
+        ).read_text(encoding="utf-8")
+        start = source.index("    async def speak_answer_local(")
+        end = source.index("    async def stream_local_tts_sentences(", start)
         function_source = source[start:end]
 
         self.assertIn("speak_answer_local_from_runtime(", function_source)

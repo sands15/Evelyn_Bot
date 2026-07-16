@@ -155,9 +155,11 @@ class DiscordTtsStreamRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(self.detached[0][0], scope)
 
     def test_main_delegates_discord_tts_stream_to_runtime_module(self) -> None:
-        source = (REPO_ROOT / "main.py").read_text(encoding="utf-8")
-        start = source.index("async def stream_tts_sentences(")
-        end = source.index("async def speak_answer_local(", start)
+        source = (
+            REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "voice_io_composition_runtime.py"
+        ).read_text(encoding="utf-8")
+        start = source.index("    async def stream_tts_sentences(")
+        end = source.index("    async def speak_answer_local(", start)
         function_source = source[start:end]
 
         self.assertIn("stream_tts_sentences_from_runtime(", function_source)

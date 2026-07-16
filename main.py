@@ -245,6 +245,7 @@ from evelyn_core.http_session_runtime import ensure_http_session_from_runtime
 from evelyn_core.llm_context_assembly import LlmContextAssemblyDeps
 from evelyn_core.llm_warmup_runtime import LlmWarmupRuntimeDeps
 from evelyn_core.llm_route_composition_runtime import LlmRouteComposition, LlmRouteCompositionDeps
+from evelyn_core.voice_io_composition_runtime import VoiceIoComposition, VoiceIoCompositionDeps
 from evelyn_core.main_llm_runtime import (
     AskLlmOnceRuntimeDeps,
     MainLlmRuntimeDeps,
@@ -330,8 +331,6 @@ from evelyn_core.discord_delivery import (
 from evelyn_core.discord_tts_stream_runtime import (
     DiscordTtsSingleRuntimeDeps,
     DiscordTtsStreamRuntimeDeps,
-    speak_answer_from_runtime,
-    stream_tts_sentences_from_runtime,
 )
 from evelyn_core.discord_voice_connection_runtime import (
     DiscordVoiceConnectionRuntimeDeps,
@@ -411,10 +410,7 @@ from evelyn_core.session_key_runtime import (
     make_voice_session_key,
     runtime_session_key,
 )
-from evelyn_core.discord_text_reply_runtime import (
-    DiscordTextReplyRuntimeDeps,
-    stream_text_reply_from_runtime,
-)
+from evelyn_core.discord_text_reply_runtime import DiscordTextReplyRuntimeDeps
 from evelyn_core.discord_session_policy import (
     DiscordRoomSessionPolicy,
     estimate_voice_like_probability_policy,
@@ -478,9 +474,6 @@ from evelyn_core.tts_interrupt_runtime import (
     TtsInterruptRuntimeDeps,
     VoiceTtsInterruptGateDeps,
     run_voice_tts_interrupt_gate_from_runtime,
-    speaker_verification_allows_tts_interrupt_from_runtime,
-    stop_active_tts_playback_from_runtime,
-    verify_speaker_for_tts_interrupt_from_runtime,
 )
 from evelyn_core.voice_timing_runtime import (
     build_voice_timing_runtime_deps as build_voice_timing_runtime_deps_from_runtime,
@@ -494,8 +487,6 @@ from evelyn_core.local_tts_playback import LocalTtsPlaybackManager
 from evelyn_core.local_tts_stream_runtime import (
     LocalTtsSingleRuntimeDeps,
     LocalTtsStreamRuntimeDeps,
-    speak_answer_local_from_runtime,
-    stream_local_tts_sentences_from_runtime,
 )
 from evelyn_core.observability_metrics import (
     ModelCallMetricsStore,
@@ -554,11 +545,7 @@ from evelyn_core.assistant_contracts import (
     TtsSynthResult,
 )
 from evelyn_core.assistant_prompt_contract import build_evelyn_system_prompt
-from evelyn_core.cached_tts_runtime import (
-    CachedTtsRuntimeDeps,
-    cached_audio_path_for_answer_from_runtime,
-    play_cached_answer_audio_from_runtime,
-)
+from evelyn_core.cached_tts_runtime import CachedTtsRuntimeDeps
 from evelyn_core.stt_model_runtime import (
     SttModelRuntimeDeps,
     build_stt_model_runtime_deps as build_stt_model_runtime_deps_from_runtime,
@@ -647,7 +634,6 @@ from evelyn_core.tts_playback import (
     CachedWaveAudioSource,
     OmniVoicePCMStream,
     StreamingVoiceDelivery,
-    SpeechChunker,
     TTSQueueSink,
     TtsPlaybackManager,
     TtsSourcePlaybackRequest,
@@ -728,10 +714,7 @@ from evelyn_core.voice_reply_dispatch_runtime import (
     VoiceReplyDispatchDeps,
     dispatch_voice_reply_from_runtime,
 )
-from evelyn_core.voice_member_audio_pipeline_runtime import (
-    VoiceMemberAudioPipelineDeps,
-    process_member_audio_pipeline_from_runtime,
-)
+from evelyn_core.voice_member_audio_pipeline_runtime import VoiceMemberAudioPipelineDeps
 from evelyn_core.voice_route_execution import (
     VoiceMainLlmStreamingDeps,
     VoiceRouteExecutionDeps,
@@ -739,31 +722,13 @@ from evelyn_core.voice_route_execution import (
 )
 from evelyn_core.voice_response_runtime import (
     VoiceResponseRuntimeDeps,
-    build_first_response_from_runtime,
-    build_followup_response_from_runtime,
     MainResponseGuidanceRuntimeDeps,
     build_main_response_guidance_from_runtime,
-    is_duplicate_followup as is_duplicate_followup_payload,
-    normalize_compare_text as normalize_compare_text_payload,
-    split_first_response_and_followup as split_first_response_and_followup_with_deps,
 )
-from evelyn_core.voice_stream_chunks import (
-    VoiceStreamChunkDeps,
-    build_stream_speech_chunker_from_runtime,
-    emit_delivery_plan_chunks as emit_delivery_plan_chunks_payload,
-    emit_stream_delta_chunks as emit_stream_delta_chunks_payload,
-    flush_streamed_answer_chunks as flush_streamed_answer_chunks_payload,
-)
+from evelyn_core.voice_stream_chunks import VoiceStreamChunkDeps
 from evelyn_core.voice_ingress_runtime import (
     VoiceIngressEntrypointDeps,
     VoiceIngressRuntimeDeps,
-    delayed_voice_utterance_flush_from_runtime,
-    enqueue_voice_ingress_for_processing_from_runtime,
-    flush_voice_utterance_buffer_from_runtime,
-    process_member_audio_from_runtime,
-    schedule_voice_utterance_item_from_runtime,
-    voice_ingress_worker_from_runtime,
-    voice_utterance_buffer_key as voice_utterance_buffer_key_payload,
 )
 from evelyn_core.voice_audio_ingress_runtime import (
     VoiceAudioIngressDeps,
@@ -785,27 +750,13 @@ from evelyn_core.voice_session_gate_runtime import (
     VoiceSessionGateDeps,
     run_voice_session_gate_from_runtime,
 )
-from evelyn_core.voice_reply_side_effects import (
-    VoiceReplySideEffectDeps,
-    finalize_voice_reply_side_effects_from_runtime,
-)
-from evelyn_core.voice_reply_gate_runtime import (
-    VoiceReplyGateRuntimeDeps,
-    should_reply_to_voice_from_runtime,
-)
-from evelyn_core.voice_delivery_runtime import (
-    VoiceDeliveryRuntimeDeps,
-    ask_llm_and_speak_local_from_runtime,
-    ask_llm_and_speak_streaming_from_runtime,
-    finalize_voice_answer_from_runtime,
-    execute_voice_delivery_plan_from_runtime,
-)
+from evelyn_core.voice_reply_side_effects import VoiceReplySideEffectDeps
+from evelyn_core.voice_reply_gate_runtime import VoiceReplyGateRuntimeDeps
+from evelyn_core.voice_delivery_runtime import VoiceDeliveryRuntimeDeps
 from evelyn_core.voice_pipeline import (
-    AnswerPayload,
     DeliveryPlan,
     RouteDecision,
     TranscriptResult,
-    VoiceReplyRequest,
     VoiceSegment,
     build_answer_payload,
     build_answer_payload_from_text,
@@ -2452,40 +2403,6 @@ def build_voice_reply_side_effect_deps() -> VoiceReplySideEffectDeps:
     )
 
 
-def finalize_voice_reply_side_effects(
-    *,
-    guild_id: int,
-    member: discord.Member,
-    session_key: str,
-    room_session_key: str,
-    room_key: str | None,
-    person_key: str | None,
-    session_memory_key: str | None,
-    voice_reply: VoiceReplyRequest,
-    plain_answer: str,
-    metrics: dict,
-    turn_scope: TurnScope,
-    accepted_turn_id: str,
-    segment_id: int,
-) -> None:
-    finalize_voice_reply_side_effects_from_runtime(
-        guild_id=guild_id,
-        member=member,
-        session_key=session_key,
-        room_session_key=room_session_key,
-        room_key=room_key,
-        person_key=person_key,
-        session_memory_key=session_memory_key,
-        voice_reply=voice_reply,
-        plain_answer=plain_answer,
-        metrics=metrics,
-        turn_scope=turn_scope,
-        accepted_turn_id=accepted_turn_id,
-        segment_id=segment_id,
-        deps=build_voice_reply_side_effect_deps(),
-    )
-
-
 def build_fast_path_policy_runtime_deps() -> FastPathPolicyRuntimeDeps:
     return FastPathPolicyRuntimeDeps(
         clean_text=clean_text,
@@ -2610,32 +2527,6 @@ def build_voice_reply_gate_runtime_deps() -> VoiceReplyGateRuntimeDeps:
     )
 
 
-def should_reply_to_voice(
-    guild_id: int,
-    text: str,
-    *,
-    wake_detected: bool = False,
-    wake_match_mode: str = "",
-    session_key: str | None = None,
-    room_session_key: str | None = None,
-    user_id: int | None = None,
-    active_speaker_user_id: int | None = None,
-    ignore_tts_suppression: bool = False,
-) -> tuple[bool, str, str]:
-    return should_reply_to_voice_from_runtime(
-        guild_id=guild_id,
-        text=text,
-        wake_detected=wake_detected,
-        wake_match_mode=wake_match_mode,
-        session_key=session_key,
-        room_session_key=room_session_key,
-        user_id=user_id,
-        active_speaker_user_id=active_speaker_user_id,
-        ignore_tts_suppression=ignore_tts_suppression,
-        deps=build_voice_reply_gate_runtime_deps(),
-    )
-
-
 def should_skip_full_stt_after_wake_probe(*, wake_detected: bool, wake_probe: str, duration_sec: float) -> bool:
     return should_skip_full_stt_after_wake_probe_from_runtime(
         wake_detected=wake_detected,
@@ -2708,49 +2599,12 @@ def build_voice_ingress_entrypoint_deps() -> VoiceIngressEntrypointDeps:
     )
 
 
-async def voice_ingress_worker() -> None:
-    await voice_ingress_worker_from_runtime(deps=build_voice_ingress_runtime_deps())
-
-
 def ensure_voice_worker_started() -> None:
     global voice_worker_task
     ensure_debug_write_worker_started()
     if voice_worker_task is not None and not voice_worker_task.done():
         return
     voice_worker_task = asyncio.create_task(voice_ingress_worker())
-
-
-def _voice_utterance_buffer_key(item: dict[str, Any]) -> str:
-    return voice_utterance_buffer_key_payload(item)
-
-
-async def _enqueue_voice_ingress_for_processing(item: dict[str, Any]) -> None:
-    await enqueue_voice_ingress_for_processing_from_runtime(
-        item,
-        deps=build_voice_ingress_runtime_deps(),
-    )
-
-
-async def _flush_voice_utterance_buffer(key: str) -> None:
-    await flush_voice_utterance_buffer_from_runtime(
-        key,
-        deps=build_voice_ingress_runtime_deps(),
-    )
-
-
-async def _delayed_voice_utterance_flush(key: str, delay_sec: float) -> None:
-    await delayed_voice_utterance_flush_from_runtime(
-        key,
-        delay_sec,
-        deps=build_voice_ingress_runtime_deps(),
-    )
-
-
-async def _schedule_voice_utterance_item(item: dict[str, Any]) -> None:
-    await schedule_voice_utterance_item_from_runtime(
-        item,
-        deps=build_voice_ingress_runtime_deps(),
-    )
 
 
 def should_label_question_response(text: str, *, session_key: str | None = None) -> bool:
@@ -4170,34 +4024,6 @@ def build_tts_interrupt_runtime_deps() -> TtsInterruptRuntimeDeps:
     )
 
 
-async def stop_active_tts_playback(guild_id: int | None, *, reason: str = "interrupt") -> bool:
-    return await stop_active_tts_playback_from_runtime(
-        guild_id,
-        deps=build_tts_interrupt_runtime_deps(),
-        reason=reason,
-    )
-
-
-async def verify_speaker_for_tts_interrupt(
-    audio: np.ndarray,
-    *,
-    sampling_rate: int,
-    source: str | None,
-    metrics: dict | None = None,
-) -> SpeakerVerificationResult:
-    return await verify_speaker_for_tts_interrupt_from_runtime(
-        audio,
-        deps=build_tts_interrupt_runtime_deps(),
-        sampling_rate=sampling_rate,
-        source=source,
-        metrics=metrics,
-    )
-
-
-def speaker_verification_allows_tts_interrupt(result: SpeakerVerificationResult) -> bool:
-    return speaker_verification_allows_tts_interrupt_from_runtime(result)
-
-
 def build_cached_tts_runtime_deps() -> CachedTtsRuntimeDeps:
     return CachedTtsRuntimeDeps(
         resolve_cached_tts_audio_path=resolve_cached_tts_audio_path,
@@ -4214,28 +4040,6 @@ def build_cached_tts_runtime_deps() -> CachedTtsRuntimeDeps:
     )
 
 
-def cached_audio_path_for_answer(answer: str) -> Path | None:
-    return cached_audio_path_for_answer_from_runtime(answer, deps=build_cached_tts_runtime_deps())
-
-
-async def play_cached_answer_audio(
-    vc: discord.VoiceClient,
-    answer: str,
-    *,
-    turn_id: str | None = None,
-    session_key: str | None = None,
-    metrics: dict | None = None,
-) -> bool:
-    return await play_cached_answer_audio_from_runtime(
-        vc,
-        answer,
-        deps=build_cached_tts_runtime_deps(),
-        turn_id=turn_id,
-        session_key=session_key,
-        metrics=metrics,
-    )
-
-
 def build_discord_tts_single_runtime_deps() -> DiscordTtsSingleRuntimeDeps:
     return DiscordTtsSingleRuntimeDeps(
         is_local_speaker_voice_client=is_local_speaker_voice_client,
@@ -4248,26 +4052,6 @@ def build_discord_tts_single_runtime_deps() -> DiscordTtsSingleRuntimeDeps:
         log_voice_latency=log_voice_latency,
         playback_manager=tts_playback_manager,
         source_playback_request_factory=TtsSourcePlaybackRequest,
-    )
-
-
-async def speak_answer(
-    vc: discord.VoiceClient,
-    answer: str,
-    *,
-    turn_id: str | None = None,
-    session_key: str | None = None,
-    turn_scope: TurnScope | None = None,
-    metrics: dict | None = None,
-) -> None:
-    await speak_answer_from_runtime(
-        vc,
-        answer,
-        deps=build_discord_tts_single_runtime_deps(),
-        turn_id=turn_id,
-        session_key=session_key,
-        turn_scope=turn_scope,
-        metrics=metrics,
     )
 
 
@@ -4293,26 +4077,6 @@ def build_discord_tts_stream_runtime_deps() -> DiscordTtsStreamRuntimeDeps:
     )
 
 
-async def stream_tts_sentences(
-    vc: discord.VoiceClient,
-    sentence_queue: "asyncio.Queue[str | None]",
-    *,
-    metrics: dict | None = None,
-    turn_id: str | None = None,
-    session_key: str | None = None,
-    turn_scope: TurnScope | None = None,
-) -> None:
-    await stream_tts_sentences_from_runtime(
-        vc,
-        sentence_queue,
-        deps=build_discord_tts_stream_runtime_deps(),
-        metrics=metrics,
-        turn_id=turn_id,
-        session_key=session_key,
-        turn_scope=turn_scope,
-    )
-
-
 def build_local_tts_single_runtime_deps() -> LocalTtsSingleRuntimeDeps:
     return LocalTtsSingleRuntimeDeps(
         playback_manager=local_tts_playback_manager,
@@ -4329,24 +4093,6 @@ def build_local_tts_single_runtime_deps() -> LocalTtsSingleRuntimeDeps:
         mark_local_tts_first_playback=_mark_local_tts_first_playback,
         record_voice_pipeline_failure=record_voice_pipeline_failure,
         omnivoice_timeout_sec=OMNIVOICE_TIMEOUT_SEC,
-    )
-
-
-async def speak_answer_local(
-    answer: str,
-    *,
-    turn_id: str | None = None,
-    session_key: str | None = None,
-    turn_scope: TurnScope | None = None,
-    metrics: dict | None = None,
-) -> bool:
-    return await speak_answer_local_from_runtime(
-        answer,
-        deps=build_local_tts_single_runtime_deps(),
-        turn_id=turn_id,
-        session_key=session_key,
-        turn_scope=turn_scope,
-        metrics=metrics,
     )
 
 
@@ -4398,24 +4144,6 @@ def build_local_tts_stream_runtime_deps() -> LocalTtsStreamRuntimeDeps:
         omnivoice_timeout_sec=OMNIVOICE_TIMEOUT_SEC,
         cleanup_prepared_tts_item=_cleanup_prepared_tts_item,
         mark_local_tts_first_playback=_mark_local_tts_first_playback,
-    )
-
-
-async def stream_local_tts_sentences(
-    sentence_queue: "asyncio.Queue[str | None]",
-    *,
-    metrics: dict | None = None,
-    turn_id: str | None = None,
-    session_key: str | None = None,
-    turn_scope: TurnScope | None = None,
-) -> int:
-    return await stream_local_tts_sentences_from_runtime(
-        sentence_queue,
-        deps=build_local_tts_stream_runtime_deps(),
-        metrics=metrics,
-        turn_id=turn_id,
-        session_key=session_key,
-        turn_scope=turn_scope,
     )
 
 
@@ -4512,72 +4240,6 @@ def build_voice_response_runtime_deps() -> VoiceResponseRuntimeDeps:
     )
 
 
-def split_first_response_and_followup(answer: str) -> tuple[str, str]:
-    return split_first_response_and_followup_with_deps(answer, deps=build_voice_response_runtime_deps())
-
-
-def normalize_compare_text(text: str) -> str:
-    return normalize_compare_text_payload(text)
-
-
-def is_duplicate_followup(first_response: str, followup_text: str) -> bool:
-    return is_duplicate_followup_payload(first_response, followup_text)
-
-
-async def build_first_response(
-    user_text: str,
-    *,
-    guild_id: int | None = None,
-    session_key: str | None = None,
-    room_key: str | None = None,
-    person_key: str | None = None,
-    session_memory_key: str | None = None,
-    source: str = "text",
-    debug_text: str | None = None,
-    metrics: dict | None = None,
-) -> tuple[AnswerPayload, str, dict | None]:
-    return await build_first_response_from_runtime(
-        user_text,
-        deps=build_voice_response_runtime_deps(),
-        guild_id=guild_id,
-        session_key=session_key,
-        room_key=room_key,
-        person_key=person_key,
-        session_memory_key=session_memory_key,
-        source=source,
-        debug_text=debug_text,
-        metrics=metrics,
-    )
-
-
-async def build_followup_response(
-    user_text: str,
-    first_response: str,
-    *,
-    guild_id: int | None = None,
-    session_key: str | None = None,
-    room_key: str | None = None,
-    person_key: str | None = None,
-    session_memory_key: str | None = None,
-    source: str = "text",
-    debug_text: str | None = None,
-    metrics: dict | None = None,
-) -> AnswerPayload:
-    return await build_followup_response_from_runtime(
-        user_text,
-        first_response,
-        deps=build_voice_response_runtime_deps(),
-        guild_id=guild_id,
-        session_key=session_key,
-        room_key=room_key,
-        person_key=person_key,
-        session_memory_key=session_memory_key,
-        source=source,
-        debug_text=debug_text,
-        metrics=metrics,
-    )
-
-
 def build_main_llm_runtime_deps() -> MainLlmRuntimeDeps:
     return MainLlmRuntimeDeps(
         model_name=MODEL_NAME,
@@ -4639,50 +4301,6 @@ def build_voice_stream_chunk_deps() -> VoiceStreamChunkDeps:
         tts_next_chunk_target_chars=TTS_NEXT_CHUNK_TARGET_CHARS,
         tts_next_chunk_max_chars=TTS_NEXT_CHUNK_MAX_CHARS,
     )
-
-
-def build_stream_speech_chunker(*, metrics: dict | None) -> SpeechChunker:
-    return build_stream_speech_chunker_from_runtime(metrics=metrics, deps=build_voice_stream_chunk_deps())
-
-
-async def emit_stream_delta_chunks(
-    delta_text: str,
-    *,
-    speech_chunker: SpeechChunker,
-    on_sentence: Callable[[str], Awaitable[None]] | None,
-    question_stream_state: dict[str, int] | None = None,
-) -> bool:
-    return await emit_stream_delta_chunks_payload(
-        delta_text,
-        speech_chunker=speech_chunker,
-        on_sentence=on_sentence,
-        question_stream_state=question_stream_state,
-    )
-
-
-async def flush_streamed_answer_chunks(
-    answer: str,
-    *,
-    speech_chunker: SpeechChunker,
-    on_sentence: Callable[[str], Awaitable[None]] | None,
-    emitted_any: bool,
-    question_stream_state: dict[str, int] | None = None,
-) -> None:
-    await flush_streamed_answer_chunks_payload(
-        answer,
-        speech_chunker=speech_chunker,
-        on_sentence=on_sentence,
-        emitted_any=emitted_any,
-        question_stream_state=question_stream_state,
-    )
-
-
-async def emit_delivery_plan_chunks(
-    delivery_plan: DeliveryPlan,
-    *,
-    on_sentence: Callable[[str], Awaitable[None]] | None,
-) -> None:
-    await emit_delivery_plan_chunks_payload(delivery_plan, on_sentence=on_sentence)
 
 
 DEFAULT_INTERNAL_ROUTES = {"main_direct", "policy_short_circuit", "search_executor", "routing", "delivery"}
@@ -5436,26 +5054,6 @@ def start_streaming_voice_delivery(
     )
 
 
-async def execute_voice_delivery_plan(
-    vc: discord.VoiceClient,
-    delivery_plan: DeliveryPlan,
-    *,
-    metrics: dict,
-    turn_id: str | None,
-    session_key: str | None,
-    turn_scope: TurnScope | None,
-) -> int:
-    return await execute_voice_delivery_plan_from_runtime(
-        vc,
-        delivery_plan,
-        deps=build_voice_delivery_runtime_deps(),
-        metrics=metrics,
-        turn_id=turn_id,
-        session_key=session_key,
-        turn_scope=turn_scope,
-    )
-
-
 def build_voice_delivery_runtime_deps() -> VoiceDeliveryRuntimeDeps:
     return VoiceDeliveryRuntimeDeps(
         attach_current_task=_attach_current_task,
@@ -5479,86 +5077,6 @@ def build_voice_delivery_runtime_deps() -> VoiceDeliveryRuntimeDeps:
     )
 
 
-async def finalize_voice_answer(
-    answer: str,
-    *,
-    on_final_answer: Callable[[str], Awaitable[None]] | None,
-    delivery: StreamingVoiceDelivery,
-    metrics: dict,
-) -> tuple[str, int]:
-    return await finalize_voice_answer_from_runtime(
-        answer,
-        on_final_answer=on_final_answer,
-        delivery=delivery,
-        metrics=metrics,
-        deps=build_voice_delivery_runtime_deps(),
-    )
-
-
-async def ask_llm_and_speak_local(
-    _vc: Any,
-    user_text: str,
-    guild_id: int | None = None,
-    on_final_answer: Callable[[str], Awaitable[None]] | None = None,
-    *,
-    session_key: str | None = None,
-    room_key: str | None = None,
-    person_key: str | None = None,
-    session_memory_key: str | None = None,
-    source: str = "voice",
-    debug_text: str | None = None,
-    metrics: dict | None = None,
-    turn_scope: TurnScope | None = None,
-) -> str:
-    return await ask_llm_and_speak_local_from_runtime(
-        _vc,
-        user_text,
-        deps=build_voice_delivery_runtime_deps(),
-        guild_id=guild_id,
-        on_final_answer=on_final_answer,
-        session_key=session_key,
-        room_key=room_key,
-        person_key=person_key,
-        session_memory_key=session_memory_key,
-        source=source,
-        debug_text=debug_text,
-        metrics=metrics,
-        turn_scope=turn_scope,
-    )
-
-
-async def ask_llm_and_speak_streaming(
-    vc: discord.VoiceClient,
-    user_text: str,
-    guild_id: int | None = None,
-    on_final_answer: Callable[[str], Awaitable[None]] | None = None,
-    *,
-    session_key: str | None = None,
-    room_key: str | None = None,
-    person_key: str | None = None,
-    session_memory_key: str | None = None,
-    source: str = "voice",
-    debug_text: str | None = None,
-    metrics: dict | None = None,
-    turn_scope: TurnScope | None = None,
-) -> str:
-    return await ask_llm_and_speak_streaming_from_runtime(
-        vc,
-        user_text,
-        deps=build_voice_delivery_runtime_deps(),
-        guild_id=guild_id,
-        on_final_answer=on_final_answer,
-        session_key=session_key,
-        room_key=room_key,
-        person_key=person_key,
-        session_memory_key=session_memory_key,
-        source=source,
-        debug_text=debug_text,
-        metrics=metrics,
-        turn_scope=turn_scope,
-    )
-
-
 def build_discord_text_reply_runtime_deps() -> DiscordTextReplyRuntimeDeps:
     return DiscordTextReplyRuntimeDeps(
         attach_current_task=_attach_current_task,
@@ -5576,40 +5094,6 @@ def build_discord_text_reply_runtime_deps() -> DiscordTextReplyRuntimeDeps:
         build_delivery_plan=build_delivery_plan,
         split_tts_sentences=split_tts_sentences,
         send_discord_text=send_discord_text,
-    )
-
-
-async def stream_text_reply(
-    channel: discord.abc.Messageable,
-    user_text: str,
-    *,
-    guild_id: int,
-    session_key: str,
-    turn_id: str | None = None,
-    room_key: str | None = None,
-    person_key: str | None = None,
-    session_memory_key: str | None = None,
-    source: str = "text",
-    debug_text: str | None = None,
-    include_voice: bool = False,
-    turn_scope: TurnScope | None = None,
-    proactive_resolution: dict | None = None,
-) -> tuple[str, discord.Message | None, dict, DeliveryPlan]:
-    return await stream_text_reply_from_runtime(
-        channel,
-        user_text,
-        guild_id=guild_id,
-        session_key=session_key,
-        turn_id=turn_id,
-        room_key=room_key,
-        person_key=person_key,
-        session_memory_key=session_memory_key,
-        source=source,
-        debug_text=debug_text,
-        include_voice=include_voice,
-        turn_scope=turn_scope,
-        proactive_resolution=proactive_resolution,
-        deps=build_discord_text_reply_runtime_deps(),
     )
 
 
@@ -5841,45 +5325,60 @@ def build_voice_member_audio_pipeline_deps() -> VoiceMemberAudioPipelineDeps:
     )
 
 
-async def process_member_audio(member: discord.Member | None, pcm_bytes: bytes, debug_meta: dict | None = None) -> None:
-    await process_member_audio_from_runtime(
-        member=member,
-        pcm_bytes=pcm_bytes,
-        debug_meta=debug_meta,
-        deps=build_voice_ingress_entrypoint_deps(),
+voice_io_composition = VoiceIoComposition(
+    VoiceIoCompositionDeps(
+        reply_side_effects=lambda: build_voice_reply_side_effect_deps(),
+        reply_gate=lambda: build_voice_reply_gate_runtime_deps(),
+        ingress=lambda: build_voice_ingress_runtime_deps(),
+        ingress_entrypoint=lambda: build_voice_ingress_entrypoint_deps(),
+        tts_interrupt=lambda: build_tts_interrupt_runtime_deps(),
+        cached_tts=lambda: build_cached_tts_runtime_deps(),
+        discord_tts_single=lambda: build_discord_tts_single_runtime_deps(),
+        discord_tts_stream=lambda: build_discord_tts_stream_runtime_deps(),
+        local_tts_single=lambda: build_local_tts_single_runtime_deps(),
+        local_tts_stream=lambda: build_local_tts_stream_runtime_deps(),
+        response=lambda: build_voice_response_runtime_deps(),
+        stream_chunks=lambda: build_voice_stream_chunk_deps(),
+        delivery=lambda: build_voice_delivery_runtime_deps(),
+        text_reply=lambda: build_discord_text_reply_runtime_deps(),
+        member_audio_pipeline=lambda: build_voice_member_audio_pipeline_deps(),
     )
+)
 
+finalize_voice_reply_side_effects = voice_io_composition.finalize_voice_reply_side_effects
+should_reply_to_voice = voice_io_composition.should_reply_to_voice
+voice_ingress_worker = voice_io_composition.voice_ingress_worker
+_voice_utterance_buffer_key = voice_io_composition.voice_utterance_buffer_key
+_enqueue_voice_ingress_for_processing = voice_io_composition.enqueue_voice_ingress_for_processing
+_flush_voice_utterance_buffer = voice_io_composition.flush_voice_utterance_buffer
+_delayed_voice_utterance_flush = voice_io_composition.delayed_voice_utterance_flush
+_schedule_voice_utterance_item = voice_io_composition.schedule_voice_utterance_item
+stop_active_tts_playback = voice_io_composition.stop_active_tts_playback
+verify_speaker_for_tts_interrupt = voice_io_composition.verify_speaker_for_tts_interrupt
+speaker_verification_allows_tts_interrupt = voice_io_composition.speaker_verification_allows_tts_interrupt
+cached_audio_path_for_answer = voice_io_composition.cached_audio_path_for_answer
+play_cached_answer_audio = voice_io_composition.play_cached_answer_audio
+speak_answer = voice_io_composition.speak_answer
+stream_tts_sentences = voice_io_composition.stream_tts_sentences
+speak_answer_local = voice_io_composition.speak_answer_local
+stream_local_tts_sentences = voice_io_composition.stream_local_tts_sentences
+split_first_response_and_followup = voice_io_composition.split_first_response_and_followup
+normalize_compare_text = voice_io_composition.normalize_compare_text
+is_duplicate_followup = voice_io_composition.is_duplicate_followup
+build_first_response = voice_io_composition.build_first_response
+build_followup_response = voice_io_composition.build_followup_response
+build_stream_speech_chunker = voice_io_composition.build_stream_speech_chunker
+emit_stream_delta_chunks = voice_io_composition.emit_stream_delta_chunks
+flush_streamed_answer_chunks = voice_io_composition.flush_streamed_answer_chunks
+emit_delivery_plan_chunks = voice_io_composition.emit_delivery_plan_chunks
+execute_voice_delivery_plan = voice_io_composition.execute_voice_delivery_plan
+finalize_voice_answer = voice_io_composition.finalize_voice_answer
+ask_llm_and_speak_local = voice_io_composition.ask_llm_and_speak_local
+ask_llm_and_speak_streaming = voice_io_composition.ask_llm_and_speak_streaming
+stream_text_reply = voice_io_composition.stream_text_reply
+process_member_audio = voice_io_composition.process_member_audio
+_process_member_audio_impl = voice_io_composition.process_member_audio_impl
 
-async def _process_member_audio_impl(
-    member: discord.Member | None,
-    pcm_bytes: bytes,
-    debug_meta: dict | None = None,
-    *,
-    session_key: str,
-    room_session_key: str,
-    room_key: str | None,
-    person_key: str | None,
-    session_memory_key: str | None,
-    turn_id: str,
-    segment_id: int,
-    ingress_during_reply: bool = False,
-    owner_user_id_on_ingress: int | None = None,
-) -> None:
-    await process_member_audio_pipeline_from_runtime(
-        member,
-        pcm_bytes,
-        debug_meta,
-        session_key=session_key,
-        room_session_key=room_session_key,
-        room_key=room_key,
-        person_key=person_key,
-        session_memory_key=session_memory_key,
-        turn_id=turn_id,
-        segment_id=segment_id,
-        ingress_during_reply=ingress_during_reply,
-        owner_user_id_on_ingress=owner_user_id_on_ingress,
-        deps=build_voice_member_audio_pipeline_deps(),
-    )
 
 # =========================================================
 # 이벤트

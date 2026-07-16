@@ -198,11 +198,12 @@ class VoiceAudioIngressRuntimeTests(unittest.TestCase):
 
     def test_main_delegates_ingress_filtering_to_runtime_module(self) -> None:
         source = (REPO_ROOT / "main.py").read_text(encoding="utf-8")
-        function_source = source[
-            source.index("async def _process_member_audio_impl(") : source.index("# 이벤트", source.index("async def _process_member_audio_impl("))
-        ]
+        composition_source = (
+            REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "voice_io_composition_runtime.py"
+        ).read_text(encoding="utf-8")
+        function_source = composition_source[composition_source.index("    async def process_member_audio_impl(") :]
         builder_source = source[
-            source.index("def build_voice_member_audio_pipeline_deps(") : source.index("async def process_member_audio(")
+            source.index("def build_voice_member_audio_pipeline_deps(") : source.index("voice_io_composition =", source.index("def build_voice_member_audio_pipeline_deps("))
         ]
 
         self.assertIn("prepare_audio_ingress=prepare_voice_audio_ingress_from_runtime", builder_source)

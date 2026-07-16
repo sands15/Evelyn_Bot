@@ -338,6 +338,9 @@ class LocalMicRoutingTests(unittest.TestCase):
         discord_tts_runtime = (
             REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "discord_tts_stream_runtime.py"
         ).read_text(encoding="utf-8")
+        voice_io_composition = (
+            REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "voice_io_composition_runtime.py"
+        ).read_text(encoding="utf-8")
 
         self.assertIn("if target is None and deps.local_only_mode", local_mic_segment_runtime)
         self.assertIn("local_only_mode=LOCAL_ONLY_MODE", main_py)
@@ -345,7 +348,7 @@ class LocalMicRoutingTests(unittest.TestCase):
         self.assertIn("handle_local_mic_segment_from_runtime(", main_py)
         self.assertIn("await ensure_local_mic_service_started()", main_py)
         self.assertIn("deps.is_local_speaker_voice_client(vc)", discord_tts_runtime)
-        self.assertIn("ask_llm_and_speak_local_from_runtime(", main_py)
+        self.assertIn("ask_llm_and_speak_local_from_runtime(", voice_io_composition)
         self.assertIn('"/voice": "voice.status"', control_page_tools)
         self.assertIn('"/voice status": "voice.status"', control_page_tools)
         self.assertIn("execute_control_page_voice_tool=execute_control_page_voice_tool", main_py)
@@ -359,12 +362,15 @@ class LocalMicRoutingTests(unittest.TestCase):
         local_tts_stream_runtime = (
             REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "local_tts_stream_runtime.py"
         ).read_text(encoding="utf-8")
+        voice_io_composition = (
+            REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "voice_io_composition_runtime.py"
+        ).read_text(encoding="utf-8")
 
         self.assertIn("def start_streaming_local_voice_delivery(", main_py)
-        self.assertIn("async def stream_local_tts_sentences(", main_py)
+        self.assertIn("async def stream_local_tts_sentences(", voice_io_composition)
         self.assertIn('"delivery_mode"] = "llm_sentence_stream"', voice_delivery_runtime)
         self.assertIn("on_sentence=fanout.on_chunk", voice_delivery_runtime)
-        self.assertIn("stream_local_tts_sentences_from_runtime(", main_py)
+        self.assertIn("stream_local_tts_sentences_from_runtime(", voice_io_composition)
         self.assertIn("prefetch_tts_sources(", local_tts_stream_runtime)
         self.assertIn("on_first_playback=", local_tts_stream_runtime)
         self.assertIn('"local_first_playback_logged"', voice_delivery_runtime)

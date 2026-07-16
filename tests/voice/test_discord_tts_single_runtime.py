@@ -148,9 +148,11 @@ class DiscordTtsSingleRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.latencies[0][1:], ("first_packet_sent_logged", "첫 패킷 송신 시간"))
 
     def test_main_delegates_single_discord_tts_to_runtime_module(self) -> None:
-        source = (REPO_ROOT / "main.py").read_text(encoding="utf-8")
-        start = source.index("async def speak_answer(")
-        end = source.index("def build_discord_tts_stream_runtime_deps", start)
+        source = (
+            REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "voice_io_composition_runtime.py"
+        ).read_text(encoding="utf-8")
+        start = source.index("    async def speak_answer(")
+        end = source.index("    async def stream_tts_sentences(", start)
         function_source = source[start:end]
 
         self.assertIn("speak_answer_from_runtime(", function_source)
