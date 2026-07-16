@@ -154,6 +154,10 @@ from evelyn_core.vision_runtime import (
     format_vision_observation_from_runtime,
     vision_watch_scene_looks_bad_from_runtime,
 )
+from evelyn_core.vision_watch_composition import (
+    VisionWatchComposition,
+    VisionWatchCompositionDeps,
+)
 from evelyn_core.text import (
     apply_stt_post_corrections,
     clean_text,
@@ -1100,7 +1104,6 @@ active_tts_playbacks = tts_playback_tracker.registry
 tts_warmup_started = False
 http_session: Optional[aiohttp.ClientSession] = None
 startup_component_state: dict[str, dict[str, Any]] = {}
-vision_watch_task: Optional[asyncio.Task] = None
 partial_stt_cache: dict[str, dict[str, Any]] = {}
 voice_utterance_assembly_config = UtteranceAssemblyConfig(
     enabled=VOICE_UTTERANCE_ASSEMBLY_ENABLED,
@@ -2005,87 +2008,38 @@ def vision_watch_scene_looks_bad(scene: str) -> bool:
     return vision_watch_scene_looks_bad_from_runtime(scene, deps=build_vision_watch_runtime_deps())
 
 
-async def run_vision_watch_once() -> dict[str, Any]:
-    frame = await asyncio.to_thread(
-        capture_vision_watch_frame,
+vision_watch_composition = VisionWatchComposition(
+    VisionWatchCompositionDeps(
+        enabled=VISION_WATCH_ENABLED,
+        interval_sec=VISION_WATCH_INTERVAL_SEC,
         thumbnail_size=VISION_WATCH_THUMBNAIL_SIZE,
         max_image_dim=VISION_WATCH_MAX_IMAGE_DIM,
         diff_threshold=VISION_WATCH_DIFF_THRESHOLD,
-        all_screens=VISION_CAPTURE_ALL_SCREENS,
+        capture_all_screens=VISION_CAPTURE_ALL_SCREENS,
+        analyze_cooldown_sec=VISION_WATCH_ANALYZE_COOLDOWN_SEC,
+        run_ocr=VISION_WATCH_RUN_OCR,
+        ocr_interval_sec=VISION_WATCH_OCR_INTERVAL_SEC,
+        analyze_timeout_sec=VISION_ANALYZE_TIMEOUT_SEC,
+        vision_service_url=VISION_SERVICE_URL,
+        capture_frame=capture_vision_watch_frame,
+        scene_looks_bad=vision_watch_scene_looks_bad,
+        build_prompt=build_vision_watch_prompt,
+        get_http_session=get_http_session,
+        client_timeout_factory=aiohttp.ClientTimeout,
+        update_analysis=update_vision_watch_analysis,
+        mark_startup_component=mark_startup_component,
+        to_thread=asyncio.to_thread,
+        sleep=asyncio.sleep,
+        create_task=asyncio.create_task,
+        now=time.time,
+        log=print,
     )
-    if frame.get("capture_black"):
-        return frame
-    now = time.time()
-    changed = bool(frame.get("changed"))
-    last_analyzed_at = float(frame.get("analyzed_at", 0.0) or 0.0)
-    scene_bad = vision_watch_scene_looks_bad(str(frame.get("scene") or ""))
-    analysis_stale = last_analyzed_at <= 0 or (now - last_analyzed_at) >= max(300.0, VISION_WATCH_ANALYZE_COOLDOWN_SEC * 4)
-    if not changed and not scene_bad and not analysis_stale:
-        return frame
-    if (now - last_analyzed_at) < VISION_WATCH_ANALYZE_COOLDOWN_SEC and not analysis_stale:
-        return frame
+)
 
-    last_ocr_at = float(frame.get("last_ocr_at", 0.0) or 0.0)
-    run_ocr = bool(VISION_WATCH_RUN_OCR and (scene_bad or analysis_stale or (now - last_ocr_at) >= VISION_WATCH_OCR_INTERVAL_SEC))
-    payload = {
-        "image_path": str(frame.get("image_path") or ""),
-        "prompt": build_vision_watch_prompt(),
-        "run_ocr": run_ocr,
-        "ocr_category": "plain",
-        "max_new_tokens": 96,
-    }
-    try:
-        timeout = aiohttp.ClientTimeout(total=VISION_ANALYZE_TIMEOUT_SEC)
-        session = await get_http_session()
-        async with session.post(f"{VISION_SERVICE_URL.rstrip('/')}/v1/vision/analyze", json=payload, timeout=timeout) as resp:
-            if resp.status != 200:
-                error_text = await resp.text()
-                raise RuntimeError(f"vision service {resp.status}: {error_text[:240]}")
-            data = await resp.json()
-        return update_vision_watch_analysis(data=data, run_ocr=run_ocr)
-    except Exception as exc:
-        return update_vision_watch_analysis(error=repr(exc), run_ocr=run_ocr)
-
-
-async def vision_watch_loop() -> None:
-    mark_startup_component("vision_watch", "running", "background screen observer")
-    print(
-        "[VISION WATCH] enabled "
-        f"interval={VISION_WATCH_INTERVAL_SEC}s thumb={VISION_WATCH_THUMBNAIL_SIZE}px "
-        f"analysis_max={VISION_WATCH_MAX_IMAGE_DIM}px threshold={VISION_WATCH_DIFF_THRESHOLD} "
-        f"ocr={'on' if VISION_WATCH_RUN_OCR else 'off'}"
-    )
-    while True:
-        try:
-            state = await run_vision_watch_once()
-            mark_startup_component(
-                "vision_watch",
-                "done",
-                f"changed={bool(state.get('changed'))} diff={float(state.get('diff_score', 0.0) or 0.0):.3f}",
-            )
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            mark_startup_component("vision_watch", "failed", repr(exc))
-            print(f"[VISION WATCH] error={exc!r}")
-        await asyncio.sleep(VISION_WATCH_INTERVAL_SEC)
-
-
-def ensure_vision_watch_started() -> None:
-    global vision_watch_task
-    if not VISION_WATCH_ENABLED:
-        return
-    if vision_watch_task is not None and not vision_watch_task.done():
-        return
-    vision_watch_task = asyncio.create_task(vision_watch_loop())
-
-
-def stop_vision_watch_task() -> None:
-    global vision_watch_task
-    task = vision_watch_task
-    vision_watch_task = None
-    if task is not None and not task.done():
-        task.cancel()
+run_vision_watch_once = vision_watch_composition.run_vision_watch_once
+vision_watch_loop = vision_watch_composition.vision_watch_loop
+ensure_vision_watch_started = vision_watch_composition.ensure_vision_watch_started
+stop_vision_watch_task = vision_watch_composition.stop_vision_watch_task
 
 
 def build_llm_context_assembly_deps() -> LlmContextAssemblyDeps:
