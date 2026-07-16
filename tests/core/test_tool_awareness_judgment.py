@@ -33,17 +33,23 @@ class ToolAwarenessJudgmentTests(unittest.TestCase):
         self.assertIn("Tool Selection Rules", self.blueprint)
 
     def test_main_guidance_gets_runtime_tool_awareness_context(self) -> None:
+        response_context_composition = (
+            REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "response_context_composition.py"
+        ).read_text(encoding="utf-8")
         self.assertIn("from evelyn_core.tool_awareness_policy import build_tool_awareness_context", self.main_py)
         self.assertIn("TOOL_AWARENESS: Runtime, not memory, is the source of truth for tools.", self.tool_awareness_policy)
         self.assertIn("Available tool shortlist for this turn", self.tool_awareness_policy)
         self.assertIn("do not give only a promise", self.tool_awareness_policy)
         self.assertIn("tool_awareness_context = deps.build_tool_awareness_context", self.voice_response_runtime_py)
-        self.assertIn("route_available=_skill_route_available", self.main_py)
+        self.assertIn("route_available=self.skill_route_available", response_context_composition)
         self.assertIn("parts.append(tool_awareness_context)", self.voice_response_runtime_py)
 
     def test_tool_awareness_uses_runtime_skill_registry_for_search(self) -> None:
-        self.assertIn("def _skill_route_available", self.main_py)
-        self.assertIn('skill_registry.find_by_route(route_name, source=source)', self.main_py)
+        response_context_composition = (
+            REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "response_context_composition.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn("def skill_route_available", response_context_composition)
+        self.assertIn('skill_registry.find_by_route(route_name, source=source)', response_context_composition)
         self.assertIn('route_available(route_name, source=source)', self.tool_awareness_policy)
         self.assertIn('_route_available(route_available, "search_executor", source=source)', self.tool_awareness_policy)
         self.assertIn("- search: use for current info, weather, prices, news", self.tool_awareness_policy)

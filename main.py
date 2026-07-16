@@ -214,13 +214,14 @@ from evelyn_core.search_followup_policy import (
 )
 from evelyn_core.search_tools import search_duckduckgo as search_duckduckgo_payload
 from evelyn_core.runtime_status_context import (
-    RuntimeStatusContextDeps,
-    RuntimeStatusContextState,
     answer_gpu_runtime_status_query,
-    build_runtime_status_context_from_runtime,
     load_runtime_gpu_status,
     load_runtime_recent_errors,
     probe_runtime_tcp_service,
+)
+from evelyn_core.response_context_composition import (
+    ResponseContextComposition,
+    ResponseContextCompositionDeps,
 )
 from evelyn_core.runtime_mode_policy import compute_runtime_mode_from_state, apply_runtime_mode_policy
 from evelyn_core.route_fallback_policy import (
@@ -651,8 +652,6 @@ from evelyn_core.voice_route_execution import (
 )
 from evelyn_core.voice_response_runtime import (
     VoiceResponseRuntimeDeps,
-    MainResponseGuidanceRuntimeDeps,
-    build_main_response_guidance_from_runtime,
 )
 from evelyn_core.voice_stream_chunks import VoiceStreamChunkDeps
 from evelyn_core.voice_ingress_runtime import (
@@ -1164,7 +1163,6 @@ control_page_runtime_services_lock: asyncio.Lock | None = None
 control_page_runtime_services_refresh_task: asyncio.Task | None = None
 control_page_ui_command_store = ControlPageUiCommandStore(limit=40)
 control_page_welcome_locks: dict[int, asyncio.Lock] = {}
-runtime_status_context_state = RuntimeStatusContextState()
 room_recent_speaker_stats: dict[str, dict[int, dict[str, float]]] = {}
 room_speaker_activity_store = RoomSpeakerActivityStore(
     recent_speaker_stats=room_recent_speaker_stats,
@@ -1710,10 +1708,10 @@ def build_cognitive_followup_runtime_deps() -> ShouldForceSearchFollowupRuntimeD
     )
 
 
-def build_runtime_status_context_deps() -> RuntimeStatusContextDeps:
-    return RuntimeStatusContextDeps(
-        enabled=RUNTIME_STATUS_CONTEXT_ENABLED,
-        refresh_sec=RUNTIME_STATUS_CONTEXT_REFRESH_SEC,
+response_context_composition = ResponseContextComposition(
+    ResponseContextCompositionDeps(
+        runtime_status_enabled=RUNTIME_STATUS_CONTEXT_ENABLED,
+        runtime_status_refresh_sec=RUNTIME_STATUS_CONTEXT_REFRESH_SEC,
         control_page_host=CONTROL_PAGE_HOST,
         control_page_port=CONTROL_PAGE_PORT,
         llm_server_url=LLM_SERVER_URL,
@@ -1723,65 +1721,30 @@ def build_runtime_status_context_deps() -> RuntimeStatusContextDeps:
         minecraft_autonomy_service_port=MINECRAFT_AUTONOMY_SERVICE_PORT,
         voyager_action_backend=VOYAGER_ACTION_BACKEND,
         voyager_codex_gateway_port=VOYAGER_CODEX_GATEWAY_PORT,
-        get_control_page_runtime_services=get_control_page_runtime_services,
+        get_control_page_runtime_services=lambda: get_control_page_runtime_services(),
         is_control_api_ready_from_runtime_services=is_control_api_ready_from_runtime_services,
         probe_runtime_tcp_service=probe_runtime_tcp_service,
         load_runtime_gpu_status=load_runtime_gpu_status,
         load_runtime_recent_errors=load_runtime_recent_errors,
         now=time.time,
-    )
-
-
-async def build_runtime_status_context(*, force: bool = False) -> str:
-    return await build_runtime_status_context_from_runtime(
-        deps=build_runtime_status_context_deps(),
-        state=runtime_status_context_state,
-        force=force,
-    )
-
-
-def _skill_route_available(route_name: str, *, source: str) -> bool:
-    try:
-        return bool(skill_registry.find_by_route(route_name, source=source))
-    except Exception:
-        return False
-
-
-def build_main_response_guidance(
-    cognitive_state: dict | None = None,
-    *,
-    source: str = "text",
-    user_text: str = "",
-    session_key: str | None = None,
-    guild_id: int | None = None,
-    minecraft_state: dict[str, Any] | None = None,
-    runtime_status_context: str | None = None,
-    route_decision: RouteDecision | None = None,
-) -> str:
-    return build_main_response_guidance_from_runtime(
-        cognitive_state,
-        source=source,
-        user_text=user_text,
-        session_key=session_key,
-        guild_id=guild_id,
-        minecraft_state=minecraft_state,
-        runtime_status_context=runtime_status_context,
-        route_decision=route_decision,
-        deps=build_main_response_guidance_runtime_deps(),
-    )
-
-
-def build_main_response_guidance_runtime_deps() -> MainResponseGuidanceRuntimeDeps:
-    return MainResponseGuidanceRuntimeDeps(
         clean_text=clean_text,
         apply_ask_gating=apply_ask_gating,
         persona_state_hint_for_turn=persona_state_hint_for_turn,
         recent_assistant_reply_summary=recent_assistant_reply_summary,
         build_tool_awareness_context=build_tool_awareness_context,
-        route_available=_skill_route_available,
+        skill_registry=skill_registry,
         format_minecraft_state_summary=format_minecraft_state_summary,
         question_feature_enabled=QUESTION_FEATURE_ENABLED,
     )
+)
+
+build_runtime_status_context_deps = response_context_composition.build_runtime_status_context_deps
+build_runtime_status_context = response_context_composition.build_runtime_status_context
+_skill_route_available = response_context_composition.skill_route_available
+build_main_response_guidance = response_context_composition.build_main_response_guidance
+build_main_response_guidance_runtime_deps = (
+    response_context_composition.build_main_response_guidance_runtime_deps
+)
 
 
 def build_vision_watch_runtime_deps() -> VisionRuntimeDeps:

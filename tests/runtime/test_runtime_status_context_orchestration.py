@@ -128,13 +128,20 @@ class RuntimeStatusContextOrchestrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("recent_errors=none", result)
 
     def test_main_delegates_status_context_to_runtime_state(self) -> None:
-        source = (REPO_ROOT / "main.py").read_text(encoding="utf-8")
+        composition_path = (
+            REPO_ROOT
+            / "evelyn_core"
+            / "runtime"
+            / "evelyn_core"
+            / "response_context_composition.py"
+        )
+        source = composition_path.read_text(encoding="utf-8")
         start = source.index("async def build_runtime_status_context(")
-        end = source.index("def _skill_route_available(", start)
+        end = source.index("def skill_route_available(", start)
         function_source = source[start:end]
 
         self.assertIn("build_runtime_status_context_from_runtime(", function_source)
-        self.assertIn("state=runtime_status_context_state", function_source)
+        self.assertIn("state=self.runtime_status_state", function_source)
         self.assertNotIn("asyncio.gather(", function_source)
 
 

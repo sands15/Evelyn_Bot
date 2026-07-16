@@ -68,9 +68,16 @@ class RuntimeDependencyContextTests(unittest.TestCase):
         runtime_status_context = (
             REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "runtime_status_context.py"
         ).read_text(encoding="utf-8")
+        response_context_composition = (
+            REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "response_context_composition.py"
+        ).read_text(encoding="utf-8")
 
         self.assertIn("def load_runtime_gpu_status", runtime_status_context)
-        self.assertIn("build_runtime_status_context_from_runtime(", main_py)
+        self.assertIn("build_runtime_status_context_from_runtime(", response_context_composition)
+        self.assertIn(
+            "build_runtime_status_context = response_context_composition.build_runtime_status_context",
+            main_py,
+        )
         self.assertIn("current_gpu_snapshot=", runtime_status_context)
         self.assertIn("current_oom_signal=", runtime_status_context)
         self.assertIn("recent_errors_are_historical=true", runtime_status_context)
