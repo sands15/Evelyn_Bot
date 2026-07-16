@@ -250,6 +250,12 @@ from evelyn_core.voice_support_composition_runtime import (
     VoiceSupportComposition,
     VoiceSupportCompositionDeps,
 )
+from evelyn_core.discord_app_composition_runtime import (
+    DiscordAppComposition,
+    DiscordAppCompositionDeps,
+    DiscordCommandCompositionDeps,
+    DiscordEventCompositionDeps,
+)
 from evelyn_core.main_llm_runtime import (
     AskLlmOnceRuntimeDeps,
     MainLlmRuntimeDeps,
@@ -355,38 +361,15 @@ from evelyn_core.discord_commands import (
     guild_only_command_message,
     normalize_channel_setting_action,
 )
-from evelyn_core.discord_command_handlers import (
-    handle_autonomy_start_command,
-    handle_autonomy_status_command,
-    handle_autonomy_stop_command,
-    handle_channel_setting_command,
-    handle_evelyn_page_command,
-    handle_join_voice_command,
-    handle_leave_voice_command,
-    handle_minecraft_connect_command,
-    handle_minecraft_disconnect_command,
-    handle_minecraft_goal_command,
-    handle_minecraft_status_command,
-    handle_prefix_command,
-    handle_rejoin_voice_command,
-    handle_reset_guild_memory_command,
-    handle_restart_bot_command,
-    handle_shutdown_bot_command,
-    handle_control_command_error,
-    handle_status_command,
-    make_control_command_authorized_checker,
-)
-from evelyn_core.discord_command_session_runtime import (
-    DiscordCommandSessionRuntimeDeps,
-    mark_text_session_from_command_runtime,
-)
+from evelyn_core.discord_command_handlers import make_control_command_authorized_checker
+from evelyn_core.discord_command_session_runtime import DiscordCommandSessionRuntimeDeps
 from evelyn_core.discord_ingress import (
     build_voice_ingress_context,
     resolve_text_thread_id,
     normalize_voice_debug_meta,
     voice_ingress_source,
 )
-from evelyn_core.discord_text_turn import DiscordTextMessageHandlerDeps, handle_discord_text_message
+from evelyn_core.discord_text_turn import DiscordTextMessageHandlerDeps
 from evelyn_core.session_key_runtime import (
     make_person_memory_key,
     make_room_memory_key,
@@ -5108,75 +5091,6 @@ process_member_audio = voice_io_composition.process_member_audio
 _process_member_audio_impl = voice_io_composition.process_member_audio_impl
 
 
-# =========================================================
-# 이벤트
-# =========================================================
-@bot.event
-async def on_ready():
-    print(f"로그인 완료: {bot.user}")
-    mark_startup_component("discord_gateway", "done", clean_text(str(bot.user or "")))
-    ensure_voice_worker_started()
-    try:
-        await start_control_page_server()
-    except Exception as e:
-        mark_startup_component("control_api", "failed", repr(e))
-        print(f"[CONTROL PAGE] start_fail err={e!r}")
-    try:
-        await ensure_startup_components_ready()
-        await ensure_local_mic_service_started()
-        ensure_vision_watch_started()
-    except Exception as e:
-        print(f"[STARTUP] init_fail err={e!r}")
-        raise
-    try:
-        await ensure_control_page_background_tasks_started()
-    except Exception as e:
-        print(f"[CONTROL PAGE] bg_tasks_fail err={e!r}")
-    for guild in bot.guilds:
-        vc = guild.voice_client
-        if isinstance(vc, EvelynVoiceClient):
-            print(f"[VOICE READY] guild={guild.id} channel={getattr(getattr(vc, 'channel', None), 'name', None)} listening={vc.is_listening()}")
-            try:
-                if vc.channel is not None:
-                    await ensure_listening_voice_client(guild, vc.channel)
-            except Exception as e:
-                print(f"[VOICE READY REARM FAIL] guild={guild.id} err={e!r}")
-        elif vc is not None:
-            print(f"[VOICE READY] guild={guild.id} unexpected_voice_client={type(vc)!r}")
-        elif VOICE_REJOIN_ON_READY:
-            ok, detail = await restore_last_voice_channel(guild)
-            if ok:
-                print(f"[VOICE READY REJOIN] guild={guild.id} channel={detail}")
-            elif detail not in {"no_saved_voice_channel", "manual_disconnect"}:
-                print(f"[VOICE READY REJOIN SKIP] guild={guild.id} reason={detail}")
-        if AUTONOMY_ENABLED:
-            try:
-                await get_or_create_autonomy_engine(guild.id).start()
-                print(f"[AUTONOMY] guild={guild.id} started")
-            except Exception as e:
-                print(f"[AUTONOMY] guild={guild.id} start_fail err={e!r}")
-
-
-@bot.event
-async def on_voice_state_update(member, before, after):
-    if bot.user is None or member.id != bot.user.id:
-        return
-    guild = getattr(member, 'guild', None)
-    if guild is None:
-        return
-    vc = guild.voice_client
-    if not isinstance(vc, EvelynVoiceClient):
-        return
-    target_channel = after.channel or vc.channel
-    if target_channel is None:
-        return
-    try:
-        await ensure_listening_voice_client(guild, target_channel)
-        print(f"[VOICE STATE REARM] guild={guild.id} channel={getattr(target_channel, 'name', None)} listening={vc.is_listening()}")
-    except Exception as e:
-        print(f"[VOICE STATE REARM FAIL] guild={guild.id} err={e!r}")
-
-
 def build_discord_text_message_handler_deps() -> DiscordTextMessageHandlerDeps:
     return DiscordTextMessageHandlerDeps(
         process_commands=bot.process_commands,
@@ -5216,29 +5130,6 @@ def build_discord_text_message_handler_deps() -> DiscordTextMessageHandlerDeps:
         format_display_text=format_display_text,
         log=print,
     )
-
-
-@bot.event
-async def on_message(message: discord.Message):
-    await handle_discord_text_message(message, build_discord_text_message_handler_deps())
-
-
-# =========================================================
-# 명령어
-# =========================================================
-@bot.command(name="들어와", aliases=["join"])
-async def join_voice(ctx):
-    await handle_join_voice_command(ctx, ensure_listening_voice_client=ensure_listening_voice_client, log=print)
-
-
-@bot.command(name="다시들어와", aliases=["rejoin"])
-async def rejoin_voice(ctx):
-    await handle_rejoin_voice_command(ctx, ensure_listening_voice_client=ensure_listening_voice_client, log=print)
-
-
-@bot.command(name="나가", aliases=["leave"])
-async def leave_voice(ctx):
-    await handle_leave_voice_command(ctx, mark_manual_disconnect=mark_voice_manual_disconnect)
 
 
 async def restart_bot_process() -> None:
@@ -5313,103 +5204,6 @@ async def run_local_only_mode() -> None:
 is_control_command_authorized = make_control_command_authorized_checker(allowed_user_ids=ALLOWED_RESTART_USER_IDS)
 
 
-@bot.command(name="재시작", aliases=["restart"])
-@commands.check(is_control_command_authorized)
-async def restart_bot_command(ctx):
-    await handle_restart_bot_command(ctx, create_task=asyncio.create_task, restart_bot_process=restart_bot_process)
-
-
-@restart_bot_command.error
-async def restart_bot_command_error(ctx, error):
-    await handle_control_command_error(ctx, error)
-
-
-@bot.command(name="종료", aliases=["shutdown", "quit", "exit"])
-@commands.check(is_control_command_authorized)
-async def shutdown_bot_command(ctx):
-    await handle_shutdown_bot_command(
-        ctx,
-        schedule_stack_shutdown=schedule_evelyn_stack_shutdown,
-        create_task=asyncio.create_task,
-        shutdown_bot_process=shutdown_bot_process,
-    )
-
-
-@shutdown_bot_command.error
-async def shutdown_bot_command_error(ctx, error):
-    await handle_control_command_error(ctx, error)
-
-
-@bot.command(name="상태", aliases=["status"])
-async def status_command(ctx):
-    await handle_status_command(
-        ctx,
-        build_reply=build_status_command_text,
-        model_name=MODEL_NAME,
-        router_model_name=ROUTER_MODEL_NAME,
-        summary_model_name=SUMMARY_MODEL_NAME,
-        stt_model_name=STT_MODEL_NAME,
-        voice_debug_save_audio=VOICE_DEBUG_SAVE_AUDIO,
-        vad_enabled=VAD_ENABLED,
-        vad_provider=VAD_PROVIDER,
-    )
-
-
-@bot.command(name="이블린페이지", aliases=["page", "homepage", "website", "landing"])
-async def evelyn_page_command(ctx):
-    await handle_evelyn_page_command(ctx, resolve_page_url=resolve_evelyn_page_url)
-
-
-@bot.command(name="접두사", aliases=["prefix"])
-@commands.check(is_control_command_authorized)
-async def set_guild_prefix(ctx, new_prefix: str | None = None):
-    await handle_prefix_command(
-        ctx,
-        new_prefix,
-        default_prefix=DEFAULT_COMMAND_PREFIX,
-        get_guild_command_prefix=get_guild_command_prefix,
-        save_guild_command_prefix=save_guild_command_prefix,
-        build_current_reply=build_prefix_current_reply,
-        build_reset_reply=build_prefix_reset_reply,
-        build_saved_reply=build_prefix_saved_reply,
-        guild_only_message=guild_only_command_message,
-    )
-
-
-@set_guild_prefix.error
-async def set_guild_prefix_error(ctx, error):
-    await handle_control_command_error(ctx, error)
-
-
-@bot.command(name="자율시작", aliases=["autonomy-on"])
-async def autonomy_start_command(ctx):
-    await handle_autonomy_start_command(
-        ctx,
-        get_or_create_autonomy_engine=get_or_create_autonomy_engine,
-        guild_only_message=guild_only_command_message,
-    )
-
-
-@bot.command(name="자율정지", aliases=["autonomy-off"])
-async def autonomy_stop_command(ctx):
-    await handle_autonomy_stop_command(
-        ctx,
-        autonomy_engines=autonomy_engines,
-        guild_only_message=guild_only_command_message,
-    )
-
-
-@bot.command(name="자율상태", aliases=["autonomy-status"])
-async def autonomy_status_command(ctx):
-    await handle_autonomy_status_command(
-        ctx,
-        autonomy_engines=autonomy_engines,
-        get_routed_autonomy_executor=get_routed_autonomy_executor,
-        build_reply=build_autonomy_status_command_text,
-        guild_only_message=guild_only_command_message,
-    )
-
-
 def build_discord_command_session_runtime_deps() -> DiscordCommandSessionRuntimeDeps:
     return DiscordCommandSessionRuntimeDeps(
         resolve_text_thread_id=resolve_text_thread_id,
@@ -5423,139 +5217,113 @@ def build_discord_command_session_runtime_deps() -> DiscordCommandSessionRuntime
     )
 
 
-def _mark_text_session_from_command(ctx, user_text: str, answer_text: str, *, awaiting_user_reply: bool = False) -> None:
-    mark_text_session_from_command_runtime(
-        ctx,
-        user_text,
-        answer_text,
-        awaiting_user_reply=awaiting_user_reply,
-        deps=build_discord_command_session_runtime_deps(),
+discord_app_composition = DiscordAppComposition(
+    DiscordAppCompositionDeps(
+        events=DiscordEventCompositionDeps(
+            bot_user=lambda: bot.user,
+            bot_guilds=lambda: list(bot.guilds),
+            mark_startup_component=mark_startup_component,
+            clean_text=clean_text,
+            ensure_voice_worker_started=ensure_voice_worker_started,
+            start_control_page_server=start_control_page_server,
+            ensure_startup_components_ready=ensure_startup_components_ready,
+            ensure_local_mic_service_started=ensure_local_mic_service_started,
+            ensure_vision_watch_started=ensure_vision_watch_started,
+            ensure_control_page_background_tasks_started=ensure_control_page_background_tasks_started,
+            voice_client_type=EvelynVoiceClient,
+            ensure_listening_voice_client=ensure_listening_voice_client,
+            voice_rejoin_on_ready=VOICE_REJOIN_ON_READY,
+            restore_last_voice_channel=restore_last_voice_channel,
+            autonomy_enabled=AUTONOMY_ENABLED,
+            get_or_create_autonomy_engine=get_or_create_autonomy_engine,
+            text_message_handler=build_discord_text_message_handler_deps,
+            log=print,
+        ),
+        commands=DiscordCommandCompositionDeps(
+            ensure_listening_voice_client=ensure_listening_voice_client,
+            mark_voice_manual_disconnect=mark_voice_manual_disconnect,
+            create_task=asyncio.create_task,
+            restart_bot_process=restart_bot_process,
+            schedule_evelyn_stack_shutdown=schedule_evelyn_stack_shutdown,
+            shutdown_bot_process=shutdown_bot_process,
+            build_status_reply=build_status_command_text,
+            model_name=MODEL_NAME,
+            router_model_name=ROUTER_MODEL_NAME,
+            summary_model_name=SUMMARY_MODEL_NAME,
+            stt_model_name=STT_MODEL_NAME,
+            voice_debug_save_audio=VOICE_DEBUG_SAVE_AUDIO,
+            vad_enabled=VAD_ENABLED,
+            vad_provider=VAD_PROVIDER,
+            resolve_evelyn_page_url=resolve_evelyn_page_url,
+            default_command_prefix=DEFAULT_COMMAND_PREFIX,
+            get_guild_command_prefix=get_guild_command_prefix,
+            save_guild_command_prefix=save_guild_command_prefix,
+            build_prefix_current_reply=build_prefix_current_reply,
+            build_prefix_reset_reply=build_prefix_reset_reply,
+            build_prefix_saved_reply=build_prefix_saved_reply,
+            guild_only_message=guild_only_command_message,
+            get_or_create_autonomy_engine=get_or_create_autonomy_engine,
+            autonomy_engines=autonomy_engines,
+            get_routed_autonomy_executor=get_routed_autonomy_executor,
+            build_autonomy_status_reply=build_autonomy_status_command_text,
+            command_session=build_discord_command_session_runtime_deps,
+            enable_minecraft_mode=enable_minecraft_mode,
+            disable_minecraft_mode=disable_minecraft_mode,
+            get_minecraft_client=get_minecraft_client,
+            build_minecraft_connect_reply=build_minecraft_connect_reply,
+            build_minecraft_goal_missing_reply=build_minecraft_goal_missing_reply,
+            build_minecraft_goal_updated_reply=build_minecraft_goal_updated_reply,
+            build_minecraft_status_reply=build_minecraft_status_command_text,
+            normalize_channel_setting_action=normalize_channel_setting_action,
+            get_guild_observe_channel_ids=get_guild_observe_channel_ids,
+            get_guild_command_only_channel_ids=get_guild_command_only_channel_ids,
+            add_guild_channel_setting=add_guild_channel_setting,
+            remove_guild_channel_setting=remove_guild_channel_setting,
+            build_channel_setting_list_reply=build_channel_setting_list_reply,
+            build_observe_channel_usage=build_observe_channel_usage,
+            build_command_channel_usage=build_command_channel_usage,
+            build_help_command_text=build_help_command_text,
+            is_control_command_authorized=is_control_command_authorized,
+            memory_root=MEMORY_ROOT,
+            reset_guild_runtime_state=reset_guild_runtime_state,
+            remove_tree=shutil.rmtree,
+            build_reset_guild_memory_reply=build_reset_guild_memory_reply,
+            log=print,
+        ),
     )
+)
+discord_app_bindings = discord_app_composition.register(bot)
 
+on_ready = discord_app_bindings.on_ready
+on_voice_state_update = discord_app_bindings.on_voice_state_update
+on_message = discord_app_bindings.on_message
+join_voice = discord_app_bindings.join_voice
+rejoin_voice = discord_app_bindings.rejoin_voice
+leave_voice = discord_app_bindings.leave_voice
+restart_bot_command = discord_app_bindings.restart_bot_command
+shutdown_bot_command = discord_app_bindings.shutdown_bot_command
+status_command = discord_app_bindings.status_command
+evelyn_page_command = discord_app_bindings.evelyn_page_command
+set_guild_prefix = discord_app_bindings.set_guild_prefix
+autonomy_start_command = discord_app_bindings.autonomy_start_command
+autonomy_stop_command = discord_app_bindings.autonomy_stop_command
+autonomy_status_command = discord_app_bindings.autonomy_status_command
+minecraft_connect_command = discord_app_bindings.minecraft_connect_command
+minecraft_disconnect_command = discord_app_bindings.minecraft_disconnect_command
+minecraft_status_command = discord_app_bindings.minecraft_status_command
+minecraft_goal_command = discord_app_bindings.minecraft_goal_command
+observe_channel_command = discord_app_bindings.observe_channel_command
+command_channel_command = discord_app_bindings.command_channel_command
+help_command = discord_app_bindings.help_command
+reset_guild_memory = discord_app_bindings.reset_guild_memory
 
-@bot.command(name="마크접속", aliases=["mc-connect", "minecraft-connect"])
-async def minecraft_connect_command(ctx):
-    await handle_minecraft_connect_command(
-        ctx,
-        enable_minecraft_mode=enable_minecraft_mode,
-        build_reply=build_minecraft_connect_reply,
-        mark_text_session_from_command=_mark_text_session_from_command,
-        guild_only_message=guild_only_command_message,
-    )
-
-
-@bot.command(name="마크종료", aliases=["mc-disconnect", "minecraft-disconnect"])
-async def minecraft_disconnect_command(ctx):
-    await handle_minecraft_disconnect_command(
-        ctx,
-        disable_minecraft_mode=disable_minecraft_mode,
-        mark_text_session_from_command=_mark_text_session_from_command,
-        guild_only_message=guild_only_command_message,
-    )
-
-
-@bot.command(name="마크상태", aliases=["mc-status", "minecraft-status"])
-async def minecraft_status_command(ctx):
-    await handle_minecraft_status_command(
-        ctx,
-        get_minecraft_client=get_minecraft_client,
-        build_reply=build_minecraft_status_command_text,
-        mark_text_session_from_command=_mark_text_session_from_command,
-        guild_only_message=guild_only_command_message,
-    )
-
-
-@bot.command(name="마크목표", aliases=["mc-goal", "minecraft-goal"])
-async def minecraft_goal_command(ctx, *, goal: str | None = None):
-    await handle_minecraft_goal_command(
-        ctx,
-        goal=goal,
-        get_minecraft_client=get_minecraft_client,
-        build_missing_reply=build_minecraft_goal_missing_reply,
-        build_updated_reply=build_minecraft_goal_updated_reply,
-        mark_text_session_from_command=_mark_text_session_from_command,
-        guild_only_message=guild_only_command_message,
-    )
-
-
-
-@bot.command(name="관찰채널", aliases=["observe-channel"])
-@commands.check(is_control_command_authorized)
-async def observe_channel_command(ctx, action: str | None = None, channel: discord.TextChannel | None = None):
-    await handle_channel_setting_command(
-        ctx,
-        action,
-        channel,
-        setting_key="observe_channel_ids",
-        label="👀 관찰채널",
-        add_success="✅ 관찰채널에 {channel.mention} 추가했어. (총 {count}개)",
-        remove_success="🗑️ 관찰채널에서 {channel.mention} 뺐어. (총 {count}개)",
-        normalize_action=normalize_channel_setting_action,
-        get_channel_ids=get_guild_observe_channel_ids,
-        add_channel_setting=add_guild_channel_setting,
-        remove_channel_setting=remove_guild_channel_setting,
-        get_guild_command_prefix=get_guild_command_prefix,
-        build_list_reply=build_channel_setting_list_reply,
-        build_usage_reply=build_observe_channel_usage,
-        guild_only_message=guild_only_command_message,
-    )
-
-
-@observe_channel_command.error
-async def observe_channel_command_error(ctx, error):
-    await handle_control_command_error(ctx, error)
-
-
-@bot.command(name="명령채널", aliases=["command-channel"])
-@commands.check(is_control_command_authorized)
-async def command_channel_command(ctx, action: str | None = None, channel: discord.TextChannel | None = None):
-    await handle_channel_setting_command(
-        ctx,
-        action,
-        channel,
-        setting_key="command_only_channel_ids",
-        label="🧭 명령채널",
-        add_success="✅ 명령채널에 {channel.mention} 추가했어. 이제 여기선 명령어만 읽어.",
-        remove_success="🗑️ 명령채널에서 {channel.mention} 뺐어. (총 {count}개)",
-        normalize_action=normalize_channel_setting_action,
-        get_channel_ids=get_guild_command_only_channel_ids,
-        add_channel_setting=add_guild_channel_setting,
-        remove_channel_setting=remove_guild_channel_setting,
-        get_guild_command_prefix=get_guild_command_prefix,
-        build_list_reply=build_channel_setting_list_reply,
-        build_usage_reply=build_command_channel_usage,
-        guild_only_message=guild_only_command_message,
-    )
-
-
-@command_channel_command.error
-async def command_channel_command_error(ctx, error):
-    await handle_control_command_error(ctx, error)
-
-
-@bot.command(name="도움말", aliases=["help"])
-async def help_command(ctx):
-    prefix = get_guild_command_prefix(ctx.guild.id if ctx.guild else None)
-    await ctx.send(build_help_command_text(prefix=prefix, control_authorized=is_control_command_authorized(ctx)))
-
-
-@bot.command(name="초기화", aliases=["reset"])
-@commands.check(is_control_command_authorized)
-async def reset_guild_memory(ctx):
-    await handle_reset_guild_memory_command(
-        ctx,
-        memory_root=MEMORY_ROOT,
-        reset_guild_runtime_state=reset_guild_runtime_state,
-        remove_tree=shutil.rmtree,
-        get_guild_command_prefix=get_guild_command_prefix,
-        build_reply=build_reset_guild_memory_reply,
-        guild_only_message=guild_only_command_message,
-    )
-
-
-@reset_guild_memory.error
-async def reset_guild_memory_error(ctx, error):
-    await handle_control_command_error(ctx, error)
+restart_bot_command_error = discord_app_composition.control_command_error
+shutdown_bot_command_error = discord_app_composition.control_command_error
+set_guild_prefix_error = discord_app_composition.control_command_error
+observe_channel_command_error = discord_app_composition.control_command_error
+command_channel_command_error = discord_app_composition.control_command_error
+reset_guild_memory_error = discord_app_composition.control_command_error
+_mark_text_session_from_command = discord_app_composition.mark_text_session_from_command
 
 
 # =========================================================
