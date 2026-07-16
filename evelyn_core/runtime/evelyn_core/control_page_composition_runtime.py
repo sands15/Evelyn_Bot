@@ -379,7 +379,7 @@ class ControlPageComposition:
             runtime_services,
             startup_steps=self.deps.startup_steps,
             startup_component_state=self.deps.startup_component_state,
-            startup_components_ready=self.deps.startup_components_ready,
+            startup_components_ready=self.deps.startup_components_ready(),
             discord_enabled=self.deps.discord_enabled,
             discord_ready=self.deps.discord_ready(),
             guild_available=guild_available,

@@ -9,6 +9,9 @@ COMPOSE = REPO_ROOT / "docker-compose.fast-control.yml"
 DOCKER_DIR = REPO_ROOT / "docker"
 CODEX_GATEWAY = REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "codex_gateway_server.py"
 MAIN = REPO_ROOT / "main.py"
+RUNTIME_LIFECYCLE_COMPOSITION = (
+    REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "runtime_lifecycle_composition.py"
+)
 CHECK_SCRIPT = REPO_ROOT / "tools" / "check_docker_runtime.ps1"
 LAUNCHERS = REPO_ROOT / "evelyn_core" / "runtime" / "launchers"
 
@@ -54,11 +57,13 @@ class DockerComposeContractTests(unittest.TestCase):
             self.assertIn(package, dockerfile)
 
     def test_remote_stt_warmup_does_not_force_local_qwen_model_load(self) -> None:
-        source = MAIN.read_text(encoding="utf-8")
+        main_source = MAIN.read_text(encoding="utf-8")
+        lifecycle_source = RUNTIME_LIFECYCLE_COMPOSITION.read_text(encoding="utf-8")
 
-        self.assertIn("if not STT_SERVICE_URL:", source)
-        self.assertIn("await asyncio.to_thread(get_stt_model)", source)
-        self.assertIn("await asyncio.to_thread(warmup_stt_sync)", source)
+        self.assertIn("stt_service_url=STT_SERVICE_URL", main_source)
+        self.assertIn("if not deps.stt_service_url:", lifecycle_source)
+        self.assertIn("await deps.to_thread(deps.get_stt_model)", lifecycle_source)
+        self.assertIn("await deps.to_thread(deps.warmup_stt_sync)", lifecycle_source)
 
     def test_codex_gateway_reports_backend_readiness(self) -> None:
         source = CODEX_GATEWAY.read_text(encoding="utf-8")

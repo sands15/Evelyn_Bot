@@ -257,6 +257,12 @@ from evelyn_core.voice_runtime_composition_runtime import (
     VoiceRuntimeComposition,
     VoiceRuntimeCompositionDeps,
 )
+from evelyn_core.runtime_lifecycle_composition import (
+    RuntimeLifecycleComposition,
+    RuntimeLifecycleCompositionDeps,
+    RuntimeProcessCompositionDeps,
+    RuntimeStartupCompositionDeps,
+)
 from evelyn_core.discord_app_composition_runtime import (
     DiscordAppComposition,
     DiscordAppCompositionDeps,
@@ -277,7 +283,6 @@ from evelyn_core.memory_context_state import build_memory_context
 from evelyn_core.startup_audio_runtime import (
     OpusStartupRuntimeDeps,
     SttWarmupRuntimeDeps,
-    ensure_opus_loaded_from_runtime,
 )
 from evelyn_core.startup_component_state import (
     STARTUP_BOOT_STEPS,
@@ -1126,12 +1131,8 @@ speaker_verifier = SpeakerVerifier(
 active_tts_playbacks = tts_playback_tracker.registry
 tts_warmup_started = False
 http_session: Optional[aiohttp.ClientSession] = None
-startup_components_ready = False
-startup_components_task: Optional[asyncio.Task] = None
 startup_component_state: dict[str, dict[str, Any]] = {}
 vision_watch_task: Optional[asyncio.Task] = None
-voice_path_warmup_locks: dict[str, asyncio.Lock] = {}
-voice_path_warmup_done: dict[str, float] = {}
 partial_stt_cache: dict[str, dict[str, Any]] = {}
 voice_utterance_assembly_config = UtteranceAssemblyConfig(
     enabled=VOICE_UTTERANCE_ASSEMBLY_ENABLED,
@@ -3029,98 +3030,92 @@ def build_search_followup_runtime_deps() -> SearchFollowupRuntimeDeps:
     )
 
 
-async def set_tts_presence(is_warming_up: bool) -> None:
-    if bot.user is None:
-        return
-    try:
-        if is_warming_up:
-            await bot.change_presence(activity=discord.Game(name="봇 준비중..."))
-        else:
-            await bot.change_presence(activity=None)
-    except Exception as e:
-        print("Presence 변경 실패:", repr(e))
-
-
-def build_opus_startup_runtime_deps() -> OpusStartupRuntimeDeps:
-    return OpusStartupRuntimeDeps(
-        opus_is_loaded=discord_opus.is_loaded,
-        load_default_opus=discord_opus._load_default,
-        mark_startup_component=mark_startup_component,
-        log=print,
+runtime_lifecycle_composition = RuntimeLifecycleComposition(
+    RuntimeLifecycleCompositionDeps(
+        startup=RuntimeStartupCompositionDeps(
+            opus=lambda: OpusStartupRuntimeDeps(
+                opus_is_loaded=discord_opus.is_loaded,
+                load_default_opus=discord_opus._load_default,
+                mark_startup_component=mark_startup_component,
+                log=print,
+            ),
+            stt_warmup=lambda: SttWarmupRuntimeDeps(
+                mark_startup_component=mark_startup_component,
+                zeros=lambda size: np.zeros(size, dtype=np.float32),
+                transcribe_audio16k_sync=transcribe_audio16k_sync,
+                target_rate=TARGET_RATE,
+                wake_max_tokens=WAKE_MAX_TOKENS,
+                log=print,
+            ),
+            llm_warmup=lambda: LlmWarmupRuntimeDeps(
+                get_http_session=get_http_session,
+                client_timeout=aiohttp.ClientTimeout,
+                mark_startup_component=mark_startup_component,
+                llm_server_url=LLM_SERVER_URL,
+                model_name=MODEL_NAME,
+                main_llm_chat_content_format=MAIN_LLM_CHAT_CONTENT_FORMAT,
+                voice_llm_max_tokens=VOICE_LLM_MAX_TOKENS,
+                main_llm_stop_tokens=MAIN_LLM_STOP_TOKENS,
+                build_chat_messages=build_chat_messages,
+                decode_sse_stream_line=decode_sse_stream_line,
+                log=print,
+            ),
+            bot_user=lambda: bot.user,
+            change_presence=bot.change_presence,
+            game_factory=discord.Game,
+            to_thread=asyncio.to_thread,
+            create_task=asyncio.create_task,
+            stt_service_url=STT_SERVICE_URL,
+            get_stt_model=lambda: get_stt_model(),
+            warmup_stt_sync=lambda: warmup_stt_sync(),
+            warmup_llm=lambda: warmup_llm(),
+            warmup_tts_server=lambda: warmup_tts_server(),
+            monotonic=time.monotonic,
+            log=print,
+        ),
+        process=RuntimeProcessCompositionDeps(
+            project_root=PROJECT_ROOT,
+            local_only_mode=LOCAL_ONLY_MODE,
+            discord_enabled=DISCORD_ENABLED,
+            control_page_port=CONTROL_PAGE_PORT,
+            fallback_target=PROJECT_ROOT / "evelyn_core" / "start.bat",
+            sleep=asyncio.sleep,
+            stop_control_page_background_tasks=lambda: stop_control_page_background_tasks(),
+            stop_vision_watch_task=lambda: stop_vision_watch_task(),
+            stop_local_mic_service=lambda: stop_local_mic_service(),
+            launch_runtime_restart_sequence=launch_runtime_restart_sequence,
+            exit_process=os._exit,
+            schedule_stack_shutdown=runtime_schedule_evelyn_stack_shutdown,
+            schedule_local_shutdown=runtime_schedule_evelyn_local_shutdown,
+            bot_guilds=lambda: list(bot.guilds),
+            mark_startup_component=lambda *args, **kwargs: mark_startup_component(*args, **kwargs),
+            start_control_page_server=lambda: start_control_page_server(),
+            ensure_local_mic_service_started=lambda: ensure_local_mic_service_started(),
+            ensure_vision_watch_started=lambda: ensure_vision_watch_started(),
+            ensure_control_page_background_tasks_started=(
+                lambda: ensure_control_page_background_tasks_started()
+            ),
+            control_page_local_url=lambda: control_page_local_url(),
+            wait_forever=lambda: asyncio.Event().wait(),
+            log=print,
+        ),
     )
+)
 
-
-def ensure_opus_loaded() -> None:
-    ensure_opus_loaded_from_runtime(deps=build_opus_startup_runtime_deps())
-
-
-def build_stt_warmup_runtime_deps() -> SttWarmupRuntimeDeps:
-    return SttWarmupRuntimeDeps(
-        mark_startup_component=mark_startup_component,
-        zeros=lambda size: np.zeros(size, dtype=np.float32),
-        transcribe_audio16k_sync=transcribe_audio16k_sync,
-        target_rate=TARGET_RATE,
-        wake_max_tokens=WAKE_MAX_TOKENS,
-        log=print,
-    )
-
-
-def build_llm_warmup_runtime_deps() -> LlmWarmupRuntimeDeps:
-    return LlmWarmupRuntimeDeps(
-        get_http_session=get_http_session,
-        client_timeout=aiohttp.ClientTimeout,
-        mark_startup_component=mark_startup_component,
-        llm_server_url=LLM_SERVER_URL,
-        model_name=MODEL_NAME,
-        main_llm_chat_content_format=MAIN_LLM_CHAT_CONTENT_FORMAT,
-        voice_llm_max_tokens=VOICE_LLM_MAX_TOKENS,
-        main_llm_stop_tokens=MAIN_LLM_STOP_TOKENS,
-        build_chat_messages=build_chat_messages,
-        decode_sse_stream_line=decode_sse_stream_line,
-        log=print,
-    )
-
-
-async def warmup_voice_path(*, reason: str, key: str | None = None, include_stt: bool = True, include_llm: bool = True, include_tts: bool = True) -> None:
-    lock_key = key or reason
-    lock = voice_path_warmup_locks.setdefault(lock_key, asyncio.Lock())
-    async with lock:
-        if key is not None and voice_path_warmup_done.get(key):
-            return
-        print(f"[STARTUP] voice_path_warmup_begin reason={reason} key={lock_key}")
-        if include_stt:
-            if not STT_SERVICE_URL:
-                await asyncio.to_thread(get_stt_model)
-            await asyncio.to_thread(warmup_stt_sync)
-        if include_llm:
-            await warmup_llm()
-        if include_tts:
-            await warmup_tts_server()
-        voice_path_warmup_done[lock_key] = time.monotonic()
-        print(f"[STARTUP] voice_path_warmup_done reason={reason} key={lock_key}")
-
-
-async def initialize_startup_components() -> None:
-    print("[STARTUP] init_begin")
-    await set_tts_presence(True)
-    try:
-        await asyncio.to_thread(ensure_opus_loaded)
-        await warmup_voice_path(reason="startup", key="startup")
-        print("[STARTUP] init_done")
-    finally:
-        await set_tts_presence(False)
-
-
-async def ensure_startup_components_ready() -> None:
-    global startup_components_ready, startup_components_task
-    if startup_components_ready:
-        return
-    current = startup_components_task
-    if current is None or current.done():
-        startup_components_task = asyncio.create_task(initialize_startup_components())
-        current = startup_components_task
-    await current
-    startup_components_ready = True
+startup_components_ready = runtime_lifecycle_composition.startup_components_ready
+set_tts_presence = runtime_lifecycle_composition.set_tts_presence
+build_opus_startup_runtime_deps = runtime_lifecycle_composition.build_opus_startup_runtime_deps
+ensure_opus_loaded = runtime_lifecycle_composition.ensure_opus_loaded
+build_stt_warmup_runtime_deps = runtime_lifecycle_composition.build_stt_warmup_runtime_deps
+build_llm_warmup_runtime_deps = runtime_lifecycle_composition.build_llm_warmup_runtime_deps
+warmup_voice_path = runtime_lifecycle_composition.warmup_voice_path
+initialize_startup_components = runtime_lifecycle_composition.initialize_startup_components
+ensure_startup_components_ready = runtime_lifecycle_composition.ensure_startup_components_ready
+restart_bot_process = runtime_lifecycle_composition.restart_bot_process
+schedule_evelyn_stack_shutdown = runtime_lifecycle_composition.schedule_evelyn_stack_shutdown
+schedule_evelyn_local_shutdown = runtime_lifecycle_composition.schedule_evelyn_local_shutdown
+shutdown_bot_process = runtime_lifecycle_composition.shutdown_bot_process
+run_local_only_mode = runtime_lifecycle_composition.run_local_only_mode
 
 
 def resolve_evelyn_page_url() -> str | None:
@@ -4859,75 +4854,6 @@ def build_discord_text_message_handler_deps() -> DiscordTextMessageHandlerDeps:
         log=print,
     )
 
-
-async def restart_bot_process() -> None:
-    await asyncio.sleep(1.0)
-    stop_control_page_background_tasks()
-    stop_vision_watch_task()
-    stop_local_mic_service()
-    script_path = Path(__file__).resolve()
-    project_dir = script_path.parent
-    launch_runtime_restart_sequence(
-        project_dir,
-        local_only_mode=LOCAL_ONLY_MODE,
-        discord_enabled=DISCORD_ENABLED,
-        control_page_port=CONTROL_PAGE_PORT,
-        fallback_target=project_dir / "evelyn_core" / "start.bat",
-    )
-    os._exit(0)
-
-
-def schedule_evelyn_stack_shutdown(delay_ms: int = 3000) -> bool:
-    return runtime_schedule_evelyn_stack_shutdown(PROJECT_ROOT, delay_ms=delay_ms)
-
-
-def schedule_evelyn_local_shutdown(delay_ms: int = 1500) -> bool:
-    return runtime_schedule_evelyn_local_shutdown(PROJECT_ROOT, delay_ms=delay_ms)
-
-
-async def shutdown_bot_process() -> None:
-    await asyncio.sleep(0.5)
-    stop_control_page_background_tasks()
-    stop_local_mic_service()
-    try:
-        for guild in list(bot.guilds):
-            vc = guild.voice_client
-            if vc is None:
-                continue
-            try:
-                if hasattr(vc, "stop_listening"):
-                    vc.stop_listening()
-            except Exception:
-                pass
-            try:
-                await vc.disconnect(force=True)
-            except Exception:
-                pass
-    finally:
-        os._exit(0)
-
-
-async def run_local_only_mode() -> None:
-    print("[LOCAL MODE] starting without Discord gateway")
-    mark_startup_component("discord_gateway", "done", "disabled by DISCORD_ENABLED=false")
-    try:
-        await start_control_page_server()
-    except Exception as e:
-        mark_startup_component("control_api", "failed", repr(e))
-        print(f"[CONTROL PAGE] start_fail err={e!r}")
-        raise
-    try:
-        await ensure_startup_components_ready()
-        await ensure_local_mic_service_started()
-        ensure_vision_watch_started()
-    except Exception as e:
-        print(f"[STARTUP] local_init_fail err={e!r}")
-    try:
-        await ensure_control_page_background_tasks_started()
-    except Exception as e:
-        print(f"[CONTROL PAGE] bg_tasks_fail err={e!r}")
-    print(f"[LOCAL MODE] ready url={control_page_local_url()}")
-    await asyncio.Event().wait()
 
 is_control_command_authorized = make_control_command_authorized_checker(allowed_user_ids=ALLOWED_RESTART_USER_IDS)
 
