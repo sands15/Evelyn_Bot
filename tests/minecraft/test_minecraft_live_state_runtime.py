@@ -156,7 +156,7 @@ class MinecraftLiveStateRuntimeTests(unittest.IsolatedAsyncioTestCase):
             REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "control_page_composition_runtime.py"
         ).read_text(encoding="utf-8")
         observe_start = source.index("async def observe_live_minecraft_state(")
-        observe_end = source.index("async def wait_for_minecraft_ready", observe_start)
+        observe_end = source.index("minecraft_mode_composition = MinecraftModeComposition(", observe_start)
         snapshot_start = composition.index("async def get_minecraft_snapshot(")
         snapshot_end = composition.index("async def safe_get_minecraft_snapshot", snapshot_start)
 

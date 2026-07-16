@@ -108,6 +108,10 @@ from evelyn_core.minecraft_live_state_runtime import (
     MinecraftLiveObservationRuntimeDeps,
     observe_live_minecraft_state_from_runtime,
 )
+from evelyn_core.minecraft_mode_composition import (
+    MinecraftModeComposition,
+    MinecraftModeCompositionDeps,
+)
 from evelyn_core.question_shaping import (
     enforce_question_limits,
 )
@@ -3015,41 +3019,19 @@ async def observe_live_minecraft_state(guild_id: int | None) -> dict[str, Any] |
     )
 
 
-async def wait_for_minecraft_ready(guild_id: int, *, timeout_sec: float = 12.0, poll_sec: float = 1.0) -> dict[str, Any]:
-    _ = guild_id
-    deadline = time.monotonic() + max(0.5, timeout_sec)
-    last_observed: dict[str, Any] = {}
-    client = get_minecraft_client()
-    while time.monotonic() < deadline:
-        status = await client.status()
-        observed = status.get("observation") if isinstance(status.get("observation"), dict) else status
-        if isinstance(observed, dict):
-            last_observed = merge_voyager_status_into_state(status, observed) or dict(observed)
-            if status.get("connected") or observed.get("connected") or observed.get("active") or observed.get("position"):
-                return last_observed
-            last_error = clean_text(str(status.get("last_error") or observed.get("last_error") or ""))
-            if last_error:
-                last_observed["wait_last_error"] = last_error
-        await asyncio.sleep(max(0.1, poll_sec))
-    if last_observed:
-        return last_observed
-    return {"connected": False, "active": False, "last_error": "timeout_waiting_for_voyager_service"}
+minecraft_mode_composition = MinecraftModeComposition(
+    MinecraftModeCompositionDeps(
+        get_client=get_minecraft_client,
+        merge_status=merge_voyager_status_into_state,
+        clean_text=clean_text,
+        monotonic=time.monotonic,
+        sleep=asyncio.sleep,
+    )
+)
 
-
-async def enable_minecraft_mode(guild_id: int, goal: str | None = None) -> dict[str, Any]:
-    _ = guild_id
-    client = get_minecraft_client()
-    started = await client.start(goal=goal)
-    observed = await wait_for_minecraft_ready(guild_id)
-    merged = merge_voyager_status_into_state(started if isinstance(started, dict) else None, observed if isinstance(observed, dict) else None) or {}
-    merged["voyager_repo_present"] = started.get("voyager_repo_present") if isinstance(started, dict) else None
-    return merged
-
-
-async def disable_minecraft_mode(guild_id: int) -> None:
-    _ = guild_id
-    client = get_minecraft_client()
-    await client.stop()
+wait_for_minecraft_ready = minecraft_mode_composition.wait_for_minecraft_ready
+enable_minecraft_mode = minecraft_mode_composition.enable_minecraft_mode
+disable_minecraft_mode = minecraft_mode_composition.disable_minecraft_mode
 
 
 def build_control_page_ui_runtime_deps() -> ControlPageUiRuntimeDeps:
