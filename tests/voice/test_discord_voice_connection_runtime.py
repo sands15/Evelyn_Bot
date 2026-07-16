@@ -157,10 +157,12 @@ class DiscordVoiceConnectionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(channel.connect_calls), 2)
 
     def test_main_delegates_voice_connect_and_reconnect_to_runtime_module(self) -> None:
-        source = (REPO_ROOT / "main.py").read_text(encoding="utf-8")
-        wait_start = source.index("async def _wait_for_internal_voice_reconnect(")
-        connect_start = source.index("async def connect_evelyn_voice_client(", wait_start)
-        ensure_start = source.index("async def ensure_listening_voice_client(", connect_start)
+        source = (
+            REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "voice_support_composition_runtime.py"
+        ).read_text(encoding="utf-8")
+        wait_start = source.index("    async def wait_for_internal_voice_reconnect(")
+        connect_start = source.index("    async def connect_evelyn_voice_client(", wait_start)
+        ensure_start = source.index("    async def ensure_listening_voice_client(", connect_start)
 
         wait_source = source[wait_start:connect_start]
         connect_source = source[connect_start:ensure_start]

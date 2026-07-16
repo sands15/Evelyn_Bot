@@ -219,9 +219,11 @@ class OmniVoiceSourceRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.failures[0][0][:2], ("tts_producer_cancelled", "cancelled"))
 
     def test_main_delegates_source_creation_to_runtime_module(self) -> None:
-        source = (REPO_ROOT / "main.py").read_text(encoding="utf-8")
-        start = source.index("async def create_omnivoice_source(")
-        end = source.index("# =========================================================\n# STT", start)
+        source = (
+            REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "voice_support_composition_runtime.py"
+        ).read_text(encoding="utf-8")
+        start = source.index("    async def create_omnivoice_source(")
+        end = source.index("    def transcribe_audio16k_sync(", start)
         function_source = source[start:end]
 
         self.assertIn("create_omnivoice_source_from_runtime(", function_source)

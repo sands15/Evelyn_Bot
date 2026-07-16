@@ -246,6 +246,10 @@ from evelyn_core.llm_context_assembly import LlmContextAssemblyDeps
 from evelyn_core.llm_warmup_runtime import LlmWarmupRuntimeDeps
 from evelyn_core.llm_route_composition_runtime import LlmRouteComposition, LlmRouteCompositionDeps
 from evelyn_core.voice_io_composition_runtime import VoiceIoComposition, VoiceIoCompositionDeps
+from evelyn_core.voice_support_composition_runtime import (
+    VoiceSupportComposition,
+    VoiceSupportCompositionDeps,
+)
 from evelyn_core.main_llm_runtime import (
     AskLlmOnceRuntimeDeps,
     MainLlmRuntimeDeps,
@@ -261,26 +265,13 @@ from evelyn_core.startup_audio_runtime import (
     OpusStartupRuntimeDeps,
     SttWarmupRuntimeDeps,
     ensure_opus_loaded_from_runtime,
-    warmup_stt_sync_from_runtime,
 )
 from evelyn_core.startup_component_state import (
     STARTUP_BOOT_STEPS,
 )
 from evelyn_core.stt_task_runtime import run_blocking_stt_task_from_runtime
-from evelyn_core.stt_transcription_runtime import (
-    SttTranscriptionRuntimeDeps,
-    transcribe_audio16k_from_runtime,
-)
-from evelyn_core.stt_text_runtime import (
-    build_stt_text_runtime_deps,
-    build_partial_stt_window_from_runtime,
-    choose_full_stt_candidate_from_runtime,
-    commit_stable_transcript_from_runtime,
-    detect_wake_word_sync_from_runtime,
-    get_partial_transcript_from_runtime,
-    longest_common_prefix_text_from_runtime,
-    score_stt_candidate_from_runtime,
-)
+from evelyn_core.stt_transcription_runtime import SttTranscriptionRuntimeDeps
+from evelyn_core.stt_text_runtime import build_stt_text_runtime_deps
 from evelyn_core.memory_layers import collect_memory_layers
 from evelyn_core.memory_llm_context import (
     build_cognitive_state_messages,
@@ -332,11 +323,7 @@ from evelyn_core.discord_tts_stream_runtime import (
     DiscordTtsSingleRuntimeDeps,
     DiscordTtsStreamRuntimeDeps,
 )
-from evelyn_core.discord_voice_connection_runtime import (
-    DiscordVoiceConnectionRuntimeDeps,
-    connect_evelyn_voice_client_from_runtime,
-    wait_for_internal_voice_reconnect_from_runtime,
-)
+from evelyn_core.discord_voice_connection_runtime import DiscordVoiceConnectionRuntimeDeps
 from evelyn_core.discord_settings_runtime import (
     DiscordSettingsRuntimeDeps,
     build_discord_settings_runtime_deps as build_discord_settings_runtime_deps_from_main,
@@ -469,7 +456,7 @@ from evelyn_core.local_mic_segment_runtime import (
     should_drop_discord_audio_for_local_mic_from_runtime,
     stop_local_mic_service_from_runtime,
 )
-from evelyn_core.tts_warmup_runtime import TtsWarmupRuntimeDeps, warmup_tts_server_from_runtime
+from evelyn_core.tts_warmup_runtime import TtsWarmupRuntimeDeps
 from evelyn_core.tts_interrupt_runtime import (
     TtsInterruptRuntimeDeps,
     VoiceTtsInterruptGateDeps,
@@ -478,10 +465,6 @@ from evelyn_core.tts_interrupt_runtime import (
 from evelyn_core.voice_timing_runtime import (
     build_voice_timing_runtime_deps as build_voice_timing_runtime_deps_from_runtime,
     VoiceTimingRuntimeDeps,
-    log_voice_bottleneck_summary_from_runtime,
-    log_voice_latency_from_runtime,
-    log_voice_stage_from_runtime,
-    should_log_voice_timing_from_runtime,
 )
 from evelyn_core.local_tts_playback import LocalTtsPlaybackManager
 from evelyn_core.local_tts_stream_runtime import (
@@ -501,10 +484,7 @@ from evelyn_core.observability_metrics import (
 from evelyn_core.omnivoice_request_runtime import (
     OmniVoiceRequestRuntimeDeps,
 )
-from evelyn_core.omnivoice_source_runtime import (
-    OmniVoiceSourceRuntimeDeps,
-    create_omnivoice_source_from_runtime,
-)
+from evelyn_core.omnivoice_source_runtime import OmniVoiceSourceRuntimeDeps
 from evelyn_core.page_urls import (
     build_evelyn_page_url_runtime_deps,
     resolve_evelyn_page_url_from_runtime,
@@ -676,17 +656,9 @@ from evelyn_core.voice_barge_in import (
     maybe_merge_barge_in_utterance,
 )
 from evelyn_core.voice_barge_in_continuity import (
-    VOICE_BARGE_IN_EVENT_FINISH,
     VOICE_BARGE_IN_REASON_CODE,
     VOICE_BARGE_IN_REASON_LABEL,
     VoiceBargeInContinuityRuntimeDeps,
-    build_voice_barge_in_continuity_snapshot_from_runtime,
-    format_voice_barge_in_continuity_detail_lines_from_runtime,
-    format_voice_barge_in_continuity_summary_from_runtime,
-    mark_voice_barge_in_continuity_probe_from_runtime,
-    parse_barge_in_reason_label_from_runtime,
-    reset_voice_barge_in_continuity_probe_from_runtime,
-    start_voice_barge_in_continuity_probe_from_runtime,
     VoiceBargeInContinuityTracker,
 )
 from evelyn_core.voice_debug_audio import (
@@ -2041,70 +2013,6 @@ def build_voice_barge_in_continuity_runtime_deps() -> VoiceBargeInContinuityRunt
     )
 
 
-def _parse_barge_in_reason_label(raw_reason_code: str) -> str:
-    return parse_barge_in_reason_label_from_runtime(
-        raw_reason_code,
-        deps=build_voice_barge_in_continuity_runtime_deps(),
-    )
-
-
-def _format_voice_barge_in_continuity_summary(continuity: dict[str, Any]) -> str:
-    return format_voice_barge_in_continuity_summary_from_runtime(
-        continuity,
-        deps=build_voice_barge_in_continuity_runtime_deps(),
-    )
-
-
-def _format_voice_barge_in_continuity_detail_lines(continuity: dict[str, Any]) -> list[str]:
-    return format_voice_barge_in_continuity_detail_lines_from_runtime(
-        continuity,
-        deps=build_voice_barge_in_continuity_runtime_deps(),
-    )
-
-
-def start_voice_barge_in_continuity_probe(metrics: dict, *, source: str) -> None:
-    start_voice_barge_in_continuity_probe_from_runtime(
-        metrics,
-        source=source,
-        deps=build_voice_barge_in_continuity_runtime_deps(),
-    )
-
-
-def _build_voice_barge_in_continuity_snapshot() -> dict[str, Any]:
-    return build_voice_barge_in_continuity_snapshot_from_runtime(
-        deps=build_voice_barge_in_continuity_runtime_deps(),
-    )
-
-
-def reset_voice_barge_in_continuity_probe(*, reason: str = "") -> None:
-    reset_voice_barge_in_continuity_probe_from_runtime(
-        reason=reason,
-        deps=build_voice_barge_in_continuity_runtime_deps(),
-    )
-
-
-def _mark_voice_barge_in_continuity_probe(
-    metrics: dict,
-    *,
-    success: bool,
-    reason: str,
-    queued_sentence_count: int = 0,
-    reason_code: str | None = None,
-    reason_label: str | None = None,
-    event: str = VOICE_BARGE_IN_EVENT_FINISH,
-) -> None:
-    mark_voice_barge_in_continuity_probe_from_runtime(
-        metrics,
-        success=success,
-        reason=reason,
-        queued_sentence_count=queued_sentence_count,
-        reason_code=reason_code,
-        reason_label=reason_label,
-        event=event,
-        deps=build_voice_barge_in_continuity_runtime_deps(),
-    )
-
-
 def get_stt_inference_lock() -> asyncio.Lock:
     global stt_inference_lock
     if stt_inference_lock is None:
@@ -3447,10 +3355,6 @@ def build_stt_warmup_runtime_deps() -> SttWarmupRuntimeDeps:
     )
 
 
-def warmup_stt_sync() -> None:
-    warmup_stt_sync_from_runtime(deps=build_stt_warmup_runtime_deps())
-
-
 def build_llm_warmup_runtime_deps() -> LlmWarmupRuntimeDeps:
     return LlmWarmupRuntimeDeps(
         get_http_session=get_http_session,
@@ -3649,11 +3553,9 @@ def build_tts_warmup_runtime_deps() -> TtsWarmupRuntimeDeps:
     )
 
 
-async def warmup_tts_server() -> None:
+def _set_tts_warmup_started(value: bool) -> None:
     global tts_warmup_started
-
-    tts_warmup_started = True
-    await warmup_tts_server_from_runtime(deps=build_tts_warmup_runtime_deps())
+    tts_warmup_started = value
 
 
 def build_voice_timing_runtime_deps() -> VoiceTimingRuntimeDeps:
@@ -3667,40 +3569,6 @@ def build_voice_timing_runtime_deps() -> VoiceTimingRuntimeDeps:
         build_turn_summary_payload=build_turn_summary_payload,
         log_turn_event=log_turn_event,
         log=print,
-    )
-
-
-def should_log_voice_timing(elapsed_ms: float) -> bool:
-    return should_log_voice_timing_from_runtime(elapsed_ms, deps=build_voice_timing_runtime_deps())
-
-
-def log_voice_latency(metrics: dict | None, key: str, label: str) -> None:
-    log_voice_latency_from_runtime(metrics, key, label, deps=build_voice_timing_runtime_deps())
-
-
-def log_voice_stage(metrics: dict | None, label: str, *, extra: str = "", key: str | None = None) -> None:
-    log_voice_stage_from_runtime(
-        metrics,
-        label,
-        deps=build_voice_timing_runtime_deps(),
-        extra=extra,
-        key=key,
-    )
-
-
-def log_voice_bottleneck_summary(
-    metrics: dict | None,
-    *,
-    label: str,
-    extra: str = "",
-    event_name: str = "turn_summary",
-) -> None:
-    log_voice_bottleneck_summary_from_runtime(
-        metrics,
-        deps=build_voice_timing_runtime_deps(),
-        label=label,
-        extra=extra,
-        event_name=event_name,
     )
 
 
@@ -3734,38 +3602,6 @@ def build_omnivoice_source_runtime_deps() -> OmniVoiceSourceRuntimeDeps:
         record_voice_pipeline_failure=record_voice_pipeline_failure,
         create_turn_scoped_task=create_turn_scoped_task,
         log=print,
-    )
-
-
-async def create_omnivoice_source(
-    text: str,
-    *,
-    on_task_started: Callable[[], None] | None = None,
-    on_request_start: Callable[[], None] | None = None,
-    on_response_headers: Callable[[], None] | None = None,
-    on_first_byte: Callable[[], None] | None = None,
-    on_first_frame: Callable[[], None] | None = None,
-    on_first_packet_sent: Callable[[], None] | None = None,
-    turn_id: str | None = None,
-    chunk_index: int | None = None,
-    session_key: str | None = None,
-    turn_scope: TurnScope | None = None,
-    trace_payload: dict[str, Any] | None = None,
-) -> OmniVoicePCMStream:
-    return await create_omnivoice_source_from_runtime(
-        text,
-        deps=build_omnivoice_source_runtime_deps(),
-        on_task_started=on_task_started,
-        on_request_start=on_request_start,
-        on_response_headers=on_response_headers,
-        on_first_byte=on_first_byte,
-        on_first_frame=on_first_frame,
-        on_first_packet_sent=on_first_packet_sent,
-        turn_id=turn_id,
-        chunk_index=chunk_index,
-        session_key=session_key,
-        turn_scope=turn_scope,
-        trace_payload=trace_payload,
     )
 
 
@@ -3819,78 +3655,6 @@ def build_stt_transcription_runtime_deps() -> SttTranscriptionRuntimeDeps:
     )
 
 
-def transcribe_audio16k_sync(audio16k: np.ndarray, max_new_tokens: int = 256, *, sampling_rate: int = TARGET_RATE, stage: str = "full") -> str:
-    return transcribe_audio16k_from_runtime(
-        audio16k,
-        max_new_tokens,
-        deps=build_stt_transcription_runtime_deps(),
-        sampling_rate=sampling_rate,
-        stage=stage,
-    )
-
-
-def build_partial_stt_window(audio16k: np.ndarray, *, sampling_rate: int = TARGET_RATE) -> np.ndarray:
-    return build_partial_stt_window_from_runtime(audio16k, sampling_rate=sampling_rate)
-
-
-def longest_common_prefix_text(a: str, b: str) -> str:
-    return longest_common_prefix_text_from_runtime(a, b, clean_text=clean_text)
-
-
-def commit_stable_transcript(session_key: str | None, *, new_partial_text: str) -> str:
-    return commit_stable_transcript_from_runtime(
-        session_key,
-        new_partial_text=new_partial_text,
-        deps=_build_stt_text_runtime_deps(),
-    )
-
-
-def get_partial_transcript(session_key: str | None, audio16k: np.ndarray, *, sampling_rate: int = TARGET_RATE) -> tuple[str, str]:
-    return get_partial_transcript_from_runtime(
-        session_key,
-        audio16k,
-        sampling_rate=sampling_rate,
-        max_new_tokens=max(64, min(VOICE_STT_MAX_NEW_TOKENS, 128)),
-        transcribe_audio16k_sync=transcribe_audio16k_sync,
-        deps=_build_stt_text_runtime_deps(),
-    )
-
-
-def score_stt_candidate(text: str, *, wake_probe: str = "") -> float:
-    return score_stt_candidate_from_runtime(
-        text,
-        wake_probe=wake_probe,
-        deps=_build_stt_text_runtime_deps(),
-    )
-
-
-def choose_full_stt_candidate(primary_text: str, rescore_text: str, *, wake_probe: str = "") -> tuple[str, dict]:
-    return choose_full_stt_candidate_from_runtime(
-        primary_text,
-        rescore_text,
-        wake_probe=wake_probe,
-        deps=_build_stt_text_runtime_deps(),
-    )
-
-
-def detect_wake_word_sync(audio: np.ndarray, *, sampling_rate: int = TARGET_RATE) -> dict[str, str | bool | None]:
-    return detect_wake_word_sync_from_runtime(
-        audio,
-        sampling_rate=sampling_rate,
-        wake_audio_sec=WAKE_AUDIO_SEC,
-        wake_confirm_audio_sec=WAKE_CONFIRM_AUDIO_SEC,
-        wake_max_tokens=WAKE_MAX_TOKENS,
-        wake_confirm_max_tokens=WAKE_CONFIRM_MAX_TOKENS,
-        transcribe_audio16k_sync=transcribe_audio16k_sync,
-        apply_stt_post_corrections=apply_stt_post_corrections,
-        strip_leading_voice_fillers=strip_leading_voice_fillers,
-        extract_leading_wake_alias=extract_leading_wake_alias,
-        fuzzy_leading_wake_alias=fuzzy_leading_wake_alias,
-        looks_like_gibberish_probe=looks_like_gibberish_probe,
-        slice_audio_window=slice_audio_window,
-    )
-
-
 # =========================================================
 # 디스코드 음성
 # =========================================================
@@ -3907,108 +3671,72 @@ def build_discord_voice_connection_runtime_deps() -> DiscordVoiceConnectionRunti
     )
 
 
-async def _wait_for_internal_voice_reconnect(target_channel: discord.VoiceChannel) -> EvelynVoiceClient | None:
-    return await wait_for_internal_voice_reconnect_from_runtime(
-        target_channel,
-        deps=build_discord_voice_connection_runtime_deps(),
+voice_support_composition = VoiceSupportComposition(
+    VoiceSupportCompositionDeps(
+        continuity=lambda: build_voice_barge_in_continuity_runtime_deps(),
+        stt_warmup=lambda: build_stt_warmup_runtime_deps(),
+        tts_warmup=lambda: build_tts_warmup_runtime_deps(),
+        timing=lambda: build_voice_timing_runtime_deps(),
+        omnivoice_source=lambda: build_omnivoice_source_runtime_deps(),
+        stt_transcription=lambda: build_stt_transcription_runtime_deps(),
+        stt_text=lambda: _build_stt_text_runtime_deps(),
+        voice_connection=lambda: build_discord_voice_connection_runtime_deps(),
+        set_tts_warmup_started=_set_tts_warmup_started,
+        partial_stt_max_new_tokens=max(64, min(VOICE_STT_MAX_NEW_TOKENS, 128)),
+        clean_text=clean_text,
+        wake_audio_sec=WAKE_AUDIO_SEC,
+        wake_confirm_audio_sec=WAKE_CONFIRM_AUDIO_SEC,
+        wake_max_tokens=WAKE_MAX_TOKENS,
+        wake_confirm_max_tokens=WAKE_CONFIRM_MAX_TOKENS,
+        apply_stt_post_corrections=apply_stt_post_corrections,
+        strip_leading_voice_fillers=strip_leading_voice_fillers,
+        extract_leading_wake_alias=extract_leading_wake_alias,
+        fuzzy_leading_wake_alias=fuzzy_leading_wake_alias,
+        looks_like_gibberish_probe=looks_like_gibberish_probe,
+        slice_audio_window=slice_audio_window,
+        ensure_startup_components_ready=ensure_startup_components_ready,
+        voice_client_type=EvelynVoiceClient,
+        process_member_audio=lambda: process_member_audio,
+        warmup_voice_path=warmup_voice_path,
+        save_last_voice_channel_state=save_last_voice_channel_state,
+        load_last_voice_channel_state=load_last_voice_channel_state,
+        increment_voice_pipeline_counter=increment_voice_pipeline_counter,
+        voice_pipeline_state=voice_pipeline_state,
+        voice_rejoin_on_ready=VOICE_REJOIN_ON_READY,
+        get_guild=bot.get_guild,
+        voice_channel_type=discord.VoiceChannel,
+        now=time.time,
+        log=print,
     )
+)
 
-
-async def connect_evelyn_voice_client(target_channel: discord.VoiceChannel) -> EvelynVoiceClient:
-    return await connect_evelyn_voice_client_from_runtime(
-        target_channel,
-        deps=build_discord_voice_connection_runtime_deps(),
-    )
-
-
-async def ensure_listening_voice_client(guild: discord.Guild, target_channel: discord.VoiceChannel) -> Optional[EvelynVoiceClient]:
-    await ensure_startup_components_ready()
-    vc = guild.voice_client
-
-    if vc is not None and not isinstance(vc, EvelynVoiceClient):
-        await vc.disconnect(force=True)
-        vc = None
-
-    if vc is None:
-        vc = await connect_evelyn_voice_client(target_channel)
-    elif isinstance(vc, EvelynVoiceClient) and vc.is_internal_voice_reconnect_active():
-        waited_vc = await _wait_for_internal_voice_reconnect(target_channel)
-        if waited_vc is not None:
-            vc = waited_vc
-    elif vc.channel != target_channel:
-        await vc.move_to(target_channel)
-
-    if isinstance(vc, EvelynVoiceClient):
-        vc.on_user_audio = process_member_audio
-        if not vc.is_listener_healthy():
-            try:
-                vc.stop_listening()
-            except Exception:
-                pass
-            vc.listen()
-            print(f"[VOICE LISTEN REARM] guild={guild.id} channel={target_channel.name}")
-        warmup_key = f"voice:{guild.id}:{getattr(target_channel, 'id', 'unknown')}"
-        try:
-            await warmup_voice_path(reason="voice_connect", key=warmup_key)
-        except Exception as e:
-            print(f"[VOICE PATH WARMUP FAIL] guild={guild.id} channel={getattr(target_channel, 'name', None)} err={e!r}")
-        save_last_voice_channel_state(guild, target_channel, reason="ensure_listening", manual_disconnect=False)
-        return vc
-
-    return None
-
-
-async def ensure_voice_client(message: discord.Message) -> Optional[EvelynVoiceClient]:
-    if not message.guild:
-        return None
-
-    voice_state = getattr(message.author, "voice", None)
-    if not voice_state or not voice_state.channel:
-        return None
-
-    vc = await ensure_listening_voice_client(message.guild, voice_state.channel)
-    return vc
-
-
-async def restore_last_voice_channel(guild: discord.Guild | None = None, *, force: bool = False) -> tuple[bool, str]:
-    if not VOICE_REJOIN_ON_READY and not force:
-        return False, "rejoin_disabled"
-    state = load_last_voice_channel_state()
-    if not state:
-        return False, "no_saved_voice_channel"
-    if state.get("manual_disconnect") and not force:
-        return False, "manual_disconnect"
-
-    guild_id = int(state.get("guild_id") or 0)
-    channel_id = int(state.get("channel_id") or 0)
-    if not guild_id or not channel_id:
-        return False, "invalid_saved_voice_channel"
-
-    target_guild = guild or bot.get_guild(guild_id)
-    if target_guild is None or int(target_guild.id) != guild_id:
-        return False, "saved_guild_not_available"
-    channel = target_guild.get_channel(channel_id)
-    if not isinstance(channel, discord.VoiceChannel):
-        return False, "saved_channel_not_available"
-
-    increment_voice_pipeline_counter("voice_rejoin_attempts")
-    voice_pipeline_state["last_voice_rejoin_at"] = time.time()
-    voice_pipeline_state["last_voice_rejoin_error"] = None
-    try:
-        vc = await ensure_listening_voice_client(target_guild, channel)
-    except Exception as exc:
-        increment_voice_pipeline_counter("voice_rejoin_fail")
-        voice_pipeline_state["last_voice_rejoin_error"] = repr(exc)
-        print(f"[VOICE REJOIN FAIL] guild={guild_id} channel={channel_id} err={exc!r}")
-        return False, repr(exc)
-    if vc is None:
-        increment_voice_pipeline_counter("voice_rejoin_fail")
-        voice_pipeline_state["last_voice_rejoin_error"] = "voice_client_none"
-        return False, "voice_client_none"
-    increment_voice_pipeline_counter("voice_rejoin_success")
-    save_last_voice_channel_state(target_guild, channel, reason="restore_last_voice_channel", manual_disconnect=False)
-    print(f"[VOICE REJOIN OK] guild={guild_id} channel={getattr(channel, 'name', None)}")
-    return True, getattr(channel, "name", str(channel_id))
+_parse_barge_in_reason_label = voice_support_composition.parse_barge_in_reason_label
+_format_voice_barge_in_continuity_summary = voice_support_composition.format_voice_barge_in_continuity_summary
+_format_voice_barge_in_continuity_detail_lines = voice_support_composition.format_voice_barge_in_continuity_detail_lines
+start_voice_barge_in_continuity_probe = voice_support_composition.start_voice_barge_in_continuity_probe
+_build_voice_barge_in_continuity_snapshot = voice_support_composition.build_voice_barge_in_continuity_snapshot
+reset_voice_barge_in_continuity_probe = voice_support_composition.reset_voice_barge_in_continuity_probe
+_mark_voice_barge_in_continuity_probe = voice_support_composition.mark_voice_barge_in_continuity_probe
+warmup_stt_sync = voice_support_composition.warmup_stt_sync
+warmup_tts_server = voice_support_composition.warmup_tts_server
+should_log_voice_timing = voice_support_composition.should_log_voice_timing
+log_voice_latency = voice_support_composition.log_voice_latency
+log_voice_stage = voice_support_composition.log_voice_stage
+log_voice_bottleneck_summary = voice_support_composition.log_voice_bottleneck_summary
+create_omnivoice_source = voice_support_composition.create_omnivoice_source
+transcribe_audio16k_sync = voice_support_composition.transcribe_audio16k_sync
+build_partial_stt_window = voice_support_composition.build_partial_stt_window
+longest_common_prefix_text = voice_support_composition.longest_common_prefix_text
+commit_stable_transcript = voice_support_composition.commit_stable_transcript
+get_partial_transcript = voice_support_composition.get_partial_transcript
+score_stt_candidate = voice_support_composition.score_stt_candidate
+choose_full_stt_candidate = voice_support_composition.choose_full_stt_candidate
+detect_wake_word_sync = voice_support_composition.detect_wake_word_sync
+_wait_for_internal_voice_reconnect = voice_support_composition.wait_for_internal_voice_reconnect
+connect_evelyn_voice_client = voice_support_composition.connect_evelyn_voice_client
+ensure_listening_voice_client = voice_support_composition.ensure_listening_voice_client
+ensure_voice_client = voice_support_composition.ensure_voice_client
+restore_last_voice_channel = voice_support_composition.restore_last_voice_channel
 
 
 def build_tts_interrupt_runtime_deps() -> TtsInterruptRuntimeDeps:

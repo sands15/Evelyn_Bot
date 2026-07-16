@@ -131,9 +131,11 @@ class SttTranscriptionRuntimeTests(unittest.TestCase):
         self.assertFalse(call["return_time_stamps"])
 
     def test_main_delegates_sync_transcription_to_runtime_module(self) -> None:
-        source = (REPO_ROOT / "main.py").read_text(encoding="utf-8")
-        start = source.index("def transcribe_audio16k_sync(")
-        end = source.index("def build_partial_stt_window", start)
+        source = (
+            REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "voice_support_composition_runtime.py"
+        ).read_text(encoding="utf-8")
+        start = source.index("    def transcribe_audio16k_sync(")
+        end = source.index("    def build_partial_stt_window", start)
         function_source = source[start:end]
 
         self.assertIn("transcribe_audio16k_from_runtime(", function_source)
