@@ -21,11 +21,27 @@ class LocalDeliveryEntryDeps:
     log: Callable[..., Any]
 
 
+@dataclass(frozen=True)
+class DiscordDeliveryEntryDeps:
+    request_factory: Callable[..., Any]
+    build_streaming_delivery: Callable[[Any], Any]
+    stream_tts_sentences: Callable[..., Any]
+    create_scoped_task: Callable[..., Any]
+    log_voice_stage: Callable[..., Any]
+    prefetch_chunks: int
+    log: Callable[..., Any]
+
+
 class DeliveryEntryComposition:
     """Owns local and Discord streaming delivery entry adapters."""
 
-    def __init__(self, local: LocalDeliveryEntryDeps) -> None:
+    def __init__(
+        self,
+        local: LocalDeliveryEntryDeps,
+        discord: DiscordDeliveryEntryDeps,
+    ) -> None:
         self.local = local
+        self.discord = discord
 
     def mark_local_tts_first_playback(
         self,
@@ -94,4 +110,31 @@ class DeliveryEntryComposition:
             session_key=session_key,
             turn_scope=turn_scope,
             deps=self.local.local_control_tts(),
+        )
+
+    def start_streaming_voice_delivery(
+        self,
+        voice_client: Any,
+        *,
+        metrics: dict,
+        turn_id: str | None,
+        session_key: str | None,
+        turn_scope: Any | None,
+    ) -> Any:
+        deps = self.discord
+        return deps.build_streaming_delivery(
+            deps.request_factory(
+                voice_client=voice_client,
+                metrics=metrics,
+                turn_id=turn_id,
+                session_key=session_key,
+                turn_scope=turn_scope,
+                stream_tts_sentences=deps.stream_tts_sentences,
+                create_playback_task=lambda coro, scope: deps.create_scoped_task(
+                    coro, turn_scope=scope
+                ),
+                log_stage=deps.log_voice_stage,
+                prefetch_chunks=deps.prefetch_chunks,
+                log=deps.log,
+            )
         )

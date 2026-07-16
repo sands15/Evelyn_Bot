@@ -4,7 +4,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 REPO_ROOT=next(p for p in Path(__file__).resolve().parents if (p/"main.py").exists()); RUNTIME_ROOT=REPO_ROOT/"evelyn_core"/"runtime"
 if str(RUNTIME_ROOT) not in sys.path: sys.path.insert(0,str(RUNTIME_ROOT))
-from evelyn_core.delivery_entry_composition import DeliveryEntryComposition, LocalDeliveryEntryDeps
+from evelyn_core.delivery_entry_composition import DiscordDeliveryEntryDeps, DeliveryEntryComposition, LocalDeliveryEntryDeps
 
 class DeliveryEntryCompositionTests(unittest.TestCase):
     def build(self):
@@ -12,7 +12,9 @@ class DeliveryEntryCompositionTests(unittest.TestCase):
             stream_local_tts_sentences=Mock(return_value="stream"),create_scoped_task=Mock(return_value="task"),
             streaming_delivery_factory=Mock(return_value="delivery"),log_voice_stage=Mock(),mark_turn_stage=Mock(),
             log_voice_latency=Mock(),local_control_tts=lambda:"local-deps",prefetch_chunks=2,log=Mock())
-        return DeliveryEntryComposition(deps),deps
+        discord=DiscordDeliveryEntryDeps(request_factory=Mock(return_value="request"),build_streaming_delivery=Mock(return_value="discord-delivery"),
+            stream_tts_sentences=Mock(),create_scoped_task=Mock(),log_voice_stage=Mock(),prefetch_chunks=2,log=Mock())
+        return DeliveryEntryComposition(deps,discord),deps
     def test_first_playback_marks_once_and_logs(self):
         c,d=self.build(); c.mark_local_tts_first_playback({"marks":{}},turn_id="t",chunk_index=1,session_key="s")
         d.mark_turn_stage.assert_called_once(); d.log_voice_latency.assert_called_once()
@@ -24,6 +26,8 @@ class DeliveryEntryCompositionTests(unittest.TestCase):
         with patch("evelyn_core.delivery_entry_composition.schedule_local_control_tts_from_runtime",return_value="task") as runtime:
             self.assertEqual(c.schedule_local_control_tts("answer"),"task")
         self.assertEqual(runtime.call_args.kwargs["deps"],"local-deps")
+    def test_discord_streaming_builds_request(self):
+        c,_=self.build(); self.assertEqual(c.start_streaming_voice_delivery("vc",metrics={},turn_id="t",session_key="s",turn_scope=None),"discord-delivery")
     def test_main_bindings(self):
         s=(REPO_ROOT/"main.py").read_text(encoding="utf-8"); self.assertIn("delivery_entry_composition = DeliveryEntryComposition(",s)
         self.assertIn("schedule_local_control_tts = delivery_entry_composition.schedule_local_control_tts",s)

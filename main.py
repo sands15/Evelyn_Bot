@@ -429,6 +429,7 @@ from evelyn_core.local_control_tts_runtime import (
     build_local_control_tts_runtime_deps,
 )
 from evelyn_core.delivery_entry_composition import (
+    DiscordDeliveryEntryDeps,
     DeliveryEntryComposition,
     LocalDeliveryEntryDeps,
 )
@@ -2818,7 +2819,16 @@ delivery_entry_composition = DeliveryEntryComposition(
         ),
         prefetch_chunks=TTS_PREFETCH_CHUNKS,
         log=print,
-    )
+    ),
+    DiscordDeliveryEntryDeps(
+        request_factory=DiscordStreamingVoiceDeliveryRequest,
+        build_streaming_delivery=build_streaming_voice_delivery,
+        stream_tts_sentences=lambda *args, **kwargs: stream_tts_sentences(*args, **kwargs),
+        create_scoped_task=create_turn_scoped_task,
+        log_voice_stage=log_voice_stage,
+        prefetch_chunks=TTS_PREFETCH_CHUNKS,
+        log=print,
+    ),
 )
 
 _mark_local_tts_first_playback = delivery_entry_composition.mark_local_tts_first_playback
@@ -2826,6 +2836,7 @@ start_streaming_local_voice_delivery = (
     delivery_entry_composition.start_streaming_local_voice_delivery
 )
 schedule_local_control_tts = delivery_entry_composition.schedule_local_control_tts
+start_streaming_voice_delivery = delivery_entry_composition.start_streaming_voice_delivery
 
 
 def build_local_tts_stream_runtime_deps() -> LocalTtsStreamRuntimeDeps:
@@ -3680,30 +3691,6 @@ maybe_handle_short_circuit_route = llm_route_composition.maybe_handle_short_circ
 maybe_execute_registered_route = llm_route_composition.maybe_execute_registered_route
 execute_main_llm_streaming_turn = llm_route_composition.execute_main_llm_streaming_turn
 ask_llm_streaming = llm_route_composition.ask_llm_streaming
-
-
-def start_streaming_voice_delivery(
-    vc: discord.VoiceClient,
-    *,
-    metrics: dict,
-    turn_id: str | None,
-    session_key: str | None,
-    turn_scope: TurnScope | None,
-) -> StreamingVoiceDelivery:
-    return build_streaming_voice_delivery(
-        DiscordStreamingVoiceDeliveryRequest(
-            voice_client=vc,
-            metrics=metrics,
-            turn_id=turn_id,
-            session_key=session_key,
-            turn_scope=turn_scope,
-            stream_tts_sentences=stream_tts_sentences,
-            create_playback_task=lambda coro, scope: create_turn_scoped_task(coro, turn_scope=scope),
-            log_stage=log_voice_stage,
-            prefetch_chunks=TTS_PREFETCH_CHUNKS,
-            log=print,
-        )
-    )
 
 
 def build_voice_delivery_runtime_deps() -> VoiceDeliveryRuntimeDeps:
