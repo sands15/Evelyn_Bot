@@ -129,7 +129,11 @@ from evelyn_core.cognitive_followup_policy import (
     ShouldForceSearchFollowupRuntimeDeps,
     should_force_search_followup_from_runtime,
 )
-from evelyn_core.cognitive_state_runtime import CognitiveStateRuntimeDeps, update_cognitive_state_from_runtime
+from evelyn_core.cognitive_state_runtime import CognitiveStateRuntimeDeps
+from evelyn_core.cognitive_refresh_composition import (
+    CognitiveRefreshComposition,
+    CognitiveRefreshCompositionDeps,
+)
 from evelyn_core.self_model import (
     mark_self_state_assistant_output,
     record_self_identity_turn,
@@ -1756,84 +1760,6 @@ def build_cognitive_followup_runtime_deps() -> ShouldForceSearchFollowupRuntimeD
     )
 
 
-async def refresh_cognitive_state_in_background(
-    guild_id: int,
-    user_text: str,
-    *,
-    reason: str,
-    session_key: str | None = None,
-    room_key: str | None = None,
-    person_key: str | None = None,
-    session_memory_key: str | None = None,
-    source: str = "text",
-    turn_scope: TurnScope | None = None,
-) -> None:
-    task_key = session_memory_key or runtime_session_key(guild_id=guild_id)
-    started_at = time.monotonic()
-    try:
-        await update_cognitive_state(
-            guild_id,
-            user_text,
-            session_key=session_key,
-            room_key=room_key,
-            person_key=person_key,
-            session_memory_key=session_memory_key,
-            source=source,
-            turn_scope=turn_scope,
-        )
-        log_turn_event(
-            "cognitive_background_done",
-            session_key=session_key,
-            turn_id=current_turn_id(session_key),
-            cognitive_background_ms=round((time.monotonic() - started_at) * 1000.0, 1),
-            reason=reason,
-        )
-    except asyncio.CancelledError:
-        raise
-    except Exception as e:
-        print(f"[COGNITIVE] background refresh 실패 guild={guild_id} session={task_key!r} reason={reason} err={e!r}")
-    finally:
-        task = background_cognitive_tasks.get(task_key)
-        if task is asyncio.current_task():
-            background_cognitive_tasks.pop(task_key, None)
-
-
-def schedule_cognitive_refresh(
-    guild_id: int | None,
-    user_text: str,
-    *,
-    reason: str,
-    session_key: str | None = None,
-    room_key: str | None = None,
-    person_key: str | None = None,
-    session_memory_key: str | None = None,
-    source: str = "text",
-    turn_scope: TurnScope | None = None,
-) -> None:
-    if guild_id is None:
-        return
-    task_key = session_memory_key or runtime_session_key(guild_id=guild_id)
-    if task_key is None:
-        return
-    existing = background_cognitive_tasks.get(task_key)
-    if existing is not None and not existing.done():
-        existing.cancel()
-    background_cognitive_tasks[task_key] = create_turn_scoped_task(
-        refresh_cognitive_state_in_background(
-            guild_id,
-            user_text,
-            reason=reason,
-            session_key=session_key,
-            room_key=room_key,
-            person_key=person_key,
-            session_memory_key=session_memory_key,
-            source=source,
-            turn_scope=turn_scope,
-        ),
-        turn_scope=turn_scope,
-    )
-
-
 def build_runtime_status_context_deps() -> RuntimeStatusContextDeps:
     return RuntimeStatusContextDeps(
         enabled=RUNTIME_STATUS_CONTEXT_ENABLED,
@@ -2196,28 +2122,26 @@ def build_cognitive_state_runtime_deps() -> CognitiveStateRuntimeDeps:
     )
 
 
-async def update_cognitive_state(
-    guild_id: int,
-    user_text: str,
-    *,
-    session_key: str | None = None,
-    room_key: str | None = None,
-    person_key: str | None = None,
-    session_memory_key: str | None = None,
-    source: str = "text",
-    turn_scope: TurnScope | None = None,
-) -> dict:
-    return await update_cognitive_state_from_runtime(
-        guild_id,
-        user_text,
-        deps=build_cognitive_state_runtime_deps(),
-        session_key=session_key,
-        room_key=room_key,
-        person_key=person_key,
-        session_memory_key=session_memory_key,
-        source=source,
-        turn_scope=turn_scope,
+cognitive_refresh_composition = CognitiveRefreshComposition(
+    CognitiveRefreshCompositionDeps(
+        state=build_cognitive_state_runtime_deps,
+        background_tasks=background_cognitive_tasks,
+        runtime_session_key=runtime_session_key,
+        create_scoped_task=create_turn_scoped_task,
+        current_turn_id=current_turn_id,
+        monotonic=time.monotonic,
+        current_task=asyncio.current_task,
+        log_turn_event=log_turn_event,
+        log=print,
     )
+)
+
+update_cognitive_state = cognitive_refresh_composition.update_cognitive_state
+refresh_cognitive_state_in_background = (
+    cognitive_refresh_composition.refresh_cognitive_state_in_background
+)
+schedule_cognitive_refresh = cognitive_refresh_composition.schedule_cognitive_refresh
+
 
 async def update_long_term_memory(
     guild_id: int,
