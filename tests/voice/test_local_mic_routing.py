@@ -341,11 +341,15 @@ class LocalMicRoutingTests(unittest.TestCase):
         voice_io_composition = (
             REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "voice_io_composition_runtime.py"
         ).read_text(encoding="utf-8")
+        voice_runtime_composition = (
+            REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "voice_runtime_composition_runtime.py"
+        ).read_text(encoding="utf-8")
 
         self.assertIn("if target is None and deps.local_only_mode", local_mic_segment_runtime)
         self.assertIn("local_only_mode=LOCAL_ONLY_MODE", main_py)
-        self.assertIn("local_control_voice_member=local_control_voice_member", main_py)
-        self.assertIn("handle_local_mic_segment_from_runtime(", main_py)
+        self.assertIn("local_control_voice_member=self.local_control_voice_member", voice_runtime_composition)
+        self.assertIn("handle_local_mic_segment_from_runtime(", voice_runtime_composition)
+        self.assertIn("should_drop_discord_audio_for_local_mic = (", main_py)
         self.assertIn("await ensure_local_mic_service_started()", main_py)
         self.assertIn("deps.is_local_speaker_voice_client(vc)", discord_tts_runtime)
         self.assertIn("ask_llm_and_speak_local_from_runtime(", voice_io_composition)

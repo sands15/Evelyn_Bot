@@ -250,6 +250,13 @@ from evelyn_core.voice_support_composition_runtime import (
     VoiceSupportComposition,
     VoiceSupportCompositionDeps,
 )
+from evelyn_core.voice_runtime_composition_runtime import (
+    LocalMicCompositionDeps,
+    VoiceDebugCompositionDeps,
+    VoicePipelineCompositionDeps,
+    VoiceRuntimeComposition,
+    VoiceRuntimeCompositionDeps,
+)
 from evelyn_core.discord_app_composition_runtime import (
     DiscordAppComposition,
     DiscordAppCompositionDeps,
@@ -275,7 +282,6 @@ from evelyn_core.startup_audio_runtime import (
 from evelyn_core.startup_component_state import (
     STARTUP_BOOT_STEPS,
 )
-from evelyn_core.stt_task_runtime import run_blocking_stt_task_from_runtime
 from evelyn_core.stt_transcription_runtime import SttTranscriptionRuntimeDeps
 from evelyn_core.stt_text_runtime import build_stt_text_runtime_deps
 from evelyn_core.memory_layers import collect_memory_layers
@@ -412,32 +418,12 @@ from evelyn_core.local_mic import (
     should_route_discord_user_to_local_mic,
 )
 from evelyn_core.local_mic_state import (
-    build_local_mic_runtime_state,
-    local_mic_status_line_from_payload,
     normalize_voice_input_mode,
-    serialize_local_mic_runtime_state_payload,
-    set_voice_input_mode_state,
-    voice_input_mode_status_line_from_mode,
 )
 from evelyn_core.local_runtime_context import build_evelyn_runtime_dependency_context_from_payload
 from evelyn_core.local_control_tts_runtime import (
     build_local_control_tts_runtime_deps,
     schedule_local_control_tts_from_runtime,
-)
-from evelyn_core.local_control_voice_runtime import (
-    LocalControlVoiceMember,
-    build_local_control_voice_member_from_runtime,
-    is_local_speaker_voice_client_from_runtime,
-)
-from evelyn_core.local_mic_segment_runtime import (
-    LocalMicDiscordSuppressionRuntimeDeps,
-    LocalMicSegmentRuntimeDeps,
-    LocalMicServiceRuntimeDeps,
-    ensure_local_mic_service_started_from_runtime,
-    handle_local_mic_segment_from_runtime,
-    local_mic_effective_max_silence_ms_from_runtime,
-    should_drop_discord_audio_for_local_mic_from_runtime,
-    stop_local_mic_service_from_runtime,
 )
 from evelyn_core.tts_warmup_runtime import TtsWarmupRuntimeDeps
 from evelyn_core.tts_interrupt_runtime import (
@@ -644,12 +630,6 @@ from evelyn_core.voice_barge_in_continuity import (
     VoiceBargeInContinuityRuntimeDeps,
     VoiceBargeInContinuityTracker,
 )
-from evelyn_core.voice_debug_audio import (
-    debug_write_worker_from_runtime,
-    enqueue_voice_debug_audio_from_runtime,
-    ensure_debug_write_worker_started_from_runtime,
-    save_voice_debug_audio_now as save_voice_debug_audio_now_payload,
-)
 from evelyn_core.voice_utterance import (
     UtteranceAssemblyConfig,
 )
@@ -721,18 +701,6 @@ from evelyn_core.voice_pipeline import (
     build_voice_reply_request,
     build_voice_segment,
     classify_dialogue_turn,
-)
-from evelyn_core.voice_pipeline_state import (
-    build_voice_pipeline_snapshot_payload,
-    default_voice_pipeline_counters,
-    default_voice_pipeline_state,
-    increment_voice_counter,
-    load_last_voice_channel_state as load_last_voice_channel_state_payload,
-    mark_last_voice_manual_disconnect,
-    record_voice_pipeline_failure_from_runtime,
-    save_last_voice_channel_state as save_last_voice_channel_state_payload,
-    save_last_voice_channel_state_from_runtime,
-    voice_last_channel_state_path as resolve_voice_last_channel_state_path,
 )
 from evelyn_voice import EvelynVoiceClient
 
@@ -1156,9 +1124,6 @@ speaker_verifier = SpeakerVerifier(
     log=print,
 )
 active_tts_playbacks = tts_playback_tracker.registry
-voice_debug_counts: dict[int, int] = {}
-voice_debug_stems: dict[tuple[int, str, str, str], str] = {}
-
 tts_warmup_started = False
 http_session: Optional[aiohttp.ClientSession] = None
 startup_components_ready = False
@@ -1190,31 +1155,6 @@ voice_ingress_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=VOICE
 voice_worker_task: asyncio.Task | None = None
 voice_utterance_buffers: dict[str, dict[str, Any]] = {}
 voice_utterance_flush_tasks: dict[str, asyncio.Task] = {}
-debug_write_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=max(8, DEBUG_WRITE_QUEUE_MAX))
-debug_write_task: asyncio.Task | None = None
-
-
-local_mic_service: LocalMicCaptureService | None = None
-local_mic_runtime_state: dict[str, Any] = build_local_mic_runtime_state(
-    enabled=LOCAL_MIC_ENABLED,
-    input_mode=VOICE_INPUT_MODE,
-    routed_user_ids=LOCAL_MIC_DISCORD_USER_IDS,
-)
-
-
-def local_control_voice_member() -> LocalControlVoiceMember:
-    return build_local_control_voice_member_from_runtime(
-        local_control_guild_id=LOCAL_CONTROL_GUILD_ID,
-        local_control_guild_name=LOCAL_CONTROL_GUILD_NAME,
-        local_mic_discord_user_ids=set(LOCAL_MIC_DISCORD_USER_IDS),
-        local_mic_user_name=os.getenv("LOCAL_MIC_USER_NAME", "정훈"),
-    )
-
-
-def is_local_speaker_voice_client(vc: Any) -> bool:
-    return is_local_speaker_voice_client_from_runtime(vc)
-
-
 control_page_runner: web.AppRunner | None = None
 control_page_site: web.TCPSite | None = None
 control_page_start_lock: asyncio.Lock | None = None
@@ -1273,11 +1213,7 @@ autonomy_last_cognitive_refresh_at: dict[int, float] = {}
 autonomy_cognitive_refresh_tasks: dict[int, asyncio.Task] = {}
 search_followup_queued_count = 0
 inflight_llm_requests = 0
-stt_inference_lock: asyncio.Lock | None = None
-stt_cooldown_until = 0.0
-voice_pipeline_counters: dict[str, int] = default_voice_pipeline_counters()
 VOICE_BARGE_IN_CONTINUITY_TARGET = 5
-voice_pipeline_state: dict[str, Any] = default_voice_pipeline_state()
 recent_skill_dispatches: dict[str, float] = {}
 SKILL_DISPATCH_CACHE_TTL_SEC = 300.0
 SKILL_DISPATCH_REPEAT_WINDOW_SEC = 5.0
@@ -1977,10 +1913,6 @@ def summarize_p95_metrics() -> dict[str, float | int]:
     )
 
 
-def increment_voice_pipeline_counter(name: str, amount: int = 1) -> None:
-    increment_voice_counter(voice_pipeline_counters, name, amount)
-
-
 voice_barge_in_continuity_tracker = VoiceBargeInContinuityTracker(
     target_count=VOICE_BARGE_IN_CONTINUITY_TARGET,
     clean_text=clean_text,
@@ -1993,119 +1925,6 @@ def build_voice_barge_in_continuity_runtime_deps() -> VoiceBargeInContinuityRunt
     return VoiceBargeInContinuityRuntimeDeps(
         tracker=voice_barge_in_continuity_tracker,
         command_status=command_status,
-    )
-
-
-def get_stt_inference_lock() -> asyncio.Lock:
-    global stt_inference_lock
-    if stt_inference_lock is None:
-        stt_inference_lock = asyncio.Lock()
-    return stt_inference_lock
-
-
-def voice_last_channel_state_path() -> Path:
-    return resolve_voice_last_channel_state_path(PROJECT_ROOT, VOICE_LAST_CHANNEL_STATE_FILE)
-
-
-def load_last_voice_channel_state() -> dict[str, Any]:
-    return load_last_voice_channel_state_payload(PROJECT_ROOT, VOICE_LAST_CHANNEL_STATE_FILE)
-
-
-def save_last_voice_channel_state(
-    guild: discord.Guild,
-    channel: discord.VoiceChannel,
-    *,
-    reason: str,
-    manual_disconnect: bool = False,
-) -> None:
-    save_last_voice_channel_state_from_runtime(
-        PROJECT_ROOT,
-        VOICE_LAST_CHANNEL_STATE_FILE,
-        voice_pipeline_state,
-        guild,
-        channel,
-        reason=reason,
-        manual_disconnect=manual_disconnect,
-        log=print,
-    )
-
-
-def mark_voice_manual_disconnect(guild: discord.Guild | None, *, reason: str) -> None:
-    try:
-        mark_last_voice_manual_disconnect(
-            PROJECT_ROOT,
-            VOICE_LAST_CHANNEL_STATE_FILE,
-            voice_pipeline_state,
-            guild,
-            reason=reason,
-        )
-    except Exception as exc:
-        print(f"[VOICE STATE SAVE FAIL] err={exc!r}")
-
-
-def record_voice_pipeline_failure(kind: str, err: BaseException | str, metrics: dict | None = None, **extra: Any) -> None:
-    record_voice_pipeline_failure_from_runtime(
-        voice_pipeline_counters,
-        voice_pipeline_state,
-        kind,
-        err,
-        merge_log_event_payload=merge_log_event_payload,
-        log_turn_event=log_turn_event,
-        metrics=metrics,
-        **extra,
-    )
-
-
-def build_voice_pipeline_snapshot(guild: discord.Guild | None = None) -> dict[str, Any]:
-    p95 = summarize_p95_metrics()
-    lock = stt_inference_lock
-    state_file = load_last_voice_channel_state()
-    output_mode = "local_speaker" if LOCAL_ONLY_MODE and local_tts_playback_manager.enabled else "discord_voice"
-    return build_voice_pipeline_snapshot_payload(
-        counters=voice_pipeline_counters,
-        state=voice_pipeline_state,
-        p95=p95,
-        now_time=time.time(),
-        now_mono=time.monotonic(),
-        stt_lock_locked=bool(lock and lock.locked()),
-        stt_cooldown_until=stt_cooldown_until,
-        last_channel_state=state_file,
-        output_mode=output_mode,
-        local_tts_output=local_tts_playback_manager.snapshot(),
-        queue_depth=voice_ingress_queue.qsize(),
-        queue_max=VOICE_INGRESS_QUEUE_MAX,
-        live_recent_sec=VOICE_LIVE_RECENT_SEC,
-        utterance_assembly_enabled=voice_utterance_assembly_config.enabled,
-        utterance_pending_count=len(voice_utterance_buffers),
-        utterance_commit_wait_sec=voice_utterance_assembly_config.commit_wait_sec,
-        barge_in_continuity=_build_voice_barge_in_continuity_snapshot(),
-        turn_path_metrics=summarize_turn_path_metrics(),
-    )
-
-
-async def run_blocking_stt_task(
-    func: Callable[[], Any],
-    *,
-    stage: str,
-    timeout_sec: float,
-    metrics: dict | None = None,
-) -> Any:
-    def set_stt_cooldown_until(value: float) -> None:
-        global stt_cooldown_until
-        stt_cooldown_until = value
-
-    return await run_blocking_stt_task_from_runtime(
-        func,
-        stage=stage,
-        timeout_sec=timeout_sec,
-        metrics=metrics,
-        get_stt_cooldown_until=lambda: stt_cooldown_until,
-        set_stt_cooldown_until=set_stt_cooldown_until,
-        stt_cooldown_after_timeout_sec=STT_COOLDOWN_AFTER_TIMEOUT_SEC,
-        monotonic=time.monotonic,
-        get_stt_inference_lock=get_stt_inference_lock,
-        increment_voice_pipeline_counter=increment_voice_pipeline_counter,
-        record_voice_pipeline_failure=record_voice_pipeline_failure,
     )
 
 
@@ -2171,98 +1990,6 @@ def register_drop_reason(metrics: dict | None, reason: str, **extra) -> None:
         merge_log_event_payload=merge_log_event_payload,
         log_turn_event=log_turn_event,
         **extra,
-    )
-
-
-def _save_voice_debug_audio_now(
-    guild_id: int,
-    speaker: str,
-    pcm_bytes: bytes,
-    audio16k: np.ndarray,
-    *,
-    wake_probe: str | None = None,
-    final_text: str | None = None,
-    debug_meta: dict | None = None,
-    save_stt_audio: bool = True,
-    stt_meta: dict | None = None,
-    session_key: str | None = None,
-    stage_label: str | None = None,
-) -> None:
-    save_voice_debug_audio_now_payload(
-        project_root=PROJECT_ROOT,
-        configured_dir=VOICE_DEBUG_AUDIO_DIR,
-        max_files_per_guild=VOICE_DEBUG_MAX_FILES_PER_GUILD,
-        max_age_days=VOICE_DEBUG_MAX_AGE_DAYS,
-        max_total_bytes_per_guild=VOICE_DEBUG_MAX_TOTAL_MB_PER_GUILD * 1024 * 1024,
-        preserve_newest=VOICE_DEBUG_PRESERVE_NEWEST,
-        raw_channels=CHANNELS,
-        raw_rate=RATE,
-        stt_rate=TARGET_RATE,
-        counts=voice_debug_counts,
-        stems=voice_debug_stems,
-        log=print,
-        guild_id=guild_id,
-        speaker=speaker,
-        pcm_bytes=pcm_bytes,
-        audio16k=audio16k,
-        wake_probe=wake_probe,
-        final_text=final_text,
-        debug_meta=debug_meta,
-        save_stt_audio=save_stt_audio,
-        stt_meta=stt_meta,
-        session_key=session_key,
-        stage_label=stage_label,
-    )
-
-
-async def debug_write_worker() -> None:
-    await debug_write_worker_from_runtime(
-        queue=debug_write_queue,
-        save_now=_save_voice_debug_audio_now,
-        to_thread=asyncio.to_thread,
-        log=print,
-    )
-
-
-def ensure_debug_write_worker_started() -> None:
-    global debug_write_task
-    debug_write_task = ensure_debug_write_worker_started_from_runtime(
-        current_task=debug_write_task,
-        create_task=asyncio.create_task,
-        worker_coro_factory=debug_write_worker,
-    )
-
-
-def save_voice_debug_audio(
-    guild_id: int,
-    speaker: str,
-    pcm_bytes: bytes,
-    audio16k: np.ndarray,
-    *,
-    wake_probe: str | None = None,
-    final_text: str | None = None,
-    debug_meta: dict | None = None,
-    save_stt_audio: bool = True,
-    stt_meta: dict | None = None,
-    session_key: str | None = None,
-    stage_label: str | None = None,
-) -> None:
-    enqueue_voice_debug_audio_from_runtime(
-        enabled=VOICE_DEBUG_SAVE_AUDIO,
-        ensure_worker_started=ensure_debug_write_worker_started,
-        queue=debug_write_queue,
-        log=print,
-        guild_id=guild_id,
-        speaker=speaker,
-        pcm_bytes=pcm_bytes,
-        audio16k=audio16k,
-        wake_probe=wake_probe,
-        final_text=final_text,
-        debug_meta=debug_meta,
-        save_stt_audio=save_stt_audio,
-        stt_meta=stt_meta,
-        session_key=session_key,
-        stage_label=stage_label,
     )
 
 
@@ -3396,17 +3123,6 @@ async def ensure_startup_components_ready() -> None:
     startup_components_ready = True
 
 
-def stop_local_mic_service() -> None:
-    global local_mic_service
-    local_mic_service = stop_local_mic_service_from_runtime(
-        current_service=local_mic_service,
-        local_mic_runtime_state=local_mic_runtime_state,
-    )
-
-
-atexit.register(stop_local_mic_service)
-
-
 def resolve_evelyn_page_url() -> str | None:
     return resolve_evelyn_page_url_from_runtime(
         deps=build_evelyn_page_url_runtime_deps(
@@ -3417,108 +3133,120 @@ def resolve_evelyn_page_url() -> str | None:
     )
 
 
-def build_local_mic_discord_suppression_runtime_deps() -> LocalMicDiscordSuppressionRuntimeDeps:
-    return LocalMicDiscordSuppressionRuntimeDeps(
-        local_mic_runtime_state=local_mic_runtime_state,
-        local_mic_capture_ready=lambda: bool(local_mic_service and local_mic_service.capture_ready),
-        preferred_user_ids=lambda: set(LOCAL_MIC_DISCORD_USER_IDS),
-        normalize_voice_input_mode=normalize_voice_input_mode,
-        should_route_discord_user_to_local_mic=should_route_discord_user_to_local_mic,
-        suppress_after_segment_sec=LOCAL_MIC_DISCORD_SUPPRESS_AFTER_SEGMENT_SEC,
-        time=time.time,
-    )
-
-
-def set_voice_input_mode(mode: str | None) -> str:
-    return set_voice_input_mode_state(local_mic_runtime_state, mode)
-
-
-def voice_input_mode_status_line() -> str:
-    return voice_input_mode_status_line_from_mode(str(local_mic_runtime_state.get("input_mode") or "auto"))
-
-
-def serialize_local_mic_runtime_state() -> dict[str, Any]:
-    return serialize_local_mic_runtime_state_payload(
-        local_mic_runtime_state,
-        service=local_mic_service,
-        max_silence_ms=LOCAL_MIC_MAX_SILENCE_MS,
-        vad_filter_enabled=LOCAL_MIC_VAD_FILTER_ENABLED,
-        env_noise_filter_enabled=LOCAL_MIC_ENV_NOISE_FILTER_ENABLED,
-        waveform_filter_enabled=LOCAL_MIC_WAVEFORM_FILTER_ENABLED,
-        discord_suppress_after_segment_sec=LOCAL_MIC_DISCORD_SUPPRESS_AFTER_SEGMENT_SEC,
-        device=LOCAL_MIC_DEVICE,
-        sample_rate=LOCAL_MIC_SAMPLE_RATE,
-        start_threshold=LOCAL_MIC_START_THRESHOLD,
-        continue_threshold=LOCAL_MIC_CONTINUE_THRESHOLD,
-    )
-
-
-def local_mic_status_line() -> str:
-    return local_mic_status_line_from_payload(serialize_local_mic_runtime_state())
-
-
-def build_local_mic_segment_runtime_deps() -> LocalMicSegmentRuntimeDeps:
-    return LocalMicSegmentRuntimeDeps(
-        local_mic_runtime_state=local_mic_runtime_state,
-        normalize_voice_input_mode=normalize_voice_input_mode,
-        resolve_local_mic_target=resolve_local_mic_target,
-        guilds=lambda: list(bot.guilds),
-        preferred_user_ids=lambda: set(LOCAL_MIC_DISCORD_USER_IDS),
-        local_only_mode=LOCAL_ONLY_MODE,
-        local_control_voice_member=local_control_voice_member,
-        process_member_audio=process_member_audio,
-        log=print,
-        time=time.time,
-    )
-
-
-async def handle_local_mic_segment(pcm_bytes: bytes, debug_meta: dict[str, Any] | None = None) -> None:
-    await handle_local_mic_segment_from_runtime(
-        pcm_bytes,
-        debug_meta,
-        deps=build_local_mic_segment_runtime_deps(),
-    )
-
-
-def build_local_mic_service_runtime_deps() -> LocalMicServiceRuntimeDeps:
-    return LocalMicServiceRuntimeDeps(
-        local_mic_runtime_state=local_mic_runtime_state,
-        local_mic_enabled=LOCAL_MIC_ENABLED,
-        local_only_mode=LOCAL_ONLY_MODE,
-        discord_user_ids=lambda: set(LOCAL_MIC_DISCORD_USER_IDS),
-        service_factory=LocalMicCaptureService,
-        get_running_loop=asyncio.get_running_loop,
-        create_task=asyncio.create_task,
-        handle_local_mic_segment=handle_local_mic_segment,
-        max_silence_ms_provider=lambda: local_mic_effective_max_silence_ms_from_runtime(
+voice_runtime_composition = VoiceRuntimeComposition(
+    VoiceRuntimeCompositionDeps(
+        pipeline=VoicePipelineCompositionDeps(
+            project_root=PROJECT_ROOT,
+            last_channel_state_file=VOICE_LAST_CHANNEL_STATE_FILE,
+            summarize_p95_metrics=summarize_p95_metrics,
+            merge_log_event_payload=merge_log_event_payload,
+            log_turn_event=log_turn_event,
+            local_only_mode=LOCAL_ONLY_MODE,
+            local_tts_enabled=lambda: local_tts_playback_manager.enabled,
+            local_tts_snapshot=local_tts_playback_manager.snapshot,
+            voice_ingress_queue_depth=voice_ingress_queue.qsize,
+            voice_ingress_queue_max=VOICE_INGRESS_QUEUE_MAX,
+            live_recent_sec=VOICE_LIVE_RECENT_SEC,
+            utterance_assembly_enabled=lambda: voice_utterance_assembly_config.enabled,
+            utterance_pending_count=lambda: len(voice_utterance_buffers),
+            utterance_commit_wait_sec=lambda: voice_utterance_assembly_config.commit_wait_sec,
+            barge_in_continuity=lambda: _build_voice_barge_in_continuity_snapshot(),
+            summarize_turn_path_metrics=summarize_turn_path_metrics,
+            stt_cooldown_after_timeout_sec=STT_COOLDOWN_AFTER_TIMEOUT_SEC,
+            monotonic=time.monotonic,
+            time=time.time,
+            log=print,
+        ),
+        debug=VoiceDebugCompositionDeps(
+            project_root=PROJECT_ROOT,
+            configured_dir=VOICE_DEBUG_AUDIO_DIR,
+            max_files_per_guild=VOICE_DEBUG_MAX_FILES_PER_GUILD,
+            max_age_days=VOICE_DEBUG_MAX_AGE_DAYS,
+            max_total_bytes_per_guild=VOICE_DEBUG_MAX_TOTAL_MB_PER_GUILD * 1024 * 1024,
+            preserve_newest=VOICE_DEBUG_PRESERVE_NEWEST,
+            raw_channels=CHANNELS,
+            raw_rate=RATE,
+            stt_rate=TARGET_RATE,
+            enabled=VOICE_DEBUG_SAVE_AUDIO,
+            queue_max=DEBUG_WRITE_QUEUE_MAX,
+            create_task=asyncio.create_task,
+            to_thread=asyncio.to_thread,
+            log=print,
+        ),
+        local_mic=LocalMicCompositionDeps(
+            enabled=LOCAL_MIC_ENABLED,
+            input_mode=VOICE_INPUT_MODE,
+            discord_user_ids=lambda: set(LOCAL_MIC_DISCORD_USER_IDS),
+            local_control_guild_id=LOCAL_CONTROL_GUILD_ID,
+            local_control_guild_name=LOCAL_CONTROL_GUILD_NAME,
+            local_mic_user_name=os.getenv("LOCAL_MIC_USER_NAME", "정훈"),
+            normalize_voice_input_mode=normalize_voice_input_mode,
+            resolve_local_mic_target=resolve_local_mic_target,
+            should_route_discord_user_to_local_mic=should_route_discord_user_to_local_mic,
+            guilds=lambda: list(bot.guilds),
+            process_member_audio=lambda: process_member_audio,
+            local_only_mode=LOCAL_ONLY_MODE,
+            service_factory=LocalMicCaptureService,
+            get_running_loop=asyncio.get_running_loop,
+            create_task=asyncio.create_task,
             local_tts_playback_snapshot=local_tts_playback_manager.snapshot,
             tts_active_max_silence_ms=LOCAL_MIC_TTS_ACTIVE_MAX_SILENCE_MS,
-            default_max_silence_ms=LOCAL_MIC_MAX_SILENCE_MS,
+            max_silence_ms=LOCAL_MIC_MAX_SILENCE_MS,
+            discord_suppress_after_segment_sec=LOCAL_MIC_DISCORD_SUPPRESS_AFTER_SEGMENT_SEC,
+            sample_rate=LOCAL_MIC_SAMPLE_RATE,
+            block_ms=LOCAL_MIC_BLOCK_MS,
+            start_threshold=LOCAL_MIC_START_THRESHOLD,
+            continue_threshold=LOCAL_MIC_CONTINUE_THRESHOLD,
+            start_consecutive=LOCAL_MIC_START_CONSECUTIVE,
+            min_voiced_ms=LOCAL_MIC_MIN_VOICED_MS,
+            preroll_ms=LOCAL_MIC_PREROLL_MS,
+            max_segment_sec=LOCAL_MIC_MAX_SEGMENT_SEC,
+            device=LOCAL_MIC_DEVICE,
+            queue_max=LOCAL_MIC_QUEUE_MAX,
+            vad_filter_enabled=LOCAL_MIC_VAD_FILTER_ENABLED,
+            env_noise_filter_enabled=LOCAL_MIC_ENV_NOISE_FILTER_ENABLED,
+            waveform_filter_enabled=LOCAL_MIC_WAVEFORM_FILTER_ENABLED,
+            time=time.time,
+            log=print,
         ),
-        sample_rate=LOCAL_MIC_SAMPLE_RATE,
-        block_ms=LOCAL_MIC_BLOCK_MS,
-        start_threshold=LOCAL_MIC_START_THRESHOLD,
-        continue_threshold=LOCAL_MIC_CONTINUE_THRESHOLD,
-        start_consecutive=LOCAL_MIC_START_CONSECUTIVE,
-        min_voiced_ms=LOCAL_MIC_MIN_VOICED_MS,
-        max_silence_ms=LOCAL_MIC_MAX_SILENCE_MS,
-        preroll_ms=LOCAL_MIC_PREROLL_MS,
-        max_segment_sec=LOCAL_MIC_MAX_SEGMENT_SEC,
-        device=LOCAL_MIC_DEVICE,
-        queue_max=LOCAL_MIC_QUEUE_MAX,
-        vad_filter_enabled=LOCAL_MIC_VAD_FILTER_ENABLED,
-        env_noise_filter_enabled=LOCAL_MIC_ENV_NOISE_FILTER_ENABLED,
-        waveform_filter_enabled=LOCAL_MIC_WAVEFORM_FILTER_ENABLED,
-        log=print,
     )
+)
 
+voice_pipeline_counters = voice_runtime_composition.voice_pipeline_counters
+voice_pipeline_state = voice_runtime_composition.voice_pipeline_state
+local_mic_runtime_state = voice_runtime_composition.local_mic_runtime_state
+increment_voice_pipeline_counter = voice_runtime_composition.increment_voice_pipeline_counter
+get_stt_inference_lock = voice_runtime_composition.get_stt_inference_lock
+voice_last_channel_state_path = voice_runtime_composition.voice_last_channel_state_path
+load_last_voice_channel_state = voice_runtime_composition.load_last_voice_channel_state
+save_last_voice_channel_state = voice_runtime_composition.save_last_voice_channel_state
+mark_voice_manual_disconnect = voice_runtime_composition.mark_voice_manual_disconnect
+record_voice_pipeline_failure = voice_runtime_composition.record_voice_pipeline_failure
+build_voice_pipeline_snapshot = voice_runtime_composition.build_voice_pipeline_snapshot
+run_blocking_stt_task = voice_runtime_composition.run_blocking_stt_task
+_save_voice_debug_audio_now = voice_runtime_composition._save_voice_debug_audio_now
+debug_write_worker = voice_runtime_composition.debug_write_worker
+ensure_debug_write_worker_started = voice_runtime_composition.ensure_debug_write_worker_started
+save_voice_debug_audio = voice_runtime_composition.save_voice_debug_audio
+local_control_voice_member = voice_runtime_composition.local_control_voice_member
+is_local_speaker_voice_client = voice_runtime_composition.is_local_speaker_voice_client
+stop_local_mic_service = voice_runtime_composition.stop_local_mic_service
+build_local_mic_discord_suppression_runtime_deps = (
+    voice_runtime_composition.build_local_mic_discord_suppression_runtime_deps
+)
+should_drop_discord_audio_for_local_mic = (
+    voice_runtime_composition.should_drop_discord_audio_for_local_mic
+)
+set_voice_input_mode = voice_runtime_composition.set_voice_input_mode
+voice_input_mode_status_line = voice_runtime_composition.voice_input_mode_status_line
+serialize_local_mic_runtime_state = voice_runtime_composition.serialize_local_mic_runtime_state
+local_mic_status_line = voice_runtime_composition.local_mic_status_line
+build_local_mic_segment_runtime_deps = voice_runtime_composition.build_local_mic_segment_runtime_deps
+handle_local_mic_segment = voice_runtime_composition.handle_local_mic_segment
+build_local_mic_service_runtime_deps = voice_runtime_composition.build_local_mic_service_runtime_deps
+ensure_local_mic_service_started = voice_runtime_composition.ensure_local_mic_service_started
 
-async def ensure_local_mic_service_started() -> None:
-    global local_mic_service
-    local_mic_service = await ensure_local_mic_service_started_from_runtime(
-        current_service=local_mic_service,
-        deps=build_local_mic_service_runtime_deps(),
-    )
+atexit.register(stop_local_mic_service)
 
 
 def build_tts_warmup_runtime_deps() -> TtsWarmupRuntimeDeps:
