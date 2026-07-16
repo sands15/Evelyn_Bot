@@ -114,7 +114,7 @@ class DeliveryEntryComposition:
 
     def start_streaming_voice_delivery(
         self,
-        voice_client: Any,
+        vc: Any,
         *,
         metrics: dict,
         turn_id: str | None,
@@ -124,7 +124,7 @@ class DeliveryEntryComposition:
         deps = self.discord
         return deps.build_streaming_delivery(
             deps.request_factory(
-                voice_client=voice_client,
+                voice_client=vc,
                 metrics=metrics,
                 turn_id=turn_id,
                 session_key=session_key,
