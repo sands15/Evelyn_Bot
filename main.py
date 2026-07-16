@@ -185,26 +185,6 @@ from evelyn_core.session_memory_state import (
 )
 from evelyn_core.session_turn_runtime import (
     SessionTurnRuntimeDeps,
-    append_history_from_runtime,
-    begin_user_text_turn_from_runtime,
-    build_topic_id_from_runtime,
-    current_turn_id_from_runtime,
-    finish_assistant_text_turn_from_runtime,
-    get_conversation_history_from_runtime,
-    increment_session_bad_audio_from_runtime,
-    is_session_active_for_user_from_runtime,
-    mark_session_active_from_runtime,
-    new_conversation_history_from_runtime,
-    new_turn_id_from_runtime,
-    next_segment_id_from_runtime,
-    persona_state_hint_for_turn_from_runtime,
-    remember_session_followup_target_from_runtime,
-    recent_assistant_reply_summary_from_runtime,
-    reset_session_bad_audio_from_runtime,
-    session_state_snapshot_from_runtime,
-    start_new_turn_from_runtime,
-    trim_history_from_runtime,
-    update_session_state_from_runtime,
 )
 from evelyn_core.room_speaker_activity import RoomSpeakerActivityStore
 from evelyn_core.response_output_policy import (
@@ -256,6 +236,10 @@ from evelyn_core.voice_runtime_composition_runtime import (
     VoicePipelineCompositionDeps,
     VoiceRuntimeComposition,
     VoiceRuntimeCompositionDeps,
+)
+from evelyn_core.conversation_session_composition import (
+    ConversationSessionComposition,
+    ConversationSessionCompositionDeps,
 )
 from evelyn_core.runtime_lifecycle_composition import (
     RuntimeLifecycleComposition,
@@ -393,7 +377,6 @@ from evelyn_core.session_key_runtime import (
 )
 from evelyn_core.discord_text_reply_runtime import DiscordTextReplyRuntimeDeps
 from evelyn_core.discord_session_policy import (
-    DiscordRoomSessionPolicy,
     estimate_voice_like_probability_policy,
     is_transport_corrupted_audio_policy,
     should_interrupt_tts,
@@ -1221,13 +1204,52 @@ SKILL_DISPATCH_REPEAT_WINDOW_SEC = 5.0
 SKILL_DISPATCH_CACHE_MAX = 1024
 
 
+conversation_session_composition = ConversationSessionComposition(
+    ConversationSessionCompositionDeps(
+        session=build_session_turn_runtime_deps,
+        room_owner_user_ids=room_owner_user_ids,
+        room_owner_until=room_owner_until,
+        room_reply_in_progress=room_reply_in_progress,
+        room_speaker_activity_store=room_speaker_activity_store,
+        monotonic=time.monotonic,
+        log_event=lambda *args, **kwargs: log_turn_event(*args, **kwargs),
+    )
+)
+
+new_conversation_history = conversation_session_composition.new_conversation_history
+remember_session_followup_target = conversation_session_composition.remember_session_followup_target
+build_topic_id = conversation_session_composition.build_topic_id
+new_turn_id = conversation_session_composition.new_turn_id
+current_turn_id = conversation_session_composition.current_turn_id
+next_segment_id = conversation_session_composition.next_segment_id
+start_new_turn = conversation_session_composition.start_new_turn
+begin_user_text_turn = conversation_session_composition.begin_user_text_turn
+finish_assistant_text_turn = conversation_session_composition.finish_assistant_text_turn
+session_state_snapshot = conversation_session_composition.session_state_snapshot
+discord_room_session_policy = conversation_session_composition.discord_room_session_policy
+_clear_room_owner = conversation_session_composition.clear_room_owner
+room_state_snapshot = conversation_session_composition.room_state_snapshot
+_prune_room_speaker_stats = conversation_session_composition.prune_room_speaker_stats
+update_room_speaker_activity = conversation_session_composition.update_room_speaker_activity
+pick_active_speaker = conversation_session_composition.pick_active_speaker
+is_room_owner_active = conversation_session_composition.is_room_owner_active
+set_room_owner = conversation_session_composition.set_room_owner
+set_room_reply_in_progress = conversation_session_composition.set_room_reply_in_progress
+increment_session_bad_audio = conversation_session_composition.increment_session_bad_audio
+reset_session_bad_audio = conversation_session_composition.reset_session_bad_audio
+update_session_state = conversation_session_composition.update_session_state
+mark_session_active = conversation_session_composition.mark_session_active
+is_session_active_for_user = conversation_session_composition.is_session_active_for_user
+get_conversation_history = conversation_session_composition.get_conversation_history
+trim_history = conversation_session_composition.trim_history
+append_history = conversation_session_composition.append_history
+recent_assistant_reply_summary = conversation_session_composition.recent_assistant_reply_summary
+persona_state_hint_for_turn = conversation_session_composition.persona_state_hint_for_turn
+
+
 # =========================================================
 # 유틸
 # =========================================================
-def new_conversation_history() -> list[dict]:
-    return new_conversation_history_from_runtime(build_session_turn_runtime_deps())
-
-
 def build_autonomy_runtime_factory_deps() -> AutonomyRuntimeFactoryDeps:
     return AutonomyRuntimeFactoryDeps(
         autonomy_engines=autonomy_engines,
@@ -1278,265 +1300,6 @@ def get_or_create_autonomy_engine(guild_id: int) -> AutonomyEngine:
         guild_id,
         deps=build_autonomy_runtime_factory_deps(),
     )
-
-def remember_session_followup_target(session_key: str, *, channel_id: int | None = None, message_id: int | None = None) -> None:
-    remember_session_followup_target_from_runtime(
-        session_key,
-        channel_id=channel_id,
-        message_id=message_id,
-        deps=build_session_turn_runtime_deps(),
-    )
-
-
-def build_topic_id(*texts: str) -> str:
-    return build_topic_id_from_runtime(*texts, deps=build_session_turn_runtime_deps())
-
-
-def new_turn_id() -> str:
-    return new_turn_id_from_runtime(build_session_turn_runtime_deps())
-
-
-def current_turn_id(session_key: str | None) -> str | None:
-    return current_turn_id_from_runtime(session_key, deps=build_session_turn_runtime_deps())
-
-
-def next_segment_id(session_key: str | None) -> int:
-    return next_segment_id_from_runtime(session_key, deps=build_session_turn_runtime_deps())
-
-
-def start_new_turn(session_key: str | None, *, turn_id: str | None = None) -> str:
-    return start_new_turn_from_runtime(session_key, turn_id=turn_id, deps=build_session_turn_runtime_deps())
-
-
-def begin_user_text_turn(
-    session_key: str,
-    user_text: str,
-    *,
-    guild_id: int | None = None,
-    user_id: int | None = None,
-) -> Any:
-    return begin_user_text_turn_from_runtime(
-        session_key,
-        user_text,
-        guild_id=guild_id,
-        user_id=user_id,
-        deps=build_session_turn_runtime_deps(),
-    )
-
-
-def finish_assistant_text_turn(
-    session_key: str,
-    user_text: str,
-    answer_text: str,
-    *,
-    guild_id: int | None = None,
-    user_id: int | None = None,
-    awaiting_user_reply: bool,
-    topic_id: str | None = None,
-) -> Any:
-    return finish_assistant_text_turn_from_runtime(
-        session_key,
-        user_text,
-        answer_text,
-        awaiting_user_reply=awaiting_user_reply,
-        topic_id=topic_id,
-        guild_id=guild_id,
-        user_id=user_id,
-        deps=build_session_turn_runtime_deps(),
-    )
-
-
-def session_state_snapshot(session_key: str | None) -> dict:
-    return session_state_snapshot_from_runtime(session_key, deps=build_session_turn_runtime_deps())
-
-
-def discord_room_session_policy() -> DiscordRoomSessionPolicy:
-    return DiscordRoomSessionPolicy(
-        room_owner_user_ids=room_owner_user_ids,
-        room_owner_until=room_owner_until,
-        room_reply_in_progress=room_reply_in_progress,
-        log_event=log_turn_event,
-        now_monotonic=time.monotonic,
-        pick_active_speaker=pick_active_speaker,
-    )
-
-
-def _clear_room_owner(room_session_key: str | None) -> None:
-    discord_room_session_policy().clear_owner(room_session_key)
-
-
-
-def room_state_snapshot(room_session_key: str | None) -> dict:
-    return discord_room_session_policy().snapshot(room_session_key)
-
-
-
-def _prune_room_speaker_stats(room_session_key: str | None, *, now: float | None = None) -> dict[int, dict[str, float]]:
-    return room_speaker_activity_store.prune(room_session_key, now=now)
-
-
-
-def update_room_speaker_activity(
-    room_session_key: str | None,
-    user_id: int | None,
-    *,
-    voiced_ms: float,
-    raw_seconds: float,
-    rms: float,
-    wake_detected: bool = False,
-) -> dict[str, float]:
-    return room_speaker_activity_store.update(
-        room_session_key,
-        user_id,
-        voiced_ms=voiced_ms,
-        raw_seconds=raw_seconds,
-        rms=rms,
-        wake_detected=wake_detected,
-    )
-
-
-
-def pick_active_speaker(room_session_key: str | None) -> int | None:
-    return room_speaker_activity_store.pick_active_speaker(room_session_key)
-
-
-
-def is_room_owner_active(room_session_key: str | None, user_id: int | None) -> bool:
-    return discord_room_session_policy().is_owner_active(room_session_key, user_id)
-
-
-
-def set_room_owner(
-    room_session_key: str | None,
-    user_id: int | None,
-    *,
-    ttl_sec: float,
-    reason: str,
-    session_key: str | None = None,
-    turn_id: str | None = None,
-    segment_id: int | None = None,
-) -> None:
-    discord_room_session_policy().set_owner(
-        room_session_key,
-        user_id,
-        ttl_sec=ttl_sec,
-        reason=reason,
-        session_key=session_key,
-        turn_id=turn_id,
-        segment_id=segment_id,
-    )
-
-
-
-def set_room_reply_in_progress(room_session_key: str | None, value: bool, *, owner_user_id: int | None = None) -> None:
-    discord_room_session_policy().set_reply_in_progress(room_session_key, value, owner_user_id=owner_user_id)
-
-
-
-def increment_session_bad_audio(session_key: str | None) -> int:
-    return increment_session_bad_audio_from_runtime(session_key, deps=build_session_turn_runtime_deps())
-
-
-
-def reset_session_bad_audio(session_key: str | None) -> None:
-    reset_session_bad_audio_from_runtime(session_key, deps=build_session_turn_runtime_deps())
-
-
-def update_session_state(
-    session_key: str | None,
-    *,
-    user_id: int | None = None,
-    speaker: str | None = None,
-    ttl_sec: float | None = None,
-    awaiting_user_reply: bool | None = None,
-    topic_id: str | None = None,
-    answer_text: str | None = None,
-    user_text: str | None = None,
-) -> None:
-    update_session_state_from_runtime(
-        session_key,
-        user_id=user_id,
-        speaker=speaker,
-        ttl_sec=ttl_sec,
-        awaiting_user_reply=awaiting_user_reply,
-        topic_id=topic_id,
-        answer_text=answer_text,
-        user_text=user_text,
-        deps=build_session_turn_runtime_deps(),
-    )
-
-
-def mark_session_active(
-    session_key: str,
-    *,
-    user_id: int | None = None,
-    ttl_sec: float = 90.0,
-    speaker: str = "assistant",
-    awaiting_user_reply: bool | None = None,
-    topic_id: str | None = None,
-    answer_text: str | None = None,
-    user_text: str | None = None,
-) -> None:
-    mark_session_active_from_runtime(
-        session_key,
-        user_id=user_id,
-        speaker=speaker,
-        ttl_sec=ttl_sec,
-        awaiting_user_reply=awaiting_user_reply,
-        topic_id=topic_id,
-        answer_text=answer_text,
-        user_text=user_text,
-        deps=build_session_turn_runtime_deps(),
-    )
-
-
-def is_session_active_for_user(session_key: str, user_id: int | None = None) -> bool:
-    return is_session_active_for_user_from_runtime(session_key, user_id=user_id, deps=build_session_turn_runtime_deps())
-
-
-def get_conversation_history(*, session_key: str | None = None, guild_id: int | None = None) -> list[dict]:
-    return get_conversation_history_from_runtime(
-        session_key=session_key,
-        guild_id=guild_id,
-        deps=build_session_turn_runtime_deps(),
-    )
-
-
-def trim_history(*, session_key: str | None = None, guild_id: int | None = None) -> None:
-    trim_history_from_runtime(
-        session_key=session_key,
-        guild_id=guild_id,
-        deps=build_session_turn_runtime_deps(),
-    )
-
-
-def append_history(session_key: str | None, user_text: str, answer: str, *, guild_id: int | None = None) -> None:
-    append_history_from_runtime(
-        session_key,
-        user_text,
-        answer,
-        guild_id=guild_id,
-        deps=build_session_turn_runtime_deps(),
-    )
-
-
-def recent_assistant_reply_summary(*, session_key: str | None = None, guild_id: int | None = None, limit: int = 1) -> str:
-    return recent_assistant_reply_summary_from_runtime(
-        session_key=session_key,
-        guild_id=guild_id,
-        limit=limit,
-        deps=build_session_turn_runtime_deps(),
-    )
-
-
-def persona_state_hint_for_turn(user_text: str, *, session_key: str | None = None, guild_id: int | None = None) -> str:
-    return persona_state_hint_for_turn_from_runtime(
-        user_text,
-        session_key=session_key,
-        guild_id=guild_id,
-        deps=build_session_turn_runtime_deps(),
-    )
-
 
 def build_guild_runtime_reset_deps() -> GuildRuntimeResetDeps:
     return build_guild_runtime_reset_deps_from_runtime(

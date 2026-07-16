@@ -162,7 +162,7 @@ class AutonomyRuntimeFactoryTests(unittest.IsolatedAsyncioTestCase):
     def test_main_delegates_autonomy_factory_to_runtime_module(self) -> None:
         source = (REPO_ROOT / "main.py").read_text(encoding="utf-8")
         start = source.index("def get_or_create_autonomy_engine(")
-        end = source.index("def remember_session_followup_target(", start)
+        end = source.index("def build_guild_runtime_reset_deps(", start)
         function_source = source[start:end]
 
         self.assertIn("get_or_create_autonomy_engine_from_runtime(", function_source)
