@@ -300,7 +300,11 @@ from evelyn_core.memory_update_policy import (
     redact_vision_text_for_memory as redact_vision_text_for_memory_payload,
     write_memory_turn_records,
 )
-from evelyn_core.memory_update_runtime import MemoryUpdateRuntimeDeps, schedule_memory_update_from_runtime
+from evelyn_core.memory_update_runtime import MemoryUpdateRuntimeDeps
+from evelyn_core.memory_maintenance_composition import (
+    MemoryMaintenanceComposition,
+    MemoryMaintenanceCompositionDeps,
+)
 from evelyn_core.memory_writeback_state import (
     run_long_term_memory_update,
 )
@@ -1908,7 +1912,7 @@ def build_live_vision_context_runtime_deps() -> LiveVisionContextRuntimeDeps:
         service_url=VISION_SERVICE_URL,
         capture_local_screen=capture_local_screen,
         build_observation_prompt=build_vision_observation_prompt,
-        get_http_session=get_http_session,
+        get_http_session=lambda: get_http_session(),
         client_timeout_factory=aiohttp.ClientTimeout,
         delete_request_image=delete_request_vision_image,
         format_observation=format_vision_observation,
@@ -1950,10 +1954,10 @@ vision_watch_composition = VisionWatchComposition(
         capture_frame=capture_vision_watch_frame,
         scene_looks_bad=vision_watch_scene_looks_bad,
         build_prompt=build_vision_watch_prompt,
-        get_http_session=get_http_session,
+        get_http_session=lambda: get_http_session(),
         client_timeout_factory=aiohttp.ClientTimeout,
         update_analysis=update_vision_watch_analysis,
-        mark_startup_component=mark_startup_component,
+        mark_startup_component=lambda *args, **kwargs: mark_startup_component(*args, **kwargs),
         to_thread=asyncio.to_thread,
         sleep=asyncio.sleep,
         create_task=asyncio.create_task,
@@ -2143,73 +2147,6 @@ refresh_cognitive_state_in_background = (
 schedule_cognitive_refresh = cognitive_refresh_composition.schedule_cognitive_refresh
 
 
-async def update_long_term_memory(
-    guild_id: int,
-    user_text: str,
-    answer: str,
-    *,
-    room_key: str | None = None,
-    person_key: str | None = None,
-    session_memory_key: str | None = None,
-    turn_scope: TurnScope | None = None,
-) -> None:
-    task = _attach_current_task(turn_scope)
-    lock = memory_locks.setdefault(guild_id, asyncio.Lock())
-    try:
-        async with lock:
-            await run_long_term_memory_update(
-                guild_id,
-                user_text,
-                answer,
-                room_key=room_key,
-                person_key=person_key,
-                session_memory_key=session_memory_key,
-                turn_scope=turn_scope,
-                collect_layers=collect_memory_layers,
-                ask_summary_llm=ask_summary_llm,
-                is_context_size_error=is_context_size_error,
-                should_log_latency=should_log_voice_timing,
-                memory_fact_limit=MEMORY_FACT_LIMIT,
-                memory_loop_limit=MEMORY_LOOP_LIMIT,
-                raw_limit=MEMORY_LONGTERM_RAW_LIMIT,
-                log=print,
-            )
-    finally:
-        _detach_task(turn_scope, task)
-def schedule_memory_vault_maintenance(guild_id: int, *, turn_scope: TurnScope | None = None) -> None:
-    interval_sec = float(os.getenv("MEMORY_VAULT_MAINTENANCE_INTERVAL_SEC", "900"))
-    now = time.monotonic()
-    last_run = float(memory_vault_last_maintenance_at.get(guild_id, 0.0) or 0.0)
-    if now - last_run < interval_sec:
-        return
-    existing = background_memory_vault_tasks.get(guild_id)
-    if existing is not None and not existing.done():
-        return
-
-    async def _maintain_memory_vault() -> None:
-        try:
-            await asyncio.sleep(0.2)
-            if turn_scope is not None:
-                turn_scope.raise_if_cancelled()
-            result = await asyncio.to_thread(run_memory_vault_maintenance_once, guild_id)
-            memory_vault_last_maintenance_at[guild_id] = time.monotonic()
-            if result.get("daily_consolidation"):
-                print(
-                    f"[MEMORY VAULT] maintenance guild={guild_id} version={result.get('memory_version')} "
-                    f"consolidated={result.get('daily_consolidation')} ms={result.get('latency_ms')}"
-                )
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            print(f"[MEMORY VAULT] maintenance failed guild={guild_id}: {exc!r}")
-        finally:
-            task = background_memory_vault_tasks.get(guild_id)
-            if task is asyncio.current_task():
-                background_memory_vault_tasks.pop(guild_id, None)
-
-    background_memory_vault_tasks[guild_id] = create_turn_scoped_task(_maintain_memory_vault(), turn_scope=turn_scope)
-
-
 def redact_vision_text_for_memory(text: str) -> str:
     return redact_vision_text_for_memory_payload(
         text,
@@ -2247,36 +2184,40 @@ def build_memory_update_runtime_deps() -> MemoryUpdateRuntimeDeps:
     )
 
 
-def schedule_memory_update(
-    guild_id: int,
-    user_text: str,
-    answer: str,
-    *,
-    room_key: str | None = None,
-    person_key: str | None = None,
-    session_memory_key: str | None = None,
-    source: str = "chat",
-    user_speaker: str = "user",
-    assistant_speaker: str = "Evelyn",
-    session_key: str | None = None,
-    turn_scope: TurnScope | None = None,
-    runtime_mode: str | None = None,
-) -> dict[str, Any]:
-    return schedule_memory_update_from_runtime(
-        guild_id,
-        user_text,
-        answer,
-        deps=build_memory_update_runtime_deps(),
-        room_key=room_key,
-        person_key=person_key,
-        session_memory_key=session_memory_key,
-        source=source,
-        user_speaker=user_speaker,
-        assistant_speaker=assistant_speaker,
-        session_key=session_key,
-        turn_scope=turn_scope,
-        runtime_mode=runtime_mode,
+memory_maintenance_composition = MemoryMaintenanceComposition(
+    MemoryMaintenanceCompositionDeps(
+        memory_update=build_memory_update_runtime_deps,
+        memory_locks=memory_locks,
+        background_vault_tasks=background_memory_vault_tasks,
+        vault_last_maintenance_at=memory_vault_last_maintenance_at,
+        attach_current_task=_attach_current_task,
+        detach_task=_detach_task,
+        run_long_term_memory_update=run_long_term_memory_update,
+        collect_memory_layers=collect_memory_layers,
+        ask_summary_llm=lambda *args, **kwargs: ask_summary_llm(*args, **kwargs),
+        is_context_size_error=is_context_size_error,
+        should_log_voice_timing=lambda *args, **kwargs: should_log_voice_timing(*args, **kwargs),
+        memory_fact_limit=MEMORY_FACT_LIMIT,
+        memory_loop_limit=MEMORY_LOOP_LIMIT,
+        raw_limit=MEMORY_LONGTERM_RAW_LIMIT,
+        run_vault_maintenance_once=run_memory_vault_maintenance_once,
+        create_scoped_task=create_turn_scoped_task,
+        lock_factory=asyncio.Lock,
+        sleep=asyncio.sleep,
+        to_thread=asyncio.to_thread,
+        current_task=asyncio.current_task,
+        monotonic=time.monotonic,
+        getenv=os.getenv,
+        log=print,
     )
+)
+
+update_long_term_memory = memory_maintenance_composition.update_long_term_memory
+schedule_memory_vault_maintenance = (
+    memory_maintenance_composition.schedule_memory_vault_maintenance
+)
+schedule_memory_update = memory_maintenance_composition.schedule_memory_update
+
 
 async def get_http_session() -> aiohttp.ClientSession:
     global http_session
