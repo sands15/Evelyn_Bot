@@ -1270,3 +1270,27 @@ Last reviewed: 2026-07-17
 - 다음 2/3 범위:
   - resource entrypoint 9개와 control-page/global state bridge 10개를 composition/runtime owner로 이동.
   - instance lock과 voice worker 등 수명주기 entrypoint의 최종 소유 경계를 함께 정리.
+
+## 2026-07-18 3회 종료 계획 — 2/3 resource/state/lifecycle 정리
+
+- global state bridge:
+  - `RuntimeValue`, `RuntimeCounter`를 추가해 control-page task/lock/server setter 8개와 카운터/setter 4개를 상태 owner method로 교체.
+  - live LLM pressure, search-followup count, TTS warmup state가 더 이상 `main.py`의 `global` setter 함수에 의존하지 않음.
+- resource entrypoint:
+  - `HttpSessionProvider`, `LazyResourceProvider`를 추가해 HTTP session과 Minecraft client의 수명주기를 owner 객체로 이동.
+  - vision memory redaction, page URL, STT model, TTS cleanup, fallback answer, routed executor, live Minecraft observation을 기존 runtime/policy owner에 직접 binding.
+- lifecycle entrypoint:
+  - `InstanceLockManager`가 instance lock handle을 소유하도록 이동.
+  - `AsyncWorkerStarter`가 voice worker task 생성·재사용·재시작을 소유하도록 이동.
+- 구조 결과:
+  - 이번 회차 대상 top-level 함수 24개가 `main.py`에서 제거됨.
+  - `main.py`: 3,773→3,681 lines, top-level functions 25→1개, 함수 정의 span 합계 126→7 lines.
+  - 남은 top-level 함수는 console filter용 custom `print` 하나뿐임.
+- 검증:
+  - 세 배치의 집중 테스트와 실제 `main.py` control-page process smoke 모두 통과.
+  - `EVELYN_RUN_REAL_MAIN_INTEGRATION=1`, `PYTHONWARNINGS=error::ResourceWarning` 전체 discovery: 1,280 tests 통과.
+  - Python compile, 중복 top-level 함수명, replacement character를 재감사.
+  - 런타임/컨테이너 재시작 및 원격 push 없음.
+- 마지막 3/3 범위:
+  - custom `print` console filter의 owner 이동으로 `main.py` top-level 함수 0개 달성.
+  - 전체 엄격 회귀, 실제 process smoke, 구조/초기화 순서/잔존 wrapper 감사와 최종 문서화를 수행.
