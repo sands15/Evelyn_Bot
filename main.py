@@ -645,10 +645,9 @@ from evelyn_core.voice_reply_dispatch_runtime import (
     dispatch_voice_reply_from_runtime,
 )
 from evelyn_core.voice_member_audio_pipeline_runtime import VoiceMemberAudioPipelineDeps
-from evelyn_core.voice_route_execution import (
-    VoiceMainLlmStreamingDeps,
-    VoiceRouteExecutionDeps,
-    build_voice_main_llm_streaming_deps as build_voice_main_llm_streaming_deps_from_runtime,
+from evelyn_core.voice_execution_dependency_composition import (
+    VoiceExecutionDependencyComposition,
+    VoiceExecutionDependencyCompositionDeps,
 )
 from evelyn_core.voice_response_runtime import (
     VoiceResponseRuntimeDeps,
@@ -3317,49 +3316,6 @@ build_control_page_boot_progress = control_page_composition.build_boot_progress
 start_control_page_server = control_page_composition.start_server
 
 
-def build_voice_route_execution_deps() -> VoiceRouteExecutionDeps:
-    return VoiceRouteExecutionDeps(
-        update_session_state=update_session_state,
-        emit_delivery_plan_chunks=emit_delivery_plan_chunks,
-        build_delivery_plan=build_delivery_plan,
-        split_tts_sentences=split_tts_sentences,
-        build_search_query=build_search_query,
-        search_duckduckgo=search_duckduckgo,
-        answer_from_search_results=answer_from_search_results,
-        prepare_llm_messages=prepare_llm_messages,
-        policy_response_for_state=policy_response_for_state,
-        build_route_decision_from_state=build_route_decision_from_state,
-        apply_ask_gating=apply_ask_gating,
-        build_route_decision=build_route_decision,
-        apply_fast_path_question_policy=apply_fast_path_question_policy,
-        should_await_user_reply_for_route=should_await_user_reply_for_route,
-        answer_simple_local_chat_query=answer_simple_local_chat_query,
-        answer_current_datetime_query=answer_current_datetime_query,
-        answer_gpu_runtime_status_query=answer_gpu_runtime_status_query,
-        synthesize_tool_result_with_main_llm=synthesize_tool_result_with_main_llm,
-        observe_live_minecraft_state=observe_live_minecraft_state,
-        skill_registry=skill_registry,
-        recent_skill_dispatches=recent_skill_dispatches,
-        build_main_response_guidance=build_main_response_guidance,
-        build_main_llm_payload=build_main_llm_payload,
-        execute_main_llm_once=execute_main_llm_once,
-        build_answer_payload_from_text=build_answer_payload_from_text,
-        resolve_route_executor=resolve_route_executor,
-        model_name=MODEL_NAME,
-        main_llm_stop_tokens=tuple(MAIN_LLM_STOP_TOKENS),
-        voice_llm_max_tokens=VOICE_LLM_MAX_TOKENS,
-        default_internal_routes=DEFAULT_INTERNAL_ROUTES,
-        disabled_main_app_skill_routes=DISABLED_MAIN_APP_SKILL_ROUTES,
-        skill_dispatch_cache_ttl_sec=SKILL_DISPATCH_CACHE_TTL_SEC,
-        skill_dispatch_repeat_window_sec=SKILL_DISPATCH_REPEAT_WINDOW_SEC,
-        skill_dispatch_cache_max=SKILL_DISPATCH_CACHE_MAX,
-        router_route_timeout_sec=ROUTER_ROUTE_TIMEOUT_SEC,
-        cognitive_timeout_sec=COGNITIVE_TIMEOUT_SEC,
-        router_llm_enabled=ROUTER_LLM_ENABLED,
-        log=print,
-    )
-
-
 def increment_inflight_llm_requests() -> None:
     global inflight_llm_requests
     inflight_llm_requests += 1
@@ -3370,44 +3326,66 @@ def decrement_inflight_llm_requests() -> None:
     inflight_llm_requests = max(0, inflight_llm_requests - 1)
 
 
-def build_voice_main_llm_streaming_deps() -> VoiceMainLlmStreamingDeps:
-    return build_voice_main_llm_streaming_deps_from_runtime(
+voice_execution_dependency_composition = VoiceExecutionDependencyComposition(
+    VoiceExecutionDependencyCompositionDeps(
+        update_session_state=update_session_state,
+        emit_delivery_plan_chunks=lambda *args, **kwargs: emit_delivery_plan_chunks(*args, **kwargs),
+        split_tts_sentences=split_tts_sentences,
+        build_search_query=lambda *args, **kwargs: build_search_query(*args, **kwargs),
+        search_duckduckgo=lambda *args, **kwargs: search_duckduckgo(*args, **kwargs),
+        answer_from_search_results=lambda *args, **kwargs: answer_from_search_results(*args, **kwargs),
+        prepare_llm_messages=lambda *args, **kwargs: prepare_llm_messages(*args, **kwargs),
+        apply_fast_path_question_policy=apply_fast_path_question_policy,
+        synthesize_tool_result_with_main_llm=lambda *args, **kwargs: synthesize_tool_result_with_main_llm(
+            *args, **kwargs
+        ),
+        observe_live_minecraft_state=observe_live_minecraft_state,
+        skill_registry=skill_registry,
+        recent_skill_dispatches=recent_skill_dispatches,
+        build_main_response_guidance=build_main_response_guidance,
+        execute_main_llm_once=lambda *args, **kwargs: execute_main_llm_once(*args, **kwargs),
+        resolve_route_executor=lambda *args, **kwargs: resolve_route_executor(*args, **kwargs),
         model_name=MODEL_NAME,
         llm_server_url=LLM_SERVER_URL,
         main_llm_chat_content_format=MAIN_LLM_CHAT_CONTENT_FORMAT,
         voice_llm_max_tokens=VOICE_LLM_MAX_TOKENS,
         main_llm_stop_tokens=tuple(MAIN_LLM_STOP_TOKENS),
+        default_internal_routes=DEFAULT_INTERNAL_ROUTES,
+        disabled_main_app_skill_routes=DISABLED_MAIN_APP_SKILL_ROUTES,
+        skill_dispatch_cache_ttl_sec=SKILL_DISPATCH_CACHE_TTL_SEC,
+        skill_dispatch_repeat_window_sec=SKILL_DISPATCH_REPEAT_WINDOW_SEC,
+        skill_dispatch_cache_max=SKILL_DISPATCH_CACHE_MAX,
+        router_route_timeout_sec=ROUTER_ROUTE_TIMEOUT_SEC,
+        cognitive_timeout_sec=COGNITIVE_TIMEOUT_SEC,
+        router_llm_enabled=ROUTER_LLM_ENABLED,
         get_http_session=get_http_session,
-        is_casual_call_or_status_question=session_is_casual_call_or_status_question,
-        observe_live_minecraft_state=observe_live_minecraft_state,
         build_runtime_status_context=build_runtime_status_context,
-        build_main_response_guidance=build_main_response_guidance,
         mark_turn_stage=mark_turn_stage,
-        build_main_llm_payload=build_main_llm_payload,
-        build_stream_speech_chunker=build_stream_speech_chunker,
-        user_explicitly_mentions_minecraft=user_explicitly_mentions_minecraft,
-        extract_main_llm_answer_from_choice=extract_main_llm_answer_from_choice,
-        sanitize_model_output=sanitize_model_output,
+        build_stream_speech_chunker=lambda *args, **kwargs: build_stream_speech_chunker(*args, **kwargs),
+        sanitize_model_output=lambda *args, **kwargs: sanitize_model_output(*args, **kwargs),
         parse_response_action_tag=parse_response_action_tag,
-        extract_answer_from_reasoning=extract_answer_from_reasoning,
-        ask_llm_once=ask_llm_once,
-        resolve_promised_search_final_answer=resolve_promised_search_final_answer,
-        enforce_question_limits=enforce_question_limits,
+        extract_answer_from_reasoning=lambda *args, **kwargs: extract_answer_from_reasoning(*args, **kwargs),
+        ask_llm_once=lambda *args, **kwargs: ask_llm_once(*args, **kwargs),
+        resolve_promised_search_final_answer=lambda *args, **kwargs: resolve_promised_search_final_answer(
+            *args, **kwargs
+        ),
         record_question_trace=record_question_trace,
-        emit_delivery_plan_chunks=emit_delivery_plan_chunks,
-        build_delivery_plan=build_delivery_plan,
-        build_answer_payload_from_text=build_answer_payload_from_text,
-        split_tts_sentences=split_tts_sentences,
-        decode_sse_stream_line=decode_sse_stream_line,
-        answer_contains_minecraft_leak=answer_contains_minecraft_leak,
-        emit_stream_delta_chunks=emit_stream_delta_chunks,
+        emit_stream_delta_chunks=lambda *args, **kwargs: emit_stream_delta_chunks(*args, **kwargs),
         record_model_call_trace=record_model_call_trace,
         sanitize_unrequested_minecraft_leak=sanitize_unrequested_minecraft_leak,
-        flush_streamed_answer_chunks=flush_streamed_answer_chunks,
+        flush_streamed_answer_chunks=lambda *args, **kwargs: flush_streamed_answer_chunks(*args, **kwargs),
         increment_inflight_llm_requests=increment_inflight_llm_requests,
         decrement_inflight_llm_requests=decrement_inflight_llm_requests,
         log=print,
     )
+)
+
+build_voice_route_execution_deps = (
+    voice_execution_dependency_composition.build_voice_route_execution_deps
+)
+build_voice_main_llm_streaming_deps = (
+    voice_execution_dependency_composition.build_voice_main_llm_streaming_deps
+)
 
 
 def build_voice_turn_entry_runtime_deps() -> VoiceTurnEntryRuntimeDeps:
