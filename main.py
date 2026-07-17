@@ -106,7 +106,6 @@ from evelyn_core.minecraft_runtime_snapshot import (
     summarize_inventory_top,
 )
 from evelyn_core.minecraft_live_state_runtime import (
-    ControlPageMinecraftLiveSnapshotRuntimeDeps,
     MinecraftLiveObservationRuntimeDeps,
     observe_live_minecraft_state_from_runtime,
 )
@@ -543,9 +542,9 @@ from evelyn_core.control_page_runtime_services_dependency_composition import (
     ControlPageRuntimeServicesDependencyComposition,
     ControlPageRuntimeServicesDependencyCompositionDeps,
 )
-from evelyn_core.control_page_minecraft_snapshot_runtime import (
-    ControlPageBackgroundTasksRuntimeDeps,
-    ControlPageMinecraftSnapshotRuntimeDeps,
+from evelyn_core.control_page_snapshot_dependency_composition import (
+    ControlPageSnapshotDependencyComposition,
+    ControlPageSnapshotDependencyCompositionDeps,
 )
 from evelyn_core.control_page_status_tool_composition import (
     ControlPageStatusToolComposition,
@@ -2883,23 +2882,51 @@ build_control_page_welcome_runtime_deps = (
 )
 
 
-def build_control_page_minecraft_live_snapshot_runtime_deps() -> ControlPageMinecraftLiveSnapshotRuntimeDeps:
-    return ControlPageMinecraftLiveSnapshotRuntimeDeps(
-        get_minecraft_client=get_minecraft_client,
-        observe_live_minecraft_state=observe_live_minecraft_state,
-        merge_voyager_status_into_state=merge_voyager_status_into_state,
-        normalize_inventory_top_entries=normalize_inventory_top_entries,
-        summarize_inventory_top=summarize_inventory_top,
-        normalize_inventory_slot_entries=normalize_inventory_slot_entries,
-        normalize_inventory_used_slots=normalize_inventory_used_slots,
-        extract_recent_activity=extract_minecraft_recent_activity_live,
-        format_position_short=format_position_short,
-        attach_minecraft_runtime_snapshot=attach_minecraft_runtime_snapshot,
-        clean_text=clean_text,
+control_page_snapshot_dependency_composition = ControlPageSnapshotDependencyComposition(
+    ControlPageSnapshotDependencyCompositionDeps(
+        control_page=lambda: control_page_composition,
+        get_minecraft_client=lambda: get_minecraft_client(),
+        observe_live_minecraft_state=lambda *args, **kwargs: observe_live_minecraft_state(
+            *args, **kwargs
+        ),
         now=time.time,
         stale_after_sec=CONTROL_PAGE_MINECRAFT_CACHE_REFRESH_SEC,
         expired_after_sec=CONTROL_PAGE_MINECRAFT_CACHE_MAX_STALE_SEC,
+        cache=control_page_minecraft_snapshot_cache,
+        get_refresh_task=lambda: control_page_minecraft_snapshot_refresh_task,
+        set_refresh_task=lambda task: _set_control_page_minecraft_snapshot_refresh_task(task),
+        get_lock=lambda: control_page_minecraft_snapshot_lock,
+        set_lock=lambda lock: _set_control_page_minecraft_snapshot_lock(lock),
+        lock_factory=asyncio.Lock,
+        create_task=asyncio.create_task,
+        wait_for=asyncio.wait_for,
+        get_snapshot=lambda *args, **kwargs: get_control_page_minecraft_snapshot(
+            *args, **kwargs
+        ),
+        timeout_sec=CONTROL_PAGE_MINECRAFT_SNAPSHOT_TIMEOUT_SEC,
+        get_poll_task=lambda: control_page_minecraft_snapshot_poll_task,
+        set_poll_task=lambda task: _set_control_page_minecraft_snapshot_poll_task(task),
+        get_runtime_services_refresh_task=lambda: control_page_runtime_services_refresh_task,
+        set_runtime_services_refresh_task=lambda task: _set_control_page_runtime_services_refresh_task(
+            task
+        ),
+        ensure_minecraft_snapshot=lambda *args, **kwargs: ensure_control_page_minecraft_snapshot(
+            *args, **kwargs
+        ),
+        sleep=asyncio.sleep,
+        log=print,
     )
+)
+
+build_control_page_minecraft_live_snapshot_runtime_deps = (
+    control_page_snapshot_dependency_composition.build_control_page_minecraft_live_snapshot_runtime_deps
+)
+build_control_page_minecraft_snapshot_runtime_deps = (
+    control_page_snapshot_dependency_composition.build_control_page_minecraft_snapshot_runtime_deps
+)
+build_control_page_background_tasks_runtime_deps = (
+    control_page_snapshot_dependency_composition.build_control_page_background_tasks_runtime_deps
+)
 
 
 control_page_runtime_services_dependency_composition = (
@@ -2950,22 +2977,6 @@ def _set_control_page_runtime_services_lock(lock: asyncio.Lock) -> None:
     control_page_runtime_services_lock = lock
 
 
-def build_control_page_minecraft_snapshot_runtime_deps() -> ControlPageMinecraftSnapshotRuntimeDeps:
-    return ControlPageMinecraftSnapshotRuntimeDeps(
-        cache=control_page_minecraft_snapshot_cache,
-        get_refresh_task=lambda: control_page_minecraft_snapshot_refresh_task,
-        set_refresh_task=_set_control_page_minecraft_snapshot_refresh_task,
-        get_lock=lambda: control_page_minecraft_snapshot_lock,
-        set_lock=_set_control_page_minecraft_snapshot_lock,
-        lock_factory=asyncio.Lock,
-        create_task=asyncio.create_task,
-        wait_for=asyncio.wait_for,
-        get_snapshot=get_control_page_minecraft_snapshot,
-        clean_text=clean_text,
-        timeout_sec=CONTROL_PAGE_MINECRAFT_SNAPSHOT_TIMEOUT_SEC,
-    )
-
-
 def _set_control_page_minecraft_snapshot_refresh_task(task: asyncio.Task | None) -> None:
     global control_page_minecraft_snapshot_refresh_task
     control_page_minecraft_snapshot_refresh_task = task
@@ -2974,23 +2985,6 @@ def _set_control_page_minecraft_snapshot_refresh_task(task: asyncio.Task | None)
 def _set_control_page_minecraft_snapshot_lock(lock: asyncio.Lock) -> None:
     global control_page_minecraft_snapshot_lock
     control_page_minecraft_snapshot_lock = lock
-
-
-def build_control_page_background_tasks_runtime_deps() -> ControlPageBackgroundTasksRuntimeDeps:
-    return ControlPageBackgroundTasksRuntimeDeps(
-        get_poll_task=lambda: control_page_minecraft_snapshot_poll_task,
-        set_poll_task=_set_control_page_minecraft_snapshot_poll_task,
-        get_snapshot_refresh_task=lambda: control_page_minecraft_snapshot_refresh_task,
-        set_snapshot_refresh_task=_set_control_page_minecraft_snapshot_refresh_task,
-        get_runtime_services_refresh_task=lambda: control_page_runtime_services_refresh_task,
-        set_runtime_services_refresh_task=_set_control_page_runtime_services_refresh_task,
-        create_task=asyncio.create_task,
-        select_control_page_guild=control_page_composition.select_guild,
-        ensure_minecraft_snapshot=ensure_control_page_minecraft_snapshot,
-        sleep=asyncio.sleep,
-        log=print,
-        refresh_interval_sec=CONTROL_PAGE_MINECRAFT_CACHE_REFRESH_SEC,
-    )
 
 
 def _set_control_page_minecraft_snapshot_poll_task(task: asyncio.Task | None) -> None:
