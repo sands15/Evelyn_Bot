@@ -2754,16 +2754,16 @@ def get_routed_autonomy_executor(guild_id: int | None) -> RoutedAutonomyExecutor
     return executor if isinstance(executor, RoutedAutonomyExecutor) else None
 
 
-def build_minecraft_live_observation_runtime_deps() -> MinecraftLiveObservationRuntimeDeps:
-    return MinecraftLiveObservationRuntimeDeps(
-        get_minecraft_client=get_minecraft_client,
-        merge_voyager_status_into_state=merge_voyager_status_into_state,
-        attach_minecraft_runtime_snapshot=attach_minecraft_runtime_snapshot,
-        clean_text=clean_text,
-        now=time.time,
-        stale_after_sec=CONTROL_PAGE_MINECRAFT_CACHE_REFRESH_SEC,
-        expired_after_sec=CONTROL_PAGE_MINECRAFT_CACHE_MAX_STALE_SEC,
-    )
+build_minecraft_live_observation_runtime_deps = partial(
+    MinecraftLiveObservationRuntimeDeps,
+    get_minecraft_client=get_minecraft_client,
+    merge_voyager_status_into_state=merge_voyager_status_into_state,
+    attach_minecraft_runtime_snapshot=attach_minecraft_runtime_snapshot,
+    clean_text=clean_text,
+    now=time.time,
+    stale_after_sec=CONTROL_PAGE_MINECRAFT_CACHE_REFRESH_SEC,
+    expired_after_sec=CONTROL_PAGE_MINECRAFT_CACHE_MAX_STALE_SEC,
+)
 
 
 async def observe_live_minecraft_state(guild_id: int | None) -> dict[str, Any] | None:

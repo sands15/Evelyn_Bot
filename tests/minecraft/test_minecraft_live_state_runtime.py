@@ -39,6 +39,13 @@ class FakeClient:
 
 
 class MinecraftLiveStateRuntimeTests(unittest.IsolatedAsyncioTestCase):
+    def test_main_binds_live_observation_builder_with_partial(self) -> None:
+        source = (REPO_ROOT / "main.py").read_text(encoding="utf-8")
+
+        self.assertNotIn("def build_minecraft_live_observation_runtime_deps(", source)
+        self.assertIn("build_minecraft_live_observation_runtime_deps = partial(", source)
+        self.assertIn("MinecraftLiveObservationRuntimeDeps,", source)
+
     def setUp(self) -> None:
         self.client = FakeClient()
         self.attach_calls: list[tuple[dict, dict]] = []
