@@ -222,6 +222,7 @@ from evelyn_core.response_context_composition import (
     ResponseContextCompositionDeps,
 )
 from evelyn_core.runtime_mode_policy import RuntimeModeResolver, apply_runtime_mode_policy
+from evelyn_core.runtime_state import RuntimeCounter, RuntimeValue
 from evelyn_core.route_fallback_policy import (
     classify_llm_route_fallback,
 )
@@ -985,7 +986,7 @@ speaker_verifier = SpeakerVerifier(
     log=print,
 )
 active_tts_playbacks = tts_playback_tracker.registry
-tts_warmup_started = False
+tts_warmup_started_state = RuntimeValue(False)
 http_session: Optional[aiohttp.ClientSession] = None
 startup_component_state: dict[str, dict[str, Any]] = {}
 partial_stt_cache: dict[str, dict[str, Any]] = {}
@@ -1011,24 +1012,24 @@ voice_ingress_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=VOICE
 voice_worker_task: asyncio.Task | None = None
 voice_utterance_buffers: dict[str, dict[str, Any]] = {}
 voice_utterance_flush_tasks: dict[str, asyncio.Task] = {}
-control_page_runner: web.AppRunner | None = None
-control_page_site: web.TCPSite | None = None
-control_page_start_lock: asyncio.Lock | None = None
+control_page_runner_state = RuntimeValue[web.AppRunner | None](None)
+control_page_site_state = RuntimeValue[web.TCPSite | None](None)
+control_page_start_lock_state = RuntimeValue[asyncio.Lock | None](None)
 control_page_chat_log_store = ControlPageChatLogStore(limit=CONTROL_PAGE_CHAT_LOG_LIMIT)
 control_page_minecraft_snapshot_cache = ControlPageMinecraftSnapshotCache(
     stale_after_sec=CONTROL_PAGE_MINECRAFT_CACHE_REFRESH_SEC,
     expired_after_sec=CONTROL_PAGE_MINECRAFT_CACHE_MAX_STALE_SEC,
 )
-control_page_minecraft_snapshot_lock: asyncio.Lock | None = None
-control_page_minecraft_snapshot_refresh_task: asyncio.Task | None = None
-control_page_minecraft_snapshot_poll_task: asyncio.Task | None = None
+control_page_minecraft_snapshot_lock_state = RuntimeValue[asyncio.Lock | None](None)
+control_page_minecraft_snapshot_refresh_task_state = RuntimeValue[asyncio.Task | None](None)
+control_page_minecraft_snapshot_poll_task_state = RuntimeValue[asyncio.Task | None](None)
 control_page_runtime_services_cache = ControlPageRuntimeServicesCache(
     stale_after_sec=CONTROL_PAGE_RUNTIME_CACHE_REFRESH_SEC,
     expired_after_sec=CONTROL_PAGE_RUNTIME_CACHE_MAX_STALE_SEC,
     refresh_min_interval_sec=CONTROL_PAGE_RUNTIME_CACHE_REFRESH_MIN_INTERVAL_SEC,
 )
-control_page_runtime_services_lock: asyncio.Lock | None = None
-control_page_runtime_services_refresh_task: asyncio.Task | None = None
+control_page_runtime_services_lock_state = RuntimeValue[asyncio.Lock | None](None)
+control_page_runtime_services_refresh_task_state = RuntimeValue[asyncio.Task | None](None)
 control_page_ui_command_store = ControlPageUiCommandStore(limit=40)
 control_page_welcome_locks: dict[int, asyncio.Lock] = {}
 room_recent_speaker_stats: dict[str, dict[int, dict[str, float]]] = {}
@@ -1141,8 +1142,8 @@ autonomy_engines: dict[int, AutonomyEngine] = {}
 last_autonomy_ping_at: dict[int, float] = {}
 autonomy_last_cognitive_refresh_at: dict[int, float] = {}
 autonomy_cognitive_refresh_tasks: dict[int, asyncio.Task] = {}
-search_followup_queued_count = 0
-inflight_llm_requests = 0
+search_followup_queued_counter = RuntimeCounter()
+inflight_llm_requests_counter = RuntimeCounter()
 VOICE_BARGE_IN_CONTINUITY_TARGET = 5
 recent_skill_dispatches: dict[str, float] = {}
 SKILL_DISPATCH_CACHE_TTL_SEC = 300.0
@@ -1217,7 +1218,7 @@ conversation_observability_composition = ConversationObservabilityComposition(
         log=print,
         record_turn_stage_metric=record_turn_stage_metric,
         summarize_voice_p95_metrics=summarize_voice_p95_metrics,
-        get_search_followup_queued_count=lambda: search_followup_queued_count,
+        get_search_followup_queued_count=search_followup_queued_counter.get,
         build_rejected_voice_turn=build_rejected_voice_turn,
     )
 )
@@ -1299,7 +1300,7 @@ autonomy_runtime_composition = AutonomyRuntimeComposition(
         local_tts_snapshot=local_tts_playback_manager.snapshot,
         serialize_local_mic_runtime_state=lambda: serialize_local_mic_runtime_state(),
         get_active_session_count=lambda: len(active_session_until),
-        get_inflight_llm_requests=lambda: inflight_llm_requests,
+        get_inflight_llm_requests=inflight_llm_requests_counter.get,
         last_autonomy_ping_at=last_autonomy_ping_at,
         answer_promises_search=answer_promises_search,
         append_history=append_history,
@@ -1463,7 +1464,7 @@ build_voice_ingress_entrypoint_deps = (
 
 compute_runtime_mode = RuntimeModeResolver(
     tts_backlog_get=lambda: tracked_tts_playback_count(tts_playback_tracker),
-    inflight_llm_requests_get=lambda: inflight_llm_requests,
+    inflight_llm_requests_get=inflight_llm_requests_counter.get,
 )
 apply_runtime_mode = apply_runtime_mode_policy
 estimate_voice_like_probability = partial(
@@ -1941,9 +1942,7 @@ async def get_http_session() -> aiohttp.ClientSession:
     return http_session
 
 
-def record_search_followup_queued() -> None:
-    global search_followup_queued_count
-    search_followup_queued_count += 1
+record_search_followup_queued = search_followup_queued_counter.increment
 
 
 runtime_lifecycle_composition = RuntimeLifecycleComposition(
@@ -2214,11 +2213,6 @@ build_omnivoice_source_runtime_deps = (
 )
 
 
-def _set_tts_warmup_started(value: bool) -> None:
-    global tts_warmup_started
-    tts_warmup_started = value
-
-
 # =========================================================
 # STT
 # =========================================================
@@ -2291,7 +2285,7 @@ voice_support_composition = VoiceSupportComposition(
         stt_transcription=lambda: build_stt_transcription_runtime_deps(),
         stt_text=lambda: _build_stt_text_runtime_deps(),
         voice_connection=lambda: build_discord_voice_connection_runtime_deps(),
-        set_tts_warmup_started=_set_tts_warmup_started,
+        set_tts_warmup_started=tts_warmup_started_state.set,
         partial_stt_max_new_tokens=max(64, min(VOICE_STT_MAX_NEW_TOKENS, 128)),
         clean_text=clean_text,
         wake_audio_sec=WAKE_AUDIO_SEC,
@@ -2734,10 +2728,10 @@ control_page_snapshot_dependency_composition = ControlPageSnapshotDependencyComp
         stale_after_sec=CONTROL_PAGE_MINECRAFT_CACHE_REFRESH_SEC,
         expired_after_sec=CONTROL_PAGE_MINECRAFT_CACHE_MAX_STALE_SEC,
         cache=control_page_minecraft_snapshot_cache,
-        get_refresh_task=lambda: control_page_minecraft_snapshot_refresh_task,
-        set_refresh_task=lambda task: _set_control_page_minecraft_snapshot_refresh_task(task),
-        get_lock=lambda: control_page_minecraft_snapshot_lock,
-        set_lock=lambda lock: _set_control_page_minecraft_snapshot_lock(lock),
+        get_refresh_task=control_page_minecraft_snapshot_refresh_task_state.get,
+        set_refresh_task=control_page_minecraft_snapshot_refresh_task_state.set,
+        get_lock=control_page_minecraft_snapshot_lock_state.get,
+        set_lock=control_page_minecraft_snapshot_lock_state.set,
         lock_factory=asyncio.Lock,
         create_task=asyncio.create_task,
         wait_for=asyncio.wait_for,
@@ -2745,12 +2739,10 @@ control_page_snapshot_dependency_composition = ControlPageSnapshotDependencyComp
             *args, **kwargs
         ),
         timeout_sec=CONTROL_PAGE_MINECRAFT_SNAPSHOT_TIMEOUT_SEC,
-        get_poll_task=lambda: control_page_minecraft_snapshot_poll_task,
-        set_poll_task=lambda task: _set_control_page_minecraft_snapshot_poll_task(task),
-        get_runtime_services_refresh_task=lambda: control_page_runtime_services_refresh_task,
-        set_runtime_services_refresh_task=lambda task: _set_control_page_runtime_services_refresh_task(
-            task
-        ),
+        get_poll_task=control_page_minecraft_snapshot_poll_task_state.get,
+        set_poll_task=control_page_minecraft_snapshot_poll_task_state.set,
+        get_runtime_services_refresh_task=control_page_runtime_services_refresh_task_state.get,
+        set_runtime_services_refresh_task=control_page_runtime_services_refresh_task_state.set,
         ensure_minecraft_snapshot=lambda *args, **kwargs: ensure_control_page_minecraft_snapshot(
             *args, **kwargs
         ),
@@ -2774,10 +2766,10 @@ control_page_runtime_services_dependency_composition = (
     ControlPageRuntimeServicesDependencyComposition(
         ControlPageRuntimeServicesDependencyCompositionDeps(
             cache=control_page_runtime_services_cache,
-            get_refresh_task=lambda: control_page_runtime_services_refresh_task,
-            set_refresh_task=lambda task: _set_control_page_runtime_services_refresh_task(task),
-            get_lock=lambda: control_page_runtime_services_lock,
-            set_lock=lambda lock: _set_control_page_runtime_services_lock(lock),
+            get_refresh_task=control_page_runtime_services_refresh_task_state.get,
+            set_refresh_task=control_page_runtime_services_refresh_task_state.set,
+            get_lock=control_page_runtime_services_lock_state.get,
+            set_lock=control_page_runtime_services_lock_state.set,
             lock_factory=asyncio.Lock,
             create_task=asyncio.create_task,
             action_backend=VOYAGER_ACTION_BACKEND,
@@ -2806,31 +2798,6 @@ build_control_page_runtime_services_runtime_deps = (
 build_control_page_runtime_services_probe_runtime_deps = (
     control_page_runtime_services_dependency_composition.build_control_page_runtime_services_probe_runtime_deps
 )
-
-
-def _set_control_page_runtime_services_refresh_task(task: asyncio.Task | None) -> None:
-    global control_page_runtime_services_refresh_task
-    control_page_runtime_services_refresh_task = task
-
-
-def _set_control_page_runtime_services_lock(lock: asyncio.Lock) -> None:
-    global control_page_runtime_services_lock
-    control_page_runtime_services_lock = lock
-
-
-def _set_control_page_minecraft_snapshot_refresh_task(task: asyncio.Task | None) -> None:
-    global control_page_minecraft_snapshot_refresh_task
-    control_page_minecraft_snapshot_refresh_task = task
-
-
-def _set_control_page_minecraft_snapshot_lock(lock: asyncio.Lock) -> None:
-    global control_page_minecraft_snapshot_lock
-    control_page_minecraft_snapshot_lock = lock
-
-
-def _set_control_page_minecraft_snapshot_poll_task(task: asyncio.Task | None) -> None:
-    global control_page_minecraft_snapshot_poll_task
-    control_page_minecraft_snapshot_poll_task = task
 
 
 control_page_status_tool_composition = ControlPageStatusToolComposition(
@@ -2998,7 +2965,7 @@ control_page_state_composition = ControlPageStateComposition(
         router_model=ROUTER_MODEL_NAME,
         summary_model=SUMMARY_MODEL_NAME,
         stt_model=STT_MODEL_NAME,
-        inflight_llm_requests=lambda: inflight_llm_requests,
+        inflight_llm_requests=inflight_llm_requests_counter.get,
         tracked_tts_count=lambda: tracked_tts_playback_count(tts_playback_tracker),
         summarize_model_call_metrics=summarize_model_call_metrics,
         summarize_question_metrics=summarize_question_metrics,
@@ -3021,21 +2988,6 @@ build_control_page_state = control_page_state_composition.build_control_page_sta
 
 open_control_page_path_with_system = open_path_with_system
 open_control_page_url_with_system = open_url_with_system
-
-
-def _set_control_page_runner(runner: web.AppRunner) -> None:
-    global control_page_runner
-    control_page_runner = runner
-
-
-def _set_control_page_site(site: web.TCPSite) -> None:
-    global control_page_site
-    control_page_site = site
-
-
-def _set_control_page_start_lock(lock: asyncio.Lock) -> None:
-    global control_page_start_lock
-    control_page_start_lock = lock
 
 
 control_page_composition = ControlPageComposition(
@@ -3061,7 +3013,7 @@ control_page_composition = ControlPageComposition(
         startup_components_ready=startup_components_ready,
         discord_enabled=DISCORD_ENABLED,
         discord_ready=bot.is_ready,
-        control_api_available=lambda: control_page_runner is not None,
+        control_api_available=lambda: control_page_runner_state.get() is not None,
         now=time.time,
     )
 )
@@ -3093,11 +3045,11 @@ control_page_http_composition = ControlPageHttpComposition(
         host=CONTROL_PAGE_HOST,
         minecraft_icon_route=CONTROL_PAGE_MINECRAFT_ICON_ROUTE,
         middleware=control_page_cors_middleware,
-        get_runner=lambda: control_page_runner,
-        set_runner=_set_control_page_runner,
-        set_site=_set_control_page_site,
-        get_start_lock=lambda: control_page_start_lock,
-        set_start_lock=_set_control_page_start_lock,
+        get_runner=control_page_runner_state.get,
+        set_runner=control_page_runner_state.set,
+        set_site=control_page_site_state.set,
+        get_start_lock=control_page_start_lock_state.get,
+        set_start_lock=control_page_start_lock_state.set,
         lock_factory=asyncio.Lock,
         application_factory=web.Application,
         app_runner_factory=web.AppRunner,
@@ -3123,14 +3075,8 @@ build_control_page_boot_progress = control_page_composition.build_boot_progress
 start_control_page_server = control_page_composition.start_server
 
 
-def increment_inflight_llm_requests() -> None:
-    global inflight_llm_requests
-    inflight_llm_requests += 1
-
-
-def decrement_inflight_llm_requests() -> None:
-    global inflight_llm_requests
-    inflight_llm_requests = max(0, inflight_llm_requests - 1)
+increment_inflight_llm_requests = inflight_llm_requests_counter.increment
+decrement_inflight_llm_requests = inflight_llm_requests_counter.decrement
 
 
 voice_execution_dependency_composition = VoiceExecutionDependencyComposition(

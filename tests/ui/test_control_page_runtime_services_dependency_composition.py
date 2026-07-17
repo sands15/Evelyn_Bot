@@ -13,19 +13,14 @@ if str(RUNTIME_ROOT) not in sys.path:
 
 
 class ControlPageRuntimeServicesDependencyCompositionTests(unittest.TestCase):
-    def test_main_binds_runtime_services_composition_before_state_setters(self) -> None:
+    def test_main_binds_runtime_services_composition_to_runtime_state(self) -> None:
         source = (REPO_ROOT / "main.py").read_text(encoding="utf-8")
-        composition_index = source.index(
-            "control_page_runtime_services_dependency_composition = ("
-        )
-        setter_index = source.index(
-            "def _set_control_page_runtime_services_refresh_task("
-        )
-
-        self.assertLess(composition_index, setter_index)
         self.assertIn(
-            "set_refresh_task=lambda task: _set_control_page_runtime_services_refresh_task(task)",
+            "set_refresh_task=control_page_runtime_services_refresh_task_state.set",
             source,
+        )
+        self.assertNotIn(
+            "def _set_control_page_runtime_services_refresh_task(", source
         )
         for name in (
             "build_control_page_runtime_services_runtime_deps",
