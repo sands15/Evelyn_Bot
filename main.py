@@ -15,6 +15,7 @@ import asyncio
 import uuid
 import wave
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
 
@@ -344,7 +345,6 @@ from evelyn_core.discord_tts_dependency_composition import (
     DiscordTtsDependencyCompositionDeps,
 )
 from evelyn_core.discord_settings_runtime import (
-    DiscordSettingsRuntimeDeps,
     build_discord_settings_runtime_deps as build_discord_settings_runtime_deps_from_main,
     resolve_command_prefix_from_runtime,
     add_guild_channel_setting_from_runtime,
@@ -888,12 +888,12 @@ instance_lock_handle = None
 instance_lock_path = Path(os.getenv("EVELYN_INSTANCE_LOCK_PATH", str(Path(__file__).resolve().with_name(".evelyn_bot.lock"))))
 
 
-def build_discord_settings_runtime_deps() -> DiscordSettingsRuntimeDeps:
-    return build_discord_settings_runtime_deps_from_main(
-        default_command_prefix=DEFAULT_COMMAND_PREFIX,
-        prefix_cache=guild_prefix_cache,
-        now=time.time,
-    )
+build_discord_settings_runtime_deps = partial(
+    build_discord_settings_runtime_deps_from_main,
+    default_command_prefix=DEFAULT_COMMAND_PREFIX,
+    prefix_cache=guild_prefix_cache,
+    now=time.time,
+)
 
 
 def release_instance_lock() -> None:

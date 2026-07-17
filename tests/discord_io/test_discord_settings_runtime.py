@@ -28,6 +28,13 @@ class DiscordSettingsRuntimeTests(unittest.TestCase):
     def setUp(self) -> None:
         self.calls: list[tuple] = []
 
+    def test_main_binds_settings_builder_with_partial(self) -> None:
+        source = (REPO_ROOT / "main.py").read_text(encoding="utf-8")
+
+        self.assertNotIn("def build_discord_settings_runtime_deps(", source)
+        self.assertIn("build_discord_settings_runtime_deps = partial(", source)
+        self.assertIn("default_command_prefix=DEFAULT_COMMAND_PREFIX", source)
+
     def test_runtime_dispatches_to_payload_callables(self) -> None:
         deps = DiscordSettingsRuntimeDeps(
             default_command_prefix="?",
