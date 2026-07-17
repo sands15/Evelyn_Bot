@@ -274,10 +274,6 @@ from evelyn_core.discord_app_composition_runtime import (
     DiscordCommandCompositionDeps,
     DiscordEventCompositionDeps,
 )
-from evelyn_core.main_llm_runtime import (
-    AskLlmOnceRuntimeDeps,
-    MainLlmRuntimeDeps,
-)
 from evelyn_core.search_followup_runtime import (
     SearchFollowupRuntimeDeps,
 )
@@ -637,10 +633,10 @@ from evelyn_core.voice_execution_dependency_composition import (
     VoiceExecutionDependencyComposition,
     VoiceExecutionDependencyCompositionDeps,
 )
-from evelyn_core.voice_response_runtime import (
-    VoiceResponseRuntimeDeps,
+from evelyn_core.voice_response_dependency_composition import (
+    VoiceResponseDependencyComposition,
+    VoiceResponseDependencyCompositionDeps,
 )
-from evelyn_core.voice_stream_chunks import VoiceStreamChunkDeps
 from evelyn_core.voice_ingress_runtime import (
     VoiceIngressEntrypointDeps,
     VoiceIngressRuntimeDeps,
@@ -2673,12 +2669,12 @@ def fallback_answer_for(user_text: str) -> str:
     return "응, 잠깐만."
 
 
-def build_voice_response_runtime_deps() -> VoiceResponseRuntimeDeps:
-    return VoiceResponseRuntimeDeps(
+voice_response_dependency_composition = VoiceResponseDependencyComposition(
+    VoiceResponseDependencyCompositionDeps(
         model_name=MODEL_NAME,
         llm_server_url=LLM_SERVER_URL,
         main_llm_chat_content_format=MAIN_LLM_CHAT_CONTENT_FORMAT,
-        main_llm_stop_tokens=tuple(MAIN_LLM_STOP_TOKENS),
+        main_llm_stop_tokens=MAIN_LLM_STOP_TOKENS,
         voice_llm_max_tokens=VOICE_LLM_MAX_TOKENS,
         get_http_session=get_http_session,
         build_chat_messages=build_chat_messages,
@@ -2686,85 +2682,66 @@ def build_voice_response_runtime_deps() -> VoiceResponseRuntimeDeps:
         split_tts_sentences=split_tts_sentences,
         build_answer_payload_from_text=build_answer_payload_from_text,
         log_voice_stage=log_voice_stage,
-        prepare_route_context=prepare_route_context,
-        prepare_llm_messages=prepare_llm_messages,
+        prepare_route_context=lambda *args, **kwargs: prepare_route_context(*args, **kwargs),
+        prepare_llm_messages=lambda *args, **kwargs: prepare_llm_messages(*args, **kwargs),
         is_user_echo_answer=is_user_echo_answer,
         is_casual_call_or_status_question=session_is_casual_call_or_status_question,
-        observe_live_minecraft_state=observe_live_minecraft_state,
+        observe_live_minecraft_state=lambda *args, **kwargs: observe_live_minecraft_state(
+            *args, **kwargs
+        ),
         build_runtime_status_context=build_runtime_status_context,
         build_main_response_guidance=build_main_response_guidance,
-        sanitize_model_output=sanitize_model_output,
+        sanitize_model_output=lambda *args, **kwargs: sanitize_model_output(*args, **kwargs),
         parse_response_action_tag=parse_response_action_tag,
-        extract_answer_from_reasoning=extract_answer_from_reasoning,
+        extract_answer_from_reasoning=lambda *args, **kwargs: extract_answer_from_reasoning(
+            *args, **kwargs
+        ),
         sanitize_unrequested_minecraft_leak=sanitize_unrequested_minecraft_leak,
         enforce_question_limits=enforce_question_limits,
         record_question_trace=record_question_trace,
         format_minecraft_state_summary=format_minecraft_state_summary,
-        log=print,
-    )
-
-
-def build_main_llm_runtime_deps() -> MainLlmRuntimeDeps:
-    return MainLlmRuntimeDeps(
-        model_name=MODEL_NAME,
-        llm_server_url=LLM_SERVER_URL,
-        main_llm_chat_content_format=MAIN_LLM_CHAT_CONTENT_FORMAT,
-        main_llm_stop_tokens=tuple(MAIN_LLM_STOP_TOKENS),
-        voice_llm_max_tokens=VOICE_LLM_MAX_TOKENS,
-        get_http_session=get_http_session,
-        fallback_answer_for=fallback_answer_for,
         extract_main_llm_answer_from_choice=extract_main_llm_answer_from_choice,
-        sanitize_model_output=sanitize_model_output,
-        parse_response_action_tag=parse_response_action_tag,
-        extract_answer_from_reasoning=extract_answer_from_reasoning,
         compact_memory_text=compact_memory_text,
-        build_main_response_guidance=build_main_response_guidance,
         build_main_llm_payload=build_main_llm_payload,
         strip_search_answer_sources=strip_search_answer_sources,
-        enforce_question_limits=enforce_question_limits,
-        record_question_trace=record_question_trace,
         answer_promises_search=answer_promises_search,
-        has_negated_search_marker=has_negated_search_marker,
-        execute_search_then_answer_action=execute_search_then_answer_action,
-        log=print,
-    )
-
-
-def build_ask_llm_once_runtime_deps() -> AskLlmOnceRuntimeDeps:
-    return AskLlmOnceRuntimeDeps(
-        log_voice_stage=log_voice_stage,
+        has_negated_search_marker=lambda *args, **kwargs: has_negated_search_marker(
+            *args, **kwargs
+        ),
+        execute_search_then_answer_action=lambda *args, **kwargs: execute_search_then_answer_action(
+            *args, **kwargs
+        ),
         clean_text=clean_text,
-        prepare_route_context=prepare_route_context,
-        maybe_execute_registered_route=maybe_execute_registered_route,
-        is_user_echo_answer=is_user_echo_answer,
+        maybe_execute_registered_route=lambda *args, **kwargs: maybe_execute_registered_route(
+            *args, **kwargs
+        ),
         update_session_state=update_session_state,
-        build_answer_payload_from_text=build_answer_payload_from_text,
-        session_is_casual_call_or_status_question=session_is_casual_call_or_status_question,
-        observe_live_minecraft_state=observe_live_minecraft_state,
-        build_runtime_status_context=build_runtime_status_context,
-        build_main_response_guidance=build_main_response_guidance,
-        build_main_llm_payload=build_main_llm_payload,
-        execute_main_llm_once=execute_main_llm_once,
-        sanitize_unrequested_minecraft_leak=sanitize_unrequested_minecraft_leak,
-        resolve_promised_search_final_answer=resolve_promised_search_final_answer,
-        enforce_question_limits=enforce_question_limits,
-        record_question_trace=record_question_trace,
-        model_name=MODEL_NAME,
-        main_llm_chat_content_format=MAIN_LLM_CHAT_CONTENT_FORMAT,
-        voice_llm_max_tokens=VOICE_LLM_MAX_TOKENS,
-        main_llm_stop_tokens=MAIN_LLM_STOP_TOKENS,
-    )
-
-
-def build_voice_stream_chunk_deps() -> VoiceStreamChunkDeps:
-    return VoiceStreamChunkDeps(
+        execute_main_llm_once=lambda *args, **kwargs: execute_main_llm_once(*args, **kwargs),
+        resolve_promised_search_final_answer=lambda *args, **kwargs: resolve_promised_search_final_answer(
+            *args, **kwargs
+        ),
         tts_first_chunk_min_chars=TTS_FIRST_CHUNK_MIN_CHARS,
         tts_first_chunk_target_chars=TTS_FIRST_CHUNK_TARGET_CHARS,
         tts_first_chunk_max_chars=TTS_FIRST_CHUNK_MAX_CHARS,
         tts_next_chunk_min_chars=TTS_NEXT_CHUNK_MIN_CHARS,
         tts_next_chunk_target_chars=TTS_NEXT_CHUNK_TARGET_CHARS,
         tts_next_chunk_max_chars=TTS_NEXT_CHUNK_MAX_CHARS,
+        log=print,
     )
+)
+
+build_voice_response_runtime_deps = (
+    voice_response_dependency_composition.build_voice_response_runtime_deps
+)
+build_main_llm_runtime_deps = (
+    voice_response_dependency_composition.build_main_llm_runtime_deps
+)
+build_ask_llm_once_runtime_deps = (
+    voice_response_dependency_composition.build_ask_llm_once_runtime_deps
+)
+build_voice_stream_chunk_deps = (
+    voice_response_dependency_composition.build_voice_stream_chunk_deps
+)
 
 
 DEFAULT_INTERNAL_ROUTES = {"main_direct", "policy_short_circuit", "search_executor", "routing", "delivery"}
