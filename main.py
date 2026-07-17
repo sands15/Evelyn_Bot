@@ -539,15 +539,13 @@ from evelyn_core.control_page_state_composition import (
     ControlPageStateComposition,
     ControlPageStateCompositionDeps,
 )
-from evelyn_core.control_page_runtime_probe import probe_control_page_runtime_services
+from evelyn_core.control_page_runtime_services_dependency_composition import (
+    ControlPageRuntimeServicesDependencyComposition,
+    ControlPageRuntimeServicesDependencyCompositionDeps,
+)
 from evelyn_core.control_page_minecraft_snapshot_runtime import (
     ControlPageBackgroundTasksRuntimeDeps,
     ControlPageMinecraftSnapshotRuntimeDeps,
-)
-from evelyn_core.control_page_runtime_services_runtime import (
-    ControlPageRuntimeServicesRuntimeDeps,
-    ControlPageRuntimeServicesProbeDeps,
-    probe_control_page_runtime_services_once_from_runtime,
 )
 from evelyn_core.control_page_status_tool_composition import (
     ControlPageStatusToolComposition,
@@ -2904,42 +2902,42 @@ def build_control_page_minecraft_live_snapshot_runtime_deps() -> ControlPageMine
     )
 
 
-def build_control_page_runtime_services_runtime_deps() -> ControlPageRuntimeServicesRuntimeDeps:
-    return ControlPageRuntimeServicesRuntimeDeps(
-        cache=control_page_runtime_services_cache,
-        get_refresh_task=lambda: control_page_runtime_services_refresh_task,
-        set_refresh_task=_set_control_page_runtime_services_refresh_task,
-        get_lock=lambda: control_page_runtime_services_lock,
-        set_lock=_set_control_page_runtime_services_lock,
-        lock_factory=asyncio.Lock,
-        create_task=asyncio.create_task,
-        probe_runtime_services_once=lambda: probe_control_page_runtime_services_once_from_runtime(
-            deps=build_control_page_runtime_services_probe_runtime_deps(),
-        ),
-        build_runtime_services_error_payload=build_control_page_runtime_services_error_payload,
-        clean_text=clean_text,
-        action_backend=VOYAGER_ACTION_BACKEND,
-        now=time.time,
+control_page_runtime_services_dependency_composition = (
+    ControlPageRuntimeServicesDependencyComposition(
+        ControlPageRuntimeServicesDependencyCompositionDeps(
+            cache=control_page_runtime_services_cache,
+            get_refresh_task=lambda: control_page_runtime_services_refresh_task,
+            set_refresh_task=lambda task: _set_control_page_runtime_services_refresh_task(task),
+            get_lock=lambda: control_page_runtime_services_lock,
+            set_lock=lambda lock: _set_control_page_runtime_services_lock(lock),
+            lock_factory=asyncio.Lock,
+            create_task=asyncio.create_task,
+            action_backend=VOYAGER_ACTION_BACKEND,
+            now=time.time,
+            service_urls={
+                "main": LLM_SERVER_URL,
+                "router": ROUTER_LLM_URL,
+                "sub": SUMMARY_LLM_URL,
+                "tts": OMNIVOICE_SERVER_URL,
+            },
+            bot_api_host=CONTROL_PAGE_BOT_API_HOST,
+            bot_api_port=CONTROL_PAGE_BOT_API_PORT,
+            bot_api_state_path=CONTROL_PAGE_BOT_API_STATE_PATH,
+            bot_api_probe_timeout_sec=CONTROL_PAGE_BOT_API_PROBE_TIMEOUT_SEC,
+            codex_gateway_port=VOYAGER_CODEX_GATEWAY_PORT,
+            voyager_alive_probe=lambda: get_minecraft_client().is_service_alive(
+                timeout_sec=0.45
+            ),
+        )
     )
+)
 
-
-def build_control_page_runtime_services_probe_runtime_deps() -> ControlPageRuntimeServicesProbeDeps:
-    return ControlPageRuntimeServicesProbeDeps(
-        service_urls={
-            "main": LLM_SERVER_URL,
-            "router": ROUTER_LLM_URL,
-            "sub": SUMMARY_LLM_URL,
-            "tts": OMNIVOICE_SERVER_URL,
-        },
-        bot_api_host=CONTROL_PAGE_BOT_API_HOST,
-        bot_api_port=CONTROL_PAGE_BOT_API_PORT,
-        bot_api_state_path=CONTROL_PAGE_BOT_API_STATE_PATH,
-        bot_api_probe_timeout_sec=CONTROL_PAGE_BOT_API_PROBE_TIMEOUT_SEC,
-        action_backend=VOYAGER_ACTION_BACKEND,
-        codex_gateway_port=VOYAGER_CODEX_GATEWAY_PORT,
-        voyager_alive_probe=lambda: get_minecraft_client().is_service_alive(timeout_sec=0.45),
-        probe_runtime_services_once=probe_control_page_runtime_services,
-    )
+build_control_page_runtime_services_runtime_deps = (
+    control_page_runtime_services_dependency_composition.build_control_page_runtime_services_runtime_deps
+)
+build_control_page_runtime_services_probe_runtime_deps = (
+    control_page_runtime_services_dependency_composition.build_control_page_runtime_services_probe_runtime_deps
+)
 
 
 def _set_control_page_runtime_services_refresh_task(task: asyncio.Task | None) -> None:
