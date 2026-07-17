@@ -130,11 +130,11 @@ from evelyn_core.cognitive_policy_state import (
     read_cached_cognitive_state,
     read_layered_cognitive_state,
 )
-from evelyn_core.cognitive_followup_policy import (
-    ShouldForceSearchFollowupRuntimeDeps,
-    should_force_search_followup_from_runtime,
+from evelyn_core.cognitive_followup_policy import should_force_search_followup_from_runtime
+from evelyn_core.llm_cognitive_dependency_composition import (
+    LlmCognitiveDependencyComposition,
+    LlmCognitiveDependencyCompositionDeps,
 )
-from evelyn_core.cognitive_state_runtime import CognitiveStateRuntimeDeps
 from evelyn_core.cognitive_refresh_composition import (
     CognitiveRefreshComposition,
     CognitiveRefreshCompositionDeps,
@@ -224,8 +224,6 @@ from evelyn_core.runtime_mode_policy import compute_runtime_mode_from_state, app
 from evelyn_core.route_fallback_policy import (
     classify_llm_route_fallback,
 )
-from evelyn_core.llm_route_runtime import LlmRouteRuntimeDeps
-from evelyn_core.json_llm_request_runtime import JsonLlmRequestRuntimeDeps
 from evelyn_core.fast_path_policy_composition import (
     FastPathPolicyComposition,
     FastPathPolicyCompositionDeps,
@@ -1675,12 +1673,81 @@ def should_force_search_followup(
     )
 
 
-def build_cognitive_followup_runtime_deps() -> ShouldForceSearchFollowupRuntimeDeps:
-    return ShouldForceSearchFollowupRuntimeDeps(
-        read_cached_cognitive_state_fn=read_cached_cognitive_state,
-        apply_ask_gating_fn=apply_ask_gating,
-        clean_text_fn=clean_text,
+llm_cognitive_dependency_composition = LlmCognitiveDependencyComposition(
+    LlmCognitiveDependencyCompositionDeps(
+        read_cached_cognitive_state=read_cached_cognitive_state,
+        apply_ask_gating=apply_ask_gating,
+        clean_text=clean_text,
+        summary_model_name=SUMMARY_MODEL_NAME,
+        summary_llm_url=SUMMARY_LLM_URL,
+        router_model_name=ROUTER_MODEL_NAME,
+        router_llm_url=ROUTER_LLM_URL,
+        get_http_session=lambda *args, **kwargs: get_http_session(*args, **kwargs),
+        client_timeout_factory=aiohttp.ClientTimeout,
+        monotonic=time.monotonic,
+        extract_json_object=extract_json_object_from_runtime,
+        record_model_call_trace=record_model_call_trace,
+        classify_llm_route_fallback=classify_llm_route_fallback,
+        fast_path_policy=lambda *args, **kwargs: fast_path_policy(*args, **kwargs),
+        session_state_snapshot=session_state_snapshot,
+        load_working_summary=lambda guild_id: compact_working_summary(
+            read_text_file(memory_summary_path(guild_id))
+        ),
+        load_cognitive_state=lambda guild_id: normalize_cognitive_state(
+            read_json_file(cognitive_state_path(guild_id))
+        ),
+        normalize_cognitive_state=normalize_cognitive_state,
+        load_recent_raw=lambda guild_id: read_jsonl(memory_raw_path(guild_id)),
+        load_recent_facts=read_fact_rows,
+        format_memory_rows_for_llm=format_memory_rows_for_llm,
+        compact_memory_text=compact_memory_text,
+        ask_router_llm=lambda *args, **kwargs: ask_router_llm(*args, **kwargs),
+        current_turn_id=current_turn_id,
+        normalize_question_policy_mapping=normalize_question_policy_mapping,
+        router_route_timeout_sec=ROUTER_ROUTE_TIMEOUT_SEC,
+        cognitive_timeout_sec=COGNITIVE_TIMEOUT_SEC,
+        router_llm_enabled=ROUTER_LLM_ENABLED,
+        router_route_max_tokens=ROUTER_ROUTE_MAX_TOKENS,
+        attach_current_task=_attach_current_task,
+        detach_task=_detach_task,
+        cognitive_locks=cognitive_locks,
+        collect_memory_layers=collect_memory_layers,
+        layered_summary_text=layered_summary_text,
+        read_layered_cognitive_state=read_layered_cognitive_state,
+        get_matching_speculative_policy=get_matching_speculative_policy,
+        build_fast_cognitive_state=build_fast_cognitive_state,
+        write_json_file=write_json_file,
+        cognitive_state_path=cognitive_state_path,
+        recent_memory_groups=recent_memory_groups,
+        memory_cognitive_raw_limit=MEMORY_COGNITIVE_RAW_LIMIT,
+        build_cognitive_state_messages=build_cognitive_state_messages,
+        cognitive_max_tokens=COGNITIVE_MAX_TOKENS,
+        is_context_size_error=is_context_size_error,
+        build_compact_cognitive_state_messages=build_compact_cognitive_state_messages,
+        should_log_voice_timing=lambda *args, **kwargs: should_log_voice_timing(
+            *args, **kwargs
+        ),
+        build_cognitive_fallback_state=build_cognitive_fallback_state,
+        finalize_cognitive_state=finalize_cognitive_state,
+        log=print,
     )
+)
+
+build_cognitive_followup_runtime_deps = (
+    llm_cognitive_dependency_composition.build_cognitive_followup_runtime_deps
+)
+build_summary_json_llm_runtime_deps = (
+    llm_cognitive_dependency_composition.build_summary_json_llm_runtime_deps
+)
+build_router_json_llm_runtime_deps = (
+    llm_cognitive_dependency_composition.build_router_json_llm_runtime_deps
+)
+build_llm_route_runtime_deps = (
+    llm_cognitive_dependency_composition.build_llm_route_runtime_deps
+)
+build_cognitive_state_runtime_deps = (
+    llm_cognitive_dependency_composition.build_cognitive_state_runtime_deps
+)
 
 
 response_context_composition = ResponseContextComposition(
@@ -1833,95 +1900,6 @@ llm_context_assembly_composition = LlmContextAssemblyComposition(
 )
 
 build_llm_context_assembly_deps = llm_context_assembly_composition.build_runtime_deps
-
-
-def build_summary_json_llm_runtime_deps() -> JsonLlmRequestRuntimeDeps:
-    return JsonLlmRequestRuntimeDeps(
-        model_name=SUMMARY_MODEL_NAME,
-        endpoint=SUMMARY_LLM_URL,
-        model_role="summary",
-        error_label="요약 LLM",
-        get_http_session=get_http_session,
-        client_timeout_factory=aiohttp.ClientTimeout,
-        monotonic=time.monotonic,
-        clean_text=clean_text,
-        extract_json_object=extract_json_object_from_runtime,
-        record_model_call_trace=record_model_call_trace,
-    )
-
-
-def build_router_json_llm_runtime_deps() -> JsonLlmRequestRuntimeDeps:
-    return JsonLlmRequestRuntimeDeps(
-        model_name=ROUTER_MODEL_NAME,
-        endpoint=ROUTER_LLM_URL,
-        model_role="router",
-        error_label="router LLM",
-        get_http_session=get_http_session,
-        client_timeout_factory=aiohttp.ClientTimeout,
-        monotonic=time.monotonic,
-        clean_text=clean_text,
-        extract_json_object=extract_json_object_from_runtime,
-        record_model_call_trace=record_model_call_trace,
-    )
-
-
-def build_llm_route_runtime_deps() -> LlmRouteRuntimeDeps:
-    return LlmRouteRuntimeDeps(
-        classify_llm_route_fallback=classify_llm_route_fallback,
-        fast_path_policy=fast_path_policy,
-        session_state_snapshot=session_state_snapshot,
-        load_working_summary=lambda guild_id: compact_working_summary(
-            read_text_file(memory_summary_path(guild_id))
-        ),
-        load_cognitive_state=lambda guild_id: normalize_cognitive_state(
-            read_json_file(cognitive_state_path(guild_id))
-        ),
-        normalize_cognitive_state=normalize_cognitive_state,
-        load_recent_raw=lambda guild_id: read_jsonl(memory_raw_path(guild_id)),
-        load_recent_facts=read_fact_rows,
-        format_memory_rows_for_llm=format_memory_rows_for_llm,
-        compact_memory_text=compact_memory_text,
-        ask_router_llm=ask_router_llm,
-        current_turn_id=current_turn_id,
-        clean_text=clean_text,
-        normalize_question_policy_mapping=normalize_question_policy_mapping,
-        router_route_timeout_sec=ROUTER_ROUTE_TIMEOUT_SEC,
-        cognitive_timeout_sec=COGNITIVE_TIMEOUT_SEC,
-        router_llm_enabled=ROUTER_LLM_ENABLED,
-        router_route_max_tokens=ROUTER_ROUTE_MAX_TOKENS,
-        log=print,
-    )
-
-
-def build_cognitive_state_runtime_deps() -> CognitiveStateRuntimeDeps:
-    return CognitiveStateRuntimeDeps(
-        attach_current_task=_attach_current_task,
-        detach_task=_detach_task,
-        cognitive_locks=cognitive_locks,
-        collect_memory_layers=collect_memory_layers,
-        layered_summary_text=layered_summary_text,
-        normalize_cognitive_state=normalize_cognitive_state,
-        read_layered_cognitive_state=read_layered_cognitive_state,
-        get_matching_speculative_policy=get_matching_speculative_policy,
-        fast_path_policy=fast_path_policy,
-        session_state_snapshot=session_state_snapshot,
-        build_fast_cognitive_state=build_fast_cognitive_state,
-        write_json_file=write_json_file,
-        cognitive_state_path=cognitive_state_path,
-        recent_memory_groups=recent_memory_groups,
-        memory_cognitive_raw_limit=MEMORY_COGNITIVE_RAW_LIMIT,
-        build_cognitive_state_messages=build_cognitive_state_messages,
-        ask_router_llm=ask_router_llm,
-        cognitive_max_tokens=COGNITIVE_MAX_TOKENS,
-        cognitive_timeout_sec=COGNITIVE_TIMEOUT_SEC,
-        current_turn_id=current_turn_id,
-        is_context_size_error=is_context_size_error,
-        build_compact_cognitive_state_messages=build_compact_cognitive_state_messages,
-        should_log_voice_timing=should_log_voice_timing,
-        build_cognitive_fallback_state=build_cognitive_fallback_state,
-        finalize_cognitive_state=finalize_cognitive_state,
-        log=print,
-    )
 
 
 cognitive_refresh_composition = CognitiveRefreshComposition(
