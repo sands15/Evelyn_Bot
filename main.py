@@ -494,9 +494,6 @@ from evelyn_core.control_page_http import (
     control_page_cors_middleware,
 )
 from evelyn_core.control_page_server import open_path_with_system, open_url_with_system
-from evelyn_core.control_page_server_start_runtime import (
-    ControlPageServerStartRuntimeDeps,
-)
 from evelyn_core.control_page_composition_runtime import (
     ControlPageComposition,
     ControlPageCompositionDeps,
@@ -3175,10 +3172,6 @@ def _set_control_page_start_lock(lock: asyncio.Lock) -> None:
     control_page_start_lock = lock
 
 
-def build_control_page_server_start_runtime_deps() -> ControlPageServerStartRuntimeDeps:
-    return control_page_http_composition.build_server_start_deps()
-
-
 control_page_composition = ControlPageComposition(
     ControlPageCompositionDeps(
         ui=lambda: build_control_page_ui_runtime_deps(),
@@ -3193,7 +3186,7 @@ control_page_composition = ControlPageComposition(
         search=lambda: build_control_page_search_runtime_deps(),
         text=lambda: build_control_page_text_runtime_deps(),
         input=lambda: build_control_page_input_runtime_deps(),
-        server_start=lambda: build_control_page_server_start_runtime_deps(),
+        server_start=lambda: control_page_http_composition.build_server_start_deps(),
         build_voice_continuity_snapshot=_build_voice_barge_in_continuity_snapshot,
         cheap_tool_decision=cheap_control_page_tool_decision,
         welcome_locks=control_page_welcome_locks,

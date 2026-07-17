@@ -172,16 +172,22 @@ class ControlPageServerStartRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.runner)
 
     def test_main_delegates_control_page_server_start_to_runtime_module(self) -> None:
-        source = (
+        runtime_source = (
             REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "control_page_composition_runtime.py"
         ).read_text(encoding="utf-8")
-        start = source.index("async def start_server(")
-        end = source.index("class ControlPageHttpComposition", start)
-        function_source = source[start:end]
+        start = runtime_source.index("async def start_server(")
+        end = runtime_source.index("class ControlPageHttpComposition", start)
+        function_source = runtime_source[start:end]
+        main_source = (REPO_ROOT / "main.py").read_text(encoding="utf-8")
 
         self.assertIn("start_control_page_server_from_runtime(", function_source)
         self.assertNotIn("web.AppRunner(", function_source)
         self.assertNotIn("app.router.add_get", function_source)
+        self.assertNotIn("def build_control_page_server_start_runtime_deps(", main_source)
+        self.assertIn(
+            "server_start=lambda: control_page_http_composition.build_server_start_deps()",
+            main_source,
+        )
 
 
 if __name__ == "__main__":
