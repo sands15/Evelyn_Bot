@@ -550,11 +550,9 @@ from evelyn_core.control_page_status_tool_composition import (
     ControlPageStatusToolComposition,
     ControlPageStatusToolCompositionDeps,
 )
-from evelyn_core.control_page_search_runtime import (
-    ControlPageSearchRuntimeDeps,
-)
-from evelyn_core.control_page_text_runtime import (
-    ControlPageTextRuntimeDeps,
+from evelyn_core.control_page_search_text_dependency_composition import (
+    ControlPageSearchTextDependencyComposition,
+    ControlPageSearchTextDependencyCompositionDeps,
 )
 from evelyn_core.control_page_tool_runtime import (
     ControlPageInputRuntimeDeps,
@@ -3059,52 +3057,64 @@ build_control_page_tool_runtime_deps = (
 )
 
 
-def build_control_page_search_runtime_deps() -> ControlPageSearchRuntimeDeps:
-    return ControlPageSearchRuntimeDeps(
-        control_page_effective_guild_id=control_page_effective_guild_id,
-        control_page_session_key=control_page_session_key,
-        get_conversation_history=get_conversation_history,
-        build_route_decision=build_route_decision,
+control_page_search_text_dependency_composition = ControlPageSearchTextDependencyComposition(
+    ControlPageSearchTextDependencyCompositionDeps(
+        effective_guild_id=lambda *args, **kwargs: control_page_effective_guild_id(
+            *args, **kwargs
+        ),
+        session_key_for_guild=lambda *args, **kwargs: control_page_session_key(
+            *args, **kwargs
+        ),
+        get_conversation_history=lambda *args, **kwargs: get_conversation_history(
+            *args, **kwargs
+        ),
         monotonic=time.monotonic,
-        execute_search_then_answer_action=execute_search_then_answer_action,
-        synthesize_tool_result_with_main_llm=synthesize_tool_result_with_main_llm,
-        clean_text=clean_text,
-        get_session_lock=lambda session_key: session_locks.setdefault(session_key, asyncio.Lock()),
-        append_history=append_history,
-        mark_session_active=mark_session_active,
+        execute_search_then_answer_action=lambda *args, **kwargs: execute_search_then_answer_action(
+            *args, **kwargs
+        ),
+        synthesize_tool_result_with_main_llm=lambda *args, **kwargs: synthesize_tool_result_with_main_llm(
+            *args, **kwargs
+        ),
+        session_locks=session_locks,
+        lock_factory=asyncio.Lock,
+        append_history=lambda *args, **kwargs: append_history(*args, **kwargs),
+        mark_session_active=lambda *args, **kwargs: mark_session_active(*args, **kwargs),
         active_conversation_text_sec=ACTIVE_CONVERSATION_TEXT_SEC,
-        build_topic_id=build_topic_id,
-        schedule_local_control_tts=schedule_local_control_tts,
-        current_turn_id=current_turn_id,
-        format_display_text=format_display_text,
-        fallback_answer_for=fallback_answer_for,
+        build_topic_id=lambda *args, **kwargs: build_topic_id(*args, **kwargs),
+        schedule_local_control_tts=lambda *args, **kwargs: schedule_local_control_tts(
+            *args, **kwargs
+        ),
+        current_turn_id=lambda *args, **kwargs: current_turn_id(*args, **kwargs),
+        format_display_text=lambda *args, **kwargs: format_display_text(*args, **kwargs),
+        fallback_answer_for=lambda *args, **kwargs: fallback_answer_for(*args, **kwargs),
+        begin_user_text_turn=lambda *args, **kwargs: begin_user_text_turn(*args, **kwargs),
+        replace_room_turn_scope=lambda *args, **kwargs: replace_room_turn_scope(*args, **kwargs),
+        attach_current_task=lambda *args, **kwargs: _attach_current_task(*args, **kwargs),
+        resolve_pending_proactive_question_for_turn=lambda *args, **kwargs: resolve_pending_proactive_question_for_turn(
+            *args, **kwargs
+        ),
+        ask_llm_streaming=lambda *args, **kwargs: ask_llm_streaming(*args, **kwargs),
+        session_state_snapshot=lambda *args, **kwargs: session_state_snapshot(*args, **kwargs),
+        maybe_append_proactive_question=lambda *args, **kwargs: maybe_append_proactive_question(
+            *args, **kwargs
+        ),
+        finish_assistant_text_turn=lambda *args, **kwargs: finish_assistant_text_turn(
+            *args, **kwargs
+        ),
+        log_voice_bottleneck_summary=lambda *args, **kwargs: log_voice_bottleneck_summary(
+            *args, **kwargs
+        ),
+        detach_task=lambda *args, **kwargs: _detach_task(*args, **kwargs),
+        clear_room_turn_scope=lambda *args, **kwargs: clear_room_turn_scope(*args, **kwargs),
     )
+)
 
-
-def build_control_page_text_runtime_deps() -> ControlPageTextRuntimeDeps:
-    return ControlPageTextRuntimeDeps(
-        effective_guild_id=control_page_effective_guild_id,
-        session_key_for_guild=control_page_session_key,
-        get_session_lock=lambda session_key: session_locks.setdefault(session_key, asyncio.Lock()),
-        begin_user_text_turn=begin_user_text_turn,
-        turn_scope_factory=TurnScope,
-        replace_room_turn_scope=replace_room_turn_scope,
-        attach_current_task=_attach_current_task,
-        monotonic=time.monotonic,
-        resolve_pending_proactive_question_for_turn=resolve_pending_proactive_question_for_turn,
-        ask_llm_streaming=ask_llm_streaming,
-        clean_text=clean_text,
-        strip_omnivoice_tags=strip_omnivoice_tags,
-        session_state_snapshot=session_state_snapshot,
-        maybe_append_proactive_question=maybe_append_proactive_question,
-        finish_assistant_text_turn=finish_assistant_text_turn,
-        log_voice_bottleneck_summary=log_voice_bottleneck_summary,
-        schedule_local_control_tts=schedule_local_control_tts,
-        format_display_text=format_display_text,
-        fallback_answer_for=fallback_answer_for,
-        detach_task=_detach_task,
-        clear_room_turn_scope=clear_room_turn_scope,
-    )
+build_control_page_search_runtime_deps = (
+    control_page_search_text_dependency_composition.build_control_page_search_runtime_deps
+)
+build_control_page_text_runtime_deps = (
+    control_page_search_text_dependency_composition.build_control_page_text_runtime_deps
+)
 
 
 def build_control_page_input_runtime_deps() -> ControlPageInputRuntimeDeps:
