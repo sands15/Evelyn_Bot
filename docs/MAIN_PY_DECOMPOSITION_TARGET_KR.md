@@ -1,6 +1,6 @@
 # main.py 분리 목표
 
-Last reviewed: 2026-07-17
+Last reviewed: 2026-07-18
 
 ## 2026-07-17 Control Page turn + voice delivery dependency composition 연속 배치
 
@@ -1294,3 +1294,25 @@ Last reviewed: 2026-07-17
 - 마지막 3/3 범위:
   - custom `print` console filter의 owner 이동으로 `main.py` top-level 함수 0개 달성.
   - 전체 엄격 회귀, 실제 process smoke, 구조/초기화 순서/잔존 wrapper 감사와 최종 문서화를 수행.
+
+## 2026-07-18 3회 종료 계획 — 3/3 최종 종료
+
+- console output:
+  - custom `print` 구현을 `ConsoleOutputFilter` owner로 이동.
+  - 기존 allowlist prefix, 비활성 시 전체 전달, 활성 시 허용 로그만 전달하는 동작을 보존.
+- 최종 구조:
+  - `main.py`: 3,681→3,680 lines.
+  - top-level 및 nested function definition 0개, `global` statement 0개, dependency-builder definition 0개.
+  - 3회 종료 구간 전체: 3,884→3,680 lines, top-level functions 50→0개.
+  - `main.py`는 환경/설정, bot 생성, typed composition wiring, event/command 등록, runtime 진입만 담당함.
+- 원래 줄 수 목표에 대한 최종 판단:
+  - 초기 문서의 1,500~2,500줄은 대략적인 크기 목표였으나, 현재 구조는 암시적 registry나 `globals()` 대신 명시적 typed dependency wiring을 유지해 3,680줄임.
+  - 줄 수만 줄이기 위해 wiring을 대형 bootstrap 파일 하나로 옮기는 것은 책임 분리가 아니라 파일 이동이므로 종료 조건으로 채택하지 않음.
+  - 구현/판정/상태 mutation 함수가 `main.py`에 0개이고 각 owner 모듈 테스트가 존재하는 semantic boundary를 최종 종료 기준으로 사용함.
+- 검증:
+  - console-output 집중 테스트와 실제 `main.py` control-page process smoke 통과.
+  - `EVELYN_RUN_REAL_MAIN_INTEGRATION=1`, `PYTHONWARNINGS=error::ResourceWarning` 전체 discovery: 1,283 tests 통과.
+  - 전체 runtime/test compile, AST function/global/build-deps 감사, replacement character 및 잔존 definition 검색 통과.
+  - 런타임/컨테이너 재시작 및 원격 push 없음.
+
+이 시점에서 `main.py` 분해 작업은 종료 상태다. 이후의 줄 수 감소는 기능 분해가 아니라 wiring 표현 최적화라는 별도 작업으로 취급한다.
