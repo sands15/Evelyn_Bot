@@ -1247,3 +1247,26 @@ Last reviewed: 2026-07-17
   - `EVELYN_RUN_REAL_MAIN_INTEGRATION=1`, `PYTHONWARNINGS=error::ResourceWarning` 전체 discovery: 1,265 tests 통과.
   - Python compile, 중복 top-level 함수, 잔존 dependency builder 함수, replacement character를 재감사.
   - 런타임/컨테이너 재시작 및 원격 push 없음.
+
+## 2026-07-18 3회 종료 계획 — 1/3 policy entrypoint 정리
+
+- Discord settings:
+  - settings dependency를 모듈 로딩 중 한 번만 조립하고 8개 entrypoint wrapper를 `partial` binding으로 교체.
+- voice/session policy:
+  - live TTS/LLM pressure를 호출마다 읽는 `RuntimeModeResolver`를 추가.
+  - runtime mode 2개, voice probability 1개, Discord session policy 6개 wrapper를 callable/partial binding으로 교체.
+- response/speculative policy:
+  - response-output dependency를 한 번만 조립하고 output 4개, speculative 3개, search-followup 1개 wrapper를 partial binding으로 교체.
+  - 실제 main smoke가 `fast_path_policy`의 eager binding 순서 문제를 검출했고, route composition 생성 뒤로 binding을 이동해 수정.
+- 구조 결과:
+  - 이번 회차 대상 wrapper 25개가 `main.py` top-level 함수에서 제거됨.
+  - `main.py`: 3,884→3,773 lines, top-level functions 50→25개, 함수 정의 span 합계 299→126 lines.
+  - 25개 잔여 함수 중 24개는 8 lines 이하이며 `get_stt_model`만 13 lines.
+- 검증:
+  - 세 배치 모두 실제 `main.py` control-page process smoke 통과.
+  - `EVELYN_RUN_REAL_MAIN_INTEGRATION=1`, `PYTHONWARNINGS=error::ResourceWarning` 전체 discovery: 1,269 tests 통과.
+  - Python compile, 중복 top-level 함수명, 대상 wrapper 잔존, replacement character를 재감사.
+  - 런타임/컨테이너 재시작 및 원격 push 없음.
+- 다음 2/3 범위:
+  - resource entrypoint 9개와 control-page/global state bridge 10개를 composition/runtime owner로 이동.
+  - instance lock과 voice worker 등 수명주기 entrypoint의 최종 소유 경계를 함께 정리.
