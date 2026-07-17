@@ -249,7 +249,9 @@ class ConversationObservabilityCompositionTests(unittest.TestCase):
         composition_index = source.index(
             "conversation_observability_composition = ConversationObservabilityComposition("
         )
-        autonomy_index = source.index("def build_autonomy_runtime_factory_deps(")
+        autonomy_index = source.index(
+            "autonomy_runtime_composition = AutonomyRuntimeComposition("
+        )
         continuity_index = source.index(
             "voice_barge_in_continuity_tracker = VoiceBargeInContinuityTracker("
         )

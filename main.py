@@ -63,9 +63,9 @@ from evelyn_core.autonomy_router import (
     ResolveRouteExecutorRuntimeDeps,
     RoutedAutonomyExecutor,
 )
-from evelyn_core.autonomy_runtime_factory import (
-    AutonomyRuntimeFactoryDeps,
-    get_or_create_autonomy_engine_from_runtime,
+from evelyn_core.autonomy_runtime_composition import (
+    AutonomyRuntimeComposition,
+    AutonomyRuntimeCompositionDeps,
 )
 from evelyn_core.config import *
 from evelyn_core.instance_lock_runtime import (
@@ -1330,8 +1330,8 @@ configure_tts_playback_logging(log_turn_event)
 # =========================================================
 # 유틸
 # =========================================================
-def build_autonomy_runtime_factory_deps() -> AutonomyRuntimeFactoryDeps:
-    return AutonomyRuntimeFactoryDeps(
+autonomy_runtime_composition = AutonomyRuntimeComposition(
+    AutonomyRuntimeCompositionDeps(
         autonomy_engines=autonomy_engines,
         get_guild=bot.get_guild,
         get_observe_channel_ids=get_guild_observe_channel_ids,
@@ -1353,18 +1353,18 @@ def build_autonomy_runtime_factory_deps() -> AutonomyRuntimeFactoryDeps:
         read_cached_cognitive_state=read_cached_cognitive_state,
         read_vision_watch_state=read_vision_watch_state,
         local_tts_snapshot=local_tts_playback_manager.snapshot,
-        serialize_local_mic_runtime_state=serialize_local_mic_runtime_state,
+        serialize_local_mic_runtime_state=lambda: serialize_local_mic_runtime_state(),
         get_active_session_count=lambda: len(active_session_until),
         get_inflight_llm_requests=lambda: inflight_llm_requests,
         last_autonomy_ping_at=last_autonomy_ping_at,
         answer_promises_search=answer_promises_search,
         append_history=append_history,
-        schedule_memory_update=schedule_memory_update,
+        schedule_memory_update=lambda *args, **kwargs: schedule_memory_update(*args, **kwargs),
         mark_session_active=mark_session_active,
         build_topic_id=build_topic_id,
         mark_self_state_assistant_output=mark_self_state_assistant_output,
         select_and_mark_proactive_question=select_and_mark_proactive_question,
-        update_cognitive_state=update_cognitive_state,
+        update_cognitive_state=lambda *args, **kwargs: update_cognitive_state(*args, **kwargs),
         autonomy_cognitive_stale_sec=AUTONOMY_COGNITIVE_STALE_SEC,
         autonomy_cognitive_min_interval_sec=AUTONOMY_COGNITIVE_MIN_INTERVAL_SEC,
         autonomy_cognitive_force_refresh_sec=AUTONOMY_COGNITIVE_FORCE_REFRESH_SEC,
@@ -1373,13 +1373,12 @@ def build_autonomy_runtime_factory_deps() -> AutonomyRuntimeFactoryDeps:
         active_conversation_text_sec=ACTIVE_CONVERSATION_TEXT_SEC,
         autonomy_poll_interval_sec=AUTONOMY_POLL_INTERVAL_SEC,
     )
+)
 
-
-def get_or_create_autonomy_engine(guild_id: int) -> AutonomyEngine:
-    return get_or_create_autonomy_engine_from_runtime(
-        guild_id,
-        deps=build_autonomy_runtime_factory_deps(),
-    )
+build_autonomy_runtime_factory_deps = (
+    autonomy_runtime_composition.build_autonomy_runtime_factory_deps
+)
+get_or_create_autonomy_engine = autonomy_runtime_composition.get_or_create_autonomy_engine
 
 def build_guild_runtime_reset_deps() -> GuildRuntimeResetDeps:
     return build_guild_runtime_reset_deps_from_runtime(

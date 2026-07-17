@@ -254,7 +254,9 @@ class ConversationSessionCompositionTests(unittest.TestCase):
         composition_index = source.index(
             "conversation_session_composition = ConversationSessionComposition("
         )
-        autonomy_index = source.index("def build_autonomy_runtime_factory_deps(")
+        autonomy_index = source.index(
+            "autonomy_runtime_composition = AutonomyRuntimeComposition("
+        )
         self.assertLess(composition_index, autonomy_index)
         self.assertIn(
             "append_history = conversation_session_composition.append_history",

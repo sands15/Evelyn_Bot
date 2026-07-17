@@ -161,13 +161,19 @@ class AutonomyRuntimeFactoryTests(unittest.IsolatedAsyncioTestCase):
 
     def test_main_delegates_autonomy_factory_to_runtime_module(self) -> None:
         source = (REPO_ROOT / "main.py").read_text(encoding="utf-8")
-        start = source.index("def get_or_create_autonomy_engine(")
+        composition_source = (
+            RUNTIME_ROOT / "evelyn_core" / "autonomy_runtime_composition.py"
+        ).read_text(encoding="utf-8")
+        start = source.index(
+            "get_or_create_autonomy_engine = autonomy_runtime_composition.get_or_create_autonomy_engine"
+        )
         end = source.index("def build_guild_runtime_reset_deps(", start)
         function_source = source[start:end]
 
-        self.assertIn("get_or_create_autonomy_engine_from_runtime(", function_source)
-        self.assertNotIn("async def _default_observe", function_source)
-        self.assertNotIn("AutonomyEngine(", function_source)
+        self.assertIn("autonomy_runtime_composition.get_or_create_autonomy_engine", function_source)
+        self.assertIn("get_or_create_autonomy_engine_from_runtime(", composition_source)
+        self.assertNotIn("async def _default_observe", composition_source)
+        self.assertNotIn("AutonomyEngine(", composition_source)
 
 
 if __name__ == "__main__":

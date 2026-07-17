@@ -1,0 +1,115 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any, Callable, MutableMapping
+
+from .autonomy import AutonomyEngine
+from .autonomy_runtime_factory import (
+    AutonomyRuntimeFactoryDeps,
+    get_or_create_autonomy_engine_from_runtime,
+)
+
+
+@dataclass(frozen=True)
+class AutonomyRuntimeCompositionDeps:
+    autonomy_engines: MutableMapping[int, AutonomyEngine]
+    get_guild: Callable[[int], Any]
+    get_observe_channel_ids: Callable[..., Any]
+    get_command_only_channel_ids: Callable[..., Any]
+    session_followup_targets: MutableMapping[str, Any]
+    clean_text: Callable[[str], str]
+    send_discord_text: Callable[..., Any]
+    question_cooldown_hit: Callable[..., Any]
+    evaluate_proactive_question_gate: Callable[..., Any]
+    proactive_question_scope_candidates: Callable[..., Any]
+    select_question_to_ask: Callable[..., Any]
+    runtime_session_key: Callable[..., str]
+    get_conversation_history: Callable[..., Any]
+    pick_recent_user_text: Callable[..., Any]
+    localtime: Callable[..., Any]
+    monotonic: Callable[[], float]
+    autonomy_last_cognitive_refresh_at: MutableMapping[int, float]
+    autonomy_cognitive_refresh_tasks: MutableMapping[int, Any]
+    read_cached_cognitive_state: Callable[..., Any]
+    read_vision_watch_state: Callable[..., Any]
+    local_tts_snapshot: Callable[[], dict[str, Any]]
+    serialize_local_mic_runtime_state: Callable[[], dict[str, Any]]
+    get_active_session_count: Callable[[], int]
+    get_inflight_llm_requests: Callable[[], int]
+    last_autonomy_ping_at: MutableMapping[int, float]
+    answer_promises_search: Callable[..., Any]
+    append_history: Callable[..., Any]
+    schedule_memory_update: Callable[..., Any]
+    mark_session_active: Callable[..., Any]
+    build_topic_id: Callable[..., str]
+    mark_self_state_assistant_output: Callable[..., Any]
+    select_and_mark_proactive_question: Callable[..., Any]
+    update_cognitive_state: Callable[..., Any]
+    autonomy_cognitive_stale_sec: float
+    autonomy_cognitive_min_interval_sec: float
+    autonomy_cognitive_force_refresh_sec: float
+    vision_watch_interval_sec: float
+    active_conversation_text_question_sec: float
+    active_conversation_text_sec: float
+    autonomy_poll_interval_sec: float
+
+
+class AutonomyRuntimeComposition:
+    """Owns the live dependency root for per-guild autonomy engines."""
+
+    def __init__(self, deps: AutonomyRuntimeCompositionDeps) -> None:
+        self.deps = deps
+
+    def build_autonomy_runtime_factory_deps(self) -> AutonomyRuntimeFactoryDeps:
+        deps = self.deps
+        return AutonomyRuntimeFactoryDeps(
+            autonomy_engines=deps.autonomy_engines,
+            get_guild=deps.get_guild,
+            get_observe_channel_ids=deps.get_observe_channel_ids,
+            get_command_only_channel_ids=deps.get_command_only_channel_ids,
+            session_followup_targets=deps.session_followup_targets,
+            clean_text=deps.clean_text,
+            send_discord_text=deps.send_discord_text,
+            question_cooldown_hit=deps.question_cooldown_hit,
+            evaluate_proactive_question_gate=deps.evaluate_proactive_question_gate,
+            proactive_question_scope_candidates=deps.proactive_question_scope_candidates,
+            select_question_to_ask=deps.select_question_to_ask,
+            runtime_session_key=deps.runtime_session_key,
+            get_conversation_history=deps.get_conversation_history,
+            pick_recent_user_text=deps.pick_recent_user_text,
+            localtime=deps.localtime,
+            monotonic=deps.monotonic,
+            autonomy_last_cognitive_refresh_at=deps.autonomy_last_cognitive_refresh_at,
+            autonomy_cognitive_refresh_tasks=deps.autonomy_cognitive_refresh_tasks,
+            read_cached_cognitive_state=deps.read_cached_cognitive_state,
+            read_vision_watch_state=deps.read_vision_watch_state,
+            local_tts_snapshot=deps.local_tts_snapshot,
+            serialize_local_mic_runtime_state=deps.serialize_local_mic_runtime_state,
+            get_active_session_count=deps.get_active_session_count,
+            get_inflight_llm_requests=deps.get_inflight_llm_requests,
+            last_autonomy_ping_at=deps.last_autonomy_ping_at,
+            answer_promises_search=deps.answer_promises_search,
+            append_history=deps.append_history,
+            schedule_memory_update=deps.schedule_memory_update,
+            mark_session_active=deps.mark_session_active,
+            build_topic_id=deps.build_topic_id,
+            mark_self_state_assistant_output=deps.mark_self_state_assistant_output,
+            select_and_mark_proactive_question=deps.select_and_mark_proactive_question,
+            update_cognitive_state=deps.update_cognitive_state,
+            autonomy_cognitive_stale_sec=deps.autonomy_cognitive_stale_sec,
+            autonomy_cognitive_min_interval_sec=deps.autonomy_cognitive_min_interval_sec,
+            autonomy_cognitive_force_refresh_sec=deps.autonomy_cognitive_force_refresh_sec,
+            vision_watch_interval_sec=deps.vision_watch_interval_sec,
+            active_conversation_text_question_sec=deps.active_conversation_text_question_sec,
+            active_conversation_text_sec=deps.active_conversation_text_sec,
+            autonomy_poll_interval_sec=deps.autonomy_poll_interval_sec,
+        )
+
+    def get_or_create_autonomy_engine(self, guild_id: int) -> AutonomyEngine:
+        return get_or_create_autonomy_engine_from_runtime(
+            guild_id,
+            deps=self.build_autonomy_runtime_factory_deps(),
+        )
+
+
+__all__ = ["AutonomyRuntimeComposition", "AutonomyRuntimeCompositionDeps"]
