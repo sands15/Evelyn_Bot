@@ -1165,3 +1165,24 @@ Last reviewed: 2026-07-17
   - 각 배치 후 실제 `main.py` control-page process smoke 통과.
   - `EVELYN_RUN_REAL_MAIN_INTEGRATION=1`, `PYTHONWARNINGS=error::ResourceWarning` 전체 discovery: 1,238 tests 통과.
   - 런타임/컨테이너 재시작 및 원격 push 없음.
+
+## 2026-07-17 voice support/response와 Control Page start 경계 연속 분리
+
+- `voice_audio_support_dependency_composition.py`
+  - TTS warmup, voice timing, OmniVoice request/source dependency builder 4개를 하나의 audio-support root로 이동.
+  - OmniVoice source의 request dependency factory는 composition 내부 method로 직접 연결.
+  - Control Page composition 뒤에서 제공되는 startup component callback은 late-bound wiring으로 초기화 순서를 보존.
+- `voice_response_dependency_composition.py`
+  - voice response, main LLM, one-shot LLM, voice stream chunk dependency builder 4개를 하나의 response root로 이동.
+  - LLM route composition 뒤에서 제공되는 route/model/search callback은 late-bound wiring으로 순환 초기화 없이 연결.
+- Control Page server-start boundary:
+  - 한 줄짜리 `build_control_page_server_start_runtime_deps` wrapper를 제거.
+  - `ControlPageCompositionDeps.server_start`가 `control_page_http_composition.build_server_start_deps()`를 직접 late-bind하도록 단순화.
+- 구조 결과:
+  - 대상 builder 9개가 `main.py` top-level 함수에서 제거됨.
+  - `main.py`: 3,899 lines, top-level functions 76개.
+- 검증:
+  - 각 신규 composition 경계 테스트와 기존 server-start runtime 테스트 통과.
+  - 각 배치 후 실제 `main.py` control-page process smoke 통과.
+  - `EVELYN_RUN_REAL_MAIN_INTEGRATION=1`, `PYTHONWARNINGS=error::ResourceWarning` 전체 discovery: 1,244 tests 통과.
+  - 런타임/컨테이너 재시작 및 원격 push 없음.
