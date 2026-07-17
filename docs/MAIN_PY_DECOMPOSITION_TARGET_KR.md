@@ -1,6 +1,32 @@
 # main.py 분리 목표
 
-Last reviewed: 2026-07-15
+Last reviewed: 2026-07-17
+
+## 2026-07-17 composition root 연속 배치
+
+- 자율행동 engine factory dependency root를 `autonomy_runtime_composition.py`로 이동했다.
+  - `build_autonomy_runtime_factory_deps`와 `get_or_create_autonomy_engine` 공개 계약은 composition binding으로 유지했다.
+  - 뒤에서 만들어지는 cognitive/memory/local-mic adapter는 lazy callback으로 연결했다.
+  - 커밋: `b817155 refactor: extract autonomy runtime composition`.
+- guild runtime reset dependency root를 `guild_runtime_reset_composition.py`로 이동했다.
+  - session/room/task/lock/TTS/cognitive mutable state 경계를 명시적 typed deps로 묶었다.
+  - `build_guild_runtime_reset_deps`와 `reset_guild_runtime_state` 공개 계약은 composition binding으로 유지했다.
+  - 커밋: `5fc3956 refactor: extract guild runtime reset composition`.
+- Control Page status/tool dependency root를 `control_page_status_tool_composition.py`로 이동했다.
+  - 뒤에서 생성되는 `ControlPageComposition`은 lazy getter로 연결해 순환 초기화 경계를 보존했다.
+  - 기존 tool builder가 존재하지 않는 `MAX_HISTORY`를 지연 참조하던 문제를 `MAX_HISTORY_ITEMS`로 바로잡았다.
+  - local-mic/voice tool 정적 계약 테스트도 새 composition 경계를 따르도록 갱신했다.
+  - 커밋: `b08eb5b refactor: extract control page status tool composition`,
+    `21223c2 test: follow control page status tool boundary`.
+- 누적 결과:
+  - `main.py`: 3,971줄 → 3,955줄
+  - 최상위 함수: 120개 → 114개
+  - 새 composition 경계 테스트 9개 추가
+  - 각 배치마다 실제 `main.py` Control Page process smoke 통과
+  - 실제 `main.py` smoke와 `PYTHONWARNINGS=error::ResourceWarning`를 포함한 전체 unittest 1,202개 통과
+  - Python `compileall`, `git diff --check`, replacement character/중복 최상위 정의 검사 통과
+- 런타임/컨테이너 재시작과 외부 push는 하지 않았다.
+- 다음 후보는 voice audio ingress/wake/STT/transcript dependency builder 군이다.
 
 ## 2026-07-15 분해 재개
 
