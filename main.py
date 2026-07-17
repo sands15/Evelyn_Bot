@@ -45,632 +45,247 @@ except ImportError:
     fcntl = None
 
 from evelyn_core.audio import (
-    apply_light_denoise,
-    compute_voice_band_metrics,
-    compute_waveform_activity_stats,
-    downmix_int16_stereo_to_mono_float,
-    is_likely_environment_noise,
-    is_probably_silent,
-    prepare_stt_audio,
-    resample_audio_float,
-    slice_audio_window,
+    apply_light_denoise, compute_voice_band_metrics, compute_waveform_activity_stats, downmix_int16_stereo_to_mono_float, is_likely_environment_noise,
+    is_probably_silent, prepare_stt_audio, resample_audio_float, slice_audio_window,
 )
 from evelyn_core.autonomy import AutonomyEngine
-from evelyn_core.autonomy_observation_state import (
-    pick_recent_user_text,
-)
-from evelyn_core.autonomy_router import (
-    ResolveRouteExecutorRuntimeDeps,
-    RoutedAutonomyExecutor,
-    get_routed_autonomy_executor_from_runtime,
-)
-from evelyn_core.autonomy_runtime_composition import (
-    AutonomyRuntimeComposition,
-    AutonomyRuntimeCompositionDeps,
-)
+from evelyn_core.autonomy_observation_state import pick_recent_user_text
+from evelyn_core.autonomy_router import ResolveRouteExecutorRuntimeDeps, RoutedAutonomyExecutor, get_routed_autonomy_executor_from_runtime
+from evelyn_core.autonomy_runtime_composition import AutonomyRuntimeComposition, AutonomyRuntimeCompositionDeps
 from evelyn_core.config import *
 from evelyn_core.console_output import ConsoleOutputFilter
 from evelyn_core.main_runtime_config import *
-from evelyn_core.instance_lock_runtime import (
-    InstanceLockManager,
-    build_instance_lock_runtime_deps,
-)
-from evelyn_core.guild_runtime_reset_composition import (
-    GuildRuntimeResetComposition,
-    GuildRuntimeResetCompositionDeps,
-)
+from evelyn_core.instance_lock_runtime import InstanceLockManager, build_instance_lock_runtime_deps
+from evelyn_core.guild_runtime_reset_composition import GuildRuntimeResetComposition, GuildRuntimeResetCompositionDeps
 from evelyn_core.memory import *
 from evelyn_core.minecraft_autonomy_client import MinecraftAutonomyClient
 from evelyn_core.memory_writebehind import (
-    mark_memory_writer_status,
-    memory_writebehind_task_key,
-    run_memory_writebehind_steps,
-    should_replace_existing_memory_task,
+    mark_memory_writer_status, memory_writebehind_task_key, run_memory_writebehind_steps, should_replace_existing_memory_task,
 )
 from evelyn_core.minecraft_assets import MinecraftItemIconLoader
 from evelyn_core.memory_vault import (
-    ensure_memory_vault_layout,
-    export_memory_graph,
-    memory_vault_user_note,
-    memory_vault_user_snapshot,
-    update_memory_vault_user_note,
+    ensure_memory_vault_layout, export_memory_graph, memory_vault_user_note, memory_vault_user_snapshot, update_memory_vault_user_note,
 )
 from evelyn_core.json_safety import safe_json_dumps, safe_json_value
 from evelyn_core.minecraft_runtime_snapshot import (
-    attach_minecraft_runtime_snapshot,
-    extract_minecraft_recent_activity_live,
-    format_minecraft_state_summary,
-    format_position_short,
-    normalize_inventory_slot_entries,
-    normalize_inventory_top_entries,
-    normalize_inventory_used_slots,
-    normalize_minecraft_item_name,
-    merge_voyager_status_into_state,
-    summarize_inventory_top,
+    attach_minecraft_runtime_snapshot, extract_minecraft_recent_activity_live, format_minecraft_state_summary, format_position_short,
+    normalize_inventory_slot_entries, normalize_inventory_top_entries, normalize_inventory_used_slots, normalize_minecraft_item_name,
+    merge_voyager_status_into_state, summarize_inventory_top,
 )
-from evelyn_core.minecraft_live_state_runtime import (
-    MinecraftLiveObservationRuntimeDeps,
-    observe_live_minecraft_state_from_runtime,
-)
-from evelyn_core.minecraft_mode_composition import (
-    MinecraftModeComposition,
-    MinecraftModeCompositionDeps,
-)
-from evelyn_core.question_shaping import (
-    enforce_question_limits,
-)
-from evelyn_core.proactive_questions import (
-    evaluate_proactive_question_gate,
-    select_question_to_ask,
-)
+from evelyn_core.minecraft_live_state_runtime import MinecraftLiveObservationRuntimeDeps, observe_live_minecraft_state_from_runtime
+from evelyn_core.minecraft_mode_composition import MinecraftModeComposition, MinecraftModeCompositionDeps
+from evelyn_core.question_shaping import enforce_question_limits
+from evelyn_core.proactive_questions import evaluate_proactive_question_gate, select_question_to_ask
 from evelyn_core.cognitive_policy_state import (
-    apply_ask_gating,
-    ask_confidence_threshold_for_source,
-    build_cognitive_fallback_state,
-    build_fast_cognitive_state,
-    finalize_cognitive_state,
-    policy_response_for_state,
-    read_cached_cognitive_state,
-    read_layered_cognitive_state,
+    apply_ask_gating, ask_confidence_threshold_for_source, build_cognitive_fallback_state, build_fast_cognitive_state, finalize_cognitive_state,
+    policy_response_for_state, read_cached_cognitive_state, read_layered_cognitive_state,
 )
 from evelyn_core.cognitive_followup_policy import should_force_search_followup_from_runtime
-from evelyn_core.llm_cognitive_dependency_composition import (
-    LlmCognitiveDependencyComposition,
-    LlmCognitiveDependencyCompositionDeps,
-)
-from evelyn_core.cognitive_refresh_composition import (
-    CognitiveRefreshComposition,
-    CognitiveRefreshCompositionDeps,
-)
+from evelyn_core.llm_cognitive_dependency_composition import LlmCognitiveDependencyComposition, LlmCognitiveDependencyCompositionDeps
+from evelyn_core.cognitive_refresh_composition import CognitiveRefreshComposition, CognitiveRefreshCompositionDeps
 from evelyn_core.self_model import (
-    mark_self_state_assistant_output,
-    record_self_identity_turn,
-    render_self_judgment_context,
-    render_self_state_context,
-    update_self_state_for_turn,
+    mark_self_state_assistant_output, record_self_identity_turn, render_self_judgment_context, render_self_state_context, update_self_state_for_turn,
 )
 from evelyn_core.vision_watch import (
-    capture_vision_watch_frame,
-    read_vision_watch_state,
-    render_vision_watch_context,
-    update_vision_watch_analysis,
-    vision_watch_scene_is_unreliable,
+    capture_vision_watch_frame, read_vision_watch_state, render_vision_watch_context, update_vision_watch_analysis, vision_watch_scene_is_unreliable,
 )
 from evelyn_core.vision_quality import build_vision_quality
-from evelyn_core.vision_request_composition import (
-    VisionRequestComposition,
-    VisionRequestCompositionDeps,
-)
-from evelyn_core.vision_watch_composition import (
-    VisionWatchComposition,
-    VisionWatchCompositionDeps,
-)
+from evelyn_core.vision_request_composition import VisionRequestComposition, VisionRequestCompositionDeps
+from evelyn_core.vision_watch_composition import VisionWatchComposition, VisionWatchCompositionDeps
 from evelyn_core.text import (
-    apply_stt_post_corrections,
-    clean_text,
-    clean_tts_text,
-    contains_leading_wake_word,
-    contains_wake_word,
-    extract_leading_wake_alias,
-    fuzzy_leading_wake_alias,
-    is_user_echo_answer,
-    is_similar,
-    looks_like_brief_filler_text,
-    looks_like_gibberish_probe,
-    looks_like_repetitive_noise_text,
-    normalize_omnivoice_tags,
-    normalize_voice_text,
-    normalized_wake_words,
-    strip_leading_voice_fillers,
-    strip_model_channel_tags,
-    strip_omnivoice_tags,
-    strip_response_action_tags,
-    strip_voice_wake_word,
-    visible_text,
+    apply_stt_post_corrections, clean_text, clean_tts_text, contains_leading_wake_word, contains_wake_word, extract_leading_wake_alias,
+    fuzzy_leading_wake_alias, is_user_echo_answer, is_similar, looks_like_brief_filler_text, looks_like_gibberish_probe, looks_like_repetitive_noise_text,
+    normalize_omnivoice_tags, normalize_voice_text, normalized_wake_words, strip_leading_voice_fillers, strip_model_channel_tags, strip_omnivoice_tags,
+    strip_response_action_tags, strip_voice_wake_word, visible_text,
 )
 from evelyn_core.session_memory_state import (
-    SessionStateStore,
-    build_topic_id as build_session_topic_id,
-    is_casual_call_or_status_question as session_is_casual_call_or_status_question,
+    SessionStateStore, build_topic_id as build_session_topic_id, is_casual_call_or_status_question as session_is_casual_call_or_status_question,
     new_turn_id as new_session_turn_id,
 )
-from evelyn_core.conversation_policy_dependency_composition import (
-    ConversationPolicyDependencyComposition,
-    ConversationPolicyDependencyCompositionDeps,
-)
+from evelyn_core.conversation_policy_dependency_composition import ConversationPolicyDependencyComposition, ConversationPolicyDependencyCompositionDeps
 from evelyn_core.room_speaker_activity import RoomSpeakerActivityStore
 from evelyn_core.response_output_policy import (
-    cleanup_assistant_display_artifacts,
-    extract_json_object_from_runtime,
-    fallback_answer_for,
-    fallback_for_unrequested_minecraft_leak_from_runtime,
-    format_display_text_from_runtime,
-    parse_response_action_tag,
-    sanitize_unrequested_minecraft_leak_from_runtime,
+    cleanup_assistant_display_artifacts, extract_json_object_from_runtime, fallback_answer_for, fallback_for_unrequested_minecraft_leak_from_runtime,
+    format_display_text_from_runtime, parse_response_action_tag, sanitize_unrequested_minecraft_leak_from_runtime,
     should_label_question_response_from_runtime,
 )
-from evelyn_core.search_followup_policy import (
-    answer_promises_search,
-    strip_search_answer_sources,
-)
+from evelyn_core.search_followup_policy import answer_promises_search, strip_search_answer_sources
 from evelyn_core.search_tools import search_duckduckgo as search_duckduckgo_payload
-from evelyn_core.runtime_status_context import (
-    answer_gpu_runtime_status_query,
-    load_runtime_gpu_status,
-    load_runtime_recent_errors,
-    probe_runtime_tcp_service,
-)
-from evelyn_core.response_context_composition import (
-    ResponseContextComposition,
-    ResponseContextCompositionDeps,
-)
+from evelyn_core.runtime_status_context import answer_gpu_runtime_status_query, load_runtime_gpu_status, load_runtime_recent_errors, probe_runtime_tcp_service
+from evelyn_core.response_context_composition import ResponseContextComposition, ResponseContextCompositionDeps
 from evelyn_core.runtime_mode_policy import RuntimeModeResolver, apply_runtime_mode_policy
-from evelyn_core.runtime_state import (
-    AsyncWorkerStarter,
-    LazyResourceProvider,
-    RuntimeCounter,
-    RuntimeValue,
-)
-from evelyn_core.route_fallback_policy import (
-    classify_llm_route_fallback,
-)
-from evelyn_core.fast_path_policy_composition import (
-    FastPathPolicyComposition,
-    FastPathPolicyCompositionDeps,
-)
+from evelyn_core.runtime_state import AsyncWorkerStarter, LazyResourceProvider, RuntimeCounter, RuntimeValue
+from evelyn_core.route_fallback_policy import classify_llm_route_fallback
+from evelyn_core.fast_path_policy_composition import FastPathPolicyComposition, FastPathPolicyCompositionDeps
 from evelyn_core.tool_awareness_policy import build_tool_awareness_context
 from evelyn_core.local_tool_diagnostic_context import build_local_tool_diagnostic_context
 from evelyn_core.http_session_runtime import HttpSessionProvider
-from evelyn_core.llm_context_assembly_composition import (
-    LlmContextAssemblyComposition,
-    LlmContextAssemblyCompositionDeps,
-)
+from evelyn_core.llm_context_assembly_composition import LlmContextAssemblyComposition, LlmContextAssemblyCompositionDeps
 from evelyn_core.llm_warmup_runtime import LlmWarmupRuntimeDeps
 from evelyn_core.llm_route_composition_runtime import LlmRouteComposition, LlmRouteCompositionDeps
 from evelyn_core.voice_io_composition_runtime import VoiceIoComposition, VoiceIoCompositionDeps
-from evelyn_core.voice_support_composition_runtime import (
-    VoiceSupportComposition,
-    VoiceSupportCompositionDeps,
-)
-from evelyn_core.voice_audio_support_dependency_composition import (
-    VoiceAudioSupportDependencyComposition,
-    VoiceAudioSupportDependencyCompositionDeps,
-)
+from evelyn_core.voice_support_composition_runtime import VoiceSupportComposition, VoiceSupportCompositionDeps
+from evelyn_core.voice_audio_support_dependency_composition import VoiceAudioSupportDependencyComposition, VoiceAudioSupportDependencyCompositionDeps
 from evelyn_core.voice_runtime_composition_runtime import (
-    LocalMicCompositionDeps,
-    VoiceDebugCompositionDeps,
-    VoicePipelineCompositionDeps,
-    VoiceRuntimeComposition,
-    VoiceRuntimeCompositionDeps,
+    LocalMicCompositionDeps, VoiceDebugCompositionDeps, VoicePipelineCompositionDeps, VoiceRuntimeComposition, VoiceRuntimeCompositionDeps,
 )
-from evelyn_core.conversation_session_composition import (
-    ConversationSessionComposition,
-    ConversationSessionCompositionDeps,
-)
-from evelyn_core.conversation_observability_composition import (
-    ConversationObservabilityComposition,
-    ConversationObservabilityCompositionDeps,
-)
+from evelyn_core.conversation_session_composition import ConversationSessionComposition, ConversationSessionCompositionDeps
+from evelyn_core.conversation_observability_composition import ConversationObservabilityComposition, ConversationObservabilityCompositionDeps
 from evelyn_core.runtime_lifecycle_composition import (
-    RuntimeLifecycleComposition,
-    RuntimeLifecycleCompositionDeps,
-    RuntimeProcessCompositionDeps,
-    RuntimeStartupCompositionDeps,
+    RuntimeLifecycleComposition, RuntimeLifecycleCompositionDeps, RuntimeProcessCompositionDeps, RuntimeStartupCompositionDeps,
 )
 from evelyn_core.discord_app_composition_runtime import (
-    DiscordAppComposition,
-    DiscordAppCompositionDeps,
-    DiscordCommandCompositionDeps,
-    DiscordEventCompositionDeps,
+    DiscordAppComposition, DiscordAppCompositionDeps, DiscordCommandCompositionDeps, DiscordEventCompositionDeps,
 )
-from evelyn_core.search_memory_dependency_composition import (
-    SearchMemoryDependencyComposition,
-    SearchMemoryDependencyCompositionDeps,
-)
+from evelyn_core.search_memory_dependency_composition import SearchMemoryDependencyComposition, SearchMemoryDependencyCompositionDeps
 from evelyn_core.memory_context_state import build_memory_context
-from evelyn_core.startup_audio_runtime import (
-    OpusStartupRuntimeDeps,
-    SttWarmupRuntimeDeps,
-)
-from evelyn_core.startup_component_state import (
-    STARTUP_BOOT_STEPS,
-)
-from evelyn_core.voice_input_support_dependency_composition import (
-    VoiceInputSupportDependencyComposition,
-    VoiceInputSupportDependencyCompositionDeps,
-)
+from evelyn_core.startup_audio_runtime import OpusStartupRuntimeDeps, SttWarmupRuntimeDeps
+from evelyn_core.startup_component_state import STARTUP_BOOT_STEPS
+from evelyn_core.voice_input_support_dependency_composition import VoiceInputSupportDependencyComposition, VoiceInputSupportDependencyCompositionDeps
 from evelyn_core.memory_layers import collect_memory_layers
-from evelyn_core.memory_llm_context import (
-    build_cognitive_state_messages,
-    build_compact_cognitive_state_messages,
-    layered_summary_text,
-    recent_memory_groups,
-)
+from evelyn_core.memory_llm_context import build_cognitive_state_messages, build_compact_cognitive_state_messages, layered_summary_text, recent_memory_groups
 from evelyn_core.memory_update_policy import (
-    build_memory_writer_decision_for_turn,
-    build_memory_writer_decision_payload,
-    memory_refresh_inputs_for_turn,
-    plan_memory_writebehind_schedule,
-    redact_vision_text_for_memory as redact_vision_text_for_memory_payload,
-    write_memory_turn_records,
+    build_memory_writer_decision_for_turn, build_memory_writer_decision_payload, memory_refresh_inputs_for_turn, plan_memory_writebehind_schedule,
+    redact_vision_text_for_memory as redact_vision_text_for_memory_payload, write_memory_turn_records,
 )
-from evelyn_core.memory_maintenance_composition import (
-    MemoryMaintenanceComposition,
-    MemoryMaintenanceCompositionDeps,
-)
-from evelyn_core.memory_writeback_state import (
-    run_long_term_memory_update,
-)
-from control_page_runtime_health import (
-    build_control_page_runtime_health,
-    is_control_api_ready_from_runtime_services,
-)
+from evelyn_core.memory_maintenance_composition import MemoryMaintenanceComposition, MemoryMaintenanceCompositionDeps
+from evelyn_core.memory_writeback_state import run_long_term_memory_update
+from control_page_runtime_health import build_control_page_runtime_health, is_control_api_ready_from_runtime_services
 from runtime_lifecycle import (
-    launch_runtime_restart_sequence,
-    schedule_evelyn_local_shutdown as runtime_schedule_evelyn_local_shutdown,
+    launch_runtime_restart_sequence, schedule_evelyn_local_shutdown as runtime_schedule_evelyn_local_shutdown,
     schedule_evelyn_stack_shutdown as runtime_schedule_evelyn_stack_shutdown,
 )
 from evelyn_core.context_pipeline import (
-    ContextBuilder,
-    build_basic_context_packet,
-    build_context_policy_for_turn,
-    build_conversation_state_context,
-    build_memory_writer_decision,
-    build_minecraft_skill_context,
-    build_runtime_state_context,
-    build_skill_context_hint,
-    build_tool_use_decisions,
-    build_vision_context_hint,
+    ContextBuilder, build_basic_context_packet, build_context_policy_for_turn, build_conversation_state_context, build_memory_writer_decision,
+    build_minecraft_skill_context, build_runtime_state_context, build_skill_context_hint, build_tool_use_decisions, build_vision_context_hint,
     render_tool_use_context,
 )
 from evelyn_core.discord_delivery import (
-    DiscordStreamingVoiceDeliveryRequest,
-    build_streaming_voice_delivery,
-    execute_streaming_voice_delivery_plan,
-    send_discord_text,
+    DiscordStreamingVoiceDeliveryRequest, build_streaming_voice_delivery, execute_streaming_voice_delivery_plan, send_discord_text,
 )
-from evelyn_core.discord_tts_dependency_composition import (
-    DiscordTtsDependencyComposition,
-    DiscordTtsDependencyCompositionDeps,
-)
+from evelyn_core.discord_tts_dependency_composition import DiscordTtsDependencyComposition, DiscordTtsDependencyCompositionDeps
 from evelyn_core.discord_settings_runtime import (
-    build_discord_settings_runtime_deps as build_discord_settings_runtime_deps_from_main,
-    resolve_command_prefix_from_runtime,
-    add_guild_channel_setting_from_runtime,
-    get_guild_command_only_channel_ids_from_runtime,
-    get_guild_command_prefix_from_runtime,
-    get_guild_observe_channel_ids_from_runtime,
-    normalize_command_prefix_from_runtime,
-    remove_guild_channel_setting_from_runtime,
-    save_guild_channel_list_from_runtime,
-    save_guild_command_prefix_from_runtime,
+    build_discord_settings_runtime_deps as build_discord_settings_runtime_deps_from_main, resolve_command_prefix_from_runtime,
+    add_guild_channel_setting_from_runtime, get_guild_command_only_channel_ids_from_runtime, get_guild_command_prefix_from_runtime,
+    get_guild_observe_channel_ids_from_runtime, normalize_command_prefix_from_runtime, remove_guild_channel_setting_from_runtime,
+    save_guild_channel_list_from_runtime, save_guild_command_prefix_from_runtime,
 )
 from evelyn_core.discord_commands import (
-    build_autonomy_status_command_text,
-    build_channel_setting_list_reply,
-    build_command_channel_usage,
-    build_help_command_text,
-    build_minecraft_connect_reply,
-    build_minecraft_goal_missing_reply,
-    build_minecraft_goal_updated_reply,
-    build_minecraft_status_command_text,
-    build_observe_channel_usage,
-    build_prefix_current_reply,
-    build_prefix_reset_reply,
-    build_prefix_saved_reply,
-    build_reset_guild_memory_reply,
-    build_status_command_text,
-    guild_only_command_message,
-    normalize_channel_setting_action,
+    build_autonomy_status_command_text, build_channel_setting_list_reply, build_command_channel_usage, build_help_command_text,
+    build_minecraft_connect_reply, build_minecraft_goal_missing_reply, build_minecraft_goal_updated_reply, build_minecraft_status_command_text,
+    build_observe_channel_usage, build_prefix_current_reply, build_prefix_reset_reply, build_prefix_saved_reply, build_reset_guild_memory_reply,
+    build_status_command_text, guild_only_command_message, normalize_channel_setting_action,
 )
 from evelyn_core.discord_command_handlers import make_control_command_authorized_checker
-from evelyn_core.discord_app_dependency_composition import (
-    DiscordAppDependencyComposition,
-    DiscordAppDependencyCompositionDeps,
-)
-from evelyn_core.discord_ingress import (
-    build_voice_ingress_context,
-    resolve_text_thread_id,
-    normalize_voice_debug_meta,
-    voice_ingress_source,
-)
+from evelyn_core.discord_app_dependency_composition import DiscordAppDependencyComposition, DiscordAppDependencyCompositionDeps
+from evelyn_core.discord_ingress import build_voice_ingress_context, resolve_text_thread_id, normalize_voice_debug_meta, voice_ingress_source
 from evelyn_core.session_key_runtime import (
-    make_person_memory_key,
-    make_room_memory_key,
-    make_session_memory_key,
-    make_text_reply_slot_key,
-    make_text_session_key,
-    make_voice_room_session_key,
-    make_voice_session_key,
-    runtime_session_key,
+    make_person_memory_key, make_room_memory_key, make_session_memory_key, make_text_reply_slot_key, make_text_session_key, make_voice_room_session_key,
+    make_voice_session_key, runtime_session_key,
 )
-from evelyn_core.voice_delivery_dependency_composition import (
-    VoiceDeliveryDependencyComposition,
-    VoiceDeliveryDependencyCompositionDeps,
-)
-from evelyn_core.voice_tts_control_dependency_composition import (
-    VoiceTtsControlDependencyComposition,
-    VoiceTtsControlDependencyCompositionDeps,
-)
+from evelyn_core.voice_delivery_dependency_composition import VoiceDeliveryDependencyComposition, VoiceDeliveryDependencyCompositionDeps
+from evelyn_core.voice_tts_control_dependency_composition import VoiceTtsControlDependencyComposition, VoiceTtsControlDependencyCompositionDeps
 from evelyn_core.discord_session_policy import (
-    estimate_voice_like_probability_policy,
-    is_transport_corrupted_audio_policy,
-    should_require_confirm_exact_for_wake_policy,
-    should_interrupt_tts,
+    estimate_voice_like_probability_policy, is_transport_corrupted_audio_policy, should_require_confirm_exact_for_wake_policy, should_interrupt_tts,
 )
 from evelyn_core.discord_session_policy_runtime import (
-    is_short_followup_candidate_from_runtime,
-    is_tail_fragment_candidate_from_runtime,
-    is_transport_corrupted_audio_from_runtime,
-    should_ignore_short_transcription_from_runtime,
-    should_require_confirm_exact_for_wake_from_runtime,
-    should_skip_full_stt_after_wake_probe_from_runtime,
+    is_short_followup_candidate_from_runtime, is_tail_fragment_candidate_from_runtime, is_transport_corrupted_audio_from_runtime,
+    should_ignore_short_transcription_from_runtime, should_require_confirm_exact_for_wake_from_runtime, should_skip_full_stt_after_wake_probe_from_runtime,
 )
 from evelyn_core.skills import skill_registry
 from evelyn_core.skills.routing import (
-    build_chat_messages,
-    build_main_llm_payload,
-    build_route_decision_from_state,
-    decode_sse_stream_line,
-    extract_main_llm_answer_from_choice,
+    build_chat_messages, build_main_llm_payload, build_route_decision_from_state, decode_sse_stream_line, extract_main_llm_answer_from_choice,
     should_await_user_reply_for_route,
 )
-from evelyn_core.local_mic import (
-    LocalMicCaptureService,
-    resolve_local_mic_target,
-    serialize_local_mic_target,
-    should_route_discord_user_to_local_mic,
-)
-from evelyn_core.local_mic_state import (
-    normalize_voice_input_mode,
-)
-from evelyn_core.local_control_tts_runtime import (
-    build_local_control_tts_runtime_deps,
-)
-from evelyn_core.delivery_entry_composition import (
-    DiscordDeliveryEntryDeps,
-    DeliveryEntryComposition,
-    LocalDeliveryEntryDeps,
-)
-from evelyn_core.tts_interrupt_runtime import (
-    run_voice_tts_interrupt_gate_from_runtime,
-)
+from evelyn_core.local_mic import LocalMicCaptureService, resolve_local_mic_target, serialize_local_mic_target, should_route_discord_user_to_local_mic
+from evelyn_core.local_mic_state import normalize_voice_input_mode
+from evelyn_core.local_control_tts_runtime import build_local_control_tts_runtime_deps
+from evelyn_core.delivery_entry_composition import DiscordDeliveryEntryDeps, DeliveryEntryComposition, LocalDeliveryEntryDeps
+from evelyn_core.tts_interrupt_runtime import run_voice_tts_interrupt_gate_from_runtime
 from evelyn_core.local_tts_playback import LocalTtsPlaybackManager
-from evelyn_core.local_tts_dependency_composition import (
-    LocalTtsDependencyComposition,
-    LocalTtsDependencyCompositionDeps,
-)
+from evelyn_core.local_tts_dependency_composition import LocalTtsDependencyComposition, LocalTtsDependencyCompositionDeps
 from evelyn_core.local_tts_stream_runtime import cleanup_prepared_tts_item
-from evelyn_core.observability_metrics import (
-    ModelCallMetricsStore,
-    record_turn_stage_metric,
-    summarize_voice_p95_metrics,
-)
-from evelyn_core.page_urls import (
-    build_evelyn_page_url_runtime_deps,
-    resolve_evelyn_page_url_from_runtime,
-)
-from evelyn_core.query_intents import (
-    answer_current_datetime_query,
-    should_force_search_query,
-)
+from evelyn_core.observability_metrics import ModelCallMetricsStore, record_turn_stage_metric, summarize_voice_p95_metrics
+from evelyn_core.page_urls import build_evelyn_page_url_runtime_deps, resolve_evelyn_page_url_from_runtime
+from evelyn_core.query_intents import answer_current_datetime_query, should_force_search_query
 from evelyn_core.question_policy_state import (
-    QuestionPolicyState,
-    default_question_metrics,
-    extract_question_policy_from_route_meta as extract_question_policy_from_route_meta_payload,
+    QuestionPolicyState, default_question_metrics, extract_question_policy_from_route_meta as extract_question_policy_from_route_meta_payload,
     is_continuable_technical_topic as is_continuable_technical_topic_payload,
     normalize_question_policy_mapping as normalize_question_policy_mapping_payload,
-    user_frustration_with_questions as user_frustration_with_questions_payload,
-    user_wants_direct_answer as user_wants_direct_answer_payload,
+    user_frustration_with_questions as user_frustration_with_questions_payload, user_wants_direct_answer as user_wants_direct_answer_payload,
 )
-from evelyn_core.assistant_contracts import (
-    TtsSynthRequest,
-    TtsSynthResult,
-)
+from evelyn_core.assistant_contracts import TtsSynthRequest, TtsSynthResult
 from evelyn_core.assistant_prompt_contract import build_evelyn_system_prompt
 from evelyn_core.stt_model_runtime import (
-    SttModelRuntimeDeps,
-    build_stt_model_runtime_deps as build_stt_model_runtime_deps_from_runtime,
-    get_stt_model_from_runtime,
+    SttModelRuntimeDeps, build_stt_model_runtime_deps as build_stt_model_runtime_deps_from_runtime, get_stt_model_from_runtime,
     normalize_stt_language_from_runtime,
 )
 from evelyn_core.control_page_contracts import memory_panel_reply
-from evelyn_core.control_page_http import (
-    control_page_cors_middleware,
-)
+from evelyn_core.control_page_http import control_page_cors_middleware
 from evelyn_core.control_page_server import open_path_with_system, open_url_with_system
 from evelyn_core.control_page_composition_runtime import (
-    ControlPageComposition,
-    ControlPageCompositionDeps,
-    ControlPageHttpComposition,
-    ControlPageHttpCompositionDeps,
+    ControlPageComposition, ControlPageCompositionDeps, ControlPageHttpComposition, ControlPageHttpCompositionDeps,
 )
 from evelyn_core.control_page_state import (
-    ControlPageChatLogStore,
-    ControlPageMinecraftSnapshotCache,
-    ControlPageRuntimeServicesCache,
-    ControlPageUiCommandStore,
-    build_control_page_autonomy_reply_payload,
-    build_control_page_inventory_reply_payload,
-    build_control_page_local_status_text_payload,
-    build_control_page_minecraft_reply_payload,
-    build_control_page_runtime_services_error_payload,
-    build_control_page_status_text_payload,
-    build_control_page_voice_continuity_reply_payload,
-    build_control_page_voice_status_reply_payload,
-    command_status,
-    control_page_open_memory_vault_tool_reply,
-    execute_control_page_memory_tool,
-    execute_control_page_minecraft_tool,
-    execute_control_page_runtime_tool,
-    execute_control_page_voice_tool,
-    memory_vault_obsidian_url,
-    sanitize_control_page_welcome_text_payload,
+    ControlPageChatLogStore, ControlPageMinecraftSnapshotCache, ControlPageRuntimeServicesCache, ControlPageUiCommandStore,
+    build_control_page_autonomy_reply_payload, build_control_page_inventory_reply_payload, build_control_page_local_status_text_payload,
+    build_control_page_minecraft_reply_payload, build_control_page_runtime_services_error_payload, build_control_page_status_text_payload,
+    build_control_page_voice_continuity_reply_payload, build_control_page_voice_status_reply_payload, command_status,
+    control_page_open_memory_vault_tool_reply, execute_control_page_memory_tool, execute_control_page_minecraft_tool, execute_control_page_runtime_tool,
+    execute_control_page_voice_tool, memory_vault_obsidian_url, sanitize_control_page_welcome_text_payload,
 )
-from evelyn_core.control_page_ui_dependency_composition import (
-    ControlPageUiDependencyComposition,
-    ControlPageUiDependencyCompositionDeps,
-)
-from evelyn_core.control_page_state_composition import (
-    ControlPageStateComposition,
-    ControlPageStateCompositionDeps,
-)
+from evelyn_core.control_page_ui_dependency_composition import ControlPageUiDependencyComposition, ControlPageUiDependencyCompositionDeps
+from evelyn_core.control_page_state_composition import ControlPageStateComposition, ControlPageStateCompositionDeps
 from evelyn_core.control_page_runtime_services_dependency_composition import (
-    ControlPageRuntimeServicesDependencyComposition,
-    ControlPageRuntimeServicesDependencyCompositionDeps,
+    ControlPageRuntimeServicesDependencyComposition, ControlPageRuntimeServicesDependencyCompositionDeps,
 )
-from evelyn_core.control_page_snapshot_dependency_composition import (
-    ControlPageSnapshotDependencyComposition,
-    ControlPageSnapshotDependencyCompositionDeps,
-)
-from evelyn_core.control_page_status_tool_composition import (
-    ControlPageStatusToolComposition,
-    ControlPageStatusToolCompositionDeps,
-)
+from evelyn_core.control_page_snapshot_dependency_composition import ControlPageSnapshotDependencyComposition, ControlPageSnapshotDependencyCompositionDeps
+from evelyn_core.control_page_status_tool_composition import ControlPageStatusToolComposition, ControlPageStatusToolCompositionDeps
 from evelyn_core.control_page_search_text_dependency_composition import (
-    ControlPageSearchTextDependencyComposition,
-    ControlPageSearchTextDependencyCompositionDeps,
+    ControlPageSearchTextDependencyComposition, ControlPageSearchTextDependencyCompositionDeps,
 )
-from evelyn_core.control_page_input_dependency_composition import (
-    ControlPageInputDependencyComposition,
-    ControlPageInputDependencyCompositionDeps,
-)
+from evelyn_core.control_page_input_dependency_composition import ControlPageInputDependencyComposition, ControlPageInputDependencyCompositionDeps
 from evelyn_core.control_page_tools import (
-    build_control_page_all_commands,
-    build_control_page_commands,
-    build_control_page_help_reply,
-    cheap_control_page_tool_decision,
-    control_page_tool_decision_from_llm,
-    control_page_tool_policy_error,
-    control_page_tool_reply_from_execution,
-    control_page_tool_registry_prompt,
+    build_control_page_all_commands, build_control_page_commands, build_control_page_help_reply, cheap_control_page_tool_decision,
+    control_page_tool_decision_from_llm, control_page_tool_policy_error, control_page_tool_reply_from_execution, control_page_tool_registry_prompt,
     should_route_control_page_tool_candidate,
 )
 from evelyn_core.tts_playback import (
-    CachedWaveAudioSource,
-    OmniVoicePCMStream,
-    StreamingVoiceDelivery,
-    TTSQueueSink,
-    TtsPlaybackManager,
-    TtsSourcePlaybackRequest,
-    TtsStreamingPlaybackRequest,
-    TtsPlaybackTracker,
-    add_omnivoice_stream_contract,
-    clear_tts_playback_tracking,
-    configure_tts_playback_logging,
-    get_tracked_tts_playback,
-    is_tracked_tts_playback_active,
-    prefetch_tts_sources,
-    resolve_cached_tts_audio_path,
-    split_tts_sentences,
-    tracked_tts_playback_count,
-    tracked_tts_playback_guild_ids,
+    CachedWaveAudioSource, OmniVoicePCMStream, StreamingVoiceDelivery, TTSQueueSink, TtsPlaybackManager, TtsSourcePlaybackRequest,
+    TtsStreamingPlaybackRequest, TtsPlaybackTracker, add_omnivoice_stream_contract, clear_tts_playback_tracking, configure_tts_playback_logging,
+    get_tracked_tts_playback, is_tracked_tts_playback_active, prefetch_tts_sources, resolve_cached_tts_audio_path, split_tts_sentences,
+    tracked_tts_playback_count, tracked_tts_playback_guild_ids,
 )
 from evelyn_core.turn_trace import TURN_SUMMARY_EVENTS, build_turn_summary_payload, write_turn_trace_event
 from evelyn_core.turn_lifecycle import TurnScope, TurnScopeRegistry, TurnState
 from evelyn_core.voice_stt_flow import (
-    apply_fuzzy_wake_near_miss,
-    apply_strict_wake_confirm_policy,
-    build_final_transcript_flow,
-    decide_final_wake_veto,
-    get_matching_speculative_policy_from_runtime,
-    interpret_wake_probe_result,
-    remember_speculative_policy_from_runtime,
-    run_full_stt_with_optional_rescore,
-    run_partial_stt_flow,
-    speculate_from_committed_stt_from_runtime,
+    apply_fuzzy_wake_near_miss, apply_strict_wake_confirm_policy, build_final_transcript_flow, decide_final_wake_veto,
+    get_matching_speculative_policy_from_runtime, interpret_wake_probe_result, remember_speculative_policy_from_runtime, run_full_stt_with_optional_rescore,
+    run_partial_stt_flow, speculate_from_committed_stt_from_runtime,
 )
 from evelyn_core.stt_client import transcribe_audio16k_via_service
-from evelyn_core.speaker_verification import (
-    SpeakerVerificationConfig,
-    SpeakerVerificationResult,
-    SpeakerVerifier,
-    speaker_verification_applies,
-)
-from evelyn_core.voice_barge_in import (
-    VoiceUtteranceMergeRecord,
-    maybe_merge_barge_in_utterance,
-)
-from evelyn_core.voice_barge_in_continuity import (
-    VOICE_BARGE_IN_REASON_CODE,
-    VOICE_BARGE_IN_REASON_LABEL,
-    VoiceBargeInContinuityTracker,
-)
-from evelyn_core.voice_utterance import (
-    UtteranceAssemblyConfig,
-)
+from evelyn_core.speaker_verification import SpeakerVerificationConfig, SpeakerVerificationResult, SpeakerVerifier, speaker_verification_applies
+from evelyn_core.voice_barge_in import VoiceUtteranceMergeRecord, maybe_merge_barge_in_utterance
+from evelyn_core.voice_barge_in_continuity import VOICE_BARGE_IN_REASON_CODE, VOICE_BARGE_IN_REASON_LABEL, VoiceBargeInContinuityTracker
+from evelyn_core.voice_utterance import UtteranceAssemblyConfig
 from evelyn_core.voice_orchestration import (
-    apply_voice_ingress_dequeue_debug_meta,
-    build_rejected_voice_turn,
-    build_voice_ingress_item,
-    enqueue_voice_ingress_item,
-    evaluate_voice_ingress_dequeue,
+    apply_voice_ingress_dequeue_debug_meta, build_rejected_voice_turn, build_voice_ingress_item, enqueue_voice_ingress_item, evaluate_voice_ingress_dequeue,
 )
-from evelyn_core.voice_member_pipeline_dependency_composition import (
-    VoiceMemberPipelineDependencyComposition,
-    VoiceMemberPipelineDependencyCompositionDeps,
-)
-from evelyn_core.voice_execution_dependency_composition import (
-    VoiceExecutionDependencyComposition,
-    VoiceExecutionDependencyCompositionDeps,
-)
-from evelyn_core.voice_response_dependency_composition import (
-    VoiceResponseDependencyComposition,
-    VoiceResponseDependencyCompositionDeps,
-)
-from evelyn_core.voice_turn_dependency_composition import (
-    VoiceTurnDependencyComposition,
-    VoiceTurnDependencyCompositionDeps,
-)
-from evelyn_core.voice_ingress_dependency_composition import (
-    VoiceIngressDependencyComposition,
-    VoiceIngressDependencyCompositionDeps,
-)
-from evelyn_core.voice_transcription_dependency_composition import (
-    VoiceTranscriptionDependencyComposition,
-    VoiceTranscriptionDependencyCompositionDeps,
-)
+from evelyn_core.voice_member_pipeline_dependency_composition import VoiceMemberPipelineDependencyComposition, VoiceMemberPipelineDependencyCompositionDeps
+from evelyn_core.voice_execution_dependency_composition import VoiceExecutionDependencyComposition, VoiceExecutionDependencyCompositionDeps
+from evelyn_core.voice_response_dependency_composition import VoiceResponseDependencyComposition, VoiceResponseDependencyCompositionDeps
+from evelyn_core.voice_turn_dependency_composition import VoiceTurnDependencyComposition, VoiceTurnDependencyCompositionDeps
+from evelyn_core.voice_ingress_dependency_composition import VoiceIngressDependencyComposition, VoiceIngressDependencyCompositionDeps
+from evelyn_core.voice_transcription_dependency_composition import VoiceTranscriptionDependencyComposition, VoiceTranscriptionDependencyCompositionDeps
 from evelyn_core.voice_pipeline import (
-    DeliveryPlan,
-    RouteDecision,
-    TranscriptResult,
-    VoiceSegment,
-    build_answer_payload,
-    build_answer_payload_from_text,
-    build_delivery_plan,
-    build_route_decision,
-    build_transcript_result,
-    build_voice_reply_request,
-    build_voice_segment,
-    classify_dialogue_turn,
+    DeliveryPlan, RouteDecision, TranscriptResult, VoiceSegment, build_answer_payload, build_answer_payload_from_text, build_delivery_plan,
+    build_route_decision, build_transcript_result, build_voice_reply_request, build_voice_segment, classify_dialogue_turn,
 )
 from evelyn_voice import EvelynVoiceClient
-
 
 control_page_minecraft_item_icon_loader = MinecraftItemIconLoader(PROJECT_ROOT)
 _ORIGINAL_PRINT = builtins.print
 turn_trace_file_lock = threading.Lock()
-
 
 print = ConsoleOutputFilter(
     enabled=VOICE_CONSOLE_ONLY_STT_AND_REPLY,
@@ -678,14 +293,12 @@ print = ConsoleOutputFilter(
     allowed_prefixes=ALLOWED_CONSOLE_PREFIXES,
 )
 
-
 if VOICE_CONSOLE_ONLY_STT_AND_REPLY:
     builtins.print = print
     logging.getLogger().setLevel(logging.CRITICAL)
     logging.getLogger("discord").setLevel(logging.CRITICAL)
     logging.getLogger("aiohttp").setLevel(logging.CRITICAL)
     logging.getLogger("evelyn_voice").setLevel(logging.CRITICAL)
-
 
 # =========================================================
 # 봇 설정
@@ -736,13 +349,11 @@ room_reply_in_progress: dict[str, bool] = {}
 voice_connect_locks: dict[int, asyncio.Lock] = {}
 instance_lock_path = Path(os.getenv("EVELYN_INSTANCE_LOCK_PATH", str(Path(__file__).resolve().with_name(".evelyn_bot.lock"))))
 
-
 discord_settings_runtime_deps = build_discord_settings_runtime_deps_from_main(
     default_command_prefix=DEFAULT_COMMAND_PREFIX,
     prefix_cache=guild_prefix_cache,
     now=time.time,
 )
-
 
 instance_lock_manager = InstanceLockManager(
     build_instance_lock_runtime_deps(instance_lock_path)
@@ -750,9 +361,7 @@ instance_lock_manager = InstanceLockManager(
 release_instance_lock = instance_lock_manager.release
 acquire_instance_lock = instance_lock_manager.acquire
 
-
 atexit.register(release_instance_lock)
-
 
 normalize_command_prefix = partial(
     normalize_command_prefix_from_runtime,
@@ -786,7 +395,6 @@ remove_guild_channel_setting = partial(
     remove_guild_channel_setting_from_runtime,
     deps=discord_settings_runtime_deps,
 )
-
 
 bot = commands.Bot(
     command_prefix=lambda _bot, message: commands.when_mentioned_or(
@@ -991,7 +599,6 @@ SKILL_DISPATCH_CACHE_TTL_SEC = 300.0
 SKILL_DISPATCH_REPEAT_WINDOW_SEC = 5.0
 SKILL_DISPATCH_CACHE_MAX = 1024
 
-
 conversation_session_composition = ConversationSessionComposition(
     ConversationSessionCompositionDeps(
         session=build_session_turn_runtime_deps,
@@ -1112,7 +719,6 @@ register_drop_reason = conversation_observability_composition.register_drop_reas
 
 configure_tts_playback_logging(log_turn_event)
 
-
 # =========================================================
 # 유틸
 # =========================================================
@@ -1205,7 +811,6 @@ build_guild_runtime_reset_deps = (
     guild_runtime_reset_composition.build_guild_runtime_reset_deps
 )
 reset_guild_runtime_state = guild_runtime_reset_composition.reset_guild_runtime_state
-
 
 voice_barge_in_continuity_tracker = VoiceBargeInContinuityTracker(
     target_count=VOICE_BARGE_IN_CONTINUITY_TARGET,
@@ -1302,7 +907,6 @@ build_voice_ingress_entrypoint_deps = (
     voice_turn_dependency_composition.build_voice_ingress_entrypoint_deps
 )
 
-
 compute_runtime_mode = RuntimeModeResolver(
     tts_backlog_get=lambda: tracked_tts_playback_count(tts_playback_tracker),
     inflight_llm_requests_get=inflight_llm_requests_counter.get,
@@ -1313,7 +917,6 @@ estimate_voice_like_probability = partial(
     body_rms_min=VOICE_WAVEFORM_BODY_RMS_MIN,
 )
 
-
 fast_path_policy_composition = FastPathPolicyComposition(
     FastPathPolicyCompositionDeps(
         clean_text=clean_text,
@@ -1323,7 +926,6 @@ fast_path_policy_composition = FastPathPolicyComposition(
 )
 
 build_fast_path_policy_runtime_deps = fast_path_policy_composition.build_runtime_deps
-
 
 discord_session_policy_runtime_deps = build_discord_session_policy_runtime_deps()
 should_ignore_short_transcription = partial(
@@ -1350,7 +952,6 @@ is_tail_fragment_candidate = partial(
     is_tail_fragment_candidate_from_runtime,
     deps=discord_session_policy_runtime_deps,
 )
-
 
 response_output_policy_runtime_deps = build_response_output_policy_runtime_deps()
 should_label_question_response = partial(
@@ -1380,7 +981,6 @@ get_matching_speculative_policy = partial(
     is_similar=is_similar,
     monotonic=time.monotonic,
 )
-
 
 llm_cognitive_dependency_composition = LlmCognitiveDependencyComposition(
     LlmCognitiveDependencyCompositionDeps(
@@ -1463,7 +1063,6 @@ should_force_search_followup = partial(
     deps=cognitive_followup_runtime_deps,
 )
 
-
 response_context_composition = ResponseContextComposition(
     ResponseContextCompositionDeps(
         runtime_status_enabled=RUNTIME_STATUS_CONTEXT_ENABLED,
@@ -1502,7 +1101,6 @@ build_main_response_guidance_runtime_deps = (
     response_context_composition.build_main_response_guidance_runtime_deps
 )
 
-
 vision_request_composition = VisionRequestComposition(
     VisionRequestCompositionDeps(
         screenshot_dir=VISION_SCREENSHOT_DIR,
@@ -1534,7 +1132,6 @@ build_live_vision_context_runtime_deps = (
 build_live_vision_context = vision_request_composition.build_live_vision_context
 build_vision_watch_prompt = vision_request_composition.build_vision_watch_prompt
 vision_watch_scene_looks_bad = vision_request_composition.vision_watch_scene_looks_bad
-
 
 vision_watch_composition = VisionWatchComposition(
     VisionWatchCompositionDeps(
@@ -1568,7 +1165,6 @@ run_vision_watch_once = vision_watch_composition.run_vision_watch_once
 vision_watch_loop = vision_watch_composition.vision_watch_loop
 ensure_vision_watch_started = vision_watch_composition.ensure_vision_watch_started
 stop_vision_watch_task = vision_watch_composition.stop_vision_watch_task
-
 
 llm_context_assembly_composition = LlmContextAssemblyComposition(
     LlmContextAssemblyCompositionDeps(
@@ -1615,7 +1211,6 @@ llm_context_assembly_composition = LlmContextAssemblyComposition(
 
 build_llm_context_assembly_deps = llm_context_assembly_composition.build_runtime_deps
 
-
 cognitive_refresh_composition = CognitiveRefreshComposition(
     CognitiveRefreshCompositionDeps(
         state=build_cognitive_state_runtime_deps,
@@ -1636,12 +1231,10 @@ refresh_cognitive_state_in_background = (
 )
 schedule_cognitive_refresh = cognitive_refresh_composition.schedule_cognitive_refresh
 
-
 redact_vision_text_for_memory = partial(
     redact_vision_text_for_memory_payload,
     vision_memory_write_enabled=VISION_MEMORY_WRITE_ENABLED,
 )
-
 
 search_memory_dependency_composition = SearchMemoryDependencyComposition(
     SearchMemoryDependencyCompositionDeps(
@@ -1728,7 +1321,6 @@ build_search_followup_runtime_deps = (
     search_memory_dependency_composition.build_search_followup_runtime_deps
 )
 
-
 memory_maintenance_composition = MemoryMaintenanceComposition(
     MemoryMaintenanceCompositionDeps(
         memory_update=build_memory_update_runtime_deps,
@@ -1763,9 +1355,7 @@ schedule_memory_vault_maintenance = (
 )
 schedule_memory_update = memory_maintenance_composition.schedule_memory_update
 
-
 record_search_followup_queued = search_followup_queued_counter.increment
-
 
 runtime_lifecycle_composition = RuntimeLifecycleComposition(
     RuntimeLifecycleCompositionDeps(
@@ -1854,7 +1444,6 @@ schedule_evelyn_local_shutdown = runtime_lifecycle_composition.schedule_evelyn_l
 shutdown_bot_process = runtime_lifecycle_composition.shutdown_bot_process
 run_local_only_mode = runtime_lifecycle_composition.run_local_only_mode
 
-
 evelyn_page_url_runtime_deps = build_evelyn_page_url_runtime_deps(
     project_root=PROJECT_ROOT,
     configured_page_url=EVELYN_PAGE_URL,
@@ -1864,7 +1453,6 @@ resolve_evelyn_page_url = partial(
     resolve_evelyn_page_url_from_runtime,
     deps=evelyn_page_url_runtime_deps,
 )
-
 
 voice_runtime_composition = VoiceRuntimeComposition(
     VoiceRuntimeCompositionDeps(
@@ -1987,7 +1575,6 @@ ensure_local_mic_service_started = voice_runtime_composition.ensure_local_mic_se
 
 atexit.register(stop_local_mic_service)
 
-
 voice_audio_support_dependency_composition = VoiceAudioSupportDependencyComposition(
     VoiceAudioSupportDependencyCompositionDeps(
         get_http_session=get_http_session,
@@ -2041,7 +1628,6 @@ build_omnivoice_source_runtime_deps = (
     voice_audio_support_dependency_composition.build_omnivoice_source_runtime_deps
 )
 
-
 # =========================================================
 # STT
 # =========================================================
@@ -2056,7 +1642,6 @@ stt_model_runtime_deps = build_stt_model_runtime_deps_from_runtime(
     log=print,
 )
 get_stt_model = partial(get_stt_model_from_runtime, deps=stt_model_runtime_deps)
-
 
 voice_input_support_dependency_composition = VoiceInputSupportDependencyComposition(
     VoiceInputSupportDependencyCompositionDeps(
@@ -2100,7 +1685,6 @@ build_stt_transcription_runtime_deps = (
 build_discord_voice_connection_runtime_deps = (
     voice_input_support_dependency_composition.build_discord_voice_connection_runtime_deps
 )
-
 
 voice_support_composition = VoiceSupportComposition(
     VoiceSupportCompositionDeps(
@@ -2169,7 +1753,6 @@ ensure_listening_voice_client = voice_support_composition.ensure_listening_voice
 ensure_voice_client = voice_support_composition.ensure_voice_client
 restore_last_voice_channel = voice_support_composition.restore_last_voice_channel
 
-
 voice_tts_control_dependency_composition = VoiceTtsControlDependencyComposition(
     VoiceTtsControlDependencyCompositionDeps(
         tts_playback_manager=tts_playback_manager,
@@ -2223,7 +1806,6 @@ build_voice_tts_interrupt_gate_deps = (
     voice_tts_control_dependency_composition.build_voice_tts_interrupt_gate_deps
 )
 
-
 discord_tts_dependency_composition = DiscordTtsDependencyComposition(
     DiscordTtsDependencyCompositionDeps(
         is_local_speaker_voice_client=is_local_speaker_voice_client,
@@ -2259,7 +1841,6 @@ build_discord_tts_stream_runtime_deps = (
     discord_tts_dependency_composition.build_discord_tts_stream_runtime_deps
 )
 
-
 local_tts_dependency_composition = LocalTtsDependencyComposition(
     LocalTtsDependencyCompositionDeps(
         playback_manager=local_tts_playback_manager,
@@ -2291,7 +1872,6 @@ build_local_tts_single_runtime_deps = (
 build_local_tts_stream_runtime_deps = (
     local_tts_dependency_composition.build_local_tts_stream_runtime_deps
 )
-
 
 delivery_entry_composition = DeliveryEntryComposition(
     LocalDeliveryEntryDeps(
@@ -2333,7 +1913,6 @@ start_streaming_local_voice_delivery = (
 )
 schedule_local_control_tts = delivery_entry_composition.schedule_local_control_tts
 start_streaming_voice_delivery = delivery_entry_composition.start_streaming_voice_delivery
-
 
 # =========================================================
 # LLM
@@ -2412,17 +1991,14 @@ build_voice_stream_chunk_deps = (
     voice_response_dependency_composition.build_voice_stream_chunk_deps
 )
 
-
 DEFAULT_INTERNAL_ROUTES = {"main_direct", "policy_short_circuit", "search_executor", "routing", "delivery"}
 DISABLED_MAIN_APP_SKILL_ROUTES = {"minecraft"}
-
 
 build_route_executor_runtime_deps = partial(
     ResolveRouteExecutorRuntimeDeps,
     get_autonomy_engine=lambda guild_id: autonomy_engines.get(guild_id),
     create_autonomy_engine=get_or_create_autonomy_engine,
 )
-
 
 get_minecraft_client = LazyResourceProvider(
     MinecraftAutonomyClient,
@@ -2433,7 +2009,6 @@ get_routed_autonomy_executor = partial(
     autonomy_engines=autonomy_engines,
     executor_type=RoutedAutonomyExecutor,
 )
-
 
 build_minecraft_live_observation_runtime_deps = partial(
     MinecraftLiveObservationRuntimeDeps,
@@ -2446,13 +2021,11 @@ build_minecraft_live_observation_runtime_deps = partial(
     expired_after_sec=CONTROL_PAGE_MINECRAFT_CACHE_MAX_STALE_SEC,
 )
 
-
 minecraft_live_observation_runtime_deps = build_minecraft_live_observation_runtime_deps()
 observe_live_minecraft_state = partial(
     observe_live_minecraft_state_from_runtime,
     deps=minecraft_live_observation_runtime_deps,
 )
-
 
 minecraft_mode_composition = MinecraftModeComposition(
     MinecraftModeCompositionDeps(
@@ -2467,7 +2040,6 @@ minecraft_mode_composition = MinecraftModeComposition(
 wait_for_minecraft_ready = minecraft_mode_composition.wait_for_minecraft_ready
 enable_minecraft_mode = minecraft_mode_composition.enable_minecraft_mode
 disable_minecraft_mode = minecraft_mode_composition.disable_minecraft_mode
-
 
 control_page_ui_dependency_composition = ControlPageUiDependencyComposition(
     ControlPageUiDependencyCompositionDeps(
@@ -2520,7 +2092,6 @@ build_control_page_welcome_runtime_deps = (
     control_page_ui_dependency_composition.build_control_page_welcome_runtime_deps
 )
 
-
 control_page_snapshot_dependency_composition = ControlPageSnapshotDependencyComposition(
     ControlPageSnapshotDependencyCompositionDeps(
         control_page=lambda: control_page_composition,
@@ -2565,7 +2136,6 @@ build_control_page_background_tasks_runtime_deps = (
     control_page_snapshot_dependency_composition.build_control_page_background_tasks_runtime_deps
 )
 
-
 control_page_runtime_services_dependency_composition = (
     ControlPageRuntimeServicesDependencyComposition(
         ControlPageRuntimeServicesDependencyCompositionDeps(
@@ -2602,7 +2172,6 @@ build_control_page_runtime_services_runtime_deps = (
 build_control_page_runtime_services_probe_runtime_deps = (
     control_page_runtime_services_dependency_composition.build_control_page_runtime_services_probe_runtime_deps
 )
-
 
 control_page_status_tool_composition = ControlPageStatusToolComposition(
     ControlPageStatusToolCompositionDeps(
@@ -2670,7 +2239,6 @@ build_control_page_tool_runtime_deps = (
     control_page_status_tool_composition.build_control_page_tool_runtime_deps
 )
 
-
 control_page_search_text_dependency_composition = ControlPageSearchTextDependencyComposition(
     ControlPageSearchTextDependencyCompositionDeps(
         effective_guild_id=lambda *args, **kwargs: control_page_effective_guild_id(
@@ -2730,7 +2298,6 @@ build_control_page_text_runtime_deps = (
     control_page_search_text_dependency_composition.build_control_page_text_runtime_deps
 )
 
-
 control_page_input_dependency_composition = ControlPageInputDependencyComposition(
     ControlPageInputDependencyCompositionDeps(
         control_page=lambda: control_page_composition,
@@ -2746,7 +2313,6 @@ control_page_input_dependency_composition = ControlPageInputDependencyCompositio
 build_control_page_input_runtime_deps = (
     control_page_input_dependency_composition.build_control_page_input_runtime_deps
 )
-
 
 control_page_state_composition = ControlPageStateComposition(
     ControlPageStateCompositionDeps(
@@ -2789,10 +2355,8 @@ control_page_state_composition = ControlPageStateComposition(
 
 build_control_page_state = control_page_state_composition.build_control_page_state
 
-
 open_control_page_path_with_system = open_path_with_system
 open_control_page_url_with_system = open_url_with_system
-
 
 control_page_composition = ControlPageComposition(
     ControlPageCompositionDeps(
@@ -2878,10 +2442,8 @@ startup_component_done = control_page_composition.startup_component_done
 build_control_page_boot_progress = control_page_composition.build_boot_progress
 start_control_page_server = control_page_composition.start_server
 
-
 increment_inflight_llm_requests = inflight_llm_requests_counter.increment
 decrement_inflight_llm_requests = inflight_llm_requests_counter.decrement
-
 
 voice_execution_dependency_composition = VoiceExecutionDependencyComposition(
     VoiceExecutionDependencyCompositionDeps(
@@ -2943,7 +2505,6 @@ build_voice_route_execution_deps = (
 build_voice_main_llm_streaming_deps = (
     voice_execution_dependency_composition.build_voice_main_llm_streaming_deps
 )
-
 
 voice_delivery_dependency_composition = VoiceDeliveryDependencyComposition(
     VoiceDeliveryDependencyCompositionDeps(
@@ -3013,7 +2574,6 @@ build_discord_text_reply_runtime_deps = (
     voice_delivery_dependency_composition.build_discord_text_reply_runtime_deps
 )
 
-
 llm_route_composition = LlmRouteComposition(
     LlmRouteCompositionDeps(
         fast_path=lambda: build_fast_path_policy_runtime_deps(),
@@ -3077,7 +2637,6 @@ maybe_handle_short_circuit_route = llm_route_composition.maybe_handle_short_circ
 maybe_execute_registered_route = llm_route_composition.maybe_execute_registered_route
 execute_main_llm_streaming_turn = llm_route_composition.execute_main_llm_streaming_turn
 ask_llm_streaming = llm_route_composition.ask_llm_streaming
-
 
 # =========================================================
 # 음성 입력 처리
@@ -3151,7 +2710,6 @@ build_voice_wake_probe_runtime_deps = (
     voice_ingress_dependency_composition.build_voice_wake_probe_runtime_deps
 )
 
-
 voice_transcription_dependency_composition = VoiceTranscriptionDependencyComposition(
     VoiceTranscriptionDependencyCompositionDeps(
         build_partial_stt_window=lambda *args, **kwargs: build_partial_stt_window(
@@ -3204,7 +2762,6 @@ build_voice_stt_execution_deps = (
 build_voice_transcript_finalize_deps = (
     voice_transcription_dependency_composition.build_voice_transcript_finalize_deps
 )
-
 
 voice_member_pipeline_dependency_composition = VoiceMemberPipelineDependencyComposition(
     VoiceMemberPipelineDependencyCompositionDeps(
@@ -3283,7 +2840,6 @@ build_voice_member_audio_pipeline_deps = (
     voice_member_pipeline_dependency_composition.build_voice_member_audio_pipeline_deps
 )
 
-
 voice_io_composition = VoiceIoComposition(
     VoiceIoCompositionDeps(
         reply_side_effects=lambda: build_voice_reply_side_effect_deps(),
@@ -3337,7 +2893,6 @@ ask_llm_and_speak_streaming = voice_io_composition.ask_llm_and_speak_streaming
 stream_text_reply = voice_io_composition.stream_text_reply
 process_member_audio = voice_io_composition.process_member_audio
 _process_member_audio_impl = voice_io_composition.process_member_audio_impl
-
 
 discord_app_dependency_composition = DiscordAppDependencyComposition(
     DiscordAppDependencyCompositionDeps(
@@ -3394,9 +2949,7 @@ build_discord_command_session_runtime_deps = (
     discord_app_dependency_composition.build_discord_command_session_runtime_deps
 )
 
-
 is_control_command_authorized = make_control_command_authorized_checker(allowed_user_ids=ALLOWED_RESTART_USER_IDS)
-
 
 discord_app_composition = DiscordAppComposition(
     DiscordAppCompositionDeps(
@@ -3505,7 +3058,6 @@ observe_channel_command_error = discord_app_composition.control_command_error
 command_channel_command_error = discord_app_composition.control_command_error
 reset_guild_memory_error = discord_app_composition.control_command_error
 _mark_text_session_from_command = discord_app_composition.mark_text_session_from_command
-
 
 # =========================================================
 # 실행
