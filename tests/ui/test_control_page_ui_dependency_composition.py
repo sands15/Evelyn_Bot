@@ -19,7 +19,7 @@ class ControlPageUiDependencyCompositionTests(unittest.TestCase):
             "control_page_ui_dependency_composition = ControlPageUiDependencyComposition("
         )
         snapshot_index = source.index(
-            "def build_control_page_minecraft_live_snapshot_runtime_deps("
+            "control_page_snapshot_dependency_composition = ControlPageSnapshotDependencyComposition("
         )
 
         self.assertLess(composition_index, snapshot_index)
