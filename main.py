@@ -453,9 +453,9 @@ from evelyn_core.voice_timing_runtime import (
     VoiceTimingRuntimeDeps,
 )
 from evelyn_core.local_tts_playback import LocalTtsPlaybackManager
-from evelyn_core.local_tts_stream_runtime import (
-    LocalTtsSingleRuntimeDeps,
-    LocalTtsStreamRuntimeDeps,
+from evelyn_core.local_tts_dependency_composition import (
+    LocalTtsDependencyComposition,
+    LocalTtsDependencyCompositionDeps,
 )
 from evelyn_core.observability_metrics import (
     ModelCallMetricsStore,
@@ -2593,8 +2593,8 @@ build_discord_tts_stream_runtime_deps = (
 )
 
 
-def build_local_tts_single_runtime_deps() -> LocalTtsSingleRuntimeDeps:
-    return LocalTtsSingleRuntimeDeps(
+local_tts_dependency_composition = LocalTtsDependencyComposition(
+    LocalTtsDependencyCompositionDeps(
         playback_manager=local_tts_playback_manager,
         clean_tts_text=clean_tts_text,
         strip_omnivoice_tags=strip_omnivoice_tags,
@@ -2606,10 +2606,24 @@ def build_local_tts_single_runtime_deps() -> LocalTtsSingleRuntimeDeps:
         mark_turn_stage=mark_turn_stage,
         log_voice_latency=log_voice_latency,
         log_turn_event=log_turn_event,
-        mark_local_tts_first_playback=_mark_local_tts_first_playback,
+        mark_local_tts_first_playback=lambda *args, **kwargs: _mark_local_tts_first_playback(
+            *args, **kwargs
+        ),
         record_voice_pipeline_failure=record_voice_pipeline_failure,
         omnivoice_timeout_sec=OMNIVOICE_TIMEOUT_SEC,
+        tts_prefetch_chunks=TTS_PREFETCH_CHUNKS,
+        create_turn_scoped_task=create_turn_scoped_task,
+        prefetch_tts_sources=prefetch_tts_sources,
+        cleanup_prepared_tts_item=lambda item: _cleanup_prepared_tts_item(item),
     )
+)
+
+build_local_tts_single_runtime_deps = (
+    local_tts_dependency_composition.build_local_tts_single_runtime_deps
+)
+build_local_tts_stream_runtime_deps = (
+    local_tts_dependency_composition.build_local_tts_stream_runtime_deps
+)
 
 
 def _cleanup_prepared_tts_item(item: object) -> None:
@@ -2660,29 +2674,6 @@ start_streaming_local_voice_delivery = (
 )
 schedule_local_control_tts = delivery_entry_composition.schedule_local_control_tts
 start_streaming_voice_delivery = delivery_entry_composition.start_streaming_voice_delivery
-
-
-def build_local_tts_stream_runtime_deps() -> LocalTtsStreamRuntimeDeps:
-    return LocalTtsStreamRuntimeDeps(
-        playback_manager=local_tts_playback_manager,
-        attach_current_task=_attach_current_task,
-        detach_task=_detach_task,
-        tts_running_state=TurnState.TTS_RUNNING,
-        clean_tts_text=clean_tts_text,
-        strip_omnivoice_tags=strip_omnivoice_tags,
-        create_omnivoice_source=create_omnivoice_source,
-        mark_turn_stage=mark_turn_stage,
-        log_voice_latency=log_voice_latency,
-        log_turn_event=log_turn_event,
-        record_voice_pipeline_failure=record_voice_pipeline_failure,
-        tts_lock=tts_lock,
-        tts_prefetch_chunks=TTS_PREFETCH_CHUNKS,
-        create_turn_scoped_task=create_turn_scoped_task,
-        prefetch_tts_sources=prefetch_tts_sources,
-        omnivoice_timeout_sec=OMNIVOICE_TIMEOUT_SEC,
-        cleanup_prepared_tts_item=_cleanup_prepared_tts_item,
-        mark_local_tts_first_playback=_mark_local_tts_first_playback,
-    )
 
 
 # =========================================================
