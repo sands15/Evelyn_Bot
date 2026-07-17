@@ -1145,3 +1145,23 @@ Last reviewed: 2026-07-17
   - 변경 파일: `main.py`, `evelyn_core/runtime/evelyn_core/autonomy_router.py`, `tests/core/test_autonomy_router_runtime.py`.
   - 검증: `py_compile main.py`, `py_compile evelyn_core/runtime/evelyn_core/autonomy_router.py`, `py_compile tests/core/test_autonomy_router_runtime.py`, `pytest tests/core/test_autonomy_router_runtime.py`.
   - 런타임/봇 재시작 없음.
+
+## 2026-07-17 TTS dependency root 연속 분리
+
+- `voice_tts_control_dependency_composition.py`
+  - TTS interruption, cached TTS playback, voice interruption gate의 세 dependency builder를 `main.py` 밖으로 이동.
+  - speaker verification, playback manager, cache resolver, interruption policy는 명시적 dependency로 주입.
+- `discord_tts_dependency_composition.py`
+  - Discord single-answer 및 streaming TTS dependency builder를 하나의 composition root로 통합.
+  - cached playback과 local-speaker fallback은 late-bound callback으로 유지해 기존 `VoiceIoComposition` 초기화 순서를 보존.
+- `local_tts_dependency_composition.py`
+  - local-speaker single-answer 및 streaming TTS dependency builder를 하나의 composition root로 통합.
+  - delivery entry가 제공하는 first-playback marker와 prepared-source cleanup은 late-bound callback으로 연결.
+- 구조 결과:
+  - 대상 builder 7개는 `main.py`의 top-level 함수에서 제거되고 세 composition method alias로 대체됨.
+  - `main.py`: 3,942 lines, top-level functions 85개.
+- 검증:
+  - 각 composition 경계 테스트 3개씩 통과.
+  - 각 배치 후 실제 `main.py` control-page process smoke 통과.
+  - `EVELYN_RUN_REAL_MAIN_INTEGRATION=1`, `PYTHONWARNINGS=error::ResourceWarning` 전체 discovery: 1,238 tests 통과.
+  - 런타임/컨테이너 재시작 및 원격 push 없음.
