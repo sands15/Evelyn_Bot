@@ -531,8 +531,9 @@ from evelyn_core.control_page_state import (
     memory_vault_obsidian_url,
     sanitize_control_page_welcome_text_payload,
 )
-from evelyn_core.control_page_guild_runtime import (
-    ControlPageGuildSelectionRuntimeDeps,
+from evelyn_core.control_page_ui_dependency_composition import (
+    ControlPageUiDependencyComposition,
+    ControlPageUiDependencyCompositionDeps,
 )
 from evelyn_core.control_page_state_composition import (
     ControlPageStateComposition,
@@ -560,10 +561,6 @@ from evelyn_core.control_page_text_runtime import (
 )
 from evelyn_core.control_page_tool_runtime import (
     ControlPageInputRuntimeDeps,
-)
-from evelyn_core.control_page_ui_runtime import (
-    ControlPageUiRuntimeDeps,
-    ControlPageWelcomeRuntimeDeps,
 )
 from evelyn_core.control_page_tools import (
     build_control_page_all_commands,
@@ -2836,54 +2833,56 @@ enable_minecraft_mode = minecraft_mode_composition.enable_minecraft_mode
 disable_minecraft_mode = minecraft_mode_composition.disable_minecraft_mode
 
 
-def build_control_page_ui_runtime_deps() -> ControlPageUiRuntimeDeps:
-    return ControlPageUiRuntimeDeps(
+control_page_ui_dependency_composition = ControlPageUiDependencyComposition(
+    ControlPageUiDependencyCompositionDeps(
+        control_page=lambda: control_page_composition,
         control_page_host=CONTROL_PAGE_HOST,
         control_page_port=CONTROL_PAGE_PORT,
         local_control_guild_id=LOCAL_CONTROL_GUILD_ID,
         local_control_guild_name=LOCAL_CONTROL_GUILD_NAME,
         control_page_welcome_fallback=CONTROL_PAGE_WELCOME_FALLBACK,
-        clean_text=clean_text,
-        sanitize_control_page_welcome_text_payload=sanitize_control_page_welcome_text_payload,
         control_page_ui_command_store=control_page_ui_command_store,
         control_page_chat_log_store=control_page_chat_log_store,
-    )
-
-
-def build_control_page_guild_selection_runtime_deps() -> ControlPageGuildSelectionRuntimeDeps:
-    return ControlPageGuildSelectionRuntimeDeps(
         get_requested_guild=lambda guild_id: bot.get_guild(int(guild_id)),
         bot_guilds=lambda: bot.guilds,
         tracked_tts_playback_guild_ids=lambda: tracked_tts_playback_guild_ids(tts_playback_tracker),
         get_tracked_tts_playback=lambda guild_id: get_tracked_tts_playback(tts_playback_tracker, int(guild_id)),
         get_active_session_user_id=lambda session_key: active_session_user_ids.get(str(session_key)),
         get_guild_member=lambda guild, user_id: guild.get_member(int(user_id)),
-        clean_text=clean_text,
-    )
-
-def build_control_page_welcome_runtime_deps() -> ControlPageWelcomeRuntimeDeps:
-    return ControlPageWelcomeRuntimeDeps(
-        effective_guild_name=control_page_composition.effective_guild_name,
-        effective_guild_id=control_page_effective_guild_id,
-        build_main_llm_payload=build_main_llm_payload,
+        effective_guild_id=lambda *args, **kwargs: control_page_effective_guild_id(
+            *args, **kwargs
+        ),
         model_name=MODEL_NAME,
         main_llm_chat_content_format=MAIN_LLM_CHAT_CONTENT_FORMAT,
-        main_llm_stop_tokens=MAIN_LLM_STOP_TOKENS,
-        get_http_session=get_http_session,
+        main_llm_stop_tokens=tuple(MAIN_LLM_STOP_TOKENS),
+        get_http_session=lambda *args, **kwargs: get_http_session(*args, **kwargs),
         client_timeout_factory=aiohttp.ClientTimeout,
         welcome_llm_timeout_sec=CONTROL_PAGE_WELCOME_LLM_TIMEOUT_SEC,
         llm_server_url=LLM_SERVER_URL,
-        extract_main_llm_answer_from_choice=extract_main_llm_answer_from_choice,
-        sanitize_model_output=sanitize_model_output,
-        parse_response_action_tag=parse_response_action_tag,
-        extract_answer_from_reasoning=extract_answer_from_reasoning,
-        sanitize_welcome_text=control_page_composition.sanitize_welcome_text,
-        record_model_call_trace=record_model_call_trace,
+        sanitize_model_output=lambda *args, **kwargs: sanitize_model_output(*args, **kwargs),
+        parse_response_action_tag=lambda *args, **kwargs: parse_response_action_tag(
+            *args, **kwargs
+        ),
+        extract_answer_from_reasoning=lambda *args, **kwargs: extract_answer_from_reasoning(
+            *args, **kwargs
+        ),
+        record_model_call_trace=lambda *args, **kwargs: record_model_call_trace(
+            *args, **kwargs
+        ),
         monotonic=time.monotonic,
-        welcome_fallback=CONTROL_PAGE_WELCOME_FALLBACK,
-        clean_text=clean_text,
         log=print,
     )
+)
+
+build_control_page_ui_runtime_deps = (
+    control_page_ui_dependency_composition.build_control_page_ui_runtime_deps
+)
+build_control_page_guild_selection_runtime_deps = (
+    control_page_ui_dependency_composition.build_control_page_guild_selection_runtime_deps
+)
+build_control_page_welcome_runtime_deps = (
+    control_page_ui_dependency_composition.build_control_page_welcome_runtime_deps
+)
 
 
 def build_control_page_minecraft_live_snapshot_runtime_deps() -> ControlPageMinecraftLiveSnapshotRuntimeDeps:
