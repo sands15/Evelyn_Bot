@@ -20,14 +20,17 @@ class RuntimeDependencyContextTests(unittest.TestCase):
         context_assembly_py = (
             REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "llm_context_assembly.py"
         ).read_text(encoding="utf-8")
+        context_composition_py = (
+            REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "llm_context_assembly_composition.py"
+        ).read_text(encoding="utf-8")
         local_runtime_context_py = (
             REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "local_runtime_context.py"
         ).read_text(encoding="utf-8")
 
-        self.assertIn("build_evelyn_runtime_dependency_context=lambda: build_evelyn_runtime_dependency_context_from_payload", main_py)
+        self.assertIn("build_evelyn_runtime_dependency_context_from_payload(", context_composition_py)
         self.assertIn("def build_evelyn_runtime_dependency_context_from_payload", local_runtime_context_py)
-        self.assertIn("build_evelyn_runtime_dependency_context_from_payload", main_py)
-        self.assertIn("render_self_judgment_context", main_py)
+        self.assertIn("build_llm_context_assembly_deps = llm_context_assembly_composition.build_runtime_deps", main_py)
+        self.assertIn("render_self_judgment_context", context_composition_py)
         self.assertIn("self_judgment_context = deps.render_self_judgment_context", context_assembly_py)
         self.assertIn("self_judgment_context", context_assembly_py)
         self.assertIn("Evelyn dependency topology:", local_runtime_context_py)

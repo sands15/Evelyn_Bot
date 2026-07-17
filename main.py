@@ -231,7 +231,10 @@ from evelyn_core.fast_path_policy_composition import (
 from evelyn_core.tool_awareness_policy import build_tool_awareness_context
 from evelyn_core.local_tool_diagnostic_context import build_local_tool_diagnostic_context
 from evelyn_core.http_session_runtime import ensure_http_session_from_runtime
-from evelyn_core.llm_context_assembly import LlmContextAssemblyDeps
+from evelyn_core.llm_context_assembly_composition import (
+    LlmContextAssemblyComposition,
+    LlmContextAssemblyCompositionDeps,
+)
 from evelyn_core.llm_warmup_runtime import LlmWarmupRuntimeDeps
 from evelyn_core.llm_route_composition_runtime import LlmRouteComposition, LlmRouteCompositionDeps
 from evelyn_core.voice_io_composition_runtime import VoiceIoComposition, VoiceIoCompositionDeps
@@ -425,7 +428,6 @@ from evelyn_core.local_mic import (
 from evelyn_core.local_mic_state import (
     normalize_voice_input_mode,
 )
-from evelyn_core.local_runtime_context import build_evelyn_runtime_dependency_context_from_payload
 from evelyn_core.local_control_tts_runtime import (
     build_local_control_tts_runtime_deps,
 )
@@ -1809,69 +1811,50 @@ ensure_vision_watch_started = vision_watch_composition.ensure_vision_watch_start
 stop_vision_watch_task = vision_watch_composition.stop_vision_watch_task
 
 
-def build_llm_context_assembly_deps() -> LlmContextAssemblyDeps:
-    return LlmContextAssemblyDeps(
+llm_context_assembly_composition = LlmContextAssemblyComposition(
+    LlmContextAssemblyCompositionDeps(
         compute_runtime_mode=compute_runtime_mode,
         apply_runtime_mode=apply_runtime_mode,
-        classify_llm_route_fallback=classify_llm_route_fallback,
-        classify_llm_route_async=classify_llm_route_async,
+        classify_llm_route_async=lambda *args, **kwargs: classify_llm_route_async(*args, **kwargs),
         session_topic_ids=session_topic_ids,
         get_conversation_history=get_conversation_history,
         read_cached_cognitive_state=read_cached_cognitive_state,
         get_matching_speculative_policy=get_matching_speculative_policy,
-        fast_path_policy=fast_path_policy,
+        fast_path_policy=lambda *args, **kwargs: fast_path_policy(*args, **kwargs),
         session_state_snapshot=session_state_snapshot,
-        context_policy_for_fast_path_policy=context_policy_for_fast_path_policy,
+        context_policy_for_fast_path_policy=lambda *args, **kwargs: context_policy_for_fast_path_policy(
+            *args, **kwargs
+        ),
         extract_question_policy_from_route_meta=extract_question_policy_from_route_meta,
-        build_fast_cognitive_state=build_fast_cognitive_state,
-        update_cognitive_state=update_cognitive_state,
-        schedule_cognitive_refresh=schedule_cognitive_refresh,
-        build_context_policy_for_turn=build_context_policy_for_turn,
-        build_tool_use_decisions=build_tool_use_decisions,
+        update_cognitive_state=lambda *args, **kwargs: update_cognitive_state(*args, **kwargs),
+        schedule_cognitive_refresh=lambda *args, **kwargs: schedule_cognitive_refresh(*args, **kwargs),
         build_runtime_status_context=build_runtime_status_context,
-        clean_text=clean_text,
-        build_local_tool_diagnostic_context=build_local_tool_diagnostic_context,
         project_root=PROJECT_ROOT,
-        build_memory_context=build_memory_context,
-        update_self_state_for_turn=update_self_state_for_turn,
-        observe_live_minecraft_state=observe_live_minecraft_state,
-        attach_minecraft_runtime_snapshot=attach_minecraft_runtime_snapshot,
+        observe_live_minecraft_state=lambda *args, **kwargs: observe_live_minecraft_state(*args, **kwargs),
         control_page_minecraft_cache_refresh_sec=CONTROL_PAGE_MINECRAFT_CACHE_REFRESH_SEC,
         control_page_minecraft_cache_max_stale_sec=CONTROL_PAGE_MINECRAFT_CACHE_MAX_STALE_SEC,
-        build_conversation_state_context=build_conversation_state_context,
-        build_runtime_state_context=build_runtime_state_context,
-        build_evelyn_runtime_dependency_context=lambda: build_evelyn_runtime_dependency_context_from_payload(
-            local_tts=local_tts_playback_manager.snapshot(),
-            local_mic=serialize_local_mic_runtime_state(),
-            local_only_mode=LOCAL_ONLY_MODE,
-            discord_enabled=DISCORD_ENABLED,
-            model_name=MODEL_NAME,
-            llm_server_url=LLM_SERVER_URL,
-            router_model_name=ROUTER_MODEL_NAME,
-            summary_model_name=SUMMARY_MODEL_NAME,
-            stt_model_name=STT_MODEL_NAME,
-            stt_backend=STT_BACKEND,
-            omnivoice_server_url=OMNIVOICE_SERVER_URL,
-            omnivoice_voice=OMNIVOICE_VOICE,
-            omnivoice_speed=OMNIVOICE_SPEED,
-            voice_input_mode_status_line=voice_input_mode_status_line(),
-        ),
-        render_self_judgment_context=render_self_judgment_context,
-        render_self_state_context=render_self_state_context,
-        render_vision_watch_context=render_vision_watch_context,
-        build_minecraft_skill_context=build_minecraft_skill_context,
+        local_tts_snapshot=local_tts_playback_manager.snapshot,
+        local_mic_snapshot=lambda: serialize_local_mic_runtime_state(),
+        local_only_mode=LOCAL_ONLY_MODE,
+        discord_enabled=DISCORD_ENABLED,
+        model_name=MODEL_NAME,
+        llm_server_url=LLM_SERVER_URL,
+        router_model_name=ROUTER_MODEL_NAME,
+        summary_model_name=SUMMARY_MODEL_NAME,
+        stt_model_name=STT_MODEL_NAME,
+        stt_backend=STT_BACKEND,
+        omnivoice_server_url=OMNIVOICE_SERVER_URL,
+        omnivoice_voice=OMNIVOICE_VOICE,
+        omnivoice_speed=OMNIVOICE_SPEED,
+        voice_input_mode_status_line=lambda: voice_input_mode_status_line(),
         odyssey_capability_json_dir=ODYSSEY_CAPABILITY_JSON_DIR,
-        build_skill_context_hint=build_skill_context_hint,
-        build_vision_context_hint=build_vision_context_hint,
         build_live_vision_context=build_live_vision_context,
-        render_tool_use_context=render_tool_use_context,
-        build_basic_context_packet=build_basic_context_packet,
-        ask_confidence_threshold_for_source=ask_confidence_threshold_for_source,
-        apply_ask_gating=apply_ask_gating,
         log_turn_event=log_turn_event,
-        visible_text=visible_text,
         log=print,
     )
+)
+
+build_llm_context_assembly_deps = llm_context_assembly_composition.build_runtime_deps
 
 
 def build_summary_json_llm_runtime_deps() -> JsonLlmRequestRuntimeDeps:
