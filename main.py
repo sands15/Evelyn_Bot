@@ -888,8 +888,7 @@ instance_lock_handle = None
 instance_lock_path = Path(os.getenv("EVELYN_INSTANCE_LOCK_PATH", str(Path(__file__).resolve().with_name(".evelyn_bot.lock"))))
 
 
-build_discord_settings_runtime_deps = partial(
-    build_discord_settings_runtime_deps_from_main,
+discord_settings_runtime_deps = build_discord_settings_runtime_deps_from_main(
     default_command_prefix=DEFAULT_COMMAND_PREFIX,
     prefix_cache=guild_prefix_cache,
     now=time.time,
@@ -915,67 +914,38 @@ def acquire_instance_lock(wait_sec: float = 15.0, poll_sec: float = 0.25) -> Non
 atexit.register(release_instance_lock)
 
 
-def normalize_command_prefix(prefix: str | None) -> str:
-    return normalize_command_prefix_from_runtime(
-        prefix,
-        deps=build_discord_settings_runtime_deps(),
-    )
-
-
-def get_guild_command_prefix(guild_id: int | None) -> str:
-    return get_guild_command_prefix_from_runtime(
-        guild_id,
-        deps=build_discord_settings_runtime_deps(),
-    )
-
-
-def save_guild_command_prefix(guild_id: int, prefix: str) -> str:
-    return save_guild_command_prefix_from_runtime(
-        guild_id,
-        prefix,
-        deps=build_discord_settings_runtime_deps(),
-    )
-
-
-def get_guild_observe_channel_ids(guild_id: int | None) -> list[int]:
-    return get_guild_observe_channel_ids_from_runtime(
-        guild_id,
-        deps=build_discord_settings_runtime_deps(),
-    )
-
-
-def get_guild_command_only_channel_ids(guild_id: int | None) -> list[int]:
-    return get_guild_command_only_channel_ids_from_runtime(
-        guild_id,
-        deps=build_discord_settings_runtime_deps(),
-    )
-
-
-def save_guild_channel_list(guild_id: int, key: str, channel_ids: list[int]) -> list[int]:
-    return save_guild_channel_list_from_runtime(
-        guild_id,
-        key,
-        channel_ids,
-        deps=build_discord_settings_runtime_deps(),
-    )
-
-
-def add_guild_channel_setting(guild_id: int, key: str, channel_id: int) -> list[int]:
-    return add_guild_channel_setting_from_runtime(
-        guild_id,
-        key,
-        channel_id,
-        deps=build_discord_settings_runtime_deps(),
-    )
-
-
-def remove_guild_channel_setting(guild_id: int, key: str, channel_id: int) -> list[int]:
-    return remove_guild_channel_setting_from_runtime(
-        guild_id,
-        key,
-        channel_id,
-        deps=build_discord_settings_runtime_deps(),
-    )
+normalize_command_prefix = partial(
+    normalize_command_prefix_from_runtime,
+    deps=discord_settings_runtime_deps,
+)
+get_guild_command_prefix = partial(
+    get_guild_command_prefix_from_runtime,
+    deps=discord_settings_runtime_deps,
+)
+save_guild_command_prefix = partial(
+    save_guild_command_prefix_from_runtime,
+    deps=discord_settings_runtime_deps,
+)
+get_guild_observe_channel_ids = partial(
+    get_guild_observe_channel_ids_from_runtime,
+    deps=discord_settings_runtime_deps,
+)
+get_guild_command_only_channel_ids = partial(
+    get_guild_command_only_channel_ids_from_runtime,
+    deps=discord_settings_runtime_deps,
+)
+save_guild_channel_list = partial(
+    save_guild_channel_list_from_runtime,
+    deps=discord_settings_runtime_deps,
+)
+add_guild_channel_setting = partial(
+    add_guild_channel_setting_from_runtime,
+    deps=discord_settings_runtime_deps,
+)
+remove_guild_channel_setting = partial(
+    remove_guild_channel_setting_from_runtime,
+    deps=discord_settings_runtime_deps,
+)
 
 
 bot = commands.Bot(
