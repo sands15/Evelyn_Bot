@@ -70,8 +70,8 @@ from evelyn_core.autonomy_runtime_composition import (
 )
 from evelyn_core.config import *
 from evelyn_core.instance_lock_runtime import (
-    acquire_instance_lock_from_main,
-    release_instance_lock_from_main,
+    InstanceLockManager,
+    build_instance_lock_runtime_deps,
 )
 from evelyn_core.guild_runtime_reset_composition import (
     GuildRuntimeResetComposition,
@@ -223,7 +223,12 @@ from evelyn_core.response_context_composition import (
     ResponseContextCompositionDeps,
 )
 from evelyn_core.runtime_mode_policy import RuntimeModeResolver, apply_runtime_mode_policy
-from evelyn_core.runtime_state import LazyResourceProvider, RuntimeCounter, RuntimeValue
+from evelyn_core.runtime_state import (
+    AsyncWorkerStarter,
+    LazyResourceProvider,
+    RuntimeCounter,
+    RuntimeValue,
+)
 from evelyn_core.route_fallback_policy import (
     classify_llm_route_fallback,
 )
@@ -887,7 +892,6 @@ room_owner_user_ids: dict[str, int] = {}
 room_owner_until: dict[str, float] = {}
 room_reply_in_progress: dict[str, bool] = {}
 voice_connect_locks: dict[int, asyncio.Lock] = {}
-instance_lock_handle = None
 instance_lock_path = Path(os.getenv("EVELYN_INSTANCE_LOCK_PATH", str(Path(__file__).resolve().with_name(".evelyn_bot.lock"))))
 
 
@@ -898,20 +902,11 @@ discord_settings_runtime_deps = build_discord_settings_runtime_deps_from_main(
 )
 
 
-def release_instance_lock() -> None:
-    global instance_lock_handle
-    release_instance_lock_from_main(instance_lock_handle, lock_path=instance_lock_path)
-    instance_lock_handle = None
-
-
-def acquire_instance_lock(wait_sec: float = 15.0, poll_sec: float = 0.25) -> None:
-    global instance_lock_handle
-    instance_lock_handle = acquire_instance_lock_from_main(
-        instance_lock_handle,
-        lock_path=instance_lock_path,
-        wait_sec=wait_sec,
-        poll_sec=poll_sec,
-    )
+instance_lock_manager = InstanceLockManager(
+    build_instance_lock_runtime_deps(instance_lock_path)
+)
+release_instance_lock = instance_lock_manager.release
+acquire_instance_lock = instance_lock_manager.acquire
 
 
 atexit.register(release_instance_lock)
@@ -1014,7 +1009,6 @@ memory_vault_last_maintenance_at: dict[int, float] = {}
 background_search_tasks: dict[str, asyncio.Task] = {}
 inflight_search_tasks: dict[str, asyncio.Task] = {}
 voice_ingress_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=VOICE_INGRESS_QUEUE_MAX)
-voice_worker_task: asyncio.Task | None = None
 voice_utterance_buffers: dict[str, dict[str, Any]] = {}
 voice_utterance_flush_tasks: dict[str, asyncio.Task] = {}
 control_page_runner_state = RuntimeValue[web.AppRunner | None](None)
@@ -1514,14 +1508,6 @@ is_tail_fragment_candidate = partial(
     is_tail_fragment_candidate_from_runtime,
     deps=discord_session_policy_runtime_deps,
 )
-
-
-def ensure_voice_worker_started() -> None:
-    global voice_worker_task
-    ensure_debug_write_worker_started()
-    if voice_worker_task is not None and not voice_worker_task.done():
-        return
-    voice_worker_task = asyncio.create_task(voice_ingress_worker())
 
 
 response_output_policy_runtime_deps = build_response_output_policy_runtime_deps()
@@ -2133,6 +2119,12 @@ _save_voice_debug_audio_now = voice_runtime_composition._save_voice_debug_audio_
 debug_write_worker = voice_runtime_composition.debug_write_worker
 ensure_debug_write_worker_started = voice_runtime_composition.ensure_debug_write_worker_started
 save_voice_debug_audio = voice_runtime_composition.save_voice_debug_audio
+voice_worker_starter = AsyncWorkerStarter(
+    before_start=ensure_debug_write_worker_started,
+    worker=lambda: voice_ingress_worker(),
+    create_task=asyncio.create_task,
+)
+ensure_voice_worker_started = voice_worker_starter.ensure_started
 local_control_voice_member = voice_runtime_composition.local_control_voice_member
 is_local_speaker_voice_client = voice_runtime_composition.is_local_speaker_voice_client
 stop_local_mic_service = voice_runtime_composition.stop_local_mic_service

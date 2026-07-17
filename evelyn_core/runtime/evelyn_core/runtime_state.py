@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Generic, TypeVar
+from typing import Any, Awaitable, Callable, Generic, TypeVar
 
 
 T = TypeVar("T")
@@ -44,4 +44,29 @@ class LazyResourceProvider(Generic[T]):
         return self._value
 
 
-__all__ = ["LazyResourceProvider", "RuntimeCounter", "RuntimeValue"]
+class AsyncWorkerStarter:
+    def __init__(
+        self,
+        *,
+        before_start: Callable[[], Any],
+        worker: Callable[[], Awaitable[Any]],
+        create_task: Callable[[Awaitable[Any]], Any],
+    ) -> None:
+        self._before_start = before_start
+        self._worker = worker
+        self._create_task = create_task
+        self._task: Any = None
+
+    def ensure_started(self) -> None:
+        self._before_start()
+        if self._task is not None and not self._task.done():
+            return
+        self._task = self._create_task(self._worker())
+
+
+__all__ = [
+    "AsyncWorkerStarter",
+    "LazyResourceProvider",
+    "RuntimeCounter",
+    "RuntimeValue",
+]

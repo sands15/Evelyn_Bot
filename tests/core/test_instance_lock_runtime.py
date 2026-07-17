@@ -14,6 +14,7 @@ if str(RUNTIME_ROOT) not in sys.path:
     sys.path.insert(0, str(RUNTIME_ROOT))
 
 from evelyn_core.instance_lock_runtime import (  # noqa: E402
+    InstanceLockManager,
     InstanceLockRuntimeDeps,
     acquire_instance_lock_from_runtime,
     release_instance_lock_from_runtime,
@@ -106,6 +107,22 @@ class InstanceLockRuntimeTests(unittest.TestCase):
             release_instance_lock_from_runtime(handle, deps=self.build_deps(lock_path))
 
             self.assertTrue(handle.closed)
+
+    def test_manager_owns_handle_across_acquire_and_release(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            lock_path = Path(temp_dir) / "lock"
+            manager = InstanceLockManager(self.build_deps(lock_path))
+            manager.acquire(wait_sec=0.0)
+            self.assertEqual(lock_path.read_text(encoding="utf-8"), "12345")
+            manager.release()
+            manager.release()
+
+    def test_main_binds_instance_lock_manager_methods(self) -> None:
+        source = (REPO_ROOT / "main.py").read_text(encoding="utf-8")
+        self.assertNotIn("def acquire_instance_lock(", source)
+        self.assertNotIn("def release_instance_lock(", source)
+        self.assertIn("acquire_instance_lock = instance_lock_manager.acquire", source)
+        self.assertIn("release_instance_lock = instance_lock_manager.release", source)
 
 
 if __name__ == "__main__":

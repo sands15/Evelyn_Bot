@@ -167,3 +167,21 @@ def release_instance_lock_from_main(
         fcntl_module=fcntl_module,
     )
     release_instance_lock_from_runtime(current_handle, deps=deps)
+
+
+class InstanceLockManager:
+    def __init__(self, deps: InstanceLockRuntimeDeps) -> None:
+        self._deps = deps
+        self._handle: Any = None
+
+    def acquire(self, wait_sec: float = 15.0, poll_sec: float = 0.25) -> None:
+        self._handle = acquire_instance_lock_from_runtime(
+            self._handle,
+            deps=self._deps,
+            wait_sec=wait_sec,
+            poll_sec=poll_sec,
+        )
+
+    def release(self) -> None:
+        release_instance_lock_from_runtime(self._handle, deps=self._deps)
+        self._handle = None

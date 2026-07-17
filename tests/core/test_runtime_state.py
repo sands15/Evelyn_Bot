@@ -11,6 +11,7 @@ if str(RUNTIME_ROOT) not in sys.path:
     sys.path.insert(0, str(RUNTIME_ROOT))
 
 from evelyn_core.runtime_state import (  # noqa: E402
+    AsyncWorkerStarter,
     LazyResourceProvider,
     RuntimeCounter,
     RuntimeValue,
@@ -44,6 +45,44 @@ class RuntimeStateTests(unittest.TestCase):
         )
         self.assertIs(provider(), provider())
         self.assertEqual(calls, ["build"])
+
+    def test_async_worker_starter_reuses_live_task_and_restarts_done_task(self) -> None:
+        events: list[str] = []
+
+        class Task:
+            def __init__(self) -> None:
+                self.finished = False
+
+            def done(self) -> bool:
+                return self.finished
+
+        tasks: list[Task] = []
+
+        def create_task(_awaitable: object) -> Task:
+            task = Task()
+            tasks.append(task)
+            return task
+
+        starter = AsyncWorkerStarter(
+            before_start=lambda: events.append("before"),
+            worker=lambda: object(),  # type: ignore[arg-type,return-value]
+            create_task=create_task,  # type: ignore[arg-type]
+        )
+        starter.ensure_started()
+        starter.ensure_started()
+        tasks[0].finished = True
+        starter.ensure_started()
+
+        self.assertEqual(len(tasks), 2)
+        self.assertEqual(events, ["before", "before", "before"])
+
+    def test_main_binds_voice_worker_starter(self) -> None:
+        source = (REPO_ROOT / "main.py").read_text(encoding="utf-8")
+        self.assertNotIn("def ensure_voice_worker_started(", source)
+        self.assertIn(
+            "ensure_voice_worker_started = voice_worker_starter.ensure_started",
+            source,
+        )
 
     def test_main_uses_state_objects_instead_of_global_setter_functions(self) -> None:
         source = (REPO_ROOT / "main.py").read_text(encoding="utf-8")
