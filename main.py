@@ -554,8 +554,9 @@ from evelyn_core.control_page_search_text_dependency_composition import (
     ControlPageSearchTextDependencyComposition,
     ControlPageSearchTextDependencyCompositionDeps,
 )
-from evelyn_core.control_page_tool_runtime import (
-    ControlPageInputRuntimeDeps,
+from evelyn_core.control_page_input_dependency_composition import (
+    ControlPageInputDependencyComposition,
+    ControlPageInputDependencyCompositionDeps,
 )
 from evelyn_core.control_page_tools import (
     build_control_page_all_commands,
@@ -3117,23 +3118,21 @@ build_control_page_text_runtime_deps = (
 )
 
 
-def build_control_page_input_runtime_deps() -> ControlPageInputRuntimeDeps:
-    return ControlPageInputRuntimeDeps(
-        clean_text=clean_text,
-        control_page_effective_guild_id=control_page_effective_guild_id,
-        control_page_session_key=control_page_session_key,
-        cheap_control_page_tool_decision=cheap_control_page_tool_decision,
-        execute_control_page_tool=control_page_composition.execute_tool,
-        remember_control_page_tool_turn=control_page_composition.remember_tool_turn,
-        should_route_control_page_tool_candidate=should_route_control_page_tool_candidate,
-        decide_control_page_tool_call=control_page_composition.decide_tool_call,
-        control_page_tool_decision_from_llm=control_page_tool_decision_from_llm,
-        control_page_tool_policy_error=control_page_tool_policy_error,
-        control_page_tool_reply_from_execution=control_page_tool_reply_from_execution,
-        should_force_search_query=should_force_search_query,
-        answer_control_page_search_text=control_page_composition.answer_search_text,
-        answer_control_page_text=control_page_composition.answer_text,
+control_page_input_dependency_composition = ControlPageInputDependencyComposition(
+    ControlPageInputDependencyCompositionDeps(
+        control_page=lambda: control_page_composition,
+        effective_guild_id=lambda *args, **kwargs: control_page_effective_guild_id(
+            *args, **kwargs
+        ),
+        session_key_for_guild=lambda *args, **kwargs: control_page_session_key(
+            *args, **kwargs
+        ),
     )
+)
+
+build_control_page_input_runtime_deps = (
+    control_page_input_dependency_composition.build_control_page_input_runtime_deps
+)
 
 
 control_page_state_composition = ControlPageStateComposition(
