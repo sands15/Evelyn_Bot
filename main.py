@@ -660,13 +660,13 @@ from evelyn_core.voice_ingress_runtime import (
     VoiceIngressRuntimeDeps,
 )
 from evelyn_core.voice_audio_ingress_runtime import (
-    VoiceAudioIngressDeps,
     prepare_voice_audio_ingress_from_runtime,
 )
-from evelyn_core.voice_wake_probe_runtime import (
-    VoiceWakeProbeDeps,
-    run_voice_wake_probe_from_runtime,
+from evelyn_core.voice_ingress_dependency_composition import (
+    VoiceIngressDependencyComposition,
+    VoiceIngressDependencyCompositionDeps,
 )
+from evelyn_core.voice_wake_probe_runtime import run_voice_wake_probe_from_runtime
 from evelyn_core.voice_stt_execution_runtime import (
     VoiceSttExecutionDeps,
     run_voice_stt_execution_from_runtime,
@@ -3493,29 +3493,35 @@ def build_discord_text_reply_runtime_deps() -> DiscordTextReplyRuntimeDeps:
 # =========================================================
 # 음성 입력 처리
 # =========================================================
-def build_voice_audio_ingress_runtime_deps() -> VoiceAudioIngressDeps:
-    return VoiceAudioIngressDeps(
+voice_ingress_dependency_composition = VoiceIngressDependencyComposition(
+    VoiceIngressDependencyCompositionDeps(
         voice_pipeline_state=voice_pipeline_state,
-        prepare_stt_audio=prepare_stt_audio,
-        save_voice_debug_audio=save_voice_debug_audio,
-        room_state_snapshot=room_state_snapshot,
+        save_voice_debug_audio=lambda *args, **kwargs: save_voice_debug_audio(*args, **kwargs),
+        room_state_snapshot=lambda *args, **kwargs: room_state_snapshot(*args, **kwargs),
         session_topic_ids=session_topic_ids,
-        build_topic_id=build_topic_id,
-        new_turn_metrics=new_turn_metrics,
-        log_voice_stage=log_voice_stage,
-        register_drop_reason=register_drop_reason,
-        log_voice_bottleneck_summary=log_voice_bottleneck_summary,
-        downmix_int16_stereo_to_mono_float=downmix_int16_stereo_to_mono_float,
-        apply_light_denoise=apply_light_denoise,
-        is_transport_corrupted_audio=is_transport_corrupted_audio,
-        build_voice_segment=build_voice_segment,
-        compute_waveform_activity_stats=compute_waveform_activity_stats,
-        estimate_voice_like_probability=estimate_voice_like_probability,
-        update_room_speaker_activity=update_room_speaker_activity,
-        increment_session_bad_audio=increment_session_bad_audio,
-        is_tail_fragment_candidate=is_tail_fragment_candidate,
-        is_probably_silent=is_probably_silent,
-        print_fn=print,
+        build_topic_id=lambda *args, **kwargs: build_topic_id(*args, **kwargs),
+        new_turn_metrics=lambda *args, **kwargs: new_turn_metrics(*args, **kwargs),
+        log_voice_stage=lambda *args, **kwargs: log_voice_stage(*args, **kwargs),
+        register_drop_reason=lambda *args, **kwargs: register_drop_reason(*args, **kwargs),
+        log_voice_bottleneck_summary=lambda *args, **kwargs: log_voice_bottleneck_summary(
+            *args, **kwargs
+        ),
+        is_transport_corrupted_audio=lambda *args, **kwargs: is_transport_corrupted_audio(
+            *args, **kwargs
+        ),
+        build_voice_segment=lambda *args, **kwargs: build_voice_segment(*args, **kwargs),
+        estimate_voice_like_probability=lambda *args, **kwargs: estimate_voice_like_probability(
+            *args, **kwargs
+        ),
+        update_room_speaker_activity=lambda *args, **kwargs: update_room_speaker_activity(
+            *args, **kwargs
+        ),
+        increment_session_bad_audio=lambda *args, **kwargs: increment_session_bad_audio(
+            *args, **kwargs
+        ),
+        is_tail_fragment_candidate=lambda *args, **kwargs: is_tail_fragment_candidate(
+            *args, **kwargs
+        ),
         stt_use_raw_48k=STT_USE_RAW_48K,
         rate=RATE,
         channels=CHANNELS,
@@ -3527,37 +3533,34 @@ def build_voice_audio_ingress_runtime_deps() -> VoiceAudioIngressDeps:
         voice_waveform_min_run_ms=VOICE_WAVEFORM_MIN_RUN_MS,
         voice_waveform_body_rms_min=VOICE_WAVEFORM_BODY_RMS_MIN,
         voice_waveform_body_peak_min=VOICE_WAVEFORM_BODY_PEAK_MIN,
-    )
-
-
-def build_voice_wake_probe_runtime_deps() -> VoiceWakeProbeDeps:
-    return VoiceWakeProbeDeps(
-        is_room_owner_active=is_room_owner_active,
-        is_session_active_for_user=is_session_active_for_user,
-        pick_active_speaker=pick_active_speaker,
-        log_voice_stage=log_voice_stage,
-        run_blocking_stt_task=run_blocking_stt_task,
-        detect_wake_word_sync=detect_wake_word_sync,
-        interpret_wake_probe_result=interpret_wake_probe_result,
-        clean_text=clean_text,
-        apply_stt_post_corrections=apply_stt_post_corrections,
-        should_require_confirm_exact_for_wake=should_require_confirm_exact_for_wake,
-        apply_strict_wake_confirm_policy=apply_strict_wake_confirm_policy,
-        apply_fuzzy_wake_near_miss=apply_fuzzy_wake_near_miss,
-        fuzzy_leading_wake_alias=fuzzy_leading_wake_alias,
-        register_drop_reason=register_drop_reason,
-        log_voice_bottleneck_summary=log_voice_bottleneck_summary,
-        is_likely_environment_noise=is_likely_environment_noise,
-        looks_like_brief_filler_text=looks_like_brief_filler_text,
-        looks_like_repetitive_noise_text=looks_like_repetitive_noise_text,
-        compute_voice_band_metrics=compute_voice_band_metrics,
-        save_voice_debug_audio=save_voice_debug_audio,
-        increment_session_bad_audio=increment_session_bad_audio,
-        should_skip_full_stt_after_wake_probe=should_skip_full_stt_after_wake_probe,
-        print_fn=print,
+        is_room_owner_active=lambda *args, **kwargs: is_room_owner_active(*args, **kwargs),
+        is_session_active_for_user=lambda *args, **kwargs: is_session_active_for_user(
+            *args, **kwargs
+        ),
+        pick_active_speaker=lambda *args, **kwargs: pick_active_speaker(*args, **kwargs),
+        run_blocking_stt_task=lambda *args, **kwargs: run_blocking_stt_task(*args, **kwargs),
+        detect_wake_word_sync=lambda *args, **kwargs: detect_wake_word_sync(*args, **kwargs),
+        should_require_confirm_exact_for_wake=lambda *args, **kwargs: should_require_confirm_exact_for_wake(
+            *args, **kwargs
+        ),
+        increment_session_bad_audio_for_wake=lambda *args, **kwargs: increment_session_bad_audio(
+            *args, **kwargs
+        ),
+        should_skip_full_stt_after_wake_probe=lambda *args, **kwargs: should_skip_full_stt_after_wake_probe(
+            *args, **kwargs
+        ),
         wake_stt_timeout_sec=WAKE_STT_TIMEOUT_SEC,
         voice_no_wake_max_continue_sec=VOICE_NO_WAKE_MAX_CONTINUE_SEC,
+        log=print,
     )
+)
+
+build_voice_audio_ingress_runtime_deps = (
+    voice_ingress_dependency_composition.build_voice_audio_ingress_runtime_deps
+)
+build_voice_wake_probe_runtime_deps = (
+    voice_ingress_dependency_composition.build_voice_wake_probe_runtime_deps
+)
 
 
 def build_voice_tts_interrupt_gate_deps() -> VoiceTtsInterruptGateDeps:
