@@ -1186,3 +1186,25 @@ Last reviewed: 2026-07-17
   - 각 배치 후 실제 `main.py` control-page process smoke 통과.
   - `EVELYN_RUN_REAL_MAIN_INTEGRATION=1`, `PYTHONWARNINGS=error::ResourceWarning` 전체 discovery: 1,244 tests 통과.
   - 런타임/컨테이너 재시작 및 원격 push 없음.
+
+## 2026-07-17 voice input/conversation policy/Discord app dependency 연속 분리
+
+- `voice_input_support_dependency_composition.py`
+  - STT text, STT transcription, Discord voice connection dependency builder 3개를 하나의 input-support root로 이동.
+  - `process_member_audio`는 `VoiceIoComposition` 뒤에서 생성되므로 late-bound callback으로 연결.
+- `conversation_policy_dependency_composition.py`
+  - question policy, question-policy state, session turn, Discord session policy, response-output policy builder 5개를 통합.
+  - conversation session 뒤에서 생성되는 snapshot callback은 late-bound wiring으로 초기화 순서를 보존.
+  - 실제 main smoke가 기존 lazy builder 안에 숨어 있던 누락 symbol 2개를 검출해 공식 policy/output helper import를 추가.
+- `discord_app_dependency_composition.py`
+  - Discord text message handler와 command-session dependency builder를 통합.
+  - `bot.user`는 시작 시점의 `None`을 고정하지 않고 builder 호출 시점에 resolve하도록 보존.
+  - 기존 command-session builder의 미정의 `MAX_HISTORY`를 실제 설정 `MAX_HISTORY_ITEMS`로 교정.
+- 구조 결과:
+  - 대상 top-level builder 10개가 `main.py`에서 제거됨.
+  - 명시적 typed wiring 증가로 `main.py`는 3,899→3,902 lines, top-level functions는 76→66개.
+- 검증:
+  - 세 신규 composition 경계 테스트 통과 및 builder dataclass 10종 materialization 확인.
+  - 수정 완료 후 각 배치 실제 `main.py` control-page process smoke 통과.
+  - `EVELYN_RUN_REAL_MAIN_INTEGRATION=1`, `PYTHONWARNINGS=error::ResourceWarning` 전체 discovery: 1,253 tests 통과.
+  - 런타임/컨테이너 재시작 및 원격 push 없음.
