@@ -71,6 +71,23 @@ class ConversationPolicyDependencyCompositionTests(unittest.TestCase):
         self.assertIn("audio_duration_fn=deps.audio_duration", source)
         self.assertIn("session_state_snapshot_fn=deps.session_state_snapshot", source)
 
+    def test_main_partials_discord_session_policy_entrypoints(self) -> None:
+        source = (REPO_ROOT / "main.py").read_text(encoding="utf-8")
+        self.assertIn(
+            "discord_session_policy_runtime_deps = build_discord_session_policy_runtime_deps()",
+            source,
+        )
+        for name in (
+            "should_ignore_short_transcription",
+            "is_short_followup_candidate",
+            "should_skip_full_stt_after_wake_probe",
+            "should_require_confirm_exact_for_wake",
+            "is_transport_corrupted_audio",
+            "is_tail_fragment_candidate",
+        ):
+            self.assertNotIn(f"def {name}(", source)
+            self.assertIn(f"{name} = partial(", source)
+
 
 if __name__ == "__main__":
     unittest.main()

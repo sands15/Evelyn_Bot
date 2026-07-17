@@ -1,6 +1,20 @@
 from __future__ import annotations
 
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Callable
+
+
+@dataclass(frozen=True)
+class RuntimeModeResolver:
+    tts_backlog_get: Callable[[], int]
+    inflight_llm_requests_get: Callable[[], int]
+
+    def __call__(self, metrics: dict | None) -> str:
+        return compute_runtime_mode_from_state(
+            metrics,
+            tts_backlog=self.tts_backlog_get(),
+            inflight_llm_requests=self.inflight_llm_requests_get(),
+        )
 
 
 def compute_runtime_mode_from_state(

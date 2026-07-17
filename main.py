@@ -221,7 +221,7 @@ from evelyn_core.response_context_composition import (
     ResponseContextComposition,
     ResponseContextCompositionDeps,
 )
-from evelyn_core.runtime_mode_policy import compute_runtime_mode_from_state, apply_runtime_mode_policy
+from evelyn_core.runtime_mode_policy import RuntimeModeResolver, apply_runtime_mode_policy
 from evelyn_core.route_fallback_policy import (
     classify_llm_route_fallback,
 )
@@ -1461,25 +1461,15 @@ build_voice_ingress_entrypoint_deps = (
 )
 
 
-def compute_runtime_mode(metrics: dict | None) -> str:
-    return compute_runtime_mode_from_state(
-        metrics,
-        tts_backlog=tracked_tts_playback_count(tts_playback_tracker),
-        inflight_llm_requests=inflight_llm_requests,
-    )
-
-
-def apply_runtime_mode(mode: str, opts: dict[str, Any] | None = None) -> dict[str, Any]:
-    return apply_runtime_mode_policy(mode, opts)
-
-
-def estimate_voice_like_probability(*, voiced_ms: float, audio_sec: float, body_rms: float) -> float:
-    return estimate_voice_like_probability_policy(
-        voiced_ms=voiced_ms,
-        audio_sec=audio_sec,
-        body_rms=body_rms,
-        body_rms_min=VOICE_WAVEFORM_BODY_RMS_MIN,
-    )
+compute_runtime_mode = RuntimeModeResolver(
+    tts_backlog_get=lambda: tracked_tts_playback_count(tts_playback_tracker),
+    inflight_llm_requests_get=lambda: inflight_llm_requests,
+)
+apply_runtime_mode = apply_runtime_mode_policy
+estimate_voice_like_probability = partial(
+    estimate_voice_like_probability_policy,
+    body_rms_min=VOICE_WAVEFORM_BODY_RMS_MIN,
+)
 
 
 fast_path_policy_composition = FastPathPolicyComposition(
@@ -1493,69 +1483,31 @@ fast_path_policy_composition = FastPathPolicyComposition(
 build_fast_path_policy_runtime_deps = fast_path_policy_composition.build_runtime_deps
 
 
-def should_ignore_short_transcription(
-    text: str,
-    pcm_bytes: bytes,
-    *,
-    wake_detected: bool = False,
-) -> bool:
-    return should_ignore_short_transcription_from_runtime(
-        text=text,
-        pcm_bytes=pcm_bytes,
-        wake_detected=wake_detected,
-        deps=build_discord_session_policy_runtime_deps(),
-    )
-
-
-def is_short_followup_candidate(
-    text: str,
-    pcm_bytes: bytes,
-    *,
-    wake_detected: bool = False,
-    owner_followup_active: bool = False,
-) -> bool:
-    return is_short_followup_candidate_from_runtime(
-        text=text,
-        pcm_bytes=pcm_bytes,
-        wake_detected=wake_detected,
-        owner_followup_active=owner_followup_active,
-        deps=build_discord_session_policy_runtime_deps(),
-    )
-
-
-def should_skip_full_stt_after_wake_probe(*, wake_detected: bool, wake_probe: str, duration_sec: float) -> bool:
-    return should_skip_full_stt_after_wake_probe_from_runtime(
-        wake_detected=wake_detected,
-        wake_probe=wake_probe,
-        duration_sec=duration_sec,
-        deps=build_discord_session_policy_runtime_deps(),
-    )
-
-
-def should_require_confirm_exact_for_wake(debug_meta: dict | None) -> bool:
-    return should_require_confirm_exact_for_wake_from_runtime(debug_meta=debug_meta, deps=build_discord_session_policy_runtime_deps())
-
-
-def is_transport_corrupted_audio(debug_meta: dict | None) -> bool:
-    return is_transport_corrupted_audio_from_runtime(debug_meta=debug_meta, deps=build_discord_session_policy_runtime_deps())
-
-
-def is_tail_fragment_candidate(
-    *,
-    session_key: str | None,
-    raw_seconds: float,
-    voiced_ms: float,
-    longest_voiced_ms: float,
-    unstable: bool,
-) -> bool:
-    return is_tail_fragment_candidate_from_runtime(
-        session_key=session_key,
-        raw_seconds=raw_seconds,
-        voiced_ms=voiced_ms,
-        longest_voiced_ms=longest_voiced_ms,
-        unstable=unstable,
-        deps=build_discord_session_policy_runtime_deps(),
-    )
+discord_session_policy_runtime_deps = build_discord_session_policy_runtime_deps()
+should_ignore_short_transcription = partial(
+    should_ignore_short_transcription_from_runtime,
+    deps=discord_session_policy_runtime_deps,
+)
+is_short_followup_candidate = partial(
+    is_short_followup_candidate_from_runtime,
+    deps=discord_session_policy_runtime_deps,
+)
+should_skip_full_stt_after_wake_probe = partial(
+    should_skip_full_stt_after_wake_probe_from_runtime,
+    deps=discord_session_policy_runtime_deps,
+)
+should_require_confirm_exact_for_wake = partial(
+    should_require_confirm_exact_for_wake_from_runtime,
+    deps=discord_session_policy_runtime_deps,
+)
+is_transport_corrupted_audio = partial(
+    is_transport_corrupted_audio_from_runtime,
+    deps=discord_session_policy_runtime_deps,
+)
+is_tail_fragment_candidate = partial(
+    is_tail_fragment_candidate_from_runtime,
+    deps=discord_session_policy_runtime_deps,
+)
 
 
 def ensure_voice_worker_started() -> None:

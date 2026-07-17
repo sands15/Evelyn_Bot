@@ -10,7 +10,11 @@ RUNTIME_ROOT = REPO_ROOT / "evelyn_core" / "runtime"
 if str(RUNTIME_ROOT) not in sys.path:
     sys.path.insert(0, str(RUNTIME_ROOT))
 
-from evelyn_core.runtime_mode_policy import compute_runtime_mode_from_state, apply_runtime_mode_policy  # noqa: E402
+from evelyn_core.runtime_mode_policy import (  # noqa: E402
+    RuntimeModeResolver,
+    apply_runtime_mode_policy,
+    compute_runtime_mode_from_state,
+)
 
 
 class RuntimeModePolicyTests(unittest.TestCase):
@@ -36,6 +40,19 @@ class RuntimeModePolicyTests(unittest.TestCase):
     def test_compute_runtime_mode_uses_congested_for_llm_pressure(self) -> None:
         self.assertEqual(compute_runtime_mode_from_state({}, tts_backlog=0, inflight_llm_requests=2), "congested")
         self.assertEqual(compute_runtime_mode_from_state({}, tts_backlog=0, inflight_llm_requests=1), "normal")
+
+    def test_runtime_mode_resolver_reads_live_pressure_on_each_call(self) -> None:
+        pressure = {"tts": 0, "llm": 0}
+        resolver = RuntimeModeResolver(
+            tts_backlog_get=lambda: pressure["tts"],
+            inflight_llm_requests_get=lambda: pressure["llm"],
+        )
+
+        self.assertEqual(resolver({}), "normal")
+        pressure["llm"] = 2
+        self.assertEqual(resolver({}), "congested")
+        pressure["tts"] = 2
+        self.assertEqual(resolver({}), "realtime")
 
     def test_apply_runtime_mode_policy_sets_defaults_and_overrides(self) -> None:
         self.assertEqual(
