@@ -55,6 +55,21 @@ class LlmCognitiveDependencyCompositionTests(unittest.TestCase):
         self.assertIn("ask_router_llm=deps.ask_router_llm", source)
         self.assertIn("build_cognitive_state_messages=deps.build_cognitive_state_messages", source)
 
+    def test_main_partials_speculative_and_followup_entrypoints(self) -> None:
+        source = (REPO_ROOT / "main.py").read_text(encoding="utf-8")
+        for name in (
+            "speculate_from_committed_stt",
+            "remember_speculative_policy",
+            "get_matching_speculative_policy",
+            "should_force_search_followup",
+        ):
+            self.assertNotIn(f"def {name}(", source)
+            self.assertIn(f"{name} = partial(", source)
+        self.assertIn(
+            "cognitive_followup_runtime_deps = build_cognitive_followup_runtime_deps()",
+            source,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

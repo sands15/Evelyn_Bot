@@ -1518,78 +1518,34 @@ def ensure_voice_worker_started() -> None:
     voice_worker_task = asyncio.create_task(voice_ingress_worker())
 
 
-def should_label_question_response(text: str, *, session_key: str | None = None) -> bool:
-    return should_label_question_response_from_runtime(
-        text,
-        session_key=session_key,
-        deps=build_response_output_policy_runtime_deps(),
-    )
-
-
-def fallback_for_unrequested_minecraft_leak(user_text: str) -> str:
-    return fallback_for_unrequested_minecraft_leak_from_runtime(
-        user_text,
-        deps=build_response_output_policy_runtime_deps(),
-    )
-
-
-def sanitize_unrequested_minecraft_leak(user_text: str, answer: str) -> str:
-    return sanitize_unrequested_minecraft_leak_from_runtime(
-        user_text,
-        answer,
-        deps=build_response_output_policy_runtime_deps(),
-    )
-
-
-def format_display_text(text: str, *, session_key: str | None = None) -> str:
-    return format_display_text_from_runtime(
-        text,
-        session_key=session_key,
-        deps=build_response_output_policy_runtime_deps(),
-    )
-
-
-def speculate_from_committed_stt(committed_text: str, room_state: dict | None) -> dict | None:
-    return speculate_from_committed_stt_from_runtime(
-        committed_text,
-        room_state,
-        clean_text=clean_text,
-        fast_path_policy=fast_path_policy,
-        monotonic=time.monotonic,
-    )
-
-
-def remember_speculative_policy(session_key: str | None, speculative: dict | None) -> None:
-    remember_speculative_policy_from_runtime(session_speculative_policies, session_key, speculative)
-
-
-def get_matching_speculative_policy(session_key: str | None, user_text: str) -> dict | None:
-    return get_matching_speculative_policy_from_runtime(
-        session_speculative_policies,
-        session_key,
-        user_text,
-        clean_text=clean_text,
-        is_similar=is_similar,
-        monotonic=time.monotonic,
-    )
-
-
-def should_force_search_followup(
-    guild_id: int | None,
-    *,
-    room_key: str | None = None,
-    person_key: str | None = None,
-    session_memory_key: str | None = None,
-    source: str,
-) -> bool:
-    return should_force_search_followup_from_runtime(
-        guild_id,
-        room_key=room_key,
-        person_key=person_key,
-        session_memory_key=session_memory_key,
-        source=source,
-        deps=build_cognitive_followup_runtime_deps(),
-    )
+response_output_policy_runtime_deps = build_response_output_policy_runtime_deps()
+should_label_question_response = partial(
+    should_label_question_response_from_runtime,
+    deps=response_output_policy_runtime_deps,
+)
+fallback_for_unrequested_minecraft_leak = partial(
+    fallback_for_unrequested_minecraft_leak_from_runtime,
+    deps=response_output_policy_runtime_deps,
+)
+sanitize_unrequested_minecraft_leak = partial(
+    sanitize_unrequested_minecraft_leak_from_runtime,
+    deps=response_output_policy_runtime_deps,
+)
+format_display_text = partial(
+    format_display_text_from_runtime,
+    deps=response_output_policy_runtime_deps,
+)
+remember_speculative_policy = partial(
+    remember_speculative_policy_from_runtime,
+    session_speculative_policies,
+)
+get_matching_speculative_policy = partial(
+    get_matching_speculative_policy_from_runtime,
+    session_speculative_policies,
+    clean_text=clean_text,
+    is_similar=is_similar,
+    monotonic=time.monotonic,
+)
 
 
 llm_cognitive_dependency_composition = LlmCognitiveDependencyComposition(
@@ -1666,6 +1622,11 @@ build_llm_route_runtime_deps = (
 )
 build_cognitive_state_runtime_deps = (
     llm_cognitive_dependency_composition.build_cognitive_state_runtime_deps
+)
+cognitive_followup_runtime_deps = build_cognitive_followup_runtime_deps()
+should_force_search_followup = partial(
+    should_force_search_followup_from_runtime,
+    deps=cognitive_followup_runtime_deps,
 )
 
 
@@ -3331,6 +3292,12 @@ needs_search_or_deep_routing = llm_route_composition.needs_search_or_deep_routin
 is_simple_directive = llm_route_composition.is_simple_directive
 is_obvious_continue = llm_route_composition.is_obvious_continue
 fast_path_policy = llm_route_composition.fast_path_policy
+speculate_from_committed_stt = partial(
+    speculate_from_committed_stt_from_runtime,
+    clean_text=clean_text,
+    fast_path_policy=fast_path_policy,
+    monotonic=time.monotonic,
+)
 context_policy_for_fast_path_policy = llm_route_composition.context_policy_for_fast_path_policy
 prepare_llm_messages = llm_route_composition.prepare_llm_messages
 extract_json_object = llm_route_composition.extract_json_object

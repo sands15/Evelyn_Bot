@@ -88,6 +88,21 @@ class ConversationPolicyDependencyCompositionTests(unittest.TestCase):
             self.assertNotIn(f"def {name}(", source)
             self.assertIn(f"{name} = partial(", source)
 
+    def test_main_partials_response_output_entrypoints(self) -> None:
+        source = (REPO_ROOT / "main.py").read_text(encoding="utf-8")
+        self.assertIn(
+            "response_output_policy_runtime_deps = build_response_output_policy_runtime_deps()",
+            source,
+        )
+        for name in (
+            "should_label_question_response",
+            "fallback_for_unrequested_minecraft_leak",
+            "sanitize_unrequested_minecraft_leak",
+            "format_display_text",
+        ):
+            self.assertNotIn(f"def {name}(", source)
+            self.assertIn(f"{name} = partial(", source)
+
 
 if __name__ == "__main__":
     unittest.main()
