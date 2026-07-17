@@ -170,9 +170,13 @@ class VoiceSttExecutionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         ).read_text(encoding="utf-8")
         start = composition_source.index("    async def process_member_audio_impl(")
         function_source = composition_source[start:]
-        builder_source = source[
-            source.index("def build_voice_member_audio_pipeline_deps(") : source.index("voice_io_composition =", source.index("def build_voice_member_audio_pipeline_deps("))
-        ]
+        builder_source = (
+            REPO_ROOT
+            / "evelyn_core"
+            / "runtime"
+            / "evelyn_core"
+            / "voice_member_pipeline_dependency_composition.py"
+        ).read_text(encoding="utf-8")
 
         self.assertIn("run_stt_execution=run_voice_stt_execution_from_runtime", builder_source)
         self.assertIn("process_member_audio_pipeline_from_runtime(", function_source)

@@ -631,22 +631,19 @@ from evelyn_core.voice_utterance import (
     UtteranceAssemblyConfig,
 )
 from evelyn_core.voice_orchestration import (
-    VoiceTranscriptReplyDeps,
     apply_voice_ingress_dequeue_debug_meta,
     build_rejected_voice_turn,
     build_voice_ingress_item,
     enqueue_voice_ingress_item,
     evaluate_voice_ingress_dequeue,
-    process_voice_reply_from_transcript_context,
 )
 from evelyn_core.voice_turn_entry_runtime import (
     VoiceTurnEntryRuntimeDeps,
 )
-from evelyn_core.voice_reply_dispatch_runtime import (
-    VoiceReplyDispatchDeps,
-    dispatch_voice_reply_from_runtime,
+from evelyn_core.voice_member_pipeline_dependency_composition import (
+    VoiceMemberPipelineDependencyComposition,
+    VoiceMemberPipelineDependencyCompositionDeps,
 )
-from evelyn_core.voice_member_audio_pipeline_runtime import VoiceMemberAudioPipelineDeps
 from evelyn_core.voice_execution_dependency_composition import (
     VoiceExecutionDependencyComposition,
     VoiceExecutionDependencyCompositionDeps,
@@ -659,23 +656,13 @@ from evelyn_core.voice_ingress_runtime import (
     VoiceIngressEntrypointDeps,
     VoiceIngressRuntimeDeps,
 )
-from evelyn_core.voice_audio_ingress_runtime import (
-    prepare_voice_audio_ingress_from_runtime,
-)
 from evelyn_core.voice_ingress_dependency_composition import (
     VoiceIngressDependencyComposition,
     VoiceIngressDependencyCompositionDeps,
 )
-from evelyn_core.voice_wake_probe_runtime import run_voice_wake_probe_from_runtime
 from evelyn_core.voice_transcription_dependency_composition import (
     VoiceTranscriptionDependencyComposition,
     VoiceTranscriptionDependencyCompositionDeps,
-)
-from evelyn_core.voice_stt_execution_runtime import run_voice_stt_execution_from_runtime
-from evelyn_core.voice_transcript_finalize_runtime import finalize_voice_transcript_from_runtime
-from evelyn_core.voice_session_gate_runtime import (
-    VoiceSessionGateDeps,
-    run_voice_session_gate_from_runtime,
 )
 from evelyn_core.voice_reply_side_effects import VoiceReplySideEffectDeps
 from evelyn_core.voice_reply_gate_runtime import VoiceReplyGateRuntimeDeps
@@ -3637,89 +3624,82 @@ build_voice_transcript_finalize_deps = (
 )
 
 
-def build_voice_session_gate_deps() -> VoiceSessionGateDeps:
-    return VoiceSessionGateDeps(
-        is_short_followup_candidate=is_short_followup_candidate,
-        should_ignore_short_transcription=should_ignore_short_transcription,
-        decide_final_wake_veto=decide_final_wake_veto,
-        extract_leading_wake_alias=extract_leading_wake_alias,
-        register_drop_reason=register_drop_reason,
-        save_voice_debug_audio=save_voice_debug_audio,
-        log_voice_stage=log_voice_stage,
-        log_voice_bottleneck_summary=log_voice_bottleneck_summary,
-        print_fn=print,
-    )
-
-
-def build_voice_reply_dispatch_deps() -> VoiceReplyDispatchDeps:
-    return VoiceReplyDispatchDeps(
-        room_state_snapshot=room_state_snapshot,
+voice_member_pipeline_dependency_composition = VoiceMemberPipelineDependencyComposition(
+    VoiceMemberPipelineDependencyCompositionDeps(
+        is_short_followup_candidate=lambda *args, **kwargs: is_short_followup_candidate(
+            *args, **kwargs
+        ),
+        should_ignore_short_transcription=lambda *args, **kwargs: should_ignore_short_transcription(
+            *args, **kwargs
+        ),
+        register_drop_reason=lambda *args, **kwargs: register_drop_reason(*args, **kwargs),
+        save_voice_debug_audio=lambda *args, **kwargs: save_voice_debug_audio(*args, **kwargs),
+        log_voice_stage=lambda *args, **kwargs: log_voice_stage(*args, **kwargs),
+        log_voice_bottleneck_summary=lambda *args, **kwargs: log_voice_bottleneck_summary(
+            *args, **kwargs
+        ),
+        room_state_snapshot=lambda *args, **kwargs: room_state_snapshot(*args, **kwargs),
         session_topic_ids=session_topic_ids,
         monotonic=time.monotonic,
-        process_voice_reply=process_voice_reply_from_transcript_context,
         active_conversation_awaiting_reply_sec=ACTIVE_CONVERSATION_AWAITING_REPLY_SEC,
         active_conversation_voice_sec=ACTIVE_CONVERSATION_VOICE_SEC,
         canned_wake_reply=CANNED_WAKE_REPLY_TEXT,
-    )
-
-
-def build_voice_transcript_reply_deps(guild: Any) -> VoiceTranscriptReplyDeps:
-    return VoiceTranscriptReplyDeps(
-        should_reply_to_voice=should_reply_to_voice,
-        register_drop_reason=register_drop_reason,
-        log_voice_stage=log_voice_stage,
-        log_voice_bottleneck_summary=log_voice_bottleneck_summary,
-        reset_session_bad_audio=reset_session_bad_audio,
-        build_voice_reply_request=build_voice_reply_request,
-        build_topic_id=build_topic_id,
+        should_reply_to_voice=lambda *args, **kwargs: should_reply_to_voice(*args, **kwargs),
+        reset_session_bad_audio=lambda *args, **kwargs: reset_session_bad_audio(*args, **kwargs),
+        build_topic_id=lambda *args, **kwargs: build_topic_id(*args, **kwargs),
         session_last_stt_text=session_last_stt_text,
         room_last_voice_reply_at=room_last_voice_reply_at,
         room_last_voice_utterance_for_merge=room_last_voice_utterance_for_merge,
-        update_room_speaker_activity=update_room_speaker_activity,
-        pick_active_speaker=pick_active_speaker,
-        start_new_turn=start_new_turn,
-        update_session_state=update_session_state,
-        set_room_owner=set_room_owner,
+        update_room_speaker_activity=lambda *args, **kwargs: update_room_speaker_activity(
+            *args, **kwargs
+        ),
+        pick_active_speaker=lambda *args, **kwargs: pick_active_speaker(*args, **kwargs),
+        start_new_turn=lambda *args, **kwargs: start_new_turn(*args, **kwargs),
+        update_session_state=lambda *args, **kwargs: update_session_state(*args, **kwargs),
+        set_room_owner=lambda *args, **kwargs: set_room_owner(*args, **kwargs),
         session_partial_stt_text=session_partial_stt_text,
         session_committed_stt_text=session_committed_stt_text,
         partial_stt_cache=partial_stt_cache,
-        make_turn_scope=TurnScope,
-        replace_room_turn_scope=replace_room_turn_scope,
-        attach_current_task=_attach_current_task,
-        set_room_reply_in_progress=set_room_reply_in_progress,
+        replace_room_turn_scope=lambda *args, **kwargs: replace_room_turn_scope(*args, **kwargs),
+        attach_current_task=lambda *args, **kwargs: _attach_current_task(*args, **kwargs),
+        set_room_reply_in_progress=lambda *args, **kwargs: set_room_reply_in_progress(
+            *args, **kwargs
+        ),
         session_locks=session_locks,
-        visible_text=visible_text,
-        print_fn=print,
-        get_voice_client=lambda: guild.voice_client,
-        speak_answer=speak_answer,
-        ask_llm_and_speak_streaming=ask_llm_and_speak_streaming,
-        record_voice_pipeline_failure=record_voice_pipeline_failure,
-        finalize_voice_reply_side_effects=finalize_voice_reply_side_effects,
-        strip_omnivoice_tags=strip_omnivoice_tags,
-        get_room_turn_scope=get_room_turn_scope,
-        detach_task=_detach_task,
-        clear_room_turn_scope=clear_room_turn_scope,
+        speak_answer=lambda *args, **kwargs: speak_answer(*args, **kwargs),
+        ask_llm_and_speak_streaming=lambda *args, **kwargs: ask_llm_and_speak_streaming(
+            *args, **kwargs
+        ),
+        record_voice_pipeline_failure=lambda *args, **kwargs: record_voice_pipeline_failure(
+            *args, **kwargs
+        ),
+        finalize_voice_reply_side_effects=lambda *args, **kwargs: finalize_voice_reply_side_effects(
+            *args, **kwargs
+        ),
+        get_room_turn_scope=lambda *args, **kwargs: get_room_turn_scope(*args, **kwargs),
+        detach_task=lambda *args, **kwargs: _detach_task(*args, **kwargs),
+        clear_room_turn_scope=lambda *args, **kwargs: clear_room_turn_scope(*args, **kwargs),
+        build_audio_ingress_deps=lambda: build_voice_audio_ingress_runtime_deps(),
+        build_wake_probe_deps=lambda: build_voice_wake_probe_runtime_deps(),
+        build_tts_interrupt_gate_deps=lambda: build_voice_tts_interrupt_gate_deps(),
+        build_stt_execution_deps=lambda: build_voice_stt_execution_deps(),
+        build_transcript_finalize_deps=lambda: build_voice_transcript_finalize_deps(),
+        log=print,
     )
+)
 
-
-def build_voice_member_audio_pipeline_deps() -> VoiceMemberAudioPipelineDeps:
-    return VoiceMemberAudioPipelineDeps(
-        prepare_audio_ingress=prepare_voice_audio_ingress_from_runtime,
-        build_audio_ingress_deps=build_voice_audio_ingress_runtime_deps,
-        run_wake_probe=run_voice_wake_probe_from_runtime,
-        build_wake_probe_deps=build_voice_wake_probe_runtime_deps,
-        run_tts_interrupt_gate=run_voice_tts_interrupt_gate_from_runtime,
-        build_tts_interrupt_gate_deps=build_voice_tts_interrupt_gate_deps,
-        run_stt_execution=run_voice_stt_execution_from_runtime,
-        build_stt_execution_deps=build_voice_stt_execution_deps,
-        finalize_transcript=finalize_voice_transcript_from_runtime,
-        build_transcript_finalize_deps=build_voice_transcript_finalize_deps,
-        run_session_gate=run_voice_session_gate_from_runtime,
-        build_session_gate_deps=build_voice_session_gate_deps,
-        dispatch_voice_reply=dispatch_voice_reply_from_runtime,
-        build_transcript_reply_deps=build_voice_transcript_reply_deps,
-        build_reply_dispatch_deps=build_voice_reply_dispatch_deps,
-    )
+build_voice_session_gate_deps = (
+    voice_member_pipeline_dependency_composition.build_voice_session_gate_deps
+)
+build_voice_reply_dispatch_deps = (
+    voice_member_pipeline_dependency_composition.build_voice_reply_dispatch_deps
+)
+build_voice_transcript_reply_deps = (
+    voice_member_pipeline_dependency_composition.build_voice_transcript_reply_deps
+)
+build_voice_member_audio_pipeline_deps = (
+    voice_member_pipeline_dependency_composition.build_voice_member_audio_pipeline_deps
+)
 
 
 voice_io_composition = VoiceIoComposition(

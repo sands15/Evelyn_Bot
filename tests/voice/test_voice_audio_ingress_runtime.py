@@ -202,9 +202,13 @@ class VoiceAudioIngressRuntimeTests(unittest.TestCase):
             REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "voice_io_composition_runtime.py"
         ).read_text(encoding="utf-8")
         function_source = composition_source[composition_source.index("    async def process_member_audio_impl(") :]
-        builder_source = source[
-            source.index("def build_voice_member_audio_pipeline_deps(") : source.index("voice_io_composition =", source.index("def build_voice_member_audio_pipeline_deps("))
-        ]
+        builder_source = (
+            REPO_ROOT
+            / "evelyn_core"
+            / "runtime"
+            / "evelyn_core"
+            / "voice_member_pipeline_dependency_composition.py"
+        ).read_text(encoding="utf-8")
 
         self.assertIn("prepare_audio_ingress=prepare_voice_audio_ingress_from_runtime", builder_source)
         self.assertIn("process_member_audio_pipeline_from_runtime(", function_source)
