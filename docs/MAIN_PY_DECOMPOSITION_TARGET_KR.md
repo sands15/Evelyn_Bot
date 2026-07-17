@@ -2,6 +2,34 @@
 
 Last reviewed: 2026-07-17
 
+## 2026-07-17 Control Page turn + voice delivery dependency composition 연속 배치
+
+- Control Page forced-search와 일반 text-turn dependency root를
+  `control_page_search_text_dependency_composition.py`로 이동했다.
+  - 공통 session lock과 turn scope 계약을 composition이 소유한다.
+  - 뒤에서 생성되는 route/search/LLM adapter는 lazy callback으로 연결했다.
+  - 커밋: `96fcdc2 refactor: extract control page search text composition`.
+- Control Page cheap-tool/router/search/text input routing dependency root를
+  `control_page_input_dependency_composition.py`로 이동했다.
+  - pure tool decision/query policy는 composition이 직접 소유하고 Control Page 실행 adapter만 late-bound한다.
+  - 커밋: `9e72497 refactor: extract control page input composition`.
+- voice turn-entry, voice delivery, Discord text-reply dependency root를
+  `voice_delivery_dependency_composition.py`로 이동했다.
+  - answer payload/delivery plan/TTS sentence split 정책은 composition이 직접 소유한다.
+  - 뒤에서 생성되는 LLM/voice I/O adapter는 lazy callback으로 연결했다.
+  - 커밋: `4eb883b refactor: extract voice delivery dependency composition`,
+    `39599ca test: follow control page input composition boundary`.
+- 누적 결과:
+  - `main.py`: 3,930줄 → 3,948줄
+  - 최상위 함수: 98개 → 92개
+  - 줄 수 증가는 voice delivery의 late-bound adapter를 전역 조회 없이 명시적으로 나열한 typed wiring 비용이다.
+  - 새 composition 경계 테스트 9개 추가
+  - 각 배치마다 실제 `main.py` Control Page process smoke 통과
+  - 실제 `main.py` smoke와 `PYTHONWARNINGS=error::ResourceWarning`를 포함한 전체 unittest 1,229개 통과
+  - Python `compileall`, `git diff --check`, replacement character/중복 최상위 정의 검사 통과
+- 런타임/컨테이너 재시작과 외부 push는 하지 않았다.
+- 다음 후보는 voice TTS interrupt/cached/single-stream dependency root 또는 남은 Control Page server-start root다.
+
 ## 2026-07-17 Control Page dependency composition 연속 배치
 
 - UI/guild selection/welcome dependency root를 `control_page_ui_dependency_composition.py`로 이동했다.
