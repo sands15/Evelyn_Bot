@@ -1208,3 +1208,24 @@ Last reviewed: 2026-07-17
   - 수정 완료 후 각 배치 실제 `main.py` control-page process smoke 통과.
   - `EVELYN_RUN_REAL_MAIN_INTEGRATION=1`, `PYTHONWARNINGS=error::ResourceWarning` 전체 discovery: 1,253 tests 통과.
   - 런타임/컨테이너 재시작 및 원격 push 없음.
+
+## 2026-07-17 voice turn/LLM cognitive/search memory dependency 연속 분리
+
+- `voice_turn_dependency_composition.py`
+  - barge-in continuity, reply side effect/gate, ingress runtime/entrypoint builder 5개를 통합.
+  - 뒤에서 생성되는 memory/search/voice worker callback은 late-bound wiring으로 연결.
+- `llm_cognitive_dependency_composition.py`
+  - cognitive follow-up, summary/router JSON LLM, LLM route, cognitive-state builder 5개를 통합.
+  - summary/router의 중복 JSON request dependency 조립은 내부 공통 factory로 합침.
+  - 뒤에서 생성되는 `fast_path_policy`, `ask_router_llm`, voice timing callback은 late-bound wiring으로 보존.
+- `search_memory_dependency_composition.py`
+  - memory update, search answer, search follow-up builder 3개를 통합.
+  - 실제 main smoke에서 eager binding된 late route helper 3개를 검출해 호출 시점 wiring으로 수정.
+- 구조 결과:
+  - 대상 top-level builder 13개가 `main.py`에서 제거됨.
+  - `main.py`: 3,902→3,884 lines, top-level functions 66→53개.
+- 검증:
+  - 세 신규 composition 경계 테스트 통과 및 builder dataclass 13종 materialization 확인.
+  - 수정 완료 후 각 배치 실제 `main.py` control-page process smoke 통과.
+  - `EVELYN_RUN_REAL_MAIN_INTEGRATION=1`, `PYTHONWARNINGS=error::ResourceWarning` 전체 discovery: 1,262 tests 통과.
+  - 런타임/컨테이너 재시작 및 원격 push 없음.
