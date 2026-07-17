@@ -667,14 +667,12 @@ from evelyn_core.voice_ingress_dependency_composition import (
     VoiceIngressDependencyCompositionDeps,
 )
 from evelyn_core.voice_wake_probe_runtime import run_voice_wake_probe_from_runtime
-from evelyn_core.voice_stt_execution_runtime import (
-    VoiceSttExecutionDeps,
-    run_voice_stt_execution_from_runtime,
+from evelyn_core.voice_transcription_dependency_composition import (
+    VoiceTranscriptionDependencyComposition,
+    VoiceTranscriptionDependencyCompositionDeps,
 )
-from evelyn_core.voice_transcript_finalize_runtime import (
-    VoiceTranscriptFinalizeDeps,
-    finalize_voice_transcript_from_runtime,
-)
+from evelyn_core.voice_stt_execution_runtime import run_voice_stt_execution_from_runtime
+from evelyn_core.voice_transcript_finalize_runtime import finalize_voice_transcript_from_runtime
 from evelyn_core.voice_session_gate_runtime import (
     VoiceSessionGateDeps,
     run_voice_session_gate_from_runtime,
@@ -3585,24 +3583,28 @@ def build_voice_tts_interrupt_gate_deps() -> VoiceTtsInterruptGateDeps:
     )
 
 
-def build_voice_stt_execution_deps() -> VoiceSttExecutionDeps:
-    return VoiceSttExecutionDeps(
-        run_partial_stt_flow=run_partial_stt_flow,
-        run_full_stt_with_optional_rescore=run_full_stt_with_optional_rescore,
-        build_partial_stt_window=build_partial_stt_window,
-        get_partial_transcript=get_partial_transcript,
-        read_committed_text=lambda key: session_committed_stt_text.get(key or "", ""),
-        run_blocking_stt_task=run_blocking_stt_task,
-        speculate_from_committed_stt=speculate_from_committed_stt,
-        room_state_snapshot=room_state_snapshot,
-        clean_text=clean_text,
-        remember_speculative_policy=remember_speculative_policy,
-        transcribe_audio=transcribe_audio16k_sync,
-        choose_full_stt_candidate=choose_full_stt_candidate,
-        log_voice_stage=log_voice_stage,
-        mark_turn_stage=mark_turn_stage,
-        save_voice_debug_audio=save_voice_debug_audio,
-        print_fn=print,
+voice_transcription_dependency_composition = VoiceTranscriptionDependencyComposition(
+    VoiceTranscriptionDependencyCompositionDeps(
+        build_partial_stt_window=lambda *args, **kwargs: build_partial_stt_window(
+            *args, **kwargs
+        ),
+        get_partial_transcript=lambda *args, **kwargs: get_partial_transcript(*args, **kwargs),
+        session_committed_stt_text=session_committed_stt_text,
+        run_blocking_stt_task=lambda *args, **kwargs: run_blocking_stt_task(*args, **kwargs),
+        speculate_from_committed_stt=lambda *args, **kwargs: speculate_from_committed_stt(
+            *args, **kwargs
+        ),
+        room_state_snapshot=lambda *args, **kwargs: room_state_snapshot(*args, **kwargs),
+        remember_speculative_policy=lambda *args, **kwargs: remember_speculative_policy(
+            *args, **kwargs
+        ),
+        transcribe_audio=lambda *args, **kwargs: transcribe_audio16k_sync(*args, **kwargs),
+        choose_full_stt_candidate=lambda *args, **kwargs: choose_full_stt_candidate(
+            *args, **kwargs
+        ),
+        log_voice_stage=lambda *args, **kwargs: log_voice_stage(*args, **kwargs),
+        mark_turn_stage=lambda *args, **kwargs: mark_turn_stage(*args, **kwargs),
+        save_voice_debug_audio=lambda *args, **kwargs: save_voice_debug_audio(*args, **kwargs),
         full_stt_timeout_sec=FULL_STT_TIMEOUT_SEC,
         voice_stt_max_new_tokens=VOICE_STT_MAX_NEW_TOKENS,
         rescore_enabled=STT_FULL_RESCORING_ENABLED,
@@ -3610,30 +3612,29 @@ def build_voice_stt_execution_deps() -> VoiceSttExecutionDeps:
         rescore_min_audio_sec=STT_FULL_RESCORING_MIN_AUDIO_SEC,
         rescore_min_text_len=STT_FULL_RESCORING_MIN_TEXT_LEN,
         rescore_timeout_sec=STT_FULL_RESCORING_TIMEOUT_SEC,
-    )
-
-
-def build_voice_transcript_finalize_deps() -> VoiceTranscriptFinalizeDeps:
-    return VoiceTranscriptFinalizeDeps(
-        build_final_transcript_flow=build_final_transcript_flow,
-        room_state_snapshot=room_state_snapshot,
-        apply_stt_post_corrections=apply_stt_post_corrections,
-        clean_text=clean_text,
-        set_partial_text=lambda key, value: session_partial_stt_text.__setitem__(key, value),
-        commit_stable_transcript=commit_stable_transcript,
-        build_transcript_result=build_transcript_result,
-        speculate_from_committed_stt=speculate_from_committed_stt,
-        remember_speculative_policy=remember_speculative_policy,
+        session_partial_stt_text=session_partial_stt_text,
+        commit_stable_transcript=lambda *args, **kwargs: commit_stable_transcript(
+            *args, **kwargs
+        ),
+        build_transcript_result=lambda *args, **kwargs: build_transcript_result(
+            *args, **kwargs
+        ),
         room_last_voice_utterance_for_merge=room_last_voice_utterance_for_merge,
-        maybe_merge_barge_in_utterance=maybe_merge_barge_in_utterance,
-        log_voice_stage=log_voice_stage,
-        print_fn=print,
         merge_window_sec=VOICE_BARGE_IN_MERGE_WINDOW_SEC,
         tts_interrupted_window_sec=VOICE_BARGE_IN_TTS_INTERRUPTED_WINDOW_SEC,
         incomplete_window_sec=VOICE_BARGE_IN_INCOMPLETE_UTTERANCE_WINDOW_SEC,
         complete_question_window_sec=VOICE_BARGE_IN_QUESTION_WINDOW_SEC,
         adaptive_window_enabled=VOICE_BARGE_IN_ADAPTIVE_MERGE_ENABLED,
+        log=print,
     )
+)
+
+build_voice_stt_execution_deps = (
+    voice_transcription_dependency_composition.build_voice_stt_execution_deps
+)
+build_voice_transcript_finalize_deps = (
+    voice_transcription_dependency_composition.build_voice_transcript_finalize_deps
+)
 
 
 def build_voice_session_gate_deps() -> VoiceSessionGateDeps:
