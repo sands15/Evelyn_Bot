@@ -341,9 +341,9 @@ from evelyn_core.discord_delivery import (
     execute_streaming_voice_delivery_plan,
     send_discord_text,
 )
-from evelyn_core.discord_tts_stream_runtime import (
-    DiscordTtsSingleRuntimeDeps,
-    DiscordTtsStreamRuntimeDeps,
+from evelyn_core.discord_tts_dependency_composition import (
+    DiscordTtsDependencyComposition,
+    DiscordTtsDependencyCompositionDeps,
 )
 from evelyn_core.discord_voice_connection_runtime import DiscordVoiceConnectionRuntimeDeps
 from evelyn_core.discord_settings_runtime import (
@@ -2557,33 +2557,24 @@ build_voice_tts_interrupt_gate_deps = (
 )
 
 
-def build_discord_tts_single_runtime_deps() -> DiscordTtsSingleRuntimeDeps:
-    return DiscordTtsSingleRuntimeDeps(
+discord_tts_dependency_composition = DiscordTtsDependencyComposition(
+    DiscordTtsDependencyCompositionDeps(
         is_local_speaker_voice_client=is_local_speaker_voice_client,
-        speak_answer_local=speak_answer_local,
+        speak_answer_local=lambda *args, **kwargs: speak_answer_local(*args, **kwargs),
         tts_running_state=TurnState.TTS_RUNNING,
-        play_cached_answer_audio=play_cached_answer_audio,
+        play_cached_answer_audio=lambda *args, **kwargs: play_cached_answer_audio(
+            *args, **kwargs
+        ),
         tts_lock=tts_lock,
         create_omnivoice_source=create_omnivoice_source,
         log_turn_event=log_turn_event,
         log_voice_latency=log_voice_latency,
         playback_manager=tts_playback_manager,
         source_playback_request_factory=TtsSourcePlaybackRequest,
-    )
-
-
-def build_discord_tts_stream_runtime_deps() -> DiscordTtsStreamRuntimeDeps:
-    return DiscordTtsStreamRuntimeDeps(
         attach_current_task=_attach_current_task,
         detach_task=_detach_task,
-        tts_running_state=TurnState.TTS_RUNNING,
-        create_omnivoice_source=create_omnivoice_source,
         mark_turn_stage=mark_turn_stage,
-        log_voice_latency=log_voice_latency,
-        log_turn_event=log_turn_event,
         record_voice_pipeline_failure=record_voice_pipeline_failure,
-        tts_lock=tts_lock,
-        playback_manager=tts_playback_manager,
         streaming_playback_request_factory=TtsStreamingPlaybackRequest,
         omnivoice_timeout_sec=OMNIVOICE_TIMEOUT_SEC,
         tts_prefetch_chunks=TTS_PREFETCH_CHUNKS,
@@ -2592,6 +2583,14 @@ def build_discord_tts_stream_runtime_deps() -> DiscordTtsStreamRuntimeDeps:
         create_turn_scoped_task=create_turn_scoped_task,
         log=print,
     )
+)
+
+build_discord_tts_single_runtime_deps = (
+    discord_tts_dependency_composition.build_discord_tts_single_runtime_deps
+)
+build_discord_tts_stream_runtime_deps = (
+    discord_tts_dependency_composition.build_discord_tts_stream_runtime_deps
+)
 
 
 def build_local_tts_single_runtime_deps() -> LocalTtsSingleRuntimeDeps:
