@@ -396,7 +396,10 @@ from evelyn_core.session_key_runtime import (
     make_voice_session_key,
     runtime_session_key,
 )
-from evelyn_core.discord_text_reply_runtime import DiscordTextReplyRuntimeDeps
+from evelyn_core.voice_delivery_dependency_composition import (
+    VoiceDeliveryDependencyComposition,
+    VoiceDeliveryDependencyCompositionDeps,
+)
 from evelyn_core.discord_session_policy import (
     estimate_voice_like_probability_policy,
     is_transport_corrupted_audio_policy,
@@ -630,9 +633,6 @@ from evelyn_core.voice_orchestration import (
     enqueue_voice_ingress_item,
     evaluate_voice_ingress_dequeue,
 )
-from evelyn_core.voice_turn_entry_runtime import (
-    VoiceTurnEntryRuntimeDeps,
-)
 from evelyn_core.voice_member_pipeline_dependency_composition import (
     VoiceMemberPipelineDependencyComposition,
     VoiceMemberPipelineDependencyCompositionDeps,
@@ -659,7 +659,6 @@ from evelyn_core.voice_transcription_dependency_composition import (
 )
 from evelyn_core.voice_reply_side_effects import VoiceReplySideEffectDeps
 from evelyn_core.voice_reply_gate_runtime import VoiceReplyGateRuntimeDeps
-from evelyn_core.voice_delivery_runtime import VoiceDeliveryRuntimeDeps
 from evelyn_core.voice_pipeline import (
     DeliveryPlan,
     RouteDecision,
@@ -3357,20 +3356,73 @@ build_voice_main_llm_streaming_deps = (
 )
 
 
-def build_voice_turn_entry_runtime_deps() -> VoiceTurnEntryRuntimeDeps:
-    return VoiceTurnEntryRuntimeDeps(
-        attach_current_task=_attach_current_task,
-        detach_task=_detach_task,
-        prepare_route_context=prepare_route_context,
-        maybe_handle_short_circuit_route=maybe_handle_short_circuit_route,
-        maybe_execute_registered_route=maybe_execute_registered_route,
-        run_main_llm_turn=execute_main_llm_streaming_turn,
-        emit_delivery_plan_chunks=emit_delivery_plan_chunks,
-        build_answer_payload_from_text=build_answer_payload_from_text,
-        build_delivery_plan=build_delivery_plan,
-        split_tts_sentences=split_tts_sentences,
-        record_voice_pipeline_failure=record_voice_pipeline_failure,
+voice_delivery_dependency_composition = VoiceDeliveryDependencyComposition(
+    VoiceDeliveryDependencyCompositionDeps(
+        attach_current_task=lambda *args, **kwargs: _attach_current_task(*args, **kwargs),
+        detach_task=lambda *args, **kwargs: _detach_task(*args, **kwargs),
+        prepare_route_context=lambda *args, **kwargs: prepare_route_context(*args, **kwargs),
+        maybe_handle_short_circuit_route=lambda *args, **kwargs: maybe_handle_short_circuit_route(
+            *args, **kwargs
+        ),
+        maybe_execute_registered_route=lambda *args, **kwargs: maybe_execute_registered_route(
+            *args, **kwargs
+        ),
+        run_main_llm_turn=lambda *args, **kwargs: execute_main_llm_streaming_turn(
+            *args, **kwargs
+        ),
+        emit_delivery_plan_chunks=lambda *args, **kwargs: emit_delivery_plan_chunks(
+            *args, **kwargs
+        ),
+        record_voice_pipeline_failure=lambda *args, **kwargs: record_voice_pipeline_failure(
+            *args, **kwargs
+        ),
+        current_turn_id=lambda *args, **kwargs: current_turn_id(*args, **kwargs),
+        session_topic_ids=session_topic_ids,
+        new_turn_metrics=lambda *args, **kwargs: new_turn_metrics(*args, **kwargs),
+        is_local_speaker_voice_client=lambda *args, **kwargs: is_local_speaker_voice_client(
+            *args, **kwargs
+        ),
+        start_streaming_voice_delivery=lambda *args, **kwargs: start_streaming_voice_delivery(
+            *args, **kwargs
+        ),
+        start_streaming_local_voice_delivery=lambda *args, **kwargs: start_streaming_local_voice_delivery(
+            *args, **kwargs
+        ),
+        ask_llm_streaming=lambda *args, **kwargs: ask_llm_streaming(*args, **kwargs),
+        speak_answer_local=lambda *args, **kwargs: speak_answer_local(*args, **kwargs),
+        local_tts_snapshot=local_tts_playback_manager.snapshot,
+        mark_barge_in_continuity_probe=lambda *args, **kwargs: _mark_voice_barge_in_continuity_probe(
+            *args, **kwargs
+        ),
+        log_voice_latency=lambda *args, **kwargs: log_voice_latency(*args, **kwargs),
+        log_voice_stage=lambda *args, **kwargs: log_voice_stage(*args, **kwargs),
+        log_voice_bottleneck_summary=lambda *args, **kwargs: log_voice_bottleneck_summary(
+            *args, **kwargs
+        ),
+        false_trigger_reason_code=VOICE_BARGE_IN_REASON_CODE["FALSE_TRIGGER"],
+        false_trigger_reason_label=VOICE_BARGE_IN_REASON_LABEL[
+            VOICE_BARGE_IN_REASON_CODE["FALSE_TRIGGER"]
+        ],
+        session_state_snapshot=lambda *args, **kwargs: session_state_snapshot(*args, **kwargs),
+        maybe_append_proactive_question=lambda *args, **kwargs: maybe_append_proactive_question(
+            *args, **kwargs
+        ),
+        update_session_state=lambda *args, **kwargs: update_session_state(*args, **kwargs),
+        format_display_text=lambda *args, **kwargs: format_display_text(*args, **kwargs),
+        fallback_answer_for=lambda *args, **kwargs: fallback_answer_for(*args, **kwargs),
+        send_discord_text=lambda *args, **kwargs: send_discord_text(*args, **kwargs),
     )
+)
+
+build_voice_turn_entry_runtime_deps = (
+    voice_delivery_dependency_composition.build_voice_turn_entry_runtime_deps
+)
+build_voice_delivery_runtime_deps = (
+    voice_delivery_dependency_composition.build_voice_delivery_runtime_deps
+)
+build_discord_text_reply_runtime_deps = (
+    voice_delivery_dependency_composition.build_discord_text_reply_runtime_deps
+)
 
 
 llm_route_composition = LlmRouteComposition(
@@ -3430,49 +3482,6 @@ maybe_handle_short_circuit_route = llm_route_composition.maybe_handle_short_circ
 maybe_execute_registered_route = llm_route_composition.maybe_execute_registered_route
 execute_main_llm_streaming_turn = llm_route_composition.execute_main_llm_streaming_turn
 ask_llm_streaming = llm_route_composition.ask_llm_streaming
-
-
-def build_voice_delivery_runtime_deps() -> VoiceDeliveryRuntimeDeps:
-    return VoiceDeliveryRuntimeDeps(
-        attach_current_task=_attach_current_task,
-        detach_task=_detach_task,
-        current_turn_id=current_turn_id,
-        session_topic_id=lambda session_key: session_topic_ids.get(session_key),
-        new_turn_metrics=new_turn_metrics,
-        is_local_speaker_voice_client=is_local_speaker_voice_client,
-        start_streaming_voice_delivery=start_streaming_voice_delivery,
-        start_streaming_local_voice_delivery=start_streaming_local_voice_delivery,
-        ask_llm_streaming=ask_llm_streaming,
-        speak_answer_local=speak_answer_local,
-        local_playback_count=lambda: int(local_tts_playback_manager.snapshot().get("playCount") or 0),
-        mark_barge_in_continuity_probe=_mark_voice_barge_in_continuity_probe,
-        record_voice_pipeline_failure=record_voice_pipeline_failure,
-        log_voice_latency=log_voice_latency,
-        log_voice_stage=log_voice_stage,
-        log_voice_bottleneck_summary=log_voice_bottleneck_summary,
-        false_trigger_reason_code=VOICE_BARGE_IN_REASON_CODE["FALSE_TRIGGER"],
-        false_trigger_reason_label=VOICE_BARGE_IN_REASON_LABEL[VOICE_BARGE_IN_REASON_CODE["FALSE_TRIGGER"]],
-    )
-
-
-def build_discord_text_reply_runtime_deps() -> DiscordTextReplyRuntimeDeps:
-    return DiscordTextReplyRuntimeDeps(
-        attach_current_task=_attach_current_task,
-        detach_task=_detach_task,
-        new_turn_metrics=new_turn_metrics,
-        session_topic_id=lambda session_key: session_topic_ids.get(session_key),
-        ask_llm_streaming=ask_llm_streaming,
-        log_llm_first_chunk=lambda metrics: log_voice_latency(metrics, "llm_first_chunk_logged", "LLM 첫 chunk 시간"),
-        session_state_snapshot=session_state_snapshot,
-        maybe_append_proactive_question=maybe_append_proactive_question,
-        update_session_state=update_session_state,
-        build_answer_payload_from_text=build_answer_payload_from_text,
-        format_display_text=format_display_text,
-        fallback_answer_for=fallback_answer_for,
-        build_delivery_plan=build_delivery_plan,
-        split_tts_sentences=split_tts_sentences,
-        send_discord_text=send_discord_text,
-    )
 
 
 # =========================================================
