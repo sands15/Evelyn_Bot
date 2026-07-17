@@ -18,7 +18,9 @@ class VoiceTranscriptionDependencyCompositionTests(unittest.TestCase):
         composition_index = source.index(
             "voice_transcription_dependency_composition = VoiceTranscriptionDependencyComposition("
         )
-        session_gate_index = source.index("def build_voice_session_gate_deps(")
+        session_gate_index = source.index(
+            "voice_member_pipeline_dependency_composition = VoiceMemberPipelineDependencyComposition("
+        )
 
         self.assertLess(composition_index, session_gate_index)
         self.assertIn(
