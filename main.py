@@ -609,7 +609,6 @@ from evelyn_core.voice_barge_in import (
 from evelyn_core.voice_barge_in_continuity import (
     VOICE_BARGE_IN_REASON_CODE,
     VOICE_BARGE_IN_REASON_LABEL,
-    VoiceBargeInContinuityRuntimeDeps,
     VoiceBargeInContinuityTracker,
 )
 from evelyn_core.voice_utterance import (
@@ -634,9 +633,9 @@ from evelyn_core.voice_response_dependency_composition import (
     VoiceResponseDependencyComposition,
     VoiceResponseDependencyCompositionDeps,
 )
-from evelyn_core.voice_ingress_runtime import (
-    VoiceIngressEntrypointDeps,
-    VoiceIngressRuntimeDeps,
+from evelyn_core.voice_turn_dependency_composition import (
+    VoiceTurnDependencyComposition,
+    VoiceTurnDependencyCompositionDeps,
 )
 from evelyn_core.voice_ingress_dependency_composition import (
     VoiceIngressDependencyComposition,
@@ -646,8 +645,6 @@ from evelyn_core.voice_transcription_dependency_composition import (
     VoiceTranscriptionDependencyComposition,
     VoiceTranscriptionDependencyCompositionDeps,
 )
-from evelyn_core.voice_reply_side_effects import VoiceReplySideEffectDeps
-from evelyn_core.voice_reply_gate_runtime import VoiceReplyGateRuntimeDeps
 from evelyn_core.voice_pipeline import (
     DeliveryPlan,
     RouteDecision,
@@ -1410,12 +1407,93 @@ voice_barge_in_continuity_tracker = VoiceBargeInContinuityTracker(
     event_logger=log_turn_event,
 )
 
-
-def build_voice_barge_in_continuity_runtime_deps() -> VoiceBargeInContinuityRuntimeDeps:
-    return VoiceBargeInContinuityRuntimeDeps(
-        tracker=voice_barge_in_continuity_tracker,
+voice_turn_dependency_composition = VoiceTurnDependencyComposition(
+    VoiceTurnDependencyCompositionDeps(
+        barge_in_tracker=voice_barge_in_continuity_tracker,
         command_status=command_status,
+        session_speculative_policies=session_speculative_policies,
+        append_history=append_history,
+        compute_runtime_mode=lambda *args, **kwargs: compute_runtime_mode(*args, **kwargs),
+        record_context_pipeline_benchmark=record_context_pipeline_benchmark,
+        schedule_memory_update=lambda *args, **kwargs: schedule_memory_update(*args, **kwargs),
+        read_cached_cognitive_state=read_cached_cognitive_state,
+        apply_ask_gating=apply_ask_gating,
+        schedule_search_followup=lambda *args, **kwargs: schedule_search_followup(
+            *args, **kwargs
+        ),
+        session_state_snapshot=session_state_snapshot,
+        mark_session_active=mark_session_active,
+        set_room_owner=set_room_owner,
+        active_conversation_voice_question_sec=ACTIVE_CONVERSATION_VOICE_QUESTION_SEC,
+        active_conversation_voice_sec=ACTIVE_CONVERSATION_VOICE_SEC,
+        active_conversation_awaiting_reply_sec=ACTIVE_CONVERSATION_AWAITING_REPLY_SEC,
+        room_state_snapshot=room_state_snapshot,
+        is_room_owner_active=is_room_owner_active,
+        is_session_active_for_user=is_session_active_for_user,
+        tts_input_suppression_reason=tts_playback_manager.input_suppression_reason,
+        room_last_voice_reply_at=room_last_voice_reply_at,
+        post_tts_ignore_sec=POST_TTS_IGNORE_SEC,
+        reply_cooldown_sec=REPLY_COOLDOWN_SEC,
+        normalize_voice_text=normalize_voice_text,
+        contains_wake_word=contains_wake_word,
+        looks_like_brief_filler_text=looks_like_brief_filler_text,
+        looks_like_repetitive_noise_text=looks_like_repetitive_noise_text,
+        is_similar=is_similar,
+        min_text_len=MIN_TEXT_LEN,
+        voice_ingress_queue=voice_ingress_queue,
+        voice_utterance_buffers=voice_utterance_buffers,
+        voice_utterance_flush_tasks=voice_utterance_flush_tasks,
+        voice_utterance_assembly_config=voice_utterance_assembly_config,
+        voice_ingress_max_age_sec=VOICE_INGRESS_MAX_AGE_SEC,
+        voice_ingress_drop_oldest_on_full=VOICE_INGRESS_DROP_OLDEST_ON_FULL,
+        voice_ingress_queue_max=VOICE_INGRESS_QUEUE_MAX,
+        evaluate_voice_ingress_dequeue=evaluate_voice_ingress_dequeue,
+        apply_voice_ingress_dequeue_debug_meta=apply_voice_ingress_dequeue_debug_meta,
+        enqueue_voice_ingress_item=enqueue_voice_ingress_item,
+        increment_voice_pipeline_counter=lambda *args, **kwargs: increment_voice_pipeline_counter(
+            *args, **kwargs
+        ),
+        process_member_audio=lambda *args, **kwargs: _process_member_audio_impl(*args, **kwargs),
+        create_task=asyncio.create_task,
+        ensure_startup_components_ready=lambda *args, **kwargs: ensure_startup_components_ready(
+            *args, **kwargs
+        ),
+        normalize_voice_debug_meta=normalize_voice_debug_meta,
+        voice_ingress_source=voice_ingress_source,
+        should_drop_discord_audio_for_local_mic=lambda *args, **kwargs: should_drop_discord_audio_for_local_mic(
+            *args, **kwargs
+        ),
+        ensure_voice_worker_started=lambda *args, **kwargs: ensure_voice_worker_started(
+            *args, **kwargs
+        ),
+        build_voice_ingress_context=build_voice_ingress_context,
+        next_segment_id=next_segment_id,
+        new_turn_id=new_turn_id,
+        build_voice_ingress_item=build_voice_ingress_item,
+        voice_ingress_queue_depth=voice_ingress_queue.qsize,
+        schedule_voice_utterance_item=lambda *args, **kwargs: _schedule_voice_utterance_item(
+            *args, **kwargs
+        ),
+        monotonic=time.monotonic,
+        log=print,
     )
+)
+
+build_voice_barge_in_continuity_runtime_deps = (
+    voice_turn_dependency_composition.build_voice_barge_in_continuity_runtime_deps
+)
+build_voice_reply_side_effect_deps = (
+    voice_turn_dependency_composition.build_voice_reply_side_effect_deps
+)
+build_voice_reply_gate_runtime_deps = (
+    voice_turn_dependency_composition.build_voice_reply_gate_runtime_deps
+)
+build_voice_ingress_runtime_deps = (
+    voice_turn_dependency_composition.build_voice_ingress_runtime_deps
+)
+build_voice_ingress_entrypoint_deps = (
+    voice_turn_dependency_composition.build_voice_ingress_entrypoint_deps
+)
 
 
 def compute_runtime_mode(metrics: dict | None) -> str:
@@ -1436,25 +1514,6 @@ def estimate_voice_like_probability(*, voiced_ms: float, audio_sec: float, body_
         audio_sec=audio_sec,
         body_rms=body_rms,
         body_rms_min=VOICE_WAVEFORM_BODY_RMS_MIN,
-    )
-
-
-def build_voice_reply_side_effect_deps() -> VoiceReplySideEffectDeps:
-    return VoiceReplySideEffectDeps(
-        session_speculative_policies=session_speculative_policies,
-        append_history=append_history,
-        compute_runtime_mode=compute_runtime_mode,
-        record_context_pipeline_benchmark=record_context_pipeline_benchmark,
-        schedule_memory_update=schedule_memory_update,
-        read_cached_cognitive_state=read_cached_cognitive_state,
-        apply_ask_gating=apply_ask_gating,
-        schedule_search_followup=schedule_search_followup,
-        session_state_snapshot=session_state_snapshot,
-        mark_session_active=mark_session_active,
-        set_room_owner=set_room_owner,
-        active_conversation_voice_question_sec=ACTIVE_CONVERSATION_VOICE_QUESTION_SEC,
-        active_conversation_voice_sec=ACTIVE_CONVERSATION_VOICE_SEC,
-        active_conversation_awaiting_reply_sec=ACTIVE_CONVERSATION_AWAITING_REPLY_SEC,
     )
 
 
@@ -1499,26 +1558,6 @@ def is_short_followup_candidate(
     )
 
 
-def build_voice_reply_gate_runtime_deps() -> VoiceReplyGateRuntimeDeps:
-    return VoiceReplyGateRuntimeDeps(
-        session_state_snapshot=session_state_snapshot,
-        room_state_snapshot=room_state_snapshot,
-        is_room_owner_active=is_room_owner_active,
-        is_session_active_for_user=is_session_active_for_user,
-        tts_input_suppression_reason=tts_playback_manager.input_suppression_reason,
-        room_last_voice_reply_at=room_last_voice_reply_at,
-        post_tts_ignore_sec=POST_TTS_IGNORE_SEC,
-        reply_cooldown_sec=REPLY_COOLDOWN_SEC,
-        normalize_voice_text=normalize_voice_text,
-        contains_wake_word=contains_wake_word,
-        looks_like_brief_filler_text=looks_like_brief_filler_text,
-        looks_like_repetitive_noise_text=looks_like_repetitive_noise_text,
-        is_similar=is_similar,
-        min_text_len=MIN_TEXT_LEN,
-        monotonic=time.monotonic,
-    )
-
-
 def should_skip_full_stt_after_wake_probe(*, wake_detected: bool, wake_probe: str, duration_sec: float) -> bool:
     return should_skip_full_stt_after_wake_probe_from_runtime(
         wake_detected=wake_detected,
@@ -1551,43 +1590,6 @@ def is_tail_fragment_candidate(
         longest_voiced_ms=longest_voiced_ms,
         unstable=unstable,
         deps=build_discord_session_policy_runtime_deps(),
-    )
-
-
-def build_voice_ingress_runtime_deps() -> VoiceIngressRuntimeDeps:
-    return VoiceIngressRuntimeDeps(
-        voice_ingress_queue=voice_ingress_queue,
-        voice_utterance_buffers=voice_utterance_buffers,
-        voice_utterance_flush_tasks=voice_utterance_flush_tasks,
-        voice_utterance_assembly_config=voice_utterance_assembly_config,
-        voice_ingress_max_age_sec=VOICE_INGRESS_MAX_AGE_SEC,
-        voice_ingress_drop_oldest_on_full=VOICE_INGRESS_DROP_OLDEST_ON_FULL,
-        voice_ingress_queue_max=VOICE_INGRESS_QUEUE_MAX,
-        evaluate_voice_ingress_dequeue=evaluate_voice_ingress_dequeue,
-        apply_voice_ingress_dequeue_debug_meta=apply_voice_ingress_dequeue_debug_meta,
-        enqueue_voice_ingress_item=enqueue_voice_ingress_item,
-        increment_voice_pipeline_counter=increment_voice_pipeline_counter,
-        process_member_audio=_process_member_audio_impl,
-        create_task=asyncio.create_task,
-        log=print,
-    )
-
-
-def build_voice_ingress_entrypoint_deps() -> VoiceIngressEntrypointDeps:
-    return VoiceIngressEntrypointDeps(
-        ensure_startup_components_ready=ensure_startup_components_ready,
-        normalize_voice_debug_meta=normalize_voice_debug_meta,
-        voice_ingress_source=voice_ingress_source,
-        should_drop_discord_audio_for_local_mic=should_drop_discord_audio_for_local_mic,
-        ensure_voice_worker_started=ensure_voice_worker_started,
-        build_voice_ingress_context=build_voice_ingress_context,
-        next_segment_id=next_segment_id,
-        new_turn_id=new_turn_id,
-        room_state_snapshot=room_state_snapshot,
-        build_voice_ingress_item=build_voice_ingress_item,
-        voice_ingress_queue_depth=voice_ingress_queue.qsize,
-        schedule_voice_utterance_item=_schedule_voice_utterance_item,
-        monotonic=time.monotonic,
     )
 
 
