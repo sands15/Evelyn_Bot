@@ -73,6 +73,26 @@ class SessionStateStore:
     committed_stt_text: dict[str, str]
     bad_audio_counts: dict[str, int]
 
+    @classmethod
+    def create_empty(cls) -> "SessionStateStore":
+        return cls(
+            histories={},
+            followup_targets={},
+            active_until={},
+            active_user_ids={},
+            last_active_at={},
+            awaiting_user_reply={},
+            last_speaker={},
+            topic_ids={},
+            turn_ids={},
+            segment_counters={},
+            last_turn_accepted_at={},
+            last_stt_text={},
+            partial_stt_text={},
+            committed_stt_text={},
+            bad_audio_counts={},
+        )
+
     def remember_followup_target(
         self,
         session_key: str,

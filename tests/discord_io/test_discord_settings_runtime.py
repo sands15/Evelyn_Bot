@@ -28,12 +28,16 @@ class DiscordSettingsRuntimeTests(unittest.TestCase):
     def setUp(self) -> None:
         self.calls: list[tuple] = []
 
-    def test_main_binds_settings_runtime_once_and_partials_entrypoints(self) -> None:
+    def test_main_binds_settings_runtime_once_and_uses_entrypoint_owner(self) -> None:
         source = (REPO_ROOT / "main.py").read_text(encoding="utf-8")
 
         self.assertNotIn("def build_discord_settings_runtime_deps(", source)
         self.assertIn(
             "discord_settings_runtime_deps = build_discord_settings_runtime_deps_from_main(",
+            source,
+        )
+        self.assertIn(
+            "discord_settings = build_discord_settings_entrypoints(discord_settings_runtime_deps)",
             source,
         )
         self.assertIn("default_command_prefix=DEFAULT_COMMAND_PREFIX", source)
@@ -48,7 +52,7 @@ class DiscordSettingsRuntimeTests(unittest.TestCase):
             "remove_guild_channel_setting",
         ):
             self.assertNotIn(f"def {name}(", source)
-            self.assertIn(f"{name} = partial(", source)
+            self.assertNotIn(f"{name} = partial(", source)
 
     def test_runtime_dispatches_to_payload_callables(self) -> None:
         deps = DiscordSettingsRuntimeDeps(

@@ -25,6 +25,15 @@ from .discord_command_handlers import (
     handle_shutdown_bot_command,
     handle_status_command,
 )
+
+
+def build_discord_intents() -> discord.Intents:
+    intents = discord.Intents.default()
+    intents.message_content = True
+    intents.guilds = True
+    intents.voice_states = True
+    intents.members = True
+    return intents
 from .discord_command_session_runtime import mark_text_session_from_command_runtime
 from .discord_text_turn import handle_discord_text_message
 

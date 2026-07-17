@@ -135,7 +135,7 @@ from evelyn_core.runtime_lifecycle_composition import (
     RuntimeLifecycleComposition, RuntimeLifecycleCompositionDeps, RuntimeProcessCompositionDeps, RuntimeStartupCompositionDeps,
 )
 from evelyn_core.discord_app_composition_runtime import (
-    DiscordAppComposition, DiscordAppCompositionDeps, DiscordCommandCompositionDeps, DiscordEventCompositionDeps,
+    DiscordAppComposition, DiscordAppCompositionDeps, DiscordCommandCompositionDeps, DiscordEventCompositionDeps, build_discord_intents,
 )
 from evelyn_core.search_memory_dependency_composition import SearchMemoryDependencyComposition, SearchMemoryDependencyCompositionDeps
 from evelyn_core.memory_context_state import build_memory_context
@@ -165,10 +165,8 @@ from evelyn_core.discord_delivery import (
 )
 from evelyn_core.discord_tts_dependency_composition import DiscordTtsDependencyComposition, DiscordTtsDependencyCompositionDeps
 from evelyn_core.discord_settings_runtime import (
-    build_discord_settings_runtime_deps as build_discord_settings_runtime_deps_from_main, resolve_command_prefix_from_runtime,
-    add_guild_channel_setting_from_runtime, get_guild_command_only_channel_ids_from_runtime, get_guild_command_prefix_from_runtime,
-    get_guild_observe_channel_ids_from_runtime, normalize_command_prefix_from_runtime, remove_guild_channel_setting_from_runtime,
-    save_guild_channel_list_from_runtime, save_guild_command_prefix_from_runtime,
+    build_discord_settings_entrypoints, build_discord_settings_runtime_deps as build_discord_settings_runtime_deps_from_main,
+    resolve_command_prefix_from_runtime,
 )
 from evelyn_core.discord_commands import (
     build_autonomy_status_command_text, build_channel_setting_list_reply, build_command_channel_usage, build_help_command_text,
@@ -303,48 +301,12 @@ if VOICE_CONSOLE_ONLY_STT_AND_REPLY:
 # =========================================================
 # 봇 설정
 # =========================================================
-intents = discord.Intents.default()
-intents.message_content = True
-intents.guilds = True
-intents.voice_states = True
-intents.members = True
+intents = build_discord_intents()
 
 guild_prefix_cache: dict[int, str] = {}
-session_histories: dict[str, list[dict]] = {}
-session_followup_targets: dict[str, dict[str, int]] = {}
-active_session_until: dict[str, float] = {}
-active_session_user_ids: dict[str, int] = {}
-session_last_active_at: dict[str, float] = {}
-session_awaiting_user_reply: dict[str, bool] = {}
-session_last_speaker: dict[str, str] = {}
-session_topic_ids: dict[str, str] = {}
-session_turn_ids: dict[str, str] = {}
-session_segment_counters: dict[str, int] = {}
-session_last_turn_accepted_at: dict[str, float] = {}
-session_last_stt_text: dict[str, str] = {}
 room_last_voice_utterance_for_merge: dict[str, VoiceUtteranceMergeRecord] = {}
-session_partial_stt_text: dict[str, str] = {}
-session_committed_stt_text: dict[str, str] = {}
-session_bad_audio_counts: dict[str, int] = {}
-session_state_store = SessionStateStore(
-    histories=session_histories,
-    followup_targets=session_followup_targets,
-    active_until=active_session_until,
-    active_user_ids=active_session_user_ids,
-    last_active_at=session_last_active_at,
-    awaiting_user_reply=session_awaiting_user_reply,
-    last_speaker=session_last_speaker,
-    topic_ids=session_topic_ids,
-    turn_ids=session_turn_ids,
-    segment_counters=session_segment_counters,
-    last_turn_accepted_at=session_last_turn_accepted_at,
-    last_stt_text=session_last_stt_text,
-    partial_stt_text=session_partial_stt_text,
-    committed_stt_text=session_committed_stt_text,
-    bad_audio_counts=session_bad_audio_counts,
-)
-room_owner_user_ids: dict[str, int] = {}
-room_owner_until: dict[str, float] = {}
+session_state_store = SessionStateStore.create_empty()
+room_speaker_activity_store = RoomSpeakerActivityStore.create_empty()
 room_reply_in_progress: dict[str, bool] = {}
 voice_connect_locks: dict[int, asyncio.Lock] = {}
 instance_lock_path = Path(os.getenv("EVELYN_INSTANCE_LOCK_PATH", str(Path(__file__).resolve().with_name(".evelyn_bot.lock"))))
@@ -354,6 +316,7 @@ discord_settings_runtime_deps = build_discord_settings_runtime_deps_from_main(
     prefix_cache=guild_prefix_cache,
     now=time.time,
 )
+discord_settings = build_discord_settings_entrypoints(discord_settings_runtime_deps)
 
 instance_lock_manager = InstanceLockManager(
     build_instance_lock_runtime_deps(instance_lock_path)
@@ -363,44 +326,11 @@ acquire_instance_lock = instance_lock_manager.acquire
 
 atexit.register(release_instance_lock)
 
-normalize_command_prefix = partial(
-    normalize_command_prefix_from_runtime,
-    deps=discord_settings_runtime_deps,
-)
-get_guild_command_prefix = partial(
-    get_guild_command_prefix_from_runtime,
-    deps=discord_settings_runtime_deps,
-)
-save_guild_command_prefix = partial(
-    save_guild_command_prefix_from_runtime,
-    deps=discord_settings_runtime_deps,
-)
-get_guild_observe_channel_ids = partial(
-    get_guild_observe_channel_ids_from_runtime,
-    deps=discord_settings_runtime_deps,
-)
-get_guild_command_only_channel_ids = partial(
-    get_guild_command_only_channel_ids_from_runtime,
-    deps=discord_settings_runtime_deps,
-)
-save_guild_channel_list = partial(
-    save_guild_channel_list_from_runtime,
-    deps=discord_settings_runtime_deps,
-)
-add_guild_channel_setting = partial(
-    add_guild_channel_setting_from_runtime,
-    deps=discord_settings_runtime_deps,
-)
-remove_guild_channel_setting = partial(
-    remove_guild_channel_setting_from_runtime,
-    deps=discord_settings_runtime_deps,
-)
-
 bot = commands.Bot(
     command_prefix=lambda _bot, message: commands.when_mentioned_or(
         resolve_command_prefix_from_runtime(
             message.guild.id if message.guild else None,
-            get_guild_command_prefix=get_guild_command_prefix,
+            get_guild_command_prefix=discord_settings.get_guild_command_prefix,
         ),
     )(_bot, message),
     intents=intents,
@@ -481,12 +411,6 @@ control_page_runtime_services_lock_state = RuntimeValue[asyncio.Lock | None](Non
 control_page_runtime_services_refresh_task_state = RuntimeValue[asyncio.Task | None](None)
 control_page_ui_command_store = ControlPageUiCommandStore(limit=40)
 control_page_welcome_locks: dict[int, asyncio.Lock] = {}
-room_recent_speaker_stats: dict[str, dict[int, dict[str, float]]] = {}
-room_speaker_activity_store = RoomSpeakerActivityStore(
-    recent_speaker_stats=room_recent_speaker_stats,
-    room_owner_user_ids=room_owner_user_ids,
-    room_owner_until=room_owner_until,
-)
 session_speculative_policies: dict[str, dict[str, Any]] = {}
 room_turn_scopes: dict[str, "TurnScope"] = {}
 turn_scope_registry = TurnScopeRegistry(room_turn_scopes=room_turn_scopes)
@@ -541,10 +465,10 @@ conversation_policy_dependency_composition = ConversationPolicyDependencyComposi
         active_conversation_text_question_sec=ACTIVE_CONVERSATION_TEXT_QUESTION_SEC,
         active_conversation_text_sec=ACTIVE_CONVERSATION_TEXT_SEC,
         max_history_items=MAX_HISTORY_ITEMS,
-        session_topic_ids=session_topic_ids,
+        session_topic_ids=session_state_store.topic_ids,
         build_topic_id=build_session_topic_id,
         new_turn_id=new_session_turn_id,
-        session_last_turn_accepted_at_get=lambda session_key: session_last_turn_accepted_at.get(
+        session_last_turn_accepted_at_get=lambda session_key: session_state_store.last_turn_accepted_at.get(
             session_key, 0.0
         ),
         monotonic=time.monotonic,
@@ -602,8 +526,8 @@ SKILL_DISPATCH_CACHE_MAX = 1024
 conversation_session_composition = ConversationSessionComposition(
     ConversationSessionCompositionDeps(
         session=build_session_turn_runtime_deps,
-        room_owner_user_ids=room_owner_user_ids,
-        room_owner_until=room_owner_until,
+        room_owner_user_ids=room_speaker_activity_store.room_owner_user_ids,
+        room_owner_until=room_speaker_activity_store.room_owner_until,
         room_reply_in_progress=room_reply_in_progress,
         room_speaker_activity_store=room_speaker_activity_store,
         monotonic=time.monotonic,
@@ -726,9 +650,9 @@ autonomy_runtime_composition = AutonomyRuntimeComposition(
     AutonomyRuntimeCompositionDeps(
         autonomy_engines=autonomy_engines,
         get_guild=bot.get_guild,
-        get_observe_channel_ids=get_guild_observe_channel_ids,
-        get_command_only_channel_ids=get_guild_command_only_channel_ids,
-        session_followup_targets=session_followup_targets,
+        get_observe_channel_ids=discord_settings.get_guild_observe_channel_ids,
+        get_command_only_channel_ids=discord_settings.get_guild_command_only_channel_ids,
+        session_followup_targets=session_state_store.followup_targets,
         clean_text=clean_text,
         send_discord_text=send_discord_text,
         question_cooldown_hit=question_cooldown_hit,
@@ -746,7 +670,7 @@ autonomy_runtime_composition = AutonomyRuntimeComposition(
         read_vision_watch_state=read_vision_watch_state,
         local_tts_snapshot=local_tts_playback_manager.snapshot,
         serialize_local_mic_runtime_state=lambda: serialize_local_mic_runtime_state(),
-        get_active_session_count=lambda: len(active_session_until),
+        get_active_session_count=lambda: len(session_state_store.active_until),
         get_inflight_llm_requests=inflight_llm_requests_counter.get,
         last_autonomy_ping_at=last_autonomy_ping_at,
         answer_promises_search=answer_promises_search,
@@ -774,24 +698,24 @@ get_or_create_autonomy_engine = autonomy_runtime_composition.get_or_create_auton
 
 guild_runtime_reset_composition = GuildRuntimeResetComposition(
     GuildRuntimeResetCompositionDeps(
-        session_histories=session_histories,
-        session_followup_targets=session_followup_targets,
-        active_session_until=active_session_until,
-        active_session_user_ids=active_session_user_ids,
-        session_last_active_at=session_last_active_at,
-        session_awaiting_user_reply=session_awaiting_user_reply,
-        session_last_speaker=session_last_speaker,
-        session_topic_ids=session_topic_ids,
-        session_turn_ids=session_turn_ids,
-        session_segment_counters=session_segment_counters,
-        session_last_turn_accepted_at=session_last_turn_accepted_at,
-        session_last_stt_text=session_last_stt_text,
+        session_histories=session_state_store.histories,
+        session_followup_targets=session_state_store.followup_targets,
+        active_session_until=session_state_store.active_until,
+        active_session_user_ids=session_state_store.active_user_ids,
+        session_last_active_at=session_state_store.last_active_at,
+        session_awaiting_user_reply=session_state_store.awaiting_user_reply,
+        session_last_speaker=session_state_store.last_speaker,
+        session_topic_ids=session_state_store.topic_ids,
+        session_turn_ids=session_state_store.turn_ids,
+        session_segment_counters=session_state_store.segment_counters,
+        session_last_turn_accepted_at=session_state_store.last_turn_accepted_at,
+        session_last_stt_text=session_state_store.last_stt_text,
         room_last_voice_utterance_for_merge=room_last_voice_utterance_for_merge,
-        session_partial_stt_text=session_partial_stt_text,
-        session_committed_stt_text=session_committed_stt_text,
-        session_bad_audio_counts=session_bad_audio_counts,
-        room_owner_user_ids=room_owner_user_ids,
-        room_owner_until=room_owner_until,
+        session_partial_stt_text=session_state_store.partial_stt_text,
+        session_committed_stt_text=session_state_store.committed_stt_text,
+        session_bad_audio_counts=session_state_store.bad_audio_counts,
+        room_owner_user_ids=room_speaker_activity_store.room_owner_user_ids,
+        room_owner_until=room_speaker_activity_store.room_owner_until,
         room_reply_in_progress=room_reply_in_progress,
         room_last_voice_reply_at=room_last_voice_reply_at,
         turn_scope_registry=turn_scope_registry,
@@ -1171,7 +1095,7 @@ llm_context_assembly_composition = LlmContextAssemblyComposition(
         compute_runtime_mode=compute_runtime_mode,
         apply_runtime_mode=apply_runtime_mode,
         classify_llm_route_async=lambda *args, **kwargs: classify_llm_route_async(*args, **kwargs),
-        session_topic_ids=session_topic_ids,
+        session_topic_ids=session_state_store.topic_ids,
         get_conversation_history=get_conversation_history,
         read_cached_cognitive_state=read_cached_cognitive_state,
         get_matching_speculative_policy=get_matching_speculative_policy,
@@ -1248,7 +1172,7 @@ search_memory_dependency_composition = SearchMemoryDependencyComposition(
         ),
         memory_refresh_inputs_for_turn=memory_refresh_inputs_for_turn,
         get_conversation_history=get_conversation_history,
-        session_last_active_at=session_last_active_at,
+        session_last_active_at=session_state_store.last_active_at,
         needs_search_or_deep_routing=lambda *args, **kwargs: needs_search_or_deep_routing(
             *args, **kwargs
         ),
@@ -1278,7 +1202,7 @@ search_memory_dependency_composition = SearchMemoryDependencyComposition(
         strip_search_answer_sources=strip_search_answer_sources,
         bot=bot,
         discord_object_factory=discord.Object,
-        session_followup_targets=session_followup_targets,
+        session_followup_targets=session_state_store.followup_targets,
         background_search_tasks=background_search_tasks,
         inflight_search_tasks=inflight_search_tasks,
         apply_runtime_mode=apply_runtime_mode,
@@ -1651,8 +1575,8 @@ voice_input_support_dependency_composition = VoiceInputSupportDependencyComposit
         looks_like_brief_filler_text=looks_like_brief_filler_text,
         looks_like_repetitive_noise_text=looks_like_repetitive_noise_text,
         is_similar=is_similar,
-        session_partial_stt_text=session_partial_stt_text,
-        session_committed_stt_text=session_committed_stt_text,
+        session_partial_stt_text=session_state_store.partial_stt_text,
+        session_committed_stt_text=session_state_store.committed_stt_text,
         partial_stt_cache=partial_stt_cache,
         stt_service_url=STT_SERVICE_URL,
         stt_service_timeout_sec=STT_SERVICE_TIMEOUT_SEC,
@@ -2055,7 +1979,7 @@ control_page_ui_dependency_composition = ControlPageUiDependencyComposition(
         bot_guilds=lambda: bot.guilds,
         tracked_tts_playback_guild_ids=lambda: tracked_tts_playback_guild_ids(tts_playback_tracker),
         get_tracked_tts_playback=lambda guild_id: get_tracked_tts_playback(tts_playback_tracker, int(guild_id)),
-        get_active_session_user_id=lambda session_key: active_session_user_ids.get(str(session_key)),
+        get_active_session_user_id=lambda session_key: session_state_store.active_user_ids.get(str(session_key)),
         get_guild_member=lambda guild, user_id: guild.get_member(int(user_id)),
         effective_guild_id=lambda *args, **kwargs: control_page_effective_guild_id(
             *args, **kwargs
@@ -2527,7 +2451,7 @@ voice_delivery_dependency_composition = VoiceDeliveryDependencyComposition(
             *args, **kwargs
         ),
         current_turn_id=lambda *args, **kwargs: current_turn_id(*args, **kwargs),
-        session_topic_ids=session_topic_ids,
+        session_topic_ids=session_state_store.topic_ids,
         new_turn_metrics=lambda *args, **kwargs: new_turn_metrics(*args, **kwargs),
         is_local_speaker_voice_client=lambda *args, **kwargs: is_local_speaker_voice_client(
             *args, **kwargs
@@ -2646,7 +2570,7 @@ voice_ingress_dependency_composition = VoiceIngressDependencyComposition(
         voice_pipeline_state=voice_pipeline_state,
         save_voice_debug_audio=lambda *args, **kwargs: save_voice_debug_audio(*args, **kwargs),
         room_state_snapshot=lambda *args, **kwargs: room_state_snapshot(*args, **kwargs),
-        session_topic_ids=session_topic_ids,
+        session_topic_ids=session_state_store.topic_ids,
         build_topic_id=lambda *args, **kwargs: build_topic_id(*args, **kwargs),
         new_turn_metrics=lambda *args, **kwargs: new_turn_metrics(*args, **kwargs),
         log_voice_stage=lambda *args, **kwargs: log_voice_stage(*args, **kwargs),
@@ -2716,7 +2640,7 @@ voice_transcription_dependency_composition = VoiceTranscriptionDependencyComposi
             *args, **kwargs
         ),
         get_partial_transcript=lambda *args, **kwargs: get_partial_transcript(*args, **kwargs),
-        session_committed_stt_text=session_committed_stt_text,
+        session_committed_stt_text=session_state_store.committed_stt_text,
         run_blocking_stt_task=lambda *args, **kwargs: run_blocking_stt_task(*args, **kwargs),
         speculate_from_committed_stt=lambda *args, **kwargs: speculate_from_committed_stt(
             *args, **kwargs
@@ -2739,7 +2663,7 @@ voice_transcription_dependency_composition = VoiceTranscriptionDependencyComposi
         rescore_min_audio_sec=STT_FULL_RESCORING_MIN_AUDIO_SEC,
         rescore_min_text_len=STT_FULL_RESCORING_MIN_TEXT_LEN,
         rescore_timeout_sec=STT_FULL_RESCORING_TIMEOUT_SEC,
-        session_partial_stt_text=session_partial_stt_text,
+        session_partial_stt_text=session_state_store.partial_stt_text,
         commit_stable_transcript=lambda *args, **kwargs: commit_stable_transcript(
             *args, **kwargs
         ),
@@ -2778,7 +2702,7 @@ voice_member_pipeline_dependency_composition = VoiceMemberPipelineDependencyComp
             *args, **kwargs
         ),
         room_state_snapshot=lambda *args, **kwargs: room_state_snapshot(*args, **kwargs),
-        session_topic_ids=session_topic_ids,
+        session_topic_ids=session_state_store.topic_ids,
         monotonic=time.monotonic,
         active_conversation_awaiting_reply_sec=ACTIVE_CONVERSATION_AWAITING_REPLY_SEC,
         active_conversation_voice_sec=ACTIVE_CONVERSATION_VOICE_SEC,
@@ -2786,7 +2710,7 @@ voice_member_pipeline_dependency_composition = VoiceMemberPipelineDependencyComp
         should_reply_to_voice=lambda *args, **kwargs: should_reply_to_voice(*args, **kwargs),
         reset_session_bad_audio=lambda *args, **kwargs: reset_session_bad_audio(*args, **kwargs),
         build_topic_id=lambda *args, **kwargs: build_topic_id(*args, **kwargs),
-        session_last_stt_text=session_last_stt_text,
+        session_last_stt_text=session_state_store.last_stt_text,
         room_last_voice_reply_at=room_last_voice_reply_at,
         room_last_voice_utterance_for_merge=room_last_voice_utterance_for_merge,
         update_room_speaker_activity=lambda *args, **kwargs: update_room_speaker_activity(
@@ -2796,8 +2720,8 @@ voice_member_pipeline_dependency_composition = VoiceMemberPipelineDependencyComp
         start_new_turn=lambda *args, **kwargs: start_new_turn(*args, **kwargs),
         update_session_state=lambda *args, **kwargs: update_session_state(*args, **kwargs),
         set_room_owner=lambda *args, **kwargs: set_room_owner(*args, **kwargs),
-        session_partial_stt_text=session_partial_stt_text,
-        session_committed_stt_text=session_committed_stt_text,
+        session_partial_stt_text=session_state_store.partial_stt_text,
+        session_committed_stt_text=session_state_store.committed_stt_text,
         partial_stt_cache=partial_stt_cache,
         replace_room_turn_scope=lambda *args, **kwargs: replace_room_turn_scope(*args, **kwargs),
         attach_current_task=lambda *args, **kwargs: _attach_current_task(*args, **kwargs),
@@ -2900,8 +2824,8 @@ discord_app_dependency_composition = DiscordAppDependencyComposition(
         bot_user=lambda: bot.user,
         is_thread_parent=lambda parent: isinstance(parent, discord.TextChannel),
         remember_session_followup_target=remember_session_followup_target,
-        get_guild_command_prefix=get_guild_command_prefix,
-        get_guild_command_only_channel_ids=get_guild_command_only_channel_ids,
+        get_guild_command_prefix=discord_settings.get_guild_command_prefix,
+        get_guild_command_only_channel_ids=discord_settings.get_guild_command_only_channel_ids,
         contains_wake_word=contains_wake_word,
         is_session_active_for_user=is_session_active_for_user,
         strip_voice_wake_word=strip_voice_wake_word,
@@ -2990,8 +2914,8 @@ discord_app_composition = DiscordAppComposition(
             vad_provider=VAD_PROVIDER,
             resolve_evelyn_page_url=resolve_evelyn_page_url,
             default_command_prefix=DEFAULT_COMMAND_PREFIX,
-            get_guild_command_prefix=get_guild_command_prefix,
-            save_guild_command_prefix=save_guild_command_prefix,
+            get_guild_command_prefix=discord_settings.get_guild_command_prefix,
+            save_guild_command_prefix=discord_settings.save_guild_command_prefix,
             build_prefix_current_reply=build_prefix_current_reply,
             build_prefix_reset_reply=build_prefix_reset_reply,
             build_prefix_saved_reply=build_prefix_saved_reply,
@@ -3009,10 +2933,10 @@ discord_app_composition = DiscordAppComposition(
             build_minecraft_goal_updated_reply=build_minecraft_goal_updated_reply,
             build_minecraft_status_reply=build_minecraft_status_command_text,
             normalize_channel_setting_action=normalize_channel_setting_action,
-            get_guild_observe_channel_ids=get_guild_observe_channel_ids,
-            get_guild_command_only_channel_ids=get_guild_command_only_channel_ids,
-            add_guild_channel_setting=add_guild_channel_setting,
-            remove_guild_channel_setting=remove_guild_channel_setting,
+            get_guild_observe_channel_ids=discord_settings.get_guild_observe_channel_ids,
+            get_guild_command_only_channel_ids=discord_settings.get_guild_command_only_channel_ids,
+            add_guild_channel_setting=discord_settings.add_guild_channel_setting,
+            remove_guild_channel_setting=discord_settings.remove_guild_channel_setting,
             build_channel_setting_list_reply=build_channel_setting_list_reply,
             build_observe_channel_usage=build_observe_channel_usage,
             build_command_channel_usage=build_command_channel_usage,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from functools import partial
 from typing import Callable
 
 
@@ -18,6 +19,35 @@ class DiscordSettingsRuntimeDeps:
     add_guild_channel_setting_payload: Callable[..., list[int]]
     remove_guild_channel_setting_payload: Callable[..., list[int]]
     now: Callable[[], float]
+
+
+@dataclass(frozen=True)
+class DiscordSettingsEntrypoints:
+    normalize_command_prefix: Callable[..., str]
+    get_guild_command_prefix: Callable[..., str]
+    save_guild_command_prefix: Callable[..., str]
+    get_guild_observe_channel_ids: Callable[..., list[int]]
+    get_guild_command_only_channel_ids: Callable[..., list[int]]
+    save_guild_channel_list: Callable[..., list[int]]
+    add_guild_channel_setting: Callable[..., list[int]]
+    remove_guild_channel_setting: Callable[..., list[int]]
+
+
+def build_discord_settings_entrypoints(
+    deps: DiscordSettingsRuntimeDeps,
+) -> DiscordSettingsEntrypoints:
+    return DiscordSettingsEntrypoints(
+        normalize_command_prefix=partial(normalize_command_prefix_from_runtime, deps=deps),
+        get_guild_command_prefix=partial(get_guild_command_prefix_from_runtime, deps=deps),
+        save_guild_command_prefix=partial(save_guild_command_prefix_from_runtime, deps=deps),
+        get_guild_observe_channel_ids=partial(get_guild_observe_channel_ids_from_runtime, deps=deps),
+        get_guild_command_only_channel_ids=partial(
+            get_guild_command_only_channel_ids_from_runtime, deps=deps
+        ),
+        save_guild_channel_list=partial(save_guild_channel_list_from_runtime, deps=deps),
+        add_guild_channel_setting=partial(add_guild_channel_setting_from_runtime, deps=deps),
+        remove_guild_channel_setting=partial(remove_guild_channel_setting_from_runtime, deps=deps),
+    )
 
 
 def build_discord_settings_runtime_deps(
@@ -134,7 +164,9 @@ def remove_guild_channel_setting_from_runtime(
 
 
 __all__ = [
+    "DiscordSettingsEntrypoints",
     "DiscordSettingsRuntimeDeps",
+    "build_discord_settings_entrypoints",
     "build_discord_settings_runtime_deps",
     "resolve_command_prefix_from_runtime",
     "add_guild_channel_setting_from_runtime",
