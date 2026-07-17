@@ -185,6 +185,21 @@ class RoutedAutonomyExecutor:
         return result
 
 
+def get_routed_autonomy_executor_from_runtime(
+    guild_id: int | None,
+    *,
+    autonomy_engines: dict[int, Any],
+    executor_type: type,
+) -> Any | None:
+    if guild_id is None:
+        return None
+    engine = autonomy_engines.get(guild_id)
+    if engine is None:
+        return None
+    executor = getattr(engine, "executor", None)
+    return executor if isinstance(executor, executor_type) else None
+
+
 @dataclass(frozen=True)
 class ResolveRouteExecutorRuntimeDeps:
     get_autonomy_engine: Callable[[int], Any]

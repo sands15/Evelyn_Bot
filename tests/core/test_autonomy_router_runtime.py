@@ -15,6 +15,8 @@ _runtime_import_error: str | None = None
 try:
     from evelyn_core.autonomy_router import (  # noqa: E402
         ResolveRouteExecutorRuntimeDeps,
+        RoutedAutonomyExecutor,
+        get_routed_autonomy_executor_from_runtime,
         resolve_route_executor_from_runtime,
     )
 except ModuleNotFoundError as exc:
@@ -51,6 +53,25 @@ class ResolveRouteExecutorRuntimeTests(unittest.TestCase):
         )
         self.assertIsNone(resolve_route_executor_from_runtime(None, "minecraft", deps=deps))
         self.assertEqual(calls, [])
+
+    def test_get_routed_autonomy_executor_validates_engine_executor_type(self) -> None:
+        executor = object.__new__(RoutedAutonomyExecutor)
+        engines = {7: types.SimpleNamespace(executor=executor)}
+        self.assertIs(
+            get_routed_autonomy_executor_from_runtime(
+                7,
+                autonomy_engines=engines,
+                executor_type=RoutedAutonomyExecutor,
+            ),
+            executor,
+        )
+        self.assertIsNone(
+            get_routed_autonomy_executor_from_runtime(
+                None,
+                autonomy_engines=engines,
+                executor_type=RoutedAutonomyExecutor,
+            )
+        )
 
     def test_existing_engine_route_executor_returned(self) -> None:
         engine = types.SimpleNamespace(executor=types.SimpleNamespace(executors={"minecraft": object()}))

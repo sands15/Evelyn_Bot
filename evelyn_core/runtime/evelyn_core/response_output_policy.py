@@ -20,6 +20,13 @@ class ResponseOutputPolicyRuntimeDeps:
 RESPONSE_ACTION_TAGS = {"찾기": "search", "질문": "ask", "대기": "wait", "응답": "answer"}
 
 
+def fallback_answer_for(user_text: str) -> str:
+    text = clean_text(user_text)
+    if not text:
+        return "응, 듣고 있어."
+    return "응, 잠깐만."
+
+
 def parse_response_action_tag(text: str) -> tuple[str | None, str]:
     raw = text or ""
     match = re.match(r"^\s*\[(찾기|질문|대기|응답)\]\s*", raw)

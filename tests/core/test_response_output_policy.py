@@ -16,6 +16,7 @@ from evelyn_core.response_output_policy import (  # noqa: E402
     cleanup_assistant_display_artifacts,
     extract_answer_from_reasoning,
     extract_answer_from_reasoning_from_runtime,
+    fallback_answer_for,
     fallback_for_unrequested_minecraft_leak,
     format_display_text,
     sanitize_model_output_from_runtime,
@@ -32,6 +33,10 @@ from evelyn_core.response_output_policy import (  # noqa: E402
 
 
 class ResponseOutputPolicyTests(unittest.TestCase):
+    def test_fallback_answer_for_handles_empty_and_nonempty_text(self) -> None:
+        self.assertEqual(fallback_answer_for(""), "응, 듣고 있어.")
+        self.assertEqual(fallback_answer_for("계속해"), "응, 잠깐만.")
+
     def test_parse_response_action_tag_returns_action_and_clean_text(self) -> None:
         self.assertEqual(parse_response_action_tag(" [찾기]  검색할게 "), ("search", "검색할게"))
         self.assertEqual(parse_response_action_tag("[질문] 어디야?"), ("ask", "어디야?"))

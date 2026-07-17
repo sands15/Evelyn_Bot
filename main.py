@@ -1,6 +1,5 @@
 import atexit
 import builtins
-import contextlib
 import hashlib
 import json
 import logging
@@ -17,7 +16,7 @@ import wave
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Optional
+from typing import Any, Awaitable, Callable
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 EVELYN_CORE_RUNTIME = PROJECT_ROOT / "evelyn_core" / "runtime"
@@ -63,6 +62,7 @@ from evelyn_core.autonomy_observation_state import (
 from evelyn_core.autonomy_router import (
     ResolveRouteExecutorRuntimeDeps,
     RoutedAutonomyExecutor,
+    get_routed_autonomy_executor_from_runtime,
 )
 from evelyn_core.autonomy_runtime_composition import (
     AutonomyRuntimeComposition,
@@ -200,6 +200,7 @@ from evelyn_core.room_speaker_activity import RoomSpeakerActivityStore
 from evelyn_core.response_output_policy import (
     cleanup_assistant_display_artifacts,
     extract_json_object_from_runtime,
+    fallback_answer_for,
     fallback_for_unrequested_minecraft_leak_from_runtime,
     format_display_text_from_runtime,
     parse_response_action_tag,
@@ -222,7 +223,7 @@ from evelyn_core.response_context_composition import (
     ResponseContextCompositionDeps,
 )
 from evelyn_core.runtime_mode_policy import RuntimeModeResolver, apply_runtime_mode_policy
-from evelyn_core.runtime_state import RuntimeCounter, RuntimeValue
+from evelyn_core.runtime_state import LazyResourceProvider, RuntimeCounter, RuntimeValue
 from evelyn_core.route_fallback_policy import (
     classify_llm_route_fallback,
 )
@@ -232,7 +233,7 @@ from evelyn_core.fast_path_policy_composition import (
 )
 from evelyn_core.tool_awareness_policy import build_tool_awareness_context
 from evelyn_core.local_tool_diagnostic_context import build_local_tool_diagnostic_context
-from evelyn_core.http_session_runtime import ensure_http_session_from_runtime
+from evelyn_core.http_session_runtime import HttpSessionProvider
 from evelyn_core.llm_context_assembly_composition import (
     LlmContextAssemblyComposition,
     LlmContextAssemblyCompositionDeps,
@@ -452,6 +453,7 @@ from evelyn_core.local_tts_dependency_composition import (
     LocalTtsDependencyComposition,
     LocalTtsDependencyCompositionDeps,
 )
+from evelyn_core.local_tts_stream_runtime import cleanup_prepared_tts_item
 from evelyn_core.observability_metrics import (
     ModelCallMetricsStore,
     record_turn_stage_metric,
@@ -987,7 +989,10 @@ speaker_verifier = SpeakerVerifier(
 )
 active_tts_playbacks = tts_playback_tracker.registry
 tts_warmup_started_state = RuntimeValue(False)
-http_session: Optional[aiohttp.ClientSession] = None
+get_http_session = HttpSessionProvider(
+    client_timeout_factory=aiohttp.ClientTimeout,
+    client_session_factory=aiohttp.ClientSession,
+)
 startup_component_state: dict[str, dict[str, Any]] = {}
 partial_stt_cache: dict[str, dict[str, Any]] = {}
 voice_utterance_assembly_config = UtteranceAssemblyConfig(
@@ -1804,11 +1809,10 @@ refresh_cognitive_state_in_background = (
 schedule_cognitive_refresh = cognitive_refresh_composition.schedule_cognitive_refresh
 
 
-def redact_vision_text_for_memory(text: str) -> str:
-    return redact_vision_text_for_memory_payload(
-        text,
-        vision_memory_write_enabled=VISION_MEMORY_WRITE_ENABLED,
-    )
+redact_vision_text_for_memory = partial(
+    redact_vision_text_for_memory_payload,
+    vision_memory_write_enabled=VISION_MEMORY_WRITE_ENABLED,
+)
 
 
 search_memory_dependency_composition = SearchMemoryDependencyComposition(
@@ -1932,16 +1936,6 @@ schedule_memory_vault_maintenance = (
 schedule_memory_update = memory_maintenance_composition.schedule_memory_update
 
 
-async def get_http_session() -> aiohttp.ClientSession:
-    global http_session
-    http_session = ensure_http_session_from_runtime(
-        http_session,
-        client_timeout_factory=aiohttp.ClientTimeout,
-        client_session_factory=aiohttp.ClientSession,
-    )
-    return http_session
-
-
 record_search_followup_queued = search_followup_queued_counter.increment
 
 
@@ -2033,14 +2027,15 @@ shutdown_bot_process = runtime_lifecycle_composition.shutdown_bot_process
 run_local_only_mode = runtime_lifecycle_composition.run_local_only_mode
 
 
-def resolve_evelyn_page_url() -> str | None:
-    return resolve_evelyn_page_url_from_runtime(
-        deps=build_evelyn_page_url_runtime_deps(
-            project_root=PROJECT_ROOT,
-            configured_page_url=EVELYN_PAGE_URL,
-            run_git_config=subprocess.run,
-        )
-    )
+evelyn_page_url_runtime_deps = build_evelyn_page_url_runtime_deps(
+    project_root=PROJECT_ROOT,
+    configured_page_url=EVELYN_PAGE_URL,
+    run_git_config=subprocess.run,
+)
+resolve_evelyn_page_url = partial(
+    resolve_evelyn_page_url_from_runtime,
+    deps=evelyn_page_url_runtime_deps,
+)
 
 
 voice_runtime_composition = VoiceRuntimeComposition(
@@ -2216,19 +2211,17 @@ build_omnivoice_source_runtime_deps = (
 # =========================================================
 # STT
 # =========================================================
-def get_stt_model() -> tuple[str, Any, Any]:
-    return get_stt_model_from_runtime(
-        deps=build_stt_model_runtime_deps_from_runtime(
-            stt_compute_type=STT_COMPUTE_TYPE,
-            stt_model_name=STT_MODEL_NAME,
-            stt_language=STT_LANGUAGE,
-            stt_force_language=STT_FORCE_LANGUAGE,
-            stt_max_new_tokens=max(VOICE_STT_MAX_NEW_TOKENS, 256),
-            get_env_token=lambda: os.getenv("HF_TOKEN"),
-            torch_device=lambda: "cuda:0" if torch.cuda.is_available() else "cpu",
-            log=print,
-        )
-    )
+stt_model_runtime_deps = build_stt_model_runtime_deps_from_runtime(
+    stt_compute_type=STT_COMPUTE_TYPE,
+    stt_model_name=STT_MODEL_NAME,
+    stt_language=STT_LANGUAGE,
+    stt_force_language=STT_FORCE_LANGUAGE,
+    stt_max_new_tokens=max(VOICE_STT_MAX_NEW_TOKENS, 256),
+    get_env_token=lambda: os.getenv("HF_TOKEN"),
+    torch_device=lambda: "cuda:0" if torch.cuda.is_available() else "cpu",
+    log=print,
+)
+get_stt_model = partial(get_stt_model_from_runtime, deps=stt_model_runtime_deps)
 
 
 voice_input_support_dependency_composition = VoiceInputSupportDependencyComposition(
@@ -2454,7 +2447,7 @@ local_tts_dependency_composition = LocalTtsDependencyComposition(
         tts_prefetch_chunks=TTS_PREFETCH_CHUNKS,
         create_turn_scoped_task=create_turn_scoped_task,
         prefetch_tts_sources=prefetch_tts_sources,
-        cleanup_prepared_tts_item=lambda item: _cleanup_prepared_tts_item(item),
+        cleanup_prepared_tts_item=cleanup_prepared_tts_item,
     )
 )
 
@@ -2464,14 +2457,6 @@ build_local_tts_single_runtime_deps = (
 build_local_tts_stream_runtime_deps = (
     local_tts_dependency_composition.build_local_tts_stream_runtime_deps
 )
-
-
-def _cleanup_prepared_tts_item(item: object) -> None:
-    if isinstance(item, tuple) and len(item) >= 2:
-        cleanup = getattr(item[1], "cleanup", None)
-        if cleanup is not None:
-            with contextlib.suppress(Exception):
-                cleanup()
 
 
 delivery_entry_composition = DeliveryEntryComposition(
@@ -2519,13 +2504,6 @@ start_streaming_voice_delivery = delivery_entry_composition.start_streaming_voic
 # =========================================================
 # LLM
 # =========================================================
-def fallback_answer_for(user_text: str) -> str:
-    user_text = clean_text(user_text)
-    if not user_text:
-        return "응, 듣고 있어."
-    return "응, 잠깐만."
-
-
 voice_response_dependency_composition = VoiceResponseDependencyComposition(
     VoiceResponseDependencyCompositionDeps(
         model_name=MODEL_NAME,
@@ -2612,23 +2590,15 @@ build_route_executor_runtime_deps = partial(
 )
 
 
-def get_minecraft_client() -> MinecraftAutonomyClient:
-    client = getattr(get_minecraft_client, "_client", None)
-    if isinstance(client, MinecraftAutonomyClient):
-        return client
-    client = MinecraftAutonomyClient()
-    setattr(get_minecraft_client, "_client", client)
-    return client
-
-
-def get_routed_autonomy_executor(guild_id: int | None) -> RoutedAutonomyExecutor | None:
-    if guild_id is None:
-        return None
-    engine = autonomy_engines.get(guild_id)
-    if engine is None:
-        return None
-    executor = getattr(engine, "executor", None)
-    return executor if isinstance(executor, RoutedAutonomyExecutor) else None
+get_minecraft_client = LazyResourceProvider(
+    MinecraftAutonomyClient,
+    MinecraftAutonomyClient,
+)
+get_routed_autonomy_executor = partial(
+    get_routed_autonomy_executor_from_runtime,
+    autonomy_engines=autonomy_engines,
+    executor_type=RoutedAutonomyExecutor,
+)
 
 
 build_minecraft_live_observation_runtime_deps = partial(
@@ -2643,11 +2613,11 @@ build_minecraft_live_observation_runtime_deps = partial(
 )
 
 
-async def observe_live_minecraft_state(guild_id: int | None) -> dict[str, Any] | None:
-    return await observe_live_minecraft_state_from_runtime(
-        guild_id,
-        deps=build_minecraft_live_observation_runtime_deps(),
-    )
+minecraft_live_observation_runtime_deps = build_minecraft_live_observation_runtime_deps()
+observe_live_minecraft_state = partial(
+    observe_live_minecraft_state_from_runtime,
+    deps=minecraft_live_observation_runtime_deps,
+)
 
 
 minecraft_mode_composition = MinecraftModeComposition(

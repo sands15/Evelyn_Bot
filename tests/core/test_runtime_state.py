@@ -10,7 +10,11 @@ RUNTIME_ROOT = REPO_ROOT / "evelyn_core" / "runtime"
 if str(RUNTIME_ROOT) not in sys.path:
     sys.path.insert(0, str(RUNTIME_ROOT))
 
-from evelyn_core.runtime_state import RuntimeCounter, RuntimeValue  # noqa: E402
+from evelyn_core.runtime_state import (  # noqa: E402
+    LazyResourceProvider,
+    RuntimeCounter,
+    RuntimeValue,
+)
 
 
 class RuntimeStateTests(unittest.TestCase):
@@ -27,6 +31,19 @@ class RuntimeStateTests(unittest.TestCase):
         counter.decrement()
         counter.decrement()
         self.assertEqual(counter.get(), 0)
+
+    def test_lazy_resource_provider_builds_once(self) -> None:
+        calls: list[str] = []
+
+        class Resource:
+            pass
+
+        provider = LazyResourceProvider(
+            lambda: calls.append("build") or Resource(),
+            Resource,
+        )
+        self.assertIs(provider(), provider())
+        self.assertEqual(calls, ["build"])
 
     def test_main_uses_state_objects_instead_of_global_setter_functions(self) -> None:
         source = (REPO_ROOT / "main.py").read_text(encoding="utf-8")

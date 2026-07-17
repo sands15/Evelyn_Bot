@@ -28,6 +28,14 @@ class LocalTtsStreamRuntimeDeps:
     mark_local_tts_first_playback: Callable[..., None]
 
 
+def cleanup_prepared_tts_item(item: object) -> None:
+    if isinstance(item, tuple) and len(item) >= 2:
+        cleanup = getattr(item[1], "cleanup", None)
+        if cleanup is not None:
+            with contextlib.suppress(Exception):
+                cleanup()
+
+
 @dataclass(frozen=True)
 class LocalTtsSingleRuntimeDeps:
     playback_manager: Any

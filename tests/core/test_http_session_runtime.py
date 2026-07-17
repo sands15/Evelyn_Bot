@@ -12,7 +12,10 @@ RUNTIME_ROOT = REPO_ROOT / "evelyn_core" / "runtime"
 if str(RUNTIME_ROOT) not in sys.path:
     sys.path.insert(0, str(RUNTIME_ROOT))
 
-from evelyn_core.http_session_runtime import ensure_http_session_from_runtime  # noqa: E402
+from evelyn_core.http_session_runtime import (  # noqa: E402
+    HttpSessionProvider,
+    ensure_http_session_from_runtime,
+)
 
 
 class HttpSessionRuntimeTests(unittest.TestCase):
@@ -48,6 +51,24 @@ class HttpSessionRuntimeTests(unittest.TestCase):
         self.assertEqual(result.timeout, {"total": None, "connect": 10, "sock_connect": 10})
         self.assertEqual(calls[0], ("timeout", {"total": None, "connect": 10, "sock_connect": 10}))
         self.assertEqual(calls[1][0], "session")
+
+    def test_provider_reuses_session_across_awaits(self) -> None:
+        import asyncio
+
+        calls: list[str] = []
+        provider = HttpSessionProvider(
+            client_timeout_factory=lambda **kwargs: kwargs,
+            client_session_factory=lambda **kwargs: (
+                calls.append("session"),
+                SimpleNamespace(closed=False, **kwargs),
+            )[1],
+        )
+
+        async def run() -> None:
+            self.assertIs(await provider(), await provider())
+
+        asyncio.run(run())
+        self.assertEqual(calls, ["session"])
 
 
 if __name__ == "__main__":
