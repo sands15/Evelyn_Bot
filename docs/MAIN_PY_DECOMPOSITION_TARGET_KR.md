@@ -2,6 +2,34 @@
 
 Last reviewed: 2026-07-17
 
+## 2026-07-17 voice dependency composition 연속 배치
+
+- audio ingress와 wake probe dependency root를 `voice_ingress_dependency_composition.py`로 이동했다.
+  - audio/VAD/waveform과 wake 판정의 순수 정책은 composition이 직접 소유한다.
+  - live session/metrics/debug adapter는 명시적 lazy callback으로 연결했다.
+  - 커밋: `f4954ba refactor: extract voice ingress dependency composition`.
+- partial/full STT 실행과 transcript 확정 dependency root를
+  `voice_transcription_dependency_composition.py`로 이동했다.
+  - STT flow, transcript correction, barge-in merge 순수 정책과 live transcript state 경계를 분리했다.
+  - 커밋: `7492326 refactor: extract voice transcription dependency composition`.
+- session gate, reply context, member-audio pipeline dependency root를
+  `voice_member_pipeline_dependency_composition.py`로 이동했다.
+  - ingress → wake → TTS interrupt → STT → transcript → session gate → reply dispatch 단계 binding을
+    composition이 소유하고, `main.py`에는 live callback/state 조립과 공개 alias만 남겼다.
+  - 기존 단계별 source-contract 테스트 7개는 새 composition 경계를 직접 검사하도록 갱신했다.
+  - 커밋: `e601575 refactor: extract voice member pipeline dependency composition`,
+    `0a6aa38 test: follow voice member pipeline composition boundary`.
+- 누적 결과:
+  - `main.py`: 3,955줄 → 3,939줄
+  - 최상위 함수: 114개 → 106개
+  - 새 composition 경계 테스트 9개 추가
+  - 각 배치마다 실제 `main.py` Control Page process smoke 통과
+  - 실제 `main.py` smoke와 `PYTHONWARNINGS=error::ResourceWarning`를 포함한 전체 unittest 1,211개 통과
+  - Python `compileall`, `git diff --check`, replacement character/중복 최상위 정의 검사 통과
+- 런타임/컨테이너 재시작과 외부 push는 하지 않았다.
+- 다음 후보는 voice TTS interrupt/reply-delivery dependency builder 또는 Control Page의 남은
+  UI/welcome/runtime-services/snapshot dependency root다.
+
 ## 2026-07-17 composition root 연속 배치
 
 - 자율행동 engine factory dependency root를 `autonomy_runtime_composition.py`로 이동했다.
