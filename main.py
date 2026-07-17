@@ -191,12 +191,13 @@ from evelyn_core.session_memory_state import (
     is_casual_call_or_status_question as session_is_casual_call_or_status_question,
     new_turn_id as new_session_turn_id,
 )
-from evelyn_core.session_turn_runtime import (
-    SessionTurnRuntimeDeps,
+from evelyn_core.conversation_policy_dependency_composition import (
+    ConversationPolicyDependencyComposition,
+    ConversationPolicyDependencyCompositionDeps,
 )
 from evelyn_core.room_speaker_activity import RoomSpeakerActivityStore
 from evelyn_core.response_output_policy import (
-    ResponseOutputPolicyRuntimeDeps,
+    cleanup_assistant_display_artifacts,
     extract_json_object_from_runtime,
     fallback_for_unrequested_minecraft_leak_from_runtime,
     format_display_text_from_runtime,
@@ -408,10 +409,10 @@ from evelyn_core.voice_tts_control_dependency_composition import (
 from evelyn_core.discord_session_policy import (
     estimate_voice_like_probability_policy,
     is_transport_corrupted_audio_policy,
+    should_require_confirm_exact_for_wake_policy,
     should_interrupt_tts,
 )
 from evelyn_core.discord_session_policy_runtime import (
-    DiscordSessionPolicyRuntimeDeps,
     is_short_followup_candidate_from_runtime,
     is_tail_fragment_candidate_from_runtime,
     is_transport_corrupted_audio_from_runtime,
@@ -474,10 +475,6 @@ from evelyn_core.question_policy_state import (
     normalize_question_policy_mapping as normalize_question_policy_mapping_payload,
     user_frustration_with_questions as user_frustration_with_questions_payload,
     user_wants_direct_answer as user_wants_direct_answer_payload,
-)
-from evelyn_core.question_policy_runtime import (
-    QuestionPolicyRuntimeDeps,
-    QuestionPolicyStateRuntimeDeps,
 )
 from evelyn_core.assistant_contracts import (
     TtsSynthRequest,
@@ -905,44 +902,6 @@ def build_discord_settings_runtime_deps() -> DiscordSettingsRuntimeDeps:
     )
 
 
-def build_question_policy_runtime_deps() -> QuestionPolicyRuntimeDeps:
-    return QuestionPolicyRuntimeDeps(
-        normalize_question_policy_mapping_payload=normalize_question_policy_mapping_payload,
-        extract_question_policy_from_route_meta_payload=extract_question_policy_from_route_meta_payload,
-        user_wants_direct_answer_payload=user_wants_direct_answer_payload,
-        user_frustration_with_questions_payload=user_frustration_with_questions_payload,
-        is_continuable_technical_topic_payload=is_continuable_technical_topic_payload,
-    )
-
-
-def build_question_policy_state_runtime_deps() -> QuestionPolicyStateRuntimeDeps:
-    return QuestionPolicyStateRuntimeDeps(
-        question_cooldown_hit_payload=question_policy_state.question_cooldown_hit,
-        apply_fast_path_question_policy_payload=question_policy_state.apply_fast_path_policy,
-        record_question_trace_payload=question_policy_state.record_question_trace,
-        summarize_question_metrics_payload=question_policy_state.summarize_question_metrics,
-        proactive_scope_candidates_payload=question_policy_state.proactive_scope_candidates,
-        record_session_question_asked_payload=question_policy_state.record_session_question_asked,
-        resolve_pending_proactive_question_for_turn_payload=question_policy_state.resolve_pending_proactive_question_for_turn,
-        select_and_mark_proactive_question_payload=question_policy_state.select_and_mark_proactive_question,
-        maybe_append_proactive_question_payload=question_policy_state.maybe_append_proactive_question,
-    )
-
-
-def build_session_turn_runtime_deps() -> SessionTurnRuntimeDeps:
-    return SessionTurnRuntimeDeps(
-        session_state_store=session_state_store,
-        system_prompt=SYSTEM_PROMPT,
-        active_conversation_awaiting_reply_sec=ACTIVE_CONVERSATION_AWAITING_REPLY_SEC,
-        active_conversation_text_question_sec=ACTIVE_CONVERSATION_TEXT_QUESTION_SEC,
-        active_conversation_text_sec=ACTIVE_CONVERSATION_TEXT_SEC,
-        max_history_items=MAX_HISTORY_ITEMS,
-        session_topic_ids=session_topic_ids,
-        build_topic_id_fn=build_session_topic_id,
-        new_turn_id_fn=new_session_turn_id,
-    )
-
-
 def release_instance_lock() -> None:
     global instance_lock_handle
     release_instance_lock_from_main(instance_lock_handle, lock_path=instance_lock_path)
@@ -956,29 +915,6 @@ def acquire_instance_lock(wait_sec: float = 15.0, poll_sec: float = 0.25) -> Non
         lock_path=instance_lock_path,
         wait_sec=wait_sec,
         poll_sec=poll_sec,
-    )
-
-
-def build_discord_session_policy_runtime_deps() -> DiscordSessionPolicyRuntimeDeps:
-    return DiscordSessionPolicyRuntimeDeps(
-        session_last_turn_accepted_at_get=lambda session_key: session_last_turn_accepted_at.get(session_key, 0.0),
-        monotonic_fn=time.monotonic,
-        should_require_confirm_exact_for_wake_payload=should_require_confirm_exact_for_wake_policy,
-        is_transport_corrupted_audio_payload=is_transport_corrupted_audio_policy,
-        no_wake_max_continue_sec=VOICE_NO_WAKE_MAX_CONTINUE_SEC,
-        clean_text=clean_text,
-        looks_like_brief_filler_text=looks_like_brief_filler_text,
-        looks_like_repetitive_noise_text=looks_like_repetitive_noise_text,
-        tail_fragment_window_sec=TAIL_FRAGMENT_WINDOW_SEC,
-        tail_fragment_max_raw_sec=TAIL_FRAGMENT_MAX_RAW_SEC,
-        tail_fragment_max_voiced_ms=TAIL_FRAGMENT_MAX_VOICED_MS,
-        tail_fragment_max_longest_ms=TAIL_FRAGMENT_MAX_LONGEST_MS,
-        normalize_voice_text=normalize_voice_text,
-        normalized_wake_words=normalized_wake_words,
-        min_audio_sec=MIN_AUDIO_SEC,
-        min_transcribed_len=MIN_TRANSCRIBED_LEN,
-        wake_short_text_keep_len=WAKE_SHORT_TEXT_KEEP_LEN,
-        audio_duration_fn=lambda pcm_bytes: len(pcm_bytes or b"") / (RATE * CHANNELS * 2),
     )
 
 
@@ -1162,6 +1098,81 @@ question_policy_state = QuestionPolicyState(
     max_per_10_turns=QUESTION_MAX_PER_10_TURNS,
     disable_after_frustration_sec=QUESTION_DISABLE_AFTER_FRUSTRATION_SEC,
 )
+
+conversation_policy_dependency_composition = ConversationPolicyDependencyComposition(
+    ConversationPolicyDependencyCompositionDeps(
+        normalize_question_policy_mapping_payload=normalize_question_policy_mapping_payload,
+        extract_question_policy_from_route_meta_payload=extract_question_policy_from_route_meta_payload,
+        user_wants_direct_answer_payload=user_wants_direct_answer_payload,
+        user_frustration_with_questions_payload=user_frustration_with_questions_payload,
+        is_continuable_technical_topic_payload=is_continuable_technical_topic_payload,
+        question_cooldown_hit_payload=question_policy_state.question_cooldown_hit,
+        apply_fast_path_question_policy_payload=question_policy_state.apply_fast_path_policy,
+        record_question_trace_payload=question_policy_state.record_question_trace,
+        summarize_question_metrics_payload=question_policy_state.summarize_question_metrics,
+        proactive_scope_candidates_payload=question_policy_state.proactive_scope_candidates,
+        record_session_question_asked_payload=question_policy_state.record_session_question_asked,
+        resolve_pending_proactive_question_for_turn_payload=(
+            question_policy_state.resolve_pending_proactive_question_for_turn
+        ),
+        select_and_mark_proactive_question_payload=(
+            question_policy_state.select_and_mark_proactive_question
+        ),
+        maybe_append_proactive_question_payload=(
+            question_policy_state.maybe_append_proactive_question
+        ),
+        session_state_store=session_state_store,
+        system_prompt=SYSTEM_PROMPT,
+        active_conversation_awaiting_reply_sec=ACTIVE_CONVERSATION_AWAITING_REPLY_SEC,
+        active_conversation_text_question_sec=ACTIVE_CONVERSATION_TEXT_QUESTION_SEC,
+        active_conversation_text_sec=ACTIVE_CONVERSATION_TEXT_SEC,
+        max_history_items=MAX_HISTORY_ITEMS,
+        session_topic_ids=session_topic_ids,
+        build_topic_id=build_session_topic_id,
+        new_turn_id=new_session_turn_id,
+        session_last_turn_accepted_at_get=lambda session_key: session_last_turn_accepted_at.get(
+            session_key, 0.0
+        ),
+        monotonic=time.monotonic,
+        should_require_confirm_exact_for_wake_payload=should_require_confirm_exact_for_wake_policy,
+        is_transport_corrupted_audio_payload=is_transport_corrupted_audio_policy,
+        no_wake_max_continue_sec=VOICE_NO_WAKE_MAX_CONTINUE_SEC,
+        clean_text=clean_text,
+        looks_like_brief_filler_text=looks_like_brief_filler_text,
+        looks_like_repetitive_noise_text=looks_like_repetitive_noise_text,
+        tail_fragment_window_sec=TAIL_FRAGMENT_WINDOW_SEC,
+        tail_fragment_max_raw_sec=TAIL_FRAGMENT_MAX_RAW_SEC,
+        tail_fragment_max_voiced_ms=TAIL_FRAGMENT_MAX_VOICED_MS,
+        tail_fragment_max_longest_ms=TAIL_FRAGMENT_MAX_LONGEST_MS,
+        normalize_voice_text=normalize_voice_text,
+        normalized_wake_words=normalized_wake_words,
+        min_audio_sec=MIN_AUDIO_SEC,
+        min_transcribed_len=MIN_TRANSCRIBED_LEN,
+        wake_short_text_keep_len=WAKE_SHORT_TEXT_KEEP_LEN,
+        audio_duration=lambda pcm_bytes: len(pcm_bytes or b"") / (RATE * CHANNELS * 2),
+        session_state_snapshot=lambda *args, **kwargs: session_state_snapshot(*args, **kwargs),
+        answer_gpu_status=answer_gpu_runtime_status_query,
+        model_output_stop_tokens=MAIN_LLM_STOP_TOKENS,
+        sanitize_model_output_cleanup=cleanup_assistant_display_artifacts,
+    )
+)
+
+build_question_policy_runtime_deps = (
+    conversation_policy_dependency_composition.build_question_policy_runtime_deps
+)
+build_question_policy_state_runtime_deps = (
+    conversation_policy_dependency_composition.build_question_policy_state_runtime_deps
+)
+build_session_turn_runtime_deps = (
+    conversation_policy_dependency_composition.build_session_turn_runtime_deps
+)
+build_discord_session_policy_runtime_deps = (
+    conversation_policy_dependency_composition.build_discord_session_policy_runtime_deps
+)
+build_response_output_policy_runtime_deps = (
+    conversation_policy_dependency_composition.build_response_output_policy_runtime_deps
+)
+
 autonomy_engines: dict[int, AutonomyEngine] = {}
 last_autonomy_ping_at: dict[int, float] = {}
 autonomy_last_cognitive_refresh_at: dict[int, float] = {}
@@ -1591,15 +1602,6 @@ def should_label_question_response(text: str, *, session_key: str | None = None)
         text,
         session_key=session_key,
         deps=build_response_output_policy_runtime_deps(),
-    )
-
-
-def build_response_output_policy_runtime_deps() -> ResponseOutputPolicyRuntimeDeps:
-    return ResponseOutputPolicyRuntimeDeps(
-        session_state_snapshot_fn=session_state_snapshot,
-        answer_gpu_status_answer_fn=answer_gpu_runtime_status_query,
-        model_output_stop_tokens=tuple(MAIN_LLM_STOP_TOKENS),
-        sanitize_model_output_cleanup_fn=cleanup_assistant_display_artifacts,
     )
 
 
