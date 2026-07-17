@@ -1316,3 +1316,26 @@ Last reviewed: 2026-07-18
   - 런타임/컨테이너 재시작 및 원격 push 없음.
 
 이 시점에서 `main.py` 분해 작업은 종료 상태다. 이후의 줄 수 감소는 기능 분해가 아니라 wiring 표현 최적화라는 별도 작업으로 취급한다.
+
+## 2026-07-18 완료 보고 정정 — 3,000줄 목표 달성
+
+앞의 “종료 상태” 판단은 원래 줄 수 목표가 남아 있는데 semantic boundary만으로 완료 처리한 과도한 판단이었다. 정훈의 지시에 따라 완료 보고를 철회하고 `main.py` 3,000줄 이하를 새 명시적 목표로 다시 진행했다.
+
+- runtime configuration owner:
+  - main 전용 환경 설정과 console/trace 상수를 `main_runtime_config.py`로 이동.
+  - `main.py`: 3,680→3,523 lines.
+- import wiring 정리:
+  - 명시적 import 출처는 유지하면서 import-only wiring을 최대 160자 범위로 재배치하고 중복 공백을 제거.
+  - `main.py`: 3,523→3,075 lines.
+- session/Discord state owner:
+  - `SessionStateStore.create_empty()`가 15개 session backing map을 직접 소유.
+  - `RoomSpeakerActivityStore.create_empty()`가 speaker/owner backing map을 직접 소유.
+  - Discord settings partial 8개를 `DiscordSettingsEntrypoints` owner로 이동.
+  - Discord intents 초기화를 Discord app runtime owner로 이동.
+  - `main.py`: 3,075→2,999 lines.
+- 최종 검증:
+  - `main.py` 2,999 lines로 3,000줄 이하 목표 달성.
+  - function definition 0개, `global`/`nonlocal` statement 0개, replacement character 0개, 최대 줄 길이 158자.
+  - 세 배치 실제 `main.py` control-page process smoke 통과.
+  - `EVELYN_RUN_REAL_MAIN_INTEGRATION=1`, `PYTHONWARNINGS=error::ResourceWarning` 전체 discovery: 1,286 tests 통과.
+  - 런타임/컨테이너 재시작 및 원격 push 없음.

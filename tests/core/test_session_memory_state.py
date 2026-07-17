@@ -40,6 +40,15 @@ def make_store() -> SessionStateStore:
 
 
 class SessionMemoryStateTests(unittest.TestCase):
+    def test_create_empty_owns_independent_backing_maps(self) -> None:
+        first = SessionStateStore.create_empty()
+        second = SessionStateStore.create_empty()
+        first.histories["room"] = []
+
+        self.assertEqual(first.histories, {"room": []})
+        self.assertEqual(second.histories, {})
+        self.assertIsNot(first.histories, first.followup_targets)
+
     def test_runtime_session_key_falls_back_to_guild_default(self) -> None:
         self.assertEqual(runtime_session_key(session_key="custom", guild_id=1), "custom")
         self.assertEqual(runtime_session_key(guild_id=42), "guild:42:default")

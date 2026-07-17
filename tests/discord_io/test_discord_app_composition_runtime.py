@@ -22,6 +22,7 @@ from evelyn_core.discord_app_composition_runtime import (  # noqa: E402
     DiscordAppCompositionDeps,
     DiscordCommandCompositionDeps,
     DiscordEventCompositionDeps,
+    build_discord_intents,
 )
 
 
@@ -43,6 +44,16 @@ def make_command_deps(**overrides) -> DiscordCommandCompositionDeps:
     )
     values.update(overrides)
     return DiscordCommandCompositionDeps(**values)
+
+
+class DiscordIntentsTests(unittest.TestCase):
+    def test_build_discord_intents_enables_required_events(self) -> None:
+        intents = build_discord_intents()
+
+        self.assertTrue(intents.message_content)
+        self.assertTrue(intents.guilds)
+        self.assertTrue(intents.voice_states)
+        self.assertTrue(intents.members)
 
 
 def make_event_deps(**overrides) -> DiscordEventCompositionDeps:

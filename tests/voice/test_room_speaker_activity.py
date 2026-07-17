@@ -14,6 +14,14 @@ from evelyn_core.room_speaker_activity import RoomSpeakerActivityStore  # noqa: 
 
 
 class RoomSpeakerActivityTests(unittest.TestCase):
+    def test_create_empty_owns_three_distinct_maps(self) -> None:
+        store = RoomSpeakerActivityStore.create_empty()
+        store.room_owner_user_ids["room"] = 1
+
+        self.assertEqual(store.room_owner_user_ids, {"room": 1})
+        self.assertEqual(store.room_owner_until, {})
+        self.assertEqual(store.recent_speaker_stats, {})
+
     def test_prune_removes_stale_speakers(self) -> None:
         stats = {
             "room": {
