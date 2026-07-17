@@ -22,7 +22,9 @@ class AutonomyRuntimeCompositionTests(unittest.TestCase):
         composition_index = source.index(
             "autonomy_runtime_composition = AutonomyRuntimeComposition("
         )
-        reset_index = source.index("def build_guild_runtime_reset_deps(")
+        reset_index = source.index(
+            "guild_runtime_reset_composition = GuildRuntimeResetComposition("
+        )
 
         self.assertLess(composition_index, reset_index)
         self.assertIn(

@@ -167,7 +167,9 @@ class AutonomyRuntimeFactoryTests(unittest.IsolatedAsyncioTestCase):
         start = source.index(
             "get_or_create_autonomy_engine = autonomy_runtime_composition.get_or_create_autonomy_engine"
         )
-        end = source.index("def build_guild_runtime_reset_deps(", start)
+        end = source.index(
+            "guild_runtime_reset_composition = GuildRuntimeResetComposition(", start
+        )
         function_source = source[start:end]
 
         self.assertIn("autonomy_runtime_composition.get_or_create_autonomy_engine", function_source)

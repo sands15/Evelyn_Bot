@@ -72,8 +72,10 @@ from evelyn_core.instance_lock_runtime import (
     acquire_instance_lock_from_main,
     release_instance_lock_from_main,
 )
-from evelyn_core.guild_runtime_reset import GuildRuntimeResetDeps, reset_guild_runtime_state_from_runtime
-from evelyn_core.guild_runtime_reset import build_guild_runtime_reset_deps as build_guild_runtime_reset_deps_from_runtime
+from evelyn_core.guild_runtime_reset_composition import (
+    GuildRuntimeResetComposition,
+    GuildRuntimeResetCompositionDeps,
+)
 from evelyn_core.memory import *
 from evelyn_core.minecraft_autonomy_client import MinecraftAutonomyClient
 from evelyn_core.memory_writebehind import (
@@ -1380,8 +1382,8 @@ build_autonomy_runtime_factory_deps = (
 )
 get_or_create_autonomy_engine = autonomy_runtime_composition.get_or_create_autonomy_engine
 
-def build_guild_runtime_reset_deps() -> GuildRuntimeResetDeps:
-    return build_guild_runtime_reset_deps_from_runtime(
+guild_runtime_reset_composition = GuildRuntimeResetComposition(
+    GuildRuntimeResetCompositionDeps(
         session_histories=session_histories,
         session_followup_targets=session_followup_targets,
         active_session_until=active_session_until,
@@ -1413,10 +1415,12 @@ def build_guild_runtime_reset_deps() -> GuildRuntimeResetDeps:
         autonomy_last_cognitive_refresh_at=autonomy_last_cognitive_refresh_at,
         autonomy_cognitive_refresh_tasks=autonomy_cognitive_refresh_tasks,
     )
+)
 
-
-def reset_guild_runtime_state(guild_id: int) -> None:
-    reset_guild_runtime_state_from_runtime(guild_id, deps=build_guild_runtime_reset_deps())
+build_guild_runtime_reset_deps = (
+    guild_runtime_reset_composition.build_guild_runtime_reset_deps
+)
+reset_guild_runtime_state = guild_runtime_reset_composition.reset_guild_runtime_state
 
 
 voice_barge_in_continuity_tracker = VoiceBargeInContinuityTracker(
