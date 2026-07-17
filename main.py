@@ -69,6 +69,7 @@ from evelyn_core.autonomy_runtime_composition import (
     AutonomyRuntimeCompositionDeps,
 )
 from evelyn_core.config import *
+from evelyn_core.console_output import ConsoleOutputFilter
 from evelyn_core.instance_lock_runtime import (
     InstanceLockManager,
     build_instance_lock_runtime_deps,
@@ -828,13 +829,11 @@ _BOTTLENECK_TURN_TRACE_EVENTS = {
 turn_trace_file_lock = threading.Lock()
 
 
-def print(*args, **kwargs):
-    if not VOICE_CONSOLE_ONLY_STT_AND_REPLY:
-        return _ORIGINAL_PRINT(*args, **kwargs)
-    text = " ".join(str(arg) for arg in args).lstrip()
-    if text.startswith(_ALLOWED_CONSOLE_PREFIXES):
-        return _ORIGINAL_PRINT(*args, **kwargs)
-    return None
+print = ConsoleOutputFilter(
+    enabled=VOICE_CONSOLE_ONLY_STT_AND_REPLY,
+    output=_ORIGINAL_PRINT,
+    allowed_prefixes=_ALLOWED_CONSOLE_PREFIXES,
+)
 
 
 if VOICE_CONSOLE_ONLY_STT_AND_REPLY:
