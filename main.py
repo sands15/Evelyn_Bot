@@ -288,8 +288,10 @@ from evelyn_core.startup_audio_runtime import (
 from evelyn_core.startup_component_state import (
     STARTUP_BOOT_STEPS,
 )
-from evelyn_core.stt_transcription_runtime import SttTranscriptionRuntimeDeps
-from evelyn_core.stt_text_runtime import build_stt_text_runtime_deps
+from evelyn_core.voice_input_support_dependency_composition import (
+    VoiceInputSupportDependencyComposition,
+    VoiceInputSupportDependencyCompositionDeps,
+)
 from evelyn_core.memory_layers import collect_memory_layers
 from evelyn_core.memory_llm_context import (
     build_cognitive_state_messages,
@@ -345,7 +347,6 @@ from evelyn_core.discord_tts_dependency_composition import (
     DiscordTtsDependencyComposition,
     DiscordTtsDependencyCompositionDeps,
 )
-from evelyn_core.discord_voice_connection_runtime import DiscordVoiceConnectionRuntimeDeps
 from evelyn_core.discord_settings_runtime import (
     DiscordSettingsRuntimeDeps,
     build_discord_settings_runtime_deps as build_discord_settings_runtime_deps_from_main,
@@ -2367,8 +2368,8 @@ def get_stt_model() -> tuple[str, Any, Any]:
     )
 
 
-def _build_stt_text_runtime_deps() -> Any:
-    return build_stt_text_runtime_deps(
+voice_input_support_dependency_composition = VoiceInputSupportDependencyComposition(
+    VoiceInputSupportDependencyCompositionDeps(
         clean_text=clean_text,
         normalize_voice_text=normalize_voice_text,
         contains_wake_word=contains_wake_word,
@@ -2378,11 +2379,6 @@ def _build_stt_text_runtime_deps() -> Any:
         session_partial_stt_text=session_partial_stt_text,
         session_committed_stt_text=session_committed_stt_text,
         partial_stt_cache=partial_stt_cache,
-    )
-
-
-def build_stt_transcription_runtime_deps() -> SttTranscriptionRuntimeDeps:
-    return SttTranscriptionRuntimeDeps(
         stt_service_url=STT_SERVICE_URL,
         stt_service_timeout_sec=STT_SERVICE_TIMEOUT_SEC,
         stt_service_fallback_local=STT_SERVICE_FALLBACK_LOCAL,
@@ -2394,25 +2390,26 @@ def build_stt_transcription_runtime_deps() -> SttTranscriptionRuntimeDeps:
         get_stt_model=get_stt_model,
         as_float32_array=lambda audio: np.asarray(audio, dtype=np.float32),
         resample_audio_float=resample_audio_float,
-        clean_text=clean_text,
-        log=print,
-    )
-
-
-# =========================================================
-# 디스코드 음성
-# =========================================================
-def build_discord_voice_connection_runtime_deps() -> DiscordVoiceConnectionRuntimeDeps:
-    return DiscordVoiceConnectionRuntimeDeps(
         voice_client_type=EvelynVoiceClient,
         voice_connect_locks=voice_connect_locks,
         voice_connect_timeout=VOICE_CONNECT_TIMEOUT,
         voice_connect_retries=VOICE_CONNECT_RETRIES,
         voice_connect_retry_delay_sec=VOICE_CONNECT_RETRY_DELAY_SEC,
-        process_member_audio=process_member_audio,
+        process_member_audio=lambda *args, **kwargs: process_member_audio(*args, **kwargs),
         sleep=asyncio.sleep,
         log=print,
     )
+)
+
+_build_stt_text_runtime_deps = (
+    voice_input_support_dependency_composition.build_stt_text_runtime_deps
+)
+build_stt_transcription_runtime_deps = (
+    voice_input_support_dependency_composition.build_stt_transcription_runtime_deps
+)
+build_discord_voice_connection_runtime_deps = (
+    voice_input_support_dependency_composition.build_discord_voice_connection_runtime_deps
+)
 
 
 voice_support_composition = VoiceSupportComposition(
