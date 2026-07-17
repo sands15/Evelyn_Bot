@@ -400,6 +400,10 @@ from evelyn_core.voice_delivery_dependency_composition import (
     VoiceDeliveryDependencyComposition,
     VoiceDeliveryDependencyCompositionDeps,
 )
+from evelyn_core.voice_tts_control_dependency_composition import (
+    VoiceTtsControlDependencyComposition,
+    VoiceTtsControlDependencyCompositionDeps,
+)
 from evelyn_core.discord_session_policy import (
     estimate_voice_like_probability_policy,
     is_transport_corrupted_audio_policy,
@@ -442,8 +446,6 @@ from evelyn_core.delivery_entry_composition import (
 )
 from evelyn_core.tts_warmup_runtime import TtsWarmupRuntimeDeps
 from evelyn_core.tts_interrupt_runtime import (
-    TtsInterruptRuntimeDeps,
-    VoiceTtsInterruptGateDeps,
     run_voice_tts_interrupt_gate_from_runtime,
 )
 from evelyn_core.voice_timing_runtime import (
@@ -490,7 +492,6 @@ from evelyn_core.assistant_contracts import (
     TtsSynthResult,
 )
 from evelyn_core.assistant_prompt_contract import build_evelyn_system_prompt
-from evelyn_core.cached_tts_runtime import CachedTtsRuntimeDeps
 from evelyn_core.stt_model_runtime import (
     SttModelRuntimeDeps,
     build_stt_model_runtime_deps as build_stt_model_runtime_deps_from_runtime,
@@ -2502,9 +2503,10 @@ ensure_voice_client = voice_support_composition.ensure_voice_client
 restore_last_voice_channel = voice_support_composition.restore_last_voice_channel
 
 
-def build_tts_interrupt_runtime_deps() -> TtsInterruptRuntimeDeps:
-    return TtsInterruptRuntimeDeps(
+voice_tts_control_dependency_composition = VoiceTtsControlDependencyComposition(
+    VoiceTtsControlDependencyCompositionDeps(
         tts_playback_manager=tts_playback_manager,
+        local_tts_playback_manager=local_tts_playback_manager,
         log_turn_event=log_turn_event,
         speaker_verification_applies=speaker_verification_applies,
         speaker_verification_result_factory=SpeakerVerificationResult,
@@ -2512,11 +2514,6 @@ def build_tts_interrupt_runtime_deps() -> TtsInterruptRuntimeDeps:
         speaker_verification_apply_to=SPEAKER_VERIFICATION_APPLY_TO,
         speaker_verification_threshold=SPEAKER_VERIFICATION_THRESHOLD,
         to_thread=asyncio.to_thread,
-    )
-
-
-def build_cached_tts_runtime_deps() -> CachedTtsRuntimeDeps:
-    return CachedTtsRuntimeDeps(
         resolve_cached_tts_audio_path=resolve_cached_tts_audio_path,
         cached_audio_enabled=CACHED_AUDIO_ENABLED,
         canned_wake_reply_text=CANNED_WAKE_REPLY_TEXT,
@@ -2524,11 +2521,40 @@ def build_cached_tts_runtime_deps() -> CachedTtsRuntimeDeps:
         project_root=PROJECT_ROOT,
         cached_wave_audio_source_factory=CachedWaveAudioSource,
         tts_source_playback_request_factory=TtsSourcePlaybackRequest,
-        tts_playback_manager=tts_playback_manager,
         clean_text=clean_text,
-        log_turn_event=log_turn_event,
         log_voice_latency=log_voice_latency,
+        should_interrupt_tts=should_interrupt_tts,
+        verify_speaker_for_tts_interrupt=lambda *args, **kwargs: verify_speaker_for_tts_interrupt(
+            *args, **kwargs
+        ),
+        speaker_verification_allows_tts_interrupt=lambda *args, **kwargs: speaker_verification_allows_tts_interrupt(
+            *args, **kwargs
+        ),
+        stop_active_tts_playback=lambda *args, **kwargs: stop_active_tts_playback(
+            *args, **kwargs
+        ),
+        register_drop_reason=register_drop_reason,
+        log_voice_stage=log_voice_stage,
+        log_voice_bottleneck_summary=log_voice_bottleneck_summary,
+        start_voice_barge_in_continuity_probe=start_voice_barge_in_continuity_probe,
+        sleep=asyncio.sleep,
+        monotonic=time.monotonic,
+        local_only_mode=LOCAL_ONLY_MODE,
+        post_tts_ignore_sec=POST_TTS_IGNORE_SEC,
+        tts_interrupt_debounce_sec=TTS_INTERRUPT_DEBOUNCE_SEC,
+        voice_waveform_body_rms_min=VOICE_WAVEFORM_BODY_RMS_MIN,
     )
+)
+
+build_tts_interrupt_runtime_deps = (
+    voice_tts_control_dependency_composition.build_tts_interrupt_runtime_deps
+)
+build_cached_tts_runtime_deps = (
+    voice_tts_control_dependency_composition.build_cached_tts_runtime_deps
+)
+build_voice_tts_interrupt_gate_deps = (
+    voice_tts_control_dependency_composition.build_voice_tts_interrupt_gate_deps
+)
 
 
 def build_discord_tts_single_runtime_deps() -> DiscordTtsSingleRuntimeDeps:
@@ -3555,28 +3581,6 @@ build_voice_audio_ingress_runtime_deps = (
 build_voice_wake_probe_runtime_deps = (
     voice_ingress_dependency_composition.build_voice_wake_probe_runtime_deps
 )
-
-
-def build_voice_tts_interrupt_gate_deps() -> VoiceTtsInterruptGateDeps:
-    return VoiceTtsInterruptGateDeps(
-        should_interrupt_tts=should_interrupt_tts,
-        local_tts_playback_manager=local_tts_playback_manager,
-        tts_playback_manager=tts_playback_manager,
-        verify_speaker_for_tts_interrupt=verify_speaker_for_tts_interrupt,
-        speaker_verification_allows_tts_interrupt=speaker_verification_allows_tts_interrupt,
-        stop_active_tts_playback=stop_active_tts_playback,
-        register_drop_reason=register_drop_reason,
-        log_voice_stage=log_voice_stage,
-        log_voice_bottleneck_summary=log_voice_bottleneck_summary,
-        start_voice_barge_in_continuity_probe=start_voice_barge_in_continuity_probe,
-        log_turn_event=log_turn_event,
-        sleep=asyncio.sleep,
-        monotonic=time.monotonic,
-        local_only_mode=LOCAL_ONLY_MODE,
-        post_tts_ignore_sec=POST_TTS_IGNORE_SEC,
-        tts_interrupt_debounce_sec=TTS_INTERRUPT_DEBOUNCE_SEC,
-        voice_waveform_body_rms_min=VOICE_WAVEFORM_BODY_RMS_MIN,
-    )
 
 
 voice_transcription_dependency_composition = VoiceTranscriptionDependencyComposition(

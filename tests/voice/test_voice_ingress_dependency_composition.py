@@ -13,14 +13,16 @@ if str(RUNTIME_ROOT) not in sys.path:
 
 
 class VoiceIngressDependencyCompositionTests(unittest.TestCase):
-    def test_main_binds_ingress_composition_before_tts_interrupt_builder(self) -> None:
+    def test_main_binds_ingress_composition_before_member_pipeline_root(self) -> None:
         source = (REPO_ROOT / "main.py").read_text(encoding="utf-8")
         composition_index = source.index(
             "voice_ingress_dependency_composition = VoiceIngressDependencyComposition("
         )
-        interrupt_index = source.index("def build_voice_tts_interrupt_gate_deps(")
+        pipeline_index = source.index(
+            "voice_member_pipeline_dependency_composition = VoiceMemberPipelineDependencyComposition("
+        )
 
-        self.assertLess(composition_index, interrupt_index)
+        self.assertLess(composition_index, pipeline_index)
         self.assertIn(
             "voice_ingress_dependency_composition.build_voice_audio_ingress_runtime_deps",
             source,
