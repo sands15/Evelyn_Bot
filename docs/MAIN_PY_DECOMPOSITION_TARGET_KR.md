@@ -2,6 +2,33 @@
 
 Last reviewed: 2026-07-17
 
+## 2026-07-17 Control Page dependency composition 연속 배치
+
+- UI/guild selection/welcome dependency root를 `control_page_ui_dependency_composition.py`로 이동했다.
+  - UI store와 guild lookup, welcome LLM 계약을 한 composition으로 묶었다.
+  - 뒤에서 생성되는 Control Page와 LLM route adapter는 lazy callback으로 연결했다.
+  - 커밋: `05e510d refactor: extract control page ui dependency composition`.
+- runtime-services cache/probe dependency root를
+  `control_page_runtime_services_dependency_composition.py`로 이동했다.
+  - cache refresh/lock 계약과 service/Bot API/Codex/Voyager probe 계약을 함께 소유한다.
+  - main 소유 task/lock setter는 lazy callback으로 유지했다.
+  - 커밋: `8883203 refactor: extract control page runtime services composition`.
+- Minecraft live/cache/background snapshot dependency root를
+  `control_page_snapshot_dependency_composition.py`로 이동했다.
+  - live observation normalization, cached snapshot singleflight, background poll stage를 함께 묶었다.
+  - 뒤에서 생성되는 Control Page와 main 소유 task/lock setter는 lazy callback으로 연결했다.
+  - 커밋: `a83b9f0 refactor: extract control page snapshot composition`,
+    `a3b6682 test: follow control page snapshot composition boundary`.
+- 누적 결과:
+  - `main.py`: 3,939줄 → 3,930줄
+  - 최상위 함수: 106개 → 98개
+  - 새 composition 경계 테스트 9개 추가
+  - 각 배치마다 실제 `main.py` Control Page process smoke 통과
+  - 실제 `main.py` smoke와 `PYTHONWARNINGS=error::ResourceWarning`를 포함한 전체 unittest 1,220개 통과
+  - Python `compileall`, `git diff --check`, replacement character/중복 최상위 정의 검사 통과
+- 런타임/컨테이너 재시작과 외부 push는 하지 않았다.
+- 다음 후보는 Control Page search/text/input dependency root 또는 voice TTS interrupt/reply-delivery root다.
+
 ## 2026-07-17 voice dependency composition 연속 배치
 
 - audio ingress와 wake probe dependency root를 `voice_ingress_dependency_composition.py`로 이동했다.
