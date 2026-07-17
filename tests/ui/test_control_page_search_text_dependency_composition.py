@@ -18,7 +18,9 @@ class ControlPageSearchTextDependencyCompositionTests(unittest.TestCase):
         composition_index = source.index(
             "control_page_search_text_dependency_composition = ControlPageSearchTextDependencyComposition("
         )
-        input_index = source.index("def build_control_page_input_runtime_deps(")
+        input_index = source.index(
+            "control_page_input_dependency_composition = ControlPageInputDependencyComposition("
+        )
 
         self.assertLess(composition_index, input_index)
         self.assertIn(
