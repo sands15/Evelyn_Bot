@@ -65,7 +65,11 @@ class ControlPageMemoryPanelCommandTests(unittest.TestCase):
         self.assertIn('with_memory_panel_command(state, "toggle")', self.local_server)
 
     def test_main_exposes_panel_commands_at_top_level_for_frontend(self) -> None:
-        self.assertIn("build_control_page_state_from_runtime(", self.main_py)
+        state_composition = (
+            REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "control_page_state_composition.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn("build_control_page_state_from_runtime(", state_composition)
+        self.assertIn("build_control_page_state = control_page_state_composition.build_control_page_state", self.main_py)
         self.assertIn("return build_control_page_local_state_view(", self.control_page_state_handler)
         self.assertIn("return build_control_page_guild_state_view(", self.control_page_state_handler)
         self.assertIn("def build_control_page_local_state_view(", self.control_page_state)
