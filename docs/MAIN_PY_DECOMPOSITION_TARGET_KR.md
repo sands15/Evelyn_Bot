@@ -1229,3 +1229,21 @@ Last reviewed: 2026-07-17
   - 수정 완료 후 각 배치 실제 `main.py` control-page process smoke 통과.
   - `EVELYN_RUN_REAL_MAIN_INTEGRATION=1`, `PYTHONWARNINGS=error::ResourceWarning` 전체 discovery: 1,262 tests 통과.
   - 런타임/컨테이너 재시작 및 원격 push 없음.
+
+## 2026-07-17 마지막 dependency builder function 제거
+
+- Discord settings:
+  - `build_discord_settings_runtime_deps` 한 줄 wrapper를 `functools.partial` binding으로 교체.
+- Route executor:
+  - `build_route_executor_runtime_deps` dataclass wrapper를 `ResolveRouteExecutorRuntimeDeps` partial binding으로 교체.
+- Minecraft live observation:
+  - `build_minecraft_live_observation_runtime_deps` dataclass wrapper를 `MinecraftLiveObservationRuntimeDeps` partial binding으로 교체.
+- 구조 결과:
+  - `main.py`의 `def build_*_deps(...)` 및 `def _build_*_deps(...)` 함수가 0개가 됨.
+  - `main.py`: 3,884 lines 유지, top-level functions 53→50개.
+- 검증:
+  - 세 기존 runtime 테스트에 main partial binding 경계 검사를 추가해 통과.
+  - 각 배치 실제 `main.py` control-page process smoke 통과.
+  - `EVELYN_RUN_REAL_MAIN_INTEGRATION=1`, `PYTHONWARNINGS=error::ResourceWarning` 전체 discovery: 1,265 tests 통과.
+  - Python compile, 중복 top-level 함수, 잔존 dependency builder 함수, replacement character를 재감사.
+  - 런타임/컨테이너 재시작 및 원격 push 없음.
