@@ -273,11 +273,9 @@ from evelyn_core.discord_app_composition_runtime import (
     DiscordCommandCompositionDeps,
     DiscordEventCompositionDeps,
 )
-from evelyn_core.search_followup_runtime import (
-    SearchFollowupRuntimeDeps,
-)
-from evelyn_core.search_answer_runtime import (
-    SearchAnswerRuntimeDeps,
+from evelyn_core.search_memory_dependency_composition import (
+    SearchMemoryDependencyComposition,
+    SearchMemoryDependencyCompositionDeps,
 )
 from evelyn_core.memory_context_state import build_memory_context
 from evelyn_core.startup_audio_runtime import (
@@ -306,7 +304,6 @@ from evelyn_core.memory_update_policy import (
     redact_vision_text_for_memory as redact_vision_text_for_memory_payload,
     write_memory_turn_records,
 )
-from evelyn_core.memory_update_runtime import MemoryUpdateRuntimeDeps
 from evelyn_core.memory_maintenance_composition import (
     MemoryMaintenanceComposition,
     MemoryMaintenanceCompositionDeps,
@@ -1930,18 +1927,22 @@ def redact_vision_text_for_memory(text: str) -> str:
     )
 
 
-def build_memory_update_runtime_deps() -> MemoryUpdateRuntimeDeps:
-    return MemoryUpdateRuntimeDeps(
+search_memory_dependency_composition = SearchMemoryDependencyComposition(
+    SearchMemoryDependencyCompositionDeps(
         write_memory_turn_records=write_memory_turn_records,
         vision_memory_write_enabled=VISION_MEMORY_WRITE_ENABLED,
         record_self_identity_turn=record_self_identity_turn,
         append_raw_transcript_rows=append_raw_transcript_rows,
         append_turn_rows_to_memory_vault=append_turn_rows_to_memory_vault,
-        schedule_memory_vault_maintenance=schedule_memory_vault_maintenance,
+        schedule_memory_vault_maintenance=lambda *args, **kwargs: schedule_memory_vault_maintenance(
+            *args, **kwargs
+        ),
         memory_refresh_inputs_for_turn=memory_refresh_inputs_for_turn,
         get_conversation_history=get_conversation_history,
         session_last_active_at=session_last_active_at,
-        needs_search_or_deep_routing=needs_search_or_deep_routing,
+        needs_search_or_deep_routing=lambda *args, **kwargs: needs_search_or_deep_routing(
+            *args, **kwargs
+        ),
         build_memory_writer_decision_for_turn=build_memory_writer_decision_for_turn,
         build_memory_writer_decision=build_memory_writer_decision,
         build_memory_writer_decision_payload=build_memory_writer_decision_payload,
@@ -1954,10 +1955,62 @@ def build_memory_update_runtime_deps() -> MemoryUpdateRuntimeDeps:
         background_memory_tasks=background_memory_tasks,
         create_turn_scoped_task=create_turn_scoped_task,
         run_memory_writebehind_steps=run_memory_writebehind_steps,
-        update_long_term_memory=update_long_term_memory,
+        update_long_term_memory=lambda *args, **kwargs: update_long_term_memory(*args, **kwargs),
         update_cognitive_state=update_cognitive_state,
+        model_name=MODEL_NAME,
+        llm_server_url=LLM_SERVER_URL,
+        chat_content_format=MAIN_LLM_CHAT_CONTENT_FORMAT,
+        stop_tokens=MAIN_LLM_STOP_TOKENS,
+        get_http_session=lambda *args, **kwargs: get_http_session(*args, **kwargs),
+        build_chat_messages=build_chat_messages,
+        client_timeout_factory=aiohttp.ClientTimeout,
+        clean_text=clean_text,
+        sanitize_model_output=lambda *args, **kwargs: sanitize_model_output(*args, **kwargs),
+        strip_search_answer_sources=strip_search_answer_sources,
+        bot=bot,
+        discord_object_factory=discord.Object,
+        session_followup_targets=session_followup_targets,
+        background_search_tasks=background_search_tasks,
+        inflight_search_tasks=inflight_search_tasks,
+        apply_runtime_mode=apply_runtime_mode,
+        parse_response_action_tag=parse_response_action_tag,
+        answer_promises_search=answer_promises_search,
+        build_search_query=lambda *args, **kwargs: build_search_query(*args, **kwargs),
+        remember_session_followup_target=remember_session_followup_target,
+        memory_summary_path=memory_summary_path,
+        read_text_file=read_text_file,
+        compact_working_summary=compact_working_summary,
+        search_duckduckgo=lambda *args, **kwargs: search_duckduckgo(*args, **kwargs),
+        answer_from_search_results=lambda *args, **kwargs: answer_from_search_results(
+            *args, **kwargs
+        ),
+        resolve_open_question_rows=resolve_open_question_rows,
+        write_json_file=write_json_file,
+        cognitive_state_path=cognitive_state_path,
+        send_discord_text=send_discord_text,
+        format_display_text=format_display_text,
+        speak_answer=lambda *args, **kwargs: speak_answer(*args, **kwargs),
+        current_turn_id=current_turn_id,
+        append_history=append_history,
+        schedule_memory_update=lambda *args, **kwargs: schedule_memory_update(*args, **kwargs),
+        attach_current_task=_attach_current_task,
+        detach_task=_detach_task,
+        record_search_followup_queued=lambda *args, **kwargs: record_search_followup_queued(
+            *args, **kwargs
+        ),
         log=print,
     )
+)
+
+build_memory_update_runtime_deps = (
+    search_memory_dependency_composition.build_memory_update_runtime_deps
+)
+build_search_answer_runtime_deps = (
+    search_memory_dependency_composition.build_search_answer_runtime_deps
+)
+build_search_followup_runtime_deps = (
+    search_memory_dependency_composition.build_search_followup_runtime_deps
+)
 
 
 memory_maintenance_composition = MemoryMaintenanceComposition(
@@ -2005,60 +2058,9 @@ async def get_http_session() -> aiohttp.ClientSession:
     return http_session
 
 
-def build_search_answer_runtime_deps() -> SearchAnswerRuntimeDeps:
-    return SearchAnswerRuntimeDeps(
-        model_name=MODEL_NAME,
-        llm_server_url=LLM_SERVER_URL,
-        chat_content_format=MAIN_LLM_CHAT_CONTENT_FORMAT,
-        stop_tokens=MAIN_LLM_STOP_TOKENS,
-        get_http_session=get_http_session,
-        build_chat_messages=build_chat_messages,
-        client_timeout_factory=aiohttp.ClientTimeout,
-        clean_text=clean_text,
-        sanitize_model_output=sanitize_model_output,
-        strip_search_answer_sources=strip_search_answer_sources,
-    )
-
-
 def record_search_followup_queued() -> None:
     global search_followup_queued_count
     search_followup_queued_count += 1
-
-
-def build_search_followup_runtime_deps() -> SearchFollowupRuntimeDeps:
-    return SearchFollowupRuntimeDeps(
-        bot=bot,
-        discord_object_factory=discord.Object,
-        session_followup_targets=session_followup_targets,
-        background_search_tasks=background_search_tasks,
-        inflight_search_tasks=inflight_search_tasks,
-        apply_runtime_mode=apply_runtime_mode,
-        parse_response_action_tag=parse_response_action_tag,
-        answer_promises_search=answer_promises_search,
-        build_search_query=build_search_query,
-        runtime_session_key=runtime_session_key,
-        remember_session_followup_target=remember_session_followup_target,
-        get_conversation_history=get_conversation_history,
-        memory_summary_path=memory_summary_path,
-        read_text_file=read_text_file,
-        compact_working_summary=compact_working_summary,
-        search_duckduckgo=search_duckduckgo,
-        answer_from_search_results=answer_from_search_results,
-        resolve_open_question_rows=resolve_open_question_rows,
-        write_json_file=write_json_file,
-        cognitive_state_path=cognitive_state_path,
-        send_discord_text=send_discord_text,
-        format_display_text=format_display_text,
-        speak_answer=speak_answer,
-        current_turn_id=current_turn_id,
-        append_history=append_history,
-        schedule_memory_update=schedule_memory_update,
-        create_turn_scoped_task=create_turn_scoped_task,
-        attach_current_task=_attach_current_task,
-        detach_task=_detach_task,
-        record_search_followup_queued=record_search_followup_queued,
-        log=print,
-    )
 
 
 runtime_lifecycle_composition = RuntimeLifecycleComposition(
