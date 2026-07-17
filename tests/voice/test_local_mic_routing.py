@@ -347,6 +347,13 @@ class LocalMicRoutingTests(unittest.TestCase):
         runtime_lifecycle_composition = (
             REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "runtime_lifecycle_composition.py"
         ).read_text(encoding="utf-8")
+        control_page_status_tool_composition = (
+            REPO_ROOT
+            / "evelyn_core"
+            / "runtime"
+            / "evelyn_core"
+            / "control_page_status_tool_composition.py"
+        ).read_text(encoding="utf-8")
 
         self.assertIn("if target is None and deps.local_only_mode", local_mic_segment_runtime)
         self.assertIn("local_only_mode=LOCAL_ONLY_MODE", main_py)
@@ -365,7 +372,14 @@ class LocalMicRoutingTests(unittest.TestCase):
         self.assertIn("ask_llm_and_speak_local_from_runtime(", voice_io_composition)
         self.assertIn('"/voice": "voice.status"', control_page_tools)
         self.assertIn('"/voice status": "voice.status"', control_page_tools)
-        self.assertIn("execute_control_page_voice_tool=execute_control_page_voice_tool", main_py)
+        self.assertIn(
+            "control_page_status_tool_composition.build_control_page_tool_runtime_deps",
+            main_py,
+        )
+        self.assertIn(
+            "execute_control_page_voice_tool=execute_control_page_voice_tool",
+            control_page_status_tool_composition,
+        )
         self.assertIn('if tool_name == "voice.status":', control_page_state)
 
     def test_local_speaker_uses_streaming_sentence_tts_with_full_answer_fallback(self) -> None:
