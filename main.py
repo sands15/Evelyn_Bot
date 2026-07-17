@@ -380,14 +380,16 @@ from evelyn_core.discord_commands import (
     normalize_channel_setting_action,
 )
 from evelyn_core.discord_command_handlers import make_control_command_authorized_checker
-from evelyn_core.discord_command_session_runtime import DiscordCommandSessionRuntimeDeps
+from evelyn_core.discord_app_dependency_composition import (
+    DiscordAppDependencyComposition,
+    DiscordAppDependencyCompositionDeps,
+)
 from evelyn_core.discord_ingress import (
     build_voice_ingress_context,
     resolve_text_thread_id,
     normalize_voice_debug_meta,
     voice_ingress_source,
 )
-from evelyn_core.discord_text_turn import DiscordTextMessageHandlerDeps
 from evelyn_core.session_key_runtime import (
     make_person_memory_key,
     make_room_memory_key,
@@ -3716,10 +3718,10 @@ process_member_audio = voice_io_composition.process_member_audio
 _process_member_audio_impl = voice_io_composition.process_member_audio_impl
 
 
-def build_discord_text_message_handler_deps() -> DiscordTextMessageHandlerDeps:
-    return DiscordTextMessageHandlerDeps(
+discord_app_dependency_composition = DiscordAppDependencyComposition(
+    DiscordAppDependencyCompositionDeps(
         process_commands=bot.process_commands,
-        bot_user=bot.user,
+        bot_user=lambda: bot.user,
         is_thread_parent=lambda parent: isinstance(parent, discord.TextChannel),
         remember_session_followup_target=remember_session_followup_target,
         get_guild_command_prefix=get_guild_command_prefix,
@@ -3753,24 +3755,26 @@ def build_discord_text_message_handler_deps() -> DiscordTextMessageHandlerDeps:
         finish_assistant_text_turn=finish_assistant_text_turn,
         log_voice_bottleneck_summary=log_voice_bottleneck_summary,
         format_display_text=format_display_text,
-        log=print,
-    )
-
-
-is_control_command_authorized = make_control_command_authorized_checker(allowed_user_ids=ALLOWED_RESTART_USER_IDS)
-
-
-def build_discord_command_session_runtime_deps() -> DiscordCommandSessionRuntimeDeps:
-    return DiscordCommandSessionRuntimeDeps(
         resolve_text_thread_id=resolve_text_thread_id,
-        is_text_thread_parent=lambda parent: isinstance(parent, discord.TextChannel),
         make_text_session_key=make_text_session_key,
         record_command_assistant_turn=session_state_store.record_command_assistant_turn,
         system_prompt=SYSTEM_PROMPT,
-        max_history_items=MAX_HISTORY,
+        max_history_items=MAX_HISTORY_ITEMS,
         normal_ttl_sec=ACTIVE_CONVERSATION_TEXT_SEC,
         question_ttl_sec=ACTIVE_CONVERSATION_TEXT_QUESTION_SEC,
+        log=print,
     )
+)
+
+build_discord_text_message_handler_deps = (
+    discord_app_dependency_composition.build_discord_text_message_handler_deps
+)
+build_discord_command_session_runtime_deps = (
+    discord_app_dependency_composition.build_discord_command_session_runtime_deps
+)
+
+
+is_control_command_authorized = make_control_command_authorized_checker(allowed_user_ids=ALLOWED_RESTART_USER_IDS)
 
 
 discord_app_composition = DiscordAppComposition(
