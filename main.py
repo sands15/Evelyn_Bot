@@ -243,6 +243,10 @@ from evelyn_core.voice_support_composition_runtime import (
     VoiceSupportComposition,
     VoiceSupportCompositionDeps,
 )
+from evelyn_core.voice_audio_support_dependency_composition import (
+    VoiceAudioSupportDependencyComposition,
+    VoiceAudioSupportDependencyCompositionDeps,
+)
 from evelyn_core.voice_runtime_composition_runtime import (
     LocalMicCompositionDeps,
     VoiceDebugCompositionDeps,
@@ -444,13 +448,8 @@ from evelyn_core.delivery_entry_composition import (
     DeliveryEntryComposition,
     LocalDeliveryEntryDeps,
 )
-from evelyn_core.tts_warmup_runtime import TtsWarmupRuntimeDeps
 from evelyn_core.tts_interrupt_runtime import (
     run_voice_tts_interrupt_gate_from_runtime,
-)
-from evelyn_core.voice_timing_runtime import (
-    build_voice_timing_runtime_deps as build_voice_timing_runtime_deps_from_runtime,
-    VoiceTimingRuntimeDeps,
 )
 from evelyn_core.local_tts_playback import LocalTtsPlaybackManager
 from evelyn_core.local_tts_dependency_composition import (
@@ -462,10 +461,6 @@ from evelyn_core.observability_metrics import (
     record_turn_stage_metric,
     summarize_voice_p95_metrics,
 )
-from evelyn_core.omnivoice_request_runtime import (
-    OmniVoiceRequestRuntimeDeps,
-)
-from evelyn_core.omnivoice_source_runtime import OmniVoiceSourceRuntimeDeps
 from evelyn_core.page_urls import (
     build_evelyn_page_url_runtime_deps,
     resolve_evelyn_page_url_from_runtime,
@@ -2302,28 +2297,21 @@ ensure_local_mic_service_started = voice_runtime_composition.ensure_local_mic_se
 atexit.register(stop_local_mic_service)
 
 
-def build_tts_warmup_runtime_deps() -> TtsWarmupRuntimeDeps:
-    return TtsWarmupRuntimeDeps(
+voice_audio_support_dependency_composition = VoiceAudioSupportDependencyComposition(
+    VoiceAudioSupportDependencyCompositionDeps(
         get_http_session=get_http_session,
-        client_timeout=aiohttp.ClientTimeout,
-        mark_startup_component=mark_startup_component,
-        startup_component_done=startup_component_done,
+        client_timeout_factory=aiohttp.ClientTimeout,
+        mark_startup_component=lambda *args, **kwargs: mark_startup_component(
+            *args, **kwargs
+        ),
+        startup_component_done=lambda *args, **kwargs: startup_component_done(
+            *args, **kwargs
+        ),
         omnivoice_server_url=OMNIVOICE_SERVER_URL,
         omnivoice_model=OMNIVOICE_MODEL,
         omnivoice_voice=OMNIVOICE_VOICE,
         omnivoice_language=OMNIVOICE_LANGUAGE,
         getenv=os.getenv,
-        log=print,
-    )
-
-
-def _set_tts_warmup_started(value: bool) -> None:
-    global tts_warmup_started
-    tts_warmup_started = value
-
-
-def build_voice_timing_runtime_deps() -> VoiceTimingRuntimeDeps:
-    return build_voice_timing_runtime_deps_from_runtime(
         monotonic=time.monotonic,
         voice_timing_log_threshold_ms=VOICE_TIMING_LOG_THRESHOLD_MS,
         voice_bottleneck_logs=VOICE_BOTTLENECK_LOGS,
@@ -2332,41 +2320,40 @@ def build_voice_timing_runtime_deps() -> VoiceTimingRuntimeDeps:
         summarize_p95_metrics=summarize_p95_metrics,
         build_turn_summary_payload=build_turn_summary_payload,
         log_turn_event=log_turn_event,
-        log=print,
-    )
-
-
-def build_omnivoice_request_runtime_deps() -> OmniVoiceRequestRuntimeDeps:
-    return OmniVoiceRequestRuntimeDeps(
         request_id_suffix=lambda: uuid.uuid4().hex[:10],
         tts_synth_request_factory=TtsSynthRequest,
         tts_synth_result_factory=TtsSynthResult,
-        omnivoice_model=OMNIVOICE_MODEL,
         omnivoice_pcm_rate=OMNIVOICE_PCM_RATE,
         omnivoice_stream=OMNIVOICE_STREAM,
         omnivoice_num_step=OMNIVOICE_NUM_STEP,
         omnivoice_speed=OMNIVOICE_SPEED,
-        omnivoice_language=OMNIVOICE_LANGUAGE,
-    )
-
-
-def build_omnivoice_source_runtime_deps() -> OmniVoiceSourceRuntimeDeps:
-    return OmniVoiceSourceRuntimeDeps(
         clean_tts_text=clean_tts_text,
         merge_log_event_payload=merge_log_event_payload,
         source_factory=OmniVoicePCMStream,
-        get_http_session=get_http_session,
-        client_timeout_factory=aiohttp.ClientTimeout,
         omnivoice_timeout_sec=OMNIVOICE_TIMEOUT_SEC,
-        omnivoice_server_url=OMNIVOICE_SERVER_URL,
-        omnivoice_voice=OMNIVOICE_VOICE,
-        request_runtime_deps_factory=build_omnivoice_request_runtime_deps,
-        monotonic=time.monotonic,
-        log_turn_event=log_turn_event,
         record_voice_pipeline_failure=record_voice_pipeline_failure,
         create_turn_scoped_task=create_turn_scoped_task,
         log=print,
     )
+)
+
+build_tts_warmup_runtime_deps = (
+    voice_audio_support_dependency_composition.build_tts_warmup_runtime_deps
+)
+build_voice_timing_runtime_deps = (
+    voice_audio_support_dependency_composition.build_voice_timing_runtime_deps
+)
+build_omnivoice_request_runtime_deps = (
+    voice_audio_support_dependency_composition.build_omnivoice_request_runtime_deps
+)
+build_omnivoice_source_runtime_deps = (
+    voice_audio_support_dependency_composition.build_omnivoice_source_runtime_deps
+)
+
+
+def _set_tts_warmup_started(value: bool) -> None:
+    global tts_warmup_started
+    tts_warmup_started = value
 
 
 # =========================================================
