@@ -548,8 +548,9 @@ from evelyn_core.control_page_runtime_services_runtime import (
     ControlPageRuntimeServicesProbeDeps,
     probe_control_page_runtime_services_once_from_runtime,
 )
-from evelyn_core.control_page_status_runtime import (
-    ControlPageStatusRuntimeDeps,
+from evelyn_core.control_page_status_tool_composition import (
+    ControlPageStatusToolComposition,
+    ControlPageStatusToolCompositionDeps,
 )
 from evelyn_core.control_page_search_runtime import (
     ControlPageSearchRuntimeDeps,
@@ -559,7 +560,6 @@ from evelyn_core.control_page_text_runtime import (
 )
 from evelyn_core.control_page_tool_runtime import (
     ControlPageInputRuntimeDeps,
-    ControlPageToolRuntimeDeps,
 )
 from evelyn_core.control_page_ui_runtime import (
     ControlPageUiRuntimeDeps,
@@ -3016,8 +3016,9 @@ def _set_control_page_minecraft_snapshot_poll_task(task: asyncio.Task | None) ->
     control_page_minecraft_snapshot_poll_task = task
 
 
-def build_control_page_status_runtime_deps() -> ControlPageStatusRuntimeDeps:
-    return ControlPageStatusRuntimeDeps(
+control_page_status_tool_composition = ControlPageStatusToolComposition(
+    ControlPageStatusToolCompositionDeps(
+        control_page=lambda: control_page_composition,
         model_name=MODEL_NAME,
         router_model_name=ROUTER_MODEL_NAME,
         summary_model_name=SUMMARY_MODEL_NAME,
@@ -3025,81 +3026,61 @@ def build_control_page_status_runtime_deps() -> ControlPageStatusRuntimeDeps:
         discord_enabled=DISCORD_ENABLED,
         bot_api_host=CONTROL_PAGE_BOT_API_HOST,
         bot_api_port=CONTROL_PAGE_BOT_API_PORT,
-        control_page_local_url=control_page_local_url,
-        voice_input_mode_status_line=voice_input_mode_status_line,
-        local_mic_status_line=local_mic_status_line,
-        current_tts_target_name=current_tts_target_name,
+        control_page_local_url=lambda: control_page_local_url(),
+        voice_input_mode_status_line=lambda *args, **kwargs: voice_input_mode_status_line(
+            *args, **kwargs
+        ),
+        local_mic_status_line=lambda *args, **kwargs: local_mic_status_line(*args, **kwargs),
+        current_tts_target_name=lambda *args, **kwargs: current_tts_target_name(*args, **kwargs),
         is_tracked_tts_playback_active=lambda guild_id: is_tracked_tts_playback_active(tts_playback_tracker, guild_id),
         local_tts_snapshot=local_tts_playback_manager.snapshot,
-        local_mic_runtime_state=serialize_local_mic_runtime_state,
-        build_voice_pipeline_snapshot=build_voice_pipeline_snapshot,
-        format_voice_continuity_detail_lines=_format_voice_barge_in_continuity_detail_lines,
-        build_status_text_payload=build_control_page_status_text_payload,
-        build_local_status_text_payload=build_control_page_local_status_text_payload,
-        build_voice_status_reply_payload=build_control_page_voice_status_reply_payload,
-        build_voice_continuity_reply_payload=build_control_page_voice_continuity_reply_payload,
-        get_control_page_minecraft_snapshot=control_page_composition.safe_get_minecraft_snapshot,
-        build_control_page_inventory_reply_payload=build_control_page_inventory_reply_payload,
-        build_control_page_minecraft_reply_payload=build_control_page_minecraft_reply_payload,
-        get_autonomy_engine=autonomy_engines.get,
+        local_mic_runtime_state=lambda: serialize_local_mic_runtime_state(),
+        build_voice_pipeline_snapshot=lambda *args, **kwargs: build_voice_pipeline_snapshot(
+            *args, **kwargs
+        ),
+        format_voice_continuity_detail_lines=lambda *args, **kwargs: _format_voice_barge_in_continuity_detail_lines(
+            *args, **kwargs
+        ),
+        autonomy_engines=autonomy_engines,
         get_routed_autonomy_executor=get_routed_autonomy_executor,
-        build_control_page_autonomy_reply_payload=build_control_page_autonomy_reply_payload,
-    )
-
-
-def build_control_page_tool_runtime_deps() -> ControlPageToolRuntimeDeps:
-    return ControlPageToolRuntimeDeps(
         clean_text=clean_text,
-        enqueue_control_page_ui_command=control_page_composition.enqueue_ui_command,
-        memory_panel_reply=memory_panel_reply,
         create_task=asyncio.create_task,
         restart_bot_process=restart_bot_process,
         recent_history_for_router=session_state_store.recent_history_for_router,
         record_tool_assistant_turn=session_state_store.record_tool_assistant_turn,
-        control_page_effective_guild_id=control_page_effective_guild_id,
-        control_page_session_key=control_page_session_key,
+        control_page_effective_guild_id=lambda *args, **kwargs: control_page_effective_guild_id(
+            *args, **kwargs
+        ),
+        control_page_session_key=lambda *args, **kwargs: control_page_session_key(
+            *args, **kwargs
+        ),
         system_prompt=SYSTEM_PROMPT,
-        max_history_items=MAX_HISTORY,
+        max_history_items=MAX_HISTORY_ITEMS,
         active_conversation_text_sec=ACTIVE_CONVERSATION_TEXT_SEC,
         router_llm_enabled=ROUTER_LLM_ENABLED,
         route_timeout_sec=ROUTER_ROUTE_TIMEOUT_SEC,
-        control_page_tool_registry_prompt=control_page_tool_registry_prompt,
-        ask_router_llm=ask_router_llm,
+        ask_router_llm=lambda *args, **kwargs: ask_router_llm(*args, **kwargs),
         current_turn_id=current_turn_id,
+        schedule_local_shutdown=schedule_evelyn_local_shutdown,
+        schedule_stack_shutdown=schedule_evelyn_stack_shutdown,
+        schedule_bot_shutdown=lambda: asyncio.create_task(shutdown_bot_process()),
+        set_input_mode=lambda *args, **kwargs: set_voice_input_mode(*args, **kwargs),
+        restore_voice_channel=lambda *args, **kwargs: restore_last_voice_channel(*args, **kwargs),
+        reset_continuity_probe=reset_voice_barge_in_continuity_probe,
+        enable_mode=enable_minecraft_mode,
+        disable_mode=disable_minecraft_mode,
+        get_client=get_minecraft_client,
+        format_position=format_position_short,
         log=print,
-        control_page_tool_policy_error=control_page_tool_policy_error,
-        build_control_page_help_reply=build_control_page_help_reply,
-        execute_control_page_memory_tool=execute_control_page_memory_tool,
-        execute_control_page_runtime_tool=execute_control_page_runtime_tool,
-        execute_control_page_voice_tool=execute_control_page_voice_tool,
-        execute_control_page_minecraft_tool=execute_control_page_minecraft_tool,
-        ensure_vault_layout=ensure_memory_vault_layout,
-        open_vault_tool_reply=control_page_open_memory_vault_tool_reply,
-        vault_obsidian_url=memory_vault_obsidian_url,
-        open_url=open_control_page_url_with_system,
-        open_path=open_control_page_path_with_system,
-        guild_getter_runtime={
-            "get_runtime_services": get_control_page_runtime_services,
-            "build_local_status_text": control_page_composition.build_local_status_text,
-            "build_status_reply": control_page_composition.build_status_reply,
-            "schedule_local_shutdown": schedule_evelyn_local_shutdown,
-            "schedule_stack_shutdown": schedule_evelyn_stack_shutdown,
-            "schedule_bot_shutdown": lambda: asyncio.create_task(shutdown_bot_process()),
-            "build_autonomy_reply": control_page_composition.build_autonomy_reply,
-            "build_voice_status_reply": control_page_composition.build_voice_status_reply,
-            "set_input_mode": set_voice_input_mode,
-            "input_mode_status_line": voice_input_mode_status_line,
-            "restore_voice_channel": restore_last_voice_channel,
-            "build_voice_continuity_reply": control_page_composition.build_voice_continuity_reply,
-            "reset_continuity_probe": reset_voice_barge_in_continuity_probe,
-            "build_inventory_reply": control_page_composition.build_inventory_reply,
-            "build_minecraft_reply": control_page_composition.build_minecraft_reply,
-            "enable_mode": enable_minecraft_mode,
-            "disable_mode": disable_minecraft_mode,
-            "get_client": get_minecraft_client,
-            "format_position": format_position_short,
-        },
     )
+)
+
+build_control_page_status_runtime_deps = (
+    control_page_status_tool_composition.build_control_page_status_runtime_deps
+)
+build_control_page_tool_runtime_deps = (
+    control_page_status_tool_composition.build_control_page_tool_runtime_deps
+)
 
 
 def build_control_page_search_runtime_deps() -> ControlPageSearchRuntimeDeps:
