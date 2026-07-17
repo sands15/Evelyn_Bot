@@ -2728,11 +2728,11 @@ DEFAULT_INTERNAL_ROUTES = {"main_direct", "policy_short_circuit", "search_execut
 DISABLED_MAIN_APP_SKILL_ROUTES = {"minecraft"}
 
 
-def build_route_executor_runtime_deps() -> ResolveRouteExecutorRuntimeDeps:
-    return ResolveRouteExecutorRuntimeDeps(
-        get_autonomy_engine=lambda guild_id: autonomy_engines.get(guild_id),
-        create_autonomy_engine=get_or_create_autonomy_engine,
-    )
+build_route_executor_runtime_deps = partial(
+    ResolveRouteExecutorRuntimeDeps,
+    get_autonomy_engine=lambda guild_id: autonomy_engines.get(guild_id),
+    create_autonomy_engine=get_or_create_autonomy_engine,
+)
 
 
 def get_minecraft_client() -> MinecraftAutonomyClient:

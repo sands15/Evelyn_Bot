@@ -36,6 +36,13 @@ class ResolveRouteExecutorRuntimeTests(unittest.TestCase):
         if _SKIP_REASON:
             raise unittest.SkipTest(_SKIP_REASON)
 
+    def test_main_binds_route_executor_builder_with_partial(self) -> None:
+        source = (REPO_ROOT / "main.py").read_text(encoding="utf-8")
+
+        self.assertNotIn("def build_route_executor_runtime_deps(", source)
+        self.assertIn("build_route_executor_runtime_deps = partial(", source)
+        self.assertIn("ResolveRouteExecutorRuntimeDeps,", source)
+
     def test_none_guild_returns_none(self) -> None:
         calls: list[tuple] = []
         deps = ResolveRouteExecutorRuntimeDeps(
