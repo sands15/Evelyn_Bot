@@ -1,7 +1,7 @@
 # Evelyn Current State
 
 Document status: **Current**
-Last reviewed: 2026-07-15 KST
+Last reviewed: 2026-07-18 KST
 Source branch: `refactor/main-py-decomposition-2026-07-15`
 
 이 문서는 현재 확인된 사실만 기록한다. 목표 구조와 과거 계획은 다른 설계/계획 문서를 사용한다.
@@ -9,26 +9,12 @@ Source branch: `refactor/main-py-decomposition-2026-07-15`
 ## Source state
 
 - 전체 프로젝트 감사의 즉시 항목을 별도 안정화 브랜치에서 처리 중이다.
-- `main.py` 분해를 재개했다. 음성 hot path의 ingress/audio filtering, wake probe/환경음 조기 차단,
-  TTS interrupt/input suppression gate, partial/full STT 실행, transcript/barge-in merge를 런타임 모듈로 옮겼다.
-  short transcript/final wake session gate와 reply context dispatch도 분리했다.
-  상위 `voice_member_audio_pipeline_runtime.py`가 모든 단계를 연결하며 `_process_member_audio_impl`은 30줄 wrapper다.
-  autonomy engine factory는 `autonomy_runtime_factory.py`, OmniVoice HTTP source 생성은
-  `omnivoice_source_runtime.py`, 로컬 TTS sentence streaming은 `local_tts_stream_runtime.py`로 이동했다.
-  LLM route는 `llm_route_runtime.py`, 단일 Main LLM 실행 orchestration은 `main_llm_runtime.py`,
-  Control Page 일반 답변 turn은 `control_page_text_runtime.py`로 이동했다.
-  runtime status context/cache/lock은 `runtime_status_context.py`, Discord sentence TTS는
-  `discord_tts_stream_runtime.py`, Control Page welcome 생성은 `control_page_ui_runtime.py`로 이동했다.
-  로컬 단일 TTS는 `local_tts_stream_runtime.py`, summary/router 비스트리밍 JSON HTTP 호출은
-  공통 `json_llm_request_runtime.py`로 이동했다.
-  Discord 단일 TTS는 `discord_tts_stream_runtime.py`, 동기 STT 변환은
-  `stt_transcription_runtime.py`, Discord 음성 연결/내부 재연결/재시도는
-  `discord_voice_connection_runtime.py`로 이동했다.
-  live vision 요청 실행은 `vision_runtime.py`, 검색 결과 요약은 `search_answer_runtime.py`,
-  streaming voice turn 진입/실패 정리는 `voice_turn_entry_runtime.py`로 이동했다.
-  Control Page aiohttp 시작/cleanup은 `control_page_server_start_runtime.py`, Minecraft live
-  status/observe 및 Control Page snapshot 조립은 `minecraft_live_state_runtime.py`로 이동했다.
-  runtime dependency builder 군과 Control Page state 조립 등은 아직 `main.py`에 남아 있다.
+- `main.py` 분해는 목표 범위에 도달했다.
+  - 현재 2,402줄이며 원래 목표 범위인 1,500~2,500줄 안에 들어왔다.
+  - top-level/nested 함수 정의, `global`/`nonlocal`, dependency-builder 함수 정의는 모두 0개다.
+  - 기능 구현, 판정, 상태 mutation은 owner runtime/composition 모듈에 있고 `main.py`는 설정 import,
+    객체 생성, 명시적 typed dependency wiring, Discord 등록, runtime 진입을 담당한다.
+  - dependency wiring은 암시적 registry나 `globals()` 우회 없이 한 줄 최대 두 인자, 158자 이하로 유지한다.
 - 핵심 준비 상태와 선택 기능 준비 상태를 분리했다.
   - `ok`: 필수 핵심 서비스 준비 여부
   - `fullyHealthy`: 선택 기능을 포함한 전체 건강 여부
@@ -60,16 +46,19 @@ Source branch: `refactor/main-py-decomposition-2026-07-15`
 
 ## Verification state
 
-검증 시각: 2026-07-16 02:12 KST
-검증한 코드 기준점: `refactor/main-py-decomposition-2026-07-15` 스물아홉 번째 Control Page/Minecraft runtime 분리 작업 트리
+최근 `main.py` 검증 시각: 2026-07-18 19:03 KST
+검증한 코드 기준점: `refactor/main-py-decomposition-2026-07-15`의 `main.py` 2,500줄 목표 작업 트리
 
-- `pip check`: 통과
-- `docker compose config --quiet`: 통과(검증용 Discord token 사용)
-- Python `compileall`: 통과
-- 활성 Live2D/boot JavaScript `node --check`: 통과
-- 전체 unittest: 일반 모드 1,112개 통과(실제 `main.py` opt-in 1개 의도적 건너뜀), 엄격 모드 1,112개 통과
-- `EVELYN_RUN_REAL_MAIN_INTEGRATION=1`: 실제 `main.py` 프로세스 smoke 포함
-- `PYTHONWARNINGS=error::ResourceWarning`: 통과
+- 전체 unittest: `EVELYN_RUN_REAL_MAIN_INTEGRATION=1`, `PYTHONWARNINGS=error::ResourceWarning`에서 1,289개 통과
+- 실제 `main.py` Control Page 프로세스 smoke 별도 재실행 통과
+- `main.py` AST/compile 감사: 함수 정의 0개, `global`/`nonlocal` 0개, 최대 줄 길이 158자, 손상 문자 0개
+
+다음 항목은 2026-07-15 전체 프로젝트 감사에서 통과했으며 이번 줄 수 작업에서는 재실행하지 않았다.
+
+- `pip check`
+- `docker compose config --quiet`(검증용 Discord token 사용)
+- Python `compileall`
+- 활성 Live2D/boot JavaScript `node --check`
 - Codex Gateway 테스트 서버: 무토큰/오토큰 `401`, 정상 bearer token `200`
 
 ## Operational boundaries

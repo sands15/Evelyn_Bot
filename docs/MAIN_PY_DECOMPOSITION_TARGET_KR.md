@@ -1339,3 +1339,25 @@ Last reviewed: 2026-07-18
   - 세 배치 실제 `main.py` control-page process smoke 통과.
   - `EVELYN_RUN_REAL_MAIN_INTEGRATION=1`, `PYTHONWARNINGS=error::ResourceWarning` 전체 discovery: 1,286 tests 통과.
   - 런타임/컨테이너 재시작 및 원격 push 없음.
+
+## 2026-07-18 원래 목표 범위 진입 — 2,500줄 이하 달성
+
+정훈의 승인에 따라 다음 현실적 종료점인 2,500줄 이하를 진행했다. 2,999줄 시점의 AST를 다시 감사한 결과, 남은 대부분은 구현이나 상태 mutation이 아니라 typed dependency constructor의 선언형 wiring이었다. 이를 별도 대형 bootstrap 파일로 옮기지 않고 현재 composition root에 그대로 유지했다.
+
+- wiring 표현 최적화:
+  - 연속된 단일 행 keyword argument를 한 줄에 최대 두 개까지만 배치했다.
+  - 모든 줄은 최대 158자를 유지했다.
+  - 재배치 전후 AST dump가 완전히 같은 경우에만 파일을 기록했다.
+- 최종 구조:
+  - `main.py`: 2,999→2,402 lines, 597줄 감소.
+  - 원래 목표 범위 1,500~2,500줄 안에 진입했다.
+  - function definition 0개, `global`/`nonlocal` statement 0개, dependency-builder definition 0개.
+  - replacement character 0개, 최대 줄 길이 158자.
+- 검증:
+  - `git diff --check`, `py_compile main.py`, AST 구조 감사 통과.
+  - 실제 `main.py` Control Page process smoke 통과.
+  - `EVELYN_RUN_REAL_MAIN_INTEGRATION=1`, `PYTHONWARNINGS=error::ResourceWarning` 전체 discovery: 1,289 tests 통과(구조 경계 테스트 3개 추가 포함).
+  - 잘못된 `unittest discover -s tests` 명령은 `third_party/Voyager`까지 탐색해 선택 의존성 `gymnasium` 부재로 1건 실패했으나, 프로젝트의 정규 탐색 명령인 `discover -s tests -t . -p test_*.py`에서는 1,289개가 모두 통과했다.
+  - 런타임/컨테이너 재시작 및 원격 push 없음.
+
+이 시점에서 줄 수와 semantic boundary를 모두 충족했다. 이후 `main.py` 축소는 별도 기능 소유권 문제가 새로 발견될 때만 수행한다.

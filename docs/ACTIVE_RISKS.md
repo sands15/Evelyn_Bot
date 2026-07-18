@@ -1,7 +1,7 @@
 # Evelyn Active Risks
 
 Document status: **Current**
-Last reviewed: 2026-07-15 KST
+Last reviewed: 2026-07-18 KST
 Evaluation stance: 실패 가능성과 검증 공백을 우선 기록
 
 ## P0 — 배포되지 않은 보안 변경
@@ -44,11 +44,11 @@ CI의 실제 프로세스 smoke는 `main.py`가 기동 가능한지만 확인한
 
 다음 조치: 릴리스 전 수동 하드웨어 검증을 별도 체크리스트로 실행하고 결과를 기록한다.
 
-## P1 — `main.py` 구조 부채
+## P2 — `main.py` 선언형 wiring 밀도
 
-음성 hot path의 실행 순서는 런타임 모듈로 이동했고 `_process_member_audio_impl`은 30줄 wrapper가 됐다. 주요 TTS/STT/vision/search/streaming turn 경계와 Control Page 서버 시작, Minecraft live 상태/snapshot까지 분리했지만 `main.py`는 여전히 7,380줄이며, 최대 함수는 `build_fast_path_policy_runtime_deps` 72줄이다. 실행 함수로는 Control Page state 조립 45줄, Discord `on_ready` 43줄, vision watch 40줄 등이 남아 있고 dependency builder도 다수다. 일부 대형 함수를 줄였다고 파일 전체 구조 위험이 해결된 상태는 아니다.
+`main.py`는 2,402줄로 목표 범위에 들어왔고 함수 정의와 `global`/`nonlocal`은 0개다. 남은 본문은 대부분 명시적 typed dependency wiring이며, 줄 수를 맞추기 위해 한 줄에 최대 두 인자를 배치해 이전보다 가로 밀도가 높다. 이는 현재 동작 위험보다는 리뷰 가독성의 잔여 비용이다.
 
-다음 조치: Control Page state와 Discord startup/vision watch 실행 경계를 검토하고, 전역을 숨기는 namespace/globals 우회 없이 dependency builder 군을 기능별 composition root로 묶는다.
+다음 조치: 줄 수만을 위한 추가 이동이나 암시적 registry 도입은 하지 않는다. 새 동작은 owner 모듈에 추가하고, `main.py`에는 최대 158자·함수 정의 0개·`global`/`nonlocal` 0개 경계를 유지한다.
 
 ## P2 — 설정과 예외 처리의 잔여 분산
 

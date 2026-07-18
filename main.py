@@ -286,8 +286,7 @@ _ORIGINAL_PRINT = builtins.print
 turn_trace_file_lock = threading.Lock()
 
 print = ConsoleOutputFilter(
-    enabled=VOICE_CONSOLE_ONLY_STT_AND_REPLY,
-    output=_ORIGINAL_PRINT,
+    enabled=VOICE_CONSOLE_ONLY_STT_AND_REPLY, output=_ORIGINAL_PRINT,
     allowed_prefixes=ALLOWED_CONSOLE_PREFIXES,
 )
 
@@ -312,8 +311,7 @@ voice_connect_locks: dict[int, asyncio.Lock] = {}
 instance_lock_path = Path(os.getenv("EVELYN_INSTANCE_LOCK_PATH", str(Path(__file__).resolve().with_name(".evelyn_bot.lock"))))
 
 discord_settings_runtime_deps = build_discord_settings_runtime_deps_from_main(
-    default_command_prefix=DEFAULT_COMMAND_PREFIX,
-    prefix_cache=guild_prefix_cache,
+    default_command_prefix=DEFAULT_COMMAND_PREFIX, prefix_cache=guild_prefix_cache,
     now=time.time,
 )
 discord_settings = build_discord_settings_entrypoints(discord_settings_runtime_deps)
@@ -333,8 +331,7 @@ bot = commands.Bot(
             get_guild_command_prefix=discord_settings.get_guild_command_prefix,
         ),
     )(_bot, message),
-    intents=intents,
-    help_command=None,
+    intents=intents, help_command=None,
 )
 
 SYSTEM_PROMPT = build_evelyn_system_prompt(omnivoice_tag_guidance=OMNIVOICE_TAG_GUIDANCE)
@@ -345,36 +342,28 @@ tts_lock = asyncio.Lock()
 tts_playback_tracker = TtsPlaybackTracker()
 tts_playback_manager = TtsPlaybackManager(tts_playback_tracker)
 local_tts_playback_manager = LocalTtsPlaybackManager(
-    enabled=LOCAL_TTS_OUTPUT_ENABLED,
-    device=LOCAL_TTS_OUTPUT_DEVICE,
+    enabled=LOCAL_TTS_OUTPUT_ENABLED, device=LOCAL_TTS_OUTPUT_DEVICE,
     log=print,
 )
 speaker_verifier = SpeakerVerifier(
     SpeakerVerificationConfig(
-        enabled=SPEAKER_VERIFICATION_ENABLED,
-        enroll_dir=SPEAKER_VERIFICATION_ENROLL_DIR,
-        threshold=SPEAKER_VERIFICATION_THRESHOLD,
-        min_audio_sec=SPEAKER_VERIFICATION_MIN_AUDIO_SEC,
-        max_audio_sec=SPEAKER_VERIFICATION_MAX_AUDIO_SEC,
-        model=SPEAKER_VERIFICATION_MODEL,
-        cache_dir=SPEAKER_VERIFICATION_CACHE_DIR,
-        device=SPEAKER_VERIFICATION_DEVICE,
+        enabled=SPEAKER_VERIFICATION_ENABLED, enroll_dir=SPEAKER_VERIFICATION_ENROLL_DIR,
+        threshold=SPEAKER_VERIFICATION_THRESHOLD, min_audio_sec=SPEAKER_VERIFICATION_MIN_AUDIO_SEC,
+        max_audio_sec=SPEAKER_VERIFICATION_MAX_AUDIO_SEC, model=SPEAKER_VERIFICATION_MODEL,
+        cache_dir=SPEAKER_VERIFICATION_CACHE_DIR, device=SPEAKER_VERIFICATION_DEVICE,
     ),
     log=print,
 )
 active_tts_playbacks = tts_playback_tracker.registry
 tts_warmup_started_state = RuntimeValue(False)
 get_http_session = HttpSessionProvider(
-    client_timeout_factory=aiohttp.ClientTimeout,
-    client_session_factory=aiohttp.ClientSession,
+    client_timeout_factory=aiohttp.ClientTimeout, client_session_factory=aiohttp.ClientSession,
 )
 startup_component_state: dict[str, dict[str, Any]] = {}
 partial_stt_cache: dict[str, dict[str, Any]] = {}
 voice_utterance_assembly_config = UtteranceAssemblyConfig(
-    enabled=VOICE_UTTERANCE_ASSEMBLY_ENABLED,
-    commit_wait_sec=VOICE_UTTERANCE_COMMIT_WAIT_SEC,
-    pad_ms=VOICE_UTTERANCE_PAD_MS,
-    max_audio_sec=VOICE_UTTERANCE_MAX_AUDIO_SEC,
+    enabled=VOICE_UTTERANCE_ASSEMBLY_ENABLED, commit_wait_sec=VOICE_UTTERANCE_COMMIT_WAIT_SEC,
+    pad_ms=VOICE_UTTERANCE_PAD_MS, max_audio_sec=VOICE_UTTERANCE_MAX_AUDIO_SEC,
 )
 
 room_last_voice_reply_at: dict[str, float] = {}
@@ -396,15 +385,13 @@ control_page_site_state = RuntimeValue[web.TCPSite | None](None)
 control_page_start_lock_state = RuntimeValue[asyncio.Lock | None](None)
 control_page_chat_log_store = ControlPageChatLogStore(limit=CONTROL_PAGE_CHAT_LOG_LIMIT)
 control_page_minecraft_snapshot_cache = ControlPageMinecraftSnapshotCache(
-    stale_after_sec=CONTROL_PAGE_MINECRAFT_CACHE_REFRESH_SEC,
-    expired_after_sec=CONTROL_PAGE_MINECRAFT_CACHE_MAX_STALE_SEC,
+    stale_after_sec=CONTROL_PAGE_MINECRAFT_CACHE_REFRESH_SEC, expired_after_sec=CONTROL_PAGE_MINECRAFT_CACHE_MAX_STALE_SEC,
 )
 control_page_minecraft_snapshot_lock_state = RuntimeValue[asyncio.Lock | None](None)
 control_page_minecraft_snapshot_refresh_task_state = RuntimeValue[asyncio.Task | None](None)
 control_page_minecraft_snapshot_poll_task_state = RuntimeValue[asyncio.Task | None](None)
 control_page_runtime_services_cache = ControlPageRuntimeServicesCache(
-    stale_after_sec=CONTROL_PAGE_RUNTIME_CACHE_REFRESH_SEC,
-    expired_after_sec=CONTROL_PAGE_RUNTIME_CACHE_MAX_STALE_SEC,
+    stale_after_sec=CONTROL_PAGE_RUNTIME_CACHE_REFRESH_SEC, expired_after_sec=CONTROL_PAGE_RUNTIME_CACHE_MAX_STALE_SEC,
     refresh_min_interval_sec=CONTROL_PAGE_RUNTIME_CACHE_REFRESH_MIN_INTERVAL_SEC,
 )
 control_page_runtime_services_lock_state = RuntimeValue[asyncio.Lock | None](None)
@@ -418,31 +405,24 @@ turn_stage_metrics: dict[str, dict[str, float]] = {}
 turn_path_metrics: dict[str, dict[str, Any]] = {}
 model_call_metrics: dict[str, dict[str, Any]] = {}
 model_call_metrics_store = ModelCallMetricsStore(
-    model_call_metrics=model_call_metrics,
-    turn_path_metrics=turn_path_metrics,
-    summary_events=TURN_SUMMARY_EVENTS,
-    trace_log_dir=TURN_TRACE_LOG_DIR,
+    model_call_metrics=model_call_metrics, turn_path_metrics=turn_path_metrics,
+    summary_events=TURN_SUMMARY_EVENTS, trace_log_dir=TURN_TRACE_LOG_DIR,
     print_fn=print,
 )
 question_metrics: dict[str, Any] = default_question_metrics()
 session_question_state: dict[str, dict[str, Any]] = {}
 question_policy_state = QuestionPolicyState(
-    question_metrics=question_metrics,
-    session_question_state=session_question_state,
-    log_turn_event=lambda event, **payload: log_turn_event(event, **payload),
-    question_feature_enabled=QUESTION_FEATURE_ENABLED,
-    min_turn_gap=QUESTION_MIN_TURN_GAP,
-    min_seconds_gap=QUESTION_MIN_SECONDS_GAP,
-    max_per_10_turns=QUESTION_MAX_PER_10_TURNS,
-    disable_after_frustration_sec=QUESTION_DISABLE_AFTER_FRUSTRATION_SEC,
+    question_metrics=question_metrics, session_question_state=session_question_state,
+    log_turn_event=lambda event, **payload: log_turn_event(event, **payload), question_feature_enabled=QUESTION_FEATURE_ENABLED,
+    min_turn_gap=QUESTION_MIN_TURN_GAP, min_seconds_gap=QUESTION_MIN_SECONDS_GAP,
+    max_per_10_turns=QUESTION_MAX_PER_10_TURNS, disable_after_frustration_sec=QUESTION_DISABLE_AFTER_FRUSTRATION_SEC,
 )
 
 conversation_policy_dependency_composition = ConversationPolicyDependencyComposition(
     ConversationPolicyDependencyCompositionDeps(
         normalize_question_policy_mapping_payload=normalize_question_policy_mapping_payload,
         extract_question_policy_from_route_meta_payload=extract_question_policy_from_route_meta_payload,
-        user_wants_direct_answer_payload=user_wants_direct_answer_payload,
-        user_frustration_with_questions_payload=user_frustration_with_questions_payload,
+        user_wants_direct_answer_payload=user_wants_direct_answer_payload, user_frustration_with_questions_payload=user_frustration_with_questions_payload,
         is_continuable_technical_topic_payload=is_continuable_technical_topic_payload,
         question_cooldown_hit_payload=question_policy_state.question_cooldown_hit,
         apply_fast_path_question_policy_payload=question_policy_state.apply_fast_path_policy,
@@ -459,39 +439,25 @@ conversation_policy_dependency_composition = ConversationPolicyDependencyComposi
         maybe_append_proactive_question_payload=(
             question_policy_state.maybe_append_proactive_question
         ),
-        session_state_store=session_state_store,
-        system_prompt=SYSTEM_PROMPT,
+        session_state_store=session_state_store, system_prompt=SYSTEM_PROMPT,
         active_conversation_awaiting_reply_sec=ACTIVE_CONVERSATION_AWAITING_REPLY_SEC,
-        active_conversation_text_question_sec=ACTIVE_CONVERSATION_TEXT_QUESTION_SEC,
-        active_conversation_text_sec=ACTIVE_CONVERSATION_TEXT_SEC,
-        max_history_items=MAX_HISTORY_ITEMS,
-        session_topic_ids=session_state_store.topic_ids,
-        build_topic_id=build_session_topic_id,
-        new_turn_id=new_session_turn_id,
+        active_conversation_text_question_sec=ACTIVE_CONVERSATION_TEXT_QUESTION_SEC, active_conversation_text_sec=ACTIVE_CONVERSATION_TEXT_SEC,
+        max_history_items=MAX_HISTORY_ITEMS, session_topic_ids=session_state_store.topic_ids,
+        build_topic_id=build_session_topic_id, new_turn_id=new_session_turn_id,
         session_last_turn_accepted_at_get=lambda session_key: session_state_store.last_turn_accepted_at.get(
             session_key, 0.0
         ),
-        monotonic=time.monotonic,
-        should_require_confirm_exact_for_wake_payload=should_require_confirm_exact_for_wake_policy,
-        is_transport_corrupted_audio_payload=is_transport_corrupted_audio_policy,
-        no_wake_max_continue_sec=VOICE_NO_WAKE_MAX_CONTINUE_SEC,
-        clean_text=clean_text,
-        looks_like_brief_filler_text=looks_like_brief_filler_text,
-        looks_like_repetitive_noise_text=looks_like_repetitive_noise_text,
-        tail_fragment_window_sec=TAIL_FRAGMENT_WINDOW_SEC,
-        tail_fragment_max_raw_sec=TAIL_FRAGMENT_MAX_RAW_SEC,
-        tail_fragment_max_voiced_ms=TAIL_FRAGMENT_MAX_VOICED_MS,
-        tail_fragment_max_longest_ms=TAIL_FRAGMENT_MAX_LONGEST_MS,
-        normalize_voice_text=normalize_voice_text,
-        normalized_wake_words=normalized_wake_words,
-        min_audio_sec=MIN_AUDIO_SEC,
-        min_transcribed_len=MIN_TRANSCRIBED_LEN,
-        wake_short_text_keep_len=WAKE_SHORT_TEXT_KEEP_LEN,
+        monotonic=time.monotonic, should_require_confirm_exact_for_wake_payload=should_require_confirm_exact_for_wake_policy,
+        is_transport_corrupted_audio_payload=is_transport_corrupted_audio_policy, no_wake_max_continue_sec=VOICE_NO_WAKE_MAX_CONTINUE_SEC,
+        clean_text=clean_text, looks_like_brief_filler_text=looks_like_brief_filler_text,
+        looks_like_repetitive_noise_text=looks_like_repetitive_noise_text, tail_fragment_window_sec=TAIL_FRAGMENT_WINDOW_SEC,
+        tail_fragment_max_raw_sec=TAIL_FRAGMENT_MAX_RAW_SEC, tail_fragment_max_voiced_ms=TAIL_FRAGMENT_MAX_VOICED_MS,
+        tail_fragment_max_longest_ms=TAIL_FRAGMENT_MAX_LONGEST_MS, normalize_voice_text=normalize_voice_text,
+        normalized_wake_words=normalized_wake_words, min_audio_sec=MIN_AUDIO_SEC,
+        min_transcribed_len=MIN_TRANSCRIBED_LEN, wake_short_text_keep_len=WAKE_SHORT_TEXT_KEEP_LEN,
         audio_duration=lambda pcm_bytes: len(pcm_bytes or b"") / (RATE * CHANNELS * 2),
-        session_state_snapshot=lambda *args, **kwargs: session_state_snapshot(*args, **kwargs),
-        answer_gpu_status=answer_gpu_runtime_status_query,
-        model_output_stop_tokens=MAIN_LLM_STOP_TOKENS,
-        sanitize_model_output_cleanup=cleanup_assistant_display_artifacts,
+        session_state_snapshot=lambda *args, **kwargs: session_state_snapshot(*args, **kwargs), answer_gpu_status=answer_gpu_runtime_status_query,
+        model_output_stop_tokens=MAIN_LLM_STOP_TOKENS, sanitize_model_output_cleanup=cleanup_assistant_display_artifacts,
     )
 )
 
@@ -525,12 +491,9 @@ SKILL_DISPATCH_CACHE_MAX = 1024
 
 conversation_session_composition = ConversationSessionComposition(
     ConversationSessionCompositionDeps(
-        session=build_session_turn_runtime_deps,
-        room_owner_user_ids=room_speaker_activity_store.room_owner_user_ids,
-        room_owner_until=room_speaker_activity_store.room_owner_until,
-        room_reply_in_progress=room_reply_in_progress,
-        room_speaker_activity_store=room_speaker_activity_store,
-        monotonic=time.monotonic,
+        session=build_session_turn_runtime_deps, room_owner_user_ids=room_speaker_activity_store.room_owner_user_ids,
+        room_owner_until=room_speaker_activity_store.room_owner_until, room_reply_in_progress=room_reply_in_progress,
+        room_speaker_activity_store=room_speaker_activity_store, monotonic=time.monotonic,
         log_event=lambda *args, **kwargs: log_turn_event(*args, **kwargs),
     )
 )
@@ -567,30 +530,18 @@ persona_state_hint_for_turn = conversation_session_composition.persona_state_hin
 
 conversation_observability_composition = ConversationObservabilityComposition(
     ConversationObservabilityCompositionDeps(
-        question_policy=build_question_policy_runtime_deps,
-        question_policy_state=build_question_policy_state_runtime_deps,
-        turn_scope_registry=turn_scope_registry,
-        turn_stage_metrics=turn_stage_metrics,
-        model_call_metrics_store=model_call_metrics_store,
-        write_turn_trace_event=write_turn_trace_event,
-        turn_trace_json_log=TURN_TRACE_JSON_LOG,
-        bottleneck_events=BOTTLENECK_TURN_TRACE_EVENTS,
-        summary_events=TURN_SUMMARY_EVENTS,
-        console_only_stt_and_reply=VOICE_CONSOLE_ONLY_STT_AND_REPLY,
-        voice_bottleneck_logs=VOICE_BOTTLENECK_LOGS,
-        voice_trace_all_events=VOICE_TRACE_ALL_EVENTS,
-        turn_trace_log_dir=TURN_TRACE_LOG_DIR,
-        turn_trace_file_lock=turn_trace_file_lock,
-        original_print=_ORIGINAL_PRINT,
-        trace_print=print,
-        monotonic=time.monotonic,
-        now=time.time,
-        benchmark_log_path=CONTEXT_PIPELINE_BENCHMARK_LOG,
-        project_root=PROJECT_ROOT,
-        log=print,
-        record_turn_stage_metric=record_turn_stage_metric,
-        summarize_voice_p95_metrics=summarize_voice_p95_metrics,
-        get_search_followup_queued_count=search_followup_queued_counter.get,
+        question_policy=build_question_policy_runtime_deps, question_policy_state=build_question_policy_state_runtime_deps,
+        turn_scope_registry=turn_scope_registry, turn_stage_metrics=turn_stage_metrics,
+        model_call_metrics_store=model_call_metrics_store, write_turn_trace_event=write_turn_trace_event,
+        turn_trace_json_log=TURN_TRACE_JSON_LOG, bottleneck_events=BOTTLENECK_TURN_TRACE_EVENTS,
+        summary_events=TURN_SUMMARY_EVENTS, console_only_stt_and_reply=VOICE_CONSOLE_ONLY_STT_AND_REPLY,
+        voice_bottleneck_logs=VOICE_BOTTLENECK_LOGS, voice_trace_all_events=VOICE_TRACE_ALL_EVENTS,
+        turn_trace_log_dir=TURN_TRACE_LOG_DIR, turn_trace_file_lock=turn_trace_file_lock,
+        original_print=_ORIGINAL_PRINT, trace_print=print,
+        monotonic=time.monotonic, now=time.time,
+        benchmark_log_path=CONTEXT_PIPELINE_BENCHMARK_LOG, project_root=PROJECT_ROOT,
+        log=print, record_turn_stage_metric=record_turn_stage_metric,
+        summarize_voice_p95_metrics=summarize_voice_p95_metrics, get_search_followup_queued_count=search_followup_queued_counter.get,
         build_rejected_voice_turn=build_rejected_voice_turn,
     )
 )
@@ -648,46 +599,27 @@ configure_tts_playback_logging(log_turn_event)
 # =========================================================
 autonomy_runtime_composition = AutonomyRuntimeComposition(
     AutonomyRuntimeCompositionDeps(
-        autonomy_engines=autonomy_engines,
-        get_guild=bot.get_guild,
+        autonomy_engines=autonomy_engines, get_guild=bot.get_guild,
         get_observe_channel_ids=discord_settings.get_guild_observe_channel_ids,
-        get_command_only_channel_ids=discord_settings.get_guild_command_only_channel_ids,
-        session_followup_targets=session_state_store.followup_targets,
-        clean_text=clean_text,
-        send_discord_text=send_discord_text,
-        question_cooldown_hit=question_cooldown_hit,
-        evaluate_proactive_question_gate=evaluate_proactive_question_gate,
-        proactive_question_scope_candidates=proactive_question_scope_candidates,
-        select_question_to_ask=select_question_to_ask,
-        runtime_session_key=runtime_session_key,
-        get_conversation_history=get_conversation_history,
-        pick_recent_user_text=pick_recent_user_text,
-        localtime=time.localtime,
-        monotonic=time.monotonic,
-        autonomy_last_cognitive_refresh_at=autonomy_last_cognitive_refresh_at,
-        autonomy_cognitive_refresh_tasks=autonomy_cognitive_refresh_tasks,
-        read_cached_cognitive_state=read_cached_cognitive_state,
-        read_vision_watch_state=read_vision_watch_state,
-        local_tts_snapshot=local_tts_playback_manager.snapshot,
-        serialize_local_mic_runtime_state=lambda: serialize_local_mic_runtime_state(),
-        get_active_session_count=lambda: len(session_state_store.active_until),
-        get_inflight_llm_requests=inflight_llm_requests_counter.get,
-        last_autonomy_ping_at=last_autonomy_ping_at,
-        answer_promises_search=answer_promises_search,
-        append_history=append_history,
-        schedule_memory_update=lambda *args, **kwargs: schedule_memory_update(*args, **kwargs),
-        mark_session_active=mark_session_active,
-        build_topic_id=build_topic_id,
-        mark_self_state_assistant_output=mark_self_state_assistant_output,
+        get_command_only_channel_ids=discord_settings.get_guild_command_only_channel_ids, session_followup_targets=session_state_store.followup_targets,
+        clean_text=clean_text, send_discord_text=send_discord_text,
+        question_cooldown_hit=question_cooldown_hit, evaluate_proactive_question_gate=evaluate_proactive_question_gate,
+        proactive_question_scope_candidates=proactive_question_scope_candidates, select_question_to_ask=select_question_to_ask,
+        runtime_session_key=runtime_session_key, get_conversation_history=get_conversation_history,
+        pick_recent_user_text=pick_recent_user_text, localtime=time.localtime,
+        monotonic=time.monotonic, autonomy_last_cognitive_refresh_at=autonomy_last_cognitive_refresh_at,
+        autonomy_cognitive_refresh_tasks=autonomy_cognitive_refresh_tasks, read_cached_cognitive_state=read_cached_cognitive_state,
+        read_vision_watch_state=read_vision_watch_state, local_tts_snapshot=local_tts_playback_manager.snapshot,
+        serialize_local_mic_runtime_state=lambda: serialize_local_mic_runtime_state(), get_active_session_count=lambda: len(session_state_store.active_until),
+        get_inflight_llm_requests=inflight_llm_requests_counter.get, last_autonomy_ping_at=last_autonomy_ping_at,
+        answer_promises_search=answer_promises_search, append_history=append_history,
+        schedule_memory_update=lambda *args, **kwargs: schedule_memory_update(*args, **kwargs), mark_session_active=mark_session_active,
+        build_topic_id=build_topic_id, mark_self_state_assistant_output=mark_self_state_assistant_output,
         select_and_mark_proactive_question=select_and_mark_proactive_question,
-        update_cognitive_state=lambda *args, **kwargs: update_cognitive_state(*args, **kwargs),
-        autonomy_cognitive_stale_sec=AUTONOMY_COGNITIVE_STALE_SEC,
-        autonomy_cognitive_min_interval_sec=AUTONOMY_COGNITIVE_MIN_INTERVAL_SEC,
-        autonomy_cognitive_force_refresh_sec=AUTONOMY_COGNITIVE_FORCE_REFRESH_SEC,
-        vision_watch_interval_sec=VISION_WATCH_INTERVAL_SEC,
-        active_conversation_text_question_sec=ACTIVE_CONVERSATION_TEXT_QUESTION_SEC,
-        active_conversation_text_sec=ACTIVE_CONVERSATION_TEXT_SEC,
-        autonomy_poll_interval_sec=AUTONOMY_POLL_INTERVAL_SEC,
+        update_cognitive_state=lambda *args, **kwargs: update_cognitive_state(*args, **kwargs), autonomy_cognitive_stale_sec=AUTONOMY_COGNITIVE_STALE_SEC,
+        autonomy_cognitive_min_interval_sec=AUTONOMY_COGNITIVE_MIN_INTERVAL_SEC, autonomy_cognitive_force_refresh_sec=AUTONOMY_COGNITIVE_FORCE_REFRESH_SEC,
+        vision_watch_interval_sec=VISION_WATCH_INTERVAL_SEC, active_conversation_text_question_sec=ACTIVE_CONVERSATION_TEXT_QUESTION_SEC,
+        active_conversation_text_sec=ACTIVE_CONVERSATION_TEXT_SEC, autonomy_poll_interval_sec=AUTONOMY_POLL_INTERVAL_SEC,
     )
 )
 
@@ -698,36 +630,21 @@ get_or_create_autonomy_engine = autonomy_runtime_composition.get_or_create_auton
 
 guild_runtime_reset_composition = GuildRuntimeResetComposition(
     GuildRuntimeResetCompositionDeps(
-        session_histories=session_state_store.histories,
-        session_followup_targets=session_state_store.followup_targets,
-        active_session_until=session_state_store.active_until,
-        active_session_user_ids=session_state_store.active_user_ids,
-        session_last_active_at=session_state_store.last_active_at,
-        session_awaiting_user_reply=session_state_store.awaiting_user_reply,
-        session_last_speaker=session_state_store.last_speaker,
-        session_topic_ids=session_state_store.topic_ids,
-        session_turn_ids=session_state_store.turn_ids,
-        session_segment_counters=session_state_store.segment_counters,
-        session_last_turn_accepted_at=session_state_store.last_turn_accepted_at,
-        session_last_stt_text=session_state_store.last_stt_text,
-        room_last_voice_utterance_for_merge=room_last_voice_utterance_for_merge,
-        session_partial_stt_text=session_state_store.partial_stt_text,
-        session_committed_stt_text=session_state_store.committed_stt_text,
-        session_bad_audio_counts=session_state_store.bad_audio_counts,
-        room_owner_user_ids=room_speaker_activity_store.room_owner_user_ids,
-        room_owner_until=room_speaker_activity_store.room_owner_until,
-        room_reply_in_progress=room_reply_in_progress,
-        room_last_voice_reply_at=room_last_voice_reply_at,
-        turn_scope_registry=turn_scope_registry,
-        session_locks=session_locks,
-        background_search_tasks=background_search_tasks,
-        clear_tts_playback_tracking=clear_tts_playback_tracking,
-        tts_playback_tracker=tts_playback_tracker,
-        memory_locks=memory_locks,
-        cognitive_locks=cognitive_locks,
-        background_cognitive_tasks=background_cognitive_tasks,
-        autonomy_last_cognitive_refresh_at=autonomy_last_cognitive_refresh_at,
-        autonomy_cognitive_refresh_tasks=autonomy_cognitive_refresh_tasks,
+        session_histories=session_state_store.histories, session_followup_targets=session_state_store.followup_targets,
+        active_session_until=session_state_store.active_until, active_session_user_ids=session_state_store.active_user_ids,
+        session_last_active_at=session_state_store.last_active_at, session_awaiting_user_reply=session_state_store.awaiting_user_reply,
+        session_last_speaker=session_state_store.last_speaker, session_topic_ids=session_state_store.topic_ids,
+        session_turn_ids=session_state_store.turn_ids, session_segment_counters=session_state_store.segment_counters,
+        session_last_turn_accepted_at=session_state_store.last_turn_accepted_at, session_last_stt_text=session_state_store.last_stt_text,
+        room_last_voice_utterance_for_merge=room_last_voice_utterance_for_merge, session_partial_stt_text=session_state_store.partial_stt_text,
+        session_committed_stt_text=session_state_store.committed_stt_text, session_bad_audio_counts=session_state_store.bad_audio_counts,
+        room_owner_user_ids=room_speaker_activity_store.room_owner_user_ids, room_owner_until=room_speaker_activity_store.room_owner_until,
+        room_reply_in_progress=room_reply_in_progress, room_last_voice_reply_at=room_last_voice_reply_at,
+        turn_scope_registry=turn_scope_registry, session_locks=session_locks,
+        background_search_tasks=background_search_tasks, clear_tts_playback_tracking=clear_tts_playback_tracking,
+        tts_playback_tracker=tts_playback_tracker, memory_locks=memory_locks,
+        cognitive_locks=cognitive_locks, background_cognitive_tasks=background_cognitive_tasks,
+        autonomy_last_cognitive_refresh_at=autonomy_last_cognitive_refresh_at, autonomy_cognitive_refresh_tasks=autonomy_cognitive_refresh_tasks,
     )
 )
 
@@ -737,81 +654,57 @@ build_guild_runtime_reset_deps = (
 reset_guild_runtime_state = guild_runtime_reset_composition.reset_guild_runtime_state
 
 voice_barge_in_continuity_tracker = VoiceBargeInContinuityTracker(
-    target_count=VOICE_BARGE_IN_CONTINUITY_TARGET,
-    clean_text=clean_text,
-    log_enabled=lambda: VOICE_BOTTLENECK_LOGS,
-    event_logger=log_turn_event,
+    target_count=VOICE_BARGE_IN_CONTINUITY_TARGET, clean_text=clean_text,
+    log_enabled=lambda: VOICE_BOTTLENECK_LOGS, event_logger=log_turn_event,
 )
 
 voice_turn_dependency_composition = VoiceTurnDependencyComposition(
     VoiceTurnDependencyCompositionDeps(
-        barge_in_tracker=voice_barge_in_continuity_tracker,
-        command_status=command_status,
-        session_speculative_policies=session_speculative_policies,
-        append_history=append_history,
+        barge_in_tracker=voice_barge_in_continuity_tracker, command_status=command_status,
+        session_speculative_policies=session_speculative_policies, append_history=append_history,
         compute_runtime_mode=lambda *args, **kwargs: compute_runtime_mode(*args, **kwargs),
         record_context_pipeline_benchmark=record_context_pipeline_benchmark,
-        schedule_memory_update=lambda *args, **kwargs: schedule_memory_update(*args, **kwargs),
-        read_cached_cognitive_state=read_cached_cognitive_state,
+        schedule_memory_update=lambda *args, **kwargs: schedule_memory_update(*args, **kwargs), read_cached_cognitive_state=read_cached_cognitive_state,
         apply_ask_gating=apply_ask_gating,
         schedule_search_followup=lambda *args, **kwargs: schedule_search_followup(
             *args, **kwargs
         ),
-        session_state_snapshot=session_state_snapshot,
-        mark_session_active=mark_session_active,
-        set_room_owner=set_room_owner,
-        active_conversation_voice_question_sec=ACTIVE_CONVERSATION_VOICE_QUESTION_SEC,
-        active_conversation_voice_sec=ACTIVE_CONVERSATION_VOICE_SEC,
-        active_conversation_awaiting_reply_sec=ACTIVE_CONVERSATION_AWAITING_REPLY_SEC,
-        room_state_snapshot=room_state_snapshot,
-        is_room_owner_active=is_room_owner_active,
-        is_session_active_for_user=is_session_active_for_user,
-        tts_input_suppression_reason=tts_playback_manager.input_suppression_reason,
-        room_last_voice_reply_at=room_last_voice_reply_at,
-        post_tts_ignore_sec=POST_TTS_IGNORE_SEC,
-        reply_cooldown_sec=REPLY_COOLDOWN_SEC,
-        normalize_voice_text=normalize_voice_text,
-        contains_wake_word=contains_wake_word,
-        looks_like_brief_filler_text=looks_like_brief_filler_text,
-        looks_like_repetitive_noise_text=looks_like_repetitive_noise_text,
-        is_similar=is_similar,
-        min_text_len=MIN_TEXT_LEN,
-        voice_ingress_queue=voice_ingress_queue,
-        voice_utterance_buffers=voice_utterance_buffers,
-        voice_utterance_flush_tasks=voice_utterance_flush_tasks,
-        voice_utterance_assembly_config=voice_utterance_assembly_config,
-        voice_ingress_max_age_sec=VOICE_INGRESS_MAX_AGE_SEC,
-        voice_ingress_drop_oldest_on_full=VOICE_INGRESS_DROP_OLDEST_ON_FULL,
-        voice_ingress_queue_max=VOICE_INGRESS_QUEUE_MAX,
-        evaluate_voice_ingress_dequeue=evaluate_voice_ingress_dequeue,
-        apply_voice_ingress_dequeue_debug_meta=apply_voice_ingress_dequeue_debug_meta,
+        session_state_snapshot=session_state_snapshot, mark_session_active=mark_session_active,
+        set_room_owner=set_room_owner, active_conversation_voice_question_sec=ACTIVE_CONVERSATION_VOICE_QUESTION_SEC,
+        active_conversation_voice_sec=ACTIVE_CONVERSATION_VOICE_SEC, active_conversation_awaiting_reply_sec=ACTIVE_CONVERSATION_AWAITING_REPLY_SEC,
+        room_state_snapshot=room_state_snapshot, is_room_owner_active=is_room_owner_active,
+        is_session_active_for_user=is_session_active_for_user, tts_input_suppression_reason=tts_playback_manager.input_suppression_reason,
+        room_last_voice_reply_at=room_last_voice_reply_at, post_tts_ignore_sec=POST_TTS_IGNORE_SEC,
+        reply_cooldown_sec=REPLY_COOLDOWN_SEC, normalize_voice_text=normalize_voice_text,
+        contains_wake_word=contains_wake_word, looks_like_brief_filler_text=looks_like_brief_filler_text,
+        looks_like_repetitive_noise_text=looks_like_repetitive_noise_text, is_similar=is_similar,
+        min_text_len=MIN_TEXT_LEN, voice_ingress_queue=voice_ingress_queue,
+        voice_utterance_buffers=voice_utterance_buffers, voice_utterance_flush_tasks=voice_utterance_flush_tasks,
+        voice_utterance_assembly_config=voice_utterance_assembly_config, voice_ingress_max_age_sec=VOICE_INGRESS_MAX_AGE_SEC,
+        voice_ingress_drop_oldest_on_full=VOICE_INGRESS_DROP_OLDEST_ON_FULL, voice_ingress_queue_max=VOICE_INGRESS_QUEUE_MAX,
+        evaluate_voice_ingress_dequeue=evaluate_voice_ingress_dequeue, apply_voice_ingress_dequeue_debug_meta=apply_voice_ingress_dequeue_debug_meta,
         enqueue_voice_ingress_item=enqueue_voice_ingress_item,
         increment_voice_pipeline_counter=lambda *args, **kwargs: increment_voice_pipeline_counter(
             *args, **kwargs
         ),
-        process_member_audio=lambda *args, **kwargs: _process_member_audio_impl(*args, **kwargs),
-        create_task=asyncio.create_task,
+        process_member_audio=lambda *args, **kwargs: _process_member_audio_impl(*args, **kwargs), create_task=asyncio.create_task,
         ensure_startup_components_ready=lambda *args, **kwargs: ensure_startup_components_ready(
             *args, **kwargs
         ),
-        normalize_voice_debug_meta=normalize_voice_debug_meta,
-        voice_ingress_source=voice_ingress_source,
+        normalize_voice_debug_meta=normalize_voice_debug_meta, voice_ingress_source=voice_ingress_source,
         should_drop_discord_audio_for_local_mic=lambda *args, **kwargs: should_drop_discord_audio_for_local_mic(
             *args, **kwargs
         ),
         ensure_voice_worker_started=lambda *args, **kwargs: ensure_voice_worker_started(
             *args, **kwargs
         ),
-        build_voice_ingress_context=build_voice_ingress_context,
-        next_segment_id=next_segment_id,
-        new_turn_id=new_turn_id,
-        build_voice_ingress_item=build_voice_ingress_item,
+        build_voice_ingress_context=build_voice_ingress_context, next_segment_id=next_segment_id,
+        new_turn_id=new_turn_id, build_voice_ingress_item=build_voice_ingress_item,
         voice_ingress_queue_depth=voice_ingress_queue.qsize,
         schedule_voice_utterance_item=lambda *args, **kwargs: _schedule_voice_utterance_item(
             *args, **kwargs
         ),
-        monotonic=time.monotonic,
-        log=print,
+        monotonic=time.monotonic, log=print,
     )
 )
 
@@ -832,8 +725,7 @@ build_voice_ingress_entrypoint_deps = (
 )
 
 compute_runtime_mode = RuntimeModeResolver(
-    tts_backlog_get=lambda: tracked_tts_playback_count(tts_playback_tracker),
-    inflight_llm_requests_get=inflight_llm_requests_counter.get,
+    tts_backlog_get=lambda: tracked_tts_playback_count(tts_playback_tracker), inflight_llm_requests_get=inflight_llm_requests_counter.get,
 )
 apply_runtime_mode = apply_runtime_mode_policy
 estimate_voice_like_probability = partial(
@@ -843,8 +735,7 @@ estimate_voice_like_probability = partial(
 
 fast_path_policy_composition = FastPathPolicyComposition(
     FastPathPolicyCompositionDeps(
-        clean_text=clean_text,
-        normalize_voice_text=normalize_voice_text,
+        clean_text=clean_text, normalize_voice_text=normalize_voice_text,
         should_force_search_query=should_force_search_query,
     )
 )
@@ -901,27 +792,19 @@ remember_speculative_policy = partial(
 get_matching_speculative_policy = partial(
     get_matching_speculative_policy_from_runtime,
     session_speculative_policies,
-    clean_text=clean_text,
-    is_similar=is_similar,
+    clean_text=clean_text, is_similar=is_similar,
     monotonic=time.monotonic,
 )
 
 llm_cognitive_dependency_composition = LlmCognitiveDependencyComposition(
     LlmCognitiveDependencyCompositionDeps(
-        read_cached_cognitive_state=read_cached_cognitive_state,
-        apply_ask_gating=apply_ask_gating,
-        clean_text=clean_text,
-        summary_model_name=SUMMARY_MODEL_NAME,
-        summary_llm_url=SUMMARY_LLM_URL,
-        router_model_name=ROUTER_MODEL_NAME,
-        router_llm_url=ROUTER_LLM_URL,
-        get_http_session=lambda *args, **kwargs: get_http_session(*args, **kwargs),
-        client_timeout_factory=aiohttp.ClientTimeout,
-        monotonic=time.monotonic,
-        extract_json_object=extract_json_object_from_runtime,
-        record_model_call_trace=record_model_call_trace,
-        classify_llm_route_fallback=classify_llm_route_fallback,
-        fast_path_policy=lambda *args, **kwargs: fast_path_policy(*args, **kwargs),
+        read_cached_cognitive_state=read_cached_cognitive_state, apply_ask_gating=apply_ask_gating,
+        clean_text=clean_text, summary_model_name=SUMMARY_MODEL_NAME,
+        summary_llm_url=SUMMARY_LLM_URL, router_model_name=ROUTER_MODEL_NAME,
+        router_llm_url=ROUTER_LLM_URL, get_http_session=lambda *args, **kwargs: get_http_session(*args, **kwargs),
+        client_timeout_factory=aiohttp.ClientTimeout, monotonic=time.monotonic,
+        extract_json_object=extract_json_object_from_runtime, record_model_call_trace=record_model_call_trace,
+        classify_llm_route_fallback=classify_llm_route_fallback, fast_path_policy=lambda *args, **kwargs: fast_path_policy(*args, **kwargs),
         session_state_snapshot=session_state_snapshot,
         load_working_summary=lambda guild_id: compact_working_summary(
             read_text_file(memory_summary_path(guild_id))
@@ -929,39 +812,24 @@ llm_cognitive_dependency_composition = LlmCognitiveDependencyComposition(
         load_cognitive_state=lambda guild_id: normalize_cognitive_state(
             read_json_file(cognitive_state_path(guild_id))
         ),
-        normalize_cognitive_state=normalize_cognitive_state,
-        load_recent_raw=lambda guild_id: read_jsonl(memory_raw_path(guild_id)),
-        load_recent_facts=read_fact_rows,
-        format_memory_rows_for_llm=format_memory_rows_for_llm,
-        compact_memory_text=compact_memory_text,
-        ask_router_llm=lambda *args, **kwargs: ask_router_llm(*args, **kwargs),
-        current_turn_id=current_turn_id,
-        normalize_question_policy_mapping=normalize_question_policy_mapping,
-        router_route_timeout_sec=ROUTER_ROUTE_TIMEOUT_SEC,
-        cognitive_timeout_sec=COGNITIVE_TIMEOUT_SEC,
-        router_llm_enabled=ROUTER_LLM_ENABLED,
-        router_route_max_tokens=ROUTER_ROUTE_MAX_TOKENS,
-        attach_current_task=_attach_current_task,
-        detach_task=_detach_task,
-        cognitive_locks=cognitive_locks,
-        collect_memory_layers=collect_memory_layers,
-        layered_summary_text=layered_summary_text,
-        read_layered_cognitive_state=read_layered_cognitive_state,
-        get_matching_speculative_policy=get_matching_speculative_policy,
-        build_fast_cognitive_state=build_fast_cognitive_state,
-        write_json_file=write_json_file,
-        cognitive_state_path=cognitive_state_path,
-        recent_memory_groups=recent_memory_groups,
-        memory_cognitive_raw_limit=MEMORY_COGNITIVE_RAW_LIMIT,
-        build_cognitive_state_messages=build_cognitive_state_messages,
-        cognitive_max_tokens=COGNITIVE_MAX_TOKENS,
-        is_context_size_error=is_context_size_error,
-        build_compact_cognitive_state_messages=build_compact_cognitive_state_messages,
+        normalize_cognitive_state=normalize_cognitive_state, load_recent_raw=lambda guild_id: read_jsonl(memory_raw_path(guild_id)),
+        load_recent_facts=read_fact_rows, format_memory_rows_for_llm=format_memory_rows_for_llm,
+        compact_memory_text=compact_memory_text, ask_router_llm=lambda *args, **kwargs: ask_router_llm(*args, **kwargs),
+        current_turn_id=current_turn_id, normalize_question_policy_mapping=normalize_question_policy_mapping,
+        router_route_timeout_sec=ROUTER_ROUTE_TIMEOUT_SEC, cognitive_timeout_sec=COGNITIVE_TIMEOUT_SEC,
+        router_llm_enabled=ROUTER_LLM_ENABLED, router_route_max_tokens=ROUTER_ROUTE_MAX_TOKENS,
+        attach_current_task=_attach_current_task, detach_task=_detach_task,
+        cognitive_locks=cognitive_locks, collect_memory_layers=collect_memory_layers,
+        layered_summary_text=layered_summary_text, read_layered_cognitive_state=read_layered_cognitive_state,
+        get_matching_speculative_policy=get_matching_speculative_policy, build_fast_cognitive_state=build_fast_cognitive_state,
+        write_json_file=write_json_file, cognitive_state_path=cognitive_state_path,
+        recent_memory_groups=recent_memory_groups, memory_cognitive_raw_limit=MEMORY_COGNITIVE_RAW_LIMIT,
+        build_cognitive_state_messages=build_cognitive_state_messages, cognitive_max_tokens=COGNITIVE_MAX_TOKENS,
+        is_context_size_error=is_context_size_error, build_compact_cognitive_state_messages=build_compact_cognitive_state_messages,
         should_log_voice_timing=lambda *args, **kwargs: should_log_voice_timing(
             *args, **kwargs
         ),
-        build_cognitive_fallback_state=build_cognitive_fallback_state,
-        finalize_cognitive_state=finalize_cognitive_state,
+        build_cognitive_fallback_state=build_cognitive_fallback_state, finalize_cognitive_state=finalize_cognitive_state,
         log=print,
     )
 )
@@ -989,30 +857,18 @@ should_force_search_followup = partial(
 
 response_context_composition = ResponseContextComposition(
     ResponseContextCompositionDeps(
-        runtime_status_enabled=RUNTIME_STATUS_CONTEXT_ENABLED,
-        runtime_status_refresh_sec=RUNTIME_STATUS_CONTEXT_REFRESH_SEC,
-        control_page_host=CONTROL_PAGE_HOST,
-        control_page_port=CONTROL_PAGE_PORT,
-        llm_server_url=LLM_SERVER_URL,
-        router_llm_url=ROUTER_LLM_URL,
-        summary_llm_url=SUMMARY_LLM_URL,
-        omnivoice_server_url=OMNIVOICE_SERVER_URL,
-        minecraft_autonomy_service_port=MINECRAFT_AUTONOMY_SERVICE_PORT,
-        voyager_action_backend=VOYAGER_ACTION_BACKEND,
-        voyager_codex_gateway_port=VOYAGER_CODEX_GATEWAY_PORT,
-        get_control_page_runtime_services=lambda: get_control_page_runtime_services(),
-        is_control_api_ready_from_runtime_services=is_control_api_ready_from_runtime_services,
-        probe_runtime_tcp_service=probe_runtime_tcp_service,
-        load_runtime_gpu_status=load_runtime_gpu_status,
-        load_runtime_recent_errors=load_runtime_recent_errors,
-        now=time.time,
-        clean_text=clean_text,
-        apply_ask_gating=apply_ask_gating,
-        persona_state_hint_for_turn=persona_state_hint_for_turn,
-        recent_assistant_reply_summary=recent_assistant_reply_summary,
-        build_tool_awareness_context=build_tool_awareness_context,
-        skill_registry=skill_registry,
-        format_minecraft_state_summary=format_minecraft_state_summary,
+        runtime_status_enabled=RUNTIME_STATUS_CONTEXT_ENABLED, runtime_status_refresh_sec=RUNTIME_STATUS_CONTEXT_REFRESH_SEC,
+        control_page_host=CONTROL_PAGE_HOST, control_page_port=CONTROL_PAGE_PORT,
+        llm_server_url=LLM_SERVER_URL, router_llm_url=ROUTER_LLM_URL,
+        summary_llm_url=SUMMARY_LLM_URL, omnivoice_server_url=OMNIVOICE_SERVER_URL,
+        minecraft_autonomy_service_port=MINECRAFT_AUTONOMY_SERVICE_PORT, voyager_action_backend=VOYAGER_ACTION_BACKEND,
+        voyager_codex_gateway_port=VOYAGER_CODEX_GATEWAY_PORT, get_control_page_runtime_services=lambda: get_control_page_runtime_services(),
+        is_control_api_ready_from_runtime_services=is_control_api_ready_from_runtime_services, probe_runtime_tcp_service=probe_runtime_tcp_service,
+        load_runtime_gpu_status=load_runtime_gpu_status, load_runtime_recent_errors=load_runtime_recent_errors,
+        now=time.time, clean_text=clean_text,
+        apply_ask_gating=apply_ask_gating, persona_state_hint_for_turn=persona_state_hint_for_turn,
+        recent_assistant_reply_summary=recent_assistant_reply_summary, build_tool_awareness_context=build_tool_awareness_context,
+        skill_registry=skill_registry, format_minecraft_state_summary=format_minecraft_state_summary,
         question_feature_enabled=QUESTION_FEATURE_ENABLED,
     )
 )
@@ -1027,18 +883,12 @@ build_main_response_guidance_runtime_deps = (
 
 vision_request_composition = VisionRequestComposition(
     VisionRequestCompositionDeps(
-        screenshot_dir=VISION_SCREENSHOT_DIR,
-        capture_all_screens=VISION_CAPTURE_ALL_SCREENS,
-        delete_request_images=VISION_DELETE_REQUEST_IMAGES,
-        auto_capture_enabled=VISION_AUTO_CAPTURE_ENABLED,
-        analyze_timeout_sec=VISION_ANALYZE_TIMEOUT_SEC,
-        service_url=VISION_SERVICE_URL,
-        build_vision_quality=build_vision_quality,
-        vision_watch_scene_is_unreliable=vision_watch_scene_is_unreliable,
-        get_http_session=lambda: get_http_session(),
-        client_timeout_factory=aiohttp.ClientTimeout,
-        clean_text=clean_text,
-        to_thread=asyncio.to_thread,
+        screenshot_dir=VISION_SCREENSHOT_DIR, capture_all_screens=VISION_CAPTURE_ALL_SCREENS,
+        delete_request_images=VISION_DELETE_REQUEST_IMAGES, auto_capture_enabled=VISION_AUTO_CAPTURE_ENABLED,
+        analyze_timeout_sec=VISION_ANALYZE_TIMEOUT_SEC, service_url=VISION_SERVICE_URL,
+        build_vision_quality=build_vision_quality, vision_watch_scene_is_unreliable=vision_watch_scene_is_unreliable,
+        get_http_session=lambda: get_http_session(), client_timeout_factory=aiohttp.ClientTimeout,
+        clean_text=clean_text, to_thread=asyncio.to_thread,
         monotonic=time.monotonic,
     )
 )
@@ -1059,28 +909,17 @@ vision_watch_scene_looks_bad = vision_request_composition.vision_watch_scene_loo
 
 vision_watch_composition = VisionWatchComposition(
     VisionWatchCompositionDeps(
-        enabled=VISION_WATCH_ENABLED,
-        interval_sec=VISION_WATCH_INTERVAL_SEC,
-        thumbnail_size=VISION_WATCH_THUMBNAIL_SIZE,
-        max_image_dim=VISION_WATCH_MAX_IMAGE_DIM,
-        diff_threshold=VISION_WATCH_DIFF_THRESHOLD,
-        capture_all_screens=VISION_CAPTURE_ALL_SCREENS,
-        analyze_cooldown_sec=VISION_WATCH_ANALYZE_COOLDOWN_SEC,
-        run_ocr=VISION_WATCH_RUN_OCR,
-        ocr_interval_sec=VISION_WATCH_OCR_INTERVAL_SEC,
-        analyze_timeout_sec=VISION_ANALYZE_TIMEOUT_SEC,
-        vision_service_url=VISION_SERVICE_URL,
-        capture_frame=capture_vision_watch_frame,
-        scene_looks_bad=vision_watch_scene_looks_bad,
-        build_prompt=build_vision_watch_prompt,
-        get_http_session=lambda: get_http_session(),
-        client_timeout_factory=aiohttp.ClientTimeout,
-        update_analysis=update_vision_watch_analysis,
-        mark_startup_component=lambda *args, **kwargs: mark_startup_component(*args, **kwargs),
-        to_thread=asyncio.to_thread,
-        sleep=asyncio.sleep,
-        create_task=asyncio.create_task,
-        now=time.time,
+        enabled=VISION_WATCH_ENABLED, interval_sec=VISION_WATCH_INTERVAL_SEC,
+        thumbnail_size=VISION_WATCH_THUMBNAIL_SIZE, max_image_dim=VISION_WATCH_MAX_IMAGE_DIM,
+        diff_threshold=VISION_WATCH_DIFF_THRESHOLD, capture_all_screens=VISION_CAPTURE_ALL_SCREENS,
+        analyze_cooldown_sec=VISION_WATCH_ANALYZE_COOLDOWN_SEC, run_ocr=VISION_WATCH_RUN_OCR,
+        ocr_interval_sec=VISION_WATCH_OCR_INTERVAL_SEC, analyze_timeout_sec=VISION_ANALYZE_TIMEOUT_SEC,
+        vision_service_url=VISION_SERVICE_URL, capture_frame=capture_vision_watch_frame,
+        scene_looks_bad=vision_watch_scene_looks_bad, build_prompt=build_vision_watch_prompt,
+        get_http_session=lambda: get_http_session(), client_timeout_factory=aiohttp.ClientTimeout,
+        update_analysis=update_vision_watch_analysis, mark_startup_component=lambda *args, **kwargs: mark_startup_component(*args, **kwargs),
+        to_thread=asyncio.to_thread, sleep=asyncio.sleep,
+        create_task=asyncio.create_task, now=time.time,
         log=print,
     )
 )
@@ -1092,14 +931,10 @@ stop_vision_watch_task = vision_watch_composition.stop_vision_watch_task
 
 llm_context_assembly_composition = LlmContextAssemblyComposition(
     LlmContextAssemblyCompositionDeps(
-        compute_runtime_mode=compute_runtime_mode,
-        apply_runtime_mode=apply_runtime_mode,
-        classify_llm_route_async=lambda *args, **kwargs: classify_llm_route_async(*args, **kwargs),
-        session_topic_ids=session_state_store.topic_ids,
-        get_conversation_history=get_conversation_history,
-        read_cached_cognitive_state=read_cached_cognitive_state,
-        get_matching_speculative_policy=get_matching_speculative_policy,
-        fast_path_policy=lambda *args, **kwargs: fast_path_policy(*args, **kwargs),
+        compute_runtime_mode=compute_runtime_mode, apply_runtime_mode=apply_runtime_mode,
+        classify_llm_route_async=lambda *args, **kwargs: classify_llm_route_async(*args, **kwargs), session_topic_ids=session_state_store.topic_ids,
+        get_conversation_history=get_conversation_history, read_cached_cognitive_state=read_cached_cognitive_state,
+        get_matching_speculative_policy=get_matching_speculative_policy, fast_path_policy=lambda *args, **kwargs: fast_path_policy(*args, **kwargs),
         session_state_snapshot=session_state_snapshot,
         context_policy_for_fast_path_policy=lambda *args, **kwargs: context_policy_for_fast_path_policy(
             *args, **kwargs
@@ -1107,28 +942,18 @@ llm_context_assembly_composition = LlmContextAssemblyComposition(
         extract_question_policy_from_route_meta=extract_question_policy_from_route_meta,
         update_cognitive_state=lambda *args, **kwargs: update_cognitive_state(*args, **kwargs),
         schedule_cognitive_refresh=lambda *args, **kwargs: schedule_cognitive_refresh(*args, **kwargs),
-        build_runtime_status_context=build_runtime_status_context,
-        project_root=PROJECT_ROOT,
+        build_runtime_status_context=build_runtime_status_context, project_root=PROJECT_ROOT,
         observe_live_minecraft_state=lambda *args, **kwargs: observe_live_minecraft_state(*args, **kwargs),
         control_page_minecraft_cache_refresh_sec=CONTROL_PAGE_MINECRAFT_CACHE_REFRESH_SEC,
-        control_page_minecraft_cache_max_stale_sec=CONTROL_PAGE_MINECRAFT_CACHE_MAX_STALE_SEC,
-        local_tts_snapshot=local_tts_playback_manager.snapshot,
-        local_mic_snapshot=lambda: serialize_local_mic_runtime_state(),
-        local_only_mode=LOCAL_ONLY_MODE,
-        discord_enabled=DISCORD_ENABLED,
-        model_name=MODEL_NAME,
-        llm_server_url=LLM_SERVER_URL,
-        router_model_name=ROUTER_MODEL_NAME,
-        summary_model_name=SUMMARY_MODEL_NAME,
-        stt_model_name=STT_MODEL_NAME,
-        stt_backend=STT_BACKEND,
-        omnivoice_server_url=OMNIVOICE_SERVER_URL,
-        omnivoice_voice=OMNIVOICE_VOICE,
-        omnivoice_speed=OMNIVOICE_SPEED,
-        voice_input_mode_status_line=lambda: voice_input_mode_status_line(),
-        odyssey_capability_json_dir=ODYSSEY_CAPABILITY_JSON_DIR,
-        build_live_vision_context=build_live_vision_context,
-        log_turn_event=log_turn_event,
+        control_page_minecraft_cache_max_stale_sec=CONTROL_PAGE_MINECRAFT_CACHE_MAX_STALE_SEC, local_tts_snapshot=local_tts_playback_manager.snapshot,
+        local_mic_snapshot=lambda: serialize_local_mic_runtime_state(), local_only_mode=LOCAL_ONLY_MODE,
+        discord_enabled=DISCORD_ENABLED, model_name=MODEL_NAME,
+        llm_server_url=LLM_SERVER_URL, router_model_name=ROUTER_MODEL_NAME,
+        summary_model_name=SUMMARY_MODEL_NAME, stt_model_name=STT_MODEL_NAME,
+        stt_backend=STT_BACKEND, omnivoice_server_url=OMNIVOICE_SERVER_URL,
+        omnivoice_voice=OMNIVOICE_VOICE, omnivoice_speed=OMNIVOICE_SPEED,
+        voice_input_mode_status_line=lambda: voice_input_mode_status_line(), odyssey_capability_json_dir=ODYSSEY_CAPABILITY_JSON_DIR,
+        build_live_vision_context=build_live_vision_context, log_turn_event=log_turn_event,
         log=print,
     )
 )
@@ -1137,14 +962,10 @@ build_llm_context_assembly_deps = llm_context_assembly_composition.build_runtime
 
 cognitive_refresh_composition = CognitiveRefreshComposition(
     CognitiveRefreshCompositionDeps(
-        state=build_cognitive_state_runtime_deps,
-        background_tasks=background_cognitive_tasks,
-        runtime_session_key=runtime_session_key,
-        create_scoped_task=create_turn_scoped_task,
-        current_turn_id=current_turn_id,
-        monotonic=time.monotonic,
-        current_task=asyncio.current_task,
-        log_turn_event=log_turn_event,
+        state=build_cognitive_state_runtime_deps, background_tasks=background_cognitive_tasks,
+        runtime_session_key=runtime_session_key, create_scoped_task=create_turn_scoped_task,
+        current_turn_id=current_turn_id, monotonic=time.monotonic,
+        current_task=asyncio.current_task, log_turn_event=log_turn_event,
         log=print,
     )
 )
@@ -1162,71 +983,44 @@ redact_vision_text_for_memory = partial(
 
 search_memory_dependency_composition = SearchMemoryDependencyComposition(
     SearchMemoryDependencyCompositionDeps(
-        write_memory_turn_records=write_memory_turn_records,
-        vision_memory_write_enabled=VISION_MEMORY_WRITE_ENABLED,
-        record_self_identity_turn=record_self_identity_turn,
-        append_raw_transcript_rows=append_raw_transcript_rows,
+        write_memory_turn_records=write_memory_turn_records, vision_memory_write_enabled=VISION_MEMORY_WRITE_ENABLED,
+        record_self_identity_turn=record_self_identity_turn, append_raw_transcript_rows=append_raw_transcript_rows,
         append_turn_rows_to_memory_vault=append_turn_rows_to_memory_vault,
         schedule_memory_vault_maintenance=lambda *args, **kwargs: schedule_memory_vault_maintenance(
             *args, **kwargs
         ),
-        memory_refresh_inputs_for_turn=memory_refresh_inputs_for_turn,
-        get_conversation_history=get_conversation_history,
+        memory_refresh_inputs_for_turn=memory_refresh_inputs_for_turn, get_conversation_history=get_conversation_history,
         session_last_active_at=session_state_store.last_active_at,
         needs_search_or_deep_routing=lambda *args, **kwargs: needs_search_or_deep_routing(
             *args, **kwargs
         ),
-        build_memory_writer_decision_for_turn=build_memory_writer_decision_for_turn,
-        build_memory_writer_decision=build_memory_writer_decision,
-        build_memory_writer_decision_payload=build_memory_writer_decision_payload,
-        plan_memory_writebehind_schedule=plan_memory_writebehind_schedule,
-        runtime_session_key=runtime_session_key,
-        memory_writebehind_task_key=memory_writebehind_task_key,
-        should_replace_existing_memory_task=should_replace_existing_memory_task,
-        mark_memory_writer_status=mark_memory_writer_status,
-        memory_writebehind_status_log=MEMORY_WRITEBEHIND_STATUS_LOG,
-        background_memory_tasks=background_memory_tasks,
-        create_turn_scoped_task=create_turn_scoped_task,
-        run_memory_writebehind_steps=run_memory_writebehind_steps,
-        update_long_term_memory=lambda *args, **kwargs: update_long_term_memory(*args, **kwargs),
-        update_cognitive_state=update_cognitive_state,
-        model_name=MODEL_NAME,
-        llm_server_url=LLM_SERVER_URL,
-        chat_content_format=MAIN_LLM_CHAT_CONTENT_FORMAT,
-        stop_tokens=MAIN_LLM_STOP_TOKENS,
-        get_http_session=lambda *args, **kwargs: get_http_session(*args, **kwargs),
-        build_chat_messages=build_chat_messages,
-        client_timeout_factory=aiohttp.ClientTimeout,
-        clean_text=clean_text,
-        sanitize_model_output=lambda *args, **kwargs: sanitize_model_output(*args, **kwargs),
-        strip_search_answer_sources=strip_search_answer_sources,
-        bot=bot,
-        discord_object_factory=discord.Object,
-        session_followup_targets=session_state_store.followup_targets,
-        background_search_tasks=background_search_tasks,
-        inflight_search_tasks=inflight_search_tasks,
-        apply_runtime_mode=apply_runtime_mode,
-        parse_response_action_tag=parse_response_action_tag,
-        answer_promises_search=answer_promises_search,
-        build_search_query=lambda *args, **kwargs: build_search_query(*args, **kwargs),
-        remember_session_followup_target=remember_session_followup_target,
-        memory_summary_path=memory_summary_path,
-        read_text_file=read_text_file,
-        compact_working_summary=compact_working_summary,
-        search_duckduckgo=lambda *args, **kwargs: search_duckduckgo(*args, **kwargs),
+        build_memory_writer_decision_for_turn=build_memory_writer_decision_for_turn, build_memory_writer_decision=build_memory_writer_decision,
+        build_memory_writer_decision_payload=build_memory_writer_decision_payload, plan_memory_writebehind_schedule=plan_memory_writebehind_schedule,
+        runtime_session_key=runtime_session_key, memory_writebehind_task_key=memory_writebehind_task_key,
+        should_replace_existing_memory_task=should_replace_existing_memory_task, mark_memory_writer_status=mark_memory_writer_status,
+        memory_writebehind_status_log=MEMORY_WRITEBEHIND_STATUS_LOG, background_memory_tasks=background_memory_tasks,
+        create_turn_scoped_task=create_turn_scoped_task, run_memory_writebehind_steps=run_memory_writebehind_steps,
+        update_long_term_memory=lambda *args, **kwargs: update_long_term_memory(*args, **kwargs), update_cognitive_state=update_cognitive_state,
+        model_name=MODEL_NAME, llm_server_url=LLM_SERVER_URL,
+        chat_content_format=MAIN_LLM_CHAT_CONTENT_FORMAT, stop_tokens=MAIN_LLM_STOP_TOKENS,
+        get_http_session=lambda *args, **kwargs: get_http_session(*args, **kwargs), build_chat_messages=build_chat_messages,
+        client_timeout_factory=aiohttp.ClientTimeout, clean_text=clean_text,
+        sanitize_model_output=lambda *args, **kwargs: sanitize_model_output(*args, **kwargs), strip_search_answer_sources=strip_search_answer_sources,
+        bot=bot, discord_object_factory=discord.Object,
+        session_followup_targets=session_state_store.followup_targets, background_search_tasks=background_search_tasks,
+        inflight_search_tasks=inflight_search_tasks, apply_runtime_mode=apply_runtime_mode,
+        parse_response_action_tag=parse_response_action_tag, answer_promises_search=answer_promises_search,
+        build_search_query=lambda *args, **kwargs: build_search_query(*args, **kwargs), remember_session_followup_target=remember_session_followup_target,
+        memory_summary_path=memory_summary_path, read_text_file=read_text_file,
+        compact_working_summary=compact_working_summary, search_duckduckgo=lambda *args, **kwargs: search_duckduckgo(*args, **kwargs),
         answer_from_search_results=lambda *args, **kwargs: answer_from_search_results(
             *args, **kwargs
         ),
-        resolve_open_question_rows=resolve_open_question_rows,
-        write_json_file=write_json_file,
-        cognitive_state_path=cognitive_state_path,
-        send_discord_text=send_discord_text,
-        format_display_text=format_display_text,
-        speak_answer=lambda *args, **kwargs: speak_answer(*args, **kwargs),
-        current_turn_id=current_turn_id,
-        append_history=append_history,
-        schedule_memory_update=lambda *args, **kwargs: schedule_memory_update(*args, **kwargs),
-        attach_current_task=_attach_current_task,
+        resolve_open_question_rows=resolve_open_question_rows, write_json_file=write_json_file,
+        cognitive_state_path=cognitive_state_path, send_discord_text=send_discord_text,
+        format_display_text=format_display_text, speak_answer=lambda *args, **kwargs: speak_answer(*args, **kwargs),
+        current_turn_id=current_turn_id, append_history=append_history,
+        schedule_memory_update=lambda *args, **kwargs: schedule_memory_update(*args, **kwargs), attach_current_task=_attach_current_task,
         detach_task=_detach_task,
         record_search_followup_queued=lambda *args, **kwargs: record_search_followup_queued(
             *args, **kwargs
@@ -1247,28 +1041,17 @@ build_search_followup_runtime_deps = (
 
 memory_maintenance_composition = MemoryMaintenanceComposition(
     MemoryMaintenanceCompositionDeps(
-        memory_update=build_memory_update_runtime_deps,
-        memory_locks=memory_locks,
-        background_vault_tasks=background_memory_vault_tasks,
-        vault_last_maintenance_at=memory_vault_last_maintenance_at,
-        attach_current_task=_attach_current_task,
-        detach_task=_detach_task,
-        run_long_term_memory_update=run_long_term_memory_update,
-        collect_memory_layers=collect_memory_layers,
-        ask_summary_llm=lambda *args, **kwargs: ask_summary_llm(*args, **kwargs),
-        is_context_size_error=is_context_size_error,
-        should_log_voice_timing=lambda *args, **kwargs: should_log_voice_timing(*args, **kwargs),
-        memory_fact_limit=MEMORY_FACT_LIMIT,
-        memory_loop_limit=MEMORY_LOOP_LIMIT,
-        raw_limit=MEMORY_LONGTERM_RAW_LIMIT,
-        run_vault_maintenance_once=run_memory_vault_maintenance_once,
-        create_scoped_task=create_turn_scoped_task,
-        lock_factory=asyncio.Lock,
-        sleep=asyncio.sleep,
-        to_thread=asyncio.to_thread,
-        current_task=asyncio.current_task,
-        monotonic=time.monotonic,
-        getenv=os.getenv,
+        memory_update=build_memory_update_runtime_deps, memory_locks=memory_locks,
+        background_vault_tasks=background_memory_vault_tasks, vault_last_maintenance_at=memory_vault_last_maintenance_at,
+        attach_current_task=_attach_current_task, detach_task=_detach_task,
+        run_long_term_memory_update=run_long_term_memory_update, collect_memory_layers=collect_memory_layers,
+        ask_summary_llm=lambda *args, **kwargs: ask_summary_llm(*args, **kwargs), is_context_size_error=is_context_size_error,
+        should_log_voice_timing=lambda *args, **kwargs: should_log_voice_timing(*args, **kwargs), memory_fact_limit=MEMORY_FACT_LIMIT,
+        memory_loop_limit=MEMORY_LOOP_LIMIT, raw_limit=MEMORY_LONGTERM_RAW_LIMIT,
+        run_vault_maintenance_once=run_memory_vault_maintenance_once, create_scoped_task=create_turn_scoped_task,
+        lock_factory=asyncio.Lock, sleep=asyncio.sleep,
+        to_thread=asyncio.to_thread, current_task=asyncio.current_task,
+        monotonic=time.monotonic, getenv=os.getenv,
         log=print,
     )
 )
@@ -1285,69 +1068,44 @@ runtime_lifecycle_composition = RuntimeLifecycleComposition(
     RuntimeLifecycleCompositionDeps(
         startup=RuntimeStartupCompositionDeps(
             opus=lambda: OpusStartupRuntimeDeps(
-                opus_is_loaded=discord_opus.is_loaded,
-                load_default_opus=discord_opus._load_default,
-                mark_startup_component=mark_startup_component,
-                log=print,
+                opus_is_loaded=discord_opus.is_loaded, load_default_opus=discord_opus._load_default,
+                mark_startup_component=mark_startup_component, log=print,
             ),
             stt_warmup=lambda: SttWarmupRuntimeDeps(
-                mark_startup_component=mark_startup_component,
-                zeros=lambda size: np.zeros(size, dtype=np.float32),
-                transcribe_audio16k_sync=transcribe_audio16k_sync,
-                target_rate=TARGET_RATE,
-                wake_max_tokens=WAKE_MAX_TOKENS,
-                log=print,
+                mark_startup_component=mark_startup_component, zeros=lambda size: np.zeros(size, dtype=np.float32),
+                transcribe_audio16k_sync=transcribe_audio16k_sync, target_rate=TARGET_RATE,
+                wake_max_tokens=WAKE_MAX_TOKENS, log=print,
             ),
             llm_warmup=lambda: LlmWarmupRuntimeDeps(
-                get_http_session=get_http_session,
-                client_timeout=aiohttp.ClientTimeout,
-                mark_startup_component=mark_startup_component,
-                llm_server_url=LLM_SERVER_URL,
-                model_name=MODEL_NAME,
-                main_llm_chat_content_format=MAIN_LLM_CHAT_CONTENT_FORMAT,
-                voice_llm_max_tokens=VOICE_LLM_MAX_TOKENS,
-                main_llm_stop_tokens=MAIN_LLM_STOP_TOKENS,
-                build_chat_messages=build_chat_messages,
-                decode_sse_stream_line=decode_sse_stream_line,
+                get_http_session=get_http_session, client_timeout=aiohttp.ClientTimeout,
+                mark_startup_component=mark_startup_component, llm_server_url=LLM_SERVER_URL,
+                model_name=MODEL_NAME, main_llm_chat_content_format=MAIN_LLM_CHAT_CONTENT_FORMAT,
+                voice_llm_max_tokens=VOICE_LLM_MAX_TOKENS, main_llm_stop_tokens=MAIN_LLM_STOP_TOKENS,
+                build_chat_messages=build_chat_messages, decode_sse_stream_line=decode_sse_stream_line,
                 log=print,
             ),
-            bot_user=lambda: bot.user,
-            change_presence=bot.change_presence,
-            game_factory=discord.Game,
-            to_thread=asyncio.to_thread,
-            create_task=asyncio.create_task,
-            stt_service_url=STT_SERVICE_URL,
-            get_stt_model=lambda: get_stt_model(),
-            warmup_stt_sync=lambda: warmup_stt_sync(),
-            warmup_llm=lambda: warmup_llm(),
-            warmup_tts_server=lambda: warmup_tts_server(),
-            monotonic=time.monotonic,
-            log=print,
+            bot_user=lambda: bot.user, change_presence=bot.change_presence,
+            game_factory=discord.Game, to_thread=asyncio.to_thread,
+            create_task=asyncio.create_task, stt_service_url=STT_SERVICE_URL,
+            get_stt_model=lambda: get_stt_model(), warmup_stt_sync=lambda: warmup_stt_sync(),
+            warmup_llm=lambda: warmup_llm(), warmup_tts_server=lambda: warmup_tts_server(),
+            monotonic=time.monotonic, log=print,
         ),
         process=RuntimeProcessCompositionDeps(
-            project_root=PROJECT_ROOT,
-            local_only_mode=LOCAL_ONLY_MODE,
-            discord_enabled=DISCORD_ENABLED,
-            control_page_port=CONTROL_PAGE_PORT,
-            fallback_target=PROJECT_ROOT / "evelyn_core" / "start.bat",
-            sleep=asyncio.sleep,
-            stop_control_page_background_tasks=lambda: stop_control_page_background_tasks(),
-            stop_vision_watch_task=lambda: stop_vision_watch_task(),
-            stop_local_mic_service=lambda: stop_local_mic_service(),
-            launch_runtime_restart_sequence=launch_runtime_restart_sequence,
-            exit_process=os._exit,
-            schedule_stack_shutdown=runtime_schedule_evelyn_stack_shutdown,
-            schedule_local_shutdown=runtime_schedule_evelyn_local_shutdown,
-            bot_guilds=lambda: list(bot.guilds),
+            project_root=PROJECT_ROOT, local_only_mode=LOCAL_ONLY_MODE,
+            discord_enabled=DISCORD_ENABLED, control_page_port=CONTROL_PAGE_PORT,
+            fallback_target=PROJECT_ROOT / "evelyn_core" / "start.bat", sleep=asyncio.sleep,
+            stop_control_page_background_tasks=lambda: stop_control_page_background_tasks(), stop_vision_watch_task=lambda: stop_vision_watch_task(),
+            stop_local_mic_service=lambda: stop_local_mic_service(), launch_runtime_restart_sequence=launch_runtime_restart_sequence,
+            exit_process=os._exit, schedule_stack_shutdown=runtime_schedule_evelyn_stack_shutdown,
+            schedule_local_shutdown=runtime_schedule_evelyn_local_shutdown, bot_guilds=lambda: list(bot.guilds),
             mark_startup_component=lambda *args, **kwargs: mark_startup_component(*args, **kwargs),
-            start_control_page_server=lambda: start_control_page_server(),
-            ensure_local_mic_service_started=lambda: ensure_local_mic_service_started(),
+            start_control_page_server=lambda: start_control_page_server(), ensure_local_mic_service_started=lambda: ensure_local_mic_service_started(),
             ensure_vision_watch_started=lambda: ensure_vision_watch_started(),
             ensure_control_page_background_tasks_started=(
                 lambda: ensure_control_page_background_tasks_started()
             ),
-            control_page_local_url=lambda: control_page_local_url(),
-            wait_forever=lambda: asyncio.Event().wait(),
+            control_page_local_url=lambda: control_page_local_url(), wait_forever=lambda: asyncio.Event().wait(),
             log=print,
         ),
     )
@@ -1369,8 +1127,7 @@ shutdown_bot_process = runtime_lifecycle_composition.shutdown_bot_process
 run_local_only_mode = runtime_lifecycle_composition.run_local_only_mode
 
 evelyn_page_url_runtime_deps = build_evelyn_page_url_runtime_deps(
-    project_root=PROJECT_ROOT,
-    configured_page_url=EVELYN_PAGE_URL,
+    project_root=PROJECT_ROOT, configured_page_url=EVELYN_PAGE_URL,
     run_git_config=subprocess.run,
 )
 resolve_evelyn_page_url = partial(
@@ -1381,78 +1138,44 @@ resolve_evelyn_page_url = partial(
 voice_runtime_composition = VoiceRuntimeComposition(
     VoiceRuntimeCompositionDeps(
         pipeline=VoicePipelineCompositionDeps(
-            project_root=PROJECT_ROOT,
-            last_channel_state_file=VOICE_LAST_CHANNEL_STATE_FILE,
-            summarize_p95_metrics=summarize_p95_metrics,
-            merge_log_event_payload=merge_log_event_payload,
-            log_turn_event=log_turn_event,
-            local_only_mode=LOCAL_ONLY_MODE,
-            local_tts_enabled=lambda: local_tts_playback_manager.enabled,
-            local_tts_snapshot=local_tts_playback_manager.snapshot,
-            voice_ingress_queue_depth=voice_ingress_queue.qsize,
-            voice_ingress_queue_max=VOICE_INGRESS_QUEUE_MAX,
-            live_recent_sec=VOICE_LIVE_RECENT_SEC,
-            utterance_assembly_enabled=lambda: voice_utterance_assembly_config.enabled,
-            utterance_pending_count=lambda: len(voice_utterance_buffers),
-            utterance_commit_wait_sec=lambda: voice_utterance_assembly_config.commit_wait_sec,
-            barge_in_continuity=lambda: _build_voice_barge_in_continuity_snapshot(),
-            summarize_turn_path_metrics=summarize_turn_path_metrics,
-            stt_cooldown_after_timeout_sec=STT_COOLDOWN_AFTER_TIMEOUT_SEC,
-            monotonic=time.monotonic,
-            time=time.time,
-            log=print,
+            project_root=PROJECT_ROOT, last_channel_state_file=VOICE_LAST_CHANNEL_STATE_FILE,
+            summarize_p95_metrics=summarize_p95_metrics, merge_log_event_payload=merge_log_event_payload,
+            log_turn_event=log_turn_event, local_only_mode=LOCAL_ONLY_MODE,
+            local_tts_enabled=lambda: local_tts_playback_manager.enabled, local_tts_snapshot=local_tts_playback_manager.snapshot,
+            voice_ingress_queue_depth=voice_ingress_queue.qsize, voice_ingress_queue_max=VOICE_INGRESS_QUEUE_MAX,
+            live_recent_sec=VOICE_LIVE_RECENT_SEC, utterance_assembly_enabled=lambda: voice_utterance_assembly_config.enabled,
+            utterance_pending_count=lambda: len(voice_utterance_buffers), utterance_commit_wait_sec=lambda: voice_utterance_assembly_config.commit_wait_sec,
+            barge_in_continuity=lambda: _build_voice_barge_in_continuity_snapshot(), summarize_turn_path_metrics=summarize_turn_path_metrics,
+            stt_cooldown_after_timeout_sec=STT_COOLDOWN_AFTER_TIMEOUT_SEC, monotonic=time.monotonic,
+            time=time.time, log=print,
         ),
         debug=VoiceDebugCompositionDeps(
-            project_root=PROJECT_ROOT,
-            configured_dir=VOICE_DEBUG_AUDIO_DIR,
-            max_files_per_guild=VOICE_DEBUG_MAX_FILES_PER_GUILD,
-            max_age_days=VOICE_DEBUG_MAX_AGE_DAYS,
-            max_total_bytes_per_guild=VOICE_DEBUG_MAX_TOTAL_MB_PER_GUILD * 1024 * 1024,
-            preserve_newest=VOICE_DEBUG_PRESERVE_NEWEST,
-            raw_channels=CHANNELS,
-            raw_rate=RATE,
-            stt_rate=TARGET_RATE,
-            enabled=VOICE_DEBUG_SAVE_AUDIO,
-            queue_max=DEBUG_WRITE_QUEUE_MAX,
-            create_task=asyncio.create_task,
-            to_thread=asyncio.to_thread,
-            log=print,
+            project_root=PROJECT_ROOT, configured_dir=VOICE_DEBUG_AUDIO_DIR,
+            max_files_per_guild=VOICE_DEBUG_MAX_FILES_PER_GUILD, max_age_days=VOICE_DEBUG_MAX_AGE_DAYS,
+            max_total_bytes_per_guild=VOICE_DEBUG_MAX_TOTAL_MB_PER_GUILD * 1024 * 1024, preserve_newest=VOICE_DEBUG_PRESERVE_NEWEST,
+            raw_channels=CHANNELS, raw_rate=RATE,
+            stt_rate=TARGET_RATE, enabled=VOICE_DEBUG_SAVE_AUDIO,
+            queue_max=DEBUG_WRITE_QUEUE_MAX, create_task=asyncio.create_task,
+            to_thread=asyncio.to_thread, log=print,
         ),
         local_mic=LocalMicCompositionDeps(
-            enabled=LOCAL_MIC_ENABLED,
-            input_mode=VOICE_INPUT_MODE,
-            discord_user_ids=lambda: set(LOCAL_MIC_DISCORD_USER_IDS),
-            local_control_guild_id=LOCAL_CONTROL_GUILD_ID,
-            local_control_guild_name=LOCAL_CONTROL_GUILD_NAME,
-            local_mic_user_name=os.getenv("LOCAL_MIC_USER_NAME", "정훈"),
-            normalize_voice_input_mode=normalize_voice_input_mode,
-            resolve_local_mic_target=resolve_local_mic_target,
-            should_route_discord_user_to_local_mic=should_route_discord_user_to_local_mic,
-            guilds=lambda: list(bot.guilds),
-            process_member_audio=lambda: process_member_audio,
-            local_only_mode=LOCAL_ONLY_MODE,
-            service_factory=LocalMicCaptureService,
-            get_running_loop=asyncio.get_running_loop,
-            create_task=asyncio.create_task,
-            local_tts_playback_snapshot=local_tts_playback_manager.snapshot,
-            tts_active_max_silence_ms=LOCAL_MIC_TTS_ACTIVE_MAX_SILENCE_MS,
-            max_silence_ms=LOCAL_MIC_MAX_SILENCE_MS,
-            discord_suppress_after_segment_sec=LOCAL_MIC_DISCORD_SUPPRESS_AFTER_SEGMENT_SEC,
-            sample_rate=LOCAL_MIC_SAMPLE_RATE,
-            block_ms=LOCAL_MIC_BLOCK_MS,
-            start_threshold=LOCAL_MIC_START_THRESHOLD,
-            continue_threshold=LOCAL_MIC_CONTINUE_THRESHOLD,
-            start_consecutive=LOCAL_MIC_START_CONSECUTIVE,
-            min_voiced_ms=LOCAL_MIC_MIN_VOICED_MS,
-            preroll_ms=LOCAL_MIC_PREROLL_MS,
-            max_segment_sec=LOCAL_MIC_MAX_SEGMENT_SEC,
-            device=LOCAL_MIC_DEVICE,
-            queue_max=LOCAL_MIC_QUEUE_MAX,
-            vad_filter_enabled=LOCAL_MIC_VAD_FILTER_ENABLED,
-            env_noise_filter_enabled=LOCAL_MIC_ENV_NOISE_FILTER_ENABLED,
-            waveform_filter_enabled=LOCAL_MIC_WAVEFORM_FILTER_ENABLED,
-            time=time.time,
-            log=print,
+            enabled=LOCAL_MIC_ENABLED, input_mode=VOICE_INPUT_MODE,
+            discord_user_ids=lambda: set(LOCAL_MIC_DISCORD_USER_IDS), local_control_guild_id=LOCAL_CONTROL_GUILD_ID,
+            local_control_guild_name=LOCAL_CONTROL_GUILD_NAME, local_mic_user_name=os.getenv("LOCAL_MIC_USER_NAME", "정훈"),
+            normalize_voice_input_mode=normalize_voice_input_mode, resolve_local_mic_target=resolve_local_mic_target,
+            should_route_discord_user_to_local_mic=should_route_discord_user_to_local_mic, guilds=lambda: list(bot.guilds),
+            process_member_audio=lambda: process_member_audio, local_only_mode=LOCAL_ONLY_MODE,
+            service_factory=LocalMicCaptureService, get_running_loop=asyncio.get_running_loop,
+            create_task=asyncio.create_task, local_tts_playback_snapshot=local_tts_playback_manager.snapshot,
+            tts_active_max_silence_ms=LOCAL_MIC_TTS_ACTIVE_MAX_SILENCE_MS, max_silence_ms=LOCAL_MIC_MAX_SILENCE_MS,
+            discord_suppress_after_segment_sec=LOCAL_MIC_DISCORD_SUPPRESS_AFTER_SEGMENT_SEC, sample_rate=LOCAL_MIC_SAMPLE_RATE,
+            block_ms=LOCAL_MIC_BLOCK_MS, start_threshold=LOCAL_MIC_START_THRESHOLD,
+            continue_threshold=LOCAL_MIC_CONTINUE_THRESHOLD, start_consecutive=LOCAL_MIC_START_CONSECUTIVE,
+            min_voiced_ms=LOCAL_MIC_MIN_VOICED_MS, preroll_ms=LOCAL_MIC_PREROLL_MS,
+            max_segment_sec=LOCAL_MIC_MAX_SEGMENT_SEC, device=LOCAL_MIC_DEVICE,
+            queue_max=LOCAL_MIC_QUEUE_MAX, vad_filter_enabled=LOCAL_MIC_VAD_FILTER_ENABLED,
+            env_noise_filter_enabled=LOCAL_MIC_ENV_NOISE_FILTER_ENABLED, waveform_filter_enabled=LOCAL_MIC_WAVEFORM_FILTER_ENABLED,
+            time=time.time, log=print,
         ),
     )
 )
@@ -1474,8 +1197,7 @@ debug_write_worker = voice_runtime_composition.debug_write_worker
 ensure_debug_write_worker_started = voice_runtime_composition.ensure_debug_write_worker_started
 save_voice_debug_audio = voice_runtime_composition.save_voice_debug_audio
 voice_worker_starter = AsyncWorkerStarter(
-    before_start=ensure_debug_write_worker_started,
-    worker=lambda: voice_ingress_worker(),
+    before_start=ensure_debug_write_worker_started, worker=lambda: voice_ingress_worker(),
     create_task=asyncio.create_task,
 )
 ensure_voice_worker_started = voice_worker_starter.ensure_started
@@ -1501,40 +1223,26 @@ atexit.register(stop_local_mic_service)
 
 voice_audio_support_dependency_composition = VoiceAudioSupportDependencyComposition(
     VoiceAudioSupportDependencyCompositionDeps(
-        get_http_session=get_http_session,
-        client_timeout_factory=aiohttp.ClientTimeout,
+        get_http_session=get_http_session, client_timeout_factory=aiohttp.ClientTimeout,
         mark_startup_component=lambda *args, **kwargs: mark_startup_component(
             *args, **kwargs
         ),
         startup_component_done=lambda *args, **kwargs: startup_component_done(
             *args, **kwargs
         ),
-        omnivoice_server_url=OMNIVOICE_SERVER_URL,
-        omnivoice_model=OMNIVOICE_MODEL,
-        omnivoice_voice=OMNIVOICE_VOICE,
-        omnivoice_language=OMNIVOICE_LANGUAGE,
-        getenv=os.getenv,
-        monotonic=time.monotonic,
-        voice_timing_log_threshold_ms=VOICE_TIMING_LOG_THRESHOLD_MS,
-        voice_bottleneck_logs=VOICE_BOTTLENECK_LOGS,
-        record_turn_stage=record_turn_stage,
-        record_turn_path_summary=record_turn_path_summary,
-        summarize_p95_metrics=summarize_p95_metrics,
-        build_turn_summary_payload=build_turn_summary_payload,
-        log_turn_event=log_turn_event,
-        request_id_suffix=lambda: uuid.uuid4().hex[:10],
-        tts_synth_request_factory=TtsSynthRequest,
-        tts_synth_result_factory=TtsSynthResult,
-        omnivoice_pcm_rate=OMNIVOICE_PCM_RATE,
-        omnivoice_stream=OMNIVOICE_STREAM,
-        omnivoice_num_step=OMNIVOICE_NUM_STEP,
-        omnivoice_speed=OMNIVOICE_SPEED,
-        clean_tts_text=clean_tts_text,
-        merge_log_event_payload=merge_log_event_payload,
-        source_factory=OmniVoicePCMStream,
-        omnivoice_timeout_sec=OMNIVOICE_TIMEOUT_SEC,
-        record_voice_pipeline_failure=record_voice_pipeline_failure,
-        create_turn_scoped_task=create_turn_scoped_task,
+        omnivoice_server_url=OMNIVOICE_SERVER_URL, omnivoice_model=OMNIVOICE_MODEL,
+        omnivoice_voice=OMNIVOICE_VOICE, omnivoice_language=OMNIVOICE_LANGUAGE,
+        getenv=os.getenv, monotonic=time.monotonic,
+        voice_timing_log_threshold_ms=VOICE_TIMING_LOG_THRESHOLD_MS, voice_bottleneck_logs=VOICE_BOTTLENECK_LOGS,
+        record_turn_stage=record_turn_stage, record_turn_path_summary=record_turn_path_summary,
+        summarize_p95_metrics=summarize_p95_metrics, build_turn_summary_payload=build_turn_summary_payload,
+        log_turn_event=log_turn_event, request_id_suffix=lambda: uuid.uuid4().hex[:10],
+        tts_synth_request_factory=TtsSynthRequest, tts_synth_result_factory=TtsSynthResult,
+        omnivoice_pcm_rate=OMNIVOICE_PCM_RATE, omnivoice_stream=OMNIVOICE_STREAM,
+        omnivoice_num_step=OMNIVOICE_NUM_STEP, omnivoice_speed=OMNIVOICE_SPEED,
+        clean_tts_text=clean_tts_text, merge_log_event_payload=merge_log_event_payload,
+        source_factory=OmniVoicePCMStream, omnivoice_timeout_sec=OMNIVOICE_TIMEOUT_SEC,
+        record_voice_pipeline_failure=record_voice_pipeline_failure, create_turn_scoped_task=create_turn_scoped_task,
         log=print,
     )
 )
@@ -1556,47 +1264,29 @@ build_omnivoice_source_runtime_deps = (
 # STT
 # =========================================================
 stt_model_runtime_deps = build_stt_model_runtime_deps_from_runtime(
-    stt_compute_type=STT_COMPUTE_TYPE,
-    stt_model_name=STT_MODEL_NAME,
-    stt_language=STT_LANGUAGE,
-    stt_force_language=STT_FORCE_LANGUAGE,
-    stt_max_new_tokens=max(VOICE_STT_MAX_NEW_TOKENS, 256),
-    get_env_token=lambda: os.getenv("HF_TOKEN"),
-    torch_device=lambda: "cuda:0" if torch.cuda.is_available() else "cpu",
-    log=print,
+    stt_compute_type=STT_COMPUTE_TYPE, stt_model_name=STT_MODEL_NAME,
+    stt_language=STT_LANGUAGE, stt_force_language=STT_FORCE_LANGUAGE,
+    stt_max_new_tokens=max(VOICE_STT_MAX_NEW_TOKENS, 256), get_env_token=lambda: os.getenv("HF_TOKEN"),
+    torch_device=lambda: "cuda:0" if torch.cuda.is_available() else "cpu", log=print,
 )
 get_stt_model = partial(get_stt_model_from_runtime, deps=stt_model_runtime_deps)
 
 voice_input_support_dependency_composition = VoiceInputSupportDependencyComposition(
     VoiceInputSupportDependencyCompositionDeps(
-        clean_text=clean_text,
-        normalize_voice_text=normalize_voice_text,
-        contains_wake_word=contains_wake_word,
-        looks_like_brief_filler_text=looks_like_brief_filler_text,
-        looks_like_repetitive_noise_text=looks_like_repetitive_noise_text,
-        is_similar=is_similar,
-        session_partial_stt_text=session_state_store.partial_stt_text,
-        session_committed_stt_text=session_state_store.committed_stt_text,
-        partial_stt_cache=partial_stt_cache,
-        stt_service_url=STT_SERVICE_URL,
-        stt_service_timeout_sec=STT_SERVICE_TIMEOUT_SEC,
-        stt_service_fallback_local=STT_SERVICE_FALLBACK_LOCAL,
-        stt_language=STT_LANGUAGE,
-        stt_force_language=STT_FORCE_LANGUAGE,
-        target_rate=TARGET_RATE,
-        normalize_stt_language=normalize_stt_language_from_runtime,
-        transcribe_via_service=transcribe_audio16k_via_service,
-        get_stt_model=get_stt_model,
-        as_float32_array=lambda audio: np.asarray(audio, dtype=np.float32),
-        resample_audio_float=resample_audio_float,
-        voice_client_type=EvelynVoiceClient,
-        voice_connect_locks=voice_connect_locks,
-        voice_connect_timeout=VOICE_CONNECT_TIMEOUT,
-        voice_connect_retries=VOICE_CONNECT_RETRIES,
-        voice_connect_retry_delay_sec=VOICE_CONNECT_RETRY_DELAY_SEC,
-        process_member_audio=lambda *args, **kwargs: process_member_audio(*args, **kwargs),
-        sleep=asyncio.sleep,
-        log=print,
+        clean_text=clean_text, normalize_voice_text=normalize_voice_text,
+        contains_wake_word=contains_wake_word, looks_like_brief_filler_text=looks_like_brief_filler_text,
+        looks_like_repetitive_noise_text=looks_like_repetitive_noise_text, is_similar=is_similar,
+        session_partial_stt_text=session_state_store.partial_stt_text, session_committed_stt_text=session_state_store.committed_stt_text,
+        partial_stt_cache=partial_stt_cache, stt_service_url=STT_SERVICE_URL,
+        stt_service_timeout_sec=STT_SERVICE_TIMEOUT_SEC, stt_service_fallback_local=STT_SERVICE_FALLBACK_LOCAL,
+        stt_language=STT_LANGUAGE, stt_force_language=STT_FORCE_LANGUAGE,
+        target_rate=TARGET_RATE, normalize_stt_language=normalize_stt_language_from_runtime,
+        transcribe_via_service=transcribe_audio16k_via_service, get_stt_model=get_stt_model,
+        as_float32_array=lambda audio: np.asarray(audio, dtype=np.float32), resample_audio_float=resample_audio_float,
+        voice_client_type=EvelynVoiceClient, voice_connect_locks=voice_connect_locks,
+        voice_connect_timeout=VOICE_CONNECT_TIMEOUT, voice_connect_retries=VOICE_CONNECT_RETRIES,
+        voice_connect_retry_delay_sec=VOICE_CONNECT_RETRY_DELAY_SEC, process_member_audio=lambda *args, **kwargs: process_member_audio(*args, **kwargs),
+        sleep=asyncio.sleep, log=print,
     )
 )
 
@@ -1612,40 +1302,23 @@ build_discord_voice_connection_runtime_deps = (
 
 voice_support_composition = VoiceSupportComposition(
     VoiceSupportCompositionDeps(
-        continuity=lambda: build_voice_barge_in_continuity_runtime_deps(),
-        stt_warmup=lambda: build_stt_warmup_runtime_deps(),
-        tts_warmup=lambda: build_tts_warmup_runtime_deps(),
-        timing=lambda: build_voice_timing_runtime_deps(),
-        omnivoice_source=lambda: build_omnivoice_source_runtime_deps(),
-        stt_transcription=lambda: build_stt_transcription_runtime_deps(),
-        stt_text=lambda: _build_stt_text_runtime_deps(),
-        voice_connection=lambda: build_discord_voice_connection_runtime_deps(),
-        set_tts_warmup_started=tts_warmup_started_state.set,
-        partial_stt_max_new_tokens=max(64, min(VOICE_STT_MAX_NEW_TOKENS, 128)),
-        clean_text=clean_text,
-        wake_audio_sec=WAKE_AUDIO_SEC,
-        wake_confirm_audio_sec=WAKE_CONFIRM_AUDIO_SEC,
-        wake_max_tokens=WAKE_MAX_TOKENS,
-        wake_confirm_max_tokens=WAKE_CONFIRM_MAX_TOKENS,
-        apply_stt_post_corrections=apply_stt_post_corrections,
-        strip_leading_voice_fillers=strip_leading_voice_fillers,
-        extract_leading_wake_alias=extract_leading_wake_alias,
-        fuzzy_leading_wake_alias=fuzzy_leading_wake_alias,
-        looks_like_gibberish_probe=looks_like_gibberish_probe,
-        slice_audio_window=slice_audio_window,
-        ensure_startup_components_ready=ensure_startup_components_ready,
-        voice_client_type=EvelynVoiceClient,
-        process_member_audio=lambda: process_member_audio,
-        warmup_voice_path=warmup_voice_path,
-        save_last_voice_channel_state=save_last_voice_channel_state,
-        load_last_voice_channel_state=load_last_voice_channel_state,
-        increment_voice_pipeline_counter=increment_voice_pipeline_counter,
-        voice_pipeline_state=voice_pipeline_state,
-        voice_rejoin_on_ready=VOICE_REJOIN_ON_READY,
-        get_guild=bot.get_guild,
-        voice_channel_type=discord.VoiceChannel,
-        now=time.time,
-        log=print,
+        continuity=lambda: build_voice_barge_in_continuity_runtime_deps(), stt_warmup=lambda: build_stt_warmup_runtime_deps(),
+        tts_warmup=lambda: build_tts_warmup_runtime_deps(), timing=lambda: build_voice_timing_runtime_deps(),
+        omnivoice_source=lambda: build_omnivoice_source_runtime_deps(), stt_transcription=lambda: build_stt_transcription_runtime_deps(),
+        stt_text=lambda: _build_stt_text_runtime_deps(), voice_connection=lambda: build_discord_voice_connection_runtime_deps(),
+        set_tts_warmup_started=tts_warmup_started_state.set, partial_stt_max_new_tokens=max(64, min(VOICE_STT_MAX_NEW_TOKENS, 128)),
+        clean_text=clean_text, wake_audio_sec=WAKE_AUDIO_SEC,
+        wake_confirm_audio_sec=WAKE_CONFIRM_AUDIO_SEC, wake_max_tokens=WAKE_MAX_TOKENS,
+        wake_confirm_max_tokens=WAKE_CONFIRM_MAX_TOKENS, apply_stt_post_corrections=apply_stt_post_corrections,
+        strip_leading_voice_fillers=strip_leading_voice_fillers, extract_leading_wake_alias=extract_leading_wake_alias,
+        fuzzy_leading_wake_alias=fuzzy_leading_wake_alias, looks_like_gibberish_probe=looks_like_gibberish_probe,
+        slice_audio_window=slice_audio_window, ensure_startup_components_ready=ensure_startup_components_ready,
+        voice_client_type=EvelynVoiceClient, process_member_audio=lambda: process_member_audio,
+        warmup_voice_path=warmup_voice_path, save_last_voice_channel_state=save_last_voice_channel_state,
+        load_last_voice_channel_state=load_last_voice_channel_state, increment_voice_pipeline_counter=increment_voice_pipeline_counter,
+        voice_pipeline_state=voice_pipeline_state, voice_rejoin_on_ready=VOICE_REJOIN_ON_READY,
+        get_guild=bot.get_guild, voice_channel_type=discord.VoiceChannel,
+        now=time.time, log=print,
     )
 )
 
@@ -1679,24 +1352,15 @@ restore_last_voice_channel = voice_support_composition.restore_last_voice_channe
 
 voice_tts_control_dependency_composition = VoiceTtsControlDependencyComposition(
     VoiceTtsControlDependencyCompositionDeps(
-        tts_playback_manager=tts_playback_manager,
-        local_tts_playback_manager=local_tts_playback_manager,
-        log_turn_event=log_turn_event,
-        speaker_verification_applies=speaker_verification_applies,
-        speaker_verification_result_factory=SpeakerVerificationResult,
-        speaker_verifier=speaker_verifier,
-        speaker_verification_apply_to=SPEAKER_VERIFICATION_APPLY_TO,
-        speaker_verification_threshold=SPEAKER_VERIFICATION_THRESHOLD,
-        to_thread=asyncio.to_thread,
-        resolve_cached_tts_audio_path=resolve_cached_tts_audio_path,
-        cached_audio_enabled=CACHED_AUDIO_ENABLED,
-        canned_wake_reply_text=CANNED_WAKE_REPLY_TEXT,
-        canned_wake_reply_audio=CANNED_WAKE_REPLY_AUDIO,
-        project_root=PROJECT_ROOT,
-        cached_wave_audio_source_factory=CachedWaveAudioSource,
-        tts_source_playback_request_factory=TtsSourcePlaybackRequest,
-        clean_text=clean_text,
-        log_voice_latency=log_voice_latency,
+        tts_playback_manager=tts_playback_manager, local_tts_playback_manager=local_tts_playback_manager,
+        log_turn_event=log_turn_event, speaker_verification_applies=speaker_verification_applies,
+        speaker_verification_result_factory=SpeakerVerificationResult, speaker_verifier=speaker_verifier,
+        speaker_verification_apply_to=SPEAKER_VERIFICATION_APPLY_TO, speaker_verification_threshold=SPEAKER_VERIFICATION_THRESHOLD,
+        to_thread=asyncio.to_thread, resolve_cached_tts_audio_path=resolve_cached_tts_audio_path,
+        cached_audio_enabled=CACHED_AUDIO_ENABLED, canned_wake_reply_text=CANNED_WAKE_REPLY_TEXT,
+        canned_wake_reply_audio=CANNED_WAKE_REPLY_AUDIO, project_root=PROJECT_ROOT,
+        cached_wave_audio_source_factory=CachedWaveAudioSource, tts_source_playback_request_factory=TtsSourcePlaybackRequest,
+        clean_text=clean_text, log_voice_latency=log_voice_latency,
         should_interrupt_tts=should_interrupt_tts,
         verify_speaker_for_tts_interrupt=lambda *args, **kwargs: verify_speaker_for_tts_interrupt(
             *args, **kwargs
@@ -1707,16 +1371,11 @@ voice_tts_control_dependency_composition = VoiceTtsControlDependencyComposition(
         stop_active_tts_playback=lambda *args, **kwargs: stop_active_tts_playback(
             *args, **kwargs
         ),
-        register_drop_reason=register_drop_reason,
-        log_voice_stage=log_voice_stage,
-        log_voice_bottleneck_summary=log_voice_bottleneck_summary,
-        start_voice_barge_in_continuity_probe=start_voice_barge_in_continuity_probe,
-        sleep=asyncio.sleep,
-        monotonic=time.monotonic,
-        local_only_mode=LOCAL_ONLY_MODE,
-        post_tts_ignore_sec=POST_TTS_IGNORE_SEC,
-        tts_interrupt_debounce_sec=TTS_INTERRUPT_DEBOUNCE_SEC,
-        voice_waveform_body_rms_min=VOICE_WAVEFORM_BODY_RMS_MIN,
+        register_drop_reason=register_drop_reason, log_voice_stage=log_voice_stage,
+        log_voice_bottleneck_summary=log_voice_bottleneck_summary, start_voice_barge_in_continuity_probe=start_voice_barge_in_continuity_probe,
+        sleep=asyncio.sleep, monotonic=time.monotonic,
+        local_only_mode=LOCAL_ONLY_MODE, post_tts_ignore_sec=POST_TTS_IGNORE_SEC,
+        tts_interrupt_debounce_sec=TTS_INTERRUPT_DEBOUNCE_SEC, voice_waveform_body_rms_min=VOICE_WAVEFORM_BODY_RMS_MIN,
     )
 )
 
@@ -1732,28 +1391,19 @@ build_voice_tts_interrupt_gate_deps = (
 
 discord_tts_dependency_composition = DiscordTtsDependencyComposition(
     DiscordTtsDependencyCompositionDeps(
-        is_local_speaker_voice_client=is_local_speaker_voice_client,
-        speak_answer_local=lambda *args, **kwargs: speak_answer_local(*args, **kwargs),
+        is_local_speaker_voice_client=is_local_speaker_voice_client, speak_answer_local=lambda *args, **kwargs: speak_answer_local(*args, **kwargs),
         tts_running_state=TurnState.TTS_RUNNING,
         play_cached_answer_audio=lambda *args, **kwargs: play_cached_answer_audio(
             *args, **kwargs
         ),
-        tts_lock=tts_lock,
-        create_omnivoice_source=create_omnivoice_source,
-        log_turn_event=log_turn_event,
-        log_voice_latency=log_voice_latency,
-        playback_manager=tts_playback_manager,
-        source_playback_request_factory=TtsSourcePlaybackRequest,
-        attach_current_task=_attach_current_task,
-        detach_task=_detach_task,
-        mark_turn_stage=mark_turn_stage,
-        record_voice_pipeline_failure=record_voice_pipeline_failure,
-        streaming_playback_request_factory=TtsStreamingPlaybackRequest,
-        omnivoice_timeout_sec=OMNIVOICE_TIMEOUT_SEC,
-        tts_prefetch_chunks=TTS_PREFETCH_CHUNKS,
-        playback_start_lookahead_chunks=TTS_PLAYBACK_START_LOOKAHEAD_CHUNKS,
-        playback_start_lookahead_timeout_ms=TTS_PLAYBACK_START_LOOKAHEAD_TIMEOUT_MS,
-        create_turn_scoped_task=create_turn_scoped_task,
+        tts_lock=tts_lock, create_omnivoice_source=create_omnivoice_source,
+        log_turn_event=log_turn_event, log_voice_latency=log_voice_latency,
+        playback_manager=tts_playback_manager, source_playback_request_factory=TtsSourcePlaybackRequest,
+        attach_current_task=_attach_current_task, detach_task=_detach_task,
+        mark_turn_stage=mark_turn_stage, record_voice_pipeline_failure=record_voice_pipeline_failure,
+        streaming_playback_request_factory=TtsStreamingPlaybackRequest, omnivoice_timeout_sec=OMNIVOICE_TIMEOUT_SEC,
+        tts_prefetch_chunks=TTS_PREFETCH_CHUNKS, playback_start_lookahead_chunks=TTS_PLAYBACK_START_LOOKAHEAD_CHUNKS,
+        playback_start_lookahead_timeout_ms=TTS_PLAYBACK_START_LOOKAHEAD_TIMEOUT_MS, create_turn_scoped_task=create_turn_scoped_task,
         log=print,
     )
 )
@@ -1767,26 +1417,18 @@ build_discord_tts_stream_runtime_deps = (
 
 local_tts_dependency_composition = LocalTtsDependencyComposition(
     LocalTtsDependencyCompositionDeps(
-        playback_manager=local_tts_playback_manager,
-        clean_tts_text=clean_tts_text,
-        strip_omnivoice_tags=strip_omnivoice_tags,
-        attach_current_task=_attach_current_task,
-        detach_task=_detach_task,
-        tts_running_state=TurnState.TTS_RUNNING,
-        tts_lock=tts_lock,
-        create_omnivoice_source=create_omnivoice_source,
-        mark_turn_stage=mark_turn_stage,
-        log_voice_latency=log_voice_latency,
+        playback_manager=local_tts_playback_manager, clean_tts_text=clean_tts_text,
+        strip_omnivoice_tags=strip_omnivoice_tags, attach_current_task=_attach_current_task,
+        detach_task=_detach_task, tts_running_state=TurnState.TTS_RUNNING,
+        tts_lock=tts_lock, create_omnivoice_source=create_omnivoice_source,
+        mark_turn_stage=mark_turn_stage, log_voice_latency=log_voice_latency,
         log_turn_event=log_turn_event,
         mark_local_tts_first_playback=lambda *args, **kwargs: _mark_local_tts_first_playback(
             *args, **kwargs
         ),
-        record_voice_pipeline_failure=record_voice_pipeline_failure,
-        omnivoice_timeout_sec=OMNIVOICE_TIMEOUT_SEC,
-        tts_prefetch_chunks=TTS_PREFETCH_CHUNKS,
-        create_turn_scoped_task=create_turn_scoped_task,
-        prefetch_tts_sources=prefetch_tts_sources,
-        cleanup_prepared_tts_item=cleanup_prepared_tts_item,
+        record_voice_pipeline_failure=record_voice_pipeline_failure, omnivoice_timeout_sec=OMNIVOICE_TIMEOUT_SEC,
+        tts_prefetch_chunks=TTS_PREFETCH_CHUNKS, create_turn_scoped_task=create_turn_scoped_task,
+        prefetch_tts_sources=prefetch_tts_sources, cleanup_prepared_tts_item=cleanup_prepared_tts_item,
     )
 )
 
@@ -1799,34 +1441,24 @@ build_local_tts_stream_runtime_deps = (
 
 delivery_entry_composition = DeliveryEntryComposition(
     LocalDeliveryEntryDeps(
-        queue_factory=lambda: asyncio.Queue(),
-        sink_factory=TTSQueueSink,
+        queue_factory=lambda: asyncio.Queue(), sink_factory=TTSQueueSink,
         stream_local_tts_sentences=(
             lambda *args, **kwargs: stream_local_tts_sentences(*args, **kwargs)
         ),
-        create_scoped_task=create_turn_scoped_task,
-        streaming_delivery_factory=StreamingVoiceDelivery,
-        log_voice_stage=log_voice_stage,
-        mark_turn_stage=mark_turn_stage,
+        create_scoped_task=create_turn_scoped_task, streaming_delivery_factory=StreamingVoiceDelivery,
+        log_voice_stage=log_voice_stage, mark_turn_stage=mark_turn_stage,
         log_voice_latency=log_voice_latency,
         local_control_tts=lambda: build_local_control_tts_runtime_deps(
-            local_only_mode=LOCAL_ONLY_MODE,
-            local_tts_enabled=lambda: bool(local_tts_playback_manager.enabled),
-            speak_answer_local=lambda *args, **kwargs: speak_answer_local(*args, **kwargs),
-            create_turn_scoped_task=create_turn_scoped_task,
-            log_voice_bottleneck_summary=log_voice_bottleneck_summary,
-            monotonic=time.monotonic,
+            local_only_mode=LOCAL_ONLY_MODE, local_tts_enabled=lambda: bool(local_tts_playback_manager.enabled),
+            speak_answer_local=lambda *args, **kwargs: speak_answer_local(*args, **kwargs), create_turn_scoped_task=create_turn_scoped_task,
+            log_voice_bottleneck_summary=log_voice_bottleneck_summary, monotonic=time.monotonic,
         ),
-        prefetch_chunks=TTS_PREFETCH_CHUNKS,
-        log=print,
+        prefetch_chunks=TTS_PREFETCH_CHUNKS, log=print,
     ),
     DiscordDeliveryEntryDeps(
-        request_factory=DiscordStreamingVoiceDeliveryRequest,
-        build_streaming_delivery=build_streaming_voice_delivery,
-        stream_tts_sentences=lambda *args, **kwargs: stream_tts_sentences(*args, **kwargs),
-        create_scoped_task=create_turn_scoped_task,
-        log_voice_stage=log_voice_stage,
-        prefetch_chunks=TTS_PREFETCH_CHUNKS,
+        request_factory=DiscordStreamingVoiceDeliveryRequest, build_streaming_delivery=build_streaming_voice_delivery,
+        stream_tts_sentences=lambda *args, **kwargs: stream_tts_sentences(*args, **kwargs), create_scoped_task=create_turn_scoped_task,
+        log_voice_stage=log_voice_stage, prefetch_chunks=TTS_PREFETCH_CHUNKS,
         log=print,
     ),
 )
@@ -1843,39 +1475,26 @@ start_streaming_voice_delivery = delivery_entry_composition.start_streaming_voic
 # =========================================================
 voice_response_dependency_composition = VoiceResponseDependencyComposition(
     VoiceResponseDependencyCompositionDeps(
-        model_name=MODEL_NAME,
-        llm_server_url=LLM_SERVER_URL,
-        main_llm_chat_content_format=MAIN_LLM_CHAT_CONTENT_FORMAT,
-        main_llm_stop_tokens=MAIN_LLM_STOP_TOKENS,
-        voice_llm_max_tokens=VOICE_LLM_MAX_TOKENS,
-        get_http_session=get_http_session,
-        build_chat_messages=build_chat_messages,
-        fallback_answer_for=fallback_answer_for,
-        split_tts_sentences=split_tts_sentences,
-        build_answer_payload_from_text=build_answer_payload_from_text,
-        log_voice_stage=log_voice_stage,
-        prepare_route_context=lambda *args, **kwargs: prepare_route_context(*args, **kwargs),
-        prepare_llm_messages=lambda *args, **kwargs: prepare_llm_messages(*args, **kwargs),
-        is_user_echo_answer=is_user_echo_answer,
+        model_name=MODEL_NAME, llm_server_url=LLM_SERVER_URL,
+        main_llm_chat_content_format=MAIN_LLM_CHAT_CONTENT_FORMAT, main_llm_stop_tokens=MAIN_LLM_STOP_TOKENS,
+        voice_llm_max_tokens=VOICE_LLM_MAX_TOKENS, get_http_session=get_http_session,
+        build_chat_messages=build_chat_messages, fallback_answer_for=fallback_answer_for,
+        split_tts_sentences=split_tts_sentences, build_answer_payload_from_text=build_answer_payload_from_text,
+        log_voice_stage=log_voice_stage, prepare_route_context=lambda *args, **kwargs: prepare_route_context(*args, **kwargs),
+        prepare_llm_messages=lambda *args, **kwargs: prepare_llm_messages(*args, **kwargs), is_user_echo_answer=is_user_echo_answer,
         is_casual_call_or_status_question=session_is_casual_call_or_status_question,
         observe_live_minecraft_state=lambda *args, **kwargs: observe_live_minecraft_state(
             *args, **kwargs
         ),
-        build_runtime_status_context=build_runtime_status_context,
-        build_main_response_guidance=build_main_response_guidance,
-        sanitize_model_output=lambda *args, **kwargs: sanitize_model_output(*args, **kwargs),
-        parse_response_action_tag=parse_response_action_tag,
+        build_runtime_status_context=build_runtime_status_context, build_main_response_guidance=build_main_response_guidance,
+        sanitize_model_output=lambda *args, **kwargs: sanitize_model_output(*args, **kwargs), parse_response_action_tag=parse_response_action_tag,
         extract_answer_from_reasoning=lambda *args, **kwargs: extract_answer_from_reasoning(
             *args, **kwargs
         ),
-        sanitize_unrequested_minecraft_leak=sanitize_unrequested_minecraft_leak,
-        enforce_question_limits=enforce_question_limits,
-        record_question_trace=record_question_trace,
-        format_minecraft_state_summary=format_minecraft_state_summary,
-        extract_main_llm_answer_from_choice=extract_main_llm_answer_from_choice,
-        compact_memory_text=compact_memory_text,
-        build_main_llm_payload=build_main_llm_payload,
-        strip_search_answer_sources=strip_search_answer_sources,
+        sanitize_unrequested_minecraft_leak=sanitize_unrequested_minecraft_leak, enforce_question_limits=enforce_question_limits,
+        record_question_trace=record_question_trace, format_minecraft_state_summary=format_minecraft_state_summary,
+        extract_main_llm_answer_from_choice=extract_main_llm_answer_from_choice, compact_memory_text=compact_memory_text,
+        build_main_llm_payload=build_main_llm_payload, strip_search_answer_sources=strip_search_answer_sources,
         answer_promises_search=answer_promises_search,
         has_negated_search_marker=lambda *args, **kwargs: has_negated_search_marker(
             *args, **kwargs
@@ -1887,17 +1506,13 @@ voice_response_dependency_composition = VoiceResponseDependencyComposition(
         maybe_execute_registered_route=lambda *args, **kwargs: maybe_execute_registered_route(
             *args, **kwargs
         ),
-        update_session_state=update_session_state,
-        execute_main_llm_once=lambda *args, **kwargs: execute_main_llm_once(*args, **kwargs),
+        update_session_state=update_session_state, execute_main_llm_once=lambda *args, **kwargs: execute_main_llm_once(*args, **kwargs),
         resolve_promised_search_final_answer=lambda *args, **kwargs: resolve_promised_search_final_answer(
             *args, **kwargs
         ),
-        tts_first_chunk_min_chars=TTS_FIRST_CHUNK_MIN_CHARS,
-        tts_first_chunk_target_chars=TTS_FIRST_CHUNK_TARGET_CHARS,
-        tts_first_chunk_max_chars=TTS_FIRST_CHUNK_MAX_CHARS,
-        tts_next_chunk_min_chars=TTS_NEXT_CHUNK_MIN_CHARS,
-        tts_next_chunk_target_chars=TTS_NEXT_CHUNK_TARGET_CHARS,
-        tts_next_chunk_max_chars=TTS_NEXT_CHUNK_MAX_CHARS,
+        tts_first_chunk_min_chars=TTS_FIRST_CHUNK_MIN_CHARS, tts_first_chunk_target_chars=TTS_FIRST_CHUNK_TARGET_CHARS,
+        tts_first_chunk_max_chars=TTS_FIRST_CHUNK_MAX_CHARS, tts_next_chunk_min_chars=TTS_NEXT_CHUNK_MIN_CHARS,
+        tts_next_chunk_target_chars=TTS_NEXT_CHUNK_TARGET_CHARS, tts_next_chunk_max_chars=TTS_NEXT_CHUNK_MAX_CHARS,
         log=print,
     )
 )
@@ -1920,8 +1535,7 @@ DISABLED_MAIN_APP_SKILL_ROUTES = {"minecraft"}
 
 build_route_executor_runtime_deps = partial(
     ResolveRouteExecutorRuntimeDeps,
-    get_autonomy_engine=lambda guild_id: autonomy_engines.get(guild_id),
-    create_autonomy_engine=get_or_create_autonomy_engine,
+    get_autonomy_engine=lambda guild_id: autonomy_engines.get(guild_id), create_autonomy_engine=get_or_create_autonomy_engine,
 )
 
 get_minecraft_client = LazyResourceProvider(
@@ -1930,18 +1544,14 @@ get_minecraft_client = LazyResourceProvider(
 )
 get_routed_autonomy_executor = partial(
     get_routed_autonomy_executor_from_runtime,
-    autonomy_engines=autonomy_engines,
-    executor_type=RoutedAutonomyExecutor,
+    autonomy_engines=autonomy_engines, executor_type=RoutedAutonomyExecutor,
 )
 
 build_minecraft_live_observation_runtime_deps = partial(
     MinecraftLiveObservationRuntimeDeps,
-    get_minecraft_client=get_minecraft_client,
-    merge_voyager_status_into_state=merge_voyager_status_into_state,
-    attach_minecraft_runtime_snapshot=attach_minecraft_runtime_snapshot,
-    clean_text=clean_text,
-    now=time.time,
-    stale_after_sec=CONTROL_PAGE_MINECRAFT_CACHE_REFRESH_SEC,
+    get_minecraft_client=get_minecraft_client, merge_voyager_status_into_state=merge_voyager_status_into_state,
+    attach_minecraft_runtime_snapshot=attach_minecraft_runtime_snapshot, clean_text=clean_text,
+    now=time.time, stale_after_sec=CONTROL_PAGE_MINECRAFT_CACHE_REFRESH_SEC,
     expired_after_sec=CONTROL_PAGE_MINECRAFT_CACHE_MAX_STALE_SEC,
 )
 
@@ -1953,10 +1563,8 @@ observe_live_minecraft_state = partial(
 
 minecraft_mode_composition = MinecraftModeComposition(
     MinecraftModeCompositionDeps(
-        get_client=get_minecraft_client,
-        merge_status=merge_voyager_status_into_state,
-        clean_text=clean_text,
-        monotonic=time.monotonic,
+        get_client=get_minecraft_client, merge_status=merge_voyager_status_into_state,
+        clean_text=clean_text, monotonic=time.monotonic,
         sleep=asyncio.sleep,
     )
 )
@@ -1967,16 +1575,11 @@ disable_minecraft_mode = minecraft_mode_composition.disable_minecraft_mode
 
 control_page_ui_dependency_composition = ControlPageUiDependencyComposition(
     ControlPageUiDependencyCompositionDeps(
-        control_page=lambda: control_page_composition,
-        control_page_host=CONTROL_PAGE_HOST,
-        control_page_port=CONTROL_PAGE_PORT,
-        local_control_guild_id=LOCAL_CONTROL_GUILD_ID,
-        local_control_guild_name=LOCAL_CONTROL_GUILD_NAME,
-        control_page_welcome_fallback=CONTROL_PAGE_WELCOME_FALLBACK,
-        control_page_ui_command_store=control_page_ui_command_store,
-        control_page_chat_log_store=control_page_chat_log_store,
-        get_requested_guild=lambda guild_id: bot.get_guild(int(guild_id)),
-        bot_guilds=lambda: bot.guilds,
+        control_page=lambda: control_page_composition, control_page_host=CONTROL_PAGE_HOST,
+        control_page_port=CONTROL_PAGE_PORT, local_control_guild_id=LOCAL_CONTROL_GUILD_ID,
+        local_control_guild_name=LOCAL_CONTROL_GUILD_NAME, control_page_welcome_fallback=CONTROL_PAGE_WELCOME_FALLBACK,
+        control_page_ui_command_store=control_page_ui_command_store, control_page_chat_log_store=control_page_chat_log_store,
+        get_requested_guild=lambda guild_id: bot.get_guild(int(guild_id)), bot_guilds=lambda: bot.guilds,
         tracked_tts_playback_guild_ids=lambda: tracked_tts_playback_guild_ids(tts_playback_tracker),
         get_tracked_tts_playback=lambda guild_id: get_tracked_tts_playback(tts_playback_tracker, int(guild_id)),
         get_active_session_user_id=lambda session_key: session_state_store.active_user_ids.get(str(session_key)),
@@ -1984,14 +1587,10 @@ control_page_ui_dependency_composition = ControlPageUiDependencyComposition(
         effective_guild_id=lambda *args, **kwargs: control_page_effective_guild_id(
             *args, **kwargs
         ),
-        model_name=MODEL_NAME,
-        main_llm_chat_content_format=MAIN_LLM_CHAT_CONTENT_FORMAT,
-        main_llm_stop_tokens=tuple(MAIN_LLM_STOP_TOKENS),
-        get_http_session=lambda *args, **kwargs: get_http_session(*args, **kwargs),
-        client_timeout_factory=aiohttp.ClientTimeout,
-        welcome_llm_timeout_sec=CONTROL_PAGE_WELCOME_LLM_TIMEOUT_SEC,
-        llm_server_url=LLM_SERVER_URL,
-        sanitize_model_output=lambda *args, **kwargs: sanitize_model_output(*args, **kwargs),
+        model_name=MODEL_NAME, main_llm_chat_content_format=MAIN_LLM_CHAT_CONTENT_FORMAT,
+        main_llm_stop_tokens=tuple(MAIN_LLM_STOP_TOKENS), get_http_session=lambda *args, **kwargs: get_http_session(*args, **kwargs),
+        client_timeout_factory=aiohttp.ClientTimeout, welcome_llm_timeout_sec=CONTROL_PAGE_WELCOME_LLM_TIMEOUT_SEC,
+        llm_server_url=LLM_SERVER_URL, sanitize_model_output=lambda *args, **kwargs: sanitize_model_output(*args, **kwargs),
         parse_response_action_tag=lambda *args, **kwargs: parse_response_action_tag(
             *args, **kwargs
         ),
@@ -2001,8 +1600,7 @@ control_page_ui_dependency_composition = ControlPageUiDependencyComposition(
         record_model_call_trace=lambda *args, **kwargs: record_model_call_trace(
             *args, **kwargs
         ),
-        monotonic=time.monotonic,
-        log=print,
+        monotonic=time.monotonic, log=print,
     )
 )
 
@@ -2018,35 +1616,27 @@ build_control_page_welcome_runtime_deps = (
 
 control_page_snapshot_dependency_composition = ControlPageSnapshotDependencyComposition(
     ControlPageSnapshotDependencyCompositionDeps(
-        control_page=lambda: control_page_composition,
-        get_minecraft_client=lambda: get_minecraft_client(),
+        control_page=lambda: control_page_composition, get_minecraft_client=lambda: get_minecraft_client(),
         observe_live_minecraft_state=lambda *args, **kwargs: observe_live_minecraft_state(
             *args, **kwargs
         ),
-        now=time.time,
-        stale_after_sec=CONTROL_PAGE_MINECRAFT_CACHE_REFRESH_SEC,
-        expired_after_sec=CONTROL_PAGE_MINECRAFT_CACHE_MAX_STALE_SEC,
-        cache=control_page_minecraft_snapshot_cache,
-        get_refresh_task=control_page_minecraft_snapshot_refresh_task_state.get,
-        set_refresh_task=control_page_minecraft_snapshot_refresh_task_state.set,
-        get_lock=control_page_minecraft_snapshot_lock_state.get,
-        set_lock=control_page_minecraft_snapshot_lock_state.set,
-        lock_factory=asyncio.Lock,
-        create_task=asyncio.create_task,
+        now=time.time, stale_after_sec=CONTROL_PAGE_MINECRAFT_CACHE_REFRESH_SEC,
+        expired_after_sec=CONTROL_PAGE_MINECRAFT_CACHE_MAX_STALE_SEC, cache=control_page_minecraft_snapshot_cache,
+        get_refresh_task=control_page_minecraft_snapshot_refresh_task_state.get, set_refresh_task=control_page_minecraft_snapshot_refresh_task_state.set,
+        get_lock=control_page_minecraft_snapshot_lock_state.get, set_lock=control_page_minecraft_snapshot_lock_state.set,
+        lock_factory=asyncio.Lock, create_task=asyncio.create_task,
         wait_for=asyncio.wait_for,
         get_snapshot=lambda *args, **kwargs: get_control_page_minecraft_snapshot(
             *args, **kwargs
         ),
-        timeout_sec=CONTROL_PAGE_MINECRAFT_SNAPSHOT_TIMEOUT_SEC,
-        get_poll_task=control_page_minecraft_snapshot_poll_task_state.get,
+        timeout_sec=CONTROL_PAGE_MINECRAFT_SNAPSHOT_TIMEOUT_SEC, get_poll_task=control_page_minecraft_snapshot_poll_task_state.get,
         set_poll_task=control_page_minecraft_snapshot_poll_task_state.set,
         get_runtime_services_refresh_task=control_page_runtime_services_refresh_task_state.get,
         set_runtime_services_refresh_task=control_page_runtime_services_refresh_task_state.set,
         ensure_minecraft_snapshot=lambda *args, **kwargs: ensure_control_page_minecraft_snapshot(
             *args, **kwargs
         ),
-        sleep=asyncio.sleep,
-        log=print,
+        sleep=asyncio.sleep, log=print,
     )
 )
 
@@ -2063,14 +1653,10 @@ build_control_page_background_tasks_runtime_deps = (
 control_page_runtime_services_dependency_composition = (
     ControlPageRuntimeServicesDependencyComposition(
         ControlPageRuntimeServicesDependencyCompositionDeps(
-            cache=control_page_runtime_services_cache,
-            get_refresh_task=control_page_runtime_services_refresh_task_state.get,
-            set_refresh_task=control_page_runtime_services_refresh_task_state.set,
-            get_lock=control_page_runtime_services_lock_state.get,
-            set_lock=control_page_runtime_services_lock_state.set,
-            lock_factory=asyncio.Lock,
-            create_task=asyncio.create_task,
-            action_backend=VOYAGER_ACTION_BACKEND,
+            cache=control_page_runtime_services_cache, get_refresh_task=control_page_runtime_services_refresh_task_state.get,
+            set_refresh_task=control_page_runtime_services_refresh_task_state.set, get_lock=control_page_runtime_services_lock_state.get,
+            set_lock=control_page_runtime_services_lock_state.set, lock_factory=asyncio.Lock,
+            create_task=asyncio.create_task, action_backend=VOYAGER_ACTION_BACKEND,
             now=time.time,
             service_urls={
                 "main": LLM_SERVER_URL,
@@ -2078,10 +1664,8 @@ control_page_runtime_services_dependency_composition = (
                 "sub": SUMMARY_LLM_URL,
                 "tts": OMNIVOICE_SERVER_URL,
             },
-            bot_api_host=CONTROL_PAGE_BOT_API_HOST,
-            bot_api_port=CONTROL_PAGE_BOT_API_PORT,
-            bot_api_state_path=CONTROL_PAGE_BOT_API_STATE_PATH,
-            bot_api_probe_timeout_sec=CONTROL_PAGE_BOT_API_PROBE_TIMEOUT_SEC,
+            bot_api_host=CONTROL_PAGE_BOT_API_HOST, bot_api_port=CONTROL_PAGE_BOT_API_PORT,
+            bot_api_state_path=CONTROL_PAGE_BOT_API_STATE_PATH, bot_api_probe_timeout_sec=CONTROL_PAGE_BOT_API_PROBE_TIMEOUT_SEC,
             codex_gateway_port=VOYAGER_CODEX_GATEWAY_PORT,
             voyager_alive_probe=lambda: get_minecraft_client().is_service_alive(
                 timeout_sec=0.45
@@ -2099,14 +1683,10 @@ build_control_page_runtime_services_probe_runtime_deps = (
 
 control_page_status_tool_composition = ControlPageStatusToolComposition(
     ControlPageStatusToolCompositionDeps(
-        control_page=lambda: control_page_composition,
-        model_name=MODEL_NAME,
-        router_model_name=ROUTER_MODEL_NAME,
-        summary_model_name=SUMMARY_MODEL_NAME,
-        stt_model_name=STT_MODEL_NAME,
-        discord_enabled=DISCORD_ENABLED,
-        bot_api_host=CONTROL_PAGE_BOT_API_HOST,
-        bot_api_port=CONTROL_PAGE_BOT_API_PORT,
+        control_page=lambda: control_page_composition, model_name=MODEL_NAME,
+        router_model_name=ROUTER_MODEL_NAME, summary_model_name=SUMMARY_MODEL_NAME,
+        stt_model_name=STT_MODEL_NAME, discord_enabled=DISCORD_ENABLED,
+        bot_api_host=CONTROL_PAGE_BOT_API_HOST, bot_api_port=CONTROL_PAGE_BOT_API_PORT,
         control_page_local_url=lambda: control_page_local_url(),
         voice_input_mode_status_line=lambda *args, **kwargs: voice_input_mode_status_line(
             *args, **kwargs
@@ -2114,20 +1694,16 @@ control_page_status_tool_composition = ControlPageStatusToolComposition(
         local_mic_status_line=lambda *args, **kwargs: local_mic_status_line(*args, **kwargs),
         current_tts_target_name=lambda *args, **kwargs: current_tts_target_name(*args, **kwargs),
         is_tracked_tts_playback_active=lambda guild_id: is_tracked_tts_playback_active(tts_playback_tracker, guild_id),
-        local_tts_snapshot=local_tts_playback_manager.snapshot,
-        local_mic_runtime_state=lambda: serialize_local_mic_runtime_state(),
+        local_tts_snapshot=local_tts_playback_manager.snapshot, local_mic_runtime_state=lambda: serialize_local_mic_runtime_state(),
         build_voice_pipeline_snapshot=lambda *args, **kwargs: build_voice_pipeline_snapshot(
             *args, **kwargs
         ),
         format_voice_continuity_detail_lines=lambda *args, **kwargs: _format_voice_barge_in_continuity_detail_lines(
             *args, **kwargs
         ),
-        autonomy_engines=autonomy_engines,
-        get_routed_autonomy_executor=get_routed_autonomy_executor,
-        clean_text=clean_text,
-        create_task=asyncio.create_task,
-        restart_bot_process=restart_bot_process,
-        recent_history_for_router=session_state_store.recent_history_for_router,
+        autonomy_engines=autonomy_engines, get_routed_autonomy_executor=get_routed_autonomy_executor,
+        clean_text=clean_text, create_task=asyncio.create_task,
+        restart_bot_process=restart_bot_process, recent_history_for_router=session_state_store.recent_history_for_router,
         record_tool_assistant_turn=session_state_store.record_tool_assistant_turn,
         control_page_effective_guild_id=lambda *args, **kwargs: control_page_effective_guild_id(
             *args, **kwargs
@@ -2135,24 +1711,16 @@ control_page_status_tool_composition = ControlPageStatusToolComposition(
         control_page_session_key=lambda *args, **kwargs: control_page_session_key(
             *args, **kwargs
         ),
-        system_prompt=SYSTEM_PROMPT,
-        max_history_items=MAX_HISTORY_ITEMS,
-        active_conversation_text_sec=ACTIVE_CONVERSATION_TEXT_SEC,
-        router_llm_enabled=ROUTER_LLM_ENABLED,
-        route_timeout_sec=ROUTER_ROUTE_TIMEOUT_SEC,
-        ask_router_llm=lambda *args, **kwargs: ask_router_llm(*args, **kwargs),
-        current_turn_id=current_turn_id,
-        schedule_local_shutdown=schedule_evelyn_local_shutdown,
-        schedule_stack_shutdown=schedule_evelyn_stack_shutdown,
-        schedule_bot_shutdown=lambda: asyncio.create_task(shutdown_bot_process()),
+        system_prompt=SYSTEM_PROMPT, max_history_items=MAX_HISTORY_ITEMS,
+        active_conversation_text_sec=ACTIVE_CONVERSATION_TEXT_SEC, router_llm_enabled=ROUTER_LLM_ENABLED,
+        route_timeout_sec=ROUTER_ROUTE_TIMEOUT_SEC, ask_router_llm=lambda *args, **kwargs: ask_router_llm(*args, **kwargs),
+        current_turn_id=current_turn_id, schedule_local_shutdown=schedule_evelyn_local_shutdown,
+        schedule_stack_shutdown=schedule_evelyn_stack_shutdown, schedule_bot_shutdown=lambda: asyncio.create_task(shutdown_bot_process()),
         set_input_mode=lambda *args, **kwargs: set_voice_input_mode(*args, **kwargs),
         restore_voice_channel=lambda *args, **kwargs: restore_last_voice_channel(*args, **kwargs),
-        reset_continuity_probe=reset_voice_barge_in_continuity_probe,
-        enable_mode=enable_minecraft_mode,
-        disable_mode=disable_minecraft_mode,
-        get_client=get_minecraft_client,
-        format_position=format_position_short,
-        log=print,
+        reset_continuity_probe=reset_voice_barge_in_continuity_probe, enable_mode=enable_minecraft_mode,
+        disable_mode=disable_minecraft_mode, get_client=get_minecraft_client,
+        format_position=format_position_short, log=print,
     )
 )
 
@@ -2181,11 +1749,9 @@ control_page_search_text_dependency_composition = ControlPageSearchTextDependenc
         synthesize_tool_result_with_main_llm=lambda *args, **kwargs: synthesize_tool_result_with_main_llm(
             *args, **kwargs
         ),
-        session_locks=session_locks,
-        lock_factory=asyncio.Lock,
+        session_locks=session_locks, lock_factory=asyncio.Lock,
         append_history=lambda *args, **kwargs: append_history(*args, **kwargs),
-        mark_session_active=lambda *args, **kwargs: mark_session_active(*args, **kwargs),
-        active_conversation_text_sec=ACTIVE_CONVERSATION_TEXT_SEC,
+        mark_session_active=lambda *args, **kwargs: mark_session_active(*args, **kwargs), active_conversation_text_sec=ACTIVE_CONVERSATION_TEXT_SEC,
         build_topic_id=lambda *args, **kwargs: build_topic_id(*args, **kwargs),
         schedule_local_control_tts=lambda *args, **kwargs: schedule_local_control_tts(
             *args, **kwargs
@@ -2240,40 +1806,26 @@ build_control_page_input_runtime_deps = (
 
 control_page_state_composition = ControlPageStateComposition(
     ControlPageStateCompositionDeps(
-        control_page=lambda: control_page_composition,
-        get_runtime_services=lambda: get_control_page_runtime_services(),
-        is_control_api_ready=is_control_api_ready_from_runtime_services,
-        build_runtime_health=build_control_page_runtime_health,
-        discord_enabled=DISCORD_ENABLED,
-        local_only_mode=LOCAL_ONLY_MODE,
-        local_control_guild_id=LOCAL_CONTROL_GUILD_ID,
-        local_control_guild_name=LOCAL_CONTROL_GUILD_NAME,
-        build_commands=build_control_page_commands,
-        build_all_commands=build_control_page_all_commands,
-        local_tts_manager=local_tts_playback_manager,
-        serialize_local_mic_state=serialize_local_mic_runtime_state,
-        read_vision_watch_state=read_vision_watch_state,
-        local_url=lambda: control_page_local_url(),
-        build_voice_pipeline_snapshot=build_voice_pipeline_snapshot,
-        main_model=MODEL_NAME,
-        router_model=ROUTER_MODEL_NAME,
-        summary_model=SUMMARY_MODEL_NAME,
-        stt_model=STT_MODEL_NAME,
-        inflight_llm_requests=inflight_llm_requests_counter.get,
-        tracked_tts_count=lambda: tracked_tts_playback_count(tts_playback_tracker),
-        summarize_model_call_metrics=summarize_model_call_metrics,
+        control_page=lambda: control_page_composition, get_runtime_services=lambda: get_control_page_runtime_services(),
+        is_control_api_ready=is_control_api_ready_from_runtime_services, build_runtime_health=build_control_page_runtime_health,
+        discord_enabled=DISCORD_ENABLED, local_only_mode=LOCAL_ONLY_MODE,
+        local_control_guild_id=LOCAL_CONTROL_GUILD_ID, local_control_guild_name=LOCAL_CONTROL_GUILD_NAME,
+        build_commands=build_control_page_commands, build_all_commands=build_control_page_all_commands,
+        local_tts_manager=local_tts_playback_manager, serialize_local_mic_state=serialize_local_mic_runtime_state,
+        read_vision_watch_state=read_vision_watch_state, local_url=lambda: control_page_local_url(),
+        build_voice_pipeline_snapshot=build_voice_pipeline_snapshot, main_model=MODEL_NAME,
+        router_model=ROUTER_MODEL_NAME, summary_model=SUMMARY_MODEL_NAME,
+        stt_model=STT_MODEL_NAME, inflight_llm_requests=inflight_llm_requests_counter.get,
+        tracked_tts_count=lambda: tracked_tts_playback_count(tts_playback_tracker), summarize_model_call_metrics=summarize_model_call_metrics,
         summarize_question_metrics=summarize_question_metrics,
         ensure_minecraft_snapshot=lambda *args, **kwargs: ensure_control_page_minecraft_snapshot(
             *args, **kwargs
         ),
         minecraft_snapshot_cache=control_page_minecraft_snapshot_cache,
         is_tts_active=lambda guild_id: is_tracked_tts_playback_active(tts_playback_tracker, guild_id),
-        current_tts_target_name=lambda *args, **kwargs: current_tts_target_name(*args, **kwargs),
-        serialize_local_mic_target=serialize_local_mic_target,
-        resolve_local_mic_target=resolve_local_mic_target,
-        guilds=lambda: bot.guilds,
-        local_mic_discord_user_ids=LOCAL_MIC_DISCORD_USER_IDS,
-        voice_debug_audio=VOICE_DEBUG_SAVE_AUDIO,
+        current_tts_target_name=lambda *args, **kwargs: current_tts_target_name(*args, **kwargs), serialize_local_mic_target=serialize_local_mic_target,
+        resolve_local_mic_target=resolve_local_mic_target, guilds=lambda: bot.guilds,
+        local_mic_discord_user_ids=LOCAL_MIC_DISCORD_USER_IDS, voice_debug_audio=VOICE_DEBUG_SAVE_AUDIO,
     )
 )
 
@@ -2284,71 +1836,42 @@ open_control_page_url_with_system = open_url_with_system
 
 control_page_composition = ControlPageComposition(
     ControlPageCompositionDeps(
-        ui=lambda: build_control_page_ui_runtime_deps(),
-        guild_selection=lambda: build_control_page_guild_selection_runtime_deps(),
-        welcome=lambda: build_control_page_welcome_runtime_deps(),
-        minecraft_live_snapshot=lambda: build_control_page_minecraft_live_snapshot_runtime_deps(),
+        ui=lambda: build_control_page_ui_runtime_deps(), guild_selection=lambda: build_control_page_guild_selection_runtime_deps(),
+        welcome=lambda: build_control_page_welcome_runtime_deps(), minecraft_live_snapshot=lambda: build_control_page_minecraft_live_snapshot_runtime_deps(),
         minecraft_snapshot=lambda: build_control_page_minecraft_snapshot_runtime_deps(),
         background_tasks=lambda: build_control_page_background_tasks_runtime_deps(),
-        runtime_services=lambda: build_control_page_runtime_services_runtime_deps(),
-        status=lambda: build_control_page_status_runtime_deps(),
-        tool=lambda: build_control_page_tool_runtime_deps(),
-        search=lambda: build_control_page_search_runtime_deps(),
-        text=lambda: build_control_page_text_runtime_deps(),
-        input=lambda: build_control_page_input_runtime_deps(),
+        runtime_services=lambda: build_control_page_runtime_services_runtime_deps(), status=lambda: build_control_page_status_runtime_deps(),
+        tool=lambda: build_control_page_tool_runtime_deps(), search=lambda: build_control_page_search_runtime_deps(),
+        text=lambda: build_control_page_text_runtime_deps(), input=lambda: build_control_page_input_runtime_deps(),
         server_start=lambda: control_page_http_composition.build_server_start_deps(),
-        build_voice_continuity_snapshot=_build_voice_barge_in_continuity_snapshot,
-        cheap_tool_decision=cheap_control_page_tool_decision,
-        welcome_locks=control_page_welcome_locks,
-        startup_component_state=startup_component_state,
-        startup_steps=STARTUP_BOOT_STEPS,
-        startup_components_ready=startup_components_ready,
-        discord_enabled=DISCORD_ENABLED,
-        discord_ready=bot.is_ready,
-        control_api_available=lambda: control_page_runner_state.get() is not None,
-        now=time.time,
+        build_voice_continuity_snapshot=_build_voice_barge_in_continuity_snapshot, cheap_tool_decision=cheap_control_page_tool_decision,
+        welcome_locks=control_page_welcome_locks, startup_component_state=startup_component_state,
+        startup_steps=STARTUP_BOOT_STEPS, startup_components_ready=startup_components_ready,
+        discord_enabled=DISCORD_ENABLED, discord_ready=bot.is_ready,
+        control_api_available=lambda: control_page_runner_state.get() is not None, now=time.time,
     )
 )
 control_page_http_composition = ControlPageHttpComposition(
     ControlPageHttpCompositionDeps(
-        docs_dir=CONTROL_PAGE_DOCS_DIR,
-        assets_dir=CONTROL_PAGE_ASSETS_DIR,
-        minecraft_item_icon_loader=control_page_minecraft_item_icon_loader,
-        normalize_minecraft_item_name=normalize_minecraft_item_name,
-        select_guild=control_page_composition.select_guild,
-        build_state=build_control_page_state,
-        discord_enabled=DISCORD_ENABLED,
-        effective_guild_id=control_page_composition.effective_guild_id,
-        append_chat_log=control_page_composition.append_chat_log,
-        handle_input=control_page_composition.handle_input,
-        ensure_minecraft_snapshot=control_page_composition.ensure_minecraft_snapshot,
-        refresh_runtime_services=control_page_composition.get_runtime_services,
-        export_memory_graph=export_memory_graph,
-        memory_vault_user_snapshot=memory_vault_user_snapshot,
-        memory_vault_user_note=memory_vault_user_note,
-        update_memory_vault_user_note=update_memory_vault_user_note,
-        local_only_mode=LOCAL_ONLY_MODE,
-        port=CONTROL_PAGE_PORT,
-        ensure_memory_vault_layout=ensure_memory_vault_layout,
-        memory_vault_obsidian_url=memory_vault_obsidian_url,
-        open_url=open_control_page_url_with_system,
-        open_path=open_control_page_path_with_system,
-        enabled=CONTROL_PAGE_ENABLED,
-        host=CONTROL_PAGE_HOST,
-        minecraft_icon_route=CONTROL_PAGE_MINECRAFT_ICON_ROUTE,
-        middleware=control_page_cors_middleware,
-        get_runner=control_page_runner_state.get,
-        set_runner=control_page_runner_state.set,
-        set_site=control_page_site_state.set,
-        get_start_lock=control_page_start_lock_state.get,
-        set_start_lock=control_page_start_lock_state.set,
-        lock_factory=asyncio.Lock,
-        application_factory=web.Application,
-        app_runner_factory=web.AppRunner,
-        tcp_site_factory=web.TCPSite,
-        mark_startup_component=control_page_composition.mark_startup_component,
-        local_url=control_page_composition.local_url,
-        log=print,
+        docs_dir=CONTROL_PAGE_DOCS_DIR, assets_dir=CONTROL_PAGE_ASSETS_DIR,
+        minecraft_item_icon_loader=control_page_minecraft_item_icon_loader, normalize_minecraft_item_name=normalize_minecraft_item_name,
+        select_guild=control_page_composition.select_guild, build_state=build_control_page_state,
+        discord_enabled=DISCORD_ENABLED, effective_guild_id=control_page_composition.effective_guild_id,
+        append_chat_log=control_page_composition.append_chat_log, handle_input=control_page_composition.handle_input,
+        ensure_minecraft_snapshot=control_page_composition.ensure_minecraft_snapshot, refresh_runtime_services=control_page_composition.get_runtime_services,
+        export_memory_graph=export_memory_graph, memory_vault_user_snapshot=memory_vault_user_snapshot,
+        memory_vault_user_note=memory_vault_user_note, update_memory_vault_user_note=update_memory_vault_user_note,
+        local_only_mode=LOCAL_ONLY_MODE, port=CONTROL_PAGE_PORT,
+        ensure_memory_vault_layout=ensure_memory_vault_layout, memory_vault_obsidian_url=memory_vault_obsidian_url,
+        open_url=open_control_page_url_with_system, open_path=open_control_page_path_with_system,
+        enabled=CONTROL_PAGE_ENABLED, host=CONTROL_PAGE_HOST,
+        minecraft_icon_route=CONTROL_PAGE_MINECRAFT_ICON_ROUTE, middleware=control_page_cors_middleware,
+        get_runner=control_page_runner_state.get, set_runner=control_page_runner_state.set,
+        set_site=control_page_site_state.set, get_start_lock=control_page_start_lock_state.get,
+        set_start_lock=control_page_start_lock_state.set, lock_factory=asyncio.Lock,
+        application_factory=web.Application, app_runner_factory=web.AppRunner,
+        tcp_site_factory=web.TCPSite, mark_startup_component=control_page_composition.mark_startup_component,
+        local_url=control_page_composition.local_url, log=print,
     )
 )
 
@@ -2371,54 +1894,36 @@ decrement_inflight_llm_requests = inflight_llm_requests_counter.decrement
 
 voice_execution_dependency_composition = VoiceExecutionDependencyComposition(
     VoiceExecutionDependencyCompositionDeps(
-        update_session_state=update_session_state,
-        emit_delivery_plan_chunks=lambda *args, **kwargs: emit_delivery_plan_chunks(*args, **kwargs),
-        split_tts_sentences=split_tts_sentences,
-        build_search_query=lambda *args, **kwargs: build_search_query(*args, **kwargs),
+        update_session_state=update_session_state, emit_delivery_plan_chunks=lambda *args, **kwargs: emit_delivery_plan_chunks(*args, **kwargs),
+        split_tts_sentences=split_tts_sentences, build_search_query=lambda *args, **kwargs: build_search_query(*args, **kwargs),
         search_duckduckgo=lambda *args, **kwargs: search_duckduckgo(*args, **kwargs),
         answer_from_search_results=lambda *args, **kwargs: answer_from_search_results(*args, **kwargs),
-        prepare_llm_messages=lambda *args, **kwargs: prepare_llm_messages(*args, **kwargs),
-        apply_fast_path_question_policy=apply_fast_path_question_policy,
+        prepare_llm_messages=lambda *args, **kwargs: prepare_llm_messages(*args, **kwargs), apply_fast_path_question_policy=apply_fast_path_question_policy,
         synthesize_tool_result_with_main_llm=lambda *args, **kwargs: synthesize_tool_result_with_main_llm(
             *args, **kwargs
         ),
-        observe_live_minecraft_state=observe_live_minecraft_state,
-        skill_registry=skill_registry,
-        recent_skill_dispatches=recent_skill_dispatches,
-        build_main_response_guidance=build_main_response_guidance,
+        observe_live_minecraft_state=observe_live_minecraft_state, skill_registry=skill_registry,
+        recent_skill_dispatches=recent_skill_dispatches, build_main_response_guidance=build_main_response_guidance,
         execute_main_llm_once=lambda *args, **kwargs: execute_main_llm_once(*args, **kwargs),
-        resolve_route_executor=lambda *args, **kwargs: resolve_route_executor(*args, **kwargs),
-        model_name=MODEL_NAME,
-        llm_server_url=LLM_SERVER_URL,
-        main_llm_chat_content_format=MAIN_LLM_CHAT_CONTENT_FORMAT,
-        voice_llm_max_tokens=VOICE_LLM_MAX_TOKENS,
-        main_llm_stop_tokens=tuple(MAIN_LLM_STOP_TOKENS),
-        default_internal_routes=DEFAULT_INTERNAL_ROUTES,
-        disabled_main_app_skill_routes=DISABLED_MAIN_APP_SKILL_ROUTES,
-        skill_dispatch_cache_ttl_sec=SKILL_DISPATCH_CACHE_TTL_SEC,
-        skill_dispatch_repeat_window_sec=SKILL_DISPATCH_REPEAT_WINDOW_SEC,
-        skill_dispatch_cache_max=SKILL_DISPATCH_CACHE_MAX,
-        router_route_timeout_sec=ROUTER_ROUTE_TIMEOUT_SEC,
-        cognitive_timeout_sec=COGNITIVE_TIMEOUT_SEC,
-        router_llm_enabled=ROUTER_LLM_ENABLED,
-        get_http_session=get_http_session,
-        build_runtime_status_context=build_runtime_status_context,
-        mark_turn_stage=mark_turn_stage,
-        build_stream_speech_chunker=lambda *args, **kwargs: build_stream_speech_chunker(*args, **kwargs),
-        sanitize_model_output=lambda *args, **kwargs: sanitize_model_output(*args, **kwargs),
-        parse_response_action_tag=parse_response_action_tag,
+        resolve_route_executor=lambda *args, **kwargs: resolve_route_executor(*args, **kwargs), model_name=MODEL_NAME,
+        llm_server_url=LLM_SERVER_URL, main_llm_chat_content_format=MAIN_LLM_CHAT_CONTENT_FORMAT,
+        voice_llm_max_tokens=VOICE_LLM_MAX_TOKENS, main_llm_stop_tokens=tuple(MAIN_LLM_STOP_TOKENS),
+        default_internal_routes=DEFAULT_INTERNAL_ROUTES, disabled_main_app_skill_routes=DISABLED_MAIN_APP_SKILL_ROUTES,
+        skill_dispatch_cache_ttl_sec=SKILL_DISPATCH_CACHE_TTL_SEC, skill_dispatch_repeat_window_sec=SKILL_DISPATCH_REPEAT_WINDOW_SEC,
+        skill_dispatch_cache_max=SKILL_DISPATCH_CACHE_MAX, router_route_timeout_sec=ROUTER_ROUTE_TIMEOUT_SEC,
+        cognitive_timeout_sec=COGNITIVE_TIMEOUT_SEC, router_llm_enabled=ROUTER_LLM_ENABLED,
+        get_http_session=get_http_session, build_runtime_status_context=build_runtime_status_context,
+        mark_turn_stage=mark_turn_stage, build_stream_speech_chunker=lambda *args, **kwargs: build_stream_speech_chunker(*args, **kwargs),
+        sanitize_model_output=lambda *args, **kwargs: sanitize_model_output(*args, **kwargs), parse_response_action_tag=parse_response_action_tag,
         extract_answer_from_reasoning=lambda *args, **kwargs: extract_answer_from_reasoning(*args, **kwargs),
         ask_llm_once=lambda *args, **kwargs: ask_llm_once(*args, **kwargs),
         resolve_promised_search_final_answer=lambda *args, **kwargs: resolve_promised_search_final_answer(
             *args, **kwargs
         ),
-        record_question_trace=record_question_trace,
-        emit_stream_delta_chunks=lambda *args, **kwargs: emit_stream_delta_chunks(*args, **kwargs),
-        record_model_call_trace=record_model_call_trace,
-        sanitize_unrequested_minecraft_leak=sanitize_unrequested_minecraft_leak,
+        record_question_trace=record_question_trace, emit_stream_delta_chunks=lambda *args, **kwargs: emit_stream_delta_chunks(*args, **kwargs),
+        record_model_call_trace=record_model_call_trace, sanitize_unrequested_minecraft_leak=sanitize_unrequested_minecraft_leak,
         flush_streamed_answer_chunks=lambda *args, **kwargs: flush_streamed_answer_chunks(*args, **kwargs),
-        increment_inflight_llm_requests=increment_inflight_llm_requests,
-        decrement_inflight_llm_requests=decrement_inflight_llm_requests,
+        increment_inflight_llm_requests=increment_inflight_llm_requests, decrement_inflight_llm_requests=decrement_inflight_llm_requests,
         log=print,
     )
 )
@@ -2432,8 +1937,7 @@ build_voice_main_llm_streaming_deps = (
 
 voice_delivery_dependency_composition = VoiceDeliveryDependencyComposition(
     VoiceDeliveryDependencyCompositionDeps(
-        attach_current_task=lambda *args, **kwargs: _attach_current_task(*args, **kwargs),
-        detach_task=lambda *args, **kwargs: _detach_task(*args, **kwargs),
+        attach_current_task=lambda *args, **kwargs: _attach_current_task(*args, **kwargs), detach_task=lambda *args, **kwargs: _detach_task(*args, **kwargs),
         prepare_route_context=lambda *args, **kwargs: prepare_route_context(*args, **kwargs),
         maybe_handle_short_circuit_route=lambda *args, **kwargs: maybe_handle_short_circuit_route(
             *args, **kwargs
@@ -2450,8 +1954,7 @@ voice_delivery_dependency_composition = VoiceDeliveryDependencyComposition(
         record_voice_pipeline_failure=lambda *args, **kwargs: record_voice_pipeline_failure(
             *args, **kwargs
         ),
-        current_turn_id=lambda *args, **kwargs: current_turn_id(*args, **kwargs),
-        session_topic_ids=session_state_store.topic_ids,
+        current_turn_id=lambda *args, **kwargs: current_turn_id(*args, **kwargs), session_topic_ids=session_state_store.topic_ids,
         new_turn_metrics=lambda *args, **kwargs: new_turn_metrics(*args, **kwargs),
         is_local_speaker_voice_client=lambda *args, **kwargs: is_local_speaker_voice_client(
             *args, **kwargs
@@ -2463,8 +1966,7 @@ voice_delivery_dependency_composition = VoiceDeliveryDependencyComposition(
             *args, **kwargs
         ),
         ask_llm_streaming=lambda *args, **kwargs: ask_llm_streaming(*args, **kwargs),
-        speak_answer_local=lambda *args, **kwargs: speak_answer_local(*args, **kwargs),
-        local_tts_snapshot=local_tts_playback_manager.snapshot,
+        speak_answer_local=lambda *args, **kwargs: speak_answer_local(*args, **kwargs), local_tts_snapshot=local_tts_playback_manager.snapshot,
         mark_barge_in_continuity_probe=lambda *args, **kwargs: _mark_voice_barge_in_continuity_probe(
             *args, **kwargs
         ),
@@ -2500,22 +2002,14 @@ build_discord_text_reply_runtime_deps = (
 
 llm_route_composition = LlmRouteComposition(
     LlmRouteCompositionDeps(
-        fast_path=lambda: build_fast_path_policy_runtime_deps(),
-        llm_context=lambda: build_llm_context_assembly_deps(),
-        summary_json=lambda: build_summary_json_llm_runtime_deps(),
-        router_json=lambda: build_router_json_llm_runtime_deps(),
-        llm_route=lambda: build_llm_route_runtime_deps(),
-        response_output=lambda: build_response_output_policy_runtime_deps(),
-        search_answer=lambda: build_search_answer_runtime_deps(),
-        search_followup=lambda: build_search_followup_runtime_deps(),
-        llm_warmup=lambda: build_llm_warmup_runtime_deps(),
-        main_llm=lambda: build_main_llm_runtime_deps(),
-        ask_llm_once=lambda: build_ask_llm_once_runtime_deps(),
-        route_executor=lambda: build_route_executor_runtime_deps(),
-        voice_route_execution=lambda: build_voice_route_execution_deps(),
-        voice_main_streaming=lambda: build_voice_main_llm_streaming_deps(),
-        voice_turn_entry=lambda: build_voice_turn_entry_runtime_deps(),
-        search_payload=search_duckduckgo_payload,
+        fast_path=lambda: build_fast_path_policy_runtime_deps(), llm_context=lambda: build_llm_context_assembly_deps(),
+        summary_json=lambda: build_summary_json_llm_runtime_deps(), router_json=lambda: build_router_json_llm_runtime_deps(),
+        llm_route=lambda: build_llm_route_runtime_deps(), response_output=lambda: build_response_output_policy_runtime_deps(),
+        search_answer=lambda: build_search_answer_runtime_deps(), search_followup=lambda: build_search_followup_runtime_deps(),
+        llm_warmup=lambda: build_llm_warmup_runtime_deps(), main_llm=lambda: build_main_llm_runtime_deps(),
+        ask_llm_once=lambda: build_ask_llm_once_runtime_deps(), route_executor=lambda: build_route_executor_runtime_deps(),
+        voice_route_execution=lambda: build_voice_route_execution_deps(), voice_main_streaming=lambda: build_voice_main_llm_streaming_deps(),
+        voice_turn_entry=lambda: build_voice_turn_entry_runtime_deps(), search_payload=search_duckduckgo_payload,
     )
 )
 
@@ -2528,8 +2022,7 @@ is_obvious_continue = llm_route_composition.is_obvious_continue
 fast_path_policy = llm_route_composition.fast_path_policy
 speculate_from_committed_stt = partial(
     speculate_from_committed_stt_from_runtime,
-    clean_text=clean_text,
-    fast_path_policy=fast_path_policy,
+    clean_text=clean_text, fast_path_policy=fast_path_policy,
     monotonic=time.monotonic,
 )
 context_policy_for_fast_path_policy = llm_route_composition.context_policy_for_fast_path_policy
@@ -2567,12 +2060,9 @@ ask_llm_streaming = llm_route_composition.ask_llm_streaming
 # =========================================================
 voice_ingress_dependency_composition = VoiceIngressDependencyComposition(
     VoiceIngressDependencyCompositionDeps(
-        voice_pipeline_state=voice_pipeline_state,
-        save_voice_debug_audio=lambda *args, **kwargs: save_voice_debug_audio(*args, **kwargs),
-        room_state_snapshot=lambda *args, **kwargs: room_state_snapshot(*args, **kwargs),
-        session_topic_ids=session_state_store.topic_ids,
-        build_topic_id=lambda *args, **kwargs: build_topic_id(*args, **kwargs),
-        new_turn_metrics=lambda *args, **kwargs: new_turn_metrics(*args, **kwargs),
+        voice_pipeline_state=voice_pipeline_state, save_voice_debug_audio=lambda *args, **kwargs: save_voice_debug_audio(*args, **kwargs),
+        room_state_snapshot=lambda *args, **kwargs: room_state_snapshot(*args, **kwargs), session_topic_ids=session_state_store.topic_ids,
+        build_topic_id=lambda *args, **kwargs: build_topic_id(*args, **kwargs), new_turn_metrics=lambda *args, **kwargs: new_turn_metrics(*args, **kwargs),
         log_voice_stage=lambda *args, **kwargs: log_voice_stage(*args, **kwargs),
         register_drop_reason=lambda *args, **kwargs: register_drop_reason(*args, **kwargs),
         log_voice_bottleneck_summary=lambda *args, **kwargs: log_voice_bottleneck_summary(
@@ -2594,18 +2084,12 @@ voice_ingress_dependency_composition = VoiceIngressDependencyComposition(
         is_tail_fragment_candidate=lambda *args, **kwargs: is_tail_fragment_candidate(
             *args, **kwargs
         ),
-        stt_use_raw_48k=STT_USE_RAW_48K,
-        rate=RATE,
-        channels=CHANNELS,
-        target_rate=TARGET_RATE,
-        voice_min_total_sec=VOICE_MIN_TOTAL_SEC,
-        tail_fragment_max_raw_sec=TAIL_FRAGMENT_MAX_RAW_SEC,
-        vad_enabled=VAD_ENABLED,
-        voice_waveform_min_voiced_ms=VOICE_WAVEFORM_MIN_VOICED_MS,
-        voice_waveform_min_run_ms=VOICE_WAVEFORM_MIN_RUN_MS,
-        voice_waveform_body_rms_min=VOICE_WAVEFORM_BODY_RMS_MIN,
-        voice_waveform_body_peak_min=VOICE_WAVEFORM_BODY_PEAK_MIN,
-        is_room_owner_active=lambda *args, **kwargs: is_room_owner_active(*args, **kwargs),
+        stt_use_raw_48k=STT_USE_RAW_48K, rate=RATE,
+        channels=CHANNELS, target_rate=TARGET_RATE,
+        voice_min_total_sec=VOICE_MIN_TOTAL_SEC, tail_fragment_max_raw_sec=TAIL_FRAGMENT_MAX_RAW_SEC,
+        vad_enabled=VAD_ENABLED, voice_waveform_min_voiced_ms=VOICE_WAVEFORM_MIN_VOICED_MS,
+        voice_waveform_min_run_ms=VOICE_WAVEFORM_MIN_RUN_MS, voice_waveform_body_rms_min=VOICE_WAVEFORM_BODY_RMS_MIN,
+        voice_waveform_body_peak_min=VOICE_WAVEFORM_BODY_PEAK_MIN, is_room_owner_active=lambda *args, **kwargs: is_room_owner_active(*args, **kwargs),
         is_session_active_for_user=lambda *args, **kwargs: is_session_active_for_user(
             *args, **kwargs
         ),
@@ -2621,8 +2105,7 @@ voice_ingress_dependency_composition = VoiceIngressDependencyComposition(
         should_skip_full_stt_after_wake_probe=lambda *args, **kwargs: should_skip_full_stt_after_wake_probe(
             *args, **kwargs
         ),
-        wake_stt_timeout_sec=WAKE_STT_TIMEOUT_SEC,
-        voice_no_wake_max_continue_sec=VOICE_NO_WAKE_MAX_CONTINUE_SEC,
+        wake_stt_timeout_sec=WAKE_STT_TIMEOUT_SEC, voice_no_wake_max_continue_sec=VOICE_NO_WAKE_MAX_CONTINUE_SEC,
         log=print,
     )
 )
@@ -2653,16 +2136,11 @@ voice_transcription_dependency_composition = VoiceTranscriptionDependencyComposi
         choose_full_stt_candidate=lambda *args, **kwargs: choose_full_stt_candidate(
             *args, **kwargs
         ),
-        log_voice_stage=lambda *args, **kwargs: log_voice_stage(*args, **kwargs),
-        mark_turn_stage=lambda *args, **kwargs: mark_turn_stage(*args, **kwargs),
-        save_voice_debug_audio=lambda *args, **kwargs: save_voice_debug_audio(*args, **kwargs),
-        full_stt_timeout_sec=FULL_STT_TIMEOUT_SEC,
-        voice_stt_max_new_tokens=VOICE_STT_MAX_NEW_TOKENS,
-        rescore_enabled=STT_FULL_RESCORING_ENABLED,
-        rescore_extra_tokens=STT_FULL_RESCORE_EXTRA_TOKENS,
-        rescore_min_audio_sec=STT_FULL_RESCORING_MIN_AUDIO_SEC,
-        rescore_min_text_len=STT_FULL_RESCORING_MIN_TEXT_LEN,
-        rescore_timeout_sec=STT_FULL_RESCORING_TIMEOUT_SEC,
+        log_voice_stage=lambda *args, **kwargs: log_voice_stage(*args, **kwargs), mark_turn_stage=lambda *args, **kwargs: mark_turn_stage(*args, **kwargs),
+        save_voice_debug_audio=lambda *args, **kwargs: save_voice_debug_audio(*args, **kwargs), full_stt_timeout_sec=FULL_STT_TIMEOUT_SEC,
+        voice_stt_max_new_tokens=VOICE_STT_MAX_NEW_TOKENS, rescore_enabled=STT_FULL_RESCORING_ENABLED,
+        rescore_extra_tokens=STT_FULL_RESCORE_EXTRA_TOKENS, rescore_min_audio_sec=STT_FULL_RESCORING_MIN_AUDIO_SEC,
+        rescore_min_text_len=STT_FULL_RESCORING_MIN_TEXT_LEN, rescore_timeout_sec=STT_FULL_RESCORING_TIMEOUT_SEC,
         session_partial_stt_text=session_state_store.partial_stt_text,
         commit_stable_transcript=lambda *args, **kwargs: commit_stable_transcript(
             *args, **kwargs
@@ -2670,12 +2148,9 @@ voice_transcription_dependency_composition = VoiceTranscriptionDependencyComposi
         build_transcript_result=lambda *args, **kwargs: build_transcript_result(
             *args, **kwargs
         ),
-        room_last_voice_utterance_for_merge=room_last_voice_utterance_for_merge,
-        merge_window_sec=VOICE_BARGE_IN_MERGE_WINDOW_SEC,
-        tts_interrupted_window_sec=VOICE_BARGE_IN_TTS_INTERRUPTED_WINDOW_SEC,
-        incomplete_window_sec=VOICE_BARGE_IN_INCOMPLETE_UTTERANCE_WINDOW_SEC,
-        complete_question_window_sec=VOICE_BARGE_IN_QUESTION_WINDOW_SEC,
-        adaptive_window_enabled=VOICE_BARGE_IN_ADAPTIVE_MERGE_ENABLED,
+        room_last_voice_utterance_for_merge=room_last_voice_utterance_for_merge, merge_window_sec=VOICE_BARGE_IN_MERGE_WINDOW_SEC,
+        tts_interrupted_window_sec=VOICE_BARGE_IN_TTS_INTERRUPTED_WINDOW_SEC, incomplete_window_sec=VOICE_BARGE_IN_INCOMPLETE_UTTERANCE_WINDOW_SEC,
+        complete_question_window_sec=VOICE_BARGE_IN_QUESTION_WINDOW_SEC, adaptive_window_enabled=VOICE_BARGE_IN_ADAPTIVE_MERGE_ENABLED,
         log=print,
     )
 )
@@ -2701,35 +2176,27 @@ voice_member_pipeline_dependency_composition = VoiceMemberPipelineDependencyComp
         log_voice_bottleneck_summary=lambda *args, **kwargs: log_voice_bottleneck_summary(
             *args, **kwargs
         ),
-        room_state_snapshot=lambda *args, **kwargs: room_state_snapshot(*args, **kwargs),
-        session_topic_ids=session_state_store.topic_ids,
-        monotonic=time.monotonic,
-        active_conversation_awaiting_reply_sec=ACTIVE_CONVERSATION_AWAITING_REPLY_SEC,
-        active_conversation_voice_sec=ACTIVE_CONVERSATION_VOICE_SEC,
-        canned_wake_reply=CANNED_WAKE_REPLY_TEXT,
+        room_state_snapshot=lambda *args, **kwargs: room_state_snapshot(*args, **kwargs), session_topic_ids=session_state_store.topic_ids,
+        monotonic=time.monotonic, active_conversation_awaiting_reply_sec=ACTIVE_CONVERSATION_AWAITING_REPLY_SEC,
+        active_conversation_voice_sec=ACTIVE_CONVERSATION_VOICE_SEC, canned_wake_reply=CANNED_WAKE_REPLY_TEXT,
         should_reply_to_voice=lambda *args, **kwargs: should_reply_to_voice(*args, **kwargs),
         reset_session_bad_audio=lambda *args, **kwargs: reset_session_bad_audio(*args, **kwargs),
-        build_topic_id=lambda *args, **kwargs: build_topic_id(*args, **kwargs),
-        session_last_stt_text=session_state_store.last_stt_text,
-        room_last_voice_reply_at=room_last_voice_reply_at,
-        room_last_voice_utterance_for_merge=room_last_voice_utterance_for_merge,
+        build_topic_id=lambda *args, **kwargs: build_topic_id(*args, **kwargs), session_last_stt_text=session_state_store.last_stt_text,
+        room_last_voice_reply_at=room_last_voice_reply_at, room_last_voice_utterance_for_merge=room_last_voice_utterance_for_merge,
         update_room_speaker_activity=lambda *args, **kwargs: update_room_speaker_activity(
             *args, **kwargs
         ),
         pick_active_speaker=lambda *args, **kwargs: pick_active_speaker(*args, **kwargs),
         start_new_turn=lambda *args, **kwargs: start_new_turn(*args, **kwargs),
         update_session_state=lambda *args, **kwargs: update_session_state(*args, **kwargs),
-        set_room_owner=lambda *args, **kwargs: set_room_owner(*args, **kwargs),
-        session_partial_stt_text=session_state_store.partial_stt_text,
-        session_committed_stt_text=session_state_store.committed_stt_text,
-        partial_stt_cache=partial_stt_cache,
+        set_room_owner=lambda *args, **kwargs: set_room_owner(*args, **kwargs), session_partial_stt_text=session_state_store.partial_stt_text,
+        session_committed_stt_text=session_state_store.committed_stt_text, partial_stt_cache=partial_stt_cache,
         replace_room_turn_scope=lambda *args, **kwargs: replace_room_turn_scope(*args, **kwargs),
         attach_current_task=lambda *args, **kwargs: _attach_current_task(*args, **kwargs),
         set_room_reply_in_progress=lambda *args, **kwargs: set_room_reply_in_progress(
             *args, **kwargs
         ),
-        session_locks=session_locks,
-        speak_answer=lambda *args, **kwargs: speak_answer(*args, **kwargs),
+        session_locks=session_locks, speak_answer=lambda *args, **kwargs: speak_answer(*args, **kwargs),
         ask_llm_and_speak_streaming=lambda *args, **kwargs: ask_llm_and_speak_streaming(
             *args, **kwargs
         ),
@@ -2739,15 +2206,11 @@ voice_member_pipeline_dependency_composition = VoiceMemberPipelineDependencyComp
         finalize_voice_reply_side_effects=lambda *args, **kwargs: finalize_voice_reply_side_effects(
             *args, **kwargs
         ),
-        get_room_turn_scope=lambda *args, **kwargs: get_room_turn_scope(*args, **kwargs),
-        detach_task=lambda *args, **kwargs: _detach_task(*args, **kwargs),
+        get_room_turn_scope=lambda *args, **kwargs: get_room_turn_scope(*args, **kwargs), detach_task=lambda *args, **kwargs: _detach_task(*args, **kwargs),
         clear_room_turn_scope=lambda *args, **kwargs: clear_room_turn_scope(*args, **kwargs),
-        build_audio_ingress_deps=lambda: build_voice_audio_ingress_runtime_deps(),
-        build_wake_probe_deps=lambda: build_voice_wake_probe_runtime_deps(),
-        build_tts_interrupt_gate_deps=lambda: build_voice_tts_interrupt_gate_deps(),
-        build_stt_execution_deps=lambda: build_voice_stt_execution_deps(),
-        build_transcript_finalize_deps=lambda: build_voice_transcript_finalize_deps(),
-        log=print,
+        build_audio_ingress_deps=lambda: build_voice_audio_ingress_runtime_deps(), build_wake_probe_deps=lambda: build_voice_wake_probe_runtime_deps(),
+        build_tts_interrupt_gate_deps=lambda: build_voice_tts_interrupt_gate_deps(), build_stt_execution_deps=lambda: build_voice_stt_execution_deps(),
+        build_transcript_finalize_deps=lambda: build_voice_transcript_finalize_deps(), log=print,
     )
 )
 
@@ -2766,20 +2229,13 @@ build_voice_member_audio_pipeline_deps = (
 
 voice_io_composition = VoiceIoComposition(
     VoiceIoCompositionDeps(
-        reply_side_effects=lambda: build_voice_reply_side_effect_deps(),
-        reply_gate=lambda: build_voice_reply_gate_runtime_deps(),
-        ingress=lambda: build_voice_ingress_runtime_deps(),
-        ingress_entrypoint=lambda: build_voice_ingress_entrypoint_deps(),
-        tts_interrupt=lambda: build_tts_interrupt_runtime_deps(),
-        cached_tts=lambda: build_cached_tts_runtime_deps(),
-        discord_tts_single=lambda: build_discord_tts_single_runtime_deps(),
-        discord_tts_stream=lambda: build_discord_tts_stream_runtime_deps(),
-        local_tts_single=lambda: build_local_tts_single_runtime_deps(),
-        local_tts_stream=lambda: build_local_tts_stream_runtime_deps(),
-        response=lambda: build_voice_response_runtime_deps(),
-        stream_chunks=lambda: build_voice_stream_chunk_deps(),
-        delivery=lambda: build_voice_delivery_runtime_deps(),
-        text_reply=lambda: build_discord_text_reply_runtime_deps(),
+        reply_side_effects=lambda: build_voice_reply_side_effect_deps(), reply_gate=lambda: build_voice_reply_gate_runtime_deps(),
+        ingress=lambda: build_voice_ingress_runtime_deps(), ingress_entrypoint=lambda: build_voice_ingress_entrypoint_deps(),
+        tts_interrupt=lambda: build_tts_interrupt_runtime_deps(), cached_tts=lambda: build_cached_tts_runtime_deps(),
+        discord_tts_single=lambda: build_discord_tts_single_runtime_deps(), discord_tts_stream=lambda: build_discord_tts_stream_runtime_deps(),
+        local_tts_single=lambda: build_local_tts_single_runtime_deps(), local_tts_stream=lambda: build_local_tts_stream_runtime_deps(),
+        response=lambda: build_voice_response_runtime_deps(), stream_chunks=lambda: build_voice_stream_chunk_deps(),
+        delivery=lambda: build_voice_delivery_runtime_deps(), text_reply=lambda: build_discord_text_reply_runtime_deps(),
         member_audio_pipeline=lambda: build_voice_member_audio_pipeline_deps(),
     )
 )
@@ -2820,49 +2276,28 @@ _process_member_audio_impl = voice_io_composition.process_member_audio_impl
 
 discord_app_dependency_composition = DiscordAppDependencyComposition(
     DiscordAppDependencyCompositionDeps(
-        process_commands=bot.process_commands,
-        bot_user=lambda: bot.user,
-        is_thread_parent=lambda parent: isinstance(parent, discord.TextChannel),
-        remember_session_followup_target=remember_session_followup_target,
+        process_commands=bot.process_commands, bot_user=lambda: bot.user,
+        is_thread_parent=lambda parent: isinstance(parent, discord.TextChannel), remember_session_followup_target=remember_session_followup_target,
         get_guild_command_prefix=discord_settings.get_guild_command_prefix,
-        get_guild_command_only_channel_ids=discord_settings.get_guild_command_only_channel_ids,
-        contains_wake_word=contains_wake_word,
-        is_session_active_for_user=is_session_active_for_user,
-        strip_voice_wake_word=strip_voice_wake_word,
-        empty_wake_text="이름만 부름. 친구처럼 짧게 반말로, 원래 하던 일을 잠깐 말하며 자연스럽게 반응해.",
-        log_turn_event=log_turn_event,
-        current_turn_id=current_turn_id,
-        resolve_pending_proactive_question_for_turn=resolve_pending_proactive_question_for_turn,
-        session_locks=session_locks,
-        reply_slot_locks=reply_slot_locks,
-        begin_user_text_turn=begin_user_text_turn,
-        replace_room_turn_scope=replace_room_turn_scope,
-        attach_current_task=_attach_current_task,
-        auto_join_voice=AUTO_JOIN_VOICE,
-        ensure_voice_client=ensure_voice_client,
-        stream_text_reply=stream_text_reply,
-        strip_omnivoice_tags=strip_omnivoice_tags,
-        execute_voice_delivery_plan=execute_voice_delivery_plan,
-        detach_task=_detach_task,
-        clear_room_turn_scope=clear_room_turn_scope,
-        session_speculative_policies=session_speculative_policies,
-        compute_runtime_mode=compute_runtime_mode,
-        record_context_pipeline_benchmark=record_context_pipeline_benchmark,
-        schedule_memory_update=schedule_memory_update,
-        should_force_search_followup=should_force_search_followup,
-        schedule_search_followup=schedule_search_followup,
-        session_state_snapshot=session_state_snapshot,
-        finish_assistant_text_turn=finish_assistant_text_turn,
-        log_voice_bottleneck_summary=log_voice_bottleneck_summary,
-        format_display_text=format_display_text,
-        resolve_text_thread_id=resolve_text_thread_id,
-        make_text_session_key=make_text_session_key,
-        record_command_assistant_turn=session_state_store.record_command_assistant_turn,
-        system_prompt=SYSTEM_PROMPT,
-        max_history_items=MAX_HISTORY_ITEMS,
-        normal_ttl_sec=ACTIVE_CONVERSATION_TEXT_SEC,
-        question_ttl_sec=ACTIVE_CONVERSATION_TEXT_QUESTION_SEC,
-        log=print,
+        get_guild_command_only_channel_ids=discord_settings.get_guild_command_only_channel_ids, contains_wake_word=contains_wake_word,
+        is_session_active_for_user=is_session_active_for_user, strip_voice_wake_word=strip_voice_wake_word,
+        empty_wake_text="이름만 부름. 친구처럼 짧게 반말로, 원래 하던 일을 잠깐 말하며 자연스럽게 반응해.", log_turn_event=log_turn_event,
+        current_turn_id=current_turn_id, resolve_pending_proactive_question_for_turn=resolve_pending_proactive_question_for_turn,
+        session_locks=session_locks, reply_slot_locks=reply_slot_locks,
+        begin_user_text_turn=begin_user_text_turn, replace_room_turn_scope=replace_room_turn_scope,
+        attach_current_task=_attach_current_task, auto_join_voice=AUTO_JOIN_VOICE,
+        ensure_voice_client=ensure_voice_client, stream_text_reply=stream_text_reply,
+        strip_omnivoice_tags=strip_omnivoice_tags, execute_voice_delivery_plan=execute_voice_delivery_plan,
+        detach_task=_detach_task, clear_room_turn_scope=clear_room_turn_scope,
+        session_speculative_policies=session_speculative_policies, compute_runtime_mode=compute_runtime_mode,
+        record_context_pipeline_benchmark=record_context_pipeline_benchmark, schedule_memory_update=schedule_memory_update,
+        should_force_search_followup=should_force_search_followup, schedule_search_followup=schedule_search_followup,
+        session_state_snapshot=session_state_snapshot, finish_assistant_text_turn=finish_assistant_text_turn,
+        log_voice_bottleneck_summary=log_voice_bottleneck_summary, format_display_text=format_display_text,
+        resolve_text_thread_id=resolve_text_thread_id, make_text_session_key=make_text_session_key,
+        record_command_assistant_turn=session_state_store.record_command_assistant_turn, system_prompt=SYSTEM_PROMPT,
+        max_history_items=MAX_HISTORY_ITEMS, normal_ttl_sec=ACTIVE_CONVERSATION_TEXT_SEC,
+        question_ttl_sec=ACTIVE_CONVERSATION_TEXT_QUESTION_SEC, log=print,
     )
 )
 
@@ -2878,75 +2313,43 @@ is_control_command_authorized = make_control_command_authorized_checker(allowed_
 discord_app_composition = DiscordAppComposition(
     DiscordAppCompositionDeps(
         events=DiscordEventCompositionDeps(
-            bot_user=lambda: bot.user,
-            bot_guilds=lambda: list(bot.guilds),
-            mark_startup_component=mark_startup_component,
-            clean_text=clean_text,
-            ensure_voice_worker_started=ensure_voice_worker_started,
-            start_control_page_server=start_control_page_server,
-            ensure_startup_components_ready=ensure_startup_components_ready,
-            ensure_local_mic_service_started=ensure_local_mic_service_started,
+            bot_user=lambda: bot.user, bot_guilds=lambda: list(bot.guilds),
+            mark_startup_component=mark_startup_component, clean_text=clean_text,
+            ensure_voice_worker_started=ensure_voice_worker_started, start_control_page_server=start_control_page_server,
+            ensure_startup_components_ready=ensure_startup_components_ready, ensure_local_mic_service_started=ensure_local_mic_service_started,
             ensure_vision_watch_started=ensure_vision_watch_started,
-            ensure_control_page_background_tasks_started=ensure_control_page_background_tasks_started,
-            voice_client_type=EvelynVoiceClient,
-            ensure_listening_voice_client=ensure_listening_voice_client,
-            voice_rejoin_on_ready=VOICE_REJOIN_ON_READY,
-            restore_last_voice_channel=restore_last_voice_channel,
-            autonomy_enabled=AUTONOMY_ENABLED,
-            get_or_create_autonomy_engine=get_or_create_autonomy_engine,
-            text_message_handler=build_discord_text_message_handler_deps,
+            ensure_control_page_background_tasks_started=ensure_control_page_background_tasks_started, voice_client_type=EvelynVoiceClient,
+            ensure_listening_voice_client=ensure_listening_voice_client, voice_rejoin_on_ready=VOICE_REJOIN_ON_READY,
+            restore_last_voice_channel=restore_last_voice_channel, autonomy_enabled=AUTONOMY_ENABLED,
+            get_or_create_autonomy_engine=get_or_create_autonomy_engine, text_message_handler=build_discord_text_message_handler_deps,
             log=print,
         ),
         commands=DiscordCommandCompositionDeps(
-            ensure_listening_voice_client=ensure_listening_voice_client,
-            mark_voice_manual_disconnect=mark_voice_manual_disconnect,
-            create_task=asyncio.create_task,
-            restart_bot_process=restart_bot_process,
-            schedule_evelyn_stack_shutdown=schedule_evelyn_stack_shutdown,
-            shutdown_bot_process=shutdown_bot_process,
-            build_status_reply=build_status_command_text,
-            model_name=MODEL_NAME,
-            router_model_name=ROUTER_MODEL_NAME,
-            summary_model_name=SUMMARY_MODEL_NAME,
-            stt_model_name=STT_MODEL_NAME,
-            voice_debug_save_audio=VOICE_DEBUG_SAVE_AUDIO,
-            vad_enabled=VAD_ENABLED,
-            vad_provider=VAD_PROVIDER,
-            resolve_evelyn_page_url=resolve_evelyn_page_url,
-            default_command_prefix=DEFAULT_COMMAND_PREFIX,
-            get_guild_command_prefix=discord_settings.get_guild_command_prefix,
-            save_guild_command_prefix=discord_settings.save_guild_command_prefix,
-            build_prefix_current_reply=build_prefix_current_reply,
-            build_prefix_reset_reply=build_prefix_reset_reply,
-            build_prefix_saved_reply=build_prefix_saved_reply,
-            guild_only_message=guild_only_command_message,
-            get_or_create_autonomy_engine=get_or_create_autonomy_engine,
-            autonomy_engines=autonomy_engines,
-            get_routed_autonomy_executor=get_routed_autonomy_executor,
-            build_autonomy_status_reply=build_autonomy_status_command_text,
-            command_session=build_discord_command_session_runtime_deps,
-            enable_minecraft_mode=enable_minecraft_mode,
-            disable_minecraft_mode=disable_minecraft_mode,
-            get_minecraft_client=get_minecraft_client,
-            build_minecraft_connect_reply=build_minecraft_connect_reply,
-            build_minecraft_goal_missing_reply=build_minecraft_goal_missing_reply,
-            build_minecraft_goal_updated_reply=build_minecraft_goal_updated_reply,
-            build_minecraft_status_reply=build_minecraft_status_command_text,
-            normalize_channel_setting_action=normalize_channel_setting_action,
-            get_guild_observe_channel_ids=discord_settings.get_guild_observe_channel_ids,
+            ensure_listening_voice_client=ensure_listening_voice_client, mark_voice_manual_disconnect=mark_voice_manual_disconnect,
+            create_task=asyncio.create_task, restart_bot_process=restart_bot_process,
+            schedule_evelyn_stack_shutdown=schedule_evelyn_stack_shutdown, shutdown_bot_process=shutdown_bot_process,
+            build_status_reply=build_status_command_text, model_name=MODEL_NAME,
+            router_model_name=ROUTER_MODEL_NAME, summary_model_name=SUMMARY_MODEL_NAME,
+            stt_model_name=STT_MODEL_NAME, voice_debug_save_audio=VOICE_DEBUG_SAVE_AUDIO,
+            vad_enabled=VAD_ENABLED, vad_provider=VAD_PROVIDER,
+            resolve_evelyn_page_url=resolve_evelyn_page_url, default_command_prefix=DEFAULT_COMMAND_PREFIX,
+            get_guild_command_prefix=discord_settings.get_guild_command_prefix, save_guild_command_prefix=discord_settings.save_guild_command_prefix,
+            build_prefix_current_reply=build_prefix_current_reply, build_prefix_reset_reply=build_prefix_reset_reply,
+            build_prefix_saved_reply=build_prefix_saved_reply, guild_only_message=guild_only_command_message,
+            get_or_create_autonomy_engine=get_or_create_autonomy_engine, autonomy_engines=autonomy_engines,
+            get_routed_autonomy_executor=get_routed_autonomy_executor, build_autonomy_status_reply=build_autonomy_status_command_text,
+            command_session=build_discord_command_session_runtime_deps, enable_minecraft_mode=enable_minecraft_mode,
+            disable_minecraft_mode=disable_minecraft_mode, get_minecraft_client=get_minecraft_client,
+            build_minecraft_connect_reply=build_minecraft_connect_reply, build_minecraft_goal_missing_reply=build_minecraft_goal_missing_reply,
+            build_minecraft_goal_updated_reply=build_minecraft_goal_updated_reply, build_minecraft_status_reply=build_minecraft_status_command_text,
+            normalize_channel_setting_action=normalize_channel_setting_action, get_guild_observe_channel_ids=discord_settings.get_guild_observe_channel_ids,
             get_guild_command_only_channel_ids=discord_settings.get_guild_command_only_channel_ids,
-            add_guild_channel_setting=discord_settings.add_guild_channel_setting,
-            remove_guild_channel_setting=discord_settings.remove_guild_channel_setting,
-            build_channel_setting_list_reply=build_channel_setting_list_reply,
-            build_observe_channel_usage=build_observe_channel_usage,
-            build_command_channel_usage=build_command_channel_usage,
-            build_help_command_text=build_help_command_text,
-            is_control_command_authorized=is_control_command_authorized,
-            memory_root=MEMORY_ROOT,
-            reset_guild_runtime_state=reset_guild_runtime_state,
-            remove_tree=shutil.rmtree,
-            build_reset_guild_memory_reply=build_reset_guild_memory_reply,
-            log=print,
+            add_guild_channel_setting=discord_settings.add_guild_channel_setting, remove_guild_channel_setting=discord_settings.remove_guild_channel_setting,
+            build_channel_setting_list_reply=build_channel_setting_list_reply, build_observe_channel_usage=build_observe_channel_usage,
+            build_command_channel_usage=build_command_channel_usage, build_help_command_text=build_help_command_text,
+            is_control_command_authorized=is_control_command_authorized, memory_root=MEMORY_ROOT,
+            reset_guild_runtime_state=reset_guild_runtime_state, remove_tree=shutil.rmtree,
+            build_reset_guild_memory_reply=build_reset_guild_memory_reply, log=print,
         ),
     )
 )
