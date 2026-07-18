@@ -16,18 +16,24 @@ Codex Gateway action 인증은 소스와 테스트에는 들어갔지만 실행 
 
 다음 조치: 실제 Minecraft 세션을 사용할 때 runner/bridge/TCP/task contract를 순서대로 검증한다.
 
-## P1 — Python 의존성 취약점 4개
+## P1 — Python 의존성 취약점 5개
 
-2026-07-15 `pip-audit` 결과, lock의 111개 패키지 중 `transformers==4.57.6` 하나에서 알려진 취약점 4개가 보고됐다.
+lock의 111개 패키지 중 `transformers==4.57.6`에서 알려진 취약점 4개, `torch==2.12.1`에서 1개가 보고됐다.
+
+Transformers findings(2026-07-15 확인):
 
 - `PYSEC-2025-217`
 - `PYSEC-2026-2290`
 - `PYSEC-2026-2288`
 - `PYSEC-2026-2289`
 
-표시된 수정 버전은 `5.0.0`과 `5.3.0`이지만, 이블린의 STT/Vision 모델 호환성을 검증하지 않은 채 major upgrade를 적용하면 런타임을 깨뜨릴 가능성이 크다.
+Torch finding(2026-07-18 CI 확인):
 
-다음 조치: 별도 호환성 브랜치에서 모델 로드, STT, Vision smoke를 먼저 통과시킨 뒤 upgrade 여부를 결정한다. 재검토일: 2026-07-22.
+- `PYSEC-2025-194` / `CVE-2025-3000`: `torch.jit.script` 메모리 손상, GitHub Reviewed Low 1.9, 로컬 공격·낮은 권한 필요, 수정 버전 `2.13.0`
+
+이블린 소스에는 `torch.jit.script`, `torch.jit`, 직접 `torch.load` 호출이 없다. 다만 전이 라이브러리 내부 호출 가능성까지 없다고 단정할 수는 없다. 표시된 수정 버전은 Transformers `5.0.0`/`5.3.0`, Torch `2.13.0`이지만, STT/Vision 모델과 `torchaudio==2.11.0`, CUDA 호환성을 검증하지 않은 채 업그레이드하면 런타임을 깨뜨릴 가능성이 크다.
+
+다음 조치: 별도 호환성 브랜치에서 Torch/Torchaudio 버전 정합성, 모델 로드, STT, Vision smoke를 먼저 통과시킨 뒤 upgrade 여부를 결정한다. CI는 이 문서에 기록된 5개 ID만 한시적으로 예외 처리하며 다른 신규 finding은 계속 실패시킨다. 재검토일: 2026-07-22.
 
 ## P1 — Node/Minecraft 의존성 취약점 8개
 
