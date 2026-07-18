@@ -71,7 +71,8 @@ jobs:
 
       - name: Check committed whitespace
         shell: bash
-        run: git diff --check HEAD^ HEAD
+        # Vendored browser assets preserve upstream whitespace for reproducible updates.
+        run: git diff --check HEAD^ HEAD -- . ':(exclude)docs/assets/vendor/**'
 
       - name: Run full regression and real main process smoke
         run: python -m unittest discover -s tests -t . -p "test_*.py"
