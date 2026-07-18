@@ -225,6 +225,30 @@ class FastControlApiToolTests(unittest.TestCase):
         self.assertTrue(bridge["ttsWarmup"]["done"])
         self.assertEqual(bridge["ttsWarmup"]["ms"], 512.3)
 
+    def test_control_state_promotes_local_bridge_voice_activity(self) -> None:
+        fast_api.LOCAL_BRIDGE_STATUS.update(
+            {
+                "enabled": True,
+                "ready": True,
+                "speaking": True,
+                "lastError": "",
+                "updatedAt": fast_api.time.time(),
+                "mic": {"captureActive": True},
+            }
+        )
+
+        state = fast_api.build_control_state(
+            {
+                "legacyServices": {"botReady": True, "ttsReady": True, "sttReady": True},
+                "services": [{"id": "bot_api", "state": "up", "ready": True}],
+            }
+        )
+
+        self.assertTrue(state["voice"]["speaking"])
+        self.assertTrue(state["voice"]["listening"])
+        self.assertEqual(state["voice"]["ttsTargetName"], "로컬 스피커")
+        self.assertEqual(state["ui"]["submode"], "voice-speaking")
+
     def test_local_bridge_status_post_drains_speak_requests_once(self) -> None:
         class _Request:
             method = "POST"
@@ -299,8 +323,42 @@ class FastControlApiToolTests(unittest.TestCase):
         progress = fast_api.build_boot_progress(health)
 
         self.assertEqual(progress["percent"], 100)
+        self.assertEqual(progress["phase"], "core services ready")
         self.assertTrue(progress["ready"])
         self.assertTrue(progress["componentsReady"])
+
+    def test_control_state_separates_core_readiness_from_optional_health(self) -> None:
+        state = fast_api.build_control_state(
+            {
+                "ok": True,
+                "fullyHealthy": False,
+                "overallState": "degraded",
+                "optionalDegraded": True,
+                "legacyServices": {
+                    "botReady": True,
+                    "mainReady": True,
+                    "routerReady": True,
+                    "subReady": True,
+                    "ttsReady": True,
+                    "sttReady": True,
+                    "voyagerReady": False,
+                    "voyagerHttpReady": True,
+                    "voyagerRuntimeReady": False,
+                },
+                "services": [
+                    {"id": service_id, "state": "up", "ready": True}
+                    for service_id, _label in fast_api.BOOT_STEPS
+                ],
+                "summary": "Voyager runtime boundary needs recovery.",
+            }
+        )
+
+        self.assertTrue(state["ok"])
+        self.assertTrue(state["runtime"]["services"]["coreReady"])
+        self.assertFalse(state["runtime"]["services"]["fullReady"])
+        self.assertTrue(state["runtime"]["services"]["optionalDegraded"])
+        self.assertTrue(state["runtime"]["services"]["voyagerHttpReady"])
+        self.assertFalse(state["runtime"]["services"]["voyagerRuntimeReady"])
 
 
 if __name__ == "__main__":

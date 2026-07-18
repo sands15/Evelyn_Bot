@@ -14,6 +14,7 @@ from urllib import error as urllib_error
 from urllib import request as urllib_request
 from urllib.parse import urlparse
 
+from evelyn_core.bounded_logs import append_bounded_log
 from evelyn_core.paths import get_repo_root, get_runtime_artifacts_root
 
 REPO_ROOT = get_repo_root()
@@ -46,6 +47,10 @@ BRIDGE_HTTP_PORT = int(os.environ.get("VOYAGER_BRIDGE_PORT", "3000"))
 _RUNNER_STATUS_LINE_LENGTH = 0
 _RUNNER_VT_MODE_ENABLED: bool | None = None
 _RUNNER_ALT_SCREEN_ENABLED = False
+_RUNNER_FILE_STATUS_LAST_EMIT_AT = 0.0
+_FILE_STATUS_INTERVAL_SEC = max(1.0, float(os.environ.get("EVELYN_STATUS_LOG_INTERVAL_SEC", "30")))
+_LOG_MAX_BYTES = max(1024, int(os.environ.get("EVELYN_LOG_MAX_BYTES", str(25 * 1024 * 1024))))
+_LOG_BACKUP_COUNT = max(1, int(os.environ.get("EVELYN_LOG_BACKUP_COUNT", "4")))
 
 
 def _configure_console_encoding() -> None:
@@ -70,13 +75,11 @@ def _set_console_title(text: str) -> None:
 
 def _append_error_log(path: Path, source: str, message: str, details: str | None = None) -> None:
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as handle:
-            stamp = time.strftime("%Y-%m-%d %H:%M:%S")
-            handle.write(f"[{stamp}] {source}: {message}\n")
-            if details:
-                handle.write(f"{details}\n")
-            handle.write("\n")
+        stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        payload = f"[{stamp}] {source}: {message}\n"
+        if details:
+            payload += f"{details}\n"
+        append_bounded_log(path, payload + "\n", max_bytes=_LOG_MAX_BYTES, backup_count=_LOG_BACKUP_COUNT)
     except Exception:
         pass
 
@@ -146,7 +149,15 @@ def _format_position(position: dict[str, Any] | None) -> str:
 
 
 def _write_status_line(line: str) -> None:
-    global _RUNNER_STATUS_LINE_LENGTH
+    global _RUNNER_FILE_STATUS_LAST_EMIT_AT, _RUNNER_STATUS_LINE_LENGTH
+    if not sys.stdout.isatty():
+        now = time.monotonic()
+        if now - _RUNNER_FILE_STATUS_LAST_EMIT_AT < _FILE_STATUS_INTERVAL_SEC:
+            return
+        _RUNNER_FILE_STATUS_LAST_EMIT_AT = now
+        sys.stdout.write(line.rstrip("\n") + "\n")
+        sys.stdout.flush()
+        return
     if _enable_vt_mode():
         _enter_alternate_screen()
         sys.stdout.write("\033[H\033[2J" + line.rstrip("\n"))

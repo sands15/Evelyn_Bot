@@ -10,6 +10,10 @@ class RoomSpeakerActivityStore:
     room_owner_user_ids: dict[str, int]
     room_owner_until: dict[str, float]
 
+    @classmethod
+    def create_empty(cls) -> "RoomSpeakerActivityStore":
+        return cls(recent_speaker_stats={}, room_owner_user_ids={}, room_owner_until={})
+
     def prune(self, room_session_key: str | None, *, now: float | None = None) -> dict[int, dict[str, float]]:
         if not room_session_key:
             return {}

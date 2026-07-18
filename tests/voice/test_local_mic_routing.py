@@ -267,8 +267,8 @@ class LocalMicRoutingTests(unittest.TestCase):
         self.assertIn('if "%LOCAL_MIC_ENABLED%"=="" set "LOCAL_MIC_ENABLED=true"', script)
         self.assertIn('if "%LOCAL_MIC_START_THRESHOLD%"=="" set "LOCAL_MIC_START_THRESHOLD=0.002"', script)
         self.assertIn('if "%LOCAL_MIC_CONTINUE_THRESHOLD%"=="" set "LOCAL_MIC_CONTINUE_THRESHOLD=0.001"', script)
-        self.assertIn('if "%LOCAL_MIC_MIN_VOICED_MS%"=="" set "LOCAL_MIC_MIN_VOICED_MS=160"', script)
-        self.assertIn('if "%LOCAL_MIC_WAVEFORM_FILTER_ENABLED%"=="" set "LOCAL_MIC_WAVEFORM_FILTER_ENABLED=false"', script)
+        self.assertIn('if "%LOCAL_MIC_MIN_VOICED_MS%"=="" set "LOCAL_MIC_MIN_VOICED_MS=280"', script)
+        self.assertIn('if "%LOCAL_MIC_WAVEFORM_FILTER_ENABLED%"=="" set "LOCAL_MIC_WAVEFORM_FILTER_ENABLED=true"', script)
         self.assertNotIn("OMNIVOICE_SPEED", script)
         self.assertNotIn("TTS_CHUNK_TAIL_SILENCE_MS", script)
         self.assertNotIn("LOCAL_TTS_TAIL_SILENCE_MS", script)
@@ -293,8 +293,9 @@ class LocalMicRoutingTests(unittest.TestCase):
         self.assertIn("LOCAL_BRIDGE_BOT_API_BASE", script)
         self.assertIn("LOCAL_MIC_START_THRESHOLD = '0.002'", script)
         self.assertIn("LOCAL_MIC_CONTINUE_THRESHOLD = '0.001'", script)
-        self.assertIn("LOCAL_MIC_MIN_VOICED_MS = '160'", script)
-        self.assertIn("LOCAL_MIC_WAVEFORM_FILTER_ENABLED = 'false'", script)
+        self.assertIn("LOCAL_MIC_MIN_VOICED_MS = '280'", script)
+        self.assertIn("LOCAL_MIC_WAVEFORM_FILTER_ENABLED = 'true'", script)
+        self.assertIn("LOCAL_BRIDGE_TTS_INPUT_SUPPRESS_AFTER_SEC = '0.7'", script)
         self.assertNotIn("py -3 main.py", script)
         self.assertIn("LOCAL_BRIDGE_STREAMING_TTS_ENABLED", bridge_source)
         self.assertIn("LOCAL_BRIDGE_TTS_WARMUP_ENABLED = 'true'", script)
@@ -325,37 +326,95 @@ class LocalMicRoutingTests(unittest.TestCase):
 
     def test_main_routes_local_only_mic_without_discord_target(self) -> None:
         main_py = (REPO_ROOT / "main.py").read_text(encoding="utf-8")
+        local_mic_segment_runtime = (
+            REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "local_mic_segment_runtime.py"
+        ).read_text(encoding="utf-8")
         control_page_tools = (
             REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "control_page_tools.py"
         ).read_text(encoding="utf-8")
         control_page_state = (
             REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "control_page_state.py"
         ).read_text(encoding="utf-8")
+        discord_tts_runtime = (
+            REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "discord_tts_stream_runtime.py"
+        ).read_text(encoding="utf-8")
+        voice_io_composition = (
+            REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "voice_io_composition_runtime.py"
+        ).read_text(encoding="utf-8")
+        voice_runtime_composition = (
+            REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "voice_runtime_composition_runtime.py"
+        ).read_text(encoding="utf-8")
+        runtime_lifecycle_composition = (
+            REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "runtime_lifecycle_composition.py"
+        ).read_text(encoding="utf-8")
+        control_page_status_tool_composition = (
+            REPO_ROOT
+            / "evelyn_core"
+            / "runtime"
+            / "evelyn_core"
+            / "control_page_status_tool_composition.py"
+        ).read_text(encoding="utf-8")
 
-        self.assertIn("target is None and LOCAL_ONLY_MODE", main_py)
-        self.assertIn("local_control_voice_member()", main_py)
-        self.assertIn("await ensure_local_mic_service_started()", main_py)
-        self.assertIn("is_local_speaker_voice_client(vc)", main_py)
-        self.assertIn("await ask_llm_and_speak_local(", main_py)
+        self.assertIn("if target is None and deps.local_only_mode", local_mic_segment_runtime)
+        self.assertIn("local_only_mode=LOCAL_ONLY_MODE", main_py)
+        self.assertIn("local_control_voice_member=self.local_control_voice_member", voice_runtime_composition)
+        self.assertIn("handle_local_mic_segment_from_runtime(", voice_runtime_composition)
+        self.assertIn("should_drop_discord_audio_for_local_mic = (", main_py)
+        self.assertIn(
+            "ensure_local_mic_service_started=lambda: ensure_local_mic_service_started()",
+            main_py,
+        )
+        self.assertIn(
+            "await deps.ensure_local_mic_service_started()",
+            runtime_lifecycle_composition,
+        )
+        self.assertIn("deps.is_local_speaker_voice_client(vc)", discord_tts_runtime)
+        self.assertIn("ask_llm_and_speak_local_from_runtime(", voice_io_composition)
         self.assertIn('"/voice": "voice.status"', control_page_tools)
         self.assertIn('"/voice status": "voice.status"', control_page_tools)
-        self.assertIn("execute_control_page_voice_tool(", main_py)
+        self.assertIn(
+            "control_page_status_tool_composition.build_control_page_tool_runtime_deps",
+            main_py,
+        )
+        self.assertIn(
+            "execute_control_page_voice_tool=execute_control_page_voice_tool",
+            control_page_status_tool_composition,
+        )
         self.assertIn('if tool_name == "voice.status":', control_page_state)
 
     def test_local_speaker_uses_streaming_sentence_tts_with_full_answer_fallback(self) -> None:
         main_py = (REPO_ROOT / "main.py").read_text(encoding="utf-8")
+        voice_delivery_runtime = (
+            REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "voice_delivery_runtime.py"
+        ).read_text(encoding="utf-8")
+        local_tts_stream_runtime = (
+            REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "local_tts_stream_runtime.py"
+        ).read_text(encoding="utf-8")
+        voice_io_composition = (
+            REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "voice_io_composition_runtime.py"
+        ).read_text(encoding="utf-8")
+        delivery_entry_composition = (
+            REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "delivery_entry_composition.py"
+        ).read_text(encoding="utf-8")
 
-        self.assertIn("def start_streaming_local_voice_delivery(", main_py)
-        self.assertIn("async def stream_local_tts_sentences(", main_py)
-        self.assertIn('metrics.setdefault("meta", {})["delivery_mode"] = "llm_sentence_stream"', main_py)
-        self.assertIn("on_sentence=fanout.on_chunk", main_py)
-        self.assertIn("prefetch_tts_sources(", main_py)
-        self.assertIn("on_first_playback=", main_py)
-        self.assertIn('"local_first_playback_logged"', main_py)
-        self.assertIn('"local_tts_first_playback"', main_py)
-        self.assertIn('"num_step": OMNIVOICE_NUM_STEP', main_py)
-        self.assertIn("await speak_answer_local(", main_py)
-        self.assertIn('metrics.setdefault("meta", {})["local_streaming_tts_fallback_used"] = True', main_py)
+        self.assertIn("def start_streaming_local_voice_delivery(", delivery_entry_composition)
+        self.assertIn(
+            "start_streaming_local_voice_delivery = (\n"
+            "    delivery_entry_composition.start_streaming_local_voice_delivery\n"
+            ")",
+            main_py,
+        )
+        self.assertIn("async def stream_local_tts_sentences(", voice_io_composition)
+        self.assertIn('"delivery_mode"] = "llm_sentence_stream"', voice_delivery_runtime)
+        self.assertIn("on_sentence=fanout.on_chunk", voice_delivery_runtime)
+        self.assertIn("stream_local_tts_sentences_from_runtime(", voice_io_composition)
+        self.assertIn("prefetch_tts_sources(", local_tts_stream_runtime)
+        self.assertIn("on_first_playback=", local_tts_stream_runtime)
+        self.assertIn('"local_first_playback_logged"', voice_delivery_runtime)
+        self.assertIn('"local_tts_first_playback"', delivery_entry_composition)
+        self.assertIn("omnivoice_num_step=OMNIVOICE_NUM_STEP", main_py)
+        self.assertIn("await deps.speak_answer_local(", voice_delivery_runtime)
+        self.assertIn('metrics.setdefault("meta", {})["local_streaming_tts_fallback_used"] = True', voice_delivery_runtime)
 
 
 if __name__ == "__main__":

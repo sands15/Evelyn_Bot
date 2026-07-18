@@ -109,10 +109,10 @@ powershell -ExecutionPolicy Bypass -File .\tools\check_docker_runtime.ps1 -Inclu
 현재 구성:
 
 - CLI: `/usr/local/bin/codex`
-- auth mount: `C:/Users/Admin/.codex/auth.json:/root/.codex/auth.json:ro`
-- config mount: `C:/Users/Admin/.codex/config.toml:/root/.codex/config.toml:ro`
+- auth mount: `${EVELYN_CODEX_AUTH_FILE:-${USERPROFILE}/.codex/auth.json}:/root/.codex/auth.json:ro`
+- config mount: `${EVELYN_CODEX_CONFIG_FILE:-${USERPROFILE}/.codex/config.toml}:/root/.codex/config.toml:ro`
 
-주의: `backendReady=true`는 CLI 실행 파일이 준비됐다는 뜻이다. 실제 `/codex/action` 호출은 Codex 인증 상태까지 통과해야 한다. `refresh_token_reused`가 나오면 호스트의 `C:\Users\Admin\.codex\auth.json`이 재로그인 필요한 상태다.
+주의: `backendReady=true`는 CLI 실행 파일이 준비됐다는 뜻이다. 실제 `/codex/action` 호출은 Codex 인증 상태까지 통과해야 한다. `refresh_token_reused`가 나오면 `EVELYN_CODEX_AUTH_FILE` 또는 기본 `${USERPROFILE}/.codex/auth.json`이 재로그인 필요한 상태다.
 `lastActionReady=false`는 HTTP 서버가 살아 있어도 마지막 실제 action 실행이 실패했다는 뜻이다.
 
 ## GPU 배치

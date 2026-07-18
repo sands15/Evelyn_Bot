@@ -68,7 +68,8 @@ python -m unittest discover -s tests
 python tests\memory\test_memory_vault.py
 python tests\core\test_dialogue_turn_classifier.py
 python -m py_compile main.py evelyn_core\runtime\evelyn_core\config.py
-node --check docs\assets\evelyn-page.js
+node --check docs\assets\evelyn-live2d.js
+node --check docs\assets\evelyn-boot-progress.js
 git diff --check
 ```
 

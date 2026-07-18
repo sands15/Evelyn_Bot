@@ -12,15 +12,11 @@ if defined PYTHONPATH (
 )
 
 REM ===== Shared launch settings =====
-REM Use GPU UUIDs instead of numeric CUDA indexes. Numeric 0/1 can be
-REM interpreted differently by Windows, WSL, CUDA, and individual runtimes.
-REM Observed physical GPUs on this host:
-REM   RTX 4060 Laptop GPU = GPU-a352a7f9-1fcf-3d18-9973-6f9114addf7b
-REM   RTX 3090            = GPU-96c554e6-feef-2980-6722-efcb0af098f9
-REM Operational target:
-REM   Router/Sub only on RTX 4060 Laptop GPU, everything else on RTX 3090.
-if "%EVELYN_GPU_4060_UUID%"=="" set "EVELYN_GPU_4060_UUID=GPU-a352a7f9-1fcf-3d18-9973-6f9114addf7b"
-if "%EVELYN_GPU_3090_UUID%"=="" set "EVELYN_GPU_3090_UUID=GPU-96c554e6-feef-2980-6722-efcb0af098f9"
+REM Current requested local target: put every Evelyn GPU workload on GPU 0.
+REM Re-verify with nvidia-smi before changing this; as of 2026-07-06,
+REM Windows GPU 0 is NVIDIA GeForce RTX 5090.
+if "%EVELYN_GPU_4060_UUID%"=="" set "EVELYN_GPU_4060_UUID=0"
+if "%EVELYN_GPU_3090_UUID%"=="" set "EVELYN_GPU_3090_UUID=0"
 if "%LLAMA_DIR%"=="" set "LLAMA_DIR=/mnt/c/Users/Admin/llama.cpp"
 if "%VENV_ACT%"=="" set "VENV_ACT=source ~/venvs/vllm-env/bin/activate"
 
@@ -59,21 +55,22 @@ if "%LLM_MODEL_NAME%"=="" set "LLM_MODEL_NAME=gemma-4-12B-it-IQ4_XS-text-only"
 if "%SUB_LLM_GPU%"=="" set "SUB_LLM_GPU=%EVELYN_GPU_4060_UUID%"
 if "%SUB_LLM_PORT%"=="" set "SUB_LLM_PORT=9821"
 if "%SUB_LLM_CONTEXT%"=="" set "SUB_LLM_CONTEXT=4096"
-if "%SUB_LLM_REASONING_BUDGET%"=="" set "SUB_LLM_REASONING_BUDGET=1"
-if "%SUB_LLM_MODEL%"=="" set "SUB_LLM_MODEL=/mnt/c/Users/Admin/llama.cpp/models/EXAONE-3.5-7.8B-Instruct-IQ4_XS.gguf"
+if "%SUB_LLM_REASONING%"=="" set "SUB_LLM_REASONING=off"
+if "%SUB_LLM_REASONING_BUDGET%"=="" set "SUB_LLM_REASONING_BUDGET=0"
+if "%SUB_LLM_MODEL%"=="" set "SUB_LLM_MODEL=/mnt/c/Users/Admin/llama.cpp/models/gemma-4-E4B-it-text-only-GGUF/gemma-4-E4B-it-Q4_K_M.gguf"
 if "%SUB_LLM_N_GPU_LAYERS%"=="" set "SUB_LLM_N_GPU_LAYERS=999"
 if "%SUB_LLM_THREADS%"=="" set "SUB_LLM_THREADS=8"
 if "%SUB_LLM_CACHE_TYPE_K%"=="" set "SUB_LLM_CACHE_TYPE_K=f16"
 if "%SUB_LLM_CACHE_TYPE_V%"=="" set "SUB_LLM_CACHE_TYPE_V=f16"
-if "%SUMMARY_MODEL_NAME%"=="" set "SUMMARY_MODEL_NAME=EXAONE-3.5-7.8B-Instruct-IQ4_XS.gguf"
+if "%SUMMARY_MODEL_NAME%"=="" set "SUMMARY_MODEL_NAME=gemma-4-E4B-it-Q4_K_M-text-only"
 
 if "%ROUTER_LLM_GPU%"=="" set "ROUTER_LLM_GPU=%EVELYN_GPU_4060_UUID%"
 if "%ROUTER_LLM_PORT%"=="" set "ROUTER_LLM_PORT=9822"
 if "%ROUTER_LLM_CONTEXT%"=="" set "ROUTER_LLM_CONTEXT=1536"
 if "%ROUTER_LLM_REASONING%"=="" set "ROUTER_LLM_REASONING=off"
 if "%ROUTER_LLM_REASONING_BUDGET%"=="" set "ROUTER_LLM_REASONING_BUDGET=12"
-if "%ROUTER_LLM_MODEL%"=="" set "ROUTER_LLM_MODEL=/mnt/c/Users/Admin/llama.cpp/models/EXAONE-3.5-2.4B-Instruct-Q4_K_M.gguf"
-if "%ROUTER_MODEL_NAME%"=="" set "ROUTER_MODEL_NAME=EXAONE-3.5-2.4B-Instruct-Q4_K_M.gguf"
+if "%ROUTER_LLM_MODEL%"=="" set "ROUTER_LLM_MODEL=/mnt/c/Users/Admin/llama.cpp/models/gemma-4-E2B-it-text-only-GGUF/gemma-4-E2B-it-Q4_K_M.gguf"
+if "%ROUTER_MODEL_NAME%"=="" set "ROUTER_MODEL_NAME=gemma-4-E2B-it-Q4_K_M-text-only"
 
 if "%OMNIVOICE_VENV%"=="" set "OMNIVOICE_VENV=C:\Users\Admin\omnivoice-server\.venv"
 if "%OMNIVOICE_PROFILE_DIR%"=="" set "OMNIVOICE_PROFILE_DIR=%~dp0..\omnivoice_profiles"
@@ -141,6 +138,15 @@ if "%VOYAGER_CODEX_GATEWAY_PYTHON_EXE%"=="" set "VOYAGER_CODEX_GATEWAY_PYTHON_EX
 
 if "%OPUS_ERROR_TO_SILENCE%"=="" set "OPUS_ERROR_TO_SILENCE=true"
 if "%STT_USE_RAW_48K%"=="" set "STT_USE_RAW_48K=false"
+if "%VOICE_DEBUG_SAVE_AUDIO%"=="" set "VOICE_DEBUG_SAVE_AUDIO=false"
+if "%VOICE_DEBUG_AUDIO_DIR%"=="" set "VOICE_DEBUG_AUDIO_DIR=debug_audio"
+if "%VOICE_DEBUG_MAX_FILES_PER_GUILD%"=="" set "VOICE_DEBUG_MAX_FILES_PER_GUILD=200"
+if "%VOICE_DEBUG_MAX_AGE_DAYS%"=="" set "VOICE_DEBUG_MAX_AGE_DAYS=7"
+if "%VOICE_DEBUG_MAX_TOTAL_MB_PER_GUILD%"=="" set "VOICE_DEBUG_MAX_TOTAL_MB_PER_GUILD=256"
+if "%VOICE_DEBUG_PRESERVE_NEWEST%"=="" set "VOICE_DEBUG_PRESERVE_NEWEST=10"
+if "%EVELYN_LOG_MAX_BYTES%"=="" set "EVELYN_LOG_MAX_BYTES=26214400"
+if "%EVELYN_LOG_BACKUP_COUNT%"=="" set "EVELYN_LOG_BACKUP_COUNT=4"
+if "%EVELYN_STATUS_LOG_INTERVAL_SEC%"=="" set "EVELYN_STATUS_LOG_INTERVAL_SEC=30"
 
 if "%START_WAIT_TIMEOUT_SEC%"=="" set "START_WAIT_TIMEOUT_SEC=120"
 if "%START_WAIT_INTERVAL_SEC%"=="" set "START_WAIT_INTERVAL_SEC=2"

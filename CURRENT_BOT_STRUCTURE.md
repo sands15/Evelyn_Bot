@@ -239,7 +239,9 @@ Minecraft/Voyager status, and memory inspection.
 Important files:
 
 - `docs/index.html`
-- `docs/assets/evelyn-page.js`
+- `docs/index.html` (현재 Control-Page 컨트롤러 포함)
+- `docs/assets/evelyn-live2d.js`
+- `docs/assets/evelyn-boot-progress.js`
 - `evelyn_core/runtime/evelyn_core/control_page_server.py`
 - `evelyn_core/runtime/evelyn_core/control_page_windows.py`
 

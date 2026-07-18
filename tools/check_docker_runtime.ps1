@@ -178,6 +178,11 @@ Invoke-RequiredHttp "Codex Gateway" "http://127.0.0.1:8787/health" {
 if ($IncludeCodexAction) {
     Write-Section "Codex Action"
     try {
+        $tokenPath = if ($env:VOYAGER_CODEX_GATEWAY_TOKEN_FILE) { $env:VOYAGER_CODEX_GATEWAY_TOKEN_FILE } else { Join-Path $PSScriptRoot '..\runtime_artifacts\secrets\codex_gateway.token' }
+        $token = if ($env:VOYAGER_CODEX_GATEWAY_TOKEN) { $env:VOYAGER_CODEX_GATEWAY_TOKEN.Trim() } elseif (Test-Path -LiteralPath $tokenPath) { (Get-Content -LiteralPath $tokenPath -Raw).Trim() } else { '' }
+        if (-not $token) {
+            throw "Codex gateway token is unavailable at $tokenPath"
+        }
         $body = @{
             prompt = "Return exactly OK."
             model = "gpt-5.5"
@@ -186,7 +191,8 @@ if ($IncludeCodexAction) {
             source = "docker-runtime-check"
             priority = 0
         } | ConvertTo-Json
-        $response = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8787/codex/action" -ContentType "application/json" -Body $body -TimeoutSec 75
+        $headers = @{ Authorization = "Bearer $token" }
+        $response = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8787/codex/action" -Headers $headers -ContentType "application/json" -Body $body -TimeoutSec 75
         if ($response.ok -eq $true -and [string]$response.content) {
             Add-Ok "Codex action endpoint executed successfully"
         }

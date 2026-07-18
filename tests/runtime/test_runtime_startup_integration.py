@@ -107,11 +107,15 @@ class RuntimeStartupIntegrationTests(unittest.IsolatedAsyncioTestCase):
         for process in self.processes:
             if process.poll() is None:
                 process.terminate()
-                try:
-                    process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait(timeout=5)
+            try:
+                process.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.communicate(timeout=5)
+            if process.stdout is not None and not process.stdout.closed:
+                process.stdout.close()
+            if process.stderr is not None and not process.stderr.closed:
+                process.stderr.close()
 
     def start_health_process(self, port: int, *, ok: bool = True) -> subprocess.Popen[str]:
         script = textwrap.dedent(
@@ -188,6 +192,7 @@ class RealMainProcessStartupSmokeTests(unittest.TestCase):
     def setUp(self) -> None:
         self.processes: list[subprocess.Popen[str]] = []
         self.temp_dirs: list[tempfile.TemporaryDirectory[str]] = []
+        self.process_logs: dict[int, tuple[Path, Path]] = {}
 
     def tearDown(self) -> None:
         for process in self.processes:
@@ -199,7 +204,15 @@ class RealMainProcessStartupSmokeTests(unittest.TestCase):
                     process.kill()
                     process.wait(timeout=5)
         for temp_dir in self.temp_dirs:
-            temp_dir.cleanup()
+            deadline = time.time() + 5.0
+            while True:
+                try:
+                    temp_dir.cleanup()
+                    break
+                except PermissionError:
+                    if time.time() >= deadline:
+                        raise
+                    time.sleep(0.1)
 
     def test_real_main_process_smoke_contract_is_opt_in(self) -> None:
         source = (REPO_ROOT / "tests" / "runtime" / "test_runtime_startup_integration.py").read_text(encoding="utf-8")
@@ -210,8 +223,15 @@ class RealMainProcessStartupSmokeTests(unittest.TestCase):
 
         main_source = (REPO_ROOT / "main.py").read_text(encoding="utf-8")
         self.assertIn("EVELYN_INSTANCE_LOCK_PATH", main_source)
-        self.assertIn("async def control_page_health_handler", main_source)
-        self.assertIn('app.router.add_get("/health", control_page_health_handler)', main_source)
+        composition_source = (
+            REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "control_page_composition_runtime.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn("async def health(", composition_source)
+        self.assertIn('("GET", "/health", self.health)', composition_source)
+        server_runtime_source = (
+            REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "control_page_server_start_runtime.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn('"GET": app.router.add_get', server_runtime_source)
 
     def start_main_process(self, port: int) -> subprocess.Popen[str]:
         temp_dir = tempfile.TemporaryDirectory()
@@ -234,18 +254,22 @@ class RealMainProcessStartupSmokeTests(unittest.TestCase):
                 "EVELYN_INSTANCE_LOCK_PATH": str(temp_root / "evelyn-test.lock"),
             }
         )
-        process = subprocess.Popen(
-            [sys.executable, str(REPO_ROOT / "main.py")],
-            cwd=str(REPO_ROOT),
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
+        stdout_path = temp_root / "main.stdout.log"
+        stderr_path = temp_root / "main.stderr.log"
+        with stdout_path.open("w", encoding="utf-8") as stdout_handle, stderr_path.open(
+            "w", encoding="utf-8"
+        ) as stderr_handle:
+            process = subprocess.Popen(
+                [sys.executable, str(REPO_ROOT / "main.py")],
+                cwd=str(REPO_ROOT),
+                env=env,
+                stdout=stdout_handle,
+                stderr=stderr_handle,
+                text=True,
+            )
         self.processes.append(process)
+        self.process_logs[id(process)] = (stdout_path, stderr_path)
         if not wait_for_port(port, timeout_sec=90.0):
-            stdout = ""
-            stderr = ""
             if process.poll() is None:
                 process.terminate()
                 try:
@@ -253,10 +277,8 @@ class RealMainProcessStartupSmokeTests(unittest.TestCase):
                 except subprocess.TimeoutExpired:
                     process.kill()
                     process.wait(timeout=5)
-            try:
-                stdout, stderr = process.communicate(timeout=3)
-            except Exception:
-                pass
+            stdout = stdout_path.read_text(encoding="utf-8", errors="replace") if stdout_path.exists() else ""
+            stderr = stderr_path.read_text(encoding="utf-8", errors="replace") if stderr_path.exists() else ""
             raise AssertionError(
                 f"real main.py control page port {port} did not open; "
                 f"returncode={process.returncode}; stdout={stdout[-1200:]!r}; stderr={stderr[-1200:]!r}"

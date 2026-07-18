@@ -16,15 +16,21 @@ if str(RUNTIME_ROOT) not in sys.path:
     sys.path.insert(0, str(RUNTIME_ROOT))
 
 from evelyn_core.control_page_http import (  # noqa: E402
+    CONTROL_PAGE_CSRF_HEADER,
+    CONTROL_PAGE_CSRF_TOKEN,
     CONTROL_PAGE_NO_STORE_HEADERS,
     add_control_page_cors_headers,
     add_control_page_no_store_headers,
     build_control_page_health_payload,
     control_page_api_cors_applies,
+    control_page_origin_is_allowed,
     control_page_cors_middleware,
+    control_page_session_handler,
     control_page_file_response,
     control_page_json_response,
     resolve_control_page_asset_path,
+    reject_browser_origin_middleware,
+    request_control_page_host_is_allowed,
 )
 
 
@@ -72,16 +78,24 @@ class ControlPageHttpTests(unittest.TestCase):
         self.assertTrue(control_page_api_cors_applies("/api/control-page/state"))
         self.assertFalse(control_page_api_cors_applies("/health"))
 
-        api_response = add_control_page_cors_headers(web.Response(status=200), path="/api/control-page/state")
+        api_response = add_control_page_cors_headers(
+            web.Response(status=200),
+            path="/api/control-page/state",
+            origin="http://127.0.0.1:8799",
+        )
         health_response = add_control_page_cors_headers(web.Response(status=200), path="/health")
 
-        self.assertEqual(api_response.headers["Access-Control-Allow-Origin"], "*")
+        self.assertEqual(api_response.headers["Access-Control-Allow-Origin"], "http://127.0.0.1:8799")
+        self.assertNotEqual(api_response.headers["Access-Control-Allow-Origin"], "*")
+        self.assertIn(CONTROL_PAGE_CSRF_HEADER, api_response.headers["Access-Control-Allow-Headers"])
         self.assertNotIn("Access-Control-Allow-Origin", health_response.headers)
 
     def test_cors_middleware_short_circuits_options_for_control_page_api(self) -> None:
         class Request:
             method = "OPTIONS"
             path = "/api/control-page/state"
+            headers = {"Host": "127.0.0.1:8799", "Origin": "http://127.0.0.1:8799"}
+            scheme = "http"
 
         async def handler(_request):
             return web.Response(status=500)
@@ -90,6 +104,161 @@ class ControlPageHttpTests(unittest.TestCase):
 
         self.assertEqual(response.status, 204)
         self.assertEqual(response.headers["Access-Control-Allow-Methods"], "GET,POST,OPTIONS")
+
+    def test_cors_middleware_rejects_untrusted_browser_origin(self) -> None:
+        class Request:
+            method = "GET"
+            path = "/api/control-page/state"
+            headers = {"Host": "127.0.0.1:8799", "Origin": "https://evil.example"}
+            scheme = "http"
+
+        called = False
+
+        async def handler(_request):
+            nonlocal called
+            called = True
+            return web.Response(status=200)
+
+        response = asyncio.run(control_page_cors_middleware(Request(), handler))
+
+        self.assertEqual(response.status, 403)
+        self.assertFalse(called)
+        self.assertEqual(json.loads(response.text)["error"], "origin_not_allowed")
+        self.assertNotIn("Access-Control-Allow-Origin", response.headers)
+
+    def test_mutating_control_request_requires_csrf_token(self) -> None:
+        class MissingTokenRequest:
+            method = "POST"
+            path = "/api/control-page/shutdown"
+            headers = {"Host": "127.0.0.1:8799", "Origin": "http://127.0.0.1:8799"}
+            scheme = "http"
+
+        class ValidTokenRequest:
+            method = "POST"
+            path = "/api/control-page/shutdown"
+            headers = {
+                "Host": "127.0.0.1:8799",
+                "Origin": "http://127.0.0.1:8799",
+                "Content-Type": "application/json; charset=utf-8",
+                CONTROL_PAGE_CSRF_HEADER: CONTROL_PAGE_CSRF_TOKEN,
+            }
+            scheme = "http"
+
+        class NonJsonRequest:
+            method = "POST"
+            path = "/api/control-page/shutdown"
+            headers = {
+                "Host": "127.0.0.1:8799",
+                "Origin": "http://127.0.0.1:8799",
+                CONTROL_PAGE_CSRF_HEADER: CONTROL_PAGE_CSRF_TOKEN,
+            }
+            scheme = "http"
+
+        calls = 0
+
+        async def handler(_request):
+            nonlocal calls
+            calls += 1
+            return web.Response(status=202)
+
+        rejected = asyncio.run(control_page_cors_middleware(MissingTokenRequest(), handler))
+        non_json = asyncio.run(control_page_cors_middleware(NonJsonRequest(), handler))
+        accepted = asyncio.run(control_page_cors_middleware(ValidTokenRequest(), handler))
+
+        self.assertEqual(rejected.status, 403)
+        self.assertEqual(json.loads(rejected.text)["error"], "csrf_token_required")
+        self.assertEqual(non_json.status, 415)
+        self.assertEqual(json.loads(non_json.text)["error"], "json_content_type_required")
+        self.assertEqual(accepted.status, 202)
+        self.assertEqual(calls, 1)
+
+    def test_session_endpoint_returns_no_store_csrf_contract(self) -> None:
+        response = asyncio.run(control_page_session_handler(None))
+        payload = json.loads(response.text)
+
+        self.assertEqual(payload["csrfToken"], CONTROL_PAGE_CSRF_TOKEN)
+        self.assertEqual(payload["csrfHeader"], CONTROL_PAGE_CSRF_HEADER)
+        self.assertEqual(response.headers["Cache-Control"], CONTROL_PAGE_NO_STORE_HEADERS["Cache-Control"])
+
+    def test_origin_validation_accepts_same_origin_and_rejects_null(self) -> None:
+        same_origin = type(
+            "Request",
+            (),
+            {
+                "headers": {"Host": "localhost:8799", "Origin": "http://localhost:8799"},
+                "scheme": "http",
+            },
+        )()
+        null_origin = type(
+            "Request",
+            (),
+            {"headers": {"Host": "localhost:8799", "Origin": "null"}, "scheme": "http"},
+        )()
+
+        self.assertTrue(control_page_origin_is_allowed(same_origin))
+        self.assertFalse(control_page_origin_is_allowed(null_origin))
+
+    def test_dns_rebinding_host_is_rejected_even_when_origin_matches_host(self) -> None:
+        rebound_request = type(
+            "Request",
+            (),
+            {
+                "method": "GET",
+                "path": "/api/control-page/state",
+                "headers": {"Host": "evil.example:8799", "Origin": "http://evil.example:8799"},
+                "scheme": "http",
+            },
+        )()
+
+        self.assertFalse(request_control_page_host_is_allowed(rebound_request))
+        self.assertFalse(control_page_origin_is_allowed(rebound_request))
+
+        async def handler(_request):
+            return web.Response(status=200)
+
+        response = asyncio.run(control_page_cors_middleware(rebound_request, handler))
+        self.assertEqual(response.status, 403)
+        self.assertEqual(json.loads(response.text)["error"], "host_not_allowed")
+
+    def test_internal_api_rejects_browser_origin_but_allows_server_call(self) -> None:
+        browser_request = type(
+            "Request",
+            (),
+            {
+                "method": "POST",
+                "path": "/api/control-page/shutdown",
+                "headers": {"Origin": "http://127.0.0.1:8799", "Content-Type": "application/json"},
+            },
+        )()
+        server_request = type(
+            "Request",
+            (),
+            {"method": "POST", "path": "/api/control-page/chat", "headers": {"Content-Type": "application/json"}},
+        )()
+
+        async def handler(_request):
+            return web.Response(status=204)
+
+        rejected = asyncio.run(reject_browser_origin_middleware(browser_request, handler))
+        accepted = asyncio.run(reject_browser_origin_middleware(server_request, handler))
+
+        self.assertEqual(rejected.status, 403)
+        self.assertEqual(json.loads(rejected.text)["error"], "browser_origin_not_allowed")
+        self.assertEqual(accepted.status, 204)
+
+    def test_internal_api_rejects_non_json_mutation(self) -> None:
+        request = type(
+            "Request",
+            (),
+            {"method": "POST", "path": "/api/control-page/shutdown", "headers": {}},
+        )()
+
+        async def handler(_request):
+            return web.Response(status=204)
+
+        response = asyncio.run(reject_browser_origin_middleware(request, handler))
+        self.assertEqual(response.status, 415)
+        self.assertEqual(json.loads(response.text)["error"], "json_content_type_required")
 
     def test_health_payload_matches_bot_api_contract(self) -> None:
         self.assertEqual(

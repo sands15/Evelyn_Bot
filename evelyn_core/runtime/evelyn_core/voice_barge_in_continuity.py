@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 from typing import Any, Callable
+from dataclasses import dataclass
 
 
 VOICE_BARGE_IN_REASON_CODE = {
@@ -23,6 +24,82 @@ VOICE_BARGE_IN_REASON_LABEL = {
 VOICE_BARGE_IN_RESET_CONFIRM_KEYWORD = "confirm"
 VOICE_BARGE_IN_EVENT_START = "start"
 VOICE_BARGE_IN_EVENT_FINISH = "finish"
+
+
+@dataclass(frozen=True)
+class VoiceBargeInContinuityRuntimeDeps:
+    tracker: "VoiceBargeInContinuityTracker"
+    command_status: Callable[[bool], str]
+
+
+def parse_barge_in_reason_label_from_runtime(
+    raw_reason_code: str,
+    *,
+    deps: VoiceBargeInContinuityRuntimeDeps,
+) -> str:
+    return deps.tracker.parse_reason_label(raw_reason_code)
+
+
+def format_voice_barge_in_continuity_summary_from_runtime(
+    continuity: dict[str, Any],
+    *,
+    deps: VoiceBargeInContinuityRuntimeDeps,
+) -> str:
+    return deps.tracker.format_summary(continuity)
+
+
+def format_voice_barge_in_continuity_detail_lines_from_runtime(
+    continuity: dict[str, Any],
+    *,
+    deps: VoiceBargeInContinuityRuntimeDeps,
+) -> list[str]:
+    return deps.tracker.format_detail_lines(continuity, command_status=deps.command_status)
+
+
+def start_voice_barge_in_continuity_probe_from_runtime(
+    metrics: dict,
+    *,
+    source: str,
+    deps: VoiceBargeInContinuityRuntimeDeps,
+) -> None:
+    deps.tracker.start_probe(metrics, source=source)
+
+
+def build_voice_barge_in_continuity_snapshot_from_runtime(
+    *,
+    deps: VoiceBargeInContinuityRuntimeDeps,
+) -> dict[str, Any]:
+    return deps.tracker.snapshot()
+
+
+def reset_voice_barge_in_continuity_probe_from_runtime(
+    *,
+    reason: str = "",
+    deps: VoiceBargeInContinuityRuntimeDeps,
+) -> None:
+    deps.tracker.reset(reason=reason)
+
+
+def mark_voice_barge_in_continuity_probe_from_runtime(
+    metrics: dict,
+    *,
+    success: bool,
+    reason: str,
+    queued_sentence_count: int = 0,
+    reason_code: str | None = None,
+    reason_label: str | None = None,
+    event: str = VOICE_BARGE_IN_EVENT_FINISH,
+    deps: VoiceBargeInContinuityRuntimeDeps,
+) -> None:
+    deps.tracker.mark_probe(
+        metrics,
+        success=success,
+        reason=reason,
+        queued_sentence_count=queued_sentence_count,
+        reason_code=reason_code,
+        reason_label=reason_label,
+        event=event,
+    )
 
 CleanText = Callable[[str], str]
 CommandStatus = Callable[[bool], str]
@@ -400,10 +477,18 @@ class VoiceBargeInContinuityTracker:
 
 
 __all__ = [
+    "VoiceBargeInContinuityRuntimeDeps",
+    "build_voice_barge_in_continuity_snapshot_from_runtime",
+    "format_voice_barge_in_continuity_detail_lines_from_runtime",
+    "format_voice_barge_in_continuity_summary_from_runtime",
     "VOICE_BARGE_IN_EVENT_FINISH",
     "VOICE_BARGE_IN_EVENT_START",
     "VOICE_BARGE_IN_REASON_CODE",
     "VOICE_BARGE_IN_REASON_LABEL",
     "VOICE_BARGE_IN_RESET_CONFIRM_KEYWORD",
+    "mark_voice_barge_in_continuity_probe_from_runtime",
+    "parse_barge_in_reason_label_from_runtime",
     "VoiceBargeInContinuityTracker",
+    "reset_voice_barge_in_continuity_probe_from_runtime",
+    "start_voice_barge_in_continuity_probe_from_runtime",
 ]

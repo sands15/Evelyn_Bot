@@ -153,27 +153,29 @@ class ShutdownScriptContractTests(unittest.TestCase):
         self.assertLess(proxy_index, fallback_index)
 
     def test_main_control_page_exposes_shutdown_endpoint(self) -> None:
-        main_py = (REPO_ROOT / "main.py").read_text(encoding="utf-8")
+        composition = (
+            REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "control_page_composition_runtime.py"
+        ).read_text(encoding="utf-8")
         control_page_state = (
             REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "control_page_state.py"
         ).read_text(encoding="utf-8")
 
-        self.assertIn("async def control_page_shutdown_handler", main_py)
-        self.assertIn('app.router.add_post("/api/control-page/shutdown", control_page_shutdown_handler)', main_py)
-        self.assertIn('app.router.add_options("/api/control-page/shutdown", control_page_shutdown_handler)', main_py)
-        self.assertIn("handle_control_page_shutdown_request", main_py)
+        self.assertIn("async def shutdown(", composition)
+        self.assertIn('("POST", "/api/control-page/shutdown", self.shutdown)', composition)
+        self.assertIn('("OPTIONS", "/api/control-page/shutdown", self.shutdown)', composition)
+        self.assertIn("handle_control_page_shutdown_request", composition)
         self.assertIn('handle_input(guild, "/shutdown")', control_page_state)
 
     def test_shutdown_command_copy_is_runtime_scoped(self) -> None:
         control_page_tools = (
             REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "control_page_tools.py"
         ).read_text(encoding="utf-8")
-        page_js = (REPO_ROOT / "docs" / "assets" / "evelyn-page.js").read_text(encoding="utf-8")
-        combined = control_page_tools + page_js
+        page_html = (REPO_ROOT / "docs" / "index.html").read_text(encoding="utf-8")
+        combined = control_page_tools + page_html
 
         self.assertNotIn("Shut down the full Evelyn stack", combined)
         self.assertIn("Shut down Evelyn runtime", control_page_tools)
-        self.assertIn("Shut down Evelyn runtime", page_js)
+        self.assertIn("Shut down Evelyn runtime", page_html)
 
     def test_stack_shutdown_reply_does_not_claim_whole_wsl_stops(self) -> None:
         main_py = (REPO_ROOT / "main.py").read_text(encoding="utf-8")

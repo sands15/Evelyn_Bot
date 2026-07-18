@@ -7,8 +7,9 @@ import os
 import re
 import subprocess
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Awaitable, Callable
 from urllib.parse import urlparse
 
 from .config import RUNTIME_ARTIFACTS_ROOT
@@ -17,6 +18,128 @@ from .text import clean_text
 
 DEFAULT_CONNECT_TIMEOUT_SEC = float(os.getenv("RUNTIME_STATUS_CONTEXT_CONNECT_TIMEOUT_SEC", "0.18"))
 DEFAULT_MAX_ERROR_CHARS = int(os.getenv("RUNTIME_STATUS_CONTEXT_MAX_ERROR_CHARS", "160"))
+
+
+@dataclass
+class RuntimeStatusContextState:
+    cache: dict[str, Any] = field(default_factory=lambda: {"text": "", "cached_at": 0.0})
+    lock: asyncio.Lock | None = None
+
+
+@dataclass(frozen=True)
+class RuntimeStatusContextDeps:
+    enabled: bool
+    refresh_sec: float
+    control_page_host: str
+    control_page_port: int
+    llm_server_url: str
+    router_llm_url: str
+    summary_llm_url: str
+    omnivoice_server_url: str
+    minecraft_autonomy_service_port: int
+    voyager_action_backend: str
+    voyager_codex_gateway_port: int
+    get_control_page_runtime_services: Callable[[], Awaitable[dict]]
+    is_control_api_ready_from_runtime_services: Callable[[dict], bool]
+    probe_runtime_tcp_service: Callable[[str, str, int], Awaitable[tuple[str, bool]]]
+    load_runtime_gpu_status: Callable[[], tuple[str, bool]]
+    load_runtime_recent_errors: Callable[[], list[str]]
+    now: Callable[[], float]
+
+
+async def build_runtime_status_context_from_runtime(
+    *,
+    deps: RuntimeStatusContextDeps,
+    state: RuntimeStatusContextState,
+    force: bool = False,
+) -> str:
+    if not deps.enabled:
+        return ""
+
+    cached_at = float(state.cache.get("cached_at") or 0.0)
+    if not force and state.cache.get("text") and (deps.now() - cached_at) <= deps.refresh_sec:
+        return str(state.cache.get("text") or "")
+
+    if state.lock is None:
+        state.lock = asyncio.Lock()
+
+    async with state.lock:
+        cached_at = float(state.cache.get("cached_at") or 0.0)
+        if not force and state.cache.get("text") and (deps.now() - cached_at) <= deps.refresh_sec:
+            return str(state.cache.get("text") or "")
+
+        probes: list[tuple[str, str, int]] = [
+            ("bot/control", deps.control_page_host, deps.control_page_port),
+        ]
+        for label, url in (
+            ("main_llm", deps.llm_server_url),
+            ("router_llm", deps.router_llm_url),
+            ("sub_llm", deps.summary_llm_url),
+            ("tts", deps.omnivoice_server_url),
+        ):
+            target = runtime_status_port_from_url(url)
+            if target is not None:
+                probes.append((label, target[0], target[1]))
+        probes.append(("voyager_service", "127.0.0.1", deps.minecraft_autonomy_service_port))
+        if clean_text(str(deps.voyager_action_backend or "")).lower() == "codex-gateway":
+            probes.append(("codex_gateway", "127.0.0.1", deps.voyager_codex_gateway_port))
+
+        results = await asyncio.gather(
+            *(deps.probe_runtime_tcp_service(label, host, port) for label, host, port in probes),
+            return_exceptions=True,
+        )
+        status_parts: list[str] = []
+        service_down_labels: list[str] = []
+        for result in results:
+            if isinstance(result, tuple) and len(result) == 2:
+                label, ok = result
+                status_parts.append(f"{label}={'up' if ok else 'down'}")
+                if not ok:
+                    service_down_labels.append(label)
+
+        service_summary = ""
+        try:
+            services = await deps.get_control_page_runtime_services()
+            service_summary = compact_runtime_error(services.get("summary"), max_chars=120)
+            bot_api_ready = deps.is_control_api_ready_from_runtime_services(services)
+            if services and not bot_api_ready:
+                bot_api_reason = clean_text(
+                    str(services.get("botApiReason") or services.get("botApiState") or "unknown")
+                )
+                service_down_labels.append("bot_api" if not bot_api_reason else f"bot_api:{bot_api_reason}")
+        except Exception:
+            service_summary = ""
+        if service_summary:
+            status_parts.append(f"summary={service_summary}")
+
+        gpu_status, gpu_near_full = await asyncio.to_thread(deps.load_runtime_gpu_status)
+        if gpu_status:
+            status_parts.append("current_gpu_snapshot=" + gpu_status)
+        oom_signal = "yes" if gpu_near_full or service_down_labels else "no"
+        oom_reason = []
+        if gpu_near_full:
+            oom_reason.append("gpu_near_full")
+        if service_down_labels:
+            oom_reason.append("service_down=" + ",".join(service_down_labels[:4]))
+        status_parts.append(
+            "current_oom_signal="
+            + oom_signal
+            + (f" ({'; '.join(oom_reason)})" if oom_reason else "")
+        )
+
+        recent_errors = deps.load_runtime_recent_errors()
+        if recent_errors:
+            status_parts.append("recent_errors=" + " | ".join(recent_errors))
+            status_parts.append(
+                "recent_errors_are_historical=true; do_not_claim_current_oom_from_recent_errors_without_current_oom_signal=yes"
+            )
+        else:
+            status_parts.append("recent_errors=none")
+
+        text = "; ".join(part for part in status_parts if part)
+        state.cache["text"] = text
+        state.cache["cached_at"] = deps.now()
+        return text
 
 
 def runtime_status_port_from_url(url: str) -> tuple[str, int] | None:

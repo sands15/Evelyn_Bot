@@ -8,6 +8,7 @@ REPO_ROOT = next(path for path in Path(__file__).resolve().parents if (path / "m
 RUNTIME_ROOT = REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core"
 STT_SERVICE = RUNTIME_ROOT / "stt_service.py"
 STT_CLIENT = RUNTIME_ROOT / "stt_client.py"
+STT_TRANSCRIPTION_RUNTIME = RUNTIME_ROOT / "stt_transcription_runtime.py"
 MAIN = REPO_ROOT / "main.py"
 COMPOSE = REPO_ROOT / "docker-compose.fast-control.yml"
 
@@ -22,12 +23,13 @@ class SttServiceContractTests(unittest.TestCase):
         self.assertIn("Qwen3ASRModel.from_pretrained", source)
 
     def test_main_uses_remote_stt_when_url_is_configured(self) -> None:
-        source = MAIN.read_text(encoding="utf-8")
+        main_source = MAIN.read_text(encoding="utf-8")
+        runtime_source = STT_TRANSCRIPTION_RUNTIME.read_text(encoding="utf-8")
 
-        self.assertIn("STT_SERVICE_URL", source)
-        self.assertIn("transcribe_audio16k_via_service", source)
-        self.assertIn("[STT REMOTE DONE]", source)
-        self.assertIn("STT_SERVICE_FALLBACK_LOCAL", source)
+        self.assertIn("stt_service_url=STT_SERVICE_URL", main_source)
+        self.assertIn("transcribe_via_service=transcribe_audio16k_via_service", main_source)
+        self.assertIn("[STT REMOTE DONE]", runtime_source)
+        self.assertIn("stt_service_fallback_local", runtime_source)
 
     def test_stt_client_uses_compact_float32_base64_payload(self) -> None:
         source = STT_CLIENT.read_text(encoding="utf-8")

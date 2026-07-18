@@ -201,12 +201,12 @@ services:
     restart: "no"
     gpus: all
     environment:
-      NVIDIA_VISIBLE_DEVICES: "GPU-96c554e6-feef-2980-6722-efcb0af098f9"
+      NVIDIA_VISIBLE_DEVICES: "0"
       NVIDIA_DRIVER_CAPABILITIES: "compute,utility"
-      CUDA_VISIBLE_DEVICES: "GPU-96c554e6-feef-2980-6722-efcb0af098f9"
+      CUDA_VISIBLE_DEVICES: "0"
       MAIN_LLM_PORT: "9820"
     volumes:
-      - C:/Users/Admin/llama.cpp:/llama
+      - ${EVELYN_LLAMA_CPP_DIR:-${USERPROFILE}/llama.cpp}:/llama
     ports:
       - "127.0.0.1:9820:9820"
     command:
@@ -251,12 +251,12 @@ services:
     restart: "no"
     gpus: all
     environment:
-      NVIDIA_VISIBLE_DEVICES: "GPU-a352a7f9-1fcf-3d18-9973-6f9114addf7b"
+      NVIDIA_VISIBLE_DEVICES: "0"
       NVIDIA_DRIVER_CAPABILITIES: "compute,utility"
-      CUDA_VISIBLE_DEVICES: "GPU-a352a7f9-1fcf-3d18-9973-6f9114addf7b"
+      CUDA_VISIBLE_DEVICES: "0"
       ROUTER_LLM_PORT: "9822"
     volumes:
-      - C:/Users/Admin/llama.cpp:/llama
+      - ${EVELYN_LLAMA_CPP_DIR:-${USERPROFILE}/llama.cpp}:/llama
     ports:
       - "127.0.0.1:9822:9822"
     command:
@@ -265,7 +265,7 @@ services:
       - >-
         export LD_LIBRARY_PATH=/llama/build/bin:/usr/local/cuda/lib64:$$LD_LIBRARY_PATH;
         exec ./build/bin/llama-server
-        -m /llama/models/EXAONE-3.5-2.4B-Instruct-Q4_K_M.gguf
+        -m /llama/models/gemma-4-E2B-it-text-only-GGUF/gemma-4-E2B-it-Q4_K_M.gguf
         --host 0.0.0.0
         --port 9822
         --flash-attn on
@@ -290,12 +290,12 @@ services:
     restart: "no"
     gpus: all
     environment:
-      NVIDIA_VISIBLE_DEVICES: "GPU-a352a7f9-1fcf-3d18-9973-6f9114addf7b"
+      NVIDIA_VISIBLE_DEVICES: "0"
       NVIDIA_DRIVER_CAPABILITIES: "compute,utility"
-      CUDA_VISIBLE_DEVICES: "GPU-a352a7f9-1fcf-3d18-9973-6f9114addf7b"
+      CUDA_VISIBLE_DEVICES: "0"
       SUB_LLM_PORT: "9821"
     volumes:
-      - C:/Users/Admin/llama.cpp:/llama
+      - ${EVELYN_LLAMA_CPP_DIR:-${USERPROFILE}/llama.cpp}:/llama
     ports:
       - "127.0.0.1:9821:9821"
     command:
@@ -304,7 +304,7 @@ services:
       - >-
         export LD_LIBRARY_PATH=/llama/build/bin:/usr/local/cuda/lib64:$$LD_LIBRARY_PATH;
         exec ./build/bin/llama-server
-        -m /llama/models/EXAONE-3.5-7.8B-Instruct-IQ4_XS.gguf
+        -m /llama/models/gemma-4-E4B-it-text-only-GGUF/gemma-4-E4B-it-Q4_K_M.gguf
         --host 0.0.0.0
         --port 9821
         --flash-attn on
@@ -313,8 +313,8 @@ services:
         --threads 8
         --cache-type-k f16
         --cache-type-v f16
-        --reasoning on
-        --reasoning-budget 1
+        --reasoning off
+        --reasoning-budget 0
     healthcheck:
       test: >-
         bash -lc "cat < /dev/null > /dev/tcp/127.0.0.1/9821"
@@ -327,14 +327,14 @@ services:
     container_name: evelyn-tts
     profiles: ["tts"]
     build:
-      context: C:/Users/Admin/omnivoice-server
+      context: ${EVELYN_OMNIVOICE_SERVER_DIR:-${USERPROFILE}/omnivoice-server}
       dockerfile: Dockerfile.cuda
     restart: "no"
     gpus: all
     environment:
-      NVIDIA_VISIBLE_DEVICES: "GPU-96c554e6-feef-2980-6722-efcb0af098f9"
+      NVIDIA_VISIBLE_DEVICES: "0"
       NVIDIA_DRIVER_CAPABILITIES: "compute,utility"
-      CUDA_VISIBLE_DEVICES: "GPU-96c554e6-feef-2980-6722-efcb0af098f9"
+      CUDA_VISIBLE_DEVICES: "0"
       OMNIVOICE_HOST: "0.0.0.0"
       OMNIVOICE_PORT: "8880"
       OMNIVOICE_DEVICE: "cuda"
@@ -343,8 +343,8 @@ services:
       OMNIVOICE_MAX_CONCURRENT: "2"
       OMNIVOICE_LOG_LEVEL: "info"
     volumes:
-      - C:/Evelyn/omnivoice_profiles:/home/ubuntu/app/profiles
-      - C:/Users/Admin/omnivoice-server:/home/ubuntu/.cache/huggingface
+      - ${EVELYN_OMNIVOICE_PROFILES_DIR:-./omnivoice_profiles}:/home/ubuntu/app/profiles
+      - ${EVELYN_OMNIVOICE_SERVER_DIR:-${USERPROFILE}/omnivoice-server}:/home/ubuntu/.cache/huggingface
     ports:
       - "127.0.0.1:8880:8880"
     healthcheck:
@@ -363,9 +363,9 @@ services:
     restart: "no"
     gpus: all
     environment:
-      NVIDIA_VISIBLE_DEVICES: "GPU-96c554e6-feef-2980-6722-efcb0af098f9"
+      NVIDIA_VISIBLE_DEVICES: "0"
       NVIDIA_DRIVER_CAPABILITIES: "compute,utility"
-      CUDA_VISIBLE_DEVICES: "GPU-96c554e6-feef-2980-6722-efcb0af098f9"
+      CUDA_VISIBLE_DEVICES: "0"
       VISION_HOST: "0.0.0.0"
       VISION_PORT: "8891"
       VISION_DEVICE: "cuda:0"
@@ -377,12 +377,12 @@ services:
       VISION_OCR_UNLOAD_AFTER_REQUEST: "true"
       VISION_OCR_DTYPE: "auto"
       VISION_WATCH_RUN_OCR: "false"
-      EVELYN_HOST_PROJECT_ROOT: "C:/Evelyn"
+      EVELYN_HOST_PROJECT_ROOT: "${EVELYN_HOST_PROJECT_ROOT:-C:/Evelyn}"
       EVELYN_CONTAINER_PROJECT_ROOT: "/app"
     volumes:
       - ./runtime_artifacts:/app/runtime_artifacts
       - ./logs:/app/logs
-      - C:/Users/Admin/.cache/huggingface:/root/.cache/huggingface
+      - ${EVELYN_HUGGINGFACE_CACHE_DIR:-${USERPROFILE}/.cache/huggingface}:/root/.cache/huggingface
     ports:
       - "127.0.0.1:8891:8891"
     healthcheck:
@@ -401,9 +401,9 @@ services:
     restart: "no"
     gpus: all
     environment:
-      NVIDIA_VISIBLE_DEVICES: "GPU-96c554e6-feef-2980-6722-efcb0af098f9"
+      NVIDIA_VISIBLE_DEVICES: "0"
       NVIDIA_DRIVER_CAPABILITIES: "compute,utility"
-      CUDA_VISIBLE_DEVICES: "GPU-96c554e6-feef-2980-6722-efcb0af098f9"
+      CUDA_VISIBLE_DEVICES: "0"
       STT_HOST: "0.0.0.0"
       STT_PORT: "8892"
       STT_MODEL_NAME: "Qwen/Qwen3-ASR-1.7B"
@@ -414,7 +414,7 @@ services:
       STT_MAX_AUDIO_SEC: "30"
     volumes:
       - ./logs:/app/logs
-      - C:/Users/Admin/.cache/huggingface:/root/.cache/huggingface
+      - ${EVELYN_HUGGINGFACE_CACHE_DIR:-${USERPROFILE}/.cache/huggingface}:/root/.cache/huggingface
     ports:
       - "127.0.0.1:8892:8892"
     healthcheck:
@@ -444,8 +444,8 @@ services:
     volumes:
       - ./runtime_artifacts:/app/runtime_artifacts
       - ./logs:/app/logs
-      - C:/Users/Admin/.codex/auth.json:/root/.codex/auth.json:ro
-      - C:/Users/Admin/.codex/config.toml:/root/.codex/config.toml:ro
+      - ${EVELYN_CODEX_AUTH_FILE:-${USERPROFILE}/.codex/auth.json}:/root/.codex/auth.json:ro
+      - ${EVELYN_CODEX_CONFIG_FILE:-${USERPROFILE}/.codex/config.toml}:/root/.codex/config.toml:ro
     ports:
       - "127.0.0.1:8787:8787"
     command: ["python", "-m", "evelyn_core.codex_gateway_server", "--host", "0.0.0.0", "--port", "8787"]

@@ -119,11 +119,11 @@ TTS_PLAYBACK_START_LOOKAHEAD_TIMEOUT_MS = float(os.getenv("TTS_PLAYBACK_START_LO
 # 메모리 업데이트와 cognitive 판단에 쓰는 서브 LLM 서버 엔드포인트.
 SUMMARY_LLM_URL = os.getenv("SUMMARY_LLM_URL", "http://127.0.0.1:9821/v1/chat/completions")
 # 요약/상황판단용 서브 모델 이름.
-SUMMARY_MODEL_NAME = os.getenv("SUMMARY_MODEL_NAME", "EXAONE-3.5-7.8B-Instruct-IQ4_XS.gguf")
+SUMMARY_MODEL_NAME = os.getenv("SUMMARY_MODEL_NAME", "gemma-4-E4B-it-Q4_K_M-text-only")
 # 라우터 LLM 서버 엔드포인트.
 ROUTER_LLM_URL = os.getenv("ROUTER_LLM_URL", "http://127.0.0.1:9822/v1/chat/completions")
 # 라우터 모델 이름.
-ROUTER_MODEL_NAME = os.getenv("ROUTER_MODEL_NAME", "EXAONE-3.5-2.4B-Instruct-Q4_K_M.gguf")
+ROUTER_MODEL_NAME = os.getenv("ROUTER_MODEL_NAME", "gemma-4-E2B-it-Q4_K_M-text-only")
 # router LLM 사용 여부.
 ROUTER_LLM_ENABLED = _env_flag("ROUTER_LLM_ENABLED", "true")
 # route 분류 최대 토큰 수.
@@ -353,11 +353,15 @@ VOICE_BOTTLENECK_LOGS = os.getenv("VOICE_BOTTLENECK_LOGS", "true").lower() == "t
 # 콘솔을 STT/TTS 핵심 로그 위주로 줄일지 여부.
 VOICE_CONSOLE_ONLY_STT_AND_REPLY = os.getenv("VOICE_CONSOLE_ONLY_STT_AND_REPLY", "false").lower() == "true"
 # WAV 디버그 아티팩트를 저장할지 여부.
-VOICE_DEBUG_SAVE_AUDIO = os.getenv("VOICE_DEBUG_SAVE_AUDIO", "true").lower() == "true"
+VOICE_DEBUG_SAVE_AUDIO = os.getenv("VOICE_DEBUG_SAVE_AUDIO", "false").lower() == "true"
 # WAV 디버그 아티팩트 루트 디렉터리.
 VOICE_DEBUG_AUDIO_DIR = os.getenv("VOICE_DEBUG_AUDIO_DIR", "debug_audio")
 # 길드별 디버그 WAV 최대 보관 개수.
 VOICE_DEBUG_MAX_FILES_PER_GUILD = int(os.getenv("VOICE_DEBUG_MAX_FILES_PER_GUILD", "200"))
+# 음성 디버그 묶음(원본/STT/JSON) 보존 기간과 길드별 총량 상한.
+VOICE_DEBUG_MAX_AGE_DAYS = float(os.getenv("VOICE_DEBUG_MAX_AGE_DAYS", "7"))
+VOICE_DEBUG_MAX_TOTAL_MB_PER_GUILD = int(os.getenv("VOICE_DEBUG_MAX_TOTAL_MB_PER_GUILD", "256"))
+VOICE_DEBUG_PRESERVE_NEWEST = int(os.getenv("VOICE_DEBUG_PRESERVE_NEWEST", "10"))
 
 
 # 대화 히스토리에 유지할 총 턴 수 상한.

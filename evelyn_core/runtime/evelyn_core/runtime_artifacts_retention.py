@@ -73,7 +73,7 @@ class CleanupPlan:
 
 
 DEFAULT_RETENTION_RULES: tuple[RetentionRule, ...] = (
-    RetentionRule("logs", ("logs/*.log",), max_age_days=14, max_total_bytes=50 * 1024 * 1024, preserve_newest=2),
+    RetentionRule("logs", ("logs/*.log*",), max_age_days=14, max_total_bytes=100 * 1024 * 1024, preserve_newest=1),
     RetentionRule("turn_trace", ("turn_trace/*.jsonl",), max_age_days=30, max_total_bytes=100 * 1024 * 1024, preserve_newest=7),
     RetentionRule("benchmarks", ("benchmarks/*.jsonl",), max_age_days=30, max_total_bytes=20 * 1024 * 1024, preserve_newest=3),
     RetentionRule("memory_writebehind", ("memory/*.jsonl",), max_age_days=30, max_total_bytes=20 * 1024 * 1024, preserve_newest=3),

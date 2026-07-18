@@ -13,6 +13,7 @@ from urllib.parse import quote
 
 from aiohttp import ClientConnectorError, ClientSession, ClientTimeout, web
 
+from .control_page_http import control_page_cors_middleware, control_page_session_handler
 from .control_page_contracts import (
     build_control_page_panel_state_payload,
     local_restart_requested_reply,
@@ -364,7 +365,7 @@ def build_boot_progress_from_ports(ports: dict[str, bool]) -> dict[str, Any]:
     done_count = sum(1 for step in steps if step["done"])
     percent = round((done_count / max(1, len(steps))) * 100)
     current = next((step for step in steps if not step["done"]), steps[-1])
-    phase = "전체 서버 준비 완료" if percent >= 100 else f"{current['label']} 대기 중"
+    phase = "핵심 서비스 준비 완료" if percent >= 100 else f"{current['label']} 대기 중"
     return {
         "percent": percent,
         "phase": phase,
@@ -547,19 +548,6 @@ def schedule_local_stack_restart(delay_ms: int = 500) -> tuple[bool, str]:
         return True, "local restart scheduled"
     except Exception as exc:
         return False, repr(exc)
-
-
-@web.middleware
-async def cors_middleware(request: web.Request, handler: Any) -> web.StreamResponse:
-    if request.method == "OPTIONS" and request.path.startswith("/api/control-page/"):
-        response: web.StreamResponse = web.Response(status=204)
-    else:
-        response = await handler(request)
-    if request.path.startswith("/api/control-page/"):
-        response.headers["Access-Control-Allow-Origin"] = "*"
-        response.headers["Access-Control-Allow-Methods"] = "GET,POST,OPTIONS"
-        response.headers["Access-Control-Allow-Headers"] = "Content-Type"
-    return response
 
 
 async def index_handler(_: web.Request) -> web.StreamResponse:
@@ -1007,11 +995,12 @@ async def icon_handler(request: web.Request) -> web.StreamResponse:
 
 
 def create_app() -> web.Application:
-    app = web.Application(middlewares=[cors_middleware])
+    app = web.Application(middlewares=[control_page_cors_middleware])
     app.router.add_get("/", index_handler)
     app.router.add_get("/health", health_handler)
     app.router.add_get("/assets/{asset_path:.*}", asset_handler)
     app.router.add_get("/api/control-page/state", state_handler)
+    app.router.add_get("/api/control-page/session", control_page_session_handler)
     app.router.add_get("/api/control-page/runtime-health", runtime_health_handler)
     app.router.add_post("/api/control-page/runtime-health/override", runtime_health_override_handler)
     app.router.add_get("/api/control-page/runtime-manifest", runtime_manifest_handler)

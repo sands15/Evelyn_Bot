@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
 from .autonomy import AutonomyExecutor
@@ -182,3 +183,40 @@ class RoutedAutonomyExecutor:
         if isinstance(result, dict):
             result.setdefault("domain", domain)
         return result
+
+
+def get_routed_autonomy_executor_from_runtime(
+    guild_id: int | None,
+    *,
+    autonomy_engines: dict[int, Any],
+    executor_type: type,
+) -> Any | None:
+    if guild_id is None:
+        return None
+    engine = autonomy_engines.get(guild_id)
+    if engine is None:
+        return None
+    executor = getattr(engine, "executor", None)
+    return executor if isinstance(executor, executor_type) else None
+
+
+@dataclass(frozen=True)
+class ResolveRouteExecutorRuntimeDeps:
+    get_autonomy_engine: Callable[[int], Any]
+    create_autonomy_engine: Callable[[int], Any]
+
+
+def resolve_route_executor_from_runtime(
+    guild_id: int | None,
+    route_name: str,
+    *,
+    deps: ResolveRouteExecutorRuntimeDeps,
+) -> Any:
+    if guild_id is None:
+        return None
+    engine = deps.get_autonomy_engine(guild_id)
+    if engine is None:
+        if route_name != "minecraft":
+            return None
+        engine = deps.create_autonomy_engine(guild_id)
+    return getattr(engine.executor, "executors", {}).get(route_name)

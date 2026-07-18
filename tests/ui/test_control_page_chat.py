@@ -9,7 +9,6 @@ from pathlib import Path
 REPO_ROOT = next(path for path in Path(__file__).resolve().parents if (path / "main.py").exists())
 CONTROL_PAGE = REPO_ROOT / "docs" / "index.html"
 CONTROL_BOOT_PROGRESS_JS = REPO_ROOT / "docs" / "assets" / "evelyn-boot-progress.js"
-CONTROL_PAGE_JS = REPO_ROOT / "docs" / "assets" / "evelyn-page.js"
 CONTROL_PAGE_CSS = REPO_ROOT / "docs" / "assets" / "evelyn-page.css"
 
 
@@ -18,7 +17,6 @@ class ControlPageChatTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.html = CONTROL_PAGE.read_text(encoding="utf-8")
         cls.boot_js = CONTROL_BOOT_PROGRESS_JS.read_text(encoding="utf-8")
-        cls.js = CONTROL_PAGE_JS.read_text(encoding="utf-8")
         cls.css = CONTROL_PAGE_CSS.read_text(encoding="utf-8")
 
     def test_chat_log_renders_state_messages(self) -> None:
@@ -45,23 +43,25 @@ class ControlPageChatTests(unittest.TestCase):
         self.assertIn("function hideNewChatMessageNotice()", self.html)
         self.assertIn("if (previousCount > 0 && hasNewMessages) {", self.html)
         self.assertIn("if (isChatScrolledNearBottom())", self.html)
-        self.assertIn("chatSignature(rows)", self.js)
-        self.assertIn("showNewChatMessageNotice()", self.js)
-        self.assertIn("dom.chatNewMessageRow", self.js)
+        self.assertIn("function chatSignature(messages)", self.html)
+        self.assertIn("showNewChatMessageNotice();", self.html)
+        self.assertIn("chatNewMessageRow", self.html)
 
     def test_send_uses_conversation_log_instead_of_single_bubble_only(self) -> None:
         self.assertIn("appendChatMessage({", self.html)
         self.assertNotIn('lastBubble.querySelector(".caption").textContent = text;', self.html)
 
+    def test_mutating_requests_use_control_page_csrf_session(self) -> None:
+        self.assertIn('"/api/control-page/session"', self.html)
+        self.assertIn('"X-Evelyn-CSRF-Token"', self.html)
+        self.assertIn('"Content-Type"] =', self.html)
+        self.assertIn('response.status === 403 && mutating', self.html)
+
     def test_user_display_name_is_not_mojibake(self) -> None:
         self.assertIn('author: "정훈"', self.html)
-        self.assertIn('"정훈"', self.js)
         self.assertIn("function normalizeChatAuthor(author, role)", self.html)
-        self.assertIn("function normalizeDisplayAuthor(author, role)", self.js)
         self.assertIn("normalizeChatAuthor(message.author || fallbackAuthor, normalizedRole)", self.html)
-        self.assertIn("normalizeDisplayAuthor(row.author, role)", self.js)
         self.assertNotIn('?뺥썕", text', self.html)
-        self.assertNotIn('?뺥썕", text', self.js)
 
     def test_control_page_asset_javascript_parses(self) -> None:
         node = shutil.which("node")
@@ -75,10 +75,13 @@ class ControlPageChatTests(unittest.TestCase):
             check=False,
         )
         self.assertEqual(boot_result.returncode, 0, boot_result.stderr + boot_result.stdout)
+        inline_script = self.html.split("<script>", 1)[1].split("</script>", 1)[0]
         result = subprocess.run(
-            [node, "--check", str(CONTROL_PAGE_JS)],
+            [node, "--check", "-"],
             cwd=REPO_ROOT,
+            input=inline_script,
             text=True,
+            encoding="utf-8",
             capture_output=True,
             check=False,
         )
@@ -149,6 +152,19 @@ class ControlPageChatTests(unittest.TestCase):
         self.assertIn("app.style.removeProperty(\"--custom-wallpaper\");", self.html)
         self.assertIn("localStorage.removeItem(\"evelynControlWallpaper\");", self.html)
 
+    def test_wallpaper_uses_persistent_blob_storage_and_validates_images(self) -> None:
+        self.assertIn('id="wallpaperPicker"', self.html)
+        self.assertIn('const WALLPAPER_DB_NAME = "evelynControlPage"', self.html)
+        self.assertIn('const WALLPAPER_STORE_KEY = "wallpaper"', self.html)
+        self.assertIn("function openWallpaperDatabase()", self.html)
+        self.assertIn("async function storeWallpaper(file)", self.html)
+        self.assertIn("async function restoreWallpaper()", self.html)
+        self.assertIn("async function applyWallpaperBlob(blob)", self.html)
+        self.assertIn("await decodedWallpaperUrl(blob)", self.html)
+        self.assertIn("URL.createObjectURL(blob)", self.html)
+        self.assertIn("await storeWallpaper(file)", self.html)
+        self.assertIn("await deleteStoredWallpaper()", self.html)
+
     def test_boot_splash_hides_only_when_components_are_ready(self) -> None:
         self.assertIn('<script src="./assets/evelyn-boot-progress.js"></script>', self.html)
         self.assertIn("window.EvelynBootProgress =", self.boot_js)
@@ -175,27 +191,14 @@ class ControlPageChatTests(unittest.TestCase):
         self.assertIn("scheduleBootProgressPolling(payload);", self.html)
         self.assertIn("scheduleBootProgressPolling(null);", self.html)
         self.assertIn("bootProgressPollTimer = window.setTimeout(() =>", self.html)
-        self.assertIn("function hasReadyRuntimeServices(payload)", self.js)
-        self.assertIn("return window.EvelynBootProgress.hasReadyRuntimeServices(payload);", self.js)
-        self.assertIn("return window.EvelynBootProgress.fromRuntimeServices(payload);", self.js)
-        self.assertIn("return window.EvelynBootProgress.isReady(payload);", self.js)
-        self.assertIn("const progress = window.EvelynBootProgress.progressFromPayload(payload);", self.js)
-        self.assertIn("function bootProgressFromRuntimeServices(payload)", self.js)
-        self.assertIn("function shouldRevealControlSurfaceDuringBoot(payload)", self.js)
-        self.assertIn("shouldRevealControlSurfaceDuringBoot(payload)", self.js)
-        self.assertIn('setApiBootProgress(componentsReady ? 100 : percent, componentsReady ? "Control Ready" : phase, { hide: componentsReady });', self.js)
-        self.assertNotIn("const apiConnected = payload.ok !== false;", self.js)
-        self.assertNotIn("hide: apiConnected", self.js)
+        self.assertNotIn("const apiConnected = payload.ok !== false;", self.html)
+        self.assertNotIn("hide: apiConnected", self.html)
 
     def test_runtime_service_health_is_rendered_without_replacing_legacy_services(self) -> None:
-        self.assertIn("function runtimeHealthFromPayload(payload)", self.js)
-        self.assertIn("function runtimeHealthIssueText(health)", self.js)
-        self.assertIn("const serviceHealth = runtimeHealthFromPayload(payload);", self.js)
-        self.assertIn("const runtimeIssue = runtimeHealthHasIssue(serviceHealth);", self.js)
-        self.assertIn("runtime.serviceHealth || payload.serviceHealth", self.js)
-        self.assertIn("runtimeIssueDetail || services.codexError || services.voyagerError", self.js)
         self.assertIn('id="runtimeHealthLine"', self.html)
         self.assertIn("function runtimeHealthText(payload)", self.html)
+        self.assertIn("function runtimeHealthObject(payload)", self.html)
+        self.assertIn("runtime.serviceHealth || payload.serviceHealth", self.html)
         self.assertIn("runtimeHealthLine.textContent = runtimeHealthText(state);", self.html)
 
     def test_runtime_health_diagnosis_map_covers_required_codes(self) -> None:
@@ -217,26 +220,29 @@ class ControlPageChatTests(unittest.TestCase):
             "VOYAGER_TASK_RECOVERY_REQUIRED",
             "VOYAGER_RUNTIME_RECOVERY_REQUIRED",
         ):
-            self.assertIn(f"{code}:", self.js)
-        self.assertIn("runtimeHealthCodeText(health)", self.js)
+            self.assertIn(f"{code}:", self.html)
+        self.assertIn("runtimeHealthCodeTextFromCode(primary.code)", self.html)
 
     def test_runtime_health_messages_are_readable_and_prioritized(self) -> None:
-        self.assertIn("Control-Page is up, but Bot API is down.", self.js)
-        self.assertIn("Control-Page is open, but Bot API is not responding.", self.js)
-        self.assertIn("Bot API is partially responding or failing some requests.", self.js)
-        self.assertIn("Control-Page server is not responding.", self.js)
-        self.assertIn("Main LLM is not responding.", self.js)
-        self.assertIn("Router LLM is not responding.", self.js)
-        self.assertIn("Sub LLM is not responding.", self.js)
-        self.assertIn("TTS is not responding.", self.js)
-        self.assertIn("Vision is not responding.", self.js)
-        self.assertIn("Voyager is not responding.", self.js)
-        self.assertIn("Codex Gateway is not responding.", self.js)
-        self.assertIn("Codex Gateway action execution failed.", self.js)
-        self.assertIn("Voyager task contract is unverified.", self.js)
-        self.assertIn("Voyager task contract failed.", self.js)
-        self.assertIn("Voyager task recovery is required.", self.js)
-        self.assertIn("Voyager runtime recovery is required.", self.js)
+        for message in (
+            "Control-Page is up, but Bot API is down.",
+            "Control-Page is open, but Bot API is not responding.",
+            "Bot API is partially responding or failing some requests.",
+            "Control-Page server is not responding.",
+            "Main LLM is not responding.",
+            "Router LLM is not responding.",
+            "Sub LLM is not responding.",
+            "TTS is not responding.",
+            "Vision is not responding.",
+            "Voyager is not responding.",
+            "Codex Gateway is not responding.",
+            "Codex Gateway action execution failed.",
+            "Voyager task contract is unverified.",
+            "Voyager task contract failed.",
+            "Voyager task recovery is required.",
+            "Voyager runtime recovery is required.",
+        ):
+            self.assertIn(message, self.html)
 
     def test_contract_timeline_renders_voyager_contract_diagnostics(self) -> None:
         self.assertIn('id="contractTimelineStatus"', self.html)
@@ -246,110 +252,43 @@ class ControlPageChatTests(unittest.TestCase):
         self.assertIn("function contractTimelineDiagnostics(payload)", self.html)
         self.assertIn("function renderContractTimeline(payload)", self.html)
         self.assertIn("renderContractTimeline(state);", self.html)
-        self.assertIn("contractTimelineDiagnostics(health)", self.js)
-        self.assertIn("function renderContractTimeline(health)", self.js)
-        self.assertIn("renderContractTimeline(serviceHealth);", self.js)
-        self.assertIn('code.startsWith("VOYAGER_TASK_CONTRACT")', self.js)
-        self.assertIn('code === "VOYAGER_RUNTIME_RECOVERY_REQUIRED"', self.js)
-        self.assertIn("dom.contractTimelineList", self.js)
+        self.assertIn('code.startsWith("VOYAGER_TASK_CONTRACT")', self.html)
+        self.assertIn('code === "VOYAGER_RUNTIME_RECOVERY_REQUIRED"', self.html)
+        self.assertIn("contractTimelineList.innerHTML", self.html)
 
-    def test_runtime_status_summary_uses_readable_text(self) -> None:
-        self.assertIn('issues.push("Runtime: " + runtimeIssue);', self.js)
-        self.assertIn('cleanDisplayText(runtimeIssueText, "Check runtime state.")', self.js)
-        self.assertIn('cleanDisplayText(runtimeIssueDetail, "Check runtime diagnosis.")', self.js)
-        self.assertIn('dom.operatorRuntimeTitle.textContent = runtimeIssue', self.js)
-        self.assertIn("const controlPlane = runtime.controlPlane || {};", self.js)
-        self.assertIn("runtimeIssueText || controlPlane.statusText || payload.statusText", self.js)
-        self.assertIn("function controlPlaneBotTimestampText(controlPlane)", self.js)
-        self.assertIn("Bot API state last OK", self.js)
-        self.assertIn("Bot API checked", self.js)
-        self.assertIn("botTimestampText ? statusText +", self.js)
-
-    def test_control_page_asset_has_readable_fallback_copy(self) -> None:
-        self.assertIn("No inventory snapshot yet.", self.js)
-        self.assertIn('brief.issueTitle || "Attention"', self.js)
-        self.assertIn("No issue details available.", self.js)
-        self.assertIn("No recent activity yet.", self.js)
-        self.assertIn('aria-label="Reset node scale to 1.00x">\' + escapeHtml(scale.toFixed(2)) + "x</button>"', self.js)
-        self.assertIn('text.includes("Evelyn status")', self.js)
-        for broken in (
-            "?쒖떆",
-            "?뱀씠",
-            "?꾩쭅",
-            "數?",
-            "Evelyn ?곹깭",
-            "二쇱쓽",
-        ):
-            self.assertNotIn(broken, self.js)
+    def test_runtime_status_summary_uses_active_health_payload(self) -> None:
+        self.assertIn("const runtime = (payload && payload.runtime) || {};", self.html)
+        self.assertIn("const health = runtime.serviceHealth || payload.serviceHealth || null;", self.html)
+        self.assertIn("const diagnostics = Array.isArray(health.diagnostics) ? health.diagnostics : [];", self.html)
+        self.assertIn("return String(health.summary || health.overallState || \"ready\");", self.html)
 
     def test_runtime_repair_action_text_uses_readable_copy(self) -> None:
-        self.assertIn('repairActionLabel: "Preview Bot API restart"', self.js)
-        self.assertIn('repairActionLabel: "Preview Bot API health repair"', self.js)
-        self.assertIn('repairActionLabel: "Preview Control-Page restart"', self.js)
-        self.assertIn('repairActionLabel: "Preview Main LLM repair"', self.js)
-        self.assertIn('repairActionLabel: "Preview Router LLM repair"', self.js)
-        self.assertIn('repairActionLabel: "Preview Sub LLM repair"', self.js)
-        self.assertIn('repairActionLabel: "Preview TTS repair"', self.js)
-        self.assertIn('repairActionLabel: "Preview Voyager repair"', self.js)
-        self.assertIn('repairActionLabel: "Preview Codex Gateway repair"', self.js)
-        self.assertIn('main_llm: "Preview Main LLM repair"', self.js)
-        self.assertIn('voyager: "Preview Voyager repair"', self.js)
-        self.assertIn('codex_gateway: "Preview Codex Gateway repair"', self.js)
-        self.assertIn("is-repair-preview", self.js)
-        self.assertIn("requestRuntimeRepairPreview(button)", self.js)
-        self.assertIn("requestRuntimeRepairApply(button)", self.js)
+        for label in (
+            "Preview Bot API restart",
+            "Preview Bot API health repair",
+            "Preview Control-Page restart",
+            "Preview Main LLM repair",
+            "Preview Router LLM repair",
+            "Preview Sub LLM repair",
+            "Preview TTS repair",
+            "Preview Voyager repair",
+            "Preview Codex Gateway repair",
+        ):
+            self.assertIn(label, self.html)
+        self.assertIn("is-repair-preview", self.html)
+        self.assertIn("async function requestRuntimeRepairPreview()", self.html)
+        self.assertIn("async function requestRuntimeRepairApply()", self.html)
 
     def test_runtime_repair_preview_status_copy_is_readable(self) -> None:
-        self.assertIn('escapeHtml(item.label || "Preview repair")', self.js)
-        self.assertIn('"Ready to start: "', self.js)
-        self.assertIn('"Preview only: "', self.js)
-        self.assertIn('"Repair preview failed: "', self.js)
-        self.assertIn('button.textContent = "Previewing..."', self.js)
-        self.assertIn('button.textContent = previousText || "Preview repair"', self.js)
-        self.assertIn('button.textContent = "Start: "', self.js)
-        self.assertIn('window.confirm("Start repair for " + serviceId + "?")', self.js)
-        self.assertIn('button.textContent = "Starting..."', self.js)
-        self.assertIn('const text = "Repair failed: " + error.message;', self.js)
-        self.assertIn('button.textContent = previousText || "Start repair"', self.js)
-        self.assertIn('dom.systemSummaryPill.textContent = ok ? "Ready" : "Preview failed";', self.js)
-        self.assertIn('dom.systemSummaryPill.textContent = result.ok ? "Repair started" : "Repair failed";', self.js)
-
-    def test_runtime_repair_action_uses_full_services_priority(self) -> None:
-        self.assertIn("const RUNTIME_REPAIR_SERVICE_PRIORITY =", self.js)
-        self.assertIn('"main_llm"', self.js)
-        self.assertIn('"router_llm"', self.js)
-        self.assertIn('"sub_llm"', self.js)
-        self.assertIn('"tts"', self.js)
-        self.assertIn('"bot_api"', self.js)
-        self.assertIn('"control_page"', self.js)
-        self.assertIn('"voyager"', self.js)
-        self.assertIn('"codex_gateway"', self.js)
-        self.assertIn("function runtimeRepairBlockingServices(health)", self.js)
-        self.assertIn("const blockingServices = runtimeRepairBlockingServices(health);", self.js)
-        self.assertIn("const preferred = blockingServices[0];", self.js)
-        self.assertIn("runtimeHealthSummary:", self.js)
-        self.assertIn("runtimeRepairSummaryForBlockingServices(blockingServices)", self.js)
-        self.assertIn("recommendedOrder: blockingServices", self.js)
-
-    def test_runtime_repair_action_mentions_main_llm_first_and_follow_up(self) -> None:
-        self.assertIn("Preview Main LLM repair", self.js)
-        self.assertIn("return `Health check recommends repairing ${firstName} first.`", self.js)
-        self.assertIn("Recheck ${followUp[0]} after ${firstName}.", self.js)
+        self.assertIn("return `Ready to start: ${commandText}`;", self.html)
+        self.assertIn("return `Preview failed: ${message}`;", self.html)
+        self.assertIn('button.textContent = "Preview checked"', self.html)
+        self.assertIn('button.textContent = "Preview failed"', self.html)
+        self.assertIn("if (!window.confirm(`Start ${action.serviceId} repair launcher?`))", self.html)
+        self.assertIn('setRuntimeRepairPreviewStatus("Starting repair launcher...")', self.html)
+        self.assertIn("setRuntimeRepairPreviewStatus(`Repair start failed: ${error.message}`)", self.html)
 
     def test_runtime_repair_preview_uses_dry_run_ui_button(self) -> None:
-        self.assertIn("function runtimeRepairActionFromPayload(payload)", self.js)
-        self.assertIn("repairPreview: true", self.js)
-        self.assertIn('data-runtime-repair-preview="1"', self.js)
-        self.assertIn("function requestRuntimeRepairPreview(button)", self.js)
-        self.assertIn("function requestRuntimeRepairApply(button)", self.js)
-        self.assertIn('fetchApi("/api/control-page/runtime-repair/preview"', self.js)
-        self.assertIn('fetchApi("/api/control-page/runtime-repair/apply"', self.js)
-        self.assertIn("JSON.stringify({ actionId, serviceId, dryRun: true })", self.js)
-        self.assertIn("confirmToken", self.js)
-        self.assertIn("window.confirm", self.js)
-        self.assertIn("function handleQuickActionClick(event)", self.js)
-        self.assertIn('event.target.closest("[data-runtime-repair-apply]")', self.js)
-        self.assertIn("dom.primaryActionRow.addEventListener(\"click\", handleQuickActionClick)", self.js)
         self.assertIn(".quick-command.is-repair-preview", self.css)
         self.assertIn(".quick-command.is-repair-apply", self.css)
         self.assertIn('id="quick-command-row"', self.html)

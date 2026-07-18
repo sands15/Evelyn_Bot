@@ -15,9 +15,12 @@ from evelyn_core.voice_stt_flow import (  # noqa: E402
     apply_strict_wake_confirm_policy,
     build_final_transcript_flow,
     decide_final_wake_veto,
+    get_matching_speculative_policy_from_runtime,
     interpret_wake_probe_result,
+    remember_speculative_policy_from_runtime,
     run_full_stt_with_optional_rescore,
     run_partial_stt_flow,
+    speculate_from_committed_stt_from_runtime,
 )
 
 
@@ -108,6 +111,63 @@ class VoiceSttFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.wake_alias, "evelyn")
         self.assertIsNone(result.wake_reject_reason)
         self.assertTrue(result.near_miss)
+
+    def test_speculate_from_committed_stt_requires_speaker_and_policy(self) -> None:
+        result = speculate_from_committed_stt_from_runtime(
+            "  continue the work  ",
+            {"owner_user_id": 7},
+            clean_text=lambda text: str(text).strip(),
+            fast_path_policy=lambda text, source, state: {"text": text, "source": source, "owner": state["owner_user_id"]},
+            monotonic=lambda: 123.0,
+        )
+
+        self.assertEqual(result["text"], "continue the work")
+        self.assertEqual(result["policy"]["source"], "voice")
+        self.assertEqual(result["prepared_at"], 123.0)
+        self.assertIsNone(
+            speculate_from_committed_stt_from_runtime(
+                "short",
+                {"owner_user_id": 7},
+                clean_text=lambda text: str(text).strip(),
+                fast_path_policy=lambda *_args: {"ok": True},
+                monotonic=lambda: 1.0,
+            )
+        )
+        self.assertIsNone(
+            speculate_from_committed_stt_from_runtime(
+                "continue the work",
+                {},
+                clean_text=lambda text: str(text).strip(),
+                fast_path_policy=lambda *_args: {"ok": True},
+                monotonic=lambda: 1.0,
+            )
+        )
+
+    def test_speculative_policy_store_matches_and_expires(self) -> None:
+        store: dict[str, dict[str, Any]] = {}
+        speculative = {"text": "continue the work", "prepared_at": 10.0}
+
+        remember_speculative_policy_from_runtime(store, "session-1", speculative)
+        matched = get_matching_speculative_policy_from_runtime(
+            store,
+            "session-1",
+            "continue the work please",
+            clean_text=lambda text: str(text).strip(),
+            is_similar=lambda _left, _right: False,
+            monotonic=lambda: 12.0,
+        )
+        expired = get_matching_speculative_policy_from_runtime(
+            store,
+            "session-1",
+            "continue the work please",
+            clean_text=lambda text: str(text).strip(),
+            is_similar=lambda _left, _right: False,
+            monotonic=lambda: 31.0,
+        )
+
+        self.assertIs(matched, speculative)
+        self.assertIsNone(expired)
+        self.assertNotIn("session-1", store)
 
     def test_final_wake_veto_allows_owner_followup_without_alias(self) -> None:
         result = decide_final_wake_veto(

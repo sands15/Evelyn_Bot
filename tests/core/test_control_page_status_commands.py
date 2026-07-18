@@ -30,15 +30,26 @@ class ControlPageStatusCommandTests(unittest.TestCase):
         self.assertIn('return control_page_tool_decision("runtime.status", source="cheap")', self.control_page_tools)
 
     def test_local_status_uses_real_local_runtime_summary(self) -> None:
-        self.assertIn("def build_control_page_local_status_text", self.main_py)
-        self.assertIn("build_control_page_local_status_text_payload(", self.main_py)
+        composition = (
+            REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "control_page_composition_runtime.py"
+        ).read_text(encoding="utf-8")
+        voice_runtime_composition = (
+            REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "voice_runtime_composition_runtime.py"
+        ).read_text(encoding="utf-8")
+        state_composition = (
+            REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "control_page_state_composition.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn("def build_local_status_text", composition)
+        self.assertIn("build_control_page_local_status_text_from_runtime(", composition)
         self.assertIn('"Evelyn 로컬 상태"', self.control_page_state)
         self.assertIn("control_page_local_url()", self.main_py)
         self.assertIn("Main LLM", self.control_page_state)
         self.assertIn("Router LLM", self.control_page_state)
         self.assertIn("Summary LLM", self.control_page_state)
-        self.assertIn("local_mic_status_line()", self.main_py)
-        self.assertIn("build_local_status_text=build_control_page_local_status_text", self.main_py)
+        self.assertIn("local_mic_status_line_from_payload(self.serialize_local_mic_runtime_state())", voice_runtime_composition)
+        self.assertIn("local_mic_status_line = voice_runtime_composition.local_mic_status_line", self.main_py)
+        self.assertIn("build_local_status_text=control_page.build_local_status_text", state_composition)
+        self.assertIn("build_control_page_state = control_page_state_composition.build_control_page_state", self.main_py)
         self.assertIn("status_text=deps.build_local_status_text(runtime_services)", self.control_page_state_handler)
         self.assertIn('"statusText": clean_text(status_text)', self.control_page_state)
 

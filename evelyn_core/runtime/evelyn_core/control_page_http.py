@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import json
+import ipaddress
+import os
+import secrets
 from pathlib import Path
 from typing import Any, Awaitable, Callable
+from urllib.parse import urlsplit
 
 from aiohttp import web
 
@@ -12,6 +16,10 @@ CONTROL_PAGE_NO_STORE_HEADERS = {
     "Pragma": "no-cache",
     "Expires": "0",
 }
+
+CONTROL_PAGE_CSRF_HEADER = "X-Evelyn-CSRF-Token"
+CONTROL_PAGE_CSRF_TOKEN = secrets.token_urlsafe(32)
+CONTROL_PAGE_MUTATING_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 
 
 def control_page_json_response(data: Any, *, status: int = 200) -> web.Response:
@@ -68,12 +76,110 @@ def control_page_api_cors_applies(path: str) -> bool:
     return str(path or "").startswith("/api/control-page/")
 
 
-def add_control_page_cors_headers(response: web.StreamResponse, *, path: str) -> web.StreamResponse:
-    if control_page_api_cors_applies(path):
-        response.headers["Access-Control-Allow-Origin"] = "*"
+def configured_control_page_origins() -> frozenset[str]:
+    raw = os.getenv("CONTROL_PAGE_ALLOWED_ORIGINS", "")
+    return frozenset(
+        normalized
+        for candidate in raw.split(",")
+        if (normalized := normalize_request_origin(candidate))
+    )
+
+
+def normalize_request_origin(value: Any) -> str:
+    origin = str(value or "").strip().rstrip("/")
+    if not origin or origin == "null":
+        return ""
+    try:
+        parsed = urlsplit(origin)
+    except ValueError:
+        return ""
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.path not in {"", "/"}:
+        return ""
+    if parsed.query or parsed.fragment or parsed.username or parsed.password:
+        return ""
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
+def request_control_page_origin(request: Any) -> str:
+    headers = getattr(request, "headers", {}) or {}
+    return normalize_request_origin(headers.get("Origin"))
+
+
+def request_control_page_self_origin(request: Any) -> str:
+    headers = getattr(request, "headers", {}) or {}
+    host = str(headers.get("Host") or getattr(request, "host", "") or "").strip()
+    scheme = str(getattr(request, "scheme", "http") or "http").strip().lower()
+    return normalize_request_origin(f"{scheme}://{host}")
+
+
+def origin_uses_loopback_host(origin: str) -> bool:
+    try:
+        hostname = (urlsplit(origin).hostname or "").rstrip(".").lower()
+    except ValueError:
+        return False
+    if hostname == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(hostname).is_loopback
+    except ValueError:
+        return False
+
+
+def request_control_page_host_is_allowed(
+    request: Any,
+    *,
+    allowed_origins: frozenset[str] | None = None,
+) -> bool:
+    self_origin = request_control_page_self_origin(request)
+    if not self_origin:
+        return False
+    if origin_uses_loopback_host(self_origin):
+        return True
+    configured = configured_control_page_origins() if allowed_origins is None else allowed_origins
+    return self_origin in configured
+
+
+def control_page_origin_is_allowed(request: Any, *, allowed_origins: frozenset[str] | None = None) -> bool:
+    headers = getattr(request, "headers", {}) or {}
+    raw_origin = str(headers.get("Origin") or "").strip()
+    if not raw_origin:
+        return True
+    origin = request_control_page_origin(request)
+    if not origin:
+        return False
+    if origin == request_control_page_self_origin(request) and origin_uses_loopback_host(origin):
+        return True
+    configured = configured_control_page_origins() if allowed_origins is None else allowed_origins
+    return origin in configured
+
+
+def add_control_page_cors_headers(
+    response: web.StreamResponse,
+    *,
+    path: str,
+    origin: str = "",
+) -> web.StreamResponse:
+    if control_page_api_cors_applies(path) and origin:
+        response.headers["Access-Control-Allow-Origin"] = origin
         response.headers["Access-Control-Allow-Methods"] = "GET,POST,OPTIONS"
-        response.headers["Access-Control-Allow-Headers"] = "Content-Type"
+        response.headers["Access-Control-Allow-Headers"] = f"Content-Type, {CONTROL_PAGE_CSRF_HEADER}"
+        response.headers["Vary"] = "Origin"
     return response
+
+
+def control_page_security_error(error: str, *, status: int = 403) -> web.Response:
+    return control_page_json_response({"ok": False, "error": error}, status=status)
+
+
+async def control_page_session_handler(_: web.Request) -> web.StreamResponse:
+    response = control_page_json_response(
+        {
+            "ok": True,
+            "csrfToken": CONTROL_PAGE_CSRF_TOKEN,
+            "csrfHeader": CONTROL_PAGE_CSRF_HEADER,
+        }
+    )
+    return add_control_page_no_store_headers(response)
 
 
 @web.middleware
@@ -81,21 +187,54 @@ async def control_page_cors_middleware(
     request: web.Request,
     handler: Callable[[web.Request], Awaitable[web.StreamResponse]],
 ) -> web.StreamResponse:
-    if request.method == "OPTIONS" and control_page_api_cors_applies(request.path):
+    api_request = control_page_api_cors_applies(request.path)
+    origin = request_control_page_origin(request)
+    if api_request and not request_control_page_host_is_allowed(request):
+        return control_page_security_error("host_not_allowed")
+    if api_request and not control_page_origin_is_allowed(request):
+        return control_page_security_error("origin_not_allowed")
+    if request.method in CONTROL_PAGE_MUTATING_METHODS and api_request:
+        supplied_token = str(request.headers.get(CONTROL_PAGE_CSRF_HEADER) or "")
+        if not secrets.compare_digest(supplied_token, CONTROL_PAGE_CSRF_TOKEN):
+            return control_page_security_error("csrf_token_required")
+        content_type = str(request.headers.get("Content-Type") or "").partition(";")[0].strip().lower()
+        if content_type != "application/json":
+            return control_page_security_error("json_content_type_required", status=415)
+    if request.method == "OPTIONS" and api_request:
         response: web.StreamResponse = web.Response(status=204)
     else:
         response = await handler(request)
-    return add_control_page_cors_headers(response, path=request.path)
+    return add_control_page_cors_headers(response, path=request.path, origin=origin)
+
+
+@web.middleware
+async def reject_browser_origin_middleware(
+    request: web.Request,
+    handler: Callable[[web.Request], Awaitable[web.StreamResponse]],
+) -> web.StreamResponse:
+    if str(request.headers.get("Origin") or "").strip():
+        return control_page_security_error("browser_origin_not_allowed")
+    if request.method in CONTROL_PAGE_MUTATING_METHODS and request.path.startswith("/api/"):
+        content_type = str(request.headers.get("Content-Type") or "").partition(";")[0].strip().lower()
+        if content_type != "application/json":
+            return control_page_security_error("json_content_type_required", status=415)
+    return await handler(request)
 
 
 __all__ = [
     "CONTROL_PAGE_NO_STORE_HEADERS",
+    "CONTROL_PAGE_CSRF_HEADER",
+    "CONTROL_PAGE_CSRF_TOKEN",
     "add_control_page_cors_headers",
     "add_control_page_no_store_headers",
     "build_control_page_health_payload",
     "control_page_api_cors_applies",
+    "control_page_origin_is_allowed",
+    "request_control_page_host_is_allowed",
     "control_page_cors_middleware",
+    "control_page_session_handler",
     "control_page_file_response",
     "control_page_json_response",
     "resolve_control_page_asset_path",
+    "reject_browser_origin_middleware",
 ]

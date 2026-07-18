@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable, MutableMapping
 
-from .voice_orchestration import (
+from .room_session_state import (
     clear_room_owner,
     is_room_owner_active,
     room_state_snapshot,
@@ -311,3 +311,87 @@ def is_short_followup_candidate_policy(
     if not text_n:
         return False
     return audio_sec < max(min_audio_sec * 1.5, 1.2) and len(text_n) < max(min_transcribed_len + 2, 8)
+
+
+def estimate_voice_like_probability_policy(
+    *,
+    voiced_ms: float,
+    audio_sec: float,
+    body_rms: float,
+    body_rms_min: float,
+) -> float:
+    audio_ms = max(audio_sec * 1000.0, 1.0)
+    voiced_ratio = max(0.0, min(1.0, voiced_ms / audio_ms))
+    rms_ratio = 0.0
+    if body_rms_min > 0:
+        rms_ratio = max(0.0, min(1.0, body_rms / body_rms_min))
+    return max(voiced_ratio, rms_ratio)
+
+
+def should_require_confirm_exact_for_wake_policy(debug_meta: dict[str, Any] | None) -> bool:
+    if not debug_meta:
+        return False
+    reasons = [str(reason) for reason in (debug_meta.get("reasons") or [])]
+    if any(
+        marker in reason
+        for reason in reasons
+        for marker in ("opus_fail", "plc", "fec", "front_burst_detected", "heavy_trim_ms", "burst_trim_ms")
+    ):
+        return True
+    if debug_meta.get("front_burst_detected"):
+        return True
+    if int(debug_meta.get("opus_fail") or 0) > 0:
+        return True
+    if int(debug_meta.get("plc_packets") or 0) > 0:
+        return True
+    if int(debug_meta.get("fec_packets") or 0) > 0:
+        return True
+    if float(debug_meta.get("trim_ms") or 0.0) >= 220.0:
+        return True
+    if float(debug_meta.get("burst_trim_ms") or 0.0) >= 140.0:
+        return True
+    return False
+
+
+def is_transport_corrupted_audio_policy(debug_meta: dict[str, Any] | None) -> bool:
+    if not debug_meta:
+        return False
+    reasons = [str(reason) for reason in (debug_meta.get("reasons") or [])]
+    required_markers = ("opus_fail", "plc", "fec", "front_burst_detected", "heavy_trim_ms", "burst_trim_ms")
+    reason_hits = {marker: any(marker in reason for reason in reasons) for marker in required_markers}
+    return (
+        (reason_hits["opus_fail"] or int(debug_meta.get("opus_fail") or 0) >= 4)
+        and (reason_hits["plc"] or int(debug_meta.get("plc_packets") or 0) >= 2)
+        and (reason_hits["fec"] or int(debug_meta.get("fec_packets") or 0) >= 2)
+        and (reason_hits["front_burst_detected"] or bool(debug_meta.get("front_burst_detected")))
+        and (reason_hits["heavy_trim_ms"] or float(debug_meta.get("trim_ms") or 0.0) >= 220.0)
+        and (reason_hits["burst_trim_ms"] or float(debug_meta.get("burst_trim_ms") or 0.0) >= 140.0)
+    )
+
+
+def is_tail_fragment_candidate_policy(
+    *,
+    has_session_key: bool,
+    accepted_age_sec: float | None,
+    raw_seconds: float,
+    voiced_ms: float,
+    longest_voiced_ms: float,
+    unstable: bool,
+    window_sec: float,
+    max_raw_sec: float,
+    max_voiced_ms: float,
+    max_longest_ms: float,
+) -> bool:
+    if not has_session_key:
+        return False
+    if accepted_age_sec is None or accepted_age_sec < 0:
+        return False
+    if accepted_age_sec > window_sec:
+        return False
+    if raw_seconds > max_raw_sec:
+        return False
+    if voiced_ms > max_voiced_ms:
+        return False
+    if longest_voiced_ms > max_longest_ms:
+        return False
+    return unstable or raw_seconds <= (max_raw_sec * 0.6)

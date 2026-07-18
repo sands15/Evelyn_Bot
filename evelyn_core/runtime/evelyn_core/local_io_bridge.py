@@ -7,6 +7,7 @@ import contextlib
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import time
 from typing import Any
@@ -68,6 +69,10 @@ LOCAL_BRIDGE_TTS_WARMUP_DELAY_SEC = max(0.0, float(os.getenv("LOCAL_BRIDGE_TTS_W
 LOCAL_BRIDGE_TTS_WARMUP_TIMEOUT_SEC = max(1.0, float(os.getenv("LOCAL_BRIDGE_TTS_WARMUP_TIMEOUT_SEC", "30")))
 LOCAL_BRIDGE_TTS_WARMUP_ATTEMPTS = max(1, int(os.getenv("LOCAL_BRIDGE_TTS_WARMUP_ATTEMPTS", "6")))
 LOCAL_BRIDGE_TTS_WARMUP_RETRY_DELAY_SEC = max(0.2, float(os.getenv("LOCAL_BRIDGE_TTS_WARMUP_RETRY_DELAY_SEC", "2.0")))
+LOCAL_BRIDGE_TTS_INPUT_SUPPRESS_AFTER_SEC = max(
+    0.0,
+    float(os.getenv("LOCAL_BRIDGE_TTS_INPUT_SUPPRESS_AFTER_SEC", "0.7")),
+)
 TTS_PCM_RATE = int(os.getenv("OMNIVOICE_PCM_RATE", "24000"))
 TTS_PCM_CHANNELS = int(os.getenv("OMNIVOICE_PCM_CHANNELS", "1"))
 TTS_SAMPLE_WIDTH_BYTES = 2
@@ -95,6 +100,9 @@ class LocalIoBridge:
         self.service: LocalMicCaptureService | None = None
         self.ready = False
         self.speaking = False
+        self.mic_input_suppressed_until = 0.0
+        self.suppressed_mic_segment_count = 0
+        self.discarded_pending_mic_segment_count = 0
         self.segment_count = 0
         self.transcript_count = 0
         self.play_count = 0
@@ -111,6 +119,7 @@ class LocalIoBridge:
         self.tts_warmup_done = False
         self.tts_warmup_error = ""
         self.tts_warmup_ms: float | None = None
+        self.output_device_request_revision = 0
 
     async def run(self) -> None:
         timeout = aiohttp.ClientTimeout(total=None, connect=10, sock_connect=10)
@@ -135,6 +144,9 @@ class LocalIoBridge:
 
         def on_segment(pcm_bytes: bytes, meta: dict[str, Any]) -> None:
             def enqueue() -> None:
+                if self._mic_input_is_suppressed():
+                    self.suppressed_mic_segment_count += 1
+                    return
                 if self.queue.full():
                     try:
                         self.queue.get_nowait()
@@ -167,10 +179,24 @@ class LocalIoBridge:
         self.last_error = "" if self.ready else (self.service.last_error or "local_mic_not_ready")
         print(f"[LOCAL BRIDGE] mic_ready={self.ready} device={LOCAL_MIC_DEVICE or 'default'} error={self.last_error or 'none'}", flush=True)
 
+    def _mic_input_is_suppressed(self) -> bool:
+        return self.speaking or time.monotonic() < self.mic_input_suppressed_until
+
+    def _discard_pending_mic_segments(self) -> int:
+        discarded = 0
+        while True:
+            try:
+                self.queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            self.queue.task_done()
+            discarded += 1
+        self.discarded_pending_mic_segment_count += discarded
+        return discarded
+
     async def _handle_segment(self, pcm_bytes: bytes, meta: dict[str, Any]) -> None:
-        if self.speaking:
-            self.last_error = "input_suppressed_while_speaking"
-            await self._post_status()
+        if self._mic_input_is_suppressed():
+            self.suppressed_mic_segment_count += 1
             return
         turn_started = time.perf_counter()
         stt_ms: float | None = None
@@ -345,6 +371,91 @@ class LocalIoBridge:
             payload["speed"] = OMNIVOICE_SPEED
         return payload
 
+    def _output_devices_snapshot(self) -> list[dict[str, Any]]:
+        if sd is None:
+            return []
+        try:
+            devices = sd.query_devices()
+            hostapis = sd.query_hostapis()
+            default_output = None
+            try:
+                default_device = sd.default.device
+                if isinstance(default_device, (list, tuple)) and len(default_device) >= 2:
+                    default_output = int(default_device[1])
+                elif isinstance(default_device, int):
+                    default_output = int(default_device)
+            except Exception:
+                default_output = None
+        except Exception as exc:
+            self.last_error = repr(exc)
+            return []
+
+        output_devices: list[dict[str, Any]] = []
+        for index, info in enumerate(devices):
+            try:
+                if int(info.get("max_output_channels") or 0) <= 0:
+                    continue
+                hostapi_index = int(info.get("hostapi") or 0)
+                hostapi_name = clean_text((hostapis[hostapi_index] or {}).get("name")) if 0 <= hostapi_index < len(hostapis) else ""
+            except Exception:
+                continue
+            if hostapi_name.strip().upper() == "MME":
+                continue
+            name = clean_text(info.get("name"))
+            if not name:
+                continue
+            output_devices.append(
+                {
+                    "id": str(index),
+                    "name": name,
+                    "api": hostapi_name or "Windows",
+                    "label": f"{name} · {hostapi_name}" if hostapi_name else name,
+                    "channels": int(info.get("max_output_channels") or 0),
+                    "sampleRate": int(float(info.get("default_samplerate") or 0)),
+                    "default": default_output == index,
+                }
+            )
+        return self._dedupe_output_devices(output_devices)
+
+    @staticmethod
+    def _output_device_family_key(name: str) -> str:
+        normalized = re.sub(r"\s+", " ", name.lower()).strip()
+        parenthetical = re.findall(r"\(([^)]+)\)", normalized)
+        if parenthetical:
+            normalized = parenthetical[-1]
+        normalized = re.sub(r"^\s*\d+\s*-\s*", "", normalized)
+        normalized = re.sub(r"^(speakers?|headphones?|스피커|헤드폰)\s*", "", normalized)
+        normalized = re.sub(r"[^a-z0-9가-힣]+", " ", normalized)
+        return re.sub(r"\s+", " ", normalized).strip() or name.lower()
+
+    @staticmethod
+    def _output_device_api_rank(api: str) -> int:
+        normalized = api.strip().lower()
+        if "wasapi" in normalized:
+            return 0
+        if "directsound" in normalized:
+            return 1
+        if "wdm-ks" in normalized:
+            return 2
+        return 3
+
+    def _dedupe_output_devices(self, devices: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        by_family: dict[str, dict[str, Any]] = {}
+        for device in devices:
+            key = self._output_device_family_key(str(device.get("name") or ""))
+            current = by_family.get(key)
+            if current is None:
+                by_family[key] = device
+                continue
+            current_rank = self._output_device_api_rank(str(current.get("api") or ""))
+            device_rank = self._output_device_api_rank(str(device.get("api") or ""))
+            if device_rank < current_rank or (device_rank == current_rank and device.get("default") and not current.get("default")):
+                by_family[key] = device
+        return sorted(by_family.values(), key=lambda item: (0 if item.get("default") else 1, str(item.get("name") or "")))
+
+    def _current_output_device_id(self) -> str:
+        return str(self.output_device if self.output_device is not None else "default")
+
     def _ensure_tts_warmup(self) -> None:
         if not LOCAL_BRIDGE_TTS_ENABLED or not LOCAL_BRIDGE_TTS_WARMUP_ENABLED:
             return
@@ -441,6 +552,11 @@ class LocalIoBridge:
             )
         finally:
             self.speaking = False
+            self.mic_input_suppressed_until = time.monotonic() + LOCAL_BRIDGE_TTS_INPUT_SUPPRESS_AFTER_SEC
+            discarded = self._discard_pending_mic_segments()
+            if discarded:
+                print(f"[LOCAL BRIDGE] discarded_pending_mic_segments={discarded}", flush=True)
+            await self._post_status()
 
     async def _play_streaming_pcm_response(
         self,
@@ -505,6 +621,7 @@ class LocalIoBridge:
         mic_stats: dict[str, Any] = {}
         if self.service is not None:
             last_input_at = self.service.last_input_at
+            suppress_remaining_sec = max(0.0, self.mic_input_suppressed_until - time.monotonic())
             mic_stats = {
                 "captureReady": self.service.capture_ready,
                 "captureActive": bool(getattr(self.service, "_capture_active", False)),
@@ -522,6 +639,10 @@ class LocalIoBridge:
                 "vadFilterEnabled": self.service.vad_filter_enabled,
                 "envNoiseFilterEnabled": self.service.env_noise_filter_enabled,
                 "waveformFilterEnabled": self.service.waveform_filter_enabled,
+                "ttsInputSuppressed": self._mic_input_is_suppressed(),
+                "ttsInputSuppressRemainingMs": round(suppress_remaining_sec * 1000.0),
+                "suppressedSegmentCount": self.suppressed_mic_segment_count,
+                "discardedPendingSegmentCount": self.discarded_pending_mic_segment_count,
             }
         payload: dict[str, Any] = {
             "enabled": True,
@@ -534,7 +655,8 @@ class LocalIoBridge:
             "lastError": self.last_error,
             "startedAt": self.started_at,
             "device": LOCAL_MIC_DEVICE or "default",
-            "outputDevice": str(self.output_device if self.output_device is not None else "default"),
+            "outputDevice": self._current_output_device_id(),
+            "outputDevices": self._output_devices_snapshot(),
             "streamingTts": LOCAL_BRIDGE_STREAMING_TTS_ENABLED,
             "botApiBase": BOT_API_BASE,
             "sttUrl": STT_SERVICE_URL,
@@ -559,6 +681,8 @@ class LocalIoBridge:
             pass
 
     def _handle_control_response(self, data: dict[str, Any]) -> None:
+        self._handle_output_device_request(data)
+
         restart = data.get("restart") if isinstance(data, dict) else None
         if isinstance(restart, dict) and restart.get("requested") and not self.restart_started:
             self.restart_started = True
@@ -592,6 +716,26 @@ class LocalIoBridge:
         self.last_error = "shutdown_requested"
         self._start_shutdown_script()
         self._schedule_bridge_exit()
+
+    def _handle_output_device_request(self, data: dict[str, Any]) -> None:
+        request = data.get("outputDeviceRequest") if isinstance(data, dict) else None
+        if not isinstance(request, dict):
+            return
+        try:
+            revision = int(request.get("revision") or 0)
+        except Exception:
+            revision = 0
+        if revision <= self.output_device_request_revision:
+            return
+        output_device = clean_text(request.get("outputDevice")) or "default"
+        self.output_device = normalize_output_device(output_device)
+        self.output_device_request_revision = revision
+        print(
+            "[LOCAL BRIDGE] output_device_selected "
+            f"device={self.output_device if self.output_device is not None else 'default'} "
+            f"revision={revision}",
+            flush=True,
+        )
 
     def _ensure_speak_worker(self) -> None:
         if self.speak_worker_task is not None and not self.speak_worker_task.done():

@@ -17,6 +17,7 @@ from typing import Any
 
 from aiohttp import web
 
+from evelyn_core.codex_gateway_auth import AUTHORIZATION_HEADER, gateway_request_authorized, resolve_gateway_token
 from evelyn_core.paths import get_repo_root, get_runtime_artifacts_root
 
 REPO_ROOT = get_repo_root()
@@ -37,6 +38,8 @@ _QUEUE: asyncio.PriorityQueue[tuple[int, int, "GatewayQueueItem"]] | None = None
 _QUEUE_WORKER: asyncio.Task[None] | None = None
 _QUEUE_SEQUENCE = itertools.count()
 _ACTIVE_QUEUE_ITEM: dict[str, Any] | None = None
+ACTION_TOKEN_KEY = web.AppKey("codex_gateway_action_token", str)
+QUEUE_WORKER_KEY = web.AppKey("codex_gateway_queue_worker", asyncio.Task)
 
 
 @dataclass
@@ -274,6 +277,8 @@ def _gateway_status() -> dict[str, Any]:
         "backendStatus": backend_status,
         "lastActionReady": last_action_ready,
         "route": "/codex/action",
+        "actionAuthRequired": True,
+        "actionAuthScheme": "Bearer",
         "queue": {
             "mode": "priority-serial",
             "size": queue.qsize() if queue is not None else 0,
@@ -512,12 +517,12 @@ async def _start_queue(app: web.Application) -> None:
     global _QUEUE, _QUEUE_WORKER
     _QUEUE = asyncio.PriorityQueue()
     _QUEUE_WORKER = asyncio.create_task(_queue_worker())
-    app["codex_gateway_queue_worker"] = _QUEUE_WORKER
+    app[QUEUE_WORKER_KEY] = _QUEUE_WORKER
 
 
 async def _stop_queue(app: web.Application) -> None:
     global _QUEUE_WORKER
-    worker = app.get("codex_gateway_queue_worker") or _QUEUE_WORKER
+    worker = app.get(QUEUE_WORKER_KEY) or _QUEUE_WORKER
     if worker is None:
         return
     worker.cancel()
@@ -576,6 +581,9 @@ async def status(_: web.Request) -> web.Response:
 
 
 async def codex_action(request: web.Request) -> web.Response:
+    if not gateway_request_authorized(request.headers.get(AUTHORIZATION_HEADER), request.app[ACTION_TOKEN_KEY]):
+        return web.json_response({"ok": False, "error": "unauthorized"}, status=401)
+
     try:
         payload = await request.json() if request.can_read_body else {}
     except Exception:
@@ -619,8 +627,9 @@ async def codex_action(request: web.Request) -> web.Response:
     return web.json_response({"ok": True, "content": content, "source": source, "priority": priority})
 
 
-def build_app() -> web.Application:
+def build_app(*, action_token: str | None = None) -> web.Application:
     app = web.Application()
+    app[ACTION_TOKEN_KEY] = str(action_token or resolve_gateway_token(create=True))
     app.on_startup.append(_start_queue)
     app.on_cleanup.append(_stop_queue)
     app.router.add_get("/health", health)

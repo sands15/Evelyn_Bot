@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
 from .text import clean_text, is_similar, strip_omnivoice_tags
+from .search_query_context import build_search_query_from_context
 
 
 @dataclass(frozen=True)
@@ -24,6 +25,10 @@ class SearchFollowupRuntimeDeps:
     search_duckduckgo: Callable[[str], Awaitable[list[dict[str, Any]]]]
     answer_from_search_results: Callable[[str, list[dict[str, Any]]], Awaitable[str]]
     resolve_open_question_rows: Callable[..., int]
+    get_conversation_history: Callable[..., list[dict[str, Any]]]
+    memory_summary_path: Callable[[int], Any]
+    read_text_file: Callable[[Any], str]
+    compact_working_summary: Callable[[str], str]
     write_json_file: Callable[[Any, Any], Any]
     cognitive_state_path: Callable[..., Any]
     send_discord_text: Callable[..., Awaitable[Any]]
@@ -37,6 +42,28 @@ class SearchFollowupRuntimeDeps:
     detach_task: Callable[[Any, asyncio.Task | None], Any]
     record_search_followup_queued: Callable[[], Any]
     log: Callable[..., Any] = print
+
+
+def build_search_query_from_runtime(
+    guild_id: int | None,
+    user_text: str,
+    *,
+    session_key: str | None = None,
+    messages: list[dict[str, Any]] | None = None,
+    deps: SearchFollowupRuntimeDeps,
+) -> str:
+    context_messages = list(messages or [])
+    if not context_messages and session_key is not None:
+        context_messages = list(deps.get_conversation_history(session_key=session_key, guild_id=guild_id))
+    summary = ""
+    if guild_id is not None:
+        summary = deps.compact_working_summary(deps.read_text_file(deps.memory_summary_path(guild_id)))
+    return build_search_query_from_context(
+        user_text,
+        messages=context_messages,
+        memory_summary=summary,
+        has_memory_scope=guild_id is not None,
+    )
 
 
 async def deliver_proactive_followup_from_runtime(
@@ -313,4 +340,3 @@ def schedule_search_followup_from_runtime(
         runtime_mode=runtime_mode,
     )
     deps.background_search_tasks[task_key] = task
-
