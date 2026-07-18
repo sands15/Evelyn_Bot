@@ -14,6 +14,7 @@ class CiWorkflowContractTests(unittest.TestCase):
         cls.source = WORKFLOW.read_text(encoding="utf-8")
 
     def test_full_locked_regression_and_real_process_smoke_are_required(self) -> None:
+        self.assertIn("fetch-depth: 0", self.source)
         self.assertIn("cache-dependency-path: requirements.lock", self.source)
         self.assertIn("-r requirements.lock", self.source)
         self.assertIn('EVELYN_RUN_REAL_MAIN_INTEGRATION: "1"', self.source)
@@ -31,6 +32,7 @@ class CiWorkflowContractTests(unittest.TestCase):
             "PYSEC-2026-2290",
             "PYSEC-2026-2288",
             "PYSEC-2026-2289",
+            "PYSEC-2025-194",
         ):
             self.assertIn(f"--ignore-vuln {vulnerability_id}", self.source)
         active_risks = (REPO_ROOT / "docs" / "ACTIVE_RISKS.md").read_text(encoding="utf-8")
