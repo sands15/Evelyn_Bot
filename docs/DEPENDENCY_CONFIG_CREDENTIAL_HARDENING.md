@@ -1,7 +1,7 @@
 # Dependency, Configuration, and Credential Hardening
 
 Document status: **Current**
-Last reviewed: 2026-07-29 KST
+Last reviewed: 2026-07-30 KST
 
 ## Dependency compatibility result
 
@@ -116,10 +116,25 @@ Completed locally:
 - owner configuration, credential staging, privacy, observability, and
   existing runtime regression tests in the current official Evelyn images.
 
+2026-07-30 source-mounted HTTP smoke:
+
+- Codex Gateway started with the new source on the existing image and safely
+  reported `backendReady=false`, `credentialMode=unconfigured`, and one fixed
+  credential error when no dedicated credential copy was supplied.
+- STT started with model loading disabled and reported owner configuration
+  plus zero runtime errors.
+- Vision started with both models disabled and reported owner configuration
+  plus zero runtime errors.
+- Control Page returned manifest `1.1` and
+  `runtime_errors.summary.v1` with all seven owner sources. Its public privacy
+  contract kept exception messages and filesystem paths disabled.
+
 Still required before deployment:
 
 - rebuild STT, Vision, Discord, and Codex Gateway images from the changed
-  dependency files;
+  dependency files; this requires explicit approval for the repository's
+  service dependency manifests to be queried against public package
+  registries;
 - GPU model-load smoke for Qwen3-ASR, SmolVLM2, and Falcon-OCR;
 - one real Codex Gateway action using the dedicated credential copy;
 - Minecraft Microsoft/Xbox login and in-game behavior smoke.
