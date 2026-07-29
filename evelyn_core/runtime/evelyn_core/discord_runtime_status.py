@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .paths import get_runtime_artifacts_root
+from .runtime_error_observability import RuntimeErrorCounter
 
 
 DISCORD_STATUS_SCHEMA = "discord_runtime.status.v1"
@@ -46,6 +47,16 @@ class DiscordRuntimeStatus:
         self.started_at = self.now()
         self.task: asyncio.Task[Any] | None = None
         self.last_error = ""
+        self.runtime_errors = RuntimeErrorCounter(now=self.now)
+
+    def record_error(
+        self,
+        code: str,
+        error: BaseException | type[BaseException] | None = None,
+    ) -> None:
+        snapshot = self.runtime_errors.record(code, error)
+        error_type = str(snapshot.get("lastErrorType") or "")
+        self.last_error = f"{snapshot['lastErrorCode']}:{error_type}".rstrip(":")
 
     def snapshot(self) -> dict[str, Any]:
         guilds = list(self.bot_guilds() or [])
@@ -57,11 +68,13 @@ class DiscordRuntimeStatus:
             channel = getattr(voice_client, "channel", None)
             try:
                 listening = bool(voice_client.is_listening())
-            except Exception:
+            except Exception as exc:
+                self.record_error("voice_listening_probe_failed", exc)
                 listening = False
             try:
                 connected = bool(voice_client.is_connected())
-            except Exception:
+            except Exception as exc:
+                self.record_error("voice_connection_probe_failed", exc)
                 connected = channel is not None
             voice_rows.append(
                 {
@@ -83,6 +96,7 @@ class DiscordRuntimeStatus:
             "listening": any(row["listening"] for row in voice_rows),
             "voiceConnections": voice_rows,
             "lastError": self.last_error,
+            **self.runtime_errors.snapshot(),
         }
 
     def write_once(self) -> dict[str, Any]:
@@ -91,7 +105,7 @@ class DiscordRuntimeStatus:
             _atomic_json_write(self.status_path, payload)
             self.last_error = ""
         except Exception as exc:
-            self.last_error = f"status_write_failed:{type(exc).__name__}"
+            self.record_error("status_write_failed", exc)
         return payload
 
     def start(self) -> asyncio.Task[Any]:

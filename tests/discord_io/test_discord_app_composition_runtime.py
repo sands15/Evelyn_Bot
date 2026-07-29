@@ -181,6 +181,21 @@ class DiscordAppCompositionTests(unittest.TestCase):
         rearm.assert_awaited_once_with(guild, voice_client.channel)
         engine.start.assert_awaited_once_with()
 
+    def test_on_ready_records_fixed_error_code_in_runtime_status(self) -> None:
+        runtime_status = Mock()
+        failure = RuntimeError("C:\\private\\token")
+        events = make_event_deps(
+            runtime_status=runtime_status,
+            start_control_page_server=AsyncMock(side_effect=failure),
+        )
+
+        asyncio.run(make_composition(events=events).on_ready())
+
+        runtime_status.record_error.assert_called_once_with(
+            "control_page_start_failed",
+            failure,
+        )
+
     def test_on_message_resolves_fresh_handler_dependencies(self) -> None:
         handler_deps = object()
         events = make_event_deps(text_message_handler=Mock(return_value=handler_deps))

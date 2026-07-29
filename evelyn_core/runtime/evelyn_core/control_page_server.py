@@ -31,6 +31,7 @@ from .memory_vault import (
     update_memory_vault_user_note,
 )
 from .runtime_health import apply_runtime_health_overrides, collect_runtime_health
+from .runtime_error_observability import collect_runtime_error_observability
 from .runtime_repair import (
     append_repair_event,
     build_runtime_repair_plan,
@@ -461,6 +462,7 @@ async def degraded_state(*, proxy_failure: dict[str, Any] | None = None) -> dict
             "bootProgress": boot_progress,
             "manifestVersion": service_health.get("manifestVersion") if isinstance(service_health, dict) else None,
             "capabilities": dict(service_health.get("capabilities") or {}) if isinstance(service_health, dict) else {},
+            "observability": dict(service_health.get("observability") or {}) if isinstance(service_health, dict) else {},
             "serviceHealth": service_health,
         },
         "minecraft": {
@@ -619,6 +621,7 @@ async def state_handler(request: web.Request) -> web.StreamResponse:
                 runtime["bootProgress"] = boot_progress
                 runtime["manifestVersion"] = service_health.get("manifestVersion") if isinstance(service_health, dict) else None
                 runtime["capabilities"] = dict(service_health.get("capabilities") or {}) if isinstance(service_health, dict) else {}
+                runtime["observability"] = dict(service_health.get("observability") or {}) if isinstance(service_health, dict) else {}
                 runtime["serviceHealth"] = service_health
                 payload["runtime"] = runtime
                 payload["bootProgress"] = boot_progress
@@ -650,6 +653,15 @@ async def health_handler(_: web.Request) -> web.StreamResponse:
 
 async def runtime_health_handler(_: web.Request) -> web.StreamResponse:
     return json_response(await cached_runtime_health(force=True))
+
+
+async def runtime_errors_handler(_: web.Request) -> web.StreamResponse:
+    return json_response(
+        {
+            "ok": True,
+            "errors": collect_runtime_error_observability(),
+        }
+    )
 
 
 async def runtime_health_override_handler(request: web.Request) -> web.StreamResponse:
@@ -1160,6 +1172,7 @@ def create_app() -> web.Application:
     app.router.add_get("/api/control-page/state", state_handler)
     app.router.add_get("/api/control-page/session", control_page_session_handler)
     app.router.add_get("/api/control-page/runtime-health", runtime_health_handler)
+    app.router.add_get("/api/control-page/runtime-errors", runtime_errors_handler)
     app.router.add_post("/api/control-page/runtime-health/override", runtime_health_override_handler)
     app.router.add_get("/api/control-page/runtime-manifest", runtime_manifest_handler)
     app.router.add_get("/api/control-page/runtime-repair", runtime_repair_handler)

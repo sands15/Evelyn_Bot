@@ -64,6 +64,7 @@ from .local_bridge_barge_in import (
 )
 from .paths import get_runtime_artifacts_root
 from .runtime_artifact_io import atomic_json_write
+from .runtime_error_observability import RuntimeErrorCounter
 from .text import clean_text, clean_tts_text, should_suppress_tts_for_command
 from .voice_validation import (
     active_validation_context,
@@ -172,6 +173,7 @@ class LocalIoBridge:
         self.transcript_count = 0
         self.play_count = 0
         self.last_error = ""
+        self.runtime_errors = RuntimeErrorCounter()
         self.last_latency: dict[str, Any] = {}
         self.last_tts_playback: dict[str, Any] = {}
         self.started_at = time.time()
@@ -543,6 +545,7 @@ class LocalIoBridge:
                 }
                 self.minecraft_command_state = "ready"
             except Exception as exc:
+                self.runtime_errors.record("minecraft_lazy_start_failed", exc)
                 self.minecraft_command_state = "failed"
                 self.minecraft_command_error = clean_text(repr(exc)) or "minecraft_lazy_start_failed"
                 self.minecraft_command_result = {
@@ -693,6 +696,7 @@ class LocalIoBridge:
                 log=lambda message: print(message, flush=True),
             )
         except Exception as exc:
+            self.runtime_errors.record("speaker_verifier_unavailable", exc)
             self.last_error = f"speaker_verifier_unavailable: {type(exc).__name__}"
             self._speaker_verifier = None
         return self._speaker_verifier
@@ -709,6 +713,7 @@ class LocalIoBridge:
                 sampling_rate=TARGET_RATE,
             )
         except Exception as exc:
+            self.runtime_errors.record("speaker_verification_failed", exc)
             self.last_error = f"speaker_verification_failed: {type(exc).__name__}"
             return None
 
@@ -837,6 +842,7 @@ class LocalIoBridge:
                     chat_ms = stream_result.get("chatMs")
                     tts_ms = stream_result.get("ttsMs")
                 except Exception as stream_exc:
+                    self.runtime_errors.record("chat_stream_failed", stream_exc)
                     print(f"[LOCAL BRIDGE] chat_stream_failed fallback_to_full err={stream_exc!r}", flush=True)
                     stage_started = time.perf_counter()
                     reply = await self._chat(text)
@@ -881,6 +887,7 @@ class LocalIoBridge:
                 )
             raise
         except Exception as exc:
+            self.runtime_errors.record("turn_pipeline_failed", exc)
             self.last_error = repr(exc)
             self._emit_validation(
                 "error",
@@ -1242,6 +1249,7 @@ class LocalIoBridge:
             except Exception:
                 default_output = None
         except Exception as exc:
+            self.runtime_errors.record("output_device_probe_failed", exc)
             self.last_error = repr(exc)
             return []
 
@@ -1341,6 +1349,7 @@ class LocalIoBridge:
                 await self._post_status()
                 return
             except Exception as exc:
+                self.runtime_errors.record("tts_warmup_attempt_failed", exc)
                 last_error = repr(exc)
                 if attempt >= LOCAL_BRIDGE_TTS_WARMUP_ATTEMPTS:
                     break
@@ -1403,7 +1412,9 @@ class LocalIoBridge:
                 "firstPlaybackMs": round(first_playback_ms, 1) if first_playback_ms is not None else None,
             }
             print(
-                f"[LOCAL BRIDGE] tts_played_streaming bytes={audio_bytes} played_bytes={played_bytes} first_playback_ms={self.last_tts_playback['firstPlaybackMs']}",
+                "[LOCAL BRIDGE] tts_played_streaming "
+                f"bytes={audio_bytes} played_bytes={played_bytes} "
+                f"first_playback_ms={self.last_tts_playback['firstPlaybackMs']}",
                 flush=True,
             )
         finally:
@@ -1547,6 +1558,7 @@ class LocalIoBridge:
                 "error": self.tts_warmup_error,
                 "ms": self.tts_warmup_ms,
             },
+            **self.runtime_errors.snapshot(),
         }
         if extra:
             payload.update(extra)
@@ -1557,6 +1569,7 @@ class LocalIoBridge:
                 payload,
             )
         except Exception as exc:
+            self.runtime_errors.record("heartbeat_write_failed", exc)
             self.last_error = f"heartbeat_write_failed: {type(exc).__name__}"
         else:
             if self.last_error.startswith("heartbeat_write_failed:"):
@@ -1657,6 +1670,7 @@ class LocalIoBridge:
                     }
                     await self._post_status()
             except Exception as exc:
+                self.runtime_errors.record("control_tts_failed", exc)
                 self.last_error = repr(exc)
                 print(f"[LOCAL BRIDGE] control_tts_failed err={exc!r}", flush=True)
                 await self._post_status()
@@ -1705,6 +1719,7 @@ class LocalIoBridge:
             )
             print(f"[LOCAL BRIDGE] shutdown script started: {STOP_SCRIPT}", flush=True)
         except Exception as exc:
+            self.runtime_errors.record("shutdown_start_failed", exc)
             self.last_error = f"shutdown start failed: {exc!r}"
             print(f"[LOCAL BRIDGE] {self.last_error}", flush=True)
 
@@ -1739,6 +1754,7 @@ class LocalIoBridge:
             )
             print(f"[LOCAL BRIDGE] restart script started: {START_LOCAL_BAT}", flush=True)
         except Exception as exc:
+            self.runtime_errors.record("restart_start_failed", exc)
             self.last_error = f"restart start failed: {exc!r}"
             print(f"[LOCAL BRIDGE] {self.last_error}", flush=True)
 

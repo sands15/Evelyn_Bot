@@ -12,6 +12,7 @@ import aiohttp
 
 from .runtime_services import HealthProbeSpec, ServiceManifest, ServiceSpec, load_service_manifest
 from .paths import get_runtime_artifacts_root
+from .runtime_error_observability import collect_runtime_error_observability
 from .voice_capabilities import attach_voice_capabilities
 
 
@@ -713,6 +714,7 @@ async def collect_runtime_health(
         overall_state = "degraded"
     else:
         overall_state = "up"
+    runtime_errors = collect_runtime_error_observability()
     return attach_voice_capabilities({
         "ok": not required_failed,
         "fullyHealthy": overall_state == "up",
@@ -726,6 +728,9 @@ async def collect_runtime_health(
         "services": list(services.values()),
         "diagnostics": [diagnostic.to_dict() for diagnostic in diagnostics],
         "legacyServices": legacy_services_from_health(services),
+        "observability": {
+            "exceptions": runtime_errors,
+        },
     })
 
 

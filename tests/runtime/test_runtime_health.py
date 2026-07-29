@@ -4,6 +4,7 @@ import sys
 import unittest
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 
 REPO_ROOT = next(path for path in Path(__file__).resolve().parents if (path / "main.py").exists())
@@ -76,6 +77,24 @@ def fake_probe(states: dict[str, str]):
 
 
 class RuntimeHealthTests(unittest.IsolatedAsyncioTestCase):
+    async def test_runtime_error_observability_is_additive(self) -> None:
+        expected = {
+            "schema": "runtime_errors.summary.v1",
+            "state": "clear",
+        }
+        manifest = load_service_manifest(force=True)
+        with patch(
+            "evelyn_core.runtime_health.collect_runtime_error_observability",
+            return_value=expected,
+        ):
+            health = await collect_runtime_health(
+                manifest=manifest,
+                probe_runner=fake_probe({}),
+            )
+
+        self.assertEqual(health["observability"]["exceptions"], expected)
+        self.assertEqual(health["overallState"], "up")
+
     async def test_all_services_up_returns_legacy_ready_flags(self) -> None:
         manifest = load_service_manifest(force=True)
         health = await collect_runtime_health(manifest=manifest, probe_runner=fake_probe({}))

@@ -23,6 +23,7 @@ from .host_supervisor_client import (
 )
 from .paths import get_repo_root, get_runtime_artifacts_root
 from .runtime_artifact_io import atomic_json_write
+from .runtime_error_observability import RuntimeErrorCounter
 from .storage_retention_report import StorageRetentionReporter
 
 
@@ -66,6 +67,7 @@ class HostSupervisor:
         self.manual_intervention_required = False
         self.last_error = ""
         self.last_action: dict[str, Any] = {}
+        self.runtime_errors = RuntimeErrorCounter(now=self.now)
         self._tokens: dict[str, dict[str, Any]] = {}
         self._stopping = False
         self._heartbeat_stop = threading.Event()
@@ -109,6 +111,7 @@ class HostSupervisor:
         if automatic and not self._consume_restart_budget():
             self.manual_intervention_required = True
             self.last_error = "automatic_restart_budget_exhausted"
+            self.runtime_errors.record("automatic_restart_budget_exhausted")
             return {
                 "ok": False,
                 "error": self.last_error,
@@ -203,11 +206,14 @@ class HostSupervisor:
                 check=False,
             )
         except Exception as exc:
+            self.runtime_errors.record("host_action_launch_failed", exc)
             return {
                 "ok": False,
                 "error": "host_action_launch_failed",
                 "detail": type(exc).__name__,
             }
+        if completed.returncode != 0:
+            self.runtime_errors.record("docker_compose_failed")
         return {
             "ok": completed.returncode == 0,
             "status": "started" if completed.returncode == 0 else "failed",
@@ -348,6 +354,7 @@ class HostSupervisor:
             "lastAction": dict(self.last_action),
             "allowedActions": sorted(ALLOWED_HOST_ACTIONS),
             "storageRetention": self.retention_reporter.status(),
+            **self.runtime_errors.snapshot(),
         }
 
     def write_status(self) -> None:
@@ -369,6 +376,7 @@ class HostSupervisor:
                 self.write_status()
             except Exception as exc:
                 self.last_error = f"heartbeat_write_failed:{type(exc).__name__}"
+                self.runtime_errors.record("heartbeat_write_failed", exc)
 
     def _observe_child(self) -> None:
         if self.child is None:
@@ -380,6 +388,7 @@ class HostSupervisor:
         self.child = None
         if self._stopping:
             return
+        self.runtime_errors.record("local_bridge_unexpected_exit")
         result = self.start_bridge(automatic=True)
         if not result.get("ok"):
             self.manual_intervention_required = True
@@ -418,6 +427,7 @@ class HostSupervisor:
             try:
                 self.retention_reporter.stop()
             except Exception as exc:
+                self.runtime_errors.record("retention_reporter_stop_failed", exc)
                 self.last_error = (
                     f"retention_reporter_stop_failed:{type(exc).__name__}"
                 )

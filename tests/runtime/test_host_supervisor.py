@@ -164,6 +164,23 @@ class HostSupervisorTests(unittest.TestCase):
         self.assertTrue(payload["storageRetention"]["dryRun"])
         self.assertFalse(payload["storageRetention"]["automaticDeletion"])
 
+    def test_failed_host_action_updates_error_counter_without_command_text(self):
+        self.supervisor.run_command = lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=1,
+            stdout="private output",
+            stderr="C:\\private\\token",
+        )
+
+        result = self.supervisor._execute_action("start_tts")
+        payload = self.supervisor.status()
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(payload["errorCount"], 1)
+        self.assertEqual(payload["lastErrorCode"], "docker_compose_failed")
+        self.assertEqual(payload["errorCounters"], {"docker_compose_failed": 1})
+        self.assertNotIn("private", json.dumps(payload))
+        self.assertNotIn("token", json.dumps(payload))
+
     def test_invalid_request_and_filename_use_a_safe_generated_response_id(self):
         request_path = self.supervisor.requests_dir / "bad.name.json"
         request_path.parent.mkdir(parents=True, exist_ok=True)

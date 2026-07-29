@@ -40,6 +40,10 @@ class LocalBridgeHeartbeatTests(unittest.IsolatedAsyncioTestCase):
             bridge = LocalIoBridge()
             bridge.session = _Session()  # type: ignore[assignment]
             bridge.last_error = "heartbeat_write_failed: PermissionError"
+            bridge.runtime_errors.record(
+                "heartbeat_write_failed",
+                PermissionError("C:\\private\\token"),
+            )
 
             with (
                 patch(
@@ -53,6 +57,10 @@ class LocalBridgeHeartbeatTests(unittest.IsolatedAsyncioTestCase):
             payload = json.loads(status_path.read_text(encoding="utf-8"))
             self.assertEqual(payload["lastError"], "")
             self.assertEqual(bridge.last_error, "")
+            self.assertEqual(payload["errorCount"], 1)
+            self.assertEqual(payload["lastErrorCode"], "heartbeat_write_failed")
+            self.assertNotIn("private", json.dumps(payload))
+            self.assertNotIn("token", json.dumps(payload))
 
 
 if __name__ == "__main__":

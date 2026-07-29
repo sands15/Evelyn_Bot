@@ -1,0 +1,124 @@
+.runtime-errors-panel {
+  margin-top: 18px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: var(--panel);
+}
+
+.runtime-errors-head,
+.runtime-errors-summary,
+.runtime-errors-source {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.runtime-errors-head strong,
+.runtime-errors-source strong {
+  display: block;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.runtime-errors-subtitle,
+.runtime-errors-meta,
+.runtime-errors-privacy {
+  display: block;
+  margin-top: 3px;
+  color: var(--soft);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.runtime-errors-panel button {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 7px 11px;
+  color: var(--text);
+  background: var(--panel-strong);
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.runtime-errors-panel button:disabled {
+  cursor: wait;
+  opacity: 0.5;
+}
+
+.runtime-errors-summary {
+  align-items: flex-end;
+  margin-top: 12px;
+  padding: 10px;
+  border-radius: 14px;
+  background: var(--panel-strong);
+}
+
+.runtime-errors-total {
+  color: var(--text);
+  font-size: 19px;
+  font-weight: 800;
+  letter-spacing: -0.03em;
+}
+
+.runtime-errors-pill {
+  flex: 0 0 auto;
+  border-radius: 999px;
+  padding: 3px 7px;
+  color: var(--soft);
+  background: rgba(127, 127, 127, 0.12);
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.runtime-errors-pill[data-state="clear"] {
+  color: #157545;
+  background: rgba(32, 173, 102, 0.12);
+}
+
+.runtime-errors-pill[data-state="attention"],
+.runtime-errors-pill[data-state="stale"],
+.runtime-errors-pill[data-state="unknown"] {
+  color: #9b6700;
+  background: rgba(226, 163, 32, 0.14);
+}
+
+.runtime-errors-pill[data-state="error"],
+.runtime-errors-pill[data-state="unavailable"] {
+  color: #bd3434;
+  background: rgba(218, 66, 66, 0.13);
+}
+
+.runtime-errors-sources {
+  display: grid;
+  gap: 7px;
+  margin-top: 8px;
+}
+
+.runtime-errors-source {
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel-strong);
+}
+
+.runtime-errors-source-copy {
+  min-width: 0;
+}
+
+.runtime-errors-source-value {
+  flex: 0 0 auto;
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 800;
+  text-align: right;
+}
+
+.runtime-errors-privacy {
+  margin-top: 9px;
+  color: #157545;
+}

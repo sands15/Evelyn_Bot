@@ -66,6 +66,24 @@ class DiscordRuntimeStatusTests(unittest.TestCase):
         self.assertFalse(payload["voiceConnected"])
         self.assertFalse(payload["listening"])
 
+    def test_recorded_error_is_exposed_as_code_type_count_only(self):
+        status = DiscordRuntimeStatus(
+            bot_user=lambda: SimpleNamespace(id=7),
+            bot_guilds=lambda: [],
+            voice_client_type=FakeVoiceClient,
+            now=lambda: 1234.5,
+        )
+
+        status.record_error("voice/rearm failed", RuntimeError("private token"))
+        payload = status.snapshot()
+
+        self.assertEqual(payload["errorCount"], 1)
+        self.assertEqual(payload["lastErrorAt"], 1234.5)
+        self.assertEqual(payload["lastErrorCode"], "voice_rearm_failed")
+        self.assertEqual(payload["lastErrorType"], "RuntimeError")
+        self.assertNotIn("private", json.dumps(payload))
+        self.assertNotIn("token", json.dumps(payload))
+
 
 if __name__ == "__main__":
     unittest.main()

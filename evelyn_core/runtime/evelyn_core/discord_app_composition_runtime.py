@@ -158,6 +158,11 @@ class DiscordAppComposition:
     def __init__(self, deps: DiscordAppCompositionDeps) -> None:
         self.deps = deps
 
+    def _record_runtime_error(self, code: str, exc: BaseException) -> None:
+        runtime_status = self.deps.events.runtime_status
+        if runtime_status is not None:
+            runtime_status.record_error(code, exc)
+
     async def on_ready(self) -> None:
         deps = self.deps.events
         if deps.runtime_status is not None:
@@ -170,6 +175,7 @@ class DiscordAppComposition:
         try:
             await deps.start_control_page_server()
         except Exception as exc:
+            self._record_runtime_error("control_page_start_failed", exc)
             deps.mark_startup_component("control_api", "failed", repr(exc))
             deps.log(f"[CONTROL PAGE] start_fail err={exc!r}")
         try:
@@ -177,11 +183,13 @@ class DiscordAppComposition:
             await deps.ensure_local_mic_service_started()
             deps.ensure_vision_watch_started()
         except Exception as exc:
+            self._record_runtime_error("startup_initialization_failed", exc)
             deps.log(f"[STARTUP] init_fail err={exc!r}")
             raise
         try:
             await deps.ensure_control_page_background_tasks_started()
         except Exception as exc:
+            self._record_runtime_error("control_page_background_tasks_failed", exc)
             deps.log(f"[CONTROL PAGE] bg_tasks_fail err={exc!r}")
         for guild in deps.bot_guilds():
             voice_client = guild.voice_client
@@ -195,6 +203,7 @@ class DiscordAppComposition:
                     if voice_client.channel is not None:
                         await deps.ensure_listening_voice_client(guild, voice_client.channel)
                 except Exception as exc:
+                    self._record_runtime_error("voice_rearm_failed", exc)
                     deps.log(f"[VOICE READY REARM FAIL] guild={guild.id} err={exc!r}")
             elif voice_client is not None:
                 deps.log(f"[VOICE READY] guild={guild.id} unexpected_voice_client={type(voice_client)!r}")
@@ -209,6 +218,7 @@ class DiscordAppComposition:
                     await deps.get_or_create_autonomy_engine(guild.id).start()
                     deps.log(f"[AUTONOMY] guild={guild.id} started")
                 except Exception as exc:
+                    self._record_runtime_error("autonomy_start_failed", exc)
                     deps.log(f"[AUTONOMY] guild={guild.id} start_fail err={exc!r}")
 
     async def on_voice_state_update(self, member: Any, before: Any, after: Any) -> None:
@@ -235,6 +245,7 @@ class DiscordAppComposition:
                 f"channel={getattr(target_channel, 'name', None)} listening={voice_client.is_listening()}"
             )
         except Exception as exc:
+            self._record_runtime_error("voice_state_rearm_failed", exc)
             deps.log(f"[VOICE STATE REARM FAIL] guild={guild.id} err={exc!r}")
         finally:
             if deps.runtime_status is not None:

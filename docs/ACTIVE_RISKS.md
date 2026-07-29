@@ -56,9 +56,17 @@ CI의 실제 프로세스 smoke는 `main.py`가 기동 가능한지만 확인한
 
 ## P2 — 설정과 예외 처리의 잔여 분산
 
-Compose의 사용자별 경로 일부는 제거했지만 Python/PowerShell 환경변수 조회와 광범위한 `except Exception`은 여전히 많다. 현재 변경은 전체 설정 통합이나 예외 관측성 문제를 해결하지 않았다.
+Compose의 사용자별 경로 일부는 제거했지만 Python/PowerShell 환경변수 조회와
+광범위한 `except Exception`은 여전히 많다. 전체 설정 통합과 모든 owner 모듈의
+예외 관측성은 아직 완료되지 않았다.
 
-다음 조치: 설정 스키마 통합과 예외 카운터/최근 오류 시각 노출을 독립 작업으로 진행한다.
+Host Supervisor, Local I/O Bridge, Discord의 heartbeat에는 프로세스 수명 오류
+카운터·최근 오류 시각·고정 오류 코드가 추가됐고 Runtime Health와 Control Page가
+이를 합성한다. 예외 메시지·스택·경로는 새 공개 응답에서 제외한다. 나머지 owner
+모듈과 설정 조회 분산은 아직 남아 있다.
+
+다음 조치: 새 예외 경계는 owner heartbeat 카운터에 연결하고, 설정 스키마 통합은
+별도 작업으로 진행한다.
 
 ## P2 — 자격증명 마운트
 
