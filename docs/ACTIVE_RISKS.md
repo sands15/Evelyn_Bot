@@ -1,7 +1,7 @@
 # Evelyn Active Risks
 
 Document status: **Current**
-Last reviewed: 2026-07-19 KST
+Last reviewed: 2026-07-29 KST
 Evaluation stance: 실패 가능성과 검증 공백을 우선 기록
 
 ## P0 — Voyager는 HTTP health와 기능 준비가 다르다
@@ -66,8 +66,12 @@ Codex 자격증명은 컨테이너에 읽기 전용으로 마운트된다. 읽�
 
 다음 조치: 전용 최소 권한 자격증명 또는 짧은 수명 토큰 도입 가능성을 검토한다.
 
-## P2 — 저장공간 정리는 아직 수동
+## P2 — 저장공간 보고는 Host Supervisor 가동에 의존
 
-retention 도구는 있지만 정기 dry-run 보고와 승인 기반 정리가 자동 운영되지 않는다. 큰 로그나 Chrome/CDP 프로필이 다시 누적될 수 있다.
+삭제 없는 주기 dry-run 보고와 Control Page 가시성은 추가됐다. 다만 Windows Host
+Supervisor가 꺼져 있으면 보고서는 오래된 상태가 되며 실제 삭제는 의도적으로
+자동화하지 않았다.
 
-다음 조치: 삭제 없는 주기 보고부터 추가하고, 실제 삭제는 별도 승인 경계로 유지한다.
+다음 조치: 후보가 반복적으로 누적될 때 보고서를 검토한 뒤 기존 retention CLI의
+명시적 `--apply`를 별도 승인으로 실행한다. 브라우저 apply API나 무인 삭제는
+도입하지 않는다.

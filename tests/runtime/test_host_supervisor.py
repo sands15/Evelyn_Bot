@@ -25,6 +25,41 @@ class FakeClock:
         return self.value
 
 
+class FakeProcess:
+    pid = 1234
+
+    def __init__(self) -> None:
+        self.returncode = None
+
+    def poll(self):
+        return self.returncode
+
+    def terminate(self):
+        self.returncode = 0
+
+    def wait(self, timeout=None):
+        return self.returncode
+
+
+class FakeRetentionReporter:
+    def __init__(self) -> None:
+        self.started = False
+        self.stopped = False
+
+    def start(self):
+        self.started = True
+
+    def stop(self):
+        self.stopped = True
+
+    def status(self):
+        return {
+            "state": "clear",
+            "dryRun": True,
+            "automaticDeletion": False,
+        }
+
+
 class HostSupervisorTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -122,6 +157,41 @@ class HostSupervisorTests(unittest.TestCase):
         )
         self.assertEqual(payload["lastError"], "")
         self.assertEqual(self.supervisor.last_error, "")
+
+    def test_status_exposes_dry_run_retention_policy(self):
+        payload = self.supervisor.status()
+
+        self.assertTrue(payload["storageRetention"]["dryRun"])
+        self.assertFalse(payload["storageRetention"]["automaticDeletion"])
+
+    def test_invalid_request_and_filename_use_a_safe_generated_response_id(self):
+        request_path = self.supervisor.requests_dir / "bad.name.json"
+        request_path.parent.mkdir(parents=True, exist_ok=True)
+        request_path.write_text("{", encoding="utf-8")
+
+        self.supervisor.process_request_queue()
+
+        responses = list(self.supervisor.responses_dir.glob("*.json"))
+        self.assertEqual(len(responses), 1)
+        self.assertRegex(responses[0].stem, r"^[0-9a-f]{32}$")
+
+    def test_run_starts_and_stops_retention_reporter(self):
+        reporter = FakeRetentionReporter()
+        supervisor = HostSupervisor(
+            project_root=self.supervisor.project_root,
+            artifacts_root=self.supervisor.artifacts_root,
+            popen=lambda *args, **kwargs: FakeProcess(),
+            run_command=self.supervisor.run_command,
+            now=self.clock,
+            retention_reporter=reporter,
+        )
+        supervisor.request_stop()
+
+        exit_code = supervisor.run()
+
+        self.assertEqual(exit_code, 0)
+        self.assertTrue(reporter.started)
+        self.assertTrue(reporter.stopped)
 
 
 if __name__ == "__main__":

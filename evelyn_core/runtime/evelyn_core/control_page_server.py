@@ -38,6 +38,7 @@ from .runtime_repair import (
     runtime_repair_capabilities,
 )
 from .runtime_services import load_service_manifest, manifest_to_dict
+from .storage_retention_report import read_storage_retention_report
 from .voice_validation import SUITE_ID, get_voice_validation_manager
 
 
@@ -795,6 +796,10 @@ async def voice_validation_handler(_: web.Request) -> web.StreamResponse:
     return json_response({"ok": True, "session": session})
 
 
+async def storage_retention_handler(_: web.Request) -> web.StreamResponse:
+    return json_response(read_storage_retention_report())
+
+
 async def voice_validation_start_handler(request: web.Request) -> web.StreamResponse:
     try:
         payload = await request.json()
@@ -1160,6 +1165,7 @@ def create_app() -> web.Application:
     app.router.add_get("/api/control-page/runtime-repair", runtime_repair_handler)
     app.router.add_post("/api/control-page/runtime-repair/preview", runtime_repair_preview_handler)
     app.router.add_post("/api/control-page/runtime-repair/apply", runtime_repair_apply_handler)
+    app.router.add_get("/api/control-page/storage-retention", storage_retention_handler)
     app.router.add_get("/api/control-page/voice-validation", voice_validation_handler)
     app.router.add_post("/api/control-page/voice-validation/start", voice_validation_start_handler)
     app.router.add_post("/api/control-page/voice-validation/confirm", voice_validation_confirm_handler)

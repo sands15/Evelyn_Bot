@@ -6,6 +6,7 @@
   <title>E.V.E.L.Y.N</title>
   <link rel="icon" type="image/png" href="./assets/evelyn-logo-light-mark.png">
   <link rel="stylesheet" href="./assets/evelyn-voice-validation.css?v=20260729-voice-p0-1">
+  <link rel="stylesheet" href="./assets/evelyn-storage-retention.css?v=20260729-retention-report-1">
   <style>
     :root {
       --bg: #f5f6f7;
@@ -2043,6 +2044,19 @@
           <button id="voiceValidationStartButton" type="button">검증 시작</button>
         </div>
         <div id="voiceValidationMount" aria-live="polite"></div>
+      </section>
+
+      <section class="storage-retention-panel" aria-label="저장공간 정리 보고">
+        <div class="storage-retention-head">
+          <div>
+            <strong>저장공간 정리 보고</strong>
+            <span class="storage-retention-subtitle">삭제 없는 주기 dry-run</span>
+          </div>
+          <button id="storageRetentionRefreshButton" type="button">새로고침</button>
+        </div>
+        <div id="storageRetentionMount" aria-live="polite">
+          <span class="storage-retention-meta">Host Supervisor 보고서를 불러오는 중입니다.</span>
+        </div>
       </section>
 
       <section class="contract-timeline" aria-label="Voyager 계약 추적 타임라인">
@@ -4805,5 +4819,6 @@
     refreshState();
   </script>
   <script src="./assets/evelyn-voice-validation.js?v=20260729-voice-p0-1"></script>
+  <script src="./assets/evelyn-storage-retention.js?v=20260729-retention-report-1"></script>
 </body>
 </html>

@@ -10,6 +10,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from collections import deque
 from pathlib import Path
 from typing import Any, Callable
@@ -22,6 +23,7 @@ from .host_supervisor_client import (
 )
 from .paths import get_repo_root, get_runtime_artifacts_root
 from .runtime_artifact_io import atomic_json_write
+from .storage_retention_report import StorageRetentionReporter
 
 
 PREVIEW_TTL_SEC = 120.0
@@ -40,6 +42,7 @@ class HostSupervisor:
         popen: Callable[..., Any] = subprocess.Popen,
         run_command: Callable[..., Any] = subprocess.run,
         now: Callable[[], float] = time.time,
+        retention_reporter: Any | None = None,
     ) -> None:
         self.project_root = Path(project_root or get_repo_root()).resolve()
         self.artifacts_root = Path(
@@ -67,6 +70,11 @@ class HostSupervisor:
         self._stopping = False
         self._heartbeat_stop = threading.Event()
         self._heartbeat_thread: threading.Thread | None = None
+        self.retention_reporter = retention_reporter or StorageRetentionReporter(
+            project_root=self.project_root,
+            artifacts_root=self.artifacts_root,
+            now=self.now,
+        )
 
     def _bridge_command(self) -> list[str]:
         return [
@@ -339,6 +347,7 @@ class HostSupervisor:
             },
             "lastAction": dict(self.last_action),
             "allowedActions": sorted(ALLOWED_HOST_ACTIONS),
+            "storageRetention": self.retention_reporter.status(),
         }
 
     def write_status(self) -> None:
@@ -385,15 +394,16 @@ class HostSupervisor:
         except OSError:
             pass
         self.start_bridge()
-        self.write_status()
-        self._heartbeat_stop.clear()
-        self._heartbeat_thread = threading.Thread(
-            target=self._heartbeat_loop,
-            name="evelyn-host-supervisor-heartbeat",
-            daemon=True,
-        )
-        self._heartbeat_thread.start()
         try:
+            self.retention_reporter.start()
+            self.write_status()
+            self._heartbeat_stop.clear()
+            self._heartbeat_thread = threading.Thread(
+                target=self._heartbeat_loop,
+                name="evelyn-host-supervisor-heartbeat",
+                daemon=True,
+            )
+            self._heartbeat_thread.start()
             while not self._stopping:
                 if self.stop_request_path.exists():
                     self._stopping = True
@@ -405,6 +415,12 @@ class HostSupervisor:
             self._heartbeat_stop.set()
             if self._heartbeat_thread is not None:
                 self._heartbeat_thread.join(timeout=2.0)
+            try:
+                self.retention_reporter.stop()
+            except Exception as exc:
+                self.last_error = (
+                    f"retention_reporter_stop_failed:{type(exc).__name__}"
+                )
             self.stop_bridge()
             self.write_status()
         return 0

@@ -1,0 +1,128 @@
+.storage-retention-panel {
+  margin-top: 18px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: var(--panel);
+}
+
+.storage-retention-head,
+.storage-retention-summary,
+.storage-retention-scope {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.storage-retention-head strong,
+.storage-retention-scope strong {
+  display: block;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.storage-retention-subtitle,
+.storage-retention-meta,
+.storage-retention-policy,
+.storage-retention-error {
+  display: block;
+  margin-top: 3px;
+  color: var(--soft);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.storage-retention-panel button {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 7px 11px;
+  color: var(--text);
+  background: var(--panel-strong);
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.storage-retention-panel button:disabled {
+  cursor: wait;
+  opacity: 0.5;
+}
+
+.storage-retention-summary {
+  align-items: flex-end;
+  margin-top: 12px;
+  padding: 10px;
+  border-radius: 14px;
+  background: var(--panel-strong);
+}
+
+.storage-retention-total {
+  color: var(--text);
+  font-size: 19px;
+  font-weight: 800;
+  letter-spacing: -0.03em;
+}
+
+.storage-retention-pill {
+  flex: 0 0 auto;
+  border-radius: 999px;
+  padding: 3px 7px;
+  color: var(--soft);
+  background: rgba(127, 127, 127, 0.12);
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.storage-retention-pill[data-state="clear"] {
+  color: #157545;
+  background: rgba(32, 173, 102, 0.12);
+}
+
+.storage-retention-pill[data-state="attention"],
+.storage-retention-pill[data-state="stale"] {
+  color: #9b6700;
+  background: rgba(226, 163, 32, 0.14);
+}
+
+.storage-retention-pill[data-state="error"],
+.storage-retention-pill[data-state="unavailable"] {
+  color: #bd3434;
+  background: rgba(218, 66, 66, 0.13);
+}
+
+.storage-retention-scopes {
+  display: grid;
+  gap: 7px;
+  margin-top: 8px;
+}
+
+.storage-retention-scope {
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel-strong);
+}
+
+.storage-retention-scope-copy {
+  min-width: 0;
+}
+
+.storage-retention-scope-value {
+  flex: 0 0 auto;
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 800;
+  text-align: right;
+}
+
+.storage-retention-policy {
+  margin-top: 9px;
+  color: #157545;
+}
+
+.storage-retention-error {
+  color: #b83d3d;
+}
