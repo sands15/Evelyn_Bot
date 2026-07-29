@@ -22,10 +22,12 @@ from .control_page_contracts import (
 )
 from .fast_action_runtime import detect_local_runtime_command
 from .memory_vault import (
+    delete_memory_vault_user_note,
     ensure_memory_vault_layout,
     export_memory_graph,
     memory_vault_user_note,
     memory_vault_user_snapshot,
+    preview_memory_vault_user_note_deletion,
     update_memory_vault_user_note,
 )
 from .runtime_health import apply_runtime_health_overrides, collect_runtime_health
@@ -965,6 +967,62 @@ async def memory_note_action_handler(request: web.Request) -> web.StreamResponse
     return json_response(result, status=200 if result.get("ok") else 404)
 
 
+def memory_note_delete_status(result: dict[str, Any]) -> int:
+    if result.get("ok"):
+        return 200
+    error = str(result.get("error") or "")
+    if error == "note_not_found":
+        return 404
+    if error == "memory_delete_failed":
+        return 500
+    if error in {
+        "memory_delete_token_expired",
+        "memory_delete_token_mismatch",
+        "memory_delete_token_reused",
+        "memory_note_changed_since_preview",
+        "memory_note_delete_protected",
+    }:
+        return 409
+    return 400
+
+
+async def memory_note_delete_preview_handler(
+    request: web.Request,
+) -> web.StreamResponse:
+    note_id = request.match_info.get("note_id", "")
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    result = preview_memory_vault_user_note_deletion(
+        note_id,
+        reason=str((payload or {}).get("reason") or "user_requested"),
+    )
+    return json_response(result, status=memory_note_delete_status(result))
+
+
+async def memory_note_delete_apply_handler(
+    request: web.Request,
+) -> web.StreamResponse:
+    note_id = request.match_info.get("note_id", "")
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    result = delete_memory_vault_user_note(
+        note_id,
+        str((payload or {}).get("confirmToken") or ""),
+        reason=str((payload or {}).get("reason") or "user_requested"),
+    )
+    return json_response(result, status=memory_note_delete_status(result))
+
+
+async def memory_note_delete_options_handler(
+    _: web.Request,
+) -> web.StreamResponse:
+    return json_response({"ok": True, "methods": ["POST", "OPTIONS"]})
+
+
 async def chat_handler(request: web.Request) -> web.StreamResponse:
     try:
         payload = await request.json()
@@ -1112,6 +1170,14 @@ def create_app() -> web.Application:
     app.router.add_get("/api/control-page/memory/{note_id}", memory_note_handler)
     app.router.add_post("/api/control-page/open-memory-vault", open_memory_vault_handler)
     app.router.add_post("/api/control-page/memory/{note_id}", memory_note_action_handler)
+    app.router.add_post(
+        "/api/control-page/memory/{note_id}/delete/preview",
+        memory_note_delete_preview_handler,
+    )
+    app.router.add_post(
+        "/api/control-page/memory/{note_id}/delete/apply",
+        memory_note_delete_apply_handler,
+    )
     app.router.add_post("/api/control-page/shutdown", shutdown_handler)
     app.router.add_post("/api/control-page/chat", chat_handler)
     app.router.add_get("/api/control-page/action-events", action_events_handler)
@@ -1120,6 +1186,14 @@ def create_app() -> web.Application:
     app.router.add_options("/api/control-page/memory", memory_snapshot_handler)
     app.router.add_options("/api/control-page/memory-graph", memory_graph_handler)
     app.router.add_options("/api/control-page/memory/{note_id}", memory_note_handler)
+    app.router.add_options(
+        "/api/control-page/memory/{note_id}/delete/preview",
+        memory_note_delete_options_handler,
+    )
+    app.router.add_options(
+        "/api/control-page/memory/{note_id}/delete/apply",
+        memory_note_delete_options_handler,
+    )
     app.router.add_options("/api/control-page/open-memory-vault", open_memory_vault_options_handler)
     app.router.add_options("/api/control-page/shutdown", shutdown_handler)
     app.router.add_options("/api/control-page/chat", chat_handler)

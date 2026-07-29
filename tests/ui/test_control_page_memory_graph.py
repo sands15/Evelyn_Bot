@@ -95,6 +95,27 @@ class ControlPageMemoryGraphTests(unittest.TestCase):
         self.assertIn('memoryGraphIncludeInternal ? "&include_internal=true" : ""', self.html)
         self.assertIn("updateMemoryManagementGraphButton();", self.html)
 
+    def test_memory_editor_shows_provenance_and_permanently_deletes(self) -> None:
+        self.assertIn('id="memoryProvenance"', self.html)
+        self.assertIn("function renderMemoryProvenance(card)", self.html)
+        self.assertIn("provenance.sourceRefs", self.html)
+        self.assertIn("provenance.derivedFrom", self.html)
+        self.assertIn("provenance.evidenceHashes", self.html)
+        self.assertIn(
+            '"/delete/preview"',
+            self.html,
+        )
+        self.assertIn(
+            '"/delete/apply"',
+            self.html,
+        )
+        self.assertIn("confirmToken: preview.confirmToken", self.html)
+        self.assertIn(
+            'memoryDeleteButton.addEventListener("click", deleteSelectedMemory)',
+            self.html,
+        )
+        self.assertNotIn('postMemoryAction("hide")', self.html)
+
 
 if __name__ == "__main__":
     unittest.main()

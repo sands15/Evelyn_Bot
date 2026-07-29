@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+import sqlite3
 import sys
 import tempfile
 import unittest
@@ -13,16 +14,23 @@ if str(RUNTIME_ROOT) not in sys.path:
 
 from evelyn_core.assistant_contracts import MemoryRecallRequest  # noqa: E402
 from evelyn_core.memory_vault import (  # noqa: E402
+    MEMORY_DELETE_TOMBSTONE_SCHEMA,
+    MEMORY_PROVENANCE_SCHEMA,
+    MemoryNoteDeletedError,
     activate_memory_vault_for_guild,
     append_turn_rows_to_memory_vault,
+    bootstrap_memory_vault_source,
     build_memory_vault_context,
     consolidate_daily_memory_once,
+    delete_memory_vault_user_note,
     export_memory_graph,
     mark_memory_note_superseded,
+    memory_note_was_deleted,
     memory_vault_user_note,
     memory_vault_user_snapshot,
     memory_vault_root,
     parse_memory_note,
+    preview_memory_vault_user_note_deletion,
     probe_sub_llm_dependency,
     read_memory_hot_context,
     recall_memory_vault,
@@ -123,8 +131,9 @@ class MemoryVaultTests(unittest.TestCase):
         self.assertIn("> [!example]- 대화 원문 보기", content)
         self.assertIn("remember this preference", content)
         self.assertIn("> - 정훈: remember this preference", content)
-        self.assertNotIn("type: daily", content)
-        self.assertNotIn("guild:123", content)
+        self.assertIn("type: daily", content)
+        self.assertIn("source: conversation-turn-log", content)
+        self.assertIn("source_refs: [guild:123]", content)
         self.assertNotIn("/user/test:", content)
 
     def test_append_turn_rows_can_record_combined_scopes_once(self) -> None:
@@ -501,6 +510,332 @@ class MemoryVaultTests(unittest.TestCase):
         self.assertTrue(state_exists)
         self.assertNotIn("confirmed_at", raw_after_actions)
 
+    def test_provenance_is_exposed_in_cards_and_cached_recall(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_memory_vault_note(
+                note_type="concept",
+                title="Verified Tea Preference",
+                body="The user prefers warm barley tea in the evening.",
+                source="sub-llm-semantic-consolidation",
+                source_refs=[r"C:\private\conversation-evidence.txt"],
+                derived_from=["daily-2026-07-29"],
+                evidence_hashes=["evidence-sha256-123"],
+                confidence="high",
+                root=root,
+            )
+            snapshot = memory_vault_user_snapshot(root=root)
+            card = next(
+                item
+                for item in snapshot["cards"]
+                if item["title"] == "Verified Tea Preference"
+            )
+            request = MemoryRecallRequest(
+                turn_id="turn-provenance",
+                session_key="session",
+                guild_id=None,
+                user_text="warm barley tea preference evening",
+                topic_id=None,
+                source="test",
+                max_items=2,
+            )
+            first = recall_memory_vault(request, root=root)
+            second = recall_memory_vault(request, root=root)
+
+        provenance = card["provenance"]
+        self.assertEqual(provenance["schema"], MEMORY_PROVENANCE_SCHEMA)
+        self.assertEqual(provenance["sourceType"], "derived")
+        self.assertEqual(
+            provenance["sourceRefs"],
+            ["local:conversation-evidence.txt"],
+        )
+        self.assertEqual(provenance["derivedFrom"], ["daily-2026-07-29"])
+        self.assertEqual(
+            provenance["evidenceHashes"],
+            ["evidence-sha256-123"],
+        )
+        self.assertIn("[Memory Provenance]", first.context_text)
+        self.assertEqual(
+            first.metadata["provenance"][0]["schema"],
+            MEMORY_PROVENANCE_SCHEMA,
+        )
+        self.assertTrue(second.metadata["cache_hit"])
+        self.assertEqual(
+            second.metadata["provenance"],
+            first.metadata["provenance"],
+        )
+        self.assertNotIn(r"C:\private", first.context_text)
+
+    def test_schema_v3_index_migrates_and_reindexes_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            vault = memory_vault_root(root)
+            (vault / "concepts").mkdir(parents=True)
+            (vault / "concepts" / "migration.md").write_text(
+                "\n".join(
+                    [
+                        "---",
+                        "id: provenance-migration",
+                        "type: concept",
+                        "title: Provenance Migration",
+                        "source: control-page-user",
+                        "source_refs: [user-request]",
+                        "derived_from: [daily-source]",
+                        "evidence_hashes: [evidence-hash]",
+                        "---",
+                        "",
+                        "Durable source for a schema migration check.",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            index_dir = root / "memory_index"
+            index_dir.mkdir(parents=True)
+            db_path = index_dir / "memory.sqlite"
+            connection = sqlite3.connect(db_path)
+            try:
+                connection.executescript(
+                    """
+                    CREATE TABLE notes (
+                        note_id TEXT PRIMARY KEY,
+                        rel_path TEXT NOT NULL UNIQUE,
+                        note_type TEXT NOT NULL,
+                        title TEXT NOT NULL,
+                        body TEXT NOT NULL,
+                        tags TEXT NOT NULL DEFAULT '[]',
+                        projects TEXT NOT NULL DEFAULT '[]',
+                        links TEXT NOT NULL DEFAULT '[]',
+                        status TEXT NOT NULL DEFAULT 'active',
+                        updated_at TEXT NOT NULL DEFAULT '',
+                        importance REAL NOT NULL DEFAULT 0.5,
+                        confidence TEXT NOT NULL DEFAULT '',
+                        mtime_ns INTEGER NOT NULL,
+                        source_hash TEXT NOT NULL
+                    );
+                    CREATE TABLE metadata (
+                        key TEXT PRIMARY KEY,
+                        value TEXT NOT NULL
+                    );
+                    INSERT INTO metadata(key, value)
+                    VALUES('schema_version', '3');
+                    """
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            sync_memory_vault_index(root=root)
+            connection = sqlite3.connect(db_path)
+            try:
+                columns = {
+                    row[1]
+                    for row in connection.execute(
+                        "PRAGMA table_info(notes)"
+                    ).fetchall()
+                }
+                row = connection.execute(
+                    """
+                    SELECT source, source_refs, derived_from, evidence_hashes
+                    FROM notes
+                    WHERE note_id = 'provenance-migration'
+                    """
+                ).fetchone()
+                schema_version = connection.execute(
+                    """
+                    SELECT value
+                    FROM metadata
+                    WHERE key = 'schema_version'
+                    """
+                ).fetchone()[0]
+            finally:
+                connection.close()
+
+        self.assertTrue(
+            {"created_at", "source", "source_refs", "derived_from", "evidence_hashes"}
+            <= columns
+        )
+        self.assertEqual(schema_version, "4")
+        self.assertEqual(row[0], "control-page-user")
+        self.assertIn("user-request", row[1])
+        self.assertIn("daily-source", row[2])
+        self.assertIn("evidence-hash", row[3])
+
+    def test_permanent_delete_removes_source_index_cache_and_user_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            title = "Permanent Deletion Canary"
+            body = "private deletion canary body that must not survive"
+            path = write_memory_vault_note(
+                note_type="concept",
+                title=title,
+                body=body,
+                source="control-page-user",
+                source_refs=["user-request"],
+                root=root,
+            )
+            note = parse_memory_note(path)
+            update_memory_vault_user_note(note.note_id, "confirm", root=root)
+            request = MemoryRecallRequest(
+                turn_id="turn-delete",
+                session_key="delete-session",
+                guild_id=None,
+                user_text="permanent deletion canary private",
+                topic_id=None,
+                source="test",
+                max_items=3,
+            )
+            before = recall_memory_vault(request, root=root)
+            preview = preview_memory_vault_user_note_deletion(
+                note.note_id,
+                reason="privacy_request",
+                root=root,
+                now=lambda: 100.0,
+            )
+            result = delete_memory_vault_user_note(
+                preview["note"]["path"],
+                preview["confirmToken"],
+                reason="privacy_request",
+                root=root,
+                now=lambda: 101.0,
+            )
+            connection = sqlite3.connect(
+                root / "memory_index" / "memory.sqlite"
+            )
+            try:
+                note_index_count = connection.execute(
+                    "SELECT COUNT(*) FROM notes WHERE note_id = ?",
+                    (note.note_id,),
+                ).fetchone()[0]
+                vector_index_count = connection.execute(
+                    "SELECT COUNT(*) FROM note_vectors WHERE note_id = ?",
+                    (note.note_id,),
+                ).fetchone()[0]
+                retrieval_cache_count = connection.execute(
+                    "SELECT COUNT(*) FROM retrieval_cache",
+                ).fetchone()[0]
+            finally:
+                connection.close()
+            after = recall_memory_vault(request, root=root)
+            detail = memory_vault_user_note(note.note_id, root=root)
+            state_raw = (
+                root / "memory_index" / "user_note_state.json"
+            ).read_text(encoding="utf-8")
+            hot_raw = (
+                root / "memory_index" / "hot_context.json"
+            ).read_text(encoding="utf-8", errors="ignore")
+            tombstone_raw = (
+                root / "memory_index" / "memory_deletions.jsonl"
+            ).read_text(encoding="utf-8")
+            recreated_error = None
+            try:
+                write_memory_vault_note(
+                    note_type="concept",
+                    title=title,
+                    body="attempted resurrection",
+                    root=root,
+                )
+            except MemoryNoteDeletedError as exc:
+                recreated_error = exc
+            path_exists_after = path.exists()
+            was_deleted = memory_note_was_deleted(note.note_id, root=root)
+            reused = delete_memory_vault_user_note(
+                note.note_id,
+                preview["confirmToken"],
+                root=root,
+                now=lambda: 102.0,
+            )
+
+        self.assertTrue(before.ok)
+        self.assertIn(title, before.context_text)
+        self.assertTrue(preview["ok"])
+        self.assertTrue(result["ok"])
+        self.assertFalse(path_exists_after)
+        self.assertEqual(note_index_count, 0)
+        self.assertEqual(vector_index_count, 0)
+        self.assertEqual(retrieval_cache_count, 0)
+        self.assertFalse(detail["ok"])
+        self.assertNotIn(title, after.context_text)
+        self.assertNotIn(body, after.context_text)
+        self.assertNotIn(note.note_id, state_raw)
+        self.assertNotIn(title, hot_raw)
+        self.assertNotIn(body, hot_raw)
+        self.assertEqual(
+            result["tombstone"]["schema"],
+            MEMORY_DELETE_TOMBSTONE_SCHEMA,
+        )
+        self.assertNotIn("path", result["tombstone"])
+        self.assertNotIn(title, tombstone_raw)
+        self.assertNotIn(body, tombstone_raw)
+        self.assertTrue(was_deleted)
+        self.assertIsInstance(recreated_error, MemoryNoteDeletedError)
+        self.assertEqual(reused["error"], "memory_delete_token_reused")
+
+    def test_permanent_delete_rejects_expired_or_stale_preview(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = write_memory_vault_note(
+                note_type="concept",
+                title="Deletion Race Guard",
+                body="initial guarded body",
+                root=root,
+            )
+            note = parse_memory_note(path)
+            expired_preview = preview_memory_vault_user_note_deletion(
+                note.note_id,
+                root=root,
+                now=lambda: 10.0,
+            )
+            expired = delete_memory_vault_user_note(
+                note.note_id,
+                expired_preview["confirmToken"],
+                root=root,
+                now=lambda: 131.0,
+            )
+            stale_preview = preview_memory_vault_user_note_deletion(
+                note.note_id,
+                root=root,
+                now=lambda: 200.0,
+            )
+            updated = update_memory_vault_user_note(
+                note.note_id,
+                "edit",
+                title="Deletion Race Guard",
+                body="changed after preview",
+                root=root,
+            )
+            stale = delete_memory_vault_user_note(
+                note.note_id,
+                stale_preview["confirmToken"],
+                root=root,
+                now=lambda: 201.0,
+            )
+            path_exists_after = path.exists()
+
+        self.assertEqual(expired["error"], "memory_delete_token_expired")
+        self.assertTrue(updated["ok"])
+        self.assertEqual(
+            stale["error"],
+            "memory_note_changed_since_preview",
+        )
+        self.assertTrue(path_exists_after)
+
+    def test_bootstrap_contract_memory_is_delete_protected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = bootstrap_memory_vault_source(root=root)
+            note = parse_memory_note(paths[0])
+            preview = preview_memory_vault_user_note_deletion(
+                note.note_id,
+                root=root,
+            )
+
+        self.assertFalse(preview["ok"])
+        self.assertEqual(
+            preview["error"],
+            "memory_note_delete_protected",
+        )
+        self.assertEqual(preview["reason"], "bootstrap_contract_note")
+
     def test_user_memory_snapshot_hides_internal_management_notes_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -536,6 +871,7 @@ class MemoryVaultTests(unittest.TestCase):
         self.assertEqual(public_detail["error"], "note_not_found")
         self.assertTrue(internal_detail["ok"])
         self.assertEqual(internal_detail["card"]["title"], "Runtime Diagnostic Card")
+        self.assertFalse(internal_detail["card"]["canDelete"])
 
     def test_vector_index_metadata_and_retrieval_mode(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

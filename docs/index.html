@@ -1520,7 +1520,7 @@
 
     .memory-editor {
       display: grid;
-      grid-template-rows: auto minmax(0, 1fr) auto;
+      grid-template-rows: auto minmax(0, 1fr) auto auto;
       gap: 10px;
       min-width: 0;
       min-height: 0;
@@ -1553,6 +1553,28 @@
       border-radius: var(--radius);
       background: var(--panel);
       resize: none;
+    }
+
+    .memory-provenance {
+      display: grid;
+      gap: 4px;
+      max-height: 112px;
+      padding: 9px 10px;
+      overflow: auto;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      color: var(--muted);
+      background: color-mix(in srgb, var(--panel) 82%, transparent);
+      font-size: 0.7rem;
+      line-height: 1.45;
+    }
+
+    .memory-provenance strong {
+      color: var(--text);
+    }
+
+    .memory-provenance-empty {
+      color: var(--soft);
     }
 
     .memory-editor-actions {
@@ -2113,6 +2135,9 @@
               <div class="memory-editor" id="memoryEditor">
                 <input class="memory-editor-title" id="memoryEditTitle" type="text" placeholder="노드를 선택하세요">
                 <textarea class="memory-editor-body" id="memoryEditBody" placeholder="왼쪽 목록이나 그래프 노드를 선택하면 내용을 수정할 수 있습니다."></textarea>
+                <div class="memory-provenance" id="memoryProvenance" aria-live="polite">
+                  <span class="memory-provenance-empty">노드를 선택하면 기억의 출처와 근거가 표시됩니다.</span>
+                </div>
                 <div class="memory-editor-actions">
                   <button id="memoryEditSaveButton" type="button">수정</button>
                   <button id="memoryConfirmButton" type="button">확인</button>
@@ -2221,6 +2246,7 @@
     const memoryEditSaveButton = document.getElementById("memoryEditSaveButton");
     const memoryConfirmButton = document.getElementById("memoryConfirmButton");
     const memoryDeleteButton = document.getElementById("memoryDeleteButton");
+    const memoryProvenance = document.getElementById("memoryProvenance");
     let memorySnapshot = null;
     let memoryGraphSnapshot = null;
     let memoryGraphMotionFrame = 0;
@@ -4135,6 +4161,32 @@
       startMemoryGraphMotion(nodes, visibleEdges, positions, dimensions);
     }
 
+    function renderMemoryProvenance(card) {
+      if (!memoryProvenance) return;
+      const provenance = card && card.provenance && typeof card.provenance === "object"
+        ? card.provenance
+        : null;
+      if (!provenance) {
+        memoryProvenance.innerHTML = '<span class="memory-provenance-empty">노드를 선택하면 기억의 출처와 근거가 표시됩니다.</span>';
+        return;
+      }
+      const refs = Array.isArray(provenance.sourceRefs) ? provenance.sourceRefs : [];
+      const derived = Array.isArray(provenance.derivedFrom) ? provenance.derivedFrom : [];
+      const hashes = Array.isArray(provenance.evidenceHashes) ? provenance.evidenceHashes : [];
+      const rows = [
+        ["출처", provenance.source || provenance.sourceType || "unknown"],
+        ["출처 유형", provenance.sourceType || "unknown"],
+        ["근거 참조", refs.length ? refs.join(", ") : "없음"],
+        ["파생 기억", derived.length ? derived.join(", ") : "없음"],
+        ["근거 해시", hashes.length ? hashes.map((value) => String(value).slice(0, 16)).join(", ") : "없음"],
+        ["확신도", provenance.confidence || card.confidence || "unknown"],
+        ["마지막 수정", provenance.updatedAt || card.updatedAt || "unknown"]
+      ];
+      memoryProvenance.innerHTML = rows.map(([label, value]) => (
+        '<div><strong>' + escapeHtml(label) + '</strong> · ' + escapeHtml(String(value)) + '</div>'
+      )).join("");
+    }
+
     function renderMemoryEditor() {
       const hasSelection = Boolean(selectedMemoryCard && selectedMemoryId);
       const locked = Boolean(selectedMemoryCard && (selectedMemoryCard.locked || selectedMemoryCard.canEdit === false || selectedMemoryCard.contentHidden));
@@ -4149,9 +4201,15 @@
         memoryEditBody.disabled = !hasSelection || locked;
       }
       if (memoryEditSaveButton) memoryEditSaveButton.disabled = !hasSelection || locked;
-      [memoryConfirmButton, memoryDeleteButton].forEach((button) => {
-        if (button) button.disabled = !hasSelection;
-      });
+      if (memoryConfirmButton) memoryConfirmButton.disabled = !hasSelection;
+      if (memoryDeleteButton) {
+        const deleteProtected = Boolean(selectedMemoryCard && selectedMemoryCard.canDelete === false);
+        memoryDeleteButton.disabled = !hasSelection || deleteProtected;
+        memoryDeleteButton.title = deleteProtected
+          ? "이 기억은 원본 계약 또는 legacy source가 관리하므로 여기서 삭제할 수 없습니다."
+          : "원문, 인덱스, 캐시에서 영구 삭제";
+      }
+      renderMemoryProvenance(hasSelection ? selectedMemoryCard : null);
     }
 
     function findMemoryCard(noteId) {
@@ -4294,6 +4352,55 @@
         setBubble(action === "edit" ? "Memory node updated." : action === "confirm" ? "Memory node confirmed." : "Memory node hidden.");
       } catch (error) {
         setBubble(`Memory action failed: ${error.message}`);
+        renderMemoryEditor();
+      }
+    }
+
+    async function deleteSelectedMemory() {
+      if (!selectedMemoryId || !selectedMemoryCard) return;
+      if (selectedMemoryCard.canDelete === false) {
+        setBubble("이 기억은 시스템 계약 또는 legacy source가 관리하므로 삭제할 수 없어.");
+        renderMemoryEditor();
+        return;
+      }
+      const noteId = selectedMemoryId;
+      if (memoryDeleteButton) memoryDeleteButton.disabled = true;
+      try {
+        const preview = await fetchApi(
+          "/api/control-page/memory/" + encodeURIComponent(noteId) + "/delete/preview",
+          {
+            method: "POST",
+            body: JSON.stringify({ reason: "user_requested" })
+          }
+        );
+        const note = preview && preview.note ? preview.note : {};
+        const provenance = note.provenance || {};
+        const source = provenance.source || provenance.sourceType || "unknown";
+        const confirmed = window.confirm(
+          `"${note.title || selectedMemoryCard.title || noteId}" 기억을 영구 삭제할까요?\n\n` +
+          `출처: ${source}\n` +
+          "원문 파일, 사용자 상태, 검색 인덱스, 검색 캐시에서 제거되며 되돌릴 수 없습니다."
+        );
+        if (!confirmed) return;
+        await fetchApi(
+          "/api/control-page/memory/" + encodeURIComponent(noteId) + "/delete/apply",
+          {
+            method: "POST",
+            body: JSON.stringify({
+              confirmToken: preview.confirmToken,
+              reason: "user_requested"
+            })
+          }
+        );
+        memorySnapshot = null;
+        memoryGraphSnapshot = null;
+        selectedMemoryId = "";
+        selectedMemoryCard = null;
+        await loadMemoryVault({ force: true });
+        setBubble("기억을 원문·인덱스·캐시에서 영구 삭제했어.");
+      } catch (error) {
+        setBubble(`기억 삭제에 실패했어. 다시 시도해줘: ${error.message}`);
+      } finally {
         renderMemoryEditor();
       }
     }
@@ -4552,11 +4659,7 @@
       memoryConfirmButton.addEventListener("click", () => postMemoryAction("confirm"));
     }
     if (memoryDeleteButton) {
-      memoryDeleteButton.addEventListener("click", () => {
-        if (!selectedMemoryId) return;
-        if (!window.confirm("이 메모리 노드를 삭제 목록으로 옮길까요?")) return;
-        postMemoryAction("hide");
-      });
+      memoryDeleteButton.addEventListener("click", deleteSelectedMemory);
     }
     composer.addEventListener("input", renderSuggestions);
     composer.addEventListener("keydown", (event) => {

@@ -10,6 +10,7 @@ from pathlib import Path
 import re
 import subprocess
 import time
+import uuid
 from typing import Any
 
 import aiohttp
