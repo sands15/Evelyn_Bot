@@ -6,12 +6,11 @@ from pathlib import Path
 
 import voyager.utils as U
 from langchain.chat_models import ChatOpenAI
-from langchain.embeddings.openai import OpenAIEmbeddings
 from langchain.schema import HumanMessage, SystemMessage
-from langchain.vectorstores import Chroma
 
 from voyager.prompts import load_prompt
 from voyager.control_primitives import load_control_primitives
+from voyager.agents.local_text_index import LocalTextIndex
 from voyager.utils.console import safe_print as print
 
 
@@ -72,9 +71,8 @@ class SkillManager:
         self.description_dir = self.skill_dir / "description"
         self.policy_state_path = self.skill_dir / self.POLICY_STATE_FILENAME
         self.policy_state = self._load_policy_state()
-        self.vectordb = Chroma(
+        self.vectordb = LocalTextIndex(
             collection_name="skill_vectordb",
-            embedding_function=OpenAIEmbeddings(),
             persist_directory=f"{ckpt_dir}/skill/vectordb",
         )
         self._ensure_vectordb_sync(repair=True)
@@ -563,6 +561,9 @@ class SkillManager:
             return []
         print(f"\033[33mSkill Manager retrieving for {k} skills\033[0m")
         docs_and_scores = self.vectordb.similarity_search_with_score(query, k=k)
+        docs_and_scores = [
+            (doc, score) for doc, score in docs_and_scores if float(score) < 1.0
+        ]
         print(
             f"\033[33mSkill Manager retrieved skills: "
             f"{', '.join([doc.metadata['name'] for doc, _ in docs_and_scores])}\033[0m"

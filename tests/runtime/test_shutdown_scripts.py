@@ -24,6 +24,8 @@ class ShutdownScriptContractTests(unittest.TestCase):
         self.assertIn("stop_local.bat", script)
         self.assertNotIn("wsl.exe --shutdown", script)
         self.assertNotIn("taskkill", script.lower())
+        self.assertIn("$env:DISCORD_BOT_TOKEN = 'local-only-disabled'", script)
+        self.assertIn("Remove-Item Env:DISCORD_BOT_TOKEN", script)
 
     def test_stack_stop_script_has_safe_contract(self) -> None:
         script = self.read_script("stop_evelyn_stack.ps1")
@@ -88,6 +90,27 @@ class ShutdownScriptContractTests(unittest.TestCase):
         self.assertIn("Wait-Port -HostName '127.0.0.1' -Port $botApiPort -Label 'Docker Bot API'", script)
         self.assertIn("Wait-Port -HostName '127.0.0.1' -Port $controlPagePublicPort -Label 'Docker Control Page'", script)
         self.assertNotIn("function Start-LocalControlService", script)
+
+    def test_local_launcher_defers_minecraft_services_until_explicit_start(self) -> None:
+        script = self.read_script("start_local_background.ps1")
+        docker_core = script[
+            script.index("function Start-DockerCore") :
+            script.index("function Test-LocalBridgeRunning")
+        ]
+        voyager_start = (
+            REPO_ROOT / "evelyn_core" / "start_voyager.bat"
+        ).read_text(encoding="utf-8")
+
+        self.assertNotIn("'--profile', 'voyager'", docker_core)
+        self.assertNotIn("'minecraft_llm'", docker_core)
+        self.assertNotIn("'codex_gateway'", docker_core)
+        self.assertNotIn("'voyager'", docker_core)
+        self.assertIn("Minecraft services are deferred", docker_core)
+        self.assertIn("-Profiles voyager", voyager_start)
+        self.assertIn(
+            "-Services router_llm,minecraft_llm,codex_gateway,voyager",
+            voyager_start,
+        )
 
     def test_local_launcher_does_not_treat_control_page_only_start_as_ready(self) -> None:
         script = self.read_script("start_local_background.ps1")

@@ -542,18 +542,12 @@ class Voyager:
                 mode=reset_mode,
                 detail="explicit reset() or rollout(reset_env=True) requested",
             )
-        difficulty = (
-            "easy" if len(self.curriculum_agent.completed_tasks) > 15 else "peaceful"
-        )
-        events = self.env.step(
-            "bot.chat(\`/time set \${getNextTime()}\`);\n"
-            + f"bot.chat('/difficulty {difficulty}');"
-        )
+        events = self.env.step("")
         self._set_phase(observation_phase, last_env_event_count=len(events))
         synced_search_policy = self._sync_search_policy_to_env()
         if synced_search_policy:
             events = copy.deepcopy(self.last_events)
-        skills = self.skill_manager.retrieve_skills(query=self.context)
+        skills = self.skill_manager.retrieve_skills(query=self.task)
         print(
             f"\033[33mRender Action Agent system message with {len(skills)} skills\033[0m"
         )
@@ -915,6 +909,15 @@ class Voyager:
             self.last_human_message_payload = payload
         return telemetry
 
+    def _set_action_wait_guard(self, enabled):
+        setter = getattr(self.env, "set_wait_guard", None)
+        if not callable(setter):
+            return False
+        try:
+            return bool(setter(bool(enabled)))
+        except Exception:
+            return False
+
     def reset(self, task, context="", reset_env=True):
         return self._activate_task(
             task,
@@ -978,7 +981,11 @@ class Voyager:
             return self.messages, 0, True, info
         self._set_phase("action_llm_request")
         try:
-            ai_message = self.action_agent.llm(self.messages)
+            self._set_action_wait_guard(True)
+            try:
+                ai_message = self.action_agent.llm(self.messages)
+            finally:
+                self._set_action_wait_guard(False)
         except Exception as exc:
             latest_payload = self._latest_event_payload(self.last_events)
             info = {
@@ -1187,7 +1194,7 @@ class Voyager:
                     events[-1][1]["voxels"] = new_events[-1][1]["voxels"]
             self._set_phase("skill_retrieval")
             new_skills = self.skill_manager.retrieve_skills(
-                query=self.context
+                query=self.task
                 + "\n\n"
                 + self.action_agent.summarize_chatlog(events)
             )

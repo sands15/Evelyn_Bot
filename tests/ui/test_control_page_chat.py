@@ -129,6 +129,33 @@ class ControlPageChatTests(unittest.TestCase):
         self.assertNotIn('applyControlPanelCommand({ action: memoryPanelAction, panel: "memory" });', self.html)
         self.assertIn('fetchApi("/api/control-page/chat"', self.html)
 
+    def test_fast_command_catalog_only_advertises_wired_voice_commands(self) -> None:
+        for command in (
+            "/help",
+            "/status",
+            "/memory",
+            "/obsidian",
+            "/voice status",
+            "/mic status",
+            "/mic on",
+            "/mic off",
+            "/minecraft connect",
+            "/minecraft status",
+            "/inventory",
+            "/voyager stats",
+            "/minecraft disconnect",
+            "/minecraft goal <goal>",
+            "/autonomy status",
+            "/repair preview",
+            "/repair start",
+            "/restart",
+            "/shutdown",
+        ):
+            with self.subTest(command=command):
+                self.assertIn(f'{{ command: "{command}"', self.html)
+        self.assertNotIn('{ command: "/voice continuity"', self.html)
+        self.assertNotIn('{ command: "/voice input auto"', self.html)
+
     def test_control_panel_commands_drive_memory_window(self) -> None:
         self.assertIn("let lastControlPanelCommandId = 0;", self.html)
         self.assertIn("function applyControlPanelCommands(state, options = {})", self.html)
@@ -296,6 +323,9 @@ class ControlPageChatTests(unittest.TestCase):
         self.assertIn('id="runtimeRepairPreviewButton"', self.html)
         self.assertIn("function runtimeRepairActionFromLegacyState(state)", self.html)
         self.assertIn("runtimeRepairActionFromLegacyState(payload)", self.html)
+        self.assertIn("function runtimeDiagnosticIsConfirmedFailure(diagnostic, state)", self.html)
+        self.assertIn("runtimeRepairReadyServices.has(serviceId)", self.html)
+        self.assertIn("RUNTIME_REPAIR_STARTUP_GRACE_MS", self.html)
         self.assertIn("suggested.actionId || suggested.action_id || suggested.id", self.html)
         self.assertIn("`start_${serviceId}`", self.html)
         self.assertIn("function requestRuntimeRepairPreview()", self.html)

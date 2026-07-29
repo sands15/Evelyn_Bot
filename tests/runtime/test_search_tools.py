@@ -38,6 +38,8 @@ class SearchToolsTests(unittest.TestCase):
         self.assertEqual(strip_search_command_words("OpenAI latest model news search"), "OpenAI latest model news")
         self.assertEqual(strip_search_command_words("OpenAI latest model news look up"), "OpenAI latest model news")
         self.assertEqual(strip_search_command_words("OpenAI 최신 모델 뉴스 검색해줘"), "OpenAI 최신 모델 뉴스")
+        self.assertEqual(strip_search_command_words("로컬 STT 모델 후보 알아봐줘"), "로컬 STT 모델 후보")
+        self.assertEqual(strip_search_command_words("로컬 STT 모델 후보 조사해봐"), "로컬 STT 모델 후보")
 
     def test_weather_location_defaults_to_seoul(self) -> None:
         self.assertEqual(weather_location_from_query("오늘 날씨"), "서울")

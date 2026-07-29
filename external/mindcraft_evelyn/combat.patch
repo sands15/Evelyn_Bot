@@ -1,0 +1,38 @@
+diff --git a/src/utils/mcdata.js b/src/utils/mcdata.js
+--- a/src/utils/mcdata.js
++++ b/src/utils/mcdata.js
+@@ -4,11 +4,13 @@ import { createBot } from 'mineflayer';
+ import prismarine_items from 'prismarine-item';
+ import { pathfinder } from 'mineflayer-pathfinder';
+ import { plugin as pvp } from 'mineflayer-pvp';
++import customPvpModule from '@nxg-org/mineflayer-custom-pvp';
+ import { plugin as collectblock } from 'mineflayer-collectblock';
+ import { plugin as autoEat } from 'mineflayer-auto-eat';
+ import plugin from 'mineflayer-armor-manager';
+ import { installEvelynRuntime } from './evelyn_runtime.js';
+ const armorManager = plugin;
++const customPvp = customPvpModule?.default || customPvpModule;
+ let mc_version = settings.minecraft_version;
+ let mcdata = null;
+ let Item = null;
+@@ -116,6 +118,7 @@ export function initBot(username) {
+ 
+     bot.loadPlugin(pathfinder);
+     bot.loadPlugin(pvp);
++    bot.loadPlugin(customPvp);
+     bot.loadPlugin(collectblock);
+     bot.loadPlugin(autoEat);
+     bot.loadPlugin(armorManager); // auto equip armor
+diff --git a/src/agent/library/skills.js b/src/agent/library/skills.js
+--- a/src/agent/library/skills.js
++++ b/src/agent/library/skills.js
+@@ -1488,9 +1488,6 @@ export async function avoidEnemies(bot, distance=16) {
+         if (bot.interrupt_code) {
+             break;
+         }
+-        if (enemy && bot.entity.position.distanceTo(enemy.position) < 3) {
+-            await attackEntity(bot, enemy, false);
+-        }
+     }
+     bot.pathfinder.stop();
+     log(bot, `Moved ${distance} away from enemies.`);

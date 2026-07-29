@@ -1,8 +1,8 @@
 # Evelyn Current State
 
 Document status: **Current**
-Last reviewed: 2026-07-18 KST
-Source branch: `refactor/main-py-decomposition-2026-07-15`
+Last reviewed: 2026-07-19 KST
+Source branch: `main` at `abac545`
 
 이 문서는 현재 확인된 사실만 기록한다. 목표 구조와 과거 계획은 다른 설계/계획 문서를 사용한다.
 
@@ -27,13 +27,14 @@ Source branch: `refactor/main-py-decomposition-2026-07-15`
 
 ## Deployment state
 
-- 이번 변경 뒤 Docker 컨테이너와 Windows 로컬 런타임은 재시작하거나 재빌드하지 않았다.
-- 따라서 현재 실행 중인 프로세스에는 이 브랜치의 Codex Gateway 인증과 readiness 변경이 아직 적용되지 않았다.
-- 실제 반영은 정훈의 재시작 승인 뒤에만 수행한다.
+- local-only Docker 이미지 10개를 새 `main` 기준으로 재빌드하고 컨테이너를 강제 재생성했다.
+- Windows Local I/O Bridge를 공식 `start_local.bat --background` 경로로 재기동했다.
+- Codex Gateway는 프로젝트 전용 ChatGPT OAuth 파일을 read-only로 마운트하며, local-only 런처가 같은 경로를 재기동 뒤에도 유지한다.
+- 최종 컨테이너 10개는 모두 `healthy`, restart count 0이고 Windows Local I/O Bridge는 attached/ready다.
 
 ## Last runtime evidence
 
-소스의 현재 health builder를 기존 로컬 서비스 상태에 직접 적용한 결과:
+2026-07-19 실제 local-only runtime checker 결과:
 
 - `ok=true`
 - `fullyHealthy=false`
@@ -41,6 +42,7 @@ Source branch: `refactor/main-py-decomposition-2026-07-15`
 - `overallState=degraded`
 - `voyagerHttpReady=true`
 - `voyagerRuntimeReady=false`
+- Codex Gateway `backendReady=true`, `lastActionReady=true`, 마지막 action phase `success`
 
 즉, 핵심 대화/제어 서비스 준비와 Voyager 실제 자동화 준비는 같은 상태가 아니다.
 
@@ -60,6 +62,8 @@ Source branch: `refactor/main-py-decomposition-2026-07-15`
 - Python `compileall`
 - 활성 Live2D/boot JavaScript `node --check`
 - Codex Gateway 테스트 서버: 무토큰/오토큰 `401`, 정상 bearer token `200`
+
+2026-07-19 운영 반영 뒤 실제 `127.0.0.1:8787/codex/action`에서도 무토큰 `401`, 오토큰 `401`, 정상 bearer token `200`과 정확한 `OK` 응답을 두 차례 확인했다.
 
 ## Operational boundaries
 

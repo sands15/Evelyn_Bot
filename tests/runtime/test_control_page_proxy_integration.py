@@ -140,6 +140,37 @@ class ControlPageProxyIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(payload["runtime"]["controlPlane"]["botApi"]["lastSuccessfulStateAt"], 0)
         self.assertIn("both responding", payload["statusText"])
 
+    async def test_action_events_handler_proxies_followup_events(self) -> None:
+        async def action_events(_: web.Request) -> web.Response:
+            return web.json_response(
+                {
+                    "ok": True,
+                    "lastEventId": 2,
+                    "activeCount": 0,
+                    "events": [{"id": 2, "type": "completed", "taskId": "fast-action-1"}],
+                    "tasks": [{"id": "fast-action-1", "status": "completed"}],
+                }
+            )
+
+        app = web.Application()
+        app.router.add_get("/api/control-page/action-events", action_events)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        sockets = site._server.sockets if site._server else []  # noqa: SLF001
+        port = int(sockets[0].getsockname()[1])
+        try:
+            with patch.object(control_page_server, "BOT_API_BASE", f"http://127.0.0.1:{port}"):
+                response = await control_page_server.action_events_handler(_Request())
+        finally:
+            await runner.cleanup()
+
+        payload = json.loads(response.text or "{}")
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["events"][0]["type"], "completed")
+        self.assertEqual(payload["tasks"][0]["status"], "completed")
+
 
 if __name__ == "__main__":
     unittest.main()

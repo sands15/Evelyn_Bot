@@ -3,7 +3,7 @@ set -euo pipefail
 
 VENV_ACT="${VENV_ACT:-source ~/venvs/vllm-env/bin/activate}"
 LLAMA_DIR="${LLAMA_DIR:-/mnt/c/Users/Admin/llama.cpp}"
-SUB_LLM_GPU="${SUB_LLM_GPU:-GPU-a352a7f9-1fcf-3d18-9973-6f9114addf7b}"
+SUB_LLM_GPU="${SUB_LLM_GPU:-GPU-96c554e6-feef-2980-6722-efcb0af098f9}"
 SUB_LLM_PORT="${SUB_LLM_PORT:-9821}"
 SUB_LLM_CONTEXT="${SUB_LLM_CONTEXT:-4096}"
 SUB_LLM_REASONING="${SUB_LLM_REASONING:-off}"

@@ -9363,9 +9363,11 @@ var __async = (__this, __arguments, generator) => {
       const t = this._currentTime * 2 * Math.PI;
       for (let i = 0; i < this._breathParameters.getSize(); ++i) {
         const data = this._breathParameters.at(i);
+        const sineValue = Math.sin(t / data.cycle);
+        const waveValue = data.waveform === "triangle" ? 2 / Math.PI * Math.asin(sineValue) : sineValue;
         model.addParameterValueById(
           data.parameterId,
-          data.offset + data.peak * Math.sin(t / data.cycle),
+          data.offset + data.peak * waveValue,
           data.weight
         );
       }
@@ -11896,6 +11898,7 @@ var __async = (__this, __arguments, generator) => {
       (_e = this.pose) == null ? void 0 : _e.updateParameters(model, dt);
       this.emit("beforeModelUpdate");
       model.update();
+      this.emit("afterModelUpdate");
       model.loadParameters();
     }
     updateFocus() {

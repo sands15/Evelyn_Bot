@@ -258,7 +258,7 @@
     },
     {
       "id": "voyager",
-      "label": "Voyager",
+      "label": "Mindcraft",
       "kind": "minecraft",
       "required": false,
       "host": "127.0.0.1",

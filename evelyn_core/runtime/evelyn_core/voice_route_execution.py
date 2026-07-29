@@ -7,7 +7,7 @@ from typing import Any, Awaitable, Callable, MutableMapping
 import aiohttp
 
 from .skills import SkillContext, SkillResult
-from .text import clean_text, is_user_echo_answer
+from .text import ModelStreamPrefixFilter, clean_text, is_user_echo_answer
 from .turn_budget import build_turn_execution_budget
 from .turn_lifecycle import TurnState
 from .voice_orchestration import VoiceTurnRequest, VoiceTurnRouteContext
@@ -773,6 +773,7 @@ async def execute_main_llm_streaming_turn(
     session = await deps.get_http_session()
     raw_parts: list[str] = []
     reasoning_parts: list[str] = []
+    model_stream_prefix_filter = ModelStreamPrefixFilter()
     speech_chunker = deps.build_stream_speech_chunker(metrics=metrics)
     question_stream_state = {
         "max_question_count": max(0, min(1, int(route_decision.max_question_count or 0))),
@@ -892,7 +893,7 @@ async def execute_main_llm_streaming_turn(
                 if reasoning_text:
                     reasoning_parts.append(reasoning_text)
 
-                delta_text = str(stream_event.get("delta_text") or "")
+                delta_text = model_stream_prefix_filter.push(str(stream_event.get("delta_text") or ""))
                 if not delta_text:
                     continue
 
@@ -916,6 +917,26 @@ async def execute_main_llm_streaming_turn(
                     continue
                 emitted_any = (await deps.emit_stream_delta_chunks(
                     delta_text,
+                    speech_chunker=speech_chunker,
+                    on_sentence=on_sentence,
+                    question_stream_state=question_stream_state,
+                )) or emitted_any
+            tail_text = model_stream_prefix_filter.finish()
+            if tail_text:
+                if on_first_chunk is not None:
+                    main_first_token_ms = max(0.0, (time.monotonic() - llm_started_at) * 1000.0)
+                    deps.mark_turn_stage(
+                        metrics,
+                        "llm_first_chunk",
+                        event_name="llm_first_chunk",
+                        source_mode=source,
+                        since_request_ms=main_first_token_ms,
+                    )
+                    on_first_chunk()
+                    on_first_chunk = None
+                raw_parts.append(tail_text)
+                emitted_any = (await deps.emit_stream_delta_chunks(
+                    tail_text,
                     speech_chunker=speech_chunker,
                     on_sentence=on_sentence,
                     question_stream_state=question_stream_state,

@@ -1,0 +1,30 @@
+diff --git a/node_modules/mineflayer-pathfinder/lib/goto.js b/node_modules/mineflayer-pathfinder/lib/goto.js
+--- a/node_modules/mineflayer-pathfinder/lib/goto.js
++++ b/node_modules/mineflayer-pathfinder/lib/goto.js
+@@ -19,13 +19,23 @@ function goto (bot, goal) {
+       cleanup()
+     }
+ 
+     function noPathListener (results) {
+-      if (results.path.length === 0) {
++      const status = results?.status
++      const pathLength = Array.isArray(results?.path) ? results.path.length : 0
++      const currentPosition = bot.entity?.position?.floored?.()
++      if (pathLength === 0 && currentPosition && goal.isEnd(currentPosition)) {
+         cleanup()
+-      } else if (results.status === 'noPath') {
++      } else if (status === 'partial') {
++        // An empty partial result means A* yielded before finding its first
++        // segment. Keep waiting for the continuation instead of reporting a
++        // successful no-op.
++        return
++      } else if (status === 'noPath') {
+         cleanup(error('NoPath', 'No path to the goal!'))
+-      } else if (results.status === 'timeout') {
++      } else if (status === 'timeout') {
+         cleanup(error('Timeout', 'Took to long to decide path to goal!'))
++      } else if (pathLength === 0) {
++        cleanup(error('NoPath', 'Pathfinder returned an empty path before reaching the goal!'))
+       }
+     }
+ 

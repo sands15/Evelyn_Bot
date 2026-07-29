@@ -45,7 +45,74 @@ class DockerComposeContractTests(unittest.TestCase):
 
         self.assertNotIn("restart: unless-stopped", source)
         self.assertNotIn("restart: always", source)
-        self.assertEqual(source.count('restart: "no"'), 11)
+        self.assertEqual(source.count('restart: "no"'), 13)
+
+    def test_mindcraft_persists_microsoft_account_profile_cache(self) -> None:
+        source = COMPOSE.read_text(encoding="utf-8")
+        voyager = source.split("  voyager:\n", 1)[1]
+
+        self.assertIn("- ./bot_profiles:/app/bot_profiles", voyager)
+        self.assertIn("- ./bot_memory/mindcraft:/app/mindcraft/bots/Evelyn_0428", voyager)
+        self.assertIn('MINEFLAYER_PROFILES_FOLDER: "/app/bot_profiles"', voyager)
+        self.assertIn('MINEFLAYER_AUTH: "microsoft"', voyager)
+        self.assertIn('MINECRAFT_VERSION: "1.21.11"', voyager)
+        self.assertIn('MINEFLAYER_AUTH", "microsoft"', (REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "config.py").read_text(encoding="utf-8"))
+        self.assertIn('MINEFLAYER_USERNAME", "Evelyn_0428"', (REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "config.py").read_text(encoding="utf-8"))
+        self.assertIn('MINEFLAYER_USERNAME=Evelyn_0428', (REPO_ROOT / "evelyn_core" / "start_env.bat").read_text(encoding="utf-8"))
+
+    def test_mindcraft_uses_authenticated_codex_gateway(self) -> None:
+        source = COMPOSE.read_text(encoding="utf-8")
+        voyager = source.split("  voyager:\n", 1)[1]
+
+        self.assertIn('MINDCRAFT_CODEX_GATEWAY_URL: "http://codex_gateway:8787/codex/action"', voyager)
+        self.assertIn('MINDCRAFT_CODEX_MODEL: "gpt-5.5"', voyager)
+        self.assertIn('VOYAGER_CODEX_GATEWAY_TOKEN_FILE: "/app/runtime_artifacts/secrets/codex_gateway.token"', voyager)
+        self.assertIn('MINDCRAFT_ENABLE_SKIN_COMMANDS: "false"', voyager)
+        self.assertIn('dockerfile: docker/Dockerfile.mindcraft', voyager)
+        self.assertIn('evelyn_core.mindcraft_service', voyager)
+        self.assertIn('["CMD", "python3", "-c"', voyager)
+
+    def test_mindcraft_uses_qwen14b_local_planner_with_shared_router(self) -> None:
+        source = COMPOSE.read_text(encoding="utf-8")
+        voyager = source.split("  voyager:\n", 1)[1]
+        minecraft_llm = source.split("  minecraft_llm:\n", 1)[1].split("\n  sub_llm:", 1)[0]
+
+        self.assertIn('profiles: ["llm", "voyager"]', source)
+        self.assertIn('container_name: evelyn-minecraft-llm', minecraft_llm)
+        self.assertIn('/llama/models/qwen3-14b/Qwen3-14B-Q4_K_M.gguf', minecraft_llm)
+        self.assertIn('-c 6144', minecraft_llm)
+        self.assertIn('-np 1', minecraft_llm)
+        self.assertIn('--cache-type-k q8_0', minecraft_llm)
+        self.assertIn('--cache-type-v q8_0', minecraft_llm)
+        self.assertIn('NVIDIA_VISIBLE_DEVICES: "1"', minecraft_llm)
+        self.assertIn('CUDA_VISIBLE_DEVICES: "1"', minecraft_llm)
+        self.assertIn('LLAMA_CHAT_TEMPLATE_KWARGS: \'{"enable_thinking":false}\'', minecraft_llm)
+        self.assertIn('MINDCRAFT_LOCAL_LLM_URL: "http://minecraft_llm:9823/v1/chat/completions"', voyager)
+        self.assertIn('MINDCRAFT_ROUTER_URL: "http://router_llm:9822/v1/chat/completions"', voyager)
+        self.assertIn('MINDCRAFT_CODEX_COOLDOWN_SEC: "30"', voyager)
+        self.assertIn(
+            'MINDCRAFT_PLANNER_STATE_PATH: "/app/runtime_artifacts/mindcraft/planner_state.json"',
+            voyager,
+        )
+        self.assertIn('MINDCRAFT_DETERMINISTIC_TOOL_BOOTSTRAP: "false"', voyager)
+        self.assertIn('minecraft_llm:', voyager)
+        self.assertIn('router_llm:', voyager)
+        self.assertIn("GET /health HTTP/1.0", minecraft_llm)
+        router_llm = source.split("  router_llm:\n", 1)[1].split("\n  minecraft_llm:", 1)[0]
+        self.assertIn("GET /health HTTP/1.0", router_llm)
+
+    def test_mindcraft_image_applies_pinned_evelyn_overlay(self) -> None:
+        dockerfile = (DOCKER_DIR / "Dockerfile.mindcraft").read_text(encoding="utf-8")
+        package = (REPO_ROOT / "external" / "mindcraft_evelyn" / "package.json").read_text(encoding="utf-8")
+        patch = (REPO_ROOT / "external" / "mindcraft_evelyn" / "evelyn.patch").read_text(encoding="utf-8")
+
+        self.assertIn("FROM node:22-bookworm-slim", dockerfile)
+        self.assertIn("sed -i 's/\\r$//'", dockerfile)
+        self.assertIn("external/mindcraft", dockerfile)
+        self.assertIn("patch -p1", dockerfile)
+        self.assertIn('"mineflayer": "4.37.1"', package)
+        self.assertIn("profilesFolder", patch)
+        self.assertIn("MINDCRAFT_ENABLE_SKIN_COMMANDS", patch)
 
     def test_discord_bot_image_contains_runtime_voice_dependencies(self) -> None:
         requirements = (DOCKER_DIR / "requirements.discord-bot.txt").read_text(encoding="utf-8")
@@ -55,6 +122,28 @@ class DockerComposeContractTests(unittest.TestCase):
             self.assertIn(dependency, requirements)
         for package in ("libopus0", "ffmpeg", "libportaudio2"):
             self.assertIn(package, dockerfile)
+
+    def test_voyager_image_contains_upstream_runtime_dependencies(self) -> None:
+        requirements = (DOCKER_DIR / "requirements.voyager.txt").read_text(encoding="utf-8")
+        dockerfile = (DOCKER_DIR / "Dockerfile.voyager").read_text(encoding="utf-8")
+
+        for dependency in (
+            "requests",
+            "javascript",
+            "langchain",
+            "langchain-community",
+            "openai",
+            "tiktoken",
+            "gymnasium",
+            "psutil",
+            "minecraft-launcher-lib",
+        ):
+            self.assertIn(dependency, requirements)
+        self.assertIn("FROM node:22-slim AS node_runtime", dockerfile)
+        self.assertNotIn("chromadb", requirements)
+        self.assertNotIn("build-essential", dockerfile)
+        self.assertIn("COPY package.json package-lock.json /app/", dockerfile)
+        self.assertIn("npm ci --omit=dev", dockerfile)
 
     def test_remote_stt_warmup_does_not_force_local_qwen_model_load(self) -> None:
         main_source = MAIN.read_text(encoding="utf-8")
@@ -102,6 +191,7 @@ class DockerComposeContractTests(unittest.TestCase):
 
         self.assertIn('app.router.add_post("/api/control-page/chat", chat_handler)', source)
         self.assertIn('app.router.add_post("/api/control-page/chat-stream", chat_stream_handler)', source)
+        self.assertIn('app.router.add_get("/api/control-page/action-events", action_events_handler)', source)
         self.assertIn('app.router.add_get("/api/local-bridge/status", local_bridge_status_handler)', source)
         self.assertIn('app.router.add_post("/api/local-bridge/status", local_bridge_status_handler)', source)
         self.assertIn('"stream": True', source)
@@ -130,7 +220,7 @@ class DockerComposeContractTests(unittest.TestCase):
             "start_vision.bat": ("-Profiles vision", "-Services vision"),
             "start_codex_gateway.bat": ("-Profiles voyager", "-Services codex_gateway"),
             "start_voyager_service.bat": ("-Profiles voyager", "-Services voyager"),
-            "start_voyager.bat": ("-Profiles voyager", "-Services codex_gateway,voyager"),
+            "start_voyager.bat": ("-Profiles voyager", "-Services router_llm,minecraft_llm,codex_gateway,voyager"),
             "start_bot.bat": ("-Profiles llm,tts,stt,vision,voyager,discord", "-Services discord_bot"),
         }
 

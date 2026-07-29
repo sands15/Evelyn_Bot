@@ -331,6 +331,10 @@ function Invoke-EvelynDockerComposeStop {
         Write-Host ("[stop_evelyn_local] dry-run: docker {0}" -f ($composeArgs -join ' '))
         return
     }
+    $insertedLocalDiscordToken = [string]::IsNullOrWhiteSpace([string]$env:DISCORD_BOT_TOKEN)
+    if ($insertedLocalDiscordToken) {
+        $env:DISCORD_BOT_TOKEN = 'local-only-disabled'
+    }
     try {
         $output = & docker @composeArgs 2>&1
         if ($output) {
@@ -343,6 +347,10 @@ function Invoke-EvelynDockerComposeStop {
         }
     } catch {
         Write-Host ("[stop_evelyn_local] docker compose stop failed: {0}" -f $_.Exception.Message)
+    } finally {
+        if ($insertedLocalDiscordToken) {
+            Remove-Item Env:DISCORD_BOT_TOKEN -ErrorAction SilentlyContinue
+        }
     }
 }
 

@@ -1,0 +1,45 @@
+diff --git a/src/agent/library/skills.js b/src/agent/library/skills.js
+--- a/src/agent/library/skills.js
++++ b/src/agent/library/skills.js
+@@ -1406 +1406 @@ export async function moveAway(bot, distance) {
+-    const pos = bot.entity.position;
++    const pos = bot.entity.position.clone();
+@@ -1434,4 +1434,33 @@ export async function moveAway(bot, distance) {
+-    await bot.pathfinder.goto(inverted_goal);
+-    let new_pos = bot.entity.position;
+-    log(bot, `Moved away from ${pos.floored()} to ${new_pos.floored()}.`);
+-    return true;
++    movements.canDig = false;
++    movements.allow1by1towers = false;
++    const targetDistance = Math.min(24, Math.max(8, Number(distance) || 8));
++    const minimumMovement = Math.min(8, Math.max(4, targetDistance * 0.5));
++    const directions = [
++        [1, 0], [0, 1], [-1, 0], [0, -1],
++        [1, 1], [-1, 1], [-1, -1], [1, -1],
++    ];
++    const startIndex = Math.abs(Math.floor(pos.x + pos.z)) % directions.length;
++    let lastError = null;
++    for (let offset = 0; offset < directions.length; offset++) {
++        const [dx, dz] = directions[(startIndex + offset) % directions.length];
++        const length = Math.hypot(dx, dz);
++        const targetX = Math.floor(pos.x + ((dx / length) * targetDistance));
++        const targetZ = Math.floor(pos.z + ((dz / length) * targetDistance));
++        const relocationGoal = new pf.goals.GoalXZ(targetX, targetZ);
++        try {
++            const path = await bot.pathfinder.getPathTo(movements, relocationGoal, 3000);
++            if (path?.status !== 'success' || !path.path?.length) continue;
++            bot.pathfinder.setMovements(movements);
++            await bot.pathfinder.goto(relocationGoal);
++            const newPos = bot.entity.position;
++            const moved = Math.hypot(newPos.x - pos.x, newPos.z - pos.z);
++            if (moved >= minimumMovement) {
++                log(bot, `Moved away from ${pos.floored()} to ${newPos.floored()} (${moved.toFixed(1)} blocks).`);
++                return true;
++            }
++            lastError = new Error(`relocation moved only ${moved.toFixed(1)} blocks`);
++        } catch (error) {
++            lastError = error;
++        }
++    }
++    throw new Error(`Relocation failed: ${lastError?.message || 'no safe path'}`);
+ }

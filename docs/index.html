@@ -2137,8 +2137,9 @@
 
   <script src="./assets/vendor/live2d/pixi-8.13.1.min.js"></script>
   <script src="./assets/vendor/live2d/live2dcubismcore-5.0.0.min.js"></script>
-  <script src="./assets/vendor/live2d/untitled-pixi-live2d-engine-cubism-1.3.1.js"></script>
-  <script src="./assets/evelyn-live2d.js"></script>
+  <script src="./assets/vendor/live2d/untitled-pixi-live2d-engine-cubism-1.3.1.js?v=20260728-breath-triangle-2"></script>
+  <script src="./assets/evelyn-avatar-director.js?v=20260727-avatar-director-3"></script>
+  <script src="./assets/evelyn-live2d.js?v=20260728-chest-warp-7"></script>
   <script src="./assets/evelyn-boot-progress.js"></script>
   <script>
     const root = document.documentElement;
@@ -2235,27 +2236,41 @@
     let runtimeRepairPreviewPlan = null;
     let runtimeRepairPreviewBusy = false;
     let runtimeRepairApplyBusy = false;
+    const runtimeRepairObservationStartedAt = Date.now();
+    const runtimeRepairReadyServices = new Set();
+    const runtimeRepairFailureObservations = new Map();
+    const RUNTIME_REPAIR_STARTUP_GRACE_MS = {
+      control_page: 30000,
+      bot_api: 30000,
+      main_llm: 120000,
+      router_llm: 90000,
+      sub_llm: 120000,
+      tts: 600000,
+      stt: 180000,
+    };
     let ttsOutputDeviceBusy = false;
     let memoryGraphNodeScale = Number(localStorage.getItem("evelynMemoryGraphNodeScale") || "1") || 1;
     memoryGraphNodeScale = Math.max(0.25, Math.min(2, memoryGraphNodeScale));
     let commandCatalog = [
-      { command: "/help", template: "/help", summary: "Show command list", group: "Basic" },
-      { command: "/status", template: "/status", summary: "Show Evelyn runtime status", group: "Basic" },
-      { command: "/memory", template: "/memory", summary: "Open or hide memory panel", group: "Page" },
-      { command: "/obsidian", template: "/obsidian", summary: "Open or hide memory panel", group: "Page" },
-      { command: "/voice status", template: "/voice status", summary: "Show voice pipeline status", group: "Voice" },
-      { command: "/voice continuity", template: "/voice continuity", summary: "Show barge-in continuity summary", group: "Voice" },
-      { command: "/voice continuity reset", template: "/voice continuity reset", summary: "Reset barge-in continuity counters", group: "Voice" },
-      { command: "/voice continuity reset confirm", template: "/voice continuity reset confirm", summary: "Confirm barge-in continuity reset", group: "Voice" },
-      { command: "/voice input auto", template: "/voice input auto", summary: "Use automatic voice input routing", group: "Voice" },
-      { command: "/voice input local", template: "/voice input local", summary: "Use local microphone input", group: "Voice" },
-      { command: "/voice input discord", template: "/voice input discord", summary: "Use Discord voice input", group: "Voice" },
-      { command: "/minecraft connect", template: "/minecraft connect", summary: "Start Voyager Minecraft mode", group: "Minecraft" },
-      { command: "/repair preview", template: "/repair preview", summary: "Preview the current runtime repair plan", group: "시스템" },
-      { command: "/repair start", template: "/repair start", summary: "Start the previewed runtime repair launcher", group: "시스템" },
-      { command: "/autonomy status", template: "/autonomy status", summary: "Show autonomy engine status", group: "Autonomy" },
-      { command: "/restart", template: "/restart", summary: "Restart Evelyn bot process", group: "System" },
-      { command: "/shutdown", template: "/shutdown", summary: "Shut down Evelyn runtime", group: "System" }
+      { command: "/help", template: "/help", summary: "사용 가능한 명령 보기", group: "기본" },
+      { command: "/status", template: "/status", summary: "이블린 핵심 서비스 상태 보기", group: "기본" },
+      { command: "/memory", template: "/memory", summary: "메모리 패널 열기/숨기기", group: "페이지" },
+      { command: "/obsidian", template: "/obsidian", summary: "Obsidian 메모리 저장소 열기", group: "페이지" },
+      { command: "/voice status", template: "/voice status", summary: "Windows 음성 브리지 상태 보기", group: "음성" },
+      { command: "/mic status", template: "/mic status", summary: "로컬 마이크 상태 보기", group: "음성" },
+      { command: "/mic on", template: "/mic on", summary: "로컬 마이크 입력 켜기", group: "음성" },
+      { command: "/mic off", template: "/mic off", summary: "로컬 마이크 입력 끄기", group: "음성" },
+      { command: "/minecraft connect", template: "/minecraft connect", summary: "Minecraft 서비스 지연 기동 및 접속", group: "Minecraft" },
+      { command: "/minecraft status", template: "/minecraft status", summary: "Minecraft 서비스와 접속 상태 보기", group: "Minecraft" },
+      { command: "/inventory", template: "/inventory", summary: "현재 Minecraft 인벤토리 보기", group: "Minecraft" },
+      { command: "/voyager stats", template: "/voyager stats", summary: "Minecraft 자율 작업 진행 상태 보기", group: "Minecraft" },
+      { command: "/minecraft disconnect", template: "/minecraft disconnect", summary: "Minecraft 에이전트 연결 중지", group: "Minecraft" },
+      { command: "/minecraft goal <goal>", template: "/minecraft goal ", summary: "Minecraft 목표 설정 또는 변경", group: "Minecraft" },
+      { command: "/autonomy status", template: "/autonomy status", summary: "Minecraft 자율 작업 상태 보기", group: "Minecraft" },
+      { command: "/repair preview", template: "/repair preview", summary: "런타임 복구 계획을 실행 없이 확인", group: "시스템" },
+      { command: "/repair start", template: "/repair start", summary: "확인된 런타임 복구 계획 실행", group: "시스템" },
+      { command: "/restart", template: "/restart", summary: "로컬 이블린 재시작 요청", group: "시스템" },
+      { command: "/shutdown", template: "/shutdown", summary: "로컬 이블린 종료 요청 (Shut down Evelyn runtime)", group: "시스템" }
     ];
 
     const savedTheme = localStorage.getItem("evelynControlTheme");
@@ -2777,17 +2792,87 @@
       }).join("");
     }
 
-    function primaryRuntimeDiagnosticForLegacy(health) {
+    function runtimeDiagnosticServiceId(diagnostic) {
+      const suggested = Array.isArray((diagnostic || {}).suggestedActions)
+        ? diagnostic.suggestedActions[0]
+        : null;
+      const actionId = String((suggested && (suggested.actionId || suggested.action_id || suggested.id)) || "");
+      return String(
+        (suggested && (suggested.serviceId || suggested.service_id))
+        || (diagnostic && (diagnostic.serviceId || diagnostic.service_id))
+        || (Array.isArray(diagnostic && diagnostic.serviceIds) ? diagnostic.serviceIds[0] : "")
+        || (Array.isArray(diagnostic && diagnostic.service_ids) ? diagnostic.service_ids[0] : "")
+        || (actionId.startsWith("start_") ? actionId.slice("start_".length) : "")
+        || ""
+      ).trim();
+    }
+
+    function updateRuntimeRepairServiceObservations(state) {
+      const health = runtimeHealthObject(state);
+      const services = Array.isArray((health || {}).services) ? health.services : [];
+      services.forEach((service) => {
+        const serviceId = String((service && service.id) || "").trim();
+        if (!serviceId) return;
+        if (service.ready === true || service.state === "up") {
+          runtimeRepairReadyServices.add(serviceId);
+          runtimeRepairFailureObservations.delete(serviceId);
+        }
+      });
+    }
+
+    function runtimeDiagnosticHasExplicitFailureEvidence(diagnostic, state) {
+      const code = String((diagnostic && diagnostic.code) || "").toUpperCase();
+      if (/HTTP_(401|403|404|500)$/.test(code) || code.includes("REFRESH_ERROR")) {
+        return true;
+      }
+      const serviceId = runtimeDiagnosticServiceId(diagnostic);
+      const health = runtimeHealthObject(state);
+      const services = Array.isArray((health || {}).services) ? health.services : [];
+      const service = services.find((item) => String((item && item.id) || "") === serviceId) || {};
+      const evidence = [
+        diagnostic && diagnostic.message,
+        diagnostic && diagnostic.details,
+        service.reason,
+      ].join(" ");
+      return /(start(?:up)?_failed|launch_failed|process_exited|container_exited|fatal|oom|out of memory)/i.test(evidence);
+    }
+
+    function runtimeDiagnosticIsConfirmedFailure(diagnostic, state) {
+      if (!diagnostic || String(diagnostic.severity || "").toLowerCase() !== "error") {
+        return false;
+      }
+      if (runtimeDiagnosticHasExplicitFailureEvidence(diagnostic, state)) {
+        return true;
+      }
+      const serviceId = runtimeDiagnosticServiceId(diagnostic);
+      if (!serviceId) {
+        return false;
+      }
+      const previous = runtimeRepairFailureObservations.get(serviceId) || {
+        count: 0,
+        firstSeenAt: Date.now(),
+      };
+      const next = {
+        count: previous.count + 1,
+        firstSeenAt: previous.firstSeenAt,
+      };
+      runtimeRepairFailureObservations.set(serviceId, next);
+      if (runtimeRepairReadyServices.has(serviceId)) {
+        return next.count >= 2;
+      }
+      const startupGraceMs = Number(RUNTIME_REPAIR_STARTUP_GRACE_MS[serviceId] || 120000);
+      return next.count >= 3 && Date.now() - runtimeRepairObservationStartedAt >= startupGraceMs;
+    }
+
+    function primaryRuntimeDiagnosticForLegacy(state) {
+      updateRuntimeRepairServiceObservations(state);
+      const health = runtimeHealthObject(state);
       const diagnostics = Array.isArray((health || {}).diagnostics) ? health.diagnostics : [];
-      return diagnostics.find((item) => item && item.severity === "error")
-        || diagnostics.find((item) => item && item.severity === "warning")
-        || diagnostics[0]
-        || null;
+      return diagnostics.find((item) => runtimeDiagnosticIsConfirmedFailure(item, state)) || null;
     }
 
     function runtimeRepairActionFromLegacyState(state) {
-      const health = runtimeHealthObject(state);
-      const primary = primaryRuntimeDiagnosticForLegacy(health);
+      const primary = primaryRuntimeDiagnosticForLegacy(state);
       const suggested = Array.isArray((primary || {}).suggestedActions) ? primary.suggestedActions[0] : null;
       const actionId = suggested && (suggested.actionId || suggested.action_id || suggested.id)
         ? (suggested.actionId || suggested.action_id || suggested.id)

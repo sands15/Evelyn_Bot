@@ -1,0 +1,144 @@
+diff --git a/nanovllm_voxcpm/models/voxcpm2/engine.py b/nanovllm_voxcpm/models/voxcpm2/engine.py
+index 2266cb5..6cd9cb3 100644
+--- a/nanovllm_voxcpm/models/voxcpm2/engine.py
++++ b/nanovllm_voxcpm/models/voxcpm2/engine.py
+@@ -213,3 +213,6 @@ class VoxCPM2Engine(LLMEngineBase):
+             remained = align_size - wav.size(1) % align_size
+             wav = torch.nn.functional.pad(wav, (remained, 0))
+         return self.model_runner.encode_latents(wav)
++
++    def decode_latents(self, latents: np.ndarray) -> np.ndarray:
++        return self.model_runner.decode_latents(latents)
+diff --git a/nanovllm_voxcpm/models/voxcpm2/runner.py b/nanovllm_voxcpm/models/voxcpm2/runner.py
+index 8d03402..ce6aa0e 100644
+--- a/nanovllm_voxcpm/models/voxcpm2/runner.py
++++ b/nanovllm_voxcpm/models/voxcpm2/runner.py
+@@ -86,6 +86,28 @@ class VoxCPM2Runner(BaseModelRunner):
+             .numpy()
+         )
+ 
++    @torch.inference_mode()
++    def decode_latents(self, latents: np.ndarray) -> np.ndarray:
++        latents = np.asarray(latents, dtype=np.float32)
++        if latents.ndim != 2 or latents.shape[1] != self.feat_dim:
++            raise ValueError(
++                f"Invalid latent shape {latents.shape}; expected (frames, {self.feat_dim})"
++            )
++        if latents.shape[0] == 0:
++            return np.empty(0, dtype=np.float32)
++        latent_tensor = (
++            torch.from_numpy(latents.copy())
++            .to(device="cuda", dtype=torch.float32)
++            .transpose(0, 1)
++            .unsqueeze(0)
++        )
++        return (
++            self.vae.decode(latent_tensor)[0, 0]
++            .to(torch.float32)
++            .cpu()
++            .numpy()
++        )
++
+     def run(self, seqs: list[RunnerTask[VoxCPM2Payload]], is_prefill: bool):
+         positions = self.prepare_prefill_context(seqs) if is_prefill else self.prepare_decode_context(seqs)
+         inputs = {"positions": positions}
+diff --git a/nanovllm_voxcpm/models/voxcpm2/server.py b/nanovllm_voxcpm/models/voxcpm2/server.py
+index 64ffc60..7ab6556 100644
+--- a/nanovllm_voxcpm/models/voxcpm2/server.py
++++ b/nanovllm_voxcpm/models/voxcpm2/server.py
+@@ -113,6 +113,19 @@ class VoxCPM2ServerImpl:
+         assert latents.shape[0] % self.llm.patch_size == 0
+         return latents.tobytes()
+ 
++    def decode_latents(self, latent_bytes: bytes) -> np.ndarray:
++        item_size = np.dtype(np.float32).itemsize
++        frame_size = self.llm.feat_dim * item_size
++        if not latent_bytes or len(latent_bytes) % frame_size != 0:
++            raise ValueError(
++                f"Invalid latent payload size {len(latent_bytes)}; "
++                f"expected a non-empty multiple of {frame_size}"
++            )
++        latents = np.frombuffer(latent_bytes, dtype=np.float32).reshape(
++            -1, self.llm.feat_dim
++        )
++        return self.llm.decode_latents(latents)
++
+     def add_request(
+         self,
+         seq_id: str,
+@@ -253,7 +266,13 @@ def main_loop(queue_in: mp.Queue, queue_out: mp.Queue, args, kwargs):
+             output = srv.step()
+             for seq in output:
+                 latest_waveform = seq.custom_payload.generated_waveforms[-1]
+-                queue_out.put({"type": "stream", "id": seq.seq_id, "data": latest_waveform})
++                latest_latents = (
++                    seq.custom_payload.feats[-1]
++                    .astype(np.float32, copy=False)
++                    .tobytes()
++                )
++                stream_item = {"waveform": latest_waveform, "latents": latest_latents}
++                queue_out.put({"type": "stream", "id": seq.seq_id, "data": stream_item})
+                 if seq.is_finished:
+                     queue_out.put({"type": "stream", "id": seq.seq_id, "data": None})
+ 
+@@ -386,6 +405,9 @@ class AsyncVoxCPM2Server:
+     async def encode_latents(self, wav: bytes, wav_format: str) -> bytes:
+         return await self.submit("encode_latents", wav, wav_format)
+ 
++    async def decode_latents(self, latent_bytes: bytes) -> np.ndarray:
++        return await self.submit("decode_latents", latent_bytes)
++
+     async def stop(self) -> None:
+         graceful_stop = False
+         if self.process.exitcode is None and self.process.is_alive():
+@@ -438,6 +460,7 @@ class AsyncVoxCPM2Server:
+         ref_audio_latents: bytes | None = None,
+         lora_name: str | None = None,
+         seed: int | None = None,
++        include_latents: bool = False,
+     ) -> AsyncGenerator[Waveform, None]:
+         seq_id = gen_uuid()
+         self.stream_table[seq_id] = asyncio.Queue()
+@@ -461,7 +484,10 @@ class AsyncVoxCPM2Server:
+                 if data is None:
+                     is_normal_exit = True
+                     break
+-                yield data
++                if include_latents:
++                    yield data["waveform"], data["latents"]
++                else:
++                    yield data["waveform"]
+         finally:
+             if not is_normal_exit:
+                 await self.submit("cancel", seq_id)
+@@ -513,6 +539,14 @@ class AsyncVoxCPM2ServerPool:
+         min_load_server_idx = np.argmin(self.servers_load)
+         return await self.servers[min_load_server_idx].encode_latents(wav, wav_format)
+ 
++    async def decode_latents(self, latent_bytes: bytes) -> np.ndarray:
++        min_load_server_idx = int(np.argmin(self.servers_load))
++        self.servers_load[min_load_server_idx] += 1
++        try:
++            return await self.servers[min_load_server_idx].decode_latents(latent_bytes)
++        finally:
++            self.servers_load[min_load_server_idx] -= 1
++
+     async def get_model_info(self) -> ModelInfoResponse:
+         if len(self.servers) == 0:
+             raise RuntimeError("server pool is empty")
+@@ -574,6 +608,7 @@ class AsyncVoxCPM2ServerPool:
+         ref_audio_latents: bytes | None = None,
+         lora_name: str | None = None,
+         seed: int | None = None,
++        include_latents: bool = False,
+     ):
+         if prompt_id is not None:
+             if prompt_id not in self._prompt_pool:
+@@ -603,6 +638,7 @@ class AsyncVoxCPM2ServerPool:
+                 ref_audio_latents,
+                 lora_name,
+                 seed,
++                include_latents,
+             ):
+                 yield data
+         finally:

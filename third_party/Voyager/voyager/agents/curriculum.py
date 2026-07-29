@@ -314,9 +314,8 @@ def _event_age_seconds(event):
         return None
 
 
-from langchain.embeddings.openai import OpenAIEmbeddings
 from langchain.schema import HumanMessage, SystemMessage
-from langchain.vectorstores import Chroma
+from voyager.agents.local_text_index import LocalTextIndex
 
 
 class CurriculumAgent:
@@ -422,9 +421,8 @@ class CurriculumAgent:
             repeat_block_failure_reasons=REPEAT_BLOCK_FAILURE_REASONS,
         )
         # vectordb for qa cache
-        self.qa_cache_questions_vectordb = Chroma(
+        self.qa_cache_questions_vectordb = LocalTextIndex(
             collection_name="qa_cache_questions_vectordb",
-            embedding_function=OpenAIEmbeddings(),
             persist_directory=f"{ckpt_dir}/curriculum/vectordb",
         )
         qa_count = self.qa_cache_questions_vectordb._collection.count()

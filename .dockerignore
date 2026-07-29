@@ -3,6 +3,8 @@
 !.dockerignore
 !requirements.txt
 !main.py
+!package.json
+!package-lock.json
 
 !docker/
 !docker/**
@@ -18,3 +20,10 @@
 
 !evelyn_voice/
 !evelyn_voice/**
+
+!external/
+!external/mindcraft/
+!external/mindcraft/**
+!external/mindcraft_evelyn/
+!external/mindcraft_evelyn/**
+external/mindcraft/.git

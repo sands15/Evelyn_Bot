@@ -286,6 +286,25 @@ class VoyagerEnv(gym.Env):
         except Exception:
             return None
 
+    def set_wait_guard(self, enabled: bool) -> bool:
+        if not self._server_port_open():
+            return False
+        try:
+            res = requests.post(
+                f"{self.server}/guard",
+                json={"enabled": bool(enabled)},
+                timeout=5,
+            )
+        except requests.RequestException:
+            return False
+        if res.status_code != 200:
+            return False
+        try:
+            payload = res.json()
+        except Exception:
+            return False
+        return bool(payload.get("enabled")) == bool(enabled)
+
     def _parse_event_timestamp(self, raw_value):
         if not isinstance(raw_value, str) or not raw_value:
             return None
@@ -347,6 +366,7 @@ class VoyagerEnv(gym.Env):
             "programs": programs,
         }
         last_error = None
+        self.set_wait_guard(False)
         for attempt in range(2):
             self.check_process(force_start=attempt > 0)
             self.unpause()
@@ -360,17 +380,20 @@ class VoyagerEnv(gym.Env):
                 if res.status_code == 200:
                     returned_data = res.json()
                     self.pause()
+                    self.set_wait_guard(True)
                     return json.loads(returned_data)
                 last_error = RuntimeError(
                     f"Failed to step Minecraft server: {res.status_code} / {res.text}"
                 )
                 if not self._is_minecraft_unavailable_error(last_error) or attempt >= 1:
+                    self.set_wait_guard(True)
                     raise last_error
             self.connected = False
             self.server_paused = False
             if attempt >= 1:
                 break
             self._restart_bridge_process()
+        self.set_wait_guard(True)
         raise RuntimeError(f"Failed to step Minecraft server: {last_error}") from last_error
 
     def render(self):
@@ -417,6 +440,7 @@ class VoyagerEnv(gym.Env):
         # All the reset in step will be soft
         self.reset_options["reset"] = "soft"
         self.pause()
+        self.set_wait_guard(True)
         return json.loads(returned_data)
 
     def close(self):

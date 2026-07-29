@@ -1,0 +1,32 @@
+diff --git a/src/agent/library/skills.js b/src/agent/library/skills.js
+--- a/src/agent/library/skills.js
++++ b/src/agent/library/skills.js
+@@ -1407,7 +1407,9 @@ export async function moveAway(bot, distance) {
+     let goal = new pf.goals.GoalNear(pos.x, pos.y, pos.z, distance);
+     let inverted_goal = new pf.goals.GoalInvert(goal);
+     const movements = new pf.Movements(bot);
+     const minimumY = Math.floor(pos.y) - 1;
++    const originalGetNeighbors = movements.getNeighbors.bind(movements);
++    movements.getNeighbors = (node) => originalGetNeighbors(node).filter((move) => move.y >= minimumY);
+     movements.maxDropDown = 1;
+     movements.allowParkour = false;
+     const belowFloor = (block) => block.position.y < minimumY ? 100 : 0;
+@@ -1447,7 +1449,9 @@ export async function moveAwayFromEntity(bot, entity, distance=16) {
+     let inverted_goal = new pf.goals.GoalInvert(goal);
+     const position = bot.entity.position;
+     const minimumY = Math.floor(position.y) - 1;
+     const movements = new pf.Movements(bot);
++    const originalGetNeighbors = movements.getNeighbors.bind(movements);
++    movements.getNeighbors = (node) => originalGetNeighbors(node).filter((move) => move.y >= minimumY);
+     const belowFloor = (block) => block.position.y < minimumY ? 100 : 0;
+     movements.maxDropDown = 1;
+     movements.allowParkour = false;
+@@ -1475,6 +1479,8 @@ export async function avoidEnemies(bot, distance=16) {
+         const follow = new pf.goals.GoalFollow(enemy, distance+1); // move a little further away
+         const inverted_goal = new pf.goals.GoalInvert(follow);
+         const movements = new pf.Movements(bot);
++        const originalGetNeighbors = movements.getNeighbors.bind(movements);
++        movements.getNeighbors = (node) => originalGetNeighbors(node).filter((move) => move.y >= minimumY);
+         const belowFloor = (block) => block.position.y < minimumY ? 100 : 0;
+         movements.maxDropDown = 1;
+         movements.allowParkour = false;

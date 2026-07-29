@@ -1,0 +1,295 @@
+diff --git a/profiles/defaults/survival.json b/profiles/defaults/survival.json
+index 4504bf9..369b494 100644
+--- a/profiles/defaults/survival.json
++++ b/profiles/defaults/survival.json
+@@ -2,12 +2,12 @@
+     "modes": {
+         "self_preservation": true,
+         "unstuck": true,
+-        "cowardice": false,
+-        "self_defense": true,
+-        "hunting": true,
++        "cowardice": true,
++        "self_defense": false,
++        "hunting": false,
+         "item_collecting": true,
+         "torch_placing": true,
+         "elbow_room": true,
+         "idle_staring": true,
+         "cheat": false
+     }
+diff --git a/src/agent/agent.js b/src/agent/agent.js
+index f5a8e3d..af937fb 100644
+--- a/src/agent/agent.js
++++ b/src/agent/agent.js
+@@ -9,6 +9,7 @@ import { NPCContoller } from './npc/controller.js';
+ import { MemoryBank } from './memory_bank.js';
+ import { SelfPrompter } from './self_prompter.js';
+ import convoManager from './conversation.js';
++import { EvelynGoalManager } from './evelyn_goal_manager.js';
+ import { handleTranslation, handleEnglishTranslation } from '../utils/translator.js';
+ import { addBrowserViewer } from './vision/browser_viewer.js';
+ import { serverProxy, sendOutputToServer } from './mindserver_proxy.js';
+@@ -78,15 +79,16 @@ export class Agent {
+ 
+         console.log(this.name, 'logging into minecraft...');
+         this.bot = initBot(this.name);
++        this.goal_manager = new EvelynGoalManager(this);
+         
+         // Connection Handler
+         const onDisconnect = (event, reason) => {
+             if (this._disconnectHandled) return;
+             this._disconnectHandled = true;
+ 
+             // Log and Analyze
+             // handleDisconnection handles logging to console and server
+-            const { type } = handleDisconnection(this.name, reason);
++            const { type } = handleDisconnection(this.name, reason, event);
+      
+             process.exit(1);
+         };
+@@ -94,11 +94,13 @@ export class Agent {
+             console.log(this.name, 'logged in!');
+             serverProxy.login();
+             
+-            // Set skin for profile, requires Fabric Tailor. (https://modrinth.com/mod/fabrictailor)
+-            if (this.prompter.profile.skin)
+-                this.bot.chat(`/skin set URL ${this.prompter.profile.skin.model} ${this.prompter.profile.skin.path}`);
+-            else
+-                this.bot.chat(`/skin clear`);
++            // Evelyn runs as a non-operator survival player. Never emit server commands by default.
++            if (process.env.MINDCRAFT_ENABLE_SKIN_COMMANDS === 'true') {
++                if (this.prompter.profile.skin)
++                    this.bot.chat(`/skin set URL ${this.prompter.profile.skin.model} ${this.prompter.profile.skin.path}`);
++                else
++                    this.bot.chat(`/skin clear`);
++            }
+         });
+ 		const spawnTimeoutDuration = settings.spawn_timeout;
+         const spawnTimeout = setTimeout(() => {
+@@ -119,6 +122,7 @@ export class Agent {
+                 // wait for a bit so stats are not undefined
+                 await new Promise((resolve) => setTimeout(resolve, 1000));
+                 
++                await this.goal_manager.initialize();
+                 console.log(`${this.name} spawned.`);
+                 this.clearBotLogs();
+               
+@@ -194,7 +198,10 @@ export class Agent {
+             if (init_message) {
+                 this.history.add('system', init_message);
+             }
+-            await this.self_prompter.handleLoad(save_data.self_prompt, save_data.self_prompting_state);
++            await this.self_prompter.handleLoad(
++                process.env.MINDCRAFT_GOAL || save_data.self_prompt,
++                save_data.self_prompting_state
++            );
+         }
+         if (save_data?.last_sender) {
+             this.last_sender = save_data.last_sender;
+@@ -211,7 +219,8 @@ export class Agent {
+             }
+         }
+-        else if (init_message) {
+-            await this.handleMessage('system', init_message, 2);
++        else if (init_message && !save_data?.self_prompt) {
++            await this.history.add('system', init_message);
++            this.self_prompter.start(process.env.MINDCRAFT_GOAL || init_message);
+         }
+         else {
+             this.openChat("Hello world! I am "+this.name);
+@@ -281,6 +285,9 @@ export class Agent {
+                     this.history.add(source, message);
+                 }
+-                let execute_res = await executeCommand(this, message);
++                const goalBefore = this.goal_manager.captureSnapshot();
++                let execute_res = await executeCommand(this, message);
++                const goalAfter = this.goal_manager.captureSnapshot();
++                await this.goal_manager.recordActionResult(message, execute_res, goalBefore, goalAfter, {autonomous: false});
+                 if (execute_res) 
+                     this.routeResponse(source, execute_res);
+                 return true;
+@@ -317,5 +324,8 @@ export class Agent {
+         for (let i=0; i<max_responses; i++) {
+             if (checkInterrupt()) break;
++            if (self_prompt) {
++                await this.goal_manager.prepareForPrompt();
++            }
+             let history = this.history.getHistory();
+             let res = await this.prompter.promptConvo(history);
+ 
+@@ -359,7 +369,22 @@ export class Agent {
+                         this.routeResponse(source, pre_message);
+                 }
+ 
++                const goalGate = this.goal_manager.gateCommand(res, {autonomous: self_prompt});
++                if (!goalGate.allowed) {
++                    const rejection = `Goal manager rejected ${command_name}: ${goalGate.reason}. Replan for the active short-term goal.`;
++                    console.warn(rejection);
++                    this.history.add('system', rejection);
++                    this.history.save();
++                    used_command = true;
++                    continue;
++                }
++
++                const goalBefore = this.goal_manager.captureSnapshot();
+                 let execute_res = await executeCommand(this, res);
++                const goalAfter = this.goal_manager.captureSnapshot();
++                await this.goal_manager.recordActionResult(
++                    res, execute_res, goalBefore, goalAfter, {autonomous: self_prompt}
++                );
+ 
+                 console.log('Agent executed:', command_name, 'and got:', execute_res);
+                 used_command = true;
+@@ -519,5 +540,6 @@ export class Agent {
+     async update(delta) {
+         await this.bot.modes.update();
++        await this.goal_manager.update(delta);
+         this.self_prompter.update(delta);
+         await this.checkTaskDone();
+     }
+@@ -531,7 +553,17 @@ export class Agent {
+ 
+     cleanKill(msg='Killing agent process...', code=1) {
+         this.history.add('system', msg);
+-        this.bot.chat(code > 1 ? 'Restarting.': 'Exiting.');
++        try {
++            if (
++                process.env.MINDCRAFT_ALLOW_OUTBOUND_CHAT === 'true' &&
++                this.bot?.entity &&
++                typeof this.bot?._client?.chat === 'function'
++            ) {
++                this.bot.chat(code > 1 ? 'Restarting.': 'Exiting.');
++            }
++        } catch (error) {
++            console.warn('[Evelyn] cleanKill chat skipped:', error?.message || error);
++        }
+         this.history.save();
+         process.exit(code);
+     }
+diff --git a/src/agent/self_prompter.js b/src/agent/self_prompter.js
+index c21b6a9..2d34fb4 100644
+--- a/src/agent/self_prompter.js
++++ b/src/agent/self_prompter.js
+@@ -65,7 +65,7 @@ export class SelfPrompter {
+         while (!this.interrupt) {
+             const msg = `You are self-prompting with the goal: '${this.prompt}'. Your next response MUST contain a command with this syntax: !commandName. Respond:`;
+             
+-            let used_command = await this.agent.handleMessage('system', msg, -1);
++            let used_command = await this.agent.handleMessage('system', msg, 1);
+             if (!used_command) {
+                 no_command_count++;
+                 if (no_command_count >= MAX_NO_COMMAND) {
+diff --git a/src/models/prompter.js b/src/models/prompter.js
+index 2e57ada..213ca6b 100644
+--- a/src/models/prompter.js
++++ b/src/models/prompter.js
+@@ -171,7 +171,8 @@ export class Prompter {
+         if (prompt.includes('$SELF_PROMPT')) {
+             // if active or paused, show the current goal
+             let self_prompt = !this.agent.self_prompter.isStopped() ? `YOUR CURRENT ASSIGNED GOAL: "${this.agent.self_prompter.prompt}"\n` : '';
+-            prompt = prompt.replaceAll('$SELF_PROMPT', self_prompt);
++            const managed_goal = this.agent.goal_manager?.promptContext?.() || '';
++            prompt = prompt.replaceAll('$SELF_PROMPT', [self_prompt, managed_goal].filter(Boolean).join('\n'));
+         }
+         if (prompt.includes('$LAST_GOALS')) {
+             let goal_text = '';
+diff --git a/src/utils/mcdata.js b/src/utils/mcdata.js
+index 2dd2ea5..90b79b3 100644
+--- a/src/utils/mcdata.js
++++ b/src/utils/mcdata.js
+@@ -7,6 +7,7 @@ import { plugin as pvp } from 'mineflayer-pvp';
+ import { plugin as collectblock } from 'mineflayer-collectblock';
+ import { plugin as autoEat } from 'mineflayer-auto-eat';
+ import plugin from 'mineflayer-armor-manager';
++import { installEvelynRuntime } from './evelyn_runtime.js';
+ const armorManager = plugin;
+ let mc_version = settings.minecraft_version;
+ let mcdata = null;
+@@ -54,11 +55,12 @@ export const WOOL_COLORS = [
+ 
+ export function initBot(username) {
+     const options = {
+-        username: username,
++        username: process.env.MINECRAFT_USERNAME || username,
+         host: settings.host,
+         port: settings.port,
+         auth: settings.auth,
+         version: mc_version,
++        profilesFolder: process.env.MINEFLAYER_PROFILES_FOLDER || './bot_profiles',
+         checkTimeoutInterval: 60000,  // 60s keep-alive check (default 30s) — reduces disconnects on slow servers
+     }
+     if (!mc_version || mc_version === "auto") {
+@@ -66,6 +68,7 @@ export function initBot(username) {
+     }
+ 
+     const bot = createBot(options);
++    installEvelynRuntime(bot, { agentName: username });
+ 
+     // Throttle position packets to avoid kicks on Paper/Spigot servers
+     // Paper enforces stricter packet rate limits than vanilla, causing ECONNRESET
+diff --git a/src/mindcraft/mindserver.js b/src/mindcraft/mindserver.js
+index 3cfef91..7b4414e 100644
+--- a/src/mindcraft/mindserver.js
++++ b/src/mindcraft/mindserver.js
+@@ -220,7 +220,7 @@ export function createMindServer(host_public = false, port = 8080) {
+     if (host_public) {
+         console.log('Public hosting not supported yet. Using localhost.');
+     }
+-    const host = 'localhost';
++    const host = '127.0.0.1';
+     server.listen(port, host, () => {
+         console.log(`MindServer running on port ${port} on host ${host}`);
+     });
+diff --git a/src/agent/modes.js b/src/agent/modes.js
+index 23f82f1..42e89ab 100644
+--- a/src/agent/modes.js
++++ b/src/agent/modes.js
+@@ -3,6 +3,7 @@ import * as world from './library/world.js';
+ import * as mc from '../utils/mcdata.js';
+ import settings from './settings.js'
+ import convoManager from './conversation.js';
++import { createEvelynSurvivalMode } from './evelyn_survival_mode.js';
+ 
+ async function say(agent, message) {
+     agent.bot.modes.behavior_log += message + '\n';
+@@ -14,5 +15,6 @@ async function say(agent, message) {
+ // to perform longer actions, use the execute function which won't block the update loop
+ const modes_list = [
++    createEvelynSurvivalMode({ execute }),
+     {
+         name: 'self_preservation',
+         description: 'Respond to drowning, burning, and damage at low health. Interrupts all actions.',
+diff --git a/src/agent/library/skills.js b/src/agent/library/skills.js
+index cd873cb..3db2fb1 100644
+--- a/src/agent/library/skills.js
++++ b/src/agent/library/skills.js
+@@ -1404,7 +1404,12 @@ export async function moveAway(bot, distance) {
+     const pos = bot.entity.position;
+     let goal = new pf.goals.GoalNear(pos.x, pos.y, pos.z, distance);
+     let inverted_goal = new pf.goals.GoalInvert(goal);
+-    bot.pathfinder.setMovements(new pf.Movements(bot));
++    const movements = new pf.Movements(bot);
++    const minimumY = Math.floor(pos.y) - 1;
++    movements.maxDropDown = 1;
++    movements.allowParkour = false;
++    movements.exclusionAreasStep.push((block) => block.position.y < minimumY ? 100 : 0);
++    bot.pathfinder.setMovements(movements);
+ 
+     if (bot.modes.isOn('cheat')) {
+         const move = new pf.Movements(bot);
+@@ -1449,8 +1454,13 @@ export async function avoidEnemies(bot, distance=16) {
+      **/
+     bot.modes.pause('self_preservation'); // prevents damage-on-low-health from interrupting the bot
+     let enemy = world.getNearestEntityWhere(bot, entity => mc.isHostile(entity), distance);
++    const minimumY = Math.floor(bot.entity.position.y) - 1;
+     while (enemy) {
+         const follow = new pf.goals.GoalFollow(enemy, distance+1); // move a little further away
+         const inverted_goal = new pf.goals.GoalInvert(follow);
+-        bot.pathfinder.setMovements(new pf.Movements(bot));
++        const movements = new pf.Movements(bot);
++        movements.maxDropDown = 1;
++        movements.allowParkour = false;
++        movements.exclusionAreasStep.push((block) => block.position.y < minimumY ? 100 : 0);
++        bot.pathfinder.setMovements(movements);
+         bot.pathfinder.setGoal(inverted_goal, true);

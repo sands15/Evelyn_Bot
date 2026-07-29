@@ -1,0 +1,60 @@
+ARG CUDA_IMAGE=nvidia/cuda:12.8.1-devel-ubuntu22.04
+FROM ${CUDA_IMAGE}
+
+ARG NANOVLLM_VOXCPM_REF=v2.0.3
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    HF_HOME=/root/.cache/huggingface \
+    MAX_JOBS=4 \
+    TORCH_CUDA_ARCH_LIST=12.0 \
+    UV_NO_PROGRESS=1
+
+COPY docker/nanovllm_voxcpm_exact_latent.patch /tmp/nanovllm_voxcpm_exact_latent.patch
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        build-essential \
+        ca-certificates \
+        ffmpeg \
+        git \
+        libgomp1 \
+        libsndfile1 \
+        ninja-build \
+        pkg-config \
+        python3-dev \
+        python3-pip \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python3 -m pip install --no-cache-dir uv \
+    && git clone --depth 1 --branch "${NANOVLLM_VOXCPM_REF}" \
+        https://github.com/a710128/nanovllm-voxcpm.git /opt/nanovllm-voxcpm \
+    && git -C /opt/nanovllm-voxcpm apply --check /tmp/nanovllm_voxcpm_exact_latent.patch \
+    && git -C /opt/nanovllm-voxcpm apply /tmp/nanovllm_voxcpm_exact_latent.patch \
+    && uv pip install --system --no-cache \
+        --index-url https://download.pytorch.org/whl/cu128 \
+        "torch==2.8.0" \
+        "torchaudio==2.8.0" \
+    && uv pip install --system --no-cache \
+        ninja \
+        packaging \
+        psutil \
+        setuptools \
+        wheel \
+    && uv pip install --system --no-cache --no-build-isolation \
+        "flash-attn==2.8.3.post1" \
+    && uv pip install --system --no-cache \
+        /opt/nanovllm-voxcpm \
+        "fastapi==0.139.2" \
+        "soxr==1.1.0" \
+        "uvicorn==0.51.0" \
+        "websockets==15.0.1"
+
+WORKDIR /app
+COPY docker/voxcpm_nanovllm_service.py /app/voxcpm_nanovllm_service.py
+
+EXPOSE 8880
+
+CMD ["python3", "-m", "uvicorn", "voxcpm_nanovllm_service:app", "--host", "0.0.0.0", "--port", "8880"]

@@ -2,16 +2,29 @@
   "use strict";
 
   const MODEL_URL = "./assets/evelyn-avatar/live2d/evelin.model3.json";
-  // Calibrated from the center of both eyes inside the visible character bounds.
-  const HEAD_FOCUS_X_RATIO = 0.482;
-  const HEAD_FOCUS_Y_RATIO = 0.276;
-  const HEAD_FOCUS_FULL_DISTANCE_HEIGHT_RATIO = 0.18;
-  const HEAD_FOCUS_MIN_DISTANCE_PX = 72;
   const CAT_EAR_PARAMETER = "ParamHairBack65";
   const CAT_EAR_PART = "ear";
   const CAT_TAIL_PART = "Part2";
   const CAT_ACCESSORY_HOTKEY = "Digit7";
   const MODEL_STATE_STORAGE_KEY = "evelynLive2dModelStateV1";
+  const SPEECH_EXPRESSION_COOLDOWN_MS = 9000;
+  const NATURAL_BREATH_CYCLE_SECONDS = 9.6;
+  const CHEST_WARP_REFERENCE_DRAWABLE = "Bra";
+  const CHEST_WARP_DRAWABLE_IDS = new Set([
+    "ArtMesh120",
+    "ArtMesh121",
+    "Bra",
+    "ArtMesh126",
+    "ArtMesh127",
+  ]);
+  const CHEST_WARP_SWEATER_DRAWABLE_IDS = new Set([
+    "ArtMesh120",
+    "ArtMesh121",
+  ]);
+  const CHEST_WARP_SWEATER_SCALE = 0.7;
+  const CHEST_WARP_GLOBAL_SCALE = 1;
+  const CHEST_WARP_LIFT = 0.016;
+  const CHEST_WARP_OUTWARD = 0.009;
   const SPEECH_EXPRESSION_PARAMETERS = Object.freeze({
     "heart eye": "ParamHairBack14",
     dia: "ParamHairBack74",
@@ -69,19 +82,27 @@
     speaking: false,
     speechExpression: null,
     speechExpressionWeight: 0,
-    speechExpressionSequence: 0,
+    lastSpeechExpressionAt: 0,
     lastSpeechText: "",
     mouthOpen: 0,
     gazeX: 0,
     gazeY: 0,
-    pointerClientX: null,
-    pointerClientY: null,
-    pointerActive: false,
+    avatarDirector: null,
+    avatarDirectorSnapshot: null,
+    avatarDirectorErrorReported: false,
     catAccessoriesVisible: true,
     activeExpression: null,
     lastExpressionValue: null,
     lastMouthParameter: 0,
     lastEyeOpenParameter: 1,
+    lastBreathParameter: 0,
+    breathConfigured: false,
+    chestWarpDrawableIndices: [],
+    chestWarpDrawableScales: new Map(),
+    chestWarpReferenceIndex: -1,
+    lastChestWarpInhale: 0,
+    lastChestWarpMaxLift: 0,
+    lastChestWarpMaxOutward: 0,
     lastCatEarParameter: 1,
     lastCatEarPartOpacity: 1,
     lastCatTailPartOpacity: 1,
@@ -90,8 +111,6 @@
     idleTailVelocities: IDLE_TAIL_PARAMETERS.map(function () { return 0; }),
     lastTailRootParameter: 0,
     lastTailTipParameter: 0,
-    blinkStartedAt: 0,
-    nextBlinkAt: 0,
     resizeObserver: null,
     lastFrameAt: 0,
   };
@@ -154,29 +173,6 @@
     state.model.scale.set(scale);
     state.model.x = width * 0.52;
     state.model.y = height - (modelHeight * scale * 0.5) + height * 0.01;
-    if (state.pointerActive) updateGazeFromPointer();
-  }
-
-  function scheduleNextBlink(now) {
-    state.nextBlinkAt = now + 2400 + Math.random() * 3600;
-  }
-
-  function eyeOpenValue(now) {
-    if (!state.nextBlinkAt) scheduleNextBlink(now);
-    if (!state.blinkStartedAt && now >= state.nextBlinkAt) {
-      state.blinkStartedAt = now;
-    }
-    if (!state.blinkStartedAt) return 1;
-
-    const elapsed = now - state.blinkStartedAt;
-    if (elapsed >= 170) {
-      state.blinkStartedAt = 0;
-      scheduleNextBlink(now);
-      return 1;
-    }
-    if (elapsed < 70) return 1 - elapsed / 70;
-    if (elapsed < 105) return 0;
-    return (elapsed - 105) / 65;
   }
 
   function speechTarget(now) {
@@ -251,9 +247,6 @@
 
   function chooseSpeechExpression(text) {
     const normalized = String(text || "").trim().toLowerCase();
-    if (/(해결|완료|성공|정상|고쳤|해냈|축하|resolved|fixed|success|complete)/i.test(normalized)) {
-      return "dia";
-    }
     if (/(사랑|좋아해|소중|보고 싶|❤|♥|💕|😍|love|adore)/i.test(normalized)) {
       return "heart eye";
     }
@@ -269,13 +262,174 @@
     if (/(걱정|불안|무서|위험|실패|오류|문제|경고|못 찾|안 돼|worry|afraid|danger|error|failed|warning)/i.test(normalized)) {
       return "pale";
     }
-    return state.speechExpressionSequence % 2 === 0 ? "cheek1" : "cheek2";
+    return null;
+  }
+
+  function configureNaturalBreathing() {
+    const internalModel = state.model && state.model.internalModel;
+    const breath = internalModel && internalModel.breath;
+    const parameters = breath && typeof breath.getParameters === "function"
+      ? breath.getParameters()
+      : null;
+    if (!parameters || typeof parameters.getSize !== "function") return false;
+
+    let dedicatedBreathFound = false;
+    for (let index = 0; index < parameters.getSize(); index += 1) {
+      const parameter = parameters.at(index);
+      const isDedicatedBreath = Boolean(
+        parameter
+        && parameter.parameterId
+        && (
+          parameter.parameterId === internalModel.idParamBreath
+          || (
+            typeof parameter.parameterId.isEqual === "function"
+            && parameter.parameterId.isEqual(internalModel.idParamBreath)
+          )
+        )
+      );
+      if (isDedicatedBreath) {
+        // A smooth 0..1 chest cycle runs before physics, so hair, ribbons and
+        // bust physics receive the same inhale/exhale signal as the torso rig.
+        parameter.offset = 0.5;
+        parameter.peak = 0.5;
+        parameter.cycle = NATURAL_BREATH_CYCLE_SECONDS;
+        parameter.weight = 1;
+        parameter.waveform = "triangle";
+        dedicatedBreathFound = true;
+      } else if (parameter) {
+        // Head and body-angle sine waves caused the previous figure-eight idle.
+        // Avatar Director owns those channels.
+        parameter.offset = 0;
+        parameter.peak = 0;
+      }
+    }
+    state.breathConfigured = dedicatedBreathFound;
+    return dedicatedBreathFound;
+  }
+
+  function configureChestMeshWarp() {
+    if (!state.model || !state.model.internalModel) return false;
+    const coreModel = state.model.internalModel.coreModel;
+    state.chestWarpDrawableIndices = [];
+    state.chestWarpDrawableScales.clear();
+    state.chestWarpReferenceIndex = -1;
+    for (let index = 0; index < coreModel.getDrawableCount(); index += 1) {
+      const drawableId = coreModel.getDrawableId(index).getString().s;
+      if (CHEST_WARP_DRAWABLE_IDS.has(drawableId)) {
+        state.chestWarpDrawableIndices.push(index);
+        state.chestWarpDrawableScales.set(
+          index,
+          CHEST_WARP_SWEATER_DRAWABLE_IDS.has(drawableId)
+            ? CHEST_WARP_SWEATER_SCALE
+            : 1
+        );
+      }
+      if (drawableId === CHEST_WARP_REFERENCE_DRAWABLE) {
+        state.chestWarpReferenceIndex = index;
+      }
+    }
+    return state.chestWarpReferenceIndex >= 0 && state.chestWarpDrawableIndices.length > 0;
+  }
+
+  function smoothstep01(value) {
+    const normalized = clamp(value, 0, 1);
+    return normalized * normalized * (3 - 2 * normalized);
+  }
+
+  function applyNaturalChestMeshWarp() {
+    if (
+      !state.model
+      || !state.model.internalModel
+      || state.chestWarpReferenceIndex < 0
+      || state.chestWarpDrawableIndices.length === 0
+    ) {
+      return;
+    }
+    const coreModel = state.model.internalModel.coreModel;
+    let breathValue = 0;
+    try {
+      breathValue = clamp(
+        coreModel.getParameterValueById(resolveCoreParameterId("ParamBreath")),
+        0,
+        1
+      );
+    } catch (_error) {
+      return;
+    }
+    // ParamBreath is already a linear triangle wave. Keep the temporal value
+    // linear so inhale/exhale reverse immediately instead of pausing at either end.
+    const inhale = breathValue;
+    const referenceVertices = coreModel.getDrawableVertexPositions(state.chestWarpReferenceIndex);
+    let referenceMinX = Infinity;
+    let referenceMaxX = -Infinity;
+    let referenceMinY = Infinity;
+    let referenceMaxY = -Infinity;
+    for (let index = 0; index < referenceVertices.length; index += 2) {
+      referenceMinX = Math.min(referenceMinX, referenceVertices[index]);
+      referenceMaxX = Math.max(referenceMaxX, referenceVertices[index]);
+      referenceMinY = Math.min(referenceMinY, referenceVertices[index + 1]);
+      referenceMaxY = Math.max(referenceMaxY, referenceVertices[index + 1]);
+    }
+    const centerX = (referenceMinX + referenceMaxX) * 0.5;
+    const centerY = referenceMinY + (referenceMaxY - referenceMinY) * 0.53;
+    const radiusX = Math.max(0.12, (referenceMaxX - referenceMinX) * 0.72);
+    const radiusY = Math.max(0.085, (referenceMaxY - referenceMinY) * 0.60);
+    let maxLift = 0;
+    let maxOutward = 0;
+
+    state.chestWarpDrawableIndices.forEach(function (drawableIndex) {
+      const vertices = coreModel.getDrawableVertexPositions(drawableIndex);
+      const drawableScale = state.chestWarpDrawableScales.get(drawableIndex) || 1;
+      for (let vertexIndex = 0; vertexIndex < vertices.length; vertexIndex += 2) {
+        const normalizedX = (vertices[vertexIndex] - centerX) / radiusX;
+        const normalizedY = (vertices[vertexIndex + 1] - centerY) / radiusY;
+        const distanceSquared = normalizedX * normalizedX + normalizedY * normalizedY;
+        if (distanceSquared >= 1) continue;
+        const weight = smoothstep01(1 - distanceSquared);
+        const lift = CHEST_WARP_LIFT
+          * CHEST_WARP_GLOBAL_SCALE
+          * inhale
+          * weight
+          * drawableScale;
+        const outward = CHEST_WARP_OUTWARD
+          * CHEST_WARP_GLOBAL_SCALE
+          * inhale
+          * weight
+          * drawableScale
+          * (0.35 + Math.min(1, Math.abs(normalizedX)) * 0.65);
+        vertices[vertexIndex] += normalizedX < 0 ? -outward : outward;
+        vertices[vertexIndex + 1] += lift;
+        maxLift = Math.max(maxLift, lift);
+        maxOutward = Math.max(maxOutward, outward);
+      }
+      // Cubism only redraws clipping masks whose vertex-change flag is set.
+      // The warp runs after coreModel.update(), so mark the altered mesh here.
+      const dynamicFlags = coreModel._model
+        && coreModel._model.drawables
+        && coreModel._model.drawables.dynamicFlags;
+      if (dynamicFlags) dynamicFlags[drawableIndex] |= 32;
+    });
+    state.lastChestWarpInhale = inhale;
+    state.lastChestWarpMaxLift = maxLift;
+    state.lastChestWarpMaxOutward = maxOutward;
   }
 
   function beginSpeechExpression(text) {
-    state.speechExpressionSequence += 1;
     state.lastSpeechText = String(text || "").trim();
-    state.speechExpression = chooseSpeechExpression(state.lastSpeechText);
+    const candidate = chooseSpeechExpression(state.lastSpeechText);
+    const now = performance.now();
+    if (
+      !candidate
+      || (
+        state.lastSpeechExpressionAt > 0
+        && now - state.lastSpeechExpressionAt < SPEECH_EXPRESSION_COOLDOWN_MS
+      )
+    ) {
+      state.speechExpression = null;
+      return;
+    }
+    state.speechExpression = candidate;
+    state.lastSpeechExpressionAt = now;
   }
 
   function updateSpeechExpression(coreModel, elapsed) {
@@ -300,16 +454,32 @@
   function updateModelParameters() {
     if (!state.model || !state.model.internalModel) return;
     const now = performance.now();
-    const elapsed = state.lastFrameAt ? clamp((now - state.lastFrameAt) / 16.667, 0.25, 4) : 1;
+    const deltaMs = state.lastFrameAt ? clamp(now - state.lastFrameAt, 4, 66.667) : 16.667;
+    const elapsed = clamp(deltaMs / 16.667, 0.25, 4);
     state.lastFrameAt = now;
     const coreModel = state.model.internalModel.coreModel;
-    const eyeOpen = eyeOpenValue(now);
     const mouthTarget = speechTarget(now);
     const smoothing = 1 - Math.pow(0.58, elapsed);
     state.mouthOpen += (mouthTarget - state.mouthOpen) * smoothing;
 
-    setCoreParameter(coreModel, "ParamEyeLOpen", eyeOpen);
-    setCoreParameter(coreModel, "ParamEyeROpen", eyeOpen);
+    if (state.avatarDirector) {
+      try {
+        state.avatarDirectorSnapshot = state.avatarDirector.update({
+          coreModel: coreModel,
+          focusController: state.model.internalModel.focusController,
+          nowMs: now,
+          deltaMs: deltaMs,
+          speaking: state.speaking,
+        });
+        state.gazeX = Number(state.avatarDirectorSnapshot.eyeX) || 0;
+        state.gazeY = Number(state.avatarDirectorSnapshot.eyeY) || 0;
+      } catch (error) {
+        if (!state.avatarDirectorErrorReported) {
+          console.warn("[Evelyn Live2D] avatar director update failed", error);
+          state.avatarDirectorErrorReported = true;
+        }
+      }
+    }
     setCoreParameter(coreModel, "ParamMouthOpenY", state.mouthOpen);
     if (state.speaking) {
       setCoreParameter(coreModel, "ParamMouthForm", 0.18);
@@ -322,6 +492,7 @@
     try {
       state.lastMouthParameter = coreModel.getParameterValueById(resolveCoreParameterId("ParamMouthOpenY"));
       state.lastEyeOpenParameter = coreModel.getParameterValueById(resolveCoreParameterId("ParamEyeLOpen"));
+      state.lastBreathParameter = coreModel.getParameterValueById(resolveCoreParameterId("ParamBreath"));
       state.lastCatEarParameter = coreModel.getParameterValueById(resolveCoreParameterId(CAT_EAR_PARAMETER));
       state.lastCatEarPartOpacity = coreModel.getPartOpacityById(resolveCoreParameterId(CAT_EAR_PART));
       state.lastCatTailPartOpacity = coreModel.getPartOpacityById(resolveCoreParameterId(CAT_TAIL_PART));
@@ -343,69 +514,6 @@
 
   function updateLive2DFrame(ticker) {
     if (state.model) state.model.update(ticker.deltaMS);
-  }
-
-  function updateFocus() {
-    if (!state.model || !state.model.internalModel) return;
-    state.model.internalModel.focusController.focus(state.gazeX, state.gazeY);
-  }
-
-  function getModelHeadClientPoint() {
-    if (!state.model || !state.app || !state.area) return null;
-    const rect = state.area.getBoundingClientRect();
-    const screen = state.app.screen || {};
-    const screenWidth = Math.max(1, Number(screen.width) || Math.round(rect.width) || 1);
-    const screenHeight = Math.max(1, Number(screen.height) || Math.round(rect.height) || 1);
-    const modelWidth = Math.max(1, Number(state.model.width) || 1);
-    const modelHeight = Math.max(1, Number(state.model.height) || 1);
-    const anchorX = state.model.anchor ? Number(state.model.anchor.x) : 0.5;
-    const anchorY = state.model.anchor ? Number(state.model.anchor.y) : 0.5;
-    const headStageX = state.model.x + (HEAD_FOCUS_X_RATIO - anchorX) * modelWidth;
-    const headStageY = state.model.y + (HEAD_FOCUS_Y_RATIO - anchorY) * modelHeight;
-    const cssScaleX = rect.width / screenWidth;
-    const cssScaleY = rect.height / screenHeight;
-    return {
-      clientX: rect.left + headStageX * cssScaleX,
-      clientY: rect.top + headStageY * cssScaleY,
-      fullDistance: Math.max(
-        HEAD_FOCUS_MIN_DISTANCE_PX,
-        modelHeight * cssScaleY * HEAD_FOCUS_FULL_DISTANCE_HEIGHT_RATIO
-      ),
-    };
-  }
-
-  function updateGazeFromPointer() {
-    if (!state.pointerActive) return;
-    const head = getModelHeadClientPoint();
-    if (!head) return;
-    const dx = state.pointerClientX - head.clientX;
-    const dy = head.clientY - state.pointerClientY;
-    const distance = Math.hypot(dx, dy);
-    if (distance < 0.5) {
-      state.gazeX = 0;
-      state.gazeY = 0;
-    } else {
-      const strength = clamp(distance / head.fullDistance, 0, 1);
-      state.gazeX = clamp((dx / distance) * strength, -1, 1);
-      state.gazeY = clamp((dy / distance) * strength, -1, 1);
-    }
-    updateFocus();
-  }
-
-  function onPointerMove(event) {
-    state.pointerClientX = event.clientX;
-    state.pointerClientY = event.clientY;
-    state.pointerActive = true;
-    updateGazeFromPointer();
-  }
-
-  function resetFocus() {
-    state.pointerClientX = null;
-    state.pointerClientY = null;
-    state.pointerActive = false;
-    state.gazeX = 0;
-    state.gazeY = 0;
-    updateFocus();
   }
 
   function shouldIgnoreHotkey(event) {
@@ -432,9 +540,6 @@
   }
 
   function bindInteractions() {
-    window.addEventListener("pointermove", onPointerMove, { passive: true });
-    window.addEventListener("blur", resetFocus);
-    document.addEventListener("pointerleave", resetFocus);
     window.addEventListener("keydown", onHotkey);
   }
 
@@ -495,9 +600,22 @@
         autoHitTest: false,
         autoFocus: false,
         autoUpdate: false,
+        breathDepth: 0,
       });
+      configureNaturalBreathing();
+      if (!configureChestMeshWarp()) {
+        console.warn("[Evelyn Live2D] chest mesh warp targets unavailable");
+      }
+      if (window.EvelynAvatarDirector && typeof window.EvelynAvatarDirector.create === "function") {
+        state.avatarDirector = window.EvelynAvatarDirector.create({
+          resolveParameterId: resolveCoreParameterId,
+        });
+      } else {
+        console.warn("[Evelyn Live2D] avatar director unavailable; continuing without autonomous gaze");
+      }
       state.model.anchor.set(0.5, 0.5);
       state.model.internalModel.on("beforeModelUpdate", updateModelParameters);
+      state.model.internalModel.on("afterModelUpdate", applyNaturalChestMeshWarp);
       state.app.stage.addChild(state.model);
       state.app.ticker.add(updateLive2DFrame);
       state.ready = true;
@@ -508,14 +626,13 @@
       applyActiveExpression();
       fitModel();
       bindInteractions();
-      scheduleNextBlink(performance.now());
       state.resizeObserver = new ResizeObserver(fitModel);
       state.resizeObserver.observe(state.area);
       state.canvas.addEventListener("webglcontextlost", (event) => {
         event.preventDefault();
         markUnavailable(new Error("WebGL context lost"));
       });
-      setStatus("Live2D 연결됨 · 1–0/F1 표정", "ready");
+      setStatus("Live2D 연결됨 · 상태 기반 자율 시선 · 1–0/F1 표정", "ready");
       window.dispatchEvent(new CustomEvent("evelyn-live2d-ready"));
       return true;
     } catch (error) {
@@ -533,13 +650,27 @@
     },
     setSpeaking: function (speaking, speechText) {
       const nextSpeaking = Boolean(speaking);
+      const speakingChanged = nextSpeaking !== state.speaking;
       const nextSpeechText = String(speechText || "").trim();
       if (nextSpeaking && (!state.speaking || (nextSpeechText && nextSpeechText !== state.lastSpeechText))) {
         beginSpeechExpression(nextSpeechText);
       }
       state.speaking = nextSpeaking;
+      if (
+        speakingChanged
+        && state.avatarDirector
+        && typeof state.avatarDirector.setActivityState === "function"
+      ) {
+        state.avatarDirector.setActivityState(state.speaking ? "speaking" : "idle");
+      }
       if (!state.speaking) state.lastSpeechText = "";
       if (state.area) state.area.classList.toggle("live2d-speaking", state.speaking);
+    },
+    setActivityState: function (activityState) {
+      return state.avatarDirector
+        && typeof state.avatarDirector.setActivityState === "function"
+        ? state.avatarDirector.setActivityState(activityState)
+        : false;
     },
     toggleCatAccessories: function () {
       state.catAccessoriesVisible = !state.catAccessoriesVisible;
@@ -579,8 +710,15 @@
     availableExpressions: function () {
       return Object.keys(EXPRESSION_PARAMETERS);
     },
+    setLookIntent: function (name, options) {
+      return state.avatarDirector
+        ? state.avatarDirector.setLookIntent(name, options)
+        : false;
+    },
+    clearLookIntent: function () {
+      if (state.avatarDirector) state.avatarDirector.clearLookIntent();
+    },
     snapshot: function () {
-      const headFocus = getModelHeadClientPoint();
       return {
         ready: state.ready,
         speaking: state.speaking,
@@ -589,6 +727,21 @@
         mouthOpen: Number(state.mouthOpen.toFixed(3)),
         mouthParameter: Number(state.lastMouthParameter.toFixed(3)),
         eyeOpenParameter: Number(state.lastEyeOpenParameter.toFixed(3)),
+        breathParameter: Number(state.lastBreathParameter.toFixed(3)),
+        breathConfigured: state.breathConfigured,
+        breathTorsoParameter: 0,
+        breathChestParameters: [],
+        chestWarp: {
+          configured: state.chestWarpReferenceIndex >= 0
+            && state.chestWarpDrawableIndices.length > 0,
+          drawableCount: state.chestWarpDrawableIndices.length,
+          sweaterScale: CHEST_WARP_SWEATER_SCALE,
+          globalScale: CHEST_WARP_GLOBAL_SCALE,
+          cycleSeconds: NATURAL_BREATH_CYCLE_SECONDS,
+          inhale: Number(state.lastChestWarpInhale.toFixed(3)),
+          maxLift: Number(state.lastChestWarpMaxLift.toFixed(5)),
+          maxOutward: Number(state.lastChestWarpMaxOutward.toFixed(5)),
+        },
         catEarParameter: Number(state.lastCatEarParameter.toFixed(3)),
         catEarPartOpacity: Number(state.lastCatEarPartOpacity.toFixed(3)),
         catTailPartOpacity: Number(state.lastCatTailPartOpacity.toFixed(3)),
@@ -603,10 +756,19 @@
         gaze: {
           x: Number(state.gazeX.toFixed(3)),
           y: Number(state.gazeY.toFixed(3)),
-          pointerActive: state.pointerActive,
-          headClientX: headFocus ? Number(headFocus.clientX.toFixed(1)) : null,
-          headClientY: headFocus ? Number(headFocus.clientY.toFixed(1)) : null,
+          source: state.avatarDirectorSnapshot && state.avatarDirectorSnapshot.mode
+            ? state.avatarDirectorSnapshot.mode
+            : "unavailable",
+          saccadeCount: state.avatarDirectorSnapshot
+            ? state.avatarDirectorSnapshot.saccadeCount
+            : 0,
+          intent: state.avatarDirectorSnapshot
+            ? state.avatarDirectorSnapshot.intent
+            : null,
         },
+        avatarDirector: state.avatarDirector
+          ? state.avatarDirector.snapshot()
+          : null,
         modelUrl: MODEL_URL,
         canvas: state.canvas ? {
           width: state.canvas.width,

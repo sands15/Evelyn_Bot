@@ -127,8 +127,7 @@ function Start-DockerCore {
         '--profile', 'llm',
         '--profile', 'tts',
         '--profile', 'vision',
-        '--profile', 'stt',
-        '--profile', 'voyager'
+        '--profile', 'stt'
     )
     $coreServices = @(
         'bot_api',
@@ -138,15 +137,13 @@ function Start-DockerCore {
         'sub_llm',
         'tts',
         'stt',
-        'vision',
-        'codex_gateway',
-        'voyager'
+        'vision'
     )
 
     $buildEnabled = $env:EVELYN_DOCKER_BUILD -and ([string]$env:EVELYN_DOCKER_BUILD).ToLowerInvariant() -in @('1', 'true', 'yes', 'on')
     if ($buildEnabled) {
         Write-Host '[Evelyn] Rebuilding Docker app images because EVELYN_DOCKER_BUILD is enabled.'
-        Invoke-DockerCommand -Arguments (@('compose') + $composeBaseArgs + @('build', 'bot_api', 'control_page', 'codex_gateway', 'voyager'))
+        Invoke-DockerCommand -Arguments (@('compose') + $composeBaseArgs + @('build', 'bot_api', 'control_page'))
     } else {
         Write-Host '[Evelyn] Reusing existing Docker images. Set EVELYN_DOCKER_BUILD=true to rebuild app images.'
     }
@@ -158,6 +155,7 @@ function Start-DockerCore {
 
     $composeArgs = $composeBaseArgs + @('up', '-d') + $coreServices
     Invoke-DockerCommand -Arguments (@('compose') + $composeArgs)
+    Write-Host '[Evelyn] Minecraft services are deferred. Run start_voyager.bat when a Minecraft command is requested.'
 }
 
 function Test-LocalBridgeRunning {

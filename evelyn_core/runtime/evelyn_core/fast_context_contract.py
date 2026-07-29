@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import asyncio
+import inspect
 import os
 from pathlib import Path
 import re
@@ -18,6 +19,8 @@ from .context_pipeline import (
     build_tool_use_decisions,
     render_tool_use_context,
 )
+from .fast_action_runtime import compact_local_bridge_context
+from .fast_tool_planner import render_fast_tool_registry_context
 from .runtime_health import collect_runtime_health
 from .runtime_services import load_service_manifest
 from .text import clean_text
@@ -27,6 +30,7 @@ RuntimeHealthProvider = Callable[[], Awaitable[dict[str, Any]]]
 SearchProvider = Callable[[str], Awaitable[tuple[str, list[dict[str, Any]]]]]
 MemoryProvider = Callable[[str], Awaitable[str]]
 LogProvider = Callable[[str], Awaitable[str]]
+LocalBridgeStatusProvider = Callable[[], Any]
 
 
 @dataclass(slots=True)
@@ -37,6 +41,7 @@ class FastControlContext:
     search_context: str = ""
     memory_context: str = ""
     log_context: str = ""
+    local_bridge_context: str = ""
 
 
 def compact_runtime_health_for_llm(health: dict[str, Any]) -> str:
@@ -74,8 +79,10 @@ def build_fast_route_capability_context() -> str:
         (
             "fast_control_route=python -m evelyn_core.fast_control_api",
             "full_main_route=main.py prepare_llm_messages context pipeline is mirrored here through shared context_pipeline policy decisions.",
-            "inline_executable_tools=runtime_status,web_current_info,runtime_log_read,control_page_panel_commands,local_shutdown_request",
-            "pre_llm_commands=/help,/status,/memory,/voice status,/shutdown,natural memory panel open/close",
+            render_fast_tool_registry_context(),
+            "pre_llm_commands=/help,/status,/memory,/voice status,/mic status,/mic on,/mic off,/minecraft status,/inventory,/voyager stats,/minecraft disconnect,/autonomy status,/restart,/shutdown,natural memory,microphone,Minecraft status,and scoped runtime controls",
+            "action_execution_contract=inline tools finish before the answer; background acknowledgements require an active_action_id.",
+            "background_followup_contract=registered long-running actions publish completion or failure to chat and /api/control-page/action-events.",
             "unsupported_inline_tools=vision_capture_or_watch,vision_ocr,host_arbitrary_file_read",
             "unsupported_tool_rule=if a required unsupported tool is needed and no evidence is present, say evidence is missing instead of pretending to have used it.",
         )
@@ -167,7 +174,22 @@ def _query_log_terms(user_text: str) -> list[str]:
     terms = []
     for token in re.findall(r"[A-Za-z0-9_\-/]{3,}|[가-힣]{2,}", user_text):
         lowered = token.lower().strip("-_/")
-        if lowered in {"log", "logs", "로그", "확인", "봐줘", "파일", "오류", "에러"}:
+        if lowered in {
+            "log",
+            "logs",
+            "로그",
+            "확인",
+            "봐줘",
+            "파일",
+            "오류",
+            "에러",
+            "문제",
+            "원인",
+            "원인을",
+            "조사",
+            "조사해봐",
+            "찾아봐",
+        }:
             continue
         terms.append(lowered)
     return terms[:8]
@@ -196,6 +218,7 @@ def build_fast_log_context(
     roots: list[Path] | None = None,
     max_files: int = 6,
     max_chars: int = 4000,
+    require_match: bool = False,
 ) -> str:
     candidates_by_path: dict[Path, tuple[float, Path, Path]] = {}
     for root in roots or default_log_roots():
@@ -241,9 +264,17 @@ def build_fast_log_context(
         interesting = [
             line
             for line in nonempty
-            if _LOG_INTEREST_PATTERN.search(line)
-            or any(term and term in line.lower() for term in query_terms)
+            if (
+                any(term and term in line.lower() for term in query_terms)
+                if require_match
+                else (
+                    _LOG_INTEREST_PATTERN.search(line)
+                    or any(term and term in line.lower() for term in query_terms)
+                )
+            )
         ]
+        if require_match and not interesting:
+            continue
         selected = interesting[-16:] if interesting else nonempty[-10:]
         try:
             label = str(path.relative_to(root))
@@ -269,17 +300,20 @@ async def build_fast_control_context(
     user_text: str,
     *,
     source: str,
+    tool_user_text: str | None = None,
     runtime_health_provider: RuntimeHealthProvider | None = None,
     search_provider: SearchProvider | None = None,
     memory_provider: MemoryProvider | None = None,
     log_provider: LogProvider | None = None,
+    local_bridge_status_provider: LocalBridgeStatusProvider | None = None,
 ) -> FastControlContext:
+    decision_text = clean_text(tool_user_text) or user_text
     policy = build_context_policy_for_turn(
-        user_text=user_text,
+        user_text=decision_text,
         source=source,
         route="fast_control_api",
     )
-    decisions = build_tool_use_decisions(user_text, policy)
+    decisions = build_tool_use_decisions(decision_text, policy)
     if any(decision.tool_name in {"vision_capture_or_watch", "vision_ocr"} for decision in decisions):
         policy.needs_vision = True
         policy.priority = "accuracy"
@@ -292,18 +326,29 @@ async def build_fast_control_context(
     search_context = ""
     memory_context = ""
     log_context = ""
+    local_bridge_context = ""
     for decision in decisions:
         if decision.tool_name == "runtime_status" and decision.auto_allowed:
             try:
                 runtime_health = await provider()
                 evidence = compact_runtime_health_for_llm(runtime_health)
+                if local_bridge_status_provider is not None:
+                    bridge_snapshot = local_bridge_status_provider()
+                    if inspect.isawaitable(bridge_snapshot):
+                        bridge_snapshot = await bridge_snapshot
+                    local_bridge_context = compact_local_bridge_context(
+                        bridge_snapshot if isinstance(bridge_snapshot, dict) else {}
+                    )
+                    evidence = "\n".join(
+                        part for part in (evidence, local_bridge_context) if clean_text(part)
+                    )
                 decision.status = "executed" if clean_text(evidence) else "executed_empty"
-                decision.evidence = clean_text(evidence)[:800]
+                decision.evidence = clean_text(evidence)[:1200]
             except Exception as exc:
                 decision.status = "failed"
                 decision.evidence = clean_text(repr(exc))[:240]
         elif decision.tool_name == "local_file_or_log_read":
-            if not decision.auto_allowed and not is_mounted_log_read_request(user_text):
+            if not decision.auto_allowed and not is_mounted_log_read_request(decision_text):
                 decision.status = "needs_local_tool"
                 decision.evidence = (
                     "Fast Control-Page chat can inspect mounted Evelyn logs only; "
@@ -311,7 +356,7 @@ async def build_fast_control_context(
                 )
                 continue
             try:
-                log_context = await (log_provider or default_log_provider)(user_text)
+                log_context = await (log_provider or default_log_provider)(decision_text)
                 decision.status = "executed" if clean_text(log_context) else "executed_empty"
                 decision.auto_allowed = True
                 decision.evidence = (
@@ -326,7 +371,7 @@ async def build_fast_control_context(
             try:
                 from .search_tools import render_search_results_for_llm
 
-                query, results = await (search_provider or default_search_provider)(user_text)
+                query, results = await (search_provider or default_search_provider)(decision_text)
                 search_context = render_search_results_for_llm(query, results)
                 decision.status = "executed" if results else "executed_empty"
                 decision.auto_allowed = True
@@ -336,7 +381,7 @@ async def build_fast_control_context(
                 decision.evidence = clean_text(repr(exc))[:240]
         elif decision.tool_name == "memory_recall":
             try:
-                memory_context = await (memory_provider or default_memory_provider)(user_text)
+                memory_context = await (memory_provider or default_memory_provider)(decision_text)
                 decision.status = "executed" if clean_text(memory_context) else "executed_empty"
                 decision.evidence = clean_text(memory_context)[:1000] if memory_context else "No relevant memory was found."
             except Exception as exc:
@@ -352,6 +397,7 @@ async def build_fast_control_context(
         for part in (
             build_runtime_state_context(source=source, route="fast_control_api"),
             build_fast_route_capability_context(),
+            local_bridge_context,
             log_context,
         )
         if clean_text(part)
@@ -372,6 +418,7 @@ async def build_fast_control_context(
         search_context=search_context,
         memory_context=memory_context,
         log_context=log_context,
+        local_bridge_context=local_bridge_context,
     )
 
 
@@ -382,18 +429,22 @@ async def build_fast_main_llm_messages(
     user_text: str,
     final_user_text: str,
     source: str,
+    tool_user_text: str | None = None,
     runtime_health_provider: RuntimeHealthProvider | None = None,
     search_provider: SearchProvider | None = None,
     memory_provider: MemoryProvider | None = None,
     log_provider: LogProvider | None = None,
+    local_bridge_status_provider: LocalBridgeStatusProvider | None = None,
 ) -> list[dict[str, Any]]:
     context = await build_fast_control_context(
         user_text,
         source=source,
+        tool_user_text=tool_user_text,
         runtime_health_provider=runtime_health_provider,
         search_provider=search_provider,
         memory_provider=memory_provider,
         log_provider=log_provider,
+        local_bridge_status_provider=local_bridge_status_provider,
     )
     system_content = "\n\n".join(
         part

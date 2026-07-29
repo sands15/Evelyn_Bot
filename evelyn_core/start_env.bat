@@ -12,11 +12,14 @@ if defined PYTHONPATH (
 )
 
 REM ===== Shared launch settings =====
-REM Current requested local target: put every Evelyn GPU workload on GPU 0.
-REM Re-verify with nvidia-smi before changing this; as of 2026-07-06,
-REM Windows GPU 0 is NVIDIA GeForce RTX 5090.
-if "%EVELYN_GPU_4060_UUID%"=="" set "EVELYN_GPU_4060_UUID=0"
-if "%EVELYN_GPU_3090_UUID%"=="" set "EVELYN_GPU_3090_UUID=0"
+REM Current local target verified 2026-07-22:
+REM GPU 0 = NVIDIA GeForce RTX 5090 (latency-sensitive workloads)
+REM GPU 1 = NVIDIA GeForce RTX 3090 (Router/Sub LLM background workloads)
+if "%EVELYN_GPU_PRIMARY%"=="" set "EVELYN_GPU_PRIMARY=0"
+if "%EVELYN_GPU_BACKGROUND%"=="" set "EVELYN_GPU_BACKGROUND=1"
+REM Keep legacy override names compatible with older launchers/configurations.
+if "%EVELYN_GPU_4060_UUID%"=="" set "EVELYN_GPU_4060_UUID=%EVELYN_GPU_BACKGROUND%"
+if "%EVELYN_GPU_3090_UUID%"=="" set "EVELYN_GPU_3090_UUID=%EVELYN_GPU_PRIMARY%"
 if "%LLAMA_DIR%"=="" set "LLAMA_DIR=/mnt/c/Users/Admin/llama.cpp"
 if "%VENV_ACT%"=="" set "VENV_ACT=source ~/venvs/vllm-env/bin/activate"
 
@@ -93,9 +96,9 @@ if "%OMNIVOICE_PLAYBACK_GAP_MULTIPLIER%"=="" set "OMNIVOICE_PLAYBACK_GAP_MULTIPL
 if "%OMNIVOICE_PLAYBACK_BLOCK_GAP_MIN_MS%"=="" set "OMNIVOICE_PLAYBACK_BLOCK_GAP_MIN_MS=250"
 
 if "%VISION_PORT%"=="" set "VISION_PORT=8891"
-if "%VISION_GPU%"=="" set "VISION_GPU=%EVELYN_GPU_3090_UUID%"
+if "%VISION_GPU%"=="" set "VISION_GPU=%EVELYN_GPU_BACKGROUND%"
 if "%VISION_BACKEND%"=="" set "VISION_BACKEND=wsl"
-if "%VISION_WSL_CUDA_VISIBLE_DEVICES%"=="" set "VISION_WSL_CUDA_VISIBLE_DEVICES=0"
+if "%VISION_WSL_CUDA_VISIBLE_DEVICES%"=="" set "VISION_WSL_CUDA_VISIBLE_DEVICES=1"
 if "%VISION_WSL_VENV_ACT%"=="" set "VISION_WSL_VENV_ACT=source ~/venvs/vllm-env/bin/activate"
 if "%VISION_DEVICE%"=="" set "VISION_DEVICE=cuda:0"
 if "%VISION_DTYPE%"=="" set "VISION_DTYPE=float16"
@@ -126,7 +129,7 @@ if "%VISION_MEMORY_WRITE_ENABLED%"=="" set "VISION_MEMORY_WRITE_ENABLED=false"
 
 set "MINEFLAYER_HOST=127.0.0.1"
 if "%MINEFLAYER_PORT%"=="" set "MINEFLAYER_PORT=25565"
-if "%MINEFLAYER_USERNAME%"=="" set "MINEFLAYER_USERNAME=sands12@naver.com"
+if "%MINEFLAYER_USERNAME%"=="" set "MINEFLAYER_USERNAME=Evelyn_0428"
 if "%MINEFLAYER_AUTH%"=="" set "MINEFLAYER_AUTH=microsoft"
 if "%MINEFLAYER_PROFILES_FOLDER%"=="" set "MINEFLAYER_PROFILES_FOLDER=%~dp0..\bot_profiles"
 

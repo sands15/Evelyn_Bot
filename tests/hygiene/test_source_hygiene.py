@@ -12,6 +12,7 @@ class SourceHygieneTests(unittest.TestCase):
         for relative_path in (
             "main.py",
             "docs/index.html",
+            "docs/assets/evelyn-avatar-director.js",
             "docs/assets/evelyn-live2d.js",
             "tests/runtime/test_shutdown_scripts.py",
         ):

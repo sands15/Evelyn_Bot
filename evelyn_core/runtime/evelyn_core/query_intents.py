@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from zoneinfo import ZoneInfo
 import re
 
 from .text import clean_text
@@ -47,6 +48,12 @@ EXPLICIT_SEARCH_MARKERS = (
     "\ucc3e\uc544",
     "\ucc3e\uc544\ubd10",
     "\ucc3e\uc544\uc918",
+    "\uc54c\uc544\ubd10",
+    "\uc54c\uc544 \ubd10",
+    "\uc54c\uc544\ubcf4",
+    "\uc870\uc0ac\ud574",
+    "\uc870\uc0ac\ud574\ubd10",
+    "\uc678\ubd80 \uac80\uc0c9",
     "\uc778\ud130\ub137",
     "\uc6f9",
     "\uc0ac\uc774\ud2b8",
@@ -225,15 +232,24 @@ def classify_datetime_query(text: str) -> str | None:
     return None
 
 
+EVELYN_LOCAL_TIMEZONE = ZoneInfo("Asia/Seoul")
+
+
 def format_current_datetime_answer(kind: str | None, *, now: datetime | None = None) -> str:
-    current = now.astimezone() if now is not None else datetime.now().astimezone()
+    current = (
+        now.astimezone(EVELYN_LOCAL_TIMEZONE)
+        if now is not None
+        else datetime.now(EVELYN_LOCAL_TIMEZONE)
+    )
     weekday = WEEKDAYS_KO[current.weekday()]
     date_part = f"{current.year}\ub144 {current.month}\uc6d4 {current.day}\uc77c {weekday}"
-    time_part = f"{current.hour:02d}\uc2dc {current.minute:02d}\ubd84"
+    period = "\uc624\uc804" if current.hour < 12 else "\uc624\ud6c4"
+    spoken_hour = current.hour % 12 or 12
+    time_part = f"{period} {spoken_hour}\uc2dc {current.minute:02d}\ubd84"
     if kind == "date":
         return f"\uc624\ub298\uc740 {date_part}\uc774\uc57c."
     if kind == "time":
-        return f"\uc9c0\uae08\uc740 {date_part} {time_part}\uc774\uc57c."
+        return f"\uc9c0\uae08\uc740 {time_part}\uc774\uc57c."
     return f"\uc624\ub298\uc740 {date_part}\uc774\uace0, \uc9c0\uae08\uc740 {time_part}\uc774\uc57c."
 
 

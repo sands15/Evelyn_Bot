@@ -1,14 +1,8 @@
 # Evelyn Active Risks
 
 Document status: **Current**
-Last reviewed: 2026-07-18 KST
+Last reviewed: 2026-07-19 KST
 Evaluation stance: 실패 가능성과 검증 공백을 우선 기록
-
-## P0 — 배포되지 않은 보안 변경
-
-Codex Gateway action 인증은 소스와 테스트에는 들어갔지만 실행 중인 컨테이너에는 아직 반영되지 않았다. 재시작 승인을 받기 전까지 현재 프로세스의 `/codex/action` 보호 여부를 새 코드 기준으로 주장하면 안 된다.
-
-다음 조치: 승인 후 관련 컨테이너를 재빌드/재시작하고, 무토큰·오토큰 `401`, 정상 토큰 `200`을 실제 포트에서 다시 확인한다.
 
 ## P0 — Voyager는 HTTP health와 기능 준비가 다르다
 
@@ -35,14 +29,18 @@ Torch finding(2026-07-18 CI 확인):
 
 다음 조치: 별도 호환성 브랜치에서 Torch/Torchaudio 버전 정합성, 모델 로드, STT, Vision smoke를 먼저 통과시킨 뒤 upgrade 여부를 결정한다. CI는 이 문서에 기록된 5개 ID만 한시적으로 예외 처리하며 다른 신규 finding은 계속 실패시킨다. 재검토일: 2026-07-22.
 
-## P1 — Node/Minecraft 의존성 취약점 8개
+## P1 — Node/Minecraft 의존성 취약점 11개
 
-2026-07-15 `npm audit` 결과는 moderate 8개다. 대상은 Mineflayer 인증/프로토콜 체인이며 `fixAvailable=false`다.
+2026-07-23 스테이징 이미지 `npm audit --omit=dev` 결과는 moderate 11개,
+high/critical 0개다. 대상은 Mineflayer 인증/프로토콜 및 플러그인 체인이다.
 
-- 직접 의존성: `mineflayer`, `mineflayer-collectblock`, `mineflayer-tool`
-- 전이 의존성: `@azure/msal-node`, `minecraft-protocol`, `prismarine-auth`, `uuid`, `yggdrasil`
+- 직접 의존성: `mineflayer`, `mineflayer-armor-manager`,
+  `mineflayer-collectblock`, `mineflayer-pvp`
+- 전이 의존성: `@azure/msal-node`, `minecraft-protocol`, `mineflayer-tool`,
+  `mineflayer-utils`, `prismarine-auth`, `uuid`, `yggdrasil`
 
-다음 조치: 강제 audit fix는 금지하고, 별도 호환성 검증에서 Mineflayer 체인을 갱신한다. 재검토일: 2026-07-22.
+대부분 `fixAvailable=false`이며 제안된 일부 강제 수정은 주요 버전 역행을 포함한다.
+다음 조치: 강제 audit fix는 금지하고, 별도 호환성 검증에서 Mineflayer 체인을 갱신한다.
 
 ## P1 — 실제 음성 하드웨어 E2E 미검증
 

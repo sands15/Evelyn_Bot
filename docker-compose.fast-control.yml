@@ -11,6 +11,7 @@ services:
       - "host.docker.internal:host-gateway"
     environment:
       EVELYN_FAST_BOOT: "1"
+      TZ: "Asia/Seoul"
       DISCORD_ENABLED: "false"
       LOCAL_ONLY: "true"
       CONTROL_PAGE_HOST: "0.0.0.0"
@@ -244,16 +245,16 @@ services:
 
   router_llm:
     container_name: evelyn-router-llm
-    profiles: ["llm"]
+    profiles: ["llm", "voyager"]
     build:
       context: .
       dockerfile: docker/Dockerfile.llama
     restart: "no"
     gpus: all
     environment:
-      NVIDIA_VISIBLE_DEVICES: "0"
+      NVIDIA_VISIBLE_DEVICES: "1"
       NVIDIA_DRIVER_CAPABILITIES: "compute,utility"
-      CUDA_VISIBLE_DEVICES: "0"
+      CUDA_VISIBLE_DEVICES: "1"
       ROUTER_LLM_PORT: "9822"
     volumes:
       - ${EVELYN_LLAMA_CPP_DIR:-${USERPROFILE}/llama.cpp}:/llama
@@ -275,11 +276,60 @@ services:
         --reasoning-budget 12
     healthcheck:
       test: >-
-        bash -lc "cat < /dev/null > /dev/tcp/127.0.0.1/9822"
+        bash -lc "exec 3<>/dev/tcp/127.0.0.1/9822; printf 'GET /health HTTP/1.0\r\nHost: localhost\r\n\r\n' >&3; grep -q '\"status\":\"ok\"' <&3"
       interval: 15s
       timeout: 8s
       retries: 40
       start_period: 60s
+
+  minecraft_llm:
+    container_name: evelyn-minecraft-llm
+    profiles: ["voyager"]
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.llama
+    restart: "no"
+    gpus: all
+    environment:
+      NVIDIA_VISIBLE_DEVICES: "1"
+      NVIDIA_DRIVER_CAPABILITIES: "compute,utility"
+      CUDA_VISIBLE_DEVICES: "1"
+      LLAMA_CHAT_TEMPLATE_KWARGS: '{"enable_thinking":false}'
+    volumes:
+      - ${EVELYN_LLAMA_CPP_DIR:-${USERPROFILE}/llama.cpp}:/llama
+    ports:
+      - "127.0.0.1:9823:9823"
+    command:
+      - bash
+      - -lc
+      - >-
+        export LD_LIBRARY_PATH=/llama/build/bin:/usr/local/cuda/lib64:$$LD_LIBRARY_PATH;
+        exec ./build/bin/llama-server
+        -m /llama/models/qwen3-14b/Qwen3-14B-Q4_K_M.gguf
+        --host 0.0.0.0
+        --port 9823
+        --flash-attn on
+        -ngl 999
+        -c 6144
+        -np 1
+        --threads 8
+        --batch-size 512
+        --ubatch-size 128
+        --cache-type-k q8_0
+        --cache-type-v q8_0
+        --cache-prompt
+        --reasoning off
+        --reasoning-budget 0
+        --reasoning-format none
+        --jinja
+        --no-mmproj
+    healthcheck:
+      test: >-
+        bash -lc "exec 3<>/dev/tcp/127.0.0.1/9823; printf 'GET /health HTTP/1.0\r\nHost: localhost\r\n\r\n' >&3; grep -q '\"status\":\"ok\"' <&3"
+      interval: 15s
+      timeout: 8s
+      retries: 40
+      start_period: 120s
 
   sub_llm:
     container_name: evelyn-sub-llm
@@ -290,9 +340,9 @@ services:
     restart: "no"
     gpus: all
     environment:
-      NVIDIA_VISIBLE_DEVICES: "0"
+      NVIDIA_VISIBLE_DEVICES: "1"
       NVIDIA_DRIVER_CAPABILITIES: "compute,utility"
-      CUDA_VISIBLE_DEVICES: "0"
+      CUDA_VISIBLE_DEVICES: "1"
       SUB_LLM_PORT: "9821"
     volumes:
       - ${EVELYN_LLAMA_CPP_DIR:-${USERPROFILE}/llama.cpp}:/llama
@@ -327,6 +377,53 @@ services:
     container_name: evelyn-tts
     profiles: ["tts"]
     build:
+      context: .
+      dockerfile: docker/Dockerfile.voxcpm
+    restart: "no"
+    gpus: all
+    environment:
+      NVIDIA_VISIBLE_DEVICES: "0"
+      NVIDIA_DRIVER_CAPABILITIES: "compute,utility"
+      CUDA_VISIBLE_DEVICES: "0"
+      VOXCPM_MODEL_ID: "openbmb/VoxCPM2"
+      VOXCPM_DEVICE: "cuda"
+      VOXCPM_REFERENCE_AUDIO: "/app/profiles/evelyn/ref_audio.wav"
+      VOXCPM_REFERENCE_META: "/app/profiles/evelyn/meta.json"
+      VOXCPM_CFG_VALUE: "2.0"
+      VOXCPM_INFERENCE_STEPS: "20"
+      VOXCPM_SEED: "42"
+      VOXCPM_DEFAULT_CONTROL_INSTRUCTION: "warm, natural and expressive tone, clear pronunciation, stable pace"
+      VOXCPM_OUTPUT_RATE: "24000"
+      VOXCPM_GPU_MEMORY_UTILIZATION: "0.90"
+      VOXCPM_MAX_MODEL_LEN: "4096"
+      VOXCPM_MAX_BATCHED_TOKENS: "4096"
+      VOXCPM_MAX_SEQS: "2"
+      VOXCPM_CONTINUATION_SEGMENTS: "2"
+      VOXCPM_CONTINUATION_SOURCE: "model_exact_no_terminal"
+      VOXCPM_SHORT_FULL_DECODE_MAX_CHARS: "32"
+      VOXCPM_SHORT_QUALITY_RETRIES: "1"
+      VOXCPM_SHORT_TARGET_RMS: "0.032"
+      VOXCPM_SHORT_MAX_GAIN: "2.5"
+      VOXCPM_SHORT_MAX_ROUGHNESS: "3.5"
+      VOXCPM_STARTUP_WARMUP: "true"
+      NANOVLLM_SERVERPOOL_NUM_KVCACHE_BLOCKS: "64"
+    volumes:
+      - ./docker/voxcpm_nanovllm_service.py:/app/voxcpm_nanovllm_service.py:ro
+      - ${EVELYN_OMNIVOICE_PROFILES_DIR:-./omnivoice_profiles}:/app/profiles:ro
+      - ${EVELYN_HUGGINGFACE_CACHE_DIR:-${USERPROFILE}/.cache/huggingface}:/root/.cache/huggingface
+    ports:
+      - "127.0.0.1:8880:8880"
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import json,urllib.request; payload=json.loads(urllib.request.urlopen('http://127.0.0.1:8880/health', timeout=5).read() or b'{}'); raise SystemExit(0 if payload.get('ok') and payload.get('ready') and payload.get('backend') == 'voxcpm2-nanovllm' else 1)"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 600s
+
+  omnivoice_fallback:
+    container_name: evelyn-omnivoice-fallback
+    profiles: ["tts-fallback"]
+    build:
       context: ${EVELYN_OMNIVOICE_SERVER_DIR:-${USERPROFILE}/omnivoice-server}
       dockerfile: Dockerfile.cuda
     restart: "no"
@@ -346,7 +443,7 @@ services:
       - ${EVELYN_OMNIVOICE_PROFILES_DIR:-./omnivoice_profiles}:/home/ubuntu/app/profiles
       - ${EVELYN_OMNIVOICE_SERVER_DIR:-${USERPROFILE}/omnivoice-server}:/home/ubuntu/.cache/huggingface
     ports:
-      - "127.0.0.1:8880:8880"
+      - "127.0.0.1:8881:8880"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8880/health')"]
       interval: 30s
@@ -363,9 +460,9 @@ services:
     restart: "no"
     gpus: all
     environment:
-      NVIDIA_VISIBLE_DEVICES: "0"
+      NVIDIA_VISIBLE_DEVICES: "1"
       NVIDIA_DRIVER_CAPABILITIES: "compute,utility"
-      CUDA_VISIBLE_DEVICES: "0"
+      CUDA_VISIBLE_DEVICES: "1"
       VISION_HOST: "0.0.0.0"
       VISION_PORT: "8891"
       VISION_DEVICE: "cuda:0"
@@ -457,40 +554,65 @@ services:
       start_period: 20s
 
   voyager:
-    container_name: evelyn-voyager
+    container_name: evelyn-mindcraft
     profiles: ["voyager"]
     build:
       context: .
-      dockerfile: docker/Dockerfile.voyager
+      dockerfile: docker/Dockerfile.mindcraft
     restart: "no"
     environment:
       MINECRAFT_AUTONOMY_SERVICE_HOST: "0.0.0.0"
       MINECRAFT_AUTONOMY_SERVICE_PORT: "8765"
-      VOYAGER_CODEX_GATEWAY_URL: "http://codex_gateway:8787/codex/action"
-      VOYAGER_CODEX_GATEWAY_HOST: "codex_gateway"
-      VOYAGER_CODEX_GATEWAY_PORT: "8787"
-      VOYAGER_ACTION_BACKEND: "codex-gateway"
-      VOYAGER_BRIDGE_HOST: "host.docker.internal"
-      VOYAGER_BRIDGE_PORT: "3000"
+      MINDCRAFT_ROOT: "/app/mindcraft"
+      MINDCRAFT_AGENT_PROFILE: "/app/mindcraft/profiles/evelyn.json"
+      MINDCRAFT_STATUS_PATH: "/app/runtime_artifacts/mindcraft/status.json"
+      MINDCRAFT_CODEX_GATEWAY_URL: "http://codex_gateway:8787/codex/action"
+      MINDCRAFT_CODEX_MODEL: "gpt-5.5"
+      MINDCRAFT_CODEX_TIMEOUT_SEC: "240"
+      MINDCRAFT_CODEX_COOLDOWN_SEC: "30"
+      MINDCRAFT_PLANNER_STATE_PATH: "/app/runtime_artifacts/mindcraft/planner_state.json"
+      MINDCRAFT_GOAL_MANAGER_STATE_PATH: "/app/runtime_artifacts/mindcraft/goal_manager_state.json"
+      MINDCRAFT_GOAL_MANAGER_MODE: "gated"
+      MINDCRAFT_DETERMINISTIC_TOOL_BOOTSTRAP: "false"
+      MINDCRAFT_LOCAL_LLM_URL: "http://minecraft_llm:9823/v1/chat/completions"
+      MINDCRAFT_LOCAL_MODEL: "Qwen3-14B-Q4_K_M.gguf"
+      MINDCRAFT_LOCAL_TIMEOUT_SEC: "90"
+      MINDCRAFT_LOCAL_MAX_TOKENS: "160"
+      MINDCRAFT_ROUTER_URL: "http://router_llm:9822/v1/chat/completions"
+      MINDCRAFT_ROUTER_MODEL: "gemma-4-E2B-it-Q4_K_M.gguf"
+      MINDCRAFT_ROUTER_TIMEOUT_SEC: "4"
+      MINDCRAFT_ALLOWED_PLAYERS: "${MINDCRAFT_ALLOWED_PLAYERS:-}"
+      MINDSERVER_PORT: "8080"
       MINEFLAYER_HOST: "host.docker.internal"
       MINEFLAYER_PORT: "25565"
+      MINEFLAYER_AUTH: "microsoft"
+      MINECRAFT_VERSION: "1.21.11"
+      MINECRAFT_USERNAME: "${MINEFLAYER_USERNAME:-Evelyn_0428}"
+      MINEFLAYER_PROFILES_FOLDER: "/app/bot_profiles"
+      MINDCRAFT_ENABLE_SKIN_COMMANDS: "false"
+      VOYAGER_CODEX_GATEWAY_TOKEN_FILE: "/app/runtime_artifacts/secrets/codex_gateway.token"
       EVELYN_PROJECT_ROOT: /app
       EVELYN_CORE_ROOT: /app/evelyn_core
       EVELYN_CORE_RUNTIME: /app/evelyn_core/runtime
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
+      router_llm:
+        condition: service_healthy
+      minecraft_llm:
+        condition: service_healthy
       codex_gateway:
         condition: service_healthy
     volumes:
+      - ./bot_memory/mindcraft:/app/mindcraft/bots/Evelyn_0428
+      - ./bot_profiles:/app/bot_profiles
       - ./runtime_artifacts:/app/runtime_artifacts
       - ./logs:/app/logs
-      - ./third_party:/app/third_party:ro
     ports:
       - "127.0.0.1:8765:8765"
-    command: ["python", "-m", "evelyn_core.voyager_service", "--host", "0.0.0.0", "--port", "8765"]
+    command: ["python3", "-m", "evelyn_core.mindcraft_service", "--host", "0.0.0.0", "--port", "8765"]
     healthcheck:
-      test: ["CMD", "python", "-c", "import json,urllib.request; payload=json.loads(urllib.request.urlopen('http://127.0.0.1:8765/health', timeout=3).read() or b'{}'); raise SystemExit(0 if payload.get('ok') else 1)"]
+      test: ["CMD", "python3", "-c", "import json,urllib.request; payload=json.loads(urllib.request.urlopen('http://127.0.0.1:8765/health', timeout=3).read() or b'{}'); raise SystemExit(0 if payload.get('ok') else 1)"]
       interval: 20s
       timeout: 8s
       retries: 8

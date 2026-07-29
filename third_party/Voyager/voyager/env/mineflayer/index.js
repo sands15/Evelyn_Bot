@@ -41,6 +41,7 @@ const RUNTIME_ARTIFACTS_ROOT = process.env.EVELYN_RUNTIME_ARTIFACTS_DIR
     || process.env.RUNTIME_ARTIFACTS_DIR
     || path.join(REPO_ROOT, "runtime_artifacts");
 const DEATH_LOG_PATH = path.join(RUNTIME_ARTIFACTS_ROOT, "voyager", "death_events.jsonl");
+const ALLOW_SERVER_CHEATS = String(process.env.MINEFLAYER_ALLOW_SERVER_CHEATS || "false").toLowerCase() === "true";
 const HOSTILE_ENTITY_NAMES = new Set([
     "blaze",
     "bogged",
@@ -57,6 +58,7 @@ const HOSTILE_ENTITY_NAMES = new Set([
     "husk",
     "magma_cube",
     "phantom",
+    "parched",
     "piglin_brute",
     "pillager",
     "ravager",
@@ -158,6 +160,10 @@ function configureBotSession(botInstance, body) {
     botInstance._voyagerWindowClosed = false;
     botInstance._voyagerChestInteracted = false;
     botInstance._voyagerContainerInteraction = null;
+    botInstance._voyagerWaitGuardEnabled = true;
+    botInstance._voyagerWaitGuardBusy = false;
+    botInstance._voyagerWaitGuardActive = false;
+    botInstance._voyagerWaitGuardLastAction = null;
     botInstance._voyagerSessionLive = !!(
         botInstance &&
         botInstance.entity &&
@@ -479,6 +485,11 @@ function buildVoyagerTelemetry(botInstance) {
         lastDeathEvent: botInstance._voyagerLastDeathEvent || null,
         deathEventLogPath: DEATH_LOG_PATH,
         searchExecution: botInstance._voyagerSearchExecution || null,
+        waitGuard: {
+            enabled: botInstance._voyagerWaitGuardEnabled === true,
+            active: botInstance._voyagerWaitGuardActive === true,
+            lastAction: botInstance._voyagerWaitGuardLastAction || null,
+        },
     };
 }
 
@@ -538,6 +549,139 @@ function snapshotHostileEntities(botInstance, maxDistance = 16, limit = 5) {
         }))
         .sort((a, b) => a.distance - b.distance)
         .slice(0, limit);
+}
+
+function clearWaitGuardMovement(botInstance) {
+    if (!botInstance || botInstance._voyagerWaitGuardActive !== true) return;
+    try {
+        if (botInstance.pathfinder) botInstance.pathfinder.setGoal(null);
+    } catch (err) {}
+    try {
+        botInstance.clearControlStates();
+    } catch (err) {}
+    botInstance._voyagerWaitGuardActive = false;
+}
+
+async function runWaitGuard(botInstance) {
+    if (
+        !botInstance
+        || botInstance._voyagerWaitGuardEnabled !== true
+        || botInstance._voyagerWaitGuardBusy === true
+        || !isBotConnected()
+        || !botInstance.entity
+        || !botInstance.entity.position
+    ) {
+        return;
+    }
+    botInstance._voyagerWaitGuardBusy = true;
+    try {
+        const inWater = botInstance.entity.isInWater === true;
+        const oxygen = typeof botInstance.oxygenLevel === "number" ? botInstance.oxygenLevel : 20;
+        if (inWater || oxygen < 18) {
+            try {
+                if (botInstance.pathfinder) botInstance.pathfinder.setGoal(null);
+            } catch (err) {}
+            botInstance.setControlState("forward", true);
+            botInstance.setControlState("jump", true);
+            botInstance.setControlState("sprint", true);
+            botInstance._voyagerWaitGuardActive = true;
+            botInstance._voyagerWaitGuardLastAction = {
+                recordedAt: new Date().toISOString(),
+                action: "escape_water",
+                oxygen,
+                health: typeof botInstance.health === "number" ? botInstance.health : null,
+                position: vecToPlain(botInstance.entity.position),
+            };
+            return;
+        }
+        const nearbyHostiles = Object.values(botInstance.entities || {})
+            .filter((entity) => {
+                if (!entity || entity === botInstance.entity || !entity.position) return false;
+                const name = String(entity.name || entity.displayName || "").toLowerCase();
+                return HOSTILE_ENTITY_NAMES.has(name)
+                    && entity.position.distanceTo(botInstance.entity.position) <= 48;
+            })
+            .sort(
+                (left, right) => left.position.distanceTo(botInstance.entity.position)
+                    - right.position.distanceTo(botInstance.entity.position)
+            );
+        const nearest = nearbyHostiles[0];
+        if (!nearest) {
+            clearWaitGuardMovement(botInstance);
+            return;
+        }
+
+        ensureBotPlugins(botInstance);
+        const position = botInstance.entity.position;
+        const awayX = position.x - nearest.position.x;
+        const awayZ = position.z - nearest.position.z;
+        const length = Math.max(0.001, Math.hypot(awayX, awayZ));
+        const hostileDistance = nearest.position.distanceTo(position);
+        const targetX = Math.floor(position.x + (awayX / length) * 24);
+        const targetZ = Math.floor(position.z + (awayZ / length) * 24);
+        const {
+            Movements,
+            goals: { GoalXZ },
+        } = requireFromRepo("mineflayer-pathfinder");
+        if (!botInstance._voyagerWaitGuardMovements) {
+            const mcData = requireFromRepo("minecraft-data")(botInstance.version);
+            botInstance._voyagerWaitGuardMovements = new Movements(botInstance, mcData);
+            botInstance._voyagerWaitGuardMovements.allowSprinting = true;
+            botInstance._voyagerWaitGuardMovements.allowParkour = false;
+            botInstance._voyagerWaitGuardMovements.canDig = false;
+            botInstance._voyagerWaitGuardMovements.liquidCost = 100;
+        }
+        if (hostileDistance <= 5) {
+            const yaw = Math.atan2(-(awayX / length), -(awayZ / length));
+            botInstance.pathfinder.setGoal(null);
+            await botInstance.look(yaw, 0, true);
+            botInstance.setControlState("forward", true);
+            botInstance.setControlState("jump", true);
+            botInstance.setControlState("sprint", true);
+        } else {
+            botInstance.pathfinder.setMovements(botInstance._voyagerWaitGuardMovements);
+            botInstance.pathfinder.setGoal(new GoalXZ(targetX, targetZ));
+            botInstance.setControlState("sprint", true);
+        }
+        botInstance._voyagerWaitGuardActive = true;
+        botInstance._voyagerWaitGuardLastAction = {
+            recordedAt: new Date().toISOString(),
+            action: "retreat_from_hostile",
+            hostile: String(nearest.name || nearest.displayName || "unknown"),
+            distance: Number(hostileDistance.toFixed(2)),
+            strategy: hostileDistance <= 5 ? "emergency_sprint" : "dry_path_retreat",
+            target: { x: targetX, z: targetZ },
+            health: typeof botInstance.health === "number" ? botInstance.health : null,
+        };
+    } catch (err) {
+        botInstance._voyagerWaitGuardLastAction = {
+            recordedAt: new Date().toISOString(),
+            action: "guard_error",
+            error: normalizeErrorMessage(err),
+        };
+    } finally {
+        botInstance._voyagerWaitGuardBusy = false;
+    }
+}
+
+function ensureWaitGuardTimer(botInstance) {
+    if (!botInstance || botInstance._voyagerWaitGuardInterval) return;
+    botInstance._voyagerWaitGuardInterval = setInterval(() => {
+        runWaitGuard(botInstance).catch(() => {});
+    }, 500);
+    if (typeof botInstance._voyagerWaitGuardInterval.unref === "function") {
+        botInstance._voyagerWaitGuardInterval.unref();
+    }
+}
+
+function disableWaitGuard(botInstance) {
+    if (!botInstance) return;
+    botInstance._voyagerWaitGuardEnabled = false;
+    if (botInstance._voyagerWaitGuardInterval) {
+        clearInterval(botInstance._voyagerWaitGuardInterval);
+        botInstance._voyagerWaitGuardInterval = null;
+    }
+    clearWaitGuardMovement(botInstance);
 }
 
 function parseDeathBroadcast(username, message) {
@@ -625,6 +769,7 @@ function installVoyagerLifecycleHooks(botInstance) {
         setConnectionState(botInstance, "disconnected", note);
         refreshVoyagerTelemetry(botInstance);
         clearVoyagerTelemetryTimer(botInstance);
+        disableWaitGuard(botInstance);
         if (bot === botInstance) {
             scheduleBotReconnect(botInstance, note);
         }
@@ -897,7 +1042,7 @@ function ensureBotPlugins(botInstance) {
 
 async function applyStartState(botInstance, body) {
     let itemTicks = 1;
-    if (body.reset === "hard") {
+    if (ALLOW_SERVER_CHEATS && body.reset === "hard") {
         await sendChatCommand(
             botInstance,
             "/clear @s",
@@ -933,7 +1078,7 @@ async function applyStartState(botInstance, body) {
         }
     }
 
-    if (body.position) {
+    if (ALLOW_SERVER_CHEATS && body.position) {
         await sendChatCommand(
             botInstance,
             `/tp @s ${body.position.x} ${body.position.y} ${body.position.z}`,
@@ -943,10 +1088,12 @@ async function applyStartState(botInstance, body) {
 
     ensureBotPlugins(botInstance);
     ensureVoyagerTelemetryTimer(botInstance);
+    ensureWaitGuardTimer(botInstance);
+    runWaitGuard(botInstance).catch(() => {});
     setConnectionState(botInstance, "awaiting_observation", body.reset === "hard" ? "hard reset completed; awaiting observation" : "session ready; awaiting observation");
     refreshVoyagerTelemetry(botInstance);
 
-    if (body.spread) {
+    if (ALLOW_SERVER_CHEATS && body.spread) {
         await sendChatCommand(
             botInstance,
             `/spreadplayers ~ ~ 0 300 under 80 false @s`,
@@ -963,8 +1110,10 @@ async function applyStartState(botInstance, body) {
     }
 
     initCounter(botInstance);
-    await sendChatCommand(botInstance, "/gamerule keepInventory true");
-    await sendChatCommand(botInstance, "/gamerule doDaylightCycle false");
+    if (ALLOW_SERVER_CHEATS) {
+        await sendChatCommand(botInstance, "/gamerule keepInventory true");
+        await sendChatCommand(botInstance, "/gamerule doDaylightCycle false");
+    }
     return observeWithVoyagerState(botInstance);
 }
 
@@ -1729,11 +1878,32 @@ app.post("/stop", (req, res) => {
         bot._voyagerIntentionalStop = true;
         bot._voyagerAutoReconnectEnabled = false;
         clearVoyagerTelemetryTimer(bot);
+        disableWaitGuard(bot);
         bot.end();
         bot = null;
     }
     res.json({
         message: "Bot stopped",
+    });
+});
+
+app.post("/guard", (req, res) => {
+    if (!bot || !isBotConnected()) {
+        res.status(400).json({ error: "Bot not spawned" });
+        return;
+    }
+    const enabled = req.body && req.body.enabled === true;
+    if (enabled) {
+        bot._voyagerWaitGuardEnabled = true;
+        ensureWaitGuardTimer(bot);
+        runWaitGuard(bot).catch(() => {});
+    } else {
+        disableWaitGuard(bot);
+    }
+    res.json({
+        enabled: bot._voyagerWaitGuardEnabled === true,
+        active: bot._voyagerWaitGuardActive === true,
+        lastAction: bot._voyagerWaitGuardLastAction || null,
     });
 });
 
@@ -1749,6 +1919,10 @@ app.post("/telemetry", (req, res) => {
 app.post("/pause", (req, res) => {
     if (!bot) {
         res.status(400).json({ error: "Bot not spawned" });
+        return;
+    }
+    if (!ALLOW_SERVER_CHEATS) {
+        res.json({ message: "No-op in survival mode", paused: false });
         return;
     }
     bot.chat("/pause");

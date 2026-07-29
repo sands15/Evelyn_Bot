@@ -34,12 +34,11 @@ class SharedContractTests(unittest.TestCase):
         self.assertIn("Vision rule: Do not claim you can see the user's screen", prompt)
         self.assertIn("tag guidance", prompt)
 
-    def test_fast_user_prefix_reinforces_runtime_tone(self) -> None:
+    def test_fast_user_text_keeps_dynamic_content_compact(self) -> None:
         text = build_fast_main_llm_user_text("안녕")
 
-        self.assertIn(FAST_MAIN_LLM_USER_PREFIX, text)
-        self.assertIn("반드시 한국어 반말", text)
-        self.assertIn("사용자 입력: 안녕", text)
+        self.assertNotIn(FAST_MAIN_LLM_USER_PREFIX, text)
+        self.assertEqual(text, "안녕")
 
     def test_control_page_memory_panel_contract_is_shared(self) -> None:
         self.assertEqual(CONTROL_PAGE_UI_PANELS["memory"], "Memory")

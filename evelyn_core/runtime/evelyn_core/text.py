@@ -1,4 +1,5 @@
 import re
+from dataclasses import dataclass
 from difflib import SequenceMatcher
 
 from .config import (
@@ -26,7 +27,7 @@ def clean_text(text: str) -> str:
 
 def strip_response_action_tags(text: str) -> str:
     """내부 제어용 응답 태그([찾기]/[질문]/[대기]/[답변])는 사용자 표시/STT/TTS 경로에서 제거한다."""
-    return re.sub(r"^\s*\[(?:찾기|질문|대기|답변)\]\s*", "", text or "", flags=re.IGNORECASE)
+    return re.sub(r"^\s*\[(?:찾기|질문|대기|답변|응답)\]\s*", "", text or "", flags=re.IGNORECASE)
 
 
 def strip_model_channel_tags(text: str) -> str:
@@ -62,6 +63,140 @@ def strip_model_channel_tags(text: str) -> str:
     text = re.sub(r"<channel\|>", " ", text, flags=re.IGNORECASE)
     text = re.sub(r"</?think>", " ", text, flags=re.IGNORECASE)
     return clean_text(text)
+
+
+_MODEL_STREAM_ACTION_TAGS = {
+    "찾기",
+    "질문",
+    "대기",
+    "답변",
+    "응답",
+    "search",
+    "ask",
+    "wait",
+    "answer",
+}
+_MODEL_STREAM_CHANNEL_ROLES = (
+    "thought",
+    "analysis",
+    "reasoning",
+    "final",
+    "model",
+    "answer",
+    "content",
+)
+
+
+@dataclass
+class ModelStreamPrefixFilter:
+    """Hold unstable leading tokens until transport/action prefixes can be discarded safely."""
+
+    pending: str = ""
+    resolved: bool = False
+    max_prefix_chars: int = 256
+
+    def push(self, delta: str) -> str:
+        if not delta:
+            return ""
+        if self.resolved:
+            return delta
+        self.pending += delta
+        return self._drain(final=False)
+
+    def finish(self) -> str:
+        if self.resolved:
+            return ""
+        return self._drain(final=True)
+
+    def _drain(self, *, final: bool) -> str:
+        while self.pending:
+            self.pending = self.pending.lstrip()
+            if not self.pending:
+                return ""
+
+            lowered = self.pending.lower()
+
+            if lowered.startswith("<think>"):
+                close_at = lowered.find("</think>", len("<think>"))
+                if close_at < 0:
+                    if final or len(self.pending) >= self.max_prefix_chars:
+                        self.pending = ""
+                    return ""
+                self.pending = self.pending[close_at + len("</think>") :]
+                continue
+
+            if "<think>".startswith(lowered) or "</think>".startswith(lowered):
+                if final:
+                    self.pending = ""
+                return ""
+
+            if lowered.startswith("</think>"):
+                self.pending = self.pending[len("</think>") :]
+                continue
+
+            if lowered.startswith("<channel|>"):
+                self.pending = self.pending[len("<channel|>") :]
+                continue
+            if "<channel|>".startswith(lowered):
+                if final:
+                    self.pending = ""
+                return ""
+
+            channel_open = "<|channel>"
+            if lowered.startswith(channel_open):
+                remainder = self.pending[len(channel_open) :].lstrip()
+                remainder_lower = remainder.lower()
+                if not remainder:
+                    if final:
+                        self.pending = ""
+                    return ""
+
+                matched_role = None
+                for role in _MODEL_STREAM_CHANNEL_ROLES:
+                    if not remainder_lower.startswith(role):
+                        continue
+                    boundary = remainder[len(role) : len(role) + 1]
+                    if not boundary or boundary.isspace() or boundary == "<":
+                        matched_role = role
+                        break
+                if matched_role is not None:
+                    self.pending = remainder[len(matched_role) :].lstrip()
+                    continue
+                if any(role.startswith(remainder_lower) for role in _MODEL_STREAM_CHANNEL_ROLES):
+                    if final:
+                        self.pending = ""
+                    return ""
+
+                # Unknown channel names are transport metadata as well. Drop the
+                # marker itself, then let ordinary visible text resolve normally.
+                self.pending = remainder
+                continue
+
+            if channel_open.startswith(lowered):
+                if final:
+                    self.pending = ""
+                return ""
+
+            if self.pending.startswith("["):
+                close_at = self.pending.find("]")
+                if close_at < 0:
+                    candidate = clean_text(self.pending[1:]).lower()
+                    if any(tag.startswith(candidate) for tag in _MODEL_STREAM_ACTION_TAGS):
+                        if final or len(self.pending) >= self.max_prefix_chars:
+                            self.pending = ""
+                        return ""
+                else:
+                    tag = clean_text(self.pending[1:close_at]).lower()
+                    if tag in _MODEL_STREAM_ACTION_TAGS:
+                        self.pending = self.pending[close_at + 1 :].lstrip()
+                        continue
+
+            self.resolved = True
+            output = self.pending
+            self.pending = ""
+            return output
+
+        return ""
 
 
 def normalize_omnivoice_tags(text: str) -> str:
@@ -125,6 +260,12 @@ def clean_tts_text(text: str) -> str:
         if tag:
             return strip_tts_leading_oh(clean_text(f"{tag} {text}"))
     return text
+
+
+def should_suppress_tts_for_command(text: str) -> bool:
+    """Return True for commands whose result is meant for display, not speech."""
+    normalized = clean_text(text).lower().strip()
+    return normalized in {"/", "/help", "help"}
 
 
 def visible_text(text: str) -> str:

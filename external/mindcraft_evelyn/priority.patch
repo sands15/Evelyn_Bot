@@ -1,0 +1,20 @@
+diff --git a/src/agent/action_manager.js b/src/agent/action_manager.js
+--- a/src/agent/action_manager.js
++++ b/src/agent/action_manager.js
+@@ -59,6 +59,16 @@ export class ActionManager {
+     }
+ 
+     async _executeAction(actionLabel, actionFn, timeout = 10) {
++        if (
++            this.executing &&
++            this.currentActionLabel === 'mode:evelyn_survival' &&
++            actionLabel !== 'mode:self_preservation'
++        ) {
++            console.log(`action "${actionLabel}" deferred while Evelyn survival recovery has priority`);
++            return {
++                success: false, message: 'Evelyn survival recovery retained priority.', interrupted: true, timedout: false
++            };
++        }
+         let TIMEOUT;
+         try {
+             if (this.last_action_time > 0) {

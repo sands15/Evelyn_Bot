@@ -33,7 +33,7 @@ class ControlPageRestartCommandTests(unittest.TestCase):
 
     def test_control_page_exposes_restart_command(self) -> None:
         self.assertIn('{"command": "/restart", "template": "/restart"', self.control_page_tools)
-        self.assertIn('{"command": "/restart", "template": "/restart"', self.local_server)
+        self.assertIn("build_fast_control_default_commands", self.local_server)
         self.assertIn('{ command: "/restart", template: "/restart"', self.index_html)
 
     def test_control_page_slash_restart_runs_restart_path(self) -> None:
@@ -51,7 +51,8 @@ class ControlPageRestartCommandTests(unittest.TestCase):
     def test_fast_control_api_slash_restart_requests_local_bridge_restart(self) -> None:
         self.assertIn("build_fast_control_default_commands", self.fast_api)
         self.assertIn("def request_local_restart(", self.fast_api)
-        self.assertIn('if normalized in {"/restart", "restart"}:', self.fast_api)
+        self.assertIn("runtime_command = detect_local_runtime_command(text)", self.fast_api)
+        self.assertIn('if runtime_command == "restart":', self.fast_api)
         self.assertIn("request_local_restart(source=source, reason=\"chat_command\")", self.fast_api)
         self.assertIn('"restart": dict(RESTART_REQUEST)', self.fast_api)
 

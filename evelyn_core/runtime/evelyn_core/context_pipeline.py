@@ -384,19 +384,10 @@ def build_context_policy_for_turn(
         "화면",
         "보여",
         "보이",
-        "봐줘",
         "읽어",
         "글자",
-        "화면",
-        "보여",
-        "보이",
         "보이는",
-        "사진",
-        "이미지",
-        "스크린샷",
         "캡처",
-        "글자",
-        "읽어",
         "비전",
         "ocr",
     )
@@ -409,8 +400,6 @@ def build_context_policy_for_turn(
         "내 화면",
         "보여",
         "보이",
-        "보고",
-        "봐",
         "사진",
         "이미지",
         "스크린샷",
@@ -514,7 +503,6 @@ def build_tool_use_decisions(user_text: str, policy: ContextPolicy | dict[str, A
         "vision",
         "capture",
         "보이는",
-        "보고",
         "화면",
         "스크린",
         "캡처",
@@ -522,10 +510,8 @@ def build_tool_use_decisions(user_text: str, policy: ContextPolicy | dict[str, A
     )
     ocr_markers = ("ocr", "text on screen", "read text", "글자", "텍스트", "읽어", "읽고", "문자")
     memory_markers = ("remember", "memory", "previous", "earlier", "기억", "이전", "아까", "방금", "대화")
-    web_markers = (
+    explicit_web_markers = (
         "latest",
-        "current",
-        "today",
         "news",
         "weather",
         "forecast",
@@ -534,17 +520,56 @@ def build_tool_use_decisions(user_text: str, policy: ContextPolicy | dict[str, A
         "search",
         "internet",
         "최신",
-        "현재",
-        "오늘",
         "뉴스",
         "날씨",
         "예보",
         "강수",
         "우산",
         "가격",
+        "시세",
+        "환율",
         "검색",
         "인터넷",
-        "법",
+        "웹에서",
+        "외부 검색",
+        "찾아봐",
+        "찾아 봐",
+        "찾아줘",
+        "찾아 줘",
+        "찾아보",
+        "알아봐",
+        "알아 봐",
+        "알아보",
+        "조사해",
+        "조사해봐",
+        "조사해 봐",
+        "법률",
+        "법령",
+        "규정",
+    )
+    current_time_markers = (
+        "current",
+        "today",
+        "now",
+        "현재",
+        "오늘",
+        "지금",
+    )
+    external_subject_markers = (
+        "president",
+        "prime minister",
+        "ceo",
+        "stock",
+        "schedule",
+        "score",
+        "대통령",
+        "총리",
+        "대표",
+        "주가",
+        "경기",
+        "일정",
+        "금리",
+        "정책",
     )
     local_file_markers = ("log", "file", "test", "diff", "git", "로그", "파일", "테스트", "문서", "코드")
     tool_diagnostic_markers = (
@@ -612,7 +637,14 @@ def build_tool_use_decisions(user_text: str, policy: ContextPolicy | dict[str, A
                 required_before_answer=_contains_any_marker(text, memory_markers),
             )
         )
-    if context_policy.needs_search or _contains_any_marker(text, web_markers):
+    needs_current_external_info = (
+        _contains_any_marker(text, explicit_web_markers)
+        or (
+            _contains_any_marker(text, current_time_markers)
+            and _contains_any_marker(text, external_subject_markers)
+        )
+    )
+    if context_policy.needs_search or needs_current_external_info:
         add(
             ToolUseDecision(
                 tool_name="web_current_info",

@@ -1,0 +1,70 @@
+FROM node:22-bookworm-slim
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONPATH=/app/evelyn_core/runtime
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+      python3 \
+      python3-pip \
+      python3-venv \
+      patch && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app/mindcraft
+
+COPY external/mindcraft/patches /app/mindcraft/patches
+COPY external/mindcraft_evelyn/package.json external/mindcraft_evelyn/package-lock.json /app/mindcraft/
+RUN npm ci
+
+COPY external/mindcraft /app/mindcraft
+COPY external/mindcraft_evelyn/package.json external/mindcraft_evelyn/package-lock.json /app/mindcraft/
+COPY external/mindcraft_evelyn/evelyn.patch /tmp/evelyn-mindcraft.patch
+COPY external/mindcraft_evelyn/safety.patch /tmp/evelyn-mindcraft-safety.patch
+COPY external/mindcraft_evelyn/pathfloor.patch /tmp/evelyn-mindcraft-pathfloor.patch
+COPY external/mindcraft_evelyn/priority.patch /tmp/evelyn-mindcraft-priority.patch
+COPY external/mindcraft_evelyn/combat.patch /tmp/evelyn-mindcraft-combat.patch
+COPY external/mindcraft_evelyn/pathfinder.patch /tmp/evelyn-mindcraft-pathfinder.patch
+COPY external/mindcraft_evelyn/relocation.patch /tmp/evelyn-mindcraft-relocation.patch
+RUN sed -i 's/\r$//' \
+      profiles/defaults/survival.json \
+      src/agent/action_manager.js \
+      src/agent/agent.js \
+      src/agent/self_prompter.js \
+      src/agent/library/skills.js \
+      src/agent/modes.js \
+      src/mindcraft/mindserver.js \
+      src/models/prompter.js \
+      src/utils/mcdata.js && \
+    patch -p1 < /tmp/evelyn-mindcraft.patch && \
+    patch -p1 < /tmp/evelyn-mindcraft-safety.patch && \
+    patch -p1 < /tmp/evelyn-mindcraft-pathfloor.patch && \
+    patch -p1 < /tmp/evelyn-mindcraft-priority.patch && \
+    patch -p1 < /tmp/evelyn-mindcraft-combat.patch && \
+    patch -p1 < /tmp/evelyn-mindcraft-pathfinder.patch && \
+    patch -p1 < /tmp/evelyn-mindcraft-relocation.patch && \
+    rm /tmp/evelyn-mindcraft.patch /tmp/evelyn-mindcraft-safety.patch /tmp/evelyn-mindcraft-pathfloor.patch /tmp/evelyn-mindcraft-priority.patch /tmp/evelyn-mindcraft-combat.patch /tmp/evelyn-mindcraft-pathfinder.patch /tmp/evelyn-mindcraft-relocation.patch
+
+COPY external/mindcraft_evelyn/src/models/codex_gateway.js /app/mindcraft/src/models/codex_gateway.js
+COPY external/mindcraft_evelyn/src/models/evelyn_planner.js /app/mindcraft/src/models/evelyn_planner.js
+COPY external/mindcraft_evelyn/src/utils/evelyn_runtime.js /app/mindcraft/src/utils/evelyn_runtime.js
+COPY external/mindcraft_evelyn/src/agent/evelyn_combat.js /app/mindcraft/src/agent/evelyn_combat.js
+COPY external/mindcraft_evelyn/src/agent/evelyn_escape_controller.js /app/mindcraft/src/agent/evelyn_escape_controller.js
+COPY external/mindcraft_evelyn/src/agent/evelyn_survival_mode.js /app/mindcraft/src/agent/evelyn_survival_mode.js
+COPY external/mindcraft_evelyn/src/agent/evelyn_world_state.js /app/mindcraft/src/agent/evelyn_world_state.js
+COPY external/mindcraft_evelyn/src/agent/evelyn_goal_manager.js /app/mindcraft/src/agent/evelyn_goal_manager.js
+COPY external/mindcraft_evelyn/src/agent/connection_handler.js /app/mindcraft/src/agent/connection_handler.js
+COPY external/mindcraft_evelyn/src/agent/vision/browser_viewer.js /app/mindcraft/src/agent/vision/browser_viewer.js
+COPY external/mindcraft_evelyn/src/agent/vision/vision_interpreter.js /app/mindcraft/src/agent/vision/vision_interpreter.js
+COPY external/mindcraft_evelyn/profiles/evelyn.json /app/mindcraft/profiles/evelyn.json
+
+COPY docker/requirements.mindcraft.txt /app/docker/requirements.mindcraft.txt
+RUN python3 -m pip install --break-system-packages --no-cache-dir -r /app/docker/requirements.mindcraft.txt
+
+COPY evelyn_core/runtime /app/evelyn_core/runtime
+
+WORKDIR /app
+EXPOSE 8765
+CMD ["python3", "-m", "evelyn_core.mindcraft_service", "--host", "0.0.0.0", "--port", "8765"]

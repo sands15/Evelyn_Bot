@@ -1,0 +1,60 @@
+diff --git a/src/agent/library/skills.js b/src/agent/library/skills.js
+--- a/src/agent/library/skills.js
++++ b/src/agent/library/skills.js
+@@ -1409,8 +1409,11 @@ export async function moveAway(bot, distance) {
+     const movements = new pf.Movements(bot);
+     const minimumY = Math.floor(pos.y) - 1;
+     movements.maxDropDown = 1;
+     movements.allowParkour = false;
+-    movements.exclusionAreasStep.push((block) => block.position.y < minimumY ? 100 : 0);
++    const belowFloor = (block) => block.position.y < minimumY ? 100 : 0;
++    movements.exclusionAreasStep.push(belowFloor);
++    movements.exclusionAreasBreak.push(belowFloor);
++    movements.exclusionAreasPlace.push(belowFloor);
+     bot.pathfinder.setMovements(movements);
+ 
+     if (bot.modes.isOn('cheat')) {
+@@ -1426,7 +1429,7 @@ export async function moveAway(bot, distance) {
+         }
+     }
+ 
+-    await goToGoal(bot, inverted_goal);
++    await bot.pathfinder.goto(inverted_goal);
+     let new_pos = bot.entity.position;
+     log(bot, `Moved away from ${pos.floored()} to ${new_pos.floored()}.`);
+     return true;
+@@ -1440,9 +1443,18 @@ export async function moveAwayFromEntity(bot, entity, distance=16) {
+      * @param {number} distance, the distance to move away.
+      * @returns {Promise<boolean>} true if the bot moved away, false otherwise.
+      **/
+     let goal = new pf.goals.GoalFollow(entity, distance);
+     let inverted_goal = new pf.goals.GoalInvert(goal);
+-    bot.pathfinder.setMovements(new pf.Movements(bot));
++    const position = bot.entity.position;
++    const minimumY = Math.floor(position.y) - 1;
++    const movements = new pf.Movements(bot);
++    const belowFloor = (block) => block.position.y < minimumY ? 100 : 0;
++    movements.maxDropDown = 1;
++    movements.allowParkour = false;
++    movements.exclusionAreasStep.push(belowFloor);
++    movements.exclusionAreasBreak.push(belowFloor);
++    movements.exclusionAreasPlace.push(belowFloor);
++    bot.pathfinder.setMovements(movements);
+     await bot.pathfinder.goto(inverted_goal);
+     return true;
+ }
+@@ -1462,10 +1473,13 @@ export async function avoidEnemies(bot, distance=16) {
+     while (enemy) {
+         const follow = new pf.goals.GoalFollow(enemy, distance+1); // move a little further away
+         const inverted_goal = new pf.goals.GoalInvert(follow);
+         const movements = new pf.Movements(bot);
++        const belowFloor = (block) => block.position.y < minimumY ? 100 : 0;
+         movements.maxDropDown = 1;
+         movements.allowParkour = false;
+-        movements.exclusionAreasStep.push((block) => block.position.y < minimumY ? 100 : 0);
++        movements.exclusionAreasStep.push(belowFloor);
++        movements.exclusionAreasBreak.push(belowFloor);
++        movements.exclusionAreasPlace.push(belowFloor);
+         bot.pathfinder.setMovements(movements);
+         bot.pathfinder.setGoal(inverted_goal, true);
+         await new Promise(resolve => setTimeout(resolve, 500));

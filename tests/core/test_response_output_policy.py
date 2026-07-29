@@ -40,6 +40,8 @@ class ResponseOutputPolicyTests(unittest.TestCase):
     def test_parse_response_action_tag_returns_action_and_clean_text(self) -> None:
         self.assertEqual(parse_response_action_tag(" [찾기]  검색할게 "), ("search", "검색할게"))
         self.assertEqual(parse_response_action_tag("[질문] 어디야?"), ("ask", "어디야?"))
+        self.assertEqual(parse_response_action_tag("[답변] 바로 말할게"), ("answer", "바로 말할게"))
+        self.assertEqual(parse_response_action_tag("[응답] 바로 말할게"), ("answer", "바로 말할게"))
         self.assertEqual(parse_response_action_tag("그냥 답"), (None, "그냥 답"))
 
     def test_normalize_friend_style_output_removes_formal_phrases_and_emoji(self) -> None:

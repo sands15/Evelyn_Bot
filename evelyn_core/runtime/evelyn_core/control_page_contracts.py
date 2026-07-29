@@ -98,13 +98,40 @@ def build_control_page_panel_state_payload(
 
 def build_fast_control_default_commands() -> list[dict[str, str]]:
     return [
-        {"command": "/help", "template": "/help", "summary": "Show available commands", "visibility": "always", "group": "base"},
-        {"command": "/status", "template": "/status", "summary": "Show Evelyn runtime status", "visibility": "always", "group": "base"},
-        {"command": "/memory", "template": "/memory", "summary": "Open or toggle the Control-Page memory panel", "visibility": "always", "group": "page"},
-        {"command": "/voice status", "template": "/voice status", "summary": "Show Windows local I/O bridge status", "visibility": "always", "group": "voice"},
-        {"command": "/restart", "template": "/restart", "summary": "Request local Evelyn runtime restart", "visibility": "always", "group": "system"},
-        {"command": "/shutdown", "template": "/shutdown", "summary": "Request local Evelyn runtime shutdown", "visibility": "always", "group": "system"},
+        {"command": "/help", "template": "/help", "summary": "사용 가능한 명령 보기", "visibility": "always", "group": "기본"},
+        {"command": "/status", "template": "/status", "summary": "이블린 핵심 서비스 상태 보기", "visibility": "always", "group": "기본"},
+        {"command": "/memory", "template": "/memory", "summary": "메모리 패널 열기/숨기기", "visibility": "always", "group": "페이지"},
+        {"command": "/obsidian", "template": "/obsidian", "summary": "Obsidian 메모리 저장소 열기", "visibility": "always", "group": "페이지"},
+        {"command": "/voice status", "template": "/voice status", "summary": "Windows 음성 브리지 상태 보기", "visibility": "always", "group": "음성"},
+        {"command": "/mic status", "template": "/mic status", "summary": "로컬 마이크 상태 보기", "visibility": "always", "group": "음성"},
+        {"command": "/mic on", "template": "/mic on", "summary": "로컬 마이크 입력 켜기", "visibility": "always", "group": "음성"},
+        {"command": "/mic off", "template": "/mic off", "summary": "로컬 마이크 입력 끄기", "visibility": "always", "group": "음성"},
+        {"command": "/minecraft connect", "template": "/minecraft connect", "summary": "Minecraft 서비스 지연 기동 및 접속", "visibility": "always", "group": "Minecraft"},
+        {"command": "/minecraft status", "template": "/minecraft status", "summary": "Minecraft 서비스와 접속 상태 보기", "visibility": "always", "group": "Minecraft"},
+        {"command": "/inventory", "template": "/inventory", "summary": "현재 Minecraft 인벤토리 보기", "visibility": "always", "group": "Minecraft"},
+        {"command": "/voyager stats", "template": "/voyager stats", "summary": "Minecraft 자율 작업 진행 상태 보기", "visibility": "always", "group": "Minecraft"},
+        {"command": "/minecraft disconnect", "template": "/minecraft disconnect", "summary": "Minecraft 에이전트 연결 중지", "visibility": "always", "group": "Minecraft"},
+        {"command": "/minecraft goal <goal>", "template": "/minecraft goal ", "summary": "Minecraft 목표 설정 또는 변경", "visibility": "always", "group": "Minecraft"},
+        {"command": "/autonomy status", "template": "/autonomy status", "summary": "Minecraft 자율 작업 상태 보기", "visibility": "always", "group": "Minecraft"},
+        {"command": "/repair preview", "template": "/repair preview", "summary": "런타임 복구 계획을 실행 없이 확인", "visibility": "always", "group": "시스템"},
+        {"command": "/repair start", "template": "/repair start", "summary": "확인된 런타임 복구 계획 실행", "visibility": "always", "group": "시스템"},
+        {"command": "/restart", "template": "/restart", "summary": "로컬 이블린 재시작 요청", "visibility": "always", "group": "시스템"},
+        {"command": "/shutdown", "template": "/shutdown", "summary": "로컬 이블린 종료 요청 (Shut down Evelyn runtime)", "visibility": "always", "group": "시스템"},
     ]
+
+
+def build_fast_control_help_reply() -> str:
+    commands = build_fast_control_default_commands()
+    lines = ["사용 가능한 명령"]
+    current_group = ""
+    for item in commands:
+        group = item["group"]
+        if group != current_group:
+            current_group = group
+            lines.extend(("", group))
+        lines.append(f"- {item['command']} — {item['summary']}")
+    lines.extend(("", "자연어로 시간 확인, 웹 검색, 기억 검색, 문제 조사도 요청할 수 있어."))
+    return "\n".join(lines)
 
 
 def local_restart_requested_reply() -> str:

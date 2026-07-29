@@ -95,6 +95,16 @@ class ContextPipelineToolPolicyTests(unittest.TestCase):
         assert web is not None
         self.assertTrue(web.required_before_answer)
 
+    def test_casual_today_conversation_does_not_request_web_tool(self) -> None:
+        decisions = build_tool_use_decisions("오늘 기분은 어때?", ContextPolicy())
+
+        self.assertNotIn("web_current_info", {item.tool_name for item in decisions})
+
+    def test_current_external_role_requests_web_tool(self) -> None:
+        decisions = build_tool_use_decisions("현재 대통령이 누구야?", ContextPolicy())
+
+        self.assertIn("web_current_info", {item.tool_name for item in decisions})
+
     def test_tool_context_renders_into_context_packet(self) -> None:
         decisions = build_tool_use_decisions("로그 파일 확인해줘", ContextPolicy())
         tool_context = render_tool_use_context(decisions)

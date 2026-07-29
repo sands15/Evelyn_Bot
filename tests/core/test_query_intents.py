@@ -28,6 +28,13 @@ class QueryIntentTests(unittest.TestCase):
         self.assertIn("2026\ub144 5\uc6d4 29\uc77c", answer or "")
         self.assertFalse(should_force_search_query("\uc624\ub298 \ub0a0\uc9dc\uac00 \ubb50\uc57c?"))
 
+    def test_datetime_query_uses_seoul_time_independent_of_host_timezone(self) -> None:
+        now = datetime(2026, 7, 28, 7, 29, tzinfo=timezone.utc)
+
+        answer = answer_current_datetime_query("\uc9c0\uae08 \uba87 \uc2dc\uc57c?", now=now)
+
+        self.assertEqual(answer, "\uc9c0\uae08\uc740 \uc624\ud6c4 4\uc2dc 29\ubd84\uc774\uc57c.")
+
     def test_search_request_is_forced_for_explicit_web_lookup(self) -> None:
         self.assertTrue(should_force_search_query("\uc774\uac70 \uc778\ud130\ub137\uc5d0\uc11c \uac80\uc0c9\ud574\uc918"))
         self.assertTrue(should_force_search_query("look up the latest release notes"))

@@ -16,9 +16,11 @@ from aiohttp import ClientConnectorError, ClientSession, ClientTimeout, web
 from .control_page_http import control_page_cors_middleware, control_page_session_handler
 from .control_page_contracts import (
     build_control_page_panel_state_payload,
+    build_fast_control_default_commands,
     local_restart_requested_reply,
     memory_panel_reply as shared_memory_panel_reply,
 )
+from .fast_action_runtime import detect_local_runtime_command
 from .memory_vault import (
     ensure_memory_vault_layout,
     export_memory_graph,
@@ -205,14 +207,7 @@ async def proxy_raw(request: web.Request, path: str) -> web.Response | None:
 
 
 def default_commands() -> list[dict[str, str]]:
-    return [
-        {"command": "/help", "template": "/help", "summary": "명령어 목록 보기", "visibility": "always", "group": "기본"},
-        {"command": "/status", "template": "/status", "summary": "Evelyn local runtime 상태 보기", "visibility": "always", "group": "기본"},
-        {"command": "/memory", "template": "/memory", "summary": "메모리 패널 열기/숨기기", "visibility": "always", "group": "페이지"},
-        {"command": "/obsidian", "template": "/obsidian", "summary": "메모리 패널 열기/숨기기", "visibility": "always", "group": "페이지"},
-        {"command": "/restart", "template": "/restart", "summary": "Evelyn bot process 재시작", "visibility": "always", "group": "시스템"},
-        {"command": "/shutdown", "template": "/shutdown", "summary": "Evelyn local runtime 종료", "visibility": "always", "group": "시스템"},
-    ]
+    return build_fast_control_default_commands()
 
 
 def format_command_help(commands: list[dict[str, str]]) -> str:
@@ -909,6 +904,9 @@ async def chat_handler(request: web.Request) -> web.StreamResponse:
         reply = format_command_help(commands if isinstance(commands, list) else [])
         return json_response({"ok": True, "reply": reply, "state": state})
     if normalized in LOCAL_STATUS_COMMANDS:
+        proxied = await proxy_json(request, "POST", "/api/control-page/chat", body=payload)
+        if proxied is not None and proxied.status < 500:
+            return proxied
         state = await degraded_state()
         runtime = state.get("runtime") if isinstance(state, dict) else {}
         services = runtime.get("services") if isinstance(runtime, dict) else {}
@@ -926,7 +924,11 @@ async def chat_handler(request: web.Request) -> web.StreamResponse:
             {"ok": bool(result.get("ok")), "reply": reply, "state": state, "openResult": result},
             status=200 if result.get("ok") else 500,
         )
+    runtime_command = detect_local_runtime_command(text)
+    restart_requested = runtime_command == "restart"
     if normalized in LOCAL_RESTART_COMMANDS:
+        restart_requested = True
+    if restart_requested:
         proxied = await proxy_json(request, "POST", "/api/control-page/chat", body=payload)
         if proxied is not None and proxied.status < 500:
             return proxied
@@ -949,7 +951,10 @@ async def chat_handler(request: web.Request) -> web.StreamResponse:
             },
             status=500,
         )
+    shutdown_requested = runtime_command == "shutdown"
     if normalized in LOCAL_SHUTDOWN_COMMANDS:
+        shutdown_requested = True
+    if shutdown_requested:
         proxied = await proxy_json(request, "POST", "/api/control-page/chat", body=payload)
         if proxied is not None and proxied.status < 500:
             return proxied
@@ -986,6 +991,22 @@ async def chat_handler(request: web.Request) -> web.StreamResponse:
     )
 
 
+async def action_events_handler(request: web.Request) -> web.StreamResponse:
+    proxied = await proxy_json(request, "GET", "/api/control-page/action-events")
+    if proxied is not None:
+        return proxied
+    return json_response(
+        {
+            "ok": False,
+            "error": "bot_api_unavailable",
+            "events": [],
+            "tasks": [],
+            "activeCount": 0,
+        },
+        status=503,
+    )
+
+
 async def icon_handler(request: web.Request) -> web.StreamResponse:
     item_name = request.match_info.get("item_name", "")
     proxied = await proxy_raw(request, f"/api/control-page/minecraft-item-icon/{item_name}")
@@ -1014,6 +1035,7 @@ def create_app() -> web.Application:
     app.router.add_post("/api/control-page/memory/{note_id}", memory_note_action_handler)
     app.router.add_post("/api/control-page/shutdown", shutdown_handler)
     app.router.add_post("/api/control-page/chat", chat_handler)
+    app.router.add_get("/api/control-page/action-events", action_events_handler)
     app.router.add_get("/api/control-page/minecraft-item-icon/{item_name}", icon_handler)
     app.router.add_options("/api/control-page/state", state_handler)
     app.router.add_options("/api/control-page/memory", memory_snapshot_handler)

@@ -156,6 +156,28 @@ class LocalMicRoutingTests(unittest.TestCase):
         self.assertEqual(bridge.speak_request_queue.qsize(), 1)
         self.assertEqual(bridge.speak_request_queue.get_nowait()["text"], "hello from page")
 
+    def test_local_io_bridge_help_reply_is_not_sent_to_tts(self) -> None:
+        async def scenario() -> LocalIoBridge:
+            bridge = LocalIoBridge()
+            bridge._post_status = AsyncMock()  # type: ignore[method-assign]
+            bridge._transcribe = AsyncMock(return_value="/help")  # type: ignore[method-assign]
+            bridge._chat = AsyncMock(return_value="사용 가능한 명령 목록")  # type: ignore[method-assign]
+            bridge._chat_stream_and_speak = AsyncMock(  # type: ignore[method-assign]
+                side_effect=AssertionError("help must not enter the TTS stream")
+            )
+            bridge._speak = AsyncMock(  # type: ignore[method-assign]
+                side_effect=AssertionError("help must not enter one-shot TTS")
+            )
+            await bridge._handle_segment(b"pcm", {"source": "test"})
+            return bridge
+
+        bridge = asyncio.run(scenario())
+
+        bridge._chat.assert_awaited_once_with("/help")  # type: ignore[union-attr]
+        bridge._chat_stream_and_speak.assert_not_awaited()  # type: ignore[union-attr]
+        bridge._speak.assert_not_awaited()  # type: ignore[union-attr]
+        self.assertEqual(bridge.last_latency["ttsMs"], 0.0)
+
     def test_local_io_bridge_tts_warmup_retries_until_ready(self) -> None:
         bridge = LocalIoBridge()
         bridge.session = object()
@@ -174,6 +196,130 @@ class LocalMicRoutingTests(unittest.TestCase):
         self.assertEqual(bridge.tts_warmup_error, "")
         self.assertEqual(bridge._drain_tts_payload.await_count, 2)
         bridge._post_status.assert_awaited_once()
+
+    def test_local_io_bridge_applies_mic_enable_request_once(self) -> None:
+        async def scenario() -> LocalIoBridge:
+            bridge = LocalIoBridge()
+            bridge.mic_enabled = False
+
+            async def start_mic() -> None:
+                bridge.ready = True
+                bridge.last_error = ""
+
+            bridge._start_mic = AsyncMock(side_effect=start_mic)  # type: ignore[method-assign]
+            response = {"micControlRequest": {"revision": 17, "enabled": True}}
+            bridge._handle_control_response(response)
+            bridge._handle_control_response(response)
+            await asyncio.gather(*list(bridge.mic_control_tasks))
+            return bridge
+
+        bridge = asyncio.run(scenario())
+
+        self.assertTrue(bridge.mic_enabled)
+        self.assertTrue(bridge.ready)
+        self.assertEqual(bridge.mic_control_request_revision, 17)
+        bridge._start_mic.assert_awaited_once()  # type: ignore[union-attr]
+
+    def test_local_io_bridge_applies_mic_disable_and_discards_queued_audio(self) -> None:
+        async def scenario() -> LocalIoBridge:
+            bridge = LocalIoBridge()
+            bridge.mic_enabled = True
+            bridge.queue.put_nowait((b"pcm", {"source": "test"}))
+
+            async def stop_mic() -> None:
+                bridge.mic_enabled = False
+                bridge._discard_pending_mic_segments()
+                bridge.ready = True
+                bridge.last_error = ""
+
+            bridge._stop_mic = AsyncMock(side_effect=stop_mic)  # type: ignore[method-assign]
+            bridge._handle_control_response(
+                {"micControlRequest": {"revision": 23, "enabled": False}}
+            )
+            await asyncio.gather(*list(bridge.mic_control_tasks))
+            return bridge
+
+        bridge = asyncio.run(scenario())
+
+        self.assertFalse(bridge.mic_enabled)
+        self.assertTrue(bridge.ready)
+        self.assertEqual(bridge.queue.qsize(), 0)
+        self.assertEqual(bridge.mic_control_request_revision, 23)
+        bridge._stop_mic.assert_awaited_once()  # type: ignore[union-attr]
+
+    def test_local_io_bridge_applies_minecraft_lazy_start_request_once(self) -> None:
+        async def scenario() -> LocalIoBridge:
+            bridge = LocalIoBridge()
+            bridge._post_status = AsyncMock()  # type: ignore[method-assign]
+            bridge._launch_minecraft_stack = AsyncMock(  # type: ignore[method-assign]
+                return_value={"alreadyReady": False, "launcherExitCode": 0}
+            )
+            bridge._activate_minecraft_command = AsyncMock(  # type: ignore[method-assign]
+                return_value={
+                    "commandApplied": True,
+                    "connected": True,
+                    "connectionState": "connected",
+                }
+            )
+            response = {
+                "minecraftCommandRequest": {
+                    "revision": 31,
+                    "command": "마인크래프트에서 나무 캐줘",
+                    "action": "goal",
+                }
+            }
+            bridge._handle_control_response(response)
+            bridge._handle_control_response(response)
+            await asyncio.gather(*list(bridge.minecraft_command_tasks))
+            return bridge
+
+        bridge = asyncio.run(scenario())
+
+        self.assertEqual(bridge.minecraft_command_request_revision, 31)
+        self.assertEqual(bridge.minecraft_command_state, "ready")
+        self.assertTrue(bridge.minecraft_command_result["commandApplied"])
+        self.assertTrue(bridge.minecraft_command_result["connected"])
+        bridge._launch_minecraft_stack.assert_awaited_once()  # type: ignore[union-attr]
+        bridge._activate_minecraft_command.assert_awaited_once_with(  # type: ignore[union-attr]
+            "마인크래프트에서 나무 캐줘",
+            "goal",
+        )
+        self.assertEqual(bridge._post_status.await_count, 2)  # type: ignore[union-attr]
+
+    def test_local_io_bridge_reports_minecraft_lazy_start_failure(self) -> None:
+        async def scenario() -> LocalIoBridge:
+            bridge = LocalIoBridge()
+            bridge._post_status = AsyncMock()  # type: ignore[method-assign]
+            bridge._launch_minecraft_stack = AsyncMock(  # type: ignore[method-assign]
+                side_effect=RuntimeError("compose failed")
+            )
+            bridge._handle_control_response(
+                {
+                    "minecraftCommandRequest": {
+                        "revision": 32,
+                        "command": "마인크래프트 시작해",
+                        "action": "start",
+                    }
+                }
+            )
+            await asyncio.gather(*list(bridge.minecraft_command_tasks))
+            return bridge
+
+        bridge = asyncio.run(scenario())
+
+        self.assertEqual(bridge.minecraft_command_request_revision, 32)
+        self.assertEqual(bridge.minecraft_command_state, "failed")
+        self.assertIn("compose failed", bridge.minecraft_command_error)
+        self.assertFalse(bridge.minecraft_command_result["commandApplied"])
+
+    def test_local_io_bridge_reports_dynamic_mic_state_and_control_revision(self) -> None:
+        bridge_source = (
+            REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "local_io_bridge.py"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('"micEnabled": self.mic_enabled', bridge_source)
+        self.assertIn('"micControlRevision": self.mic_control_request_revision', bridge_source)
+        self.assertIn("if not self.mic_enabled:", bridge_source)
 
     def test_local_mic_short_segments_are_reported_as_rejected(self) -> None:
         captured: list[tuple[bytes, dict]] = []
@@ -261,10 +407,10 @@ class LocalMicRoutingTests(unittest.TestCase):
         self.assertEqual(flush_calls, [False])
         self.assertEqual(service.last_effective_max_silence_ms, 200)
 
-    def test_start_local_enables_local_mic_by_default(self) -> None:
+    def test_start_local_disables_local_mic_by_default(self) -> None:
         script = (REPO_ROOT / "evelyn_core" / "start_local.bat").read_text(encoding="utf-8")
 
-        self.assertIn('if "%LOCAL_MIC_ENABLED%"=="" set "LOCAL_MIC_ENABLED=true"', script)
+        self.assertIn('if "%LOCAL_MIC_ENABLED%"=="" set "LOCAL_MIC_ENABLED=false"', script)
         self.assertIn('if "%LOCAL_MIC_START_THRESHOLD%"=="" set "LOCAL_MIC_START_THRESHOLD=0.002"', script)
         self.assertIn('if "%LOCAL_MIC_CONTINUE_THRESHOLD%"=="" set "LOCAL_MIC_CONTINUE_THRESHOLD=0.001"', script)
         self.assertIn('if "%LOCAL_MIC_MIN_VOICED_MS%"=="" set "LOCAL_MIC_MIN_VOICED_MS=280"', script)
@@ -274,7 +420,7 @@ class LocalMicRoutingTests(unittest.TestCase):
         self.assertNotIn("LOCAL_TTS_TAIL_SILENCE_MS", script)
         self.assertNotIn("TTS_FIRST_CHUNK_MIN_CHARS", script)
         self.assertNotIn("TTS_NEXT_CHUNK_MIN_CHARS", script)
-        self.assertNotIn('set "LOCAL_MIC_ENABLED=false"', script)
+        self.assertNotIn('set "LOCAL_MIC_ENABLED=true"', script)
 
     def test_background_local_mode_uses_docker_core_and_windows_io_bridge(self) -> None:
         script = (REPO_ROOT / "evelyn_core" / "runtime" / "launchers" / "start_local_background.ps1").read_text(encoding="utf-8")
@@ -284,6 +430,7 @@ class LocalMicRoutingTests(unittest.TestCase):
         self.assertIn("'--profile', 'llm'", script)
         self.assertIn("'--profile', 'tts'", script)
         self.assertIn("'--profile', 'stt'", script)
+        self.assertNotIn("'--profile', 'voyager'", script)
         self.assertIn("EVELYN_DOCKER_BUILD", script)
         self.assertIn("@('up', '-d')", script)
         self.assertIn("'stop', 'discord_bot'", script)
@@ -298,11 +445,18 @@ class LocalMicRoutingTests(unittest.TestCase):
         self.assertIn("LOCAL_BRIDGE_TTS_INPUT_SUPPRESS_AFTER_SEC = '0.7'", script)
         self.assertNotIn("py -3 main.py", script)
         self.assertIn("LOCAL_BRIDGE_STREAMING_TTS_ENABLED", bridge_source)
+        self.assertIn("if not self.mic_enabled:", bridge_source)
+        self.assertIn('"micEnabled": self.mic_enabled', bridge_source)
+        self.assertIn('"micControlRevision": self.mic_control_request_revision', bridge_source)
         self.assertIn("LOCAL_BRIDGE_TTS_WARMUP_ENABLED = 'true'", script)
         self.assertIn("LOCAL_BRIDGE_TTS_WARMUP_DELAY_SEC = '0.5'", script)
         self.assertIn("LOCAL_BRIDGE_TTS_WARMUP_TEXT", bridge_source)
         self.assertIn("tts_warmup_done", bridge_source)
         self.assertIn("/api/control-page/chat-stream", bridge_source)
+        self.assertIn('if event_type == "progress":', bridge_source)
+        self.assertIn('await websocket.send_json({"type": "commit"})', bridge_source)
+        self.assertIn('"progressCount": progress_count', bridge_source)
+        self.assertIn('"firstProgressMs": round(first_progress_ms, 1)', bridge_source)
         self.assertIn("_play_streaming_pcm_response", bridge_source)
         self.assertIn("tts_played_streaming", bridge_source)
         self.assertIn('"num_step": OMNIVOICE_NUM_STEP', bridge_source)

@@ -49,6 +49,18 @@ async def fake_logs(_: str) -> str:
     return "Recent Evelyn log evidence: background_start/Bot-Control.log\napi_error:500 while handling /shutdown"
 
 
+def fake_local_bridge_status() -> dict[str, object]:
+    return {
+        "enabled": True,
+        "ready": True,
+        "micEnabled": False,
+        "mic": {"enabled": False, "captureActive": False},
+        "segmentCount": 0,
+        "transcriptCount": 0,
+        "speaking": False,
+    }
+
+
 class FastContextContractTests(unittest.IsolatedAsyncioTestCase):
     def test_bot_api_requirements_include_memory_recall_dependency(self) -> None:
         requirements = (REPO_ROOT / "docker" / "requirements.bot-api.txt").read_text(encoding="utf-8")
@@ -60,13 +72,17 @@ class FastContextContractTests(unittest.IsolatedAsyncioTestCase):
             "main llm runtime status and gpu status?",
             source="control_page",
             runtime_health_provider=fake_runtime_health,
+            local_bridge_status_provider=fake_local_bridge_status,
         )
 
         by_name = {item.tool_name: item for item in context.tool_use_decisions}
         self.assertIn("runtime_status", by_name)
         self.assertEqual(by_name["runtime_status"].status, "executed")
         self.assertIn("All runtime services are ready", by_name["runtime_status"].evidence)
+        self.assertIn("mic_enabled=false", by_name["runtime_status"].evidence)
         self.assertIn("runtime_status", context.system_context)
+        self.assertIn("mic_capture_active=false", context.system_context)
+        self.assertIn("mic_enabled=false", context.local_bridge_context)
         self.assertIn("fast_control_route", context.system_context)
 
     async def test_current_info_executes_search_in_fast_context(self) -> None:
@@ -84,6 +100,31 @@ class FastContextContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Weather Example", web.evidence)
         self.assertIn("Search tool result", context.system_context)
         self.assertIn("Today is rainy and cool", context.system_context)
+
+    async def test_korean_research_request_executes_search_without_vision_false_positive(self) -> None:
+        context = await build_fast_control_context(
+            "STT 모델 후보를 알아봐줘",
+            source="local_bridge",
+            runtime_health_provider=fake_runtime_health,
+            search_provider=fake_search,
+        )
+
+        by_name = {item.tool_name: item for item in context.tool_use_decisions}
+        self.assertEqual(by_name["web_current_info"].status, "executed")
+        self.assertNotIn("vision_capture_or_watch", by_name)
+
+    async def test_contextual_tool_text_can_ground_short_followup_search(self) -> None:
+        context = await build_fast_control_context(
+            "그거 해줘",
+            tool_user_text="로컬 STT 모델 교체 후보 찾아봐",
+            source="local_bridge",
+            runtime_health_provider=fake_runtime_health,
+            search_provider=fake_search,
+        )
+
+        web = next(item for item in context.tool_use_decisions if item.tool_name == "web_current_info")
+        self.assertEqual(web.status, "executed")
+        self.assertIn("로컬 STT 모델 교체 후보 찾아봐", context.search_context)
 
     async def test_tool_diagnostic_executes_mounted_log_read_in_fast_context(self) -> None:
         context = await build_fast_control_context(
@@ -141,6 +182,22 @@ class FastContextContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("should-not-leak", context)
         self.assertNotIn("private voice text", context)
 
+    def test_fast_log_context_can_require_query_match_for_investigation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_root:
+            root = Path(temp_root)
+            (root / "runtime.log").write_text(
+                "unrelated startup line\nminecraft warning only\n",
+                encoding="utf-8",
+            )
+
+            context = build_fast_log_context(
+                "tts",
+                roots=[root],
+                require_match=True,
+            )
+
+        self.assertEqual(context, "")
+
     async def test_memory_recall_executes_in_fast_context(self) -> None:
         context = await build_fast_control_context(
             "memory previous preference?",
@@ -165,6 +222,7 @@ class FastContextContractTests(unittest.IsolatedAsyncioTestCase):
             runtime_health_provider=fake_runtime_health,
             search_provider=fake_search,
             memory_provider=fake_memory,
+            local_bridge_status_provider=fake_local_bridge_status,
         )
 
         self.assertEqual(messages[0]["role"], "system")

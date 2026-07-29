@@ -55,7 +55,7 @@ def normalize_search_query(text: str) -> str:
 
 
 def strip_search_command_words(text: str) -> str:
-    query = clean_text(text)
+    query = clean_text(text).rstrip(" .!?。！？")
     if not query:
         return ""
     replacements = (
@@ -67,9 +67,18 @@ def strip_search_command_words(text: str) -> str:
         r"검색해줘\s*$",
         r"검색해\s*$",
         r"검색\s*$",
+        r"외부\s*검색\s*$",
         r"찾아봐\s*$",
+        r"찾아\s*봐\s*$",
         r"찾아줘\s*$",
         r"찾아\s*$",
+        r"알아봐줘\s*$",
+        r"알아\s*봐줘\s*$",
+        r"알아봐\s*$",
+        r"알아\s*봐\s*$",
+        r"알아보라고\s*$",
+        r"조사해봐\s*$",
+        r"조사해\s*$",
         r"알려줘\s*$",
         r"알려 줘\s*$",
     )

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
+import random
 import re
 import time
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Awaitable, Callable
 
 from aiohttp import ClientSession, ClientTimeout, web
 
@@ -17,16 +19,43 @@ from .assistant_prompt_contract import (
 from .control_page_contracts import (
     build_control_page_panel_state_payload,
     build_fast_control_default_commands,
+    build_fast_control_help_reply,
     detect_memory_panel_action,
     local_restart_requested_reply,
     local_shutdown_requested_reply,
     memory_panel_reply,
 )
+from .context_pipeline import build_context_policy_for_turn, build_tool_use_decisions
 from .fast_context_contract import build_fast_main_llm_messages
+from .fast_action_runtime import (
+    FastActionCoordinator,
+    FastActionExecutionError,
+    FastActionTask,
+    SafeIncrementalSpeechFilter,
+    detect_local_mic_command,
+    detect_local_runtime_command,
+    detect_minecraft_control_command,
+    detect_minecraft_runtime_command,
+    enforce_action_reply_contract,
+    has_unbacked_progress_claim,
+    is_local_mic_status_request,
+    render_local_mic_status,
+)
+from .fast_tool_planner import (
+    FastToolPlan,
+    answer_fast_tool_capability_question,
+    enforce_registered_tool_capability_truth,
+    plan_fast_tool_request,
+)
 from .paths import get_runtime_artifacts_root
+from .query_intents import answer_current_datetime_query
 from .runtime_health import collect_runtime_health, default_probe_runner
 from .runtime_services import HealthProbeSpec, ServiceSpec, load_service_manifest
-from .text import visible_text as shared_visible_text
+from .text import (
+    ModelStreamPrefixFilter,
+    should_suppress_tts_for_command,
+    visible_text as shared_visible_text,
+)
 
 
 HOST = os.getenv("CONTROL_PAGE_HOST", "0.0.0.0")
@@ -39,9 +68,46 @@ MAIN_LLM_STOP_TOKENS = tuple(
     for token in os.getenv("MAIN_LLM_STOP_TOKENS", "<|eot_id|>,<|end_of_text|>").split(",")
     if token.strip()
 )
+MEMORY_RECALL_PROGRESS_TEXTS = (
+    "잠깐만.",
+    "잠시만.",
+    "음… 기다려봐.",
+    "어디 보자…",
+    "잠깐 기다려봐.",
+)
+MEMORY_RECALL_PROGRESS_SOURCES = frozenset({"local_bridge", "local_mic", "voice"})
+MEMORY_RECALL_PROGRESS_LAST_TEXT: str | None = None
+RESEARCH_PROGRESS_TEXTS = (
+    "잠깐, 관련 자료를 찾아볼게.",
+    "음… 제대로 비교해볼게.",
+    "잠시만, 필요한 자료부터 모아볼게.",
+)
+INVESTIGATION_PROGRESS_TEXTS = (
+    "잠깐, 상태와 로그를 확인해볼게.",
+    "음… 문제 원인을 좀 찾아볼게.",
+    "잠시만, 실제 상태부터 점검해볼게.",
+)
+MINECRAFT_LAZY_START_TIMEOUT_SEC = max(
+    30.0,
+    float(os.getenv("MINECRAFT_LAZY_START_TIMEOUT_SEC", "300")),
+)
+MINECRAFT_AUTONOMY_SERVICE_HOST = os.getenv("MINECRAFT_AUTONOMY_SERVICE_HOST", "voyager")
+MINECRAFT_AUTONOMY_SERVICE_PORT = int(os.getenv("MINECRAFT_AUTONOMY_SERVICE_PORT", "8765"))
+MINECRAFT_AUTONOMY_SERVICE_BASE = (
+    f"http://{MINECRAFT_AUTONOMY_SERVICE_HOST}:{MINECRAFT_AUTONOMY_SERVICE_PORT}"
+)
+MINECRAFT_CONTROL_TIMEOUT_SEC = max(
+    0.5,
+    float(os.getenv("MINECRAFT_CONTROL_TIMEOUT_SEC", "2.5")),
+)
 CHAT_LOG_LIMIT = max(4, int(os.getenv("FAST_CONTROL_CHAT_LOG_LIMIT", "40")))
 LOCAL_BRIDGE_STALE_AFTER_SEC = max(3.0, float(os.getenv("LOCAL_BRIDGE_STALE_AFTER_SEC", "8.0")))
-FAST_MAIN_LLM_SYSTEM_PROMPT = build_evelyn_system_prompt()
+FAST_MAIN_LLM_SYSTEM_PROMPT = "\n".join(
+    (
+        build_evelyn_system_prompt(),
+        FAST_MAIN_LLM_USER_PREFIX,
+    )
+)
 
 
 BOOT_STEPS = (
@@ -55,6 +121,9 @@ BOOT_STEPS = (
 )
 
 CHAT_MESSAGES: list[dict[str, Any]] = []
+ACTION_COORDINATOR = FastActionCoordinator(history_limit=CHAT_LOG_LIMIT)
+BACKGROUND_ACTION_HANDLERS: list[dict[str, Any]] = []
+BACKGROUND_ACTION_TASKS: set[asyncio.Task[Any]] = set()
 CONTROL_PAGE_UI_COMMANDS: list[dict[str, Any]] = []
 CONTROL_PAGE_UI_COMMAND_SEQ = 0
 LOCAL_BRIDGE_STATUS: dict[str, Any] = {
@@ -106,6 +175,19 @@ def save_local_audio_device_state(state: dict[str, Any]) -> None:
 
 
 LOCAL_BRIDGE_OUTPUT_DEVICE_REQUEST: dict[str, Any] = load_local_audio_device_state()
+LOCAL_BRIDGE_MIC_CONTROL_REQUEST: dict[str, Any] = {
+    "revision": 0,
+    "enabled": None,
+    "requestedAt": None,
+    "source": "",
+}
+LOCAL_BRIDGE_MINECRAFT_COMMAND_REQUEST: dict[str, Any] = {
+    "revision": 0,
+    "command": "",
+    "action": "",
+    "requestedAt": None,
+    "source": "",
+}
 
 
 def json_response(payload: dict[str, Any], *, status: int = 200) -> web.Response:
@@ -114,6 +196,34 @@ def json_response(payload: dict[str, Any], *, status: int = 200) -> web.Response
 
 def clean_text(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value or "").strip())
+
+
+def should_emit_memory_recall_progress(text: str, *, source: str) -> bool:
+    if clean_text(source).lower() not in MEMORY_RECALL_PROGRESS_SOURCES:
+        return False
+    policy = build_context_policy_for_turn(
+        user_text=text,
+        source=source,
+        route="fast_control_api",
+    )
+    return any(
+        decision.tool_name == "memory_recall"
+        and decision.auto_allowed
+        and decision.required_before_answer
+        for decision in build_tool_use_decisions(text, policy)
+    )
+
+
+def next_memory_recall_progress_text() -> str:
+    global MEMORY_RECALL_PROGRESS_LAST_TEXT
+    candidates = tuple(
+        text
+        for text in MEMORY_RECALL_PROGRESS_TEXTS
+        if text != MEMORY_RECALL_PROGRESS_LAST_TEXT
+    )
+    text = random.choice(candidates or MEMORY_RECALL_PROGRESS_TEXTS)
+    MEMORY_RECALL_PROGRESS_LAST_TEXT = text
+    return text
 
 
 def visible_text(value: Any) -> str:
@@ -130,7 +240,15 @@ def visible_text(value: Any) -> str:
     return clean_text(shared_visible_text(text))
 
 
-def append_chat_message(role: str, author: str, text: str, *, source: str | None = None) -> None:
+def append_chat_message(
+    role: str,
+    author: str,
+    text: str,
+    *,
+    source: str | None = None,
+    task_id: str | None = None,
+    task_status: str | None = None,
+) -> None:
     message = {
         "role": role,
         "author": author,
@@ -139,13 +257,38 @@ def append_chat_message(role: str, author: str, text: str, *, source: str | None
     }
     if source:
         message["source"] = source
+    if clean_text(task_id):
+        message["taskId"] = clean_text(task_id)
+    if clean_text(task_status):
+        message["taskStatus"] = clean_text(task_status)
     CHAT_MESSAGES.append(message)
     if len(CHAT_MESSAGES) > CHAT_LOG_LIMIT:
         del CHAT_MESSAGES[:-CHAT_LOG_LIMIT]
 
 
+def recent_chat_messages_for_planner(text: str, *, limit: int = 8) -> list[dict[str, str]]:
+    messages = [
+        {
+            "role": clean_text(message.get("role")) or "user",
+            "content": clean_text(message.get("text")),
+        }
+        for message in CHAT_MESSAGES[-max(1, limit + 1) :]
+        if clean_text(message.get("role")) in {"user", "assistant"}
+        and clean_text(message.get("text"))
+    ]
+    if (
+        messages
+        and messages[-1]["role"] == "user"
+        and messages[-1]["content"] == clean_text(text)
+    ):
+        messages.pop()
+    return messages[-limit:]
+
+
 def local_bridge_status_snapshot(*, now: float | None = None) -> dict[str, Any]:
     snapshot = dict(LOCAL_BRIDGE_STATUS)
+    snapshot["micControlRequest"] = dict(LOCAL_BRIDGE_MIC_CONTROL_REQUEST)
+    snapshot["minecraftCommandRequest"] = dict(LOCAL_BRIDGE_MINECRAFT_COMMAND_REQUEST)
     if LOCAL_BRIDGE_OUTPUT_DEVICE_REQUEST.get("outputDevice"):
         snapshot["outputDeviceSelection"] = dict(LOCAL_BRIDGE_OUTPUT_DEVICE_REQUEST)
     updated_at = snapshot.get("updatedAt")
@@ -203,8 +346,620 @@ def set_local_bridge_output_device(output_device: str, *, source: str = "control
     return dict(LOCAL_BRIDGE_OUTPUT_DEVICE_REQUEST)
 
 
+def request_local_bridge_mic_control(enabled: bool, *, source: str = "control_page") -> dict[str, Any]:
+    current_revision = int(LOCAL_BRIDGE_MIC_CONTROL_REQUEST.get("revision") or 0)
+    revision = max(current_revision + 1, int(time.time() * 1000))
+    LOCAL_BRIDGE_MIC_CONTROL_REQUEST.update(
+        {
+            "revision": revision,
+            "enabled": bool(enabled),
+            "requestedAt": time.time(),
+            "source": clean_text(source) or "control_page",
+        }
+    )
+    return dict(LOCAL_BRIDGE_MIC_CONTROL_REQUEST)
+
+
+async def wait_for_local_bridge_mic_control(
+    request: dict[str, Any],
+    *,
+    timeout_sec: float = 4.0,
+) -> dict[str, Any]:
+    revision = int(request.get("revision") or 0)
+    desired_enabled = bool(request.get("enabled"))
+    deadline = time.monotonic() + max(0.1, float(timeout_sec))
+    while time.monotonic() < deadline:
+        snapshot = local_bridge_status_snapshot()
+        applied_revision = int(snapshot.get("micControlRevision") or 0)
+        if applied_revision >= revision and bool(snapshot.get("micEnabled")) == desired_enabled:
+            return {"applied": True, "request": dict(request), "localBridge": snapshot}
+        await asyncio.sleep(0.05)
+    return {
+        "applied": False,
+        "request": dict(request),
+        "localBridge": local_bridge_status_snapshot(),
+        "error": "mic_control_ack_timeout",
+    }
+
+
+async def execute_local_bridge_mic_control(enabled: bool, *, source: str) -> str:
+    request = request_local_bridge_mic_control(enabled, source=source)
+    result = await wait_for_local_bridge_mic_control(request)
+    snapshot = dict(result.get("localBridge") or {})
+    if not result.get("applied"):
+        action = "켜기" if enabled else "끄기"
+        return f"마이크 입력 {action} 요청은 보냈지만 브리지 적용 확인을 받지 못했어."
+    if enabled:
+        mic = dict(snapshot.get("mic") or {})
+        if snapshot.get("ready") and mic.get("captureReady"):
+            return "마이크 입력을 켰어."
+        error = clean_text(snapshot.get("lastError")) or clean_text(mic.get("lastError"))
+        detail = f" 오류: {error}" if error else ""
+        return clean_text(f"마이크 입력을 켜려고 했지만 캡처가 준비되지 않았어.{detail}")
+    error = clean_text(snapshot.get("lastError"))
+    if error.startswith("mic_control_failed"):
+        return f"마이크 입력을 끄려고 했지만 캡처 종료 중 오류가 났어. 오류: {error}"
+    return "마이크 입력을 껐어."
+
+
+def request_local_bridge_minecraft_command(command: str, *, source: str) -> dict[str, Any]:
+    action = detect_minecraft_runtime_command(command)
+    if action not in {"start", "goal"}:
+        raise ValueError("not_a_minecraft_runtime_command")
+    if clean_text(LOCAL_BRIDGE_MINECRAFT_COMMAND_REQUEST.get("command")):
+        raise RuntimeError("minecraft_command_already_pending")
+    current_revision = int(LOCAL_BRIDGE_MINECRAFT_COMMAND_REQUEST.get("revision") or 0)
+    revision = max(current_revision + 1, int(time.time() * 1000))
+    LOCAL_BRIDGE_MINECRAFT_COMMAND_REQUEST.update(
+        {
+            "revision": revision,
+            "command": clean_text(command),
+            "action": action,
+            "requestedAt": time.time(),
+            "source": clean_text(source) or "control_page",
+        }
+    )
+    return dict(LOCAL_BRIDGE_MINECRAFT_COMMAND_REQUEST)
+
+
+def clear_local_bridge_minecraft_command_request(revision: int) -> None:
+    if int(LOCAL_BRIDGE_MINECRAFT_COMMAND_REQUEST.get("revision") or 0) != int(revision):
+        return
+    LOCAL_BRIDGE_MINECRAFT_COMMAND_REQUEST.update(
+        {
+            "command": "",
+            "action": "",
+            "requestedAt": None,
+            "source": "",
+        }
+    )
+
+
+async def wait_for_local_bridge_minecraft_command(
+    request: dict[str, Any],
+    *,
+    timeout_sec: float = MINECRAFT_LAZY_START_TIMEOUT_SEC,
+) -> dict[str, Any]:
+    revision = int(request.get("revision") or 0)
+    deadline = time.monotonic() + max(0.1, float(timeout_sec))
+    while time.monotonic() < deadline:
+        snapshot = local_bridge_status_snapshot()
+        applied_revision = int(snapshot.get("minecraftCommandRevision") or 0)
+        state = clean_text(snapshot.get("minecraftCommandState")).lower()
+        if applied_revision >= revision and state in {"ready", "failed"}:
+            return {
+                "applied": state == "ready",
+                "request": dict(request),
+                "localBridge": snapshot,
+                "state": state,
+                "result": dict(snapshot.get("minecraftCommandResult") or {}),
+                "error": clean_text(snapshot.get("minecraftCommandError")),
+            }
+        await asyncio.sleep(0.1)
+    return {
+        "applied": False,
+        "request": dict(request),
+        "localBridge": local_bridge_status_snapshot(),
+        "state": "timeout",
+        "result": {},
+        "error": "minecraft_command_ack_timeout",
+    }
+
+
+async def request_minecraft_control_service(
+    method: str,
+    path: str,
+) -> tuple[dict[str, Any] | None, str]:
+    url = f"{MINECRAFT_AUTONOMY_SERVICE_BASE}{path}"
+    timeout = ClientTimeout(total=MINECRAFT_CONTROL_TIMEOUT_SEC)
+    try:
+        async with ClientSession(timeout=timeout) as session:
+            async with session.request(method.upper(), url) as response:
+                raw = await response.text()
+                try:
+                    payload = json.loads(raw or "{}")
+                except json.JSONDecodeError:
+                    payload = {}
+                if response.status >= 400:
+                    return None, clean_text(
+                        str((payload or {}).get("error") or raw or f"http_{response.status}")
+                    )
+                if not isinstance(payload, dict):
+                    return None, "invalid_minecraft_response"
+                return payload, ""
+    except Exception as exc:
+        return None, clean_text(repr(exc))
+
+
+def minecraft_service_is_offline(error: str) -> bool:
+    normalized = clean_text(error).lower()
+    if any(
+        marker in normalized
+        for marker in (
+            "clientconnectorerror",
+            "clientconnectordnserror",
+            "connectionrefusederror",
+            "connect call failed",
+            "offline",
+            "name or service not known",
+            "nodename nor servname",
+            "temporary failure in name resolution",
+        )
+    ):
+        return True
+    if "timeouterror" not in normalized:
+        return False
+    bridge = local_bridge_status_snapshot()
+    command_revision = int(bridge.get("minecraftCommandRevision") or 0)
+    command_state = clean_text(bridge.get("minecraftCommandState")).lower()
+    return command_revision <= 0 or command_state in {"", "idle", "failed"}
+
+
+def minecraft_control_error_reply(subject: str, error: str) -> str:
+    if minecraft_service_is_offline(error):
+        return minecraft_standby_reply(subject)
+    detail = clean_text(error) or "unknown_error"
+    return f"마인크래프트 {subject} 확인에 실패했어. 오류: {detail}"
+
+
+def minecraft_standby_reply(subject: str = "상태") -> str:
+    if subject == "inventory":
+        return "마인크래프트 서비스가 대기 중이라 현재 인벤토리는 확인할 수 없어."
+    if subject == "disconnect":
+        return "마인크래프트 서비스는 이미 종료돼 있어."
+    return "마인크래프트 서비스는 지금 대기 중이야. 실행 명령을 받기 전에는 전용 모델을 로드하지 않아."
+
+
+def render_minecraft_status(payload: dict[str, Any], *, detailed: bool = False) -> str:
+    running = bool(payload.get("running") or payload.get("loop_running"))
+    connected = bool(payload.get("connected") or payload.get("minecraft_connected"))
+    if not running:
+        return minecraft_standby_reply()
+    state = clean_text(payload.get("connection_state")) or ("connected" if connected else "starting")
+    goal = clean_text(payload.get("goal") or payload.get("current_task"))
+    stage = clean_text(payload.get("display_stage") or payload.get("stage"))
+    last_error = clean_text(payload.get("last_error"))
+    parts = [
+        f"마인크래프트 에이전트는 실행 중이고 게임 접속은 {'확인됐어' if connected else '아직 준비 중이야'}.",
+        f"현재 상태는 {state}야.",
+    ]
+    if goal:
+        parts.append(f"목표는 “{goal}”이야.")
+    if detailed and stage:
+        parts.append(f"진행 단계는 {stage}야.")
+    if detailed:
+        blocked_count = int(payload.get("blocked_command_count") or 0)
+        parts.append(f"차단된 명령은 {blocked_count}건이야.")
+    if last_error:
+        parts.append(f"최근 오류: {last_error}")
+    return clean_text(" ".join(parts))
+
+
+def render_minecraft_inventory(payload: dict[str, Any]) -> str:
+    inventory = payload.get("inventory")
+    if not isinstance(inventory, dict) or not inventory:
+        return "현재 확인되는 마인크래프트 인벤토리가 비어 있어."
+    items: list[str] = []
+    for name, raw_count in sorted(inventory.items(), key=lambda item: str(item[0]).lower()):
+        try:
+            count = int(raw_count)
+        except (TypeError, ValueError):
+            count = 0
+        if count > 0:
+            items.append(f"{clean_text(name)} {count}개")
+        if len(items) >= 12:
+            break
+    if not items:
+        return "현재 확인되는 마인크래프트 인벤토리가 비어 있어."
+    return "현재 인벤토리: " + ", ".join(items) + "."
+
+
+async def execute_minecraft_control_command(action: str) -> str:
+    if action == "disconnect":
+        payload, error = await request_minecraft_control_service("POST", "/stop")
+        if payload is None:
+            return minecraft_control_error_reply("disconnect", error)
+        if payload.get("running") or payload.get("loop_running"):
+            return "마인크래프트 중지 요청을 보냈지만 에이전트가 아직 실행 중이야."
+        return "마인크래프트 에이전트 연결을 중지했어."
+
+    if action == "inventory":
+        payload, error = await request_minecraft_control_service("GET", "/observe")
+        if payload is None:
+            return minecraft_control_error_reply("inventory", error)
+        return render_minecraft_inventory(payload)
+
+    payload, error = await request_minecraft_control_service("GET", "/status")
+    if payload is None:
+        return minecraft_control_error_reply("상태", error)
+    return render_minecraft_status(payload, detailed=action in {"stats", "autonomy_status"})
+
+
+async def execute_local_bridge_minecraft_command(command: str, source: str) -> str:
+    bridge = local_bridge_status_snapshot()
+    if not bridge.get("ready") or bridge.get("stale"):
+        raise FastActionExecutionError(
+            "local_bridge_not_ready",
+            reply="로컬 브리지가 준비되지 않아서 마인크래프트 서비스를 자동으로 시작하지 못했어.",
+        )
+    try:
+        request = request_local_bridge_minecraft_command(command, source=source)
+    except RuntimeError as exc:
+        if str(exc) != "minecraft_command_already_pending":
+            raise
+        raise FastActionExecutionError(
+            "minecraft_command_already_pending",
+            reply="이미 다른 마인크래프트 명령을 준비 중이야. 끝나는 대로 결과를 알려줄게.",
+        ) from exc
+    outcome = await wait_for_local_bridge_minecraft_command(request)
+    if not outcome.get("applied"):
+        clear_local_bridge_minecraft_command_request(int(request.get("revision") or 0))
+        detail = clean_text(outcome.get("error"))
+        suffix = f" 오류: {detail}" if detail else ""
+        raise FastActionExecutionError(
+            detail or "minecraft_lazy_start_failed",
+            reply=clean_text(f"마인크래프트 모델과 서비스를 준비하지 못했어.{suffix}"),
+        )
+    clear_local_bridge_minecraft_command_request(int(request.get("revision") or 0))
+    result = dict(outcome.get("result") or {})
+    connected = bool(result.get("connected"))
+    command_applied = bool(result.get("commandApplied"))
+    if connected and command_applied:
+        return "마인크래프트 모델과 서비스를 준비했고, 게임 접속과 명령 전달까지 확인했어."
+    if command_applied:
+        return "마인크래프트 모델과 서비스를 준비했고 명령도 전달했어. 게임 접속은 아직 진행 중이야."
+    return "마인크래프트 모델과 서비스를 준비했어."
+
+
+async def synthesize_tool_evidence_reply(
+    *,
+    user_text: str,
+    task_kind: str,
+    evidence: str,
+) -> str:
+    system_prompt = "\n\n".join(
+        (
+            FAST_MAIN_LLM_SYSTEM_PROMPT,
+            (
+                "A registered Evelyn tool already completed a background task. "
+                "Answer only from the supplied evidence. Do not say you will search, inspect, or work later. "
+                "Do not claim a registered tool is unavailable. "
+                "For comparison research, give a concise Korean comparison and a practical next choice. "
+                "For runtime investigation, state the observed cause or uncertainty and the most useful next action. "
+                "Do not recommend network, server, permissions, or restarts unless the evidence explicitly shows that failure. "
+                "If the requested service is healthy, say no current failure is confirmed before discussing log observations. "
+                "Use 2 to 5 short Korean sentences."
+            ),
+            f"completed_task_kind={task_kind}\n{clean_text(evidence)[:7000]}",
+        )
+    )
+    payload: dict[str, Any] = {
+        "model": MODEL_NAME,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": clean_text(user_text)},
+        ],
+        "temperature": 0.2,
+        "max_tokens": 650,
+        "stream": False,
+        "cache_prompt": True,
+    }
+    if MAIN_LLM_STOP_TOKENS:
+        payload["stop"] = list(MAIN_LLM_STOP_TOKENS)
+    timeout = ClientTimeout(total=120)
+    async with ClientSession(timeout=timeout) as session:
+        async with session.post(LLM_SERVER_URL, json=payload) as response:
+            if response.status != 200:
+                detail = await response.text()
+                raise RuntimeError(f"main_llm_tool_synthesis_error {response.status}: {detail[:300]}")
+            data = await response.json(content_type=None)
+    choices = data.get("choices") or []
+    content = ((choices[0].get("message") or {}).get("content")) if choices else ""
+    reply = enforce_registered_tool_capability_truth(visible_text(content))
+    return enforce_action_reply_contract(reply)
+
+
+async def execute_web_research_plan(plan: FastToolPlan, user_text: str, source: str) -> str:
+    from .fast_context_contract import default_search_provider
+    from .search_tools import normalize_search_query, render_search_results_for_llm
+
+    query = normalize_search_query(plan.query or user_text)
+    if not query:
+        raise FastActionExecutionError(
+            "research_query_empty",
+            reply="무엇을 조사해야 하는지 주제를 잡지 못했어. 대상을 한 번만 더 말해줘.",
+        )
+    executed_query, results = await default_search_provider(query)
+    if not results:
+        retry_query = normalize_search_query(
+            re.sub(
+                r"(?:아니|그거|그걸|좀|제대로|찾아보라고|알아보라고|조사해보라고)",
+                " ",
+                query,
+                flags=re.IGNORECASE,
+            )
+        )
+        if retry_query and retry_query != executed_query:
+            executed_query, results = await default_search_provider(retry_query)
+    if not results:
+        raise FastActionExecutionError(
+            "web_research_empty",
+            reply=f"`{executed_query or query}`로 검색했지만 비교할 만한 결과를 찾지 못했어.",
+        )
+    evidence = render_search_results_for_llm(executed_query, results)
+    try:
+        reply = await synthesize_tool_evidence_reply(
+            user_text=user_text,
+            task_kind="research_compare",
+            evidence=evidence,
+        )
+    except Exception:
+        titles = [
+            clean_text((item if isinstance(item, dict) else item.to_dict()).get("title"))
+            for item in results[:3]
+        ]
+        reply = clean_text(
+            f"`{executed_query}` 검색은 완료했어. "
+            f"우선 확인된 후보는 {', '.join(title for title in titles if title)}야."
+        )
+    if not reply:
+        raise FastActionExecutionError(
+            "web_research_synthesis_empty",
+            reply="검색은 끝났지만 결과 요약이 비어 있었어.",
+        )
+    return reply
+
+
+async def execute_runtime_investigation_plan(plan: FastToolPlan, user_text: str, source: str) -> str:
+    from .fast_context_contract import build_fast_log_context, compact_runtime_health_for_llm
+
+    health = await collect_runtime_health(
+        manifest=load_service_manifest(),
+        probe_runner=fast_control_probe_runner,
+    )
+    lowered_query = clean_text(plan.query or user_text).lower()
+    target_markers = {
+        "tts": ("tts", "음성 합성", "목소리"),
+        "stt": ("stt", "음성 인식"),
+        "main_llm": ("main llm", "main_llm", "메인 llm", "메인 모델"),
+        "router_llm": ("router", "라우터"),
+        "sub_llm": ("sub llm", "sub_llm", "서브 llm", "서브 모델"),
+        "bot_api": ("bot api", "bot_api", "봇 api"),
+        "control_page": ("control page", "control_page", "제어 페이지", "컨트롤 페이지"),
+        "vision": ("vision", "비전", "화면 인식"),
+    }
+    target_ids = {
+        service_id
+        for service_id, markers in target_markers.items()
+        if any(marker in lowered_query for marker in markers)
+    }
+    log_query = " ".join(sorted(target_ids)) if target_ids else (plan.query or user_text)
+    log_context = await asyncio.to_thread(
+        build_fast_log_context,
+        log_query,
+        max_files=10,
+        max_chars=4500,
+        require_match=True,
+    )
+    health_evidence = compact_runtime_health_for_llm(health)
+    if target_ids:
+        services = [
+            dict(item)
+            for item in health.get("services") or []
+            if isinstance(item, dict) and clean_text(item.get("id")) in target_ids
+        ]
+        diagnostics = [
+            dict(item)
+            for item in health.get("diagnostics") or []
+            if isinstance(item, dict)
+            and target_ids.intersection(
+                {
+                    clean_text(service_id)
+                    for service_id in (
+                        item.get("serviceIds")
+                        or item.get("service_ids")
+                        or [item.get("serviceId") or item.get("service_id")]
+                    )
+                    if clean_text(service_id)
+                }
+            )
+        ]
+        targeted_health = {
+            "overallState": (
+                "up"
+                if services and all(item.get("state") == "up" or item.get("ready") for item in services)
+                else "down"
+            ),
+            "summary": (
+                "Requested services are responding; no current health failure is confirmed."
+                if services and all(item.get("state") == "up" or item.get("ready") for item in services)
+                else "One or more requested services are not responding."
+            ),
+            "services": services,
+            "diagnostics": diagnostics,
+        }
+        health_evidence = compact_runtime_health_for_llm(targeted_health)
+    evidence = "\n\n".join(
+        part
+        for part in (
+            "[Runtime Health]\n" + health_evidence,
+            "[Mounted Evelyn Logs]\n" + (clean_text(log_context) or "No matching recent log evidence."),
+        )
+        if clean_text(part)
+    )
+    try:
+        reply = await synthesize_tool_evidence_reply(
+            user_text=user_text,
+            task_kind="runtime_investigation",
+            evidence=evidence,
+        )
+    except Exception:
+        reply = clean_text(
+            f"실제 런타임 상태와 로그를 확인했어. "
+            f"{health.get('summary') or health.get('overallState') or '상태 요약은 비어 있어.'}"
+        )
+    if not reply:
+        raise FastActionExecutionError(
+            "runtime_investigation_synthesis_empty",
+            reply="상태와 로그 확인은 끝났지만 전달할 결론이 비어 있었어.",
+        )
+    return reply
+
+
+def prepare_tool_plan_background_action(
+    plan: FastToolPlan | None,
+    text: str,
+    *,
+    source: str,
+) -> tuple[FastActionTask, Callable[[str, str], Awaitable[str]]] | None:
+    if plan is None or not plan.is_background:
+        return None
+    if plan.tool_name == "research_compare":
+        start_reply = random.choice(RESEARCH_PROGRESS_TEXTS)
+
+        async def runner(user_text: str, runner_source: str) -> str:
+            return await execute_web_research_plan(plan, user_text, runner_source)
+
+    elif plan.tool_name == "runtime_investigation":
+        start_reply = random.choice(INVESTIGATION_PROGRESS_TEXTS)
+
+        async def runner(user_text: str, runner_source: str) -> str:
+            return await execute_runtime_investigation_plan(plan, user_text, runner_source)
+
+    else:
+        return None
+    task = ACTION_COORDINATOR.start(
+        kind=plan.tool_name,
+        source=source,
+        user_text=text,
+        start_reply=start_reply,
+    )
+    return task, runner
+
+
 def should_queue_local_bridge_speech(source: str) -> bool:
     return clean_text(source) not in {"local_bridge", "local_mic", "voice"}
+
+
+def register_background_action_handler(
+    *,
+    kind: str,
+    matcher: Callable[[str], bool],
+    runner: Callable[[str, str], Awaitable[str]],
+    start_reply: str | Callable[[str], str],
+) -> None:
+    BACKGROUND_ACTION_HANDLERS.append(
+        {
+            "kind": clean_text(kind) or "background",
+            "matcher": matcher,
+            "runner": runner,
+            "startReply": start_reply,
+        }
+    )
+
+
+def clear_background_action_handlers() -> None:
+    BACKGROUND_ACTION_HANDLERS.clear()
+
+
+def register_builtin_background_action_handlers() -> None:
+    if any(clean_text(handler.get("kind")) == "minecraft_lazy_start" for handler in BACKGROUND_ACTION_HANDLERS):
+        return
+    register_background_action_handler(
+        kind="minecraft_lazy_start",
+        matcher=lambda text: detect_minecraft_runtime_command(text) in {"start", "goal"},
+        runner=execute_local_bridge_minecraft_command,
+        start_reply="마인크래프트 쪽을 준비할게. 끝나면 바로 알려줄게.",
+    )
+
+
+def prepare_registered_background_action(
+    text: str,
+    *,
+    source: str,
+) -> tuple[FastActionTask, Callable[[str, str], Awaitable[str]]] | None:
+    for handler in BACKGROUND_ACTION_HANDLERS:
+        matcher = handler.get("matcher")
+        if not callable(matcher) or not matcher(text):
+            continue
+        start_reply_value = handler.get("startReply")
+        start_reply = start_reply_value(text) if callable(start_reply_value) else start_reply_value
+        task = ACTION_COORDINATOR.start(
+            kind=clean_text(handler.get("kind")) or "background",
+            source=source,
+            user_text=text,
+            start_reply=clean_text(start_reply) or "작업을 시작했어.",
+        )
+        runner = handler.get("runner")
+        if not callable(runner):
+            ACTION_COORDINATOR.fail(
+                task.task_id,
+                "background_action_runner_missing",
+                reply="작업 실행기가 연결되지 않아 시작하지 못했어.",
+            )
+            return None
+        return task, runner
+    return None
+
+
+def launch_background_action(
+    task: FastActionTask,
+    runner: Callable[[str, str], Awaitable[str]],
+) -> asyncio.Task[Any]:
+    async def execute() -> None:
+        try:
+            raw_reply = await runner(task.user_text, task.source)
+            final_reply = enforce_action_reply_contract(clean_text(raw_reply))
+            if not final_reply:
+                final_reply = "작업은 완료됐지만 전달할 결과가 비어 있어."
+            completed = ACTION_COORDINATOR.complete(task.task_id, final_reply)
+            append_chat_message(
+                "assistant",
+                "Evelyn",
+                completed.final_reply,
+                source="fast_control_action_followup",
+                task_id=completed.task_id,
+                task_status=completed.status,
+            )
+            queue_local_bridge_speech(completed.final_reply, source="fast_control_action_followup")
+        except Exception as exc:
+            error = clean_text(repr(exc)) or "background_action_failed"
+            failed_reply = clean_text(getattr(exc, "reply", "")) or "작업 실행 중 오류가 나서 완료하지 못했어."
+            failed = ACTION_COORDINATOR.fail(task.task_id, error, reply=failed_reply)
+            append_chat_message(
+                "assistant",
+                "Evelyn",
+                failed.final_reply,
+                source="fast_control_action_followup",
+                task_id=failed.task_id,
+                task_status=failed.status,
+            )
+            queue_local_bridge_speech(failed.final_reply, source="fast_control_action_followup")
+
+    background_task = asyncio.create_task(execute(), name=task.task_id)
+    BACKGROUND_ACTION_TASKS.add(background_task)
+    background_task.add_done_callback(BACKGROUND_ACTION_TASKS.discard)
+    return background_task
 
 
 def enqueue_control_page_ui_command(action: str, *, panel_id: str) -> dict[str, Any]:
@@ -365,7 +1120,12 @@ def pop_speakable_chunks(buffer: str, *, force: bool = False, max_chars: int = 1
     return chunks, text
 
 
-async def build_main_llm_payload(text: str, *, source: str) -> dict[str, Any]:
+async def build_main_llm_payload(
+    text: str,
+    *,
+    source: str,
+    tool_plan: FastToolPlan | None = None,
+) -> dict[str, Any]:
     recent_messages = [
         {"role": message.get("role"), "content": clean_text(message.get("text"))}
         for message in CHAT_MESSAGES[-8:]
@@ -380,6 +1140,8 @@ async def build_main_llm_payload(text: str, *, source: str) -> dict[str, Any]:
         user_text=text,
         final_user_text=final_user_text,
         source=source,
+        tool_user_text=tool_plan.query if tool_plan is not None else None,
+        local_bridge_status_provider=local_bridge_status_snapshot,
     )
     payload = {
         "model": MODEL_NAME,
@@ -394,9 +1156,15 @@ async def build_main_llm_payload(text: str, *, source: str) -> dict[str, Any]:
     return payload
 
 
-async def iter_main_llm_deltas(text: str, *, source: str) -> AsyncIterator[str]:
-    payload = await build_main_llm_payload(text, source=source)
+async def iter_main_llm_deltas(
+    text: str,
+    *,
+    source: str,
+    tool_plan: FastToolPlan | None = None,
+) -> AsyncIterator[str]:
+    payload = await build_main_llm_payload(text, source=source, tool_plan=tool_plan)
     timeout = ClientTimeout(total=120)
+    prefix_filter = ModelStreamPrefixFilter()
     async with ClientSession(timeout=timeout) as session:
         async with session.post(LLM_SERVER_URL, json=payload) as resp:
             if resp.status != 200:
@@ -407,7 +1175,12 @@ async def iter_main_llm_deltas(text: str, *, source: str) -> AsyncIterator[str]:
                 data = await resp.json()
                 choices = data.get("choices") or []
                 if choices:
-                    yield str((choices[0].get("message") or {}).get("content") or "")
+                    filtered = prefix_filter.push(str((choices[0].get("message") or {}).get("content") or ""))
+                    if filtered:
+                        yield filtered
+                    tail = prefix_filter.finish()
+                    if tail:
+                        yield tail
                 return
             async for raw_line in resp.content:
                 event = parse_stream_line(raw_line)
@@ -417,20 +1190,49 @@ async def iter_main_llm_deltas(text: str, *, source: str) -> AsyncIterator[str]:
                     break
                 delta = str(event.get("delta") or "")
                 if delta:
-                    yield delta
+                    filtered = prefix_filter.push(delta)
+                    if filtered:
+                        yield filtered
+            tail = prefix_filter.finish()
+            if tail:
+                yield tail
 
 
-async def ask_main_llm(text: str, *, source: str) -> str:
-    parts = [delta async for delta in iter_main_llm_deltas(text, source=source)]
-    return visible_text("".join(parts))
+async def ask_main_llm(
+    text: str,
+    *,
+    source: str,
+    tool_plan: FastToolPlan | None = None,
+) -> str:
+    stream = (
+        iter_main_llm_deltas(text, source=source)
+        if tool_plan is None
+        else iter_main_llm_deltas(text, source=source, tool_plan=tool_plan)
+    )
+    parts = [
+        delta
+        async for delta in stream
+    ]
+    return enforce_registered_tool_capability_truth(visible_text("".join(parts)))
 
 
-async def ask_main_llm_and_queue_speech(text: str, *, source: str) -> tuple[str, int]:
+async def ask_main_llm_and_queue_speech(
+    text: str,
+    *,
+    source: str,
+    tool_plan: FastToolPlan | None = None,
+) -> tuple[str, int]:
     raw_parts: list[str] = []
     clean_seen_len = 0
     sentence_buffer = ""
+    emitted_chunks: list[str] = []
     queued_count = 0
-    async for delta in iter_main_llm_deltas(text, source=source):
+    stream = (
+        iter_main_llm_deltas(text, source=source)
+        if tool_plan is None
+        else iter_main_llm_deltas(text, source=source, tool_plan=tool_plan)
+    )
+    async for delta in stream:
         raw_parts.append(delta)
         cleaned = visible_text("".join(raw_parts))
         new_text = cleaned[clean_seen_len:]
@@ -440,43 +1242,165 @@ async def ask_main_llm_and_queue_speech(text: str, *, source: str) -> tuple[str,
         sentence_buffer += new_text
         chunks, sentence_buffer = pop_speakable_chunks(sentence_buffer)
         for chunk in chunks:
+            if has_unbacked_progress_claim(chunk):
+                continue
+            emitted_chunks.append(chunk)
             if queue_local_bridge_speech(chunk, source=source):
                 queued_count += 1
     tail_chunks, sentence_buffer = pop_speakable_chunks(sentence_buffer, force=True)
     for chunk in tail_chunks:
+        if has_unbacked_progress_claim(chunk):
+            continue
+        emitted_chunks.append(chunk)
         if queue_local_bridge_speech(chunk, source=source):
             queued_count += 1
-    return visible_text("".join(raw_parts)), queued_count
+
+    reply = enforce_action_reply_contract(
+        enforce_registered_tool_capability_truth(visible_text("".join(raw_parts)))
+    )
+    emitted_text = clean_text(" ".join(emitted_chunks))
+    if not emitted_text:
+        reply_chunks, _remainder = pop_speakable_chunks(reply, force=True)
+        for chunk in reply_chunks:
+            if queue_local_bridge_speech(chunk, source=source):
+                queued_count += 1
+    elif reply.startswith(emitted_text):
+        remainder_chunks, _remainder = pop_speakable_chunks(reply[len(emitted_text) :], force=True)
+        for chunk in remainder_chunks:
+            if queue_local_bridge_speech(chunk, source=source):
+                queued_count += 1
+    elif reply != emitted_text:
+        reply = enforce_action_reply_contract(emitted_text)
+    return reply, queued_count
+
+
+def render_fast_runtime_status(health: dict[str, Any]) -> str:
+    legacy = dict(health.get("legacyServices") or {})
+    required_keys = ("botReady", "mainReady", "routerReady", "subReady", "ttsReady", "sttReady")
+    core_ready = all(bool(legacy.get(key)) for key in required_keys)
+    if not core_ready:
+        return clean_text(
+            str(health.get("summary") or health.get("overallState") or "runtime status unavailable")
+        )
+
+    bridge = local_bridge_status_snapshot()
+    bridge_ready = bool(bridge.get("ready")) and not bool(bridge.get("stale"))
+    mic = dict(bridge.get("mic") or {})
+    mic_enabled = bool(bridge.get("micEnabled", mic.get("enabled", False)))
+    minecraft_ready = bool(
+        legacy.get("voyagerReady")
+        or legacy.get("voyagerHttpReady")
+        or legacy.get("voyagerRuntimeReady")
+    )
+    parts = [
+        "이블린 핵심 서비스는 모두 정상 작동 중이야.",
+        (
+            f"Windows 음성 브리지는 정상이고 마이크는 {'켜져 있어' if mic_enabled else '꺼져 있어'}."
+            if bridge_ready
+            else "Windows 음성 브리지는 현재 준비되지 않았어."
+        ),
+        (
+            "마인크래프트 서비스도 실행 중이야."
+            if minecraft_ready
+            else "마인크래프트 서비스는 명령을 받기 전까지 대기 중이야."
+        ),
+    ]
+    return clean_text(" ".join(parts))
 
 
 async def resolve_pre_llm_reply(text: str, *, source: str) -> str | None:
-    normalized = text.lower()
-    queued_speech_count = 0
+    normalized = clean_text(text).lower().strip()
+    capability_reply = answer_fast_tool_capability_question(text)
+    if capability_reply is not None:
+        return capability_reply
+    datetime_reply = answer_current_datetime_query(text)
+    if datetime_reply is not None:
+        return datetime_reply
     if normalized in {"/help", "help"}:
-        return "?ъ슜 媛?? /status, /memory, /voice status, ?쇰컲 ??? 濡쒖뺄 ?뚯꽦? Windows local I/O bridge媛 ?대떦??"
+        return build_fast_control_help_reply()
     if normalized in {"/status", "status"}:
         manifest = load_service_manifest()
         health = await collect_runtime_health(manifest=manifest, probe_runner=fast_control_probe_runner)
-        return str(health.get("summary") or health.get("overallState") or "runtime status unavailable")
+        return render_fast_runtime_status(health)
     if (memory_action := detect_memory_panel_action(text)) is not None:
         return execute_memory_panel_action(memory_action)
+    mic_command = detect_local_mic_command(text)
+    if mic_command == "on":
+        return await execute_local_bridge_mic_control(True, source=source)
+    if mic_command == "off":
+        return await execute_local_bridge_mic_control(False, source=source)
+    if mic_command == "status" or is_local_mic_status_request(text):
+        return render_local_mic_status(local_bridge_status_snapshot())
     if normalized in {"/voice", "/voice status", "voice status"}:
         bridge_status = local_bridge_status_snapshot()
         ready = bool(bridge_status.get("ready"))
         error = clean_text(bridge_status.get("lastError"))
-        reply = f"Windows local I/O bridge: {'ready' if ready else 'not ready'}"
+        mic = dict(bridge_status.get("mic") or {})
+        mic_enabled = bool(bridge_status.get("micEnabled", mic.get("enabled", False)))
+        reply = (
+            f"Windows local I/O bridge는 {'준비됐어' if ready else '준비되지 않았어'}. "
+            f"마이크 입력은 {'켜져 있어' if mic_enabled else '꺼져 있어'}."
+        )
         if bridge_status.get("stale"):
-            reply += f" | stale {bridge_status.get('ageSec')}s"
+            reply += f" 마지막 상태는 {bridge_status.get('ageSec')}초 전이야."
         if error:
-            reply += f" | {error}"
-        return reply
-    if normalized in {"/restart", "restart"}:
+            reply += f" 오류: {error}"
+        return clean_text(reply)
+
+    minecraft_control = detect_minecraft_control_command(text)
+    if minecraft_control is not None:
+        return await execute_minecraft_control_command(minecraft_control)
+
+    runtime_command = detect_local_runtime_command(text)
+    if runtime_command == "restart":
         request_local_restart(source=source, reason="chat_command")
         return local_restart_requested_reply()
-    if normalized in {"/shutdown", "shutdown"}:
+    if runtime_command == "shutdown":
         request_local_shutdown(source=source, reason="chat_command")
         return local_shutdown_requested_reply()
+
+    if normalized == "/obsidian":
+        return "Obsidian 열기는 이블린 제어 페이지에서 실행할 수 있어."
+    if normalized.startswith("/repair"):
+        return "런타임 복구 명령은 이블린 제어 페이지의 복구 카드에서 미리보기 후 실행할 수 있어."
+    if normalized.startswith(("/voice continuity", "/voice input ", "/voice reconnect", "/voice rejoin")):
+        return "그 음성 명령은 현재 로컬 Fast Control에서 지원하지 않아. /voice status와 /mic 명령을 사용해줘."
+
+    if detect_minecraft_runtime_command(text) in {"start", "goal"}:
+        return None
+    if normalized.startswith("/"):
+        return f"지원하지 않는 명령이야: {normalized}. /help에서 현재 사용 가능한 명령을 확인해줘."
     return None
+
+
+def should_skip_fast_tool_planner(text: str) -> bool:
+    normalized = clean_text(text).lower().strip()
+    if not normalized:
+        return True
+    if normalized.startswith("/"):
+        return True
+    if detect_local_runtime_command(text) is not None:
+        return True
+    if detect_local_mic_command(text) is not None or is_local_mic_status_request(text):
+        return True
+    if detect_minecraft_control_command(text) is not None:
+        return True
+    if detect_minecraft_runtime_command(text) is not None:
+        return True
+    if detect_memory_panel_action(text) is not None:
+        return True
+    if answer_current_datetime_query(text) is not None:
+        return True
+    return answer_fast_tool_capability_question(text) is not None
+
+
+async def plan_fast_tool_request_for_turn(text: str) -> FastToolPlan | None:
+    if should_skip_fast_tool_planner(text):
+        return None
+    return await plan_fast_tool_request(
+        text,
+        recent_messages=recent_chat_messages_for_planner(text),
+    )
 
 
 def _service_by_id(health: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -570,6 +1494,7 @@ def build_control_state(health: dict[str, Any]) -> dict[str, Any]:
             "messages": default_chat_messages(),
             "inputEnabled": chat_ready,
         },
+        "actions": ACTION_COORDINATOR.snapshot(),
         "voice": {
             "outputMode": "windows_local_bridge" if bridge_status.get("enabled") else "docker_service",
             "channelName": "로컬 마이크" if bridge_listening else "없음",
@@ -640,47 +1565,76 @@ async def chat_handler(request: web.Request) -> web.StreamResponse:
     if not text:
         return json_response({"ok": False, "error": "empty_text"}, status=400)
     source = clean_text((payload or {}).get("source")) or "control_page"
+    suppress_tts = should_suppress_tts_for_command(text)
     append_chat_message("user", "정훈", text, source=source)
-    normalized = text.lower()
+    tool_plan = await plan_fast_tool_request_for_turn(text)
+    queued_speech_count = 0
+    task_record: FastActionTask | None = None
+    task_runner: Callable[[str, str], Awaitable[str]] | None = None
     try:
-        if normalized in {"/help", "help"}:
-            reply = "사용 가능: /status, /memory, /voice status, 일반 대화. 로컬 음성은 Windows local I/O bridge가 담당해."
-        elif normalized in {"/status", "status"}:
-            manifest = load_service_manifest()
-            health = await collect_runtime_health(manifest=manifest, probe_runner=fast_control_probe_runner)
-            reply = str(health.get("summary") or health.get("overallState") or "runtime status unavailable")
-        elif (memory_action := detect_memory_panel_action(text)) is not None:
-            reply = execute_memory_panel_action(memory_action)
-        elif normalized in {"/voice", "/voice status", "voice status"}:
-            bridge_status = local_bridge_status_snapshot()
-            ready = bool(bridge_status.get("ready"))
-            error = clean_text(bridge_status.get("lastError"))
-            reply = f"Windows local I/O bridge: {'ready' if ready else 'not ready'}"
-            if bridge_status.get("stale"):
-                reply += f" | stale {bridge_status.get('ageSec')}s"
-            if error:
-                reply += f" | {error}"
-        elif normalized in {"/restart", "restart"}:
-            request_local_restart(source=source, reason="chat_command")
-            reply = local_restart_requested_reply()
-        elif normalized in {"/shutdown", "shutdown"}:
-            request_local_shutdown(source=source, reason="chat_command")
-            reply = local_shutdown_requested_reply()
+        pre_llm_reply = await resolve_pre_llm_reply(text, source=source)
+        if pre_llm_reply is not None:
+            reply = pre_llm_reply
         else:
-            if should_queue_local_bridge_speech(source):
-                reply, queued_speech_count = await ask_main_llm_and_queue_speech(text, source=source)
+            prepared_action = prepare_tool_plan_background_action(
+                tool_plan,
+                text,
+                source=source,
+            ) or prepare_registered_background_action(text, source=source)
+            if prepared_action is not None:
+                task_record, task_runner = prepared_action
+                reply = task_record.start_reply
             else:
-                reply = await ask_main_llm(text, source=source)
+                if should_queue_local_bridge_speech(source):
+                    if tool_plan is None:
+                        reply, queued_speech_count = await ask_main_llm_and_queue_speech(text, source=source)
+                    else:
+                        reply, queued_speech_count = await ask_main_llm_and_queue_speech(
+                            text,
+                            source=source,
+                            tool_plan=tool_plan,
+                        )
+                else:
+                    if tool_plan is None:
+                        reply = await ask_main_llm(text, source=source)
+                    else:
+                        reply = await ask_main_llm(text, source=source, tool_plan=tool_plan)
             if not reply:
                 reply = "응답이 비어 있었어. 다시 한 번 말해줘."
+        reply = enforce_registered_tool_capability_truth(
+            enforce_action_reply_contract(
+                reply,
+                active_task_id=task_record.task_id if task_record is not None else None,
+            )
+        )
     except Exception as exc:
+        if task_record is not None and task_record.status == "running":
+            ACTION_COORDINATOR.fail(task_record.task_id, repr(exc), reply="작업을 시작하지 못했어.")
         reply = f"처리 중 오류가 났어: {exc}"
-    append_chat_message("assistant", "Evelyn", reply, source="fast_control_api")
-    if should_queue_local_bridge_speech(source) and queued_speech_count <= 0:
+        task_runner = None
+    append_chat_message(
+        "assistant",
+        "Evelyn",
+        reply,
+        source="fast_control_api",
+        task_id=task_record.task_id if task_record is not None else None,
+        task_status=task_record.status if task_record is not None else None,
+    )
+    if not suppress_tts and should_queue_local_bridge_speech(source) and queued_speech_count <= 0:
         queue_local_bridge_speech(reply, source=source)
+    if task_record is not None and task_runner is not None and task_record.status == "running":
+        launch_background_action(task_record, task_runner)
     manifest = load_service_manifest()
     health = await collect_runtime_health(manifest=manifest, probe_runner=fast_control_probe_runner)
-    return json_response({"ok": True, "reply": reply, "state": build_control_state(health)})
+    result: dict[str, Any] = {
+        "ok": True,
+        "reply": reply,
+        "suppressTts": suppress_tts,
+        "state": build_control_state(health),
+    }
+    if task_record is not None:
+        result["task"] = task_record.to_dict()
+    return json_response(result)
 
 
 async def write_stream_event(response: web.StreamResponse, payload: dict[str, Any]) -> None:
@@ -696,7 +1650,9 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
     if not text:
         return json_response({"ok": False, "error": "empty_text"}, status=400)
     source = clean_text((payload or {}).get("source")) or "local_bridge"
-    append_chat_message("user", "?뺥썕", text, source=source)
+    suppress_tts = should_suppress_tts_for_command(text)
+    append_chat_message("user", "정훈", text, source=source)
+    tool_plan = await plan_fast_tool_request_for_turn(text)
 
     response = web.StreamResponse(
         status=200,
@@ -710,58 +1666,177 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
 
     started_at = time.perf_counter()
     first_sentence_ms: float | None = None
+    first_delta_ms: float | None = None
+    first_progress_ms: float | None = None
     raw_parts: list[str] = []
     clean_seen_len = 0
     sentence_buffer = ""
     reply = ""
+    emitted_chunks: list[str] = []
+    task_record: FastActionTask | None = None
+    task_runner: Callable[[str, str], Awaitable[str]] | None = None
+    speech_filter = SafeIncrementalSpeechFilter()
+
+    async def emit_delta(fragment: str) -> None:
+        nonlocal first_delta_ms
+        if not fragment:
+            return
+        elapsed_ms = (time.perf_counter() - started_at) * 1000.0
+        if first_delta_ms is None:
+            first_delta_ms = elapsed_ms
+        await write_stream_event(
+            response,
+            {
+                "type": "delta",
+                "text": fragment,
+                "suppressTts": suppress_tts,
+                "elapsedMs": round(elapsed_ms, 1),
+            },
+        )
+
+    async def emit_progress(text: str, *, stage: str) -> None:
+        nonlocal first_progress_ms
+        progress_text = clean_text(text)
+        if not progress_text:
+            return
+        elapsed_ms = (time.perf_counter() - started_at) * 1000.0
+        if first_progress_ms is None:
+            first_progress_ms = elapsed_ms
+        await write_stream_event(
+            response,
+            {
+                "type": "progress",
+                "text": progress_text,
+                "stage": clean_text(stage),
+                "requiresContinuation": True,
+                "terminal": False,
+                "suppressTts": suppress_tts,
+                "elapsedMs": round(elapsed_ms, 1),
+            },
+        )
+
+    async def emit_sentence(sentence: str) -> None:
+        nonlocal first_sentence_ms
+        chunk = clean_text(sentence)
+        if not chunk:
+            return
+        elapsed_ms = (time.perf_counter() - started_at) * 1000.0
+        if first_sentence_ms is None:
+            first_sentence_ms = elapsed_ms
+        emitted_chunks.append(chunk)
+        await write_stream_event(
+            response,
+            {
+                "type": "sentence",
+                "text": chunk,
+                "suppressTts": suppress_tts,
+                "elapsedMs": round(elapsed_ms, 1),
+            },
+        )
+
     try:
         pre_llm_reply = await resolve_pre_llm_reply(text, source=source)
         if pre_llm_reply is not None:
-            reply = pre_llm_reply
-            await write_stream_event(response, {"type": "sentence", "text": reply, "elapsedMs": 0.0})
-            first_sentence_ms = 0.0
+            reply = enforce_action_reply_contract(pre_llm_reply)
+            await emit_sentence(reply)
         else:
-            async for delta in iter_main_llm_deltas(text, source=source):
-                raw_parts.append(delta)
-                cleaned = visible_text("".join(raw_parts))
-                new_text = cleaned[clean_seen_len:]
-                clean_seen_len = len(cleaned)
-                if not new_text:
-                    continue
-                sentence_buffer += new_text
-                chunks, sentence_buffer = pop_speakable_chunks(sentence_buffer)
-                for chunk in chunks:
-                    elapsed_ms = (time.perf_counter() - started_at) * 1000.0
-                    if first_sentence_ms is None:
-                        first_sentence_ms = elapsed_ms
-                    await write_stream_event(
-                        response,
-                        {"type": "sentence", "text": chunk, "elapsedMs": round(elapsed_ms, 1)},
-                    )
-            tail_chunks, sentence_buffer = pop_speakable_chunks(sentence_buffer, force=True)
-            for chunk in tail_chunks:
-                elapsed_ms = (time.perf_counter() - started_at) * 1000.0
-                if first_sentence_ms is None:
-                    first_sentence_ms = elapsed_ms
-                await write_stream_event(
-                    response,
-                    {"type": "sentence", "text": chunk, "elapsedMs": round(elapsed_ms, 1)},
+            prepared_action = prepare_tool_plan_background_action(
+                tool_plan,
+                text,
+                source=source,
+            ) or prepare_registered_background_action(text, source=source)
+            if prepared_action is not None:
+                task_record, task_runner = prepared_action
+                reply = enforce_action_reply_contract(
+                    task_record.start_reply,
+                    active_task_id=task_record.task_id,
                 )
-            reply = visible_text("".join(raw_parts))
-            if not reply:
-                reply = "답변이 비어 있었어. 다시 한 번 말해줘."
-        append_chat_message("assistant", "Evelyn", reply, source="fast_control_api_stream")
+                await emit_sentence(reply)
+            else:
+                if should_emit_memory_recall_progress(text, source=source):
+                    await emit_progress(
+                        next_memory_recall_progress_text(),
+                        stage="memory_recall",
+                    )
+                llm_stream = (
+                    iter_main_llm_deltas(text, source=source)
+                    if tool_plan is None
+                    else iter_main_llm_deltas(text, source=source, tool_plan=tool_plan)
+                )
+                async for delta in llm_stream:
+                    raw_parts.append(delta)
+                    cleaned = visible_text("".join(raw_parts))
+                    new_text = cleaned[clean_seen_len:]
+                    clean_seen_len = len(cleaned)
+                    if not new_text:
+                        continue
+                    for safe_fragment in speech_filter.push(new_text):
+                        await emit_delta(safe_fragment)
+                    sentence_buffer += new_text
+                    chunks, sentence_buffer = pop_speakable_chunks(sentence_buffer)
+                    for chunk in chunks:
+                        if has_unbacked_progress_claim(chunk):
+                            continue
+                        await emit_sentence(chunk)
+                for safe_fragment in speech_filter.finish():
+                    await emit_delta(safe_fragment)
+                tail_chunks, sentence_buffer = pop_speakable_chunks(sentence_buffer, force=True)
+                for chunk in tail_chunks:
+                    if has_unbacked_progress_claim(chunk):
+                        continue
+                    await emit_sentence(chunk)
+                reply = enforce_registered_tool_capability_truth(
+                    enforce_action_reply_contract(visible_text("".join(raw_parts)))
+                )
+                if not reply:
+                    reply = "답변이 비어 있었어. 다시 한 번 말해줘."
+                emitted_text = clean_text(" ".join(emitted_chunks))
+                if not emitted_text:
+                    await emit_sentence(reply)
+                elif reply.startswith(emitted_text):
+                    await emit_sentence(reply[len(emitted_text) :])
+                elif reply != emitted_text:
+                    reply = enforce_action_reply_contract(emitted_text)
+        append_chat_message(
+            "assistant",
+            "Evelyn",
+            reply,
+            source="fast_control_api_stream",
+            task_id=task_record.task_id if task_record is not None else None,
+            task_status=task_record.status if task_record is not None else None,
+        )
         await write_stream_event(
             response,
             {
                 "type": "done",
                 "ok": True,
                 "reply": reply,
+                "suppressTts": suppress_tts,
+                "taskId": task_record.task_id if task_record is not None else None,
+                "taskStatus": task_record.status if task_record is not None else None,
                 "firstSentenceMs": round(first_sentence_ms, 1) if first_sentence_ms is not None else None,
+                "firstDeltaMs": round(first_delta_ms, 1) if first_delta_ms is not None else None,
+                "firstProgressMs": round(first_progress_ms, 1) if first_progress_ms is not None else None,
                 "elapsedMs": round((time.perf_counter() - started_at) * 1000.0, 1),
             },
         )
+        if task_record is not None and task_runner is not None and task_record.status == "running":
+            launch_background_action(task_record, task_runner)
     except Exception as exc:
+        if task_record is not None and task_record.status == "running":
+            failed = ACTION_COORDINATOR.fail(
+                task_record.task_id,
+                repr(exc),
+                reply="작업을 시작하지 못했어.",
+            )
+            append_chat_message(
+                "assistant",
+                "Evelyn",
+                failed.final_reply,
+                source="fast_control_action_followup",
+                task_id=failed.task_id,
+                task_status=failed.status,
+            )
         await write_stream_event(response, {"type": "error", "ok": False, "error": repr(exc)})
     await response.write_eof()
     return response
@@ -776,6 +1851,13 @@ async def local_bridge_status_handler(request: web.Request) -> web.StreamRespons
             payload = {}
         if isinstance(payload, dict):
             LOCAL_BRIDGE_STATUS.update(payload)
+            try:
+                minecraft_revision = int(payload.get("minecraftCommandRevision") or 0)
+            except (TypeError, ValueError):
+                minecraft_revision = 0
+            minecraft_state = clean_text(payload.get("minecraftCommandState")).lower()
+            if minecraft_revision and minecraft_state in {"ready", "failed"}:
+                clear_local_bridge_minecraft_command_request(minecraft_revision)
         LOCAL_BRIDGE_STATUS["enabled"] = True
         LOCAL_BRIDGE_STATUS["updatedAt"] = time.time()
         speak_requests = drain_local_bridge_speak_requests()
@@ -787,9 +1869,44 @@ async def local_bridge_status_handler(request: web.Request) -> web.StreamRespons
             "outputDeviceRequest": dict(LOCAL_BRIDGE_OUTPUT_DEVICE_REQUEST)
             if LOCAL_BRIDGE_OUTPUT_DEVICE_REQUEST.get("outputDevice")
             else {},
+            "micControlRequest": dict(LOCAL_BRIDGE_MIC_CONTROL_REQUEST),
+            "minecraftCommandRequest": dict(LOCAL_BRIDGE_MINECRAFT_COMMAND_REQUEST),
             "restart": dict(RESTART_REQUEST),
             "shutdown": dict(SHUTDOWN_REQUEST),
         }
+    )
+
+
+async def local_bridge_mic_handler(request: web.Request) -> web.StreamResponse:
+    if request.method == "GET":
+        return json_response(
+            {
+                "ok": True,
+                "request": dict(LOCAL_BRIDGE_MIC_CONTROL_REQUEST),
+                "localBridge": local_bridge_status_snapshot(),
+            }
+        )
+    try:
+        payload = await request.json()
+    except Exception:
+        return json_response({"ok": False, "error": "invalid_json"}, status=400)
+    value = (payload or {}).get("enabled")
+    if not isinstance(value, bool):
+        action = clean_text((payload or {}).get("action")).lower()
+        if action in {"on", "enable", "start"}:
+            value = True
+        elif action in {"off", "disable", "stop"}:
+            value = False
+        else:
+            return json_response({"ok": False, "error": "missing_mic_enabled"}, status=400)
+    request_state = request_local_bridge_mic_control(
+        value,
+        source=clean_text((payload or {}).get("source")) or "control_page",
+    )
+    result = await wait_for_local_bridge_mic_control(request_state)
+    return json_response(
+        {"ok": bool(result.get("applied")), **result},
+        status=200 if result.get("applied") else 202,
     )
 
 
@@ -834,6 +1951,24 @@ async def local_bridge_test_tts_handler(request: web.Request) -> web.StreamRespo
     return json_response({"ok": True, "request": queued, "localBridge": local_bridge_status_snapshot()})
 
 
+async def action_events_handler(request: web.Request) -> web.StreamResponse:
+    try:
+        after = int(clean_text(request.query.get("after")) or "0")
+    except (TypeError, ValueError):
+        return json_response({"ok": False, "error": "invalid_after_cursor"}, status=400)
+    snapshot = ACTION_COORDINATOR.snapshot()
+    return json_response(
+        {
+            "ok": True,
+            "after": max(0, after),
+            "lastEventId": snapshot["lastEventId"],
+            "activeCount": snapshot["activeCount"],
+            "events": ACTION_COORDINATOR.events_after(after),
+            "tasks": snapshot["tasks"],
+        }
+    )
+
+
 async def shutdown_handler(request: web.Request) -> web.StreamResponse:
     try:
         payload = await request.json()
@@ -845,14 +1980,18 @@ async def shutdown_handler(request: web.Request) -> web.StreamResponse:
 
 
 def create_app() -> web.Application:
+    register_builtin_background_action_handlers()
     app = web.Application(middlewares=[reject_browser_origin_middleware])
     app.router.add_get("/health", health_handler)
     app.router.add_get("/api/control-page/state", state_handler)
     app.router.add_post("/api/control-page/chat", chat_handler)
     app.router.add_post("/api/control-page/chat-stream", chat_stream_handler)
+    app.router.add_get("/api/control-page/action-events", action_events_handler)
     app.router.add_post("/api/control-page/shutdown", shutdown_handler)
     app.router.add_get("/api/local-bridge/status", local_bridge_status_handler)
     app.router.add_post("/api/local-bridge/status", local_bridge_status_handler)
+    app.router.add_get("/api/local-bridge/mic", local_bridge_mic_handler)
+    app.router.add_post("/api/local-bridge/mic", local_bridge_mic_handler)
     app.router.add_get("/api/local-bridge/output-device", local_bridge_output_device_handler)
     app.router.add_post("/api/local-bridge/output-device", local_bridge_output_device_handler)
     app.router.add_post("/api/local-bridge/test-tts", local_bridge_test_tts_handler)

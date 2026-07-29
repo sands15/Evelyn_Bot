@@ -93,6 +93,6 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "$deadline=(Get-Date).Add
 exit /b %ERRORLEVEL%
 
 :run_docker
-powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0runtime\launchers\start_docker_compose_services.ps1" -Profiles voyager -Services codex_gateway,voyager
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0runtime\launchers\start_docker_compose_services.ps1" -Profiles voyager -Services router_llm,minecraft_llm,codex_gateway,voyager
 set "EXIT_CODE=%ERRORLEVEL%"
 endlocal & exit /b %EXIT_CODE%

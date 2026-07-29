@@ -17,7 +17,7 @@ class ResponseOutputPolicyRuntimeDeps:
     sanitize_model_output_cleanup_fn: Callable[[str], str] | None = None
 
 
-RESPONSE_ACTION_TAGS = {"찾기": "search", "질문": "ask", "대기": "wait", "응답": "answer"}
+RESPONSE_ACTION_TAGS = {"찾기": "search", "질문": "ask", "대기": "wait", "답변": "answer", "응답": "answer"}
 
 
 def fallback_answer_for(user_text: str) -> str:
@@ -29,7 +29,7 @@ def fallback_answer_for(user_text: str) -> str:
 
 def parse_response_action_tag(text: str) -> tuple[str | None, str]:
     raw = text or ""
-    match = re.match(r"^\s*\[(찾기|질문|대기|응답)\]\s*", raw)
+    match = re.match(r"^\s*\[(찾기|질문|대기|답변|응답)\]\s*", raw)
     if not match:
         return None, clean_text(raw)
     action = RESPONSE_ACTION_TAGS.get(match.group(1))

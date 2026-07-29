@@ -18,14 +18,14 @@ $visionOcrIdleUnloadSec = if ($env:VISION_OCR_IDLE_UNLOAD_SEC) { $env:VISION_OCR
 $visionOcrUnloadAfterRequest = if ($env:VISION_OCR_UNLOAD_AFTER_REQUEST) { $env:VISION_OCR_UNLOAD_AFTER_REQUEST } else { 'false' }
 
 if ($visionBackend -ieq 'wsl') {
-    $wslCudaVisibleDevices = if ($env:VISION_WSL_CUDA_VISIBLE_DEVICES) { $env:VISION_WSL_CUDA_VISIBLE_DEVICES } else { '0' }
+    $wslCudaVisibleDevices = if ($env:VISION_WSL_CUDA_VISIBLE_DEVICES) { $env:VISION_WSL_CUDA_VISIBLE_DEVICES } else { '1' }
     $wslVenvAct = if ($env:VISION_WSL_VENV_ACT) { $env:VISION_WSL_VENV_ACT } else { 'source ~/venvs/vllm-env/bin/activate' }
     $smolModel = if ($env:VISION_SMOL_MODEL) { $env:VISION_SMOL_MODEL } else { 'HuggingFaceTB/SmolVLM2-500M-Video-Instruct' }
     $ocrModel = if ($env:VISION_OCR_MODEL) { $env:VISION_OCR_MODEL } else { 'tiiuae/Falcon-OCR' }
     $loadSmol = if ($env:VISION_LOAD_SMOL) { $env:VISION_LOAD_SMOL } else { 'true' }
     $loadOcr = if ($env:VISION_LOAD_OCR) { $env:VISION_LOAD_OCR } else { 'true' }
     Write-Host "[Evelyn Vision] backend=wsl port=$visionPort cuda_visible_devices=$wslCudaVisibleDevices device=$visionDevice dtype=$visionDtype"
-    Write-Host "[Evelyn Vision] WSL CUDA device 0 is expected to be RTX 3090 on this host."
+    Write-Host "[Evelyn Vision] Physical WSL CUDA device 1 is expected to be RTX 3090 on this host."
     $bashCommand = "cd /mnt/c/Evelyn && $wslVenvAct && export PYTHONPATH=/mnt/c/Evelyn/evelyn_core/runtime && export CUDA_VISIBLE_DEVICES='$wslCudaVisibleDevices' && export VISION_PORT='$visionPort' && export VISION_DEVICE='$visionDevice' && export VISION_DTYPE='$visionDtype' && export VISION_OCR_DTYPE='$visionOcrDtype' && export VISION_OCR_LAZY_LOAD='$visionOcrLazyLoad' && export VISION_OCR_IDLE_UNLOAD_SEC='$visionOcrIdleUnloadSec' && export VISION_OCR_UNLOAD_AFTER_REQUEST='$visionOcrUnloadAfterRequest' && export VISION_SMOL_MODEL='$smolModel' && export VISION_OCR_MODEL='$ocrModel' && export VISION_LOAD_SMOL='$loadSmol' && export VISION_LOAD_OCR='$loadOcr' && exec python -m evelyn_core.vision_service"
     wsl.exe bash -lc $bashCommand
     exit $LASTEXITCODE

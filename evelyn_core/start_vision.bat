@@ -58,7 +58,7 @@ echo Usage: start_vision.bat [--inline]
 echo.
 echo Starts Evelyn Vision service:
 echo   - default backend: WSL
-echo   - default GPU: RTX 3090 as WSL CUDA_VISIBLE_DEVICES=0
+echo   - default GPU: RTX 3090 as WSL CUDA_VISIBLE_DEVICES=1
 echo   - default port: %VISION_PORT%
 echo   - models: %VISION_SMOL_MODEL% + %VISION_OCR_MODEL%
 echo.

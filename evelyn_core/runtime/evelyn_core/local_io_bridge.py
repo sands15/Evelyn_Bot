@@ -21,6 +21,7 @@ from .config import (
     LOCAL_MIC_CONTINUE_THRESHOLD,
     LOCAL_MIC_DEVICE,
     LOCAL_MIC_ENV_NOISE_FILTER_ENABLED,
+    LOCAL_MIC_ENABLED,
     LOCAL_MIC_MAX_SEGMENT_SEC,
     LOCAL_MIC_MIN_VOICED_MS,
     LOCAL_MIC_PREROLL_MS,
@@ -43,9 +44,10 @@ from .config import (
     OMNIVOICE_VOICE,
     TARGET_RATE,
 )
+from .fast_action_runtime import detect_minecraft_runtime_command
 from .local_mic import LocalMicCaptureService
 from .local_tts_playback import normalize_output_device
-from .text import clean_text, clean_tts_text
+from .text import clean_text, clean_tts_text, should_suppress_tts_for_command
 
 try:
     import sounddevice as sd
@@ -59,6 +61,10 @@ OMNIVOICE_SERVER_URL = os.getenv("OMNIVOICE_SERVER_URL", "http://127.0.0.1:8880"
 LOCAL_TTS_OUTPUT_DEVICE = os.getenv("LOCAL_TTS_OUTPUT_DEVICE") or os.getenv("LOCAL_AUDIO_OUTPUT_DEVICE")
 LOCAL_BRIDGE_TTS_ENABLED = os.getenv("LOCAL_BRIDGE_TTS_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
 LOCAL_BRIDGE_STREAMING_TTS_ENABLED = os.getenv("LOCAL_BRIDGE_STREAMING_TTS_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+LOCAL_BRIDGE_VOXCPM_INPUT_STREAMING_ENABLED = os.getenv(
+    "LOCAL_BRIDGE_VOXCPM_INPUT_STREAMING_ENABLED",
+    "true",
+).strip().lower() in {"1", "true", "yes", "on"}
 LOCAL_BRIDGE_MIN_TEXT_CHARS = max(1, int(os.getenv("LOCAL_BRIDGE_MIN_TEXT_CHARS", "2")))
 LOCAL_BRIDGE_STATUS_INTERVAL_SEC = max(0.2, float(os.getenv("LOCAL_BRIDGE_STATUS_INTERVAL_SEC", "0.25")))
 LOCAL_BRIDGE_EXIT_AFTER_SHUTDOWN = os.getenv("LOCAL_BRIDGE_EXIT_AFTER_SHUTDOWN", "true").strip().lower() in {"1", "true", "yes", "on"}
@@ -79,6 +85,35 @@ TTS_SAMPLE_WIDTH_BYTES = 2
 PROJECT_ROOT = Path(os.getenv("EVELYN_PROJECT_ROOT") or Path(__file__).resolve().parents[3])
 STOP_SCRIPT = PROJECT_ROOT / "evelyn_core" / "runtime" / "launchers" / "stop_evelyn_local.ps1"
 START_LOCAL_BAT = PROJECT_ROOT / "evelyn_core" / "start_local.bat"
+START_VOYAGER_BAT = PROJECT_ROOT / "evelyn_core" / "start_voyager.bat"
+MINECRAFT_SERVICE_BASE = os.getenv(
+    "LOCAL_BRIDGE_MINECRAFT_SERVICE_BASE",
+    "http://127.0.0.1:8765",
+).rstrip("/")
+MINECRAFT_MODEL_HEALTH_URL = os.getenv(
+    "LOCAL_BRIDGE_MINECRAFT_MODEL_HEALTH_URL",
+    "http://127.0.0.1:9823/health",
+)
+MINECRAFT_GATEWAY_HEALTH_URL = os.getenv(
+    "LOCAL_BRIDGE_MINECRAFT_GATEWAY_HEALTH_URL",
+    "http://127.0.0.1:8787/health",
+)
+LOCAL_BRIDGE_MINECRAFT_START_TIMEOUT_SEC = max(
+    30.0,
+    float(os.getenv("LOCAL_BRIDGE_MINECRAFT_START_TIMEOUT_SEC", "300")),
+)
+LOCAL_BRIDGE_MINECRAFT_CONNECT_WAIT_SEC = max(
+    0.0,
+    float(os.getenv("LOCAL_BRIDGE_MINECRAFT_CONNECT_WAIT_SEC", "45")),
+)
+
+
+def voxcpm_stream_url(base_url: str = OMNIVOICE_SERVER_URL) -> str:
+    if base_url.startswith("https://"):
+        base_url = "wss://" + base_url[len("https://") :]
+    elif base_url.startswith("http://"):
+        base_url = "ws://" + base_url[len("http://") :]
+    return base_url.rstrip("/") + "/v1/audio/speech/stream"
 
 
 def iter_pcm_aligned_chunks(chunks: list[bytes], *, sample_width: int = TTS_SAMPLE_WIDTH_BYTES):
@@ -98,6 +133,11 @@ class LocalIoBridge:
         self.queue: asyncio.Queue[tuple[bytes, dict[str, Any]]] = asyncio.Queue(maxsize=8)
         self.session: aiohttp.ClientSession | None = None
         self.service: LocalMicCaptureService | None = None
+        self.mic_enabled = bool(LOCAL_MIC_ENABLED)
+        self.mic_control_request_revision = 0
+        self.mic_control_pending_revision = 0
+        self.mic_control_lock = asyncio.Lock()
+        self.mic_control_tasks: set[asyncio.Task[Any]] = set()
         self.ready = False
         self.speaking = False
         self.mic_input_suppressed_until = 0.0
@@ -120,6 +160,13 @@ class LocalIoBridge:
         self.tts_warmup_error = ""
         self.tts_warmup_ms: float | None = None
         self.output_device_request_revision = 0
+        self.minecraft_command_request_revision = 0
+        self.minecraft_command_pending_revision = 0
+        self.minecraft_command_state = "idle"
+        self.minecraft_command_error = ""
+        self.minecraft_command_result: dict[str, Any] = {}
+        self.minecraft_command_lock = asyncio.Lock()
+        self.minecraft_command_tasks: set[asyncio.Task[Any]] = set()
 
     async def run(self) -> None:
         timeout = aiohttp.ClientTimeout(total=None, connect=10, sock_connect=10)
@@ -140,6 +187,17 @@ class LocalIoBridge:
                     self.queue.task_done()
 
     async def _start_mic(self) -> None:
+        if not self.mic_enabled:
+            self.service = None
+            self.ready = True
+            self.last_error = ""
+            print("[LOCAL BRIDGE] mic_disabled=true", flush=True)
+            return
+        if self.service is not None and self.service.capture_ready:
+            self.ready = True
+            self.last_error = ""
+            return
+
         loop = asyncio.get_running_loop()
 
         def on_segment(pcm_bytes: bytes, meta: dict[str, Any]) -> None:
@@ -179,6 +237,269 @@ class LocalIoBridge:
         self.last_error = "" if self.ready else (self.service.last_error or "local_mic_not_ready")
         print(f"[LOCAL BRIDGE] mic_ready={self.ready} device={LOCAL_MIC_DEVICE or 'default'} error={self.last_error or 'none'}", flush=True)
 
+    async def _stop_mic(self) -> None:
+        self.mic_enabled = False
+        service = self.service
+        self.service = None
+        self._discard_pending_mic_segments()
+        if service is not None:
+            await asyncio.to_thread(service.stop)
+        self.ready = True
+        self.last_error = ""
+        print("[LOCAL BRIDGE] mic_ready=false mic_disabled=true", flush=True)
+
+    async def _apply_mic_control_request(self, *, revision: int, enabled: bool) -> None:
+        async with self.mic_control_lock:
+            if revision <= self.mic_control_request_revision:
+                return
+            try:
+                if enabled:
+                    self.mic_enabled = True
+                    await self._start_mic()
+                else:
+                    await self._stop_mic()
+            except Exception as exc:
+                self.ready = False if enabled else True
+                self.last_error = f"mic_control_failed: {exc!r}"
+            finally:
+                self.mic_control_request_revision = revision
+            print(
+                "[LOCAL BRIDGE] mic_control_applied "
+                f"enabled={self.mic_enabled} ready={self.ready} revision={revision} "
+                f"error={self.last_error or 'none'}",
+                flush=True,
+            )
+
+    def _handle_mic_control_request(self, data: dict[str, Any]) -> None:
+        request = data.get("micControlRequest") if isinstance(data, dict) else None
+        if not isinstance(request, dict) or not isinstance(request.get("enabled"), bool):
+            return
+        try:
+            revision = int(request.get("revision") or 0)
+        except (TypeError, ValueError):
+            return
+        if revision <= max(self.mic_control_request_revision, self.mic_control_pending_revision):
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self.mic_control_pending_revision = revision
+        task = loop.create_task(
+            self._apply_mic_control_request(revision=revision, enabled=bool(request["enabled"])),
+            name=f"local-mic-control-{revision}",
+        )
+        self.mic_control_tasks.add(task)
+        task.add_done_callback(self.mic_control_tasks.discard)
+
+    async def _http_health_ready(self, url: str) -> bool:
+        if self.session is None:
+            return False
+        try:
+            async with self.session.get(url, timeout=aiohttp.ClientTimeout(total=2)) as response:
+                if response.status != 200:
+                    return False
+                payload = await response.json(content_type=None)
+                if isinstance(payload, dict) and payload.get("ok") is False:
+                    return False
+                return True
+        except Exception:
+            return False
+
+    async def _minecraft_stack_ready(self) -> bool:
+        checks = (
+            MINECRAFT_MODEL_HEALTH_URL,
+            MINECRAFT_GATEWAY_HEALTH_URL,
+            f"{MINECRAFT_SERVICE_BASE}/health",
+        )
+        return all([await self._http_health_ready(url) for url in checks])
+
+    def _minecraft_launcher_environment(self) -> dict[str, str]:
+        env = os.environ.copy()
+        env.setdefault("DISCORD_BOT_TOKEN", "local-only-disabled")
+        secret_home = PROJECT_ROOT / "runtime_artifacts" / "secrets" / "codex_device_home"
+        auth_file = secret_home / "auth.json"
+        config_file = secret_home / "config.toml"
+        if auth_file.exists():
+            env.setdefault("EVELYN_CODEX_AUTH_FILE", str(auth_file))
+        if config_file.exists():
+            env.setdefault("EVELYN_CODEX_CONFIG_FILE", str(config_file))
+        return env
+
+    async def _launch_minecraft_stack(self) -> dict[str, Any]:
+        if await self._minecraft_stack_ready():
+            return {"alreadyReady": True, "launcherExitCode": 0}
+        if not START_VOYAGER_BAT.exists():
+            raise RuntimeError(f"minecraft launcher not found: {START_VOYAGER_BAT}")
+        cmd_exe = os.environ.get("COMSPEC") or "cmd.exe"
+        process = subprocess.Popen(
+            [cmd_exe, "/d", "/c", "call", str(START_VOYAGER_BAT)],
+            cwd=str(PROJECT_ROOT),
+            env=self._minecraft_launcher_environment(),
+            creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
+        )
+        deadline = time.monotonic() + LOCAL_BRIDGE_MINECRAFT_START_TIMEOUT_SEC
+        while time.monotonic() < deadline:
+            if await self._minecraft_stack_ready():
+                return {
+                    "alreadyReady": False,
+                    "launcherExitCode": process.poll(),
+                    "launcherPid": process.pid,
+                }
+            return_code = process.poll()
+            if return_code is not None and return_code != 0:
+                raise RuntimeError(f"minecraft launcher exited with code {return_code}")
+            await asyncio.sleep(1.0)
+        raise RuntimeError(
+            f"minecraft services did not become ready within "
+            f"{LOCAL_BRIDGE_MINECRAFT_START_TIMEOUT_SEC:.0f}s"
+        )
+
+    async def _activate_minecraft_command(self, command: str, action: str) -> dict[str, Any]:
+        if self.session is None:
+            raise RuntimeError("local bridge HTTP session is not ready")
+        payload: dict[str, Any] = {}
+        runner_alive = False
+        try:
+            async with self.session.get(
+                f"{MINECRAFT_SERVICE_BASE}/health",
+                timeout=aiohttp.ClientTimeout(total=3),
+            ) as response:
+                health = await response.json(content_type=None)
+                runner_alive = bool(
+                    response.status == 200
+                    and isinstance(health, dict)
+                    and health.get("runner_alive")
+                )
+        except Exception:
+            runner_alive = False
+        endpoint = "/start"
+        if action == "goal":
+            payload["goal"] = clean_text(command)
+            if runner_alive:
+                endpoint = "/goal"
+        async with self.session.post(
+            f"{MINECRAFT_SERVICE_BASE}{endpoint}",
+            json=payload,
+            timeout=aiohttp.ClientTimeout(total=15),
+        ) as response:
+            started = await response.json(content_type=None)
+            if response.status >= 400:
+                raise RuntimeError(
+                    clean_text((started or {}).get("error"))
+                    or f"mindcraft start failed with HTTP {response.status}"
+                )
+
+        status = dict(started or {}) if isinstance(started, dict) else {}
+        deadline = time.monotonic() + LOCAL_BRIDGE_MINECRAFT_CONNECT_WAIT_SEC
+        while time.monotonic() < deadline:
+            if status.get("connected"):
+                break
+            await asyncio.sleep(1.0)
+            try:
+                async with self.session.get(
+                    f"{MINECRAFT_SERVICE_BASE}/status",
+                    timeout=aiohttp.ClientTimeout(total=3),
+                ) as response:
+                    if response.status == 200:
+                        payload = await response.json(content_type=None)
+                        if isinstance(payload, dict):
+                            status = payload
+            except Exception:
+                continue
+            if not status.get("running") and clean_text(status.get("last_error")):
+                break
+        return {
+            "command": clean_text(command),
+            "action": action,
+            "commandApplied": bool(status.get("running") or status.get("connected")),
+            "connected": bool(status.get("connected")),
+            "connectionState": clean_text(status.get("connection_state")) or "unknown",
+            "goal": clean_text(status.get("goal")),
+            "lastError": clean_text(status.get("last_error")),
+        }
+
+    async def _apply_minecraft_command_request(
+        self,
+        *,
+        revision: int,
+        command: str,
+        action: str,
+    ) -> None:
+        async with self.minecraft_command_lock:
+            if revision <= self.minecraft_command_request_revision:
+                return
+            self.minecraft_command_request_revision = revision
+            self.minecraft_command_state = "starting"
+            self.minecraft_command_error = ""
+            self.minecraft_command_result = {}
+            await self._post_status()
+            try:
+                launcher_result = await self._launch_minecraft_stack()
+                command_result = await self._activate_minecraft_command(command, action)
+                self.minecraft_command_result = {
+                    **launcher_result,
+                    **command_result,
+                }
+                self.minecraft_command_state = "ready"
+            except Exception as exc:
+                self.minecraft_command_state = "failed"
+                self.minecraft_command_error = clean_text(repr(exc)) or "minecraft_lazy_start_failed"
+                self.minecraft_command_result = {
+                    "command": clean_text(command),
+                    "action": action,
+                    "commandApplied": False,
+                    "connected": False,
+                }
+            finally:
+                self.minecraft_command_pending_revision = max(
+                    self.minecraft_command_pending_revision,
+                    revision,
+                )
+                await self._post_status()
+            print(
+                "[LOCAL BRIDGE] minecraft_command_applied "
+                f"revision={revision} state={self.minecraft_command_state} "
+                f"connected={bool(self.minecraft_command_result.get('connected'))} "
+                f"error={self.minecraft_command_error or 'none'}",
+                flush=True,
+            )
+
+    def _handle_minecraft_command_request(self, data: dict[str, Any]) -> None:
+        request = data.get("minecraftCommandRequest") if isinstance(data, dict) else None
+        if not isinstance(request, dict):
+            return
+        command = clean_text(request.get("command"))
+        action = clean_text(request.get("action")).lower()
+        if not command or action not in {"start", "goal"}:
+            return
+        if detect_minecraft_runtime_command(command) != action:
+            return
+        try:
+            revision = int(request.get("revision") or 0)
+        except (TypeError, ValueError):
+            return
+        if revision <= max(
+            self.minecraft_command_request_revision,
+            self.minecraft_command_pending_revision,
+        ):
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self.minecraft_command_pending_revision = revision
+        task = loop.create_task(
+            self._apply_minecraft_command_request(
+                revision=revision,
+                command=command,
+                action=action,
+            ),
+            name=f"minecraft-lazy-start-{revision}",
+        )
+        self.minecraft_command_tasks.add(task)
+        task.add_done_callback(self.minecraft_command_tasks.discard)
+
     def _mic_input_is_suppressed(self) -> bool:
         return self.speaking or time.monotonic() < self.mic_input_suppressed_until
 
@@ -212,7 +533,12 @@ class LocalIoBridge:
                 return
             self.transcript_count += 1
             print(f"[LOCAL BRIDGE] transcript={text!r}", flush=True)
-            if LOCAL_BRIDGE_STREAMING_TTS_ENABLED and LOCAL_BRIDGE_TTS_ENABLED:
+            if should_suppress_tts_for_command(text):
+                stage_started = time.perf_counter()
+                reply = await self._chat(text)
+                chat_ms = (time.perf_counter() - stage_started) * 1000.0
+                tts_ms = 0.0
+            elif LOCAL_BRIDGE_STREAMING_TTS_ENABLED and LOCAL_BRIDGE_TTS_ENABLED:
                 try:
                     stream_result = await self._chat_stream_and_speak(text)
                     reply = clean_text(stream_result.get("reply"))
@@ -283,6 +609,208 @@ class LocalIoBridge:
             return clean_text(data.get("reply"))
 
     async def _chat_stream_and_speak(self, text: str) -> dict[str, Any]:
+        if LOCAL_BRIDGE_VOXCPM_INPUT_STREAMING_ENABLED and sd is not None:
+            return await self._chat_delta_stream_and_speak(text)
+        return await self._chat_sentence_stream_and_speak(text)
+
+    async def _chat_delta_stream_and_speak(self, text: str) -> dict[str, Any]:
+        assert self.session is not None
+        payload = {"text": text, "source": "local_bridge"}
+        started_at = time.perf_counter()
+        sentence_count = 0
+        first_sentence_ms: float | None = None
+        first_delta_ms: float | None = None
+        first_progress_ms: float | None = None
+        progress_count = 0
+        final_reply = ""
+        chat_done_ms: float | None = None
+        audio_bytes = 0
+        played_bytes = 0
+        first_playback_ms: float | None = None
+        websocket: aiohttp.ClientWebSocketResponse | None = None
+        receiver: asyncio.Task[None] | None = None
+
+        self.speaking = True
+        await self._post_status()
+
+        async def receive_tts_audio() -> None:
+            nonlocal audio_bytes, played_bytes, first_playback_ms
+            remainder = b""
+            with sd.RawOutputStream(
+                samplerate=TTS_PCM_RATE,
+                channels=TTS_PCM_CHANNELS,
+                dtype="int16",
+                device=self.output_device,
+            ) as stream:
+                assert websocket is not None
+                async for message in websocket:
+                    if message.type == aiohttp.WSMsgType.BINARY:
+                        chunk = bytes(message.data or b"")
+                        if not chunk:
+                            continue
+                        audio_bytes += len(chunk)
+                        data = remainder + chunk
+                        aligned_len = len(data) - (len(data) % TTS_SAMPLE_WIDTH_BYTES)
+                        if aligned_len > 0:
+                            playable = data[:aligned_len]
+                            await asyncio.to_thread(stream.write, playable)
+                            if first_playback_ms is None:
+                                first_playback_ms = (time.perf_counter() - started_at) * 1000.0
+                            played_bytes += len(playable)
+                        remainder = data[aligned_len:]
+                        continue
+                    if message.type == aiohttp.WSMsgType.TEXT:
+                        event = json.loads(str(message.data or "{}"))
+                        event_type = clean_text(event.get("type"))
+                        if event_type == "error":
+                            raise RuntimeError(clean_text(event.get("error")) or "voxcpm_stream_failed")
+                        if event_type in {"done", "canceled"}:
+                            break
+                        continue
+                    if message.type in {
+                        aiohttp.WSMsgType.CLOSE,
+                        aiohttp.WSMsgType.CLOSED,
+                        aiohttp.WSMsgType.ERROR,
+                    }:
+                        break
+                if remainder:
+                    padded = remainder + (b"\x00" * (TTS_SAMPLE_WIDTH_BYTES - len(remainder)))
+                    await asyncio.to_thread(stream.write, padded)
+                    if first_playback_ms is None:
+                        first_playback_ms = (time.perf_counter() - started_at) * 1000.0
+                    played_bytes += len(padded)
+                if played_bytes > 0:
+                    await asyncio.to_thread(
+                        stream.write,
+                        b"\x00" * int(TTS_PCM_RATE * TTS_PCM_CHANNELS * 2 * 0.18),
+                    )
+
+        try:
+            websocket = await self.session.ws_connect(
+                voxcpm_stream_url(),
+                heartbeat=30.0,
+                receive_timeout=180.0,
+                max_msg_size=0,
+            )
+            ready = await websocket.receive_json(timeout=30.0)
+            if clean_text(ready.get("type")) != "ready":
+                raise RuntimeError(f"voxcpm_stream_not_ready: {ready}")
+            await websocket.send_json({"type": "start"})
+            receiver = asyncio.create_task(receive_tts_audio(), name="local-voxcpm-stream-receiver")
+
+            saw_delta = False
+            async with self.session.post(
+                f"{BOT_API_BASE}/api/control-page/chat-stream",
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=180),
+            ) as resp:
+                if resp.status != 200:
+                    detail = await resp.text()
+                    raise RuntimeError(f"chat_stream_failed {resp.status}: {detail[:300]}")
+                async for raw_line in resp.content:
+                    line = raw_line.decode("utf-8", errors="ignore").strip()
+                    if not line:
+                        continue
+                    try:
+                        event = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    event_type = clean_text(event.get("type"))
+                    if event_type == "progress":
+                        progress_text = clean_tts_text(event.get("text"))
+                        if not progress_text:
+                            continue
+                        progress_count += 1
+                        if first_progress_ms is None:
+                            first_progress_ms = (time.perf_counter() - started_at) * 1000.0
+                        await websocket.send_json({"type": "append", "text": progress_text})
+                        await websocket.send_json({"type": "commit"})
+                        continue
+                    if event_type == "delta":
+                        fragment = str(event.get("text") or "")
+                        if not fragment:
+                            continue
+                        saw_delta = True
+                        if first_delta_ms is None:
+                            first_delta_ms = (time.perf_counter() - started_at) * 1000.0
+                        await websocket.send_json({"type": "append", "text": fragment})
+                        continue
+                    if event_type == "sentence":
+                        sentence = clean_tts_text(event.get("text"))
+                        if not sentence:
+                            continue
+                        sentence_count += 1
+                        if first_sentence_ms is None:
+                            first_sentence_ms = (time.perf_counter() - started_at) * 1000.0
+                        if not saw_delta:
+                            await websocket.send_json({"type": "append", "text": sentence})
+                        continue
+                    if event_type == "done":
+                        final_reply = clean_text(event.get("reply"))
+                        chat_done_ms = (time.perf_counter() - started_at) * 1000.0
+                        continue
+                    if event_type == "error":
+                        raise RuntimeError(clean_text(event.get("error")) or "chat_stream_failed")
+
+            await websocket.send_json({"type": "flush"})
+            await receiver
+            receiver = None
+            if audio_bytes <= 0 or played_bytes <= 0:
+                raise RuntimeError(
+                    f"voxcpm_stream_empty_audio audio_bytes={audio_bytes} played_bytes={played_bytes}"
+                )
+
+            self.play_count += 1
+            self.last_error = ""
+            self.last_tts_playback = {
+                "voice": "clone:evelyn",
+                "audioBytes": audio_bytes,
+                "playedBytes": played_bytes,
+                "firstPlaybackMs": round(first_playback_ms, 1) if first_playback_ms is not None else None,
+                "inputStreaming": True,
+            }
+            elapsed_ms = (time.perf_counter() - started_at) * 1000.0
+            print(
+                "[LOCAL BRIDGE] delta_stream_reply "
+                f"sentence_count={sentence_count} "
+                f"progress_count={progress_count} "
+                f"first_progress_ms={round(first_progress_ms, 1) if first_progress_ms is not None else None} "
+                f"first_delta_ms={round(first_delta_ms, 1) if first_delta_ms is not None else None} "
+                f"first_sentence_ms={round(first_sentence_ms, 1) if first_sentence_ms is not None else None} "
+                f"first_playback_ms={self.last_tts_playback['firstPlaybackMs']} "
+                f"audio_bytes={audio_bytes}",
+                flush=True,
+            )
+            return {
+                "reply": final_reply,
+                "sentenceCount": sentence_count,
+                "progressCount": progress_count,
+                "firstProgressMs": round(first_progress_ms, 1) if first_progress_ms is not None else None,
+                "firstSentenceMs": round(first_sentence_ms, 1) if first_sentence_ms is not None else None,
+                "firstDeltaMs": round(first_delta_ms, 1) if first_delta_ms is not None else None,
+                "chatMs": chat_done_ms if chat_done_ms is not None else elapsed_ms,
+                "ttsMs": elapsed_ms,
+            }
+        except Exception:
+            if websocket is not None and not websocket.closed:
+                with contextlib.suppress(Exception):
+                    await websocket.send_json({"type": "cancel"})
+            if receiver is not None and not receiver.done():
+                receiver.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await receiver
+            raise
+        finally:
+            if websocket is not None and not websocket.closed:
+                await websocket.close()
+            self.speaking = False
+            self.mic_input_suppressed_until = time.monotonic() + LOCAL_BRIDGE_TTS_INPUT_SUPPRESS_AFTER_SEC
+            discarded = self._discard_pending_mic_segments()
+            if discarded:
+                print(f"[LOCAL BRIDGE] discarded_pending_mic_segments={discarded}", flush=True)
+            await self._post_status()
+
+    async def _chat_sentence_stream_and_speak(self, text: str) -> dict[str, Any]:
         assert self.session is not None
         payload = {"text": text, "source": "local_bridge"}
         started_at = time.perf_counter()
@@ -618,11 +1146,12 @@ class LocalIoBridge:
     async def _post_status(self, extra: dict[str, Any] | None = None) -> None:
         if self.session is None:
             return
-        mic_stats: dict[str, Any] = {}
+        mic_stats: dict[str, Any] = {"enabled": self.mic_enabled}
         if self.service is not None:
             last_input_at = self.service.last_input_at
             suppress_remaining_sec = max(0.0, self.mic_input_suppressed_until - time.monotonic())
             mic_stats = {
+                "enabled": True,
                 "captureReady": self.service.capture_ready,
                 "captureActive": bool(getattr(self.service, "_capture_active", False)),
                 "inputBlockCount": self.service.input_block_count,
@@ -647,6 +1176,12 @@ class LocalIoBridge:
         payload: dict[str, Any] = {
             "enabled": True,
             "ready": self.ready,
+            "micEnabled": self.mic_enabled,
+            "micControlRevision": self.mic_control_request_revision,
+            "minecraftCommandRevision": self.minecraft_command_request_revision,
+            "minecraftCommandState": self.minecraft_command_state,
+            "minecraftCommandError": self.minecraft_command_error,
+            "minecraftCommandResult": dict(self.minecraft_command_result),
             "speaking": self.speaking,
             "mode": "windows_io_bridge",
             "segmentCount": self.segment_count,
@@ -658,6 +1193,7 @@ class LocalIoBridge:
             "outputDevice": self._current_output_device_id(),
             "outputDevices": self._output_devices_snapshot(),
             "streamingTts": LOCAL_BRIDGE_STREAMING_TTS_ENABLED,
+            "inputStreamingTts": LOCAL_BRIDGE_VOXCPM_INPUT_STREAMING_ENABLED,
             "botApiBase": BOT_API_BASE,
             "sttUrl": STT_SERVICE_URL,
             "ttsUrl": OMNIVOICE_SERVER_URL,
@@ -681,7 +1217,9 @@ class LocalIoBridge:
             pass
 
     def _handle_control_response(self, data: dict[str, Any]) -> None:
+        self._handle_mic_control_request(data)
         self._handle_output_device_request(data)
+        self._handle_minecraft_command_request(data)
 
         restart = data.get("restart") if isinstance(data, dict) else None
         if isinstance(restart, dict) and restart.get("requested") and not self.restart_started:
