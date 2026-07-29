@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>E.V.E.L.Y.N</title>
   <link rel="icon" type="image/png" href="./assets/evelyn-logo-light-mark.png">
+  <link rel="stylesheet" href="./assets/evelyn-voice-validation.css?v=20260729-voice-p0-1">
   <style>
     :root {
       --bg: #f5f6f7;
@@ -2009,6 +2010,17 @@
           </div>
         </div>
         <p class="audio-device-status" id="ttsOutputDeviceStatus">선택하면 브리지에 저장됩니다.</p>
+      </section>
+
+      <section class="voice-validation-panel" aria-label="음성 P0 검증">
+        <div class="voice-validation-launch">
+          <div>
+            <strong>음성 P0 검증</strong>
+            <span>로컬·Discord 실제 E2E 10턴 + 무음</span>
+          </div>
+          <button id="voiceValidationStartButton" type="button">검증 시작</button>
+        </div>
+        <div id="voiceValidationMount" aria-live="polite"></div>
       </section>
 
       <section class="contract-timeline" aria-label="Voyager 계약 추적 타임라인">
@@ -4689,5 +4701,6 @@
 
     refreshState();
   </script>
+  <script src="./assets/evelyn-voice-validation.js?v=20260729-voice-p0-1"></script>
 </body>
 </html>

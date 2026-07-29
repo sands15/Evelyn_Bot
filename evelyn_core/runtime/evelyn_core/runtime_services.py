@@ -11,7 +11,7 @@ from typing import Any, Literal
 RUNTIME_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MANIFEST_PATH = RUNTIME_ROOT / "service_manifest.json"
 
-ProbeKind = Literal["tcp", "http"]
+ProbeKind = Literal["tcp", "http", "artifact_json"]
 
 
 @dataclass(frozen=True)
@@ -24,6 +24,7 @@ class HealthProbeSpec:
     method: str = "GET"
     expect_status: int | None = None
     expect_json: dict[str, Any] | None = None
+    stale_after_sec: float | None = None
 
 
 @dataclass(frozen=True)
@@ -73,7 +74,7 @@ _MANIFEST_CACHE_MTIME: float | None = None
 
 
 def _effective_port(raw: dict[str, Any]) -> tuple[int, int, str | None]:
-    default_port = int(raw["port"])
+    default_port = int(raw.get("port") or 0)
     env_name = (raw.get("env") or {}).get("port") if isinstance(raw.get("env"), dict) else None
     if env_name and os.getenv(str(env_name)):
         try:
@@ -93,7 +94,7 @@ def _effective_host(raw: dict[str, Any]) -> tuple[str, str, str | None]:
 
 def _parse_probe(raw: dict[str, Any], *, service_host: str, service_port: int) -> HealthProbeSpec:
     kind = str(raw.get("kind") or "").lower()
-    if kind not in {"tcp", "http"}:
+    if kind not in {"tcp", "http", "artifact_json"}:
         raise ValueError(f"unknown probe kind: {kind}")
     return HealthProbeSpec(
         kind=kind,  # type: ignore[arg-type]
@@ -104,6 +105,7 @@ def _parse_probe(raw: dict[str, Any], *, service_host: str, service_port: int) -
         method=str(raw.get("method") or "GET").upper(),
         expect_status=int(raw["expect_status"]) if raw.get("expect_status") is not None else None,
         expect_json=dict(raw.get("expect_json") or {}) if isinstance(raw.get("expect_json"), dict) else None,
+        stale_after_sec=float(raw["stale_after_sec"]) if raw.get("stale_after_sec") is not None else None,
     )
 
 
@@ -180,7 +182,7 @@ def validate_service_manifest(manifest: ServiceManifest) -> list[ManifestIssue]:
         ids.add(service.id)
         if not service.checks:
             issues.append(ManifestIssue("error.no_checks", f"service has no health checks: {service.id}", service.id))
-        if service.required:
+        if service.required and service.port > 0:
             key = (service.host, service.port)
             other = required_ports.get(key)
             if other:
@@ -192,7 +194,12 @@ def validate_service_manifest(manifest: ServiceManifest) -> list[ManifestIssue]:
                     )
                 )
             required_ports[key] = service.id
-        if service.repair and service.repair.allowed and not service.launcher:
+        if (
+            service.repair
+            and service.repair.allowed
+            and not service.launcher
+            and service.repair.strategy != "host_supervisor"
+        ):
             issues.append(ManifestIssue("error.repair_without_launcher", f"repair allowed without launcher: {service.id}", service.id))
 
     ports = {service.id: service.port for service in manifest.services}
@@ -244,6 +251,7 @@ def manifest_to_dict(manifest: ServiceManifest) -> dict[str, Any]:
                         "timeoutMs": check.timeout_ms,
                         "expectStatus": check.expect_status,
                         "expectJson": check.expect_json,
+                        "staleAfterSec": check.stale_after_sec,
                     }
                     for check in service.checks
                 ],

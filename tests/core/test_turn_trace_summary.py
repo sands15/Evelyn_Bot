@@ -30,6 +30,9 @@ class TurnTraceSummaryTests(unittest.TestCase):
             "memory_writer_decision",
             "minecraft_snapshot_freshness",
             "error_layer",
+            "validation_session_id",
+            "validation_step_id",
+            "validation_transcript_match",
         }
 
         self.assertTrue(required.issubset(set(TURN_SUMMARY_KEYS)))
@@ -62,6 +65,9 @@ class TurnTraceSummaryTests(unittest.TestCase):
                     },
                     "minecraft_snapshot_age_ms": 1234.4,
                     "minecraft_snapshot_freshness": "fresh",
+                    "validation_session_id": "validation-1",
+                    "validation_step_id": "02-listening",
+                    "validation_transcript_match": True,
                 },
             },
             label="voice_turn",
@@ -82,6 +88,9 @@ class TurnTraceSummaryTests(unittest.TestCase):
         self.assertEqual(payload["response_mode"], "short")
         self.assertEqual(payload["minecraft_snapshot_age_ms"], 1234.4)
         self.assertEqual(payload["minecraft_snapshot_freshness"], "fresh")
+        self.assertEqual(payload["validation_session_id"], "validation-1")
+        self.assertEqual(payload["validation_step_id"], "02-listening")
+        self.assertTrue(payload["validation_transcript_match"])
         self.assertEqual(payload["context_tokens_estimate"], 30)
         self.assertEqual(payload["llm_ms"], 123.5)
         self.assertEqual(payload["tts_first_audio_ms"], 88.8)

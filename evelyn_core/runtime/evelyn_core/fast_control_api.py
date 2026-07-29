@@ -1526,6 +1526,7 @@ def build_control_state(health: dict[str, Any]) -> dict[str, Any]:
             },
             "controlPlane": control_plane,
             "bootProgress": boot_progress,
+            "capabilities": dict(health.get("capabilities") or {}),
             "serviceHealth": health,
         },
         "statusText": control_plane["statusText"],

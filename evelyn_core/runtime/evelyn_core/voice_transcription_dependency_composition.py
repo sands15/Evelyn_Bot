@@ -12,6 +12,7 @@ from .voice_stt_flow import (
     run_partial_stt_flow,
 )
 from .voice_transcript_finalize_runtime import VoiceTranscriptFinalizeDeps
+from .voice_validation import emit_transcript_validation_event
 
 
 @dataclass(frozen=True)
@@ -104,6 +105,7 @@ class VoiceTranscriptionDependencyComposition:
             incomplete_window_sec=deps.incomplete_window_sec,
             complete_question_window_sec=deps.complete_question_window_sec,
             adaptive_window_enabled=deps.adaptive_window_enabled,
+            validation_transcript_observer=emit_transcript_validation_event,
         )
 
 

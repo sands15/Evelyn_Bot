@@ -3,6 +3,8 @@
 !.dockerignore
 !requirements.txt
 !main.py
+!control_page_runtime_health.py
+!runtime_lifecycle.py
 !package.json
 !package-lock.json
 

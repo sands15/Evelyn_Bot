@@ -31,7 +31,16 @@ class VoiceBargeInContinuityTests(unittest.TestCase):
         events: list[tuple[tuple, dict]] = []
         tracker = self.make_tracker(events)
 
-        first_metrics = {"meta": {"turn_id": "turn-1", "session_key": "session-1", "guild_id": 1}}
+        first_metrics = {
+            "meta": {
+                "turn_id": "turn-1",
+                "session_key": "session-1",
+                "guild_id": 1,
+                "validation_session_id": "validation-1",
+                "validation_step_id": "08-barge-interrupt",
+                "validation_transcript_match": True,
+            }
+        }
         tracker.start_probe(first_metrics, source="discord_voice")
         tracker.mark_probe(first_metrics, success=True, reason="finalize_complete", queued_sentence_count=1)
 
@@ -54,6 +63,14 @@ class VoiceBargeInContinuityTests(unittest.TestCase):
         self.assertEqual(second["targetReachedTurnId"], "turn-2")
         self.assertEqual(len(events), 2)
         self.assertEqual(events[-1][1]["target_count"], 2)
+        self.assertEqual(
+            events[0][1]["validation_session_id"],
+            "validation-1",
+        )
+        self.assertEqual(
+            events[0][1]["validation_step_id"],
+            "08-barge-interrupt",
+        )
 
     def test_failure_classification_resets_success_streak(self) -> None:
         tracker = self.make_tracker()

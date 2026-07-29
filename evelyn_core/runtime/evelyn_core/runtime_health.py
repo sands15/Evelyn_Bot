@@ -2,13 +2,17 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 import aiohttp
 
 from .runtime_services import HealthProbeSpec, ServiceManifest, ServiceSpec, load_service_manifest
+from .paths import get_runtime_artifacts_root
+from .voice_capabilities import attach_voice_capabilities
 
 
 ProbeRunner = Callable[[ServiceSpec, HealthProbeSpec], Awaitable[dict[str, Any]]]
@@ -131,11 +135,103 @@ async def _probe_http(_: ServiceSpec, check: HealthProbeSpec) -> dict[str, Any]:
         }
 
 
+def _artifact_path(check: HealthProbeSpec) -> Path | None:
+    root = get_runtime_artifacts_root().resolve()
+    raw = str(check.path or "").replace("\\", "/").strip()
+    if raw.startswith("runtime_artifacts/"):
+        raw = raw.removeprefix("runtime_artifacts/")
+    candidate = Path(raw)
+    if not candidate.is_absolute():
+        candidate = root / candidate
+    try:
+        resolved = candidate.resolve()
+        resolved.relative_to(root)
+    except (OSError, ValueError):
+        return None
+    return resolved
+
+
+async def _probe_artifact_json(_: ServiceSpec, check: HealthProbeSpec) -> dict[str, Any]:
+    started = time.monotonic()
+    path = _artifact_path(check)
+    if path is None:
+        return {
+            "kind": "artifact_json",
+            "ok": False,
+            "reason": "artifact_path_outside_runtime_root",
+            "target": str(check.path or ""),
+            "elapsedMs": round((time.monotonic() - started) * 1000.0, 1),
+        }
+    try:
+        raw = await asyncio.to_thread(path.read_text, encoding="utf-8")
+    except FileNotFoundError:
+        return {
+            "kind": "artifact_json",
+            "ok": False,
+            "reason": "artifact_missing",
+            "target": str(path),
+            "elapsedMs": round((time.monotonic() - started) * 1000.0, 1),
+        }
+    except OSError as exc:
+        return {
+            "kind": "artifact_json",
+            "ok": False,
+            "reason": "artifact_read_failed",
+            "target": str(path),
+            "error": type(exc).__name__,
+            "elapsedMs": round((time.monotonic() - started) * 1000.0, 1),
+        }
+    try:
+        payload = json.loads(raw)
+    except (ValueError, TypeError):
+        return {
+            "kind": "artifact_json",
+            "ok": False,
+            "reason": "artifact_corrupt",
+            "target": str(path),
+            "elapsedMs": round((time.monotonic() - started) * 1000.0, 1),
+        }
+    if not isinstance(payload, dict):
+        return {
+            "kind": "artifact_json",
+            "ok": False,
+            "reason": "artifact_not_object",
+            "target": str(path),
+            "elapsedMs": round((time.monotonic() - started) * 1000.0, 1),
+        }
+    json_ok = True
+    if check.expect_json is not None:
+        json_ok = all(payload.get(key) == value for key, value in check.expect_json.items())
+    heartbeat_at = next(
+        (
+            float(payload[key])
+            for key in ("heartbeatAt", "updatedAt", "at")
+            if isinstance(payload.get(key), (int, float))
+        ),
+        path.stat().st_mtime,
+    )
+    age_sec = max(0.0, time.time() - heartbeat_at)
+    stale = check.stale_after_sec is not None and age_sec > check.stale_after_sec
+    ok = bool(json_ok and not stale)
+    return {
+        "kind": "artifact_json",
+        "ok": ok,
+        "reason": "ok" if ok else "artifact_stale" if stale else "unexpected_json",
+        "target": str(path),
+        "payload": payload,
+        "ageSec": round(age_sec, 2),
+        "staleAfterSec": check.stale_after_sec,
+        "elapsedMs": round((time.monotonic() - started) * 1000.0, 1),
+    }
+
+
 async def default_probe_runner(service: ServiceSpec, check: HealthProbeSpec) -> dict[str, Any]:
     if check.kind == "tcp":
         return await _probe_tcp(service, check)
     if check.kind == "http":
         return await _probe_http(service, check)
+    if check.kind == "artifact_json":
+        return await _probe_artifact_json(service, check)
     return {"kind": check.kind, "ok": False, "reason": "unknown_probe_kind"}
 
 
@@ -617,7 +713,7 @@ async def collect_runtime_health(
         overall_state = "degraded"
     else:
         overall_state = "up"
-    return {
+    return attach_voice_capabilities({
         "ok": not required_failed,
         "fullyHealthy": overall_state == "up",
         "coreState": "down" if required_failed else "up",
@@ -630,7 +726,7 @@ async def collect_runtime_health(
         "services": list(services.values()),
         "diagnostics": [diagnostic.to_dict() for diagnostic in diagnostics],
         "legacyServices": legacy_services_from_health(services),
-    }
+    })
 
 
 def legacy_services_from_health(services: dict[str, dict[str, Any]]) -> dict[str, Any]:

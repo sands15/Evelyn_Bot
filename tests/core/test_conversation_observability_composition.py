@@ -77,6 +77,24 @@ class ConversationObservabilityCompositionTests(unittest.TestCase):
             trace_print=deps.trace_print,
         )
 
+    def test_voice_validation_observer_receives_same_event_payload(self) -> None:
+        observer = Mock()
+        composition, *_ = self.build_composition(voice_validation_observer=observer)
+
+        composition.log_turn_event(
+            "voice_turn_summary",
+            turn_id="turn-1",
+            validation_session_id="validation-1",
+        )
+
+        observer.assert_called_once_with(
+            "voice_turn_summary",
+            {
+                "turn_id": "turn-1",
+                "validation_session_id": "validation-1",
+            },
+        )
+
     def test_turn_scope_and_model_metric_adapters_share_injected_stores(self) -> None:
         composition, deps, *_ = self.build_composition()
         scope = object()

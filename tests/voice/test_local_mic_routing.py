@@ -422,9 +422,10 @@ class LocalMicRoutingTests(unittest.TestCase):
         self.assertNotIn("TTS_NEXT_CHUNK_MIN_CHARS", script)
         self.assertNotIn('set "LOCAL_MIC_ENABLED=true"', script)
 
-    def test_background_local_mode_uses_docker_core_and_windows_io_bridge(self) -> None:
+    def test_background_local_mode_uses_docker_core_and_host_supervised_bridge(self) -> None:
         script = (REPO_ROOT / "evelyn_core" / "runtime" / "launchers" / "start_local_background.ps1").read_text(encoding="utf-8")
         bridge_source = (REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "local_io_bridge.py").read_text(encoding="utf-8")
+        supervisor_source = (REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "host_supervisor.py").read_text(encoding="utf-8")
 
         self.assertIn("Invoke-DockerCommand -Arguments (@('compose') + $composeArgs)", script)
         self.assertIn("'--profile', 'llm'", script)
@@ -435,7 +436,9 @@ class LocalMicRoutingTests(unittest.TestCase):
         self.assertIn("@('up', '-d')", script)
         self.assertIn("'stop', 'discord_bot'", script)
         self.assertIn("EVELYN_LOCAL_KEEP_DISCORD_BOT", script)
-        self.assertIn("evelyn_core.local_io_bridge", script)
+        self.assertIn("evelyn_core.host_supervisor", script)
+        self.assertNotIn("evelyn_core.local_io_bridge", script)
+        self.assertIn('"evelyn_core.local_io_bridge"', supervisor_source)
         self.assertIn("--project-root '$projectRoot'", script)
         self.assertIn("LOCAL_BRIDGE_BOT_API_BASE", script)
         self.assertIn("LOCAL_MIC_START_THRESHOLD = '0.002'", script)

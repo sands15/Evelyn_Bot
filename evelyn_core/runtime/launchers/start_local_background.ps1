@@ -9,7 +9,7 @@ $botApiPort = if ($env:CONTROL_PAGE_BOT_API_PORT) { [int]$env:CONTROL_PAGE_BOT_A
 $controlPageUrl = "http://127.0.0.1:$controlPagePublicPort/"
 $stopMarker = Join-Path $projectRoot '.evelyn_stop_requested'
 $logDir = Join-Path $projectRoot 'runtime_artifacts\logs\background_start'
-$bridgeLog = Join-Path $logDir 'Local-IO-Bridge.log'
+$supervisorLog = Join-Path $logDir 'Host-Supervisor.log'
 
 $env:CONTROL_PAGE_PUBLIC_PORT = [string]$controlPagePublicPort
 $env:CONTROL_PAGE_BOT_API_PORT = [string]$botApiPort
@@ -158,19 +158,19 @@ function Start-DockerCore {
     Write-Host '[Evelyn] Minecraft services are deferred. Run start_voyager.bat when a Minecraft command is requested.'
 }
 
-function Test-LocalBridgeRunning {
+function Test-HostSupervisorRunning {
     $escapedRoot = [Regex]::Escape($projectRoot)
     $matches = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
         Where-Object {
-            $_.CommandLine -match 'evelyn_core\.local_io_bridge' -and
+            $_.CommandLine -match 'evelyn_core\.host_supervisor' -and
             $_.CommandLine -match $escapedRoot
         }
     return [bool]$matches
 }
 
-function Start-LocalIoBridge {
-    if (Test-LocalBridgeRunning) {
-        Write-Host '[Evelyn] Local I/O bridge is already running.'
+function Start-HostSupervisor {
+    if (Test-HostSupervisorRunning) {
+        Write-Host '[Evelyn] Windows Host Supervisor is already running.'
         return
     }
 
@@ -183,6 +183,7 @@ Set-Location '$projectRoot'
 `$env:LOCAL_BRIDGE_BOT_API_BASE = 'http://127.0.0.1:$botApiPort'
 `$env:STT_SERVICE_URL = 'http://127.0.0.1:8892'
 `$env:OMNIVOICE_SERVER_URL = 'http://127.0.0.1:8880'
+`$env:EVELYN_RUNTIME_ARTIFACTS_DIR = '$projectRoot\runtime_artifacts'
 if (-not `$env:LOCAL_MIC_START_THRESHOLD) { `$env:LOCAL_MIC_START_THRESHOLD = '0.002' }
 if (-not `$env:LOCAL_MIC_CONTINUE_THRESHOLD) { `$env:LOCAL_MIC_CONTINUE_THRESHOLD = '0.001' }
 if (-not `$env:LOCAL_MIC_MIN_VOICED_MS) { `$env:LOCAL_MIC_MIN_VOICED_MS = '280' }
@@ -191,19 +192,27 @@ if (-not `$env:LOCAL_BRIDGE_TTS_INPUT_SUPPRESS_AFTER_SEC) { `$env:LOCAL_BRIDGE_T
 if (-not `$env:LOCAL_BRIDGE_STATUS_INTERVAL_SEC) { `$env:LOCAL_BRIDGE_STATUS_INTERVAL_SEC = '0.25' }
 if (-not `$env:LOCAL_BRIDGE_TTS_WARMUP_ENABLED) { `$env:LOCAL_BRIDGE_TTS_WARMUP_ENABLED = 'true' }
 if (-not `$env:LOCAL_BRIDGE_TTS_WARMUP_DELAY_SEC) { `$env:LOCAL_BRIDGE_TTS_WARMUP_DELAY_SEC = '0.5' }
-if (Test-Path '.venv\Scripts\python.exe') {
-    & '.venv\Scripts\python.exe' -m evelyn_core.local_io_bridge --project-root '$projectRoot' *>> '$bridgeLog'
+`$venvPython = Join-Path '$projectRoot' '.venv\Scripts\python.exe'
+`$pythonExecutable = `$null
+if (Test-Path -LiteralPath `$venvPython) {
+    & `$venvPython --version *> `$null
+    if (`$LASTEXITCODE -eq 0) {
+        `$pythonExecutable = `$venvPython
+    }
+}
+if (`$pythonExecutable) {
+    & `$pythonExecutable -m evelyn_core.host_supervisor --project-root '$projectRoot' --artifacts-root '$projectRoot\runtime_artifacts' *>> '$supervisorLog'
 } else {
-    py -3 -m evelyn_core.local_io_bridge --project-root '$projectRoot' *>> '$bridgeLog'
+    py -3.11 -m evelyn_core.host_supervisor --project-root '$projectRoot' --artifacts-root '$projectRoot\runtime_artifacts' *>> '$supervisorLog'
 }
 "@
 
-    $visible = if ($env:EVELYN_LOCAL_BRIDGE_VISIBLE) {
-        ([string]$env:EVELYN_LOCAL_BRIDGE_VISIBLE).ToLowerInvariant() -notin @('0', 'false', 'no', 'off')
+    $visible = if ($env:EVELYN_HOST_SUPERVISOR_VISIBLE) {
+        ([string]$env:EVELYN_HOST_SUPERVISOR_VISIBLE).ToLowerInvariant() -notin @('0', 'false', 'no', 'off')
     } else {
-        $true
+        $false
     }
-    Start-PowerShellWindow -Title 'Evelyn Local I/O Bridge' -Script $pythonCommand -Visible:$visible
+    Start-PowerShellWindow -Title 'Evelyn Host Supervisor' -Script $pythonCommand -Visible:$visible
 }
 
 function Open-ControlPage {
@@ -235,8 +244,8 @@ Wait-Port -HostName '127.0.0.1' -Port 8892 -Label 'STT'
 Wait-Port -HostName '127.0.0.1' -Port $botApiPort -Label 'Docker Bot API'
 Wait-Port -HostName '127.0.0.1' -Port $controlPagePublicPort -Label 'Docker Control Page'
 
-Start-LocalIoBridge
+Start-HostSupervisor
 
 Write-Host "[Evelyn] Docker local core is ready. Control page: $controlPageUrl"
-Write-Host "[Evelyn] Windows local I/O bridge log: $bridgeLog"
+Write-Host "[Evelyn] Windows Host Supervisor log: $supervisorLog"
 Open-ControlPage

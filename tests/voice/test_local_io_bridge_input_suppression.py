@@ -16,12 +16,12 @@ from evelyn_core.local_io_bridge import LocalIoBridge  # noqa: E402
 
 
 class LocalIoBridgeInputSuppressionTests(unittest.IsolatedAsyncioTestCase):
-    def test_input_is_suppressed_while_speaking_and_during_cooldown(self) -> None:
+    def test_speaking_input_is_not_discarded_but_post_playback_cooldown_is(self) -> None:
         bridge = LocalIoBridge()
 
         self.assertFalse(bridge._mic_input_is_suppressed())
         bridge.speaking = True
-        self.assertTrue(bridge._mic_input_is_suppressed())
+        self.assertFalse(bridge._mic_input_is_suppressed())
         bridge.speaking = False
         bridge.mic_input_suppressed_until = time.monotonic() + 0.7
         self.assertTrue(bridge._mic_input_is_suppressed())

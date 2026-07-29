@@ -137,6 +137,8 @@ from evelyn_core.runtime_lifecycle_composition import (
 from evelyn_core.discord_app_composition_runtime import (
     DiscordAppComposition, DiscordAppCompositionDeps, DiscordCommandCompositionDeps, DiscordEventCompositionDeps, build_discord_intents,
 )
+from evelyn_core.discord_runtime_status import DiscordRuntimeStatus
+from evelyn_core.voice_validation import observe_turn_trace_for_voice_validation
 from evelyn_core.search_memory_dependency_composition import SearchMemoryDependencyComposition, SearchMemoryDependencyCompositionDeps
 from evelyn_core.memory_context_state import build_memory_context
 from evelyn_core.startup_audio_runtime import OpusStartupRuntimeDeps, SttWarmupRuntimeDeps
@@ -543,6 +545,7 @@ conversation_observability_composition = ConversationObservabilityComposition(
         log=print, record_turn_stage_metric=record_turn_stage_metric,
         summarize_voice_p95_metrics=summarize_voice_p95_metrics, get_search_followup_queued_count=search_followup_queued_counter.get,
         build_rejected_voice_turn=build_rejected_voice_turn,
+        voice_validation_observer=observe_turn_trace_for_voice_validation,
     )
 )
 
@@ -2323,6 +2326,11 @@ discord_app_composition = DiscordAppComposition(
             restore_last_voice_channel=restore_last_voice_channel, autonomy_enabled=AUTONOMY_ENABLED,
             get_or_create_autonomy_engine=get_or_create_autonomy_engine, text_message_handler=build_discord_text_message_handler_deps,
             log=print,
+            runtime_status=DiscordRuntimeStatus(
+                bot_user=lambda: bot.user,
+                bot_guilds=lambda: list(bot.guilds),
+                voice_client_type=EvelynVoiceClient,
+            ),
         ),
         commands=DiscordCommandCompositionDeps(
             ensure_listening_voice_client=ensure_listening_voice_client, mark_voice_manual_disconnect=mark_voice_manual_disconnect,

@@ -95,7 +95,7 @@ class ShutdownScriptContractTests(unittest.TestCase):
         script = self.read_script("start_local_background.ps1")
         docker_core = script[
             script.index("function Start-DockerCore") :
-            script.index("function Test-LocalBridgeRunning")
+            script.index("function Test-HostSupervisorRunning")
         ]
         voyager_start = (
             REPO_ROOT / "evelyn_core" / "start_voyager.bat"
@@ -112,19 +112,28 @@ class ShutdownScriptContractTests(unittest.TestCase):
             voyager_start,
         )
 
-    def test_local_launcher_does_not_treat_control_page_only_start_as_ready(self) -> None:
+    def test_local_launcher_starts_supervisor_before_reporting_ready(self) -> None:
         script = self.read_script("start_local_background.ps1")
 
         start_index = script.index("Start-DockerCore")
         bot_wait_index = script.index("Wait-Port -HostName '127.0.0.1' -Port $botApiPort -Label 'Docker Bot API'")
         page_wait_index = script.index("Wait-Port -HostName '127.0.0.1' -Port $controlPagePublicPort -Label 'Docker Control Page'")
-        bridge_index = script.index("Start-LocalIoBridge", page_wait_index)
+        supervisor_index = script.index("Start-HostSupervisor", page_wait_index)
         ready_index = script.index('Write-Host "[Evelyn] Docker local core is ready. Control page: $controlPageUrl"')
 
         self.assertLess(start_index, bot_wait_index)
         self.assertLess(bot_wait_index, page_wait_index)
-        self.assertLess(page_wait_index, bridge_index)
-        self.assertLess(bridge_index, ready_index)
+        self.assertLess(page_wait_index, supervisor_index)
+        self.assertLess(supervisor_index, ready_index)
+        self.assertNotIn("Start-LocalIoBridge", script)
+
+    def test_local_launcher_uses_supervisor_as_bridge_parent(self) -> None:
+        script = self.read_script("start_local_background.ps1")
+
+        self.assertIn("function Start-HostSupervisor", script)
+        self.assertIn("evelyn_core.host_supervisor", script)
+        self.assertIn("$supervisorLog", script)
+        self.assertIn("-WindowStyle $windowStyle", script)
 
     def test_bot_launcher_prefers_explicit_bot_api_port_env(self) -> None:
         script = self.read_script("start_bot.ps1")

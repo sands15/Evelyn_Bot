@@ -11,6 +11,7 @@ import re
 import subprocess
 import time
 from typing import Any
+import uuid
 
 import aiohttp
 import numpy as np
@@ -43,11 +44,31 @@ from .config import (
     OMNIVOICE_STREAM_STRATEGY,
     OMNIVOICE_VOICE,
     TARGET_RATE,
+    VOICE_WAVEFORM_BODY_RMS_MIN,
+    SPEAKER_VERIFICATION_APPLY_TO,
+    SPEAKER_VERIFICATION_CACHE_DIR,
+    SPEAKER_VERIFICATION_DEVICE,
+    SPEAKER_VERIFICATION_ENABLED,
+    SPEAKER_VERIFICATION_ENROLL_DIR,
+    SPEAKER_VERIFICATION_MAX_AUDIO_SEC,
+    SPEAKER_VERIFICATION_MIN_AUDIO_SEC,
+    SPEAKER_VERIFICATION_MODEL,
+    SPEAKER_VERIFICATION_THRESHOLD,
 )
 from .fast_action_runtime import detect_minecraft_runtime_command
 from .local_mic import LocalMicCaptureService
 from .local_tts_playback import normalize_output_device
+from .local_bridge_barge_in import (
+    SingleOwnerPlaybackController,
+    evaluate_local_barge_in,
+)
+from .paths import get_runtime_artifacts_root
 from .text import clean_text, clean_tts_text, should_suppress_tts_for_command
+from .voice_validation import (
+    active_validation_context,
+    emit_transcript_validation_event,
+    emit_voice_validation_event,
+)
 
 try:
     import sounddevice as sd
@@ -106,6 +127,17 @@ LOCAL_BRIDGE_MINECRAFT_CONNECT_WAIT_SEC = max(
     0.0,
     float(os.getenv("LOCAL_BRIDGE_MINECRAFT_CONNECT_WAIT_SEC", "45")),
 )
+LOCAL_BRIDGE_STATUS_PATH = get_runtime_artifacts_root() / "local_bridge" / "status.json"
+
+
+def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    temporary.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    os.replace(temporary, path)
 
 
 def voxcpm_stream_url(base_url: str = OMNIVOICE_SERVER_URL) -> str:
@@ -131,6 +163,8 @@ def iter_pcm_aligned_chunks(chunks: list[bytes], *, sample_width: int = TTS_SAMP
 class LocalIoBridge:
     def __init__(self) -> None:
         self.queue: asyncio.Queue[tuple[bytes, dict[str, Any]]] = asyncio.Queue(maxsize=8)
+        self.priority_queue: asyncio.Queue[tuple[bytes, dict[str, Any]]] = asyncio.Queue(maxsize=4)
+        self.barge_in_queue: asyncio.Queue[tuple[bytes, dict[str, Any]]] = asyncio.Queue(maxsize=4)
         self.session: aiohttp.ClientSession | None = None
         self.service: LocalMicCaptureService | None = None
         self.mic_enabled = bool(LOCAL_MIC_ENABLED)
@@ -167,6 +201,17 @@ class LocalIoBridge:
         self.minecraft_command_result: dict[str, Any] = {}
         self.minecraft_command_lock = asyncio.Lock()
         self.minecraft_command_tasks: set[asyncio.Task[Any]] = set()
+        self.active_turn_task: asyncio.Task[Any] | None = None
+        self.barge_worker_task: asyncio.Task[Any] | None = None
+        self.active_turn_id = ""
+        self.active_turn_started_at: float | None = None
+        self.active_validation: dict[str, str] | None = None
+        self.playback_started_for_turn = False
+        self.playback_cancelled_for_turn = False
+        self.reply_final_for_turn = False
+        self.playback_controller = SingleOwnerPlaybackController()
+        self._speaker_verifier: Any | None = None
+        self._speaker_verifier_initialized = False
 
     async def run(self) -> None:
         timeout = aiohttp.ClientTimeout(total=None, connect=10, sock_connect=10)
@@ -175,16 +220,60 @@ class LocalIoBridge:
             await self._start_mic()
             await self._post_status()
             self._ensure_tts_warmup()
+            self.barge_worker_task = asyncio.create_task(
+                self._barge_in_worker(),
+                name="local-bridge-barge-in",
+            )
             while True:
+                if self.active_turn_task is not None and self.active_turn_task.done():
+                    with contextlib.suppress(asyncio.CancelledError, Exception):
+                        await self.active_turn_task
+                    self.active_turn_task = None
+                if self.active_turn_task is None:
+                    source_queue: asyncio.Queue[tuple[bytes, dict[str, Any]]]
+                    try:
+                        item = self.priority_queue.get_nowait()
+                        source_queue = self.priority_queue
+                    except asyncio.QueueEmpty:
+                        try:
+                            item = await asyncio.wait_for(
+                                self.queue.get(),
+                                timeout=LOCAL_BRIDGE_STATUS_INTERVAL_SEC,
+                            )
+                            source_queue = self.queue
+                        except asyncio.TimeoutError:
+                            await self._post_status()
+                            continue
+                    pcm_bytes, meta = item
+                    self.active_turn_task = asyncio.create_task(
+                        self._process_queued_segment(
+                            pcm_bytes,
+                            meta,
+                            source_queue=source_queue,
+                        ),
+                        name=f"local-bridge-turn-{meta.get('turnId') or 'unknown'}",
+                    )
                 try:
-                    pcm_bytes, meta = await asyncio.wait_for(self.queue.get(), timeout=LOCAL_BRIDGE_STATUS_INTERVAL_SEC)
+                    await asyncio.wait_for(
+                        asyncio.shield(self.active_turn_task),
+                        timeout=LOCAL_BRIDGE_STATUS_INTERVAL_SEC,
+                    )
                 except asyncio.TimeoutError:
                     await self._post_status()
-                    continue
-                try:
-                    await self._handle_segment(pcm_bytes, meta)
-                finally:
-                    self.queue.task_done()
+                except asyncio.CancelledError:
+                    pass
+
+    async def _process_queued_segment(
+        self,
+        pcm_bytes: bytes,
+        meta: dict[str, Any],
+        *,
+        source_queue: asyncio.Queue[tuple[bytes, dict[str, Any]]],
+    ) -> None:
+        try:
+            await self._handle_segment(pcm_bytes, meta)
+        finally:
+            source_queue.task_done()
 
     async def _start_mic(self) -> None:
         if not self.mic_enabled:
@@ -202,16 +291,36 @@ class LocalIoBridge:
 
         def on_segment(pcm_bytes: bytes, meta: dict[str, Any]) -> None:
             def enqueue() -> None:
+                segment_meta = dict(meta)
+                segment_meta.setdefault("turnId", uuid.uuid4().hex)
+                if self.speaking:
+                    validation = active_validation_context(
+                        surface="local",
+                        prefer_interrupt=True,
+                    )
+                    if validation:
+                        segment_meta["validationSessionId"] = validation["sessionId"]
+                        segment_meta["validationStepId"] = validation["stepId"]
+                    if self.barge_in_queue.full():
+                        with contextlib.suppress(Exception):
+                            self.barge_in_queue.get_nowait()
+                            self.barge_in_queue.task_done()
+                    self.barge_in_queue.put_nowait((pcm_bytes, segment_meta))
+                    return
                 if self._mic_input_is_suppressed():
                     self.suppressed_mic_segment_count += 1
                     return
+                validation = active_validation_context(surface="local")
+                if validation:
+                    segment_meta["validationSessionId"] = validation["sessionId"]
+                    segment_meta["validationStepId"] = validation["stepId"]
                 if self.queue.full():
                     try:
                         self.queue.get_nowait()
                         self.queue.task_done()
                     except Exception:
                         pass
-                self.queue.put_nowait((pcm_bytes, meta))
+                self.queue.put_nowait((pcm_bytes, segment_meta))
 
             loop.call_soon_threadsafe(enqueue)
 
@@ -501,7 +610,176 @@ class LocalIoBridge:
         task.add_done_callback(self.minecraft_command_tasks.discard)
 
     def _mic_input_is_suppressed(self) -> bool:
-        return self.speaking or time.monotonic() < self.mic_input_suppressed_until
+        return time.monotonic() < self.mic_input_suppressed_until
+
+    def _validation_context_from_meta(
+        self,
+        meta: dict[str, Any] | None = None,
+    ) -> dict[str, str] | None:
+        source = dict(meta or {})
+        session_id = str(source.get("validationSessionId") or "")
+        step_id = str(source.get("validationStepId") or "")
+        if session_id and step_id:
+            return {"sessionId": session_id, "stepId": step_id, "surface": "local"}
+        return self.active_validation
+
+    def _emit_validation(
+        self,
+        event: str,
+        *,
+        meta: dict[str, Any] | None = None,
+        **payload: Any,
+    ) -> None:
+        context = self._validation_context_from_meta(meta)
+        if not context:
+            return
+        emit_voice_validation_event(
+            "local",
+            event,
+            session_id=context.get("sessionId"),
+            step_id=context.get("stepId"),
+            turnId=str((meta or {}).get("turnId") or self.active_turn_id or ""),
+            **payload,
+        )
+
+    def _mark_playback_started_once(self) -> None:
+        if self.playback_started_for_turn:
+            return
+        self.playback_started_for_turn = True
+        latency_ms = (
+            (time.perf_counter() - self.active_turn_started_at) * 1000.0
+            if self.active_turn_started_at is not None
+            else None
+        )
+        self._emit_validation(
+            "playback_started",
+            latencyMs=round(latency_ms, 1) if latency_ms is not None else None,
+        )
+
+    def _claim_playback_owner(self) -> str:
+        active_task = self.active_turn_task
+        if active_task is not None and not active_task.done():
+            owner_id = self.active_turn_id
+            cancel = active_task.cancel
+        else:
+            current_task = asyncio.current_task()
+            if current_task is None:
+                raise RuntimeError("playback_task_missing")
+            owner_id = f"control-{id(current_task)}"
+            cancel = current_task.cancel
+        if not self.playback_controller.claim(owner_id, cancel):
+            raise RuntimeError("active_playback_owner_conflict")
+        return owner_id
+
+    def _mark_reply_final_once(self) -> None:
+        if self.reply_final_for_turn:
+            return
+        self.reply_final_for_turn = True
+        self._emit_validation("reply_final")
+
+    def _speaker_verifier_for_barge_in(self) -> Any | None:
+        if self._speaker_verifier_initialized:
+            return self._speaker_verifier
+        self._speaker_verifier_initialized = True
+        apply_to = str(SPEAKER_VERIFICATION_APPLY_TO or "").lower()
+        applies = apply_to in {"1", "true", "on", "all", "always", "local", "local_mic"}
+        if not SPEAKER_VERIFICATION_ENABLED or not applies:
+            return None
+        try:
+            from .speaker_verification import SpeakerVerificationConfig, SpeakerVerifier
+
+            self._speaker_verifier = SpeakerVerifier(
+                SpeakerVerificationConfig(
+                    enabled=True,
+                    enroll_dir=SPEAKER_VERIFICATION_ENROLL_DIR,
+                    threshold=SPEAKER_VERIFICATION_THRESHOLD,
+                    min_audio_sec=SPEAKER_VERIFICATION_MIN_AUDIO_SEC,
+                    max_audio_sec=SPEAKER_VERIFICATION_MAX_AUDIO_SEC,
+                    model=SPEAKER_VERIFICATION_MODEL,
+                    cache_dir=SPEAKER_VERIFICATION_CACHE_DIR,
+                    device=SPEAKER_VERIFICATION_DEVICE,
+                ),
+                log=lambda message: print(message, flush=True),
+            )
+        except Exception as exc:
+            self.last_error = f"speaker_verifier_unavailable: {type(exc).__name__}"
+            self._speaker_verifier = None
+        return self._speaker_verifier
+
+    async def _verify_barge_in_speaker(self, pcm_bytes: bytes) -> Any | None:
+        verifier = self._speaker_verifier_for_barge_in()
+        if verifier is None:
+            return None
+        try:
+            audio16k = np.asarray(prepare_stt_audio(pcm_bytes), dtype=np.float32)
+            return await asyncio.to_thread(
+                verifier.verify,
+                audio16k,
+                sampling_rate=TARGET_RATE,
+            )
+        except Exception as exc:
+            self.last_error = f"speaker_verification_failed: {type(exc).__name__}"
+            return None
+
+    async def _barge_in_worker(self) -> None:
+        while True:
+            pcm_bytes, meta = await self.barge_in_queue.get()
+            try:
+                verification = await self._verify_barge_in_speaker(pcm_bytes)
+                decision = evaluate_local_barge_in(
+                    meta,
+                    body_rms_min=VOICE_WAVEFORM_BODY_RMS_MIN,
+                    speaker_verification=verification,
+                )
+                decision_payload = {
+                    "reason": decision.reason,
+                    "vadProb": round(decision.interrupt_meta.vad_prob, 4),
+                    "audioSec": round(decision.interrupt_meta.audio_sec, 3),
+                    "rmsOk": decision.interrupt_meta.rms_ok,
+                    "speakerVerification": decision.speaker_verification,
+                }
+                if not decision.accepted:
+                    self._emit_validation(
+                        "barge_in_rejected",
+                        meta=meta,
+                        **decision_payload,
+                    )
+                    continue
+                original_context = self.active_validation
+                original_turn_id = self.active_turn_id
+                self._mark_reply_final_once()
+                controller_cancelled = self.playback_controller.request_cancel()
+                if (
+                    not controller_cancelled
+                    and self.active_turn_task is not None
+                    and not self.active_turn_task.done()
+                ):
+                    self.active_turn_task.cancel()
+                if not self.playback_cancelled_for_turn:
+                    self.playback_cancelled_for_turn = True
+                    if original_context:
+                        emit_voice_validation_event(
+                            "local",
+                            "playback_cancelled",
+                            session_id=original_context.get("sessionId"),
+                            step_id=original_context.get("stepId"),
+                            turnId=original_turn_id,
+                            reason=decision.reason,
+                        )
+                meta["bargeInAccepted"] = True
+                meta["interruptedTurnId"] = original_turn_id
+                self._emit_validation(
+                    "barge_in_accepted",
+                    meta=meta,
+                    **decision_payload,
+                )
+                if self.priority_queue.full():
+                    with contextlib.suppress(Exception):
+                        self.priority_queue.get_nowait()
+                        self.priority_queue.task_done()
+                self.priority_queue.put_nowait((pcm_bytes, meta))
+            finally:
+                self.barge_in_queue.task_done()
 
     def _discard_pending_mic_segments(self) -> int:
         discarded = 0
@@ -516,14 +794,27 @@ class LocalIoBridge:
         return discarded
 
     async def _handle_segment(self, pcm_bytes: bytes, meta: dict[str, Any]) -> None:
-        if self._mic_input_is_suppressed():
+        if self._mic_input_is_suppressed() and not meta.get("bargeInAccepted"):
             self.suppressed_mic_segment_count += 1
             return
         turn_started = time.perf_counter()
+        self.active_turn_started_at = turn_started
+        self.active_turn_id = str(meta.get("turnId") or uuid.uuid4().hex)
+        meta["turnId"] = self.active_turn_id
+        self.active_validation = self._validation_context_from_meta(meta)
+        self.playback_started_for_turn = False
+        self.playback_cancelled_for_turn = False
+        self.reply_final_for_turn = False
         stt_ms: float | None = None
         chat_ms: float | None = None
         tts_ms: float | None = None
         self.segment_count += 1
+        self._emit_validation(
+            "capture",
+            meta=meta,
+            durationSec=meta.get("duration_sec"),
+            bargeIn=bool(meta.get("bargeInAccepted")),
+        )
         await self._post_status(extra={"lastSegmentMeta": meta})
         try:
             stage_started = time.perf_counter()
@@ -531,7 +822,17 @@ class LocalIoBridge:
             stt_ms = (time.perf_counter() - stage_started) * 1000.0
             if len(text) < LOCAL_BRIDGE_MIN_TEXT_CHARS:
                 return
+            context = self._validation_context_from_meta(meta)
+            if context:
+                emit_transcript_validation_event(
+                    "local",
+                    text,
+                    session_id=context.get("sessionId"),
+                    step_id=context.get("stepId"),
+                    turnId=self.active_turn_id,
+                )
             self.transcript_count += 1
+            self._emit_validation("turn_accepted", meta=meta)
             print(f"[LOCAL BRIDGE] transcript={text!r}", flush=True)
             if should_suppress_tts_for_command(text):
                 stage_started = time.perf_counter()
@@ -561,9 +862,40 @@ class LocalIoBridge:
                     stage_started = time.perf_counter()
                     await self._speak(reply)
                     tts_ms = (time.perf_counter() - stage_started) * 1000.0
+            if reply:
+                self._mark_reply_final_once()
+            if self.playback_started_for_turn and not self.playback_cancelled_for_turn:
+                self._emit_validation("playback_completed", meta=meta)
+                if meta.get("bargeInAccepted"):
+                    self._emit_validation(
+                        "barge_in_continuity",
+                        meta=meta,
+                        status="success",
+                        reason="replacement_playback_completed",
+                    )
+            elif reply and LOCAL_BRIDGE_TTS_ENABLED and not should_suppress_tts_for_command(text):
+                self._emit_validation(
+                    "playback_failed",
+                    meta=meta,
+                    errorCode="playback_not_started",
+                )
             print(f"[LOCAL BRIDGE] reply={reply!r}", flush=True)
+        except asyncio.CancelledError:
+            if self.playback_started_for_turn and not self.playback_cancelled_for_turn:
+                self.playback_cancelled_for_turn = True
+                self._emit_validation(
+                    "playback_cancelled",
+                    meta=meta,
+                    reason="turn_cancelled",
+                )
+            raise
         except Exception as exc:
             self.last_error = repr(exc)
+            self._emit_validation(
+                "error",
+                meta=meta,
+                errorCode=type(exc).__name__,
+            )
             print(f"[LOCAL BRIDGE] segment_failed err={exc!r}", flush=True)
         finally:
             total_ms = (time.perf_counter() - turn_started) * 1000.0
@@ -629,6 +961,7 @@ class LocalIoBridge:
         first_playback_ms: float | None = None
         websocket: aiohttp.ClientWebSocketResponse | None = None
         receiver: asyncio.Task[None] | None = None
+        playback_owner = self._claim_playback_owner()
 
         self.speaking = True
         await self._post_status()
@@ -656,6 +989,7 @@ class LocalIoBridge:
                             await asyncio.to_thread(stream.write, playable)
                             if first_playback_ms is None:
                                 first_playback_ms = (time.perf_counter() - started_at) * 1000.0
+                                self._mark_playback_started_once()
                             played_bytes += len(playable)
                         remainder = data[aligned_len:]
                         continue
@@ -678,6 +1012,7 @@ class LocalIoBridge:
                     await asyncio.to_thread(stream.write, padded)
                     if first_playback_ms is None:
                         first_playback_ms = (time.perf_counter() - started_at) * 1000.0
+                        self._mark_playback_started_once()
                     played_bytes += len(padded)
                 if played_bytes > 0:
                     await asyncio.to_thread(
@@ -803,6 +1138,7 @@ class LocalIoBridge:
         finally:
             if websocket is not None and not websocket.closed:
                 await websocket.close()
+            self.playback_controller.release(playback_owner)
             self.speaking = False
             self.mic_input_suppressed_until = time.monotonic() + LOCAL_BRIDGE_TTS_INPUT_SUPPRESS_AFTER_SEC
             discarded = self._discard_pending_mic_segments()
@@ -1040,6 +1376,7 @@ class LocalIoBridge:
 
     async def _speak_with_payload(self, payload: dict[str, Any]) -> None:
         assert self.session is not None
+        playback_owner = self._claim_playback_owner()
         self.speaking = True
         await self._post_status()
         try:
@@ -1079,6 +1416,7 @@ class LocalIoBridge:
                 flush=True,
             )
         finally:
+            self.playback_controller.release(playback_owner)
             self.speaking = False
             self.mic_input_suppressed_until = time.monotonic() + LOCAL_BRIDGE_TTS_INPUT_SUPPRESS_AFTER_SEC
             discarded = self._discard_pending_mic_segments()
@@ -1115,6 +1453,7 @@ class LocalIoBridge:
                     stream.write(playable)
                     if first_playback_ms is None:
                         first_playback_ms = (time.perf_counter() - started_at) * 1000.0
+                        self._mark_playback_started_once()
                     played_bytes += len(playable)
                 remainder = data[aligned_len:]
             if remainder:
@@ -1122,6 +1461,7 @@ class LocalIoBridge:
                 stream.write(padded)
                 if first_playback_ms is None:
                     first_playback_ms = (time.perf_counter() - started_at) * 1000.0
+                    self._mark_playback_started_once()
                 played_bytes += len(padded)
             if played_bytes > 0:
                 stream.write(b"\x00" * int(TTS_PCM_RATE * TTS_PCM_CHANNELS * 2 * 0.18))
@@ -1138,6 +1478,8 @@ class LocalIoBridge:
             device=self.output_device,
         ) as stream:
             for chunk in iter_pcm_aligned_chunks(chunks):
+                if played_bytes == 0:
+                    self._mark_playback_started_once()
                 stream.write(chunk)
                 played_bytes += len(chunk)
             stream.write(b"\x00" * int(TTS_PCM_RATE * TTS_PCM_CHANNELS * 2 * 0.18))
@@ -1174,6 +1516,8 @@ class LocalIoBridge:
                 "discardedPendingSegmentCount": self.discarded_pending_mic_segment_count,
             }
         payload: dict[str, Any] = {
+            "schema": "local_io_bridge.status.v1",
+            "heartbeatAt": time.time(),
             "enabled": True,
             "ready": self.ready,
             "micEnabled": self.mic_enabled,
@@ -1187,6 +1531,8 @@ class LocalIoBridge:
             "segmentCount": self.segment_count,
             "transcriptCount": self.transcript_count,
             "playCount": self.play_count,
+            "activePlaybackOwner": self.playback_controller.owner_id or None,
+            "playbackCancelRequested": self.playback_controller.cancel_requested,
             "lastError": self.last_error,
             "startedAt": self.started_at,
             "device": LOCAL_MIC_DEVICE or "default",
@@ -1209,6 +1555,10 @@ class LocalIoBridge:
         }
         if extra:
             payload.update(extra)
+        try:
+            await asyncio.to_thread(_write_json_atomic, LOCAL_BRIDGE_STATUS_PATH, payload)
+        except Exception as exc:
+            self.last_error = f"heartbeat_write_failed: {type(exc).__name__}"
         try:
             async with self.session.post(f"{BOT_API_BASE}/api/local-bridge/status", json=payload, timeout=aiohttp.ClientTimeout(total=2)) as resp:
                 data = await resp.json(content_type=None)
@@ -1293,6 +1643,8 @@ class LocalIoBridge:
             try:
                 text = clean_text(request.get("text"))
                 if text and LOCAL_BRIDGE_TTS_ENABLED:
+                    while self.active_turn_task is not None and not self.active_turn_task.done():
+                        await asyncio.sleep(0.05)
                     started = time.perf_counter()
                     await self._speak(text)
                     tts_playback = dict(self.last_tts_playback)

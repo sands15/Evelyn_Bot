@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sys
 import unittest
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -159,6 +159,34 @@ class VoiceTranscriptFinalizeRuntimeTests(unittest.TestCase):
         self.finalize()
 
         self.assertFalse(any(kind == "remember" for kind, _payload in self.events))
+
+    def test_validation_observer_adds_trace_metadata_without_transcript(self) -> None:
+        calls = []
+        self.deps = replace(
+            self.deps,
+            validation_transcript_observer=lambda surface, transcript, **kwargs: (
+                calls.append((surface, transcript, kwargs))
+                or {
+                    "sessionId": "validation-1",
+                    "stepId": "02-listening",
+                    "matched": True,
+                }
+            ),
+        )
+
+        self.finalize()
+
+        self.assertEqual(calls[0][0], "discord")
+        self.assertEqual(calls[0][1], "수정 문장")
+        self.assertEqual(
+            self.metrics["meta"]["validation_session_id"],
+            "validation-1",
+        )
+        self.assertEqual(
+            self.metrics["meta"]["validation_step_id"],
+            "02-listening",
+        )
+        self.assertNotIn("validation_transcript", self.metrics["meta"])
 
     def test_main_delegates_transcript_finalization_to_runtime_module(self) -> None:
         source = (REPO_ROOT / "main.py").read_text(encoding="utf-8")

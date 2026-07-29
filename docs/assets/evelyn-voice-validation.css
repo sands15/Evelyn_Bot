@@ -1,0 +1,226 @@
+.voice-validation-panel {
+  margin-top: 18px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: var(--panel);
+}
+
+.voice-validation-launch,
+.voice-validation-row,
+.voice-validation-actions,
+.voice-validation-capability-head,
+.voice-validation-progress-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.voice-validation-launch strong,
+.voice-validation-capability strong,
+.voice-validation-step strong {
+  display: block;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.voice-validation-launch span,
+.voice-validation-meta,
+.voice-validation-empty,
+.voice-validation-blocker,
+.voice-validation-warning {
+  display: block;
+  margin-top: 3px;
+  color: var(--soft);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.voice-validation-panel button {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 7px 11px;
+  color: var(--text);
+  background: var(--panel-strong);
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.voice-validation-panel button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.voice-validation-panel button.is-primary {
+  border-color: rgba(72, 115, 255, 0.45);
+  color: #fff;
+  background: #3f6ef6;
+}
+
+.voice-validation-panel button.is-danger {
+  border-color: rgba(218, 66, 66, 0.35);
+  color: #c83939;
+}
+
+.voice-validation-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.voice-validation-capability,
+.voice-validation-step,
+.voice-validation-summary {
+  margin-top: 10px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--panel-strong);
+}
+
+.voice-validation-capability {
+  margin-top: 0;
+}
+
+.voice-validation-pill {
+  flex: 0 0 auto;
+  border-radius: 999px;
+  padding: 3px 7px;
+  color: var(--soft);
+  background: rgba(127, 127, 127, 0.12);
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.voice-validation-pill[data-state="ready"],
+.voice-validation-pill[data-state="passed"] {
+  color: #157545;
+  background: rgba(32, 173, 102, 0.12);
+}
+
+.voice-validation-pill[data-state="degraded"],
+.voice-validation-pill[data-state="preflight"] {
+  color: #9b6700;
+  background: rgba(226, 163, 32, 0.14);
+}
+
+.voice-validation-pill[data-state="unavailable"],
+.voice-validation-pill[data-state="failed"],
+.voice-validation-pill[data-state="aborted"] {
+  color: #bd3434;
+  background: rgba(218, 66, 66, 0.13);
+}
+
+.voice-validation-blocker {
+  color: #b83d3d;
+}
+
+.voice-validation-warning {
+  color: #986600;
+}
+
+.voice-validation-surfaces {
+  display: flex;
+  gap: 12px;
+  margin-top: 10px;
+  color: var(--soft);
+  font-size: 11px;
+}
+
+.voice-validation-surfaces label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.voice-validation-prompt {
+  margin: 9px 0 0;
+  padding: 10px;
+  border-left: 3px solid #4c74ee;
+  border-radius: 7px;
+  color: var(--text);
+  background: rgba(76, 116, 238, 0.08);
+  font-size: 13px;
+  line-height: 1.55;
+  word-break: keep-all;
+}
+
+.voice-validation-interrupt {
+  margin-top: 8px;
+  border-left-color: #db7b2c;
+  background: rgba(219, 123, 44, 0.09);
+}
+
+.voice-validation-events {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 5px;
+  margin-top: 9px;
+}
+
+.voice-validation-event {
+  padding: 6px;
+  border-radius: 8px;
+  color: var(--soft);
+  background: rgba(127, 127, 127, 0.08);
+  font-size: 9px;
+  text-align: center;
+}
+
+.voice-validation-event.is-done {
+  color: #157545;
+  background: rgba(32, 173, 102, 0.12);
+}
+
+.voice-validation-actions {
+  justify-content: flex-start;
+  flex-wrap: wrap;
+  margin-top: 10px;
+}
+
+.voice-validation-progress {
+  height: 5px;
+  margin-top: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(127, 127, 127, 0.14);
+}
+
+.voice-validation-progress i {
+  display: block;
+  height: 100%;
+  width: 0;
+  border-radius: inherit;
+  background: #4c74ee;
+  transition: width 180ms ease;
+}
+
+.voice-validation-summary dl {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 5px 9px;
+  margin: 8px 0 0;
+  font-size: 10px;
+}
+
+.voice-validation-summary dt {
+  color: var(--soft);
+}
+
+.voice-validation-summary dd {
+  margin: 0;
+  color: var(--text);
+  font-weight: 700;
+}
+
+@media (max-width: 720px) {
+  .voice-validation-grid,
+  .voice-validation-events {
+    grid-template-columns: 1fr;
+  }
+}

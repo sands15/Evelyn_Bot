@@ -8,6 +8,7 @@ $ErrorActionPreference = 'Continue'
 $projectRoot = Resolve-Path (Join-Path $PSScriptRoot '..\..\..')
 $composeFile = Join-Path $projectRoot 'docker-compose.fast-control.yml'
 $stopMarker = Join-Path $projectRoot '.evelyn_stop_requested'
+$supervisorStopRequest = Join-Path $projectRoot 'runtime_artifacts\host_supervisor\stop.request'
 $targetPorts = @(8798, 8799, 8880, 8891, 9820, 9821, 9822)
 $evelynCommandFragments = @(
     'C:\Evelyn',
@@ -362,6 +363,33 @@ if (-not $DryRun) {
     try {
         Set-Content -LiteralPath $stopMarker -Value ("local stop requested at " + (Get-Date).ToString('s')) -Encoding UTF8 -Force
     } catch {
+    }
+}
+
+if ($DryRun) {
+    Write-Host ("[stop_evelyn_local] dry-run: request graceful Host Supervisor shutdown at {0}" -f $supervisorStopRequest)
+} else {
+    try {
+        $supervisorDirectory = Split-Path -Parent $supervisorStopRequest
+        New-Item -ItemType Directory -Force -Path $supervisorDirectory | Out-Null
+        Set-Content -LiteralPath $supervisorStopRequest -Value ("stop requested at " + (Get-Date).ToString('s')) -Encoding UTF8 -Force
+        Write-Host "[stop_evelyn_local] requested graceful Host Supervisor and Local I/O Bridge shutdown"
+        $supervisorDeadline = (Get-Date).AddSeconds(6)
+        do {
+            $supervisorRunning = $false
+            foreach ($candidateProcess in @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)) {
+                if ([string]$candidateProcess.CommandLine -match 'evelyn_core\.host_supervisor') {
+                    $supervisorRunning = $true
+                    break
+                }
+            }
+            if (-not $supervisorRunning) {
+                break
+            }
+            Start-Sleep -Milliseconds 250
+        } while ((Get-Date) -lt $supervisorDeadline)
+    } catch {
+        Write-Host ("[stop_evelyn_local] Host Supervisor graceful stop request failed: {0}" -f $_.Exception.Message)
     }
 }
 

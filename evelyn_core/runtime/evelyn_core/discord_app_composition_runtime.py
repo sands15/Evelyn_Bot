@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 import discord
+
+if TYPE_CHECKING:
+    from .discord_runtime_status import DiscordRuntimeStatus
 
 from .discord_command_handlers import (
     handle_autonomy_start_command,
@@ -61,6 +64,7 @@ class DiscordEventCompositionDeps:
     get_or_create_autonomy_engine: Callable[[int], Any]
     text_message_handler: DepsFactory
     log: Callable[..., Any]
+    runtime_status: "DiscordRuntimeStatus | None" = None
 
 
 @dataclass(frozen=True)
@@ -156,6 +160,9 @@ class DiscordAppComposition:
 
     async def on_ready(self) -> None:
         deps = self.deps.events
+        if deps.runtime_status is not None:
+            deps.runtime_status.start()
+            deps.runtime_status.write_once()
         user = deps.bot_user()
         deps.log(f"로그인 완료: {user}")
         deps.mark_startup_component("discord_gateway", "done", deps.clean_text(str(user or "")))
@@ -210,6 +217,8 @@ class DiscordAppComposition:
         user = deps.bot_user()
         if user is None or member.id != user.id:
             return
+        if deps.runtime_status is not None:
+            deps.runtime_status.write_once()
         guild = getattr(member, "guild", None)
         if guild is None:
             return
@@ -227,6 +236,9 @@ class DiscordAppComposition:
             )
         except Exception as exc:
             deps.log(f"[VOICE STATE REARM FAIL] guild={guild.id} err={exc!r}")
+        finally:
+            if deps.runtime_status is not None:
+                deps.runtime_status.write_once()
 
     async def on_message(self, message: discord.Message) -> None:
         await handle_discord_text_message(message, self.deps.events.text_message_handler())

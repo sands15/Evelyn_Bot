@@ -1,5 +1,5 @@
 {
-  "schema_version": "1.0",
+  "schema_version": "1.1",
   "runtime_name": "evelyn-local",
   "services": [
     {
@@ -250,8 +250,8 @@
       ],
       "launcher": "",
       "repair": {
-        "allowed": false,
-        "strategy": "none",
+        "allowed": true,
+        "strategy": "host_supervisor",
         "requires_confirm": true,
         "cooldown_sec": 60
       }
@@ -325,6 +325,84 @@
         "strategy": "start_if_down",
         "requires_confirm": true,
         "cooldown_sec": 120
+      }
+    },
+    {
+      "id": "host_supervisor",
+      "label": "Windows Host Supervisor",
+      "kind": "windows_host_process",
+      "required": false,
+      "host": "127.0.0.1",
+      "port": 0,
+      "checks": [
+        {
+          "kind": "artifact_json",
+          "path": "host_supervisor/status.json",
+          "timeout_ms": 300,
+          "stale_after_sec": 4,
+          "expect_json": {
+            "schema": "host_supervisor.status.v1"
+          }
+        }
+      ],
+      "launcher": "",
+      "repair": {
+        "allowed": false,
+        "strategy": "none",
+        "requires_confirm": true,
+        "cooldown_sec": 60
+      }
+    },
+    {
+      "id": "local_io_bridge",
+      "label": "Local I/O Bridge",
+      "kind": "windows_host_process",
+      "required": false,
+      "host": "127.0.0.1",
+      "port": 0,
+      "checks": [
+        {
+          "kind": "artifact_json",
+          "path": "local_bridge/status.json",
+          "timeout_ms": 300,
+          "stale_after_sec": 4,
+          "expect_json": {
+            "schema": "local_io_bridge.status.v1"
+          }
+        }
+      ],
+      "launcher": "launchers/start_local_background.ps1",
+      "repair": {
+        "allowed": true,
+        "strategy": "start_if_down",
+        "requires_confirm": true,
+        "cooldown_sec": 30
+      }
+    },
+    {
+      "id": "discord_bot",
+      "label": "Discord Bot",
+      "kind": "discord_gateway",
+      "required": false,
+      "host": "127.0.0.1",
+      "port": 0,
+      "checks": [
+        {
+          "kind": "artifact_json",
+          "path": "discord/status.json",
+          "timeout_ms": 300,
+          "stale_after_sec": 5,
+          "expect_json": {
+            "schema": "discord_runtime.status.v1"
+          }
+        }
+      ],
+      "launcher": "../start_local.bat",
+      "repair": {
+        "allowed": true,
+        "strategy": "start_if_down",
+        "requires_confirm": true,
+        "cooldown_sec": 60
       }
     }
   ]

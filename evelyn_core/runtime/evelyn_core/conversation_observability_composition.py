@@ -56,6 +56,7 @@ class ConversationObservabilityCompositionDeps:
     summarize_voice_p95_metrics: Callable[..., dict[str, float | int]]
     get_search_followup_queued_count: Callable[[], int]
     build_rejected_voice_turn: Callable[..., Any]
+    voice_validation_observer: Callable[[str, dict[str, Any]], Any] | None = None
 
 
 class ConversationObservabilityComposition:
@@ -80,6 +81,11 @@ class ConversationObservabilityComposition:
             original_print=deps.original_print,
             trace_print=deps.trace_print,
         )
+        if deps.voice_validation_observer is not None:
+            try:
+                deps.voice_validation_observer(event, dict(payload))
+            except Exception as exc:
+                deps.original_print(f"[VOICE VALIDATION OBSERVER ERROR] {exc!r}")
 
     def record_model_call_trace(
         self,

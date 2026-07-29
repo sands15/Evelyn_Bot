@@ -24,6 +24,7 @@ class VoiceTranscriptFinalizeDeps:
     incomplete_window_sec: float
     complete_question_window_sec: float
     adaptive_window_enabled: bool
+    validation_transcript_observer: Callable[..., Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -127,6 +128,27 @@ def finalize_voice_transcript_from_runtime(
         f"[STT RESULT][full-final] text={transcript_result.final_text!r} "
         f"committed={transcript_result.committed_text!r} wake_detected={transcript_result.wake_detected}"
     )
+    if deps.validation_transcript_observer is not None:
+        try:
+            validation_event = deps.validation_transcript_observer(
+                "discord",
+                transcript_result.final_text,
+                turnId=turn_id,
+                prefer_interrupt=bool(
+                    metrics.setdefault("meta", {}).get("tts_interrupted_by_user_audio")
+                    or metrics.setdefault("meta", {}).get("local_tts_interrupted_by_user_audio")
+                ),
+            )
+        except Exception:
+            validation_event = None
+        if isinstance(validation_event, dict):
+            metrics.setdefault("meta", {}).update(
+                {
+                    "validation_session_id": validation_event.get("sessionId"),
+                    "validation_step_id": validation_event.get("stepId"),
+                    "validation_transcript_match": bool(validation_event.get("matched")),
+                }
+            )
     return VoiceTranscriptFinalizeResult(
         text=text,
         committed_text=committed_text,

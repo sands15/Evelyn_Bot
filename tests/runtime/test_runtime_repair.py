@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 
 REPO_ROOT = next(path for path in Path(__file__).resolve().parents if (path / "main.py").exists())
@@ -15,6 +16,7 @@ if str(RUNTIME_ROOT) not in sys.path:
     sys.path.insert(0, str(RUNTIME_ROOT))
 
 from evelyn_core.runtime_health import collect_runtime_health  # noqa: E402
+from evelyn_core import runtime_repair as runtime_repair_module  # noqa: E402
 from evelyn_core.runtime_repair import (  # noqa: E402
     append_repair_event,
     build_runtime_repair_plan,
@@ -35,6 +37,15 @@ def fake_probe(states: dict[str, str]):
 
 
 class RuntimeRepairTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.direct_windows_patch = patch.object(
+            runtime_repair_module,
+            "direct_windows_repair_enabled",
+            return_value=True,
+        )
+        self.direct_windows_patch.start()
+        self.addCleanup(self.direct_windows_patch.stop)
+
     def health(self, states: dict[str, str]) -> dict[str, Any]:
         manifest = load_service_manifest(force=True)
         return asyncio.run(collect_runtime_health(manifest=manifest, probe_runner=fake_probe(states)))
@@ -245,6 +256,74 @@ class RuntimeRepairTests(unittest.TestCase):
             self.assertEqual(row["serviceId"], "bot_api")
             self.assertEqual(row["actionId"], "start_bot_api")
             self.assertIn("at", row)
+
+    def test_docker_control_page_reports_supervisor_unavailable(self) -> None:
+        manifest = load_service_manifest(force=True)
+        health = self.health({"tts": "down"})
+        with patch.object(
+            runtime_repair_module,
+            "direct_windows_repair_enabled",
+            return_value=False,
+        ), patch.object(
+            runtime_repair_module,
+            "HostSupervisorClient",
+        ) as client:
+            client.return_value.status.return_value = {
+                "available": False,
+                "error": "host_supervisor_unavailable",
+                "manualCommand": "start_local.bat --background",
+            }
+            plan = build_runtime_repair_plan(
+                service_id="tts",
+                manifest=manifest,
+                health=health,
+            )
+
+        self.assertFalse(plan["ok"])
+        self.assertEqual(plan["error"], "host_supervisor_unavailable")
+        self.assertEqual(plan["manualCommand"], "start_local.bat --background")
+
+    def test_docker_control_page_preview_and_apply_use_supervisor_token(self) -> None:
+        manifest = load_service_manifest(force=True)
+        health = self.health({"tts": "down"})
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "repair.jsonl"
+            with patch.object(
+                runtime_repair_module,
+                "direct_windows_repair_enabled",
+                return_value=False,
+            ), patch.object(
+                runtime_repair_module,
+                "HostSupervisorClient",
+            ) as client:
+                client.return_value.status.return_value = {"available": True}
+                client.return_value.preview.return_value = {
+                    "ok": True,
+                    "previewToken": "supervisor-token",
+                    "expiresAt": 1120.0,
+                }
+                client.return_value.apply.return_value = {
+                    "ok": True,
+                    "status": "started",
+                }
+                plan = build_runtime_repair_plan(
+                    service_id="tts",
+                    manifest=manifest,
+                    health=health,
+                )
+                response = execute_runtime_repair_plan(
+                    plan=plan,
+                    confirm_token=plan["confirmToken"],
+                    log_path=log_path,
+                )
+
+        self.assertEqual(plan["executionMode"], "host_supervisor")
+        self.assertEqual(plan["confirmToken"], "supervisor-token")
+        client.return_value.apply.assert_called_once_with(
+            "start_tts",
+            "supervisor-token",
+        )
+        self.assertTrue(response["ok"])
 
 
 if __name__ == "__main__":

@@ -36,6 +36,7 @@ from .runtime_repair import (
     runtime_repair_capabilities,
 )
 from .runtime_services import load_service_manifest, manifest_to_dict
+from .voice_validation import SUITE_ID, get_voice_validation_manager
 
 
 PROJECT_ROOT = Path(os.getenv("EVELYN_PROJECT_ROOT") or Path(__file__).resolve().parents[3])
@@ -456,6 +457,7 @@ async def degraded_state(*, proxy_failure: dict[str, Any] | None = None) -> dict
             "controlPlane": control_plane,
             "bootProgress": boot_progress,
             "manifestVersion": service_health.get("manifestVersion") if isinstance(service_health, dict) else None,
+            "capabilities": dict(service_health.get("capabilities") or {}) if isinstance(service_health, dict) else {},
             "serviceHealth": service_health,
         },
         "minecraft": {
@@ -613,6 +615,7 @@ async def state_handler(request: web.Request) -> web.StreamResponse:
                 runtime["controlPlane"] = control_plane
                 runtime["bootProgress"] = boot_progress
                 runtime["manifestVersion"] = service_health.get("manifestVersion") if isinstance(service_health, dict) else None
+                runtime["capabilities"] = dict(service_health.get("capabilities") or {}) if isinstance(service_health, dict) else {}
                 runtime["serviceHealth"] = service_health
                 payload["runtime"] = runtime
                 payload["bootProgress"] = boot_progress
@@ -722,7 +725,8 @@ async def runtime_repair_preview_handler(request: web.Request) -> web.StreamResp
     refresh_health = bool((payload or {}).get("refreshHealth", True))
     manifest = load_service_manifest()
     health = await cached_runtime_health(force=refresh_health)
-    plan = build_runtime_repair_plan(
+    plan = await asyncio.to_thread(
+        build_runtime_repair_plan,
         service_id=service_id or None,
         action_id=action_id or None,
         manifest=manifest,
@@ -742,13 +746,16 @@ async def runtime_repair_apply_handler(request: web.Request) -> web.StreamRespon
     reason = str((payload or {}).get("reason") or "").strip()
     manifest = load_service_manifest()
     health = await cached_runtime_health(force=True)
-    plan = build_runtime_repair_plan(
+    plan = await asyncio.to_thread(
+        build_runtime_repair_plan,
         service_id=service_id or None,
         action_id=action_id or None,
         manifest=manifest,
         health=health,
+        issue_supervisor_preview=False,
     )
-    response = execute_runtime_repair_plan(
+    response = await asyncio.to_thread(
+        execute_runtime_repair_plan,
         plan=plan,
         confirm_token=confirm_token,
         reason=reason,
@@ -775,6 +782,73 @@ async def runtime_repair_apply_handler(request: web.Request) -> web.StreamRespon
     error = response.get("error")
     status = 409 if error in {"repair_cooldown_active", "confirm_token_required"} else 400
     return json_response(response, status=status)
+
+
+async def voice_validation_handler(_: web.Request) -> web.StreamResponse:
+    health = await cached_runtime_health(force=True)
+    capabilities = (
+        dict(health.get("capabilities") or {}) if isinstance(health, dict) else {}
+    )
+    session = get_voice_validation_manager().snapshot(capabilities=capabilities)
+    return json_response({"ok": True, "session": session})
+
+
+async def voice_validation_start_handler(request: web.Request) -> web.StreamResponse:
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    suite = str((payload or {}).get("suite") or SUITE_ID).strip()
+    surfaces = (payload or {}).get("surfaces")
+    if not isinstance(surfaces, list):
+        return json_response({"ok": False, "error": "surfaces_required"}, status=400)
+    health = await cached_runtime_health(force=True)
+    capabilities = (
+        dict(health.get("capabilities") or {}) if isinstance(health, dict) else {}
+    )
+    result = get_voice_validation_manager().start(
+        suite=suite,
+        surfaces=[str(item) for item in surfaces],
+        capabilities=capabilities,
+    )
+    status = 201 if result.get("ok") else 409 if result.get("error") == "validation_session_active" else 400
+    return json_response(result, status=status)
+
+
+async def voice_validation_confirm_handler(request: web.Request) -> web.StreamResponse:
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    result = get_voice_validation_manager().confirm(
+        session_id=str((payload or {}).get("sessionId") or ""),
+        step_id=str((payload or {}).get("stepId") or ""),
+        heard=bool((payload or {}).get("heard")),
+    )
+    return json_response(result, status=200 if result.get("ok") else 409)
+
+
+async def voice_validation_retry_handler(request: web.Request) -> web.StreamResponse:
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    result = get_voice_validation_manager().retry(
+        session_id=str((payload or {}).get("sessionId") or ""),
+        step_id=str((payload or {}).get("stepId") or ""),
+    )
+    return json_response(result, status=200 if result.get("ok") else 409)
+
+
+async def voice_validation_abort_handler(request: web.Request) -> web.StreamResponse:
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    result = get_voice_validation_manager().abort(
+        session_id=str((payload or {}).get("sessionId") or ""),
+    )
+    return json_response(result, status=200 if result.get("ok") else 409)
 
 
 async def shutdown_handler(_: web.Request) -> web.StreamResponse:
@@ -1028,6 +1102,11 @@ def create_app() -> web.Application:
     app.router.add_get("/api/control-page/runtime-repair", runtime_repair_handler)
     app.router.add_post("/api/control-page/runtime-repair/preview", runtime_repair_preview_handler)
     app.router.add_post("/api/control-page/runtime-repair/apply", runtime_repair_apply_handler)
+    app.router.add_get("/api/control-page/voice-validation", voice_validation_handler)
+    app.router.add_post("/api/control-page/voice-validation/start", voice_validation_start_handler)
+    app.router.add_post("/api/control-page/voice-validation/confirm", voice_validation_confirm_handler)
+    app.router.add_post("/api/control-page/voice-validation/retry", voice_validation_retry_handler)
+    app.router.add_post("/api/control-page/voice-validation/abort", voice_validation_abort_handler)
     app.router.add_get("/api/control-page/memory", memory_snapshot_handler)
     app.router.add_get("/api/control-page/memory-graph", memory_graph_handler)
     app.router.add_get("/api/control-page/memory/{note_id}", memory_note_handler)
@@ -1044,6 +1123,10 @@ def create_app() -> web.Application:
     app.router.add_options("/api/control-page/open-memory-vault", open_memory_vault_options_handler)
     app.router.add_options("/api/control-page/shutdown", shutdown_handler)
     app.router.add_options("/api/control-page/chat", chat_handler)
+    app.router.add_options("/api/control-page/voice-validation/start", voice_validation_start_handler)
+    app.router.add_options("/api/control-page/voice-validation/confirm", voice_validation_confirm_handler)
+    app.router.add_options("/api/control-page/voice-validation/retry", voice_validation_retry_handler)
+    app.router.add_options("/api/control-page/voice-validation/abort", voice_validation_abort_handler)
     return app
 
 

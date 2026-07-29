@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .paths import get_runtime_artifacts_root
+from .host_supervisor_client import ALLOWED_HOST_ACTIONS, HostSupervisorClient
 from .runtime_services import RUNTIME_ROOT, ServiceManifest, ServiceSpec, get_service, load_service_manifest
 
 
@@ -21,10 +22,24 @@ RepairRunner = Callable[[list[str], str], dict[str, Any]]
 
 REPAIR_PRIORITY_SERVICE_IDS = ("main_llm", "router_llm", "sub_llm", "tts", "bot_api", "control_page", "voyager", "codex_gateway")
 BLOCKING_SERVICE_STATES = {"down", "partial", "unknown"}
+HOST_ACTION_BY_SERVICE_ID = {
+    "local_io_bridge": "restart_local_bridge",
+    "discord_bot": "start_discord_bot",
+    "main_llm": "start_main_llm",
+    "stt": "start_stt",
+    "tts": "start_tts",
+}
+SERVICE_ID_BY_HOST_ACTION = {action: service for service, action in HOST_ACTION_BY_SERVICE_ID.items()}
+
+
+def direct_windows_repair_enabled() -> bool:
+    return os.name == "nt"
 
 
 def service_id_from_action(action_id: str) -> str:
     action = str(action_id or "").strip()
+    if action in SERVICE_ID_BY_HOST_ACTION:
+        return SERVICE_ID_BY_HOST_ACTION[action]
     if action.startswith("start_"):
         return action.removeprefix("start_")
     return action
@@ -233,30 +248,54 @@ def runtime_repair_capabilities(
     health: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     manifest = manifest or load_service_manifest()
+    delegated_runtime = not direct_windows_repair_enabled()
+    supervisor_status = HostSupervisorClient().status() if delegated_runtime else {}
     services = []
     for service in manifest.services:
         repair = service.repair
         if not repair or not repair.allowed:
             continue
         service_health = service_health_from_summary(health, service.id)
+        host_action_id = HOST_ACTION_BY_SERVICE_ID.get(service.id)
+        delegated = delegated_runtime
+        execution_supported = (
+            bool(host_action_id and supervisor_status.get("available"))
+            if delegated
+            else True
+        )
         services.append(
             {
                 "id": service.id,
                 "label": service.label,
                 "required": service.required,
                 "state": str((service_health or {}).get("state") or "unknown"),
-                "actionId": f"start_{service.id}",
+                "actionId": host_action_id or f"start_{service.id}",
                 "strategy": repair.strategy,
                 "requiresConfirm": repair.requires_confirm,
                 "cooldownSec": repair.cooldown_sec,
                 "dryRunOnly": False,
-                "executionSupported": True,
+                "executionSupported": execution_supported,
+                "executionMode": "host_supervisor" if delegated else "direct_windows",
+                "executionError": (
+                    None
+                    if execution_supported
+                    else "host_supervisor_unavailable"
+                    if host_action_id
+                    else "host_action_not_allowed"
+                ),
+                "manualCommand": (
+                    supervisor_status.get("manualCommand")
+                    if delegated and not supervisor_status.get("available")
+                    else None
+                ),
             }
         )
     return {
         "ok": True,
         "dryRunOnly": False,
-        "executionSupported": True,
+        "executionSupported": any(bool(item.get("executionSupported")) for item in services),
+        "executionMode": "host_supervisor" if delegated_runtime else "direct_windows",
+        "hostSupervisor": supervisor_status if delegated_runtime else {"available": True},
         "runtimeName": manifest.runtime_name,
         "manifestVersion": manifest.schema_version,
         "repairableServices": services,
@@ -269,10 +308,16 @@ def build_runtime_repair_plan(
     action_id: str | None = None,
     manifest: ServiceManifest | None = None,
     health: dict[str, Any] | None = None,
+    issue_supervisor_preview: bool = True,
 ) -> dict[str, Any]:
     manifest = manifest or load_service_manifest()
     normalized_service_id = str(service_id or "").strip() or service_id_from_action(str(action_id or ""))
-    action = str(action_id or f"start_{normalized_service_id}").strip()
+    default_action = (
+        HOST_ACTION_BY_SERVICE_ID.get(normalized_service_id)
+        if not direct_windows_repair_enabled()
+        else None
+    )
+    action = str(action_id or default_action or f"start_{normalized_service_id}").strip()
     if not normalized_service_id:
         return {
             "ok": False,
@@ -292,7 +337,11 @@ def build_runtime_repair_plan(
             "message": f"Unknown runtime service: {normalized_service_id}",
         }
 
-    if action not in {"start", f"start_{service.id}"}:
+    supported_actions = {"start", f"start_{service.id}"}
+    host_action = HOST_ACTION_BY_SERVICE_ID.get(service.id)
+    if host_action:
+        supported_actions.add(host_action)
+    if action not in supported_actions:
         return {
             "ok": False,
             "dryRun": True,
@@ -334,7 +383,7 @@ def build_runtime_repair_plan(
             "error": "repair_not_allowed",
             "message": f"Repair is not allowed for {service.label}.",
         }
-    if repair.strategy != "start_if_down":
+    if repair.strategy not in {"start_if_down", "host_supervisor"}:
         return {
             **base,
             "ok": False,
@@ -363,6 +412,73 @@ def build_runtime_repair_plan(
             "planStatus": "not_needed",
             "message": f"{service.label} is already up.",
         }
+
+    if not direct_windows_repair_enabled():
+        if not host_action or host_action not in ALLOWED_HOST_ACTIONS:
+            return {
+                **base,
+                "ok": False,
+                "eligible": False,
+                "error": "host_action_not_allowed",
+                "executionMode": "host_supervisor",
+                "message": f"{service.label} has no allowlisted Windows Host Supervisor action.",
+            }
+        client = HostSupervisorClient()
+        supervisor_status = client.status()
+        if not supervisor_status.get("available"):
+            return {
+                **base,
+                "ok": False,
+                "eligible": False,
+                "error": "host_supervisor_unavailable",
+                "executionMode": "host_supervisor",
+                "manualCommand": "start_local.bat --background",
+                "message": "Windows Host Supervisor is unavailable. Run start_local.bat --background on Windows.",
+            }
+        preview = client.preview(host_action) if issue_supervisor_preview else {
+            "ok": True,
+            "actionId": host_action,
+            "requiresConfirm": True,
+        }
+        if not preview.get("ok"):
+            return {
+                **base,
+                "ok": False,
+                "eligible": False,
+                "error": preview.get("error") or "host_supervisor_preview_failed",
+                "executionMode": "host_supervisor",
+                "message": "Windows Host Supervisor did not accept the repair preview.",
+            }
+        plan = {
+            **base,
+            "ok": True,
+            "eligible": True,
+            "planStatus": "ready",
+            "executionMode": "host_supervisor",
+            "hostActionId": host_action,
+            "commandPreview": [host_action],
+            "preconditions": [
+                "actionId is in the Windows Host Supervisor allowlist",
+                "Host Supervisor heartbeat is fresh",
+                "service is not currently up",
+            ],
+            "riskChecks": [
+                {"id": "allowlist_only", "ok": True, "message": "No arbitrary command, argv, or working directory is accepted."},
+                {"id": "single_use_token", "ok": True, "message": "Preview token expires after two minutes and is consumed on apply."},
+            ],
+            "inferredSideEffects": [f"would execute allowlisted action {host_action}"],
+            "message": f"{service.label} repair is ready through Windows Host Supervisor.",
+            "safety": {
+                "willExecute": False,
+                "requiresManualConfirm": True,
+                "boundary": "fixed Host Supervisor action allowlist",
+            },
+        }
+        if preview.get("previewToken"):
+            plan["confirmToken"] = preview.get("previewToken")
+            plan["confirmTokenExpiresAt"] = preview.get("expiresAt")
+            plan["confirmInstruction"] = "Send this single-use token to the apply endpoint within two minutes."
+        return plan
 
     launcher_path = resolve_launcher_path(service)
     if launcher_path is None:
@@ -431,7 +547,7 @@ def build_runtime_repair_plan(
 
 def start_visible_process(command: list[str], cwd: str) -> dict[str, Any]:
     creationflags = 0
-    if os.name == "nt" and hasattr(subprocess, "CREATE_NEW_CONSOLE"):
+    if direct_windows_repair_enabled() and hasattr(subprocess, "CREATE_NEW_CONSOLE"):
         creationflags = subprocess.CREATE_NEW_CONSOLE
     process = subprocess.Popen(
         command,
@@ -462,6 +578,41 @@ def execute_runtime_repair_plan(
             "safety": {"willExecute": False},
         }
         append_repair_event({"event": "apply_rejected", **response, "reason": str(reason or "")}, log_path=log_path)
+        return response
+
+    if plan.get("executionMode") == "host_supervisor":
+        cooldown = cooldown_block_reason(plan, now_ts=now_ts, log_path=log_path)
+        if cooldown is not None:
+            response = {
+                "ok": False,
+                "serviceId": plan.get("serviceId"),
+                "actionId": plan.get("actionId"),
+                "message": "Repair action is still in cooldown.",
+                "safety": {"willExecute": False},
+                **cooldown,
+            }
+            append_repair_event({"event": "apply_rejected", **response, "reason": str(reason or "")}, log_path=log_path)
+            return response
+        action = str(plan.get("hostActionId") or "")
+        delegated = HostSupervisorClient().apply(action, str(confirm_token or ""))
+        response = {
+            **delegated,
+            "serviceId": plan.get("serviceId"),
+            "actionId": action,
+            "executionMode": "host_supervisor",
+            "safety": {
+                "willExecute": bool(delegated.get("ok")),
+                "boundary": "fixed Host Supervisor action allowlist",
+            },
+        }
+        append_repair_event(
+            {
+                "event": "apply_succeeded" if response.get("ok") else "apply_failed",
+                **response,
+                "reason": str(reason or ""),
+            },
+            log_path=log_path,
+        )
         return response
 
     expected_token = str(plan.get("confirmToken") or confirm_token_for_plan(plan))
@@ -542,7 +693,7 @@ def execute_runtime_repair_plan(
         "runner": runner_result,
         "safety": {
             "willExecute": True,
-            "visibleLaunch": os.name == "nt",
+            "visibleLaunch": direct_windows_repair_enabled(),
             "mode": "start_if_down",
         },
     }

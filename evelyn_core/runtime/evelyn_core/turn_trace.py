@@ -80,6 +80,9 @@ TURN_SUMMARY_KEYS: tuple[str, ...] = (
     "tts_first_audio_ms_p95",
     "search_followup_queued_count",
     "cancelled_stale_turn_count",
+    "validation_session_id",
+    "validation_step_id",
+    "validation_transcript_match",
     "extra",
 )
 
@@ -300,6 +303,9 @@ def build_turn_summary_payload(
         "tts_first_audio_ms_p95": _round_ms(p95.get("tts_first_audio_ms_p95")),
         "search_followup_queued_count": p95.get("search_followup_queued_count"),
         "cancelled_stale_turn_count": p95.get("cancelled_stale_turn_count"),
+        "validation_session_id": meta.get("validation_session_id"),
+        "validation_step_id": meta.get("validation_step_id"),
+        "validation_transcript_match": _bool_or_none(meta.get("validation_transcript_match")),
         "extra": extra or None,
     }
 
