@@ -112,6 +112,17 @@ class HostSupervisorTests(unittest.TestCase):
         self.clock.value += 601
         self.assertTrue(self.supervisor._consume_restart_budget())
 
+    def test_successful_status_write_clears_transient_heartbeat_error(self):
+        self.supervisor.last_error = "heartbeat_write_failed:PermissionError"
+
+        self.supervisor.write_status()
+
+        payload = json.loads(
+            self.supervisor.status_path.read_text(encoding="utf-8")
+        )
+        self.assertEqual(payload["lastError"], "")
+        self.assertEqual(self.supervisor.last_error, "")
+
 
 if __name__ == "__main__":
     unittest.main()

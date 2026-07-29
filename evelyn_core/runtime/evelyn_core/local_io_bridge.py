@@ -11,7 +11,6 @@ import re
 import subprocess
 import time
 from typing import Any
-import uuid
 
 import aiohttp
 import numpy as np
@@ -63,6 +62,7 @@ from .local_bridge_barge_in import (
     evaluate_local_barge_in,
 )
 from .paths import get_runtime_artifacts_root
+from .runtime_artifact_io import atomic_json_write
 from .text import clean_text, clean_tts_text, should_suppress_tts_for_command
 from .voice_validation import (
     active_validation_context,
@@ -128,16 +128,6 @@ LOCAL_BRIDGE_MINECRAFT_CONNECT_WAIT_SEC = max(
     float(os.getenv("LOCAL_BRIDGE_MINECRAFT_CONNECT_WAIT_SEC", "45")),
 )
 LOCAL_BRIDGE_STATUS_PATH = get_runtime_artifacts_root() / "local_bridge" / "status.json"
-
-
-def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
-    temporary.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
-        encoding="utf-8",
-    )
-    os.replace(temporary, path)
 
 
 def voxcpm_stream_url(base_url: str = OMNIVOICE_SERVER_URL) -> str:
@@ -1533,7 +1523,11 @@ class LocalIoBridge:
             "playCount": self.play_count,
             "activePlaybackOwner": self.playback_controller.owner_id or None,
             "playbackCancelRequested": self.playback_controller.cancel_requested,
-            "lastError": self.last_error,
+            "lastError": (
+                ""
+                if self.last_error.startswith("heartbeat_write_failed:")
+                else self.last_error
+            ),
             "startedAt": self.started_at,
             "device": LOCAL_MIC_DEVICE or "default",
             "outputDevice": self._current_output_device_id(),
@@ -1556,9 +1550,16 @@ class LocalIoBridge:
         if extra:
             payload.update(extra)
         try:
-            await asyncio.to_thread(_write_json_atomic, LOCAL_BRIDGE_STATUS_PATH, payload)
+            await asyncio.to_thread(
+                atomic_json_write,
+                LOCAL_BRIDGE_STATUS_PATH,
+                payload,
+            )
         except Exception as exc:
             self.last_error = f"heartbeat_write_failed: {type(exc).__name__}"
+        else:
+            if self.last_error.startswith("heartbeat_write_failed:"):
+                self.last_error = ""
         try:
             async with self.session.post(f"{BOT_API_BASE}/api/local-bridge/status", json=payload, timeout=aiohttp.ClientTimeout(total=2)) as resp:
                 data = await resp.json(content_type=None)

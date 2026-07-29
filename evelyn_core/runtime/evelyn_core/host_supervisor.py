@@ -10,7 +10,6 @@ import subprocess
 import sys
 import threading
 import time
-import uuid
 from collections import deque
 from pathlib import Path
 from typing import Any, Callable
@@ -22,6 +21,7 @@ from .host_supervisor_client import (
     SUPERVISOR_STATUS_SCHEMA,
 )
 from .paths import get_repo_root, get_runtime_artifacts_root
+from .runtime_artifact_io import atomic_json_write
 
 
 PREVIEW_TTL_SEC = 120.0
@@ -29,16 +29,6 @@ AUTO_RESTART_LIMIT = 3
 AUTO_RESTART_WINDOW_SEC = 10 * 60
 HEARTBEAT_INTERVAL_SEC = 1.0
 _REQUEST_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_-]{1,96}$")
-
-
-def _atomic_json_write(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
-    temporary.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
-        encoding="utf-8",
-    )
-    os.replace(temporary, path)
 
 
 class HostSupervisor:
@@ -319,7 +309,7 @@ class HostSupervisor:
                 else uuid.uuid4().hex
             )
             response = self.handle_request(request)
-            _atomic_json_write(self.responses_dir / f"{request_id}.json", response)
+            atomic_json_write(self.responses_dir / f"{request_id}.json", response)
             try:
                 request_path.unlink()
             except OSError:
@@ -352,7 +342,17 @@ class HostSupervisor:
         }
 
     def write_status(self) -> None:
-        _atomic_json_write(self.status_path, self.status())
+        recovering_heartbeat_error = self.last_error.startswith(
+            "heartbeat_write_failed:"
+        )
+        payload = self.status()
+        if recovering_heartbeat_error:
+            payload["lastError"] = ""
+        atomic_json_write(self.status_path, payload)
+        if recovering_heartbeat_error and self.last_error.startswith(
+            "heartbeat_write_failed:"
+        ):
+            self.last_error = ""
 
     def _heartbeat_loop(self) -> None:
         while not self._heartbeat_stop.wait(HEARTBEAT_INTERVAL_SEC):
