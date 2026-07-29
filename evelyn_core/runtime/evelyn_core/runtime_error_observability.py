@@ -6,7 +6,7 @@ import re
 import threading
 import time
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 from .paths import get_runtime_artifacts_root
 
@@ -20,6 +20,10 @@ _KNOWN_ERROR_CODES = frozenset(
         "automatic_restart_budget_exhausted",
         "autonomy_start_failed",
         "chat_stream_failed",
+        "codex_backend_failed",
+        "codex_credentials_failed",
+        "codex_handler_failed",
+        "codex_prompt_cleanup_failed",
         "control_page_background_tasks_failed",
         "control_page_start_failed",
         "control_tts_failed",
@@ -27,6 +31,10 @@ _KNOWN_ERROR_CODES = frozenset(
         "heartbeat_write_failed",
         "host_action_launch_failed",
         "local_bridge_unexpected_exit",
+        "mindcraft_auto_restart_failed",
+        "mindcraft_log_close_failed",
+        "mindcraft_start_failed",
+        "mindcraft_stop_failed",
         "minecraft_lazy_start_failed",
         "output_device_probe_failed",
         "restart_start_failed",
@@ -35,6 +43,9 @@ _KNOWN_ERROR_CODES = frozenset(
         "shutdown_start_failed",
         "speaker_verification_failed",
         "speaker_verifier_unavailable",
+        "stt_import_failed",
+        "stt_model_load_failed",
+        "stt_transcribe_failed",
         "startup_initialization_failed",
         "status_write_failed",
         "tts_warmup_attempt_failed",
@@ -43,6 +54,12 @@ _KNOWN_ERROR_CODES = frozenset(
         "voice_listening_probe_failed",
         "voice_rearm_failed",
         "voice_state_rearm_failed",
+        "vision_analyze_failed",
+        "vision_describe_failed",
+        "vision_model_load_failed",
+        "vision_ocr_generation_failed",
+        "vision_ocr_load_failed",
+        "vision_reaper_failed",
     }
 )
 _SOURCE_SPECS: tuple[dict[str, Any], ...] = (
@@ -66,6 +83,28 @@ _SOURCE_SPECS: tuple[dict[str, Any], ...] = (
         "path": Path("discord") / "status.json",
         "schema": "discord_runtime.status.v1",
         "staleAfterSec": 8.0,
+    },
+)
+_HTTP_SOURCE_SPECS: tuple[dict[str, str], ...] = (
+    {
+        "id": "stt",
+        "label": "STT",
+        "serviceId": "stt",
+    },
+    {
+        "id": "vision",
+        "label": "Vision",
+        "serviceId": "vision",
+    },
+    {
+        "id": "mindcraft",
+        "label": "Mindcraft",
+        "serviceId": "voyager",
+    },
+    {
+        "id": "codexGateway",
+        "label": "Codex Gateway",
+        "serviceId": "codex_gateway",
     },
 )
 
@@ -230,11 +269,83 @@ def _read_source(
         )
 
 
+def _service_rows(
+    service_health: Mapping[str, Any] | None,
+) -> Mapping[str, Any]:
+    if not isinstance(service_health, Mapping):
+        return {}
+    raw_services = service_health.get("services")
+    if isinstance(raw_services, list):
+        return {
+            str(item.get("id")): item
+            for item in raw_services
+            if isinstance(item, Mapping) and item.get("id")
+        }
+    return service_health
+
+
+def _service_error_source(
+    service_rows: Mapping[str, Any],
+    spec: dict[str, str],
+) -> dict[str, Any]:
+    base_spec: dict[str, Any] = {
+        "id": spec["id"],
+        "label": spec["label"],
+    }
+    service = service_rows.get(spec["serviceId"])
+    if not isinstance(service, Mapping):
+        return _unavailable_source(base_spec, state="missing")
+    payload: Mapping[str, Any] | None = None
+    for check in service.get("checks") or []:
+        if not isinstance(check, Mapping):
+            continue
+        candidate = check.get("payload")
+        if isinstance(candidate, Mapping) and (
+            "errorCount" in candidate
+            or "lastErrorCode" in candidate
+            or "errorCounters" in candidate
+        ):
+            payload = candidate
+            break
+    if payload is None:
+        return _unavailable_source(base_spec, state="unavailable")
+
+    last_error_at = _safe_number(payload.get("lastErrorAt"))
+    last_error_code = sanitize_runtime_error_code(
+        payload.get("lastErrorCode"),
+        fallback="",
+    )
+    state = str(service.get("state") or "unknown")
+    current_failure = (
+        payload.get("ok") is False
+        or payload.get("ready") is False
+        or payload.get("lastActionReady") is False
+        or state in {"down", "partial", "degraded"}
+    )
+    return {
+        "id": spec["id"],
+        "label": spec["label"],
+        "state": "ready" if state == "up" else state,
+        "available": True,
+        "stale": False,
+        "heartbeatAt": _safe_number(service.get("checkedAt")),
+        "errorCount": _safe_count(payload.get("errorCount")),
+        "lastErrorAt": last_error_at,
+        "lastErrorCode": last_error_code,
+        "lastErrorType": sanitize_runtime_error_type(
+            payload.get("lastErrorType")
+        ),
+        "errorCounters": _safe_counters(payload.get("errorCounters")),
+        "hasCurrentError": bool(last_error_code and current_failure),
+    }
+
+
 def collect_runtime_error_observability(
     *,
     artifacts_root: Path | None = None,
     now: float | None = None,
     recent_after_sec: float = DEFAULT_RECENT_AFTER_SEC,
+    service_health: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     root = Path(artifacts_root or get_runtime_artifacts_root()).resolve()
     current_time = time.time() if now is None else float(now)
@@ -251,6 +362,10 @@ def collect_runtime_error_observability(
                     "code": warning,
                 }
             )
+    service_rows = _service_rows(service_health)
+    for spec in _HTTP_SOURCE_SPECS:
+        source = _service_error_source(service_rows, spec)
+        sources[source["id"]] = source
 
     available_count = sum(1 for source in sources.values() if source["available"])
     stale_count = sum(1 for source in sources.values() if source["stale"])

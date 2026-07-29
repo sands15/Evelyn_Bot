@@ -91,6 +91,23 @@ class MindcraftRuntimeContractTests(unittest.TestCase):
         self.assertEqual(payload["observation"]["inventory"]["oak_log"], 4)
         self.assertEqual(payload["current_subgoal"]["id"], "obtain_logs")
         self.assertEqual(payload["current_task_stage"], "obtain_logs")
+        self.assertEqual(payload["configuration"]["schema"], "runtime_config.owner.v1")
+        self.assertEqual(payload["errorCount"], 0)
+
+    def test_stop_failure_is_counted_without_storing_exception_text(self) -> None:
+        runtime = mindcraft_service.MindcraftRuntime()
+        runtime._process = Mock()
+        runtime._process.poll.return_value = None
+        runtime._process.terminate.side_effect = OSError("private host path")
+
+        with self.assertRaises(OSError):
+            runtime.stop()
+
+        snapshot = runtime.runtime_errors.snapshot()
+        self.assertEqual(snapshot["errorCount"], 1)
+        self.assertEqual(snapshot["lastErrorCode"], "mindcraft_stop_failed")
+        self.assertEqual(snapshot["lastErrorType"], "OSError")
+        self.assertNotIn("private host path", json.dumps(snapshot))
 
     def test_overlay_blocks_slash_commands_and_uses_profile_cache(self) -> None:
         runtime_source = (

@@ -47,6 +47,63 @@ foreach ($service in $Services) {
     }
 }
 
+function Initialize-CodexCredentialMount {
+    $needsGateway = (
+        $normalizedServices -contains 'codex_gateway' -or
+        $normalizedServices -contains 'voyager' -or
+        ($normalizedServices.Count -eq 0 -and $normalizedProfiles -contains 'voyager')
+    )
+    if (-not $needsGateway) {
+        return
+    }
+
+    $credentialDirectory = if ($env:EVELYN_CODEX_CREDENTIALS_DIR) {
+        [System.IO.Path]::GetFullPath($env:EVELYN_CODEX_CREDENTIALS_DIR)
+    } else {
+        [System.IO.Path]::GetFullPath(
+            (Join-Path $projectRoot 'runtime_artifacts\secrets\codex_device_home')
+        )
+    }
+    $liveCodexHome = [System.IO.Path]::GetFullPath(
+        (Join-Path $env:USERPROFILE '.codex')
+    ).TrimEnd('\', '/')
+    $liveCodexPrefix = $liveCodexHome + [System.IO.Path]::DirectorySeparatorChar
+    if (
+        $credentialDirectory.Equals(
+            $liveCodexHome,
+            [System.StringComparison]::OrdinalIgnoreCase
+        ) -or
+        $credentialDirectory.StartsWith(
+            $liveCodexPrefix,
+            [System.StringComparison]::OrdinalIgnoreCase
+        )
+    ) {
+        throw 'EVELYN_CODEX_CREDENTIALS_DIR must not point at the live user .codex directory.'
+    }
+
+    $authFile = Join-Path $credentialDirectory 'auth.json'
+    if (-not (Test-Path -LiteralPath $authFile -PathType Leaf)) {
+        $provisioner = Join-Path $PSScriptRoot 'provision_codex_credentials.ps1'
+        throw (
+            'Dedicated Codex auth.json is missing. Run: powershell.exe ' +
+            "-NoProfile -ExecutionPolicy Bypass -File `"$provisioner`""
+        )
+    }
+    if ((Get-Item -LiteralPath $authFile).Length -gt 1MB) {
+        throw 'Dedicated Codex auth.json exceeds the 1 MiB safety limit.'
+    }
+    try {
+        Get-Content -LiteralPath $authFile -Raw -Encoding UTF8 |
+            ConvertFrom-Json |
+            Out-Null
+    } catch {
+        throw 'Dedicated Codex auth.json is not valid JSON.'
+    }
+    $env:EVELYN_CODEX_CREDENTIALS_DIR = $credentialDirectory
+}
+
+Initialize-CodexCredentialMount
+
 $composeArgs = @('-f', $composeFile)
 foreach ($profile in $normalizedProfiles) {
     $composeArgs += @('--profile', $profile)

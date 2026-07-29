@@ -160,7 +160,16 @@ class DockerComposeContractTests(unittest.TestCase):
         check_script = CHECK_SCRIPT.read_text(encoding="utf-8")
 
         self.assertIn("npm install -g @openai/codex@0.128.0", (DOCKER_DIR / "Dockerfile.voyager").read_text(encoding="utf-8"))
-        self.assertIn("${EVELYN_CODEX_AUTH_FILE:-${USERPROFILE}/.codex/auth.json}:/root/.codex/auth.json:ro", compose)
+        self.assertIn(
+            "${EVELYN_CODEX_CREDENTIALS_DIR:-./runtime_artifacts/secrets/codex_device_home}"
+            ":/run/secrets/evelyn-codex:ro",
+            compose,
+        )
+        self.assertNotIn("${USERPROFILE}/.codex/auth.json", compose)
+        self.assertIn("CODEX_HOME: \"/tmp/evelyn-codex-home\"", compose)
+        self.assertIn("read_only: true", compose)
+        self.assertIn("no-new-privileges:true", compose)
+        self.assertIn("/tmp/evelyn-codex-home:mode=0700", compose)
         self.assertIn("backendReady", source)
         self.assertIn("lastActionReady", source)
         self.assertIn("actionAuthRequired", source)
@@ -181,8 +190,7 @@ class DockerComposeContractTests(unittest.TestCase):
             "EVELYN_OMNIVOICE_SERVER_DIR",
             "EVELYN_OMNIVOICE_PROFILES_DIR",
             "EVELYN_HUGGINGFACE_CACHE_DIR",
-            "EVELYN_CODEX_AUTH_FILE",
-            "EVELYN_CODEX_CONFIG_FILE",
+            "EVELYN_CODEX_CREDENTIALS_DIR",
         ):
             self.assertIn(variable, source)
 
@@ -208,8 +216,26 @@ class DockerComposeContractTests(unittest.TestCase):
         self.assertIn("start_local_background.ps1", local_start)
         self.assertIn("docker-compose.fast-control.yml", docker_helper)
         self.assertIn("@('compose') + $composeArgs + @('up', '-d') + $serviceArgs", docker_helper)
+        self.assertIn("$normalizedServices -contains 'voyager'", docker_helper)
+        self.assertIn("$credentialDirectory.StartsWith(", docker_helper)
+        self.assertIn("$liveCodexPrefix", docker_helper)
         self.assertIn("EVELYN_ALLOW_LEGACY_HOST_START", core_start + local_start)
         self.assertIn('call "%~dp0start_main_llm.bat" --legacy-host', local_start)
+
+        provisioner = (
+            LAUNCHERS / "provision_codex_credentials.ps1"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            "Remove-Item -LiteralPath $staleConfig -Force",
+            provisioner,
+        )
+
+        native_gateway = (
+            LAUNCHERS / "start_codex_gateway.ps1"
+        ).read_text(encoding="utf-8")
+        self.assertIn("evelyn-codex-gateway-$PID", native_gateway)
+        self.assertIn("$env:CODEX_HOME = $codexEphemeralHome", native_gateway)
+        self.assertIn(".evelyn-ephemeral-codex-home", native_gateway)
 
     def test_individual_service_batches_do_not_start_host_processes_by_default(self) -> None:
         service_batches = {

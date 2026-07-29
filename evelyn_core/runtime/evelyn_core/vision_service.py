@@ -19,25 +19,40 @@ from PIL import Image
 from huggingface_hub import snapshot_download
 from transformers import AutoModelForCausalLM, AutoModelForImageTextToText, AutoProcessor, PreTrainedTokenizerFast
 
+from .runtime_config_schema import VISION_SERVICE_SETTINGS, load_runtime_settings
+from .runtime_error_observability import RuntimeErrorCounter
 from .vision_quality import build_vision_quality
 
 
-SMOL_MODEL_ID = os.getenv("VISION_SMOL_MODEL", "HuggingFaceTB/SmolVLM2-500M-Video-Instruct")
-OCR_MODEL_ID = os.getenv("VISION_OCR_MODEL", "tiiuae/Falcon-OCR")
-VISION_DEVICE = os.getenv("VISION_DEVICE", "cuda:0" if torch.cuda.is_available() else "cpu")
-VISION_DTYPE = os.getenv("VISION_DTYPE", "float16").lower()
-VISION_OCR_DTYPE = os.getenv("VISION_OCR_DTYPE", "auto").lower()
-VISION_MAX_NEW_TOKENS = int(os.getenv("VISION_MAX_NEW_TOKENS", "96"))
-VISION_TRUST_REMOTE_CODE = os.getenv("VISION_TRUST_REMOTE_CODE", "true").lower() == "true"
-VISION_LOAD_SMOL = os.getenv("VISION_LOAD_SMOL", "true").lower() == "true"
-VISION_LOAD_OCR = os.getenv("VISION_LOAD_OCR", "true").lower() == "true"
-VISION_OCR_LAZY_LOAD = os.getenv("VISION_OCR_LAZY_LOAD", "false").lower() in {"1", "true", "yes", "on"}
-VISION_OCR_IDLE_UNLOAD_SEC = max(0.0, float(os.getenv("VISION_OCR_IDLE_UNLOAD_SEC", "600")))
-VISION_OCR_UNLOAD_AFTER_REQUEST = os.getenv("VISION_OCR_UNLOAD_AFTER_REQUEST", "false").lower() in {"1", "true", "yes", "on"}
-VISION_OCR_EMPTY_CACHE_ON_UNLOAD = os.getenv("VISION_OCR_EMPTY_CACHE_ON_UNLOAD", "true").lower() in {"1", "true", "yes", "on"}
-VISION_OCR_COMPILE = os.getenv("VISION_OCR_COMPILE", "false").lower() == "true"
-EVELYN_HOST_PROJECT_ROOT = os.getenv("EVELYN_HOST_PROJECT_ROOT", "")
-EVELYN_CONTAINER_PROJECT_ROOT = os.getenv("EVELYN_CONTAINER_PROJECT_ROOT", "")
+_VISION_CONFIG = load_runtime_settings("vision", VISION_SERVICE_SETTINGS)
+_RUNTIME_ERRORS = RuntimeErrorCounter()
+SMOL_MODEL_ID = str(_VISION_CONFIG["VISION_SMOL_MODEL"])
+OCR_MODEL_ID = str(_VISION_CONFIG["VISION_OCR_MODEL"])
+_configured_device = str(_VISION_CONFIG["VISION_DEVICE"])
+VISION_DEVICE = (
+    "cuda:0" if torch.cuda.is_available() else "cpu"
+) if _configured_device == "auto" else _configured_device
+VISION_DTYPE = str(_VISION_CONFIG["VISION_DTYPE"]).lower()
+VISION_OCR_DTYPE = str(_VISION_CONFIG["VISION_OCR_DTYPE"]).lower()
+VISION_MAX_NEW_TOKENS = int(_VISION_CONFIG["VISION_MAX_NEW_TOKENS"])
+VISION_TRUST_REMOTE_CODE = bool(_VISION_CONFIG["VISION_TRUST_REMOTE_CODE"])
+VISION_LOAD_SMOL = bool(_VISION_CONFIG["VISION_LOAD_SMOL"])
+VISION_LOAD_OCR = bool(_VISION_CONFIG["VISION_LOAD_OCR"])
+VISION_OCR_LAZY_LOAD = bool(_VISION_CONFIG["VISION_OCR_LAZY_LOAD"])
+VISION_OCR_IDLE_UNLOAD_SEC = float(_VISION_CONFIG["VISION_OCR_IDLE_UNLOAD_SEC"])
+VISION_OCR_UNLOAD_AFTER_REQUEST = bool(
+    _VISION_CONFIG["VISION_OCR_UNLOAD_AFTER_REQUEST"]
+)
+VISION_OCR_EMPTY_CACHE_ON_UNLOAD = bool(
+    _VISION_CONFIG["VISION_OCR_EMPTY_CACHE_ON_UNLOAD"]
+)
+VISION_OCR_COMPILE = bool(_VISION_CONFIG["VISION_OCR_COMPILE"])
+EVELYN_HOST_PROJECT_ROOT = str(_VISION_CONFIG["EVELYN_HOST_PROJECT_ROOT"] or "")
+EVELYN_CONTAINER_PROJECT_ROOT = str(
+    _VISION_CONFIG["EVELYN_CONTAINER_PROJECT_ROOT"] or ""
+)
+VISION_HOST = str(_VISION_CONFIG["VISION_HOST"])
+VISION_PORT = int(_VISION_CONFIG["VISION_PORT"])
 WINDOWS_DRIVE_RE = re.compile(r"^([A-Za-z]):[\\/](.*)$")
 
 
@@ -240,7 +255,11 @@ def ensure_ocr_loaded() -> Any:
         if not VISION_OCR_LAZY_LOAD:
             raise HTTPException(status_code=503, detail="Falcon-OCR is not loaded")
         print(f"[VISION OCR] lazy load start model={OCR_MODEL_ID} gpu={gpu_snapshot()}", flush=True)
-        _ocr_model = load_falcon_ocr_model()
+        try:
+            _ocr_model = load_falcon_ocr_model()
+        except Exception as exc:
+            _RUNTIME_ERRORS.record("vision_ocr_load_failed", exc)
+            raise
         _ocr_loaded_at = time.time()
         _ocr_last_used_at = None
         print(f"[VISION OCR] lazy load done gpu={gpu_snapshot()}", flush=True)
@@ -267,7 +286,10 @@ def start_ocr_idle_reaper() -> None:
     def run() -> None:
         while True:
             time.sleep(interval)
-            maybe_unload_idle_ocr()
+            try:
+                maybe_unload_idle_ocr()
+            except Exception as exc:
+                _RUNTIME_ERRORS.record("vision_reaper_failed", exc)
 
     threading.Thread(target=run, name="vision-ocr-idle-reaper", daemon=True).start()
 
@@ -307,7 +329,11 @@ def load_models() -> None:
 
 @app.on_event("startup")
 def startup() -> None:
-    load_models()
+    try:
+        load_models()
+    except Exception as exc:
+        _RUNTIME_ERRORS.record("vision_model_load_failed", exc)
+        raise
     start_ocr_idle_reaper()
 
 
@@ -320,6 +346,8 @@ def health() -> dict[str, Any]:
             "ocr": ocr_status(),
         },
         "gpu": gpu_snapshot(),
+        "configuration": _VISION_CONFIG.public_summary(),
+        **_RUNTIME_ERRORS.snapshot(),
     }
 
 
@@ -348,21 +376,25 @@ def describe(request: VisionRequest) -> dict[str, Any]:
             ],
         }
     ]
-    inputs = _smol_processor.apply_chat_template(
-        messages,
-        add_generation_prompt=True,
-        tokenize=True,
-        return_dict=True,
-        return_tensors="pt",
-    ).to(_smol_model.device, dtype=_dtype)
-    with torch.inference_mode():
-        output_ids = _smol_model.generate(
-            **inputs,
-            do_sample=False,
-            max_new_tokens=request.max_new_tokens or VISION_MAX_NEW_TOKENS,
-        )
-    generated = output_ids[0][inputs["input_ids"].shape[-1] :]
-    text = _smol_processor.decode(generated, skip_special_tokens=True).strip()
+    try:
+        inputs = _smol_processor.apply_chat_template(
+            messages,
+            add_generation_prompt=True,
+            tokenize=True,
+            return_dict=True,
+            return_tensors="pt",
+        ).to(_smol_model.device, dtype=_dtype)
+        with torch.inference_mode():
+            output_ids = _smol_model.generate(
+                **inputs,
+                do_sample=False,
+                max_new_tokens=request.max_new_tokens or VISION_MAX_NEW_TOKENS,
+            )
+        generated = output_ids[0][inputs["input_ids"].shape[-1] :]
+        text = _smol_processor.decode(generated, skip_special_tokens=True).strip()
+    except Exception as exc:
+        _RUNTIME_ERRORS.record("vision_describe_failed", exc)
+        raise
     return {"text": text, "gpu": gpu_snapshot()}
 
 
@@ -379,9 +411,10 @@ def ocr(request: OcrRequest) -> dict[str, Any]:
             texts = ocr_model.generate(image, category=request.category, **kwargs)
             mark_ocr_used()
     except Exception as exc:  # noqa: BLE001 - third-party model code should surface through the API.
+        _RUNTIME_ERRORS.record("vision_ocr_generation_failed", exc)
         ocr_model = None
         cleanup_ocr_after_request()
-        raise HTTPException(status_code=500, detail=f"Falcon-OCR generation failed: {exc}") from exc
+        raise HTTPException(status_code=500, detail="vision_ocr_generation_failed") from exc
     text = texts[0] if texts else ""
     ocr_model = None
     cleanup_ocr_after_request()
@@ -393,30 +426,37 @@ def analyze(request: AnalyzeRequest) -> dict[str, Any]:
     image = load_image(image_path=request.image_path, image_base64=request.image_base64)
     result: dict[str, Any] = {}
     if _smol_model is not None and _smol_processor is not None:
-        messages = [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image", "image": image},
-                    {"type": "text", "text": request.prompt},
-                ],
-            }
-        ]
-        inputs = _smol_processor.apply_chat_template(
-            messages,
-            add_generation_prompt=True,
-            tokenize=True,
-            return_dict=True,
-            return_tensors="pt",
-        ).to(_smol_model.device, dtype=_dtype)
-        with torch.inference_mode():
-            output_ids = _smol_model.generate(
-                **inputs,
-                do_sample=False,
-                max_new_tokens=request.max_new_tokens or VISION_MAX_NEW_TOKENS,
-            )
-        generated = output_ids[0][inputs["input_ids"].shape[-1] :]
-        result["scene"] = _smol_processor.decode(generated, skip_special_tokens=True).strip()
+        try:
+            messages = [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image", "image": image},
+                        {"type": "text", "text": request.prompt},
+                    ],
+                }
+            ]
+            inputs = _smol_processor.apply_chat_template(
+                messages,
+                add_generation_prompt=True,
+                tokenize=True,
+                return_dict=True,
+                return_tensors="pt",
+            ).to(_smol_model.device, dtype=_dtype)
+            with torch.inference_mode():
+                output_ids = _smol_model.generate(
+                    **inputs,
+                    do_sample=False,
+                    max_new_tokens=request.max_new_tokens or VISION_MAX_NEW_TOKENS,
+                )
+            generated = output_ids[0][inputs["input_ids"].shape[-1] :]
+            result["scene"] = _smol_processor.decode(
+                generated,
+                skip_special_tokens=True,
+            ).strip()
+        except Exception as exc:
+            _RUNTIME_ERRORS.record("vision_analyze_failed", exc)
+            raise
     if request.run_ocr:
         ocr_model = None
         try:
@@ -427,7 +467,8 @@ def analyze(request: AnalyzeRequest) -> dict[str, Any]:
             result["ocr"] = str(texts[0]).strip() if texts else ""
             result["ocr_status"] = ocr_status()
         except Exception as exc:  # noqa: BLE001 - keep scene output available when OCR fails.
-            result["ocr_error"] = f"Falcon-OCR generation failed: {exc}"
+            _RUNTIME_ERRORS.record("vision_ocr_generation_failed", exc)
+            result["ocr_error"] = "vision_ocr_generation_failed"
         finally:
             ocr_model = None
             cleanup_ocr_after_request()
@@ -438,9 +479,7 @@ def analyze(request: AnalyzeRequest) -> dict[str, Any]:
 
 
 def main() -> None:
-    host = os.getenv("VISION_HOST", "127.0.0.1")
-    port = int(os.getenv("VISION_PORT", "8891"))
-    uvicorn.run(app, host=host, port=port)
+    uvicorn.run(app, host=VISION_HOST, port=VISION_PORT)
 
 
 if __name__ == "__main__":

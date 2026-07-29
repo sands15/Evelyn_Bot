@@ -175,6 +175,48 @@ class RuntimeErrorObservabilityTests(unittest.TestCase):
         self.assertEqual(summary["state"], "unknown")
         self.assertEqual(summary["summary"]["staleCount"], 1)
 
+    def test_http_owner_counters_are_merged_without_error_messages(self) -> None:
+        service_health = {
+            "stt": {
+                "id": "stt",
+                "state": "up",
+                "checkedAt": self.now,
+                "checks": [
+                    {
+                        "kind": "http",
+                        "payload": {
+                            "ok": True,
+                            "ready": True,
+                            "errorCount": 2,
+                            "lastErrorAt": self.now - 3,
+                            "lastErrorCode": "stt_transcribe_failed",
+                            "lastErrorType": "RuntimeError",
+                            "errorCounters": {
+                                "stt_transcribe_failed": 2,
+                            },
+                            "privateMessage": "C:\\secret\\model",
+                        },
+                    }
+                ],
+            }
+        }
+
+        summary = collect_runtime_error_observability(
+            artifacts_root=self.root,
+            now=self.now,
+            service_health=service_health,
+        )
+
+        self.assertEqual(summary["state"], "attention")
+        self.assertEqual(summary["sources"]["stt"]["errorCount"], 2)
+        self.assertEqual(
+            summary["sources"]["stt"]["lastErrorCode"],
+            "stt_transcribe_failed",
+        )
+        serialized = json.dumps(summary)
+        self.assertNotIn("privateMessage", serialized)
+        self.assertNotIn("secret", serialized)
+
 
 if __name__ == "__main__":
     unittest.main()

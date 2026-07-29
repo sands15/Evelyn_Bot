@@ -420,12 +420,8 @@ class LocalIoBridge:
         env = os.environ.copy()
         env.setdefault("DISCORD_BOT_TOKEN", "local-only-disabled")
         secret_home = PROJECT_ROOT / "runtime_artifacts" / "secrets" / "codex_device_home"
-        auth_file = secret_home / "auth.json"
-        config_file = secret_home / "config.toml"
-        if auth_file.exists():
-            env.setdefault("EVELYN_CODEX_AUTH_FILE", str(auth_file))
-        if config_file.exists():
-            env.setdefault("EVELYN_CODEX_CONFIG_FILE", str(config_file))
+        if (secret_home / "auth.json").is_file():
+            env.setdefault("EVELYN_CODEX_CREDENTIALS_DIR", str(secret_home))
         return env
 
     async def _launch_minecraft_stack(self) -> dict[str, Any]:

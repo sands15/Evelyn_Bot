@@ -22,6 +22,19 @@ class SttServiceContractTests(unittest.TestCase):
         self.assertIn("audio_f32_base64", source)
         self.assertIn("Qwen3ASRModel.from_pretrained", source)
 
+    def test_stt_health_exposes_safe_configuration_and_error_counters(self) -> None:
+        source = STT_SERVICE.read_text(encoding="utf-8")
+
+        self.assertIn("load_runtime_settings", source)
+        self.assertIn("RuntimeErrorCounter", source)
+        self.assertIn('"configuration": _STT_CONFIG.public_summary()', source)
+        self.assertIn('"importErrorType":', source)
+        self.assertNotIn('"importError": repr(', source)
+        self.assertIn('_RUNTIME_ERRORS.record("stt_import_failed"', source)
+        self.assertIn('_RUNTIME_ERRORS.record("stt_model_load_failed"', source)
+        self.assertIn('_RUNTIME_ERRORS.record("stt_transcribe_failed"', source)
+        self.assertIn('detail="invalid_audio_f32_base64"', source)
+
     def test_main_uses_remote_stt_when_url_is_configured(self) -> None:
         main_source = MAIN.read_text(encoding="utf-8")
         runtime_source = STT_TRANSCRIPTION_RUNTIME.read_text(encoding="utf-8")

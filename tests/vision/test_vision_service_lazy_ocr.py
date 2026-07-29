@@ -33,6 +33,23 @@ class VisionServiceLazyOcrTests(unittest.TestCase):
         self.assertIn("from .vision_quality import build_vision_quality", source)
         self.assertIn('result["quality"] = build_vision_quality(result)', source)
 
+    def test_vision_service_exposes_safe_configuration_and_error_counters(self) -> None:
+        source = VISION_SERVICE.read_text(encoding="utf-8")
+
+        self.assertIn("load_runtime_settings", source)
+        self.assertIn("RuntimeErrorCounter", source)
+        self.assertIn('"configuration": _VISION_CONFIG.public_summary()', source)
+        self.assertIn('_RUNTIME_ERRORS.record("vision_model_load_failed"', source)
+        self.assertIn('_RUNTIME_ERRORS.record("vision_describe_failed"', source)
+        self.assertIn('_RUNTIME_ERRORS.record("vision_analyze_failed"', source)
+        self.assertGreaterEqual(
+            source.count('_RUNTIME_ERRORS.record("vision_ocr_generation_failed"'),
+            2,
+        )
+        self.assertIn('detail="vision_ocr_generation_failed"', source)
+        self.assertIn('result["ocr_error"] = "vision_ocr_generation_failed"', source)
+        self.assertNotIn("Falcon-OCR generation failed: {exc}", source)
+
     def test_start_vision_passes_lazy_ocr_env_to_wsl_and_windows(self) -> None:
         source = START_VISION.read_text(encoding="utf-8")
 

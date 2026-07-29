@@ -10,9 +10,12 @@ Evaluation stance: 실패 가능성과 검증 공백을 우선 기록
 
 다음 조치: 실제 Minecraft 세션을 사용할 때 runner/bridge/TCP/task contract를 순서대로 검증한다.
 
-## P1 — Python 의존성 취약점 5개
+## P1 — Python 모델 런타임 의존성 잔여 취약점
 
-lock의 111개 패키지 중 `transformers==4.57.6`에서 알려진 취약점 4개, `torch==2.12.1`에서 1개가 보고됐다.
+루트/Windows lock의 Torch는 `2.13.0`으로 올라가
+`PYSEC-2025-194` 감사 예외를 제거했다. 그러나 Qwen-ASR 0.0.6이
+`transformers==4.57.6`을 정확히 요구하므로 Transformers finding 4개는 STT
+호환 릴리스 전까지 남는다.
 
 Transformers findings(2026-07-15 확인):
 
@@ -21,13 +24,18 @@ Transformers findings(2026-07-15 확인):
 - `PYSEC-2026-2288`
 - `PYSEC-2026-2289`
 
-Torch finding(2026-07-18 CI 확인):
+CUDA 12.8 공식 인덱스는 현재 Torch/Torchaudio 2.11과 Torchvision 0.26까지만
+제공한다. STT/Vision은 그 일치 조합으로 올렸지만 수정 버전 2.13은 사용할 수
+없다. exact-latent/FlashAttention 결합인 VoxCPM은 모델 smoke 없이 2.8에서
+올리지 않았다.
 
-- `PYSEC-2025-194` / `CVE-2025-3000`: `torch.jit.script` 메모리 손상, GitHub Reviewed Low 1.9, 로컬 공격·낮은 권한 필요, 수정 버전 `2.13.0`
+Falcon-OCR은 여전히 Hugging Face remote model code 실행을 요구한다.
+`VISION_TRUST_REMOTE_CODE=false`는 SmolVLM 경로만 제한하며 Falcon-OCR을
+sandbox한 것은 아니다.
 
-이블린 소스에는 `torch.jit.script`, `torch.jit`, 직접 `torch.load` 호출이 없다. 다만 전이 라이브러리 내부 호출 가능성까지 없다고 단정할 수는 없다. 표시된 수정 버전은 Transformers `5.0.0`/`5.3.0`, Torch `2.13.0`이지만, STT/Vision 모델과 `torchaudio==2.11.0`, CUDA 호환성을 검증하지 않은 채 업그레이드하면 런타임을 깨뜨릴 가능성이 크다.
-
-다음 조치: 별도 호환성 브랜치에서 Torch/Torchaudio 버전 정합성, 모델 로드, STT, Vision smoke를 먼저 통과시킨 뒤 upgrade 여부를 결정한다. CI는 이 문서에 기록된 5개 ID만 한시적으로 예외 처리하며 다른 신규 finding은 계속 실패시킨다. 재검토일: 2026-07-22.
+다음 조치: Qwen-ASR의 Transformers 5 호환 릴리스와 CUDA 12.8 Torch 2.13
+wheel을 재확인한다. 새 이미지 GPU 모델 로드 smoke 전에는 배포 완료로 판정하지
+않는다.
 
 ## P1 — Node/Minecraft 의존성 취약점 11개
 
@@ -56,23 +64,29 @@ CI의 실제 프로세스 smoke는 `main.py`가 기동 가능한지만 확인한
 
 ## P2 — 설정과 예외 처리의 잔여 분산
 
-Compose의 사용자별 경로 일부는 제거했지만 Python/PowerShell 환경변수 조회와
-광범위한 `except Exception`은 여전히 많다. 전체 설정 통합과 모든 owner 모듈의
-예외 관측성은 아직 완료되지 않았다.
+STT, Vision, Codex Gateway, Mindcraft는 공통 typed 설정 스키마로 이동했고
+잘못된 값은 원문을 노출하지 않는 경고와 기본값으로 처리한다. Python/PowerShell
+전체의 환경변수 조회, 특히 대형 호환 계층인 `config.py`와
+`main_runtime_config.py`는 아직 분산돼 있다.
 
-Host Supervisor, Local I/O Bridge, Discord의 heartbeat에는 프로세스 수명 오류
-카운터·최근 오류 시각·고정 오류 코드가 추가됐고 Runtime Health와 Control Page가
-이를 합성한다. 예외 메시지·스택·경로는 새 공개 응답에서 제외한다. 나머지 owner
-모듈과 설정 조회 분산은 아직 남아 있다.
+Host Supervisor, Local I/O Bridge, Discord, STT, Vision, Codex Gateway,
+Mindcraft의 오류 카운터를 Runtime Health와 Control Page가 합성한다. 예외
+메시지·스택·경로는 새 공개 응답에서 제외한다. 아직 owner 경계가 없는 보조
+모듈의 광범위한 예외 처리는 남아 있다.
 
-다음 조치: 새 예외 경계는 owner heartbeat 카운터에 연결하고, 설정 스키마 통합은
-별도 작업으로 진행한다.
+다음 조치: 새 서비스 owner를 만들 때 typed schema와 오류 카운터를 필수 계약으로
+적용하고, 기존 대형 설정 모듈은 기능 변경 시 점진적으로 이동한다.
 
-## P2 — 자격증명 마운트
+## P2 — Codex 자격증명의 수명
 
-Codex 자격증명은 컨테이너에 읽기 전용으로 마운트된다. 읽기 전용은 변조만 줄이고 탈취 범위는 제거하지 않는다. Gateway action 인증 추가만으로 컨테이너 침해 위험이 사라지는 것은 아니다.
+사용자의 live `~/.codex` 직접 마운트는 제거했다. 전용 디렉터리에서
+`auth.json`과 선택적 `config.toml`만 읽어 컨테이너 tmpfs에 복사하며 Gateway는
+read-only root, capability drop, `no-new-privileges`로 실행한다.
 
-다음 조치: 전용 최소 권한 자격증명 또는 짧은 수명 토큰 도입 가능성을 검토한다.
+전용 `auth.json` 사본은 여전히 장기 자격증명이다.
+
+다음 조치: 사용자 대화형 세션과 독립적으로 폐기할 수 있는 목적 제한·짧은 수명
+토큰이 제공되면 교체한다.
 
 ## P2 — 저장공간 보고는 Host Supervisor 가동에 의존
 

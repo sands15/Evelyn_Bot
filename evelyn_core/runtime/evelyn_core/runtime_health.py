@@ -714,7 +714,9 @@ async def collect_runtime_health(
         overall_state = "degraded"
     else:
         overall_state = "up"
-    runtime_errors = collect_runtime_error_observability()
+    runtime_errors = collect_runtime_error_observability(
+        service_health=services,
+    )
     return attach_voice_capabilities({
         "ok": not required_failed,
         "fullyHealthy": overall_state == "up",

@@ -6,7 +6,9 @@ import contextlib
 import ctypes
 import itertools
 import json
+import math
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -18,16 +20,35 @@ from typing import Any
 from aiohttp import web
 
 from evelyn_core.codex_gateway_auth import AUTHORIZATION_HEADER, gateway_request_authorized, resolve_gateway_token
+from evelyn_core.codex_gateway_credentials import prepare_codex_credentials
 from evelyn_core.paths import get_repo_root, get_runtime_artifacts_root
+from evelyn_core.runtime_config_schema import (
+    CODEX_GATEWAY_SETTINGS,
+    load_runtime_settings,
+)
+from evelyn_core.runtime_error_observability import RuntimeErrorCounter
 
 REPO_ROOT = get_repo_root()
 RUNTIME_ARTIFACTS_ROOT = get_runtime_artifacts_root()
-DEFAULT_HOST = os.getenv("VOYAGER_CODEX_GATEWAY_HOST", "127.0.0.1")
-DEFAULT_PORT = int(os.getenv("VOYAGER_CODEX_GATEWAY_PORT", "8787"))
-DEFAULT_MODEL = os.getenv("VOYAGER_CODEX_MODEL", "gpt-5.5")
-DEFAULT_TIMEOUT_SEC = float(os.getenv("VOYAGER_CODEX_GATEWAY_TIMEOUT_SEC", "260"))
-DEFAULT_WORKDIR = str(REPO_ROOT)
-DEFAULT_BACKEND_MODE = os.getenv("VOYAGER_CODEX_GATEWAY_BACKEND", "codex-exec").strip().lower()
+_GATEWAY_CONFIG = load_runtime_settings("codex_gateway", CODEX_GATEWAY_SETTINGS)
+_RUNTIME_ERRORS = RuntimeErrorCounter()
+_CREDENTIAL_STATUS: dict[str, Any] = {
+    "ready": False,
+    "mode": "not-initialized",
+    "errorCode": "codex_credentials_not_initialized",
+    "authPresent": False,
+    "configPresent": False,
+}
+DEFAULT_HOST = str(_GATEWAY_CONFIG["VOYAGER_CODEX_GATEWAY_HOST"])
+DEFAULT_PORT = int(_GATEWAY_CONFIG["VOYAGER_CODEX_GATEWAY_PORT"])
+DEFAULT_MODEL = str(_GATEWAY_CONFIG["VOYAGER_CODEX_MODEL"])
+DEFAULT_TIMEOUT_SEC = float(_GATEWAY_CONFIG["VOYAGER_CODEX_GATEWAY_TIMEOUT_SEC"])
+DEFAULT_WORKDIR = str(
+    _GATEWAY_CONFIG["VOYAGER_CODEX_GATEWAY_WORKDIR"] or REPO_ROOT
+)
+DEFAULT_BACKEND_MODE = str(
+    _GATEWAY_CONFIG["VOYAGER_CODEX_GATEWAY_BACKEND"]
+).strip().lower()
 LAST_REQUEST_STATUS_PATH = RUNTIME_ARTIFACTS_ROOT / "codex_gateway" / "last_request.json"
 GATEWAY_ERROR_LOG_PATH = RUNTIME_ARTIFACTS_ROOT / "logs" / "codex_gateway_errors.log"
 _GATEWAY_STATUS_LINE_LENGTH = 0
@@ -171,7 +192,9 @@ def _announce_gateway_status(message: str) -> None:
 
 
 def _backend_command() -> str:
-    return str(os.getenv("VOYAGER_CODEX_GATEWAY_COMMAND", "")).strip()
+    if not bool(_GATEWAY_CONFIG["EVELYN_ALLOW_CUSTOM_GATEWAY_COMMAND"]):
+        return ""
+    return str(_GATEWAY_CONFIG["VOYAGER_CODEX_GATEWAY_COMMAND"] or "").strip()
 
 
 def _backend_mode(env: dict[str, str] | None = None) -> str:
@@ -219,12 +242,72 @@ def _request_priority(payload: dict[str, Any], source: str) -> int:
     return 50
 
 
+def _safe_request_label(value: Any, *, fallback: str, allow_slash: bool = False) -> str:
+    pattern = r"[^A-Za-z0-9_.:/-]+" if allow_slash else r"[^A-Za-z0-9_.-]+"
+    cleaned = re.sub(pattern, "_", str(value or "").strip()).strip("._-")
+    return cleaned[:80] or fallback
+
+
+def _request_timeout(value: Any) -> float:
+    try:
+        timeout = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("codex_timeout_invalid") from exc
+    if not math.isfinite(timeout) or not 1.0 <= timeout <= 1800.0:
+        raise ValueError("codex_timeout_invalid")
+    return timeout
+
+
 def _load_last_request_status() -> dict[str, Any] | None:
     try:
         payload = json.loads(LAST_REQUEST_STATUS_PATH.read_text(encoding="utf-8"))
     except Exception:
         return None
     return payload if isinstance(payload, dict) else None
+
+
+def _public_last_request(payload: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(payload, dict):
+        return None
+    allowed_keys = (
+        "phase",
+        "backend",
+        "model",
+        "started_at",
+        "finished_at",
+        "elapsed_sec",
+        "returncode",
+        "prompt_chars",
+        "output_chars",
+        "source",
+        "priority",
+        "queue_size",
+    )
+    return {
+        key: payload[key]
+        for key in allowed_keys
+        if key in payload
+    }
+
+
+def initialize_codex_credentials() -> dict[str, Any]:
+    global _CREDENTIAL_STATUS
+    _CREDENTIAL_STATUS = prepare_codex_credentials()
+    if not _CREDENTIAL_STATUS.get("ready"):
+        _RUNTIME_ERRORS.record("codex_credentials_failed")
+    return dict(_CREDENTIAL_STATUS)
+
+
+def _resolve_request_workdir(value: Any) -> str:
+    allowed_root = Path(DEFAULT_WORKDIR).expanduser().resolve()
+    requested = Path(str(value or allowed_root)).expanduser().resolve()
+    try:
+        requested.relative_to(allowed_root)
+    except ValueError as exc:
+        raise ValueError("codex_workdir_outside_allowed_root") from exc
+    if not requested.is_dir():
+        raise ValueError("codex_workdir_unavailable")
+    return str(requested)
 
 
 def _write_last_request_status(payload: dict[str, Any]) -> None:
@@ -245,7 +328,6 @@ def _write_last_request_status(payload: dict[str, Any]) -> None:
             GATEWAY_ERROR_LOG_PATH,
             "codex_gateway",
             "codex request failed",
-            f"stderr={payload.get('stderr_preview')}\nstdout={payload.get('stdout_preview')}",
         )
     elif phase == "empty_output":
         _announce_gateway_status("codex returned empty output")
@@ -253,7 +335,6 @@ def _write_last_request_status(payload: dict[str, Any]) -> None:
             GATEWAY_ERROR_LOG_PATH,
             "codex_gateway",
             "codex returned empty output",
-            str(payload.get("stderr_preview") or ""),
         )
     elif phase == "queued":
         queue_size = payload.get("queue_size")
@@ -275,6 +356,8 @@ def _gateway_status() -> dict[str, Any]:
         "backend": _backend_label(),
         "backendReady": bool(backend_status.get("ready")),
         "backendStatus": backend_status,
+        "credentials": dict(_CREDENTIAL_STATUS),
+        "configuration": _GATEWAY_CONFIG.public_summary(),
         "lastActionReady": last_action_ready,
         "route": "/codex/action",
         "actionAuthRequired": True,
@@ -284,17 +367,18 @@ def _gateway_status() -> dict[str, Any]:
             "size": queue.qsize() if queue is not None else 0,
             "active": _ACTIVE_QUEUE_ITEM,
         },
-        "last_request": last_request,
+        "lastRequest": _public_last_request(last_request),
+        **_RUNTIME_ERRORS.snapshot(),
     }
 
 
 def _resolve_codex_cli() -> str:
-    explicit = str(os.getenv("VOYAGER_CODEX_CLI", "")).strip()
-    if explicit:
+    explicit = _GATEWAY_CONFIG["VOYAGER_CODEX_CLI"]
+    if explicit is not None:
         candidate = Path(explicit)
         if candidate.exists():
             return str(candidate)
-        raise RuntimeError(f"VOYAGER_CODEX_CLI points to a missing file: {explicit}")
+        raise RuntimeError("configured Codex CLI is unavailable")
 
     for name in ("codex", "codex.cmd", "codex.exe"):
         found = shutil.which(name)
@@ -321,22 +405,31 @@ def _backend_readiness() -> dict[str, Any]:
             "ready": True,
             "backend": "shell-command",
             "commandConfigured": True,
-            "detail": "VOYAGER_CODEX_GATEWAY_COMMAND is configured.",
         }
-    try:
-        cli = _resolve_codex_cli()
-    except Exception as exc:
+    if not _CREDENTIAL_STATUS.get("ready"):
         return {
             "ready": False,
             "backend": _backend_mode(),
             "commandConfigured": False,
-            "error": str(exc),
+            "errorCode": str(
+                _CREDENTIAL_STATUS.get("errorCode")
+                or "codex_credentials_unavailable"
+            ),
+        }
+    try:
+        _resolve_codex_cli()
+    except Exception:
+        return {
+            "ready": False,
+            "backend": _backend_mode(),
+            "commandConfigured": False,
+            "errorCode": "codex_cli_unavailable",
         }
     return {
         "ready": True,
         "backend": _backend_mode(),
         "commandConfigured": False,
-        "cli": cli,
+        "cliAvailable": True,
     }
 
 
@@ -361,16 +454,10 @@ def _strip_outer_fence(text: str) -> str:
     return stripped
 
 
-def _preview_text(text: str, limit: int = 2000) -> str:
-    if len(text) <= limit:
-        return text
-    head = max(0, limit // 2)
-    tail = max(0, limit - head - 80)
-    return f"{text[:head]}\n... <truncated {len(text) - head - tail} chars> ...\n{text[-tail:]}"
-
-
 async def _run_backend(prompt: str, model: str, timeout_sec: float, cwd: str) -> str:
     command = _backend_command()
+    if not command and not _CREDENTIAL_STATUS.get("ready"):
+        raise RuntimeError("codex_credentials_unavailable")
     env = os.environ.copy()
     _backend_mode(env)
     env["VOYAGER_CODEX_MODEL"] = model
@@ -383,7 +470,6 @@ async def _run_backend(prompt: str, model: str, timeout_sec: float, cwd: str) ->
         "backend": _backend_label(env),
         "model": model,
         "timeout_sec": timeout_sec,
-        "cwd": cwd,
         "prompt_chars": len(prompt),
     }
     _write_last_request_status(status_payload)
@@ -426,13 +512,15 @@ async def _run_backend(prompt: str, model: str, timeout_sec: float, cwd: str) ->
     status_payload.update({
         "phase": "backend_running",
         "pid": proc.pid,
-        "cli": command if command else (codex_cli if 'codex_cli' in locals() else None),
     })
     _write_last_request_status(status_payload)
 
     try:
         try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(stdin_data), timeout=max(1.0, timeout_sec))
+            stdout, _stderr = await asyncio.wait_for(
+                proc.communicate(stdin_data),
+                timeout=max(1.0, timeout_sec),
+            )
         except asyncio.TimeoutError as exc:
             proc.kill()
             await proc.communicate()
@@ -445,7 +533,6 @@ async def _run_backend(prompt: str, model: str, timeout_sec: float, cwd: str) ->
             raise RuntimeError(f"Codex gateway backend timed out after {timeout_sec:.0f}s") from exc
 
         output = stdout.decode("utf-8", errors="replace").strip()
-        err = stderr.decode("utf-8", errors="replace").strip()
 
         if proc.returncode != 0:
             status_payload.update({
@@ -453,21 +540,18 @@ async def _run_backend(prompt: str, model: str, timeout_sec: float, cwd: str) ->
                 "finished_at": time.time(),
                 "elapsed_sec": round(time.time() - started_at, 3),
                 "returncode": proc.returncode,
-                "stderr_preview": _preview_text(err),
-                "stdout_preview": _preview_text(output),
             })
             _write_last_request_status(status_payload)
-            raise RuntimeError(err or output or f"Codex gateway backend exited with code {proc.returncode}")
+            raise RuntimeError("codex_backend_process_failed")
         if not output:
             status_payload.update({
                 "phase": "empty_output",
                 "finished_at": time.time(),
                 "elapsed_sec": round(time.time() - started_at, 3),
                 "returncode": proc.returncode,
-                "stderr_preview": _preview_text(err),
             })
             _write_last_request_status(status_payload)
-            raise RuntimeError(err or "Codex gateway backend returned empty stdout")
+            raise RuntimeError("codex_backend_empty_output")
         cleaned = _strip_outer_fence(output)
         status_payload.update({
             "phase": "success",
@@ -482,8 +566,8 @@ async def _run_backend(prompt: str, model: str, timeout_sec: float, cwd: str) ->
         if prompt_path is not None:
             try:
                 prompt_path.unlink(missing_ok=True)
-            except Exception:
-                pass
+            except Exception as exc:
+                _RUNTIME_ERRORS.record("codex_prompt_cleanup_failed", exc)
 
 
 async def _queue_worker() -> None:
@@ -562,7 +646,6 @@ async def _submit_backend(
         "backend": _backend_label(),
         "model": model,
         "timeout_sec": timeout_sec,
-        "cwd": cwd,
         "prompt_chars": len(prompt),
         "source": source,
         "priority": priority,
@@ -593,10 +676,33 @@ async def codex_action(request: web.Request) -> web.Response:
     if not prompt:
         return web.json_response({"ok": False, "error": "prompt is empty"}, status=400)
 
-    model = str((payload or {}).get("model") or DEFAULT_MODEL).strip() or DEFAULT_MODEL
-    timeout_sec = float((payload or {}).get("timeout_sec") or DEFAULT_TIMEOUT_SEC)
-    cwd = str((payload or {}).get("cwd") or os.getenv("VOYAGER_CODEX_GATEWAY_WORKDIR") or DEFAULT_WORKDIR)
-    source = str((payload or {}).get("source") or (payload or {}).get("request_type") or "voyager-action").strip() or "voyager-action"
+    model = _safe_request_label(
+        (payload or {}).get("model") or DEFAULT_MODEL,
+        fallback=DEFAULT_MODEL,
+        allow_slash=True,
+    )
+    try:
+        timeout_sec = _request_timeout(
+            (payload or {}).get("timeout_sec") or DEFAULT_TIMEOUT_SEC
+        )
+    except ValueError as exc:
+        return web.json_response(
+            {"ok": False, "error": str(exc)},
+            status=400,
+        )
+    try:
+        cwd = _resolve_request_workdir((payload or {}).get("cwd"))
+    except ValueError as exc:
+        return web.json_response(
+            {"ok": False, "error": str(exc)},
+            status=400,
+        )
+    source = _safe_request_label(
+        (payload or {}).get("source")
+        or (payload or {}).get("request_type")
+        or "voyager-action",
+        fallback="voyager-action",
+    )
     priority = _request_priority(payload or {}, source)
 
     try:
@@ -609,20 +715,30 @@ async def codex_action(request: web.Request) -> web.Response:
             priority=priority,
         )
     except RuntimeError as exc:
-        message = str(exc)
-        return web.json_response({"ok": False, "error": message}, status=500)
+        _RUNTIME_ERRORS.record("codex_backend_failed", exc)
+        return web.json_response(
+            {"ok": False, "error": "codex_backend_failed"},
+            status=500,
+        )
     except Exception as exc:
+        _RUNTIME_ERRORS.record("codex_handler_failed", exc)
         _write_last_request_status({
             "started_at": time.time(),
             "phase": "handler_exception",
-            "error": str(exc),
+            "errorType": type(exc).__name__,
             "model": model,
             "timeout_sec": timeout_sec,
-            "cwd": cwd,
             "prompt_chars": len(prompt),
         })
-        _append_error_log(GATEWAY_ERROR_LOG_PATH, "codex_gateway_handler", str(exc))
-        return web.json_response({"ok": False, "error": str(exc)}, status=500)
+        _append_error_log(
+            GATEWAY_ERROR_LOG_PATH,
+            "codex_gateway_handler",
+            type(exc).__name__,
+        )
+        return web.json_response(
+            {"ok": False, "error": "codex_handler_failed"},
+            status=500,
+        )
 
     return web.json_response({"ok": True, "content": content, "source": source, "priority": priority})
 
@@ -643,6 +759,7 @@ def main() -> None:
     parser.add_argument("--host", default=DEFAULT_HOST)
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     args = parser.parse_args()
+    initialize_codex_credentials()
     _announce_gateway_status(f"HTTP ready at http://{args.host}:{args.port}")
     _announce_gateway_status("waiting for action request")
     try:

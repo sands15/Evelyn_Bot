@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import base64
-import os
 import time
 from typing import Any
 
@@ -12,25 +11,31 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 from .audio import resample_audio_float
+from .runtime_config_schema import STT_SERVICE_SETTINGS, load_runtime_settings
+from .runtime_error_observability import RuntimeErrorCounter
 from .text import clean_text
+
+_STT_CONFIG = load_runtime_settings("stt", STT_SERVICE_SETTINGS)
+_RUNTIME_ERRORS = RuntimeErrorCounter()
 
 try:
     from qwen_asr import Qwen3ASRModel
 except Exception as exc:  # noqa: BLE001 - surfaced through /health and startup logs.
     Qwen3ASRModel = None
     QWEN_ASR_IMPORT_ERROR = exc
+    _RUNTIME_ERRORS.record("stt_import_failed", exc)
 else:
     QWEN_ASR_IMPORT_ERROR = None
 
 
-STT_MODEL_NAME = os.getenv("STT_MODEL_NAME", "Qwen/Qwen3-ASR-1.7B")
-STT_LANGUAGE = os.getenv("STT_LANGUAGE", "ko")
-STT_FORCE_LANGUAGE = os.getenv("STT_FORCE_LANGUAGE", "true").lower() in {"1", "true", "yes", "on"}
-STT_COMPUTE_TYPE = os.getenv("STT_COMPUTE_TYPE", "float16")
-STT_HOST = os.getenv("STT_HOST", "127.0.0.1")
-STT_PORT = int(os.getenv("STT_PORT", "8892"))
-STT_LOAD_ON_START = os.getenv("STT_LOAD_ON_START", "true").lower() in {"1", "true", "yes", "on"}
-STT_MAX_AUDIO_SEC = max(1.0, float(os.getenv("STT_MAX_AUDIO_SEC", "30")))
+STT_MODEL_NAME = str(_STT_CONFIG["STT_MODEL_NAME"])
+STT_LANGUAGE = str(_STT_CONFIG["STT_LANGUAGE"])
+STT_FORCE_LANGUAGE = bool(_STT_CONFIG["STT_FORCE_LANGUAGE"])
+STT_COMPUTE_TYPE = str(_STT_CONFIG["STT_COMPUTE_TYPE"])
+STT_HOST = str(_STT_CONFIG["STT_HOST"])
+STT_PORT = int(_STT_CONFIG["STT_PORT"])
+STT_LOAD_ON_START = bool(_STT_CONFIG["STT_LOAD_ON_START"])
+STT_MAX_AUDIO_SEC = float(_STT_CONFIG["STT_MAX_AUDIO_SEC"])
 TARGET_RATE = 16000
 
 app = FastAPI(title="Evelyn STT Service", version="0.1")
@@ -116,12 +121,16 @@ def get_model() -> Any:
         "max_inference_batch_size": 1,
         "max_new_tokens": 256,
     }
-    token = os.getenv("HF_TOKEN")
+    token = str(_STT_CONFIG["HF_TOKEN"] or "")
     if token:
         load_kwargs["token"] = token
 
     print(f"[STT SERVICE LOAD] start model={STT_MODEL_NAME} device={device} dtype={load_kwargs['dtype']}", flush=True)
-    _model = Qwen3ASRModel.from_pretrained(STT_MODEL_NAME, **load_kwargs)
+    try:
+        _model = Qwen3ASRModel.from_pretrained(STT_MODEL_NAME, **load_kwargs)
+    except Exception as exc:
+        _RUNTIME_ERRORS.record("stt_model_load_failed", exc)
+        raise
     _loaded_at = time.time()
     print(f"[STT SERVICE LOAD] done model={STT_MODEL_NAME} gpu={gpu_snapshot()}", flush=True)
     return _model
@@ -131,7 +140,7 @@ def decode_audio(request_payload: TranscribeRequest) -> np.ndarray:
     try:
         raw = base64.b64decode(request_payload.audio_f32_base64, validate=True)
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=400, detail=f"invalid audio_f32_base64: {exc}") from exc
+        raise HTTPException(status_code=400, detail="invalid_audio_f32_base64") from exc
 
     audio = np.frombuffer(raw, dtype=np.float32)
     if int(request_payload.sample_count) != int(audio.size):
@@ -158,7 +167,13 @@ def health() -> dict[str, Any]:
         "loadedAt": _loaded_at,
         "loadOnStart": STT_LOAD_ON_START,
         "gpu": gpu_snapshot(),
-        "importError": None if QWEN_ASR_IMPORT_ERROR is None else repr(QWEN_ASR_IMPORT_ERROR),
+        "importErrorType": (
+            None
+            if QWEN_ASR_IMPORT_ERROR is None
+            else type(QWEN_ASR_IMPORT_ERROR).__name__
+        ),
+        "configuration": _STT_CONFIG.public_summary(),
+        **_RUNTIME_ERRORS.snapshot(),
     }
 
 
@@ -176,11 +191,15 @@ def transcribe(payload: TranscribeRequest) -> dict[str, Any]:
 
     model = get_model()
     language = normalize_language(payload.language) if (payload.language or STT_FORCE_LANGUAGE) else None
-    results = model.transcribe(
-        audio=(audio, sampling_rate),
-        language=language,
-        return_time_stamps=False,
-    )
+    try:
+        results = model.transcribe(
+            audio=(audio, sampling_rate),
+            language=language,
+            return_time_stamps=False,
+        )
+    except Exception as exc:
+        _RUNTIME_ERRORS.record("stt_transcribe_failed", exc)
+        raise
     text = clean_text(getattr(results[0], "text", "") if results else "")
     duration_ms = (time.monotonic() - started) * 1000.0
     print(f"[STT SERVICE DONE][{payload.stage}] sec={audio.size / float(sampling_rate):.2f} text={text!r}", flush=True)

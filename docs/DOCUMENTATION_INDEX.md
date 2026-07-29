@@ -42,6 +42,10 @@ implemented behavior.
 - `docs/RUNTIME_ARTIFACTS_RETENTION.md`
   - Current retention guidance for runtime artifacts.
 
+- `docs/DEPENDENCY_CONFIG_CREDENTIAL_HARDENING.md`
+  - Current dependency compatibility matrix, typed owner configuration,
+    exception observability, and dedicated Codex credential boundary.
+
 - `docs/EVELYN_COMPLETENESS_EVALUATION_2026-06-09.md`
   - Detailed completeness evaluation and redesign-priority reference.
   - Includes the 2026-06-15 update for local TTS barge-in, speaker

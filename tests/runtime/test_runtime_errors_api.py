@@ -3,7 +3,7 @@ from __future__ import annotations
 import sys
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from aiohttp.test_utils import TestClient, TestServer
 
@@ -42,8 +42,13 @@ class RuntimeErrorsApiTests(unittest.IsolatedAsyncioTestCase):
         }
         self.summary_patch = patch.object(
             control_page_server,
-            "collect_runtime_error_observability",
-            return_value=self.summary,
+            "cached_runtime_health",
+            new_callable=AsyncMock,
+            return_value={
+                "observability": {
+                    "exceptions": self.summary,
+                }
+            },
         )
         self.summary_patch.start()
         self.client = TestClient(TestServer(control_page_server.create_app()))

@@ -469,6 +469,7 @@ services:
       VISION_DTYPE: "float16"
       VISION_LOAD_SMOL: "true"
       VISION_LOAD_OCR: "false"
+      VISION_TRUST_REMOTE_CODE: "false"
       VISION_OCR_LAZY_LOAD: "true"
       VISION_OCR_IDLE_UNLOAD_SEC: "600"
       VISION_OCR_UNLOAD_AFTER_REQUEST: "true"
@@ -534,15 +535,23 @@ services:
       VOYAGER_CODEX_MODEL: "gpt-5.5"
       VOYAGER_CODEX_GATEWAY_BACKEND: "codex-exec"
       VOYAGER_CODEX_GATEWAY_WORKDIR: "/app"
-      CODEX_HOME: "/root/.codex"
+      EVELYN_ALLOW_CUSTOM_GATEWAY_COMMAND: "false"
+      EVELYN_CODEX_CREDENTIALS_DIR: "/run/secrets/evelyn-codex"
+      CODEX_HOME: "/tmp/evelyn-codex-home"
       EVELYN_PROJECT_ROOT: /app
       EVELYN_CORE_ROOT: /app/evelyn_core
       EVELYN_CORE_RUNTIME: /app/evelyn_core/runtime
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp/evelyn-codex-home:mode=0700,uid=0,gid=0
     volumes:
       - ./runtime_artifacts:/app/runtime_artifacts
       - ./logs:/app/logs
-      - ${EVELYN_CODEX_AUTH_FILE:-${USERPROFILE}/.codex/auth.json}:/root/.codex/auth.json:ro
-      - ${EVELYN_CODEX_CONFIG_FILE:-${USERPROFILE}/.codex/config.toml}:/root/.codex/config.toml:ro
+      - ${EVELYN_CODEX_CREDENTIALS_DIR:-./runtime_artifacts/secrets/codex_device_home}:/run/secrets/evelyn-codex:ro
     ports:
       - "127.0.0.1:8787:8787"
     command: ["python", "-m", "evelyn_core.codex_gateway_server", "--host", "0.0.0.0", "--port", "8787"]

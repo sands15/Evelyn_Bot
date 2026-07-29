@@ -656,10 +656,25 @@ async def runtime_health_handler(_: web.Request) -> web.StreamResponse:
 
 
 async def runtime_errors_handler(_: web.Request) -> web.StreamResponse:
+    health = await cached_runtime_health(force=True)
+    observability = (
+        health.get("observability")
+        if isinstance(health, dict)
+        else None
+    )
+    errors = (
+        observability.get("exceptions")
+        if isinstance(observability, dict)
+        else None
+    )
     return json_response(
         {
             "ok": True,
-            "errors": collect_runtime_error_observability(),
+            "errors": (
+                errors
+                if isinstance(errors, dict)
+                else collect_runtime_error_observability()
+            ),
         }
     )
 

@@ -109,11 +109,28 @@ powershell -ExecutionPolicy Bypass -File .\tools\check_docker_runtime.ps1 -Inclu
 현재 구성:
 
 - CLI: `/usr/local/bin/codex`
-- auth mount: `${EVELYN_CODEX_AUTH_FILE:-${USERPROFILE}/.codex/auth.json}:/root/.codex/auth.json:ro`
-- config mount: `${EVELYN_CODEX_CONFIG_FILE:-${USERPROFILE}/.codex/config.toml}:/root/.codex/config.toml:ro`
+- host credential directory:
+  `runtime_artifacts/secrets/codex_device_home`
+- container secret mount: `/run/secrets/evelyn-codex:ro`
+- ephemeral CLI home: `/tmp/evelyn-codex-home`
+- root filesystem: read-only
+- Linux capabilities: all dropped
+- custom shell backend: disabled by default
 
-주의: `backendReady=true`는 CLI 실행 파일이 준비됐다는 뜻이다. 실제 `/codex/action` 호출은 Codex 인증 상태까지 통과해야 한다. `refresh_token_reused`가 나오면 `EVELYN_CODEX_AUTH_FILE` 또는 기본 `${USERPROFILE}/.codex/auth.json`이 재로그인 필요한 상태다.
-`lastActionReady=false`는 HTTP 서버가 살아 있어도 마지막 실제 action 실행이 실패했다는 뜻이다.
+사용자의 live `.codex` 디렉터리를 직접 마운트하지 않는다. 최초 실행 전 전용 사본을
+명시적으로 만든다.
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass `
+  -File .\evelyn_core\runtime\launchers\provision_codex_credentials.ps1
+```
+
+기본 명령은 `auth.json`만 복사한다. Gateway에 사용자 설정이 꼭 필요할 때만
+`-IncludeConfig`를 사용한다.
+
+주의: `backendReady=true`는 CLI와 전용 인증 사본이 준비됐다는 뜻이다. 실제
+`/codex/action` 호출도 별도로 통과해야 한다. `lastActionReady=false`는 HTTP
+서버가 살아 있어도 마지막 실제 action 실행이 실패했다는 뜻이다.
 
 ## GPU 배치
 

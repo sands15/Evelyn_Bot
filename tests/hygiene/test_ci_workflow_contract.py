@@ -32,11 +32,11 @@ class CiWorkflowContractTests(unittest.TestCase):
             "PYSEC-2026-2290",
             "PYSEC-2026-2288",
             "PYSEC-2026-2289",
-            "PYSEC-2025-194",
         ):
             self.assertIn(f"--ignore-vuln {vulnerability_id}", self.source)
+        self.assertNotIn("--ignore-vuln PYSEC-2025-194", self.source)
         active_risks = (REPO_ROOT / "docs" / "ACTIVE_RISKS.md").read_text(encoding="utf-8")
-        self.assertIn("재검토일: 2026-07-22", active_risks)
+        self.assertIn("Qwen-ASR 0.0.6", active_risks)
 
 
 if __name__ == "__main__":

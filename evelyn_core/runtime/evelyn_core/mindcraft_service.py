@@ -12,6 +12,11 @@ from typing import Any
 from aiohttp import web
 
 from .paths import get_runtime_artifacts_root
+from .runtime_config_schema import (
+    MINDCRAFT_SERVICE_SETTINGS,
+    load_runtime_settings,
+)
+from .runtime_error_observability import RuntimeErrorCounter
 
 
 DEFAULT_GOAL = (
@@ -23,11 +28,21 @@ DEFAULT_GOAL = (
     "privileges; when blocked, observe and take a normal-player detour instead of repeating."
 )
 RUNTIME_ARTIFACTS_ROOT = get_runtime_artifacts_root()
-STATUS_PATH = Path(os.getenv("MINDCRAFT_STATUS_PATH") or RUNTIME_ARTIFACTS_ROOT / "mindcraft" / "status.json")
+_MINDCRAFT_CONFIG = load_runtime_settings(
+    "mindcraft",
+    MINDCRAFT_SERVICE_SETTINGS,
+)
+STATUS_PATH = Path(
+    _MINDCRAFT_CONFIG["MINDCRAFT_STATUS_PATH"]
+    or RUNTIME_ARTIFACTS_ROOT / "mindcraft" / "status.json"
+)
 GOAL_STATE_PATH = RUNTIME_ARTIFACTS_ROOT / "voyager" / "voyager_goal_state.json"
 LOG_PATH = RUNTIME_ARTIFACTS_ROOT / "logs" / "mindcraft.log"
-MINDCRAFT_ROOT = Path(os.getenv("MINDCRAFT_ROOT") or "/app/mindcraft")
-PROFILE_PATH = Path(os.getenv("MINDCRAFT_AGENT_PROFILE") or MINDCRAFT_ROOT / "profiles" / "evelyn.json")
+MINDCRAFT_ROOT = Path(_MINDCRAFT_CONFIG["MINDCRAFT_ROOT"])
+PROFILE_PATH = Path(
+    _MINDCRAFT_CONFIG["MINDCRAFT_AGENT_PROFILE"]
+    or MINDCRAFT_ROOT / "profiles" / "evelyn.json"
+)
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -50,7 +65,11 @@ def _clean_goal(value: Any) -> str:
 
 
 def _allowed_players() -> list[str]:
-    return [item.strip() for item in str(os.getenv("MINDCRAFT_ALLOWED_PLAYERS") or "").split(",") if item.strip()]
+    return [
+        item.strip()
+        for item in str(_MINDCRAFT_CONFIG["MINDCRAFT_ALLOWED_PLAYERS"]).split(",")
+        if item.strip()
+    ]
 
 
 class MindcraftRuntime:
@@ -61,14 +80,12 @@ class MindcraftRuntime:
         self._started_at: float | None = None
         self._last_exit_code: int | None = None
         self._manual_stop = False
-        self._auto_restart = os.getenv("MINDCRAFT_AUTO_RESTART", "true").lower() not in {
-            "0",
-            "false",
-            "off",
-            "no",
-        }
+        self.runtime_errors = RuntimeErrorCounter()
+        self._auto_restart = bool(_MINDCRAFT_CONFIG["MINDCRAFT_AUTO_RESTART"])
         self._restart_backoff_until = 0.0
-        self._restart_cooldown_sec = float(os.getenv("MINDCRAFT_AUTO_RESTART_COOLDOWN_SEC", "5"))
+        self._restart_cooldown_sec = float(
+            _MINDCRAFT_CONFIG["MINDCRAFT_AUTO_RESTART_COOLDOWN_SEC"]
+        )
 
     def process_alive(self) -> bool:
         process = self._process
@@ -87,11 +104,11 @@ class MindcraftRuntime:
 
     def _settings(self, goal: str) -> dict[str, Any]:
         return {
-            "minecraft_version": os.getenv("MINECRAFT_VERSION", "1.21.11"),
-            "host": os.getenv("MINEFLAYER_HOST", "host.docker.internal"),
-            "port": int(os.getenv("MINEFLAYER_PORT", "25565")),
-            "auth": os.getenv("MINEFLAYER_AUTH", "microsoft"),
-            "mindserver_port": int(os.getenv("MINDSERVER_PORT", "8080")),
+            "minecraft_version": str(_MINDCRAFT_CONFIG["MINECRAFT_VERSION"]),
+            "host": str(_MINDCRAFT_CONFIG["MINEFLAYER_HOST"]),
+            "port": int(_MINDCRAFT_CONFIG["MINEFLAYER_PORT"]),
+            "auth": str(_MINDCRAFT_CONFIG["MINEFLAYER_AUTH"]),
+            "mindserver_port": int(_MINDCRAFT_CONFIG["MINDSERVER_PORT"]),
             "auto_open_ui": False,
             "base_profile": "survival",
             "profiles": [str(PROFILE_PATH)],
@@ -135,8 +152,16 @@ class MindcraftRuntime:
             if self.process_alive():
                 return
             if not (MINDCRAFT_ROOT / "main.js").exists():
+                self.runtime_errors.record(
+                    "mindcraft_start_failed",
+                    FileNotFoundError,
+                )
                 raise RuntimeError(f"Mindcraft main.js is missing under {MINDCRAFT_ROOT}")
             if not PROFILE_PATH.exists():
+                self.runtime_errors.record(
+                    "mindcraft_start_failed",
+                    FileNotFoundError,
+                )
                 raise RuntimeError(f"Mindcraft Evelyn profile is missing: {PROFILE_PATH}")
 
             env = os.environ.copy()
@@ -144,21 +169,31 @@ class MindcraftRuntime:
             env["PROFILES"] = json.dumps([str(PROFILE_PATH)])
             env["MINDCRAFT_GOAL"] = requested_goal
             env["MINDCRAFT_STATUS_PATH"] = str(STATUS_PATH)
-            env.setdefault("MINECRAFT_USERNAME", os.getenv("MINEFLAYER_USERNAME", "Evelyn_0428"))
-            env.setdefault("MINEFLAYER_PROFILES_FOLDER", "/app/bot_profiles")
+            env.setdefault(
+                "MINECRAFT_USERNAME",
+                str(_MINDCRAFT_CONFIG["MINEFLAYER_USERNAME"]),
+            )
+            env.setdefault(
+                "MINEFLAYER_PROFILES_FOLDER",
+                str(_MINDCRAFT_CONFIG["MINEFLAYER_PROFILES_FOLDER"]),
+            )
             env["MINDCRAFT_ENABLE_SKIN_COMMANDS"] = "false"
             env["INSECURE_CODING"] = ""
 
             LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
             self._log_handle = LOG_PATH.open("a", encoding="utf-8", buffering=1)
-            self._process = subprocess.Popen(
-                ["node", "main.js"],
-                cwd=str(MINDCRAFT_ROOT),
-                env=env,
-                stdout=self._log_handle,
-                stderr=subprocess.STDOUT,
-                text=True,
-            )
+            try:
+                self._process = subprocess.Popen(
+                    ["node", "main.js"],
+                    cwd=str(MINDCRAFT_ROOT),
+                    env=env,
+                    stdout=self._log_handle,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                )
+            except Exception as exc:
+                self.runtime_errors.record("mindcraft_start_failed", exc)
+                raise
             self._started_at = time.time()
             self._last_exit_code = None
             self._restart_backoff_until = 0.0
@@ -171,8 +206,8 @@ class MindcraftRuntime:
             if self._log_handle is not None:
                 try:
                     self._log_handle.close()
-                except Exception:
-                    pass
+                except Exception as exc:
+                    self.runtime_errors.record("mindcraft_log_close_failed", exc)
                 finally:
                     self._log_handle = None
 
@@ -191,39 +226,46 @@ class MindcraftRuntime:
             try:
                 self.start(self.get_goal())
             except Exception as exc:
+                self.runtime_errors.record("mindcraft_auto_restart_failed", exc)
                 telemetry = _read_json(STATUS_PATH)
-                telemetry["last_error"] = f"Auto-restart failed: {exc}"
+                telemetry["last_error"] = (
+                    f"mindcraft_auto_restart_failed:{type(exc).__name__}"
+                )
                 _write_json(STATUS_PATH, telemetry)
 
     def stop(self) -> None:
         with self._lock:
-            self._manual_stop = True
-            process = self._process
-            if process is not None and process.poll() is None:
-                process.terminate()
-                try:
-                    process.wait(timeout=10)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait(timeout=5)
-            if process is not None:
-                self._last_exit_code = process.poll()
-            self._process = None
-            if self._log_handle is not None:
-                self._log_handle.close()
-                self._log_handle = None
-            telemetry = _read_json(STATUS_PATH)
-            telemetry.update(
-                {
-                    "runtime": "mindcraft",
-                    "running": False,
-                    "connected": False,
-                    "connection_state": "stopped",
-                    "phase": "stopped",
-                    "updated_at": time.time(),
-                }
-            )
-            _write_json(STATUS_PATH, telemetry)
+            try:
+                self._manual_stop = True
+                process = self._process
+                if process is not None and process.poll() is None:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait(timeout=5)
+                if process is not None:
+                    self._last_exit_code = process.poll()
+                self._process = None
+                if self._log_handle is not None:
+                    self._log_handle.close()
+                    self._log_handle = None
+                telemetry = _read_json(STATUS_PATH)
+                telemetry.update(
+                    {
+                        "runtime": "mindcraft",
+                        "running": False,
+                        "connected": False,
+                        "connection_state": "stopped",
+                        "phase": "stopped",
+                        "updated_at": time.time(),
+                    }
+                )
+                _write_json(STATUS_PATH, telemetry)
+            except Exception as exc:
+                self.runtime_errors.record("mindcraft_stop_failed", exc)
+                raise
 
     def restart_for_goal(self, goal: str) -> None:
         with self._lock:
@@ -293,14 +335,14 @@ class MindcraftRuntime:
             "hostiles_nearby": observation["hostiles_nearby"],
             "survival_controller": observation["survival_controller"],
             "agent_models": {
-                "planner": os.getenv("MINDCRAFT_LOCAL_MODEL", "Qwen3-14B-Q4_K_M.gguf"),
-                "router": os.getenv("MINDCRAFT_ROUTER_MODEL", "gemma-4-E2B-it-Q4_K_M.gguf"),
-                "escalation": os.getenv("MINDCRAFT_CODEX_MODEL", "gpt-5.5"),
+                "planner": str(_MINDCRAFT_CONFIG["MINDCRAFT_LOCAL_MODEL"]),
+                "router": str(_MINDCRAFT_CONFIG["MINDCRAFT_ROUTER_MODEL"]),
+                "escalation": str(_MINDCRAFT_CONFIG["MINDCRAFT_CODEX_MODEL"]),
             },
             "codex_gateway": {
                 "enabled": True,
-                "url": os.getenv("MINDCRAFT_CODEX_GATEWAY_URL", "http://codex_gateway:8787/codex/action"),
-                "model": os.getenv("MINDCRAFT_CODEX_MODEL", "gpt-5.5"),
+                "url": str(_MINDCRAFT_CONFIG["MINDCRAFT_CODEX_GATEWAY_URL"]),
+                "model": str(_MINDCRAFT_CONFIG["MINDCRAFT_CODEX_MODEL"]),
             },
             "command_policy": "outbound_chat_disabled_by_default",
             "blocked_command_count": int(telemetry.get("blocked_command_count") or 0),
@@ -308,8 +350,8 @@ class MindcraftRuntime:
             "telemetry_fresh": telemetry_fresh,
             "updated_at": updated_at or self._started_at or time.time(),
             "runner_exit_code": self._last_exit_code,
-            "runner_status_path": str(STATUS_PATH),
-            "runner_log_path": str(LOG_PATH),
+            "configuration": _MINDCRAFT_CONFIG.public_summary(),
+            **self.runtime_errors.snapshot(),
             "note": "Evelyn Mindcraft v0.1.4 runtime with non-operator survival policy.",
         }
 
@@ -319,7 +361,14 @@ STATE = MindcraftRuntime()
 
 async def health(_: web.Request) -> web.Response:
     return web.json_response(
-        {"ok": True, "service": "mindcraft_minecraft", "runtime": "mindcraft", "runner_alive": STATE.process_alive()}
+        {
+            "ok": True,
+            "service": "mindcraft_minecraft",
+            "runtime": "mindcraft",
+            "runner_alive": STATE.process_alive(),
+            "configuration": _MINDCRAFT_CONFIG.public_summary(),
+            **STATE.runtime_errors.snapshot(),
+        }
     )
 
 

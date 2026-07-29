@@ -1,12 +1,13 @@
 aiohttp>=3.13
 discord.py>=2.7
-qwen-asr
-transformers>=4.57
+qwen-asr==0.0.6
+# qwen-asr 0.0.6 requires this exact Transformers release.
+transformers==4.57.6
 numpy>=2.0
 Pillow>=11.0
 requests>=2.32
 psutil>=5.9
-torch>=2.8
+torch>=2.13
 fastapi>=0.115
 uvicorn>=0.32
 PyNaCl>=1.5

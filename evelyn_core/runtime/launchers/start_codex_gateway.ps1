@@ -6,6 +6,16 @@ $env:EVELYN_PROJECT_ROOT = [string]$projectRoot
 $env:EVELYN_CORE_ROOT = Join-Path $projectRoot 'evelyn_core'
 $env:EVELYN_CORE_RUNTIME = [string]$coreRuntime
 $env:PYTHONPATH = if ($env:PYTHONPATH) { "$coreRuntime;$($env:PYTHONPATH)" } else { [string]$coreRuntime }
+$env:EVELYN_CODEX_CREDENTIALS_DIR = if ($env:EVELYN_CODEX_CREDENTIALS_DIR) {
+    [System.IO.Path]::GetFullPath($env:EVELYN_CODEX_CREDENTIALS_DIR)
+} else {
+    Join-Path $projectRoot 'runtime_artifacts\secrets\codex_device_home'
+}
+$codexTempRoot = [System.IO.Path]::GetFullPath(
+    [System.IO.Path]::GetTempPath()
+).TrimEnd('\', '/')
+$codexEphemeralHome = Join-Path $codexTempRoot "evelyn-codex-gateway-$PID"
+$env:CODEX_HOME = $codexEphemeralHome
 Set-Location $projectRoot
 
 $pythonExe = if ($env:VOYAGER_CODEX_GATEWAY_PYTHON_EXE) { $env:VOYAGER_CODEX_GATEWAY_PYTHON_EXE } else { Join-Path $projectRoot '.venv-voyager\Scripts\python.exe' }
@@ -44,4 +54,16 @@ finally {
         try { $mutex.ReleaseMutex() | Out-Null } catch {}
     }
     $mutex.Dispose()
+    $marker = Join-Path $codexEphemeralHome '.evelyn-ephemeral-codex-home'
+    $tempPrefix = $codexTempRoot + [System.IO.Path]::DirectorySeparatorChar
+    $resolvedEphemeralHome = [System.IO.Path]::GetFullPath($codexEphemeralHome)
+    if (
+        $resolvedEphemeralHome.StartsWith(
+            $tempPrefix,
+            [System.StringComparison]::OrdinalIgnoreCase
+        ) -and
+        (Test-Path -LiteralPath $marker -PathType Leaf)
+    ) {
+        Remove-Item -LiteralPath $resolvedEphemeralHome -Recurse -Force
+    }
 }
