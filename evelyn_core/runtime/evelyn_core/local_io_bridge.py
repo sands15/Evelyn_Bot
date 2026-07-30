@@ -57,6 +57,7 @@ from .config import (
 )
 from .fast_action_runtime import detect_minecraft_runtime_command
 from .host_vision_bridge import HostVisionBridge
+from .host_ui_action_bridge import HostUiActionBridge
 from .local_mic import LocalMicCaptureService
 from .local_tts_playback import normalize_output_device
 from .local_bridge_barge_in import (
@@ -195,6 +196,8 @@ class LocalIoBridge:
         self.barge_worker_task: asyncio.Task[Any] | None = None
         self.host_vision_bridge: HostVisionBridge | None = None
         self.host_vision_task: asyncio.Task[Any] | None = None
+        self.host_ui_action_bridge: HostUiActionBridge | None = None
+        self.host_ui_action_task: asyncio.Task[Any] | None = None
         self.active_turn_id = ""
         self.active_turn_started_at: float | None = None
         self.active_validation: dict[str, str] | None = None
@@ -214,6 +217,11 @@ class LocalIoBridge:
             self.host_vision_task = asyncio.create_task(
                 self.host_vision_bridge.run(),
                 name="local-bridge-host-vision",
+            )
+            self.host_ui_action_bridge = HostUiActionBridge()
+            self.host_ui_action_task = asyncio.create_task(
+                self.host_ui_action_bridge.run(),
+                name="local-bridge-host-ui-action",
             )
             await self._post_status()
             self._ensure_tts_warmup()
@@ -263,6 +271,14 @@ class LocalIoBridge:
                         if current_task is not None and current_task.cancelling():
                             raise
             finally:
+                if self.host_ui_action_task is not None:
+                    self.host_ui_action_task.cancel()
+                    with contextlib.suppress(
+                        asyncio.CancelledError,
+                        Exception,
+                    ):
+                        await self.host_ui_action_task
+                    self.host_ui_action_task = None
                 if self.host_vision_task is not None:
                     self.host_vision_task.cancel()
                     with contextlib.suppress(asyncio.CancelledError, Exception):
@@ -1516,6 +1532,15 @@ class LocalIoBridge:
                     "schema": "host_vision.status.v1",
                     "state": "starting",
                     "captureEnabled": False,
+                }
+            ),
+            "hostUiAction": (
+                self.host_ui_action_bridge.snapshot()
+                if self.host_ui_action_bridge is not None
+                else {
+                    "schema": "host_ui_action.status.v1",
+                    "state": "starting",
+                    "auditReady": False,
                 }
             ),
             **self.runtime_errors.snapshot(),

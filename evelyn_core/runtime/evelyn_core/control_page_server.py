@@ -1232,6 +1232,75 @@ async def voice_validation_abort_handler(request: web.Request) -> web.StreamResp
     return json_response(result, status=200 if result.get("ok") else 409)
 
 
+async def ui_action_status_handler(
+    request: web.Request,
+) -> web.StreamResponse:
+    proxied = await proxy_json(
+        request,
+        "GET",
+        "/api/control-page/ui-action",
+    )
+    if proxied is not None:
+        return proxied
+    return json_response(
+        {
+            "ok": False,
+            "schema": "ui_action.control-status.v1",
+            "status": {},
+            "error": "bot_api_unavailable",
+        },
+        status=503,
+    )
+
+
+async def ui_action_preview_handler(
+    request: web.Request,
+) -> web.StreamResponse:
+    try:
+        payload = await request.json()
+    except Exception:
+        return json_response(
+            {"ok": False, "error": "invalid_json"},
+            status=400,
+        )
+    proxied = await proxy_json(
+        request,
+        "POST",
+        "/api/control-page/ui-action/preview",
+        body=payload,
+    )
+    if proxied is not None:
+        return proxied
+    return json_response(
+        {"ok": False, "error": "bot_api_unavailable"},
+        status=503,
+    )
+
+
+async def ui_action_apply_handler(
+    request: web.Request,
+) -> web.StreamResponse:
+    try:
+        payload = await request.json()
+    except Exception:
+        return json_response(
+            {"ok": False, "error": "invalid_json"},
+            status=400,
+        )
+    proxied = await proxy_json(
+        request,
+        "POST",
+        "/api/control-page/ui-action/apply",
+        body=payload,
+    )
+    if proxied is not None:
+        return proxied
+    return json_response(
+        {"ok": False, "error": "bot_api_unavailable"},
+        status=503,
+    )
+
+
 async def shutdown_handler(_: web.Request) -> web.StreamResponse:
     proxied = await proxy_json(_, "POST", "/api/control-page/shutdown", body={"source": "control_page", "reason": "shutdown_button"})
     if proxied is not None and proxied.status < 500:
@@ -1880,6 +1949,18 @@ def create_app() -> web.Application:
     app.router.add_post("/api/control-page/voice-validation/confirm", voice_validation_confirm_handler)
     app.router.add_post("/api/control-page/voice-validation/retry", voice_validation_retry_handler)
     app.router.add_post("/api/control-page/voice-validation/abort", voice_validation_abort_handler)
+    app.router.add_get(
+        "/api/control-page/ui-action",
+        ui_action_status_handler,
+    )
+    app.router.add_post(
+        "/api/control-page/ui-action/preview",
+        ui_action_preview_handler,
+    )
+    app.router.add_post(
+        "/api/control-page/ui-action/apply",
+        ui_action_apply_handler,
+    )
     app.router.add_get("/api/control-page/memory", memory_snapshot_handler)
     app.router.add_get("/api/control-page/memory-graph", memory_graph_handler)
     app.router.add_get(
@@ -2066,6 +2147,14 @@ def create_app() -> web.Application:
     app.router.add_options("/api/control-page/voice-validation/confirm", voice_validation_confirm_handler)
     app.router.add_options("/api/control-page/voice-validation/retry", voice_validation_retry_handler)
     app.router.add_options("/api/control-page/voice-validation/abort", voice_validation_abort_handler)
+    app.router.add_options(
+        "/api/control-page/ui-action/preview",
+        ui_action_preview_handler,
+    )
+    app.router.add_options(
+        "/api/control-page/ui-action/apply",
+        ui_action_apply_handler,
+    )
     return app
 
 

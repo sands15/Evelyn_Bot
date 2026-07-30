@@ -161,6 +161,18 @@ class VoiceValidationApiTests(unittest.IsolatedAsyncioTestCase):
                     (await response.json())["error"],
                     "csrf_token_required",
                 )
+        for suffix in ("preview", "apply"):
+            with self.subTest(route=f"ui-action/{suffix}"):
+                response = await self.client.post(
+                    f"/api/control-page/ui-action/{suffix}",
+                    headers={"Origin": self.origin},
+                    json={},
+                )
+                self.assertEqual(response.status, 403)
+                self.assertEqual(
+                    (await response.json())["error"],
+                    "csrf_token_required",
+                )
 
     async def test_preflight_options_is_non_mutating(self):
         response = await self.client.options(
@@ -169,6 +181,48 @@ class VoiceValidationApiTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(response.status, 204)
         self.assertIn("POST", response.headers["Access-Control-Allow-Methods"])
+
+    async def test_ui_action_proxy_preserves_fail_closed_status(self):
+        for suffix, payload in (
+            (
+                "preview",
+                {
+                    "elementId": "a" * 20,
+                    "action": "invoke",
+                    "postcondition": "target_absent",
+                },
+            ),
+            (
+                "apply",
+                {
+                    "confirmToken": "t" * 43,
+                    "userConfirmed": True,
+                },
+            ),
+        ):
+            with self.subTest(route=suffix), patch.object(
+                control_page_server,
+                "proxy_json",
+                new=AsyncMock(
+                    return_value=control_page_server.json_response(
+                        {
+                            "ok": False,
+                            "error": "ui_action_foreground_changed_since_preview",
+                        },
+                        status=409,
+                    )
+                ),
+            ):
+                response = await self.client.post(
+                    f"/api/control-page/ui-action/{suffix}",
+                    headers=self.headers(),
+                    json=payload,
+                )
+                self.assertEqual(response.status, 409)
+                self.assertEqual(
+                    (await response.json())["error"],
+                    "ui_action_foreground_changed_since_preview",
+                )
 
     async def test_consent_preview_apply_and_revoke_use_bridge_ack(self):
         preview_response = await self.client.post(

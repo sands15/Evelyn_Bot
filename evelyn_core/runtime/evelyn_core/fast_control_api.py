@@ -52,6 +52,10 @@ from .minecraft_mode_composition import (
     MinecraftModeComposition,
     MinecraftModeCompositionDeps,
 )
+from .host_ui_action_client import (
+    apply_host_ui_action,
+    preview_host_ui_action,
+)
 from .minecraft_world_lease import MinecraftWorldLeaseOwner
 from .minecraft_world_lease_delegation import (
     MINECRAFT_WORLD_LEASE_DELEGATION_TOKEN_HEADER,
@@ -2258,6 +2262,91 @@ async def local_bridge_test_tts_handler(request: web.Request) -> web.StreamRespo
     return json_response({"ok": True, "request": queued, "localBridge": local_bridge_status_snapshot()})
 
 
+async def ui_action_status_handler(_: web.Request) -> web.StreamResponse:
+    local_bridge = local_bridge_status_snapshot()
+    status = (
+        local_bridge.get("hostUiAction")
+        if isinstance(local_bridge, dict)
+        else None
+    )
+    return json_response(
+        {
+            "ok": bool(
+                isinstance(status, dict)
+                and status.get("state") == "running"
+                and status.get("auditReady") is True
+            ),
+            "schema": "ui_action.control-status.v1",
+            "status": dict(status or {}),
+            "policy": {
+                "requiresExplicitConfirmation": True,
+                "automaticRetry": False,
+                "arbitraryCoordinates": False,
+                "allowedActions": ["invoke"],
+                "allowedControlTypes": ["Button"],
+            },
+        }
+    )
+
+
+async def ui_action_preview_handler(
+    request: web.Request,
+) -> web.StreamResponse:
+    try:
+        payload = await request.json()
+    except Exception:
+        return json_response(
+            {"ok": False, "error": "invalid_json"},
+            status=400,
+        )
+    if not isinstance(payload, dict) or set(payload) != {
+        "elementId",
+        "action",
+        "postcondition",
+    }:
+        return json_response(
+            {"ok": False, "error": "ui_action_invalid_preview_request"},
+            status=400,
+        )
+    result = await preview_host_ui_action(
+        element_id=str(payload.get("elementId") or ""),
+        action=str(payload.get("action") or ""),
+        postcondition=str(payload.get("postcondition") or ""),
+    )
+    return json_response(
+        result,
+        status=200 if result.get("ok") else 409,
+    )
+
+
+async def ui_action_apply_handler(
+    request: web.Request,
+) -> web.StreamResponse:
+    try:
+        payload = await request.json()
+    except Exception:
+        return json_response(
+            {"ok": False, "error": "invalid_json"},
+            status=400,
+        )
+    if (
+        not isinstance(payload, dict)
+        or set(payload) != {"confirmToken", "userConfirmed"}
+        or payload.get("userConfirmed") is not True
+    ):
+        return json_response(
+            {"ok": False, "error": "ui_action_explicit_confirmation_required"},
+            status=400,
+        )
+    result = await apply_host_ui_action(
+        confirm_token=str(payload.get("confirmToken") or ""),
+    )
+    return json_response(
+        result,
+        status=200 if result.get("ok") else 409,
+    )
+
+
 async def action_events_handler(request: web.Request) -> web.StreamResponse:
     try:
         after = int(clean_text(request.query.get("after")) or "0")
@@ -2322,6 +2411,18 @@ def create_app(
     app.router.add_get("/api/local-bridge/output-device", local_bridge_output_device_handler)
     app.router.add_post("/api/local-bridge/output-device", local_bridge_output_device_handler)
     app.router.add_post("/api/local-bridge/test-tts", local_bridge_test_tts_handler)
+    app.router.add_get(
+        "/api/control-page/ui-action",
+        ui_action_status_handler,
+    )
+    app.router.add_post(
+        "/api/control-page/ui-action/preview",
+        ui_action_preview_handler,
+    )
+    app.router.add_post(
+        "/api/control-page/ui-action/apply",
+        ui_action_apply_handler,
+    )
     return app
 
 

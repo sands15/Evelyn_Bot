@@ -66,6 +66,23 @@ class RuntimeArtifactsRetentionTests(unittest.TestCase):
         self.assertEqual(rule.max_total_bytes, 20 * 1024 * 1024)
         self.assertEqual(rule.preserve_newest, 7)
 
+    def test_host_ui_action_journal_has_bounded_retention(
+        self,
+    ) -> None:
+        rule = next(
+            row
+            for row in DEFAULT_RETENTION_RULES
+            if row.name == "host_ui_action_events"
+        )
+
+        self.assertEqual(
+            rule.patterns,
+            ("host_ui_action/events/*.jsonl",),
+        )
+        self.assertEqual(rule.max_age_days, 30)
+        self.assertEqual(rule.max_total_bytes, 20 * 1024 * 1024)
+        self.assertEqual(rule.preserve_newest, 7)
+
     def test_inventory_stays_within_root(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)

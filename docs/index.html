@@ -8,6 +8,7 @@
   <link rel="stylesheet" href="./assets/evelyn-voice-validation.css?v=20260729-voice-p0-1">
   <link rel="stylesheet" href="./assets/evelyn-storage-retention.css?v=20260729-retention-report-1">
   <link rel="stylesheet" href="./assets/evelyn-runtime-errors.css?v=20260729-runtime-errors-1">
+  <link rel="stylesheet" href="./assets/evelyn-ui-action.css?v=20260731-ui-action-1">
   <style>
     :root {
       --bg: #f5f6f7;
@@ -2218,6 +2219,43 @@
           <button id="voiceValidationStartButton" type="button">검증 시작</button>
         </div>
         <div id="voiceValidationMount" aria-live="polite"></div>
+      </section>
+
+      <section class="ui-action-panel" aria-label="화면 행동 승인">
+        <div class="ui-action-head">
+          <div>
+            <strong>화면 행동 승인</strong>
+            <span class="ui-action-subtitle">현재 전경 창의 UIA Button만 · 자동 재시도 없음</span>
+          </div>
+          <span class="ui-action-pill" id="uiActionStatePill" data-state="unknown">unknown</span>
+        </div>
+        <form class="ui-action-form" id="uiActionPreviewForm">
+          <label>
+            <span>Element ID</span>
+            <input
+              id="uiActionElementId"
+              type="text"
+              inputmode="text"
+              autocomplete="off"
+              maxlength="20"
+              pattern="[0-9a-f]{20}"
+              placeholder="20자리 elementId"
+              required
+            >
+          </label>
+          <label>
+            <span>성공 조건</span>
+            <select id="uiActionPostcondition">
+              <option value="target_absent">대상이 사라짐</option>
+              <option value="target_disabled">대상이 비활성화됨</option>
+              <option value="window_changed">창이 바뀜</option>
+            </select>
+          </label>
+          <button id="uiActionPreviewButton" type="submit">미리보기</button>
+        </form>
+        <div id="uiActionMount" aria-live="polite">
+          <span class="ui-action-meta">Host UI Action 상태를 확인하는 중입니다.</span>
+        </div>
       </section>
 
       <section class="storage-retention-panel" aria-label="저장공간 정리 보고">
@@ -5849,5 +5887,6 @@
   <script src="./assets/evelyn-voice-validation.js?v=20260729-voice-p0-1"></script>
   <script src="./assets/evelyn-storage-retention.js?v=20260729-retention-report-1"></script>
   <script src="./assets/evelyn-runtime-errors.js?v=20260729-runtime-errors-1"></script>
+  <script src="./assets/evelyn-ui-action.js?v=20260731-ui-action-1"></script>
 </body>
 </html>
