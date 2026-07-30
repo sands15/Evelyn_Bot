@@ -22,7 +22,7 @@ recall prompt에는 원문 전체 대신 선택된 기억의 note ID, source, ev
 
 ## Legacy provenance backfill audit
 
-과거 note에 `derived_from`이 비어 있는 경우 Control Page의 읽기 전용
+과거 note에 `derived_from`이 비어 있는 경우 Control Page의
 `GET /api/control-page/memory-provenance-audit`가
 `memory.provenance.backfill-audit.v1` 후보 보고서를 만든다.
 
@@ -40,7 +40,9 @@ ref와 evidence hash가 같은 source 집합을 가리킬 때만 `verified`, 하
 
 보고서는 다음 경계를 지킨다.
 
-- `readOnly=true`, `autoApply=false`, `canApply=false`이며 apply route가 없다.
+- 조회 API와 저장 보고서는 항상 `readOnly=true`, `autoApply=false`다.
+- `verified`와 `review` 후보만 `canApply=true`이고 `ambiguous`, 보호 대상,
+  숨김 대상은 `canApply=false`와 차단 사유를 반환한다.
 - 사용자 note Markdown과 현재 `derived_from`을 수정하지 않는다.
 - 저장 파일에는 note ID, 후보 source ID, 판정 코드, 집계와 graph
   fingerprint만 기록한다.
@@ -48,8 +50,47 @@ ref와 evidence hash가 같은 source 집합을 가리킬 때만 `verified`, 하
 - graph가 바뀌면 새 fingerprint로 보고서를 다시 계산한다.
 
 Control Page는 live note의 공개 title/type을 결합해 후보를 보여 주지만
-`verified`도 자동으로 적용하지 않는다. 이는 backfill 사실이 아니라 사용자
-검토를 위한 증거 목록이다.
+어떤 후보도 자동으로 적용하지 않는다. 조회 결과는 backfill 사실이 아니라
+사용자 검토를 위한 증거 목록이다.
+
+## Two-step provenance backfill
+
+근거 연결은 감사 조회와 분리된 두 POST 요청으로만 수행한다.
+
+1. `POST /api/control-page/memory-provenance-backfill/{noteId}/preview`
+2. `POST /api/control-page/memory-provenance-backfill/{noteId}/apply`
+
+preview 요청은 감사에서 반환한 source note ID 집합 전체를 제출해야 한다.
+현재 후보 집합과 정확히 같지 않거나 후보가 `ambiguous`이면 토큰을 발급하지
+않는다. 발급된 암호학적 난수 token은 120초 동안 한 번만 쓸 수 있고 다음
+상태에 함께 묶인다.
+
+- memory root와 target note ID
+- target의 현재 SHA-256 content hash
+- 모든 source note ID와 각각의 현재 content hash
+- 후보 판정 상태와 전체 provenance graph fingerprint
+- 위 값을 정규화해 계산한 binding fingerprint
+
+apply는 token을 먼저 소비한 뒤 같은 후보를 다시 계산한다. 대상·source·무관한
+다른 graph node를 포함해 graph가 하나라도 바뀌거나, token이 만료·재사용되거나,
+다른 대상/root에 제출되면 HTTP 409로 거부하고 파일을 쓰지 않는다. token은
+프로세스 메모리에만 있으므로 Bot API 재시작 뒤에는 복구되지 않는다.
+
+사용자 확인이 성공하면 제목과 본문 suffix는 byte-for-byte 그대로 두고 front
+matter에만 `derived_from`, `provenance_backfilled_at`,
+`provenance_backfill_method=exact-metadata-user-confirmed`,
+`provenance_backfill_audit_hash`, 증가한 `revision`을 원자적으로 기록한다.
+그 뒤 index와 hot context를 다시 만든다. 파일 교체 실패는
+`memory_provenance_backfill_failed`, 후처리 실패는
+`memory_provenance_backfill_cleanup_required`이며 후자는 `applied=true`를
+함께 반환한다. preview/apply 모두 기존 Control Page CSRF 계약을 따른다.
+
+새 파생 note의 forward write 계약도 별도로 강제한다.
+`write_memory_vault_note`는 consolidation 또는 recomposition source를
+`derived`로 판정하면 비어 있지 않은 `derived_from`을 요구하고 self-reference를
+거부한다. 일일·semantic consolidation과 partial recomposition은 실제 source
+note ID를 명시한다. 기본 source는 파생으로 오해될 수 있는 `consolidation`이
+아니라 `runtime`이다.
 
 ## Optimistic edit and correction
 
@@ -243,23 +284,29 @@ prompt block과 user state가 의도적으로 남아 있다.
 - Sub-LLM 입력에 삭제 source와 기존 파생 본문이 포함되지 않음
 - 남은 source만 사용한 topological 재합성과 user-edit 해제
 
-`tests.memory.test_memory_provenance_audit`와
+`tests.memory.test_memory_provenance_audit`,
+`tests.memory.test_memory_provenance_backfill`과
 `tests.runtime.test_memory_provenance_audit_api`는 다음을 검증한다.
 
 - exact source ref와 evidence hash의 교차 검증
 - 충돌 신호의 `ambiguous` 유지, cycle과 user-detach 후보 거부
 - 내용이 같다는 이유만으로 후보를 만들지 않음
-- preview 뒤 source/target Markdown이 byte-for-byte 그대로 유지됨
+- 읽기 전용 audit 뒤 source/target Markdown이 byte-for-byte 그대로 유지됨
 - 저장 보고서에 title, body, path/ref, evidence hash가 없음
 - quarantine 수, 재합성 가능 수와 최장 대기 시간 집계
-- 읽기 전용 API와 Control Page 표시 계약
+- 2단계 CSRF API와 명시적 사용자 확인 UI
+- target/source/full-graph 변경, 잘못된 source, 만료·재사용 token 거부
+- Bot API 재시작 뒤 token 무효화와 성공 적용 뒤 provenance 복구
+- 성공 적용에서 제목·본문 byte 안정성, 원자 쓰기 실패 시 원본 보존
+- 새 derived write의 `derived_from` 필수 계약
 
 ## Remaining boundary
 
 연쇄 철회는 여전히 note가 선언한 `derived_from` metadata에 의존한다. 감사
-보고서는 기존 source ref/hash로 정확히 증명할 수 있는 후보만 찾고, 실제
-backfill을 적용하지 않는다. metadata 자체가 전혀 없거나 외부 source만 가리키는
-과거 note의 숨은 의존성은 찾을 수 없다. 또한 multi-source note의 자동 재합성은
-Sub-LLM이 준비될 때까지 fail-closed quarantine으로 남는다. 따라서 현재
-계약은 “선언된 provenance graph 전체의 철회 + 명시적 신호가 남은 누락 후보의
-읽기 전용 감사”이며, 내용 유사도만으로 삭제 또는 backfill했다고 주장하지 않는다.
+보고서는 기존 source ref/hash로 정확히 증명할 수 있는 후보만 찾고, 그 후보도
+사용자의 별도 preview와 확인 없이는 적용하지 않는다. metadata 자체가 전혀
+없거나 외부 source만 가리키는 과거 note의 숨은 의존성은 찾을 수 없다. 또한
+multi-source note의 자동 재합성은 Sub-LLM이 준비될 때까지 fail-closed
+quarantine으로 남는다. 따라서 현재 계약은 “선언된 provenance graph 전체의
+철회 + 명시적 신호가 남은 누락 후보의 conflict-safe 수동 연결”이며, 내용
+유사도만으로 삭제 또는 backfill했다고 주장하지 않는다.

@@ -60,7 +60,7 @@ class MemoryEditApiTests(unittest.IsolatedAsyncioTestCase):
             note_type="concept",
             title="API Memory Edit",
             body="generated API memory",
-            source="sub-llm-semantic-consolidation",
+            source="legacy-sub-llm-semantic-consolidation",
             source_refs=["daily/2026-07-30"],
             evidence_hashes=["old-api-evidence"],
         )

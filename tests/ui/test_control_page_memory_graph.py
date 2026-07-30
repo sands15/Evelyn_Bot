@@ -185,15 +185,35 @@ class ControlPageMemoryGraphTests(unittest.TestCase):
             self.html,
         )
         self.assertIn(
-            "여기서는 어떤 메모도 수정하지 않습니다.",
+            "조회만으로는 어떤 메모도 수정하지 않습니다.",
             self.html,
         )
         self.assertIn(
             "data-audit-target",
             self.html,
         )
-        self.assertNotIn(
-            "memory-provenance-audit/apply",
+        self.assertIn(
+            "function applyMemoryProvenanceBackfill(candidate, button)",
+            self.html,
+        )
+        self.assertIn(
+            "data-audit-backfill",
+            self.html,
+        )
+        self.assertIn(
+            "memory-provenance-backfill/",
+            self.html,
+        )
+        self.assertIn(
+            'body: JSON.stringify({ sourceNoteIds })',
+            self.html,
+        )
+        self.assertIn(
+            "confirmToken: preview.confirmToken",
+            self.html,
+        )
+        self.assertIn(
+            "미리보기 뒤 기억·근거·그래프가 바뀌어서 연결하지 않았어.",
             self.html,
         )
 

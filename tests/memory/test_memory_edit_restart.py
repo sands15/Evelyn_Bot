@@ -78,7 +78,9 @@ class MemoryEditRestartTests(unittest.TestCase):
                 note_type="concept",
                 title="Restart Corrected Memory",
                 body="generated value before correction",
-                source="sub-llm-semantic-consolidation",
+                source=(
+                    "legacy-sub-llm-semantic-consolidation"
+                ),
                 source_refs=["daily/restart-source"],
                 evidence_hashes=["generated-evidence"],
                 root=root,

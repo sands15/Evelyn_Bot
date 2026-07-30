@@ -130,20 +130,27 @@ hot-context에서 fail-closed quarantine한다. 새 프로세스도 같은 상�
 상위 source가 quarantine이면 multi-source note는 안전하게 격리된 채로 남아
 자동 회상에 사용되지 않지만 즉시 재합성되지는 않는다.
 
-Control Page의 읽기 전용 근거 감사는 legacy/과거 semantic note의 exact source
-ref와 evidence hash만 대조한다. 본문 유사도나 LLM 추측은 사용하지 않으며
-교차 검증, 단일 신호, 모호한 후보를 분리한다. content-free 보고서에는 note ID와
-판정만 저장하고, 사용자 수정으로 분리된 관계와 cycle 후보는 제외한다. 운영
-상태에는 quarantine 대기 수, 재합성 가능 수와 가장 오래된 대기 시간을 표시한다.
+Control Page의 근거 감사는 legacy/과거 semantic note의 exact source ref와
+evidence hash만 대조한다. 본문 유사도나 LLM 추측은 사용하지 않으며 교차 검증,
+단일 신호, 모호한 후보를 분리한다. content-free 보고서에는 note ID와 판정만
+저장하고, 사용자 수정으로 분리된 관계와 cycle 후보는 제외한다. 운영 상태에는
+quarantine 대기 수, 재합성 가능 수와 가장 오래된 대기 시간을 표시한다.
 
-남은 위험은 보고서에 apply 경로가 의도적으로 없고, source ref/hash 자체가
-누락된 note는 후보조차 만들 수 없다는 점이다. `verified` 역시 기존 metadata가
-서로 일치한다는 뜻이지 자동 적용 권한이 아니다.
+`verified`/`review` 후보는 별도 2단계 확인으로만 연결한다. 일회용 token은 target,
+모든 source hash와 전체 graph fingerprint에 묶이며 120초 뒤 만료된다. 적용 전
+어느 node라도 바뀌면 아무것도 쓰지 않는다. `ambiguous`와 보호 대상은 적용할 수
+없고, 새 consolidation/recomposition write는 `derived_from` 없이는 거부된다.
 
-다음 조치: 대상 content hash, source hash 집합, graph fingerprint에 묶인
-일회용 preview token과 사용자 명시 확인을 요구하는 conflict-safe backfill
-apply 계약을 설계한다. `ambiguous` 후보는 적용 불가로 유지하고, 모든 현행
-importer가 새 파생 note에 `derived_from`을 의무 기록하는 forward 검증도 추가한다.
+남은 위험은 source ref/hash 자체가 누락되었거나 외부 source만 가리키는 과거
+note는 후보조차 만들 수 없다는 점이다. `verified`도 기존 metadata가 서로
+일치한다는 뜻일 뿐 진실을 자동 보증하지 않으므로 사용자 확인이 계속 필요하다.
+또한 Sub-LLM이 꺼져 있거나 상위 source가 quarantine이면 multi-source note는
+안전하게 격리되지만 즉시 재합성되지 않는다.
+
+다음 조치: source type·note type·age별 provenance coverage와
+`memory_derived_from_required` 거부 수를 content-free 지표로 관측한다.
+명시적 신호가 전혀 없는 과거 note는 자동 추론하지 않고 사용자가 source를 직접
+선택하는 별도 교정 계약을 설계한다.
 
 ## P1 — UI 접근성 corpus·동작 대상 계약 미완성
 

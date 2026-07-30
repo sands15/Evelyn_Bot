@@ -1247,14 +1247,29 @@ class MemoryVaultTests(unittest.TestCase):
                 {"role": "user", "speaker": "user", "source": "test", "text": f"important memory line {index}"}
                 for index in range(40)
             ]
-            append_turn_rows_to_memory_vault(123, rows, root=root)
+            daily_path = append_turn_rows_to_memory_vault(
+                123,
+                rows,
+                root=root,
+            )
+            assert daily_path is not None
             path = consolidate_daily_memory_once(123, root=root, min_chars=100)
             assert path is not None
             content = path.read_text(encoding="utf-8")
+            consolidated_note = parse_memory_note(path)
+            daily_note = parse_memory_note(daily_path)
             result = run_memory_vault_maintenance_once(123, root=root)
 
         self.assertIn("type: episode", content)
         self.assertIn("important memory line", content)
+        self.assertIn(
+            daily_note.note_id,
+            str(
+                consolidated_note.metadata.get(
+                    "derived_from"
+                )
+            ),
+        )
         self.assertGreaterEqual(result["memory_version"], 1)
 
     def test_activation_bootstraps_hot_context_and_legacy_mirror(self) -> None:
@@ -1385,7 +1400,12 @@ class MemoryVaultTests(unittest.TestCase):
                 {"role": "user", "speaker": "user", "source": "test", "text": f"semantic memory line {index}"}
                 for index in range(40)
             ]
-            append_turn_rows_to_memory_vault(123, rows, root=root)
+            daily_path = append_turn_rows_to_memory_vault(
+                123,
+                rows,
+                root=root,
+            )
+            assert daily_path is not None
             result = run_semantic_memory_consolidation_once(
                 123,
                 root=root,
@@ -1403,7 +1423,12 @@ class MemoryVaultTests(unittest.TestCase):
                 {"role": "user", "speaker": "user", "source": "test", "text": f"Evelyn should remember structured memory architecture detail {index}"}
                 for index in range(30)
             ]
-            append_turn_rows_to_memory_vault(123, rows, root=root)
+            daily_path = append_turn_rows_to_memory_vault(
+                123,
+                rows,
+                root=root,
+            )
+            assert daily_path is not None
 
             def fake_llm(_messages: list[dict]) -> dict:
                 return {
@@ -1437,9 +1462,19 @@ class MemoryVaultTests(unittest.TestCase):
                 max_items=4,
             )
             recall = recall_memory_vault(request, root=root)
+            semantic_note = parse_memory_note(
+                Path(result["created_notes"][0])
+            )
+            semantic_source = parse_memory_note(daily_path)
 
         self.assertEqual(result["status"], "created")
         self.assertTrue(result["created_notes"])
+        self.assertIn(
+            semantic_source.note_id,
+            str(
+                semantic_note.metadata.get("derived_from")
+            ),
+        )
         self.assertTrue(recall.ok)
         self.assertIn("Structured Memory Architecture", recall.context_text)
 

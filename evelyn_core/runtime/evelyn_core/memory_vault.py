@@ -43,6 +43,7 @@ DERIVATION_REVOCATIONS_NAME = "memory_derivation_revocations.json"
 PROVENANCE_AUDIT_NAME = "memory_provenance_backfill_audit.json"
 RETRIEVAL_CACHE_TTL_SECONDS = 300
 MEMORY_DELETE_PREVIEW_TTL_SECONDS = 120
+MEMORY_PROVENANCE_BACKFILL_PREVIEW_TTL_SECONDS = 120
 DEFAULT_PROJECT = "evelyn"
 DAILY_USER_LABEL = os.getenv("MEMORY_DAILY_USER_LABEL", "정훈")
 DAILY_ASSISTANT_LABEL = os.getenv("MEMORY_DAILY_ASSISTANT_LABEL", "이블린")
@@ -68,6 +69,12 @@ MEMORY_DERIVATION_RECOMPOSITION_SCHEMA = "memory.derivation.recomposition.v1"
 MEMORY_PROVENANCE_BACKFILL_AUDIT_SCHEMA = (
     "memory.provenance.backfill-audit.v1"
 )
+MEMORY_PROVENANCE_BACKFILL_PREVIEW_SCHEMA = (
+    "memory.provenance.backfill-preview.v1"
+)
+MEMORY_PROVENANCE_BACKFILL_RESULT_SCHEMA = (
+    "memory.provenance.backfill-result.v1"
+)
 MEMORY_QUARANTINE_STATUS_SCHEMA = "memory.quarantine.status.v1"
 MEMORY_EDIT_RESULT_SCHEMA = "memory.edit.result.v1"
 MEMORY_EDIT_MAX_TITLE_CHARS = 160
@@ -91,6 +98,11 @@ MEMORY_ADMIN_RECALL_MARKERS = (
 _memory_delete_lock = threading.RLock()
 _memory_delete_tokens: dict[str, dict[str, Any]] = {}
 _memory_edit_lock = threading.RLock()
+_memory_provenance_backfill_lock = threading.RLock()
+_memory_provenance_backfill_tokens: dict[
+    str,
+    dict[str, Any],
+] = {}
 
 
 class MemoryNoteDeletedError(RuntimeError):
@@ -1810,7 +1822,8 @@ def refresh_legacy_memory_mirror(guild_id: int, *, root: Path | None = None, max
             body,
         ]
     )
-    target.write_text(content, encoding="utf-8")
+    with _memory_edit_lock:
+        atomic_text_write(target, content, durable=True)
     return target
 
 
@@ -1926,9 +1939,14 @@ def _write_legacy_node_note(
             "",
         ]
     )
-    if target.exists() and target.read_text(encoding="utf-8", errors="ignore") == content:
-        return target
-    target.write_text(content, encoding="utf-8")
+    with _memory_edit_lock:
+        if (
+            target.exists()
+            and target.read_text(encoding="utf-8", errors="ignore")
+            == content
+        ):
+            return target
+        atomic_text_write(target, content, durable=True)
     return target
 
 
@@ -2038,19 +2056,6 @@ def append_turn_rows_to_memory_vault(
             generation += 1
         note_id = f"daily-{day_key}-continuation-{generation}"
         initialize_note = True
-    if initialize_note:
-        path.write_text(
-            _daily_intro_block(
-                day_key,
-                note_id=note_id,
-                guild_id=guild_id,
-                scope_type=scope_type,
-                scope_key=scope_key,
-                scope_labels=scope_labels,
-            ),
-            encoding="utf-8",
-        )
-
     block = "\n".join(
         [
             ">",
@@ -2059,8 +2064,39 @@ def append_turn_rows_to_memory_vault(
             ">",
         ]
     )
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(block)
+    with _memory_edit_lock:
+        should_initialize = initialize_note
+        if should_initialize and path.exists():
+            try:
+                locked_existing = parse_memory_note(path)
+            except Exception:
+                locked_existing = None
+            if (
+                locked_existing is not None
+                and locked_existing.note_id == note_id
+                and not memory_note_was_deleted(
+                    locked_existing.note_id,
+                    root=root,
+                )
+            ):
+                should_initialize = False
+        if should_initialize:
+            atomic_text_write(
+                path,
+                _daily_intro_block(
+                    day_key,
+                    note_id=note_id,
+                    guild_id=guild_id,
+                    scope_type=scope_type,
+                    scope_key=scope_key,
+                    scope_labels=scope_labels,
+                ),
+                durable=True,
+            )
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(block)
+            handle.flush()
+            os.fsync(handle.fileno())
     return path
 
 
@@ -2158,7 +2194,8 @@ def consolidate_daily_memory_once(
             "",
         ]
     )
-    target.write_text(content, encoding="utf-8")
+    with _memory_edit_lock:
+        atomic_text_write(target, content, durable=True)
     sync_memory_vault_index(root=root)
     return target
 
@@ -2936,7 +2973,7 @@ def write_memory_vault_note(
     tags: list[str] | None = None,
     projects: list[str] | None = None,
     links: list[str] | None = None,
-    source: str = "consolidation",
+    source: str = "runtime",
     source_refs: list[str] | None = None,
     derived_from: list[str] | None = None,
     evidence_hashes: list[str] | None = None,
@@ -2961,6 +2998,17 @@ def write_memory_vault_note(
     slug = _slug(title, default=normalized_type)
     path = vault / folder / f"{slug}.md"
     note_id = f"{normalized_type}-{_stable_id(folder + '/' + slug)}"
+    normalized_derivations = list(
+        dict.fromkeys(_as_list(derived_from))
+    )[:12]
+    if (
+        _memory_source_type(source, normalized_type)
+        == "derived"
+        and not normalized_derivations
+    ):
+        raise ValueError("memory_derived_from_required")
+    if note_id in normalized_derivations:
+        raise ValueError("memory_derivation_self_reference")
     if memory_note_was_deleted(note_id, root=root):
         raise MemoryNoteDeletedError(
             f"memory note {note_id} was permanently deleted"
@@ -2978,7 +3026,7 @@ def write_memory_vault_note(
             "confidence": confidence,
             "source": source,
             "source_refs": source_refs or [],
-            "derived_from": derived_from or [],
+            "derived_from": normalized_derivations,
             "evidence_hashes": evidence_hashes or [],
             "tags": tags or [],
             "projects": projects or [DEFAULT_PROJECT],
@@ -2986,7 +3034,8 @@ def write_memory_vault_note(
         }
     )
     content = f"{front_matter}\n\n# {clean_text(title)}\n\n{clean_text(body)}\n"
-    path.write_text(content, encoding="utf-8")
+    with _memory_edit_lock:
+        atomic_text_write(path, content, durable=True)
     sync_memory_vault_index(root=root)
     return path
 
@@ -4217,6 +4266,24 @@ def memory_provenance_backfill_preview(
         )
         if target is None:
             continue
+        target_source = note_sources.get(
+            candidate.target_note_id
+        )
+        protection = ""
+        if target_source is not None:
+            target_path, target_note = target_source
+            target_rel_path = target_path.relative_to(
+                ensure_memory_vault_layout(root)
+            ).as_posix()
+            protection = _memory_note_deletion_protection(
+                target_note,
+                target_rel_path,
+            )
+        can_apply = (
+            candidate.state in {"verified", "review"}
+            and not protection
+            and not bool(target.get("contentHidden"))
+        )
         sources: list[dict[str, Any]] = []
         for signal in candidate.signals:
             public_source = _memory_public_audit_note(
@@ -4243,7 +4310,17 @@ def memory_provenance_backfill_preview(
                 "reasonCodes": list(
                     candidate.reason_codes
                 ),
-                "canApply": False,
+                "canApply": can_apply,
+                "applyBlocker": (
+                    ""
+                    if can_apply
+                    else (
+                        "memory_provenance_backfill_ambiguous"
+                        if candidate.state == "ambiguous"
+                        else protection
+                        or "memory_provenance_backfill_protected"
+                    )
+                ),
             }
         )
     return {
@@ -4690,6 +4767,626 @@ def _memory_note_deletion_protection(
     if clean_text(str(note.metadata.get("source") or "")) == BOOTSTRAP_NOTE_SOURCE:
         return "bootstrap_contract_note"
     return ""
+
+
+def _memory_provenance_backfill_binding_fingerprint(
+    *,
+    target_note_id: str,
+    target_content_hash: str,
+    source_content_hashes: dict[str, str],
+    graph_fingerprint: str,
+    candidate_state: str,
+) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            {
+                "targetNoteId": target_note_id,
+                "targetContentHash": target_content_hash,
+                "sourceContentHashes": {
+                    note_id: source_content_hashes[note_id]
+                    for note_id in sorted(source_content_hashes)
+                },
+                "graphFingerprint": graph_fingerprint,
+                "candidateState": candidate_state,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _memory_provenance_backfill_candidate_binding(
+    note_id_or_rel_path: str,
+    source_note_ids: list[str] | tuple[str, ...],
+    *,
+    root: Path | None = None,
+) -> dict[str, Any]:
+    target = _memory_vault_find_note(
+        note_id_or_rel_path,
+        root=root,
+    )
+    if target is None:
+        return {"ok": False, "error": "note_not_found"}
+    target_path, target_note, target_raw = target
+    vault = ensure_memory_vault_layout(root)
+    rel_path = target_path.relative_to(vault).as_posix()
+    protection = _memory_note_deletion_protection(
+        target_note,
+        rel_path,
+    )
+    if protection == "internal_note_not_public":
+        return {"ok": False, "error": "note_not_found"}
+    if protection:
+        return {
+            "ok": False,
+            "error": "memory_provenance_backfill_protected",
+            "reason": protection,
+        }
+
+    nodes, note_sources = _memory_provenance_audit_nodes(
+        root=root
+    )
+    audit = audit_missing_derivations(nodes)
+    candidate = next(
+        (
+            item
+            for item in audit.candidates
+            if item.target_note_id == target_note.note_id
+        ),
+        None,
+    )
+    if candidate is None:
+        return {
+            "ok": False,
+            "error": (
+                "memory_provenance_backfill_candidate_unavailable"
+            ),
+        }
+    if candidate.state == "ambiguous":
+        return {
+            "ok": False,
+            "error": "memory_provenance_backfill_ambiguous",
+        }
+
+    requested_source_ids = sorted(
+        dict.fromkeys(
+            clean_text(str(item))
+            for item in source_note_ids
+            if clean_text(str(item))
+        )
+    )
+    if not requested_source_ids:
+        return {
+            "ok": False,
+            "error": (
+                "memory_provenance_backfill_source_ids_required"
+            ),
+        }
+    if len(requested_source_ids) > 12:
+        return {
+            "ok": False,
+            "error": (
+                "memory_provenance_backfill_source_ids_invalid"
+            ),
+        }
+    candidate_source_ids = sorted(
+        candidate.candidate_source_ids
+    )
+    if requested_source_ids != candidate_source_ids:
+        return {
+            "ok": False,
+            "error": (
+                "memory_provenance_backfill_source_mismatch"
+            ),
+        }
+
+    source_content_hashes: dict[str, str] = {}
+    for source_id in requested_source_ids:
+        source = note_sources.get(source_id)
+        if source is None:
+            return {
+                "ok": False,
+                "error": (
+                    "memory_provenance_backfill_source_unavailable"
+                ),
+            }
+        _source_path, source_note = source
+        source_content_hashes[source_id] = (
+            source_note.source_hash
+        )
+
+    graph_fingerprint = (
+        _memory_provenance_audit_fingerprint(nodes)
+    )
+    binding_fingerprint = (
+        _memory_provenance_backfill_binding_fingerprint(
+            target_note_id=target_note.note_id,
+            target_content_hash=target_note.source_hash,
+            source_content_hashes=source_content_hashes,
+            graph_fingerprint=graph_fingerprint,
+            candidate_state=candidate.state,
+        )
+    )
+    return {
+        "ok": True,
+        "targetPath": target_path,
+        "targetRelPath": rel_path,
+        "targetNote": target_note,
+        "targetRaw": target_raw,
+        "sourceNoteIds": requested_source_ids,
+        "sourceContentHashes": source_content_hashes,
+        "candidate": candidate,
+        "candidateState": candidate.state,
+        "graphFingerprint": graph_fingerprint,
+        "bindingFingerprint": binding_fingerprint,
+        "noteSources": note_sources,
+    }
+
+
+def _prune_memory_provenance_backfill_tokens(
+    now: float,
+) -> None:
+    stale = [
+        token
+        for token, payload
+        in _memory_provenance_backfill_tokens.items()
+        if float(payload.get("expiresAt") or 0) < now - 60
+    ]
+    for token in stale:
+        _memory_provenance_backfill_tokens.pop(
+            token,
+            None,
+        )
+
+
+def preview_memory_provenance_backfill_application(
+    note_id_or_rel_path: str,
+    source_note_ids: list[str] | tuple[str, ...],
+    *,
+    root: Path | None = None,
+    now: Callable[[], float] = time.time,
+) -> dict[str, Any]:
+    sync_memory_vault_index(root=root)
+    binding = _memory_provenance_backfill_candidate_binding(
+        note_id_or_rel_path,
+        source_note_ids,
+        root=root,
+    )
+    if not binding.get("ok"):
+        return binding
+
+    target_note = binding["targetNote"]
+    candidate = binding["candidate"]
+    note_sources = binding["noteSources"]
+    timestamp = float(now())
+    expires_at = (
+        timestamp
+        + MEMORY_PROVENANCE_BACKFILL_PREVIEW_TTL_SECONDS
+    )
+    token = secrets.token_urlsafe(32)
+    root_key = str((root or MEMORY_ROOT).resolve())
+    with _memory_provenance_backfill_lock:
+        _prune_memory_provenance_backfill_tokens(
+            timestamp
+        )
+        _memory_provenance_backfill_tokens[token] = {
+            "targetNoteId": target_note.note_id,
+            "root": root_key,
+            "targetContentHash": target_note.source_hash,
+            "sourceNoteIds": list(
+                binding["sourceNoteIds"]
+            ),
+            "sourceContentHashes": dict(
+                binding["sourceContentHashes"]
+            ),
+            "graphFingerprint": binding[
+                "graphFingerprint"
+            ],
+            "bindingFingerprint": binding[
+                "bindingFingerprint"
+            ],
+            "candidateState": binding["candidateState"],
+            "expiresAt": expires_at,
+            "used": False,
+        }
+
+    target_public = _memory_public_audit_note(
+        target_note.note_id,
+        note_sources,
+        root=root,
+        include_internal=False,
+    )
+    source_signals = {
+        signal.source_note_id: list(
+            signal.reason_codes
+        )
+        for signal in candidate.signals
+    }
+    public_sources: list[dict[str, Any]] = []
+    for source_id in binding["sourceNoteIds"]:
+        public_source = _memory_public_audit_note(
+            source_id,
+            note_sources,
+            root=root,
+            include_internal=False,
+        )
+        if public_source is not None:
+            public_sources.append(
+                {
+                    **public_source,
+                    "reasonCodes": source_signals.get(
+                        source_id,
+                        [],
+                    ),
+                }
+            )
+    return {
+        "ok": True,
+        "schema": MEMORY_PROVENANCE_BACKFILL_PREVIEW_SCHEMA,
+        "action": "provenance_backfill",
+        "target": target_public,
+        "candidateState": binding["candidateState"],
+        "candidateSources": public_sources,
+        "sourceNoteIds": list(binding["sourceNoteIds"]),
+        "graphFingerprint": binding[
+            "graphFingerprint"
+        ],
+        "bindingFingerprint": binding[
+            "bindingFingerprint"
+        ],
+        "consequences": {
+            "bodyChanged": False,
+            "titleChanged": False,
+            "derivedFromAdded": True,
+            "searchIndexRebuilt": True,
+            "hotContextRebuilt": True,
+            "automaticInferenceUsed": False,
+        },
+        "confirmToken": token,
+        "expiresAt": expires_at,
+    }
+
+
+def _memory_provenance_backfill_binding_matches(
+    binding: dict[str, Any],
+    preview: dict[str, Any],
+) -> bool:
+    if not binding.get("ok"):
+        return False
+    checks = (
+        (
+            clean_text(
+                str(binding.get("bindingFingerprint") or "")
+            ),
+            clean_text(
+                str(preview.get("bindingFingerprint") or "")
+            ),
+        ),
+        (
+            clean_text(
+                str(binding.get("graphFingerprint") or "")
+            ),
+            clean_text(
+                str(preview.get("graphFingerprint") or "")
+            ),
+        ),
+        (
+            clean_text(
+                str(
+                    binding["targetNote"].source_hash
+                    if binding.get("targetNote")
+                    else ""
+                )
+            ),
+            clean_text(
+                str(preview.get("targetContentHash") or "")
+            ),
+        ),
+    )
+    if not all(
+        left
+        and right
+        and secrets.compare_digest(left, right)
+        for left, right in checks
+    ):
+        return False
+    if list(binding.get("sourceNoteIds") or []) != list(
+        preview.get("sourceNoteIds") or []
+    ):
+        return False
+    current_source_hashes = dict(
+        binding.get("sourceContentHashes") or {}
+    )
+    preview_source_hashes = dict(
+        preview.get("sourceContentHashes") or {}
+    )
+    if set(current_source_hashes) != set(
+        preview_source_hashes
+    ):
+        return False
+    return all(
+        secrets.compare_digest(
+            clean_text(str(current_source_hashes[note_id])),
+            clean_text(str(preview_source_hashes[note_id])),
+        )
+        for note_id in current_source_hashes
+    )
+
+
+def _replace_memory_front_matter(
+    raw: str,
+    metadata: dict[str, Any],
+) -> str:
+    formatted = _format_front_matter(metadata)
+    if not raw.startswith("---"):
+        return formatted + "\n\n" + raw
+    lines = raw.splitlines(keepends=True)
+    end_index: int | None = None
+    for index, line in enumerate(lines[1:], start=1):
+        if line.strip() == "---":
+            end_index = index
+            break
+    if end_index is None:
+        return formatted + "\n\n" + raw
+    suffix = "".join(lines[end_index + 1 :])
+    if not suffix:
+        return formatted + "\n"
+    return formatted + "\n" + suffix
+
+
+def apply_memory_provenance_backfill(
+    note_id_or_rel_path: str,
+    confirm_token: str,
+    *,
+    root: Path | None = None,
+    now: Callable[[], float] = time.time,
+) -> dict[str, Any]:
+    token = clean_text(confirm_token)
+    timestamp = float(now())
+    root_key = str((root or MEMORY_ROOT).resolve())
+    with _memory_provenance_backfill_lock:
+        _prune_memory_provenance_backfill_tokens(
+            timestamp
+        )
+        preview = _memory_provenance_backfill_tokens.get(
+            token
+        )
+        if preview is None:
+            return {
+                "ok": False,
+                "error": (
+                    "memory_provenance_backfill_token_invalid"
+                ),
+            }
+        if preview.get("used"):
+            return {
+                "ok": False,
+                "error": (
+                    "memory_provenance_backfill_token_reused"
+                ),
+            }
+        preview["used"] = True
+        if float(preview.get("expiresAt") or 0) < timestamp:
+            return {
+                "ok": False,
+                "error": (
+                    "memory_provenance_backfill_token_expired"
+                ),
+            }
+        if clean_text(
+            str(preview.get("root") or "")
+        ) != root_key:
+            return {
+                "ok": False,
+                "error": (
+                    "memory_provenance_backfill_token_mismatch"
+                ),
+            }
+
+    requested_target = _memory_vault_find_note(
+        note_id_or_rel_path,
+        root=root,
+    )
+    if requested_target is None:
+        return {"ok": False, "error": "note_not_found"}
+    if clean_text(
+        str(preview.get("targetNoteId") or "")
+    ) != requested_target[1].note_id:
+        return {
+            "ok": False,
+            "error": (
+                "memory_provenance_backfill_token_mismatch"
+            ),
+        }
+
+    sync_memory_vault_index(root=root)
+    binding = _memory_provenance_backfill_candidate_binding(
+        note_id_or_rel_path,
+        list(preview.get("sourceNoteIds") or []),
+        root=root,
+    )
+    if not _memory_provenance_backfill_binding_matches(
+        binding,
+        preview,
+    ):
+        return {
+            "ok": False,
+            "error": (
+                "memory_provenance_backfill_changed_since_preview"
+            ),
+        }
+
+    applied_at = time.strftime(
+        "%Y-%m-%dT%H:%M:%SZ",
+        time.gmtime(timestamp),
+    )
+    updated_note: MemoryVaultNote | None = None
+    previous_content_hash = clean_text(
+        str(preview.get("targetContentHash") or "")
+    )
+    try:
+        with (
+            _memory_delete_lock,
+            _memory_edit_lock,
+            _memory_provenance_backfill_lock,
+        ):
+            locked_binding = (
+                _memory_provenance_backfill_candidate_binding(
+                    note_id_or_rel_path,
+                    list(
+                        preview.get("sourceNoteIds") or []
+                    ),
+                    root=root,
+                )
+            )
+            if not _memory_provenance_backfill_binding_matches(
+                locked_binding,
+                preview,
+            ):
+                return {
+                    "ok": False,
+                    "error": (
+                        "memory_provenance_backfill_changed_since_preview"
+                    ),
+                }
+            path = Path(locked_binding["targetPath"])
+            current_raw = path.read_text(
+                encoding="utf-8",
+                errors="ignore",
+            )
+            current_note = parse_memory_note(
+                path,
+                current_raw,
+            )
+            if not secrets.compare_digest(
+                current_note.source_hash,
+                previous_content_hash,
+            ):
+                return {
+                    "ok": False,
+                    "error": (
+                        "memory_provenance_backfill_changed_since_preview"
+                    ),
+                }
+            metadata, _body = _split_front_matter(
+                current_raw
+            )
+            if _as_list(metadata.get("derived_from")):
+                return {
+                    "ok": False,
+                    "error": (
+                        "memory_provenance_backfill_changed_since_preview"
+                    ),
+                }
+            if not metadata:
+                metadata = {
+                    "id": current_note.note_id,
+                    "type": current_note.note_type,
+                    "title": current_note.title,
+                    "status": current_note.status or "active",
+                    "created_at": applied_at,
+                    "source": "runtime",
+                }
+            metadata["derived_from"] = list(
+                locked_binding["sourceNoteIds"]
+            )
+            metadata["updated_at"] = applied_at
+            metadata["provenance_backfilled_at"] = applied_at
+            metadata["provenance_backfill_method"] = (
+                "exact-metadata-user-confirmed"
+            )
+            metadata["provenance_backfill_audit_hash"] = (
+                locked_binding["graphFingerprint"]
+            )
+            metadata["revision"] = max(
+                0,
+                _front_matter_int(
+                    metadata,
+                    "revision",
+                    0,
+                ),
+            ) + 1
+            updated_raw = _replace_memory_front_matter(
+                current_raw,
+                metadata,
+            )
+            atomic_text_write(
+                path,
+                updated_raw,
+                durable=True,
+            )
+            updated_note = parse_memory_note(
+                path,
+                updated_raw,
+            )
+    except Exception as exc:
+        return {
+            "ok": False,
+            "schema": (
+                MEMORY_PROVENANCE_BACKFILL_RESULT_SCHEMA
+            ),
+            "action": "provenance_backfill",
+            "applied": False,
+            "error": "memory_provenance_backfill_failed",
+            "detail": type(exc).__name__,
+        }
+
+    cleanup_errors: list[str] = []
+    try:
+        version = sync_memory_vault_index(root=root)
+    except Exception:
+        version = 0
+        cleanup_errors.append(
+            "memory_provenance_backfill_index_cleanup_failed"
+        )
+    try:
+        refresh_memory_hot_context(root=root)
+    except Exception:
+        cleanup_errors.append(
+            "memory_provenance_backfill_hot_context_cleanup_failed"
+        )
+    try:
+        memory_provenance_backfill_preview(root=root)
+    except Exception:
+        cleanup_errors.append(
+            "memory_provenance_backfill_audit_refresh_failed"
+        )
+
+    result = {
+        "ok": not cleanup_errors,
+        "schema": MEMORY_PROVENANCE_BACKFILL_RESULT_SCHEMA,
+        "action": "provenance_backfill",
+        "noteId": updated_note.note_id if updated_note else "",
+        "applied": updated_note is not None,
+        "previousContentHash": previous_content_hash,
+        "contentHash": (
+            updated_note.source_hash
+            if updated_note is not None
+            else ""
+        ),
+        "sourceNoteIds": list(
+            preview.get("sourceNoteIds") or []
+        ),
+        "candidateState": clean_text(
+            str(preview.get("candidateState") or "")
+        ),
+        "graphFingerprint": clean_text(
+            str(preview.get("graphFingerprint") or "")
+        ),
+        "appliedAt": applied_at,
+        "memoryVersion": version,
+    }
+    if cleanup_errors:
+        result.update(
+            {
+                "error": (
+                    "memory_provenance_backfill_cleanup_required"
+                ),
+                "cleanupErrors": cleanup_errors,
+            }
+        )
+    return result
 
 
 def _prune_memory_delete_tokens(now: float) -> None:
@@ -5285,34 +5982,44 @@ def mark_memory_note_superseded(note_id_or_rel_path: str, *, root: Path | None =
     vault = ensure_memory_vault_layout(root)
     deleted_note_ids = _memory_deleted_note_ids(root)
     target_key = clean_text(note_id_or_rel_path)
-    for path in vault.rglob("*.md"):
-        try:
-            raw = path.read_text(encoding="utf-8", errors="ignore")
-            note = parse_memory_note(path, raw)
-        except Exception:
-            continue
-        if note.note_id in deleted_note_ids:
-            continue
-        rel_path = path.relative_to(vault).as_posix()
-        if target_key not in {note.note_id, rel_path, path.stem}:
-            continue
-        if raw.startswith("---"):
-            raw = re.sub(r"(?m)^status:\s*.*$", "status: superseded", raw, count=1)
-            if "status:" not in raw.split("---", 2)[1]:
-                raw = raw.replace("---", "---\nstatus: superseded", 1)
-        else:
-            raw = _format_front_matter(
-                {
-                    "id": note.note_id,
-                    "type": note.note_type,
-                    "title": note.title,
-                    "status": "superseded",
-                    "updated_at": _utc_now_iso(),
-                }
-            ) + "\n\n" + raw
-        path.write_text(raw, encoding="utf-8")
-        sync_memory_vault_index(root=root)
-        return True
+    with _memory_edit_lock:
+        for path in vault.rglob("*.md"):
+            try:
+                raw = path.read_text(encoding="utf-8", errors="ignore")
+                note = parse_memory_note(path, raw)
+            except Exception:
+                continue
+            if note.note_id in deleted_note_ids:
+                continue
+            rel_path = path.relative_to(vault).as_posix()
+            if target_key not in {note.note_id, rel_path, path.stem}:
+                continue
+            if raw.startswith("---"):
+                raw = re.sub(
+                    r"(?m)^status:\s*.*$",
+                    "status: superseded",
+                    raw,
+                    count=1,
+                )
+                if "status:" not in raw.split("---", 2)[1]:
+                    raw = raw.replace(
+                        "---",
+                        "---\nstatus: superseded",
+                        1,
+                    )
+            else:
+                raw = _format_front_matter(
+                    {
+                        "id": note.note_id,
+                        "type": note.note_type,
+                        "title": note.title,
+                        "status": "superseded",
+                        "updated_at": _utc_now_iso(),
+                    }
+                ) + "\n\n" + raw
+            atomic_text_write(path, raw, durable=True)
+            sync_memory_vault_index(root=root)
+            return True
     return False
 
 
@@ -5325,11 +6032,14 @@ __all__ = [
     "MEMORY_DELETE_TOMBSTONE_SCHEMA",
     "MEMORY_EDIT_RESULT_SCHEMA",
     "MEMORY_PROVENANCE_BACKFILL_AUDIT_SCHEMA",
+    "MEMORY_PROVENANCE_BACKFILL_PREVIEW_SCHEMA",
+    "MEMORY_PROVENANCE_BACKFILL_RESULT_SCHEMA",
     "MEMORY_PROVENANCE_SCHEMA",
     "MEMORY_QUARANTINE_STATUS_SCHEMA",
     "MemoryNoteDeletedError",
     "MemoryVaultNote",
     "activate_memory_vault_for_guild",
+    "apply_memory_provenance_backfill",
     "append_turn_rows_to_memory_vault",
     "bootstrap_memory_vault_source",
     "build_memory_vault_context",
@@ -5345,6 +6055,7 @@ __all__ = [
     "parse_memory_note",
     "probe_sub_llm_dependency",
     "preview_memory_vault_user_note_deletion",
+    "preview_memory_provenance_backfill_application",
     "recall_memory_vault",
     "read_memory_hot_context",
     "request_sub_llm_json",

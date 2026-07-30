@@ -195,7 +195,9 @@ class ProvenanceAuditIntegrationTests(unittest.TestCase):
                 note_type="episode",
                 title="Opaque Target Title Canary",
                 body="private target body canary",
-                source="sub-llm-semantic-consolidation",
+                source=(
+                    "legacy-sub-llm-semantic-consolidation"
+                ),
                 source_refs=[source_ref],
                 evidence_hashes=[source_digest],
                 root=root,
@@ -239,7 +241,7 @@ class ProvenanceAuditIntegrationTests(unittest.TestCase):
             ],
             source.note_id,
         )
-        self.assertFalse(
+        self.assertTrue(
             preview["candidates"][0]["canApply"]
         )
         self.assertEqual(

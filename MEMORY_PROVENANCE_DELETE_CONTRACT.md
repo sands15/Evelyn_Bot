@@ -1,41 +1,23 @@
 # Memory Provenance and Deletion Contract
 
-## Provenance
+The canonical current contract is
+[`docs/MEMORY_PROVENANCE_DELETION_CONTRACT.md`](docs/MEMORY_PROVENANCE_DELETION_CONTRACT.md).
+This root file is retained as a stable compatibility pointer.
 
-Public memory cards and recall results expose `memory.provenance.v1`.
-The contract records the source category, sanitized source references, parent
-memory IDs, evidence hashes, timestamps, confidence, and user confirmation or
-edit state. Absolute local paths are reduced to `local:<filename>` before they
-leave the runtime.
+Current invariants:
 
-The generated SQLite index is schema version 4. Markdown remains the durable
-source; index, vector, retrieval-cache, and hot-context data are rebuildable.
-
-## Permanent deletion
-
-Control Page deletion is a two-step operation:
-
-1. `POST /api/control-page/memory/{noteId}/delete/preview`
-2. `POST /api/control-page/memory/{noteId}/delete/apply`
-
-Preview returns a cryptographically random, single-use confirmation token.
-The token expires after two minutes and is bound to the memory root, note ID,
-and content hash. Apply fails if the token is invalid, expired, reused, points
-to another note, or if the source changed after preview.
-
-A successful apply:
-
-- deletes the Markdown source file;
-- removes user confirmation, pin, hide, and edit state;
-- removes the note from search and vector indexes;
-- invalidates retrieval caches;
-- rebuilds hot context;
-- writes a content-free tombstone that prevents automatic regeneration.
-
-The tombstone stores only schema, opaque note ID, note type, source category,
-content hash, deletion reason, and deletion time. It never stores the title,
-body, transcript, source path, or source references.
-
-Bootstrap contract notes, internal management notes, and
-legacy-source-managed notes cannot be deleted from Control Page. All mutating
-endpoints use the existing Control Page CSRF contract.
+- Markdown is durable memory; SQLite schema v6, FTS, vectors, retrieval cache,
+  graph data, and hot context are rebuildable derivatives.
+- Public memory and recall expose `memory.provenance.v1` with sanitized source
+  references and declared `derivedFrom` edges.
+- user edits, permanent deletion, and exact-metadata provenance backfill use
+  separate conflict-safe preview/apply contracts with CSRF protection.
+- provenance backfill tokens expire after 120 seconds, are single-use, and bind
+  the target hash, every source hash, and the full graph fingerprint.
+- ambiguous backfill candidates cannot be applied, and no candidate is applied
+  automatically.
+- deletion is tombstone-first; tombstones and provenance audit reports never
+  store title, body, transcript, source path/ref, evidence hash, or content
+  hash.
+- new consolidation and recomposition writes must declare their source note IDs
+  through `derived_from`.

@@ -1532,11 +1532,26 @@
     }
 
     .memory-audit-open {
-      justify-self: start;
       min-height: 32px;
       padding: 0 10px;
       font-size: 0.74rem;
       font-weight: 800;
+    }
+
+    .memory-audit-card-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .memory-audit-apply {
+      min-height: 32px;
+      padding: 0 10px;
+      border-color: rgba(47, 157, 104, 0.45);
+      color: var(--text);
+      background: rgba(47, 157, 104, 0.12);
+      font-size: 0.74rem;
+      font-weight: 900;
     }
 
     .memory-cards {
@@ -4456,7 +4471,7 @@
         '<div class="memory-audit-metric"><strong>' + Number(summary.verifiedCount || 0) + '</strong><span>참조+해시 일치</span></div>' +
         '<div class="memory-audit-metric"><strong>' + Number(summary.ambiguousCount || 0) + '</strong><span>신호 충돌</span></div>' +
         '</div>' +
-        '<span class="memory-audit-policy">본문 유사도는 사용하지 않았습니다. 정확한 source ref와 evidence hash만 감사하며, 여기서는 어떤 메모도 수정하지 않습니다.</span>' +
+        '<span class="memory-audit-policy">본문 유사도는 사용하지 않았습니다. 정확한 source ref와 evidence hash만 감사하며, 조회만으로는 어떤 메모도 수정하지 않습니다. 근거 연결은 별도의 2단계 확인이 필요합니다.</span>' +
         (Number(summary.unmatchedTargetCount || 0)
           ? '<span class="memory-audit-policy">명시적 신호가 있지만 연결 대상을 증명하지 못한 기억 ' + Number(summary.unmatchedTargetCount || 0) + '개는 미적용 상태로 남겼습니다.</span>'
           : '') +
@@ -4482,17 +4497,97 @@
               return `${source.title || source.id || "unknown"} (${labels.join(", ") || "정확 일치"})`;
             }).join(" · ");
             const state = String(candidate.state || "review");
+            const canApply = Boolean(candidate.canApply);
             return (
               '<article class="memory-audit-card" data-audit-state="' + escapeHtml(state) + '">' +
               '<div class="memory-audit-card-head"><strong>' + escapeHtml(target.title || target.id || "Untitled") + '</strong>' +
               '<span class="memory-audit-state">' + escapeHtml(stateLabels[state] || state) + '</span></div>' +
               '<span class="memory-audit-signals">후보 근거: ' + escapeHtml(signalText || "없음") + '</span>' +
+              '<div class="memory-audit-card-actions">' +
               '<button class="memory-audit-open" type="button" data-audit-target="' + escapeHtml(target.id || "") + '">기억 열기</button>' +
+              (canApply
+                ? '<button class="memory-audit-apply" type="button" data-audit-backfill="' + escapeHtml(target.id || "") + '">근거 연결 검토</button>'
+                : '') +
+              '</div>' +
               '</article>'
             );
           }).join("")
         : '<div class="memory-empty">현재 정확한 메타데이터로 증명할 수 있는 백필 후보가 없습니다.</div>';
       memoryAudit.innerHTML = quarantineMarkup + summaryMarkup + candidateMarkup;
+    }
+
+    function findMemoryAuditCandidate(noteId) {
+      const candidates = Array.isArray(memoryAuditSnapshot && memoryAuditSnapshot.candidates)
+        ? memoryAuditSnapshot.candidates
+        : [];
+      return candidates.find((candidate) => (
+        String(candidate && candidate.target && candidate.target.id || "") === String(noteId || "")
+      )) || null;
+    }
+
+    async function applyMemoryProvenanceBackfill(candidate, button) {
+      const target = candidate && candidate.target ? candidate.target : {};
+      const sources = Array.isArray(candidate && candidate.candidateSources)
+        ? candidate.candidateSources
+        : [];
+      const sourceNoteIds = sources.map((source) => String(source.id || "")).filter(Boolean);
+      if (!candidate || !candidate.canApply || !target.id || !sourceNoteIds.length) {
+        setBubble("이 후보는 정확한 근거 연결 대상으로 확정할 수 없어 적용하지 않았어.");
+        return;
+      }
+      if (button) button.disabled = true;
+      try {
+        const preview = await fetchApi(
+          "/api/control-page/memory-provenance-backfill/" + encodeURIComponent(target.id) + "/preview",
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ sourceNoteIds })
+          }
+        );
+        const previewSources = Array.isArray(preview && preview.candidateSources)
+          ? preview.candidateSources
+          : [];
+        const sourceNames = previewSources.map((source) => source.title || source.id).filter(Boolean);
+        const confirmed = window.confirm(
+          `"${target.title || target.id}" 기억에 파생 근거를 연결할까요?\n\n` +
+          `후보 상태: ${preview.candidateState || candidate.state || "review"}\n` +
+          `연결할 근거: ${sourceNames.join(", ") || sourceNoteIds.join(", ")}\n\n` +
+          "제목과 본문은 바꾸지 않습니다. 현재 note와 모든 source hash, 전체 graph fingerprint가 그대로일 때만 적용됩니다."
+        );
+        if (!confirmed) return;
+        const applied = await fetchApi(
+          "/api/control-page/memory-provenance-backfill/" + encodeURIComponent(target.id) + "/apply",
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ confirmToken: preview.confirmToken })
+          }
+        );
+        memorySnapshot = null;
+        memoryGraphSnapshot = null;
+        memoryAuditSnapshot = null;
+        await loadMemoryVault({ force: true });
+        setMemoryPage("audit");
+        setBubble(
+          applied && applied.applied
+            ? `기억 본문은 유지하고 파생 근거 ${sourceNoteIds.length}개를 연결했어.`
+            : "근거 연결 결과를 다시 확인해줘."
+        );
+      } catch (error) {
+        if (String(error.message || "") === "api_error:409") {
+          memorySnapshot = null;
+          memoryGraphSnapshot = null;
+          memoryAuditSnapshot = null;
+          await loadMemoryVault({ force: true });
+          setMemoryPage("audit");
+          setBubble("미리보기 뒤 기억·근거·그래프가 바뀌어서 연결하지 않았어. 최신 후보를 다시 확인해줘.");
+          return;
+        }
+        setBubble(`근거 연결에 실패했어: ${error.message}`);
+      } finally {
+        if (button) button.disabled = false;
+      }
     }
 
     function renderMemoryCards() {
@@ -4982,9 +5077,16 @@
     }
     if (memoryAudit) {
       memoryAudit.addEventListener("click", (event) => {
-        const button = event.target.closest("[data-audit-target]");
-        if (!button) return;
-        const noteId = button.getAttribute("data-audit-target") || "";
+        const backfillButton = event.target.closest("[data-audit-backfill]");
+        if (backfillButton) {
+          const noteId = backfillButton.getAttribute("data-audit-backfill") || "";
+          const candidate = findMemoryAuditCandidate(noteId);
+          if (candidate) applyMemoryProvenanceBackfill(candidate, backfillButton);
+          return;
+        }
+        const openButton = event.target.closest("[data-audit-target]");
+        if (!openButton) return;
+        const noteId = openButton.getAttribute("data-audit-target") || "";
         if (noteId) selectMemoryCard(noteId, { openManager: true });
       });
     }
