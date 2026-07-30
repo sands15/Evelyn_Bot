@@ -49,6 +49,20 @@ class RuntimeErrorCounterTests(unittest.TestCase):
         self.assertEqual(snapshot["errorCounters"], {"voice_rearm_failed": 2})
         self.assertEqual(snapshot["lastErrorType"], "TimeoutError")
 
+    def test_guild_reset_revocation_error_keeps_its_actionable_code(self) -> None:
+        counter = RuntimeErrorCounter(now=lambda: 1000.0)
+
+        snapshot = counter.record(
+            "conversation_continuity_guild_reset_revoke_failed",
+            PermissionError("private checkpoint path"),
+        )
+
+        self.assertEqual(
+            snapshot["lastErrorCode"],
+            "conversation_continuity_guild_reset_revoke_failed",
+        )
+        self.assertNotIn("private", json.dumps(snapshot))
+
 
 class RuntimeErrorObservabilityTests(unittest.TestCase):
     def setUp(self) -> None:

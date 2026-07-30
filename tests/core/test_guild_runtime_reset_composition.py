@@ -69,13 +69,20 @@ class GuildRuntimeResetCompositionTests(unittest.TestCase):
         self.assertNotIn("globals()", source)
         self.assertNotIn("import main", source)
         self.assertIn("build_guild_runtime_reset_deps_from_runtime(", source)
-        self.assertIn("self.deps.flush_session_continuity()", source)
+        self.assertIn("self.deps.reset_session_continuity_guild(", source)
 
-    def test_reset_flushes_continuity_after_runtime_state_is_cleared(self) -> None:
+    def test_reset_is_wrapped_by_durable_continuity_revocation(self) -> None:
         events: list[str] = []
+
+        def reset_continuity_guild(guild_id, reset_runtime_state):
+            events.append(f"revoke:{guild_id}")
+            reset_runtime_state()
+            events.append("flush")
+            return {"state": "ready"}
+
         composition = GuildRuntimeResetComposition(
             SimpleNamespace(
-                flush_session_continuity=lambda: events.append("flush")
+                reset_session_continuity_guild=reset_continuity_guild
             )
         )
         composition.build_guild_runtime_reset_deps = Mock(return_value=object())
@@ -87,7 +94,23 @@ class GuildRuntimeResetCompositionTests(unittest.TestCase):
         ):
             composition.reset_guild_runtime_state(7)
 
-        self.assertEqual(events, ["reset", "flush"])
+        self.assertEqual(events, ["revoke:7", "reset", "flush"])
+
+    def test_continuity_persistence_failure_fails_the_reset_command(self) -> None:
+        composition = GuildRuntimeResetComposition(
+            SimpleNamespace(
+                reset_session_continuity_guild=lambda guild_id, callback: {
+                    "state": "error",
+                    "lastErrorCode": "continuity_reset_not_durable",
+                }
+            )
+        )
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "continuity_reset_not_durable",
+        ):
+            composition.reset_guild_runtime_state(7)
 
 
 if __name__ == "__main__":

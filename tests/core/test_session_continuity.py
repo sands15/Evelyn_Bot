@@ -91,6 +91,26 @@ class SessionContinuityTests(unittest.TestCase):
         )
         return store
 
+    def add_other_guild(self, store: SessionStateStore) -> str:
+        session_key = "guild:2:text:5:user:6"
+        store.append_history(
+            session_key,
+            "다른 길드의 대화",
+            "이 관계는 유지해야 해.",
+            system_prompt="private system prompt",
+            max_history_items=12,
+        )
+        store.update_session_state(
+            session_key,
+            user_id=6,
+            speaker="assistant",
+            awaiting_user_reply=True,
+            topic_id="topic-2",
+            active_conversation_awaiting_reply_sec=300.0,
+            now_monotonic=100.0,
+        )
+        return session_key
+
     def test_completed_turn_and_active_followup_survive_fresh_restart(self) -> None:
         source_clock = FakeClock(wall=1000.0, monotonic=100.0)
         source = self.populated_store()
@@ -212,6 +232,138 @@ class SessionContinuityTests(unittest.TestCase):
         self.assertEqual(status["state"], "empty")
         self.assertFalse(self.checkpoint_path.exists())
         self.assertEqual(status["persistedSessionCount"], 0)
+
+    def test_guild_reset_marker_filters_old_checkpoint_after_mid_reset_crash(
+        self,
+    ) -> None:
+        clock = FakeClock(wall=1000.0, monotonic=100.0)
+        store = self.populated_store()
+        other_key = self.add_other_guild(store)
+        manager = self.manager(store, clock)
+        manager.flush()
+
+        class SimulatedCrash(RuntimeError):
+            pass
+
+        with self.assertRaises(SimulatedCrash):
+            manager.reset_guild(
+                1,
+                lambda: (_ for _ in ()).throw(
+                    SimulatedCrash("process exited during reset")
+                ),
+            )
+
+        restored_store = SessionStateStore.create_empty()
+        restored = self.manager(
+            restored_store,
+            FakeClock(wall=1001.0, monotonic=500.0),
+        ).restore()
+        ledger = json.loads(
+            (self.root / "guild_revocations.json").read_text(encoding="utf-8")
+        )
+
+        self.assertEqual(restored["state"], "restored")
+        self.assertEqual(restored["restoredSessionCount"], 1)
+        self.assertNotIn("guild:1:text:2:user:3", restored_store.histories)
+        self.assertIn(other_key, restored_store.histories)
+        self.assertEqual(ledger["guilds"], {"1": 1000.0})
+        self.assertTrue(ledger["policy"]["contentFree"])
+        serialized = json.dumps(ledger, ensure_ascii=False)
+        self.assertNotIn("내가 하던 이야기를 기억해", serialized)
+        self.assertNotIn("다른 길드의 대화", serialized)
+
+    def test_successful_guild_reset_rewrites_checkpoint_before_unrevoking(
+        self,
+    ) -> None:
+        clock = FakeClock(wall=1000.0, monotonic=100.0)
+        store = self.populated_store()
+        other_key = self.add_other_guild(store)
+        manager = self.manager(store, clock)
+        manager.flush()
+
+        def clear_target() -> None:
+            for mapping in (
+                store.histories,
+                store.followup_targets,
+                store.active_until,
+                store.active_user_ids,
+                store.last_active_at,
+                store.awaiting_user_reply,
+                store.last_speaker,
+                store.topic_ids,
+                store.turn_ids,
+            ):
+                mapping.pop("guild:1:text:2:user:3", None)
+
+        clock.wall = 1001.0
+        result = manager.reset_guild(1, clear_target)
+        checkpoint = json.loads(
+            self.checkpoint_path.read_text(encoding="utf-8")
+        )
+        ledger = json.loads(
+            (self.root / "guild_revocations.json").read_text(encoding="utf-8")
+        )
+
+        self.assertEqual(result["state"], "ready")
+        self.assertEqual(
+            [row["sessionKey"] for row in checkpoint["sessions"]],
+            [other_key],
+        )
+        self.assertEqual(ledger["guilds"], {})
+        self.assertEqual(result["guildRevocationCount"], 0)
+
+    def test_guild_reset_does_not_run_if_revocation_marker_is_not_durable(
+        self,
+    ) -> None:
+        clock = FakeClock(wall=1000.0, monotonic=100.0)
+        store = self.populated_store()
+        manager = self.manager(store, clock)
+        manager.flush()
+        reset_called = False
+
+        def fail_revocation_write(path: Path, payload: dict, **kwargs) -> None:
+            if Path(path).name == "guild_revocations.json":
+                raise PermissionError("revocation path unavailable")
+            atomic_json_write(path, payload, **kwargs)
+
+        def reset() -> None:
+            nonlocal reset_called
+            reset_called = True
+
+        with patch(
+            "evelyn_core.session_continuity.atomic_json_write",
+            side_effect=fail_revocation_write,
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "conversation_continuity_guild_reset_revoke_failed",
+            ):
+                manager.reset_guild(1, reset)
+
+        self.assertFalse(reset_called)
+        self.assertTrue(self.checkpoint_path.exists())
+
+    def test_corrupt_guild_revocation_ledger_rejects_checkpoint(self) -> None:
+        clock = FakeClock(wall=1000.0, monotonic=100.0)
+        self.manager(self.populated_store(), clock).flush()
+        (self.root / "guild_revocations.json").write_text(
+            '{"schema":"wrong","guilds":{"1":1000}}',
+            encoding="utf-8",
+        )
+        restored_store = SessionStateStore.create_empty()
+
+        status = self.manager(
+            restored_store,
+            FakeClock(wall=1001.0, monotonic=500.0),
+        ).restore()
+
+        self.assertEqual(status["state"], "error")
+        self.assertEqual(
+            status["lastErrorCode"],
+            "conversation_continuity_checkpoint_rejected",
+        )
+        self.assertEqual(restored_store.histories, {})
+        self.assertFalse(self.checkpoint_path.exists())
 
     def test_expired_followup_restores_history_but_not_active_state(self) -> None:
         source = self.populated_store()

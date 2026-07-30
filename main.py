@@ -684,7 +684,7 @@ guild_runtime_reset_composition = GuildRuntimeResetComposition(
         tts_playback_tracker=tts_playback_tracker, memory_locks=memory_locks,
         cognitive_locks=cognitive_locks, background_cognitive_tasks=background_cognitive_tasks,
         autonomy_last_cognitive_refresh_at=autonomy_last_cognitive_refresh_at, autonomy_cognitive_refresh_tasks=autonomy_cognitive_refresh_tasks,
-        flush_session_continuity=session_continuity_checkpoint.flush,
+        reset_session_continuity_guild=session_continuity_checkpoint.reset_guild,
     )
 )
 

@@ -42,7 +42,7 @@ class GuildRuntimeResetCompositionDeps:
     background_cognitive_tasks: MutableMapping[str, Any]
     autonomy_last_cognitive_refresh_at: MutableMapping[int, Any]
     autonomy_cognitive_refresh_tasks: MutableMapping[int, Any]
-    flush_session_continuity: Callable[[], Any]
+    reset_session_continuity_guild: Callable[[int, Callable[[], Any]], Any]
 
 
 class GuildRuntimeResetComposition:
@@ -87,11 +87,20 @@ class GuildRuntimeResetComposition:
         )
 
     def reset_guild_runtime_state(self, guild_id: int) -> None:
-        reset_guild_runtime_state_from_runtime(
+        result = self.deps.reset_session_continuity_guild(
             guild_id,
-            deps=self.build_guild_runtime_reset_deps(),
+            lambda: reset_guild_runtime_state_from_runtime(
+                guild_id,
+                deps=self.build_guild_runtime_reset_deps(),
+            ),
         )
-        self.deps.flush_session_continuity()
+        if isinstance(result, dict) and result.get("state") == "error":
+            raise RuntimeError(
+                str(
+                    result.get("lastErrorCode")
+                    or "conversation_continuity_guild_reset_failed"
+                )
+            )
 
 
 __all__ = ["GuildRuntimeResetComposition", "GuildRuntimeResetCompositionDeps"]

@@ -16,12 +16,16 @@ from .text import clean_text
 
 SESSION_CONTINUITY_CHECKPOINT_SCHEMA = "conversation_continuity.checkpoint.v1"
 SESSION_CONTINUITY_STATUS_SCHEMA = "conversation_continuity.status.v1"
+SESSION_CONTINUITY_REVOCATIONS_SCHEMA = (
+    "conversation_continuity.guild_revocations.v1"
+)
 DEFAULT_MAX_AGE_SEC = 15 * 60.0
 DEFAULT_FLUSH_INTERVAL_SEC = 1.0
 DEFAULT_MAX_SESSIONS = 32
 DEFAULT_MAX_HISTORY_ITEMS = 12
 DEFAULT_MAX_CONTENT_CHARS = 2000
 DEFAULT_MAX_FILE_BYTES = 1024 * 1024
+DEFAULT_MAX_GUILD_REVOCATIONS = 256
 _ALLOWED_HISTORY_ROLES = frozenset({"user", "assistant"})
 _ALLOWED_SPEAKERS = frozenset({"user", "assistant"})
 
@@ -84,6 +88,14 @@ def _safe_followup_target(value: Any) -> dict[str, int]:
     return target
 
 
+def _session_guild_id(session_key: str) -> int | None:
+    parts = str(session_key or "").split(":", 2)
+    if len(parts) < 3 or parts[0] != "guild":
+        return None
+    guild_id = _safe_int(parts[1])
+    return guild_id if guild_id is not None and guild_id >= 0 else None
+
+
 class SessionContinuityCheckpoint:
     """Persists a bounded, short-lived completed-turn checkpoint across restarts."""
 
@@ -93,6 +105,7 @@ class SessionContinuityCheckpoint:
         store: Any,
         checkpoint_path: Path,
         status_path: Path,
+        revocations_path: Path | None = None,
         system_prompt: str,
         max_age_sec: float = DEFAULT_MAX_AGE_SEC,
         flush_interval_sec: float = DEFAULT_FLUSH_INTERVAL_SEC,
@@ -107,6 +120,10 @@ class SessionContinuityCheckpoint:
         self.store = store
         self.checkpoint_path = Path(checkpoint_path)
         self.status_path = Path(status_path)
+        self.revocations_path = Path(
+            revocations_path
+            or self.checkpoint_path.with_name("guild_revocations.json")
+        )
         self.system_prompt = str(system_prompt)
         self.max_age_sec = max(60.0, float(max_age_sec))
         self.flush_interval_sec = max(0.25, float(flush_interval_sec))
@@ -127,6 +144,7 @@ class SessionContinuityCheckpoint:
         self._checkpoint_revoked_at: float | None = None
         self._restored_session_count = 0
         self._persisted_session_count = 0
+        self._guild_revocations: dict[int, float] = {}
 
     def _emit(self, message: str) -> None:
         if self.log is not None:
@@ -283,6 +301,7 @@ class SessionContinuityCheckpoint:
             "checkpointRevokedAt": self._checkpoint_revoked_at,
             "restoredSessionCount": self._restored_session_count,
             "persistedSessionCount": self._persisted_session_count,
+            "guildRevocationCount": len(self._guild_revocations),
             "policy": {
                 "maxAgeSec": self.max_age_sec,
                 "flushIntervalSec": self.flush_interval_sec,
@@ -291,6 +310,71 @@ class SessionContinuityCheckpoint:
             },
             **self.runtime_errors.snapshot(),
         }
+
+    def _load_guild_revocations(self) -> dict[int, float]:
+        path = self.revocations_path
+        if not path.exists():
+            return {}
+        if (
+            path.is_symlink()
+            or not path.is_file()
+            or path.stat().st_size > 128 * 1024
+        ):
+            raise ValueError("guild_revocations_rejected")
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if (
+            not isinstance(payload, dict)
+            or payload.get("schema")
+            != SESSION_CONTINUITY_REVOCATIONS_SCHEMA
+            or not isinstance(payload.get("guilds"), dict)
+        ):
+            raise ValueError("guild_revocations_rejected")
+        revocations: dict[int, float] = {}
+        for raw_guild_id, raw_timestamp in payload["guilds"].items():
+            guild_id = _safe_int(raw_guild_id)
+            timestamp = _finite_float(raw_timestamp, default=-1.0)
+            if (
+                guild_id is None
+                or guild_id < 0
+                or str(guild_id) != str(raw_guild_id)
+                or timestamp < 0.0
+            ):
+                raise ValueError("guild_revocations_rejected")
+            revocations[guild_id] = timestamp
+        return dict(
+            sorted(
+                revocations.items(),
+                key=lambda item: (-item[1], item[0]),
+            )[:DEFAULT_MAX_GUILD_REVOCATIONS]
+        )
+
+    def _write_guild_revocations(
+        self,
+        revocations: dict[int, float],
+    ) -> None:
+        bounded = dict(
+            sorted(
+                revocations.items(),
+                key=lambda item: (-item[1], item[0]),
+            )[:DEFAULT_MAX_GUILD_REVOCATIONS]
+        )
+        atomic_json_write(
+            self.revocations_path,
+            {
+                "schema": SESSION_CONTINUITY_REVOCATIONS_SCHEMA,
+                "updatedAt": self.wall_time(),
+                "guilds": {
+                    str(guild_id): timestamp
+                    for guild_id, timestamp in sorted(bounded.items())
+                },
+                "policy": {
+                    "contentFree": True,
+                    "maxGuilds": DEFAULT_MAX_GUILD_REVOCATIONS,
+                },
+            },
+            durable=True,
+        )
+        self._guild_revocations = bounded
 
     def _write_status(self, *, durable: bool = False) -> None:
         try:
@@ -406,6 +490,15 @@ class SessionContinuityCheckpoint:
                 self._state = "stale"
                 self._write_status()
                 return self.status()
+            try:
+                guild_revocations = self._load_guild_revocations()
+            except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                self._discard_checkpoint()
+                return self._record_error(
+                    "conversation_continuity_checkpoint_rejected",
+                    exc,
+                )
+            self._guild_revocations = guild_revocations
 
             restored = 0
             now_mono = self.monotonic()
@@ -417,6 +510,16 @@ class SessionContinuityCheckpoint:
                     continue
                 session_key = _valid_session_key(row.get("sessionKey"))
                 if not session_key:
+                    continue
+                guild_id = _session_guild_id(session_key)
+                if (
+                    guild_id is not None
+                    and _finite_float(
+                        guild_revocations.get(guild_id),
+                        default=-1.0,
+                    )
+                    >= saved_at
+                ):
                     continue
                 history = _safe_history(
                     row.get("history"),
@@ -481,6 +584,52 @@ class SessionContinuityCheckpoint:
             self._emit(
                 f"[SESSION CONTINUITY] restored sessions={restored}"
             )
+            return self.status()
+
+    def reset_guild(
+        self,
+        guild_id: int,
+        reset_runtime_state: Callable[[], Any],
+    ) -> dict[str, Any]:
+        """Durably revoke a guild checkpoint before clearing its live state."""
+        normalized_guild_id = _safe_int(guild_id)
+        if normalized_guild_id is None or normalized_guild_id < 0:
+            raise ValueError("invalid_guild_id")
+        with self._lock:
+            try:
+                revocations = self._load_guild_revocations()
+                revocations[normalized_guild_id] = self.wall_time()
+                self._write_guild_revocations(revocations)
+                self._state = "guild_reset_revoked"
+                self._write_status(durable=True)
+            except Exception as exc:
+                self._record_error(
+                    "conversation_continuity_guild_reset_revoke_failed",
+                    exc,
+                )
+                raise RuntimeError(
+                    "conversation_continuity_guild_reset_revoke_failed"
+                ) from exc
+            try:
+                reset_runtime_state()
+            except Exception as exc:
+                self._record_error(
+                    "conversation_continuity_guild_reset_failed",
+                    exc,
+                )
+                raise
+            result = self.flush(force=True)
+            if result.get("state") == "error":
+                return result
+            try:
+                revocations.pop(normalized_guild_id, None)
+                self._write_guild_revocations(revocations)
+                self._write_status(durable=True)
+            except Exception as exc:
+                return self._record_error(
+                    "conversation_continuity_guild_reset_finalize_failed",
+                    exc,
+                )
             return self.status()
 
     def flush(self, *, force: bool = False) -> dict[str, Any]:
@@ -562,6 +711,7 @@ __all__ = [
     "DEFAULT_FLUSH_INTERVAL_SEC",
     "DEFAULT_MAX_AGE_SEC",
     "SESSION_CONTINUITY_CHECKPOINT_SCHEMA",
+    "SESSION_CONTINUITY_REVOCATIONS_SCHEMA",
     "SESSION_CONTINUITY_STATUS_SCHEMA",
     "SessionContinuityCheckpoint",
 ]

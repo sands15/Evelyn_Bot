@@ -110,39 +110,51 @@ def _cancel_task(task: Any) -> None:
         task.cancel()
 
 
+def _has_prefix(value: Any, prefix: str) -> bool:
+    return isinstance(value, str) and value.startswith(prefix)
+
+
+def _drop_prefixed(mapping: MutableMapping[str, Any], prefix: str) -> None:
+    for key in [key for key in mapping if _has_prefix(key, prefix)]:
+        mapping.pop(key, None)
+
+
 def reset_guild_runtime_state_from_runtime(guild_id: int, *, deps: GuildRuntimeResetDeps) -> None:
     prefix = f"guild:{guild_id}:"
-    for key in [key for key in deps.session_histories if key.startswith(prefix)]:
-        deps.session_histories.pop(key, None)
-    for key in [key for key in deps.session_followup_targets if key.startswith(prefix)]:
-        deps.session_followup_targets.pop(key, None)
-    for key in [key for key in deps.active_session_until if key.startswith(prefix)]:
-        deps.active_session_until.pop(key, None)
-        deps.active_session_user_ids.pop(key, None)
-        deps.session_last_active_at.pop(key, None)
-        deps.session_awaiting_user_reply.pop(key, None)
-        deps.session_last_speaker.pop(key, None)
-        deps.session_topic_ids.pop(key, None)
-        deps.session_turn_ids.pop(key, None)
-        deps.session_segment_counters.pop(key, None)
-        deps.session_last_turn_accepted_at.pop(key, None)
-        deps.session_last_stt_text.pop(key, None)
-        for room_key, record in list(deps.room_last_voice_utterance_for_merge.items()):
-            if getattr(record, "session_key", None) == key:
-                deps.room_last_voice_utterance_for_merge.pop(room_key, None)
-        deps.session_partial_stt_text.pop(key, None)
-        deps.session_committed_stt_text.pop(key, None)
-        deps.session_bad_audio_counts.pop(key, None)
-    for key in [key for key in deps.room_owner_user_ids if key.startswith(prefix)]:
-        deps.room_owner_user_ids.pop(key, None)
-        deps.room_owner_until.pop(key, None)
-        deps.room_reply_in_progress.pop(key, None)
-        deps.room_last_voice_reply_at.pop(key, None)
+    for mapping in (
+        deps.session_histories,
+        deps.session_followup_targets,
+        deps.active_session_until,
+        deps.active_session_user_ids,
+        deps.session_last_active_at,
+        deps.session_awaiting_user_reply,
+        deps.session_last_speaker,
+        deps.session_topic_ids,
+        deps.session_turn_ids,
+        deps.session_segment_counters,
+        deps.session_last_turn_accepted_at,
+        deps.session_last_stt_text,
+        deps.session_partial_stt_text,
+        deps.session_committed_stt_text,
+        deps.session_bad_audio_counts,
+    ):
+        _drop_prefixed(mapping, prefix)
+    for room_key, record in list(
+        deps.room_last_voice_utterance_for_merge.items()
+    ):
+        if _has_prefix(getattr(record, "session_key", None), prefix):
+            deps.room_last_voice_utterance_for_merge.pop(room_key, None)
+    for mapping in (
+        deps.room_owner_user_ids,
+        deps.room_owner_until,
+        deps.room_reply_in_progress,
+        deps.room_last_voice_reply_at,
+    ):
+        _drop_prefixed(mapping, prefix)
     deps.turn_scope_registry.cancel_matching_prefix(prefix)
-    for key in [key for key in deps.session_locks if key.startswith(prefix)]:
-        deps.session_locks.pop(key, None)
+    _drop_prefixed(deps.session_locks, prefix)
     for key, task in list(deps.background_search_tasks.items()):
-        if key.startswith(prefix):
+        if _has_prefix(key, prefix):
             _cancel_task(task)
             deps.background_search_tasks.pop(key, None)
     deps.clear_tts_playback_tracking(
@@ -152,7 +164,7 @@ def reset_guild_runtime_state_from_runtime(guild_id: int, *, deps: GuildRuntimeR
     deps.memory_locks.pop(guild_id, None)
     deps.cognitive_locks.pop(guild_id, None)
     for key, task in list(deps.background_cognitive_tasks.items()):
-        if key.startswith(prefix):
+        if _has_prefix(key, prefix):
             _cancel_task(task)
             deps.background_cognitive_tasks.pop(key, None)
     deps.autonomy_last_cognitive_refresh_at.pop(guild_id, None)

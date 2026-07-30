@@ -148,6 +148,54 @@ class GuildRuntimeResetTests(unittest.TestCase):
         self.assertTrue(state["tasks"]["cognitive"].cancelled)
         self.assertTrue(state["tasks"]["refresh"].cancelled)
 
+    def test_reset_removes_orphaned_state_without_active_or_owner_anchor(self) -> None:
+        deps, state = self.build_deps()
+        guild_key = "guild:7:voice:42"
+        state["active_session_until"].pop(guild_key)
+        state["room_owner_user_ids"].pop(guild_key)
+
+        reset_guild_runtime_state_from_runtime(7, deps=deps)
+
+        prefixed_mappings = (
+            state["session_histories"],
+            state["session_followup_targets"],
+            state["active_session_until"],
+            state["active_session_user_ids"],
+            state["session_last_active_at"],
+            state["session_awaiting_user_reply"],
+            state["session_last_speaker"],
+            state["session_topic_ids"],
+            state["session_turn_ids"],
+            state["session_segment_counters"],
+            state["session_last_turn_accepted_at"],
+            state["session_last_stt_text"],
+            state["session_partial_stt_text"],
+            state["session_committed_stt_text"],
+            state["session_bad_audio_counts"],
+            state["room_owner_user_ids"],
+            state["room_owner_until"],
+            state["room_reply_in_progress"],
+            state["room_last_voice_reply_at"],
+            state["session_locks"],
+            state["background_search_tasks"],
+            state["background_cognitive_tasks"],
+        )
+        for mapping in prefixed_mappings:
+            self.assertFalse(
+                any(
+                    isinstance(key, str)
+                    and key.startswith("guild:7:")
+                    for key in mapping
+                ),
+                mapping,
+            )
+        self.assertFalse(
+            any(
+                getattr(record, "session_key", "").startswith("guild:7:")
+                for record in state["room_last_voice_utterance_for_merge"].values()
+            )
+        )
+
 
 def test_build_guild_runtime_reset_deps_identity() -> None:
     deps = build_guild_runtime_reset_deps(
