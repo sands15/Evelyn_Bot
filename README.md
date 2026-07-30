@@ -44,6 +44,25 @@ public web app.
 
 ## Running
 
+On a first Windows setup, create the isolated Host Supervisor runtime:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\evelyn_core\runtime\launchers\bootstrap_host_runtime.ps1
+```
+
+This installs the small, locked host-only dependency set into `.venv-host`.
+GPU model dependencies remain inside the Docker services.
+
+The local TTS service also requires the private, untracked voice profile:
+
+```text
+omnivoice_profiles/evelyn/ref_audio.wav
+omnivoice_profiles/evelyn/meta.json
+```
+
+`meta.json` must contain a non-empty `ref_text`. The launcher validates this
+profile before starting Docker and does not add either file to source control.
+
 The usual launcher is:
 
 ```bat

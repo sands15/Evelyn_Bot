@@ -442,7 +442,7 @@ class LocalMicRoutingTests(unittest.TestCase):
         self.assertIn("'stop', 'discord_bot'", script)
         self.assertIn("EVELYN_LOCAL_KEEP_DISCORD_BOT", script)
         self.assertIn("evelyn_core.host_supervisor", script)
-        self.assertNotIn("evelyn_core.local_io_bridge", script)
+        self.assertNotIn("-m evelyn_core.local_io_bridge", script)
         self.assertIn('"evelyn_core.local_io_bridge"', supervisor_source)
         self.assertIn("--project-root '$projectRoot'", script)
         self.assertIn("LOCAL_BRIDGE_BOT_API_BASE", script)

@@ -1,5 +1,9 @@
 import numpy as np
-import torch
+
+try:
+    import torch
+except Exception:
+    torch = None
 
 try:
     import soxr
@@ -108,7 +112,7 @@ def apply_light_denoise(audio_in: np.ndarray, sampling_rate: int = TARGET_RATE) 
     audio = np.asarray(audio_in, dtype=np.float32).copy()
     effective_rate = max(1, int(sampling_rate))
 
-    if torchaudio_F is not None:
+    if torchaudio_F is not None and torch is not None:
         try:
             tensor = torch.from_numpy(audio)
             tensor = torchaudio_F.highpass_biquad(tensor, effective_rate, DENOISE_HIGHPASS_HZ)
@@ -195,7 +199,7 @@ def get_silero_vad_model():
     if silero_vad_model is not None:
         return silero_vad_model
 
-    if load_silero_vad is None or get_speech_timestamps is None:
+    if torch is None or load_silero_vad is None or get_speech_timestamps is None:
         raise RuntimeError("silero_vad is not available")
 
     silero_vad_model = load_silero_vad(onnx=SILERO_VAD_ONNX)
@@ -241,6 +245,8 @@ def is_probably_silent_energy(audio: np.ndarray, sampling_rate: int = TARGET_RAT
 
 def is_probably_silent_silero(audio: np.ndarray, sampling_rate: int = TARGET_RATE) -> bool:
     """Silero VAD 타임스탬프가 비어 있으면 무음으로 본다."""
+    if torch is None:
+        raise RuntimeError("torch is not available")
     if audio.size == 0:
         return True
 

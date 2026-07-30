@@ -131,9 +131,54 @@ class ShutdownScriptContractTests(unittest.TestCase):
         script = self.read_script("start_local_background.ps1")
 
         self.assertIn("function Start-HostSupervisor", script)
+        self.assertIn("function Resolve-HostPython", script)
+        self.assertIn("function Wait-HostSupervisorReady", script)
+        self.assertIn(".venv-host\\Scripts\\python.exe", script)
+        self.assertIn("EVELYN_HOST_PYTHON", script)
+        self.assertIn("bootstrap_host_runtime.ps1", script)
+        self.assertIn("consecutiveFreshHeartbeats", script)
         self.assertIn("evelyn_core.host_supervisor", script)
         self.assertIn("$supervisorLog", script)
         self.assertIn("-WindowStyle $windowStyle", script)
+        self.assertNotIn("py -3.11 -m evelyn_core.host_supervisor", script)
+
+    def test_host_runtime_bootstrap_is_locked_and_keeps_torch_optional(self) -> None:
+        bootstrap = self.read_script("bootstrap_host_runtime.ps1")
+        lock = (REPO_ROOT / "requirements.host.lock").read_text(encoding="utf-8")
+
+        self.assertIn("requirements.host.lock", bootstrap)
+        self.assertIn(".venv-host", bootstrap)
+        self.assertIn("Python311", bootstrap)
+        self.assertIn("import aiohttp, numpy, sounddevice", bootstrap)
+        self.assertIn("aiohttp==3.14.1", lock)
+        self.assertIn("numpy==2.4.6", lock)
+        self.assertIn("sounddevice==0.5.5", lock)
+        self.assertIn("soxr==1.1.0", lock)
+        self.assertNotIn("torch==", lock)
+
+    def test_local_launcher_fails_early_for_missing_tts_profile(self) -> None:
+        script = self.read_script("start_local_background.ps1")
+
+        self.assertIn("function Assert-TtsProfileReady", script)
+        self.assertIn("ref_audio.wav", script)
+        self.assertIn("meta.json", script)
+        self.assertIn("$metadata.ref_text", script)
+        self.assertIn("Assert-TtsProfileReady\nStart-DockerCore", script)
+        self.assertLess(
+            script.index("Assert-TtsProfileReady\nStart-DockerCore"),
+            script.index("Wait-Port -HostName '127.0.0.1' -Port 9820"),
+        )
+
+    def test_local_launcher_exports_host_paths_before_compose(self) -> None:
+        script = self.read_script("start_local_background.ps1")
+
+        self.assertIn("$env:EVELYN_HOST_PROJECT_ROOT = $projectRoot", script)
+        self.assertIn("$env:EVELYN_OMNIVOICE_PROFILES_DIR = $ttsProfilesRoot", script)
+        self.assertIn("$env:DISCORD_BOT_TOKEN = 'local-only-disabled'", script)
+        self.assertLess(
+            script.index("$env:EVELYN_HOST_PROJECT_ROOT = $projectRoot"),
+            script.index("Assert-TtsProfileReady\nStart-DockerCore"),
+        )
 
     def test_bot_launcher_prefers_explicit_bot_api_port_env(self) -> None:
         script = self.read_script("start_bot.ps1")

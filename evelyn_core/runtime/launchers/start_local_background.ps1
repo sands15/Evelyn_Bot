@@ -10,9 +10,20 @@ $controlPageUrl = "http://127.0.0.1:$controlPagePublicPort/"
 $stopMarker = Join-Path $projectRoot '.evelyn_stop_requested'
 $logDir = Join-Path $projectRoot 'runtime_artifacts\logs\background_start'
 $supervisorLog = Join-Path $logDir 'Host-Supervisor.log'
+$supervisorStatus = Join-Path $projectRoot 'runtime_artifacts\host_supervisor\status.json'
+$ttsProfilesRoot = if ($env:EVELYN_OMNIVOICE_PROFILES_DIR) {
+    [System.IO.Path]::GetFullPath([string]$env:EVELYN_OMNIVOICE_PROFILES_DIR)
+} else {
+    Join-Path $projectRoot 'omnivoice_profiles'
+}
 
 $env:CONTROL_PAGE_PUBLIC_PORT = [string]$controlPagePublicPort
 $env:CONTROL_PAGE_BOT_API_PORT = [string]$botApiPort
+$env:EVELYN_HOST_PROJECT_ROOT = $projectRoot
+$env:EVELYN_OMNIVOICE_PROFILES_DIR = $ttsProfilesRoot
+if ([string]::IsNullOrWhiteSpace($env:DISCORD_BOT_TOKEN)) {
+    $env:DISCORD_BOT_TOKEN = 'local-only-disabled'
+}
 
 if (Test-Path $stopMarker) {
     Remove-Item -LiteralPath $stopMarker -Force -ErrorAction SilentlyContinue
@@ -93,6 +104,122 @@ $Script
     ) | Out-Null
 }
 
+function Test-HostPythonReady {
+    param([string]$FilePath)
+
+    if ([string]::IsNullOrWhiteSpace($FilePath) -or -not (Test-Path -LiteralPath $FilePath -PathType Leaf)) {
+        return $false
+    }
+    $previousPythonPath = $env:PYTHONPATH
+    try {
+        $env:PYTHONPATH = $coreRuntime
+        & $FilePath -c "import aiohttp, numpy, sounddevice; import evelyn_core.local_io_bridge" *> $null
+        return $LASTEXITCODE -eq 0
+    } catch {
+        return $false
+    } finally {
+        if ($null -eq $previousPythonPath) {
+            Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue
+        } else {
+            $env:PYTHONPATH = $previousPythonPath
+        }
+    }
+}
+
+function Resolve-HostPython {
+    $candidates = New-Object System.Collections.Generic.List[string]
+    if (-not [string]::IsNullOrWhiteSpace($env:EVELYN_HOST_PYTHON)) {
+        $candidates.Add([string]$env:EVELYN_HOST_PYTHON)
+    }
+    $candidates.Add((Join-Path $projectRoot '.venv-host\Scripts\python.exe'))
+    $candidates.Add((Join-Path $projectRoot '.venv\Scripts\python.exe'))
+    if (-not [string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
+        $candidates.Add((Join-Path $env:LOCALAPPDATA 'Programs\Python\Python311\python.exe'))
+    }
+
+    $seen = @{}
+    foreach ($candidate in $candidates) {
+        $key = ([string]$candidate).ToLowerInvariant()
+        if ($seen.ContainsKey($key)) {
+            continue
+        }
+        $seen[$key] = $true
+        if (Test-HostPythonReady -FilePath $candidate) {
+            return [string](Resolve-Path -LiteralPath $candidate)
+        }
+    }
+    throw (
+        "No verified Windows host runtime is available. Run: powershell -ExecutionPolicy Bypass " +
+        "-File .\evelyn_core\runtime\launchers\bootstrap_host_runtime.ps1"
+    )
+}
+
+function Wait-HostSupervisorReady {
+    param(
+        [double]$MinimumHeartbeat,
+        [int]$TimeoutSec = 20
+    )
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    $lastHeartbeat = 0.0
+    $consecutiveFreshHeartbeats = 0
+    while ((Get-Date) -lt $deadline) {
+        try {
+            if (Test-Path -LiteralPath $supervisorStatus -PathType Leaf) {
+                $status = Get-Content -Raw -LiteralPath $supervisorStatus | ConvertFrom-Json
+                $heartbeat = [double]$status.heartbeatAt
+                $ready = (
+                    [string]$status.schema -eq 'host_supervisor.status.v1' -and
+                    [string]$status.state -eq 'running' -and
+                    [bool]$status.localBridge.running -and
+                    $heartbeat -ge $MinimumHeartbeat
+                )
+                if ($ready -and $heartbeat -gt $lastHeartbeat) {
+                    $lastHeartbeat = $heartbeat
+                    $consecutiveFreshHeartbeats += 1
+                    if ($consecutiveFreshHeartbeats -ge 2) {
+                        return
+                    }
+                } elseif (-not $ready) {
+                    $consecutiveFreshHeartbeats = 0
+                }
+            }
+        } catch {
+            $consecutiveFreshHeartbeats = 0
+        }
+        Start-Sleep -Milliseconds 250
+    }
+    throw "Windows Host Supervisor or Local I/O Bridge did not produce two fresh healthy heartbeats."
+}
+
+function Assert-TtsProfileReady {
+    $profileRoot = Join-Path $ttsProfilesRoot 'evelyn'
+    $referenceAudio = Join-Path $profileRoot 'ref_audio.wav'
+    $metadataPath = Join-Path $profileRoot 'meta.json'
+    $remediation = (
+        "Restore or provision ref_audio.wav and meta.json under '$profileRoot' " +
+        "before starting Evelyn."
+    )
+
+    if (-not (Test-Path -LiteralPath $referenceAudio -PathType Leaf)) {
+        throw "Evelyn TTS profile audio is missing. $remediation"
+    }
+    if ((Get-Item -LiteralPath $referenceAudio).Length -le 44) {
+        throw "Evelyn TTS profile audio is empty or invalid. $remediation"
+    }
+    if (-not (Test-Path -LiteralPath $metadataPath -PathType Leaf)) {
+        throw "Evelyn TTS profile metadata is missing. $remediation"
+    }
+    try {
+        $metadata = Get-Content -Raw -LiteralPath $metadataPath | ConvertFrom-Json
+    } catch {
+        throw "Evelyn TTS profile metadata is not valid JSON. $remediation"
+    }
+    if ([string]::IsNullOrWhiteSpace([string]$metadata.ref_text)) {
+        throw "Evelyn TTS profile ref_text is missing. $remediation"
+    }
+}
+
 function Invoke-DockerCommand {
     param(
         [string[]]$Arguments,
@@ -171,9 +298,13 @@ function Test-HostSupervisorRunning {
 function Start-HostSupervisor {
     if (Test-HostSupervisorRunning) {
         Write-Host '[Evelyn] Windows Host Supervisor is already running.'
+        Wait-HostSupervisorReady -MinimumHeartbeat ([DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - 4)
         return
     }
 
+    $hostPython = Resolve-HostPython
+    $escapedHostPython = $hostPython.Replace("'", "''")
+    $launchStartedAt = [double]([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()) / 1000.0
     $pythonCommand = @"
 Set-Location '$projectRoot'
 `$env:PYTHONPATH = '$coreRuntime'
@@ -192,19 +323,7 @@ if (-not `$env:LOCAL_BRIDGE_TTS_INPUT_SUPPRESS_AFTER_SEC) { `$env:LOCAL_BRIDGE_T
 if (-not `$env:LOCAL_BRIDGE_STATUS_INTERVAL_SEC) { `$env:LOCAL_BRIDGE_STATUS_INTERVAL_SEC = '0.25' }
 if (-not `$env:LOCAL_BRIDGE_TTS_WARMUP_ENABLED) { `$env:LOCAL_BRIDGE_TTS_WARMUP_ENABLED = 'true' }
 if (-not `$env:LOCAL_BRIDGE_TTS_WARMUP_DELAY_SEC) { `$env:LOCAL_BRIDGE_TTS_WARMUP_DELAY_SEC = '0.5' }
-`$venvPython = Join-Path '$projectRoot' '.venv\Scripts\python.exe'
-`$pythonExecutable = `$null
-if (Test-Path -LiteralPath `$venvPython) {
-    & `$venvPython --version *> `$null
-    if (`$LASTEXITCODE -eq 0) {
-        `$pythonExecutable = `$venvPython
-    }
-}
-if (`$pythonExecutable) {
-    & `$pythonExecutable -m evelyn_core.host_supervisor --project-root '$projectRoot' --artifacts-root '$projectRoot\runtime_artifacts' *>> '$supervisorLog'
-} else {
-    py -3.11 -m evelyn_core.host_supervisor --project-root '$projectRoot' --artifacts-root '$projectRoot\runtime_artifacts' *>> '$supervisorLog'
-}
+& '$escapedHostPython' -m evelyn_core.host_supervisor --project-root '$projectRoot' --artifacts-root '$projectRoot\runtime_artifacts' *>> '$supervisorLog'
 "@
 
     $visible = if ($env:EVELYN_HOST_SUPERVISOR_VISIBLE) {
@@ -213,6 +332,7 @@ if (`$pythonExecutable) {
         $false
     }
     Start-PowerShellWindow -Title 'Evelyn Host Supervisor' -Script $pythonCommand -Visible:$visible
+    Wait-HostSupervisorReady -MinimumHeartbeat $launchStartedAt
 }
 
 function Open-ControlPage {
@@ -234,6 +354,7 @@ function Open-ControlPage {
     Start-Process $controlPageUrl | Out-Null
 }
 
+Assert-TtsProfileReady
 Start-DockerCore
 
 Wait-Port -HostName '127.0.0.1' -Port 9820 -Label 'Main-LLM'

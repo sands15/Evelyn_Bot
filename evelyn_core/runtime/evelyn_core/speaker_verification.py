@@ -7,7 +7,11 @@ from pathlib import Path
 from typing import Callable
 
 import numpy as np
-import torch
+
+try:
+    import torch
+except Exception:
+    torch = None
 
 from .audio import resample_audio_float
 
@@ -161,6 +165,8 @@ class SpeakerVerifier:
     def _embed(self, audio: np.ndarray, sampling_rate: int) -> np.ndarray:
         if self._embedding_fn is not None:
             return np.asarray(self._embedding_fn(audio, sampling_rate), dtype=np.float32).reshape(-1)
+        if torch is None:
+            raise RuntimeError("torch_not_available")
 
         classifier = self._load_speechbrain_classifier()
         wav = torch.as_tensor(audio, dtype=torch.float32).unsqueeze(0)
@@ -193,7 +199,7 @@ class SpeakerVerifier:
     def _resolve_device(self) -> str | None:
         value = (self.config.device or "auto").strip().lower()
         if value in {"", "auto"}:
-            return "cuda:0" if torch.cuda.is_available() else "cpu"
+            return "cuda:0" if torch is not None and torch.cuda.is_available() else "cpu"
         if value in {"none", "default"}:
             return None
         return value

@@ -102,9 +102,18 @@ high/critical 0개다. 대상은 Mineflayer 인증/프로토콜 및 플러그인
 
 ## P1 — 실제 음성 하드웨어 E2E 미검증
 
-CI의 실제 프로세스 smoke는 `main.py`가 기동 가능한지만 확인한다. 마이크 입력부터 STT, 대화, TTS, 로컬 재생까지 5회 연속 성공을 보장하지 않는다.
+Windows Host Supervisor는 이제 별도 `.venv-host`와 최소 lock으로 재현 가능하게
+설치되며, launcher는 Host Supervisor와 Local I/O Bridge에서 서로 다른 두 번의
+fresh heartbeat를 확인한 뒤에만 준비 완료를 보고한다. TTS 음성 프로필의 WAV,
+JSON, `ref_text`도 Docker 시작 전에 검사한다.
 
-다음 조치: 릴리스 전 수동 하드웨어 검증을 별도 체크리스트로 실행하고 결과를 기록한다.
+그러나 CI의 실제 프로세스 smoke는 `main.py`가 기동 가능한지만 확인한다. 마이크
+입력부터 STT, 대화, TTS, 로컬 재생까지 계획된 surface별 10턴과 무음 구간을
+보장하지 않는다. 현재 로컬 마이크는 개인정보 보호 기본값으로 비활성화 상태다.
+
+다음 조치: 사용자가 마이크 사용을 명시적으로 허용한 세션에서 Control Page 음성
+검증 마법사로 로컬/Discord 10턴, barge-in, 무음 구간을 실행하고 비식별 보고서를
+기록한다.
 
 ## P1 — 실제 Windows 화면 관찰 E2E 미검증
 
@@ -113,8 +122,11 @@ CI의 실제 프로세스 smoke는 `main.py`가 기동 가능한지만 확인한
 경로는 차단했다. scene만 성공한 경우 OCR 도구도 성공한 것으로 보던 경계 역시
 분리했다.
 
-그러나 현재 브랜치에서는 실제 Windows 캡처와 배포된 Vision/OCR 서비스를 함께
-사용해 성공·검은 프레임·빈 분석 결과를 검증하지 않았다.
+기존 기본값 `C:/Evelyn` 대신 launcher가 실제 Windows 프로젝트 경로를 Vision
+컨테이너에 전달하도록 시작 계약을 보강했다. 그러나 현재 브랜치에서는 기본 Fast
+Control Page가 Windows 화면 캡처를 요청하는 host bridge를 아직 갖지 않으며,
+실제 Windows 캡처와 배포된 Vision/OCR 서비스를 함께 사용한 성공·검은 프레임·
+빈 분석 결과도 검증하지 않았다.
 
 다음 조치: 실제 화면에서 명확한 UI 텍스트, 텍스트 없는 장면, 검은 프레임을 각각
 실행하고, 답변의 화면 주장과 benchmark의 `vision_evidence_*` 필드가 일치하는지

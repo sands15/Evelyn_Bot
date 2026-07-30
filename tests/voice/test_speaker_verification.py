@@ -5,6 +5,7 @@ import tempfile
 import unittest
 import wave
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 
@@ -19,6 +20,7 @@ from evelyn_core.speaker_verification import (  # noqa: E402
     SpeakerVerifier,
     speaker_verification_applies,
 )
+from evelyn_core import speaker_verification as speaker_verification_module  # noqa: E402
 
 
 def write_wav(path: Path, audio: np.ndarray, *, rate: int = 16000) -> None:
@@ -80,6 +82,23 @@ class SpeakerVerificationTests(unittest.TestCase):
         self.assertTrue(speaker_verification_applies(source="local_mic", apply_to="local_mic"))
         self.assertFalse(speaker_verification_applies(source="discord_voice", apply_to="local_mic"))
         self.assertTrue(speaker_verification_applies(source="discord_voice", apply_to="all"))
+
+    def test_missing_optional_torch_degrades_verification_without_import_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            enroll_dir = Path(tmp)
+            write_wav(enroll_dir / "sample.wav", np.ones(16000, dtype=np.float32) * 0.2)
+            verifier = SpeakerVerifier(
+                SpeakerVerificationConfig(enabled=True, enroll_dir=enroll_dir),
+            )
+
+            with patch.object(speaker_verification_module, "torch", None):
+                result = verifier.verify(
+                    np.ones(16000, dtype=np.float32) * 0.1,
+                    sampling_rate=16000,
+                )
+
+        self.assertEqual(result.status, "unavailable")
+        self.assertEqual(result.detail, "no_valid_enrollment_wav")
 
 
 if __name__ == "__main__":
