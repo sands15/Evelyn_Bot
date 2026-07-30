@@ -15,6 +15,8 @@ control page.
 - Uses local TTS for spoken replies.
 - Keeps long-term project memory in a human-readable Markdown vault.
 - Provides a local control page for runtime state and memory graph inspection.
+- Grounds local screen questions in ephemeral Windows evidence and refuses
+  exact screen claims when that evidence is not actionable.
 - Can connect to a Minecraft/Voyager automation stack when needed.
 
 ## Main Parts
@@ -42,6 +44,19 @@ The control page is a local dashboard for checking the bot, voice state, runtime
 status, and memory graph. It is meant for local operation and debugging, not as a
 public web app.
 
+## Local Screen Understanding
+
+The Windows Host Supervisor owns a narrow Host Vision Bridge. It captures one
+ephemeral screen observation on demand, combines bounded foreground-window
+metadata with the local Vision service and Windows OCR, and returns structured
+evidence to the Docker Bot API. Screenshots and OCR tiles are deleted after the
+request; status files keep only counters and evidence metadata.
+
+Exact text requests fail closed when OCR is unscored or unreliable. See:
+
+- `docs/HOST_VISION_BRIDGE_CONTRACT.md`
+- `docs/VISION_EVIDENCE_CONTRACT.md`
+
 ## Running
 
 On a first Windows setup, create the isolated Host Supervisor runtime:
@@ -68,6 +83,19 @@ The usual launcher is:
 ```bat
 start.bat
 ```
+
+To rebuild the local app images before starting:
+
+```powershell
+$env:EVELYN_DOCKER_BUILD = "true"
+powershell -ExecutionPolicy Bypass `
+  -File .\evelyn_core\runtime\launchers\start_local_background.ps1
+```
+
+The build helper uses a temporary unused drive letter when the project path
+contains non-ASCII characters, avoiding the Docker Buildx session-key failure
+seen with direct builds from such paths. It builds only the Bot API, Control
+Page, and Vision images and removes only the mapping it created.
 
 Runtime defaults are configured through:
 

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import asyncio
 import inspect
 import os
@@ -21,9 +21,11 @@ from .context_pipeline import (
 )
 from .fast_action_runtime import compact_local_bridge_context
 from .fast_tool_planner import render_fast_tool_registry_context
+from .host_vision_client import HostVisionResult, request_host_vision
 from .runtime_health import collect_runtime_health
 from .runtime_services import load_service_manifest
 from .text import clean_text
+from .vision_runtime import VisionEvidence
 
 
 RuntimeHealthProvider = Callable[[], Awaitable[dict[str, Any]]]
@@ -31,6 +33,7 @@ SearchProvider = Callable[[str], Awaitable[tuple[str, list[dict[str, Any]]]]]
 MemoryProvider = Callable[[str], Awaitable[str]]
 LogProvider = Callable[[str], Awaitable[str]]
 LocalBridgeStatusProvider = Callable[[], Any]
+VisionProvider = Callable[..., Awaitable[HostVisionResult]]
 
 
 @dataclass(slots=True)
@@ -42,6 +45,48 @@ class FastControlContext:
     memory_context: str = ""
     log_context: str = ""
     local_bridge_context: str = ""
+    vision_context: str = ""
+    vision_evidence: VisionEvidence = field(default_factory=VisionEvidence)
+    required_evidence_failure_reply: str = ""
+
+
+@dataclass(slots=True)
+class FastMainLlmRequest:
+    context: FastControlContext
+    messages: list[dict[str, Any]]
+
+
+def build_required_evidence_failure_reply(
+    decisions: list[ToolUseDecision],
+    *,
+    vision_evidence: VisionEvidence,
+) -> str:
+    failed_required = {
+        decision.tool_name
+        for decision in decisions
+        if decision.required_before_answer
+        and decision.status in {
+            "failed",
+            "failed_or_unavailable",
+            "executed_empty",
+        }
+    }
+    if "vision_ocr" in failed_required:
+        if vision_evidence.scene_available:
+            return (
+                "화면 캡처는 됐지만 이번에는 글자를 읽을 수 있는 근거를 얻지 못했어. "
+                "제목이나 버튼 이름은 추측하지 않을게."
+            )
+        return (
+            "이번에는 화면의 글자를 확인할 수 없었어. "
+            "제목이나 버튼 이름은 추측하지 않을게."
+        )
+    if "vision_capture_or_watch" in failed_required:
+        return (
+            "이번에는 화면을 확인할 수 없었어. "
+            "보이는 내용을 추측하지 않을게."
+        )
+    return ""
 
 
 def compact_runtime_health_for_llm(health: dict[str, Any]) -> str:
@@ -79,12 +124,13 @@ def build_fast_route_capability_context() -> str:
         (
             "fast_control_route=python -m evelyn_core.fast_control_api",
             "full_main_route=main.py prepare_llm_messages context pipeline is mirrored here through shared context_pipeline policy decisions.",
-            render_fast_tool_registry_context(),
-            "pre_llm_commands=/help,/status,/memory,/voice status,/mic status,/mic on,/mic off,/minecraft status,/inventory,/voyager stats,/minecraft disconnect,/autonomy status,/restart,/shutdown,natural memory,microphone,Minecraft status,and scoped runtime controls",
+            "supported_inline_tools=vision_capture_or_watch,vision_ocr,runtime_status,runtime_log_read,memory_recall,web_search,datetime",
+            "unsupported_inline_tools=host_arbitrary_file_read",
+            "unsupported_tool_rule=if a required unsupported tool is needed and no evidence is present, say evidence is missing instead of pretending to have used it.",
             "action_execution_contract=inline tools finish before the answer; background acknowledgements require an active_action_id.",
             "background_followup_contract=registered long-running actions publish completion or failure to chat and /api/control-page/action-events.",
-            "unsupported_inline_tools=vision_capture_or_watch,vision_ocr,host_arbitrary_file_read",
-            "unsupported_tool_rule=if a required unsupported tool is needed and no evidence is present, say evidence is missing instead of pretending to have used it.",
+            "pre_llm_commands=/help,/status,/memory,/voice status,/mic status,/mic on,/mic off,/minecraft status,/inventory,/voyager stats,/minecraft disconnect,/autonomy status,/restart,/shutdown,natural memory,microphone,Minecraft status,and scoped runtime controls",
+            render_fast_tool_registry_context(),
         )
     )
 
@@ -306,6 +352,7 @@ async def build_fast_control_context(
     memory_provider: MemoryProvider | None = None,
     log_provider: LogProvider | None = None,
     local_bridge_status_provider: LocalBridgeStatusProvider | None = None,
+    vision_provider: VisionProvider | None = None,
 ) -> FastControlContext:
     decision_text = clean_text(tool_user_text) or user_text
     policy = build_context_policy_for_turn(
@@ -327,6 +374,56 @@ async def build_fast_control_context(
     memory_context = ""
     log_context = ""
     local_bridge_context = ""
+    vision_context = ""
+    vision_evidence = VisionEvidence(
+        state="unknown",
+        reason_code="not_requested",
+    )
+    vision_decisions = [
+        decision
+        for decision in decisions
+        if decision.tool_name in {"vision_capture_or_watch", "vision_ocr"}
+    ]
+    if vision_decisions:
+        run_ocr = any(decision.tool_name == "vision_ocr" for decision in vision_decisions)
+        try:
+            vision_result = await (vision_provider or request_host_vision)(
+                decision_text,
+                run_ocr=run_ocr,
+            )
+            if not isinstance(vision_result, HostVisionResult):
+                raise TypeError("invalid_host_vision_result")
+            vision_evidence = vision_result.evidence
+            observation = vision_result.observation
+        except Exception:
+            vision_evidence = VisionEvidence(
+                state="failed",
+                reason_code="host_vision_runtime_error",
+            )
+            observation = (
+                "Local screen vision failed before a usable observation was produced. "
+                "Do not claim the screen was analyzed."
+            )
+        vision_context = "\n\n".join(
+            (
+                "VISION_ANSWER_RULE: This turn requested live screen evidence. "
+                "Only a vision.evidence.v1 result with evidence_available=true counts as an "
+                "observation. A request, capture attempt, or failure message is not evidence. "
+                "When evidence is unavailable, say the screen could not be observed and do not "
+                "infer its contents.",
+                clean_text(observation),
+                "VISION_EVIDENCE_GATE: " + vision_evidence.provenance_summary(),
+            )
+        )
+        for decision in vision_decisions:
+            decision.status = (
+                "executed"
+                if vision_evidence.satisfies_tool(decision.tool_name)
+                else "failed_or_unavailable"
+            )
+            decision.evidence = vision_evidence.provenance_summary(
+                tool_name=decision.tool_name
+            )
     for decision in decisions:
         if decision.tool_name == "runtime_status" and decision.auto_allowed:
             try:
@@ -409,6 +506,7 @@ async def build_fast_control_context(
         conversation_state="route: fast_control_api",
         tool_context=render_tool_use_context(decisions),
         skill_context=search_context,
+        vision_context=vision_context,
         policy=policy,
     )
     return FastControlContext(
@@ -419,6 +517,60 @@ async def build_fast_control_context(
         memory_context=memory_context,
         log_context=log_context,
         local_bridge_context=local_bridge_context,
+        vision_context=vision_context,
+        vision_evidence=vision_evidence,
+        required_evidence_failure_reply=build_required_evidence_failure_reply(
+            decisions,
+            vision_evidence=vision_evidence,
+        ),
+    )
+
+
+async def build_fast_main_llm_request(
+    *,
+    base_system_prompt: str,
+    recent_messages: list[dict[str, Any]],
+    user_text: str,
+    final_user_text: str,
+    source: str,
+    tool_user_text: str | None = None,
+    runtime_health_provider: RuntimeHealthProvider | None = None,
+    search_provider: SearchProvider | None = None,
+    memory_provider: MemoryProvider | None = None,
+    log_provider: LogProvider | None = None,
+    local_bridge_status_provider: LocalBridgeStatusProvider | None = None,
+    vision_provider: VisionProvider | None = None,
+) -> FastMainLlmRequest:
+    context = await build_fast_control_context(
+        user_text,
+        source=source,
+        tool_user_text=tool_user_text,
+        runtime_health_provider=runtime_health_provider,
+        search_provider=search_provider,
+        memory_provider=memory_provider,
+        log_provider=log_provider,
+        local_bridge_status_provider=local_bridge_status_provider,
+        vision_provider=vision_provider,
+    )
+    system_content = "\n\n".join(
+        part
+        for part in (
+            clean_text(base_system_prompt),
+            context.system_context,
+        )
+        if clean_text(part)
+    )
+    return FastMainLlmRequest(
+        context=context,
+        messages=[
+            {"role": "system", "content": system_content},
+            *[
+                dict(message)
+                for message in recent_messages
+                if isinstance(message, dict)
+            ],
+            {"role": "user", "content": final_user_text},
+        ],
     )
 
 
@@ -435,9 +587,13 @@ async def build_fast_main_llm_messages(
     memory_provider: MemoryProvider | None = None,
     log_provider: LogProvider | None = None,
     local_bridge_status_provider: LocalBridgeStatusProvider | None = None,
+    vision_provider: VisionProvider | None = None,
 ) -> list[dict[str, Any]]:
-    context = await build_fast_control_context(
-        user_text,
+    request = await build_fast_main_llm_request(
+        base_system_prompt=base_system_prompt,
+        recent_messages=recent_messages,
+        user_text=user_text,
+        final_user_text=final_user_text,
         source=source,
         tool_user_text=tool_user_text,
         runtime_health_provider=runtime_health_provider,
@@ -445,17 +601,6 @@ async def build_fast_main_llm_messages(
         memory_provider=memory_provider,
         log_provider=log_provider,
         local_bridge_status_provider=local_bridge_status_provider,
+        vision_provider=vision_provider,
     )
-    system_content = "\n\n".join(
-        part
-        for part in (
-            clean_text(base_system_prompt),
-            context.system_context,
-        )
-        if clean_text(part)
-    )
-    return [
-        {"role": "system", "content": system_content},
-        *[dict(message) for message in recent_messages if isinstance(message, dict)],
-        {"role": "user", "content": final_user_text},
-    ]
+    return request.messages

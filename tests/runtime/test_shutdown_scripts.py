@@ -150,11 +150,37 @@ class ShutdownScriptContractTests(unittest.TestCase):
         self.assertIn(".venv-host", bootstrap)
         self.assertIn("Python311", bootstrap)
         self.assertIn("import aiohttp, numpy, sounddevice", bootstrap)
+        self.assertIn("from PIL import ImageGrab", bootstrap)
         self.assertIn("aiohttp==3.14.1", lock)
         self.assertIn("numpy==2.4.6", lock)
+        self.assertIn("Pillow==12.3.0", lock)
+        self.assertIn("tzdata==2026.3", lock)
         self.assertIn("sounddevice==0.5.5", lock)
         self.assertIn("soxr==1.1.0", lock)
         self.assertNotIn("torch==", lock)
+
+    def test_local_launcher_waits_for_vision_before_host_bridge(self) -> None:
+        script = self.read_script("start_local_background.ps1")
+
+        self.assertIn("function Wait-HttpReady", script)
+        self.assertIn("START_MODEL_WAIT_TIMEOUT_SEC", script)
+        self.assertIn("[bool]$health.ok -and [bool]$health.ready", script)
+        self.assertIn("[bool]$health.ok -and [bool]$health.models.smol.loaded", script)
+        self.assertIn(
+            "Wait-HttpReady -Url 'http://127.0.0.1:8880/health' -Label 'OmniVoice-TTS'",
+            script,
+        )
+        self.assertIn(
+            "Wait-HttpReady -Url 'http://127.0.0.1:8892/health' -Label 'STT'",
+            script,
+        )
+        vision_wait = script.index(
+            "Wait-HttpReady -Url 'http://127.0.0.1:8891/health' -Label 'Vision' -Contract 'vision'"
+        )
+        supervisor_start = script.index("Start-HostSupervisor", vision_wait)
+        self.assertLess(vision_wait, supervisor_start)
+        self.assertIn("VISION_SERVICE_URL = 'http://127.0.0.1:8891'", script)
+        self.assertIn("from PIL import ImageGrab", script)
 
     def test_local_launcher_fails_early_for_missing_tts_profile(self) -> None:
         script = self.read_script("start_local_background.ps1")
@@ -179,6 +205,29 @@ class ShutdownScriptContractTests(unittest.TestCase):
             script.index("$env:EVELYN_HOST_PROJECT_ROOT = $projectRoot"),
             script.index("Assert-TtsProfileReady\nStart-DockerCore"),
         )
+
+    def test_local_launcher_uses_path_safe_allowlisted_image_builder(self) -> None:
+        launcher = self.read_script("start_local_background.ps1")
+        builder = self.read_script("build_local_docker_images.ps1")
+
+        self.assertIn("build_local_docker_images.ps1", launcher)
+        self.assertIn("& $dockerImageBuilder -ProjectRoot $projectRoot", launcher)
+        self.assertIn("'bot_api',\n            'control_page',\n            'vision'", launcher)
+        self.assertIn("Stop-BotApiForImageRefresh", launcher)
+        self.assertIn("'--timeout', '15'", launcher)
+        self.assertIn("$minecraftOwnerClaim", launcher)
+        self.assertNotIn("@('compose') + $composeBaseArgs + @('build'", launcher)
+
+        self.assertIn("[ValidateSet('bot_api', 'control_page', 'vision')]", builder)
+        self.assertIn("$requiresAsciiAlias", builder)
+        self.assertIn("QueryDosDevice", builder)
+        self.assertIn("& subst.exe $candidate $resolvedProjectRoot", builder)
+        self.assertIn("Refusing to remove $mappedDrive because its target changed.", builder)
+        self.assertIn("& subst.exe $mappedDrive '/D'", builder)
+        self.assertIn("'evelyn-fast-control-bot_api'", builder)
+        self.assertIn("'evelyn-fast-control-control_page'", builder)
+        self.assertIn("'evelyn-fast-control-vision'", builder)
+        self.assertNotIn("Invoke-Expression", builder)
 
     def test_bot_launcher_prefers_explicit_bot_api_port_env(self) -> None:
         script = self.read_script("start_bot.ps1")

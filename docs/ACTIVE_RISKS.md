@@ -115,22 +115,27 @@ JSON, `ref_text`도 Docker 시작 전에 검사한다.
 검증 마법사로 로컬/Discord 10턴, barge-in, 무음 구간을 실행하고 비식별 보고서를
 기록한다.
 
-## P1 — 실제 Windows 화면 관찰 E2E 미검증
+## P1 — 정확한 UI 텍스트·동작 대상 근거 부족
 
-화면 관찰 요청, 실제 scene/OCR 근거, 실패·unreliable·unknown 상태를
-`vision.evidence.v1`로 분리하고, 문자열 안내문만으로 vision 도구가 성공 처리되는
-경로는 차단했다. scene만 성공한 경우 OCR 도구도 성공한 것으로 보던 경계 역시
-분리했다.
+Windows Host Vision Bridge, 실제 화면 캡처, foreground window metadata,
+SmolVLM scene, Windows Runtime OCR을 기본 Fast Control 경로에 연결했다. 요청은
+고정 schema·TTL·크기 제한을 사용하고 임의 명령·argv·경로를 받지 않는다. 화면과
+OCR tile은 정상 처리 직후 삭제되며 status에는 내용 대신 evidence와 지연만 남는다.
 
-기존 기본값 `C:/Evelyn` 대신 launcher가 실제 Windows 프로젝트 경로를 Vision
-컨테이너에 전달하도록 시작 계약을 보강했다. 그러나 현재 브랜치에서는 기본 Fast
-Control Page가 Windows 화면 캡처를 요청하는 host bridge를 아직 갖지 않으며,
-실제 Windows 캡처와 배포된 Vision/OCR 서비스를 함께 사용한 성공·검은 프레임·
-빈 분석 결과도 검증하지 않았다.
+2026-07-30 실제 Control Page E2E에서 현재 앱 질문은 foreground 근거와 일치하는
+Minecraft로 답했다. 정확한 제목·버튼 질문에서는 비actionable OCR을 근거로 쓰지
+않고 Main LLM 호출 전에 고정 no-evidence 응답을 반환했다. 동일 화면에서 나온
+SmolVLM의 identity-only `Evelyn` 결과도 폐기됐다. 요청 뒤 requests, processing,
+responses, screenshots 큐가 모두 0임을 확인했다.
 
-다음 조치: 실제 화면에서 명확한 UI 텍스트, 텍스트 없는 장면, 검은 프레임을 각각
-실행하고, 답변의 화면 주장과 benchmark의 `vision_evidence_*` 필드가 일치하는지
-확인한다.
+현재 Windows OCR은 실제 일부 문자를 읽지만 정답률 점수가 없는 저신뢰 보조
+근거다. 픽셀 scene 모델만으로 정확한 버튼 이름·좌표를 단정하거나 행동을 허가할
+수 없다. 검은 프레임과 손상 응답은 회귀 테스트로 fail-closed임을 검증했지만 실제
+GPU/Windows 조합의 반복 표본은 아직 부족하다.
+
+다음 조치: foreground window에 귀속된 Windows UI Automation/accessibility tree를
+별도 allowlist·freshness·element identity 계약으로 추가하고, 실제 UI corpus에서
+정확도를 측정한 뒤에만 버튼 이름과 클릭 대상 근거를 actionable로 승격한다.
 
 ## P2 — `main.py` 선언형 wiring 밀도
 

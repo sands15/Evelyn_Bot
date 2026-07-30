@@ -382,11 +382,11 @@ def build_context_policy_for_turn(
         "이미지",
         "스크린샷",
         "화면",
-        "보여",
-        "보이",
-        "읽어",
-        "글자",
         "보이는",
+        "뭐가 보여",
+        "무엇이 보여",
+        "뭐 보여",
+        "무엇이 보이",
         "캡처",
         "비전",
         "ocr",
@@ -398,17 +398,17 @@ def build_context_policy_for_turn(
     korean_vision_markers = (
         "화면",
         "내 화면",
-        "보여",
-        "보이",
+        "보이는",
+        "뭐가 보여",
+        "무엇이 보여",
+        "뭐 보여",
+        "무엇이 보이",
         "사진",
         "이미지",
         "스크린샷",
         "캡처",
         "캡쳐",
-        "글자",
-        "읽어",
         "비전",
-        "시각",
         "ocr",
     )
     is_vision = any(marker in text for marker in vision_markers) or any(marker in text for marker in korean_vision_markers)
@@ -506,9 +506,25 @@ def build_tool_use_decisions(user_text: str, policy: ContextPolicy | dict[str, A
         "화면",
         "스크린",
         "캡처",
-        "시각",
     )
-    ocr_markers = ("ocr", "text on screen", "read text", "글자", "텍스트", "읽어", "읽고", "문자")
+    ocr_markers = (
+        "ocr",
+        "text on screen",
+        "read text",
+        "title",
+        "button",
+        "label",
+        "menu",
+        "글자",
+        "텍스트",
+        "읽어",
+        "읽고",
+        "문자",
+        "제목",
+        "버튼",
+        "메뉴",
+        "오류 메시지",
+    )
     memory_markers = ("remember", "memory", "previous", "earlier", "기억", "이전", "아까", "방금", "대화")
     explicit_web_markers = (
         "latest",
@@ -607,7 +623,11 @@ def build_tool_use_decisions(user_text: str, policy: ContextPolicy | dict[str, A
                 required_before_answer=_contains_any_marker(text, runtime_markers),
             )
         )
-    if context_policy.needs_vision or _contains_any_marker(text, screen_markers):
+    asks_screen_evidence = context_policy.needs_vision or _contains_any_marker(
+        text,
+        screen_markers,
+    )
+    if asks_screen_evidence:
         add(
             ToolUseDecision(
                 tool_name="vision_capture_or_watch",
@@ -617,7 +637,7 @@ def build_tool_use_decisions(user_text: str, policy: ContextPolicy | dict[str, A
                 cost="medium",
             )
         )
-    if _contains_any_marker(text, ocr_markers):
+    if asks_screen_evidence and _contains_any_marker(text, ocr_markers):
         add(
             ToolUseDecision(
                 tool_name="vision_ocr",

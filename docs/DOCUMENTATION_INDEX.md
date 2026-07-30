@@ -66,6 +66,10 @@ implemented behavior.
   - 화면 관찰 요청과 실제 관찰 근거를 분리하는 `vision.evidence.v1`,
     scene/OCR별 충족 조건, fail-closed prompt/tool gate와 관찰 가능성 계약.
 
+- `docs/HOST_VISION_BRIDGE_CONTRACT.md`
+  - Docker와 Windows 사이의 단일 화면 관찰 queue, exact schema/TTL/allowlist,
+    foreground metadata·native OCR 신뢰 경계, 즉시 삭제와 live E2E 증거 계약.
+
 - `docs/RUNTIME_ERROR_OBSERVABILITY_CONTRACT.md`
   - Runtime owner별 고정 오류 코드·카운터와 Control Page 공개 privacy 계약.
 

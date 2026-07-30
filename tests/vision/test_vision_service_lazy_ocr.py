@@ -8,6 +8,7 @@ REPO_ROOT = next(path for path in Path(__file__).resolve().parents if (path / "m
 VISION_SERVICE = REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "vision_service.py"
 START_VISION = REPO_ROOT / "evelyn_core" / "runtime" / "launchers" / "start_vision.ps1"
 START_ENV = REPO_ROOT / "evelyn_core" / "start_env.bat"
+VISION_DOCKERFILE = REPO_ROOT / "docker" / "Dockerfile.vision"
 
 
 class VisionServiceLazyOcrTests(unittest.TestCase):
@@ -30,6 +31,13 @@ class VisionServiceLazyOcrTests(unittest.TestCase):
         self.assertIn("EVELYN_CONTAINER_PROJECT_ROOT", source)
         self.assertIn("def map_host_project_path(", source)
         self.assertIn("map_host_project_path(image_path)", source)
+        self.assertIn("def _falcon_ocr_file(", source)
+        self.assertIn("from huggingface_hub import hf_hub_download", source)
+        self.assertIn("local_files_only=True", source)
+        self.assertIn(
+            'revision=getattr(model.config, "_commit_hash", None)',
+            source,
+        )
         self.assertIn("from .vision_quality import build_vision_quality", source)
         self.assertIn('result["quality"] = build_vision_quality(result)', source)
 
@@ -49,6 +57,12 @@ class VisionServiceLazyOcrTests(unittest.TestCase):
         self.assertIn('detail="vision_ocr_generation_failed"', source)
         self.assertIn('result["ocr_error"] = "vision_ocr_generation_failed"', source)
         self.assertNotIn("Falcon-OCR generation failed: {exc}", source)
+
+    def test_vision_image_includes_falcon_remote_code_runtime_dependency(self) -> None:
+        dockerfile = VISION_DOCKERFILE.read_text(encoding="utf-8")
+
+        self.assertIn("RUN pip install requests==2.34.2", dockerfile)
+        self.assertIn("python3-dev", dockerfile)
 
     def test_start_vision_passes_lazy_ocr_env_to_wsl_and_windows(self) -> None:
         source = START_VISION.read_text(encoding="utf-8")

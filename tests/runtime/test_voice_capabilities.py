@@ -40,6 +40,12 @@ class VoiceCapabilitiesTests(unittest.TestCase):
                         "mic": {"enabled": True, "captureReady": True},
                         "outputDevice": "default",
                         "ttsWarmup": {"enabled": True, "done": True, "error": ""},
+                        "hostVision": {
+                            "schema": "host_vision.status.v1",
+                            "state": "running",
+                            "captureEnabled": True,
+                            "lastErrorCode": "",
+                        },
                     },
                 ),
                 service(
@@ -55,6 +61,7 @@ class VoiceCapabilitiesTests(unittest.TestCase):
                 service("main_llm"),
                 service("stt"),
                 service("tts"),
+                service("vision"),
             ]
         }
 
@@ -63,6 +70,7 @@ class VoiceCapabilitiesTests(unittest.TestCase):
         self.assertTrue(capabilities["voiceLocal"]["ready"])
         self.assertEqual(capabilities["voiceLocal"]["state"], "ready")
         self.assertTrue(capabilities["voiceDiscord"]["ready"])
+        self.assertTrue(capabilities["screenVision"]["ready"])
 
     def test_local_mic_and_warmup_are_hard_blockers(self):
         health = self.ready_health()
@@ -104,6 +112,32 @@ class VoiceCapabilitiesTests(unittest.TestCase):
         self.assertTrue(capability["ready"])
         self.assertEqual(capability["state"], "degraded")
         self.assertEqual(capability["warnings"][0]["code"], "local_bridge_reported_error")
+
+    def test_screen_vision_requires_host_capture_bridge_and_vision_service(self):
+        health = self.ready_health()
+        bridge = next(row for row in health["services"] if row["id"] == "local_io_bridge")
+        bridge["checks"][0]["payload"]["hostVision"]["state"] = "stopped"
+        vision = next(row for row in health["services"] if row["id"] == "vision")
+        vision["state"] = "down"
+        vision["ready"] = False
+
+        capability = build_voice_capabilities(health)["screenVision"]
+        codes = {item["code"] for item in capability["blockers"]}
+
+        self.assertFalse(capability["ready"])
+        self.assertIn("host_vision_bridge_not_running", codes)
+        self.assertIn("vision_down", codes)
+
+    def test_last_failed_capture_degrades_but_does_not_disable_future_capture(self):
+        health = self.ready_health()
+        bridge = next(row for row in health["services"] if row["id"] == "local_io_bridge")
+        bridge["checks"][0]["payload"]["hostVision"]["lastErrorCode"] = "black_frame"
+
+        capability = build_voice_capabilities(health)["screenVision"]
+
+        self.assertTrue(capability["ready"])
+        self.assertEqual(capability["state"], "degraded")
+        self.assertEqual(capability["warnings"][0]["code"], "host_vision_last_request_failed")
 
 
 if __name__ == "__main__":

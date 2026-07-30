@@ -36,8 +36,9 @@ The following invariants are fail-closed:
 - Only `state=observed` with `evidence_available=true` can satisfy a vision
   tool requirement.
 - At least one of `scene_available` or `ocr_available` must also be true.
-- `vision_ocr` additionally requires `ocr_available=true`; a scene description
-  alone is not OCR evidence.
+- `vision_ocr` additionally requires `ocr_available=true` and
+  `actionable=true`; a scene description or unscored OCR string alone is not
+  exact-text evidence.
 - Missing, unknown-schema, or internally contradictory evidence is normalized
   to unavailable evidence.
 - `actionable=true` is impossible when usable evidence is absent.
@@ -82,9 +83,15 @@ The focused tests cover:
 - successful live scene/OCR evidence;
 - successful analysis with no usable evidence;
 - scene-only evidence failing the OCR requirement;
+- unscored native OCR remaining non-actionable;
+- foreground-window evidence preserving a grounded application observation
+  when an identity-only scene result is rejected;
 - missing and contradictory contracts failing closed;
 - unexpected runtime exceptions degrading without losing the text turn;
 - benchmark serialization without scene/OCR content.
 
-Real Windows capture plus the deployed vision service still requires a live E2E
-check before release.
+The 2026-07-30 live Windows E2E verified both sides of the gate: a general
+foreground-application question was answered as Minecraft from current
+evidence, while an exact title/button question returned the deterministic
+no-evidence reply before Main LLM generation. See
+`docs/HOST_VISION_BRIDGE_CONTRACT.md` for the host boundary and privacy proof.

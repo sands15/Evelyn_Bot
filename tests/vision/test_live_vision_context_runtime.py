@@ -64,6 +64,8 @@ class LiveVisionContextRuntimeTests(unittest.IsolatedAsyncioTestCase):
             "ocr_corrupt": False,
             "no_usable_evidence": False,
         }
+        self.local_ocr_provider = None
+        self.local_window_provider = None
 
     async def capture(self):
         self.capture_calls += 1
@@ -89,6 +91,8 @@ class LiveVisionContextRuntimeTests(unittest.IsolatedAsyncioTestCase):
             build_vision_quality=lambda _data: dict(self.quality),
             clean_text=lambda text: str(text).strip(),
             monotonic=lambda: next(self.times),
+            local_ocr_provider=self.local_ocr_provider,
+            local_window_provider=self.local_window_provider,
         )
 
     async def _get_session(self):
@@ -182,6 +186,133 @@ class LiveVisionContextRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(evidence.satisfies_tool("vision_capture_or_watch"))
         self.assertTrue(evidence.satisfies_tool("vision_ocr"))
 
+    async def test_scene_only_request_does_not_lazy_load_ocr(self) -> None:
+        self.response = FakeResponse(data={"scene": "화면", "ocr": ""})
+        self.session = FakeSession(self.response)
+        metrics: dict = {}
+
+        await build_live_vision_context_from_runtime(
+            "화면을 봐줘",
+            deps=self.build_deps(),
+            metrics=metrics,
+            run_ocr=False,
+        )
+
+        request = self.session.calls[0][1]
+        self.assertFalse(request["json"]["run_ocr"])
+        evidence = vision_evidence_from_metrics(metrics)
+        self.assertTrue(evidence.scene_available)
+        self.assertFalse(evidence.ocr_available)
+        self.assertTrue(evidence.satisfies_tool("vision_capture_or_watch"))
+        self.assertFalse(evidence.satisfies_tool("vision_ocr"))
+
+    async def test_windows_native_ocr_satisfies_text_gate_without_docker_ocr(self) -> None:
+        async def native_ocr(_path: Path) -> dict[str, object]:
+            return {
+                "schema": "windows_ocr.observation.v1",
+                "attempted": True,
+                "text": "E.V.E.L.Y.N 전송",
+            }
+
+        self.local_ocr_provider = native_ocr
+        self.response = FakeResponse(data={"scene": "Evelyn.", "ocr": ""})
+        self.session = FakeSession(self.response)
+        metrics: dict = {}
+
+        await build_live_vision_context_from_runtime(
+            "화면 제목과 버튼을 읽어줘",
+            deps=self.build_deps(),
+            metrics=metrics,
+            run_ocr=True,
+        )
+
+        request = self.session.calls[0][1]
+        self.assertFalse(request["json"]["run_ocr"])
+        self.assertEqual(metrics["meta"]["vision_ocr_source"], "windows_native")
+        self.assertEqual(metrics["meta"]["vision_ocr_chars"], len("E.V.E.L.Y.N 전송"))
+        self.assertTrue(vision_evidence_from_metrics(metrics).ocr_available)
+
+    async def test_empty_native_ocr_does_not_trigger_hallucinatory_model_fallback(self) -> None:
+        async def native_ocr(_path: Path) -> dict[str, object]:
+            return {
+                "schema": "windows_ocr.observation.v1",
+                "attempted": True,
+                "text": "",
+            }
+
+        self.local_ocr_provider = native_ocr
+        self.response = FakeResponse(data={"scene": "게임 화면", "ocr": "fabricated"})
+        self.session = FakeSession(self.response)
+        metrics: dict = {}
+
+        await build_live_vision_context_from_runtime(
+            "화면 글자를 읽어줘",
+            deps=self.build_deps(),
+            metrics=metrics,
+            run_ocr=True,
+        )
+
+        request = self.session.calls[0][1]
+        self.assertFalse(request["json"]["run_ocr"])
+        self.assertEqual(metrics["meta"]["vision_ocr_chars"], 0)
+        self.assertFalse(vision_evidence_from_metrics(metrics).ocr_available)
+
+    async def test_foreground_window_is_strong_scene_provenance(self) -> None:
+        async def foreground_window() -> dict[str, object]:
+            return {
+                "schema": "windows_foreground.observation.v1",
+                "available": True,
+                "title": "Minecraft 26.2 - 싱글플레이",
+                "className": "GLFW30",
+            }
+
+        self.local_window_provider = foreground_window
+        self.response = FakeResponse(data={"scene": "Evelyn.", "ocr": ""})
+        self.session = FakeSession(self.response)
+        self.quality = {
+            "confidence": "low",
+            "actionable": False,
+            "scene_unreliable": True,
+            "ocr_corrupt": False,
+            "no_usable_evidence": False,
+        }
+        metrics: dict = {}
+
+        await build_live_vision_context_from_runtime(
+            "무슨 앱이 보여?",
+            deps=self.build_deps(),
+            metrics=metrics,
+            run_ocr=False,
+        )
+
+        evidence = vision_evidence_from_metrics(metrics)
+        self.assertTrue(metrics["meta"]["vision_foreground_available"])
+        self.assertTrue(evidence.scene_available)
+        self.assertTrue(evidence.satisfies_tool("vision_capture_or_watch"))
+
+    async def test_scene_that_only_echoes_request_is_not_visual_evidence(self) -> None:
+        self.response = FakeResponse(
+            data={
+                "scene": "현재 화면의 앱과 가장 큰 제목을 근거만으로 설명해줘. 앱을 설명하는 화면입니다.",
+                "ocr": "",
+            }
+        )
+        self.session = FakeSession(self.response)
+        metrics: dict = {}
+
+        await build_live_vision_context_from_runtime(
+            "현재 화면의 앱과 가장 큰 제목을 근거만으로 설명해줘",
+            deps=self.build_deps(),
+            metrics=metrics,
+            run_ocr=False,
+        )
+
+        evidence = vision_evidence_from_metrics(metrics)
+        self.assertEqual(evidence.state, "unreliable")
+        self.assertFalse(evidence.evidence_available)
+        self.assertFalse(evidence.scene_available)
+        self.assertTrue(metrics["meta"]["vision_quality"]["scene_request_echo"])
+
     async def test_success_without_usable_scene_or_ocr_is_not_evidence(self) -> None:
         self.response = FakeResponse(data={"scene": "", "ocr": "���"})
         self.session = FakeSession(self.response)
@@ -215,6 +346,21 @@ class LiveVisionContextRuntimeTests(unittest.IsolatedAsyncioTestCase):
             scene_available=True,
             ocr_available=False,
             confidence="low",
+            freshness="live",
+        )
+
+        self.assertTrue(evidence.satisfies_tool("vision_capture_or_watch"))
+        self.assertFalse(evidence.satisfies_tool("vision_ocr"))
+
+    def test_unscored_ocr_is_supporting_context_not_required_tool_evidence(self) -> None:
+        evidence = VisionEvidence(
+            state="observed",
+            reason_code="live_observation",
+            evidence_available=True,
+            scene_available=True,
+            ocr_available=True,
+            confidence="low",
+            actionable=False,
             freshness="live",
         )
 

@@ -64,6 +64,61 @@ class ContextPipelineToolPolicyTests(unittest.TestCase):
         self.assertIn("vision_capture_or_watch", names)
         self.assertIn("vision_ocr", names)
 
+    def test_screen_title_and_button_request_needs_ocr_tool(self) -> None:
+        policy = build_context_policy_for_turn(
+            user_text="화면에서 가장 큰 제목과 버튼을 말해줘",
+            source="text",
+            route="main_direct",
+        )
+
+        names = {
+            item.tool_name
+            for item in build_tool_use_decisions(
+                "화면에서 가장 큰 제목과 버튼을 말해줘",
+                policy,
+            )
+        }
+
+        self.assertIn("vision_capture_or_watch", names)
+        self.assertIn("vision_ocr", names)
+
+    def test_plain_document_read_request_does_not_capture_screen(self) -> None:
+        policy = build_context_policy_for_turn(
+            user_text="이 문서를 읽고 요약해줘",
+            source="text",
+            route="main_direct",
+        )
+
+        decisions = build_tool_use_decisions("이 문서를 읽고 요약해줘", policy)
+        names = {item.tool_name for item in decisions}
+
+        self.assertFalse(policy.needs_vision)
+        self.assertNotIn("vision_capture_or_watch", names)
+        self.assertNotIn("vision_ocr", names)
+
+    def test_generic_show_me_request_does_not_capture_screen(self) -> None:
+        policy = build_context_policy_for_turn(
+            user_text="예시를 하나 보여줘",
+            source="text",
+            route="main_direct",
+        )
+
+        self.assertFalse(policy.needs_vision)
+
+    def test_current_time_request_does_not_capture_screen(self) -> None:
+        policy = build_context_policy_for_turn(
+            user_text="현재 시각을 알려줘",
+            source="text",
+            route="main_direct",
+        )
+        decisions = build_tool_use_decisions("현재 시각을 알려줘", policy)
+
+        self.assertFalse(policy.needs_vision)
+        self.assertNotIn(
+            "vision_capture_or_watch",
+            {item.tool_name for item in decisions},
+        )
+
     def test_vision_hint_requires_using_observation_evidence(self) -> None:
         hint = build_vision_context_hint(ContextPolicy(needs_vision=True), user_text="화면 봐")
         packet = build_basic_context_packet(

@@ -31,6 +31,16 @@ RUN python3 -m venv --system-site-packages "$VIRTUAL_ENV" \
         --index-url https://download.pytorch.org/whl/cu128 \
     && pip install -r /tmp/requirements.vision.txt
 
+# Falcon-OCR remote model code imports requests at lazy-load time.
+RUN pip install requests==2.34.2
+
+# Falcon-OCR's CUDA/Triton path builds a small Python extension on first use.
+# Keep this after the expensive Python dependency layer so image rebuilds can
+# reuse the model runtime cache when only the compiler header package changes.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3-dev \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY evelyn_core/runtime /app/evelyn_core/runtime
 
 EXPOSE 8891

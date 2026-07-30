@@ -235,6 +235,73 @@ def build_voice_capabilities(health: dict[str, Any] | None) -> dict[str, Any]:
         blockers=discord_blockers,
         warnings=discord_warnings,
     )
+
+    vision_blockers: list[dict[str, Any]] = []
+    vision_warnings: list[dict[str, Any]] = []
+    vision_repairs: list[dict[str, Any]] = []
+    _service_blockers(
+        ("host_supervisor", "local_io_bridge", "vision"),
+        services,
+        vision_blockers,
+        vision_repairs,
+    )
+    if supervisor is None or supervisor.get("state") != "up":
+        vision_repairs.append(
+            {
+                "actionId": "start_host_supervisor_manual",
+                "serviceId": "host_supervisor",
+                "label": "Host Supervisor 수동 시작",
+                "requiresConfirm": False,
+                "manualCommand": "start_local.bat --background",
+            }
+        )
+    elif bridge is None or bridge.get("state") != "up":
+        vision_repairs.append(
+            _repair_action(
+                "restart_local_bridge",
+                label="Local I/O Bridge 재시작",
+                service_id="local_io_bridge",
+            )
+        )
+    if bridge and bridge.get("state") == "up":
+        host_vision = (
+            bridge_payload.get("hostVision")
+            if isinstance(bridge_payload.get("hostVision"), dict)
+            else {}
+        )
+        if host_vision.get("schema") != "host_vision.status.v1":
+            _blocker(
+                vision_blockers,
+                "host_vision_status_missing",
+                "Windows 화면 관찰 브리지 상태가 없습니다.",
+                service_id="local_io_bridge",
+            )
+        elif str(host_vision.get("state") or "") != "running":
+            _blocker(
+                vision_blockers,
+                "host_vision_bridge_not_running",
+                "Windows 화면 관찰 브리지가 실행 중이 아닙니다.",
+                service_id="local_io_bridge",
+            )
+        if not bool(host_vision.get("captureEnabled")):
+            _blocker(
+                vision_blockers,
+                "host_vision_capture_disabled",
+                "Windows 화면 캡처가 비활성화되어 있습니다.",
+                service_id="local_io_bridge",
+            )
+        if host_vision.get("lastErrorCode"):
+            _warning(
+                vision_warnings,
+                "host_vision_last_request_failed",
+                "최근 화면 관찰 요청이 근거를 만들지 못했습니다.",
+                service_id="local_io_bridge",
+            )
+
+    vision_state = _capability_state(
+        blockers=vision_blockers,
+        warnings=vision_warnings,
+    )
     return {
         "voiceLocal": {
             "state": local_state,
@@ -257,6 +324,17 @@ def build_voice_capabilities(health: dict[str, Any] | None) -> dict[str, Any]:
                 for service_id in ("discord_bot", "main_llm", "stt", "tts")
             ],
             "repairActions": _dedupe_actions(discord_repairs),
+        },
+        "screenVision": {
+            "state": vision_state,
+            "ready": vision_state in {"ready", "degraded"},
+            "blockers": vision_blockers,
+            "warnings": vision_warnings,
+            "dependencies": [
+                _dependency(service_id, services.get(service_id))
+                for service_id in ("host_supervisor", "local_io_bridge", "vision")
+            ],
+            "repairActions": _dedupe_actions(vision_repairs),
         },
     }
 

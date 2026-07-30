@@ -43,6 +43,34 @@ class VisionQualityTests(unittest.TestCase):
         self.assertEqual(quality["confidence"], "normal")
         self.assertTrue(quality["actionable"])
 
+    def test_windows_native_ocr_without_confidence_is_supporting_only(self) -> None:
+        quality = build_vision_quality(
+            {
+                "scene": "게임 화면",
+                "ocr": "SWAG 25802",
+                "ocr_source": "windows_native",
+            }
+        )
+
+        self.assertTrue(quality["ocr_unscored"])
+        self.assertEqual(quality["confidence"], "low")
+        self.assertFalse(quality["actionable"])
+
+    def test_identity_only_scene_is_rejected_but_foreground_title_survives(self) -> None:
+        quality = build_vision_quality(
+            {
+                "scene": "Evelyn.",
+                "ocr": "",
+                "foreground_window_title": "Minecraft 26.2 - 싱글플레이",
+                "foreground_window_class": "GLFW30",
+            }
+        )
+
+        self.assertTrue(quality["scene_identity_only"])
+        self.assertTrue(quality["scene_unreliable"])
+        self.assertTrue(quality["foreground_available"])
+        self.assertFalse(quality["no_usable_evidence"])
+
     def test_weak_evidence_is_context_only_not_actionable(self) -> None:
         quality = build_vision_quality(
             {
@@ -58,6 +86,21 @@ class VisionQualityTests(unittest.TestCase):
         self.assertEqual(quality["confidence"], "low")
         self.assertFalse(quality["actionable"])
         self.assertIn("sole basis for actions", quality["guidance"])
+
+    def test_request_echo_marker_invalidates_scene_but_preserves_clean_ocr(self) -> None:
+        quality = build_vision_quality(
+            {
+                "scene": "사용자 요청을 그대로 반복합니다.",
+                "ocr": "E.V.E.L.Y.N 검증 시작",
+                "_scene_request_echo": True,
+            }
+        )
+
+        self.assertTrue(quality["scene_request_echo"])
+        self.assertTrue(quality["scene_unreliable"])
+        self.assertFalse(quality["no_usable_evidence"])
+        self.assertEqual(quality["confidence"], "low")
+        self.assertFalse(quality["actionable"])
 
     def test_replacement_character_marks_ocr_corrupt(self) -> None:
         self.assertTrue(vision_text_looks_corrupt("OpenClaw Ign�집random"))

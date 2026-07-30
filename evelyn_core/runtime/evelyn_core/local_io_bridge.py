@@ -56,6 +56,7 @@ from .config import (
     SPEAKER_VERIFICATION_THRESHOLD,
 )
 from .fast_action_runtime import detect_minecraft_runtime_command
+from .host_vision_bridge import HostVisionBridge
 from .local_mic import LocalMicCaptureService
 from .local_tts_playback import normalize_output_device
 from .local_bridge_barge_in import (
@@ -192,6 +193,8 @@ class LocalIoBridge:
         self.minecraft_command_tasks: set[asyncio.Task[Any]] = set()
         self.active_turn_task: asyncio.Task[Any] | None = None
         self.barge_worker_task: asyncio.Task[Any] | None = None
+        self.host_vision_bridge: HostVisionBridge | None = None
+        self.host_vision_task: asyncio.Task[Any] | None = None
         self.active_turn_id = ""
         self.active_turn_started_at: float | None = None
         self.active_validation: dict[str, str] | None = None
@@ -207,50 +210,64 @@ class LocalIoBridge:
         async with aiohttp.ClientSession(timeout=timeout) as session:
             self.session = session
             await self._start_mic()
+            self.host_vision_bridge = HostVisionBridge(session=session)
+            self.host_vision_task = asyncio.create_task(
+                self.host_vision_bridge.run(),
+                name="local-bridge-host-vision",
+            )
             await self._post_status()
             self._ensure_tts_warmup()
             self.barge_worker_task = asyncio.create_task(
                 self._barge_in_worker(),
                 name="local-bridge-barge-in",
             )
-            while True:
-                if self.active_turn_task is not None and self.active_turn_task.done():
-                    with contextlib.suppress(asyncio.CancelledError, Exception):
-                        await self.active_turn_task
-                    self.active_turn_task = None
-                if self.active_turn_task is None:
-                    source_queue: asyncio.Queue[tuple[bytes, dict[str, Any]]]
-                    try:
-                        item = self.priority_queue.get_nowait()
-                        source_queue = self.priority_queue
-                    except asyncio.QueueEmpty:
+            try:
+                while True:
+                    if self.active_turn_task is not None and self.active_turn_task.done():
+                        with contextlib.suppress(asyncio.CancelledError, Exception):
+                            await self.active_turn_task
+                        self.active_turn_task = None
+                    if self.active_turn_task is None:
+                        source_queue: asyncio.Queue[tuple[bytes, dict[str, Any]]]
                         try:
-                            item = await asyncio.wait_for(
-                                self.queue.get(),
-                                timeout=LOCAL_BRIDGE_STATUS_INTERVAL_SEC,
-                            )
-                            source_queue = self.queue
-                        except asyncio.TimeoutError:
-                            await self._post_status()
-                            continue
-                    pcm_bytes, meta = item
-                    self.active_turn_task = asyncio.create_task(
-                        self._process_queued_segment(
-                            pcm_bytes,
-                            meta,
-                            source_queue=source_queue,
-                        ),
-                        name=f"local-bridge-turn-{meta.get('turnId') or 'unknown'}",
-                    )
-                try:
-                    await asyncio.wait_for(
-                        asyncio.shield(self.active_turn_task),
-                        timeout=LOCAL_BRIDGE_STATUS_INTERVAL_SEC,
-                    )
-                except asyncio.TimeoutError:
-                    await self._post_status()
-                except asyncio.CancelledError:
-                    pass
+                            item = self.priority_queue.get_nowait()
+                            source_queue = self.priority_queue
+                        except asyncio.QueueEmpty:
+                            try:
+                                item = await asyncio.wait_for(
+                                    self.queue.get(),
+                                    timeout=LOCAL_BRIDGE_STATUS_INTERVAL_SEC,
+                                )
+                                source_queue = self.queue
+                            except asyncio.TimeoutError:
+                                await self._post_status()
+                                continue
+                        pcm_bytes, meta = item
+                        self.active_turn_task = asyncio.create_task(
+                            self._process_queued_segment(
+                                pcm_bytes,
+                                meta,
+                                source_queue=source_queue,
+                            ),
+                            name=f"local-bridge-turn-{meta.get('turnId') or 'unknown'}",
+                        )
+                    try:
+                        await asyncio.wait_for(
+                            asyncio.shield(self.active_turn_task),
+                            timeout=LOCAL_BRIDGE_STATUS_INTERVAL_SEC,
+                        )
+                    except asyncio.TimeoutError:
+                        await self._post_status()
+                    except asyncio.CancelledError:
+                        current_task = asyncio.current_task()
+                        if current_task is not None and current_task.cancelling():
+                            raise
+            finally:
+                if self.host_vision_task is not None:
+                    self.host_vision_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError, Exception):
+                        await self.host_vision_task
+                    self.host_vision_task = None
 
     async def _process_queued_segment(
         self,
@@ -1492,6 +1509,15 @@ class LocalIoBridge:
                 "error": self.tts_warmup_error,
                 "ms": self.tts_warmup_ms,
             },
+            "hostVision": (
+                self.host_vision_bridge.snapshot()
+                if self.host_vision_bridge is not None
+                else {
+                    "schema": "host_vision.status.v1",
+                    "state": "starting",
+                    "captureEnabled": False,
+                }
+            ),
             **self.runtime_errors.snapshot(),
         }
         if extra:

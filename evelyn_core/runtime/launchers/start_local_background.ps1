@@ -11,6 +11,8 @@ $stopMarker = Join-Path $projectRoot '.evelyn_stop_requested'
 $logDir = Join-Path $projectRoot 'runtime_artifacts\logs\background_start'
 $supervisorLog = Join-Path $logDir 'Host-Supervisor.log'
 $supervisorStatus = Join-Path $projectRoot 'runtime_artifacts\host_supervisor\status.json'
+$dockerImageBuilder = Join-Path $PSScriptRoot 'build_local_docker_images.ps1'
+$minecraftOwnerClaim = Join-Path $projectRoot 'runtime_artifacts\minecraft_world_lease\owner_claim.json'
 $ttsProfilesRoot = if ($env:EVELYN_OMNIVOICE_PROFILES_DIR) {
     [System.IO.Path]::GetFullPath([string]$env:EVELYN_OMNIVOICE_PROFILES_DIR)
 } else {
@@ -77,6 +79,40 @@ function Wait-Port {
     throw "$Label was not ready in time"
 }
 
+function Wait-HttpReady {
+    param(
+        [string]$Url,
+        [string]$Label,
+        [ValidateSet('ready', 'vision')]
+        [string]$Contract = 'ready'
+    )
+
+    $timeoutSec = if ($env:START_MODEL_WAIT_TIMEOUT_SEC) {
+        [int]$env:START_MODEL_WAIT_TIMEOUT_SEC
+    } else {
+        600
+    }
+    $deadline = (Get-Date).AddSeconds($timeoutSec)
+    Write-Host "[Evelyn] Waiting for $Label readiness at $Url"
+    while ((Get-Date) -lt $deadline) {
+        try {
+            $health = Invoke-RestMethod -Uri $Url -Method Get -TimeoutSec 5
+            $ready = if ($Contract -eq 'vision') {
+                [bool]$health.ok -and [bool]$health.models.smol.loaded
+            } else {
+                [bool]$health.ok -and [bool]$health.ready
+            }
+            if ($ready) {
+                Write-Host "[Evelyn] $Label readiness contract passed"
+                return
+            }
+        } catch {
+        }
+        Start-Sleep -Seconds 2
+    }
+    throw "$Label did not satisfy its HTTP readiness contract in time."
+}
+
 function New-EncodedCommand {
     param([string]$Script)
     $bytes = [System.Text.Encoding]::Unicode.GetBytes($Script)
@@ -113,7 +149,7 @@ function Test-HostPythonReady {
     $previousPythonPath = $env:PYTHONPATH
     try {
         $env:PYTHONPATH = $coreRuntime
-        & $FilePath -c "import aiohttp, numpy, sounddevice; import evelyn_core.local_io_bridge" *> $null
+        & $FilePath -c "import aiohttp, numpy, sounddevice; from PIL import ImageGrab; import evelyn_core.local_io_bridge" *> $null
         return $LASTEXITCODE -eq 0
     } catch {
         return $false
@@ -243,6 +279,27 @@ function Invoke-DockerCommand {
     }
 }
 
+function Stop-BotApiForImageRefresh {
+    Write-Host '[Evelyn] Stopping the current Bot API cleanly before replacing its image.'
+    Invoke-DockerCommand -Arguments @(
+        'stop',
+        '--timeout', '15',
+        'evelyn-bot-api'
+    ) -IgnoreFailure
+
+    $deadline = (Get-Date).AddSeconds(20)
+    while ((Get-Date) -lt $deadline) {
+        if (-not (Test-Path -LiteralPath $minecraftOwnerClaim -PathType Leaf)) {
+            return
+        }
+        Start-Sleep -Milliseconds 250
+    }
+    throw (
+        "Bot API stopped but did not release its Minecraft owner claim. " +
+        "Refusing to recreate it while ownership is ambiguous: $minecraftOwnerClaim"
+    )
+}
+
 function Start-DockerCore {
     if (-not (Test-Path -LiteralPath $composeFile)) {
         throw "Compose file not found: $composeFile"
@@ -270,7 +327,15 @@ function Start-DockerCore {
     $buildEnabled = $env:EVELYN_DOCKER_BUILD -and ([string]$env:EVELYN_DOCKER_BUILD).ToLowerInvariant() -in @('1', 'true', 'yes', 'on')
     if ($buildEnabled) {
         Write-Host '[Evelyn] Rebuilding Docker app images because EVELYN_DOCKER_BUILD is enabled.'
-        Invoke-DockerCommand -Arguments (@('compose') + $composeBaseArgs + @('build', 'bot_api', 'control_page'))
+        if (-not (Test-Path -LiteralPath $dockerImageBuilder -PathType Leaf)) {
+            throw "Docker image builder not found: $dockerImageBuilder"
+        }
+        & $dockerImageBuilder -ProjectRoot $projectRoot -Services @(
+            'bot_api',
+            'control_page',
+            'vision'
+        )
+        Stop-BotApiForImageRefresh
     } else {
         Write-Host '[Evelyn] Reusing existing Docker images. Set EVELYN_DOCKER_BUILD=true to rebuild app images.'
     }
@@ -314,6 +379,7 @@ Set-Location '$projectRoot'
 `$env:LOCAL_BRIDGE_BOT_API_BASE = 'http://127.0.0.1:$botApiPort'
 `$env:STT_SERVICE_URL = 'http://127.0.0.1:8892'
 `$env:OMNIVOICE_SERVER_URL = 'http://127.0.0.1:8880'
+`$env:VISION_SERVICE_URL = 'http://127.0.0.1:8891'
 `$env:EVELYN_RUNTIME_ARTIFACTS_DIR = '$projectRoot\runtime_artifacts'
 if (-not `$env:LOCAL_MIC_START_THRESHOLD) { `$env:LOCAL_MIC_START_THRESHOLD = '0.002' }
 if (-not `$env:LOCAL_MIC_CONTINUE_THRESHOLD) { `$env:LOCAL_MIC_CONTINUE_THRESHOLD = '0.001' }
@@ -362,6 +428,10 @@ Wait-Port -HostName '127.0.0.1' -Port 9822 -Label 'Router-LLM'
 Wait-Port -HostName '127.0.0.1' -Port 9821 -Label 'Sub-LLM'
 Wait-Port -HostName '127.0.0.1' -Port 8880 -Label 'OmniVoice-TTS'
 Wait-Port -HostName '127.0.0.1' -Port 8892 -Label 'STT'
+Wait-Port -HostName '127.0.0.1' -Port 8891 -Label 'Vision'
+Wait-HttpReady -Url 'http://127.0.0.1:8880/health' -Label 'OmniVoice-TTS'
+Wait-HttpReady -Url 'http://127.0.0.1:8892/health' -Label 'STT'
+Wait-HttpReady -Url 'http://127.0.0.1:8891/health' -Label 'Vision' -Contract 'vision'
 Wait-Port -HostName '127.0.0.1' -Port $botApiPort -Label 'Docker Bot API'
 Wait-Port -HostName '127.0.0.1' -Port $controlPagePublicPort -Label 'Docker Control Page'
 

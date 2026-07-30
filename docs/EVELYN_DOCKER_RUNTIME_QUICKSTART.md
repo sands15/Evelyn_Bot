@@ -22,6 +22,28 @@ Discord bot loop는 `discord` profile의 `discord_bot` 서비스로 분리한다
 
 ## 실행
 
+Windows 로컬 기본 경로는 launcher를 사용한다. Host Supervisor와 화면 bridge,
+TTS profile 검증, 모델 readiness까지 같은 계약으로 확인한다.
+
+```powershell
+powershell -ExecutionPolicy Bypass `
+  -File .\evelyn_core\runtime\launchers\start_local_background.ps1
+```
+
+Bot API, Control Page, Vision 소스 변경을 이미지에 반영할 때:
+
+```powershell
+$env:EVELYN_DOCKER_BUILD = "true"
+$env:CONTROL_PAGE_AUTO_OPEN = "false" # 선택
+powershell -ExecutionPolicy Bypass `
+  -File .\evelyn_core\runtime\launchers\start_local_background.ps1
+```
+
+프로젝트 경로에 한글 등 non-ASCII 문자가 있으면 launcher가 사용하지 않는 임시
+드라이브 문자에 프로젝트를 매핑한 뒤 allowlist 이미지 세 개만 빌드하고, 자신이
+만든 매핑임을 다시 확인한 뒤 해제한다. 기존 `subst` 매핑은 재사용하거나 삭제하지
+않는다.
+
 기본 런타임:
 
 ```powershell
@@ -56,6 +78,14 @@ Discord bot까지 포함:
 powershell -ExecutionPolicy Bypass -File .\tools\check_docker_runtime.ps1 -IncludeDiscordBot
 ```
 
+명시적으로 시작한 Minecraft/Codex stack까지 포함:
+
+```powershell
+powershell -ExecutionPolicy Bypass `
+  -File .\tools\check_docker_runtime.ps1 `
+  -IncludeMinecraftStack
+```
+
 Codex action 실제 호출까지 포함:
 
 ```powershell
@@ -72,7 +102,10 @@ powershell -ExecutionPolicy Bypass -File .\tools\check_docker_runtime.ps1 -Inclu
 
 - 모든 핵심 HTTP health가 응답한다.
 - `controlReady`, `botReady`, `mainReady`, `routerReady`, `subReady`, `ttsReady`, `sttReady`, `chatReady`, `voiceReady`, `visionReady`가 `true`다.
-- `voyagerReady`, `codexReady`도 현재 Compose 범위에서는 `true`여야 한다.
+- 기본 local core 검사에서는 지연 시작되는 `voyagerReady`, `codexReady`가
+  경고일 수 있다.
+- `-IncludeMinecraftStack` 사용 시 `voyagerReady`, `codexReady`가 모두
+  `true`여야 한다.
 - `-IncludeDiscordBot` 사용 시 `evelyn-discord-bot` 상태가 `running`이고 restart loop가 없어야 한다.
 - `-IncludeCodexAction` 사용 시 `/codex/action`이 실제 응답까지 반환해야 한다.
 
@@ -100,7 +133,12 @@ powershell -ExecutionPolicy Bypass -File .\tools\check_docker_runtime.ps1 -Inclu
 - `STT_SERVICE_FALLBACK_LOCAL=false`로 두어 컨테이너 안에서 Qwen ASR을 중복 로드하지 않는다.
 - TTS는 `OMNIVOICE_SERVER_URL=http://tts:8880`을 사용한다.
 - 로컬모드는 Docker core와 Windows local I/O bridge로 나뉜다. Docker는 LLM/TTS/STT/Vision/Control/Bot API를 맡고, Windows bridge는 실제 마이크 캡처와 스피커 재생만 맡는다.
-- 컨테이너 안에서는 Windows 화면 캡처가 불가능하므로 `discord_bot`의 `VISION_WATCH_ENABLED=false`를 유지한다. Vision 분석은 별도 `vision` 서비스가 담당한다.
+- 컨테이너 안에서는 Windows 화면 캡처가 불가능하므로 `discord_bot`의 `VISION_WATCH_ENABLED=false`를 유지한다.
+- Windows Host Supervisor의 Host Vision Bridge가 요청별 임시 캡처, foreground
+  window metadata, native OCR을 담당하고 별도 `vision` 서비스가 scene 분석을
+  담당한다.
+- screenshot과 OCR tile은 요청 직후 삭제된다. 정확한 글자 근거가 actionable하지
+  않으면 Bot API는 Main LLM 호출 전에 화면 텍스트 주장을 거부한다.
 
 ## Codex Gateway
 

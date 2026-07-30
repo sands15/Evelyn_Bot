@@ -249,7 +249,7 @@ def runtime_repair_capabilities(
 ) -> dict[str, Any]:
     manifest = manifest or load_service_manifest()
     delegated_runtime = not direct_windows_repair_enabled()
-    supervisor_status = HostSupervisorClient().status() if delegated_runtime else {}
+    supervisor_status = HostSupervisorClient().status()
     services = []
     for service in manifest.services:
         repair = service.repair
@@ -257,7 +257,7 @@ def runtime_repair_capabilities(
             continue
         service_health = service_health_from_summary(health, service.id)
         host_action_id = HOST_ACTION_BY_SERVICE_ID.get(service.id)
-        delegated = delegated_runtime
+        delegated = delegated_runtime or service.id == "local_io_bridge"
         execution_supported = (
             bool(host_action_id and supervisor_status.get("available"))
             if delegated
@@ -404,7 +404,8 @@ def build_runtime_repair_plan(
                 "reason": "safe health override does not mutate real services",
             },
         }
-    if current_state == "up":
+    explicit_restart = action == "restart_local_bridge"
+    if current_state == "up" and not explicit_restart:
         return {
             **base,
             "ok": True,
@@ -413,7 +414,8 @@ def build_runtime_repair_plan(
             "message": f"{service.label} is already up.",
         }
 
-    if not direct_windows_repair_enabled():
+    use_supervisor = not direct_windows_repair_enabled() or explicit_restart
+    if use_supervisor:
         if not host_action or host_action not in ALLOWED_HOST_ACTIONS:
             return {
                 **base,
@@ -460,7 +462,11 @@ def build_runtime_repair_plan(
             "preconditions": [
                 "actionId is in the Windows Host Supervisor allowlist",
                 "Host Supervisor heartbeat is fresh",
-                "service is not currently up",
+                (
+                    "explicit restart action may replace the currently running Local I/O Bridge"
+                    if explicit_restart
+                    else "service is not currently up"
+                ),
             ],
             "riskChecks": [
                 {"id": "allowlist_only", "ok": True, "message": "No arbitrary command, argv, or working directory is accepted."},

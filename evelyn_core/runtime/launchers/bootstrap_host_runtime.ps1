@@ -101,7 +101,7 @@ if ($LASTEXITCODE -ne 0) {
 $previousPythonPath = $env:PYTHONPATH
 try {
     $env:PYTHONPATH = $runtimeRoot
-    & $venvPython -c "import aiohttp, numpy, sounddevice; import evelyn_core.local_io_bridge; print('host_runtime_ready')"
+    & $venvPython -c "import aiohttp, numpy, sounddevice; from PIL import ImageGrab; import evelyn_core.local_io_bridge; print('host_runtime_ready')"
     if ($LASTEXITCODE -ne 0) {
         throw "Windows host runtime import verification failed."
     }

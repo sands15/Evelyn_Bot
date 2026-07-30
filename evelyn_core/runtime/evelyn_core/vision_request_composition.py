@@ -32,6 +32,8 @@ class VisionRequestCompositionDeps:
     clean_text: Callable[[str], str]
     to_thread: Callable[..., Awaitable[Any]]
     monotonic: Callable[[], float]
+    local_ocr_provider: Callable[[Any], Awaitable[Any]] | None = None
+    local_window_provider: Callable[[], Awaitable[dict[str, Any]]] | None = None
 
 
 class VisionRequestComposition:
@@ -63,7 +65,8 @@ class VisionRequestComposition:
         image.save(path)
         extrema = image.getextrema()
         if extrema and all(int(high) <= 2 for _low, high in extrema):
-            raise RuntimeError(f"screen capture returned a black frame: {path}")
+            self.delete_file_quietly(path)
+            raise RuntimeError("screen capture returned a black frame")
         return path, image.size
 
     async def capture_local_screen(self) -> tuple[Path, tuple[int, int]]:
@@ -120,6 +123,8 @@ class VisionRequestComposition:
             build_vision_quality=deps.build_vision_quality,
             clean_text=deps.clean_text,
             monotonic=deps.monotonic,
+            local_ocr_provider=deps.local_ocr_provider,
+            local_window_provider=deps.local_window_provider,
         )
 
     async def build_live_vision_context(
@@ -127,11 +132,13 @@ class VisionRequestComposition:
         user_text: str,
         *,
         metrics: dict | None = None,
+        run_ocr: bool = True,
     ) -> str:
         return await build_live_vision_context_from_runtime(
             user_text,
             deps=self.build_live_vision_context_runtime_deps(),
             metrics=metrics,
+            run_ocr=run_ocr,
         )
 
     def build_vision_watch_prompt(self) -> str:

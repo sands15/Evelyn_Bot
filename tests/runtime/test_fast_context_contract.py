@@ -16,6 +16,8 @@ from evelyn_core.fast_context_contract import (  # noqa: E402
     build_fast_control_context,
     build_fast_main_llm_messages,
 )
+from evelyn_core.host_vision_client import HostVisionResult  # noqa: E402
+from evelyn_core.vision_runtime import VisionEvidence  # noqa: E402
 
 
 async def fake_runtime_health() -> dict[str, object]:
@@ -47,6 +49,59 @@ async def fake_memory(_: str) -> str:
 
 async def fake_logs(_: str) -> str:
     return "Recent Evelyn log evidence: background_start/Bot-Control.log\napi_error:500 while handling /shutdown"
+
+
+async def fake_observed_vision(user_text: str, *, run_ocr: bool) -> HostVisionResult:
+    return HostVisionResult(
+        observation=(
+            "Local screen vision observation is available.\n"
+            "scene: Evelyn Control Page가 열려 있다.\n"
+            + ("ocr_text: Start voice validation" if run_ocr else "")
+        ),
+        evidence=VisionEvidence(
+            state="observed",
+            reason_code="live_observation",
+            evidence_available=True,
+            scene_available=True,
+            ocr_available=run_ocr,
+            confidence="normal",
+            actionable=True,
+            freshness="live",
+        ),
+        screenshot_deleted=True,
+    )
+
+
+async def fake_failed_vision(user_text: str, *, run_ocr: bool) -> HostVisionResult:
+    return HostVisionResult(
+        observation="Screen capture returned a black frame. Do not claim screen contents.",
+        evidence=VisionEvidence(
+            state="failed",
+            reason_code="black_frame",
+        ),
+        error_code="black_frame",
+        screenshot_deleted=True,
+    )
+
+
+async def fake_scene_only_vision(user_text: str, *, run_ocr: bool) -> HostVisionResult:
+    return HostVisionResult(
+        observation=(
+            "Local screen vision observation is available.\n"
+            "scene: Evelyn."
+        ),
+        evidence=VisionEvidence(
+            state="observed",
+            reason_code="live_observation",
+            evidence_available=True,
+            scene_available=True,
+            ocr_available=False,
+            confidence="normal",
+            actionable=True,
+            freshness="live",
+        ),
+        screenshot_deleted=True,
+    )
 
 
 def fake_local_bridge_status() -> dict[str, object]:
@@ -231,6 +286,92 @@ class FastContextContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("web_current_info", messages[0]["content"])
         self.assertIn("Weather Example", messages[0]["content"])
         self.assertEqual(messages[-1], {"role": "user", "content": "final user text"})
+
+    async def test_screen_text_request_uses_live_host_evidence(self) -> None:
+        context = await build_fast_control_context(
+            "현재 화면에 보이는 글자를 읽어줘",
+            source="control_page",
+            runtime_health_provider=fake_runtime_health,
+            vision_provider=fake_observed_vision,
+        )
+
+        by_name = {item.tool_name: item for item in context.tool_use_decisions}
+        self.assertEqual(by_name["vision_capture_or_watch"].status, "executed")
+        self.assertEqual(by_name["vision_ocr"].status, "executed")
+        self.assertTrue(context.vision_evidence.evidence_available)
+        self.assertTrue(context.vision_evidence.ocr_available)
+        self.assertIn("Start voice validation", context.vision_context)
+        self.assertIn("schema=vision.evidence.v1", context.system_context)
+        self.assertIn(
+            "supported_inline_tools=vision_capture_or_watch,vision_ocr",
+            context.system_context,
+        )
+        self.assertNotIn(
+            "unsupported_inline_tools=vision_capture_or_watch",
+            context.system_context,
+        )
+
+    async def test_failed_screen_capture_never_marks_tool_executed(self) -> None:
+        context = await build_fast_control_context(
+            "현재 화면을 봐줘",
+            source="control_page",
+            runtime_health_provider=fake_runtime_health,
+            vision_provider=fake_failed_vision,
+        )
+
+        vision = next(
+            item
+            for item in context.tool_use_decisions
+            if item.tool_name == "vision_capture_or_watch"
+        )
+        self.assertEqual(vision.status, "failed_or_unavailable")
+        self.assertIn("reason=black_frame", vision.evidence)
+        self.assertFalse(context.vision_evidence.evidence_available)
+        self.assertIn("Do not claim screen contents", context.system_context)
+        self.assertIn("화면을 확인할 수 없었어", context.required_evidence_failure_reply)
+
+    async def test_missing_required_ocr_is_a_deterministic_pre_llm_gate(self) -> None:
+        context = await build_fast_control_context(
+            "현재 화면에서 가장 큰 제목과 보이는 버튼 하나만 말해줘.",
+            source="control_page",
+            runtime_health_provider=fake_runtime_health,
+            vision_provider=fake_scene_only_vision,
+        )
+
+        by_name = {item.tool_name: item for item in context.tool_use_decisions}
+        self.assertEqual(by_name["vision_capture_or_watch"].status, "executed")
+        self.assertEqual(by_name["vision_ocr"].status, "failed_or_unavailable")
+        self.assertIn("글자를 읽을 수 있는 근거", context.required_evidence_failure_reply)
+        self.assertIn("추측하지 않을게", context.required_evidence_failure_reply)
+
+    async def test_observed_required_ocr_does_not_gate_the_llm(self) -> None:
+        context = await build_fast_control_context(
+            "현재 화면에서 가장 큰 제목과 보이는 버튼 하나만 말해줘.",
+            source="control_page",
+            runtime_health_provider=fake_runtime_health,
+            vision_provider=fake_observed_vision,
+        )
+
+        self.assertEqual(context.required_evidence_failure_reply, "")
+
+    async def test_non_vision_turn_does_not_touch_host_capture(self) -> None:
+        called = False
+
+        async def forbidden_provider(user_text: str, *, run_ocr: bool) -> HostVisionResult:
+            nonlocal called
+            called = True
+            raise AssertionError("vision provider should not be called")
+
+        context = await build_fast_control_context(
+            "이 문서를 읽고 요약해줘",
+            source="control_page",
+            runtime_health_provider=fake_runtime_health,
+            vision_provider=forbidden_provider,
+        )
+
+        self.assertFalse(called)
+        self.assertEqual(context.vision_context, "")
+        self.assertEqual(context.vision_evidence.reason_code, "not_requested")
 
 
 if __name__ == "__main__":

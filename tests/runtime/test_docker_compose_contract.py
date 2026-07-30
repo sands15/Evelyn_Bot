@@ -181,6 +181,31 @@ class DockerComposeContractTests(unittest.TestCase):
         self.assertIn("$json.backendReady -eq $true", check_script)
         self.assertIn("IncludeCodexAction", check_script)
 
+    def test_runtime_checker_matches_deferred_minecraft_contract(self) -> None:
+        check_script = CHECK_SCRIPT.read_text(encoding="utf-8")
+
+        self.assertIn("[switch]$IncludeMinecraftStack", check_script)
+        self.assertIn(
+            'if ($IncludeMinecraftStack -or $IncludeCodexAction)',
+            check_script,
+        )
+        self.assertIn(
+            '$env:DISCORD_BOT_TOKEN = "runtime-check-disabled"',
+            check_script,
+        )
+        self.assertIn(
+            "Voyager health check skipped; use -IncludeMinecraftStack",
+            check_script,
+        )
+        self.assertIn(
+            'Add-Failure "$flag is not true for the requested Minecraft stack"',
+            check_script,
+        )
+        self.assertNotIn(
+            '$script:ComposeProfiles = @("llm", "tts", "vision", "stt", "voyager")',
+            check_script,
+        )
+
     def test_host_specific_compose_paths_are_configurable(self) -> None:
         source = COMPOSE.read_text(encoding="utf-8")
 

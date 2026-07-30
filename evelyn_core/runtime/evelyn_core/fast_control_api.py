@@ -26,7 +26,7 @@ from .control_page_contracts import (
     memory_panel_reply,
 )
 from .context_pipeline import build_context_policy_for_turn, build_tool_use_decisions
-from .fast_context_contract import build_fast_main_llm_messages
+from .fast_context_contract import build_fast_main_llm_request
 from .fast_action_runtime import (
     FastActionCoordinator,
     FastActionExecutionError,
@@ -1306,12 +1306,12 @@ def pop_speakable_chunks(buffer: str, *, force: bool = False, max_chars: int = 1
     return chunks, text
 
 
-async def build_main_llm_payload(
+async def build_main_llm_request_payload(
     text: str,
     *,
     source: str,
     tool_plan: FastToolPlan | None = None,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], str]:
     recent_messages = [
         {"role": message.get("role"), "content": clean_text(message.get("text"))}
         for message in CHAT_MESSAGES[-8:]
@@ -1320,7 +1320,7 @@ async def build_main_llm_payload(
     if recent_messages and recent_messages[-1].get("content") == clean_text(text):
         recent_messages = recent_messages[:-1]
     final_user_text = build_fast_main_llm_user_text(text)
-    messages = await build_fast_main_llm_messages(
+    llm_request = await build_fast_main_llm_request(
         base_system_prompt=FAST_MAIN_LLM_SYSTEM_PROMPT,
         recent_messages=recent_messages,
         user_text=text,
@@ -1331,7 +1331,7 @@ async def build_main_llm_payload(
     )
     payload = {
         "model": MODEL_NAME,
-        "messages": messages,
+        "messages": llm_request.messages,
         "temperature": 0.3 if source in {"voice", "local_bridge", "local_mic"} else 0.2,
         "max_tokens": 700,
         "stream": True,
@@ -1339,6 +1339,20 @@ async def build_main_llm_payload(
     }
     if MAIN_LLM_STOP_TOKENS:
         payload["stop"] = list(MAIN_LLM_STOP_TOKENS)
+    return payload, llm_request.context.required_evidence_failure_reply
+
+
+async def build_main_llm_payload(
+    text: str,
+    *,
+    source: str,
+    tool_plan: FastToolPlan | None = None,
+) -> dict[str, Any]:
+    payload, _failure_reply = await build_main_llm_request_payload(
+        text,
+        source=source,
+        tool_plan=tool_plan,
+    )
     return payload
 
 
@@ -1348,7 +1362,14 @@ async def iter_main_llm_deltas(
     source: str,
     tool_plan: FastToolPlan | None = None,
 ) -> AsyncIterator[str]:
-    payload = await build_main_llm_payload(text, source=source, tool_plan=tool_plan)
+    payload, failure_reply = await build_main_llm_request_payload(
+        text,
+        source=source,
+        tool_plan=tool_plan,
+    )
+    if failure_reply:
+        yield failure_reply
+        return
     timeout = ClientTimeout(total=120)
     prefix_filter = ModelStreamPrefixFilter()
     async with ClientSession(timeout=timeout) as session:

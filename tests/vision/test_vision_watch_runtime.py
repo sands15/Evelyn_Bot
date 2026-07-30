@@ -46,8 +46,10 @@ class VisionWatchRuntimeTests(unittest.TestCase):
 
     def test_build_vision_observation_prompt(self) -> None:
         prompt = build_vision_observation_prompt_from_runtime("  화면에 뭐가 보이냐?  ", deps=self.deps)
-        self.assertIn("User request: 화면에 뭐가 보이냐?", prompt)
-        self.assertLessEqual(len(prompt), 280)
+        self.assertIn("factual visual inventory", prompt)
+        self.assertNotIn("화면에 뭐가 보이냐", prompt)
+        self.assertIn("Distinguish chat content", prompt)
+        self.assertLessEqual(len(prompt), 360)
 
     def test_build_vision_watch_prompt(self) -> None:
         self.assertIn("lightweight background screen observer", build_vision_watch_prompt_from_runtime())

@@ -4,7 +4,9 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
+
+from PIL import Image
 
 REPO_ROOT = next(p for p in Path(__file__).resolve().parents if (p / "main.py").exists())
 RUNTIME_ROOT = REPO_ROOT / "evelyn_core" / "runtime"
@@ -59,6 +61,18 @@ class VisionRequestCompositionTests(unittest.IsolatedAsyncioTestCase):
                 "automatic capture is disabled",
                 await composition.build_live_vision_context("hello"),
             )
+
+    def test_black_frame_is_deleted_before_capture_failure_escapes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            screenshot_dir = Path(temp_dir)
+            composition = self.build(screenshot_dir)
+            black = Image.new("RGB", (8, 8), color=(0, 0, 0))
+
+            with patch("PIL.ImageGrab.grab", return_value=black):
+                with self.assertRaisesRegex(RuntimeError, "black frame"):
+                    composition.capture_local_screen_sync()
+
+            self.assertEqual(list(screenshot_dir.glob("*.png")), [])
 
     def test_main_uses_explicit_bindings(self) -> None:
         source = (REPO_ROOT / "main.py").read_text(encoding="utf-8")

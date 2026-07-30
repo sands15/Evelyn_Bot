@@ -1,6 +1,7 @@
 param(
     [int]$TimeoutSec = 10,
     [switch]$IncludeDiscordBot,
+    [switch]$IncludeMinecraftStack,
     [switch]$IncludeCodexAction,
     [switch]$IncludeLocalBridge
 )
@@ -10,9 +11,17 @@ $ErrorActionPreference = "Stop"
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
 $ComposeFile = Join-Path $ProjectRoot "docker-compose.fast-control.yml"
 $script:Failures = 0
-$script:ComposeProfiles = @("llm", "tts", "vision", "stt", "voyager")
+$script:ComposeProfiles = @("llm", "tts", "vision", "stt")
+if ($IncludeMinecraftStack -or $IncludeCodexAction) {
+    $script:ComposeProfiles += "voyager"
+}
 if ($IncludeDiscordBot) {
     $script:ComposeProfiles += "discord"
+}
+if ([string]::IsNullOrWhiteSpace($env:DISCORD_BOT_TOKEN)) {
+    # Compose interpolates required variables even for inactive profiles.
+    # This value is never used to start Discord and exists only for config/ps.
+    $env:DISCORD_BOT_TOKEN = "runtime-check-disabled"
 }
 
 function Get-ComposeArgs {
@@ -165,15 +174,25 @@ Invoke-RequiredHttp "Vision" "http://127.0.0.1:8891/health" {
     return $null -ne $json -and $json.ok -eq $true
 } | Out-Null
 
-Invoke-RequiredHttp "Voyager" "http://127.0.0.1:8765/health" {
-    param($json, $content)
-    return $null -ne $json -and $json.ok -eq $true
-} | Out-Null
+if ($IncludeMinecraftStack) {
+    Invoke-RequiredHttp "Voyager" "http://127.0.0.1:8765/health" {
+        param($json, $content)
+        return $null -ne $json -and $json.ok -eq $true
+    } | Out-Null
+}
+else {
+    Add-Warn "Voyager health check skipped; use -IncludeMinecraftStack when the deferred stack is running"
+}
 
-Invoke-RequiredHttp "Codex Gateway" "http://127.0.0.1:8787/health" {
-    param($json, $content)
-    return $null -ne $json -and $json.ok -eq $true -and $json.backendReady -eq $true
-} | Out-Null
+if ($IncludeMinecraftStack -or $IncludeCodexAction) {
+    Invoke-RequiredHttp "Codex Gateway" "http://127.0.0.1:8787/health" {
+        param($json, $content)
+        return $null -ne $json -and $json.ok -eq $true -and $json.backendReady -eq $true
+    } | Out-Null
+}
+else {
+    Add-Warn "Codex Gateway health check skipped; use -IncludeMinecraftStack or -IncludeCodexAction"
+}
 
 if ($IncludeCodexAction) {
     Write-Section "Codex Action"
@@ -268,12 +287,38 @@ if ($controlState -and $controlState.runtime -and $controlState.runtime.services
         }
     }
 
-    foreach ($flag in @("voyagerReady", "codexReady")) {
-        if ($services.$flag -eq $true) {
-            Add-Ok "$flag=true"
+    if ($IncludeMinecraftStack) {
+        foreach ($flag in @("voyagerReady", "codexReady")) {
+            if ($services.$flag -eq $true) {
+                Add-Ok "$flag=true"
+            }
+            else {
+                Add-Failure "$flag is not true for the requested Minecraft stack"
+            }
+        }
+    }
+    elseif ($IncludeCodexAction) {
+        if ($services.codexReady -eq $true) {
+            Add-Ok "codexReady=true"
         }
         else {
-            Add-Warn "$flag=false or unavailable (not part of the current Docker core stack)"
+            Add-Failure "codexReady is not true for the requested Codex action check"
+        }
+        if ($services.voyagerReady -eq $true) {
+            Add-Ok "voyagerReady=true"
+        }
+        else {
+            Add-Warn "voyagerReady=false or unavailable (not required for the Codex action check)"
+        }
+    }
+    else {
+        foreach ($flag in @("voyagerReady", "codexReady")) {
+            if ($services.$flag -eq $true) {
+                Add-Ok "$flag=true"
+            }
+            else {
+                Add-Warn "$flag=false or unavailable (deferred from the local core stack)"
+            }
         }
     }
 

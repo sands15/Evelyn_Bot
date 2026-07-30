@@ -108,6 +108,33 @@ class RuntimeRepairTests(unittest.TestCase):
         self.assertFalse(plan["eligible"])
         self.assertEqual(plan["planStatus"], "not_needed")
 
+    def test_explicit_local_bridge_restart_is_eligible_while_up(self) -> None:
+        manifest = load_service_manifest(force=True)
+        health = self.health({})
+        with patch.object(
+            runtime_repair_module,
+            "HostSupervisorClient",
+        ) as client:
+            client.return_value.status.return_value = {"available": True}
+            client.return_value.preview.return_value = {
+                "ok": True,
+                "previewToken": "restart-token",
+                "expiresAt": 1120.0,
+            }
+            plan = build_runtime_repair_plan(
+                service_id="local_io_bridge",
+                action_id="restart_local_bridge",
+                manifest=manifest,
+                health=health,
+            )
+
+        self.assertTrue(plan["ok"])
+        self.assertTrue(plan["eligible"])
+        self.assertEqual(plan["planStatus"], "ready")
+        self.assertEqual(plan["executionMode"], "host_supervisor")
+        self.assertEqual(plan["confirmToken"], "restart-token")
+        client.return_value.preview.assert_called_once_with("restart_local_bridge")
+
     def test_optional_voyager_stack_services_return_dry_run_command_preview(self) -> None:
         manifest = load_service_manifest(force=True)
         voyager = build_runtime_repair_plan(service_id="voyager", manifest=manifest, health=self.health({"voyager": "down"}))

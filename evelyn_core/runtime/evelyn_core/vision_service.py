@@ -16,11 +16,12 @@ import uvicorn
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from PIL import Image
-from huggingface_hub import snapshot_download
+from huggingface_hub import hf_hub_download
 from transformers import AutoModelForCausalLM, AutoModelForImageTextToText, AutoProcessor, PreTrainedTokenizerFast
 
 from .runtime_config_schema import VISION_SERVICE_SETTINGS, load_runtime_settings
 from .runtime_error_observability import RuntimeErrorCounter
+from .vision_ocr_tiles import build_screen_ocr_tiles, merge_screen_ocr_texts
 from .vision_quality import build_vision_quality
 
 
@@ -142,13 +143,45 @@ def load_image(*, image_path: str | None = None, image_base64: str | None = None
     raise HTTPException(status_code=400, detail="provide image_path or image_base64")
 
 
-def load_falcon_ocr_tokenizer() -> PreTrainedTokenizerFast:
-    """Falcon-OCR ships tokenizer_class=TokenizersBackend, which AutoTokenizer cannot import."""
+def _falcon_ocr_file(filename: str, *, revision: str | None) -> Path:
+    download_kwargs: dict[str, Any] = {}
+    if revision:
+        download_kwargs["revision"] = revision
     try:
-        snapshot = Path(snapshot_download(OCR_MODEL_ID, local_files_only=True))
+        return Path(
+            hf_hub_download(
+                OCR_MODEL_ID,
+                filename,
+                local_files_only=True,
+                **download_kwargs,
+            )
+        )
     except Exception:
-        snapshot = Path(snapshot_download(OCR_MODEL_ID))
-    tokenizer_config = json.loads((snapshot / "tokenizer_config.json").read_text(encoding="utf-8"))
+        return Path(
+            hf_hub_download(
+                OCR_MODEL_ID,
+                filename,
+                **download_kwargs,
+            )
+        )
+
+
+def load_falcon_ocr_tokenizer(
+    *,
+    revision: str | None = None,
+) -> PreTrainedTokenizerFast:
+    """Falcon-OCR ships tokenizer_class=TokenizersBackend, which AutoTokenizer cannot import."""
+    tokenizer_config_path = _falcon_ocr_file(
+        "tokenizer_config.json",
+        revision=revision,
+    )
+    tokenizer_file = _falcon_ocr_file(
+        "tokenizer.json",
+        revision=revision,
+    )
+    tokenizer_config = json.loads(
+        tokenizer_config_path.read_text(encoding="utf-8")
+    )
     tokenizer_kwargs: dict[str, Any] = {}
     for key, value in tokenizer_config.items():
         if key.endswith("_token") and isinstance(value, str):
@@ -161,7 +194,7 @@ def load_falcon_ocr_tokenizer() -> PreTrainedTokenizerFast:
         tokenizer_kwargs["eos_token"] = tokenizer_config["eos_token"]
 
     tokenizer = PreTrainedTokenizerFast(
-        tokenizer_file=str(snapshot / "tokenizer.json"),
+        tokenizer_file=str(tokenizer_file),
         **tokenizer_kwargs,
     )
     for token_name, token in tokenizer.special_tokens_map.items():
@@ -212,7 +245,9 @@ def load_falcon_ocr_model() -> Any:
         torch_dtype=resolve_ocr_dtype(),
         device_map="auto" if VISION_DEVICE.startswith("cuda") else None,
     )
-    model._tokenizer = load_falcon_ocr_tokenizer()
+    model._tokenizer = load_falcon_ocr_tokenizer(
+        revision=getattr(model.config, "_commit_hash", None),
+    )
     model.eval()
     return model
 
@@ -461,10 +496,17 @@ def analyze(request: AnalyzeRequest) -> dict[str, Any]:
         ocr_model = None
         try:
             ocr_model = ensure_ocr_loaded()
+            ocr_tiles = build_screen_ocr_tiles(image)
             with _ocr_lock, torch.inference_mode():
-                texts = ocr_model.generate(image, category=request.ocr_category, compile=VISION_OCR_COMPILE)
+                texts = ocr_model.generate(
+                    ocr_tiles,
+                    category=[request.ocr_category] * len(ocr_tiles),
+                    max_new_tokens=request.max_new_tokens or VISION_MAX_NEW_TOKENS,
+                    compile=VISION_OCR_COMPILE,
+                )
                 mark_ocr_used()
-            result["ocr"] = str(texts[0]).strip() if texts else ""
+            result["ocr"] = merge_screen_ocr_texts(texts)
+            result["ocr_region_count"] = len(ocr_tiles)
             result["ocr_status"] = ocr_status()
         except Exception as exc:  # noqa: BLE001 - keep scene output available when OCR fails.
             _RUNTIME_ERRORS.record("vision_ocr_generation_failed", exc)
