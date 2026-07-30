@@ -243,14 +243,24 @@ element ID, 명시 확인 없는 apply를 각각 403/400/409/400으로 거부했
 호출하지 않았고, 이후 queue 3개는 비었으며 execution/verified count는 0이다.
 브라우저 panel은 `running`을 표시했고 warning/error console log는 없었다.
 
+불투명 element ID를 수동 복사하던 UX는 read-only Button discovery로
+대체됐다. 별도 5초 전경 전환 뒤 이름 있고 enabled인 Button을 최대 24개
+transient selector에 표시하며, source tree가 잘렸다면 truncated 상태를
+보존한다. 발견은 token을 만들지 않고 preview와 명시 확인을 계속 요구한다.
+queue는 v2 exact-schema이며 disabled/duplicate/malformed/over-limit target을
+Docker client에서 fail-closed한다. target/window text는 응답과 메모리 DOM
+밖에 저장하지 않는다.
+
 남은 위험은 실제 행동을 한 번도 수행하지 않았다는 점이다. UIA를 잘 노출하는
 Win32/Chromium/WinUI 앱의 양성·음성 corpus가 없고, SDL·게임·일부 GPU 앱처럼
 root-only인 화면은 계속 non-actionable이다. 현재 범위에는 Button 외 control,
 window activation, keyboard/text 입력, 일반 rollback이 없다. Control Page에는
-명시적으로 무장하고 취소할 수 있는 preview/apply별 5초 전경 전환이 추가됐다.
+명시적으로 무장하고 취소할 수 있는 discovery/preview/apply별 5초 전경 전환이
+추가됐다.
 브라우저 타이머가 2초보다 늦게 깨어나면 요청하지 않고, apply는 별도 확인 후에만
 무장한다. `target_disabled`를 되돌릴 수 있는 단일 Button fixture도 준비됐지만
-실제 양성 실행과 전경 불일치 corpus는 아직 사용자 승인 세션에서 검증하지 않았다.
+유효한 live discovery, 실제 양성 실행과 전경 불일치 corpus는 아직 사용자 승인
+세션에서 검증하지 않았다.
 
 다음 조치: 격리된 테스트 앱과 사용자 동의 세션에서 파일 탐색기, 브라우저,
 설정, WinUI의 stable Button corpus를 먼저 측정한다. no-op 또는 쉽게 되돌릴 수

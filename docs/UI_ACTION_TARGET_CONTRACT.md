@@ -233,8 +233,10 @@ across File Explorer, Chromium, Windows Settings, and WinUI applications are
 still required. The Control Page now has explicit, cancellable five-second
 foreground handoffs for discovery, preview, and confirmed apply, and the
 reversible fixture is available for the first positive check. Discovery and
-selection have synthetic/API coverage but are not yet deployed or exercised
-against a live external target. The fixture has not been launched and no live
-action has executed. Applications that expose only a root window remain
-non-actionable. General rollback and non-Button actions are outside the current
-boundary.
+selection are deployed with synthetic/API coverage; the deployed API rejected
+missing CSRF and extra command fields before Host observation, while the
+browser rendered the discovery control and disabled pre-discovery selector
+without warning/error logs. A valid live discovery has not been sent, the
+fixture has not been launched, and no live action has executed. Applications
+that expose only a root window remain non-actionable. General rollback and
+non-Button actions are outside the current boundary.

@@ -2,7 +2,7 @@
 
 Document status: **Current**
 Last reviewed: 2026-07-31 KST
-Source branch: `codex/dependency-config-hardening` through `9d1edf6`
+Source branch: `codex/dependency-config-hardening` through `a98f611`
 
 이 문서는 현재 확인된 사실만 기록한다. 목표 구조와 과거 계획은 다른 설계/계획 문서를 사용한다.
 
@@ -281,6 +281,25 @@ Source branch: `codex/dependency-config-hardening` through `9d1edf6`
     warning/error log는 0개였다.
   - fixture는 실행하지 않았고 preview/apply도 누르지 않아 실제 action은
     계속 0회다.
+- `a98f611`은 불투명 element ID 수동 입력을 read-only Button discovery로
+  대체했다. 명시적으로 무장한 5초 뒤 현재 전경에서 이름 있고 enabled인
+  Button을 최대 24개 읽으며, 발견만으로 preview token이나 실행 권한은
+  만들어지지 않는다.
+  - Bot API image:
+    `sha256:a730927d1528492013fbeb71d2baad251cc5b3e9f0cf8094a3c880314dd875c2`
+  - Control Page image:
+    `sha256:4abebc98c19bcb340dd966cfe210df9ed2aac178667c6b66b9b8ad7ab711751f`
+  - Bot API owner claim을 15초 grace 정상 종료로 반납한 뒤 두 컨테이너만
+    교체했다. 둘 다 healthy, restart count 0이다.
+  - Host Supervisor의 allowlisted `restart_local_bridge` preview/apply로
+    Local Bridge를 교체했고 Host UI Action은
+    `host_ui_action.request.v2`/`response.v2`, `running/auditReady`다.
+  - discovery API는 CSRF 없는 요청을 403, 임의 `command` 필드를 400
+    `ui_action_invalid_discover_request`로 Host 관찰 전에 거부했다.
+  - 배포 브라우저는 `5초 후 Button 찾기`, 발견 전 disabled 대상 selector,
+    `RUNNING`을 렌더링했고 warning/error log는 0개였다.
+  - 유효한 discovery는 실행하지 않아 discovery/preview/execution/verified
+    count가 모두 0이고 requests/processing/responses queue도 모두 비어 있다.
 - 공식 `check_docker_runtime.ps1 -IncludeLocalBridge`가 Control Page,
   Bot API, Main/Router/Sub LLM, TTS, STT, Vision과 Windows Local I/O
   Bridge를 모두 준비 상태로 판정했다.
