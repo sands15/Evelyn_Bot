@@ -48,7 +48,8 @@ implemented behavior.
 
 - `docs/CONVERSATION_CONTINUITY_CONTRACT.md`
   - 프로세스 재시작 뒤 완료된 대화 턴과 active follow-up을 15분 동안
-    제한적으로 복구하는 checkpoint, privacy, deletion, observability 계약.
+    제한적으로 복구하는 checkpoint, 전달 직후 durable commit, privacy,
+    deletion, observability 계약.
 
 - `docs/MEMORY_PROVENANCE_DELETION_CONTRACT.md`
   - 기억의 source/evidence provenance, content-hash 기반 충돌 없는 사용자

@@ -2,7 +2,7 @@
 
 Document status: **Current**
 Last reviewed: 2026-07-31 KST
-Source branch: `codex/dependency-config-hardening` through `52f7bf5`
+Source branch: `codex/dependency-config-hardening` through `a879380`
 
 이 문서는 현재 확인된 사실만 기록한다. 목표 구조와 과거 계획은 다른 설계/계획 문서를 사용한다.
 
@@ -10,7 +10,7 @@ Source branch: `codex/dependency-config-hardening` through `52f7bf5`
 
 - 전체 프로젝트 감사의 즉시 항목을 별도 안정화 브랜치에서 처리 중이다.
 - `main.py` 분해는 목표 범위에 도달했다.
-  - 현재 2,402줄이며 원래 목표 범위인 1,500~2,500줄 안에 들어왔다.
+  - 현재 2,500줄이며 원래 목표 범위인 1,500~2,500줄 안에 들어왔다.
   - top-level/nested 함수 정의, `global`/`nonlocal`, dependency-builder 함수 정의는 모두 0개다.
   - 기능 구현, 판정, 상태 mutation은 owner runtime/composition 모듈에 있고 `main.py`는 설정 import,
     객체 생성, 명시적 typed dependency wiring, Discord 등록, runtime 진입을 담당한다.
@@ -37,6 +37,19 @@ Source branch: `codex/dependency-config-hardening` through `52f7bf5`
   - checkpoint commit 뒤 head commit 전 crash만 정확한 한 generation
     chain으로 복구하며, v1 checkpoint는 raw JSON hash로 generation 0에
     고정한 뒤 다음 변경에서 v2로 연결한다.
+  - 외부 전달이 끝난 완료 턴은 1초 periodic writer를 기다리지 않고 즉시
+    durable commit한다. Discord text는 commit 뒤 선택적 TTS를 실행하므로
+    TTS 실패가 이미 전달된 답변을 history에서 잃게 하지 않는다.
+  - Control Page 일반·검색, 검색 후속, 자율 후속, Discord 명령, 음성 재생
+    완료도 같은 commit 계약을 사용한다. 실패 시 중복 전송하지 않고
+    `conversation_continuity_commit_failed`만 기록한다.
+- 공개 오류 경계는 `public_error_contract.py`의 고정 코드·문구를 사용한다.
+  - Discord 명령/text, Control Page, Fast Control chat/stream/background
+    action, runtime repair, mic/bridge와 Minecraft snapshot이 예외 메시지,
+    내부 URL, filesystem 경로, token-like 문자열을 응답에 복사하지 않는다.
+  - status와 task event의 오류 코드는 구문 검증하며 알 수 없는 문자열은
+    surface별 고정 fallback으로 바꾼다.
+  - 운영 로그도 예외 원문 대신 고정 event와 exception type만 남긴다.
 - 자율행동의 승인과 결과 증거를 같은 action·grant에 묶었다.
   - `autonomy.outcome-evidence-policy.v1`이 모든 supported action의 exact
     evidence code를 정의한다. 비어 있지 않은 임의 코드나 다른 action의
@@ -586,6 +599,31 @@ Source branch: `codex/dependency-config-hardening` through `52f7bf5`
 - 한글 경로 allowlist 빌드, Bot API owner-claim 정상 해제, 이미지 교체,
   전체 launcher readiness E2E 통과
 - 배포 후 공식 `check_docker_runtime.ps1 -IncludeLocalBridge` 통과
+- `a879380`의 delivered-turn durability와 public error contract 변경은
+  bundled Python 집중 테스트 107개, 공식 Discord Python 환경의 current-source
+  통합 집중 테스트 219개, composition 배선 테스트 18개를 통과했다.
+- Bot API 이미지의 전체 discovery는 1,727개를 실행해 기능 assertion 실패
+  0개였다. 이미지에 없는 git, Pillow, Discord와 Voyager package 경로 때문에
+  환경 import 오류 17개와 skip 19개가 남았다.
+- Discord를 비활성화한 격리 환경에서 실제 `main.py` Control Page smoke와
+  강제 종료·재시작 continuity 복구를 각각 다시 통과했다. 기본 runtime
+  artifact는 사용하지 않았다.
+- 새 이미지 digest는 Bot API
+  `sha256:1cf8ade15988c3cf8420d11e0a514835933650c1ced8ac8e613d0b7c726eb1ac`,
+  Control Page
+  `sha256:d9c6db01e8f3ac75807c8919c7e155273321f07f6aaeffb00dd1563b41dff0b1`,
+  Discord
+  `sha256:a8858aae57a63b1be537962a60e8d04847cf1d43b0d947dd0d148f0a04d559bf`다.
+  세 이미지의 내부 `compileall`과 `pip check`를 통과했다.
+- Bot API와 Control Page만 새 이미지로 교체했다. 첫 Bot API 기동은 이전
+  owner claim이 아직 15초 stale 경계를 지나지 않아
+  `minecraft_world_lease_owner_conflict`로 fail-closed 종료됐다. stale 경과
+  뒤 같은 컨테이너가 claim을 회수해 `healthy`, restart count 0이 됐다.
+  Control Page도 새 이미지에서 `healthy`, restart count 0이다.
+- 배포 뒤 공식 `check_docker_runtime.ps1 -IncludeLocalBridge`는
+  Control Page, Bot API, Main/Router/Sub LLM, TTS, STT, Vision과 Windows
+  Local I/O Bridge를 모두 준비 상태로 판정했다. 실제 Discord bot,
+  Minecraft/Voyager와 마이크 capture는 시작하지 않았다.
 
 ## Operational boundaries
 

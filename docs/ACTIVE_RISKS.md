@@ -79,6 +79,13 @@ Minecraft lease도 따르도록 하드코딩 경로를 제거했다. 같은 임�
 `main.py`를 기동·강제 종료·재기동하고 두 번의 restore와 repository 기본
 checkpoint 비변경을 확인하는 opt-in CI 시나리오도 추가했다.
 
+완료 턴이 1초 periodic writer를 기다리던 crash-loss 창도 닫았다. Discord
+text는 실제 전송 뒤 완료 상태와 checkpoint를 먼저 durable commit하고
+선택적 TTS를 실행한다. Control Page 일반·검색, 검색 후속, 자율 후속,
+Discord 명령, 음성 재생 완료 경로도 같은 즉시 commit 계약을 사용한다.
+commit 실패는 이미 전달된 응답을 취소하거나 중복 전송하지 않고 고정 오류
+코드만 남긴다.
+
 새 공식 Discord 이미지에서 guild reset/continuity/Discord command wiring과
 opt-in real-main crash/restart 집중 테스트 68개, `compileall`, `pip check`를
 통과했다. 전체 core 440개도 기능 assertion 실패는 0개였고, 이미지에 `git`
@@ -93,10 +100,15 @@ opt-in real-main crash/restart 집중 테스트 68개, `compileall`, `pip check`
 재시작까지 수행하는 live E2E와 이 브랜치의 원격 Windows CI 결과다. 실제
 Discord bot은 사용자 요청 없이 시작하지 않았다.
 
+즉시 `fsync`는 완료 턴마다 추가되는 디스크 비용이다. 합성 테스트와 격리된
+실제 `main.py` crash/restart는 통과했지만, 실제 Discord text/voice와
+Control Page의 p50/p95 전달 후 commit 지연은 아직 측정하지 않았다.
+
 다음 조치: 사용자가 Discord 검증을 시작할 때 별도 테스트 guild에서 완료 턴과
 active follow-up을 만든 뒤 관리자 초기화, 강제 재시작, 대상 guild 비복구와
 다른 guild 보존을 확인한다. 원격 브랜치를 올릴 때 Windows CI의 opt-in
-real-main 시나리오도 함께 통과시킨다.
+real-main 시나리오도 함께 통과시키고, 전달 후 commit 지연을 별도 지표로
+측정한다.
 
 ## P1 — Python 모델 런타임 의존성 잔여 취약점
 

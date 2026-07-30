@@ -70,6 +70,28 @@ checkpoint 파일은 임시 파일에 JSON을 쓴 뒤 flush와 `fsync`를 완료
 checkpoint 저장 실패로 발생한 revocation status는 `fsync`해 fail-closed
 경계를 내구성 있게 남긴다. head도 같은 durable atomic writer를 사용한다.
 
+외부에 답변 전달이 완료된 턴은 1초 periodic writer를 기다리지 않는다.
+`commit_completed_turn()` 또는 async wrapper가 즉시 강제 flush하고,
+`state=active|empty`, `rollbackProtected=true`, 저장 세션 수와 generation을
+검증한다. 검증 실패는 원문 예외 없이
+`conversation_continuity_commit_failed`로 정규화한다.
+
+전달과 기록 순서는 다음 계약을 따른다.
+
+- Discord text는 텍스트 전송, 완료 상태 반영, durable commit 뒤 선택적 음성
+  재생을 수행한다. 선택적 TTS가 실패해도 이미 전달된 텍스트는 남는다.
+- Control Page 일반·검색 답변은 세션 완료 상태를 반영하고 durable commit한
+  뒤 로컬 TTS를 예약한다.
+- 검색 후속 답변은 Discord text 전달 직후 한 번만 history와 checkpoint를
+  기록한다. 같은 답변의 선택적 voice가 실패해도 중복 기록하지 않는다.
+- 자율 후속 답변과 Discord 명령 응답도 실제 전송·기록 뒤 즉시 commit한다.
+- 음성 답변은 재생 완료 뒤 history, active session, room owner를 반영하고
+  즉시 commit한다.
+
+이미 외부에 전달된 뒤 commit이 실패하면 답변을 거짓으로 미전달 처리하거나
+중복 전송하지 않는다. 대신 고정 오류 코드와 예외 타입만 관측하고 periodic
+writer가 다시 저장을 시도한다.
+
 ## Restore and lifecycle
 
 - 인스턴스 잠금을 획득한 프로세스만 체크포인트를 복구한다.
@@ -138,6 +160,10 @@ Runtime Health의 `runtime_errors.summary.v1`에는
 - 다른 guild의 checkpoint는 같은 crash 경계에서도 정상 복구
 - revocation ledger의 content-free·corrupt fail-closed 계약
 - single-flight periodic writer와 직접 사전 변경 감지
+- Discord text 전달 뒤 선택적 TTS 실패 전 즉시 durable commit
+- Control Page 일반·검색, 검색 후속, 자율 후속, Discord 명령과 음성 완료
+  경로의 전달·기록·commit 순서
+- commit 실패 시 중복 전송 없이 고정 오류 코드만 기록
 - Runtime Errors의 privacy 및 stale/current-error 판정
 
 `tests.core.test_session_continuity_restart`는 periodic writer가 실제
@@ -157,3 +183,12 @@ topic/turn ID와 reply target을 복구하고, 현재 system prompt를 새로 �
 두 main 인스턴스가 각각 restore를 보고해야 하며 repository의 기본
 `runtime_artifacts` checkpoint는 변경하면 안 된다. CI는
 `EVELYN_RUN_REAL_MAIN_INTEGRATION=1`로 이 시나리오를 실행한다.
+
+`tests.discord_io.test_discord_text_turn`,
+`tests.ui.test_control_page_text_runtime`,
+`tests.ui.test_control_page_search_runtime`,
+`tests.core.test_search_followup_runtime`,
+`tests.core.test_autonomy_runtime_factory`,
+`tests.discord_io.test_discord_command_session_runtime`,
+`tests.voice.test_voice_reply_side_effects`는 각 전달 경로에서 commit의 정확한
+순서와 선택적 TTS 실패 뒤 연속성 보존을 검증한다.
