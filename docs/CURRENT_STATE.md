@@ -2,7 +2,7 @@
 
 Document status: **Current**
 Last reviewed: 2026-07-30 KST
-Source branch: `codex/dependency-config-hardening` at `1348321`
+Source branch: `codex/dependency-config-hardening` at `6f55a27`
 
 이 문서는 현재 확인된 사실만 기록한다. 목표 구조와 과거 계획은 다른 설계/계획 문서를 사용한다.
 
@@ -40,6 +40,16 @@ Source branch: `codex/dependency-config-hardening` at `1348321`
 - 한글 프로젝트 경로의 Docker Buildx 문제를 피하기 위해 빌드 동안만 사용하지
   않는 드라이브 문자를 매핑한다. allowlist 이미지 세 개만 빌드하고 자신이 만든
   매핑만 검증 후 해제한다.
+- Control Page 메모리 수정은 읽어 온 카드의 64자 `expectedContentHash`를
+  필수로 제출한다.
+  - 다른 편집으로 내용이 바뀌었으면 `409 memory_note_changed_since_read`로
+    거부하고 최신 카드를 다시 불러오므로 오래된 화면이 새 내용을 덮어쓰지 않는다.
+  - 수정 파일은 같은 디렉터리 임시 파일을 flush/fsync한 뒤 원자적으로
+    교체한다. 교체 실패 시 원본을 보존하고 `500 memory_edit_failed`를 반환한다.
+  - 수정된 기억은 현재 source를 `user-edit`로 바꾸고 revision과 새 evidence
+    hash를 기록한다. 원래 source/source refs와 이전 evidence hash는 별도
+    provenance 필드에 보존한다.
+  - 메모리 인덱스 schema는 v5이며 재시작 뒤에도 수정 provenance가 유지된다.
 
 ## Deployment state
 
@@ -47,6 +57,8 @@ Source branch: `codex/dependency-config-hardening` at `1348321`
   allowlist `restart_local_bridge` 액션으로 Local I/O/Host Vision bridge를
   재기동했다. Control Page와 Vision 서비스는 변경이 없어 기존 healthy
   이미지를 유지했다.
+- 이후 `6f55a27` 소스로 `bot_api`와 `control_page` 이미지를 실제
+  재빌드·교체해 conflict-safe 메모리 수정 계약과 UI를 배포했다.
 - 세 컨테이너 모두 `healthy`, restart count 0이다. Main/Router/Sub LLM,
   TTS, STT도 계속 healthy다.
 - Windows Host Supervisor와 Local I/O Bridge heartbeat는 fresh이고 bridge는
@@ -80,9 +92,17 @@ Source branch: `codex/dependency-config-hardening` at `1348321`
   processing, responses, screenshots 디렉터리는 모두 0개였다.
 - `status.json`만 남았으며 화면·OCR·사용자 문장 원문은 포함하지 않는다.
 
+배포된 메모리 UI/API도 비파괴적으로 재검증했다.
+
+- Control Page 배포 HTML에 `expectedContentHash`, `api_error:409`,
+  `originSource`, revision 표시 계약이 모두 존재한다.
+- 읽기 전용 메모리 API가 반환한 실제 카드 2개 모두 64자 content hash와
+  provenance 객체, `originSource`·`revision` 필드를 제공했다.
+- 실제 사용자 기억의 수정·삭제는 수행하지 않았다.
+
 ## Verification state
 
-검증한 코드 기준점: `1348321`
+검증한 코드 기준점: `6f55a27`
 
 - 새 Bot API Python 3.11 이미지에서 전체 `unittest discover` 1,585개를
   실행했다. 기능 assertion 실패는 0개였다.
@@ -93,6 +113,10 @@ Source branch: `codex/dependency-config-hardening` at `1348321`
 - 새 accessibility/Fast Context/Fast Control/vision quality 회귀 134개를
   Windows Python에서 통과했고, 배포 Bot API 이미지의 read-only source
   mount에서 핵심 102개를 다시 통과
+- 메모리 계층 85개와 Control/API/runtime/UI 계층 89개, 합계 174개를
+  Bot API Python 3.11 이미지의 read-only source mount에서 통과
+- 별도 focused run 91개에서 충돌 거부, 원자적 쓰기 실패 시 원본 보존,
+  user-edit provenance, CSRF, 새 Python 프로세스 재시작 복구를 통과
 - 실제 `main.py` Control Page 기동 및 강제 종료 뒤 대화 연속성 복구 smoke
   2개 통과
 - Python `compileall`, 모든 `docs/assets/*.js`의 `node --check`, 변경
