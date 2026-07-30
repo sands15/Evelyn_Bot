@@ -73,6 +73,19 @@ def write_request(
 
 
 class HostVisionBridgeTests(unittest.IsolatedAsyncioTestCase):
+    def test_default_composition_wires_read_only_accessibility_provider(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_root:
+            bridge = HostVisionBridge(
+                session=object(),  # type: ignore[arg-type]
+                artifacts_root=Path(temp_root),
+            )
+
+        self.assertIsNotNone(
+            bridge.composition.deps.local_accessibility_provider
+        )
+
     async def test_valid_request_is_claimed_analyzed_and_bounded(self) -> None:
         with tempfile.TemporaryDirectory() as temp_root:
             root = Path(temp_root)

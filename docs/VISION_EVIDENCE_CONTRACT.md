@@ -21,7 +21,7 @@ Background vision-watch context remains explicitly soft context with its own TTL
 {
   "schema": "vision.evidence.v1",
   "state": "observed|unreliable|unavailable|failed|unknown",
-  "reason_code": "live_observation",
+  "reason_code": "live_observation|live_accessibility_observation",
   "evidence_available": true,
   "scene_available": true,
   "ocr_available": true,
@@ -39,6 +39,12 @@ The following invariants are fail-closed:
 - `vision_ocr` additionally requires `ocr_available=true` and
   `actionable=true`; a scene description or unscored OCR string alone is not
   exact-text evidence.
+- `reason_code=live_accessibility_observation` is emitted only when a fresh
+  Windows UI Automation observation matches the separately captured foreground
+  title/class and contains the named control type required by the request.
+- Accessibility text from a mismatched foreground window is discarded.
+  Accessibility text that lacks the requested control type remains
+  low-confidence context and cannot satisfy `vision_ocr`.
 - Missing, unknown-schema, or internally contradictory evidence is normalized
   to unavailable evidence.
 - `actionable=true` is impossible when usable evidence is absent.
@@ -86,12 +92,19 @@ The focused tests cover:
 - unscored native OCR remaining non-actionable;
 - foreground-window evidence preserving a grounded application observation
   when an identity-only scene result is rejected;
+- fresh, foreground-bound, request-sufficient UI Automation evidence becoming
+  actionable exact text;
+- changed-window and missing-control accessibility observations failing closed
+  or falling back to non-actionable native OCR;
+- exact window-title replies bypassing Main LLM generation, while native OCR
+  cannot enter that deterministic copy path;
 - missing and contradictory contracts failing closed;
 - unexpected runtime exceptions degrading without losing the text turn;
 - benchmark serialization without scene/OCR content.
 
-The 2026-07-30 live Windows E2E verified both sides of the gate: a general
-foreground-application question was answered as Minecraft from current
-evidence, while an exact title/button question returned the deterministic
-no-evidence reply before Main LLM generation. See
+The 2026-07-30 live Windows E2E verified both sides of the exact-text gate. A
+foreground SDL title was copied verbatim as `테라리아: 모래는 OP다` with
+`live_accessibility_observation`, while a button request against the same
+root-only accessibility tree returned the deterministic no-evidence reply
+before Main LLM generation. See
 `docs/HOST_VISION_BRIDGE_CONTRACT.md` for the host boundary and privacy proof.

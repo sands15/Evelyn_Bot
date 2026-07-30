@@ -4,6 +4,7 @@ import asyncio
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 
@@ -112,6 +113,38 @@ class FastControlApiToolTests(unittest.TestCase):
 
         self.assertIsNotNone(reply)
         self.assertIn("\uc9c0\uae08\uc740", reply or "")
+
+    def test_grounded_exact_reply_bypasses_main_llm_stream(self) -> None:
+        request = SimpleNamespace(
+            context=SimpleNamespace(
+                required_evidence_failure_reply="",
+                grounded_evidence_reply="Minecraft 26.2 - 싱글플레이",
+            ),
+            messages=[],
+        )
+
+        async def collect() -> list[str]:
+            with patch.object(
+                fast_api,
+                "build_fast_main_llm_request",
+                new=AsyncMock(return_value=request),
+            ), patch.object(
+                fast_api,
+                "ClientSession",
+                side_effect=AssertionError("main LLM must not be called"),
+            ):
+                return [
+                    delta
+                    async for delta in fast_api.iter_main_llm_deltas(
+                        "현재 Windows 화면의 창 제목만 정확히 말해줘.",
+                        source="control_page",
+                    )
+                ]
+
+        self.assertEqual(
+            asyncio.run(collect()),
+            ["Minecraft 26.2 - 싱글플레이"],
+        )
 
     def test_help_reply_is_built_from_the_fast_command_registry(self) -> None:
         reply = asyncio.run(fast_api.resolve_pre_llm_reply("/help", source="control_page"))

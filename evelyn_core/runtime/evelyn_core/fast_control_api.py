@@ -1339,7 +1339,11 @@ async def build_main_llm_request_payload(
     }
     if MAIN_LLM_STOP_TOKENS:
         payload["stop"] = list(MAIN_LLM_STOP_TOKENS)
-    return payload, llm_request.context.required_evidence_failure_reply
+    deterministic_reply = (
+        llm_request.context.required_evidence_failure_reply
+        or llm_request.context.grounded_evidence_reply
+    )
+    return payload, deterministic_reply
 
 
 async def build_main_llm_payload(

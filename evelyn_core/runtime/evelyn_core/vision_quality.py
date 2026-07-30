@@ -96,10 +96,23 @@ def build_vision_quality(data: dict[str, Any]) -> dict[str, Any]:
     )
     ocr_empty = not bool(ocr)
     unscored_native_ocr = bool(ocr) and ocr_source == "windows_native"
+    trusted_accessibility = bool(
+        ocr
+        and ocr_source == "windows_accessibility"
+        and data.get("_accessibility_window_matched") is True
+        and data.get("_accessibility_request_satisfied") is True
+        and not ocr_corrupt
+    )
+    untrusted_accessibility = bool(
+        ocr
+        and ocr_source == "windows_accessibility"
+        and not trusted_accessibility
+    )
     weak = (
-        scene_unreliable
+        (scene_unreliable and not trusted_accessibility)
         or ocr_corrupt
         or unscored_native_ocr
+        or untrusted_accessibility
         or (not scene and ocr_empty)
     )
     no_usable_evidence = (
@@ -117,6 +130,8 @@ def build_vision_quality(data: dict[str, Any]) -> dict[str, Any]:
         "ocr_corrupt": ocr_corrupt,
         "ocr_empty": ocr_empty,
         "ocr_unscored": unscored_native_ocr,
+        "ocr_trusted": trusted_accessibility,
+        "ocr_untrusted": untrusted_accessibility,
         "weak": weak,
         "no_usable_evidence": no_usable_evidence,
         "confidence": confidence,

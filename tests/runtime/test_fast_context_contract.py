@@ -72,6 +72,28 @@ async def fake_observed_vision(user_text: str, *, run_ocr: bool) -> HostVisionRe
     )
 
 
+async def fake_accessibility_vision(user_text: str, *, run_ocr: bool) -> HostVisionResult:
+    return HostVisionResult(
+        observation=(
+            "Local screen vision observation is available.\n"
+            "foreground_window: title=Minecraft 26.2 - 싱글플레이; class=GLFW30\n"
+            "ocr_text:\n"
+            "Window: Minecraft 26.2 - 싱글플레이"
+        ),
+        evidence=VisionEvidence(
+            state="observed",
+            reason_code="live_accessibility_observation",
+            evidence_available=True,
+            scene_available=True,
+            ocr_available=True,
+            confidence="normal",
+            actionable=True,
+            freshness="live",
+        ),
+        screenshot_deleted=True,
+    )
+
+
 async def fake_failed_vision(user_text: str, *, run_ocr: bool) -> HostVisionResult:
     return HostVisionResult(
         observation="Screen capture returned a black frame. Do not claim screen contents.",
@@ -353,6 +375,31 @@ class FastContextContractTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(context.required_evidence_failure_reply, "")
+
+    async def test_exact_window_title_is_copied_from_accessibility_evidence(self) -> None:
+        context = await build_fast_control_context(
+            "현재 Windows 화면의 창 제목만 정확히 말해줘.",
+            source="control_page",
+            runtime_health_provider=fake_runtime_health,
+            vision_provider=fake_accessibility_vision,
+        )
+
+        self.assertEqual(context.required_evidence_failure_reply, "")
+        self.assertEqual(
+            context.grounded_evidence_reply,
+            "Minecraft 26.2 - 싱글플레이",
+        )
+
+    async def test_non_accessibility_ocr_does_not_bypass_the_llm(self) -> None:
+        context = await build_fast_control_context(
+            "현재 Windows 화면의 창 제목만 정확히 말해줘.",
+            source="control_page",
+            runtime_health_provider=fake_runtime_health,
+            vision_provider=fake_observed_vision,
+        )
+
+        self.assertEqual(context.required_evidence_failure_reply, "")
+        self.assertEqual(context.grounded_evidence_reply, "")
 
     async def test_non_vision_turn_does_not_touch_host_capture(self) -> None:
         called = False

@@ -56,6 +56,43 @@ class VisionQualityTests(unittest.TestCase):
         self.assertEqual(quality["confidence"], "low")
         self.assertFalse(quality["actionable"])
 
+    def test_foreground_bound_accessibility_is_actionable_text(self) -> None:
+        quality = build_vision_quality(
+            {
+                "scene": "Evelyn.",
+                "ocr": "Window: E.V.E.L.Y.N\nButton: 전송",
+                "ocr_source": "windows_accessibility",
+                "foreground_window_title": "E.V.E.L.Y.N",
+                "foreground_window_class": "Chrome_WidgetWin_1",
+                "_accessibility_window_matched": True,
+                "_accessibility_request_satisfied": True,
+            }
+        )
+
+        self.assertTrue(quality["scene_unreliable"])
+        self.assertTrue(quality["ocr_trusted"])
+        self.assertFalse(quality["weak"])
+        self.assertEqual(quality["confidence"], "normal")
+        self.assertTrue(quality["actionable"])
+
+    def test_accessibility_without_required_control_is_context_only(self) -> None:
+        quality = build_vision_quality(
+            {
+                "scene": "브라우저 화면",
+                "ocr": "Window: E.V.E.L.Y.N\nText: 대화",
+                "ocr_source": "windows_accessibility",
+                "foreground_window_title": "E.V.E.L.Y.N",
+                "foreground_window_class": "Chrome_WidgetWin_1",
+                "_accessibility_window_matched": True,
+                "_accessibility_request_satisfied": False,
+            }
+        )
+
+        self.assertFalse(quality["ocr_trusted"])
+        self.assertTrue(quality["ocr_untrusted"])
+        self.assertEqual(quality["confidence"], "low")
+        self.assertFalse(quality["actionable"])
+
     def test_identity_only_scene_is_rejected_but_foreground_title_survives(self) -> None:
         quality = build_vision_quality(
             {

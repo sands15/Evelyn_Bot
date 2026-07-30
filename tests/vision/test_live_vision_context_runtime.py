@@ -66,6 +66,7 @@ class LiveVisionContextRuntimeTests(unittest.IsolatedAsyncioTestCase):
         }
         self.local_ocr_provider = None
         self.local_window_provider = None
+        self.local_accessibility_provider = None
 
     async def capture(self):
         self.capture_calls += 1
@@ -93,6 +94,7 @@ class LiveVisionContextRuntimeTests(unittest.IsolatedAsyncioTestCase):
             monotonic=lambda: next(self.times),
             local_ocr_provider=self.local_ocr_provider,
             local_window_provider=self.local_window_provider,
+            local_accessibility_provider=self.local_accessibility_provider,
         )
 
     async def _get_session(self):
@@ -289,6 +291,138 @@ class LiveVisionContextRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(metrics["meta"]["vision_foreground_available"])
         self.assertTrue(evidence.scene_available)
         self.assertTrue(evidence.satisfies_tool("vision_capture_or_watch"))
+
+    async def test_foreground_bound_accessibility_satisfies_exact_text_gate(
+        self,
+    ) -> None:
+        async def foreground_window() -> dict[str, object]:
+            return {
+                "schema": "windows_foreground.observation.v1",
+                "available": True,
+                "title": "E.V.E.L.Y.N",
+                "className": "Chrome_WidgetWin_1",
+            }
+
+        async def accessibility() -> dict[str, object]:
+            return {
+                "schema": "windows_accessibility.observation.v1",
+                "attempted": True,
+                "available": True,
+                "windowTitle": "E.V.E.L.Y.N",
+                "windowClass": "Chrome_WidgetWin_1",
+                "elements": [
+                    {
+                        "name": "전송",
+                        "controlType": "Button",
+                    }
+                ],
+                "text": "Window: E.V.E.L.Y.N\nButton: 전송",
+            }
+
+        self.local_window_provider = foreground_window
+        self.local_accessibility_provider = accessibility
+        self.response = FakeResponse(data={"scene": "Evelyn.", "ocr": ""})
+        self.session = FakeSession(self.response)
+        self.quality = {
+            "confidence": "normal",
+            "actionable": True,
+            "scene_unreliable": True,
+            "ocr_corrupt": False,
+            "ocr_trusted": True,
+            "no_usable_evidence": False,
+        }
+        metrics: dict = {}
+
+        await build_live_vision_context_from_runtime(
+            "제목과 버튼 하나를 말해줘",
+            deps=self.build_deps(),
+            metrics=metrics,
+            run_ocr=True,
+        )
+
+        request = self.session.calls[0][1]
+        evidence = vision_evidence_from_metrics(metrics)
+        self.assertFalse(request["json"]["run_ocr"])
+        self.assertEqual(
+            metrics["meta"]["vision_ocr_source"],
+            "windows_accessibility",
+        )
+        self.assertTrue(
+            metrics["meta"]["vision_accessibility_window_matched"]
+        )
+        self.assertTrue(
+            metrics["meta"]["vision_accessibility_request_satisfied"]
+        )
+        self.assertEqual(
+            metrics["meta"]["vision_accessibility_element_count"],
+            1,
+        )
+        self.assertTrue(evidence.ocr_available)
+        self.assertTrue(evidence.actionable)
+        self.assertTrue(evidence.satisfies_tool("vision_ocr"))
+        self.assertEqual(
+            evidence.reason_code,
+            "live_accessibility_observation",
+        )
+
+    async def test_accessibility_window_mismatch_falls_back_to_native_ocr(
+        self,
+    ) -> None:
+        native_calls = 0
+
+        async def foreground_window() -> dict[str, object]:
+            return {
+                "schema": "windows_foreground.observation.v1",
+                "available": True,
+                "title": "E.V.E.L.Y.N",
+                "className": "Chrome_WidgetWin_1",
+            }
+
+        async def accessibility() -> dict[str, object]:
+            return {
+                "schema": "windows_accessibility.observation.v1",
+                "attempted": True,
+                "available": True,
+                "windowTitle": "다른 창",
+                "windowClass": "Chrome_WidgetWin_1",
+                "elements": [
+                    {
+                        "name": "전송",
+                        "controlType": "Button",
+                    }
+                ],
+                "text": "Button: 전송",
+            }
+
+        async def native_ocr(_path: Path) -> dict[str, object]:
+            nonlocal native_calls
+            native_calls += 1
+            return {
+                "schema": "windows_ocr.observation.v1",
+                "attempted": True,
+                "text": "native fallback",
+            }
+
+        self.local_window_provider = foreground_window
+        self.local_accessibility_provider = accessibility
+        self.local_ocr_provider = native_ocr
+        metrics: dict = {}
+
+        await build_live_vision_context_from_runtime(
+            "버튼을 읽어줘",
+            deps=self.build_deps(),
+            metrics=metrics,
+            run_ocr=True,
+        )
+
+        self.assertEqual(native_calls, 1)
+        self.assertFalse(
+            metrics["meta"]["vision_accessibility_window_matched"]
+        )
+        self.assertEqual(
+            metrics["meta"]["vision_ocr_source"],
+            "windows_native",
+        )
 
     async def test_scene_that_only_echoes_request_is_not_visual_evidence(self) -> None:
         self.response = FakeResponse(

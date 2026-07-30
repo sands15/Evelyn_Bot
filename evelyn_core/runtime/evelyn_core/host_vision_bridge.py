@@ -30,6 +30,7 @@ from .vision_quality import build_vision_quality
 from .vision_request_composition import VisionRequestComposition, VisionRequestCompositionDeps
 from .vision_runtime import VisionEvidence, vision_evidence_from_metrics
 from .vision_watch import vision_watch_scene_is_unreliable
+from .windows_accessibility import WindowsAccessibility
 from .windows_native_ocr import WindowsNativeOcr
 from .windows_foreground_context import read_windows_foreground_window
 
@@ -99,6 +100,7 @@ class HostVisionBridge:
         windows_ocr = WindowsNativeOcr(
             screenshot_root=self.screenshots_dir,
         )
+        windows_accessibility = WindowsAccessibility()
         return VisionRequestComposition(
             VisionRequestCompositionDeps(
                 screenshot_dir=self.screenshots_dir,
@@ -116,6 +118,7 @@ class HostVisionBridge:
                 monotonic=self.monotonic,
                 local_ocr_provider=windows_ocr.recognize,
                 local_window_provider=get_foreground_window,
+                local_accessibility_provider=windows_accessibility.read,
             )
         )
 

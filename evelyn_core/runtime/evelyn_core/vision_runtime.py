@@ -4,6 +4,11 @@ import re
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
+from .windows_accessibility import (
+    accessibility_supports_request,
+    accessibility_window_matches_foreground,
+)
+
 
 VISION_EVIDENCE_SCHEMA = "vision.evidence.v1"
 VISION_EVIDENCE_STATES = frozenset({"observed", "unreliable", "unavailable", "failed", "unknown"})
@@ -131,6 +136,9 @@ class LiveVisionContextRuntimeDeps:
     monotonic: Callable[[], float]
     local_ocr_provider: Callable[[Any], Awaitable[Any]] | None = None
     local_window_provider: Callable[[], Awaitable[dict[str, Any]]] | None = None
+    local_accessibility_provider: (
+        Callable[[], Awaitable[dict[str, Any]]] | None
+    ) = None
 
 
 async def build_live_vision_context_from_runtime(
@@ -174,7 +182,12 @@ async def build_live_vision_context_from_runtime(
     local_ocr = ""
     local_ocr_attempted = False
     local_ocr_failed = False
+    local_ocr_source = ""
     foreground_window: dict[str, Any] = {}
+    accessibility_attempted = False
+    accessibility_window_matched = False
+    accessibility_request_satisfied = False
+    accessibility_element_count = 0
     if deps.local_window_provider is not None:
         try:
             candidate_window = await deps.local_window_provider()
@@ -191,7 +204,49 @@ async def build_live_vision_context_from_runtime(
                 }
         except Exception:
             foreground_window = {}
-    if run_ocr and deps.local_ocr_provider is not None:
+    if run_ocr and deps.local_accessibility_provider is not None:
+        try:
+            accessibility = await deps.local_accessibility_provider()
+            accessibility_attempted = bool(
+                isinstance(accessibility, dict)
+                and accessibility.get("attempted")
+            )
+            if accessibility_attempted:
+                accessibility_window_matched = bool(
+                    foreground_window
+                    and accessibility_window_matches_foreground(
+                        accessibility,
+                        foreground_window,
+                    )
+                )
+                accessibility_element_count = len(
+                    [
+                        item
+                        for item in accessibility.get("elements") or []
+                        if isinstance(item, dict)
+                    ]
+                )
+                accessibility_request_satisfied = bool(
+                    accessibility_window_matched
+                    and accessibility_supports_request(
+                        user_text,
+                        accessibility,
+                    )
+                )
+                accessibility_text = deps.clean_text(
+                    str(accessibility.get("text") or "")
+                )
+                if accessibility_window_matched and accessibility_text:
+                    local_ocr_attempted = True
+                    local_ocr = accessibility_text
+                    local_ocr_source = "windows_accessibility"
+        except Exception:
+            accessibility_attempted = True
+    if (
+        run_ocr
+        and not local_ocr_attempted
+        and deps.local_ocr_provider is not None
+    ):
         try:
             local_ocr_result = await deps.local_ocr_provider(image_path)
             if isinstance(local_ocr_result, dict):
@@ -204,6 +259,7 @@ async def build_live_vision_context_from_runtime(
             else:
                 local_ocr_attempted = True
                 local_ocr = deps.clean_text(local_ocr_result)
+            local_ocr_source = "windows_native"
         except Exception:
             local_ocr_failed = True
     payload = {
@@ -252,9 +308,17 @@ async def build_live_vision_context_from_runtime(
         data["foreground_window_class"] = foreground_window["className"]
     if local_ocr_attempted:
         data["ocr"] = local_ocr
-        data["ocr_source"] = "windows_native"
+        data["ocr_source"] = local_ocr_source or "windows_native"
     elif local_ocr_failed:
         data["local_ocr_error"] = "windows_native_ocr_failed"
+    data["_accessibility_attempted"] = accessibility_attempted
+    data["_accessibility_window_matched"] = (
+        accessibility_window_matched
+    )
+    data["_accessibility_request_satisfied"] = (
+        accessibility_request_satisfied
+    )
+    data["accessibility_element_count"] = accessibility_element_count
     data["_scene_request_echo"] = vision_scene_echoes_request(
         str(data.get("scene") or ""),
         user_text,
@@ -268,7 +332,7 @@ async def build_live_vision_context_from_runtime(
         image_deleted=deleted,
     )
     quality = deps.build_vision_quality(data)
-    if data["_scene_request_echo"]:
+    if data["_scene_request_echo"] and not quality.get("ocr_trusted"):
         ocr = deps.clean_text(str(data.get("ocr") or ""))
         ocr_available_after_echo = bool(ocr) and not bool(quality.get("ocr_corrupt"))
         quality = {
@@ -297,9 +361,18 @@ async def build_live_vision_context_from_runtime(
         scene_available = False
         ocr_available = False
     confidence = str(quality.get("confidence") or ("normal" if evidence_available else "none"))
+    reason_code = (
+        "live_accessibility_observation"
+        if quality.get("ocr_trusted")
+        else (
+            "live_observation"
+            if evidence_available
+            else "no_usable_visual_evidence"
+        )
+    )
     evidence = VisionEvidence(
         state="observed" if evidence_available else "unreliable",
-        reason_code="live_observation" if evidence_available else "no_usable_visual_evidence",
+        reason_code=reason_code,
         evidence_available=evidence_available,
         scene_available=scene_available,
         ocr_available=ocr_available,
@@ -320,6 +393,18 @@ async def build_live_vision_context_from_runtime(
         metrics.setdefault("meta", {})["vision_foreground_available"] = (
             foreground_available
         )
+        metrics.setdefault("meta", {})[
+            "vision_accessibility_attempted"
+        ] = accessibility_attempted
+        metrics.setdefault("meta", {})[
+            "vision_accessibility_window_matched"
+        ] = accessibility_window_matched
+        metrics.setdefault("meta", {})[
+            "vision_accessibility_request_satisfied"
+        ] = accessibility_request_satisfied
+        metrics.setdefault("meta", {})[
+            "vision_accessibility_element_count"
+        ] = accessibility_element_count
         metrics.setdefault("meta", {})["vision_quality"] = dict(quality)
     return observation
 

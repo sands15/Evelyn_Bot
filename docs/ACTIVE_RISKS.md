@@ -115,27 +115,31 @@ JSON, `ref_text`도 Docker 시작 전에 검사한다.
 검증 마법사로 로컬/Discord 10턴, barge-in, 무음 구간을 실행하고 비식별 보고서를
 기록한다.
 
-## P1 — 정확한 UI 텍스트·동작 대상 근거 부족
+## P1 — UI 접근성 corpus·동작 대상 계약 미완성
 
-Windows Host Vision Bridge, 실제 화면 캡처, foreground window metadata,
-SmolVLM scene, Windows Runtime OCR을 기본 Fast Control 경로에 연결했다. 요청은
-고정 schema·TTL·크기 제한을 사용하고 임의 명령·argv·경로를 받지 않는다. 화면과
-OCR tile은 정상 처리 직후 삭제되며 status에는 내용 대신 evidence와 지연만 남는다.
+Windows Host Vision Bridge에 읽기 전용 Windows UI Automation Control View를
+연결했다. 허용 control type과 최대 120개/5초 freshness를 고정했고, foreground
+title/class가 별도 관측과 일치할 때만 사용한다. Edit·Document·Value/Invoke
+pattern·PID·경로·명령행은 읽지 않으며 runtime ID는 외부로 내보내지 않고
+단방향 element ID로 바꾼다. 버튼·메뉴·탭 요청은 해당 이름 있는 control type이
+실제로 있을 때만 exact-text evidence가 된다.
 
-2026-07-30 실제 Control Page E2E에서 현재 앱 질문은 foreground 근거와 일치하는
-Minecraft로 답했다. 정확한 제목·버튼 질문에서는 비actionable OCR을 근거로 쓰지
-않고 Main LLM 호출 전에 고정 no-evidence 응답을 반환했다. 동일 화면에서 나온
-SmolVLM의 identity-only `Evelyn` 결과도 폐기됐다. 요청 뒤 requests, processing,
-responses, screenshots 큐가 모두 0임을 확인했다.
+2026-07-30 실제 Control Page E2E에서 SDL 전경 제목
+`테라리아: 모래는 OP다`를 문자 그대로 반환했고 Host Vision은
+`live_accessibility_observation`, actionable=true를 기록했다. 같은 앱은 Window
+루트 외 Button을 노출하지 않았으므로 버튼 이름 요청은 Main LLM 전에 고정
+no-evidence 응답으로 닫혔다. screenshot과 모든 큐 파일은 즉시 삭제됐다.
 
-현재 Windows OCR은 실제 일부 문자를 읽지만 정답률 점수가 없는 저신뢰 보조
-근거다. 픽셀 scene 모델만으로 정확한 버튼 이름·좌표를 단정하거나 행동을 허가할
-수 없다. 검은 프레임과 손상 응답은 회귀 테스트로 fail-closed임을 검증했지만 실제
-GPU/Windows 조합의 반복 표본은 아직 부족하다.
+남은 위험은 두 가지다. UIA를 잘 노출하는 Win32/Chromium/WinUI 앱의 버튼·메뉴
+양성 표본을 아직 실제 corpus로 대조하지 않았고, SDL·게임·일부 GPU 앱처럼
+root-only인 화면은 정확한 하위 UI 의미를 제공하지 않는다. 또한 element ID는
+관측 상관관계용일 뿐 클릭 권한이 아니며, 현재 구현은 UI focus·invoke·입력
+mutation을 전혀 수행하지 않는다.
 
-다음 조치: foreground window에 귀속된 Windows UI Automation/accessibility tree를
-별도 allowlist·freshness·element identity 계약으로 추가하고, 실제 UI corpus에서
-정확도를 측정한 뒤에만 버튼 이름과 클릭 대상 근거를 actionable로 승격한다.
+다음 조치: 파일 탐색기, 브라우저, 설정, WinUI 앱의 title/button/menu/tab
+양성·음성 corpus를 반복 측정한다. 이후에도 클릭은 사용자 승인, 재관측,
+foreground 일치, element identity, 결과 검증과 rollback을 포함하는 별도
+행동 계약을 설계·검증한 뒤에만 허용한다.
 
 ## P2 — `main.py` 선언형 wiring 밀도
 

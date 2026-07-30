@@ -34,6 +34,9 @@ class VisionRequestCompositionDeps:
     monotonic: Callable[[], float]
     local_ocr_provider: Callable[[Any], Awaitable[Any]] | None = None
     local_window_provider: Callable[[], Awaitable[dict[str, Any]]] | None = None
+    local_accessibility_provider: (
+        Callable[[], Awaitable[dict[str, Any]]] | None
+    ) = None
 
 
 class VisionRequestComposition:
@@ -125,6 +128,7 @@ class VisionRequestComposition:
             monotonic=deps.monotonic,
             local_ocr_provider=deps.local_ocr_provider,
             local_window_provider=deps.local_window_provider,
+            local_accessibility_provider=deps.local_accessibility_provider,
         )
 
     async def build_live_vision_context(

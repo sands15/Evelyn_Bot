@@ -21,6 +21,9 @@ It does not make every pixel-model or OCR result trustworthy.
   deployed Vision service, records evidence metadata, and deletes transient
   files.
 - `windows_foreground_context.py`: reads only the active window title and class.
+- `windows_accessibility.py` and `invoke_windows_accessibility.ps1`: read a
+  bounded, allowlisted Control View from the foreground Windows UI Automation
+  tree and discard raw runtime IDs after deriving opaque element IDs.
 - `windows_native_ocr.py` and `invoke_windows_ocr.ps1`: run the fixed Windows
   Runtime OCR operation against bridge-owned screenshots.
 - `vision_runtime.py` and `vision_quality.py`: produce `vision.evidence.v1` and
@@ -98,16 +101,31 @@ confidence:
 - Foreground window metadata is a structured Windows observation. Only the
   bounded title and class name are read; PID, process path, command line, and
   other windows are not collected.
+- Windows UI Automation is the preferred exact-text source. The fixed observer
+  reads only the foreground Control View and allowlisted structural controls
+  such as Window, Button, Menu, Tab, Text, List, and Header. It does not read
+  Edit or Document controls, Value/Invoke patterns, process IDs, paths, command
+  lines, or background windows, and it cannot focus or activate an element.
+- A UI Automation observation is fresh for at most five seconds, contains at
+  most 120 elements, and is usable only while its title/class still matches the
+  separately observed foreground window. Raw runtime IDs are never returned by
+  the Python boundary; a one-way 20-character element ID is derived instead.
+- Exact-text sufficiency is request-specific. A title request requires a window
+  title or named title-like control; a button, menu, tab, checkbox, or radio
+  request requires a named control of that type. Merely having some accessible
+  text does not authorize a different requested claim.
 - SmolVLM scene output is accepted only after quality checks. Empty, repeated,
   request-echo, and identity-only (`Evelyn` or `이블린`) outputs are rejected.
 - Windows OCR uses the signed-in user's Windows Runtime OCR languages and tiled
   high-resolution input. Its text is currently unscored, so it is supporting
   low-confidence context and is not sufficient for exact-text actions.
 
-`vision_ocr` is satisfied only when OCR exists **and** the combined evidence is
-actionable. When the user asks for an exact title or button and that condition
-is absent, the Fast Control path returns a deterministic refusal before calling
-the Main LLM.
+`vision_ocr` is satisfied only when exact UI Automation text is foreground
+bound, fresh, and sufficient for the requested control type. Native OCR remains
+supporting context. When the user asks for an exact title, Fast Control copies
+the title from the fixed observation before Main LLM generation. When exact
+evidence is absent, it returns a deterministic refusal before calling the Main
+LLM.
 
 ## Privacy and Retention
 
@@ -119,7 +137,7 @@ the Main LLM.
   180 seconds and stale screenshots after 300 seconds.
 - `status.json` contains heartbeat, counters, latency, evidence metadata,
   character counts, and deletion state only. It does not contain screenshot
-  pixels, OCR text, scene text, user text, or prompts.
+  pixels, accessibility names, OCR text, scene text, user text, or prompts.
 - Raw screenshots and OCR text must not be added to reports, logs, benchmarks,
   or source control.
 
@@ -149,15 +167,21 @@ to disappear. It refuses to recreate the Bot API while ownership is ambiguous.
 On 2026-07-30, the deployed local runtime was exercised through the actual
 Control Page:
 
-- A general screen question answered that Minecraft was open, matching the
-  visible foreground application and structured Windows title.
-- An exact-title/button question received the deterministic no-evidence reply
-  because OCR was not actionable; an earlier hallucinated title/button answer
-  was no longer possible.
+- The fixed UI Automation observer read the foreground SDL window title
+  `테라리아: 모래는 OP다`.
+- The Control Page exact-title question returned exactly
+  `테라리아: 모래는 OP다`, with no LLM-added spacing, explanation, or
+  reformatting. Host Vision recorded
+  `reason_code=live_accessibility_observation`, `actionable=true`.
+- The same SDL application exposed no named Button control. An exact button
+  request therefore returned the deterministic no-evidence reply rather than
+  borrowing the window title or inventing a button.
 - Host scene and OCR requests reported `screenshotDeleted=true`.
 - After each request, the request, processing, response, and screenshot queues
   were empty; only metadata-only `status.json` remained.
 
-The remaining limitation is exact UI semantics. A future Windows UI Automation
-or accessibility-tree source needs its own scored, window-bound evidence
-contract before it can authorize button-name or click-target claims.
+No click or other UI mutation is authorized by this read-only contract.
+Applications that expose only a root window, including the tested SDL window,
+continue to fail closed for button/menu requests. A separate, explicitly
+approved action-target contract and a multi-application accuracy corpus are
+required before accessibility element IDs may authorize actions.

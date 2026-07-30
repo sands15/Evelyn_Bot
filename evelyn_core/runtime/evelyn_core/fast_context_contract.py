@@ -48,6 +48,7 @@ class FastControlContext:
     vision_context: str = ""
     vision_evidence: VisionEvidence = field(default_factory=VisionEvidence)
     required_evidence_failure_reply: str = ""
+    grounded_evidence_reply: str = ""
 
 
 @dataclass(slots=True)
@@ -87,6 +88,41 @@ def build_required_evidence_failure_reply(
             "보이는 내용을 추측하지 않을게."
         )
     return ""
+
+
+def build_grounded_evidence_reply(
+    user_text: str,
+    *,
+    vision_result: HostVisionResult | None,
+) -> str:
+    if (
+        vision_result is None
+        or vision_result.evidence.reason_code
+        != "live_accessibility_observation"
+        or not vision_result.evidence.satisfies_tool("vision_ocr")
+    ):
+        return ""
+    normalized = clean_text(user_text).casefold()
+    asks_exact_window_title = bool(
+        "창 제목" in normalized
+        or "window title" in normalized
+    ) and any(
+        marker in normalized
+        for marker in ("정확", "그대로", "exact", "verbatim")
+    )
+    if not asks_exact_window_title:
+        return ""
+    match = re.search(
+        r"foreground_window:\s*title=(.*?);\s*class=",
+        vision_result.observation,
+        flags=re.IGNORECASE,
+    )
+    if match is None:
+        return ""
+    title = clean_text(match.group(1))[:240]
+    if not title or title == "<empty>":
+        return ""
+    return title
 
 
 def compact_runtime_health_for_llm(health: dict[str, Any]) -> str:
@@ -379,6 +415,7 @@ async def build_fast_control_context(
         state="unknown",
         reason_code="not_requested",
     )
+    vision_result: HostVisionResult | None = None
     vision_decisions = [
         decision
         for decision in decisions
@@ -396,6 +433,7 @@ async def build_fast_control_context(
             vision_evidence = vision_result.evidence
             observation = vision_result.observation
         except Exception:
+            vision_result = None
             vision_evidence = VisionEvidence(
                 state="failed",
                 reason_code="host_vision_runtime_error",
@@ -522,6 +560,10 @@ async def build_fast_control_context(
         required_evidence_failure_reply=build_required_evidence_failure_reply(
             decisions,
             vision_evidence=vision_evidence,
+        ),
+        grounded_evidence_reply=build_grounded_evidence_reply(
+            decision_text,
+            vision_result=vision_result,
         ),
     )
 
