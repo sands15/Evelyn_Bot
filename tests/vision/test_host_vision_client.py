@@ -15,6 +15,9 @@ if str(RUNTIME_ROOT) not in sys.path:
     sys.path.insert(0, str(RUNTIME_ROOT))
 
 from evelyn_core.host_vision_client import request_host_vision  # noqa: E402
+from evelyn_core.host_vision_contract import (  # noqa: E402
+    HOST_VISION_MAX_RESPONSE_AGE_SEC,
+)
 from evelyn_core.runtime_artifact_io import atomic_json_write  # noqa: E402
 from evelyn_core.vision_runtime import VisionEvidence  # noqa: E402
 
@@ -34,6 +37,7 @@ class HostVisionClientTests(unittest.IsolatedAsyncioTestCase):
                 request_path = candidates[0]
                 request = json.loads(request_path.read_text(encoding="utf-8"))
                 request_id = request["requestId"]
+                observed_at = time.time()
                 evidence = VisionEvidence(
                     state="observed",
                     reason_code="live_observation",
@@ -43,14 +47,17 @@ class HostVisionClientTests(unittest.IsolatedAsyncioTestCase):
                     confidence="normal",
                     actionable=True,
                     freshness="live",
+                    observed_at=observed_at,
+                    expires_at=observed_at + 15.0,
                 )
+                response_created_at = time.time()
                 response = {
                     "schema": "host_vision.response.v1",
                     "requestId": request_id,
-                    "createdAt": time.time(),
-                    "expiresAt": time.time() + 60.0,
+                    "createdAt": response_created_at,
+                    "expiresAt": response_created_at + 60.0,
                     "observation": "scene: Control Page\nocr_text: Start",
-                    "evidence": evidence.to_dict(),
+                    "evidence": evidence.to_dict(now=response_created_at),
                     "errorCode": "",
                     "latencyMs": 14.0,
                     "screenshotDeleted": True,
@@ -151,6 +158,109 @@ class HostVisionClientTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result.evidence.state, "failed")
         self.assertEqual(result.error_code, "invalid_evidence_contract")
+
+    async def test_old_response_is_rejected_before_its_long_ttl_expires(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_root:
+            root = Path(temp_root)
+
+            async def fake_host() -> None:
+                requests = root / "host_vision" / "requests"
+                while True:
+                    candidates = list(requests.glob("*.json")) if requests.exists() else []
+                    if candidates:
+                        break
+                    await asyncio.sleep(0.005)
+                request = json.loads(candidates[0].read_text(encoding="utf-8"))
+                request_id = request["requestId"]
+                now = time.time()
+                created_at = now - HOST_VISION_MAX_RESPONSE_AGE_SEC - 1.0
+                evidence = VisionEvidence(
+                    state="observed",
+                    reason_code="live_observation",
+                    evidence_available=True,
+                    scene_available=True,
+                    confidence="normal",
+                    freshness="live",
+                    observed_at=created_at,
+                    expires_at=created_at + 15.0,
+                )
+                response = {
+                    "schema": "host_vision.response.v1",
+                    "requestId": request_id,
+                    "createdAt": created_at,
+                    "expiresAt": now + 60.0,
+                    "observation": "scene: stale",
+                    "evidence": evidence.to_dict(now=created_at),
+                    "errorCode": "",
+                    "latencyMs": 1.0,
+                    "screenshotDeleted": True,
+                    "sceneChars": 5,
+                    "ocrChars": 0,
+                }
+                atomic_json_write(
+                    root / "host_vision" / "responses" / f"{request_id}.json",
+                    response,
+                )
+
+            host_task = asyncio.create_task(fake_host())
+            result = await request_host_vision(
+                "화면을 봐줘",
+                run_ocr=False,
+                artifacts_root=root,
+                timeout_sec=1.0,
+                poll_interval_sec=0.005,
+            )
+            await host_task
+
+        self.assertEqual(result.error_code, "response_stale")
+        self.assertFalse(result.evidence.evidence_available)
+
+    async def test_invalid_response_validity_window_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_root:
+            root = Path(temp_root)
+
+            async def fake_host() -> None:
+                requests = root / "host_vision" / "requests"
+                while True:
+                    candidates = list(requests.glob("*.json")) if requests.exists() else []
+                    if candidates:
+                        break
+                    await asyncio.sleep(0.005)
+                request = json.loads(candidates[0].read_text(encoding="utf-8"))
+                request_id = request["requestId"]
+                created_at = time.time()
+                response = {
+                    "schema": "host_vision.response.v1",
+                    "requestId": request_id,
+                    "createdAt": created_at,
+                    "expiresAt": created_at + 999.0,
+                    "observation": "not trusted",
+                    "evidence": VisionEvidence(
+                        state="failed",
+                        reason_code="test_failure",
+                    ).to_dict(now=created_at),
+                    "errorCode": "test_failure",
+                    "latencyMs": 1.0,
+                    "screenshotDeleted": True,
+                    "sceneChars": 0,
+                    "ocrChars": 0,
+                }
+                atomic_json_write(
+                    root / "host_vision" / "responses" / f"{request_id}.json",
+                    response,
+                )
+
+            host_task = asyncio.create_task(fake_host())
+            result = await request_host_vision(
+                "화면을 봐줘",
+                run_ocr=False,
+                artifacts_root=root,
+                timeout_sec=1.0,
+                poll_interval_sec=0.005,
+            )
+            await host_task
+
+        self.assertEqual(result.error_code, "invalid_response_lifetime")
 
 
 if __name__ == "__main__":

@@ -64,6 +64,7 @@ class LlmContextAssemblyVisionEvidenceTests(unittest.TestCase):
 
     def test_scene_only_observation_satisfies_capture_but_not_ocr(self) -> None:
         decisions = self.decisions()
+        now = time.time()
         evidence = VisionEvidence(
             state="observed",
             reason_code="live_observation",
@@ -73,6 +74,8 @@ class LlmContextAssemblyVisionEvidenceTests(unittest.TestCase):
             confidence="low",
             actionable=False,
             freshness="live",
+            observed_at=now,
+            expires_at=now + 15.0,
         )
 
         apply_vision_evidence_to_tool_decisions(decisions, evidence)
@@ -84,6 +87,7 @@ class LlmContextAssemblyVisionEvidenceTests(unittest.TestCase):
 
     def test_usable_live_ocr_satisfies_both_tools(self) -> None:
         decisions = self.decisions()
+        now = time.time()
         evidence = VisionEvidence(
             state="observed",
             reason_code="live_observation",
@@ -93,12 +97,14 @@ class LlmContextAssemblyVisionEvidenceTests(unittest.TestCase):
             confidence="normal",
             actionable=True,
             freshness="live",
+            observed_at=now,
+            expires_at=now + 15.0,
         )
 
         apply_vision_evidence_to_tool_decisions(decisions, evidence)
 
         self.assertEqual([decision.status for decision in decisions], ["executed", "executed"])
-        self.assertTrue(all("schema=vision.evidence.v1" in decision.evidence for decision in decisions))
+        self.assertTrue(all("schema=vision.evidence.v2" in decision.evidence for decision in decisions))
         self.assertTrue(all("tool_satisfied=true" in decision.evidence for decision in decisions))
 
     def test_unknown_legacy_callback_result_fails_closed(self) -> None:
@@ -194,6 +200,7 @@ class LlmContextAssemblyVisionEvidenceIntegrationTests(unittest.IsolatedAsyncioT
 
     async def test_live_scene_and_ocr_mark_required_tools_executed(self) -> None:
         async def observed_vision(_user_text: str, *, metrics: dict | None = None) -> str:
+            now = time.time()
             record_vision_evidence(
                 metrics,
                 VisionEvidence(
@@ -205,6 +212,8 @@ class LlmContextAssemblyVisionEvidenceIntegrationTests(unittest.IsolatedAsyncioT
                     confidence="normal",
                     actionable=True,
                     freshness="live",
+                    observed_at=now,
+                    expires_at=now + 15.0,
                 ),
             )
             return "scene: 설정 화면\nocr_text: 저장"
@@ -223,6 +232,39 @@ class LlmContextAssemblyVisionEvidenceIntegrationTests(unittest.IsolatedAsyncioT
         self.assertTrue(context_meta["vision_scene_available"])
         self.assertTrue(context_meta["vision_ocr_available"])
         self.assertTrue(context_meta["vision_actionable"])
+
+    async def test_stale_observation_text_is_removed_before_llm_context(self) -> None:
+        async def stale_vision(_user_text: str, *, metrics: dict | None = None) -> str:
+            now = time.time()
+            record_vision_evidence(
+                metrics,
+                VisionEvidence(
+                    state="observed",
+                    reason_code="claimed_live",
+                    evidence_available=True,
+                    scene_available=True,
+                    ocr_available=True,
+                    confidence="normal",
+                    actionable=True,
+                    freshness="live",
+                    observed_at=now - 30.0,
+                    expires_at=now - 15.0,
+                ),
+            )
+            return "scene: STALE_PRIVATE_SCREEN_CONTENT"
+
+        metrics = {"started_at": time.monotonic(), "meta": {}, "marks": {}}
+        messages, _state, _route, _policy = await prepare_llm_messages_from_runtime(
+            "화면 글자 읽어줘",
+            deps=self.build_deps(stale_vision),
+            metrics=metrics,
+        )
+
+        system_context = messages[0]["content"]
+        self.assertNotIn("STALE_PRIVATE_SCREEN_CONTENT", system_context)
+        self.assertIn("observation was discarded", system_context)
+        self.assertIn("reason=stale_visual_evidence", system_context)
+        self.assertNotIn("status=executed;", system_context)
 
     async def test_unexpected_vision_runtime_error_degrades_without_losing_turn(self) -> None:
         async def broken_vision(_user_text: str, *, metrics: dict | None = None) -> str:

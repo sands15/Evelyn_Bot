@@ -25,7 +25,7 @@ from .host_vision_client import HostVisionResult, request_host_vision
 from .runtime_health import collect_runtime_health
 from .runtime_services import load_service_manifest
 from .text import clean_text
-from .vision_runtime import VisionEvidence
+from .vision_runtime import VisionEvidence, vision_evidence_from_payload
 
 
 RuntimeHealthProvider = Callable[[], Awaitable[dict[str, Any]]]
@@ -430,8 +430,26 @@ async def build_fast_control_context(
             )
             if not isinstance(vision_result, HostVisionResult):
                 raise TypeError("invalid_host_vision_result")
-            vision_evidence = vision_result.evidence
-            observation = vision_result.observation
+            vision_evidence = vision_evidence_from_payload(
+                vision_result.evidence.to_dict(),
+            )
+            observation = (
+                vision_result.observation
+                if vision_evidence.state == "observed"
+                else (
+                    "Local screen observation was discarded because its evidence "
+                    "was unavailable, stale, or invalid. Do not infer screen contents."
+                )
+            )
+            vision_result = HostVisionResult(
+                observation=observation,
+                evidence=vision_evidence,
+                error_code=vision_result.error_code,
+                latency_ms=vision_result.latency_ms,
+                screenshot_deleted=vision_result.screenshot_deleted,
+                scene_chars=vision_result.scene_chars,
+                ocr_chars=vision_result.ocr_chars,
+            )
         except Exception:
             vision_result = None
             vision_evidence = VisionEvidence(
@@ -445,7 +463,8 @@ async def build_fast_control_context(
         vision_context = "\n\n".join(
             (
                 "VISION_ANSWER_RULE: This turn requested live screen evidence. "
-                "Only a vision.evidence.v1 result with evidence_available=true counts as an "
+                "Only a vision.evidence.v2 result with evidence_available=true, freshness=live, "
+                "and an unexpired timestamp counts as an "
                 "observation. A request, capture attempt, or failure message is not evidence. "
                 "When evidence is unavailable, say the screen could not be observed and do not "
                 "infer its contents.",

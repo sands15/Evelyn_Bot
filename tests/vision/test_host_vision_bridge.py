@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+import time
 import unittest
 
 
@@ -21,6 +22,7 @@ from evelyn_core.vision_runtime import VisionEvidence, record_vision_evidence  #
 class FakeComposition:
     def __init__(self, evidence: VisionEvidence | None = None) -> None:
         self.calls: list[tuple[str, bool]] = []
+        now = time.time()
         self.evidence = evidence or VisionEvidence(
             state="observed",
             reason_code="live_observation",
@@ -29,6 +31,8 @@ class FakeComposition:
             confidence="normal",
             actionable=True,
             freshness="live",
+            observed_at=now,
+            expires_at=now + 15.0,
         )
 
     async def build_live_vision_context(
@@ -90,16 +94,17 @@ class HostVisionBridgeTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temp_root:
             root = Path(temp_root)
             composition = FakeComposition()
+            now = time.time()
             bridge = HostVisionBridge(
                 session=object(),  # type: ignore[arg-type]
                 artifacts_root=root,
                 composition=composition,  # type: ignore[arg-type]
-                now=lambda: 1000.0,
+                now=lambda: now,
                 monotonic=lambda: 20.0,
             )
             request_id = "a" * 32
             request_path = root / "host_vision" / "requests" / f"{request_id}.json"
-            write_request(request_path, request_id=request_id, now=1000.0)
+            write_request(request_path, request_id=request_id, now=now)
 
             processed = await bridge.process_pending()
             response_path = root / "host_vision" / "responses" / f"{request_id}.json"
@@ -109,6 +114,7 @@ class HostVisionBridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(composition.calls, [("현재 화면을 봐줘", True)])
         self.assertFalse(request_path.exists())
         self.assertEqual(response["schema"], "host_vision.response.v1")
+        self.assertEqual(response["evidence"]["schema"], "vision.evidence.v2")
         self.assertEqual(response["evidence"]["state"], "observed")
         self.assertTrue(response["screenshotDeleted"])
         self.assertEqual(response["sceneChars"], 12)
@@ -141,6 +147,54 @@ class HostVisionBridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(composition.calls, [])
         self.assertEqual(response["errorCode"], "invalid_request")
         self.assertFalse(response["evidence"]["evidence_available"])
+
+    async def test_stale_evidence_removes_observation_text_from_response(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_root:
+            root = Path(temp_root)
+            now = time.time()
+            composition = FakeComposition(
+                VisionEvidence(
+                    state="observed",
+                    reason_code="claimed_live",
+                    evidence_available=True,
+                    scene_available=True,
+                    confidence="normal",
+                    freshness="live",
+                    observed_at=now - 30.0,
+                    expires_at=now - 15.0,
+                )
+            )
+            bridge = HostVisionBridge(
+                session=object(),  # type: ignore[arg-type]
+                artifacts_root=root,
+                composition=composition,  # type: ignore[arg-type]
+                now=lambda: now,
+                monotonic=lambda: 20.0,
+            )
+            request_id = "e" * 32
+            request_path = (
+                root / "host_vision" / "requests" / f"{request_id}.json"
+            )
+            write_request(request_path, request_id=request_id, now=now)
+
+            await bridge.process_pending()
+            response = json.loads(
+                (
+                    root
+                    / "host_vision"
+                    / "responses"
+                    / f"{request_id}.json"
+                ).read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(response["evidence"]["state"], "unreliable")
+        self.assertEqual(
+            response["evidence"]["reason_code"],
+            "stale_visual_evidence",
+        )
+        self.assertNotIn("Control Page", response["observation"])
+        self.assertEqual(response["sceneChars"], 0)
+        self.assertEqual(response["ocrChars"], 0)
 
     async def test_expired_request_never_captures(self) -> None:
         with tempfile.TemporaryDirectory() as temp_root:

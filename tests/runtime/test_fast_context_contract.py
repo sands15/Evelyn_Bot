@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -52,6 +53,7 @@ async def fake_logs(_: str) -> str:
 
 
 async def fake_observed_vision(user_text: str, *, run_ocr: bool) -> HostVisionResult:
+    now = time.time()
     return HostVisionResult(
         observation=(
             "Local screen vision observation is available.\n"
@@ -67,12 +69,15 @@ async def fake_observed_vision(user_text: str, *, run_ocr: bool) -> HostVisionRe
             confidence="normal",
             actionable=True,
             freshness="live",
+            observed_at=now,
+            expires_at=now + 15.0,
         ),
         screenshot_deleted=True,
     )
 
 
 async def fake_accessibility_vision(user_text: str, *, run_ocr: bool) -> HostVisionResult:
+    now = time.time()
     return HostVisionResult(
         observation=(
             "Local screen vision observation is available.\n"
@@ -89,6 +94,8 @@ async def fake_accessibility_vision(user_text: str, *, run_ocr: bool) -> HostVis
             confidence="normal",
             actionable=True,
             freshness="live",
+            observed_at=now,
+            expires_at=now + 15.0,
         ),
         screenshot_deleted=True,
     )
@@ -107,6 +114,7 @@ async def fake_failed_vision(user_text: str, *, run_ocr: bool) -> HostVisionResu
 
 
 async def fake_scene_only_vision(user_text: str, *, run_ocr: bool) -> HostVisionResult:
+    now = time.time()
     return HostVisionResult(
         observation=(
             "Local screen vision observation is available.\n"
@@ -121,6 +129,28 @@ async def fake_scene_only_vision(user_text: str, *, run_ocr: bool) -> HostVision
             confidence="normal",
             actionable=True,
             freshness="live",
+            observed_at=now,
+            expires_at=now + 15.0,
+        ),
+        screenshot_deleted=True,
+    )
+
+
+async def fake_stale_vision(user_text: str, *, run_ocr: bool) -> HostVisionResult:
+    now = time.time()
+    return HostVisionResult(
+        observation="scene: STALE_PRIVATE_SCREEN_CONTENT",
+        evidence=VisionEvidence(
+            state="observed",
+            reason_code="claimed_live",
+            evidence_available=True,
+            scene_available=True,
+            ocr_available=run_ocr,
+            confidence="normal",
+            actionable=True,
+            freshness="live",
+            observed_at=now - 30.0,
+            expires_at=now - 15.0,
         ),
         screenshot_deleted=True,
     )
@@ -323,7 +353,7 @@ class FastContextContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(context.vision_evidence.evidence_available)
         self.assertTrue(context.vision_evidence.ocr_available)
         self.assertIn("Start voice validation", context.vision_context)
-        self.assertIn("schema=vision.evidence.v1", context.system_context)
+        self.assertIn("schema=vision.evidence.v2", context.system_context)
         self.assertIn(
             "supported_inline_tools=vision_capture_or_watch,vision_ocr",
             context.system_context,
@@ -349,8 +379,26 @@ class FastContextContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(vision.status, "failed_or_unavailable")
         self.assertIn("reason=black_frame", vision.evidence)
         self.assertFalse(context.vision_evidence.evidence_available)
-        self.assertIn("Do not claim screen contents", context.system_context)
+        self.assertIn("observation was discarded", context.system_context)
         self.assertIn("화면을 확인할 수 없었어", context.required_evidence_failure_reply)
+
+    async def test_stale_screen_content_is_removed_before_llm_context(self) -> None:
+        context = await build_fast_control_context(
+            "현재 화면을 봐줘",
+            source="control_page",
+            runtime_health_provider=fake_runtime_health,
+            vision_provider=fake_stale_vision,
+        )
+
+        vision = next(
+            item
+            for item in context.tool_use_decisions
+            if item.tool_name == "vision_capture_or_watch"
+        )
+        self.assertEqual(vision.status, "failed_or_unavailable")
+        self.assertIn("reason=stale_visual_evidence", vision.evidence)
+        self.assertNotIn("STALE_PRIVATE_SCREEN_CONTENT", context.system_context)
+        self.assertIn("observation was discarded", context.system_context)
 
     async def test_missing_required_ocr_is_a_deterministic_pre_llm_gate(self) -> None:
         context = await build_fast_control_context(

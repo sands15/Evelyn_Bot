@@ -28,7 +28,11 @@ from .runtime_artifact_io import atomic_json_write
 from .text import clean_text
 from .vision_quality import build_vision_quality
 from .vision_request_composition import VisionRequestComposition, VisionRequestCompositionDeps
-from .vision_runtime import VisionEvidence, vision_evidence_from_metrics
+from .vision_runtime import (
+    VisionEvidence,
+    vision_evidence_from_metrics,
+    vision_evidence_from_payload,
+)
 from .vision_watch import vision_watch_scene_is_unreliable
 from .windows_accessibility import WindowsAccessibility
 from .windows_native_ocr import WindowsNativeOcr
@@ -278,7 +282,10 @@ class HostVisionBridge:
                     reason_code="host_vision_runtime_error",
                 )
             else:
-                evidence = vision_evidence_from_metrics(metrics)
+                evidence = vision_evidence_from_metrics(
+                    metrics,
+                    now=self.now(),
+                )
 
             observation = clean_text(observation)[:HOST_VISION_MAX_OBSERVATION_CHARS]
             if evidence.state == "observed" and not observation:
@@ -286,21 +293,39 @@ class HostVisionBridge:
                     state="unreliable",
                     reason_code="empty_observation",
                 )
-            error_code = "" if evidence.evidence_available else evidence.reason_code
             latency_ms = max(0.0, (self.monotonic() - started) * 1000.0)
             meta = metrics.get("meta") if isinstance(metrics.get("meta"), dict) else {}
+            response_created_at = self.now()
+            evidence = vision_evidence_from_payload(
+                evidence.to_dict(now=response_created_at),
+                now=response_created_at,
+            )
+            if evidence.state != "observed":
+                observation = (
+                    "Local screen vision did not produce current usable evidence. "
+                    "Do not infer screen contents."
+                )
+            error_code = "" if evidence.evidence_available else evidence.reason_code
             response = {
                 "schema": HOST_VISION_RESPONSE_SCHEMA,
                 "requestId": request_id,
-                "createdAt": self.now(),
-                "expiresAt": self.now() + HOST_VISION_RESPONSE_TTL_SEC,
+                "createdAt": response_created_at,
+                "expiresAt": response_created_at + HOST_VISION_RESPONSE_TTL_SEC,
                 "observation": observation,
-                "evidence": evidence.to_dict(),
+                "evidence": evidence.to_dict(now=response_created_at),
                 "errorCode": clean_text(error_code)[:80],
                 "latencyMs": round(latency_ms, 1),
                 "screenshotDeleted": bool(meta.get("vision_capture_deleted")),
-                "sceneChars": max(0, int(meta.get("vision_scene_chars") or 0)),
-                "ocrChars": max(0, int(meta.get("vision_ocr_chars") or 0)),
+                "sceneChars": (
+                    max(0, int(meta.get("vision_scene_chars") or 0))
+                    if evidence.state == "observed"
+                    else 0
+                ),
+                "ocrChars": (
+                    max(0, int(meta.get("vision_ocr_chars") or 0))
+                    if evidence.state == "observed"
+                    else 0
+                ),
             }
             await asyncio.to_thread(
                 atomic_json_write,
@@ -320,16 +345,17 @@ class HostVisionBridge:
 
     async def _write_failure_response(self, request_id: str, error_code: str) -> None:
         evidence = VisionEvidence(state="failed", reason_code=error_code or "invalid_request")
+        response_created_at = self.now()
         response = {
             "schema": HOST_VISION_RESPONSE_SCHEMA,
             "requestId": request_id,
-            "createdAt": self.now(),
-            "expiresAt": self.now() + HOST_VISION_RESPONSE_TTL_SEC,
+            "createdAt": response_created_at,
+            "expiresAt": response_created_at + HOST_VISION_RESPONSE_TTL_SEC,
             "observation": (
                 "Local screen vision request was rejected before capture. "
                 "Do not claim the screen was analyzed."
             ),
-            "evidence": evidence.to_dict(),
+            "evidence": evidence.to_dict(now=response_created_at),
             "errorCode": clean_text(error_code or "invalid_request")[:80],
             "latencyMs": 0.0,
             "screenshotDeleted": True,

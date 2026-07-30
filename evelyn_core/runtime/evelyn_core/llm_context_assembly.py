@@ -326,7 +326,8 @@ async def prepare_llm_messages_from_runtime(
     if context_policy.needs_vision:
         vision_context_parts.append(
             "VISION_ANSWER_RULE: This turn requested screen/vision evidence. "
-            "Only a vision.evidence.v1 result with evidence_available=true counts as an observation. "
+            "Only a vision.evidence.v2 result with evidence_available=true, freshness=live, "
+            "and an unexpired timestamp counts as an observation. "
             "A request, policy hint, capture attempt, or failure message is not visual evidence. "
             "When evidence is unavailable, say that the screen could not be observed and do not infer its contents."
         )
@@ -349,6 +350,11 @@ async def prepare_llm_messages_from_runtime(
                 "Do not claim the screen was analyzed."
             )
         vision_evidence = vision_evidence_from_metrics(vision_runtime_metrics)
+        if vision_evidence.state != "observed":
+            live_vision_context = (
+                "Local screen observation was discarded because its evidence "
+                "was unavailable, stale, or invalid. Do not infer screen contents."
+            )
         vision_context_parts.append(live_vision_context)
         vision_context_parts.append(
             "VISION_EVIDENCE_GATE: " + vision_evidence.provenance_summary()

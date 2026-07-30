@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import time
 import unittest
 from pathlib import Path
 
@@ -13,9 +14,11 @@ if str(RUNTIME_ROOT) not in sys.path:
 from evelyn_core.vision_runtime import (  # noqa: E402
     LiveVisionContextRuntimeDeps,
     VISION_EVIDENCE_SCHEMA,
+    VISION_EVIDENCE_MAX_AGE_SEC,
     VisionEvidence,
     build_live_vision_context_from_runtime,
     vision_evidence_from_metrics,
+    vision_evidence_from_payload,
 )
 
 
@@ -122,6 +125,10 @@ class LiveVisionContextRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 "confidence": "none",
                 "actionable": False,
                 "freshness": "unknown",
+                "observedAt": None,
+                "expiresAt": None,
+                "ageSec": None,
+                "maxAgeSec": VISION_EVIDENCE_MAX_AGE_SEC,
             },
         )
 
@@ -423,6 +430,51 @@ class LiveVisionContextRuntimeTests(unittest.IsolatedAsyncioTestCase):
             metrics["meta"]["vision_ocr_source"],
             "windows_native",
         )
+        self.assertTrue(metrics["meta"]["vision_source_conflict"])
+        self.assertFalse(metrics["meta"]["vision_foreground_available"])
+        evidence = vision_evidence_from_metrics(metrics)
+        self.assertEqual(
+            evidence.reason_code,
+            "live_observation_source_conflict_fallback",
+        )
+        self.assertFalse(evidence.actionable)
+        self.assertFalse(evidence.satisfies_tool("vision_ocr"))
+
+    async def test_stale_analysis_is_sanitized_and_never_becomes_evidence(
+        self,
+    ) -> None:
+        self.response = FakeResponse(
+            data={"scene": "STALE_SECRET_SCENE", "ocr": "STALE_SECRET_OCR"}
+        )
+        self.session = FakeSession(self.response)
+        base_time = time.time()
+        wall_times = iter(
+            [base_time, base_time + VISION_EVIDENCE_MAX_AGE_SEC + 0.5]
+        )
+        deps = self.build_deps()
+        object.__setattr__(deps, "wall_time", lambda: next(wall_times))
+        metrics: dict = {}
+
+        result = await build_live_vision_context_from_runtime(
+            "화면을 봐줘",
+            deps=deps,
+            metrics=metrics,
+        )
+
+        self.assertIn("became stale", result)
+        self.assertNotIn("STALE_SECRET", result)
+        self.assertEqual(
+            metrics["meta"]["vision_evidence"]["reason_code"],
+            "stale_visual_evidence",
+        )
+        self.assertEqual(metrics["meta"]["vision_evidence"]["freshness"], "stale")
+        self.assertFalse(
+            vision_evidence_from_metrics(metrics).satisfies_tool(
+                "vision_capture_or_watch"
+            )
+        )
+        self.assertEqual(metrics["meta"]["vision_scene_chars"], 0)
+        self.assertEqual(metrics["meta"]["vision_ocr_chars"], 0)
 
     async def test_scene_that_only_echoes_request_is_not_visual_evidence(self) -> None:
         self.response = FakeResponse(
@@ -473,6 +525,7 @@ class LiveVisionContextRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(evidence.satisfies_tool("vision_ocr"))
 
     def test_ocr_tool_requires_usable_ocr_not_only_a_scene(self) -> None:
+        now = time.time()
         evidence = VisionEvidence(
             state="observed",
             reason_code="live_observation",
@@ -481,12 +534,15 @@ class LiveVisionContextRuntimeTests(unittest.IsolatedAsyncioTestCase):
             ocr_available=False,
             confidence="low",
             freshness="live",
+            observed_at=now,
+            expires_at=now + VISION_EVIDENCE_MAX_AGE_SEC,
         )
 
         self.assertTrue(evidence.satisfies_tool("vision_capture_or_watch"))
         self.assertFalse(evidence.satisfies_tool("vision_ocr"))
 
     def test_unscored_ocr_is_supporting_context_not_required_tool_evidence(self) -> None:
+        now = time.time()
         evidence = VisionEvidence(
             state="observed",
             reason_code="live_observation",
@@ -496,6 +552,8 @@ class LiveVisionContextRuntimeTests(unittest.IsolatedAsyncioTestCase):
             confidence="low",
             actionable=False,
             freshness="live",
+            observed_at=now,
+            expires_at=now + VISION_EVIDENCE_MAX_AGE_SEC,
         )
 
         self.assertTrue(evidence.satisfies_tool("vision_capture_or_watch"))
@@ -523,6 +581,58 @@ class LiveVisionContextRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(evidence.reason_code, "invalid_evidence_contract")
         self.assertFalse(evidence.evidence_available)
         self.assertFalse(evidence.actionable)
+
+    def test_observed_evidence_without_timestamps_fails_closed(self) -> None:
+        evidence = VisionEvidence(
+            state="observed",
+            reason_code="claimed_live",
+            evidence_available=True,
+            scene_available=True,
+            freshness="live",
+        )
+
+        self.assertFalse(evidence.satisfies_tool("vision_capture_or_watch"))
+        self.assertEqual(
+            evidence.to_dict()["reason_code"],
+            "missing_evidence_timestamp",
+        )
+
+    def test_stale_and_legacy_payloads_fail_closed(self) -> None:
+        now = time.time()
+        stale = vision_evidence_from_payload(
+            {
+                "schema": VISION_EVIDENCE_SCHEMA,
+                "state": "observed",
+                "reason_code": "forged_live",
+                "evidence_available": True,
+                "scene_available": True,
+                "ocr_available": True,
+                "confidence": "normal",
+                "actionable": True,
+                "freshness": "live",
+                "observedAt": now - 30.0,
+                "expiresAt": now - 15.0,
+            },
+            now=now,
+        )
+        legacy = vision_evidence_from_payload(
+            {
+                "schema": "vision.evidence.v1",
+                "state": "observed",
+                "evidence_available": True,
+                "scene_available": True,
+                "ocr_available": True,
+                "actionable": True,
+                "freshness": "live",
+            },
+            now=now,
+        )
+
+        self.assertEqual(stale.state, "unreliable")
+        self.assertEqual(stale.reason_code, "stale_visual_evidence")
+        self.assertFalse(stale.satisfies_tool("vision_capture_or_watch", now=now))
+        self.assertEqual(legacy.reason_code, "legacy_evidence_without_timestamp")
+        self.assertFalse(legacy.satisfies_tool("vision_ocr", now=now))
 
     def test_main_delegates_live_vision_context_to_runtime_module(self) -> None:
         source = (

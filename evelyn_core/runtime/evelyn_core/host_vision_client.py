@@ -5,6 +5,7 @@ import argparse
 import contextlib
 from dataclasses import dataclass
 import json
+import math
 from pathlib import Path
 import sys
 import time
@@ -13,8 +14,10 @@ import uuid
 
 from .host_vision_contract import (
     HOST_VISION_MAX_REQUEST_TTL_SEC,
+    HOST_VISION_MAX_RESPONSE_AGE_SEC,
     HOST_VISION_REQUEST_SCHEMA,
     HOST_VISION_RESPONSE_SCHEMA,
+    HOST_VISION_RESPONSE_TTL_SEC,
 )
 from .paths import get_runtime_artifacts_root
 from .runtime_artifact_io import atomic_json_write
@@ -90,16 +93,40 @@ def _read_response(
         or not isinstance(created_at, (int, float))
         or isinstance(expires_at, bool)
         or not isinstance(expires_at, (int, float))
-        or float(created_at) > now + 5.0
-        or float(expires_at) <= now
+        or not math.isfinite(float(created_at))
+        or not math.isfinite(float(expires_at))
     ):
+        return _failed_result("invalid_response_lifetime")
+    created_at = float(created_at)
+    expires_at = float(expires_at)
+    if (
+        created_at > now + 2.0
+        or expires_at <= created_at
+        or expires_at - created_at > HOST_VISION_RESPONSE_TTL_SEC + 0.001
+    ):
+        return _failed_result("invalid_response_lifetime")
+    if now - created_at > HOST_VISION_MAX_RESPONSE_AGE_SEC:
+        return _failed_result("response_stale")
+    if expires_at <= now:
         return _failed_result("response_expired")
     observation = payload.get("observation")
     if not isinstance(observation, str) or len(observation) > 4000:
         return _failed_result("invalid_observation")
-    evidence = vision_evidence_from_payload(payload.get("evidence"))
+    raw_evidence = payload.get("evidence")
+    evidence = vision_evidence_from_payload(raw_evidence, now=now)
+    if (
+        isinstance(raw_evidence, dict)
+        and raw_evidence.get("state") == "observed"
+        and evidence.state != "observed"
+    ):
+        return _failed_result("invalid_evidence_contract")
     if evidence.state == "observed" and (not evidence.evidence_available or not clean_text(observation)):
         return _failed_result("invalid_evidence_contract")
+    if evidence.state != "observed":
+        observation = (
+            "Local screen vision did not produce current usable evidence. "
+            "Do not infer screen contents."
+        )
     error_code = clean_text(payload.get("errorCode"))[:80]
     latency = payload.get("latencyMs")
     if isinstance(latency, bool) or not isinstance(latency, (int, float)):
@@ -118,8 +145,16 @@ def _read_response(
             if type(payload.get("screenshotDeleted")) is bool
             else None
         ),
-        scene_chars=max(0, int(scene_chars)) if isinstance(scene_chars, int) else 0,
-        ocr_chars=max(0, int(ocr_chars)) if isinstance(ocr_chars, int) else 0,
+        scene_chars=(
+            max(0, int(scene_chars))
+            if evidence.state == "observed" and isinstance(scene_chars, int)
+            else 0
+        ),
+        ocr_chars=(
+            max(0, int(ocr_chars))
+            if evidence.state == "observed" and isinstance(ocr_chars, int)
+            else 0
+        ),
     )
 
 
