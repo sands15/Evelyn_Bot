@@ -1,7 +1,7 @@
 # Vision Evidence Contract
 
 Document status: **Current**
-Last reviewed: 2026-07-30 KST
+Last reviewed: 2026-07-31 KST
 
 ## Purpose
 
@@ -19,7 +19,7 @@ Background vision-watch context remains explicitly soft context with its own TTL
 
 ```json
 {
-  "schema": "vision.evidence.v1",
+  "schema": "vision.evidence.v2",
   "state": "observed|unreliable|unavailable|failed|unknown",
   "reason_code": "live_observation|live_accessibility_observation",
   "evidence_available": true,
@@ -27,14 +27,24 @@ Background vision-watch context remains explicitly soft context with its own TTL
   "ocr_available": true,
   "confidence": "normal",
   "actionable": true,
-  "freshness": "live"
+  "freshness": "live",
+  "observedAt": 1000.0,
+  "expiresAt": 1015.0,
+  "ageSec": 0.25,
+  "maxAgeSec": 15.0
 }
 ```
 
 The following invariants are fail-closed:
 
-- Only `state=observed` with `evidence_available=true` can satisfy a vision
-  tool requirement.
+- Only `state=observed`, `evidence_available=true`, `freshness=live`, and a
+  valid unexpired timestamp window can satisfy a vision tool requirement.
+- `observedAt` is recorded immediately after the screenshot capture returns.
+  `expiresAt-observedAt` cannot exceed 15 seconds. A missing, non-finite,
+  future, inverted, overlong, or expired window is fail-closed.
+- `vision.evidence.v1` observed payloads are legacy evidence without a
+  trustworthy capture timestamp. They normalize to
+  `unreliable/legacy_evidence_without_timestamp` and cannot satisfy a tool.
 - At least one of `scene_available` or `ocr_available` must also be true.
 - `vision_ocr` additionally requires `ocr_available=true` and
   `actionable=true`; a scene description or unscored OCR string alone is not
@@ -43,14 +53,19 @@ The following invariants are fail-closed:
   Windows UI Automation observation matches the separately captured foreground
   title/class and contains the named control type required by the request.
 - Accessibility text from a mismatched foreground window is discarded.
-  Accessibility text that lacks the requested control type remains
-  low-confidence context and cannot satisfy `vision_ocr`.
+  The conflicting foreground metadata is also discarded. A screenshot/native
+  OCR fallback may remain scene evidence, but it is marked low confidence and
+  non-actionable, so it cannot satisfy `vision_ocr`.
 - Missing, unknown-schema, or internally contradictory evidence is normalized
   to unavailable evidence.
 - `actionable=true` is impossible when usable evidence is absent.
 - A capture or analysis exception must preserve the text turn, mark the
   required tool `failed_or_unavailable`, and instruct the model not to claim
   screen contents.
+- If analysis completes after the 15-second capture window, scene/OCR/title
+  text is removed before the Host Bridge response, client result, and LLM
+  context are assembled. Only content-free reason, age, counts, and deletion
+  status may remain.
 
 ## Prompt and Tool Boundary
 
@@ -96,6 +111,10 @@ The focused tests cover:
   actionable exact text;
 - changed-window and missing-control accessibility observations failing closed
   or falling back to non-actionable native OCR;
+- source-conflict fallback discarding foreground/UIA state;
+- capture-age expiry sanitizing stale scene/OCR text;
+- legacy v1, missing timestamp, future/inverted/overlong timestamp, and stale
+  host response rejection;
 - exact window-title replies bypassing Main LLM generation, while native OCR
   cannot enter that deterministic copy path;
 - missing and contradictory contracts failing closed;

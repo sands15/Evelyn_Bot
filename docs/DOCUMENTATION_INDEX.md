@@ -1,6 +1,6 @@
 # Evelyn Documentation Index
 
-Last reviewed: 2026-07-30
+Last reviewed: 2026-07-31
 
 Use this file to choose the right document before editing Evelyn. Current runtime
 facts still need to be verified against code before reporting them as
@@ -70,8 +70,9 @@ implemented behavior.
     인증된 Discord 위임, 경쟁 owner 차단, 재시작 비복구 계약을 정의한다.
 
 - `docs/VISION_EVIDENCE_CONTRACT.md`
-  - 화면 관찰 요청과 실제 관찰 근거를 분리하는 `vision.evidence.v1`,
-    scene/OCR별 충족 조건, fail-closed prompt/tool gate와 관찰 가능성 계약.
+  - 화면 관찰 요청과 실제 관찰 근거를 분리하는 `vision.evidence.v2`,
+    15초 freshness, source-conflict fallback, scene/OCR별 충족 조건과
+    fail-closed prompt/tool gate 계약.
 
 - `docs/HOST_VISION_BRIDGE_CONTRACT.md`
   - Docker와 Windows 사이의 단일 화면 관찰 queue, exact schema/TTL/allowlist,

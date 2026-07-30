@@ -1,8 +1,8 @@
 # Evelyn Current State
 
 Document status: **Current**
-Last reviewed: 2026-07-30 KST
-Source branch: `codex/dependency-config-hardening` at `b5d352a`
+Last reviewed: 2026-07-31 KST
+Source branch: `codex/dependency-config-hardening` at `743cfd3`
 
 이 문서는 현재 확인된 사실만 기록한다. 목표 구조와 과거 계획은 다른 설계/계획 문서를 사용한다.
 
@@ -59,6 +59,14 @@ Source branch: `codex/dependency-config-hardening` at `b5d352a`
     UI focus·click·입력 mutation을 수행하지 않는다.
   - screenshot, OCR tile, 요청/응답은 요청 뒤 삭제되고 status에는 근거
     metadata와 지연만 남는다.
+  - per-turn evidence는 `vision.evidence.v2`이며 screenshot capture 뒤
+    15초 안에서만 live다. timestamp 누락·역전·미래·만료와 v1 legacy
+    observed payload는 tool evidence가 될 수 없다.
+  - 전경 창과 UI Automation source가 충돌하면 두 structured source를
+    버리고 screenshot/native OCR만 low-confidence·non-actionable fallback으로
+    사용한다.
+  - stale/invalid observation 원문은 Host Bridge response, client result,
+    Main/Fast LLM context에서 반복 제거한다.
 - 한글 프로젝트 경로의 Docker Buildx 문제를 피하기 위해 빌드 동안만 사용하지
   않는 드라이브 문자를 매핑한다. allowlist 이미지 세 개만 빌드하고 자신이 만든
   매핑만 검증 후 해제한다.
@@ -185,6 +193,13 @@ Source branch: `codex/dependency-config-hardening` at `b5d352a`
   실제 Discord 서비스는 시작하거나 교체하지 않았다.
   - Discord image:
     `sha256:7c8563c727bd7e8aeb8a806835da16df0648c5a516b5a9f48cf9dfef721f99d6`
+- `743cfd3` 소스로 Bot API와 Vision 이미지를 빌드해 per-turn vision
+  freshness/source-conflict fail-closed 경계를 합성 검증했다. 실행 중인
+  Bot API·Vision 컨테이너는 교체하지 않았고 실제 화면 캡처도 요청하지 않았다.
+  - Bot API image:
+    `sha256:898cf1df0adc40aa40fb989108b7187c6401b8d25727b6ee8d1ba93926176802`
+  - Vision image:
+    `sha256:30bad0c4399c60a89ae9cb9729fc29f9896c7375e5e8504599de6ffdcd9e0c81`
 - 이전 `c656fc8` 배포의 recreate 직후에는 이전 Bot API owner claim이 15초
   stale guard 안에 있어 첫 Bot API start가
   `minecraft_world_lease_owner_conflict`로 fail-closed 종료됐다. guard 만료
@@ -290,8 +305,20 @@ Source branch: `codex/dependency-config-hardening` at `b5d352a`
 
 ## Verification state
 
-검증한 코드 기준점: `b5d352a`
+검증한 코드 기준점: `743cfd3`
 
+- bundled Python의 freshness·host client·LLM context 집중 테스트 32개와,
+  공식 Bot API 이미지에 구워진 소스의 집중 테스트 51개를 통과했다.
+- Pillow와 aiohttp가 함께 있는 공식 Discord 테스트 환경의 current-source
+  mount에서 Host Vision Bridge 6개를 통과했다.
+- 전체 Vision discovery 78개는 기능 assertion 실패 0개였고, Linux에서
+  테스트가 `os.name`을 Windows로 patch한 뒤 `WindowsPath`를 생성하는 기존
+  platform 오류 1개만 남았다.
+- 최종 Bot API·Vision 이미지의 `compileall`, `pip check`, Compose config를
+  통과했다.
+- 검증 중 실제 화면 캡처, UI mutation, 마이크·Discord·Minecraft 시작은
+  수행하지 않았다. 실행 중인 Bot API·Vision은 기존 healthy 이미지와
+  restart count 0을 유지했다.
 - 새 공식 Discord 이미지 내부 소스로 자율 승인·restart 비복구·exact
   evidence·실행 중 grant 교체/만료·audit write 실패·Discord status·Minecraft
   lease·실제 `main.py` crash/restart 통합 테스트 96개를 통과했다.

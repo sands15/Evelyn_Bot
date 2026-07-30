@@ -1,7 +1,7 @@
 # Host Vision Bridge Contract
 
 Document status: **Current**
-Last reviewed: 2026-07-30 KST
+Last reviewed: 2026-07-31 KST
 
 ## Purpose
 
@@ -26,7 +26,7 @@ It does not make every pixel-model or OCR result trustworthy.
   tree and discard raw runtime IDs after deriving opaque element IDs.
 - `windows_native_ocr.py` and `invoke_windows_ocr.ps1`: run the fixed Windows
   Runtime OCR operation against bridge-owned screenshots.
-- `vision_runtime.py` and `vision_quality.py`: produce `vision.evidence.v1` and
+- `vision_runtime.py` and `vision_quality.py`: produce `vision.evidence.v2` and
   decide whether the result is actionable.
 
 The Host Supervisor owns the bridge process. Docker communicates only through
@@ -40,8 +40,8 @@ The Host Supervisor owns the bridge process. Docker communicates only through
 {
   "schema": "host_vision.request.v1",
   "requestId": "32 lowercase hex characters",
-  "createdAt": 0.0,
-  "expiresAt": 0.0,
+  "createdAt": 1000.0,
+  "expiresAt": 1180.0,
   "userText": "bounded user request",
   "runOcr": false
 }
@@ -67,18 +67,22 @@ evidence:
 {
   "schema": "host_vision.response.v1",
   "requestId": "32 lowercase hex characters",
-  "createdAt": 0.0,
-  "expiresAt": 0.0,
+  "createdAt": 1000.0,
+  "expiresAt": 1180.0,
   "observation": "ephemeral prompt context",
   "evidence": {
-    "schema": "vision.evidence.v1",
+    "schema": "vision.evidence.v2",
     "state": "observed",
     "evidence_available": true,
     "scene_available": true,
     "ocr_available": false,
     "confidence": "low",
     "actionable": false,
-    "freshness": "live"
+    "freshness": "live",
+    "observedAt": 1000.0,
+    "expiresAt": 1015.0,
+    "ageSec": 0.2,
+    "maxAgeSec": 15.0
   },
   "errorCode": "",
   "latencyMs": 0.0,
@@ -88,10 +92,12 @@ evidence:
 }
 ```
 
-The client rejects unknown keys, wrong schemas or IDs, expired responses,
-oversized observations, and contradictory evidence. Failure remains an explicit
-failed or unavailable result; it is never converted into a successful screen
-claim.
+The client rejects unknown keys, wrong schemas or IDs, responses older than 15
+seconds, expired or overlong response lifetimes, oversized observations, and
+contradictory evidence. The response file may remain in the queue for cleanup
+for up to 180 seconds, but it stops being consumable evidence after 15 seconds.
+Failure remains an explicit failed or unavailable result; it is never converted
+into a successful screen claim.
 
 ## Evidence Sources and Trust
 
@@ -110,6 +116,12 @@ confidence:
   most 120 elements, and is usable only while its title/class still matches the
   separately observed foreground window. Raw runtime IDs are never returned by
   the Python boundary; a one-way 20-character element ID is derived instead.
+- Per-turn combined evidence is fresh for at most 15 seconds from screenshot
+  capture completion. The bridge and client recompute freshness from timestamps
+  instead of trusting a serialized `freshness=live` claim.
+- When foreground metadata and UI Automation identify different windows, both
+  conflicting structured sources are discarded. Screenshot scene/native OCR
+  may be used only as a low-confidence, non-actionable fallback.
 - Exact-text sufficiency is request-specific. A title request requires a window
   title or named title-like control; a button, menu, tab, checkbox, or radio
   request requires a named control of that type. Merely having some accessible
@@ -133,6 +145,9 @@ LLM.
   `screenshots/` directory.
 - Normal completion deletes the screenshot and every OCR tile immediately.
 - The client deletes its request and response in `finally`.
+- Stale or invalid evidence has its observation text and scene/OCR counts
+  removed before the bridge writes a response and again before the client
+  exposes a result.
 - Bridge cleanup removes stale requests, processing files, and responses after
   180 seconds and stale screenshots after 300 seconds.
 - `status.json` contains heartbeat, counters, latency, evidence metadata,

@@ -214,6 +214,12 @@ pattern·PID·경로·명령행은 읽지 않으며 runtime ID는 외부로 내�
 단방향 element ID로 바꾼다. 버튼·메뉴·탭 요청은 해당 이름 있는 control type이
 실제로 있을 때만 exact-text evidence가 된다.
 
+Per-turn 합성 근거도 `vision.evidence.v2`로 올려 screenshot capture 뒤 15초
+안에서만 live로 인정한다. v1 legacy나 timestamp 누락·역전·미래·만료는
+fail-closed하고 stale 원문은 Host Bridge·client·LLM context에서 제거한다.
+foreground와 UIA가 충돌하면 두 structured source를 버리고 screenshot/native
+OCR만 low-confidence·non-actionable fallback으로 남긴다.
+
 2026-07-30 실제 Control Page E2E에서 SDL 전경 제목
 `테라리아: 모래는 OP다`를 문자 그대로 반환했고 Host Vision은
 `live_accessibility_observation`, actionable=true를 기록했다. 같은 앱은 Window
