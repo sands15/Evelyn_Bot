@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -10,7 +11,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import memory_vault as vault
-from .runtime_artifact_io import atomic_text_write
+from .runtime_artifact_io import atomic_json_write, atomic_text_write
 from .text import clean_text
 
 
@@ -27,16 +28,46 @@ MEMORY_PROVENANCE_CORRECTION_RESULT_SCHEMA = (
     "memory.provenance.correction-result.v1"
 )
 MEMORY_PROVENANCE_CORRECTION_EVENT_SCHEMA = (
+    "memory.provenance.correction.event.v2"
+)
+MEMORY_PROVENANCE_CORRECTION_LEGACY_EVENT_SCHEMA = (
     "memory.provenance.correction.event.v1"
+)
+MEMORY_PROVENANCE_CORRECTION_WRITER_SCHEMA = (
+    "memory.provenance.correction-writer.v1"
+)
+MEMORY_PROVENANCE_CORRECTION_CHAIN_HEAD_SCHEMA = (
+    "memory.provenance.correction-chain-head.v1"
 )
 MEMORY_PROVENANCE_CORRECTION_JOURNAL_NAME = (
     "memory_provenance_corrections.jsonl"
 )
+MEMORY_PROVENANCE_CORRECTION_WRITER_LOCK_NAME = (
+    ".memory_provenance_correction_writer.lock"
+)
+MEMORY_PROVENANCE_CORRECTION_WRITER_MARKER_NAME = (
+    "memory_provenance_correction_writer.json"
+)
+MEMORY_PROVENANCE_CORRECTION_CHAIN_HEAD_NAME = (
+    "memory_provenance_correction_chain_head.json"
+)
 MEMORY_PROVENANCE_CORRECTION_TOKEN_TTL_SECONDS = 120
 MEMORY_PROVENANCE_CORRECTION_MAX_SOURCES = 12
+MEMORY_PROVENANCE_CORRECTION_CHAIN_GENESIS = "0" * 64
 
 _correction_lock = threading.RLock()
 _correction_tokens: dict[str, dict[str, Any]] = {}
+_correction_process_nonce = secrets.token_hex(12)
+_writer_local = threading.local()
+_writer_owned_roots: dict[str, int] = {}
+
+
+class MemoryProvenanceCorrectionJournalIntegrityError(OSError):
+    pass
+
+
+class MemoryProvenanceCorrectionWriterUnavailable(OSError):
+    pass
 
 
 def _now_iso(timestamp: float | None = None) -> str:
@@ -54,6 +85,385 @@ def _journal_path(root: Path | None = None) -> Path:
     )
 
 
+def _writer_lock_path(root: Path | None = None) -> Path:
+    return (
+        vault.memory_index_dir(root)
+        / MEMORY_PROVENANCE_CORRECTION_WRITER_LOCK_NAME
+    )
+
+
+def _writer_marker_path(root: Path | None = None) -> Path:
+    return (
+        vault.memory_index_dir(root)
+        / MEMORY_PROVENANCE_CORRECTION_WRITER_MARKER_NAME
+    )
+
+
+def _chain_head_path(root: Path | None = None) -> Path:
+    return (
+        vault.memory_index_dir(root)
+        / MEMORY_PROVENANCE_CORRECTION_CHAIN_HEAD_NAME
+    )
+
+
+def _canonical_json(payload: dict[str, Any]) -> str:
+    return json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _event_hash(payload: dict[str, Any]) -> str:
+    unsigned = {
+        key: value
+        for key, value in payload.items()
+        if key != "eventHash"
+    }
+    return hashlib.sha256(
+        _canonical_json(unsigned).encode("utf-8")
+    ).hexdigest()
+
+
+def _legacy_anchor(lines: list[str]) -> str:
+    digest = hashlib.sha256(
+        b"memory.provenance.correction.legacy-anchor.v1\n"
+    )
+    for line in lines:
+        digest.update(line.encode("utf-8"))
+        digest.update(b"\n")
+    return digest.hexdigest()
+
+
+def _write_writer_marker(
+    *,
+    root: Path | None,
+    state: str,
+    acquired_at: str,
+    recovered_stale_owner: bool,
+) -> None:
+    payload = {
+        "schema": MEMORY_PROVENANCE_CORRECTION_WRITER_SCHEMA,
+        "state": state,
+        "processNonce": _correction_process_nonce,
+        "pid": os.getpid(),
+        "acquiredAt": acquired_at,
+        "updatedAt": _now_iso(),
+        "recoveredStaleOwner": recovered_stale_owner,
+        "contentFree": True,
+    }
+    atomic_json_write(
+        _writer_marker_path(root),
+        payload,
+        durable=True,
+    )
+
+
+def _lock_writer_handle(handle: Any) -> None:
+    if os.name == "nt":
+        import msvcrt
+
+        handle.seek(0)
+        if handle.read(1) == b"":
+            handle.seek(0)
+            handle.write(b"\0")
+            handle.flush()
+            os.fsync(handle.fileno())
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        return
+    import fcntl
+
+    fcntl.flock(
+        handle.fileno(),
+        fcntl.LOCK_EX | fcntl.LOCK_NB,
+    )
+
+
+def _unlock_writer_handle(handle: Any) -> None:
+    if os.name == "nt":
+        import msvcrt
+
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        return
+    import fcntl
+
+    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def _held_writer_roots() -> set[str]:
+    held = getattr(_writer_local, "held_roots", None)
+    if held is None:
+        held = set()
+        _writer_local.held_roots = held
+    return held
+
+
+@contextlib.contextmanager
+def _writer_guard(root: Path | None = None):
+    root_key = str((root or vault.MEMORY_ROOT).resolve())
+    held_roots = _held_writer_roots()
+    if root_key in held_roots:
+        yield
+        return
+    owner_thread_id = threading.get_ident()
+    with _correction_lock:
+        if root_key in _writer_owned_roots:
+            raise MemoryProvenanceCorrectionWriterUnavailable(
+                "memory_provenance_correction_writer_unavailable"
+            )
+        _writer_owned_roots[root_key] = owner_thread_id
+    lock_path = _writer_lock_path(root)
+    locked = False
+    marker_held = False
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        acquired_at = _now_iso()
+        with lock_path.open("a+b") as handle:
+            try:
+                _lock_writer_handle(handle)
+                locked = True
+            except OSError as exc:
+                raise MemoryProvenanceCorrectionWriterUnavailable(
+                    "memory_provenance_correction_writer_unavailable"
+                ) from exc
+            marker_path = _writer_marker_path(root)
+            recovered_stale_owner = False
+            try:
+                marker = json.loads(
+                    marker_path.read_text(encoding="utf-8")
+                )
+                recovered_stale_owner = bool(
+                    isinstance(marker, dict)
+                    and marker.get("state") == "held"
+                    and marker.get("processNonce")
+                    != _correction_process_nonce
+                )
+            except (FileNotFoundError, OSError, json.JSONDecodeError):
+                recovered_stale_owner = False
+            try:
+                _write_writer_marker(
+                    root=root,
+                    state="held",
+                    acquired_at=acquired_at,
+                    recovered_stale_owner=recovered_stale_owner,
+                )
+            except OSError as exc:
+                with contextlib.suppress(OSError):
+                    _unlock_writer_handle(handle)
+                locked = False
+                raise MemoryProvenanceCorrectionWriterUnavailable(
+                    "memory_provenance_correction_writer_marker_unavailable"
+                ) from exc
+            marker_held = True
+            held_roots.add(root_key)
+            try:
+                yield
+            finally:
+                held_roots.discard(root_key)
+                if marker_held:
+                    with contextlib.suppress(OSError):
+                        _write_writer_marker(
+                            root=root,
+                            state="released",
+                            acquired_at=acquired_at,
+                            recovered_stale_owner=recovered_stale_owner,
+                        )
+                if locked:
+                    with contextlib.suppress(OSError):
+                        _unlock_writer_handle(handle)
+    finally:
+        with _correction_lock:
+            if (
+                _writer_owned_roots.get(root_key)
+                == owner_thread_id
+            ):
+                _writer_owned_roots.pop(root_key, None)
+
+
+def _journal_snapshot(
+    root: Path | None = None,
+) -> dict[str, Any]:
+    path = _journal_path(root)
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        if _chain_head_path(root).exists():
+            raise MemoryProvenanceCorrectionJournalIntegrityError(
+                "memory_provenance_correction_journal_integrity_failed"
+            )
+        return {
+            "events": [],
+            "sequence": 0,
+            "lastHash": MEMORY_PROVENANCE_CORRECTION_CHAIN_GENESIS,
+            "integrity": "empty",
+            "headState": "missing",
+        }
+    except (OSError, UnicodeError) as exc:
+        raise MemoryProvenanceCorrectionJournalIntegrityError(
+            "memory_provenance_correction_journal_unreadable"
+        ) from exc
+    raw_lines = text.splitlines()
+    if any(not line.strip() for line in raw_lines):
+        raise MemoryProvenanceCorrectionJournalIntegrityError(
+            "memory_provenance_correction_journal_integrity_failed"
+        )
+    events: list[dict[str, Any]] = []
+    legacy_lines: list[str] = []
+    chain_hashes: dict[int, str] = {}
+    chain_started = False
+    sequence = 0
+    expected_previous = MEMORY_PROVENANCE_CORRECTION_CHAIN_GENESIS
+    for raw_line in raw_lines:
+        try:
+            payload = json.loads(raw_line)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise MemoryProvenanceCorrectionJournalIntegrityError(
+                "memory_provenance_correction_journal_integrity_failed"
+            ) from exc
+        if not isinstance(payload, dict):
+            raise MemoryProvenanceCorrectionJournalIntegrityError(
+                "memory_provenance_correction_journal_integrity_failed"
+            )
+        schema = payload.get("schema")
+        if (
+            schema == MEMORY_PROVENANCE_CORRECTION_LEGACY_EVENT_SCHEMA
+            and not chain_started
+        ):
+            legacy_lines.append(raw_line)
+            events.append(payload)
+            continue
+        if schema != MEMORY_PROVENANCE_CORRECTION_EVENT_SCHEMA:
+            raise MemoryProvenanceCorrectionJournalIntegrityError(
+                "memory_provenance_correction_journal_integrity_failed"
+            )
+        if not chain_started:
+            chain_started = True
+            expected_previous = (
+                _legacy_anchor(legacy_lines)
+                if legacy_lines
+                else MEMORY_PROVENANCE_CORRECTION_CHAIN_GENESIS
+            )
+        event_sequence = payload.get("sequence")
+        previous_hash = payload.get("previousHash")
+        event_hash = payload.get("eventHash")
+        if (
+            isinstance(event_sequence, bool)
+            or not isinstance(event_sequence, int)
+            or event_sequence != sequence + 1
+            or previous_hash != expected_previous
+            or not isinstance(event_hash, str)
+            or len(event_hash) != 64
+            or not secrets.compare_digest(
+                event_hash,
+                _event_hash(payload),
+            )
+        ):
+            raise MemoryProvenanceCorrectionJournalIntegrityError(
+                "memory_provenance_correction_journal_integrity_failed"
+            )
+        sequence = event_sequence
+        expected_previous = event_hash
+        chain_hashes[sequence] = event_hash
+        events.append(payload)
+    legacy_hash = (
+        _legacy_anchor(legacy_lines)
+        if legacy_lines
+        else MEMORY_PROVENANCE_CORRECTION_CHAIN_GENESIS
+    )
+    head_state = "missing"
+    try:
+        head = json.loads(
+            _chain_head_path(root).read_text(encoding="utf-8")
+        )
+    except FileNotFoundError:
+        head = None
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise MemoryProvenanceCorrectionJournalIntegrityError(
+            "memory_provenance_correction_journal_integrity_failed"
+        ) from exc
+    if head is not None:
+        head_sequence = head.get("sequence") if isinstance(head, dict) else None
+        head_hash = head.get("eventHash") if isinstance(head, dict) else None
+        if (
+            not isinstance(head, dict)
+            or set(head)
+            != {
+                "schema",
+                "sequence",
+                "eventHash",
+                "updatedAt",
+                "contentFree",
+            }
+            or head.get("schema")
+            != MEMORY_PROVENANCE_CORRECTION_CHAIN_HEAD_SCHEMA
+            or isinstance(head_sequence, bool)
+            or not isinstance(head_sequence, int)
+            or head_sequence < 0
+            or head_sequence > sequence
+            or not isinstance(head_hash, str)
+            or len(head_hash) != 64
+            or head.get("contentFree") is not True
+            or not isinstance(head.get("updatedAt"), str)
+            or not secrets.compare_digest(
+                head_hash,
+                (
+                    legacy_hash
+                    if head_sequence == 0
+                    else chain_hashes.get(head_sequence, "")
+                ),
+            )
+        ):
+            raise MemoryProvenanceCorrectionJournalIntegrityError(
+                "memory_provenance_correction_journal_integrity_failed"
+            )
+        head_state = (
+            "current"
+            if head_sequence == sequence
+            else "lagging"
+        )
+    return {
+        "events": events,
+        "sequence": sequence,
+        "lastHash": (
+            expected_previous
+            if chain_started
+            else (
+                legacy_hash
+            )
+        ),
+        "integrity": (
+            "verified"
+            if chain_started
+            else ("legacy" if legacy_lines else "empty")
+        ),
+        "headState": head_state,
+    }
+
+
+def _write_chain_head(
+    *,
+    root: Path | None,
+    sequence: int,
+    event_hash: str,
+) -> None:
+    atomic_json_write(
+        _chain_head_path(root),
+        {
+            "schema": (
+                MEMORY_PROVENANCE_CORRECTION_CHAIN_HEAD_SCHEMA
+            ),
+            "sequence": int(sequence),
+            "eventHash": str(event_hash),
+            "updatedAt": _now_iso(),
+            "contentFree": True,
+        },
+        durable=True,
+    )
+
+
 def _append_journal_event(
     payload: dict[str, Any],
     *,
@@ -61,54 +471,36 @@ def _append_journal_event(
 ) -> None:
     path = _journal_path(root)
     path.parent.mkdir(parents=True, exist_ok=True)
-    event = {
-        "schema": MEMORY_PROVENANCE_CORRECTION_EVENT_SCHEMA,
-        **payload,
-    }
-    with _correction_lock:
-        with path.open(
-            "a",
-            encoding="utf-8",
-            newline="\n",
-        ) as handle:
-            handle.write(
-                json.dumps(
-                    event,
-                    ensure_ascii=False,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                )
-                + "\n"
+    with _writer_guard(root):
+        with _correction_lock:
+            snapshot = _journal_snapshot(root)
+            event = {
+                "schema": MEMORY_PROVENANCE_CORRECTION_EVENT_SCHEMA,
+                **payload,
+                "sequence": int(snapshot["sequence"]) + 1,
+                "previousHash": str(snapshot["lastHash"]),
+            }
+            event["eventHash"] = _event_hash(event)
+            with path.open(
+                "a",
+                encoding="utf-8",
+                newline="\n",
+            ) as handle:
+                handle.write(_canonical_json(event) + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            _write_chain_head(
+                root=root,
+                sequence=event["sequence"],
+                event_hash=event["eventHash"],
             )
-            handle.flush()
-            os.fsync(handle.fileno())
 
 
 def _read_journal_events(
     root: Path | None = None,
 ) -> list[dict[str, Any]]:
-    path = _journal_path(root)
     with _correction_lock:
-        try:
-            lines = path.read_text(
-                encoding="utf-8",
-                errors="ignore",
-            ).splitlines()
-        except (FileNotFoundError, OSError):
-            return []
-    output: list[dict[str, Any]] = []
-    for line in lines:
-        try:
-            payload = json.loads(line)
-        except (TypeError, json.JSONDecodeError):
-            continue
-        if (
-            isinstance(payload, dict)
-            and payload.get("schema")
-            == MEMORY_PROVENANCE_CORRECTION_EVENT_SCHEMA
-        ):
-            output.append(payload)
-    return output
+        return list(_journal_snapshot(root)["events"])
 
 
 def _journal_records(
@@ -133,6 +525,32 @@ def _journal_records(
         elif event_type in {"committed", "failed"}:
             terminal[change_id] = event
     return prepared, terminal
+
+
+def _journal_error(exc: BaseException) -> str:
+    code = clean_text(str(exc))
+    return (
+        code
+        if code.startswith("memory_provenance_correction_")
+        else "memory_provenance_correction_journal_integrity_failed"
+    )
+
+
+def _writer_public_state(root: Path | None = None) -> str:
+    try:
+        payload = json.loads(
+            _writer_marker_path(root).read_text(encoding="utf-8")
+        )
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        return "unknown"
+    if (
+        not isinstance(payload, dict)
+        or payload.get("schema")
+        != MEMORY_PROVENANCE_CORRECTION_WRITER_SCHEMA
+        or payload.get("state") not in {"held", "released"}
+    ):
+        return "unknown"
+    return str(payload["state"])
 
 
 def _as_ids(value: object) -> list[str]:
@@ -200,50 +618,81 @@ def _prepared_matches_note(
 def _reconcile_journal(
     root: Path | None = None,
 ) -> list[dict[str, Any]]:
-    events = _read_journal_events(root)
+    with _correction_lock:
+        snapshot = _journal_snapshot(root)
+    if (
+        bool(snapshot["events"])
+        and snapshot["headState"] != "current"
+    ):
+        try:
+            with _writer_guard(root):
+                with _correction_lock:
+                    snapshot = _journal_snapshot(root)
+                    if (
+                        bool(snapshot["events"])
+                        and snapshot["headState"] != "current"
+                    ):
+                        _write_chain_head(
+                            root=root,
+                            sequence=int(snapshot["sequence"]),
+                            event_hash=str(snapshot["lastHash"]),
+                        )
+                        snapshot = _journal_snapshot(root)
+        except MemoryProvenanceCorrectionWriterUnavailable:
+            pass
+    events = list(snapshot["events"])
     prepared, terminal = _journal_records(events)
+    recovered_any = False
     for change_id, intent in prepared.items():
         if change_id in terminal:
             continue
-        with _correction_lock:
-            _latest_prepared, latest_terminal = (
-                _journal_records(_read_journal_events(root))
-            )
-            if change_id in latest_terminal:
-                continue
-            target = vault._memory_vault_find_note(  # noqa: SLF001
-                clean_text(
-                    str(intent.get("targetNoteId") or "")
-                ),
-                root=root,
-            )
-            if (
-                target is None
-                or not _prepared_matches_note(intent, target[1])
-            ):
-                continue
-            recovered = {
-                "eventType": "committed",
-                "changeId": change_id,
-                "committedAt": _now_iso(),
-                "recoveredAfterRestart": True,
-            }
-            try:
+        try:
+            with _writer_guard(root):
+                with _correction_lock:
+                    _latest_prepared, latest_terminal = (
+                        _journal_records(
+                            _read_journal_events(root)
+                        )
+                    )
+                    if change_id in latest_terminal:
+                        continue
+                    target = (
+                        vault._memory_vault_find_note(  # noqa: SLF001
+                            clean_text(
+                                str(
+                                    intent.get("targetNoteId")
+                                    or ""
+                                )
+                            ),
+                            root=root,
+                        )
+                    )
+                    if (
+                        target is None
+                        or not _prepared_matches_note(
+                            intent,
+                            target[1],
+                        )
+                    ):
+                        continue
+                    recovered = {
+                        "eventType": "committed",
+                        "changeId": change_id,
+                        "committedAt": _now_iso(),
+                        "recoveredAfterRestart": True,
+                    }
                 _append_journal_event(
                     recovered,
                     root=root,
                 )
-            except OSError:
-                continue
-        events.append(
-            {
-                "schema": (
-                    MEMORY_PROVENANCE_CORRECTION_EVENT_SCHEMA
-                ),
-                **recovered,
-            }
-        )
-    return events
+                recovered_any = True
+        except OSError:
+            continue
+    return (
+        _read_journal_events(root)
+        if recovered_any
+        else events
+    )
 
 
 def _committed_records(
@@ -670,7 +1119,36 @@ def memory_provenance_correction_overview(
             root=root
         )
     )
-    records = _committed_records(root)
+    try:
+        records = _committed_records(root)
+        with _correction_lock:
+            journal_snapshot = _journal_snapshot(root)
+        journal_integrity = str(
+            journal_snapshot["integrity"]
+        )
+        journal_chain_ready = bool(
+            not journal_snapshot["events"]
+            or journal_snapshot["headState"] == "current"
+        )
+    except MemoryProvenanceCorrectionJournalIntegrityError as exc:
+        return {
+            "ok": False,
+            "schema": (
+                MEMORY_PROVENANCE_CORRECTION_OVERVIEW_SCHEMA
+            ),
+            "error": _journal_error(exc),
+            "readOnly": True,
+            "autoApply": False,
+            "contentSimilarityUsed": False,
+            "journalContentFree": True,
+            "journalIntegrity": "failed",
+            "journalChainReady": False,
+            "journalWriterProtected": True,
+            "writerState": _writer_public_state(root),
+            "relationshipCount": 0,
+            "relationships": [],
+            "checkedAt": _now_iso(),
+        }
     latest_by_target: dict[str, dict[str, Any]] = {}
     for record in records:
         target_id = clean_text(
@@ -779,6 +1257,10 @@ def memory_provenance_correction_overview(
         "autoApply": False,
         "contentSimilarityUsed": False,
         "journalContentFree": True,
+        "journalIntegrity": journal_integrity,
+        "journalChainReady": journal_chain_ready,
+        "journalWriterProtected": True,
+        "writerState": _writer_public_state(root),
         "relationshipCount": len(relationships),
         "relationships": relationships,
         "checkedAt": _now_iso(),
@@ -791,7 +1273,10 @@ def memory_provenance_correction_source_options(
     root: Path | None = None,
 ) -> dict[str, Any]:
     vault.sync_memory_vault_index(root=root)
-    _reconcile_journal(root)
+    try:
+        _reconcile_journal(root)
+    except MemoryProvenanceCorrectionJournalIntegrityError as exc:
+        return {"ok": False, "error": _journal_error(exc)}
     target = vault._memory_vault_find_note(  # noqa: SLF001
         note_id_or_rel_path,
         root=root,
@@ -976,7 +1461,10 @@ def preview_memory_provenance_correction(
     now: Callable[[], float] = time.time,
 ) -> dict[str, Any]:
     vault.sync_memory_vault_index(root=root)
-    _reconcile_journal(root)
+    try:
+        _reconcile_journal(root)
+    except MemoryProvenanceCorrectionJournalIntegrityError as exc:
+        return {"ok": False, "error": _journal_error(exc)}
     binding = _target_binding(
         note_id_or_rel_path,
         source_note_ids,
@@ -998,7 +1486,10 @@ def preview_memory_provenance_correction_undo(
     now: Callable[[], float] = time.time,
 ) -> dict[str, Any]:
     vault.sync_memory_vault_index(root=root)
-    _reconcile_journal(root)
+    try:
+        _reconcile_journal(root)
+    except MemoryProvenanceCorrectionJournalIntegrityError as exc:
+        return {"ok": False, "error": _journal_error(exc)}
     target = vault._memory_vault_find_note(  # noqa: SLF001
         note_id_or_rel_path,
         root=root,
@@ -1449,6 +1940,46 @@ def _apply_preview(
     return result
 
 
+def _apply_with_writer(
+    note_id_or_rel_path: str,
+    confirm_token: str,
+    *,
+    expected_kind: str,
+    root: Path | None = None,
+    now: Callable[[], float] = time.time,
+) -> dict[str, Any]:
+    try:
+        with _writer_guard(root):
+            _journal_snapshot(root)
+            return _apply_preview(
+                note_id_or_rel_path,
+                confirm_token,
+                expected_kind=expected_kind,
+                root=root,
+                now=now,
+            )
+    except MemoryProvenanceCorrectionJournalIntegrityError as exc:
+        return {
+            "ok": False,
+            "schema": (
+                MEMORY_PROVENANCE_CORRECTION_RESULT_SCHEMA
+            ),
+            "action": expected_kind,
+            "applied": False,
+            "error": _journal_error(exc),
+        }
+    except MemoryProvenanceCorrectionWriterUnavailable as exc:
+        return {
+            "ok": False,
+            "schema": (
+                MEMORY_PROVENANCE_CORRECTION_RESULT_SCHEMA
+            ),
+            "action": expected_kind,
+            "applied": False,
+            "error": _journal_error(exc),
+        }
+
+
 def apply_memory_provenance_correction(
     note_id_or_rel_path: str,
     confirm_token: str,
@@ -1456,7 +1987,7 @@ def apply_memory_provenance_correction(
     root: Path | None = None,
     now: Callable[[], float] = time.time,
 ) -> dict[str, Any]:
-    return _apply_preview(
+    return _apply_with_writer(
         note_id_or_rel_path,
         confirm_token,
         expected_kind="correction",
@@ -1472,7 +2003,7 @@ def apply_memory_provenance_correction_undo(
     root: Path | None = None,
     now: Callable[[], float] = time.time,
 ) -> dict[str, Any]:
-    return _apply_preview(
+    return _apply_with_writer(
         note_id_or_rel_path,
         confirm_token,
         expected_kind="undo",

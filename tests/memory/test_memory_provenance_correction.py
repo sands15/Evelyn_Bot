@@ -5,6 +5,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 
@@ -315,12 +316,50 @@ class MemoryProvenanceCorrectionTests(unittest.TestCase):
                 json.loads(line)
                 for line in raw.splitlines()
             ]
+            head_raw = correction._chain_head_path(
+                root
+            ).read_text(encoding="utf-8")
+            head = json.loads(head_raw)
+            marker_raw = correction._writer_marker_path(
+                root
+            ).read_text(encoding="utf-8")
+            marker = json.loads(marker_raw)
 
         self.assertEqual(
             [row["eventType"] for row in rows],
             ["prepared", "committed"],
         )
+        self.assertEqual(
+            [row["schema"] for row in rows],
+            [
+                correction.MEMORY_PROVENANCE_CORRECTION_EVENT_SCHEMA,
+                correction.MEMORY_PROVENANCE_CORRECTION_EVENT_SCHEMA,
+            ],
+        )
+        self.assertEqual(
+            [row["sequence"] for row in rows],
+            [1, 2],
+        )
+        self.assertEqual(
+            rows[0]["previousHash"],
+            correction.MEMORY_PROVENANCE_CORRECTION_CHAIN_GENESIS,
+        )
+        self.assertEqual(
+            rows[1]["previousHash"],
+            rows[0]["eventHash"],
+        )
+        self.assertTrue(
+            all(len(row["eventHash"]) == 64 for row in rows)
+        )
+        self.assertEqual(head["sequence"], 2)
+        self.assertEqual(head["eventHash"], rows[1]["eventHash"])
+        self.assertTrue(head["contentFree"])
+        self.assertEqual(marker["state"], "released")
+        self.assertTrue(marker["contentFree"])
         self.assertTrue(rows[0]["contentFree"])
+        persisted = "\n".join(
+            (raw, head_raw, marker_raw)
+        )
         for forbidden in (
             "Correction Source",
             "Correction Target",
@@ -334,7 +373,381 @@ class MemoryProvenanceCorrectionTests(unittest.TestCase):
             '"evidenceHash"',
             '"transcript"',
         ):
-            self.assertNotIn(forbidden, raw)
+            self.assertNotIn(forbidden, persisted)
+
+    def test_tampered_journal_blocks_apply_without_note_write(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fixture = self.create_fixture(root)
+            source_b = fixture["source_b"]
+            target = fixture["target"]
+            target_path = fixture["target_path"]
+            preview = (
+                correction.preview_memory_provenance_correction(
+                    target.note_id,
+                    [source_b.note_id],
+                    root=root,
+                )
+            )
+            before_raw = target_path.read_text(encoding="utf-8")
+            journal_path = correction._journal_path(root)
+            journal_path.parent.mkdir(
+                parents=True,
+                exist_ok=True,
+            )
+            journal_path.write_text(
+                json.dumps(
+                    {
+                        "schema": (
+                            correction
+                            .MEMORY_PROVENANCE_CORRECTION_EVENT_SCHEMA
+                        )
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            applied = (
+                correction.apply_memory_provenance_correction(
+                    target.note_id,
+                    preview["confirmToken"],
+                    root=root,
+                )
+            )
+            overview = (
+                correction.memory_provenance_correction_overview(
+                    root=root
+                )
+            )
+            after_raw = target_path.read_text(
+                encoding="utf-8"
+            )
+
+        self.assertFalse(applied["ok"])
+        self.assertFalse(applied["applied"])
+        self.assertEqual(
+            applied["error"],
+            (
+                "memory_provenance_correction_"
+                "journal_integrity_failed"
+            ),
+        )
+        self.assertEqual(
+            after_raw,
+            before_raw,
+        )
+        self.assertFalse(overview["ok"])
+        self.assertEqual(
+            overview["journalIntegrity"],
+            "failed",
+        )
+        self.assertEqual(overview["relationships"], [])
+
+    def test_tail_deletion_is_detected_by_chain_head(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fixture = self.create_fixture(root)
+            source_b = fixture["source_b"]
+            target = fixture["target"]
+            preview = (
+                correction.preview_memory_provenance_correction(
+                    target.note_id,
+                    [source_b.note_id],
+                    root=root,
+                )
+            )
+            correction.apply_memory_provenance_correction(
+                target.note_id,
+                preview["confirmToken"],
+                root=root,
+            )
+            journal_path = correction._journal_path(root)
+            rows = journal_path.read_text(
+                encoding="utf-8"
+            ).splitlines()
+            self.assertEqual(len(rows), 2)
+            journal_path.write_text(
+                rows[0] + "\n",
+                encoding="utf-8",
+            )
+
+            overview = (
+                correction.memory_provenance_correction_overview(
+                    root=root
+                )
+            )
+
+        self.assertFalse(overview["ok"])
+        self.assertEqual(
+            overview["error"],
+            (
+                "memory_provenance_correction_"
+                "journal_integrity_failed"
+            ),
+        )
+
+    def test_legacy_prefix_is_anchored_by_first_v2_event(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            journal_path = correction._journal_path(root)
+            journal_path.parent.mkdir(
+                parents=True,
+                exist_ok=True,
+            )
+            legacy = {
+                "schema": (
+                    correction
+                    .MEMORY_PROVENANCE_CORRECTION_LEGACY_EVENT_SCHEMA
+                ),
+                "eventType": "failed",
+                "changeId": "provcorr-legacy-prefix",
+            }
+            legacy_line = json.dumps(
+                legacy,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            journal_path.write_text(
+                legacy_line + "\n",
+                encoding="utf-8",
+            )
+
+            correction._append_journal_event(
+                {
+                    "eventType": "failed",
+                    "changeId": "provcorr-v2-anchor",
+                    "failedAt": "2026-07-31T00:00:00Z",
+                    "errorCode": "test_failure",
+                },
+                root=root,
+            )
+            rows = [
+                json.loads(line)
+                for line in journal_path.read_text(
+                    encoding="utf-8"
+                ).splitlines()
+            ]
+            head = json.loads(
+                correction._chain_head_path(root).read_text(
+                    encoding="utf-8"
+                )
+            )
+            legacy["eventType"] = "committed"
+            changed_legacy_line = json.dumps(
+                legacy,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            journal_path.write_text(
+                changed_legacy_line
+                + "\n"
+                + json.dumps(
+                    rows[1],
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(
+                correction
+                .MemoryProvenanceCorrectionJournalIntegrityError
+            ):
+                correction._read_journal_events(root)
+
+        self.assertEqual(
+            rows[1]["previousHash"],
+            correction._legacy_anchor([legacy_line]),
+        )
+        self.assertNotEqual(
+            rows[1]["previousHash"],
+            correction.MEMORY_PROVENANCE_CORRECTION_CHAIN_GENESIS,
+        )
+        self.assertEqual(head["sequence"], 1)
+        self.assertEqual(head["eventHash"], rows[1]["eventHash"])
+
+    def test_competing_process_writer_is_rejected(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            script = (
+                "import json,sys;"
+                f"sys.path.insert(0,{str(RUNTIME_ROOT)!r});"
+                "from pathlib import Path;"
+                "from evelyn_core import "
+                "memory_provenance_correction as c;"
+                "\ntry:\n"
+                " c._append_journal_event("
+                "{'eventType':'failed',"
+                "'changeId':'provcorr-child',"
+                "'failedAt':'2026-07-31T00:00:00Z',"
+                "'errorCode':'test_failure'},"
+                f"root=Path({str(root)!r}))\n"
+                " print(json.dumps({'ok':True}))\n"
+                "except Exception as exc:\n"
+                " print(json.dumps({"
+                "'ok':False,"
+                "'type':type(exc).__name__,"
+                "'error':str(exc)}))"
+            )
+            with correction._writer_guard(root):
+                child = subprocess.run(
+                    [sys.executable, "-c", script],
+                    text=True,
+                    cwd=str(REPO_ROOT),
+                    capture_output=True,
+                    check=True,
+                )
+            child_result = json.loads(child.stdout)
+            correction._append_journal_event(
+                {
+                    "eventType": "failed",
+                    "changeId": "provcorr-parent",
+                    "failedAt": "2026-07-31T00:00:00Z",
+                    "errorCode": "test_failure",
+                },
+                root=root,
+            )
+            rows = correction._read_journal_events(root)
+            marker = json.loads(
+                correction._writer_marker_path(root).read_text(
+                    encoding="utf-8"
+                )
+            )
+
+        self.assertFalse(child_result["ok"])
+        self.assertEqual(
+            child_result["type"],
+            "MemoryProvenanceCorrectionWriterUnavailable",
+        )
+        self.assertEqual(
+            child_result["error"],
+            "memory_provenance_correction_writer_unavailable",
+        )
+        self.assertEqual(
+            [row["changeId"] for row in rows],
+            ["provcorr-parent"],
+        )
+        self.assertEqual(marker["state"], "released")
+
+    def test_competing_thread_writer_is_rejected(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+
+            def try_writer() -> tuple[str, str]:
+                try:
+                    with correction._writer_guard(root):
+                        return ("ok", "")
+                except Exception as exc:
+                    return (type(exc).__name__, str(exc))
+
+            with correction._writer_guard(root):
+                with ThreadPoolExecutor(
+                    max_workers=1
+                ) as executor:
+                    result = executor.submit(
+                        try_writer
+                    ).result(timeout=2)
+
+        self.assertEqual(
+            result,
+            (
+                "MemoryProvenanceCorrectionWriterUnavailable",
+                (
+                    "memory_provenance_correction_"
+                    "writer_unavailable"
+                ),
+            ),
+        )
+
+    def test_lagging_chain_head_recovers_after_commit_crash(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fixture = self.create_fixture(root)
+            source_b = fixture["source_b"]
+            target = fixture["target"]
+            preview = (
+                correction.preview_memory_provenance_correction(
+                    target.note_id,
+                    [source_b.note_id],
+                    root=root,
+                )
+            )
+            original_write_head = correction._write_chain_head
+            calls = 0
+
+            def fail_second_head(
+                *,
+                root: Path | None,
+                sequence: int,
+                event_hash: str,
+            ) -> None:
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    raise OSError("simulated head crash")
+                original_write_head(
+                    root=root,
+                    sequence=sequence,
+                    event_hash=event_hash,
+                )
+
+            with patch.object(
+                correction,
+                "_write_chain_head",
+                side_effect=fail_second_head,
+            ):
+                applied = (
+                    correction.apply_memory_provenance_correction(
+                        target.note_id,
+                        preview["confirmToken"],
+                        root=root,
+                    )
+                )
+            lagging = correction._journal_snapshot(root)
+            overview = (
+                correction.memory_provenance_correction_overview(
+                    root=root
+                )
+            )
+            repaired = correction._journal_snapshot(root)
+            rows = correction._read_journal_events(root)
+            head = json.loads(
+                correction._chain_head_path(root).read_text(
+                    encoding="utf-8"
+                )
+            )
+
+        self.assertTrue(applied["applied"])
+        self.assertFalse(applied["ok"])
+        self.assertIn(
+            (
+                "memory_provenance_correction_"
+                "journal_commit_failed"
+            ),
+            applied["cleanupErrors"],
+        )
+        self.assertEqual(lagging["headState"], "lagging")
+        self.assertTrue(overview["ok"])
+        self.assertEqual(repaired["headState"], "current")
+        self.assertEqual(head["sequence"], 2)
+        self.assertEqual(head["eventHash"], rows[-1]["eventHash"])
 
     def test_post_write_exception_is_committed_not_failed(
         self,

@@ -1553,6 +1553,16 @@ def memory_provenance_correction_status(
     ):
         return 503
     if error in {
+        (
+            "memory_provenance_correction_"
+            "journal_integrity_failed"
+        ),
+        "memory_provenance_correction_journal_unreadable",
+        "memory_provenance_correction_writer_marker_unavailable",
+        "memory_provenance_correction_writer_unavailable",
+    }:
+        return 503
+    if error in {
         "memory_provenance_correction_changed_since_preview",
         "memory_provenance_correction_cycle",
         "memory_provenance_correction_no_change",
@@ -1666,8 +1676,10 @@ async def memory_provenance_backfill_options_handler(
 async def memory_provenance_corrections_handler(
     _: web.Request,
 ) -> web.StreamResponse:
+    result = memory_provenance_correction_overview()
     return json_response(
-        memory_provenance_correction_overview()
+        result,
+        status=memory_provenance_correction_status(result),
     )
 
 

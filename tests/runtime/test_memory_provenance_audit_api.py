@@ -507,6 +507,57 @@ class MemoryProvenanceAuditApiTests(
 
         self.assertEqual(response.status, 409)
 
+    async def test_correction_integrity_failure_is_unavailable(
+        self,
+    ) -> None:
+        with patch.object(
+            control_page_server,
+            "memory_provenance_correction_overview",
+            return_value={
+                "ok": False,
+                "error": (
+                    "memory_provenance_correction_"
+                    "journal_integrity_failed"
+                ),
+            },
+        ):
+            response = await self.client.get(
+                (
+                    "/api/control-page/"
+                    "memory-provenance-corrections"
+                ),
+                headers={"Origin": self.origin},
+            )
+
+        self.assertEqual(response.status, 503)
+
+    async def test_correction_writer_conflict_is_unavailable(
+        self,
+    ) -> None:
+        with patch.object(
+            control_page_server,
+            "apply_memory_provenance_correction",
+            return_value={
+                "ok": False,
+                "applied": False,
+                "error": (
+                    "memory_provenance_correction_"
+                    "writer_unavailable"
+                ),
+            },
+        ):
+            response = await self.client.post(
+                (
+                    "/api/control-page/"
+                    "memory-provenance-corrections/"
+                    "target/apply"
+                ),
+                headers=self.headers(),
+                json={"confirmToken": "busy"},
+            )
+
+        self.assertEqual(response.status, 503)
+
     async def test_memory_snapshot_includes_quarantine_status(
         self,
     ) -> None:
