@@ -81,9 +81,12 @@ DEFAULT_RETENTION_RULES: tuple[RetentionRule, ...] = (
     RetentionRule("memory_writebehind", ("memory/*.jsonl",), max_age_days=30, max_total_bytes=20 * 1024 * 1024, preserve_newest=3),
     RetentionRule(
         "conversation_continuity",
-        ("conversation_continuity/active.json",),
+        (
+            "conversation_continuity/active.json",
+            "conversation_continuity/checkpoint_head.json",
+        ),
         max_age_days=1,
-        max_total_bytes=1024 * 1024,
+        max_total_bytes=2 * 1024 * 1024,
         preserve_newest=0,
     ),
     RetentionRule(

@@ -212,12 +212,27 @@ class RuntimeArtifactsRetentionTests(unittest.TestCase):
                 '{"completedTurnText": true}',
                 mtime=now - 2 * 86400,
             )
+            write_file(
+                (
+                    root
+                    / "conversation_continuity"
+                    / "checkpoint_head.json"
+                ),
+                '{"contentFree": true}',
+                mtime=now - 2 * 86400,
+            )
 
             plan = build_cleanup_plan(root, now=now)
 
         self.assertEqual(
             [item.relative_path for item in plan.candidates],
-            ["conversation_continuity/active.json"],
+            [
+                "conversation_continuity/active.json",
+                (
+                    "conversation_continuity/"
+                    "checkpoint_head.json"
+                ),
+            ],
         )
 
 

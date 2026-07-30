@@ -18,8 +18,12 @@ if str(RUNTIME_ROOT) not in sys.path:
     sys.path.insert(0, str(RUNTIME_ROOT))
 
 from evelyn_core.session_continuity import (  # noqa: E402
+    SESSION_CONTINUITY_CHAIN_GENESIS,
     SESSION_CONTINUITY_CHECKPOINT_SCHEMA,
+    SESSION_CONTINUITY_HEAD_SCHEMA,
+    SESSION_CONTINUITY_LEGACY_CHECKPOINT_SCHEMA,
     SessionContinuityCheckpoint,
+    _checkpoint_hash,
 )
 from evelyn_core.runtime_artifact_io import atomic_json_write  # noqa: E402
 from evelyn_core.session_memory_state import SessionStateStore  # noqa: E402
@@ -124,9 +128,31 @@ class SessionContinuityTests(unittest.TestCase):
 
         self.assertEqual(flushed["state"], "ready")
         payload = json.loads(self.checkpoint_path.read_text(encoding="utf-8"))
+        head = json.loads(
+            (self.root / "checkpoint_head.json").read_text(
+                encoding="utf-8"
+            )
+        )
         self.assertEqual(
             payload["schema"],
             SESSION_CONTINUITY_CHECKPOINT_SCHEMA,
+        )
+        self.assertEqual(payload["generation"], 1)
+        self.assertEqual(
+            payload["previousHash"],
+            SESSION_CONTINUITY_CHAIN_GENESIS,
+        )
+        self.assertEqual(head["schema"], SESSION_CONTINUITY_HEAD_SCHEMA)
+        self.assertEqual(head["state"], "active")
+        self.assertEqual(head["generation"], 1)
+        self.assertEqual(
+            head["checkpointHash"],
+            payload["checkpointHash"],
+        )
+        self.assertTrue(head["contentFree"])
+        self.assertNotIn(
+            "내가 하던 이야기를 기억해",
+            json.dumps(head, ensure_ascii=False),
         )
         serialized = json.dumps(payload, ensure_ascii=False)
         self.assertNotIn("private system prompt", serialized)
@@ -163,6 +189,266 @@ class SessionContinuityTests(unittest.TestCase):
             {"channel_id": 2, "message_id": 4},
         )
         self.assertNotIn(session_key, restored_store.partial_stt_text)
+        self.assertEqual(
+            restored["checkpointIntegrity"],
+            "verified",
+        )
+        self.assertEqual(
+            restored["checkpointHeadState"],
+            "current",
+        )
+        self.assertTrue(restored["rollbackProtected"])
+
+    def test_valid_json_content_tamper_is_rejected(
+        self,
+    ) -> None:
+        clock = FakeClock(wall=1000.0, monotonic=100.0)
+        self.manager(self.populated_store(), clock).flush()
+        payload = json.loads(
+            self.checkpoint_path.read_text(encoding="utf-8")
+        )
+        payload["sessions"][0]["history"][0]["content"] = (
+            "변조된 대화문"
+        )
+        payload["checkpointHash"] = _checkpoint_hash(payload)
+        self.checkpoint_path.write_text(
+            json.dumps(payload, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        restored_store = SessionStateStore.create_empty()
+
+        status = self.manager(
+            restored_store,
+            FakeClock(wall=1001.0, monotonic=500.0),
+        ).restore()
+        head = json.loads(
+            (self.root / "checkpoint_head.json").read_text(
+                encoding="utf-8"
+            )
+        )
+
+        self.assertEqual(status["state"], "error")
+        self.assertEqual(
+            status["lastErrorCode"],
+            "conversation_continuity_checkpoint_rejected",
+        )
+        self.assertEqual(status["checkpointIntegrity"], "failed")
+        self.assertEqual(restored_store.histories, {})
+        self.assertFalse(self.checkpoint_path.exists())
+        self.assertEqual(head["state"], "empty")
+
+    def test_rollback_to_older_generation_is_rejected(
+        self,
+    ) -> None:
+        clock = FakeClock(wall=1000.0, monotonic=100.0)
+        store = self.populated_store()
+        manager = self.manager(store, clock)
+        manager.flush()
+        first_raw = self.checkpoint_path.read_text(
+            encoding="utf-8"
+        )
+        store.histories["guild:1:text:2:user:3"].extend(
+            [
+                {"role": "user", "content": "두 번째 사용자 턴"},
+                {"role": "assistant", "content": "두 번째 답변"},
+            ]
+        )
+        clock.wall = 1001.0
+        manager.flush()
+        current_head = json.loads(
+            (self.root / "checkpoint_head.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(current_head["generation"], 2)
+        self.checkpoint_path.write_text(
+            first_raw,
+            encoding="utf-8",
+        )
+        restored_store = SessionStateStore.create_empty()
+
+        status = self.manager(
+            restored_store,
+            FakeClock(wall=1002.0, monotonic=500.0),
+        ).restore()
+
+        self.assertEqual(status["state"], "error")
+        self.assertEqual(
+            status["lastErrorCode"],
+            "conversation_continuity_checkpoint_rejected",
+        )
+        self.assertEqual(restored_store.histories, {})
+        self.assertFalse(self.checkpoint_path.exists())
+
+    def test_checkpoint_deletion_behind_active_head_is_rejected(
+        self,
+    ) -> None:
+        clock = FakeClock(wall=1000.0, monotonic=100.0)
+        self.manager(self.populated_store(), clock).flush()
+        self.checkpoint_path.unlink()
+        restored_store = SessionStateStore.create_empty()
+
+        status = self.manager(
+            restored_store,
+            FakeClock(wall=1001.0, monotonic=500.0),
+        ).restore()
+        head = json.loads(
+            (self.root / "checkpoint_head.json").read_text(
+                encoding="utf-8"
+            )
+        )
+
+        self.assertEqual(status["state"], "error")
+        self.assertEqual(
+            status["lastErrorCode"],
+            "conversation_continuity_checkpoint_rejected",
+        )
+        self.assertEqual(restored_store.histories, {})
+        self.assertEqual(head["state"], "empty")
+
+    def test_lagging_head_after_commit_crash_is_recovered(
+        self,
+    ) -> None:
+        clock = FakeClock(wall=1000.0, monotonic=100.0)
+        store = self.populated_store()
+        manager = self.manager(store, clock)
+        manager.flush()
+        store.histories["guild:1:text:2:user:3"].extend(
+            [
+                {"role": "user", "content": "head crash 직전"},
+                {"role": "assistant", "content": "복구할게"},
+            ]
+        )
+        clock.wall = 1001.0
+        original_write = atomic_json_write
+        failed = False
+
+        def fail_first_head(
+            path: Path,
+            payload: dict,
+            **kwargs,
+        ) -> None:
+            nonlocal failed
+            if Path(path) == manager.head_path and not failed:
+                failed = True
+                raise OSError("simulated head commit crash")
+            original_write(path, payload, **kwargs)
+
+        with patch(
+            "evelyn_core.session_continuity.atomic_json_write",
+            side_effect=fail_first_head,
+        ):
+            flushed = manager.flush()
+
+        self.assertEqual(flushed["state"], "error")
+        self.assertEqual(
+            flushed["checkpointHeadState"],
+            "lagging",
+        )
+        self.assertTrue(self.checkpoint_path.exists())
+        lagging_head = json.loads(
+            manager.head_path.read_text(encoding="utf-8")
+        )
+        self.assertEqual(lagging_head["generation"], 1)
+
+        restored_store = SessionStateStore.create_empty()
+        restored = self.manager(
+            restored_store,
+            FakeClock(wall=1002.0, monotonic=500.0),
+        ).restore()
+        head = json.loads(
+            manager.head_path.read_text(encoding="utf-8")
+        )
+
+        self.assertEqual(restored["state"], "restored")
+        self.assertEqual(
+            restored["checkpointHeadState"],
+            "current",
+        )
+        self.assertEqual(head["state"], "active")
+        self.assertEqual(head["generation"], 2)
+        self.assertIn(
+            "guild:1:text:2:user:3",
+            restored_store.histories,
+        )
+
+    def test_legacy_checkpoint_is_anchored_then_chained(
+        self,
+    ) -> None:
+        source_clock = FakeClock(
+            wall=1000.0,
+            monotonic=100.0,
+        )
+        self.manager(
+            self.populated_store(),
+            source_clock,
+        ).flush()
+        legacy = json.loads(
+            self.checkpoint_path.read_text(encoding="utf-8")
+        )
+        legacy["schema"] = (
+            SESSION_CONTINUITY_LEGACY_CHECKPOINT_SCHEMA
+        )
+        legacy.pop("generation")
+        legacy.pop("previousHash")
+        legacy.pop("checkpointHash")
+        self.checkpoint_path.write_text(
+            json.dumps(
+                legacy,
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+        (self.root / "checkpoint_head.json").unlink()
+        restored_store = SessionStateStore.create_empty()
+        restored_clock = FakeClock(
+            wall=1001.0,
+            monotonic=500.0,
+        )
+        manager = self.manager(
+            restored_store,
+            restored_clock,
+        )
+
+        restored = manager.restore()
+        legacy_head = json.loads(
+            manager.head_path.read_text(encoding="utf-8")
+        )
+
+        self.assertEqual(restored["state"], "restored")
+        self.assertEqual(
+            restored["checkpointIntegrity"],
+            "legacy_anchored",
+        )
+        self.assertEqual(legacy_head["generation"], 0)
+        self.assertTrue(restored["rollbackProtected"])
+
+        restored_store.histories[
+            "guild:1:text:2:user:3"
+        ].extend(
+            [
+                {"role": "user", "content": "마이그레이션 뒤 턴"},
+                {"role": "assistant", "content": "이어갈게"},
+            ]
+        )
+        restored_clock.wall = 1002.0
+        migrated = manager.flush()
+        current = json.loads(
+            self.checkpoint_path.read_text(encoding="utf-8")
+        )
+
+        self.assertEqual(migrated["state"], "ready")
+        self.assertEqual(
+            current["schema"],
+            SESSION_CONTINUITY_CHECKPOINT_SCHEMA,
+        )
+        self.assertEqual(current["generation"], 1)
+        self.assertEqual(
+            current["previousHash"],
+            legacy_head["checkpointHash"],
+        )
 
     def test_stale_checkpoint_does_not_restore_relationship_state(self) -> None:
         source_clock = FakeClock(wall=1000.0, monotonic=100.0)

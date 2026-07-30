@@ -230,8 +230,29 @@ class SessionContinuityRestartTests(unittest.TestCase):
             status_raw = (
                 root / "status.json"
             ).read_text(encoding="utf-8")
+            head = json.loads(
+                (
+                    root / "checkpoint_head.json"
+                ).read_text(encoding="utf-8")
+            )
 
         self.assertEqual(result["status"]["state"], "restored")
+        self.assertEqual(
+            result["status"]["checkpointIntegrity"],
+            "verified",
+        )
+        self.assertEqual(
+            result["status"]["checkpointHeadState"],
+            "current",
+        )
+        self.assertTrue(
+            result["status"]["rollbackProtected"]
+        )
+        self.assertEqual(head["state"], "active")
+        self.assertEqual(
+            head["checkpointHash"],
+            checkpoint["checkpointHash"],
+        )
         self.assertEqual(
             result["status"]["restoredSessionCount"],
             1,

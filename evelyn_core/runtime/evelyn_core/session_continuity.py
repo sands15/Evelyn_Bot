@@ -14,7 +14,13 @@ from .runtime_error_observability import RuntimeErrorCounter
 from .text import clean_text
 
 
-SESSION_CONTINUITY_CHECKPOINT_SCHEMA = "conversation_continuity.checkpoint.v1"
+SESSION_CONTINUITY_CHECKPOINT_SCHEMA = "conversation_continuity.checkpoint.v2"
+SESSION_CONTINUITY_LEGACY_CHECKPOINT_SCHEMA = (
+    "conversation_continuity.checkpoint.v1"
+)
+SESSION_CONTINUITY_HEAD_SCHEMA = (
+    "conversation_continuity.checkpoint-head.v1"
+)
 SESSION_CONTINUITY_STATUS_SCHEMA = "conversation_continuity.status.v1"
 SESSION_CONTINUITY_REVOCATIONS_SCHEMA = (
     "conversation_continuity.guild_revocations.v1"
@@ -26,6 +32,7 @@ DEFAULT_MAX_HISTORY_ITEMS = 12
 DEFAULT_MAX_CONTENT_CHARS = 2000
 DEFAULT_MAX_FILE_BYTES = 1024 * 1024
 DEFAULT_MAX_GUILD_REVOCATIONS = 256
+SESSION_CONTINUITY_CHAIN_GENESIS = "0" * 64
 _ALLOWED_HISTORY_ROLES = frozenset({"user", "assistant"})
 _ALLOWED_SPEAKERS = frozenset({"user", "assistant"})
 
@@ -96,6 +103,45 @@ def _session_guild_id(session_key: str) -> int | None:
     return guild_id if guild_id is not None and guild_id >= 0 else None
 
 
+def _canonical_json(payload: dict[str, Any]) -> str:
+    return json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _checkpoint_hash(payload: dict[str, Any]) -> str:
+    unsigned = {
+        key: value
+        for key, value in payload.items()
+        if key != "checkpointHash"
+    }
+    return hashlib.sha256(
+        _canonical_json(unsigned).encode("utf-8")
+    ).hexdigest()
+
+
+def _legacy_checkpoint_hash(raw_text: str) -> str:
+    digest = hashlib.sha256(
+        b"conversation_continuity.legacy-checkpoint.v1\n"
+    )
+    digest.update(raw_text.encode("utf-8"))
+    return digest.hexdigest()
+
+
+def _valid_sha256(value: Any) -> str:
+    if not isinstance(value, str) or len(value) != 64:
+        return ""
+    lowered = value.lower()
+    return (
+        lowered
+        if all(character in "0123456789abcdef" for character in lowered)
+        else ""
+    )
+
+
 class SessionContinuityCheckpoint:
     """Persists a bounded, short-lived completed-turn checkpoint across restarts."""
 
@@ -105,6 +151,7 @@ class SessionContinuityCheckpoint:
         store: Any,
         checkpoint_path: Path,
         status_path: Path,
+        head_path: Path | None = None,
         revocations_path: Path | None = None,
         system_prompt: str,
         max_age_sec: float = DEFAULT_MAX_AGE_SEC,
@@ -120,6 +167,12 @@ class SessionContinuityCheckpoint:
         self.store = store
         self.checkpoint_path = Path(checkpoint_path)
         self.status_path = Path(status_path)
+        self.head_path = Path(
+            head_path
+            or self.checkpoint_path.with_name(
+                "checkpoint_head.json"
+            )
+        )
         self.revocations_path = Path(
             revocations_path
             or self.checkpoint_path.with_name("guild_revocations.json")
@@ -145,6 +198,9 @@ class SessionContinuityCheckpoint:
         self._restored_session_count = 0
         self._persisted_session_count = 0
         self._guild_revocations: dict[int, float] = {}
+        self._checkpoint_integrity = "unknown"
+        self._checkpoint_generation = 0
+        self._checkpoint_head_state = "missing"
 
     def _emit(self, message: str) -> None:
         if self.log is not None:
@@ -239,6 +295,8 @@ class SessionContinuityCheckpoint:
         *,
         saved_at: float,
         now_monotonic: float,
+        generation: int,
+        previous_hash: str,
     ) -> dict[str, Any]:
         sessions: list[dict[str, Any]] = []
         for source in material["sessions"]:
@@ -272,8 +330,10 @@ class SessionContinuityCheckpoint:
                     },
                 }
             )
-        return {
+        payload = {
             "schema": SESSION_CONTINUITY_CHECKPOINT_SCHEMA,
+            "generation": int(generation),
+            "previousHash": str(previous_hash),
             "savedAt": saved_at,
             "expiresAt": saved_at + self.max_age_sec,
             "policy": {
@@ -288,6 +348,8 @@ class SessionContinuityCheckpoint:
             },
             "sessions": sessions,
         }
+        payload["checkpointHash"] = _checkpoint_hash(payload)
+        return payload
 
     def status(self) -> dict[str, Any]:
         updated_at = self.wall_time()
@@ -302,6 +364,19 @@ class SessionContinuityCheckpoint:
             "restoredSessionCount": self._restored_session_count,
             "persistedSessionCount": self._persisted_session_count,
             "guildRevocationCount": len(self._guild_revocations),
+            "checkpointIntegrity": self._checkpoint_integrity,
+            "checkpointGeneration": self._checkpoint_generation,
+            "checkpointHeadState": self._checkpoint_head_state,
+            "rollbackProtected": bool(
+                self._checkpoint_head_state
+                in {"current", "empty"}
+                and self._checkpoint_integrity
+                in {
+                    "empty",
+                    "legacy_anchored",
+                    "verified",
+                }
+            ),
             "policy": {
                 "maxAgeSec": self.max_age_sec,
                 "flushIntervalSec": self.flush_interval_sec,
@@ -310,6 +385,283 @@ class SessionContinuityCheckpoint:
             },
             **self.runtime_errors.snapshot(),
         }
+
+    def _load_checkpoint_head(self) -> dict[str, Any] | None:
+        path = self.head_path
+        if not path.exists() and not path.is_symlink():
+            return None
+        if (
+            path.is_symlink()
+            or not path.is_file()
+            or path.stat().st_size > 128 * 1024
+        ):
+            raise ValueError("checkpoint_head_rejected")
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        expected_keys = {
+            "schema",
+            "state",
+            "generation",
+            "checkpointHash",
+            "updatedAt",
+            "contentFree",
+        }
+        generation = (
+            payload.get("generation")
+            if isinstance(payload, dict)
+            else None
+        )
+        state = (
+            str(payload.get("state") or "")
+            if isinstance(payload, dict)
+            else ""
+        )
+        checkpoint_hash = (
+            _valid_sha256(payload.get("checkpointHash"))
+            if isinstance(payload, dict)
+            else ""
+        )
+        updated_at = (
+            _finite_float(payload.get("updatedAt"), default=-1.0)
+            if isinstance(payload, dict)
+            else -1.0
+        )
+        if (
+            not isinstance(payload, dict)
+            or set(payload) != expected_keys
+            or payload.get("schema")
+            != SESSION_CONTINUITY_HEAD_SCHEMA
+            or state not in {"active", "empty"}
+            or isinstance(generation, bool)
+            or not isinstance(generation, int)
+            or generation < 0
+            or not checkpoint_hash
+            or updated_at < 0.0
+            or payload.get("contentFree") is not True
+            or (
+                state == "empty"
+                and checkpoint_hash
+                != SESSION_CONTINUITY_CHAIN_GENESIS
+            )
+        ):
+            raise ValueError("checkpoint_head_rejected")
+        return {
+            **payload,
+            "checkpointHash": checkpoint_hash,
+            "updatedAt": updated_at,
+        }
+
+    def _write_checkpoint_head(
+        self,
+        *,
+        state: str,
+        generation: int,
+        checkpoint_hash: str,
+    ) -> None:
+        atomic_json_write(
+            self.head_path,
+            {
+                "schema": SESSION_CONTINUITY_HEAD_SCHEMA,
+                "state": state,
+                "generation": int(generation),
+                "checkpointHash": str(checkpoint_hash),
+                "updatedAt": self.wall_time(),
+                "contentFree": True,
+            },
+            durable=True,
+        )
+
+    def _discard_checkpoint_head(self) -> None:
+        try:
+            if (
+                self.head_path.exists()
+                and not self.head_path.is_symlink()
+                and self.head_path.is_file()
+            ):
+                self.head_path.unlink()
+        except OSError:
+            return
+
+    def _checkpoint_snapshot(self) -> dict[str, Any]:
+        head = self._load_checkpoint_head()
+        path = self.checkpoint_path
+        if not path.exists() and not path.is_symlink():
+            if head is not None and head["state"] == "active":
+                raise ValueError("checkpoint_missing_after_head")
+            return {
+                "payload": None,
+                "rawText": "",
+                "schema": "",
+                "generation": (
+                    int(head["generation"])
+                    if head is not None
+                    else 0
+                ),
+                "checkpointHash": (
+                    str(head["checkpointHash"])
+                    if head is not None
+                    else SESSION_CONTINUITY_CHAIN_GENESIS
+                ),
+                "integrity": "empty",
+                "headState": (
+                    "empty"
+                    if head is not None
+                    else "missing"
+                ),
+            }
+        if (
+            path.is_symlink()
+            or not path.is_file()
+            or path.stat().st_size > self.max_file_bytes
+        ):
+            raise ValueError("checkpoint_rejected")
+        raw_text = path.read_text(encoding="utf-8")
+        payload = json.loads(raw_text)
+        if not isinstance(payload, dict):
+            raise ValueError("checkpoint_rejected")
+        schema = payload.get("schema")
+        if schema == SESSION_CONTINUITY_LEGACY_CHECKPOINT_SCHEMA:
+            checkpoint_hash = _legacy_checkpoint_hash(raw_text)
+            if head is None:
+                head_state = "missing"
+            elif (
+                head["state"] == "active"
+                and int(head["generation"]) == 0
+                and head["checkpointHash"] == checkpoint_hash
+            ):
+                head_state = "current"
+            else:
+                raise ValueError("legacy_checkpoint_head_mismatch")
+            return {
+                "payload": payload,
+                "rawText": raw_text,
+                "schema": schema,
+                "generation": 0,
+                "checkpointHash": checkpoint_hash,
+                "integrity": "legacy",
+                "headState": head_state,
+            }
+        if schema != SESSION_CONTINUITY_CHECKPOINT_SCHEMA:
+            raise ValueError("invalid_schema")
+        generation = payload.get("generation")
+        previous_hash = _valid_sha256(
+            payload.get("previousHash")
+        )
+        checkpoint_hash = _valid_sha256(
+            payload.get("checkpointHash")
+        )
+        if (
+            isinstance(generation, bool)
+            or not isinstance(generation, int)
+            or generation < 1
+            or not previous_hash
+            or not checkpoint_hash
+            or checkpoint_hash != _checkpoint_hash(payload)
+        ):
+            raise ValueError("checkpoint_integrity_failed")
+        if head is None:
+            if (
+                generation != 1
+                or previous_hash
+                != SESSION_CONTINUITY_CHAIN_GENESIS
+            ):
+                raise ValueError("checkpoint_head_missing")
+            head_state = "lagging"
+        elif (
+            head["state"] == "active"
+            and generation == int(head["generation"])
+            and checkpoint_hash == head["checkpointHash"]
+        ):
+            head_state = "current"
+        elif (
+            head["state"] == "active"
+            and generation == int(head["generation"]) + 1
+            and previous_hash == head["checkpointHash"]
+        ):
+            head_state = "lagging"
+        elif (
+            head["state"] == "empty"
+            and generation == int(head["generation"]) + 1
+            and previous_hash
+            == SESSION_CONTINUITY_CHAIN_GENESIS
+        ):
+            head_state = "lagging"
+        else:
+            raise ValueError("checkpoint_rollback_or_head_mismatch")
+        return {
+            "payload": payload,
+            "rawText": raw_text,
+            "schema": schema,
+            "generation": generation,
+            "checkpointHash": checkpoint_hash,
+            "integrity": "verified",
+            "headState": head_state,
+        }
+
+    def _anchor_checkpoint_snapshot(
+        self,
+        snapshot: dict[str, Any],
+    ) -> dict[str, Any]:
+        payload = snapshot.get("payload")
+        if payload is None:
+            self._checkpoint_generation = int(
+                snapshot["generation"]
+            )
+            self._checkpoint_integrity = "empty"
+            self._checkpoint_head_state = str(
+                snapshot["headState"]
+            )
+            return snapshot
+        if snapshot["headState"] != "current":
+            self._write_checkpoint_head(
+                state="active",
+                generation=int(snapshot["generation"]),
+                checkpoint_hash=str(
+                    snapshot["checkpointHash"]
+                ),
+            )
+            snapshot = {
+                **snapshot,
+                "headState": "current",
+            }
+        self._checkpoint_generation = int(
+            snapshot["generation"]
+        )
+        self._checkpoint_integrity = (
+            "legacy_anchored"
+            if snapshot["integrity"] == "legacy"
+            else "verified"
+        )
+        self._checkpoint_head_state = "current"
+        return snapshot
+
+    def _revoke_checkpoint_chain(self) -> None:
+        self._checkpoint_revoked_at = self.wall_time()
+        generation = self._checkpoint_generation
+        try:
+            head = self._load_checkpoint_head()
+            if head is not None:
+                generation = max(
+                    generation,
+                    int(head["generation"]),
+                )
+        except Exception:
+            self._discard_checkpoint_head()
+        try:
+            self._write_checkpoint_head(
+                state="empty",
+                generation=generation + 1,
+                checkpoint_hash=(
+                    SESSION_CONTINUITY_CHAIN_GENESIS
+                ),
+            )
+            self._checkpoint_generation = generation + 1
+            self._checkpoint_head_state = "empty"
+        except Exception:
+            self._discard_checkpoint_head()
+            self._checkpoint_head_state = "failed"
+        self._checkpoint_integrity = "failed"
+        self._last_signature = ""
+        self._discard_checkpoint()
 
     def _load_guild_revocations(self) -> dict[int, float]:
         path = self.revocations_path
@@ -434,66 +786,66 @@ class SessionContinuityCheckpoint:
             self._checkpoint_revoked_at = revoked_at
             material = self._material()
             self._last_signature = self._signature(material)
-            if not self.checkpoint_path.exists():
-                self._checkpoint_revoked_at = None
-                self._state = "missing"
-                self._write_status()
-                return self.status()
             try:
-                if (
-                    self.checkpoint_path.is_symlink()
-                    or not self.checkpoint_path.is_file()
-                ):
-                    raise ValueError("checkpoint_rejected")
-                if self.checkpoint_path.stat().st_size > self.max_file_bytes:
-                    self._discard_checkpoint()
-                    return self._record_error(
-                        "conversation_continuity_checkpoint_rejected",
-                        ValueError("checkpoint_too_large"),
-                    )
-                payload = json.loads(
-                    self.checkpoint_path.read_text(encoding="utf-8")
-                )
-            except (OSError, ValueError, json.JSONDecodeError) as exc:
-                self._discard_checkpoint()
+                snapshot = self._checkpoint_snapshot()
+            except (
+                OSError,
+                UnicodeError,
+                json.JSONDecodeError,
+            ) as exc:
+                self._revoke_checkpoint_chain()
                 return self._record_error(
                     "conversation_continuity_restore_failed",
                     exc,
                 )
-            if (
-                not isinstance(payload, dict)
-                or payload.get("schema") != SESSION_CONTINUITY_CHECKPOINT_SCHEMA
-            ):
-                self._discard_checkpoint()
+            except ValueError as exc:
+                self._revoke_checkpoint_chain()
                 return self._record_error(
                     "conversation_continuity_checkpoint_rejected",
-                    ValueError("invalid_schema"),
+                    exc,
                 )
+            try:
+                snapshot = self._anchor_checkpoint_snapshot(
+                    snapshot
+                )
+            except Exception as exc:
+                self._checkpoint_head_state = "failed"
+                return self._record_error(
+                    "conversation_continuity_restore_failed",
+                    exc,
+                )
+            if snapshot["payload"] is None:
+                self._checkpoint_revoked_at = None
+                self._state = "missing"
+                self._write_status()
+                return self.status()
+            payload = snapshot["payload"]
             saved_at = _finite_float(payload.get("savedAt"), default=-1.0)
             now_wall = self.wall_time()
             if saved_at < 0.0 or saved_at > now_wall + 60.0:
-                self._discard_checkpoint()
+                self._revoke_checkpoint_chain()
                 return self._record_error(
                     "conversation_continuity_checkpoint_rejected",
                     ValueError("invalid_saved_at"),
                 )
             if revoked_at is not None and revoked_at >= saved_at:
-                self._discard_checkpoint()
+                self._revoke_checkpoint_chain()
                 return self._record_error(
                     "conversation_continuity_checkpoint_rejected",
                     ValueError("checkpoint_revoked"),
                 )
             age_sec = max(0.0, now_wall - saved_at)
             if age_sec > self.max_age_sec:
-                self._discard_checkpoint()
+                self._revoke_checkpoint_chain()
                 self._checkpoint_revoked_at = None
+                self._checkpoint_integrity = "empty"
                 self._state = "stale"
                 self._write_status()
                 return self.status()
             try:
                 guild_revocations = self._load_guild_revocations()
             except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
-                self._discard_checkpoint()
+                self._revoke_checkpoint_chain()
                 return self._record_error(
                     "conversation_continuity_checkpoint_rejected",
                     exc,
@@ -635,6 +987,29 @@ class SessionContinuityCheckpoint:
     def flush(self, *, force: bool = False) -> dict[str, Any]:
         with self._lock:
             try:
+                snapshot = self._checkpoint_snapshot()
+            except (
+                OSError,
+                UnicodeError,
+                json.JSONDecodeError,
+                ValueError,
+            ) as exc:
+                self._revoke_checkpoint_chain()
+                return self._record_error(
+                    "conversation_continuity_checkpoint_rejected",
+                    exc,
+                )
+            try:
+                snapshot = self._anchor_checkpoint_snapshot(
+                    snapshot
+                )
+            except Exception as exc:
+                self._checkpoint_head_state = "failed"
+                return self._record_error(
+                    "conversation_continuity_flush_failed",
+                    exc,
+                )
+            try:
                 material = self._material()
                 signature = self._signature(material)
             except Exception as exc:
@@ -643,29 +1018,60 @@ class SessionContinuityCheckpoint:
                     exc,
                 )
             if not force and signature == self._last_signature:
+                if (
+                    snapshot["payload"] is not None
+                    and self._state == "error"
+                ):
+                    self._state = "ready"
+                    self._write_status()
                 return self.status()
             sessions = material["sessions"]
-            try:
-                if not sessions:
-                    self.checkpoint_path.unlink(missing_ok=True)
-                    self._last_signature = signature
-                    self._persisted_session_count = 0
-                    self._last_persisted_at = self.wall_time()
-                    self._checkpoint_revoked_at = None
-                    self._state = "empty"
-                    self._write_status()
-                    return self.status()
-                saved_at = self.wall_time()
-                payload = self._payload_from_material(
-                    material,
-                    saved_at=saved_at,
-                    now_monotonic=self.monotonic(),
+            if not sessions:
+                try:
+                    self._write_checkpoint_head(
+                        state="empty",
+                        generation=(
+                            int(snapshot["generation"]) + 1
+                        ),
+                        checkpoint_hash=(
+                            SESSION_CONTINUITY_CHAIN_GENESIS
+                        ),
+                    )
+                except Exception as exc:
+                    self._revoke_checkpoint_chain()
+                    return self._record_error(
+                        "conversation_continuity_flush_failed",
+                        exc,
+                    )
+                self._discard_checkpoint()
+                self._checkpoint_generation = (
+                    int(snapshot["generation"]) + 1
                 )
-                encoded = json.dumps(
-                    payload,
-                    ensure_ascii=False,
-                    sort_keys=True,
-                ).encode("utf-8")
+                self._checkpoint_integrity = "empty"
+                self._checkpoint_head_state = "empty"
+                self._last_signature = signature
+                self._persisted_session_count = 0
+                self._last_persisted_at = self.wall_time()
+                self._checkpoint_revoked_at = None
+                self._state = "empty"
+                self._write_status()
+                return self.status()
+            saved_at = self.wall_time()
+            generation = int(snapshot["generation"]) + 1
+            previous_hash = (
+                str(snapshot["checkpointHash"])
+                if snapshot["payload"] is not None
+                else SESSION_CONTINUITY_CHAIN_GENESIS
+            )
+            payload = self._payload_from_material(
+                material,
+                saved_at=saved_at,
+                now_monotonic=self.monotonic(),
+                generation=generation,
+                previous_hash=previous_hash,
+            )
+            try:
+                encoded = _canonical_json(payload).encode("utf-8")
                 if len(encoded) > self.max_file_bytes:
                     raise ValueError("checkpoint_too_large")
                 atomic_json_write(
@@ -676,8 +1082,7 @@ class SessionContinuityCheckpoint:
             except Exception as exc:
                 # A stale pre-reset checkpoint is more dangerous than losing
                 # short-lived continuity. Fail closed and never resurrect it.
-                self._checkpoint_revoked_at = self.wall_time()
-                self._discard_checkpoint()
+                self._revoke_checkpoint_chain()
                 return self._record_error(
                     "conversation_continuity_flush_failed",
                     exc,
@@ -686,6 +1091,23 @@ class SessionContinuityCheckpoint:
             self._persisted_session_count = len(sessions)
             self._last_persisted_at = saved_at
             self._checkpoint_revoked_at = None
+            self._checkpoint_generation = generation
+            self._checkpoint_integrity = "verified"
+            try:
+                self._write_checkpoint_head(
+                    state="active",
+                    generation=generation,
+                    checkpoint_hash=str(
+                        payload["checkpointHash"]
+                    ),
+                )
+            except Exception as exc:
+                self._checkpoint_head_state = "lagging"
+                return self._record_error(
+                    "conversation_continuity_flush_failed",
+                    exc,
+                )
+            self._checkpoint_head_state = "current"
             self._state = "ready"
             self._write_status()
             return self.status()
@@ -710,7 +1132,10 @@ class SessionContinuityCheckpoint:
 __all__ = [
     "DEFAULT_FLUSH_INTERVAL_SEC",
     "DEFAULT_MAX_AGE_SEC",
+    "SESSION_CONTINUITY_CHAIN_GENESIS",
     "SESSION_CONTINUITY_CHECKPOINT_SCHEMA",
+    "SESSION_CONTINUITY_HEAD_SCHEMA",
+    "SESSION_CONTINUITY_LEGACY_CHECKPOINT_SCHEMA",
     "SESSION_CONTINUITY_REVOCATIONS_SCHEMA",
     "SESSION_CONTINUITY_STATUS_SCHEMA",
     "SessionContinuityCheckpoint",
