@@ -404,6 +404,32 @@
         "requires_confirm": true,
         "cooldown_sec": 60
       }
+    },
+    {
+      "id": "minecraft_world_lease",
+      "label": "Minecraft World Lease",
+      "kind": "authorization_owner",
+      "required": false,
+      "host": "127.0.0.1",
+      "port": 0,
+      "checks": [
+        {
+          "kind": "artifact_json",
+          "path": "minecraft_world_lease/status.json",
+          "timeout_ms": 300,
+          "stale_after_sec": 15,
+          "expect_json": {
+            "schema": "minecraft_world_lease.status.v1"
+          }
+        }
+      ],
+      "launcher": "",
+      "repair": {
+        "allowed": false,
+        "strategy": "none",
+        "requires_confirm": true,
+        "cooldown_sec": 60
+      }
     }
   ]
 }

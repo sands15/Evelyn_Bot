@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import os
 import subprocess
@@ -12,6 +13,10 @@ from typing import Any
 from aiohttp import web
 
 from .paths import get_runtime_artifacts_root
+from .minecraft_world_lease_contract import (
+    load_guarded_world_lease,
+    validate_world_lease_request,
+)
 from .runtime_config_schema import (
     MINDCRAFT_SERVICE_SETTINGS,
     load_runtime_settings,
@@ -28,6 +33,17 @@ DEFAULT_GOAL = (
     "privileges; when blocked, observe and take a normal-player detour instead of repeating."
 )
 RUNTIME_ARTIFACTS_ROOT = get_runtime_artifacts_root()
+WORLD_LEASE_STATUS_PATH = (
+    RUNTIME_ARTIFACTS_ROOT
+    / "minecraft_world_lease"
+    / "status.json"
+)
+WORLD_LEASE_SECRET_PATH = (
+    RUNTIME_ARTIFACTS_ROOT
+    / "secrets"
+    / "minecraft_world_lease.json"
+)
+WORLD_LEASE_GUARD_INTERVAL_SEC = 5.0
 _MINDCRAFT_CONFIG = load_runtime_settings(
     "mindcraft",
     MINDCRAFT_SERVICE_SETTINGS,
@@ -79,7 +95,10 @@ class MindcraftRuntime:
         self._lock = threading.RLock()
         self._started_at: float | None = None
         self._last_exit_code: int | None = None
-        self._manual_stop = False
+        self._manual_stop = True
+        self._last_world_lease_error_code = (
+            "minecraft_world_authorization_required"
+        )
         self.runtime_errors = RuntimeErrorCounter()
         self._auto_restart = bool(_MINDCRAFT_CONFIG["MINDCRAFT_AUTO_RESTART"])
         self._restart_backoff_until = 0.0
@@ -233,6 +252,20 @@ class MindcraftRuntime:
                 )
                 _write_json(STATUS_PATH, telemetry)
 
+    def reconcile_world_lease(self) -> bool:
+        lease_status, error = load_guarded_world_lease(
+            WORLD_LEASE_STATUS_PATH,
+            WORLD_LEASE_SECRET_PATH,
+        )
+        authorized = bool(lease_status)
+        self._last_world_lease_error_code = error
+        if not authorized:
+            if self.process_alive() or not self._manual_stop:
+                self.stop()
+            return False
+        self._ensure_process_running()
+        return True
+
     def stop(self) -> None:
         with self._lock:
             try:
@@ -276,11 +309,11 @@ class MindcraftRuntime:
                 self.start(goal)
 
     def build_status(self) -> dict[str, Any]:
+        world_lease_authorized = self.reconcile_world_lease()
         process = self._process
         if process is not None and process.poll() is not None:
             self._last_exit_code = process.returncode
         self._cleanup_process_state()
-        self._ensure_process_running()
         running = self.process_alive()
         telemetry = _read_json(STATUS_PATH)
         updated_at = telemetry.get("updated_at")
@@ -350,6 +383,11 @@ class MindcraftRuntime:
             "telemetry_fresh": telemetry_fresh,
             "updated_at": updated_at or self._started_at or time.time(),
             "runner_exit_code": self._last_exit_code,
+            "world_lease_authorized": world_lease_authorized,
+            "world_lease_error_code": (
+                "" if world_lease_authorized
+                else self._last_world_lease_error_code
+            ),
             "configuration": _MINDCRAFT_CONFIG.public_summary(),
             **self.runtime_errors.snapshot(),
             "note": "Evelyn Mindcraft v0.1.4 runtime with non-operator survival policy.",
@@ -382,6 +420,16 @@ async def observe(_: web.Request) -> web.Response:
 
 async def start(request: web.Request) -> web.Response:
     payload = await request.json() if request.can_read_body else {}
+    valid, error = validate_world_lease_request(
+        payload,
+        status_path=WORLD_LEASE_STATUS_PATH,
+        secret_path=WORLD_LEASE_SECRET_PATH,
+    )
+    if not valid:
+        raise web.HTTPForbidden(
+            text=json.dumps({"error": error}),
+            content_type="application/json",
+        )
     STATE.start(_clean_goal((payload or {}).get("goal") or STATE.get_goal()))
     return web.json_response(STATE.build_status())
 
@@ -393,6 +441,16 @@ async def stop(_: web.Request) -> web.Response:
 
 async def set_goal(request: web.Request) -> web.Response:
     payload = await request.json() if request.can_read_body else {}
+    valid, error = validate_world_lease_request(
+        payload,
+        status_path=WORLD_LEASE_STATUS_PATH,
+        secret_path=WORLD_LEASE_SECRET_PATH,
+    )
+    if not valid:
+        raise web.HTTPForbidden(
+            text=json.dumps({"error": error}),
+            content_type="application/json",
+        )
     goal = str((payload or {}).get("goal") or "").strip()
     if not goal:
         raise web.HTTPBadRequest(text=json.dumps({"error": "goal text is empty"}), content_type="application/json")
@@ -404,6 +462,31 @@ async def _cleanup(_: web.Application) -> None:
     STATE.stop()
 
 
+async def _world_lease_guard_context(_: web.Application):
+    async def guard_loop() -> None:
+        while True:
+            await asyncio.sleep(WORLD_LEASE_GUARD_INTERVAL_SEC)
+            try:
+                STATE.reconcile_world_lease()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                STATE.runtime_errors.record(
+                    "mindcraft_world_lease_guard_failed",
+                    exc,
+                )
+
+    task = asyncio.create_task(guard_loop())
+    try:
+        yield
+    finally:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+
 def build_app() -> web.Application:
     app = web.Application()
     app.router.add_get("/health", health)
@@ -412,6 +495,7 @@ def build_app() -> web.Application:
     app.router.add_post("/start", start)
     app.router.add_post("/stop", stop)
     app.router.add_post("/goal", set_goal)
+    app.cleanup_ctx.append(_world_lease_guard_context)
     app.on_cleanup.append(_cleanup)
     return app
 

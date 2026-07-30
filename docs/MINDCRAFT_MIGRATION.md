@@ -22,6 +22,8 @@ patch and copies the custom runtime modules into the image.
 - service API: port `8765`
 - compatible endpoints: `/health`, `/status`, `/observe`, `/start`, `/stop`,
   and `/goal`
+- mutating endpoint boundary: `/start` and `/goal` require an exact fresh
+  `minecraft_world_lease.proof.v1`; `/stop` is always allowed
 - planner: `GPT-5.5` through the authenticated Codex Gateway
 - Minecraft version: `1.21.11`
 - account authentication: Microsoft
@@ -37,6 +39,8 @@ patch and copies the custom runtime modules into the image.
 - Mindcraft bot memory: `bot_memory/mindcraft`
 - profiles: `bot_profiles`
 - runtime telemetry: `runtime_artifacts/mindcraft/status.json`
+- world-action authorization:
+  `runtime_artifacts/minecraft_world_lease/status.json`
 - runtime log: `runtime_artifacts/logs/mindcraft.log`
 - Codex Gateway token: `runtime_artifacts/secrets/codex_gateway.token`
 

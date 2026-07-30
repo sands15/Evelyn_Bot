@@ -137,8 +137,15 @@ class DiscordCommandHandlerTests(unittest.TestCase):
         ctx = FakeContext(guild=guild, content="마크접속")
         marks: list[tuple[str, str]] = []
 
-        async def enable(guild_id: int):
+        async def enable(
+            guild_id: int,
+            *,
+            issuer_ref: str,
+            source: str,
+        ):
             self.assertEqual(guild_id, 1)
+            self.assertEqual(issuer_ref, "discord_user:3")
+            self.assertEqual(source, "discord_command")
             return {"connected": True}
 
         asyncio.run(
@@ -211,6 +218,9 @@ class DiscordCommandHandlerTests(unittest.TestCase):
             handle_minecraft_status_command(
                 ctx,
                 get_minecraft_client=lambda: Client(),
+                get_minecraft_world_lease_status=lambda: {
+                    "state": "authorization_required"
+                },
                 build_reply=lambda status: "status",
                 mark_text_session_from_command=lambda _ctx, user_text, reply_text: marks.append((user_text, reply_text)),
                 guild_only_message=lambda: "guild only",
@@ -226,12 +236,12 @@ class DiscordCommandHandlerTests(unittest.TestCase):
         goal_ctx = FakeContext(guild=guild, content="마크목표 diamond")
         marks: list[tuple[str, str]] = []
 
-        class Client:
-            async def set_goal(self, goal: str):
-                return {"stage": goal}
+        async def set_goal(guild_id: int, goal: str):
+            self.assertEqual(guild_id, 1)
+            return {"stage": goal}
 
         kwargs = dict(
-            get_minecraft_client=lambda: Client(),
+            set_minecraft_goal=set_goal,
             build_missing_reply=lambda: "missing goal",
             build_updated_reply=lambda goal, status: f"goal:{goal}:{status['stage']}",
             mark_text_session_from_command=lambda _ctx, user_text, reply_text: marks.append((user_text, reply_text)),

@@ -21,16 +21,18 @@ marker와 실제 상태 증거가 없으면 성공 문구를 만들지 않는다
 꺼져 있어, 실제 Discord 승인 명령부터 메시지 전송 및 Minecraft 상태 변화까지
 한 세션에서 수행하는 live E2E는 아직 확인하지 못했다.
 
-또한 assistant 자율 루프의 grant TTL은 Voyager runner의 지속 실행을 자동
-중지시키지 않는다. Minecraft 직접 모드는 현재 owner/admin의 명시적 명령으로
-보호되지만, bot process restart와 lease 만료 시 별도 정지 owner가 필요한
-상태다.
+Minecraft world-action lease, process-rotated capability token, 5초 owner
+heartbeat, 15초 service-side stale guard, restart 비복구, `/start`·`/goal`
+proof, 만료·상태 불명 시 fail-closed 정지는 구현됐다. Local I/O Bridge와
+legacy auto-start 우회도 차단했다.
 
 다음 조치: 공식 Discord/Bot API 이미지에서 owner/admin과 일반 사용자의 명령
 경계를 각각 확인하고, grant 만료·프로세스 재시작·Minecraft 연결 실패를
 포함한 합성 시나리오를 실행한다. 성공 action마다 audit journal의
 `verified=true`와 예상 `evidenceCode`가 실제 효과와 일치하는지 대조한다.
-그 전에 Minecraft world-action lease와 restart fail-closed 정지를 구현한다.
+추가로 split Docker Fast Control Page가 별도 Discord 프로세스와 경쟁하지
+않고 lease를 발급할 수 있도록 중앙 authorization owner 또는 인증된 위임
+채널을 설계한다. 현재 Fast Control의 start/goal은 안전하게 거부된다.
 
 ## P1 — Conversation Continuity 실제 crash/restart 검증 대기
 

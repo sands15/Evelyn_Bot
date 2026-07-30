@@ -338,9 +338,19 @@ class MinecraftAutonomyClient:
                 await asyncio.sleep(0.25)
             raise RuntimeError("Codex gateway did not become ready in time")
 
-    async def start(self, goal: str | None = None) -> dict[str, Any]:
+    async def start(
+        self,
+        goal: str | None = None,
+        *,
+        world_lease: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         await self.ensure_codex_gateway()
-        return await self._request("POST", "/start", {"goal": goal} if goal else {})
+        payload: dict[str, Any] = {}
+        if goal:
+            payload["goal"] = goal
+        if world_lease:
+            payload["worldLease"] = dict(world_lease)
+        return await self._request("POST", "/start", payload)
 
     async def stop(self) -> dict[str, Any]:
         if not await self.is_service_alive():
@@ -409,11 +419,19 @@ class MinecraftAutonomyClient:
             encoding="utf-8",
         )
 
-    async def set_goal(self, goal: str) -> dict[str, Any]:
+    async def set_goal(
+        self,
+        goal: str,
+        *,
+        world_lease: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         goal_text = str(goal or "").strip()
         if not goal_text:
             raise RuntimeError("goal text is empty")
-        status = await self._request("POST", "/goal", {"goal": goal_text})
+        payload: dict[str, Any] = {"goal": goal_text}
+        if world_lease:
+            payload["worldLease"] = dict(world_lease)
+        status = await self._request("POST", "/goal", payload)
         if not isinstance(status, dict):
             raise RuntimeError("minecraft_goal_unverified")
         echoed_goal = str(

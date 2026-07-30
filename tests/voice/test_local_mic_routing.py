@@ -247,7 +247,7 @@ class LocalMicRoutingTests(unittest.TestCase):
         self.assertEqual(bridge.mic_control_request_revision, 23)
         bridge._stop_mic.assert_awaited_once()  # type: ignore[union-attr]
 
-    def test_local_io_bridge_applies_minecraft_lazy_start_request_once(self) -> None:
+    def test_local_io_bridge_rejects_minecraft_world_action_without_lease_owner(self) -> None:
         async def scenario() -> LocalIoBridge:
             bridge = LocalIoBridge()
             bridge._post_status = AsyncMock()  # type: ignore[method-assign]
@@ -276,17 +276,18 @@ class LocalMicRoutingTests(unittest.TestCase):
         bridge = asyncio.run(scenario())
 
         self.assertEqual(bridge.minecraft_command_request_revision, 31)
-        self.assertEqual(bridge.minecraft_command_state, "ready")
-        self.assertTrue(bridge.minecraft_command_result["commandApplied"])
-        self.assertTrue(bridge.minecraft_command_result["connected"])
-        bridge._launch_minecraft_stack.assert_awaited_once()  # type: ignore[union-attr]
-        bridge._activate_minecraft_command.assert_awaited_once_with(  # type: ignore[union-attr]
-            "마인크래프트에서 나무 캐줘",
-            "goal",
+        self.assertEqual(bridge.minecraft_command_state, "failed")
+        self.assertEqual(
+            bridge.minecraft_command_error,
+            "RuntimeError('minecraft_world_authorization_required')",
         )
+        self.assertFalse(bridge.minecraft_command_result["commandApplied"])
+        self.assertFalse(bridge.minecraft_command_result["connected"])
+        bridge._launch_minecraft_stack.assert_not_awaited()  # type: ignore[union-attr]
+        bridge._activate_minecraft_command.assert_not_awaited()  # type: ignore[union-attr]
         self.assertEqual(bridge._post_status.await_count, 2)  # type: ignore[union-attr]
 
-    def test_local_io_bridge_reports_minecraft_lazy_start_failure(self) -> None:
+    def test_local_io_bridge_ignores_launcher_for_rejected_world_action(self) -> None:
         async def scenario() -> LocalIoBridge:
             bridge = LocalIoBridge()
             bridge._post_status = AsyncMock()  # type: ignore[method-assign]
@@ -309,8 +310,12 @@ class LocalMicRoutingTests(unittest.TestCase):
 
         self.assertEqual(bridge.minecraft_command_request_revision, 32)
         self.assertEqual(bridge.minecraft_command_state, "failed")
-        self.assertIn("compose failed", bridge.minecraft_command_error)
+        self.assertIn(
+            "minecraft_world_authorization_required",
+            bridge.minecraft_command_error,
+        )
         self.assertFalse(bridge.minecraft_command_result["commandApplied"])
+        bridge._launch_minecraft_stack.assert_not_awaited()  # type: ignore[union-attr]
 
     def test_local_io_bridge_reports_dynamic_mic_state_and_control_revision(self) -> None:
         bridge_source = (

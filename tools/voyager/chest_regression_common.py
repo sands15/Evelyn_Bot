@@ -5,13 +5,29 @@ import socket
 import sys
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import requests
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+RUNTIME_ROOT = REPO_ROOT / "evelyn_core" / "runtime"
+if str(RUNTIME_ROOT) not in sys.path:
+    sys.path.insert(0, str(RUNTIME_ROOT))
+
+from evelyn_core.minecraft_world_lease_contract import (
+    load_valid_world_lease,
+)
+from evelyn_core.paths import get_runtime_artifacts_root
+
 SERVICE_URL = "http://127.0.0.1:8765"
 BRIDGE_URL = "http://127.0.0.1:3000"
 DEFAULT_MC_PORT = 25565
+WORLD_LEASE_STATUS_PATH = (
+    get_runtime_artifacts_root()
+    / "minecraft_world_lease"
+    / "status.json"
+)
 
 
 @dataclass
@@ -34,25 +50,36 @@ def _post_json(url: str, payload: dict[str, Any], timeout: int = 60) -> Any:
 
 
 def ensure_bridge_ready(timeout_seconds: int = 45) -> None:
+    lease, error = load_valid_world_lease(
+        WORLD_LEASE_STATUS_PATH,
+    )
+    if not lease:
+        raise RuntimeError(
+            "Minecraft world lease is required before regression: "
+            f"{error}"
+        )
     deadline = time.time() + timeout_seconds
     while time.time() < deadline:
         try:
             with socket.create_connection(("127.0.0.1", 3000), timeout=1):
                 return
         except OSError:
-            try:
-                requests.post(
-                    f"{SERVICE_URL}/start",
-                    json={"mode": "inference", "goal": "Open nearby chest once"},
-                    timeout=20,
-                )
-            except Exception:
-                pass
             time.sleep(1)
-    raise RuntimeError("Mineflayer bridge on port 3000 did not become ready in time")
+    raise RuntimeError(
+        "Mineflayer bridge did not become ready under the active "
+        "world lease"
+    )
 
 
 def attach_bridge(mc_port: int = DEFAULT_MC_PORT) -> None:
+    lease, error = load_valid_world_lease(
+        WORLD_LEASE_STATUS_PATH,
+    )
+    if not lease:
+        raise RuntimeError(
+            "Minecraft world lease is required before bridge attach: "
+            f"{error}"
+        )
     _post_json(
         f"{BRIDGE_URL}/start",
         {

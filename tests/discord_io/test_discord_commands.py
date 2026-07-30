@@ -140,6 +140,10 @@ class DiscordCommandHelperTests(unittest.TestCase):
                 "current_task": "collect",
                 "current_task_stage": "iron",
                 "last_progress_message": "found cave",
+                "world_lease": {
+                    "state": "authorized",
+                    "lease": {"expiresAt": 2000.0},
+                },
                 "observation": {"position": {"x": 1}, "hunger": 18, "health": 20, "hostiles_nearby": 2},
                 "voyager_evaluation": {
                     "goal": "diamond_pickaxe",
@@ -152,6 +156,8 @@ class DiscordCommandHelperTests(unittest.TestCase):
         )
 
         self.assertIn("- running: on", text)
+        self.assertIn("- world_lease: authorized", text)
+        self.assertIn("- lease_expires_at: 2000.0", text)
         self.assertIn("- eval_goal: diamond_pickaxe", text)
         self.assertIn("- tech_tree: iron", text)
         self.assertIn("- skill_library: 9", text)

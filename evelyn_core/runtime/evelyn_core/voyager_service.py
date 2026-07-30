@@ -21,11 +21,25 @@ if os.name == "nt":
 from aiohttp import web
 
 from evelyn_core.bounded_logs import append_bounded_log, rotate_log_if_needed
+from evelyn_core.minecraft_world_lease_contract import (
+    load_guarded_world_lease,
+    validate_world_lease_request,
+)
 from evelyn_core.paths import get_repo_root, get_runtime_artifacts_root
 
 DEFAULT_VOYAGER_GOAL = "discovering as many diverse things as possible"
 REPO_ROOT = get_repo_root()
 RUNTIME_ARTIFACTS_ROOT = get_runtime_artifacts_root()
+WORLD_LEASE_STATUS_PATH = (
+    RUNTIME_ARTIFACTS_ROOT
+    / "minecraft_world_lease"
+    / "status.json"
+)
+WORLD_LEASE_SECRET_PATH = (
+    RUNTIME_ARTIFACTS_ROOT
+    / "secrets"
+    / "minecraft_world_lease.json"
+)
 GOAL_STATE_PATH = RUNTIME_ARTIFACTS_ROOT / "voyager" / "voyager_goal_state.json"
 RUNNER_STATUS_PATH = RUNTIME_ARTIFACTS_ROOT / "voyager" / "upstream_bridge_status.json"
 RUNNER_LOG_PATH = RUNTIME_ARTIFACTS_ROOT / "logs" / "upstream_bridge_runner.log"
@@ -601,6 +615,20 @@ def _status_poller(stop_event: threading.Event) -> None:
     last_error: str | None = None
     while not stop_event.is_set():
         try:
+            lease_status, lease_error = load_guarded_world_lease(
+                WORLD_LEASE_STATUS_PATH,
+                WORLD_LEASE_SECRET_PATH,
+            )
+            if (
+                not lease_status
+                and STATE._process_alive()
+            ):
+                STATE.stop_runner()
+                _append_error_log(
+                    SERVICE_ERROR_LOG_PATH,
+                    "voyager_world_lease_guard",
+                    lease_error,
+                )
             current = STATE.build_status()
             status_block = _format_minecraft_status(current)
             _write_status_line(status_block)
@@ -1249,6 +1277,16 @@ async def observe(_: web.Request) -> web.Response:
 
 async def start(request: web.Request) -> web.Response:
     payload = await request.json() if request.can_read_body else {}
+    valid, error = validate_world_lease_request(
+        payload,
+        status_path=WORLD_LEASE_STATUS_PATH,
+        secret_path=WORLD_LEASE_SECRET_PATH,
+    )
+    if not valid:
+        raise web.HTTPForbidden(
+            text=json.dumps({"error": error}),
+            content_type="application/json",
+        )
     goal = str((payload or {}).get("goal") or STATE.get_goal()).strip() or DEFAULT_VOYAGER_GOAL
     mode = str((payload or {}).get("mode") or "").strip() or None
     STATE.start_runner(goal, mode)
@@ -1266,6 +1304,16 @@ async def stop(_: web.Request) -> web.Response:
 
 async def set_goal(request: web.Request) -> web.Response:
     payload = await request.json() if request.can_read_body else {}
+    valid, error = validate_world_lease_request(
+        payload,
+        status_path=WORLD_LEASE_STATUS_PATH,
+        secret_path=WORLD_LEASE_SECRET_PATH,
+    )
+    if not valid:
+        raise web.HTTPForbidden(
+            text=json.dumps({"error": error}),
+            content_type="application/json",
+        )
     goal = str((payload or {}).get("goal") or "").strip()
     if not goal:
         raise web.HTTPBadRequest(text=json.dumps({"error": "goal text is empty"}), content_type="application/json")

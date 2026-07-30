@@ -14,7 +14,7 @@ if /I "%~1"=="--legacy-host" if /I not "%EVELYN_ALLOW_LEGACY_HOST_START%"=="true
 if "%MINECRAFT_AUTONOMY_SERVICE_HOST%"=="" set "MINECRAFT_AUTONOMY_SERVICE_HOST=127.0.0.1"
 if "%MINECRAFT_AUTONOMY_SERVICE_PORT%"=="" set "MINECRAFT_AUTONOMY_SERVICE_PORT=8765"
 if "%VOYAGER_PYTHON_EXE%"=="" set "VOYAGER_PYTHON_EXE=%~dp0..\.venv-voyager\Scripts\python.exe"
-if "%VOYAGER_AUTO_START%"=="" set "VOYAGER_AUTO_START=true"
+if "%VOYAGER_AUTO_START%"=="" set "VOYAGER_AUTO_START=false"
 if "%VOYAGER_START_GOAL%"=="" set "VOYAGER_START_GOAL=discovering as many diverse things as possible"
 
 set "VOYAGER_NO_AUTOSTART="
@@ -61,7 +61,8 @@ if not defined VOYAGER_SERVICE_ALREADY_RUNNING (
 
 if /I not "%VOYAGER_AUTO_START%"=="true" goto :done
 if defined VOYAGER_NO_AUTOSTART goto :done
-powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0runtime\launchers\start_voyager_task.ps1"
+echo [Evelyn] Direct Voyager auto-start is disabled by the world-action lease policy.
+echo [Evelyn] Use the Control Page Minecraft tool or Discord /minecraft connect.
 
 :done
 endlocal

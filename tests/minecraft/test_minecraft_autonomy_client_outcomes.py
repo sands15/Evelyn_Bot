@@ -37,6 +37,30 @@ class MinecraftAutonomyClientOutcomeTests(
         client._persist_goal_override = Mock()
         return client
 
+    async def test_start_forwards_world_lease_proof(self) -> None:
+        client = self.client({"connected": True})
+        client.ensure_codex_gateway = AsyncMock()
+        proof = {
+            "schema": "minecraft_world_lease.proof.v1",
+            "leaseId": "lease-1",
+            "authorizationToken": "secret-1",
+        }
+
+        await client.start(
+            "diamond",
+            world_lease=proof,
+        )
+
+        client.ensure_codex_gateway.assert_awaited_once_with()
+        client._request.assert_awaited_once_with(
+            "POST",
+            "/start",
+            {
+                "goal": "diamond",
+                "worldLease": proof,
+            },
+        )
+
     async def test_set_goal_persists_only_confirmed_echo(self) -> None:
         client = self.client(
             {

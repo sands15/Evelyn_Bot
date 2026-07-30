@@ -49,6 +49,23 @@ class RuntimeArtifactsRetentionTests(unittest.TestCase):
         self.assertEqual(rule.max_total_bytes, 20 * 1024 * 1024)
         self.assertEqual(rule.preserve_newest, 7)
 
+    def test_minecraft_world_lease_journal_has_bounded_retention(
+        self,
+    ) -> None:
+        rule = next(
+            row
+            for row in DEFAULT_RETENTION_RULES
+            if row.name == "minecraft_world_lease_events"
+        )
+
+        self.assertEqual(
+            rule.patterns,
+            ("minecraft_world_lease/events/*.jsonl",),
+        )
+        self.assertEqual(rule.max_age_days, 30)
+        self.assertEqual(rule.max_total_bytes, 20 * 1024 * 1024)
+        self.assertEqual(rule.preserve_newest, 7)
+
     def test_inventory_stays_within_root(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -242,7 +242,7 @@ async def execute_control_page_tool_from_runtime(
             build_minecraft_reply=runtime.get("build_minecraft_reply"),
             enable_mode=runtime.get("enable_mode"),
             disable_mode=runtime.get("disable_mode"),
-            get_client=runtime.get("get_client"),
+            set_goal=runtime.get("set_minecraft_goal"),
             format_position=runtime.get("format_position"),
         )
         if minecraft_reply is not None:

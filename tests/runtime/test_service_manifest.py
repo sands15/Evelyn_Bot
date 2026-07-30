@@ -41,6 +41,19 @@ class ServiceManifestTests(unittest.TestCase):
         self.assertIn("tts", service_ids)
         self.assertIn("stt", service_ids)
         self.assertIn("vision", service_ids)
+        self.assertIn("minecraft_world_lease", service_ids)
+
+        lease_service = get_service(
+            manifest,
+            "minecraft_world_lease",
+        )
+        self.assertIsNotNone(lease_service)
+        assert lease_service is not None
+        self.assertFalse(lease_service.required)
+        self.assertEqual(
+            lease_service.checks[0].kind,
+            "artifact_json",
+        )
 
         ports = service_port_map(manifest)
         self.assertEqual(ports["stt"], 8892)

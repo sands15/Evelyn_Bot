@@ -54,6 +54,10 @@ implemented behavior.
   - 현재 프로세스에만 유효한 자율행동 grant, exact action scope, 결과 증거,
     Minecraft 직접 제어의 fail-closed 성공 판정과 감사 journal 계약.
 
+- `docs/MINECRAFT_WORLD_ACTION_LEASE.md`
+  - Minecraft runner의 단일 process-owned lease, 서비스 proof, heartbeat
+    만료 정지, 재시작 비복구, 우회 경로 차단과 잔여 Docker 경계를 정의한다.
+
 - `docs/RUNTIME_ERROR_OBSERVABILITY_CONTRACT.md`
   - Runtime owner별 고정 오류 코드·카운터와 Control Page 공개 privacy 계약.
 

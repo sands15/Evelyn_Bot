@@ -273,6 +273,29 @@ class FastControlApiToolTests(unittest.TestCase):
         )
         self.assertFalse(fast_api.minecraft_service_is_offline("TimeoutError()"))
 
+    def test_fast_control_minecraft_start_requires_lease_owner(self) -> None:
+        reply = asyncio.run(
+            fast_api.resolve_pre_llm_reply(
+                "마인크래프트 시작해",
+                source="control_page",
+            )
+        )
+
+        self.assertIn("먼저 연결해야", reply)
+        fast_api.register_builtin_background_action_handlers()
+        self.assertEqual(fast_api.BACKGROUND_ACTION_HANDLERS, [])
+
+        with self.assertRaisesRegex(
+            fast_api.FastActionExecutionError,
+            "minecraft_world_authorization_required",
+        ):
+            asyncio.run(
+                fast_api.execute_local_bridge_minecraft_command(
+                    "마인크래프트 시작해",
+                    "control_page",
+                )
+            )
+
     def test_local_bridge_snapshot_marks_stale_ready_false(self) -> None:
         fast_api.LOCAL_BRIDGE_STATUS.update(
             {

@@ -173,7 +173,7 @@ class MinecraftModeCompositionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(
             (
                 "enable_minecraft_mode = "
-                "minecraft_mode_composition.enable_minecraft_mode"
+                "minecraft_world_lease_owner.connect"
             ),
             source,
         )

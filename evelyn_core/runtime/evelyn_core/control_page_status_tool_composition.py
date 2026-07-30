@@ -71,9 +71,13 @@ class ControlPageStatusToolCompositionDeps:
     set_input_mode: Callable[..., Any]
     restore_voice_channel: Callable[..., Any]
     reset_continuity_probe: Callable[..., Any]
+    get_minecraft_world_lease_status: Callable[
+        [],
+        dict[str, Any],
+    ]
     enable_mode: Callable[..., Any]
     disable_mode: Callable[..., Any]
-    get_client: Callable[..., Any]
+    set_minecraft_goal: Callable[..., Any]
     format_position: Callable[..., str]
     log: Callable[..., Any] = print
 
@@ -109,6 +113,9 @@ class ControlPageStatusToolComposition:
             build_voice_status_reply_payload=build_control_page_voice_status_reply_payload,
             build_voice_continuity_reply_payload=build_control_page_voice_continuity_reply_payload,
             get_control_page_minecraft_snapshot=control_page.safe_get_minecraft_snapshot,
+            get_minecraft_world_lease_status=(
+                deps.get_minecraft_world_lease_status
+            ),
             build_control_page_inventory_reply_payload=build_control_page_inventory_reply_payload,
             build_control_page_minecraft_reply_payload=build_control_page_minecraft_reply_payload,
             get_autonomy_engine=deps.autonomy_engines.get,
@@ -167,7 +174,7 @@ class ControlPageStatusToolComposition:
                 "build_minecraft_reply": control_page.build_minecraft_reply,
                 "enable_mode": deps.enable_mode,
                 "disable_mode": deps.disable_mode,
-                "get_client": deps.get_client,
+                "set_minecraft_goal": deps.set_minecraft_goal,
                 "format_position": deps.format_position,
             },
         )

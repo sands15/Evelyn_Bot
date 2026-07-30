@@ -166,11 +166,23 @@ def build_minecraft_status_command_text(status: dict[str, Any]) -> str:
     hostiles = observed.get("hostiles_nearby") if isinstance(observed, dict) else None
     tech_tree = evaluation.get("tech_tree") if isinstance(evaluation.get("tech_tree"), dict) else {}
     skill_library = evaluation.get("skill_library") if isinstance(evaluation.get("skill_library"), dict) else {}
+    lease_status = (
+        status.get("world_lease")
+        if isinstance(status.get("world_lease"), dict)
+        else {}
+    )
+    lease = (
+        lease_status.get("lease")
+        if isinstance(lease_status.get("lease"), dict)
+        else {}
+    )
     return (
         "⛏️ 마인크래프트 상태\n"
         f"- service: voyager\n"
         f"- running: {'on' if status.get('running') else 'off'}\n"
         f"- connected: {'on' if status.get('connected') else 'off'}\n"
+        f"- world_lease: {lease_status.get('state') or 'unknown'}\n"
+        f"- lease_expires_at: {lease.get('expiresAt') if lease.get('expiresAt') is not None else 'none'}\n"
         f"- goal: {status.get('goal') or 'none'}\n"
         f"- stage: {status.get('stage') or 'unknown'}\n"
         f"- task: {status.get('current_task') or 'none'}\n"

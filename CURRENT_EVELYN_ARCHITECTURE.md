@@ -9,7 +9,7 @@ Status note, 2026-06-01:
   `CURRENT_EVELYN_PIPELINE.md`.
 - For documentation status, see `docs/DOCUMENTATION_INDEX.md`.
 
-Last updated: 2026-05-12  
+Last updated: 2026-07-30
 Branch baseline: `structural-change`
 
 ## 1. High-level shape
@@ -43,18 +43,27 @@ Codex gateway가 살아 있어도 runner가 정상이라는 뜻은 아니고, ru
 - Root shim: `start_voyager.bat`
 - Evelyn launcher wrapper: `evelyn_core/start_voyager.bat`
 - Service host: `evelyn_core/runtime/launchers/start_voyager_service.ps1`
-- Start trigger helper: `evelyn_core/runtime/launchers/start_voyager_task.ps1`
+- Retired direct-start helper:
+  `evelyn_core/runtime/launchers/start_voyager_task.ps1` (fails closed and
+  directs the operator to an authorized lease entry point)
 
 ### Runtime sequence
 
 1. Visible launcher starts the Voyager service host.
 2. `voyager_service.py` opens the HTTP control surface on `8765`.
-3. `/start` spawns `upstream_voyager_runner.py` in the Voyager venv.
-4. The runner boots upstream Voyager from `third_party/Voyager`.
-5. Voyager action generation routes through the Codex gateway.
-6. Voyager executes against the mineflayer bridge / Minecraft runtime.
-7. Runner writes status to `runtime_artifacts/voyager/upstream_bridge_status.json`.
-8. Service serves `/health`, `/status`, and `/observe` from runner state plus live bridge telemetry.
+3. An authorized Discord or monolithic Control Page action issues a
+   process-owned world lease.
+4. `/start` accepts only an exact proof of that fresh lease, then spawns
+   `upstream_voyager_runner.py` in the Voyager venv.
+5. The runner boots upstream Voyager from `third_party/Voyager`.
+6. Voyager action generation routes through the Codex gateway.
+7. Voyager executes against the mineflayer bridge / Minecraft runtime.
+8. Runner writes status to `runtime_artifacts/voyager/upstream_bridge_status.json`.
+9. Service serves `/health`, `/status`, and `/observe` from runner state plus live bridge telemetry.
+
+The active Compose runtime has migrated to Mindcraft; see
+`docs/MINDCRAFT_MIGRATION.md`. Both Mindcraft and this legacy Voyager service
+apply the same lease proof and service-side stale-heartbeat stop contract.
 
 ## 3. Core local ownership boundaries
 

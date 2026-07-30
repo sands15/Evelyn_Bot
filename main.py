@@ -78,6 +78,7 @@ from evelyn_core.minecraft_runtime_snapshot import (
 )
 from evelyn_core.minecraft_live_state_runtime import MinecraftLiveObservationRuntimeDeps, observe_live_minecraft_state_from_runtime
 from evelyn_core.minecraft_mode_composition import MinecraftModeComposition, MinecraftModeCompositionDeps
+from evelyn_core.minecraft_world_lease import MinecraftWorldLeaseOwner
 from evelyn_core.question_shaping import enforce_question_limits
 from evelyn_core.proactive_questions import evaluate_proactive_question_gate, select_question_to_ask
 from evelyn_core.cognitive_policy_state import (
@@ -1139,6 +1140,14 @@ runtime_lifecycle_composition = RuntimeLifecycleComposition(
             fallback_target=PROJECT_ROOT / "evelyn_core" / "start.bat", sleep=asyncio.sleep,
             ensure_session_continuity_started=session_continuity_checkpoint.ensure_started,
             flush_session_continuity=session_continuity_checkpoint.flush,
+            ensure_minecraft_world_lease_started=(
+                lambda: minecraft_world_lease_owner.ensure_started()
+            ),
+            shutdown_minecraft_world_lease=(
+                lambda reason: minecraft_world_lease_owner.shutdown(
+                    reason=reason
+                )
+            ),
             stop_control_page_background_tasks=lambda: stop_control_page_background_tasks(), stop_vision_watch_task=lambda: stop_vision_watch_task(),
             stop_local_mic_service=lambda: stop_local_mic_service(), launch_runtime_restart_sequence=launch_runtime_restart_sequence,
             exit_process=os._exit, schedule_stack_shutdown=runtime_schedule_evelyn_stack_shutdown,
@@ -1614,8 +1623,29 @@ minecraft_mode_composition = MinecraftModeComposition(
 )
 
 wait_for_minecraft_ready = minecraft_mode_composition.wait_for_minecraft_ready
-enable_minecraft_mode = minecraft_mode_composition.enable_minecraft_mode
-disable_minecraft_mode = minecraft_mode_composition.disable_minecraft_mode
+minecraft_world_lease_owner = MinecraftWorldLeaseOwner(
+    status_path=(
+        PROJECT_ROOT
+        / "runtime_artifacts"
+        / "minecraft_world_lease"
+        / "status.json"
+    ),
+    events_dir=(
+        PROJECT_ROOT
+        / "runtime_artifacts"
+        / "minecraft_world_lease"
+        / "events"
+    ),
+    get_runtime_status=lambda: get_minecraft_client().status(),
+    enable_mode=minecraft_mode_composition.enable_minecraft_mode,
+    disable_mode=minecraft_mode_composition.disable_minecraft_mode,
+    set_goal=lambda goal, **kwargs: get_minecraft_client().set_goal(goal, **kwargs),
+    create_task=asyncio.create_task,
+    log=print,
+)
+enable_minecraft_mode = minecraft_world_lease_owner.connect
+disable_minecraft_mode = minecraft_world_lease_owner.disconnect
+set_minecraft_goal = minecraft_world_lease_owner.set_goal
 
 control_page_ui_dependency_composition = ControlPageUiDependencyComposition(
     ControlPageUiDependencyCompositionDeps(
@@ -1762,8 +1792,11 @@ control_page_status_tool_composition = ControlPageStatusToolComposition(
         schedule_stack_shutdown=schedule_evelyn_stack_shutdown, schedule_bot_shutdown=lambda: asyncio.create_task(shutdown_bot_process()),
         set_input_mode=lambda *args, **kwargs: set_voice_input_mode(*args, **kwargs),
         restore_voice_channel=lambda *args, **kwargs: restore_last_voice_channel(*args, **kwargs),
-        reset_continuity_probe=reset_voice_barge_in_continuity_probe, enable_mode=enable_minecraft_mode,
-        disable_mode=disable_minecraft_mode, get_client=get_minecraft_client,
+        reset_continuity_probe=reset_voice_barge_in_continuity_probe,
+        get_minecraft_world_lease_status=minecraft_world_lease_owner.status,
+        enable_mode=enable_minecraft_mode,
+        disable_mode=disable_minecraft_mode,
+        set_minecraft_goal=set_minecraft_goal,
         format_position=format_position_short, log=print,
     )
 )
@@ -2395,6 +2428,8 @@ discord_app_composition = DiscordAppComposition(
             revoke_autonomy_authorization=autonomy_authorization_manager.revoke,
             command_session=build_discord_command_session_runtime_deps, enable_minecraft_mode=enable_minecraft_mode,
             disable_minecraft_mode=disable_minecraft_mode, get_minecraft_client=get_minecraft_client,
+            get_minecraft_world_lease_status=minecraft_world_lease_owner.status,
+            set_minecraft_goal=set_minecraft_goal,
             build_minecraft_connect_reply=build_minecraft_connect_reply, build_minecraft_goal_missing_reply=build_minecraft_goal_missing_reply,
             build_minecraft_goal_updated_reply=build_minecraft_goal_updated_reply, build_minecraft_status_reply=build_minecraft_status_command_text,
             normalize_channel_setting_action=normalize_channel_setting_action, get_guild_observe_channel_ids=discord_settings.get_guild_observe_channel_ids,
@@ -2449,6 +2484,7 @@ if DISCORD_ENABLED and not DISCORD_BOT_TOKEN:
 
 acquire_instance_lock()
 autonomy_authorization_manager.initialize()
+minecraft_world_lease_owner.initialize()
 session_continuity_checkpoint.restore()
 atexit.register(session_continuity_checkpoint.flush)
 if DISCORD_ENABLED:

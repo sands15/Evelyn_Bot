@@ -101,6 +101,11 @@ class DiscordCommandCompositionDeps:
     enable_minecraft_mode: Callable[..., Any]
     disable_minecraft_mode: Callable[..., Any]
     get_minecraft_client: Callable[[], Any]
+    get_minecraft_world_lease_status: Callable[
+        [],
+        dict[str, Any],
+    ]
+    set_minecraft_goal: Callable[..., Any]
     build_minecraft_connect_reply: Callable[..., str]
     build_minecraft_goal_missing_reply: Callable[..., str]
     build_minecraft_goal_updated_reply: Callable[..., str]
@@ -397,6 +402,9 @@ class DiscordAppComposition:
         await handle_minecraft_status_command(
             ctx,
             get_minecraft_client=deps.get_minecraft_client,
+            get_minecraft_world_lease_status=(
+                deps.get_minecraft_world_lease_status
+            ),
             build_reply=deps.build_minecraft_status_reply,
             mark_text_session_from_command=self.mark_text_session_from_command,
             guild_only_message=deps.guild_only_message,
@@ -407,7 +415,7 @@ class DiscordAppComposition:
         await handle_minecraft_goal_command(
             ctx,
             goal=goal,
-            get_minecraft_client=deps.get_minecraft_client,
+            set_minecraft_goal=deps.set_minecraft_goal,
             build_missing_reply=deps.build_minecraft_goal_missing_reply,
             build_updated_reply=deps.build_minecraft_goal_updated_reply,
             mark_text_session_from_command=self.mark_text_session_from_command,

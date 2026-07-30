@@ -369,7 +369,13 @@ async def handle_minecraft_connect_command(
         await ctx.send(guild_only_message())
         return
     try:
-        observed = await enable_minecraft_mode(ctx.guild.id)
+        observed = await enable_minecraft_mode(
+            ctx.guild.id,
+            issuer_ref=(
+                f"discord_user:{getattr(ctx.author, 'id', '')}"
+            ),
+            source="discord_command",
+        )
         reply_text = build_reply(observed)
         await ctx.send(reply_text)
     except Exception as exc:
@@ -409,6 +415,7 @@ async def handle_minecraft_status_command(
     ctx: Any,
     *,
     get_minecraft_client: Any,
+    get_minecraft_world_lease_status: Any,
     build_reply: Any,
     mark_text_session_from_command: Any,
     guild_only_message: Any,
@@ -419,7 +426,11 @@ async def handle_minecraft_status_command(
     client = get_minecraft_client()
     try:
         status = await client.status()
-        reply_text = build_reply(status)
+        payload = dict(status) if isinstance(status, dict) else {}
+        payload["world_lease"] = (
+            get_minecraft_world_lease_status()
+        )
+        reply_text = build_reply(payload)
         await ctx.send(reply_text)
     except Exception as exc:
         reply_text = f"❌ 마인크래프트 상태 확인 실패: {exc}"
@@ -431,7 +442,7 @@ async def handle_minecraft_goal_command(
     ctx: Any,
     *,
     goal: str | None,
-    get_minecraft_client: Any,
+    set_minecraft_goal: Any,
     build_missing_reply: Any,
     build_updated_reply: Any,
     mark_text_session_from_command: Any,
@@ -446,9 +457,11 @@ async def handle_minecraft_goal_command(
         await ctx.send(reply_text)
         mark_text_session_from_command(ctx, getattr(ctx.message, "content", None) or "마크목표", reply_text)
         return
-    client = get_minecraft_client()
     try:
-        status = await client.set_goal(goal_text)
+        status = await set_minecraft_goal(
+            ctx.guild.id,
+            goal_text,
+        )
         reply_text = build_updated_reply(goal_text, status)
         await ctx.send(reply_text)
     except Exception as exc:

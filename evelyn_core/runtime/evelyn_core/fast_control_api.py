@@ -596,39 +596,14 @@ async def execute_minecraft_control_command(action: str) -> str:
 
 
 async def execute_local_bridge_minecraft_command(command: str, source: str) -> str:
-    bridge = local_bridge_status_snapshot()
-    if not bridge.get("ready") or bridge.get("stale"):
-        raise FastActionExecutionError(
-            "local_bridge_not_ready",
-            reply="로컬 브리지가 준비되지 않아서 마인크래프트 서비스를 자동으로 시작하지 못했어.",
-        )
-    try:
-        request = request_local_bridge_minecraft_command(command, source=source)
-    except RuntimeError as exc:
-        if str(exc) != "minecraft_command_already_pending":
-            raise
-        raise FastActionExecutionError(
-            "minecraft_command_already_pending",
-            reply="이미 다른 마인크래프트 명령을 준비 중이야. 끝나는 대로 결과를 알려줄게.",
-        ) from exc
-    outcome = await wait_for_local_bridge_minecraft_command(request)
-    if not outcome.get("applied"):
-        clear_local_bridge_minecraft_command_request(int(request.get("revision") or 0))
-        detail = clean_text(outcome.get("error"))
-        suffix = f" 오류: {detail}" if detail else ""
-        raise FastActionExecutionError(
-            detail or "minecraft_lazy_start_failed",
-            reply=clean_text(f"마인크래프트 모델과 서비스를 준비하지 못했어.{suffix}"),
-        )
-    clear_local_bridge_minecraft_command_request(int(request.get("revision") or 0))
-    result = dict(outcome.get("result") or {})
-    connected = bool(result.get("connected"))
-    command_applied = bool(result.get("commandApplied"))
-    if connected and command_applied:
-        return "마인크래프트 모델과 서비스를 준비했고, 게임 접속과 명령 전달까지 확인했어."
-    if command_applied:
-        return "마인크래프트 모델과 서비스를 준비했고 명령도 전달했어. 게임 접속은 아직 진행 중이야."
-    return "마인크래프트 모델과 서비스를 준비했어."
+    _ = command, source
+    raise FastActionExecutionError(
+        "minecraft_world_authorization_required",
+        reply=(
+            "마인크래프트 세계 행동은 승인된 Control Page 도구나 "
+            "Discord /minecraft connect 명령으로 먼저 연결해야 해."
+        ),
+    )
 
 
 async def synthesize_tool_evidence_reply(
@@ -883,14 +858,9 @@ def clear_background_action_handlers() -> None:
 
 
 def register_builtin_background_action_handlers() -> None:
-    if any(clean_text(handler.get("kind")) == "minecraft_lazy_start" for handler in BACKGROUND_ACTION_HANDLERS):
-        return
-    register_background_action_handler(
-        kind="minecraft_lazy_start",
-        matcher=lambda text: detect_minecraft_runtime_command(text) in {"start", "goal"},
-        runner=execute_local_bridge_minecraft_command,
-        start_reply="마인크래프트 쪽을 준비할게. 끝나면 바로 알려줄게.",
-    )
+    # Minecraft start/goal is intentionally excluded. The local bridge does not
+    # own the process-local world lease and therefore cannot authorize actions.
+    return
 
 
 def prepare_registered_background_action(
@@ -1367,7 +1337,10 @@ async def resolve_pre_llm_reply(text: str, *, source: str) -> str | None:
         return "그 음성 명령은 현재 로컬 Fast Control에서 지원하지 않아. /voice status와 /mic 명령을 사용해줘."
 
     if detect_minecraft_runtime_command(text) in {"start", "goal"}:
-        return None
+        return (
+            "마인크래프트 세계 행동은 승인된 Control Page 도구나 "
+            "Discord /minecraft connect 명령으로 먼저 연결해야 해."
+        )
     if normalized.startswith("/"):
         return f"지원하지 않는 명령이야: {normalized}. /help에서 현재 사용 가능한 명령을 확인해줘."
     return None

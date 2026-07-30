@@ -25,6 +25,13 @@ from evelyn_core.runtime_lifecycle_composition import (
 )
 
 
+async def _record_async(
+    events: list[object],
+    event: object,
+) -> None:
+    events.append(event)
+
+
 class FakeVoiceClient:
     def __init__(self, events: list[object], *, fail: bool = False) -> None:
         self.events = events
@@ -76,6 +83,8 @@ class RuntimeLifecycleCompositionTests(unittest.IsolatedAsyncioTestCase):
             sleep=AsyncMock(),
             ensure_session_continuity_started=Mock(),
             flush_session_continuity=Mock(),
+            ensure_minecraft_world_lease_started=AsyncMock(),
+            shutdown_minecraft_world_lease=AsyncMock(),
             stop_control_page_background_tasks=Mock(),
             stop_vision_watch_task=Mock(),
             stop_local_mic_service=Mock(),
@@ -156,6 +165,11 @@ class RuntimeLifecycleCompositionTests(unittest.IsolatedAsyncioTestCase):
             [(True,), (False,)],
         )
         composition.deps.process.ensure_session_continuity_started.assert_called_once_with()
+        (
+            composition.deps.process
+            .ensure_minecraft_world_lease_started
+            .assert_awaited_once_with()
+        )
 
     async def test_restart_stops_services_launches_and_exits_in_order(self) -> None:
         events: list[object] = []
@@ -167,6 +181,12 @@ class RuntimeLifecycleCompositionTests(unittest.IsolatedAsyncioTestCase):
             sleep=sleep,
             flush_session_continuity=lambda: events.append(
                 "flush_continuity"
+            ),
+            shutdown_minecraft_world_lease=(
+                lambda reason: _record_async(
+                    events,
+                    ("stop_minecraft", reason),
+                )
             ),
             stop_control_page_background_tasks=lambda: events.append("stop_control"),
             stop_vision_watch_task=lambda: events.append("stop_vision"),
@@ -183,6 +203,7 @@ class RuntimeLifecycleCompositionTests(unittest.IsolatedAsyncioTestCase):
             [event[0] if isinstance(event, tuple) else event for event in events],
             [
                 "flush_continuity",
+                "stop_minecraft",
                 "sleep",
                 "stop_control",
                 "stop_vision",
@@ -191,7 +212,7 @@ class RuntimeLifecycleCompositionTests(unittest.IsolatedAsyncioTestCase):
                 "exit",
             ],
         )
-        launch = events[5]
+        launch = events[6]
         self.assertEqual(launch[1], (REPO_ROOT,))
         self.assertEqual(
             launch[2],
@@ -212,6 +233,12 @@ class RuntimeLifecycleCompositionTests(unittest.IsolatedAsyncioTestCase):
         ]
         process = self.build_process_deps(
             flush_session_continuity=lambda: events.append("flush_continuity"),
+            shutdown_minecraft_world_lease=(
+                lambda reason: _record_async(
+                    events,
+                    ("stop_minecraft", reason),
+                )
+            ),
             bot_guilds=lambda: guilds,
             exit_process=lambda code: events.append(("exit", code)),
         )
@@ -221,6 +248,10 @@ class RuntimeLifecycleCompositionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(events.count("stop_listening"), 2)
         self.assertEqual(events.count(("disconnect", True)), 2)
         self.assertEqual(events[0], "flush_continuity")
+        self.assertEqual(
+            events[1],
+            ("stop_minecraft", "shutdown"),
+        )
         self.assertEqual(events[-1], ("exit", 0))
         process.stop_control_page_background_tasks.assert_called_once_with()
         process.stop_local_mic_service.assert_called_once_with()

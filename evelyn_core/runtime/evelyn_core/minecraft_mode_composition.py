@@ -135,9 +135,14 @@ class MinecraftModeComposition:
         self,
         guild_id: int,
         goal: str | None = None,
+        *,
+        world_lease: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         client = self.deps.get_client()
-        started = await client.start(goal=goal)
+        start_kwargs: dict[str, Any] = {"goal": goal}
+        if world_lease:
+            start_kwargs["world_lease"] = dict(world_lease)
+        started = await client.start(**start_kwargs)
         observed = await self.wait_for_minecraft_ready(guild_id)
         merged = dict(observed) if isinstance(observed, dict) else {}
         merged["voyager_repo_present"] = (

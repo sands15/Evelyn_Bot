@@ -53,8 +53,17 @@ def _deps(**overrides) -> ControlPageStatusRuntimeDeps:
             "completed_count": 1,
             "goal": "mine",
         },
+        get_minecraft_world_lease_status=lambda: {
+            "state": "authorized",
+            "lease": {"expiresAt": 2000.0},
+        },
         build_control_page_inventory_reply_payload=lambda payload: f"inventory:{len(payload.get('inventory', []))}",
-        build_control_page_minecraft_reply_payload=lambda payload: f"minecraft:{payload.get('goal', 'none')}",
+        build_control_page_minecraft_reply_payload=(
+            lambda payload: (
+                f"minecraft:{payload.get('goal', 'none')}:"
+                f"{payload.get('world_lease', {}).get('state')}"
+            )
+        ),
         get_autonomy_engine=lambda _guild_id: None,
         get_routed_autonomy_executor=lambda _guild_id: None,
         build_control_page_autonomy_reply_payload=lambda **kwargs: (
@@ -99,7 +108,10 @@ class ControlPageStatusRuntimeTests(unittest.TestCase):
             minecraft = await build_control_page_minecraft_reply_from_runtime(guild, deps=deps)
 
             self.assertEqual(inventory, "inventory:1")
-            self.assertEqual(minecraft, "minecraft:none")
+            self.assertEqual(
+                minecraft,
+                "minecraft:none:authorized",
+            )
 
         asyncio.run(run())
 

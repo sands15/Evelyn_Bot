@@ -1293,11 +1293,30 @@ def build_control_page_inventory_reply_payload(minecraft: dict[str, Any]) -> str
 
 
 def build_control_page_minecraft_reply_payload(minecraft: dict[str, Any]) -> str:
+    lease_status = (
+        minecraft.get("world_lease")
+        if isinstance(minecraft.get("world_lease"), dict)
+        else {}
+    )
+    lease = (
+        lease_status.get("lease")
+        if isinstance(lease_status.get("lease"), dict)
+        else {}
+    )
+    lease_expiry = lease.get("expiresAt")
     return "\n".join(
         [
             "Minecraft 상태",
             f"- Voyager 실행: {command_status(bool(minecraft.get('minecraft_autonomy')))}",
             f"- 연결: {command_status(bool(minecraft.get('voyager_connected')))}",
+            (
+                "- world lease: "
+                f"{lease_status.get('state') or 'unknown'}"
+            ),
+            (
+                "- lease expiry: "
+                f"{lease_expiry if lease_expiry is not None else 'none'}"
+            ),
             f"- 목표: {minecraft.get('goal') or '없음'}",
             f"- stage: {minecraft.get('stage') or '없음'}",
             f"- task: {minecraft.get('current_task') or '없음'}",
@@ -1504,7 +1523,7 @@ async def execute_control_page_minecraft_tool(
     build_minecraft_reply: Any,
     enable_mode: Any,
     disable_mode: Any,
-    get_client: Any,
+    set_goal: Any,
     format_position: Any,
 ) -> str | None:
     if not tool_name.startswith("minecraft."):
@@ -1516,7 +1535,11 @@ async def execute_control_page_minecraft_tool(
     if tool_name == "minecraft.status":
         return await build_minecraft_reply(guild)
     if tool_name == "minecraft.connect":
-        observed = await enable_mode(guild.id)
+        observed = await enable_mode(
+            guild.id,
+            issuer_ref="control_page:local",
+            source="control_page",
+        )
         return build_control_page_minecraft_connect_reply_payload(
             observed,
             position_text=format_position(observed.get("position")),
@@ -1528,7 +1551,7 @@ async def execute_control_page_minecraft_tool(
         goal_text = clean_text(str(arguments.get("goal") or ""))
         if not goal_text:
             return build_control_page_minecraft_goal_missing_reply()
-        status = await get_client().set_goal(goal_text)
+        status = await set_goal(guild.id, goal_text)
         return build_control_page_minecraft_goal_updated_reply(goal_text, status)
     return None
 

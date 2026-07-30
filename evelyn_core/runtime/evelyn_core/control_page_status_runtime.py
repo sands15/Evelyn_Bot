@@ -27,6 +27,10 @@ class ControlPageStatusRuntimeDeps:
     build_voice_status_reply_payload: Callable[..., str]
     build_voice_continuity_reply_payload: Callable[..., str]
     get_control_page_minecraft_snapshot: Callable[[int | None], Awaitable[dict[str, Any]]]
+    get_minecraft_world_lease_status: Callable[
+        [],
+        dict[str, Any],
+    ]
     build_control_page_inventory_reply_payload: Callable[[dict[str, Any]], str]
     build_control_page_minecraft_reply_payload: Callable[[dict[str, Any]], str]
     get_autonomy_engine: Callable[[int], Any | None]
@@ -66,7 +70,12 @@ async def build_control_page_status_reply_from_runtime(
     *,
     deps: ControlPageStatusRuntimeDeps,
 ) -> str:
-    minecraft = await deps.get_control_page_minecraft_snapshot(guild.id)
+    minecraft = dict(
+        await deps.get_control_page_minecraft_snapshot(guild.id)
+    )
+    minecraft["world_lease"] = (
+        deps.get_minecraft_world_lease_status()
+    )
     return build_control_page_status_text_from_runtime(guild, minecraft, deps=deps)
 
 
@@ -135,7 +144,12 @@ async def build_control_page_minecraft_reply_from_runtime(
     *,
     deps: ControlPageStatusRuntimeDeps,
 ) -> str:
-    minecraft = await deps.get_control_page_minecraft_snapshot(guild.id)
+    minecraft = dict(
+        await deps.get_control_page_minecraft_snapshot(guild.id)
+    )
+    minecraft["world_lease"] = (
+        deps.get_minecraft_world_lease_status()
+    )
     return deps.build_control_page_minecraft_reply_payload(minecraft)
 
 

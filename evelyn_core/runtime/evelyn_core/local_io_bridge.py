@@ -125,10 +125,6 @@ LOCAL_BRIDGE_MINECRAFT_START_TIMEOUT_SEC = max(
     30.0,
     float(os.getenv("LOCAL_BRIDGE_MINECRAFT_START_TIMEOUT_SEC", "300")),
 )
-LOCAL_BRIDGE_MINECRAFT_CONNECT_WAIT_SEC = max(
-    0.0,
-    float(os.getenv("LOCAL_BRIDGE_MINECRAFT_CONNECT_WAIT_SEC", "45")),
-)
 LOCAL_BRIDGE_STATUS_PATH = get_runtime_artifacts_root() / "local_bridge" / "status.json"
 
 
@@ -454,68 +450,10 @@ class LocalIoBridge:
         )
 
     async def _activate_minecraft_command(self, command: str, action: str) -> dict[str, Any]:
-        if self.session is None:
-            raise RuntimeError("local bridge HTTP session is not ready")
-        payload: dict[str, Any] = {}
-        runner_alive = False
-        try:
-            async with self.session.get(
-                f"{MINECRAFT_SERVICE_BASE}/health",
-                timeout=aiohttp.ClientTimeout(total=3),
-            ) as response:
-                health = await response.json(content_type=None)
-                runner_alive = bool(
-                    response.status == 200
-                    and isinstance(health, dict)
-                    and health.get("runner_alive")
-                )
-        except Exception:
-            runner_alive = False
-        endpoint = "/start"
-        if action == "goal":
-            payload["goal"] = clean_text(command)
-            if runner_alive:
-                endpoint = "/goal"
-        async with self.session.post(
-            f"{MINECRAFT_SERVICE_BASE}{endpoint}",
-            json=payload,
-            timeout=aiohttp.ClientTimeout(total=15),
-        ) as response:
-            started = await response.json(content_type=None)
-            if response.status >= 400:
-                raise RuntimeError(
-                    clean_text((started or {}).get("error"))
-                    or f"mindcraft start failed with HTTP {response.status}"
-                )
-
-        status = dict(started or {}) if isinstance(started, dict) else {}
-        deadline = time.monotonic() + LOCAL_BRIDGE_MINECRAFT_CONNECT_WAIT_SEC
-        while time.monotonic() < deadline:
-            if status.get("connected"):
-                break
-            await asyncio.sleep(1.0)
-            try:
-                async with self.session.get(
-                    f"{MINECRAFT_SERVICE_BASE}/status",
-                    timeout=aiohttp.ClientTimeout(total=3),
-                ) as response:
-                    if response.status == 200:
-                        payload = await response.json(content_type=None)
-                        if isinstance(payload, dict):
-                            status = payload
-            except Exception:
-                continue
-            if not status.get("running") and clean_text(status.get("last_error")):
-                break
-        return {
-            "command": clean_text(command),
-            "action": action,
-            "commandApplied": bool(status.get("running") or status.get("connected")),
-            "connected": bool(status.get("connected")),
-            "connectionState": clean_text(status.get("connection_state")) or "unknown",
-            "goal": clean_text(status.get("goal")),
-            "lastError": clean_text(status.get("last_error")),
-        }
+        _ = command, action
+        raise RuntimeError(
+            "minecraft_world_authorization_required"
+        )
 
     async def _apply_minecraft_command_request(
         self,
@@ -533,13 +471,9 @@ class LocalIoBridge:
             self.minecraft_command_result = {}
             await self._post_status()
             try:
-                launcher_result = await self._launch_minecraft_stack()
-                command_result = await self._activate_minecraft_command(command, action)
-                self.minecraft_command_result = {
-                    **launcher_result,
-                    **command_result,
-                }
-                self.minecraft_command_state = "ready"
+                raise RuntimeError(
+                    "minecraft_world_authorization_required"
+                )
             except Exception as exc:
                 self.runtime_errors.record("minecraft_lazy_start_failed", exc)
                 self.minecraft_command_state = "failed"

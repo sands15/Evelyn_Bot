@@ -792,6 +792,10 @@ class ControlPageStateModuleTests(unittest.TestCase):
                 "voyager_tech_tree_highest": "iron",
                 "voyager_unique_item_count": 12,
                 "position_text": "1, 2, 3",
+                "world_lease": {
+                    "state": "authorized",
+                    "lease": {"expiresAt": 2000.0},
+                },
             }
         )
 
@@ -802,6 +806,8 @@ class ControlPageStateModuleTests(unittest.TestCase):
         self.assertEqual(continuity_text, "바리인 연속성\n- 연속 성공: 2/5")
         self.assertEqual(inventory_text, "Minecraft 인벤토리 요약\n- stone: 3")
         self.assertIn("- Voyager 실행: 켜짐", minecraft_text)
+        self.assertIn("- world lease: authorized", minecraft_text)
+        self.assertIn("- lease expiry: 2000.0", minecraft_text)
         self.assertIn("- 목표: diamond", minecraft_text)
         self.assertIn("- position: 1, 2, 3", minecraft_text)
 
@@ -1210,8 +1216,14 @@ class ControlPageStateModuleTests(unittest.TestCase):
             calls.append(("status", guild.id))
             return "status"
 
-        async def enable_mode(guild_id: int):
+        async def enable_mode(
+            guild_id: int,
+            *,
+            issuer_ref: str,
+            source: str,
+        ):
             calls.append(("enable", guild_id))
+            calls.append(("issuer", (issuer_ref, source)))
             return {
                 "connected": True,
                 "outcome_verified": True,
@@ -1230,15 +1242,14 @@ class ControlPageStateModuleTests(unittest.TestCase):
                 "outcome_code": "minecraft_stopped",
             }
 
-        class FakeClient:
-            async def set_goal(self, goal: str):
-                calls.append(("goal", goal))
-                return {
-                    "goal": goal,
-                    "stage": "plan",
-                    "outcome_verified": True,
-                    "outcome_code": "minecraft_goal_confirmed",
-                }
+        async def set_goal(guild_id: int, goal: str):
+            calls.append(("goal", (guild_id, goal)))
+            return {
+                "goal": goal,
+                "stage": "plan",
+                "outcome_verified": True,
+                "outcome_code": "minecraft_goal_confirmed",
+            }
 
         guild = SimpleNamespace(id=7)
         not_minecraft = asyncio.run(
@@ -1250,7 +1261,7 @@ class ControlPageStateModuleTests(unittest.TestCase):
                 build_minecraft_reply=minecraft_reply,
                 enable_mode=enable_mode,
                 disable_mode=disable_mode,
-                get_client=FakeClient,
+                set_goal=set_goal,
                 format_position=lambda position: "1, 2, 3",
             )
         )
@@ -1263,7 +1274,7 @@ class ControlPageStateModuleTests(unittest.TestCase):
                 build_minecraft_reply=minecraft_reply,
                 enable_mode=enable_mode,
                 disable_mode=disable_mode,
-                get_client=FakeClient,
+                set_goal=set_goal,
                 format_position=lambda position: "1, 2, 3",
             )
         )
@@ -1276,7 +1287,7 @@ class ControlPageStateModuleTests(unittest.TestCase):
                 build_minecraft_reply=minecraft_reply,
                 enable_mode=enable_mode,
                 disable_mode=disable_mode,
-                get_client=FakeClient,
+                set_goal=set_goal,
                 format_position=lambda position: "1, 2, 3",
             )
         )
@@ -1289,7 +1300,7 @@ class ControlPageStateModuleTests(unittest.TestCase):
                 build_minecraft_reply=minecraft_reply,
                 enable_mode=enable_mode,
                 disable_mode=disable_mode,
-                get_client=FakeClient,
+                set_goal=set_goal,
                 format_position=lambda position: "1, 2, 3",
             )
         )
@@ -1302,7 +1313,7 @@ class ControlPageStateModuleTests(unittest.TestCase):
                 build_minecraft_reply=minecraft_reply,
                 enable_mode=enable_mode,
                 disable_mode=disable_mode,
-                get_client=FakeClient,
+                set_goal=set_goal,
                 format_position=lambda position: "1, 2, 3",
             )
         )
@@ -1315,7 +1326,7 @@ class ControlPageStateModuleTests(unittest.TestCase):
                 build_minecraft_reply=minecraft_reply,
                 enable_mode=enable_mode,
                 disable_mode=disable_mode,
-                get_client=FakeClient,
+                set_goal=set_goal,
                 format_position=lambda position: "1, 2, 3",
             )
         )
@@ -1328,7 +1339,7 @@ class ControlPageStateModuleTests(unittest.TestCase):
                 build_minecraft_reply=minecraft_reply,
                 enable_mode=enable_mode,
                 disable_mode=disable_mode,
-                get_client=FakeClient,
+                set_goal=set_goal,
                 format_position=lambda position: "1, 2, 3",
             )
         )
@@ -1345,7 +1356,11 @@ class ControlPageStateModuleTests(unittest.TestCase):
             [
                 ("inventory", 7),
                 ("enable", 7),
-                ("goal", "diamond"),
+                (
+                    "issuer",
+                    ("control_page:local", "control_page"),
+                ),
+                ("goal", (7, "diamond")),
                 ("disable", 7),
             ],
         )

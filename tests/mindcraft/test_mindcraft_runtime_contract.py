@@ -43,6 +43,62 @@ class MindcraftRuntimeContractTests(unittest.TestCase):
         self.assertIn("!attackPlayer", settings["blocked_actions"])
         self.assertIn("!digDown", settings["blocked_actions"])
 
+    def test_cold_runtime_does_not_auto_start_without_lease(self) -> None:
+        runtime = mindcraft_service.MindcraftRuntime()
+        runtime._ensure_process_running = Mock()
+
+        with patch.object(
+            mindcraft_service,
+            "load_valid_world_lease",
+            return_value=(
+                {},
+                "minecraft_world_authorization_required",
+            ),
+        ):
+            authorized = runtime.reconcile_world_lease()
+
+        self.assertFalse(authorized)
+        runtime._ensure_process_running.assert_not_called()
+        self.assertTrue(runtime._manual_stop)
+
+    def test_live_runner_is_stopped_when_lease_heartbeat_is_stale(
+        self,
+    ) -> None:
+        runtime = mindcraft_service.MindcraftRuntime()
+        runtime._manual_stop = False
+        runtime._process = Mock()
+        runtime._process.poll.return_value = None
+        runtime.stop = Mock()
+
+        with patch.object(
+            mindcraft_service,
+            "load_valid_world_lease",
+            return_value=(
+                {},
+                "minecraft_world_lease_heartbeat_stale",
+            ),
+        ):
+            authorized = runtime.reconcile_world_lease()
+
+        self.assertFalse(authorized)
+        runtime.stop.assert_called_once_with()
+
+    def test_live_lease_allows_only_previously_started_runtime_restart(
+        self,
+    ) -> None:
+        runtime = mindcraft_service.MindcraftRuntime()
+        runtime._ensure_process_running = Mock()
+
+        with patch.object(
+            mindcraft_service,
+            "load_valid_world_lease",
+            return_value=({"active": True}, ""),
+        ):
+            self.assertTrue(runtime.reconcile_world_lease())
+
+        runtime._ensure_process_running.assert_called_once_with()
+        self.assertTrue(runtime._manual_stop)
+
     def test_status_uses_fresh_mindcraft_telemetry(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -81,6 +137,11 @@ class MindcraftRuntimeContractTests(unittest.TestCase):
             with (
                 patch.object(mindcraft_service, "STATUS_PATH", status_path),
                 patch.object(mindcraft_service, "GOAL_STATE_PATH", goal_path),
+                patch.object(
+                    mindcraft_service,
+                    "load_valid_world_lease",
+                    return_value=({"active": True}, ""),
+                ),
             ):
                 payload = runtime.build_status()
 
