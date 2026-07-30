@@ -4204,9 +4204,11 @@
       const rows = [
         ["출처", provenance.source || provenance.sourceType || "unknown"],
         ["출처 유형", provenance.sourceType || "unknown"],
+        ["원래 출처", provenance.originSource || "없음"],
         ["근거 참조", refs.length ? refs.join(", ") : "없음"],
         ["파생 기억", derived.length ? derived.join(", ") : "없음"],
         ["근거 해시", hashes.length ? hashes.map((value) => String(value).slice(0, 16)).join(", ") : "없음"],
+        ["수정 버전", Number(provenance.revision || 0) ? String(provenance.revision) : "원본"],
         ["확신도", provenance.confidence || card.confidence || "unknown"],
         ["마지막 수정", provenance.updatedAt || card.updatedAt || "unknown"]
       ];
@@ -4360,6 +4362,9 @@
       if (action === "edit") {
         payload.title = memoryEditTitle ? memoryEditTitle.value : "";
         payload.body = memoryEditBody ? memoryEditBody.value : "";
+        payload.expectedContentHash = selectedMemoryCard
+          ? String(selectedMemoryCard.sourceHash || "")
+          : "";
       }
       [memoryEditSaveButton, memoryConfirmButton, memoryDeleteButton].forEach((button) => {
         if (button) button.disabled = true;
@@ -4379,6 +4384,14 @@
         await loadMemoryVault({ force: true });
         setBubble(action === "edit" ? "Memory node updated." : action === "confirm" ? "Memory node confirmed." : "Memory node hidden.");
       } catch (error) {
+        if (action === "edit" && String(error.message || "") === "api_error:409") {
+          memorySnapshot = null;
+          memoryGraphSnapshot = null;
+          selectedMemoryCard = null;
+          await loadMemoryVault({ force: true });
+          setBubble("다른 곳에서 기억이 바뀌어서 덮어쓰지 않았어. 최신 내용을 다시 불러왔어.");
+          return;
+        }
         setBubble(`Memory action failed: ${error.message}`);
         renderMemoryEditor();
       }

@@ -12,7 +12,10 @@ RUNTIME_ROOT = REPO_ROOT / "evelyn_core" / "runtime"
 if str(RUNTIME_ROOT) not in sys.path:
     sys.path.insert(0, str(RUNTIME_ROOT))
 
-from evelyn_core.runtime_artifact_io import atomic_json_write  # noqa: E402
+from evelyn_core.runtime_artifact_io import (  # noqa: E402
+    atomic_json_write,
+    atomic_text_write,
+)
 
 
 class RuntimeArtifactIoTests(unittest.TestCase):
@@ -102,6 +105,36 @@ class RuntimeArtifactIoTests(unittest.TestCase):
                 list(target.parent.glob(".*.tmp")),
                 [],
             )
+
+    def test_atomic_text_write_syncs_and_retries_replace(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target = Path(temp_dir) / "memory.md"
+            synced: list[int] = []
+            replace_calls = 0
+
+            def replace(source, destination) -> None:
+                nonlocal replace_calls
+                replace_calls += 1
+                if replace_calls == 1:
+                    raise PermissionError("temporary reader lock")
+                Path(source).replace(destination)
+
+            atomic_text_write(
+                target,
+                "line one\nline two\n",
+                replace=replace,
+                sync=synced.append,
+                sleep=lambda _: None,
+                durable=True,
+            )
+
+            self.assertEqual(replace_calls, 2)
+            self.assertEqual(len(synced), 1)
+            self.assertEqual(
+                target.read_text(encoding="utf-8"),
+                "line one\nline two\n",
+            )
+            self.assertEqual(list(target.parent.glob(".*.tmp")), [])
 
 
 if __name__ == "__main__":

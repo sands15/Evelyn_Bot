@@ -19,7 +19,7 @@ from typing import Any, Callable
 
 from .assistant_contracts import MemoryRecallRequest, MemoryRecallResult
 from .config import MEMORY_ROOT, MEMORY_ROW_MAX_CHARS, SUMMARY_LLM_URL, SUMMARY_MODEL_NAME
-from .runtime_artifact_io import atomic_json_write
+from .runtime_artifact_io import atomic_json_write, atomic_text_write
 from .text import clean_text
 
 
@@ -49,6 +49,9 @@ MEMORY_PROVENANCE_SCHEMA = "memory.provenance.v1"
 MEMORY_DELETE_PREVIEW_SCHEMA = "memory.deletion.preview.v1"
 MEMORY_DELETE_RESULT_SCHEMA = "memory.deletion.result.v1"
 MEMORY_DELETE_TOMBSTONE_SCHEMA = "memory.deletion.tombstone.v1"
+MEMORY_EDIT_RESULT_SCHEMA = "memory.edit.result.v1"
+MEMORY_EDIT_MAX_TITLE_CHARS = 160
+MEMORY_EDIT_MAX_BODY_CHARS = 100_000
 MEMORY_ADMIN_RECALL_MARKERS = (
     "memory vault",
     "memory system",
@@ -67,6 +70,7 @@ MEMORY_ADMIN_RECALL_MARKERS = (
 
 _memory_delete_lock = threading.RLock()
 _memory_delete_tokens: dict[str, dict[str, Any]] = {}
+_memory_edit_lock = threading.RLock()
 
 
 class MemoryNoteDeletedError(RuntimeError):
@@ -361,6 +365,10 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             source_refs TEXT NOT NULL DEFAULT '[]',
             derived_from TEXT NOT NULL DEFAULT '[]',
             evidence_hashes TEXT NOT NULL DEFAULT '[]',
+            origin_source TEXT NOT NULL DEFAULT '',
+            origin_source_refs TEXT NOT NULL DEFAULT '[]',
+            revision INTEGER NOT NULL DEFAULT 0,
+            revised_from_evidence_hashes TEXT NOT NULL DEFAULT '[]',
             mtime_ns INTEGER NOT NULL,
             source_hash TEXT NOT NULL
         );
@@ -403,6 +411,10 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         "ALTER TABLE notes ADD COLUMN source_refs TEXT NOT NULL DEFAULT '[]'",
         "ALTER TABLE notes ADD COLUMN derived_from TEXT NOT NULL DEFAULT '[]'",
         "ALTER TABLE notes ADD COLUMN evidence_hashes TEXT NOT NULL DEFAULT '[]'",
+        "ALTER TABLE notes ADD COLUMN origin_source TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE notes ADD COLUMN origin_source_refs TEXT NOT NULL DEFAULT '[]'",
+        "ALTER TABLE notes ADD COLUMN revision INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE notes ADD COLUMN revised_from_evidence_hashes TEXT NOT NULL DEFAULT '[]'",
     ):
         try:
             conn.execute(statement)
@@ -441,6 +453,13 @@ def _set_metadata(conn: sqlite3.Connection, key: str, value: str | int) -> None:
 def _front_matter_float(metadata: dict[str, Any], key: str, default: float) -> float:
     try:
         return float(str(metadata.get(key, default)))
+    except Exception:
+        return default
+
+
+def _front_matter_int(metadata: dict[str, Any], key: str, default: int) -> int:
+    try:
+        return int(str(metadata.get(key, default)))
     except Exception:
         return default
 
@@ -541,7 +560,7 @@ def sync_memory_vault_index(*, root: Path | None = None, db_path: Path | None = 
 
     with closing(_connect_index(index_path)) as conn:
         _ensure_schema(conn)
-        force_reindex = _get_metadata_int(conn, "schema_version", 0) < 4
+        force_reindex = _get_metadata_int(conn, "schema_version", 0) < 5
         existing = {
             row["rel_path"]: row
             for row in conn.execute("SELECT rel_path, source_hash FROM notes").fetchall()
@@ -565,9 +584,11 @@ def sync_memory_vault_index(*, root: Path | None = None, db_path: Path | None = 
                 INSERT INTO notes(
                     note_id, rel_path, note_type, title, body, tags, projects, links,
                     status, created_at, updated_at, importance, confidence, source,
-                    source_refs, derived_from, evidence_hashes, mtime_ns, source_hash
+                    source_refs, derived_from, evidence_hashes, origin_source,
+                    origin_source_refs, revision, revised_from_evidence_hashes,
+                    mtime_ns, source_hash
                 )
-                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(rel_path) DO UPDATE SET
                     note_id = excluded.note_id,
                     note_type = excluded.note_type,
@@ -585,6 +606,10 @@ def sync_memory_vault_index(*, root: Path | None = None, db_path: Path | None = 
                     source_refs = excluded.source_refs,
                     derived_from = excluded.derived_from,
                     evidence_hashes = excluded.evidence_hashes,
+                    origin_source = excluded.origin_source,
+                    origin_source_refs = excluded.origin_source_refs,
+                    revision = excluded.revision,
+                    revised_from_evidence_hashes = excluded.revised_from_evidence_hashes,
                     mtime_ns = excluded.mtime_ns,
                     source_hash = excluded.source_hash
                 """,
@@ -606,6 +631,10 @@ def sync_memory_vault_index(*, root: Path | None = None, db_path: Path | None = 
                     json.dumps(_as_list(note.metadata.get("source_refs") or note.metadata.get("source_ref")), ensure_ascii=False),
                     json.dumps(_as_list(note.metadata.get("derived_from")), ensure_ascii=False),
                     json.dumps(_as_list(note.metadata.get("evidence_hashes") or note.metadata.get("source_hash")), ensure_ascii=False),
+                    clean_text(str(note.metadata.get("origin_source") or "")),
+                    json.dumps(_as_list(note.metadata.get("origin_source_refs")), ensure_ascii=False),
+                    max(0, _front_matter_int(note.metadata, "revision", 0)),
+                    json.dumps(_as_list(note.metadata.get("revised_from_evidence_hashes")), ensure_ascii=False),
                     path.stat().st_mtime_ns,
                     note.source_hash,
                 ),
@@ -638,7 +667,7 @@ def sync_memory_vault_index(*, root: Path | None = None, db_path: Path | None = 
             version += 1
             _set_metadata(conn, "memory_version", version)
             _set_metadata(conn, "last_indexed_at", _utc_now_iso())
-            _set_metadata(conn, "schema_version", 4)
+            _set_metadata(conn, "schema_version", 5)
             _set_metadata(conn, "vector_model", VECTOR_INDEX_MODEL)
             _set_metadata(conn, "vector_dimensions", VECTOR_INDEX_DIMENSIONS)
             conn.execute("DELETE FROM retrieval_cache")
@@ -706,6 +735,24 @@ def _memory_note_provenance(
             or note.metadata.get("source_hash")
         )
     )
+    origin_source = clean_text(
+        str(note.metadata.get("origin_source") or "")
+    )
+    origin_source_refs = [
+        item
+        for item in (
+            _public_memory_source_ref(value)
+            for value in _as_list(
+                note.metadata.get("origin_source_refs")
+            )
+        )
+        if item
+    ]
+    revised_from_evidence_hashes = list(
+        _as_list(
+            note.metadata.get("revised_from_evidence_hashes")
+        )
+    )
     if not source_refs and note.note_type == "daily":
         source_refs = [rel_path]
     if not derived_from and "consolidation" in source.lower():
@@ -725,6 +772,17 @@ def _memory_note_provenance(
         "sourceRefs": list(dict.fromkeys(source_refs))[:12],
         "derivedFrom": list(dict.fromkeys(derived_from))[:12],
         "evidenceHashes": list(dict.fromkeys(evidence_hashes))[:12],
+        "originSource": origin_source,
+        "originSourceRefs": list(
+            dict.fromkeys(origin_source_refs)
+        )[:12],
+        "revision": max(
+            0,
+            _front_matter_int(note.metadata, "revision", 0),
+        ),
+        "revisedFromEvidenceHashes": list(
+            dict.fromkeys(revised_from_evidence_hashes)
+        )[:12],
         "createdAt": clean_text(str(note.metadata.get("created_at") or "")),
         "updatedAt": clean_text(
             str(note.metadata.get("updated_at") or note.updated_at or "")
@@ -742,6 +800,17 @@ def _memory_row_provenance(row: sqlite3.Row) -> dict[str, Any]:
         str(row["source"] if "source" in row.keys() else "")
     )
     note_type = clean_text(str(row["note_type"]))
+    try:
+        revision = max(
+            0,
+            int(
+                row["revision"]
+                if "revision" in row.keys()
+                else 0
+            ),
+        )
+    except (TypeError, ValueError):
+        revision = 0
     return {
         "schema": MEMORY_PROVENANCE_SCHEMA,
         "noteId": clean_text(str(row["note_id"])),
@@ -767,6 +836,28 @@ def _memory_row_provenance(row: sqlite3.Row) -> dict[str, Any]:
                 else "[]"
             )
         ),
+        "originSource": clean_text(
+            str(
+                row["origin_source"]
+                if "origin_source" in row.keys()
+                else ""
+            )
+        ),
+        "originSourceRefs": _safe_json_list(
+            str(
+                row["origin_source_refs"]
+                if "origin_source_refs" in row.keys()
+                else "[]"
+            )
+        ),
+        "revision": revision,
+        "revisedFromEvidenceHashes": _safe_json_list(
+            str(
+                row["revised_from_evidence_hashes"]
+                if "revised_from_evidence_hashes" in row.keys()
+                else "[]"
+            )
+        ),
         "createdAt": clean_text(
             str(row["created_at"] if "created_at" in row.keys() else "")
         ),
@@ -781,11 +872,19 @@ def _memory_provenance_context_line(provenance: dict[str, Any]) -> str:
     evidence_label = clean_text(str(evidence[0]))[:16] if evidence else "-"
     refs = list(provenance.get("sourceRefs") or [])
     ref_label = clean_text(str(refs[0])) if refs else "-"
+    origin = clean_text(str(provenance.get("originSource") or ""))
+    revision = max(0, int(provenance.get("revision") or 0))
+    revision_label = (
+        f"; revision={revision}; origin={origin or '-'}"
+        if revision
+        else ""
+    )
     return (
         f"- {clean_text(str(provenance.get('noteId') or 'unknown'))}: "
         f"source={clean_text(str(provenance.get('source') or 'unknown'))}; "
         f"ref={ref_label}; evidence={evidence_label}; "
         f"confidence={clean_text(str(provenance.get('confidence') or 'unknown'))}"
+        f"{revision_label}"
     )
 
 
@@ -2612,17 +2711,120 @@ def _memory_vault_find_note(note_id_or_rel_path: str, *, root: Path | None = Non
     return None
 
 
-def _write_memory_vault_note_body(path: Path, raw: str, note: MemoryVaultNote, *, title: str | None = None, body: str | None = None) -> None:
+def _normalize_memory_edit_body(value: str) -> str:
+    normalized = str(value).replace("\r\n", "\n").replace("\r", "\n")
+    normalized = re.sub(
+        r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]+",
+        " ",
+        normalized,
+    )
+    return "\n".join(line.rstrip() for line in normalized.splitlines()).strip()
+
+
+def _memory_edit_evidence_hash(*, title: str, body: str) -> str:
+    payload = json.dumps(
+        {"body": body, "title": title},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _write_memory_vault_note_body(
+    path: Path,
+    raw: str,
+    note: MemoryVaultNote,
+    *,
+    title: str,
+    body: str,
+) -> MemoryVaultNote:
     metadata, current_body = _split_front_matter(raw)
     next_title = clean_text(title or note.title or path.stem)
-    next_body = clean_text(body if body is not None else current_body)
+    next_body = _normalize_memory_edit_body(
+        body if body is not None else current_body
+    )
+    edited_at = _utc_now_iso()
     if metadata:
         metadata["title"] = next_title
-        metadata["updated_at"] = _utc_now_iso()
-        content = _format_front_matter(metadata) + "\n\n" + f"# {next_title}\n\n{next_body.strip()}\n"
+        metadata["updated_at"] = edited_at
+        metadata["user_edited_at"] = edited_at
+        if not clean_text(str(metadata.get("origin_source") or "")):
+            metadata["origin_source"] = clean_text(
+                str(metadata.get("source") or "unknown")
+            )
+        if not _as_list(metadata.get("origin_source_refs")):
+            metadata["origin_source_refs"] = list(
+                _as_list(
+                    metadata.get("source_refs")
+                    or metadata.get("source_ref")
+                )
+            )
+        previous_evidence = list(
+            _as_list(
+                metadata.get("revised_from_evidence_hashes")
+            )
+        )
+        previous_evidence.extend(
+            _as_list(
+                metadata.get("evidence_hashes")
+                or metadata.get("source_hash")
+            )
+        )
+        metadata["revised_from_evidence_hashes"] = list(
+            dict.fromkeys(previous_evidence)
+        )[:12]
+        metadata["source"] = "user-edit"
+        metadata["source_refs"] = [
+            "control-page-memory-editor"
+        ]
+        metadata["evidence_hashes"] = [
+            _memory_edit_evidence_hash(
+                title=next_title,
+                body=next_body,
+            )
+        ]
+        metadata["confidence"] = "high"
+        metadata["revision"] = max(
+            0,
+            _front_matter_int(metadata, "revision", 0),
+        ) + 1
+        content = (
+            _format_front_matter(metadata)
+            + "\n\n"
+            + f"# {next_title}\n\n{next_body}\n"
+        )
     else:
-        content = f"# {next_title}\n\n{next_body.strip()}\n"
-    path.write_text(content, encoding="utf-8")
+        metadata = {
+            "id": note.note_id,
+            "type": note.note_type,
+            "title": next_title,
+            "status": note.status or "active",
+            "created_at": edited_at,
+            "updated_at": edited_at,
+            "user_edited_at": edited_at,
+            "confidence": "high",
+            "source": "user-edit",
+            "source_refs": ["control-page-memory-editor"],
+            "origin_source": "unknown",
+            "origin_source_refs": [],
+            "derived_from": [],
+            "evidence_hashes": [
+                _memory_edit_evidence_hash(
+                    title=next_title,
+                    body=next_body,
+                )
+            ],
+            "revised_from_evidence_hashes": [],
+            "revision": 1,
+        }
+        content = (
+            _format_front_matter(metadata)
+            + "\n\n"
+            + f"# {next_title}\n\n{next_body}\n"
+        )
+    atomic_text_write(path, content, durable=True)
+    return parse_memory_note(path, content)
 
 
 def memory_vault_user_snapshot(
@@ -2709,6 +2911,7 @@ def update_memory_vault_user_note(
     *,
     title: str | None = None,
     body: str | None = None,
+    expected_content_hash: str | None = None,
     root: Path | None = None,
 ) -> dict[str, Any]:
     target = _memory_vault_find_note(note_id_or_rel_path, root=root)
@@ -2737,16 +2940,122 @@ def update_memory_vault_user_note(
         rel_path = path.relative_to(vault).as_posix()
         if _is_legacy_memory_note_type(note.note_type, rel_path):
             return {"ok": False, "error": "locked_legacy_note"}
-        _write_memory_vault_note_body(path, raw, note, title=title, body=body)
+        expected_hash = clean_text(expected_content_hash)
+        if not re.fullmatch(r"[0-9a-f]{64}", expected_hash):
+            return {
+                "ok": False,
+                "error": "memory_edit_content_hash_required",
+            }
+        if title is not None and not isinstance(title, str):
+            return {"ok": False, "error": "memory_edit_invalid_title"}
+        if body is not None and not isinstance(body, str):
+            return {"ok": False, "error": "memory_edit_invalid_body"}
+        next_title = clean_text(title or note.title)
+        next_body = _normalize_memory_edit_body(
+            body
+            if body is not None
+            else _memory_vault_edit_body(note, raw)
+        )
+        if not next_title or len(next_title) > MEMORY_EDIT_MAX_TITLE_CHARS:
+            return {"ok": False, "error": "memory_edit_invalid_title"}
+        if len(next_body) > MEMORY_EDIT_MAX_BODY_CHARS:
+            return {"ok": False, "error": "memory_edit_body_too_large"}
+        with _memory_edit_lock:
+            current = _memory_vault_find_note(
+                note_id_or_rel_path,
+                root=root,
+            )
+            if current is None:
+                return {"ok": False, "error": "note_not_found"}
+            path, note, raw = current
+            state = _read_user_note_state(root)
+            note_state = dict(state.get(note.note_id, {}))
+            if not secrets.compare_digest(
+                note.source_hash,
+                expected_hash,
+            ):
+                return {
+                    "ok": False,
+                    "error": "memory_note_changed_since_read",
+                    "noteId": note.note_id,
+                    "contentHash": note.source_hash,
+                }
+            previous_content_hash = note.source_hash
+            try:
+                updated_note = _write_memory_vault_note_body(
+                    path,
+                    raw,
+                    note,
+                    title=next_title,
+                    body=next_body,
+                )
+            except OSError:
+                return {
+                    "ok": False,
+                    "schema": MEMORY_EDIT_RESULT_SCHEMA,
+                    "action": "edit",
+                    "noteId": note.note_id,
+                    "edited": False,
+                    "error": "memory_edit_failed",
+                }
         note_state["edited_at"] = now
     else:
         return {"ok": False, "error": "unsupported_action"}
     note_state["updated_at"] = now
     state[note.note_id] = note_state
-    _write_user_note_state(state, root)
+    cleanup_errors: list[str] = []
+    try:
+        _write_user_note_state(state, root)
+    except OSError:
+        if normalized_action != "edit":
+            raise
+        cleanup_errors.append(
+            "memory_edit_user_state_cleanup_failed"
+        )
     if normalized_action == "edit":
-        sync_memory_vault_index(root=root)
-    return {"ok": True, "noteId": note.note_id, "action": normalized_action, "state": note_state}
+        try:
+            sync_memory_vault_index(root=root)
+        except Exception:
+            cleanup_errors.append(
+                "memory_edit_index_cleanup_failed"
+            )
+        provenance = _memory_note_provenance(
+            updated_note,
+            rel_path=path.relative_to(
+                ensure_memory_vault_layout(root)
+            ).as_posix(),
+            note_state=note_state,
+        )
+        if cleanup_errors:
+            return {
+                "ok": False,
+                "schema": MEMORY_EDIT_RESULT_SCHEMA,
+                "action": "edit",
+                "noteId": note.note_id,
+                "edited": True,
+                "previousContentHash": previous_content_hash,
+                "contentHash": updated_note.source_hash,
+                "provenance": provenance,
+                "error": "memory_edit_cleanup_required",
+                "cleanupErrors": cleanup_errors,
+            }
+        return {
+            "ok": True,
+            "schema": MEMORY_EDIT_RESULT_SCHEMA,
+            "action": "edit",
+            "noteId": note.note_id,
+            "edited": True,
+            "previousContentHash": previous_content_hash,
+            "contentHash": updated_note.source_hash,
+            "provenance": provenance,
+            "state": note_state,
+        }
+    return {
+        "ok": True,
+        "noteId": note.note_id,
+        "action": normalized_action,
+        "state": note_state,
+    }
 
 
 def _memory_deletion_tombstones_path(root: Path | None = None) -> Path:
@@ -3465,6 +3774,7 @@ __all__ = [
     "MEMORY_DELETE_PREVIEW_SCHEMA",
     "MEMORY_DELETE_RESULT_SCHEMA",
     "MEMORY_DELETE_TOMBSTONE_SCHEMA",
+    "MEMORY_EDIT_RESULT_SCHEMA",
     "MEMORY_PROVENANCE_SCHEMA",
     "MemoryNoteDeletedError",
     "MemoryVaultNote",

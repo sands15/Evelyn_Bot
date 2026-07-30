@@ -450,8 +450,20 @@ class ControlPageStateModuleTests(unittest.TestCase):
         )
         self.assertEqual(parse_control_page_memory_note_query({"include_internal": "true"}), {"include_internal": True})
         self.assertEqual(
-            parse_control_page_memory_note_action_payload({"action": " edit ", "title": "Title", "body": "Body"}),
-            {"action": "edit", "title": "Title", "body": "Body"},
+            parse_control_page_memory_note_action_payload(
+                {
+                    "action": " edit ",
+                    "title": "Title",
+                    "body": "Body",
+                    "expectedContentHash": "current-hash",
+                }
+            ),
+            {
+                "action": "edit",
+                "title": "Title",
+                "body": "Body",
+                "expected_content_hash": "current-hash",
+            },
         )
         self.assertEqual(
             parse_control_page_chat_payload({"text": " hi ", "guildId": "7"}),
@@ -460,15 +472,35 @@ class ControlPageStateModuleTests(unittest.TestCase):
         self.assertEqual(parse_control_page_chat_payload({})["error"], "empty_text")
 
     def test_memory_note_action_handler_helper_parses_payload_and_status(self) -> None:
-        calls: list[tuple[str, str, str, str]] = []
+        calls: list[tuple[str, str, str, str, str]] = []
 
-        def update_note(note_id: str, action: str, *, title: str | None = None, body: str | None = None) -> dict:
-            calls.append((note_id, action, title or "", body or ""))
+        def update_note(
+            note_id: str,
+            action: str,
+            *,
+            title: str | None = None,
+            body: str | None = None,
+            expected_content_hash: str | None = None,
+        ) -> dict:
+            calls.append(
+                (
+                    note_id,
+                    action,
+                    title or "",
+                    body or "",
+                    expected_content_hash or "",
+                )
+            )
             return {"ok": action == "edit", "noteId": note_id}
 
         ok_result, ok_status = handle_control_page_memory_note_action_request(
             "note-1",
-            {"action": " edit ", "title": "Title", "body": "Body"},
+            {
+                "action": " edit ",
+                "title": "Title",
+                "body": "Body",
+                "expectedContentHash": "current-hash",
+            },
             update_note=update_note,
         )
         fail_result, fail_status = handle_control_page_memory_note_action_request(
@@ -478,14 +510,20 @@ class ControlPageStateModuleTests(unittest.TestCase):
         )
 
         self.assertEqual(ok_status, 200)
-        self.assertEqual(fail_status, 404)
+        self.assertEqual(fail_status, 400)
         self.assertTrue(ok_result["ok"])
         self.assertFalse(fail_result["ok"])
         self.assertEqual(
             calls,
             [
-                ("note-1", "edit", "Title", "Body"),
-                ("note-2", "missing", "", ""),
+                (
+                    "note-1",
+                    "edit",
+                    "Title",
+                    "Body",
+                    "current-hash",
+                ),
+                ("note-2", "missing", "", "", ""),
             ],
         )
         self.assertEqual(control_page_result_status({"ok": True}), 200)

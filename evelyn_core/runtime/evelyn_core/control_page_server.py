@@ -995,8 +995,32 @@ async def memory_note_action_handler(request: web.Request) -> web.StreamResponse
         action,
         title=(payload or {}).get("title"),
         body=(payload or {}).get("body"),
+        expected_content_hash=(payload or {}).get(
+            "expectedContentHash"
+        ),
     )
-    return json_response(result, status=200 if result.get("ok") else 404)
+    return json_response(
+        result,
+        status=memory_note_action_status(result),
+    )
+
+
+def memory_note_action_status(result: dict[str, Any]) -> int:
+    if result.get("ok"):
+        return 200
+    error = str(result.get("error") or "")
+    if error == "note_not_found":
+        return 404
+    if error in {
+        "locked_legacy_note",
+        "memory_note_changed_since_read",
+    }:
+        return 409
+    if error == "memory_edit_failed":
+        return 500
+    if error == "memory_edit_cleanup_required":
+        return 503
+    return 400
 
 
 def memory_note_delete_status(result: dict[str, Any]) -> int:

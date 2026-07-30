@@ -20,6 +20,36 @@ recall prompt에는 원문 전체 대신 선택된 기억의 note ID, source, ev
 요약과 confidence를 넣는다. 파생 기억은 원본 note ID와 evidence hash를
 유지해야 한다.
 
+## Optimistic edit and correction
+
+Control Page에서 기억을 수정할 때는 마지막으로 읽은 card의 `sourceHash`를
+`expectedContentHash`로 함께 보낸다.
+
+1. edit API는 64자리 현재 content hash가 없으면 요청을 거부한다.
+2. 저장 직전에 note를 다시 읽고 hash를 비교한다.
+3. 다른 탭, Obsidian, 다른 요청이 먼저 수정했다면 HTTP 409와
+   `memory_note_changed_since_read`를 반환하며 최신 파일을 덮지 않는다.
+4. 편집 파일은 같은 디렉터리의 임시 파일에 UTF-8로 쓰고 flush·`fsync`한
+   뒤 `os.replace`로 원자 교체한다.
+
+사용자 수정은 기존 자동 생성 근거를 현재 내용의 근거인 것처럼 유지하지 않는다.
+편집된 front matter와 `memory.provenance.v1`은 다음을 기록한다.
+
+- 현재 `source=user-edit`, `sourceType=user`
+- 현재 본문과 제목으로 계산한 새 SHA-256 `evidenceHashes`
+- `sourceRefs=[control-page-memory-editor]`
+- 증가하는 `revision`
+- 최초 `originSource`, `originSourceRefs`
+- 이전 evidence hash를 현재 근거와 분리한
+  `revisedFromEvidenceHashes`
+- `confidence=high`, `userEditedAt`
+
+SQLite/FTS/vector/retrieval cache는 schema version 5로 다시 동기화한다.
+인덱스나 user-state 후처리가 실패하면 편집을 완전 성공으로 보고하지 않고
+HTTP 503, `memory_edit_cleanup_required`, `edited=true`를 반환한다.
+원자 파일 교체 자체가 실패하면 HTTP 500, `memory_edit_failed`,
+`edited=false`다.
+
 ## Two-step deletion
 
 사용자 기억 삭제는 preview와 apply를 분리한다.
@@ -101,3 +131,15 @@ prompt block과 user state가 의도적으로 남아 있다.
   retrieval cache, user state, hot-context와 prompt block을 제거한다.
 - recall 결과에 삭제 title/body가 없고 동일 note ID 재생성이 차단된다.
 - tombstone에는 title, body, path, content hash가 없다.
+
+`tests.memory.test_memory_edit_restart`는 사용자 편집 뒤 새 Python
+프로세스에서 note detail과 recall을 다시 열어 수정 본문,
+`source=user-edit`, revision, 새 evidence가 유지되는지 검증한다.
+
+## Remaining boundary
+
+현재 삭제는 선택한 note ID를 영구 철회한다. 그 note를 `derivedFrom`으로
+참조하는 별도 파생 note까지 자동 삭제하거나 다시 합성하지는 않는다.
+여러 원본을 합친 파생 기억을 무조건 연쇄 삭제하면 다른 유효한 근거도 잃을 수
+있으므로, 파생 provenance 재평가와 부분 철회 계약을 별도로 구현하기 전에는
+원본 삭제를 “관련된 모든 기억 삭제”라고 표현하면 안 된다.

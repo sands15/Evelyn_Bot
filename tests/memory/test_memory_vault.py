@@ -569,6 +569,175 @@ class MemoryVaultTests(unittest.TestCase):
         )
         self.assertNotIn(r"C:\private", first.context_text)
 
+    def test_user_edit_requires_current_hash_and_replaces_stale_provenance(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = write_memory_vault_note(
+                note_type="concept",
+                title="Generated Preference",
+                body="The generated memory says tea.",
+                source="sub-llm-semantic-consolidation",
+                source_refs=["daily/2026-07-30"],
+                derived_from=["daily-2026-07-30"],
+                evidence_hashes=["old-derived-evidence"],
+                confidence="medium",
+                root=root,
+            )
+            original = parse_memory_note(path)
+            missing_hash = update_memory_vault_user_note(
+                original.note_id,
+                "edit",
+                title="Corrected Preference",
+                body="The user directly corrected this memory to coffee.",
+                root=root,
+            )
+            edited = update_memory_vault_user_note(
+                original.note_id,
+                "edit",
+                title="Corrected Preference",
+                body="The user directly corrected this memory to coffee.",
+                expected_content_hash=original.source_hash,
+                root=root,
+            )
+            detail = memory_vault_user_note(
+                original.note_id,
+                root=root,
+            )
+            recall = recall_memory_vault(
+                MemoryRecallRequest(
+                    turn_id="turn-user-edit-provenance",
+                    session_key="session",
+                    guild_id=None,
+                    user_text="corrected preference coffee",
+                    topic_id=None,
+                    source="test",
+                    max_items=2,
+                ),
+                root=root,
+            )
+
+        self.assertFalse(missing_hash["ok"])
+        self.assertEqual(
+            missing_hash["error"],
+            "memory_edit_content_hash_required",
+        )
+        self.assertTrue(edited["ok"])
+        self.assertEqual(edited["schema"], "memory.edit.result.v1")
+        self.assertTrue(edited["edited"])
+        self.assertNotEqual(
+            edited["contentHash"],
+            original.source_hash,
+        )
+        provenance = detail["card"]["provenance"]
+        self.assertEqual(provenance["source"], "user-edit")
+        self.assertEqual(provenance["sourceType"], "user")
+        self.assertEqual(
+            provenance["sourceRefs"],
+            ["control-page-memory-editor"],
+        )
+        self.assertEqual(
+            provenance["originSource"],
+            "sub-llm-semantic-consolidation",
+        )
+        self.assertEqual(
+            provenance["originSourceRefs"],
+            ["daily/2026-07-30"],
+        )
+        self.assertEqual(provenance["revision"], 1)
+        self.assertEqual(provenance["confidence"], "high")
+        self.assertNotEqual(
+            provenance["evidenceHashes"],
+            ["old-derived-evidence"],
+        )
+        self.assertIn(
+            "old-derived-evidence",
+            provenance["revisedFromEvidenceHashes"],
+        )
+        recall_provenance = recall.metadata["provenance"][0]
+        self.assertEqual(recall_provenance["source"], "user-edit")
+        self.assertEqual(recall_provenance["revision"], 1)
+        self.assertIn("revision=1", recall.context_text)
+
+    def test_stale_user_edit_does_not_overwrite_newer_memory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = write_memory_vault_note(
+                note_type="concept",
+                title="Concurrent Memory",
+                body="original body",
+                source="control-page-user",
+                root=root,
+            )
+            original = parse_memory_note(path)
+            first = update_memory_vault_user_note(
+                original.note_id,
+                "edit",
+                title="Concurrent Memory",
+                body="first accepted correction",
+                expected_content_hash=original.source_hash,
+                root=root,
+            )
+            stale = update_memory_vault_user_note(
+                original.note_id,
+                "edit",
+                title="Concurrent Memory",
+                body="stale overwrite attempt",
+                expected_content_hash=original.source_hash,
+                root=root,
+            )
+            detail = memory_vault_user_note(
+                original.note_id,
+                root=root,
+            )
+
+        self.assertTrue(first["ok"])
+        self.assertFalse(stale["ok"])
+        self.assertEqual(
+            stale["error"],
+            "memory_note_changed_since_read",
+        )
+        self.assertIn(
+            "first accepted correction",
+            detail["card"]["body"],
+        )
+        self.assertNotIn(
+            "stale overwrite attempt",
+            detail["card"]["body"],
+        )
+
+    def test_atomic_edit_failure_preserves_original_memory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = write_memory_vault_note(
+                note_type="concept",
+                title="Atomic Memory",
+                body="original atomic body",
+                source="control-page-user",
+                root=root,
+            )
+            original = parse_memory_note(path)
+            with patch.object(
+                memory_vault_module,
+                "atomic_text_write",
+                side_effect=OSError("disk unavailable"),
+            ):
+                result = update_memory_vault_user_note(
+                    original.note_id,
+                    "edit",
+                    title="Atomic Memory",
+                    body="must not partially replace",
+                    expected_content_hash=original.source_hash,
+                    root=root,
+                )
+            after = path.read_text(encoding="utf-8")
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "memory_edit_failed")
+        self.assertIn("original atomic body", after)
+        self.assertNotIn("must not partially replace", after)
+
     def test_schema_v3_index_migrates_and_reindexes_provenance(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -657,7 +826,7 @@ class MemoryVaultTests(unittest.TestCase):
             {"created_at", "source", "source_refs", "derived_from", "evidence_hashes"}
             <= columns
         )
-        self.assertEqual(schema_version, "4")
+        self.assertEqual(schema_version, "5")
         self.assertEqual(row[0], "control-page-user")
         self.assertIn("user-request", row[1])
         self.assertIn("daily-source", row[2])
@@ -961,6 +1130,7 @@ class MemoryVaultTests(unittest.TestCase):
                 "edit",
                 title="Deletion Race Guard",
                 body="changed after preview",
+                expected_content_hash=note.source_hash,
                 root=root,
             )
             stale = delete_memory_vault_user_note(

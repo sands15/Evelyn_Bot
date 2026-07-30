@@ -101,6 +101,16 @@ class ControlPageMemoryGraphTests(unittest.TestCase):
         self.assertIn("provenance.sourceRefs", self.html)
         self.assertIn("provenance.derivedFrom", self.html)
         self.assertIn("provenance.evidenceHashes", self.html)
+        self.assertIn("provenance.originSource", self.html)
+        self.assertIn("provenance.revision", self.html)
+        self.assertIn(
+            "payload.expectedContentHash = selectedMemoryCard",
+            self.html,
+        )
+        self.assertIn(
+            "다른 곳에서 기억이 바뀌어서 덮어쓰지 않았어.",
+            self.html,
+        )
         self.assertIn(
             '"/delete/preview"',
             self.html,

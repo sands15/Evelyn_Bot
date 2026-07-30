@@ -921,6 +921,7 @@ def parse_control_page_memory_note_action_payload(payload: Any) -> dict[str, Any
         "action": clean_text(str(body.get("action") or "")),
         "title": body.get("title"),
         "body": body.get("body"),
+        "expected_content_hash": body.get("expectedContentHash"),
     }
 
 
@@ -940,8 +941,29 @@ def handle_control_page_memory_note_action_request(
         note_action.get("action"),
         title=note_action.get("title"),
         body=note_action.get("body"),
+        expected_content_hash=note_action.get(
+            "expected_content_hash"
+        ),
     )
-    return result, control_page_result_status(result)
+    error = clean_text(str(result.get("error") or ""))
+    status = (
+        200
+        if result.get("ok")
+        else 409
+        if error
+        in {
+            "locked_legacy_note",
+            "memory_note_changed_since_read",
+        }
+        else 500
+        if error == "memory_edit_failed"
+        else 503
+        if error == "memory_edit_cleanup_required"
+        else 404
+        if error == "note_not_found"
+        else 400
+    )
+    return result, status
 
 
 def parse_control_page_chat_payload(payload: Any) -> dict[str, Any]:

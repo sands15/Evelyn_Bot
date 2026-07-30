@@ -51,8 +51,9 @@ implemented behavior.
     제한적으로 복구하는 checkpoint, privacy, deletion, observability 계약.
 
 - `docs/MEMORY_PROVENANCE_DELETION_CONTRACT.md`
-  - 기억의 source/evidence provenance, 2단계 삭제, tombstone-first 내구성,
-    fail-closed 조회·cache 무효화와 재시작 재조정 계약.
+  - 기억의 source/evidence provenance, content-hash 기반 충돌 없는 사용자
+    수정, 2단계 삭제, tombstone-first 내구성, fail-closed 조회·cache
+    무효화와 재시작 재조정 계약.
 
 - `docs/AUTONOMY_AUTHORIZATION_CONTRACT.md`
   - 현재 프로세스에만 유효한 자율행동 grant, exact action scope, 결과 증거,

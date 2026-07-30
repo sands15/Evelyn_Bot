@@ -115,6 +115,23 @@ JSON, `ref_text`도 Docker 시작 전에 검사한다.
 검증 마법사로 로컬/Discord 10턴, barge-in, 무음 구간을 실행하고 비식별 보고서를
 기록한다.
 
+## P1 — 원본 기억 삭제의 파생 기억 부분 철회 미구현
+
+사용자 기억 편집은 현재 content hash를 요구하고 stale overwrite를 거부하며,
+원자 파일 교체 뒤 `source=user-edit`, 새 evidence hash, revision, 최초 출처를
+기록한다. 편집 결과는 새 프로세스 recall에서도 유지된다. 선택한 note 삭제도
+tombstone-first로 source/index/cache에서 fail-closed한다.
+
+그러나 삭제한 note를 `derivedFrom`으로 참조하는 별도 semantic/episode note는
+자동으로 삭제하거나 재합성하지 않는다. 한 파생 note가 여러 원본을 합쳤을 수
+있어 단순 연쇄 삭제도 안전하지 않다. 따라서 현재 삭제 의미는 “선택한 note
+identity의 영구 철회”이며 “그 내용에서 파생된 모든 기억의 완전 제거”가 아니다.
+
+다음 조치: 삭제 preview에 영향받는 파생 note 목록과 유효한 남은 근거를 표시하고,
+단일 원본 파생은 함께 tombstone, 다중 원본 파생은 quarantine 후 재합성하는
+부분 철회 계약을 설계한다. 해당 계약 전에는 UI와 대화가 cascade 완료를 주장하지
+않도록 유지한다.
+
 ## P1 — UI 접근성 corpus·동작 대상 계약 미완성
 
 Windows Host Vision Bridge에 읽기 전용 Windows UI Automation Control View를
