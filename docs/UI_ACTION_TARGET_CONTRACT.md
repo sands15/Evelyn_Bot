@@ -201,7 +201,8 @@ No live UI action has been executed. Positive and broader negative corpus runs
 across File Explorer, Chromium, Windows Settings, and WinUI applications are
 still required. The Control Page now has explicit, cancellable five-second
 foreground handoffs for preview and confirmed apply, and the reversible
-fixture is available for the first positive check, but neither has been used
-to execute a live action. Applications that expose only a root window remain
-non-actionable. General rollback and non-Button actions are outside the
-current boundary.
+fixture is available for the first positive check. The handoff UI is deployed
+and renders against a running Host UI Action Bridge, but the fixture has not
+been launched and neither flow has executed a live action. Applications that
+expose only a root window remain non-actionable. General rollback and
+non-Button actions are outside the current boundary.

@@ -2,7 +2,7 @@
 
 Document status: **Current**
 Last reviewed: 2026-07-31 KST
-Source branch: `codex/dependency-config-hardening` through `271c741`
+Source branch: `codex/dependency-config-hardening` through `9d1edf6`
 
 이 문서는 현재 확인된 사실만 기록한다. 목표 구조와 과거 계획은 다른 설계/계획 문서를 사용한다.
 
@@ -268,10 +268,19 @@ Source branch: `codex/dependency-config-hardening` through `271c741`
   `process_started`, `action_denied`뿐이다.
 - 실제 브라우저 panel은 `RUNNING`과 세 postcondition을 렌더링했고
   warning/error console log는 0개였다. preview/apply 버튼은 누르지 않았다.
-- 후속 소스에는 preview와 확인된 apply를 각각 명시적으로 무장하는 5초 전경
+- `9d1edf6`에는 preview와 확인된 apply를 각각 명시적으로 무장하는 5초 전경
   전환, 취소 버튼, 절대 deadline과 2초 late-callback fail-closed가 추가됐다.
   `target_disabled`를 수동 reset할 수 있는 단일 Button Windows fixture도
-  준비했다. 이 후속 흐름은 정적/DOM 검증만 했고 실제 action은 수행하지 않았다.
+  준비했다.
+  - Control Page image:
+    `sha256:ba9d99a0f8b7740e601c5fd69e2778ef361c49d5f1b8c16c5c11f23b3571b896`
+  - Control Page만 교체했고 healthy, restart count 0이다.
+  - 배포 이미지의 cache-busted HTML/JS와 fixture 포함 여부, `pip check`를
+    확인했다.
+  - 실제 브라우저는 새 5초 전환 UI와 `RUNNING`을 렌더링했고
+    warning/error log는 0개였다.
+  - fixture는 실행하지 않았고 preview/apply도 누르지 않아 실제 action은
+    계속 0회다.
 - 공식 `check_docker_runtime.ps1 -IncludeLocalBridge`가 Control Page,
   Bot API, Main/Router/Sub LLM, TTS, STT, Vision과 Windows Local I/O
   Bridge를 모두 준비 상태로 판정했다.
