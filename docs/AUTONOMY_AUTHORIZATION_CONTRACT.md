@@ -17,11 +17,18 @@ Last reviewed: 2026-07-30 KST
 4. `AUTONOMY_ENABLED=true`는 기능 사용 가능 여부일 뿐 자동 실행 승인이 아니다.
 5. 저장된 `enabled`와 `allowed_actions`는 재시작 뒤 실행 권한으로 복원하지 않는다.
 6. action 실행 직전에 grant와 exact scope를 다시 검사한다.
-7. 만료·철회·scope 불일치가 발견되면 루프를 중단하고
+7. executor가 성공 결과를 반환한 뒤에도 실행 전과 같은 grant ID가 여전히
+   유효한지 재검사한다. 실행 중 만료·철회·교체되면 결과가 실제로 발생했더라도
+   plan cursor를 진행하지 않는다.
+8. 만료·철회·scope 불일치가 발견되면 루프를 중단하고
    `authorization_required`로 전환한다.
-8. executor 결과가 성공 상태여도 `verified=true`와 예상된
+9. executor 결과가 성공 상태여도 `verified=true`와 그 action에 허용된 exact
    `evidence_code`가 모두 없으면 계획 cursor를 진행하지 않는다.
-9. 구현되지 않은 callback은 `executor_callback_unavailable`로 차단하며
+10. retry budget 소진은 효과 증거가 아니며 성공·skip으로 바꾸거나 plan cursor를
+    진행하지 않는다.
+11. 승인·결정·결과 journal을 durable 기록할 수 없으면 모든 grant를 폐기하고
+    `authorization_audit_unavailable`로 fail-closed한다.
+12. 구현되지 않은 callback은 `executor_callback_unavailable`로 차단하며
    성공 no-op으로 대체하지 않는다.
 
 ## 승인 진입점
@@ -59,8 +66,15 @@ artifact에도 대화문, raw action arguments, 모델 응답 payload, 음성 �
 예외 stack 또는 임의 경로를 기록하지 않는다.
 
 감사 이벤트는 action 이름, 고정 reason code, 결과 상태, 검증 여부와 정규화된
-evidence code만 저장한다. 기본 retention은 30일 또는 20 MiB이고 최신 7개
-파일을 보존한다.
+evidence code만 저장한다. 각 이벤트 행은 반환 전에 flush와 `fsync`를 완료한다.
+기록 실패 시 새 grant나 실행 허용을 반환하지 않으며 기존 grant도 모두
+폐기한다. 기본 retention은 30일 또는 20 MiB이고 최신 7개 파일을 보존한다.
+
+status의 `auditReady`는 현재 journal 기록 가능 여부를 나타낸다. policy에는
+`autonomy.outcome-evidence-policy.v1`, `strictActionEvidenceMatch=true`,
+`retryExhaustionIsEvidence=false`가 노출된다. Discord `자율상태`는 issuer나
+grant ID를 공개하지 않고 현재 guild의 승인 활성 여부, 남은 TTL, audit 상태와
+strict evidence policy만 보여준다.
 
 ## 결과 검증
 
@@ -68,7 +82,9 @@ evidence code만 저장한다. 기본 retention은 30일 또는 20 MiB이고 최
 
 - `status`가 `ok`, `done`, `completed` 중 하나다.
 - `verified`가 정확히 `true`다.
-- executor가 해당 action 계약에 맞는 `evidence_code`를 반환한다.
+- executor가 `autonomy.outcome-evidence-policy.v1`에서 해당 action에
+  허용한 exact `evidence_code`를 반환한다.
+- 실행 뒤 같은 grant ID가 아직 유효하다.
 
 조건을 만족하지 않는 성공 응답은 `unverified/outcome_unverified`로
 정규화한다. plan cursor는 유지하고 다음 cycle에서 재계획한다.
@@ -78,8 +94,17 @@ assistant 기본 executor의 대표 증거 코드는 다음과 같다.
 - Discord 전송 완료: `discord_send_completed`
 - 상태 snapshot 생성: `status_snapshot_built`
 - 최근 문맥 요약 생성: `recent_context_payload_built`
+- 알림 요약 생성: `summary_payload_built`
 - cognitive state 갱신: `cognitive_state_updated`
+- proactive gate만 확인한 무동작: `proactive_gate_completed`
 - 부작용 없는 idle: `no_side_effect_required`
+
+`maybe_ping_user`는 실제 메시지를 보냈을 때 `discord_send_completed`, 보낼
+필요가 없음을 gate에서 확인했을 때 `proactive_gate_completed`만 허용한다.
+다른 action의 올바른 코드를 교차 제출해도 검증되지 않는다. Minecraft action은
+각 action별 `minecraft_<action>_completed`를 사용하며, inventory/hazard/
+hostile/target/food 부재로 명시적으로 생략하는 일부 단계만 각자의 고정
+absence evidence code를 추가로 허용한다.
 
 ## Minecraft 직접 제어 결과
 
@@ -109,8 +134,13 @@ Minecraft의 지속 실행까지 확장했다고 해석하면 안 된다.
 단위·composition 테스트는 다음을 검증한다.
 
 - restart 비복구, TTL 만료, exact scope, grant 교체와 철회
+- 실제 새 Python 프로세스의 crash/restart grant 비복구
 - 민감 payload가 없는 상태와 JSONL 감사 이벤트
+- audit journal의 flush/fsync와 write 실패 시 grant 전부 fail-closed
 - callback 부재와 evidence 누락의 fail-closed 처리
+- action별 evidence 교차 제출 거부와 전체 supported action policy coverage
+- 실행 중 grant 교체·만료 시 cursor 유지 및 원래 grant ID 감사
+- retry budget 소진의 미검증·cursor 유지
 - 미검증 결과와 미검증 skip이 plan cursor를 진행하지 않음
 - Minecraft 접속·종료·목표 변경의 긍정/부정 outcome
 - 변경성 Discord 명령의 owner/admin 권한 검사

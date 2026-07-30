@@ -14,8 +14,11 @@ Evaluation stance: 실패 가능성과 검증 공백을 우선 기록
 
 현재 프로세스에만 유효한 guild별 grant, 1시간 TTL, exact action scope,
 restart 비복구, 변경성 Discord 명령 권한 검사와 미검증 결과의 plan 진행
-차단은 구현되어 있다. Minecraft 접속·종료·목표 변경도 명시적 outcome
-marker와 실제 상태 증거가 없으면 성공 문구를 만들지 않는다.
+차단은 구현되어 있다. action별 exact evidence allowlist, 실행 뒤 동일 grant
+재검사, 실행 중 만료·교체의 cursor 차단, retry budget 비증거화, audit journal
+flush/fsync와 기록 실패 시 전체 grant 폐기도 구현됐다. Minecraft 접속·종료·
+목표 변경은 명시적 outcome marker와 실제 상태 증거가 없으면 성공 문구를
+만들지 않는다.
 
 현재 Docker local core와 Bot API는 실행 중이지만 Discord bot과
 Minecraft/Voyager는 사용자 요청 없이 지연 시작 상태다. 번들 Python에는
@@ -28,13 +31,22 @@ proof, 만료·상태 불명 시 fail-closed 정지는 구현됐다. Bot API 단
 공유 claim을 통한 경쟁 owner 차단, Discord 인증 위임, split Fast Control의
 승인 경로도 구현했다. Local I/O Bridge와 legacy auto-start 우회는 차단했다.
 
-다음 조치: 공식 Discord/Bot API 이미지에서 owner/admin과 일반 사용자의 명령
-경계를 각각 확인하고, grant 만료·프로세스 재시작·Minecraft 연결 실패를
-포함한 합성 시나리오를 실행한다. 성공 action마다 audit journal의
-`verified=true`와 예상 `evidenceCode`가 실제 효과와 일치하는지 대조한다.
-split Docker에서는 Bot API 재시작 시 token 회전·lease 비복구·stale runner
-정지, Discord 재시작 시 중앙 lease 유지, 동시 Control Page/Discord 요청의
-owner mismatch를 실제 컨테이너와 Minecraft 세션에서 추가 검증한다.
+공식 Discord 이미지에서 grant crash/restart 비복구, 실행 중 교체·만료,
+audit write 실패, exact evidence, Discord status 노출, Minecraft lease와
+실제 `main.py` crash/restart를 포함한 집중 테스트 96개를 통과했다. 전체 core
+452개도 기능 assertion 실패 0개였고 이미지에 `git` 실행 파일이 없어 과거
+main signature를 조회하는 테스트 2개만 환경 오류였다.
+
+남은 공백은 실제 Discord 메시지 전송과 실제 Minecraft 연결·종료·목표 변경을
+한 승인 세션에서 수행하는 live E2E다. split Docker의 Bot API 재시작 token
+회전·lease 비복구·stale runner 정지, Discord 재시작 시 중앙 lease 유지,
+동시 Control Page/Discord 요청의 owner mismatch도 실제 Minecraft 세션에서는
+아직 확인하지 않았다.
+
+다음 조치: 사용자가 별도 Discord/Minecraft 검증 세션을 시작할 때 owner/admin과
+일반 사용자의 명령 경계, grant 만료·재시작·연결 실패, 각 성공 action의
+`verified=true`와 exact `evidenceCode`, 실제 world effect를 한 흐름에서
+대조한다.
 
 ## P1 — Conversation Continuity live Discord·원격 CI 검증 대기
 

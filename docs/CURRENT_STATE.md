@@ -2,7 +2,7 @@
 
 Document status: **Current**
 Last reviewed: 2026-07-30 KST
-Source branch: `codex/dependency-config-hardening` at `9fc3899`
+Source branch: `codex/dependency-config-hardening` at `b5d352a`
 
 이 문서는 현재 확인된 사실만 기록한다. 목표 구조와 과거 계획은 다른 설계/계획 문서를 사용한다.
 
@@ -30,6 +30,19 @@ Source branch: `codex/dependency-config-hardening` at `9fc3899`
     대상 guild만 차단하며 다른 guild는 복구한다.
   - marker 기록 실패 시 runtime reset을 시작하지 않고, ledger 손상 시 기존
     checkpoint 전체를 fail-closed로 거부한다.
+- 자율행동의 승인과 결과 증거를 같은 action·grant에 묶었다.
+  - `autonomy.outcome-evidence-policy.v1`이 모든 supported action의 exact
+    evidence code를 정의한다. 비어 있지 않은 임의 코드나 다른 action의
+    올바른 코드는 성공 증거가 아니다.
+  - executor 성공 뒤 실행 전 grant ID를 다시 검사하며, 실행 중 grant가
+    교체·만료·철회되면 engine을 중단하고 plan cursor를 유지한다.
+  - retry budget 소진은 `verified=false`인 blocked 결과이며 성공·skip으로
+    변환하지 않는다.
+  - 승인·결정·결과 event는 flush/fsync 뒤 반환한다. journal을 기록할 수
+    없으면 새 실행을 허용하지 않고 모든 grant를 폐기한다.
+  - Discord `자율상태`는 현재 guild의 승인 활성 여부, 남은 TTL, audit
+    readiness와 strict evidence policy를 표시하되 issuer와 grant ID는
+    공개하지 않는다.
 - Codex Gateway의 `/codex/action`은 bearer token을 요구한다. `/health`는 읽기 전용으로 유지한다.
 - 사용되지 않던 `docs/assets/evelyn-page.js`는 삭제했고, UI 테스트는 실제 `docs/index.html` 인라인 컨트롤러를 검사한다.
 - Docker Compose의 사용자별 `C:/Users/Admin/...` 경로는 환경변수와 `USERPROFILE` 기반으로 바꿨다.
@@ -167,6 +180,11 @@ Source branch: `codex/dependency-config-hardening` at `9fc3899`
   시작하거나 교체하지 않았다.
   - Discord image:
     `sha256:b5984c5ec26a28a8a927982f4f85fc6df01c5f38946f86eec24675a25090d338`
+- `b5d352a` 소스로 Discord bot 이미지를 다시 빌드해 exact action evidence,
+  grant post-check, audit fail-closed와 Discord 승인 상태 표시를 검증했다.
+  실제 Discord 서비스는 시작하거나 교체하지 않았다.
+  - Discord image:
+    `sha256:7c8563c727bd7e8aeb8a806835da16df0648c5a516b5a9f48cf9dfef721f99d6`
 - 이전 `c656fc8` 배포의 recreate 직후에는 이전 Bot API owner claim이 15초
   stale guard 안에 있어 첫 Bot API start가
   `minecraft_world_lease_owner_conflict`로 fail-closed 종료됐다. guard 만료
@@ -272,8 +290,16 @@ Source branch: `codex/dependency-config-hardening` at `9fc3899`
 
 ## Verification state
 
-검증한 코드 기준점: `9fc3899`
+검증한 코드 기준점: `b5d352a`
 
+- 새 공식 Discord 이미지 내부 소스로 자율 승인·restart 비복구·exact
+  evidence·실행 중 grant 교체/만료·audit write 실패·Discord status·Minecraft
+  lease·실제 `main.py` crash/restart 통합 테스트 96개를 통과했다.
+- 전체 core 452개는 기능 assertion 실패 0개였다. 이미지에 `git` 실행 파일이
+  없어 과거 main signature 비교 2개만 환경 오류로 남았다.
+- 새 Discord 이미지의 `compileall`과 `pip check`를 통과했다.
+- 실제 Discord bot과 Minecraft/Voyager는 시작하지 않았으므로 live action
+  effect 검증은 수행하지 않았다.
 - 새 공식 Discord 이미지에서 guild reset, continuity, Discord command wiring,
   Runtime Errors, opt-in real-main startup/crash-restart 집중 테스트 68개를
   통과했다.
