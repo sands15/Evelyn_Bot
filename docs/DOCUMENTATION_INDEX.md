@@ -50,6 +50,10 @@ implemented behavior.
   - 프로세스 재시작 뒤 완료된 대화 턴과 active follow-up을 15분 동안
     제한적으로 복구하는 checkpoint, privacy, deletion, observability 계약.
 
+- `docs/AUTONOMY_AUTHORIZATION_CONTRACT.md`
+  - 현재 프로세스에만 유효한 자율행동 grant, exact action scope, 결과 증거,
+    Minecraft 직접 제어의 fail-closed 성공 판정과 감사 journal 계약.
+
 - `docs/RUNTIME_ERROR_OBSERVABILITY_CONTRACT.md`
   - Runtime owner별 고정 오류 코드·카운터와 Control Page 공개 privacy 계약.
 

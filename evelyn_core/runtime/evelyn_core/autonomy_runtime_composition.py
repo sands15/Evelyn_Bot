@@ -52,6 +52,9 @@ class AutonomyRuntimeCompositionDeps:
     active_conversation_text_question_sec: float
     active_conversation_text_sec: float
     autonomy_poll_interval_sec: float
+    get_authorized_actions: Callable[[int], list[str]]
+    authorize_action: Callable[[int, str], dict[str, Any]]
+    record_action_outcome: Callable[[int, str, dict[str, Any]], None]
 
 
 class AutonomyRuntimeComposition:
@@ -103,6 +106,9 @@ class AutonomyRuntimeComposition:
             active_conversation_text_question_sec=deps.active_conversation_text_question_sec,
             active_conversation_text_sec=deps.active_conversation_text_sec,
             autonomy_poll_interval_sec=deps.autonomy_poll_interval_sec,
+            get_authorized_actions=deps.get_authorized_actions,
+            authorize_action=deps.authorize_action,
+            record_action_outcome=deps.record_action_outcome,
         )
 
     def get_or_create_autonomy_engine(self, guild_id: int) -> AutonomyEngine:

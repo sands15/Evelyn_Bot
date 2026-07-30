@@ -884,19 +884,50 @@ class ControlPageStateModuleTests(unittest.TestCase):
         self.assertEqual(scheduled, ["bot"])
         self.assertEqual(
             build_control_page_minecraft_connect_reply_payload(
-                {"objective_goal": "diamond", "objective_stage": "mine"},
+                {
+                    "connected": True,
+                    "outcome_verified": True,
+                    "outcome_code": "minecraft_connected",
+                    "objective_goal": "diamond",
+                    "objective_stage": "mine",
+                },
                 position_text="1, 2, 3",
             ),
             "Voyager Minecraft 모드를 시작했어.\n- goal: diamond\n- stage: mine\n- position: 1, 2, 3",
         )
-        self.assertEqual(build_control_page_minecraft_disconnect_reply(), "Voyager Minecraft 모드를 중지했어.")
+        self.assertEqual(
+            build_control_page_minecraft_disconnect_reply(
+                {
+                    "running": False,
+                    "connected": False,
+                    "outcome_verified": True,
+                    "outcome_code": "minecraft_stopped",
+                }
+            ),
+            "Voyager Minecraft 모드를 중지했어.",
+        )
         self.assertEqual(
             build_control_page_minecraft_goal_missing_reply(),
             "목표를 같이 적어줘. 예: /minecraft goal progress_to_diamond",
         )
         self.assertEqual(
-            build_control_page_minecraft_goal_updated_reply("diamond", {"stage": "mine"}),
+            build_control_page_minecraft_goal_updated_reply(
+                "diamond",
+                {
+                    "goal": "diamond",
+                    "stage": "mine",
+                    "outcome_verified": True,
+                    "outcome_code": "minecraft_goal_confirmed",
+                },
+            ),
             "Minecraft 목표를 바꿨어.\n- goal: diamond\n- stage: mine",
+        )
+        self.assertIn(
+            "확인하지 못했어",
+            build_control_page_minecraft_connect_reply_payload(
+                {"position": {"x": 1}},
+                position_text="1, 2, 3",
+            ),
         )
 
     def test_execute_control_page_memory_tool_routes_panel_and_vault_callbacks(self) -> None:
@@ -1181,15 +1212,33 @@ class ControlPageStateModuleTests(unittest.TestCase):
 
         async def enable_mode(guild_id: int):
             calls.append(("enable", guild_id))
-            return {"objective_goal": "diamond", "objective_stage": "mine", "position": {"x": 1, "y": 2, "z": 3}}
+            return {
+                "connected": True,
+                "outcome_verified": True,
+                "outcome_code": "minecraft_connected",
+                "objective_goal": "diamond",
+                "objective_stage": "mine",
+                "position": {"x": 1, "y": 2, "z": 3},
+            }
 
         async def disable_mode(guild_id: int):
             calls.append(("disable", guild_id))
+            return {
+                "running": False,
+                "connected": False,
+                "outcome_verified": True,
+                "outcome_code": "minecraft_stopped",
+            }
 
         class FakeClient:
             async def set_goal(self, goal: str):
                 calls.append(("goal", goal))
-                return {"stage": "plan"}
+                return {
+                    "goal": goal,
+                    "stage": "plan",
+                    "outcome_verified": True,
+                    "outcome_code": "minecraft_goal_confirmed",
+                }
 
         guild = SimpleNamespace(id=7)
         not_minecraft = asyncio.run(

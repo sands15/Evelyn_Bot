@@ -19,6 +19,10 @@ from .discord_commands import (
     control_command_check_failure_message,
     is_control_command_authorized_payload,
 )
+from .minecraft_mode_composition import (
+    MINECRAFT_STOPPED_OUTCOME,
+    minecraft_stop_confirmed,
+)
 
 
 async def handle_join_voice_command(
@@ -135,28 +139,50 @@ async def handle_prefix_command(
 async def handle_autonomy_start_command(
     ctx: Any,
     *,
+    autonomy_enabled: bool,
     get_or_create_autonomy_engine: Any,
+    grant_autonomy_authorization: Any,
+    revoke_autonomy_authorization: Any,
     guild_only_message: Any,
 ) -> None:
     if ctx.guild is None:
         await ctx.send(guild_only_message())
         return
+    if not autonomy_enabled:
+        await ctx.send("자율 행동 기능이 설정에서 비활성화되어 있어.")
+        return
+    grant = grant_autonomy_authorization(
+        ctx.guild.id,
+        f"discord_user:{getattr(ctx.author, 'id', '')}",
+    )
+    if not isinstance(grant, dict) or not grant.get("ok"):
+        await ctx.send("❌ 자율 행동 승인을 발급하지 못했어.")
+        return
     try:
         await get_or_create_autonomy_engine(ctx.guild.id).start()
         await ctx.send("🤖 자율 행동 루프를 시작했어.")
-    except Exception as exc:
-        await ctx.send(f"❌ 자율 행동 시작 실패: {exc}")
+    except Exception:
+        revoke_autonomy_authorization(
+            ctx.guild.id,
+            reason_code="start_failed",
+        )
+        await ctx.send("❌ 자율 행동 시작에 실패했고 승인은 폐기했어.")
 
 
 async def handle_autonomy_stop_command(
     ctx: Any,
     *,
     autonomy_engines: dict[int, Any],
+    revoke_autonomy_authorization: Any,
     guild_only_message: Any,
 ) -> None:
     if ctx.guild is None:
         await ctx.send(guild_only_message())
         return
+    revoke_autonomy_authorization(
+        ctx.guild.id,
+        reason_code="explicit_autonomy_stop",
+    )
     engine = autonomy_engines.get(ctx.guild.id)
     if engine is None:
         await ctx.send("이미 자율 행동이 꺼져 있어.")
@@ -363,7 +389,14 @@ async def handle_minecraft_disconnect_command(
         await ctx.send(guild_only_message())
         return
     try:
-        await disable_minecraft_mode(ctx.guild.id)
+        stopped = await disable_minecraft_mode(ctx.guild.id)
+        if not (
+            isinstance(stopped, dict)
+            and stopped.get("outcome_verified") is True
+            and stopped.get("outcome_code") == MINECRAFT_STOPPED_OUTCOME
+            and minecraft_stop_confirmed(stopped)
+        ):
+            raise RuntimeError("minecraft_stop_unverified")
         reply_text = "🛑 Voyager 기반 마인크래프트 자율 모드를 중지했어."
         await ctx.send(reply_text)
     except Exception as exc:

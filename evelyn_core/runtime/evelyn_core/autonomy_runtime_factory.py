@@ -56,6 +56,9 @@ class AutonomyRuntimeFactoryDeps:
     active_conversation_text_question_sec: float
     active_conversation_text_sec: float
     autonomy_poll_interval_sec: float
+    get_authorized_actions: Callable[[int], list[str]]
+    authorize_action: Callable[[int, str], dict[str, Any]]
+    record_action_outcome: Callable[[int, str, dict[str, Any]], None]
 
 
 def get_or_create_autonomy_engine_from_runtime(
@@ -212,22 +215,31 @@ def get_or_create_autonomy_engine_from_runtime(
         )
         deps.last_autonomy_ping_at[guild_id] = deps.monotonic()
         deps.mark_self_state_assistant_output(proactive=True)
-        return {"status": "ok", "reason": "sent_followup", "text": text}
+        return {
+            "status": "ok",
+            "reason": "sent_followup",
+            "text": text,
+            "verified": True,
+            "evidence_code": "discord_send_completed",
+        }
 
     async def default_summarize() -> dict[str, Any]:
         history = deps.get_conversation_history(
             session_key=deps.runtime_session_key(guild_id=guild_id),
             guild_id=guild_id,
         )
-        return build_autonomy_summary_payload(
+        result = build_autonomy_summary_payload(
             history,
             active_sessions=deps.get_active_session_count(),
             inflight_llm_requests=deps.get_inflight_llm_requests(),
         )
+        result["verified"] = True
+        result["evidence_code"] = "summary_payload_built"
+        return result
 
     async def default_check_status() -> dict[str, Any]:
         channel = await find_followup_channel()
-        return build_autonomy_status_payload(
+        result = build_autonomy_status_payload(
             connected=channel is not None,
             active_sessions=deps.get_active_session_count(),
             inflight_llm_requests=deps.get_inflight_llm_requests(),
@@ -239,13 +251,19 @@ def get_or_create_autonomy_engine_from_runtime(
                 ]
             ),
         )
+        result["verified"] = True
+        result["evidence_code"] = "status_snapshot_built"
+        return result
 
     async def default_summarize_recent_context() -> dict[str, Any]:
         history = deps.get_conversation_history(
             session_key=deps.runtime_session_key(guild_id=guild_id),
             guild_id=guild_id,
         )
-        return build_autonomy_recent_context_payload(history)
+        result = build_autonomy_recent_context_payload(history)
+        result["verified"] = True
+        result["evidence_code"] = "recent_context_payload_built"
+        return result
 
     async def default_maybe_ping_user(text: str) -> dict[str, Any]:
         last_ping_at = float(deps.last_autonomy_ping_at.get(guild_id, 0.0) or 0.0)
@@ -264,7 +282,13 @@ def get_or_create_autonomy_engine_from_runtime(
             session_memory_key=session_key,
         )
         if not marked:
-            return {"status": "ok", "reason": "no_queued_proactive_question", "skipped": True}
+            return {
+                "status": "ok",
+                "reason": "no_queued_proactive_question",
+                "skipped": True,
+                "verified": True,
+                "evidence_code": "proactive_gate_completed",
+            }
         return await default_send_followup(
             marked["ask_text"],
             awaiting_user_reply=True,
@@ -300,6 +324,8 @@ def get_or_create_autonomy_engine_from_runtime(
                 "confidence": state.get("confidence"),
                 "elapsed_ms": elapsed_ms,
                 "text": latest_user_text[:120],
+                "verified": True,
+                "evidence_code": "cognitive_state_updated",
             }
 
         task = asyncio.create_task(run_refresh())
@@ -326,6 +352,9 @@ def get_or_create_autonomy_engine_from_runtime(
         ),
         notify=notify,
         poll_interval_sec=deps.autonomy_poll_interval_sec,
+        get_authorized_actions=deps.get_authorized_actions,
+        authorize_action=deps.authorize_action,
+        record_action_outcome=deps.record_action_outcome,
     )
     deps.autonomy_engines[guild_id] = engine
     return engine

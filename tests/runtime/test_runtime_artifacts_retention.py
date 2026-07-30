@@ -13,6 +13,7 @@ if str(RUNTIME_ROOT) not in sys.path:
     sys.path.insert(0, str(RUNTIME_ROOT))
 
 from evelyn_core.runtime_artifacts_retention import (  # noqa: E402
+    DEFAULT_RETENTION_RULES,
     RetentionRule,
     apply_cleanup_plan,
     build_cleanup_plan,
@@ -31,6 +32,23 @@ def write_file(path: Path, text: str, *, mtime: float) -> None:
 
 
 class RuntimeArtifactsRetentionTests(unittest.TestCase):
+    def test_autonomy_authorization_journal_has_bounded_retention(
+        self,
+    ) -> None:
+        rule = next(
+            row
+            for row in DEFAULT_RETENTION_RULES
+            if row.name == "autonomy_authorization_events"
+        )
+
+        self.assertEqual(
+            rule.patterns,
+            ("autonomy_authorization/events/*.jsonl",),
+        )
+        self.assertEqual(rule.max_age_days, 30)
+        self.assertEqual(rule.max_total_bytes, 20 * 1024 * 1024)
+        self.assertEqual(rule.preserve_newest, 7)
+
     def test_inventory_stays_within_root(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)

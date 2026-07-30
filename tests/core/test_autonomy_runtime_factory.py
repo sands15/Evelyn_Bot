@@ -88,6 +88,22 @@ class AutonomyRuntimeFactoryTests(unittest.IsolatedAsyncioTestCase):
             active_conversation_text_question_sec=30.0,
             active_conversation_text_sec=15.0,
             autonomy_poll_interval_sec=4.0,
+            get_authorized_actions=lambda _guild_id: [
+                "assistant:idle",
+            ],
+            authorize_action=lambda _guild_id, action: {
+                "allowed": action == "assistant:idle",
+                "code": (
+                    "authorized"
+                    if action == "assistant:idle"
+                    else "authorization_scope_denied"
+                ),
+            },
+            record_action_outcome=lambda guild_id, action, result: (
+                self.events.append(
+                    ("outcome", (guild_id, action, result))
+                )
+            ),
         )
 
     def create_engine(self):
@@ -129,6 +145,11 @@ class AutonomyRuntimeFactoryTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(result["status"], "ok")
+        self.assertTrue(result["verified"])
+        self.assertEqual(
+            result["evidence_code"],
+            "discord_send_completed",
+        )
         self.assertEqual(self.last_ping[11], 100.0)
         kinds = [kind for kind, _payload in self.events]
         self.assertEqual(kinds, ["send", "history", "memory", "session", "self_state"])
@@ -148,6 +169,11 @@ class AutonomyRuntimeFactoryTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result["status"], "ok")
         self.assertEqual(result["reason"], "router_refreshed")
+        self.assertTrue(result["verified"])
+        self.assertEqual(
+            result["evidence_code"],
+            "cognitive_state_updated",
+        )
         self.assertEqual(result["elapsed_ms"], 250.0)
         self.assertEqual(self.last_refresh[11], 100.0)
         self.assertNotIn(11, self.refresh_tasks)

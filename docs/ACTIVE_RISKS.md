@@ -10,6 +10,28 @@ Evaluation stance: 실패 가능성과 검증 공백을 우선 기록
 
 다음 조치: 실제 Minecraft 세션을 사용할 때 runner/bridge/TCP/task contract를 순서대로 검증한다.
 
+## P0 — 승인된 자율행동 live E2E 검증 대기
+
+현재 프로세스에만 유효한 guild별 grant, 1시간 TTL, exact action scope,
+restart 비복구, 변경성 Discord 명령 권한 검사와 미검증 결과의 plan 진행
+차단은 구현되어 있다. Minecraft 접속·종료·목표 변경도 명시적 outcome
+marker와 실제 상태 증거가 없으면 성공 문구를 만들지 않는다.
+
+그러나 현재 번들 Python에는 `aiohttp`와 `discord`가 없고 Docker Engine도
+꺼져 있어, 실제 Discord 승인 명령부터 메시지 전송 및 Minecraft 상태 변화까지
+한 세션에서 수행하는 live E2E는 아직 확인하지 못했다.
+
+또한 assistant 자율 루프의 grant TTL은 Voyager runner의 지속 실행을 자동
+중지시키지 않는다. Minecraft 직접 모드는 현재 owner/admin의 명시적 명령으로
+보호되지만, bot process restart와 lease 만료 시 별도 정지 owner가 필요한
+상태다.
+
+다음 조치: 공식 Discord/Bot API 이미지에서 owner/admin과 일반 사용자의 명령
+경계를 각각 확인하고, grant 만료·프로세스 재시작·Minecraft 연결 실패를
+포함한 합성 시나리오를 실행한다. 성공 action마다 audit journal의
+`verified=true`와 예상 `evidenceCode`가 실제 효과와 일치하는지 대조한다.
+그 전에 Minecraft world-action lease와 restart fail-closed 정지를 구현한다.
+
 ## P1 — Conversation Continuity 실제 crash/restart 검증 대기
 
 완료된 대화 턴과 active follow-up을 15분 동안 제한적으로 복구하는 checkpoint,

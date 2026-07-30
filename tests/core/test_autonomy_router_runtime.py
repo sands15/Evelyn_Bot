@@ -14,6 +14,7 @@ if str(RUNTIME_ROOT) not in sys.path:
 _runtime_import_error: str | None = None
 try:
     from evelyn_core.autonomy_router import (  # noqa: E402
+        DefaultAutonomyExecutor,
         ResolveRouteExecutorRuntimeDeps,
         RoutedAutonomyExecutor,
         get_routed_autonomy_executor_from_runtime,
@@ -105,6 +106,87 @@ class ResolveRouteExecutorRuntimeTests(unittest.TestCase):
         )
         self.assertIsNone(resolve_route_executor_from_runtime(13, "vision", deps=deps))
         self.assertEqual(created, [])
+
+
+class DefaultAutonomyExecutorOutcomeTests(
+    unittest.IsolatedAsyncioTestCase
+):
+    @classmethod
+    def setUpClass(cls) -> None:
+        if _SKIP_REASON:
+            raise unittest.SkipTest(_SKIP_REASON)
+
+    async def test_missing_callback_is_blocked_not_fake_success(
+        self,
+    ) -> None:
+        executor = DefaultAutonomyExecutor()
+
+        result = await executor.execute_step(
+            {
+                "domain": "assistant",
+                "action": "send_followup",
+                "text": "hello",
+            }
+        )
+
+        self.assertEqual(result["status"], "blocked")
+        self.assertEqual(
+            result["reason"],
+            "executor_callback_unavailable",
+        )
+        self.assertFalse(result["verified"])
+
+    async def test_callback_success_requires_typed_evidence(
+        self,
+    ) -> None:
+        async def send_followup(_text: str) -> dict:
+            return {
+                "status": "ok",
+                "verified": True,
+                "evidence_code": "discord_send_completed",
+            }
+
+        executor = DefaultAutonomyExecutor(
+            send_followup_fn=send_followup,
+        )
+
+        result = await executor.execute_step(
+            {
+                "domain": "assistant",
+                "action": "send_followup",
+                "text": "hello",
+            }
+        )
+
+        self.assertTrue(result["verified"])
+        self.assertEqual(
+            result["evidence_code"],
+            "discord_send_completed",
+        )
+
+    async def test_callback_ok_without_evidence_stays_unverified(
+        self,
+    ) -> None:
+        async def send_followup(_text: str) -> dict:
+            return {"status": "ok"}
+
+        executor = DefaultAutonomyExecutor(
+            send_followup_fn=send_followup,
+        )
+
+        result = await executor.execute_step(
+            {
+                "domain": "assistant",
+                "action": "send_followup",
+                "text": "hello",
+            }
+        )
+
+        self.assertFalse(result["verified"])
+        self.assertEqual(
+            result["reason"],
+            "outcome_evidence_missing",
+        )
 
 
 if __name__ == "__main__":

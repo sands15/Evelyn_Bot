@@ -111,13 +111,24 @@ class DiscordCommandHelperTests(unittest.TestCase):
 
     def test_minecraft_connect_reply_reports_success_or_last_error(self) -> None:
         success = build_minecraft_connect_reply(
-            {"connected": True, "position": {"x": 1}, "objective_stage": "wood", "objective_goal": "diamond"}
+            {
+                "connected": True,
+                "outcome_verified": True,
+                "outcome_code": "minecraft_connected",
+                "position": {"x": 1},
+                "objective_stage": "wood",
+                "objective_goal": "diamond",
+            }
         )
         failure = build_minecraft_connect_reply({"wait_last_error": "timeout"})
+        position_only = build_minecraft_connect_reply(
+            {"position": {"x": 1}}
+        )
 
         self.assertIn("Voyager 기반 마인크래프트 자율 모드 시작 완료", success)
         self.assertIn("- goal: diamond", success)
         self.assertIn("last_error=timeout", failure)
+        self.assertIn("접속 실패", position_only)
 
     def test_minecraft_status_text_summarizes_voyager_evaluation(self) -> None:
         text = build_minecraft_status_command_text(
@@ -149,8 +160,23 @@ class DiscordCommandHelperTests(unittest.TestCase):
     def test_minecraft_goal_and_reset_replies(self) -> None:
         self.assertIn("마크목표 diamond", build_minecraft_goal_missing_reply())
         self.assertEqual(
-            build_minecraft_goal_updated_reply("diamond", {"stage": "mine"}),
+            build_minecraft_goal_updated_reply(
+                "diamond",
+                {
+                    "goal": "diamond",
+                    "stage": "mine",
+                    "outcome_verified": True,
+                    "outcome_code": "minecraft_goal_confirmed",
+                },
+            ),
             "🎯 마인크래프트 목표를 바꿨어.\n- goal: diamond\n- stage: mine",
+        )
+        self.assertIn(
+            "확인하지 못했어",
+            build_minecraft_goal_updated_reply(
+                "diamond",
+                {"goal": "other", "stage": "mine"},
+            ),
         )
         self.assertEqual(
             build_reset_guild_memory_reply(guild_name="Home", current_prefix="!"),

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import time
 from collections import defaultdict, deque
@@ -8,6 +9,10 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Protocol
 
+from .autonomy_authorization import (
+    ASSISTANT_AUTONOMY_ACTIONS,
+    MINECRAFT_AUTONOMY_ACTIONS,
+)
 from .memory import cognitive_state_path, read_json_file, write_json_file
 from .minecraft_threat import has_interrupting_threat, has_survival_threat, highest_threat_score, threat_count, threat_distance
 from .paths import get_repo_root
@@ -107,37 +112,8 @@ class AutonomyEngine:
     @staticmethod
     def default_allowed_actions() -> list[str]:
         return [
-            "assistant:check_status",
-            "assistant:refresh_cognitive_state",
-            "assistant:summarize_notifications",
-            "assistant:summarize_recent_context",
-            "assistant:send_followup",
-            "assistant:maybe_ping_user",
-            "assistant:idle",
-            "minecraft:retreat",
-            "minecraft:heal_or_regroup",
-            "minecraft:find_food_source",
-            "minecraft:consume_food",
-            "minecraft:gather_logs",
-            "minecraft:craft_basic_tools",
-            "minecraft:gather_basic_resources",
-            "minecraft:equip_shield",
-            "minecraft:eat_if_low",
-            "minecraft:avoid_hazard",
-            "minecraft:exploration_guard",
-            "minecraft:explore_interesting_block",
-            "minecraft:enter_cave",
-            "minecraft:exit_cave",
-            "minecraft:navigate_stairs",
-            "minecraft:place_block_nearby",
-            "minecraft:generated_skill",
-            "minecraft:melee_attack",
-            "minecraft:craft_stone_tools",
-            "minecraft:craft_furnace",
-            "minecraft:smelt_iron_ingot",
-            "minecraft:craft_torch",
-            "minecraft:craft_chest",
-            "minecraft:cook_food",
+            *ASSISTANT_AUTONOMY_ACTIONS,
+            *MINECRAFT_AUTONOMY_ACTIONS,
         ]
 
     def __init__(
@@ -147,14 +123,25 @@ class AutonomyEngine:
         executor: AutonomyExecutor,
         notify: Callable[[str], Awaitable[None]] | None = None,
         poll_interval_sec: float = 4.0,
+        get_authorized_actions: Callable[[int], list[str]] | None = None,
+        authorize_action: Callable[[int, str], dict[str, Any]] | None = None,
+        record_action_outcome: Callable[
+            [int, str, dict[str, Any]],
+            None,
+        ]
+        | None = None,
     ) -> None:
         self.guild_id = guild_id
         self.executor = executor
         self.notify = notify
         self.poll_interval_sec = max(1.0, float(poll_interval_sec))
-        self.state = AutonomyRuntimeState(allowed_actions=self.default_allowed_actions())
+        self.get_authorized_actions = get_authorized_actions
+        self.authorize_action = authorize_action
+        self.record_action_outcome = record_action_outcome
+        self.state = AutonomyRuntimeState()
         self._task: asyncio.Task | None = None
         self._lock = asyncio.Lock()
+        self._executor_connected = False
         self._blocked_counts: dict[str, int] = defaultdict(int)
         self._recent_goal_kinds: deque[str] = deque(maxlen=8)
 
@@ -167,19 +154,31 @@ class AutonomyEngine:
         runtime = saved.get("autonomy_runtime") if isinstance(saved, dict) else None
         if not isinstance(runtime, dict):
             return
-        persisted_allowed = [clean_text(str(item)) for item in runtime.get("allowed_actions", []) if clean_text(str(item))]
-        merged_allowed = list(dict.fromkeys([*self.default_allowed_actions(), *persisted_allowed]))
         current_goal = runtime.get("current_goal")
         current_plan = runtime.get("current_plan")
         last_step_result = runtime.get("last_step_result") if isinstance(runtime.get("last_step_result"), dict) else {}
         last_router_refresh_result = runtime.get("last_router_refresh_result") if isinstance(runtime.get("last_router_refresh_result"), dict) else {}
         drive_state = runtime.get("drive_state") if isinstance(runtime.get("drive_state"), dict) else {}
-        stale_plan = bool(last_step_result.get("reason") in {"retry_suppressed", "action_not_allowed"})
+        was_enabled = bool(runtime.get("enabled", False))
+        stale_plan = bool(
+            was_enabled
+            or last_step_result.get("reason")
+            in {
+                "retry_suppressed",
+                "action_not_allowed",
+                "authorization_required",
+                "authorization_scope_denied",
+            }
+        )
         self.state = AutonomyRuntimeState(
-            enabled=bool(runtime.get("enabled", False)),
-            status=clean_text(str(runtime.get("status", "idle"))) or "idle",
+            enabled=False,
+            status=(
+                "authorization_required"
+                if was_enabled
+                else "idle"
+            ),
             safety_mode=clean_text(str(runtime.get("safety_mode", "constrained"))) or "constrained",
-            allowed_actions=merged_allowed,
+            allowed_actions=[],
             last_observation=runtime.get("last_observation") if isinstance(runtime.get("last_observation"), dict) else {},
             current_goal=None if stale_plan else (AutonomyGoal(**current_goal) if isinstance(current_goal, dict) and current_goal.get("kind") else None),
             current_plan=None if stale_plan else (AutonomyPlan(**current_plan) if isinstance(current_plan, dict) and current_plan.get("goal_kind") else None),
@@ -216,9 +215,28 @@ class AutonomyEngine:
             if self._task is not None and not self._task.done():
                 return
             self.load_persisted_state()
-            await self.executor.connect()
+            authorized_actions = (
+                self.get_authorized_actions(self.guild_id)
+                if self.get_authorized_actions is not None
+                else []
+            )
+            supported = set(self.default_allowed_actions())
+            authorized_actions = [
+                action
+                for action in authorized_actions
+                if action in supported
+            ]
+            if not authorized_actions:
+                self.state.enabled = False
+                self.state.status = "authorization_required"
+                self.state.allowed_actions = []
+                self.state.updated_at = time.time()
+                self.persist_state()
+                raise PermissionError("autonomy_authorization_required")
+            await self._connect_executor_once()
             self.state.enabled = True
             self.state.status = "running"
+            self.state.allowed_actions = list(dict.fromkeys(authorized_actions))
             self.state.updated_at = time.time()
             self.persist_state()
             self._task = asyncio.create_task(self._run_loop())
@@ -227,6 +245,7 @@ class AutonomyEngine:
         async with self._lock:
             self.state.enabled = False
             self.state.status = "stopping"
+            self.state.allowed_actions = []
             self.state.updated_at = time.time()
             self.persist_state()
             task = self._task
@@ -235,28 +254,44 @@ class AutonomyEngine:
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await task
-        await self.executor.disconnect()
+        await self._disconnect_executor_once()
         self.state.status = "idle"
         self.state.updated_at = time.time()
         self.persist_state()
 
+    async def _connect_executor_once(self) -> None:
+        if self._executor_connected:
+            return
+        await self.executor.connect()
+        self._executor_connected = True
+
+    async def _disconnect_executor_once(self) -> None:
+        if not self._executor_connected:
+            return
+        self._executor_connected = False
+        await self.executor.disconnect()
+
     async def _run_loop(self) -> None:
-        while self.state.enabled:
-            try:
-                cycle_result = await self.run_cycle()
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                self.state.last_error = clean_text(repr(exc))
-                self.state.failure_count += 1
-                self.state.status = "error"
-                self.state.updated_at = time.time()
-                self.persist_state()
-                if self.notify is not None:
-                    await self.notify(f"[자율봇] 오류: {self.state.last_error}")
-                await asyncio.sleep(self.poll_interval_sec)
-                continue
-            await asyncio.sleep(self.next_poll_delay(cycle_result))
+        try:
+            while self.state.enabled:
+                try:
+                    cycle_result = await self.run_cycle()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    self.state.last_error = clean_text(repr(exc))
+                    self.state.failure_count += 1
+                    self.state.status = "error"
+                    self.state.updated_at = time.time()
+                    self.persist_state()
+                    if self.notify is not None:
+                        await self.notify(f"[자율봇] 오류: {self.state.last_error}")
+                    await asyncio.sleep(self.poll_interval_sec)
+                    continue
+                await asyncio.sleep(self.next_poll_delay(cycle_result))
+        finally:
+            if not self.state.enabled:
+                await self._disconnect_executor_once()
 
     def next_poll_delay(self, cycle_result: AutonomyCycleResult) -> float:
         observation = cycle_result.observation if isinstance(cycle_result.observation, dict) else {}
@@ -323,7 +358,20 @@ class AutonomyEngine:
         self.state.current_goal = selected_goal
         self.state.current_plan = planned
         self.state.last_step_result = step_result or {}
-        self.state.status = "running" if self.state.enabled else "idle"
+        authorization_blocked = bool(
+            isinstance(step_result, dict)
+            and step_result.get("reason")
+            in {
+                "authorization_required",
+                "authorization_scope_denied",
+                "authorization_action_unsupported",
+            }
+        )
+        self.state.status = (
+            "authorization_required"
+            if authorization_blocked
+            else ("running" if self.state.enabled else "idle")
+        )
         self.state.updated_at = time.time()
         self.persist_state()
         return AutonomyCycleResult(
@@ -667,7 +715,11 @@ class AutonomyEngine:
             return False
         if "replan" in step_result:
             return bool(step_result.get("replan"))
-        if step_result.get("status") in {"failed", "blocked"}:
+        if step_result.get("status") in {
+            "failed",
+            "blocked",
+            "unverified",
+        }:
             return True
         return False
 
@@ -681,14 +733,53 @@ class AutonomyEngine:
         return plan
 
     def is_action_allowed(self, step: dict[str, Any]) -> bool:
+        return bool(self.action_authorization_decision(step).get("allowed"))
+
+    def action_authorization_decision(
+        self,
+        step: dict[str, Any],
+    ) -> dict[str, Any]:
         domain = clean_text(str(step.get("domain", "assistant"))) or "assistant"
         action = clean_text(str(step.get("action", "")))
         if not action:
-            return False
+            return {
+                "allowed": False,
+                "code": "authorization_action_unsupported",
+            }
         token = f"{domain}:{action}"
-        if not self.state.allowed_actions:
-            return False
-        return token in self.state.allowed_actions
+        if token not in self.state.allowed_actions:
+            return {
+                "allowed": False,
+                "code": "authorization_scope_denied",
+                "action": token,
+            }
+        if self.authorize_action is None:
+            return {
+                "allowed": False,
+                "code": "authorization_required",
+                "action": token,
+            }
+        decision = self.authorize_action(self.guild_id, token)
+        if not isinstance(decision, dict):
+            return {
+                "allowed": False,
+                "code": "authorization_required",
+                "action": token,
+            }
+        return decision
+
+    def _record_action_result(
+        self,
+        action_key: str,
+        result: dict[str, Any],
+    ) -> dict[str, Any]:
+        if self.record_action_outcome is not None and action_key:
+            self.record_action_outcome(
+                self.guild_id,
+                action_key,
+                result,
+            )
+        return result
 
     async def execute_next_step(self, plan: AutonomyPlan | None) -> dict[str, Any] | None:
         if plan is None:
@@ -697,42 +788,174 @@ class AutonomyEngine:
             return {"status": "done", "reason": "plan_complete"}
         step = plan.steps[plan.cursor]
         action_key = self._action_key(step)
+        authorization = self.action_authorization_decision(step)
+        if not authorization.get("allowed"):
+            self.state.enabled = False
+            self.state.status = "authorization_required"
+            self.state.allowed_actions = []
+            return self._record_action_result(
+                action_key,
+                {
+                    "status": "blocked",
+                    "reason": str(
+                        authorization.get("code")
+                        or "authorization_required"
+                    ),
+                    "step": step,
+                    "verified": False,
+                },
+            )
         if action_key and self._blocked_counts.get(action_key, 0) >= 2:
             plan.cursor += 1
             plan.updated_at = time.time()
-            return {"status": "ok", "reason": "retry_suppressed_skip", "step": step, "skipped": True, "replan": False}
-        if not self.is_action_allowed(step):
-            return {"status": "blocked", "reason": "action_not_allowed", "step": step}
+            return self._record_action_result(
+                action_key,
+                {
+                    "status": "ok",
+                    "reason": "retry_suppressed_skip",
+                    "step": step,
+                    "skipped": True,
+                    "replan": False,
+                    "verified": True,
+                    "evidence_code": "retry_budget_exhausted",
+                },
+            )
         result = await self.executor.execute_step(step)
         if isinstance(result, dict):
             result.setdefault("step", step)
+            verified_outcome = bool(
+                result.get("verified") is True
+                and clean_text(
+                    str(result.get("evidence_code") or "")
+                )
+            )
             if step.get("action") == "refresh_cognitive_state":
                 self.state.last_router_refresh_result = dict(result)
-            if step.get("action") == "equip_shield" and result.get("reason") == "shield_not_in_inventory":
+            if (
+                verified_outcome
+                and step.get("action") == "equip_shield"
+                and result.get("reason") == "shield_not_in_inventory"
+            ):
                 plan.cursor += 1
                 plan.updated_at = time.time()
-                return {"status": "ok", "reason": "shield_skipped", "step": step, "replan": False}
-            if step.get("action") == "avoid_hazard" and result.get("reason") == "no_immediate_hazard":
+                return self._record_action_result(
+                    action_key,
+                    {
+                        "status": "ok",
+                        "reason": "shield_skipped",
+                        "step": step,
+                        "replan": False,
+                        "verified": True,
+                        "skipped": True,
+                        "evidence_code": "inventory_absence_verified",
+                    },
+                )
+            if (
+                verified_outcome
+                and step.get("action") == "avoid_hazard"
+                and result.get("reason") == "no_immediate_hazard"
+            ):
                 plan.cursor += 1
                 plan.updated_at = time.time()
-                return {"status": "ok", "reason": "hazard_step_skipped", "step": step, "replan": False}
-            if step.get("action") == "retreat" and result.get("reason") == "no_hostile_nearby":
+                return self._record_action_result(
+                    action_key,
+                    {
+                        "status": "ok",
+                        "reason": "hazard_step_skipped",
+                        "step": step,
+                        "replan": False,
+                        "verified": True,
+                        "skipped": True,
+                        "evidence_code": "hazard_absence_verified",
+                    },
+                )
+            if (
+                verified_outcome
+                and step.get("action") == "retreat"
+                and result.get("reason") == "no_hostile_nearby"
+            ):
                 plan.cursor += 1
                 plan.updated_at = time.time()
-                return {"status": "ok", "reason": "retreat_step_skipped", "step": step, "replan": False}
-            if step.get("action") == "melee_attack" and result.get("reason") in {"target_entity_not_found", "target_entity_unreachable"}:
+                return self._record_action_result(
+                    action_key,
+                    {
+                        "status": "ok",
+                        "reason": "retreat_step_skipped",
+                        "step": step,
+                        "replan": False,
+                        "verified": True,
+                        "skipped": True,
+                        "evidence_code": "hostile_absence_verified",
+                    },
+                )
+            if (
+                verified_outcome
+                and step.get("action") == "melee_attack"
+                and result.get("reason")
+                in {
+                    "target_entity_not_found",
+                    "target_entity_unreachable",
+                }
+            ):
                 plan.cursor += 1
                 plan.updated_at = time.time()
-                return {"status": "ok", "reason": "attack_step_skipped", "step": step, "replan": False}
-            if step.get("action") in {"eat_if_low", "consume_food", "heal_or_regroup"} and result.get("reason") == "no_food_in_inventory":
+                return self._record_action_result(
+                    action_key,
+                    {
+                        "status": "ok",
+                        "reason": "attack_step_skipped",
+                        "step": step,
+                        "replan": False,
+                        "verified": True,
+                        "skipped": True,
+                        "evidence_code": "target_absence_verified",
+                    },
+                )
+            if (
+                verified_outcome
+                and step.get("action")
+                in {
+                    "eat_if_low",
+                    "consume_food",
+                    "heal_or_regroup",
+                }
+                and result.get("reason") == "no_food_in_inventory"
+            ):
                 plan.cursor += 1
                 plan.updated_at = time.time()
-                return {"status": "ok", "reason": "food_step_skipped", "step": step, "replan": False}
+                return self._record_action_result(
+                    action_key,
+                    {
+                        "status": "ok",
+                        "reason": "food_step_skipped",
+                        "step": step,
+                        "replan": False,
+                        "verified": True,
+                        "skipped": True,
+                        "evidence_code": "food_absence_verified",
+                    },
+                )
             if result.get("status") in {"ok", "done", "completed"}:
+                if not verified_outcome:
+                    return self._record_action_result(
+                        action_key,
+                        {
+                            "status": "unverified",
+                            "reason": "outcome_unverified",
+                            "reportedStatus": result.get("status"),
+                            "step": step,
+                            "verified": False,
+                        },
+                    )
                 plan.cursor += 1
                 plan.updated_at = time.time()
-            return result
-        return {"status": "unknown", "raw": result}
-
-
-import contextlib
+            return self._record_action_result(action_key, result)
+        return self._record_action_result(
+            action_key,
+            {
+                "status": "unknown",
+                "reason": "executor_result_invalid",
+                "step": step,
+                "verified": False,
+            },
+        )

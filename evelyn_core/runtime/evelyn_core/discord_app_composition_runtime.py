@@ -61,7 +61,6 @@ class DiscordEventCompositionDeps:
     voice_rejoin_on_ready: bool
     restore_last_voice_channel: Callable[..., Any]
     autonomy_enabled: bool
-    get_or_create_autonomy_engine: Callable[[int], Any]
     text_message_handler: DepsFactory
     log: Callable[..., Any]
     runtime_status: "DiscordRuntimeStatus | None" = None
@@ -91,10 +90,13 @@ class DiscordCommandCompositionDeps:
     build_prefix_reset_reply: Callable[..., str]
     build_prefix_saved_reply: Callable[..., str]
     guild_only_message: Callable[[], str]
+    autonomy_enabled: bool
     get_or_create_autonomy_engine: Callable[[int], Any]
     autonomy_engines: dict[Any, Any]
     get_routed_autonomy_executor: Callable[..., Any]
     build_autonomy_status_reply: Callable[..., str]
+    grant_autonomy_authorization: Callable[..., dict[str, Any]]
+    revoke_autonomy_authorization: Callable[..., dict[str, Any]]
     command_session: DepsFactory
     enable_minecraft_mode: Callable[..., Any]
     disable_minecraft_mode: Callable[..., Any]
@@ -214,12 +216,10 @@ class DiscordAppComposition:
                 elif detail not in {"no_saved_voice_channel", "manual_disconnect"}:
                     deps.log(f"[VOICE READY REJOIN SKIP] guild={guild.id} reason={detail}")
             if deps.autonomy_enabled:
-                try:
-                    await deps.get_or_create_autonomy_engine(guild.id).start()
-                    deps.log(f"[AUTONOMY] guild={guild.id} started")
-                except Exception as exc:
-                    self._record_runtime_error("autonomy_start_failed", exc)
-                    deps.log(f"[AUTONOMY] guild={guild.id} start_fail err={exc!r}")
+                deps.log(
+                    f"[AUTONOMY] guild={guild.id} "
+                    "available approval_required=true"
+                )
 
     async def on_voice_state_update(self, member: Any, before: Any, after: Any) -> None:
         _ = before
@@ -331,7 +331,10 @@ class DiscordAppComposition:
         deps = self.deps.commands
         await handle_autonomy_start_command(
             ctx,
+            autonomy_enabled=deps.autonomy_enabled,
             get_or_create_autonomy_engine=deps.get_or_create_autonomy_engine,
+            grant_autonomy_authorization=deps.grant_autonomy_authorization,
+            revoke_autonomy_authorization=deps.revoke_autonomy_authorization,
             guild_only_message=deps.guild_only_message,
         )
 
@@ -340,6 +343,7 @@ class DiscordAppComposition:
         await handle_autonomy_stop_command(
             ctx,
             autonomy_engines=deps.autonomy_engines,
+            revoke_autonomy_authorization=deps.revoke_autonomy_authorization,
             guild_only_message=deps.guild_only_message,
         )
 
@@ -585,9 +589,13 @@ class DiscordAppComposition:
         autonomy_start_command = bot.command(name="자율시작", aliases=["autonomy-on"])(
             autonomy_start_command_callback
         )
+        autonomy_start_command.add_check(commands.is_control_command_authorized)
+        autonomy_start_command.error(self.control_command_error)
         autonomy_stop_command = bot.command(name="자율정지", aliases=["autonomy-off"])(
             autonomy_stop_command_callback
         )
+        autonomy_stop_command.add_check(commands.is_control_command_authorized)
+        autonomy_stop_command.error(self.control_command_error)
         autonomy_status_command = bot.command(name="자율상태", aliases=["autonomy-status"])(
             autonomy_status_command_callback
         )
@@ -596,10 +604,14 @@ class DiscordAppComposition:
             name="마크접속",
             aliases=["mc-connect", "minecraft-connect"],
         )(minecraft_connect_command_callback)
+        minecraft_connect_command.add_check(commands.is_control_command_authorized)
+        minecraft_connect_command.error(self.control_command_error)
         minecraft_disconnect_command = bot.command(
             name="마크종료",
             aliases=["mc-disconnect", "minecraft-disconnect"],
         )(minecraft_disconnect_command_callback)
+        minecraft_disconnect_command.add_check(commands.is_control_command_authorized)
+        minecraft_disconnect_command.error(self.control_command_error)
         minecraft_status_command = bot.command(
             name="마크상태",
             aliases=["mc-status", "minecraft-status"],
@@ -608,6 +620,8 @@ class DiscordAppComposition:
             name="마크목표",
             aliases=["mc-goal", "minecraft-goal"],
         )(minecraft_goal_command_callback)
+        minecraft_goal_command.add_check(commands.is_control_command_authorized)
+        minecraft_goal_command.error(self.control_command_error)
 
         observe_channel_command = bot.command(name="관찰채널", aliases=["observe-channel"])(
             observe_channel_command_callback

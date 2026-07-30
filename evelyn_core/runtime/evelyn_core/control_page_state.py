@@ -11,6 +11,12 @@ from control_page_runtime_health import (
 )
 
 from .control_page_contracts import build_control_page_panel_state_payload
+from .minecraft_mode_composition import (
+    MINECRAFT_CONNECTED_OUTCOME,
+    MINECRAFT_STOPPED_OUTCOME,
+    minecraft_connection_confirmed,
+    minecraft_stop_confirmed,
+)
 from .minecraft_runtime_snapshot import attach_minecraft_runtime_snapshot
 from .text import clean_text
 
@@ -1341,6 +1347,13 @@ def build_control_page_shutdown_tool_reply(
 
 
 def build_control_page_minecraft_connect_reply_payload(observed: dict[str, Any], *, position_text: str) -> str:
+    verified = (
+        observed.get("outcome_verified") is True
+        and observed.get("outcome_code") == MINECRAFT_CONNECTED_OUTCOME
+        and minecraft_connection_confirmed(observed)
+    )
+    if not verified:
+        return "Voyager Minecraft 시작 결과를 실제 게임 연결로 확인하지 못했어."
     goal = clean_text(str(observed.get("objective_goal") or observed.get("goal") or "없음")) or "없음"
     stage = clean_text(str(observed.get("objective_stage") or observed.get("stage") or "없음")) or "없음"
     return "\n".join(
@@ -1353,7 +1366,14 @@ def build_control_page_minecraft_connect_reply_payload(observed: dict[str, Any],
     )
 
 
-def build_control_page_minecraft_disconnect_reply() -> str:
+def build_control_page_minecraft_disconnect_reply(status: dict[str, Any]) -> str:
+    verified = (
+        status.get("outcome_verified") is True
+        and status.get("outcome_code") == MINECRAFT_STOPPED_OUTCOME
+        and minecraft_stop_confirmed(status)
+    )
+    if not verified:
+        return "Voyager Minecraft 중지 결과를 확인하지 못했어."
     return "Voyager Minecraft 모드를 중지했어."
 
 
@@ -1362,6 +1382,13 @@ def build_control_page_minecraft_goal_missing_reply() -> str:
 
 
 def build_control_page_minecraft_goal_updated_reply(goal_text: str, status: dict[str, Any]) -> str:
+    verified = (
+        status.get("outcome_verified") is True
+        and status.get("outcome_code") == "minecraft_goal_confirmed"
+        and clean_text(str(status.get("goal") or "")) == clean_text(goal_text)
+    )
+    if not verified:
+        return "Minecraft 목표 변경 결과를 확인하지 못했어."
     stage = clean_text(str(status.get("stage") or "unknown")) or "unknown"
     return "\n".join(
         [
@@ -1495,8 +1522,8 @@ async def execute_control_page_minecraft_tool(
             position_text=format_position(observed.get("position")),
         )
     if tool_name == "minecraft.disconnect":
-        await disable_mode(guild.id)
-        return build_control_page_minecraft_disconnect_reply()
+        status = await disable_mode(guild.id)
+        return build_control_page_minecraft_disconnect_reply(status)
     if tool_name == "minecraft.set_goal":
         goal_text = clean_text(str(arguments.get("goal") or ""))
         if not goal_text:

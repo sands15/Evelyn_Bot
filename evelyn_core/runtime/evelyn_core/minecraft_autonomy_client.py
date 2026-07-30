@@ -413,12 +413,21 @@ class MinecraftAutonomyClient:
         goal_text = str(goal or "").strip()
         if not goal_text:
             raise RuntimeError("goal text is empty")
-        self._persist_goal_override(goal_text)
         status = await self._request("POST", "/goal", {"goal": goal_text})
-        if isinstance(status, dict):
-            echoed_goal = str(status.get("goal") or goal_text).strip()
-            self._persist_goal_override(echoed_goal or goal_text)
-        return status
+        if not isinstance(status, dict):
+            raise RuntimeError("minecraft_goal_unverified")
+        echoed_goal = str(
+            status.get("goal")
+            or status.get("goal_override")
+            or ""
+        ).strip()
+        if echoed_goal != goal_text:
+            raise RuntimeError("minecraft_goal_unverified")
+        self._persist_goal_override(goal_text)
+        verified = dict(status)
+        verified["outcome_verified"] = True
+        verified["outcome_code"] = "minecraft_goal_confirmed"
+        return verified
 
     async def is_connected(self) -> bool:
         status = await self.status()

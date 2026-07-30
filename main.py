@@ -49,6 +49,10 @@ from evelyn_core.audio import (
     is_probably_silent, prepare_stt_audio, resample_audio_float, slice_audio_window,
 )
 from evelyn_core.autonomy import AutonomyEngine
+from evelyn_core.autonomy_authorization import (
+    ASSISTANT_AUTONOMY_ACTIONS,
+    AutonomyAuthorizationManager,
+)
 from evelyn_core.autonomy_observation_state import pick_recent_user_text
 from evelyn_core.autonomy_router import ResolveRouteExecutorRuntimeDeps, RoutedAutonomyExecutor, get_routed_autonomy_executor_from_runtime
 from evelyn_core.autonomy_runtime_composition import AutonomyRuntimeComposition, AutonomyRuntimeCompositionDeps
@@ -323,6 +327,20 @@ session_continuity_checkpoint = SessionContinuityCheckpoint(
         / "status.json"
     ),
     system_prompt=SYSTEM_PROMPT, log=print,
+)
+autonomy_authorization_manager = AutonomyAuthorizationManager(
+    status_path=(
+        PROJECT_ROOT
+        / "runtime_artifacts"
+        / "autonomy_authorization"
+        / "status.json"
+    ),
+    events_dir=(
+        PROJECT_ROOT
+        / "runtime_artifacts"
+        / "autonomy_authorization"
+        / "events"
+    ),
 )
 room_speaker_activity_store = RoomSpeakerActivityStore.create_empty()
 room_reply_in_progress: dict[str, bool] = {}
@@ -640,6 +658,9 @@ autonomy_runtime_composition = AutonomyRuntimeComposition(
         autonomy_cognitive_min_interval_sec=AUTONOMY_COGNITIVE_MIN_INTERVAL_SEC, autonomy_cognitive_force_refresh_sec=AUTONOMY_COGNITIVE_FORCE_REFRESH_SEC,
         vision_watch_interval_sec=VISION_WATCH_INTERVAL_SEC, active_conversation_text_question_sec=ACTIVE_CONVERSATION_TEXT_QUESTION_SEC,
         active_conversation_text_sec=ACTIVE_CONVERSATION_TEXT_SEC, autonomy_poll_interval_sec=AUTONOMY_POLL_INTERVAL_SEC,
+        get_authorized_actions=autonomy_authorization_manager.authorized_actions,
+        authorize_action=autonomy_authorization_manager.authorize,
+        record_action_outcome=autonomy_authorization_manager.record_outcome,
     )
 )
 
@@ -2344,7 +2365,7 @@ discord_app_composition = DiscordAppComposition(
             ensure_control_page_background_tasks_started=ensure_control_page_background_tasks_started, voice_client_type=EvelynVoiceClient,
             ensure_listening_voice_client=ensure_listening_voice_client, voice_rejoin_on_ready=VOICE_REJOIN_ON_READY,
             restore_last_voice_channel=restore_last_voice_channel, autonomy_enabled=AUTONOMY_ENABLED,
-            get_or_create_autonomy_engine=get_or_create_autonomy_engine, text_message_handler=build_discord_text_message_handler_deps,
+            text_message_handler=build_discord_text_message_handler_deps,
             log=print,
             runtime_status=DiscordRuntimeStatus(
                 bot_user=lambda: bot.user,
@@ -2364,8 +2385,14 @@ discord_app_composition = DiscordAppComposition(
             get_guild_command_prefix=discord_settings.get_guild_command_prefix, save_guild_command_prefix=discord_settings.save_guild_command_prefix,
             build_prefix_current_reply=build_prefix_current_reply, build_prefix_reset_reply=build_prefix_reset_reply,
             build_prefix_saved_reply=build_prefix_saved_reply, guild_only_message=guild_only_command_message,
+            autonomy_enabled=AUTONOMY_ENABLED,
             get_or_create_autonomy_engine=get_or_create_autonomy_engine, autonomy_engines=autonomy_engines,
             get_routed_autonomy_executor=get_routed_autonomy_executor, build_autonomy_status_reply=build_autonomy_status_command_text,
+            grant_autonomy_authorization=lambda guild_id, issuer_ref: autonomy_authorization_manager.grant(
+                guild_id=guild_id, issuer_ref=issuer_ref,
+                source="discord_command", scopes=ASSISTANT_AUTONOMY_ACTIONS,
+            ),
+            revoke_autonomy_authorization=autonomy_authorization_manager.revoke,
             command_session=build_discord_command_session_runtime_deps, enable_minecraft_mode=enable_minecraft_mode,
             disable_minecraft_mode=disable_minecraft_mode, get_minecraft_client=get_minecraft_client,
             build_minecraft_connect_reply=build_minecraft_connect_reply, build_minecraft_goal_missing_reply=build_minecraft_goal_missing_reply,
@@ -2421,6 +2448,7 @@ if DISCORD_ENABLED and not DISCORD_BOT_TOKEN:
     raise RuntimeError("DISCORD_BOT_TOKEN 환경변수가 설정되지 않았습니다.")
 
 acquire_instance_lock()
+autonomy_authorization_manager.initialize()
 session_continuity_checkpoint.restore()
 atexit.register(session_continuity_checkpoint.flush)
 if DISCORD_ENABLED:

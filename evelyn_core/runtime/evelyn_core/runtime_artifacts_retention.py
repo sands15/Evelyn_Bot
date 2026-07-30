@@ -86,6 +86,13 @@ DEFAULT_RETENTION_RULES: tuple[RetentionRule, ...] = (
         max_total_bytes=1024 * 1024,
         preserve_newest=0,
     ),
+    RetentionRule(
+        "autonomy_authorization_events",
+        ("autonomy_authorization/events/*.jsonl",),
+        max_age_days=30,
+        max_total_bytes=20 * 1024 * 1024,
+        preserve_newest=7,
+    ),
     RetentionRule("voice_debug_audio", ("voice_debug/**/*.wav", "voice_debug/**/*.pcm"), max_age_days=7, max_total_bytes=2 * 1024 * 1024 * 1024, preserve_newest=50),
     RetentionRule("control_page_dumps", ("control_page/dumps/*",), max_age_days=7, max_total_bytes=50 * 1024 * 1024, preserve_newest=3),
     RetentionRule("minecraft_window_state", ("minecraft/window_state/*.json",), max_age_days=30, max_total_bytes=50 * 1024 * 1024, preserve_newest=10),

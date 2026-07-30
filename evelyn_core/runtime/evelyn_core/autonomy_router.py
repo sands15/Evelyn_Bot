@@ -27,6 +27,37 @@ class DefaultAutonomyExecutor:
         self.maybe_ping_user_fn = maybe_ping_user_fn
         self.refresh_cognitive_state_fn = refresh_cognitive_state_fn
 
+    @staticmethod
+    def _finalize_callback_result(
+        result: dict[str, Any],
+        *,
+        action: str,
+        evidence_code: str,
+    ) -> dict[str, Any]:
+        result.setdefault("handled_by", "default")
+        result.setdefault("action", action)
+        status = str(result.get("status") or "").strip().lower()
+        verified = bool(
+            status in {"ok", "done", "completed"}
+            and result.get("verified") is True
+            and clean_text(str(result.get("evidence_code") or ""))
+            == evidence_code
+        )
+        result["verified"] = verified
+        if status in {"ok", "done", "completed"} and not verified:
+            result["reason"] = "outcome_evidence_missing"
+        return result
+
+    @staticmethod
+    def _unavailable(action: str) -> dict[str, Any]:
+        return {
+            "status": "blocked",
+            "handled_by": "default",
+            "action": action,
+            "reason": "executor_callback_unavailable",
+            "verified": False,
+        }
+
     async def connect(self) -> None:
         return None
 
@@ -53,54 +84,79 @@ class DefaultAutonomyExecutor:
             if self.send_followup_fn is not None and text:
                 result = await self.send_followup_fn(text)
                 if isinstance(result, dict):
-                    result.setdefault("handled_by", "default")
-                    result.setdefault("action", action)
-                    return result
-            return {"status": "ok", "handled_by": "default", "action": action, "note": "followup_noop"}
+                    return self._finalize_callback_result(
+                        result,
+                        action=action,
+                        evidence_code="discord_send_completed",
+                    )
+            return self._unavailable(action)
         if action == "summarize_notifications":
             if self.summarize_fn is not None:
                 result = await self.summarize_fn()
                 if isinstance(result, dict):
-                    result.setdefault("handled_by", "default")
-                    result.setdefault("action", action)
-                    return result
-            return {"status": "ok", "handled_by": "default", "action": action, "note": "summary_noop"}
+                    return self._finalize_callback_result(
+                        result,
+                        action=action,
+                        evidence_code="summary_payload_built",
+                    )
+            return self._unavailable(action)
         if action == "check_status":
             if self.check_status_fn is not None:
                 result = await self.check_status_fn()
                 if isinstance(result, dict):
-                    result.setdefault("handled_by", "default")
-                    result.setdefault("action", action)
-                    return result
-            return {"status": "ok", "handled_by": "default", "action": action, "note": "check_status_noop"}
+                    return self._finalize_callback_result(
+                        result,
+                        action=action,
+                        evidence_code="status_snapshot_built",
+                    )
+            return self._unavailable(action)
         if action == "refresh_cognitive_state":
             if self.refresh_cognitive_state_fn is not None:
                 result = await self.refresh_cognitive_state_fn()
                 if isinstance(result, dict):
-                    result.setdefault("handled_by", "default")
-                    result.setdefault("action", action)
-                    return result
-            return {"status": "ok", "handled_by": "default", "action": action, "note": "refresh_cognitive_state_noop"}
+                    return self._finalize_callback_result(
+                        result,
+                        action=action,
+                        evidence_code="cognitive_state_updated",
+                    )
+            return self._unavailable(action)
         if action == "summarize_recent_context":
             if self.summarize_recent_context_fn is not None:
                 result = await self.summarize_recent_context_fn()
                 if isinstance(result, dict):
-                    result.setdefault("handled_by", "default")
-                    result.setdefault("action", action)
-                    return result
-            return {"status": "ok", "handled_by": "default", "action": action, "note": "summarize_recent_context_noop"}
+                    return self._finalize_callback_result(
+                        result,
+                        action=action,
+                        evidence_code="recent_context_payload_built",
+                    )
+            return self._unavailable(action)
         if action == "maybe_ping_user":
             text = clean_text(str(step.get("text", ""))) or "지금 확인이 필요해 보여."
             if self.maybe_ping_user_fn is not None:
                 result = await self.maybe_ping_user_fn(text)
                 if isinstance(result, dict):
-                    result.setdefault("handled_by", "default")
-                    result.setdefault("action", action)
-                    return result
-            return {"status": "ok", "handled_by": "default", "action": action, "note": "maybe_ping_user_noop"}
+                    return self._finalize_callback_result(
+                        result,
+                        action=action,
+                        evidence_code="proactive_gate_completed",
+                    )
+            return self._unavailable(action)
         if action == "idle":
-            return {"status": "ok", "handled_by": "default", "action": action, "note": "idle_ok"}
-        return {"status": "blocked", "handled_by": "default", "action": action, "reason": "unsupported_default_action"}
+            return {
+                "status": "ok",
+                "handled_by": "default",
+                "action": action,
+                "reason": "idle_ok",
+                "verified": True,
+                "evidence_code": "no_side_effect_required",
+            }
+        return {
+            "status": "blocked",
+            "handled_by": "default",
+            "action": action,
+            "reason": "unsupported_default_action",
+            "verified": False,
+        }
 
 
 class RoutedAutonomyExecutor:

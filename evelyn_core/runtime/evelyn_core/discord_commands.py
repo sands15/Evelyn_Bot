@@ -3,6 +3,10 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable
 from typing import Any
 
+from .minecraft_mode_composition import (
+    MINECRAFT_CONNECTED_OUTCOME,
+    minecraft_connection_confirmed,
+)
 from .text import clean_text
 
 
@@ -138,7 +142,11 @@ def build_autonomy_status_command_text(
 
 
 def build_minecraft_connect_reply(observed: dict[str, Any]) -> str:
-    connected = bool(observed.get("connected") or observed.get("active") or observed.get("position"))
+    connected = (
+        observed.get("outcome_verified") is True
+        and observed.get("outcome_code") == MINECRAFT_CONNECTED_OUTCOME
+        and minecraft_connection_confirmed(observed)
+    )
     target = f"{observed.get('position')}" if observed.get("position") else "위치 미확인"
     stage = clean_text(str(observed.get("objective_stage") or "")) or "unknown"
     goal = clean_text(str(observed.get("objective_goal") or "")) or "progress_to_diamond"
@@ -185,6 +193,13 @@ def build_minecraft_goal_missing_reply() -> str:
 
 
 def build_minecraft_goal_updated_reply(goal_text: str, status: dict[str, Any]) -> str:
+    verified = (
+        status.get("outcome_verified") is True
+        and status.get("outcome_code") == "minecraft_goal_confirmed"
+        and clean_text(str(status.get("goal") or "")) == clean_text(goal_text)
+    )
+    if not verified:
+        return "❌ 마인크래프트 목표 변경 결과를 확인하지 못했어."
     return f"🎯 마인크래프트 목표를 바꿨어.\n- goal: {goal_text}\n- stage: {status.get('stage') or 'unknown'}"
 
 

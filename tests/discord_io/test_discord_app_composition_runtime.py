@@ -38,6 +38,7 @@ def make_command_deps(**overrides) -> DiscordCommandCompositionDeps:
         vad_provider="silero",
         default_command_prefix="!",
         guild_only_message=lambda: "guild only",
+        autonomy_enabled=True,
         autonomy_engines={},
         command_session=lambda: object(),
         is_control_command_authorized=lambda _ctx: True,
@@ -129,6 +130,11 @@ class DiscordAppCompositionTests(unittest.TestCase):
             "재시작",
             "종료",
             "접두사",
+            "자율시작",
+            "자율정지",
+            "마크접속",
+            "마크종료",
+            "마크목표",
             "관찰채널",
             "명령채널",
             "초기화",
@@ -146,7 +152,7 @@ class DiscordAppCompositionTests(unittest.TestCase):
         self.assertIs(bot.on_ready.__self__, composition)
         self.assertIs(bot.on_message.__self__, composition)
 
-    def test_on_ready_initializes_services_rearms_voice_and_starts_autonomy(self) -> None:
+    def test_on_ready_initializes_services_without_resuming_autonomy(self) -> None:
         class VoiceClient:
             channel = SimpleNamespace(name="General")
 
@@ -155,7 +161,6 @@ class DiscordAppCompositionTests(unittest.TestCase):
                 return True
 
         voice_client = VoiceClient()
-        engine = SimpleNamespace(start=AsyncMock())
         guild = SimpleNamespace(id=7, voice_client=voice_client)
         mark = Mock()
         rearm = AsyncMock()
@@ -166,7 +171,6 @@ class DiscordAppCompositionTests(unittest.TestCase):
             voice_client_type=VoiceClient,
             ensure_listening_voice_client=rearm,
             autonomy_enabled=True,
-            get_or_create_autonomy_engine=lambda guild_id: engine,
         )
 
         asyncio.run(make_composition(events=events).on_ready())
@@ -179,7 +183,9 @@ class DiscordAppCompositionTests(unittest.TestCase):
         events.ensure_vision_watch_started.assert_called_once_with()
         events.ensure_control_page_background_tasks_started.assert_awaited_once_with()
         rearm.assert_awaited_once_with(guild, voice_client.channel)
-        engine.start.assert_awaited_once_with()
+        events.log.assert_any_call(
+            "[AUTONOMY] guild=7 available approval_required=true"
+        )
 
     def test_on_ready_records_fixed_error_code_in_runtime_status(self) -> None:
         runtime_status = Mock()

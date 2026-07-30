@@ -22,6 +22,7 @@ from evelyn_core.discord_command_handlers import (  # noqa: E402
     handle_join_voice_command,
     handle_leave_voice_command,
     handle_minecraft_connect_command,
+    handle_minecraft_disconnect_command,
     handle_minecraft_goal_command,
     handle_minecraft_status_command,
     handle_prefix_command,
@@ -153,6 +154,50 @@ class DiscordCommandHandlerTests(unittest.TestCase):
         self.assertEqual(ctx.sent, ["connect:True"])
         self.assertEqual(marks, [("마크접속", "connect:True")])
 
+    def test_minecraft_disconnect_requires_verified_stop(self) -> None:
+        guild = SimpleNamespace(id=1)
+        success_ctx = FakeContext(guild=guild, content="마크종료")
+        failure_ctx = FakeContext(guild=guild, content="마크종료")
+        marks: list[tuple[str, str]] = []
+
+        async def verified_stop(_guild_id: int):
+            return {
+                "running": False,
+                "connected": False,
+                "outcome_verified": True,
+                "outcome_code": "minecraft_stopped",
+            }
+
+        async def unverified_stop(_guild_id: int):
+            return {"running": False, "connected": False}
+
+        kwargs = {
+            "mark_text_session_from_command": (
+                lambda _ctx, user_text, reply_text: marks.append(
+                    (user_text, reply_text)
+                )
+            ),
+            "guild_only_message": lambda: "guild only",
+        }
+        asyncio.run(
+            handle_minecraft_disconnect_command(
+                success_ctx,
+                disable_minecraft_mode=verified_stop,
+                **kwargs,
+            )
+        )
+        asyncio.run(
+            handle_minecraft_disconnect_command(
+                failure_ctx,
+                disable_minecraft_mode=unverified_stop,
+                **kwargs,
+            )
+        )
+
+        self.assertIn("중지했어", success_ctx.sent[0])
+        self.assertIn("minecraft_stop_unverified", failure_ctx.sent[0])
+        self.assertEqual(len(marks), 2)
+
     def test_minecraft_status_command_records_failure_reply(self) -> None:
         guild = SimpleNamespace(id=1)
         ctx = FakeContext(guild=guild, content="마크상태")
@@ -245,14 +290,40 @@ class DiscordCommandHandlerTests(unittest.TestCase):
                 return name == "minecraft"
 
         engines = {1: Engine()}
+        authorizations: list[tuple[str, int, str]] = []
         asyncio.run(
             handle_autonomy_start_command(
                 start_ctx,
+                autonomy_enabled=True,
                 get_or_create_autonomy_engine=lambda guild_id: engines[guild_id],
+                grant_autonomy_authorization=(
+                    lambda guild_id, issuer_ref: (
+                        authorizations.append(
+                            ("grant", guild_id, issuer_ref)
+                        )
+                        or {"ok": True}
+                    )
+                ),
+                revoke_autonomy_authorization=(
+                    lambda guild_id, reason_code: authorizations.append(
+                        ("revoke", guild_id, reason_code)
+                    )
+                ),
                 guild_only_message=lambda: "guild only",
             )
         )
-        asyncio.run(handle_autonomy_stop_command(stop_ctx, autonomy_engines=engines, guild_only_message=lambda: "guild only"))
+        asyncio.run(
+            handle_autonomy_stop_command(
+                stop_ctx,
+                autonomy_engines=engines,
+                revoke_autonomy_authorization=(
+                    lambda guild_id, reason_code: authorizations.append(
+                        ("revoke", guild_id, reason_code)
+                    )
+                ),
+                guild_only_message=lambda: "guild only",
+            )
+        )
         asyncio.run(
             handle_autonomy_status_command(
                 status_ctx,
@@ -264,9 +335,44 @@ class DiscordCommandHandlerTests(unittest.TestCase):
         )
 
         self.assertEqual(calls, ["start", "stop"])
+        self.assertEqual(
+            authorizations,
+            [
+                ("grant", 1, "discord_user:3"),
+                ("revoke", 1, "explicit_autonomy_stop"),
+            ],
+        )
         self.assertEqual(start_ctx.sent, ["🤖 자율 행동 루프를 시작했어."])
         self.assertEqual(stop_ctx.sent, ["🛑 자율 행동 루프를 멈췄어."])
         self.assertEqual(status_ctx.sent, ["status:running:True"])
+
+    def test_autonomy_start_respects_feature_flag(self) -> None:
+        guild = SimpleNamespace(id=1)
+        ctx = FakeContext(guild=guild)
+        grants: list[int] = []
+
+        asyncio.run(
+            handle_autonomy_start_command(
+                ctx,
+                autonomy_enabled=False,
+                get_or_create_autonomy_engine=lambda _guild_id: (
+                    self.fail("engine must not be created")
+                ),
+                grant_autonomy_authorization=(
+                    lambda guild_id, _issuer_ref: (
+                        grants.append(guild_id) or {"ok": True}
+                    )
+                ),
+                revoke_autonomy_authorization=lambda *_args, **_kwargs: None,
+                guild_only_message=lambda: "guild only",
+            )
+        )
+
+        self.assertEqual(
+            ctx.sent,
+            ["자율 행동 기능이 설정에서 비활성화되어 있어."],
+        )
+        self.assertEqual(grants, [])
 
     def test_channel_setting_command_lists_adds_removes_and_shows_usage(self) -> None:
         channel = SimpleNamespace(id=10, mention="#general")
