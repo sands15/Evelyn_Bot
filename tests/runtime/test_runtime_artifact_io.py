@@ -54,6 +54,55 @@ class RuntimeArtifactIoTests(unittest.TestCase):
                 atomic_json_write(target, {}, replace=replace)
             self.assertEqual(list(target.parent.glob(".*.tmp")), [])
 
+    def test_durable_write_syncs_temporary_file_before_replace(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target = Path(temp_dir) / "checkpoint.json"
+            synced_file_descriptors: list[int] = []
+            replaced_after_sync: list[bool] = []
+
+            def sync(file_descriptor: int) -> None:
+                synced_file_descriptors.append(file_descriptor)
+
+            def replace(source, destination) -> None:
+                replaced_after_sync.append(bool(synced_file_descriptors))
+                Path(source).replace(destination)
+
+            atomic_json_write(
+                target,
+                {"durable": True},
+                replace=replace,
+                sync=sync,
+                durable=True,
+            )
+
+            self.assertEqual(len(synced_file_descriptors), 1)
+            self.assertEqual(replaced_after_sync, [True])
+            self.assertEqual(
+                json.loads(target.read_text(encoding="utf-8")),
+                {"durable": True},
+            )
+
+    def test_durable_sync_failure_removes_temporary_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target = Path(temp_dir) / "checkpoint.json"
+
+            def sync(_file_descriptor: int) -> None:
+                raise OSError("sync failed")
+
+            with self.assertRaisesRegex(OSError, "sync failed"):
+                atomic_json_write(
+                    target,
+                    {"durable": True},
+                    sync=sync,
+                    durable=True,
+                )
+
+            self.assertFalse(target.exists())
+            self.assertEqual(
+                list(target.parent.glob(".*.tmp")),
+                [],
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

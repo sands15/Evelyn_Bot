@@ -32,6 +32,11 @@ Last reviewed: 2026-07-30 KST
 잠금으로 이전 파일을 즉시 unlink하지 못해도 status의 `checkpointRevokedAt`
 이후보다 오래된 checkpoint는 다음 restore에서 거부한다.
 
+checkpoint 파일은 임시 파일에 JSON을 쓴 뒤 flush와 `fsync`를 완료하고
+원자적으로 교체한다. 일반 heartbeat는 불필요한 디스크 동기화를 하지 않지만,
+checkpoint 저장 실패로 발생한 revocation status는 `fsync`해 fail-closed
+경계를 내구성 있게 남긴다.
+
 ## Restore and lifecycle
 
 - 인스턴스 잠금을 획득한 프로세스만 체크포인트를 복구한다.
@@ -78,3 +83,9 @@ Runtime Health의 `runtime_errors.summary.v1`에는
 - 빈 store 및 guild reset 후 즉시 체크포인트 갱신
 - single-flight periodic writer와 직접 사전 변경 감지
 - Runtime Errors의 privacy 및 stale/current-error 판정
+
+`tests.core.test_session_continuity_restart`는 periodic writer가 실제
+checkpoint를 만든 뒤 첫 Python 프로세스를 `os._exit(74)`로 종료한다. 두 번째
+새 Python 프로세스는 완료 턴, active follow-up TTL, user ownership, speaker,
+topic/turn ID와 reply target을 복구하고, 현재 system prompt를 새로 삽입하며
+부분 STT와 이전 system prompt가 남지 않는지 검증한다.

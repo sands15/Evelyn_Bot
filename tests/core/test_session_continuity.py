@@ -270,10 +270,14 @@ class SessionContinuityTests(unittest.TestCase):
         )
         clock.wall = 1001.0
 
-        def fail_checkpoint_only(path: Path, payload: dict) -> None:
+        def fail_checkpoint_only(
+            path: Path,
+            payload: dict,
+            **kwargs,
+        ) -> None:
             if Path(path) == self.checkpoint_path:
                 raise PermissionError("checkpoint busy")
-            atomic_json_write(path, payload)
+            atomic_json_write(path, payload, **kwargs)
 
         with (
             patch(

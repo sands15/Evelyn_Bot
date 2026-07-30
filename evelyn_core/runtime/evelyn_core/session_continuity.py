@@ -292,16 +292,20 @@ class SessionContinuityCheckpoint:
             **self.runtime_errors.snapshot(),
         }
 
-    def _write_status(self) -> None:
+    def _write_status(self, *, durable: bool = False) -> None:
         try:
-            atomic_json_write(self.status_path, self.status())
+            atomic_json_write(
+                self.status_path,
+                self.status(),
+                durable=durable,
+            )
         except Exception:
             return
 
     def _record_error(self, code: str, exc: BaseException) -> dict[str, Any]:
         self.runtime_errors.record(code, exc)
         self._state = "error"
-        self._write_status()
+        self._write_status(durable=True)
         self._emit(
             f"[SESSION CONTINUITY] {code} type={type(exc).__name__}"
         )
@@ -515,7 +519,11 @@ class SessionContinuityCheckpoint:
                 ).encode("utf-8")
                 if len(encoded) > self.max_file_bytes:
                     raise ValueError("checkpoint_too_large")
-                atomic_json_write(self.checkpoint_path, payload)
+                atomic_json_write(
+                    self.checkpoint_path,
+                    payload,
+                    durable=True,
+                )
             except Exception as exc:
                 # A stale pre-reset checkpoint is more dangerous than losing
                 # short-lived continuity. Fail closed and never resurrect it.

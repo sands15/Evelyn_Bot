@@ -35,19 +35,25 @@ split Docker에서는 Bot API 재시작 시 token 회전·lease 비복구·stale
 정지, Discord 재시작 시 중앙 lease 유지, 동시 Control Page/Discord 요청의
 owner mismatch를 실제 컨테이너와 Minecraft 세션에서 추가 검증한다.
 
-## P1 — Conversation Continuity 실제 crash/restart 검증 대기
+## P1 — Conversation Continuity 전체 main crash/restart 검증 대기
 
 완료된 대화 턴과 active follow-up을 15분 동안 제한적으로 복구하는 checkpoint,
 guild 초기화 즉시 flush, 만료·손상·revocation fail-closed 계약은 구현됐고
-집중 단위 테스트와 lifecycle smoke를 통과했다.
+집중 단위 테스트와 lifecycle smoke를 통과했다. checkpoint와 revocation
+marker는 필요한 경로에서 flush·fsync 뒤 원자 교체된다.
+
+periodic writer가 저장한 직후 첫 Python 프로세스를 `os._exit`로 강제 종료하고
+두 번째 새 프로세스가 완료 턴, active follow-up, user ownership, 현재 system
+prompt와 reply target을 복구하는 owner-level E2E도 통과했다. 부분 STT와 이전
+system prompt는 복구되지 않았다.
 
 현재 Docker Engine이 꺼져 있고 번들 Python에는 `aiohttp`, `discord`, `torch`가
 없어 실제 `main.py` 프로세스를 종료·재기동하는 통합 검증은 아직 실행하지
 못했다.
 
 다음 조치: 공식 Discord/Bot API 이미지 또는 깨끗한 Python 3.11 환경에서 전체
-회귀를 실행한 뒤, 민감 정보가 없는 합성 세션으로 정상 restart와 강제 crash
-각각의 복구·만료·guild reset 비복구를 확인한다.
+`main.py`를 사용해 민감 정보가 없는 합성 Discord 세션의 강제 crash와 재기동,
+guild reset 비복구를 확인한다.
 
 ## P1 — Python 모델 런타임 의존성 잔여 취약점
 

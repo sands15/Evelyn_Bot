@@ -17,9 +17,11 @@ def atomic_json_write(
     payload: dict[str, Any],
     *,
     replace: Callable[[str | bytes | os.PathLike[str] | os.PathLike[bytes], str | bytes | os.PathLike[str] | os.PathLike[bytes]], None] = os.replace,
+    sync: Callable[[int], None] = os.fsync,
     sleep: Callable[[float], None] = time.sleep,
     attempts: int = DEFAULT_REPLACE_ATTEMPTS,
     retry_delay_sec: float = DEFAULT_RETRY_DELAY_SEC,
+    durable: bool = False,
 ) -> None:
     """Write JSON atomically, tolerating short Windows reader locks.
 
@@ -27,6 +29,7 @@ def atomic_json_write(
     artifact without delete sharing. Windows then rejects ``os.replace`` with
     ``PermissionError`` even though both paths are writable. Retrying only that
     transient class preserves atomic readers without masking other I/O errors.
+    ``durable=True`` flushes and syncs the temporary file before replacement.
     """
 
     target = Path(path)
@@ -34,13 +37,20 @@ def atomic_json_write(
     temporary = target.with_name(
         f".{target.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
     )
-    temporary.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
-        encoding="utf-8",
-    )
     maximum_attempts = max(1, int(attempts))
     delay = max(0.0, float(retry_delay_sec))
     try:
+        with temporary.open("w", encoding="utf-8") as handle:
+            json.dump(
+                payload,
+                handle,
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            )
+            if durable:
+                handle.flush()
+                sync(handle.fileno())
         for attempt in range(maximum_attempts):
             try:
                 replace(temporary, target)
