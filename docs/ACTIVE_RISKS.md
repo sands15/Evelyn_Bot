@@ -58,6 +58,15 @@ marker를 없애므로 초기화 도중 프로세스가 죽어도 삭제된 guil
 않는다. checkpoint와 revocation marker는 필요한 경로에서 flush·fsync 뒤
 원자 교체된다.
 
+checkpoint v2는 generation, 이전 hash, canonical payload hash를 저장하고
+별도의 content-free durable head가 최신 generation/hash를 고정한다. 따라서
+valid JSON으로 내용을 바꾸고 self-hash를 다시 계산해도 head 불일치로
+거부하며, 과거 generation rollback과 active head 뒤 checkpoint 삭제도
+fail-closed한다. checkpoint commit 뒤 head commit 전에 죽은 경우에만 정확히
+한 generation 앞선 chain을 복구한다. 기존 v1은 raw JSON hash로 generation
+0 head에 먼저 고정한 뒤 다음 변경에서 v2로 연결하며, 빈 store는 empty head를
+먼저 전진시킨 뒤 checkpoint를 제거한다.
+
 periodic writer가 저장한 직후 첫 Python 프로세스를 `os._exit`로 강제 종료하고
 두 번째 새 프로세스가 완료 턴, active follow-up, user ownership, 현재 system
 prompt와 reply target을 복구하는 owner-level E2E도 통과했다. 부분 STT와 이전
@@ -74,6 +83,11 @@ checkpoint 비변경을 확인하는 opt-in CI 시나리오도 추가했다.
 opt-in real-main crash/restart 집중 테스트 68개, `compileall`, `pip check`를
 통과했다. 전체 core 440개도 기능 assertion 실패는 0개였고, 이미지에 `git`
 실행 파일이 없어 과거 main signature를 조회하는 테스트 2개만 환경 오류였다.
+
+새 v2 이미지에서도 재계산 hash 변조, 과거 generation rollback, checkpoint
+삭제, v1 migration, head commit crash 복구와 실제 `main.py` crash/restart를
+검증했다. 다만 checkpoint와 head를 함께 다시 쓸 수 있는 filesystem 관리자에
+대한 keyed authenticity나 외부 불변 원장은 아직 제공하지 않는다.
 
 남은 검증 공백은 실제 인증된 Discord 세션에서 관리자 초기화 명령 직후
 재시작까지 수행하는 live E2E와 이 브랜치의 원격 Windows CI 결과다. 실제

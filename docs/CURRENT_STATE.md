@@ -2,7 +2,7 @@
 
 Document status: **Current**
 Last reviewed: 2026-07-31 KST
-Source branch: `codex/dependency-config-hardening` through `ce31793`
+Source branch: `codex/dependency-config-hardening` through `52f7bf5`
 
 이 문서는 현재 확인된 사실만 기록한다. 목표 구조와 과거 계획은 다른 설계/계획 문서를 사용한다.
 
@@ -30,6 +30,13 @@ Source branch: `codex/dependency-config-hardening` through `ce31793`
     대상 guild만 차단하며 다른 guild는 복구한다.
   - marker 기록 실패 시 runtime reset을 시작하지 않고, ledger 손상 시 기존
     checkpoint 전체를 fail-closed로 거부한다.
+  - checkpoint v2는 증가하는 generation, 이전 hash와 canonical payload hash를
+    저장하고 content-free durable head가 최신 generation/hash를 고정한다.
+  - valid JSON 변조 뒤 self-hash 재계산, 과거 generation rollback, active
+    head 뒤 checkpoint 삭제를 복구하지 않는다.
+  - checkpoint commit 뒤 head commit 전 crash만 정확한 한 generation
+    chain으로 복구하며, v1 checkpoint는 raw JSON hash로 generation 0에
+    고정한 뒤 다음 변경에서 v2로 연결한다.
 - 자율행동의 승인과 결과 증거를 같은 action·grant에 묶었다.
   - `autonomy.outcome-evidence-policy.v1`이 모든 supported action의 exact
     evidence code를 정의한다. 비어 있지 않은 임의 코드나 다른 action의
@@ -257,6 +264,13 @@ Source branch: `codex/dependency-config-hardening` through `ce31793`
     `sha256:1bdb56fe6bc63b05ce514bd3ab8e00873c0ca3035171fcd96129e06fc55272c7`
   - Bot API를 15초 grace로 정상 종료해 Minecraft owner claim 반납을 확인한
     뒤 두 컨테이너만 교체했다. 둘 다 healthy, restart count 0이다.
+- `52f7bf5` 소스로 Discord bot 이미지를 빌드해 conversation checkpoint v2의
+  hash/generation chain, durable head, rollback·삭제 거부와 legacy migration을
+  검증했다. 실제 Discord 서비스는 시작하거나 교체하지 않았다.
+  - Discord image:
+    `sha256:e46bdd3ae0afb4aaeddcb6bbc5a12a1a6d4b7512bd8683daf80a31151b5be9f0`
+  - 실제 `runtime_artifacts/conversation_continuity`에는 checkpoint/head가
+    없어 기존 대화를 생성하거나 migration하지 않았다.
 - Windows Host Supervisor와 Local I/O Bridge heartbeat는 fresh이고 bridge는
   `ready=true`, TTS warmup 완료, Host Vision `running`이다.
 - 개인정보 보호 기본값에 따라 로컬 마이크는 비활성 상태다.
@@ -411,8 +425,23 @@ Source branch: `codex/dependency-config-hardening` through `ce31793`
 
 ## Verification state
 
-검증한 코드 기준점: `ce31793`
+검증한 코드 기준점: `52f7bf5`
 
+- bundled Python에서 continuity/restart/guild reset/retention 집중 테스트
+  33개를 통과했다.
+- 공식 Bot API Python 3.11 환경의 current-source mount에서 continuity,
+  retention, Runtime Errors, startup 47개(skip 2)와 runtime 전체
+  364개(skip 2)를 통과했다.
+- 공식 Discord 환경의 current-source mount에서 core 458개를 실행해 기능
+  assertion 실패는 0개였다. 이미지에 `git` 실행 파일이 없어 과거 signature
+  비교 2개만 환경 오류였다.
+- 새 Discord 이미지에서 continuity/restart/guild reset/retention/
+  observability 42개와 실제 `main.py` crash/restart 1개를 통과했다.
+- 재계산 self-hash 변조, 과거 generation rollback, active head 뒤 checkpoint
+  삭제, 정확한 한 generation head-lag 복구, v1 anchoring과 v2 migration을
+  합성 검증했다. 이미지의 `compileall`과 `pip check`도 통과했다.
+- 실제 Discord bot은 시작하지 않았고 실제 continuity artifact도 없었으므로
+  사용자 대화를 생성·변경·복구하지 않았다.
 - bundled Python에서 correction 15개와 memory discovery 131개를 통과했다.
 - 공식 Bot API Python 3.11 환경의 current-source mount에서 correction/API
   24개와 runtime 364개(skip 2)를 통과했다.

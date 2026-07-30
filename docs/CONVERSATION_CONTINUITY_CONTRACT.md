@@ -1,7 +1,7 @@
 # Conversation Continuity Contract
 
 Document status: **Current**
-Last reviewed: 2026-07-30 KST
+Last reviewed: 2026-07-31 KST
 
 ## Purpose
 
@@ -25,12 +25,37 @@ Last reviewed: 2026-07-30 KST
 - system prompt
 - stack trace, 예외 메시지, 파일시스템 경로
 
-체크포인트 스키마는 `conversation_continuity.checkpoint.v1`이다. 기본 유효 시간은
+체크포인트 스키마는 `conversation_continuity.checkpoint.v2`다. 기본 유효 시간은
 15분이고 파일 상한은 1 MiB다. 만료·손상·스키마 불일치·크기 초과 파일은
 복구하지 않고 즉시 폐기한다. 저장 실패 시 이전 체크포인트도 폐기해 초기화된
 상태나 삭제된 세션이 다음 재시작에서 되살아나는 것을 막는다. Windows 파일
 잠금으로 이전 파일을 즉시 unlink하지 못해도 status의 `checkpointRevokedAt`
 이후보다 오래된 checkpoint는 다음 restore에서 거부한다.
+
+v2 checkpoint는 1부터 증가하는 `generation`, 직전 checkpoint의
+`previousHash`, `checkpointHash`를 제외한 canonical JSON의 SHA-256
+`checkpointHash`를 포함한다. 대화문을 바꾸고 self-hash를 다시 계산하더라도
+별도 head와 일치하지 않으면 복구하지 않는다.
+
+`runtime_artifacts/conversation_continuity/checkpoint_head.json`은 최신
+generation과 checkpoint hash를 고정하는 content-free durable head다. schema,
+`active|empty`, generation, hash, 갱신 시각과 `contentFree=true`만 저장하고
+대화문·사용자·guild/channel/message/session ID는 저장하지 않는다.
+
+- checkpoint를 먼저 `fsync`·원자 교체하고 head를 durable 교체한다.
+- checkpoint가 head보다 정확히 한 generation 앞서고 `previousHash`가 기존
+  head와 일치하면 head 교체 직전 crash로만 판정해 head를 복구한다.
+- 과거 generation rollback, 같은 generation의 다른 hash, active head 뒤
+  checkpoint 삭제는 fail-closed한다.
+- 빈 store는 먼저 `empty` head를 한 generation 전진시킨 뒤 checkpoint를
+  삭제한다. unlink가 지연돼도 이전 대화가 복구되지 않는다.
+- 기존 v1 checkpoint는 raw JSON 전체의 domain-separated SHA-256으로
+  generation 0 head에 먼저 고정한다. 다음 상태 변경에서 v2 generation 1로
+  연결한다.
+
+hash/head는 우발적·비협조적 변조와 rollback을 탐지한다. checkpoint와 head를
+함께 다시 쓸 수 있는 filesystem 관리자에 대한 keyed authenticity나 외부
+불변 원장은 아니다.
 
 `runtime_artifacts/conversation_continuity/guild_revocations.json`은 길드 초기화가
 체크포인트보다 먼저 내구성 있게 기록됐음을 나타내는 write-ahead ledger다.
@@ -43,11 +68,12 @@ Last reviewed: 2026-07-30 KST
 checkpoint 파일은 임시 파일에 JSON을 쓴 뒤 flush와 `fsync`를 완료하고
 원자적으로 교체한다. 일반 heartbeat는 불필요한 디스크 동기화를 하지 않지만,
 checkpoint 저장 실패로 발생한 revocation status는 `fsync`해 fail-closed
-경계를 내구성 있게 남긴다.
+경계를 내구성 있게 남긴다. head도 같은 durable atomic writer를 사용한다.
 
 ## Restore and lifecycle
 
 - 인스턴스 잠금을 획득한 프로세스만 체크포인트를 복구한다.
+- 인스턴스 잠금이 checkpoint/head의 단일 writer 권한이다.
 - 복구 시 현재 코드의 system prompt를 새로 삽입한다.
 - monotonic clock 값 자체는 재사용하지 않고, 저장된 남은 TTL에서 실제 경과
   시간을 차감해 새 프로세스의 clock으로 변환한다.
@@ -66,7 +92,9 @@ checkpoint 저장 실패로 발생한 revocation status는 `fsync`해 fail-close
 `runtime_artifacts/conversation_continuity/status.json`은
 `conversation_continuity.status.v1` heartbeat를 제공한다. 이 파일은 payload나
 대화문을 포함하지 않고 상태, 복구·저장 시각, 세션 수, 보존 정책, 고정 오류
-코드 카운터와 현재 guild revocation 개수만 포함한다.
+코드 카운터와 현재 guild revocation 개수만 포함한다. additive 상태 필드
+`checkpointIntegrity`, `checkpointGeneration`, `checkpointHeadState`,
+`rollbackProtected`가 현재 보호 상태를 공개한다.
 
 Runtime Health의 `runtime_errors.summary.v1`에는
 `conversationContinuity` owner가 추가된다. heartbeat가 5초를 넘으면 stale이며,
@@ -77,7 +105,8 @@ Runtime Health의 `runtime_errors.summary.v1`에는
 - 정상 실행 중 체크포인트는 마지막 상태 변경 후 15분 안에서만 복구 가능하다.
 - restore가 만료를 발견하면 즉시 삭제한다.
 - 일반 runtime artifact retention은 방어적으로 1일 이상 된
-  `conversation_continuity/active.json`도 삭제 대상으로 선택한다.
+  `conversation_continuity/active.json`과 `checkpoint_head.json`도 삭제
+  대상으로 선택한다.
 - 세션 store가 비면 체크포인트를 삭제한다.
 - guild revocation ledger는 history가 아니라 bounded active metadata다. 정상
   초기화가 끝나면 해당 marker를 제거하며, 중단된 초기화의 marker만 안전한
@@ -96,6 +125,11 @@ Runtime Health의 `runtime_errors.summary.v1`에는
 - 현재 system prompt 재삽입과 raw audio/부분 STT 제외
 - 경과 시간에 따른 follow-up 만료
 - stale·corrupt·oversized checkpoint 거부와 폐기
+- self-hash를 다시 계산한 valid JSON 내용 변조 거부
+- 과거 generation rollback과 active head 뒤 checkpoint 삭제 거부
+- checkpoint commit 뒤 head commit crash의 정확한 1-generation 복구
+- v1 raw checkpoint anchoring과 다음 write의 v2 chain migration
+- content-free head와 status integrity 공개 계약
 - 저장 실패 시 이전 파일 fail-closed 폐기
 - unlink 실패 시 revocation marker로 이전 파일 복구 거부
 - 빈 store 및 guild reset 후 즉시 체크포인트 갱신
