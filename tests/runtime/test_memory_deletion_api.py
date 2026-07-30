@@ -181,6 +181,40 @@ class MemoryDeletionApiTests(unittest.IsolatedAsyncioTestCase):
             "memory_note_delete_protected",
         )
 
+    async def test_cleanup_required_is_reported_as_service_unavailable(
+        self,
+    ) -> None:
+        cleanup_result = {
+            "ok": False,
+            "schema": "memory.deletion.result.v1",
+            "noteId": "concept-test",
+            "deleted": False,
+            "tombstoned": True,
+            "sourceFileDeleted": False,
+            "error": "memory_delete_cleanup_required",
+            "cleanupErrors": [
+                "memory_delete_source_cleanup_failed",
+            ],
+        }
+        with patch.object(
+            control_page_server,
+            "delete_memory_vault_user_note",
+            return_value=cleanup_result,
+        ):
+            response = await self.client.post(
+                "/api/control-page/memory/concept-test/delete/apply",
+                headers=self.headers(),
+                json={"confirmToken": "one-use-token"},
+            )
+
+        self.assertEqual(response.status, 503)
+        payload = await response.json()
+        self.assertTrue(payload["tombstoned"])
+        self.assertEqual(
+            payload["error"],
+            "memory_delete_cleanup_required",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

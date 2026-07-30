@@ -1007,6 +1007,8 @@ def memory_note_delete_status(result: dict[str, Any]) -> int:
         return 404
     if error == "memory_delete_failed":
         return 500
+    if error == "memory_delete_cleanup_required":
+        return 503
     if error in {
         "memory_delete_token_expired",
         "memory_delete_token_mismatch",

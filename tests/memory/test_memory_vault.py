@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 REPO_ROOT = next(path for path in Path(__file__).resolve().parents if (path / "main.py").exists())
@@ -13,6 +14,7 @@ if str(RUNTIME_ROOT) not in sys.path:
     sys.path.insert(0, str(RUNTIME_ROOT))
 
 from evelyn_core.assistant_contracts import MemoryRecallRequest  # noqa: E402
+from evelyn_core import memory_vault as memory_vault_module  # noqa: E402
 from evelyn_core.memory_vault import (  # noqa: E402
     MEMORY_DELETE_TOMBSTONE_SCHEMA,
     MEMORY_PROVENANCE_SCHEMA,
@@ -34,6 +36,7 @@ from evelyn_core.memory_vault import (  # noqa: E402
     probe_sub_llm_dependency,
     read_memory_hot_context,
     recall_memory_vault,
+    refresh_memory_hot_context,
     refresh_legacy_memory_node_notes,
     run_memory_vault_maintenance_once,
     run_semantic_memory_consolidation_once,
@@ -764,11 +767,168 @@ class MemoryVaultTests(unittest.TestCase):
             MEMORY_DELETE_TOMBSTONE_SCHEMA,
         )
         self.assertNotIn("path", result["tombstone"])
+        self.assertNotIn("contentHash", result["tombstone"])
         self.assertNotIn(title, tombstone_raw)
         self.assertNotIn(body, tombstone_raw)
         self.assertTrue(was_deleted)
         self.assertIsInstance(recreated_error, MemoryNoteDeletedError)
         self.assertEqual(reused["error"], "memory_delete_token_reused")
+
+    def test_delete_tombstone_hides_memory_before_cleanup_finishes(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            title = "Crash Safe Deletion Canary"
+            body = "private crash window body"
+            path = write_memory_vault_note(
+                note_type="project",
+                title=title,
+                body=body,
+                source="control-page-user",
+                root=root,
+            )
+            note = parse_memory_note(path)
+            refresh_memory_hot_context(root=root)
+            preview = preview_memory_vault_user_note_deletion(
+                note.note_id,
+                reason="privacy_request",
+                root=root,
+                now=lambda: 500.0,
+            )
+
+            with (
+                patch.object(
+                    Path,
+                    "unlink",
+                    side_effect=PermissionError("locked"),
+                ),
+                patch.object(
+                    memory_vault_module,
+                    "refresh_memory_hot_context",
+                    side_effect=RuntimeError("interrupted"),
+                ),
+            ):
+                result = delete_memory_vault_user_note(
+                    note.note_id,
+                    preview["confirmToken"],
+                    reason="privacy_request",
+                    root=root,
+                    now=lambda: 501.0,
+                )
+                source_still_exists = path.exists()
+                stale_hot_context = read_memory_hot_context(
+                    root=root
+                )
+                snapshot = memory_vault_user_snapshot(root=root)
+
+            sync_memory_vault_index(root=root)
+            source_exists_after_reconcile = path.exists()
+            hot_context_exists_after_reconcile = (
+                root / "memory_index" / "hot_context.json"
+            ).exists()
+            prompt_block_exists_after_reconcile = (
+                root
+                / "memory_index"
+                / "prompt_blocks"
+                / "core_prompt.txt"
+            ).exists()
+            recall = recall_memory_vault(
+                MemoryRecallRequest(
+                    turn_id="turn-after-crash-safe-delete",
+                    session_key="delete-session",
+                    guild_id=None,
+                    user_text=title,
+                    topic_id=None,
+                    source="test",
+                    max_items=3,
+                ),
+                root=root,
+            )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(
+            result["error"],
+            "memory_delete_cleanup_required",
+        )
+        self.assertTrue(result["tombstoned"])
+        self.assertTrue(source_still_exists)
+        self.assertEqual(stale_hot_context, "")
+        self.assertFalse(
+            any(
+                card["id"] == note.note_id
+                for card in snapshot["cards"]
+            )
+        )
+        self.assertFalse(source_exists_after_reconcile)
+        self.assertFalse(hot_context_exists_after_reconcile)
+        self.assertFalse(prompt_block_exists_after_reconcile)
+        self.assertNotIn(title, recall.context_text)
+        self.assertNotIn(body, recall.context_text)
+
+    def test_deleted_daily_note_resumes_with_new_identity(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = append_turn_rows_to_memory_vault(
+                7,
+                [
+                    {
+                        "role": "user",
+                        "text": "first private daily turn",
+                    },
+                    {
+                        "role": "assistant",
+                        "text": "first reply",
+                    },
+                ],
+                root=root,
+            )
+            self.assertIsNotNone(path)
+            original_note = parse_memory_note(path)
+            preview = preview_memory_vault_user_note_deletion(
+                original_note.note_id,
+                reason="privacy_request",
+                root=root,
+            )
+            deleted = delete_memory_vault_user_note(
+                original_note.note_id,
+                preview["confirmToken"],
+                reason="privacy_request",
+                root=root,
+            )
+            continued_path = append_turn_rows_to_memory_vault(
+                7,
+                [
+                    {
+                        "role": "user",
+                        "text": "new conversation after deletion",
+                    },
+                    {
+                        "role": "assistant",
+                        "text": "new reply",
+                    },
+                ],
+                root=root,
+            )
+            continued_note = parse_memory_note(continued_path)
+            continued_raw = continued_path.read_text(
+                encoding="utf-8"
+            )
+
+        self.assertTrue(deleted["ok"])
+        self.assertNotEqual(
+            continued_note.note_id,
+            original_note.note_id,
+        )
+        self.assertTrue(
+            continued_note.note_id.startswith(
+                original_note.note_id + "-continuation-"
+            )
+        )
+        self.assertNotIn("first private daily turn", continued_raw)
+        self.assertIn("new conversation after deletion", continued_raw)
 
     def test_permanent_delete_rejects_expired_or_stale_preview(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -50,6 +50,10 @@ implemented behavior.
   - 프로세스 재시작 뒤 완료된 대화 턴과 active follow-up을 15분 동안
     제한적으로 복구하는 checkpoint, privacy, deletion, observability 계약.
 
+- `docs/MEMORY_PROVENANCE_DELETION_CONTRACT.md`
+  - 기억의 source/evidence provenance, 2단계 삭제, tombstone-first 내구성,
+    fail-closed 조회·cache 무효화와 재시작 재조정 계약.
+
 - `docs/AUTONOMY_AUTHORIZATION_CONTRACT.md`
   - 현재 프로세스에만 유효한 자율행동 grant, exact action scope, 결과 증거,
     Minecraft 직접 제어의 fail-closed 성공 판정과 감사 journal 계약.

@@ -533,6 +533,9 @@ def _dot_sparse_vectors(left: dict[str, float], right: dict[str, float]) -> floa
 
 def sync_memory_vault_index(*, root: Path | None = None, db_path: Path | None = None) -> int:
     vault = ensure_memory_vault_layout(root)
+    _reconcile_memory_deletion_tombstones(root=root)
+    deleted_note_ids = _memory_deleted_note_ids(root)
+    _invalidate_stale_memory_hot_context(root=root)
     index_path = db_path or memory_index_db_path(root)
     note_paths = sorted(path for path in vault.rglob("*.md") if path.is_file())
 
@@ -550,6 +553,8 @@ def sync_memory_vault_index(*, root: Path | None = None, db_path: Path | None = 
             try:
                 note = parse_memory_note(path)
             except Exception:
+                continue
+            if note.note_id in deleted_note_ids:
                 continue
             rel_path = path.relative_to(vault).as_posix()
             seen.add(rel_path)
@@ -1502,6 +1507,7 @@ def _format_memory_callout(kind: str, title: str, items: list[str], *, empty_tex
 def _daily_intro_block(
     day_key: str,
     *,
+    note_id: str,
     guild_id: int,
     scope_type: str,
     scope_key: str | None,
@@ -1513,7 +1519,7 @@ def _daily_intro_block(
         [
             _format_front_matter(
                 {
-                    "id": f"daily-{day_key}",
+                    "id": note_id,
                     "type": "daily",
                     "title": f"이블린 일일 메모 {day_key}",
                     "status": "active",
@@ -1859,10 +1865,35 @@ def append_turn_rows_to_memory_vault(
     vault = ensure_memory_vault_layout(root)
     day_key = time.strftime("%Y-%m-%d")
     path = vault / "daily" / f"{day_key}.md"
-    if not path.exists():
+    note_id = f"daily-{day_key}"
+    initialize_note = not path.exists()
+    if path.exists():
+        try:
+            existing = parse_memory_note(path)
+        except Exception:
+            existing = None
+        if existing is not None:
+            if not memory_note_was_deleted(
+                existing.note_id,
+                root=root,
+            ):
+                note_id = existing.note_id
+            else:
+                initialize_note = True
+    if memory_note_was_deleted(note_id, root=root):
+        generation = 1
+        while memory_note_was_deleted(
+            f"daily-{day_key}-continuation-{generation}",
+            root=root,
+        ):
+            generation += 1
+        note_id = f"daily-{day_key}-continuation-{generation}"
+        initialize_note = True
+    if initialize_note:
         path.write_text(
             _daily_intro_block(
                 day_key,
+                note_id=note_id,
                 guild_id=guild_id,
                 scope_type=scope_type,
                 scope_key=scope_key,
@@ -2563,6 +2594,7 @@ def _memory_vault_user_card(
 
 def _memory_vault_find_note(note_id_or_rel_path: str, *, root: Path | None = None) -> tuple[Path, MemoryVaultNote, str] | None:
     vault = ensure_memory_vault_layout(root)
+    deleted_note_ids = _memory_deleted_note_ids(root)
     target = clean_text(note_id_or_rel_path)
     if not target:
         return None
@@ -2571,6 +2603,8 @@ def _memory_vault_find_note(note_id_or_rel_path: str, *, root: Path | None = Non
             raw = path.read_text(encoding="utf-8", errors="ignore")
             note = parse_memory_note(path, raw)
         except Exception:
+            continue
+        if note.note_id in deleted_note_ids:
             continue
         rel_path = path.relative_to(vault).as_posix()
         if target in {note.note_id, rel_path, path.stem}:
@@ -2601,6 +2635,7 @@ def memory_vault_user_snapshot(
     version = sync_memory_vault_index(root=root)
     vault = ensure_memory_vault_layout(root)
     state = _read_user_note_state(root)
+    deleted_note_ids = _memory_deleted_note_ids(root)
     cards: list[dict[str, Any]] = []
     counts = {"total": 0, "confirmed": 0, "unconfirmed": 0, "pinned": 0, "hidden": 0}
     for path in vault.rglob("*.md"):
@@ -2608,6 +2643,8 @@ def memory_vault_user_snapshot(
             raw = path.read_text(encoding="utf-8", errors="ignore")
             note = parse_memory_note(path, raw)
         except Exception:
+            continue
+        if note.note_id in deleted_note_ids:
             continue
         rel_path = path.relative_to(vault).as_posix()
         if not include_internal and _is_internal_memory_note_type(note.note_type):
@@ -2736,10 +2773,15 @@ def _read_memory_deletion_tombstones(
     root: Path | None = None,
 ) -> list[dict[str, Any]]:
     path = _memory_deletion_tombstones_path(root)
-    if not path.exists():
-        return []
+    with _memory_delete_lock:
+        if not path.exists():
+            return []
+        lines = path.read_text(
+            encoding="utf-8",
+            errors="ignore",
+        ).splitlines()
     output: list[dict[str, Any]] = []
-    for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+    for line in lines:
         try:
             payload = json.loads(line)
         except Exception:
@@ -2750,6 +2792,122 @@ def _read_memory_deletion_tombstones(
         ):
             output.append(payload)
     return output
+
+
+def _memory_deleted_note_ids(
+    root: Path | None = None,
+) -> set[str]:
+    return {
+        note_id
+        for item in _read_memory_deletion_tombstones(root)
+        if (
+            note_id := clean_text(
+                str(item.get("noteId") or "")
+            )
+        )
+    }
+
+
+def _memory_deletion_journal_state(
+    root: Path | None = None,
+) -> tuple[int, int]:
+    try:
+        journal_stat = _memory_deletion_tombstones_path(root).stat()
+    except FileNotFoundError:
+        return (0, 0)
+    except OSError:
+        return (-1, -1)
+    return (journal_stat.st_mtime_ns, journal_stat.st_size)
+
+
+def _invalidate_stale_memory_hot_context(
+    *,
+    root: Path | None = None,
+) -> None:
+    index_dir = memory_index_dir(root)
+    hot_path = index_dir / "hot_context.json"
+    prompt_path = index_dir / "prompt_blocks" / "core_prompt.txt"
+    cache_state: tuple[int, int] | None = None
+    if hot_path.exists():
+        try:
+            payload = json.loads(
+                hot_path.read_text(
+                    encoding="utf-8",
+                    errors="ignore",
+                )
+            )
+            if isinstance(payload, dict):
+                cache_state = (
+                    int(
+                        payload.get(
+                            "deletion_journal_mtime_ns"
+                        )
+                        or 0
+                    ),
+                    int(
+                        payload.get(
+                            "deletion_journal_size"
+                        )
+                        or 0
+                    ),
+                )
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            cache_state = None
+    if cache_state == _memory_deletion_journal_state(root):
+        return
+    for path in (hot_path, prompt_path):
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            pass
+
+
+def _reconcile_memory_deletion_tombstones(
+    *,
+    root: Path | None = None,
+) -> dict[str, Any]:
+    deleted_note_ids = _memory_deleted_note_ids(root)
+    if not deleted_note_ids:
+        return {
+            "deletedNoteCount": 0,
+            "sourceFileCount": 0,
+            "cleanupErrorCount": 0,
+        }
+    vault = ensure_memory_vault_layout(root)
+    source_file_count = 0
+    cleanup_error_count = 0
+    for path in vault.rglob("*.md"):
+        try:
+            note = parse_memory_note(path)
+        except Exception:
+            continue
+        if note.note_id not in deleted_note_ids:
+            continue
+        try:
+            path.unlink()
+            source_file_count += 1
+        except FileNotFoundError:
+            pass
+        except OSError:
+            cleanup_error_count += 1
+    state = _read_user_note_state(root)
+    next_state = {
+        note_id: payload
+        for note_id, payload in state.items()
+        if note_id not in deleted_note_ids
+    }
+    if next_state != state:
+        try:
+            _write_user_note_state(next_state, root)
+        except OSError:
+            cleanup_error_count += 1
+    return {
+        "deletedNoteCount": len(deleted_note_ids),
+        "sourceFileCount": source_file_count,
+        "cleanupErrorCount": cleanup_error_count,
+    }
 
 
 def _append_memory_deletion_tombstone(
@@ -2884,7 +3042,7 @@ def delete_memory_vault_user_note(
     target = _memory_vault_find_note(note_id_or_rel_path, root=root)
     if target is None:
         return {"ok": False, "error": "note_not_found"}
-    path, note, raw = target
+    path, note, _raw = target
     if (
         clean_text(str(preview.get("noteId") or ""))
         != clean_text(note.note_id)
@@ -2924,11 +3082,11 @@ def delete_memory_vault_user_note(
         "noteId": note.note_id,
         "noteType": note.note_type,
         "sourceType": provenance["sourceType"],
-        "contentHash": note.source_hash,
         "reason": normalized_reason,
         "deletedAt": deleted_at,
     }
 
+    source_file_deleted = False
     try:
         with _memory_delete_lock:
             if not resolved_path.exists():
@@ -2945,24 +3103,61 @@ def delete_memory_vault_user_note(
                     "ok": False,
                     "error": "memory_note_changed_since_preview",
                 }
-            raw = current_raw
-            resolved_path.unlink()
-        _write_user_note_state(state, root)
-        version = sync_memory_vault_index(root=root)
-        refresh_memory_hot_context(root=root)
-        _append_memory_deletion_tombstone(tombstone, root=root)
+            _append_memory_deletion_tombstone(
+                tombstone,
+                root=root,
+            )
+            try:
+                resolved_path.unlink()
+                source_file_deleted = True
+            except FileNotFoundError:
+                source_file_deleted = True
+            except OSError:
+                pass
     except Exception as exc:
-        resolved_path.parent.mkdir(parents=True, exist_ok=True)
-        resolved_path.write_text(raw, encoding="utf-8")
-        if previous_note_state is not None:
-            state[note.note_id] = previous_note_state
-        _write_user_note_state(state, root)
-        sync_memory_vault_index(root=root)
-        refresh_memory_hot_context(root=root)
         return {
             "ok": False,
             "error": "memory_delete_failed",
             "detail": type(exc).__name__,
+        }
+
+    cleanup_errors: list[str] = []
+    try:
+        _write_user_note_state(state, root)
+    except OSError:
+        cleanup_errors.append("memory_delete_user_state_cleanup_failed")
+    try:
+        version = sync_memory_vault_index(root=root)
+    except Exception:
+        version = 0
+        cleanup_errors.append("memory_delete_index_cleanup_failed")
+    if "memory_delete_user_state_cleanup_failed" in cleanup_errors:
+        try:
+            if note.note_id not in _read_user_note_state(root):
+                cleanup_errors.remove(
+                    "memory_delete_user_state_cleanup_failed"
+                )
+        except OSError:
+            pass
+    source_file_deleted = not resolved_path.exists()
+    if not source_file_deleted:
+        cleanup_errors.append("memory_delete_source_cleanup_failed")
+    try:
+        refresh_memory_hot_context(root=root)
+    except Exception:
+        cleanup_errors.append("memory_delete_hot_context_cleanup_failed")
+    if cleanup_errors:
+        return {
+            "ok": False,
+            "schema": MEMORY_DELETE_RESULT_SCHEMA,
+            "action": "delete",
+            "noteId": note.note_id,
+            "deleted": False,
+            "tombstoned": True,
+            "sourceFileDeleted": source_file_deleted,
+            "error": "memory_delete_cleanup_required",
+            "cleanupErrors": list(dict.fromkeys(cleanup_errors)),
+            "tombstone": tombstone,
         }
 
     return {
@@ -2974,6 +3169,8 @@ def delete_memory_vault_user_note(
         "deletedAt": deleted_at,
         "reason": normalized_reason,
         "memoryVersion": version,
+        "sourceFileDeleted": True,
+        "tombstoned": True,
         "tombstone": tombstone,
     }
 
@@ -3063,6 +3260,16 @@ def refresh_memory_hot_context(
             LIMIT 24
             """
         ).fetchall()
+        with _memory_delete_lock:
+            deletion_journal_state_before = (
+                _memory_deletion_journal_state(root)
+            )
+            deleted_note_ids = _memory_deleted_note_ids(root)
+        rows = [
+            row
+            for row in rows
+            if clean_text(str(row["note_id"])) not in deleted_note_ids
+        ]
 
         block_lines: list[str] = []
         source_paths: list[str] = []
@@ -3076,11 +3283,17 @@ def refresh_memory_hot_context(
         if len(content) > max_chars:
             content = content[: max(0, max_chars - 3)].rstrip() + "..."
 
+        deletion_journal_state = _memory_deletion_journal_state(root)
+        if deletion_journal_state != deletion_journal_state_before:
+            content = ""
+            source_paths = []
         payload = {
             "memory_version": version,
             "created_at": time.time(),
             "content": content,
             "sources": source_paths,
+            "deletion_journal_mtime_ns": deletion_journal_state[0],
+            "deletion_journal_size": deletion_journal_state[1],
             "max_chars": max_chars,
             "dependencies": dependency_health or {},
         }
@@ -3114,6 +3327,23 @@ def read_memory_hot_context(*, root: Path | None = None, max_chars: int = HOT_CO
     except Exception:
         return ""
     if not isinstance(payload, dict):
+        return ""
+    try:
+        cached_deletion_journal_mtime_ns = int(
+            payload.get("deletion_journal_mtime_ns") or 0
+        )
+        cached_deletion_journal_size = int(
+            payload.get("deletion_journal_size") or 0
+        )
+    except (TypeError, ValueError):
+        return ""
+    if (
+        (
+            cached_deletion_journal_mtime_ns,
+            cached_deletion_journal_size,
+        )
+        != _memory_deletion_journal_state(root)
+    ):
         return ""
     content = clean_text(str(payload.get("content") or ""))
     if len(content) > max_chars:
@@ -3198,12 +3428,15 @@ def activate_memory_vault_for_guild(guild_id: int, *, root: Path | None = None) 
 
 def mark_memory_note_superseded(note_id_or_rel_path: str, *, root: Path | None = None) -> bool:
     vault = ensure_memory_vault_layout(root)
+    deleted_note_ids = _memory_deleted_note_ids(root)
     target_key = clean_text(note_id_or_rel_path)
     for path in vault.rglob("*.md"):
         try:
             raw = path.read_text(encoding="utf-8", errors="ignore")
             note = parse_memory_note(path, raw)
         except Exception:
+            continue
+        if note.note_id in deleted_note_ids:
             continue
         rel_path = path.relative_to(vault).as_posix()
         if target_key not in {note.note_id, rel_path, path.stem}:
