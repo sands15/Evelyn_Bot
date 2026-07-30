@@ -20,6 +20,8 @@ if str(RUNTIME_ROOT) not in sys.path:
 
 from evelyn_core.runtime_health import collect_runtime_health  # noqa: E402
 from evelyn_core.runtime_services import HealthProbeSpec, ServiceManifest, ServiceSpec  # noqa: E402
+from evelyn_core.session_continuity import SessionContinuityCheckpoint  # noqa: E402
+from evelyn_core.session_memory_state import SessionStateStore  # noqa: E402
 
 
 def unused_tcp_port() -> int:
@@ -223,6 +225,26 @@ class RealMainProcessStartupSmokeTests(unittest.TestCase):
 
         main_source = (REPO_ROOT / "main.py").read_text(encoding="utf-8")
         self.assertIn("EVELYN_INSTANCE_LOCK_PATH", main_source)
+        self.assertNotIn('/ "runtime_artifacts"', main_source)
+        self.assertGreaterEqual(
+            main_source.count("RUNTIME_ARTIFACTS_ROOT"),
+            7,
+        )
+        local_bridge_source = (
+            REPO_ROOT
+            / "evelyn_core"
+            / "runtime"
+            / "evelyn_core"
+            / "local_io_bridge.py"
+        ).read_text(encoding="utf-8")
+        self.assertNotIn(
+            'PROJECT_ROOT / "runtime_artifacts"',
+            local_bridge_source,
+        )
+        self.assertIn(
+            "get_runtime_artifacts_root()",
+            local_bridge_source,
+        )
         composition_source = (
             REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "control_page_composition_runtime.py"
         ).read_text(encoding="utf-8")
@@ -233,10 +255,18 @@ class RealMainProcessStartupSmokeTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn('"GET": app.router.add_get', server_runtime_source)
 
-    def start_main_process(self, port: int) -> subprocess.Popen[str]:
+    def allocate_temp_root(self) -> Path:
         temp_dir = tempfile.TemporaryDirectory()
         self.temp_dirs.append(temp_dir)
-        temp_root = Path(temp_dir.name)
+        return Path(temp_dir.name)
+
+    def start_main_process(
+        self,
+        port: int,
+        *,
+        temp_root: Path | None = None,
+    ) -> subprocess.Popen[str]:
+        temp_root = temp_root or self.allocate_temp_root()
         env = os.environ.copy()
         env.update(
             {
@@ -252,6 +282,13 @@ class RealMainProcessStartupSmokeTests(unittest.TestCase):
                 "CONTROL_PAGE_RUNTIME_CACHE_REFRESH_SEC": "0.2",
                 "EVELYN_RUNTIME_ARTIFACTS_DIR": str(temp_root / "artifacts"),
                 "EVELYN_INSTANCE_LOCK_PATH": str(temp_root / "evelyn-test.lock"),
+                "BOT_MEMORY_DIR": str(temp_root / "bot_memory"),
+                "TURN_TRACE_LOG_DIR": str(
+                    temp_root / "logs" / "turn_trace"
+                ),
+                "EVELYN_CACHED_AUDIO_DIR": str(
+                    temp_root / "audio_cache"
+                ),
             }
         )
         stdout_path = temp_root / "main.stdout.log"
@@ -285,6 +322,34 @@ class RealMainProcessStartupSmokeTests(unittest.TestCase):
             )
         return process
 
+    @staticmethod
+    def wait_for_continuity_restore(
+        status_path: Path,
+        *,
+        newer_than: float = 0.0,
+        timeout_sec: float = 15.0,
+    ) -> dict[str, object]:
+        deadline = time.time() + timeout_sec
+        while time.time() < deadline:
+            try:
+                payload = json.loads(
+                    status_path.read_text(encoding="utf-8")
+                )
+            except (FileNotFoundError, json.JSONDecodeError):
+                time.sleep(0.05)
+                continue
+            restored_at = float(payload.get("lastRestoredAt") or 0.0)
+            if (
+                payload.get("state") == "restored"
+                and payload.get("restoredSessionCount") == 1
+                and restored_at > newer_than
+            ):
+                return payload
+            time.sleep(0.05)
+        raise AssertionError(
+            f"continuity restore status not observed at {status_path}"
+        )
+
     @unittest.skipUnless(
         os.getenv("EVELYN_RUN_REAL_MAIN_INTEGRATION", "").lower() in {"1", "true", "yes", "on"},
         "set EVELYN_RUN_REAL_MAIN_INTEGRATION=1 to spawn the real main.py process",
@@ -305,6 +370,97 @@ class RealMainProcessStartupSmokeTests(unittest.TestCase):
         self.assertIn("services", state["runtime"])
         self.assertIn("bootProgress", state)
         self.assertTrue(state["ok"])
+
+    @unittest.skipUnless(
+        os.getenv(
+            "EVELYN_RUN_REAL_MAIN_INTEGRATION",
+            "",
+        ).lower()
+        in {"1", "true", "yes", "on"},
+        "set EVELYN_RUN_REAL_MAIN_INTEGRATION=1 to spawn the real main.py process",
+    )
+    def test_real_main_crash_restart_restores_isolated_continuity(
+        self,
+    ) -> None:
+        temp_root = self.allocate_temp_root()
+        artifacts_root = temp_root / "artifacts"
+        continuity_root = artifacts_root / "conversation_continuity"
+        checkpoint_path = continuity_root / "active.json"
+        status_path = continuity_root / "status.json"
+        shared_checkpoint_path = (
+            REPO_ROOT
+            / "runtime_artifacts"
+            / "conversation_continuity"
+            / "active.json"
+        )
+        shared_checkpoint_before = (
+            shared_checkpoint_path.read_bytes()
+            if shared_checkpoint_path.is_file()
+            else None
+        )
+
+        session_key = "guild:7:text:8:user:42"
+        store = SessionStateStore.create_empty()
+        store.append_history(
+            session_key,
+            "main process continuity canary",
+            "I will survive the process restart",
+            system_prompt="seed prompt",
+            max_history_items=12,
+        )
+        store.update_session_state(
+            session_key,
+            user_id=42,
+            speaker="assistant",
+            awaiting_user_reply=True,
+            topic_id="main-restart-topic",
+            active_conversation_awaiting_reply_sec=300.0,
+        )
+        SessionContinuityCheckpoint(
+            store=store,
+            checkpoint_path=checkpoint_path,
+            status_path=status_path,
+            system_prompt="seed prompt",
+        ).flush(force=True)
+
+        first = self.start_main_process(
+            unused_tcp_port(),
+            temp_root=temp_root,
+        )
+        first_status = self.wait_for_continuity_restore(status_path)
+        first_restored_at = float(
+            first_status.get("lastRestoredAt") or 0.0
+        )
+
+        first.kill()
+        first.wait(timeout=10)
+        self.assertNotEqual(first.returncode, 0)
+        self.assertTrue(checkpoint_path.is_file())
+
+        second = self.start_main_process(
+            unused_tcp_port(),
+            temp_root=temp_root,
+        )
+        second_status = self.wait_for_continuity_restore(
+            status_path,
+            newer_than=first_restored_at,
+        )
+        self.assertIsNone(second.poll())
+        self.assertEqual(second_status["restoredSessionCount"], 1)
+        self.assertGreater(
+            float(second_status.get("lastRestoredAt") or 0.0),
+            first_restored_at,
+        )
+
+        shared_checkpoint_after = (
+            shared_checkpoint_path.read_bytes()
+            if shared_checkpoint_path.is_file()
+            else None
+        )
+        self.assertEqual(
+            shared_checkpoint_after,
+            shared_checkpoint_before,
+        )
 
 
 if __name__ == "__main__":

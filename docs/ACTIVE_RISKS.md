@@ -47,13 +47,18 @@ periodic writer가 저장한 직후 첫 Python 프로세스를 `os._exit`로 강
 prompt와 reply target을 복구하는 owner-level E2E도 통과했다. 부분 STT와 이전
 system prompt는 복구되지 않았다.
 
-현재 Docker Engine이 꺼져 있고 번들 Python에는 `aiohttp`, `discord`, `torch`가
-없어 실제 `main.py` 프로세스를 종료·재기동하는 통합 검증은 아직 실행하지
-못했다.
+real-main smoke가 설정한 임시 artifact root를 continuity, autonomy,
+Minecraft lease도 따르도록 하드코딩 경로를 제거했다. 같은 임시 root에서 실제
+`main.py`를 기동·강제 종료·재기동하고 두 번의 restore와 repository 기본
+checkpoint 비변경을 확인하는 opt-in CI 시나리오도 추가했다.
 
-다음 조치: 공식 Discord/Bot API 이미지 또는 깨끗한 Python 3.11 환경에서 전체
-`main.py`를 사용해 민감 정보가 없는 합성 Discord 세션의 강제 crash와 재기동,
-guild reset 비복구를 확인한다.
+현재 Docker Engine이 꺼져 있고 번들 Python에는 `discord`와 `torch`가 없어 새
+real-main crash 시나리오는 로컬에서 실행하지 못했다. lock 의존성을 설치하는
+Windows CI에서는 `EVELYN_RUN_REAL_MAIN_INTEGRATION=1`로 실행되지만, 아직 이
+브랜치의 원격 CI 결과는 없다.
+
+다음 조치: Windows CI에서 real-main crash/restart를 통과시킨 뒤, 공식 Discord
+이미지에서 합성 Discord 세션과 guild reset 비복구를 확인한다.
 
 ## P1 — Python 모델 런타임 의존성 잔여 취약점
 

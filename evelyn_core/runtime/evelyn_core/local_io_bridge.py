@@ -415,7 +415,11 @@ class LocalIoBridge:
     def _minecraft_launcher_environment(self) -> dict[str, str]:
         env = os.environ.copy()
         env.setdefault("DISCORD_BOT_TOKEN", "local-only-disabled")
-        secret_home = PROJECT_ROOT / "runtime_artifacts" / "secrets" / "codex_device_home"
+        secret_home = (
+            get_runtime_artifacts_root()
+            / "secrets"
+            / "codex_device_home"
+        )
         if (secret_home / "auth.json").is_file():
             env.setdefault("EVELYN_CODEX_CREDENTIALS_DIR", str(secret_home))
         return env

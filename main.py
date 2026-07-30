@@ -317,14 +317,12 @@ session_state_store = SessionStateStore.create_empty()
 session_continuity_checkpoint = SessionContinuityCheckpoint(
     store=session_state_store,
     checkpoint_path=(
-        PROJECT_ROOT
-        / "runtime_artifacts"
+        RUNTIME_ARTIFACTS_ROOT
         / "conversation_continuity"
         / "active.json"
     ),
     status_path=(
-        PROJECT_ROOT
-        / "runtime_artifacts"
+        RUNTIME_ARTIFACTS_ROOT
         / "conversation_continuity"
         / "status.json"
     ),
@@ -332,14 +330,12 @@ session_continuity_checkpoint = SessionContinuityCheckpoint(
 )
 autonomy_authorization_manager = AutonomyAuthorizationManager(
     status_path=(
-        PROJECT_ROOT
-        / "runtime_artifacts"
+        RUNTIME_ARTIFACTS_ROOT
         / "autonomy_authorization"
         / "status.json"
     ),
     events_dir=(
-        PROJECT_ROOT
-        / "runtime_artifacts"
+        RUNTIME_ARTIFACTS_ROOT
         / "autonomy_authorization"
         / "events"
     ),
@@ -1625,8 +1621,8 @@ minecraft_mode_composition = MinecraftModeComposition(
 
 wait_for_minecraft_ready = minecraft_mode_composition.wait_for_minecraft_ready
 local_minecraft_world_lease_owner = MinecraftWorldLeaseOwner(
-    status_path=PROJECT_ROOT / "runtime_artifacts" / "minecraft_world_lease" / "status.json",
-    events_dir=PROJECT_ROOT / "runtime_artifacts" / "minecraft_world_lease" / "events",
+    status_path=RUNTIME_ARTIFACTS_ROOT / "minecraft_world_lease" / "status.json",
+    events_dir=RUNTIME_ARTIFACTS_ROOT / "minecraft_world_lease" / "events",
     get_runtime_status=lambda: get_minecraft_client().status(),
     enable_mode=minecraft_mode_composition.enable_minecraft_mode,
     disable_mode=minecraft_mode_composition.disable_minecraft_mode,
@@ -1637,7 +1633,7 @@ local_minecraft_world_lease_owner = MinecraftWorldLeaseOwner(
 minecraft_world_lease_owner = (
     MinecraftWorldLeaseRemote(
         base_url=MINECRAFT_WORLD_LEASE_OWNER_URL,
-        secret_path=PROJECT_ROOT / "runtime_artifacts" / "secrets" / "minecraft_world_lease.json",
+        secret_path=RUNTIME_ARTIFACTS_ROOT / "secrets" / "minecraft_world_lease.json",
         create_task=asyncio.create_task,
     )
     if MINECRAFT_WORLD_LEASE_OWNER_URL

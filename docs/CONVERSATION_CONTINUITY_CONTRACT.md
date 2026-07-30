@@ -89,3 +89,10 @@ checkpoint를 만든 뒤 첫 Python 프로세스를 `os._exit(74)`로 종료한�
 새 Python 프로세스는 완료 턴, active follow-up TTL, user ownership, speaker,
 topic/turn ID와 reply target을 복구하고, 현재 system prompt를 새로 삽입하며
 부분 STT와 이전 system prompt가 남지 않는지 검증한다.
+
+`tests.runtime.test_runtime_startup_integration`의 opt-in real-main 시나리오는
+설정된 `EVELYN_RUNTIME_ARTIFACTS_DIR`에 합성 checkpoint를 만든 뒤 실제
+`main.py`를 기동하고 강제 종료한 다음 같은 artifact root로 다시 기동한다.
+두 main 인스턴스가 각각 restore를 보고해야 하며 repository의 기본
+`runtime_artifacts` checkpoint는 변경하면 안 된다. CI는
+`EVELYN_RUN_REAL_MAIN_INTEGRATION=1`로 이 시나리오를 실행한다.
