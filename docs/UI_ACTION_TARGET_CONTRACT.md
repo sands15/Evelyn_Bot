@@ -164,7 +164,16 @@ reuse, process restart, changed windows, changed/disabled targets, duplicate
 identities, executor contract mismatch, postcondition failure, response
 tampering, CSRF, queue cleanup, and retention.
 
-No live UI action has been executed. Positive and negative corpus runs across
-File Explorer, Chromium, Windows Settings, and WinUI applications are still
-required. Applications that expose only a root window remain non-actionable.
-Rollback and non-Button actions are outside the current boundary.
+The contract is deployed in the local Bot API, Control Page, and Windows Local
+I/O Bridge. A live negative request with a well-formed nonexistent element ID
+crossed the public CSRF boundary and host queue, reobserved the foreground, and
+returned `ui_action_target_missing` without calling the executor. The three
+queues were empty afterward, the content-free audit recorded only
+`process_started` and `action_denied`, and execution count remained zero. The
+deployed browser panel reported `running` with no warning/error console logs.
+
+No live UI action has been executed. Positive and broader negative corpus runs
+across File Explorer, Chromium, Windows Settings, and WinUI applications are
+still required. Applications that expose only a root window remain
+non-actionable. Rollback and non-Button actions are outside the current
+boundary.

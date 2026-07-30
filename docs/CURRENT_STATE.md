@@ -218,18 +218,21 @@ Source branch: `codex/dependency-config-hardening` at `b53a529`
     `sha256:898cf1df0adc40aa40fb989108b7187c6401b8d25727b6ee8d1ba93926176802`
   - Vision image:
     `sha256:30bad0c4399c60a89ae9cb9729fc29f9896c7375e5e8504599de6ffdcd9e0c81`
-- `b53a529` 소스로 Bot API와 Control Page 이미지를 빌드해 UIA Button
+- `b53a529` 소스로 Bot API와 Control Page 이미지를 빌드·배포해 UIA Button
   preview/apply, Host queue, 실행 전 재관찰, 실행 후 postcondition 검증과
-  `outcome_unverified` 전달을 검증했다. 실행 중 컨테이너와 Windows Local I/O
-  Bridge는 교체·재시작하지 않았고 실제 UI action도 수행하지 않았다.
+  `outcome_unverified` 전달을 검증했다. 실제 UI action은 수행하지 않았다.
   - Bot API image:
     `sha256:737e2b9f5b819eaa235e2a6f937707c29900877e47d9985a1826b988b6004ec0`
   - Control Page image:
     `sha256:6d01495a80f57d58b9aca62902dc9225ed5ee8880793cefe039915240f516c7f`
-  - 실행 중 Bot API는 `903e2cf...`, Control Page는 `6b959879...` 기존
-    이미지이며 둘 다 healthy, restart count 0이다.
-  - `docs/` bind mount 때문에 새 승인 패널 shell은 현재 페이지에 보이지만,
-    배포 전 backend route는 404로 fail-closed해 `unavailable`을 표시한다.
+  - 기존 Bot API를 15초 grace로 먼저 정상 종료했고
+    `minecraft_world_lease/owner_claim.json`이 사라진 뒤 두 컨테이너만
+    교체했다. 새 owner nonce가 생성됐고 active world lease는 없다.
+  - 두 컨테이너는 새 digest로 healthy, restart count 0이다.
+  - Host Supervisor allowlist `restart_local_bridge` preview/apply로
+    Local I/O Bridge를 새 프로세스로 교체했다. 새 bridge는 ready,
+    Host Vision `vision.evidence.v2`, Host UI Action `running/auditReady`다.
+  - 마이크는 OFF, Discord/Minecraft/Voyager는 기동하지 않았다.
 - 이전 `c656fc8` 배포의 recreate 직후에는 이전 Bot API owner claim이 15초
   stale guard 안에 있어 첫 Bot API start가
   `minecraft_world_lease_owner_conflict`로 fail-closed 종료됐다. guard 만료
@@ -246,6 +249,28 @@ Source branch: `codex/dependency-config-hardening` at `b53a529`
   실행하지 않는다. Discord bot도 사용자 요청 없이 시작하지 않았다.
 
 ## Last runtime evidence
+
+2026-07-31 UI Action 배포 후 비파괴 검증 결과:
+
+- `GET /api/control-page/ui-action`은 Control Page와 Bot API 모두
+  `host_ui_action.status.v1`, `state=running`, `auditReady=true`,
+  `allowedActions=["invoke"]`, `arbitraryCoordinates=false`를 반환했다.
+- CSRF 없는 preview는 403, 임의 `command` 필드는 400, 존재하지 않는
+  20자리 element ID는 409 `ui_action_target_missing`, `userConfirmed=false`
+  apply는 400으로 거부됐다.
+- well-formed missing-target 요청은 Host queue가 1회 처리했지만 preview
+  token을 만들지 않았고 executor도 호출하지 않았다. authorization state는
+  `authorization_required`, preview/execution/verified count는 모두 0,
+  denied count만 1이다.
+- requests/processing/responses queue는 모두 0개다. authorization/status와
+  JSONL audit에는 window title/class, element ID, target name, automation ID,
+  bounds, confirm token, argv, working directory가 없었다. audit event는
+  `process_started`, `action_denied`뿐이다.
+- 실제 브라우저 panel은 `RUNNING`과 세 postcondition을 렌더링했고
+  warning/error console log는 0개였다. preview/apply 버튼은 누르지 않았다.
+- 공식 `check_docker_runtime.ps1 -IncludeLocalBridge`가 Control Page,
+  Bot API, Main/Router/Sub LLM, TTS, STT, Vision과 Windows Local I/O
+  Bridge를 모두 준비 상태로 판정했다.
 
 2026-07-30 실제 local-only runtime checker 결과:
 
@@ -349,9 +374,9 @@ Source branch: `codex/dependency-config-hardening` at `b53a529`
   합성 검증했다.
 - 새 Bot API와 Control Page 이미지 내부에서 실제 module/route/asset smoke,
   `compileall`, `pip check`와 local-only sentinel Compose config를 통과했다.
-- 실제 브라우저 DOM에서 새 승인 panel과 세 postcondition option을 확인했고
-  warning/error console log는 0개였다. backend는 아직 이전 이미지라
-  404/unavailable로 닫혔고 preview/apply나 실제 UI invoke는 수행하지 않았다.
+- 배포 뒤 실제 브라우저 DOM에서 새 승인 panel과 세 postcondition option,
+  `RUNNING`을 확인했고 warning/error console log는 0개였다. 안전한
+  missing-target preview 외 실제 apply/UI invoke는 수행하지 않았다.
 - bundled Python의 freshness·host client·LLM context 집중 테스트 32개와,
   공식 Bot API 이미지에 구워진 소스의 집중 테스트 51개를 통과했다.
 - Pillow와 aiohttp가 함께 있는 공식 Discord 테스트 환경의 current-source
@@ -482,6 +507,6 @@ Source branch: `codex/dependency-config-hardening` at `b53a529`
 - Host Vision 요청은 `runtime_artifacts/host_vision/`의 exact-schema queue만
   사용하고, Host Supervisor가 소유한 Local I/O Bridge만 화면을 캡처한다.
 - Host UI Action 요청은 `runtime_artifacts/host_ui_action/`의 exact-schema
-  queue만 사용한다. 배포 전이며 현재 실제 action은 허용·수행되지 않았다.
+  queue만 사용한다. 경계는 배포됐지만 실제 action 실행 횟수는 0이다.
 
 남은 문제는 [ACTIVE_RISKS.md](ACTIVE_RISKS.md)에만 유지한다.

@@ -236,6 +236,13 @@ PowerShell `InvokePattern`을 1회 호출한다. 결과는 `target_absent`,
 재시도하지 않는다. 임의 command/argv/path/좌표/키보드와 background window는
 받지 않으며 target/window text는 status와 감사 journal에 저장하지 않는다.
 
+이 경계는 로컬 Bot API, Control Page, Windows Local I/O Bridge에 배포됐다.
+실제 공개 API에서 CSRF 누락, 임의 command 필드, 존재하지 않는 well-formed
+element ID, 명시 확인 없는 apply를 각각 403/400/409/400으로 거부했다.
+존재하지 않는 target 요청은 host queue와 전경 재관찰까지 통과했지만 executor를
+호출하지 않았고, 이후 queue 3개는 비었으며 execution/verified count는 0이다.
+브라우저 panel은 `running`을 표시했고 warning/error console log는 없었다.
+
 남은 위험은 실제 행동을 한 번도 수행하지 않았다는 점이다. UIA를 잘 노출하는
 Win32/Chromium/WinUI 앱의 양성·음성 corpus가 없고, SDL·게임·일부 GPU 앱처럼
 root-only인 화면은 계속 non-actionable이다. 현재 범위에는 Button 외 control,
