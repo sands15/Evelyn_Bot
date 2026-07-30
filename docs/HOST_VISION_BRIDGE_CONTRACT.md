@@ -197,6 +197,8 @@ Control Page:
 
 No click or other UI mutation is authorized by this read-only contract.
 Applications that expose only a root window, including the tested SDL window,
-continue to fail closed for button/menu requests. A separate, explicitly
-approved action-target contract and a multi-application accuracy corpus are
-required before accessibility element IDs may authorize actions.
+continue to fail closed for button/menu requests. The separate
+`UI_ACTION_TARGET_CONTRACT.md` now permits only an explicitly confirmed,
+reobserved foreground `Button` `InvokePattern` with a verified postcondition.
+That action contract has synthetic coverage only; a multi-application accuracy
+corpus and live action verification are still required.

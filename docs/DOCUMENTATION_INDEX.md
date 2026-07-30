@@ -78,6 +78,11 @@ implemented behavior.
   - Docker와 Windows 사이의 단일 화면 관찰 queue, exact schema/TTL/allowlist,
     foreground metadata·native OCR 신뢰 경계, 즉시 삭제와 live E2E 증거 계약.
 
+- `docs/UI_ACTION_TARGET_CONTRACT.md`
+  - 현재 전경 UIA Button의 `invoke`만 허용하는 30초 일회성 preview/apply,
+    실행 직전 대상 재관찰, 실행 후 exact postcondition 검증,
+    `outcome_unverified` fail-closed와 content-free 감사 계약.
+
 - `docs/RUNTIME_ERROR_OBSERVABILITY_CONTRACT.md`
   - Runtime owner별 고정 오류 코드·카운터와 Control Page 공개 privacy 계약.
 

@@ -52,6 +52,8 @@ Environment overrides:
   audit journals older than 30 days or over 20 MB total.
 - `minecraft_world_lease/events/*.jsonl`: keep newest 7, remove world-action
   lease audit journals older than 30 days or over 20 MB total.
+- `host_ui_action/events/*.jsonl`: keep newest 7, remove content-free UI action
+  authorization/outcome journals older than 30 days or over 20 MB total.
 - `benchmarks/*.jsonl`: keep newest 3, remove rows older than 30 days or over 20 MB total.
 - `memory/*.jsonl`: keep newest 3, remove write-behind status logs older than 30 days or over 20 MB total.
 - Legacy `runtime_artifacts/voice_debug/**/*.wav` and `*.pcm`: keep newest 50, remove audio older than 7 days or over 2 GB total. The active top-level `debug_audio/` store uses the separate bundle-aware command above.

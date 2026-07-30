@@ -1,7 +1,7 @@
 # Evelyn Active Risks
 
 Document status: **Current**
-Last reviewed: 2026-07-30 KST
+Last reviewed: 2026-07-31 KST
 Evaluation stance: 실패 가능성과 검증 공백을 우선 기록
 
 ## P0 — Voyager는 HTTP health와 기능 준비가 다르다
@@ -205,7 +205,7 @@ preview의 설명 가능성, relink/unlink/undo 결과와 journal 복구를 운�
 marker가 필요한지 위협 모델로 판단하고, coverage bucket과 forward rejection
 추세가 실제 품질 신호인지 함께 측정한다.
 
-## P1 — UI 접근성 corpus·동작 대상 계약 미완성
+## P1 — UI 접근성 corpus·live 행동 검증 미완성
 
 Windows Host Vision Bridge에 읽기 전용 Windows UI Automation Control View를
 연결했다. 허용 control type과 최대 120개/5초 freshness를 고정했고, foreground
@@ -226,16 +226,27 @@ OCR만 low-confidence·non-actionable fallback으로 남긴다.
 루트 외 Button을 노출하지 않았으므로 버튼 이름 요청은 Main LLM 전에 고정
 no-evidence 응답으로 닫혔다. screenshot과 모든 큐 파일은 즉시 삭제됐다.
 
-남은 위험은 두 가지다. UIA를 잘 노출하는 Win32/Chromium/WinUI 앱의 버튼·메뉴
-양성 표본을 아직 실제 corpus로 대조하지 않았고, SDL·게임·일부 GPU 앱처럼
-root-only인 화면은 정확한 하위 UI 의미를 제공하지 않는다. 또한 element ID는
-관측 상관관계용일 뿐 클릭 권한이 아니며, 현재 구현은 UI focus·invoke·입력
-mutation을 전혀 수행하지 않는다.
+별도 UI Action Target 계약은 구현됐다. 현재 전경의 이름 있는 enabled
+`Button`과 `invoke`만 허용하고, 30초·일회성·재시작 비복구 token을 exact
+window/element fingerprint와 postcondition에 묶는다. apply는 token을 먼저
+소모한 뒤 다시 관찰한 foreground와 target이 완전히 같을 때만 fixed
+PowerShell `InvokePattern`을 1회 호출한다. 결과는 `target_absent`,
+`target_disabled`, `window_changed` 중 승인된 조건을 재관찰해야 성공한다.
+실행됐지만 결과가 확인되지 않으면 `outcome_unverified` 실패로 보존하고 자동
+재시도하지 않는다. 임의 command/argv/path/좌표/키보드와 background window는
+받지 않으며 target/window text는 status와 감사 journal에 저장하지 않는다.
 
-다음 조치: 파일 탐색기, 브라우저, 설정, WinUI 앱의 title/button/menu/tab
-양성·음성 corpus를 반복 측정한다. 이후에도 클릭은 사용자 승인, 재관측,
-foreground 일치, element identity, 결과 검증과 rollback을 포함하는 별도
-행동 계약을 설계·검증한 뒤에만 허용한다.
+남은 위험은 실제 행동을 한 번도 수행하지 않았다는 점이다. UIA를 잘 노출하는
+Win32/Chromium/WinUI 앱의 양성·음성 corpus가 없고, SDL·게임·일부 GPU 앱처럼
+root-only인 화면은 계속 non-actionable이다. 현재 범위에는 Button 외 control,
+window activation, keyboard/text 입력, rollback이 없다. Control Page는
+foreground를 점유하므로 외부 앱 target의 preview/confirm UX도 별도 live
+설계가 필요하다.
+
+다음 조치: 격리된 테스트 앱과 사용자 동의 세션에서 파일 탐색기, 브라우저,
+설정, WinUI의 stable Button corpus를 먼저 측정한다. no-op 또는 쉽게 되돌릴 수
+있는 동작부터 target identity와 세 postcondition을 확인하고, focus handoff와
+rollback이 검증되기 전에는 범위를 넓히지 않는다.
 
 ## P2 — `main.py` 선언형 wiring 밀도
 

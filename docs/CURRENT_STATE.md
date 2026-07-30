@@ -2,7 +2,7 @@
 
 Document status: **Current**
 Last reviewed: 2026-07-31 KST
-Source branch: `codex/dependency-config-hardening` at `743cfd3`
+Source branch: `codex/dependency-config-hardening` at `b53a529`
 
 이 문서는 현재 확인된 사실만 기록한다. 목표 구조와 과거 계획은 다른 설계/계획 문서를 사용한다.
 
@@ -67,6 +67,24 @@ Source branch: `codex/dependency-config-hardening` at `743cfd3`
     사용한다.
   - stale/invalid observation 원문은 Host Bridge response, client result,
     Main/Fast LLM context에서 반복 제거한다.
+- 읽기 전용 화면 관찰과 실제 UI mutation 사이에 별도 Host UI Action
+  경계를 추가했다.
+  - 현재 전경의 이름 있는 enabled UIA `Button`과 `invoke`만 허용하며,
+    임의 command/argv/path/좌표/키보드와 background window는 거부한다.
+  - 30초 일회성 token은 process memory에만 있고 재시작 뒤 복구되지 않는다.
+    apply 전에 foreground window와 element ID/control/name/automation ID/
+    bounds를 다시 관찰해 preview와 완전히 같은지 확인한다.
+  - fixed PowerShell executor는 `InvokePattern`을 한 번만 호출한다. 이후
+    `target_absent`, `target_disabled`, `window_changed` 중 승인된 조건이
+    관찰돼야 성공이다.
+  - 실행됐지만 결과를 증명하지 못하면 `outcome_unverified` 실패로 보존하고
+    자동 재시도하지 않는다. 감사 journal을 `fsync`할 수 없으면 새 실행을
+    시작하지 않는다.
+  - status와 감사 journal은 target/window text, element ID, token, 화면
+    내용을 저장하지 않는다. journal은 30일/20 MiB/최근 7개 보존 규칙을
+    사용한다.
+  - Control Page는 CSRF 적용 preview/apply와 별도 `window.confirm`을
+    제공한다.
 - 한글 프로젝트 경로의 Docker Buildx 문제를 피하기 위해 빌드 동안만 사용하지
   않는 드라이브 문자를 매핑한다. allowlist 이미지 세 개만 빌드하고 자신이 만든
   매핑만 검증 후 해제한다.
@@ -200,6 +218,18 @@ Source branch: `codex/dependency-config-hardening` at `743cfd3`
     `sha256:898cf1df0adc40aa40fb989108b7187c6401b8d25727b6ee8d1ba93926176802`
   - Vision image:
     `sha256:30bad0c4399c60a89ae9cb9729fc29f9896c7375e5e8504599de6ffdcd9e0c81`
+- `b53a529` 소스로 Bot API와 Control Page 이미지를 빌드해 UIA Button
+  preview/apply, Host queue, 실행 전 재관찰, 실행 후 postcondition 검증과
+  `outcome_unverified` 전달을 검증했다. 실행 중 컨테이너와 Windows Local I/O
+  Bridge는 교체·재시작하지 않았고 실제 UI action도 수행하지 않았다.
+  - Bot API image:
+    `sha256:737e2b9f5b819eaa235e2a6f937707c29900877e47d9985a1826b988b6004ec0`
+  - Control Page image:
+    `sha256:6d01495a80f57d58b9aca62902dc9225ed5ee8880793cefe039915240f516c7f`
+  - 실행 중 Bot API는 `903e2cf...`, Control Page는 `6b959879...` 기존
+    이미지이며 둘 다 healthy, restart count 0이다.
+  - `docs/` bind mount 때문에 새 승인 패널 shell은 현재 페이지에 보이지만,
+    배포 전 backend route는 404로 fail-closed해 `unavailable`을 표시한다.
 - 이전 `c656fc8` 배포의 recreate 직후에는 이전 Bot API owner claim이 15초
   stale guard 안에 있어 첫 Bot API start가
   `minecraft_world_lease_owner_conflict`로 fail-closed 종료됐다. guard 만료
@@ -305,8 +335,23 @@ Source branch: `codex/dependency-config-hardening` at `743cfd3`
 
 ## Verification state
 
-검증한 코드 기준점: `743cfd3`
+검증한 코드 기준점: `b53a529`
 
+- 공식 Python/aiohttp 이미지의 read-only source mount에서 UI action/CSRF/
+  retention 집중 테스트 52개, runtime 전체 361개(skip 2), UI 전체 154개
+  (skip 7)를 통과했다.
+- Vision 전체 102개는 새 UI action/기존 observation 기능 assertion 실패
+  0개였고, Linux가 `WindowsPath`를 만들 수 없는 기존 native OCR platform
+  오류 1개만 남았다. 같은 native OCR 6개는 Windows에서 통과했다.
+- stale observation, 30초 token 만료·재사용·restart 비복구, changed
+  foreground/target/bounds, disabled target, 임의 필드, executor tampering,
+  세 postcondition, 실행 후 `outcome_unverified`, 감사 privacy/retention을
+  합성 검증했다.
+- 새 Bot API와 Control Page 이미지 내부에서 실제 module/route/asset smoke,
+  `compileall`, `pip check`와 local-only sentinel Compose config를 통과했다.
+- 실제 브라우저 DOM에서 새 승인 panel과 세 postcondition option을 확인했고
+  warning/error console log는 0개였다. backend는 아직 이전 이미지라
+  404/unavailable로 닫혔고 preview/apply나 실제 UI invoke는 수행하지 않았다.
 - bundled Python의 freshness·host client·LLM context 집중 테스트 32개와,
   공식 Bot API 이미지에 구워진 소스의 집중 테스트 51개를 통과했다.
 - Pillow와 aiohttp가 함께 있는 공식 Discord 테스트 환경의 current-source
@@ -436,5 +481,7 @@ Source branch: `codex/dependency-config-hardening` at `743cfd3`
 - 런타임 repair는 preview와 apply를 분리하며, preview만으로 프로세스를 시작하지 않는다.
 - Host Vision 요청은 `runtime_artifacts/host_vision/`의 exact-schema queue만
   사용하고, Host Supervisor가 소유한 Local I/O Bridge만 화면을 캡처한다.
+- Host UI Action 요청은 `runtime_artifacts/host_ui_action/`의 exact-schema
+  queue만 사용한다. 배포 전이며 현재 실제 action은 허용·수행되지 않았다.
 
 남은 문제는 [ACTIVE_RISKS.md](ACTIVE_RISKS.md)에만 유지한다.
