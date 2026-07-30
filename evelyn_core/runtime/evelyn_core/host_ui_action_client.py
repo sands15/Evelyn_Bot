@@ -142,17 +142,24 @@ def _read_response(
         return _failed(operation, "ui_action_invalid_response")
     if payload["ok"] and error_code:
         return _failed(operation, "ui_action_contradictory_response")
-    if not payload["ok"]:
-        if not error_code or payload["preview"] or payload["result"]:
+    if not payload["ok"] and not error_code:
+        return _failed(operation, "ui_action_contradictory_response")
+    if operation == "preview":
+        if payload["result"]:
             return _failed(operation, "ui_action_contradictory_response")
-        return {
-            "ok": False,
-            "operation": operation,
-            "error": error_code,
-            "preview": {},
-            "result": {},
-        }
-    if operation == "preview" and payload["ok"]:
+        if not payload["ok"]:
+            if payload["preview"]:
+                return _failed(
+                    operation,
+                    "ui_action_contradictory_response",
+                )
+            return {
+                "ok": False,
+                "operation": operation,
+                "error": error_code,
+                "preview": {},
+                "result": {},
+            }
         preview = payload["preview"]
         target = preview.get("target")
         policy = preview.get("policy")
@@ -195,28 +202,88 @@ def _read_response(
             or policy.get("arbitraryCoordinates") is not False
         ):
             return _failed(operation, "ui_action_invalid_preview_contract")
-        if payload["result"]:
+    if operation == "apply":
+        if payload["preview"]:
             return _failed(operation, "ui_action_contradictory_response")
-    if operation == "apply" and payload["ok"]:
         result = payload["result"]
+        if not payload["ok"] and not result:
+            return {
+                "ok": False,
+                "operation": operation,
+                "error": error_code,
+                "preview": {},
+                "result": {},
+            }
+        result_error = str(result.get("error") or "")
         if (
             set(result) != _UI_ACTION_RESULT_KEYS
-            or result.get("ok") is not True
+            or type(result.get("ok")) is not bool
             or result.get("schema") != "ui_action.result.v1"
-            or result.get("state") != "verified"
-            or result.get("error") != ""
+            or result.get("state")
+            not in {
+                "verified",
+                "outcome_unverified",
+                "execution_failed",
+                "authorization_audit_unavailable",
+            }
+            or (
+                result_error
+                and not _UI_ACTION_ERROR_CODE_RE.fullmatch(result_error)
+            )
             or not _UI_ACTION_OPERATION_ID_RE.fullmatch(
                 str(result.get("operationId") or "")
             )
             or result.get("action") not in UI_ACTION_ALLOWED_ACTIONS
             or result.get("postcondition")
             not in UI_ACTION_ALLOWED_POSTCONDITIONS
-            or result.get("executed") is not True
-            or result.get("verified") is not True
+            or type(result.get("executed")) is not bool
+            or type(result.get("verified")) is not bool
             or result.get("automaticRetry") is not False
         ):
             return _failed(operation, "ui_action_invalid_result_contract")
-        if payload["preview"]:
+        result_state = result["state"]
+        state_valid = bool(
+            (
+                result_state == "verified"
+                and result["ok"] is True
+                and result["executed"] is True
+                and result["verified"] is True
+                and not result_error
+            )
+            or (
+                result_state == "outcome_unverified"
+                and result["ok"] is False
+                and result["executed"] is True
+                and result["verified"] is False
+                and bool(result_error)
+            )
+            or (
+                result_state == "execution_failed"
+                and result["ok"] is False
+                and result["executed"] is False
+                and result["verified"] is False
+                and bool(result_error)
+            )
+            or (
+                result_state == "authorization_audit_unavailable"
+                and result["ok"] is False
+                and result["verified"] is False
+                and result_error
+                == "ui_action_authorization_audit_unavailable"
+            )
+        )
+        if (
+            not state_valid
+            or result["ok"] is not payload["ok"]
+            or (
+                payload["ok"]
+                and error_code
+            )
+            or (
+                not payload["ok"]
+                and result_error != error_code
+            )
+        ):
             return _failed(operation, "ui_action_contradictory_response")
     return {
         "ok": bool(payload["ok"]),

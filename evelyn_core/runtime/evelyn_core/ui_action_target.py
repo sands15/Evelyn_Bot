@@ -643,8 +643,12 @@ class UiActionTargetManager:
                     "schema": UI_ACTION_RESULT_SCHEMA,
                     "state": "authorization_audit_unavailable",
                     "error": "ui_action_authorization_audit_unavailable",
+                    "operationId": operation_id,
+                    "action": pending["action"],
+                    "postcondition": pending["postcondition"],
                     "executed": executed,
                     "verified": False,
+                    "automaticRetry": False,
                 }
             if verified:
                 self._verified_count += 1

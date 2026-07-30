@@ -204,6 +204,66 @@ class HostUiActionClientTests(unittest.IsolatedAsyncioTestCase):
             "ui_action_invalid_preview_contract",
         )
 
+    async def test_unverified_execution_is_preserved_as_failure(self) -> None:
+        async def unverified_host(root: Path) -> None:
+            requests = root / "host_ui_action" / "requests"
+            for _ in range(100):
+                candidates = (
+                    list(requests.glob("*.json"))
+                    if requests.exists()
+                    else []
+                )
+                if candidates:
+                    break
+                await asyncio.sleep(0.005)
+            request = json.loads(candidates[0].read_text(encoding="utf-8"))
+            created_at = time.time()
+            error = "ui_action_outcome_unverified"
+            atomic_json_write(
+                root
+                / "host_ui_action"
+                / "responses"
+                / f"{request['requestId']}.json",
+                {
+                    "schema": "host_ui_action.response.v1",
+                    "requestId": request["requestId"],
+                    "createdAt": created_at,
+                    "expiresAt": created_at + 30.0,
+                    "ok": False,
+                    "operation": "apply",
+                    "errorCode": error,
+                    "preview": {},
+                    "result": {
+                        "ok": False,
+                        "schema": "ui_action.result.v1",
+                        "state": "outcome_unverified",
+                        "error": error,
+                        "operationId": f"ui-action-{'a' * 24}",
+                        "action": "invoke",
+                        "postcondition": "target_absent",
+                        "executed": True,
+                        "verified": False,
+                        "automaticRetry": False,
+                    },
+                },
+            )
+
+        with tempfile.TemporaryDirectory() as temp_root:
+            root = Path(temp_root)
+            host_task = asyncio.create_task(unverified_host(root))
+            result = await apply_host_ui_action(
+                confirm_token="t" * 43,
+                artifacts_root=root,
+                timeout_sec=1.0,
+                poll_interval_sec=0.005,
+            )
+            await host_task
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "ui_action_outcome_unverified")
+        self.assertTrue(result["result"]["executed"])
+        self.assertFalse(result["result"]["verified"])
+
     async def test_arbitrary_input_is_rejected_before_queue_write(self) -> None:
         with tempfile.TemporaryDirectory() as temp_root:
             root = Path(temp_root)
