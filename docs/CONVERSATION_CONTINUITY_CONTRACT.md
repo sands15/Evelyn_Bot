@@ -32,6 +32,14 @@ Last reviewed: 2026-07-30 KST
 잠금으로 이전 파일을 즉시 unlink하지 못해도 status의 `checkpointRevokedAt`
 이후보다 오래된 checkpoint는 다음 restore에서 거부한다.
 
+`runtime_artifacts/conversation_continuity/guild_revocations.json`은 길드 초기화가
+체크포인트보다 먼저 내구성 있게 기록됐음을 나타내는 write-ahead ledger다.
+스키마는 `conversation_continuity.guild_revocations.v1`이며 최근 길드 최대
+256개의 숫자 ID와 철회 시각만 저장한다. 대화문, 사용자 ID, 채널 ID, 세션 키,
+경로와 오류 메시지는 저장하지 않는다. ledger가 손상됐거나 schema·크기·파일
+형식 검사를 통과하지 못하면 기존 checkpoint 전체를 복구하지 않는 fail-closed
+정책을 적용한다.
+
 checkpoint 파일은 임시 파일에 JSON을 쓴 뒤 flush와 `fsync`를 완료하고
 원자적으로 교체한다. 일반 heartbeat는 불필요한 디스크 동기화를 하지 않지만,
 checkpoint 저장 실패로 발생한 revocation status는 `fsync`해 fail-closed
@@ -45,14 +53,20 @@ checkpoint 저장 실패로 발생한 revocation status는 `fsync`해 fail-close
   시간을 차감해 새 프로세스의 clock으로 변환한다.
 - 1초 주기의 single-flight writer가 직접 변경된 세션 사전도 감지한다.
 - 정상 restart, shutdown, process exit 전에 동기 flush를 시도한다.
-- Discord guild 기억 초기화는 runtime state를 지운 직후 즉시 flush한다.
+- Discord guild 기억 초기화는 checkpoint owner의 단일 잠금 안에서 처리한다.
+  먼저 guild revocation을 durable ledger에 기록하고, 모든 guild-prefixed
+  runtime map을 각각 지운 뒤 checkpoint를 강제 저장한다. 새 checkpoint가
+  내구성 있게 교체된 다음에만 revocation을 제거한다.
+- marker 기록 전 실패하면 runtime state를 지우지 않는다. marker 기록 뒤
+  runtime reset 또는 checkpoint 저장 도중 프로세스가 종료되면 다음
+  restore가 이전 checkpoint에서 그 guild만 제외한다.
 
 ## Operational status
 
 `runtime_artifacts/conversation_continuity/status.json`은
 `conversation_continuity.status.v1` heartbeat를 제공한다. 이 파일은 payload나
 대화문을 포함하지 않고 상태, 복구·저장 시각, 세션 수, 보존 정책, 고정 오류
-코드 카운터만 포함한다.
+코드 카운터와 현재 guild revocation 개수만 포함한다.
 
 Runtime Health의 `runtime_errors.summary.v1`에는
 `conversationContinuity` owner가 추가된다. heartbeat가 5초를 넘으면 stale이며,
@@ -65,7 +79,11 @@ Runtime Health의 `runtime_errors.summary.v1`에는
 - 일반 runtime artifact retention은 방어적으로 1일 이상 된
   `conversation_continuity/active.json`도 삭제 대상으로 선택한다.
 - 세션 store가 비면 체크포인트를 삭제한다.
-- guild 기억 초기화는 해당 guild 세션을 제거한 결과를 즉시 저장한다.
+- guild revocation ledger는 history가 아니라 bounded active metadata다. 정상
+  초기화가 끝나면 해당 marker를 제거하며, 중단된 초기화의 marker만 안전한
+  checkpoint 교체가 끝날 때까지 유지한다.
+- guild 기억 초기화는 해당 guild의 모든 sparse runtime state를 제거한 결과를
+  즉시 저장한다.
 
 이 계약은 영구 기억의 provenance·tombstone·permanent delete 계약을 대체하지
 않는다.
@@ -81,6 +99,10 @@ Runtime Health의 `runtime_errors.summary.v1`에는
 - 저장 실패 시 이전 파일 fail-closed 폐기
 - unlink 실패 시 revocation marker로 이전 파일 복구 거부
 - 빈 store 및 guild reset 후 즉시 체크포인트 갱신
+- anchor map이 없는 sparse guild state와 음성 merge record의 독립 제거
+- guild revocation 기록 직후와 runtime clear 직후 `os._exit` 시 비복구
+- 다른 guild의 checkpoint는 같은 crash 경계에서도 정상 복구
+- revocation ledger의 content-free·corrupt fail-closed 계약
 - single-flight periodic writer와 직접 사전 변경 감지
 - Runtime Errors의 privacy 및 stale/current-error 판정
 
@@ -89,6 +111,11 @@ checkpoint를 만든 뒤 첫 Python 프로세스를 `os._exit(74)`로 종료한�
 새 Python 프로세스는 완료 턴, active follow-up TTL, user ownership, speaker,
 topic/turn ID와 reply target을 복구하고, 현재 system prompt를 새로 삽입하며
 부분 STT와 이전 system prompt가 남지 않는지 검증한다.
+
+`tests.core.test_session_continuity_guild_reset_restart`는 두 개의 독립 Python
+프로세스를 사용한다. 첫 프로세스를 durable marker 직후 또는 runtime clear
+직후 `os._exit`로 종료하고, 두 번째 프로세스가 초기화 대상 guild를 복구하지
+않으면서 다른 guild의 완료 턴과 active follow-up은 보존하는지 검증한다.
 
 `tests.runtime.test_runtime_startup_integration`의 opt-in real-main 시나리오는
 설정된 `EVELYN_RUNTIME_ARTIFACTS_DIR`에 합성 checkpoint를 만든 뒤 실제

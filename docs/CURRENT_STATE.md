@@ -2,7 +2,7 @@
 
 Document status: **Current**
 Last reviewed: 2026-07-30 KST
-Source branch: `codex/dependency-config-hardening` at `b2cb9a2`
+Source branch: `codex/dependency-config-hardening` at `9fc3899`
 
 이 문서는 현재 확인된 사실만 기록한다. 목표 구조와 과거 계획은 다른 설계/계획 문서를 사용한다.
 
@@ -21,6 +21,15 @@ Source branch: `codex/dependency-config-hardening` at `b2cb9a2`
   - Voyager HTTP 응답과 실제 runner/bridge/Minecraft 준비 여부도 분리했다.
 - 루트 Python 의존성은 `requirements.lock`으로 고정했다.
 - GitHub Actions는 Windows/Python 3.11/Node 24에서 전체 회귀 테스트와 실제 `main.py` 프로세스 smoke를 실행한다.
+- 단기 대화 연속성 checkpoint의 guild 초기화 경계를 강화했다.
+  - content-free per-guild revocation ledger를 runtime clear 전에 durable
+    기록한다.
+  - checkpoint owner 잠금 안에서 모든 guild-prefixed session/room state와
+    merge record를 독립적으로 제거하고 새 checkpoint를 강제 저장한다.
+  - checkpoint 교체 전 crash에서는 revocation marker가 이전 checkpoint의
+    대상 guild만 차단하며 다른 guild는 복구한다.
+  - marker 기록 실패 시 runtime reset을 시작하지 않고, ledger 손상 시 기존
+    checkpoint 전체를 fail-closed로 거부한다.
 - Codex Gateway의 `/codex/action`은 bearer token을 요구한다. `/health`는 읽기 전용으로 유지한다.
 - 사용되지 않던 `docs/assets/evelyn-page.js`는 삭제했고, UI 테스트는 실제 `docs/index.html` 인라인 컨트롤러를 검사한다.
 - Docker Compose의 사용자별 `C:/Users/Admin/...` 경로는 환경변수와 `USERPROFILE` 기반으로 바꿨다.
@@ -153,6 +162,11 @@ Source branch: `codex/dependency-config-hardening` at `b2cb9a2`
   - 새 Control Page는 첫 기동에서 `healthy`, restart count 0이다.
   - 배포 전후 Local I/O Bridge의 실제 `micEnabled=false`를 확인했으며,
     사용자의 허용 버튼은 누르지 않았다.
+- `9fc3899` 소스로 Discord bot 이미지를 빌드해 대화 연속성의 guild reset
+  crash 경계와 실제 `main.py` 재시작을 검증했다. 실제 Discord 서비스는
+  시작하거나 교체하지 않았다.
+  - Discord image:
+    `sha256:b5984c5ec26a28a8a927982f4f85fc6df01c5f38946f86eec24675a25090d338`
 - 이전 `c656fc8` 배포의 recreate 직후에는 이전 Bot API owner claim이 15초
   stale guard 안에 있어 첫 Bot API start가
   `minecraft_world_lease_owner_conflict`로 fail-closed 종료됐다. guard 만료
@@ -258,8 +272,20 @@ Source branch: `codex/dependency-config-hardening` at `b2cb9a2`
 
 ## Verification state
 
-검증한 코드 기준점: `c92a158`
+검증한 코드 기준점: `9fc3899`
 
+- 새 공식 Discord 이미지에서 guild reset, continuity, Discord command wiring,
+  Runtime Errors, opt-in real-main startup/crash-restart 집중 테스트 68개를
+  통과했다.
+- 별도 두 프로세스 테스트는 durable guild marker 직후와 runtime clear 직후
+  각각 `os._exit`로 중단했다. 재기동 시 초기화 대상 guild는 복구되지 않았고
+  다른 guild의 완료 턴과 active follow-up은 유지됐다.
+- 공식 Discord 이미지의 전체 core 440개는 기능 assertion 실패 0개였다.
+  이미지에 `git` 실행 파일이 없어 과거 main signature 비교 2개만 환경 오류로
+  남았다.
+- 새 Discord 이미지의 `compileall`과 `pip check`를 통과했다.
+- 실제 Discord bot은 시작하지 않았으므로 인증된 live guild 초기화 E2E는
+  아직 수행하지 않았다.
 - bundled Python에서 memory discovery 125개와 UI discovery 149개,
   correction/UI focused 23개, `compileall`, Control Page 인라인 JavaScript
   parse와 `git diff --check`를 통과했다.

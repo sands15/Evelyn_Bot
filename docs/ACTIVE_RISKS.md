@@ -36,31 +36,41 @@ split Docker에서는 Bot API 재시작 시 token 회전·lease 비복구·stale
 정지, Discord 재시작 시 중앙 lease 유지, 동시 Control Page/Discord 요청의
 owner mismatch를 실제 컨테이너와 Minecraft 세션에서 추가 검증한다.
 
-## P1 — Conversation Continuity 전체 main crash/restart 검증 대기
+## P1 — Conversation Continuity live Discord·원격 CI 검증 대기
 
 완료된 대화 턴과 active follow-up을 15분 동안 제한적으로 복구하는 checkpoint,
-guild 초기화 즉시 flush, 만료·손상·revocation fail-closed 계약은 구현됐고
-집중 단위 테스트와 lifecycle smoke를 통과했다. checkpoint와 revocation
-marker는 필요한 경로에서 flush·fsync 뒤 원자 교체된다.
+만료·손상·revocation fail-closed 계약은 구현됐다. guild 초기화는 이제
+content-free write-ahead ledger를 먼저 durable 기록한 뒤 모든 sparse runtime
+map을 독립적으로 지우고 checkpoint를 강제 교체한다. 교체가 끝난 뒤에만
+marker를 없애므로 초기화 도중 프로세스가 죽어도 삭제된 guild가 되살아나지
+않는다. checkpoint와 revocation marker는 필요한 경로에서 flush·fsync 뒤
+원자 교체된다.
 
 periodic writer가 저장한 직후 첫 Python 프로세스를 `os._exit`로 강제 종료하고
 두 번째 새 프로세스가 완료 턴, active follow-up, user ownership, 현재 system
 prompt와 reply target을 복구하는 owner-level E2E도 통과했다. 부분 STT와 이전
-system prompt는 복구되지 않았다.
+system prompt는 복구되지 않았다. 별도 guild reset E2E는 durable marker 직후와
+runtime clear 직후 두 crash 경계를 각각 강제 종료했고, 대상 guild는 비복구,
+다른 guild는 정상 복구됨을 확인했다.
 
 real-main smoke가 설정한 임시 artifact root를 continuity, autonomy,
 Minecraft lease도 따르도록 하드코딩 경로를 제거했다. 같은 임시 root에서 실제
 `main.py`를 기동·강제 종료·재기동하고 두 번의 restore와 repository 기본
 checkpoint 비변경을 확인하는 opt-in CI 시나리오도 추가했다.
 
-Docker local core와 Local I/O Bridge의 공식 readiness checker는 통과했다.
-다만 번들 Python에는 `discord`와 `torch`가 없어 새 real-main crash
-시나리오를 전체 Discord/모델 의존성과 함께 로컬에서 실행하지 못했다. lock
-의존성을 설치하는 Windows CI에서는 `EVELYN_RUN_REAL_MAIN_INTEGRATION=1`로
-실행되지만, 아직 이 브랜치의 원격 CI 결과는 없다.
+새 공식 Discord 이미지에서 guild reset/continuity/Discord command wiring과
+opt-in real-main crash/restart 집중 테스트 68개, `compileall`, `pip check`를
+통과했다. 전체 core 440개도 기능 assertion 실패는 0개였고, 이미지에 `git`
+실행 파일이 없어 과거 main signature를 조회하는 테스트 2개만 환경 오류였다.
 
-다음 조치: Windows CI에서 real-main crash/restart를 통과시킨 뒤, 공식 Discord
-이미지에서 합성 Discord 세션과 guild reset 비복구를 확인한다.
+남은 검증 공백은 실제 인증된 Discord 세션에서 관리자 초기화 명령 직후
+재시작까지 수행하는 live E2E와 이 브랜치의 원격 Windows CI 결과다. 실제
+Discord bot은 사용자 요청 없이 시작하지 않았다.
+
+다음 조치: 사용자가 Discord 검증을 시작할 때 별도 테스트 guild에서 완료 턴과
+active follow-up을 만든 뒤 관리자 초기화, 강제 재시작, 대상 guild 비복구와
+다른 guild 보존을 확인한다. 원격 브랜치를 올릴 때 Windows CI의 opt-in
+real-main 시나리오도 함께 통과시킨다.
 
 ## P1 — Python 모델 런타임 의존성 잔여 취약점
 
