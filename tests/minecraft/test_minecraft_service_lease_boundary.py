@@ -150,6 +150,72 @@ class MinecraftServiceLeaseBoundaryTests(unittest.TestCase):
             shutdown_source.index("exit_process"),
         )
 
+    def test_split_runtime_uses_bot_api_as_single_owner(self) -> None:
+        fast_api_path = CORE_ROOT / "fast_control_api.py"
+        fast_api_source = fast_api_path.read_text(encoding="utf-8")
+        create_app_source = function_source(
+            fast_api_path,
+            "create_app",
+        )
+        main_source = (REPO_ROOT / "main.py").read_text(
+            encoding="utf-8"
+        )
+        compose_source = (
+            REPO_ROOT / "docker-compose.fast-control.yml"
+        ).read_text(encoding="utf-8")
+        discord_section = compose_source.split(
+            "  discord_bot:\n",
+            1,
+        )[1]
+
+        self.assertIn(
+            '"/internal/minecraft-world-lease"',
+            create_app_source,
+        )
+        self.assertIn(
+            '"/internal/minecraft-world-lease/{action}"',
+            create_app_source,
+        )
+        self.assertIn(
+            "minecraft_world_lease_delegation_authorized",
+            fast_api_source,
+        )
+        self.assertIn(
+            "execute_minecraft_world_lease_delegation",
+            fast_api_source,
+        )
+        self.assertIn(
+            "MinecraftWorldLeaseRemote(",
+            main_source,
+        )
+        self.assertIn(
+            "if MINECRAFT_WORLD_LEASE_OWNER_URL",
+            main_source,
+        )
+        self.assertIn(
+            'MINECRAFT_WORLD_LEASE_OWNER_URL: "http://bot_api:8798"',
+            discord_section,
+        )
+
+    def test_internal_owner_api_has_no_arbitrary_execution_fields(
+        self,
+    ) -> None:
+        delegation_source = (
+            CORE_ROOT
+            / "minecraft_world_lease_delegation.py"
+        ).read_text(encoding="utf-8")
+
+        for action in ('"connect"', '"disconnect"', '"goal"'):
+            self.assertIn(action, delegation_source)
+        for forbidden in (
+            "subprocess",
+            "shell=True",
+            'payload.get("argv")',
+            'payload.get("command")',
+            'payload.get("cwd")',
+        ):
+            self.assertNotIn(forbidden, delegation_source)
+
 
 if __name__ == "__main__":
     unittest.main()

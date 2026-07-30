@@ -209,6 +209,7 @@ class MinecraftWorldLeaseTests(unittest.IsolatedAsyncioTestCase):
     async def test_process_restart_does_not_restore_lease(self) -> None:
         await self.connect()
         previous_token = self.owner.authorization_token
+        self.clock.value += self.owner.owner_claim_stale_sec + 1.0
         replacement = MinecraftWorldLeaseOwner(
             status_path=self.root / "status.json",
             events_dir=self.root / "events",
@@ -229,6 +230,116 @@ class MinecraftWorldLeaseTests(unittest.IsolatedAsyncioTestCase):
             replacement.authorization_token,
             previous_token,
         )
+
+    async def test_competing_owner_cannot_replace_live_claim(
+        self,
+    ) -> None:
+        original_secret = json.loads(
+            self.owner.secret_path.read_text(encoding="utf-8")
+        )
+        competitor = MinecraftWorldLeaseOwner(
+            status_path=self.root / "status.json",
+            events_dir=self.root / "events",
+            get_runtime_status=self.runtime.status,
+            enable_mode=self.runtime.enable,
+            disable_mode=self.runtime.disable,
+            set_goal=self.runtime.set_goal,
+            now=self.clock,
+            monotonic=self.clock,
+            log=lambda *_args: None,
+        )
+
+        status = competitor.initialize()
+
+        self.assertEqual(status["state"], "owner_conflict")
+        self.assertFalse(status["ownerClaimOwned"])
+        self.assertEqual(competitor.delegation_token(), "")
+        self.assertEqual(
+            json.loads(
+                self.owner.secret_path.read_text(encoding="utf-8")
+            ),
+            original_secret,
+        )
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "minecraft_world_lease_owner_conflict",
+        ):
+            await competitor.connect(
+                7,
+                issuer_ref="discord_user:456",
+                source="discord_command",
+            )
+
+    async def test_stale_claim_takeover_invalidates_old_owner(
+        self,
+    ) -> None:
+        await self.connect()
+        self.clock.value += self.owner.owner_claim_stale_sec + 1.0
+        replacement = MinecraftWorldLeaseOwner(
+            status_path=self.root / "status.json",
+            events_dir=self.root / "events",
+            get_runtime_status=self.runtime.status,
+            enable_mode=self.runtime.enable,
+            disable_mode=self.runtime.disable,
+            set_goal=self.runtime.set_goal,
+            now=self.clock,
+            monotonic=self.clock,
+            log=lambda *_args: None,
+        )
+
+        replacement_status = replacement.initialize()
+        old_status = self.owner.status()
+
+        self.assertTrue(replacement_status["ownerClaimOwned"])
+        self.assertEqual(
+            replacement_status["state"],
+            "authorization_required",
+        )
+        self.assertEqual(old_status["state"], "owner_conflict")
+        self.assertFalse(old_status["active"])
+        self.assertEqual(self.owner.delegation_token(), "")
+
+    async def test_clean_shutdown_releases_claim_and_token(
+        self,
+    ) -> None:
+        self.owner._watchdog_task = None
+
+        result = await self.owner.shutdown()
+
+        self.assertTrue(result["stopped"])
+        self.assertFalse(self.owner.owner_claim_path.exists())
+        self.assertFalse(self.owner.status()["ownerClaimOwned"])
+        self.assertEqual(self.owner.delegation_token(), "")
+
+    def test_unwritable_claim_fails_closed_without_secret(
+        self,
+    ) -> None:
+        blocking_parent = self.root / "not-a-directory"
+        blocking_parent.write_text("blocked", encoding="utf-8")
+        owner = MinecraftWorldLeaseOwner(
+            status_path=self.root / "other-status.json",
+            events_dir=self.root / "other-events",
+            owner_claim_path=blocking_parent / "claim.json",
+            get_runtime_status=self.runtime.status,
+            enable_mode=self.runtime.enable,
+            disable_mode=self.runtime.disable,
+            set_goal=self.runtime.set_goal,
+            now=self.clock,
+            monotonic=self.clock,
+            log=lambda *_args: None,
+        )
+
+        status = owner.initialize()
+
+        self.assertEqual(
+            status["state"],
+            "manual_intervention_required",
+        )
+        self.assertEqual(
+            status["lastErrorCode"],
+            "minecraft_world_lease_owner_claim_write_failed",
+        )
+        self.assertEqual(owner.delegation_token(), "")
 
     async def test_restart_reconcile_stops_stale_runner(self) -> None:
         self.runtime.statuses = [
@@ -309,6 +420,24 @@ class MinecraftWorldLeaseTests(unittest.IsolatedAsyncioTestCase):
             await self.owner.disconnect(8)
 
         self.assertTrue(self.owner.status()["active"])
+
+    async def test_connect_cannot_replace_other_guild_owner(self) -> None:
+        await self.connect(guild_id=7)
+        self.runtime.calls.clear()
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "minecraft_world_lease_owner_mismatch",
+        ):
+            await self.connect(guild_id=8)
+
+        self.assertEqual(
+            self.owner.status()["lease"]["guildId"],
+            7,
+        )
+        self.assertFalse(
+            any(call[0] == "disable" for call in self.runtime.calls)
+        )
 
     async def test_connect_failure_revokes_and_stops(self) -> None:
         self.runtime.enable_result = RuntimeError("start failed")

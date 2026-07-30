@@ -445,6 +445,12 @@ def detect_minecraft_runtime_command(text: str) -> str | None:
     normalized = clean_text(text).lower()
     if not normalized:
         return None
+    if re.match(
+        r"^/(?:minecraft|mc)\s+goal(?:\s+.+)?$",
+        normalized,
+        flags=re.IGNORECASE,
+    ):
+        return "goal"
     slash_commands = {
         "/minecraft start": "start",
         "/minecraft connect": "start",

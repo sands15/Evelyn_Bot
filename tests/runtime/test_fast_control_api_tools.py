@@ -170,15 +170,20 @@ class FastControlApiToolTests(unittest.TestCase):
 
     def test_scoped_component_shutdown_does_not_stop_the_evelyn_runtime(self) -> None:
         with patch.object(
-            fast_api,
-            "request_minecraft_control_service",
-            new=AsyncMock(return_value=(None, "offline")),
+            fast_api.MINECRAFT_WORLD_LEASE_OWNER,
+            "disconnect",
+            new=AsyncMock(
+                return_value={
+                    "running": False,
+                    "connected": False,
+                }
+            ),
         ):
             reply = asyncio.run(
                 fast_api.resolve_pre_llm_reply("마인크래프트 종료해", source="test")
             )
 
-        self.assertEqual(reply, "마인크래프트 서비스는 이미 종료돼 있어.")
+        self.assertEqual(reply, "마인크래프트 에이전트 연결을 중지했어.")
         self.assertFalse(fast_api.SHUTDOWN_REQUEST["requested"])
 
     def test_unknown_slash_command_never_falls_through_to_main_llm(self) -> None:
@@ -242,20 +247,22 @@ class FastControlApiToolTests(unittest.TestCase):
 
     def test_minecraft_disconnect_requires_service_result_before_success(self) -> None:
         with patch.object(
-            fast_api,
-            "request_minecraft_control_service",
-            new=AsyncMock(return_value=({"running": False}, "")),
-        ) as request:
+            fast_api.MINECRAFT_WORLD_LEASE_OWNER,
+            "disconnect",
+            new=AsyncMock(return_value={"running": False}),
+        ) as disconnect:
             reply = asyncio.run(fast_api.execute_minecraft_control_command("disconnect"))
 
-        request.assert_awaited_once_with("POST", "/stop")
+        disconnect.assert_awaited_once_with(0)
         self.assertEqual(reply, "마인크래프트 에이전트 연결을 중지했어.")
 
     def test_minecraft_http_failure_is_not_reported_as_already_stopped(self) -> None:
         with patch.object(
-            fast_api,
-            "request_minecraft_control_service",
-            new=AsyncMock(return_value=(None, "http_500")),
+            fast_api.MINECRAFT_WORLD_LEASE_OWNER,
+            "disconnect",
+            new=AsyncMock(
+                side_effect=RuntimeError("minecraft_stop_unverified")
+            ),
         ):
             reply = asyncio.run(fast_api.execute_minecraft_control_command("disconnect"))
 
@@ -273,15 +280,32 @@ class FastControlApiToolTests(unittest.TestCase):
         )
         self.assertFalse(fast_api.minecraft_service_is_offline("TimeoutError()"))
 
-    def test_fast_control_minecraft_start_requires_lease_owner(self) -> None:
-        reply = asyncio.run(
-            fast_api.resolve_pre_llm_reply(
-                "마인크래프트 시작해",
-                source="control_page",
-            )
+    def test_fast_control_minecraft_start_grants_central_lease(self) -> None:
+        connect = AsyncMock(
+            return_value={
+                "connected": True,
+                "outcome_verified": True,
+                "outcome_code": "minecraft_connected",
+            }
         )
+        with patch.object(
+            fast_api.MINECRAFT_WORLD_LEASE_OWNER,
+            "connect",
+            new=connect,
+        ):
+            reply = asyncio.run(
+                fast_api.resolve_pre_llm_reply(
+                    "마인크래프트 시작해",
+                    source="control_page",
+                )
+            )
 
-        self.assertIn("먼저 연결해야", reply)
+        self.assertIn("lease를 발급했고", reply)
+        connect.assert_awaited_once_with(
+            0,
+            issuer_ref="fast_control:control_page",
+            source="control_page",
+        )
         fast_api.register_builtin_background_action_handlers()
         self.assertEqual(fast_api.BACKGROUND_ACTION_HANDLERS, [])
 
@@ -295,6 +319,58 @@ class FastControlApiToolTests(unittest.TestCase):
                     "control_page",
                 )
             )
+
+    def test_fast_control_goal_uses_existing_local_lease(self) -> None:
+        set_goal = AsyncMock(
+            return_value={
+                "goal": "diamond",
+                "outcome_verified": True,
+                "outcome_code": "minecraft_goal_confirmed",
+            }
+        )
+        with (
+            patch.object(
+                fast_api.MINECRAFT_WORLD_LEASE_OWNER,
+                "status",
+                return_value={
+                    "active": True,
+                    "lease": {"guildId": 0},
+                },
+            ),
+            patch.object(
+                fast_api.MINECRAFT_WORLD_LEASE_OWNER,
+                "set_goal",
+                new=set_goal,
+            ),
+        ):
+            reply = asyncio.run(
+                fast_api.resolve_pre_llm_reply(
+                    "/minecraft goal diamond",
+                    source="control_page",
+                )
+            )
+
+        self.assertIn("목표 변경을 실제 runtime 응답으로 확인", reply)
+        set_goal.assert_awaited_once_with(0, "diamond")
+
+    def test_fast_control_cannot_replace_another_owner(self) -> None:
+        with patch.object(
+            fast_api.MINECRAFT_WORLD_LEASE_OWNER,
+            "connect",
+            new=AsyncMock(
+                side_effect=RuntimeError(
+                    "minecraft_world_lease_owner_mismatch"
+                )
+            ),
+        ):
+            reply = asyncio.run(
+                fast_api.resolve_pre_llm_reply(
+                    "마인크래프트 시작해",
+                    source="control_page",
+                )
+            )
+
+        self.assertIn("다른 대화 공간", reply)
 
     def test_local_bridge_snapshot_marks_stale_ready_false(self) -> None:
         fast_api.LOCAL_BRIDGE_STATUS.update(

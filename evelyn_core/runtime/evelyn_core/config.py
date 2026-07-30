@@ -183,6 +183,10 @@ VOYAGER_PYTHON_EXE = os.getenv("VOYAGER_PYTHON_EXE", str(REPO_ROOT / ".venv-voya
 MINECRAFT_AUTONOMY_SERVICE_HOST = os.getenv("MINECRAFT_AUTONOMY_SERVICE_HOST", "127.0.0.1")
 # Voyager 기반 마인크래프트 자율 서비스 포트.
 MINECRAFT_AUTONOMY_SERVICE_PORT = int(os.getenv("MINECRAFT_AUTONOMY_SERVICE_PORT", "8765"))
+MINECRAFT_WORLD_LEASE_OWNER_URL = os.getenv(
+    "MINECRAFT_WORLD_LEASE_OWNER_URL",
+    "",
+).strip()
 # Codex gateway 전용 Python 실행 파일 경로. 기본적으로 Voyager 전용 venv를 재사용.
 VOYAGER_CODEX_GATEWAY_PYTHON_EXE = os.getenv("VOYAGER_CODEX_GATEWAY_PYTHON_EXE", VOYAGER_PYTHON_EXE)
 # Codex gateway 액션 생성 엔드포인트.

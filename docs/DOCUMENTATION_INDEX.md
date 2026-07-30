@@ -55,8 +55,8 @@ implemented behavior.
     Minecraft 직접 제어의 fail-closed 성공 판정과 감사 journal 계약.
 
 - `docs/MINECRAFT_WORLD_ACTION_LEASE.md`
-  - Minecraft runner의 단일 process-owned lease, 서비스 proof, heartbeat
-    만료 정지, 재시작 비복구, 우회 경로 차단과 잔여 Docker 경계를 정의한다.
+  - Minecraft runner의 Bot API 단일 lease owner, 서비스 proof, heartbeat,
+    인증된 Discord 위임, 경쟁 owner 차단, 재시작 비복구 계약을 정의한다.
 
 - `docs/RUNTIME_ERROR_OBSERVABILITY_CONTRACT.md`
   - Runtime owner별 고정 오류 코드·카운터와 Control Page 공개 privacy 계약.

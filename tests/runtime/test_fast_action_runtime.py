@@ -65,6 +65,7 @@ class FastActionRuntimeTests(unittest.TestCase):
         self.assertEqual(detect_minecraft_runtime_command("마크 서버에 접속해줘"), "start")
         self.assertEqual(detect_minecraft_runtime_command("마인크래프트에서 나무 캐줘"), "goal")
         self.assertEqual(detect_minecraft_runtime_command("/minecraft connect"), "start")
+        self.assertEqual(detect_minecraft_runtime_command("/minecraft goal diamond"), "goal")
         self.assertIsNone(detect_minecraft_runtime_command("마인크래프트 상태 알려줘"))
         self.assertIsNone(detect_minecraft_runtime_command("마인크래프트 종료해"))
         self.assertIsNone(detect_minecraft_runtime_command("마인크래프트 좋아해?"))

@@ -48,6 +48,20 @@ from .fast_tool_planner import (
     plan_fast_tool_request,
 )
 from .paths import get_runtime_artifacts_root
+from .minecraft_mode_composition import (
+    MinecraftModeComposition,
+    MinecraftModeCompositionDeps,
+)
+from .minecraft_world_lease import MinecraftWorldLeaseOwner
+from .minecraft_world_lease_delegation import (
+    MINECRAFT_WORLD_LEASE_DELEGATION_TOKEN_HEADER,
+    execute_minecraft_world_lease_delegation,
+    minecraft_world_lease_delegation_authorized,
+    minecraft_world_lease_delegation_error_code,
+)
+from .minecraft_world_lease_http_runtime import (
+    MinecraftWorldLeaseHttpRuntime,
+)
 from .query_intents import answer_current_datetime_query
 from .runtime_health import collect_runtime_health, default_probe_runner
 from .runtime_services import HealthProbeSpec, ServiceSpec, load_service_manifest
@@ -61,6 +75,11 @@ from .text import (
 HOST = os.getenv("CONTROL_PAGE_HOST", "0.0.0.0")
 PORT = int(os.getenv("CONTROL_PAGE_PORT", os.getenv("CONTROL_PAGE_BOT_API_PORT", "8798")))
 PUBLIC_CONTROL_PORT = int(os.getenv("CONTROL_PAGE_PUBLIC_PORT", "8799"))
+MINECRAFT_WORLD_LEASE_OWNER_ENABLED = (
+    os.getenv("MINECRAFT_WORLD_LEASE_OWNER_ENABLED", "").strip().lower()
+    in {"1", "true", "yes", "on"}
+    or os.getenv("EVELYN_FAST_BOOT", "").strip() == "1"
+)
 LLM_SERVER_URL = os.getenv("LLM_SERVER_URL", "http://127.0.0.1:9820/v1/chat/completions")
 MODEL_NAME = os.getenv("LLM_MODEL_NAME", "google-gemma-4-12B-it-IQ4_XS.gguf")
 MAIN_LLM_STOP_TOKENS = tuple(
@@ -469,12 +488,20 @@ async def wait_for_local_bridge_minecraft_command(
 async def request_minecraft_control_service(
     method: str,
     path: str,
+    payload: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any] | None, str]:
     url = f"{MINECRAFT_AUTONOMY_SERVICE_BASE}{path}"
     timeout = ClientTimeout(total=MINECRAFT_CONTROL_TIMEOUT_SEC)
     try:
         async with ClientSession(timeout=timeout) as session:
-            async with session.request(method.upper(), url) as response:
+            request_kwargs: dict[str, Any] = {}
+            if payload is not None:
+                request_kwargs["json"] = payload
+            async with session.request(
+                method.upper(),
+                url,
+                **request_kwargs,
+            ) as response:
                 raw = await response.text()
                 try:
                     payload = json.loads(raw or "{}")
@@ -515,6 +542,61 @@ def minecraft_service_is_offline(error: str) -> bool:
     return command_revision <= 0 or command_state in {"", "idle", "failed"}
 
 
+async def _request_minecraft_world_runtime(
+    method: str,
+    path: str,
+    payload: dict[str, Any] | None,
+) -> tuple[dict[str, Any] | None, str]:
+    return await request_minecraft_control_service(
+        method,
+        path,
+        payload,
+    )
+
+
+def _merge_minecraft_world_status(
+    status: Any,
+    observed: Any,
+) -> dict[str, Any]:
+    merged = dict(status) if isinstance(status, dict) else {}
+    if isinstance(observed, dict):
+        merged.update(observed)
+    return merged
+
+
+MINECRAFT_WORLD_HTTP_RUNTIME = MinecraftWorldLeaseHttpRuntime(
+    request=_request_minecraft_world_runtime,
+    is_offline_error=minecraft_service_is_offline,
+)
+MINECRAFT_WORLD_MODE = MinecraftModeComposition(
+    MinecraftModeCompositionDeps(
+        get_client=lambda: MINECRAFT_WORLD_HTTP_RUNTIME,
+        merge_status=_merge_minecraft_world_status,
+        clean_text=clean_text,
+        monotonic=time.monotonic,
+        sleep=asyncio.sleep,
+    )
+)
+MINECRAFT_WORLD_LEASE_OWNER = MinecraftWorldLeaseOwner(
+    status_path=(
+        get_runtime_artifacts_root()
+        / "minecraft_world_lease"
+        / "status.json"
+    ),
+    events_dir=(
+        get_runtime_artifacts_root()
+        / "minecraft_world_lease"
+        / "events"
+    ),
+    get_runtime_status=MINECRAFT_WORLD_HTTP_RUNTIME.status,
+    enable_mode=MINECRAFT_WORLD_MODE.enable_minecraft_mode,
+    disable_mode=MINECRAFT_WORLD_MODE.disable_minecraft_mode,
+    set_goal=MINECRAFT_WORLD_HTTP_RUNTIME.set_goal,
+    create_task=asyncio.create_task,
+    log=print,
+)
+
+
 def minecraft_control_error_reply(subject: str, error: str) -> str:
     if minecraft_service_is_offline(error):
         return minecraft_standby_reply(subject)
@@ -533,8 +615,16 @@ def minecraft_standby_reply(subject: str = "상태") -> str:
 def render_minecraft_status(payload: dict[str, Any], *, detailed: bool = False) -> str:
     running = bool(payload.get("running") or payload.get("loop_running"))
     connected = bool(payload.get("connected") or payload.get("minecraft_connected"))
+    lease_status = (
+        payload.get("world_lease")
+        if isinstance(payload.get("world_lease"), dict)
+        else {}
+    )
     if not running:
-        return minecraft_standby_reply()
+        reply = minecraft_standby_reply()
+        if lease_status.get("active"):
+            reply += " 세계 행동 lease는 승인됐지만 runner는 실행 중이 아니야."
+        return reply
     state = clean_text(payload.get("connection_state")) or ("connected" if connected else "starting")
     goal = clean_text(payload.get("goal") or payload.get("current_task"))
     stage = clean_text(payload.get("display_stage") or payload.get("stage"))
@@ -552,6 +642,11 @@ def render_minecraft_status(payload: dict[str, Any], *, detailed: bool = False) 
         parts.append(f"차단된 명령은 {blocked_count}건이야.")
     if last_error:
         parts.append(f"최근 오류: {last_error}")
+    if lease_status:
+        parts.append(
+            "세계 행동 lease는 "
+            f"{lease_status.get('state') or 'unknown'} 상태야."
+        )
     return clean_text(" ".join(parts))
 
 
@@ -574,13 +669,34 @@ def render_minecraft_inventory(payload: dict[str, Any]) -> str:
     return "현재 인벤토리: " + ", ".join(items) + "."
 
 
-async def execute_minecraft_control_command(action: str) -> str:
+async def execute_minecraft_control_command(
+    action: str,
+    *,
+    guild_id: int = 0,
+) -> str:
     if action == "disconnect":
-        payload, error = await request_minecraft_control_service("POST", "/stop")
-        if payload is None:
-            return minecraft_control_error_reply("disconnect", error)
+        try:
+            payload = await MINECRAFT_WORLD_LEASE_OWNER.disconnect(
+                guild_id
+            )
+        except RuntimeError as exc:
+            code = minecraft_world_lease_delegation_error_code(
+                exc
+            )
+            if code == "minecraft_world_lease_owner_mismatch":
+                return (
+                    "다른 대화 공간이 현재 Minecraft lease를 소유하고 "
+                    "있어서 여기서는 연결을 종료할 수 없어."
+                )
+            return (
+                "마인크래프트 연결 종료 검증에 실패했어. "
+                f"오류 코드: {code}"
+            )
         if payload.get("running") or payload.get("loop_running"):
-            return "마인크래프트 중지 요청을 보냈지만 에이전트가 아직 실행 중이야."
+            return (
+                "마인크래프트 중지 요청 뒤에도 runner가 실행 중이라 "
+                "성공으로 처리하지 않았어."
+            )
         return "마인크래프트 에이전트 연결을 중지했어."
 
     if action == "inventory":
@@ -592,7 +708,107 @@ async def execute_minecraft_control_command(action: str) -> str:
     payload, error = await request_minecraft_control_service("GET", "/status")
     if payload is None:
         return minecraft_control_error_reply("상태", error)
+    payload["world_lease"] = MINECRAFT_WORLD_LEASE_OWNER.status()
     return render_minecraft_status(payload, detailed=action in {"stats", "autonomy_status"})
+
+
+def minecraft_goal_from_command(text: str) -> str:
+    value = clean_text(text)
+    match = re.match(
+        r"^/(?:minecraft|mc)\s+goal\s+(.+)$",
+        value,
+        flags=re.IGNORECASE,
+    )
+    if match:
+        return clean_text(match.group(1))
+    return value
+
+
+def fast_control_minecraft_issuer(source: str) -> str:
+    safe_source = re.sub(
+        r"[^A-Za-z0-9_.-]+",
+        "_",
+        clean_text(source),
+    ).strip("_")
+    return f"fast_control:{safe_source or 'local'}"
+
+
+async def execute_fast_control_minecraft_runtime_command(
+    text: str,
+    *,
+    source: str,
+    guild_id: int = 0,
+) -> str:
+    action = detect_minecraft_runtime_command(text)
+    if action not in {"start", "goal"}:
+        raise RuntimeError("not_a_minecraft_runtime_command")
+    try:
+        if action == "goal":
+            goal = minecraft_goal_from_command(text)
+            status = MINECRAFT_WORLD_LEASE_OWNER.status()
+            lease = (
+                status.get("lease")
+                if isinstance(status.get("lease"), dict)
+                else {}
+            )
+            if (
+                status.get("active")
+                and lease.get("guildId") == guild_id
+            ):
+                result = await MINECRAFT_WORLD_LEASE_OWNER.set_goal(
+                    guild_id,
+                    goal,
+                )
+                if result.get("outcome_verified") is not True:
+                    raise RuntimeError("minecraft_goal_unverified")
+                return "Minecraft 목표 변경을 실제 runtime 응답으로 확인했어."
+            result = await MINECRAFT_WORLD_LEASE_OWNER.connect(
+                guild_id,
+                issuer_ref=fast_control_minecraft_issuer(
+                    source
+                ),
+                source="control_page",
+                goal=goal,
+            )
+        else:
+            result = await MINECRAFT_WORLD_LEASE_OWNER.connect(
+                guild_id,
+                issuer_ref=fast_control_minecraft_issuer(
+                    source
+                ),
+                source="control_page",
+            )
+    except RuntimeError as exc:
+        code = minecraft_world_lease_delegation_error_code(exc)
+        if code == "minecraft_service_unavailable":
+            return (
+                "Minecraft 실행 서비스가 아직 올라오지 않았어. "
+                "Voyager 프로필을 시작한 뒤 다시 승인해줘."
+            )
+        if code == "minecraft_world_lease_owner_mismatch":
+            return (
+                "다른 대화 공간이 현재 Minecraft lease를 소유하고 있어. "
+                "그 공간에서 먼저 연결을 종료해야 해."
+            )
+        return (
+            "Minecraft 세계 행동을 시작하지 못했어. "
+            f"오류 코드: {code}"
+        )
+    if (
+        result.get("outcome_verified") is not True
+        or not (
+            result.get("connected")
+            or result.get("minecraft_connected")
+        )
+    ):
+        return (
+            "Minecraft 연결 결과를 검증하지 못해서 시작 성공으로 "
+            "처리하지 않았어."
+        )
+    return (
+        "Minecraft world-action lease를 발급했고 게임 연결까지 "
+        "확인했어."
+    )
 
 
 async def execute_local_bridge_minecraft_command(command: str, source: str) -> str:
@@ -1337,9 +1553,9 @@ async def resolve_pre_llm_reply(text: str, *, source: str) -> str | None:
         return "그 음성 명령은 현재 로컬 Fast Control에서 지원하지 않아. /voice status와 /mic 명령을 사용해줘."
 
     if detect_minecraft_runtime_command(text) in {"start", "goal"}:
-        return (
-            "마인크래프트 세계 행동은 승인된 Control Page 도구나 "
-            "Discord /minecraft connect 명령으로 먼저 연결해야 해."
+        return await execute_fast_control_minecraft_runtime_command(
+            text,
+            source=source,
         )
     if normalized.startswith("/"):
         return f"지원하지 않는 명령이야: {normalized}. /help에서 현재 사용 가능한 명령을 확인해줘."
@@ -1520,8 +1736,100 @@ async def fast_control_probe_runner(service: ServiceSpec, check: HealthProbeSpec
     return await default_probe_runner(service, check)
 
 
+async def minecraft_world_lease_owner_context(
+    _: web.Application,
+):
+    MINECRAFT_WORLD_LEASE_OWNER.initialize()
+    await MINECRAFT_WORLD_LEASE_OWNER.ensure_started()
+    try:
+        yield
+    finally:
+        await MINECRAFT_WORLD_LEASE_OWNER.shutdown(
+            reason="shutdown"
+        )
+
+
 async def health_handler(_: web.Request) -> web.StreamResponse:
-    return json_response({"ok": True, "role": "fast-control-bot-api", "port": PORT})
+    return json_response(
+        {
+            "ok": True,
+            "role": "fast-control-bot-api",
+            "port": PORT,
+            "minecraftWorldLease": (
+                MINECRAFT_WORLD_LEASE_OWNER.status()
+            ),
+        }
+    )
+
+
+async def minecraft_world_lease_status_handler(
+    _: web.Request,
+) -> web.StreamResponse:
+    return json_response(
+        {
+            "ok": True,
+            "leaseStatus": MINECRAFT_WORLD_LEASE_OWNER.status(),
+        }
+    )
+
+
+async def minecraft_world_lease_mutation_handler(
+    request: web.Request,
+) -> web.StreamResponse:
+    presented_token = request.headers.get(
+        MINECRAFT_WORLD_LEASE_DELEGATION_TOKEN_HEADER,
+        "",
+    )
+    expected_token = (
+        MINECRAFT_WORLD_LEASE_OWNER.delegation_token()
+    )
+    if not minecraft_world_lease_delegation_authorized(
+        expected_token=expected_token,
+        presented_token=presented_token,
+    ):
+        return json_response(
+            {
+                "ok": False,
+                "error": (
+                    "minecraft_world_lease_delegation_unauthorized"
+                ),
+            },
+            status=401,
+        )
+    try:
+        payload = await request.json()
+    except Exception:
+        return json_response(
+            {
+                "ok": False,
+                "error": "minecraft_world_payload_invalid",
+            },
+            status=400,
+        )
+    action = clean_text(
+        request.match_info.get("action")
+    ).lower()
+    try:
+        response = (
+            await execute_minecraft_world_lease_delegation(
+                MINECRAFT_WORLD_LEASE_OWNER,
+                action=action,
+                payload=payload,
+            )
+        )
+    except Exception as exc:
+        error = minecraft_world_lease_delegation_error_code(
+            exc
+        )
+        return json_response(
+            {"ok": False, "error": error},
+            status=(
+                503
+                if error == "minecraft_service_unavailable"
+                else 409
+            ),
+        )
+    return json_response(response)
 
 
 async def state_handler(_: web.Request) -> web.StreamResponse:
@@ -1953,10 +2261,30 @@ async def shutdown_handler(request: web.Request) -> web.StreamResponse:
     return json_response(request_local_shutdown(source=source, reason=reason))
 
 
-def create_app() -> web.Application:
+def create_app(
+    *,
+    enable_minecraft_world_lease_owner: bool | None = None,
+) -> web.Application:
     register_builtin_background_action_handlers()
     app = web.Application(middlewares=[reject_browser_origin_middleware])
+    owner_enabled = (
+        MINECRAFT_WORLD_LEASE_OWNER_ENABLED
+        if enable_minecraft_world_lease_owner is None
+        else bool(enable_minecraft_world_lease_owner)
+    )
+    if owner_enabled:
+        app.cleanup_ctx.append(
+            minecraft_world_lease_owner_context
+        )
     app.router.add_get("/health", health_handler)
+    app.router.add_get(
+        "/internal/minecraft-world-lease",
+        minecraft_world_lease_status_handler,
+    )
+    app.router.add_post(
+        "/internal/minecraft-world-lease/{action}",
+        minecraft_world_lease_mutation_handler,
+    )
     app.router.add_get("/api/control-page/state", state_handler)
     app.router.add_post("/api/control-page/chat", chat_handler)
     app.router.add_post("/api/control-page/chat-stream", chat_stream_handler)

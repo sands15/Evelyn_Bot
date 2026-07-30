@@ -79,6 +79,7 @@ from evelyn_core.minecraft_runtime_snapshot import (
 from evelyn_core.minecraft_live_state_runtime import MinecraftLiveObservationRuntimeDeps, observe_live_minecraft_state_from_runtime
 from evelyn_core.minecraft_mode_composition import MinecraftModeComposition, MinecraftModeCompositionDeps
 from evelyn_core.minecraft_world_lease import MinecraftWorldLeaseOwner
+from evelyn_core.minecraft_world_lease_remote import MinecraftWorldLeaseRemote
 from evelyn_core.question_shaping import enforce_question_limits
 from evelyn_core.proactive_questions import evaluate_proactive_question_gate, select_question_to_ask
 from evelyn_core.cognitive_policy_state import (
@@ -1623,25 +1624,24 @@ minecraft_mode_composition = MinecraftModeComposition(
 )
 
 wait_for_minecraft_ready = minecraft_mode_composition.wait_for_minecraft_ready
-minecraft_world_lease_owner = MinecraftWorldLeaseOwner(
-    status_path=(
-        PROJECT_ROOT
-        / "runtime_artifacts"
-        / "minecraft_world_lease"
-        / "status.json"
-    ),
-    events_dir=(
-        PROJECT_ROOT
-        / "runtime_artifacts"
-        / "minecraft_world_lease"
-        / "events"
-    ),
+local_minecraft_world_lease_owner = MinecraftWorldLeaseOwner(
+    status_path=PROJECT_ROOT / "runtime_artifacts" / "minecraft_world_lease" / "status.json",
+    events_dir=PROJECT_ROOT / "runtime_artifacts" / "minecraft_world_lease" / "events",
     get_runtime_status=lambda: get_minecraft_client().status(),
     enable_mode=minecraft_mode_composition.enable_minecraft_mode,
     disable_mode=minecraft_mode_composition.disable_minecraft_mode,
     set_goal=lambda goal, **kwargs: get_minecraft_client().set_goal(goal, **kwargs),
     create_task=asyncio.create_task,
     log=print,
+)
+minecraft_world_lease_owner = (
+    MinecraftWorldLeaseRemote(
+        base_url=MINECRAFT_WORLD_LEASE_OWNER_URL,
+        secret_path=PROJECT_ROOT / "runtime_artifacts" / "secrets" / "minecraft_world_lease.json",
+        create_task=asyncio.create_task,
+    )
+    if MINECRAFT_WORLD_LEASE_OWNER_URL
+    else local_minecraft_world_lease_owner
 )
 enable_minecraft_mode = minecraft_world_lease_owner.connect
 disable_minecraft_mode = minecraft_world_lease_owner.disconnect

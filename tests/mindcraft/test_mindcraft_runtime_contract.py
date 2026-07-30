@@ -49,7 +49,7 @@ class MindcraftRuntimeContractTests(unittest.TestCase):
 
         with patch.object(
             mindcraft_service,
-            "load_valid_world_lease",
+            "load_guarded_world_lease",
             return_value=(
                 {},
                 "minecraft_world_authorization_required",
@@ -72,7 +72,7 @@ class MindcraftRuntimeContractTests(unittest.TestCase):
 
         with patch.object(
             mindcraft_service,
-            "load_valid_world_lease",
+            "load_guarded_world_lease",
             return_value=(
                 {},
                 "minecraft_world_lease_heartbeat_stale",
@@ -91,7 +91,7 @@ class MindcraftRuntimeContractTests(unittest.TestCase):
 
         with patch.object(
             mindcraft_service,
-            "load_valid_world_lease",
+            "load_guarded_world_lease",
             return_value=({"active": True}, ""),
         ):
             self.assertTrue(runtime.reconcile_world_lease())
@@ -139,7 +139,7 @@ class MindcraftRuntimeContractTests(unittest.TestCase):
                 patch.object(mindcraft_service, "GOAL_STATE_PATH", goal_path),
                 patch.object(
                     mindcraft_service,
-                    "load_valid_world_lease",
+                    "load_guarded_world_lease",
                     return_value=({"active": True}, ""),
                 ),
             ):

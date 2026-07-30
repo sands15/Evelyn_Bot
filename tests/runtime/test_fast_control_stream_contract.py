@@ -5,7 +5,7 @@ import json
 import sys
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from aiohttp.test_utils import TestClient, TestServer
 
@@ -55,6 +55,113 @@ class FastControlStreamContractTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await client.close()
         return [json.loads(line) for line in body.splitlines() if line.strip()]
+
+    async def test_minecraft_owner_mutation_requires_shared_token(
+        self,
+    ) -> None:
+        class Owner:
+            def __init__(self) -> None:
+                self.calls = []
+
+            def delegation_token(self):
+                return "owner-secret"
+
+            def status(self):
+                return {
+                    "state": "authorization_required",
+                    "active": False,
+                    "lease": None,
+                }
+
+            async def connect(self, guild_id, **kwargs):
+                self.calls.append((guild_id, kwargs))
+                return {
+                    "connected": True,
+                    "outcome_verified": True,
+                }
+
+        owner = Owner()
+        with patch.object(
+            fast_api,
+            "MINECRAFT_WORLD_LEASE_OWNER",
+            owner,
+        ):
+            client = TestClient(
+                TestServer(
+                    fast_api.create_app(
+                        enable_minecraft_world_lease_owner=False
+                    )
+                )
+            )
+            await client.start_server()
+            try:
+                unauthorized = await client.post(
+                    "/internal/minecraft-world-lease/connect",
+                    json={
+                        "guildId": 7,
+                        "issuerRef": "discord_user:1",
+                        "source": "discord_command",
+                    },
+                )
+                authorized = await client.post(
+                    "/internal/minecraft-world-lease/connect",
+                    headers={
+                        fast_api.MINECRAFT_WORLD_LEASE_DELEGATION_TOKEN_HEADER:
+                        "owner-secret"
+                    },
+                    json={
+                        "guildId": 7,
+                        "issuerRef": "discord_user:1",
+                        "source": "discord_command",
+                    },
+                )
+                authorized_payload = await authorized.json()
+            finally:
+                await client.close()
+
+        self.assertEqual(unauthorized.status, 401)
+        self.assertEqual(authorized.status, 200)
+        self.assertTrue(authorized_payload["ok"])
+        self.assertNotIn(
+            "owner-secret",
+            json.dumps(authorized_payload),
+        )
+        self.assertEqual(len(owner.calls), 1)
+
+    async def test_minecraft_owner_api_rejects_browser_origin(
+        self,
+    ) -> None:
+        client = TestClient(
+            TestServer(
+                fast_api.create_app(
+                    enable_minecraft_world_lease_owner=False
+                )
+            )
+        )
+        await client.start_server()
+        try:
+            response = await client.post(
+                "/internal/minecraft-world-lease/connect",
+                headers={
+                    "Origin": "http://127.0.0.1:8799",
+                    fast_api.MINECRAFT_WORLD_LEASE_DELEGATION_TOKEN_HEADER:
+                    "any-value",
+                },
+                json={
+                    "guildId": 0,
+                    "issuerRef": "browser",
+                    "source": "control_page",
+                },
+            )
+            payload = await response.json()
+        finally:
+            await client.close()
+
+        self.assertEqual(response.status, 403)
+        self.assertEqual(
+            payload["error"],
+            "browser_origin_not_allowed",
+        )
 
     async def test_stream_suppresses_unbacked_progress_sentences(self) -> None:
         original_iter = fast_api.iter_main_llm_deltas
@@ -263,36 +370,37 @@ class FastControlStreamContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(done["taskId"], "fast-action-1")
         self.assertIn("로컬 STT 모델", captured["query"])
 
-    async def test_minecraft_execution_command_lazy_starts_and_publishes_followup(self) -> None:
-        original_runner = fast_api.execute_local_bridge_minecraft_command
-
-        async def fake_runner(command: str, source: str) -> str:
-            self.assertEqual(command, "마인크래프트에서 나무 캐줘")
-            self.assertEqual(source, "local_bridge")
-            await asyncio.sleep(0)
-            return "마인크래프트 모델과 서비스를 준비했고, 게임 접속과 명령 전달까지 확인했어."
-
-        fast_api.execute_local_bridge_minecraft_command = fake_runner
-        try:
+    async def test_minecraft_execution_command_uses_central_lease_owner(
+        self,
+    ) -> None:
+        connect = AsyncMock(
+            return_value={
+                "connected": True,
+                "outcome_verified": True,
+                "outcome_code": "minecraft_connected",
+            }
+        )
+        with patch.object(
+            fast_api.MINECRAFT_WORLD_LEASE_OWNER,
+            "connect",
+            new=connect,
+        ):
             events = await self.post_stream("마인크래프트에서 나무 캐줘")
-            pending = list(fast_api.BACKGROUND_ACTION_TASKS)
-            if pending:
-                await asyncio.gather(*pending)
-        finally:
-            fast_api.execute_local_bridge_minecraft_command = original_runner
 
         sentence = next(event for event in events if event["type"] == "sentence")
         done = next(event for event in events if event["type"] == "done")
         self.assertEqual(
             sentence["text"],
-            "마인크래프트 쪽을 준비할게. 끝나면 바로 알려줄게.",
+            "Minecraft world-action lease를 발급했고 게임 연결까지 확인했어.",
         )
-        self.assertEqual(done["taskId"], "fast-action-1")
-        self.assertEqual(done["taskStatus"], "running")
-        task = fast_api.ACTION_COORDINATOR.get("fast-action-1")
-        self.assertIsNotNone(task)
-        self.assertEqual(task.status, "completed")
-        self.assertIn("명령 전달까지 확인했어", fast_api.CHAT_MESSAGES[-1]["text"])
+        self.assertEqual(done["reply"], sentence["text"])
+        self.assertIsNone(done["taskId"])
+        connect.assert_awaited_once_with(
+            0,
+            issuer_ref="fast_control:local_bridge",
+            source="control_page",
+            goal="마인크래프트에서 나무 캐줘",
+        )
 
 
 if __name__ == "__main__":

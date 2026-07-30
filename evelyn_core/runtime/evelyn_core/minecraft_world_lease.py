@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import os
 import secrets
 import threading
 import time
@@ -27,10 +28,14 @@ from .runtime_artifact_io import atomic_json_write
 
 
 MINECRAFT_WORLD_LEASE_EVENT_SCHEMA = "minecraft_world_lease.event.v1"
+MINECRAFT_WORLD_LEASE_OWNER_CLAIM_SCHEMA = (
+    "minecraft_world_lease.owner_claim.v1"
+)
 DEFAULT_WORLD_LEASE_TTL_SEC = 60 * 60.0
 MAX_WORLD_LEASE_TTL_SEC = 4 * 60 * 60.0
 MIN_WORLD_LEASE_TTL_SEC = 60.0
 DEFAULT_WATCHDOG_INTERVAL_SEC = 5.0
+MIN_OWNER_CLAIM_STALE_SEC = 15.0
 STOP_RETRY_WINDOW_SEC = 10 * 60.0
 STOP_RETRY_LIMIT = 3
 
@@ -150,6 +155,7 @@ class MinecraftWorldLeaseOwner:
         status_path: Path,
         events_dir: Path,
         secret_path: Path | None = None,
+        owner_claim_path: Path | None = None,
         get_runtime_status: Callable[
             [],
             Awaitable[dict[str, Any]],
@@ -180,6 +186,11 @@ class MinecraftWorldLeaseOwner:
             / "secrets"
             / "minecraft_world_lease.json"
         )
+        self.owner_claim_path = Path(
+            owner_claim_path
+            or self.status_path.parent
+            / "owner_claim.json"
+        )
         self.get_runtime_status = get_runtime_status
         self.enable_mode = enable_mode
         self.disable_mode = disable_mode
@@ -209,10 +220,15 @@ class MinecraftWorldLeaseOwner:
                 DEFAULT_WATCHDOG_INTERVAL_SEC,
             ),
         )
+        self.owner_claim_stale_sec = max(
+            MIN_OWNER_CLAIM_STALE_SEC,
+            self.watchdog_interval_sec * 3.0,
+        )
         self.log = log
         self.process_nonce = secrets.token_hex(8)
         self.authorization_token = secrets.token_urlsafe(32)
         self._secret_ready = False
+        self._owner_claim_owned = False
         self._lease: MinecraftWorldLease | None = None
         self._state = "not_initialized"
         self._last_event_at: float | None = None
@@ -329,9 +345,11 @@ class MinecraftWorldLeaseOwner:
             "manualInterventionRequired": (
                 self._state == "manual_intervention_required"
             ),
+            "ownerClaimOwned": self._owner_claim_owned,
             "policy": {
                 "restoredAfterRestart": False,
                 "singleWorldOwner": True,
+                "ownerClaimStaleSec": self.owner_claim_stale_sec,
                 "defaultTtlSec": self.default_ttl_sec,
                 "maxTtlSec": self.max_ttl_sec,
                 "watchdogIntervalSec": self.watchdog_interval_sec,
@@ -345,6 +363,8 @@ class MinecraftWorldLeaseOwner:
         }
 
     def _write_status(self) -> None:
+        if not self._owner_claim_matches():
+            return
         try:
             atomic_json_write(
                 self.status_path,
@@ -352,6 +372,139 @@ class MinecraftWorldLeaseOwner:
             )
         except OSError:
             return
+
+    def _owner_claim_payload(self) -> dict[str, Any]:
+        return {
+            "schema": MINECRAFT_WORLD_LEASE_OWNER_CLAIM_SCHEMA,
+            "processNonce": self.process_nonce,
+            "updatedAt": self.now(),
+            "pid": os.getpid(),
+        }
+
+    def _read_owner_claim(self) -> dict[str, Any]:
+        try:
+            payload = json.loads(
+                self.owner_claim_path.read_text(encoding="utf-8")
+            )
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    def _owner_claim_matches(self) -> bool:
+        if not self._owner_claim_owned:
+            return False
+        payload = self._read_owner_claim()
+        matches = bool(
+            payload.get("schema")
+            == MINECRAFT_WORLD_LEASE_OWNER_CLAIM_SCHEMA
+            and payload.get("processNonce") == self.process_nonce
+        )
+        if not matches:
+            self._owner_claim_owned = False
+            self._secret_ready = False
+            self._lease = None
+            self._state = "owner_conflict"
+            self._last_error_code = (
+                "minecraft_world_lease_owner_conflict"
+            )
+        return matches
+
+    def _claim_observed_at(self, payload: dict[str, Any]) -> float:
+        updated_at = _finite_float(payload.get("updatedAt"), -1.0)
+        if updated_at >= 0.0:
+            return updated_at
+        try:
+            return float(self.owner_claim_path.stat().st_mtime)
+        except OSError:
+            return self.now()
+
+    def _create_owner_claim(self) -> bool:
+        self.owner_claim_path.parent.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+        created = False
+        try:
+            with self.owner_claim_path.open(
+                "x",
+                encoding="utf-8",
+            ) as stream:
+                created = True
+                json.dump(
+                    self._owner_claim_payload(),
+                    stream,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+                stream.flush()
+                os.fsync(stream.fileno())
+        except FileExistsError:
+            return False
+        except OSError:
+            if created:
+                try:
+                    self.owner_claim_path.unlink()
+                except OSError:
+                    pass
+            raise
+        self._owner_claim_owned = True
+        return True
+
+    def _acquire_owner_claim(self) -> bool:
+        if self._create_owner_claim():
+            return True
+        payload = self._read_owner_claim()
+        age = max(
+            0.0,
+            self.now() - self._claim_observed_at(payload),
+        )
+        if age <= self.owner_claim_stale_sec:
+            return False
+        try:
+            self.owner_claim_path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            return False
+        return self._create_owner_claim()
+
+    def _refresh_owner_claim(self) -> bool:
+        if not self._owner_claim_matches():
+            return False
+        try:
+            atomic_json_write(
+                self.owner_claim_path,
+                self._owner_claim_payload(),
+            )
+        except OSError:
+            self._owner_claim_owned = False
+            self._secret_ready = False
+            self._lease = None
+            self._state = "owner_conflict"
+            self._last_error_code = (
+                "minecraft_world_lease_owner_claim_failed"
+            )
+            return False
+        return True
+
+    def _release_owner_claim(self) -> None:
+        if not self._owner_claim_matches():
+            return
+        try:
+            self.owner_claim_path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            self._secret_ready = False
+            return
+        self._owner_claim_owned = False
+        self._secret_ready = False
+
+    def _require_owner_claim(self) -> None:
+        if not self._owner_claim_matches():
+            raise RuntimeError(
+                "minecraft_world_lease_owner_conflict"
+            )
 
     def _write_secret(self) -> None:
         atomic_json_write(
@@ -386,14 +539,31 @@ class MinecraftWorldLeaseOwner:
 
     def initialize(self) -> dict[str, Any]:
         with self._data_lock:
+            if self._owner_claim_owned:
+                self._release_owner_claim()
             self.process_nonce = secrets.token_hex(8)
             self.authorization_token = secrets.token_urlsafe(32)
             self._secret_ready = False
+            self._owner_claim_owned = False
             self._lease = None
             self._state = "authorization_required"
             self._last_stop_outcome = ""
             self._last_error_code = ""
             self._stop_attempts.clear()
+            try:
+                claim_acquired = self._acquire_owner_claim()
+            except OSError:
+                self._state = "manual_intervention_required"
+                self._last_error_code = (
+                    "minecraft_world_lease_owner_claim_write_failed"
+                )
+                return self._status_payload()
+            if not claim_acquired:
+                self._state = "owner_conflict"
+                self._last_error_code = (
+                    "minecraft_world_lease_owner_conflict"
+                )
+                return self._status_payload()
             try:
                 self._write_secret()
             except OSError:
@@ -410,7 +580,17 @@ class MinecraftWorldLeaseOwner:
 
     def status(self) -> dict[str, Any]:
         with self._data_lock:
+            if self._owner_claim_owned:
+                self._owner_claim_matches()
             return self._status_payload()
+
+    def delegation_token(self) -> str:
+        with self._data_lock:
+            return (
+                self.authorization_token
+                if self._secret_ready
+                else ""
+            )
 
     def _issue_lease(
         self,
@@ -623,6 +803,9 @@ class MinecraftWorldLeaseOwner:
 
     async def ensure_started(self) -> dict[str, Any]:
         async with self._start_lock:
+            with self._data_lock:
+                self._require_owner_claim()
+                self._refresh_owner_claim()
             task = self._watchdog_task
             if task is not None and not task.done():
                 return self.status()
@@ -640,6 +823,8 @@ class MinecraftWorldLeaseOwner:
             try:
                 await self.sleep(self.watchdog_interval_sec)
                 with self._data_lock:
+                    if not self._refresh_owner_claim():
+                        return
                     lease = self._lease
                     if (
                         lease is not None
@@ -692,16 +877,9 @@ class MinecraftWorldLeaseOwner:
                 current is not None
                 and current.guild_id != int(guild_id)
             ):
-                previous_guild_id = current.guild_id
-                self._revoke_lease(reason="lease_replaced")
-                if not await self._stop_runtime(
-                    guild_id=previous_guild_id,
-                    reason="lease_replaced",
-                    force=True,
-                ):
-                    raise RuntimeError(
-                        "minecraft_previous_owner_stop_unverified"
-                    )
+                raise RuntimeError(
+                    "minecraft_world_lease_owner_mismatch"
+                )
             elif current is None:
                 runtime_status = await self._runtime_status()
                 if (
@@ -831,6 +1009,12 @@ class MinecraftWorldLeaseOwner:
                 await task
             except asyncio.CancelledError:
                 pass
+        with self._data_lock:
+            if not self._owner_claim_matches():
+                return {
+                    "stopped": False,
+                    "action": "owner_conflict",
+                }
         async with self._operation_lock:
             lease = self._lease
             guild_id = lease.guild_id if lease is not None else 0
@@ -842,19 +1026,23 @@ class MinecraftWorldLeaseOwner:
             ):
                 self._state = "authorization_required"
                 self._write_status()
-                return {
+                result = {
                     "stopped": True,
                     "action": "already_stopped",
                 }
-            stopped = await self._stop_runtime(
-                guild_id=guild_id,
-                reason=reason,
-                force=True,
-            )
-            return {
-                "stopped": stopped,
-                "action": "shutdown_stop",
-            }
+            else:
+                stopped = await self._stop_runtime(
+                    guild_id=guild_id,
+                    reason=reason,
+                    force=True,
+                )
+                result = {
+                    "stopped": stopped,
+                    "action": "shutdown_stop",
+                }
+            with self._data_lock:
+                self._release_owner_claim()
+            return result
 
 
 __all__ = [
@@ -862,6 +1050,7 @@ __all__ = [
     "DEFAULT_WORLD_LEASE_TTL_SEC",
     "MAX_WORLD_LEASE_TTL_SEC",
     "MINECRAFT_WORLD_LEASE_EVENT_SCHEMA",
+    "MINECRAFT_WORLD_LEASE_OWNER_CLAIM_SCHEMA",
     "MINECRAFT_WORLD_LEASE_STATUS_SCHEMA",
     "MinecraftWorldLease",
     "MinecraftWorldLeaseOwner",

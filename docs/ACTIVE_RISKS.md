@@ -23,16 +23,17 @@ marker와 실제 상태 증거가 없으면 성공 문구를 만들지 않는다
 
 Minecraft world-action lease, process-rotated capability token, 5초 owner
 heartbeat, 15초 service-side stale guard, restart 비복구, `/start`·`/goal`
-proof, 만료·상태 불명 시 fail-closed 정지는 구현됐다. Local I/O Bridge와
-legacy auto-start 우회도 차단했다.
+proof, 만료·상태 불명 시 fail-closed 정지는 구현됐다. Bot API 단일 owner,
+공유 claim을 통한 경쟁 owner 차단, Discord 인증 위임, split Fast Control의
+승인 경로도 구현했다. Local I/O Bridge와 legacy auto-start 우회는 차단했다.
 
 다음 조치: 공식 Discord/Bot API 이미지에서 owner/admin과 일반 사용자의 명령
 경계를 각각 확인하고, grant 만료·프로세스 재시작·Minecraft 연결 실패를
 포함한 합성 시나리오를 실행한다. 성공 action마다 audit journal의
 `verified=true`와 예상 `evidenceCode`가 실제 효과와 일치하는지 대조한다.
-추가로 split Docker Fast Control Page가 별도 Discord 프로세스와 경쟁하지
-않고 lease를 발급할 수 있도록 중앙 authorization owner 또는 인증된 위임
-채널을 설계한다. 현재 Fast Control의 start/goal은 안전하게 거부된다.
+split Docker에서는 Bot API 재시작 시 token 회전·lease 비복구·stale runner
+정지, Discord 재시작 시 중앙 lease 유지, 동시 Control Page/Discord 요청의
+owner mismatch를 실제 컨테이너와 Minecraft 세션에서 추가 검증한다.
 
 ## P1 — Conversation Continuity 실제 crash/restart 검증 대기
 
