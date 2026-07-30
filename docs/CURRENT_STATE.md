@@ -2,7 +2,7 @@
 
 Document status: **Current**
 Last reviewed: 2026-07-30 KST
-Source branch: `codex/dependency-config-hardening` at `6f55a27`
+Source branch: `codex/dependency-config-hardening` at `b9e4c6b`
 
 이 문서는 현재 확인된 사실만 기록한다. 목표 구조와 과거 계획은 다른 설계/계획 문서를 사용한다.
 
@@ -49,7 +49,18 @@ Source branch: `codex/dependency-config-hardening` at `6f55a27`
   - 수정된 기억은 현재 source를 `user-edit`로 바꾸고 revision과 새 evidence
     hash를 기록한다. 원래 source/source refs와 이전 evidence hash는 별도
     provenance 필드에 보존한다.
-  - 메모리 인덱스 schema는 v5이며 재시작 뒤에도 수정 provenance가 유지된다.
+  - 메모리 인덱스 schema는 v6이며 재시작 뒤에도 수정 provenance가 유지된다.
+- 기억 삭제 preview는 현재 `derivedFrom` graph 영향과 fingerprint를 함께
+  고정한다. apply 전 graph가 바뀌면 409로 아무것도 삭제하지 않는다.
+  - 유일한 근거를 잃는 파생 기억은 content-free tombstone으로 연쇄 철회한다.
+  - 다른 근거가 남은 기억과 그 하위 파생은 Markdown만 사용자 검토용으로
+    보존하고 recall/FTS/vector/graph/hot-context에서 격리한다.
+  - root tombstone 직후 프로세스가 죽어도 새 프로세스가 같은 cascade와
+    quarantine을 재구성한다.
+  - Sub-LLM 재합성은 삭제 source와 기존 파생 본문을 입력하지 않고 살아 있는
+    source note만 사용한다. Sub-LLM이 없으면 추측하지 않고 격리를 유지한다.
+  - 사용자가 직접 수정하면 과거 derived relation은 `originDerivedFrom`으로
+    분리되고 현재 근거는 `user-edit`로 바뀐다.
 
 ## Deployment state
 
@@ -59,6 +70,8 @@ Source branch: `codex/dependency-config-hardening` at `6f55a27`
   이미지를 유지했다.
 - 이후 `6f55a27` 소스로 `bot_api`와 `control_page` 이미지를 실제
   재빌드·교체해 conflict-safe 메모리 수정 계약과 UI를 배포했다.
+- 이후 `b9e4c6b` 소스로 두 이미지를 다시 빌드·교체해 파생 기억의
+  cascade/quarantine/recomposition 계약과 삭제 영향 UI를 배포했다.
 - 세 컨테이너 모두 `healthy`, restart count 0이다. Main/Router/Sub LLM,
   TTS, STT도 계속 healthy다.
 - Windows Host Supervisor와 Local I/O Bridge heartbeat는 fresh이고 bridge는
@@ -98,11 +111,15 @@ Source branch: `codex/dependency-config-hardening` at `6f55a27`
   `originSource`, revision 표시 계약이 모두 존재한다.
 - 읽기 전용 메모리 API가 반환한 실제 카드 2개 모두 64자 content hash와
   provenance 객체, `originSource`·`revision` 필드를 제공했다.
+- 두 배포 컨테이너의 실제 SQLite memory schema는 v6이다. 현재 실제 vault는
+  indexed note 2개, 선언된 derived note 0개, quarantine 0개다.
+- 배포 HTML은 파생 영향 preview, 연쇄 철회 경고, quarantine badge,
+  stale-impact 409 거부와 `originDerivedFrom` 표시 계약을 모두 제공한다.
 - 실제 사용자 기억의 수정·삭제는 수행하지 않았다.
 
 ## Verification state
 
-검증한 코드 기준점: `6f55a27`
+검증한 코드 기준점: `b9e4c6b`
 
 - 새 Bot API Python 3.11 이미지에서 전체 `unittest discover` 1,585개를
   실행했다. 기능 assertion 실패는 0개였다.
@@ -117,6 +134,18 @@ Source branch: `codex/dependency-config-hardening` at `6f55a27`
   Bot API Python 3.11 이미지의 read-only source mount에서 통과
 - 별도 focused run 91개에서 충돌 거부, 원자적 쓰기 실패 시 원본 보존,
   user-edit provenance, CSRF, 새 Python 프로세스 재시작 복구를 통과
+- 최종 memory discovery 95개와 관련 API/runtime/UI 61개 통과
+- 전체 discovery는 1,575개를 실행해 기능 assertion 실패 0개였다. Bot API
+  경량 이미지에 없는 git, Pillow, Discord, requests/gymnasium 및 Linux에서
+  실행할 수 없는 WindowsPath 때문에 생긴 17개 import/platform 오류는
+  Discord/Vision/Windows와 직접 소유 모듈 환경에서 각각 재실행했다.
+- 파생 철회 전용 테스트는 단일-source 연쇄 tombstone, multi-source와 하위
+  파생 quarantine, 영향 fingerprint 409, content-free state, 살아 있는
+  source만의 topological 재합성, user edit 해제, hot-context 원자 갱신을
+  통과했다.
+- root tombstone `fsync` 직후 별도 Python 프로세스를 강제 종료한 뒤 새
+  프로세스가 source 파일·인덱스·graph를 fail-closed로 정리하고
+  cascade/quarantine을 복구하는 테스트를 통과했다.
 - 실제 `main.py` Control Page 기동 및 강제 종료 뒤 대화 연속성 복구 smoke
   2개 통과
 - Python `compileall`, 모든 `docs/assets/*.js`의 `node --check`, 변경
