@@ -26,9 +26,11 @@ from .memory_derivation_revocation import (
     resolve_derivation_states,
 )
 from .memory_provenance_audit import (
+    DIRECT_SOURCE_TYPES,
     ProvenanceAuditNode,
     ProvenanceAuditResult,
     audit_missing_derivations,
+    summarize_provenance_coverage,
 )
 from .runtime_artifact_io import atomic_json_write, atomic_text_write
 from .text import clean_text
@@ -41,6 +43,9 @@ USER_NOTE_STATE_NAME = "user_note_state.json"
 DELETION_TOMBSTONES_NAME = "memory_deletions.jsonl"
 DERIVATION_REVOCATIONS_NAME = "memory_derivation_revocations.json"
 PROVENANCE_AUDIT_NAME = "memory_provenance_backfill_audit.json"
+PROVENANCE_FORWARD_REJECTIONS_NAME = (
+    "memory_provenance_forward_write_rejections.json"
+)
 RETRIEVAL_CACHE_TTL_SECONDS = 300
 MEMORY_DELETE_PREVIEW_TTL_SECONDS = 120
 MEMORY_PROVENANCE_BACKFILL_PREVIEW_TTL_SECONDS = 120
@@ -75,6 +80,12 @@ MEMORY_PROVENANCE_BACKFILL_PREVIEW_SCHEMA = (
 MEMORY_PROVENANCE_BACKFILL_RESULT_SCHEMA = (
     "memory.provenance.backfill-result.v1"
 )
+MEMORY_PROVENANCE_MANUAL_OPTIONS_SCHEMA = (
+    "memory.provenance.manual-source-options.v1"
+)
+MEMORY_PROVENANCE_FORWARD_REJECTIONS_SCHEMA = (
+    "memory.provenance.forward-write-rejections.v1"
+)
 MEMORY_QUARANTINE_STATUS_SCHEMA = "memory.quarantine.status.v1"
 MEMORY_EDIT_RESULT_SCHEMA = "memory.edit.result.v1"
 MEMORY_EDIT_MAX_TITLE_CHARS = 160
@@ -99,6 +110,7 @@ _memory_delete_lock = threading.RLock()
 _memory_delete_tokens: dict[str, dict[str, Any]] = {}
 _memory_edit_lock = threading.RLock()
 _memory_provenance_backfill_lock = threading.RLock()
+_memory_provenance_observability_lock = threading.RLock()
 _memory_provenance_backfill_tokens: dict[
     str,
     dict[str, Any],
@@ -3006,6 +3018,13 @@ def write_memory_vault_note(
         == "derived"
         and not normalized_derivations
     ):
+        try:
+            _record_memory_provenance_forward_rejection(
+                normalized_type,
+                root=root,
+            )
+        except Exception:
+            pass
         raise ValueError("memory_derived_from_required")
     if note_id in normalized_derivations:
         raise ValueError("memory_derivation_self_reference")
@@ -3761,6 +3780,148 @@ def _memory_provenance_audit_path(
     return memory_index_dir(root) / PROVENANCE_AUDIT_NAME
 
 
+def _memory_provenance_forward_rejections_path(
+    root: Path | None = None,
+) -> Path:
+    return (
+        memory_index_dir(root)
+        / PROVENANCE_FORWARD_REJECTIONS_NAME
+    )
+
+
+def _read_memory_provenance_forward_rejections(
+    root: Path | None = None,
+) -> dict[str, Any]:
+    path = _memory_provenance_forward_rejections_path(root)
+    if not path.exists():
+        return {
+            "schema": (
+                MEMORY_PROVENANCE_FORWARD_REJECTIONS_SCHEMA
+            ),
+            "contentFree": True,
+            "count": 0,
+            "byNoteType": {},
+            "firstRejectedAt": "",
+            "lastRejectedAt": "",
+        }
+    try:
+        payload = json.loads(
+            path.read_text(encoding="utf-8")
+        )
+    except (OSError, json.JSONDecodeError):
+        return {
+            "schema": (
+                MEMORY_PROVENANCE_FORWARD_REJECTIONS_SCHEMA
+            ),
+            "contentFree": True,
+            "count": 0,
+            "byNoteType": {},
+            "firstRejectedAt": "",
+            "lastRejectedAt": "",
+        }
+    if (
+        not isinstance(payload, dict)
+        or payload.get("schema")
+        != MEMORY_PROVENANCE_FORWARD_REJECTIONS_SCHEMA
+    ):
+        return {
+            "schema": (
+                MEMORY_PROVENANCE_FORWARD_REJECTIONS_SCHEMA
+            ),
+            "contentFree": True,
+            "count": 0,
+            "byNoteType": {},
+            "firstRejectedAt": "",
+            "lastRejectedAt": "",
+        }
+    by_note_type = (
+        payload.get("byNoteType")
+        if isinstance(payload.get("byNoteType"), dict)
+        else {}
+    )
+
+    def non_negative_int(value: object) -> int:
+        try:
+            return max(0, int(value or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    return {
+        "schema": (
+            MEMORY_PROVENANCE_FORWARD_REJECTIONS_SCHEMA
+        ),
+        "contentFree": True,
+        "count": non_negative_int(payload.get("count")),
+        "byNoteType": {
+            clean_text(str(key)).lower() or "unknown": (
+                non_negative_int(value)
+            )
+            for key, value in by_note_type.items()
+        },
+        "firstRejectedAt": clean_text(
+            str(payload.get("firstRejectedAt") or "")
+        ),
+        "lastRejectedAt": clean_text(
+            str(payload.get("lastRejectedAt") or "")
+        ),
+    }
+
+
+def _record_memory_provenance_forward_rejection(
+    note_type: str,
+    *,
+    root: Path | None = None,
+) -> None:
+    normalized_type = (
+        clean_text(note_type).lower() or "unknown"
+    )
+    rejected_at = _utc_now_iso()
+    with _memory_provenance_observability_lock:
+        payload = (
+            _read_memory_provenance_forward_rejections(
+                root
+            )
+        )
+        by_note_type = dict(
+            payload.get("byNoteType") or {}
+        )
+        by_note_type[normalized_type] = (
+            max(
+                0,
+                int(by_note_type.get(normalized_type) or 0),
+            )
+            + 1
+        )
+        atomic_json_write(
+            _memory_provenance_forward_rejections_path(
+                root
+            ),
+            {
+                "schema": (
+                    MEMORY_PROVENANCE_FORWARD_REJECTIONS_SCHEMA
+                ),
+                "contentFree": True,
+                "count": (
+                    max(
+                        0,
+                        int(payload.get("count") or 0),
+                    )
+                    + 1
+                ),
+                "byNoteType": {
+                    key: by_note_type[key]
+                    for key in sorted(by_note_type)
+                },
+                "firstRejectedAt": (
+                    payload.get("firstRejectedAt")
+                    or rejected_at
+                ),
+                "lastRejectedAt": rejected_at,
+            },
+            durable=True,
+        )
+
+
 def _parse_memory_utc_timestamp(
     value: object,
 ) -> datetime | None:
@@ -4066,6 +4227,13 @@ def _memory_provenance_audit_nodes(
                     _memory_audit_evidence_aliases(note)
                 ),
                 explicitly_detached=explicitly_detached,
+                updated_at=clean_text(
+                    str(
+                        note.metadata.get("updated_at")
+                        or note.metadata.get("created_at")
+                        or ""
+                    )
+                ),
             )
         )
     return output, note_sources
@@ -4124,6 +4292,13 @@ def _memory_provenance_audit_summary(
         "unmatchedTargetCount": (
             audit.unmatched_target_count
         ),
+        "missingSignalTargetCount": len(
+            audit.missing_signal_target_ids
+        ),
+        "manualReviewTargetCount": (
+            len(audit.missing_signal_target_ids)
+            + len(audit.unmatched_target_ids)
+        ),
         "cycleRejectedSignalCount": (
             audit.cycle_rejected_signal_count
         ),
@@ -4135,6 +4310,7 @@ def _memory_persisted_provenance_audit(
     root: Path | None,
     graph_fingerprint: str,
     audit: ProvenanceAuditResult,
+    coverage: dict[str, Any],
 ) -> dict[str, Any]:
     path = _memory_provenance_audit_path(root)
     entries = [
@@ -4166,6 +4342,11 @@ def _memory_persisted_provenance_audit(
         "summary": _memory_provenance_audit_summary(
             audit
         ),
+        "coverage": {
+            key: value
+            for key, value in coverage.items()
+            if key != "checkedAt"
+        },
         "entries": entries,
     }
     generated_at = ""
@@ -4251,10 +4432,20 @@ def memory_provenance_backfill_preview(
     graph_fingerprint = (
         _memory_provenance_audit_fingerprint(nodes)
     )
+    coverage = summarize_provenance_coverage(
+        nodes,
+        audit=audit,
+        forward_write_rejections=(
+            _read_memory_provenance_forward_rejections(
+                root
+            )
+        ),
+    )
     persisted = _memory_persisted_provenance_audit(
         root=root,
         graph_fingerprint=graph_fingerprint,
         audit=audit,
+        coverage=coverage,
     )
     public_candidates: list[dict[str, Any]] = []
     for candidate in audit.candidates:
@@ -4272,20 +4463,26 @@ def memory_provenance_backfill_preview(
         protection = ""
         if target_source is not None:
             target_path, target_note = target_source
-            target_rel_path = target_path.relative_to(
-                ensure_memory_vault_layout(root)
-            ).as_posix()
-            protection = _memory_note_deletion_protection(
+            protection = _memory_provenance_target_blocker(
+                target_path,
                 target_note,
-                target_rel_path,
+                root=root,
             )
-        can_apply = (
-            candidate.state in {"verified", "review"}
-            and not protection
-            and not bool(target.get("contentHidden"))
-        )
         sources: list[dict[str, Any]] = []
+        source_protection = ""
         for signal in candidate.signals:
+            source_entry = note_sources.get(
+                signal.source_note_id
+            )
+            if source_entry is not None and not source_protection:
+                source_path, source_note = source_entry
+                source_protection = (
+                    _memory_provenance_source_blocker(
+                        source_path,
+                        source_note,
+                        root=root,
+                    )
+                )
             public_source = _memory_public_audit_note(
                 signal.source_note_id,
                 note_sources,
@@ -4302,6 +4499,12 @@ def memory_provenance_backfill_preview(
                     ),
                 }
             )
+        can_apply = (
+            candidate.state in {"verified", "review"}
+            and not protection
+            and not source_protection
+            and not bool(target.get("contentHidden"))
+        )
         public_candidates.append(
             {
                 "target": target,
@@ -4318,8 +4521,55 @@ def memory_provenance_backfill_preview(
                         "memory_provenance_backfill_ambiguous"
                         if candidate.state == "ambiguous"
                         else protection
+                        or source_protection
                         or "memory_provenance_backfill_protected"
                     )
+                ),
+            }
+        )
+    manual_review_targets: list[dict[str, Any]] = []
+    manual_target_reasons = {
+        **{
+            note_id: "missing_explicit_signal"
+            for note_id in audit.missing_signal_target_ids
+        },
+        **{
+            note_id: "unmatched_explicit_metadata"
+            for note_id in audit.unmatched_target_ids
+        },
+    }
+    for target_note_id in sorted(manual_target_reasons):
+        target = _memory_public_audit_note(
+            target_note_id,
+            note_sources,
+            root=root,
+            include_internal=include_internal,
+        )
+        target_source = note_sources.get(target_note_id)
+        if target is None or target_source is None:
+            continue
+        target_path, target_note = target_source
+        protection = _memory_provenance_target_blocker(
+            target_path,
+            target_note,
+            root=root,
+        )
+        can_select_sources = bool(
+            not protection
+            and not bool(target.get("contentHidden"))
+        )
+        manual_review_targets.append(
+            {
+                "target": target,
+                "reason": manual_target_reasons[
+                    target_note_id
+                ],
+                "canSelectSources": can_select_sources,
+                "selectionBlocker": (
+                    ""
+                    if can_select_sources
+                    else protection
+                    or "memory_provenance_backfill_protected"
                 ),
             }
         )
@@ -4332,11 +4582,143 @@ def memory_provenance_backfill_preview(
         "policy": "exact_metadata_only",
         "graphFingerprint": graph_fingerprint,
         "summary": dict(persisted["summary"]),
+        "coverage": coverage,
         "candidates": public_candidates,
+        "manualReviewTargets": manual_review_targets,
+        "manualSelectionPolicy": (
+            "user_selected_source_note_ids_only"
+        ),
         "reportPath": str(
             _memory_provenance_audit_path(root)
         ),
         "generatedAt": persisted["generatedAt"],
+        "checkedAt": _utc_now_iso(),
+    }
+
+
+def memory_provenance_manual_source_options(
+    note_id_or_rel_path: str,
+    *,
+    root: Path | None = None,
+) -> dict[str, Any]:
+    sync_memory_vault_index(root=root)
+    target = _memory_vault_find_note(
+        note_id_or_rel_path,
+        root=root,
+    )
+    if target is None:
+        return {"ok": False, "error": "note_not_found"}
+    target_path, target_note, _target_raw = target
+    target_blocker = _memory_provenance_target_blocker(
+        target_path,
+        target_note,
+        root=root,
+    )
+    if target_blocker == "internal_note_not_public":
+        return {"ok": False, "error": "note_not_found"}
+    if target_blocker:
+        return {
+            "ok": False,
+            "error": "memory_provenance_backfill_protected",
+            "reason": target_blocker,
+        }
+
+    nodes, note_sources = _memory_provenance_audit_nodes(
+        root=root
+    )
+    audit = audit_missing_derivations(nodes)
+    target_reason = _memory_provenance_manual_target_reason(
+        target_note.note_id,
+        audit,
+    )
+    if target_reason == "ambiguous_exact_metadata":
+        return {
+            "ok": False,
+            "error": "memory_provenance_backfill_ambiguous",
+        }
+    if target_reason == "exact_candidate_available":
+        return {
+            "ok": False,
+            "error": (
+                "memory_provenance_manual_exact_candidate_available"
+            ),
+        }
+    if target_reason not in {
+        "missing_explicit_signal",
+        "unmatched_explicit_metadata",
+    }:
+        return {
+            "ok": False,
+            "error": (
+                "memory_provenance_manual_target_ineligible"
+            ),
+        }
+
+    node_by_id = {
+        node.note_id: node
+        for node in nodes
+    }
+    source_options: list[dict[str, Any]] = []
+    for source_id in sorted(note_sources):
+        if source_id == target_note.note_id:
+            continue
+        source_path, source_note = note_sources[source_id]
+        source_node = node_by_id.get(source_id)
+        if (
+            source_node is None
+            or not _memory_provenance_source_is_grounded(
+                source_node
+            )
+            or _memory_provenance_source_blocker(
+                source_path,
+                source_note,
+                root=root,
+            )
+            or _memory_provenance_depends_on(
+                node_by_id,
+                source_id,
+                target_note.note_id,
+            )
+        ):
+            continue
+        public_source = _memory_public_audit_note(
+            source_id,
+            note_sources,
+            root=root,
+            include_internal=False,
+        )
+        if (
+            public_source is None
+            or bool(public_source.get("contentHidden"))
+        ):
+            continue
+        source_options.append(
+            {
+                **public_source,
+                "sourceType": source_node.source_type,
+            }
+        )
+
+    target_public = _memory_public_audit_note(
+        target_note.note_id,
+        note_sources,
+        root=root,
+        include_internal=False,
+    )
+    return {
+        "ok": True,
+        "schema": MEMORY_PROVENANCE_MANUAL_OPTIONS_SCHEMA,
+        "readOnly": True,
+        "autoApply": False,
+        "contentSimilarityUsed": False,
+        "selectionMode": "user_selected",
+        "target": target_public,
+        "reason": target_reason,
+        "sourceOptions": source_options,
+        "sourceOptionCount": len(source_options),
+        "graphFingerprint": (
+            _memory_provenance_audit_fingerprint(nodes)
+        ),
         "checkedAt": _utc_now_iso(),
     }
 
@@ -4769,6 +5151,118 @@ def _memory_note_deletion_protection(
     return ""
 
 
+def _memory_provenance_target_blocker(
+    path: Path,
+    note: MemoryVaultNote,
+    *,
+    root: Path | None = None,
+) -> str:
+    vault = ensure_memory_vault_layout(root)
+    rel_path = path.relative_to(vault).as_posix()
+    protection = _memory_note_deletion_protection(
+        note,
+        rel_path,
+    )
+    if protection:
+        return protection
+    note_state = _read_user_note_state(root).get(
+        note.note_id,
+        {},
+    )
+    if bool(note_state.get("hidden")):
+        return "memory_note_hidden"
+    if note.note_id in _memory_quarantined_note_ids(root):
+        return "memory_note_quarantined"
+    return ""
+
+
+def _memory_provenance_source_blocker(
+    path: Path,
+    note: MemoryVaultNote,
+    *,
+    root: Path | None = None,
+) -> str:
+    vault = ensure_memory_vault_layout(root)
+    rel_path = path.relative_to(vault).as_posix()
+    if _is_internal_memory_note_type(note.note_type):
+        return "memory_provenance_source_not_public"
+    if _is_legacy_memory_note_type(
+        note.note_type,
+        rel_path,
+    ):
+        return "memory_provenance_source_not_public"
+    note_state = _read_user_note_state(root).get(
+        note.note_id,
+        {},
+    )
+    if bool(note_state.get("hidden")):
+        return "memory_provenance_source_hidden"
+    if note.note_id in _memory_quarantined_note_ids(root):
+        return "memory_provenance_source_quarantined"
+    return ""
+
+
+def _memory_provenance_manual_target_reason(
+    target_note_id: str,
+    audit: ProvenanceAuditResult,
+) -> str:
+    candidate = next(
+        (
+            item
+            for item in audit.candidates
+            if item.target_note_id == target_note_id
+        ),
+        None,
+    )
+    if candidate is not None:
+        return (
+            "ambiguous_exact_metadata"
+            if candidate.state == "ambiguous"
+            else "exact_candidate_available"
+        )
+    if target_note_id in set(
+        audit.missing_signal_target_ids
+    ):
+        return "missing_explicit_signal"
+    if target_note_id in set(audit.unmatched_target_ids):
+        return "unmatched_explicit_metadata"
+    return "manual_target_ineligible"
+
+
+def _memory_provenance_depends_on(
+    nodes: dict[str, ProvenanceAuditNode],
+    start_note_id: str,
+    target_note_id: str,
+) -> bool:
+    pending = [start_note_id]
+    visited: set[str] = set()
+    while pending:
+        current_id = pending.pop()
+        if current_id in visited:
+            continue
+        visited.add(current_id)
+        current = nodes.get(current_id)
+        if current is None:
+            continue
+        for source_id in current.derived_from:
+            if source_id == target_note_id:
+                return True
+            if source_id not in visited:
+                pending.append(source_id)
+    return False
+
+
+def _memory_provenance_source_is_grounded(
+    node: ProvenanceAuditNode,
+) -> bool:
+    return bool(
+        node.derived_from
+        or node.explicitly_detached
+        or node.origin_derived_from
+        or node.source_type in DIRECT_SOURCE_TYPES
+    )
+
+
 def _memory_provenance_backfill_binding_fingerprint(
     *,
     target_note_id: str,
@@ -4776,6 +5270,8 @@ def _memory_provenance_backfill_binding_fingerprint(
     source_content_hashes: dict[str, str],
     graph_fingerprint: str,
     candidate_state: str,
+    selection_mode: str,
+    manual_reason: str = "",
 ) -> str:
     return hashlib.sha256(
         json.dumps(
@@ -4788,6 +5284,8 @@ def _memory_provenance_backfill_binding_fingerprint(
                 },
                 "graphFingerprint": graph_fingerprint,
                 "candidateState": candidate_state,
+                "selectionMode": selection_mode,
+                "manualReason": manual_reason,
             },
             ensure_ascii=False,
             sort_keys=True,
@@ -4800,8 +5298,22 @@ def _memory_provenance_backfill_candidate_binding(
     note_id_or_rel_path: str,
     source_note_ids: list[str] | tuple[str, ...],
     *,
+    selection_mode: str = "exact_metadata",
     root: Path | None = None,
 ) -> dict[str, Any]:
+    normalized_selection_mode = clean_text(
+        selection_mode
+    ).lower()
+    if normalized_selection_mode not in {
+        "exact_metadata",
+        "user_selected",
+    }:
+        return {
+            "ok": False,
+            "error": (
+                "memory_provenance_backfill_selection_mode_invalid"
+            ),
+        }
     target = _memory_vault_find_note(
         note_id_or_rel_path,
         root=root,
@@ -4811,9 +5323,10 @@ def _memory_provenance_backfill_candidate_binding(
     target_path, target_note, target_raw = target
     vault = ensure_memory_vault_layout(root)
     rel_path = target_path.relative_to(vault).as_posix()
-    protection = _memory_note_deletion_protection(
+    protection = _memory_provenance_target_blocker(
+        target_path,
         target_note,
-        rel_path,
+        root=root,
     )
     if protection == "internal_note_not_public":
         return {"ok": False, "error": "note_not_found"}
@@ -4836,18 +5349,45 @@ def _memory_provenance_backfill_candidate_binding(
         ),
         None,
     )
-    if candidate is None:
-        return {
-            "ok": False,
-            "error": (
-                "memory_provenance_backfill_candidate_unavailable"
-            ),
-        }
-    if candidate.state == "ambiguous":
+    if (
+        candidate is not None
+        and candidate.state == "ambiguous"
+    ):
         return {
             "ok": False,
             "error": "memory_provenance_backfill_ambiguous",
         }
+    manual_reason = ""
+    if normalized_selection_mode == "exact_metadata":
+        if candidate is None:
+            return {
+                "ok": False,
+                "error": (
+                    "memory_provenance_backfill_candidate_unavailable"
+                ),
+            }
+    else:
+        if candidate is not None:
+            return {
+                "ok": False,
+                "error": (
+                    "memory_provenance_manual_exact_candidate_available"
+                ),
+            }
+        manual_reason = _memory_provenance_manual_target_reason(
+            target_note.note_id,
+            audit,
+        )
+        if manual_reason not in {
+            "missing_explicit_signal",
+            "unmatched_explicit_metadata",
+        }:
+            return {
+                "ok": False,
+                "error": (
+                    "memory_provenance_manual_target_ineligible"
+                ),
+            }
 
     requested_source_ids = sorted(
         dict.fromkeys(
@@ -4870,18 +5410,23 @@ def _memory_provenance_backfill_candidate_binding(
                 "memory_provenance_backfill_source_ids_invalid"
             ),
         }
-    candidate_source_ids = sorted(
-        candidate.candidate_source_ids
-    )
-    if requested_source_ids != candidate_source_ids:
-        return {
-            "ok": False,
-            "error": (
-                "memory_provenance_backfill_source_mismatch"
-            ),
-        }
+    if normalized_selection_mode == "exact_metadata":
+        candidate_source_ids = sorted(
+            candidate.candidate_source_ids
+        )
+        if requested_source_ids != candidate_source_ids:
+            return {
+                "ok": False,
+                "error": (
+                    "memory_provenance_backfill_source_mismatch"
+                ),
+            }
 
     source_content_hashes: dict[str, str] = {}
+    node_by_id = {
+        node.note_id: node
+        for node in nodes
+    }
     for source_id in requested_source_ids:
         source = note_sources.get(source_id)
         if source is None:
@@ -4891,11 +5436,54 @@ def _memory_provenance_backfill_candidate_binding(
                     "memory_provenance_backfill_source_unavailable"
                 ),
             }
-        _source_path, source_note = source
+        source_path, source_note = source
+        source_blocker = _memory_provenance_source_blocker(
+            source_path,
+            source_note,
+            root=root,
+        )
+        if source_blocker:
+            return {
+                "ok": False,
+                "error": source_blocker,
+            }
+        if normalized_selection_mode == "user_selected":
+            source_node = node_by_id.get(source_id)
+            if (
+                source_node is None
+                or not _memory_provenance_source_is_grounded(
+                    source_node
+                )
+            ):
+                return {
+                    "ok": False,
+                    "error": (
+                        "memory_provenance_manual_source_ungrounded"
+                    ),
+                }
+            if (
+                source_id == target_note.note_id
+                or _memory_provenance_depends_on(
+                    node_by_id,
+                    source_id,
+                    target_note.note_id,
+                )
+            ):
+                return {
+                    "ok": False,
+                    "error": (
+                        "memory_provenance_manual_cycle"
+                    ),
+                }
         source_content_hashes[source_id] = (
             source_note.source_hash
         )
 
+    candidate_state = (
+        candidate.state
+        if candidate is not None
+        else "user_selected"
+    )
     graph_fingerprint = (
         _memory_provenance_audit_fingerprint(nodes)
     )
@@ -4905,7 +5493,9 @@ def _memory_provenance_backfill_candidate_binding(
             target_content_hash=target_note.source_hash,
             source_content_hashes=source_content_hashes,
             graph_fingerprint=graph_fingerprint,
-            candidate_state=candidate.state,
+            candidate_state=candidate_state,
+            selection_mode=normalized_selection_mode,
+            manual_reason=manual_reason,
         )
     )
     return {
@@ -4917,7 +5507,9 @@ def _memory_provenance_backfill_candidate_binding(
         "sourceNoteIds": requested_source_ids,
         "sourceContentHashes": source_content_hashes,
         "candidate": candidate,
-        "candidateState": candidate.state,
+        "candidateState": candidate_state,
+        "selectionMode": normalized_selection_mode,
+        "manualReason": manual_reason,
         "graphFingerprint": graph_fingerprint,
         "bindingFingerprint": binding_fingerprint,
         "noteSources": note_sources,
@@ -4944,6 +5536,7 @@ def preview_memory_provenance_backfill_application(
     note_id_or_rel_path: str,
     source_note_ids: list[str] | tuple[str, ...],
     *,
+    selection_mode: str = "exact_metadata",
     root: Path | None = None,
     now: Callable[[], float] = time.time,
 ) -> dict[str, Any]:
@@ -4951,6 +5544,7 @@ def preview_memory_provenance_backfill_application(
     binding = _memory_provenance_backfill_candidate_binding(
         note_id_or_rel_path,
         source_note_ids,
+        selection_mode=selection_mode,
         root=root,
     )
     if not binding.get("ok"):
@@ -4987,6 +5581,8 @@ def preview_memory_provenance_backfill_application(
                 "bindingFingerprint"
             ],
             "candidateState": binding["candidateState"],
+            "selectionMode": binding["selectionMode"],
+            "manualReason": binding["manualReason"],
             "expiresAt": expires_at,
             "used": False,
         }
@@ -5001,7 +5597,11 @@ def preview_memory_provenance_backfill_application(
         signal.source_note_id: list(
             signal.reason_codes
         )
-        for signal in candidate.signals
+        for signal in (
+            candidate.signals
+            if candidate is not None
+            else ()
+        )
     }
     public_sources: list[dict[str, Any]] = []
     for source_id in binding["sourceNoteIds"]:
@@ -5017,7 +5617,12 @@ def preview_memory_provenance_backfill_application(
                     **public_source,
                     "reasonCodes": source_signals.get(
                         source_id,
-                        [],
+                        (
+                            []
+                            if binding["selectionMode"]
+                            == "exact_metadata"
+                            else ["user_selected"]
+                        ),
                     ),
                 }
             )
@@ -5027,6 +5632,8 @@ def preview_memory_provenance_backfill_application(
         "action": "provenance_backfill",
         "target": target_public,
         "candidateState": binding["candidateState"],
+        "selectionMode": binding["selectionMode"],
+        "manualReason": binding["manualReason"],
         "candidateSources": public_sources,
         "sourceNoteIds": list(binding["sourceNoteIds"]),
         "graphFingerprint": binding[
@@ -5042,6 +5649,10 @@ def preview_memory_provenance_backfill_application(
             "searchIndexRebuilt": True,
             "hotContextRebuilt": True,
             "automaticInferenceUsed": False,
+            "userSelectedSources": (
+                binding["selectionMode"]
+                == "user_selected"
+            ),
         },
         "confirmToken": token,
         "expiresAt": expires_at,
@@ -5204,6 +5815,12 @@ def apply_memory_provenance_backfill(
     binding = _memory_provenance_backfill_candidate_binding(
         note_id_or_rel_path,
         list(preview.get("sourceNoteIds") or []),
+        selection_mode=clean_text(
+            str(
+                preview.get("selectionMode")
+                or "exact_metadata"
+            )
+        ),
         root=root,
     )
     if not _memory_provenance_backfill_binding_matches(
@@ -5236,6 +5853,12 @@ def apply_memory_provenance_backfill(
                     note_id_or_rel_path,
                     list(
                         preview.get("sourceNoteIds") or []
+                    ),
+                    selection_mode=clean_text(
+                        str(
+                            preview.get("selectionMode")
+                            or "exact_metadata"
+                        )
                     ),
                     root=root,
                 )
@@ -5294,7 +5917,12 @@ def apply_memory_provenance_backfill(
             metadata["updated_at"] = applied_at
             metadata["provenance_backfilled_at"] = applied_at
             metadata["provenance_backfill_method"] = (
-                "exact-metadata-user-confirmed"
+                (
+                    "user-selected-source-note-ids"
+                    if preview.get("selectionMode")
+                    == "user_selected"
+                    else "exact-metadata-user-confirmed"
+                )
             )
             metadata["provenance_backfill_audit_hash"] = (
                 locked_binding["graphFingerprint"]
@@ -5370,6 +5998,12 @@ def apply_memory_provenance_backfill(
         ),
         "candidateState": clean_text(
             str(preview.get("candidateState") or "")
+        ),
+        "selectionMode": clean_text(
+            str(preview.get("selectionMode") or "")
+        ),
+        "manualReason": clean_text(
+            str(preview.get("manualReason") or "")
         ),
         "graphFingerprint": clean_text(
             str(preview.get("graphFingerprint") or "")
@@ -6034,6 +6668,8 @@ __all__ = [
     "MEMORY_PROVENANCE_BACKFILL_AUDIT_SCHEMA",
     "MEMORY_PROVENANCE_BACKFILL_PREVIEW_SCHEMA",
     "MEMORY_PROVENANCE_BACKFILL_RESULT_SCHEMA",
+    "MEMORY_PROVENANCE_FORWARD_REJECTIONS_SCHEMA",
+    "MEMORY_PROVENANCE_MANUAL_OPTIONS_SCHEMA",
     "MEMORY_PROVENANCE_SCHEMA",
     "MEMORY_QUARANTINE_STATUS_SCHEMA",
     "MemoryNoteDeletedError",
@@ -6049,6 +6685,7 @@ __all__ = [
     "memory_note_was_deleted",
     "memory_index_db_path",
     "memory_provenance_backfill_preview",
+    "memory_provenance_manual_source_options",
     "memory_quarantine_status",
     "memory_vault_user_snapshot",
     "memory_vault_root",

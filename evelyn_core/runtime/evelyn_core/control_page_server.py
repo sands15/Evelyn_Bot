@@ -27,6 +27,7 @@ from .memory_vault import (
     ensure_memory_vault_layout,
     export_memory_graph,
     memory_provenance_backfill_preview,
+    memory_provenance_manual_source_options,
     memory_vault_user_note,
     memory_vault_user_snapshot,
     preview_memory_provenance_backfill_application,
@@ -1088,6 +1089,13 @@ def memory_provenance_backfill_status(
         "memory_provenance_backfill_token_invalid",
         "memory_provenance_backfill_token_mismatch",
         "memory_provenance_backfill_token_reused",
+        "memory_provenance_manual_cycle",
+        "memory_provenance_manual_exact_candidate_available",
+        "memory_provenance_manual_source_ungrounded",
+        "memory_provenance_manual_target_ineligible",
+        "memory_provenance_source_hidden",
+        "memory_provenance_source_not_public",
+        "memory_provenance_source_quarantined",
     }:
         return 409
     return 400
@@ -1129,6 +1137,45 @@ async def memory_provenance_backfill_apply_handler(
     result = apply_memory_provenance_backfill(
         note_id,
         str((payload or {}).get("confirmToken") or ""),
+    )
+    return json_response(
+        result,
+        status=memory_provenance_backfill_status(result),
+    )
+
+
+async def memory_provenance_manual_sources_handler(
+    request: web.Request,
+) -> web.StreamResponse:
+    note_id = request.match_info.get("note_id", "")
+    result = memory_provenance_manual_source_options(
+        note_id
+    )
+    return json_response(
+        result,
+        status=memory_provenance_backfill_status(result),
+    )
+
+
+async def memory_provenance_manual_preview_handler(
+    request: web.Request,
+) -> web.StreamResponse:
+    note_id = request.match_info.get("note_id", "")
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    source_note_ids = (
+        (payload or {}).get("sourceNoteIds")
+        if isinstance(payload, dict)
+        else None
+    )
+    if not isinstance(source_note_ids, list):
+        source_note_ids = []
+    result = preview_memory_provenance_backfill_application(
+        note_id,
+        [str(item) for item in source_note_ids],
+        selection_mode="user_selected",
     )
     return json_response(
         result,
@@ -1345,6 +1392,20 @@ def create_app() -> web.Application:
         ),
         memory_provenance_backfill_apply_handler,
     )
+    app.router.add_get(
+        (
+            "/api/control-page/memory-provenance-manual/"
+            "{note_id}/sources"
+        ),
+        memory_provenance_manual_sources_handler,
+    )
+    app.router.add_post(
+        (
+            "/api/control-page/memory-provenance-manual/"
+            "{note_id}/preview"
+        ),
+        memory_provenance_manual_preview_handler,
+    )
     app.router.add_get("/api/control-page/memory/{note_id}", memory_note_handler)
     app.router.add_post("/api/control-page/open-memory-vault", open_memory_vault_handler)
     app.router.add_post("/api/control-page/memory/{note_id}", memory_note_action_handler)
@@ -1366,6 +1427,20 @@ def create_app() -> web.Application:
     app.router.add_options(
         (
             "/api/control-page/memory-provenance-backfill/"
+            "{note_id}/preview"
+        ),
+        memory_provenance_backfill_options_handler,
+    )
+    app.router.add_options(
+        (
+            "/api/control-page/memory-provenance-manual/"
+            "{note_id}/sources"
+        ),
+        memory_provenance_backfill_options_handler,
+    )
+    app.router.add_options(
+        (
+            "/api/control-page/memory-provenance-manual/"
             "{note_id}/preview"
         ),
         memory_provenance_backfill_options_handler,

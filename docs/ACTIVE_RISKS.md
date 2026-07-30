@@ -141,16 +141,22 @@ quarantine 대기 수, 재합성 가능 수와 가장 오래된 대기 시간을
 어느 node라도 바뀌면 아무것도 쓰지 않는다. `ambiguous`와 보호 대상은 적용할 수
 없고, 새 consolidation/recomposition write는 `derived_from` 없이는 거부된다.
 
-남은 위험은 source ref/hash 자체가 누락되었거나 외부 source만 가리키는 과거
-note는 후보조차 만들 수 없다는 점이다. `verified`도 기존 metadata가 서로
-일치한다는 뜻일 뿐 진실을 자동 보증하지 않으므로 사용자 확인이 계속 필요하다.
-또한 Sub-LLM이 꺼져 있거나 상위 source가 quarantine이면 multi-source note는
-안전하게 격리되지만 즉시 재합성되지 않는다.
+source type·note type·age별 provenance coverage와
+`memory_derived_from_required` 거부 수는 content-free 지표로 관측한다.
+명시적 신호가 없거나 현재 source와 맞지 않는 과거 note는 자동 추론하지 않고
+사용자가 공개·비격리·접지된 source를 직접 선택한다. 이 경로도 120초 일회용
+preview/apply이며 target/source/full graph가 바뀌면 아무것도 쓰지 않는다.
 
-다음 조치: source type·note type·age별 provenance coverage와
-`memory_derived_from_required` 거부 수를 content-free 지표로 관측한다.
-명시적 신호가 전혀 없는 과거 note는 자동 추론하지 않고 사용자가 source를 직접
-선택하는 별도 교정 계약을 설계한다.
+남은 위험은 coverage가 구조적 근거 연결만 측정하며 기억 내용이나 사용자의
+선택이 사실임을 보증하지 않는다는 점이다. 현재 수동 경로는 최초 누락 연결만
+지원하므로, 잘못 연결한 `derived_from`을 본문 수정 없이 다시 연결·해제하고
+감사 가능한 이력에서 되돌리는 계약이 없다. 또한 Sub-LLM이 꺼져 있거나 상위
+source가 quarantine이면 multi-source note는 안전하게 격리되지만 즉시
+재합성되지 않는다.
+
+다음 조치: 기존 provenance 관계의 conflict-safe relink/unlink preview,
+content-free 변경 journal과 명시적 undo 계약을 설계한다. 실제 vault가 더
+쌓이면 coverage bucket과 forward rejection 추세가 의미 있는지 함께 검증한다.
 
 ## P1 — UI 접근성 corpus·동작 대상 계약 미완성
 

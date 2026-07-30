@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import unittest
@@ -213,6 +214,109 @@ class MemoryProvenanceAuditApiTests(
             )
 
         self.assertEqual(response.status, 409)
+
+    async def test_manual_source_selection_requires_csrf_and_applies(
+        self,
+    ) -> None:
+        source_path = memory_vault.write_memory_vault_note(
+            note_type="daily",
+            title="Manual API Source",
+            body="manual API source body",
+            source="conversation-turn-log",
+        )
+        source = memory_vault.parse_memory_note(source_path)
+        target_path = memory_vault.write_memory_vault_note(
+            note_type="episode",
+            title="Manual API Target",
+            body="manual API target body",
+            source="legacy-importer",
+        )
+        target = memory_vault.parse_memory_note(target_path)
+        sources_path = (
+            "/api/control-page/memory-provenance-manual/"
+            f"{target.note_id}/sources"
+        )
+        preview_path = (
+            "/api/control-page/memory-provenance-manual/"
+            f"{target.note_id}/preview"
+        )
+        apply_path = (
+            "/api/control-page/memory-provenance-backfill/"
+            f"{target.note_id}/apply"
+        )
+
+        options_response = await self.client.get(
+            sources_path,
+            headers={"Origin": self.origin},
+        )
+        options = await options_response.json()
+        preflight_response = await self.client.options(
+            sources_path,
+            headers={"Origin": self.origin},
+        )
+        denied_preview = await self.client.post(
+            preview_path,
+            headers={"Origin": self.origin},
+            json={"sourceNoteIds": [source.note_id]},
+        )
+        preview_response = await self.client.post(
+            preview_path,
+            headers=self.headers(),
+            json={"sourceNoteIds": [source.note_id]},
+        )
+        preview = await preview_response.json()
+        apply_response = await self.client.post(
+            apply_path,
+            headers=self.headers(),
+            json={"confirmToken": preview["confirmToken"]},
+        )
+        applied = await apply_response.json()
+        audit_response = await self.client.get(
+            "/api/control-page/memory-provenance-audit",
+            headers={"Origin": self.origin},
+        )
+        audit = await audit_response.json()
+
+        self.assertEqual(options_response.status, 200)
+        self.assertEqual(preflight_response.status, 204)
+        self.assertEqual(
+            preflight_response.headers[
+                "Access-Control-Allow-Methods"
+            ],
+            "GET,POST,OPTIONS",
+        )
+        self.assertEqual(
+            options["schema"],
+            "memory.provenance.manual-source-options.v1",
+        )
+        self.assertEqual(
+            [item["id"] for item in options["sourceOptions"]],
+            [source.note_id],
+        )
+        serialized_options = json.dumps(
+            options,
+            ensure_ascii=False,
+        )
+        self.assertNotIn("manual API source body", serialized_options)
+        self.assertNotIn("sourceHash", serialized_options)
+        self.assertNotIn("contentHash", serialized_options)
+        self.assertEqual(denied_preview.status, 403)
+        self.assertEqual(preview_response.status, 200)
+        self.assertEqual(
+            preview["selectionMode"],
+            "user_selected",
+        )
+        self.assertEqual(apply_response.status, 200)
+        self.assertTrue(applied["applied"])
+        self.assertEqual(
+            applied["selectionMode"],
+            "user_selected",
+        )
+        self.assertEqual(
+            audit["coverage"]["needsReviewCount"],
+            0,
+        )
+        self.assertEqual(audit["manualReviewTargets"], [])
 
     async def test_memory_snapshot_includes_quarantine_status(
         self,

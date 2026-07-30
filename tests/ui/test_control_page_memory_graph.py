@@ -158,7 +158,7 @@ class ControlPageMemoryGraphTests(unittest.TestCase):
         )
         self.assertNotIn('postMemoryAction("hide")', self.html)
 
-    def test_memory_audit_is_read_only_and_shows_quarantine_age(
+    def test_memory_audit_shows_coverage_and_two_step_corrections(
         self,
     ) -> None:
         self.assertIn('data-memory-page="audit"', self.html)
@@ -181,11 +181,11 @@ class ControlPageMemoryGraphTests(unittest.TestCase):
             self.html,
         )
         self.assertIn(
-            "본문 유사도는 사용하지 않았습니다.",
+            "본문 유사도·임베딩·LLM 추측은 사용하지 않습니다.",
             self.html,
         )
         self.assertIn(
-            "조회만으로는 어떤 메모도 수정하지 않습니다.",
+            "조회만으로는 어떤 메모도 수정하지 않으며",
             self.html,
         )
         self.assertIn(
@@ -214,6 +214,38 @@ class ControlPageMemoryGraphTests(unittest.TestCase):
         )
         self.assertIn(
             "미리보기 뒤 기억·근거·그래프가 바뀌어서 연결하지 않았어.",
+            self.html,
+        )
+        self.assertIn(
+            "근거 연결 coverage",
+            self.html,
+        )
+        self.assertIn(
+            "forwardWriteRejections",
+            self.html,
+        )
+        self.assertIn(
+            "data-audit-manual",
+            self.html,
+        )
+        self.assertIn(
+            "function loadMemoryManualSourcePicker(item, button)",
+            self.html,
+        )
+        self.assertIn(
+            "function applyMemoryManualProvenance(item, card, button)",
+            self.html,
+        )
+        self.assertIn(
+            "memory-provenance-manual/",
+            self.html,
+        )
+        self.assertIn(
+            "사용자 직접 지정 · 자동 추론 없음",
+            self.html,
+        )
+        self.assertIn(
+            "선택 뒤 기억·source·그래프 상태가 바뀌어서 아무것도 연결하지 않았어.",
             self.html,
         )
 
