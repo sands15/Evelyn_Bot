@@ -318,6 +318,195 @@ class MemoryProvenanceAuditApiTests(
         )
         self.assertEqual(audit["manualReviewTargets"], [])
 
+    async def test_correction_relink_and_undo_require_csrf(
+        self,
+    ) -> None:
+        source_a_path = memory_vault.write_memory_vault_note(
+            note_type="daily",
+            title="Correction API Source A",
+            body="private correction API source A body",
+            source="conversation-turn-log",
+        )
+        source_b_path = memory_vault.write_memory_vault_note(
+            note_type="daily",
+            title="Correction API Source B",
+            body="private correction API source B body",
+            source="conversation-turn-log",
+        )
+        source_a = memory_vault.parse_memory_note(
+            source_a_path
+        )
+        source_b = memory_vault.parse_memory_note(
+            source_b_path
+        )
+        target_path = memory_vault.write_memory_vault_note(
+            note_type="episode",
+            title="Correction API Target",
+            body="private correction API target body",
+            source="sub-llm-semantic-consolidation",
+            derived_from=[source_a.note_id],
+        )
+        target = memory_vault.parse_memory_note(target_path)
+        base_path = (
+            "/api/control-page/memory-provenance-corrections"
+        )
+        note_path = f"{base_path}/{target.note_id}"
+
+        overview_response = await self.client.get(
+            base_path,
+            headers={"Origin": self.origin},
+        )
+        overview = await overview_response.json()
+        sources_response = await self.client.get(
+            f"{note_path}/sources",
+            headers={"Origin": self.origin},
+        )
+        options = await sources_response.json()
+        preflight_response = await self.client.options(
+            f"{note_path}/preview",
+            headers={"Origin": self.origin},
+        )
+        denied_preview = await self.client.post(
+            f"{note_path}/preview",
+            headers={"Origin": self.origin},
+            json={"sourceNoteIds": [source_b.note_id]},
+        )
+        invalid_preview = await self.client.post(
+            f"{note_path}/preview",
+            headers=self.headers(),
+            json={},
+        )
+        preview_response = await self.client.post(
+            f"{note_path}/preview",
+            headers=self.headers(),
+            json={"sourceNoteIds": [source_b.note_id]},
+        )
+        preview = await preview_response.json()
+        denied_apply = await self.client.post(
+            f"{note_path}/apply",
+            headers={"Origin": self.origin},
+            json={"confirmToken": preview["confirmToken"]},
+        )
+        apply_response = await self.client.post(
+            f"{note_path}/apply",
+            headers=self.headers(),
+            json={"confirmToken": preview["confirmToken"]},
+        )
+        applied = await apply_response.json()
+        changed_overview_response = await self.client.get(
+            base_path,
+            headers={"Origin": self.origin},
+        )
+        changed_overview = (
+            await changed_overview_response.json()
+        )
+        undo_preview_response = await self.client.post(
+            f"{note_path}/undo/preview",
+            headers=self.headers(),
+            json={"changeId": applied["changeId"]},
+        )
+        undo_preview = await undo_preview_response.json()
+        undo_apply_response = await self.client.post(
+            f"{note_path}/undo/apply",
+            headers=self.headers(),
+            json={
+                "confirmToken": undo_preview[
+                    "confirmToken"
+                ]
+            },
+        )
+        undone = await undo_apply_response.json()
+        final_note = memory_vault.parse_memory_note(
+            target_path
+        )
+
+        self.assertEqual(overview_response.status, 200)
+        self.assertEqual(
+            overview["schema"],
+            "memory.provenance.corrections.v1",
+        )
+        self.assertEqual(overview["relationshipCount"], 1)
+        self.assertEqual(
+            overview["relationships"][0]["currentSourceIds"],
+            [source_a.note_id],
+        )
+        self.assertEqual(sources_response.status, 200)
+        self.assertEqual(
+            {
+                item["id"]
+                for item in options["sourceOptions"]
+            },
+            {source_a.note_id, source_b.note_id},
+        )
+        self.assertTrue(options["unlinkAllowed"])
+        serialized_read_models = json.dumps(
+            [overview, options],
+            ensure_ascii=False,
+        )
+        for private_value in (
+            "private correction API source A body",
+            "private correction API source B body",
+            "private correction API target body",
+            "sourceHash",
+            "contentHash",
+        ):
+            self.assertNotIn(
+                private_value,
+                serialized_read_models,
+            )
+        self.assertEqual(preflight_response.status, 204)
+        self.assertEqual(denied_preview.status, 403)
+        self.assertEqual(invalid_preview.status, 400)
+        self.assertEqual(preview_response.status, 200)
+        self.assertEqual(preview["action"], "relink")
+        self.assertEqual(denied_apply.status, 403)
+        self.assertEqual(apply_response.status, 200)
+        self.assertTrue(applied["applied"])
+        self.assertNotIn("contentHash", applied)
+        self.assertNotIn("previousContentHash", applied)
+        self.assertTrue(
+            changed_overview["relationships"][0][
+                "latestChange"
+            ]["canUndo"]
+        )
+        self.assertEqual(undo_preview_response.status, 200)
+        self.assertEqual(
+            undo_preview["previewKind"],
+            "undo",
+        )
+        self.assertEqual(undo_apply_response.status, 200)
+        self.assertTrue(undone["applied"])
+        self.assertEqual(
+            final_note.metadata["derived_from"],
+            f"[{source_a.note_id}]",
+        )
+
+    async def test_correction_stale_binding_maps_to_conflict(
+        self,
+    ) -> None:
+        with patch.object(
+            control_page_server,
+            "apply_memory_provenance_correction",
+            return_value={
+                "ok": False,
+                "error": (
+                    "memory_provenance_correction_"
+                    "changed_since_preview"
+                ),
+            },
+        ):
+            response = await self.client.post(
+                (
+                    "/api/control-page/"
+                    "memory-provenance-corrections/"
+                    "target/apply"
+                ),
+                headers=self.headers(),
+                json={"confirmToken": "stale"},
+            )
+
+        self.assertEqual(response.status, 409)
+
     async def test_memory_snapshot_includes_quarantine_status(
         self,
     ) -> None:

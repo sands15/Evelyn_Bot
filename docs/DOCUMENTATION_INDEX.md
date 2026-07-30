@@ -55,9 +55,11 @@ implemented behavior.
     수정, 2단계 삭제, tombstone-first 내구성, 파생 기억의 연쇄 철회·격리·
     privacy-preserving 재합성, 누락 provenance의 exact-metadata 감사와
     target/source/full-graph hash에 묶인 2단계 backfill, 신호가 없는 과거
-    기억의 사용자 직접 source 선택, source/note/age별 content-free coverage,
-    derived write 거부 카운터와 forward 검증, quarantine 대기 관측,
-    fail-closed 조회·cache 무효화와 재시작 재조정 계약.
+    기억의 사용자 직접 source 선택, 기존 관계의 conflict-safe
+    relink/unlink와 최신 변경 undo, content-free write-ahead correction
+    journal, source/note/age별 coverage, derived write 거부 카운터와 forward
+    검증, quarantine 대기 관측, fail-closed 조회·cache 무효화와 재시작
+    재조정 계약.
 
 - `docs/AUTONOMY_AUTHORIZATION_CONTRACT.md`
   - 현재 프로세스에만 유효한 자율행동 grant, exact action scope, 결과 증거,

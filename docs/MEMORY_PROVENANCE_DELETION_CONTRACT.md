@@ -147,6 +147,91 @@ fingerprint에 더해 `selectionMode=user_selected`와 대상의 수동 검토 �
 note ID를 명시한다. 기본 source는 파생으로 오해될 수 있는 `consolidation`이
 아니라 `runtime`이다.
 
+## Existing provenance relink, unlink, and undo
+
+이미 근거가 연결된 파생 기억과 사용자가 연결을 해제한 기억은 본문 편집과
+분리된 provenance correction 계약으로 관리한다.
+
+- `GET /api/control-page/memory-provenance-corrections`
+- `GET /api/control-page/memory-provenance-corrections/{noteId}/sources`
+- `POST /api/control-page/memory-provenance-corrections/{noteId}/preview`
+- `POST /api/control-page/memory-provenance-corrections/{noteId}/apply`
+- `POST /api/control-page/memory-provenance-corrections/{noteId}/undo/preview`
+- `POST /api/control-page/memory-provenance-corrections/{noteId}/undo/apply`
+
+조회 응답은 대상과 source의 공개 ID, title, type, source type 및 현재 연결만
+반환한다. body, path, content/source/evidence hash와 transcript는 반환하지
+않는다. hidden, legacy/internal, quarantine, 미접지 source와 cycle을 만드는
+source는 선택할 수 없다. 최대 12개를 ID 안정 순서로 직접 선택하며 자동 추천,
+본문 유사도, 임베딩과 LLM 추론은 사용하지 않는다.
+
+`sourceNoteIds=[]`를 명시하면 현재 `derived_from`을 모두 해제하는 `unlink`다.
+필드 누락이나 배열이 아닌 값은 unlink로 해석하지 않고 HTTP 400으로 거부한다.
+해제는 target이나 source note를 삭제하지 않으며 제거된 ID는
+`origin_derived_from`에 보존한다. 이후 `relink`에서 현재 직접 source로 다시
+선택한 ID는 origin history에서 제외해 현재 관계와 과거 관계가 겹치지 않게
+한다.
+
+correction preview는 120초 동안 한 번만 쓸 수 있는 난수 token을 발급한다.
+token은 다음 전체 상태에 묶인다.
+
+- memory root, target note ID와 현재 revision
+- target의 현재 content hash
+- 현재·제안 `derived_from`과 `origin_derived_from`
+- 선택된 모든 source의 현재 content hash
+- 전체 provenance graph fingerprint와 정규화된 binding fingerprint
+- correction/undo 종류와 undo 대상 change ID
+
+apply는 token을 먼저 소비하고 memory delete/edit/correction lock을 함께 잡은
+뒤 같은 binding을 다시 계산한다. target, source 또는 무관한 graph node라도
+바뀌었거나 token이 만료·재사용됐으면 HTTP 409로 거부하며 파일을 쓰지 않는다.
+모든 변경 POST는 기존 Control Page CSRF 계약을 따른다.
+
+성공한 relink/unlink는 title과 body suffix를 byte-for-byte 유지하고 front
+matter만 원자적으로 교체한다. 새 `derived_from`, 누적
+`origin_derived_from`, 증가한 `revision`과 다음 metadata를 기록한다.
+
+- `provenance_corrected_at`
+- `provenance_correction_change_id`
+- `provenance_correction_method=user-relinked-source-note-ids`
+  또는 `user-unlinked-source-note-ids`
+
+변경 내구성 경계는 다음 순서다.
+
+1. `memory.provenance.correction.event.v1`의 `prepared` event를 append,
+   flush, `fsync`한다.
+2. 같은 디렉터리의 임시 파일을 내구성 있게 쓴 뒤 Markdown을 원자 교체한다.
+3. 같은 change ID의 `committed` event를 append, flush, `fsync`한다.
+4. SQLite/FTS/vector index, hot context와 provenance audit를 다시 만든다.
+
+journal은 change/action/target ID, 이전·새 source/origin ID, 이전·새 revision,
+undo 대상 ID, actor와 시각만 저장한다. title, body, path, content/source/
+evidence hash와 transcript는 저장하지 않는다. 삭제 tombstone처럼 audit
+연속성을 위해 자동 retention 없이 append-only로 보존한다.
+
+프로세스가 1번 뒤 2번 전에 종료되면 적용되지 않은 `prepared`는 현재 note와
+일치하지 않아 committed로 승격되지 않는다. 2번 뒤 3번 전에 종료되면 다음
+overview/source-options/preview가 note의 change ID, revision, source/origin
+ID를 대조하고 일치할 때만 `recoveredAfterRestart=true` committed event를
+추가한다. 이 reconciliation GET은 note를 수정하지 않지만 누락된 journal
+terminal event를 복구할 수 있다. 파일 교체 직후 같은 프로세스에서 예외가
+발생해도 note를 재판독해 적용 상태가 확인되면 잘못된 `failed` terminal을
+기록하지 않는다.
+
+가장 최근 committed relink/unlink만 명시적으로 undo할 수 있다. 현재 note의
+change ID, revision과 source/origin ID가 그 변경의 결과와 정확히 같아야 한다.
+undo는 이전 source/origin을 복원하면서
+`provenance_correction_method=user-undo`,
+`provenance_correction_undo_of`와 새 change ID를 기록하는 별도 append-only
+변경이다. undo 자체에는 자동 redo를 제공하지 않는다.
+
+파일 교체 전에 실패하면 HTTP 500,
+`memory_provenance_correction_failed`, `applied=false`다. 파일은 바뀌었지만
+journal commit이나 index/hot-context/audit 후처리가 실패하면 HTTP 503,
+`memory_provenance_correction_cleanup_required`, `applied=true`와 구체적인
+고정 cleanup error code를 반환한다. 다음 조회의 journal reconciliation과
+index sync가 상태를 복구한다.
+
 ## Optimistic edit and correction
 
 Control Page에서 기억을 수정할 때는 마지막으로 읽은 card의 `sourceHash`를
@@ -305,6 +390,8 @@ fail-closed한다. 운영자는 재시작 또는 index sync 뒤 잔여 파일과
   `bot_memory/memory_index/memory_provenance_backfill_audit.json`
 - content-free forward-write rejection counter:
   `bot_memory/memory_index/memory_provenance_forward_write_rejections.json`
+- content-free provenance correction journal:
+  `bot_memory/memory_index/memory_provenance_corrections.jsonl`
 - hot context:
   `bot_memory/memory_index/hot_context.json`
 
@@ -344,6 +431,7 @@ prompt block과 user state가 의도적으로 남아 있다.
 `tests.memory.test_memory_provenance_audit`,
 `tests.memory.test_memory_provenance_backfill`,
 `tests.memory.test_memory_provenance_manual`과
+`tests.memory.test_memory_provenance_correction`,
 `tests.runtime.test_memory_provenance_audit_api`는 다음을 검증한다.
 
 - exact source ref와 evidence hash의 교차 검증
@@ -362,6 +450,11 @@ prompt block과 user state가 의도적으로 남아 있다.
 - 신호 없음·불일치 대상의 사용자 직접 source 선택과 exact/ambiguous 분리
 - 숨김·격리·legacy/internal·미접지·cycle source 거부
 - 수동 preview의 target/source/full-graph 충돌 거부
+- 기존 관계의 relink, 명시적 빈 배열 unlink와 origin history 보존
+- 가장 최근 변경만의 explicit undo와 undo 이후 자동 redo 금지
+- correction journal의 content-free 필드와 prepared-before-write 순서
+- 파일 교체 뒤 예외의 read-back commit 및 commit event 누락의 새 프로세스 복구
+- correction API의 CSRF, 잘못된 빈 요청 거부와 공개 hash/body 비노출
 
 ## Remaining boundary
 
@@ -371,10 +464,15 @@ prompt block과 user state가 의도적으로 남아 있다.
 note가 계약상 분류됐다는 뜻이지 기억 내용이나 사용자의 선택이 사실임을
 보증하지 않는다.
 
-현재 수동 경로는 최초 누락 연결만 지원한다. 사용자가 잘못 연결한 provenance를
-본문 수정과 분리해 다시 연결하거나 해제하는 전용 UI·변경 이력·undo 계약은
-아직 없다. 또한 multi-source note의 자동 재합성은 Sub-LLM이 준비될 때까지
-fail-closed quarantine으로 남는다. 따라서 현재 계약은 “선언된 provenance
-graph 전체의 철회 + exact metadata 또는 사용자가 직접 선택한 누락 관계의
-conflict-safe 연결”이며, 내용 유사도만으로 삭제 또는 backfill했다고 주장하지
-않는다.
+기존 관계의 relink/unlink와 최근 변경 undo까지 구현됐지만, 이 계약도 사용자가
+선택한 source가 의미적으로 사실인지 자동 증명하지 않는다. journal은
+content-free·append-only이고 단일 Bot API writer에서 직렬화되지만 event
+chain을 암호학적으로 연결하거나 여러 writer 사이의 분산 합의를 제공하지는
+않는다. 실제 vault에는 현재 derived relationship이 없어 운영 데이터에
+mutation을 가하는 live correction은 수행하지 않았다.
+
+multi-source note의 자동 재합성은 Sub-LLM이 준비될 때까지 fail-closed
+quarantine으로 남는다. 따라서 현재 계약은 “선언된 provenance graph 전체의
+철회 + exact metadata 또는 사용자 직접 선택에 의한 conflict-safe
+backfill/relink/unlink/undo”이며, coverage 100%나 사용자 선택만으로 기억
+내용의 사실성을 보증하지 않는다.

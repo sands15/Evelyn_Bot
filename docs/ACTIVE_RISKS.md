@@ -149,16 +149,33 @@ source type·note type·age별 provenance coverage와
 사용자가 공개·비격리·접지된 source를 직접 선택한다. 이 경로도 120초 일회용
 preview/apply이며 target/source/full graph가 바뀌면 아무것도 쓰지 않는다.
 
-남은 위험은 coverage가 구조적 근거 연결만 측정하며 기억 내용이나 사용자의
-선택이 사실임을 보증하지 않는다는 점이다. 현재 수동 경로는 최초 누락 연결만
-지원하므로, 잘못 연결한 `derived_from`을 본문 수정 없이 다시 연결·해제하고
-감사 가능한 이력에서 되돌리는 계약이 없다. 또한 Sub-LLM이 꺼져 있거나 상위
-source가 quarantine이면 multi-source note는 안전하게 격리되지만 즉시
-재합성되지 않는다.
+기존 관계도 이제 별도 2단계 preview/apply로 relink하거나 명시적 빈 source
+배열로 unlink할 수 있다. 제거한 ID는 `origin_derived_from`에 남고, 가장 최근
+relink/unlink만 현재 revision과 관계가 정확히 일치할 때 별도 append-only
+변경으로 undo할 수 있다. token은 target/source hash, current/proposed
+source·origin ID와 전체 graph fingerprint에 묶여 어느 node라도 바뀌면
+fail-closed한다.
 
-다음 조치: 기존 provenance 관계의 conflict-safe relink/unlink preview,
-content-free 변경 journal과 명시적 undo 계약을 설계한다. 실제 vault가 더
-쌓이면 coverage bucket과 forward rejection 추세가 의미 있는지 함께 검증한다.
+write-ahead correction journal은 note/source ID, revision, action과 시각만
+저장한다. prepared를 `fsync`한 뒤 Markdown을 원자 교체하고 committed를
+기록한다. 파일 교체 뒤 commit event 전에 죽으면 새 프로세스가 note의 change
+ID/revision/source/origin과 정확히 일치할 때만 committed를 복구한다. UI와
+API는 body, path와 content/source/evidence hash를 공개하지 않으며 모든
+mutation은 CSRF와 별도 사용자 확인을 요구한다.
+
+남은 위험은 coverage와 correction이 구조적 근거 연결만 다루며 기억 내용이나
+사용자의 선택이 사실임을 보증하지 않는다는 점이다. journal은 단일 Bot API
+writer 안에서 직렬화되지만 event chain의 암호학적 tamper evidence나 여러
+writer의 합의는 제공하지 않는다. 실제 vault에는 현재 derived relationship이
+0개라 운영 데이터에 대한 live relink/unlink/undo는 비파괴 원칙상 실행하지
+않았다. 또한 Sub-LLM이 꺼져 있거나 상위 source가 quarantine이면 multi-source
+note는 안전하게 격리되지만 즉시 재합성되지 않는다.
+
+다음 조치: 실제 derived 기억이 생기면 사용자 청취·화면 확인과 별개로 correction
+preview의 설명 가능성, relink/unlink/undo 결과와 journal 복구를 운영 데이터
+복제본에서 검증한다. 이후 journal hash chaining과 단일-writer ownership
+marker가 필요한지 위협 모델로 판단하고, coverage bucket과 forward rejection
+추세가 실제 품질 신호인지 함께 측정한다.
 
 ## P1 — UI 접근성 corpus·동작 대상 계약 미완성
 

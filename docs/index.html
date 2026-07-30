@@ -1535,6 +1535,10 @@
       border-color: rgba(62, 112, 205, 0.5);
     }
 
+    .memory-audit-card[data-audit-state="correction"] {
+      border-color: rgba(142, 92, 199, 0.5);
+    }
+
     .memory-audit-open {
       min-height: 32px;
       padding: 0 10px;
@@ -1554,6 +1558,16 @@
       border-color: rgba(47, 157, 104, 0.45);
       color: var(--text);
       background: rgba(47, 157, 104, 0.12);
+      font-size: 0.74rem;
+      font-weight: 900;
+    }
+
+    .memory-audit-undo {
+      min-height: 32px;
+      padding: 0 10px;
+      border-color: rgba(142, 92, 199, 0.48);
+      color: var(--text);
+      background: rgba(142, 92, 199, 0.12);
       font-size: 0.74rem;
       font-weight: 900;
     }
@@ -2449,6 +2463,7 @@
     let memorySnapshot = null;
     let memoryGraphSnapshot = null;
     let memoryAuditSnapshot = null;
+    let memoryCorrectionSnapshot = null;
     let memoryGraphMotionFrame = 0;
     let memoryGraphMotionState = null;
     let memoryGraphDragSuppressClick = false;
@@ -4614,7 +4629,74 @@
             );
           }).join("")
         : '<div class="memory-empty">사용자가 직접 source를 지정해야 하는 기억이 없습니다.</div>';
-      memoryAudit.innerHTML = quarantineMarkup + coverageMarkup + summaryMarkup + candidateMarkup + manualMarkup;
+      const correctionRelationships = Array.isArray(
+        memoryCorrectionSnapshot && memoryCorrectionSnapshot.relationships
+      )
+        ? memoryCorrectionSnapshot.relationships
+        : [];
+      const correctionActionLabels = {
+        relink: "근거 변경",
+        unlink: "연결 해제",
+        undo: "명시적 되돌리기"
+      };
+      const correctionSummaryMarkup =
+        '<section class="memory-audit-status">' +
+        '<div class="memory-audit-card-head"><strong>현재 근거 연결 관리</strong>' +
+        '<span class="memory-audit-state">사용자 확인 필요</span></div>' +
+        '<div class="memory-audit-grid">' +
+        '<div class="memory-audit-metric"><strong>' + correctionRelationships.length + '</strong><span>관리 가능한 파생 기억</span></div>' +
+        '<div class="memory-audit-metric"><strong>2단계</strong><span>미리보기 후 적용</span></div>' +
+        '<div class="memory-audit-metric"><strong>1회</strong><span>최근 변경 되돌리기</span></div>' +
+        '</div>' +
+        '<span class="memory-audit-policy">연결 수정과 전체 해제는 제목·본문을 바꾸지 않습니다. 이전 연결은 origin history에 남고, 내용 없는 write-ahead journal로 복구됩니다. 되돌리기는 가장 최근 relink/unlink에만 제공되며 redo는 자동 제공하지 않습니다.</span>' +
+        '</section>';
+      const correctionMarkup = memoryCorrectionSnapshot
+        ? (
+            correctionRelationships.length
+              ? correctionRelationships.map((item) => {
+                  const target = item && item.target ? item.target : {};
+                  const sources = Array.isArray(item && item.currentSources)
+                    ? item.currentSources
+                    : [];
+                  const latest = item && item.latestChange ? item.latestChange : null;
+                  const sourceNames = sources
+                    .map((source) => source.title || source.id || "unknown")
+                    .filter(Boolean);
+                  const currentLabel = sourceNames.length
+                    ? sourceNames.join(" · ")
+                    : "모든 직접 근거 연결이 해제됨";
+                  const latestLabel = latest
+                    ? `${correctionActionLabels[latest.action] || latest.action || "변경"} · ${latest.appliedAt || "시각 미상"}`
+                    : "사용자 변경 기록 없음";
+                  const canCorrect = Boolean(item.canCorrect);
+                  const canUndo = Boolean(latest && latest.canUndo);
+                  return (
+                    '<article class="memory-audit-card" data-audit-state="correction" data-audit-correction-card="' + escapeHtml(target.id || "") + '">' +
+                    '<div class="memory-audit-card-head"><strong>' + escapeHtml(target.title || target.id || "Untitled") + '</strong>' +
+                    '<span class="memory-audit-state">' + escapeHtml(sourceNames.length ? `${sources.length}개 연결` : "사용자 해제") + '</span></div>' +
+                    '<span class="memory-audit-signals">현재 근거: ' + escapeHtml(currentLabel) + '</span>' +
+                    '<span class="memory-audit-policy">최근 변경: ' + escapeHtml(latestLabel) + '</span>' +
+                    (item.correctionBlocker
+                      ? '<span class="memory-audit-policy">수정 차단: ' + escapeHtml(item.correctionBlocker) + '</span>'
+                      : '') +
+                    '<div class="memory-audit-card-actions">' +
+                    '<button class="memory-audit-open" type="button" data-audit-target="' + escapeHtml(target.id || "") + '">기억 열기</button>' +
+                    (canCorrect
+                      ? '<button class="memory-audit-apply" type="button" data-audit-correction="' + escapeHtml(target.id || "") + '">근거 연결 수정</button>'
+                      : '') +
+                    (canUndo
+                      ? '<button class="memory-audit-undo" type="button" data-audit-correction-undo="' + escapeHtml(target.id || "") + '">최근 변경 되돌리기</button>'
+                      : '') +
+                    '</div>' +
+                    '<div class="memory-audit-manual-mount"></div>' +
+                    '</article>'
+                  );
+                }).join("")
+              : '<div class="memory-empty">현재 수정할 파생 근거 연결이 없습니다.</div>'
+          )
+        : '<div class="memory-empty">현재 근거 연결을 불러오는 중입니다.</div>';
+      memoryAudit.innerHTML = quarantineMarkup + coverageMarkup + summaryMarkup +
+        candidateMarkup + manualMarkup + correctionSummaryMarkup + correctionMarkup;
     }
 
     function findMemoryAuditCandidate(noteId) {
@@ -4631,6 +4713,17 @@
         ? memoryAuditSnapshot.manualReviewTargets
         : [];
       return targets.find((item) => (
+        String(item && item.target && item.target.id || "") === String(noteId || "")
+      )) || null;
+    }
+
+    function findMemoryCorrectionRelationship(noteId) {
+      const relationships = Array.isArray(
+        memoryCorrectionSnapshot && memoryCorrectionSnapshot.relationships
+      )
+        ? memoryCorrectionSnapshot.relationships
+        : [];
+      return relationships.find((item) => (
         String(item && item.target && item.target.id || "") === String(noteId || "")
       )) || null;
     }
@@ -4677,6 +4770,7 @@
         memorySnapshot = null;
         memoryGraphSnapshot = null;
         memoryAuditSnapshot = null;
+        memoryCorrectionSnapshot = null;
         await loadMemoryVault({ force: true });
         setMemoryPage("audit");
         setBubble(
@@ -4689,6 +4783,7 @@
           memorySnapshot = null;
           memoryGraphSnapshot = null;
           memoryAuditSnapshot = null;
+          memoryCorrectionSnapshot = null;
           await loadMemoryVault({ force: true });
           setMemoryPage("audit");
           setBubble("미리보기 뒤 기억·근거·그래프가 바뀌어서 연결하지 않았어. 최신 후보를 다시 확인해줘.");
@@ -4790,6 +4885,7 @@
         memorySnapshot = null;
         memoryGraphSnapshot = null;
         memoryAuditSnapshot = null;
+        memoryCorrectionSnapshot = null;
         await loadMemoryVault({ force: true });
         setMemoryPage("audit");
         setBubble(
@@ -4802,12 +4898,215 @@
           memorySnapshot = null;
           memoryGraphSnapshot = null;
           memoryAuditSnapshot = null;
+          memoryCorrectionSnapshot = null;
           await loadMemoryVault({ force: true });
           setMemoryPage("audit");
           setBubble("선택 뒤 기억·source·그래프 상태가 바뀌어서 아무것도 연결하지 않았어. 다시 확인해줘.");
           return;
         }
         setBubble(`수동 근거 연결에 실패했어: ${error.message}`);
+      } finally {
+        button.disabled = false;
+      }
+    }
+
+    async function refreshMemoryAfterProvenanceChange() {
+      memorySnapshot = null;
+      memoryGraphSnapshot = null;
+      memoryAuditSnapshot = null;
+      memoryCorrectionSnapshot = null;
+      await loadMemoryVault({ force: true });
+      setMemoryPage("audit");
+    }
+
+    async function loadMemoryCorrectionSourcePicker(item, button) {
+      const target = item && item.target ? item.target : {};
+      const card = button && button.closest("[data-audit-correction-card]");
+      const mount = card && card.querySelector(".memory-audit-manual-mount");
+      if (!item || !item.canCorrect || !target.id || !mount) return;
+      button.disabled = true;
+      mount.innerHTML = '<div class="memory-empty">현재 연결과 사용할 수 있는 근거를 불러오는 중입니다.</div>';
+      try {
+        const payload = await fetchApi(
+          "/api/control-page/memory-provenance-corrections/" +
+          encodeURIComponent(target.id) + "/sources"
+        );
+        const options = Array.isArray(payload && payload.sourceOptions)
+          ? payload.sourceOptions
+          : [];
+        const currentIds = new Set(
+          Array.isArray(payload && payload.currentSourceIds)
+            ? payload.currentSourceIds.map((value) => String(value || ""))
+            : []
+        );
+        const optionsMarkup = options.length
+          ? options.map((source) => (
+              '<label class="memory-audit-manual-option">' +
+              '<input type="checkbox" data-audit-correction-source value="' +
+              escapeHtml(source.id || "") + '"' +
+              (currentIds.has(String(source.id || "")) ? " checked" : "") + '>' +
+              '<span>' + escapeHtml(source.title || source.id || "Untitled") +
+              '<small>' + escapeHtml(`${source.type || "note"} · ${source.sourceType || "unknown"}`) + '</small></span>' +
+              '</label>'
+            )).join("")
+          : '<div class="memory-empty">현재 선택할 수 있는 공개·검증된 source note가 없습니다.</div>';
+        mount.innerHTML =
+          '<section class="memory-audit-manual-picker">' +
+          '<strong>현재 근거 연결을 직접 수정</strong>' +
+          '<span class="memory-audit-policy">체크된 항목이 적용 후 직접 근거가 됩니다. 모두 해제하면 연결만 끊고 이전 근거 ID는 origin history에 보존합니다. source와 target 기억은 삭제하지 않습니다.</span>' +
+          '<div class="memory-audit-manual-options">' +
+          optionsMarkup +
+          '</div>' +
+          '<div class="memory-audit-card-actions">' +
+          '<button class="memory-audit-apply" type="button" data-audit-correction-confirm="' + escapeHtml(target.id) + '">선택 결과 검토</button>' +
+          '<button class="memory-audit-open" type="button" data-audit-correction-cancel>취소</button>' +
+          '</div>' +
+          '</section>';
+      } catch (error) {
+        mount.innerHTML = '<div class="memory-empty">근거 연결 목록을 불러오지 못했습니다.</div>';
+        setBubble(`근거 연결 목록을 불러오지 못했어: ${error.message}`);
+      } finally {
+        button.disabled = false;
+      }
+    }
+
+    async function applyMemoryProvenanceCorrection(item, card, button) {
+      const target = item && item.target ? item.target : {};
+      const checked = card
+        ? Array.from(card.querySelectorAll("[data-audit-correction-source]:checked"))
+        : [];
+      const sourceNoteIds = checked
+        .map((input) => String(input.value || ""))
+        .filter(Boolean);
+      if (!target.id) return;
+      if (sourceNoteIds.length > 12) {
+        setBubble("한 번에 연결할 근거는 최대 12개야.");
+        return;
+      }
+      button.disabled = true;
+      try {
+        const preview = await fetchApi(
+          "/api/control-page/memory-provenance-corrections/" +
+          encodeURIComponent(target.id) + "/preview",
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ sourceNoteIds })
+          }
+        );
+        const sources = Array.isArray(preview && preview.proposedSources)
+          ? preview.proposedSources
+          : [];
+        const sourceNames = sources
+          .map((source) => source.title || source.id)
+          .filter(Boolean);
+        const unlinking = String(preview && preview.action || "") === "unlink";
+        const confirmed = window.confirm(
+          `"${target.title || target.id}" 기억의 근거 연결을 ${unlinking ? "모두 해제" : "수정"}할까요?\n\n` +
+          (unlinking
+            ? "적용 후 직접 근거: 없음\n"
+            : `적용 후 직접 근거: ${sourceNames.join(", ") || sourceNoteIds.join(", ")}\n`) +
+          "선택 방식: 사용자 직접 지정 · 자동 추론 없음\n\n" +
+          "제목과 본문, source 기억은 바꾸거나 삭제하지 않습니다. 이전 연결은 origin history에 남으며 현재 note/source와 전체 graph가 미리보기와 같을 때만 적용됩니다."
+        );
+        if (!confirmed) return;
+        const applied = await fetchApi(
+          "/api/control-page/memory-provenance-corrections/" +
+          encodeURIComponent(target.id) + "/apply",
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              confirmToken: preview.confirmToken
+            })
+          }
+        );
+        await refreshMemoryAfterProvenanceChange();
+        setBubble(
+          applied && applied.applied
+            ? (
+                unlinking
+                  ? "기억 본문은 유지하고 직접 근거 연결을 해제했어. 이전 연결은 origin history에 남겼어."
+                  : `기억 본문은 유지하고 사용자가 고른 근거 ${sourceNoteIds.length}개로 연결을 바꿨어.`
+              )
+            : "근거 연결 수정 결과를 다시 확인해줘."
+        );
+      } catch (error) {
+        const code = String(error.message || "");
+        if (code === "api_error:409") {
+          await refreshMemoryAfterProvenanceChange();
+          setBubble("선택이 현재 연결과 같거나 미리보기 뒤 기억·근거·그래프가 바뀌어서 적용하지 않았어. 최신 상태에서 다시 선택해줘.");
+          return;
+        }
+        if (code === "api_error:503") {
+          await refreshMemoryAfterProvenanceChange();
+          setBubble("연결 파일은 바뀌었을 수 있지만 journal 또는 인덱스 후처리를 확인해야 해. 새로 불러온 상태와 런타임 로그를 확인해줘.");
+          return;
+        }
+        setBubble(`근거 연결 수정에 실패했어: ${error.message}`);
+      } finally {
+        button.disabled = false;
+      }
+    }
+
+    async function undoMemoryProvenanceCorrection(item, button) {
+      const target = item && item.target ? item.target : {};
+      const latest = item && item.latestChange ? item.latestChange : null;
+      if (!target.id || !latest || !latest.canUndo || !latest.changeId) return;
+      button.disabled = true;
+      try {
+        const preview = await fetchApi(
+          "/api/control-page/memory-provenance-corrections/" +
+          encodeURIComponent(target.id) + "/undo/preview",
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ changeId: latest.changeId })
+          }
+        );
+        const sources = Array.isArray(preview && preview.proposedSources)
+          ? preview.proposedSources
+          : [];
+        const sourceNames = sources
+          .map((source) => source.title || source.id)
+          .filter(Boolean);
+        const confirmed = window.confirm(
+          `"${target.title || target.id}" 기억의 최근 근거 변경을 되돌릴까요?\n\n` +
+          `복원할 직접 근거: ${sourceNames.join(", ") || "없음"}\n` +
+          `되돌릴 변경: ${latest.changeId}\n\n` +
+          "이 동작도 새로운 append-only 변경으로 기록됩니다. 제목과 본문은 바꾸지 않으며, 되돌리기 자체에는 자동 redo를 제공하지 않습니다."
+        );
+        if (!confirmed) return;
+        const applied = await fetchApi(
+          "/api/control-page/memory-provenance-corrections/" +
+          encodeURIComponent(target.id) + "/undo/apply",
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              confirmToken: preview.confirmToken
+            })
+          }
+        );
+        await refreshMemoryAfterProvenanceChange();
+        setBubble(
+          applied && applied.applied
+            ? "최근 근거 연결 변경을 명시적으로 되돌렸어. 이 되돌리기도 별도 이력으로 남겼어."
+            : "근거 연결 되돌리기 결과를 다시 확인해줘."
+        );
+      } catch (error) {
+        const code = String(error.message || "");
+        if (code === "api_error:409") {
+          await refreshMemoryAfterProvenanceChange();
+          setBubble("그 변경은 더 이상 가장 최근 변경이 아니거나 현재 연결이 달라져서 되돌리지 않았어.");
+          return;
+        }
+        if (code === "api_error:503") {
+          await refreshMemoryAfterProvenanceChange();
+          setBubble("되돌리기 파일은 바뀌었을 수 있지만 journal 또는 인덱스 후처리를 확인해야 해. 새로 불러온 상태를 확인해줘.");
+          return;
+        }
+        setBubble(`근거 연결 되돌리기에 실패했어: ${error.message}`);
       } finally {
         button.disabled = false;
       }
@@ -4823,8 +5122,9 @@
         const graphCount = Array.isArray(memoryGraphSnapshot && memoryGraphSnapshot.nodes) ? memoryGraphSnapshot.nodes.length : 0;
         const quarantineCount = Number(memorySnapshot && memorySnapshot.quarantineStatus && memorySnapshot.quarantineStatus.count || 0);
         const candidateCount = Number(memoryAuditSnapshot && memoryAuditSnapshot.summary && memoryAuditSnapshot.summary.candidateTargetCount || 0);
+        const correctionCount = Number(memoryCorrectionSnapshot && memoryCorrectionSnapshot.relationshipCount || 0);
         memoryHint.textContent = total
-          ? `Graph ${graphCount || total} nodes, ${total} notes · 격리 ${quarantineCount} · provenance 후보 ${candidateCount}`
+          ? `Graph ${graphCount || total} nodes, ${total} notes · 격리 ${quarantineCount} · provenance 후보 ${candidateCount} · 연결 관리 ${correctionCount}`
           : "Waiting for memory_vault nodes.";
       }
       if (!cards.length) {
@@ -4865,7 +5165,13 @@
 
     async function loadMemoryVault({ force = false } = {}) {
       if (memoryLoading && memoryLoadPromise) return memoryLoadPromise;
-      if (memorySnapshot && memoryGraphSnapshot && memoryAuditSnapshot && !force) {
+      if (
+        memorySnapshot &&
+        memoryGraphSnapshot &&
+        memoryAuditSnapshot &&
+        memoryCorrectionSnapshot &&
+        !force
+      ) {
         renderMemoryGraph();
         renderMemoryCards();
         renderMemoryAudit();
@@ -4880,14 +5186,21 @@
         memoryGraph.innerHTML = '<div class="memory-empty">메모리 노드 그래프를 불러오는 중입니다.</div>';
       }
       memoryLoadPromise = (async () => {
-        const [snapshotPayload, graphPayload, auditPayload] = await Promise.all([
+        const [
+          snapshotPayload,
+          graphPayload,
+          auditPayload,
+          correctionPayload
+        ] = await Promise.all([
           fetchApi("/api/control-page/memory?limit=180"),
           fetchApi("/api/control-page/memory-graph?max_nodes=160" + (memoryGraphIncludeInternal ? "&include_internal=true" : "")),
-          fetchApi("/api/control-page/memory-provenance-audit" + (memoryGraphIncludeInternal ? "?include_internal=true" : ""))
+          fetchApi("/api/control-page/memory-provenance-audit" + (memoryGraphIncludeInternal ? "?include_internal=true" : "")),
+          fetchApi("/api/control-page/memory-provenance-corrections")
         ]);
         memorySnapshot = snapshotPayload || { cards: [] };
         memoryGraphSnapshot = graphPayload || { nodes: [], edges: [] };
         memoryAuditSnapshot = auditPayload || { summary: {}, candidates: [] };
+        memoryCorrectionSnapshot = correctionPayload || { relationships: [] };
         renderMemoryGraph();
         renderMemoryCards();
         renderMemoryAudit();
@@ -4940,6 +5253,7 @@
         memorySnapshot = null;
         memoryGraphSnapshot = null;
         memoryAuditSnapshot = null;
+        memoryCorrectionSnapshot = null;
         selectedMemoryId = keepSelection;
         selectedMemoryCard = null;
         await loadMemoryVault({ force: true });
@@ -4949,6 +5263,7 @@
           memorySnapshot = null;
           memoryGraphSnapshot = null;
           memoryAuditSnapshot = null;
+          memoryCorrectionSnapshot = null;
           selectedMemoryCard = null;
           await loadMemoryVault({ force: true });
           setBubble("다른 곳에서 기억이 바뀌어서 덮어쓰지 않았어. 최신 내용을 다시 불러왔어.");
@@ -5020,6 +5335,7 @@
         memorySnapshot = null;
         memoryGraphSnapshot = null;
         memoryAuditSnapshot = null;
+        memoryCorrectionSnapshot = null;
         selectedMemoryId = "";
         selectedMemoryCard = null;
         await loadMemoryVault({ force: true });
@@ -5035,6 +5351,7 @@
           memorySnapshot = null;
           memoryGraphSnapshot = null;
           memoryAuditSnapshot = null;
+          memoryCorrectionSnapshot = null;
           await loadMemoryVault({ force: true });
           setBubble("삭제 미리보기 뒤 기억이나 파생 근거가 바뀌어서 삭제하지 않았어. 다시 확인해줘.");
           return;
@@ -5232,6 +5549,7 @@
         memoryGraphIncludeInternal = !memoryGraphIncludeInternal;
         memoryGraphSnapshot = null;
         memoryAuditSnapshot = null;
+        memoryCorrectionSnapshot = null;
         memoryFilter = "all";
         updateMemoryManagementGraphButton();
         loadMemoryVault({ force: true });
@@ -5300,6 +5618,49 @@
     }
     if (memoryAudit) {
       memoryAudit.addEventListener("click", (event) => {
+        const correctionConfirmButton = event.target.closest("[data-audit-correction-confirm]");
+        if (correctionConfirmButton) {
+          const noteId = correctionConfirmButton.getAttribute("data-audit-correction-confirm") || "";
+          const item = findMemoryCorrectionRelationship(noteId);
+          const card = correctionConfirmButton.closest("[data-audit-correction-card]");
+          if (item && card) {
+            applyMemoryProvenanceCorrection(
+              item,
+              card,
+              correctionConfirmButton
+            );
+          }
+          return;
+        }
+        const correctionCancelButton = event.target.closest("[data-audit-correction-cancel]");
+        if (correctionCancelButton) {
+          renderMemoryAudit();
+          return;
+        }
+        const correctionUndoButton = event.target.closest("[data-audit-correction-undo]");
+        if (correctionUndoButton) {
+          const noteId = correctionUndoButton.getAttribute("data-audit-correction-undo") || "";
+          const item = findMemoryCorrectionRelationship(noteId);
+          if (item) {
+            undoMemoryProvenanceCorrection(
+              item,
+              correctionUndoButton
+            );
+          }
+          return;
+        }
+        const correctionButton = event.target.closest("[data-audit-correction]");
+        if (correctionButton) {
+          const noteId = correctionButton.getAttribute("data-audit-correction") || "";
+          const item = findMemoryCorrectionRelationship(noteId);
+          if (item) {
+            loadMemoryCorrectionSourcePicker(
+              item,
+              correctionButton
+            );
+          }
+          return;
+        }
         const manualConfirmButton = event.target.closest("[data-audit-manual-confirm]");
         if (manualConfirmButton) {
           const noteId = manualConfirmButton.getAttribute("data-audit-manual-confirm") || "";

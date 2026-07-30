@@ -21,6 +21,14 @@ from .control_page_contracts import (
     memory_panel_reply as shared_memory_panel_reply,
 )
 from .fast_action_runtime import detect_local_runtime_command
+from .memory_provenance_correction import (
+    apply_memory_provenance_correction,
+    apply_memory_provenance_correction_undo,
+    memory_provenance_correction_overview,
+    memory_provenance_correction_source_options,
+    preview_memory_provenance_correction,
+    preview_memory_provenance_correction_undo,
+)
 from .memory_vault import (
     apply_memory_provenance_backfill,
     delete_memory_vault_user_note,
@@ -1101,6 +1109,42 @@ def memory_provenance_backfill_status(
     return 400
 
 
+def memory_provenance_correction_status(
+    result: dict[str, Any],
+) -> int:
+    if result.get("ok"):
+        return 200
+    error = str(result.get("error") or "")
+    if error == "note_not_found":
+        return 404
+    if error == "memory_provenance_correction_failed":
+        return 500
+    if (
+        error
+        == "memory_provenance_correction_cleanup_required"
+    ):
+        return 503
+    if error in {
+        "memory_provenance_correction_changed_since_preview",
+        "memory_provenance_correction_cycle",
+        "memory_provenance_correction_no_change",
+        "memory_provenance_correction_protected",
+        "memory_provenance_correction_source_unavailable",
+        "memory_provenance_correction_source_ungrounded",
+        "memory_provenance_correction_target_ineligible",
+        "memory_provenance_correction_token_expired",
+        "memory_provenance_correction_token_invalid",
+        "memory_provenance_correction_token_mismatch",
+        "memory_provenance_correction_token_reused",
+        "memory_provenance_correction_undo_unavailable",
+        "memory_provenance_source_hidden",
+        "memory_provenance_source_not_public",
+        "memory_provenance_source_quarantined",
+    }:
+        return 409
+    return 400
+
+
 async def memory_provenance_backfill_preview_handler(
     request: web.Request,
 ) -> web.StreamResponse:
@@ -1188,6 +1232,117 @@ async def memory_provenance_backfill_options_handler(
 ) -> web.StreamResponse:
     return json_response(
         {"ok": True, "methods": ["POST", "OPTIONS"]}
+    )
+
+
+async def memory_provenance_corrections_handler(
+    _: web.Request,
+) -> web.StreamResponse:
+    return json_response(
+        memory_provenance_correction_overview()
+    )
+
+
+async def memory_provenance_correction_sources_handler(
+    request: web.Request,
+) -> web.StreamResponse:
+    result = memory_provenance_correction_source_options(
+        request.match_info.get("note_id", "")
+    )
+    return json_response(
+        result,
+        status=memory_provenance_correction_status(result),
+    )
+
+
+async def memory_provenance_correction_preview_handler(
+    request: web.Request,
+) -> web.StreamResponse:
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = None
+    source_note_ids = (
+        payload.get("sourceNoteIds")
+        if isinstance(payload, dict)
+        and "sourceNoteIds" in payload
+        else None
+    )
+    if (
+        not isinstance(source_note_ids, list)
+        or not all(
+            isinstance(item, str)
+            for item in source_note_ids
+        )
+    ):
+        result = {
+            "ok": False,
+            "error": (
+                "memory_provenance_correction_source_ids_invalid"
+            ),
+        }
+        return json_response(
+            result,
+            status=memory_provenance_correction_status(result),
+        )
+    result = preview_memory_provenance_correction(
+        request.match_info.get("note_id", ""),
+        source_note_ids,
+    )
+    return json_response(
+        result,
+        status=memory_provenance_correction_status(result),
+    )
+
+
+async def memory_provenance_correction_apply_handler(
+    request: web.Request,
+) -> web.StreamResponse:
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    result = apply_memory_provenance_correction(
+        request.match_info.get("note_id", ""),
+        str((payload or {}).get("confirmToken") or ""),
+    )
+    return json_response(
+        result,
+        status=memory_provenance_correction_status(result),
+    )
+
+
+async def memory_provenance_correction_undo_preview_handler(
+    request: web.Request,
+) -> web.StreamResponse:
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    result = preview_memory_provenance_correction_undo(
+        request.match_info.get("note_id", ""),
+        str((payload or {}).get("changeId") or ""),
+    )
+    return json_response(
+        result,
+        status=memory_provenance_correction_status(result),
+    )
+
+
+async def memory_provenance_correction_undo_apply_handler(
+    request: web.Request,
+) -> web.StreamResponse:
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    result = apply_memory_provenance_correction_undo(
+        request.match_info.get("note_id", ""),
+        str((payload or {}).get("confirmToken") or ""),
+    )
+    return json_response(
+        result,
+        status=memory_provenance_correction_status(result),
     )
 
 
@@ -1406,6 +1561,45 @@ def create_app() -> web.Application:
         ),
         memory_provenance_manual_preview_handler,
     )
+    app.router.add_get(
+        "/api/control-page/memory-provenance-corrections",
+        memory_provenance_corrections_handler,
+    )
+    app.router.add_get(
+        (
+            "/api/control-page/memory-provenance-corrections/"
+            "{note_id}/sources"
+        ),
+        memory_provenance_correction_sources_handler,
+    )
+    app.router.add_post(
+        (
+            "/api/control-page/memory-provenance-corrections/"
+            "{note_id}/preview"
+        ),
+        memory_provenance_correction_preview_handler,
+    )
+    app.router.add_post(
+        (
+            "/api/control-page/memory-provenance-corrections/"
+            "{note_id}/apply"
+        ),
+        memory_provenance_correction_apply_handler,
+    )
+    app.router.add_post(
+        (
+            "/api/control-page/memory-provenance-corrections/"
+            "{note_id}/undo/preview"
+        ),
+        memory_provenance_correction_undo_preview_handler,
+    )
+    app.router.add_post(
+        (
+            "/api/control-page/memory-provenance-corrections/"
+            "{note_id}/undo/apply"
+        ),
+        memory_provenance_correction_undo_apply_handler,
+    )
     app.router.add_get("/api/control-page/memory/{note_id}", memory_note_handler)
     app.router.add_post("/api/control-page/open-memory-vault", open_memory_vault_handler)
     app.router.add_post("/api/control-page/memory/{note_id}", memory_note_action_handler)
@@ -1428,6 +1622,45 @@ def create_app() -> web.Application:
         (
             "/api/control-page/memory-provenance-backfill/"
             "{note_id}/preview"
+        ),
+        memory_provenance_backfill_options_handler,
+    )
+    app.router.add_options(
+        "/api/control-page/memory-provenance-corrections",
+        memory_provenance_backfill_options_handler,
+    )
+    app.router.add_options(
+        (
+            "/api/control-page/memory-provenance-corrections/"
+            "{note_id}/sources"
+        ),
+        memory_provenance_backfill_options_handler,
+    )
+    app.router.add_options(
+        (
+            "/api/control-page/memory-provenance-corrections/"
+            "{note_id}/preview"
+        ),
+        memory_provenance_backfill_options_handler,
+    )
+    app.router.add_options(
+        (
+            "/api/control-page/memory-provenance-corrections/"
+            "{note_id}/apply"
+        ),
+        memory_provenance_backfill_options_handler,
+    )
+    app.router.add_options(
+        (
+            "/api/control-page/memory-provenance-corrections/"
+            "{note_id}/undo/preview"
+        ),
+        memory_provenance_backfill_options_handler,
+    )
+    app.router.add_options(
+        (
+            "/api/control-page/memory-provenance-corrections/"
+            "{note_id}/undo/apply"
         ),
         memory_provenance_backfill_options_handler,
     )

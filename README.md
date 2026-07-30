@@ -33,10 +33,15 @@ control page.
 Evelyn's long-term memory is being moved into an Obsidian-style Markdown vault.
 The Markdown files are the durable source of truth, while SQLite, search indexes,
 graph links, and hot-context caches are rebuildable runtime helpers.
+The local Control Page exposes evidence-only provenance audits and explicit
+preview/apply flows for source backfill, relink, unlink, and latest-change undo.
+These flows preserve note content, reject stale graph state, and keep
+content-free recovery journals.
 
-The main design note is:
+The current architecture and mutation contract are:
 
 - `docs/EVELYN_MEMORY_VAULT_ARCHITECTURE.md`
+- `docs/MEMORY_PROVENANCE_DELETION_CONTRACT.md`
 
 ## Control Page
 

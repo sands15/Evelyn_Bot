@@ -249,6 +249,74 @@ class ControlPageMemoryGraphTests(unittest.TestCase):
             self.html,
         )
 
+    def test_existing_provenance_can_be_relinked_unlinked_and_undone(
+        self,
+    ) -> None:
+        self.assertIn(
+            'let memoryCorrectionSnapshot = null;',
+            self.html,
+        )
+        self.assertIn(
+            "/api/control-page/memory-provenance-corrections",
+            self.html,
+        )
+        self.assertIn(
+            "function findMemoryCorrectionRelationship(noteId)",
+            self.html,
+        )
+        self.assertIn(
+            "function loadMemoryCorrectionSourcePicker(item, button)",
+            self.html,
+        )
+        self.assertIn(
+            "function applyMemoryProvenanceCorrection(item, card, button)",
+            self.html,
+        )
+        self.assertIn(
+            "function undoMemoryProvenanceCorrection(item, button)",
+            self.html,
+        )
+        self.assertIn(
+            "data-audit-correction-source",
+            self.html,
+        )
+        self.assertIn(
+            "data-audit-correction-confirm",
+            self.html,
+        )
+        self.assertIn(
+            "data-audit-correction-undo",
+            self.html,
+        )
+        self.assertIn(
+            '"/undo/preview"',
+            self.html,
+        )
+        self.assertIn(
+            '"/undo/apply"',
+            self.html,
+        )
+        self.assertIn(
+            "모두 해제하면 연결만 끊고 이전 근거 ID는 origin history에 보존합니다.",
+            self.html,
+        )
+        self.assertIn(
+            "내용 없는 write-ahead journal로 복구됩니다.",
+            self.html,
+        )
+        self.assertIn(
+            "되돌리기는 가장 최근 relink/unlink에만 제공되며 redo는 자동 제공하지 않습니다.",
+            self.html,
+        )
+        self.assertIn(
+            "이 동작도 새로운 append-only 변경으로 기록됩니다.",
+            self.html,
+        )
+        self.assertIn(
+            'code === "api_error:503"',
+            self.html,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
