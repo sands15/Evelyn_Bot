@@ -27,6 +27,9 @@ _KNOWN_ERROR_CODES = frozenset(
         "control_page_background_tasks_failed",
         "control_page_start_failed",
         "control_tts_failed",
+        "conversation_continuity_checkpoint_rejected",
+        "conversation_continuity_flush_failed",
+        "conversation_continuity_restore_failed",
         "docker_compose_failed",
         "heartbeat_write_failed",
         "host_action_launch_failed",
@@ -83,6 +86,13 @@ _SOURCE_SPECS: tuple[dict[str, Any], ...] = (
         "path": Path("discord") / "status.json",
         "schema": "discord_runtime.status.v1",
         "staleAfterSec": 8.0,
+    },
+    {
+        "id": "conversationContinuity",
+        "label": "Conversation Continuity",
+        "path": Path("conversation_continuity") / "status.json",
+        "schema": "conversation_continuity.status.v1",
+        "staleAfterSec": 5.0,
     },
 )
 _HTTP_SOURCE_SPECS: tuple[dict[str, str], ...] = (
@@ -243,7 +253,12 @@ def _read_source(
         error_count = _safe_count(payload.get("errorCount"))
         counters = _safe_counters(payload.get("errorCounters"))
         has_current_error = bool(
-            last_error_code and str(payload.get("lastError") or "").strip()
+            last_error_code
+            and (
+                str(payload.get("lastError") or "").strip()
+                or str(payload.get("state") or "").strip().lower()
+                in {"error", "down", "degraded"}
+            )
         )
         return (
             {

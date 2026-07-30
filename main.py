@@ -102,6 +102,7 @@ from evelyn_core.session_memory_state import (
     SessionStateStore, build_topic_id as build_session_topic_id, is_casual_call_or_status_question as session_is_casual_call_or_status_question,
     new_turn_id as new_session_turn_id,
 )
+from evelyn_core.session_continuity import SessionContinuityCheckpoint
 from evelyn_core.conversation_policy_dependency_composition import ConversationPolicyDependencyComposition, ConversationPolicyDependencyCompositionDeps
 from evelyn_core.room_speaker_activity import RoomSpeakerActivityStore
 from evelyn_core.response_output_policy import (
@@ -307,6 +308,22 @@ intents = build_discord_intents()
 guild_prefix_cache: dict[int, str] = {}
 room_last_voice_utterance_for_merge: dict[str, VoiceUtteranceMergeRecord] = {}
 session_state_store = SessionStateStore.create_empty()
+session_continuity_checkpoint = SessionContinuityCheckpoint(
+    store=session_state_store,
+    checkpoint_path=(
+        PROJECT_ROOT
+        / "runtime_artifacts"
+        / "conversation_continuity"
+        / "active.json"
+    ),
+    status_path=(
+        PROJECT_ROOT
+        / "runtime_artifacts"
+        / "conversation_continuity"
+        / "status.json"
+    ),
+    system_prompt=SYSTEM_PROMPT, log=print,
+)
 room_speaker_activity_store = RoomSpeakerActivityStore.create_empty()
 room_reply_in_progress: dict[str, bool] = {}
 voice_connect_locks: dict[int, asyncio.Lock] = {}
@@ -648,6 +665,7 @@ guild_runtime_reset_composition = GuildRuntimeResetComposition(
         tts_playback_tracker=tts_playback_tracker, memory_locks=memory_locks,
         cognitive_locks=cognitive_locks, background_cognitive_tasks=background_cognitive_tasks,
         autonomy_last_cognitive_refresh_at=autonomy_last_cognitive_refresh_at, autonomy_cognitive_refresh_tasks=autonomy_cognitive_refresh_tasks,
+        flush_session_continuity=session_continuity_checkpoint.flush,
     )
 )
 
@@ -1098,6 +1116,8 @@ runtime_lifecycle_composition = RuntimeLifecycleComposition(
             project_root=PROJECT_ROOT, local_only_mode=LOCAL_ONLY_MODE,
             discord_enabled=DISCORD_ENABLED, control_page_port=CONTROL_PAGE_PORT,
             fallback_target=PROJECT_ROOT / "evelyn_core" / "start.bat", sleep=asyncio.sleep,
+            ensure_session_continuity_started=session_continuity_checkpoint.ensure_started,
+            flush_session_continuity=session_continuity_checkpoint.flush,
             stop_control_page_background_tasks=lambda: stop_control_page_background_tasks(), stop_vision_watch_task=lambda: stop_vision_watch_task(),
             stop_local_mic_service=lambda: stop_local_mic_service(), launch_runtime_restart_sequence=launch_runtime_restart_sequence,
             exit_process=os._exit, schedule_stack_shutdown=runtime_schedule_evelyn_stack_shutdown,
@@ -2401,6 +2421,8 @@ if DISCORD_ENABLED and not DISCORD_BOT_TOKEN:
     raise RuntimeError("DISCORD_BOT_TOKEN 환경변수가 설정되지 않았습니다.")
 
 acquire_instance_lock()
+session_continuity_checkpoint.restore()
+atexit.register(session_continuity_checkpoint.flush)
 if DISCORD_ENABLED:
     bot.run(DISCORD_BOT_TOKEN)
 else:

@@ -148,6 +148,26 @@ class RuntimeArtifactsRetentionTests(unittest.TestCase):
 
         self.assertEqual([item.relative_path for item in plan.candidates], ["logs/service.log.1"])
 
+    def test_stale_conversation_continuity_checkpoint_is_selected(self) -> None:
+        now = time.time()
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            checkpoint = (
+                root / "conversation_continuity" / "active.json"
+            )
+            write_file(
+                checkpoint,
+                '{"completedTurnText": true}',
+                mtime=now - 2 * 86400,
+            )
+
+            plan = build_cleanup_plan(root, now=now)
+
+        self.assertEqual(
+            [item.relative_path for item in plan.candidates],
+            ["conversation_continuity/active.json"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

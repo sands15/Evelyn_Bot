@@ -1,14 +1,15 @@
 # Runtime Error Observability Contract
 
 Document status: **Current**
-Last reviewed: 2026-07-29 KST
+Last reviewed: 2026-07-30 KST
 
 ## Purpose
 
 핵심 음성 런타임의 광범위한 예외 경계가 실패를 삼킨 뒤 운영자에게 보이지 않는
-문제를 줄인다. Host Supervisor, Local I/O Bridge, Discord는 기존 heartbeat에,
-STT, Vision, Codex Gateway, Mindcraft는 HTTP health/status 응답에 프로세스 수명
-기준 오류 카운터와 최근 오류 코드를 additive 필드로 기록한다.
+문제를 줄인다. Host Supervisor, Local I/O Bridge, Discord, Conversation
+Continuity는 heartbeat에, STT, Vision, Codex Gateway, Mindcraft는 HTTP
+health/status 응답에 프로세스 수명 기준 오류 카운터와 최근 오류 코드를
+additive 필드로 기록한다.
 
 ## Heartbeat fields
 
@@ -39,6 +40,7 @@ STT, Vision, Codex Gateway, Mindcraft는 HTTP health/status 응답에 프로세�
 - `runtime_artifacts/host_supervisor/status.json`
 - `runtime_artifacts/local_bridge/status.json`
 - `runtime_artifacts/discord/status.json`
+- `runtime_artifacts/conversation_continuity/status.json`
 
 대상 HTTP owner:
 

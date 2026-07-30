@@ -1,7 +1,7 @@
 # Evelyn Active Risks
 
 Document status: **Current**
-Last reviewed: 2026-07-29 KST
+Last reviewed: 2026-07-30 KST
 Evaluation stance: 실패 가능성과 검증 공백을 우선 기록
 
 ## P0 — Voyager는 HTTP health와 기능 준비가 다르다
@@ -9,6 +9,20 @@ Evaluation stance: 실패 가능성과 검증 공백을 우선 기록
 마지막 확인에서 Voyager HTTP는 응답했지만 runner, bridge, Minecraft 경계는 준비되지 않았다. `healthy` 컨테이너만 보고 Minecraft 자동화가 가능하다고 판단하면 오판이다.
 
 다음 조치: 실제 Minecraft 세션을 사용할 때 runner/bridge/TCP/task contract를 순서대로 검증한다.
+
+## P1 — Conversation Continuity 실제 crash/restart 검증 대기
+
+완료된 대화 턴과 active follow-up을 15분 동안 제한적으로 복구하는 checkpoint,
+guild 초기화 즉시 flush, 만료·손상·revocation fail-closed 계약은 구현됐고
+집중 단위 테스트와 lifecycle smoke를 통과했다.
+
+현재 Docker Engine이 꺼져 있고 번들 Python에는 `aiohttp`, `discord`, `torch`가
+없어 실제 `main.py` 프로세스를 종료·재기동하는 통합 검증은 아직 실행하지
+못했다.
+
+다음 조치: 공식 Discord/Bot API 이미지 또는 깨끗한 Python 3.11 환경에서 전체
+회귀를 실행한 뒤, 민감 정보가 없는 합성 세션으로 정상 restart와 강제 crash
+각각의 복구·만료·guild reset 비복구를 확인한다.
 
 ## P1 — Python 모델 런타임 의존성 잔여 취약점
 
@@ -69,10 +83,10 @@ STT, Vision, Codex Gateway, Mindcraft는 공통 typed 설정 스키마로 이동
 전체의 환경변수 조회, 특히 대형 호환 계층인 `config.py`와
 `main_runtime_config.py`는 아직 분산돼 있다.
 
-Host Supervisor, Local I/O Bridge, Discord, STT, Vision, Codex Gateway,
-Mindcraft의 오류 카운터를 Runtime Health와 Control Page가 합성한다. 예외
-메시지·스택·경로는 새 공개 응답에서 제외한다. 아직 owner 경계가 없는 보조
-모듈의 광범위한 예외 처리는 남아 있다.
+Host Supervisor, Local I/O Bridge, Discord, Conversation Continuity, STT,
+Vision, Codex Gateway, Mindcraft의 오류 카운터를 Runtime Health와 Control
+Page가 합성한다. 예외 메시지·스택·경로는 새 공개 응답에서 제외한다. 아직
+owner 경계가 없는 보조 모듈의 광범위한 예외 처리는 남아 있다.
 
 다음 조치: 새 서비스 owner를 만들 때 typed schema와 오류 카운터를 필수 계약으로
 적용하고, 기존 대형 설정 모듈은 기능 변경 시 점진적으로 이동한다.

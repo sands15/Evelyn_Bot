@@ -74,6 +74,8 @@ class RuntimeLifecycleCompositionTests(unittest.IsolatedAsyncioTestCase):
             control_page_port=8799,
             fallback_target=REPO_ROOT / "evelyn_core" / "start.bat",
             sleep=AsyncMock(),
+            ensure_session_continuity_started=Mock(),
+            flush_session_continuity=Mock(),
             stop_control_page_background_tasks=Mock(),
             stop_vision_watch_task=Mock(),
             stop_local_mic_service=Mock(),
@@ -153,6 +155,7 @@ class RuntimeLifecycleCompositionTests(unittest.IsolatedAsyncioTestCase):
             [call.args for call in composition.set_tts_presence.await_args_list],
             [(True,), (False,)],
         )
+        composition.deps.process.ensure_session_continuity_started.assert_called_once_with()
 
     async def test_restart_stops_services_launches_and_exits_in_order(self) -> None:
         events: list[object] = []
@@ -162,6 +165,9 @@ class RuntimeLifecycleCompositionTests(unittest.IsolatedAsyncioTestCase):
 
         process = self.build_process_deps(
             sleep=sleep,
+            flush_session_continuity=lambda: events.append(
+                "flush_continuity"
+            ),
             stop_control_page_background_tasks=lambda: events.append("stop_control"),
             stop_vision_watch_task=lambda: events.append("stop_vision"),
             stop_local_mic_service=lambda: events.append("stop_mic"),
@@ -175,9 +181,17 @@ class RuntimeLifecycleCompositionTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             [event[0] if isinstance(event, tuple) else event for event in events],
-            ["sleep", "stop_control", "stop_vision", "stop_mic", "launch", "exit"],
+            [
+                "flush_continuity",
+                "sleep",
+                "stop_control",
+                "stop_vision",
+                "stop_mic",
+                "launch",
+                "exit",
+            ],
         )
-        launch = events[4]
+        launch = events[5]
         self.assertEqual(launch[1], (REPO_ROOT,))
         self.assertEqual(
             launch[2],
@@ -197,6 +211,7 @@ class RuntimeLifecycleCompositionTests(unittest.IsolatedAsyncioTestCase):
             SimpleNamespace(voice_client=None),
         ]
         process = self.build_process_deps(
+            flush_session_continuity=lambda: events.append("flush_continuity"),
             bot_guilds=lambda: guilds,
             exit_process=lambda code: events.append(("exit", code)),
         )
@@ -205,6 +220,7 @@ class RuntimeLifecycleCompositionTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(events.count("stop_listening"), 2)
         self.assertEqual(events.count(("disconnect", True)), 2)
+        self.assertEqual(events[0], "flush_continuity")
         self.assertEqual(events[-1], ("exit", 0))
         process.stop_control_page_background_tasks.assert_called_once_with()
         process.stop_local_mic_service.assert_called_once_with()

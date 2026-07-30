@@ -42,6 +42,7 @@ class GuildRuntimeResetCompositionDeps:
     background_cognitive_tasks: MutableMapping[str, Any]
     autonomy_last_cognitive_refresh_at: MutableMapping[int, Any]
     autonomy_cognitive_refresh_tasks: MutableMapping[int, Any]
+    flush_session_continuity: Callable[[], Any]
 
 
 class GuildRuntimeResetComposition:
@@ -90,6 +91,7 @@ class GuildRuntimeResetComposition:
             guild_id,
             deps=self.build_guild_runtime_reset_deps(),
         )
+        self.deps.flush_session_continuity()
 
 
 __all__ = ["GuildRuntimeResetComposition", "GuildRuntimeResetCompositionDeps"]

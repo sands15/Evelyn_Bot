@@ -94,6 +94,7 @@ class RuntimeErrorObservabilityTests(unittest.TestCase):
 
         self.assertEqual(summary["schema"], RUNTIME_ERROR_SUMMARY_SCHEMA)
         self.assertEqual(summary["state"], "error")
+        self.assertEqual(summary["summary"]["sourceCount"], 8)
         self.assertEqual(summary["summary"]["totalCount"], 3)
         self.assertEqual(summary["summary"]["currentErrorCount"], 1)
         self.assertEqual(summary["summary"]["recentErrorCount"], 2)
@@ -216,6 +217,39 @@ class RuntimeErrorObservabilityTests(unittest.TestCase):
         serialized = json.dumps(summary)
         self.assertNotIn("privateMessage", serialized)
         self.assertNotIn("secret", serialized)
+
+    def test_conversation_continuity_error_is_current_and_private(self) -> None:
+        write_status(
+            self.root,
+            "conversation_continuity/status.json",
+            {
+                "schema": "conversation_continuity.status.v1",
+                "state": "error",
+                "heartbeatAt": self.now,
+                "errorCount": 1,
+                "lastErrorAt": self.now,
+                "lastErrorCode": "conversation_continuity_flush_failed",
+                "lastErrorType": "PermissionError",
+                "errorCounters": {
+                    "conversation_continuity_flush_failed": 1,
+                },
+                "privateMessage": "C:\\private\\conversation",
+            },
+        )
+
+        summary = collect_runtime_error_observability(
+            artifacts_root=self.root,
+            now=self.now,
+        )
+
+        source = summary["sources"]["conversationContinuity"]
+        self.assertEqual(summary["state"], "error")
+        self.assertTrue(source["hasCurrentError"])
+        self.assertEqual(
+            source["lastErrorCode"],
+            "conversation_continuity_flush_failed",
+        )
+        self.assertNotIn("private", json.dumps(summary))
 
 
 if __name__ == "__main__":

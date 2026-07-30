@@ -43,6 +43,8 @@ class RuntimeProcessCompositionDeps:
     control_page_port: int
     fallback_target: Path
     sleep: Callable[[float], Awaitable[Any]]
+    ensure_session_continuity_started: Callable[[], Any]
+    flush_session_continuity: Callable[[], Any]
     stop_control_page_background_tasks: Callable[[], Any]
     stop_vision_watch_task: Callable[[], Any]
     stop_local_mic_service: Callable[[], Any]
@@ -133,6 +135,7 @@ class RuntimeLifecycleComposition:
 
     async def initialize_startup_components(self) -> None:
         deps = self.deps.startup
+        self.deps.process.ensure_session_continuity_started()
         deps.log("[STARTUP] init_begin")
         await self.set_tts_presence(True)
         try:
@@ -156,6 +159,7 @@ class RuntimeLifecycleComposition:
 
     async def restart_bot_process(self) -> None:
         deps = self.deps.process
+        deps.flush_session_continuity()
         await deps.sleep(1.0)
         deps.stop_control_page_background_tasks()
         deps.stop_vision_watch_task()
@@ -179,6 +183,7 @@ class RuntimeLifecycleComposition:
 
     async def shutdown_bot_process(self) -> None:
         deps = self.deps.process
+        deps.flush_session_continuity()
         await deps.sleep(0.5)
         deps.stop_control_page_background_tasks()
         deps.stop_local_mic_service()

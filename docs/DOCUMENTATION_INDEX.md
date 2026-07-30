@@ -1,6 +1,6 @@
 # Evelyn Documentation Index
 
-Last reviewed: 2026-07-15
+Last reviewed: 2026-07-30
 
 Use this file to choose the right document before editing Evelyn. Current runtime
 facts still need to be verified against code before reporting them as
@@ -45,6 +45,13 @@ implemented behavior.
 - `docs/DEPENDENCY_CONFIG_CREDENTIAL_HARDENING.md`
   - Current dependency compatibility matrix, typed owner configuration,
     exception observability, and dedicated Codex credential boundary.
+
+- `docs/CONVERSATION_CONTINUITY_CONTRACT.md`
+  - 프로세스 재시작 뒤 완료된 대화 턴과 active follow-up을 15분 동안
+    제한적으로 복구하는 checkpoint, privacy, deletion, observability 계약.
+
+- `docs/RUNTIME_ERROR_OBSERVABILITY_CONTRACT.md`
+  - Runtime owner별 고정 오류 코드·카운터와 Control Page 공개 privacy 계약.
 
 - `docs/EVELYN_COMPLETENESS_EVALUATION_2026-06-09.md`
   - Detailed completeness evaluation and redesign-priority reference.
