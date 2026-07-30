@@ -2,7 +2,7 @@
 
 Document status: **Current**
 Last reviewed: 2026-07-31 KST
-Source branch: `codex/dependency-config-hardening` through `a98f611`
+Source branch: `codex/dependency-config-hardening` through `ce31793`
 
 이 문서는 현재 확인된 사실만 기록한다. 목표 구조와 과거 계획은 다른 설계/계획 문서를 사용한다.
 
@@ -151,6 +151,12 @@ Source branch: `codex/dependency-config-hardening` through `a98f611`
     write-ahead journal을 `fsync`한 뒤 Markdown을 원자 교체하고 committed를
     기록하며, commit 직전 중단은 새 프로세스가 note metadata와 정확히
     일치할 때만 복구한다.
+  - correction event v2는 sequence/previous hash/event hash를 잇고 별도
+    durable head로 꼬리 삭제를 감지한다. v1 prefix도 raw-line anchor로
+    고정하며, 유효한 journal append 뒤 head 교체 중단만 lease 아래 복구한다.
+  - Windows byte-range lock/POSIX `flock`과 프로세스 owner table이 correction
+    전체를 단일 writer로 만든다. journal/head 손상과 writer 경쟁은 token
+    소비나 Markdown write 전에 fail-closed하며 API는 HTTP 503을 반환한다.
   - journal과 공개 API는 note/source ID, revision, action과 공개 title/type만
     다루며 body, path, content/source/evidence hash와 transcript를 저장하거나
     노출하지 않는다. 모든 변경은 CSRF와 브라우저의 별도 확인이 필요하다.
@@ -242,6 +248,15 @@ Source branch: `codex/dependency-config-hardening` through `a98f611`
 - Bot API, Control Page, Main/Router/Sub LLM, TTS, STT, Vision 여덟
   컨테이너가 모두 `healthy`다. 새 Bot API와 Control Page의 restart count는
   0이다.
+- `ce31793` 소스로 Bot API와 Control Page를 직접 재빌드·교체해 correction
+  journal v2 hash chain, durable head, OS/process single-writer 경계와
+  integrity/writer HTTP 503을 배포했다.
+  - Bot API image:
+    `sha256:288f3a977ad5f7637022f64c0e1fc15768a2aae041502e3a1ff4b93fc4110a9d`
+  - Control Page image:
+    `sha256:1bdb56fe6bc63b05ce514bd3ab8e00873c0ca3035171fcd96129e06fc55272c7`
+  - Bot API를 15초 grace로 정상 종료해 Minecraft owner claim 반납을 확인한
+    뒤 두 컨테이너만 교체했다. 둘 다 healthy, restart count 0이다.
 - Windows Host Supervisor와 Local I/O Bridge heartbeat는 fresh이고 bridge는
   `ready=true`, TTS warmup 완료, Host Vision `running`이다.
 - 개인정보 보호 기본값에 따라 로컬 마이크는 비활성 상태다.
@@ -303,6 +318,10 @@ Source branch: `codex/dependency-config-hardening` through `a98f611`
 - 공식 `check_docker_runtime.ps1 -IncludeLocalBridge`가 Control Page,
   Bot API, Main/Router/Sub LLM, TTS, STT, Vision과 Windows Local I/O
   Bridge를 모두 준비 상태로 판정했다.
+- 배포된 correction overview는 `journalIntegrity=empty`,
+  `journalChainReady=true`, `journalWriterProtected=true`,
+  `relationshipCount=0`을 반환했다. 실제 vault Markdown 3개의 조회 전후
+  SHA-256 변경은 0개였고 journal/head/writer artifact도 생성되지 않았다.
 
 2026-07-30 실제 local-only runtime checker 결과:
 
@@ -392,8 +411,18 @@ Source branch: `codex/dependency-config-hardening` through `a98f611`
 
 ## Verification state
 
-검증한 코드 기준점: `b53a529`
+검증한 코드 기준점: `ce31793`
 
+- bundled Python에서 correction 15개와 memory discovery 131개를 통과했다.
+- 공식 Bot API Python 3.11 환경의 current-source mount에서 correction/API
+  24개와 runtime 364개(skip 2)를 통과했다.
+- 새 Bot API 이미지에 구워진 source와 read-only test mount로 correction/API
+  24개를 통과했다. 새 Bot API와 Control Page 이미지의 `compileall`,
+  `pip check`도 통과했다.
+- hash/event 수정, chain tail 삭제, legacy prefix 수정, 같은 프로세스 thread와
+  별도 프로세스 writer 경쟁, commit 뒤 lagging head 복구를 합성 검증했다.
+- 배포 뒤 두 새 컨테이너는 위 digest로 healthy, restart count 0이고 공식
+  `check_docker_runtime.ps1 -IncludeLocalBridge`가 다시 통과했다.
 - 공식 Python/aiohttp 이미지의 read-only source mount에서 UI action/CSRF/
   retention 집중 테스트 52개, runtime 전체 361개(skip 2), UI 전체 154개
   (skip 7)를 통과했다.

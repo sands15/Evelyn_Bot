@@ -209,6 +209,29 @@ undo 대상 ID, actor와 시각만 저장한다. title, body, path, content/sour
 evidence hash와 transcript는 저장하지 않는다. 삭제 tombstone처럼 audit
 연속성을 위해 자동 retention 없이 append-only로 보존한다.
 
+새 event는 `memory.provenance.correction.event.v2`이며 1부터 증가하는
+`sequence`, 직전 event의 `previousHash`, `eventHash`를 제외한 event의
+canonical JSON으로 계산한 SHA-256 `eventHash`를 가진다. 최초 v2 event 앞에
+v1 event가 있으면
+v1 raw line 전체를 domain-separated SHA-256으로 묶은 값이
+`previousHash`가 된다. 따라서 v1 prefix의 수정·삭제도 이후 검증에서
+감지한다.
+
+마지막 sequence/hash는 별도
+`memory_provenance_correction_chain_head.json`에 durable atomic replace로
+기록한다. 이 head가 journal보다 앞서거나 기존 prefix와 다르면 손상으로
+판정한다. journal append의 `fsync` 뒤 head 교체 전에 중단되어 head가 없거나
+뒤처진 경우에는, journal chain과 기존 head prefix가 모두 유효할 때만 같은
+writer lease 아래 head를 복구한다. journal과 head가 모두 비어 있는 최초
+상태는 정상이다.
+
+correction 전체는 Windows byte-range lock 또는 POSIX `flock`과 프로세스 내부
+owner table을 함께 사용한다. 임의 명령이나 경로를 받는 lease API는 없으며,
+diagnostic marker에는 schema, held/released, process nonce, PID, 시각,
+stale-owner 회수 여부와 `contentFree=true`만 기록한다. 다른 thread/process가
+이미 소유 중이면 대기하거나 겹쳐 쓰지 않고 즉시
+`memory_provenance_correction_writer_unavailable`로 거부한다.
+
 프로세스가 1번 뒤 2번 전에 종료되면 적용되지 않은 `prepared`는 현재 note와
 일치하지 않아 committed로 승격되지 않는다. 2번 뒤 3번 전에 종료되면 다음
 overview/source-options/preview가 note의 change ID, revision, source/origin
@@ -231,6 +254,11 @@ journal commit이나 index/hot-context/audit 후처리가 실패하면 HTTP 503,
 `memory_provenance_correction_cleanup_required`, `applied=true`와 구체적인
 고정 cleanup error code를 반환한다. 다음 조회의 journal reconciliation과
 index sync가 상태를 복구한다.
+
+journal/hash/head가 손상됐거나 읽을 수 없으면 overview와 mutation은 HTTP
+503으로 fail-closed한다. apply는 confirm token을 소비하거나 Markdown을
+쓰기 전에 integrity를 검사한다. writer lock 또는 marker를 확보할 수 없을
+때도 HTTP 503이며 note는 바뀌지 않는다.
 
 ## Optimistic edit and correction
 
@@ -392,6 +420,12 @@ fail-closed한다. 운영자는 재시작 또는 index sync 뒤 잔여 파일과
   `bot_memory/memory_index/memory_provenance_forward_write_rejections.json`
 - content-free provenance correction journal:
   `bot_memory/memory_index/memory_provenance_corrections.jsonl`
+- correction journal chain head:
+  `bot_memory/memory_index/memory_provenance_correction_chain_head.json`
+- content-free correction writer marker:
+  `bot_memory/memory_index/memory_provenance_correction_writer.json`
+- correction writer OS lock:
+  `bot_memory/memory_index/.memory_provenance_correction_writer.lock`
 - hot context:
   `bot_memory/memory_index/hot_context.json`
 
@@ -453,6 +487,10 @@ prompt block과 user state가 의도적으로 남아 있다.
 - 기존 관계의 relink, 명시적 빈 배열 unlink와 origin history 보존
 - 가장 최근 변경만의 explicit undo와 undo 이후 자동 redo 금지
 - correction journal의 content-free 필드와 prepared-before-write 순서
+- v2 hash chain, 별도 head의 tail deletion 탐지와 legacy v1 prefix anchoring
+- 같은 프로세스 thread 및 별도 프로세스 writer 경쟁의 즉시 거부
+- journal/head 손상 시 note 무수정 fail-closed와 HTTP 503
+- journal append 뒤 head 교체 중단의 lagging-head 복구
 - 파일 교체 뒤 예외의 read-back commit 및 commit event 누락의 새 프로세스 복구
 - correction API의 CSRF, 잘못된 빈 요청 거부와 공개 hash/body 비노출
 
@@ -466,10 +504,12 @@ note가 계약상 분류됐다는 뜻이지 기억 내용이나 사용자의 선
 
 기존 관계의 relink/unlink와 최근 변경 undo까지 구현됐지만, 이 계약도 사용자가
 선택한 source가 의미적으로 사실인지 자동 증명하지 않는다. journal은
-content-free·append-only이고 단일 Bot API writer에서 직렬화되지만 event
-chain을 암호학적으로 연결하거나 여러 writer 사이의 분산 합의를 제공하지는
-않는다. 실제 vault에는 현재 derived relationship이 없어 운영 데이터에
-mutation을 가하는 live correction은 수행하지 않았다.
+content-free·append-only이고 v2 SHA-256 chain, 별도 durable head와 OS
+single-writer lock으로 보호된다. 다만 이는 keyed signature나 외부 불변
+anchor가 아니므로 journal과 head를 함께 다시 쓸 수 있는 filesystem 관리자에
+대한 authenticity 또는 여러 host 사이의 분산 합의를 제공하지 않는다. 실제
+vault에는 현재 derived relationship이 없어 운영 데이터에 mutation을 가하는
+live correction은 수행하지 않았다.
 
 multi-source note의 자동 재합성은 Sub-LLM이 준비될 때까지 fail-closed
 quarantine으로 남는다. 따라서 현재 계약은 “선언된 provenance graph 전체의

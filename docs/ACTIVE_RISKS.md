@@ -191,19 +191,30 @@ ID/revision/source/origin과 정확히 일치할 때만 committed를 복구한�
 API는 body, path와 content/source/evidence hash를 공개하지 않으며 모든
 mutation은 CSRF와 별도 사용자 확인을 요구한다.
 
-남은 위험은 coverage와 correction이 구조적 근거 연결만 다루며 기억 내용이나
-사용자의 선택이 사실임을 보증하지 않는다는 점이다. journal은 단일 Bot API
-writer 안에서 직렬화되지만 event chain의 암호학적 tamper evidence나 여러
-writer의 합의는 제공하지 않는다. 실제 vault에는 현재 derived relationship이
-0개라 운영 데이터에 대한 live relink/unlink/undo는 비파괴 원칙상 실행하지
-않았다. 또한 Sub-LLM이 꺼져 있거나 상위 source가 quarantine이면 multi-source
-note는 안전하게 격리되지만 즉시 재합성되지 않는다.
+journal v2는 각 event의 sequence, 이전 event hash와 현재 event hash를 잇고,
+별도 durable chain head로 꼬리 삭제도 감지한다. 기존 v1 prefix는 정확한 raw
+line hash로 첫 v2 event 또는 sequence 0 head에 고정한다. Windows byte-range
+lock/POSIX `flock`과 프로세스 내부 owner table이 correction 전체를 단일
+writer로 만들며, content-free marker는 crash 뒤 stale owner 회수를 기록한다.
+chain/head 손상이나 writer 경쟁은 note와 token을 건드리기 전에 fail-closed하고
+API는 HTTP 503을 반환한다. journal append 뒤 head 교체 전에 중단된 경우에만
+유효한 chain prefix를 같은 writer lease 아래 복구한다.
 
-다음 조치: 실제 derived 기억이 생기면 사용자 청취·화면 확인과 별개로 correction
-preview의 설명 가능성, relink/unlink/undo 결과와 journal 복구를 운영 데이터
-복제본에서 검증한다. 이후 journal hash chaining과 단일-writer ownership
-marker가 필요한지 위협 모델로 판단하고, coverage bucket과 forward rejection
-추세가 실제 품질 신호인지 함께 측정한다.
+남은 위험은 coverage와 correction이 구조적 근거 연결만 다루며 기억 내용이나
+사용자의 선택이 사실임을 보증하지 않는다는 점이다. hash chain과 head는
+우발적·비협조적 파일 변조의 증거이지, journal과 head를 함께 다시 쓸 수 있는
+filesystem 관리자에 대한 keyed authenticity나 외부 불변 원장은 아니다.
+OS lock도 단일 host/shared filesystem의 writer 배제이며 분산 합의가 아니다.
+실제 vault에는 현재 derived relationship이 0개라 운영 데이터에 대한 live
+relink/unlink/undo는 비파괴 원칙상 실행하지 않았다. 또한 Sub-LLM이 꺼져
+있거나 상위 source가 quarantine이면 multi-source note는 안전하게 격리되지만
+즉시 재합성되지 않는다.
+
+다음 조치: 실제 derived 기억이 생기면 correction preview의 설명 가능성,
+relink/unlink/undo 결과와 journal 복구를 운영 데이터 복제본에서 검증한다.
+filesystem 관리자까지 위협 모델에 포함할 때는 keyed external anchor 또는
+불변 audit sink를 추가하고, coverage bucket과 forward rejection 추세가 실제
+품질 신호인지 함께 측정한다.
 
 ## P1 — UI 접근성 corpus·live 행동 검증 미완성
 
