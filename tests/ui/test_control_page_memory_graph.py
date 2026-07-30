@@ -102,7 +102,23 @@ class ControlPageMemoryGraphTests(unittest.TestCase):
         self.assertIn("provenance.derivedFrom", self.html)
         self.assertIn("provenance.evidenceHashes", self.html)
         self.assertIn("provenance.originSource", self.html)
+        self.assertIn(
+            "provenance.originDerivedFrom",
+            self.html,
+        )
         self.assertIn("provenance.revision", self.html)
+        self.assertIn("card.quarantined", self.html)
+        self.assertIn("revocation.revokedSourceIds", self.html)
+        self.assertIn(
+            "revocation.remainingSourceIds",
+            self.html,
+        )
+        self.assertIn(
+            "selectedMemoryCard.canConfirm === false",
+            self.html,
+        )
+        self.assertIn("is-quarantined", self.html)
+        self.assertIn("근거 격리", self.html)
         self.assertIn(
             "payload.expectedContentHash = selectedMemoryCard",
             self.html,
@@ -120,6 +136,22 @@ class ControlPageMemoryGraphTests(unittest.TestCase):
             self.html,
         )
         self.assertIn("confirmToken: preview.confirmToken", self.html)
+        self.assertIn(
+            "preview.derivationImpact",
+            self.html,
+        )
+        self.assertIn(
+            "impact.cascadeDelete",
+            self.html,
+        )
+        self.assertIn(
+            "impact.quarantine",
+            self.html,
+        )
+        self.assertIn(
+            "삭제 미리보기 뒤 기억이나 파생 근거가 바뀌어서 삭제하지 않았어.",
+            self.html,
+        )
         self.assertIn(
             'memoryDeleteButton.addEventListener("click", deleteSelectedMemory)',
             self.html,

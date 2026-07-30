@@ -215,6 +215,143 @@ class MemoryDeletionApiTests(unittest.IsolatedAsyncioTestCase):
             "memory_delete_cleanup_required",
         )
 
+    async def test_api_reports_and_applies_derivation_impact(
+        self,
+    ) -> None:
+        source_a_path = memory_vault.write_memory_vault_note(
+            note_type="concept",
+            title="API Derivation Source A",
+            body="revoked API source body",
+            source="control-page-user",
+        )
+        source_b_path = memory_vault.write_memory_vault_note(
+            note_type="concept",
+            title="API Derivation Source B",
+            body="remaining API source body",
+            source="control-page-user",
+        )
+        source_a = memory_vault.parse_memory_note(
+            source_a_path
+        )
+        source_b = memory_vault.parse_memory_note(
+            source_b_path
+        )
+        single_path = memory_vault.write_memory_vault_note(
+            note_type="episode",
+            title="API Single Derived",
+            body="single API derived body",
+            source="sub-llm-semantic-consolidation",
+            derived_from=[source_a.note_id],
+        )
+        multi_path = memory_vault.write_memory_vault_note(
+            note_type="concept",
+            title="API Multi Derived",
+            body="multi API derived body",
+            source="sub-llm-semantic-consolidation",
+            derived_from=[
+                source_a.note_id,
+                source_b.note_id,
+            ],
+        )
+        multi = memory_vault.parse_memory_note(multi_path)
+
+        preview_response = await self.client.post(
+            (
+                f"/api/control-page/memory/{source_a.note_id}"
+                "/delete/preview"
+            ),
+            headers=self.headers(),
+            json={"reason": "privacy_request"},
+        )
+        preview = await preview_response.json()
+        apply_response = await self.client.post(
+            (
+                f"/api/control-page/memory/{source_a.note_id}"
+                "/delete/apply"
+            ),
+            headers=self.headers(),
+            json={
+                "confirmToken": preview["confirmToken"],
+                "reason": "privacy_request",
+            },
+        )
+        applied = await apply_response.json()
+        snapshot_response = await self.client.get(
+            "/api/control-page/memory?limit=20",
+            headers={"Origin": self.origin},
+        )
+        snapshot = await snapshot_response.json()
+
+        self.assertEqual(preview_response.status, 200)
+        self.assertEqual(
+            preview["derivationImpact"][
+                "cascadeDeleteCount"
+            ],
+            1,
+        )
+        self.assertEqual(
+            preview["derivationImpact"]["quarantineCount"],
+            1,
+        )
+        self.assertEqual(apply_response.status, 200)
+        self.assertEqual(
+            applied["derivationImpact"]["quarantineCount"],
+            1,
+        )
+        self.assertFalse(source_a_path.exists())
+        self.assertFalse(single_path.exists())
+        self.assertTrue(multi_path.exists())
+        cards = {
+            card["id"]: card
+            for card in snapshot["cards"]
+        }
+        self.assertTrue(cards[multi.note_id]["quarantined"])
+
+    async def test_api_rejects_stale_derivation_impact(
+        self,
+    ) -> None:
+        source_path = memory_vault.write_memory_vault_note(
+            note_type="concept",
+            title="API Stale Impact Source",
+            body="stale impact source body",
+            source="control-page-user",
+        )
+        source = memory_vault.parse_memory_note(source_path)
+        preview_response = await self.client.post(
+            (
+                f"/api/control-page/memory/{source.note_id}"
+                "/delete/preview"
+            ),
+            headers=self.headers(),
+            json={},
+        )
+        preview = await preview_response.json()
+        memory_vault.write_memory_vault_note(
+            note_type="episode",
+            title="API Late Derived",
+            body="late derived after preview",
+            source="sub-llm-semantic-consolidation",
+            derived_from=[source.note_id],
+        )
+        apply_response = await self.client.post(
+            (
+                f"/api/control-page/memory/{source.note_id}"
+                "/delete/apply"
+            ),
+            headers=self.headers(),
+            json={"confirmToken": preview["confirmToken"]},
+        )
+        payload = await apply_response.json()
+
+        self.assertEqual(apply_response.status, 409)
+        self.assertEqual(
+            payload["error"],
+            (
+                "memory_derivation_impact_changed_since_preview"
+            ),
+        )
+        self.assertTrue(source_path.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

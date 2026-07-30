@@ -1014,6 +1014,7 @@ def memory_note_action_status(result: dict[str, Any]) -> int:
     if error in {
         "locked_legacy_note",
         "memory_note_changed_since_read",
+        "memory_note_quarantined",
     }:
         return 409
     if error == "memory_edit_failed":
@@ -1038,6 +1039,7 @@ def memory_note_delete_status(result: dict[str, Any]) -> int:
         "memory_delete_token_mismatch",
         "memory_delete_token_reused",
         "memory_note_changed_since_preview",
+        "memory_derivation_impact_changed_since_preview",
         "memory_note_delete_protected",
     }:
         return 409

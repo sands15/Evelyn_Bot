@@ -508,11 +508,26 @@ class ControlPageStateModuleTests(unittest.TestCase):
             {"action": "missing"},
             update_note=update_note,
         )
+        quarantined_result, quarantined_status = (
+            handle_control_page_memory_note_action_request(
+                "note-3",
+                {"action": "confirm"},
+                update_note=lambda *_args, **_kwargs: {
+                    "ok": False,
+                    "error": "memory_note_quarantined",
+                },
+            )
+        )
 
         self.assertEqual(ok_status, 200)
         self.assertEqual(fail_status, 400)
+        self.assertEqual(quarantined_status, 409)
         self.assertTrue(ok_result["ok"])
         self.assertFalse(fail_result["ok"])
+        self.assertEqual(
+            quarantined_result["error"],
+            "memory_note_quarantined",
+        )
         self.assertEqual(
             calls,
             [

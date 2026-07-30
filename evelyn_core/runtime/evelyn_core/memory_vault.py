@@ -19,6 +19,12 @@ from typing import Any, Callable
 
 from .assistant_contracts import MemoryRecallRequest, MemoryRecallResult
 from .config import MEMORY_ROOT, MEMORY_ROW_MAX_CHARS, SUMMARY_LLM_URL, SUMMARY_MODEL_NAME
+from .memory_derivation_revocation import (
+    DerivationNode,
+    DerivationResolution,
+    changed_quarantine_ids,
+    resolve_derivation_states,
+)
 from .runtime_artifact_io import atomic_json_write, atomic_text_write
 from .text import clean_text
 
@@ -28,6 +34,7 @@ INDEX_DIR_NAME = "memory_index"
 INDEX_DB_NAME = "memory.sqlite"
 USER_NOTE_STATE_NAME = "user_note_state.json"
 DELETION_TOMBSTONES_NAME = "memory_deletions.jsonl"
+DERIVATION_REVOCATIONS_NAME = "memory_derivation_revocations.json"
 RETRIEVAL_CACHE_TTL_SECONDS = 300
 MEMORY_DELETE_PREVIEW_TTL_SECONDS = 120
 DEFAULT_PROJECT = "evelyn"
@@ -49,6 +56,9 @@ MEMORY_PROVENANCE_SCHEMA = "memory.provenance.v1"
 MEMORY_DELETE_PREVIEW_SCHEMA = "memory.deletion.preview.v1"
 MEMORY_DELETE_RESULT_SCHEMA = "memory.deletion.result.v1"
 MEMORY_DELETE_TOMBSTONE_SCHEMA = "memory.deletion.tombstone.v1"
+MEMORY_DERIVATION_IMPACT_SCHEMA = "memory.derivation.impact.v1"
+MEMORY_DERIVATION_REVOCATIONS_SCHEMA = "memory.derivation.revocations.v1"
+MEMORY_DERIVATION_RECOMPOSITION_SCHEMA = "memory.derivation.recomposition.v1"
 MEMORY_EDIT_RESULT_SCHEMA = "memory.edit.result.v1"
 MEMORY_EDIT_MAX_TITLE_CHARS = 160
 MEMORY_EDIT_MAX_BODY_CHARS = 100_000
@@ -364,6 +374,7 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             source TEXT NOT NULL DEFAULT '',
             source_refs TEXT NOT NULL DEFAULT '[]',
             derived_from TEXT NOT NULL DEFAULT '[]',
+            origin_derived_from TEXT NOT NULL DEFAULT '[]',
             evidence_hashes TEXT NOT NULL DEFAULT '[]',
             origin_source TEXT NOT NULL DEFAULT '',
             origin_source_refs TEXT NOT NULL DEFAULT '[]',
@@ -410,6 +421,7 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         "ALTER TABLE notes ADD COLUMN source TEXT NOT NULL DEFAULT ''",
         "ALTER TABLE notes ADD COLUMN source_refs TEXT NOT NULL DEFAULT '[]'",
         "ALTER TABLE notes ADD COLUMN derived_from TEXT NOT NULL DEFAULT '[]'",
+        "ALTER TABLE notes ADD COLUMN origin_derived_from TEXT NOT NULL DEFAULT '[]'",
         "ALTER TABLE notes ADD COLUMN evidence_hashes TEXT NOT NULL DEFAULT '[]'",
         "ALTER TABLE notes ADD COLUMN origin_source TEXT NOT NULL DEFAULT ''",
         "ALTER TABLE notes ADD COLUMN origin_source_refs TEXT NOT NULL DEFAULT '[]'",
@@ -553,14 +565,20 @@ def _dot_sparse_vectors(left: dict[str, float], right: dict[str, float]) -> floa
 def sync_memory_vault_index(*, root: Path | None = None, db_path: Path | None = None) -> int:
     vault = ensure_memory_vault_layout(root)
     _reconcile_memory_deletion_tombstones(root=root)
+    derivation_state = _reconcile_memory_derivation_revocations(
+        root=root
+    )
     deleted_note_ids = _memory_deleted_note_ids(root)
+    quarantined_note_ids = set(
+        derivation_state.get("quarantinedNoteIds") or []
+    )
     _invalidate_stale_memory_hot_context(root=root)
     index_path = db_path or memory_index_db_path(root)
     note_paths = sorted(path for path in vault.rglob("*.md") if path.is_file())
 
     with closing(_connect_index(index_path)) as conn:
         _ensure_schema(conn)
-        force_reindex = _get_metadata_int(conn, "schema_version", 0) < 5
+        force_reindex = _get_metadata_int(conn, "schema_version", 0) < 6
         existing = {
             row["rel_path"]: row
             for row in conn.execute("SELECT rel_path, source_hash FROM notes").fetchall()
@@ -573,7 +591,10 @@ def sync_memory_vault_index(*, root: Path | None = None, db_path: Path | None = 
                 note = parse_memory_note(path)
             except Exception:
                 continue
-            if note.note_id in deleted_note_ids:
+            if (
+                note.note_id in deleted_note_ids
+                or note.note_id in quarantined_note_ids
+            ):
                 continue
             rel_path = path.relative_to(vault).as_posix()
             seen.add(rel_path)
@@ -584,11 +605,12 @@ def sync_memory_vault_index(*, root: Path | None = None, db_path: Path | None = 
                 INSERT INTO notes(
                     note_id, rel_path, note_type, title, body, tags, projects, links,
                     status, created_at, updated_at, importance, confidence, source,
-                    source_refs, derived_from, evidence_hashes, origin_source,
+                    source_refs, derived_from, origin_derived_from,
+                    evidence_hashes, origin_source,
                     origin_source_refs, revision, revised_from_evidence_hashes,
                     mtime_ns, source_hash
                 )
-                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(rel_path) DO UPDATE SET
                     note_id = excluded.note_id,
                     note_type = excluded.note_type,
@@ -605,6 +627,7 @@ def sync_memory_vault_index(*, root: Path | None = None, db_path: Path | None = 
                     source = excluded.source,
                     source_refs = excluded.source_refs,
                     derived_from = excluded.derived_from,
+                    origin_derived_from = excluded.origin_derived_from,
                     evidence_hashes = excluded.evidence_hashes,
                     origin_source = excluded.origin_source,
                     origin_source_refs = excluded.origin_source_refs,
@@ -630,6 +653,7 @@ def sync_memory_vault_index(*, root: Path | None = None, db_path: Path | None = 
                     clean_text(str(note.metadata.get("source") or "")),
                     json.dumps(_as_list(note.metadata.get("source_refs") or note.metadata.get("source_ref")), ensure_ascii=False),
                     json.dumps(_as_list(note.metadata.get("derived_from")), ensure_ascii=False),
+                    json.dumps(_as_list(note.metadata.get("origin_derived_from")), ensure_ascii=False),
                     json.dumps(_as_list(note.metadata.get("evidence_hashes") or note.metadata.get("source_hash")), ensure_ascii=False),
                     clean_text(str(note.metadata.get("origin_source") or "")),
                     json.dumps(_as_list(note.metadata.get("origin_source_refs")), ensure_ascii=False),
@@ -667,7 +691,7 @@ def sync_memory_vault_index(*, root: Path | None = None, db_path: Path | None = 
             version += 1
             _set_metadata(conn, "memory_version", version)
             _set_metadata(conn, "last_indexed_at", _utc_now_iso())
-            _set_metadata(conn, "schema_version", 5)
+            _set_metadata(conn, "schema_version", 6)
             _set_metadata(conn, "vector_model", VECTOR_INDEX_MODEL)
             _set_metadata(conn, "vector_dimensions", VECTOR_INDEX_DIMENSIONS)
             conn.execute("DELETE FROM retrieval_cache")
@@ -691,7 +715,10 @@ def _memory_source_type(source: str, note_type: str) -> str:
         return "system"
     if "legacy" in normalized:
         return "legacy"
-    if "consolidation" in normalized:
+    if (
+        "consolidation" in normalized
+        or "recomposition" in normalized
+    ):
         return "derived"
     if normalized in {"conversation-turn-log", "daily-turn-log"} or note_type == "daily":
         return "conversation"
@@ -729,6 +756,9 @@ def _memory_note_provenance(
         if item
     ]
     derived_from = list(_as_list(note.metadata.get("derived_from")))
+    origin_derived_from = list(
+        _as_list(note.metadata.get("origin_derived_from"))
+    )
     evidence_hashes = list(
         _as_list(
             note.metadata.get("evidence_hashes")
@@ -771,6 +801,9 @@ def _memory_note_provenance(
         "sourceType": _memory_source_type(source, note.note_type),
         "sourceRefs": list(dict.fromkeys(source_refs))[:12],
         "derivedFrom": list(dict.fromkeys(derived_from))[:12],
+        "originDerivedFrom": list(
+            dict.fromkeys(origin_derived_from)
+        )[:12],
         "evidenceHashes": list(dict.fromkeys(evidence_hashes))[:12],
         "originSource": origin_source,
         "originSourceRefs": list(
@@ -828,6 +861,13 @@ def _memory_row_provenance(row: sqlite3.Row) -> dict[str, Any]:
         ],
         "derivedFrom": _safe_json_list(
             str(row["derived_from"] if "derived_from" in row.keys() else "[]")
+        ),
+        "originDerivedFrom": _safe_json_list(
+            str(
+                row["origin_derived_from"]
+                if "origin_derived_from" in row.keys()
+                else "[]"
+            )
         ),
         "evidenceHashes": _safe_json_list(
             str(
@@ -2275,9 +2315,400 @@ def run_semantic_memory_consolidation_once(
     }
 
 
+def _write_recomposed_memory_note(
+    path: Path,
+    raw: str,
+    note: MemoryVaultNote,
+    *,
+    title: str,
+    body: str,
+    tags: list[str],
+    links: list[str],
+    confidence: str,
+    source_note_ids: list[str],
+    source_hashes: list[str],
+    revoked_source_ids: list[str],
+) -> MemoryVaultNote:
+    metadata, _old_body = _split_front_matter(raw)
+    recomposed_at = _utc_now_iso()
+    next_title = clean_text(title)[:MEMORY_EDIT_MAX_TITLE_CHARS]
+    next_body = _normalize_memory_edit_body(body)
+    if not next_title or not next_body:
+        raise ValueError("memory_recomposition_empty")
+
+    if not metadata:
+        metadata = {
+            "id": note.note_id,
+            "type": note.note_type,
+            "status": note.status or "active",
+            "created_at": recomposed_at,
+            "projects": [DEFAULT_PROJECT],
+        }
+    if not clean_text(str(metadata.get("origin_source") or "")):
+        metadata["origin_source"] = clean_text(
+            str(metadata.get("source") or "unknown")
+        )
+    if not _as_list(metadata.get("origin_source_refs")):
+        metadata["origin_source_refs"] = list(
+            _as_list(
+                metadata.get("source_refs")
+                or metadata.get("source_ref")
+            )
+        )
+    origin_derivations = list(
+        _as_list(metadata.get("origin_derived_from"))
+    )
+    origin_derivations.extend(
+        _as_list(metadata.get("derived_from"))
+    )
+    metadata.update(
+        {
+            "title": next_title,
+            "updated_at": recomposed_at,
+            "source": "sub-llm-partial-recomposition",
+            "source_refs": source_note_ids,
+            "derived_from": source_note_ids,
+            "origin_derived_from": list(
+                dict.fromkeys(origin_derivations)
+            )[:12],
+            "evidence_hashes": source_hashes,
+            "revoked_source_ids": list(
+                dict.fromkeys(revoked_source_ids)
+            )[:12],
+            "tags": list(dict.fromkeys(tags))[:12],
+            "links": list(dict.fromkeys(links))[:12],
+            "confidence": confidence,
+            "revision": max(
+                0,
+                _front_matter_int(
+                    metadata,
+                    "revision",
+                    0,
+                ),
+            )
+            + 1,
+            "revocation_resolved_at": recomposed_at,
+            "revocation_resolution": (
+                "sub-llm-partial-recomposition"
+            ),
+            "recomposition_of": note.note_id,
+        }
+    )
+    metadata.pop("source_hash", None)
+    content = (
+        _format_front_matter(metadata)
+        + "\n\n"
+        + f"# {next_title}\n\n{next_body}\n"
+    )
+    atomic_text_write(path, content, durable=True)
+    return parse_memory_note(path, content)
+
+
+def run_memory_derivation_recomposition_once(
+    *,
+    root: Path | None = None,
+    sub_llm_health: dict[str, Any] | None = None,
+    llm_client: Any | None = None,
+    max_notes: int = 4,
+    max_source_chars: int = 2400,
+) -> dict[str, Any]:
+    """Rebuild quarantined notes from remaining live sources only."""
+
+    started = time.monotonic()
+    sync_memory_vault_index(root=root)
+    health = (
+        sub_llm_health
+        if isinstance(sub_llm_health, dict)
+        else probe_sub_llm_dependency()
+    )
+    entries = _read_memory_derivation_revocations(root)
+    if not entries:
+        return {
+            "schema": MEMORY_DERIVATION_RECOMPOSITION_SCHEMA,
+            "status": "clear",
+            "recomposedNoteIds": [],
+            "pendingNoteIds": [],
+            "latencyMs": round(
+                (time.monotonic() - started) * 1000.0,
+                1,
+            ),
+        }
+    if not health.get("available"):
+        return {
+            "schema": MEMORY_DERIVATION_RECOMPOSITION_SCHEMA,
+            "status": "skipped_sub_llm_unavailable",
+            "recomposedNoteIds": [],
+            "pendingNoteIds": sorted(entries),
+            "latencyMs": round(
+                (time.monotonic() - started) * 1000.0,
+                1,
+            ),
+        }
+
+    recomposed: list[str] = []
+    errors: list[dict[str, str]] = []
+    attempted_note_ids: set[str] = set()
+    attempts = max(1, min(20, int(max_notes or 1)))
+    for _index in range(attempts):
+        sync_memory_vault_index(root=root)
+        entries = _read_memory_derivation_revocations(root)
+        if not entries:
+            break
+        _nodes, note_sources = _memory_derivation_nodes(
+            root=root
+        )
+        deleted_ids = _memory_deleted_note_ids(root)
+        quarantined_ids = set(entries)
+        ready: tuple[
+            str,
+            dict[str, Any],
+            list[str],
+        ] | None = None
+        for note_id in sorted(entries):
+            if note_id in attempted_note_ids:
+                continue
+            source = note_sources.get(note_id)
+            if source is None:
+                continue
+            _target_path, target_note = source
+            dependencies = list(
+                _as_list(
+                    target_note.metadata.get(
+                        "derived_from"
+                    )
+                )
+            )
+            live_source_ids = [
+                source_id
+                for source_id in dependencies
+                if (
+                    source_id not in deleted_ids
+                    and source_id not in quarantined_ids
+                    and source_id in note_sources
+                )
+            ]
+            blocked_source_ids = [
+                source_id
+                for source_id in dependencies
+                if source_id in quarantined_ids
+            ]
+            if live_source_ids and not blocked_source_ids:
+                ready = (
+                    note_id,
+                    entries[note_id],
+                    live_source_ids,
+                )
+                break
+        if ready is None:
+            break
+
+        note_id, revocation, live_source_ids = ready
+        attempted_note_ids.add(note_id)
+        _target_path, target_note = note_sources[note_id]
+        target_hash = target_note.source_hash
+        source_documents: list[dict[str, Any]] = []
+        source_versions: dict[str, str] = {}
+        for source_id in live_source_ids:
+            _source_path, source_note = note_sources[source_id]
+            source_versions[source_id] = (
+                source_note.source_hash
+            )
+            source_documents.append(
+                {
+                    "id": source_id,
+                    "type": source_note.note_type,
+                    "title": source_note.title,
+                    "body": source_note.body[
+                        : max(200, max_source_chars)
+                    ],
+                    "evidenceHash": (
+                        source_note.source_hash
+                    ),
+                }
+            )
+
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You are Evelyn's privacy-preserving memory "
+                    "recomposition worker. Return exactly one JSON "
+                    "object shaped as {\"note\":{\"title\":\"...\","
+                    "\"body\":\"...\",\"tags\":[\"...\"],"
+                    "\"links\":[\"...\"],"
+                    "\"confidence\":\"low|medium|high\"}}. "
+                    "Use only the supplied live source notes. Never "
+                    "infer, restore, mention, or preserve information "
+                    "from a revoked source. If the live sources do not "
+                    "support a fact, omit it."
+                ),
+            },
+            {
+                "role": "user",
+                "content": json.dumps(
+                    {
+                        "targetType": target_note.note_type,
+                        "liveSources": source_documents,
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+            },
+        ]
+        try:
+            result = (
+                llm_client(messages)
+                if llm_client is not None
+                else request_sub_llm_json(messages)
+            )
+        except Exception as exc:
+            errors.append(
+                {
+                    "noteId": note_id,
+                    "error": type(exc).__name__,
+                }
+            )
+            continue
+        item = (
+            result.get("note")
+            if isinstance(result, dict)
+            and isinstance(result.get("note"), dict)
+            else {}
+        )
+        next_title = clean_text(
+            str(item.get("title") or "")
+        )
+        next_body = _normalize_memory_edit_body(
+            str(item.get("body") or "")
+        )
+        if not next_title or len(next_body) < 10:
+            errors.append(
+                {
+                    "noteId": note_id,
+                    "error": "memory_recomposition_invalid",
+                }
+            )
+            continue
+        confidence = clean_text(
+            str(item.get("confidence") or "medium")
+        ).lower()
+        if confidence not in {"low", "medium", "high"}:
+            confidence = "medium"
+        tags = list(_as_list(item.get("tags")))
+        links = list(_as_list(item.get("links")))
+
+        with _memory_edit_lock:
+            current = _memory_vault_find_note(
+                note_id,
+                root=root,
+            )
+            if current is None:
+                continue
+            current_path, current_note, current_raw = current
+            if not secrets.compare_digest(
+                current_note.source_hash,
+                target_hash,
+            ):
+                errors.append(
+                    {
+                        "noteId": note_id,
+                        "error": (
+                            "memory_recomposition_target_changed"
+                        ),
+                    }
+                )
+                continue
+            sources_changed = False
+            for source_id, expected_hash in (
+                source_versions.items()
+            ):
+                current_source = _memory_vault_find_note(
+                    source_id,
+                    root=root,
+                )
+                if (
+                    current_source is None
+                    or not secrets.compare_digest(
+                        current_source[1].source_hash,
+                        expected_hash,
+                    )
+                ):
+                    sources_changed = True
+                    break
+            if sources_changed:
+                errors.append(
+                    {
+                        "noteId": note_id,
+                        "error": (
+                            "memory_recomposition_source_changed"
+                        ),
+                    }
+                )
+                continue
+            try:
+                _write_recomposed_memory_note(
+                    current_path,
+                    current_raw,
+                    current_note,
+                    title=next_title,
+                    body=next_body,
+                    tags=tags,
+                    links=links,
+                    confidence=confidence,
+                    source_note_ids=live_source_ids,
+                    source_hashes=[
+                        source_versions[source_id]
+                        for source_id in live_source_ids
+                    ],
+                    revoked_source_ids=list(
+                        revocation.get(
+                            "revokedSourceIds"
+                        )
+                        or []
+                    ),
+                )
+            except (OSError, ValueError) as exc:
+                errors.append(
+                    {
+                        "noteId": note_id,
+                        "error": type(exc).__name__,
+                    }
+                )
+                continue
+        recomposed.append(note_id)
+
+    sync_memory_vault_index(root=root)
+    pending = sorted(
+        _read_memory_derivation_revocations(root)
+    )
+    return {
+        "schema": MEMORY_DERIVATION_RECOMPOSITION_SCHEMA,
+        "status": (
+            "recomposed"
+            if recomposed
+            else "pending"
+            if pending
+            else "clear"
+        ),
+        "recomposedNoteIds": recomposed,
+        "pendingNoteIds": pending,
+        "errors": errors,
+        "latencyMs": round(
+            (time.monotonic() - started) * 1000.0,
+            1,
+        ),
+    }
+
+
 def run_memory_vault_maintenance_once(guild_id: int, *, root: Path | None = None) -> dict[str, Any]:
     started = time.monotonic()
     sub_llm = probe_sub_llm_dependency()
+    derivation_recomposition = (
+        run_memory_derivation_recomposition_once(
+            root=root,
+            sub_llm_health=sub_llm,
+        )
+    )
     bootstrap_paths = bootstrap_memory_vault_source(root=root)
     legacy_path = refresh_legacy_memory_mirror(guild_id, root=root)
     legacy_nodes = refresh_legacy_memory_node_notes(guild_id, root=root)
@@ -2299,6 +2730,9 @@ def run_memory_vault_maintenance_once(guild_id: int, *, root: Path | None = None
         "legacy_nodes": [str(path) for path in legacy_nodes],
         "daily_consolidation": str(consolidated_path) if consolidated_path else "",
         "semantic_consolidation": semantic_consolidation,
+        "derivation_recomposition": (
+            derivation_recomposition
+        ),
         "hot_context_sources": hot_context.get("sources", []),
         "dependencies": {"sub_llm": sub_llm},
         "semantic_consolidation_enabled": bool(sub_llm.get("available")),
@@ -2642,6 +3076,7 @@ def _memory_vault_user_card(
     *,
     hidden: bool,
     rel_path: str,
+    revocation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     confirmed_at = clean_text(str(note_state.get("confirmed_at") or note.metadata.get("confirmed_at") or ""))
     is_locked_legacy = _is_legacy_memory_note_type(note.note_type, rel_path)
@@ -2650,6 +3085,14 @@ def _memory_vault_user_card(
         clean_text(str(note.metadata.get("source") or "")) == BOOTSTRAP_NOTE_SOURCE
     )
     locked_preview = _locked_memory_preview(note.note_type, rel_path)
+    revocation_state = (
+        dict(revocation)
+        if isinstance(revocation, dict)
+        else {}
+    )
+    quarantined = (
+        revocation_state.get("state") == "quarantined"
+    )
     return {
         "id": note.note_id,
         "title": _legacy_to_public_title(note.note_type, rel_path, note.title),
@@ -2662,8 +3105,12 @@ def _memory_vault_user_card(
         "confirmedAt": confirmed_at,
         "pinned": bool(note_state.get("pinned")),
         "hidden": hidden,
+        "quarantined": quarantined,
+        "recallEligible": not quarantined,
+        "revocation": revocation_state,
         "locked": is_locked_legacy,
         "canEdit": not is_locked_legacy,
+        "canConfirm": not quarantined,
         "canDelete": (
             not is_internal_note
             and not is_locked_legacy
@@ -2760,6 +3207,16 @@ def _write_memory_vault_note_body(
                     or metadata.get("source_ref")
                 )
             )
+        previous_derivations = list(
+            _as_list(metadata.get("origin_derived_from"))
+        )
+        previous_derivations.extend(
+            _as_list(metadata.get("derived_from"))
+        )
+        metadata["origin_derived_from"] = list(
+            dict.fromkeys(previous_derivations)
+        )[:12]
+        metadata["derived_from"] = []
         previous_evidence = list(
             _as_list(
                 metadata.get("revised_from_evidence_hashes")
@@ -2784,7 +3241,10 @@ def _write_memory_vault_note_body(
                 body=next_body,
             )
         ]
+        metadata.pop("source_hash", None)
         metadata["confidence"] = "high"
+        metadata["revocation_resolved_at"] = edited_at
+        metadata["revocation_resolution"] = "user-edit"
         metadata["revision"] = max(
             0,
             _front_matter_int(metadata, "revision", 0),
@@ -2809,6 +3269,7 @@ def _write_memory_vault_note_body(
             "origin_source": "unknown",
             "origin_source_refs": [],
             "derived_from": [],
+            "origin_derived_from": [],
             "evidence_hashes": [
                 _memory_edit_evidence_hash(
                     title=next_title,
@@ -2817,6 +3278,8 @@ def _write_memory_vault_note_body(
             ],
             "revised_from_evidence_hashes": [],
             "revision": 1,
+            "revocation_resolved_at": edited_at,
+            "revocation_resolution": "user-edit",
         }
         content = (
             _format_front_matter(metadata)
@@ -2837,9 +3300,17 @@ def memory_vault_user_snapshot(
     version = sync_memory_vault_index(root=root)
     vault = ensure_memory_vault_layout(root)
     state = _read_user_note_state(root)
+    revocations = _read_memory_derivation_revocations(root)
     deleted_note_ids = _memory_deleted_note_ids(root)
     cards: list[dict[str, Any]] = []
-    counts = {"total": 0, "confirmed": 0, "unconfirmed": 0, "pinned": 0, "hidden": 0}
+    counts = {
+        "total": 0,
+        "confirmed": 0,
+        "unconfirmed": 0,
+        "pinned": 0,
+        "hidden": 0,
+        "quarantined": 0,
+    }
     for path in vault.rglob("*.md"):
         try:
             raw = path.read_text(encoding="utf-8", errors="ignore")
@@ -2866,8 +3337,29 @@ def memory_vault_user_snapshot(
             counts["unconfirmed"] += 1
         if pinned:
             counts["pinned"] += 1
-        cards.append(_memory_vault_user_card(path, note, raw, note_state, hidden=hidden, rel_path=rel_path))
-    cards.sort(key=lambda item: (not item["pinned"], item["confirmed"], -float(item["importance"] or 0), item["title"]))
+        revocation = revocations.get(note.note_id)
+        if revocation:
+            counts["quarantined"] += 1
+        cards.append(
+            _memory_vault_user_card(
+                path,
+                note,
+                raw,
+                note_state,
+                hidden=hidden,
+                rel_path=rel_path,
+                revocation=revocation,
+            )
+        )
+    cards.sort(
+        key=lambda item: (
+            not item["quarantined"],
+            not item["pinned"],
+            item["confirmed"],
+            -float(item["importance"] or 0),
+            item["title"],
+        )
+    )
     cards = cards[: max(1, limit)]
     return {
         "ok": True,
@@ -2897,10 +3389,58 @@ def memory_vault_user_note(
     rel_path = path.relative_to(vault).as_posix()
     state = _read_user_note_state(root)
     note_state = state.get(note.note_id, {})
+    (
+        derivation_resolution,
+        _derivation_nodes,
+        _derivation_sources,
+        revocations,
+    ) = _resolve_current_memory_derivations(root=root)
+    if note.note_id in derivation_resolution.deleted_note_ids:
+        return {"ok": False, "error": "note_not_found"}
+    revocation = revocations.get(note.note_id)
+    if (
+        revocation is None
+        and note.note_id
+        in derivation_resolution.quarantined_note_ids
+    ):
+        reason = derivation_resolution.reasons.get(
+            note.note_id
+        )
+        revocation = {
+            "noteId": note.note_id,
+            "state": "quarantined",
+            "directSourceIds": list(
+                _as_list(note.metadata.get("derived_from"))
+            ),
+            "revokedSourceIds": list(
+                reason.revoked_source_ids
+                if reason is not None
+                else ()
+            ),
+            "blockedSourceIds": list(
+                reason.blocked_source_ids
+                if reason is not None
+                else ()
+            ),
+            "remainingSourceIds": list(
+                reason.remaining_source_ids
+                if reason is not None
+                else ()
+            ),
+            "quarantinedAt": _utc_now_iso(),
+        }
     hidden = bool(note_state.get("hidden")) or note.status in {"archived", "superseded"}
     return {
         "ok": True,
-        "card": _memory_vault_user_card(path, note, raw, note_state, hidden=hidden, rel_path=rel_path),
+        "card": _memory_vault_user_card(
+            path,
+            note,
+            raw,
+            note_state,
+            hidden=hidden,
+            rel_path=rel_path,
+            revocation=revocation,
+        ),
         "checkedAt": _utc_now_iso(),
     }
 
@@ -2914,6 +3454,7 @@ def update_memory_vault_user_note(
     expected_content_hash: str | None = None,
     root: Path | None = None,
 ) -> dict[str, Any]:
+    sync_memory_vault_index(root=root)
     target = _memory_vault_find_note(note_id_or_rel_path, root=root)
     if target is None:
         return {"ok": False, "error": "note_not_found"}
@@ -2923,6 +3464,11 @@ def update_memory_vault_user_note(
     normalized_action = clean_text(action).lower()
     now = _utc_now_iso()
     if normalized_action == "confirm":
+        if note.note_id in _memory_quarantined_note_ids(root):
+            return {
+                "ok": False,
+                "error": "memory_note_quarantined",
+            }
         note_state["confirmed_at"] = now
     elif normalized_action == "unconfirm":
         note_state.pop("confirmed_at", None)
@@ -3019,6 +3565,17 @@ def update_memory_vault_user_note(
             cleanup_errors.append(
                 "memory_edit_index_cleanup_failed"
             )
+        try:
+            refresh_memory_hot_context(root=root)
+        except Exception:
+            cleanup_errors.append(
+                "memory_edit_hot_context_cleanup_failed"
+            )
+        else:
+            if "memory_edit_index_cleanup_failed" in cleanup_errors:
+                cleanup_errors.remove(
+                    "memory_edit_index_cleanup_failed"
+                )
         provenance = _memory_note_provenance(
             updated_note,
             rel_path=path.relative_to(
@@ -3129,14 +3686,422 @@ def _memory_deletion_journal_state(
     return (journal_stat.st_mtime_ns, journal_stat.st_size)
 
 
+def _memory_derivation_revocations_path(
+    root: Path | None = None,
+) -> Path:
+    return memory_index_dir(root) / DERIVATION_REVOCATIONS_NAME
+
+
+def _memory_derivation_revocation_file_state(
+    root: Path | None = None,
+) -> tuple[int, int]:
+    try:
+        state = _memory_derivation_revocations_path(root).stat()
+    except FileNotFoundError:
+        return (0, 0)
+    except OSError:
+        return (-1, -1)
+    return (state.st_mtime_ns, state.st_size)
+
+
+def _read_memory_derivation_revocations(
+    root: Path | None = None,
+) -> dict[str, dict[str, Any]]:
+    path = _memory_derivation_revocations_path(root)
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(
+            "memory_derivation_revocations_corrupt"
+        ) from exc
+    if (
+        not isinstance(payload, dict)
+        or payload.get("schema")
+        != MEMORY_DERIVATION_REVOCATIONS_SCHEMA
+        or not isinstance(payload.get("entries"), dict)
+    ):
+        raise RuntimeError(
+            "memory_derivation_revocations_corrupt"
+        )
+    output: dict[str, dict[str, Any]] = {}
+    for note_id, entry in payload["entries"].items():
+        cleaned_id = clean_text(str(note_id))
+        if (
+            cleaned_id
+            and isinstance(entry, dict)
+            and entry.get("state") == "quarantined"
+        ):
+            output[cleaned_id] = dict(entry)
+    return output
+
+
+def _write_memory_derivation_revocations(
+    entries: dict[str, dict[str, Any]],
+    *,
+    root: Path | None = None,
+) -> None:
+    path = _memory_derivation_revocations_path(root)
+    if not entries and not path.exists():
+        return
+    atomic_json_write(
+        path,
+        {
+            "schema": MEMORY_DERIVATION_REVOCATIONS_SCHEMA,
+            "updatedAt": _utc_now_iso(),
+            "entries": {
+                note_id: entries[note_id]
+                for note_id in sorted(entries)
+            },
+        },
+        durable=True,
+    )
+
+
+def _memory_derivation_nodes(
+    *,
+    root: Path | None = None,
+) -> tuple[
+    dict[str, DerivationNode],
+    dict[str, tuple[Path, MemoryVaultNote]],
+]:
+    vault = ensure_memory_vault_layout(root)
+    deleted_note_ids = _memory_deleted_note_ids(root)
+    nodes: dict[str, DerivationNode] = {}
+    note_sources: dict[str, tuple[Path, MemoryVaultNote]] = {}
+    for path in sorted(vault.rglob("*.md")):
+        if not path.is_file():
+            continue
+        try:
+            note = parse_memory_note(path)
+        except Exception:
+            continue
+        if note.note_id in deleted_note_ids:
+            continue
+        dependencies = tuple(
+            _as_list(note.metadata.get("derived_from"))
+        )
+        nodes[note.note_id] = DerivationNode(
+            note_id=note.note_id,
+            title=note.title,
+            note_type=note.note_type,
+            source_hash=note.source_hash,
+            derived_from=dependencies,
+        )
+        note_sources[note.note_id] = (path, note)
+    return nodes, note_sources
+
+
+def _memory_revocation_entry_resolved(
+    note: MemoryVaultNote,
+    entry: dict[str, Any],
+) -> bool:
+    resolved_at = clean_text(
+        str(note.metadata.get("revocation_resolved_at") or "")
+    )
+    quarantined_at = clean_text(
+        str(entry.get("quarantinedAt") or "")
+    )
+    if not resolved_at:
+        return False
+    try:
+        resolved_time = datetime.fromisoformat(
+            resolved_at.replace("Z", "+00:00")
+        ).timestamp()
+        quarantined_time = datetime.fromisoformat(
+            quarantined_at.replace("Z", "+00:00")
+        ).timestamp()
+    except (TypeError, ValueError):
+        return False
+    return resolved_time >= quarantined_time
+
+
+def _active_memory_quarantine_seeds(
+    entries: dict[str, dict[str, Any]],
+    note_sources: dict[
+        str,
+        tuple[Path, MemoryVaultNote],
+    ],
+) -> set[str]:
+    seeds: set[str] = set()
+    for note_id, entry in entries.items():
+        source = note_sources.get(note_id)
+        if source is None:
+            continue
+        _path, note = source
+        if not _memory_revocation_entry_resolved(note, entry):
+            seeds.add(note_id)
+    return seeds
+
+
+def _resolve_current_memory_derivations(
+    *,
+    root: Path | None = None,
+    additional_deleted_ids: set[str] | None = None,
+) -> tuple[
+    DerivationResolution,
+    dict[str, DerivationNode],
+    dict[str, tuple[Path, MemoryVaultNote]],
+    dict[str, dict[str, Any]],
+]:
+    nodes, note_sources = _memory_derivation_nodes(root=root)
+    entries = _read_memory_derivation_revocations(root)
+    seeds = _active_memory_quarantine_seeds(
+        entries,
+        note_sources,
+    )
+    deleted_note_ids = _memory_deleted_note_ids(root)
+    deleted_note_ids.update(additional_deleted_ids or set())
+    resolution = resolve_derivation_states(
+        nodes,
+        deleted_note_ids=deleted_note_ids,
+        seeded_quarantine_ids=seeds,
+    )
+    return resolution, nodes, note_sources, entries
+
+
+def _memory_derivation_public_source(
+    source_id: str,
+    nodes: dict[str, DerivationNode],
+) -> dict[str, Any]:
+    node = nodes.get(source_id)
+    return {
+        "id": source_id,
+        "title": node.title if node is not None else source_id,
+        "type": node.note_type if node is not None else "unknown",
+    }
+
+
+def _memory_derivation_deletion_impact(
+    trigger_note_id: str,
+    *,
+    root: Path | None = None,
+) -> tuple[dict[str, Any], str]:
+    baseline, nodes, note_sources, entries = (
+        _resolve_current_memory_derivations(root=root)
+    )
+    candidate = resolve_derivation_states(
+        nodes,
+        deleted_note_ids=(
+            set(baseline.deleted_note_ids)
+            | {clean_text(trigger_note_id)}
+        ),
+        seeded_quarantine_ids=_active_memory_quarantine_seeds(
+            entries,
+            note_sources,
+        ),
+    )
+    trigger_id = clean_text(trigger_note_id)
+    cascade_ids = sorted(
+        (
+            set(candidate.deleted_note_ids)
+            - set(baseline.deleted_note_ids)
+        )
+        - {trigger_id}
+    )
+    quarantine_ids = sorted(
+        set(changed_quarantine_ids(baseline, candidate))
+        - set(candidate.deleted_note_ids)
+        - {trigger_id}
+    )
+
+    cascade: list[dict[str, Any]] = []
+    for note_id in cascade_ids:
+        node = nodes.get(note_id)
+        if node is None:
+            continue
+        revoked = sorted(
+            set(node.derived_from)
+            & set(candidate.deleted_note_ids)
+        )
+        cascade.append(
+            {
+                "id": note_id,
+                "title": node.title,
+                "type": node.note_type,
+                "revokedSourceIds": revoked,
+            }
+        )
+
+    quarantine: list[dict[str, Any]] = []
+    for note_id in quarantine_ids:
+        node = nodes.get(note_id)
+        reason = candidate.reasons.get(note_id)
+        if node is None or reason is None:
+            continue
+        quarantine.append(
+            {
+                "id": note_id,
+                "title": node.title,
+                "type": node.note_type,
+                "revokedSourceIds": list(
+                    reason.revoked_source_ids
+                ),
+                "blockedSourceIds": list(
+                    reason.blocked_source_ids
+                ),
+                "remainingSources": [
+                    _memory_derivation_public_source(
+                        source_id,
+                        nodes,
+                    )
+                    for source_id in reason.remaining_source_ids
+                ],
+            }
+        )
+
+    impact = {
+        "schema": MEMORY_DERIVATION_IMPACT_SCHEMA,
+        "triggerNoteId": trigger_id,
+        "affectedCount": len(cascade) + len(quarantine),
+        "cascadeDeleteCount": len(cascade),
+        "quarantineCount": len(quarantine),
+        "cascadeDelete": cascade,
+        "quarantine": quarantine,
+        "recompositionQueued": bool(quarantine),
+    }
+    fingerprint_payload = {
+        "triggerNoteId": trigger_id,
+        "triggerContentHash": (
+            nodes[trigger_id].source_hash
+            if trigger_id in nodes
+            else ""
+        ),
+        "baselineDeleted": sorted(
+            baseline.deleted_note_ids
+        ),
+        "baselineQuarantined": sorted(
+            baseline.quarantined_note_ids
+        ),
+        "impact": impact,
+        "affectedSourceHashes": {
+            note_id: nodes[note_id].source_hash
+            for note_id in sorted(
+                set(cascade_ids) | set(quarantine_ids)
+            )
+            if note_id in nodes
+        },
+    }
+    fingerprint = hashlib.sha256(
+        json.dumps(
+            fingerprint_payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    return impact, fingerprint
+
+
+def _reconcile_memory_derivation_revocations(
+    *,
+    root: Path | None = None,
+) -> dict[str, Any]:
+    resolution, nodes, note_sources, prior_entries = (
+        _resolve_current_memory_derivations(root=root)
+    )
+    deleted_before = _memory_deleted_note_ids(root)
+    cascade_ids = sorted(
+        set(resolution.deleted_note_ids) - deleted_before
+    )
+    now_iso = _utc_now_iso()
+    for note_id in cascade_ids:
+        node = nodes.get(note_id)
+        if node is None:
+            continue
+        reason = {
+            "schema": MEMORY_DELETE_TOMBSTONE_SCHEMA,
+            "noteId": note_id,
+            "noteType": node.note_type,
+            "sourceType": "derived",
+            "reason": "source_revoked",
+            "deletedAt": now_iso,
+            "revokedByNoteIds": sorted(
+                set(node.derived_from)
+                & set(resolution.deleted_note_ids)
+            )[:12],
+        }
+        _append_memory_deletion_tombstone(
+            reason,
+            root=root,
+        )
+
+    if cascade_ids:
+        _reconcile_memory_deletion_tombstones(root=root)
+
+    entries: dict[str, dict[str, Any]] = {}
+    for note_id in sorted(
+        set(resolution.quarantined_note_ids)
+        - set(resolution.deleted_note_ids)
+    ):
+        node = nodes.get(note_id)
+        reason = resolution.reasons.get(note_id)
+        if node is None or reason is None:
+            continue
+        previous = prior_entries.get(note_id, {})
+        entries[note_id] = {
+            "noteId": note_id,
+            "state": "quarantined",
+            "directSourceIds": list(node.derived_from),
+            "revokedSourceIds": list(
+                reason.revoked_source_ids
+            ),
+            "blockedSourceIds": list(
+                reason.blocked_source_ids
+            ),
+            "remainingSourceIds": list(
+                reason.remaining_source_ids
+            ),
+            "quarantinedAt": clean_text(
+                str(previous.get("quarantinedAt") or "")
+            )
+            or now_iso,
+        }
+    if entries != prior_entries:
+        _write_memory_derivation_revocations(
+            entries,
+            root=root,
+        )
+        _remove_memory_hot_context_files(root=root)
+    return {
+        "cascadeDeletedNoteIds": cascade_ids,
+        "quarantinedNoteIds": sorted(entries),
+        "cascadeDeletedCount": len(cascade_ids),
+        "quarantinedCount": len(entries),
+    }
+
+
+def _memory_quarantined_note_ids(
+    root: Path | None = None,
+) -> set[str]:
+    return set(_read_memory_derivation_revocations(root))
+
+
+def _remove_memory_hot_context_files(
+    *,
+    root: Path | None = None,
+) -> None:
+    index_dir = memory_index_dir(root)
+    for path in (
+        index_dir / "hot_context.json",
+        index_dir / "prompt_blocks" / "core_prompt.txt",
+    ):
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            pass
+
+
 def _invalidate_stale_memory_hot_context(
     *,
     root: Path | None = None,
 ) -> None:
     index_dir = memory_index_dir(root)
     hot_path = index_dir / "hot_context.json"
-    prompt_path = index_dir / "prompt_blocks" / "core_prompt.txt"
-    cache_state: tuple[int, int] | None = None
+    cache_state: tuple[int, int, int, int] | None = None
     if hot_path.exists():
         try:
             payload = json.loads(
@@ -3159,18 +4124,27 @@ def _invalidate_stale_memory_hot_context(
                         )
                         or 0
                     ),
+                    int(
+                        payload.get(
+                            "derivation_revocations_mtime_ns"
+                        )
+                        or 0
+                    ),
+                    int(
+                        payload.get(
+                            "derivation_revocations_size"
+                        )
+                        or 0
+                    ),
                 )
         except (OSError, TypeError, ValueError, json.JSONDecodeError):
             cache_state = None
-    if cache_state == _memory_deletion_journal_state(root):
+    if cache_state == (
+        *_memory_deletion_journal_state(root),
+        *_memory_derivation_revocation_file_state(root),
+    ):
         return
-    for path in (hot_path, prompt_path):
-        try:
-            path.unlink()
-        except FileNotFoundError:
-            pass
-        except OSError:
-            pass
+    _remove_memory_hot_context_files(root=root)
 
 
 def _reconcile_memory_deletion_tombstones(
@@ -3264,6 +4238,7 @@ def preview_memory_vault_user_note_deletion(
     root: Path | None = None,
     now: Callable[[], float] = time.time,
 ) -> dict[str, Any]:
+    sync_memory_vault_index(root=root)
     target = _memory_vault_find_note(note_id_or_rel_path, root=root)
     if target is None:
         return {"ok": False, "error": "note_not_found"}
@@ -3284,12 +4259,19 @@ def preview_memory_vault_user_note_deletion(
     token = secrets.token_urlsafe(32)
     root_key = str((root or MEMORY_ROOT).resolve())
     normalized_reason = _memory_deletion_reason(reason)
+    derivation_impact, derivation_impact_hash = (
+        _memory_derivation_deletion_impact(
+            note.note_id,
+            root=root,
+        )
+    )
     with _memory_delete_lock:
         _prune_memory_delete_tokens(timestamp)
         _memory_delete_tokens[token] = {
             "noteId": note.note_id,
             "root": root_key,
             "contentHash": note.source_hash,
+            "derivationImpactHash": derivation_impact_hash,
             "reason": normalized_reason,
             "expiresAt": expires_at,
             "used": False,
@@ -3318,6 +4300,7 @@ def preview_memory_vault_user_note_deletion(
             "hotContextRebuilt": True,
             "contentFreeTombstoneRetained": True,
         },
+        "derivationImpact": derivation_impact,
         "reason": normalized_reason,
         "confirmToken": token,
         "expiresAt": expires_at,
@@ -3374,6 +4357,24 @@ def delete_memory_vault_user_note(
         }
     if note.source_hash != clean_text(str(preview.get("contentHash") or "")):
         return {"ok": False, "error": "memory_note_changed_since_preview"}
+    derivation_impact, derivation_impact_hash = (
+        _memory_derivation_deletion_impact(
+            note.note_id,
+            root=root,
+        )
+    )
+    if not secrets.compare_digest(
+        derivation_impact_hash,
+        clean_text(
+            str(preview.get("derivationImpactHash") or "")
+        ),
+    ):
+        return {
+            "ok": False,
+            "error": (
+                "memory_derivation_impact_changed_since_preview"
+            ),
+        }
 
     state = _read_user_note_state(root)
     previous_note_state = state.pop(note.note_id, None)
@@ -3412,6 +4413,30 @@ def delete_memory_vault_user_note(
                     "ok": False,
                     "error": "memory_note_changed_since_preview",
                 }
+            locked_impact, locked_impact_hash = (
+                _memory_derivation_deletion_impact(
+                    current_note.note_id,
+                    root=root,
+                )
+            )
+            if not secrets.compare_digest(
+                locked_impact_hash,
+                clean_text(
+                    str(
+                        preview.get(
+                            "derivationImpactHash"
+                        )
+                        or ""
+                    )
+                ),
+            ):
+                return {
+                    "ok": False,
+                    "error": (
+                        "memory_derivation_impact_changed_since_preview"
+                    ),
+                }
+            derivation_impact = locked_impact
             _append_memory_deletion_tombstone(
                 tombstone,
                 root=root,
@@ -3467,6 +4492,7 @@ def delete_memory_vault_user_note(
             "error": "memory_delete_cleanup_required",
             "cleanupErrors": list(dict.fromkeys(cleanup_errors)),
             "tombstone": tombstone,
+            "derivationImpact": derivation_impact,
         }
 
     return {
@@ -3481,6 +4507,7 @@ def delete_memory_vault_user_note(
         "sourceFileDeleted": True,
         "tombstoned": True,
         "tombstone": tombstone,
+        "derivationImpact": derivation_impact,
     }
 
 
@@ -3573,6 +4600,11 @@ def refresh_memory_hot_context(
             deletion_journal_state_before = (
                 _memory_deletion_journal_state(root)
             )
+            derivation_revocation_state_before = (
+                _memory_derivation_revocation_file_state(
+                    root
+                )
+            )
             deleted_note_ids = _memory_deleted_note_ids(root)
         rows = [
             row
@@ -3593,7 +4625,15 @@ def refresh_memory_hot_context(
             content = content[: max(0, max_chars - 3)].rstrip() + "..."
 
         deletion_journal_state = _memory_deletion_journal_state(root)
-        if deletion_journal_state != deletion_journal_state_before:
+        derivation_revocation_state = (
+            _memory_derivation_revocation_file_state(root)
+        )
+        if (
+            deletion_journal_state
+            != deletion_journal_state_before
+            or derivation_revocation_state
+            != derivation_revocation_state_before
+        ):
             content = ""
             source_paths = []
         payload = {
@@ -3603,14 +4643,25 @@ def refresh_memory_hot_context(
             "sources": source_paths,
             "deletion_journal_mtime_ns": deletion_journal_state[0],
             "deletion_journal_size": deletion_journal_state[1],
+            "derivation_revocations_mtime_ns": (
+                derivation_revocation_state[0]
+            ),
+            "derivation_revocations_size": (
+                derivation_revocation_state[1]
+            ),
             "max_chars": max_chars,
             "dependencies": dependency_health or {},
         }
-        (memory_index_dir(root) / "hot_context.json").write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2),
-            encoding="utf-8",
+        atomic_json_write(
+            memory_index_dir(root) / "hot_context.json",
+            payload,
+            durable=True,
         )
-        (prompt_dir / "core_prompt.txt").write_text(content, encoding="utf-8")
+        atomic_text_write(
+            prompt_dir / "core_prompt.txt",
+            content,
+            durable=True,
+        )
         conn.execute(
             """
             INSERT INTO prompt_block_cache(block_key, memory_version, created_at, content)
@@ -3644,6 +4695,16 @@ def read_memory_hot_context(*, root: Path | None = None, max_chars: int = HOT_CO
         cached_deletion_journal_size = int(
             payload.get("deletion_journal_size") or 0
         )
+        cached_derivation_revocations_mtime_ns = int(
+            payload.get(
+                "derivation_revocations_mtime_ns"
+            )
+            or 0
+        )
+        cached_derivation_revocations_size = int(
+            payload.get("derivation_revocations_size")
+            or 0
+        )
     except (TypeError, ValueError):
         return ""
     if (
@@ -3652,6 +4713,11 @@ def read_memory_hot_context(*, root: Path | None = None, max_chars: int = HOT_CO
             cached_deletion_journal_size,
         )
         != _memory_deletion_journal_state(root)
+        or (
+            cached_derivation_revocations_mtime_ns,
+            cached_derivation_revocations_size,
+        )
+        != _memory_derivation_revocation_file_state(root)
     ):
         return ""
     content = clean_text(str(payload.get("content") or ""))
@@ -3706,6 +4772,12 @@ def activate_memory_vault_for_guild(guild_id: int, *, root: Path | None = None) 
     """Activate the full Markdown vault/index/cache pipeline for a guild."""
     started = time.monotonic()
     sub_llm = probe_sub_llm_dependency()
+    derivation_recomposition = (
+        run_memory_derivation_recomposition_once(
+            root=root,
+            sub_llm_health=sub_llm,
+        )
+    )
     bootstrap_paths = bootstrap_memory_vault_source(root=root)
     legacy_path = refresh_legacy_memory_mirror(guild_id, root=root)
     legacy_nodes = refresh_legacy_memory_node_notes(guild_id, root=root)
@@ -3726,6 +4798,9 @@ def activate_memory_vault_for_guild(guild_id: int, *, root: Path | None = None) 
         "legacy_nodes": [str(path) for path in legacy_nodes],
         "daily_consolidation": str(consolidated_path) if consolidated_path else "",
         "semantic_consolidation": semantic_consolidation,
+        "derivation_recomposition": (
+            derivation_recomposition
+        ),
         "memory_version": version,
         "hot_context_sources": hot_context.get("sources", []),
         "dependencies": {"sub_llm": sub_llm},
@@ -3771,6 +4846,9 @@ def mark_memory_note_superseded(note_id_or_rel_path: str, *, root: Path | None =
 
 
 __all__ = [
+    "MEMORY_DERIVATION_IMPACT_SCHEMA",
+    "MEMORY_DERIVATION_RECOMPOSITION_SCHEMA",
+    "MEMORY_DERIVATION_REVOCATIONS_SCHEMA",
     "MEMORY_DELETE_PREVIEW_SCHEMA",
     "MEMORY_DELETE_RESULT_SCHEMA",
     "MEMORY_DELETE_TOMBSTONE_SCHEMA",
@@ -3800,6 +4878,7 @@ __all__ = [
     "refresh_memory_hot_context",
     "consolidate_daily_memory_once",
     "run_memory_vault_maintenance_once",
+    "run_memory_derivation_recomposition_once",
     "run_semantic_memory_consolidation_once",
     "sync_memory_vault_index",
     "delete_memory_vault_user_note",

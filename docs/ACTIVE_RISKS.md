@@ -115,22 +115,25 @@ JSON, `ref_text`도 Docker 시작 전에 검사한다.
 검증 마법사로 로컬/Discord 10턴, barge-in, 무음 구간을 실행하고 비식별 보고서를
 기록한다.
 
-## P1 — 원본 기억 삭제의 파생 기억 부분 철회 미구현
+## P1 — 과거 기억의 누락된 파생 provenance와 재합성 지연
 
-사용자 기억 편집은 현재 content hash를 요구하고 stale overwrite를 거부하며,
-원자 파일 교체 뒤 `source=user-edit`, 새 evidence hash, revision, 최초 출처를
-기록한다. 편집 결과는 새 프로세스 recall에서도 유지된다. 선택한 note 삭제도
-tombstone-first로 source/index/cache에서 fail-closed한다.
+삭제 preview는 현재 `derivedFrom` graph의 영향 목록과 fingerprint를 제공한다.
+유일한 근거를 잃는 파생 note는 content-free tombstone으로 연쇄 철회하고,
+다른 살아 있는 근거가 있는 note와 그 하위 파생은 recall/FTS/vector/graph/
+hot-context에서 fail-closed quarantine한다. 새 프로세스도 같은 상태를
+재구성한다. Sub-LLM 재합성은 기존 파생 본문과 삭제 source를 입력하지 않고
+남은 source note만 사용한다.
 
-그러나 삭제한 note를 `derivedFrom`으로 참조하는 별도 semantic/episode note는
-자동으로 삭제하거나 재합성하지 않는다. 한 파생 note가 여러 원본을 합쳤을 수
-있어 단순 연쇄 삭제도 안전하지 않다. 따라서 현재 삭제 의미는 “선택한 note
-identity의 영구 철회”이며 “그 내용에서 파생된 모든 기억의 완전 제거”가 아니다.
+남은 위험은 이 판정이 note front matter의 `derived_from` 선언에 의존한다는
+점이다. 과거 importer나 수동 note가 실제 근거 관계를 기록하지 않았다면 내용이
+유사하더라도 자동 연쇄 철회 대상임을 증명할 수 없다. 또한 Sub-LLM이 꺼져 있거나
+상위 source가 quarantine이면 multi-source note는 안전하게 격리된 채로 남아
+자동 회상에 사용되지 않지만 즉시 재합성되지는 않는다.
 
-다음 조치: 삭제 preview에 영향받는 파생 note 목록과 유효한 남은 근거를 표시하고,
-단일 원본 파생은 함께 tombstone, 다중 원본 파생은 quarantine 후 재합성하는
-부분 철회 계약을 설계한다. 해당 계약 전에는 UI와 대화가 cascade 완료를 주장하지
-않도록 유지한다.
+다음 조치: legacy/과거 semantic note의 evidence hash와 source ref를 감사해
+명시적 `derived_from` backfill 후보 보고서를 만든다. backfill은 자동 추측으로
+적용하지 않고 사용자 확인 가능한 preview를 거친다. 운영 상태에는 quarantine
+대기 수와 가장 오래된 대기 시간을 노출한다.
 
 ## P1 — UI 접근성 corpus·동작 대상 계약 미완성
 

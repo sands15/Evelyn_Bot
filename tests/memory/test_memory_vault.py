@@ -645,6 +645,11 @@ class MemoryVaultTests(unittest.TestCase):
             provenance["originSourceRefs"],
             ["daily/2026-07-30"],
         )
+        self.assertEqual(provenance["derivedFrom"], [])
+        self.assertEqual(
+            provenance["originDerivedFrom"],
+            ["daily-2026-07-30"],
+        )
         self.assertEqual(provenance["revision"], 1)
         self.assertEqual(provenance["confidence"], "high")
         self.assertNotEqual(
@@ -823,10 +828,17 @@ class MemoryVaultTests(unittest.TestCase):
                 connection.close()
 
         self.assertTrue(
-            {"created_at", "source", "source_refs", "derived_from", "evidence_hashes"}
+            {
+                "created_at",
+                "source",
+                "source_refs",
+                "derived_from",
+                "origin_derived_from",
+                "evidence_hashes",
+            }
             <= columns
         )
-        self.assertEqual(schema_version, "5")
+        self.assertEqual(schema_version, "6")
         self.assertEqual(row[0], "control-page-user")
         self.assertIn("user-request", row[1])
         self.assertIn("daily-source", row[2])

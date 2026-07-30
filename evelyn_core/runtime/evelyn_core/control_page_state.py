@@ -954,6 +954,7 @@ def handle_control_page_memory_note_action_request(
         in {
             "locked_legacy_note",
             "memory_note_changed_since_read",
+            "memory_note_quarantined",
         }
         else 500
         if error == "memory_edit_failed"

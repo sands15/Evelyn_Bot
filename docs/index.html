@@ -1476,6 +1476,20 @@
       background: rgba(47, 157, 104, 0.1);
     }
 
+    .memory-card.is-quarantined {
+      border-color: rgba(211, 132, 35, 0.58);
+      background: rgba(211, 132, 35, 0.1);
+    }
+
+    .memory-card.is-quarantined .memory-badge {
+      color: #8a4d00;
+      background: rgba(211, 132, 35, 0.2);
+    }
+
+    [data-theme="dark"] .memory-card.is-quarantined .memory-badge {
+      color: #ffd49a;
+    }
+
     [data-theme="dark"] .memory-card {
       background: rgba(255, 255, 255, 0.055);
     }
@@ -4200,13 +4214,23 @@
       }
       const refs = Array.isArray(provenance.sourceRefs) ? provenance.sourceRefs : [];
       const derived = Array.isArray(provenance.derivedFrom) ? provenance.derivedFrom : [];
+      const originDerived = Array.isArray(provenance.originDerivedFrom) ? provenance.originDerivedFrom : [];
       const hashes = Array.isArray(provenance.evidenceHashes) ? provenance.evidenceHashes : [];
+      const revocation = card && card.revocation && typeof card.revocation === "object" ? card.revocation : {};
+      const revoked = Array.isArray(revocation.revokedSourceIds) ? revocation.revokedSourceIds : [];
+      const blocked = Array.isArray(revocation.blockedSourceIds) ? revocation.blockedSourceIds : [];
+      const remaining = Array.isArray(revocation.remainingSourceIds) ? revocation.remainingSourceIds : [];
       const rows = [
+        ["회상 상태", card.quarantined ? "근거 철회로 격리됨" : "사용 가능"],
         ["출처", provenance.source || provenance.sourceType || "unknown"],
         ["출처 유형", provenance.sourceType || "unknown"],
         ["원래 출처", provenance.originSource || "없음"],
         ["근거 참조", refs.length ? refs.join(", ") : "없음"],
         ["파생 기억", derived.length ? derived.join(", ") : "없음"],
+        ["이전 파생 근거", originDerived.length ? originDerived.join(", ") : "없음"],
+        ["철회된 근거", revoked.length ? revoked.join(", ") : "없음"],
+        ["재합성 대기 근거", blocked.length ? blocked.join(", ") : "없음"],
+        ["남은 유효 근거", remaining.length ? remaining.join(", ") : "없음"],
         ["근거 해시", hashes.length ? hashes.map((value) => String(value).slice(0, 16)).join(", ") : "없음"],
         ["수정 버전", Number(provenance.revision || 0) ? String(provenance.revision) : "원본"],
         ["확신도", provenance.confidence || card.confidence || "unknown"],
@@ -4231,7 +4255,13 @@
         memoryEditBody.disabled = !hasSelection || locked;
       }
       if (memoryEditSaveButton) memoryEditSaveButton.disabled = !hasSelection || locked;
-      if (memoryConfirmButton) memoryConfirmButton.disabled = !hasSelection;
+      if (memoryConfirmButton) {
+        const confirmBlocked = Boolean(selectedMemoryCard && selectedMemoryCard.canConfirm === false);
+        memoryConfirmButton.disabled = !hasSelection || confirmBlocked;
+        memoryConfirmButton.title = confirmBlocked
+          ? "철회된 근거가 포함된 기억은 수정 또는 재합성 전까지 확인할 수 없습니다."
+          : "이 기억을 확인";
+      }
       if (memoryDeleteButton) {
         const deleteProtected = Boolean(selectedMemoryCard && selectedMemoryCard.canDelete === false);
         memoryDeleteButton.disabled = !hasSelection || deleteProtected;
@@ -4291,15 +4321,16 @@
         const title = card.title || card.id || "Untitled";
         const badge = card.category || card.type || "note";
         const locked = Boolean(card.locked || card.canEdit === false || card.contentHidden);
+        const quarantined = Boolean(card.quarantined);
         const displayTitle = locked ? "Archived memory" : title;
         const preview = locked ? (card.preview || "Archived memory is locked.") : (card.preview || card.body || "");
         const relPath = locked ? "Archived" : (card.relPath || card.path || card.id || "");
         const active = String(card.id || "") === selectedMemoryId ? " active" : "";
         return (
-          '<article class="memory-card' + active + (locked ? ' is-locked' : '') + '" role="button" tabindex="0" data-memory-id="' + escapeHtml(card.id || "") + '">' +
+          '<article class="memory-card' + active + (locked ? ' is-locked' : '') + (quarantined ? ' is-quarantined' : '') + '" role="button" tabindex="0" data-memory-id="' + escapeHtml(card.id || "") + '">' +
           '<div class="memory-card-head">' +
           '<strong>' + escapeHtml(displayTitle) + '</strong>' +
-          '<span class="memory-badge">' + escapeHtml(locked ? "Archived" : (card.confirmed ? "confirmed" : badge)) + '</span>' +
+          '<span class="memory-badge">' + escapeHtml(locked ? "Archived" : (quarantined ? "근거 격리" : (card.confirmed ? "confirmed" : badge))) + '</span>' +
           '</div>' +
           '<p class="memory-card-preview">' + escapeHtml(preview || "No content") + '</p>' +
           '<div class="memory-card-meta">' + escapeHtml(relPath) + '</div>' +
@@ -4417,13 +4448,35 @@
         const note = preview && preview.note ? preview.note : {};
         const provenance = note.provenance || {};
         const source = provenance.source || provenance.sourceType || "unknown";
+        const impact = preview && preview.derivationImpact ? preview.derivationImpact : {};
+        const cascade = Array.isArray(impact.cascadeDelete) ? impact.cascadeDelete : [];
+        const quarantine = Array.isArray(impact.quarantine) ? impact.quarantine : [];
+        const cascadeNames = cascade.slice(0, 5).map((item) => item.title || item.id).filter(Boolean);
+        const quarantineNames = quarantine.slice(0, 5).map((item) => item.title || item.id).filter(Boolean);
+        const impactLines = [];
+        if (cascade.length) {
+          impactLines.push(
+            `유일한 근거를 잃는 파생 기억 ${cascade.length}개도 영구 철회됩니다` +
+            (cascadeNames.length ? `: ${cascadeNames.join(", ")}` : ".")
+          );
+        }
+        if (quarantine.length) {
+          impactLines.push(
+            `다른 근거가 남은 파생 기억 ${quarantine.length}개는 회상에서 격리하고 재합성을 대기합니다` +
+            (quarantineNames.length ? `: ${quarantineNames.join(", ")}` : ".")
+          );
+        }
+        if (!impactLines.length) {
+          impactLines.push("영향받는 파생 기억은 없습니다.");
+        }
         const confirmed = window.confirm(
           `"${note.title || selectedMemoryCard.title || noteId}" 기억을 영구 삭제할까요?\n\n` +
           `출처: ${source}\n` +
+          impactLines.join("\n") + "\n\n" +
           "원문 파일, 사용자 상태, 검색 인덱스, 검색 캐시에서 제거되며 되돌릴 수 없습니다."
         );
         if (!confirmed) return;
-        await fetchApi(
+        const applied = await fetchApi(
           "/api/control-page/memory/" + encodeURIComponent(noteId) + "/delete/apply",
           {
             method: "POST",
@@ -4438,8 +4491,21 @@
         selectedMemoryId = "";
         selectedMemoryCard = null;
         await loadMemoryVault({ force: true });
-        setBubble("기억을 원문·인덱스·캐시에서 영구 삭제했어.");
+        const appliedImpact = applied && applied.derivationImpact ? applied.derivationImpact : {};
+        const cascadeCount = Number(appliedImpact.cascadeDeleteCount || 0);
+        const quarantineCount = Number(appliedImpact.quarantineCount || 0);
+        setBubble(
+          `기억을 영구 삭제했어. 파생 기억 ${cascadeCount}개도 철회했고 ` +
+          `${quarantineCount}개는 근거 재합성 전까지 회상에서 격리했어.`
+        );
       } catch (error) {
+        if (String(error.message || "") === "api_error:409") {
+          memorySnapshot = null;
+          memoryGraphSnapshot = null;
+          await loadMemoryVault({ force: true });
+          setBubble("삭제 미리보기 뒤 기억이나 파생 근거가 바뀌어서 삭제하지 않았어. 다시 확인해줘.");
+          return;
+        }
         setBubble(`기억 삭제에 실패했어. 다시 시도해줘: ${error.message}`);
       } finally {
         renderMemoryEditor();
