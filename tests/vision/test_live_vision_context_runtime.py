@@ -12,7 +12,10 @@ if str(RUNTIME_ROOT) not in sys.path:
 
 from evelyn_core.vision_runtime import (  # noqa: E402
     LiveVisionContextRuntimeDeps,
+    VISION_EVIDENCE_SCHEMA,
+    VisionEvidence,
     build_live_vision_context_from_runtime,
+    vision_evidence_from_metrics,
 )
 
 
@@ -54,6 +57,13 @@ class LiveVisionContextRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.response = FakeResponse(data={"scene": "화면", "ocr": "문자"})
         self.session = FakeSession(self.response)
         self.times = iter([10.0, 10.25])
+        self.quality = {
+            "confidence": "normal",
+            "actionable": True,
+            "scene_unreliable": False,
+            "ocr_corrupt": False,
+            "no_usable_evidence": False,
+        }
 
     async def capture(self):
         self.capture_calls += 1
@@ -76,7 +86,7 @@ class LiveVisionContextRuntimeTests(unittest.IsolatedAsyncioTestCase):
             client_timeout_factory=lambda **kwargs: kwargs,
             delete_request_image=self.delete,
             format_observation=lambda **kwargs: f"observation:{kwargs['image_deleted']}",
-            build_vision_quality=lambda _data: {"confidence": "high", "actionable": True},
+            build_vision_quality=lambda _data: dict(self.quality),
             clean_text=lambda text: str(text).strip(),
             monotonic=lambda: next(self.times),
         )
@@ -85,13 +95,29 @@ class LiveVisionContextRuntimeTests(unittest.IsolatedAsyncioTestCase):
         return self.session
 
     async def test_disabled_returns_before_capture(self) -> None:
+        metrics: dict = {}
         result = await build_live_vision_context_from_runtime(
             "화면",
             deps=self.build_deps(enabled=False),
+            metrics=metrics,
         )
 
         self.assertIn("automatic capture is disabled", result)
         self.assertEqual(self.capture_calls, 0)
+        self.assertEqual(
+            metrics["meta"]["vision_evidence"],
+            {
+                "schema": VISION_EVIDENCE_SCHEMA,
+                "state": "unavailable",
+                "reason_code": "auto_capture_disabled",
+                "evidence_available": False,
+                "scene_available": False,
+                "ocr_available": False,
+                "confidence": "none",
+                "actionable": False,
+                "freshness": "unknown",
+            },
+        )
 
     async def test_black_frame_capture_failure_records_error_and_forbids_claim(self) -> None:
         self.capture_error = RuntimeError("black frame detected")
@@ -106,6 +132,9 @@ class LiveVisionContextRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("black frame", result)
         self.assertIn("Do not claim", result)
         self.assertIn("black frame detected", metrics["meta"]["vision_capture_error"])
+        self.assertEqual(metrics["meta"]["vision_evidence"]["state"], "failed")
+        self.assertEqual(metrics["meta"]["vision_evidence"]["reason_code"], "black_frame")
+        self.assertFalse(metrics["meta"]["vision_evidence"]["evidence_available"])
 
     async def test_analysis_failure_deletes_capture_and_records_metrics(self) -> None:
         self.response = FakeResponse(status=503, text="offline")
@@ -122,6 +151,8 @@ class LiveVisionContextRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.delete_calls, [Path("capture.png")])
         self.assertEqual(metrics["meta"]["vision_capture_path"], "")
         self.assertTrue(metrics["meta"]["vision_capture_deleted"])
+        self.assertEqual(metrics["meta"]["vision_evidence"]["state"], "failed")
+        self.assertEqual(metrics["meta"]["vision_evidence"]["reason_code"], "analysis_failed")
 
     async def test_success_formats_observation_and_records_quality_metrics(self) -> None:
         metrics: dict = {}
@@ -140,7 +171,78 @@ class LiveVisionContextRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(metrics["marks"]["vision_ready"], 250.0)
         self.assertEqual(metrics["meta"]["vision_ocr_chars"], 2)
         self.assertEqual(metrics["meta"]["vision_scene_chars"], 2)
-        self.assertEqual(metrics["meta"]["vision_quality"]["confidence"], "high")
+        self.assertEqual(metrics["meta"]["vision_quality"]["confidence"], "normal")
+        evidence = vision_evidence_from_metrics(metrics)
+        self.assertEqual(evidence.state, "observed")
+        self.assertTrue(evidence.evidence_available)
+        self.assertTrue(evidence.scene_available)
+        self.assertTrue(evidence.ocr_available)
+        self.assertTrue(evidence.actionable)
+        self.assertEqual(evidence.freshness, "live")
+        self.assertTrue(evidence.satisfies_tool("vision_capture_or_watch"))
+        self.assertTrue(evidence.satisfies_tool("vision_ocr"))
+
+    async def test_success_without_usable_scene_or_ocr_is_not_evidence(self) -> None:
+        self.response = FakeResponse(data={"scene": "", "ocr": "���"})
+        self.session = FakeSession(self.response)
+        self.quality = {
+            "confidence": "none",
+            "actionable": False,
+            "scene_unreliable": False,
+            "ocr_corrupt": True,
+            "no_usable_evidence": True,
+        }
+        metrics: dict = {}
+
+        await build_live_vision_context_from_runtime(
+            "읽어줘",
+            deps=self.build_deps(),
+            metrics=metrics,
+        )
+
+        evidence = vision_evidence_from_metrics(metrics)
+        self.assertEqual(evidence.state, "unreliable")
+        self.assertEqual(evidence.reason_code, "no_usable_visual_evidence")
+        self.assertFalse(evidence.evidence_available)
+        self.assertFalse(evidence.satisfies_tool("vision_capture_or_watch"))
+        self.assertFalse(evidence.satisfies_tool("vision_ocr"))
+
+    def test_ocr_tool_requires_usable_ocr_not_only_a_scene(self) -> None:
+        evidence = VisionEvidence(
+            state="observed",
+            reason_code="live_observation",
+            evidence_available=True,
+            scene_available=True,
+            ocr_available=False,
+            confidence="low",
+            freshness="live",
+        )
+
+        self.assertTrue(evidence.satisfies_tool("vision_capture_or_watch"))
+        self.assertFalse(evidence.satisfies_tool("vision_ocr"))
+
+    def test_missing_or_invalid_metrics_fail_closed(self) -> None:
+        self.assertEqual(vision_evidence_from_metrics(None).state, "unknown")
+        self.assertFalse(vision_evidence_from_metrics({}).evidence_available)
+        invalid = {"meta": {"vision_evidence": {"schema": "other", "state": "observed"}}}
+        self.assertFalse(vision_evidence_from_metrics(invalid).evidence_available)
+        contradictory = {
+            "meta": {
+                "vision_evidence": {
+                    "schema": VISION_EVIDENCE_SCHEMA,
+                    "state": "observed",
+                    "evidence_available": True,
+                    "scene_available": False,
+                    "ocr_available": False,
+                    "actionable": True,
+                }
+            }
+        }
+        evidence = vision_evidence_from_metrics(contradictory)
+        self.assertEqual(evidence.state, "unknown")
+        self.assertEqual(evidence.reason_code, "invalid_evidence_contract")
+        self.assertFalse(evidence.evidence_available)
+        self.assertFalse(evidence.actionable)
 
     def test_main_delegates_live_vision_context_to_runtime_module(self) -> None:
         source = (

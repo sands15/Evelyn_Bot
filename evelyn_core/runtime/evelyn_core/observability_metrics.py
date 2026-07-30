@@ -314,12 +314,27 @@ def record_context_pipeline_benchmark_from_runtime(
         "section_chars": context_meta.get("section_chars"),
         "minecraft_context": bool(context_meta.get("minecraft_context")),
         "vision_context": "vision" in set(context_meta.get("sections") or []),
+        "vision_requested": bool(context_meta.get("vision_requested")),
+        "vision_evidence_available": bool(context_meta.get("vision_evidence_available")),
+        "vision_evidence_state": clean_text(str(context_meta.get("vision_evidence_state") or "unknown")),
+        "vision_scene_available": bool(context_meta.get("vision_scene_available")),
+        "vision_ocr_available": bool(context_meta.get("vision_ocr_available")),
+        "vision_actionable": bool(context_meta.get("vision_actionable")),
         "user_text_len": len(clean_text(user_text)),
         "answer_len": len(clean_text(answer)),
         "marks": {
             key: value
             for key, value in ((metrics or {}).get("marks") or {}).items()
-            if key in {"route_ready", "memory_ready", "t_context_build", "llm_done", "t_main_done", "llm_http_ms"}
+            if key
+            in {
+                "route_ready",
+                "memory_ready",
+                "vision_ready",
+                "t_context_build",
+                "llm_done",
+                "t_main_done",
+                "llm_http_ms",
+            }
         },
     }
     try:

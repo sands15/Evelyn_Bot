@@ -257,9 +257,15 @@ class ObservabilityMetricsTests(unittest.TestCase):
                             "sections": ["memory", "vision"],
                             "section_chars": {"memory": 10},
                             "minecraft_context": True,
+                            "vision_requested": True,
+                            "vision_evidence_available": True,
+                            "vision_evidence_state": "observed",
+                            "vision_scene_available": True,
+                            "vision_ocr_available": False,
+                            "vision_actionable": False,
                         },
                     },
-                    "marks": {"route_ready": 12.0, "ignored": 99.0},
+                    "marks": {"route_ready": 12.0, "vision_ready": 34.0, "ignored": 99.0},
                 },
                 user_text=" hello ",
                 answer=" answer ",
@@ -281,7 +287,13 @@ class ObservabilityMetricsTests(unittest.TestCase):
         self.assertEqual(record["route"], "main")
         self.assertTrue(record["minecraft_context"])
         self.assertTrue(record["vision_context"])
-        self.assertEqual(record["marks"], {"route_ready": 12.0})
+        self.assertTrue(record["vision_requested"])
+        self.assertTrue(record["vision_evidence_available"])
+        self.assertEqual(record["vision_evidence_state"], "observed")
+        self.assertTrue(record["vision_scene_available"])
+        self.assertFalse(record["vision_ocr_available"])
+        self.assertFalse(record["vision_actionable"])
+        self.assertEqual(record["marks"], {"route_ready": 12.0, "vision_ready": 34.0})
         self.assertEqual(record["user_text_len"], 5)
         self.assertEqual(record["answer_len"], 6)
 

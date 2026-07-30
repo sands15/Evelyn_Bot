@@ -62,6 +62,10 @@ implemented behavior.
   - Minecraft runner의 Bot API 단일 lease owner, 서비스 proof, heartbeat,
     인증된 Discord 위임, 경쟁 owner 차단, 재시작 비복구 계약을 정의한다.
 
+- `docs/VISION_EVIDENCE_CONTRACT.md`
+  - 화면 관찰 요청과 실제 관찰 근거를 분리하는 `vision.evidence.v1`,
+    scene/OCR별 충족 조건, fail-closed prompt/tool gate와 관찰 가능성 계약.
+
 - `docs/RUNTIME_ERROR_OBSERVABILITY_CONTRACT.md`
   - Runtime owner별 고정 오류 코드·카운터와 Control Page 공개 privacy 계약.
 

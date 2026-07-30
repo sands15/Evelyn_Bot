@@ -245,10 +245,13 @@ Phase 1 is the stable contract that later phases will wire into.
 - Router LLM output now requests a `context_policy` object and normalizes it through `ContextPolicy.from_mapping()` before prompt assembly.
 - Router route response budget now defaults to `220` tokens so the policy JSON is not truncated.
 - Runtime state, skill graph hints, and vision hints now have first-class packet sections.
+- Per-turn screen observation uses the fail-closed `vision.evidence.v1` contract:
+  a request, hint, capture attempt, or failure string cannot mark a vision tool
+  executed; scene and OCR availability are evaluated separately.
 - Memory writing now has an explicit `MemoryWriterDecision` contract before summary/fact/open-question updates are scheduled.
 - Minecraft context now pulls compact live state plus matching Voyager skill snippets into the skill/capability section when the policy asks for it.
 - Minecraft context also reads Odyssey-style JSON capability data when `ODYSSEY_CAPABILITY_JSON_DIR` is available, adding compact action / recipe / tool / smelt / collect snippets instead of raw library dumps.
 - Discord attachment metadata is forwarded as `[Attached Visual Inputs]`; OpenAI/vLLM content-array payloads now convert those image URLs into `image_url` entries for actual multimodal main-model calls.
-- Context pipeline benchmark rows are appended to `runtime_artifacts/benchmarks/context_pipeline_benchmarks.jsonl` so router/context sections, timing marks, answer length, and Minecraft/vision usage can be compared across turns.
+- Context pipeline benchmark rows are appended to `runtime_artifacts/benchmarks/context_pipeline_benchmarks.jsonl` so router/context sections, timing marks, answer length, Minecraft usage, and requested-versus-observed vision state can be compared across turns.
 - `MAIN_LLM_CONTEXT` now defaults to `2048` in the launcher environment.
 - Still incomplete: a persistent OpenHA/CrossAgent action-interface index and a benchmark dashboard/summary job are not wired yet.

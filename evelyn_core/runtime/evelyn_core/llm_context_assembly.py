@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from .context_pipeline import ContextBuilder, ContextPolicy
+from .vision_runtime import VisionEvidence, record_vision_evidence, vision_evidence_from_metrics
 
 
 @dataclass(frozen=True)
@@ -55,6 +56,21 @@ class LlmContextAssemblyDeps:
     log_turn_event: Callable[..., Any]
     visible_text: Callable[[str], str]
     log: Callable[..., Any] = print
+
+
+def apply_vision_evidence_to_tool_decisions(
+    tool_use_decisions: list[Any],
+    evidence: VisionEvidence,
+) -> None:
+    for decision in tool_use_decisions:
+        if decision.tool_name not in {"vision_capture_or_watch", "vision_ocr"}:
+            continue
+        decision.status = (
+            "executed"
+            if evidence.satisfies_tool(decision.tool_name)
+            else "failed_or_unavailable"
+        )
+        decision.evidence = evidence.provenance_summary(tool_name=decision.tool_name)
 
 
 async def prepare_llm_messages_from_runtime(
@@ -303,24 +319,42 @@ async def prepare_llm_messages_from_runtime(
     if not skill_context:
         skill_context = deps.build_skill_context_hint(context_policy)
     vision_context_parts = [deps.build_vision_context_hint(context_policy, user_text=user_text)]
+    vision_evidence = VisionEvidence(
+        state="unavailable" if context_policy.needs_vision else "unknown",
+        reason_code="not_requested" if not context_policy.needs_vision else "missing_evidence_contract",
+    )
     if context_policy.needs_vision:
         vision_context_parts.append(
             "VISION_ANSWER_RULE: This turn requested screen/vision evidence. "
-            "If the observation below contains a scene, OCR text, or a capture/analyze failure, answer using that result directly. "
-            "Do not fall back to a generic short reply unless the observation is empty or unavailable."
+            "Only a vision.evidence.v1 result with evidence_available=true counts as an observation. "
+            "A request, policy hint, capture attempt, or failure message is not visual evidence. "
+            "When evidence is unavailable, say that the screen could not be observed and do not infer its contents."
         )
-        vision_context_parts.append(await deps.build_live_vision_context(user_text, metrics=metrics))
+        vision_runtime_metrics = metrics if metrics is not None else {"meta": {}, "marks": {}}
+        try:
+            live_vision_context = await deps.build_live_vision_context(
+                user_text,
+                metrics=vision_runtime_metrics,
+            )
+        except Exception as exc:
+            vision_runtime_metrics.setdefault("meta", {})["vision_runtime_error"] = deps.clean_text(
+                repr(exc)
+            )[:240]
+            record_vision_evidence(
+                vision_runtime_metrics,
+                VisionEvidence(state="failed", reason_code="vision_runtime_error"),
+            )
+            live_vision_context = (
+                "Local screen vision failed before a usable observation was produced. "
+                "Do not claim the screen was analyzed."
+            )
+        vision_evidence = vision_evidence_from_metrics(vision_runtime_metrics)
+        vision_context_parts.append(live_vision_context)
+        vision_context_parts.append(
+            "VISION_EVIDENCE_GATE: " + vision_evidence.provenance_summary()
+        )
     vision_context = "\n\n".join(part for part in vision_context_parts if deps.clean_text(part))
-    for decision in tool_use_decisions:
-        if decision.tool_name not in {"vision_capture_or_watch", "vision_ocr"}:
-            continue
-        if deps.clean_text(vision_context):
-            decision.status = "executed"
-            if not deps.clean_text(decision.evidence):
-                decision.evidence = deps.clean_text(vision_context)[:500]
-        else:
-            decision.status = "failed_or_unavailable"
-            decision.evidence = "Vision context was requested by policy but no vision context was produced."
+    apply_vision_evidence_to_tool_decisions(tool_use_decisions, vision_evidence)
     tool_context = deps.render_tool_use_context(tool_use_decisions)
     context_packet = deps.build_basic_context_packet(
         current_user_input="",
@@ -350,6 +384,12 @@ async def prepare_llm_messages_from_runtime(
             },
             "minecraft_context": bool(live_context_minecraft_state),
             "vision_context": bool(vision_context),
+            "vision_requested": bool(context_policy.needs_vision),
+            "vision_evidence_available": bool(vision_evidence.evidence_available),
+            "vision_evidence_state": vision_evidence.state,
+            "vision_scene_available": bool(vision_evidence.scene_available),
+            "vision_ocr_available": bool(vision_evidence.ocr_available),
+            "vision_actionable": bool(vision_evidence.actionable),
             "self_judgment_context": bool(self_judgment_context),
         }
 

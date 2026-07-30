@@ -5,6 +5,90 @@ from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
 
+VISION_EVIDENCE_SCHEMA = "vision.evidence.v1"
+VISION_EVIDENCE_STATES = frozenset({"observed", "unreliable", "unavailable", "failed", "unknown"})
+
+
+@dataclass(frozen=True)
+class VisionEvidence:
+    state: str = "unknown"
+    reason_code: str = "missing_evidence_contract"
+    evidence_available: bool = False
+    scene_available: bool = False
+    ocr_available: bool = False
+    confidence: str = "none"
+    actionable: bool = False
+    freshness: str = "unknown"
+    schema: str = VISION_EVIDENCE_SCHEMA
+
+    def to_dict(self) -> dict[str, Any]:
+        state = self.state if self.state in VISION_EVIDENCE_STATES else "unknown"
+        return {
+            "schema": VISION_EVIDENCE_SCHEMA,
+            "state": state,
+            "reason_code": str(self.reason_code or "unknown"),
+            "evidence_available": bool(self.evidence_available),
+            "scene_available": bool(self.scene_available),
+            "ocr_available": bool(self.ocr_available),
+            "confidence": str(self.confidence or "none"),
+            "actionable": bool(self.actionable),
+            "freshness": str(self.freshness or "unknown"),
+        }
+
+    def satisfies_tool(self, tool_name: str) -> bool:
+        if self.state != "observed" or not self.evidence_available:
+            return False
+        if tool_name == "vision_ocr":
+            return self.ocr_available
+        return self.scene_available or self.ocr_available
+
+    def provenance_summary(self, *, tool_name: str = "") -> str:
+        satisfied = self.satisfies_tool(tool_name) if tool_name else self.evidence_available
+        return (
+            f"schema={VISION_EVIDENCE_SCHEMA}; state={self.state}; reason={self.reason_code}; "
+            f"tool_satisfied={str(bool(satisfied)).lower()}; "
+            f"scene_available={str(self.scene_available).lower()}; "
+            f"ocr_available={str(self.ocr_available).lower()}; "
+            f"confidence={self.confidence}; actionable={str(self.actionable).lower()}; "
+            f"freshness={self.freshness}"
+        )
+
+
+def record_vision_evidence(metrics: dict | None, evidence: VisionEvidence) -> None:
+    if metrics is None:
+        return
+    metrics.setdefault("meta", {})["vision_evidence"] = evidence.to_dict()
+
+
+def vision_evidence_from_metrics(metrics: dict | None) -> VisionEvidence:
+    meta = metrics.get("meta") if isinstance(metrics, dict) else None
+    payload = meta.get("vision_evidence") if isinstance(meta, dict) else None
+    if not isinstance(payload, dict) or payload.get("schema") != VISION_EVIDENCE_SCHEMA:
+        return VisionEvidence()
+    state = str(payload.get("state") or "unknown")
+    if state not in VISION_EVIDENCE_STATES:
+        state = "unknown"
+    scene_available = bool(payload.get("scene_available"))
+    ocr_available = bool(payload.get("ocr_available"))
+    evidence_available = bool(payload.get("evidence_available"))
+    if state == "observed" and (not evidence_available or not (scene_available or ocr_available)):
+        return VisionEvidence(state="unknown", reason_code="invalid_evidence_contract")
+    if state != "observed":
+        evidence_available = False
+        scene_available = False
+        ocr_available = False
+    return VisionEvidence(
+        state=state,
+        reason_code=str(payload.get("reason_code") or "unknown"),
+        evidence_available=evidence_available,
+        scene_available=scene_available,
+        ocr_available=ocr_available,
+        confidence=str(payload.get("confidence") or "none"),
+        actionable=bool(payload.get("actionable")) and evidence_available,
+        freshness=str(payload.get("freshness") or "unknown"),
+    )
+
+
 @dataclass(frozen=True)
 class VisionRuntimeDeps:
     clean_text: Callable[[str], str]
@@ -35,6 +119,10 @@ async def build_live_vision_context_from_runtime(
     metrics: dict | None = None,
 ) -> str:
     if not deps.auto_capture_enabled:
+        record_vision_evidence(
+            metrics,
+            VisionEvidence(state="unavailable", reason_code="auto_capture_disabled"),
+        )
         return "Local screen vision was requested, but automatic capture is disabled."
     started_at = deps.monotonic()
     try:
@@ -44,12 +132,22 @@ async def build_live_vision_context_from_runtime(
         if metrics is not None:
             metrics.setdefault("meta", {})["vision_capture_error"] = error
         if "black frame" in error.lower():
+            record_vision_evidence(
+                metrics,
+                VisionEvidence(state="failed", reason_code="black_frame"),
+            )
             return (
                 "Local screen vision was requested, but the Windows screen capture returned a black frame. "
-                "Do not claim the screen was analyzed. Tell the user the capture itself is black and needs capture-session fixing. "
-                f"capture_error: {error}"
+                "Do not claim the screen was analyzed. Tell the user the capture itself is black and needs capture-session fixing."
             )
-        return f"Local screen vision was requested, but screen capture failed: {error}"
+        record_vision_evidence(
+            metrics,
+            VisionEvidence(state="failed", reason_code="capture_failed"),
+        )
+        return (
+            "Local screen vision was requested, but screen capture failed. "
+            "Do not claim the screen was analyzed."
+        )
 
     payload = {
         "image_path": str(image_path),
@@ -77,9 +175,19 @@ async def build_live_vision_context_from_runtime(
             metrics.setdefault("meta", {})["vision_analyze_error"] = error
             metrics.setdefault("meta", {})["vision_capture_path"] = "" if deleted else str(image_path)
             metrics.setdefault("meta", {})["vision_capture_deleted"] = deleted
+        record_vision_evidence(
+            metrics,
+            VisionEvidence(state="failed", reason_code="analysis_failed"),
+        )
         if deleted:
-            return f"Local screen capture was discarded after vision analysis failed: {error}"
-        return f"Local screen capture was saved at {image_path}, but vision analysis failed: {error}"
+            return (
+                "Local screen capture was discarded after vision analysis failed. "
+                "Do not claim the screen was analyzed."
+            )
+        return (
+            "Local screen capture cleanup also failed after vision analysis failed. "
+            "Do not claim the screen was analyzed."
+        )
 
     deleted = deps.delete_request_image(image_path)
     observation = deps.format_observation(
@@ -89,12 +197,34 @@ async def build_live_vision_context_from_runtime(
         image_deleted=deleted,
     )
     quality = deps.build_vision_quality(data)
+    scene = deps.clean_text(str(data.get("scene") or ""))
+    ocr = deps.clean_text(str(data.get("ocr") or ""))
+    scene_available = bool(scene) and not bool(quality.get("scene_unreliable"))
+    ocr_available = bool(ocr) and not bool(quality.get("ocr_corrupt"))
+    evidence_available = scene_available or ocr_available
+    no_usable_evidence = bool(quality.get("no_usable_evidence", not evidence_available))
+    if no_usable_evidence:
+        evidence_available = False
+        scene_available = False
+        ocr_available = False
+    confidence = str(quality.get("confidence") or ("normal" if evidence_available else "none"))
+    evidence = VisionEvidence(
+        state="observed" if evidence_available else "unreliable",
+        reason_code="live_observation" if evidence_available else "no_usable_visual_evidence",
+        evidence_available=evidence_available,
+        scene_available=scene_available,
+        ocr_available=ocr_available,
+        confidence=confidence,
+        actionable=bool(quality.get("actionable")) and evidence_available,
+        freshness="live",
+    )
+    record_vision_evidence(metrics, evidence)
     if metrics is not None:
         metrics.setdefault("marks", {})["vision_ready"] = (deps.monotonic() - started_at) * 1000.0
         metrics.setdefault("meta", {})["vision_capture_path"] = "" if deleted else str(image_path)
         metrics.setdefault("meta", {})["vision_capture_deleted"] = deleted
-        metrics.setdefault("meta", {})["vision_ocr_chars"] = len(deps.clean_text(str(data.get("ocr") or "")))
-        metrics.setdefault("meta", {})["vision_scene_chars"] = len(deps.clean_text(str(data.get("scene") or "")))
+        metrics.setdefault("meta", {})["vision_ocr_chars"] = len(ocr)
+        metrics.setdefault("meta", {})["vision_scene_chars"] = len(scene)
         metrics.setdefault("meta", {})["vision_quality"] = dict(quality)
     return observation
 
@@ -184,10 +314,14 @@ def vision_watch_scene_looks_bad_from_runtime(scene: str, *, deps: VisionRuntime
 
 __all__ = [
     "LiveVisionContextRuntimeDeps",
+    "VISION_EVIDENCE_SCHEMA",
+    "VisionEvidence",
     "VisionRuntimeDeps",
     "build_live_vision_context_from_runtime",
     "build_vision_observation_prompt_from_runtime",
     "build_vision_watch_prompt_from_runtime",
     "format_vision_observation_from_runtime",
+    "record_vision_evidence",
+    "vision_evidence_from_metrics",
     "vision_watch_scene_looks_bad_from_runtime",
 ]
