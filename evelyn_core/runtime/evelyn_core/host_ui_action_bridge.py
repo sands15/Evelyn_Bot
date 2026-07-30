@@ -188,7 +188,10 @@ class HostUiActionBridge:
         element_id = str(payload.get("elementId") or "")
         postcondition = str(payload.get("postcondition") or "")
         confirm_token = str(payload.get("confirmToken") or "")
-        if operation == "preview":
+        if operation == "discover":
+            if action or element_id or postcondition or confirm_token:
+                return None, "ui_action_invalid_discover_request"
+        elif operation == "preview":
             if (
                 action not in UI_ACTION_ALLOWED_ACTIONS
                 or not HOST_UI_ACTION_ELEMENT_ID_RE.fullmatch(element_id)
@@ -263,6 +266,24 @@ class HostUiActionBridge:
                 return
             operation = request["operation"]
             self.last_operation = operation
+            if operation == "discover":
+                try:
+                    current = await self.accessibility.read()
+                except Exception:
+                    outcome = {
+                        "ok": False,
+                        "error": "ui_action_observation_unavailable",
+                    }
+                else:
+                    outcome = self.manager.discover(observation=current)
+                await self._write_response(
+                    request_id=request_id,
+                    operation=operation,
+                    ok=bool(outcome.get("ok")),
+                    error_code=str(outcome.get("error") or ""),
+                    targets=outcome if outcome.get("ok") else {},
+                )
+                return
             if operation == "preview":
                 try:
                     current = await self.accessibility.read()
@@ -348,6 +369,7 @@ class HostUiActionBridge:
         operation: str,
         ok: bool,
         error_code: str,
+        targets: dict[str, Any] | None = None,
         preview: dict[str, Any] | None = None,
         result: dict[str, Any] | None = None,
     ) -> None:
@@ -359,9 +381,12 @@ class HostUiActionBridge:
             "expiresAt": created_at + HOST_UI_ACTION_RESPONSE_TTL_SEC,
             "ok": bool(ok),
             "operation": (
-                operation if operation in {"preview", "apply"} else ""
+                operation
+                if operation in {"discover", "preview", "apply"}
+                else ""
             ),
             "errorCode": str(error_code or "")[:80],
+            "targets": dict(targets or {}),
             "preview": dict(preview or {}),
             "result": dict(result or {}),
         }

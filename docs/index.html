@@ -8,7 +8,7 @@
   <link rel="stylesheet" href="./assets/evelyn-voice-validation.css?v=20260729-voice-p0-1">
   <link rel="stylesheet" href="./assets/evelyn-storage-retention.css?v=20260729-retention-report-1">
   <link rel="stylesheet" href="./assets/evelyn-runtime-errors.css?v=20260729-runtime-errors-1">
-  <link rel="stylesheet" href="./assets/evelyn-ui-action.css?v=20260731-ui-action-2">
+  <link rel="stylesheet" href="./assets/evelyn-ui-action.css?v=20260731-ui-action-3">
   <style>
     :root {
       --bg: #f5f6f7;
@@ -2225,23 +2225,26 @@
         <div class="ui-action-head">
           <div>
             <strong>화면 행동 승인</strong>
-            <span class="ui-action-subtitle">5초 전경 전환 · UIA Button만 · 자동 재시도 없음</span>
+            <span class="ui-action-subtitle">5초 Button 찾기·전경 전환 · 자동 재시도 없음</span>
           </div>
           <span class="ui-action-pill" id="uiActionStatePill" data-state="unknown">unknown</span>
         </div>
+        <div class="ui-action-discovery">
+          <button id="uiActionDiscoverButton" type="button">5초 후 Button 찾기</button>
+          <span class="ui-action-meta" id="uiActionDiscoverySummary">
+            먼저 대상 앱으로 전환해 실행 가능한 Button을 읽으세요.
+          </span>
+        </div>
         <form class="ui-action-form" id="uiActionPreviewForm">
           <label>
-            <span>Element ID</span>
-            <input
+            <span>대상 Button</span>
+            <select
               id="uiActionElementId"
-              type="text"
-              inputmode="text"
-              autocomplete="off"
-              maxlength="20"
-              pattern="[0-9a-f]{20}"
-              placeholder="20자리 elementId"
               required
+              disabled
             >
+              <option value="">먼저 Button 찾기를 실행하세요</option>
+            </select>
           </label>
           <label>
             <span>성공 조건</span>
@@ -2251,7 +2254,7 @@
               <option value="window_changed">창이 바뀜</option>
             </select>
           </label>
-          <button id="uiActionPreviewButton" type="submit">5초 후 미리보기</button>
+          <button id="uiActionPreviewButton" type="submit" disabled>5초 후 미리보기</button>
         </form>
         <div id="uiActionMount" aria-live="polite">
           <span class="ui-action-meta">Host UI Action 상태를 확인하는 중입니다.</span>
@@ -5887,6 +5890,6 @@
   <script src="./assets/evelyn-voice-validation.js?v=20260729-voice-p0-1"></script>
   <script src="./assets/evelyn-storage-retention.js?v=20260729-retention-report-1"></script>
   <script src="./assets/evelyn-runtime-errors.js?v=20260729-runtime-errors-1"></script>
-  <script src="./assets/evelyn-ui-action.js?v=20260731-ui-action-2"></script>
+  <script src="./assets/evelyn-ui-action.js?v=20260731-ui-action-3"></script>
 </body>
 </html>

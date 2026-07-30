@@ -18,6 +18,7 @@ if str(RUNTIME_ROOT) not in sys.path:
 
 from evelyn_core.host_ui_action_client import (  # noqa: E402
     apply_host_ui_action,
+    discover_host_ui_action,
     preview_host_ui_action,
 )
 from evelyn_core.runtime_artifact_io import atomic_json_write  # noqa: E402
@@ -40,9 +41,35 @@ class HostUiActionClientTests(unittest.IsolatedAsyncioTestCase):
         request_id = request["requestId"]
         operation = request["operation"]
         created_at = time.time() - response_age_sec
+        targets = {}
         preview = {}
         result = {}
-        if operation == "preview":
+        if operation == "discover":
+            targets = {
+                "ok": True,
+                "schema": "ui_action.targets.v1",
+                "observedAt": created_at,
+                "window": {
+                    "title": "Evelyn",
+                    "className": "Chrome_WidgetWin_1",
+                },
+                "targets": [
+                    {
+                        "elementId": "a" * 20,
+                        "name": "확인",
+                        "controlType": "Button",
+                        "isEnabled": True,
+                    }
+                ],
+                "truncated": False,
+                "policy": {
+                    "action": "invoke",
+                    "requiresPreview": True,
+                    "requiresExplicitConfirmation": True,
+                    "automaticRetry": False,
+                },
+            }
+        elif operation == "preview":
             preview = {
                 "ok": True,
                 "schema": "ui_action.preview.v1",
@@ -84,13 +111,14 @@ class HostUiActionClientTests(unittest.IsolatedAsyncioTestCase):
             / "responses"
             / f"{request_id}.json",
             {
-                "schema": "host_ui_action.response.v1",
+                "schema": "host_ui_action.response.v2",
                 "requestId": request_id,
                 "createdAt": created_at,
                 "expiresAt": created_at + 30.0,
                 "ok": True,
                 "operation": operation,
                 "errorCode": "",
+                "targets": targets,
                 "preview": preview,
                 "result": result,
             },
@@ -131,6 +159,102 @@ class HostUiActionClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(requests, [])
         self.assertEqual(responses, [])
 
+    async def test_discovery_contract_is_consumed_without_authority(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_root:
+            root = Path(temp_root)
+            host_task = asyncio.create_task(self.fake_host(root))
+            discovered = await discover_host_ui_action(
+                artifacts_root=root,
+                timeout_sec=1.0,
+                poll_interval_sec=0.005,
+            )
+            await host_task
+            remaining = list((root / "host_ui_action").rglob("*.json"))
+
+        self.assertTrue(discovered["ok"])
+        self.assertEqual(discovered["operation"], "discover")
+        self.assertEqual(
+            discovered["targets"]["targets"][0]["elementId"],
+            "a" * 20,
+        )
+        self.assertEqual(discovered["preview"], {})
+        self.assertEqual(discovered["result"], {})
+        self.assertEqual(remaining, [])
+
+    async def test_disabled_discovery_target_fails_closed(self) -> None:
+        async def invalid_host(root: Path) -> None:
+            requests = root / "host_ui_action" / "requests"
+            for _ in range(100):
+                candidates = (
+                    list(requests.glob("*.json"))
+                    if requests.exists()
+                    else []
+                )
+                if candidates:
+                    break
+                await asyncio.sleep(0.005)
+            request = json.loads(candidates[0].read_text(encoding="utf-8"))
+            created_at = time.time()
+            atomic_json_write(
+                root
+                / "host_ui_action"
+                / "responses"
+                / f"{request['requestId']}.json",
+                {
+                    "schema": "host_ui_action.response.v2",
+                    "requestId": request["requestId"],
+                    "createdAt": created_at,
+                    "expiresAt": created_at + 30.0,
+                    "ok": True,
+                    "operation": "discover",
+                    "errorCode": "",
+                    "targets": {
+                        "ok": True,
+                        "schema": "ui_action.targets.v1",
+                        "observedAt": created_at,
+                        "window": {
+                            "title": "Evelyn",
+                            "className": "Fixture",
+                        },
+                        "targets": [
+                            {
+                                "elementId": "a" * 20,
+                                "name": "확인",
+                                "controlType": "Button",
+                                "isEnabled": False,
+                            }
+                        ],
+                        "truncated": False,
+                        "policy": {
+                            "action": "invoke",
+                            "requiresPreview": True,
+                            "requiresExplicitConfirmation": True,
+                            "automaticRetry": False,
+                        },
+                    },
+                    "preview": {},
+                    "result": {},
+                },
+            )
+
+        with tempfile.TemporaryDirectory() as temp_root:
+            root = Path(temp_root)
+            host_task = asyncio.create_task(invalid_host(root))
+            discovered = await discover_host_ui_action(
+                artifacts_root=root,
+                timeout_sec=1.0,
+                poll_interval_sec=0.005,
+            )
+            await host_task
+
+        self.assertFalse(discovered["ok"])
+        self.assertEqual(
+            discovered["error"],
+            "ui_action_invalid_targets_contract",
+        )
+
     async def test_stale_response_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temp_root:
             root = Path(temp_root)
@@ -170,13 +294,14 @@ class HostUiActionClientTests(unittest.IsolatedAsyncioTestCase):
                 / "responses"
                 / f"{request['requestId']}.json",
                 {
-                    "schema": "host_ui_action.response.v1",
+                    "schema": "host_ui_action.response.v2",
                     "requestId": request["requestId"],
                     "createdAt": created_at,
                     "expiresAt": created_at + 30.0,
                     "ok": True,
                     "operation": "preview",
                     "errorCode": "",
+                    "targets": {},
                     "preview": {
                         "schema": "ui_action.preview.v1",
                         "confirmToken": "t" * 43,
@@ -225,13 +350,14 @@ class HostUiActionClientTests(unittest.IsolatedAsyncioTestCase):
                 / "responses"
                 / f"{request['requestId']}.json",
                 {
-                    "schema": "host_ui_action.response.v1",
+                    "schema": "host_ui_action.response.v2",
                     "requestId": request["requestId"],
                     "createdAt": created_at,
                     "expiresAt": created_at + 30.0,
                     "ok": False,
                     "operation": "apply",
                     "errorCode": error,
+                    "targets": {},
                     "preview": {},
                     "result": {
                         "ok": False,

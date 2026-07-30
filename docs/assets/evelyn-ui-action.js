@@ -3,6 +3,10 @@
 
   const mount = document.getElementById("uiActionMount");
   const form = document.getElementById("uiActionPreviewForm");
+  const discoverButton = document.getElementById("uiActionDiscoverButton");
+  const discoverySummary = document.getElementById(
+    "uiActionDiscoverySummary"
+  );
   const elementInput = document.getElementById("uiActionElementId");
   const postconditionInput = document.getElementById("uiActionPostcondition");
   const previewButton = document.getElementById("uiActionPreviewButton");
@@ -10,6 +14,8 @@
   if (
     !mount ||
     !form ||
+    !discoverButton ||
+    !discoverySummary ||
     !elementInput ||
     !postconditionInput ||
     !previewButton ||
@@ -23,6 +29,7 @@
   const FOCUS_HANDOFF_MAX_LATE_MS = 2000;
   const state = {
     busy: false,
+    discovery: null,
     preview: null,
     expiryTimer: null,
     handoff: null,
@@ -76,6 +83,21 @@
       window.clearInterval(state.expiryTimer);
       state.expiryTimer = null;
     }
+    syncControls();
+  }
+
+  function clearDiscovery() {
+    state.discovery = null;
+    const placeholder = element(
+      "option",
+      "",
+      "먼저 Button 찾기를 실행하세요"
+    );
+    placeholder.value = "";
+    elementInput.replaceChildren(placeholder);
+    discoverySummary.textContent =
+      "먼저 대상 앱으로 전환해 실행 가능한 Button을 읽으세요.";
+    syncControls();
   }
 
   function clearHandoff() {
@@ -84,6 +106,67 @@
       state.handoffTimer = null;
     }
     state.handoff = null;
+  }
+
+  function selectedElementId() {
+    const value = String(elementInput.value || "").trim().toLowerCase();
+    return /^[0-9a-f]{20}$/.test(value) ? value : "";
+  }
+
+  function syncControls() {
+    const locked = state.busy || Boolean(state.preview);
+    const targets = Array.isArray(state.discovery && state.discovery.targets)
+      ? state.discovery.targets
+      : [];
+    discoverButton.disabled = locked;
+    elementInput.disabled = locked || targets.length === 0;
+    postconditionInput.disabled = locked;
+    previewButton.disabled = locked || !selectedElementId();
+  }
+
+  function renderDiscovery() {
+    const discovery = state.discovery;
+    const targets = Array.isArray(discovery && discovery.targets)
+      ? discovery.targets
+      : [];
+    const options = [
+      Object.assign(
+        element(
+          "option",
+          "",
+          targets.length
+            ? "Button을 선택하세요"
+            : "실행 가능한 Button이 없습니다"
+        ),
+        { value: "" }
+      ),
+    ];
+    for (const target of targets) {
+      const option = element(
+        "option",
+        "",
+        `${target.name} · ${target.elementId.slice(-6)}`
+      );
+      option.value = target.elementId;
+      options.push(option);
+    }
+    elementInput.replaceChildren(...options);
+    if (!discovery) {
+      clearDiscovery();
+      syncControls();
+      return;
+    }
+    const windowInfo = discovery.window || {};
+    const windowName =
+      windowInfo.title || windowInfo.className || "이름 없는 전경 창";
+    discoverySummary.textContent = [
+      `${windowName} · 실행 가능한 Button ${targets.length}개`,
+      discovery.truncated ? "일부만 표시됨" : "",
+      "발견은 실행 권한을 만들지 않음",
+    ]
+      .filter(Boolean)
+      .join(" · ");
+    syncControls();
   }
 
   function renderMessage(message, isError) {
@@ -168,18 +251,24 @@
       )
     );
     mount.replaceChildren(card);
+    syncControls();
   }
 
   function renderHandoff() {
     const handoff = state.handoff;
     if (!handoff) return;
     const applying = handoff.kind === "apply";
+    const discovering = handoff.kind === "discover";
     const card = element("article", "ui-action-handoff");
     card.append(
       element(
         "strong",
         "",
-        applying ? "승인됨 · 대상 창으로 전환" : "대상 창으로 전환"
+        applying
+          ? "승인됨 · 대상 창으로 전환"
+          : discovering
+            ? "Button을 읽을 창으로 전환"
+            : "대상 창으로 전환"
       ),
       element(
         "span",
@@ -191,7 +280,9 @@
         "ui-action-meta",
         applying
           ? "카운트가 끝나면 승인된 apply를 한 번 전송합니다. 정확히 같은 대상 창을 전경으로 두세요."
-          : "카운트가 끝나면 preview를 한 번 전송합니다. elementId가 있는 대상 창을 전경으로 두세요."
+          : discovering
+            ? "카운트가 끝나면 전경 창의 이름 있는 enabled Button 목록을 한 번 읽습니다. 어떤 행동도 실행하지 않습니다."
+            : "카운트가 끝나면 선택한 Button의 preview를 한 번 전송합니다. 같은 대상 창을 전경으로 두세요."
       )
     );
     const actions = element("div", "ui-action-actions");
@@ -204,10 +295,13 @@
       element(
         "span",
         "ui-action-policy",
-        "취소하면 요청하지 않습니다 · 전경/대상 불일치는 실행 없이 token을 소모합니다 · 자동 재시도 없음"
+        discovering
+          ? "취소하면 요청하지 않습니다 · 발견은 실행 권한을 만들지 않습니다 · 이름 있는 enabled Button만 표시"
+          : "취소하면 요청하지 않습니다 · 전경/대상 불일치는 실행 없이 token을 소모합니다 · 자동 재시도 없음"
       )
     );
     mount.replaceChildren(card);
+    syncControls();
   }
 
   function confirmationText(preview) {
@@ -235,13 +329,52 @@
       setState(payload.ok ? status.state || "running" : "unavailable");
       renderMessage(
         payload.ok
-          ? "현재 전경 창에서 관찰된 Button의 elementId를 입력하세요."
+          ? "Button 찾기로 대상 창을 읽고, 목록에서 실행 대상을 고르세요."
           : "Host UI Action Bridge가 준비되지 않았습니다.",
         !payload.ok
       );
     } catch (error) {
       setState("unavailable");
       renderMessage(error.message || "화면 행동 상태를 읽지 못했습니다.", true);
+    }
+    syncControls();
+  }
+
+  async function executeDiscoveryRequest() {
+    try {
+      const payload = await api("/api/control-page/ui-action/targets", {
+        method: "POST",
+        body: JSON.stringify({}),
+      });
+      const discovery = payload.targets || null;
+      const policy = discovery && discovery.policy;
+      if (
+        !discovery ||
+        discovery.schema !== "ui_action.targets.v1" ||
+        !Array.isArray(discovery.targets) ||
+        !policy ||
+        policy.requiresPreview !== true ||
+        policy.requiresExplicitConfirmation !== true ||
+        policy.automaticRetry !== false
+      ) {
+        throw new Error("Button 발견 계약을 확인할 수 없습니다.");
+      }
+      state.discovery = discovery;
+      renderDiscovery();
+      setState("targets_observed");
+      renderMessage(
+        discovery.targets.length
+          ? "대상 Button을 고른 뒤 별도 미리보기를 진행하세요."
+          : "이 전경 창에는 실행 가능한 이름 있는 Button이 없습니다.",
+        false
+      );
+    } catch (error) {
+      clearDiscovery();
+      setState("denied");
+      renderMessage(error.message || "Button 목록을 읽지 못했습니다.", true);
+    } finally {
+      state.busy = false;
+      syncControls();
     }
   }
 
@@ -277,14 +410,14 @@
       renderMessage(error.message || "미리보기가 거부됐습니다.", true);
     } finally {
       state.busy = false;
-      previewButton.disabled = false;
       if (state.preview) renderPreview();
+      syncControls();
     }
   }
 
   async function executeApplyRequest(preview) {
     state.busy = true;
-    previewButton.disabled = true;
+    syncControls();
     if (state.expiryTimer) {
       window.clearInterval(state.expiryTimer);
       state.expiryTimer = null;
@@ -324,8 +457,9 @@
         true
       );
     } finally {
+      clearDiscovery();
       state.busy = false;
-      previewButton.disabled = false;
+      syncControls();
     }
   }
 
@@ -338,7 +472,7 @@
     state.handoff = null;
     if (Date.now() - handoff.deadlineAt > FOCUS_HANDOFF_MAX_LATE_MS) {
       state.busy = false;
-      previewButton.disabled = false;
+      syncControls();
       if (
         handoff.kind === "apply" &&
         state.preview &&
@@ -357,7 +491,9 @@
       }
       return;
     }
-    if (handoff.kind === "preview") {
+    if (handoff.kind === "discover") {
+      void executeDiscoveryRequest();
+    } else if (handoff.kind === "preview") {
       void executePreviewRequest(handoff.payload);
     } else if (handoff.kind === "apply") {
       void executeApplyRequest(handoff.payload.preview);
@@ -374,7 +510,7 @@
     };
     state.handoff = handoff;
     state.busy = true;
-    previewButton.disabled = true;
+    syncControls();
     setState("focus_handoff");
     renderHandoff();
     state.handoffTimer = window.setInterval(function () {
@@ -395,7 +531,7 @@
     const kind = state.handoff && state.handoff.kind;
     clearHandoff();
     state.busy = false;
-    previewButton.disabled = false;
+    syncControls();
     if (
       kind === "apply" &&
       state.preview &&
@@ -407,6 +543,7 @@
       return;
     }
     clearPreview();
+    if (kind === "discover") clearDiscovery();
     setState("authorization_required");
     renderMessage(
       "전경 전환 카운트다운을 취소했습니다. 아무 요청도 보내지 않았습니다.",
@@ -414,12 +551,18 @@
     );
   }
 
+  function discoverTargets() {
+    if (state.busy || state.preview) return;
+    clearDiscovery();
+    armFocusHandoff("discover", {});
+  }
+
   function previewAction(event) {
     event.preventDefault();
     if (state.busy) return;
-    const elementId = String(elementInput.value || "").trim().toLowerCase();
-    if (!/^[0-9a-f]{20}$/.test(elementId)) {
-      renderMessage("elementId는 소문자 16진수 20자리여야 합니다.", true);
+    const elementId = selectedElementId();
+    if (!elementId) {
+      renderMessage("먼저 발견된 Button 목록에서 대상을 고르세요.", true);
       return;
     }
     clearPreview();
@@ -448,6 +591,8 @@
     armFocusHandoff("apply", { preview });
   }
 
+  discoverButton.addEventListener("click", discoverTargets);
+  elementInput.addEventListener("change", syncControls);
   form.addEventListener("submit", previewAction);
   mount.addEventListener("click", function (event) {
     const applyButton = event.target.closest("[data-ui-action-apply]");
@@ -468,6 +613,7 @@
   document.addEventListener("visibilitychange", function () {
     if (!document.hidden) refreshStatus();
   });
+  clearDiscovery();
   refreshStatus();
   window.setInterval(refreshStatus, 30 * 1000);
 })();

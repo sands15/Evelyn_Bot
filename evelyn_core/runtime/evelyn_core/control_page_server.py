@@ -1277,6 +1277,30 @@ async def ui_action_preview_handler(
     )
 
 
+async def ui_action_targets_handler(
+    request: web.Request,
+) -> web.StreamResponse:
+    try:
+        payload = await request.json()
+    except Exception:
+        return json_response(
+            {"ok": False, "error": "invalid_json"},
+            status=400,
+        )
+    proxied = await proxy_json(
+        request,
+        "POST",
+        "/api/control-page/ui-action/targets",
+        body=payload,
+    )
+    if proxied is not None:
+        return proxied
+    return json_response(
+        {"ok": False, "error": "bot_api_unavailable"},
+        status=503,
+    )
+
+
 async def ui_action_apply_handler(
     request: web.Request,
 ) -> web.StreamResponse:
@@ -1954,6 +1978,10 @@ def create_app() -> web.Application:
         ui_action_status_handler,
     )
     app.router.add_post(
+        "/api/control-page/ui-action/targets",
+        ui_action_targets_handler,
+    )
+    app.router.add_post(
         "/api/control-page/ui-action/preview",
         ui_action_preview_handler,
     )
@@ -2147,6 +2175,10 @@ def create_app() -> web.Application:
     app.router.add_options("/api/control-page/voice-validation/confirm", voice_validation_confirm_handler)
     app.router.add_options("/api/control-page/voice-validation/retry", voice_validation_retry_handler)
     app.router.add_options("/api/control-page/voice-validation/abort", voice_validation_abort_handler)
+    app.router.add_options(
+        "/api/control-page/ui-action/targets",
+        ui_action_targets_handler,
+    )
     app.router.add_options(
         "/api/control-page/ui-action/preview",
         ui_action_preview_handler,

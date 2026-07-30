@@ -67,6 +67,35 @@ class UiActionFastApiTests(unittest.IsolatedAsyncioTestCase):
             postcondition="target_absent",
         )
 
+    async def test_targets_accepts_only_an_empty_contract(self) -> None:
+        provider = AsyncMock(
+            return_value={
+                "ok": True,
+                "operation": "discover",
+                "error": "",
+                "targets": {"schema": "ui_action.targets.v1"},
+                "preview": {},
+                "result": {},
+            }
+        )
+        with patch.object(
+            fast_api,
+            "discover_host_ui_action",
+            new=provider,
+        ):
+            accepted = await self.client.post(
+                "/api/control-page/ui-action/targets",
+                json={},
+            )
+            rejected = await self.client.post(
+                "/api/control-page/ui-action/targets",
+                json={"command": "calc.exe"},
+            )
+
+        self.assertEqual(accepted.status, 200)
+        self.assertEqual(rejected.status, 400)
+        provider.assert_awaited_once_with()
+
     async def test_apply_requires_explicit_confirmation_marker(self) -> None:
         provider = AsyncMock(
             return_value={

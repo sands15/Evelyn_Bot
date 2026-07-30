@@ -49,12 +49,14 @@
 }
 
 .ui-action-pill[data-state="running"],
+.ui-action-pill[data-state="targets_observed"],
 .ui-action-pill[data-state="verified"] {
   color: #157545;
   background: rgba(32, 173, 102, 0.12);
 }
 
 .ui-action-pill[data-state="confirmation_required"],
+.ui-action-pill[data-state="focus_handoff"],
 .ui-action-pill[data-state="executing"] {
   color: #9b6700;
   background: rgba(226, 163, 32, 0.14);
@@ -73,6 +75,19 @@
   grid-template-columns: minmax(0, 1fr);
   gap: 8px;
   margin-top: 12px;
+}
+
+.ui-action-discovery {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.ui-action-discovery .ui-action-meta {
+  min-width: 0;
+  margin-top: 0;
+  overflow-wrap: anywhere;
 }
 
 .ui-action-form label {

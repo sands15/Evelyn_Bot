@@ -3,8 +3,8 @@ from __future__ import annotations
 import re
 
 
-HOST_UI_ACTION_REQUEST_SCHEMA = "host_ui_action.request.v1"
-HOST_UI_ACTION_RESPONSE_SCHEMA = "host_ui_action.response.v1"
+HOST_UI_ACTION_REQUEST_SCHEMA = "host_ui_action.request.v2"
+HOST_UI_ACTION_RESPONSE_SCHEMA = "host_ui_action.response.v2"
 HOST_UI_ACTION_STATUS_SCHEMA = "host_ui_action.status.v1"
 HOST_UI_ACTION_REQUEST_KEYS = frozenset(
     {
@@ -28,6 +28,7 @@ HOST_UI_ACTION_RESPONSE_KEYS = frozenset(
         "ok",
         "operation",
         "errorCode",
+        "targets",
         "preview",
         "result",
     }

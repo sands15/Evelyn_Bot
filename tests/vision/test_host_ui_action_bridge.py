@@ -144,6 +144,85 @@ class HostUiActionBridgeTests(unittest.IsolatedAsyncioTestCase):
         )
         return bridge, accessibility, invoker
 
+    async def test_discover_returns_targets_without_execution(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_root:
+            root = Path(temp_root)
+            bridge, accessibility, invoker = self.build_bridge(
+                root,
+                observations=[observation(now=1000.0)],
+            )
+            request_id = "9" * 32
+            write_request(
+                root
+                / "host_ui_action"
+                / "requests"
+                / f"{request_id}.json",
+                request_id=request_id,
+                now=1000.0,
+                operation="discover",
+            )
+
+            await bridge.process_pending()
+            response = json.loads(
+                (
+                    root
+                    / "host_ui_action"
+                    / "responses"
+                    / f"{request_id}.json"
+                ).read_text(encoding="utf-8")
+            )
+
+        self.assertTrue(response["ok"])
+        self.assertEqual(response["operation"], "discover")
+        self.assertEqual(response["targets"]["targets"][0]["name"], "확인")
+        self.assertEqual(response["preview"], {})
+        self.assertEqual(response["result"], {})
+        self.assertEqual(accessibility.calls, 1)
+        self.assertEqual(invoker.calls, [])
+        self.assertNotIn(
+            "확인",
+            json.dumps(bridge.snapshot(), ensure_ascii=False),
+        )
+
+    async def test_discover_rejects_action_fields_before_observation(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_root:
+            root = Path(temp_root)
+            bridge, accessibility, invoker = self.build_bridge(
+                root,
+                observations=[observation(now=1000.0)],
+            )
+            request_id = "8" * 32
+            write_request(
+                root
+                / "host_ui_action"
+                / "requests"
+                / f"{request_id}.json",
+                request_id=request_id,
+                now=1000.0,
+                operation="discover",
+                action="invoke",
+            )
+
+            await bridge.process_pending()
+            response = json.loads(
+                (
+                    root
+                    / "host_ui_action"
+                    / "responses"
+                    / f"{request_id}.json"
+                ).read_text(encoding="utf-8")
+            )
+
+        self.assertFalse(response["ok"])
+        self.assertEqual(
+            response["errorCode"],
+            "ui_action_invalid_discover_request",
+        )
+        self.assertEqual(accessibility.calls, 0)
+        self.assertEqual(invoker.calls, [])
+
     async def test_preview_and_apply_reobserve_execute_and_verify(self) -> None:
         with tempfile.TemporaryDirectory() as temp_root:
             root = Path(temp_root)

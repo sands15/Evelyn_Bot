@@ -54,6 +54,7 @@ from .minecraft_mode_composition import (
 )
 from .host_ui_action_client import (
     apply_host_ui_action,
+    discover_host_ui_action,
     preview_host_ui_action,
 )
 from .minecraft_world_lease import MinecraftWorldLeaseOwner
@@ -2319,6 +2320,28 @@ async def ui_action_preview_handler(
     )
 
 
+async def ui_action_targets_handler(
+    request: web.Request,
+) -> web.StreamResponse:
+    try:
+        payload = await request.json()
+    except Exception:
+        return json_response(
+            {"ok": False, "error": "invalid_json"},
+            status=400,
+        )
+    if not isinstance(payload, dict) or payload:
+        return json_response(
+            {"ok": False, "error": "ui_action_invalid_discover_request"},
+            status=400,
+        )
+    result = await discover_host_ui_action()
+    return json_response(
+        result,
+        status=200 if result.get("ok") else 409,
+    )
+
+
 async def ui_action_apply_handler(
     request: web.Request,
 ) -> web.StreamResponse:
@@ -2414,6 +2437,10 @@ def create_app(
     app.router.add_get(
         "/api/control-page/ui-action",
         ui_action_status_handler,
+    )
+    app.router.add_post(
+        "/api/control-page/ui-action/targets",
+        ui_action_targets_handler,
     )
     app.router.add_post(
         "/api/control-page/ui-action/preview",

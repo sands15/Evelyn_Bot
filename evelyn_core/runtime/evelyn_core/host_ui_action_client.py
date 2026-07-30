@@ -26,10 +26,36 @@ from .runtime_artifact_io import atomic_json_write
 from .ui_action_target import (
     UI_ACTION_ALLOWED_ACTIONS,
     UI_ACTION_ALLOWED_POSTCONDITIONS,
+    UI_ACTION_DISCOVERY_MAX_TARGETS,
+    UI_ACTION_FUTURE_TOLERANCE_SEC,
+    UI_ACTION_OBSERVATION_MAX_AGE_SEC,
 )
 
 
 HOST_UI_ACTION_DEFAULT_TIMEOUT_SEC = 10.0
+_UI_ACTION_TARGETS_KEYS = frozenset(
+    {
+        "ok",
+        "schema",
+        "observedAt",
+        "window",
+        "targets",
+        "truncated",
+        "policy",
+    }
+)
+_UI_ACTION_TARGETS_WINDOW_KEYS = frozenset({"title", "className"})
+_UI_ACTION_DISCOVERED_TARGET_KEYS = frozenset(
+    {"elementId", "name", "controlType", "isEnabled"}
+)
+_UI_ACTION_TARGETS_POLICY_KEYS = frozenset(
+    {
+        "action",
+        "requiresPreview",
+        "requiresExplicitConfirmation",
+        "automaticRetry",
+    }
+)
 _UI_ACTION_PREVIEW_KEYS = frozenset(
     {
         "ok",
@@ -83,6 +109,7 @@ def _failed(operation: str, error: str) -> dict[str, Any]:
         "ok": False,
         "operation": operation,
         "error": str(error or "host_ui_action_failed")[:80],
+        "targets": {},
         "preview": {},
         "result": {},
     }
@@ -109,6 +136,7 @@ def _read_response(
         or payload.get("requestId") != request_id
         or payload.get("operation") != operation
         or type(payload.get("ok")) is not bool
+        or not isinstance(payload.get("targets"), dict)
         or not isinstance(payload.get("preview"), dict)
         or not isinstance(payload.get("result"), dict)
     ):
@@ -144,8 +172,83 @@ def _read_response(
         return _failed(operation, "ui_action_contradictory_response")
     if not payload["ok"] and not error_code:
         return _failed(operation, "ui_action_contradictory_response")
+    if operation == "discover":
+        if payload["preview"] or payload["result"]:
+            return _failed(operation, "ui_action_contradictory_response")
+        if not payload["ok"]:
+            if payload["targets"]:
+                return _failed(
+                    operation,
+                    "ui_action_contradictory_response",
+                )
+            return {
+                "ok": False,
+                "operation": operation,
+                "error": error_code,
+                "targets": {},
+                "preview": {},
+                "result": {},
+            }
+        discovered = payload["targets"]
+        observed_at = discovered.get("observedAt")
+        window = discovered.get("window")
+        targets = discovered.get("targets")
+        policy = discovered.get("policy")
+        if (
+            set(discovered) != _UI_ACTION_TARGETS_KEYS
+            or discovered.get("ok") is not True
+            or discovered.get("schema") != "ui_action.targets.v1"
+            or isinstance(observed_at, bool)
+            or not isinstance(observed_at, (int, float))
+            or not math.isfinite(float(observed_at))
+            or float(observed_at) > now + UI_ACTION_FUTURE_TOLERANCE_SEC
+            or now - float(observed_at)
+            > UI_ACTION_OBSERVATION_MAX_AGE_SEC
+            or not isinstance(window, dict)
+            or set(window) != _UI_ACTION_TARGETS_WINDOW_KEYS
+            or not isinstance(window.get("title"), str)
+            or not isinstance(window.get("className"), str)
+            or len(window["title"]) > 240
+            or len(window["className"]) > 80
+            or (
+                not window["title"]
+                and not window["className"]
+            )
+            or not isinstance(targets, list)
+            or len(targets) > UI_ACTION_DISCOVERY_MAX_TARGETS
+            or type(discovered.get("truncated")) is not bool
+            or not isinstance(policy, dict)
+            or set(policy) != _UI_ACTION_TARGETS_POLICY_KEYS
+            or policy.get("action") != "invoke"
+            or policy.get("requiresPreview") is not True
+            or policy.get("requiresExplicitConfirmation") is not True
+            or policy.get("automaticRetry") is not False
+        ):
+            return _failed(operation, "ui_action_invalid_targets_contract")
+        seen_target_ids: set[str] = set()
+        for target in targets:
+            if (
+                not isinstance(target, dict)
+                or set(target) != _UI_ACTION_DISCOVERED_TARGET_KEYS
+                or not isinstance(target.get("elementId"), str)
+                or not isinstance(target.get("name"), str)
+                or not isinstance(target.get("controlType"), str)
+                or not HOST_UI_ACTION_ELEMENT_ID_RE.fullmatch(
+                    target.get("elementId") or ""
+                )
+                or not target["name"]
+                or len(target["name"]) > 180
+                or target.get("controlType") != "Button"
+                or target.get("isEnabled") is not True
+                or target["elementId"] in seen_target_ids
+            ):
+                return _failed(
+                    operation,
+                    "ui_action_invalid_targets_contract",
+                )
+            seen_target_ids.add(target["elementId"])
     if operation == "preview":
-        if payload["result"]:
+        if payload["targets"] or payload["result"]:
             return _failed(operation, "ui_action_contradictory_response")
         if not payload["ok"]:
             if payload["preview"]:
@@ -157,6 +260,7 @@ def _read_response(
                 "ok": False,
                 "operation": operation,
                 "error": error_code,
+                "targets": {},
                 "preview": {},
                 "result": {},
             }
@@ -203,7 +307,7 @@ def _read_response(
         ):
             return _failed(operation, "ui_action_invalid_preview_contract")
     if operation == "apply":
-        if payload["preview"]:
+        if payload["targets"] or payload["preview"]:
             return _failed(operation, "ui_action_contradictory_response")
         result = payload["result"]
         if not payload["ok"] and not result:
@@ -211,6 +315,7 @@ def _read_response(
                 "ok": False,
                 "operation": operation,
                 "error": error_code,
+                "targets": {},
                 "preview": {},
                 "result": {},
             }
@@ -289,6 +394,7 @@ def _read_response(
         "ok": bool(payload["ok"]),
         "operation": operation,
         "error": error_code,
+        "targets": dict(payload["targets"]),
         "preview": dict(payload["preview"]),
         "result": dict(payload["result"]),
     }
@@ -308,7 +414,10 @@ async def _request(
     monotonic: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], Awaitable[Any]] = asyncio.sleep,
 ) -> dict[str, Any]:
-    if operation == "preview":
+    if operation == "discover":
+        if action or element_id or postcondition or confirm_token:
+            return _failed(operation, "ui_action_invalid_discover_request")
+    elif operation == "preview":
         if (
             action not in UI_ACTION_ALLOWED_ACTIONS
             or not HOST_UI_ACTION_ELEMENT_ID_RE.fullmatch(element_id)
@@ -392,6 +501,15 @@ async def preview_host_ui_action(
     )
 
 
+async def discover_host_ui_action(
+    **kwargs: Any,
+) -> dict[str, Any]:
+    return await _request(
+        operation="discover",
+        **kwargs,
+    )
+
+
 async def apply_host_ui_action(
     *,
     confirm_token: str,
@@ -407,5 +525,6 @@ async def apply_host_ui_action(
 __all__ = [
     "HOST_UI_ACTION_DEFAULT_TIMEOUT_SEC",
     "apply_host_ui_action",
+    "discover_host_ui_action",
     "preview_host_ui_action",
 ]

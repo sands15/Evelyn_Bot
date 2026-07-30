@@ -161,7 +161,7 @@ class VoiceValidationApiTests(unittest.IsolatedAsyncioTestCase):
                     (await response.json())["error"],
                     "csrf_token_required",
                 )
-        for suffix in ("preview", "apply"):
+        for suffix in ("targets", "preview", "apply"):
             with self.subTest(route=f"ui-action/{suffix}"):
                 response = await self.client.post(
                     f"/api/control-page/ui-action/{suffix}",
@@ -184,6 +184,7 @@ class VoiceValidationApiTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_ui_action_proxy_preserves_fail_closed_status(self):
         for suffix, payload in (
+            ("targets", {}),
             (
                 "preview",
                 {

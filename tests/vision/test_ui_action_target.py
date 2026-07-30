@@ -15,6 +15,7 @@ if str(RUNTIME_ROOT) not in sys.path:
     sys.path.insert(0, str(RUNTIME_ROOT))
 
 from evelyn_core.ui_action_target import (  # noqa: E402
+    UI_ACTION_DISCOVERY_MAX_TARGETS,
     UI_ACTION_EVENT_SCHEMA,
     UI_ACTION_STATUS_SCHEMA,
     UI_ACTION_TOKEN_RECORD_RETENTION_SEC,
@@ -130,6 +131,88 @@ class UiActionTargetManagerTests(unittest.TestCase):
         self.assertNotIn(WINDOW_TITLE, event_text)
         self.assertNotIn("private UI text", event_text)
         self.assertNotIn(ELEMENT_ID, event_text)
+
+    def test_discover_lists_only_enabled_buttons_without_authority(
+        self,
+    ) -> None:
+        current = observation(now=self.clock)
+        current["elements"].append(
+            {
+                "elementId": "b" * 20,
+                "name": "사용 불가",
+                "automationId": "disabled-button",
+                "controlType": "Button",
+                "isEnabled": False,
+                "bounds": {
+                    "x": 100.0,
+                    "y": 20.0,
+                    "width": 80.0,
+                    "height": 30.0,
+                },
+            }
+        )
+
+        discovered = self.manager.discover(observation=current)
+        status = self.manager.status()
+        persisted = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in self.root.rglob("*")
+            if path.is_file()
+        )
+
+        self.assertTrue(discovered["ok"])
+        self.assertEqual(discovered["schema"], "ui_action.targets.v1")
+        self.assertEqual(
+            [target["name"] for target in discovered["targets"]],
+            ["저장"],
+        )
+        self.assertTrue(discovered["policy"]["requiresPreview"])
+        self.assertTrue(
+            discovered["policy"]["requiresExplicitConfirmation"]
+        )
+        self.assertEqual(status["activePreviewCount"], 0)
+        self.assertEqual(status["discoveryCount"], 1)
+        self.assertEqual(status["state"], "authorization_required")
+        self.assertNotIn(WINDOW_TITLE, persisted)
+        self.assertNotIn("저장", persisted)
+        self.assertNotIn("사용 불가", persisted)
+
+    def test_discover_bounds_large_button_lists(self) -> None:
+        current = observation(now=self.clock, include_target=False)
+        current["elements"] = [
+            {
+                "elementId": f"{index:020x}",
+                "name": f"Button {index}",
+                "automationId": f"button-{index}",
+                "controlType": "Button",
+                "isEnabled": True,
+                "bounds": {
+                    "x": float(index),
+                    "y": 20.0,
+                    "width": 80.0,
+                    "height": 30.0,
+                },
+            }
+            for index in range(UI_ACTION_DISCOVERY_MAX_TARGETS + 5)
+        ]
+
+        discovered = self.manager.discover(observation=current)
+
+        self.assertTrue(discovered["ok"])
+        self.assertTrue(discovered["truncated"])
+        self.assertEqual(
+            len(discovered["targets"]),
+            UI_ACTION_DISCOVERY_MAX_TARGETS,
+        )
+
+    def test_discover_preserves_source_truncation(self) -> None:
+        current = observation(now=self.clock)
+        current["truncated"] = True
+
+        discovered = self.manager.discover(observation=current)
+
+        self.assertTrue(discovered["ok"])
+        self.assertTrue(discovered["truncated"])
 
     def test_apply_reobserves_exact_target_and_verifies_absence(self) -> None:
         preview = self.preview()

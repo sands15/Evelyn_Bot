@@ -26,11 +26,16 @@ class ControlPageUiActionTests(unittest.TestCase):
         html = HTML.read_text(encoding="utf-8")
         self.assertIn('id="uiActionPreviewForm"', html)
         self.assertIn('id="uiActionMount"', html)
+        self.assertIn('id="uiActionDiscoverButton"', html)
+        self.assertIn('id="uiActionDiscoverySummary"', html)
+        self.assertIn('id="uiActionElementId"', html)
+        self.assertIn("5초 후 Button 찾기", html)
         self.assertIn("evelyn-ui-action.js", html)
         self.assertIn("evelyn-ui-action.css", html)
 
     def test_ui_requires_preview_and_explicit_confirmation(self) -> None:
         source = JS.read_text(encoding="utf-8")
+        self.assertIn("/api/control-page/ui-action/targets", source)
         self.assertIn("/api/control-page/ui-action/preview", source)
         self.assertIn("/api/control-page/ui-action/apply", source)
         self.assertIn("/api/control-page/session", source)
@@ -45,8 +50,14 @@ class ControlPageUiActionTests(unittest.TestCase):
         self.assertIn("uiActionHandoffCancel", source)
         self.assertIn('armFocusHandoff("preview"', source)
         self.assertIn('armFocusHandoff("apply"', source)
+        self.assertIn('armFocusHandoff("discover"', source)
+        self.assertIn("requiresPreview !== true", source)
+        self.assertIn("requiresExplicitConfirmation !== true", source)
+        self.assertIn("발견은 실행 권한을 만들지 않음", source)
         self.assertNotIn("setTimeout(applyAction", source)
         self.assertNotIn("setTimeout(executeApplyRequest", source)
+        self.assertNotIn("localStorage", source)
+        self.assertNotIn("sessionStorage", source)
         self.assertNotIn("rawCommand", source)
 
         apply_source = source[
@@ -68,7 +79,7 @@ class ControlPageUiActionTests(unittest.TestCase):
 
     def test_server_registers_ui_action_routes(self) -> None:
         source = SERVER.read_text(encoding="utf-8")
-        for suffix in ("", "/preview", "/apply"):
+        for suffix in ("", "/targets", "/preview", "/apply"):
             self.assertIn(
                 f'"/api/control-page/ui-action{suffix}"',
                 source,

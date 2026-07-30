@@ -11,6 +11,11 @@ Windows UI Automation `InvokePattern` call only when the same foreground
 `Button` can be reidentified immediately before execution and a named
 postcondition can be verified afterward.
 
+It also exposes an explicit read-only discovery step so the operator can choose
+an opaque target ID without copying it from a developer tool. Discovery returns
+at most 24 named, visible, enabled foreground Buttons and grants no execution
+authority.
+
 It is not general desktop automation. It does not authorize coordinates,
 keyboard input, text entry, arbitrary commands, background windows, retries, or
 rollback.
@@ -18,7 +23,8 @@ rollback.
 ## Ownership
 
 - `ui_action_target.py` owns target binding, process-memory confirmation tokens,
-  pre-execution reobservation, outcome verification, and the content-free audit.
+  bounded target discovery, pre-execution reobservation, outcome verification,
+  and the content-free audit.
 - `windows_accessibility_invoke.py` owns the fixed PowerShell executor contract.
 - `invoke_windows_accessibility_action.ps1` walks the current foreground UIA
   Control View and invokes exactly one matching visible, enabled `Button`.
@@ -51,29 +57,34 @@ The current allowlist is intentionally small:
 
 Menus, tabs, checkboxes, text fields, keyboard shortcuts, pointer coordinates,
 window activation, and process launch are not accepted by this contract.
+Discovery is read-only and does not expand this action allowlist.
 
 ## Authorization Flow
 
-1. Preview reads a fresh foreground Windows Accessibility observation.
-2. The requested opaque `elementId` must identify exactly one named, visible,
+1. An explicitly armed discovery may read one fresh foreground Windows
+   Accessibility observation. It returns at most 24 named, enabled Buttons,
+   creates no token, and does not persist target or window text.
+2. After the operator selects one returned Button, preview reads a new fresh
+   foreground Windows Accessibility observation.
+3. The requested opaque `elementId` must identify exactly one named, visible,
    enabled `Button`.
-3. The manager binds the preview to:
+4. The manager binds the preview to:
    - foreground window title and class digest;
    - element ID, control type, automation ID, accessible name, and bounds;
    - exact action and postcondition.
-4. A URL-safe confirmation token is held in process memory for at most 30
+5. A URL-safe confirmation token is held in process memory for at most 30
    seconds. It is not restored after restart.
-5. Apply requires the exact token and a Control Page request carrying
+6. Apply requires the exact token and a Control Page request carrying
    `userConfirmed=true` through the CSRF-protected public endpoint.
-6. The token is consumed before revalidation. Expiry, reuse, stale observation,
+7. The token is consumed before revalidation. Expiry, reuse, stale observation,
    changed foreground, changed target, missing target, or disabled target
    prevents execution and cannot reuse the token.
-7. The authorization audit writes and `fsync`s `execution_started` before the
+8. The authorization audit writes and `fsync`s `execution_started` before the
    fixed executor is called. If the audit is unavailable, execution does not
    start.
-8. The executor rechecks the expected foreground digest, walks at most 600 UIA
+9. The executor rechecks the expected foreground digest, walks at most 600 UIA
    nodes to depth 8, requires one exact element ID, and invokes it once.
-9. A new observation must prove the selected postcondition. There is no
+10. A new observation must prove the selected postcondition. There is no
    automatic retry.
 
 ## Result Semantics
@@ -93,11 +104,11 @@ alone is never sufficient.
 ## Queue Contract
 
 Docker writes only to `runtime_artifacts/host_ui_action/`.
-`host_ui_action.request.v1` has exactly these keys:
+`host_ui_action.request.v2` has exactly these keys:
 
 ```json
 {
-  "schema": "host_ui_action.request.v1",
+  "schema": "host_ui_action.request.v2",
   "requestId": "32 lowercase hex characters",
   "createdAt": 1000.0,
   "expiresAt": 1015.0,
@@ -109,10 +120,22 @@ Docker writes only to `runtime_artifacts/host_ui_action/`.
 }
 ```
 
-Apply uses `operation=apply`, sets only `confirmToken`, and leaves action,
-element ID, and postcondition empty. Unknown or missing keys, invalid IDs,
-overlong lifetimes, expired requests, arbitrary paths, command fields, or
-unsupported values are rejected before observation or execution.
+Discovery uses `operation=discover` and requires `action`, `elementId`,
+`postcondition`, and `confirmToken` to all be empty. Preview uses
+`operation=preview` with an allowed action, exact element ID, and allowed
+postcondition. Apply uses `operation=apply`, sets only `confirmToken`, and
+leaves action, element ID, and postcondition empty.
+
+`host_ui_action.response.v2` adds an exact `targets` object alongside the
+mutually exclusive `preview` and `result` objects. A successful discovery must
+contain `ui_action.targets.v1`, one bounded foreground identity, zero to 24
+unique enabled Button targets, and policy markers proving that preview and
+explicit confirmation are still required. Disabled, duplicate, malformed, or
+over-limit targets fail closed at the Docker client.
+
+Unknown or missing keys, invalid IDs, overlong lifetimes, expired requests,
+arbitrary paths, command fields, or unsupported values are rejected before
+observation or execution.
 
 The host atomically claims one request at a time. Responses are exact-schema,
 bounded, fresh for at most 10 seconds at the client, and deleted by the client
@@ -122,6 +145,12 @@ seconds and responses after 30 seconds.
 ## Control Page API
 
 - `GET /api/control-page/ui-action`
+- `POST /api/control-page/ui-action/targets`
+
+  ```json
+  {}
+  ```
+
 - `POST /api/control-page/ui-action/preview`
 
   ```json
@@ -141,10 +170,11 @@ seconds and responses after 30 seconds.
   }
   ```
 
-Both mutations use the existing Control Page CSRF/session boundary. Preview
-shows the exact target name, control type, foreground window, action, and
-postcondition. Preview and apply each require the operator to arm a separate
-five-second foreground handoff. The browser sends one request when the armed
+All three POST routes use the existing Control Page CSRF/session boundary.
+Discovery, preview, and apply each require the operator to arm a separate
+five-second foreground handoff. Discovery fills a transient Button selector;
+preview shows the exact selected target name, control type, foreground window,
+action, and postcondition. The browser sends one request when the armed
 deadline arrives, never before explicit arming. The countdown can be cancelled,
 and a callback that wakes more than two seconds late sends no request. Apply
 also requires the separate browser confirmation before it can be armed.
@@ -174,7 +204,7 @@ powershell.exe -NoProfile -STA -File .\evelyn_core\runtime\launchers\show_ui_act
 ## Privacy and Retention
 
 - Target/window text and confirmation tokens exist only in transient
-  request/response handling and the in-memory preview UI.
+  request/response handling and the in-memory discovery/preview UI.
 - `status.json`, `authorization.json`, and audit JSONL do not store accessible
   names, window titles, element IDs, commands, coordinates, or screen content.
 - Audit rows store timestamps, operation IDs, action/postcondition codes, a
@@ -187,7 +217,8 @@ powershell.exe -NoProfile -STA -File .\evelyn_core\runtime\launchers\show_ui_act
 The contract has synthetic coverage for stale observations, expiry, token
 reuse, process restart, changed windows, changed/disabled targets, duplicate
 identities, executor contract mismatch, postcondition failure, response
-tampering, CSRF, queue cleanup, and retention.
+tampering, bounded discovery, disabled discovered targets, discovery without
+authority, CSRF, queue cleanup, and retention.
 
 The contract is deployed in the local Bot API, Control Page, and Windows Local
 I/O Bridge. A live negative request with a well-formed nonexistent element ID
@@ -200,9 +231,10 @@ deployed browser panel reported `running` with no warning/error console logs.
 No live UI action has been executed. Positive and broader negative corpus runs
 across File Explorer, Chromium, Windows Settings, and WinUI applications are
 still required. The Control Page now has explicit, cancellable five-second
-foreground handoffs for preview and confirmed apply, and the reversible
-fixture is available for the first positive check. The handoff UI is deployed
-and renders against a running Host UI Action Bridge, but the fixture has not
-been launched and neither flow has executed a live action. Applications that
-expose only a root window remain non-actionable. General rollback and
-non-Button actions are outside the current boundary.
+foreground handoffs for discovery, preview, and confirmed apply, and the
+reversible fixture is available for the first positive check. Discovery and
+selection have synthetic/API coverage but are not yet deployed or exercised
+against a live external target. The fixture has not been launched and no live
+action has executed. Applications that expose only a root window remain
+non-actionable. General rollback and non-Button actions are outside the current
+boundary.

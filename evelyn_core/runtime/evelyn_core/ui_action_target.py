@@ -16,11 +16,13 @@ from .windows_accessibility import WINDOWS_ACCESSIBILITY_OBSERVATION_SCHEMA
 
 
 UI_ACTION_PREVIEW_SCHEMA = "ui_action.preview.v1"
+UI_ACTION_TARGETS_SCHEMA = "ui_action.targets.v1"
 UI_ACTION_EXECUTION_SCHEMA = "ui_action.execution.v1"
 UI_ACTION_RESULT_SCHEMA = "ui_action.result.v1"
 UI_ACTION_STATUS_SCHEMA = "ui_action.status.v1"
 UI_ACTION_EVENT_SCHEMA = "ui_action.event.v1"
 UI_ACTION_PREVIEW_TTL_SEC = 30.0
+UI_ACTION_DISCOVERY_MAX_TARGETS = 24
 UI_ACTION_TOKEN_RECORD_RETENTION_SEC = 300.0
 UI_ACTION_OBSERVATION_MAX_AGE_SEC = 5.0
 UI_ACTION_FUTURE_TOLERANCE_SEC = 2.0
@@ -133,7 +135,10 @@ def normalize_ui_action_observation(
     if not title and not class_name:
         return None, "ui_action_foreground_identity_missing"
     raw_elements = payload.get("elements")
-    if not isinstance(raw_elements, list):
+    if (
+        not isinstance(raw_elements, list)
+        or type(payload.get("truncated")) is not bool
+    ):
         return None, "ui_action_observation_invalid"
     elements: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -151,6 +156,7 @@ def normalize_ui_action_observation(
         "windowTitle": title,
         "windowClass": class_name,
         "windowDigest": _window_digest(title, class_name),
+        "truncated": payload["truncated"],
         "elements": elements,
     }, ""
 
@@ -219,6 +225,7 @@ class UiActionTargetManager:
         self._tokens: dict[str, dict[str, Any]] = {}
         self._pending: dict[str, dict[str, Any]] = {}
         self._state = "authorization_required"
+        self._discovery_count = 0
         self._preview_count = 0
         self._execution_count = 0
         self._verified_count = 0
@@ -300,6 +307,7 @@ class UiActionTargetManager:
                 and float(item.get("expiresAt") or 0.0) > self.now()
             ),
             "pendingExecutionCount": len(self._pending),
+            "discoveryCount": self._discovery_count,
             "previewCount": self._preview_count,
             "executionCount": self._execution_count,
             "verifiedCount": self._verified_count,
@@ -456,6 +464,67 @@ class UiActionTargetManager:
                     "verifyAfterExecute": True,
                     "automaticRetry": False,
                     "arbitraryCoordinates": False,
+                },
+            }
+
+    def discover(
+        self,
+        *,
+        observation: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Return bounded, enabled Button choices without granting authority."""
+        with self._lock:
+            if not self._audit_ready:
+                return self._deny("ui_action_authorization_audit_unavailable")
+            normalized, error = normalize_ui_action_observation(
+                observation,
+                now=self.now(),
+            )
+            if normalized is None:
+                return self._deny(error)
+            eligible = [
+                {
+                    "elementId": item["elementId"],
+                    "name": item["name"],
+                    "controlType": item["controlType"],
+                    "isEnabled": True,
+                }
+                for item in normalized["elements"]
+                if item["isEnabled"]
+            ]
+            truncated = bool(
+                normalized["truncated"]
+                or len(eligible) > UI_ACTION_DISCOVERY_MAX_TARGETS
+            )
+            targets = eligible[:UI_ACTION_DISCOVERY_MAX_TARGETS]
+            if not self._append_event(
+                event="targets_observed",
+                reason_code="explicit_target_discovery",
+                executed=False,
+                verified=False,
+            ):
+                self._fail_closed_for_audit()
+                return {
+                    "ok": False,
+                    "error": "ui_action_authorization_audit_unavailable",
+                }
+            self._discovery_count += 1
+            self._write_status()
+            return {
+                "ok": True,
+                "schema": UI_ACTION_TARGETS_SCHEMA,
+                "observedAt": normalized["capturedAt"],
+                "window": {
+                    "title": normalized["windowTitle"],
+                    "className": normalized["windowClass"],
+                },
+                "targets": targets,
+                "truncated": truncated,
+                "policy": {
+                    "action": "invoke",
+                    "requiresPreview": True,
+                    "requiresExplicitConfirmation": True,
+                    "automaticRetry": False,
                 },
             }
 
@@ -684,14 +753,17 @@ __all__ = [
     "UI_ACTION_ALLOWED_ACTIONS",
     "UI_ACTION_ALLOWED_CONTROL_TYPES",
     "UI_ACTION_ALLOWED_POSTCONDITIONS",
+    "UI_ACTION_DISCOVERY_MAX_TARGETS",
     "UI_ACTION_EVENT_SCHEMA",
     "UI_ACTION_EXECUTION_SCHEMA",
+    "UI_ACTION_FUTURE_TOLERANCE_SEC",
     "UI_ACTION_OBSERVATION_MAX_AGE_SEC",
     "UI_ACTION_PREVIEW_SCHEMA",
     "UI_ACTION_PREVIEW_TTL_SEC",
     "UI_ACTION_TOKEN_RECORD_RETENTION_SEC",
     "UI_ACTION_RESULT_SCHEMA",
     "UI_ACTION_STATUS_SCHEMA",
+    "UI_ACTION_TARGETS_SCHEMA",
     "UiActionTargetManager",
     "normalize_ui_action_observation",
 ]
