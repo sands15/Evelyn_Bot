@@ -18,10 +18,15 @@
     return;
   }
 
+  const FOCUS_HANDOFF_DELAY_SEC = 5;
+  const FOCUS_HANDOFF_TOKEN_MARGIN_SEC = 1;
+  const FOCUS_HANDOFF_MAX_LATE_MS = 2000;
   const state = {
     busy: false,
     preview: null,
     expiryTimer: null,
+    handoff: null,
+    handoffTimer: null,
   };
 
   function element(tag, className, text) {
@@ -71,6 +76,14 @@
       window.clearInterval(state.expiryTimer);
       state.expiryTimer = null;
     }
+  }
+
+  function clearHandoff() {
+    if (state.handoffTimer) {
+      window.clearInterval(state.handoffTimer);
+      state.handoffTimer = null;
+    }
+    state.handoff = null;
   }
 
   function renderMessage(message, isError) {
@@ -127,10 +140,17 @@
     );
 
     const actions = element("div", "ui-action-actions");
-    const applyButton = element("button", "is-primary", "확인 후 1회 실행");
+    const applyButton = element(
+      "button",
+      "is-primary",
+      `확인 후 ${FOCUS_HANDOFF_DELAY_SEC}초 뒤 1회 실행`
+    );
     applyButton.type = "button";
     applyButton.dataset.uiActionApply = "1";
-    applyButton.disabled = state.busy || remainingSeconds() <= 0;
+    applyButton.disabled =
+      state.busy ||
+      remainingSeconds() <=
+        FOCUS_HANDOFF_DELAY_SEC + FOCUS_HANDOFF_TOKEN_MARGIN_SEC;
     const cancelButton = element("button", "", "취소");
     cancelButton.type = "button";
     cancelButton.dataset.uiActionCancel = "1";
@@ -144,7 +164,47 @@
       element(
         "span",
         "ui-action-policy",
-        "실행 직전 같은 창·같은 요소를 재관찰하고, 실행 뒤 성공 조건까지 확인합니다."
+        "확인 뒤 대상 창으로 돌아갈 시간이 주어집니다. 실행 직전 같은 창·같은 요소를 재관찰합니다."
+      )
+    );
+    mount.replaceChildren(card);
+  }
+
+  function renderHandoff() {
+    const handoff = state.handoff;
+    if (!handoff) return;
+    const applying = handoff.kind === "apply";
+    const card = element("article", "ui-action-handoff");
+    card.append(
+      element(
+        "strong",
+        "",
+        applying ? "승인됨 · 대상 창으로 전환" : "대상 창으로 전환"
+      ),
+      element(
+        "span",
+        "ui-action-handoff-countdown",
+        `${handoff.remaining}초`
+      ),
+      element(
+        "span",
+        "ui-action-meta",
+        applying
+          ? "카운트가 끝나면 승인된 apply를 한 번 전송합니다. 정확히 같은 대상 창을 전경으로 두세요."
+          : "카운트가 끝나면 preview를 한 번 전송합니다. elementId가 있는 대상 창을 전경으로 두세요."
+      )
+    );
+    const actions = element("div", "ui-action-actions");
+    const cancelButton = element("button", "", "카운트다운 취소");
+    cancelButton.type = "button";
+    cancelButton.dataset.uiActionHandoffCancel = "1";
+    actions.append(cancelButton);
+    card.append(
+      actions,
+      element(
+        "span",
+        "ui-action-policy",
+        "취소하면 요청하지 않습니다 · 전경/대상 불일치는 실행 없이 token을 소모합니다 · 자동 재시도 없음"
       )
     );
     mount.replaceChildren(card);
@@ -160,6 +220,7 @@
       `행동: ${preview.action || "invoke"}`,
       `성공 조건: ${preview.postcondition || ""}`,
       "",
+      `${FOCUS_HANDOFF_DELAY_SEC}초 동안 대상 창으로 돌아가세요.`,
       "창이나 대상이 바뀌면 실행되지 않으며 자동 재시도하지 않습니다.",
     ].join("\n");
   }
@@ -184,24 +245,14 @@
     }
   }
 
-  async function previewAction(event) {
-    event.preventDefault();
-    if (state.busy) return;
-    const elementId = String(elementInput.value || "").trim().toLowerCase();
-    if (!/^[0-9a-f]{20}$/.test(elementId)) {
-      renderMessage("elementId는 소문자 16진수 20자리여야 합니다.", true);
-      return;
-    }
-    clearPreview();
-    state.busy = true;
-    previewButton.disabled = true;
+  async function executePreviewRequest(requestPayload) {
     try {
       const payload = await api("/api/control-page/ui-action/preview", {
         method: "POST",
         body: JSON.stringify({
-          elementId,
+          elementId: requestPayload.elementId,
           action: "invoke",
-          postcondition: String(postconditionInput.value || ""),
+          postcondition: requestPayload.postcondition,
         }),
       });
       state.preview = payload.preview || null;
@@ -211,6 +262,7 @@
       setState("confirmation_required");
       renderPreview();
       state.expiryTimer = window.setInterval(function () {
+        if (state.handoff) return;
         if (remainingSeconds() <= 0) {
           clearPreview();
           setState("authorization_required");
@@ -230,19 +282,18 @@
     }
   }
 
-  async function applyAction() {
-    if (state.busy || !state.preview) return;
-    const preview = state.preview;
-    if (remainingSeconds() <= 0) {
-      clearPreview();
-      setState("authorization_required");
-      renderMessage("승인 토큰이 만료됐습니다. 다시 미리보기 하세요.", true);
-      return;
-    }
-    if (!window.confirm(confirmationText(preview))) return;
+  async function executeApplyRequest(preview) {
     state.busy = true;
-    renderPreview();
+    previewButton.disabled = true;
+    if (state.expiryTimer) {
+      window.clearInterval(state.expiryTimer);
+      state.expiryTimer = null;
+    }
     setState("executing");
+    renderMessage(
+      "대상 창과 요소를 다시 확인하고 승인된 행동 1회를 요청하는 중입니다.",
+      false
+    );
     try {
       const payload = await api("/api/control-page/ui-action/apply", {
         method: "POST",
@@ -278,11 +329,135 @@
     }
   }
 
+  function runArmedHandoff(handoff) {
+    if (state.handoff !== handoff) return;
+    if (state.handoffTimer) {
+      window.clearInterval(state.handoffTimer);
+      state.handoffTimer = null;
+    }
+    state.handoff = null;
+    if (Date.now() - handoff.deadlineAt > FOCUS_HANDOFF_MAX_LATE_MS) {
+      state.busy = false;
+      previewButton.disabled = false;
+      if (
+        handoff.kind === "apply" &&
+        state.preview &&
+        remainingSeconds() >
+          FOCUS_HANDOFF_DELAY_SEC + FOCUS_HANDOFF_TOKEN_MARGIN_SEC
+      ) {
+        setState("confirmation_required");
+        renderPreview();
+      } else {
+        clearPreview();
+        setState("authorization_required");
+        renderMessage(
+          "브라우저가 지연되어 전경 전환 시한을 넘겼습니다. 요청하지 않았습니다.",
+          true
+        );
+      }
+      return;
+    }
+    if (handoff.kind === "preview") {
+      void executePreviewRequest(handoff.payload);
+    } else if (handoff.kind === "apply") {
+      void executeApplyRequest(handoff.payload.preview);
+    }
+  }
+
+  function armFocusHandoff(kind, payload) {
+    clearHandoff();
+    const handoff = {
+      kind,
+      payload,
+      remaining: FOCUS_HANDOFF_DELAY_SEC,
+      deadlineAt: Date.now() + FOCUS_HANDOFF_DELAY_SEC * 1000,
+    };
+    state.handoff = handoff;
+    state.busy = true;
+    previewButton.disabled = true;
+    setState("focus_handoff");
+    renderHandoff();
+    state.handoffTimer = window.setInterval(function () {
+      if (state.handoff !== handoff) return;
+      handoff.remaining = Math.max(
+        0,
+        Math.ceil((handoff.deadlineAt - Date.now()) / 1000)
+      );
+      if (handoff.remaining <= 0) {
+        runArmedHandoff(handoff);
+        return;
+      }
+      renderHandoff();
+    }, 1000);
+  }
+
+  function cancelFocusHandoff() {
+    const kind = state.handoff && state.handoff.kind;
+    clearHandoff();
+    state.busy = false;
+    previewButton.disabled = false;
+    if (
+      kind === "apply" &&
+      state.preview &&
+      remainingSeconds() >
+        FOCUS_HANDOFF_DELAY_SEC + FOCUS_HANDOFF_TOKEN_MARGIN_SEC
+    ) {
+      setState("confirmation_required");
+      renderPreview();
+      return;
+    }
+    clearPreview();
+    setState("authorization_required");
+    renderMessage(
+      "전경 전환 카운트다운을 취소했습니다. 아무 요청도 보내지 않았습니다.",
+      false
+    );
+  }
+
+  function previewAction(event) {
+    event.preventDefault();
+    if (state.busy) return;
+    const elementId = String(elementInput.value || "").trim().toLowerCase();
+    if (!/^[0-9a-f]{20}$/.test(elementId)) {
+      renderMessage("elementId는 소문자 16진수 20자리여야 합니다.", true);
+      return;
+    }
+    clearPreview();
+    armFocusHandoff("preview", {
+      elementId,
+      postcondition: String(postconditionInput.value || ""),
+    });
+  }
+
+  function applyAction() {
+    if (state.busy || !state.preview) return;
+    const preview = state.preview;
+    if (
+      remainingSeconds() <=
+      FOCUS_HANDOFF_DELAY_SEC + FOCUS_HANDOFF_TOKEN_MARGIN_SEC
+    ) {
+      clearPreview();
+      setState("authorization_required");
+      renderMessage(
+        "전경 전환 전에 승인 토큰이 만료될 수 있습니다. 다시 미리보기 하세요.",
+        true
+      );
+      return;
+    }
+    if (!window.confirm(confirmationText(preview))) return;
+    armFocusHandoff("apply", { preview });
+  }
+
   form.addEventListener("submit", previewAction);
   mount.addEventListener("click", function (event) {
     const applyButton = event.target.closest("[data-ui-action-apply]");
     const cancelButton = event.target.closest("[data-ui-action-cancel]");
-    if (applyButton) {
+    const handoffCancelButton = event.target.closest(
+      "[data-ui-action-handoff-cancel]"
+    );
+    if (handoffCancelButton) {
+      cancelFocusHandoff();
+    } else if (applyButton) {
       applyAction();
     } else if (cancelButton && !state.busy) {
       clearPreview();

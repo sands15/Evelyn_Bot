@@ -143,8 +143,33 @@ seconds and responses after 30 seconds.
 
 Both mutations use the existing Control Page CSRF/session boundary. Preview
 shows the exact target name, control type, foreground window, action, and
-postcondition. Apply remains a separate browser confirmation and is never
-scheduled automatically.
+postcondition. Preview and apply each require the operator to arm a separate
+five-second foreground handoff. The browser sends one request when the armed
+deadline arrives, never before explicit arming. The countdown can be cancelled,
+and a callback that wakes more than two seconds late sends no request. Apply
+also requires the separate browser confirmation before it can be armed.
+
+The handoff does not activate or choose a window. The operator must return to
+the intended foreground window. Apply consumes its token before reobservation,
+so a changed foreground or target fails closed and is never retried.
+
+## Reversible Positive Fixture
+
+`evelyn_core/runtime/launchers/show_ui_action_test_fixture.ps1` provides one
+named UIA `Button`, `Evelyn Safe Invoke Test`, for an explicitly approved live
+positive check. Invoking the target disables it, which proves the
+`target_disabled` postcondition. A separate `LinkLabel` resets the target
+manually; it is not an allowed Button action target.
+
+The fixture writes only `state`, timestamp, enabled state, expected
+postcondition, and privacy/reversibility flags to
+`runtime_artifacts/ui_action_fixture/status.json`. It does not call the
+production action boundary and does not retain target or window text. Launch
+it manually in an STA Windows PowerShell session:
+
+```powershell
+powershell.exe -NoProfile -STA -File .\evelyn_core\runtime\launchers\show_ui_action_test_fixture.ps1
+```
 
 ## Privacy and Retention
 
@@ -174,6 +199,9 @@ deployed browser panel reported `running` with no warning/error console logs.
 
 No live UI action has been executed. Positive and broader negative corpus runs
 across File Explorer, Chromium, Windows Settings, and WinUI applications are
-still required. Applications that expose only a root window remain
-non-actionable. Rollback and non-Button actions are outside the current
-boundary.
+still required. The Control Page now has explicit, cancellable five-second
+foreground handoffs for preview and confirmed apply, and the reversible
+fixture is available for the first positive check, but neither has been used
+to execute a live action. Applications that expose only a root window remain
+non-actionable. General rollback and non-Button actions are outside the
+current boundary.

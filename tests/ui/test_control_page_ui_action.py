@@ -38,8 +38,33 @@ class ControlPageUiActionTests(unittest.TestCase):
         self.assertIn("window.confirm", source)
         self.assertIn("userConfirmed: true", source)
         self.assertIn('action: "invoke"', source)
+        self.assertIn("FOCUS_HANDOFF_DELAY_SEC = 5", source)
+        self.assertIn("FOCUS_HANDOFF_MAX_LATE_MS = 2000", source)
+        self.assertIn("deadlineAt: Date.now()", source)
+        self.assertIn('setState("focus_handoff")', source)
+        self.assertIn("uiActionHandoffCancel", source)
+        self.assertIn('armFocusHandoff("preview"', source)
+        self.assertIn('armFocusHandoff("apply"', source)
         self.assertNotIn("setTimeout(applyAction", source)
+        self.assertNotIn("setTimeout(executeApplyRequest", source)
         self.assertNotIn("rawCommand", source)
+
+        apply_source = source[
+            source.index("function applyAction()") :
+            source.index('form.addEventListener("submit"')
+        ]
+        self.assertLess(
+            apply_source.index("window.confirm"),
+            apply_source.index('armFocusHandoff("apply"'),
+        )
+        armed_source = source[
+            source.index("function runArmedHandoff(") :
+            source.index("function armFocusHandoff(")
+        ]
+        self.assertLess(
+            armed_source.index("FOCUS_HANDOFF_MAX_LATE_MS"),
+            armed_source.index("executeApplyRequest"),
+        )
 
     def test_server_registers_ui_action_routes(self) -> None:
         source = SERVER.read_text(encoding="utf-8")
