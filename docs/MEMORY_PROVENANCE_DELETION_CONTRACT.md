@@ -86,3 +86,18 @@ fail-closed한다. 운영자는 재시작 또는 index sync 뒤 잔여 파일과
   `bot_memory/memory_index/hot_context.json`
 
 위 경로의 정확한 root는 실행 설정 또는 테스트 root에 따라 달라질 수 있다.
+
+## Verification
+
+`tests.memory.test_memory_deletion_restart`는 실제 별도 Python 프로세스에서
+tombstone append의 `fsync` 직후 `os._exit(73)`을 실행한다. 이 시점에는
+source Markdown, SQLite note/vector/FTS row, retrieval cache, hot-context,
+prompt block과 user state가 의도적으로 남아 있다.
+
+두 번째 새 Python 프로세스는 다음을 검증한다.
+
+- 최초 direct detail과 hot-context read가 삭제 내용을 반환하지 않는다.
+- snapshot/index sync가 남은 source, note/vector/FTS/graph row,
+  retrieval cache, user state, hot-context와 prompt block을 제거한다.
+- recall 결과에 삭제 title/body가 없고 동일 note ID 재생성이 차단된다.
+- tombstone에는 title, body, path, content hash가 없다.

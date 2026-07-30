@@ -49,22 +49,6 @@ guild 초기화 즉시 flush, 만료·손상·revocation fail-closed 계약은 �
 회귀를 실행한 뒤, 민감 정보가 없는 합성 세션으로 정상 restart와 강제 crash
 각각의 복구·만료·guild reset 비복구를 확인한다.
 
-## P1 — Memory 삭제 실제 crash/restart 검증 대기
-
-memory 삭제는 content-hash에 묶인 일회용 preview/apply 뒤 tombstone을 먼저
-flush·fsync한다. tombstoned note는 source 파일이 남아 있어도 index, direct
-lookup, user snapshot, recall, hot prompt에서 fail-closed로 제외되고 다음
-index sync가 잔여 source와 state를 재조정한다. 삭제된 당일 daily note에 새
-대화가 생기면 continuation ID를 사용한다.
-
-단위 테스트는 source unlink와 hot-context rebuild 실패를 합성해 즉시 비노출과
-후속 재조정을 확인했다. 실제 프로세스를 tombstone fsync 직후 강제 종료하고
-재기동하는 운영 E2E는 아직 실행하지 않았다.
-
-다음 조치: 깨끗한 Python 3.11 또는 공식 이미지에서 합성 기억만 사용해 apply
-도중 crash를 주입하고, 재시작 전후 Control Page·recall·prompt·SQLite·source
-파일 모두에서 원문이 되살아나지 않는지 확인한다.
-
 ## P1 — Python 모델 런타임 의존성 잔여 취약점
 
 루트/Windows lock의 Torch는 `2.13.0`으로 올라가
