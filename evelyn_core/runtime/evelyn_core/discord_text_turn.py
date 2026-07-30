@@ -11,6 +11,7 @@ from .discord_ingress import (
     decide_text_message_precheck,
     is_reply_to_target_user,
 )
+from .public_error_contract import public_failure_message
 from .turn_lifecycle import TurnScope
 
 
@@ -49,6 +50,7 @@ class DiscordTextMessageHandlerDeps:
     schedule_search_followup: Any
     session_state_snapshot: Any
     finish_assistant_text_turn: Any
+    commit_session_continuity: Any
     log_voice_bottleneck_summary: Any
     format_display_text: Any
     log: Any
@@ -146,6 +148,7 @@ async def handle_discord_text_message(message: Any, deps: DiscordTextMessageHand
     plain_answer = ""
     text_metrics: dict[str, Any] = {}
     text_delivery_plan = None
+    text_delivered = False
     text_turn_summary_logged = False
     try:
         async with reply_lock:
@@ -169,76 +172,156 @@ async def handle_discord_text_message(message: Any, deps: DiscordTextMessageHand
                     proactive_resolution=proactive_resolution,
                 )
                 plain_answer = deps.strip_omnivoice_tags(answer) or answer
+                text_delivered = True
 
-            if vc is not None and text_delivery_plan is not None and text_delivery_plan.should_play_voice:
-                await deps.execute_voice_delivery_plan(
-                    vc,
-                    text_delivery_plan,
+            async with state_lock:
+                deps.session_speculative_policies.pop(
+                    session_key,
+                    None,
+                )
+                awaiting_reply = bool(
+                    deps.session_state_snapshot(session_key).get(
+                        "awaiting_user_reply"
+                    )
+                )
+                deps.finish_assistant_text_turn(
+                    session_key,
+                    user_text,
+                    plain_answer,
+                    guild_id=message.guild.id,
+                    user_id=message.author.id,
+                    awaiting_user_reply=awaiting_reply,
+                    topic_id=topic_id,
+                )
+                try:
+                    continuity_status = (
+                        await deps.commit_session_continuity()
+                    )
+                    text_metrics.setdefault("meta", {}).update(
+                        {
+                            "continuity_commit": "durable",
+                            "continuity_generation": int(
+                                continuity_status.get(
+                                    "checkpointGeneration"
+                                )
+                                or 0
+                            ),
+                        }
+                    )
+                except Exception as exc:
+                    text_metrics.setdefault("meta", {}).update(
+                        {
+                            "continuity_commit": "failed",
+                            "continuity_error": (
+                                "conversation_continuity_"
+                                "commit_failed"
+                            ),
+                        }
+                    )
+                    deps.log(
+                        (
+                            "[TEXT TURN] "
+                            "continuity_commit_failed "
+                            "errorType="
+                        ),
+                        type(exc).__name__,
+                    )
+                runtime_mode = (
+                    (text_metrics.get("meta") or {}).get(
+                        "runtime_mode"
+                    )
+                    or deps.compute_runtime_mode(text_metrics)
+                )
+                deps.record_context_pipeline_benchmark(
                     metrics=text_metrics,
-                    turn_id=turn_id or deps.current_turn_id(session_key),
+                    user_text=user_text,
+                    answer=plain_answer,
+                    source="text",
+                    guild_id=message.guild.id,
                     session_key=session_key,
-                    turn_scope=turn_scope,
+                )
+                memory_writer_decision = (
+                    deps.schedule_memory_update(
+                        message.guild.id,
+                        user_text,
+                        plain_answer,
+                        room_key=room_key,
+                        person_key=person_key,
+                        session_memory_key=session_memory_key,
+                        source="text",
+                        user_speaker=(
+                            message.author.display_name
+                        ),
+                        assistant_speaker="Evelyn",
+                        session_key=session_key,
+                        turn_scope=turn_scope,
+                        runtime_mode=runtime_mode,
+                    )
+                )
+                text_metrics.setdefault("meta", {})[
+                    "memory_writer_decision"
+                ] = memory_writer_decision
+                search_requested = (
+                    deps.should_force_search_followup(
+                        message.guild.id,
+                        room_key=room_key,
+                        person_key=person_key,
+                        session_memory_key=session_memory_key,
+                        source="text",
+                    )
+                )
+                deps.schedule_search_followup(
+                    message.guild.id,
+                    session_key,
+                    user_text,
+                    plain_answer,
+                    room_key=room_key,
+                    person_key=person_key,
+                    session_memory_key=session_memory_key,
+                    channel_id=message.channel.id,
+                    reply_to_message_id=message.id,
+                    source="search-followup-text",
+                    force=search_requested,
+                    turn_scope=None,
+                    runtime_mode=runtime_mode,
                 )
 
-        async with state_lock:
-            deps.session_speculative_policies.pop(session_key, None)
-            runtime_mode = ((text_metrics.get("meta") or {}).get("runtime_mode")) or deps.compute_runtime_mode(text_metrics)
-            deps.record_context_pipeline_benchmark(
-                metrics=text_metrics,
-                user_text=user_text,
-                answer=plain_answer,
-                source="text",
-                guild_id=message.guild.id,
-                session_key=session_key,
-            )
-            memory_writer_decision = deps.schedule_memory_update(
-                message.guild.id,
-                user_text,
-                plain_answer,
-                room_key=room_key,
-                person_key=person_key,
-                session_memory_key=session_memory_key,
-                source="text",
-                user_speaker=message.author.display_name,
-                assistant_speaker="Evelyn",
-                session_key=session_key,
-                turn_scope=turn_scope,
-                runtime_mode=runtime_mode,
-            )
-            text_metrics.setdefault("meta", {})["memory_writer_decision"] = memory_writer_decision
-            search_requested = deps.should_force_search_followup(
-                message.guild.id,
-                room_key=room_key,
-                person_key=person_key,
-                session_memory_key=session_memory_key,
-                source="text",
-            )
-            deps.schedule_search_followup(
-                message.guild.id,
-                session_key,
-                user_text,
-                plain_answer,
-                room_key=room_key,
-                person_key=person_key,
-                session_memory_key=session_memory_key,
-                channel_id=message.channel.id,
-                reply_to_message_id=message.id,
-                source="search-followup-text",
-                force=search_requested,
-                turn_scope=None,
-                runtime_mode=runtime_mode,
-            )
-
-            awaiting_reply = bool(deps.session_state_snapshot(session_key).get("awaiting_user_reply"))
-            deps.finish_assistant_text_turn(
-                session_key,
-                user_text,
-                plain_answer,
-                guild_id=message.guild.id,
-                user_id=message.author.id,
-                awaiting_user_reply=awaiting_reply,
-                topic_id=topic_id,
-            )
+            if (
+                vc is not None
+                and text_delivery_plan is not None
+                and text_delivery_plan.should_play_voice
+            ):
+                try:
+                    await deps.execute_voice_delivery_plan(
+                        vc,
+                        text_delivery_plan,
+                        metrics=text_metrics,
+                        turn_id=(
+                            turn_id
+                            or deps.current_turn_id(session_key)
+                        ),
+                        session_key=session_key,
+                        turn_scope=turn_scope,
+                    )
+                except Exception as exc:
+                    text_metrics.setdefault("meta", {}).update(
+                        {
+                            "error_layer": (
+                                "optional_voice_delivery"
+                            ),
+                            "error": (
+                                "optional_voice_delivery_failed"
+                            ),
+                        }
+                    )
+                    deps.log(
+                        (
+                            "[TEXT TURN] "
+                            "optional_voice_delivery_failed "
+                            "errorType="
+                        ),
+                        type(exc).__name__,
+                    )
 
         deps.log_voice_bottleneck_summary(
             text_metrics,
@@ -249,8 +332,11 @@ async def handle_discord_text_message(message: Any, deps: DiscordTextMessageHand
         text_turn_summary_logged = True
 
     except Exception as exc:
-        deps.log("전체 오류:", repr(exc))
-        await message.channel.send(f"❌ 오류 발생: {exc}")
+        deps.log("전체 오류 type=", type(exc).__name__)
+        if not text_delivered:
+            await message.channel.send(
+                public_failure_message("text_turn_failed")
+            )
     finally:
         if text_metrics and not text_turn_summary_logged:
             text_metrics.setdefault("meta", {})["error_layer"] = "text_turn"

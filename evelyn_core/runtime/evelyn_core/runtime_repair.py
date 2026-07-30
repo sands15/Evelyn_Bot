@@ -675,12 +675,17 @@ def execute_runtime_repair_plan(
     try:
         runner_result = (runner or start_visible_process)(command, cwd)
     except Exception as exc:
+        print(
+            "[RUNTIME REPAIR] launcher_failed "
+            f"service={plan.get('serviceId')} action={plan.get('actionId')} "
+            f"errorType={type(exc).__name__}"
+        )
         response = {
             "ok": False,
             "error": "repair_launch_failed",
             "serviceId": plan.get("serviceId"),
             "actionId": plan.get("actionId"),
-            "message": f"Repair launcher failed: {exc}",
+            "message": "Repair launcher failed. Check runtime repair status.",
             "safety": {"willExecute": True, "launchAttempted": True},
         }
         append_repair_event({"event": "apply_failed", **response, "reason": str(reason or "")}, log_path=log_path)

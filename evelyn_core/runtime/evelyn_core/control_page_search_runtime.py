@@ -17,12 +17,14 @@ class ControlPageSearchRuntimeDeps:
     get_session_lock: Callable[[str], Any]
     append_history: Callable[..., None]
     mark_session_active: Callable[..., None]
+    commit_session_continuity: Callable[[], Awaitable[dict[str, Any]]]
     active_conversation_text_sec: float
     build_topic_id: Callable[..., str]
     schedule_local_control_tts: Callable[..., None]
     current_turn_id: Callable[[str | None], str | None]
     format_display_text: Callable[..., str]
     fallback_answer_for: Callable[[str], str]
+    log: Callable[..., Any]
 
 
 async def answer_control_page_search_text_from_runtime(
@@ -88,6 +90,21 @@ async def answer_control_page_search_text_from_runtime(
             answer_text=reply,
             user_text=user_text,
         )
+        try:
+            continuity_status = await deps.commit_session_continuity()
+            metrics["meta"]["continuity_commit"] = "durable"
+            metrics["meta"]["continuity_generation"] = int(
+                continuity_status.get("generation") or 0
+            )
+        except Exception as exc:
+            metrics["meta"]["continuity_commit"] = "failed"
+            metrics["meta"]["continuity_error"] = (
+                "conversation_continuity_commit_failed"
+            )
+            deps.log(
+                "[CONTROL PAGE] search_continuity_commit_failed "
+                f"session={session_key} errorType={type(exc).__name__}"
+            )
     deps.schedule_local_control_tts(
         reply,
         turn_id=deps.current_turn_id(session_key),

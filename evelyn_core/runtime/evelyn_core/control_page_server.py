@@ -42,6 +42,7 @@ from .memory_vault import (
     preview_memory_vault_user_note_deletion,
     update_memory_vault_user_note,
 )
+from .public_error_contract import public_error_code, public_failure_message
 from .runtime_health import apply_runtime_health_overrides, collect_runtime_health
 from .runtime_error_observability import collect_runtime_error_observability
 from .runtime_repair import (
@@ -216,7 +217,15 @@ async def proxy_json(request: web.Request, method: str, path: str, *, body: Any 
                 text = await response.text()
                 return web.Response(status=response.status, text=text, content_type=response.content_type or "application/json")
     except Exception as exc:
-        remember_proxy_failure(request, proxy_failure_payload(classify_proxy_exception(exc), url=url, detail=repr(exc)))
+        print(
+            "[CONTROL PAGE] proxy_failed "
+            f"method={method} path={path} "
+            f"errorType={type(exc).__name__}"
+        )
+        remember_proxy_failure(
+            request,
+            proxy_failure_payload(classify_proxy_exception(exc), url=url),
+        )
         return None
 
 
@@ -256,17 +265,38 @@ async def request_local_bridge_mic_control(
                     payload = {}
                 if not isinstance(payload, dict):
                     payload = {}
+                payload.pop("detail", None)
+                if payload.get("error"):
+                    payload["error"] = public_error_code(
+                        payload.get("error"),
+                        fallback="mic_control_failed",
+                    )
+                local_bridge = payload.get("localBridge")
+                if isinstance(local_bridge, dict):
+                    raw_error = local_bridge.get("lastError")
+                    if raw_error:
+                        local_bridge["lastError"] = public_error_code(
+                            raw_error,
+                            fallback="local_bridge_failed",
+                        )
                 payload.setdefault("httpStatus", response.status)
                 if response.status >= 400:
                     payload["ok"] = False
                     payload.setdefault("error", f"mic_control_http_{response.status}")
                 return payload
     except Exception as exc:
+        print(
+            "[CONTROL PAGE] mic_control_proxy_failed "
+            f"enabled={bool(enabled)} source={source} "
+            f"errorType={type(exc).__name__}"
+        )
         return {
             "ok": False,
             "applied": False,
-            "error": classify_proxy_exception(exc),
-            "detail": repr(exc),
+            "error": public_error_code(
+                classify_proxy_exception(exc),
+                fallback="mic_control_failed",
+            ),
         }
 
 
@@ -307,13 +337,12 @@ def classify_proxy_exception(exc: BaseException) -> str:
 
 
 def proxy_failure_payload(kind: str, *, url: str, detail: str = "") -> dict[str, Any]:
-    detail_text = str(detail or "")
+    _ = url, detail
     return {
-        "kind": kind,
-        "target": url,
-        "botApiHost": BOT_API_HOST,
-        "botApiPort": BOT_API_PORT,
-        "detail": detail_text[:240],
+        "kind": public_error_code(
+            kind,
+            fallback="proxy_failed",
+        ),
         "at": time.time(),
     }
 
@@ -384,6 +413,15 @@ def build_control_plane_state(
 ) -> dict[str, Any]:
     bot_port_open = bool(ports.get("bot"))
     cache_stale = runtime_health_cache_stale(cache_age_sec)
+    safe_proxy_failure: dict[str, Any] = {}
+    if isinstance(proxy_failure, dict):
+        safe_proxy_failure["kind"] = public_error_code(
+            proxy_failure.get("kind"),
+            fallback="proxy_failed",
+        )
+        failure_at = proxy_failure.get("at")
+        if isinstance(failure_at, (int, float)):
+            safe_proxy_failure["at"] = float(failure_at)
     return {
         "controlPage": {
             "ready": True,
@@ -401,7 +439,7 @@ def build_control_plane_state(
             "lastCheckedAt": bot_checked_at,
             "lastSuccessfulStateAt": bot_state_success_at,
         },
-        "lastProxyFailure": dict(proxy_failure or {}),
+        "lastProxyFailure": safe_proxy_failure,
         "healthCache": {
             "ageSec": round(float(cache_age_sec or 0.0), 1),
             "stale": cache_stale,
@@ -553,7 +591,7 @@ def json_response(data: Any, *, status: int = 200) -> web.Response:
 def schedule_local_stack_shutdown(delay_ms: int = 1500) -> tuple[bool, str]:
     stop_script = PROJECT_ROOT / "evelyn_core" / "runtime" / "launchers" / "stop_evelyn_local.ps1"
     if not stop_script.exists():
-        return False, f"shutdown helper not found: {stop_script}"
+        return False, "local_shutdown_helper_missing"
     try:
         subprocess.Popen(
             [
@@ -574,16 +612,20 @@ def schedule_local_stack_shutdown(delay_ms: int = 1500) -> tuple[bool, str]:
         )
         return True, "local shutdown scheduled"
     except Exception as exc:
-        return False, repr(exc)
+        print(
+            "[CONTROL PAGE] local_shutdown_schedule_failed "
+            f"errorType={type(exc).__name__}"
+        )
+        return False, "local_shutdown_failed"
 
 
 def schedule_local_stack_restart(delay_ms: int = 500) -> tuple[bool, str]:
     stop_script = PROJECT_ROOT / "evelyn_core" / "runtime" / "launchers" / "stop_evelyn_local.ps1"
     start_script = PROJECT_ROOT / "evelyn_core" / "start_local.bat"
     if not stop_script.exists():
-        return False, f"restart stop helper not found: {stop_script}"
+        return False, "local_restart_stop_helper_missing"
     if not start_script.exists():
-        return False, f"restart start helper not found: {start_script}"
+        return False, "local_restart_start_helper_missing"
     try:
         restart_script = (
             "$ErrorActionPreference = 'Continue'; "
@@ -608,7 +650,11 @@ def schedule_local_stack_restart(delay_ms: int = 500) -> tuple[bool, str]:
         )
         return True, "local restart scheduled"
     except Exception as exc:
-        return False, repr(exc)
+        print(
+            "[CONTROL PAGE] local_restart_schedule_failed "
+            f"errorType={type(exc).__name__}"
+        )
+        return False, "local_restart_failed"
 
 
 async def index_handler(_: web.Request) -> web.StreamResponse:
@@ -865,7 +911,14 @@ async def runtime_repair_apply_handler(request: web.Request) -> web.StreamRespon
         )
         response["repairLog"] = {"ok": True, "path": log_result.get("logPath")}
     except Exception as exc:
-        response["repairLog"] = {"ok": False, "error": str(exc)}
+        print(
+            "[CONTROL PAGE] repair_log_write_failed "
+            f"errorType={type(exc).__name__}"
+        )
+        response["repairLog"] = {
+            "ok": False,
+            "error": "repair_log_write_failed",
+        }
     if response.get("ok"):
         return json_response(response, status=202)
     error = response.get("error")
@@ -901,6 +954,10 @@ async def _revoke_voice_capture_consent(
         try:
             pending = manager.begin_revoke(reason=reason)
         except Exception as exc:
+            print(
+                "[CONTROL PAGE] voice_consent_revoke_state_write_failed "
+                f"reason={reason} errorType={type(exc).__name__}"
+            )
             control = await request_local_bridge_mic_control(
                 False,
                 source=f"voice_capture_consent:{reason}:state_error",
@@ -912,7 +969,6 @@ async def _revoke_voice_capture_consent(
             return {
                 "ok": False,
                 "error": "voice_capture_consent_state_write_failed",
-                "detail": repr(exc),
                 "controlApplied": applied,
                 "localBridge": bridge,
                 "consent": manager.status(),
@@ -1051,6 +1107,10 @@ async def voice_capture_consent_apply_handler(
                 error=str(control.get("error") or bridge.get("lastError") or ""),
             )
         except Exception as exc:
+            print(
+                "[CONTROL PAGE] voice_consent_apply_state_write_failed "
+                f"errorType={type(exc).__name__}"
+            )
             disable = await request_local_bridge_mic_control(
                 False,
                 source="voice_capture_consent:state_write_failed",
@@ -1059,7 +1119,6 @@ async def voice_capture_consent_apply_handler(
                 {
                     "ok": False,
                     "error": "voice_capture_consent_state_write_failed",
-                    "detail": repr(exc),
                     "controlApplied": bool(disable.get("applied")),
                     "localBridge": dict(disable.get("localBridge") or bridge),
                 },
@@ -1369,20 +1428,30 @@ def open_memory_vault_payload() -> dict[str, Any]:
             "url": obsidian_url,
         }
     except Exception as exc:
+        print(
+            "[CONTROL PAGE] obsidian_protocol_open_failed "
+            f"errorType={type(exc).__name__}"
+        )
         try:
             open_path_with_system(vault)
             return {
                 "ok": True,
-                "message": f"Obsidian protocol failed, opened the vault folder instead: {exc}",
+                "message": "Obsidian protocol failed, so the vault folder was opened instead.",
                 "vaultPath": str(vault),
                 "url": obsidian_url,
                 "fallback": "folder",
             }
         except Exception as fallback_exc:
+            print(
+                "[CONTROL PAGE] memory_vault_open_failed "
+                f"errorType={type(fallback_exc).__name__}"
+            )
             return {
                 "ok": False,
                 "error": "open_memory_vault_failed",
-                "message": str(fallback_exc),
+                "message": public_failure_message(
+                    "open_memory_vault_failed"
+                ),
                 "vaultPath": str(vault),
                 "url": obsidian_url,
             }
@@ -1878,7 +1947,7 @@ async def chat_handler(request: web.Request) -> web.StreamResponse:
             {
                 "ok": False,
                 "error": "local_restart_failed",
-                "reply": f"Local restart helper failed: {detail}",
+                "reply": public_failure_message("local_restart_failed"),
                 "state": state,
             },
             status=500,
@@ -1904,7 +1973,7 @@ async def chat_handler(request: web.Request) -> web.StreamResponse:
             {
                 "ok": False,
                 "error": "local_shutdown_failed",
-                "reply": f"Local shutdown helper failed: {detail}",
+                "reply": public_failure_message("local_shutdown_failed"),
                 "state": state,
             },
             status=500,

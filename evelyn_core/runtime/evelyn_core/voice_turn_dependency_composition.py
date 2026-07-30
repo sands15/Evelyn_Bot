@@ -24,6 +24,7 @@ class VoiceTurnDependencyCompositionDeps:
     session_state_snapshot: Callable[..., Any]
     mark_session_active: Callable[..., Any]
     set_room_owner: Callable[..., Any]
+    commit_session_continuity: Callable[..., Any]
     active_conversation_voice_question_sec: float
     active_conversation_voice_sec: float
     active_conversation_awaiting_reply_sec: float
@@ -96,6 +97,10 @@ class VoiceTurnDependencyComposition:
             session_state_snapshot=deps.session_state_snapshot,
             mark_session_active=deps.mark_session_active,
             set_room_owner=deps.set_room_owner,
+            commit_session_continuity=(
+                deps.commit_session_continuity
+            ),
+            log=deps.log,
             active_conversation_voice_question_sec=deps.active_conversation_voice_question_sec,
             active_conversation_voice_sec=deps.active_conversation_voice_sec,
             active_conversation_awaiting_reply_sec=(

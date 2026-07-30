@@ -18,6 +18,7 @@ from .minecraft_mode_composition import (
     minecraft_stop_confirmed,
 )
 from .minecraft_runtime_snapshot import attach_minecraft_runtime_snapshot
+from .public_error_contract import public_error_code, public_failure_message
 from .text import clean_text
 
 
@@ -166,12 +167,25 @@ class ControlPageMinecraftSnapshotCache:
         self.snapshot = dict(snapshot)
         self.cached_at = time.time() if now is None else float(now)
         self.stale = False
-        self.last_error = clean_text(str(snapshot.get("last_error") or ""))
+        raw_error = clean_text(str(snapshot.get("last_error") or ""))
+        self.last_error = (
+            public_error_code(
+                raw_error,
+                fallback="minecraft_snapshot_unavailable",
+            )
+            if raw_error
+            else ""
+        )
+        if self.last_error:
+            self.snapshot["last_error"] = self.last_error
         return self.snapshot_copy(now=self.cached_at)
 
     def store_error(self, error_text: str, *, now: float | None = None) -> dict[str, Any]:
         _ = now
-        self.last_error = clean_text(str(error_text or "")) or "minecraft_snapshot_error"
+        self.last_error = public_error_code(
+            error_text,
+            fallback="minecraft_snapshot_unavailable",
+        )
         self.stale = True
         if not self.snapshot:
             self.snapshot = {
@@ -601,7 +615,14 @@ def build_control_page_minecraft_payload(
         "completedCount": minecraft.get("completed_count") or 0,
         "failedCount": minecraft.get("failed_count") or 0,
         "recentActivity": activity,
-        "lastError": minecraft.get("last_error") or "",
+        "lastError": (
+            public_error_code(
+                minecraft.get("last_error"),
+                fallback="minecraft_snapshot_unavailable",
+            )
+            if minecraft.get("last_error")
+            else ""
+        ),
         **dict(minecraft_status_fields or {}),
         "idleSummary": "" if minecraft_session_active else idle_summary,
     }
@@ -1000,6 +1021,7 @@ async def handle_control_page_chat_request(
     build_state: Any,
     user_author: str = "정훈",
     assistant_author: str = "Evelyn",
+    log: Any = print,
 ) -> tuple[dict[str, Any], int]:
     chat_request = parse_control_page_chat_payload(payload)
     if not chat_request.get("ok"):
@@ -1014,10 +1036,13 @@ async def handle_control_page_chat_request(
 
     guild_id = int(effective_guild_id(guild))
     append_chat_log(guild_id, "user", user_author, text)
+    error_code = ""
     try:
         reply_text = await handle_input(guild, text)
     except Exception as exc:
-        reply_text = f"처리 중 오류가 났어: {exc}"
+        error_code = "control_page_chat_failed"
+        log("[CONTROL PAGE] chat_failed errorType=", type(exc).__name__)
+        reply_text = public_failure_message(error_code)
     append_chat_log(guild_id, "assistant", assistant_author, reply_text)
 
     refresh_plan = control_page_chat_refresh_plan(text)
@@ -1031,7 +1056,14 @@ async def handle_control_page_chat_request(
     if refresh_plan.get("needs_runtime_refresh"):
         await refresh_runtime_services(force=True)
     state = await build_state(guild)
-    return {"ok": True, "reply": reply_text, "state": state}, 200
+    result = {
+        "ok": not bool(error_code),
+        "reply": reply_text,
+        "state": state,
+    }
+    if error_code:
+        result["error"] = error_code
+    return result, 200
 
 
 async def handle_control_page_shutdown_request(
@@ -1052,11 +1084,12 @@ def memory_vault_obsidian_url(vault_path: Any) -> str:
 
 
 def memory_vault_open_tool_reply(*, outcome: str, error: Any = "") -> str:
+    _ = error
     if outcome == "obsidian":
         return "Obsidian 메모리 vault를 열게."
     if outcome == "folder":
-        return f"Obsidian protocol이 실패해서 vault 폴더를 대신 열었어: {error}"
-    return f"Obsidian 메모리 vault를 열지 못했어: {error}"
+        return "Obsidian protocol이 실패해서 vault 폴더를 대신 열었어."
+    return public_failure_message("open_memory_vault_failed")
 
 
 def control_page_open_memory_vault_tool_reply(
@@ -1084,6 +1117,7 @@ def control_page_open_memory_vault_payload(
     outcome: str,
     error: Any = "",
 ) -> dict[str, Any]:
+    _ = error
     if outcome == "obsidian":
         return {
             "ok": True,
@@ -1094,7 +1128,7 @@ def control_page_open_memory_vault_payload(
     if outcome == "folder":
         return {
             "ok": True,
-            "message": f"Obsidian protocol failed, opened the vault folder instead: {error}",
+            "message": "Obsidian protocol failed, so the vault folder was opened instead.",
             "vaultPath": str(vault_path),
             "url": obsidian_url,
             "fallback": "folder",
@@ -1102,7 +1136,7 @@ def control_page_open_memory_vault_payload(
     return {
         "ok": False,
         "error": "open_memory_vault_failed",
-        "message": str(error),
+        "message": public_failure_message("open_memory_vault_failed"),
         "vaultPath": str(vault_path),
         "url": obsidian_url,
     }

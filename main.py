@@ -657,8 +657,8 @@ autonomy_runtime_composition = AutonomyRuntimeComposition(
         vision_watch_interval_sec=VISION_WATCH_INTERVAL_SEC, active_conversation_text_question_sec=ACTIVE_CONVERSATION_TEXT_QUESTION_SEC,
         active_conversation_text_sec=ACTIVE_CONVERSATION_TEXT_SEC, autonomy_poll_interval_sec=AUTONOMY_POLL_INTERVAL_SEC,
         get_authorized_actions=autonomy_authorization_manager.authorized_actions,
-        authorize_action=autonomy_authorization_manager.authorize,
-        record_action_outcome=autonomy_authorization_manager.record_outcome,
+        authorize_action=autonomy_authorization_manager.authorize, record_action_outcome=autonomy_authorization_manager.record_outcome,
+        commit_session_continuity=session_continuity_checkpoint.commit_completed_turn_async, log=print,
     )
 )
 
@@ -710,7 +710,9 @@ voice_turn_dependency_composition = VoiceTurnDependencyComposition(
             *args, **kwargs
         ),
         session_state_snapshot=session_state_snapshot, mark_session_active=mark_session_active,
-        set_room_owner=set_room_owner, active_conversation_voice_question_sec=ACTIVE_CONVERSATION_VOICE_QUESTION_SEC,
+        set_room_owner=set_room_owner,
+        commit_session_continuity=session_continuity_checkpoint.commit_completed_turn,
+        active_conversation_voice_question_sec=ACTIVE_CONVERSATION_VOICE_QUESTION_SEC,
         active_conversation_voice_sec=ACTIVE_CONVERSATION_VOICE_SEC, active_conversation_awaiting_reply_sec=ACTIVE_CONVERSATION_AWAITING_REPLY_SEC,
         room_state_snapshot=room_state_snapshot, is_room_owner_active=is_room_owner_active,
         is_session_active_for_user=is_session_active_for_user, tts_input_suppression_reason=tts_playback_manager.input_suppression_reason,
@@ -1065,7 +1067,7 @@ search_memory_dependency_composition = SearchMemoryDependencyComposition(
         record_search_followup_queued=lambda *args, **kwargs: record_search_followup_queued(
             *args, **kwargs
         ),
-        log=print,
+        commit_session_continuity=session_continuity_checkpoint.commit_completed_turn_async, log=print,
     )
 )
 
@@ -1846,11 +1848,15 @@ control_page_search_text_dependency_composition = ControlPageSearchTextDependenc
         finish_assistant_text_turn=lambda *args, **kwargs: finish_assistant_text_turn(
             *args, **kwargs
         ),
+        commit_session_continuity=(
+            session_continuity_checkpoint.commit_completed_turn_async
+        ),
         log_voice_bottleneck_summary=lambda *args, **kwargs: log_voice_bottleneck_summary(
             *args, **kwargs
         ),
         detach_task=lambda *args, **kwargs: _detach_task(*args, **kwargs),
         clear_room_turn_scope=lambda *args, **kwargs: clear_room_turn_scope(*args, **kwargs),
+        log=print,
     )
 )
 
@@ -2366,11 +2372,12 @@ discord_app_dependency_composition = DiscordAppDependencyComposition(
         record_context_pipeline_benchmark=record_context_pipeline_benchmark, schedule_memory_update=schedule_memory_update,
         should_force_search_followup=should_force_search_followup, schedule_search_followup=schedule_search_followup,
         session_state_snapshot=session_state_snapshot, finish_assistant_text_turn=finish_assistant_text_turn,
+        commit_session_continuity=session_continuity_checkpoint.commit_completed_turn_async,
+        commit_session_continuity_sync=session_continuity_checkpoint.commit_completed_turn, log=print,
         log_voice_bottleneck_summary=log_voice_bottleneck_summary, format_display_text=format_display_text,
         resolve_text_thread_id=resolve_text_thread_id, make_text_session_key=make_text_session_key,
         record_command_assistant_turn=session_state_store.record_command_assistant_turn, system_prompt=SYSTEM_PROMPT,
-        max_history_items=MAX_HISTORY_ITEMS, normal_ttl_sec=ACTIVE_CONVERSATION_TEXT_SEC,
-        question_ttl_sec=ACTIVE_CONVERSATION_TEXT_QUESTION_SEC, log=print,
+        max_history_items=MAX_HISTORY_ITEMS, normal_ttl_sec=ACTIVE_CONVERSATION_TEXT_SEC, question_ttl_sec=ACTIVE_CONVERSATION_TEXT_QUESTION_SEC,
     )
 )
 

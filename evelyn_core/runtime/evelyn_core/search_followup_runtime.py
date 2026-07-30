@@ -41,6 +41,7 @@ class SearchFollowupRuntimeDeps:
     attach_current_task: Callable[[Any], asyncio.Task | None]
     detach_task: Callable[[Any, asyncio.Task | None], Any]
     record_search_followup_queued: Callable[[], Any]
+    commit_session_continuity: Callable[[], Awaitable[dict[str, Any]]]
     log: Callable[..., Any] = print
 
 
@@ -91,6 +92,35 @@ async def deliver_proactive_followup_from_runtime(
     if target_channel_id is None and session_key is not None:
         target_channel_id = stored_target.get("channel_id")
     reply_target_id = reply_to_message_id if reply_to_message_id is not None else stored_target.get("message_id")
+    recorded = False
+
+    async def record_delivered_followup() -> None:
+        nonlocal recorded
+        if recorded:
+            return
+        deps.append_history(session_key, query, plain_answer, guild_id=guild_id)
+        try:
+            await deps.commit_session_continuity()
+        except Exception as exc:
+            deps.log(
+                "[SEARCH] followup_continuity_commit_failed "
+                f"guild={guild_id} session={session_key} "
+                f"errorType={type(exc).__name__}"
+            )
+        deps.schedule_memory_update(
+            guild_id,
+            query,
+            plain_answer,
+            room_key=room_key,
+            person_key=person_key,
+            session_memory_key=session_memory_key,
+            source=source,
+            user_speaker="search_task",
+            assistant_speaker="Evelyn",
+            turn_scope=turn_scope,
+            runtime_mode=runtime_mode,
+        )
+        recorded = True
 
     if target_channel_id is not None:
         channel = deps.bot.get_channel(target_channel_id)
@@ -108,6 +138,7 @@ async def deliver_proactive_followup_from_runtime(
                 reference_message_id=reply_target_id,
                 reference_factory=lambda message_id: deps.discord_object_factory(id=message_id),
             )
+            await record_delivered_followup()
 
     vc = guild.voice_client if guild else None
     if vc is not None and vc.is_connected():
@@ -121,25 +152,15 @@ async def deliver_proactive_followup_from_runtime(
                 session_key=session_key,
                 turn_scope=turn_scope,
             )
+            await record_delivered_followup()
         except Exception as e:
-            deps.log(f"[SEARCH] proactive TTS 실패: {e!r}")
+            deps.log(
+                "[SEARCH] proactive TTS 실패 "
+                f"errorType={type(e).__name__}"
+            )
 
     if turn_scope is not None:
         turn_scope.raise_if_cancelled()
-    deps.append_history(session_key, query, plain_answer, guild_id=guild_id)
-    deps.schedule_memory_update(
-        guild_id,
-        query,
-        plain_answer,
-        room_key=room_key,
-        person_key=person_key,
-        session_memory_key=session_memory_key,
-        source=source,
-        user_speaker="search_task",
-        assistant_speaker="Evelyn",
-        turn_scope=turn_scope,
-        runtime_mode=runtime_mode,
-    )
 
 
 def normalize_search_key(session_key: str, query: str) -> str:

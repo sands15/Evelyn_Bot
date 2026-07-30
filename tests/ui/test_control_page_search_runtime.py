@@ -26,6 +26,7 @@ def _deps(**overrides) -> tuple[ControlPageSearchRuntimeDeps, dict[str, object]]
         "route": [],
         "search": [],
         "synthesis": [],
+        "events": [],
         "locks": {},
     }
 
@@ -43,6 +44,10 @@ def _deps(**overrides) -> tuple[ControlPageSearchRuntimeDeps, dict[str, object]]
             locks[session_key] = asyncio.Lock()
         return locks[session_key]
 
+    async def commit_session_continuity():
+        state["events"].append("commit")
+        return {"generation": 4}
+
     deps = ControlPageSearchRuntimeDeps(
         control_page_effective_guild_id=lambda guild: int(getattr(guild, "id", 999) or 999),
         control_page_session_key=lambda guild_id: f"control:{guild_id}",
@@ -53,14 +58,25 @@ def _deps(**overrides) -> tuple[ControlPageSearchRuntimeDeps, dict[str, object]]
         synthesize_tool_result_with_main_llm=synthesize_tool_result_with_main_llm,
         clean_text=lambda text: text.strip(),
         get_session_lock=get_session_lock,
-        append_history=lambda *args, **kwargs: state["history"].append((args, kwargs)),
-        mark_session_active=lambda *args, **kwargs: state["active"].append((args, kwargs)),
+        append_history=lambda *args, **kwargs: (
+            state["events"].append("history"),
+            state["history"].append((args, kwargs)),
+        )[-1],
+        mark_session_active=lambda *args, **kwargs: (
+            state["events"].append("active"),
+            state["active"].append((args, kwargs)),
+        )[-1],
+        commit_session_continuity=commit_session_continuity,
         active_conversation_text_sec=30.0,
         build_topic_id=lambda *texts: "topic:" + "|".join(texts),
-        schedule_local_control_tts=lambda *args, **kwargs: state["tts"].append((args, kwargs)),
+        schedule_local_control_tts=lambda *args, **kwargs: (
+            state["events"].append("tts"),
+            state["tts"].append((args, kwargs)),
+        )[-1],
         current_turn_id=lambda session_key: f"turn:{session_key}",
         format_display_text=lambda text, **_kwargs: f"display:{text}",
         fallback_answer_for=lambda text: f"fallback:{text}",
+        log=lambda *args, **kwargs: None,
     )
     if overrides:
         deps = ControlPageSearchRuntimeDeps(**{**deps.__dict__, **overrides})
@@ -86,6 +102,11 @@ class ControlPageSearchRuntimeTests(unittest.TestCase):
         self.assertEqual(state["active"][0][1]["topic_id"], "topic:오늘 날씨|search_executor|final answer")
         self.assertEqual(state["tts"][0][0], ("final answer",))
         self.assertEqual(state["tts"][0][1]["turn_id"], "turn:control:7")
+        self.assertEqual(state["events"], ["history", "active", "commit", "tts"])
+        self.assertEqual(
+            state["synthesis"][0]["metrics"]["meta"]["continuity_generation"],
+            4,
+        )
 
     def test_search_answer_falls_back_to_action_result_when_synthesis_is_empty(self) -> None:
         async def synthesize_tool_result_with_main_llm(**_kwargs):

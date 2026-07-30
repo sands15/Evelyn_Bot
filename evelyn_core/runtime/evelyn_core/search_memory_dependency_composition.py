@@ -71,6 +71,7 @@ class SearchMemoryDependencyCompositionDeps:
     attach_current_task: Callable[..., Any]
     detach_task: Callable[..., Any]
     record_search_followup_queued: Callable[..., Any]
+    commit_session_continuity: Callable[..., Any]
     log: Callable[..., Any]
 
 
@@ -158,6 +159,7 @@ class SearchMemoryDependencyComposition:
             attach_current_task=deps.attach_current_task,
             detach_task=deps.detach_task,
             record_search_followup_queued=deps.record_search_followup_queued,
+            commit_session_continuity=deps.commit_session_continuity,
             log=deps.log,
         )
 

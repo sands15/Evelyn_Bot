@@ -14,6 +14,8 @@ class DiscordCommandSessionRuntimeDeps:
     max_history_items: int
     normal_ttl_sec: float
     question_ttl_sec: float
+    commit_session_continuity: Callable[[], dict[str, Any]]
+    log: Callable[..., Any]
 
 
 def mark_text_session_from_command_runtime(
@@ -51,6 +53,13 @@ def mark_text_session_from_command_runtime(
         normal_ttl_sec=deps.normal_ttl_sec,
         question_ttl_sec=deps.question_ttl_sec,
     )
+    try:
+        deps.commit_session_continuity()
+    except Exception as exc:
+        deps.log(
+            "[DISCORD] command_continuity_commit_failed "
+            f"session={session_key} errorType={type(exc).__name__}"
+        )
 
 
 __all__ = [

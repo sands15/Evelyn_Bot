@@ -1112,6 +1112,26 @@ class SessionContinuityCheckpoint:
             self._write_status()
             return self.status()
 
+    def commit_completed_turn(self) -> dict[str, Any]:
+        """Durably anchor a completed user/assistant turn before returning."""
+        status = self.flush(force=True)
+        if (
+            status.get("state") == "error"
+            or status.get("rollbackProtected") is not True
+            or int(status.get("persistedSessionCount") or 0) < 1
+        ):
+            raise RuntimeError(
+                "conversation_continuity_commit_failed"
+            )
+        return status
+
+    async def commit_completed_turn_async(
+        self,
+    ) -> dict[str, Any]:
+        return await asyncio.to_thread(
+            self.commit_completed_turn
+        )
+
     async def _run(self) -> None:
         while True:
             await asyncio.sleep(self.flush_interval_sec)

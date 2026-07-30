@@ -223,6 +223,40 @@ class FastControlStreamContractTests(unittest.IsolatedAsyncioTestCase):
         done = next(event for event in events if event["type"] == "done")
         self.assertIsNotNone(done["firstDeltaMs"])
 
+    async def test_stream_failure_emits_only_fixed_error_code(self) -> None:
+        original_iter = fast_api.iter_main_llm_deltas
+
+        async def fail_iter(text: str, *, source: str):
+            if False:
+                yield ""
+            raise RuntimeError(
+                "Bearer stream-secret http://internal:9820 C:\\private"
+            )
+
+        fast_api.iter_main_llm_deltas = fail_iter
+        try:
+            events = await self.post_stream("실패 테스트")
+        finally:
+            fast_api.iter_main_llm_deltas = original_iter
+
+        error = next(
+            event
+            for event in events
+            if event["type"] == "error"
+        )
+        self.assertEqual(
+            error["error"],
+            "fast_control_stream_failed",
+        )
+        self.assertIn(
+            "fast_control_stream_failed",
+            error["message"],
+        )
+        public_text = json.dumps(events, ensure_ascii=False)
+        self.assertNotIn("stream-secret", public_text)
+        self.assertNotIn("internal:9820", public_text)
+        self.assertNotIn("C:\\\\private", public_text)
+
     async def test_memory_recall_progress_is_non_terminal_and_final_reply_continues(self) -> None:
         original_iter = fast_api.iter_main_llm_deltas
 

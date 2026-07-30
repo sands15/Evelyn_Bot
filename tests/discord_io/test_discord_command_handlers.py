@@ -202,7 +202,13 @@ class DiscordCommandHandlerTests(unittest.TestCase):
         )
 
         self.assertIn("중지했어", success_ctx.sent[0])
-        self.assertIn("minecraft_stop_unverified", failure_ctx.sent[0])
+        self.assertEqual(
+            failure_ctx.sent,
+            [
+                "❌ 마인크래프트 연결을 종료하지 못했어. 현재 상태를 다시 "
+                "확인해줘. (minecraft_disconnect_failed)"
+            ],
+        )
         self.assertEqual(len(marks), 2)
 
     def test_minecraft_status_command_records_failure_reply(self) -> None:
@@ -227,8 +233,12 @@ class DiscordCommandHandlerTests(unittest.TestCase):
             )
         )
 
-        self.assertEqual(ctx.sent, ["❌ 마인크래프트 상태 확인 실패: down"])
-        self.assertEqual(marks, [("마크상태", "❌ 마인크래프트 상태 확인 실패: down")])
+        expected = (
+            "❌ 마인크래프트 상태를 확인하지 못했어. 잠깐 뒤에 다시 "
+            "시도해줘. (minecraft_status_failed)"
+        )
+        self.assertEqual(ctx.sent, [expected])
+        self.assertEqual(marks, [("마크상태", expected)])
 
     def test_minecraft_goal_command_handles_missing_and_updated_goal(self) -> None:
         guild = SimpleNamespace(id=1)
@@ -393,6 +403,73 @@ class DiscordCommandHandlerTests(unittest.TestCase):
             ["자율 행동 기능이 설정에서 비활성화되어 있어."],
         )
         self.assertEqual(grants, [])
+
+    def test_command_failures_do_not_expose_exception_text(self) -> None:
+        secret = (
+            "Bearer discord-secret http://internal:8765 "
+            "C:\\Users\\Admin\\private.txt"
+        )
+        guild = SimpleNamespace(id=1, voice_client=None)
+        voice_channel = SimpleNamespace(name="General")
+        join_ctx = FakeContext(
+            guild=guild,
+            voice_channel=voice_channel,
+        )
+        autonomy_ctx = FakeContext(guild=guild)
+        minecraft_ctx = FakeContext(
+            guild=guild,
+            content="마크접속",
+        )
+        logged: list[tuple[object, ...]] = []
+
+        async def fail(*_args, **_kwargs):
+            raise RuntimeError(secret)
+
+        class Engine:
+            async def stop(self):
+                raise RuntimeError(secret)
+
+        asyncio.run(
+            handle_join_voice_command(
+                join_ctx,
+                ensure_listening_voice_client=fail,
+                log=lambda *args: logged.append(args),
+            )
+        )
+        asyncio.run(
+            handle_autonomy_stop_command(
+                autonomy_ctx,
+                autonomy_engines={1: Engine()},
+                revoke_autonomy_authorization=(
+                    lambda *_args, **_kwargs: None
+                ),
+                guild_only_message=lambda: "guild only",
+                log=lambda *args: logged.append(args),
+            )
+        )
+        asyncio.run(
+            handle_minecraft_connect_command(
+                minecraft_ctx,
+                enable_minecraft_mode=fail,
+                build_reply=lambda _observed: "connected",
+                mark_text_session_from_command=lambda *_args: None,
+                guild_only_message=lambda: "guild only",
+                log=lambda *args: logged.append(args),
+            )
+        )
+
+        public_text = "\n".join(
+            join_ctx.sent
+            + autonomy_ctx.sent
+            + minecraft_ctx.sent
+        )
+        self.assertNotIn("discord-secret", public_text)
+        self.assertNotIn("internal:8765", public_text)
+        self.assertNotIn("private.txt", public_text)
+        self.assertIn("voice_connect_failed", public_text)
+        self.assertIn("autonomy_stop_failed", public_text)
+        self.assertIn("minecraft_connect_failed", public_text)
+        self.assertTrue(logged)
 
     def test_autonomy_status_reports_authorization_without_engine(
         self,

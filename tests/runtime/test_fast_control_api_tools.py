@@ -770,6 +770,61 @@ class FastControlApiToolTests(unittest.TestCase):
         self.assertIn("실제 작업이 시작되지 않았어", payload["reply"])
         self.assertNotIn("확인해볼게", payload["reply"])
 
+    def test_chat_handler_failure_uses_fixed_public_error(self) -> None:
+        class _Request:
+            async def json(self):
+                return {
+                    "text": "실패 테스트",
+                    "source": "control_page",
+                }
+
+        async def fake_collect_runtime_health(
+            *,
+            manifest,
+            probe_runner,
+        ):
+            return {
+                "ok": True,
+                "overallState": "up",
+                "legacyServices": {},
+                "services": [],
+            }
+
+        async def fail_main_llm(*args, **kwargs):
+            raise RuntimeError(
+                "Bearer api-secret http://internal:9820 C:\\private"
+            )
+
+        original_collect = fast_api.collect_runtime_health
+        original_ask = fast_api.ask_main_llm
+        fast_api.collect_runtime_health = fake_collect_runtime_health
+        fast_api.ask_main_llm = fail_main_llm
+        try:
+            response = asyncio.run(
+                fast_api.chat_handler(_Request())
+            )
+        finally:
+            fast_api.collect_runtime_health = original_collect
+            fast_api.ask_main_llm = original_ask
+
+        payload = fast_api.json.loads(response.text or "{}")
+        self.assertFalse(payload["ok"])
+        self.assertEqual(
+            payload["error"],
+            "fast_control_chat_failed",
+        )
+        self.assertIn(
+            "fast_control_chat_failed",
+            payload["reply"],
+        )
+        public_text = fast_api.json.dumps(
+            payload,
+            ensure_ascii=False,
+        )
+        self.assertNotIn("api-secret", public_text)
+        self.assertNotIn("internal:9820", public_text)
+        self.assertNotIn("C:\\\\private", public_text)
+
     def test_registered_background_action_adds_followup_chat_and_events(self) -> None:
         async def runner(user_text: str, source: str) -> str:
             await asyncio.sleep(0)
@@ -832,9 +887,46 @@ class FastControlApiToolTests(unittest.TestCase):
         task = asyncio.run(scenario())
 
         self.assertEqual(task.status, "failed")
-        self.assertEqual(task.error, "FastActionExecutionError('local_bridge_not_ready')")
+        self.assertEqual(task.error, "local_bridge_not_ready")
         self.assertIn("로컬 브리지가 준비되지 않아서", task.final_reply)
         self.assertEqual(fast_api.CHAT_MESSAGES[-1]["taskStatus"], "failed")
+
+    def test_unknown_background_failure_is_redacted_from_snapshot(self) -> None:
+        async def runner(user_text: str, source: str) -> str:
+            raise RuntimeError(
+                "Bearer task-secret http://internal:9820 C:\\private"
+            )
+
+        async def scenario():
+            fast_api.register_background_action_handler(
+                kind="unit",
+                matcher=lambda text: True,
+                runner=runner,
+                start_reply="작업을 시작할게.",
+            )
+            prepared = fast_api.prepare_registered_background_action(
+                "실패 테스트",
+                source="control_page",
+            )
+            self.assertIsNotNone(prepared)
+            task, task_runner = prepared
+            await fast_api.launch_background_action(
+                task,
+                task_runner,
+            )
+            return task
+
+        task = asyncio.run(scenario())
+        snapshot_text = fast_api.json.dumps(
+            fast_api.ACTION_COORDINATOR.snapshot(),
+            ensure_ascii=False,
+        )
+
+        self.assertEqual(task.error, "background_action_failed")
+        self.assertIn("background_action_failed", task.final_reply)
+        self.assertNotIn("task-secret", snapshot_text)
+        self.assertNotIn("internal:9820", snapshot_text)
+        self.assertNotIn("C:\\\\private", snapshot_text)
 
     def test_chat_handler_returns_real_task_id_before_background_followup(self) -> None:
         class _Request:

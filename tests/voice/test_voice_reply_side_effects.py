@@ -48,6 +48,11 @@ class VoiceReplySideEffectsTests(unittest.TestCase):
                     return {"awaiting_user_reply": True}
                 if name == "compute_runtime_mode":
                     return "normal"
+                if name == "commit_session_continuity":
+                    return {
+                        "checkpointGeneration": 4,
+                        "rollbackProtected": True,
+                    }
                 return None
 
             return _inner
@@ -64,6 +69,10 @@ class VoiceReplySideEffectsTests(unittest.TestCase):
             session_state_snapshot=record("session_state_snapshot"),
             mark_session_active=record("mark_session_active"),
             set_room_owner=record("set_room_owner"),
+            commit_session_continuity=record(
+                "commit_session_continuity"
+            ),
+            log=record("log"),
             active_conversation_voice_question_sec=12.0,
             active_conversation_voice_sec=3.0,
             active_conversation_awaiting_reply_sec=30.0,
@@ -101,6 +110,92 @@ class VoiceReplySideEffectsTests(unittest.TestCase):
         self.assertEqual(by_name["set_room_owner"][0], ("room-1", 42))
         self.assertEqual(by_name["set_room_owner"][1]["ttl_sec"], 30.0)
         self.assertEqual(by_name["set_room_owner"][1]["turn_id"], "turn-1")
+        self.assertIn("commit_session_continuity", by_name)
+        self.assertEqual(
+            metrics["meta"]["continuity_commit"],
+            "durable",
+        )
+        self.assertEqual(
+            metrics["meta"]["continuity_generation"],
+            4,
+        )
+        self.assertLess(
+            [name for name, _args, _kwargs in calls].index(
+                "set_room_owner"
+            ),
+            [name for name, _args, _kwargs in calls].index(
+                "commit_session_continuity"
+            ),
+        )
+
+    def test_commit_failure_is_observable_without_losing_delivered_turn(
+        self,
+    ) -> None:
+        metrics: dict[str, Any] = {"meta": {}}
+        calls: list[str] = []
+
+        def noop(*_args: Any, **_kwargs: Any) -> Any:
+            return None
+
+        def commit() -> None:
+            raise RuntimeError(
+                "Bearer continuity-secret C:\\private"
+            )
+
+        deps = VoiceReplySideEffectDeps(
+            session_speculative_policies={},
+            append_history=lambda *_args, **_kwargs: calls.append(
+                "append"
+            ),
+            compute_runtime_mode=lambda _metrics: "normal",
+            record_context_pipeline_benchmark=noop,
+            schedule_memory_update=lambda *_args, **_kwargs: {},
+            read_cached_cognitive_state=lambda *_args, **_kwargs: {},
+            apply_ask_gating=lambda state, **_kwargs: state,
+            schedule_search_followup=noop,
+            session_state_snapshot=lambda _key: {
+                "awaiting_user_reply": False
+            },
+            mark_session_active=lambda *_args, **_kwargs: calls.append(
+                "active"
+            ),
+            set_room_owner=lambda *_args, **_kwargs: calls.append(
+                "owner"
+            ),
+            commit_session_continuity=commit,
+            log=lambda *_args: calls.append("log"),
+            active_conversation_voice_question_sec=12.0,
+            active_conversation_voice_sec=3.0,
+            active_conversation_awaiting_reply_sec=30.0,
+        )
+
+        finalize_voice_reply_side_effects_from_runtime(
+            guild_id=7,
+            member=FakeMember(),
+            session_key="session-1",
+            room_session_key="room-1",
+            room_key=None,
+            person_key=None,
+            session_memory_key=None,
+            voice_reply=FakeVoiceReply(),
+            plain_answer="답변",
+            metrics=metrics,
+            turn_scope="scope",
+            accepted_turn_id="turn-1",
+            segment_id=1,
+            deps=deps,
+        )
+
+        self.assertEqual(calls[:3], ["append", "active", "owner"])
+        self.assertEqual(
+            metrics["meta"]["continuity_commit"],
+            "failed",
+        )
+        self.assertEqual(
+            metrics["meta"]["continuity_error"],
+            "conversation_continuity_commit_failed",
+        )
+        self.assertIn("log", calls)
 
 
 if __name__ == "__main__":

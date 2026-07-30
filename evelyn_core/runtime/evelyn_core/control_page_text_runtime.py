@@ -21,12 +21,17 @@ class ControlPageTextRuntimeDeps:
     session_state_snapshot: Callable[[str], dict]
     maybe_append_proactive_question: Callable[..., tuple[str, bool]]
     finish_assistant_text_turn: Callable[..., None]
+    commit_session_continuity: Callable[
+        [],
+        Awaitable[dict[str, Any]],
+    ]
     log_voice_bottleneck_summary: Callable[..., None]
     schedule_local_control_tts: Callable[..., None]
     format_display_text: Callable[..., str]
     fallback_answer_for: Callable[[str], str]
     detach_task: Callable[[Any, Any], None]
     clear_room_turn_scope: Callable[[str, Any], None]
+    log: Callable[..., Any]
 
 
 async def answer_control_page_text_from_runtime(
@@ -111,6 +116,37 @@ async def answer_control_page_text_from_runtime(
                 awaiting_user_reply=awaiting_reply,
                 topic_id=topic_id,
             )
+            try:
+                continuity_status = (
+                    await deps.commit_session_continuity()
+                )
+                text_metrics.setdefault("meta", {}).update(
+                    {
+                        "continuity_commit": "durable",
+                        "continuity_generation": int(
+                            continuity_status.get(
+                                "checkpointGeneration"
+                            )
+                            or 0
+                        ),
+                    }
+                )
+            except Exception as exc:
+                text_metrics.setdefault("meta", {}).update(
+                    {
+                        "continuity_commit": "failed",
+                        "continuity_error": (
+                            "conversation_continuity_commit_failed"
+                        ),
+                    }
+                )
+                deps.log(
+                    (
+                        "[CONTROL PAGE] "
+                        "continuity_commit_failed:"
+                    ),
+                    repr(exc),
+                )
         deps.log_voice_bottleneck_summary(
             text_metrics,
             label="text_turn",

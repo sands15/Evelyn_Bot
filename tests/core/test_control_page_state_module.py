@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -620,6 +621,53 @@ class ControlPageStateModuleTests(unittest.TestCase):
         self.assertEqual(missing_status, 503)
         self.assertEqual(missing_payload["error"], "guild_not_available")
 
+    def test_control_page_chat_failure_is_fixed_and_redacted(self) -> None:
+        logs: list[tuple[object, ...]] = []
+        chat_log: list[tuple[object, ...]] = []
+
+        async def fail_input(_guild, _text: str) -> str:
+            raise RuntimeError(
+                "Bearer browser-secret http://internal:9820 C:\\private"
+            )
+
+        async def noop(*_args, **_kwargs):
+            return {}
+
+        payload, status = asyncio.run(
+            handle_control_page_chat_request(
+                {"text": "hello"},
+                discord_enabled=False,
+                select_guild=lambda _guild_id: None,
+                effective_guild_id=lambda _guild: 0,
+                append_chat_log=lambda *args: chat_log.append(args),
+                handle_input=fail_input,
+                ensure_minecraft_snapshot=noop,
+                refresh_runtime_services=noop,
+                build_state=noop,
+                log=lambda *args: logs.append(args),
+            )
+        )
+
+        self.assertEqual(status, 200)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(
+            payload["error"],
+            "control_page_chat_failed",
+        )
+        self.assertIn(
+            "control_page_chat_failed",
+            payload["reply"],
+        )
+        public_text = json.dumps(payload, ensure_ascii=False)
+        self.assertNotIn("browser-secret", public_text)
+        self.assertNotIn("internal:9820", public_text)
+        self.assertNotIn("C:\\\\private", public_text)
+        self.assertEqual(
+            chat_log[-1][1:3],
+            ("assistant", "Evelyn"),
+        )
+        self.assertTrue(logs)
+
     def test_control_page_shutdown_request_handler_routes_shutdown_command(self) -> None:
         guild = SimpleNamespace(id=7)
         handled: list[tuple[object, str]] = []
@@ -655,13 +703,13 @@ class ControlPageStateModuleTests(unittest.TestCase):
             vault_path="C:/Evelyn Memory/Vault",
             obsidian_url=url,
             outcome="folder",
-            error="protocol blocked",
+            error="Bearer secret C:\\private http://internal",
         )
         failed_payload = control_page_open_memory_vault_payload(
             vault_path="C:/Evelyn Memory/Vault",
             obsidian_url=url,
             outcome="failed",
-            error="no opener",
+            error="Bearer secret C:\\private http://internal",
         )
 
         self.assertEqual(url, "obsidian://open?path=C%3A%2FEvelyn%20Memory%2FVault")
@@ -672,6 +720,10 @@ class ControlPageStateModuleTests(unittest.TestCase):
         self.assertEqual(folder_payload["fallback"], "folder")
         self.assertFalse(failed_payload["ok"])
         self.assertEqual(failed_payload["error"], "open_memory_vault_failed")
+        serialized = str(folder_payload) + str(failed_payload)
+        self.assertNotIn("secret", serialized)
+        self.assertNotIn("private", serialized)
+        self.assertNotIn("internal", serialized)
 
     def test_memory_vault_open_result_uses_obsidian_then_folder_fallback(self) -> None:
         calls: list[tuple[str, str]] = []

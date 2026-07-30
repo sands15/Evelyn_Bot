@@ -17,6 +17,8 @@ class VoiceReplySideEffectDeps:
     session_state_snapshot: Callable[[str | None], dict[str, Any]]
     mark_session_active: Callable[..., Any]
     set_room_owner: Callable[..., Any]
+    commit_session_continuity: Callable[..., Any]
+    log: Callable[..., Any]
     active_conversation_voice_question_sec: float
     active_conversation_voice_sec: float
     active_conversation_awaiting_reply_sec: float
@@ -112,3 +114,29 @@ def finalize_voice_reply_side_effects_from_runtime(
         turn_id=accepted_turn_id,
         segment_id=segment_id,
     )
+    try:
+        continuity_status = deps.commit_session_continuity()
+        metrics.setdefault("meta", {}).update(
+            {
+                "continuity_commit": "durable",
+                "continuity_generation": int(
+                    continuity_status.get(
+                        "checkpointGeneration"
+                    )
+                    or 0
+                ),
+            }
+        )
+    except Exception as exc:
+        metrics.setdefault("meta", {}).update(
+            {
+                "continuity_commit": "failed",
+                "continuity_error": (
+                    "conversation_continuity_commit_failed"
+                ),
+            }
+        )
+        deps.log(
+            "[VOICE TURN] continuity_commit_failed errorType=",
+            type(exc).__name__,
+        )

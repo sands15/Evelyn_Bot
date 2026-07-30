@@ -91,6 +91,7 @@ class ControlPageSnapshotDependencyComposition:
             get_snapshot=deps.get_snapshot,
             clean_text=clean_text,
             timeout_sec=deps.timeout_sec,
+            log=deps.log,
         )
 
     def build_control_page_background_tasks_runtime_deps(

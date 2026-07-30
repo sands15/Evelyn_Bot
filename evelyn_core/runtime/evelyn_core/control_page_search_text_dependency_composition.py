@@ -36,9 +36,11 @@ class ControlPageSearchTextDependencyCompositionDeps:
     session_state_snapshot: Callable[..., Any]
     maybe_append_proactive_question: Callable[..., Any]
     finish_assistant_text_turn: Callable[..., Any]
+    commit_session_continuity: Callable[..., Any]
     log_voice_bottleneck_summary: Callable[..., Any]
     detach_task: Callable[..., Any]
     clear_room_turn_scope: Callable[..., Any]
+    log: Callable[..., Any]
 
 
 class ControlPageSearchTextDependencyComposition:
@@ -64,12 +66,14 @@ class ControlPageSearchTextDependencyComposition:
             get_session_lock=self._get_session_lock,
             append_history=deps.append_history,
             mark_session_active=deps.mark_session_active,
+            commit_session_continuity=deps.commit_session_continuity,
             active_conversation_text_sec=deps.active_conversation_text_sec,
             build_topic_id=deps.build_topic_id,
             schedule_local_control_tts=deps.schedule_local_control_tts,
             current_turn_id=deps.current_turn_id,
             format_display_text=deps.format_display_text,
             fallback_answer_for=deps.fallback_answer_for,
+            log=deps.log,
         )
 
     def build_control_page_text_runtime_deps(self) -> ControlPageTextRuntimeDeps:
@@ -90,12 +94,16 @@ class ControlPageSearchTextDependencyComposition:
             session_state_snapshot=deps.session_state_snapshot,
             maybe_append_proactive_question=deps.maybe_append_proactive_question,
             finish_assistant_text_turn=deps.finish_assistant_text_turn,
+            commit_session_continuity=(
+                deps.commit_session_continuity
+            ),
             log_voice_bottleneck_summary=deps.log_voice_bottleneck_summary,
             schedule_local_control_tts=deps.schedule_local_control_tts,
             format_display_text=deps.format_display_text,
             fallback_answer_for=deps.fallback_answer_for,
             detach_task=deps.detach_task,
             clear_room_turn_scope=deps.clear_room_turn_scope,
+            log=deps.log,
         )
 
 

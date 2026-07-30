@@ -48,6 +48,10 @@ from .fast_tool_planner import (
     plan_fast_tool_request,
 )
 from .paths import get_runtime_artifacts_root
+from .public_error_contract import (
+    public_error_code,
+    public_failure_message,
+)
 from .minecraft_mode_composition import (
     MinecraftModeComposition,
     MinecraftModeCompositionDeps,
@@ -311,6 +315,25 @@ def recent_chat_messages_for_planner(text: str, *, limit: int = 8) -> list[dict[
 
 def local_bridge_status_snapshot(*, now: float | None = None) -> dict[str, Any]:
     snapshot = dict(LOCAL_BRIDGE_STATUS)
+    raw_error = clean_text(snapshot.get("lastError"))
+    error_fallback = (
+        "mic_control_failed"
+        if raw_error.lower().startswith("mic_control_failed")
+        else "local_bridge_failed"
+    )
+    snapshot["lastError"] = (
+        public_error_code(raw_error, fallback=error_fallback)
+        if raw_error
+        else ""
+    )
+    mic = dict(snapshot.get("mic") or {})
+    raw_mic_error = clean_text(mic.get("lastError"))
+    if raw_mic_error:
+        mic["lastError"] = public_error_code(
+            raw_mic_error,
+            fallback="mic_control_failed",
+        )
+        snapshot["mic"] = mic
     snapshot["micControlRequest"] = dict(LOCAL_BRIDGE_MIC_CONTROL_REQUEST)
     snapshot["minecraftCommandRequest"] = dict(LOCAL_BRIDGE_MINECRAFT_COMMAND_REQUEST)
     if LOCAL_BRIDGE_OUTPUT_DEVICE_REQUEST.get("outputDevice"):
@@ -325,7 +348,9 @@ def local_bridge_status_snapshot(*, now: float | None = None) -> dict[str, Any]:
         return snapshot
     snapshot["ready"] = False
     snapshot["stale"] = True
-    snapshot["lastError"] = clean_text(snapshot.get("lastError")) or f"local_bridge_stale age={snapshot['ageSec']}s"
+    snapshot["lastError"] = (
+        clean_text(snapshot.get("lastError")) or "local_bridge_stale"
+    )
     return snapshot
 
 
@@ -513,14 +538,20 @@ async def request_minecraft_control_service(
                 except json.JSONDecodeError:
                     payload = {}
                 if response.status >= 400:
-                    return None, clean_text(
-                        str((payload or {}).get("error") or raw or f"http_{response.status}")
+                    return None, public_error_code(
+                        (payload or {}).get("error"),
+                        fallback="minecraft_request_failed",
                     )
                 if not isinstance(payload, dict):
                     return None, "invalid_minecraft_response"
                 return payload, ""
     except Exception as exc:
-        return None, clean_text(repr(exc))
+        print(
+            "[FAST CONTROL] minecraft_request_failed "
+            f"method={method} path={path} "
+            f"errorType={type(exc).__name__}"
+        )
+        return None, "minecraft_service_unavailable"
 
 
 def minecraft_service_is_offline(error: str) -> bool:
@@ -533,6 +564,7 @@ def minecraft_service_is_offline(error: str) -> bool:
             "connectionrefusederror",
             "connect call failed",
             "offline",
+            "minecraft_service_unavailable",
             "name or service not known",
             "nodename nor servname",
             "temporary failure in name resolution",
@@ -633,7 +665,15 @@ def render_minecraft_status(payload: dict[str, Any], *, detailed: bool = False) 
     state = clean_text(payload.get("connection_state")) or ("connected" if connected else "starting")
     goal = clean_text(payload.get("goal") or payload.get("current_task"))
     stage = clean_text(payload.get("display_stage") or payload.get("stage"))
-    last_error = clean_text(payload.get("last_error"))
+    raw_last_error = clean_text(payload.get("last_error"))
+    last_error = (
+        public_error_code(
+            raw_last_error,
+            fallback="minecraft_snapshot_unavailable",
+        )
+        if raw_last_error
+        else ""
+    )
     parts = [
         f"마인크래프트 에이전트는 실행 중이고 게임 접속은 {'확인됐어' if connected else '아직 준비 중이야'}.",
         f"현재 상태는 {state}야.",
@@ -1134,8 +1174,25 @@ def launch_background_action(
             )
             queue_local_bridge_speech(completed.final_reply, source="fast_control_action_followup")
         except Exception as exc:
-            error = clean_text(repr(exc)) or "background_action_failed"
-            failed_reply = clean_text(getattr(exc, "reply", "")) or "작업 실행 중 오류가 나서 완료하지 못했어."
+            print(
+                "[FAST CONTROL] background_action_failed "
+                f"task={task.task_id} errorType={type(exc).__name__}",
+                flush=True,
+            )
+            if isinstance(exc, FastActionExecutionError):
+                error = public_error_code(
+                    str(exc),
+                    fallback="background_action_failed",
+                )
+                failed_reply = (
+                    clean_text(exc.reply)
+                    or public_failure_message(
+                        "background_action_failed"
+                    )
+                )
+            else:
+                error = "background_action_failed"
+                failed_reply = public_failure_message(error)
             failed = ACTION_COORDINATOR.fail(task.task_id, error, reply=failed_reply)
             append_chat_message(
                 "assistant",
@@ -1550,7 +1607,14 @@ async def resolve_pre_llm_reply(text: str, *, source: str) -> str | None:
     if normalized in {"/voice", "/voice status", "voice status"}:
         bridge_status = local_bridge_status_snapshot()
         ready = bool(bridge_status.get("ready"))
-        error = clean_text(bridge_status.get("lastError"))
+        error = (
+            public_error_code(
+                bridge_status.get("lastError"),
+                fallback="local_bridge_failed",
+            )
+            if bridge_status.get("lastError")
+            else ""
+        )
         mic = dict(bridge_status.get("mic") or {})
         mic_enabled = bool(bridge_status.get("micEnabled", mic.get("enabled", False)))
         reply = (
@@ -1881,6 +1945,7 @@ async def chat_handler(request: web.Request) -> web.StreamResponse:
     append_chat_message("user", "정훈", text, source=source)
     tool_plan = await plan_fast_tool_request_for_turn(text)
     queued_speech_count = 0
+    error_code = ""
     task_record: FastActionTask | None = None
     task_runner: Callable[[str, str], Awaitable[str]] | None = None
     try:
@@ -1920,9 +1985,19 @@ async def chat_handler(request: web.Request) -> web.StreamResponse:
             )
         )
     except Exception as exc:
+        error_code = "fast_control_chat_failed"
+        print(
+            "[FAST CONTROL] chat_failed "
+            f"errorType={type(exc).__name__}",
+            flush=True,
+        )
         if task_record is not None and task_record.status == "running":
-            ACTION_COORDINATOR.fail(task_record.task_id, repr(exc), reply="작업을 시작하지 못했어.")
-        reply = f"처리 중 오류가 났어: {exc}"
+            ACTION_COORDINATOR.fail(
+                task_record.task_id,
+                error_code,
+                reply=public_failure_message(error_code),
+            )
+        reply = public_failure_message(error_code)
         task_runner = None
     append_chat_message(
         "assistant",
@@ -1939,11 +2014,13 @@ async def chat_handler(request: web.Request) -> web.StreamResponse:
     manifest = load_service_manifest()
     health = await collect_runtime_health(manifest=manifest, probe_runner=fast_control_probe_runner)
     result: dict[str, Any] = {
-        "ok": True,
+        "ok": not bool(error_code),
         "reply": reply,
         "suppressTts": suppress_tts,
         "state": build_control_state(health),
     }
+    if error_code:
+        result["error"] = error_code
     if task_record is not None:
         result["task"] = task_record.to_dict()
     return json_response(result)
@@ -2135,11 +2212,17 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
         if task_record is not None and task_runner is not None and task_record.status == "running":
             launch_background_action(task_record, task_runner)
     except Exception as exc:
+        error_code = "fast_control_stream_failed"
+        print(
+            "[FAST CONTROL] chat_stream_failed "
+            f"errorType={type(exc).__name__}",
+            flush=True,
+        )
         if task_record is not None and task_record.status == "running":
             failed = ACTION_COORDINATOR.fail(
                 task_record.task_id,
-                repr(exc),
-                reply="작업을 시작하지 못했어.",
+                error_code,
+                reply=public_failure_message(error_code),
             )
             append_chat_message(
                 "assistant",
@@ -2149,7 +2232,15 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
                 task_id=failed.task_id,
                 task_status=failed.status,
             )
-        await write_stream_event(response, {"type": "error", "ok": False, "error": repr(exc)})
+        await write_stream_event(
+            response,
+            {
+                "type": "error",
+                "ok": False,
+                "error": error_code,
+                "message": public_failure_message(error_code),
+            },
+        )
     await response.write_eof()
     return response
 

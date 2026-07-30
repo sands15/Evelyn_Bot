@@ -37,6 +37,7 @@ class ControlPageTextRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.detached: list[tuple[FakeScope, object]] = []
         self.cleared: list[tuple[str, FakeScope]] = []
         self.append_calls: list[tuple[tuple, dict]] = []
+        self.commits: list[str] = []
 
     async def ask_streaming(self, _text: str, **kwargs) -> str:
         if self.ask_error is not None:
@@ -50,6 +51,13 @@ class ControlPageTextRuntimeTests(unittest.IsolatedAsyncioTestCase):
         return f"{args[0]} 추가 질문?", self.append_proactive
 
     def build_deps(self) -> ControlPageTextRuntimeDeps:
+        async def commit_session_continuity():
+            self.commits.append("commit")
+            return {
+                "state": "ready",
+                "rollbackProtected": True,
+            }
+
         return ControlPageTextRuntimeDeps(
             effective_guild_id=lambda guild: guild.id if guild is not None else 0,
             session_key_for_guild=lambda guild_id: f"control:{guild_id}",
@@ -68,12 +76,14 @@ class ControlPageTextRuntimeTests(unittest.IsolatedAsyncioTestCase):
             session_state_snapshot=lambda _key: {"awaiting_user_reply": False},
             maybe_append_proactive_question=self.maybe_append,
             finish_assistant_text_turn=lambda *args, **kwargs: self.finished.append((args, kwargs)),
+            commit_session_continuity=commit_session_continuity,
             log_voice_bottleneck_summary=lambda metrics, **kwargs: self.summaries.append((metrics, kwargs)),
             schedule_local_control_tts=lambda *args, **kwargs: self.scheduled.append((args, kwargs)),
             format_display_text=lambda text, **_kwargs: f" display:{text} ",
             fallback_answer_for=lambda _text: "fallback",
             detach_task=lambda scope, task: self.detached.append((scope, task)),
             clear_room_turn_scope=lambda key, scope: self.cleared.append((key, scope)),
+            log=lambda *_args: None,
         )
 
     async def test_answer_records_turn_appends_question_and_schedules_local_tts(self) -> None:
@@ -87,6 +97,7 @@ class ControlPageTextRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.replaced[0][0], "control:7")
         self.assertEqual(self.finished[0][0][:3], ("control:7", "질문", "원본 답변 추가 질문?"))
         self.assertTrue(self.finished[0][1]["awaiting_user_reply"])
+        self.assertEqual(self.commits, ["commit"])
         self.assertEqual(self.scheduled[0][0], ("원본 답변 추가 질문?",))
         self.assertEqual(self.scheduled[0][1]["turn_id"], "turn-1")
         self.assertEqual(self.summaries[0][1]["event_name"], "text_turn_summary")
@@ -124,6 +135,7 @@ class ControlPageTextRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(summary["extra"], "control_page=true error=true")
         self.assertEqual(len(self.detached), 1)
         self.assertEqual(len(self.cleared), 1)
+        self.assertEqual(self.commits, [])
 
     def test_main_delegates_control_page_answer_to_runtime_module(self) -> None:
         source = (

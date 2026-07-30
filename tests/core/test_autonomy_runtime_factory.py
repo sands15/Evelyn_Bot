@@ -47,6 +47,10 @@ class AutonomyRuntimeFactoryTests(unittest.IsolatedAsyncioTestCase):
             self.events.append(("refresh", (args, kwargs)))
             return {"updated_at": "now", "action": "reply", "confidence": 0.9}
 
+        async def commit_session_continuity() -> dict[str, Any]:
+            self.events.append(("commit", None))
+            return {"generation": 9}
+
         return AutonomyRuntimeFactoryDeps(
             autonomy_engines=self.engines,
             get_guild=lambda _guild_id: self.guild,
@@ -104,6 +108,8 @@ class AutonomyRuntimeFactoryTests(unittest.IsolatedAsyncioTestCase):
                     ("outcome", (guild_id, action, result))
                 )
             ),
+            commit_session_continuity=commit_session_continuity,
+            log=lambda *args, **kwargs: None,
         )
 
     def create_engine(self):
@@ -150,9 +156,14 @@ class AutonomyRuntimeFactoryTests(unittest.IsolatedAsyncioTestCase):
             result["evidence_code"],
             "discord_send_completed",
         )
+        self.assertTrue(result["continuityDurable"])
+        self.assertEqual(result["continuityGeneration"], 9)
         self.assertEqual(self.last_ping[11], 100.0)
         kinds = [kind for kind, _payload in self.events]
-        self.assertEqual(kinds, ["send", "history", "memory", "session", "self_state"])
+        self.assertEqual(
+            kinds,
+            ["send", "history", "memory", "session", "commit", "self_state"],
+        )
         session_payload = next(payload for kind, payload in self.events if kind == "session")
         self.assertEqual(session_payload[1]["ttl_sec"], 30.0)
         self.assertTrue(session_payload[1]["awaiting_user_reply"])

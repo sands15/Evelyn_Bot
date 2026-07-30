@@ -23,6 +23,7 @@ from .minecraft_mode_composition import (
     MINECRAFT_STOPPED_OUTCOME,
     minecraft_stop_confirmed,
 )
+from .public_error_contract import public_failure_message
 
 
 async def handle_join_voice_command(
@@ -43,8 +44,10 @@ async def handle_join_voice_command(
             return
         await ctx.send(f"🔊 {voice_state.channel.name}에 들어왔어. 이제 듣고 말할게.")
     except Exception as exc:
-        log("음성 연결 오류:", repr(exc))
-        await ctx.send(f"❌ 음성 연결 실패: {exc}")
+        log("음성 연결 오류 type=", type(exc).__name__)
+        await ctx.send(
+            public_failure_message("voice_connect_failed")
+        )
 
 
 async def handle_rejoin_voice_command(
@@ -74,8 +77,10 @@ async def handle_rejoin_voice_command(
             return
         await ctx.send("🔄 다시 붙었어. 이제 계속 들을게.")
     except Exception as exc:
-        log("재연결 오류:", repr(exc))
-        await ctx.send(f"❌ 재연결 실패: {exc}")
+        log("재연결 오류 type=", type(exc).__name__)
+        await ctx.send(
+            public_failure_message("voice_reconnect_failed")
+        )
 
 
 async def handle_leave_voice_command(
@@ -175,6 +180,7 @@ async def handle_autonomy_stop_command(
     autonomy_engines: dict[int, Any],
     revoke_autonomy_authorization: Any,
     guild_only_message: Any,
+    log: Any = print,
 ) -> None:
     if ctx.guild is None:
         await ctx.send(guild_only_message())
@@ -191,7 +197,10 @@ async def handle_autonomy_stop_command(
         await engine.stop()
         await ctx.send("🛑 자율 행동 루프를 멈췄어.")
     except Exception as exc:
-        await ctx.send(f"❌ 자율 행동 정지 실패: {exc}")
+        log("자율 행동 정지 오류 type=", type(exc).__name__)
+        await ctx.send(
+            public_failure_message("autonomy_stop_failed")
+        )
 
 
 async def handle_autonomy_status_command(
@@ -376,6 +385,7 @@ async def handle_minecraft_connect_command(
     build_reply: Any,
     mark_text_session_from_command: Any,
     guild_only_message: Any,
+    log: Any = print,
 ) -> None:
     if ctx.guild is None:
         await ctx.send(guild_only_message())
@@ -391,7 +401,10 @@ async def handle_minecraft_connect_command(
         reply_text = build_reply(observed)
         await ctx.send(reply_text)
     except Exception as exc:
-        reply_text = f"❌ 마인크래프트 접속 실패: {exc}"
+        log("마인크래프트 접속 오류 type=", type(exc).__name__)
+        reply_text = public_failure_message(
+            "minecraft_connect_failed"
+        )
         await ctx.send(reply_text)
     mark_text_session_from_command(ctx, getattr(ctx.message, "content", None) or "마크접속", reply_text)
 
@@ -402,6 +415,7 @@ async def handle_minecraft_disconnect_command(
     disable_minecraft_mode: Any,
     mark_text_session_from_command: Any,
     guild_only_message: Any,
+    log: Any = print,
 ) -> None:
     if ctx.guild is None:
         await ctx.send(guild_only_message())
@@ -418,7 +432,10 @@ async def handle_minecraft_disconnect_command(
         reply_text = "🛑 Voyager 기반 마인크래프트 자율 모드를 중지했어."
         await ctx.send(reply_text)
     except Exception as exc:
-        reply_text = f"❌ 마인크래프트 연결 종료 실패: {exc}"
+        log("마인크래프트 연결 종료 오류 type=", type(exc).__name__)
+        reply_text = public_failure_message(
+            "minecraft_disconnect_failed"
+        )
         await ctx.send(reply_text)
     mark_text_session_from_command(ctx, getattr(ctx.message, "content", None) or "마크종료", reply_text)
 
@@ -431,6 +448,7 @@ async def handle_minecraft_status_command(
     build_reply: Any,
     mark_text_session_from_command: Any,
     guild_only_message: Any,
+    log: Any = print,
 ) -> None:
     if ctx.guild is None:
         await ctx.send(guild_only_message())
@@ -445,7 +463,10 @@ async def handle_minecraft_status_command(
         reply_text = build_reply(payload)
         await ctx.send(reply_text)
     except Exception as exc:
-        reply_text = f"❌ 마인크래프트 상태 확인 실패: {exc}"
+        log("마인크래프트 상태 확인 오류 type=", type(exc).__name__)
+        reply_text = public_failure_message(
+            "minecraft_status_failed"
+        )
         await ctx.send(reply_text)
     mark_text_session_from_command(ctx, getattr(ctx.message, "content", None) or "마크상태", reply_text)
 
@@ -459,6 +480,7 @@ async def handle_minecraft_goal_command(
     build_updated_reply: Any,
     mark_text_session_from_command: Any,
     guild_only_message: Any,
+    log: Any = print,
 ) -> None:
     if ctx.guild is None:
         await ctx.send(guild_only_message())
@@ -477,7 +499,10 @@ async def handle_minecraft_goal_command(
         reply_text = build_updated_reply(goal_text, status)
         await ctx.send(reply_text)
     except Exception as exc:
-        reply_text = f"❌ 마인크래프트 목표 변경 실패: {exc}"
+        log("마인크래프트 목표 변경 오류 type=", type(exc).__name__)
+        reply_text = public_failure_message(
+            "minecraft_goal_failed"
+        )
         await ctx.send(reply_text)
     mark_text_session_from_command(ctx, getattr(ctx.message, "content", None) or "마크목표", reply_text)
 

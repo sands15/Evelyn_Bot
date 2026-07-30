@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import sys
 import unittest
 from pathlib import Path
@@ -10,7 +11,11 @@ RUNTIME_ROOT = REPO_ROOT / "evelyn_core" / "runtime"
 if str(RUNTIME_ROOT) not in sys.path:
     sys.path.insert(0, str(RUNTIME_ROOT))
 
-from evelyn_core.search_followup_runtime import SearchFollowupRuntimeDeps, build_search_query_from_runtime  # noqa: E402
+from evelyn_core.search_followup_runtime import (  # noqa: E402
+    SearchFollowupRuntimeDeps,
+    build_search_query_from_runtime,
+    deliver_proactive_followup_from_runtime,
+)
 
 
 def build_deps(
@@ -39,6 +44,9 @@ def build_deps(
 
     def _compact_working_summary(text: str) -> str:
         return f"compact::{text}::{compact_summary}"
+
+    async def _commit_session_continuity():
+        return {"generation": 1}
 
     return SearchFollowupRuntimeDeps(
         bot=object(),
@@ -71,6 +79,7 @@ def build_deps(
         attach_current_task=lambda *args, **kwargs: None,
         detach_task=lambda *args, **kwargs: None,
         record_search_followup_queued=lambda: None,
+        commit_session_continuity=_commit_session_continuity,
         log=lambda *args, **kwargs: None,
     )
 
@@ -119,6 +128,72 @@ class SearchFollowupRuntimeTests(unittest.TestCase):
         self.assertEqual(history_calls, [{"session_key": "session-42", "guild_id": 42}])
         self.assertEqual(summary_path_calls, [42])
         self.assertEqual(summary_read_calls, ["summary:42"])
+
+    def test_delivered_text_is_committed_before_optional_voice(self) -> None:
+        events: list[str] = []
+
+        class Channel:
+            async def send(self, *_args, **_kwargs):
+                return None
+
+        class Voice:
+            def is_connected(self):
+                return True
+
+        class Bot:
+            def get_guild(self, _guild_id):
+                return type("Guild", (), {"voice_client": Voice()})()
+
+            def get_channel(self, _channel_id):
+                return Channel()
+
+        async def send(*_args, **_kwargs):
+            events.append("send")
+
+        async def commit():
+            events.append("commit")
+            return {"generation": 2}
+
+        async def speak(*_args, **_kwargs):
+            events.append("voice")
+            raise RuntimeError("optional voice failed")
+
+        deps = build_deps()
+        deps = SearchFollowupRuntimeDeps(
+            **{
+                **deps.__dict__,
+                "bot": Bot(),
+                "send_discord_text": send,
+                "append_history": lambda *_args, **_kwargs: events.append(
+                    "history"
+                ),
+                "schedule_memory_update": lambda *_args, **_kwargs: events.append(
+                    "memory"
+                ),
+                "commit_session_continuity": commit,
+                "speak_answer": speak,
+            }
+        )
+
+        asyncio.run(
+            deliver_proactive_followup_from_runtime(
+                1,
+                "query",
+                "answer",
+                deps=deps,
+                session_key="session",
+                room_key=None,
+                person_key=None,
+                session_memory_key=None,
+                channel_id=10,
+                source="search",
+            )
+        )
+
+        self.assertEqual(
+            events,
+            ["send", "history", "commit", "memory", "voice"],
+        )
 
 
 if __name__ == "__main__":

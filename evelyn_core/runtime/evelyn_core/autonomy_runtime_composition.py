@@ -55,6 +55,8 @@ class AutonomyRuntimeCompositionDeps:
     get_authorized_actions: Callable[[int], list[str]]
     authorize_action: Callable[[int, str], dict[str, Any]]
     record_action_outcome: Callable[[int, str, dict[str, Any]], None]
+    commit_session_continuity: Callable[..., Any]
+    log: Callable[..., Any]
 
 
 class AutonomyRuntimeComposition:
@@ -109,6 +111,8 @@ class AutonomyRuntimeComposition:
             get_authorized_actions=deps.get_authorized_actions,
             authorize_action=deps.authorize_action,
             record_action_outcome=deps.record_action_outcome,
+            commit_session_continuity=deps.commit_session_continuity,
+            log=deps.log,
         )
 
     def get_or_create_autonomy_engine(self, guild_id: int) -> AutonomyEngine:

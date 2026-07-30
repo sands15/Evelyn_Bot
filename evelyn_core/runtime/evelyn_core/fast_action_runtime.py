@@ -6,6 +6,7 @@ import time
 from typing import Any, Callable
 
 from .text import clean_text
+from .public_error_contract import public_error_code
 
 
 UNBACKED_PROGRESS_FALLBACK = (
@@ -506,7 +507,15 @@ def compact_local_bridge_context(snapshot: dict[str, Any] | None) -> str:
         ("mic_segment_count", safe_count(bridge.get("segmentCount"))),
         ("mic_transcript_count", safe_count(bridge.get("transcriptCount"))),
         ("speaker_active", bool(bridge.get("speaking"))),
-        ("local_bridge_last_error", clean_text(bridge.get("lastError")) or "none"),
+        (
+            "local_bridge_last_error",
+            public_error_code(
+                bridge.get("lastError"),
+                fallback="local_bridge_failed",
+            )
+            if bridge.get("lastError")
+            else "none",
+        ),
     )
     return "\n".join(f"{key}={str(value).lower() if isinstance(value, bool) else value}" for key, value in fields)
 
@@ -514,7 +523,14 @@ def compact_local_bridge_context(snapshot: dict[str, Any] | None) -> str:
 def render_local_mic_status(snapshot: dict[str, Any] | None) -> str:
     bridge = dict(snapshot or {})
     mic = dict(bridge.get("mic") or {})
-    error = clean_text(bridge.get("lastError"))
+    error = (
+        public_error_code(
+            bridge.get("lastError"),
+            fallback="local_bridge_failed",
+        )
+        if bridge.get("lastError")
+        else ""
+    )
     if bridge.get("stale"):
         age = bridge.get("ageSec")
         detail = f" 마지막 상태는 {age}초 전이야." if isinstance(age, (int, float)) else ""
@@ -623,7 +639,10 @@ class FastActionCoordinator:
         task = self._require_task(task_id)
         task.status = "failed"
         task.finished_at = self.time_fn()
-        task.error = clean_text(error)
+        task.error = public_error_code(
+            error,
+            fallback="background_action_failed",
+        )
         task.final_reply = clean_text(reply)
         self._append_event(task, event_type="failed", reply=task.final_reply, error=task.error)
         return task

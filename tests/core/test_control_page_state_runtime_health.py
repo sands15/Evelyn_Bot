@@ -23,6 +23,34 @@ class ControlPageRuntimeHealthContractTests(unittest.TestCase):
 
     def test_control_page_imports_manifest_health_layer(self) -> None:
         self.assertIn("collect_runtime_health", self.local_server)
+
+    def test_memory_vault_open_failure_does_not_expose_exception(self) -> None:
+        secret = "Bearer secret C:\\private http://internal"
+        with (
+            patch.object(
+                control_page_server,
+                "ensure_memory_vault_layout",
+                return_value=Path("C:/Vault"),
+            ),
+            patch.object(
+                control_page_server,
+                "open_url_with_system",
+                side_effect=OSError(secret),
+            ),
+            patch.object(
+                control_page_server,
+                "open_path_with_system",
+                side_effect=OSError(secret),
+            ),
+        ):
+            payload = control_page_server.open_memory_vault_payload()
+
+        serialized = json.dumps(payload)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error"], "open_memory_vault_failed")
+        self.assertNotIn("secret", serialized)
+        self.assertNotIn("private", serialized)
+        self.assertNotIn("internal", serialized)
         self.assertIn("apply_runtime_health_overrides", self.local_server)
         self.assertIn("from .runtime_services import load_service_manifest, manifest_to_dict", self.local_server)
 
@@ -33,7 +61,8 @@ class ControlPageRuntimeHealthContractTests(unittest.TestCase):
         self.assertIn('runtime["serviceHealth"] = service_health', self.local_server)
         self.assertIn('runtime["manifestVersion"] = service_health.get("manifestVersion")', self.local_server)
         self.assertIn('runtime["controlPlane"] = control_plane', self.local_server)
-        self.assertIn('"lastProxyFailure": dict(proxy_failure or {})', self.local_server)
+        self.assertIn('"lastProxyFailure": safe_proxy_failure', self.local_server)
+        self.assertIn("public_error_code(", self.local_server)
 
     def test_runtime_health_has_dedicated_read_only_endpoints(self) -> None:
         self.assertIn("async def runtime_health_handler", self.local_server)
@@ -230,6 +259,18 @@ class ControlPageStateMergeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["runtime"]["controlPlane"]["botApi"]["port"], 8798)
         self.assertEqual(payload["runtime"]["controlPlane"]["botApi"]["state"], "down")
         self.assertEqual(payload["runtime"]["controlPlane"]["lastProxyFailure"]["kind"], "port_closed")
+        self.assertNotIn(
+            "detail",
+            payload["runtime"]["controlPlane"]["lastProxyFailure"],
+        )
+        self.assertNotIn(
+            "target",
+            payload["runtime"]["controlPlane"]["lastProxyFailure"],
+        )
+        self.assertNotIn(
+            "connection refused",
+            json.dumps(payload, ensure_ascii=False),
+        )
         self.assertFalse(payload["runtime"]["services"]["botReady"])
         self.assertIn("Bot API is not reachable on 8798", payload["statusText"])
 

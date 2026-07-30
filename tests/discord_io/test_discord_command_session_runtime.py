@@ -17,6 +17,7 @@ from evelyn_core.discord_command_session_runtime import (
 class DiscordCommandSessionRuntimeTests(unittest.TestCase):
     def test_mark_text_session_from_command_records_turn_with_message_context(self) -> None:
         calls: list[tuple] = []
+        commits: list[str] = []
         thread_checks: list[object] = []
 
         def resolve_text_thread_id(channel, *, is_thread_parent):
@@ -35,6 +36,10 @@ class DiscordCommandSessionRuntimeTests(unittest.TestCase):
             max_history_items=12,
             normal_ttl_sec=30.0,
             question_ttl_sec=45.0,
+            commit_session_continuity=lambda: (
+                commits.append("commit") or {"generation": 3}
+            ),
+            log=lambda *args, **kwargs: None,
         )
         ctx = SimpleNamespace(
             guild=SimpleNamespace(id=1),
@@ -53,6 +58,7 @@ class DiscordCommandSessionRuntimeTests(unittest.TestCase):
 
         self.assertEqual(thread_checks, [True])
         self.assertEqual(len(calls), 1)
+        self.assertEqual(commits, ["commit"])
         args, kwargs = calls[0]
         self.assertEqual(args, ("1:2:3:77", "user", "answer"))
         self.assertEqual(
@@ -81,6 +87,8 @@ class DiscordCommandSessionRuntimeTests(unittest.TestCase):
             max_history_items=12,
             normal_ttl_sec=30.0,
             question_ttl_sec=45.0,
+            commit_session_continuity=lambda: {"generation": 1},
+            log=lambda *args, **kwargs: None,
         )
 
         mark_text_session_from_command_runtime(

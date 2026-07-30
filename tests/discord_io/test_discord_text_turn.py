@@ -64,6 +64,13 @@ def make_deps(calls: list[tuple[str, object]], **overrides) -> DiscordTextMessag
         calls.append(("stream", kwargs["user_text"] if "user_text" in kwargs else args[1]))
         return "<voice>answer</voice>", None, {"meta": {}}, None
 
+    async def commit_session_continuity():
+        calls.append(("commit_continuity", None))
+        return {
+            "state": "ready",
+            "rollbackProtected": True,
+        }
+
     deps = dict(
         process_commands=process_commands,
         bot_user=SimpleNamespace(id=10),
@@ -103,6 +110,7 @@ def make_deps(calls: list[tuple[str, object]], **overrides) -> DiscordTextMessag
         finish_assistant_text_turn=lambda session_key, user_text, answer, **kwargs: calls.append(
             ("finish", (session_key, user_text, answer, kwargs["topic_id"]))
         ),
+        commit_session_continuity=commit_session_continuity,
         log_voice_bottleneck_summary=lambda metrics, **kwargs: calls.append(("summary", kwargs["event_name"])),
         format_display_text=lambda text, **kwargs: text,
         log=lambda *args: calls.append(("log", args)),
@@ -151,9 +159,104 @@ class DiscordTextTurnHandlerTests(unittest.TestCase):
             ),
             calls,
         )
+        self.assertIn(("commit_continuity", None), calls)
         self.assertIn(("summary", "text_turn_summary"), calls)
         self.assertEqual(calls[-1], ("process_commands", "Evelyn hi"))
         self.assertEqual(message.channel.typing_count, 1)
+
+    def test_delivered_text_turn_is_committed_when_optional_voice_fails(self) -> None:
+        calls: list[tuple[str, object]] = []
+
+        async def stream_text_reply(*args, **kwargs):
+            calls.append(("stream", args[1]))
+            return (
+                "<voice>answer</voice>",
+                SimpleNamespace(id=77),
+                {"meta": {}},
+                SimpleNamespace(should_play_voice=True),
+            )
+
+        async def fail_voice(*args, **kwargs):
+            calls.append(("voice", kwargs["turn_id"]))
+            raise RuntimeError(
+                "Bearer discord-secret C:\\Users\\Admin\\private.txt"
+            )
+
+        async def ensure_voice_client(_message):
+            return SimpleNamespace(is_connected=lambda: True)
+
+        deps = make_deps(
+            calls,
+            auto_join_voice=True,
+            ensure_voice_client=ensure_voice_client,
+            stream_text_reply=stream_text_reply,
+            execute_voice_delivery_plan=fail_voice,
+        )
+        message = make_message(
+            guild=SimpleNamespace(id=1, name="Guild")
+        )
+
+        asyncio.run(handle_discord_text_message(message, deps))
+
+        finish_indexes = [
+            index
+            for index, call in enumerate(calls)
+            if call[0] == "finish"
+        ]
+        voice_index = next(
+            index
+            for index, call in enumerate(calls)
+            if call[0] == "voice"
+        )
+        commit_index = next(
+            index
+            for index, call in enumerate(calls)
+            if call[0] == "commit_continuity"
+        )
+        self.assertEqual(len(finish_indexes), 1)
+        self.assertLess(finish_indexes[0], commit_index)
+        self.assertLess(commit_index, voice_index)
+        self.assertEqual(message.channel.sent, [])
+        self.assertNotIn(
+            "discord-secret",
+            " ".join(
+                str(call)
+                for call in calls
+                if call[0] != "log"
+            ),
+        )
+        self.assertIn(("summary", "text_turn_summary"), calls)
+        self.assertEqual(
+            calls[-1],
+            ("process_commands", "Evelyn hi"),
+        )
+
+    def test_pre_delivery_failure_returns_fixed_public_message(self) -> None:
+        calls: list[tuple[str, object]] = []
+
+        async def fail_stream(*args, **kwargs):
+            raise RuntimeError(
+                "token=discord-secret http://internal:9820 C:\\private"
+            )
+
+        deps = make_deps(calls, stream_text_reply=fail_stream)
+        message = make_message(
+            guild=SimpleNamespace(id=1, name="Guild")
+        )
+
+        asyncio.run(handle_discord_text_message(message, deps))
+
+        self.assertEqual(
+            message.channel.sent,
+            [
+                "❌ 응답을 전달하지 못했어. 잠깐 뒤에 다시 시도해줘. "
+                "(text_turn_failed)"
+            ],
+        )
+        self.assertNotIn("discord-secret", message.channel.sent[0])
+        self.assertFalse(
+            any(call[0] == "finish" for call in calls)
+        )
 
 
 if __name__ == "__main__":

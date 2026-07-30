@@ -42,6 +42,8 @@ class DiscordAppDependencyCompositionDeps:
     schedule_search_followup: Callable[..., Any]
     session_state_snapshot: Callable[..., Any]
     finish_assistant_text_turn: Callable[..., Any]
+    commit_session_continuity: Callable[..., Any]
+    commit_session_continuity_sync: Callable[..., Any]
     log_voice_bottleneck_summary: Callable[..., Any]
     format_display_text: Callable[..., str]
     resolve_text_thread_id: Callable[..., int | None]
@@ -98,6 +100,9 @@ class DiscordAppDependencyComposition:
             schedule_search_followup=deps.schedule_search_followup,
             session_state_snapshot=deps.session_state_snapshot,
             finish_assistant_text_turn=deps.finish_assistant_text_turn,
+            commit_session_continuity=(
+                deps.commit_session_continuity
+            ),
             log_voice_bottleneck_summary=deps.log_voice_bottleneck_summary,
             format_display_text=deps.format_display_text,
             log=deps.log,
@@ -116,6 +121,8 @@ class DiscordAppDependencyComposition:
             max_history_items=deps.max_history_items,
             normal_ttl_sec=deps.normal_ttl_sec,
             question_ttl_sec=deps.question_ttl_sec,
+            commit_session_continuity=deps.commit_session_continuity_sync,
+            log=deps.log,
         )
 
 

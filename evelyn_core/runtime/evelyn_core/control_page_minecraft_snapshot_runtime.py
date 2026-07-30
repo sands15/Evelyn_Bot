@@ -17,6 +17,7 @@ class ControlPageMinecraftSnapshotRuntimeDeps:
     get_snapshot: Callable[[int | None], Awaitable[dict[str, Any]]]
     clean_text: Callable[[str], str]
     timeout_sec: float
+    log: Callable[..., Any]
 
 
 @dataclass(frozen=True)
@@ -58,8 +59,12 @@ async def safe_get_control_page_minecraft_snapshot_from_runtime(
             timeout=max(0.0, float(timeout_seconds)),
         )
     except Exception as exc:
+        deps.log(
+            "[CONTROL PAGE] minecraft_snapshot_read_failed "
+            f"guild={guild_id} errorType={type(exc).__name__}"
+        )
         return {
-            "last_error": deps.clean_text(str(exc)) or repr(exc),
+            "last_error": "minecraft_snapshot_unavailable",
             "inventory_top": [],
             "inventory_summary": "inventory unavailable",
             "recent_activity": [],
@@ -77,8 +82,11 @@ async def refresh_control_page_minecraft_snapshot_once_from_runtime(
             timeout=max(0.5, float(deps.timeout_sec)),
         )
     except Exception as exc:
-        error_text = deps.clean_text(str(exc)) or repr(exc)
-        return deps.cache.store_error(error_text)
+        deps.log(
+            "[CONTROL PAGE] minecraft_snapshot_refresh_failed "
+            f"guild={guild_id} errorType={type(exc).__name__}"
+        )
+        return deps.cache.store_error("minecraft_snapshot_unavailable")
 
     return deps.cache.store_success(snapshot)
 
@@ -126,7 +134,10 @@ async def control_page_minecraft_snapshot_poller_from_runtime(
         except Exception as exc:
             if type(exc).__name__ == "CancelledError":
                 raise
-            deps.log(f"[CONTROL PAGE] minecraft_snapshot_poll_failed err={exc!r}")
+            deps.log(
+                "[CONTROL PAGE] minecraft_snapshot_poll_failed "
+                f"errorType={type(exc).__name__}"
+            )
         await deps.sleep(max(0.5, float(deps.refresh_interval_sec)))
 
 

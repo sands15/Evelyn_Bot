@@ -188,7 +188,10 @@ class SessionContinuityTests(unittest.TestCase):
             restored_store.followup_targets[session_key],
             {"channel_id": 2, "message_id": 4},
         )
-        self.assertNotIn(session_key, restored_store.partial_stt_text)
+        self.assertNotIn(
+            session_key,
+            restored_store.partial_stt_text,
+        )
         self.assertEqual(
             restored["checkpointIntegrity"],
             "verified",
@@ -198,6 +201,46 @@ class SessionContinuityTests(unittest.TestCase):
             "current",
         )
         self.assertTrue(restored["rollbackProtected"])
+
+    def test_completed_turn_commit_is_immediately_durable(self) -> None:
+        clock = FakeClock(wall=1000.0, monotonic=100.0)
+        store = self.populated_store()
+        manager = self.manager(store, clock)
+
+        status = manager.commit_completed_turn()
+
+        self.assertEqual(status["state"], "ready")
+        self.assertTrue(status["rollbackProtected"])
+        self.assertEqual(status["persistedSessionCount"], 1)
+        self.assertTrue(self.checkpoint_path.exists())
+        self.assertTrue(manager.head_path.exists())
+
+    def test_completed_turn_commit_raises_fixed_error_on_failure(
+        self,
+    ) -> None:
+        clock = FakeClock(wall=1000.0, monotonic=100.0)
+        manager = self.manager(self.populated_store(), clock)
+
+        with (
+            patch(
+                "evelyn_core.session_continuity.atomic_json_write",
+                side_effect=PermissionError(
+                    "Bearer continuity-secret C:\\private"
+                ),
+            ),
+            self.assertRaisesRegex(
+                RuntimeError,
+                "^conversation_continuity_commit_failed$",
+            ),
+        ):
+            manager.commit_completed_turn()
+
+        status = manager.status()
+        self.assertEqual(status["state"], "error")
+        self.assertNotIn(
+            "continuity-secret",
+            json.dumps(status),
+        )
 
     def test_valid_json_content_tamper_is_rejected(
         self,

@@ -69,6 +69,7 @@ class ControlPageMinecraftSnapshotRuntimeTests(unittest.IsolatedAsyncioTestCase)
             get_snapshot=get_snapshot,
             clean_text=lambda text: text.strip(),
             timeout_sec=0.5,
+            log=lambda *args, **kwargs: None,
         )
         return deps, tasks, state
 
@@ -123,8 +124,14 @@ class ControlPageMinecraftSnapshotRuntimeTests(unittest.IsolatedAsyncioTestCase)
 
         snapshot = await refresh_control_page_minecraft_snapshot_once_from_runtime(7, deps=deps)
 
-        self.assertEqual(snapshot["last_error"], "minecraft down")
-        self.assertEqual(cache.errors, ["minecraft down"])
+        self.assertEqual(
+            snapshot["last_error"],
+            "minecraft_snapshot_unavailable",
+        )
+        self.assertEqual(
+            cache.errors,
+            ["minecraft_snapshot_unavailable"],
+        )
 
     async def test_safe_get_snapshot_returns_error_payload_on_failure(self) -> None:
         cache = FakeMinecraftSnapshotCache(fresh=False)
@@ -140,7 +147,10 @@ class ControlPageMinecraftSnapshotRuntimeTests(unittest.IsolatedAsyncioTestCase)
             timeout_seconds=0.01,
         )
 
-        self.assertEqual(snapshot["last_error"], "minecraft timeout")
+        self.assertEqual(
+            snapshot["last_error"],
+            "minecraft_snapshot_unavailable",
+        )
         self.assertEqual(snapshot["inventory_summary"], "inventory unavailable")
 
     async def test_safe_get_snapshot_returns_snapshot_when_successful(self) -> None:

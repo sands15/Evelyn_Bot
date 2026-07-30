@@ -59,6 +59,8 @@ class AutonomyRuntimeFactoryDeps:
     get_authorized_actions: Callable[[int], list[str]]
     authorize_action: Callable[[int, str], dict[str, Any]]
     record_action_outcome: Callable[[int, str, dict[str, Any]], None]
+    commit_session_continuity: Callable[[], Awaitable[dict[str, Any]]]
+    log: Callable[..., Any]
 
 
 def get_or_create_autonomy_engine_from_runtime(
@@ -213,6 +215,19 @@ def get_or_create_autonomy_engine_from_runtime(
             answer_text=text,
             user_text=user_text or "[autonomy]",
         )
+        continuity_durable = False
+        continuity_generation = 0
+        try:
+            continuity_status = await deps.commit_session_continuity()
+            continuity_durable = True
+            continuity_generation = int(
+                continuity_status.get("generation") or 0
+            )
+        except Exception as exc:
+            deps.log(
+                "[AUTONOMY] followup_continuity_commit_failed "
+                f"guild={guild_id} errorType={type(exc).__name__}"
+            )
         deps.last_autonomy_ping_at[guild_id] = deps.monotonic()
         deps.mark_self_state_assistant_output(proactive=True)
         return {
@@ -221,6 +236,8 @@ def get_or_create_autonomy_engine_from_runtime(
             "text": text,
             "verified": True,
             "evidence_code": "discord_send_completed",
+            "continuityDurable": continuity_durable,
+            "continuityGeneration": continuity_generation,
         }
 
     async def default_summarize() -> dict[str, Any]:

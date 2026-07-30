@@ -221,6 +221,34 @@ class RuntimeRepairTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0][0][0], "powershell.exe")
 
+    def test_apply_failure_does_not_expose_runner_exception(self) -> None:
+        manifest = load_service_manifest(force=True)
+        plan = build_runtime_repair_plan(
+            service_id="bot_api",
+            manifest=manifest,
+            health=self.health({"bot_api": "down"}),
+        )
+        plan["cooldownSec"] = 0
+        secret = "Bearer secret C:\\private http://internal"
+
+        def failing_runner(_command: list[str], _cwd: str) -> dict[str, Any]:
+            raise OSError(secret)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            response = execute_runtime_repair_plan(
+                plan=plan,
+                confirm_token=plan["confirmToken"],
+                runner=failing_runner,
+                log_path=Path(tmp) / "repair_log.jsonl",
+            )
+
+        serialized = json.dumps(response)
+        self.assertFalse(response["ok"])
+        self.assertEqual(response["error"], "repair_launch_failed")
+        self.assertNotIn("secret", serialized)
+        self.assertNotIn("private", serialized)
+        self.assertNotIn("internal", serialized)
+
     def test_apply_cooldown_blocks_repeated_start(self) -> None:
         manifest = load_service_manifest(force=True)
         plan = build_runtime_repair_plan(service_id="bot_api", manifest=manifest, health=self.health({"bot_api": "down"}))
