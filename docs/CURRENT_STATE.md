@@ -2,7 +2,7 @@
 
 Document status: **Current**
 Last reviewed: 2026-07-30 KST
-Source branch: `codex/dependency-config-hardening` at `fa1fd78`
+Source branch: `codex/dependency-config-hardening` at `ca9492b`
 
 이 문서는 현재 확인된 사실만 기록한다. 목표 구조와 과거 계획은 다른 설계/계획 문서를 사용한다.
 
@@ -61,7 +61,7 @@ Source branch: `codex/dependency-config-hardening` at `fa1fd78`
     source note만 사용한다. Sub-LLM이 없으면 추측하지 않고 격리를 유지한다.
   - 사용자가 직접 수정하면 과거 derived relation은 `originDerivedFrom`으로
     분리되고 현재 근거는 `user-edit`로 바뀐다.
-- 누락된 과거 `derived_from`은 읽기 전용 provenance 감사에서만 후보로
+- 누락된 과거 `derived_from`은 provenance 감사에서 먼저 읽기 전용 후보로
   표시한다.
   - source note ID/vault 상대 경로와 정확히 일치하는 source ref, 현재
     source hash 또는 기존 consolidation body digest와 정확히 일치하는
@@ -72,7 +72,16 @@ Source branch: `codex/dependency-config-hardening` at `fa1fd78`
     제외한다.
   - 저장 보고서는 note/source ID와 판정 코드·집계·graph fingerprint만
     포함한다. title, body, path/ref, evidence hash, transcript는 저장하지
-    않으며 apply API도 없다.
+    않는다.
+  - `verified`/`review`만 별도 preview/apply와 브라우저의 명시 확인 뒤 연결할
+    수 있다. `ambiguous`와 보호 대상은 적용할 수 없으며 자동 적용은 없다.
+  - 120초 일회용 token은 target/source content hash와 전체 graph
+    fingerprint에 묶인다. 어느 node라도 바뀌거나 Bot API가 재시작되면
+    fail-closed로 적용하지 않는다.
+  - 성공 시 제목·본문은 그대로 두고 `derived_from`과 사용자 확인 backfill
+    metadata만 원자적으로 기록한 뒤 index/hot context를 재구성한다.
+  - 새 consolidation/recomposition write는 실제 `derived_from`이 없으면
+    `memory_derived_from_required`로 거부한다.
 - memory snapshot은 격리 수, 재합성 가능 수, 차단 수, 가장 오래된 대기
   시각·경과 초를 `memory.quarantine.status.v1`로 집계한다. 집계에는
   note ID나 콘텐츠를 넣지 않는다.
@@ -90,10 +99,13 @@ Source branch: `codex/dependency-config-hardening` at `fa1fd78`
 - 이후 `fa1fd78` 소스로 `bot_api`와 `control_page` 이미지를 다시
   빌드·교체해 exact-metadata provenance 감사, content-free 후보 보고서,
   quarantine 대기 관측과 Control Page “근거 감사” 탭을 배포했다.
+- 이후 `ca9492b` 소스로 두 이미지를 다시 빌드·교체해 conflict-safe
+  provenance backfill, explicit-confirm UI와 derived-write forward 검증을
+  배포했다.
   - Bot API image:
-    `sha256:7c186f97787b0905ea465b9c99eda18659ab2c2a2d6c04ca3d7907b7f15d3361`
+    `sha256:742252ff46b7f766d74bc8cde35fc52a62aafe5fda7c01576917808462b664e2`
   - Control Page image:
-    `sha256:d7ea84a1c9e3a8f4a6ecbeb7497f919882b013fd80b215d2ffc2a415b7bfe70f`
+    `sha256:9efe6dbf507791739effa97d1ea40a148cf127d8e751ade88bb917c4e2f0925e`
 - 세 컨테이너 모두 `healthy`, restart count 0이다. Main/Router/Sub LLM,
   TTS, STT도 계속 healthy다.
 - Windows Host Supervisor와 Local I/O Bridge heartbeat는 fresh이고 bridge는
@@ -145,11 +157,16 @@ Source branch: `codex/dependency-config-hardening` at `fa1fd78`
   evidence hash/transcript key는 0개였다.
 - 실제 브라우저에서 메모리 창의 “근거 감사” 탭을 열어 격리 수,
   재합성 가능 수, 가장 오래된 대기, 후보/교차 검증/신호 충돌 집계와
-  “본문 유사도 미사용·메모 미수정” 경계가 렌더링되는 것을 확인했다.
+  “본문 유사도 미사용·조회만으로 미수정·별도 2단계 확인” 경계가
+  렌더링되는 것을 확인했다.
+- 배포 HTML에 backfill preview/apply route, `window.confirm`, stale graph
+  409 처리와 자동 적용 금지 문구가 존재한다.
+- 실제 vault에는 적용 가능한 후보가 0개였으므로 preview/apply를 호출하지
+  않았고 실제 사용자 기억은 수정하지 않았다.
 
 ## Verification state
 
-검증한 코드 기준점: `fa1fd78`
+검증한 코드 기준점: `ca9492b`
 
 - 새 Bot API Python 3.11 이미지에서 전체 `unittest discover` 1,585개를
   실행했다. 기능 assertion 실패는 0개였다.
@@ -170,6 +187,22 @@ Source branch: `codex/dependency-config-hardening` at `fa1fd78`
   provenance/delete/edit/UI focused 26개 통과
 - audit privacy/UI/source-hygiene focused 21개와 Control Page 인라인
   JavaScript 파싱 통과
+- 이번 conflict-safe backfill 변경 뒤 bundled Python에서 memory discovery
+  108개와 focused backfill/audit/UI 26개, compileall과 Control Page 인라인
+  JavaScript 파싱을 통과했다.
+- 최종 Bot API Python 3.11 이미지 환경에서 memory discovery 108개,
+  memory runtime API 15개, provenance/delete/edit/UI focused 28개를
+  read-only source mount로 통과했다.
+- 같은 이미지의 전체 discovery는 1,593개를 실행해 기능 assertion 실패
+  0개였다. 이미지에 없는 Discord/Pillow 등 소유 환경 의존성과 platform
+  차이로 기존 17개 import/platform 오류가 남았고 skipped는 17개였다.
+- 배포 직전 Compose config는 Discord token이 없는 shell에서는 필수 변수
+  검증으로 거부됐고, local-only sentinel을 명시한 배포에서는 설정을 정상
+  해석했다. Bot API를 먼저 정상 종료해 Minecraft owner claim 반납을 확인한
+  뒤 두 컨테이너만 교체했다.
+- 배포 뒤 Bot API와 Control Page는 새 image digest로 `healthy`, restart
+  count 0이며 나머지 Main/Router/Sub LLM, TTS, STT, Vision도 계속
+  `healthy`다.
 - 전체 discovery는 1,575개를 실행해 기능 assertion 실패 0개였다. Bot API
   경량 이미지에 없는 git, Pillow, Discord, requests/gymnasium 및 Linux에서
   실행할 수 없는 WindowsPath 때문에 생긴 17개 import/platform 오류는
