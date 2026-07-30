@@ -52,12 +52,65 @@ class DiscordCommandHelperTests(unittest.TestCase):
             last_error = ""
             allowed_actions = ["a", "b", "c", "d", "e", "f", "g"]
 
-        text = build_autonomy_status_command_text(State(), minecraft_enabled=True)
+        text = build_autonomy_status_command_text(
+            State(),
+            minecraft_enabled=True,
+            authorization={
+                "state": "ready",
+                "updatedAt": 100.0,
+                "auditReady": True,
+                "activeGrants": [
+                    {
+                        "guildId": 7,
+                        "expiresAt": 160.0,
+                        "grantId": "must-not-render",
+                    }
+                ],
+                "policy": {
+                    "strictActionEvidenceMatch": True,
+                },
+            },
+            guild_id=7,
+        )
 
         self.assertIn("- status: running", text)
         self.assertIn("- goal: explore", text)
         self.assertIn("- minecraft_autonomy: on", text)
         self.assertIn("- allowed: a, b, c, d, e, f, ...", text)
+        self.assertIn("- authorization: active", text)
+        self.assertIn("- authorization_ttl_sec: 60", text)
+        self.assertIn("- audit: ready", text)
+        self.assertIn(
+            "- evidence_policy: strict_action_match",
+            text,
+        )
+        self.assertNotIn("must-not-render", text)
+
+    def test_autonomy_status_exposes_fail_closed_audit_without_ids(
+        self,
+    ) -> None:
+        text = build_autonomy_status_command_text(
+            None,
+            minecraft_enabled=False,
+            authorization={
+                "state": "authorization_audit_unavailable",
+                "auditReady": False,
+                "activeGrants": [],
+                "policy": {
+                    "strictActionEvidenceMatch": True,
+                },
+                "processNonce": "must-not-render",
+            },
+            guild_id=7,
+        )
+
+        self.assertIn("- status: not_created", text)
+        self.assertIn(
+            "- authorization: authorization_audit_unavailable",
+            text,
+        )
+        self.assertIn("- audit: unavailable", text)
+        self.assertNotIn("must-not-render", text)
 
     def test_status_command_text_preserves_runtime_fields(self) -> None:
         text = build_status_command_text(

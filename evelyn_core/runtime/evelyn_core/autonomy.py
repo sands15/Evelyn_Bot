@@ -13,6 +13,7 @@ from .autonomy_authorization import (
     ASSISTANT_AUTONOMY_ACTIONS,
     MINECRAFT_AUTONOMY_ACTIONS,
 )
+from .autonomy_outcome_evidence import autonomy_outcome_verified
 from .memory import cognitive_state_path, read_json_file, write_json_file
 from .minecraft_threat import has_interrupting_threat, has_survival_threat, highest_threat_score, threat_count, threat_distance
 from .paths import get_repo_root
@@ -168,6 +169,9 @@ class AutonomyEngine:
                 "action_not_allowed",
                 "authorization_required",
                 "authorization_scope_denied",
+                "authorization_action_unsupported",
+                "authorization_audit_unavailable",
+                "authorization_changed_during_action",
             }
         )
         self.state = AutonomyRuntimeState(
@@ -365,6 +369,8 @@ class AutonomyEngine:
                 "authorization_required",
                 "authorization_scope_denied",
                 "authorization_action_unsupported",
+                "authorization_audit_unavailable",
+                "authorization_changed_during_action",
             }
         )
         self.state.status = (
@@ -772,14 +778,37 @@ class AutonomyEngine:
         self,
         action_key: str,
         result: dict[str, Any],
+        *,
+        authorization_grant_id: str = "",
     ) -> dict[str, Any]:
         if self.record_action_outcome is not None and action_key:
+            audit_result = dict(result)
+            audit_result["_authorization_grant_id"] = (
+                authorization_grant_id
+            )
             self.record_action_outcome(
                 self.guild_id,
                 action_key,
-                result,
+                audit_result,
             )
         return result
+
+    def _authorization_remains_current(
+        self,
+        action_key: str,
+        grant_id: str,
+    ) -> tuple[bool, str]:
+        if not self.authorize_action or not grant_id:
+            return False, "authorization_required"
+        decision = self.authorize_action(self.guild_id, action_key)
+        if not isinstance(decision, dict) or not decision.get("allowed"):
+            return False, str(
+                (decision or {}).get("code")
+                or "authorization_required"
+            )
+        if str(decision.get("grantId") or "") != grant_id:
+            return False, "authorization_changed_during_action"
+        return True, "authorized"
 
     async def execute_next_step(self, plan: AutonomyPlan | None) -> dict[str, Any] | None:
         if plan is None:
@@ -789,6 +818,9 @@ class AutonomyEngine:
         step = plan.steps[plan.cursor]
         action_key = self._action_key(step)
         authorization = self.action_authorization_decision(step)
+        authorization_grant_id = str(
+            authorization.get("grantId") or ""
+        )
         if not authorization.get("allowed"):
             self.state.enabled = False
             self.state.status = "authorization_required"
@@ -806,29 +838,50 @@ class AutonomyEngine:
                 },
             )
         if action_key and self._blocked_counts.get(action_key, 0) >= 2:
-            plan.cursor += 1
-            plan.updated_at = time.time()
             return self._record_action_result(
                 action_key,
                 {
-                    "status": "ok",
-                    "reason": "retry_suppressed_skip",
+                    "status": "blocked",
+                    "reason": "retry_budget_exhausted",
                     "step": step,
-                    "skipped": True,
-                    "replan": False,
-                    "verified": True,
-                    "evidence_code": "retry_budget_exhausted",
+                    "skipped": False,
+                    "replan": True,
+                    "verified": False,
                 },
+                authorization_grant_id=authorization_grant_id,
             )
         result = await self.executor.execute_step(step)
         if isinstance(result, dict):
             result.setdefault("step", step)
-            verified_outcome = bool(
-                result.get("verified") is True
-                and clean_text(
-                    str(result.get("evidence_code") or "")
-                )
+            verified_outcome = autonomy_outcome_verified(
+                action_key,
+                result,
             )
+            if verified_outcome:
+                (
+                    authorization_current,
+                    authorization_code,
+                ) = self._authorization_remains_current(
+                    action_key,
+                    authorization_grant_id,
+                )
+                if not authorization_current:
+                    self.state.enabled = False
+                    self.state.status = "authorization_required"
+                    self.state.allowed_actions = []
+                    return self._record_action_result(
+                        action_key,
+                        {
+                            "status": "unverified",
+                            "reason": authorization_code,
+                            "reportedStatus": result.get("status"),
+                            "step": step,
+                            "verified": False,
+                        },
+                        authorization_grant_id=(
+                            authorization_grant_id
+                        ),
+                    )
             if step.get("action") == "refresh_cognitive_state":
                 self.state.last_router_refresh_result = dict(result)
             if (
@@ -849,6 +902,7 @@ class AutonomyEngine:
                         "skipped": True,
                         "evidence_code": "inventory_absence_verified",
                     },
+                    authorization_grant_id=authorization_grant_id,
                 )
             if (
                 verified_outcome
@@ -868,6 +922,7 @@ class AutonomyEngine:
                         "skipped": True,
                         "evidence_code": "hazard_absence_verified",
                     },
+                    authorization_grant_id=authorization_grant_id,
                 )
             if (
                 verified_outcome
@@ -887,6 +942,7 @@ class AutonomyEngine:
                         "skipped": True,
                         "evidence_code": "hostile_absence_verified",
                     },
+                    authorization_grant_id=authorization_grant_id,
                 )
             if (
                 verified_outcome
@@ -910,6 +966,7 @@ class AutonomyEngine:
                         "skipped": True,
                         "evidence_code": "target_absence_verified",
                     },
+                    authorization_grant_id=authorization_grant_id,
                 )
             if (
                 verified_outcome
@@ -934,6 +991,7 @@ class AutonomyEngine:
                         "skipped": True,
                         "evidence_code": "food_absence_verified",
                     },
+                    authorization_grant_id=authorization_grant_id,
                 )
             if result.get("status") in {"ok", "done", "completed"}:
                 if not verified_outcome:
@@ -946,10 +1004,17 @@ class AutonomyEngine:
                             "step": step,
                             "verified": False,
                         },
+                        authorization_grant_id=(
+                            authorization_grant_id
+                        ),
                     )
                 plan.cursor += 1
                 plan.updated_at = time.time()
-            return self._record_action_result(action_key, result)
+            return self._record_action_result(
+                action_key,
+                result,
+                authorization_grant_id=authorization_grant_id,
+            )
         return self._record_action_result(
             action_key,
             {
@@ -958,4 +1023,5 @@ class AutonomyEngine:
                 "step": step,
                 "verified": False,
             },
+            authorization_grant_id=authorization_grant_id,
         )

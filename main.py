@@ -2422,6 +2422,7 @@ discord_app_composition = DiscordAppComposition(
                 source="discord_command", scopes=ASSISTANT_AUTONOMY_ACTIONS,
             ),
             revoke_autonomy_authorization=autonomy_authorization_manager.revoke,
+            get_autonomy_authorization_status=autonomy_authorization_manager.status,
             command_session=build_discord_command_session_runtime_deps, enable_minecraft_mode=enable_minecraft_mode,
             disable_minecraft_mode=disable_minecraft_mode, get_minecraft_client=get_minecraft_client,
             get_minecraft_world_lease_status=minecraft_world_lease_owner.status,

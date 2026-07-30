@@ -97,6 +97,7 @@ class DiscordCommandCompositionDeps:
     build_autonomy_status_reply: Callable[..., str]
     grant_autonomy_authorization: Callable[..., dict[str, Any]]
     revoke_autonomy_authorization: Callable[..., dict[str, Any]]
+    get_autonomy_authorization_status: Callable[[], dict[str, Any]]
     command_session: DepsFactory
     enable_minecraft_mode: Callable[..., Any]
     disable_minecraft_mode: Callable[..., Any]
@@ -358,6 +359,9 @@ class DiscordAppComposition:
             ctx,
             autonomy_engines=deps.autonomy_engines,
             get_routed_autonomy_executor=deps.get_routed_autonomy_executor,
+            get_autonomy_authorization_status=(
+                deps.get_autonomy_authorization_status
+            ),
             build_reply=deps.build_autonomy_status_reply,
             guild_only_message=deps.guild_only_message,
         )

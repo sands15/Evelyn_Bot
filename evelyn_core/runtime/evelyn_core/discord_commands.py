@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from collections.abc import Callable, Iterable
 from typing import Any
 
@@ -8,6 +9,14 @@ from .minecraft_mode_composition import (
     minecraft_connection_confirmed,
 )
 from .text import clean_text
+
+
+def _safe_float(value: Any) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return number if math.isfinite(number) else 0.0
 
 
 def is_control_command_authorized_payload(
@@ -118,8 +127,60 @@ def build_autonomy_status_command_text(
     state: Any,
     *,
     minecraft_enabled: bool,
+    authorization: dict[str, Any] | None = None,
+    guild_id: int | None = None,
     allowed_limit: int = 6,
 ) -> str:
+    authorization = (
+        authorization
+        if isinstance(authorization, dict)
+        else {}
+    )
+    updated_at = _safe_float(authorization.get("updatedAt"))
+    active_grant = next(
+        (
+            grant
+            for grant in authorization.get("activeGrants", [])
+            if isinstance(grant, dict)
+            and grant.get("guildId") == guild_id
+            and _safe_float(grant.get("expiresAt")) > updated_at
+        ),
+        None,
+    )
+    authorization_state = (
+        "active"
+        if active_grant is not None
+        else str(
+            authorization.get("state")
+            or "authorization_required"
+        )
+    )
+    authorization_ttl_sec = max(
+        0,
+        round(
+            _safe_float((active_grant or {}).get("expiresAt"))
+            - updated_at
+        ),
+    )
+    audit_state = (
+        "ready"
+        if authorization.get("auditReady") is True
+        else (
+            "unavailable"
+            if authorization.get("auditReady") is False
+            else "unknown"
+        )
+    )
+    policy = (
+        authorization.get("policy")
+        if isinstance(authorization.get("policy"), dict)
+        else {}
+    )
+    evidence_policy = (
+        "strict_action_match"
+        if policy.get("strictActionEvidenceMatch") is True
+        else "unknown"
+    )
     current_goal = getattr(state, "current_goal", None)
     current_plan = getattr(state, "current_plan", None)
     goal = getattr(current_goal, "summary", None) if current_goal else None
@@ -130,8 +191,12 @@ def build_autonomy_status_command_text(
         allowed += ", ..."
     return (
         f"🤖 자율상태\n"
-        f"- status: {getattr(state, 'status', None)}\n"
-        f"- safety: {getattr(state, 'safety_mode', None)}\n"
+        f"- status: {getattr(state, 'status', None) or 'not_created'}\n"
+        f"- safety: {getattr(state, 'safety_mode', None) or 'constrained'}\n"
+        f"- authorization: {authorization_state}\n"
+        f"- authorization_ttl_sec: {authorization_ttl_sec}\n"
+        f"- audit: {audit_state}\n"
+        f"- evidence_policy: {evidence_policy}\n"
         f"- goal: {goal or '없음'}\n"
         f"- plan: {plan or '없음'}\n"
         f"- failures: {getattr(state, 'failure_count', 0)}\n"

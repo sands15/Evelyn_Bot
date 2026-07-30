@@ -339,7 +339,14 @@ class DiscordCommandHandlerTests(unittest.TestCase):
                 status_ctx,
                 autonomy_engines=engines,
                 get_routed_autonomy_executor=lambda guild_id: Router(),
-                build_reply=lambda state, *, minecraft_enabled: f"status:{state.status}:{minecraft_enabled}",
+                get_autonomy_authorization_status=lambda: {
+                    "state": "ready",
+                    "auditReady": True,
+                },
+                build_reply=lambda state, *, minecraft_enabled, authorization, guild_id: (
+                    f"status:{state.status}:{minecraft_enabled}:"
+                    f"{authorization['state']}:{guild_id}"
+                ),
                 guild_only_message=lambda: "guild only",
             )
         )
@@ -354,7 +361,10 @@ class DiscordCommandHandlerTests(unittest.TestCase):
         )
         self.assertEqual(start_ctx.sent, ["🤖 자율 행동 루프를 시작했어."])
         self.assertEqual(stop_ctx.sent, ["🛑 자율 행동 루프를 멈췄어."])
-        self.assertEqual(status_ctx.sent, ["status:running:True"])
+        self.assertEqual(
+            status_ctx.sent,
+            ["status:running:True:ready:1"],
+        )
 
     def test_autonomy_start_respects_feature_flag(self) -> None:
         guild = SimpleNamespace(id=1)
@@ -383,6 +393,33 @@ class DiscordCommandHandlerTests(unittest.TestCase):
             ["자율 행동 기능이 설정에서 비활성화되어 있어."],
         )
         self.assertEqual(grants, [])
+
+    def test_autonomy_status_reports_authorization_without_engine(
+        self,
+    ) -> None:
+        ctx = FakeContext(guild=SimpleNamespace(id=7))
+
+        asyncio.run(
+            handle_autonomy_status_command(
+                ctx,
+                autonomy_engines={},
+                get_routed_autonomy_executor=lambda _guild_id: None,
+                get_autonomy_authorization_status=lambda: {
+                    "state": "authorization_required",
+                    "auditReady": True,
+                },
+                build_reply=lambda state, **kwargs: (
+                    f"{state}:{kwargs['authorization']['state']}:"
+                    f"{kwargs['guild_id']}"
+                ),
+                guild_only_message=lambda: "guild only",
+            )
+        )
+
+        self.assertEqual(
+            ctx.sent,
+            ["None:authorization_required:7"],
+        )
 
     def test_channel_setting_command_lists_adds_removes_and_shows_usage(self) -> None:
         channel = SimpleNamespace(id=10, mention="#general")

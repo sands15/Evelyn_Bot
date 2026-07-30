@@ -188,6 +188,32 @@ class DefaultAutonomyExecutorOutcomeTests(
             "outcome_evidence_missing",
         )
 
+    async def test_maybe_ping_accepts_sent_message_evidence(self) -> None:
+        async def maybe_ping(_text: str) -> dict:
+            return {
+                "status": "ok",
+                "verified": True,
+                "evidence_code": "discord_send_completed",
+            }
+
+        executor = DefaultAutonomyExecutor(
+            maybe_ping_user_fn=maybe_ping,
+        )
+
+        result = await executor.execute_step(
+            {
+                "domain": "assistant",
+                "action": "maybe_ping_user",
+                "text": "hello",
+            }
+        )
+
+        self.assertTrue(result["verified"])
+        self.assertEqual(
+            result["evidence_code"],
+            "discord_send_completed",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

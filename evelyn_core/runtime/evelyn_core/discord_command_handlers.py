@@ -199,6 +199,7 @@ async def handle_autonomy_status_command(
     *,
     autonomy_engines: dict[int, Any],
     get_routed_autonomy_executor: Any,
+    get_autonomy_authorization_status: Any,
     build_reply: Any,
     guild_only_message: Any,
 ) -> None:
@@ -206,12 +207,23 @@ async def handle_autonomy_status_command(
         await ctx.send(guild_only_message())
         return
     engine = autonomy_engines.get(ctx.guild.id)
-    if engine is None:
-        await ctx.send("자율 행동 엔진이 아직 만들어지지 않았어.")
-        return
     router = get_routed_autonomy_executor(ctx.guild.id)
     minecraft_enabled = bool(router and router.is_domain_enabled("minecraft"))
-    await ctx.send(build_reply(engine.state, minecraft_enabled=minecraft_enabled))
+    try:
+        authorization = get_autonomy_authorization_status()
+    except Exception:
+        authorization = {
+            "state": "unknown",
+            "auditReady": None,
+        }
+    await ctx.send(
+        build_reply(
+            engine.state if engine is not None else None,
+            minecraft_enabled=minecraft_enabled,
+            authorization=authorization,
+            guild_id=ctx.guild.id,
+        )
+    )
 
 
 async def handle_channel_setting_command(

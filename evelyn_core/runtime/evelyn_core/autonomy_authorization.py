@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import secrets
 import threading
 import time
@@ -188,6 +189,7 @@ class AutonomyAuthorizationManager:
         self._last_event_at: float | None = None
         self._decision_count = 0
         self._denied_count = 0
+        self._audit_ready = False
 
     def _append_event(
         self,
@@ -195,12 +197,14 @@ class AutonomyAuthorizationManager:
         *,
         guild_id: int | None = None,
         grant: AutonomyAuthorizationGrant | None = None,
+        grant_id: str = "",
         action: str = "",
         reason_code: str = "",
         outcome_status: str = "",
         verified: bool | None = None,
         evidence_code: str = "",
-    ) -> None:
+        authorization_current: bool | None = None,
+    ) -> bool:
         timestamp = self.now()
         record: dict[str, Any] = {
             "schema": AUTONOMY_AUTHORIZATION_EVENT_SCHEMA,
@@ -209,7 +213,11 @@ class AutonomyAuthorizationManager:
             "event": _safe_identifier(event),
             "processNonce": self.process_nonce,
             "guildId": guild_id,
-            "grantId": grant.grant_id if grant is not None else "",
+            "grantId": (
+                grant.grant_id
+                if grant is not None
+                else _safe_identifier(grant_id)
+            ),
             "issuerRef": grant.issuer_ref if grant is not None else "",
             "source": grant.source if grant is not None else "",
             "scopes": list(grant.scopes) if grant is not None else [],
@@ -230,6 +238,7 @@ class AutonomyAuthorizationManager:
             ),
             "verified": verified,
             "evidenceCode": _safe_identifier(evidence_code),
+            "authorizationCurrent": authorization_current,
         }
         try:
             self.events_dir.mkdir(parents=True, exist_ok=True)
@@ -243,11 +252,26 @@ class AutonomyAuthorizationManager:
                     )
                     + "\n"
                 )
+                stream.flush()
+                os.fsync(stream.fileno())
             self._last_event_at = timestamp
+            self._audit_ready = True
+            return True
         except OSError:
-            return
+            self._audit_ready = False
+            return False
+
+    def _fail_closed_for_audit(self) -> None:
+        self._grants.clear()
+        self._state = "authorization_audit_unavailable"
+        self._audit_ready = False
+        self._write_status()
 
     def _status_payload(self) -> dict[str, Any]:
+        from .autonomy_outcome_evidence import (
+            AUTONOMY_OUTCOME_EVIDENCE_POLICY_SCHEMA,
+        )
+
         timestamp = self.now()
         active = [
             grant.public_dict()
@@ -267,6 +291,7 @@ class AutonomyAuthorizationManager:
             "decisionCount": self._decision_count,
             "deniedCount": self._denied_count,
             "lastEventAt": self._last_event_at,
+            "auditReady": self._audit_ready,
             "policy": {
                 "restoredAfterRestart": False,
                 "defaultTtlSec": self.default_ttl_sec,
@@ -275,6 +300,11 @@ class AutonomyAuthorizationManager:
                 "issuerRefPublic": False,
                 "rawArguments": False,
                 "transcript": False,
+                "outcomeEvidencePolicy": (
+                    AUTONOMY_OUTCOME_EVIDENCE_POLICY_SCHEMA
+                ),
+                "strictActionEvidenceMatch": True,
+                "retryExhaustionIsEvidence": False,
             },
         }
 
@@ -288,14 +318,15 @@ class AutonomyAuthorizationManager:
         with self._lock:
             self._grants.clear()
             self._state = "authorization_required"
-            self._append_event(
+            if not self._append_event(
                 "process_started",
                 reason_code="process_restart",
-            )
+            ):
+                self._fail_closed_for_audit()
             self._write_status()
             return self._status_payload()
 
-    def _prune_expired(self) -> None:
+    def _prune_expired(self) -> bool:
         timestamp = self.now()
         expired = [
             guild_id
@@ -304,12 +335,14 @@ class AutonomyAuthorizationManager:
         ]
         for guild_id in expired:
             grant = self._grants.pop(guild_id)
-            self._append_event(
+            if not self._append_event(
                 "grant_expired",
                 guild_id=guild_id,
                 grant=grant,
                 reason_code="grant_expired",
-            )
+            ):
+                self._fail_closed_for_audit()
+                return False
         if expired:
             self._state = (
                 "ready"
@@ -317,6 +350,7 @@ class AutonomyAuthorizationManager:
                 else "authorization_required"
             )
             self._write_status()
+        return True
 
     def grant(
         self,
@@ -361,15 +395,24 @@ class AutonomyAuthorizationManager:
             min(self.max_ttl_sec, requested_ttl),
         )
         with self._lock:
-            self._prune_expired()
+            if not self._prune_expired():
+                return {
+                    "ok": False,
+                    "error": "authorization_audit_unavailable",
+                }
             previous = self._grants.get(resolved_guild_id)
             if previous is not None:
-                self._append_event(
+                if not self._append_event(
                     "grant_revoked",
                     guild_id=resolved_guild_id,
                     grant=previous,
                     reason_code="grant_replaced",
-                )
+                ):
+                    self._fail_closed_for_audit()
+                    return {
+                        "ok": False,
+                        "error": "authorization_audit_unavailable",
+                    }
             issued_at = self.now()
             grant = AutonomyAuthorizationGrant(
                 grant_id=secrets.token_urlsafe(18),
@@ -380,14 +423,19 @@ class AutonomyAuthorizationManager:
                 issued_at=issued_at,
                 expires_at=issued_at + effective_ttl,
             )
-            self._grants[resolved_guild_id] = grant
-            self._state = "ready"
-            self._append_event(
+            if not self._append_event(
                 "grant_issued",
                 guild_id=resolved_guild_id,
                 grant=grant,
                 reason_code="explicit_autonomy_start",
-            )
+            ):
+                self._fail_closed_for_audit()
+                return {
+                    "ok": False,
+                    "error": "authorization_audit_unavailable",
+                }
+            self._grants[resolved_guild_id] = grant
+            self._state = "ready"
             self._write_status()
             return {
                 "ok": True,
@@ -409,7 +457,7 @@ class AutonomyAuthorizationManager:
         with self._lock:
             grant = self._grants.pop(resolved_guild_id, None)
             if grant is not None:
-                self._append_event(
+                if not self._append_event(
                     "grant_revoked",
                     guild_id=resolved_guild_id,
                     grant=grant,
@@ -417,7 +465,13 @@ class AutonomyAuthorizationManager:
                         reason_code,
                         fallback="manual_revoke",
                     ),
-                )
+                ):
+                    self._fail_closed_for_audit()
+                    return {
+                        "ok": False,
+                        "revoked": True,
+                        "error": "authorization_audit_unavailable",
+                    }
             self._state = (
                 "ready"
                 if self._grants
@@ -434,7 +488,8 @@ class AutonomyAuthorizationManager:
         if resolved_guild_id is None:
             return []
         with self._lock:
-            self._prune_expired()
+            if not self._prune_expired():
+                return []
             grant = self._grants.get(resolved_guild_id)
             return list(grant.scopes) if grant is not None else []
 
@@ -442,7 +497,23 @@ class AutonomyAuthorizationManager:
         resolved_guild_id = _safe_guild_id(guild_id)
         resolved_action = str(action or "").strip()
         with self._lock:
-            self._prune_expired()
+            if not self._prune_expired():
+                self._decision_count += 1
+                self._denied_count += 1
+                self._write_status()
+                return {
+                    "schema": AUTONOMY_AUTHORIZATION_DECISION_SCHEMA,
+                    "allowed": False,
+                    "code": "authorization_audit_unavailable",
+                    "guildId": resolved_guild_id,
+                    "action": (
+                        resolved_action
+                        if resolved_action in SUPPORTED_AUTONOMY_ACTIONS
+                        else ""
+                    ),
+                    "grantId": "",
+                    "expiresAt": None,
+                }
             grant = (
                 self._grants.get(resolved_guild_id)
                 if resolved_guild_id is not None
@@ -463,7 +534,7 @@ class AutonomyAuthorizationManager:
             self._decision_count += 1
             if not allowed:
                 self._denied_count += 1
-            self._append_event(
+            if not self._append_event(
                 "action_authorized" if allowed else "action_denied",
                 guild_id=resolved_guild_id,
                 grant=grant,
@@ -473,7 +544,23 @@ class AutonomyAuthorizationManager:
                     if allowed
                     else "action_denied"
                 ),
-            )
+            ):
+                if allowed:
+                    self._denied_count += 1
+                self._fail_closed_for_audit()
+                return {
+                    "schema": AUTONOMY_AUTHORIZATION_DECISION_SCHEMA,
+                    "allowed": False,
+                    "code": "authorization_audit_unavailable",
+                    "guildId": resolved_guild_id,
+                    "action": (
+                        resolved_action
+                        if resolved_action in SUPPORTED_AUTONOMY_ACTIONS
+                        else ""
+                    ),
+                    "grantId": "",
+                    "expiresAt": None,
+                }
             self._write_status()
             return {
                 "schema": AUTONOMY_AUTHORIZATION_DECISION_SCHEMA,
@@ -495,19 +582,58 @@ class AutonomyAuthorizationManager:
         action: str,
         result: dict[str, Any],
     ) -> None:
+        from .autonomy_outcome_evidence import (
+            AUTONOMY_SUCCESS_STATUSES,
+            autonomy_outcome_verified,
+        )
+
         resolved_guild_id = _safe_guild_id(guild_id)
         resolved_action = str(action or "").strip()
         with self._lock:
+            if not self._prune_expired():
+                return
             grant = (
                 self._grants.get(resolved_guild_id)
                 if resolved_guild_id is not None
                 else None
             )
+            authorization_grant_id = _safe_identifier(
+                result.get("_authorization_grant_id")
+            )
+            authorization_current = bool(
+                grant is not None
+                and (
+                    not authorization_grant_id
+                    or grant.grant_id == authorization_grant_id
+                )
+                and resolved_action in grant.scopes
+            )
+            event_grant = (
+                grant
+                if (
+                    grant is not None
+                    and (
+                        not authorization_grant_id
+                        or grant.grant_id == authorization_grant_id
+                    )
+                )
+                else None
+            )
             status = str(result.get("status") or "").strip().lower()
-            self._append_event(
+            verified = autonomy_outcome_verified(
+                resolved_action,
+                result,
+            ) and authorization_current
+            if (
+                status in AUTONOMY_SUCCESS_STATUSES
+                and not verified
+            ):
+                status = "unverified"
+            if not self._append_event(
                 "action_outcome",
                 guild_id=resolved_guild_id,
-                grant=grant,
+                grant=event_grant,
+                grant_id=authorization_grant_id,
                 action=resolved_action,
                 reason_code="action_outcome",
                 outcome_status=(
@@ -515,9 +641,12 @@ class AutonomyAuthorizationManager:
                     if status in _ALLOWED_OUTCOME_STATUSES
                     else "unknown"
                 ),
-                verified=bool(result.get("verified")),
+                verified=verified,
                 evidence_code=str(result.get("evidence_code") or ""),
-            )
+                authorization_current=authorization_current,
+            ):
+                self._fail_closed_for_audit()
+                return
             self._write_status()
 
     def status(self) -> dict[str, Any]:

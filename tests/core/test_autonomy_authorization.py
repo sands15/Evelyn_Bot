@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 REPO_ROOT = next(
@@ -24,7 +25,12 @@ from evelyn_core.autonomy_authorization import (  # noqa: E402
     ASSISTANT_AUTONOMY_ACTIONS,
     AUTONOMY_AUTHORIZATION_DECISION_SCHEMA,
     AUTONOMY_AUTHORIZATION_STATUS_SCHEMA,
+    SUPPORTED_AUTONOMY_ACTIONS,
     AutonomyAuthorizationManager,
+)
+from evelyn_core.autonomy_outcome_evidence import (  # noqa: E402
+    autonomy_outcome_verified,
+    expected_autonomy_evidence_codes,
 )
 
 
@@ -41,10 +47,11 @@ class DummyExecutor:
         self.result = result or {
             "status": "ok",
             "verified": True,
-            "evidence_code": "dummy_effect_verified",
+            "evidence_code": "no_side_effect_required",
         }
         self.connect_count = 0
         self.disconnect_count = 0
+        self.execute_count = 0
 
     async def connect(self) -> None:
         self.connect_count += 1
@@ -59,6 +66,7 @@ class DummyExecutor:
         }
 
     async def execute_step(self, step: dict) -> dict:
+        self.execute_count += 1
         return dict(self.result)
 
 
@@ -203,6 +211,147 @@ class AutonomyAuthorizationManagerTests(unittest.TestCase):
         self.assertNotIn("C:\\\\secret", serialized)
         self.assertIn("discord_user:123", serialized)
         self.assertIn("idle_effect_verified", serialized)
+        outcome = [
+            row
+            for row in self.read_events()
+            if row["event"] == "action_outcome"
+        ][-1]
+        self.assertEqual(outcome["outcomeStatus"], "unverified")
+        self.assertFalse(outcome["verified"])
+
+    def test_every_supported_action_has_exact_evidence_policy(self) -> None:
+        for action in SUPPORTED_AUTONOMY_ACTIONS:
+            with self.subTest(action=action):
+                codes = expected_autonomy_evidence_codes(action)
+                self.assertTrue(codes)
+                for code in codes:
+                    self.assertTrue(code)
+                    self.assertEqual(code, code.strip())
+
+    def test_outcome_policy_rejects_unrelated_nonempty_evidence(self) -> None:
+        self.assertFalse(
+            autonomy_outcome_verified(
+                "assistant:idle",
+                {
+                    "status": "ok",
+                    "verified": True,
+                    "evidence_code": "discord_send_completed",
+                },
+            )
+        )
+
+    def test_audit_event_is_flushed_and_synced_before_return(self) -> None:
+        with patch(
+            "evelyn_core.autonomy_authorization.os.fsync"
+        ) as sync:
+            self.manager.record_outcome(
+                7,
+                "assistant:idle",
+                {
+                    "status": "ok",
+                    "verified": True,
+                    "evidence_code": "no_side_effect_required",
+                },
+            )
+
+        sync.assert_called_once()
+
+    def test_grant_fails_closed_when_audit_journal_is_unavailable(
+        self,
+    ) -> None:
+        blocked_root = self.root / "blocked-events"
+        blocked_root.write_text("not a directory", encoding="utf-8")
+        manager = AutonomyAuthorizationManager(
+            status_path=self.root / "blocked-status.json",
+            events_dir=blocked_root,
+            now=self.clock,
+        )
+
+        initialized = manager.initialize()
+        granted = manager.grant(
+            guild_id=7,
+            issuer_ref="discord_user:123",
+            source="discord_command",
+            scopes=["assistant:idle"],
+        )
+
+        self.assertEqual(
+            initialized["state"],
+            "authorization_audit_unavailable",
+        )
+        self.assertFalse(initialized["auditReady"])
+        self.assertFalse(granted["ok"])
+        self.assertEqual(
+            granted["error"],
+            "authorization_audit_unavailable",
+        )
+        self.assertEqual(manager.authorized_actions(7), [])
+
+    def test_authorize_fails_closed_if_decision_cannot_be_audited(
+        self,
+    ) -> None:
+        self.manager.grant(
+            guild_id=7,
+            issuer_ref="discord_user:123",
+            source="discord_command",
+            scopes=["assistant:idle"],
+        )
+
+        with patch.object(
+            self.manager,
+            "_append_event",
+            return_value=False,
+        ):
+            decision = self.manager.authorize(
+                7,
+                "assistant:idle",
+            )
+
+        self.assertFalse(decision["allowed"])
+        self.assertEqual(
+            decision["code"],
+            "authorization_audit_unavailable",
+        )
+        self.assertEqual(self.manager.authorized_actions(7), [])
+        self.assertEqual(
+            self.manager.status()["state"],
+            "authorization_audit_unavailable",
+        )
+
+    def test_outcome_is_not_attributed_to_replacement_grant(self) -> None:
+        first = self.manager.grant(
+            guild_id=7,
+            issuer_ref="discord_user:123",
+            source="discord_command",
+            scopes=["assistant:idle"],
+        )["grant"]
+        self.manager.grant(
+            guild_id=7,
+            issuer_ref="discord_user:456",
+            source="discord_command",
+            scopes=["assistant:idle"],
+        )
+
+        self.manager.record_outcome(
+            7,
+            "assistant:idle",
+            {
+                "status": "ok",
+                "verified": True,
+                "evidence_code": "no_side_effect_required",
+                "_authorization_grant_id": first["grantId"],
+            },
+        )
+
+        outcome = [
+            row
+            for row in self.read_events()
+            if row["event"] == "action_outcome"
+        ][-1]
+        self.assertEqual(outcome["grantId"], first["grantId"])
+        self.assertFalse(outcome["authorizationCurrent"])
+        self.assertFalse(outcome["verified"])
+        self.assertEqual(outcome["outcomeStatus"], "unverified")
 
 
 class AutonomyEngineAuthorizationTests(unittest.IsolatedAsyncioTestCase):
@@ -219,6 +368,18 @@ class AutonomyEngineAuthorizationTests(unittest.IsolatedAsyncioTestCase):
             max_ttl_sec=60.0,
         )
         self.manager.initialize()
+
+    def read_events(self) -> list[dict]:
+        rows: list[dict] = []
+        for path in (self.root / "events").glob("*.jsonl"):
+            rows.extend(
+                json.loads(line)
+                for line in path.read_text(
+                    encoding="utf-8"
+                ).splitlines()
+                if line.strip()
+            )
+        return rows
 
     def engine(self, executor: DummyExecutor) -> AutonomyEngine:
         engine = AutonomyEngine(
@@ -282,7 +443,7 @@ class AutonomyEngineAuthorizationTests(unittest.IsolatedAsyncioTestCase):
         executor.result = {
             "status": "ok",
             "verified": True,
-            "evidence_code": "dummy_effect_verified",
+            "evidence_code": "no_side_effect_required",
         }
         verified = await engine.execute_next_step(plan)
 
@@ -359,6 +520,150 @@ class AutonomyEngineAuthorizationTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(engine.state.enabled)
         self.assertEqual(engine.state.allowed_actions, [])
         self.assertEqual(plan.cursor, 0)
+
+    async def test_wrong_action_evidence_does_not_advance_plan(self) -> None:
+        self.manager.grant(
+            guild_id=7,
+            issuer_ref="discord_user:123",
+            source="discord_command",
+            scopes=["assistant:idle"],
+        )
+        executor = DummyExecutor(
+            {
+                "status": "ok",
+                "verified": True,
+                "evidence_code": "discord_send_completed",
+            }
+        )
+        engine = self.engine(executor)
+        engine.state.enabled = True
+        engine.state.allowed_actions = ["assistant:idle"]
+        plan = AutonomyPlan(
+            goal_kind="idle",
+            summary="wait",
+            steps=[{"domain": "assistant", "action": "idle"}],
+        )
+
+        result = await engine.execute_next_step(plan)
+
+        self.assertEqual(result["status"], "unverified")
+        self.assertEqual(result["reason"], "outcome_unverified")
+        self.assertEqual(plan.cursor, 0)
+
+    async def test_retry_budget_never_impersonates_effect_evidence(self) -> None:
+        self.manager.grant(
+            guild_id=7,
+            issuer_ref="discord_user:123",
+            source="discord_command",
+            scopes=["assistant:idle"],
+        )
+        executor = DummyExecutor()
+        engine = self.engine(executor)
+        engine.state.enabled = True
+        engine.state.allowed_actions = ["assistant:idle"]
+        engine._blocked_counts["assistant:idle"] = 2
+        plan = AutonomyPlan(
+            goal_kind="idle",
+            summary="wait",
+            steps=[{"domain": "assistant", "action": "idle"}],
+        )
+
+        result = await engine.execute_next_step(plan)
+
+        self.assertEqual(result["status"], "blocked")
+        self.assertEqual(result["reason"], "retry_budget_exhausted")
+        self.assertFalse(result["verified"])
+        self.assertEqual(plan.cursor, 0)
+        self.assertEqual(executor.execute_count, 0)
+
+    async def test_grant_replacement_during_action_blocks_plan_progress(
+        self,
+    ) -> None:
+        first = self.manager.grant(
+            guild_id=7,
+            issuer_ref="discord_user:123",
+            source="discord_command",
+            scopes=["assistant:idle"],
+        )["grant"]
+
+        class ReplacingExecutor(DummyExecutor):
+            async def execute_step(inner_self, step: dict) -> dict:
+                inner_self.execute_count += 1
+                self.manager.grant(
+                    guild_id=7,
+                    issuer_ref="discord_user:456",
+                    source="discord_command",
+                    scopes=["assistant:idle"],
+                )
+                return dict(inner_self.result)
+
+        executor = ReplacingExecutor()
+        engine = self.engine(executor)
+        engine.state.enabled = True
+        engine.state.allowed_actions = ["assistant:idle"]
+        plan = AutonomyPlan(
+            goal_kind="idle",
+            summary="wait",
+            steps=[{"domain": "assistant", "action": "idle"}],
+        )
+
+        result = await engine.execute_next_step(plan)
+
+        self.assertEqual(result["status"], "unverified")
+        self.assertEqual(
+            result["reason"],
+            "authorization_changed_during_action",
+        )
+        self.assertEqual(plan.cursor, 0)
+        self.assertFalse(engine.state.enabled)
+        self.assertEqual(engine.state.allowed_actions, [])
+        outcome = [
+            row
+            for row in self.read_events()
+            if row["event"] == "action_outcome"
+        ]
+        self.assertEqual(outcome[-1]["grantId"], first["grantId"])
+        self.assertFalse(outcome[-1]["authorizationCurrent"])
+
+    async def test_grant_expiry_during_action_blocks_plan_progress(
+        self,
+    ) -> None:
+        first = self.manager.grant(
+            guild_id=7,
+            issuer_ref="discord_user:123",
+            source="discord_command",
+            scopes=["assistant:idle"],
+            ttl_sec=60.0,
+        )["grant"]
+
+        class ExpiringExecutor(DummyExecutor):
+            async def execute_step(inner_self, step: dict) -> dict:
+                inner_self.execute_count += 1
+                self.clock.value = 1061.0
+                return dict(inner_self.result)
+
+        engine = self.engine(ExpiringExecutor())
+        engine.state.enabled = True
+        engine.state.allowed_actions = ["assistant:idle"]
+        plan = AutonomyPlan(
+            goal_kind="idle",
+            summary="wait",
+            steps=[{"domain": "assistant", "action": "idle"}],
+        )
+
+        result = await engine.execute_next_step(plan)
+
+        self.assertEqual(result["status"], "unverified")
+        self.assertEqual(result["reason"], "authorization_required")
+        self.assertEqual(plan.cursor, 0)
+        self.assertFalse(engine.state.enabled)
+        outcome = [
+            row
+            for row in self.read_events()
+            if row["event"] == "action_outcome"
+        ][-1]
+        self.assertEqual(outcome["grantId"], first["grantId"])
+        self.assertFalse(outcome["authorizationCurrent"])
 
 
 if __name__ == "__main__":

@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
 from .autonomy import AutonomyExecutor
+from .autonomy_outcome_evidence import autonomy_outcome_verified
 from .text import clean_text
 
 
@@ -32,16 +33,13 @@ class DefaultAutonomyExecutor:
         result: dict[str, Any],
         *,
         action: str,
-        evidence_code: str,
     ) -> dict[str, Any]:
         result.setdefault("handled_by", "default")
         result.setdefault("action", action)
         status = str(result.get("status") or "").strip().lower()
-        verified = bool(
-            status in {"ok", "done", "completed"}
-            and result.get("verified") is True
-            and clean_text(str(result.get("evidence_code") or ""))
-            == evidence_code
+        verified = autonomy_outcome_verified(
+            f"assistant:{action}",
+            result,
         )
         result["verified"] = verified
         if status in {"ok", "done", "completed"} and not verified:
@@ -87,7 +85,6 @@ class DefaultAutonomyExecutor:
                     return self._finalize_callback_result(
                         result,
                         action=action,
-                        evidence_code="discord_send_completed",
                     )
             return self._unavailable(action)
         if action == "summarize_notifications":
@@ -97,7 +94,6 @@ class DefaultAutonomyExecutor:
                     return self._finalize_callback_result(
                         result,
                         action=action,
-                        evidence_code="summary_payload_built",
                     )
             return self._unavailable(action)
         if action == "check_status":
@@ -107,7 +103,6 @@ class DefaultAutonomyExecutor:
                     return self._finalize_callback_result(
                         result,
                         action=action,
-                        evidence_code="status_snapshot_built",
                     )
             return self._unavailable(action)
         if action == "refresh_cognitive_state":
@@ -117,7 +112,6 @@ class DefaultAutonomyExecutor:
                     return self._finalize_callback_result(
                         result,
                         action=action,
-                        evidence_code="cognitive_state_updated",
                     )
             return self._unavailable(action)
         if action == "summarize_recent_context":
@@ -127,7 +121,6 @@ class DefaultAutonomyExecutor:
                     return self._finalize_callback_result(
                         result,
                         action=action,
-                        evidence_code="recent_context_payload_built",
                     )
             return self._unavailable(action)
         if action == "maybe_ping_user":
@@ -138,7 +131,6 @@ class DefaultAutonomyExecutor:
                     return self._finalize_callback_result(
                         result,
                         action=action,
-                        evidence_code="proactive_gate_completed",
                     )
             return self._unavailable(action)
         if action == "idle":
