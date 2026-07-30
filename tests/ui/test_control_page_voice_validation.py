@@ -28,6 +28,9 @@ class ControlPageVoiceValidationTests(unittest.TestCase):
         self.assertIn("/api/control-page/voice-validation/confirm", source)
         self.assertIn("/api/control-page/voice-validation/retry", source)
         self.assertIn("/api/control-page/voice-validation/abort", source)
+        self.assertIn("/api/control-page/voice-capture-consent/preview", source)
+        self.assertIn("/api/control-page/voice-capture-consent/apply", source)
+        self.assertIn("/api/control-page/voice-capture-consent/revoke", source)
         self.assertIn("/api/control-page/session", source)
         self.assertIn("X-Evelyn-CSRF-Token", source)
         self.assertNotIn("rawAudio", source)
@@ -36,6 +39,18 @@ class ControlPageVoiceValidationTests(unittest.TestCase):
         source = SERVER.read_text(encoding="utf-8")
         for suffix in ("", "/start", "/confirm", "/retry", "/abort"):
             self.assertIn(f'"/api/control-page/voice-validation{suffix}"', source)
+        for suffix in ("", "/preview", "/apply", "/revoke"):
+            self.assertIn(
+                f'"/api/control-page/voice-capture-consent{suffix}"',
+                source,
+            )
+
+    def test_ui_exposes_explicit_consent_and_revoke_controls(self):
+        source = JS.read_text(encoding="utf-8")
+        self.assertIn('data-voice-consent-grant="1"', source)
+        self.assertIn('data-voice-consent-revoke="1"', source)
+        self.assertIn("최대 ${maxMinutes}분 뒤 자동으로 꺼집니다.", source)
+        self.assertIn("원문 음성이나 transcript를 저장하지 않습니다.", source)
 
     def test_javascript_parses(self):
         node = shutil.which("node")

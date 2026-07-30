@@ -49,6 +49,7 @@
 
   function capabilityCard(id, label, capability) {
     const value = capability || { state: "unknown", blockers: [], warnings: [], repairActions: [] };
+    const consent = value.consent || {};
     const blockers = (value.blockers || [])
       .map((item) => `<span class="voice-validation-blocker">${escapeHtml(item.message || item.code)}</span>`)
       .join("");
@@ -60,9 +61,22 @@
         const manual = action.manualCommand
           ? `<span class="voice-validation-meta">${escapeHtml(action.manualCommand)}</span>`
           : "";
+        if (action.consent) {
+          return `<button class="is-primary" type="button" data-voice-consent-grant="1">${escapeHtml(action.label || action.actionId)}</button>${manual}`;
+        }
         return `<button type="button" data-voice-repair="${escapeHtml(action.actionId)}" data-service-id="${escapeHtml(action.serviceId)}">${escapeHtml(action.label || action.actionId)}</button>${manual}`;
       })
       .join("");
+    const consentStatus = id === "voiceLocal"
+      ? consent.active
+        ? [
+            '<div class="voice-validation-consent is-active">',
+            `<span>검증용 마이크 동의 활성 · 약 ${Math.max(1, Math.ceil(Number(consent.remainingSec || 0) / 60))}분 남음</span>`,
+            '<button class="is-danger" type="button" data-voice-consent-revoke="1">마이크 권한 철회</button>',
+            "</div>",
+          ].join("")
+        : '<span class="voice-validation-meta">마이크는 기본 OFF이며 명시적 동의 후에만 검증 동안 켜집니다.</span>'
+      : "";
     return [
       `<article class="voice-validation-capability" data-capability="${id}">`,
       '<div class="voice-validation-capability-head">',
@@ -70,6 +84,7 @@
       `<span class="voice-validation-pill" data-state="${escapeHtml(value.state)}">${escapeHtml(value.state)}</span>`,
       "</div>",
       blockers || warnings || '<span class="voice-validation-meta">필수 의존성이 준비됐습니다.</span>',
+      consentStatus,
       repairs ? `<div class="voice-validation-actions">${repairs}</div>` : "",
       "</article>",
     ].join("");
@@ -277,6 +292,55 @@
     }
   }
 
+  async function grantVoiceCaptureConsent(button) {
+    button.disabled = true;
+    try {
+      const preview = await api("/api/control-page/voice-capture-consent/preview", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ scope: "voice_validation_local" }),
+      });
+      const maxMinutes = Math.max(1, Math.ceil(Number(preview.maxConsentSec || 1800) / 60));
+      const confirmed = window.confirm(
+        `로컬 음성 검증을 위해 마이크를 켤까요?\n\n` +
+        `검증 종료·권한 철회·Control Page 재시작 또는 최대 ${maxMinutes}분 뒤 자동으로 꺼집니다.\n` +
+        "이 동의 기록에는 원문 음성이나 transcript를 저장하지 않습니다."
+      );
+      if (!confirmed) return;
+      const result = await api("/api/control-page/voice-capture-consent/apply", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          scope: "voice_validation_local",
+          confirmToken: preview.confirmToken,
+        }),
+      });
+      if (result.validationSession) state.session = result.validationSession;
+      await refresh();
+    } catch (error) {
+      window.alert(error.message);
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  async function revokeVoiceCaptureConsent(button) {
+    if (!window.confirm("로컬 마이크 권한을 지금 철회하고 캡처를 끌까요?")) return;
+    button.disabled = true;
+    try {
+      await api("/api/control-page/voice-capture-consent/revoke", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ reason: "user_revoked" }),
+      });
+      await refresh();
+    } catch (error) {
+      window.alert(error.message);
+    } finally {
+      button.disabled = false;
+    }
+  }
+
   startButton.addEventListener("click", startValidation);
   mount.addEventListener("change", (event) => {
     const input = event.target.closest("[data-voice-surface]");
@@ -285,6 +349,16 @@
     else state.surfaces.delete(input.dataset.voiceSurface);
   });
   mount.addEventListener("click", async (event) => {
+    const consentGrant = event.target.closest("[data-voice-consent-grant]");
+    if (consentGrant) {
+      await grantVoiceCaptureConsent(consentGrant);
+      return;
+    }
+    const consentRevoke = event.target.closest("[data-voice-consent-revoke]");
+    if (consentRevoke) {
+      await revokeVoiceCaptureConsent(consentRevoke);
+      return;
+    }
     const repairButton = event.target.closest("[data-voice-repair]");
     if (repairButton) {
       await repair(repairButton.dataset.voiceRepair, repairButton.dataset.serviceId, repairButton);
