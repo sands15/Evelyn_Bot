@@ -2,7 +2,7 @@
 
 Document status: **Current**
 Last reviewed: 2026-07-30 KST
-Source branch: `codex/dependency-config-hardening` at `c92a158`
+Source branch: `codex/dependency-config-hardening` at `b2cb9a2`
 
 이 문서는 현재 확인된 사실만 기록한다. 목표 구조와 과거 계획은 다른 설계/계획 문서를 사용한다.
 
@@ -144,6 +144,15 @@ Source branch: `codex/dependency-config-hardening` at `c92a158`
   - 기존 Bot API를 먼저 정상 종료해 Minecraft owner claim이 사라진 것을
     확인한 뒤 두 컨테이너만 교체했다. 두 컨테이너 모두 첫 기동에서
     `healthy`, restart count 0이다.
+- 이후 `b2cb9a2` 소스로 Control Page만 교체해 로컬 음성 검증 전용 마이크
+  동의 임대, preview/apply/revoke API, 세션 종료·만료·재시작 fail-closed
+  철회와 명시적 grant/revoke UI를 배포했다. Bot API와 나머지 서비스는
+  교체하지 않았다.
+  - Control Page image:
+    `sha256:6b9598799e76f33f03a9740e81fbb9426fb22e20e4609458f8c78c34d3d37485`
+  - 새 Control Page는 첫 기동에서 `healthy`, restart count 0이다.
+  - 배포 전후 Local I/O Bridge의 실제 `micEnabled=false`를 확인했으며,
+    사용자의 허용 버튼은 누르지 않았다.
 - 이전 `c656fc8` 배포의 recreate 직후에는 이전 Bot API owner claim이 15초
   stale guard 안에 있어 첫 Bot API start가
   `minecraft_world_lease_owner_conflict`로 fail-closed 종료됐다. guard 만료
@@ -169,6 +178,22 @@ Source branch: `codex/dependency-config-hardening` at `c92a158`
 - Windows Local I/O Bridge attached/ready
 - 지연 시작되는 `voyagerReady`, `codexReady`는 경고이며 core 실패로 계산하지 않음
 - 공식 checker 최종 결과: `Docker runtime check passed.`
+
+배포된 로컬 음성 동의 경계를 비활성 상태에서 검증했다.
+
+- `GET /api/control-page/voice-capture-consent`는
+  `voice.capture-consent.v1`, `state=inactive`, `active=false`,
+  `storesAudio=false`, `storesTranscript=false`를 반환했다.
+- 실제 Local I/O Bridge는 `ready=true`, `micEnabled=false`,
+  `micControlRevision=0`으로 유지됐다.
+- 동의 전 voice capability는 `local_mic_disabled`,
+  `local_mic_capture_not_ready`, `local_mic_consent_required`를 blocker로
+  보고하고 `grant_voice_validation_mic_consent` action을 제공했다.
+- CSRF token 없는 preview POST는 403으로 거부됐다.
+- 실제 브라우저 DOM에는 “검증 세션 동안 마이크 허용” 버튼과 기본 OFF 안내가
+  렌더링됐고 warning/error console log는 0개였다. 버튼은 누르지 않았다.
+- 배포 뒤 공식 `check_docker_runtime.ps1 -IncludeLocalBridge`가 다시
+  통과했다.
 
 배포된 Control Page에서 실제 화면 질문 두 종류를 재검증했다.
 
