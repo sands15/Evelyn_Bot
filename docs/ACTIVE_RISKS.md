@@ -17,9 +17,10 @@ restart 비복구, 변경성 Discord 명령 권한 검사와 미검증 결과의
 차단은 구현되어 있다. Minecraft 접속·종료·목표 변경도 명시적 outcome
 marker와 실제 상태 증거가 없으면 성공 문구를 만들지 않는다.
 
-그러나 현재 번들 Python에는 `aiohttp`와 `discord`가 없고 Docker Engine도
-꺼져 있어, 실제 Discord 승인 명령부터 메시지 전송 및 Minecraft 상태 변화까지
-한 세션에서 수행하는 live E2E는 아직 확인하지 못했다.
+현재 Docker local core와 Bot API는 실행 중이지만 Discord bot과
+Minecraft/Voyager는 사용자 요청 없이 지연 시작 상태다. 번들 Python에는
+`aiohttp`와 `discord`가 없으므로 실제 Discord 승인 명령부터 메시지 전송 및
+Minecraft 상태 변화까지 한 세션에서 수행하는 live E2E는 아직 확인하지 못했다.
 
 Minecraft world-action lease, process-rotated capability token, 5초 owner
 heartbeat, 15초 service-side stale guard, restart 비복구, `/start`·`/goal`
@@ -52,10 +53,11 @@ Minecraft lease도 따르도록 하드코딩 경로를 제거했다. 같은 임�
 `main.py`를 기동·강제 종료·재기동하고 두 번의 restore와 repository 기본
 checkpoint 비변경을 확인하는 opt-in CI 시나리오도 추가했다.
 
-현재 Docker Engine이 꺼져 있고 번들 Python에는 `discord`와 `torch`가 없어 새
-real-main crash 시나리오는 로컬에서 실행하지 못했다. lock 의존성을 설치하는
-Windows CI에서는 `EVELYN_RUN_REAL_MAIN_INTEGRATION=1`로 실행되지만, 아직 이
-브랜치의 원격 CI 결과는 없다.
+Docker local core와 Local I/O Bridge의 공식 readiness checker는 통과했다.
+다만 번들 Python에는 `discord`와 `torch`가 없어 새 real-main crash
+시나리오를 전체 Discord/모델 의존성과 함께 로컬에서 실행하지 못했다. lock
+의존성을 설치하는 Windows CI에서는 `EVELYN_RUN_REAL_MAIN_INTEGRATION=1`로
+실행되지만, 아직 이 브랜치의 원격 CI 결과는 없다.
 
 다음 조치: Windows CI에서 real-main crash/restart를 통과시킨 뒤, 공식 Discord
 이미지에서 합성 Discord 세션과 guild reset 비복구를 확인한다.

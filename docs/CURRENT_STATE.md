@@ -2,7 +2,7 @@
 
 Document status: **Current**
 Last reviewed: 2026-07-30 KST
-Source branch: `codex/dependency-config-hardening` at `ca9492b`
+Source branch: `codex/dependency-config-hardening` at `c656fc8`
 
 이 문서는 현재 확인된 사실만 기록한다. 목표 구조와 과거 계획은 다른 설계/계획 문서를 사용한다.
 
@@ -82,6 +82,17 @@ Source branch: `codex/dependency-config-hardening` at `ca9492b`
     metadata만 원자적으로 기록한 뒤 index/hot context를 재구성한다.
   - 새 consolidation/recomposition write는 실제 `derived_from`이 없으면
     `memory_derived_from_required`로 거부한다.
+  - source type·note type·age별 `memory.provenance.coverage.v1`은 note ID,
+    title, body, path, source ref/hash와 transcript 없이 구조적 근거 상태만
+    집계한다.
+  - 거부된 derived write는 note type별 content-free 내구 카운터에만
+    기록한다. 손상된 숫자는 감사 API를 실패시키지 않고 0으로 처리한다.
+  - exact 신호가 없거나 현재 source와 불일치하는 과거 note는 자동 추론하지
+    않는다. 공개·visible·비격리·접지된 source를 사용자가 최대 12개까지 직접
+    선택하고 별도 preview/apply로만 연결한다.
+  - manual token도 selection mode, target/source content hash와 전체 graph
+    fingerprint에 묶인다. exact/ambiguous 대상, 숨김·격리·legacy/internal·
+    미접지·cycle source는 fail-closed로 거부한다.
 - memory snapshot은 격리 수, 재합성 가능 수, 차단 수, 가장 오래된 대기
   시각·경과 초를 `memory.quarantine.status.v1`로 집계한다. 집계에는
   note ID나 콘텐츠를 넣지 않는다.
@@ -102,12 +113,20 @@ Source branch: `codex/dependency-config-hardening` at `ca9492b`
 - 이후 `ca9492b` 소스로 두 이미지를 다시 빌드·교체해 conflict-safe
   provenance backfill, explicit-confirm UI와 derived-write forward 검증을
   배포했다.
+- 이후 `c656fc8` 소스로 두 이미지를 다시 빌드·교체해 content-free
+  provenance coverage·forward rejection 관측, 신호 없는 과거 기억의
+  사용자 직접 source 선택과 Control Page 교정 UI를 배포했다.
   - Bot API image:
-    `sha256:742252ff46b7f766d74bc8cde35fc52a62aafe5fda7c01576917808462b664e2`
+    `sha256:5bfc251e86826146eaa386e74ed1981ad79c44e98e2516e2e7e72ddb365e3ec6`
   - Control Page image:
-    `sha256:9efe6dbf507791739effa97d1ea40a148cf127d8e751ade88bb917c4e2f0925e`
-- 세 컨테이너 모두 `healthy`, restart count 0이다. Main/Router/Sub LLM,
-  TTS, STT도 계속 healthy다.
+    `sha256:fe1be3464ca9236fdabdb6835842bf5926b0a315a594672b905a4e48eceb2130`
+- recreate 직후 이전 Bot API owner claim이 15초 stale guard 안에 있어 첫
+  Bot API start가 `minecraft_world_lease_owner_conflict`로 fail-closed
+  종료됐다. guard 만료 뒤 같은 새 컨테이너가 claim을 회수해 정상 기동했고,
+  중복 world owner는 만들어지지 않았다.
+- Bot API, Control Page, Main/Router/Sub LLM, TTS, STT, Vision 여덟
+  컨테이너가 모두 `healthy`다. 새 Bot API와 Control Page의 restart count는
+  0이다.
 - Windows Host Supervisor와 Local I/O Bridge heartbeat는 fresh이고 bridge는
   `ready=true`, TTS warmup 완료, Host Vision `running`이다.
 - 개인정보 보호 기본값에 따라 로컬 마이크는 비활성 상태다.
@@ -163,11 +182,38 @@ Source branch: `codex/dependency-config-hardening` at `ca9492b`
   409 처리와 자동 적용 금지 문구가 존재한다.
 - 실제 vault에는 적용 가능한 후보가 0개였으므로 preview/apply를 호출하지
   않았고 실제 사용자 기억은 수정하지 않았다.
+- 배포된 coverage API는 실제 note 2개 중 grounded 2개, needs-review 0개,
+  ratio 1.0을 반환했다. forward-write rejection, exact 후보, manual 대상,
+  ambiguous는 모두 0이며 `autoApply=false`,
+  `contentSimilarityUsed=false`다.
+- 저장된 감사 보고서의 coverage에는 요청 시각을 남기지 않으며 금지된
+  title/body/path/source-ref/evidence-hash/transcript/content-hash key가
+  0개다.
+- 실제 브라우저의 “근거 감사” 화면에서 100%, `2 / 2`, source
+  `conversation 2/2`, note type `daily 2/2`, age bucket, 직접 선택 0과
+  자동 적용·본문 유사도·임베딩·LLM 추론 금지 문구가 렌더링됐다. 브라우저
+  console warning/error는 0개였고 연결 버튼은 누르지 않았다.
 
 ## Verification state
 
-검증한 코드 기준점: `ca9492b`
+검증한 코드 기준점: `c656fc8`
 
+- bundled Python에서 memory discovery 116개와 provenance/UI focused
+  34개, `compileall`, Control Page 인라인 JavaScript parse와
+  `git diff --check`를 통과했다.
+- Bot API Python 3.11 이미지에서 manual provenance API 5개,
+  runtime 340개, UI 148개를 통과했다. UI 6개와 runtime 2개는 명시적으로
+  skip됐다.
+- 같은 이미지의 전체 discovery는 1,584개를 실행해 기능 assertion 실패
+  0개였다. 경량 이미지에 없는 git, Pillow, Discord, requests 의존성 때문에
+  기존 import/platform 오류 17개와 skip 17개가 남았다.
+- 수동 provenance 테스트는 content-free coverage와 거부 카운터,
+  손상 카운터 처리, exact/ambiguous/direct target 분리,
+  숨김·격리·legacy/internal·미접지·cycle source 거부, target/source/
+  unrelated full-graph 충돌 거부, 제목·본문 byte 안정성을 검증했다.
+- 배포 뒤 실제 API 집계와 저장 보고서 privacy를 확인하고, 실제 브라우저 DOM과
+  console을 검증했다. 공식
+  `check_docker_runtime.ps1 -IncludeLocalBridge`도 통과했다.
 - 새 Bot API Python 3.11 이미지에서 전체 `unittest discover` 1,585개를
   실행했다. 기능 assertion 실패는 0개였다.
 - 이미지별 의존성 또는 OS 차이로 발생한 10개 import/platform 오류는 Windows,
