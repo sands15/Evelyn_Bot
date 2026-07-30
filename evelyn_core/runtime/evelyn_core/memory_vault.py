@@ -13,7 +13,7 @@ import urllib.error
 import urllib.request
 from contextlib import closing
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -25,6 +25,11 @@ from .memory_derivation_revocation import (
     changed_quarantine_ids,
     resolve_derivation_states,
 )
+from .memory_provenance_audit import (
+    ProvenanceAuditNode,
+    ProvenanceAuditResult,
+    audit_missing_derivations,
+)
 from .runtime_artifact_io import atomic_json_write, atomic_text_write
 from .text import clean_text
 
@@ -35,6 +40,7 @@ INDEX_DB_NAME = "memory.sqlite"
 USER_NOTE_STATE_NAME = "user_note_state.json"
 DELETION_TOMBSTONES_NAME = "memory_deletions.jsonl"
 DERIVATION_REVOCATIONS_NAME = "memory_derivation_revocations.json"
+PROVENANCE_AUDIT_NAME = "memory_provenance_backfill_audit.json"
 RETRIEVAL_CACHE_TTL_SECONDS = 300
 MEMORY_DELETE_PREVIEW_TTL_SECONDS = 120
 DEFAULT_PROJECT = "evelyn"
@@ -59,6 +65,10 @@ MEMORY_DELETE_TOMBSTONE_SCHEMA = "memory.deletion.tombstone.v1"
 MEMORY_DERIVATION_IMPACT_SCHEMA = "memory.derivation.impact.v1"
 MEMORY_DERIVATION_REVOCATIONS_SCHEMA = "memory.derivation.revocations.v1"
 MEMORY_DERIVATION_RECOMPOSITION_SCHEMA = "memory.derivation.recomposition.v1"
+MEMORY_PROVENANCE_BACKFILL_AUDIT_SCHEMA = (
+    "memory.provenance.backfill-audit.v1"
+)
+MEMORY_QUARANTINE_STATUS_SCHEMA = "memory.quarantine.status.v1"
 MEMORY_EDIT_RESULT_SCHEMA = "memory.edit.result.v1"
 MEMORY_EDIT_MAX_TITLE_CHARS = 160
 MEMORY_EDIT_MAX_BODY_CHARS = 100_000
@@ -3366,6 +3376,10 @@ def memory_vault_user_snapshot(
         "memoryVersion": version,
         "vaultPath": str(vault),
         "counts": counts,
+        "quarantineStatus": memory_quarantine_status(
+            root=root,
+            entries=revocations,
+        ),
         "cards": cards,
         "includeInternal": bool(include_internal),
         "hiddenTypes": sorted(MEMORY_INTERNAL_NOTE_TYPES) if not include_internal else [],
@@ -3692,6 +3706,97 @@ def _memory_derivation_revocations_path(
     return memory_index_dir(root) / DERIVATION_REVOCATIONS_NAME
 
 
+def _memory_provenance_audit_path(
+    root: Path | None = None,
+) -> Path:
+    return memory_index_dir(root) / PROVENANCE_AUDIT_NAME
+
+
+def _parse_memory_utc_timestamp(
+    value: object,
+) -> datetime | None:
+    cleaned = clean_text(str(value or ""))
+    if not cleaned:
+        return None
+    try:
+        parsed = datetime.fromisoformat(
+            cleaned.replace("Z", "+00:00")
+        )
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def memory_quarantine_status(
+    *,
+    root: Path | None = None,
+    entries: dict[str, dict[str, Any]] | None = None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    current_entries = (
+        dict(entries)
+        if entries is not None
+        else _read_memory_derivation_revocations(root)
+    )
+    checked_time = now or datetime.now(timezone.utc)
+    if checked_time.tzinfo is None:
+        checked_time = checked_time.replace(tzinfo=timezone.utc)
+    checked_time = checked_time.astimezone(timezone.utc)
+
+    timestamps: list[datetime] = []
+    unknown_age_count = 0
+    recomposition_ready_count = 0
+    blocked_count = 0
+    for entry in current_entries.values():
+        quarantined_at = _parse_memory_utc_timestamp(
+            entry.get("quarantinedAt")
+        )
+        if quarantined_at is None:
+            unknown_age_count += 1
+        else:
+            timestamps.append(quarantined_at)
+        remaining = set(
+            _as_list(entry.get("remainingSourceIds"))
+        )
+        blocked = set(
+            _as_list(entry.get("blockedSourceIds"))
+        )
+        if remaining and not blocked:
+            recomposition_ready_count += 1
+        else:
+            blocked_count += 1
+
+    oldest = min(timestamps) if timestamps else None
+    oldest_age_seconds = (
+        max(
+            0,
+            int((checked_time - oldest).total_seconds()),
+        )
+        if oldest is not None
+        else None
+    )
+    return {
+        "schema": MEMORY_QUARANTINE_STATUS_SCHEMA,
+        "state": "pending" if current_entries else "clear",
+        "count": len(current_entries),
+        "recompositionReadyCount": recomposition_ready_count,
+        "blockedCount": blocked_count,
+        "oldestQuarantinedAt": (
+            oldest.isoformat().replace("+00:00", "Z")
+            if oldest is not None
+            else ""
+        ),
+        "oldestAgeSeconds": oldest_age_seconds,
+        "unknownAgeCount": unknown_age_count,
+        "checkedAt": checked_time.isoformat().replace(
+            "+00:00",
+            "Z",
+        ),
+    }
+
+
 def _memory_derivation_revocation_file_state(
     root: Path | None = None,
 ) -> tuple[int, int]:
@@ -3791,6 +3896,372 @@ def _memory_derivation_nodes(
         )
         note_sources[note.note_id] = (path, note)
     return nodes, note_sources
+
+
+def _memory_audit_reference_aliases(
+    vault: Path,
+    path: Path,
+    note: MemoryVaultNote,
+) -> tuple[str, ...]:
+    rel_path = path.relative_to(vault).as_posix()
+    without_suffix = (
+        rel_path[:-3]
+        if rel_path.lower().endswith(".md")
+        else rel_path
+    )
+    return tuple(
+        dict.fromkeys(
+            (
+                note.note_id,
+                rel_path,
+                without_suffix,
+                f"{VAULT_DIR_NAME}/{rel_path}",
+                f"{VAULT_DIR_NAME}/{without_suffix}",
+            )
+        )
+    )
+
+
+def _memory_audit_evidence_aliases(
+    note: MemoryVaultNote,
+) -> tuple[str, ...]:
+    body_bytes = clean_text(note.body).encode(
+        "utf-8",
+        errors="ignore",
+    )
+    sha1_body = hashlib.sha1(body_bytes).hexdigest()
+    return tuple(
+        dict.fromkeys(
+            (
+                note.source_hash,
+                sha1_body,
+                sha1_body[:12],
+                hashlib.sha256(body_bytes).hexdigest(),
+            )
+        )
+    )
+
+
+def _memory_provenance_audit_nodes(
+    *,
+    root: Path | None = None,
+) -> tuple[
+    list[ProvenanceAuditNode],
+    dict[str, tuple[Path, MemoryVaultNote]],
+]:
+    vault = ensure_memory_vault_layout(root)
+    _nodes, note_sources = _memory_derivation_nodes(root=root)
+    output: list[ProvenanceAuditNode] = []
+    for note_id in sorted(note_sources):
+        path, note = note_sources[note_id]
+        source = clean_text(
+            str(note.metadata.get("source") or "")
+        )
+        origin_derived_from = tuple(
+            _as_list(note.metadata.get("origin_derived_from"))
+        )
+        revocation_resolution = clean_text(
+            str(
+                note.metadata.get(
+                    "revocation_resolution"
+                )
+                or ""
+            )
+        )
+        explicitly_detached = bool(
+            not _as_list(note.metadata.get("derived_from"))
+            and (
+                origin_derived_from
+                or revocation_resolution == "user-edit"
+                or _memory_source_type(
+                    source,
+                    note.note_type,
+                )
+                == "user"
+            )
+        )
+        output.append(
+            ProvenanceAuditNode(
+                note_id=note.note_id,
+                note_type=note.note_type,
+                source_type=_memory_source_type(
+                    source,
+                    note.note_type,
+                ),
+                source_refs=tuple(
+                    _as_list(
+                        note.metadata.get("source_refs")
+                        or note.metadata.get("source_ref")
+                    )
+                ),
+                derived_from=tuple(
+                    _as_list(
+                        note.metadata.get("derived_from")
+                    )
+                ),
+                origin_derived_from=origin_derived_from,
+                evidence_hashes=tuple(
+                    _as_list(
+                        note.metadata.get("evidence_hashes")
+                        or note.metadata.get("source_hash")
+                    )
+                ),
+                reference_aliases=(
+                    _memory_audit_reference_aliases(
+                        vault,
+                        path,
+                        note,
+                    )
+                ),
+                evidence_aliases=(
+                    _memory_audit_evidence_aliases(note)
+                ),
+                explicitly_detached=explicitly_detached,
+            )
+        )
+    return output, note_sources
+
+
+def _memory_provenance_audit_fingerprint(
+    nodes: list[ProvenanceAuditNode],
+) -> str:
+    payload = [
+        {
+            "id": node.note_id,
+            "type": node.note_type,
+            "sourceType": node.source_type,
+            "sourceRefs": list(node.source_refs),
+            "derivedFrom": list(node.derived_from),
+            "originDerivedFrom": list(
+                node.origin_derived_from
+            ),
+            "evidenceHashes": list(node.evidence_hashes),
+            "referenceAliases": list(
+                node.reference_aliases
+            ),
+            "evidenceAliases": list(node.evidence_aliases),
+            "explicitlyDetached": node.explicitly_detached,
+        }
+        for node in sorted(nodes, key=lambda item: item.note_id)
+    ]
+    return hashlib.sha256(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _memory_provenance_audit_summary(
+    audit: ProvenanceAuditResult,
+) -> dict[str, int]:
+    return {
+        "auditedNoteCount": audit.audited_note_count,
+        "declaredDerivationCount": (
+            audit.declared_derivation_count
+        ),
+        "explicitlyDetachedCount": (
+            audit.explicitly_detached_count
+        ),
+        "auditableMissingCount": (
+            audit.auditable_missing_count
+        ),
+        "candidateTargetCount": len(audit.candidates),
+        "verifiedCount": audit.verified_count,
+        "reviewCount": audit.review_count,
+        "ambiguousCount": audit.ambiguous_count,
+        "unmatchedTargetCount": (
+            audit.unmatched_target_count
+        ),
+        "cycleRejectedSignalCount": (
+            audit.cycle_rejected_signal_count
+        ),
+    }
+
+
+def _memory_persisted_provenance_audit(
+    *,
+    root: Path | None,
+    graph_fingerprint: str,
+    audit: ProvenanceAuditResult,
+) -> dict[str, Any]:
+    path = _memory_provenance_audit_path(root)
+    entries = [
+        {
+            "targetNoteId": candidate.target_note_id,
+            "state": candidate.state,
+            "candidateSourceIds": list(
+                candidate.candidate_source_ids
+            ),
+            "signals": [
+                {
+                    "sourceNoteId": signal.source_note_id,
+                    "reasonCodes": list(
+                        signal.reason_codes
+                    ),
+                }
+                for signal in candidate.signals
+            ],
+            "reasonCodes": list(candidate.reason_codes),
+        }
+        for candidate in audit.candidates
+    ]
+    stable_payload = {
+        "schema": MEMORY_PROVENANCE_BACKFILL_AUDIT_SCHEMA,
+        "readOnly": True,
+        "autoApply": False,
+        "contentSimilarityUsed": False,
+        "graphFingerprint": graph_fingerprint,
+        "summary": _memory_provenance_audit_summary(
+            audit
+        ),
+        "entries": entries,
+    }
+    generated_at = ""
+    try:
+        existing = json.loads(
+            path.read_text(encoding="utf-8")
+        )
+        if (
+            isinstance(existing, dict)
+            and {
+                key: value
+                for key, value in existing.items()
+                if key != "generatedAt"
+            }
+            == stable_payload
+        ):
+            generated_at = clean_text(
+                str(existing.get("generatedAt") or "")
+            )
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        pass
+    payload = {
+        **stable_payload,
+        "generatedAt": generated_at or _utc_now_iso(),
+    }
+    if not generated_at:
+        atomic_json_write(path, payload, durable=True)
+    return payload
+
+
+def _memory_public_audit_note(
+    note_id: str,
+    note_sources: dict[
+        str,
+        tuple[Path, MemoryVaultNote],
+    ],
+    *,
+    root: Path | None,
+    include_internal: bool,
+) -> dict[str, Any] | None:
+    source = note_sources.get(note_id)
+    if source is None:
+        return None
+    path, note = source
+    vault = ensure_memory_vault_layout(root)
+    rel_path = path.relative_to(vault).as_posix()
+    if (
+        _is_internal_memory_note_type(note.note_type)
+        and not include_internal
+    ):
+        return {
+            "id": note.note_id,
+            "title": "관리 기억",
+            "type": "internal",
+            "contentHidden": True,
+        }
+    locked = _is_legacy_memory_note_type(
+        note.note_type,
+        rel_path,
+    )
+    return {
+        "id": note.note_id,
+        "title": _legacy_to_public_title(
+            note.note_type,
+            rel_path,
+            note.title,
+        ),
+        "type": note.note_type,
+        "contentHidden": locked,
+    }
+
+
+def memory_provenance_backfill_preview(
+    *,
+    root: Path | None = None,
+    include_internal: bool = False,
+) -> dict[str, Any]:
+    sync_memory_vault_index(root=root)
+    nodes, note_sources = _memory_provenance_audit_nodes(
+        root=root
+    )
+    audit = audit_missing_derivations(nodes)
+    graph_fingerprint = (
+        _memory_provenance_audit_fingerprint(nodes)
+    )
+    persisted = _memory_persisted_provenance_audit(
+        root=root,
+        graph_fingerprint=graph_fingerprint,
+        audit=audit,
+    )
+    public_candidates: list[dict[str, Any]] = []
+    for candidate in audit.candidates:
+        target = _memory_public_audit_note(
+            candidate.target_note_id,
+            note_sources,
+            root=root,
+            include_internal=include_internal,
+        )
+        if target is None:
+            continue
+        sources: list[dict[str, Any]] = []
+        for signal in candidate.signals:
+            public_source = _memory_public_audit_note(
+                signal.source_note_id,
+                note_sources,
+                root=root,
+                include_internal=include_internal,
+            )
+            if public_source is None:
+                continue
+            sources.append(
+                {
+                    **public_source,
+                    "reasonCodes": list(
+                        signal.reason_codes
+                    ),
+                }
+            )
+        public_candidates.append(
+            {
+                "target": target,
+                "state": candidate.state,
+                "candidateSources": sources,
+                "reasonCodes": list(
+                    candidate.reason_codes
+                ),
+                "canApply": False,
+            }
+        )
+    return {
+        "ok": True,
+        "schema": MEMORY_PROVENANCE_BACKFILL_AUDIT_SCHEMA,
+        "readOnly": True,
+        "autoApply": False,
+        "contentSimilarityUsed": False,
+        "policy": "exact_metadata_only",
+        "graphFingerprint": graph_fingerprint,
+        "summary": dict(persisted["summary"]),
+        "candidates": public_candidates,
+        "reportPath": str(
+            _memory_provenance_audit_path(root)
+        ),
+        "generatedAt": persisted["generatedAt"],
+        "checkedAt": _utc_now_iso(),
+    }
 
 
 def _memory_revocation_entry_resolved(
@@ -4853,7 +5324,9 @@ __all__ = [
     "MEMORY_DELETE_RESULT_SCHEMA",
     "MEMORY_DELETE_TOMBSTONE_SCHEMA",
     "MEMORY_EDIT_RESULT_SCHEMA",
+    "MEMORY_PROVENANCE_BACKFILL_AUDIT_SCHEMA",
     "MEMORY_PROVENANCE_SCHEMA",
+    "MEMORY_QUARANTINE_STATUS_SCHEMA",
     "MemoryNoteDeletedError",
     "MemoryVaultNote",
     "activate_memory_vault_for_guild",
@@ -4865,6 +5338,8 @@ __all__ = [
     "mark_memory_note_superseded",
     "memory_note_was_deleted",
     "memory_index_db_path",
+    "memory_provenance_backfill_preview",
+    "memory_quarantine_status",
     "memory_vault_user_snapshot",
     "memory_vault_root",
     "parse_memory_note",

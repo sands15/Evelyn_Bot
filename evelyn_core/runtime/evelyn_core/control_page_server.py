@@ -25,6 +25,7 @@ from .memory_vault import (
     delete_memory_vault_user_note,
     ensure_memory_vault_layout,
     export_memory_graph,
+    memory_provenance_backfill_preview,
     memory_vault_user_note,
     memory_vault_user_snapshot,
     preview_memory_vault_user_note_deletion,
@@ -976,6 +977,19 @@ async def memory_snapshot_handler(request: web.Request) -> web.StreamResponse:
     return json_response(memory_vault_user_snapshot(include_hidden=include_hidden, include_internal=include_internal, limit=limit))
 
 
+async def memory_provenance_audit_handler(
+    request: web.Request,
+) -> web.StreamResponse:
+    include_internal = str(
+        request.query.get("include_internal", "")
+    ).lower() in {"1", "true", "yes", "on"}
+    return json_response(
+        memory_provenance_backfill_preview(
+            include_internal=include_internal,
+        )
+    )
+
+
 async def memory_note_handler(request: web.Request) -> web.StreamResponse:
     note_id = request.match_info.get("note_id", "")
     include_internal = str(request.query.get("include_internal", "")).lower() in {"1", "true", "yes", "on"}
@@ -1229,6 +1243,10 @@ def create_app() -> web.Application:
     app.router.add_post("/api/control-page/voice-validation/abort", voice_validation_abort_handler)
     app.router.add_get("/api/control-page/memory", memory_snapshot_handler)
     app.router.add_get("/api/control-page/memory-graph", memory_graph_handler)
+    app.router.add_get(
+        "/api/control-page/memory-provenance-audit",
+        memory_provenance_audit_handler,
+    )
     app.router.add_get("/api/control-page/memory/{note_id}", memory_note_handler)
     app.router.add_post("/api/control-page/open-memory-vault", open_memory_vault_handler)
     app.router.add_post("/api/control-page/memory/{note_id}", memory_note_action_handler)

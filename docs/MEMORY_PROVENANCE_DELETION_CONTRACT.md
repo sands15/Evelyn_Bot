@@ -20,6 +20,37 @@ recall prompt에는 원문 전체 대신 선택된 기억의 note ID, source, ev
 요약과 confidence를 넣는다. 파생 기억은 원본 note ID와 evidence hash를
 유지해야 한다.
 
+## Legacy provenance backfill audit
+
+과거 note에 `derived_from`이 비어 있는 경우 Control Page의 읽기 전용
+`GET /api/control-page/memory-provenance-audit`가
+`memory.provenance.backfill-audit.v1` 후보 보고서를 만든다.
+
+감사는 다음의 기존 명시적 metadata만 사용한다.
+
+- source note ID 또는 vault 상대 경로와 정확히 일치하는 `source_refs`
+- source note의 현재 원문 hash 또는 기존 consolidation body digest와
+  정확히 일치하는 `evidence_hashes`
+
+본문·제목 유사도, 임베딩 근접도, LLM 추측은 신호로 사용하지 않는다. source
+ref와 evidence hash가 같은 source 집합을 가리킬 때만 `verified`, 하나의
+정확 신호만 있으면 `review`, 두 신호가 서로 다른 source를 가리키거나 후보가
+모호하면 `ambiguous`다. 기존 graph에 cycle을 만드는 후보와 user edit로
+의도적으로 분리되어 `origin_derived_from`만 남은 note는 후보에서 제외한다.
+
+보고서는 다음 경계를 지킨다.
+
+- `readOnly=true`, `autoApply=false`, `canApply=false`이며 apply route가 없다.
+- 사용자 note Markdown과 현재 `derived_from`을 수정하지 않는다.
+- 저장 파일에는 note ID, 후보 source ID, 판정 코드, 집계와 graph
+  fingerprint만 기록한다.
+- title, body, source path/ref, evidence hash, transcript는 저장하지 않는다.
+- graph가 바뀌면 새 fingerprint로 보고서를 다시 계산한다.
+
+Control Page는 live note의 공개 title/type을 결합해 후보를 보여 주지만
+`verified`도 자동으로 적용하지 않는다. 이는 backfill 사실이 아니라 사용자
+검토를 위한 증거 목록이다.
+
 ## Optimistic edit and correction
 
 Control Page에서 기억을 수정할 때는 마지막으로 읽은 card의 `sourceHash`를
@@ -131,6 +162,11 @@ Sub-LLM이 준비되면 maintenance/activation 경로가 quarantine note를
 Sub-LLM이 없거나 상위 quarantine source가 아직 복구되지 않았으면 자동으로
 내용을 만들지 않고 quarantine을 계속 유지한다.
 
+Control Page memory snapshot은 `memory.quarantine.status.v1` 집계도 제공한다.
+여기에는 현재 격리 수, 즉시 재합성 가능한 수, 상위 근거로 차단된 수, 가장
+오래된 `quarantinedAt`과 경과 초, 시간 판정 불가 수만 들어간다. note ID,
+title, body와 transcript는 집계에 포함하지 않는다.
+
 ## Cache and daily-note continuity
 
 hot context에는 deletion journal의 수정 시각과 크기를 함께 저장한다. 캐시와
@@ -169,6 +205,8 @@ fail-closed한다. 운영자는 재시작 또는 index sync 뒤 잔여 파일과
   `bot_memory/memory_index/memory.sqlite`
 - derived revocation state:
   `bot_memory/memory_index/memory_derivation_revocations.json`
+- content-free provenance audit:
+  `bot_memory/memory_index/memory_provenance_backfill_audit.json`
 - hot context:
   `bot_memory/memory_index/hot_context.json`
 
@@ -205,11 +243,23 @@ prompt block과 user state가 의도적으로 남아 있다.
 - Sub-LLM 입력에 삭제 source와 기존 파생 본문이 포함되지 않음
 - 남은 source만 사용한 topological 재합성과 user-edit 해제
 
+`tests.memory.test_memory_provenance_audit`와
+`tests.runtime.test_memory_provenance_audit_api`는 다음을 검증한다.
+
+- exact source ref와 evidence hash의 교차 검증
+- 충돌 신호의 `ambiguous` 유지, cycle과 user-detach 후보 거부
+- 내용이 같다는 이유만으로 후보를 만들지 않음
+- preview 뒤 source/target Markdown이 byte-for-byte 그대로 유지됨
+- 저장 보고서에 title, body, path/ref, evidence hash가 없음
+- quarantine 수, 재합성 가능 수와 최장 대기 시간 집계
+- 읽기 전용 API와 Control Page 표시 계약
+
 ## Remaining boundary
 
-연쇄 철회는 note가 선언한 `derived_from` metadata에 의존한다. 수동 작성 또는
-과거 importer가 실제 근거 관계를 이 필드에 기록하지 않았다면 런타임이 숨은
-의존성을 추론하지 않는다. 또한 multi-source note의 자동 재합성은 Sub-LLM이
-준비될 때까지 fail-closed quarantine으로 남는다. 따라서 현재 계약은
-“선언된 provenance graph 전체의 철회”이며, provenance가 누락된 과거 note까지
-내용 유사도만으로 삭제했다고 주장하지 않는다.
+연쇄 철회는 여전히 note가 선언한 `derived_from` metadata에 의존한다. 감사
+보고서는 기존 source ref/hash로 정확히 증명할 수 있는 후보만 찾고, 실제
+backfill을 적용하지 않는다. metadata 자체가 전혀 없거나 외부 source만 가리키는
+과거 note의 숨은 의존성은 찾을 수 없다. 또한 multi-source note의 자동 재합성은
+Sub-LLM이 준비될 때까지 fail-closed quarantine으로 남는다. 따라서 현재
+계약은 “선언된 provenance graph 전체의 철회 + 명시적 신호가 남은 누락 후보의
+읽기 전용 감사”이며, 내용 유사도만으로 삭제 또는 backfill했다고 주장하지 않는다.

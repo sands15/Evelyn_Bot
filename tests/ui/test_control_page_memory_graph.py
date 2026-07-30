@@ -158,6 +158,45 @@ class ControlPageMemoryGraphTests(unittest.TestCase):
         )
         self.assertNotIn('postMemoryAction("hide")', self.html)
 
+    def test_memory_audit_is_read_only_and_shows_quarantine_age(
+        self,
+    ) -> None:
+        self.assertIn('data-memory-page="audit"', self.html)
+        self.assertIn('id="memoryAuditButton"', self.html)
+        self.assertIn('id="memoryAudit"', self.html)
+        self.assertIn(
+            "/api/control-page/memory-provenance-audit",
+            self.html,
+        )
+        self.assertIn(
+            "function renderMemoryAudit()",
+            self.html,
+        )
+        self.assertIn(
+            "memorySnapshot.quarantineStatus",
+            self.html,
+        )
+        self.assertIn(
+            "quarantine.oldestAgeSeconds",
+            self.html,
+        )
+        self.assertIn(
+            "본문 유사도는 사용하지 않았습니다.",
+            self.html,
+        )
+        self.assertIn(
+            "여기서는 어떤 메모도 수정하지 않습니다.",
+            self.html,
+        )
+        self.assertIn(
+            "data-audit-target",
+            self.html,
+        )
+        self.assertNotIn(
+            "memory-provenance-audit/apply",
+            self.html,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

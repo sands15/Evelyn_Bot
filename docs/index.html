@@ -1451,6 +1451,94 @@
       min-height: 0;
     }
 
+    .memory-audit {
+      display: grid;
+      align-content: start;
+      gap: 12px;
+      min-height: 0;
+      padding-right: 6px;
+      overflow: auto;
+    }
+
+    .memory-audit-status,
+    .memory-audit-card {
+      display: grid;
+      gap: 8px;
+      padding: 13px 14px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: rgba(255, 255, 255, 0.4);
+    }
+
+    [data-theme="dark"] .memory-audit-status,
+    [data-theme="dark"] .memory-audit-card {
+      background: rgba(255, 255, 255, 0.05);
+    }
+
+    .memory-audit-status.pending {
+      border-color: rgba(211, 132, 35, 0.58);
+      background: rgba(211, 132, 35, 0.1);
+    }
+
+    .memory-audit-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 8px;
+    }
+
+    .memory-audit-metric {
+      display: grid;
+      gap: 3px;
+      padding: 9px 10px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+    }
+
+    .memory-audit-metric strong {
+      font-size: 1.05rem;
+    }
+
+    .memory-audit-metric span,
+    .memory-audit-policy,
+    .memory-audit-signals {
+      color: var(--soft);
+      font-size: 0.76rem;
+      line-height: 1.5;
+    }
+
+    .memory-audit-card-head {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .memory-audit-state {
+      flex: 0 0 auto;
+      padding: 3px 7px;
+      border-radius: 999px;
+      color: var(--soft);
+      background: rgba(128, 134, 146, 0.14);
+      font-size: 0.68rem;
+      font-weight: 800;
+    }
+
+    .memory-audit-card[data-audit-state="verified"] {
+      border-color: rgba(47, 157, 104, 0.45);
+    }
+
+    .memory-audit-card[data-audit-state="ambiguous"] {
+      border-color: rgba(211, 132, 35, 0.58);
+    }
+
+    .memory-audit-open {
+      justify-self: start;
+      min-height: 32px;
+      padding: 0 10px;
+      font-size: 0.74rem;
+      font-weight: 800;
+    }
+
     .memory-cards {
       display: grid;
       align-content: start;
@@ -1853,6 +1941,10 @@
         grid-template-columns: 1fr;
       }
 
+      .memory-audit-grid {
+        grid-template-columns: 1fr;
+      }
+
       .memory-graph svg {
         min-height: 330px;
       }
@@ -2125,6 +2217,10 @@
             <strong>수정</strong>
             <span>확인 / 삭제</span>
           </button>
+          <button class="note" type="button" data-memory-page="audit">
+            <strong>근거 감사</strong>
+            <span>읽기 전용 후보</span>
+          </button>
         </div>
         <div class="memory-list" data-memory-filter-list hidden>
           <button class="note active" type="button" data-memory-filter="all">
@@ -2158,6 +2254,7 @@
               <button class="node-scale-value" id="memoryNodeScaleValue" type="button" title="노드 크기 1.00배로 되돌리기" aria-live="polite" aria-label="노드 크기 1.00배로 되돌리기">⦿ 1.00x</button>
               <button class="node-scale-button" id="memoryNodeGrowButton" type="button" title="노드 크게" aria-label="노드 크게">+</button>
             </div>
+            <button id="memoryAuditButton" type="button" aria-pressed="false">근거 감사</button>
             <button id="memoryManagementGraphButton" type="button" aria-pressed="false" title="관리 메모리 노드 보기">관리 그래프</button>
             <button id="memoryRefreshButton" type="button">새로고침</button>
             <button id="openObsidianButton" type="button">Obsidian</button>
@@ -2186,6 +2283,11 @@
                   <button class="danger-action" id="memoryDeleteButton" type="button">삭제</button>
                 </div>
               </div>
+            </div>
+          </section>
+          <section class="memory-page" id="memoryAuditPage" data-memory-page-content="audit">
+            <div class="memory-audit" id="memoryAudit" aria-live="polite">
+              <div class="memory-empty">파생 근거와 격리 상태를 감사하는 중입니다.</div>
             </div>
           </section>
         </div>
@@ -2281,6 +2383,7 @@
     const memoryNodeShrinkButton = document.getElementById("memoryNodeShrinkButton");
     const memoryNodeScaleValue = document.getElementById("memoryNodeScaleValue");
     const memoryManagementGraphButton = document.getElementById("memoryManagementGraphButton");
+    const memoryAuditButton = document.getElementById("memoryAuditButton");
     const openObsidianButton = document.getElementById("openObsidianButton");
     const memoryGraph = document.getElementById("memoryGraph");
     const memoryEditTitle = document.getElementById("memoryEditTitle");
@@ -2289,8 +2392,10 @@
     const memoryConfirmButton = document.getElementById("memoryConfirmButton");
     const memoryDeleteButton = document.getElementById("memoryDeleteButton");
     const memoryProvenance = document.getElementById("memoryProvenance");
+    const memoryAudit = document.getElementById("memoryAudit");
     let memorySnapshot = null;
     let memoryGraphSnapshot = null;
+    let memoryAuditSnapshot = null;
     let memoryGraphMotionFrame = 0;
     let memoryGraphMotionState = null;
     let memoryGraphDragSuppressClick = false;
@@ -3789,7 +3894,10 @@
     }
 
     function setMemoryPage(page) {
-      memoryPage = page === "manage" ? "manage" : "graph";
+      memoryPage = ["graph", "manage", "audit"].includes(page) ? page : "graph";
+      if (memoryAuditButton) {
+        memoryAuditButton.setAttribute("aria-pressed", String(memoryPage === "audit"));
+      }
       document.querySelectorAll("[data-memory-page]").forEach((button) => {
         button.classList.toggle("active", button.getAttribute("data-memory-page") === memoryPage);
       });
@@ -3801,6 +3909,9 @@
       });
       if (memoryPage === "graph") {
         renderMemoryGraph();
+      } else if (memoryPage === "audit") {
+        stopMemoryGraphMotion();
+        renderMemoryAudit();
       } else {
         stopMemoryGraphMotion();
       }
@@ -4297,6 +4408,93 @@
       }
     }
 
+    function formatMemoryAge(seconds) {
+      const value = Number(seconds);
+      if (!Number.isFinite(value) || value < 0) return "측정 불가";
+      if (value < 60) return `${Math.floor(value)}초`;
+      if (value < 3600) return `${Math.floor(value / 60)}분`;
+      if (value < 86400) return `${Math.floor(value / 3600)}시간`;
+      return `${Math.floor(value / 86400)}일 ${Math.floor((value % 86400) / 3600)}시간`;
+    }
+
+    function renderMemoryAudit() {
+      if (!memoryAudit) return;
+      const quarantine = memorySnapshot && memorySnapshot.quarantineStatus
+        ? memorySnapshot.quarantineStatus
+        : {};
+      const quarantineCount = Number(quarantine.count || 0);
+      const oldestAge = quarantine.oldestAgeSeconds;
+      const quarantineMarkup =
+        '<section class="memory-audit-status' + (quarantineCount ? ' pending' : '') + '">' +
+        '<div class="memory-audit-card-head"><strong>파생 기억 격리 상태</strong>' +
+        '<span class="memory-audit-state">' + escapeHtml(quarantineCount ? "재합성 대기" : "정상") + '</span></div>' +
+        '<div class="memory-audit-grid">' +
+        '<div class="memory-audit-metric"><strong>' + quarantineCount + '</strong><span>격리된 기억</span></div>' +
+        '<div class="memory-audit-metric"><strong>' + Number(quarantine.recompositionReadyCount || 0) + '</strong><span>재합성 가능</span></div>' +
+        '<div class="memory-audit-metric"><strong>' + escapeHtml(quarantineCount ? formatMemoryAge(oldestAge) : "없음") + '</strong><span>가장 오래된 대기</span></div>' +
+        '</div>' +
+        (Number(quarantine.unknownAgeCount || 0)
+          ? '<span class="memory-audit-policy">시작 시간을 판정할 수 없는 격리 ' + Number(quarantine.unknownAgeCount || 0) + '개가 있습니다.</span>'
+          : '') +
+        '</section>';
+
+      if (!memoryAuditSnapshot || !memoryAuditSnapshot.summary) {
+        memoryAudit.innerHTML = quarantineMarkup +
+          '<div class="memory-empty">누락된 파생 근거 후보를 불러오는 중입니다.</div>';
+        return;
+      }
+      const summary = memoryAuditSnapshot.summary || {};
+      const candidates = Array.isArray(memoryAuditSnapshot.candidates)
+        ? memoryAuditSnapshot.candidates
+        : [];
+      const summaryMarkup =
+        '<section class="memory-audit-status">' +
+        '<div class="memory-audit-card-head"><strong>누락 provenance 후보</strong>' +
+        '<span class="memory-audit-state">읽기 전용</span></div>' +
+        '<div class="memory-audit-grid">' +
+        '<div class="memory-audit-metric"><strong>' + Number(summary.candidateTargetCount || 0) + '</strong><span>검토 후보</span></div>' +
+        '<div class="memory-audit-metric"><strong>' + Number(summary.verifiedCount || 0) + '</strong><span>참조+해시 일치</span></div>' +
+        '<div class="memory-audit-metric"><strong>' + Number(summary.ambiguousCount || 0) + '</strong><span>신호 충돌</span></div>' +
+        '</div>' +
+        '<span class="memory-audit-policy">본문 유사도는 사용하지 않았습니다. 정확한 source ref와 evidence hash만 감사하며, 여기서는 어떤 메모도 수정하지 않습니다.</span>' +
+        (Number(summary.unmatchedTargetCount || 0)
+          ? '<span class="memory-audit-policy">명시적 신호가 있지만 연결 대상을 증명하지 못한 기억 ' + Number(summary.unmatchedTargetCount || 0) + '개는 미적용 상태로 남겼습니다.</span>'
+          : '') +
+        '</section>';
+      const stateLabels = {
+        verified: "교차 검증",
+        review: "검토 필요",
+        ambiguous: "모호함"
+      };
+      const signalLabels = {
+        exact_source_ref: "source ref 정확히 일치",
+        exact_evidence_hash: "evidence hash 정확히 일치"
+      };
+      const candidateMarkup = candidates.length
+        ? candidates.map((candidate) => {
+            const target = candidate && candidate.target ? candidate.target : {};
+            const sources = Array.isArray(candidate && candidate.candidateSources)
+              ? candidate.candidateSources
+              : [];
+            const signalText = sources.map((source) => {
+              const reasons = Array.isArray(source.reasonCodes) ? source.reasonCodes : [];
+              const labels = reasons.map((code) => signalLabels[code] || code);
+              return `${source.title || source.id || "unknown"} (${labels.join(", ") || "정확 일치"})`;
+            }).join(" · ");
+            const state = String(candidate.state || "review");
+            return (
+              '<article class="memory-audit-card" data-audit-state="' + escapeHtml(state) + '">' +
+              '<div class="memory-audit-card-head"><strong>' + escapeHtml(target.title || target.id || "Untitled") + '</strong>' +
+              '<span class="memory-audit-state">' + escapeHtml(stateLabels[state] || state) + '</span></div>' +
+              '<span class="memory-audit-signals">후보 근거: ' + escapeHtml(signalText || "없음") + '</span>' +
+              '<button class="memory-audit-open" type="button" data-audit-target="' + escapeHtml(target.id || "") + '">기억 열기</button>' +
+              '</article>'
+            );
+          }).join("")
+        : '<div class="memory-empty">현재 정확한 메타데이터로 증명할 수 있는 백필 후보가 없습니다.</div>';
+      memoryAudit.innerHTML = quarantineMarkup + summaryMarkup + candidateMarkup;
+    }
+
     function renderMemoryCards() {
       if (!memoryCards) return;
       const cards = memoryCardsForFilter(memorySnapshot && memorySnapshot.cards);
@@ -4305,12 +4503,17 @@
       if (memoryVaultPath) memoryVaultPath.textContent = memorySnapshot && memorySnapshot.vaultPath ? memorySnapshot.vaultPath : "";
       if (memoryHint) {
         const graphCount = Array.isArray(memoryGraphSnapshot && memoryGraphSnapshot.nodes) ? memoryGraphSnapshot.nodes.length : 0;
-        memoryHint.textContent = total ? `Graph ${graphCount || total} nodes, ${total} notes` : "Waiting for memory_vault nodes.";
+        const quarantineCount = Number(memorySnapshot && memorySnapshot.quarantineStatus && memorySnapshot.quarantineStatus.count || 0);
+        const candidateCount = Number(memoryAuditSnapshot && memoryAuditSnapshot.summary && memoryAuditSnapshot.summary.candidateTargetCount || 0);
+        memoryHint.textContent = total
+          ? `Graph ${graphCount || total} nodes, ${total} notes · 격리 ${quarantineCount} · provenance 후보 ${candidateCount}`
+          : "Waiting for memory_vault nodes.";
       }
       if (!cards.length) {
         memoryCards.innerHTML = '<div class="memory-empty">No memory notes to display.</div>';
         selectedMemoryCard = null;
         renderMemoryEditor();
+        renderMemoryAudit();
         return;
       }
       if (!selectedMemoryId || !cards.some((card) => String(card.id) === selectedMemoryId)) {
@@ -4339,13 +4542,15 @@
       }).join("");
       selectedMemoryCard = findMemoryCard(selectedMemoryId);
       renderMemoryEditor();
+      renderMemoryAudit();
     }
 
     async function loadMemoryVault({ force = false } = {}) {
       if (memoryLoading && memoryLoadPromise) return memoryLoadPromise;
-      if (memorySnapshot && memoryGraphSnapshot && !force) {
+      if (memorySnapshot && memoryGraphSnapshot && memoryAuditSnapshot && !force) {
         renderMemoryGraph();
         renderMemoryCards();
+        renderMemoryAudit();
         return;
       }
       memoryLoading = true;
@@ -4357,14 +4562,17 @@
         memoryGraph.innerHTML = '<div class="memory-empty">메모리 노드 그래프를 불러오는 중입니다.</div>';
       }
       memoryLoadPromise = (async () => {
-        const [snapshotPayload, graphPayload] = await Promise.all([
+        const [snapshotPayload, graphPayload, auditPayload] = await Promise.all([
           fetchApi("/api/control-page/memory?limit=180"),
-          fetchApi("/api/control-page/memory-graph?max_nodes=160" + (memoryGraphIncludeInternal ? "&include_internal=true" : ""))
+          fetchApi("/api/control-page/memory-graph?max_nodes=160" + (memoryGraphIncludeInternal ? "&include_internal=true" : "")),
+          fetchApi("/api/control-page/memory-provenance-audit" + (memoryGraphIncludeInternal ? "?include_internal=true" : ""))
         ]);
         memorySnapshot = snapshotPayload || { cards: [] };
         memoryGraphSnapshot = graphPayload || { nodes: [], edges: [] };
+        memoryAuditSnapshot = auditPayload || { summary: {}, candidates: [] };
         renderMemoryGraph();
         renderMemoryCards();
+        renderMemoryAudit();
       })();
       try {
         await memoryLoadPromise;
@@ -4375,6 +4583,9 @@
         }
         if (memoryCards) {
           memoryCards.innerHTML = '<div class="memory-empty">메모리 API 연결 실패: ' + escapeHtml(error.message) + '</div>';
+        }
+        if (memoryAudit) {
+          memoryAudit.innerHTML = '<div class="memory-empty">근거 감사 API 연결 실패: ' + escapeHtml(error.message) + '</div>';
         }
       } finally {
         memoryLoading = false;
@@ -4410,6 +4621,7 @@
         const keepSelection = action !== "hide" ? selectedMemoryId : "";
         memorySnapshot = null;
         memoryGraphSnapshot = null;
+        memoryAuditSnapshot = null;
         selectedMemoryId = keepSelection;
         selectedMemoryCard = null;
         await loadMemoryVault({ force: true });
@@ -4418,6 +4630,7 @@
         if (action === "edit" && String(error.message || "") === "api_error:409") {
           memorySnapshot = null;
           memoryGraphSnapshot = null;
+          memoryAuditSnapshot = null;
           selectedMemoryCard = null;
           await loadMemoryVault({ force: true });
           setBubble("다른 곳에서 기억이 바뀌어서 덮어쓰지 않았어. 최신 내용을 다시 불러왔어.");
@@ -4488,6 +4701,7 @@
         );
         memorySnapshot = null;
         memoryGraphSnapshot = null;
+        memoryAuditSnapshot = null;
         selectedMemoryId = "";
         selectedMemoryCard = null;
         await loadMemoryVault({ force: true });
@@ -4502,6 +4716,7 @@
         if (String(error.message || "") === "api_error:409") {
           memorySnapshot = null;
           memoryGraphSnapshot = null;
+          memoryAuditSnapshot = null;
           await loadMemoryVault({ force: true });
           setBubble("삭제 미리보기 뒤 기억이나 파생 근거가 바뀌어서 삭제하지 않았어. 다시 확인해줘.");
           return;
@@ -4698,6 +4913,7 @@
       memoryManagementGraphButton.addEventListener("click", () => {
         memoryGraphIncludeInternal = !memoryGraphIncludeInternal;
         memoryGraphSnapshot = null;
+        memoryAuditSnapshot = null;
         memoryFilter = "all";
         updateMemoryManagementGraphButton();
         loadMemoryVault({ force: true });
@@ -4757,6 +4973,19 @@
         if (!card) return;
         event.preventDefault();
         selectMemoryCard(card.getAttribute("data-memory-id"), { openManager: false });
+      });
+    }
+    if (memoryAuditButton) {
+      memoryAuditButton.addEventListener("click", () => {
+        setMemoryPage(memoryPage === "audit" ? "graph" : "audit");
+      });
+    }
+    if (memoryAudit) {
+      memoryAudit.addEventListener("click", (event) => {
+        const button = event.target.closest("[data-audit-target]");
+        if (!button) return;
+        const noteId = button.getAttribute("data-audit-target") || "";
+        if (noteId) selectMemoryCard(noteId, { openManager: true });
       });
     }
     if (memoryEditSaveButton) {

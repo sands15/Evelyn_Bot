@@ -53,7 +53,8 @@ implemented behavior.
 - `docs/MEMORY_PROVENANCE_DELETION_CONTRACT.md`
   - 기억의 source/evidence provenance, content-hash 기반 충돌 없는 사용자
     수정, 2단계 삭제, tombstone-first 내구성, 파생 기억의 연쇄 철회·격리·
-    privacy-preserving 재합성, fail-closed 조회·cache 무효화와 재시작
+    privacy-preserving 재합성, 누락 provenance의 exact-metadata 읽기 전용
+    감사, quarantine 대기 관측, fail-closed 조회·cache 무효화와 재시작
     재조정 계약.
 
 - `docs/AUTONOMY_AUTHORIZATION_CONTRACT.md`
