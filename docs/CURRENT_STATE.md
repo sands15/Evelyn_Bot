@@ -2,7 +2,7 @@
 
 Document status: **Current**
 Last reviewed: 2026-07-30 KST
-Source branch: `codex/dependency-config-hardening` at `c656fc8`
+Source branch: `codex/dependency-config-hardening` at `c92a158`
 
 이 문서는 현재 확인된 사실만 기록한다. 목표 구조와 과거 계획은 다른 설계/계획 문서를 사용한다.
 
@@ -93,6 +93,19 @@ Source branch: `codex/dependency-config-hardening` at `c656fc8`
   - manual token도 selection mode, target/source content hash와 전체 graph
     fingerprint에 묶인다. exact/ambiguous 대상, 숨김·격리·legacy/internal·
     미접지·cycle source는 fail-closed로 거부한다.
+  - 이미 연결된 파생 관계는 별도 correction overview/source-options와
+    preview/apply로 relink하거나 명시적 빈 배열로 unlink할 수 있다.
+    제거한 source ID는 `origin_derived_from`에 보존하며 가장 최근
+    relink/unlink만 현재 revision·관계가 정확히 일치할 때 별도 변경으로
+    undo한다.
+  - correction token은 target/source content hash, current/proposed
+    source·origin ID와 전체 graph fingerprint에 묶인 120초 일회용이다.
+    write-ahead journal을 `fsync`한 뒤 Markdown을 원자 교체하고 committed를
+    기록하며, commit 직전 중단은 새 프로세스가 note metadata와 정확히
+    일치할 때만 복구한다.
+  - journal과 공개 API는 note/source ID, revision, action과 공개 title/type만
+    다루며 body, path, content/source/evidence hash와 transcript를 저장하거나
+    노출하지 않는다. 모든 변경은 CSRF와 브라우저의 별도 확인이 필요하다.
 - memory snapshot은 격리 수, 재합성 가능 수, 차단 수, 가장 오래된 대기
   시각·경과 초를 `memory.quarantine.status.v1`로 집계한다. 집계에는
   note ID나 콘텐츠를 넣지 않는다.
@@ -120,10 +133,23 @@ Source branch: `codex/dependency-config-hardening` at `c656fc8`
     `sha256:5bfc251e86826146eaa386e74ed1981ad79c44e98e2516e2e7e72ddb365e3ec6`
   - Control Page image:
     `sha256:fe1be3464ca9236fdabdb6835842bf5926b0a315a594672b905a4e48eceb2130`
-- recreate 직후 이전 Bot API owner claim이 15초 stale guard 안에 있어 첫
-  Bot API start가 `minecraft_world_lease_owner_conflict`로 fail-closed
-  종료됐다. guard 만료 뒤 같은 새 컨테이너가 claim을 회수해 정상 기동했고,
-  중복 world owner는 만들어지지 않았다.
+- 이후 `c92a158` 소스로 Bot API와 Control Page를 다시 빌드·교체해 기존
+  provenance 관계의 conflict-safe relink/unlink, content-free write-ahead
+  journal, 재시작 복구, 최신 변경 explicit undo와 Control Page 관리 UI를
+  배포했다.
+  - Bot API image:
+    `sha256:903e2cf6546fe2aeafb2a2d1b33526bbf498c1b74057d206c8f1ed2457b5870d`
+  - Control Page image:
+    `sha256:e8e8cc962adc2190b7749fc9b692887cef2382934cd1dcfe2b0871d0af73800a`
+  - 기존 Bot API를 먼저 정상 종료해 Minecraft owner claim이 사라진 것을
+    확인한 뒤 두 컨테이너만 교체했다. 두 컨테이너 모두 첫 기동에서
+    `healthy`, restart count 0이다.
+- 이전 `c656fc8` 배포의 recreate 직후에는 이전 Bot API owner claim이 15초
+  stale guard 안에 있어 첫 Bot API start가
+  `minecraft_world_lease_owner_conflict`로 fail-closed 종료됐다. guard 만료
+  뒤 같은 새 컨테이너가 claim을 회수해 정상 기동했고, 중복 world owner는
+  만들어지지 않았다. `c92a158` 배포에서는 정상 종료와 claim 반납을 먼저
+  확인해 이 일시 충돌이 재발하지 않았다.
 - Bot API, Control Page, Main/Router/Sub LLM, TTS, STT, Vision 여덟
   컨테이너가 모두 `healthy`다. 새 Bot API와 Control Page의 restart count는
   0이다.
@@ -193,11 +219,36 @@ Source branch: `codex/dependency-config-hardening` at `c656fc8`
   `conversation 2/2`, note type `daily 2/2`, age bucket, 직접 선택 0과
   자동 적용·본문 유사도·임베딩·LLM 추론 금지 문구가 렌더링됐다. 브라우저
   console warning/error는 0개였고 연결 버튼은 누르지 않았다.
+- 배포된 correction API는
+  `memory.provenance.corrections.v1`, `readOnly=true`,
+  `autoApply=false`, `journalContentFree=true`를 반환했다. 실제 vault에는
+  derived relationship이 0개라 관리 대상도 0개였고 correction journal은
+  생성되지 않았다.
+- correction API 조회 전후 실제 Markdown 2개의 SHA-256을 대조해 변경·추가
+  파일이 0개임을 확인했다. 실제 사용자 기억에는 relink/unlink/undo를
+  적용하지 않았다.
+- 실제 브라우저의 “현재 근거 연결 관리” 영역에 관리 대상 0, 미리보기 후
+  2단계 적용, 최근 변경 1회 undo, origin history와 content-free
+  write-ahead journal 경계가 렌더링됐다. console warning/error는 0개였다.
 
 ## Verification state
 
-검증한 코드 기준점: `c656fc8`
+검증한 코드 기준점: `c92a158`
 
+- bundled Python에서 memory discovery 125개와 UI discovery 149개,
+  correction/UI focused 23개, `compileall`, Control Page 인라인 JavaScript
+  parse와 `git diff --check`를 통과했다.
+- 기존 Bot API Python 3.11 이미지의 read-only source mount에서 correction
+  module/API 16개와 runtime 342개를 통과했다. runtime skip은 2개다.
+- 전체 discovery는 1,614개를 실행해 기능 assertion 실패 0개였다. 경량
+  Bot API 이미지에 없는 git, Pillow, Discord와 Voyager 선택 패키지 때문에
+  기존 import/platform 오류 17개와 skip 17개가 남았다.
+- 새로 빌드한 이미지 내부 소스와 HTML 자체를 대상으로 correction/API/UI
+  30개를 통과했다. 새 Bot API와 Control Page 이미지의 `compileall`과
+  `pip check`, local-only sentinel Compose config도 통과했다.
+- 배포 뒤 공식 `check_docker_runtime.ps1 -IncludeLocalBridge`가
+  Control Page, Bot API, Main/Router/Sub LLM, TTS, STT, Vision 및 Windows
+  Local I/O Bridge를 모두 준비 상태로 판정했다.
 - bundled Python에서 memory discovery 116개와 provenance/UI focused
   34개, `compileall`, Control Page 인라인 JavaScript parse와
   `git diff --check`를 통과했다.
