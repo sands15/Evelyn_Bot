@@ -332,6 +332,14 @@ Source branch: `codex/dependency-config-hardening`, current Fast Control action-
     귀속을 모두 버리고 한 개의 opaque 확인 전용 component로 처리한다. receipt와
     turn summary에는 `promptTruncated`, `promptEvidenceDiscarded`, 잘리기 전의
     content-free candidate count만 남기며 본문이나 transcript는 기록하지 않는다.
+  - Control Page의 provenance 감사 응답·저장 보고서·UI는 별도
+    `memory.legacy-context-coverage.v1` 집계를 제공한다. guild/room/person/session
+    scope의 저장 summary/raw/fact/question을 prompt와 같은 evidence 규칙으로
+    재검사하고 전체/attributed/확인 전용 수와 kind/scope/storage별 수만 공개한다.
+    ID, scope key, 파일명·경로, 본문과 transcript는 공개하지 않으며 손상 JSON,
+    누락·불일치 evidence, 읽기 실패와 unsafe location도 count로만 남긴다.
+    저장 row 기준이라 hot/일자별 mirror를 함께 셀 수 있고 실제 prompt 선택 수는
+    아니라는 한계를 계약과 화면에 명시한다.
   - pinned hot-context는 현재 recall의 memory version과 정확히 같고 포함 note
     ID가 있는 경우에만 live prompt에 들어간다. 과거 형식, 손상, 삭제/파생
     상태 불일치와 stale version은 fail-closed로 제외한다.
@@ -1176,6 +1184,17 @@ Source branch: `codex/dependency-config-hardening`, current Fast Control action-
   테스트 이미지의 `compileall`/`pip check`, 전체 profile Compose config도
   통과했다. 실제 기억·실행 중 서비스는 변경하지 않았고 Discord, 마이크,
   Minecraft와 무거운 모델 서비스는 시작하지 않았다.
+- legacy context coverage 변경은 focused API 9개와 core/memory/UI 51개,
+  memory 142개, runtime 415개(skip 2), UI 156개(skip 7)를 통과했다. core
+  545개는 기능 assertion 실패 0개였고 이미지의 `git` 부재 오류 2개는 Windows
+  13개로 보완했다. 전체 discovery 1,999개는 같은 `git` 오류 2개, Linux의
+  Windows OCR 환경 오류 1개와 Voyager package initializer 의존성 오류 1개만
+  남겼으며 Windows 19개, Voyager 18개와 격리 local index 4개가 모두 통과했다.
+  실제 Control Page는 HTTP 200, 새 coverage 카드/schema 포함, health 정상임을
+  확인했다. bundled Python과 두 테스트 이미지의 `compileall`/`pip check`, 전체
+  profile Compose config와 `git diff --check`도 통과했다. 실제 `bot_memory`는
+  읽기 전용 집계만 수행했고 scope 3개, legacy 저장 항목 0개(`empty`)였다.
+  실행 중인 서비스와 사용자 기억은 변경하지 않았다.
 
 ## Operational boundaries
 

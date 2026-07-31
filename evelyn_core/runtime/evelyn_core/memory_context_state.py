@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import re
 from typing import Any
 
 from .cognitive_policy_state import read_layered_cognitive_state
 from .config import MEMORY_RAW_CONTEXT_LIMIT, MEMORY_RETRIEVE_LIMIT, MEMORY_VAULT_RAW_RETRIEVE_LIMIT
 from .memory import merge_memory_rows, normalize_cognitive_state, select_relevant_memory_rows
+from .memory_legacy_evidence import validate_legacy_memory_evidence
 from .memory_layers import collect_memory_layers
 from .memory_prompt_policy import MEMORY_CONTEXT_USE_POLICY
 from .memory_vault import build_memory_vault_context
@@ -211,57 +211,6 @@ def build_memory_context_payload(
     return "\n\n".join(parts)
 
 
-def _legacy_memory_evidence(
-    row: dict[str, Any],
-    *,
-    expected_kind: str,
-) -> tuple[str, tuple[str, ...], tuple[str, ...]] | None:
-    evidence_kind = clean_text(str(row.get("evidence_kind") or ""))
-    if evidence_kind != expected_kind:
-        return None
-    evidence_id = clean_text(str(row.get("evidence_id") or ""))[:120]
-    if not re.fullmatch(r"[A-Za-z0-9._:-]+", evidence_id):
-        return None
-    if evidence_kind == "conversation_turn":
-        source_turn_id = clean_text(str(row.get("source_turn_id") or ""))[:80]
-        if not re.fullmatch(r"[A-Za-z0-9._:-]+", source_turn_id):
-            return None
-        role = clean_text(str(row.get("role") or "user")).lower()
-        if role not in {"user", "assistant"}:
-            return None
-        if evidence_id != f"turn:{source_turn_id}:{role}":
-            return None
-        return evidence_id, (), (source_turn_id,)
-    if evidence_kind not in {"derived_summary", "derived_fact", "derived_question"}:
-        return None
-    source_evidence_ids = row.get("source_evidence_ids")
-    if not isinstance(source_evidence_ids, (list, tuple)):
-        return None
-    cleaned_source_evidence_ids = tuple(
-        dict.fromkeys(
-            cleaned
-            for item in source_evidence_ids[:64]
-            if re.fullmatch(
-                r"[A-Za-z0-9._:-]+",
-                (cleaned := clean_text(str(item))[:120]),
-            )
-        )
-    )
-    if not cleaned_source_evidence_ids:
-        return None
-    source_turn_ids = tuple(
-        dict.fromkeys(
-            cleaned
-            for item in (row.get("source_turn_ids") or [])[:32]
-            if re.fullmatch(
-                r"[A-Za-z0-9._:-]+",
-                (cleaned := clean_text(str(item))[:80]),
-            )
-        )
-    ) if isinstance(row.get("source_turn_ids"), (list, tuple)) else ()
-    return evidence_id, cleaned_source_evidence_ids, source_turn_ids
-
-
 def _annotate_memory_rows(
     rows: list[dict],
     *,
@@ -272,8 +221,13 @@ def _annotate_memory_rows(
             **row,
             _MEMORY_GROUNDING_KEY: (
                 "attributed"
-                if _legacy_memory_evidence(row, expected_kind=expected_kind)
-                is not None
+                if (
+                    validate_legacy_memory_evidence(
+                        row,
+                        expected_kind=expected_kind,
+                    )
+                    is not None
+                )
                 else "unattributed"
             ),
         }
@@ -290,11 +244,13 @@ def _annotate_memory_layers(
         summary_attributed = bool(
             layer.get("summary")
             and isinstance(summary_provenance, dict)
-            and _legacy_memory_evidence(
-                summary_provenance,
-                expected_kind="derived_summary",
+            and (
+                validate_legacy_memory_evidence(
+                    summary_provenance,
+                    expected_kind="derived_summary",
+                )
+                is not None
             )
-            is not None
         )
         annotated[key] = {
             **layer,
@@ -437,7 +393,12 @@ def build_memory_context(
         *(
             evidence
             for row in summary_evidence_items
-            if (evidence := _legacy_memory_evidence(row, expected_kind="derived_summary"))
+            if (
+                evidence := validate_legacy_memory_evidence(
+                    row,
+                    expected_kind="derived_summary",
+                )
+            )
             is not None
         ),
         *(
@@ -448,19 +409,34 @@ def build_memory_context(
                 *room_rows,
                 *render_vault_raw_rows,
             ]
-            if (evidence := _legacy_memory_evidence(row, expected_kind="conversation_turn"))
+            if (
+                evidence := validate_legacy_memory_evidence(
+                    row,
+                    expected_kind="conversation_turn",
+                )
+            )
             is not None
         ),
         *(
             evidence
             for row in render_facts
-            if (evidence := _legacy_memory_evidence(row, expected_kind="derived_fact"))
+            if (
+                evidence := validate_legacy_memory_evidence(
+                    row,
+                    expected_kind="derived_fact",
+                )
+            )
             is not None
         ),
         *(
             evidence
             for row in render_questions
-            if (evidence := _legacy_memory_evidence(row, expected_kind="derived_question"))
+            if (
+                evidence := validate_legacy_memory_evidence(
+                    row,
+                    expected_kind="derived_question",
+                )
+            )
             is not None
         ),
     ]

@@ -189,6 +189,26 @@ class ControlPageMemoryGraphTests(unittest.TestCase):
             self.html,
         )
         self.assertIn(
+            "memoryAuditSnapshot.legacyContextCoverage",
+            self.html,
+        )
+        self.assertIn(
+            "memory.legacy-context-coverage.v1",
+            self.html,
+        )
+        self.assertIn(
+            "대화 기억 근거 coverage",
+            self.html,
+        )
+        self.assertIn(
+            "확인 전용 항목은 사실 근거로 쓰지 않습니다.",
+            self.html,
+        )
+        self.assertIn(
+            "function formatLegacyMemoryCoverageDimension(rows, labels = {})",
+            self.html,
+        )
+        self.assertIn(
             "data-audit-target",
             self.html,
         )

@@ -14,6 +14,7 @@ from .config import (
     MEMORY_VAULT_DAYS,
     MEMORY_WORKING_SUMMARY_MAX_CHARS,
 )
+from .memory_legacy_evidence import MEMORY_LEGACY_EVIDENCE_SCHEMA
 from .text import clean_text
 from .memory_vault import (
     append_turn_rows_to_memory_vault,
@@ -21,8 +22,6 @@ from .memory_vault import (
     run_memory_vault_maintenance_once,
 )
 
-
-MEMORY_LEGACY_EVIDENCE_SCHEMA = "memory.legacy-evidence.v1"
 _MEMORY_EVIDENCE_ID_RE = re.compile(r"^[A-Za-z0-9._:-]+$")
 
 

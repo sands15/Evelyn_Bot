@@ -87,6 +87,18 @@ class MemoryProvenanceAuditApiTests(
             source_refs=[source_ref],
             evidence_hashes=[source.source_hash],
         )
+        legacy_scope = Path(self.temp_dir.name) / "guild_7"
+        legacy_scope.mkdir(parents=True)
+        (legacy_scope / "raw_transcript.jsonl").write_text(
+            json.dumps(
+                {
+                    "role": "user",
+                    "text": "PRIVATE_LEGACY_API_CANARY",
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
 
         response = await self.client.get(
             "/api/control-page/memory-provenance-audit",
@@ -112,6 +124,20 @@ class MemoryProvenanceAuditApiTests(
         self.assertTrue(
             payload["candidates"][0]["canApply"]
         )
+        legacy_coverage = payload["legacyContextCoverage"]
+        self.assertEqual(
+            legacy_coverage["schema"],
+            "memory.legacy-context-coverage.v1",
+        )
+        self.assertEqual(legacy_coverage["totalStoredItemCount"], 1)
+        self.assertEqual(legacy_coverage["confirmOnlyStoredItemCount"], 1)
+        self.assertNotIn(
+            "PRIVATE_LEGACY_API_CANARY",
+            json.dumps(payload, ensure_ascii=False),
+        )
+        persisted_raw = Path(payload["reportPath"]).read_text(encoding="utf-8")
+        self.assertIn("memory.legacy-context-coverage.v1", persisted_raw)
+        self.assertNotIn("PRIVATE_LEGACY_API_CANARY", persisted_raw)
 
     async def test_two_step_backfill_requires_csrf_and_applies(
         self,

@@ -4536,6 +4536,16 @@
       }).join(" · ");
     }
 
+    function formatLegacyMemoryCoverageDimension(rows, labels = {}) {
+      const values = Array.isArray(rows) ? rows : [];
+      if (!values.length) return "없음";
+      return values.map((row) => {
+        const key = String(row && row.key || "unknown");
+        const label = labels[key] || key;
+        return `${label} ${Number(row.attributedStoredItemCount || 0)}/${Number(row.totalStoredItemCount || 0)}`;
+      }).join(" · ");
+    }
+
     function renderMemoryAudit() {
       if (!memoryAudit) return;
       const quarantine = memorySnapshot && memorySnapshot.quarantineStatus
@@ -4564,6 +4574,7 @@
       }
       const summary = memoryAuditSnapshot.summary || {};
       const coverage = memoryAuditSnapshot.coverage || {};
+      const legacyCoverage = memoryAuditSnapshot.legacyContextCoverage || {};
       const candidates = Array.isArray(memoryAuditSnapshot.candidates)
         ? memoryAuditSnapshot.candidates
         : [];
@@ -4571,6 +4582,11 @@
         ? memoryAuditSnapshot.manualReviewTargets
         : [];
       const coverageRatio = Math.max(0, Math.min(1, Number(coverage.coverageRatio || 0)));
+      const legacyCoverageAvailable = legacyCoverage.schema === "memory.legacy-context-coverage.v1";
+      const legacyCoverageRatio = Math.max(0, Math.min(1, Number(legacyCoverage.attributionRatio || 0)));
+      const legacyCoverageScanIssues = Number(legacyCoverage.unreadableFileCount || 0) +
+        Number(legacyCoverage.oversizedFileCount || 0) + Number(legacyCoverage.malformedFileCount || 0) +
+        Number(legacyCoverage.malformedLineCount || 0) + Number(legacyCoverage.unsafeLocationCount || 0);
       const ageLabels = {
         "0_7d": "7일 이내",
         "8_30d": "8–30일",
@@ -4592,6 +4608,41 @@
         '<span class="memory-audit-policy">age: ' + escapeHtml(formatMemoryCoverageDimension(coverage.byAgeBucket, ageLabels)) + '</span>' +
         '<span class="memory-audit-policy">집계에는 note ID, 제목, 본문, 경로, transcript가 들어가지 않습니다.</span>' +
         '</section>';
+      const legacyKindLabels = {
+        summary: "요약",
+        raw: "대화 row",
+        fact: "fact",
+        question: "질문"
+      };
+      const legacyScopeLabels = {
+        guild: "공용",
+        room: "방",
+        person: "사람",
+        session: "세션"
+      };
+      const legacyStorageLabels = {
+        hot: "hot",
+        vault: "일자별 vault"
+      };
+      const legacyCoverageMarkup = legacyCoverageAvailable
+        ? '<section class="memory-audit-status' + (Number(legacyCoverage.confirmOnlyStoredItemCount || 0) || legacyCoverageScanIssues ? ' pending' : '') + '">' +
+          '<div class="memory-audit-card-head"><strong>대화 기억 근거 coverage</strong>' +
+          '<span class="memory-audit-state">' + (Number(legacyCoverage.totalStoredItemCount || 0) ? Math.round(legacyCoverageRatio * 100) + '%' : '항목 없음') + '</span></div>' +
+          '<div class="memory-audit-grid">' +
+          '<div class="memory-audit-metric"><strong>' + Number(legacyCoverage.attributedStoredItemCount || 0) + ' / ' + Number(legacyCoverage.totalStoredItemCount || 0) + '</strong><span>근거 ID 일치</span></div>' +
+          '<div class="memory-audit-metric"><strong>' + Number(legacyCoverage.confirmOnlyStoredItemCount || 0) + '</strong><span>확인 전용</span></div>' +
+          '<div class="memory-audit-metric"><strong>' + (Number(legacyCoverage.missingEvidenceItemCount || 0) + Number(legacyCoverage.invalidEvidenceItemCount || 0)) + '</strong><span>누락·손상 근거</span></div>' +
+          '</div>' +
+          '<span class="memory-audit-policy">kind: ' + escapeHtml(formatLegacyMemoryCoverageDimension(legacyCoverage.byKind, legacyKindLabels)) + '</span>' +
+          '<span class="memory-audit-policy">scope: ' + escapeHtml(formatLegacyMemoryCoverageDimension(legacyCoverage.byScopeType, legacyScopeLabels)) + '</span>' +
+          '<span class="memory-audit-policy">storage: ' + escapeHtml(formatLegacyMemoryCoverageDimension(legacyCoverage.byStorage, legacyStorageLabels)) + '</span>' +
+          '<span class="memory-audit-policy">저장된 row와 요약 기준 집계라 hot·일자별 mirror가 함께 셀 수 있으며, 실제 한 턴의 prompt 선택 수와는 다릅니다.</span>' +
+          '<span class="memory-audit-policy">확인 전용 항목은 사실 근거로 쓰지 않습니다. 집계에는 ID, 본문, 경로, transcript가 들어가지 않습니다.</span>' +
+          (legacyCoverageScanIssues
+            ? '<span class="memory-audit-policy">읽기·형식·크기·안전 경계 문제 ' + legacyCoverageScanIssues + '건은 근거 coverage로 인정하지 않았습니다.</span>'
+            : '') +
+          '</section>'
+        : '<section class="memory-audit-status pending"><div class="memory-audit-card-head"><strong>대화 기억 근거 coverage</strong><span class="memory-audit-state">측정 전</span></div><span class="memory-audit-policy">Bot API가 새 content-free coverage 계약을 제공하면 표시됩니다.</span></section>';
       const summaryMarkup =
         '<section class="memory-audit-status">' +
         '<div class="memory-audit-card-head"><strong>누락 provenance 검토</strong>' +
@@ -4736,7 +4787,7 @@
               : '<div class="memory-empty">현재 수정할 파생 근거 연결이 없습니다.</div>'
           )
         : '<div class="memory-empty">현재 근거 연결을 불러오는 중입니다.</div>';
-      memoryAudit.innerHTML = quarantineMarkup + coverageMarkup + summaryMarkup +
+      memoryAudit.innerHTML = quarantineMarkup + coverageMarkup + legacyCoverageMarkup + summaryMarkup +
         candidateMarkup + manualMarkup + correctionSummaryMarkup + correctionMarkup;
     }
 

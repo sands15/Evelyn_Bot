@@ -78,6 +78,32 @@ title, body, source, source ref, hash 또는 경로는 저장하지 않는다. �
 없거나 손상됐거나 숫자가 유효하지 않으면 감사 조회는 실패하지 않고 해당
 값을 0으로 취급한다.
 
+## Content-free legacy context coverage
+
+같은 감사 응답과 저장 보고서는 `legacyContextCoverage`에
+`memory.legacy-context-coverage.v1` 집계를 제공한다. 이 집계는 global semantic
+vault note가 아니라 `guild_*` 아래 guild/room/person/session scope에 저장된
+rolling summary, raw transcript row, fact, question의 현재 근거 연결 상태를
+측정한다.
+
+- summary는 본문 SHA-256과 `rolling_summary.provenance.json`이 일치하고 파생
+  evidence/source ID 형식이 유효할 때만 attributed다.
+- raw row는 `conversation_turn` evidence ID, source turn ID와 role의 결합이
+  정확할 때만 attributed다.
+- fact/question은 각 파생 kind와 source evidence ID가 유효할 때만 attributed다.
+- 근거 필드가 없으면 missing, 필드·sidecar·본문 hash가 손상되면 invalid로 세며
+  둘 다 `memory.context-use.v1`의 확인 전용 항목이다.
+
+응답에는 전체/attributed/확인 전용 수, missing/invalid 수, kind/scope/storage별
+집계, 손상 JSON·읽기 실패·과대 파일·안전하지 않은 location 수만 들어간다.
+guild/note/turn/evidence ID, scope key, 파일명·경로, summary/fact/question 본문과
+transcript는 넣지 않는다. 집계기는 없는 디렉터리를 만들거나 기억을 수정하지
+않으며 symlink나 memory root 밖으로 해석되는 location은 읽지 않는다.
+
+수치는 저장된 row와 summary 기준이다. hot 파일과 일자별 vault mirror를 모두
+셀 수 있으므로 고유 대화 턴 수나 실제 한 요청에서 prompt에 선택된 항목 수로
+해석하면 안 된다. 이 한계는 `itemSemantics`와 `mayContainMirrors`에 명시한다.
+
 ## Two-step provenance backfill
 
 근거 연결은 감사 조회와 분리된 두 POST 요청으로만 수행한다.

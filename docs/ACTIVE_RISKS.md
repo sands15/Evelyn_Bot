@@ -393,12 +393,20 @@ facts/questions도 같은 입력 계보와 별도 파생 ID를 hot JSONL과 mirr
 재계산하며, 최종 1,680자 경계에서 문맥이 잘리면 개별 귀속을 버리고 하나의
 opaque 확인 전용 component로 강등한다.
 
-남은 coverage 위험은 실제 legacy 항목 중 어느 것이 사용자 확인을 거쳐 새 근거로
-재작성되어야 하는지 운영 데이터에서 아직 측정·검토하지 않았다는 점이다. 확인
-전용 문구는 모델 행동 계약이지 기억 내용의 진실성 보증이 아니므로 실제 대화에서
-단정 억제와 확인 질문 품질도 평가해야 한다. 다음 조치는 content-free coverage
-집계로 legacy 확인 전용 비율을 관측하고, 사용자가 확인한 항목만 새 evidence에
-연결하는 preview/apply 흐름을 설계하는 것이다.
+저장 legacy coverage는 이제 `memory.legacy-context-coverage.v1`로 측정한다.
+summary/raw/fact/question을 prompt와 같은 evidence 규칙으로 재검사하고
+kind/scope/storage별 전체·attributed·확인 전용 수만 감사 API·저장 보고서·UI에
+노출한다. ID, scope key, 경로, 본문과 transcript는 내보내지 않으며 hot/일자별
+mirror가 함께 셀 수 있어 고유 턴 수나 실제 prompt 선택 수는 아니라는 한계를
+명시한다. 현재 프로젝트 `bot_memory`의 읽기 전용 측정은 scope 3개, 저장 legacy
+항목 0개로 `empty`였다. 실제 사용자 기억은 수정하지 않았다.
+
+남은 위험은 이후 import/복원으로 확인 전용 legacy 항목이 생겼을 때 이를 사용자
+확인만으로 과거 source에 소급 귀속할 수 없다는 점이다. 안전한 확인 흐름은 기존
+row를 고치는 backfill이 아니라 현재 확인 발화를 새 turn evidence로 가진 새 기억을
+만들고, 원래 항목은 계속 미확인으로 보존하거나 별도 철회하는 방식이어야 한다.
+또한 확인 전용 문구는 모델 행동 계약이지 내용의 진실성 보증이 아니므로 실제
+대화에서 단정 억제와 확인 질문 품질은 아직 평가해야 한다.
 
 남은 위험은 coverage와 correction이 구조적 근거 연결만 다루며 기억 내용이나
 사용자의 선택이 사실임을 보증하지 않는다는 점이다. hash chain과 head는

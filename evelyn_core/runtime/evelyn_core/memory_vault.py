@@ -25,6 +25,7 @@ from .memory_derivation_revocation import (
     changed_quarantine_ids,
     resolve_derivation_states,
 )
+from .memory_legacy_coverage import summarize_legacy_memory_context_coverage
 from .memory_provenance_audit import (
     DIRECT_SOURCE_TYPES,
     ProvenanceAuditNode,
@@ -4406,6 +4407,7 @@ def _memory_persisted_provenance_audit(
     graph_fingerprint: str,
     audit: ProvenanceAuditResult,
     coverage: dict[str, Any],
+    legacy_context_coverage: dict[str, Any],
 ) -> dict[str, Any]:
     path = _memory_provenance_audit_path(root)
     entries = [
@@ -4440,6 +4442,11 @@ def _memory_persisted_provenance_audit(
         "coverage": {
             key: value
             for key, value in coverage.items()
+            if key != "checkedAt"
+        },
+        "legacyContextCoverage": {
+            key: value
+            for key, value in legacy_context_coverage.items()
             if key != "checkedAt"
         },
         "entries": entries,
@@ -4536,11 +4543,15 @@ def memory_provenance_backfill_preview(
             )
         ),
     )
+    legacy_context_coverage = summarize_legacy_memory_context_coverage(
+        root=root or MEMORY_ROOT,
+    )
     persisted = _memory_persisted_provenance_audit(
         root=root,
         graph_fingerprint=graph_fingerprint,
         audit=audit,
         coverage=coverage,
+        legacy_context_coverage=legacy_context_coverage,
     )
     public_candidates: list[dict[str, Any]] = []
     for candidate in audit.candidates:
@@ -4678,6 +4689,7 @@ def memory_provenance_backfill_preview(
         "graphFingerprint": graph_fingerprint,
         "summary": dict(persisted["summary"]),
         "coverage": coverage,
+        "legacyContextCoverage": legacy_context_coverage,
         "candidates": public_candidates,
         "manualReviewTargets": manual_review_targets,
         "manualSelectionPolicy": (
