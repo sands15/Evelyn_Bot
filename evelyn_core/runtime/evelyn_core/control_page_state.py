@@ -22,6 +22,49 @@ from .public_error_contract import public_error_code, public_failure_message
 from .text import clean_text
 
 
+CONTROL_PAGE_RUNTIME_ERROR_CODES = frozenset(
+    {
+        "runtime_refresh_failed",
+        "voyager_probe_failed",
+        "bot_api_probe_failed",
+        "bot_api_tcp_probe_failed",
+        "bot_api_http_probe_failed",
+        "bot_api_timeout",
+        "bot_api_state_invalid",
+        "codex_gateway_probe_failed",
+        "codex_gateway_not_ready",
+        "codex_credentials_not_initialized",
+        "codex_credentials_unconfigured",
+        "codex_credentials_unavailable",
+        "codex_home_missing",
+        "codex_credentials_missing",
+        "codex_credentials_invalid_file",
+        "codex_credentials_file_too_large",
+        "codex_credentials_source_matches_target",
+        "codex_credentials_auth_invalid",
+        "codex_credentials_target_unavailable",
+        "codex_credentials_target_not_ephemeral",
+        "codex_cli_unavailable",
+    }
+)
+
+
+def sanitize_control_page_runtime_error_code(
+    value: Any,
+    *,
+    fallback: str = "",
+) -> str:
+    candidate = clean_text(str(value or "")).strip().lower()
+    safe_fallback = clean_text(str(fallback or "")).strip().lower()
+    if safe_fallback not in CONTROL_PAGE_RUNTIME_ERROR_CODES:
+        safe_fallback = ""
+    return (
+        candidate
+        if candidate in CONTROL_PAGE_RUNTIME_ERROR_CODES
+        else safe_fallback
+    )
+
+
 def command_status(value: bool) -> str:
     return "켜짐" if value else "꺼짐"
 
@@ -281,6 +324,36 @@ def build_control_page_runtime_services_payload(
 ) -> dict[str, Any]:
     cleaned_bot_api_state = clean_text(str(bot_api_state or "")) or "down"
     cleaned_bot_api_reason = clean_text(str(bot_api_reason or ""))
+    cleaned_bot_api_error = sanitize_control_page_runtime_error_code(
+        bot_api_error,
+        fallback=(
+            "bot_api_probe_failed"
+            if clean_text(str(bot_api_error or ""))
+            else ""
+        ),
+    )
+    cleaned_bot_api_error_kind = (
+        sanitize_control_page_runtime_error_code(
+            bot_api_error_kind,
+            fallback=cleaned_bot_api_error,
+        )
+    )
+    cleaned_voyager_error = sanitize_control_page_runtime_error_code(
+        voyager_error,
+        fallback=(
+            "voyager_probe_failed"
+            if clean_text(str(voyager_error or ""))
+            else ""
+        ),
+    )
+    cleaned_codex_error = sanitize_control_page_runtime_error_code(
+        codex_error,
+        fallback=(
+            "codex_gateway_not_ready"
+            if codex_required and codex_ready is False
+            else ""
+        ),
+    )
     bot_api_state_ready = is_control_plane_service_ready_state(cleaned_bot_api_state)
     bot_ready = bool(bot_api_http_ready and bot_api_state_ready)
     if bot_api_http_ready and not bot_api_state_ready and not cleaned_bot_api_reason:
@@ -299,8 +372,8 @@ def build_control_page_runtime_services_payload(
         "botApiHttpReady": bool(bot_api_http_ready),
         "botApiState": cleaned_bot_api_state,
         "botApiReason": cleaned_bot_api_reason,
-        "botApiError": clean_text(str(bot_api_error or "")),
-        "botApiErrorKind": clean_text(str(bot_api_error_kind or "")),
+        "botApiError": cleaned_bot_api_error,
+        "botApiErrorKind": cleaned_bot_api_error_kind,
         "summary": build_control_page_runtime_summary(
             bot_ready=bot_ready,
             voyager_ready=bool(voyager_ready),
@@ -310,11 +383,9 @@ def build_control_page_runtime_services_payload(
             bot_api_http_ready=bool(bot_api_http_ready),
             bot_api_state=cleaned_bot_api_state,
             bot_api_reason_code=cleaned_bot_api_reason,
-            bot_api_error=bot_api_error,
+            bot_api_error=cleaned_bot_api_error,
         ),
     }
-    cleaned_voyager_error = clean_text(str(voyager_error or ""))
-    cleaned_codex_error = clean_text(str(codex_error or ""))
     if cleaned_voyager_error:
         services["voyagerError"] = cleaned_voyager_error
     if cleaned_codex_error:
@@ -327,7 +398,10 @@ def build_control_page_runtime_services_error_payload(
     *,
     action_backend: str,
 ) -> dict[str, Any]:
-    cleaned_error = clean_text(str(error_text or "")) or "runtime_refresh_error"
+    cleaned_error = sanitize_control_page_runtime_error_code(
+        error_text,
+        fallback="runtime_refresh_failed",
+    )
     codex_backend = clean_text(str(action_backend or "")) or "unknown"
     codex_required = codex_backend.lower() == "codex-gateway"
     return {
@@ -1654,6 +1728,7 @@ def build_control_page_autonomy_reply_payload(
 
 
 __all__ = [
+    "CONTROL_PAGE_RUNTIME_ERROR_CODES",
     "ControlPageChatLogStore",
     "ControlPageMinecraftSnapshotCache",
     "ControlPageRuntimeServicesCache",
@@ -1710,4 +1785,5 @@ __all__ = [
     "parse_control_page_memory_note_query",
     "parse_control_page_memory_snapshot_query",
     "sanitize_control_page_welcome_text_payload",
+    "sanitize_control_page_runtime_error_code",
 ]

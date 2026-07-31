@@ -78,10 +78,9 @@ async def refresh_control_page_runtime_services_cache_once_from_runtime(
 ) -> None:
     try:
         services = await deps.probe_runtime_services_once()
-    except Exception as exc:
-        error_text = deps.clean_text(str(exc)) or type(exc).__name__
+    except Exception:
         services = deps.build_runtime_services_error_payload(
-            error_text,
+            "runtime_refresh_failed",
             action_backend=deps.action_backend,
         )
     deps.cache.store_success(services)

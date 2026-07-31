@@ -5,7 +5,10 @@ from typing import Any, Awaitable, Callable
 
 import aiohttp
 
-from .control_page_state import build_control_page_runtime_services_payload
+from .control_page_state import (
+    build_control_page_runtime_services_payload,
+    sanitize_control_page_runtime_error_code,
+)
 from .runtime_status_context import probe_runtime_tcp_service, runtime_status_port_from_url
 from .text import clean_text
 
@@ -13,6 +16,19 @@ from .text import clean_text
 TcpProbe = Callable[[str, str, int], Awaitable[tuple[str, bool]]]
 HttpJsonGet = Callable[[str, float], Awaitable[tuple[int, Any]]]
 VoyagerAliveProbe = Callable[[], Awaitable[bool]]
+
+
+def _codex_gateway_error_code(payload: dict[str, Any]) -> str:
+    candidates = [payload.get("errorCode")]
+    for key in ("credentials", "backendStatus"):
+        nested = payload.get(key)
+        if isinstance(nested, dict):
+            candidates.append(nested.get("errorCode"))
+    for candidate in candidates:
+        code = sanitize_control_page_runtime_error_code(candidate)
+        if code.startswith("codex_"):
+            return code
+    return "codex_gateway_not_ready"
 
 
 async def http_get_json(url: str, timeout_sec: float) -> tuple[int, Any]:
@@ -75,14 +91,14 @@ async def probe_control_page_runtime_services(
     voyager_error = ""
     try:
         voyager_ready = bool(await voyager_alive_probe())
-    except Exception as exc:
-        voyager_error = clean_text(str(exc)) or type(exc).__name__
+    except Exception:
+        voyager_error = "voyager_probe_failed"
 
     try:
         _, bot_api_port_open = await tcp_probe("bot_api", bot_api_host, int(bot_api_port))
-    except Exception as exc:
-        bot_api_error = clean_text(str(exc)) or type(exc).__name__
-        bot_api_error_kind = type(exc).__name__
+    except Exception:
+        bot_api_error = "bot_api_tcp_probe_failed"
+        bot_api_error_kind = "bot_api_tcp_probe_failed"
 
     if bot_api_port_open:
         try:
@@ -97,18 +113,18 @@ async def probe_control_page_runtime_services(
                     bot_api_state = "up"
             else:
                 bot_api_state = "state_not_dict"
-                bot_api_error = "invalid state payload"
-                bot_api_error_kind = "bot_api_state_payload"
+                bot_api_error = "bot_api_state_invalid"
+                bot_api_error_kind = "bot_api_state_invalid"
                 bot_api_reason = "CP_BOT_STATE_NOT_DICT"
         except asyncio.TimeoutError:
             bot_api_state = "partial"
-            bot_api_error = "bot api contract timeout"
+            bot_api_error = "bot_api_timeout"
             bot_api_error_kind = "bot_api_timeout"
             bot_api_reason = "CP_BOT_PROXY_TIMEOUT"
-        except Exception as exc:
+        except Exception:
             bot_api_state = "partial"
-            bot_api_error = clean_text(str(exc)) or type(exc).__name__
-            bot_api_error_kind = type(exc).__name__
+            bot_api_error = "bot_api_http_probe_failed"
+            bot_api_error_kind = "bot_api_http_probe_failed"
             bot_api_reason = "CP_BOT_PROXY_ERROR"
     else:
         bot_api_reason = "CP_UP_BOT_DOWN"
@@ -124,13 +140,18 @@ async def probe_control_page_runtime_services(
             status, payload = await http_json_get(codex_health_url, 0.45)
             if isinstance(payload, dict):
                 codex_backend = clean_text(str(payload.get("backend") or codex_backend)) or codex_backend
-                codex_ready = status == 200 and bool(payload.get("ok", True))
+                codex_ready = (
+                    status == 200
+                    and payload.get("backendReady") is True
+                )
                 if not codex_ready:
-                    codex_error = clean_text(str(payload.get("error") or payload.get("codex_login_message") or "")) or codex_error
+                    codex_error = _codex_gateway_error_code(payload)
             else:
                 codex_ready = status == 200
-        except Exception as exc:
-            codex_error = clean_text(str(exc)) or type(exc).__name__
+                if not codex_ready:
+                    codex_error = "codex_gateway_not_ready"
+        except Exception:
+            codex_error = "codex_gateway_probe_failed"
 
     return build_control_page_runtime_services_payload(
         service_results=service_results,

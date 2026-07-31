@@ -39,7 +39,16 @@ class ControlPageRuntimeProbeTests(unittest.IsolatedAsyncioTestCase):
             if url.endswith("/api/state"):
                 return 200, {"status": "ready"}
             if url.endswith("/health"):
-                return 200, {"backend": "codex-gateway", "ok": False, "codex_login_message": "login required"}
+                return 200, {
+                    "backend": "codex-gateway",
+                    "ok": True,
+                    "backendReady": False,
+                    "credentials": {
+                        "errorCode": (
+                            "codex_credentials_unconfigured"
+                        )
+                    },
+                }
             raise AssertionError(f"unexpected url {url}")
 
         services = await probe_control_page_runtime_services(
@@ -66,7 +75,59 @@ class ControlPageRuntimeProbeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(services["voyagerReady"])
         self.assertTrue(services["codexRequired"])
         self.assertFalse(services["codexReady"])
-        self.assertEqual(services["codexError"], "login required")
+        self.assertEqual(
+            services["codexError"],
+            "codex_credentials_unconfigured",
+        )
+
+    async def test_codex_readiness_requires_backend_ready_contract(
+        self,
+    ) -> None:
+        async def tcp_probe(
+            label: str,
+            host: str,
+            port: int,
+        ) -> tuple[str, bool]:
+            _ = host, port
+            return label, True
+
+        async def http_json_get(
+            url: str,
+            timeout_sec: float,
+        ) -> tuple[int, Any]:
+            _ = timeout_sec
+            if url.endswith("/api/state"):
+                return 200, {"status": "ready"}
+            return 200, {
+                "ok": True,
+                "backend": "codex-exec",
+                "backendReady": False,
+                "backendStatus": {
+                    "errorCode": "codex_cli_unavailable"
+                },
+            }
+
+        services = await probe_control_page_runtime_services(
+            service_urls={"main": "http://127.0.0.1:9820"},
+            bot_api_host="127.0.0.1",
+            bot_api_port=8798,
+            bot_api_state_path="/api/state",
+            bot_api_probe_timeout_sec=0.75,
+            action_backend="codex-gateway",
+            codex_gateway_port=8799,
+            voyager_alive_probe=lambda: asyncio.sleep(
+                0,
+                result=True,
+            ),
+            tcp_probe=tcp_probe,
+            http_json_get=http_json_get,
+        )
+
+        self.assertFalse(services["codexReady"])
+        self.assertEqual(
+            services["codexError"],
+            "codex_cli_unavailable",
+        )
 
     async def test_probe_runtime_services_marks_bot_api_down_without_http_probe(self) -> None:
         http_called = False
@@ -126,7 +187,129 @@ class ControlPageRuntimeProbeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(services["botApiPortOpen"])
         self.assertEqual(services["botApiState"], "partial")
         self.assertEqual(services["botApiReason"], "CP_BOT_PROXY_TIMEOUT")
+        self.assertEqual(services["botApiError"], "bot_api_timeout")
         self.assertEqual(services["botApiErrorKind"], "bot_api_timeout")
+
+    async def test_probe_exceptions_do_not_publish_private_details(
+        self,
+    ) -> None:
+        private = (
+            "Bearer probe-secret http://internal:8798 "
+            "C:\\Users\\Admin\\private.txt"
+        )
+
+        async def tcp_probe(
+            label: str,
+            host: str,
+            port: int,
+        ) -> tuple[str, bool]:
+            _ = host, port
+            if label == "bot_api":
+                raise OSError(private)
+            return label, True
+
+        async def voyager_alive() -> bool:
+            raise RuntimeError(private)
+
+        async def http_json_get(
+            url: str,
+            timeout_sec: float,
+        ) -> tuple[int, Any]:
+            _ = url, timeout_sec
+            raise ConnectionError(private)
+
+        services = await probe_control_page_runtime_services(
+            service_urls={"main": "http://127.0.0.1:9820"},
+            bot_api_host="127.0.0.1",
+            bot_api_port=8798,
+            bot_api_state_path="/api/state",
+            bot_api_probe_timeout_sec=0.75,
+            action_backend="codex-gateway",
+            codex_gateway_port=8799,
+            voyager_alive_probe=voyager_alive,
+            tcp_probe=tcp_probe,
+            http_json_get=http_json_get,
+        )
+
+        self.assertEqual(
+            services["botApiError"],
+            "bot_api_tcp_probe_failed",
+        )
+        self.assertEqual(
+            services["botApiErrorKind"],
+            "bot_api_tcp_probe_failed",
+        )
+        self.assertEqual(
+            services["voyagerError"],
+            "voyager_probe_failed",
+        )
+        self.assertEqual(
+            services["codexError"],
+            "codex_gateway_probe_failed",
+        )
+        serialized = str(services)
+        self.assertNotIn("probe-secret", serialized)
+        self.assertNotIn("internal:8798", serialized)
+        self.assertNotIn("private.txt", serialized)
+
+    async def test_http_probe_and_untrusted_health_errors_are_content_free(
+        self,
+    ) -> None:
+        private = (
+            "token=health-secret http://internal:8798 "
+            "C:\\private.txt"
+        )
+
+        async def tcp_probe(
+            label: str,
+            host: str,
+            port: int,
+        ) -> tuple[str, bool]:
+            _ = host, port
+            return label, True
+
+        async def http_json_get(
+            url: str,
+            timeout_sec: float,
+        ) -> tuple[int, Any]:
+            _ = timeout_sec
+            if url.endswith("/api/state"):
+                raise OSError(private)
+            return 503, {
+                "backend": "codex-gateway",
+                "ok": False,
+                "error": private,
+                "errorCode": "health-secret",
+            }
+
+        services = await probe_control_page_runtime_services(
+            service_urls={"main": "http://127.0.0.1:9820"},
+            bot_api_host="127.0.0.1",
+            bot_api_port=8798,
+            bot_api_state_path="/api/state",
+            bot_api_probe_timeout_sec=0.75,
+            action_backend="codex-gateway",
+            codex_gateway_port=8799,
+            voyager_alive_probe=lambda: asyncio.sleep(
+                0,
+                result=True,
+            ),
+            tcp_probe=tcp_probe,
+            http_json_get=http_json_get,
+        )
+
+        self.assertEqual(
+            services["botApiError"],
+            "bot_api_http_probe_failed",
+        )
+        self.assertEqual(
+            services["codexError"],
+            "codex_gateway_not_ready",
+        )
+        serialized = str(services)
+        self.assertNotIn("health-secret", serialized)
+        self.assertNotIn("internal:8798", serialized)
+        self.assertNotIn("private.txt", serialized)
 
 
 if __name__ == "__main__":

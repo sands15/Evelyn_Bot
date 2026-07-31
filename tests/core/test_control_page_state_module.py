@@ -180,10 +180,13 @@ class ControlPageStateModuleTests(unittest.TestCase):
             codex_required=True,
             codex_ready=False,
             codex_backend="codex-gateway",
-            codex_error="login required",
+            codex_error=(
+                "Bearer state-secret "
+                "http://internal:8798 C:\\private.txt"
+            ),
         )
         errored = build_control_page_runtime_services_error_payload(
-            "probe failed",
+            "Bearer refresh-secret C:\\private.txt",
             action_backend="codex-gateway",
         )
 
@@ -191,11 +194,26 @@ class ControlPageStateModuleTests(unittest.TestCase):
         self.assertTrue(services["mainReady"])
         self.assertEqual(services["botApiReason"], "CP_BOT_STATE_NOT_READY")
         self.assertEqual(services["codexBackend"], "codex-gateway")
-        self.assertEqual(services["codexError"], "login required")
+        self.assertEqual(
+            services["codexError"],
+            "codex_gateway_not_ready",
+        )
+        self.assertEqual(
+            services["botApiError"],
+            "bot_api_probe_failed",
+        )
         self.assertIn("bot down", services["summary"])
         self.assertEqual(errored["botApiReason"], "CP_RUNTIME_REFRESH_ERROR")
-        self.assertEqual(errored["botApiError"], "probe failed")
+        self.assertEqual(
+            errored["botApiError"],
+            "runtime_refresh_failed",
+        )
         self.assertTrue(errored["codexRequired"])
+        serialized = str({"services": services, "errored": errored})
+        self.assertNotIn("state-secret", serialized)
+        self.assertNotIn("refresh-secret", serialized)
+        self.assertNotIn("internal:8798", serialized)
+        self.assertNotIn("private.txt", serialized)
 
     def test_welcome_text_sanitizer_trims_quotes_and_falls_back(self) -> None:
         self.assertEqual(

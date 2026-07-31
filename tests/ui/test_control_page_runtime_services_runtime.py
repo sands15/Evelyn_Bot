@@ -125,7 +125,10 @@ class ControlPageRuntimeServicesRuntimeTests(unittest.IsolatedAsyncioTestCase):
         cache = FakeRuntimeServicesCache(mode="expired")
 
         async def probe():
-            raise RuntimeError("service down")
+            raise RuntimeError(
+                "Bearer refresh-secret "
+                "http://internal:8798 C:\\private.txt"
+            )
 
         deps, tasks, _ = self.build_deps(cache=cache, probe=probe)
 
@@ -133,8 +136,14 @@ class ControlPageRuntimeServicesRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(tasks, [])
         self.assertFalse(snapshot["refreshing"])
-        self.assertEqual(cache.services["error"], "service down")
+        self.assertEqual(
+            cache.services["error"],
+            "runtime_refresh_failed",
+        )
         self.assertEqual(cache.services["backend"], "voyager")
+        self.assertNotIn("refresh-secret", str(cache.services))
+        self.assertNotIn("internal:8798", str(cache.services))
+        self.assertNotIn("private.txt", str(cache.services))
 
     async def test_probe_runtime_services_once_from_runtime_invokes_voyager_probe(self) -> None:
         calls = {"voyager": 0}
