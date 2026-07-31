@@ -382,6 +382,15 @@ Vision, Codex Gateway, Mindcraft의 오류 카운터를 Runtime Health와 Contro
 Page가 합성한다. 예외 메시지·스택·경로는 새 공개 응답에서 제외한다. 아직
 owner 경계가 없는 보조 모듈의 광범위한 예외 처리는 남아 있다.
 
+`0f0201f`는 Control Page의 legacy runtime service probe도 같은 공개 오류
+경계로 옮겼다. Voyager, Bot API TCP/HTTP, Codex Gateway와 전체 refresh
+예외는 이제 exact allowlist 코드만 `services`에 남기며 예외 원문, upstream
+`error`/login 문자열, URL과 경로를 복사하지 않는다. 최종 payload builder도
+알 수 없는 입력을 generic 고정 코드로 바꾸므로 다른 호출자가 원문을 다시
+주입할 수 없다. Codex readiness는 HTTP service의 `ok`가 아니라 현재 계약의
+`backendReady is true`를 요구해, gateway만 살아 있고 행동 backend가 없는
+상태를 준비 완료로 오판하지 않는다.
+
 다음 조치: 새 서비스 owner를 만들 때 typed schema와 오류 카운터를 필수 계약으로
 적용하고, 기존 대형 설정 모듈은 기능 변경 시 점진적으로 이동한다.
 

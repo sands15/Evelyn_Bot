@@ -2,7 +2,7 @@
 
 Document status: **Current**
 Last reviewed: 2026-07-31 KST
-Source branch: `codex/dependency-config-hardening` through `67a7adf`
+Source branch: `codex/dependency-config-hardening` through `0f0201f`
 
 이 문서는 현재 확인된 사실만 기록한다. 목표 구조와 과거 계획은 다른 설계/계획 문서를 사용한다.
 
@@ -79,6 +79,13 @@ Source branch: `codex/dependency-config-hardening` through `67a7adf`
   - status와 task event의 오류 코드는 구문 검증하며 알 수 없는 문자열은
     surface별 고정 fallback으로 바꾼다.
   - 운영 로그도 예외 원문 대신 고정 event와 exception type만 남긴다.
+  - Control Page legacy runtime service probe의 Bot API TCP/HTTP, Voyager,
+    Codex와 전체 refresh 오류도 exact allowlist 코드만 공개한다. 최종 payload
+    builder가 알 수 없는 error/login 문자열을 generic 코드로 바꾸므로 내부
+    URL·경로·token-like 원문이 `services`로 다시 들어오지 않는다.
+  - Codex readiness는 gateway HTTP의 `ok`가 아니라 exact
+    `backendReady is true`를 요구한다. gateway만 살아 있고 credential/CLI
+    backend가 준비되지 않은 상태는 fail-closed로 `codexReady=false`다.
 - 자율행동의 승인과 결과 증거를 같은 action·grant에 묶었다.
   - `autonomy.outcome-evidence-policy.v1`이 모든 supported action의 exact
     evidence code를 정의한다. 비어 있지 않은 임의 코드나 다른 action의
@@ -852,6 +859,21 @@ Source branch: `codex/dependency-config-hardening` through `67a7adf`
   이미지 `compileall`, `pip check`, 전체 profile Compose config와
   `git diff --check`를 통과했다. 이미지만 빌드했고 실제 Discord bot과
   마이크·Minecraft는 시작하지 않았다.
+- `0f0201f`는 Control Page runtime probe의 예외 원문 공개와 Codex
+  `ok`/`backendReady` 혼동을 닫았다. token-like 문자열, 내부 URL, Windows
+  경로를 넣은 개별 probe·전체 refresh·untrusted health 입력은 고정 코드로만
+  투영된다.
+- 공식 이미지 환경에서 집중 41개, runtime 388개(skip 2), UI 154개(skip 7)를
+  통과했다. core 468개는 기능 assertion 실패 0개였고 이미지에 없는 `git`
+  오류 2개는 Windows에서 해당 모듈 13개를 재실행해 통과했다.
+- 새 Control Page image
+  `sha256:2a20b778b966e18930de96120146a08f1758b2f9b2c86fd74e8513b1181aaf0c`를
+  단독 교체했다. 실제 `/health`는 ok, 공개 state에는 Bearer·Windows user
+  path·traceback 패턴이 없었고 컨테이너는 healthy, restart count 0이다.
+- Discord/Main owner image
+  `sha256:570dd9be4de3c89dc39c1bc0060fe3b89fc4c3dd5cda3d7e7141d652b83793f5`는
+  `compileall`, `pip check`와 집중 테스트를 통과했지만 시작하지 않았다.
+  Bot API는 기존 healthy image와 restart count 0을 유지했다.
 
 ## Operational boundaries
 

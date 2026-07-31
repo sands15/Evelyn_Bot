@@ -1,7 +1,7 @@
 # Dependency, Configuration, and Credential Hardening
 
 Document status: **Current**
-Last reviewed: 2026-07-30 KST
+Last reviewed: 2026-07-31 KST
 
 ## Dependency compatibility result
 
@@ -72,6 +72,18 @@ Public summaries keep only:
 Codex Gateway health also strips backend stdout, stderr, working directories,
 and executable paths.
 
+Control Page의 legacy runtime service probe도 같은 경계를 사용한다.
+`botApiError`, `botApiErrorKind`, `voyagerError`, `codexError`는 exact
+allowlist 코드만 허용한다. 개별 TCP/HTTP/Voyager/Codex probe와 전체 refresh
+예외는 exception message를 사용하지 않으며, 신뢰할 수 없는 upstream
+`error`·login 문자열도 공개 payload로 복사하지 않는다. Codex Gateway의
+허용된 credential/backend error code만 통과하고 나머지는
+`codex_gateway_not_ready`로 정규화한다.
+
+Codex 동작 준비 상태는 `/health`의 HTTP 생존 신호 `ok`와 분리된다.
+Control Page는 `backendReady is true`일 때만 `codexReady=true`로 판정한다.
+필드 누락, false, 비-boolean 값은 모두 fail-closed다.
+
 ## Codex credential boundary
 
 Compose no longer mounts the user's live `~/.codex/auth.json` or
@@ -129,9 +141,22 @@ Completed locally:
   `runtime_errors.summary.v1` with all seven owner sources. Its public privacy
   contract kept exception messages and filesystem paths disabled.
 
+2026-07-31 runtime probe hardening:
+
+- private token-like text, internal URL, Windows path를 넣은 개별 probe,
+  전체 refresh와 untrusted Codex health 합성 테스트에서 공개 결과는 고정
+  코드만 유지했다.
+- 공식 Control Page/Discord 환경의 집중 41개, runtime 388개, UI 154개와
+  core 468개를 실행했고 기능 assertion 실패는 0개였다. 이미지에 없는
+  `git`으로 난 기존 core 검사 2개는 Windows에서 해당 모듈 13개를 통과했다.
+- Control Page image `sha256:2a20b778b966e18930de96120146a08f1758b2f9b2c86fd74e8513b1181aaf0c`
+  를 배포했고 healthy, restart count 0이다. Discord image
+  `sha256:570dd9be4de3c89dc39c1bc0060fe3b89fc4c3dd5cda3d7e7141d652b83793f5`
+  는 빌드·검증만 하고 시작하지 않았다.
+
 Still required before deployment:
 
-- rebuild STT, Vision, Discord, and Codex Gateway images from the changed
+- rebuild STT, Vision, and Codex Gateway images from the changed
   dependency files; this requires explicit approval for the repository's
   service dependency manifests to be queried against public package
   registries;
