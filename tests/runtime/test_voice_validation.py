@@ -152,6 +152,31 @@ class VoiceValidationTests(unittest.TestCase):
         self.assertTrue(retried["ok"])
         self.assertEqual(retried["session"]["currentStep"]["status"], "pending")
 
+    def test_stt_mismatch_fails_attempt_immediately(self) -> None:
+        self.start()
+
+        self.record("stt_final", transcript="완전히 다른 말")
+
+        session = self.manager.snapshot()
+        self.assertEqual(session["currentStep"]["status"], "failed")
+        self.assertEqual(session["lastFailureCode"], "stt_mismatch")
+
+    def test_conflicting_playback_terminal_events_fail_attempt(self) -> None:
+        self.start()
+        self.record("stt_final", transcript="이블린")
+        self.record("turn_accepted")
+        self.record("reply_final")
+        self.record("playback_started")
+        self.record("playback_completed")
+        self.record("playback_cancelled")
+
+        session = self.manager.snapshot()
+        self.assertEqual(session["currentStep"]["status"], "failed")
+        self.assertEqual(
+            session["lastFailureCode"],
+            "conflicting_playback_terminal_events",
+        )
+
     def test_retry_is_limited_to_three_attempts(self) -> None:
         session = self.start()
         step_id = session["currentStep"]["id"]
@@ -163,6 +188,53 @@ class VoiceValidationTests(unittest.TestCase):
         exhausted = self.manager.retry(session_id=session["sessionId"], step_id=step_id)
         self.assertFalse(exhausted["ok"])
         self.assertEqual(exhausted["error"], "attempt_budget_exhausted")
+
+    def test_retry_rejects_a_non_current_step(self) -> None:
+        session = self.start()
+        completed_step_id = session["currentStep"]["id"]
+        self.complete_normal_step()
+
+        result = self.manager.retry(
+            session_id=session["sessionId"],
+            step_id=completed_step_id,
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "validation_step_not_current")
+        self.assertEqual(self.manager.snapshot()["currentStep"]["id"], "02-listening")
+
+    def test_heard_confirmation_requires_completed_playback(self) -> None:
+        session = self.start()
+        step = session["currentStep"]
+        self.record("stt_final", transcript=step["prompt"])
+        self.record("turn_accepted")
+        self.record("reply_final")
+        self.record("playback_started")
+
+        result = self.manager.confirm(
+            session_id=session["sessionId"],
+            step_id=step["id"],
+            heard=True,
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "playback_not_completed")
+        self.assertFalse(self.manager.snapshot()["currentStep"]["heard"])
+
+    def test_events_for_non_active_steps_are_rejected(self) -> None:
+        session = self.start()
+
+        result = self.manager.record_event(
+            {
+                "event": "turn_accepted",
+                "surface": "local",
+                "stepId": "03-mood",
+            }
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "validation_event_step_not_active")
+        self.assertEqual(self.manager.snapshot()["currentStep"]["id"], "01-wake")
 
     def test_third_failed_attempt_ends_session(self) -> None:
         session = self.start()
@@ -233,6 +305,39 @@ class VoiceValidationTests(unittest.TestCase):
         self.clock.advance(31 * 86400)
         self.manager.prune_reports()
         self.assertFalse(list(reports.glob("*.json")))
+
+    def test_silence_step_fails_on_any_tts_playback_activity(self) -> None:
+        session = self.start()
+        while self.manager.snapshot()["currentStep"]["kind"] != "silence":
+            snapshot = self.manager.snapshot()
+            step = snapshot["currentStep"]
+            if step["kind"] == "normal":
+                self.complete_normal_step()
+            elif step["kind"] == "barge_source":
+                self.record("stt_final", transcript=step["prompt"])
+                self.record("turn_accepted")
+                self.record("reply_final")
+                self.record("playback_started")
+                self.record("playback_cancelled")
+            else:
+                self.record("stt_final", transcript=step["prompt"])
+                self.record("turn_accepted")
+                self.record("barge_in_accepted")
+                self.record("reply_final")
+                self.record("playback_started")
+                self.record("playback_completed")
+                self.record("barge_in_continuity")
+                self.manager.confirm(
+                    session_id=session["sessionId"],
+                    step_id=step["id"],
+                    heard=True,
+                )
+
+        self.record("playback_completed")
+
+        snapshot = self.manager.snapshot()
+        self.assertEqual(snapshot["currentStep"]["status"], "failed")
+        self.assertEqual(snapshot["lastFailureCode"], "silence_activity_detected")
 
     def test_discord_turn_summary_maps_playback_latency_and_outcome_events(self) -> None:
         payload = {

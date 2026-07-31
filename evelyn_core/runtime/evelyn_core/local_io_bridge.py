@@ -757,9 +757,6 @@ class LocalIoBridge:
         return discarded
 
     async def _handle_segment(self, pcm_bytes: bytes, meta: dict[str, Any]) -> None:
-        if self._mic_input_is_suppressed() and not meta.get("bargeInAccepted"):
-            self.suppressed_mic_segment_count += 1
-            return
         turn_started = time.perf_counter()
         self.active_turn_started_at = turn_started
         self.active_turn_id = str(meta.get("turnId") or uuid.uuid4().hex)
@@ -1106,9 +1103,6 @@ class LocalIoBridge:
             self.playback_controller.release(playback_owner)
             self.speaking = False
             self.mic_input_suppressed_until = time.monotonic() + LOCAL_BRIDGE_TTS_INPUT_SUPPRESS_AFTER_SEC
-            discarded = self._discard_pending_mic_segments()
-            if discarded:
-                print(f"[LOCAL BRIDGE] discarded_pending_mic_segments={discarded}", flush=True)
             await self._post_status()
 
     async def _chat_sentence_stream_and_speak(self, text: str) -> dict[str, Any]:
@@ -1348,32 +1342,47 @@ class LocalIoBridge:
         await self._post_status()
         try:
             request_started = time.perf_counter()
-            async with self.session.post(
-                f"{OMNIVOICE_SERVER_URL}/v1/audio/speech",
-                json=payload,
-                timeout=aiohttp.ClientTimeout(total=180),
-            ) as resp:
-                if resp.status != 200 and str(payload.get("voice") or "").startswith("clone:"):
-                    resp.release()
-                    fallback_payload = dict(payload)
-                    fallback_payload["voice"] = "auto"
-                    await self._speak_with_payload(fallback_payload)
-                    return
-                if resp.status != 200:
-                    detail = await resp.text()
-                    raise RuntimeError(f"tts_failed {resp.status}: {detail[:300]}")
-                audio_bytes, played_bytes, first_playback_ms = await self._play_streaming_pcm_response(
-                    resp,
-                    started_at=request_started,
-                )
+            candidate_payloads = [dict(payload)]
+            if str(payload.get("voice") or "").startswith("clone:"):
+                fallback_payload = dict(payload)
+                fallback_payload["voice"] = "auto"
+                candidate_payloads.append(fallback_payload)
+            active_payload = candidate_payloads[0]
+            audio_bytes = 0
+            played_bytes = 0
+            first_playback_ms: float | None = None
+            for index, candidate_payload in enumerate(candidate_payloads):
+                active_payload = candidate_payload
+                async with self.session.post(
+                    f"{OMNIVOICE_SERVER_URL}/v1/audio/speech",
+                    json=candidate_payload,
+                    timeout=aiohttp.ClientTimeout(total=180),
+                ) as resp:
+                    if resp.status != 200 and index + 1 < len(candidate_payloads):
+                        continue
+                    if resp.status != 200:
+                        detail = await resp.text()
+                        raise RuntimeError(f"tts_failed {resp.status}: {detail[:300]}")
+                    audio_bytes, played_bytes, first_playback_ms = (
+                        await self._play_streaming_pcm_response(
+                            resp,
+                            started_at=request_started,
+                        )
+                    )
+                    break
             if audio_bytes <= 0:
-                raise RuntimeError(f"tts_empty_audio voice={payload.get('voice') or 'auto'}")
+                raise RuntimeError(
+                    f"tts_empty_audio voice={active_payload.get('voice') or 'auto'}"
+                )
             if played_bytes <= 0:
-                raise RuntimeError(f"tts_playback_empty voice={payload.get('voice') or 'auto'} bytes={audio_bytes}")
+                raise RuntimeError(
+                    "tts_playback_empty "
+                    f"voice={active_payload.get('voice') or 'auto'} bytes={audio_bytes}"
+                )
             self.play_count += 1
             self.last_error = ""
             self.last_tts_playback = {
-                "voice": str(payload.get("voice") or "auto"),
+                "voice": str(active_payload.get("voice") or "auto"),
                 "audioBytes": audio_bytes,
                 "playedBytes": played_bytes,
                 "firstPlaybackMs": round(first_playback_ms, 1) if first_playback_ms is not None else None,
@@ -1388,9 +1397,6 @@ class LocalIoBridge:
             self.playback_controller.release(playback_owner)
             self.speaking = False
             self.mic_input_suppressed_until = time.monotonic() + LOCAL_BRIDGE_TTS_INPUT_SUPPRESS_AFTER_SEC
-            discarded = self._discard_pending_mic_segments()
-            if discarded:
-                print(f"[LOCAL BRIDGE] discarded_pending_mic_segments={discarded}", flush=True)
             await self._post_status()
 
     async def _play_streaming_pcm_response(

@@ -5,6 +5,7 @@ import sys
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 
 REPO_ROOT = next(path for path in Path(__file__).resolve().parents if (path / "main.py").exists())
@@ -39,20 +40,62 @@ class LocalIoBridgeInputSuppressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bridge._discard_pending_mic_segments(), 0)
         self.assertEqual(bridge.discarded_pending_mic_segment_count, 2)
 
-    async def test_handle_segment_drops_cooldown_audio_before_stt(self) -> None:
+    async def test_already_queued_segment_survives_post_playback_cooldown(self) -> None:
         bridge = LocalIoBridge()
         bridge.mic_input_suppressed_until = time.monotonic() + 0.7
+        bridge._post_status = AsyncMock()  # type: ignore[method-assign]
+        bridge._transcribe = AsyncMock(return_value="/help")  # type: ignore[method-assign]
+        bridge._chat = AsyncMock(return_value="ok")  # type: ignore[method-assign]
 
-        async def unexpected_transcribe(_pcm_bytes: bytes) -> str:
-            raise AssertionError("suppressed audio reached STT")
+        await bridge._handle_segment(b"user speech", {"source": "test"})
 
-        bridge._transcribe = unexpected_transcribe  # type: ignore[method-assign]
-        await bridge._handle_segment(b"echo", {"source": "test"})
-
-        self.assertEqual(bridge.segment_count, 0)
-        self.assertEqual(bridge.transcript_count, 0)
-        self.assertEqual(bridge.suppressed_mic_segment_count, 1)
+        self.assertEqual(bridge.segment_count, 1)
+        self.assertEqual(bridge.transcript_count, 1)
+        self.assertEqual(bridge.suppressed_mic_segment_count, 0)
         self.assertEqual(bridge.last_error, "")
+
+    async def test_tts_cleanup_preserves_queue_and_clone_fallback_keeps_one_owner(self) -> None:
+        class FakeResponse:
+            def __init__(self, status: int) -> None:
+                self.status = status
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            async def text(self) -> str:
+                return "tts failed"
+
+        class FakeSession:
+            def __init__(self) -> None:
+                self.payloads: list[dict] = []
+
+            def post(self, _url, *, json, timeout):
+                del timeout
+                self.payloads.append(dict(json))
+                return FakeResponse(503 if len(self.payloads) == 1 else 200)
+
+        bridge = LocalIoBridge()
+        session = FakeSession()
+        bridge.session = session  # type: ignore[assignment]
+        bridge.queue.put_nowait((b"next user turn", {"source": "test"}))
+        bridge._post_status = AsyncMock()  # type: ignore[method-assign]
+        bridge._play_streaming_pcm_response = AsyncMock(  # type: ignore[method-assign]
+            return_value=(1024, 1024, 12.5)
+        )
+
+        await bridge._speak_with_payload({"input": "hello", "voice": "clone:evelyn"})
+
+        self.assertEqual(
+            [payload["voice"] for payload in session.payloads],
+            ["clone:evelyn", "auto"],
+        )
+        self.assertEqual(bridge.last_tts_playback["voice"], "auto")
+        self.assertEqual(bridge.queue.qsize(), 1)
+        self.assertFalse(bridge.speaking)
+        self.assertEqual(bridge.playback_controller.owner_id, "")
 
 
 if __name__ == "__main__":

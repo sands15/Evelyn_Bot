@@ -568,6 +568,8 @@ class VoiceValidationManager:
                 or (self._session.get("currentStep") or {}).get("id")
                 or ""
             )
+            if not self._event_target_is_active(surface=surface, step_id=step_id):
+                return {"ok": False, "error": "validation_event_step_not_active"}
             if "transcript" in event:
                 step = self._step_by_id(surface, step_id)
                 if step is not None:
@@ -608,6 +610,28 @@ class VoiceValidationManager:
             None,
         )
 
+    def _event_target_is_active(self, *, surface: str, step_id: str) -> bool:
+        if not self._session or self._session.get("state") != "running":
+            return False
+        current = self._session.get("currentStep") or {}
+        if surface != str(self._session.get("surface") or ""):
+            return False
+        if step_id == str(current.get("id") or ""):
+            return True
+        return bool(
+            current.get("kind") == "barge_source"
+            and step_id == str(current.get("interruptStepId") or "")
+        )
+
+    def _step_is_current(self, step: dict[str, Any]) -> bool:
+        if not self._session:
+            return False
+        current = self._session.get("currentStep") or {}
+        return bool(
+            step.get("surface") == self._session.get("surface")
+            and step.get("id") == current.get("id")
+        )
+
     def _apply_event(self, event: dict[str, Any]) -> None:
         if not self._session or event.get("sessionId") != self._session.get("sessionId"):
             return
@@ -617,6 +641,8 @@ class VoiceValidationManager:
         self._seen_event_ids.add(event_id)
         surface = str(event.get("surface") or "")
         step_id = str(event.get("stepId") or "")
+        if not self._event_target_is_active(surface=surface, step_id=step_id):
+            return
         step = self._step_by_id(surface, step_id)
         if step is None:
             return
@@ -653,17 +679,33 @@ class VoiceValidationManager:
         kind = step.get("kind")
         accepted = self._event_count(step, "turn_accepted")
         replies = self._event_count(step, "reply_final")
+        stt_finals = self._event_count(step, "stt_final")
         started = self._event_count(step, "playback_started")
         completed = self._event_count(step, "playback_completed")
         cancelled = self._event_count(step, "playback_cancelled")
+        interrupt = self._event_count(step, "barge_in_accepted")
+        continuity = self._event_count(step, "barge_in_continuity")
         failed = self._event_count(step, "playback_failed") + self._event_count(step, "error")
-        if accepted > 1 or replies > 1 or started > 1 or completed > 1 or cancelled > 1:
+        if (
+            stt_finals > 1
+            or accepted > 1
+            or replies > 1
+            or started > 1
+            or completed > 1
+            or cancelled > 1
+            or interrupt > 1
+            or continuity > 1
+        ):
             self._fail_attempt(step, "duplicate_turn_or_playback")
         elif failed:
             self._fail_attempt(
                 step,
                 str(step["errors"][-1] if step.get("errors") else "unhandled_voice_error"),
             )
+        elif completed and cancelled:
+            self._fail_attempt(step, "conflicting_playback_terminal_events")
+        elif stt_finals == 1 and not bool((step.get("match") or {}).get("matched")):
+            self._fail_attempt(step, "stt_mismatch")
         elif (
             completed == 1
             and (accepted != 1 or replies != 1 or started != 1)
@@ -680,28 +722,45 @@ class VoiceValidationManager:
             self._fail_attempt(step, "orphan_or_incomplete_cancelled_playback")
         elif kind == "normal":
             match_ok = bool((step.get("match") or {}).get("matched"))
-            if accepted == replies == started == completed == 1 and match_ok and step.get("heard"):
+            if (
+                accepted == replies == started == completed == 1
+                and cancelled == interrupt == continuity == 0
+                and match_ok
+                and step.get("heard")
+            ):
                 step["status"] = "passed"
         elif kind == "barge_source":
             if (
                 accepted == replies == started == cancelled == 1
+                and completed == interrupt == continuity == 0
                 and bool((step.get("match") or {}).get("matched"))
             ):
                 step["status"] = "passed"
         elif kind == "barge_interrupt":
-            interrupt = self._event_count(step, "barge_in_accepted")
-            continuity = self._event_count(step, "barge_in_continuity")
             if (
                 accepted == replies == started == completed == interrupt == continuity == 1
+                and cancelled == 0
                 and bool((step.get("match") or {}).get("matched"))
                 and step.get("heard")
             ):
                 step["status"] = "passed"
         elif kind == "silence":
             silence_completed = self._event_count(step, "silence_completed")
-            if silence_completed == 1 and accepted == 0 and started == 0:
+            voice_activity = (
+                stt_finals
+                + accepted
+                + replies
+                + started
+                + completed
+                + cancelled
+                + interrupt
+                + continuity
+            )
+            if voice_activity:
+                self._fail_attempt(step, "silence_activity_detected")
+            elif silence_completed == 1:
                 step["status"] = "passed"
-        if step.get("status") == "passed":
+        if step.get("status") == "passed" and self._step_is_current(step):
             self._advance()
 
     def _fail_attempt(self, step: dict[str, Any], error_code: str) -> None:
@@ -748,6 +807,13 @@ class VoiceValidationManager:
                 return {"ok": False, "error": "validation_step_not_found"}
             if step.get("kind") not in {"normal", "barge_interrupt"}:
                 return {"ok": False, "error": "heard_confirmation_not_applicable"}
+            if step.get("status") == "failed":
+                return {"ok": False, "error": "validation_step_failed"}
+            if (
+                self._event_count(step, "playback_started") != 1
+                or self._event_count(step, "playback_completed") != 1
+            ):
+                return {"ok": False, "error": "playback_not_completed"}
             step["heard"] = bool(heard)
             if not heard:
                 self._fail_attempt(step, "user_did_not_hear_playback")
@@ -760,6 +826,11 @@ class VoiceValidationManager:
         with self._lock:
             if not self._session or session_id != self._session.get("sessionId"):
                 return {"ok": False, "error": "validation_session_not_found"}
+            if self._session.get("state") != "running":
+                return {"ok": False, "error": "validation_session_not_running"}
+            current = self._session.get("currentStep") or {}
+            if step_id != current.get("id"):
+                return {"ok": False, "error": "validation_step_not_current"}
             step = self._step_by_id(str(self._session.get("surface") or ""), step_id)
             if step is None:
                 return {"ok": False, "error": "validation_step_not_found"}
