@@ -1,5 +1,6 @@
 import unittest
 import sys
+import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -9,6 +10,7 @@ if str(RUNTIME_ROOT) not in sys.path:
     sys.path.insert(0, str(RUNTIME_ROOT))
 
 from evelyn_core.discord_command_session_runtime import (
+    ContinuityRecordingCommandContext,
     DiscordCommandSessionRuntimeDeps,
     mark_text_session_from_command_runtime,
 )
@@ -18,6 +20,91 @@ from tests.continuity_test_support import (
 
 
 class DiscordCommandSessionRuntimeTests(unittest.TestCase):
+    def test_recording_context_commits_only_after_successful_text_delivery(
+        self,
+    ) -> None:
+        order: list[object] = []
+        delivered = object()
+
+        class Context:
+            guild = SimpleNamespace(id=1)
+            message = SimpleNamespace(content="!상태")
+
+            async def send(self, content=None, *args, **kwargs):
+                order.append(("send", content, args, kwargs))
+                return delivered
+
+        original = Context()
+        wrapped = ContinuityRecordingCommandContext(
+            original,
+            record_reply=(
+                lambda ctx, user, answer: order.append(
+                    ("record", ctx, user, answer)
+                )
+            ),
+            log=lambda *_args, **_kwargs: None,
+        )
+
+        result = asyncio.run(wrapped.send("정상", silent=True))
+
+        self.assertIs(result, delivered)
+        self.assertEqual(order[0], ("send", "정상", (), {"silent": True}))
+        self.assertEqual(
+            order[1],
+            ("record", original, "!상태", "정상"),
+        )
+
+    def test_recording_context_does_not_commit_failed_or_non_text_delivery(
+        self,
+    ) -> None:
+        records: list[object] = []
+
+        class Context:
+            message = SimpleNamespace(content="!상태")
+
+            async def send(self, content=None, *args, **kwargs):
+                if content == "실패":
+                    raise RuntimeError("delivery_failed")
+                return "sent"
+
+        wrapped = ContinuityRecordingCommandContext(
+            Context(),
+            record_reply=lambda *args: records.append(args),
+            log=lambda *_args, **_kwargs: None,
+        )
+
+        self.assertEqual(asyncio.run(wrapped.send(None)), "sent")
+        with self.assertRaisesRegex(RuntimeError, "delivery_failed"):
+            asyncio.run(wrapped.send("실패"))
+        self.assertEqual(records, [])
+
+    def test_recording_context_contains_record_failure_after_delivery(
+        self,
+    ) -> None:
+        logs: list[tuple[object, ...]] = []
+
+        class Context:
+            message = SimpleNamespace(content="")
+
+            async def send(self, content=None):
+                return "sent"
+
+        wrapped = ContinuityRecordingCommandContext(
+            Context(),
+            record_reply=lambda *_args: (_ for _ in ()).throw(
+                RuntimeError("private")
+            ),
+            log=lambda *args, **_kwargs: logs.append(args),
+        )
+
+        self.assertEqual(asyncio.run(wrapped.send("정상")), "sent")
+        self.assertIn(
+            "command_continuity_record_failed",
+            str(logs),
+        )
+        self.assertIn("RuntimeError", str(logs))
+        self.assertNotIn("private", str(logs))
+
     def test_mark_text_session_from_command_records_turn_with_message_context(self) -> None:
         calls: list[tuple] = []
         commits: list[str] = []

@@ -37,7 +37,10 @@ def build_discord_intents() -> discord.Intents:
     intents.voice_states = True
     intents.members = True
     return intents
-from .discord_command_session_runtime import mark_text_session_from_command_runtime
+from .discord_command_session_runtime import (
+    ContinuityRecordingCommandContext,
+    mark_text_session_from_command_runtime,
+)
 from .discord_text_turn import handle_discord_text_message
 
 
@@ -171,6 +174,15 @@ class DiscordAppComposition:
         if runtime_status is not None:
             runtime_status.record_error(code, exc)
 
+    def _command_context(self, ctx: Any) -> Any:
+        if isinstance(ctx, ContinuityRecordingCommandContext):
+            return ctx
+        return ContinuityRecordingCommandContext(
+            ctx,
+            record_reply=self.mark_text_session_from_command,
+            log=self.deps.commands.log,
+        )
+
     async def on_ready(self) -> None:
         deps = self.deps.events
         if deps.runtime_status is not None:
@@ -261,6 +273,7 @@ class DiscordAppComposition:
         await handle_discord_text_message(message, self.deps.events.text_message_handler())
 
     async def join_voice(self, ctx: Any) -> None:
+        ctx = self._command_context(ctx)
         deps = self.deps.commands
         await handle_join_voice_command(
             ctx,
@@ -269,6 +282,7 @@ class DiscordAppComposition:
         )
 
     async def rejoin_voice(self, ctx: Any) -> None:
+        ctx = self._command_context(ctx)
         deps = self.deps.commands
         await handle_rejoin_voice_command(
             ctx,
@@ -277,12 +291,14 @@ class DiscordAppComposition:
         )
 
     async def leave_voice(self, ctx: Any) -> None:
+        ctx = self._command_context(ctx)
         await handle_leave_voice_command(
             ctx,
             mark_manual_disconnect=self.deps.commands.mark_voice_manual_disconnect,
         )
 
     async def restart_bot_command(self, ctx: Any) -> None:
+        ctx = self._command_context(ctx)
         deps = self.deps.commands
         await handle_restart_bot_command(
             ctx,
@@ -291,6 +307,7 @@ class DiscordAppComposition:
         )
 
     async def shutdown_bot_command(self, ctx: Any) -> None:
+        ctx = self._command_context(ctx)
         deps = self.deps.commands
         await handle_shutdown_bot_command(
             ctx,
@@ -300,9 +317,11 @@ class DiscordAppComposition:
         )
 
     async def control_command_error(self, ctx: Any, error: Any) -> None:
+        ctx = self._command_context(ctx)
         await handle_control_command_error(ctx, error)
 
     async def status_command(self, ctx: Any) -> None:
+        ctx = self._command_context(ctx)
         deps = self.deps.commands
         await handle_status_command(
             ctx,
@@ -317,9 +336,11 @@ class DiscordAppComposition:
         )
 
     async def evelyn_page_command(self, ctx: Any) -> None:
+        ctx = self._command_context(ctx)
         await handle_evelyn_page_command(ctx, resolve_page_url=self.deps.commands.resolve_evelyn_page_url)
 
     async def set_guild_prefix(self, ctx: Any, new_prefix: str | None = None) -> None:
+        ctx = self._command_context(ctx)
         deps = self.deps.commands
         await handle_prefix_command(
             ctx,
@@ -334,6 +355,7 @@ class DiscordAppComposition:
         )
 
     async def autonomy_start_command(self, ctx: Any) -> None:
+        ctx = self._command_context(ctx)
         deps = self.deps.commands
         await handle_autonomy_start_command(
             ctx,
@@ -345,6 +367,7 @@ class DiscordAppComposition:
         )
 
     async def autonomy_stop_command(self, ctx: Any) -> None:
+        ctx = self._command_context(ctx)
         deps = self.deps.commands
         await handle_autonomy_stop_command(
             ctx,
@@ -354,6 +377,7 @@ class DiscordAppComposition:
         )
 
     async def autonomy_status_command(self, ctx: Any) -> None:
+        ctx = self._command_context(ctx)
         deps = self.deps.commands
         await handle_autonomy_status_command(
             ctx,
@@ -383,25 +407,26 @@ class DiscordAppComposition:
         )
 
     async def minecraft_connect_command(self, ctx: Any) -> None:
+        ctx = self._command_context(ctx)
         deps = self.deps.commands
         await handle_minecraft_connect_command(
             ctx,
             enable_minecraft_mode=deps.enable_minecraft_mode,
             build_reply=deps.build_minecraft_connect_reply,
-            mark_text_session_from_command=self.mark_text_session_from_command,
             guild_only_message=deps.guild_only_message,
         )
 
     async def minecraft_disconnect_command(self, ctx: Any) -> None:
+        ctx = self._command_context(ctx)
         deps = self.deps.commands
         await handle_minecraft_disconnect_command(
             ctx,
             disable_minecraft_mode=deps.disable_minecraft_mode,
-            mark_text_session_from_command=self.mark_text_session_from_command,
             guild_only_message=deps.guild_only_message,
         )
 
     async def minecraft_status_command(self, ctx: Any) -> None:
+        ctx = self._command_context(ctx)
         deps = self.deps.commands
         await handle_minecraft_status_command(
             ctx,
@@ -410,11 +435,11 @@ class DiscordAppComposition:
                 deps.get_minecraft_world_lease_status
             ),
             build_reply=deps.build_minecraft_status_reply,
-            mark_text_session_from_command=self.mark_text_session_from_command,
             guild_only_message=deps.guild_only_message,
         )
 
     async def minecraft_goal_command(self, ctx: Any, *, goal: str | None = None) -> None:
+        ctx = self._command_context(ctx)
         deps = self.deps.commands
         await handle_minecraft_goal_command(
             ctx,
@@ -422,7 +447,6 @@ class DiscordAppComposition:
             set_minecraft_goal=deps.set_minecraft_goal,
             build_missing_reply=deps.build_minecraft_goal_missing_reply,
             build_updated_reply=deps.build_minecraft_goal_updated_reply,
-            mark_text_session_from_command=self.mark_text_session_from_command,
             guild_only_message=deps.guild_only_message,
         )
 
@@ -432,6 +456,7 @@ class DiscordAppComposition:
         action: str | None = None,
         channel: discord.TextChannel | None = None,
     ) -> None:
+        ctx = self._command_context(ctx)
         deps = self.deps.commands
         await handle_channel_setting_command(
             ctx,
@@ -457,6 +482,7 @@ class DiscordAppComposition:
         action: str | None = None,
         channel: discord.TextChannel | None = None,
     ) -> None:
+        ctx = self._command_context(ctx)
         deps = self.deps.commands
         await handle_channel_setting_command(
             ctx,
@@ -477,6 +503,7 @@ class DiscordAppComposition:
         )
 
     async def help_command(self, ctx: Any) -> None:
+        ctx = self._command_context(ctx)
         deps = self.deps.commands
         prefix = deps.get_guild_command_prefix(ctx.guild.id if ctx.guild else None)
         await ctx.send(
@@ -487,6 +514,7 @@ class DiscordAppComposition:
         )
 
     async def reset_guild_memory(self, ctx: Any) -> None:
+        ctx = self._command_context(ctx)
         deps = self.deps.commands
         await handle_reset_guild_memory_command(
             ctx,

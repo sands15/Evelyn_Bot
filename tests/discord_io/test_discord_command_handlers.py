@@ -132,10 +132,9 @@ class DiscordCommandHandlerTests(unittest.TestCase):
         self.assertEqual(marks, [(guild, "leave_command")])
         self.assertEqual(ctx.sent, ["👋 나갔어."])
 
-    def test_minecraft_connect_command_sends_reply_and_marks_session(self) -> None:
+    def test_minecraft_connect_command_sends_reply(self) -> None:
         guild = SimpleNamespace(id=1)
         ctx = FakeContext(guild=guild, content="마크접속")
-        marks: list[tuple[str, str]] = []
 
         async def enable(
             guild_id: int,
@@ -153,19 +152,16 @@ class DiscordCommandHandlerTests(unittest.TestCase):
                 ctx,
                 enable_minecraft_mode=enable,
                 build_reply=lambda observed: f"connect:{observed['connected']}",
-                mark_text_session_from_command=lambda _ctx, user_text, reply_text: marks.append((user_text, reply_text)),
                 guild_only_message=lambda: "guild only",
             )
         )
 
         self.assertEqual(ctx.sent, ["connect:True"])
-        self.assertEqual(marks, [("마크접속", "connect:True")])
 
     def test_minecraft_disconnect_requires_verified_stop(self) -> None:
         guild = SimpleNamespace(id=1)
         success_ctx = FakeContext(guild=guild, content="마크종료")
         failure_ctx = FakeContext(guild=guild, content="마크종료")
-        marks: list[tuple[str, str]] = []
 
         async def verified_stop(_guild_id: int):
             return {
@@ -179,11 +175,6 @@ class DiscordCommandHandlerTests(unittest.TestCase):
             return {"running": False, "connected": False}
 
         kwargs = {
-            "mark_text_session_from_command": (
-                lambda _ctx, user_text, reply_text: marks.append(
-                    (user_text, reply_text)
-                )
-            ),
             "guild_only_message": lambda: "guild only",
         }
         asyncio.run(
@@ -209,12 +200,10 @@ class DiscordCommandHandlerTests(unittest.TestCase):
                 "확인해줘. (minecraft_disconnect_failed)"
             ],
         )
-        self.assertEqual(len(marks), 2)
 
-    def test_minecraft_status_command_records_failure_reply(self) -> None:
+    def test_minecraft_status_command_sends_failure_reply(self) -> None:
         guild = SimpleNamespace(id=1)
         ctx = FakeContext(guild=guild, content="마크상태")
-        marks: list[tuple[str, str]] = []
 
         class Client:
             async def status(self):
@@ -228,7 +217,6 @@ class DiscordCommandHandlerTests(unittest.TestCase):
                     "state": "authorization_required"
                 },
                 build_reply=lambda status: "status",
-                mark_text_session_from_command=lambda _ctx, user_text, reply_text: marks.append((user_text, reply_text)),
                 guild_only_message=lambda: "guild only",
             )
         )
@@ -238,13 +226,11 @@ class DiscordCommandHandlerTests(unittest.TestCase):
             "시도해줘. (minecraft_status_failed)"
         )
         self.assertEqual(ctx.sent, [expected])
-        self.assertEqual(marks, [("마크상태", expected)])
 
     def test_minecraft_goal_command_handles_missing_and_updated_goal(self) -> None:
         guild = SimpleNamespace(id=1)
         missing_ctx = FakeContext(guild=guild, content="마크목표")
         goal_ctx = FakeContext(guild=guild, content="마크목표 diamond")
-        marks: list[tuple[str, str]] = []
 
         async def set_goal(guild_id: int, goal: str):
             self.assertEqual(guild_id, 1)
@@ -254,7 +240,6 @@ class DiscordCommandHandlerTests(unittest.TestCase):
             set_minecraft_goal=set_goal,
             build_missing_reply=lambda: "missing goal",
             build_updated_reply=lambda goal, status: f"goal:{goal}:{status['stage']}",
-            mark_text_session_from_command=lambda _ctx, user_text, reply_text: marks.append((user_text, reply_text)),
             guild_only_message=lambda: "guild only",
         )
         asyncio.run(handle_minecraft_goal_command(missing_ctx, goal="", **kwargs))
@@ -262,7 +247,6 @@ class DiscordCommandHandlerTests(unittest.TestCase):
 
         self.assertEqual(missing_ctx.sent, ["missing goal"])
         self.assertEqual(goal_ctx.sent, ["goal:diamond:diamond"])
-        self.assertEqual(marks, [("마크목표", "missing goal"), ("마크목표 diamond", "goal:diamond:diamond")])
 
     def test_prefix_command_reads_resets_and_saves_prefix(self) -> None:
         guild = SimpleNamespace(id=1)
@@ -452,7 +436,6 @@ class DiscordCommandHandlerTests(unittest.TestCase):
                 minecraft_ctx,
                 enable_minecraft_mode=fail,
                 build_reply=lambda _observed: "connected",
-                mark_text_session_from_command=lambda *_args: None,
                 guild_only_message=lambda: "guild only",
                 log=lambda *args: logged.append(args),
             )

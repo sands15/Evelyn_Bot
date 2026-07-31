@@ -7,6 +7,7 @@ from .continuity_commit_contract import (
     require_durable_continuity_receipt,
 )
 
+
 @dataclass(frozen=True)
 class DiscordCommandSessionRuntimeDeps:
     resolve_text_thread_id: Callable[..., int | None]
@@ -19,6 +20,51 @@ class DiscordCommandSessionRuntimeDeps:
     question_ttl_sec: float
     commit_session_continuity: Callable[[], dict[str, Any]]
     log: Callable[..., Any]
+
+
+class ContinuityRecordingCommandContext:
+    """Delegate a Discord command context and commit each delivered text reply."""
+
+    def __init__(
+        self,
+        ctx: Any,
+        *,
+        record_reply: Callable[[Any, str, str], None],
+        log: Callable[..., Any],
+    ) -> None:
+        self._ctx = ctx
+        self._record_reply = record_reply
+        self._log = log
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._ctx, name)
+
+    async def send(
+        self,
+        content: Any = None,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        delivered = await self._ctx.send(content, *args, **kwargs)
+        if not isinstance(content, str) or not content.strip():
+            return delivered
+
+        message = getattr(self._ctx, "message", None)
+        user_text = getattr(message, "content", None)
+        if not isinstance(user_text, str) or not user_text.strip():
+            user_text = "[discord command]"
+        try:
+            self._record_reply(
+                self._ctx,
+                user_text,
+                content,
+            )
+        except Exception as exc:
+            self._log(
+                "[DISCORD] command_continuity_record_failed "
+                f"errorType={type(exc).__name__}"
+            )
+        return delivered
 
 
 def mark_text_session_from_command_runtime(
@@ -68,6 +114,7 @@ def mark_text_session_from_command_runtime(
 
 
 __all__ = [
+    "ContinuityRecordingCommandContext",
     "DiscordCommandSessionRuntimeDeps",
     "mark_text_session_from_command_runtime",
 ]

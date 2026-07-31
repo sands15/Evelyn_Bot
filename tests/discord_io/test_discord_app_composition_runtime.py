@@ -6,7 +6,7 @@ import unittest
 from dataclasses import fields
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, Mock, call, patch
 
 import discord
 from discord.ext import commands
@@ -151,6 +151,63 @@ class DiscordAppCompositionTests(unittest.TestCase):
         self.assertEqual(list(bot.get_command("관찰채널").clean_params), ["action", "channel"])
         self.assertIs(bot.on_ready.__self__, composition)
         self.assertIs(bot.on_message.__self__, composition)
+
+    def test_command_replies_use_one_post_delivery_continuity_owner(
+        self,
+    ) -> None:
+        command_deps = make_command_deps(
+            get_guild_command_prefix=lambda _guild_id: "!",
+            build_help_command_text=(
+                lambda **_kwargs: "help reply"
+            ),
+            build_minecraft_goal_missing_reply=(
+                lambda: "missing goal"
+            ),
+        )
+        composition = make_composition(commands_deps=command_deps)
+        recorder = Mock()
+        composition.mark_text_session_from_command = recorder
+
+        def context(content: str) -> SimpleNamespace:
+            return SimpleNamespace(
+                guild=SimpleNamespace(id=1),
+                channel=SimpleNamespace(id=2),
+                author=SimpleNamespace(id=3),
+                message=SimpleNamespace(id=4, content=content),
+                send=AsyncMock(return_value=SimpleNamespace(id=5)),
+            )
+
+        help_ctx = context("!도움말")
+        minecraft_ctx = context("!마크목표")
+        denied_ctx = context("!재시작")
+
+        asyncio.run(composition.help_command(help_ctx))
+        asyncio.run(
+            composition.minecraft_goal_command(
+                minecraft_ctx,
+                goal="",
+            )
+        )
+        asyncio.run(
+            composition.control_command_error(
+                denied_ctx,
+                commands.CheckFailure(),
+            )
+        )
+
+        self.assertEqual(
+            recorder.call_args_list,
+            [
+                call(help_ctx, "!도움말", "help reply"),
+                call(minecraft_ctx, "!마크목표", "missing goal"),
+                call(
+                    denied_ctx,
+                    "!재시작",
+                    "이 명령은 허용된 Discord ID이거나 "
+                    "서버 관리자 권한이 있어야 쓸 수 있어.",
+                ),
+            ],
+        )
 
     def test_on_ready_initializes_services_without_resuming_autonomy(self) -> None:
         class VoiceClient:

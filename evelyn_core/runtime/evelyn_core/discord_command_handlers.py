@@ -383,7 +383,6 @@ async def handle_minecraft_connect_command(
     *,
     enable_minecraft_mode: Any,
     build_reply: Any,
-    mark_text_session_from_command: Any,
     guild_only_message: Any,
     log: Any = print,
 ) -> None:
@@ -406,14 +405,12 @@ async def handle_minecraft_connect_command(
             "minecraft_connect_failed"
         )
         await ctx.send(reply_text)
-    mark_text_session_from_command(ctx, getattr(ctx.message, "content", None) or "마크접속", reply_text)
 
 
 async def handle_minecraft_disconnect_command(
     ctx: Any,
     *,
     disable_minecraft_mode: Any,
-    mark_text_session_from_command: Any,
     guild_only_message: Any,
     log: Any = print,
 ) -> None:
@@ -437,7 +434,6 @@ async def handle_minecraft_disconnect_command(
             "minecraft_disconnect_failed"
         )
         await ctx.send(reply_text)
-    mark_text_session_from_command(ctx, getattr(ctx.message, "content", None) or "마크종료", reply_text)
 
 
 async def handle_minecraft_status_command(
@@ -446,7 +442,6 @@ async def handle_minecraft_status_command(
     get_minecraft_client: Any,
     get_minecraft_world_lease_status: Any,
     build_reply: Any,
-    mark_text_session_from_command: Any,
     guild_only_message: Any,
     log: Any = print,
 ) -> None:
@@ -468,7 +463,6 @@ async def handle_minecraft_status_command(
             "minecraft_status_failed"
         )
         await ctx.send(reply_text)
-    mark_text_session_from_command(ctx, getattr(ctx.message, "content", None) or "마크상태", reply_text)
 
 
 async def handle_minecraft_goal_command(
@@ -478,7 +472,6 @@ async def handle_minecraft_goal_command(
     set_minecraft_goal: Any,
     build_missing_reply: Any,
     build_updated_reply: Any,
-    mark_text_session_from_command: Any,
     guild_only_message: Any,
     log: Any = print,
 ) -> None:
@@ -489,7 +482,6 @@ async def handle_minecraft_goal_command(
     if not goal_text:
         reply_text = build_missing_reply()
         await ctx.send(reply_text)
-        mark_text_session_from_command(ctx, getattr(ctx.message, "content", None) or "마크목표", reply_text)
         return
     try:
         status = await set_minecraft_goal(
@@ -504,7 +496,6 @@ async def handle_minecraft_goal_command(
             "minecraft_goal_failed"
         )
         await ctx.send(reply_text)
-    mark_text_session_from_command(ctx, getattr(ctx.message, "content", None) or "마크목표", reply_text)
 
 
 def make_control_command_authorized_checker(*, allowed_user_ids: set[int] | frozenset[int]) -> Any:
