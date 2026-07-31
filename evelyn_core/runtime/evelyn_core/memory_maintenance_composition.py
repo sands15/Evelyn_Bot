@@ -1,10 +1,55 @@
 from __future__ import annotations
 
 import asyncio
+import math
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
 from .memory_update_runtime import schedule_memory_update_from_runtime
+
+
+DEFAULT_MEMORY_VAULT_MAINTENANCE_INTERVAL_SEC = 900.0
+DEFAULT_MEMORY_DERIVATION_RETRY_INTERVAL_SEC = 60.0
+MIN_MEMORY_DERIVATION_RETRY_INTERVAL_SEC = 5.0
+
+
+def _safe_interval(value: Any, default: float) -> float:
+    try:
+        interval = float(value)
+    except (TypeError, ValueError):
+        return default
+    return interval if math.isfinite(interval) else default
+
+
+def _pending_recomposition_count(result: Any) -> int:
+    if not isinstance(result, dict):
+        return 0
+    recomposition = result.get("derivation_recomposition")
+    if not isinstance(recomposition, dict):
+        return 0
+    pending = recomposition.get("pendingNoteIds")
+    if not isinstance(pending, list):
+        return 0
+    return sum(1 for note_id in pending if str(note_id or "").strip())
+
+
+def _maintenance_last_run_marker(
+    *,
+    finished_at: float,
+    interval_sec: float,
+    retry_interval_sec: float,
+    pending_count: int,
+) -> float:
+    if pending_count <= 0:
+        return finished_at
+    retry_delay = min(
+        interval_sec,
+        max(
+            MIN_MEMORY_DERIVATION_RETRY_INTERVAL_SEC,
+            retry_interval_sec,
+        ),
+    )
+    return finished_at - max(0.0, interval_sec - retry_delay)
 
 
 @dataclass(frozen=True)
@@ -80,7 +125,25 @@ class MemoryMaintenanceComposition:
         self, guild_id: int, *, turn_scope: Any | None = None
     ) -> None:
         deps = self.deps
-        interval_sec = float(deps.getenv("MEMORY_VAULT_MAINTENANCE_INTERVAL_SEC", "900"))
+        interval_sec = max(
+            1.0,
+            _safe_interval(
+                deps.getenv(
+                    "MEMORY_VAULT_MAINTENANCE_INTERVAL_SEC",
+                    str(
+                        DEFAULT_MEMORY_VAULT_MAINTENANCE_INTERVAL_SEC
+                    ),
+                ),
+                DEFAULT_MEMORY_VAULT_MAINTENANCE_INTERVAL_SEC,
+            ),
+        )
+        retry_interval_sec = _safe_interval(
+            deps.getenv(
+                "MEMORY_DERIVATION_RETRY_INTERVAL_SEC",
+                str(DEFAULT_MEMORY_DERIVATION_RETRY_INTERVAL_SEC),
+            ),
+            DEFAULT_MEMORY_DERIVATION_RETRY_INTERVAL_SEC,
+        )
         now = deps.monotonic()
         last_run = float(deps.vault_last_maintenance_at.get(guild_id, 0.0) or 0.0)
         if now - last_run < interval_sec:
@@ -95,7 +158,35 @@ class MemoryMaintenanceComposition:
                 if turn_scope is not None:
                     turn_scope.raise_if_cancelled()
                 result = await deps.to_thread(deps.run_vault_maintenance_once, guild_id)
-                deps.vault_last_maintenance_at[guild_id] = deps.monotonic()
+                pending_count = _pending_recomposition_count(
+                    result
+                )
+                finished_at = deps.monotonic()
+                # This in-memory value is the interval-gate marker, not an
+                # audit timestamp. Backdating only pending recomposition
+                # allows an earlier next-turn retry without a tight loop.
+                deps.vault_last_maintenance_at[guild_id] = (
+                    _maintenance_last_run_marker(
+                        finished_at=finished_at,
+                        interval_sec=interval_sec,
+                        retry_interval_sec=retry_interval_sec,
+                        pending_count=pending_count,
+                    )
+                )
+                if pending_count:
+                    retry_delay = min(
+                        interval_sec,
+                        max(
+                            MIN_MEMORY_DERIVATION_RETRY_INTERVAL_SEC,
+                            retry_interval_sec,
+                        ),
+                    )
+                    deps.log(
+                        "[MEMORY VAULT] derivation recomposition "
+                        f"pending guild={guild_id} "
+                        f"count={pending_count} "
+                        f"retrySec={round(retry_delay, 1)}"
+                    )
                 if result.get("daily_consolidation"):
                     deps.log(
                         f"[MEMORY VAULT] maintenance guild={guild_id} "

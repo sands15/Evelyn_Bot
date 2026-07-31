@@ -37,6 +37,91 @@ class MemoryMaintenanceCompositionTests(unittest.IsolatedAsyncioTestCase):
             result=composition.schedule_memory_update(1,"u","a",source="voice")
         self.assertEqual(result,{"scheduled":True}); self.assertEqual(runtime.call_args.kwargs["deps"],"memory-deps")
 
+    async def test_pending_recomposition_uses_short_retry_gate(self):
+        clock = Mock(return_value=1000.0)
+        create_task = Mock(
+            side_effect=lambda coro, turn_scope=None: asyncio.create_task(
+                coro
+            )
+        )
+        getenv = Mock(
+            side_effect=lambda key, default: {
+                "MEMORY_VAULT_MAINTENANCE_INTERVAL_SEC": "900",
+                "MEMORY_DERIVATION_RETRY_INTERVAL_SEC": "60",
+            }.get(key, default)
+        )
+        to_thread = AsyncMock(
+            return_value={
+                "derivation_recomposition": {
+                    "status": "skipped_sub_llm_unavailable",
+                    "pendingNoteIds": [
+                        "private-derived-note-id"
+                    ],
+                }
+            }
+        )
+        log = Mock()
+        composition, deps = self.build(
+            monotonic=clock,
+            create_scoped_task=create_task,
+            getenv=getenv,
+            to_thread=to_thread,
+            log=log,
+        )
+
+        composition.schedule_memory_vault_maintenance(1)
+        await deps.background_vault_tasks[1]
+
+        self.assertEqual(
+            deps.vault_last_maintenance_at[1],
+            160.0,
+        )
+        logged = " ".join(
+            str(call.args[0])
+            for call in log.call_args_list
+            if call.args
+        )
+        self.assertIn("count=1", logged)
+        self.assertIn("retrySec=60.0", logged)
+        self.assertNotIn("private-derived-note-id", logged)
+
+        clock.return_value = 1059.0
+        composition.schedule_memory_vault_maintenance(1)
+        self.assertEqual(create_task.call_count, 1)
+
+        clock.return_value = 1060.0
+        composition.schedule_memory_vault_maintenance(1)
+        self.assertEqual(create_task.call_count, 2)
+        await deps.background_vault_tasks[1]
+
+    async def test_clear_recomposition_keeps_normal_interval(self):
+        clock = Mock(return_value=1000.0)
+        create_task = Mock(
+            side_effect=lambda coro, turn_scope=None: asyncio.create_task(
+                coro
+            )
+        )
+        composition, deps = self.build(
+            monotonic=clock,
+            create_scoped_task=create_task,
+            to_thread=AsyncMock(
+                return_value={
+                    "derivation_recomposition": {
+                        "status": "clear",
+                        "pendingNoteIds": [],
+                    }
+                }
+            ),
+        )
+
+        composition.schedule_memory_vault_maintenance(1)
+        await deps.background_vault_tasks[1]
+
+        self.assertEqual(
+            deps.vault_last_maintenance_at[1],
+            1000.0,
+        )
+
     def test_main_uses_lazy_summary_binding(self):
         source=(REPO_ROOT/"main.py").read_text(encoding="utf-8")
         self.assertIn("memory_maintenance_composition = MemoryMaintenanceComposition(",source)
