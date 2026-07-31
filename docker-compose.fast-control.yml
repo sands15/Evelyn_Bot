@@ -460,8 +460,8 @@ services:
       retries: 5
       start_period: 90s
 
-  vision:
-    container_name: evelyn-vision
+  vision_runtime:
+    container_name: evelyn-vision-runtime
     profiles: ["vision"]
     build:
       context: .
@@ -508,14 +508,44 @@ services:
       - ./runtime_artifacts:/app/runtime_artifacts:ro
       - ./logs:/app/logs:ro
       - ${EVELYN_HUGGINGFACE_CACHE_DIR:-${USERPROFILE}/.cache/huggingface}:/model-cache:ro
-    ports:
-      - "127.0.0.1:8891:8891"
+    networks:
+      - vision_isolated
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8891/health')"]
       interval: 30s
       timeout: 10s
       retries: 8
       start_period: 180s
+
+  vision:
+    container_name: evelyn-vision
+    profiles: ["vision"]
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.vision-ingress
+    restart: "no"
+    depends_on:
+      vision_runtime:
+        condition: service_healthy
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=16m
+    networks:
+      - default
+      - vision_isolated
+    ports:
+      - "127.0.0.1:8891:8891"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8891/health', timeout=5)"]
+      interval: 20s
+      timeout: 8s
+      retries: 8
+      start_period: 10s
 
   stt:
     container_name: evelyn-stt
@@ -653,3 +683,7 @@ services:
       timeout: 8s
       retries: 8
       start_period: 20s
+
+networks:
+  vision_isolated:
+    internal: true

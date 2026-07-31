@@ -148,7 +148,7 @@ class DockerComposeContractTests(unittest.TestCase):
 
         self.assertNotIn("restart: unless-stopped", source)
         self.assertNotIn("restart: always", source)
-        self.assertEqual(source.count('restart: "no"'), 13)
+        self.assertEqual(source.count('restart: "no"'), 14)
 
     def test_bot_api_has_time_to_release_single_owner_claim(self) -> None:
         source = COMPOSE.read_text(encoding="utf-8")
@@ -335,29 +335,58 @@ class DockerComposeContractTests(unittest.TestCase):
         self,
     ) -> None:
         source = COMPOSE.read_text(encoding="utf-8")
-        vision = source.split("  vision:\n", 1)[1].split(
+        vision_runtime = source.split("  vision_runtime:\n", 1)[1].split(
+            "\n  vision:",
+            1,
+        )[0]
+        vision_ingress = source.split("  vision:\n", 1)[1].split(
             "\n  stt:",
             1,
         )[0]
 
         self.assertIn(
             'VISION_OCR_REVISION: "42ec56b72a23984ac059e7c8a6d397a8529423fe"',
-            vision,
+            vision_runtime,
         )
-        self.assertIn('VISION_OCR_LOCAL_FILES_ONLY: "true"', vision)
-        self.assertIn('HF_HOME: "/model-cache"', vision)
-        self.assertIn('HF_HUB_CACHE: "/model-cache/hub"', vision)
-        self.assertIn('HF_HUB_OFFLINE: "1"', vision)
-        self.assertIn('HF_MODULES_CACHE: "/tmp/hf-modules"', vision)
-        self.assertIn("read_only: true", vision)
-        self.assertIn("cap_drop:\n      - ALL", vision)
-        self.assertIn("- no-new-privileges:true", vision)
-        self.assertIn("pids_limit: 512", vision)
-        self.assertIn("/tmp:rw,nosuid,nodev,size=4g", vision)
-        self.assertIn("./runtime_artifacts:/app/runtime_artifacts:ro", vision)
-        self.assertIn("./logs:/app/logs:ro", vision)
-        self.assertIn(":/model-cache:ro", vision)
-        self.assertNotIn(":/root/.cache/huggingface", vision)
+        self.assertIn(
+            'VISION_OCR_LOCAL_FILES_ONLY: "true"',
+            vision_runtime,
+        )
+        self.assertIn('HF_HOME: "/model-cache"', vision_runtime)
+        self.assertIn('HF_HUB_CACHE: "/model-cache/hub"', vision_runtime)
+        self.assertIn('HF_HUB_OFFLINE: "1"', vision_runtime)
+        self.assertIn('HF_MODULES_CACHE: "/tmp/hf-modules"', vision_runtime)
+        self.assertIn("read_only: true", vision_runtime)
+        self.assertIn("cap_drop:\n      - ALL", vision_runtime)
+        self.assertIn("- no-new-privileges:true", vision_runtime)
+        self.assertIn("pids_limit: 512", vision_runtime)
+        self.assertIn("/tmp:rw,nosuid,nodev,size=4g", vision_runtime)
+        self.assertIn(
+            "./runtime_artifacts:/app/runtime_artifacts:ro",
+            vision_runtime,
+        )
+        self.assertIn("./logs:/app/logs:ro", vision_runtime)
+        self.assertIn(":/model-cache:ro", vision_runtime)
+        self.assertNotIn(":/root/.cache/huggingface", vision_runtime)
+        self.assertIn("networks:\n      - vision_isolated", vision_runtime)
+        self.assertNotIn("ports:", vision_runtime)
+
+        self.assertIn(
+            "dockerfile: docker/Dockerfile.vision-ingress",
+            vision_ingress,
+        )
+        self.assertIn("vision_runtime:\n        condition: service_healthy", vision_ingress)
+        self.assertIn("read_only: true", vision_ingress)
+        self.assertIn("cap_drop:\n      - ALL", vision_ingress)
+        self.assertIn("- no-new-privileges:true", vision_ingress)
+        self.assertIn("pids_limit: 128", vision_ingress)
+        self.assertIn("- default\n      - vision_isolated", vision_ingress)
+        self.assertIn('"127.0.0.1:8891:8891"', vision_ingress)
+        self.assertNotIn("volumes:", vision_ingress)
+        self.assertIn(
+            "networks:\n  vision_isolated:\n    internal: true",
+            source,
+        )
 
     def test_fast_control_api_supports_local_bridge_chat_contract(self) -> None:
         source = (REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "fast_control_api.py").read_text(encoding="utf-8")
@@ -381,6 +410,10 @@ class DockerComposeContractTests(unittest.TestCase):
         self.assertIn("start_local_background.ps1", local_start)
         self.assertIn("docker-compose.fast-control.yml", docker_helper)
         self.assertIn("@('compose') + $composeArgs + @('up', '-d') + $serviceArgs", docker_helper)
+        self.assertIn("$normalizedServices -contains 'vision'", docker_helper)
+        self.assertIn("build_local_docker_images.ps1", docker_helper)
+        self.assertIn("-Services @('vision')", docker_helper)
+        self.assertIn("$composeBuildServices | Where-Object", docker_helper)
         self.assertIn("$normalizedServices -contains 'voyager'", docker_helper)
         self.assertIn("$credentialDirectory.StartsWith(", docker_helper)
         self.assertIn("$liveCodexPrefix", docker_helper)

@@ -18,10 +18,16 @@ $imageDefinitions = @{
         Dockerfile = 'docker\Dockerfile.control-page'
         Image = 'evelyn-fast-control-control_page'
     }
-    vision = @{
-        Dockerfile = 'docker\Dockerfile.vision'
-        Image = 'evelyn-fast-control-vision'
-    }
+    vision = @(
+        @{
+            Dockerfile = 'docker\Dockerfile.vision-ingress'
+            Image = 'evelyn-fast-control-vision'
+        },
+        @{
+            Dockerfile = 'docker\Dockerfile.vision'
+            Image = 'evelyn-fast-control-vision_runtime'
+        }
+    )
 }
 
 if (-not ('EvelynSubstNativeMethods' -as [type])) {
@@ -136,13 +142,16 @@ try {
     Push-Location -LiteralPath $buildRoot
     try {
         foreach ($service in $Services) {
-            $definition = $imageDefinitions[$service]
-            $dockerfile = [string]$definition.Dockerfile
-            if (-not (Test-Path -LiteralPath $dockerfile -PathType Leaf)) {
-                throw "Dockerfile not found for allowlisted service ${service}: $dockerfile"
+            $definitions = @($imageDefinitions[$service])
+            foreach ($definition in $definitions) {
+                $dockerfile = [string]$definition.Dockerfile
+                if (-not (Test-Path -LiteralPath $dockerfile -PathType Leaf)) {
+                    throw "Dockerfile not found for allowlisted service ${service}: $dockerfile"
+                }
+                $image = [string]$definition.Image
+                Write-Host "[Evelyn] Building allowlisted image $service as $image."
+                Invoke-DockerBuild -Dockerfile $dockerfile -Image $image
             }
-            Write-Host "[Evelyn] Building allowlisted image $service."
-            Invoke-DockerBuild -Dockerfile $dockerfile -Image ([string]$definition.Image)
         }
     } finally {
         Pop-Location

@@ -14,7 +14,8 @@
 - `sub_llm`: llama-server sub LLM, `9821`
 - `tts`: OmniVoice TTS, `8880`
 - `stt`: Qwen3-ASR STT service, `8892`
-- `vision`: SmolVLM2 Vision service, `8891`
+- `vision`: credential-free Vision ingress, `8891`
+- `vision_runtime`: isolated SmolVLM2/Falcon-OCR GPU runtime
 - `voyager`: Minecraft/Voyager HTTP service, `8765`
 - `codex_gateway`: Voyager Codex Gateway HTTP service, `8787`
 
@@ -40,9 +41,10 @@ powershell -ExecutionPolicy Bypass `
 ```
 
 프로젝트 경로에 한글 등 non-ASCII 문자가 있으면 launcher가 사용하지 않는 임시
-드라이브 문자에 프로젝트를 매핑한 뒤 allowlist 이미지 세 개만 빌드하고, 자신이
-만든 매핑임을 다시 확인한 뒤 해제한다. 기존 `subst` 매핑은 재사용하거나 삭제하지
-않는다.
+드라이브 문자에 프로젝트를 매핑한 뒤 allowlist 서비스 그룹 세 개만 빌드한다.
+Vision 그룹은 `vision` ingress와 `vision_runtime` 두 이미지를 함께 갱신한다.
+launcher는 자신이 만든 매핑임을 다시 확인한 뒤 해제하며 기존 `subst` 매핑은
+재사용하거나 삭제하지 않는다.
 
 기본 런타임:
 
@@ -118,11 +120,18 @@ powershell -ExecutionPolicy Bypass -File .\tools\check_docker_runtime.ps1 -Inclu
 - Sub LLM: `http://sub_llm:9821/v1/chat/completions`
 - TTS: `http://tts:8880`
 - STT: `http://stt:8892`
-- Vision: `http://vision:8891`
+- Vision ingress: `http://vision:8891`
 - Codex Gateway: `http://codex_gateway:8787/codex/action`
 - Voyager: `voyager:8765`
 
 호스트에서 직접 확인할 때만 `127.0.0.1` published port를 사용한다.
+
+Vision의 서비스명과 published port는 최소 ingress가 소유한다. 실제 GPU 모델
+runtime인 `vision_runtime`은 외부 gateway가 없는 `vision_isolated` network에만
+연결되며 host port를 publish하지 않는다. ingress는 정해진 Vision endpoint만
+`vision_runtime:8891`로 전달하고 credential, model cache, runtime artifact를
+마운트하지 않는다. 따라서 호출자는 기존 URL을 유지하면서 Falcon-OCR remote
+code에는 인터넷이나 다른 Evelyn 서비스로 향하는 route를 주지 않는다.
 
 ## 음성 처리
 
@@ -174,9 +183,10 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass `
 
 현재 Compose는 GPU UUID로 배치를 고정한다.
 
-- RTX 3090: `main_llm`, `tts`, `stt`, `vision`
+- RTX 3090: `main_llm`, `tts`, `stt`, `vision_runtime`
 - RTX 4060 Laptop GPU: `router_llm`, `sub_llm`
-- CPU only: `control_page`, `bot_api`, `discord_bot`, `voyager`, `codex_gateway`
+- CPU only: `control_page`, `bot_api`, `discord_bot`, `vision` ingress,
+  `voyager`, `codex_gateway`
 
 운영 시 GPU 번호만 보지 말고 실제 GPU 이름도 같이 확인한다.
 

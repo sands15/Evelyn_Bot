@@ -227,6 +227,9 @@ class ShutdownScriptContractTests(unittest.TestCase):
         self.assertIn("'evelyn-fast-control-bot_api'", builder)
         self.assertIn("'evelyn-fast-control-control_page'", builder)
         self.assertIn("'evelyn-fast-control-vision'", builder)
+        self.assertIn("'evelyn-fast-control-vision_runtime'", builder)
+        self.assertIn("'docker\\Dockerfile.vision-ingress'", builder)
+        self.assertIn("'docker\\Dockerfile.vision'", builder)
         self.assertNotIn("Invoke-Expression", builder)
 
     def test_bot_launcher_prefers_explicit_bot_api_port_env(self) -> None:

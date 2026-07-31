@@ -1,0 +1,14 @@
+FROM python:3.11-slim@sha256:c20888b6acdd1e63e1c433a185bf3ad162c0288fe484616ce062e0d28add2900
+
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
+WORKDIR /app
+
+COPY evelyn_core/runtime/evelyn_core/vision_ingress_proxy.py /app/vision_ingress_proxy.py
+
+USER 65534:65534
+
+EXPOSE 8891
+
+CMD ["python", "/app/vision_ingress_proxy.py"]

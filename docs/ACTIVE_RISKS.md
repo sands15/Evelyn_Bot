@@ -292,10 +292,16 @@ CUDA 12.8 공식 인덱스는 현재 Torch/Torchaudio 2.11과 Torchvision 0.26�
 Falcon-OCR은 여전히 Hugging Face remote model code 실행을 요구한다. 다만
 full commit과 모든 snapshot 파일의 size/SHA-256을 고정하고, 실행 전 전체
 검증, 기본 offline/local-only 로드, read-only model cache·root filesystem,
-non-root·capability drop·no-new-privileges 경계를 적용했다. 이것은 공급망
-변경과 파일시스템/프로세스 권한을 제한하지만 remote code의 임의 네트워크
-접근까지 격리한 sandbox는 아니다. GPU 모델 로드 smoke도 별도 승인 전에는
-미완료다.
+non-root·capability drop·no-new-privileges 경계를 적용했다. 모델 runtime은
+외부 gateway가 없는 Compose `vision_isolated` internal network에만 연결한다.
+기존 Docker/host 호출은 credential·model cache·bind mount가 전혀 없는 별도
+UID 65534 ingress가 method/path/body/response allowlist를 적용해 고정
+`vision_runtime:8891`로만 전달한다. 따라서 remote model code에는 인터넷이나
+다른 Evelyn 서비스로 가는 network route가 없다.
+
+이 경계는 kernel syscall sandbox가 아니며, 격리된 runtime에 할당된 CPU/GPU/
+memory 고갈 시도까지 제거하지는 않는다. GPU 모델 로드 smoke도 별도 승인
+전에는 미완료다.
 
 다음 조치: Qwen-ASR의 Transformers 5 호환 릴리스와 CUDA 12.8 Torch 2.13
 wheel을 재확인한다. 새 이미지 GPU 모델 로드 smoke 전에는 배포 완료로 판정하지

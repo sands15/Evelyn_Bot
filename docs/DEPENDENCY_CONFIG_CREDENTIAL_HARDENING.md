@@ -47,8 +47,19 @@ both use its `hub/` child so the downloaded and mounted snapshot are identical.
 The Vision container runs as UID/GID 10001 with a read-only root filesystem,
 all Linux capabilities dropped, `no-new-privileges`, a PID limit, ephemeral
 write paths under `/tmp`, and the model cache mounted read-only. This narrows
-the executable-code boundary; it does not convert Falcon-OCR to native
-Transformers code or isolate arbitrary network access from that code.
+the executable-code boundary. The model runtime is also attached only to the
+Compose `vision_isolated` network (`internal: true`), which has no external
+gateway. A separate UID 65534 ingress with no credentials, model cache, or
+bind mounts is the only dual-network peer. It accepts a fixed method/path
+allowlist and proxies only to `vision_runtime:8891`, preserving
+`http://vision:8891` for Docker callers and `127.0.0.1:8891` for the host
+without giving remote model code an egress route.
+
+This does not convert Falcon-OCR to native Transformers code or provide a
+kernel syscall sandbox. Compromised model code can still consume the Vision
+runtime's allocated CPU/GPU/memory and attempt denial of service inside its
+own isolated network, so bounded requests, responses, PIDs, and operator
+timeouts remain required.
 
 ### Node/Minecraft
 

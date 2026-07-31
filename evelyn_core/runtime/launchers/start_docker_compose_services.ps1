@@ -119,7 +119,22 @@ $buildEnabled = $Build -or (
 )
 
 if ($buildEnabled) {
-    Invoke-DockerCommand -Arguments (@('compose') + $composeArgs + @('build') + $serviceArgs)
+    $composeBuildServices = @($serviceArgs)
+    if ($normalizedServices -contains 'vision') {
+        $pathSafeBuilder = Join-Path $PSScriptRoot 'build_local_docker_images.ps1'
+        if (-not (Test-Path -LiteralPath $pathSafeBuilder -PathType Leaf)) {
+            throw "Path-safe Docker image builder not found: $pathSafeBuilder"
+        }
+        & $pathSafeBuilder -ProjectRoot $projectRoot -Services @('vision')
+        $composeBuildServices = @(
+            $composeBuildServices | Where-Object { $_ -ne 'vision' }
+        )
+    }
+    if ($composeBuildServices.Count -gt 0) {
+        Invoke-DockerCommand -Arguments (
+            @('compose') + $composeArgs + @('build') + $composeBuildServices
+        )
+    }
 }
 
 Invoke-DockerCommand -Arguments (@('compose') + $composeArgs + @('up', '-d') + $serviceArgs)

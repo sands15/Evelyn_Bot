@@ -9,6 +9,9 @@ VISION_SERVICE = REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "vision
 START_VISION = REPO_ROOT / "evelyn_core" / "runtime" / "launchers" / "start_vision.ps1"
 START_ENV = REPO_ROOT / "evelyn_core" / "start_env.bat"
 VISION_DOCKERFILE = REPO_ROOT / "docker" / "Dockerfile.vision"
+VISION_INGRESS_DOCKERFILE = (
+    REPO_ROOT / "docker" / "Dockerfile.vision-ingress"
+)
 DOCKERIGNORE = REPO_ROOT / ".dockerignore"
 
 
@@ -79,6 +82,12 @@ class VisionServiceLazyOcrTests(unittest.TestCase):
         self.assertIn("USER 10001:10001", dockerfile)
         dockerignore = DOCKERIGNORE.read_text(encoding="utf-8")
         self.assertIn("!tools/provision_falcon_ocr_snapshot.py", dockerignore)
+
+        ingress = VISION_INGRESS_DOCKERFILE.read_text(encoding="utf-8")
+        self.assertIn("python:3.11-slim@sha256:", ingress)
+        self.assertIn("COPY evelyn_core/runtime/evelyn_core/vision_ingress_proxy.py", ingress)
+        self.assertIn("USER 65534:65534", ingress)
+        self.assertNotIn("pip install", ingress)
 
     def test_start_vision_passes_lazy_ocr_env_to_wsl_and_windows(self) -> None:
         source = START_VISION.read_text(encoding="utf-8")
