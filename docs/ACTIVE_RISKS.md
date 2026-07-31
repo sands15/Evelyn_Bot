@@ -189,6 +189,14 @@ token은 120초·일회용이고, 동의는 세션 연결 전 최대 5분과 연
 fail-closed 요청한다. 상태는 제어 메타데이터만 저장하고 음성·transcript를
 저장하지 않는다. 현재 실제 마이크는 계속 비활성 상태다.
 
+검증 FSM은 이제 현재 단계와 연결된 interrupt 단계 외 이벤트를 거부하고,
+재생 완료 전 청취 확인과 지난 단계 재시도를 허용하지 않는다. STT 불일치,
+중복 final/turn/playback/interrupt, 완료·취소 동시 관측, 무음 구간 활동도
+즉시 실패다. 로컬 브리지는 재생 직전 일반 큐 발화를 TTS cleanup에서 잃지
+않고, clone voice fallback도 단일 playback owner 안에서 수행한다. 전체 음성
+414개와 관련 검증/runtime/UI 50개는 통과했지만 이는 합성 입력과 mock 장치를
+사용한 계약 검증이다.
+
 다음 조치: 사용자가 Control Page의 “검증 세션 동안 마이크 허용”을 직접 확인한
 뒤 로컬/Discord 10턴, barge-in, 무음 구간을 실행하고 비식별 보고서를 기록한다.
 

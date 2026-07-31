@@ -2,7 +2,7 @@
 
 Document status: **Current**
 Last reviewed: 2026-07-31 KST
-Source branch: `codex/dependency-config-hardening` through `bd0786d`
+Source branch: `codex/dependency-config-hardening` through `3473a44`
 
 이 문서는 현재 확인된 사실만 기록한다. 목표 구조와 과거 계획은 다른 설계/계획 문서를 사용한다.
 
@@ -26,6 +26,15 @@ Source branch: `codex/dependency-config-hardening` through `bd0786d`
     `explicit_postcondition` 결과 검증을 모두 요구한다.
   - 누락·손상·상위 상태와 모순된 Mindcraft 계약은 fail-closed하며,
     Control Page와 Runtime Health는 같은 validator를 사용한다.
+- 음성 P0 검증 FSM과 로컬 재생 연속성 경계를 강화했다.
+  - 현재 surface와 barge-in에 연결된 interrupt 단계만 이벤트를 받을 수 있다.
+    지난 단계 재시도와 재생 완료 전 청취 확인은 서버에서 거부한다.
+  - STT 불일치, 중복 final/turn/playback/interrupt, 완료·취소 동시 관측,
+    무음 구간의 모든 음성·재생 활동은 즉시 해당 시도를 실패시킨다.
+  - 재생 직전에 일반 큐에 들어온 발화는 TTS 종료·cooldown 때문에 폐기하지
+    않는다. 재생 중 발화는 기존 barge-in 큐와 VAD/RMS/화자 검증을 유지한다.
+  - clone TTS 실패 시 같은 playback owner 안에서 `auto` voice로 한 번
+    fallback하므로 재귀 claim 충돌과 이중 재생을 만들지 않는다.
 - 루트 Python 의존성은 `requirements.lock`으로 고정했다.
 - GitHub Actions는 Windows/Python 3.11/Node 24에서 전체 회귀 테스트와 실제 `main.py` 프로세스 smoke를 실행한다.
 - 단기 대화 연속성 checkpoint의 guild 초기화 경계를 강화했다.
@@ -747,6 +756,24 @@ Source branch: `codex/dependency-config-hardening` through `bd0786d`
   `minecraft_world_lease_owner_conflict`로 fail-closed 종료됐다. stale 경과
   뒤 같은 컨테이너가 claim을 회수해 `healthy`, restart count 0이 됐다.
   Control Page도 새 이미지에서 `healthy`, restart count 0이다.
+- `3473a44`의 음성 P0 FSM·입력 연속성 변경은 전체 음성 테스트 414개와
+  검증 API/capability/동의/Discord heartbeat/UI 테스트 50개를 통과했다.
+  전체 discovery는 Discord 이미지에서 1,874개를 실행했고 기능 assertion
+  실패는 0개였다. 이미지에 없는 `git`, Linux의 `WindowsPath`, Voyager
+  `gymnasium` 때문에 난 환경 오류 4개가 가리킨 실제 테스트 7개는 Windows
+  Python과 Codex Gateway/Voyager 이미지에서 모두 통과했다.
+- 새 이미지 digest는 Bot API
+  `sha256:fd4b48cc5cdaeebaa3973d674f6be8a5fccbd1c66ac303e9cc426a283edccb13`,
+  Control Page
+  `sha256:cdb1270127412370515daff1c6ab4af0e01541dd476b7497f1812d4671045577`,
+  Discord
+  `sha256:65e0554b97f5fe97aa3a9e2b850d6cf5c6a5682ed5f9c03d97def97e20d7be2a`다.
+  세 이미지의 `pip check`, Python `compileall`, validation JavaScript
+  `node --check`, `git diff --check`를 통과했다.
+- Bot API와 Control Page만 새 이미지로 교체했다. 첫 Bot API 기동은 교체 전
+  컨테이너의 owner claim이 15초 stale 유예 안에 있어 fail-closed 종료됐고,
+  유예 뒤 같은 컨테이너가 정상 인수했다. 현재 두 서비스는 `healthy`,
+  restart count 0이다. Discord와 마이크·LLM/STT/TTS는 시작하지 않았다.
 - 배포 뒤 공식 `check_docker_runtime.ps1 -IncludeLocalBridge`는
   Control Page, Bot API, Main/Router/Sub LLM, TTS, STT, Vision과 Windows
   Local I/O Bridge를 모두 준비 상태로 판정했다. 실제 Discord bot,
