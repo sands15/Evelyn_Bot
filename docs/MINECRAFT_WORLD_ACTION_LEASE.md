@@ -1,7 +1,7 @@
 # Minecraft World-Action Lease
 
 Document status: **Current implementation contract**
-Last reviewed: 2026-07-30 KST
+Last reviewed: 2026-07-31 KST
 
 ## Purpose
 
@@ -19,7 +19,11 @@ Minecraft runner may start or accept a goal.
 - The default TTL is 1 hour; the maximum is 4 hours.
 - A lease belongs to one guild/context and one issuing process nonce.
 - An owner-process restart never restores the previous lease.
-- A live owner refreshes the status heartbeat every 5 seconds.
+- A live owner refreshes the status and owner-claim heartbeats every 5 seconds.
+- While no lease exists, the owner probes the deferred Minecraft service every
+  30 seconds instead of on every heartbeat. Lease expiry is still checked on
+  every 5-second tick, and explicit status or mutation requests are immediate.
+  The Mindcraft service keeps its independent 5-second authorization guard.
 - The owner also holds `owner_claim.json`. A second process cannot initialize
   as owner while that claim is fresh; a stale claim is eligible for takeover
   only after 15 seconds or three watchdog intervals, whichever is longer.
@@ -103,7 +107,9 @@ Unit coverage includes lease issue, expiry, restart non-restore, competing-owner
 rejection, stale-claim takeover, stale runner cleanup, status failure,
 cross-guild rejection, authenticated typed delegation, token rotation, proof
 mismatch, stale heartbeat, stop verification, retry exhaustion, privacy, and
-retention.
+retention. It also verifies that standby service probes are throttled without
+slowing the owner-claim heartbeat and that only internal background status
+failures are omitted from repetitive logs.
 
 Live Docker/Minecraft verification is still required. A passing unit suite does
 not prove that container scheduling, shared-volume heartbeat propagation,

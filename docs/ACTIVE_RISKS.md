@@ -47,6 +47,12 @@ grace를 사용한다. 실제 SIGTERM은 4.2초 안에 claim을 제거했으며 
 `--force-recreate`는 첫 시도에 healthy가 됐다. 전원 차단·SIGKILL처럼 cleanup이
 불가능한 종료는 의도적으로 15초 stale guard 뒤에만 새 owner가 인수한다.
 
+Minecraft가 지연 시작인 동안 owner claim과 공개 상태 heartbeat는 5초로
+유지하되, 외부 서비스 `/status` 탐지는 30초로 분리했다. lease 만료와
+Mindcraft 자체 authorization guard는 계속 5초 경계이며, 명시적 상태·변경
+요청은 즉시 실행된다. 따라서 대기 서비스 timeout이 핵심 런타임 로그와
+event loop를 계속 점유하지 않으면서도 unauthorized runner 방어는 유지된다.
+
 공식 Discord 이미지에서 grant crash/restart 비복구, 실행 중 교체·만료,
 audit write 실패, exact evidence, Discord status 노출, Minecraft lease와
 실제 `main.py` crash/restart를 포함한 집중 테스트 96개를 통과했다. 전체 core

@@ -791,6 +791,20 @@ Source branch: `codex/dependency-config-hardening` through `d504303`
   Control Page, Bot API, Main/Router/Sub LLM, TTS, STT, Vision과 Windows
   Local I/O Bridge를 모두 준비 상태로 판정했다. 실제 Discord bot,
   Minecraft/Voyager와 마이크 capture는 시작하지 않았다.
+- `159093e`는 Minecraft 단일 owner의 5초 claim/status heartbeat와 lease
+  만료 처리를 그대로 유지하면서, lease 없는 지연 시작 상태의 HTTP probe만
+  30초로 분리했다. 내부 background `/status` 실패는 반복 로그를 남기지
+  않지만 명시적 상태·시작·중지·목표 요청의 실패 보고는 유지한다.
+- Minecraft/Fast Control/lease boundary/shutdown 집중 테스트 131개,
+  Python `compileall`, Bot API 이미지 `pip check`, Compose config와
+  `git diff --check`를 통과했다.
+- 배포 전 기존 Bot API는 Minecraft가 꺼진 상태에서 90초 동안 동일
+  `TimeoutError`를 13번 기록했다. 새 이미지 배포 뒤 30초 probe 경계를
+  지나도 해당 반복 로그는 0건이며, owner claim과 공개 상태 heartbeat는
+  계속 전진했다.
+- 현재 Bot API 이미지 digest는
+  `sha256:d1e8e5920019859e011b52fcb7dabfaf94831f601526c9ed1898fbedba6a47f3`이고
+  `healthy`, restart count 0이다. Control Page도 계속 `healthy`다.
 
 ## Operational boundaries
 
