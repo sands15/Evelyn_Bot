@@ -105,6 +105,26 @@ Main/Voice LLM의 runtime status context에는
   다시 검사하고, unknown/legacy 문자열 및 additive private 필드를 버린다.
 - 렌더링은 `owner`, `code`, coarse age bucket만 포함하며 최대 3개다.
 
+Autonomy의 실패 문맥은 별도 exact 계약만 사용한다.
+
+```json
+{
+  "schema": "autonomy.failure.v1",
+  "code": "autonomy_executor_observe_failed|autonomy_executor_execute_failed|autonomy_cycle_failed",
+  "phase": "observe|execute|cycle",
+  "domain": "assistant|minecraft|unknown",
+  "action": "optional exact supported action",
+  "verified": false
+}
+```
+
+- exception message, exception repr, URL, 경로와 token-like 원문은 관찰,
+  영속 상태, action audit, 알림과 사용자 status에 복사하지 않는다.
+- action 실행 예외는 `failed/verified=false`이며 plan cursor를 전진시키지
+  않는다.
+- legacy state의 raw error는 load와 writer에서 정규화하고, Discord와
+  Control Page가 마지막 출력 직전에 exact code allowlist를 다시 검사한다.
+
 ## Codex credential boundary
 
 Compose no longer mounts the user's live `~/.codex/auth.json` or
@@ -187,6 +207,18 @@ Completed locally:
   `sha256:1ad4935410afec659a1862e11d3950c3657d379618bb29d3190cde7f58cc69b9`
   는 내부 `compileall`, `pip check`와 집중 테스트를 통과했다. 실제
   Discord/Main 서비스는 시작하지 않았다.
+
+2026-07-31 autonomy failure hardening:
+
+- token-like 문자열, 내부 URL과 Windows path를 관찰·실행·cycle 예외와
+  legacy state에 주입한 집중 테스트 78개에서 고정 marker만 남았다.
+- Discord I/O 99개, runtime 393개(skip 2), UI 154개(skip 7)를 통과했다.
+  core 476개는 기능 assertion 실패 0개였고 이미지에 없는 `git` 오류 2개와
+  Windows 전용 OCR은 Windows 모듈 19개로 보완했다.
+- Discord/Main image
+  `sha256:f0d82b867babaeb5ad4731116fa90c4ae91e30630dfc6ca6e64bca36506c83b9`
+  는 내부 `compileall`, `pip check`, 계약 import와 집중 테스트 78개를
+  통과했다. 실제 Discord/Main 서비스는 시작하지 않았다.
 
 Still required before deployment:
 

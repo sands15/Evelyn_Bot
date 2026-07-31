@@ -2,7 +2,7 @@
 
 Document status: **Current**
 Last reviewed: 2026-07-31 KST
-Source branch: `codex/dependency-config-hardening` through `436fb59`
+Source branch: `codex/dependency-config-hardening` through `26c97e8`
 
 이 문서는 현재 확인된 사실만 기록한다. 목표 구조와 과거 계획은 다른 설계/계획 문서를 사용한다.
 
@@ -103,6 +103,16 @@ Source branch: `codex/dependency-config-hardening` through `436fb59`
   - Discord `자율상태`는 현재 guild의 승인 활성 여부, 남은 TTL, audit
     readiness와 strict evidence policy를 표시하되 issuer와 grant ID는
     공개하지 않는다.
+  - executor 관찰 예외는 `autonomy.failure.v1`의 고정
+    `autonomy_executor_observe_failed` marker로만 판단 상태에 들어간다.
+    예외 메시지, token-like 문자열, 내부 URL과 filesystem 경로는 저장하지
+    않는다.
+  - action executor 예외는 고정 `autonomy_executor_execute_failed`인
+    `failed/verified=false` 결과로 action audit에 남고 plan cursor를
+    전진시키지 않는다. 그 밖의 cycle 예외는 `autonomy_cycle_failed`다.
+  - legacy 영속 상태를 읽을 때와 다시 쓸 때 raw `last_error` 및
+    `executor_errors`를 정규화하며, Discord와 Control Page 최종 출력도 같은
+    exact allowlist를 다시 검사한다.
 - Codex Gateway의 `/codex/action`은 bearer token을 요구한다. `/health`는 읽기 전용으로 유지한다.
 - 사용되지 않던 `docs/assets/evelyn-page.js`는 삭제했고, UI 테스트는 실제 `docs/index.html` 인라인 컨트롤러를 검사한다.
 - Docker Compose의 사용자별 `C:/Users/Admin/...` 경로는 환경변수와 `USERPROFILE` 기반으로 바꿨다.
@@ -890,6 +900,18 @@ Source branch: `codex/dependency-config-hardening` through `436fb59`
   `sha256:1ad4935410afec659a1862e11d3950c3657d379618bb29d3190cde7f58cc69b9`는
   `compileall`, `pip check`와 집중 테스트를 통과했지만 시작하지 않았다.
   실행 중인 Control Page와 Bot API는 그대로 healthy다.
+- `26c97e8`은 자율 executor의 관찰·실행·cycle 예외 원문을
+  `autonomy.failure.v1` 고정 marker로 교체했다. 실행 예외는 action별
+  failed/unverified audit 결과이며 승인된 계획을 성공으로 진행시키지 않는다.
+- 새 계약 집중 테스트 78개, Discord I/O 99개, runtime 393개(skip 2),
+  UI 154개(skip 7)를 통과했다. core 476개는 기능 assertion 실패 0개였고
+  이미지에 `git`이 없어 난 기존 서명 검사 2개와 Windows 전용 OCR은 Windows
+  모듈 19개로 보완했다.
+- 새 Discord/Main image
+  `sha256:f0d82b867babaeb5ad4731116fa90c4ae91e30630dfc6ca6e64bca36506c83b9`는
+  내부 `compileall`, `pip check`, 새 계약 포함 확인과 이미지 내부 집중
+  테스트 78개를 통과했다. 실제 Discord/Main 서비스는 시작하지 않았다.
+  실행 중인 Control Page와 Bot API 두 서비스는 그대로 유지했다.
 
 ## Operational boundaries
 

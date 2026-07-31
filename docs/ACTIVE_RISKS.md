@@ -30,6 +30,14 @@ flush/fsync와 기록 실패 시 전체 grant 폐기도 구현됐다. Minecraft 
 목표 변경은 명시적 outcome marker와 실제 상태 증거가 없으면 성공 문구를
 만들지 않는다.
 
+executor 실패 문맥도 content-free 계약으로 닫혔다. 환경 관찰 실패,
+action 실행 실패와 나머지 cycle 실패는 각각 exact code만 남기며, 실행
+예외는 `failed/verified=false` action outcome이라 계획을 진행시키지 않는다.
+이전 raw `last_error`와 `executor_errors`는 재시작 load, writer, Discord와
+Control Page 최종 consumer에서 다시 정규화한다. 따라서 이 항목의 남은 P0는
+오류 원문 처리나 정적 승인 계약이 아니라 실제 승인 세션의 live effect와
+실패·복구 전이 검증이다.
+
 현재 Docker local core와 Bot API는 실행 중이지만 Discord bot과
 Minecraft/Voyager는 사용자 요청 없이 지연 시작 상태다. 번들 Python에는
 `aiohttp`와 `discord`가 없으므로 실제 Discord 승인 명령부터 메시지 전송 및
@@ -398,6 +406,12 @@ content-free로 바꿨다. Codex `error`/`stderr_tail`/`message`, Voyager
 `runtime.recent-error.v1`의 exact owner/code/age bucket으로 바꾸며, 최종
 context builder가 schema·owner·code·bucket allowlist를 다시 검사한다.
 성공한 Voyager critique는 최근 오류로 취급하지 않는다.
+
+`26c97e8`은 자율 engine 내부 판단·영속 상태·공개 status의 executor 예외
+원문도 `autonomy.failure.v1`으로 교체했다. 관찰·실행·cycle의 세 exact code
+외 입력은 generic cycle code로 바뀌고, 실패 payload의 domain/action은 지원
+목록만 허용한다. 실행 실패는 content-free audit 결과로 기록되지만 성공
+evidence가 아니며, legacy 상태와 최종 consumer도 독립적으로 재검사한다.
 
 다음 조치: 새 서비스 owner를 만들 때 typed schema와 오류 카운터를 필수 계약으로
 적용하고, 기존 대형 설정 모듈은 기능 변경 시 점진적으로 이동한다.

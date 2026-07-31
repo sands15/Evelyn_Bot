@@ -257,6 +257,10 @@ Phase 1 is the stable contract that later phases will wire into.
   and OCR availability are evaluated separately and stale observation text is
   removed before prompt assembly.
 - Memory writing now has an explicit `MemoryWriterDecision` contract before summary/fact/open-question updates are scheduled.
+- Autonomy observations never carry executor exception text into need/goal
+  selection. Observation, action execution, and cycle failures use the exact
+  content-free `autonomy.failure.v1` contract; action failures remain
+  unverified and cannot advance a plan.
 - Minecraft context now pulls compact live state plus matching Voyager skill snippets into the skill/capability section when the policy asks for it.
 - Minecraft context also reads Odyssey-style JSON capability data when `ODYSSEY_CAPABILITY_JSON_DIR` is available, adding compact action / recipe / tool / smelt / collect snippets instead of raw library dumps.
 - Discord attachment metadata is forwarded as `[Attached Visual Inputs]`; OpenAI/vLLM content-array payloads now convert those image URLs into `image_url` entries for actual multimodal main-model calls.
