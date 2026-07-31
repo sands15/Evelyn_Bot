@@ -1,10 +1,10 @@
 diff --git a/src/utils/mcdata.js b/src/utils/mcdata.js
 --- a/src/utils/mcdata.js
 +++ b/src/utils/mcdata.js
-@@ -4,11 +4,13 @@ import { createBot } from 'mineflayer';
+@@ -4,11 +4,12 @@ import { createBot } from 'mineflayer';
  import prismarine_items from 'prismarine-item';
  import { pathfinder } from 'mineflayer-pathfinder';
- import { plugin as pvp } from 'mineflayer-pvp';
+-import { plugin as pvp } from 'mineflayer-pvp';
 +import customPvpModule from '@nxg-org/mineflayer-custom-pvp';
  import { plugin as collectblock } from 'mineflayer-collectblock';
  import { plugin as autoEat } from 'mineflayer-auto-eat';
@@ -15,14 +15,14 @@ diff --git a/src/utils/mcdata.js b/src/utils/mcdata.js
  let mc_version = settings.minecraft_version;
  let mcdata = null;
  let Item = null;
-@@ -116,6 +118,7 @@ export function initBot(username) {
+@@ -116,5 +117,6 @@ export function initBot(username) {
  
      bot.loadPlugin(pathfinder);
-     bot.loadPlugin(pvp);
+-    bot.loadPlugin(pvp);
 +    bot.loadPlugin(customPvp);
++    bot.pvp = bot.swordpvp; // Mindcraft only uses the compatible attack/stop API.
      bot.loadPlugin(collectblock);
      bot.loadPlugin(autoEat);
-     bot.loadPlugin(armorManager); // auto equip armor
 diff --git a/src/agent/library/skills.js b/src/agent/library/skills.js
 --- a/src/agent/library/skills.js
 +++ b/src/agent/library/skills.js

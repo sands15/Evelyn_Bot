@@ -68,6 +68,16 @@ The root and Mindcraft manifests both pin the current public Mineflayer
 authentication-chain findings cannot be removed safely by overriding UUID or
 Microsoft/Xbox authentication dependencies.
 
+Mindcraft no longer loads both `mineflayer-pvp` and
+`@nxg-org/mineflayer-custom-pvp`. The legacy plugin and its
+`mineflayer-utils` dependency branch were removed; Mindcraft's existing
+`bot.pvp.attack/stop` calls are bridged to the pinned custom plugin's
+`bot.swordpvp` API. A build-time smoke verifies the plugin entry point and the
+two compatibility methods before an image can be produced. This reduced the
+Mindcraft production audit from 14 to 12 moderate findings while retaining
+zero high or critical findings. The root production audit remains 8 moderate,
+zero high, and zero critical findings.
+
 ## Typed owner configuration
 
 `runtime_config_schema.py` owns typed parsing and safe diagnostics for:

@@ -353,6 +353,13 @@ class MindcraftRuntimeContractTests(unittest.TestCase):
         combat_patch = (
             REPO_ROOT / "external" / "mindcraft_evelyn" / "combat.patch"
         ).read_text(encoding="utf-8")
+        combat_smoke = (
+            REPO_ROOT
+            / "external"
+            / "mindcraft_evelyn"
+            / "scripts"
+            / "verify_combat_runtime.mjs"
+        ).read_text(encoding="utf-8")
         dockerfile = (REPO_ROOT / "docker" / "Dockerfile.mindcraft").read_text(encoding="utf-8")
         escape_source = (
             REPO_ROOT
@@ -367,7 +374,14 @@ class MindcraftRuntimeContractTests(unittest.TestCase):
         self.assertIn("fightWithCustomPvp", combat_source)
         self.assertIn("selectCombatTarget", combat_source)
         self.assertEqual(package["dependencies"]["@nxg-org/mineflayer-custom-pvp"], "1.7.16")
+        self.assertNotIn("mineflayer-pvp", package["dependencies"])
         self.assertIn("bot.loadPlugin(customPvp)", combat_patch)
+        self.assertIn("-import { plugin as pvp } from 'mineflayer-pvp';", combat_patch)
+        self.assertIn("-    bot.loadPlugin(pvp);", combat_patch)
+        self.assertIn("bot.pvp = bot.swordpvp", combat_patch)
+        self.assertIn("SwordPvp?.prototype?.attack", combat_smoke)
+        self.assertIn("SwordPvp?.prototype?.stop", combat_smoke)
+        self.assertIn("verify_combat_runtime.mjs", dockerfile)
         self.assertIn("-            await attackEntity(bot, enemy, false)", combat_patch)
         self.assertIn("evelyn_combat.js", dockerfile)
         self.assertIn("evelyn_escape_controller.js", dockerfile)

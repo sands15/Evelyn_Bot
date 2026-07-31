@@ -307,3 +307,21 @@ no edible food. `acquire_food` repeatedly failed because bread crafting requires
 a crafting table and the deterministic recovery does not currently navigate to
 one. This predates the combat replacement and needs a separate normal-player
 food-recovery change; do not report overall survival as stable.
+
+## Dependency consolidation (2026-08-01)
+
+The staged Mindcraft runtime no longer installs the legacy `mineflayer-pvp`
+plugin in parallel with `@nxg-org/mineflayer-custom-pvp`. The only legacy API
+surface used by Mindcraft was `bot.pvp.attack/stop`; it now points at the custom
+plugin's verified `bot.swordpvp` implementation. The legacy plugin and its
+`mineflayer-utils` branch are absent from the generated lockfile and image.
+
+The isolated image build passed `npm ci`, all overlay patches, runtime lint,
+the pinned custom-PvP API smoke, and an offline image inspection. The focused
+Python Mindcraft contracts passed 15/15. The Node suite passed 82/83; the one
+Goal Manager assertion failure reproduces unchanged against the preceding
+image and is not caused by the dependency consolidation. The production audit
+is now moderate 12, high 0, critical 0. The staged image is
+`sha256:57f2ae27d8ea16b5a777905859dcd1b9b0f76ad895e5b374133024e2d46fa2e5`.
+It was inspected only; no Minecraft process, account login, or live service was
+started.

@@ -307,21 +307,26 @@ memory 고갈 시도까지 제거하지는 않는다. GPU 모델 로드 smoke도
 wheel을 재확인한다. 새 이미지 GPU 모델 로드 smoke 전에는 배포 완료로 판정하지
 않는다.
 
-## P1 — Node/Minecraft 의존성 취약점 14개
+## P1 — Node/Minecraft 의존성 취약점 12개
 
-2026-07-31 Mindcraft runtime의 ESLint를 10.8.0으로 올리고 실제 runtime
-config dependency를 명시적으로 고정한 새 이미지에서
-`npm audit --omit=dev` 결과는 moderate 14개, high/critical 0개다.
-기존 high 5개 ESLint/minimatch 체인은 제거됐다. 남은 대상은 Mineflayer
-인증/프로토콜 및 플러그인 체인이다.
+2026-08-01 Mindcraft runtime의 중복 PvP 구현을 정리했다. 기존
+`mineflayer-pvp`가 제공하던 `attack`/`stop` 호출은 이미 설치된
+`@nxg-org/mineflayer-custom-pvp`의 `bot.swordpvp`로 호환 연결하고, legacy
+패키지와 그 전이 `mineflayer-utils` 가지를 lockfile에서 제거했다. 새 이미지의
+`npm audit --omit=dev` 결과는 moderate 12개, high/critical 0개다. 기존 high
+5개 ESLint/minimatch 체인도 제거된 상태를 유지한다.
 
 - 직접 의존성: `mineflayer`, `mineflayer-armor-manager`,
-  `mineflayer-collectblock`, `mineflayer-pvp`
-- 전이 의존성: `@azure/msal-node`, `minecraft-protocol`, `mineflayer-tool`,
-  `mineflayer-utils`, `prismarine-auth`, `uuid`, `yggdrasil`
+  `mineflayer-collectblock`, `@nxg-org/mineflayer-custom-pvp`
+- 전이 의존성: `@nxg-org/mineflayer-tracker`,
+  `@nxg-org/mineflayer-trajectories`, `@azure/msal-node`,
+  `minecraft-protocol`, `mineflayer-tool`, `prismarine-auth`, `uuid`,
+  `yggdrasil`
 
-대부분 `fixAvailable=false`이며 제안된 일부 강제 수정은 주요 버전 역행을 포함한다.
-다음 조치: 강제 audit fix는 금지하고, 별도 호환성 검증에서 Mineflayer 체인을 갱신한다.
+대부분 `fixAvailable=false`다. npm이 fix 가능으로 표시한 custom-PvP와 armor
+가지는 각각 현재 최신 `1.7.16`·`2.0.1`에서 구버전 `1.7.2`·`1.4.2`로
+내리는 제안이라 적용하지 않았다. 다음 조치: 강제 audit fix는 금지하고,
+Microsoft/Xbox 인증 체인과 Mineflayer 플러그인의 호환 릴리스를 추적한다.
 
 ## P1 — Runtime Health 공개 projection 배포 대기
 

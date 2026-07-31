@@ -63,7 +63,9 @@ COPY external/mindcraft_evelyn/src/agent/vision/browser_viewer.js /app/mindcraft
 COPY external/mindcraft_evelyn/src/agent/vision/vision_interpreter.js /app/mindcraft/src/agent/vision/vision_interpreter.js
 COPY external/mindcraft_evelyn/profiles/evelyn.json /app/mindcraft/profiles/evelyn.json
 COPY external/mindcraft_evelyn/scripts/verify_runtime_lint.mjs /app/mindcraft/scripts/verify_runtime_lint.mjs
+COPY external/mindcraft_evelyn/scripts/verify_combat_runtime.mjs /app/mindcraft/scripts/verify_combat_runtime.mjs
 RUN node /app/mindcraft/scripts/verify_runtime_lint.mjs
+RUN node /app/mindcraft/scripts/verify_combat_runtime.mjs
 
 COPY docker/requirements.mindcraft.txt /app/docker/requirements.mindcraft.txt
 RUN python3 -m pip install --break-system-packages --no-cache-dir -r /app/docker/requirements.mindcraft.txt
