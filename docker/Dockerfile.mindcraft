@@ -33,6 +33,7 @@ RUN sed -i 's/\r$//' \
       profiles/defaults/survival.json \
       src/agent/action_manager.js \
       src/agent/agent.js \
+      src/agent/coder.js \
       src/agent/self_prompter.js \
       src/agent/library/skills.js \
       src/agent/modes.js \
