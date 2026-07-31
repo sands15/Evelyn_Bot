@@ -8,9 +8,12 @@ export async function main(bot) {
 }
 `);
 const invalid = await eslint.lintText(`
-export async function main(bot) {
-    Promise.resolve(bot);
+async function helper() {
     await Promise.resolve();
+}
+export async function main(bot) {
+    helper();
+    await Promise.resolve(bot);
 }
 `);
 
