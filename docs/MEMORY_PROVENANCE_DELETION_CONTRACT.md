@@ -304,6 +304,29 @@ journal/hash/head가 손상됐거나 읽을 수 없으면 overview와 mutation�
 쓰기 전에 integrity를 검사한다. writer lock 또는 marker를 확보할 수 없을
 때도 HTTP 503이며 note는 바뀌지 않는다.
 
+## Content-bound user review confirmation
+
+Control Page의 기억 카드 `confirm`은 사용자가 화면에서 검토한 정확한 note
+revision에만 적용된다. 요청은 카드에서 받은 64자리 `expectedContentHash`를
+필수로 보내며, 서버는 단일 edit lock 안에서 note를 다시 읽어 현재
+`sourceHash`와 비교한다. 다르면 `memory_note_changed_since_read`로 아무 상태도
+쓰지 않는다.
+
+성공하면 `memory.user-review-confirmation.v1` receipt와 함께 sidecar에
+`confirmed_at`, `confirmed_content_hash`를 flush/fsync 뒤 원자 기록한다. snapshot/card는 저장된
+hash가 현재 note hash와 정확히 같은 경우에만 `confirmed=true`,
+`confirmationState=confirmed`, `confirmationContentBound=true`를 반환한다. 이후
+파일 변경이나 예전 hash 없는 sidecar를 발견하면 `confirmed=false`,
+`confirmationState=stale`로 fail-closed하고 재확인을 요구한다. state write가
+실패하면 성공을 반환하지 않는다.
+
+본문이 공개 화면에 표시되지 않는 legacy note와 public mutation surface 밖의
+internal note, explicit confirmation 무결성이 손상된 note는 확인할 수 없다. 이
+review confirmation은 현재 내용을 사용자가 봤다는 UI 상태이며 source refs나
+evidence hash를 새로 만들지 않고, ungrounded 기억을 `attributed`로 승격하지도
+않는다. 새 직접 사용자 근거가 필요하면 현재 발화의 `/remember` 또는
+`기억해줘:` 계약으로 별도 user-confirmed note를 만든다.
+
 ## Optimistic edit and correction
 
 Control Page에서 기억을 수정할 때는 마지막으로 읽은 card의 `sourceHash`를

@@ -510,7 +510,10 @@ class ControlPageStateModuleTests(unittest.TestCase):
                     expected_content_hash or "",
                 )
             )
-            return {"ok": action == "edit", "noteId": note_id}
+            return {
+                "ok": action in {"edit", "confirm"},
+                "noteId": note_id,
+            }
 
         ok_result, ok_status = handle_control_page_memory_note_action_request(
             "note-1",
@@ -527,6 +530,16 @@ class ControlPageStateModuleTests(unittest.TestCase):
             {"action": "missing"},
             update_note=update_note,
         )
+        confirm_result, confirm_status = (
+            handle_control_page_memory_note_action_request(
+                "note-confirm",
+                {
+                    "action": "confirm",
+                    "expectedContentHash": "confirmed-hash",
+                },
+                update_note=update_note,
+            )
+        )
         quarantined_result, quarantined_status = (
             handle_control_page_memory_note_action_request(
                 "note-3",
@@ -537,15 +550,71 @@ class ControlPageStateModuleTests(unittest.TestCase):
                 },
             )
         )
+        hidden_result, hidden_status = (
+            handle_control_page_memory_note_action_request(
+                "note-hidden",
+                {
+                    "action": "confirm",
+                    "expectedContentHash": "hidden-hash",
+                },
+                update_note=lambda *_args, **_kwargs: {
+                    "ok": False,
+                    "error": "memory_confirmation_content_hidden",
+                },
+            )
+        )
+        write_failed_result, write_failed_status = (
+            handle_control_page_memory_note_action_request(
+                "note-write-failed",
+                {
+                    "action": "confirm",
+                    "expectedContentHash": "write-hash",
+                },
+                update_note=lambda *_args, **_kwargs: {
+                    "ok": False,
+                    "error": "memory_confirmation_write_failed",
+                },
+            )
+        )
+        integrity_result, integrity_status = (
+            handle_control_page_memory_note_action_request(
+                "note-integrity-invalid",
+                {
+                    "action": "confirm",
+                    "expectedContentHash": "integrity-hash",
+                },
+                update_note=lambda *_args, **_kwargs: {
+                    "ok": False,
+                    "error": "memory_note_integrity_invalid",
+                },
+            )
+        )
 
         self.assertEqual(ok_status, 200)
+        self.assertEqual(confirm_status, 200)
         self.assertEqual(fail_status, 400)
         self.assertEqual(quarantined_status, 409)
+        self.assertEqual(hidden_status, 409)
+        self.assertEqual(write_failed_status, 500)
+        self.assertEqual(integrity_status, 409)
         self.assertTrue(ok_result["ok"])
+        self.assertTrue(confirm_result["ok"])
         self.assertFalse(fail_result["ok"])
         self.assertEqual(
             quarantined_result["error"],
             "memory_note_quarantined",
+        )
+        self.assertEqual(
+            hidden_result["error"],
+            "memory_confirmation_content_hidden",
+        )
+        self.assertEqual(
+            write_failed_result["error"],
+            "memory_confirmation_write_failed",
+        )
+        self.assertEqual(
+            integrity_result["error"],
+            "memory_note_integrity_invalid",
         )
         self.assertEqual(
             calls,
@@ -558,6 +627,13 @@ class ControlPageStateModuleTests(unittest.TestCase):
                     "current-hash",
                 ),
                 ("note-2", "missing", "", "", ""),
+                (
+                    "note-confirm",
+                    "confirm",
+                    "",
+                    "",
+                    "confirmed-hash",
+                ),
             ],
         )
         self.assertEqual(control_page_result_status({"ok": True}), 200)

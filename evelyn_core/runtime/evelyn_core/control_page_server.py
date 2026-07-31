@@ -1549,11 +1549,16 @@ def memory_note_action_status(result: dict[str, Any]) -> int:
         return 404
     if error in {
         "locked_legacy_note",
+        "memory_confirmation_content_hidden",
         "memory_note_changed_since_read",
+        "memory_note_integrity_invalid",
         "memory_note_quarantined",
     }:
         return 409
-    if error == "memory_edit_failed":
+    if error in {
+        "memory_edit_failed",
+        "memory_confirmation_write_failed",
+    }:
         return 500
     if error == "memory_edit_cleanup_required":
         return 503

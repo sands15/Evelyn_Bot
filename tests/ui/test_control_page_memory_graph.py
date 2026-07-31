@@ -127,6 +127,22 @@ class ControlPageMemoryGraphTests(unittest.TestCase):
             self.html,
         )
         self.assertIn(
+            'action === "edit" || action === "confirm"',
+            self.html,
+        )
+        self.assertIn(
+            'selectedMemoryCard.confirmationState',
+            self.html,
+        )
+        self.assertIn("현재 내용 재확인", self.html)
+        self.assertIn("confirmationStale", self.html)
+        self.assertIn("현재 revision 결박", self.html)
+        self.assertIn("재확인 필요", self.html)
+        self.assertIn(
+            "확인하는 동안 기억 내용이나 근거 상태가 바뀌어서 확인하지 않았어.",
+            self.html,
+        )
+        self.assertIn(
             "다른 곳에서 기억이 바뀌어서 덮어쓰지 않았어.",
             self.html,
         )

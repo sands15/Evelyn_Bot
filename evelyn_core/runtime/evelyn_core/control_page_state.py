@@ -1049,11 +1049,17 @@ def handle_control_page_memory_note_action_request(
         if error
         in {
             "locked_legacy_note",
+            "memory_confirmation_content_hidden",
             "memory_note_changed_since_read",
+            "memory_note_integrity_invalid",
             "memory_note_quarantined",
         }
         else 500
-        if error == "memory_edit_failed"
+        if error
+        in {
+            "memory_edit_failed",
+            "memory_confirmation_write_failed",
+        }
         else 503
         if error == "memory_edit_cleanup_required"
         else 404

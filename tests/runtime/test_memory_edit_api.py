@@ -188,6 +188,97 @@ class MemoryEditApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(payload["edited"])
         self.assertEqual(payload["error"], "memory_edit_failed")
 
+    async def test_confirmation_requires_csrf_and_exact_content_hash(
+        self,
+    ) -> None:
+        note = self.create_note()
+        path = f"/api/control-page/memory/{note.note_id}"
+
+        missing_hash_response = await self.client.post(
+            path,
+            headers=self.headers(),
+            json={"action": "confirm"},
+        )
+        stale_hash_response = await self.client.post(
+            path,
+            headers=self.headers(),
+            json={
+                "action": "confirm",
+                "expectedContentHash": "0" * 64,
+            },
+        )
+        missing_csrf_response = await self.client.post(
+            path,
+            headers={"Origin": self.origin},
+            json={
+                "action": "confirm",
+                "expectedContentHash": note.source_hash,
+            },
+        )
+        accepted_response = await self.client.post(
+            path,
+            headers=self.headers(),
+            json={
+                "action": "confirm",
+                "expectedContentHash": note.source_hash,
+            },
+        )
+        detail_response = await self.client.get(
+            path,
+            headers={"Origin": self.origin},
+        )
+
+        self.assertEqual(missing_hash_response.status, 400)
+        self.assertEqual(
+            (await missing_hash_response.json())["error"],
+            "memory_confirm_content_hash_required",
+        )
+        self.assertEqual(stale_hash_response.status, 409)
+        self.assertEqual(
+            (await stale_hash_response.json())["error"],
+            "memory_note_changed_since_read",
+        )
+        self.assertEqual(missing_csrf_response.status, 403)
+        self.assertEqual(accepted_response.status, 200)
+        accepted = await accepted_response.json()
+        self.assertEqual(
+            accepted["schema"],
+            "memory.user-review-confirmation.v1",
+        )
+        self.assertTrue(accepted["confirmationContentBound"])
+        detail = await detail_response.json()
+        self.assertTrue(detail["card"]["confirmed"])
+        self.assertEqual(
+            detail["card"]["confirmationState"],
+            "confirmed",
+        )
+
+    async def test_confirmation_state_write_failure_returns_500(
+        self,
+    ) -> None:
+        note = self.create_note()
+        with patch.object(
+            memory_vault,
+            "_write_user_note_state",
+            side_effect=OSError("disk unavailable"),
+        ):
+            response = await self.client.post(
+                f"/api/control-page/memory/{note.note_id}",
+                headers=self.headers(),
+                json={
+                    "action": "confirm",
+                    "expectedContentHash": note.source_hash,
+                },
+            )
+
+        self.assertEqual(response.status, 500)
+        payload = await response.json()
+        self.assertFalse(payload["confirmed"])
+        self.assertEqual(
+            payload["error"],
+            "memory_confirmation_write_failed",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -376,6 +376,14 @@ Source branch: `codex/dependency-config-hardening`, current grounded-memory prom
     context에서 제거되며 Control Page에는 `근거 손상`과 content-free blocker로
     표시된다. 사용자가 편집하면 `user-edit` ref와 새 title/body evidence hash,
     새 확인 시각으로 다시 결합한 뒤에만 회상 가능해진다.
+  - Control Page 카드의 일반 `확인`은 이제 사용자가 읽은 정확한 note
+    `sourceHash`를 필수로 보내고 서버가 edit lock 안에서 현재 revision을 다시
+    대조한다. 성공 sidecar는 확인 시각과 `confirmed_content_hash`를 flush/fsync
+    뒤 함께 보존한다. 이후 note가 바뀌거나 예전 sidecar에 hash가 없으면 confirmed 표시를
+    유지하지 않고 `confirmationState=stale`·재확인 수로 드러낸다. 숨겨진 legacy,
+    internal note와 explicit confirmation 무결성이 손상된 note는 확인할 수 없고
+    state write 실패도 성공으로 보고하지 않는다. 이 UI review 상태는
+    source/evidence를 새로 만들거나 ungrounded 기억을 attributed로 승격하지 않는다.
   - Control Page는 요청마다 request ID를 만들고 Local I/O Bridge는 기존 음성
     turn ID를 일반·stream 요청에 전달한다. 노트 파일명과 공개 ID는 기억 본문
     hash에서 만들지 않아 content-free receipt가 본문 equality oracle이 되지 않는다.
@@ -1371,6 +1379,28 @@ Source branch: `codex/dependency-config-hardening`, current grounded-memory prom
   validation JavaScript `node --check`, bundled Python `compileall`과
   `git diff --check`를 통과했다. 실행 중인 서비스는 교체하지 않았고 실제 사용자
   기억, Discord, 마이크, 스피커, Minecraft와 runtime artifact는 변경하지 않았다.
+- content-bound user review confirmation은 Control Page가 표시한 exact
+  `sourceHash`를 서버에서 lock 안에 다시 비교하고, 성공 sidecar도 같은 hash에
+  결박한다. 누락 hash, stale revision, 숨겨진 legacy/internal note, 손상된
+  explicit-confirm note와 state write 실패를 각각 fail-closed하며, 이후 note
+  변경은 `confirmationState=stale`로 강등한다. 이 review 상태는 provenance
+  backfill이나 recall grounding으로 사용하지 않는다.
+- current-source 검증은 core 558개 중 기능 assertion 실패 0개를 확인했다.
+  Discord 이미지의 `git` 부재로 난 기존 signature 환경 오류 2개는 Windows의
+  해당 모듈 13개로 보완했다. runtime 425개(skip 2), memory 162개, UI 157개,
+  voice 424개, Discord I/O 109개가 통과했다. 실제 HTTP confirmation의
+  CSRF/hash/stale/write-failure 집중 테스트 6개도 통과했다.
+- 현재 소스를 내장한 검증 이미지는 Discord/Main
+  `sha256:3cd615caeb3f5799f3873768c753d878df553904309d9c551e9ad508169238ed`,
+  Bot API
+  `sha256:878bd8a79e37a1f450dd057a40bff0d678f32cacf5c42618fac6c7be19c9f1ba`,
+  Control Page
+  `sha256:0b61d91b17127ce5335215113a2ecd473da6705bcc4ed042b4d7502788697cf7`이다.
+  이미지 내부 제품 소스 집중 테스트 132개씩(skip 1), 각 이미지
+  `compileall`/`pip check`, 전체 profile Compose config, 모든 Control Page asset
+  JavaScript `node --check`, bundled Python `compileall`, `git diff --check`를
+  통과했다. 실행 중인 서비스를 교체하지 않았고 실제 사용자 기억과 runtime
+  artifact를 읽거나 수정하지 않았다.
 
 ## Operational boundaries
 

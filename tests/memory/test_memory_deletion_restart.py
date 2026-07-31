@@ -270,6 +270,7 @@ class MemoryDeletionRestartTests(unittest.TestCase):
             update_memory_vault_user_note(
                 note.note_id,
                 "confirm",
+                expected_content_hash=note.source_hash,
                 root=root,
             )
             refresh_memory_hot_context(root=root)

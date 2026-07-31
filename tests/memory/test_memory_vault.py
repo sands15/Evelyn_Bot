@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+import json
 import sqlite3
 import sys
 import tempfile
@@ -490,7 +491,14 @@ class MemoryVaultTests(unittest.TestCase):
             )
             first = memory_vault_user_snapshot(root=root)
             note_id = first["cards"][0]["id"]
-            confirmed = update_memory_vault_user_note(note_id, "confirm", root=root)
+            confirmed = update_memory_vault_user_note(
+                note_id,
+                "confirm",
+                expected_content_hash=first["cards"][0][
+                    "sourceHash"
+                ],
+                root=root,
+            )
             pinned = update_memory_vault_user_note(note_id, "pin", root=root)
             second = memory_vault_user_snapshot(root=root)
             hidden = update_memory_vault_user_note(note_id, "hide", root=root)
@@ -498,6 +506,9 @@ class MemoryVaultTests(unittest.TestCase):
             state_path = root / "memory_index" / "user_note_state.json"
             note_raw = Path(first["vaultPath"]) / first["cards"][0]["path"]
             state_exists = state_path.exists()
+            state_payload = json.loads(
+                state_path.read_text(encoding="utf-8")
+            )
             raw_after_actions = note_raw.read_text(encoding="utf-8")
 
         self.assertEqual(first["counts"]["unconfirmed"], 1)
@@ -505,13 +516,215 @@ class MemoryVaultTests(unittest.TestCase):
         self.assertFalse(first["cards"][0]["body"].startswith("#"))
         self.assertTrue(first["cards"][0]["body"])
         self.assertTrue(confirmed["ok"])
+        self.assertEqual(
+            confirmed["schema"],
+            "memory.user-review-confirmation.v1",
+        )
+        self.assertTrue(confirmed["confirmationContentBound"])
         self.assertTrue(pinned["ok"])
         self.assertTrue(second["cards"][0]["confirmed"])
+        self.assertEqual(
+            second["cards"][0]["confirmationState"],
+            "confirmed",
+        )
+        self.assertTrue(
+            second["cards"][0]["confirmationContentBound"]
+        )
         self.assertTrue(second["cards"][0]["pinned"])
         self.assertTrue(hidden["ok"])
         self.assertEqual(third["counts"]["total"], 0)
         self.assertTrue(state_exists)
+        self.assertEqual(
+            state_payload["notes"][note_id][
+                "confirmed_content_hash"
+            ],
+            first["cards"][0]["sourceHash"],
+        )
         self.assertNotIn("confirmed_at", raw_after_actions)
+
+    def test_user_review_confirmation_is_bound_to_exact_note_revision(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_memory_vault_note(
+                note_type="concept",
+                title="Revision-bound confirmation",
+                body="The first reviewed body.",
+                source="control-page-user",
+                root=root,
+            )
+            first = memory_vault_user_snapshot(root=root)
+            first_card = first["cards"][0]
+            missing_hash = update_memory_vault_user_note(
+                first_card["id"],
+                "confirm",
+                root=root,
+            )
+            changed_before_confirm = update_memory_vault_user_note(
+                first_card["id"],
+                "confirm",
+                expected_content_hash="0" * 64,
+                root=root,
+            )
+            confirmed = update_memory_vault_user_note(
+                first_card["id"],
+                "confirm",
+                expected_content_hash=first_card["sourceHash"],
+                root=root,
+            )
+            edited = update_memory_vault_user_note(
+                first_card["id"],
+                "edit",
+                title="Revision-bound confirmation",
+                body="The second reviewed body.",
+                expected_content_hash=first_card["sourceHash"],
+                root=root,
+            )
+            after_edit = memory_vault_user_snapshot(root=root)
+            stale_card = after_edit["cards"][0]
+            reconfirmed = update_memory_vault_user_note(
+                stale_card["id"],
+                "confirm",
+                expected_content_hash=stale_card["sourceHash"],
+                root=root,
+            )
+            final = memory_vault_user_snapshot(root=root)
+
+        self.assertEqual(
+            missing_hash["error"],
+            "memory_confirm_content_hash_required",
+        )
+        self.assertEqual(
+            changed_before_confirm["error"],
+            "memory_note_changed_since_read",
+        )
+        self.assertTrue(confirmed["ok"])
+        self.assertTrue(edited["ok"])
+        self.assertFalse(stale_card["confirmed"])
+        self.assertEqual(
+            stale_card["confirmationState"],
+            "stale",
+        )
+        self.assertFalse(
+            stale_card["confirmationContentBound"]
+        )
+        self.assertEqual(
+            stale_card["provenance"]["userConfirmationState"],
+            "stale",
+        )
+        self.assertEqual(
+            after_edit["counts"]["confirmationStale"],
+            1,
+        )
+        self.assertTrue(reconfirmed["ok"])
+        self.assertTrue(final["cards"][0]["confirmed"])
+        self.assertEqual(
+            final["cards"][0]["confirmationState"],
+            "confirmed",
+        )
+
+    def test_hidden_and_internal_notes_cannot_be_user_confirmed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            legacy_path = write_memory_vault_note(
+                note_type="legacy",
+                title="Hidden legacy note",
+                body="The user cannot review this body in the public UI.",
+                root=root,
+            )
+            internal_path = write_memory_vault_note(
+                note_type="internal",
+                title="Internal contract note",
+                body="This note is outside the public mutation surface.",
+                root=root,
+            )
+            invalid_path = write_memory_vault_note(
+                note_type="concept",
+                title="Damaged explicit confirmation",
+                body="The explicit confirmation contract is incomplete.",
+                tags=["user-confirmed"],
+                source="control-page-user",
+                root=root,
+            )
+            legacy_note = parse_memory_note(legacy_path)
+            internal_note = parse_memory_note(internal_path)
+            invalid_note = parse_memory_note(invalid_path)
+            legacy_result = update_memory_vault_user_note(
+                legacy_note.note_id,
+                "confirm",
+                expected_content_hash=legacy_note.source_hash,
+                root=root,
+            )
+            internal_result = update_memory_vault_user_note(
+                internal_note.note_id,
+                "confirm",
+                expected_content_hash=internal_note.source_hash,
+                root=root,
+            )
+            invalid_result = update_memory_vault_user_note(
+                invalid_note.note_id,
+                "confirm",
+                expected_content_hash=invalid_note.source_hash,
+                root=root,
+            )
+
+        self.assertEqual(
+            legacy_result["error"],
+            "memory_confirmation_content_hidden",
+        )
+        self.assertEqual(
+            internal_result["error"],
+            "note_not_found",
+        )
+        self.assertEqual(
+            invalid_result["error"],
+            "memory_note_integrity_invalid",
+        )
+
+    def test_user_review_confirmation_write_failure_is_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = write_memory_vault_note(
+                note_type="concept",
+                title="Confirmation write failure",
+                body="This must not be reported as confirmed.",
+                root=root,
+            )
+            note = parse_memory_note(path)
+            with patch.object(
+                memory_vault_module,
+                "_write_user_note_state",
+                side_effect=OSError("disk unavailable"),
+            ):
+                result = update_memory_vault_user_note(
+                    note.note_id,
+                    "confirm",
+                    expected_content_hash=note.source_hash,
+                    root=root,
+                )
+            snapshot = memory_vault_user_snapshot(root=root)
+
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["confirmed"])
+        self.assertEqual(
+            result["error"],
+            "memory_confirmation_write_failed",
+        )
+        self.assertFalse(snapshot["cards"][0]["confirmed"])
+
+    def test_user_note_state_uses_durable_atomic_write(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with patch.object(
+                memory_vault_module,
+                "atomic_json_write",
+            ) as writer:
+                memory_vault_module._write_user_note_state(
+                    {"note-1": {"confirmed_at": "now"}},
+                    root,
+                )
+
+        self.assertEqual(writer.call_count, 1)
+        self.assertTrue(writer.call_args.kwargs["durable"])
 
     def test_provenance_is_exposed_in_cards_and_cached_recall(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -858,7 +1071,12 @@ class MemoryVaultTests(unittest.TestCase):
                 root=root,
             )
             note = parse_memory_note(path)
-            update_memory_vault_user_note(note.note_id, "confirm", root=root)
+            update_memory_vault_user_note(
+                note.note_id,
+                "confirm",
+                expected_content_hash=note.source_hash,
+                root=root,
+            )
             request = MemoryRecallRequest(
                 turn_id="turn-delete",
                 session_key="delete-session",

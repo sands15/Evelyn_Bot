@@ -94,6 +94,9 @@ MEMORY_PROVENANCE_FORWARD_REJECTIONS_SCHEMA = (
 )
 MEMORY_QUARANTINE_STATUS_SCHEMA = "memory.quarantine.status.v1"
 MEMORY_EDIT_RESULT_SCHEMA = "memory.edit.result.v1"
+MEMORY_USER_REVIEW_CONFIRMATION_SCHEMA = (
+    "memory.user-review-confirmation.v1"
+)
 MEMORY_EDIT_MAX_TITLE_CHARS = 160
 MEMORY_EDIT_MAX_BODY_CHARS = 100_000
 MEMORY_ADMIN_RECALL_MARKERS = (
@@ -840,6 +843,64 @@ def _user_confirmed_memory_integrity_state(
     )
 
 
+def _memory_confirmation_state(
+    note: MemoryVaultNote,
+    note_state: dict[str, Any],
+    *,
+    raw: str | None = None,
+) -> dict[str, Any]:
+    integrity_state = _user_confirmed_memory_integrity_state(
+        note,
+        raw=raw,
+    )
+    metadata_confirmed_at = clean_text(
+        str(note.metadata.get("confirmed_at") or "")
+    )
+    if integrity_state == "verified" and metadata_confirmed_at:
+        return {
+            "state": "confirmed",
+            "confirmedAt": metadata_confirmed_at,
+            "contentBound": True,
+        }
+    if integrity_state == "invalid":
+        return {
+            "state": "invalid",
+            "confirmedAt": "",
+            "contentBound": False,
+        }
+
+    reviewed_at = clean_text(
+        str(note_state.get("confirmed_at") or "")
+    )
+    reviewed_hash = clean_text(
+        str(note_state.get("confirmed_content_hash") or "")
+    ).lower()
+    if not reviewed_at:
+        return {
+            "state": "unconfirmed",
+            "confirmedAt": "",
+            "contentBound": False,
+        }
+    if (
+        re.fullmatch(r"[0-9a-f]{64}", reviewed_hash)
+        and re.fullmatch(r"[0-9a-f]{64}", note.source_hash)
+        and secrets.compare_digest(
+            reviewed_hash,
+            note.source_hash,
+        )
+    ):
+        return {
+            "state": "confirmed",
+            "confirmedAt": reviewed_at,
+            "contentBound": True,
+        }
+    return {
+        "state": "stale",
+        "confirmedAt": "",
+        "contentBound": False,
+    }
+
+
 def _public_memory_source_ref(value: str) -> str:
     cleaned = clean_text(value).strip()
     if not cleaned:
@@ -904,8 +965,9 @@ def _memory_note_provenance(
             for value in note.links
             if clean_text(value).lower().startswith("daily/")
         ]
-    confirmed_at = clean_text(
-        str(state.get("confirmed_at") or note.metadata.get("confirmed_at") or "")
+    confirmation = _memory_confirmation_state(
+        note,
+        state,
     )
     return {
         "schema": MEMORY_PROVENANCE_SCHEMA,
@@ -935,8 +997,12 @@ def _memory_note_provenance(
         ),
         "contentHash": note.source_hash,
         "confidence": clean_text(str(note.metadata.get("confidence") or "")),
-        "userConfirmed": bool(confirmed_at),
-        "confirmedAt": confirmed_at,
+        "userConfirmed": confirmation["state"] == "confirmed",
+        "confirmedAt": confirmation["confirmedAt"],
+        "userConfirmationState": confirmation["state"],
+        "userConfirmationContentBound": confirmation[
+            "contentBound"
+        ],
         "userEditedAt": clean_text(str(state.get("edited_at") or "")),
     }
 
@@ -3276,6 +3342,7 @@ def _write_user_note_state(state: dict[str, dict[str, Any]], root: Path | None =
             "updated_at": _utc_now_iso(),
             "notes": state,
         },
+        durable=True,
     )
 
 
@@ -3340,7 +3407,11 @@ def _memory_vault_user_card(
     rel_path: str,
     revocation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    confirmed_at = clean_text(str(note_state.get("confirmed_at") or note.metadata.get("confirmed_at") or ""))
+    confirmation = _memory_confirmation_state(
+        note,
+        note_state,
+        raw=raw,
+    )
     is_locked_legacy = _is_legacy_memory_note_type(note.note_type, rel_path)
     is_internal_note = _is_internal_memory_note_type(note.note_type)
     is_bootstrap_note = (
@@ -3373,8 +3444,12 @@ def _memory_vault_user_card(
         "path": rel_path,
         "body": "" if is_locked_legacy else _memory_vault_edit_body(note, raw),
         "preview": locked_preview if is_locked_legacy else _memory_vault_note_preview(note.body),
-        "confirmed": bool(confirmed_at),
-        "confirmedAt": confirmed_at,
+        "confirmed": confirmation["state"] == "confirmed",
+        "confirmedAt": confirmation["confirmedAt"],
+        "confirmationState": confirmation["state"],
+        "confirmationContentBound": confirmation[
+            "contentBound"
+        ],
         "pinned": bool(note_state.get("pinned")),
         "hidden": hidden,
         "quarantined": quarantined,
@@ -3391,8 +3466,12 @@ def _memory_vault_user_card(
         ),
         "revocation": revocation_state,
         "locked": is_locked_legacy,
-        "canEdit": not is_locked_legacy,
-        "canConfirm": recall_eligible,
+        "canEdit": not is_locked_legacy and not is_internal_note,
+        "canConfirm": (
+            recall_eligible
+            and not is_locked_legacy
+            and not is_internal_note
+        ),
         "canDelete": (
             not is_internal_note
             and not is_locked_legacy
@@ -3591,6 +3670,7 @@ def memory_vault_user_snapshot(
         "total": 0,
         "confirmed": 0,
         "unconfirmed": 0,
+        "confirmationStale": 0,
         "pinned": 0,
         "hidden": 0,
         "quarantined": 0,
@@ -3613,13 +3693,8 @@ def memory_vault_user_snapshot(
             counts["hidden"] += 1
             if not include_hidden:
                 continue
-        confirmed_at = clean_text(str(note_state.get("confirmed_at") or note.metadata.get("confirmed_at") or ""))
         pinned = bool(note_state.get("pinned"))
         counts["total"] += 1
-        if confirmed_at:
-            counts["confirmed"] += 1
-        else:
-            counts["unconfirmed"] += 1
         if pinned:
             counts["pinned"] += 1
         revocation = revocations.get(note.note_id)
@@ -3634,6 +3709,12 @@ def memory_vault_user_snapshot(
             rel_path=rel_path,
             revocation=revocation,
         )
+        if card["confirmed"]:
+            counts["confirmed"] += 1
+        else:
+            counts["unconfirmed"] += 1
+        if card["confirmationState"] == "stale":
+            counts["confirmationStale"] += 1
         if card["userConfirmationIntegrity"] == "invalid":
             counts["integrityInvalid"] += 1
         cards.append(card)
@@ -3749,19 +3830,125 @@ def update_memory_vault_user_note(
     if target is None:
         return {"ok": False, "error": "note_not_found"}
     path, note, raw = target
+    vault = ensure_memory_vault_layout(root)
+    rel_path = path.relative_to(vault).as_posix()
+    if _is_internal_memory_note_type(note.note_type):
+        return {"ok": False, "error": "note_not_found"}
     state = _read_user_note_state(root)
     note_state = dict(state.get(note.note_id, {}))
     normalized_action = clean_text(action).lower()
     now = _utc_now_iso()
     if normalized_action == "confirm":
+        if _is_legacy_memory_note_type(note.note_type, rel_path):
+            return {
+                "ok": False,
+                "error": "memory_confirmation_content_hidden",
+            }
         if note.note_id in _memory_quarantined_note_ids(root):
             return {
                 "ok": False,
                 "error": "memory_note_quarantined",
             }
-        note_state["confirmed_at"] = now
+        if (
+            _user_confirmed_memory_integrity_state(
+                note,
+                raw=raw,
+            )
+            == "invalid"
+        ):
+            return {
+                "ok": False,
+                "error": "memory_note_integrity_invalid",
+            }
+        expected_hash = clean_text(expected_content_hash).lower()
+        if not re.fullmatch(r"[0-9a-f]{64}", expected_hash):
+            return {
+                "ok": False,
+                "error": "memory_confirm_content_hash_required",
+            }
+        with _memory_edit_lock:
+            current = _memory_vault_find_note(
+                note_id_or_rel_path,
+                root=root,
+            )
+            if current is None:
+                return {"ok": False, "error": "note_not_found"}
+            path, note, raw = current
+            current_rel_path = path.relative_to(vault).as_posix()
+            if (
+                _is_internal_memory_note_type(note.note_type)
+                or _is_legacy_memory_note_type(
+                    note.note_type,
+                    current_rel_path,
+                )
+            ):
+                return {
+                    "ok": False,
+                    "error": "memory_confirmation_content_hidden",
+                }
+            if note.note_id in _memory_quarantined_note_ids(root):
+                return {
+                    "ok": False,
+                    "error": "memory_note_quarantined",
+                }
+            if (
+                _user_confirmed_memory_integrity_state(
+                    note,
+                    raw=raw,
+                )
+                == "invalid"
+            ):
+                return {
+                    "ok": False,
+                    "error": "memory_note_integrity_invalid",
+                }
+            if not secrets.compare_digest(
+                note.source_hash,
+                expected_hash,
+            ):
+                return {
+                    "ok": False,
+                    "error": "memory_note_changed_since_read",
+                    "noteId": note.note_id,
+                    "contentHash": note.source_hash,
+                }
+            state = _read_user_note_state(root)
+            note_state = dict(state.get(note.note_id, {}))
+            note_state["confirmed_at"] = now
+            note_state["confirmed_content_hash"] = (
+                note.source_hash
+            )
+            note_state.pop("confirmation_stale_at", None)
+            note_state["updated_at"] = now
+            state[note.note_id] = note_state
+            try:
+                _write_user_note_state(state, root)
+            except OSError:
+                return {
+                    "ok": False,
+                    "schema": (
+                        MEMORY_USER_REVIEW_CONFIRMATION_SCHEMA
+                    ),
+                    "action": "confirm",
+                    "noteId": note.note_id,
+                    "confirmed": False,
+                    "error": "memory_confirmation_write_failed",
+                }
+        return {
+            "ok": True,
+            "schema": MEMORY_USER_REVIEW_CONFIRMATION_SCHEMA,
+            "action": "confirm",
+            "noteId": note.note_id,
+            "confirmed": True,
+            "confirmationState": "confirmed",
+            "confirmationContentBound": True,
+            "confirmedAt": now,
+            "contentHash": note.source_hash,
+        }
     elif normalized_action == "unconfirm":
         note_state.pop("confirmed_at", None)
+        note_state.pop("confirmed_content_hash", None)
+        note_state.pop("confirmation_stale_at", None)
     elif normalized_action == "pin":
         note_state["pinned"] = True
     elif normalized_action == "unpin":
@@ -3772,8 +3959,6 @@ def update_memory_vault_user_note(
     elif normalized_action == "unhide":
         note_state["hidden"] = False
     elif normalized_action == "edit":
-        vault = ensure_memory_vault_layout(root)
-        rel_path = path.relative_to(vault).as_posix()
         if _is_legacy_memory_note_type(note.note_type, rel_path):
             return {"ok": False, "error": "locked_legacy_note"}
         expected_hash = clean_text(expected_content_hash)
@@ -6918,6 +7103,7 @@ __all__ = [
     "MEMORY_PROVENANCE_MANUAL_OPTIONS_SCHEMA",
     "MEMORY_PROVENANCE_SCHEMA",
     "MEMORY_QUARANTINE_STATUS_SCHEMA",
+    "MEMORY_USER_REVIEW_CONFIRMATION_SCHEMA",
     "MemoryNoteDeletedError",
     "MemoryVaultNote",
     "activate_memory_vault_for_guild",

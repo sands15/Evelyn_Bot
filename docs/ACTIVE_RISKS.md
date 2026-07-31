@@ -444,6 +444,14 @@ context에서 제외한다. Control Page는 본문을 숨기지 않고 사용자
 삭제할 수 있게 두되 회상 불가와 고정 blocker를 표시한다. 편집은 새 user-edit
 근거를 만들므로 손상된 원본 metadata를 그대로 신뢰해 복구하지 않는다.
 
+Control Page의 일반 카드 확인도 exact note hash에 결박했다. 사용자가 읽은
+`sourceHash` 없이 확인할 수 없고, lock 안의 재확인에서 revision이 다르면 아무
+상태도 쓰지 않는다. sidecar hash가 현재 note와 다르거나 없는 과거 확인은
+`stale`로 강등하며 숨겨진 legacy/internal note와 무결성이 손상된 explicit
+confirmation note는 서버에서도 거부한다. 이 표시는 현재 내용을 사용자가
+검토했다는 상태일 뿐 source/evidence를 만들지 않으므로 과거 ungrounded 기억을
+attributed로 승격하지 않는다.
+
 남은 위험은 이후 import/복원으로 확인 전용 legacy 항목이 생겼을 때 이를 사용자
 확인만으로 과거 source에 소급 귀속할 수 없다는 점이다. 안전한 확인 흐름은 기존
 row를 고치는 backfill이 아니라 현재 확인 발화를 새 turn evidence로 가진 새 기억을
