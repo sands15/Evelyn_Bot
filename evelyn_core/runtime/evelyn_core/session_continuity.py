@@ -14,6 +14,7 @@ from .continuity_commit_contract import (
     CONTINUITY_STATUS_SCHEMA,
 )
 from .continuity_authenticity import (
+    CONTINUITY_AUTH_ARTIFACT_GUILD_REVOCATIONS,
     CONTINUITY_AUTH_SCOPE_MAIN,
     CONTINUITY_HEAD_SCHEMA_V1,
     CONTINUITY_HEAD_SCHEMA_V2,
@@ -43,6 +44,9 @@ SESSION_CONTINUITY_COMMIT_METRICS_SCHEMA = (
 )
 SESSION_CONTINUITY_REVOCATIONS_SCHEMA = (
     "conversation_continuity.guild_revocations.v1"
+)
+SESSION_CONTINUITY_AUTHENTICATED_REVOCATIONS_SCHEMA = (
+    "conversation_continuity.guild_revocations.v2"
 )
 DEFAULT_MAX_AGE_SEC = 15 * 60.0
 DEFAULT_FLUSH_INTERVAL_SEC = 1.0
@@ -261,6 +265,7 @@ class SessionContinuityCheckpoint:
         self._restored_session_count = 0
         self._persisted_session_count = 0
         self._guild_revocations: dict[int, float] = {}
+        self._guild_revocations_authenticity = "missing"
         self._checkpoint_integrity = "unknown"
         self._checkpoint_generation = 0
         self._checkpoint_head_state = "missing"
@@ -469,6 +474,14 @@ class SessionContinuityCheckpoint:
             "restoredSessionCount": self._restored_session_count,
             "persistedSessionCount": self._persisted_session_count,
             "guildRevocationCount": len(self._guild_revocations),
+            "guildRevocationsAuthenticity": (
+                self._guild_revocations_authenticity
+            ),
+            "guildRevocationsTamperEvident": bool(
+                self.authenticity.configured
+                and self._guild_revocations_authenticity
+                == "verified"
+            ),
             "checkpointIntegrity": self._checkpoint_integrity,
             "checkpointGeneration": self._checkpoint_generation,
             "checkpointHeadState": self._checkpoint_head_state,
@@ -911,6 +924,7 @@ class SessionContinuityCheckpoint:
     def _load_guild_revocations(self) -> dict[int, float]:
         path = self.revocations_path
         if not path.exists():
+            self._guild_revocations_authenticity = "missing"
             return {}
         if (
             path.is_symlink()
@@ -919,13 +933,74 @@ class SessionContinuityCheckpoint:
         ):
             raise ValueError("guild_revocations_rejected")
         payload = json.loads(path.read_text(encoding="utf-8"))
+        schema = (
+            str(payload.get("schema") or "")
+            if isinstance(payload, dict)
+            else ""
+        )
+        base_keys = {
+            "schema",
+            "updatedAt",
+            "guilds",
+            "policy",
+        }
+        expected_keys = set(base_keys)
+        if schema == SESSION_CONTINUITY_AUTHENTICATED_REVOCATIONS_SCHEMA:
+            expected_keys.update(
+                {
+                    "authAlgorithm",
+                    "authScope",
+                    "authKeyId",
+                    "authTag",
+                }
+            )
         if (
             not isinstance(payload, dict)
-            or payload.get("schema")
-            != SESSION_CONTINUITY_REVOCATIONS_SCHEMA
+            or set(payload) != expected_keys
+            or schema
+            not in {
+                SESSION_CONTINUITY_REVOCATIONS_SCHEMA,
+                SESSION_CONTINUITY_AUTHENTICATED_REVOCATIONS_SCHEMA,
+            }
             or not isinstance(payload.get("guilds"), dict)
+            or not isinstance(payload.get("policy"), dict)
+            or set(payload["policy"])
+            != {"contentFree", "maxGuilds"}
+            or payload["policy"].get("contentFree") is not True
+            or payload["policy"].get("maxGuilds")
+            != DEFAULT_MAX_GUILD_REVOCATIONS
+            or _finite_float(
+                payload.get("updatedAt"),
+                default=-1.0,
+            )
+            < 0.0
         ):
             raise ValueError("guild_revocations_rejected")
+        try:
+            if schema == SESSION_CONTINUITY_AUTHENTICATED_REVOCATIONS_SCHEMA:
+                self.authenticity.verify_scoped_artifact(
+                    payload,
+                    artifact_scope=(
+                        CONTINUITY_AUTH_ARTIFACT_GUILD_REVOCATIONS
+                    ),
+                )
+                auth_state = "verified"
+            elif self.authenticity.configured:
+                if not self.authenticity.allow_unsigned_bootstrap:
+                    raise ContinuityAuthenticityError(
+                        "continuity_auth_bootstrap_required"
+                    )
+                auth_state = "bootstrap_required"
+            else:
+                auth_state = "unconfigured"
+        except ContinuityAuthenticityError as exc:
+            self._guild_revocations_authenticity = {
+                "continuity_auth_bootstrap_required": (
+                    "bootstrap_required"
+                ),
+                "continuity_auth_key_required": "key_required",
+            }.get(exc.code, "failed")
+            raise
         revocations: dict[int, float] = {}
         for raw_guild_id, raw_timestamp in payload["guilds"].items():
             guild_id = _safe_int(raw_guild_id)
@@ -938,12 +1013,17 @@ class SessionContinuityCheckpoint:
             ):
                 raise ValueError("guild_revocations_rejected")
             revocations[guild_id] = timestamp
-        return dict(
+        bounded = dict(
             sorted(
                 revocations.items(),
                 key=lambda item: (-item[1], item[0]),
             )[:DEFAULT_MAX_GUILD_REVOCATIONS]
         )
+        if auth_state == "bootstrap_required":
+            self._write_guild_revocations(bounded)
+        else:
+            self._guild_revocations_authenticity = auth_state
+        return bounded
 
     def _write_guild_revocations(
         self,
@@ -955,23 +1035,39 @@ class SessionContinuityCheckpoint:
                 key=lambda item: (-item[1], item[0]),
             )[:DEFAULT_MAX_GUILD_REVOCATIONS]
         )
+        payload = {
+            "schema": (
+                SESSION_CONTINUITY_AUTHENTICATED_REVOCATIONS_SCHEMA
+                if self.authenticity.configured
+                else SESSION_CONTINUITY_REVOCATIONS_SCHEMA
+            ),
+            "updatedAt": self.wall_time(),
+            "guilds": {
+                str(guild_id): timestamp
+                for guild_id, timestamp in sorted(bounded.items())
+            },
+            "policy": {
+                "contentFree": True,
+                "maxGuilds": DEFAULT_MAX_GUILD_REVOCATIONS,
+            },
+        }
+        payload = self.authenticity.sign_scoped_artifact(
+            payload,
+            artifact_scope=(
+                CONTINUITY_AUTH_ARTIFACT_GUILD_REVOCATIONS
+            ),
+        )
         atomic_json_write(
             self.revocations_path,
-            {
-                "schema": SESSION_CONTINUITY_REVOCATIONS_SCHEMA,
-                "updatedAt": self.wall_time(),
-                "guilds": {
-                    str(guild_id): timestamp
-                    for guild_id, timestamp in sorted(bounded.items())
-                },
-                "policy": {
-                    "contentFree": True,
-                    "maxGuilds": DEFAULT_MAX_GUILD_REVOCATIONS,
-                },
-            },
+            payload,
             durable=True,
         )
         self._guild_revocations = bounded
+        self._guild_revocations_authenticity = (
+            "verified"
+            if self.authenticity.configured
+            else "unconfigured"
+        )
 
     def _write_status(self, *, durable: bool = False) -> None:
         try:
@@ -1103,6 +1199,8 @@ class SessionContinuityCheckpoint:
                 return self.status()
             try:
                 guild_revocations = self._load_guild_revocations()
+            except ContinuityAuthenticityError as exc:
+                return self._record_error(exc.code, exc)
             except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
                 self._revoke_checkpoint_chain()
                 return self._record_error(
@@ -1520,6 +1618,7 @@ __all__ = [
     "SESSION_CONTINUITY_CHECKPOINT_SCHEMA",
     "SESSION_CONTINUITY_COMMIT_METRICS_SCHEMA",
     "SESSION_CONTINUITY_AUTHENTICATED_HEAD_SCHEMA",
+    "SESSION_CONTINUITY_AUTHENTICATED_REVOCATIONS_SCHEMA",
     "SESSION_CONTINUITY_HEAD_SCHEMA",
     "SESSION_CONTINUITY_LEGACY_CHECKPOINT_SCHEMA",
     "SESSION_CONTINUITY_REVOCATIONS_SCHEMA",

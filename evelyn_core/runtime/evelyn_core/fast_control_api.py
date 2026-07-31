@@ -224,6 +224,7 @@ FAST_ACTION_RECOVERY_JOURNAL = FastActionRecoveryJournal(
         / "recovery.json"
     ),
     enabled=FAST_CONTROL_CONTINUITY_ENABLED,
+    authenticity=CONTINUITY_AUTHENTICITY,
 )
 CROSS_SURFACE_CONTINUITY_BRIDGE = CrossSurfaceContinuityBridge(
     artifacts_root=CONTINUITY_ARTIFACTS_ROOT,

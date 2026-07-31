@@ -9,6 +9,11 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
+from .continuity_authenticity import (
+    CONTINUITY_AUTH_ARTIFACT_FAST_ACTION_HEAD,
+    ContinuityAuthenticity,
+    ContinuityAuthenticityError,
+)
 from .runtime_artifact_io import atomic_json_write
 from .text import clean_text
 
@@ -24,6 +29,9 @@ FAST_ACTION_RECOVERY_SCHEMA = (
 )
 FAST_ACTION_RECOVERY_HEAD_SCHEMA = (
     "fast_control.action-recovery-head.v1"
+)
+FAST_ACTION_RECOVERY_AUTHENTICATED_HEAD_SCHEMA = (
+    "fast_control.action-recovery-head.v2"
 )
 FAST_ACTION_RECOVERY_CHAIN_GENESIS = "0" * 64
 FAST_ACTION_RECOVERY_NOTICE = (
@@ -109,6 +117,7 @@ class FastActionRecoveryJournal:
         max_actions: int = (
             DEFAULT_FAST_ACTION_RECOVERY_MAX_ACTIONS
         ),
+        authenticity: ContinuityAuthenticity | None = None,
     ) -> None:
         self.path = Path(path)
         self.head_path = Path(
@@ -127,6 +136,9 @@ class FastActionRecoveryJournal:
                 int(max_actions),
             ),
         )
+        self.authenticity = (
+            authenticity or ContinuityAuthenticity()
+        )
         self._lock = threading.RLock()
         self._actions: dict[str, dict[str, Any]] = {}
         self._last_recovery_at = 0.0
@@ -142,6 +154,10 @@ class FastActionRecoveryJournal:
         self._head_state = (
             "disabled" if not self.enabled else "missing"
         )
+        self._head_authenticity = (
+            "disabled" if not self.enabled else "missing"
+        )
+        self._auth_error_code = ""
         self._load_state = (
             "disabled" if not self.enabled else "ready"
         )
@@ -393,18 +409,36 @@ class FastActionRecoveryJournal:
         payload = json.loads(
             path.read_text(encoding="utf-8")
         )
+        schema = (
+            clean_text(payload.get("schema"))
+            if isinstance(payload, dict)
+            else ""
+        )
+        base_keys = {
+            "schema",
+            "generation",
+            "journalHash",
+            "updatedAt",
+            "contentFree",
+        }
+        expected_keys = set(base_keys)
+        if schema == FAST_ACTION_RECOVERY_AUTHENTICATED_HEAD_SCHEMA:
+            expected_keys.update(
+                {
+                    "authAlgorithm",
+                    "authScope",
+                    "authKeyId",
+                    "authTag",
+                }
+            )
         if (
             not isinstance(payload, dict)
-            or set(payload)
-            != {
-                "schema",
-                "generation",
-                "journalHash",
-                "updatedAt",
-                "contentFree",
+            or set(payload) != expected_keys
+            or schema
+            not in {
+                FAST_ACTION_RECOVERY_HEAD_SCHEMA,
+                FAST_ACTION_RECOVERY_AUTHENTICATED_HEAD_SCHEMA,
             }
-            or payload.get("schema")
-            != FAST_ACTION_RECOVERY_HEAD_SCHEMA
             or payload.get("contentFree") is not True
         ):
             raise ValueError("fast_action_head_invalid")
@@ -419,10 +453,27 @@ class FastActionRecoveryJournal:
         )
         if not journal_hash:
             raise ValueError("fast_action_head_invalid")
+        if schema == FAST_ACTION_RECOVERY_AUTHENTICATED_HEAD_SCHEMA:
+            self.authenticity.verify_scoped_artifact(
+                payload,
+                artifact_scope=(
+                    CONTINUITY_AUTH_ARTIFACT_FAST_ACTION_HEAD
+                ),
+            )
+            auth_state = "verified"
+        elif self.authenticity.configured:
+            if not self.authenticity.allow_unsigned_bootstrap:
+                raise ContinuityAuthenticityError(
+                    "continuity_auth_bootstrap_required"
+                )
+            auth_state = "bootstrap_required"
+        else:
+            auth_state = "unconfigured"
         return {
             "generation": generation,
             "journalHash": journal_hash,
             "updatedAt": updated_at,
+            "authenticity": auth_state,
         }
 
     def _write_head(
@@ -431,16 +482,32 @@ class FastActionRecoveryJournal:
         generation: int,
         journal_hash: str,
     ) -> None:
+        payload = {
+            "schema": (
+                FAST_ACTION_RECOVERY_AUTHENTICATED_HEAD_SCHEMA
+                if self.authenticity.configured
+                else FAST_ACTION_RECOVERY_HEAD_SCHEMA
+            ),
+            "generation": generation,
+            "journalHash": journal_hash,
+            "updatedAt": self._now(),
+            "contentFree": True,
+        }
+        payload = self.authenticity.sign_scoped_artifact(
+            payload,
+            artifact_scope=(
+                CONTINUITY_AUTH_ARTIFACT_FAST_ACTION_HEAD
+            ),
+        )
         atomic_json_write(
             self.head_path,
-            {
-                "schema": FAST_ACTION_RECOVERY_HEAD_SCHEMA,
-                "generation": generation,
-                "journalHash": journal_hash,
-                "updatedAt": self._now(),
-                "contentFree": True,
-            },
+            payload,
             durable=True,
+        )
+        self._head_authenticity = (
+            "verified"
+            if self.authenticity.configured
+            else "unconfigured"
         )
 
     def _adopt_head_anchor(
@@ -452,6 +519,9 @@ class FastActionRecoveryJournal:
         self._generation = int(head["generation"])
         self._journal_hash = str(head["journalHash"])
         self._head_state = "orphaned"
+        self._head_authenticity = str(
+            head.get("authenticity") or "missing"
+        )
 
     def _mark_load_failure(
         self,
@@ -468,6 +538,24 @@ class FastActionRecoveryJournal:
             if state == "error"
             else "fast_action_recovery_journal_corrupt"
         )
+
+    def _mark_auth_failure(
+        self,
+        exc: ContinuityAuthenticityError,
+        *,
+        head: dict[str, Any] | None,
+    ) -> None:
+        self._actions = {}
+        self._adopt_head_anchor(head)
+        self._load_state = "auth_error"
+        self._integrity = "failed"
+        self._auth_error_code = exc.code
+        self._head_authenticity = {
+            "continuity_auth_bootstrap_required": (
+                "bootstrap_required"
+            ),
+            "continuity_auth_key_required": "key_required",
+        }.get(exc.code, "failed")
 
     def _load(self) -> None:
         head: dict[str, Any] | None = None
@@ -508,6 +596,13 @@ class FastActionRecoveryJournal:
             if schema == FAST_ACTION_RECOVERY_LEGACY_SCHEMA:
                 journal_hash = _legacy_journal_hash(raw_text)
                 if head is None:
+                    if (
+                        self.authenticity.configured
+                        and not self.authenticity.allow_unsigned_bootstrap
+                    ):
+                        raise ContinuityAuthenticityError(
+                            "continuity_auth_bootstrap_required"
+                        )
                     self._write_head(
                         generation=0,
                         journal_hash=journal_hash,
@@ -520,10 +615,22 @@ class FastActionRecoveryJournal:
                     raise ValueError(
                         "fast_action_legacy_head_mismatch"
                     )
+                elif head.get("authenticity") == "bootstrap_required":
+                    self._write_head(
+                        generation=0,
+                        journal_hash=journal_hash,
+                    )
                 generation = 0
                 integrity = "legacy_anchored"
             else:
                 if head is None:
+                    if (
+                        self.authenticity.configured
+                        and not self.authenticity.allow_unsigned_bootstrap
+                    ):
+                        raise ContinuityAuthenticityError(
+                            "continuity_auth_bootstrap_required"
+                        )
                     if (
                         generation != 1
                         or previous_hash
@@ -541,7 +648,11 @@ class FastActionRecoveryJournal:
                     and journal_hash
                     == str(head["journalHash"])
                 ):
-                    pass
+                    if head.get("authenticity") == "bootstrap_required":
+                        self._write_head(
+                            generation=generation,
+                            journal_hash=journal_hash,
+                        )
                 elif (
                     generation
                     == int(head["generation"]) + 1
@@ -566,6 +677,19 @@ class FastActionRecoveryJournal:
             self._integrity = integrity
             self._head_state = "current"
             self._load_state = "ready"
+            self._auth_error_code = ""
+            if self._head_authenticity == "missing":
+                self._head_authenticity = (
+                    str(head.get("authenticity") or "missing")
+                    if head is not None
+                    else (
+                        "verified"
+                        if self.authenticity.configured
+                        else "unconfigured"
+                    )
+                )
+        except ContinuityAuthenticityError as exc:
+            self._mark_auth_failure(exc, head=head)
         except (
             UnicodeError,
             json.JSONDecodeError,
@@ -622,6 +746,7 @@ class FastActionRecoveryJournal:
             self._integrity = "verified"
             self._head_state = "current"
             self._load_state = "ready"
+            self._auth_error_code = ""
         except Exception:
             self._load_state = "error"
             self._integrity = "failed"
@@ -644,7 +769,11 @@ class FastActionRecoveryJournal:
             continuity_generation
         )
         with self._lock:
-            if self._load_state in {"corrupt", "error"}:
+            if self._load_state in {
+                "auth_error",
+                "corrupt",
+                "error",
+            }:
                 raise RuntimeError(
                     "fast_action_recovery_unavailable"
                 )
@@ -744,6 +873,10 @@ class FastActionRecoveryJournal:
                     and self._head_state == "current"
                     and self._integrity
                     in {"legacy_anchored", "verified"}
+                    and (
+                        not self.authenticity.configured
+                        or self._head_authenticity == "verified"
+                    )
                 )
             )
 
@@ -796,6 +929,13 @@ class FastActionRecoveryJournal:
         except ValueError:
             generation = 0
         with self._lock:
+            if self._load_state == "auth_error":
+                return {
+                    "state": "unavailable",
+                    "pendingCount": 0,
+                    "noticeRequired": False,
+                    "reasonCode": self._auth_error_code,
+                }
             if self._load_state == "corrupt":
                 return {
                     "state": "recovery_required",
@@ -874,6 +1014,10 @@ class FastActionRecoveryJournal:
                 "fast_action_recovery_code_invalid"
             )
         with self._lock:
+            if self._load_state == "auth_error":
+                raise RuntimeError(
+                    "fast_action_recovery_auth_unavailable"
+                )
             previous = (
                 dict(self._actions),
                 self._last_recovery_at,
@@ -909,7 +1053,11 @@ class FastActionRecoveryJournal:
         with self._lock:
             if not self.enabled:
                 state = "disabled"
-            elif self._load_state in {"corrupt", "error"}:
+            elif self._load_state in {
+                "auth_error",
+                "corrupt",
+                "error",
+            }:
                 state = self._load_state
             elif self._actions:
                 state = "pending"
@@ -924,12 +1072,28 @@ class FastActionRecoveryJournal:
                 "integrity": self._integrity,
                 "generation": self._generation,
                 "headState": self._head_state,
+                "headAuthenticity": self._head_authenticity,
+                "keyedAuthenticity": (
+                    self.authenticity.configured
+                ),
+                "tamperEvident": bool(
+                    self.authenticity.configured
+                    and self._load_state == "ready"
+                    and self._head_state == "current"
+                    and self._head_authenticity == "verified"
+                    and self._integrity
+                    in {"legacy_anchored", "verified"}
+                ),
                 "rollbackProtected": bool(
                     self.enabled
                     and self._load_state == "ready"
                     and self._head_state == "current"
                     and self._integrity
                     in {"legacy_anchored", "verified"}
+                    and (
+                        not self.authenticity.configured
+                        or self._head_authenticity == "verified"
+                    )
                 ),
                 "noticeCorrelationReady": bool(
                     not self._actions
@@ -954,7 +1118,10 @@ class FastActionRecoveryJournal:
                 "lastRecoveryCount": (
                     self._last_recovery_count
                 ),
-                "lastErrorCode": self._last_error_code,
+                "lastErrorCode": (
+                    self._auth_error_code
+                    or self._last_error_code
+                ),
                 "policy": {
                     "contentFree": True,
                     "rawText": False,
@@ -967,6 +1134,7 @@ class FastActionRecoveryJournal:
 __all__ = [
     "DEFAULT_FAST_ACTION_RECOVERY_MAX_ACTIONS",
     "FAST_ACTION_RECOVERY_CHAIN_GENESIS",
+    "FAST_ACTION_RECOVERY_AUTHENTICATED_HEAD_SCHEMA",
     "FAST_ACTION_RECOVERY_HEAD_SCHEMA",
     "FAST_ACTION_RECOVERY_LEGACY_SCHEMA",
     "FAST_ACTION_RECOVERY_NOTICE",

@@ -35,7 +35,13 @@ from evelyn_core.continuity_commit_contract import (  # noqa: E402
 from evelyn_core.fast_control_continuity import (  # noqa: E402
     FastControlContinuityOwner,
 )
+from evelyn_core.fast_action_recovery import (  # noqa: E402
+    FAST_ACTION_RECOVERY_AUTHENTICATED_HEAD_SCHEMA,
+    FastActionRecoveryJournal,
+)
+from evelyn_core import fast_action_recovery as action_recovery  # noqa: E402
 from evelyn_core.session_continuity import (  # noqa: E402
+    SESSION_CONTINUITY_AUTHENTICATED_REVOCATIONS_SCHEMA,
     SessionContinuityCheckpoint,
     _checkpoint_hash,
 )
@@ -290,6 +296,212 @@ class ContinuityAuthenticityTests(unittest.TestCase):
             ConversationContinuityCommitError
         ):
             require_durable_continuity_receipt(forged_status)
+
+    def test_fast_action_rewrite_is_auth_blocked_without_overwrite(
+        self,
+    ) -> None:
+        path = self.artifacts / "fast_control_actions" / "recovery.json"
+        journal = FastActionRecoveryJournal(
+            path=path,
+            enabled=True,
+            wall_time=self.clock.wall_time,
+            authenticity=self.authenticity(),
+        )
+        journal.begin("fast-action-1")
+        head_path = journal.head_path
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["actions"][0]["startedAt"] = 1001.0
+        payload["journalHash"] = action_recovery._journal_hash(
+            payload
+        )
+        path.write_text(
+            json.dumps(payload, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        head = json.loads(head_path.read_text(encoding="utf-8"))
+        head["journalHash"] = payload["journalHash"]
+        head_path.write_text(
+            json.dumps(head, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        malicious_journal = path.read_bytes()
+        malicious_head = head_path.read_bytes()
+
+        restored = FastActionRecoveryJournal(
+            path=path,
+            enabled=True,
+            wall_time=self.clock.wall_time,
+            authenticity=self.authenticity(),
+        )
+        status = restored.public_status()
+        decision = restored.recovery_decision(
+            continuity_generation=0
+        )
+
+        self.assertEqual(status["state"], "auth_error")
+        self.assertEqual(
+            status["lastErrorCode"],
+            "continuity_auth_failed",
+        )
+        self.assertFalse(status["rollbackProtected"])
+        self.assertFalse(status["tamperEvident"])
+        self.assertEqual(decision["state"], "unavailable")
+        self.assertFalse(decision["noticeRequired"])
+        with self.assertRaises(RuntimeError):
+            restored.begin("fast-action-2")
+        with self.assertRaises(RuntimeError):
+            restored.acknowledge_recovery(
+                recovered_count=1,
+                error_code="fast_action_recovery_journal_corrupt",
+            )
+        self.assertEqual(path.read_bytes(), malicious_journal)
+        self.assertEqual(head_path.read_bytes(), malicious_head)
+
+    def test_fast_action_unsigned_head_requires_bootstrap(
+        self,
+    ) -> None:
+        path = self.artifacts / "fast_control_actions" / "recovery.json"
+        unsigned = FastActionRecoveryJournal(
+            path=path,
+            enabled=True,
+            wall_time=self.clock.wall_time,
+        )
+        unsigned.begin("fast-action-1")
+        head_path = unsigned.head_path
+        unsigned_head = head_path.read_bytes()
+
+        rejected = FastActionRecoveryJournal(
+            path=path,
+            enabled=True,
+            wall_time=self.clock.wall_time,
+            authenticity=self.authenticity(),
+        )
+        self.assertEqual(
+            rejected.public_status()["state"],
+            "auth_error",
+        )
+        self.assertEqual(head_path.read_bytes(), unsigned_head)
+
+        adopted = FastActionRecoveryJournal(
+            path=path,
+            enabled=True,
+            wall_time=self.clock.wall_time,
+            authenticity=self.authenticity(bootstrap=True),
+        )
+        signed_head = json.loads(
+            head_path.read_text(encoding="utf-8")
+        )
+        self.assertEqual(adopted.public_status()["state"], "pending")
+        self.assertTrue(adopted.public_status()["tamperEvident"])
+        self.assertEqual(
+            signed_head["schema"],
+            FAST_ACTION_RECOVERY_AUTHENTICATED_HEAD_SCHEMA,
+        )
+        signed_bytes = head_path.read_bytes()
+        missing_key = FastActionRecoveryJournal(
+            path=path,
+            enabled=True,
+            wall_time=self.clock.wall_time,
+        )
+        self.assertEqual(
+            missing_key.public_status()["state"],
+            "auth_error",
+        )
+        self.assertEqual(
+            missing_key.public_status()["lastErrorCode"],
+            "continuity_auth_key_required",
+        )
+        self.assertEqual(head_path.read_bytes(), signed_bytes)
+
+    def test_signed_guild_revocations_reject_rewrite(
+        self,
+    ) -> None:
+        authenticity = self.authenticity()
+        manager = self.manager(
+            store=self.store(),
+            authenticity=authenticity,
+        )
+        manager.flush()
+        manager._write_guild_revocations({7: 1000.0})
+        ledger_path = self.owner_root / "guild_revocations.json"
+        ledger = json.loads(
+            ledger_path.read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            ledger["schema"],
+            SESSION_CONTINUITY_AUTHENTICATED_REVOCATIONS_SCHEMA,
+        )
+        self.assertTrue(
+            manager.status()["guildRevocationsTamperEvident"]
+        )
+        ledger["guilds"]["7"] = 1001.0
+        ledger_path.write_text(
+            json.dumps(ledger, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        malicious_ledger = ledger_path.read_bytes()
+
+        restored = self.manager(
+            authenticity=authenticity,
+        ).restore()
+        cross = read_verified_continuity_snapshot(
+            self.owner_root,
+            source="main",
+            wall_time=self.clock.wall_time,
+            guild_id=7,
+            user_id=9,
+            authenticity=authenticity,
+        )
+
+        self.assertEqual(restored["state"], "error")
+        self.assertEqual(
+            restored["lastErrorCode"],
+            "continuity_auth_failed",
+        )
+        self.assertTrue((self.owner_root / "active.json").exists())
+        self.assertEqual(ledger_path.read_bytes(), malicious_ledger)
+        self.assertEqual(cross.state, "rejected")
+
+    def test_unsigned_guild_revocations_require_bootstrap(
+        self,
+    ) -> None:
+        unsigned = self.manager()
+        unsigned._write_guild_revocations({7: 1000.0})
+        ledger_path = self.owner_root / "guild_revocations.json"
+        before = ledger_path.read_bytes()
+
+        rejected = self.manager(
+            authenticity=self.authenticity(),
+        )
+        with self.assertRaises(ContinuityAuthenticityError):
+            rejected._load_guild_revocations()
+        self.assertEqual(ledger_path.read_bytes(), before)
+
+        adopted = self.manager(
+            authenticity=self.authenticity(bootstrap=True),
+        )
+        self.assertEqual(
+            adopted._load_guild_revocations(),
+            {7: 1000.0},
+        )
+        signed = json.loads(
+            ledger_path.read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            signed["schema"],
+            SESSION_CONTINUITY_AUTHENTICATED_REVOCATIONS_SCHEMA,
+        )
+        self.assertEqual(
+            adopted.status()["guildRevocationsAuthenticity"],
+            "verified",
+        )
+        without_key = self.manager()
+        with self.assertRaises(ContinuityAuthenticityError) as caught:
+            without_key._load_guild_revocations()
+        self.assertEqual(
+            caught.exception.code,
+            "continuity_auth_key_required",
+        )
 
     def test_rewritten_checkpoint_and_head_fail_without_deletion(
         self,

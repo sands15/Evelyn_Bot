@@ -11,9 +11,11 @@ from pathlib import Path
 from typing import Any, Callable, Iterable
 
 from .continuity_authenticity import (
+    CONTINUITY_AUTH_ARTIFACT_GUILD_REVOCATIONS,
     CONTINUITY_AUTH_SCOPE_FAST_CONTROL,
     CONTINUITY_AUTH_SCOPE_MAIN,
     ContinuityAuthenticity,
+    ContinuityAuthenticityError,
     validate_continuity_head,
 )
 from .session_continuity import (
@@ -21,6 +23,7 @@ from .session_continuity import (
     DEFAULT_MAX_GUILD_REVOCATIONS,
     DEFAULT_MAX_SESSIONS,
     SESSION_CONTINUITY_CHECKPOINT_SCHEMA,
+    SESSION_CONTINUITY_AUTHENTICATED_REVOCATIONS_SCHEMA,
     SESSION_CONTINUITY_REVOCATIONS_SCHEMA,
 )
 from .text import clean_text
@@ -218,6 +221,8 @@ def _safe_history(
 
 def _read_revocations(
     path: Path,
+    *,
+    authenticity: ContinuityAuthenticity,
 ) -> dict[int, float]:
     payload = _read_regular_json(
         path,
@@ -228,11 +233,25 @@ def _read_revocations(
         return {}
     policy = payload.get("policy")
     guilds = payload.get("guilds")
+    schema = clean_text(payload.get("schema"))
+    base_keys = {"schema", "updatedAt", "guilds", "policy"}
+    expected_keys = set(base_keys)
+    if schema == SESSION_CONTINUITY_AUTHENTICATED_REVOCATIONS_SCHEMA:
+        expected_keys.update(
+            {
+                "authAlgorithm",
+                "authScope",
+                "authKeyId",
+                "authTag",
+            }
+        )
     if (
-        set(payload)
-        != {"schema", "updatedAt", "guilds", "policy"}
-        or payload.get("schema")
-        != SESSION_CONTINUITY_REVOCATIONS_SCHEMA
+        set(payload) != expected_keys
+        or schema
+        not in {
+            SESSION_CONTINUITY_REVOCATIONS_SCHEMA,
+            SESSION_CONTINUITY_AUTHENTICATED_REVOCATIONS_SCHEMA,
+        }
         or not isinstance(guilds, dict)
         or len(guilds) > DEFAULT_MAX_GUILD_REVOCATIONS
         or not isinstance(policy, dict)
@@ -243,6 +262,17 @@ def _read_revocations(
         or _finite_float(payload.get("updatedAt")) < 0.0
     ):
         raise ValueError("revocations_rejected")
+    if schema == SESSION_CONTINUITY_AUTHENTICATED_REVOCATIONS_SCHEMA:
+        authenticity.verify_scoped_artifact(
+            payload,
+            artifact_scope=(
+                CONTINUITY_AUTH_ARTIFACT_GUILD_REVOCATIONS
+            ),
+        )
+    elif authenticity.configured:
+        raise ContinuityAuthenticityError(
+            "continuity_auth_bootstrap_required"
+        )
     revocations: dict[int, float] = {}
     for raw_guild_id, raw_timestamp in guilds.items():
         guild_id = _positive_int(raw_guild_id)
@@ -1182,7 +1212,8 @@ def read_verified_continuity_snapshot(
                 error_code="cross_surface_continuity_stale",
             )
         revocations = _read_revocations(
-            root / "guild_revocations.json"
+            root / "guild_revocations.json",
+            authenticity=head_authenticity,
         )
         sessions = checkpoint.get("sessions")
         if not isinstance(sessions, list):

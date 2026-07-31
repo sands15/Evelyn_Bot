@@ -42,6 +42,20 @@ CONTINUITY_AUTH_SCOPES = frozenset(
         CONTINUITY_AUTH_SCOPE_FAST_CONTROL,
     }
 )
+CONTINUITY_AUTH_ARTIFACT_GUILD_REVOCATIONS = (
+    "conversation_continuity.guild_revocations"
+)
+CONTINUITY_AUTH_ARTIFACT_FAST_ACTION_HEAD = (
+    "fast_control.action_recovery_head"
+)
+_CONTINUITY_AUTH_ARTIFACT_DOMAINS = {
+    CONTINUITY_AUTH_ARTIFACT_GUILD_REVOCATIONS: (
+        b"evelyn.conversation-continuity.guild-revocations.v2\n"
+    ),
+    CONTINUITY_AUTH_ARTIFACT_FAST_ACTION_HEAD: (
+        b"evelyn.fast-control.action-recovery-head.v2\n"
+    ),
+}
 
 
 class ContinuityAuthenticityError(ValueError):
@@ -140,7 +154,12 @@ class ContinuityAuthenticity:
             return ""
         return hashlib.sha256(self.key).hexdigest()[:16]
 
-    def _tag(self, unsigned_head: Mapping[str, Any]) -> str:
+    def _tag_for_domain(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        domain: bytes,
+    ) -> str:
         if self.key is None:
             raise ContinuityAuthenticityError(
                 "continuity_auth_key_required"
@@ -149,9 +168,15 @@ class ContinuityAuthenticity:
             self.key,
             digestmod=hashlib.sha256,
         )
-        digest.update(CONTINUITY_AUTH_DOMAIN)
-        digest.update(_canonical_json(unsigned_head))
+        digest.update(domain)
+        digest.update(_canonical_json(payload))
         return digest.hexdigest()
+
+    def _tag(self, unsigned_head: Mapping[str, Any]) -> str:
+        return self._tag_for_domain(
+            unsigned_head,
+            domain=CONTINUITY_AUTH_DOMAIN,
+        )
 
     def sign_head(
         self,
@@ -210,6 +235,86 @@ class ContinuityAuthenticity:
         if not hmac.compare_digest(
             supplied,
             self._tag(unsigned),
+        ):
+            raise ContinuityAuthenticityError(
+                "continuity_auth_failed"
+            )
+
+    def sign_scoped_artifact(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        artifact_scope: str,
+    ) -> dict[str, Any]:
+        if self.key is None:
+            return dict(payload)
+        domain = _CONTINUITY_AUTH_ARTIFACT_DOMAINS.get(
+            artifact_scope
+        )
+        if domain is None:
+            raise ContinuityAuthenticityError(
+                "continuity_auth_scope_invalid"
+            )
+        signed = {
+            **dict(payload),
+            "authAlgorithm": CONTINUITY_AUTH_ALGORITHM,
+            "authScope": artifact_scope,
+            "authKeyId": self.key_id,
+        }
+        signed["authTag"] = self._tag_for_domain(
+            signed,
+            domain=domain,
+        )
+        return signed
+
+    def verify_scoped_artifact(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        artifact_scope: str,
+    ) -> None:
+        if self.key is None:
+            raise ContinuityAuthenticityError(
+                "continuity_auth_key_required"
+            )
+        domain = _CONTINUITY_AUTH_ARTIFACT_DOMAINS.get(
+            artifact_scope
+        )
+        if domain is None:
+            raise ContinuityAuthenticityError(
+                "continuity_auth_scope_invalid"
+            )
+        if (
+            payload.get("authAlgorithm")
+            != CONTINUITY_AUTH_ALGORITHM
+            or payload.get("authScope") != artifact_scope
+            or payload.get("authKeyId") != self.key_id
+        ):
+            raise ContinuityAuthenticityError(
+                "continuity_auth_failed"
+            )
+        supplied = str(payload.get("authTag") or "").lower()
+        if (
+            len(supplied) != 64
+            or not all(
+                character in "0123456789abcdef"
+                for character in supplied
+            )
+        ):
+            raise ContinuityAuthenticityError(
+                "continuity_auth_failed"
+            )
+        unsigned = {
+            key: value
+            for key, value in payload.items()
+            if key != "authTag"
+        }
+        if not hmac.compare_digest(
+            supplied,
+            self._tag_for_domain(
+                unsigned,
+                domain=domain,
+            ),
         ):
             raise ContinuityAuthenticityError(
                 "continuity_auth_failed"
@@ -387,6 +492,8 @@ def validate_continuity_head(
 
 __all__ = [
     "CONTINUITY_AUTH_ALGORITHM",
+    "CONTINUITY_AUTH_ARTIFACT_FAST_ACTION_HEAD",
+    "CONTINUITY_AUTH_ARTIFACT_GUILD_REVOCATIONS",
     "CONTINUITY_AUTH_BOOTSTRAP_ENV",
     "CONTINUITY_AUTH_KEY_FILE_ENV",
     "CONTINUITY_AUTH_SCOPE_FAST_CONTROL",

@@ -27,12 +27,16 @@ WRITER_PROCESS = textwrap.dedent(
     import sys
     from pathlib import Path
 
+    from evelyn_core.continuity_authenticity import ContinuityAuthenticity
     from evelyn_core.session_continuity import SessionContinuityCheckpoint
     from evelyn_core.session_memory_state import SessionStateStore
 
     root = Path(sys.argv[1])
-    phase = sys.argv[2]
-    crash_code = int(sys.argv[3])
+    authenticity = ContinuityAuthenticity(
+        key=Path(sys.argv[2]).read_bytes()
+    )
+    phase = sys.argv[3]
+    crash_code = int(sys.argv[4])
     store = SessionStateStore.create_empty()
     sessions = (
         (
@@ -69,6 +73,7 @@ WRITER_PROCESS = textwrap.dedent(
         checkpoint_path=root / "active.json",
         status_path=root / "status.json",
         system_prompt="old system prompt",
+        authenticity=authenticity,
     )
     manager.flush(force=True)
 
@@ -102,16 +107,21 @@ RECOVERY_PROCESS = textwrap.dedent(
     import sys
     from pathlib import Path
 
+    from evelyn_core.continuity_authenticity import ContinuityAuthenticity
     from evelyn_core.session_continuity import SessionContinuityCheckpoint
     from evelyn_core.session_memory_state import SessionStateStore
 
     root = Path(sys.argv[1])
+    authenticity = ContinuityAuthenticity(
+        key=Path(sys.argv[2]).read_bytes()
+    )
     store = SessionStateStore.create_empty()
     manager = SessionContinuityCheckpoint(
         store=store,
         checkpoint_path=root / "active.json",
         status_path=root / "status.json",
         system_prompt="new system prompt",
+        authenticity=authenticity,
     )
     status = manager.restore()
     print(
@@ -144,13 +154,19 @@ class SessionContinuityGuildResetRestartTests(unittest.TestCase):
     ) -> None:
         for phase, exit_code in CRASH_EXIT_CODES.items():
             with self.subTest(phase=phase), tempfile.TemporaryDirectory() as temp_dir:
-                root = Path(temp_dir)
+                base = Path(temp_dir)
+                root = base / "continuity"
+                key_path = base / "continuity-auth.key"
+                key_path.write_bytes(
+                    b"guild-reset-restart-auth-key-32-bytes"
+                )
                 writer = subprocess.run(
                     [
                         sys.executable,
                         "-c",
                         WRITER_PROCESS,
                         str(root),
+                        str(key_path),
                         phase,
                         str(exit_code),
                     ],
@@ -176,6 +192,7 @@ class SessionContinuityGuildResetRestartTests(unittest.TestCase):
                         "-c",
                         RECOVERY_PROCESS,
                         str(root),
+                        str(key_path),
                     ],
                     cwd=REPO_ROOT,
                     env=self.subprocess_environment(),
@@ -192,6 +209,10 @@ class SessionContinuityGuildResetRestartTests(unittest.TestCase):
                 result = json.loads(recovery.stdout)
 
                 self.assertEqual(result["status"]["state"], "restored")
+                self.assertEqual(
+                    result["status"]["guildRevocationsAuthenticity"],
+                    "verified",
+                )
                 self.assertEqual(
                     result["status"]["restoredSessionCount"],
                     1,

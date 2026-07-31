@@ -24,6 +24,7 @@ WRITER_PROCESS = textwrap.dedent(
     import sys
     from pathlib import Path
 
+    from evelyn_core.continuity_authenticity import ContinuityAuthenticity
     from evelyn_core.fast_action_recovery import (
         FastActionRecoveryJournal,
     )
@@ -32,9 +33,13 @@ WRITER_PROCESS = textwrap.dedent(
     )
 
     root = Path(sys.argv[1])
+    authenticity = ContinuityAuthenticity(
+        key=Path(sys.argv[2]).read_bytes()
+    )
     owner = FastControlContinuityOwner(
         artifacts_root=root,
         enabled=True,
+        authenticity=authenticity,
         log=lambda *_args, **_kwargs: None,
     )
     owner.record_completed_turn(
@@ -48,6 +53,7 @@ WRITER_PROCESS = textwrap.dedent(
             / "recovery.json"
         ),
         enabled=True,
+        authenticity=authenticity,
     )
     journal.begin("fast-action-1")
     os._exit({CRASH_EXIT_CODE})
@@ -60,6 +66,7 @@ RECOVERY_PROCESS = textwrap.dedent(
     import sys
     from pathlib import Path
 
+    from evelyn_core.continuity_authenticity import ContinuityAuthenticity
     from evelyn_core.fast_action_recovery import (
         FAST_ACTION_RECOVERY_NOTICE,
         FastActionRecoveryJournal,
@@ -69,9 +76,13 @@ RECOVERY_PROCESS = textwrap.dedent(
     )
 
     root = Path(sys.argv[1])
+    authenticity = ContinuityAuthenticity(
+        key=Path(sys.argv[2]).read_bytes()
+    )
     owner = FastControlContinuityOwner(
         artifacts_root=root,
         enabled=True,
+        authenticity=authenticity,
         log=lambda *_args, **_kwargs: None,
     )
     journal = FastActionRecoveryJournal(
@@ -81,6 +92,7 @@ RECOVERY_PROCESS = textwrap.dedent(
             / "recovery.json"
         ),
         enabled=True,
+        authenticity=authenticity,
     )
     owner_status = owner.status()
     decision = journal.recovery_decision(
@@ -125,13 +137,19 @@ class FastActionRecoveryRestartTests(unittest.TestCase):
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
+            base = Path(temp_dir)
+            root = base / "artifacts"
+            key_path = base / "continuity-auth.key"
+            key_path.write_bytes(
+                b"fast-action-restart-auth-key-32-bytes"
+            )
             writer = subprocess.run(
                 [
                     sys.executable,
                     "-c",
                     WRITER_PROCESS,
                     str(root),
+                    str(key_path),
                 ],
                 cwd=REPO_ROOT,
                 env=self.subprocess_environment(),
@@ -165,6 +183,7 @@ class FastActionRecoveryRestartTests(unittest.TestCase):
                     "-c",
                     RECOVERY_PROCESS,
                     str(root),
+                    str(key_path),
                 ],
                 cwd=REPO_ROOT,
                 env=self.subprocess_environment(),
@@ -186,6 +205,7 @@ class FastActionRecoveryRestartTests(unittest.TestCase):
                     "-c",
                     RECOVERY_PROCESS,
                     str(root),
+                    str(key_path),
                 ],
                 cwd=REPO_ROOT,
                 env=self.subprocess_environment(),
@@ -210,6 +230,7 @@ class FastActionRecoveryRestartTests(unittest.TestCase):
             "fast_action_recovery_interrupted",
         )
         self.assertEqual(result["journal"]["state"], "recovered")
+        self.assertTrue(result["journal"]["tamperEvident"])
         self.assertEqual(result["generation"], 2)
         notice = result["messages"][-1]["text"]
         self.assertIn("자동으로 다시 시도하지 않았어", notice)

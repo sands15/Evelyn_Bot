@@ -75,7 +75,7 @@ hash-chain·rollback protection·exact receipt 검증을 사용한다.
 - `fast_control.continuity-status.v1`은 state, generation, message count와
   고정 오류 코드만 공개하며 대화 내용은 포함하지 않는다.
 
-## Keyed head authenticity
+## Keyed continuity authenticity
 
 `EVELYN_CONTINUITY_AUTH_KEY_FILE`을 설정하면 Main/Discord owner와 Fast Control
 owner는 content-free checkpoint head를
@@ -84,6 +84,18 @@ owner는 content-free checkpoint head를
 current head만 받아들인다. 서명에는 `conversation_continuity` 또는
 `fast_control_continuity` owner scope도 포함되어 한 owner의 정상 서명본을 다른
 owner 폴더로 복사하는 교차-owner replay를 거부한다.
+
+같은 키는 서로 다른 HMAC domain으로 두 content-free 보조 저장소도 인증한다.
+
+- `conversation_continuity.guild_revocations.v2`는 ledger 전체를 인증해 guild ID,
+  철회 시각과 정책의 변경을 거부한다. Main restore와 cross-surface reader가 같은
+  tag를 검증한다.
+- `fast_control.action-recovery-head.v2`는 recovery journal의 generation/hash를
+  인증한다. journal과 일반 head hash를 함께 다시 계산해도 tag가 없으면
+  `auth_error`가 된다.
+- Action recovery 인증 오류는 자동 중단 안내나 acknowledgement를 기록하지
+  않는다. 올바른 키로 재시작할 수 있도록 journal/head를 보존하고 background
+  action 시작과 continuity commit을 막는다.
 
 - 키 파일은 최소 32바이트의 raw key 또는 `base64:` 접두사가 붙은 base64
   key여야 한다. 상대 경로, symlink, 8KiB 초과 파일과 repository 또는
@@ -102,11 +114,12 @@ owner 폴더로 복사하는 교차-owner replay를 거부한다.
   사용한다. override는 호스트의 절대 키 경로를 `/run/secrets`에 read-only
   secret으로 마운트해 Bot API와 Discord가 같은 키를 사용하게 한다.
 
-이 HMAC 경계는 공유 continuity 폴더의 관리자가 checkpoint와 head를 임의의
-새 내용으로 함께 다시 쓰는 공격을 탐지한다. 그러나 공격자가 이미 서명된 과거
-checkpoint/head 쌍을 그대로 replay하거나 모든 continuity 파일을 삭제하는 것은
-외부 단조 counter가 없으면 탐지할 수 없다. 따라서 `tamperEvident=true`는
-임의 위조 방지를 뜻하며, 외부 불변 anchor나 완전한 삭제 탐지를 뜻하지 않는다.
+이 HMAC 경계는 공유 continuity 폴더의 관리자가 checkpoint/head,
+guild-revocation ledger, action journal/head를 임의의 새 내용으로 다시 쓰는
+공격을 탐지한다. 그러나 공격자가 이미 서명된 과거 artifact 쌍을 그대로
+replay하거나 한 저장소의 모든 파일을 삭제하는 것은 외부 단조 counter가 없으면
+탐지할 수 없다. 따라서 `tamperEvident=true`는 임의 위조 방지를 뜻하며, 외부
+불변 anchor나 완전한 삭제 탐지를 뜻하지 않는다.
 
 Fast Control의 background 조사 작업은 시작 답변만 복구되고 실제
 `asyncio.Task`는 재시작 뒤 복구할 수 없다. 이를 진행 중인 것처럼 남기거나
@@ -152,11 +165,12 @@ Fast Control의 background 조사 작업은 시작 답변만 복구되고 실제
 - 기존 v1 exact-schema journal은 raw byte hash로 generation 0 head에 먼저
   고정한다. v2 진행 entry에는 action 시작 continuity generation이 없으므로
   오래된 안내를 재사용하지 않고 보수적으로 새 안내를 commit한 뒤 v3로
-  전환한다. journal과 head를 함께 다시 쓰거나 함께 삭제할 수 있는 filesystem
-  관리자는 이 로컬 증거 경계 밖이다.
+  전환한다. 외부 키를 켜면 journal/head 동시 임의 재작성은 인증에서 거부되며,
+  이미 서명된 과거 쌍의 replay와 두 파일 동시 삭제는 외부 anchor 경계다.
 - 공개 `actions.recovery` 상태는 pending/recovery count, 고정 오류 코드와
   generation/integrity/head 상태, `rollbackProtected`, `contentFree=true`,
-  `rawText=false`, `automaticRetry=false`만 포함한다.
+  `rawText=false`, `automaticRetry=false`만 포함한다. 외부 키 사용 시 content-free
+  `headAuthenticity`, `keyedAuthenticity`, `tamperEvident`도 포함한다.
 
 이 분리는 두 프로세스가 하나의 checkpoint를 경쟁해서 덮어쓰는 것을 막는
 single-writer 경계다. surface 전환은 별도 mutation owner를 추가하지 않고
@@ -243,11 +257,12 @@ v2는 checkpoint와 일반 head를 함께 임의 재작성하는 공격까지 �
 
 `runtime_artifacts/conversation_continuity/guild_revocations.json`은 길드 초기화가
 체크포인트보다 먼저 내구성 있게 기록됐음을 나타내는 write-ahead ledger다.
-스키마는 `conversation_continuity.guild_revocations.v1`이며 최근 길드 최대
-256개의 숫자 ID와 철회 시각만 저장한다. 대화문, 사용자 ID, 채널 ID, 세션 키,
-경로와 오류 메시지는 저장하지 않는다. ledger가 손상됐거나 schema·크기·파일
-형식 검사를 통과하지 못하면 기존 checkpoint 전체를 복구하지 않는 fail-closed
-정책을 적용한다.
+무키 스키마는 `conversation_continuity.guild_revocations.v1`, 외부 키 사용
+스키마는 HMAC 필드가 추가된 v2이며 최근 길드 최대 256개의 숫자 ID와 철회
+시각만 저장한다. 대화문, 사용자 ID, 채널 ID, 세션 키, 경로와 오류 메시지는
+저장하지 않는다. ledger가 손상됐거나 schema·크기·파일 형식·인증 검사를
+통과하지 못하면 기존 checkpoint 전체를 복구하지 않는 fail-closed 정책을
+적용한다.
 
 checkpoint 파일은 임시 파일에 JSON을 쓴 뒤 flush와 `fsync`를 완료하고
 원자적으로 교체한다. 일반 heartbeat는 불필요한 디스크 동기화를 하지 않지만,
@@ -365,6 +380,8 @@ writer가 다시 저장을 시도한다.
 대화문을 포함하지 않고 상태, 복구·저장 시각, 세션 수, 보존 정책, 고정 오류
 코드 카운터와 현재 guild revocation 개수만 포함한다. additive 상태 필드
 `checkpointIntegrity`, `checkpointGeneration`, `checkpointHeadState`,
+`checkpointHeadAuthenticity`, `guildRevocationsAuthenticity`,
+`keyedAuthenticity`, 두 content-free tamper-evidence boolean과
 `rollbackProtected`가 현재 보호 상태를 공개한다.
 
 Runtime Health의 `runtime_errors.summary.v1`에는
@@ -434,6 +451,12 @@ transcript, 사용자·guild/channel/message/session/turn ID, 경로와 예외
 - guild revocation 기록 직후와 runtime clear 직후 `os._exit` 시 비복구
 - 다른 guild의 checkpoint는 같은 crash 경계에서도 정상 복구
 - revocation ledger의 content-free·corrupt fail-closed 계약
+- signed revocation ledger의 guild/timestamp 위조 거부와 unsigned one-shot
+  bootstrap, 실제 guild-reset crash/restart 인증 유지
+- signed Fast Action journal/head 동시 hash 재작성의 `auth_error`, 원본 보존,
+  자동 notice/ack 0회와 unsigned one-shot bootstrap
+- signed Fast Action crash/restart의 중단 안내 1회, 자동 재실행 0회와
+  `tamperEvident=true`
 - single-flight periodic writer와 직접 사전 변경 감지
 - Discord text 전달 뒤 선택적 TTS 실패 전 즉시 durable commit
 - Discord text의 전달된 고정 실패 턴 commit, fallback 전송 실패 시

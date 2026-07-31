@@ -106,6 +106,9 @@ signed 상태의 key 누락·불일치와 검토되지 않은 v1
 상태는 원본을 지우지 않고 fail-closed하며, v1 승격은 one-shot
 `EVELYN_CONTINUITY_AUTH_BOOTSTRAP=true`가 있어야 한다. 기본 환경에는 운영 키를
 포함하지 않으므로 배포에서 override를 실제 사용해야 이 보호가 활성화된다.
+같은 키의 별도 HMAC domain이 guild revocation ledger 전체와 Fast Action
+recovery head의 journal generation/hash도 인증한다. Action 인증 오류는 자동
+중단 안내나 ack로 원본을 덮지 않고 `auth_error`에서 멈춘다.
 
 periodic writer가 저장한 직후 첫 Python 프로세스를 `os._exit`로 강제 종료하고
 두 번째 새 프로세스가 완료 턴, active follow-up, user ownership, 현재 system
@@ -247,13 +250,12 @@ v3는 각 action marker에 시작 당시 Fast continuity generation도 기록한
 현재 generation이 이번 안내의 durable 전달을 증명해 중복 안내를 막는다. 시작
 generation이 없는 v1/v2 pending marker는 보수적으로 새 안내를 요구한다.
 
-남은 위험은 action journal/head 자체에는 아직 외부 keyed authenticity가 없어
-둘을 함께 재작성할 수 있다는 점이다. continuity checkpoint는 외부 키를 켜면
-임의 위조를 거부하지만, 이미 서명된 과거 쌍의 replay나 전체 파일 삭제는 외부
-단조 anchor 없이는 탐지하지 못한다. 실제 Control Page에서 장시간 웹 조사 중
-Bot API 컨테이너를 강제 종료하는 운영 E2E도 아직 수행하지 않았다. live
-검증에서는 시작 답변 뒤 강제 종료, 고정 중단 안내, 자동 재요청 0회와
-`actions.recovery`의 content-free 상태를 함께 확인한다.
+action journal/head와 guild revocation ledger도 외부 키를 켜면 임의 위조를
+거부한다. 남은 위험은 이미 서명된 과거 artifact 쌍의 replay나 한 저장소의
+전체 파일 삭제를 외부 단조 anchor 없이 탐지하지 못한다는 점이다. 실제 Control
+Page에서 장시간 웹 조사 중 Bot API 컨테이너를 강제 종료하는 운영 E2E도 아직
+수행하지 않았다. live 검증에서는 시작 답변 뒤 강제 종료, 고정 중단 안내,
+자동 재요청 0회와 `actions.recovery`의 content-free 상태를 함께 확인한다.
 
 ## P1 — Python 모델 런타임 의존성 잔여 취약점
 
