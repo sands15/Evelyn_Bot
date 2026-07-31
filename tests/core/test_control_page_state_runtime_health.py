@@ -91,8 +91,10 @@ class ControlPageRuntimeHealthContractTests(unittest.TestCase):
 
     def test_runtime_health_is_cached_for_state_polling(self) -> None:
         self.assertIn("RUNTIME_HEALTH_CACHE_TTL_SEC", self.local_server)
+        self.assertIn("RUNTIME_HEALTH_CACHE_MAX_STALE_SEC", self.local_server)
         self.assertIn("async def cached_runtime_health", self.local_server)
-        self.assertIn("runtime_health_cache_lock = asyncio.Lock()", self.local_server)
+        self.assertIn("RuntimeHealthSnapshotCache(", self.local_server)
+        self.assertIn("CONTROL_PAGE_RUNTIME_HEALTH_CACHE.get", self.local_server)
         self.assertIn("cached_runtime_health(force=True)", self.local_server)
 
     def test_static_control_page_assets_declare_utf8(self) -> None:
@@ -150,13 +152,45 @@ class ControlPageStateMergeTests(unittest.IsolatedAsyncioTestCase):
     def test_control_plane_status_text_marks_stale_runtime_health_cache(self) -> None:
         stale = control_page_server.build_control_plane_state(
             ports={"bot": True},
-            cache_age_sec=control_page_server.RUNTIME_HEALTH_CACHE_TTL_SEC + 10,
+            cache_age_sec=(
+                control_page_server.RUNTIME_HEALTH_CACHE_MAX_STALE_SEC
+                + 1
+            ),
         )
 
         self.assertTrue(stale["healthCache"]["stale"])
         self.assertEqual(stale["healthCache"]["ttlSec"], control_page_server.RUNTIME_HEALTH_CACHE_TTL_SEC)
+        self.assertEqual(
+            stale["healthCache"]["maxStaleSec"],
+            control_page_server.RUNTIME_HEALTH_CACHE_MAX_STALE_SEC,
+        )
         self.assertIn("Runtime health data is stale", stale["statusText"])
         self.assertIn("refresh before trusting readiness", stale["statusText"])
+
+    async def test_boot_progress_uses_snapshot_cache_age(self) -> None:
+        service_health = {
+            "cache": {
+                "ageSec": 2.75,
+                "stale": False,
+            },
+            "legacyServices": {
+                "botReady": True,
+                "mainReady": True,
+                "routerReady": True,
+                "subReady": True,
+                "ttsReady": True,
+            },
+            "services": [],
+        }
+
+        with patch.object(
+            control_page_server,
+            "cached_runtime_health",
+            new=AsyncMock(return_value=service_health),
+        ):
+            progress = await control_page_server.current_boot_progress()
+
+        self.assertEqual(progress["healthCacheAgeSec"], 2.75)
 
     async def test_degraded_state_keeps_required_schema_when_bot_api_is_missing(self) -> None:
         service_health = {

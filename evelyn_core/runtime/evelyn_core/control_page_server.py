@@ -44,6 +44,9 @@ from .memory_vault import (
 )
 from .public_error_contract import public_error_code, public_failure_message
 from .runtime_health import apply_runtime_health_overrides, collect_runtime_health
+from .runtime_health_snapshot_cache import (
+    RuntimeHealthSnapshotCache,
+)
 from .runtime_error_observability import collect_runtime_error_observability
 from .runtime_repair import (
     append_repair_event,
@@ -86,10 +89,24 @@ MODEL_PORTS = {
     "codex": int(os.getenv("VOYAGER_CODEX_GATEWAY_PORT", "8787")),
     "bot": BOT_API_PORT,
 }
-RUNTIME_HEALTH_CACHE_TTL_SEC = float(os.getenv("CONTROL_PAGE_RUNTIME_HEALTH_CACHE_TTL_SEC", "1.5"))
-runtime_health_cache: dict[str, Any] | None = None
-runtime_health_cache_at = 0.0
-runtime_health_cache_lock: asyncio.Lock | None = None
+RUNTIME_HEALTH_CACHE_TTL_SEC = max(
+    0.5,
+    float(
+        os.getenv(
+            "CONTROL_PAGE_RUNTIME_HEALTH_CACHE_TTL_SEC",
+            "2.0",
+        )
+    ),
+)
+RUNTIME_HEALTH_CACHE_MAX_STALE_SEC = max(
+    RUNTIME_HEALTH_CACHE_TTL_SEC,
+    float(
+        os.getenv(
+            "CONTROL_PAGE_RUNTIME_HEALTH_CACHE_MAX_STALE_SEC",
+            "6.0",
+        )
+    ),
+)
 runtime_health_overrides: dict[str, dict[str, Any]] = {}
 bot_state_last_success_at = 0.0
 VOICE_CAPTURE_CONSENT_LOCK_KEY = web.AppKey(
@@ -170,37 +187,26 @@ async def probe_port(port: int, host: str = "127.0.0.1", timeout_sec: float = 0.
         return False
 
 
-async def cached_runtime_health(*, force: bool = False) -> dict[str, Any]:
-    global runtime_health_cache
-    global runtime_health_cache_at
-    global runtime_health_cache_lock
+async def collect_control_page_runtime_health() -> dict[str, Any]:
+    manifest = load_service_manifest()
+    health = await collect_runtime_health(manifest=manifest)
+    prune_runtime_health_overrides()
+    return apply_runtime_health_overrides(
+        health,
+        runtime_health_overrides,
+        manifest=manifest,
+    )
 
-    now = time.time()
-    if (
-        not force
-        and runtime_health_cache is not None
-        and RUNTIME_HEALTH_CACHE_TTL_SEC > 0
-        and now - runtime_health_cache_at < RUNTIME_HEALTH_CACHE_TTL_SEC
-    ):
-        return dict(runtime_health_cache)
-    if runtime_health_cache_lock is None:
-        runtime_health_cache_lock = asyncio.Lock()
-    async with runtime_health_cache_lock:
-        now = time.time()
-        if (
-            not force
-            and runtime_health_cache is not None
-            and RUNTIME_HEALTH_CACHE_TTL_SEC > 0
-            and now - runtime_health_cache_at < RUNTIME_HEALTH_CACHE_TTL_SEC
-        ):
-            return dict(runtime_health_cache)
-        manifest = load_service_manifest()
-        health = await collect_runtime_health(manifest=manifest)
-        prune_runtime_health_overrides()
-        health = apply_runtime_health_overrides(health, runtime_health_overrides, manifest=manifest)
-        runtime_health_cache = dict(health)
-        runtime_health_cache_at = time.time()
-        return dict(runtime_health_cache)
+
+CONTROL_PAGE_RUNTIME_HEALTH_CACHE = RuntimeHealthSnapshotCache(
+    collector=collect_control_page_runtime_health,
+    refresh_after_sec=RUNTIME_HEALTH_CACHE_TTL_SEC,
+    max_stale_sec=RUNTIME_HEALTH_CACHE_MAX_STALE_SEC,
+)
+
+
+async def cached_runtime_health(*, force: bool = False) -> dict[str, Any]:
+    return await CONTROL_PAGE_RUNTIME_HEALTH_CACHE.get(force=force)
 
 
 async def proxy_json(request: web.Request, method: str, path: str, *, body: Any = None) -> web.Response | None:
@@ -365,8 +371,8 @@ def last_proxy_failure(request: web.Request) -> dict[str, Any] | None:
 def runtime_health_cache_stale(cache_age_sec: float | None) -> bool:
     return bool(
         cache_age_sec is not None
-        and RUNTIME_HEALTH_CACHE_TTL_SEC > 0
-        and cache_age_sec > RUNTIME_HEALTH_CACHE_TTL_SEC
+        and RUNTIME_HEALTH_CACHE_MAX_STALE_SEC > 0
+        and cache_age_sec > RUNTIME_HEALTH_CACHE_MAX_STALE_SEC
     )
 
 
@@ -444,6 +450,7 @@ def build_control_plane_state(
             "ageSec": round(float(cache_age_sec or 0.0), 1),
             "stale": cache_stale,
             "ttlSec": RUNTIME_HEALTH_CACHE_TTL_SEC,
+            "maxStaleSec": RUNTIME_HEALTH_CACHE_MAX_STALE_SEC,
         },
         "statusText": control_plane_status_text(ports=ports, proxy_failure=proxy_failure, cache_age_sec=cache_age_sec),
     }
@@ -477,6 +484,7 @@ def build_boot_progress_from_ports(ports: dict[str, bool]) -> dict[str, Any]:
 
 async def current_boot_progress() -> dict[str, Any]:
     service_health = await cached_runtime_health()
+    health_cache = dict(service_health.get("cache") or {})
     legacy = dict(service_health.get("legacyServices") or {})
     ports = {
         "main": bool(legacy.get("mainReady")),
@@ -491,7 +499,11 @@ async def current_boot_progress() -> dict[str, Any]:
         "ports": ports,
         "bootProgress": build_boot_progress_from_ports(ports),
         "serviceHealth": service_health,
-        "healthCacheAgeSec": max(0.0, time.time() - runtime_health_cache_at) if runtime_health_cache_at > 0 else None,
+        "healthCacheAgeSec": (
+            max(0.0, float(health_cache.get("ageSec") or 0.0))
+            if health_cache
+            else None
+        ),
         "botApiCheckedAt": runtime_service_checked_at(service_health, "bot_api"),
         "botStateLastSuccessAt": bot_state_last_success_at if bot_state_last_success_at > 0 else None,
     }
@@ -785,9 +797,6 @@ async def runtime_errors_handler(_: web.Request) -> web.StreamResponse:
 
 
 async def runtime_health_override_handler(request: web.Request) -> web.StreamResponse:
-    global runtime_health_cache
-    global runtime_health_cache_at
-
     if not request_is_loopback(request):
         return json_response({"ok": False, "error": "loopback_only"}, status=403)
     try:
@@ -815,8 +824,7 @@ async def runtime_health_override_handler(request: web.Request) -> web.StreamRes
             "message": str((payload or {}).get("message") or f"{service_id} is safely simulated as {state}."),
             "expiresAt": time.time() + ttl_sec,
         }
-    runtime_health_cache = None
-    runtime_health_cache_at = 0.0
+    CONTROL_PAGE_RUNTIME_HEALTH_CACHE.clear()
     health = await cached_runtime_health(force=True)
     return json_response(
         {

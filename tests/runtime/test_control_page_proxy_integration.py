@@ -31,8 +31,7 @@ class _Request(dict):
 
 class ControlPageProxyIntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self) -> None:
-        control_page_server.runtime_health_cache = None
-        control_page_server.runtime_health_cache_at = 0.0
+        control_page_server.CONTROL_PAGE_RUNTIME_HEALTH_CACHE.clear()
         control_page_server.bot_state_last_success_at = 0.0
 
     async def start_bot_api(self, handler) -> tuple[web.AppRunner, int]:
