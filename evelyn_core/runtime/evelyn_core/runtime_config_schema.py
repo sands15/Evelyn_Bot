@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 from urllib.parse import urlparse
 
+from .vision_remote_model_lock import FALCON_OCR_REVISION
+
 
 RUNTIME_CONFIG_SCHEMA = "runtime_config.owner.v1"
 _TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
@@ -188,6 +190,12 @@ VISION_SERVICE_SETTINGS = (
         default="HuggingFaceTB/SmolVLM2-500M-Video-Instruct",
     ),
     SettingSpec("VISION_OCR_MODEL", default="tiiuae/Falcon-OCR"),
+    SettingSpec("VISION_OCR_REVISION", default=FALCON_OCR_REVISION),
+    SettingSpec(
+        "VISION_OCR_LOCAL_FILES_ONLY",
+        kind="bool",
+        default=True,
+    ),
     SettingSpec("VISION_DEVICE", default="auto"),
     SettingSpec(
         "VISION_DTYPE",

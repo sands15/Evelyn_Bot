@@ -1,7 +1,7 @@
 # Dependency, Configuration, and Credential Hardening
 
 Document status: **Current**
-Last reviewed: 2026-07-31 KST
+Last reviewed: 2026-08-01 KST
 
 ## Dependency compatibility result
 
@@ -25,10 +25,30 @@ Torchvision 0.26. Root/CPU runtimes can use Torch 2.13, but CUDA services
 cannot claim the same remediation until compatible CUDA wheels and model
 smoke evidence exist.
 
-Falcon-OCR still requires Hugging Face remote model code. The new
-`VISION_TRUST_REMOTE_CODE=false` default applies to SmolVLM only; it is not a
-claim that Falcon-OCR has been sandboxed or converted to native Transformers
-code.
+Falcon-OCR still requires Hugging Face remote model code. Evelyn now pins the
+full upstream commit `42ec56b72a23984ac059e7c8a6d397a8529423fe` and verifies
+the size and SHA-256 of every executable, configuration, tokenizer, and weight
+file before `trust_remote_code=True` is reached. The runtime defaults to
+`VISION_OCR_LOCAL_FILES_ONLY=true`; an absent, changed, or incomplete snapshot
+fails closed with a content-free health code.
+
+Provisioning is an explicit administrator operation outside the repository:
+
+```powershell
+python tools/provision_falcon_ocr_snapshot.py download `
+  --cache-dir C:/Users/you/.cache/huggingface
+python tools/provision_falcon_ocr_snapshot.py verify `
+  --cache-dir C:/Users/you/.cache/huggingface
+```
+
+`--cache-dir` is the Hugging Face home directory; the provisioner and runtime
+both use its `hub/` child so the downloaded and mounted snapshot are identical.
+
+The Vision container runs as UID/GID 10001 with a read-only root filesystem,
+all Linux capabilities dropped, `no-new-privileges`, a PID limit, ephemeral
+write paths under `/tmp`, and the model cache mounted read-only. This narrows
+the executable-code boundary; it does not convert Falcon-OCR to native
+Transformers code or isolate arbitrary network access from that code.
 
 ### Node/Minecraft
 

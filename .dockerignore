@@ -23,6 +23,9 @@
 !evelyn_voice/
 !evelyn_voice/**
 
+!tools/
+!tools/provision_falcon_ocr_snapshot.py
+
 !external/
 !external/mindcraft/
 !external/mindcraft/**

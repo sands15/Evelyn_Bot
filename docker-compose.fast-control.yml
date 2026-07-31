@@ -479,6 +479,8 @@ services:
       VISION_LOAD_SMOL: "true"
       VISION_LOAD_OCR: "false"
       VISION_TRUST_REMOTE_CODE: "false"
+      VISION_OCR_REVISION: "42ec56b72a23984ac059e7c8a6d397a8529423fe"
+      VISION_OCR_LOCAL_FILES_ONLY: "true"
       VISION_OCR_LAZY_LOAD: "true"
       VISION_OCR_IDLE_UNLOAD_SEC: "600"
       VISION_OCR_UNLOAD_AFTER_REQUEST: "true"
@@ -486,10 +488,26 @@ services:
       VISION_WATCH_RUN_OCR: "false"
       EVELYN_HOST_PROJECT_ROOT: "${EVELYN_HOST_PROJECT_ROOT:-C:/Evelyn}"
       EVELYN_CONTAINER_PROJECT_ROOT: "/app"
+      HF_HOME: "/model-cache"
+      HF_HUB_CACHE: "/model-cache/hub"
+      HF_HUB_OFFLINE: "1"
+      HF_MODULES_CACHE: "/tmp/hf-modules"
+      TORCH_EXTENSIONS_DIR: "/tmp/torch-extensions"
+      TRITON_CACHE_DIR: "/tmp/triton"
+      XDG_CACHE_HOME: "/tmp/xdg-cache"
+      HOME: "/tmp/vision-home"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 512
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=4g
     volumes:
-      - ./runtime_artifacts:/app/runtime_artifacts
-      - ./logs:/app/logs
-      - ${EVELYN_HUGGINGFACE_CACHE_DIR:-${USERPROFILE}/.cache/huggingface}:/root/.cache/huggingface
+      - ./runtime_artifacts:/app/runtime_artifacts:ro
+      - ./logs:/app/logs:ro
+      - ${EVELYN_HUGGINGFACE_CACHE_DIR:-${USERPROFILE}/.cache/huggingface}:/model-cache:ro
     ports:
       - "127.0.0.1:8891:8891"
     healthcheck:

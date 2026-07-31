@@ -9,6 +9,7 @@ VISION_SERVICE = REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "vision
 START_VISION = REPO_ROOT / "evelyn_core" / "runtime" / "launchers" / "start_vision.ps1"
 START_ENV = REPO_ROOT / "evelyn_core" / "start_env.bat"
 VISION_DOCKERFILE = REPO_ROOT / "docker" / "Dockerfile.vision"
+DOCKERIGNORE = REPO_ROOT / ".dockerignore"
 
 
 class VisionServiceLazyOcrTests(unittest.TestCase):
@@ -33,10 +34,20 @@ class VisionServiceLazyOcrTests(unittest.TestCase):
         self.assertIn("map_host_project_path(image_path)", source)
         self.assertIn("def _falcon_ocr_file(", source)
         self.assertIn("from huggingface_hub import hf_hub_download", source)
-        self.assertIn("local_files_only=True", source)
+        self.assertIn("def verify_falcon_ocr_snapshot()", source)
+        self.assertIn("verify_remote_model_snapshot(", source)
+        self.assertIn("verify_falcon_ocr_snapshot()", source)
+        self.assertIn("revision=OCR_MODEL_REVISION", source)
+        self.assertIn("local_files_only=VISION_OCR_LOCAL_FILES_ONLY", source)
         self.assertIn(
-            'revision=getattr(model.config, "_commit_hash", None)',
+            'getattr(model.config, "_commit_hash", None) or ""',
             source,
+        )
+        self.assertIn('"supplyChain": ocr_supply_chain_status()', source)
+        load_start = source.index("def load_falcon_ocr_model")
+        self.assertLess(
+            source.index("verify_falcon_ocr_snapshot()", load_start),
+            source.index("AutoModelForCausalLM.from_pretrained", load_start),
         )
         self.assertIn("from .vision_quality import build_vision_quality", source)
         self.assertIn('result["quality"] = build_vision_quality(result)', source)
@@ -63,22 +74,42 @@ class VisionServiceLazyOcrTests(unittest.TestCase):
 
         self.assertIn("RUN pip install requests==2.34.2", dockerfile)
         self.assertIn("python3-dev", dockerfile)
+        self.assertIn("COPY docker/falcon_ocr_snapshot.lock.json", dockerfile)
+        self.assertIn("COPY tools/provision_falcon_ocr_snapshot.py", dockerfile)
+        self.assertIn("USER 10001:10001", dockerfile)
+        dockerignore = DOCKERIGNORE.read_text(encoding="utf-8")
+        self.assertIn("!tools/provision_falcon_ocr_snapshot.py", dockerignore)
 
     def test_start_vision_passes_lazy_ocr_env_to_wsl_and_windows(self) -> None:
         source = START_VISION.read_text(encoding="utf-8")
 
         self.assertIn("$visionOcrLazyLoad", source)
+        self.assertIn("export VISION_OCR_REVISION='$visionOcrRevision'", source)
+        self.assertIn(
+            "export VISION_OCR_LOCAL_FILES_ONLY='$visionOcrLocalFilesOnly'",
+            source,
+        )
         self.assertIn("export VISION_OCR_LAZY_LOAD='$visionOcrLazyLoad'", source)
         self.assertIn("export VISION_OCR_IDLE_UNLOAD_SEC='$visionOcrIdleUnloadSec'", source)
         self.assertIn("export VISION_OCR_UNLOAD_AFTER_REQUEST='$visionOcrUnloadAfterRequest'", source)
         self.assertIn("$env:VISION_OCR_LAZY_LOAD = $visionOcrLazyLoad", source)
         self.assertIn("$env:VISION_OCR_IDLE_UNLOAD_SEC = $visionOcrIdleUnloadSec", source)
         self.assertIn("$env:VISION_OCR_UNLOAD_AFTER_REQUEST = $visionOcrUnloadAfterRequest", source)
+        self.assertIn("$env:VISION_OCR_REVISION = $visionOcrRevision", source)
+        self.assertIn("$env:VISION_OCR_LOCAL_FILES_ONLY = $visionOcrLocalFilesOnly", source)
 
     def test_start_env_declares_lazy_ocr_defaults(self) -> None:
         source = START_ENV.read_text(encoding="utf-8")
 
         self.assertIn('if "%VISION_OCR_LAZY_LOAD%"=="" set "VISION_OCR_LAZY_LOAD=false"', source)
+        self.assertIn(
+            'if "%VISION_OCR_REVISION%"=="" set "VISION_OCR_REVISION=42ec56b72a23984ac059e7c8a6d397a8529423fe"',
+            source,
+        )
+        self.assertIn(
+            'if "%VISION_OCR_LOCAL_FILES_ONLY%"=="" set "VISION_OCR_LOCAL_FILES_ONLY=true"',
+            source,
+        )
         self.assertIn('if "%VISION_OCR_IDLE_UNLOAD_SEC%"=="" set "VISION_OCR_IDLE_UNLOAD_SEC=600"', source)
         self.assertIn(
             'if "%VISION_OCR_UNLOAD_AFTER_REQUEST%"=="" set "VISION_OCR_UNLOAD_AFTER_REQUEST=false"',

@@ -17,8 +17,10 @@ if str(RUNTIME_ROOT) not in sys.path:
 from evelyn_core.runtime_config_schema import (  # noqa: E402
     RUNTIME_CONFIG_SCHEMA,
     SettingSpec,
+    VISION_SERVICE_SETTINGS,
     load_runtime_settings,
 )
+from evelyn_core.vision_remote_model_lock import FALCON_OCR_REVISION  # noqa: E402
 
 
 class RuntimeConfigSchemaTests(unittest.TestCase):
@@ -89,6 +91,16 @@ class RuntimeConfigSchemaTests(unittest.TestCase):
             settings.public_summary()["warnings"],
             [{"field": "CURRENT", "code": "deprecated_alias"}],
         )
+
+    def test_vision_ocr_defaults_to_exact_offline_snapshot(self) -> None:
+        settings = load_runtime_settings(
+            "vision",
+            VISION_SERVICE_SETTINGS,
+            environ={},
+        )
+
+        self.assertEqual(settings["VISION_OCR_REVISION"], FALCON_OCR_REVISION)
+        self.assertIs(settings["VISION_OCR_LOCAL_FILES_ONLY"], True)
 
 
 if __name__ == "__main__":

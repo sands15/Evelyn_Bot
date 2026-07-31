@@ -331,6 +331,34 @@ class DockerComposeContractTests(unittest.TestCase):
         ):
             self.assertIn(variable, source)
 
+    def test_vision_remote_code_runs_from_pinned_read_only_snapshot(
+        self,
+    ) -> None:
+        source = COMPOSE.read_text(encoding="utf-8")
+        vision = source.split("  vision:\n", 1)[1].split(
+            "\n  stt:",
+            1,
+        )[0]
+
+        self.assertIn(
+            'VISION_OCR_REVISION: "42ec56b72a23984ac059e7c8a6d397a8529423fe"',
+            vision,
+        )
+        self.assertIn('VISION_OCR_LOCAL_FILES_ONLY: "true"', vision)
+        self.assertIn('HF_HOME: "/model-cache"', vision)
+        self.assertIn('HF_HUB_CACHE: "/model-cache/hub"', vision)
+        self.assertIn('HF_HUB_OFFLINE: "1"', vision)
+        self.assertIn('HF_MODULES_CACHE: "/tmp/hf-modules"', vision)
+        self.assertIn("read_only: true", vision)
+        self.assertIn("cap_drop:\n      - ALL", vision)
+        self.assertIn("- no-new-privileges:true", vision)
+        self.assertIn("pids_limit: 512", vision)
+        self.assertIn("/tmp:rw,nosuid,nodev,size=4g", vision)
+        self.assertIn("./runtime_artifacts:/app/runtime_artifacts:ro", vision)
+        self.assertIn("./logs:/app/logs:ro", vision)
+        self.assertIn(":/model-cache:ro", vision)
+        self.assertNotIn(":/root/.cache/huggingface", vision)
+
     def test_fast_control_api_supports_local_bridge_chat_contract(self) -> None:
         source = (REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "fast_control_api.py").read_text(encoding="utf-8")
 

@@ -289,9 +289,13 @@ CUDA 12.8 공식 인덱스는 현재 Torch/Torchaudio 2.11과 Torchvision 0.26�
 없다. exact-latent/FlashAttention 결합인 VoxCPM은 모델 smoke 없이 2.8에서
 올리지 않았다.
 
-Falcon-OCR은 여전히 Hugging Face remote model code 실행을 요구한다.
-`VISION_TRUST_REMOTE_CODE=false`는 SmolVLM 경로만 제한하며 Falcon-OCR을
-sandbox한 것은 아니다.
+Falcon-OCR은 여전히 Hugging Face remote model code 실행을 요구한다. 다만
+full commit과 모든 snapshot 파일의 size/SHA-256을 고정하고, 실행 전 전체
+검증, 기본 offline/local-only 로드, read-only model cache·root filesystem,
+non-root·capability drop·no-new-privileges 경계를 적용했다. 이것은 공급망
+변경과 파일시스템/프로세스 권한을 제한하지만 remote code의 임의 네트워크
+접근까지 격리한 sandbox는 아니다. GPU 모델 로드 smoke도 별도 승인 전에는
+미완료다.
 
 다음 조치: Qwen-ASR의 Transformers 5 호환 릴리스와 CUDA 12.8 Torch 2.13
 wheel을 재확인한다. 새 이미지 GPU 모델 로드 smoke 전에는 배포 완료로 판정하지

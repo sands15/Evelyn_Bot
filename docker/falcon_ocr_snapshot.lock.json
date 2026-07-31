@@ -1,0 +1,73 @@
+{
+  "schema": "vision.remote-model-lock.v1",
+  "repoId": "tiiuae/Falcon-OCR",
+  "revision": "42ec56b72a23984ac059e7c8a6d397a8529423fe",
+  "files": [
+    {
+      "name": "attention.py",
+      "role": "remote_code",
+      "size": 4566,
+      "sha256": "9dcd7f868901e50ae5b541ff44c9893215c9fb9684127799c841f3e1456dc524"
+    },
+    {
+      "name": "configuration_falcon_ocr.py",
+      "role": "remote_code",
+      "size": 2222,
+      "sha256": "452656de36620c58a1ec7ce84c53f2360aae550ef32beb5b7486e2419c7932e9"
+    },
+    {
+      "name": "modeling_falcon_ocr.py",
+      "role": "remote_code",
+      "size": 32898,
+      "sha256": "f04219e56b5e721e68e24191c312c50645a010344602d598fafcf7fc826c6e15"
+    },
+    {
+      "name": "processing_falcon_ocr.py",
+      "role": "remote_code",
+      "size": 15527,
+      "sha256": "80ba44e6aa6eaa5f11b335b10fbe62bfcb63bc2b73c7a8fdbe049304b75e5d8d"
+    },
+    {
+      "name": "rope.py",
+      "role": "remote_code",
+      "size": 4689,
+      "sha256": "8446ee8047a7da4291a9b4b91bbee2e7ca988dc05ab94ce65d9dc12868c345c7"
+    },
+    {
+      "name": "config.json",
+      "role": "configuration",
+      "size": 746,
+      "sha256": "35bc3fb6d0d3ab137980891ef259e1924a9230ce771535bc4182a76a4ebaf826"
+    },
+    {
+      "name": "model_args.json",
+      "role": "configuration",
+      "size": 822,
+      "sha256": "f40e7a82b5654c85beaa46a95f88a30d6f6e3a54ee105529813188e383c5841f"
+    },
+    {
+      "name": "special_tokens_map.json",
+      "role": "tokenizer",
+      "size": 9357,
+      "sha256": "edd96763ef5d2e6c583ddd4859f3aa23661a9ace343e3709d96cea05d555be51"
+    },
+    {
+      "name": "tokenizer_config.json",
+      "role": "tokenizer",
+      "size": 4352,
+      "sha256": "074e03d3fd56d190dac763ec5dfe75a728e15783fc5d919d4b5cbe72bcd24d26"
+    },
+    {
+      "name": "tokenizer.json",
+      "role": "tokenizer",
+      "size": 5063163,
+      "sha256": "4a9892af2b1ef021a421f140c7e3c064f5b255f7d75ba18c883996d86e1cf15a"
+    },
+    {
+      "name": "model.safetensors",
+      "role": "weights",
+      "size": 1079789440,
+      "sha256": "cc0d1d34c0406448de8129d2e28e98e59553a5c7654a8d0970f007a1d042f3cb"
+    }
+  ]
+}

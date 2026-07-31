@@ -23,12 +23,23 @@ from .runtime_config_schema import VISION_SERVICE_SETTINGS, load_runtime_setting
 from .runtime_error_observability import RuntimeErrorCounter
 from .vision_ocr_tiles import build_screen_ocr_tiles, merge_screen_ocr_texts
 from .vision_quality import build_vision_quality
+from .vision_remote_model_lock import (
+    VisionRemoteModelLockError,
+    load_remote_model_lock,
+    public_remote_model_status,
+    validate_remote_model_configuration,
+    verify_remote_model_snapshot,
+)
 
 
 _VISION_CONFIG = load_runtime_settings("vision", VISION_SERVICE_SETTINGS)
 _RUNTIME_ERRORS = RuntimeErrorCounter()
 SMOL_MODEL_ID = str(_VISION_CONFIG["VISION_SMOL_MODEL"])
 OCR_MODEL_ID = str(_VISION_CONFIG["VISION_OCR_MODEL"])
+OCR_MODEL_REVISION = str(_VISION_CONFIG["VISION_OCR_REVISION"])
+VISION_OCR_LOCAL_FILES_ONLY = bool(
+    _VISION_CONFIG["VISION_OCR_LOCAL_FILES_ONLY"]
+)
 _configured_device = str(_VISION_CONFIG["VISION_DEVICE"])
 VISION_DEVICE = (
     "cuda:0" if torch.cuda.is_available() else "cpu"
@@ -144,26 +155,19 @@ def load_image(*, image_path: str | None = None, image_base64: str | None = None
 
 
 def _falcon_ocr_file(filename: str, *, revision: str | None) -> Path:
-    download_kwargs: dict[str, Any] = {}
-    if revision:
-        download_kwargs["revision"] = revision
-    try:
-        return Path(
-            hf_hub_download(
-                OCR_MODEL_ID,
-                filename,
-                local_files_only=True,
-                **download_kwargs,
-            )
+    selected_revision = str(revision or OCR_MODEL_REVISION)
+    if selected_revision != OCR_MODEL_REVISION:
+        raise VisionRemoteModelLockError(
+            "vision_remote_model_revision_mismatch"
         )
-    except Exception:
-        return Path(
-            hf_hub_download(
-                OCR_MODEL_ID,
-                filename,
-                **download_kwargs,
-            )
+    return Path(
+        hf_hub_download(
+            OCR_MODEL_ID,
+            filename,
+            revision=OCR_MODEL_REVISION,
+            local_files_only=VISION_OCR_LOCAL_FILES_ONLY,
         )
+    )
 
 
 def load_falcon_ocr_tokenizer(
@@ -235,18 +239,77 @@ _ocr_model: Any | None = None
 _ocr_loaded_at: float | None = None
 _ocr_last_used_at: float | None = None
 _ocr_lock = threading.RLock()
+_ocr_supply_chain_lock = threading.RLock()
 _ocr_idle_reaper_started = False
+_ocr_supply_chain_receipt: dict[str, Any] | None = None
+_ocr_supply_chain_failure = ""
+
+
+def _locked_ocr_model_configuration() -> Any:
+    lock = load_remote_model_lock()
+    validate_remote_model_configuration(
+        lock,
+        repo_id=OCR_MODEL_ID,
+        revision=OCR_MODEL_REVISION,
+    )
+    return lock
+
+
+def verify_falcon_ocr_snapshot() -> dict[str, Any]:
+    global _ocr_supply_chain_receipt, _ocr_supply_chain_failure
+    with _ocr_supply_chain_lock:
+        if _ocr_supply_chain_receipt is not None:
+            return dict(_ocr_supply_chain_receipt)
+        try:
+            lock = _locked_ocr_model_configuration()
+            receipt = verify_remote_model_snapshot(
+                lock,
+                downloader=hf_hub_download,
+                local_files_only=VISION_OCR_LOCAL_FILES_ONLY,
+            )
+        except VisionRemoteModelLockError as exc:
+            _ocr_supply_chain_failure = exc.code
+            raise
+        _ocr_supply_chain_receipt = dict(receipt)
+        _ocr_supply_chain_failure = ""
+        return dict(receipt)
+
+
+def ocr_supply_chain_status() -> dict[str, Any]:
+    configured = False
+    failure_code = _ocr_supply_chain_failure
+    try:
+        _locked_ocr_model_configuration()
+        configured = True
+    except VisionRemoteModelLockError as exc:
+        failure_code = exc.code
+    return public_remote_model_status(
+        configured=configured,
+        local_files_only=VISION_OCR_LOCAL_FILES_ONLY,
+        receipt=_ocr_supply_chain_receipt,
+        failure_code=failure_code,
+    )
 
 
 def load_falcon_ocr_model() -> Any:
+    verify_falcon_ocr_snapshot()
     model = AutoModelForCausalLM.from_pretrained(
         OCR_MODEL_ID,
         trust_remote_code=True,
+        revision=OCR_MODEL_REVISION,
+        local_files_only=VISION_OCR_LOCAL_FILES_ONLY,
         torch_dtype=resolve_ocr_dtype(),
         device_map="auto" if VISION_DEVICE.startswith("cuda") else None,
     )
+    loaded_revision = str(
+        getattr(model.config, "_commit_hash", None) or ""
+    )
+    if loaded_revision != OCR_MODEL_REVISION:
+        raise VisionRemoteModelLockError(
+            "vision_remote_model_revision_mismatch"
+        )
     model._tokenizer = load_falcon_ocr_tokenizer(
-        revision=getattr(model.config, "_commit_hash", None),
+        revision=OCR_MODEL_REVISION,
     )
     model.eval()
     return model
@@ -292,9 +355,18 @@ def ensure_ocr_loaded() -> Any:
         print(f"[VISION OCR] lazy load start model={OCR_MODEL_ID} gpu={gpu_snapshot()}", flush=True)
         try:
             _ocr_model = load_falcon_ocr_model()
+        except VisionRemoteModelLockError as exc:
+            _RUNTIME_ERRORS.record("vision_ocr_load_failed", exc)
+            raise HTTPException(
+                status_code=503,
+                detail=exc.code,
+            ) from exc
         except Exception as exc:
             _RUNTIME_ERRORS.record("vision_ocr_load_failed", exc)
-            raise
+            raise HTTPException(
+                status_code=503,
+                detail="vision_ocr_load_failed",
+            ) from exc
         _ocr_loaded_at = time.time()
         _ocr_last_used_at = None
         print(f"[VISION OCR] lazy load done gpu={gpu_snapshot()}", flush=True)
@@ -339,6 +411,7 @@ def ocr_status() -> dict[str, Any]:
         "lastUsedAt": _ocr_last_used_at,
         "idleUnloadSec": VISION_OCR_IDLE_UNLOAD_SEC,
         "unloadAfterRequest": VISION_OCR_UNLOAD_AFTER_REQUEST,
+        "supplyChain": ocr_supply_chain_status(),
     }
 
 
