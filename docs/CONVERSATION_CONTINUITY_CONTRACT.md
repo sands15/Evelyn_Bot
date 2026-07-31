@@ -88,6 +88,18 @@ checkpoint 저장 실패로 발생한 revocation status는 `fsync`해 fail-close
 - 음성 답변은 재생 완료 뒤 history, active session, room owner를 반영하고
   즉시 commit한다.
 
+Discord message reference fallback도 delivery-at-most-once 경계를 따른다.
+
+- message ID 변환 등 reference 생성이 네트워크 전송 전에 로컬에서 실패하면
+  reference 없는 전송을 한 번 수행할 수 있다.
+- Discord가 첫 reference 전송을 확실히 거부한 비모호 4xx 응답에서만
+  reference 없는 전송을 한 번 수행한다.
+- timeout, 연결 단절, 상태 없는 예외, 5xx와 `408|409|425|429`는 첫 전송이
+  Discord에 수락됐는지 증명할 수 없다. 이 경우 wrapper는 일반 메시지로
+  재전송하지 않고 원래 오류를 상위로 전달한다.
+- 이 경계는 ambiguous failure에서 응답 하나를 잃을 가능성보다 같은 응답을
+  두 번 전달해 관계 상태를 왜곡하는 위험을 우선 차단한다.
+
 이미 외부에 전달된 뒤 commit이 실패하면 답변을 거짓으로 미전달 처리하거나
 중복 전송하지 않는다. 대신 고정 오류 코드와 예외 타입만 관측하고 periodic
 writer가 다시 저장을 시도한다.
@@ -181,6 +193,8 @@ transcript, 사용자·guild/channel/message/session/turn ID, 경로와 예외
 - revocation ledger의 content-free·corrupt fail-closed 계약
 - single-flight periodic writer와 직접 사전 변경 감지
 - Discord text 전달 뒤 선택적 TTS 실패 전 즉시 durable commit
+- Discord reference의 로컬 생성 실패·확정 4xx fallback과
+  timeout·5xx·상태 없는 ambiguous failure의 무재전송
 - Control Page 일반·검색, 검색 후속, 자율 후속, Discord 명령과 음성 완료
   경로의 전달·기록·commit 순서
 - commit 실패 시 중복 전송 없이 고정 오류 코드만 기록
@@ -210,6 +224,7 @@ topic/turn ID와 reply target을 복구하고, 현재 system prompt를 새로 �
 `EVELYN_RUN_REAL_MAIN_INTEGRATION=1`로 이 시나리오를 실행한다.
 
 `tests.discord_io.test_discord_text_turn`,
+`tests.discord_io.test_discord_delivery`,
 `tests.ui.test_control_page_text_runtime`,
 `tests.ui.test_control_page_search_runtime`,
 `tests.core.test_search_followup_runtime`,

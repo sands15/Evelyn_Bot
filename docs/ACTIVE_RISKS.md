@@ -108,6 +108,13 @@ Discord 명령, 음성 재생 완료 경로도 같은 즉시 commit 계약을 �
 commit 실패는 이미 전달된 응답을 취소하거나 중복 전송하지 않고 고정 오류
 코드만 남긴다.
 
+`67a7adf`는 Discord reference 전송의 fallback도 같은 중복 방지 경계로
+좁혔다. reference 생성이 네트워크 전에 로컬에서 실패했거나 Discord가 첫
+요청을 비모호 4xx로 확실히 거부한 경우에만 일반 메시지를 한 번 보낸다.
+timeout, 연결 오류, 상태 없는 예외, 5xx와 `408|409|425|429`는 첫 전송의
+성공 여부가 모호하므로 자동 재전송하지 않는다. 서버에는 성공했지만 응답만
+유실된 요청을 일반 메시지로 다시 보내는 중복 창을 닫은 것이다.
+
 새 공식 Discord 이미지에서 guild reset/continuity/Discord command wiring과
 opt-in real-main crash/restart 집중 테스트 68개, `compileall`, `pip check`를
 통과했다. 전체 core 440개도 기능 assertion 실패는 0개였고, 이미지에 `git`
@@ -117,6 +124,14 @@ opt-in real-main crash/restart 집중 테스트 68개, `compileall`, `pip check`
 삭제, v1 migration, head commit crash 복구와 실제 `main.py` crash/restart를
 검증했다. 다만 checkpoint와 head를 함께 다시 쓸 수 있는 filesystem 관리자에
 대한 keyed authenticity나 외부 불변 원장은 아직 제공하지 않는다.
+
+`67a7adf` 공식 Discord 이미지에서는 새 전달 테스트 9개, 인접 경로 8개,
+Discord I/O 전체 98개를 통과했다. core 468개도 기능 assertion 실패는
+0개였고 이미지에 없는 `git` 때문에 난 기존 서명 검사 2개는 Windows에서
+해당 모듈 13개를 재실행해 통과했다. 이미지 digest는
+`sha256:66470617533a4d44eca6b53b0b91c2cf6e043a651675a63d74eeb083e2c22181`이며
+`compileall`, `pip check`, 전체 profile Compose config도 통과했다. 이미지만
+빌드했고 실제 Discord bot은 시작하지 않았다.
 
 남은 검증 공백은 실제 인증된 Discord 세션에서 관리자 초기화 명령 직후
 재시작까지 수행하는 live E2E와 이 브랜치의 원격 Windows CI 결과다. 실제

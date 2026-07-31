@@ -2,7 +2,7 @@
 
 Document status: **Current**
 Last reviewed: 2026-07-31 KST
-Source branch: `codex/dependency-config-hardening` through `d504303`
+Source branch: `codex/dependency-config-hardening` through `67a7adf`
 
 이 문서는 현재 확인된 사실만 기록한다. 목표 구조와 과거 계획은 다른 설계/계획 문서를 사용한다.
 
@@ -63,6 +63,10 @@ Source branch: `codex/dependency-config-hardening` through `d504303`
   - Control Page 일반·검색, 검색 후속, 자율 후속, Discord 명령, 음성 재생
     완료도 같은 commit 계약을 사용한다. 실패 시 중복 전송하지 않고
     `conversation_continuity_commit_failed`만 기록한다.
+  - Discord reference fallback은 로컬 reference 생성 실패 또는 비모호한
+    Discord 4xx 거부에서만 일반 메시지를 한 번 보낸다. timeout, 연결 오류,
+    상태 없는 예외, 5xx와 `408|409|425|429`처럼 첫 요청의 성공 여부가
+    모호하면 재전송하지 않아 같은 답변이 두 번 전달되는 창을 닫는다.
   - 완료 턴 durable commit은 process-local 최근 성공 256개의 지연을
     content-free 상태로 계측한다. 20개 전에는 `warming`, 이후 p95가
     100ms를 넘으면 `conversation_continuity_commit_latency_high` 경고다.
@@ -836,6 +840,18 @@ Source branch: `codex/dependency-config-hardening` through `d504303`
 - 운영 vault는 read-only API로만 확인했다. 현재 note 3개, provenance
   coverage 100%, declared derivation 0개, quarantine 0개이며 실제 기억
   파일에 correction/recomposition mutation을 실행하지 않았다.
+- `67a7adf`는 Discord reference 전송의 모든 예외를 일반 메시지로 다시
+  보내던 fallback을 delivery-at-most-once 경계로 제한했다. 확정 404와 로컬
+  reference 생성 실패는 fallback하고, timeout·503은 첫 요청 한 번만 남긴다.
+- 공식 Discord 이미지에서 새 전달 테스트 9개, 인접 검색 후속/Discord text
+  테스트 8개와 Discord I/O 전체 98개를 통과했다. core 468개는 기능 assertion
+  실패 0개였고, 이미지에 `git`이 없어 난 기존 서명 검사 2개는 Windows
+  Python에서 해당 모듈 13개를 따로 실행해 통과했다.
+- Discord 테스트 이미지 digest는
+  `sha256:66470617533a4d44eca6b53b0b91c2cf6e043a651675a63d74eeb083e2c22181`이다.
+  이미지 `compileall`, `pip check`, 전체 profile Compose config와
+  `git diff --check`를 통과했다. 이미지만 빌드했고 실제 Discord bot과
+  마이크·Minecraft는 시작하지 않았다.
 
 ## Operational boundaries
 
