@@ -225,7 +225,8 @@ hot-context에서 fail-closed quarantine한다. 새 프로세스도 같은 상�
 점이다. 과거 importer나 수동 note가 실제 근거 관계를 기록하지 않았다면 내용이
 유사하더라도 자동 연쇄 철회 대상임을 증명할 수 없다. 또한 Sub-LLM이 꺼져 있거나
 상위 source가 quarantine이면 multi-source note는 안전하게 격리된 채로 남아
-자동 회상에 사용되지 않지만 즉시 재합성되지는 않는다.
+자동 회상에 사용되지 않는다. 재합성 대기가 남으면 일반 900초 유지보수와
+분리된 60초 retry gate를 기록해 다음 비실시간 유지보수 기회에 다시 시도한다.
 
 Control Page의 근거 감사는 legacy/과거 semantic note의 exact source ref와
 evidence hash만 대조한다. 본문 유사도나 LLM 추측은 사용하지 않으며 교차 검증,
@@ -274,8 +275,11 @@ filesystem 관리자에 대한 keyed authenticity나 외부 불변 원장은 아
 OS lock도 단일 host/shared filesystem의 writer 배제이며 분산 합의가 아니다.
 실제 vault에는 현재 derived relationship이 0개라 운영 데이터에 대한 live
 relink/unlink/undo는 비파괴 원칙상 실행하지 않았다. 또한 Sub-LLM이 꺼져
-있거나 상위 source가 quarantine이면 multi-source note는 안전하게 격리되지만
-즉시 재합성되지 않는다.
+있거나 상위 source가 quarantine이면 multi-source note는 안전하게 격리된다.
+pending 전용 retry는 기본 60초로 줄었지만 전체 vault 유지보수는 음성 hot
+path와 GPU 경합을 피하려고 `realtime` 턴에서 실행하지 않는다. 따라서
+음성만 계속되는 세션의 재시도는 다음 startup 또는 비실시간 기억 유지보수
+기회까지 기다릴 수 있다.
 
 다음 조치: 실제 derived 기억이 생기면 correction preview의 설명 가능성,
 relink/unlink/undo 결과와 journal 복구를 운영 데이터 복제본에서 검증한다.

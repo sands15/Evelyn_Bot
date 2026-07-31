@@ -665,6 +665,24 @@ returns invalid JSON, or produces no useful notes, the deterministic
 maintenance path remains valid and the failure is reported in the maintenance
 result instead of being hidden.
 
+Derived-memory revocation and recomposition use a separate fail-closed path:
+
+- notes with a revoked source and another live source remain quarantined until
+  they can be rebuilt from live source notes only;
+- the old derived body and revoked source body are never sent to the sub LLM;
+- ordinary vault maintenance remains gated at 900 seconds by default;
+- a maintenance result with `pendingNoteIds` uses
+  `MEMORY_DERIVATION_RETRY_INTERVAL_SEC` (60 seconds by default) for the next
+  eligible non-realtime maintenance opportunity;
+- the retry log contains only guild ID, pending count, and retry delay, never
+  note IDs or note content;
+- a clear recomposition result keeps the ordinary maintenance interval.
+
+The short retry is demand-triggered rather than a permanent polling loop.
+Realtime voice turns do not launch full vault maintenance, so startup or a
+later non-realtime turn remains the recovery opportunity when a session stays
+voice-only.
+
 ### Phase 0: Documentation and Compatibility
 
 - Add this document.

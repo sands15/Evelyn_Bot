@@ -824,6 +824,18 @@ Source branch: `codex/dependency-config-hardening` through `d504303`
   `sha256:61c6a6b62d8a2128fe3194cc053e7a84aa53952ad8c2cf403bef76f2663d46b6`다.
   두 컨테이너 모두 `healthy`, restart count 0이고 이미지 `compileall`,
   `pip check`, Compose config와 `git diff --check`를 통과했다.
+- `eba918f`는 파생 기억 재합성이 `pending`일 때 일반 900초 vault
+  유지보수와 분리된 기본 60초 retry gate를 기록한다. 다음 비실시간 기억
+  유지보수 기회에 단일 기존 task 경계로 다시 시도하며, 로그에는 note ID나
+  본문 없이 guild ID, 대기 개수, retry 시간만 남긴다. 재합성이 clear이면
+  기존 900초 간격을 그대로 유지한다.
+- memory 전체 133개를 Bot API와 새 Discord/main 이미지에서 각각 통과했다.
+  Discord 이미지의 `compileall`과 `pip check`도 통과했으며 digest는
+  `sha256:219f3ec72c5263397d45cc16d367f9e3b0bbe637098b237994a486a4cbbdfde4`다.
+  이미지만 빌드했고 실제 Discord bot은 시작하지 않았다.
+- 운영 vault는 read-only API로만 확인했다. 현재 note 3개, provenance
+  coverage 100%, declared derivation 0개, quarantine 0개이며 실제 기억
+  파일에 correction/recomposition mutation을 실행하지 않았다.
 
 ## Operational boundaries
 
