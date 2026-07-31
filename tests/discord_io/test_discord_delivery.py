@@ -20,15 +20,25 @@ from evelyn_core.discord_delivery import (  # noqa: E402
 
 
 class FakeChannel:
-    def __init__(self, *, fail_referenced_send: bool = False) -> None:
-        self.fail_referenced_send = fail_referenced_send
+    def __init__(
+        self,
+        *,
+        referenced_send_error: BaseException | None = None,
+    ) -> None:
+        self.referenced_send_error = referenced_send_error
         self.calls: list[tuple[str, dict[str, Any]]] = []
 
     async def send(self, text: str, **kwargs: Any) -> dict[str, Any]:
         self.calls.append((text, kwargs))
-        if self.fail_referenced_send and "reference" in kwargs:
-            raise RuntimeError("referenced send failed")
+        if self.referenced_send_error is not None and "reference" in kwargs:
+            raise self.referenced_send_error
         return {"text": text, "kwargs": kwargs}
+
+
+class FakeDiscordHttpError(RuntimeError):
+    def __init__(self, status: int) -> None:
+        super().__init__(f"discord http {status}")
+        self.status = status
 
 
 class DiscordDeliveryTests(unittest.IsolatedAsyncioTestCase):
@@ -56,8 +66,12 @@ class DiscordDeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result.used_reference)
         self.assertFalse(result.fallback_used)
 
-    async def test_send_discord_text_falls_back_when_reference_send_fails(self) -> None:
-        channel = FakeChannel(fail_referenced_send=True)
+    async def test_send_discord_text_falls_back_after_definitive_reference_rejection(
+        self,
+    ) -> None:
+        channel = FakeChannel(
+            referenced_send_error=FakeDiscordHttpError(404)
+        )
 
         result = await send_discord_text(
             channel,
@@ -76,6 +90,66 @@ class DiscordDeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result.used_reference)
         self.assertTrue(result.fallback_used)
         self.assertEqual(result.message["text"], "hello")
+
+    async def test_send_discord_text_does_not_retry_ambiguous_timeout(
+        self,
+    ) -> None:
+        timeout = TimeoutError("response lost after possible delivery")
+        channel = FakeChannel(referenced_send_error=timeout)
+
+        with self.assertRaises(TimeoutError) as raised:
+            await send_discord_text(
+                channel,
+                "hello",
+                reference_message_id="42",
+                reference_factory=lambda message_id: {
+                    "id": message_id
+                },
+            )
+
+        self.assertIs(raised.exception, timeout)
+        self.assertEqual(
+            channel.calls,
+            [("hello", {"reference": {"id": 42}})],
+        )
+
+    async def test_send_discord_text_does_not_retry_ambiguous_server_error(
+        self,
+    ) -> None:
+        channel = FakeChannel(
+            referenced_send_error=FakeDiscordHttpError(503)
+        )
+
+        with self.assertRaises(FakeDiscordHttpError):
+            await send_discord_text(
+                channel,
+                "hello",
+                reference_message_id="42",
+                reference_factory=lambda message_id: {
+                    "id": message_id
+                },
+            )
+
+        self.assertEqual(
+            channel.calls,
+            [("hello", {"reference": {"id": 42}})],
+        )
+
+    async def test_send_discord_text_falls_back_when_reference_is_invalid_locally(
+        self,
+    ) -> None:
+        channel = FakeChannel()
+
+        result = await send_discord_text(
+            channel,
+            "hello",
+            reference_message_id="not-an-integer",
+            reference_factory=lambda message_id: {"id": message_id},
+        )
+
+        self.assertEqual(channel.calls, [("hello", {})])
+        self.assertFalse(result.used_reference)
+        self.assertTrue(result.fallback_used)
 
     async def test_build_streaming_voice_delivery_queues_chunks_to_stream_task(self) -> None:
         metrics: dict[str, Any] = {}

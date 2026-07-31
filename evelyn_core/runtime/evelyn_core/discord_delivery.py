@@ -28,6 +28,33 @@ class DiscordStreamingVoiceDeliveryRequest:
     log: Callable[[str], None] | None = None
 
 
+def _discord_http_status(exc: BaseException) -> int | None:
+    status = getattr(exc, "status", None)
+    if status is None:
+        status = getattr(getattr(exc, "response", None), "status", None)
+    try:
+        normalized = int(status)
+    except (TypeError, ValueError):
+        return None
+    return normalized if 100 <= normalized <= 599 else None
+
+
+def _is_definitive_reference_rejection(exc: BaseException) -> bool:
+    """Return true only when Discord definitely rejected the first send.
+
+    A timeout, connection failure, or 5xx may happen after Discord accepted
+    the message. Retrying those failures without the reference can duplicate
+    a reply, so only non-ambiguous client rejections are eligible.
+    """
+
+    status = _discord_http_status(exc)
+    return bool(
+        status is not None
+        and 400 <= status < 500
+        and status not in {408, 409, 425, 429}
+    )
+
+
 async def send_discord_text(
     channel: Any,
     text: str,
@@ -44,13 +71,24 @@ async def send_discord_text(
 
     try:
         reference = reference_factory(int(reference_message_id))
+    except (TypeError, ValueError, OverflowError):
+        # Reference construction failed locally, before any network send.
+        return DiscordTextDeliveryResult(
+            message=await channel.send(text),
+            used_reference=False,
+            fallback_used=True,
+        )
+
+    try:
         message = await channel.send(text, reference=reference)
         return DiscordTextDeliveryResult(
             message=message,
             used_reference=True,
             fallback_used=False,
         )
-    except Exception:
+    except Exception as exc:
+        if not _is_definitive_reference_rejection(exc):
+            raise
         return DiscordTextDeliveryResult(
             message=await channel.send(text),
             used_reference=False,
