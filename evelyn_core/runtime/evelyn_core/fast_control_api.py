@@ -44,6 +44,11 @@ from .fast_action_runtime import (
     is_local_mic_status_request,
     render_local_mic_status,
 )
+from .fast_action_recovery import (
+    FAST_ACTION_RECOVERY_NOTICE,
+    FAST_ACTION_RECOVERY_SCHEMA,
+    FastActionRecoveryJournal,
+)
 from .fast_tool_planner import (
     FastToolPlan,
     answer_fast_tool_capability_question,
@@ -188,6 +193,14 @@ BOOT_STEPS = (
 
 FAST_CONTROL_CONTINUITY_OWNER = FastControlContinuityOwner(
     artifacts_root=get_runtime_artifacts_root(),
+    enabled=FAST_CONTROL_CONTINUITY_ENABLED,
+)
+FAST_ACTION_RECOVERY_JOURNAL = FastActionRecoveryJournal(
+    path=(
+        get_runtime_artifacts_root()
+        / "fast_control_actions"
+        / "recovery.json"
+    ),
     enabled=FAST_CONTROL_CONTINUITY_ENABLED,
 )
 CROSS_SURFACE_CONTINUITY_BRIDGE = CrossSurfaceContinuityBridge(
@@ -394,6 +407,18 @@ def commit_fast_control_turn(
         return _fast_control_continuity_result(
             enabled=False,
         )
+    if not (
+        FAST_ACTION_RECOVERY_JOURNAL
+        .continuity_commit_allowed()
+    ):
+        print(
+            "[FAST CONTROL] continuity_blocked_by_action_recovery",
+            flush=True,
+        )
+        return _fast_control_continuity_result(
+            raw_status=None,
+            enabled=True,
+        )
     try:
         raw_status = owner.record_completed_turn(
             user_text,
@@ -435,6 +460,217 @@ def commit_fast_control_followup(
         raw_status=raw_status,
         enabled=True,
     )
+
+
+def begin_fast_action_recovery(
+    task: FastActionTask,
+) -> None:
+    try:
+        FAST_ACTION_RECOVERY_JOURNAL.begin(
+            task.task_id
+        )
+    except Exception as exc:
+        ACTION_COORDINATOR.fail(
+            task.task_id,
+            "fast_action_recovery_unavailable",
+            reply=(
+                "작업 복구 상태를 기록하지 못해서 "
+                "장시간 작업을 시작하지 않았어."
+            ),
+        )
+        print(
+            "[FAST CONTROL] action_recovery_begin_failed "
+            f"errorType={type(exc).__name__}",
+            flush=True,
+        )
+        raise RuntimeError(
+            "fast_action_recovery_unavailable"
+        ) from exc
+
+
+def commit_fast_control_action_followup(
+    task_id: str,
+    assistant_text: str,
+) -> dict[str, Any]:
+    owner = FAST_CONTROL_CONTINUITY_OWNER
+    journal = FAST_ACTION_RECOVERY_JOURNAL
+    if not owner.enabled:
+        return _fast_control_continuity_result(
+            enabled=False,
+        )
+
+    def prepare_terminal(
+        expected_generation: int,
+    ) -> None:
+        journal.prepare_terminal(
+            task_id,
+            expected_generation=expected_generation,
+        )
+
+    try:
+        raw_status = owner.record_assistant_followup(
+            assistant_text,
+            before_commit=prepare_terminal,
+        )
+    except Exception as exc:
+        print(
+            "[FAST CONTROL] action_followup_commit_failed "
+            f"errorType={type(exc).__name__}",
+            flush=True,
+        )
+        raw_status = None
+    result = _fast_control_continuity_result(
+        raw_status=raw_status,
+        enabled=True,
+    )
+    if result.get("durable") is True:
+        try:
+            journal.finish(task_id)
+        except Exception as exc:
+            print(
+                "[FAST CONTROL] action_recovery_finish_failed "
+                f"errorType={type(exc).__name__}",
+                flush=True,
+            )
+    else:
+        try:
+            journal.mark_interrupted(task_id)
+        except Exception as exc:
+            print(
+                "[FAST CONTROL] action_recovery_interrupt_failed "
+                f"errorType={type(exc).__name__}",
+                flush=True,
+            )
+    return result
+
+
+def commit_fast_control_terminal_turn(
+    task_id: str,
+    user_text: str,
+    assistant_text: str,
+) -> dict[str, Any]:
+    owner = FAST_CONTROL_CONTINUITY_OWNER
+    journal = FAST_ACTION_RECOVERY_JOURNAL
+    if not owner.enabled:
+        return _fast_control_continuity_result(
+            enabled=False,
+        )
+
+    def prepare_terminal(
+        expected_generation: int,
+    ) -> None:
+        journal.prepare_terminal(
+            task_id,
+            expected_generation=expected_generation,
+        )
+
+    try:
+        raw_status = owner.record_completed_turn(
+            user_text,
+            assistant_text,
+            before_commit=prepare_terminal,
+        )
+    except Exception as exc:
+        print(
+            "[FAST CONTROL] action_terminal_turn_commit_failed "
+            f"errorType={type(exc).__name__}",
+            flush=True,
+        )
+        raw_status = None
+    result = _fast_control_continuity_result(
+        raw_status=raw_status,
+        enabled=True,
+    )
+    if result.get("durable") is True:
+        try:
+            journal.finish(task_id)
+        except Exception as exc:
+            print(
+                "[FAST CONTROL] action_recovery_finish_failed "
+                f"errorType={type(exc).__name__}",
+                flush=True,
+            )
+    else:
+        try:
+            journal.mark_interrupted(task_id)
+        except Exception as exc:
+            print(
+                "[FAST CONTROL] action_recovery_interrupt_failed "
+                f"errorType={type(exc).__name__}",
+                flush=True,
+            )
+    return result
+
+
+def recover_fast_control_actions_after_restart(
+) -> dict[str, Any]:
+    journal = FAST_ACTION_RECOVERY_JOURNAL
+    owner = FAST_CONTROL_CONTINUITY_OWNER
+    owner_status = owner.status()
+    generation = max(
+        0,
+        int(owner_status.get("generation") or 0),
+    )
+    decision = journal.recovery_decision(
+        continuity_generation=generation,
+        continuity_ready=(
+            owner_status.get("durableReady") is True
+        ),
+    )
+    state = clean_text(decision.get("state"))
+    pending_count = max(
+        0,
+        int(decision.get("pendingCount") or 0),
+    )
+    if state in {"disabled", "idle", "unavailable"}:
+        return journal.public_status()
+    if state == "delivery_verified":
+        try:
+            return journal.acknowledge_recovery(
+                recovered_count=pending_count,
+            )
+        except Exception as exc:
+            print(
+                "[FAST CONTROL] action_recovery_ack_failed "
+                f"errorType={type(exc).__name__}",
+                flush=True,
+            )
+            return journal.public_status()
+    restored_notice = bool(
+        CHAT_MESSAGES
+        and clean_text(CHAT_MESSAGES[-1].get("role"))
+        == "assistant"
+        and clean_text(CHAT_MESSAGES[-1].get("text"))
+        == FAST_ACTION_RECOVERY_NOTICE
+        and clean_text(CHAT_MESSAGES[-1].get("source"))
+        == "fast_control_continuity_restore"
+    )
+    if not restored_notice:
+        append_chat_message(
+            "assistant",
+            "Evelyn",
+            FAST_ACTION_RECOVERY_NOTICE,
+            source="fast_control_action_recovery",
+        )
+        continuity = commit_fast_control_followup(
+            FAST_ACTION_RECOVERY_NOTICE
+        )
+        if continuity.get("durable") is not True:
+            return journal.public_status()
+    try:
+        return journal.acknowledge_recovery(
+            recovered_count=pending_count,
+            error_code=clean_text(
+                decision.get("reasonCode")
+            ),
+        )
+    except Exception as exc:
+        print(
+            "[FAST CONTROL] action_recovery_ack_failed "
+            f"errorType={type(exc).__name__}",
+            flush=True,
+        )
+        return journal.public_status()
 
 
 def recent_chat_messages_for_planner(text: str, *, limit: int = 8) -> list[dict[str, str]]:
@@ -1255,6 +1491,7 @@ def prepare_tool_plan_background_action(
         user_text=text,
         start_reply=start_reply,
     )
+    begin_fast_action_recovery(task)
     return task, runner
 
 
@@ -1314,6 +1551,7 @@ def prepare_registered_background_action(
                 reply="작업 실행기가 연결되지 않아 시작하지 못했어.",
             )
             return None
+        begin_fast_action_recovery(task)
         return task, runner
     return None
 
@@ -1337,7 +1575,8 @@ def launch_background_action(
                 task_id=completed.task_id,
                 task_status=completed.status,
             )
-            commit_fast_control_followup(
+            commit_fast_control_action_followup(
+                completed.task_id,
                 completed.final_reply
             )
             queue_local_bridge_speech(completed.final_reply, source="fast_control_action_followup")
@@ -1370,7 +1609,8 @@ def launch_background_action(
                 task_id=failed.task_id,
                 task_status=failed.status,
             )
-            commit_fast_control_followup(
+            commit_fast_control_action_followup(
+                failed.task_id,
                 failed.final_reply
             )
             queue_local_bridge_speech(failed.final_reply, source="fast_control_action_followup")
@@ -1976,7 +2216,12 @@ def build_control_state(health: dict[str, Any]) -> dict[str, Any]:
             "messages": default_chat_messages(),
             "inputEnabled": chat_ready,
         },
-        "actions": ACTION_COORDINATOR.snapshot(),
+        "actions": {
+            **ACTION_COORDINATOR.snapshot(),
+            "recovery": (
+                FAST_ACTION_RECOVERY_JOURNAL.public_status()
+            ),
+        },
         "voice": {
             "outputMode": "windows_local_bridge" if bridge_status.get("enabled") else "docker_service",
             "channelName": "로컬 마이크" if bridge_listening else "없음",
@@ -2235,7 +2480,18 @@ async def chat_handler(request: web.Request) -> web.StreamResponse:
         task_id=task_record.task_id if task_record is not None else None,
         task_status=task_record.status if task_record is not None else None,
     )
-    continuity = commit_fast_control_turn(text, reply)
+    continuity = (
+        commit_fast_control_terminal_turn(
+            task_record.task_id,
+            text,
+            reply,
+        )
+        if (
+            task_record is not None
+            and task_record.status != "running"
+        )
+        else commit_fast_control_turn(text, reply)
+    )
     if not suppress_tts and should_queue_local_bridge_speech(source) and queued_speech_count <= 0:
         queue_local_bridge_speech(reply, source=source)
     if task_record is not None and task_runner is not None and task_record.status == "running":
@@ -2475,9 +2731,17 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
                 failure_reply,
                 source="fast_control_api_stream",
             )
-        continuity = commit_fast_control_turn(
-            text,
-            failure_reply,
+        continuity = (
+            commit_fast_control_terminal_turn(
+                task_record.task_id,
+                text,
+                failure_reply,
+            )
+            if task_record is not None
+            else commit_fast_control_turn(
+                text,
+                failure_reply,
+            )
         )
         await write_stream_event(
             response,
@@ -2742,6 +3006,7 @@ def create_app(
     enable_minecraft_world_lease_owner: bool | None = None,
 ) -> web.Application:
     register_builtin_background_action_handlers()
+    recover_fast_control_actions_after_restart()
     app = web.Application(middlewares=[reject_browser_origin_middleware])
     owner_enabled = (
         MINECRAFT_WORLD_LEASE_OWNER_ENABLED

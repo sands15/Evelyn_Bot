@@ -1186,7 +1186,7 @@ class FastControlApiToolTests(unittest.TestCase):
 
         with patch.object(
             fast_api,
-            "commit_fast_control_followup",
+            "commit_fast_control_action_followup",
         ) as commit_followup:
             task = asyncio.run(scenario())
         snapshot = fast_api.ACTION_COORDINATOR.snapshot()
@@ -1197,6 +1197,7 @@ class FastControlApiToolTests(unittest.TestCase):
         self.assertEqual(fast_api.CHAT_MESSAGES[-1]["taskStatus"], "completed")
         self.assertIn("완료: 긴 작업", fast_api.CHAT_MESSAGES[-1]["text"])
         commit_followup.assert_called_once_with(
+            task.task_id,
             fast_api.CHAT_MESSAGES[-1]["text"]
         )
 
@@ -1409,6 +1410,31 @@ class FastControlApiToolTests(unittest.TestCase):
         self.assertIn("generatedAt", payload)
         self.assertIn("actions", payload)
         self.assertEqual(payload["actions"]["activeCount"], 0)
+        recovery = payload["actions"]["recovery"]
+        self.assertEqual(
+            recovery["schema"],
+            fast_api.FAST_ACTION_RECOVERY_SCHEMA,
+        )
+        self.assertEqual(
+            set(recovery["policy"]),
+            {
+                "contentFree",
+                "rawText",
+                "automaticRetry",
+                "maxActions",
+            },
+        )
+        self.assertTrue(recovery["policy"]["contentFree"])
+        self.assertFalse(recovery["policy"]["rawText"])
+        self.assertFalse(
+            recovery["policy"]["automaticRetry"]
+        )
+        recovery_text = fast_api.json.dumps(
+            recovery,
+            ensure_ascii=False,
+        )
+        self.assertNotIn("사용자 질문", recovery_text)
+        self.assertNotIn("최종 답변", recovery_text)
         self.assertIn("voice", payload)
         self.assertIn("restart", payload)
         self.assertIn("shutdown", payload)

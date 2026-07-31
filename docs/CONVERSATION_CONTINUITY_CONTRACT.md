@@ -41,6 +41,36 @@ hash-chain·rollback protection·exact receipt 검증을 사용한다.
 - `fast_control.continuity-status.v1`은 state, generation, message count와
   고정 오류 코드만 공개하며 대화 내용은 포함하지 않는다.
 
+Fast Control의 background 조사 작업은 시작 답변만 복구되고 실제
+`asyncio.Task`는 재시작 뒤 복구할 수 없다. 이를 진행 중인 것처럼 남기거나
+자동 재실행하지 않기 위해
+`runtime_artifacts/fast_control_actions/recovery.json`에
+`fast_control.action-recovery.v1` 표식을 durable 기록한다.
+
+- 최대 40개의 `actionId`, `running|terminal_committing`, 시작 시각,
+  예상 Fast continuity generation만 저장한다. 사용자 요청, 시작·최종 답변,
+  tool evidence, 오류 원문과 경로는 저장하지 않는다.
+- background action의 시작 응답을 공개하거나 runner를 launch하기 전에
+  `running` 표식을 먼저 `fsync`·원자 교체한다. 기록할 수 없으면
+  “작업을 시작한다”는 응답을 만들지 않는다.
+- 최종 성공·실패 답변은 Fast continuity owner의 단일 잠금 안에서 다음
+  generation을 먼저 `terminal_committing`에 기록한 뒤 대화 checkpoint에
+  commit한다. 정확한 durable receipt 뒤에만 action 표식을 제거한다.
+- process가 checkpoint commit 뒤 표식 제거 전에 죽어도 새 owner의 current
+  generation이 예상 값에 도달했고 continuity가 `durableReady=true`일 때만
+  이미 전달된 결과로 인정해 조용히 정리한다.
+- generation에 도달하지 못했거나 표식이 `running`이면 고정 중단 안내를
+  완료 턴으로 한 번 durable commit한다. 부작용 중복을 막기 위해 원래 작업은
+  자동 재시도하지 않는다.
+- action commit 실패 뒤 예상 generation을 `running`으로 되돌려 이후 일반
+  대화 commit이 같은 번호를 사용해도 결과 전달로 오판하지 않는다. 이 되돌림
+  자체를 기록할 수 없으면 일반 continuity generation 전진도 fail-closed한다.
+- journal이 손상되면 새 background action을 시작하지 않는다. 재시작
+  reconciliation은 원문 없는 고정 안내가 durable해진 뒤에만 손상 표식을
+  빈 exact-schema 상태로 교체한다.
+- 공개 `actions.recovery` 상태는 pending/recovery count, 고정 오류 코드와
+  `contentFree=true`, `rawText=false`, `automaticRetry=false`만 포함한다.
+
 이 분리는 두 프로세스가 하나의 checkpoint를 경쟁해서 덮어쓰는 것을 막는
 single-writer 경계다. surface 전환은 별도 mutation owner를 추가하지 않고
 `cross_surface_continuity.py`의 read-only verifier가 양쪽 checkpoint를
@@ -327,6 +357,11 @@ transcript, 사용자·guild/channel/message/session/turn ID, 경로와 예외
 - Control Page의 읽기 전용 p50/p95·표본 수 표시와 JavaScript parse
 - Fast Control 정상·실패·planner 실패·stream·background follow-up의
   commit과 fresh-process 복구, LLM recent context 재주입
+- Fast Control background action의 durable 시작 표식, continuity generation
+  결합, 정상 완료 뒤 제거, commit 실패 generation 재사용 방지와 실제
+  `os._exit` 재시작 중단 안내
+- 손상·쓰기 실패 action recovery journal의 fail-closed 시작 차단,
+  content-free 공개 상태와 자동 재시도 금지
 - read-only cross-surface reader의 current hash/head 검증, 변조·lagging
   head·symlink·stale·손상 revocation 거부와 무변경 파일 증거
 - Discord guild/user exact scope, 다른 member/server 제외와 content-free

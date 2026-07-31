@@ -120,12 +120,26 @@ class FastControlContinuityOwner:
         self,
         user_text: str,
         assistant_text: str,
+        *,
+        before_commit: Callable[[int], Any] | None = None,
     ) -> dict[str, Any]:
         cleaned_user = clean_text(user_text)
         cleaned_assistant = clean_text(assistant_text)
         if not cleaned_user or not cleaned_assistant:
             raise ValueError("fast_control_turn_empty")
         with self._lock:
+            checkpoint = self._require_checkpoint()
+            current_generation = max(
+                0,
+                int(
+                    checkpoint.status().get(
+                        "checkpointGeneration"
+                    )
+                    or 0
+                ),
+            )
+            if before_commit is not None:
+                before_commit(current_generation + 1)
             self.store.finish_assistant_text_turn(
                 FAST_CONTROL_SESSION_KEY,
                 cleaned_user,
@@ -141,16 +155,30 @@ class FastControlContinuityOwner:
                 ),
                 now_monotonic=self.monotonic(),
             )
-            return self._require_checkpoint().commit_completed_turn()
+            return checkpoint.commit_completed_turn()
 
     def record_assistant_followup(
         self,
         assistant_text: str,
+        *,
+        before_commit: Callable[[int], Any] | None = None,
     ) -> dict[str, Any]:
         cleaned_assistant = clean_text(assistant_text)
         if not cleaned_assistant:
             raise ValueError("fast_control_followup_empty")
         with self._lock:
+            checkpoint = self._require_checkpoint()
+            current_generation = max(
+                0,
+                int(
+                    checkpoint.status().get(
+                        "checkpointGeneration"
+                    )
+                    or 0
+                ),
+            )
+            if before_commit is not None:
+                before_commit(current_generation + 1)
             history = self.store.get_conversation_history(
                 system_prompt=FAST_CONTROL_SYSTEM_PROMPT,
                 session_key=FAST_CONTROL_SESSION_KEY,
@@ -178,7 +206,7 @@ class FastControlContinuityOwner:
                 ),
                 now_monotonic=self.monotonic(),
             )
-            return self._require_checkpoint().commit_completed_turn()
+            return checkpoint.commit_completed_turn()
 
     def status(self) -> dict[str, Any]:
         if not self.enabled or self.checkpoint is None:

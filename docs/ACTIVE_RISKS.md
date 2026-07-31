@@ -206,6 +206,21 @@ real-main 시나리오도 함께 통과시키고, 전달 후 commit 지연을 �
 측정한다. 실제 정상 완료 턴 20개가 쌓인 뒤 100ms 경고선이 Windows 저장장치
 특성에 맞는지도 재평가한다.
 
+Fast Control background 조사 작업의 별도 재시작 손실 창은 닫았다. 시작 전에
+원문 없는 durable action 표식을 기록하고, 최종 답변 commit의 예상 continuity
+generation과 current owner를 교차검증한다. 결과가 이미 durable하면 재시작
+뒤 조용히 정리하고, 실행 중 또는 commit 전 crash면 고정 중단 안내를 한 번
+commit하며 원래 작업은 자동 재시도하지 않는다. action commit 실패 뒤 다른
+대화가 같은 generation을 사용해 완료로 오판되는 것도 `running` 복귀로 막는다.
+실제 `os._exit` fresh-process 검증은 중단 안내가 한 번만 복구되는 것을
+확인했다.
+
+남은 위험은 journal과 continuity checkpoint를 함께 다시 쓸 수 있는 filesystem
+관리자에 대한 외부 authenticity가 없다는 점과, 실제 Control Page에서 장시간
+웹 조사 중 Bot API 컨테이너를 강제 종료하는 운영 E2E는 아직 수행하지 않았다는
+점이다. live 검증에서는 시작 답변 뒤 강제 종료, 고정 중단 안내, 자동 재요청
+0회와 `actions.recovery`의 content-free 상태를 함께 확인한다.
+
 ## P1 — Python 모델 런타임 의존성 잔여 취약점
 
 루트/Windows lock의 Torch는 `2.13.0`으로 올라가

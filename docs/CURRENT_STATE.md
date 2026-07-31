@@ -2,7 +2,7 @@
 
 Document status: **Current**
 Last reviewed: 2026-07-31 KST
-Source branch: `codex/dependency-config-hardening`, current cross-surface merge-evidence increment
+Source branch: `codex/dependency-config-hardening`, current Fast Control action-recovery increment
 
 이 문서는 현재 확인된 사실만 기록한다. 목표 구조와 과거 계획은 다른 설계/계획 문서를 사용한다.
 
@@ -93,6 +93,17 @@ Source branch: `codex/dependency-config-hardening`, current cross-surface merge-
     projection에서 제거하고 artifact에는 저장하지 않는다.
   - 현재 surface owner가 손상돼 reset/delete 경계를 검증할 수 없으면
     정상인 상대 owner도 주입하지 않는 fail-closed 규칙을 적용한다.
+  - Fast Control background action은 시작 전에
+    `fast_control.action-recovery.v1` content-free 표식을 durable 기록한다.
+    최종 성공·실패 답변은 Fast continuity owner 잠금 안에서 예상 generation과
+    결합하며, receipt가 확인된 뒤에만 표식을 제거한다.
+  - 실행 중 crash는 고정 중단 안내를 한 번 durable commit하고 원래 action을
+    자동 재시도하지 않는다. 최종 답변 commit 뒤 표식 제거 전 crash는 current
+    generation으로 전달을 확인해 거짓 중단 안내를 추가하지 않는다.
+  - action commit 실패는 표식을 `running`으로 되돌려 이후 일반 턴의 같은
+    generation을 action 결과로 오판하지 않는다. journal 손상·쓰기 실패는
+    새 장시간 작업과 안전하지 않은 continuity generation 전진을 fail-closed
+    한다. 공개 상태에는 원문·tool evidence·경로가 없다.
   - 모든 전달 surface는 callback 반환만으로 durable 성공을 선언하지 않는다.
     status schema, ready state, current head, verified integrity, rollback
     protection, 양수 generation/session count와 이번 commit의 성공 metric을
@@ -1029,6 +1040,24 @@ Source branch: `codex/dependency-config-hardening`, current cross-surface merge-
   `sha256:fd33eeb2041823044f3ed07fd82f190a2c5dbf530654d0a1c7a461639272bea0`는
   continuity·공통 prompt·merge-evidence 집중 48개를 통과했다. 두 이미지
   모두 내장 소스 `compileall`과 `pip check`를 통과했다.
+- 이번 action-recovery 변경의 current-source 전체 회귀는 runtime
+  407개(skip 2), UI 156개(skip 7), Discord I/O 107개, voice 415개를
+  통과했다. core 511개는 기능 assertion 실패 0개였고 이미지에 `git`이
+  없어 난 기존 서명 검사 환경 오류 2개는 Windows의 해당 모듈 13개로
+  보완했다.
+- 새 내장 소스 Bot API image
+  `sha256:76389d7f0a9e8c14a605df1e754343888ccd9235980119b4c41725a62b0a3103`와
+  Discord/Main image
+  `sha256:4e27ac4204454acaa795dfbb3adf24cb99faa5e9e76cc536f7beb77f66fe54d7`는
+  각각 action recovery·Fast continuity·API·stream 집중 95개를 통과했다.
+  두 이미지 모두 내장 소스 `compileall`과 `pip check`, 전체 profile
+  Compose config를 통과했다.
+- 새 이미지만 만들었고 실행 중인 Bot API는 기존 image
+  `sha256:6471bf4b32c2cd5704e82c899c27b73ad333805653bdbbad287676cfa65dcd4d`,
+  Control Page는 기존 image
+  `sha256:2a20b778b966e18930de96120146a08f1758b2f9b2c86fd74e8513b1181aaf0c`를
+  유지한다. 두 컨테이너 모두 여전히 healthy이며 실제 Discord/Main,
+  마이크와 무거운 모델 서비스는 시작하지 않았다.
 - 실제 인증된 Discord↔Control Page handoff는 아래 운영 경계 때문에 별도
   검증 상태로 남긴다. 새 이미지만 빌드했고 실행 중인 기존 Bot API와
   Control Page는 교체하지 않았으며 둘 다 healthy 상태다.
