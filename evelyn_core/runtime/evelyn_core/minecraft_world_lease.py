@@ -1001,48 +1001,48 @@ class MinecraftWorldLeaseOwner:
             return result
 
     async def shutdown(self, *, reason: str = "shutdown") -> dict[str, Any]:
-        task = self._watchdog_task
-        self._watchdog_task = None
-        if task is not None and not task.done():
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-        with self._data_lock:
-            if not self._owner_claim_matches():
-                return {
-                    "stopped": False,
-                    "action": "owner_conflict",
-                }
-        async with self._operation_lock:
-            lease = self._lease
-            guild_id = lease.guild_id if lease is not None else 0
-            self._revoke_lease(reason=reason)
-            runtime_status = await self._runtime_status()
-            if (
-                not runtime_status.get("_status_unavailable")
-                and not minecraft_runtime_active(runtime_status)
-            ):
-                self._state = "authorization_required"
-                self._write_status()
-                result = {
-                    "stopped": True,
-                    "action": "already_stopped",
-                }
-            else:
+        try:
+            task = self._watchdog_task
+            self._watchdog_task = None
+            if task is not None and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+            with self._data_lock:
+                if not self._owner_claim_matches():
+                    return {
+                        "stopped": False,
+                        "action": "owner_conflict",
+                    }
+            async with self._operation_lock:
+                lease = self._lease
+                guild_id = lease.guild_id if lease is not None else 0
+                self._revoke_lease(reason=reason)
+                runtime_status = await self._runtime_status()
+                if (
+                    not runtime_status.get("_status_unavailable")
+                    and not minecraft_runtime_active(runtime_status)
+                ):
+                    self._state = "authorization_required"
+                    self._write_status()
+                    return {
+                        "stopped": True,
+                        "action": "already_stopped",
+                    }
                 stopped = await self._stop_runtime(
                     guild_id=guild_id,
                     reason=reason,
                     force=True,
                 )
-                result = {
+                return {
                     "stopped": stopped,
                     "action": "shutdown_stop",
                 }
+        finally:
             with self._data_lock:
                 self._release_owner_claim()
-            return result
 
 
 __all__ = [

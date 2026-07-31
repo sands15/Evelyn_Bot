@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
 import tempfile
@@ -307,6 +308,19 @@ class MinecraftWorldLeaseTests(unittest.IsolatedAsyncioTestCase):
         result = await self.owner.shutdown()
 
         self.assertTrue(result["stopped"])
+        self.assertFalse(self.owner.owner_claim_path.exists())
+        self.assertFalse(self.owner.status()["ownerClaimOwned"])
+        self.assertEqual(self.owner.delegation_token(), "")
+
+    async def test_cancelled_shutdown_still_releases_claim_and_token(
+        self,
+    ) -> None:
+        self.owner._watchdog_task = None
+        self.runtime.statuses = [asyncio.CancelledError()]
+
+        with self.assertRaises(asyncio.CancelledError):
+            await self.owner.shutdown()
+
         self.assertFalse(self.owner.owner_claim_path.exists())
         self.assertFalse(self.owner.status()["ownerClaimOwned"])
         self.assertEqual(self.owner.delegation_token(), "")

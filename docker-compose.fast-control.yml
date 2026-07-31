@@ -7,6 +7,7 @@ services:
       context: .
       dockerfile: docker/Dockerfile.bot-api
     restart: "no"
+    stop_grace_period: 30s
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:
