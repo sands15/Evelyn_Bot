@@ -18,6 +18,7 @@ from evelyn_core import fast_control_api as fast_api  # noqa: E402
 
 class FastControlApiToolTests(unittest.TestCase):
     def setUp(self) -> None:
+        fast_api.FAST_RUNTIME_HEALTH_CACHE.clear()
         fast_api.CHAT_MESSAGES.clear()
         fast_api.ACTION_COORDINATOR.clear()
         fast_api.clear_background_action_handlers()
@@ -1088,6 +1089,90 @@ class FastControlApiToolTests(unittest.TestCase):
         self.assertTrue(payload["runtime"]["services"]["voiceReady"])
         self.assertEqual(payload["runtime"]["controlPlane"]["controlPage"]["port"], fast_api.PUBLIC_CONTROL_PORT)
         self.assertEqual(payload["runtime"]["controlPlane"]["botApi"]["port"], fast_api.PORT)
+
+    def test_state_handler_reuses_snapshot_and_refreshes_in_background(
+        self,
+    ) -> None:
+        clock = [100.0]
+        calls = 0
+
+        async def collect() -> dict:
+            nonlocal calls
+            calls += 1
+            return {
+                "ok": True,
+                "fullyHealthy": True,
+                "overallState": "up",
+                "summary": "ready",
+                "revision": calls,
+                "legacyServices": {
+                    "botReady": True,
+                    "mainReady": True,
+                    "routerReady": True,
+                    "subReady": True,
+                    "ttsReady": True,
+                    "sttReady": True,
+                },
+                "services": [
+                    {
+                        "id": "bot_api",
+                        "state": "up",
+                        "ready": True,
+                    }
+                ],
+            }
+
+        cache = fast_api.RuntimeHealthSnapshotCache(
+            collector=collect,
+            refresh_after_sec=2.0,
+            max_stale_sec=6.0,
+            monotonic=lambda: clock[0],
+        )
+
+        async def exercise() -> tuple[dict, dict, dict, dict]:
+            first = await fast_api.state_handler(object())
+            second = await fast_api.state_handler(object())
+            clock[0] += 2.1
+            refreshing = await fast_api.state_handler(object())
+            await asyncio.sleep(0)
+            refreshed = await fast_api.state_handler(object())
+            return tuple(
+                fast_api.json.loads(response.text or "{}")
+                for response in (
+                    first,
+                    second,
+                    refreshing,
+                    refreshed,
+                )
+            )
+
+        with patch.object(
+            fast_api,
+            "FAST_RUNTIME_HEALTH_CACHE",
+            cache,
+        ):
+            first, second, refreshing, refreshed = asyncio.run(
+                exercise()
+            )
+
+        self.assertEqual(calls, 2)
+        self.assertEqual(
+            first["runtime"]["serviceHealth"]["revision"],
+            1,
+        )
+        self.assertEqual(
+            second["runtime"]["serviceHealth"]["revision"],
+            1,
+        )
+        self.assertTrue(
+            refreshing["runtime"]["controlPlane"]["healthCache"][
+                "refreshing"
+            ]
+        )
+        self.assertEqual(
+            refreshed["runtime"]["serviceHealth"]["revision"],
+            2,
+        )
 
     def test_control_state_preserves_local_bridge_tts_warmup_status(self) -> None:
         fast_api.LOCAL_BRIDGE_STATUS.update(

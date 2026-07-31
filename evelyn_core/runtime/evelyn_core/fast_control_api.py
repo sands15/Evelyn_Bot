@@ -73,6 +73,9 @@ from .minecraft_world_lease_http_runtime import (
 )
 from .query_intents import answer_current_datetime_query
 from .runtime_health import collect_runtime_health, default_probe_runner
+from .runtime_health_snapshot_cache import (
+    RuntimeHealthSnapshotCache,
+)
 from .runtime_services import HealthProbeSpec, ServiceSpec, load_service_manifest
 from .text import (
     ModelStreamPrefixFilter,
@@ -127,6 +130,24 @@ MINECRAFT_AUTONOMY_SERVICE_BASE = (
 MINECRAFT_CONTROL_TIMEOUT_SEC = max(
     0.5,
     float(os.getenv("MINECRAFT_CONTROL_TIMEOUT_SEC", "2.5")),
+)
+FAST_RUNTIME_HEALTH_REFRESH_SEC = max(
+    0.5,
+    float(
+        os.getenv(
+            "FAST_RUNTIME_HEALTH_REFRESH_SEC",
+            "2.0",
+        )
+    ),
+)
+FAST_RUNTIME_HEALTH_MAX_STALE_SEC = max(
+    FAST_RUNTIME_HEALTH_REFRESH_SEC,
+    float(
+        os.getenv(
+            "FAST_RUNTIME_HEALTH_MAX_STALE_SEC",
+            "6.0",
+        )
+    ),
 )
 CHAT_LOG_LIMIT = max(4, int(os.getenv("FAST_CONTROL_CHAT_LOG_LIMIT", "40")))
 LOCAL_BRIDGE_STALE_AFTER_SEC = max(3.0, float(os.getenv("LOCAL_BRIDGE_STALE_AFTER_SEC", "8.0")))
@@ -1282,7 +1303,12 @@ def request_local_restart(*, source: str, reason: str = "") -> dict[str, Any]:
     }
 
 
-def build_control_plane_state(*, bot_ready: bool) -> dict[str, Any]:
+def build_control_plane_state(
+    *,
+    bot_ready: bool,
+    health_cache: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    cache = dict(health_cache or {})
     return {
         "controlPage": {
             "ready": True,
@@ -1299,7 +1325,26 @@ def build_control_plane_state(*, bot_ready: bool) -> dict[str, Any]:
             "state": "ready" if bot_ready else "down",
         },
         "lastProxyFailure": {},
-        "healthCache": {"ageSec": 0.0, "stale": False},
+        "healthCache": {
+            "schema": str(
+                cache.get("schema") or "runtime_health.cache.v1"
+            ),
+            "ageSec": max(
+                0.0,
+                float(cache.get("ageSec") or 0.0),
+            ),
+            "stale": bool(cache.get("stale")),
+            "refreshing": bool(cache.get("refreshing")),
+            "refreshAfterSec": float(
+                cache.get("refreshAfterSec") or 0.0
+            ),
+            "maxStaleSec": float(
+                cache.get("maxStaleSec") or 0.0
+            ),
+            "lastRefreshError": str(
+                cache.get("lastRefreshError") or ""
+            ),
+        },
         "statusText": (
             "Control-Page and Bot API are both responding."
             if bot_ready
@@ -1759,7 +1804,14 @@ def build_control_state(health: dict[str, Any]) -> dict[str, Any]:
     bridge_mic = dict(bridge_status.get("mic") or {})
     bridge_speaking = bool(bridge_status.get("speaking"))
     bridge_listening = bool(bridge_mic.get("captureActive"))
-    control_plane = build_control_plane_state(bot_ready=bot_ready)
+    control_plane = build_control_plane_state(
+        bot_ready=bot_ready,
+        health_cache=(
+            health.get("cache")
+            if isinstance(health.get("cache"), dict)
+            else None
+        ),
+    )
     return {
         "ok": core_ready,
         "generatedAt": time.time(),
@@ -1837,6 +1889,27 @@ async def fast_control_probe_runner(service: ServiceSpec, check: HealthProbeSpec
             "elapsedMs": 0.0,
         }
     return await default_probe_runner(service, check)
+
+
+async def collect_fast_runtime_health() -> dict[str, Any]:
+    return await collect_runtime_health(
+        manifest=load_service_manifest(),
+        probe_runner=fast_control_probe_runner,
+    )
+
+
+FAST_RUNTIME_HEALTH_CACHE = RuntimeHealthSnapshotCache(
+    collector=collect_fast_runtime_health,
+    refresh_after_sec=FAST_RUNTIME_HEALTH_REFRESH_SEC,
+    max_stale_sec=FAST_RUNTIME_HEALTH_MAX_STALE_SEC,
+)
+
+
+async def cached_fast_runtime_health(
+    *,
+    force: bool = False,
+) -> dict[str, Any]:
+    return await FAST_RUNTIME_HEALTH_CACHE.get(force=force)
 
 
 async def minecraft_world_lease_owner_context(
@@ -1936,8 +2009,7 @@ async def minecraft_world_lease_mutation_handler(
 
 
 async def state_handler(_: web.Request) -> web.StreamResponse:
-    manifest = load_service_manifest()
-    health = await collect_runtime_health(manifest=manifest, probe_runner=fast_control_probe_runner)
+    health = await cached_fast_runtime_health()
     return json_response(build_control_state(health))
 
 
@@ -2020,8 +2092,7 @@ async def chat_handler(request: web.Request) -> web.StreamResponse:
         queue_local_bridge_speech(reply, source=source)
     if task_record is not None and task_runner is not None and task_record.status == "running":
         launch_background_action(task_record, task_runner)
-    manifest = load_service_manifest()
-    health = await collect_runtime_health(manifest=manifest, probe_runner=fast_control_probe_runner)
+    health = await cached_fast_runtime_health()
     result: dict[str, Any] = {
         "ok": not bool(error_code),
         "reply": reply,
