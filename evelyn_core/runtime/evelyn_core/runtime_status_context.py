@@ -18,6 +18,51 @@ from .text import clean_text
 
 DEFAULT_CONNECT_TIMEOUT_SEC = float(os.getenv("RUNTIME_STATUS_CONTEXT_CONNECT_TIMEOUT_SEC", "0.18"))
 DEFAULT_MAX_ERROR_CHARS = int(os.getenv("RUNTIME_STATUS_CONTEXT_MAX_ERROR_CHARS", "160"))
+RUNTIME_RECENT_ERROR_SCHEMA = "runtime.recent-error.v1"
+RUNTIME_RECENT_ERROR_OWNERS = frozenset(
+    {
+        "codex_gateway",
+        "voyager",
+        "voyager_service",
+        "upstream_bridge",
+    }
+)
+RUNTIME_RECENT_ERROR_CODES = frozenset(
+    {
+        "codex_backend_failed",
+        "codex_request_timeout",
+        "codex_empty_output",
+        "codex_handler_failed",
+        "codex_recent_failure",
+        "voyager_runtime_failed",
+        "voyager_task_failed",
+        "voyager_service_log_present",
+        "upstream_bridge_log_present",
+    }
+)
+RUNTIME_RECENT_ERROR_AGE_BUCKETS = frozenset(
+    {
+        "lt_1m",
+        "lt_1h",
+        "lt_1d",
+        "gte_1d",
+        "unknown",
+    }
+)
+_CODEX_FAILURE_CODES = {
+    "error": "codex_backend_failed",
+    "timeout": "codex_request_timeout",
+    "empty_output": "codex_empty_output",
+    "handler_exception": "codex_handler_failed",
+}
+_VOYAGER_FAILURE_COMPLETION_REASONS = frozenset(
+    {
+        "action_generation_failed",
+        "death_recovery_required",
+        "max_retries_exhausted",
+        "action_parse_failed",
+    }
+)
 
 
 @dataclass
@@ -43,7 +88,7 @@ class RuntimeStatusContextDeps:
     is_control_api_ready_from_runtime_services: Callable[[dict], bool]
     probe_runtime_tcp_service: Callable[[str, str, int], Awaitable[tuple[str, bool]]]
     load_runtime_gpu_status: Callable[[], tuple[str, bool]]
-    load_runtime_recent_errors: Callable[[], list[str]]
+    load_runtime_recent_errors: Callable[[], list[dict[str, str]]]
     now: Callable[[], float]
 
 
@@ -127,9 +172,21 @@ async def build_runtime_status_context_from_runtime(
             + (f" ({'; '.join(oom_reason)})" if oom_reason else "")
         )
 
-        recent_errors = deps.load_runtime_recent_errors()
+        recent_errors: list[dict[str, str]] = []
+        for item in deps.load_runtime_recent_errors():
+            marker = sanitize_runtime_recent_error_marker(item)
+            if marker is not None:
+                recent_errors.append(marker)
+            if len(recent_errors) >= 3:
+                break
         if recent_errors:
-            status_parts.append("recent_errors=" + " | ".join(recent_errors))
+            status_parts.append(
+                "recent_errors="
+                + " | ".join(
+                    render_runtime_recent_error_marker(marker)
+                    for marker in recent_errors
+                )
+            )
             status_parts.append(
                 "recent_errors_are_historical=true; do_not_claim_current_oom_from_recent_errors_without_current_oom_signal=yes"
             )
@@ -175,17 +232,6 @@ async def probe_runtime_tcp_service(
         return label, False
 
 
-def read_text_tail(path: Path, *, max_bytes: int = 4096) -> str:
-    try:
-        with path.open("rb") as handle:
-            handle.seek(0, os.SEEK_END)
-            size = handle.tell()
-            handle.seek(max(0, size - max_bytes), os.SEEK_SET)
-            return handle.read(max_bytes).decode("utf-8", errors="replace")
-    except Exception:
-        return ""
-
-
 def compact_runtime_error(value: Any, *, max_chars: int | None = None) -> str:
     limit = max_chars if max_chars is not None else DEFAULT_MAX_ERROR_CHARS
     text = clean_text(str(value or ""))
@@ -197,66 +243,156 @@ def compact_runtime_error(value: Any, *, max_chars: int | None = None) -> str:
     return text
 
 
-def runtime_file_age_label(path: Path) -> str:
+def runtime_file_age_bucket(path: Path) -> str:
     try:
         age_sec = max(0.0, time.time() - path.stat().st_mtime)
     except Exception:
-        return ""
+        return "unknown"
     if age_sec < 60:
-        return f"{int(age_sec)}s ago"
+        return "lt_1m"
     if age_sec < 3600:
-        return f"{int(age_sec // 60)}m ago"
+        return "lt_1h"
     if age_sec < 86400:
-        return f"{int(age_sec // 3600)}h ago"
-    return f"{int(age_sec // 86400)}d ago"
+        return "lt_1d"
+    return "gte_1d"
 
 
-def load_runtime_recent_errors() -> list[str]:
-    errors: list[str] = []
+def build_runtime_recent_error_marker(
+    *,
+    owner: str,
+    code: str,
+    path: Path,
+) -> dict[str, str] | None:
+    return sanitize_runtime_recent_error_marker(
+        {
+            "schema": RUNTIME_RECENT_ERROR_SCHEMA,
+            "owner": owner,
+            "code": code,
+            "ageBucket": runtime_file_age_bucket(path),
+        }
+    )
+
+
+def sanitize_runtime_recent_error_marker(
+    value: Any,
+) -> dict[str, str] | None:
+    if not isinstance(value, dict):
+        return None
+    if value.get("schema") != RUNTIME_RECENT_ERROR_SCHEMA:
+        return None
+    owner = clean_text(str(value.get("owner") or "")).lower()
+    code = clean_text(str(value.get("code") or "")).lower()
+    age_bucket = clean_text(
+        str(value.get("ageBucket") or "")
+    ).lower()
+    if (
+        owner not in RUNTIME_RECENT_ERROR_OWNERS
+        or code not in RUNTIME_RECENT_ERROR_CODES
+        or age_bucket not in RUNTIME_RECENT_ERROR_AGE_BUCKETS
+    ):
+        return None
+    return {
+        "schema": RUNTIME_RECENT_ERROR_SCHEMA,
+        "owner": owner,
+        "code": code,
+        "ageBucket": age_bucket,
+    }
+
+
+def render_runtime_recent_error_marker(
+    marker: dict[str, str],
+) -> str:
+    safe = sanitize_runtime_recent_error_marker(marker)
+    if safe is None:
+        return ""
+    return (
+        f"owner={safe['owner']},"
+        f"code={safe['code']},"
+        f"age={safe['ageBucket']}"
+    )
+
+
+def load_runtime_recent_errors() -> list[dict[str, str]]:
+    errors: list[dict[str, str]] = []
     codex_path = RUNTIME_ARTIFACTS_ROOT / "codex_gateway" / "last_request.json"
     try:
         codex_payload = json.loads(codex_path.read_text(encoding="utf-8"))
-        codex_error = (
+        has_legacy_error = bool(
             codex_payload.get("error")
             or codex_payload.get("stderr_tail")
             or codex_payload.get("message")
         )
-        codex_status = clean_text(str(codex_payload.get("status") or codex_payload.get("phase") or ""))
-        if codex_error:
-            codex_age = runtime_file_age_label(codex_path)
-            codex_meta = ", ".join(part for part in (codex_status, codex_age) if part)
-            prefix = f"codex({codex_meta})" if codex_meta else "codex"
-            errors.append(f"{prefix}: {compact_runtime_error(codex_error)}")
+        codex_phase = clean_text(
+            str(
+                codex_payload.get("status")
+                or codex_payload.get("phase")
+                or ""
+            )
+        ).lower()
+        codex_code = _CODEX_FAILURE_CODES.get(codex_phase)
+        if codex_code is not None or has_legacy_error:
+            marker = build_runtime_recent_error_marker(
+                owner="codex_gateway",
+                code=codex_code or "codex_recent_failure",
+                path=codex_path,
+            )
+            if marker is not None:
+                errors.append(marker)
     except Exception:
         pass
 
     voyager_status_path = RUNTIME_ARTIFACTS_ROOT / "voyager" / "upstream_bridge_status.json"
     try:
         status_payload = json.loads(voyager_status_path.read_text(encoding="utf-8"))
-        voyager_error = (
-            status_payload.get("last_error")
-            or status_payload.get("last_critique")
-            or status_payload.get("last_completion_reason")
-        )
-        if voyager_error:
-            voyager_age = runtime_file_age_label(voyager_status_path)
-            prefix = f"voyager({voyager_age})" if voyager_age else "voyager"
-            errors.append(f"{prefix}: {compact_runtime_error(voyager_error)}")
+        completion_reason = clean_text(
+            str(status_payload.get("last_completion_reason") or "")
+        ).lower()
+        voyager_code = ""
+        if status_payload.get("last_error"):
+            voyager_code = "voyager_runtime_failed"
+        elif completion_reason in _VOYAGER_FAILURE_COMPLETION_REASONS:
+            voyager_code = "voyager_task_failed"
+        if voyager_code:
+            marker = build_runtime_recent_error_marker(
+                owner="voyager",
+                code=voyager_code,
+                path=voyager_status_path,
+            )
+            if marker is not None:
+                errors.append(marker)
     except Exception:
         pass
 
-    for label, log_path in (
-        ("voyager_service", RUNTIME_ARTIFACTS_ROOT / "logs" / "voyager_service_errors.log"),
-        ("upstream_bridge", RUNTIME_ARTIFACTS_ROOT / "logs" / "upstream_bridge_errors.log"),
+    for owner, code, log_path in (
+        (
+            "voyager_service",
+            "voyager_service_log_present",
+            RUNTIME_ARTIFACTS_ROOT
+            / "logs"
+            / "voyager_service_errors.log",
+        ),
+        (
+            "upstream_bridge",
+            "upstream_bridge_log_present",
+            RUNTIME_ARTIFACTS_ROOT
+            / "logs"
+            / "upstream_bridge_errors.log",
+        ),
     ):
         if len(errors) >= 3:
             break
-        tail = read_text_tail(log_path)
-        lines = [compact_runtime_error(line) for line in tail.splitlines() if compact_runtime_error(line)]
-        if lines:
-            log_age = runtime_file_age_label(log_path)
-            prefix = f"{label}({log_age})" if log_age else label
-            errors.append(f"{prefix}: {lines[-1]}")
+        try:
+            has_error_log = log_path.is_file() and log_path.stat().st_size > 0
+        except OSError:
+            has_error_log = False
+        if has_error_log:
+            marker = build_runtime_recent_error_marker(
+                owner=owner,
+                code=code,
+                path=log_path,
+            )
+            if marker is not None:
+                errors.append(marker)
 
     return errors[:3]
 

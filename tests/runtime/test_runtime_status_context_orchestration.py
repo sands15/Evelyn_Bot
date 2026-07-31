@@ -25,7 +25,7 @@ class RuntimeStatusContextOrchestrationTests(unittest.IsolatedAsyncioTestCase):
         self.services = {"summary": "all ready", "botApiReady": True}
         self.service_error: Exception | None = None
         self.gpu_result = ("gpu0 RTX used=1/10MB", False)
-        self.recent_errors: list[str] = []
+        self.recent_errors: list[dict[str, str] | str] = []
 
     async def probe(self, label: str, host: str, port: int) -> tuple[str, bool]:
         self.probes.append((label, host, port))
@@ -78,7 +78,14 @@ class RuntimeStatusContextOrchestrationTests(unittest.IsolatedAsyncioTestCase):
         self.down_labels = {"tts"}
         self.services = {"summary": "partial readiness", "botApiReady": False, "botApiReason": "starting"}
         self.gpu_result = ("gpu0 RTX used=9500/10000MB", True)
-        self.recent_errors = ["old OOM"]
+        self.recent_errors = [
+            {
+                "schema": "runtime.recent-error.v1",
+                "owner": "codex_gateway",
+                "code": "codex_backend_failed",
+                "ageBucket": "lt_1h",
+            }
+        ]
         state = RuntimeStatusContextState()
 
         result = await build_runtime_status_context_from_runtime(deps=self.build_deps(), state=state)
@@ -99,7 +106,11 @@ class RuntimeStatusContextOrchestrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("current_oom_signal=yes", result)
         self.assertIn("gpu_near_full", result)
         self.assertIn("bot_api:starting", result)
-        self.assertIn("recent_errors=old OOM", result)
+        self.assertIn(
+            "recent_errors=owner=codex_gateway,"
+            "code=codex_backend_failed,age=lt_1h",
+            result,
+        )
         self.assertIn("recent_errors_are_historical=true", result)
         self.assertEqual(state.cache["text"], result)
         self.assertEqual(state.cache["cached_at"], 100.0)
@@ -126,6 +137,45 @@ class RuntimeStatusContextOrchestrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("bot/control=up", result)
         self.assertNotIn("summary=", result)
         self.assertIn("recent_errors=none", result)
+
+    async def test_untrusted_recent_error_details_are_not_added_to_context(
+        self,
+    ) -> None:
+        private = (
+            "Bearer context-secret http://internal:9820 "
+            "C:\\Users\\Admin\\private.txt"
+        )
+        self.recent_errors = [
+            private,
+            {
+                "schema": "runtime.recent-error.v1",
+                "owner": "codex_gateway",
+                "code": "codex_backend_failed",
+                "ageBucket": "lt_1m",
+                "detail": private,
+            },
+            {
+                "schema": "runtime.recent-error.v1",
+                "owner": "unknown_owner",
+                "code": private,
+                "ageBucket": "lt_1m",
+            },
+        ]
+        state = RuntimeStatusContextState()
+
+        result = await build_runtime_status_context_from_runtime(
+            deps=self.build_deps(),
+            state=state,
+        )
+
+        self.assertIn(
+            "recent_errors=owner=codex_gateway,"
+            "code=codex_backend_failed,age=lt_1m",
+            result,
+        )
+        self.assertNotIn("context-secret", result)
+        self.assertNotIn("internal:9820", result)
+        self.assertNotIn("private.txt", result)
 
     def test_main_delegates_status_context_to_runtime_state(self) -> None:
         composition_path = (

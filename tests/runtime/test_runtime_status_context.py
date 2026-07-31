@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -14,8 +16,11 @@ if str(RUNTIME_ROOT) not in sys.path:
 from evelyn_core.runtime_status_context import (  # noqa: E402
     answer_gpu_runtime_status_query,
     compact_runtime_error,
+    load_runtime_recent_errors,
     load_runtime_gpu_status,
+    render_runtime_recent_error_marker,
     runtime_status_port_from_url,
+    sanitize_runtime_recent_error_marker,
 )
 
 
@@ -55,6 +60,140 @@ class RuntimeStatusContextTests(unittest.TestCase):
 
         self.assertIn("현재 OOM 신호는 없어", answer)
         self.assertIn("NVIDIA GeForce RTX 3090", answer)
+
+    def test_recent_error_loader_returns_content_free_markers(self) -> None:
+        private = (
+            "Bearer artifact-secret http://internal:9820 "
+            "C:\\Users\\Admin\\private.txt"
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            codex_path = root / "codex_gateway" / "last_request.json"
+            voyager_path = (
+                root / "voyager" / "upstream_bridge_status.json"
+            )
+            logs = root / "logs"
+            codex_path.parent.mkdir(parents=True)
+            voyager_path.parent.mkdir(parents=True)
+            logs.mkdir(parents=True)
+            codex_path.write_text(
+                json.dumps(
+                    {
+                        "phase": "error",
+                        "error": private,
+                        "stderr_tail": private,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            voyager_path.write_text(
+                json.dumps({"last_error": private}),
+                encoding="utf-8",
+            )
+            (logs / "voyager_service_errors.log").write_text(
+                private,
+                encoding="utf-8",
+            )
+            (logs / "upstream_bridge_errors.log").write_text(
+                private,
+                encoding="utf-8",
+            )
+
+            with patch(
+                "evelyn_core.runtime_status_context."
+                "RUNTIME_ARTIFACTS_ROOT",
+                root,
+            ):
+                markers = load_runtime_recent_errors()
+
+        self.assertEqual(len(markers), 3)
+        self.assertEqual(
+            [marker["owner"] for marker in markers],
+            ["codex_gateway", "voyager", "voyager_service"],
+        )
+        self.assertEqual(
+            [marker["code"] for marker in markers],
+            [
+                "codex_backend_failed",
+                "voyager_runtime_failed",
+                "voyager_service_log_present",
+            ],
+        )
+        serialized = json.dumps(markers)
+        self.assertNotIn("artifact-secret", serialized)
+        self.assertNotIn("internal:9820", serialized)
+        self.assertNotIn("private.txt", serialized)
+
+    def test_success_critique_is_not_treated_as_recent_error(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            voyager_path = (
+                root / "voyager" / "upstream_bridge_status.json"
+            )
+            voyager_path.parent.mkdir(parents=True)
+            voyager_path.write_text(
+                json.dumps(
+                    {
+                        "last_error": None,
+                        "last_critique": (
+                            "private successful critique"
+                        ),
+                        "last_completion_reason": "critic_success",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch(
+                "evelyn_core.runtime_status_context."
+                "RUNTIME_ARTIFACTS_ROOT",
+                root,
+            ):
+                markers = load_runtime_recent_errors()
+
+        self.assertEqual(markers, [])
+
+    def test_recent_error_marker_rejects_unknown_contract_values(
+        self,
+    ) -> None:
+        private = "Bearer marker-secret C:\\private.txt"
+        valid = {
+            "schema": "runtime.recent-error.v1",
+            "owner": "upstream_bridge",
+            "code": "upstream_bridge_log_present",
+            "ageBucket": "gte_1d",
+            "detail": private,
+        }
+
+        sanitized = sanitize_runtime_recent_error_marker(valid)
+
+        self.assertEqual(
+            sanitized,
+            {
+                "schema": "runtime.recent-error.v1",
+                "owner": "upstream_bridge",
+                "code": "upstream_bridge_log_present",
+                "ageBucket": "gte_1d",
+            },
+        )
+        self.assertEqual(
+            render_runtime_recent_error_marker(valid),
+            "owner=upstream_bridge,"
+            "code=upstream_bridge_log_present,age=gte_1d",
+        )
+        self.assertIsNone(
+            sanitize_runtime_recent_error_marker(
+                {
+                    **valid,
+                    "owner": "unknown",
+                    "code": private,
+                }
+            )
+        )
+        self.assertNotIn(
+            "marker-secret",
+            render_runtime_recent_error_marker(valid),
+        )
 
 
 if __name__ == "__main__":

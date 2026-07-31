@@ -32,7 +32,10 @@ class ResponseContextCompositionDeps:
     is_control_api_ready_from_runtime_services: Callable[[dict], bool]
     probe_runtime_tcp_service: Callable[..., Awaitable[tuple[str, bool]]]
     load_runtime_gpu_status: Callable[[], tuple[str, bool]]
-    load_runtime_recent_errors: Callable[[], list[str]]
+    load_runtime_recent_errors: Callable[
+        [],
+        list[dict[str, str]],
+    ]
     now: Callable[[], float]
     clean_text: Callable[[str], str]
     apply_ask_gating: Callable[..., dict[str, Any]]
