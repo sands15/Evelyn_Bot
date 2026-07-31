@@ -391,6 +391,14 @@ owner 경계가 없는 보조 모듈의 광범위한 예외 처리는 남아 있
 `backendReady is true`를 요구해, gateway만 살아 있고 행동 backend가 없는
 상태를 준비 완료로 오판하지 않는다.
 
+`436fb59`는 Main/Voice LLM에 주입되는 legacy runtime status context도
+content-free로 바꿨다. Codex `error`/`stderr_tail`/`message`, Voyager
+`last_error`/`last_critique`와 error log 마지막 줄을 prompt에 복사하지 않는다.
+구조화 phase/completion reason과 오류 파일의 비어 있지 않음만
+`runtime.recent-error.v1`의 exact owner/code/age bucket으로 바꾸며, 최종
+context builder가 schema·owner·code·bucket allowlist를 다시 검사한다.
+성공한 Voyager critique는 최근 오류로 취급하지 않는다.
+
 다음 조치: 새 서비스 owner를 만들 때 typed schema와 오류 카운터를 필수 계약으로
 적용하고, 기존 대형 설정 모듈은 기능 변경 시 점진적으로 이동한다.
 

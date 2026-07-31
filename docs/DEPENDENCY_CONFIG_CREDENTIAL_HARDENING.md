@@ -84,6 +84,27 @@ Codex 동작 준비 상태는 `/health`의 HTTP 생존 신호 `ok`와 분리된�
 Control Page는 `backendReady is true`일 때만 `codexReady=true`로 판정한다.
 필드 누락, false, 비-boolean 값은 모두 fail-closed다.
 
+Main/Voice LLM의 runtime status context에는
+`runtime.recent-error.v1` marker만 들어간다.
+
+```json
+{
+  "schema": "runtime.recent-error.v1",
+  "owner": "codex_gateway|voyager|voyager_service|upstream_bridge",
+  "code": "exact allowlisted code",
+  "ageBucket": "lt_1m|lt_1h|lt_1d|gte_1d|unknown"
+}
+```
+
+- Codex artifact의 phase와 오류 필드 존재 여부만 읽고 `error`,
+  `stderr_tail`, `message` 본문은 prompt에 넣지 않는다.
+- Voyager는 `last_error` 존재 여부 또는 allowlisted failure completion
+  reason만 사용한다. 정상 completion의 critique는 오류가 아니다.
+- error log는 크기가 0보다 큰지만 확인하고 tail 내용을 읽지 않는다.
+- loader 결과를 신뢰하지 않고 최종 context builder가 schema와 세 enum을
+  다시 검사하고, unknown/legacy 문자열 및 additive private 필드를 버린다.
+- 렌더링은 `owner`, `code`, coarse age bucket만 포함하며 최대 3개다.
+
 ## Codex credential boundary
 
 Compose no longer mounts the user's live `~/.codex/auth.json` or
@@ -153,6 +174,19 @@ Completed locally:
   를 배포했고 healthy, restart count 0이다. Discord image
   `sha256:570dd9be4de3c89dc39c1bc0060fe3b89fc4c3dd5cda3d7e7141d652b83793f5`
   는 빌드·검증만 하고 시작하지 않았다.
+
+2026-07-31 runtime context hardening:
+
+- artifact/log와 dependency 주입값에 token-like text, 내부 URL, Windows
+  path를 넣어도 LLM context에는 exact marker만 남는 집중 테스트 22개를
+  통과했다.
+- runtime 전체 393개는 통과(skip 2)했고 core 468개는 기능 assertion 실패
+  0개였다. 이미지에 없는 `git` 오류 2개는 Windows의 해당 모듈 13개로
+  보완했다.
+- Discord/Main image
+  `sha256:1ad4935410afec659a1862e11d3950c3657d379618bb29d3190cde7f58cc69b9`
+  는 내부 `compileall`, `pip check`와 집중 테스트를 통과했다. 실제
+  Discord/Main 서비스는 시작하지 않았다.
 
 Still required before deployment:
 

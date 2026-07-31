@@ -2,7 +2,7 @@
 
 Document status: **Current**
 Last reviewed: 2026-07-31 KST
-Source branch: `codex/dependency-config-hardening` through `0f0201f`
+Source branch: `codex/dependency-config-hardening` through `436fb59`
 
 이 문서는 현재 확인된 사실만 기록한다. 목표 구조와 과거 계획은 다른 설계/계획 문서를 사용한다.
 
@@ -86,6 +86,10 @@ Source branch: `codex/dependency-config-hardening` through `0f0201f`
   - Codex readiness는 gateway HTTP의 `ok`가 아니라 exact
     `backendReady is true`를 요구한다. gateway만 살아 있고 credential/CLI
     backend가 준비되지 않은 상태는 fail-closed로 `codexReady=false`다.
+  - Main/Voice LLM의 runtime status context는 Codex/Voyager artifact와
+    error log 원문을 넣지 않는다. `runtime.recent-error.v1`의 exact
+    owner/code/coarse age bucket만 최대 3개 렌더링하고 최종 consumer가
+    allowlist를 다시 검증한다.
 - 자율행동의 승인과 결과 증거를 같은 action·grant에 묶었다.
   - `autonomy.outcome-evidence-policy.v1`이 모든 supported action의 exact
     evidence code를 정의한다. 비어 있지 않은 임의 코드나 다른 action의
@@ -874,6 +878,18 @@ Source branch: `codex/dependency-config-hardening` through `0f0201f`
   `sha256:570dd9be4de3c89dc39c1bc0060fe3b89fc4c3dd5cda3d7e7141d652b83793f5`는
   `compileall`, `pip check`와 집중 테스트를 통과했지만 시작하지 않았다.
   Bot API는 기존 healthy image와 restart count 0을 유지했다.
+- `436fb59`는 runtime artifact/log의 최근 오류 원문을 Main/Voice prompt에
+  넣던 경로를 content-free marker로 교체했다. Codex stderr/message와
+  Voyager error/critique/log tail은 더 이상 읽어 렌더링하지 않으며 정상
+  critique를 오류로 오인하지 않는다.
+- status/context 집중 22개와 runtime 393개(skip 2)를 통과했다. core
+  468개는 기능 assertion 실패 0개였고 기존 `git` 환경 오류 2개는 Windows
+  모듈 13개로 보완했다. 운영 artifact의 read-only marker 결과는 현재
+  0개였다.
+- 새 Discord/Main image
+  `sha256:1ad4935410afec659a1862e11d3950c3657d379618bb29d3190cde7f58cc69b9`는
+  `compileall`, `pip check`와 집중 테스트를 통과했지만 시작하지 않았다.
+  실행 중인 Control Page와 Bot API는 그대로 healthy다.
 
 ## Operational boundaries
 

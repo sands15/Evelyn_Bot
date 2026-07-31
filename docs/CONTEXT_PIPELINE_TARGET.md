@@ -97,6 +97,12 @@ Examples:
 - current vision target or attachment summary
 - live service status if the user asks operational questions
 
+최근 runtime 오류는 raw artifact, stderr, log tail 또는 예외 문장을 넣지 않는다.
+현재 구현은 `runtime.recent-error.v1`의 allowlisted owner, fixed code와
+`lt_1m|lt_1h|lt_1d|gte_1d|unknown` age bucket만 최대 3개 전달한다. loader와
+최종 context consumer가 각각 계약을 검증하며 성공한 critique는 오류로
+분류하지 않는다.
+
 ### 5. Skill / Capability Graph
 
 Procedural and capability knowledge from Evelyn, Voyager, Odyssey, OpenHA-style action spaces, and later internal planners.
