@@ -374,9 +374,14 @@ class FastControlApiToolTests(unittest.TestCase):
         }
         with patch.object(
             fast_api,
-            "store_explicit_memory_confirmation",
-            return_value=receipt,
-        ) as store, patch.object(
+            "execute_explicit_memory_confirmation",
+            return_value=(
+                True,
+                "지금 요청을 근거로 새 기억에 저장했어.",
+                receipt,
+                "",
+            ),
+        ) as execute, patch.object(
             fast_api,
             "plan_fast_tool_request_for_turn",
             new=AsyncMock(),
@@ -395,8 +400,8 @@ class FastControlApiToolTests(unittest.TestCase):
             fast_api.CHAT_MESSAGES[-1]["memoryWriteReceipt"],
             receipt,
         )
-        store.assert_called_once_with(
-            "나는 산책을 좋아해",
+        execute.assert_called_once_with(
+            "/remember 나는 산책을 좋아해",
             action_id="control-request-123",
         )
         planner.assert_not_awaited()

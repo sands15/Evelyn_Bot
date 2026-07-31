@@ -15,6 +15,13 @@ from .continuity_commit_contract import (
     require_durable_continuity_receipt,
 )
 from .public_error_contract import public_failure_message
+from .explicit_memory_confirmation import (
+    execute_explicit_memory_confirmation,
+    is_explicit_memory_confirmation_command,
+)
+from .memory_confirmation_contract import (
+    explicit_memory_writer_skip_decision,
+)
 from .turn_lifecycle import TurnScope
 
 
@@ -153,6 +160,8 @@ async def handle_discord_text_message(message: Any, deps: DiscordTextMessageHand
     text_delivery_plan = None
     text_delivered = False
     text_turn_summary_logged = False
+    memory_command_matched = False
+    memory_write_receipt: dict[str, Any] | None = None
 
     async def finish_and_commit_delivered_turn(
         answer_text: str,
@@ -206,26 +215,72 @@ async def handle_discord_text_message(message: Any, deps: DiscordTextMessageHand
     try:
         async with reply_lock:
             async with message.channel.typing():
-                if deps.auto_join_voice:
-                    vc = await deps.ensure_voice_client(message)
-
-                answer, _sent_message, text_metrics, text_delivery_plan = await deps.stream_text_reply(
-                    message.channel,
-                    user_text,
-                    guild_id=message.guild.id,
-                    session_key=session_key,
-                    turn_id=turn_id,
-                    room_key=room_key,
-                    person_key=person_key,
-                    session_memory_key=session_memory_key,
-                    source="text",
-                    debug_text=user_text,
-                    include_voice=vc is not None,
-                    turn_scope=turn_scope,
-                    proactive_resolution=proactive_resolution,
-                )
-                plain_answer = deps.strip_omnivoice_tags(answer) or answer
-                text_delivered = True
+                if is_explicit_memory_confirmation_command(
+                    user_text
+                ):
+                    (
+                        memory_command_matched,
+                        memory_command_reply,
+                        memory_write_receipt,
+                        memory_command_error,
+                    ) = await asyncio.to_thread(
+                        execute_explicit_memory_confirmation,
+                        user_text,
+                        action_id=(
+                            f"discord-message:{message.guild.id}:"
+                            f"{message.channel.id}:{message.id}"
+                        ),
+                        evidence_turn_id=turn_id,
+                        source="discord-user",
+                    )
+                else:
+                    memory_command_reply = ""
+                    memory_command_error = ""
+                if memory_command_matched:
+                    answer = memory_command_reply
+                    plain_answer = memory_command_reply
+                    text_metrics = {
+                        "meta": {
+                            "reply_source": (
+                                "explicit_memory_confirmation"
+                            ),
+                            "memory_write_receipt": (
+                                memory_write_receipt
+                            ),
+                            "memory_write_error": (
+                                memory_command_error
+                            ),
+                        }
+                    }
+                    await message.channel.send(memory_command_reply)
+                    text_delivered = True
+                else:
+                    if deps.auto_join_voice:
+                        vc = await deps.ensure_voice_client(message)
+                    (
+                        answer,
+                        _sent_message,
+                        text_metrics,
+                        text_delivery_plan,
+                    ) = await deps.stream_text_reply(
+                        message.channel,
+                        user_text,
+                        guild_id=message.guild.id,
+                        session_key=session_key,
+                        turn_id=turn_id,
+                        room_key=room_key,
+                        person_key=person_key,
+                        session_memory_key=session_memory_key,
+                        source="text",
+                        debug_text=user_text,
+                        include_voice=vc is not None,
+                        turn_scope=turn_scope,
+                        proactive_resolution=proactive_resolution,
+                    )
+                    plain_answer = (
+                        deps.strip_omnivoice_tags(answer) or answer
+                    )
+                    text_delivered = True
 
             async with state_lock:
                 deps.session_speculative_policies.pop(
@@ -247,64 +302,70 @@ async def handle_discord_text_message(message: Any, deps: DiscordTextMessageHand
                     )
                     or deps.compute_runtime_mode(text_metrics)
                 )
-                deps.record_context_pipeline_benchmark(
-                    metrics=text_metrics,
-                    user_text=user_text,
-                    answer=plain_answer,
-                    source="text",
-                    guild_id=message.guild.id,
-                    session_key=session_key,
-                )
-                memory_writer_decision = (
-                    deps.schedule_memory_update(
+                if memory_command_matched:
+                    memory_writer_decision = (
+                        explicit_memory_writer_skip_decision()
+                    )
+                else:
+                    deps.record_context_pipeline_benchmark(
+                        metrics=text_metrics,
+                        user_text=user_text,
+                        answer=plain_answer,
+                        source="text",
+                        guild_id=message.guild.id,
+                        session_key=session_key,
+                    )
+                    memory_writer_decision = (
+                        deps.schedule_memory_update(
+                            message.guild.id,
+                            user_text,
+                            plain_answer,
+                            room_key=room_key,
+                            person_key=person_key,
+                            session_memory_key=session_memory_key,
+                            source="text",
+                            user_speaker=(
+                                message.author.display_name
+                            ),
+                            assistant_speaker="Evelyn",
+                            session_key=session_key,
+                            turn_scope=turn_scope,
+                            runtime_mode=runtime_mode,
+                        )
+                    )
+                text_metrics.setdefault("meta", {})[
+                    "memory_writer_decision"
+                ] = memory_writer_decision
+                if not memory_command_matched:
+                    search_requested = (
+                        deps.should_force_search_followup(
+                            message.guild.id,
+                            room_key=room_key,
+                            person_key=person_key,
+                            session_memory_key=session_memory_key,
+                            source="text",
+                        )
+                    )
+                    deps.schedule_search_followup(
                         message.guild.id,
+                        session_key,
                         user_text,
                         plain_answer,
                         room_key=room_key,
                         person_key=person_key,
                         session_memory_key=session_memory_key,
-                        source="text",
-                        user_speaker=(
-                            message.author.display_name
-                        ),
-                        assistant_speaker="Evelyn",
-                        session_key=session_key,
-                        turn_scope=turn_scope,
+                        channel_id=message.channel.id,
+                        reply_to_message_id=message.id,
+                        source="search-followup-text",
+                        force=search_requested,
+                        turn_scope=None,
                         runtime_mode=runtime_mode,
+                        continuity_generation=(
+                            text_metrics.get("meta", {}).get(
+                                "continuity_generation"
+                            )
+                        ),
                     )
-                )
-                text_metrics.setdefault("meta", {})[
-                    "memory_writer_decision"
-                ] = memory_writer_decision
-                search_requested = (
-                    deps.should_force_search_followup(
-                        message.guild.id,
-                        room_key=room_key,
-                        person_key=person_key,
-                        session_memory_key=session_memory_key,
-                        source="text",
-                    )
-                )
-                deps.schedule_search_followup(
-                    message.guild.id,
-                    session_key,
-                    user_text,
-                    plain_answer,
-                    room_key=room_key,
-                    person_key=person_key,
-                    session_memory_key=session_memory_key,
-                    channel_id=message.channel.id,
-                    reply_to_message_id=message.id,
-                    source="search-followup-text",
-                    force=search_requested,
-                    turn_scope=None,
-                    runtime_mode=runtime_mode,
-                    continuity_generation=(
-                        text_metrics.get("meta", {}).get(
-                            "continuity_generation"
-                        )
-                    ),
-                )
 
             if (
                 vc is not None

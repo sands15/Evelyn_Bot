@@ -343,14 +343,19 @@ Source branch: `codex/dependency-config-hardening`, current evidence-bound user 
   - 현재 발화나 답변을 Summary LLM 입력에 포함하면서 유효한 current turn ID가
     없으면 과거 기억의 evidence를 새 결과의 근거로 빌려 쓰지 않는다. 이때 새
     summary/fact/question은 귀속 정보가 없는 확인 전용 상태로 fail-closed한다.
-  - Fast Control은 `/remember <fact>`, `/memory remember <fact>`와 엄격한
+  - Fast Control과 gate를 통과한 Discord 텍스트·음성 turn은
+    `/remember <fact>`, `/memory remember <fact>`와 엄격한
     `기억해줘: <fact>` 형식만 직접 사용자 확인 기억으로 저장한다. 일반 대화나
     “기억”이라는 단어가 포함된 문장을 자동 영구 저장하지 않는다.
-  - 저장 노트는 `control-page-user` 직접 출처, 현재 request/voice turn 참조,
-    본문 evidence hash와 `confirmed_at`을 하나의 Markdown write에 함께 남긴다.
-    같은 action ID 재시도는 같은 노트로 멱등 처리하고 다른 본문으로 재사용하면
-    거부한다. API/stream/chat 관측 receipt는 note ID·상태·turn 참조·확인 시각만
-    포함하며 기억 본문이나 transcript를 넣지 않는다.
+  - 저장 노트는 surface에 맞는 `control-page-user` 또는 `discord-user` 직접
+    출처, 현재 request/accepted turn 참조, 본문 evidence hash와 `confirmed_at`을
+    하나의 Markdown write에 함께 남긴다. Discord 메시지 ID는 저장 멱등성에만
+    사용하고 공개 근거는 내부 accepted turn ID로 분리한다.
+  - 같은 action ID 재시도는 같은 노트와 최초 저장 근거로 멱등 처리하고 다른
+    본문으로 재사용하면 거부한다. API/stream/chat/voice 관측 receipt는 exact
+    schema의 note ID·상태·turn 참조·확인 시각만 포함하며 기억 본문이나
+    transcript를 넣지 않는다. 직접 저장 turn은 일반 Summary LLM memory writer와
+    search follow-up을 건너뛰어 같은 발화를 중복 저장하지 않는다.
   - Control Page는 요청마다 request ID를 만들고 Local I/O Bridge는 기존 음성
     turn ID를 일반·stream 요청에 전달한다. 노트 파일명과 공개 ID는 기억 본문
     hash에서 만들지 않아 content-free receipt가 본문 equality oracle이 되지 않는다.
@@ -1221,6 +1226,21 @@ Source branch: `codex/dependency-config-hardening`, current evidence-bound user 
   Control Page
   `sha256:23794015780b40316f080365d5f1f82b5e6375ad176e9f596b1c0e096442c861`이며
   둘 다 내장 package `compileall`과 `pip check`를 통과했다. 실행 중인 기존
+  Bot API와 Control Page는 교체하지 않았고 계속 healthy다. 실제 사용자 기억,
+  Discord, 마이크, Minecraft와 무거운 모델 서비스도 변경하거나 시작하지 않았다.
+- Discord explicit-confirm memory 변경은 집중 107개, memory 152개, runtime
+  417개(skip 2), Discord I/O 109개, voice 417개와 UI 157개(skip 7)를
+  통과했다. Main/Discord 이미지의 core 546개는 기능 assertion 실패 0개였고
+  이미지에 `git`이 없어 난 기존 서명 검사 환경 오류 2개는 Windows의 해당
+  모듈 13개로 보완했다. 전체 discovery는 2,016개를 실행해 같은 `git` 오류
+  2개, Linux의 Windows OCR 환경 오류 1개와 서드파티 Voyager `gymnasium`
+  의존성 오류 1개만 남겼고 Windows OCR 6개도 별도로 통과했다.
+- 새 내장 소스 검증 이미지는 Bot API
+  `sha256:043ae4176b191752fd8abb641041e2435fc778c97a9c6197475b6269177dd6df`,
+  Discord/Main
+  `sha256:2df481e0660a2b45f7252966c2dfa1fd90bddd46d98654c29e1a2464603107ad`이며
+  각각 내장 소스 집중 85개와 22개, `compileall`, `pip check`를 통과했다.
+  전체 profile Compose config와 `git diff --check`도 통과했다. 실행 중인 기존
   Bot API와 Control Page는 교체하지 않았고 계속 healthy다. 실제 사용자 기억,
   Discord, 마이크, Minecraft와 무거운 모델 서비스도 변경하거나 시작하지 않았다.
 

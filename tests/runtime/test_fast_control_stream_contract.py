@@ -436,8 +436,13 @@ class FastControlStreamContractTests(unittest.IsolatedAsyncioTestCase):
         }
         with patch.object(
             fast_api,
-            "store_explicit_memory_confirmation",
-            return_value=receipt,
+            "execute_explicit_memory_confirmation",
+            return_value=(
+                True,
+                "지금 요청을 근거로 새 기억에 저장했어.",
+                receipt,
+                "",
+            ),
         ), patch.object(
             fast_api,
             "plan_fast_tool_request_for_turn",

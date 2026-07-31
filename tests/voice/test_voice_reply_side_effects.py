@@ -271,6 +271,96 @@ class VoiceReplySideEffectsTests(unittest.TestCase):
         )
         self.assertNotIn(private, str(metrics))
 
+    def test_explicit_memory_confirmation_skips_duplicate_memory_and_search(self) -> None:
+        metrics: dict[str, Any] = {
+            "meta": {
+                "runtime_mode": "normal",
+                "memory_write_receipt": {
+                    "schema": "memory.user-confirmation.v1",
+                    "state": "stored",
+                    "noteId": "concept-discord-voice",
+                    "sourceRef": "turn:turn-voice-1:user",
+                    "confirmedAt": "2026-07-31T00:00:00+00:00",
+                    "contentFree": True,
+                },
+            }
+        }
+        calls: list[str] = []
+
+        def unexpected(*_args: Any, **_kwargs: Any) -> Any:
+            raise AssertionError(
+                "normal memory/search path must be skipped"
+            )
+
+        deps = VoiceReplySideEffectDeps(
+            session_speculative_policies={},
+            append_history=(
+                lambda *_args, **_kwargs: calls.append("append")
+            ),
+            compute_runtime_mode=unexpected,
+            record_context_pipeline_benchmark=unexpected,
+            schedule_memory_update=unexpected,
+            read_cached_cognitive_state=unexpected,
+            apply_ask_gating=unexpected,
+            schedule_search_followup=unexpected,
+            session_state_snapshot=(
+                lambda _key: {"awaiting_user_reply": False}
+            ),
+            mark_session_active=(
+                lambda *_args, **_kwargs: calls.append("active")
+            ),
+            set_room_owner=(
+                lambda *_args, **_kwargs: calls.append("owner")
+            ),
+            commit_session_continuity=(
+                lambda: calls.append("commit")
+                or durable_continuity_status(8)
+            ),
+            log=lambda *_args: calls.append("log"),
+            active_conversation_voice_question_sec=12.0,
+            active_conversation_voice_sec=3.0,
+            active_conversation_awaiting_reply_sec=30.0,
+        )
+
+        finalize_voice_reply_side_effects_from_runtime(
+            guild_id=7,
+            member=FakeMember(),
+            session_key="session-1",
+            room_session_key="room-1",
+            room_key="room-key",
+            person_key="person-key",
+            session_memory_key="session-memory",
+            voice_reply=FakeVoiceReply(
+                history_user_text=(
+                    "기억해줘: 나는 비 오는 날 산책을 좋아해"
+                )
+            ),
+            plain_answer="지금 요청을 근거로 새 기억에 저장했어.",
+            metrics=metrics,
+            turn_scope="scope",
+            accepted_turn_id="turn-voice-1",
+            segment_id=5,
+            deps=deps,
+        )
+
+        self.assertEqual(
+            calls,
+            ["append", "active", "owner", "commit"],
+        )
+        self.assertEqual(
+            metrics["meta"]["memory_writer_decision"]["reason"],
+            "explicit_user_confirmation",
+        )
+        self.assertFalse(
+            metrics["meta"]["memory_writer_decision"][
+                "write_raw_transcript"
+            ]
+        )
+        self.assertEqual(
+            metrics["meta"]["continuity_generation"],
+            8,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

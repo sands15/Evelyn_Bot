@@ -5,6 +5,7 @@ import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 
 REPO_ROOT = next(path for path in Path(__file__).resolve().parents if (path / "main.py").exists())
@@ -163,6 +164,81 @@ class DiscordTextTurnHandlerTests(unittest.TestCase):
         self.assertIn(("summary", "text_turn_summary"), calls)
         self.assertEqual(calls[-1], ("process_commands", "Evelyn hi"))
         self.assertEqual(message.channel.typing_count, 1)
+
+    def test_explicit_memory_confirmation_bypasses_llm_and_keeps_continuity(self) -> None:
+        calls: list[tuple[str, object]] = []
+        summaries: list[dict] = []
+        receipt = {
+            "schema": "memory.user-confirmation.v1",
+            "state": "stored",
+            "noteId": "concept-discord-text",
+            "sourceRef": (
+                "turn:turn:guild:1:text:2:user:3:user"
+            ),
+            "confirmedAt": "2026-07-31T00:00:00+00:00",
+            "contentFree": True,
+        }
+
+        def unexpected(*_args, **_kwargs):
+            raise AssertionError("normal memory path must be skipped")
+
+        deps = make_deps(
+            calls,
+            auto_join_voice=True,
+            ensure_voice_client=unexpected,
+            stream_text_reply=unexpected,
+            record_context_pipeline_benchmark=unexpected,
+            schedule_memory_update=unexpected,
+            should_force_search_followup=unexpected,
+            schedule_search_followup=unexpected,
+            log_voice_bottleneck_summary=(
+                lambda metrics, **_kwargs: summaries.append(
+                    metrics
+                )
+            ),
+        )
+        message = make_message(
+            content=(
+                "Evelyn /remember 나는 비 오는 날 산책을 좋아해"
+            ),
+            guild=SimpleNamespace(id=1, name="Guild"),
+            message_id=99,
+        )
+
+        with patch(
+            "evelyn_core.discord_text_turn."
+            "execute_explicit_memory_confirmation",
+            return_value=(
+                True,
+                "지금 요청을 근거로 새 기억에 저장했어.",
+                receipt,
+                "",
+            ),
+        ) as execute:
+            asyncio.run(handle_discord_text_message(message, deps))
+
+        self.assertEqual(
+            message.channel.sent,
+            ["지금 요청을 근거로 새 기억에 저장했어."],
+        )
+        self.assertFalse(any(call[0] == "stream" for call in calls))
+        self.assertIn(("commit_continuity", None), calls)
+        self.assertEqual(
+            summaries[0]["meta"]["memory_write_receipt"],
+            receipt,
+        )
+        self.assertEqual(
+            summaries[0]["meta"]["memory_writer_decision"][
+                "reason"
+            ],
+            "explicit_user_confirmation",
+        )
+        execute.assert_called_once_with(
+            "/remember 나는 비 오는 날 산책을 좋아해",
+            action_id="discord-message:1:2:99",
+            evidence_turn_id="turn:guild:1:text:2:user:3",
+            source="discord-user",
+        )
 
     def test_delivered_text_turn_is_committed_when_optional_voice_fails(self) -> None:
         calls: list[tuple[str, object]] = []

@@ -43,6 +43,10 @@ class TurnTraceSummaryTests(unittest.TestCase):
             "memory_legacy_confirm_only_item_count",
             "memory_receipt_content_free",
             "memory_writer_decision",
+            "memory_write_state",
+            "memory_write_note_id",
+            "memory_write_error",
+            "memory_write_content_free",
             "minecraft_snapshot_freshness",
             "error_layer",
             "validation_session_id",
@@ -102,6 +106,14 @@ class TurnTraceSummaryTests(unittest.TestCase):
                         },
                     },
                     "minecraft_snapshot_age_ms": 1234.4,
+                    "memory_write_receipt": {
+                        "schema": "memory.user-confirmation.v1",
+                        "state": "stored",
+                        "noteId": "concept-confirmed",
+                        "sourceRef": "turn:turn-12345:user",
+                        "confirmedAt": "2026-07-31T00:00:00+00:00",
+                        "contentFree": True,
+                    },
                     "minecraft_snapshot_freshness": "fresh",
                     "validation_session_id": "validation-1",
                     "validation_step_id": "02-listening",
@@ -151,6 +163,17 @@ class TurnTraceSummaryTests(unittest.TestCase):
         self.assertEqual(payload["memory_hot_context_state"], "provided")
         self.assertEqual(payload["memory_version"], 7)
         self.assertTrue(payload["memory_receipt_content_free"])
+        self.assertEqual(payload["memory_write_state"], "stored")
+        self.assertEqual(
+            payload["memory_write_note_id"],
+            "concept-confirmed",
+        )
+        self.assertIsNone(payload["memory_write_error"])
+        self.assertTrue(payload["memory_write_content_free"])
+        self.assertNotIn(
+            "sourceRef",
+            json.dumps(payload, ensure_ascii=False),
+        )
         self.assertEqual(payload["minecraft_snapshot_age_ms"], 1234.4)
         self.assertEqual(payload["minecraft_snapshot_freshness"], "fresh")
         self.assertEqual(payload["validation_session_id"], "validation-1")
@@ -175,6 +198,36 @@ class TurnTraceSummaryTests(unittest.TestCase):
         self.assertEqual(payload["error_layer"], "text_turn")
         self.assertIn("ValueError", payload["error"])
         self.assertIsNone(payload["total_ms"])
+
+    def test_invalid_memory_write_receipt_fails_closed_without_private_fields(self) -> None:
+        payload = build_turn_summary_payload(
+            {
+                "meta": {
+                    "turn_id": "turn-private",
+                    "memory_write_receipt": {
+                        "schema": "memory.user-confirmation.v1",
+                        "state": "stored",
+                        "noteId": "concept-safe-id",
+                        "sourceRef": "turn:turn-private:user",
+                        "confirmedAt": "2026-07-31T00:00:00+00:00",
+                        "contentFree": True,
+                        "body": "private-memory-body",
+                    },
+                }
+            },
+            label="voice_turn",
+            event_name="voice_turn_summary",
+            total_ms=1.0,
+        )
+
+        self.assertIsNone(payload["memory_write_state"])
+        self.assertIsNone(payload["memory_write_note_id"])
+        self.assertIsNone(payload["memory_write_error"])
+        self.assertIsNone(payload["memory_write_content_free"])
+        self.assertNotIn(
+            "private-memory-body",
+            json.dumps(payload, ensure_ascii=False),
+        )
 
     def test_playback_completed_is_explicit_in_summary(self) -> None:
         payload = build_turn_summary_payload(

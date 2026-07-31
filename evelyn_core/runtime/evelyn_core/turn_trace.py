@@ -7,6 +7,9 @@ from pathlib import Path
 from typing import Any
 
 from .text import clean_text
+from .memory_confirmation_contract import (
+    is_explicit_memory_confirmation_receipt,
+)
 
 
 TURN_SUMMARY_EVENTS = frozenset(
@@ -74,6 +77,10 @@ TURN_SUMMARY_KEYS: tuple[str, ...] = (
     "memory_version",
     "memory_receipt_content_free",
     "memory_writer_decision",
+    "memory_write_state",
+    "memory_write_note_id",
+    "memory_write_error",
+    "memory_write_content_free",
     "minecraft_snapshot_age_ms",
     "minecraft_snapshot_freshness",
     "playback_started",
@@ -264,6 +271,16 @@ def build_turn_summary_payload(
     context_meta = _as_mapping(meta.get("context_pipeline"))
     policy = _as_mapping(context_meta.get("policy"))
     memory_receipt = _as_mapping(context_meta.get("memory_receipt"))
+    raw_memory_write_receipt = meta.get(
+        "memory_write_receipt"
+    )
+    memory_write_receipt = (
+        _as_mapping(raw_memory_write_receipt)
+        if is_explicit_memory_confirmation_receipt(
+            raw_memory_write_receipt
+        )
+        else {}
+    )
     p95 = _as_mapping(p95_summary)
     section_chars = context_meta.get("section_chars")
 
@@ -334,6 +351,18 @@ def build_turn_summary_payload(
         "memory_version": _int_or_none(memory_receipt.get("memoryVersion")),
         "memory_receipt_content_free": _bool_or_none(memory_receipt.get("contentFree")),
         "memory_writer_decision": meta.get("memory_writer_decision"),
+        "memory_write_state": _clean_optional(
+            memory_write_receipt.get("state")
+        ),
+        "memory_write_note_id": _clean_optional(
+            memory_write_receipt.get("noteId")
+        ),
+        "memory_write_error": _clean_optional(
+            memory_write_receipt.get("error")
+        ),
+        "memory_write_content_free": _bool_or_none(
+            memory_write_receipt.get("contentFree")
+        ),
         "minecraft_snapshot_age_ms": _round_ms(meta.get("minecraft_snapshot_age_ms")),
         "minecraft_snapshot_freshness": _clean_optional(meta.get("minecraft_snapshot_freshness")),
         "playback_started": playback_started,

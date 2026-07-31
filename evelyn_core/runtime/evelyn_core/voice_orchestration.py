@@ -14,6 +14,10 @@ from .room_session_state import (
     set_room_reply_in_progress,
 )
 from .text import clean_text, is_user_echo_answer
+from .explicit_memory_confirmation import (
+    execute_explicit_memory_confirmation,
+    is_explicit_memory_confirmation_command,
+)
 from .voice_pipeline import AnswerPayload, DeliveryPlan, RouteDecision, TranscriptResult, VoiceReplyRequest, VoiceSegment
 from .voice_barge_in import remember_voice_utterance_for_merge
 
@@ -1475,7 +1479,63 @@ async def deliver_voice_reply(
     report_delivery_error: Callable[[Exception], None],
 ) -> VoiceReplyDeliveryResult | None:
     try:
-        if voice_reply.wake_only_turn:
+        memory_command_matched = False
+        memory_command_reply = ""
+        memory_write_receipt = None
+        memory_command_error = ""
+        if is_explicit_memory_confirmation_command(
+            voice_reply.history_user_text
+        ):
+            (
+                memory_command_matched,
+                memory_command_reply,
+                memory_write_receipt,
+                memory_command_error,
+            ) = await asyncio.to_thread(
+                execute_explicit_memory_confirmation,
+                voice_reply.history_user_text,
+                action_id=accepted_turn_id,
+                evidence_turn_id=accepted_turn_id,
+                source="discord-user",
+            )
+        if memory_command_matched:
+            answer = memory_command_reply
+            metrics.setdefault("meta", {}).update(
+                {
+                    "turn_type": "memory_confirmation",
+                    "selected_path": (
+                        "explicit_memory_confirmation"
+                    ),
+                    "reply_source": (
+                        "explicit_memory_confirmation"
+                    ),
+                    "memory_write_receipt": (
+                        memory_write_receipt
+                    ),
+                    "memory_write_error": memory_command_error,
+                }
+            )
+            if on_final_answer is not None:
+                await on_final_answer(answer)
+            try:
+                await speak_answer(
+                    vc,
+                    answer,
+                    turn_id=accepted_turn_id,
+                    session_key=session_key,
+                    turn_scope=turn_scope,
+                    metrics=metrics,
+                )
+            except Exception as e:
+                record_voice_pipeline_failure(
+                    "tts_playback_failed",
+                    e,
+                    metrics,
+                    stage="memory_confirmation_speak_answer",
+                )
+                raise
+            used_wake_only_reply = False
+        elif voice_reply.wake_only_turn:
             answer = canned_wake_reply
             metrics.setdefault("meta", {}).update(
                 {

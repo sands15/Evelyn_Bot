@@ -60,10 +60,7 @@ from .fast_control_continuity import (
     FastControlContinuityOwner,
 )
 from .explicit_memory_confirmation import (
-    ExplicitMemoryConfirmationError,
-    MEMORY_USER_CONFIRMATION_SCHEMA,
-    parse_explicit_memory_confirmation,
-    store_explicit_memory_confirmation,
+    execute_explicit_memory_confirmation,
 )
 from .cross_surface_continuity import (
     CrossSurfaceContinuityBridge,
@@ -299,70 +296,6 @@ def json_response(payload: dict[str, Any], *, status: int = 200) -> web.Response
 
 def clean_text(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value or "").strip())
-
-
-def execute_explicit_memory_confirmation(
-    text: str,
-    *,
-    action_id: object = "",
-) -> tuple[bool, str, dict[str, Any] | None, str]:
-    try:
-        fact = parse_explicit_memory_confirmation(text)
-    except ExplicitMemoryConfirmationError as exc:
-        return (
-            True,
-            "기억할 내용을 함께 적어줘. 예: /remember 나는 산책을 좋아해",
-            {
-                "schema": MEMORY_USER_CONFIRMATION_SCHEMA,
-                "state": "rejected",
-                "error": exc.code,
-                "contentFree": True,
-            },
-            exc.code,
-        )
-    if fact is None:
-        return False, "", None, ""
-    try:
-        receipt = store_explicit_memory_confirmation(
-            fact,
-            action_id=action_id,
-        )
-    except ExplicitMemoryConfirmationError as exc:
-        return (
-            True,
-            "지금은 그 기억을 근거와 함께 저장하지 못했어. 다시 시도해줘.",
-            {
-                "schema": MEMORY_USER_CONFIRMATION_SCHEMA,
-                "state": "failed",
-                "error": exc.code,
-                "contentFree": True,
-            },
-            exc.code,
-        )
-    except Exception as exc:
-        print(
-            "[FAST CONTROL] explicit_memory_confirmation_failed "
-            f"errorType={type(exc).__name__}",
-            flush=True,
-        )
-        return (
-            True,
-            "지금은 그 기억을 근거와 함께 저장하지 못했어. 다시 시도해줘.",
-            {
-                "schema": MEMORY_USER_CONFIRMATION_SCHEMA,
-                "state": "failed",
-                "error": "memory_confirmation_write_failed",
-                "contentFree": True,
-            },
-            "memory_confirmation_write_failed",
-        )
-    state = clean_text(receipt.get("state"))
-    reply = (
-        "이미 같은 내용이 근거 있는 기억으로 저장되어 있어."
-        if state == "duplicate"
-        else "지금 요청을 근거로 새 기억에 저장했어."
-    )
-    return True, reply, receipt, ""
 
 
 def should_emit_memory_recall_progress(text: str, *, source: str) -> bool:

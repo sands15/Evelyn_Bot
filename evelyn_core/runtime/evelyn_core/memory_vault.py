@@ -757,7 +757,12 @@ def _memory_source_type(source: str, note_type: str) -> str:
         return "derived"
     if normalized in {"conversation-turn-log", "daily-turn-log"} or note_type == "daily":
         return "conversation"
-    if normalized in {"user", "user-edit", "control-page-user"}:
+    if normalized in {
+        "user",
+        "user-edit",
+        "control-page-user",
+        "discord-user",
+    }:
         return "user"
     return "unknown" if not normalized else "runtime"
 
