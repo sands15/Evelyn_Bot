@@ -343,6 +343,7 @@ class LlmRouteComposition:
         force: bool = False,
         turn_scope: Any | None = None,
         runtime_mode: str | None = None,
+        continuity_generation: int | None = None,
     ) -> None:
         schedule_search_followup_from_runtime(
             guild_id,
@@ -359,6 +360,7 @@ class LlmRouteComposition:
             force=force,
             turn_scope=turn_scope,
             runtime_mode=runtime_mode,
+            continuity_generation=continuity_generation,
         )
 
     async def warmup_llm(self) -> None:

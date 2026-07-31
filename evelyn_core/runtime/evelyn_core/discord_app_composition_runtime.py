@@ -67,6 +67,7 @@ class DiscordEventCompositionDeps:
     text_message_handler: DepsFactory
     log: Callable[..., Any]
     runtime_status: "DiscordRuntimeStatus | None" = None
+    recover_search_followups: Callable[..., Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -237,6 +238,27 @@ class DiscordAppComposition:
                 deps.log(
                     f"[AUTONOMY] guild={guild.id} "
                     "available approval_required=true"
+                )
+        if deps.recover_search_followups is not None:
+            try:
+                recovery = await deps.recover_search_followups()
+                if int(recovery.get("pending", 0)):
+                    deps.log(
+                        "[SEARCH] recovery_complete "
+                        f"pending={int(recovery.get('pending', 0))} "
+                        f"resumed={int(recovery.get('resumed', 0))} "
+                        f"verified={int(recovery.get('verified', 0))} "
+                        f"redelivered={int(recovery.get('redelivered', 0))} "
+                        f"uncertain={int(recovery.get('uncertain', 0))}"
+                    )
+            except Exception as exc:
+                self._record_runtime_error(
+                    "search_followup_recovery_failed",
+                    exc,
+                )
+                deps.log(
+                    "[SEARCH] recovery_start_failed "
+                    f"errorType={type(exc).__name__}"
                 )
 
     async def on_voice_state_update(self, member: Any, before: Any, after: Any) -> None:

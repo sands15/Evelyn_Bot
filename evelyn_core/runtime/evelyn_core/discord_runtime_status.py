@@ -35,6 +35,7 @@ class DiscordRuntimeStatus:
         status_path: Path | None = None,
         interval_sec: float = 1.0,
         now: Callable[[], float] = time.time,
+        search_followup_recovery_status: Callable[[], dict[str, Any]] | None = None,
     ) -> None:
         self.bot_user = bot_user
         self.bot_guilds = bot_guilds
@@ -44,6 +45,9 @@ class DiscordRuntimeStatus:
         )
         self.interval_sec = max(0.2, float(interval_sec))
         self.now = now
+        self.search_followup_recovery_status = (
+            search_followup_recovery_status
+        )
         self.started_at = self.now()
         self.task: asyncio.Task[Any] | None = None
         self.last_error = ""
@@ -84,6 +88,17 @@ class DiscordRuntimeStatus:
                     "listening": listening,
                 }
             )
+        search_recovery: dict[str, Any] = {}
+        if self.search_followup_recovery_status is not None:
+            try:
+                search_recovery = dict(
+                    self.search_followup_recovery_status() or {}
+                )
+            except Exception as exc:
+                self.record_error(
+                    "search_followup_recovery_status_failed",
+                    exc,
+                )
         return {
             "schema": DISCORD_STATUS_SCHEMA,
             "heartbeatAt": self.now(),
@@ -95,6 +110,7 @@ class DiscordRuntimeStatus:
             "voiceConnected": any(row["connected"] for row in voice_rows),
             "listening": any(row["listening"] for row in voice_rows),
             "voiceConnections": voice_rows,
+            "searchFollowupRecovery": search_recovery,
             "lastError": self.last_error,
             **self.runtime_errors.snapshot(),
         }

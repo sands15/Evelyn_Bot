@@ -105,6 +105,12 @@ class VoiceReplySideEffectsTests(unittest.TestCase):
         self.assertEqual(by_name["schedule_memory_update"][1]["runtime_mode"], "normal")
         self.assertTrue(by_name["schedule_search_followup"][1]["force"])
         self.assertEqual(by_name["schedule_search_followup"][1]["source"], "search-followup-voice")
+        self.assertEqual(
+            by_name["schedule_search_followup"][1][
+                "continuity_generation"
+            ],
+            4,
+        )
         self.assertEqual(by_name["mark_session_active"][1]["ttl_sec"], 12.0)
         self.assertTrue(by_name["mark_session_active"][1]["awaiting_user_reply"])
         self.assertEqual(by_name["set_room_owner"][0], ("room-1", 42))
@@ -125,6 +131,14 @@ class VoiceReplySideEffectsTests(unittest.TestCase):
             ),
             [name for name, _args, _kwargs in calls].index(
                 "commit_session_continuity"
+            ),
+        )
+        self.assertLess(
+            [name for name, _args, _kwargs in calls].index(
+                "commit_session_continuity"
+            ),
+            [name for name, _args, _kwargs in calls].index(
+                "schedule_search_followup"
             ),
         )
 

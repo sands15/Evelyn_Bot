@@ -43,6 +43,7 @@ class GuildRuntimeResetCompositionDeps:
     autonomy_last_cognitive_refresh_at: MutableMapping[int, Any]
     autonomy_cognitive_refresh_tasks: MutableMapping[int, Any]
     reset_session_continuity_guild: Callable[[int, Callable[[], Any]], Any]
+    reset_search_followup_recovery_guild: Callable[[int], Any] | None = None
 
 
 class GuildRuntimeResetComposition:
@@ -101,6 +102,13 @@ class GuildRuntimeResetComposition:
                     or "conversation_continuity_guild_reset_failed"
                 )
             )
+        reset_search_recovery = getattr(
+            self.deps,
+            "reset_search_followup_recovery_guild",
+            None,
+        )
+        if reset_search_recovery is not None:
+            reset_search_recovery(guild_id)
 
 
 __all__ = ["GuildRuntimeResetComposition", "GuildRuntimeResetCompositionDeps"]

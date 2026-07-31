@@ -82,7 +82,10 @@ class GuildRuntimeResetCompositionTests(unittest.TestCase):
 
         composition = GuildRuntimeResetComposition(
             SimpleNamespace(
-                reset_session_continuity_guild=reset_continuity_guild
+                reset_session_continuity_guild=reset_continuity_guild,
+                reset_search_followup_recovery_guild=lambda guild_id: events.append(
+                    f"search:{guild_id}"
+                ),
             )
         )
         composition.build_guild_runtime_reset_deps = Mock(return_value=object())
@@ -94,7 +97,10 @@ class GuildRuntimeResetCompositionTests(unittest.TestCase):
         ):
             composition.reset_guild_runtime_state(7)
 
-        self.assertEqual(events, ["revoke:7", "reset", "flush"])
+        self.assertEqual(
+            events,
+            ["revoke:7", "reset", "flush", "search:7"],
+        )
 
     def test_continuity_persistence_failure_fails_the_reset_command(self) -> None:
         composition = GuildRuntimeResetComposition(

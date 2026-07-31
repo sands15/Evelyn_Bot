@@ -73,6 +73,8 @@ class SearchMemoryDependencyCompositionDeps:
     record_search_followup_queued: Callable[..., Any]
     commit_session_continuity: Callable[..., Any]
     log: Callable[..., Any]
+    search_followup_recovery: Any | None = None
+    continuity_status: Callable[[], dict[str, Any]] | None = None
 
 
 class SearchMemoryDependencyComposition:
@@ -160,6 +162,8 @@ class SearchMemoryDependencyComposition:
             detach_task=deps.detach_task,
             record_search_followup_queued=deps.record_search_followup_queued,
             commit_session_continuity=deps.commit_session_continuity,
+            search_followup_recovery=deps.search_followup_recovery,
+            continuity_status=deps.continuity_status,
             log=deps.log,
         )
 

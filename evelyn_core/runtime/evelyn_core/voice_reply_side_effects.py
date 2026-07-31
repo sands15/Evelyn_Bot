@@ -82,20 +82,6 @@ def finalize_voice_reply_side_effects_from_runtime(
         ).get("action")
         == "search_then_answer"
     )
-    deps.schedule_search_followup(
-        guild_id,
-        session_key,
-        voice_reply.history_user_text,
-        plain_answer,
-        room_key=room_key,
-        person_key=person_key,
-        session_memory_key=session_memory_key,
-        channel_id=None,
-        source="search-followup-voice",
-        force=search_requested,
-        turn_scope=None,
-        runtime_mode=runtime_mode,
-    )
     awaiting_reply = bool(deps.session_state_snapshot(session_key).get("awaiting_user_reply"))
     followup_ttl = deps.active_conversation_voice_question_sec if awaiting_reply else deps.active_conversation_voice_sec
     deps.mark_session_active(
@@ -143,3 +129,22 @@ def finalize_voice_reply_side_effects_from_runtime(
             "[VOICE TURN] continuity_commit_failed errorType=",
             type(exc).__name__,
         )
+    deps.schedule_search_followup(
+        guild_id,
+        session_key,
+        voice_reply.history_user_text,
+        plain_answer,
+        room_key=room_key,
+        person_key=person_key,
+        session_memory_key=session_memory_key,
+        channel_id=None,
+        source="search-followup-voice",
+        force=search_requested,
+        turn_scope=None,
+        runtime_mode=runtime_mode,
+        continuity_generation=(
+            metrics.get("meta", {}).get(
+                "continuity_generation"
+            )
+        ),
+    )

@@ -299,6 +299,11 @@ async def handle_discord_text_message(message: Any, deps: DiscordTextMessageHand
                     force=search_requested,
                     turn_scope=None,
                     runtime_mode=runtime_mode,
+                    continuity_generation=(
+                        text_metrics.get("meta", {}).get(
+                            "continuity_generation"
+                        )
+                    ),
                 )
 
             if (

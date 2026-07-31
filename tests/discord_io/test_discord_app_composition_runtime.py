@@ -73,6 +73,7 @@ def make_event_deps(**overrides) -> DiscordEventCompositionDeps:
         autonomy_enabled=False,
         text_message_handler=lambda: object(),
         log=Mock(),
+        recover_search_followups=None,
     )
     values.update(overrides)
     return DiscordEventCompositionDeps(**values)
@@ -257,6 +258,30 @@ class DiscordAppCompositionTests(unittest.TestCase):
         runtime_status.record_error.assert_called_once_with(
             "control_page_start_failed",
             failure,
+        )
+
+    def test_on_ready_recovers_promised_search_followups(self) -> None:
+        recover = AsyncMock(
+            return_value={
+                "pending": 1,
+                "resumed": 1,
+                "verified": 0,
+                "redelivered": 0,
+                "uncertain": 0,
+            }
+        )
+        events = make_event_deps(
+            recover_search_followups=recover,
+        )
+
+        asyncio.run(make_composition(events=events).on_ready())
+
+        recover.assert_awaited_once_with()
+        self.assertTrue(
+            any(
+                "recovery_complete" in str(call_args)
+                for call_args in events.log.call_args_list
+            )
         )
 
     def test_on_message_resolves_fresh_handler_dependencies(self) -> None:

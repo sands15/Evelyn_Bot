@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 
 REPO_ROOT = next(path for path in Path(__file__).resolve().parents if (path / "main.py").exists())
@@ -15,6 +17,12 @@ from evelyn_core.search_followup_runtime import (  # noqa: E402
     SearchFollowupRuntimeDeps,
     build_search_query_from_runtime,
     deliver_proactive_followup_from_runtime,
+    recover_search_followups_from_runtime,
+    run_search_followup_from_runtime,
+    schedule_search_followup_from_runtime,
+)
+from evelyn_core.search_followup_recovery import (  # noqa: E402
+    SearchFollowupRecoveryJournal,
 )
 from tests.continuity_test_support import (  # noqa: E402
     durable_continuity_status,
@@ -256,28 +264,521 @@ class SearchFollowupRuntimeTests(unittest.TestCase):
             }
         )
 
-        asyncio.run(
-            deliver_proactive_followup_from_runtime(
-                1,
-                "query",
-                "answer",
-                deps=deps,
-                session_key="session",
-                room_key=None,
-                person_key=None,
-                session_memory_key=None,
-                channel_id=10,
-                source="search",
+        with self.assertRaises(Exception):
+            asyncio.run(
+                deliver_proactive_followup_from_runtime(
+                    1,
+                    "query",
+                    "answer",
+                    deps=deps,
+                    session_key="session",
+                    room_key=None,
+                    person_key=None,
+                    session_memory_key=None,
+                    channel_id=10,
+                    source="search",
+                )
             )
-        )
 
-        self.assertEqual(events, ["history", "commit", "memory"])
+        self.assertEqual(events, ["history", "commit"])
         rendered = str(logs)
         self.assertIn(
             "ConversationContinuityCommitError",
             rendered,
         )
         self.assertNotIn("followup-continuity-secret", rendered)
+
+    def test_scheduler_persists_only_after_durable_anchor(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            journal = SearchFollowupRecoveryJournal(
+                path=Path(temporary) / "active.json"
+            )
+            created: list[object] = []
+
+            def create_task(coro, **_kwargs):
+                coro.close()
+                created.append(coro)
+                return SimpleNamespace(done=lambda: False, cancel=lambda: None)
+
+            deps = build_deps(
+                get_conversation_history_result=[
+                    {"role": "user", "content": "검색해줘"},
+                    {"role": "assistant", "content": "찾아보고 알려줄게"},
+                ]
+            )
+            deps = SearchFollowupRuntimeDeps(
+                **{
+                    **deps.__dict__,
+                    "answer_promises_search": lambda _text: True,
+                    "build_search_query": lambda *_args, **_kwargs: "검색 질의",
+                    "runtime_session_key": lambda **_kwargs: "session-1",
+                    "current_turn_id": lambda _key: "turn-1",
+                    "create_turn_scoped_task": create_task,
+                    "search_followup_recovery": journal,
+                }
+            )
+
+            schedule_search_followup_from_runtime(
+                7,
+                "session-1",
+                "검색해줘",
+                "찾아보고 알려줄게",
+                deps=deps,
+                channel_id=8,
+                source="search-followup-text",
+                continuity_generation=4,
+            )
+
+            self.assertEqual(len(created), 1)
+            self.assertEqual(journal.pending()[0]["continuityGeneration"], 4)
+            raw = journal.path.read_text(encoding="utf-8")
+            self.assertNotIn("검색해줘", raw)
+            self.assertNotIn("검색 질의", raw)
+
+    def test_restart_resumes_search_from_verified_continuity(self) -> None:
+        async def scenario() -> None:
+            with tempfile.TemporaryDirectory() as temporary:
+                journal = SearchFollowupRecoveryJournal(
+                    path=Path(temporary) / "active.json"
+                )
+                history = [
+                    {"role": "user", "content": "검색해줘"},
+                    {"role": "assistant", "content": "찾아보고 알려줄게"},
+                ]
+                sent: list[str] = []
+
+                class Channel:
+                    async def send(self, text, **_kwargs):
+                        sent.append(text)
+
+                    def history(self, **_kwargs):
+                        async def rows():
+                            if False:
+                                yield None
+
+                        return rows()
+
+                class Bot:
+                    user = SimpleNamespace(id=99)
+
+                    def get_channel(self, _channel_id):
+                        return Channel()
+
+                    async def fetch_channel(self, _channel_id):
+                        return Channel()
+
+                    def get_guild(self, _guild_id):
+                        return SimpleNamespace(voice_client=None)
+
+                intent_id = journal.begin(
+                    guild_id=7,
+                    session_key="session-1",
+                    source="text",
+                    turn_id="turn-1",
+                    room_key=None,
+                    person_key=None,
+                    session_memory_key=None,
+                    channel_id=8,
+                    reply_to_message_id=10,
+                    request_user_text="검색해줘",
+                    request_answer_text="찾아보고 알려줄게",
+                    query="검색 질의",
+                    continuity_generation=4,
+                )
+                self.assertIsNotNone(intent_id)
+
+                async def commit():
+                    return durable_continuity_status(5)
+
+                deps = build_deps(
+                    get_conversation_history_result=history
+                )
+                deps = SearchFollowupRuntimeDeps(
+                    **{
+                        **deps.__dict__,
+                        "bot": Bot(),
+                        "build_search_query": lambda *_args, **_kwargs: "검색 질의",
+                        "search_duckduckgo": lambda _query: asyncio.sleep(
+                            0,
+                            result=[{"title": "결과"}],
+                        ),
+                        "answer_from_search_results": lambda *_args: asyncio.sleep(
+                            0,
+                            result="검색 결과 답변",
+                        ),
+                        "get_conversation_history": lambda **_kwargs: history,
+                        "append_history": lambda _session, user, answer, **_kwargs: history.extend(
+                            [
+                                {"role": "user", "content": user},
+                                {"role": "assistant", "content": answer},
+                            ]
+                        ),
+                        "commit_session_continuity": commit,
+                        "send_discord_text": lambda _channel, text, **_kwargs: asyncio.sleep(
+                            0,
+                            result=sent.append(text),
+                        ),
+                        "format_display_text": lambda text, **_kwargs: text,
+                        "create_turn_scoped_task": lambda coro, **_kwargs: asyncio.create_task(
+                            coro
+                        ),
+                        "search_followup_recovery": journal,
+                        "continuity_status": lambda: {
+                            "state": "restored",
+                            "checkpointGeneration": 4,
+                            "rollbackProtected": True,
+                        },
+                    }
+                )
+
+                result = await recover_search_followups_from_runtime(
+                    deps=deps
+                )
+                self.assertEqual(result["resumed"], 1)
+                await deps.background_search_tasks["session-1"]
+                self.assertEqual(sent, ["검색 결과 답변"])
+                self.assertEqual(journal.pending(), [])
+
+        asyncio.run(scenario())
+
+    def test_attempted_text_delivery_is_verified_before_resend(self) -> None:
+        async def scenario(
+            *,
+            existing: bool,
+            preparing: bool = False,
+        ) -> tuple[dict[str, int], list[str]]:
+            with tempfile.TemporaryDirectory() as temporary:
+                journal = SearchFollowupRecoveryJournal(
+                    path=Path(temporary) / "active.json"
+                )
+                history = [
+                    {"role": "user", "content": "검색해줘"},
+                    {"role": "assistant", "content": "찾아보고 알려줄게"},
+                    {"role": "user", "content": "검색 질의"},
+                    {"role": "assistant", "content": "검색 결과 답변"},
+                ]
+                intent_id = journal.begin(
+                    guild_id=7,
+                    session_key="session-1",
+                    source="text",
+                    turn_id="turn-1",
+                    room_key=None,
+                    person_key=None,
+                    session_memory_key=None,
+                    channel_id=8,
+                    reply_to_message_id=10,
+                    request_user_text="검색해줘",
+                    request_answer_text="찾아보고 알려줄게",
+                    query="검색 질의",
+                    continuity_generation=4,
+                )
+                journal.begin_delivery_prepare(
+                    intent_id,
+                    answer="검색 결과 답변",
+                    display_text="검색 결과 답변",
+                )
+                if not preparing:
+                    journal.mark_delivery_ready(
+                        intent_id,
+                        answer="검색 결과 답변",
+                        display_text="검색 결과 답변",
+                        continuity_generation=5,
+                    )
+                    journal.mark_delivery_attempted(intent_id)
+                sent: list[str] = []
+
+                class Channel:
+                    async def send(self, text, **_kwargs):
+                        sent.append(text)
+
+                    def history(self, **_kwargs):
+                        async def rows():
+                            if existing:
+                                yield SimpleNamespace(
+                                    author=SimpleNamespace(id=99),
+                                    content="검색 결과 답변",
+                                )
+
+                        return rows()
+
+                class Bot:
+                    user = SimpleNamespace(id=99)
+
+                    def get_channel(self, _channel_id):
+                        return Channel()
+
+                    def get_guild(self, _guild_id):
+                        return SimpleNamespace(voice_client=None)
+
+                deps = build_deps(
+                    get_conversation_history_result=history
+                )
+                deps = SearchFollowupRuntimeDeps(
+                    **{
+                        **deps.__dict__,
+                        "bot": Bot(),
+                        "get_conversation_history": lambda **_kwargs: history,
+                        "format_display_text": lambda text, **_kwargs: text,
+                        "send_discord_text": lambda _channel, text, **_kwargs: asyncio.sleep(
+                            0,
+                            result=sent.append(text),
+                        ),
+                        "search_followup_recovery": journal,
+                        "continuity_status": lambda: {
+                            "checkpointGeneration": 5,
+                            "rollbackProtected": True,
+                        },
+                    }
+                )
+                result = await recover_search_followups_from_runtime(
+                    deps=deps
+                )
+                self.assertEqual(journal.pending(), [])
+                return result, sent
+
+        verified, verified_sent = asyncio.run(scenario(existing=True))
+        redelivered, redelivered_sent = asyncio.run(
+            scenario(existing=False)
+        )
+        prepared, prepared_sent = asyncio.run(
+            scenario(existing=False, preparing=True)
+        )
+        self.assertEqual(verified["verified"], 1)
+        self.assertEqual(verified_sent, [])
+        self.assertEqual(redelivered["redelivered"], 1)
+        self.assertEqual(redelivered_sent, ["검색 결과 답변"])
+        self.assertEqual(prepared["redelivered"], 1)
+        self.assertEqual(prepared_sent, ["검색 결과 답변"])
+
+    def test_failure_logs_do_not_expose_query_or_exception_text(self) -> None:
+        private_query = "Bearer private-search-query"
+        private_error = "https://private.example/token"
+        logs: list[tuple[object, ...]] = []
+
+        class Bot:
+            def get_guild(self, _guild_id):
+                return SimpleNamespace(voice_client=None)
+
+        async def fail_search(_query):
+            raise RuntimeError(private_error)
+
+        async def no_wait(_seconds):
+            return None
+
+        deps = build_deps()
+        deps = SearchFollowupRuntimeDeps(
+            **{
+                **deps.__dict__,
+                "bot": Bot(),
+                "search_duckduckgo": fail_search,
+                "sleep": no_wait,
+                "commit_session_continuity": lambda: asyncio.sleep(
+                    0,
+                    result=durable_continuity_status(2),
+                ),
+                "log": lambda *args: logs.append(args),
+            }
+        )
+
+        asyncio.run(
+            run_search_followup_from_runtime(
+                7,
+                private_query,
+                deps=deps,
+                session_key="session-1",
+                room_key=None,
+                person_key=None,
+                session_memory_key=None,
+                channel_id=None,
+                source="search-followup-text",
+            )
+        )
+
+        rendered = str(logs)
+        self.assertNotIn(private_query, rendered)
+        self.assertNotIn(private_error, rendered)
+        self.assertIn("RuntimeError", rendered)
+
+    def test_inconclusive_delivery_history_fails_closed(self) -> None:
+        async def scenario() -> None:
+            with tempfile.TemporaryDirectory() as temporary:
+                journal = SearchFollowupRecoveryJournal(
+                    path=Path(temporary) / "active.json"
+                )
+                history = [
+                    {"role": "user", "content": "검색해줘"},
+                    {"role": "assistant", "content": "찾아보고 알려줄게"},
+                    {"role": "user", "content": "검색 질의"},
+                    {"role": "assistant", "content": "검색 결과 답변"},
+                ]
+                intent_id = journal.begin(
+                    guild_id=7,
+                    session_key="session-1",
+                    source="text",
+                    turn_id="turn-1",
+                    room_key=None,
+                    person_key=None,
+                    session_memory_key=None,
+                    channel_id=8,
+                    reply_to_message_id=10,
+                    request_user_text="검색해줘",
+                    request_answer_text="찾아보고 알려줄게",
+                    query="검색 질의",
+                    continuity_generation=4,
+                )
+                journal.begin_delivery_prepare(
+                    intent_id,
+                    answer="검색 결과 답변",
+                    display_text="검색 결과 답변",
+                )
+                journal.mark_delivery_ready(
+                    intent_id,
+                    answer="검색 결과 답변",
+                    display_text="검색 결과 답변",
+                    continuity_generation=5,
+                )
+                journal.mark_delivery_attempted(intent_id)
+                sent: list[str] = []
+
+                class Channel:
+                    def history(self, **_kwargs):
+                        async def rows():
+                            for index in range(50):
+                                yield SimpleNamespace(
+                                    author=SimpleNamespace(id=99),
+                                    content=f"other-{index}",
+                                )
+
+                        return rows()
+
+                    async def send(self, text, **_kwargs):
+                        sent.append(text)
+
+                class Bot:
+                    user = SimpleNamespace(id=99)
+
+                    def get_channel(self, _channel_id):
+                        return Channel()
+
+                    def get_guild(self, _guild_id):
+                        return SimpleNamespace(voice_client=None)
+
+                deps = build_deps()
+                deps = SearchFollowupRuntimeDeps(
+                    **{
+                        **deps.__dict__,
+                        "bot": Bot(),
+                        "get_conversation_history": lambda **_kwargs: history,
+                        "format_display_text": lambda text, **_kwargs: text,
+                        "send_discord_text": lambda _channel, text, **_kwargs: asyncio.sleep(
+                            0,
+                            result=sent.append(text),
+                        ),
+                        "search_followup_recovery": journal,
+                        "continuity_status": lambda: {
+                            "checkpointGeneration": 5,
+                            "rollbackProtected": True,
+                        },
+                    }
+                )
+
+                result = await recover_search_followups_from_runtime(
+                    deps=deps
+                )
+
+                self.assertEqual(result["uncertain"], 1)
+                self.assertEqual(sent, [])
+                self.assertEqual(
+                    journal.pending()[0]["phase"],
+                    "delivery_uncertain",
+                )
+
+        asyncio.run(scenario())
+
+    def test_retry_budget_survives_restart(self) -> None:
+        async def scenario() -> None:
+            with tempfile.TemporaryDirectory() as temporary:
+                journal = SearchFollowupRecoveryJournal(
+                    path=Path(temporary) / "active.json"
+                )
+                intent_id = journal.begin(
+                    guild_id=7,
+                    session_key="session-1",
+                    source="text",
+                    turn_id="turn-1",
+                    room_key=None,
+                    person_key=None,
+                    session_memory_key=None,
+                    channel_id=8,
+                    reply_to_message_id=10,
+                    request_user_text="검색해줘",
+                    request_answer_text="찾아보고 알려줄게",
+                    query="검색 질의",
+                    continuity_generation=4,
+                )
+                for _ in range(3):
+                    journal.record_attempt_failure(
+                        intent_id,
+                        error_code="search_followup_execution_failed",
+                    )
+                search_calls = 0
+                sent: list[str] = []
+
+                class Channel:
+                    async def send(self, text, **_kwargs):
+                        sent.append(text)
+
+                class Bot:
+                    def get_channel(self, _channel_id):
+                        return Channel()
+
+                    def get_guild(self, _guild_id):
+                        return SimpleNamespace(voice_client=None)
+
+                async def search(_query):
+                    nonlocal search_calls
+                    search_calls += 1
+                    return []
+
+                async def commit():
+                    return durable_continuity_status(5)
+
+                deps = build_deps()
+                deps = SearchFollowupRuntimeDeps(
+                    **{
+                        **deps.__dict__,
+                        "bot": Bot(),
+                        "search_duckduckgo": search,
+                        "format_display_text": lambda text, **_kwargs: text,
+                        "send_discord_text": lambda _channel, text, **_kwargs: asyncio.sleep(
+                            0,
+                            result=sent.append(text),
+                        ),
+                        "commit_session_continuity": commit,
+                        "search_followup_recovery": journal,
+                    }
+                )
+
+                await run_search_followup_from_runtime(
+                    7,
+                    "검색 질의",
+                    deps=deps,
+                    session_key="session-1",
+                    room_key=None,
+                    person_key=None,
+                    session_memory_key=None,
+                    channel_id=8,
+                    reply_to_message_id=10,
+                    source="search-followup-recovery-text",
+                    recovery_intent_id=intent_id,
+                )
+
+                self.assertEqual(search_calls, 0)
+                self.assertEqual(len(sent), 1)
+                self.assertIn("세 번", sent[0])
+                self.assertEqual(journal.pending(), [])
+
+        asyncio.run(scenario())
 
 
 if __name__ == "__main__":

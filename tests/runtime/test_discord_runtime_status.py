@@ -40,6 +40,11 @@ class DiscordRuntimeStatusTests(unittest.TestCase):
                 voice_client_type=FakeVoiceClient,
                 status_path=path,
                 now=lambda: 1234.5,
+                search_followup_recovery_status=lambda: {
+                    "state": "ready",
+                    "pendingCount": 1,
+                    "policy": {"contentFree": True},
+                },
             )
 
             payload = status.write_once()
@@ -50,6 +55,10 @@ class DiscordRuntimeStatusTests(unittest.TestCase):
         self.assertTrue(payload["voiceConnected"])
         self.assertTrue(payload["listening"])
         self.assertEqual(persisted["heartbeatAt"], 1234.5)
+        self.assertEqual(
+            persisted["searchFollowupRecovery"]["pendingCount"],
+            1,
+        )
         self.assertNotIn("transcript", persisted)
 
     def test_disconnected_voice_is_not_reported_as_ready(self):

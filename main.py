@@ -117,6 +117,8 @@ from evelyn_core.response_output_policy import (
     should_label_question_response_from_runtime,
 )
 from evelyn_core.search_followup_policy import answer_promises_search, strip_search_answer_sources
+from evelyn_core.search_followup_recovery import SearchFollowupRecoveryJournal
+from evelyn_core.search_followup_runtime import recover_search_followups_from_runtime
 from evelyn_core.search_tools import search_duckduckgo as search_duckduckgo_payload
 from evelyn_core.runtime_status_context import answer_gpu_runtime_status_query, load_runtime_gpu_status, load_runtime_recent_errors, probe_runtime_tcp_service
 from evelyn_core.response_context_composition import ResponseContextComposition, ResponseContextCompositionDeps
@@ -328,6 +330,7 @@ session_continuity_checkpoint = SessionContinuityCheckpoint(
     ),
     system_prompt=SYSTEM_PROMPT, log=print,
 )
+search_followup_recovery = SearchFollowupRecoveryJournal(path=RUNTIME_ARTIFACTS_ROOT / "search_followup_recovery" / "active.json", enabled=DISCORD_ENABLED)
 autonomy_authorization_manager = AutonomyAuthorizationManager(
     status_path=(
         RUNTIME_ARTIFACTS_ROOT
@@ -685,9 +688,9 @@ guild_runtime_reset_composition = GuildRuntimeResetComposition(
         cognitive_locks=cognitive_locks, background_cognitive_tasks=background_cognitive_tasks,
         autonomy_last_cognitive_refresh_at=autonomy_last_cognitive_refresh_at, autonomy_cognitive_refresh_tasks=autonomy_cognitive_refresh_tasks,
         reset_session_continuity_guild=session_continuity_checkpoint.reset_guild,
+        reset_search_followup_recovery_guild=search_followup_recovery.reset_guild,
     )
 )
-
 build_guild_runtime_reset_deps = (
     guild_runtime_reset_composition.build_guild_runtime_reset_deps
 )
@@ -1064,13 +1067,11 @@ search_memory_dependency_composition = SearchMemoryDependencyComposition(
         current_turn_id=current_turn_id, append_history=append_history,
         schedule_memory_update=lambda *args, **kwargs: schedule_memory_update(*args, **kwargs), attach_current_task=_attach_current_task,
         detach_task=_detach_task,
-        record_search_followup_queued=lambda *args, **kwargs: record_search_followup_queued(
-            *args, **kwargs
-        ),
+        record_search_followup_queued=lambda *args, **kwargs: record_search_followup_queued(*args, **kwargs),
         commit_session_continuity=session_continuity_checkpoint.commit_completed_turn_async, log=print,
+        search_followup_recovery=search_followup_recovery, continuity_status=session_continuity_checkpoint.status,
     )
 )
-
 build_memory_update_runtime_deps = (
     search_memory_dependency_composition.build_memory_update_runtime_deps
 )
@@ -2402,11 +2403,10 @@ discord_app_composition = DiscordAppComposition(
             ensure_listening_voice_client=ensure_listening_voice_client, voice_rejoin_on_ready=VOICE_REJOIN_ON_READY,
             restore_last_voice_channel=restore_last_voice_channel, autonomy_enabled=AUTONOMY_ENABLED,
             text_message_handler=build_discord_text_message_handler_deps,
-            log=print,
+            log=print, recover_search_followups=partial(recover_search_followups_from_runtime, deps=build_search_followup_runtime_deps()),
             runtime_status=DiscordRuntimeStatus(
-                bot_user=lambda: bot.user,
-                bot_guilds=lambda: list(bot.guilds),
-                voice_client_type=EvelynVoiceClient,
+                bot_user=lambda: bot.user, bot_guilds=lambda: list(bot.guilds),
+                voice_client_type=EvelynVoiceClient, search_followup_recovery_status=search_followup_recovery.public_status,
             ),
         ),
         commands=DiscordCommandCompositionDeps(
