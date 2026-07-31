@@ -242,7 +242,7 @@ matter만 원자적으로 교체한다. 새 `derived_from`, 누적
 
 변경 내구성 경계는 다음 순서다.
 
-1. `memory.provenance.correction.event.v1`의 `prepared` event를 append,
+1. `memory.provenance.correction.event.v2`의 `prepared` event를 append,
    flush, `fsync`한다.
 2. 같은 디렉터리의 임시 파일을 내구성 있게 쓴 뒤 Markdown을 원자 교체한다.
 3. 같은 change ID의 `committed` event를 append, flush, `fsync`한다.
@@ -275,6 +275,32 @@ diagnostic marker에는 schema, held/released, process nonce, PID, 시각,
 stale-owner 회수 여부와 `contentFree=true`만 기록한다. 다른 thread/process가
 이미 소유 중이면 대기하거나 겹쳐 쓰지 않고 즉시
 `memory_provenance_correction_writer_unavailable`로 거부한다.
+
+선택적으로 correction head에 기억 전용 HMAC-SHA256 authenticity를 적용한다.
+`EVELYN_MEMORY_INTEGRITY_KEY_FILE`은 repository와 `bot_memory` 밖의 절대 경로,
+symlink가 아닌 32 byte 이상 key 파일이어야 한다. 관계 연속성용
+`EVELYN_CONTINUITY_AUTH_KEY_FILE`과는 HMAC domain과 환경 변수를 모두 분리하며
+같은 key를 재사용하지 않는 것이 운영 계약이다. 키가 설정되면 head는
+`memory.provenance.correction-chain-head.v2`로 승격되고 sequence, event hash,
+시각과 content-free metadata 전체를 인증한다. 서명 head가 있는데 key가 없거나
+tag/key ID가 다르면 fail-closed한다.
+
+`EVELYN_MEMORY_INTEGRITY_ANCHOR_DIR`을 함께 설정하면 Bot API가 repository,
+`bot_memory`, `runtime_artifacts` 밖의 보호 디렉터리에
+`memory.provenance.correction-external-anchor.v1`을 기록한다. 앵커는 마지막
+sequence/hash와 HMAC만 가지며 기억 내용은 저장하지 않는다. journal/head의
+서명된 과거 복제본 재생, 둘의 동시 재작성, 전체 삭제는 더 높은 외부 앵커와
+충돌해 거부된다. journal append 뒤 head 기록 전 중단 또는 head 기록 뒤 anchor
+교체 전 중단은 기존 anchor와 정확히 연결되는 한 단계에 한해 같은 writer lease
+아래 복구한다. key 파일은 Bot API가 쓰는 anchor 디렉터리 안에 둘 수 없다.
+
+기존 무서명 이력이나 최초 빈 상태를 채택할 때만
+`EVELYN_MEMORY_INTEGRITY_BOOTSTRAP=true`를 한 번 사용한다. 이때도 현재 chain을
+먼저 검증한 뒤 signed head와 anchor를 만든다. Control Page가
+`journalAuthenticity=verified`, `journalExternalAnchorState=verified`,
+`journalRollbackProtected=true`를 보고하면 즉시 false로 되돌린다. 외부 anchor
+디렉터리가 설정됐는데 record가 없고 bootstrap이 꺼져 있으면 자동으로 새
+신뢰 기준을 만들지 않는다.
 
 프로세스가 1번 뒤 2번 전에 종료되면 적용되지 않은 `prepared`는 현재 note와
 일치하지 않아 committed로 승격되지 않는다. 2번 뒤 3번 전에 종료되면 다음
@@ -493,6 +519,8 @@ fail-closed한다. 운영자는 재시작 또는 index sync 뒤 잔여 파일과
   `bot_memory/memory_index/memory_provenance_correction_writer.json`
 - correction writer OS lock:
   `bot_memory/memory_index/.memory_provenance_correction_writer.lock`
+- optional external correction anchor (configured root):
+  `memory-provenance-corrections.json`
 - hot context:
   `bot_memory/memory_index/hot_context.json`
 
@@ -555,6 +583,10 @@ prompt block과 user state가 의도적으로 남아 있다.
 - 가장 최근 변경만의 explicit undo와 undo 이후 자동 redo 금지
 - correction journal의 content-free 필드와 prepared-before-write 순서
 - v2 hash chain, 별도 head의 tail deletion 탐지와 legacy v1 prefix anchoring
+- 기억 전용 HMAC head와 외부 monotonic anchor의 명시적 one-shot bootstrap
+- HMAC 변조, signed past replay, journal/head 전체 삭제의 fail-closed 탐지
+- journal-ahead-of-head와 head-ahead-of-anchor의 한 단계 crash recovery
+- key/anchor의 repository·memory root 내부 경로와 symlink 거부
 - 같은 프로세스 thread 및 별도 프로세스 writer 경쟁의 즉시 거부
 - journal/head 손상 시 note 무수정 fail-closed와 HTTP 503
 - journal append 뒤 head 교체 중단의 lagging-head 복구
@@ -571,12 +603,13 @@ note가 계약상 분류됐다는 뜻이지 기억 내용이나 사용자의 선
 
 기존 관계의 relink/unlink와 최근 변경 undo까지 구현됐지만, 이 계약도 사용자가
 선택한 source가 의미적으로 사실인지 자동 증명하지 않는다. journal은
-content-free·append-only이고 v2 SHA-256 chain, 별도 durable head와 OS
-single-writer lock으로 보호된다. 다만 이는 keyed signature나 외부 불변
-anchor가 아니므로 journal과 head를 함께 다시 쓸 수 있는 filesystem 관리자에
-대한 authenticity 또는 여러 host 사이의 분산 합의를 제공하지 않는다. 실제
-vault에는 현재 derived relationship이 없어 운영 데이터에 mutation을 가하는
-live correction은 수행하지 않았다.
+content-free·append-only이고 v2 SHA-256 chain, HMAC head, 외부 monotonic anchor,
+OS single-writer lock으로 보호할 수 있다. 이 보호는 memory 파일을 제어하는
+공격자와 key/anchor 경로를 분리한다는 trust boundary에 의존한다. 공격자가 key를
+읽거나 외부 anchor도 함께 과거로 되돌릴 수 있으면 로컬 파일만으로는 이를
+구분할 수 없으며 TPM/원격 append-only ledger 또는 여러 host 사이의 분산 합의는
+제공하지 않는다. 실제 vault에는 현재 derived relationship이 없어 운영 데이터에
+mutation을 가하는 live correction은 수행하지 않았다.
 
 multi-source note의 자동 재합성은 Sub-LLM이 준비될 때까지 fail-closed
 quarantine으로 남는다. 따라서 현재 계약은 “선언된 provenance graph 전체의

@@ -1640,15 +1640,20 @@ def memory_provenance_correction_status(
         == "memory_provenance_correction_cleanup_required"
     ):
         return 503
-    if error in {
-        (
-            "memory_provenance_correction_"
-            "journal_integrity_failed"
-        ),
-        "memory_provenance_correction_journal_unreadable",
-        "memory_provenance_correction_writer_marker_unavailable",
-        "memory_provenance_correction_writer_unavailable",
-    }:
+    if (
+        error
+        in {
+            (
+                "memory_provenance_correction_"
+                "journal_integrity_failed"
+            ),
+            "memory_provenance_correction_journal_unreadable",
+            "memory_provenance_correction_writer_marker_unavailable",
+            "memory_provenance_correction_writer_unavailable",
+        }
+        or error.startswith("memory_provenance_correction_auth_")
+        or error.startswith("memory_provenance_correction_anchor_")
+    ):
         return 503
     if error in {
         "memory_provenance_correction_changed_since_preview",

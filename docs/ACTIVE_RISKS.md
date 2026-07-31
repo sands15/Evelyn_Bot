@@ -496,10 +496,14 @@ row를 고치는 backfill이 아니라 현재 확인 발화를 새 turn evidence
 질문의 품질과, 이후 새 직접 사용자 근거로 저장되는 흐름은 아직 평가해야 한다.
 
 남은 위험은 coverage와 correction이 구조적 근거 연결만 다루며 기억 내용이나
-사용자의 선택이 사실임을 보증하지 않는다는 점이다. hash chain과 head는
-우발적·비협조적 파일 변조의 증거이지, journal과 head를 함께 다시 쓸 수 있는
-filesystem 관리자에 대한 keyed authenticity나 외부 불변 원장은 아니다.
-OS lock도 단일 host/shared filesystem의 writer 배제이며 분산 합의가 아니다.
+사용자의 선택이 사실임을 보증하지 않는다는 점이다. correction journal/head에는
+관계 연속성 키와 분리된 기억 전용 HMAC과 외부 monotonic anchor를 추가했다.
+명시적 one-shot bootstrap 뒤에는 HMAC 변조, signed past replay, journal/head
+전체 삭제를 fail-closed하고 journal→head 및 head→anchor의 한 단계 commit lag만
+writer lease 아래 복구한다. 다만 이 보장은 memory 파일과 key/anchor 경로의
+권한이 분리된다는 trust boundary에 의존한다. filesystem 관리자가 key를 읽거나
+외부 anchor도 함께 되돌릴 수 있으면 로컬 파일만으로는 감지할 수 없고 OS lock도
+단일 host/shared filesystem의 writer 배제일 뿐 분산 합의가 아니다.
 실제 vault에는 현재 derived relationship이 0개라 운영 데이터에 대한 live
 relink/unlink/undo는 비파괴 원칙상 실행하지 않았다. 또한 Sub-LLM이 꺼져
 있거나 상위 source가 quarantine이면 multi-source note는 안전하게 격리된다.
@@ -510,9 +514,9 @@ path와 GPU 경합을 피하려고 `realtime` 턴에서 실행하지 않는다. 
 
 다음 조치: 실제 derived 기억이 생기면 correction preview의 설명 가능성,
 relink/unlink/undo 결과와 journal 복구를 운영 데이터 복제본에서 검증한다.
-filesystem 관리자까지 위협 모델에 포함할 때는 keyed external anchor 또는
-불변 audit sink를 추가하고, coverage bucket과 forward rejection 추세가 실제
-품질 신호인지 함께 측정한다.
+key/anchor 경로까지 장악하는 관리자를 위협 모델에 포함할 때는 TPM 또는 원격
+append-only audit sink를 추가하고, coverage bucket과 forward rejection 추세가
+실제 품질 신호인지 함께 측정한다.
 
 ## P1 — UI 접근성 corpus·live 행동 검증 미완성
 

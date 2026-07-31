@@ -11,6 +11,13 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import memory_vault as vault
+from .memory_integrity_authenticity import (
+    MEMORY_INTEGRITY_HEAD_SCHEMA,
+    MemoryIntegrityAuthenticity,
+    MemoryIntegrityAuthenticityError,
+    load_memory_integrity_authenticity,
+)
+from .paths import get_repo_root
 from .runtime_artifact_io import atomic_json_write, atomic_text_write
 from .text import clean_text
 
@@ -104,6 +111,21 @@ def _chain_head_path(root: Path | None = None) -> Path:
         vault.memory_index_dir(root)
         / MEMORY_PROVENANCE_CORRECTION_CHAIN_HEAD_NAME
     )
+
+
+def _memory_authenticity(
+    root: Path | None = None,
+) -> MemoryIntegrityAuthenticity:
+    memory_root = (root or vault.MEMORY_ROOT).resolve()
+    try:
+        return load_memory_integrity_authenticity(
+            protected_root=get_repo_root(),
+            additional_protected_roots=(memory_root,),
+        )
+    except MemoryIntegrityAuthenticityError as exc:
+        raise MemoryProvenanceCorrectionJournalIntegrityError(
+            str(exc)
+        ) from exc
 
 
 def _canonical_json(payload: dict[str, Any]) -> str:
@@ -286,6 +308,7 @@ def _writer_guard(root: Path | None = None):
 def _journal_snapshot(
     root: Path | None = None,
 ) -> dict[str, Any]:
+    authenticity = _memory_authenticity(root)
     path = _journal_path(root)
     try:
         text = path.read_text(encoding="utf-8")
@@ -294,12 +317,49 @@ def _journal_snapshot(
             raise MemoryProvenanceCorrectionJournalIntegrityError(
                 "memory_provenance_correction_journal_integrity_failed"
             )
+        anchor_state = "unconfigured"
+        if authenticity.external_anchor_configured:
+            try:
+                anchor_state = authenticity.inspect_anchor(
+                    sequence=0,
+                    event_hash=(
+                        MEMORY_PROVENANCE_CORRECTION_CHAIN_GENESIS
+                    ),
+                    previous_hash=(
+                        MEMORY_PROVENANCE_CORRECTION_CHAIN_GENESIS
+                    ),
+                )
+            except MemoryIntegrityAuthenticityError as exc:
+                raise MemoryProvenanceCorrectionJournalIntegrityError(
+                    str(exc)
+                ) from exc
+        head_authenticity = (
+            "bootstrap_required"
+            if authenticity.configured
+            else "unconfigured"
+        )
+        if (
+            authenticity.configured
+            and not authenticity.allow_unsigned_bootstrap
+        ):
+            raise MemoryProvenanceCorrectionJournalIntegrityError(
+                "memory_provenance_correction_auth_bootstrap_required"
+            )
         return {
             "events": [],
             "sequence": 0,
             "lastHash": MEMORY_PROVENANCE_CORRECTION_CHAIN_GENESIS,
+            "lastPreviousHash": (
+                MEMORY_PROVENANCE_CORRECTION_CHAIN_GENESIS
+            ),
             "integrity": "empty",
             "headState": "missing",
+            "headAuthenticity": head_authenticity,
+            "authenticityConfigured": authenticity.configured,
+            "externalAnchorConfigured": (
+                authenticity.external_anchor_configured
+            ),
+            "externalAnchorState": anchor_state,
         }
     except (OSError, UnicodeError) as exc:
         raise MemoryProvenanceCorrectionJournalIntegrityError(
@@ -374,6 +434,13 @@ def _journal_snapshot(
         else MEMORY_PROVENANCE_CORRECTION_CHAIN_GENESIS
     )
     head_state = "missing"
+    head_authenticity = (
+        "unconfigured"
+        if not authenticity.configured
+        else "bootstrap_required"
+    )
+    head_sequence: int | None = None
+    head_hash = ""
     try:
         head = json.loads(
             _chain_head_path(root).read_text(encoding="utf-8")
@@ -387,18 +454,36 @@ def _journal_snapshot(
     if head is not None:
         head_sequence = head.get("sequence") if isinstance(head, dict) else None
         head_hash = head.get("eventHash") if isinstance(head, dict) else None
-        if (
-            not isinstance(head, dict)
-            or set(head)
-            != {
+        schema = head.get("schema") if isinstance(head, dict) else None
+        expected_keys = (
+            {
                 "schema",
                 "sequence",
                 "eventHash",
                 "updatedAt",
                 "contentFree",
             }
-            or head.get("schema")
-            != MEMORY_PROVENANCE_CORRECTION_CHAIN_HEAD_SCHEMA
+            if schema == MEMORY_PROVENANCE_CORRECTION_CHAIN_HEAD_SCHEMA
+            else {
+                "schema",
+                "sequence",
+                "eventHash",
+                "updatedAt",
+                "contentFree",
+                "authAlgorithm",
+                "authScope",
+                "authKeyId",
+                "authTag",
+            }
+        )
+        if (
+            not isinstance(head, dict)
+            or set(head) != expected_keys
+            or schema
+            not in {
+                MEMORY_PROVENANCE_CORRECTION_CHAIN_HEAD_SCHEMA,
+                MEMORY_INTEGRITY_HEAD_SCHEMA,
+            }
             or isinstance(head_sequence, bool)
             or not isinstance(head_sequence, int)
             or head_sequence < 0
@@ -419,27 +504,103 @@ def _journal_snapshot(
             raise MemoryProvenanceCorrectionJournalIntegrityError(
                 "memory_provenance_correction_journal_integrity_failed"
             )
+        if schema == MEMORY_INTEGRITY_HEAD_SCHEMA:
+            if not authenticity.configured:
+                raise MemoryProvenanceCorrectionJournalIntegrityError(
+                    "memory_provenance_correction_auth_key_required"
+                )
+            try:
+                authenticity.verify_head(head)
+            except MemoryIntegrityAuthenticityError as exc:
+                raise MemoryProvenanceCorrectionJournalIntegrityError(
+                    str(exc)
+                ) from exc
+            head_authenticity = "verified"
+        elif authenticity.configured:
+            if not authenticity.allow_unsigned_bootstrap:
+                raise MemoryProvenanceCorrectionJournalIntegrityError(
+                    "memory_provenance_correction_auth_bootstrap_required"
+                )
+            head_authenticity = "bootstrap_required"
         head_state = (
             "current"
             if head_sequence == sequence
             else "lagging"
         )
+    last_hash = (
+        expected_previous
+        if chain_started
+        else legacy_hash
+    )
+    last_previous_hash = (
+        (
+            legacy_hash
+            if sequence == 1
+            else chain_hashes.get(sequence - 1, "")
+        )
+        if sequence > 0
+        else MEMORY_PROVENANCE_CORRECTION_CHAIN_GENESIS
+    )
+    anchor_sequence = (
+        int(head_sequence)
+        if head_sequence is not None
+        else sequence
+    )
+    anchor_hash = (
+        str(head_hash)
+        if head_sequence is not None
+        else last_hash
+    )
+    anchor_previous_hash = (
+        (
+            legacy_hash
+            if anchor_sequence == 1
+            else chain_hashes.get(anchor_sequence - 1, "")
+        )
+        if anchor_sequence > 0
+        else MEMORY_PROVENANCE_CORRECTION_CHAIN_GENESIS
+    )
+    try:
+        anchor_state = authenticity.inspect_anchor(
+            sequence=anchor_sequence,
+            event_hash=anchor_hash,
+            previous_hash=anchor_previous_hash,
+        )
+    except MemoryIntegrityAuthenticityError as exc:
+        raise MemoryProvenanceCorrectionJournalIntegrityError(
+            str(exc)
+        ) from exc
+    if (
+        head is None
+        and authenticity.configured
+        and not authenticity.allow_unsigned_bootstrap
+    ):
+        if (
+            authenticity.external_anchor_configured
+            and anchor_state == "verified"
+        ):
+            head_authenticity = "recoverable"
+        else:
+            raise MemoryProvenanceCorrectionJournalIntegrityError(
+                "memory_provenance_correction_auth_bootstrap_required"
+            )
     return {
         "events": events,
         "sequence": sequence,
-        "lastHash": (
-            expected_previous
-            if chain_started
-            else (
-                legacy_hash
-            )
-        ),
+        "lastHash": last_hash,
+        "lastPreviousHash": last_previous_hash,
         "integrity": (
             "verified"
             if chain_started
             else ("legacy" if legacy_lines else "empty")
         ),
         "headState": head_state,
+        "headAuthenticity": head_authenticity,
+        "authenticityConfigured": authenticity.configured,
+        "externalAnchorConfigured": (
+            authenticity.external_anchor_configured
+        ),
+        "externalAnchorState": anchor_state,
     }
 
 
@@ -449,8 +610,8 @@ def _write_chain_head(
     sequence: int,
     event_hash: str,
 ) -> None:
-    atomic_json_write(
-        _chain_head_path(root),
+    authenticity = _memory_authenticity(root)
+    head = authenticity.sign_head(
         {
             "schema": (
                 MEMORY_PROVENANCE_CORRECTION_CHAIN_HEAD_SCHEMA
@@ -459,9 +620,59 @@ def _write_chain_head(
             "eventHash": str(event_hash),
             "updatedAt": _now_iso(),
             "contentFree": True,
-        },
-        durable=True,
+        }
     )
+    atomic_json_write(_chain_head_path(root), head, durable=True)
+    if authenticity.external_anchor_configured:
+        previous_hash = (
+            MEMORY_PROVENANCE_CORRECTION_CHAIN_GENESIS
+            if int(sequence) == 0
+            and not _journal_path(root).exists()
+            else str(_journal_snapshot(root)["lastPreviousHash"])
+        )
+        try:
+            authenticity.reconcile_anchor(
+                sequence=int(sequence),
+                event_hash=str(event_hash),
+                previous_hash=previous_hash,
+            )
+        except MemoryIntegrityAuthenticityError as exc:
+            raise MemoryProvenanceCorrectionJournalIntegrityError(
+                str(exc)
+            ) from exc
+
+
+def _ensure_journal_checkpoint(
+    root: Path | None = None,
+) -> dict[str, Any]:
+    snapshot = _journal_snapshot(root)
+    if (
+        snapshot["headState"] == "lagging"
+        or (
+            snapshot["headState"] == "missing"
+            and snapshot["authenticityConfigured"]
+        )
+        or snapshot["headAuthenticity"] == "bootstrap_required"
+        or snapshot["externalAnchorState"]
+        in {"bootstrap_required", "lagging"}
+    ):
+        if (
+            int(snapshot["sequence"]) == 0
+            and snapshot["authenticityConfigured"]
+            and not _journal_path(root).exists()
+        ):
+            atomic_text_write(
+                _journal_path(root),
+                "",
+                durable=True,
+            )
+        _write_chain_head(
+            root=root,
+            sequence=int(snapshot["sequence"]),
+            event_hash=str(snapshot["lastHash"]),
+        )
+        snapshot = _journal_snapshot(root)
+    return snapshot
 
 
 def _append_journal_event(
@@ -473,7 +684,7 @@ def _append_journal_event(
     path.parent.mkdir(parents=True, exist_ok=True)
     with _writer_guard(root):
         with _correction_lock:
-            snapshot = _journal_snapshot(root)
+            snapshot = _ensure_journal_checkpoint(root)
             event = {
                 "schema": MEMORY_PROVENANCE_CORRECTION_EVENT_SCHEMA,
                 **payload,
@@ -533,6 +744,19 @@ def _journal_error(exc: BaseException) -> str:
         code
         if code.startswith("memory_provenance_correction_")
         else "memory_provenance_correction_journal_integrity_failed"
+    )
+
+
+def _authenticity_public_configuration(
+    root: Path | None = None,
+) -> tuple[bool, bool]:
+    try:
+        authenticity = _memory_authenticity(root)
+    except MemoryProvenanceCorrectionJournalIntegrityError:
+        return False, False
+    return (
+        authenticity.configured,
+        authenticity.external_anchor_configured,
     )
 
 
@@ -621,23 +845,31 @@ def _reconcile_journal(
     with _correction_lock:
         snapshot = _journal_snapshot(root)
     if (
-        bool(snapshot["events"])
-        and snapshot["headState"] != "current"
+        snapshot["headState"] == "lagging"
+        or (
+            snapshot["headState"] == "missing"
+            and snapshot["authenticityConfigured"]
+        )
+        or snapshot["headAuthenticity"] == "bootstrap_required"
+        or snapshot["externalAnchorState"]
+        in {"bootstrap_required", "lagging"}
     ):
         try:
             with _writer_guard(root):
                 with _correction_lock:
                     snapshot = _journal_snapshot(root)
                     if (
-                        bool(snapshot["events"])
-                        and snapshot["headState"] != "current"
-                    ):
-                        _write_chain_head(
-                            root=root,
-                            sequence=int(snapshot["sequence"]),
-                            event_hash=str(snapshot["lastHash"]),
+                        snapshot["headState"] == "lagging"
+                        or (
+                            snapshot["headState"] == "missing"
+                            and snapshot["authenticityConfigured"]
                         )
-                        snapshot = _journal_snapshot(root)
+                        or snapshot["headAuthenticity"]
+                        == "bootstrap_required"
+                        or snapshot["externalAnchorState"]
+                        in {"bootstrap_required", "lagging"}
+                    ):
+                        snapshot = _ensure_journal_checkpoint(root)
         except MemoryProvenanceCorrectionWriterUnavailable:
             pass
     events = list(snapshot["events"])
@@ -1127,10 +1359,28 @@ def memory_provenance_correction_overview(
             journal_snapshot["integrity"]
         )
         journal_chain_ready = bool(
-            not journal_snapshot["events"]
-            or journal_snapshot["headState"] == "current"
+            (
+                journal_snapshot["headState"] == "current"
+                or (
+                    not journal_snapshot["events"]
+                    and not journal_snapshot[
+                        "authenticityConfigured"
+                    ]
+                )
+            )
+            and (
+                not journal_snapshot["authenticityConfigured"]
+                or journal_snapshot["headAuthenticity"] == "verified"
+            )
+            and (
+                not journal_snapshot["externalAnchorConfigured"]
+                or journal_snapshot["externalAnchorState"] == "verified"
+            )
         )
     except MemoryProvenanceCorrectionJournalIntegrityError as exc:
+        auth_configured, anchor_configured = (
+            _authenticity_public_configuration(root)
+        )
         return {
             "ok": False,
             "schema": (
@@ -1144,6 +1394,11 @@ def memory_provenance_correction_overview(
             "journalIntegrity": "failed",
             "journalChainReady": False,
             "journalWriterProtected": True,
+            "journalAuthenticity": "failed",
+            "journalAuthenticityConfigured": auth_configured,
+            "journalExternalAnchorConfigured": anchor_configured,
+            "journalExternalAnchorState": "failed",
+            "journalRollbackProtected": False,
             "writerState": _writer_public_state(root),
             "relationshipCount": 0,
             "relationships": [],
@@ -1260,6 +1515,22 @@ def memory_provenance_correction_overview(
         "journalIntegrity": journal_integrity,
         "journalChainReady": journal_chain_ready,
         "journalWriterProtected": True,
+        "journalAuthenticity": journal_snapshot[
+            "headAuthenticity"
+        ],
+        "journalAuthenticityConfigured": journal_snapshot[
+            "authenticityConfigured"
+        ],
+        "journalExternalAnchorConfigured": journal_snapshot[
+            "externalAnchorConfigured"
+        ],
+        "journalExternalAnchorState": journal_snapshot[
+            "externalAnchorState"
+        ],
+        "journalRollbackProtected": bool(
+            journal_snapshot["headAuthenticity"] == "verified"
+            and journal_snapshot["externalAnchorState"] == "verified"
+        ),
         "writerState": _writer_public_state(root),
         "relationshipCount": len(relationships),
         "relationships": relationships,
@@ -1950,7 +2221,7 @@ def _apply_with_writer(
 ) -> dict[str, Any]:
     try:
         with _writer_guard(root):
-            _journal_snapshot(root)
+            _ensure_journal_checkpoint(root)
             return _apply_preview(
                 note_id_or_rel_path,
                 confirm_token,

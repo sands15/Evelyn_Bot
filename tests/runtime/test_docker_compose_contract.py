@@ -9,6 +9,9 @@ COMPOSE = REPO_ROOT / "docker-compose.fast-control.yml"
 CONTINUITY_AUTH_COMPOSE = (
     REPO_ROOT / "docker-compose.continuity-auth.yml"
 )
+MEMORY_INTEGRITY_COMPOSE = (
+    REPO_ROOT / "docker-compose.memory-integrity.yml"
+)
 DOCKER_DIR = REPO_ROOT / "docker"
 CODEX_GATEWAY = REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "codex_gateway_server.py"
 MAIN = REPO_ROOT / "main.py"
@@ -20,6 +23,35 @@ LAUNCHERS = REPO_ROOT / "evelyn_core" / "runtime" / "launchers"
 
 
 class DockerComposeContractTests(unittest.TestCase):
+    def test_memory_integrity_override_is_bot_api_only_and_external(
+        self,
+    ) -> None:
+        source = MEMORY_INTEGRITY_COMPOSE.read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("  bot_api:\n", source)
+        self.assertNotIn("discord_bot:", source)
+        self.assertIn(
+            "${EVELYN_MEMORY_INTEGRITY_KEY_FILE:?",
+            source,
+        )
+        self.assertIn(
+            "EVELYN_MEMORY_INTEGRITY_KEY_FILE: "
+            "/run/secrets/evelyn_memory_integrity.key",
+            source,
+        )
+        self.assertIn(
+            "${EVELYN_MEMORY_INTEGRITY_ANCHOR_DIR:?",
+            source,
+        )
+        self.assertIn(
+            "target: /var/lib/evelyn-memory-integrity-anchor",
+            source,
+        )
+        self.assertNotIn("bot_memory", source)
+        self.assertNotIn("runtime_artifacts/secrets", source)
+
     def test_continuity_auth_override_shares_key_and_external_anchor(
         self,
     ) -> None:

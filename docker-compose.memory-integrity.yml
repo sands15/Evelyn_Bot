@@ -1,0 +1,16 @@
+services:
+  bot_api:
+    environment:
+      EVELYN_MEMORY_INTEGRITY_KEY_FILE: /run/secrets/evelyn_memory_integrity.key
+      EVELYN_MEMORY_INTEGRITY_ANCHOR_DIR: /var/lib/evelyn-memory-integrity-anchor
+      EVELYN_MEMORY_INTEGRITY_BOOTSTRAP: "${EVELYN_MEMORY_INTEGRITY_BOOTSTRAP:-false}"
+    secrets:
+      - evelyn_memory_integrity_key
+    volumes:
+      - type: bind
+        source: "${EVELYN_MEMORY_INTEGRITY_ANCHOR_DIR:?Set an absolute external memory integrity anchor directory}"
+        target: /var/lib/evelyn-memory-integrity-anchor
+
+secrets:
+  evelyn_memory_integrity_key:
+    file: "${EVELYN_MEMORY_INTEGRITY_KEY_FILE:?Set an absolute external memory integrity key file}"

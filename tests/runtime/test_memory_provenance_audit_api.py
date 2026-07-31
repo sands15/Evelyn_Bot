@@ -557,6 +557,31 @@ class MemoryProvenanceAuditApiTests(
 
         self.assertEqual(response.status, 503)
 
+    async def test_correction_authenticity_failures_are_unavailable(
+        self,
+    ) -> None:
+        errors = (
+            "memory_provenance_correction_auth_failed",
+            "memory_provenance_correction_auth_bootstrap_required",
+            "memory_provenance_correction_anchor_bootstrap_required",
+            "memory_provenance_correction_anchor_replay_detected",
+            "memory_provenance_correction_anchor_unavailable",
+        )
+        for error in errors:
+            with self.subTest(error=error), patch.object(
+                control_page_server,
+                "memory_provenance_correction_overview",
+                return_value={"ok": False, "error": error},
+            ):
+                response = await self.client.get(
+                    (
+                        "/api/control-page/"
+                        "memory-provenance-corrections"
+                    ),
+                    headers={"Origin": self.origin},
+                )
+                self.assertEqual(response.status, 503)
+
     async def test_correction_writer_conflict_is_unavailable(
         self,
     ) -> None:
