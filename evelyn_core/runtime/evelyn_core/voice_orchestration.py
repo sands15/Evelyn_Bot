@@ -199,7 +199,7 @@ def mark_voice_turn_error_layer(request: VoiceTurnRequest, layer: str, exc: Base
         return
     meta = metrics.setdefault("meta", {})
     meta["error_layer"] = layer
-    meta["error"] = repr(exc)
+    meta["error"] = type(exc).__name__
 
 
 class VoiceTurnOrchestrator:
@@ -735,6 +735,8 @@ def finalize_delivered_voice_reply(
     gate_mode: str,
     finalize_voice_reply_side_effects: Callable[..., Any],
     log_voice_stage: Callable[..., Any],
+    delivery_succeeded: bool = True,
+    failure_code: str = "",
 ) -> None:
     finalize_voice_reply_side_effects(
         guild_id=guild_id,
@@ -750,8 +752,22 @@ def finalize_delivered_voice_reply(
         turn_scope=turn_scope,
         accepted_turn_id=accepted_turn_id,
         segment_id=segment_id,
+        delivery_succeeded=delivery_succeeded,
+        failure_code=failure_code,
     )
-    log_voice_stage(metrics, "voice_worker_turn 완료", extra=f"speaker={member.display_name} gate={gate_mode}")
+    log_voice_stage(
+        metrics,
+        (
+            "voice_worker_turn 완료"
+            if delivery_succeeded
+            else "voice_worker_turn 전달 실패 보존"
+        ),
+        extra=(
+            f"speaker={member.display_name} gate={gate_mode}"
+            if delivery_succeeded
+            else f"failure_code={failure_code or 'voice_delivery_failed'}"
+        ),
+    )
 
 
 def get_room_reply_lock(
@@ -780,7 +796,9 @@ def prepare_voice_reply_delivery_runtime(
         )
 
     def report_delivery_error(exc: Exception) -> None:
-        print_fn(f"❌ [LLM/TTS] {exc}")
+        print_fn(
+            f"❌ [LLM/TTS] errorType={type(exc).__name__}"
+        )
 
     return VoiceReplyDeliveryRuntime(
         accepted_turn_id=accepted_execution.accepted_turn_id,
@@ -906,6 +924,37 @@ async def run_locked_voice_reply_delivery(
         log_voice_stage(metrics, "voice_reply_lock_acquired", extra=f"room={room_session_key}")
         vc = get_voice_client()
         if vc is None:
+            metrics.setdefault("meta", {})[
+                "voice_delivery_failure_code"
+            ] = "voice_connection_unavailable"
+            record_voice_pipeline_failure(
+                "voice_connection_unavailable",
+                "voice_connection_unavailable",
+                metrics,
+                stage="voice_connection",
+            )
+            finalize_delivered_voice_reply(
+                guild_id=guild_id,
+                member=member,
+                session_key=session_key,
+                room_session_key=room_session_key,
+                room_key=room_key,
+                person_key=person_key,
+                session_memory_key=session_memory_key,
+                voice_reply=voice_reply,
+                plain_answer="",
+                metrics=metrics,
+                turn_scope=turn_scope,
+                accepted_turn_id=accepted_turn_id,
+                segment_id=segment_id,
+                gate_mode=gate_mode,
+                finalize_voice_reply_side_effects=(
+                    finalize_voice_reply_side_effects
+                ),
+                log_voice_stage=log_voice_stage,
+                delivery_succeeded=False,
+                failure_code="voice_connection_unavailable",
+            )
             return None
 
         delivery_result = await deliver_voice_reply(
@@ -929,6 +978,34 @@ async def run_locked_voice_reply_delivery(
             report_delivery_error=report_delivery_error,
         )
         if delivery_result is None:
+            failure_code = str(
+                metrics.get("meta", {}).get(
+                    "voice_delivery_failure_code"
+                )
+                or "voice_delivery_failed"
+            )
+            finalize_delivered_voice_reply(
+                guild_id=guild_id,
+                member=member,
+                session_key=session_key,
+                room_session_key=room_session_key,
+                room_key=room_key,
+                person_key=person_key,
+                session_memory_key=session_memory_key,
+                voice_reply=voice_reply,
+                plain_answer="",
+                metrics=metrics,
+                turn_scope=turn_scope,
+                accepted_turn_id=accepted_turn_id,
+                segment_id=segment_id,
+                gate_mode=gate_mode,
+                finalize_voice_reply_side_effects=(
+                    finalize_voice_reply_side_effects
+                ),
+                log_voice_stage=log_voice_stage,
+                delivery_succeeded=False,
+                failure_code=failure_code,
+            )
             return None
 
         finalize_delivered_voice_reply(
@@ -1589,11 +1666,23 @@ async def deliver_voice_reply(
             used_wake_only_reply = False
         log_voice_stage(metrics, "LLM/TTS 완료", extra=f"answer_len={len(answer)}")
     except Exception as e:
+        metrics.setdefault("meta", {})[
+            "voice_delivery_failure_code"
+        ] = "voice_delivery_failed"
         report_delivery_error(e)
         return None
 
     answer = clean_text(answer)
     if not answer:
+        metrics.setdefault("meta", {})[
+            "voice_delivery_failure_code"
+        ] = "voice_delivery_empty"
+        record_voice_pipeline_failure(
+            "voice_delivery_empty",
+            "voice_delivery_empty",
+            metrics,
+            stage="answer_finalize",
+        )
         log_voice_stage(metrics, "최종 답변 비어있음")
         return None
 

@@ -15,6 +15,9 @@ RUNTIME_ERROR_SUMMARY_SCHEMA = "runtime_errors.summary.v1"
 DEFAULT_RECENT_AFTER_SEC = 60 * 60
 _SAFE_CODE_PATTERN = re.compile(r"[^a-z0-9_.-]+")
 _SAFE_TYPE_PATTERN = re.compile(r"[^A-Za-z0-9_.-]+")
+_SAFE_EXCEPTION_TYPE_PATTERN = re.compile(
+    r"^[A-Za-z][A-Za-z0-9_.]{0,79}(?:Error|Exception)$"
+)
 _KNOWN_ERROR_CODES = frozenset(
     {
         "automatic_restart_budget_exhausted",
@@ -54,15 +57,23 @@ _KNOWN_ERROR_CODES = frozenset(
         "speaker_verifier_unavailable",
         "stt_import_failed",
         "stt_model_load_failed",
+        "stt_timeout",
         "stt_transcribe_failed",
         "startup_initialization_failed",
         "status_write_failed",
         "tts_warmup_attempt_failed",
+        "tts_playback_failed",
+        "tts_producer_cancelled",
+        "tts_request_failed",
         "turn_pipeline_failed",
         "voice_connection_probe_failed",
+        "voice_connection_unavailable",
+        "voice_delivery_empty",
+        "voice_delivery_failed",
         "voice_listening_probe_failed",
         "voice_rearm_failed",
         "voice_state_rearm_failed",
+        "wake_probe_failed",
         "vision_analyze_failed",
         "vision_describe_failed",
         "vision_model_load_failed",
@@ -134,7 +145,12 @@ def sanitize_runtime_error_code(value: Any, *, fallback: str = "runtime_error") 
 
 def sanitize_runtime_error_type(value: Any) -> str:
     text = _SAFE_TYPE_PATTERN.sub("_", str(value or "").strip())
-    return text.strip("._-")[:80]
+    candidate = text.strip("._-")[:80]
+    return (
+        candidate
+        if _SAFE_EXCEPTION_TYPE_PATTERN.fullmatch(candidate)
+        else ""
+    )
 
 
 class RuntimeErrorCounter:

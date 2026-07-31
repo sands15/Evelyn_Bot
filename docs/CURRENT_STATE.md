@@ -1301,6 +1301,30 @@ Source branch: `codex/dependency-config-hardening`, current evidence-bound user 
   이미지 내부 소스 기준 집중 테스트 100개·38개와 양쪽 `compileall`,
   `pip check`, 전체 profile Compose config가 통과했다. 실행 중인 기존 Bot API와
   Control Page는 교체하지 않았다.
+- 음성 전달 실패 연속성 변경은 reply gate를 통과한 사용자 발화 뒤 Discord
+  connection 부재, 빈 답변, LLM/TTS 전달 실패가 발생해도 사용자 row만 한 번
+  history에 남기고 즉시 durable continuity commit한다. 존재하지 않는 assistant
+  답변, memory write, cognitive/search follow-up은 만들지 않는다. 새 프로세스의
+  checkpoint restore에서도 마지막 speaker와 미응답 사용자 발화가 유지된다.
+- voice pipeline snapshot, rejoin 상태, STT/wake/TTS 로그와 turn summary는 고정
+  오류 코드와 검증된 예외 클래스 이름만 사용한다. legacy 오류 메시지·경로·토큰은
+  공개 projection에서 제거하며 STT/TTS/voice delivery 카운터의 고정 코드는
+  그대로 보존한다.
+- 변경 소스는 집중 테스트 101개, voice 424개, runtime 421개(skip 2), UI
+  157개(skip 7), Discord I/O 109개, memory 158개를 통과했다. core 551개는 기능
+  assertion 실패 0개였고 이미지에 `git`이 없어 난 기존 signature 환경 오류
+  2개는 Windows의 해당 모듈 13개로 보완했다.
+- 현재 소스를 내장한 검증 이미지는 Discord/Main
+  `sha256:0300dbb9477e4e93bf7c2a0c14c10a7d42a279c9b7ae88b74a5183c952e62877`,
+  Bot API
+  `sha256:41b56e7ffa4be528c9244fcda158c10712191df631f1b397ecdfee6d9cff364f`,
+  Control Page
+  `sha256:1f5afc9ffa026574c014bea8a4c4260e602c1a091e9aaef76023f0e36aafb2f5`이다.
+  이미지 내부 소스 테스트 101개·65개·65개와 각 이미지 `compileall`, `pip check`,
+  전체 profile Compose config, voice validation JavaScript `node --check`,
+  `git diff --check`를 통과했다. 실행 중인 기존 Bot API와 Control Page는 교체하지
+  않았고 실제 Discord, 마이크, 스피커, 무거운 모델과 사용자 runtime artifact는
+  변경하거나 시작하지 않았다.
 
 ## Operational boundaries
 

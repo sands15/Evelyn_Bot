@@ -57,7 +57,7 @@ class VoicePipelineStateTests(unittest.TestCase):
             turn_path_metrics={"voice": {"count": 1}},
         )
 
-        self.assertIn("boom", error_text)
+        self.assertEqual(error_text, "tts_request_failed")
         self.assertEqual(counters["tts_request_failed_count"], 1)
         self.assertEqual(snapshot["queueFullDropCount"], 2)
         self.assertTrue(snapshot["liveRecent"])
@@ -95,12 +95,72 @@ class VoicePipelineStateTests(unittest.TestCase):
 
         self.assertEqual(counters["tts_request_failed_count"], 1)
         self.assertEqual(state["last_failure"]["kind"], "tts_request_failed")
-        self.assertIn("boom", state["last_failure"]["error"])
+        self.assertEqual(state["last_failure"]["errorType"], "RuntimeError")
+        self.assertTrue(state["last_failure"]["contentFree"])
+        self.assertNotIn("error", state["last_failure"])
         self.assertEqual(events[0][0], "tts_request_failed")
         self.assertEqual(events[0][1]["turn_id"], "turn-1")
         self.assertEqual(events[0][1]["room_session_key"], "room-1")
         self.assertEqual(events[0][1]["stage"], "tts")
-        self.assertIn("boom", events[0][1]["error"])
+        self.assertEqual(events[0][1]["error"], "tts_request_failed")
+        self.assertEqual(events[0][1]["error_type"], "RuntimeError")
+        self.assertNotIn("boom", str(events))
+
+    def test_snapshot_closes_over_legacy_private_failure_fields(self) -> None:
+        state = default_voice_pipeline_state()
+        state.update(
+            {
+                "last_failure": {
+                    "kind": "tts_request_failed",
+                    "error": "Bearer private-token C:\\private",
+                    "errorType": "Bearer private-token C:\\private",
+                    "at": "Bearer private-token C:\\private",
+                },
+                "last_voice_rejoin_error": "C:\\private\\token",
+                "last_voice_rejoin_error_type": (
+                    "Bearer private-token C:\\private"
+                ),
+            }
+        )
+
+        snapshot = build_voice_pipeline_snapshot_payload(
+            counters=default_voice_pipeline_counters(),
+            state=state,
+            p95={},
+            now_time=100.0,
+            now_mono=50.0,
+            stt_lock_locked=False,
+            stt_cooldown_until=0.0,
+            last_channel_state=None,
+            output_mode="discord_voice",
+            local_tts_output={},
+            queue_depth=0,
+            queue_max=16,
+            live_recent_sec=15.0,
+            utterance_assembly_enabled=False,
+            utterance_pending_count=0,
+            utterance_commit_wait_sec=0.0,
+            barge_in_continuity={},
+            turn_path_metrics={},
+        )
+
+        self.assertEqual(
+            snapshot["lastFailure"],
+            {
+                "kind": "tts_request_failed",
+                "errorType": "",
+                "at": None,
+                "contentFree": True,
+            },
+        )
+        self.assertEqual(
+            snapshot["lastVoiceRejoinError"],
+            "voice_rearm_failed",
+        )
+        self.assertEqual(snapshot["lastVoiceRejoinErrorType"], "")
+        serialized = str(snapshot)
+        self.assertNotIn("private-token", serialized)
+        self.assertNotIn("C:\\private", serialized)
 
     def test_last_voice_channel_state_file_round_trip(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

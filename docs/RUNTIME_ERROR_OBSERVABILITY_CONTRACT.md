@@ -1,7 +1,7 @@
 # Runtime Error Observability Contract
 
 Document status: **Current**
-Last reviewed: 2026-07-30 KST
+Last reviewed: 2026-07-31 KST
 
 ## Purpose
 
@@ -34,6 +34,8 @@ additive 필드로 기록한다.
 - `errorCounters`는 고정 코드별 프로세스 수명 카운터다.
 - 서비스 재시작 시 카운터는 0부터 다시 시작한다.
 - 등록되지 않은 동적 오류 코드는 `runtime_error`로 축약해 경로·입력값 유출을 막는다.
+- 예외 타입은 `Error` 또는 `Exception`으로 끝나는 클래스 이름 형식만 허용한다.
+  이 형식이 아닌 legacy 문자열은 빈 값으로 축약한다.
 
 대상 heartbeat:
 
@@ -88,3 +90,14 @@ additive 필드로 기록한다.
 
 기존 서비스 heartbeat의 `lastError` 호환 필드는 유지하지만 새 합성기는 해당 값을
 공개 응답으로 복사하지 않고 현재 오류 존재 여부 판정에만 사용한다.
+
+Discord 음성 pipeline snapshot도 같은 경계를 따른다.
+
+- `lastFailure`는 `kind`, `errorType`, 숫자 `at`, `contentFree=true`만 공개한다.
+- voice rejoin 오류는 `voice_rearm_failed`와 검증된 예외 클래스 이름만 공개한다.
+- turn summary의 `error`는 고정 코드 또는 예외 클래스 이름이며 임의 문자열은
+  `turn_failed`로 축약한다.
+- STT timeout, TTS request/producer/playback, voice connection 부재, 빈 답변과
+  delivery 실패는 고정 코드별 카운터를 유지한다.
+- wake/STT/TTS/rejoin 로그와 validation observer로 전달되는 오류 필드에는 예외
+  메시지 대신 고정 코드와 클래스 이름만 넣는다.

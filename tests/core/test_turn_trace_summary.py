@@ -196,8 +196,39 @@ class TurnTraceSummaryTests(unittest.TestCase):
         )
 
         self.assertEqual(payload["error_layer"], "text_turn")
-        self.assertIn("ValueError", payload["error"])
+        self.assertEqual(payload["error"], "ValueError")
         self.assertIsNone(payload["total_ms"])
+
+    def test_error_message_is_replaced_with_content_free_code(self) -> None:
+        payload = build_turn_summary_payload(
+            {
+                "meta": {
+                    "turn_id": "turn-private",
+                    "error": "Bearer private-token C:\\private\\voice.wav",
+                },
+                "marks": {},
+            },
+            label="voice_turn",
+            event_name="voice_turn_summary",
+            total_ms=1.0,
+            error_layer="voice_delivery",
+        )
+
+        self.assertEqual(payload["error"], "turn_failed")
+        serialized = json.dumps(payload, ensure_ascii=False)
+        self.assertNotIn("private-token", serialized)
+        self.assertNotIn("voice.wav", serialized)
+
+    def test_voice_failure_code_remains_actionable(self) -> None:
+        payload = build_turn_summary_payload(
+            {"meta": {"error": "tts_request_failed"}, "marks": {}},
+            label="voice_turn",
+            event_name="voice_turn_summary",
+            total_ms=1.0,
+            error_layer="tts",
+        )
+
+        self.assertEqual(payload["error"], "tts_request_failed")
 
     def test_invalid_memory_write_receipt_fails_closed_without_private_fields(self) -> None:
         payload = build_turn_summary_payload(

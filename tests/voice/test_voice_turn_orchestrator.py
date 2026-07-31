@@ -16,6 +16,7 @@ from evelyn_core.voice_orchestration import (  # noqa: E402
     VoiceTurnOrchestratorDeps,
     VoiceTurnRequest,
     prepare_voice_reply_for_delivery,
+    run_locked_voice_reply_delivery,
 )
 from evelyn_core.voice_pipeline import (  # noqa: E402
     DeliveryPlan,
@@ -33,6 +34,98 @@ def split_test_tts_chunks(text: str, *, force: bool = False) -> tuple[list[str],
 
 
 class VoiceTurnOrchestratorTests(unittest.IsolatedAsyncioTestCase):
+    async def test_missing_voice_connection_durably_routes_unanswered_turn(
+        self,
+    ) -> None:
+        finalized: list[dict[str, Any]] = []
+        failures: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+        metrics: dict[str, Any] = {"meta": {}}
+        member = type(
+            "Member",
+            (),
+            {"id": 42, "display_name": "tester"},
+        )()
+        reply = VoiceReplyRequest(
+            transcript=None,
+            segment=None,
+            gate_mode="wake_entry",
+            raw_user_text="이어가줘",
+            prompt_user_text="이어가줘",
+            history_user_text="이어가줘",
+            wake_only_turn=False,
+            turn_type="voice_request",
+            selected_path="main_llm",
+            reply_source="main_llm",
+            topic_id="topic-1",
+        )
+
+        result = await run_locked_voice_reply_delivery(
+            room_session_key="room-1",
+            lock=__import__("asyncio").Lock(),
+            get_voice_client=lambda: None,
+            member=member,
+            voice_reply=reply,
+            canned_wake_reply="응",
+            accepted_turn_id="turn-1",
+            session_key="session-1",
+            guild_id=7,
+            room_key=None,
+            person_key=None,
+            session_memory_key=None,
+            metrics=metrics,
+            turn_scope="scope",
+            segment_id=1,
+            gate_mode="wake_entry",
+            on_final_answer=None,
+            speak_answer=lambda *_args, **_kwargs: self.fail(
+                "TTS must not start without a voice connection"
+            ),
+            ask_llm_and_speak_streaming=(
+                lambda *_args, **_kwargs: self.fail(
+                    "LLM delivery must not start without a voice connection"
+                )
+            ),
+            record_voice_pipeline_failure=(
+                lambda *args, **kwargs: failures.append((args, kwargs))
+            ),
+            finalize_voice_reply_side_effects=(
+                lambda **kwargs: finalized.append(kwargs)
+            ),
+            log_voice_stage=lambda *_args, **_kwargs: None,
+            strip_omnivoice_tags=lambda text: text,
+            report_waiting_on_lock=None,
+            report_delivery_error=lambda _exc: None,
+        )
+
+        self.assertIsNone(result)
+        self.assertEqual(len(finalized), 1)
+        self.assertFalse(finalized[0]["delivery_succeeded"])
+        self.assertEqual(
+            finalized[0]["failure_code"],
+            "voice_connection_unavailable",
+        )
+        self.assertEqual(
+            finalized[0]["voice_reply"].history_user_text,
+            "이어가줘",
+        )
+        self.assertEqual(
+            metrics["meta"]["voice_delivery_failure_code"],
+            "voice_connection_unavailable",
+        )
+        self.assertEqual(
+            failures,
+            [
+                (
+                    (
+                        "voice_connection_unavailable",
+                        "voice_connection_unavailable",
+                        metrics,
+                    ),
+                    {"stage": "voice_connection"},
+                )
+            ],
+        )
+
     def make_orchestrator(
         self,
         *,
@@ -185,7 +278,8 @@ class VoiceTurnOrchestratorTests(unittest.IsolatedAsyncioTestCase):
             await orchestrator.execute(VoiceTurnRequest(user_text="run route", metrics=metrics))
 
         self.assertEqual(metrics["meta"]["error_layer"], "voice_turn_orchestrator.skill_route")
-        self.assertIn("route exploded", metrics["meta"]["error"])
+        self.assertEqual(metrics["meta"]["error"], "RuntimeError")
+        self.assertNotIn("route exploded", str(metrics))
 
     def test_prepare_voice_reply_skips_tts_suppression_after_interrupt(self) -> None:
         captured_kwargs: dict[str, Any] = {}

@@ -113,11 +113,13 @@ async def finalize_voice_answer_from_runtime(
                 reason_label=deps.false_trigger_reason_label,
             )
     except Exception as exc:
-        error_text = f"{type(exc).__name__}:{clean_text(str(exc))}"
         deps.mark_barge_in_continuity_probe(
             metrics,
             success=False,
-            reason=f"finalize_exception:{error_text}",
+            reason=(
+                "finalize_exception:"
+                f"{type(exc).__name__}"
+            ),
             queued_sentence_count=0,
         )
         raise
@@ -214,7 +216,9 @@ async def ask_llm_and_speak_local_from_runtime(
                 )
             except Exception as exc:
                 cleaned_answer = clean_text(answer)
-                metrics.setdefault("meta", {})["local_streaming_tts_error"] = repr(exc)
+                metrics.setdefault("meta", {})[
+                    "local_streaming_tts_error"
+                ] = type(exc).__name__
                 deps.record_voice_pipeline_failure(
                     "tts_playback_failed",
                     exc,
@@ -265,7 +269,7 @@ async def ask_llm_and_speak_local_from_runtime(
     except Exception as exc:
         metrics = metrics or {}
         metrics.setdefault("meta", {})["error_layer"] = "voice_turn"
-        metrics.setdefault("meta", {})["error"] = repr(exc)
+        metrics.setdefault("meta", {})["error"] = type(exc).__name__
         deps.log_voice_bottleneck_summary(
             metrics,
             label="voice_turn",
@@ -380,7 +384,7 @@ async def ask_llm_and_speak_streaming_from_runtime(
     except Exception as exc:
         metrics = metrics or {}
         metrics.setdefault("meta", {})["error_layer"] = "voice_turn"
-        metrics.setdefault("meta", {})["error"] = repr(exc)
+        metrics.setdefault("meta", {})["error"] = type(exc).__name__
         deps.log_voice_bottleneck_summary(
             metrics,
             label="voice_turn",

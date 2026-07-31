@@ -49,6 +49,36 @@ class RuntimeErrorCounterTests(unittest.TestCase):
         self.assertEqual(snapshot["errorCounters"], {"voice_rearm_failed": 2})
         self.assertEqual(snapshot["lastErrorType"], "TimeoutError")
 
+    def test_voice_pipeline_codes_remain_actionable(self) -> None:
+        counter = RuntimeErrorCounter(now=lambda: 1000.0)
+
+        for code in (
+            "stt_timeout",
+            "tts_request_failed",
+            "tts_producer_cancelled",
+            "tts_playback_failed",
+            "voice_connection_unavailable",
+            "voice_delivery_empty",
+            "voice_delivery_failed",
+        ):
+            snapshot = counter.record(code, RuntimeError("private"))
+            self.assertEqual(snapshot["lastErrorCode"], code)
+
+    def test_non_exception_type_text_is_rejected(self) -> None:
+        counter = RuntimeErrorCounter(now=lambda: 1000.0)
+
+        snapshot = counter.record(
+            "voice_delivery_failed",
+            type(
+                "Bearer_private_token",
+                (Exception,),
+                {},
+            )(),
+        )
+
+        self.assertEqual(snapshot["lastErrorType"], "")
+        self.assertNotIn("private", json.dumps(snapshot).lower())
+
     def test_guild_reset_revocation_error_keeps_its_actionable_code(self) -> None:
         counter = RuntimeErrorCounter(now=lambda: 1000.0)
 

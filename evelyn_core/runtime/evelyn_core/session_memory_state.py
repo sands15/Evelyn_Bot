@@ -411,7 +411,7 @@ class SessionStateStore:
         self,
         session_key: str | None,
         user_text: str,
-        answer: str,
+        answer: str | None,
         *,
         system_prompt: str,
         max_history_items: int,
@@ -419,7 +419,13 @@ class SessionStateStore:
     ) -> None:
         history = self.get_conversation_history(system_prompt=system_prompt, session_key=session_key, guild_id=guild_id)
         history.append({"role": "user", "content": clean_text(user_text)})
-        history.append({"role": "assistant", "content": clean_text(answer)})
+        if answer is not None:
+            history.append(
+                {
+                    "role": "assistant",
+                    "content": clean_text(answer),
+                }
+            )
         self.trim_history(
             system_prompt=system_prompt,
             max_history_items=max_history_items,

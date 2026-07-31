@@ -303,7 +303,7 @@ class ConversationSessionComposition:
         self,
         session_key: str | None,
         user_text: str,
-        answer: str,
+        answer: str | None,
         *,
         guild_id: int | None = None,
     ) -> None:

@@ -207,6 +207,60 @@ class SessionContinuityTests(unittest.TestCase):
         )
         self.assertTrue(restored["rollbackProtected"])
 
+    def test_unanswered_voice_user_turn_survives_fresh_restart(
+        self,
+    ) -> None:
+        session_key = "guild:1:voice:2:user:3"
+        source = SessionStateStore.create_empty()
+        source.append_history(
+            session_key,
+            "재생에 실패해도 이 부탁은 잊지 마",
+            None,
+            system_prompt="private system prompt",
+            max_history_items=12,
+        )
+        source.update_session_state(
+            session_key,
+            user_id=3,
+            speaker="user",
+            awaiting_user_reply=False,
+            topic_id="voice-failure-topic",
+            active_conversation_awaiting_reply_sec=300.0,
+            now_monotonic=100.0,
+        )
+        source_clock = FakeClock(wall=1000.0, monotonic=100.0)
+
+        committed = self.manager(
+            source,
+            source_clock,
+            system_prompt="private system prompt",
+        ).commit_completed_turn()
+
+        self.assertEqual(committed["state"], "ready")
+        restored_store = SessionStateStore.create_empty()
+        restored = self.manager(
+            restored_store,
+            FakeClock(wall=1001.0, monotonic=500.0),
+        ).restore()
+        self.assertEqual(restored["state"], "restored")
+        self.assertEqual(
+            restored_store.histories[session_key],
+            [
+                {
+                    "role": "system",
+                    "content": "current system prompt",
+                },
+                {
+                    "role": "user",
+                    "content": "재생에 실패해도 이 부탁은 잊지 마",
+                },
+            ],
+        )
+        self.assertEqual(
+            restored_store.last_speaker[session_key],
+            "user",
+        )
+
     def test_completed_turn_commit_is_immediately_durable(self) -> None:
         clock = FakeClock(wall=1000.0, monotonic=100.0)
         store = self.populated_store()

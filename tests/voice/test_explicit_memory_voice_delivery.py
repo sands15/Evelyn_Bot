@@ -24,6 +24,62 @@ from evelyn_core.voice_orchestration import (  # noqa: E402
 class ExplicitMemoryVoiceDeliveryTests(
     unittest.IsolatedAsyncioTestCase
 ):
+    async def test_empty_streaming_answer_records_fixed_delivery_failure(
+        self,
+    ) -> None:
+        failures: list[tuple[str, object, dict]] = []
+        metrics: dict = {"meta": {}}
+
+        async def empty_llm(*_args, **_kwargs) -> str:
+            return ""
+
+        result = await deliver_voice_reply(
+            voice_reply=SimpleNamespace(
+                wake_only_turn=False,
+                history_user_text="답을 이어가줘",
+                prompt_user_text="답을 이어가줘",
+                turn_type="conversation",
+                selected_path="main_llm",
+            ),
+            canned_wake_reply="응?",
+            vc=object(),
+            accepted_turn_id="turn-empty-1",
+            session_key="session-1",
+            guild_id=7,
+            room_key="room-key",
+            person_key="person-key",
+            session_memory_key="session-memory",
+            metrics=metrics,
+            turn_scope=object(),
+            on_final_answer=None,
+            speak_answer=lambda *_args, **_kwargs: None,
+            ask_llm_and_speak_streaming=empty_llm,
+            record_voice_pipeline_failure=(
+                lambda code, error, _metrics, **kwargs: failures.append(
+                    (code, error, kwargs)
+                )
+            ),
+            log_voice_stage=lambda *_args, **_kwargs: None,
+            strip_omnivoice_tags=lambda value: value,
+            report_delivery_error=lambda _exc: None,
+        )
+
+        self.assertIsNone(result)
+        self.assertEqual(
+            metrics["meta"]["voice_delivery_failure_code"],
+            "voice_delivery_empty",
+        )
+        self.assertEqual(
+            failures,
+            [
+                (
+                    "voice_delivery_empty",
+                    "voice_delivery_empty",
+                    {"stage": "answer_finalize"},
+                )
+            ],
+        )
+
     async def test_accepted_memory_command_bypasses_llm_and_speaks_receipt(self) -> None:
         receipt = {
             "schema": "memory.user-confirmation.v1",

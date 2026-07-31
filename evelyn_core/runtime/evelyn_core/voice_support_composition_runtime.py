@@ -394,16 +394,31 @@ class VoiceSupportComposition:
         self.deps.increment_voice_pipeline_counter("voice_rejoin_attempts")
         self.deps.voice_pipeline_state["last_voice_rejoin_at"] = self.deps.now()
         self.deps.voice_pipeline_state["last_voice_rejoin_error"] = None
+        self.deps.voice_pipeline_state[
+            "last_voice_rejoin_error_type"
+        ] = ""
         try:
             voice_client = await self.ensure_listening_voice_client(target_guild, channel)
         except Exception as exc:
             self.deps.increment_voice_pipeline_counter("voice_rejoin_fail")
-            self.deps.voice_pipeline_state["last_voice_rejoin_error"] = repr(exc)
-            self.deps.log(f"[VOICE REJOIN FAIL] guild={guild_id} channel={channel_id} err={exc!r}")
-            return False, repr(exc)
+            self.deps.voice_pipeline_state[
+                "last_voice_rejoin_error"
+            ] = "voice_rearm_failed"
+            self.deps.voice_pipeline_state[
+                "last_voice_rejoin_error_type"
+            ] = type(exc).__name__
+            self.deps.log(
+                "[VOICE REJOIN FAIL] "
+                f"guild={guild_id} channel={channel_id} "
+                f"errorType={type(exc).__name__}"
+            )
+            return False, "voice_rearm_failed"
         if voice_client is None:
             self.deps.increment_voice_pipeline_counter("voice_rejoin_fail")
             self.deps.voice_pipeline_state["last_voice_rejoin_error"] = "voice_client_none"
+            self.deps.voice_pipeline_state[
+                "last_voice_rejoin_error_type"
+            ] = ""
             return False, "voice_client_none"
         self.deps.increment_voice_pipeline_counter("voice_rejoin_success")
         self.deps.save_last_voice_channel_state(

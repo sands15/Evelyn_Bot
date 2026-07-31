@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from collections.abc import Mapping
 from pathlib import Path
@@ -114,6 +115,31 @@ TURN_SUMMARY_KEYS: tuple[str, ...] = (
     "extra",
 )
 
+_TURN_SUMMARY_ERROR_CODES = frozenset(
+    {
+        "cancelled",
+        "control_page_text_aborted_before_summary",
+        "conversation_continuity_commit_failed",
+        "llm_failed",
+        "stt_timeout",
+        "stt_transcribe_failed",
+        "text_turn_aborted_before_summary",
+        "text_turn_failed",
+        "tts_playback_failed",
+        "tts_producer_cancelled",
+        "tts_request_failed",
+        "turn_failed",
+        "voice_connection_unavailable",
+        "voice_delivery_empty",
+        "voice_delivery_failed",
+        "voice_rearm_failed",
+        "wake_probe_failed",
+    }
+)
+_EXCEPTION_TYPE_RE = re.compile(
+    r"^[A-Za-z][A-Za-z0-9_.]{0,79}(?:Error|Exception)$"
+)
+
 
 def write_turn_trace_event(
     event: str,
@@ -176,6 +202,21 @@ def _clean_optional(value: Any) -> str | None:
         return None
     cleaned = clean_text(str(value))
     return cleaned or None
+
+
+def _turn_summary_error(value: Any) -> str | None:
+    if value is None:
+        return None
+    candidate = (
+        type(value).__name__
+        if isinstance(value, BaseException)
+        else clean_text(str(value))
+    )
+    if candidate in _TURN_SUMMARY_ERROR_CODES:
+        return candidate
+    if _EXCEPTION_TYPE_RE.fullmatch(candidate):
+        return candidate
+    return "turn_failed"
 
 
 def _round_ms(value: Any) -> float | None:
@@ -369,7 +410,7 @@ def build_turn_summary_payload(
         "playback_completed": playback_completed,
         "playback_cancelled": playback_cancelled,
         "error_layer": error_layer or meta.get("error_layer"),
-        "error": repr(error) if isinstance(error, BaseException) else _clean_optional(error or meta.get("error")),
+        "error": _turn_summary_error(error or meta.get("error")),
         "t_ingress": _round_ms(marks.get("t_ingress")),
         "t_policy": _round_ms(marks.get("t_policy")),
         "t_context_build": _round_ms(marks.get("t_context_build")),

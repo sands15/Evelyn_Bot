@@ -11,6 +11,15 @@ from .memory_confirmation_contract import (
     is_explicit_memory_confirmation_receipt,
 )
 
+
+VOICE_DELIVERY_FAILURE_CODES = frozenset(
+    {
+        "voice_connection_unavailable",
+        "voice_delivery_empty",
+        "voice_delivery_failed",
+    }
+)
+
 @dataclass(frozen=True)
 class VoiceReplySideEffectDeps:
     session_speculative_policies: MutableMapping[str, Any]
@@ -46,9 +55,81 @@ def finalize_voice_reply_side_effects_from_runtime(
     turn_scope: Any,
     accepted_turn_id: str,
     segment_id: int,
+    delivery_succeeded: bool = True,
+    failure_code: str = "",
     deps: VoiceReplySideEffectDeps,
 ) -> None:
     deps.session_speculative_policies.pop(session_key, None)
+    if not delivery_succeeded:
+        meta = metrics.setdefault("meta", {})
+        safe_failure_code = (
+            failure_code
+            if failure_code in VOICE_DELIVERY_FAILURE_CODES
+            else "voice_delivery_failed"
+        )
+        meta.update(
+            {
+                "voice_delivery_state": "failed",
+                "voice_delivery_error": safe_failure_code,
+                "continuity_turn_state": "unanswered_user",
+                "error": safe_failure_code,
+            }
+        )
+        meta.setdefault("error_layer", "voice_delivery")
+        if meta.get("unanswered_voice_turn_recorded") is True:
+            return
+        try:
+            deps.append_history(
+                session_key,
+                voice_reply.history_user_text,
+                None,
+                guild_id=guild_id,
+            )
+            meta["unanswered_voice_turn_recorded"] = True
+            deps.mark_session_active(
+                session_key,
+                user_id=getattr(member, "id", None),
+                ttl_sec=deps.active_conversation_voice_sec,
+                speaker="user",
+                awaiting_user_reply=False,
+                topic_id=voice_reply.topic_id,
+                user_text=voice_reply.history_user_text,
+            )
+            deps.set_room_owner(
+                room_session_key,
+                getattr(member, "id", None),
+                ttl_sec=deps.active_conversation_voice_sec,
+                reason="voice_delivery_failed",
+                session_key=session_key,
+                turn_id=accepted_turn_id,
+                segment_id=segment_id,
+            )
+            continuity_receipt = require_durable_continuity_receipt(
+                deps.commit_session_continuity()
+            )
+            meta.update(
+                {
+                    "continuity_commit": "durable",
+                    "continuity_generation": int(
+                        continuity_receipt["generation"]
+                    ),
+                }
+            )
+        except Exception as exc:
+            meta.update(
+                {
+                    "continuity_commit": "failed",
+                    "continuity_error": (
+                        "conversation_continuity_commit_failed"
+                    ),
+                }
+            )
+            deps.log(
+                "[VOICE TURN] unanswered_turn_commit_failed errorType=",
+                type(exc).__name__,
+            )
+        return
+
     deps.append_history(session_key, voice_reply.history_user_text, plain_answer, guild_id=guild_id)
     runtime_mode = ((metrics.get("meta") or {}).get("runtime_mode")) or deps.compute_runtime_mode(metrics)
     memory_write_receipt = (metrics.get("meta") or {}).get(

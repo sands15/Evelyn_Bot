@@ -144,7 +144,9 @@ async def run_voice_wake_probe_from_runtime(
                 metrics=metrics,
             )
         except Exception as exc:
-            deps.print_fn(f"[WAKE STT] {exc}")
+            deps.print_fn(
+                f"[WAKE STT] errorType={type(exc).__name__}"
+            )
             _register_wake_drop(
                 deps,
                 metrics,
@@ -152,9 +154,14 @@ async def run_voice_wake_probe_from_runtime(
                 session_key=session_key,
                 room_session_key=room_session_key,
                 owner_user_id=owner_user_id,
-                error=repr(exc),
+                error="wake_probe_failed",
+                error_type=type(exc).__name__,
             )
-            deps.log_voice_stage(metrics, "웨이크 프로브 실패", extra=repr(exc))
+            deps.log_voice_stage(
+                metrics,
+                "웨이크 프로브 실패",
+                extra=f"errorType={type(exc).__name__}",
+            )
             _log_wake_drop_summary(deps, metrics, "wake_probe_error")
             return None
 

@@ -75,6 +75,34 @@ class SessionMemoryStateTests(unittest.TestCase):
         self.assertEqual(history[1]["content"], "user 1")
         self.assertEqual(store.recent_assistant_reply_summary(system_prompt="system", guild_id=1, limit=2), "answer 1 / answer 2")
 
+    def test_unanswered_user_turn_is_preserved_without_fake_assistant_reply(
+        self,
+    ) -> None:
+        store = make_store()
+
+        store.append_history(
+            "guild:1:voice:2:user:3",
+            "내가 방금 부탁한 내용을 이어서 해줘",
+            None,
+            system_prompt="system",
+            max_history_items=10,
+        )
+
+        history = store.get_conversation_history(
+            system_prompt="system",
+            session_key="guild:1:voice:2:user:3",
+        )
+        self.assertEqual(
+            history,
+            [
+                {"role": "system", "content": "system"},
+                {
+                    "role": "user",
+                    "content": "내가 방금 부탁한 내용을 이어서 해줘",
+                },
+            ],
+        )
+
     def test_session_state_lifecycle_mutates_backing_maps(self) -> None:
         store = make_store()
 

@@ -143,6 +143,50 @@ class VoiceIoCompositionRuntimeTests(unittest.IsolatedAsyncioTestCase):
             deps=self.tokens["member_audio_pipeline"],
         )
 
+    def test_reply_side_effect_adapter_forwards_delivery_failure(self) -> None:
+        runtime = Mock(return_value=None)
+        with patch(
+            "evelyn_core.voice_io_composition_runtime."
+            "finalize_voice_reply_side_effects_from_runtime",
+            runtime,
+        ):
+            self.composition.finalize_voice_reply_side_effects(
+                guild_id=7,
+                member="member",
+                session_key="session",
+                room_session_key="room-session",
+                room_key="room",
+                person_key="person",
+                session_memory_key="memory",
+                voice_reply="reply",
+                plain_answer="",
+                metrics={"meta": {}},
+                turn_scope="scope",
+                accepted_turn_id="turn",
+                segment_id=9,
+                delivery_succeeded=False,
+                failure_code="voice_delivery_failed",
+            )
+
+        runtime.assert_called_once_with(
+            guild_id=7,
+            member="member",
+            session_key="session",
+            room_session_key="room-session",
+            room_key="room",
+            person_key="person",
+            session_memory_key="memory",
+            voice_reply="reply",
+            plain_answer="",
+            metrics={"meta": {}},
+            turn_scope="scope",
+            accepted_turn_id="turn",
+            segment_id=9,
+            delivery_succeeded=False,
+            failure_code="voice_delivery_failed",
+            deps=self.tokens["reply_side_effects"],
+        )
+
     def test_stateless_helpers_do_not_build_runtime_dependencies(self) -> None:
         with patch(
             "evelyn_core.voice_io_composition_runtime.normalize_compare_text",

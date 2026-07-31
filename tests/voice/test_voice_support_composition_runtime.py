@@ -219,6 +219,44 @@ class VoiceSupportCompositionRuntimeTests(unittest.IsolatedAsyncioTestCase):
             manual_disconnect=False,
         )
 
+    async def test_restore_failure_exposes_only_code_and_type(self) -> None:
+        channel = FakeVoiceChannel()
+        guild = FakeGuild(guild_id=11, channel=channel)
+        pipeline_state: dict[str, object] = {}
+        log = Mock()
+        deps = self.build_deps(
+            load_last_voice_channel_state=Mock(
+                return_value={
+                    "guild_id": 11,
+                    "channel_id": 22,
+                    "manual_disconnect": False,
+                }
+            ),
+            get_guild=Mock(return_value=guild),
+            voice_pipeline_state=pipeline_state,
+            log=log,
+        )
+        composition = VoiceSupportComposition(deps)
+        composition.ensure_listening_voice_client = AsyncMock(
+            side_effect=RuntimeError(
+                "Bearer private-token C:\\private\\voice.wav"
+            )
+        )
+
+        result = await composition.restore_last_voice_channel()
+
+        self.assertEqual(result, (False, "voice_rearm_failed"))
+        self.assertEqual(
+            pipeline_state["last_voice_rejoin_error"],
+            "voice_rearm_failed",
+        )
+        self.assertEqual(
+            pipeline_state["last_voice_rejoin_error_type"],
+            "RuntimeError",
+        )
+        self.assertNotIn("private-token", str(log.call_args_list))
+        self.assertNotIn("voice.wav", str(log.call_args_list))
+
     async def test_restore_respects_disabled_and_manual_disconnect_gates(self) -> None:
         disabled = VoiceSupportComposition(self.build_deps(voice_rejoin_on_ready=False))
         self.assertEqual(await disabled.restore_last_voice_channel(), (False, "rejoin_disabled"))

@@ -201,7 +201,7 @@ def trim_history_from_runtime(
 def append_history_from_runtime(
     session_key: str | None,
     user_text: str,
-    answer: str,
+    answer: str | None,
     *,
     guild_id: int | None = None,
     deps: SessionTurnRuntimeDeps,

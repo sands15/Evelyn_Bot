@@ -1,11 +1,24 @@
 from __future__ import annotations
 
 import json
+import math
 import time
 from pathlib import Path
 from typing import Any, Callable
 
+from .runtime_error_observability import (
+    sanitize_runtime_error_code,
+    sanitize_runtime_error_type,
+)
 from .text import clean_text
+
+
+def _safe_failure_timestamp(value: Any) -> float | None:
+    try:
+        timestamp = float(value)
+    except (TypeError, ValueError):
+        return None
+    return timestamp if math.isfinite(timestamp) else None
 
 
 def default_voice_pipeline_counters() -> dict[str, int]:
@@ -33,6 +46,7 @@ def default_voice_pipeline_state() -> dict[str, Any]:
         "last_voice_channel": None,
         "last_voice_rejoin_at": None,
         "last_voice_rejoin_error": None,
+        "last_voice_rejoin_error_type": "",
         "last_failure": None,
     }
 
@@ -51,21 +65,32 @@ def record_voice_failure_state(
 ) -> str:
     counter_map = {
         "llm_failed": "llm_failed_count",
+        "stt_timeout": "stt_timeout_count",
         "tts_request_failed": "tts_request_failed_count",
         "tts_producer_cancelled": "tts_producer_cancelled_count",
         "tts_playback_failed": "tts_playback_failed_count",
+        "voice_connection_unavailable": (
+            "voice_delivery_failed_count"
+        ),
+        "voice_delivery_empty": "voice_delivery_failed_count",
         "voice_delivery_failed": "voice_delivery_failed_count",
     }
-    counter = counter_map.get(kind)
+    safe_kind = sanitize_runtime_error_code(kind)
+    counter = counter_map.get(safe_kind)
     if counter:
         increment_voice_counter(counters, counter)
-    error_text = repr(err) if isinstance(err, BaseException) else clean_text(str(err))
+    error_type = (
+        sanitize_runtime_error_type(type(err).__name__)
+        if isinstance(err, BaseException)
+        else ""
+    )
     state["last_failure"] = {
-        "kind": kind,
-        "error": error_text[:260],
+        "kind": safe_kind,
+        "errorType": error_type,
         "at": time.time() if now is None else float(now),
+        "contentFree": True,
     }
-    return error_text
+    return safe_kind
 
 
 def record_voice_pipeline_failure_from_runtime(
@@ -79,10 +104,20 @@ def record_voice_pipeline_failure_from_runtime(
     metrics: dict | None = None,
     **extra: Any,
 ) -> None:
-    error_text = record_voice_failure_state(counters, state, kind, err)
+    error_code = record_voice_failure_state(
+        counters,
+        state,
+        kind,
+        err,
+    )
+    error_type = (
+        sanitize_runtime_error_type(type(err).__name__)
+        if isinstance(err, BaseException)
+        else ""
+    )
     meta = (metrics or {}).get("meta") or {}
     log_turn_event(
-        kind,
+        error_code,
         **merge_log_event_payload(
             explicit={
                 "turn_id": meta.get("turn_id"),
@@ -92,7 +127,8 @@ def record_voice_pipeline_failure_from_runtime(
                 "room_session_key": meta.get("room_session_key"),
                 "guild_id": meta.get("guild_id"),
                 "source": meta.get("source"),
-                "error": error_text[:500],
+                "error": error_code,
+                "error_type": error_type,
             },
             extra=extra,
         ),
@@ -222,6 +258,24 @@ def build_voice_pipeline_snapshot_payload(
     cooldown_remaining = max(0.0, float(stt_cooldown_until) - float(now_mono))
     if last_channel_state:
         state["last_voice_channel"] = dict(last_channel_state)
+    raw_last_failure = state.get("last_failure")
+    last_failure = None
+    if isinstance(raw_last_failure, dict):
+        last_failure = {
+            "kind": sanitize_runtime_error_code(
+                raw_last_failure.get("kind")
+            ),
+            "errorType": sanitize_runtime_error_type(
+                raw_last_failure.get("errorType")
+            ),
+            "at": _safe_failure_timestamp(raw_last_failure.get("at")),
+            "contentFree": True,
+        }
+    last_rejoin_error = (
+        "voice_rearm_failed"
+        if state.get("last_voice_rejoin_error")
+        else ""
+    )
     return {
         "outputMode": clean_text(output_mode) or "discord_voice",
         "localTtsOutput": dict(local_tts_output or {}),
@@ -250,8 +304,11 @@ def build_voice_pipeline_snapshot_payload(
         "bargeInContinuity": dict(barge_in_continuity or {}),
         "lastVoiceChannel": state.get("last_voice_channel"),
         "lastVoiceRejoinAt": state.get("last_voice_rejoin_at"),
-        "lastVoiceRejoinError": state.get("last_voice_rejoin_error"),
-        "lastFailure": state.get("last_failure"),
+        "lastVoiceRejoinError": last_rejoin_error,
+        "lastVoiceRejoinErrorType": sanitize_runtime_error_type(
+            state.get("last_voice_rejoin_error_type")
+        ),
+        "lastFailure": last_failure,
         "sttMsP95": p95.get("stt_ms_p95", 0),
         "ttsFirstAudioMsP95": p95.get("tts_first_audio_ms_p95", 0),
         "mainFirstTokenMsP95": p95.get("main_first_token_ms_p95", 0),

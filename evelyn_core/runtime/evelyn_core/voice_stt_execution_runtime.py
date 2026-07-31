@@ -94,7 +94,9 @@ async def run_voice_stt_execution_from_runtime(
             deps.remember_speculative_policy(session_key, speculative)
             metrics.setdefault("meta", {})["speculative_policy"] = dict(speculative.get("policy") or {})
     except Exception as exc:
-        deps.print_fn(f"[STT PARTIAL] {exc}")
+        deps.print_fn(
+            f"[STT PARTIAL] errorType={type(exc).__name__}"
+        )
 
     try:
         full_stt_result = await deps.run_full_stt_with_optional_rescore(
@@ -123,8 +125,12 @@ async def run_voice_stt_execution_from_runtime(
             speaker_name=display_name,
         )
     except Exception as exc:
-        deps.print_fn(f"[STT] {exc}")
-        deps.log_voice_stage(metrics, "본문 STT 실패", extra=repr(exc))
+        deps.print_fn(f"[STT] errorType={type(exc).__name__}")
+        deps.log_voice_stage(
+            metrics,
+            "본문 STT 실패",
+            extra=f"errorType={type(exc).__name__}",
+        )
         return None
 
     text = full_stt_result.text

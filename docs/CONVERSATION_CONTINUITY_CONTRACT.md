@@ -14,7 +14,7 @@ Last reviewed: 2026-07-31 KST
 `runtime_artifacts/conversation_continuity/active.json`은 다음 항목만 저장한다.
 
 - 최대 32개 세션
-- 세션당 최근 완료 이력 최대 12개
+- 세션당 최근 확정 이력 최대 12개
 - 항목당 최대 2,000자
 - 활성 대화의 남은 TTL, 사용자 ID, speaker, topic/turn ID, follow-up target
 
@@ -24,6 +24,30 @@ Last reviewed: 2026-07-31 KST
 - 부분 STT 및 아직 확정되지 않은 transcript
 - system prompt
 - stack trace, 예외 메시지, 파일시스템 경로
+
+## Accepted voice turn delivery failure
+
+최종 STT와 reply gate를 통과한 음성 발화는 답변 전달이 실패해도 사라진 턴으로
+취급하지 않는다. Discord voice connection 부재, 빈 최종 답변, LLM/TTS 전달
+실패 시 다음 경계를 적용한다.
+
+- 사용자 발화만 history에 한 번 추가하고 존재하지 않는 assistant 답변은 만들지
+  않는다. 따라서 복구된 history는 `user` row로 끝날 수 있다.
+- 세션의 마지막 speaker를 `user`로 유지하고 room owner를 보존한 뒤 같은 durable
+  continuity commit 계약으로 즉시 checkpoint한다.
+- 같은 turn finalizer가 중복 호출돼도 process-local turn metrics의
+  `unanswered_voice_turn_recorded` 표식으로 history mutation과 commit을 한 번만
+  수행한다.
+- 전달되지 않은 답변을 기억으로 쓰거나 cognitive/search follow-up을 시작하지
+  않는다. 다음 정상 턴은 보존된 사용자 발화를 문맥으로 받아 관계를 이어간다.
+- 실패 메타데이터는 `voice_connection_unavailable`, `voice_delivery_empty`,
+  `voice_delivery_failed`, `conversation_continuity_commit_failed` 같은 고정 코드와
+  예외 클래스 이름만 사용한다. 예외 메시지·경로·토큰은 status와 turn summary에
+  넣지 않는다.
+
+이 checkpoint의 사용자 발화는 기존 단기 대화 continuity 범위 안의 확정
+transcript다. 음성 검증 report/event에 transcript나 raw audio를 새로 복제하는
+것은 계속 금지한다.
 
 split Docker의 standalone Bot API는 Discord/Main owner와 같은 파일을 동시에
 쓰지 않는다. 대신 `runtime_artifacts/fast_control_continuity/`에 독립된

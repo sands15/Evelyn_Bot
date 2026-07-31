@@ -89,6 +89,8 @@ class VoiceIoComposition:
         turn_scope: Any,
         accepted_turn_id: str,
         segment_id: int,
+        delivery_succeeded: bool = True,
+        failure_code: str = "",
     ) -> None:
         finalize_voice_reply_side_effects_from_runtime(
             guild_id=guild_id,
@@ -104,6 +106,8 @@ class VoiceIoComposition:
             turn_scope=turn_scope,
             accepted_turn_id=accepted_turn_id,
             segment_id=segment_id,
+            delivery_succeeded=delivery_succeeded,
+            failure_code=failure_code,
             deps=self.deps.reply_side_effects(),
         )
 
