@@ -117,6 +117,51 @@ def _verified_receipt(
     return receipt
 
 
+def _verified_stored_card(
+    card: dict[str, Any],
+    *,
+    expected_fact: str,
+    expected_evidence_hash: str,
+    expected_source: str,
+    expected_source_ref: str | None = None,
+) -> tuple[str, str, str]:
+    provenance = dict(card.get("provenance") or {})
+    source_refs = [
+        clean_text(item)
+        for item in (provenance.get("sourceRefs") or [])
+        if clean_text(item)
+    ]
+    evidence_hashes = [
+        clean_text(item).lower()
+        for item in (provenance.get("evidenceHashes") or [])
+        if clean_text(item)
+    ]
+    note_id = clean_text(card.get("id"))
+    confirmed_at = clean_text(card.get("confirmedAt"))
+    valid = bool(
+        clean_text(card.get("body")) == expected_fact
+        and card.get("confirmed") is True
+        and card.get("recallEligible") is True
+        and note_id
+        and confirmed_at
+        and clean_text(provenance.get("source")).lower()
+        == expected_source
+        and clean_text(provenance.get("sourceType")).lower()
+        == "user"
+        and len(source_refs) == 1
+        and evidence_hashes == [expected_evidence_hash]
+        and (
+            expected_source_ref is None
+            or source_refs == [expected_source_ref]
+        )
+    )
+    if not valid:
+        raise ExplicitMemoryConfirmationError(
+            "memory_confirmation_write_unverified"
+        )
+    return note_id, source_refs[0], confirmed_at
+
+
 def store_explicit_memory_confirmation(
     fact: str,
     *,
@@ -164,30 +209,21 @@ def store_explicit_memory_confirmation(
                 raise ExplicitMemoryConfirmationError(
                     "memory_confirmation_hash_collision"
                 )
-            if not card.get("confirmed") or not clean_text(
-                card.get("confirmedAt")
-            ):
-                raise ExplicitMemoryConfirmationError(
-                    "memory_confirmation_write_unverified"
-                )
-            provenance = dict(card.get("provenance") or {})
-            stored_source_refs = list(
-                provenance.get("sourceRefs") or []
+            (
+                note_id,
+                stored_source_ref,
+                stored_confirmed_at,
+            ) = _verified_stored_card(
+                card,
+                expected_fact=normalized_fact,
+                expected_evidence_hash=evidence_hash,
+                expected_source=normalized_source,
             )
-            stored_source_ref = clean_text(
-                stored_source_refs[0]
-                if stored_source_refs
-                else ""
-            )
-            if not stored_source_ref:
-                raise ExplicitMemoryConfirmationError(
-                    "memory_confirmation_write_unverified"
-                )
             return _verified_receipt(
                 state="duplicate",
-                note_id=clean_text(card.get("id")),
+                note_id=note_id,
                 source_ref=stored_source_ref,
-                confirmed_at=clean_text(card.get("confirmedAt")),
+                confirmed_at=stored_confirmed_at,
             )
 
         confirmed_at = _confirmed_at()
@@ -212,15 +248,22 @@ def store_explicit_memory_confirmation(
                 "memory_confirmation_write_unverified"
             )
         card = dict(stored.get("card") or {})
-        if clean_text(card.get("body")) != normalized_fact:
-            raise ExplicitMemoryConfirmationError(
-                "memory_confirmation_write_unverified"
-            )
+        (
+            note_id,
+            stored_source_ref,
+            stored_confirmed_at,
+        ) = _verified_stored_card(
+            card,
+            expected_fact=normalized_fact,
+            expected_evidence_hash=evidence_hash,
+            expected_source=normalized_source,
+            expected_source_ref=source_ref,
+        )
         return _verified_receipt(
             state="stored",
-            note_id=clean_text(card.get("id")),
-            source_ref=source_ref,
-            confirmed_at=clean_text(card.get("confirmedAt")) or confirmed_at,
+            note_id=note_id,
+            source_ref=stored_source_ref,
+            confirmed_at=stored_confirmed_at,
         )
 
 

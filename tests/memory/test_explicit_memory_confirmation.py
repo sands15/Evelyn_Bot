@@ -4,6 +4,7 @@ import sys
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 
 REPO_ROOT = next(
@@ -223,6 +224,43 @@ class ExplicitMemoryConfirmationTests(unittest.TestCase):
             "memory_confirmation_source_invalid",
         )
 
+    def test_duplicate_fails_closed_when_stored_provenance_is_damaged(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            store_explicit_memory_confirmation(
+                "손상되면 성공으로 답하지 마",
+                action_id="damaged-provenance-123",
+                root=root,
+            )
+            path = next(
+                (root / "memory_vault" / "concepts").glob("*.md")
+            )
+            lines = path.read_text(encoding="utf-8").splitlines()
+            damaged = [
+                "evidence_hashes: []"
+                if line.startswith("evidence_hashes:")
+                else line
+                for line in lines
+            ]
+            path.write_text(
+                "\n".join(damaged) + "\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(
+                ExplicitMemoryConfirmationError
+            ) as caught:
+                store_explicit_memory_confirmation(
+                    "손상되면 성공으로 답하지 마",
+                    action_id="damaged-provenance-123",
+                    root=root,
+                )
+
+        self.assertEqual(
+            caught.exception.code,
+            "memory_confirmation_write_unverified",
+        )
+
     def test_executor_rejects_empty_command_without_content(self) -> None:
         matched, reply, receipt, error = (
             execute_explicit_memory_confirmation("/remember")
@@ -233,6 +271,32 @@ class ExplicitMemoryConfirmationTests(unittest.TestCase):
         self.assertEqual(receipt["state"], "rejected")
         self.assertTrue(receipt["contentFree"])
         self.assertEqual(error, "memory_confirmation_text_required")
+
+    def test_executor_reports_unverified_write_without_memory_content(self) -> None:
+        with patch(
+            "evelyn_core.explicit_memory_confirmation."
+            "store_explicit_memory_confirmation",
+            side_effect=ExplicitMemoryConfirmationError(
+                "memory_confirmation_write_unverified"
+            ),
+        ):
+            matched, reply, receipt, error = (
+                execute_explicit_memory_confirmation(
+                    "/remember private-canary-must-not-leak",
+                    action_id="failed-write-action-123",
+                )
+            )
+
+        self.assertTrue(matched)
+        self.assertIn("저장하지 못했어", reply)
+        self.assertEqual(receipt["state"], "failed")
+        self.assertEqual(
+            receipt["error"],
+            "memory_confirmation_write_unverified",
+        )
+        self.assertTrue(receipt["contentFree"])
+        self.assertEqual(error, "memory_confirmation_write_unverified")
+        self.assertNotIn("private-canary", str(receipt))
 
     def test_receipt_validator_rejects_extra_or_private_fields(self) -> None:
         valid = {

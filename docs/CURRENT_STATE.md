@@ -356,6 +356,11 @@ Source branch: `codex/dependency-config-hardening`, current evidence-bound user 
     schema의 note ID·상태·turn 참조·확인 시각만 포함하며 기억 본문이나
     transcript를 넣지 않는다. 직접 저장 turn은 일반 Summary LLM memory writer와
     search follow-up을 건너뛰어 같은 발화를 중복 저장하지 않는다.
+  - 저장·중복 성공은 다시 읽은 card의 본문, 직접 사용자 source/source type,
+    단일 turn source ref, 본문 SHA-256 evidence, `confirmed_at`과 현재
+    recall eligibility를 모두 재검사한 뒤에만 반환한다. 일부 metadata가
+    손상된 기존 파일은 성공으로 복구 추정하지 않고 content-free
+    `memory_confirmation_write_unverified`로 fail-closed한다.
   - Control Page는 요청마다 request ID를 만들고 Local I/O Bridge는 기존 음성
     turn ID를 일반·stream 요청에 전달한다. 노트 파일명과 공개 ID는 기억 본문
     hash에서 만들지 않아 content-free receipt가 본문 equality oracle이 되지 않는다.
@@ -1243,6 +1248,18 @@ Source branch: `codex/dependency-config-hardening`, current evidence-bound user 
   전체 profile Compose config와 `git diff --check`도 통과했다. 실행 중인 기존
   Bot API와 Control Page는 교체하지 않았고 계속 healthy다. 실제 사용자 기억,
   Discord, 마이크, Minecraft와 무거운 모델 서비스도 변경하거나 시작하지 않았다.
+- explicit-confirm memory lifecycle 강화는 저장·회수·삭제 집중 12개,
+  memory 전체 154개와 Control/Discord/voice/trace 인접 경로 98개를 통과했다.
+  격리된 lifecycle은 Discord 직접 출처 기억이 attributed prompt로 제공되고,
+  2단계 삭제 뒤 같은 query·receipt·tombstone 어디에도 다시 나타나지 않음을
+  확인했다. 손상 provenance 재시도는 성공 대신 content-free 실패가 된다.
+- 새 내장 소스 검증 이미지는 Bot API
+  `sha256:16e8a41da36e593fa0f2e0c61102857dec1fee6857d8c61cc0dab1a04b549a64`,
+  Discord/Main
+  `sha256:0213e52e21d9f617c077607b50c322c76373f96fc29377f4223093f2663528c1`이며
+  각각 내장 소스 88개와 22개, `compileall`, `pip check`를 통과했다. 전체
+  profile Compose config도 통과했다. 실행 중 서비스와 실제 사용자 기억은
+  변경하지 않았다.
 
 ## Operational boundaries
 

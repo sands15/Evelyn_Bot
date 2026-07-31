@@ -401,6 +401,13 @@ mirror가 함께 셀 수 있어 고유 턴 수나 실제 prompt 선택 수는 �
 명시한다. 현재 프로젝트 `bot_memory`의 읽기 전용 측정은 scope 3개, 저장 legacy
 항목 0개로 `empty`였다. 실제 사용자 기억은 수정하지 않았다.
 
+현재 사용자 확인 발화를 새 근거로 만드는 경로는 Fast Control과 accepted
+Discord text/voice에 연결됐다. 성공은 저장 후 card의 직접 사용자 source,
+단일 turn ref, 본문 evidence hash, confirmed timestamp와 recall eligibility를
+모두 재검사하며, 손상 provenance는 content-free 실패로 닫힌다. 격리된
+저장→attributed prompt 회수→2단계 삭제→동일 query 비회상 lifecycle도
+통과했지만 실제 사용자 기억에는 쓰기·삭제를 수행하지 않았다.
+
 남은 위험은 이후 import/복원으로 확인 전용 legacy 항목이 생겼을 때 이를 사용자
 확인만으로 과거 source에 소급 귀속할 수 없다는 점이다. 안전한 확인 흐름은 기존
 row를 고치는 backfill이 아니라 현재 확인 발화를 새 turn evidence로 가진 새 기억을
