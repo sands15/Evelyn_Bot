@@ -1020,6 +1020,9 @@ Current recommendation:
 - [x] Add confirmed manual repair execution after explicit operator approval.
 - [x] Add cooldown persistence for execution phase.
 - [x] Add Control-Page preview -> confirm -> apply flow.
+- [x] Add bounded single-flight runtime health snapshots so 1.5-second UI
+  polling does not synchronously repeat all probes.
+- [x] Fail cached readiness closed after the maximum freshness boundary.
 
 ## Success Criteria
 

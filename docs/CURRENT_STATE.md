@@ -805,6 +805,25 @@ Source branch: `codex/dependency-config-hardening` through `d504303`
 - 현재 Bot API 이미지 digest는
   `sha256:d1e8e5920019859e011b52fcb7dabfaf94831f601526c9ed1898fbedba6a47f3`이고
   `healthy`, restart count 0이다. Control Page도 계속 `healthy`다.
+- `c858fcc`와 `8da072e`는 Bot API와 공개 Control Page의 반복 runtime
+  health 수집을 [2초 single-flight snapshot과 6초 fail-closed freshness
+  경계](RUNTIME_HEALTH_SNAPSHOT_CONTRACT.md)로 교체했다. 일반 상태·채팅
+  응답은 stale-while-revalidate를 사용하고, 명시적 `/status`, 진단, repair,
+  override는 fresh 수집을 유지한다.
+- 새 cache owner 단위·Fast Control·Control Page 결합 테스트 105개와
+  Control Page API 집중 테스트 37개를 통과했다. 새 Control Page 이미지에서
+  runtime 전체 386개를 실행해 실패 0개, 환경 의도 skip 2개였다.
+- 배포 전 Bot API 직접 상태 요청은 p50 605ms / p95 1,172ms였고, 배포 후
+  30회 측정은 p50 4.7ms / p95 15.48ms였다. 공개 8799 경로는 cache owner
+  교체 전 p95 376.58ms, 교체 후 steady-state p95 20.09ms였다. 첫 cold
+  요청은 fresh 증거를 기다려 805.81ms였고, 이후 관찰한 cache 최대 나이는
+  2.3초, stale 응답은 0건이었다.
+- 현재 이미지 digest는 Bot API
+  `sha256:6471bf4b32c2cd5704e82c899c27b73ad333805653bdbbad287676cfa65dcd4d`,
+  Control Page
+  `sha256:61c6a6b62d8a2128fe3194cc053e7a84aa53952ad8c2cf403bef76f2663d46b6`다.
+  두 컨테이너 모두 `healthy`, restart count 0이고 이미지 `compileall`,
+  `pip check`, Compose config와 `git diff --check`를 통과했다.
 
 ## Operational boundaries
 
