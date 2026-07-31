@@ -318,10 +318,18 @@ plugin's verified `bot.swordpvp` implementation. The legacy plugin and its
 
 The isolated image build passed `npm ci`, all overlay patches, runtime lint,
 the pinned custom-PvP API smoke, and an offline image inspection. The focused
-Python Mindcraft contracts passed 15/15. The Node suite passed 82/83; the one
-Goal Manager assertion failure reproduces unchanged against the preceding
-image and is not caused by the dependency consolidation. The production audit
-is now moderate 12, high 0, critical 0. The staged image is
-`sha256:57f2ae27d8ea16b5a777905859dcd1b9b0f76ad895e5b374133024e2d46fa2e5`.
+Python Mindcraft contracts passed 15/15. The first dependency-only image exposed
+one pre-existing Goal Manager assertion failure: `escape_to_surface` incorrectly
+required an actionable hostile before claiming movement ownership. That allowed
+planner movement to interrupt underground or water escape when no hostile was
+present.
+
+The follow-up separates the two recovery phases. `escape_to_surface` owns
+movement until its bounded failure budget is exhausted, while `handle_hostile`
+owns movement only while an actionable hostile remains. The high-failure
+planner handoff remains intact. Focused ownership tests passed 4/4, the complete
+Node suite passed 84/84, and the Python Mindcraft contracts passed 15/15. The
+production audit remains moderate 12, high 0, critical 0. The final staged image
+is `sha256:6e6b95a5e87efcb5187df3d0ae53478740f4c35ee025db172ecc3669b4690f37`.
 It was inspected only; no Minecraft process, account login, or live service was
 started.

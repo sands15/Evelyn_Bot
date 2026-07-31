@@ -125,11 +125,66 @@ test('survival recovery ownership is treated as goal mismatch and can block repe
             phase: 'escape_to_surface',
             cooldown_until: {},
         };
-        manager.gateCommand('!searchForBlock("wheat", 32)', {autonomous: true});
+        const firstGate = manager.gateCommand(
+            '!searchForBlock("wheat", 32)',
+            {autonomous: true},
+        );
+        assert.equal(firstGate.allowed, false);
+        assert.equal(firstGate.reason, 'survival_recovery_owns_movement');
         manager.gateCommand('!searchForBlock("wheat", 32)', {autonomous: true});
         manager.gateCommand('!searchForBlock("wheat", 32)', {autonomous: true});
         assert.equal(manager.state.currentSubgoal, null);
         assert.equal(manager.state.blockedSubgoals.at(-1)?.reason, 'repeated_irrelevant_commands');
+    } finally {
+        fs.rmSync(directory, {recursive: true, force: true});
+    }
+});
+
+test('hostile recovery without an actionable hostile releases planner movement', () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'evelyn-goal-hostile-release-'));
+    try {
+        const manager = new EvelynGoalManager(
+            fakeAgent(fakeBot(), []),
+            {
+                statePath: path.join(directory, 'state.json'),
+                mode: 'gated',
+                ultimateGoal: 'Defeat the Ender Dragon',
+            },
+        );
+        manager.state.currentSubgoal = {
+            id: 'restore_food',
+            kind: 'obtain',
+            target: '#food',
+            success: {kind: 'inventory', target: '#food', count: 3},
+            allowedCommands: ['!searchForBlock', '!collectBlocks', '!goToPosition'],
+            allowedTargets: ['#food'],
+            attempts: 0,
+            actionBudget: 8,
+            observationStreak: 0,
+            gateRejects: 0,
+        };
+        manager.lastSnapshot = {
+            inventory: {},
+            hostilesNearby: [
+                {name: 'husk', distance: 14, verticalDistance: 11, actionable: false},
+            ],
+        };
+        manager.agent.bot.evelynSurvivalState = {
+            phase: 'handle_hostile',
+            hostiles: [
+                {name: 'husk', distance: 14, verticalDistance: 11, actionable: false},
+            ],
+            hostileCount: 0,
+            cooldown_until: {},
+        };
+
+        const gate = manager.gateCommand(
+            '!searchForBlock("wheat", 32)',
+            {autonomous: true},
+        );
+
+        assert.equal(gate.allowed, true);
+        assert.equal(gate.reason, 'relevant');
     } finally {
         fs.rmSync(directory, {recursive: true, force: true});
     }

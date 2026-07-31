@@ -172,7 +172,7 @@ function survivalRecoveryPhase(phase) {
 }
 
 function survivalRecoveryActive(state) {
-    const recoveryPhase = String(state?.phase || '');
+    const recoveryPhase = String(state?.phase || '').toLowerCase();
     const isRecoveryPhase = survivalRecoveryPhase(recoveryPhase);
     const failureCount = Number(state?.failures?.[recoveryPhase] || 0);
     const maxFailureCount = Math.max(
@@ -187,7 +187,9 @@ function survivalRecoveryActive(state) {
         const hasHighFailureHostile = hasActionableHostile(state);
         if (!hasHighFailureHostile) return false;
     }
-    if (isRecoveryPhase) return hasActionableHostile(state);
+    if (isRecoveryPhase) {
+        return recoveryPhase === 'escape_to_surface' || hasActionableHostile(state);
+    }
     const now = nowSeconds();
     const handoffUntil = normalizeEpochSeconds(state?.recovery_handoff_until);
     if (Number.isFinite(handoffUntil) && handoffUntil > now) {
