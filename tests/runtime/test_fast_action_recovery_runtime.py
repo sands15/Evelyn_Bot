@@ -427,6 +427,66 @@ class FastActionRecoveryRuntimeTests(unittest.TestCase):
                 "corrupt",
             )
 
+    def test_missing_journal_after_head_recovers_only_after_notice(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            owner = self.owner(root)
+            owner.record_completed_turn(
+                "조사해줘",
+                "확인해 볼게.",
+            )
+            journal = self.journal(root)
+            journal.begin("fast-action-1")
+            head_generation = journal.public_status()[
+                "generation"
+            ]
+            journal.path.unlink()
+            restored_journal = self.journal(root)
+            self.assertEqual(
+                restored_journal.public_status()["state"],
+                "corrupt",
+            )
+            messages: list[dict] = []
+            with (
+                patch.object(
+                    fast_api,
+                    "FAST_CONTROL_CONTINUITY_OWNER",
+                    owner,
+                ),
+                patch.object(
+                    fast_api,
+                    "FAST_ACTION_RECOVERY_JOURNAL",
+                    restored_journal,
+                ),
+                patch.object(
+                    fast_api,
+                    "CHAT_MESSAGES",
+                    messages,
+                ),
+            ):
+                status = (
+                    fast_api
+                    .recover_fast_control_actions_after_restart()
+                )
+
+            self.assertEqual(status["state"], "recovered")
+            self.assertTrue(status["rollbackProtected"])
+            self.assertEqual(status["headState"], "current")
+            self.assertGreater(
+                status["generation"],
+                head_generation,
+            )
+            self.assertEqual(
+                status["lastErrorCode"],
+                "fast_action_recovery_journal_corrupt",
+            )
+            self.assertEqual(
+                messages[-1]["text"],
+                fast_api.FAST_ACTION_RECOVERY_NOTICE,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

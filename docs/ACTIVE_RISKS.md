@@ -215,11 +215,18 @@ commit하며 원래 작업은 자동 재시도하지 않는다. action commit �
 실제 `os._exit` fresh-process 검증은 중단 안내가 한 번만 복구되는 것을
 확인했다.
 
-남은 위험은 journal과 continuity checkpoint를 함께 다시 쓸 수 있는 filesystem
-관리자에 대한 외부 authenticity가 없다는 점과, 실제 Control Page에서 장시간
-웹 조사 중 Bot API 컨테이너를 강제 종료하는 운영 E2E는 아직 수행하지 않았다는
-점이다. live 검증에서는 시작 답변 뒤 강제 종료, 고정 중단 안내, 자동 재요청
-0회와 `actions.recovery`의 content-free 상태를 함께 확인한다.
+action journal도 v2 generation/hash chain과 별도 content-free durable head로
+보강했다. 진행 표식이 생성된 chain의 단일 journal/head 삭제, self-hash 변조,
+과거 journal rollback은 fail-closed하고, journal 교체 뒤 head 교체 전 crash의
+정확한 한 generation만 복구한다. 기존 v1은 raw byte hash로 generation 0에
+고정한 뒤 v2로 연결한다.
+
+남은 위험은 journal과 head, continuity checkpoint까지 함께 다시 쓰거나 함께
+삭제할 수 있는 filesystem 관리자에 대한 외부 authenticity가 없다는 점과,
+실제 Control Page에서 장시간 웹 조사 중 Bot API 컨테이너를 강제 종료하는 운영
+E2E는 아직 수행하지 않았다는 점이다. live 검증에서는 시작 답변 뒤 강제 종료,
+고정 중단 안내, 자동 재요청 0회와 `actions.recovery`의 content-free 상태를 함께
+확인한다.
 
 ## P1 — Python 모델 런타임 의존성 잔여 취약점
 

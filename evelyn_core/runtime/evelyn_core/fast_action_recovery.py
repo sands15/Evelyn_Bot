@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import re
@@ -12,9 +13,16 @@ from .runtime_artifact_io import atomic_json_write
 from .text import clean_text
 
 
-FAST_ACTION_RECOVERY_SCHEMA = (
+FAST_ACTION_RECOVERY_LEGACY_SCHEMA = (
     "fast_control.action-recovery.v1"
 )
+FAST_ACTION_RECOVERY_SCHEMA = (
+    "fast_control.action-recovery.v2"
+)
+FAST_ACTION_RECOVERY_HEAD_SCHEMA = (
+    "fast_control.action-recovery-head.v1"
+)
+FAST_ACTION_RECOVERY_CHAIN_GENESIS = "0" * 64
 FAST_ACTION_RECOVERY_NOTICE = (
     "재시작 전에 시작한 작업의 최종 결과를 확인할 수 없었어. "
     "중복 실행을 피하려고 자동으로 다시 시도하지 않았어."
@@ -25,6 +33,35 @@ _ACTION_ID_PATTERN = re.compile(r"^fast-action-[1-9][0-9]{0,11}$")
 _ACTION_STATES = frozenset(
     {"running", "terminal_committing"}
 )
+
+
+def _valid_sha256(value: Any) -> str:
+    candidate = clean_text(value).lower()
+    if re.fullmatch(r"[0-9a-f]{64}", candidate):
+        return candidate
+    return ""
+
+
+def _journal_hash(payload: dict[str, Any]) -> str:
+    material = {
+        key: value
+        for key, value in payload.items()
+        if key != "journalHash"
+    }
+    encoded = json.dumps(
+        material,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _legacy_journal_hash(raw_text: str) -> str:
+    return hashlib.sha256(
+        raw_text.encode("utf-8")
+    ).hexdigest()
 
 
 def _finite_nonnegative(value: Any) -> float:
@@ -63,6 +100,7 @@ class FastActionRecoveryJournal:
         self,
         *,
         path: Path,
+        head_path: Path | None = None,
         enabled: bool,
         wall_time: Callable[[], float] = time.time,
         max_actions: int = (
@@ -70,6 +108,13 @@ class FastActionRecoveryJournal:
         ),
     ) -> None:
         self.path = Path(path)
+        self.head_path = Path(
+            head_path
+            if head_path is not None
+            else self.path.with_name(
+                f"{self.path.stem}.head.json"
+            )
+        )
         self.enabled = bool(enabled)
         self.wall_time = wall_time
         self.max_actions = max(
@@ -84,19 +129,37 @@ class FastActionRecoveryJournal:
         self._last_recovery_at = 0.0
         self._last_recovery_count = 0
         self._last_error_code = ""
+        self._generation = 0
+        self._journal_hash = (
+            FAST_ACTION_RECOVERY_CHAIN_GENESIS
+        )
+        self._integrity = (
+            "disabled" if not self.enabled else "uninitialized"
+        )
+        self._head_state = (
+            "disabled" if not self.enabled else "missing"
+        )
         self._load_state = (
             "disabled" if not self.enabled else "ready"
         )
         if self.enabled:
             self._load()
 
-    def _empty_payload(self) -> dict[str, Any]:
+    def _now(self) -> float:
+        return _finite_nonnegative(self.wall_time())
+
+    def _empty_payload(
+        self,
+        *,
+        generation: int,
+        previous_hash: str,
+    ) -> dict[str, Any]:
         return {
             "schema": FAST_ACTION_RECOVERY_SCHEMA,
-            "updatedAt": max(
-                0.0,
-                float(self.wall_time()),
-            ),
+            "generation": generation,
+            "previousHash": previous_hash,
+            "journalHash": "",
+            "updatedAt": self._now(),
             "actions": [],
             "lastRecoveryAt": self._last_recovery_at,
             "lastRecoveryCount": (
@@ -111,12 +174,21 @@ class FastActionRecoveryJournal:
             },
         }
 
-    def _payload(self) -> dict[str, Any]:
-        payload = self._empty_payload()
+    def _payload(
+        self,
+        *,
+        generation: int,
+        previous_hash: str,
+    ) -> dict[str, Any]:
+        payload = self._empty_payload(
+            generation=generation,
+            previous_hash=previous_hash,
+        )
         payload["actions"] = [
             dict(entry)
             for entry in self._actions.values()
         ]
+        payload["journalHash"] = _journal_hash(payload)
         return payload
 
     def _validated_payload(
@@ -127,10 +199,13 @@ class FastActionRecoveryJournal:
         float,
         int,
         str,
+        int,
+        str,
+        str,
     ]:
         if not isinstance(payload, dict):
             raise ValueError("fast_action_journal_invalid")
-        expected_keys = {
+        base_keys = {
             "schema",
             "updatedAt",
             "actions",
@@ -139,12 +214,25 @@ class FastActionRecoveryJournal:
             "lastErrorCode",
             "policy",
         }
+        schema = clean_text(payload.get("schema"))
+        expected_keys = set(base_keys)
+        if schema == FAST_ACTION_RECOVERY_SCHEMA:
+            expected_keys.update(
+                {
+                    "generation",
+                    "previousHash",
+                    "journalHash",
+                }
+            )
         policy = payload.get("policy")
         actions = payload.get("actions")
         if (
             set(payload) != expected_keys
-            or payload.get("schema")
-            != FAST_ACTION_RECOVERY_SCHEMA
+            or schema
+            not in {
+                FAST_ACTION_RECOVERY_SCHEMA,
+                FAST_ACTION_RECOVERY_LEGACY_SCHEMA,
+            }
             or not isinstance(policy, dict)
             or set(policy)
             != {
@@ -161,6 +249,30 @@ class FastActionRecoveryJournal:
             or len(actions) > self.max_actions
         ):
             raise ValueError("fast_action_journal_invalid")
+        generation = 0
+        previous_hash = (
+            FAST_ACTION_RECOVERY_CHAIN_GENESIS
+        )
+        journal_hash = ""
+        if schema == FAST_ACTION_RECOVERY_SCHEMA:
+            generation = _nonnegative_int(
+                payload.get("generation")
+            )
+            previous_hash = _valid_sha256(
+                payload.get("previousHash")
+            )
+            journal_hash = _valid_sha256(
+                payload.get("journalHash")
+            )
+            if (
+                generation < 1
+                or not previous_hash
+                or not journal_hash
+                or journal_hash != _journal_hash(payload)
+            ):
+                raise ValueError(
+                    "fast_action_journal_integrity_failed"
+                )
         _finite_nonnegative(payload.get("updatedAt"))
         last_recovery_at = _finite_nonnegative(
             payload.get("lastRecoveryAt")
@@ -225,12 +337,116 @@ class FastActionRecoveryJournal:
             last_recovery_at,
             last_recovery_count,
             last_error_code,
+            generation,
+            previous_hash,
+            journal_hash,
+        )
+
+    def _load_head(self) -> dict[str, Any] | None:
+        path = self.head_path
+        if not path.exists() and not path.is_symlink():
+            return None
+        if (
+            path.is_symlink()
+            or not path.is_file()
+            or path.stat().st_size
+            > DEFAULT_FAST_ACTION_RECOVERY_MAX_BYTES
+        ):
+            raise ValueError("fast_action_head_invalid")
+        payload = json.loads(
+            path.read_text(encoding="utf-8")
+        )
+        if (
+            not isinstance(payload, dict)
+            or set(payload)
+            != {
+                "schema",
+                "generation",
+                "journalHash",
+                "updatedAt",
+                "contentFree",
+            }
+            or payload.get("schema")
+            != FAST_ACTION_RECOVERY_HEAD_SCHEMA
+            or payload.get("contentFree") is not True
+        ):
+            raise ValueError("fast_action_head_invalid")
+        generation = _nonnegative_int(
+            payload.get("generation")
+        )
+        journal_hash = _valid_sha256(
+            payload.get("journalHash")
+        )
+        updated_at = _finite_nonnegative(
+            payload.get("updatedAt")
+        )
+        if not journal_hash:
+            raise ValueError("fast_action_head_invalid")
+        return {
+            "generation": generation,
+            "journalHash": journal_hash,
+            "updatedAt": updated_at,
+        }
+
+    def _write_head(
+        self,
+        *,
+        generation: int,
+        journal_hash: str,
+    ) -> None:
+        atomic_json_write(
+            self.head_path,
+            {
+                "schema": FAST_ACTION_RECOVERY_HEAD_SCHEMA,
+                "generation": generation,
+                "journalHash": journal_hash,
+                "updatedAt": self._now(),
+                "contentFree": True,
+            },
+            durable=True,
+        )
+
+    def _adopt_head_anchor(
+        self,
+        head: dict[str, Any] | None,
+    ) -> None:
+        if head is None:
+            return
+        self._generation = int(head["generation"])
+        self._journal_hash = str(head["journalHash"])
+        self._head_state = "orphaned"
+
+    def _mark_load_failure(
+        self,
+        *,
+        state: str,
+        head: dict[str, Any] | None,
+    ) -> None:
+        self._actions = {}
+        self._adopt_head_anchor(head)
+        self._load_state = state
+        self._integrity = "failed"
+        self._last_error_code = (
+            "fast_action_recovery_write_failed"
+            if state == "error"
+            else "fast_action_recovery_journal_corrupt"
         )
 
     def _load(self) -> None:
-        if not self.path.exists() and not self.path.is_symlink():
-            return
+        head: dict[str, Any] | None = None
         try:
+            head = self._load_head()
+            path_missing = (
+                not self.path.exists()
+                and not self.path.is_symlink()
+            )
+            if path_missing:
+                if head is not None:
+                    raise ValueError(
+                        "fast_action_journal_missing_after_head"
+                    )
+                self._write()
+                return
             if (
                 self.path.is_symlink()
                 or not self.path.is_file()
@@ -240,38 +456,139 @@ class FastActionRecoveryJournal:
                 raise ValueError(
                     "fast_action_journal_invalid"
                 )
-            payload = json.loads(
-                self.path.read_text(encoding="utf-8")
-            )
+            raw_text = self.path.read_text(encoding="utf-8")
+            payload = json.loads(raw_text)
             (
-                self._actions,
-                self._last_recovery_at,
-                self._last_recovery_count,
-                self._last_error_code,
+                actions,
+                last_recovery_at,
+                last_recovery_count,
+                last_error_code,
+                generation,
+                previous_hash,
+                journal_hash,
             ) = self._validated_payload(payload)
+            schema = clean_text(payload.get("schema"))
+            if schema == FAST_ACTION_RECOVERY_LEGACY_SCHEMA:
+                journal_hash = _legacy_journal_hash(raw_text)
+                if head is None:
+                    self._write_head(
+                        generation=0,
+                        journal_hash=journal_hash,
+                    )
+                elif (
+                    int(head["generation"]) != 0
+                    or str(head["journalHash"])
+                    != journal_hash
+                ):
+                    raise ValueError(
+                        "fast_action_legacy_head_mismatch"
+                    )
+                generation = 0
+                integrity = "legacy_anchored"
+            else:
+                if head is None:
+                    if (
+                        generation != 1
+                        or previous_hash
+                        != FAST_ACTION_RECOVERY_CHAIN_GENESIS
+                    ):
+                        raise ValueError(
+                            "fast_action_head_missing"
+                        )
+                    self._write_head(
+                        generation=generation,
+                        journal_hash=journal_hash,
+                    )
+                elif (
+                    generation == int(head["generation"])
+                    and journal_hash
+                    == str(head["journalHash"])
+                ):
+                    pass
+                elif (
+                    generation
+                    == int(head["generation"]) + 1
+                    and previous_hash
+                    == str(head["journalHash"])
+                ):
+                    self._write_head(
+                        generation=generation,
+                        journal_hash=journal_hash,
+                    )
+                else:
+                    raise ValueError(
+                        "fast_action_rollback_or_head_mismatch"
+                    )
+                integrity = "verified"
+            self._actions = actions
+            self._last_recovery_at = last_recovery_at
+            self._last_recovery_count = last_recovery_count
+            self._last_error_code = last_error_code
+            self._generation = generation
+            self._journal_hash = journal_hash
+            self._integrity = integrity
+            self._head_state = "current"
+            self._load_state = "ready"
         except (
-            OSError,
             UnicodeError,
             json.JSONDecodeError,
             TypeError,
             ValueError,
         ):
-            self._actions = {}
-            self._load_state = "corrupt"
-            self._last_error_code = (
-                "fast_action_recovery_journal_corrupt"
+            self._mark_load_failure(
+                state="corrupt",
+                head=head,
+            )
+        except OSError:
+            self._mark_load_failure(
+                state="error",
+                head=head,
             )
 
+    @staticmethod
+    def _write_target_allowed(path: Path) -> bool:
+        return bool(
+            not path.is_symlink()
+            and (
+                not path.exists()
+                or path.is_file()
+            )
+        )
+
     def _write(self) -> None:
+        generation = self._generation + 1
+        payload = self._payload(
+            generation=generation,
+            previous_hash=self._journal_hash,
+        )
+        journal_hash = str(payload["journalHash"])
         try:
+            if not self._write_target_allowed(
+                self.path
+            ) or not self._write_target_allowed(
+                self.head_path
+            ):
+                raise OSError(
+                    "fast_action_recovery_target_rejected"
+                )
             atomic_json_write(
                 self.path,
-                self._payload(),
+                payload,
                 durable=True,
             )
+            self._write_head(
+                generation=generation,
+                journal_hash=journal_hash,
+            )
+            self._generation = generation
+            self._journal_hash = journal_hash
+            self._integrity = "verified"
+            self._head_state = "current"
             self._load_state = "ready"
         except Exception:
             self._load_state = "error"
+            self._integrity = "failed"
+            self._head_state = "write_failed"
             self._last_error_code = (
                 "fast_action_recovery_write_failed"
             )
@@ -295,10 +612,7 @@ class FastActionRecoveryJournal:
             self._actions[validated_id] = {
                 "actionId": validated_id,
                 "state": "running",
-                "startedAt": max(
-                    0.0,
-                    float(self.wall_time()),
-                ),
+                "startedAt": self._now(),
                 "expectedGeneration": 0,
             }
             try:
@@ -379,7 +693,12 @@ class FastActionRecoveryJournal:
         with self._lock:
             return bool(
                 not self.enabled
-                or self._load_state == "ready"
+                or (
+                    self._load_state == "ready"
+                    and self._head_state == "current"
+                    and self._integrity
+                    in {"legacy_anchored", "verified"}
+                )
             )
 
     def recovery_decision(
@@ -488,10 +807,7 @@ class FastActionRecoveryJournal:
                 self._load_state,
             )
             self._actions = {}
-            self._last_recovery_at = max(
-                0.0,
-                float(self.wall_time()),
-            )
+            self._last_recovery_at = self._now()
             self._last_recovery_count = count
             self._last_error_code = code
             self._load_state = "ready"
@@ -503,8 +819,14 @@ class FastActionRecoveryJournal:
                     self._last_recovery_at,
                     self._last_recovery_count,
                     self._last_error_code,
-                    self._load_state,
+                    _previous_load_state,
                 ) = previous
+                self._load_state = "error"
+                self._integrity = "failed"
+                self._head_state = "write_failed"
+                self._last_error_code = (
+                    "fast_action_recovery_write_failed"
+                )
                 raise
             return self.public_status()
 
@@ -524,6 +846,16 @@ class FastActionRecoveryJournal:
                 "schema": FAST_ACTION_RECOVERY_SCHEMA,
                 "enabled": self.enabled,
                 "state": state,
+                "integrity": self._integrity,
+                "generation": self._generation,
+                "headState": self._head_state,
+                "rollbackProtected": bool(
+                    self.enabled
+                    and self._load_state == "ready"
+                    and self._head_state == "current"
+                    and self._integrity
+                    in {"legacy_anchored", "verified"}
+                ),
                 "pendingCount": len(self._actions),
                 "lastRecoveryAt": (
                     self._last_recovery_at
@@ -545,6 +877,9 @@ class FastActionRecoveryJournal:
 
 __all__ = [
     "DEFAULT_FAST_ACTION_RECOVERY_MAX_ACTIONS",
+    "FAST_ACTION_RECOVERY_CHAIN_GENESIS",
+    "FAST_ACTION_RECOVERY_HEAD_SCHEMA",
+    "FAST_ACTION_RECOVERY_LEGACY_SCHEMA",
     "FAST_ACTION_RECOVERY_NOTICE",
     "FAST_ACTION_RECOVERY_SCHEMA",
     "FastActionRecoveryJournal",

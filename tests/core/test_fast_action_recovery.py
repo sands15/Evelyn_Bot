@@ -18,9 +18,12 @@ if str(RUNTIME_ROOT) not in sys.path:
     sys.path.insert(0, str(RUNTIME_ROOT))
 
 from evelyn_core.fast_action_recovery import (  # noqa: E402
+    FAST_ACTION_RECOVERY_HEAD_SCHEMA,
+    FAST_ACTION_RECOVERY_LEGACY_SCHEMA,
     FAST_ACTION_RECOVERY_SCHEMA,
     FastActionRecoveryJournal,
 )
+from evelyn_core import fast_action_recovery as recovery_module  # noqa: E402
 from evelyn_core.fast_control_continuity import (  # noqa: E402
     FastControlContinuityOwner,
 )
@@ -82,6 +85,9 @@ class FastActionRecoveryTests(unittest.TestCase):
             set(payload),
             {
                 "schema",
+                "generation",
+                "previousHash",
+                "journalHash",
                 "updatedAt",
                 "actions",
                 "lastRecoveryAt",
@@ -93,6 +99,15 @@ class FastActionRecoveryTests(unittest.TestCase):
         self.assertEqual(
             payload["schema"],
             FAST_ACTION_RECOVERY_SCHEMA,
+        )
+        self.assertEqual(payload["generation"], 2)
+        self.assertRegex(
+            payload["previousHash"],
+            r"^[0-9a-f]{64}$",
+        )
+        self.assertRegex(
+            payload["journalHash"],
+            r"^[0-9a-f]{64}$",
         )
         self.assertEqual(
             set(payload["actions"][0]),
@@ -128,6 +143,214 @@ class FastActionRecoveryTests(unittest.TestCase):
         )
         self.assertNotIn("사용자 질문", serialized)
         self.assertNotIn("최종 답변", serialized)
+        head = json.loads(
+            journal.head_path.read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            set(head),
+            {
+                "schema",
+                "generation",
+                "journalHash",
+                "updatedAt",
+                "contentFree",
+            },
+        )
+        self.assertEqual(
+            head["schema"],
+            FAST_ACTION_RECOVERY_HEAD_SCHEMA,
+        )
+        self.assertEqual(
+            head["generation"],
+            payload["generation"],
+        )
+        self.assertEqual(
+            head["journalHash"],
+            payload["journalHash"],
+        )
+        self.assertTrue(
+            journal.public_status()["rollbackProtected"]
+        )
+
+    def test_empty_chain_is_initialized_and_protected(
+        self,
+    ) -> None:
+        journal = self.journal()
+
+        status = journal.public_status()
+
+        self.assertTrue(self.path.is_file())
+        self.assertTrue(journal.head_path.is_file())
+        self.assertEqual(status["generation"], 1)
+        self.assertEqual(status["integrity"], "verified")
+        self.assertEqual(status["headState"], "current")
+        self.assertTrue(status["rollbackProtected"])
+
+    def test_missing_journal_after_head_fails_closed(
+        self,
+    ) -> None:
+        journal = self.journal()
+        journal.begin("fast-action-1")
+        self.path.unlink()
+
+        restored = self.journal()
+
+        status = restored.public_status()
+        self.assertEqual(status["state"], "corrupt")
+        self.assertEqual(status["integrity"], "failed")
+        self.assertEqual(status["headState"], "orphaned")
+        self.assertFalse(status["rollbackProtected"])
+        self.assertTrue(
+            restored.recovery_decision(
+                continuity_generation=0,
+            )["noticeRequired"]
+        )
+        with self.assertRaises(RuntimeError):
+            restored.begin("fast-action-2")
+
+    def test_rolled_back_journal_is_rejected_by_current_head(
+        self,
+    ) -> None:
+        journal = self.journal()
+        journal.begin("fast-action-1")
+        old_journal = self.path.read_text(encoding="utf-8")
+        journal.prepare_terminal(
+            "fast-action-1",
+            expected_generation=3,
+        )
+        self.path.write_text(old_journal, encoding="utf-8")
+
+        restored = self.journal()
+
+        status = restored.public_status()
+        self.assertEqual(status["state"], "corrupt")
+        self.assertEqual(status["headState"], "orphaned")
+        self.assertFalse(status["rollbackProtected"])
+
+    def test_missing_head_after_chain_advance_fails_closed(
+        self,
+    ) -> None:
+        journal = self.journal()
+        journal.begin("fast-action-1")
+        journal.head_path.unlink()
+
+        restored = self.journal()
+
+        status = restored.public_status()
+        self.assertEqual(status["state"], "corrupt")
+        self.assertEqual(status["integrity"], "failed")
+        self.assertEqual(status["headState"], "missing")
+        self.assertFalse(status["rollbackProtected"])
+
+    def test_self_hash_mismatch_fails_closed(
+        self,
+    ) -> None:
+        journal = self.journal()
+        journal.begin("fast-action-1")
+        payload = json.loads(
+            self.path.read_text(encoding="utf-8")
+        )
+        payload["actions"][0]["startedAt"] = 2000.0
+        self.path.write_text(
+            json.dumps(
+                payload,
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+
+        restored = self.journal()
+
+        status = restored.public_status()
+        self.assertEqual(status["state"], "corrupt")
+        self.assertEqual(status["integrity"], "failed")
+        self.assertFalse(status["rollbackProtected"])
+
+    def test_one_ahead_journal_recovers_after_head_write_crash(
+        self,
+    ) -> None:
+        journal = self.journal()
+        failed = False
+        real_write = recovery_module.atomic_json_write
+
+        def write(path, payload, **kwargs):
+            nonlocal failed
+            if Path(path) == journal.head_path and not failed:
+                failed = True
+                raise OSError("private head path")
+            return real_write(path, payload, **kwargs)
+
+        with patch.object(
+            recovery_module,
+            "atomic_json_write",
+            side_effect=write,
+        ):
+            with self.assertRaises(OSError):
+                journal.begin("fast-action-1")
+
+        self.assertEqual(
+            journal.public_status()["state"],
+            "error",
+        )
+        restored = self.journal()
+        status = restored.public_status()
+        self.assertEqual(status["state"], "pending")
+        self.assertEqual(status["integrity"], "verified")
+        self.assertEqual(status["headState"], "current")
+        self.assertTrue(status["rollbackProtected"])
+        self.assertTrue(
+            restored.recovery_decision(
+                continuity_generation=0,
+            )["noticeRequired"]
+        )
+
+    def test_v1_journal_is_anchored_then_migrated(
+        self,
+    ) -> None:
+        self.path.parent.mkdir(parents=True)
+        self.path.write_text(
+            json.dumps(
+                {
+                    "schema": FAST_ACTION_RECOVERY_LEGACY_SCHEMA,
+                    "updatedAt": 1000.0,
+                    "actions": [],
+                    "lastRecoveryAt": 0.0,
+                    "lastRecoveryCount": 0,
+                    "lastErrorCode": "",
+                    "policy": {
+                        "contentFree": True,
+                        "rawText": False,
+                        "automaticRetry": False,
+                        "maxActions": 40,
+                    },
+                },
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+
+        journal = self.journal()
+
+        anchored = journal.public_status()
+        self.assertEqual(anchored["generation"], 0)
+        self.assertEqual(
+            anchored["integrity"],
+            "legacy_anchored",
+        )
+        self.assertTrue(anchored["rollbackProtected"])
+        journal.begin("fast-action-1")
+        migrated = json.loads(
+            self.path.read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            migrated["schema"],
+            FAST_ACTION_RECOVERY_SCHEMA,
+        )
+        self.assertEqual(migrated["generation"], 1)
 
     def test_generation_proves_terminal_delivery_after_restart(
         self,

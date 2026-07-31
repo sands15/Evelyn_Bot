@@ -45,11 +45,14 @@ Fast Control의 background 조사 작업은 시작 답변만 복구되고 실제
 `asyncio.Task`는 재시작 뒤 복구할 수 없다. 이를 진행 중인 것처럼 남기거나
 자동 재실행하지 않기 위해
 `runtime_artifacts/fast_control_actions/recovery.json`에
-`fast_control.action-recovery.v1` 표식을 durable 기록한다.
+`fast_control.action-recovery.v2` 표식을 durable 기록하고,
+`recovery.head.json`의 content-free head가 현재 generation과 journal hash를
+고정한다.
 
 - 최대 40개의 `actionId`, `running|terminal_committing`, 시작 시각,
-  예상 Fast continuity generation만 저장한다. 사용자 요청, 시작·최종 답변,
-  tool evidence, 오류 원문과 경로는 저장하지 않는다.
+  예상 Fast continuity generation과 journal generation/이전 hash/현재 hash만
+  저장한다. 사용자 요청, 시작·최종 답변, tool evidence, 오류 원문과 경로는
+  저장하지 않는다.
 - background action의 시작 응답을 공개하거나 runner를 launch하기 전에
   `running` 표식을 먼저 `fsync`·원자 교체한다. 기록할 수 없으면
   “작업을 시작한다”는 응답을 만들지 않는다.
@@ -68,8 +71,19 @@ Fast Control의 background 조사 작업은 시작 답변만 복구되고 실제
 - journal이 손상되면 새 background action을 시작하지 않는다. 재시작
   reconciliation은 원문 없는 고정 안내가 durable해진 뒤에만 손상 표식을
   빈 exact-schema 상태로 교체한다.
+- journal은 먼저, head는 다음에 durable 교체한다. journal만 정확히 한
+  generation 앞서고 `previousHash`가 현재 head를 가리키면 head 교체 직전
+  crash로만 인정해 head를 복구한다. 최초 빈 generation 1 journal의 genesis
+  연결도 같은 bootstrap crash 경계로 anchor한다. head가 생긴 뒤 journal
+  삭제, 진행 표식 생성 뒤 head 삭제, self-hash 불일치, 과거 journal rollback과
+  그 밖의 generation 불일치는 fail-closed한다.
+- 기존 v1 exact-schema journal은 raw byte hash로 generation 0 head에 먼저
+  고정하고, 다음 mutation부터 v2 chain으로 연결한다. journal과 head를 함께
+  다시 쓰거나 함께 삭제할 수 있는 filesystem 관리자는 이 로컬 증거 경계
+  밖이다.
 - 공개 `actions.recovery` 상태는 pending/recovery count, 고정 오류 코드와
-  `contentFree=true`, `rawText=false`, `automaticRetry=false`만 포함한다.
+  generation/integrity/head 상태, `rollbackProtected`, `contentFree=true`,
+  `rawText=false`, `automaticRetry=false`만 포함한다.
 
 이 분리는 두 프로세스가 하나의 checkpoint를 경쟁해서 덮어쓰는 것을 막는
 single-writer 경계다. surface 전환은 별도 mutation owner를 추가하지 않고
@@ -362,6 +376,8 @@ transcript, 사용자·guild/channel/message/session/turn ID, 경로와 예외
   `os._exit` 재시작 중단 안내
 - 손상·쓰기 실패 action recovery journal의 fail-closed 시작 차단,
   content-free 공개 상태와 자동 재시도 금지
+- action recovery v2의 빈 chain 초기화, journal/head 삭제, 과거 journal
+  rollback, self-hash, one-generation head 지연 복구와 v1 anchor/migration
 - read-only cross-surface reader의 current hash/head 검증, 변조·lagging
   head·symlink·stale·손상 revocation 거부와 무변경 파일 증거
 - Discord guild/user exact scope, 다른 member/server 제외와 content-free
