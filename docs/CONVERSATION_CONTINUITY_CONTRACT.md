@@ -113,6 +113,14 @@ rollback protection 누락, 이전 commit의 실패 지표는 모두 고정
 - 검색 후속 답변은 Discord text 전달 직후 한 번만 history와 checkpoint를
   기록한다. 같은 답변의 선택적 voice가 실패해도 중복 기록하지 않는다.
 - 자율 후속 답변과 Discord 명령 응답도 실제 전송·기록 뒤 즉시 commit한다.
+  Discord 명령은 composition이 주입한 단일 context owner가 성공한 plain-text
+  `ctx.send()`를 가로채므로 도움말·상태·접두사·자율 제어·채널 설정·초기화,
+  Minecraft와 권한 거부 응답이 모두 같은 경계를 통과한다.
+- Discord 명령 전송 자체가 실패하면 history와 checkpoint를 변경하지 않는다.
+  전송 성공 뒤 continuity 기록이 실패해도 이미 전달된 응답을 재전송하거나
+  command 실패로 바꾸지 않고 고정 event와 exception type만 기록한다.
+  Minecraft handler의 이전 수동 기록은 제거해 응답당 기록·commit을 한 번으로
+  제한한다.
 - 음성 답변은 재생 완료 뒤 history, active session, room owner를 반영하고
   즉시 commit한다.
 - Discord text/command, Control Page 일반·검색, 검색 후속, 자율 후속과
@@ -234,6 +242,8 @@ transcript, 사용자·guild/channel/message/session/turn ID, 경로와 예외
   timeout·5xx·상태 없는 ambiguous failure의 무재전송
 - Control Page 일반·검색, 검색 후속, 자율 후속, Discord 명령과 음성 완료
   경로의 전달·기록·commit 순서
+- Discord 명령 19개와 권한 거부 응답의 단일 post-delivery owner,
+  전송 실패 시 무기록, Minecraft 중복 commit 방지
 - commit 실패 시 중복 전송 없이 고정 오류 코드만 기록
 - Runtime Errors의 privacy 및 stale/current-error 판정
 - 완료 턴 commit의 20표본 warming/warning 판정, bounded percentile과

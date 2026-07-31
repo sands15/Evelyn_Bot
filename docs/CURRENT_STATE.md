@@ -63,6 +63,10 @@ Source branch: `codex/dependency-config-hardening` through `2272668`
   - Control Page 일반·검색, 검색 후속, 자율 후속, Discord 명령, 음성 재생
     완료도 같은 commit 계약을 사용한다. 실패 시 중복 전송하지 않고
     `conversation_continuity_commit_failed`만 기록한다.
+  - Discord 명령 19개와 권한 거부 응답은 composition이 주입한 단일
+    post-delivery context owner를 통과한다. 성공한 plain-text 전송만
+    history와 checkpoint에 한 번 기록하며, 전송 실패는 기록하지 않고
+    Minecraft의 이전 수동 기록도 제거해 이중 commit을 막는다.
   - 모든 전달 surface는 callback 반환만으로 durable 성공을 선언하지 않는다.
     status schema, ready state, current head, verified integrity, rollback
     protection, 양수 generation/session count와 이번 commit의 성공 metric을
@@ -931,6 +935,18 @@ Source branch: `codex/dependency-config-hardening` through `2272668`
   `sha256:9e0b178be17328a9ffec393b72e31343b9dfd645dba9f1d8da955ac1f6e3b93d`는
   내부 `compileall`, `pip check`, receipt 계약 import와 이미지 내부 집중
   테스트 61개를 통과했다. 실제 Discord/Main 서비스는 시작하지 않았다.
+- `4193075`는 Minecraft 네 명령에만 있던 수동 continuity 기록을
+  composition의 단일 post-delivery command context로 올렸다. 도움말·상태·
+  접두사·자율 제어·채널 설정·초기화·음성 제어와 권한 거부까지 모든 등록
+  명령 응답을 포괄하며, 성공한 전송 뒤 한 번만 기록한다.
+- 새 owner 집중 테스트 31개, Discord I/O 105개와 surface 공통
+  commit/receipt/restart 테스트 70개가 공식 Discord 이미지에서 통과했다.
+  실제 Discord나 무거운 음성·LLM 서비스는 시작하지 않았다.
+- 새 Discord/Main image
+  `sha256:368d5decb1441a9b5b2b5ab9e5e5991da62814116c09cbfb12546b974ac2f878`는
+  이미지 내부 `compileall`, `pip check`와 읽기 전용 테스트 마운트로 실행한
+  집중 테스트 36개를 통과했다. 이미지는 시작하지 않았고 실행 중인 Bot API와
+  Control Page 두 서비스는 그대로 healthy다.
 
 ## Operational boundaries
 
