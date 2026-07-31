@@ -10,6 +10,7 @@ from control_page_runtime_health import (
     is_control_plane_service_ready_state,
 )
 
+from .autonomy_failure_contract import autonomy_last_error
 from .control_page_contracts import build_control_page_panel_state_payload
 from .minecraft_mode_composition import (
     MINECRAFT_CONNECTED_OUTCOME,
@@ -1720,7 +1721,7 @@ def build_control_page_autonomy_reply_payload(
             f"- 계획: {clean_text(plan) or '없음'}",
             f"- drive: {drive_line}",
             f"- 실패 횟수: {int(failure_count)}",
-            f"- 마지막 오류: {clean_text(last_error or '') or '없음'}",
+            f"- 마지막 오류: {autonomy_last_error(last_error) or '없음'}",
             f"- Minecraft 자율 행동: {command_status(minecraft_enabled)}",
             f"- 허용 액션: {allowed}",
         ]

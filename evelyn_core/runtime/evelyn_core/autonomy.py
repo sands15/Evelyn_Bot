@@ -13,6 +13,13 @@ from .autonomy_authorization import (
     ASSISTANT_AUTONOMY_ACTIONS,
     MINECRAFT_AUTONOMY_ACTIONS,
 )
+from .autonomy_failure_contract import (
+    AUTONOMY_CYCLE_FAILED,
+    AUTONOMY_EXECUTOR_EXECUTE_FAILED,
+    autonomy_failure_payload,
+    autonomy_last_error,
+    sanitize_autonomy_observation,
+)
 from .autonomy_outcome_evidence import autonomy_outcome_verified
 from .memory import cognitive_state_path, read_json_file, write_json_file
 from .minecraft_threat import has_interrupting_threat, has_survival_threat, highest_threat_score, threat_count, threat_distance
@@ -183,13 +190,17 @@ class AutonomyEngine:
             ),
             safety_mode=clean_text(str(runtime.get("safety_mode", "constrained"))) or "constrained",
             allowed_actions=[],
-            last_observation=runtime.get("last_observation") if isinstance(runtime.get("last_observation"), dict) else {},
+            last_observation=sanitize_autonomy_observation(
+                runtime.get("last_observation")
+            ),
             current_goal=None if stale_plan else (AutonomyGoal(**current_goal) if isinstance(current_goal, dict) and current_goal.get("kind") else None),
             current_plan=None if stale_plan else (AutonomyPlan(**current_plan) if isinstance(current_plan, dict) and current_plan.get("goal_kind") else None),
             last_step_result={} if stale_plan else last_step_result,
             last_router_refresh_result=last_router_refresh_result,
             drive_state=drive_state,
-            last_error=clean_text(str(runtime.get("last_error", ""))),
+            last_error=autonomy_last_error(
+                runtime.get("last_error")
+            ),
             failure_count=int(runtime.get("failure_count", 0) or 0),
             updated_at=float(runtime.get("updated_at", time.time()) or time.time()),
         )
@@ -197,6 +208,12 @@ class AutonomyEngine:
     def persist_state(self) -> None:
         path = cognitive_state_path(self.guild_id, scope_type="system", scope_key=self.memory_scope_key)
         payload = read_json_file(path)
+        self.state.last_observation = sanitize_autonomy_observation(
+            self.state.last_observation
+        )
+        self.state.last_error = autonomy_last_error(
+            self.state.last_error
+        )
         payload["autonomy_runtime"] = {
             "enabled": self.state.enabled,
             "status": self.state.status,
@@ -282,14 +299,18 @@ class AutonomyEngine:
                     cycle_result = await self.run_cycle()
                 except asyncio.CancelledError:
                     raise
-                except Exception as exc:
-                    self.state.last_error = clean_text(repr(exc))
+                except Exception:
+                    self.state.last_error = AUTONOMY_CYCLE_FAILED
                     self.state.failure_count += 1
                     self.state.status = "error"
                     self.state.updated_at = time.time()
                     self.persist_state()
                     if self.notify is not None:
-                        await self.notify(f"[자율봇] 오류: {self.state.last_error}")
+                        with contextlib.suppress(Exception):
+                            await self.notify(
+                                "[자율봇] 오류: "
+                                f"{AUTONOMY_CYCLE_FAILED}"
+                            )
                     await asyncio.sleep(self.poll_interval_sec)
                     continue
                 await asyncio.sleep(self.next_poll_delay(cycle_result))
@@ -358,7 +379,9 @@ class AutonomyEngine:
                 self._blocked_counts.pop(action_key, None)
         if self.should_replan(step_result):
             planned = self.replan_goal(selected_goal, observation, step_result)
-        self.state.last_observation = observation
+        self.state.last_observation = sanitize_autonomy_observation(
+            observation
+        )
         self.state.current_goal = selected_goal
         self.state.current_plan = planned
         self.state.last_step_result = step_result or {}
@@ -373,13 +396,31 @@ class AutonomyEngine:
                 "authorization_changed_during_action",
             }
         )
+        executor_failed = bool(
+            isinstance(step_result, dict)
+            and step_result.get("reason")
+            == AUTONOMY_EXECUTOR_EXECUTE_FAILED
+        )
+        if executor_failed:
+            self.state.last_error = AUTONOMY_EXECUTOR_EXECUTE_FAILED
+            self.state.failure_count += 1
         self.state.status = (
             "authorization_required"
             if authorization_blocked
-            else ("running" if self.state.enabled else "idle")
+            else (
+                "error"
+                if executor_failed
+                else ("running" if self.state.enabled else "idle")
+            )
         )
         self.state.updated_at = time.time()
         self.persist_state()
+        if executor_failed and self.notify is not None:
+            with contextlib.suppress(Exception):
+                await self.notify(
+                    "[자율봇] 오류: "
+                    f"{AUTONOMY_EXECUTOR_EXECUTE_FAILED}"
+                )
         return AutonomyCycleResult(
             observation=observation,
             needs=needs,
@@ -850,7 +891,26 @@ class AutonomyEngine:
                 },
                 authorization_grant_id=authorization_grant_id,
             )
-        result = await self.executor.execute_step(step)
+        try:
+            result = await self.executor.execute_step(step)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return self._record_action_result(
+                action_key,
+                {
+                    "status": "failed",
+                    "reason": AUTONOMY_EXECUTOR_EXECUTE_FAILED,
+                    "step": step,
+                    "verified": False,
+                    "failure": autonomy_failure_payload(
+                        code=AUTONOMY_EXECUTOR_EXECUTE_FAILED,
+                        phase="execute",
+                        action=action_key,
+                    ),
+                },
+                authorization_grant_id=authorization_grant_id,
+            )
         if isinstance(result, dict):
             result.setdefault("step", step)
             verified_outcome = autonomy_outcome_verified(

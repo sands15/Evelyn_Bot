@@ -112,6 +112,35 @@ class DiscordCommandHelperTests(unittest.TestCase):
         self.assertIn("- audit: unavailable", text)
         self.assertNotIn("must-not-render", text)
 
+    def test_autonomy_status_redacts_legacy_raw_error(self) -> None:
+        private = (
+            "Bearer status-secret "
+            "https://internal.example/private "
+            r"C:\Users\Admin\executor.py"
+        )
+
+        class State:
+            status = "error"
+            safety_mode = "constrained"
+            current_goal = None
+            current_plan = None
+            failure_count = 1
+            last_error = private
+            allowed_actions = []
+
+        text = build_autonomy_status_command_text(
+            State(),
+            minecraft_enabled=False,
+        )
+
+        self.assertIn(
+            "- last_error: autonomy_cycle_failed",
+            text,
+        )
+        self.assertNotIn("status-secret", text)
+        self.assertNotIn("internal.example", text)
+        self.assertNotIn("Users", text)
+
     def test_status_command_text_preserves_runtime_fields(self) -> None:
         text = build_status_command_text(
             model_name="main-model",

@@ -215,5 +215,48 @@ class DefaultAutonomyExecutorOutcomeTests(
         )
 
 
+class RoutedAutonomyExecutorFailureTests(
+    unittest.IsolatedAsyncioTestCase
+):
+    @classmethod
+    def setUpClass(cls) -> None:
+        if _SKIP_REASON:
+            raise unittest.SkipTest(_SKIP_REASON)
+
+    async def test_observe_failure_never_exposes_exception_text(
+        self,
+    ) -> None:
+        private = (
+            "Bearer routed-secret "
+            "https://internal.example/private "
+            r"C:\Users\Admin\executor.py"
+        )
+
+        class DefaultExecutor:
+            async def observe(self) -> dict:
+                return {"environment": "assistant"}
+
+        class FailingExecutor:
+            async def observe(self) -> dict:
+                raise RuntimeError(private)
+
+        executor = RoutedAutonomyExecutor(
+            default_executor=DefaultExecutor(),
+            executors={"minecraft": FailingExecutor()},
+        )
+        executor.enabled_domains = {"minecraft"}
+
+        observed = await executor.observe()
+        rendered = repr(observed)
+
+        self.assertNotIn("routed-secret", rendered)
+        self.assertNotIn("internal.example", rendered)
+        self.assertNotIn("Users", rendered)
+        self.assertEqual(
+            observed["executor_errors"]["minecraft"]["code"],
+            "autonomy_executor_observe_failed",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

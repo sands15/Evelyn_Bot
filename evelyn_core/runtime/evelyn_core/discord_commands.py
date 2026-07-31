@@ -4,6 +4,7 @@ import math
 from collections.abc import Callable, Iterable
 from typing import Any
 
+from .autonomy_failure_contract import autonomy_last_error
 from .minecraft_mode_composition import (
     MINECRAFT_CONNECTED_OUTCOME,
     minecraft_connection_confirmed,
@@ -200,7 +201,7 @@ def build_autonomy_status_command_text(
         f"- goal: {goal or '없음'}\n"
         f"- plan: {plan or '없음'}\n"
         f"- failures: {getattr(state, 'failure_count', 0)}\n"
-        f"- last_error: {getattr(state, 'last_error', None) or '없음'}\n"
+        f"- last_error: {autonomy_last_error(getattr(state, 'last_error', None)) or '없음'}\n"
         f"- minecraft_autonomy: {'on' if minecraft_enabled else 'off'}\n"
         f"- allowed: {allowed or '없음'}"
     )

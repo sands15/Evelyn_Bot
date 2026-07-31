@@ -576,6 +576,59 @@ class AutonomyEngineAuthorizationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(plan.cursor, 0)
         self.assertEqual(executor.execute_count, 0)
 
+    async def test_executor_exception_is_content_free_failed_outcome(
+        self,
+    ) -> None:
+        private = (
+            "Bearer execute-secret "
+            "https://internal.example/private "
+            r"C:\Users\Admin\executor.py"
+        )
+        self.manager.grant(
+            guild_id=7,
+            issuer_ref="discord_user:123",
+            source="discord_command",
+            scopes=["assistant:idle"],
+        )
+
+        class FailingExecutor(DummyExecutor):
+            async def execute_step(
+                self,
+                step: dict,
+            ) -> dict:
+                self.execute_count += 1
+                raise RuntimeError(private)
+
+        engine = self.engine(FailingExecutor())
+        engine.state.enabled = True
+        engine.state.allowed_actions = ["assistant:idle"]
+        plan = AutonomyPlan(
+            goal_kind="idle",
+            summary="wait",
+            steps=[{"domain": "assistant", "action": "idle"}],
+        )
+
+        result = await engine.execute_next_step(plan)
+        rendered = json.dumps(result)
+
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(
+            result["reason"],
+            "autonomy_executor_execute_failed",
+        )
+        self.assertFalse(result["verified"])
+        self.assertEqual(plan.cursor, 0)
+        self.assertNotIn("execute-secret", rendered)
+        self.assertNotIn("internal.example", rendered)
+        self.assertNotIn("Users", rendered)
+        outcome = [
+            row
+            for row in self.read_events()
+            if row["event"] == "action_outcome"
+        ][-1]
+        self.assertEqual(outcome["outcomeStatus"], "failed")
+        self.assertFalse(outcome["verified"])
+
     async def test_grant_replacement_during_action_blocks_plan_progress(
         self,
     ) -> None:

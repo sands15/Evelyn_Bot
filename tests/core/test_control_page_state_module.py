@@ -960,6 +960,32 @@ class ControlPageStateModuleTests(unittest.TestCase):
         self.assertIn("- Minecraft 자율 행동: 켜짐", text)
         self.assertIn("- 허용 액션: observe, speak, move, search, remember, wait, ...", text)
 
+    def test_autonomy_reply_redacts_legacy_raw_error(self) -> None:
+        private = (
+            "Bearer control-secret "
+            "https://internal.example/private "
+            r"C:\Users\Admin\executor.py"
+        )
+        text = build_control_page_autonomy_reply_payload(
+            status="error",
+            safety_mode="constrained",
+            goal="",
+            plan="",
+            drive=None,
+            failure_count=1,
+            last_error=private,
+            minecraft_enabled=False,
+            allowed_actions=[],
+        )
+
+        self.assertIn(
+            "- 마지막 오류: autonomy_cycle_failed",
+            text,
+        )
+        self.assertNotIn("control-secret", text)
+        self.assertNotIn("internal.example", text)
+        self.assertNotIn("Users", text)
+
     def test_control_page_tool_execution_reply_payloads(self) -> None:
         self.assertEqual(control_page_discord_required_reply(), "그 명령은 Discord 연결이 필요해.")
         self.assertEqual(

@@ -4,6 +4,11 @@ from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
 from .autonomy import AutonomyExecutor
+from .autonomy_failure_contract import (
+    AUTONOMY_EXECUTOR_OBSERVE_FAILED,
+    AUTONOMY_FAILURE_DOMAINS,
+    autonomy_failure_payload,
+)
 from .autonomy_outcome_evidence import autonomy_outcome_verified
 from .text import clean_text
 
@@ -159,7 +164,11 @@ class RoutedAutonomyExecutor:
         self.enabled_domains: set[str] = set()
 
     def list_enabled_domains(self) -> list[str]:
-        return sorted(self.enabled_domains)
+        return sorted(
+            domain
+            for domain in self.enabled_domains
+            if domain in AUTONOMY_FAILURE_DOMAINS
+        )
 
     def is_domain_enabled(self, domain: str) -> bool:
         return clean_text(domain) in self.enabled_domains
@@ -167,7 +176,10 @@ class RoutedAutonomyExecutor:
     async def enable_domain(self, domain: str) -> bool:
         normalized = clean_text(domain)
         executor = self.executors.get(normalized)
-        if not normalized or executor is None:
+        if (
+            normalized not in AUTONOMY_FAILURE_DOMAINS
+            or executor is None
+        ):
             return False
         await executor.connect()
         self.enabled_domains.add(normalized)
@@ -208,8 +220,15 @@ class RoutedAutonomyExecutor:
                 continue
             try:
                 env_obs = await executor.observe()
-            except Exception as exc:
-                observed.setdefault("executor_errors", {})[name] = repr(exc)
+            except Exception:
+                failure = autonomy_failure_payload(
+                    code=AUTONOMY_EXECUTOR_OBSERVE_FAILED,
+                    phase="observe",
+                    domain=name,
+                )
+                observed.setdefault("executor_errors", {})[
+                    failure["domain"]
+                ] = failure
                 continue
             if not isinstance(env_obs, dict):
                 continue
