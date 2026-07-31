@@ -155,12 +155,13 @@ sandbox한 것은 아니다.
 wheel을 재확인한다. 새 이미지 GPU 모델 로드 smoke 전에는 배포 완료로 판정하지
 않는다.
 
-## P1 — Node/Minecraft 의존성 취약점 19개
+## P1 — Node/Minecraft 의존성 취약점 14개
 
-2026-07-31 새 Mindcraft 이미지의 `npm audit --omit=dev` 결과는
-moderate 14개, high 5개, critical 0개다. 2026-07-23의 production-only
-집계 moderate 11개보다 증가했다. 대상은 Mineflayer 인증/프로토콜 및
-플러그인 체인이다.
+2026-07-31 Mindcraft runtime의 ESLint를 10.8.0으로 올리고 실제 runtime
+config dependency를 명시적으로 고정한 새 이미지에서
+`npm audit --omit=dev` 결과는 moderate 14개, high/critical 0개다.
+기존 high 5개 ESLint/minimatch 체인은 제거됐다. 남은 대상은 Mineflayer
+인증/프로토콜 및 플러그인 체인이다.
 
 - 직접 의존성: `mineflayer`, `mineflayer-armor-manager`,
   `mineflayer-collectblock`, `mineflayer-pvp`

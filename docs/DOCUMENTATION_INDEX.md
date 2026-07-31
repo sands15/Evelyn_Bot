@@ -74,6 +74,10 @@ implemented behavior.
   - Mindcraft HTTP liveness와 실제 Minecraft 자율행동 readiness를 분리하는
     exact dependency, blocker, task contract, fail-closed 소비자 계약.
 
+- `docs/MINDCRAFT_MIGRATION.md`
+  - 현재 pinned Mindcraft runtime, Evelyn overlay, world lease, survival
+    controller와 generated-code lint gate의 빌드·운영 검증 기록.
+
 - `docs/VISION_EVIDENCE_CONTRACT.md`
   - 화면 관찰 요청과 실제 관찰 근거를 분리하는 `vision.evidence.v2`,
     15초 freshness, source-conflict fallback, scene/OCR별 충족 조건과

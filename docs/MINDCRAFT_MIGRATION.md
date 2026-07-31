@@ -53,9 +53,34 @@ patch and copies the custom runtime modules into the image.
 - Contract and regression suite passes 45 tests, including the Codex Gateway
   authentication sequence: missing token `401`, wrong token `401`, valid
   Bearer token `200`.
-- Production dependency audit reports no high or critical findings. Eleven
-  moderate findings remain in the upstream Mineflayer authentication chain,
-  with no available upstream fix in the pinned dependency graph.
+- Production dependency audit reports no high or critical findings. Fourteen
+  moderate findings remain in the upstream Mineflayer authentication/plugin
+  chain, with no safe compatible upstream fix currently proven.
+
+## Runtime generated-code lint gate
+
+The pinned upstream `Coder` uses ESLint before executing generated action code.
+The runtime image therefore owns ESLint and its flat-config dependencies as
+production dependencies rather than assuming upstream development packages are
+present.
+
+The 2026-07-31 hardening does the following:
+
+- pins ESLint `10.8.0`, `@eslint/js` `10.0.1`, `globals` `17.8.0`, and
+  `eslint-plugin-no-floating-promise` `2.0.0`;
+- runs the actual image `eslint.config.js` during every Docker build;
+- requires valid generated code to pass and an unawaited declared async call
+  to be rejected by `no-floating-promise/no-floating-promise`;
+- catches lint infrastructure failure inside `Coder._lintCode()` and returns a
+  fixed fail-closed result without executing generated code or logging the raw
+  exception.
+
+Image
+`sha256:56963ab15c8f98a9eee454bfdfe1feff14e118e68b85fe84e812ac278122e667`
+passed the build-time lint contract, direct patched-Coder allow/reject smoke,
+config-missing fail-closed smoke, `npm ls`, Node syntax, Python `compileall`,
+and `pip check`. Its production audit is moderate 14, high 0, critical 0.
+The image was staged only; the Mindcraft service was not started or replaced.
 
 ## Live cutover result
 

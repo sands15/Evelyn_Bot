@@ -2,7 +2,7 @@
 
 Document status: **Current**
 Last reviewed: 2026-07-31 KST
-Source branch: `codex/dependency-config-hardening` through `0b054ac`
+Source branch: `codex/dependency-config-hardening` through `bd0786d`
 
 이 문서는 현재 확인된 사실만 기록한다. 목표 구조와 과거 계획은 다른 설계/계획 문서를 사용한다.
 
@@ -198,6 +198,13 @@ Source branch: `codex/dependency-config-hardening` through `0b054ac`
 
 ## Deployment state
 
+- `bd0786d` 소스로 Mindcraft 이미지만 다시 빌드했다.
+  - Mindcraft:
+    `sha256:56963ab15c8f98a9eee454bfdfe1feff14e118e68b85fe84e812ac278122e667`
+  - ESLint 10.8.0, 실제 config dependency와 build-time runtime lint
+    smoke가 포함된다.
+  - 이미지는 빌드·검증만 했고 실행 중인 Mindcraft 서비스는 시작하거나
+    교체하지 않았다.
 - `0b054ac` 소스로 Bot API, Control Page, Discord와 Mindcraft 이미지를
   정식 Dockerfile에서 빌드했다.
   - Bot API:
@@ -321,6 +328,22 @@ Source branch: `codex/dependency-config-hardening` through `0b054ac`
   실행하지 않는다. Discord bot도 사용자 요청 없이 시작하지 않았다.
 
 ## Last runtime evidence
+
+2026-07-31 Mindcraft code-generation lint gate 복구 결과:
+
+- 이전 image의 실제 `Coder._lintCode()`는
+  `eslint-plugin-no-floating-promise`가 설치되지 않아
+  `ERR_MODULE_NOT_FOUND`로 중단되는 것을 재현했다.
+- runtime ESLint를 10.8.0으로 올리고 `@eslint/js`, `globals`,
+  `eslint-plugin-no-floating-promise`를 exact production dependency로
+  고정했다.
+- 새 이미지 빌드는 실제 `eslint.config.js`로 정상 코드를 허용하고 선언된
+  async 함수의 floating call을 거부한 뒤에만 완료된다.
+- 실제 patched `Coder._lintCode()`도 같은 허용·거부 계약을 통과했다.
+  config를 찾을 수 없는 cwd에서는 예외를 전파하거나 코드를 실행하지 않고
+  고정 문구로 fail-closed했다.
+- production audit은 이전 moderate 14/high 5에서 moderate 14/high 0,
+  critical 0으로 개선됐다.
 
 2026-07-31 Minecraft functional readiness 배포 후 비파괴 검증 결과:
 
@@ -510,8 +533,13 @@ Source branch: `codex/dependency-config-hardening` through `0b054ac`
 
 ## Verification state
 
-검증한 코드 기준점: `0b054ac`
+검증한 코드 기준점: `bd0786d`
 
+- current-source에서 Mindcraft 15개, Minecraft 79개, Docker 계약 16개를
+  통과했다.
+- 새 Mindcraft image의 build-time lint smoke, 실제 Coder 정상/거부 경로,
+  config-missing fail-closed 경로, `npm ls`, production audit,
+  Python `compileall`/`pip check`와 Node syntax를 통과했다.
 - 공식 Discord Python 환경의 current-source mount에서 focused 65개,
   Runtime 전체 373개(skip 2), Mindcraft 14개, Minecraft 79개,
   관련 Control Page 11개(skip 1)를 통과했다.
