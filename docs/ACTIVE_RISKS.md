@@ -4,11 +4,21 @@ Document status: **Current**
 Last reviewed: 2026-07-31 KST
 Evaluation stance: 실패 가능성과 검증 공백을 우선 기록
 
-## P0 — Voyager는 HTTP health와 기능 준비가 다르다
+## P0 — Minecraft functional readiness live E2E 대기
 
-마지막 확인에서 Voyager HTTP는 응답했지만 runner, bridge, Minecraft 경계는 준비되지 않았다. `healthy` 컨테이너만 보고 Minecraft 자동화가 가능하다고 판단하면 오판이다.
+Mindcraft HTTP liveness와 실제 Minecraft 자율행동 readiness는 이제 별도
+계약으로 판정한다. world lease, runner, fresh telemetry, Minecraft 연결,
+gated goal manager의 명령 게이트·explicit postcondition task contract,
+active autonomy 중 하나라도 없으면 `voyagerReady=false`다. 누락·모순된
+Mindcraft 계약도 fail-closed하며 고정 blocker만 공개한다.
 
-다음 조치: 실제 Minecraft 세션을 사용할 때 runner/bridge/TCP/task contract를 순서대로 검증한다.
+합성·이미지 내부 검증은 통과했지만 실제 Minecraft world에는 접속하지 않았다.
+따라서 lease 승인부터 runner 연결, 실제 task effect, 연결 단절과 재시작까지
+한 세션에서 readiness가 정확히 전이하는지는 아직 확인하지 못했다.
+
+다음 조치: 사용자가 별도 Minecraft 검증 세션을 시작할 때
+`blocked → starting → ready → blocked` 전이와 실제 world effect를
+Control Page, Runtime Health, Mindcraft telemetry에서 함께 대조한다.
 
 ## P0 — 승인된 자율행동 live E2E 검증 대기
 
@@ -145,10 +155,12 @@ sandbox한 것은 아니다.
 wheel을 재확인한다. 새 이미지 GPU 모델 로드 smoke 전에는 배포 완료로 판정하지
 않는다.
 
-## P1 — Node/Minecraft 의존성 취약점 11개
+## P1 — Node/Minecraft 의존성 취약점 19개
 
-2026-07-23 스테이징 이미지 `npm audit --omit=dev` 결과는 moderate 11개,
-high/critical 0개다. 대상은 Mineflayer 인증/프로토콜 및 플러그인 체인이다.
+2026-07-31 새 Mindcraft 이미지의 `npm audit --omit=dev` 결과는
+moderate 14개, high 5개, critical 0개다. 2026-07-23의 production-only
+집계 moderate 11개보다 증가했다. 대상은 Mineflayer 인증/프로토콜 및
+플러그인 체인이다.
 
 - 직접 의존성: `mineflayer`, `mineflayer-armor-manager`,
   `mineflayer-collectblock`, `mineflayer-pvp`

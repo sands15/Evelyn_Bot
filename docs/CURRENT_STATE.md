@@ -2,7 +2,7 @@
 
 Document status: **Current**
 Last reviewed: 2026-07-31 KST
-Source branch: `codex/dependency-config-hardening` through `5acdc83`
+Source branch: `codex/dependency-config-hardening` through `0b054ac`
 
 이 문서는 현재 확인된 사실만 기록한다. 목표 구조와 과거 계획은 다른 설계/계획 문서를 사용한다.
 
@@ -18,7 +18,14 @@ Source branch: `codex/dependency-config-hardening` through `5acdc83`
 - 핵심 준비 상태와 선택 기능 준비 상태를 분리했다.
   - `ok`: 필수 핵심 서비스 준비 여부
   - `fullyHealthy`: 선택 기능을 포함한 전체 건강 여부
-  - Voyager HTTP 응답과 실제 runner/bridge/Minecraft 준비 여부도 분리했다.
+  - Voyager/Mindcraft HTTP 응답과 실제 Minecraft 자율행동 준비 여부도
+    `minecraft_autonomy.readiness.v1`로 분리했다.
+  - world lease, runner, fresh telemetry, Minecraft 연결, gated task
+    contract와 active autonomy를 exact boolean dependency로 재계산한다.
+  - task contract는 `evelyn_goal_manager` 명령 게이트와
+    `explicit_postcondition` 결과 검증을 모두 요구한다.
+  - 누락·손상·상위 상태와 모순된 Mindcraft 계약은 fail-closed하며,
+    Control Page와 Runtime Health는 같은 validator를 사용한다.
 - 루트 Python 의존성은 `requirements.lock`으로 고정했다.
 - GitHub Actions는 Windows/Python 3.11/Node 24에서 전체 회귀 테스트와 실제 `main.py` 프로세스 smoke를 실행한다.
 - 단기 대화 연속성 checkpoint의 guild 초기화 경계를 강화했다.
@@ -191,6 +198,23 @@ Source branch: `codex/dependency-config-hardening` through `5acdc83`
 
 ## Deployment state
 
+- `0b054ac` 소스로 Bot API, Control Page, Discord와 Mindcraft 이미지를
+  정식 Dockerfile에서 빌드했다.
+  - Bot API:
+    `sha256:af2dd47c2290cb4a663494cc801d21461e66e832e7851e4d0273974057689baf`
+  - Control Page:
+    `sha256:7fa972a3c7791e6f1214b4e15071d1215b9a7baeeef425160d321adc75060581`
+  - Discord:
+    `sha256:1bbf4d34322c6d548bbaf305f88fe024fbb16286f236f95a9623c978584a0850`
+  - Mindcraft:
+    `sha256:7964e7b21ea9b4efe74b85826f332aa771f973fb5928321c4d590b35c2881334`
+  - Bot API와 Control Page만 교체했다. 이전 owner claim의 15초 stale
+    guard 안에서 첫 Bot API 기동이 fail-closed 종료됐고, guard 경과 뒤
+    같은 컨테이너가 claim을 인계받았다. 두 서비스는 현재 새 digest로
+    `healthy`, restart count 0이다.
+  - Discord와 Mindcraft 이미지는 빌드·검증만 했으며 실제 서비스를
+    시작하지 않았다. LLM/STT/TTS/Vision, 마이크와 Host Bridge도 이번
+    작업에서 시작하지 않았다.
 - `1348321` 소스로 `bot_api` 이미지를 실제 재빌드·교체하고 Host Supervisor의
   allowlist `restart_local_bridge` 액션으로 Local I/O/Host Vision bridge를
   재기동했다. Control Page와 Vision 서비스는 변경이 없어 기존 healthy
@@ -297,6 +321,20 @@ Source branch: `codex/dependency-config-hardening` through `5acdc83`
   실행하지 않는다. Discord bot도 사용자 요청 없이 시작하지 않았다.
 
 ## Last runtime evidence
+
+2026-07-31 Minecraft functional readiness 배포 후 비파괴 검증 결과:
+
+- 실행 중인 Bot API와 Control Page `/health`는 모두 `ok=true`다.
+- 현재 실제 Voyager/Mindcraft는 정지 상태이므로 Control Page의
+  `serviceHealth`는 `voyager.state=down`, `voyagerHttpReady=false`,
+  `voyagerRuntimeReady=false`, legacy `voyagerReady=false`를 반환한다.
+- Main/Router/Sub LLM, TTS, STT와 Vision도 의도적으로 시작하지 않아
+  전체 runtime은 `down`이다. 이를 Minecraft readiness 성공으로 오인하지
+  않는다.
+- Mindcraft 이미지는 고정 submodule 커밋
+  `b36eaf7e61b3f6bd031fdb531812b2e3c42b6c73`에서 정식 빌드했다.
+- 새 Mindcraft image의 production-only `npm audit` 집계는 moderate 14,
+  high 5, critical 0이며 미해결 위험으로 유지한다.
 
 2026-07-31 완료 턴 commit 지연 계측 배포 후 비파괴 검증 결과:
 
@@ -472,8 +510,18 @@ Source branch: `codex/dependency-config-hardening` through `5acdc83`
 
 ## Verification state
 
-검증한 코드 기준점: `5acdc83`
+검증한 코드 기준점: `0b054ac`
 
+- 공식 Discord Python 환경의 current-source mount에서 focused 65개,
+  Runtime 전체 373개(skip 2), Mindcraft 14개, Minecraft 79개,
+  관련 Control Page 11개(skip 1)를 통과했다.
+- 새 이미지에 구워진 소스로 Bot API readiness/health 24개,
+  Control Page 배선 10개, Discord client/main 배선 18개를 통과했다.
+- 네 이미지의 `compileall`과 `pip check`, Mindcraft overlay의
+  `node --check`, exact readiness 생산·검증 smoke를 통과했다.
+- Mindcraft 전체 정식 빌드와 production-only `npm audit --omit=dev`
+  집계를 완료했다. 실제 Discord·Minecraft·마이크·모델 서비스는
+  시작하지 않았다.
 - bundled Python에서 commit metrics, Runtime Errors와 Control Page UI
   집중 테스트 37개를 통과했다.
 - 공식 Discord Python 3.11 환경의 current-source read-only mount에서
