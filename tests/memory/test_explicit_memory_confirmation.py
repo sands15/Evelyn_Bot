@@ -95,6 +95,11 @@ class ExplicitMemoryConfirmationTests(unittest.TestCase):
         self.assertTrue(note["ok"])
         self.assertEqual(note["card"]["body"], "나는 산책을 좋아해")
         self.assertTrue(note["card"]["confirmed"])
+        self.assertEqual(
+            note["card"]["userConfirmationIntegrity"],
+            "verified",
+        )
+        self.assertTrue(note["card"]["recallEligible"])
         self.assertEqual(len(markdown_files), 1)
         self.assertIn("source: control-page-user", raw)
         self.assertIn(
@@ -102,6 +107,10 @@ class ExplicitMemoryConfirmationTests(unittest.TestCase):
             raw,
         )
         self.assertIn("confirmed_at:", raw)
+        self.assertIn(
+            "memory_contract: memory.user-confirmation.note.v1",
+            raw,
+        )
         self.assertIn("evidence_hashes:", raw)
 
     def test_invalid_action_id_is_not_written_to_source_ref(self) -> None:

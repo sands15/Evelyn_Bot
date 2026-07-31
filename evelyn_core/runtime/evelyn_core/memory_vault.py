@@ -26,6 +26,11 @@ from .memory_derivation_revocation import (
     resolve_derivation_states,
 )
 from .memory_legacy_coverage import summarize_legacy_memory_context_coverage
+from .memory_confirmation_contract import (
+    MEMORY_USER_CONFIRMATION_NOTE_SCHEMA,
+    MEMORY_USER_CONFIRMATION_TAG,
+    is_user_confirmed_memory_integrity_valid,
+)
 from .memory_provenance_audit import (
     DIRECT_SOURCE_TYPES,
     ProvenanceAuditNode,
@@ -623,12 +628,21 @@ def sync_memory_vault_index(*, root: Path | None = None, db_path: Path | None = 
 
         for path in note_paths:
             try:
-                note = parse_memory_note(path)
+                raw = path.read_text(
+                    encoding="utf-8",
+                    errors="ignore",
+                )
+                note = parse_memory_note(path, raw)
             except Exception:
                 continue
             if (
                 note.note_id in deleted_note_ids
                 or note.note_id in quarantined_note_ids
+                or _user_confirmed_memory_integrity_state(
+                    note,
+                    raw=raw,
+                )
+                == "invalid"
             ):
                 continue
             rel_path = path.relative_to(vault).as_posix()
@@ -765,6 +779,65 @@ def _memory_source_type(source: str, note_type: str) -> str:
     }:
         return "user"
     return "unknown" if not normalized else "runtime"
+
+
+def _is_user_confirmed_memory_note(
+    note: MemoryVaultNote,
+) -> bool:
+    memory_contract = clean_text(
+        str(note.metadata.get("memory_contract") or "")
+    )
+    tags = {
+        clean_text(tag).lower()
+        for tag in note.tags
+        if clean_text(tag)
+    }
+    return bool(
+        memory_contract == MEMORY_USER_CONFIRMATION_NOTE_SCHEMA
+        or MEMORY_USER_CONFIRMATION_TAG in tags
+        or note.path.name.lower().startswith("user-confirmed-")
+    )
+
+
+def _user_confirmed_memory_integrity_state(
+    note: MemoryVaultNote,
+    *,
+    raw: str | None = None,
+) -> str:
+    if not _is_user_confirmed_memory_note(note):
+        return "not_applicable"
+    if raw is None:
+        try:
+            raw = note.path.read_text(
+                encoding="utf-8",
+                errors="ignore",
+            )
+        except OSError:
+            return "invalid"
+    source = clean_text(
+        str(note.metadata.get("source") or "")
+    )
+    return (
+        "verified"
+        if is_user_confirmed_memory_integrity_valid(
+            title=note.title,
+            body=_memory_vault_edit_body(note, raw),
+            source=source,
+            source_type=_memory_source_type(
+                source,
+                note.note_type,
+            ),
+            source_refs=_as_list(
+                note.metadata.get("source_refs")
+                or note.metadata.get("source_ref")
+            ),
+            evidence_hashes=_as_list(
+                note.metadata.get("evidence_hashes")
+            ),
+            confirmed_at=note.metadata.get("confirmed_at"),
+        )
+        else "invalid"
+    )
 
 
 def _public_memory_source_ref(value: str) -> str:
@@ -3092,6 +3165,7 @@ def write_memory_vault_note(
     derived_from: list[str] | None = None,
     evidence_hashes: list[str] | None = None,
     confirmed_at: str | None = None,
+    memory_contract: str | None = None,
     importance: float = 0.5,
     confidence: str = "medium",
     root: Path | None = None,
@@ -3156,6 +3230,11 @@ def write_memory_vault_note(
     normalized_confirmed_at = clean_text(confirmed_at)
     if normalized_confirmed_at:
         metadata["confirmed_at"] = normalized_confirmed_at
+    normalized_memory_contract = clean_text(memory_contract)
+    if normalized_memory_contract:
+        metadata["memory_contract"] = (
+            normalized_memory_contract
+        )
     front_matter = _format_front_matter(metadata)
     content = f"{front_matter}\n\n# {clean_text(title)}\n\n{clean_text(body)}\n"
     with _memory_edit_lock:
@@ -3276,6 +3355,16 @@ def _memory_vault_user_card(
     quarantined = (
         revocation_state.get("state") == "quarantined"
     )
+    user_confirmation_integrity = (
+        _user_confirmed_memory_integrity_state(
+            note,
+            raw=raw,
+        )
+    )
+    integrity_invalid = (
+        user_confirmation_integrity == "invalid"
+    )
+    recall_eligible = not quarantined and not integrity_invalid
     return {
         "id": note.note_id,
         "title": _legacy_to_public_title(note.note_type, rel_path, note.title),
@@ -3289,11 +3378,21 @@ def _memory_vault_user_card(
         "pinned": bool(note_state.get("pinned")),
         "hidden": hidden,
         "quarantined": quarantined,
-        "recallEligible": not quarantined,
+        "recallEligible": recall_eligible,
+        "recallBlockedReason": (
+            "user_confirmation_integrity_invalid"
+            if integrity_invalid
+            else "memory_derivation_quarantined"
+            if quarantined
+            else ""
+        ),
+        "userConfirmationIntegrity": (
+            user_confirmation_integrity
+        ),
         "revocation": revocation_state,
         "locked": is_locked_legacy,
         "canEdit": not is_locked_legacy,
-        "canConfirm": not quarantined,
+        "canConfirm": recall_eligible,
         "canDelete": (
             not is_internal_note
             and not is_locked_legacy
@@ -3424,6 +3523,8 @@ def _write_memory_vault_note_body(
                 body=next_body,
             )
         ]
+        if _is_user_confirmed_memory_note(note):
+            metadata["confirmed_at"] = edited_at
         metadata.pop("source_hash", None)
         metadata["confidence"] = "high"
         metadata["revocation_resolved_at"] = edited_at
@@ -3493,6 +3594,7 @@ def memory_vault_user_snapshot(
         "pinned": 0,
         "hidden": 0,
         "quarantined": 0,
+        "integrityInvalid": 0,
     }
     for path in vault.rglob("*.md"):
         try:
@@ -3523,20 +3625,21 @@ def memory_vault_user_snapshot(
         revocation = revocations.get(note.note_id)
         if revocation:
             counts["quarantined"] += 1
-        cards.append(
-            _memory_vault_user_card(
-                path,
-                note,
-                raw,
-                note_state,
-                hidden=hidden,
-                rel_path=rel_path,
-                revocation=revocation,
-            )
+        card = _memory_vault_user_card(
+            path,
+            note,
+            raw,
+            note_state,
+            hidden=hidden,
+            rel_path=rel_path,
+            revocation=revocation,
         )
+        if card["userConfirmationIntegrity"] == "invalid":
+            counts["integrityInvalid"] += 1
+        cards.append(card)
     cards.sort(
         key=lambda item: (
-            not item["quarantined"],
+            item["recallEligible"],
             not item["pinned"],
             item["confirmed"],
             -float(item["importance"] or 0),

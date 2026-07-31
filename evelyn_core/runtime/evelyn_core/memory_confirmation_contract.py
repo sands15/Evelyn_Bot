@@ -1,16 +1,28 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from datetime import datetime
 from typing import Any
 
 
 MEMORY_USER_CONFIRMATION_SCHEMA = "memory.user-confirmation.v1"
+MEMORY_USER_CONFIRMATION_NOTE_SCHEMA = (
+    "memory.user-confirmation.note.v1"
+)
+MEMORY_USER_CONFIRMATION_SOURCES = frozenset(
+    {"control-page-user", "discord-user"}
+)
+MEMORY_USER_CONFIRMATION_TAG = "user-confirmed"
+MEMORY_USER_EDIT_SOURCE = "user-edit"
+MEMORY_USER_EDIT_SOURCE_REF = "control-page-memory-editor"
 _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,160}$")
 _SOURCE_REF_RE = re.compile(
     r"^turn:[A-Za-z0-9._:-]{8,120}:user$"
 )
 _ERROR_CODE_RE = re.compile(r"^[a-z0-9_]{1,80}$")
+_EVIDENCE_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 _SUCCESS_KEYS = frozenset(
     {
         "schema",
@@ -78,6 +90,100 @@ def is_explicit_memory_confirmation_receipt(
     return False
 
 
+def _clean(value: object) -> str:
+    return " ".join(str(value or "").split()).strip()
+
+
+def _clean_values(value: object) -> list[str]:
+    if not isinstance(value, (list, tuple, set)):
+        return []
+    return [
+        cleaned
+        for item in value
+        if (cleaned := _clean(item))
+    ]
+
+
+def _user_edit_evidence_hash(*, title: str, body: str) -> str:
+    payload = json.dumps(
+        {"body": body, "title": title},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _normalize_user_edit_body(value: object) -> str:
+    normalized = str(value or "").replace(
+        "\r\n",
+        "\n",
+    ).replace("\r", "\n")
+    normalized = re.sub(
+        r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]+",
+        " ",
+        normalized,
+    )
+    return "\n".join(
+        line.rstrip()
+        for line in normalized.splitlines()
+    ).strip()
+
+
+def is_user_confirmed_memory_integrity_valid(
+    *,
+    title: object,
+    body: object,
+    source: object,
+    source_type: object,
+    source_refs: object,
+    evidence_hashes: object,
+    confirmed_at: object,
+) -> bool:
+    normalized_title = _clean(title)
+    normalized_body = _clean(body)
+    normalized_edit_body = _normalize_user_edit_body(body)
+    normalized_source = _clean(source).lower()
+    normalized_source_type = _clean(source_type).lower()
+    normalized_refs = _clean_values(source_refs)
+    normalized_hashes = [
+        value.lower()
+        for value in _clean_values(evidence_hashes)
+    ]
+    if (
+        not normalized_body
+        or normalized_source_type != "user"
+        or len(normalized_refs) != 1
+        or len(normalized_hashes) != 1
+        or _EVIDENCE_HASH_RE.fullmatch(
+            normalized_hashes[0]
+        )
+        is None
+        or not _valid_iso_datetime(confirmed_at)
+    ):
+        return False
+    if normalized_source in MEMORY_USER_CONFIRMATION_SOURCES:
+        return bool(
+            _SOURCE_REF_RE.fullmatch(normalized_refs[0])
+            and normalized_hashes[0]
+            == hashlib.sha256(
+                normalized_body.encode("utf-8")
+            ).hexdigest()
+        )
+    if normalized_source == MEMORY_USER_EDIT_SOURCE:
+        return bool(
+            normalized_title
+            and normalized_refs
+            == [MEMORY_USER_EDIT_SOURCE_REF]
+            and normalized_hashes[0]
+            == _user_edit_evidence_hash(
+                title=normalized_title,
+                body=normalized_edit_body,
+            )
+        )
+    return False
+
+
 def explicit_memory_writer_skip_decision() -> dict[str, Any]:
     return {
         "write_raw_transcript": False,
@@ -91,7 +197,13 @@ def explicit_memory_writer_skip_decision() -> dict[str, Any]:
 
 
 __all__ = [
+    "MEMORY_USER_CONFIRMATION_NOTE_SCHEMA",
     "MEMORY_USER_CONFIRMATION_SCHEMA",
+    "MEMORY_USER_CONFIRMATION_SOURCES",
+    "MEMORY_USER_CONFIRMATION_TAG",
+    "MEMORY_USER_EDIT_SOURCE",
+    "MEMORY_USER_EDIT_SOURCE_REF",
     "explicit_memory_writer_skip_decision",
     "is_explicit_memory_confirmation_receipt",
+    "is_user_confirmed_memory_integrity_valid",
 ]

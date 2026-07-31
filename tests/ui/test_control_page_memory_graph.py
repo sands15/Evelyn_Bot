@@ -118,6 +118,9 @@ class ControlPageMemoryGraphTests(unittest.TestCase):
             self.html,
         )
         self.assertIn("is-quarantined", self.html)
+        self.assertIn("is-recall-blocked", self.html)
+        self.assertIn("userConfirmationIntegrity", self.html)
+        self.assertIn("근거 손상", self.html)
         self.assertIn("근거 격리", self.html)
         self.assertIn(
             "payload.expectedContentHash = selectedMemoryCard",

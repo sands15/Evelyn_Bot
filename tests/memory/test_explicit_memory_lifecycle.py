@@ -26,7 +26,10 @@ from evelyn_core.memory_prompt_policy import (  # noqa: E402
 from evelyn_core.memory_vault import (  # noqa: E402
     build_memory_vault_context,
     delete_memory_vault_user_note,
+    memory_vault_user_note,
+    memory_vault_user_snapshot,
     preview_memory_vault_user_note_deletion,
+    update_memory_vault_user_note,
 )
 
 
@@ -110,6 +113,185 @@ class ExplicitMemoryLifecycleTests(unittest.TestCase):
         self.assertNotIn(stored["noteId"], after_receipt["suppliedNoteIds"])
         self.assertNotIn(fact, after_context)
         self.assertNotIn(canary, tombstone)
+
+    def test_damaged_confirmed_memory_is_evicted_from_cached_recall(self) -> None:
+        canary = "evelyn-damaged-memory-842"
+        fact = f"손상 차단 표식은 {canary}"
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            stored = store_explicit_memory_confirmation(
+                fact,
+                action_id="control-damaged-memory-842",
+                root=root,
+            )
+            warm_receipt: dict = {}
+            build_memory_vault_context(
+                7,
+                canary,
+                max_items=1,
+                root=root,
+                receipt=warm_receipt,
+            )
+            cached_receipt: dict = {}
+            cached_context = build_memory_vault_context(
+                7,
+                canary,
+                max_items=1,
+                root=root,
+                receipt=cached_receipt,
+            )
+            path = next(
+                (root / "memory_vault" / "concepts").glob(
+                    "user-confirmed-*.md"
+                )
+            )
+            lines = path.read_text(encoding="utf-8").splitlines()
+            path.write_text(
+                "\n".join(
+                    "evidence_hashes: []"
+                    if line.startswith("evidence_hashes:")
+                    else line
+                    for line in lines
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            blocked_receipt: dict = {}
+            blocked_context = build_memory_vault_context(
+                7,
+                canary,
+                max_items=1,
+                root=root,
+                receipt=blocked_receipt,
+            )
+            detail = memory_vault_user_note(
+                stored["noteId"],
+                root=root,
+            )
+            snapshot = memory_vault_user_snapshot(root=root)
+
+        self.assertIn(fact, cached_context)
+        self.assertTrue(cached_receipt["cacheHit"])
+        self.assertNotIn(fact, blocked_context)
+        self.assertNotIn(
+            stored["noteId"],
+            blocked_receipt["suppliedNoteIds"],
+        )
+        self.assertGreater(
+            blocked_receipt["memoryVersion"],
+            cached_receipt["memoryVersion"],
+        )
+        self.assertEqual(
+            detail["card"]["userConfirmationIntegrity"],
+            "invalid",
+        )
+        self.assertFalse(detail["card"]["recallEligible"])
+        self.assertFalse(detail["card"]["canConfirm"])
+        self.assertTrue(detail["card"]["canEdit"])
+        self.assertEqual(
+            detail["card"]["recallBlockedReason"],
+            "user_confirmation_integrity_invalid",
+        )
+        self.assertEqual(snapshot["counts"]["integrityInvalid"], 1)
+
+    def test_legacy_confirmed_memory_without_contract_marker_still_recalls(self) -> None:
+        canary = "evelyn-legacy-confirmed-memory-854"
+        fact = f"기존 확인 기억 표식은 {canary}"
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            stored = store_explicit_memory_confirmation(
+                fact,
+                action_id="control-legacy-memory-854",
+                root=root,
+            )
+            path = next(
+                (root / "memory_vault" / "concepts").glob(
+                    "user-confirmed-*.md"
+                )
+            )
+            raw = path.read_text(encoding="utf-8")
+            path.write_text(
+                "\n".join(
+                    line
+                    for line in raw.splitlines()
+                    if not line.startswith("memory_contract:")
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            receipt: dict = {}
+            context = build_memory_vault_context(
+                7,
+                canary,
+                max_items=1,
+                root=root,
+                receipt=receipt,
+            )
+            detail = memory_vault_user_note(
+                stored["noteId"],
+                root=root,
+            )
+
+        self.assertIn(fact, context)
+        self.assertIn(stored["noteId"], receipt["suppliedNoteIds"])
+        self.assertEqual(
+            detail["card"]["userConfirmationIntegrity"],
+            "verified",
+        )
+        self.assertTrue(detail["card"]["recallEligible"])
+
+    def test_user_edit_rebinds_confirmed_memory_integrity(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            stored = store_explicit_memory_confirmation(
+                "수정 전 표식 old-confirmed-memory-913",
+                action_id="control-edit-memory-913",
+                root=root,
+            )
+            before = memory_vault_user_note(
+                stored["noteId"],
+                root=root,
+            )
+            edited = update_memory_vault_user_note(
+                stored["noteId"],
+                "edit",
+                title="사용자가 수정한 확인 기억",
+                body=(
+                    "수정 후 표식 new-confirmed-memory-913\n"
+                    "두 번째 줄도 같은 사용자 수정 근거야"
+                ),
+                expected_content_hash=before["card"]["sourceHash"],
+                root=root,
+            )
+            after = memory_vault_user_note(
+                stored["noteId"],
+                root=root,
+            )
+            receipt: dict = {}
+            context = build_memory_vault_context(
+                7,
+                "new-confirmed-memory-913",
+                max_items=1,
+                root=root,
+                receipt=receipt,
+            )
+
+        self.assertTrue(edited["ok"])
+        self.assertEqual(
+            after["card"]["userConfirmationIntegrity"],
+            "verified",
+        )
+        self.assertTrue(after["card"]["recallEligible"])
+        self.assertEqual(
+            after["card"]["provenance"]["source"],
+            "user-edit",
+        )
+        self.assertIn(stored["noteId"], receipt["suppliedNoteIds"])
+        self.assertIn("new-confirmed-memory-913", context)
+        self.assertIn("두 번째 줄도 같은 사용자 수정 근거야", context)
+        self.assertNotIn("old-confirmed-memory-913", context)
 
 
 if __name__ == "__main__":

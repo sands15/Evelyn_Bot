@@ -13,17 +13,18 @@ from .memory_vault import (
     write_memory_vault_note,
 )
 from .memory_confirmation_contract import (
+    MEMORY_USER_CONFIRMATION_NOTE_SCHEMA,
     MEMORY_USER_CONFIRMATION_SCHEMA,
+    MEMORY_USER_CONFIRMATION_SOURCES,
+    MEMORY_USER_CONFIRMATION_TAG,
     explicit_memory_writer_skip_decision,
     is_explicit_memory_confirmation_receipt,
+    is_user_confirmed_memory_integrity_valid,
 )
 from .text import clean_text
 
 
 MEMORY_USER_CONFIRMATION_MAX_CHARS = 2_000
-MEMORY_USER_CONFIRMATION_SOURCES = frozenset(
-    {"control-page-user", "discord-user"}
-)
 _ACTION_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{8,120}$")
 _COMMAND_PATTERNS = (
     re.compile(r"^/remember(?:\s+(.*))?$", re.IGNORECASE),
@@ -139,7 +140,16 @@ def _verified_stored_card(
     note_id = clean_text(card.get("id"))
     confirmed_at = clean_text(card.get("confirmedAt"))
     valid = bool(
-        clean_text(card.get("body")) == expected_fact
+        is_user_confirmed_memory_integrity_valid(
+            title=card.get("title"),
+            body=card.get("body"),
+            source=provenance.get("source"),
+            source_type=provenance.get("sourceType"),
+            source_refs=source_refs,
+            evidence_hashes=evidence_hashes,
+            confirmed_at=confirmed_at,
+        )
+        and clean_text(card.get("body")) == expected_fact
         and card.get("confirmed") is True
         and card.get("recallEligible") is True
         and note_id
@@ -232,12 +242,15 @@ def store_explicit_memory_confirmation(
             title="사용자 확인 기억",
             body=normalized_fact,
             storage_key=storage_key,
-            tags=["user-confirmed"],
+            tags=[MEMORY_USER_CONFIRMATION_TAG],
             projects=["evelyn"],
             source=normalized_source,
             source_refs=[source_ref],
             evidence_hashes=[evidence_hash],
             confirmed_at=confirmed_at,
+            memory_contract=(
+                MEMORY_USER_CONFIRMATION_NOTE_SCHEMA
+            ),
             importance=0.75,
             confidence="high",
             root=root,

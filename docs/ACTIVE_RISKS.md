@@ -408,6 +408,12 @@ Discord text/voice에 연결됐다. 성공은 저장 후 card의 직접 사용�
 저장→attributed prompt 회수→2단계 삭제→동일 query 비회상 lifecycle도
 통과했지만 실제 사용자 기억에는 쓰기·삭제를 수행하지 않았다.
 
+저장 뒤 손상도 recall 시점에 다시 닫는다. 새 note marker와 기존 tag/path를
+함께 사용해 user-confirmed 계열을 식별하고, 무결성이 깨지면 index·cache·hot
+context에서 제외한다. Control Page는 본문을 숨기지 않고 사용자가 검토·편집·
+삭제할 수 있게 두되 회상 불가와 고정 blocker를 표시한다. 편집은 새 user-edit
+근거를 만들므로 손상된 원본 metadata를 그대로 신뢰해 복구하지 않는다.
+
 남은 위험은 이후 import/복원으로 확인 전용 legacy 항목이 생겼을 때 이를 사용자
 확인만으로 과거 source에 소급 귀속할 수 없다는 점이다. 안전한 확인 흐름은 기존
 row를 고치는 backfill이 아니라 현재 확인 발화를 새 turn evidence로 가진 새 기억을

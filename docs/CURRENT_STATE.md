@@ -361,6 +361,13 @@ Source branch: `codex/dependency-config-hardening`, current evidence-bound user 
     recall eligibility를 모두 재검사한 뒤에만 반환한다. 일부 metadata가
     손상된 기존 파일은 성공으로 복구 추정하지 않고 content-free
     `memory_confirmation_write_unverified`로 fail-closed한다.
+  - 새 노트는 `memory.user-confirmation.note.v1` marker를 함께 기록한다. recall
+    index는 marker, `user-confirmed` tag 또는 고정 storage path로 이 계열을
+    다시 식별하고, source/ref/evidence/confirmed timestamp를 매 동기화에서
+    재검사한다. 무결성이 깨진 노트는 기존 retrieval cache·FTS·vector·hot
+    context에서 제거되며 Control Page에는 `근거 손상`과 content-free blocker로
+    표시된다. 사용자가 편집하면 `user-edit` ref와 새 title/body evidence hash,
+    새 확인 시각으로 다시 결합한 뒤에만 회상 가능해진다.
   - Control Page는 요청마다 request ID를 만들고 Local I/O Bridge는 기존 음성
     turn ID를 일반·stream 요청에 전달한다. 노트 파일명과 공개 ID는 기억 본문
     hash에서 만들지 않아 content-free receipt가 본문 equality oracle이 되지 않는다.
@@ -1260,6 +1267,22 @@ Source branch: `codex/dependency-config-hardening`, current evidence-bound user 
   각각 내장 소스 88개와 22개, `compileall`, `pip check`를 통과했다. 전체
   profile Compose config도 통과했다. 실행 중 서비스와 실제 사용자 기억은
   변경하지 않았다.
+- confirmed-memory recall integrity 변경은 집중 29개, memory 158개,
+  runtime 417개(skip 2), UI 157개(skip 7), Discord I/O 109개와 voice
+  417개를 통과했다. core 546개는 기능 assertion 실패 0개였고 이미지의 `git`
+  부재 오류 2개는 Windows의 해당 모듈 13개로 보완했다. 손상 전 cache hit를
+  만든 뒤 evidence를 제거한 테스트에서도 다음 recall은 memory version을
+  전진시키고 노트와 cache를 prompt에서 제거했으며, 사용자 편집 뒤 새 근거로만
+  복구했다. inline JavaScript `node --check`와 Compose config도 통과했다.
+- 새 내장 소스 검증 이미지는 Bot API
+  `sha256:76d8c74a70da8bf276ff11352c4232a65f21696b694d30c1d87f44702212ba83`,
+  Discord/Main
+  `sha256:cfeffd07a86b916ab38c7d170d4fca5cecfe1dcb6b3dadfecec946cbb21f742c`,
+  Control Page
+  `sha256:a2c7c68b97d350df4549bc3bb8e8896ae209f7d20c28e227f4335695f97da2c0`이며
+  내장 소스 집중 90개·22개·14개와 각 이미지 `compileall`/`pip check`를
+  통과했다. 실행 중 기존 Bot API와 Control Page는 교체하지 않았고 healthy다.
+  실제 사용자 기억과 Discord, 마이크, Minecraft는 변경하거나 시작하지 않았다.
 
 ## Operational boundaries
 

@@ -1632,17 +1632,20 @@
       background: rgba(47, 157, 104, 0.1);
     }
 
-    .memory-card.is-quarantined {
+    .memory-card.is-quarantined,
+    .memory-card.is-recall-blocked {
       border-color: rgba(211, 132, 35, 0.58);
       background: rgba(211, 132, 35, 0.1);
     }
 
-    .memory-card.is-quarantined .memory-badge {
+    .memory-card.is-quarantined .memory-badge,
+    .memory-card.is-recall-blocked .memory-badge {
       color: #8a4d00;
       background: rgba(211, 132, 35, 0.2);
     }
 
-    [data-theme="dark"] .memory-card.is-quarantined .memory-badge {
+    [data-theme="dark"] .memory-card.is-quarantined .memory-badge,
+    [data-theme="dark"] .memory-card.is-recall-blocked .memory-badge {
       color: #ffd49a;
     }
 
@@ -4441,8 +4444,15 @@
       const revoked = Array.isArray(revocation.revokedSourceIds) ? revocation.revokedSourceIds : [];
       const blocked = Array.isArray(revocation.blockedSourceIds) ? revocation.blockedSourceIds : [];
       const remaining = Array.isArray(revocation.remainingSourceIds) ? revocation.remainingSourceIds : [];
+      const recallState = card.quarantined
+        ? "근거 철회로 격리됨"
+        : card.userConfirmationIntegrity === "invalid"
+          ? "확정 기억 근거 손상으로 제외됨"
+          : card.recallEligible === false
+            ? "회상에서 제외됨"
+            : "사용 가능";
       const rows = [
-        ["회상 상태", card.quarantined ? "근거 철회로 격리됨" : "사용 가능"],
+        ["회상 상태", recallState],
         ["출처", provenance.source || provenance.sourceType || "unknown"],
         ["출처 유형", provenance.sourceType || "unknown"],
         ["원래 출처", provenance.originSource || "없음"],
@@ -5216,8 +5226,9 @@
         const quarantineCount = Number(memorySnapshot && memorySnapshot.quarantineStatus && memorySnapshot.quarantineStatus.count || 0);
         const candidateCount = Number(memoryAuditSnapshot && memoryAuditSnapshot.summary && memoryAuditSnapshot.summary.candidateTargetCount || 0);
         const correctionCount = Number(memoryCorrectionSnapshot && memoryCorrectionSnapshot.relationshipCount || 0);
+        const integrityInvalidCount = Number(memorySnapshot && memorySnapshot.counts && memorySnapshot.counts.integrityInvalid || 0);
         memoryHint.textContent = total
-          ? `Graph ${graphCount || total} nodes, ${total} notes · 격리 ${quarantineCount} · provenance 후보 ${candidateCount} · 연결 관리 ${correctionCount}`
+          ? `Graph ${graphCount || total} nodes, ${total} notes · 격리 ${quarantineCount} · 근거 손상 ${integrityInvalidCount} · provenance 후보 ${candidateCount} · 연결 관리 ${correctionCount}`
           : "Waiting for memory_vault nodes.";
       }
       if (!cards.length) {
@@ -5236,15 +5247,17 @@
         const badge = card.category || card.type || "note";
         const locked = Boolean(card.locked || card.canEdit === false || card.contentHidden);
         const quarantined = Boolean(card.quarantined);
+        const recallBlocked = card.recallEligible === false;
+        const integrityInvalid = card.userConfirmationIntegrity === "invalid";
         const displayTitle = locked ? "Archived memory" : title;
         const preview = locked ? (card.preview || "Archived memory is locked.") : (card.preview || card.body || "");
         const relPath = locked ? "Archived" : (card.relPath || card.path || card.id || "");
         const active = String(card.id || "") === selectedMemoryId ? " active" : "";
         return (
-          '<article class="memory-card' + active + (locked ? ' is-locked' : '') + (quarantined ? ' is-quarantined' : '') + '" role="button" tabindex="0" data-memory-id="' + escapeHtml(card.id || "") + '">' +
+          '<article class="memory-card' + active + (locked ? ' is-locked' : '') + (quarantined ? ' is-quarantined' : '') + (recallBlocked && !quarantined ? ' is-recall-blocked' : '') + '" role="button" tabindex="0" data-memory-id="' + escapeHtml(card.id || "") + '">' +
           '<div class="memory-card-head">' +
           '<strong>' + escapeHtml(displayTitle) + '</strong>' +
-          '<span class="memory-badge">' + escapeHtml(locked ? "Archived" : (quarantined ? "근거 격리" : (card.confirmed ? "confirmed" : badge))) + '</span>' +
+          '<span class="memory-badge">' + escapeHtml(locked ? "Archived" : (quarantined ? "근거 격리" : (integrityInvalid ? "근거 손상" : (card.confirmed ? "confirmed" : badge)))) + '</span>' +
           '</div>' +
           '<p class="memory-card-preview">' + escapeHtml(preview || "No content") + '</p>' +
           '<div class="memory-card-meta">' + escapeHtml(relPath) + '</div>' +
