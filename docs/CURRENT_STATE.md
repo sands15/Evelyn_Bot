@@ -2,7 +2,7 @@
 
 Document status: **Current**
 Last reviewed: 2026-07-31 KST
-Source branch: `codex/dependency-config-hardening` through `a879380`
+Source branch: `codex/dependency-config-hardening` through `5acdc83`
 
 이 문서는 현재 확인된 사실만 기록한다. 목표 구조와 과거 계획은 다른 설계/계획 문서를 사용한다.
 
@@ -43,6 +43,11 @@ Source branch: `codex/dependency-config-hardening` through `a879380`
   - Control Page 일반·검색, 검색 후속, 자율 후속, Discord 명령, 음성 재생
     완료도 같은 commit 계약을 사용한다. 실패 시 중복 전송하지 않고
     `conversation_continuity_commit_failed`만 기록한다.
+  - 완료 턴 durable commit은 process-local 최근 성공 256개의 지연을
+    content-free 상태로 계측한다. 20개 전에는 `warming`, 이후 p95가
+    100ms를 넘으면 `conversation_continuity_commit_latency_high` 경고다.
+    시도·성공·실패 횟수, last/p50/p95/max와 고정 코드만
+    `conversation_continuity.status.v1` 및 Runtime Errors에 공개한다.
 - 공개 오류 경계는 `public_error_contract.py`의 고정 코드·문구를 사용한다.
   - Discord 명령/text, Control Page, Fast Control chat/stream/background
     action, runtime repair, mic/bridge와 Minecraft snapshot이 예외 메시지,
@@ -265,9 +270,9 @@ Source branch: `codex/dependency-config-hardening` through `a879380`
   뒤 같은 새 컨테이너가 claim을 회수해 정상 기동했고, 중복 world owner는
   만들어지지 않았다. `c92a158` 배포에서는 정상 종료와 claim 반납을 먼저
   확인해 이 일시 충돌이 재발하지 않았다.
-- Bot API, Control Page, Main/Router/Sub LLM, TTS, STT, Vision 여덟
-  컨테이너가 모두 `healthy`다. 새 Bot API와 Control Page의 restart count는
-  0이다.
+- 해당 이전 배포 당시 Bot API, Control Page, Main/Router/Sub LLM, TTS,
+  STT, Vision 여덟 컨테이너가 모두 `healthy`였고 새 Bot API와 Control
+  Page의 restart count는 0이었다.
 - `ce31793` 소스로 Bot API와 Control Page를 직접 재빌드·교체해 correction
   journal v2 hash chain, durable head, OS/process single-writer 경계와
   integrity/writer HTTP 503을 배포했다.
@@ -284,15 +289,44 @@ Source branch: `codex/dependency-config-hardening` through `a879380`
     `sha256:e46bdd3ae0afb4aaeddcb6bbc5a12a1a6d4b7512bd8683daf80a31151b5be9f0`
   - 실제 `runtime_artifacts/conversation_continuity`에는 checkpoint/head가
     없어 기존 대화를 생성하거나 migration하지 않았다.
-- Windows Host Supervisor와 Local I/O Bridge heartbeat는 fresh이고 bridge는
-  `ready=true`, TTS warmup 완료, Host Vision `running`이다.
+- 해당 이전 배포 당시 Windows Host Supervisor와 Local I/O Bridge heartbeat는
+  fresh였고 bridge는 `ready=true`, TTS warmup 완료, Host Vision
+  `running`이었다.
 - 개인정보 보호 기본값에 따라 로컬 마이크는 비활성 상태다.
 - Minecraft/Voyager와 Codex Gateway는 기본 local core에서 지연 시작되며 현재
   실행하지 않는다. Discord bot도 사용자 요청 없이 시작하지 않았다.
 
 ## Last runtime evidence
 
-2026-07-31 UI Action 배포 후 비파괴 검증 결과:
+2026-07-31 완료 턴 commit 지연 계측 배포 후 비파괴 검증 결과:
+
+- `5acdc83`은 durable checkpoint/head commit의 호출 지연을 계측하고,
+  최근 성공 256개의 p50/p95/max, 누적 시도·성공·실패 횟수와 마지막 성공
+  여부만 공개한다. 대화문, 사용자·세션 ID, 경로와 예외 메시지는 지표에
+  포함하지 않는다.
+- Runtime Errors는 fresh한 20개 이상 표본의 p95가 100ms를 넘을 때만
+  Conversation Continuity를 `degraded`, 전체를 `attention`으로 표시한다.
+  stale 경고는 현재 경고로 승격하지 않는다. Control Page는 p50/p95와
+  표본 수를 읽기 전용으로 표시한다.
+- Docker가 약 10시간 동안 종료돼 있던 상태에서 새 Bot API와 Control Page만
+  교체·기동했다. 둘 다 새 digest로 `healthy`, restart count 0이다.
+  Main/Router/Sub LLM, TTS, STT, Vision, Discord, Host Supervisor와 Local
+  I/O Bridge는 이번 배포에서 임의로 시작하지 않았다. 따라서 실제 대화
+  commit 표본은 아직 0개이며 continuity source는 `missing`이다.
+- 새 image digest:
+  - Bot API:
+    `sha256:e7feaaa8fc923f895e78bffbc8f9499d48d51efb6e61856823a88208d40e7a3f`
+  - Control Page:
+    `sha256:a069154e39a03b928fe57aa9fb3aba75a4cc756dd7f4bc35821f23ecc3886553`
+  - Discord:
+    `sha256:d9e5f743624fa45ae71ce71c3f9d1a7ca73c4ef4dcb94958d84f4cd5644d566b`
+- 배포된 `/api/control-page/runtime-errors`는
+  `runtime_errors.summary.v1`과 privacy false flags를 반환했고 실제
+  Windows 경로나 `privateMessage`를 포함하지 않았다. 현재 continuity owner가
+  기동하지 않아 전체 상태는 `unknown`, source는 `missing`으로 정확히
+  표시됐다.
+
+같은 날 UI Action 배포 후 비파괴 검증 결과:
 
 - `GET /api/control-page/ui-action`은 Control Page와 Bot API 모두
   `host_ui_action.status.v1`, `state=running`, `auditReady=true`,
@@ -438,7 +472,24 @@ Source branch: `codex/dependency-config-hardening` through `a879380`
 
 ## Verification state
 
-검증한 코드 기준점: `52f7bf5`
+검증한 코드 기준점: `5acdc83`
+
+- bundled Python에서 commit metrics, Runtime Errors와 Control Page UI
+  집중 테스트 37개를 통과했다.
+- 공식 Discord Python 3.11 환경의 current-source read-only mount에서
+  모든 완료 턴 경로·continuity·Runtime Errors·Runtime Health 집중 테스트
+  85개(skip 3), Runtime 전체 370개(skip 2), UI 전체 154개(skip 7),
+  Discord I/O 95개, Voice 413개를 통과했다.
+- Core 전체 467개는 기능 assertion 실패 0개였고 이미지에 `git` 실행 파일이
+  없어 과거 `main.py` signature를 조회하는 기존 테스트 2개만 환경 오류였다.
+- 격리 artifact root에서 실제 `main.py` Control Page smoke와 강제 종료·
+  재시작 continuity 복구 2개를 통과했다.
+- 새 Bot API와 Control Page 이미지 내부 소스는 read-only test mount에서
+  각각 집중 테스트 51개(skip 1), Discord 이미지는 모든 완료 턴 경로 집중
+  테스트 76개(skip 1)를 통과했다. 세 이미지 모두 전체 `compileall`과
+  `pip check`를 통과했다.
+- `node --check`, local-only sentinel Compose config와 `git diff --check`를
+  통과했다.
 
 - bundled Python에서 continuity/restart/guild reset/retention 집중 테스트
   33개를 통과했다.
@@ -636,5 +687,8 @@ Source branch: `codex/dependency-config-hardening` through `a879380`
   사용하고, Host Supervisor가 소유한 Local I/O Bridge만 화면을 캡처한다.
 - Host UI Action 요청은 `runtime_artifacts/host_ui_action/`의 exact-schema
   queue만 사용한다. 경계는 배포됐지만 실제 action 실행 횟수는 0이다.
+- 현재 실행 중인 Docker 서비스는 Bot API와 Control Page뿐이다. 무거운
+  LLM/STT/TTS/Vision과 Discord/Minecraft, Windows Host Supervisor/Local
+  Bridge는 이번 작업에서 시작하지 않았다.
 
 남은 문제는 [ACTIVE_RISKS.md](ACTIVE_RISKS.md)에만 유지한다.

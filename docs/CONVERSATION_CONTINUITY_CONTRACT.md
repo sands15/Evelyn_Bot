@@ -122,6 +122,26 @@ Runtime Health의 `runtime_errors.summary.v1`에는
 `conversationContinuity` owner가 추가된다. heartbeat가 5초를 넘으면 stale이며,
 복구·저장 실패는 고정 코드와 예외 타입만 공개한다.
 
+`status.json`의 additive `completedTurnCommit`은
+`conversation_continuity.commit-metrics.v1`이다. 이 지표는 현재 프로세스에서
+성공한 최근 256개 durable checkpoint/head commit의 last/p50/p95/max
+밀리초와 누적 시도·성공·실패 횟수, 마지막 성공 여부만 보존한다. 대화문,
+transcript, 사용자·guild/channel/message/session/turn ID, 경로와 예외
+메시지는 저장하지 않는다.
+
+- 성공 표본 20개 전에는 `idle|warming`이다.
+- 20개 이후 p95가 100ms를 넘으면 `warning`과
+  `conversation_continuity_commit_latency_high`를 공개한다.
+- 경고는 대화 실패나 durable commit 실패가 아니며 첫 버전에서는
+  관측 신호다.
+- 마지막 commit 실패는 `error`와
+  `conversation_continuity_commit_failed`로 표시하고 실패 지연은 성공
+  percentile에 섞지 않는다.
+- 표본은 재시작 뒤 복구하지 않는다. 오래된 프로세스의 stale 경고는 Runtime
+  Errors의 현재 경고로 승격하지 않는다.
+- Runtime Errors와 Control Page는 허용 필드만 다시 투영하며 알 수 없는
+  nested 필드나 private 값을 전달하지 않는다.
+
 ## Retention and deletion
 
 - 정상 실행 중 체크포인트는 마지막 상태 변경 후 15분 안에서만 복구 가능하다.
@@ -165,6 +185,11 @@ Runtime Health의 `runtime_errors.summary.v1`에는
   경로의 전달·기록·commit 순서
 - commit 실패 시 중복 전송 없이 고정 오류 코드만 기록
 - Runtime Errors의 privacy 및 stale/current-error 판정
+- 완료 턴 commit의 20표본 warming/warning 판정, bounded percentile과
+  실패 횟수
+- Runtime Errors의 commit 지연 경고 투영, stale 비승격과 nested-field
+  privacy
+- Control Page의 읽기 전용 p50/p95·표본 수 표시와 JavaScript parse
 
 `tests.core.test_session_continuity_restart`는 periodic writer가 실제
 checkpoint를 만든 뒤 첫 Python 프로세스를 `os._exit(74)`로 종료한다. 두 번째

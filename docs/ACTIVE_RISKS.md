@@ -100,15 +100,23 @@ opt-in real-main crash/restart 집중 테스트 68개, `compileall`, `pip check`
 재시작까지 수행하는 live E2E와 이 브랜치의 원격 Windows CI 결과다. 실제
 Discord bot은 사용자 요청 없이 시작하지 않았다.
 
-즉시 `fsync`는 완료 턴마다 추가되는 디스크 비용이다. 합성 테스트와 격리된
-실제 `main.py` crash/restart는 통과했지만, 실제 Discord text/voice와
-Control Page의 p50/p95 전달 후 commit 지연은 아직 측정하지 않았다.
+즉시 `fsync`는 완료 턴마다 추가되는 디스크 비용이다. `5acdc83`부터
+process-local 최근 성공 256개의 durable commit 지연을 content-free로
+계측하고, 시도·성공·실패 횟수와 last/p50/p95/max만 status와 Runtime Errors,
+Control Page에 공개한다. 20개 전에는 `warming`이며 이후 p95가 100ms를 넘으면
+경고하되 대화 실패로 처리하지 않는다. stale 지표는 현재 경고로 승격하지 않는다.
+
+합성 테스트와 격리된 실제 `main.py` crash/restart는 통과했지만, 이번 배포에서는
+Discord/Main owner를 시작하지 않아 실제 대화 표본은 아직 0개다. 따라서 실제
+Discord text/voice와 Control Page의 전달 후 commit p50/p95는 여전히
+측정되지 않았다.
 
 다음 조치: 사용자가 Discord 검증을 시작할 때 별도 테스트 guild에서 완료 턴과
 active follow-up을 만든 뒤 관리자 초기화, 강제 재시작, 대상 guild 비복구와
 다른 guild 보존을 확인한다. 원격 브랜치를 올릴 때 Windows CI의 opt-in
 real-main 시나리오도 함께 통과시키고, 전달 후 commit 지연을 별도 지표로
-측정한다.
+측정한다. 실제 정상 완료 턴 20개가 쌓인 뒤 100ms 경고선이 Windows 저장장치
+특성에 맞는지도 재평가한다.
 
 ## P1 — Python 모델 런타임 의존성 잔여 취약점
 
