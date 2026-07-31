@@ -219,7 +219,14 @@ action journal도 v2 generation/hash chain과 별도 content-free durable head�
 보강했다. 진행 표식이 생성된 chain의 단일 journal/head 삭제, self-hash 변조,
 과거 journal rollback은 fail-closed하고, journal 교체 뒤 head 교체 전 crash의
 정확한 한 generation만 복구한다. 기존 v1은 raw byte hash로 generation 0에
-고정한 뒤 v2로 연결한다.
+고정한 뒤 다음 mutation에서 v3로 연결한다.
+
+v3는 각 action marker에 시작 당시 Fast continuity generation도 기록한다.
+따라서 이전 action의 동일한 고정 안내가 마지막 문장인 상태에서 새 action이
+시작 직후 죽어도 오래된 안내를 새 action 복구 증거로 재사용하지 않는다.
+안내 commit 뒤 journal ack 전에 다시 죽은 경우에는 시작 generation보다 큰
+현재 generation이 이번 안내의 durable 전달을 증명해 중복 안내를 막는다. 시작
+generation이 없는 v1/v2 pending marker는 보수적으로 새 안내를 요구한다.
 
 남은 위험은 journal과 head, continuity checkpoint까지 함께 다시 쓰거나 함께
 삭제할 수 있는 filesystem 관리자에 대한 외부 authenticity가 없다는 점과,

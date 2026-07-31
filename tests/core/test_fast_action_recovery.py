@@ -21,6 +21,7 @@ from evelyn_core.fast_action_recovery import (  # noqa: E402
     FAST_ACTION_RECOVERY_HEAD_SCHEMA,
     FAST_ACTION_RECOVERY_LEGACY_SCHEMA,
     FAST_ACTION_RECOVERY_SCHEMA,
+    FAST_ACTION_RECOVERY_V2_SCHEMA,
     FastActionRecoveryJournal,
 )
 from evelyn_core import fast_action_recovery as recovery_module  # noqa: E402
@@ -116,6 +117,7 @@ class FastActionRecoveryTests(unittest.TestCase):
                 "state",
                 "startedAt",
                 "expectedGeneration",
+                "startedGeneration",
             },
         )
         self.assertEqual(
@@ -125,6 +127,12 @@ class FastActionRecoveryTests(unittest.TestCase):
         self.assertEqual(
             payload["actions"][0][
                 "expectedGeneration"
+            ],
+            0,
+        )
+        self.assertEqual(
+            payload["actions"][0][
+                "startedGeneration"
             ],
             0,
         )
@@ -351,6 +359,94 @@ class FastActionRecoveryTests(unittest.TestCase):
             FAST_ACTION_RECOVERY_SCHEMA,
         )
         self.assertEqual(migrated["generation"], 1)
+
+    def test_v2_pending_action_requires_new_notice_then_migrates(
+        self,
+    ) -> None:
+        journal = self.journal()
+        journal.begin(
+            "fast-action-1",
+            continuity_generation=7,
+        )
+        payload = json.loads(
+            self.path.read_text(encoding="utf-8")
+        )
+        payload["schema"] = FAST_ACTION_RECOVERY_V2_SCHEMA
+        for entry in payload["actions"]:
+            entry.pop("startedGeneration")
+        payload["journalHash"] = recovery_module._journal_hash(
+            payload
+        )
+        self.path.write_text(
+            json.dumps(
+                payload,
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+        head = json.loads(
+            journal.head_path.read_text(encoding="utf-8")
+        )
+        head["journalHash"] = payload["journalHash"]
+        journal.head_path.write_text(
+            json.dumps(
+                head,
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+
+        restored = self.journal()
+
+        self.assertEqual(
+            restored.public_status()["state"],
+            "pending",
+        )
+        self.assertFalse(
+            restored.public_status()[
+                "noticeCorrelationReady"
+            ]
+        )
+        self.assertFalse(
+            restored.restored_notice_matches(
+                continuity_generation=8,
+            )
+        )
+        restored.acknowledge_recovery(
+            recovered_count=1,
+            error_code="fast_action_recovery_interrupted",
+        )
+        migrated = json.loads(
+            self.path.read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            migrated["schema"],
+            FAST_ACTION_RECOVERY_SCHEMA,
+        )
+
+    def test_restored_notice_must_postdate_action_start(
+        self,
+    ) -> None:
+        journal = self.journal()
+        journal.begin(
+            "fast-action-1",
+            continuity_generation=4,
+        )
+
+        self.assertFalse(
+            journal.restored_notice_matches(
+                continuity_generation=4,
+            )
+        )
+        self.assertTrue(
+            journal.restored_notice_matches(
+                continuity_generation=5,
+            )
+        )
 
     def test_generation_proves_terminal_delivery_after_restart(
         self,

@@ -57,7 +57,12 @@ class FastActionRecoveryRuntimeTests(unittest.TestCase):
         self,
     ) -> None:
         class FailedJournal:
-            def begin(self, _task_id):
+            def begin(
+                self,
+                _task_id,
+                *,
+                continuity_generation=0,
+            ):
                 raise OSError("private journal path")
 
         fast_api.register_background_action_handler(
@@ -319,6 +324,195 @@ class FastActionRecoveryRuntimeTests(unittest.TestCase):
             self.assertEqual(
                 restored_messages[-1]["text"],
                 "이미 전달된 최종 결과",
+            )
+
+    def test_old_notice_cannot_ack_new_action_marker(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            owner = self.owner(root)
+            owner.record_completed_turn(
+                "이전 조사",
+                "이전 시작 답변",
+            )
+            owner.record_assistant_followup(
+                fast_api.FAST_ACTION_RECOVERY_NOTICE
+            )
+            journal = self.journal(root)
+            journal.begin(
+                "fast-action-1",
+                continuity_generation=(
+                    owner.status()["generation"]
+                ),
+            )
+            restored_owner = self.owner(root)
+            restored_journal = self.journal(root)
+            restored_messages = (
+                restored_owner.restored_chat_messages()
+            )
+            with (
+                patch.object(
+                    fast_api,
+                    "FAST_CONTROL_CONTINUITY_OWNER",
+                    restored_owner,
+                ),
+                patch.object(
+                    fast_api,
+                    "FAST_ACTION_RECOVERY_JOURNAL",
+                    restored_journal,
+                ),
+                patch.object(
+                    fast_api,
+                    "CHAT_MESSAGES",
+                    restored_messages,
+                ),
+            ):
+                status = (
+                    fast_api
+                    .recover_fast_control_actions_after_restart()
+                )
+
+            self.assertEqual(status["state"], "recovered")
+            persisted = self.owner(
+                root
+            ).restored_chat_messages()
+            self.assertEqual(
+                sum(
+                    message["text"]
+                    == fast_api.FAST_ACTION_RECOVERY_NOTICE
+                    for message in persisted
+                ),
+                2,
+            )
+
+    def test_committed_notice_acks_without_duplicate_after_crash(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            owner = self.owner(root)
+            journal = self.journal(root)
+            journal.begin(
+                "fast-action-1",
+                continuity_generation=0,
+            )
+            owner.record_completed_turn(
+                "새 조사",
+                "새 시작 답변",
+            )
+            owner.record_assistant_followup(
+                fast_api.FAST_ACTION_RECOVERY_NOTICE
+            )
+            restored_owner = self.owner(root)
+            restored_journal = self.journal(root)
+            restored_messages = (
+                restored_owner.restored_chat_messages()
+            )
+            generation = restored_owner.status()["generation"]
+            with (
+                patch.object(
+                    fast_api,
+                    "FAST_CONTROL_CONTINUITY_OWNER",
+                    restored_owner,
+                ),
+                patch.object(
+                    fast_api,
+                    "FAST_ACTION_RECOVERY_JOURNAL",
+                    restored_journal,
+                ),
+                patch.object(
+                    fast_api,
+                    "CHAT_MESSAGES",
+                    restored_messages,
+                ),
+            ):
+                status = (
+                    fast_api
+                    .recover_fast_control_actions_after_restart()
+                )
+
+            self.assertEqual(status["state"], "recovered")
+            persisted_owner = self.owner(root)
+            self.assertEqual(
+                persisted_owner.status()["generation"],
+                generation,
+            )
+            self.assertEqual(
+                sum(
+                    message["text"]
+                    == fast_api.FAST_ACTION_RECOVERY_NOTICE
+                    for message in (
+                        persisted_owner.restored_chat_messages()
+                    )
+                ),
+                1,
+            )
+
+    def test_unready_continuity_cannot_prove_restored_notice(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            owner = self.owner(root)
+            journal = self.journal(root)
+            journal.begin(
+                "fast-action-1",
+                continuity_generation=0,
+            )
+            owner.record_completed_turn(
+                "새 조사",
+                "새 시작 답변",
+            )
+            owner.record_assistant_followup(
+                fast_api.FAST_ACTION_RECOVERY_NOTICE
+            )
+            restored_owner = self.owner(root)
+            restored_journal = self.journal(root)
+            restored_messages = (
+                restored_owner.restored_chat_messages()
+            )
+            unready_status = {
+                **restored_owner.status(),
+                "durableReady": False,
+            }
+            with (
+                patch.object(
+                    fast_api,
+                    "FAST_CONTROL_CONTINUITY_OWNER",
+                    restored_owner,
+                ),
+                patch.object(
+                    fast_api,
+                    "FAST_ACTION_RECOVERY_JOURNAL",
+                    restored_journal,
+                ),
+                patch.object(
+                    fast_api,
+                    "CHAT_MESSAGES",
+                    restored_messages,
+                ),
+                patch.object(
+                    restored_owner,
+                    "status",
+                    return_value=unready_status,
+                ),
+            ):
+                status = (
+                    fast_api
+                    .recover_fast_control_actions_after_restart()
+                )
+
+            self.assertEqual(status["state"], "recovered")
+            self.assertEqual(
+                sum(
+                    message["text"]
+                    == fast_api.FAST_ACTION_RECOVERY_NOTICE
+                    for message in (
+                        self.owner(root).restored_chat_messages()
+                    )
+                ),
+                2,
             )
 
     def test_corrupt_journal_recovers_only_after_durable_notice(

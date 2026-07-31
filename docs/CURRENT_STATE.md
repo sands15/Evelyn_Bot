@@ -94,7 +94,7 @@ Source branch: `codex/dependency-config-hardening`, current Fast Control action-
   - 현재 surface owner가 손상돼 reset/delete 경계를 검증할 수 없으면
     정상인 상대 owner도 주입하지 않는 fail-closed 규칙을 적용한다.
   - Fast Control background action은 시작 전에
-    `fast_control.action-recovery.v2` content-free 표식을 durable 기록한다.
+    `fast_control.action-recovery.v3` content-free 표식을 durable 기록한다.
     최종 성공·실패 답변은 Fast continuity owner 잠금 안에서 예상 generation과
     결합하며, receipt가 확인된 뒤에만 표식을 제거한다.
   - 실행 중 crash는 고정 중단 안내를 한 번 durable commit하고 원래 action을
@@ -108,7 +108,11 @@ Source branch: `codex/dependency-config-hardening`, current Fast Control action-
     durable head가 진행 표식이 생성된 chain의 단일 파일 삭제·rollback을
     검출한다. journal이 head보다 정확히 한 generation 앞선 유효 chain일 때만
     head-write crash로 복구하며, 기존 v1은 raw byte hash generation 0 anchor
-    뒤 v2로 전환한다.
+    뒤 다음 mutation에서 v3로 전환한다.
+  - 각 action marker는 시작 당시 Fast continuity generation을 함께 저장한다.
+    마지막 복구 안내가 이 generation보다 실제로 뒤에 있을 때만 이번 action의
+    안내로 인정하므로 이전 동일 안내를 새 action에 재사용하는 ABA 오인을
+    막는다. v1/v2 pending marker는 보수적으로 새 안내 뒤 v3로 전환한다.
   - 모든 전달 surface는 callback 반환만으로 durable 성공을 선언하지 않는다.
     status schema, ready state, current head, verified integrity, rollback
     protection, 양수 generation/session count와 이번 commit의 성공 metric을
@@ -1077,6 +1081,20 @@ Source branch: `codex/dependency-config-hardening`, current Fast Control action-
 - 이번에도 새 이미지만 만들었고 실행 중인 기존 Bot API와 Control Page는
   교체하지 않았다. 두 서비스는 동일한 기존 image로 계속 healthy이며 실제
   Discord/Main, 마이크와 무거운 모델 서비스는 시작하지 않았다.
+- action recovery v3 변경의 current-source 전체 회귀는 runtime 411개
+  (skip 2), UI 156개(skip 7), Discord I/O 107개를 통과했다. core 520개는
+  기능 assertion 실패 0개였고 이미지에 `git`이 없어 난 기존 서명 검사
+  환경 오류 2개는 Windows의 해당 모듈 13개로 보완했다.
+- 새 내장 소스 Bot API image
+  `sha256:991abf38703006eb235c4fe6816da6434688d8281b9654a8a27cd93a9a5f9987`와
+  Discord/Main image
+  `sha256:edf989950e79c68362fc09398064abf2bd51ad91a60a1729b6327f276f0804aa`는
+  각각 시작 generation correlation·v1/v2 migration·Fast continuity·API·
+  stream 집중 108개를 통과했다. 두 이미지 모두 내장 소스 `compileall`과
+  `pip check`, 전체 profile Compose config를 통과했다.
+- v3 이미지도 빌드와 검증만 수행했다. 실행 중인 기존 Bot API와 Control
+  Page는 같은 image로 계속 healthy이며 실제 Discord/Main, 마이크와 무거운
+  모델 서비스는 시작하지 않았다.
 - 실제 인증된 Discord↔Control Page handoff는 아래 운영 경계 때문에 별도
   검증 상태로 남긴다. 새 이미지만 빌드했고 실행 중인 기존 Bot API와
   Control Page는 교체하지 않았으며 둘 다 healthy 상태다.

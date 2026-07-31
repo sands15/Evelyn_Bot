@@ -466,8 +466,13 @@ def begin_fast_action_recovery(
     task: FastActionTask,
 ) -> None:
     try:
+        owner_status = FAST_CONTROL_CONTINUITY_OWNER.status()
         FAST_ACTION_RECOVERY_JOURNAL.begin(
-            task.task_id
+            task.task_id,
+            continuity_generation=max(
+                0,
+                int(owner_status.get("generation") or 0),
+            ),
         )
     except Exception as exc:
         ACTION_COORDINATOR.fail(
@@ -644,6 +649,10 @@ def recover_fast_control_actions_after_restart(
         == FAST_ACTION_RECOVERY_NOTICE
         and clean_text(CHAT_MESSAGES[-1].get("source"))
         == "fast_control_continuity_restore"
+        and owner_status.get("durableReady") is True
+        and journal.restored_notice_matches(
+            continuity_generation=generation,
+        )
     )
     if not restored_notice:
         append_chat_message(

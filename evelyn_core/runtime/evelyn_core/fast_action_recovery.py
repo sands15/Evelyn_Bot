@@ -16,8 +16,11 @@ from .text import clean_text
 FAST_ACTION_RECOVERY_LEGACY_SCHEMA = (
     "fast_control.action-recovery.v1"
 )
-FAST_ACTION_RECOVERY_SCHEMA = (
+FAST_ACTION_RECOVERY_V2_SCHEMA = (
     "fast_control.action-recovery.v2"
+)
+FAST_ACTION_RECOVERY_SCHEMA = (
+    "fast_control.action-recovery.v3"
 )
 FAST_ACTION_RECOVERY_HEAD_SCHEMA = (
     "fast_control.action-recovery-head.v1"
@@ -185,7 +188,22 @@ class FastActionRecoveryJournal:
             previous_hash=previous_hash,
         )
         payload["actions"] = [
-            dict(entry)
+            {
+                "actionId": entry["actionId"],
+                "state": entry["state"],
+                "startedAt": entry["startedAt"],
+                "expectedGeneration": entry[
+                    "expectedGeneration"
+                ],
+                "startedGeneration": (
+                    entry["startedGeneration"]
+                    if isinstance(
+                        entry.get("startedGeneration"),
+                        int,
+                    )
+                    else 0
+                ),
+            }
             for entry in self._actions.values()
         ]
         payload["journalHash"] = _journal_hash(payload)
@@ -216,7 +234,10 @@ class FastActionRecoveryJournal:
         }
         schema = clean_text(payload.get("schema"))
         expected_keys = set(base_keys)
-        if schema == FAST_ACTION_RECOVERY_SCHEMA:
+        if schema in {
+            FAST_ACTION_RECOVERY_SCHEMA,
+            FAST_ACTION_RECOVERY_V2_SCHEMA,
+        }:
             expected_keys.update(
                 {
                     "generation",
@@ -232,6 +253,7 @@ class FastActionRecoveryJournal:
             not in {
                 FAST_ACTION_RECOVERY_SCHEMA,
                 FAST_ACTION_RECOVERY_LEGACY_SCHEMA,
+                FAST_ACTION_RECOVERY_V2_SCHEMA,
             }
             or not isinstance(policy, dict)
             or set(policy)
@@ -254,7 +276,10 @@ class FastActionRecoveryJournal:
             FAST_ACTION_RECOVERY_CHAIN_GENESIS
         )
         journal_hash = ""
-        if schema == FAST_ACTION_RECOVERY_SCHEMA:
+        if schema in {
+            FAST_ACTION_RECOVERY_SCHEMA,
+            FAST_ACTION_RECOVERY_V2_SCHEMA,
+        }:
             generation = _nonnegative_int(
                 payload.get("generation")
             )
@@ -292,15 +317,19 @@ class FastActionRecoveryJournal:
             raise ValueError("fast_action_error_code_invalid")
         validated: dict[str, dict[str, Any]] = {}
         for raw_entry in actions:
+            expected_entry_keys = {
+                "actionId",
+                "state",
+                "startedAt",
+                "expectedGeneration",
+            }
+            if schema == FAST_ACTION_RECOVERY_SCHEMA:
+                expected_entry_keys.add(
+                    "startedGeneration"
+                )
             if (
                 not isinstance(raw_entry, dict)
-                or set(raw_entry)
-                != {
-                    "actionId",
-                    "state",
-                    "startedAt",
-                    "expectedGeneration",
-                }
+                or set(raw_entry) != expected_entry_keys
             ):
                 raise ValueError("fast_action_entry_invalid")
             action_id = _action_id(
@@ -312,6 +341,13 @@ class FastActionRecoveryJournal:
             )
             expected_generation = _nonnegative_int(
                 raw_entry.get("expectedGeneration")
+            )
+            started_generation = (
+                _nonnegative_int(
+                    raw_entry.get("startedGeneration")
+                )
+                if schema == FAST_ACTION_RECOVERY_SCHEMA
+                else None
             )
             if (
                 state not in _ACTION_STATES
@@ -331,6 +367,7 @@ class FastActionRecoveryJournal:
                 "state": state,
                 "startedAt": started_at,
                 "expectedGeneration": expected_generation,
+                "startedGeneration": started_generation,
             }
         return (
             validated,
@@ -594,10 +631,18 @@ class FastActionRecoveryJournal:
             )
             raise
 
-    def begin(self, action_id: str) -> dict[str, Any]:
+    def begin(
+        self,
+        action_id: str,
+        *,
+        continuity_generation: int = 0,
+    ) -> dict[str, Any]:
         if not self.enabled:
             return self.public_status()
         validated_id = _action_id(action_id)
+        started_generation = _nonnegative_int(
+            continuity_generation
+        )
         with self._lock:
             if self._load_state in {"corrupt", "error"}:
                 raise RuntimeError(
@@ -614,6 +659,7 @@ class FastActionRecoveryJournal:
                 "state": "running",
                 "startedAt": self._now(),
                 "expectedGeneration": 0,
+                "startedGeneration": started_generation,
             }
             try:
                 self._write()
@@ -700,6 +746,35 @@ class FastActionRecoveryJournal:
                     in {"legacy_anchored", "verified"}
                 )
             )
+
+    def restored_notice_matches(
+        self,
+        *,
+        continuity_generation: int,
+    ) -> bool:
+        try:
+            generation = _nonnegative_int(
+                continuity_generation
+            )
+        except ValueError:
+            return False
+        with self._lock:
+            if (
+                self._load_state != "ready"
+                or not self._actions
+            ):
+                return False
+            for entry in self._actions.values():
+                started_generation = entry.get(
+                    "startedGeneration"
+                )
+                if (
+                    isinstance(started_generation, bool)
+                    or not isinstance(started_generation, int)
+                    or generation <= started_generation
+                ):
+                    return False
+            return True
 
     def recovery_decision(
         self,
@@ -856,6 +931,20 @@ class FastActionRecoveryJournal:
                     and self._integrity
                     in {"legacy_anchored", "verified"}
                 ),
+                "noticeCorrelationReady": bool(
+                    not self._actions
+                    or all(
+                        isinstance(
+                            entry.get("startedGeneration"),
+                            int,
+                        )
+                        and not isinstance(
+                            entry.get("startedGeneration"),
+                            bool,
+                        )
+                        for entry in self._actions.values()
+                    )
+                ),
                 "pendingCount": len(self._actions),
                 "lastRecoveryAt": (
                     self._last_recovery_at
@@ -882,5 +971,6 @@ __all__ = [
     "FAST_ACTION_RECOVERY_LEGACY_SCHEMA",
     "FAST_ACTION_RECOVERY_NOTICE",
     "FAST_ACTION_RECOVERY_SCHEMA",
+    "FAST_ACTION_RECOVERY_V2_SCHEMA",
     "FastActionRecoveryJournal",
 ]

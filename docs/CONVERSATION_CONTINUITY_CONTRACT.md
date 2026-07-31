@@ -45,14 +45,14 @@ Fast Control의 background 조사 작업은 시작 답변만 복구되고 실제
 `asyncio.Task`는 재시작 뒤 복구할 수 없다. 이를 진행 중인 것처럼 남기거나
 자동 재실행하지 않기 위해
 `runtime_artifacts/fast_control_actions/recovery.json`에
-`fast_control.action-recovery.v2` 표식을 durable 기록하고,
+`fast_control.action-recovery.v3` 표식을 durable 기록하고,
 `recovery.head.json`의 content-free head가 현재 generation과 journal hash를
 고정한다.
 
 - 최대 40개의 `actionId`, `running|terminal_committing`, 시작 시각,
-  예상 Fast continuity generation과 journal generation/이전 hash/현재 hash만
-  저장한다. 사용자 요청, 시작·최종 답변, tool evidence, 오류 원문과 경로는
-  저장하지 않는다.
+  action 시작 당시 Fast continuity generation, 예상 최종 generation과 journal
+  generation/이전 hash/현재 hash만 저장한다. 사용자 요청, 시작·최종 답변,
+  tool evidence, 오류 원문과 경로는 저장하지 않는다.
 - background action의 시작 응답을 공개하거나 runner를 launch하기 전에
   `running` 표식을 먼저 `fsync`·원자 교체한다. 기록할 수 없으면
   “작업을 시작한다”는 응답을 만들지 않는다.
@@ -65,6 +65,11 @@ Fast Control의 background 조사 작업은 시작 답변만 복구되고 실제
 - generation에 도달하지 못했거나 표식이 `running`이면 고정 중단 안내를
   완료 턴으로 한 번 durable commit한다. 부작용 중복을 막기 위해 원래 작업은
   자동 재시도하지 않는다.
+- 재시작 뒤 마지막 문장이 같은 고정 안내여도 action 시작 generation보다
+  현재 continuity generation이 실제로 클 때만 이번 action의 이미 전달된
+  안내로 인정한다. 이전 action의 동일 안내 뒤 새 marker만 기록하고 죽은
+  경우에는 새 중단 안내를 생략하지 않는다. 반대로 안내 commit 뒤 journal
+  ack 전에 죽으면 더 큰 generation이 전달을 증명해 중복 안내를 만들지 않는다.
 - action commit 실패 뒤 예상 generation을 `running`으로 되돌려 이후 일반
   대화 commit이 같은 번호를 사용해도 결과 전달로 오판하지 않는다. 이 되돌림
   자체를 기록할 수 없으면 일반 continuity generation 전진도 fail-closed한다.
@@ -78,9 +83,10 @@ Fast Control의 background 조사 작업은 시작 답변만 복구되고 실제
   삭제, 진행 표식 생성 뒤 head 삭제, self-hash 불일치, 과거 journal rollback과
   그 밖의 generation 불일치는 fail-closed한다.
 - 기존 v1 exact-schema journal은 raw byte hash로 generation 0 head에 먼저
-  고정하고, 다음 mutation부터 v2 chain으로 연결한다. journal과 head를 함께
-  다시 쓰거나 함께 삭제할 수 있는 filesystem 관리자는 이 로컬 증거 경계
-  밖이다.
+  고정한다. v2 진행 entry에는 action 시작 continuity generation이 없으므로
+  오래된 안내를 재사용하지 않고 보수적으로 새 안내를 commit한 뒤 v3로
+  전환한다. journal과 head를 함께 다시 쓰거나 함께 삭제할 수 있는 filesystem
+  관리자는 이 로컬 증거 경계 밖이다.
 - 공개 `actions.recovery` 상태는 pending/recovery count, 고정 오류 코드와
   generation/integrity/head 상태, `rollbackProtected`, `contentFree=true`,
   `rawText=false`, `automaticRetry=false`만 포함한다.
@@ -378,6 +384,8 @@ transcript, 사용자·guild/channel/message/session/turn ID, 경로와 예외
   content-free 공개 상태와 자동 재시도 금지
 - action recovery v2의 빈 chain 초기화, journal/head 삭제, 과거 journal
   rollback, self-hash, one-generation head 지연 복구와 v1 anchor/migration
+- action recovery v3의 시작 continuity generation 결합, 이전 동일 안내의
+  새 action 오인 방지, 안내 commit 뒤 ack crash의 무중복 복구와 v2 migration
 - read-only cross-surface reader의 current hash/head 검증, 변조·lagging
   head·symlink·stale·손상 revocation 거부와 무변경 파일 증거
 - Discord guild/user exact scope, 다른 member/server 제외와 content-free

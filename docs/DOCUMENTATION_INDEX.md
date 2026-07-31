@@ -50,8 +50,9 @@ implemented behavior.
   - 프로세스 재시작 뒤 완료된 대화 턴과 active follow-up을 15분 동안
     제한적으로 복구하는 checkpoint, 전달 직후 durable commit, content-free
     commit p50/p95 지표, Fast Control background action의 원문 없는
-    crash-recovery 표식, generation/hash head와 자동 재시도 금지, Discord
-    ambiguous-send 무재전송, privacy, deletion, observability 계약.
+    crash-recovery 표식, generation/hash head, 시작 generation 기반 안내
+    correlation과 자동 재시도 금지, Discord ambiguous-send 무재전송, privacy,
+    deletion, observability 계약.
 
 - `docs/MEMORY_PROVENANCE_DELETION_CONTRACT.md`
   - 기억의 source/evidence provenance, content-hash 기반 충돌 없는 사용자
