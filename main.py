@@ -1739,7 +1739,7 @@ control_page_runtime_services_dependency_composition = (
             bot_api_host=CONTROL_PAGE_BOT_API_HOST, bot_api_port=CONTROL_PAGE_BOT_API_PORT,
             bot_api_state_path=CONTROL_PAGE_BOT_API_STATE_PATH, bot_api_probe_timeout_sec=CONTROL_PAGE_BOT_API_PROBE_TIMEOUT_SEC,
             codex_gateway_port=VOYAGER_CODEX_GATEWAY_PORT,
-            voyager_alive_probe=lambda: get_minecraft_client().is_service_alive(
+            voyager_alive_probe=lambda: get_minecraft_client().is_functionally_ready(
                 timeout_sec=0.45
             ),
         )

@@ -26,7 +26,43 @@ def fake_probe(states: dict[str, str]):
             return {"kind": "http", "ok": False, "reason": "timeout", "target": target, "status": None}
         payload = {"lastActionReady": False} if service.id == "codex_gateway" and state == "action_failed" and check.kind == "http" else None
         if service.id == "voyager" and check.kind == "http" and check.path == "/status":
-            if state == "task_unverified":
+            if state == "up":
+                payload = {
+                    "service": "mindcraft_minecraft",
+                    "runtime": "mindcraft",
+                    "running": True,
+                    "telemetry_fresh": True,
+                    "minecraft_connected": True,
+                    "world_lease_authorized": True,
+                    "recovery_state": {
+                        "scope": "healthy",
+                        "domain": "healthy",
+                        "healthy": True,
+                    },
+                    "functional_readiness": {
+                        "schema": "minecraft_autonomy.readiness.v1",
+                        "state": "ready",
+                        "ready": True,
+                        "blockers": [],
+                        "dependencies": {
+                            "worldLeaseAuthorized": True,
+                            "runnerAlive": True,
+                            "telemetryFresh": True,
+                            "minecraftConnected": True,
+                            "taskContractReady": True,
+                            "autonomyActive": True,
+                        },
+                        "taskContract": {
+                            "schema": "mindcraft.task-contract.v1",
+                            "goalManagerMode": "gated",
+                            "autonomyState": "active",
+                            "commandGate": "evelyn_goal_manager",
+                            "effectVerification": "explicit_postcondition",
+                        },
+                        "contentFree": True,
+                    },
+                }
+            elif state == "task_unverified":
                 payload = {
                     "recovery_state": {
                         "scope": "task",
@@ -63,6 +99,82 @@ def fake_probe(states: dict[str, str]):
                         "reason": "Runner is up but the bridge HTTP port is not reachable.",
                         "healthy": False,
                     }
+                }
+            elif state == "mindcraft_http_only":
+                payload = {
+                    "service": "mindcraft_minecraft",
+                    "runtime": "mindcraft",
+                    "running": False,
+                    "connected": False,
+                }
+            elif state == "mindcraft_blocked":
+                payload = {
+                    "service": "mindcraft_minecraft",
+                    "runtime": "mindcraft",
+                    "running": True,
+                    "telemetry_fresh": True,
+                    "minecraft_connected": False,
+                    "world_lease_authorized": True,
+                    "functional_readiness": {
+                        "schema": "minecraft_autonomy.readiness.v1",
+                        "state": "starting",
+                        "ready": False,
+                        "blockers": [
+                            "minecraft_not_connected"
+                        ],
+                        "dependencies": {
+                            "worldLeaseAuthorized": True,
+                            "runnerAlive": True,
+                            "telemetryFresh": True,
+                            "minecraftConnected": False,
+                            "taskContractReady": True,
+                            "autonomyActive": True,
+                        },
+                        "taskContract": {
+                            "schema": "mindcraft.task-contract.v1",
+                            "goalManagerMode": "gated",
+                            "autonomyState": "active",
+                            "commandGate": "evelyn_goal_manager",
+                            "effectVerification": "explicit_postcondition",
+                        },
+                        "contentFree": True,
+                    },
+                }
+            elif state == "mindcraft_inconsistent":
+                payload = {
+                    "service": "mindcraft_minecraft",
+                    "runtime": "mindcraft",
+                    "running": True,
+                    "telemetry_fresh": True,
+                    "minecraft_connected": False,
+                    "world_lease_authorized": True,
+                    "recovery_state": {
+                        "scope": "healthy",
+                        "domain": "healthy",
+                        "healthy": True,
+                    },
+                    "functional_readiness": {
+                        "schema": "minecraft_autonomy.readiness.v1",
+                        "state": "ready",
+                        "ready": True,
+                        "blockers": [],
+                        "dependencies": {
+                            "worldLeaseAuthorized": True,
+                            "runnerAlive": True,
+                            "telemetryFresh": True,
+                            "minecraftConnected": True,
+                            "taskContractReady": True,
+                            "autonomyActive": True,
+                        },
+                        "taskContract": {
+                            "schema": "mindcraft.task-contract.v1",
+                            "goalManagerMode": "gated",
+                            "autonomyState": "active",
+                            "commandGate": "evelyn_goal_manager",
+                            "effectVerification": "explicit_postcondition",
+                        },
+                        "contentFree": True,
+                    },
                 }
         return {
             "kind": check.kind,
@@ -257,6 +369,99 @@ class RuntimeHealthTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(health["legacyServices"]["voyagerReady"])
         self.assertIn("VOYAGER_RUNTIME_RECOVERY_REQUIRED", diagnostics)
         self.assertIn("bridge_http", diagnostics["VOYAGER_RUNTIME_RECOVERY_REQUIRED"]["details"])
+
+    async def test_mindcraft_http_without_readiness_contract_fails_closed(
+        self,
+    ) -> None:
+        manifest = load_service_manifest(force=True)
+        health = await collect_runtime_health(
+            manifest=manifest,
+            probe_runner=fake_probe(
+                {"voyager": "mindcraft_http_only"}
+            ),
+        )
+        services = {
+            service["id"]: service
+            for service in health["services"]
+        }
+        diagnostics = {
+            diagnostic["code"]: diagnostic
+            for diagnostic in health["diagnostics"]
+        }
+
+        voyager = services["voyager"]
+        self.assertTrue(voyager["httpReady"])
+        self.assertFalse(voyager["runtimeReady"])
+        self.assertFalse(voyager["ready"])
+        self.assertEqual(
+            voyager["readinessContractState"],
+            "missing",
+        )
+        self.assertEqual(
+            voyager["readinessBlockers"],
+            ["readiness_contract_missing"],
+        )
+        self.assertEqual(health["overallState"], "degraded")
+        self.assertIn(
+            "VOYAGER_RUNTIME_RECOVERY_REQUIRED",
+            diagnostics,
+        )
+
+    async def test_mindcraft_readiness_recomputes_fixed_blockers(
+        self,
+    ) -> None:
+        manifest = load_service_manifest(force=True)
+        health = await collect_runtime_health(
+            manifest=manifest,
+            probe_runner=fake_probe(
+                {"voyager": "mindcraft_blocked"}
+            ),
+        )
+        voyager = next(
+            service
+            for service in health["services"]
+            if service["id"] == "voyager"
+        )
+
+        self.assertFalse(voyager["runtimeReady"])
+        self.assertEqual(
+            voyager["readinessContractState"],
+            "valid",
+        )
+        self.assertEqual(
+            voyager["readinessBlockers"],
+            ["minecraft_not_connected"],
+        )
+        self.assertEqual(
+            voyager["functionalReadiness"]["state"],
+            "starting",
+        )
+
+    async def test_mindcraft_inconsistent_readiness_is_invalid(
+        self,
+    ) -> None:
+        manifest = load_service_manifest(force=True)
+        health = await collect_runtime_health(
+            manifest=manifest,
+            probe_runner=fake_probe(
+                {"voyager": "mindcraft_inconsistent"}
+            ),
+        )
+        voyager = next(
+            service
+            for service in health["services"]
+            if service["id"] == "voyager"
+        )
+
+        self.assertFalse(voyager["runtimeReady"])
+        self.assertEqual(
+            voyager["readinessContractState"],
+            "invalid",
+        )
+        self.assertEqual(
+            voyager["readinessBlockers"],
+            ["readiness_contract_invalid"],
+        )
 
 
 if __name__ == "__main__":

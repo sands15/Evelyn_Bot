@@ -88,11 +88,21 @@ function nearbyHostiles(bot) {
 
 export function installEvelynRuntime(bot, { agentName }) {
     const state = loadInitialState(agentName);
+    const goalManagerMode = String(
+        process.env.MINDCRAFT_GOAL_MANAGER_MODE || 'gated'
+    ).trim().toLowerCase();
     state.runtime = 'mindcraft';
     state.agent_name = agentName;
     state.goal = process.env.MINDCRAFT_GOAL || state.goal || null;
     state.running = true;
     state.command_policy = 'outbound_chat_disabled_by_default';
+    state.task_contract = {
+        schema: 'mindcraft.task-contract.v1',
+        ready: goalManagerMode === 'gated',
+        goal_manager_mode: goalManagerMode,
+        command_gate: 'evelyn_goal_manager',
+        effect_verification: 'explicit_postcondition'
+    };
     state.updated_at = Date.now() / 1000;
 
     const writeStatus = () => {

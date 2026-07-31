@@ -12,6 +12,10 @@ import aiohttp
 
 from .runtime_services import HealthProbeSpec, ServiceManifest, ServiceSpec, load_service_manifest
 from .paths import get_runtime_artifacts_root
+from .minecraft_autonomy_readiness import (
+    MINECRAFT_READINESS_BLOCKERS,
+    validate_minecraft_autonomy_readiness,
+)
 from .runtime_error_observability import collect_runtime_error_observability
 from .voice_capabilities import attach_voice_capabilities
 
@@ -301,22 +305,75 @@ def _annotate_functional_readiness(services: dict[str, dict[str, Any]]) -> None:
         return
 
     http_ready = voyager.get("state") == "up"
-    runtime_ready = http_ready
+    runtime_ready = False
+    contract_state = "unavailable"
+    readiness: dict[str, Any] | None = None
     if http_ready:
         status_payload = _first_http_payload(voyager, path_suffix="/status") or _first_http_payload(voyager)
         recovery_state = status_payload.get("recovery_state") if isinstance(status_payload, dict) else None
-        if (
-            isinstance(recovery_state, dict)
-            and str(recovery_state.get("scope") or "").strip().lower() == "runtime"
-            and recovery_state.get("healthy") is False
+        readiness, contract_state = (
+            validate_minecraft_autonomy_readiness(
+                status_payload
+            )
+            if isinstance(status_payload, dict)
+            else (None, "missing")
+        )
+        if readiness is not None:
+            if (
+                isinstance(recovery_state, dict)
+                and str(
+                    recovery_state.get("scope") or ""
+                ).strip().lower()
+                == "runtime"
+                and recovery_state.get("healthy") is False
+            ):
+                readiness = None
+                contract_state = "invalid"
+            else:
+                runtime_ready = bool(readiness["ready"])
+        elif (
+            contract_state == "missing"
+            and isinstance(status_payload, dict)
+            and str(
+                status_payload.get("runtime") or ""
+            ).strip().lower()
+            != "mindcraft"
+            and isinstance(recovery_state, dict)
+            and isinstance(
+                recovery_state.get("healthy"),
+                bool,
+            )
         ):
-            runtime_ready = False
+            contract_state = "legacy"
+            runtime_ready = not bool(
+                str(
+                    recovery_state.get("scope") or ""
+                ).strip().lower()
+                == "runtime"
+                and recovery_state.get("healthy") is False
+            )
 
     voyager["httpReady"] = http_ready
     voyager["runtimeReady"] = runtime_ready
+    voyager["readinessContractState"] = contract_state
+    if readiness is not None:
+        voyager["functionalReadiness"] = readiness
+        voyager["readinessBlockers"] = list(
+            readiness["blockers"]
+        )
+    elif http_ready and contract_state in {"missing", "invalid"}:
+        voyager["readinessBlockers"] = [
+            f"readiness_contract_{contract_state}"
+        ]
     if http_ready and not runtime_ready:
         voyager["ready"] = False
-        voyager["reason"] = "runtime_recovery_required"
+        voyager["reason"] = (
+            "runtime_recovery_required"
+            if contract_state == "legacy"
+            else f"readiness_contract_{contract_state}"
+            if contract_state in {"missing", "invalid"}
+            else "functional_not_ready"
+        )
 
 
 def _status_text(value: Any) -> str:
@@ -495,6 +552,46 @@ def _diagnose(services: dict[str, dict[str, Any]]) -> list[Diagnostic]:
     if voyager.get("state") == "up":
         status_payload = _first_http_payload(voyager, path_suffix="/status") or _first_http_payload(voyager)
         recovery_state = status_payload.get("recovery_state") if isinstance(status_payload, dict) else None
+        if (
+            voyager.get("httpReady") is True
+            and voyager.get("runtimeReady") is False
+            and not (
+                isinstance(recovery_state, dict)
+                and str(
+                    recovery_state.get("scope") or ""
+                ).strip().lower()
+                == "runtime"
+                and recovery_state.get("healthy") is False
+            )
+        ):
+            blockers = [
+                str(item)
+                for item in voyager.get(
+                    "readinessBlockers"
+                )
+                or []
+                if str(item) in {
+                    *MINECRAFT_READINESS_BLOCKERS.values(),
+                    "readiness_contract_missing",
+                    "readiness_contract_invalid",
+                }
+            ]
+            diagnostics.append(
+                Diagnostic(
+                    code="VOYAGER_RUNTIME_RECOVERY_REQUIRED",
+                    severity="warning",
+                    message=(
+                        "Mindcraft HTTP is reachable, but Minecraft "
+                        "autonomy is not functionally ready."
+                    ),
+                    details=(
+                        "blockers=" + ",".join(blockers)
+                        if blockers
+                        else "blockers=readiness_unknown"
+                    ),
+                    service_ids=("voyager",),
+                )
+            )
         if isinstance(recovery_state, dict) and recovery_state.get("healthy") is False:
             scope = str(recovery_state.get("scope") or "unknown")
             domain = str(recovery_state.get("domain") or "unknown")

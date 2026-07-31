@@ -21,6 +21,9 @@ from .config import (
     VOYAGER_PYTHON_EXE,
 )
 from .paths import get_repo_root, get_runtime_artifacts_root
+from .minecraft_autonomy_readiness import (
+    validate_minecraft_autonomy_readiness,
+)
 
 
 REPO_ROOT = get_repo_root()
@@ -84,6 +87,37 @@ class MinecraftAutonomyClient:
             timeout = aiohttp.ClientTimeout(total=max(0.1, float(timeout_sec)))
             async with session.get(self.base_url + "/health", timeout=timeout) as resp:
                 return resp.status == 200
+        except Exception:
+            return False
+
+    async def is_functionally_ready(
+        self,
+        timeout_sec: float = 1.0,
+    ) -> bool:
+        try:
+            payload = await self._request(
+                "GET",
+                "/status",
+                ensure_service=False,
+                timeout_sec=max(0.1, float(timeout_sec)),
+            )
+            readiness, contract_state = (
+                validate_minecraft_autonomy_readiness(
+                    payload
+                )
+            )
+            if readiness is not None:
+                return bool(readiness["ready"])
+            recovery_state = payload.get("recovery_state")
+            return bool(
+                contract_state == "missing"
+                and str(
+                    payload.get("runtime") or ""
+                ).strip().lower()
+                != "mindcraft"
+                and isinstance(recovery_state, dict)
+                and recovery_state.get("healthy") is True
+            )
         except Exception:
             return False
 

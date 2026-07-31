@@ -29,6 +29,16 @@ class ControlPageRuntimeServicesDependencyCompositionTests(unittest.TestCase):
             self.assertIn(
                 f"control_page_runtime_services_dependency_composition.{name}", source
             )
+        self.assertIn(
+            "voyager_alive_probe=lambda: "
+            "get_minecraft_client().is_functionally_ready(",
+            source,
+        )
+        self.assertNotIn(
+            "voyager_alive_probe=lambda: "
+            "get_minecraft_client().is_service_alive(",
+            source,
+        )
 
     def test_composition_keeps_both_builder_signatures(self) -> None:
         module = ast.parse(

@@ -61,6 +61,78 @@ class MinecraftAutonomyClientOutcomeTests(
             },
         )
 
+    async def test_functional_readiness_requires_exact_contract(
+        self,
+    ) -> None:
+        client = self.client(
+            {
+                "runtime": "mindcraft",
+                "running": True,
+                "telemetry_fresh": True,
+                "minecraft_connected": True,
+                "world_lease_authorized": True,
+                "functional_readiness": {
+                    "schema": "minecraft_autonomy.readiness.v1",
+                    "state": "ready",
+                    "ready": True,
+                    "blockers": [],
+                    "dependencies": {
+                        "worldLeaseAuthorized": True,
+                        "runnerAlive": True,
+                        "telemetryFresh": True,
+                        "minecraftConnected": True,
+                        "taskContractReady": True,
+                        "autonomyActive": True,
+                    },
+                    "taskContract": {
+                        "schema": "mindcraft.task-contract.v1",
+                        "goalManagerMode": "gated",
+                        "autonomyState": "active",
+                        "commandGate": "evelyn_goal_manager",
+                        "effectVerification": "explicit_postcondition",
+                    },
+                    "contentFree": True,
+                },
+            }
+        )
+
+        self.assertTrue(await client.is_functionally_ready())
+        client._request.assert_awaited_once_with(
+            "GET",
+            "/status",
+            ensure_service=False,
+            timeout_sec=1.0,
+        )
+
+    async def test_functional_readiness_rejects_http_only_status(
+        self,
+    ) -> None:
+        client = self.client(
+            {
+                "runtime": "mindcraft",
+                "running": False,
+                "connected": False,
+            }
+        )
+
+        self.assertFalse(await client.is_functionally_ready())
+
+    async def test_legacy_voyager_healthy_boundary_remains_supported(
+        self,
+    ) -> None:
+        client = self.client(
+            {
+                "service": "voyager_minecraft",
+                "recovery_state": {
+                    "scope": "healthy",
+                    "domain": "healthy",
+                    "healthy": True,
+                },
+            }
+        )
+
+        self.assertTrue(await client.is_functionally_ready())
+
     async def test_set_goal_persists_only_confirmed_echo(self) -> None:
         client = self.client(
             {

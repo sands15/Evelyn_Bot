@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
 import tempfile
@@ -117,12 +118,20 @@ class MindcraftRuntimeContractTests(unittest.TestCase):
                         "inventory": {"oak_log": 4},
                         "hostiles_nearby": [],
                         "goal_manager": {
-                            "mode": "shadow",
+                            "mode": "gated",
+                            "autonomy_state": "active",
                             "current_subgoal": {
                                 "id": "obtain_logs",
                                 "kind": "obtain",
                                 "target": "#logs",
                             },
+                        },
+                        "task_contract": {
+                            "schema": "mindcraft.task-contract.v1",
+                            "ready": True,
+                            "goal_manager_mode": "gated",
+                            "command_gate": "evelyn_goal_manager",
+                            "effect_verification": "explicit_postcondition",
                         },
                         "updated_at": mindcraft_service.time.time(),
                     }
@@ -154,6 +163,99 @@ class MindcraftRuntimeContractTests(unittest.TestCase):
         self.assertEqual(payload["current_task_stage"], "obtain_logs")
         self.assertEqual(payload["configuration"]["schema"], "runtime_config.owner.v1")
         self.assertEqual(payload["errorCount"], 0)
+        readiness = payload["functional_readiness"]
+        self.assertEqual(
+            readiness["schema"],
+            "minecraft_autonomy.readiness.v1",
+        )
+        self.assertTrue(readiness["ready"])
+        self.assertEqual(readiness["state"], "ready")
+        self.assertEqual(readiness["blockers"], [])
+        self.assertTrue(
+            all(readiness["dependencies"].values())
+        )
+
+    def test_status_blocks_http_only_or_unverified_task_runtime(
+        self,
+    ) -> None:
+        readiness = mindcraft_service._functional_readiness(
+            world_lease_authorized=True,
+            running=True,
+            telemetry_fresh=True,
+            connected=True,
+            telemetry={
+                "goal_manager": {
+                    "mode": "shadow",
+                    "autonomy_state": "active",
+                },
+                "task_contract": {
+                    "schema": "mindcraft.task-contract.v1",
+                    "ready": False,
+                    "goal_manager_mode": "shadow",
+                    "command_gate": "evelyn_goal_manager",
+                    "effect_verification": "explicit_postcondition",
+                },
+            },
+        )
+
+        self.assertFalse(readiness["ready"])
+        self.assertEqual(readiness["state"], "blocked")
+        self.assertEqual(
+            readiness["blockers"],
+            ["task_contract_unavailable"],
+        )
+
+    def test_status_reports_each_functional_dependency_fail_closed(
+        self,
+    ) -> None:
+        readiness = mindcraft_service._functional_readiness(
+            world_lease_authorized=False,
+            running=False,
+            telemetry_fresh=False,
+            connected=False,
+            telemetry={},
+        )
+
+        self.assertFalse(readiness["ready"])
+        self.assertEqual(readiness["state"], "blocked")
+        self.assertEqual(
+            readiness["blockers"],
+            [
+                "world_lease_unauthorized",
+                "runner_not_alive",
+                "telemetry_stale",
+                "minecraft_not_connected",
+                "task_contract_unavailable",
+                "autonomy_not_active",
+            ],
+        )
+
+    def test_health_exposes_liveness_and_functional_readiness(
+        self,
+    ) -> None:
+        functional_readiness = {
+            "schema": "minecraft_autonomy.readiness.v1",
+            "state": "starting",
+            "ready": False,
+            "blockers": ["minecraft_not_connected"],
+        }
+        with patch.object(
+            mindcraft_service.STATE,
+            "build_status",
+            return_value={
+                "running": True,
+                "functional_readiness": functional_readiness,
+            },
+        ):
+            response = asyncio.run(mindcraft_service.health(Mock()))
+
+        payload = json.loads(response.text)
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["runner_alive"])
+        self.assertEqual(
+            payload["functional_readiness"],
+            functional_readiness,
+        )
 
     def test_stop_failure_is_counted_without_storing_exception_text(self) -> None:
         runtime = mindcraft_service.MindcraftRuntime()
@@ -185,6 +287,8 @@ class MindcraftRuntimeContractTests(unittest.TestCase):
         self.assertIn("bot.once('inject_allowed', installChatGuard)", runtime_source)
         self.assertIn("survival_controller", runtime_source)
         self.assertIn("goal_manager", runtime_source)
+        self.assertIn("mindcraft.task-contract.v1", runtime_source)
+        self.assertIn("effect_verification", runtime_source)
         self.assertIn("MINEFLAYER_PROFILES_FOLDER", overlay_patch)
         self.assertIn("process.env.MINECRAFT_USERNAME", overlay_patch)
         self.assertIn("self_prompter.start(process.env.MINDCRAFT_GOAL || init_message)", overlay_patch)

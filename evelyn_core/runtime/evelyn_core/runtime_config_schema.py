@@ -272,6 +272,11 @@ MINDCRAFT_SERVICE_SETTINGS = (
     SettingSpec("MINDCRAFT_ROOT", kind="path", default=Path("/app/mindcraft")),
     SettingSpec("MINDCRAFT_AGENT_PROFILE", kind="path", default=None),
     SettingSpec("MINDCRAFT_ALLOWED_PLAYERS", default="", allow_empty=True),
+    SettingSpec(
+        "MINDCRAFT_GOAL_MANAGER_MODE",
+        default="gated",
+        choices=("gated", "shadow", "off"),
+    ),
     SettingSpec("MINDCRAFT_AUTO_RESTART", kind="bool", default=True),
     SettingSpec(
         "MINDCRAFT_AUTO_RESTART_COOLDOWN_SEC",

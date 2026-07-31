@@ -17,6 +17,13 @@ from .minecraft_world_lease_contract import (
     load_guarded_world_lease,
     validate_world_lease_request,
 )
+from .minecraft_autonomy_readiness import (
+    MINECRAFT_AUTONOMY_READINESS_SCHEMA,
+    MINECRAFT_READINESS_BLOCKERS,
+    MINECRAFT_READINESS_DEPENDENCIES,
+    MINDCRAFT_TASK_CONTRACT_SCHEMA,
+    expected_readiness_state,
+)
 from .runtime_config_schema import (
     MINDCRAFT_SERVICE_SETTINGS,
     load_runtime_settings,
@@ -86,6 +93,86 @@ def _allowed_players() -> list[str]:
         for item in str(_MINDCRAFT_CONFIG["MINDCRAFT_ALLOWED_PLAYERS"]).split(",")
         if item.strip()
     ]
+
+
+def _functional_readiness(
+    *,
+    world_lease_authorized: bool,
+    running: bool,
+    telemetry_fresh: bool,
+    connected: bool,
+    telemetry: dict[str, Any],
+) -> dict[str, Any]:
+    task_contract = (
+        telemetry.get("task_contract")
+        if isinstance(telemetry.get("task_contract"), dict)
+        else {}
+    )
+    goal_manager = (
+        telemetry.get("goal_manager")
+        if isinstance(telemetry.get("goal_manager"), dict)
+        else {}
+    )
+    goal_manager_mode = str(
+        goal_manager.get("mode") or ""
+    ).strip().lower()
+    autonomy_state = str(
+        goal_manager.get("autonomy_state") or ""
+    ).strip().lower()
+    task_contract_ready = bool(
+        task_contract.get("schema")
+        == MINDCRAFT_TASK_CONTRACT_SCHEMA
+        and task_contract.get("ready") is True
+        and str(
+            task_contract.get("goal_manager_mode") or ""
+        ).strip().lower()
+        == "gated"
+        and task_contract.get("command_gate")
+        == "evelyn_goal_manager"
+        and task_contract.get("effect_verification")
+        == "explicit_postcondition"
+        and goal_manager_mode == "gated"
+    )
+    autonomy_active = autonomy_state == "active"
+    dependencies = {
+        "worldLeaseAuthorized": bool(
+            world_lease_authorized
+        ),
+        "runnerAlive": bool(running),
+        "telemetryFresh": bool(telemetry_fresh),
+        "minecraftConnected": bool(connected),
+        "taskContractReady": task_contract_ready,
+        "autonomyActive": autonomy_active,
+    }
+    blockers = [
+        MINECRAFT_READINESS_BLOCKERS[name]
+        for name in MINECRAFT_READINESS_DEPENDENCIES
+        if not dependencies[name]
+    ]
+    state = expected_readiness_state(dependencies)
+    return {
+        "schema": MINECRAFT_AUTONOMY_READINESS_SCHEMA,
+        "state": state,
+        "ready": not blockers,
+        "blockers": blockers,
+        "dependencies": dependencies,
+        "taskContract": {
+            "schema": (
+                MINDCRAFT_TASK_CONTRACT_SCHEMA
+                if task_contract_ready
+                else ""
+            ),
+            "goalManagerMode": goal_manager_mode,
+            "autonomyState": autonomy_state,
+            "commandGate": str(
+                task_contract.get("command_gate") or ""
+            ),
+            "effectVerification": str(
+                task_contract.get("effect_verification") or ""
+            ),
+        },
+        "contentFree": True,
+    }
 
 
 class MindcraftRuntime:
@@ -188,6 +275,11 @@ class MindcraftRuntime:
             env["PROFILES"] = json.dumps([str(PROFILE_PATH)])
             env["MINDCRAFT_GOAL"] = requested_goal
             env["MINDCRAFT_STATUS_PATH"] = str(STATUS_PATH)
+            env["MINDCRAFT_GOAL_MANAGER_MODE"] = str(
+                _MINDCRAFT_CONFIG[
+                    "MINDCRAFT_GOAL_MANAGER_MODE"
+                ]
+            )
             env.setdefault(
                 "MINECRAFT_USERNAME",
                 str(_MINDCRAFT_CONFIG["MINEFLAYER_USERNAME"]),
@@ -342,6 +434,13 @@ class MindcraftRuntime:
             if isinstance(goal_manager.get("current_subgoal"), dict)
             else None
         )
+        functional_readiness = _functional_readiness(
+            world_lease_authorized=world_lease_authorized,
+            running=running,
+            telemetry_fresh=telemetry_fresh,
+            connected=connected,
+            telemetry=telemetry,
+        )
         return {
             "service": "mindcraft_minecraft",
             "runtime": "mindcraft",
@@ -388,6 +487,7 @@ class MindcraftRuntime:
                 "" if world_lease_authorized
                 else self._last_world_lease_error_code
             ),
+            "functional_readiness": functional_readiness,
             "configuration": _MINDCRAFT_CONFIG.public_summary(),
             **self.runtime_errors.snapshot(),
             "note": "Evelyn Mindcraft v0.1.4 runtime with non-operator survival policy.",
@@ -398,12 +498,18 @@ STATE = MindcraftRuntime()
 
 
 async def health(_: web.Request) -> web.Response:
+    runtime_status = STATE.build_status()
     return web.json_response(
         {
             "ok": True,
             "service": "mindcraft_minecraft",
             "runtime": "mindcraft",
-            "runner_alive": STATE.process_alive(),
+            "runner_alive": bool(
+                runtime_status.get("running")
+            ),
+            "functional_readiness": runtime_status.get(
+                "functional_readiness"
+            ),
             "configuration": _MINDCRAFT_CONFIG.public_summary(),
             **STATE.runtime_errors.snapshot(),
         }
