@@ -116,6 +116,14 @@ Discord 명령, 음성 재생 완료 경로도 같은 즉시 commit 계약을 �
 commit 실패는 이미 전달된 응답을 취소하거나 중복 전송하지 않고 고정 오류
 코드만 남긴다.
 
+`2272668`부터 각 surface는 commit callback의 단순 반환을 durable 성공으로
+간주하지 않는다. exact status schema, current/verified checkpoint head,
+rollback protection, 양수 generation·session count와 이번 commit 성공
+metric을 모두 검증한 최소 receipt만 받는다. 부분·legacy·손상 status는
+fail-closed하며, 자율 후속이 실제 owner 필드 대신 없는 `generation`을 읽어
+항상 0으로 기록하던 결함도 닫혔다. 이 경계는 실제 전달을 되돌리거나 같은
+답변을 재전송하지 않고 durability 실패만 정확히 드러낸다.
+
 `67a7adf`는 Discord reference 전송의 fallback도 같은 중복 방지 경계로
 좁혔다. reference 생성이 네트워크 전에 로컬에서 실패했거나 Discord가 첫
 요청을 비모호 4xx로 확실히 거부한 경우에만 일반 메시지를 한 번 보낸다.

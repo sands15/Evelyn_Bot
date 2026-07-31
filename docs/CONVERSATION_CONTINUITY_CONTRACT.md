@@ -76,6 +76,34 @@ checkpoint 저장 실패로 발생한 revocation status는 `fsync`해 fail-close
 검증한다. 검증 실패는 원문 예외 없이
 `conversation_continuity_commit_failed`로 정규화한다.
 
+각 전달 surface는 commit callback이 예외 없이 반환됐다는 사실만으로 성공을
+판정하지 않는다. 반환된 `conversation_continuity.status.v1`에서 다음 증거를
+모두 exact type/value로 다시 검증한다.
+
+- `state=ready`
+- `rollbackProtected=true`
+- `checkpointIntegrity=verified`
+- `checkpointHeadState=current`
+- 양수 `checkpointGeneration`과 `persistedSessionCount`
+- `conversation_continuity.commit-metrics.v1`의 양수 시도·성공·표본 수와
+  `lastSucceeded=true`
+
+검증 성공 후 소비자에게 남기는 최소 receipt는 다음과 같다.
+
+```json
+{
+  "schema": "conversation_continuity.commit-receipt.v1",
+  "durable": true,
+  "generation": 7,
+  "persistedSessionCount": 1
+}
+```
+
+부분 status, legacy `generation` 필드, 잘못된 schema/type, lagging head,
+rollback protection 누락, 이전 commit의 실패 지표는 모두 고정
+`conversation_continuity_commit_failed`로 처리한다. callback의 임의 private
+필드는 receipt, metrics, log에 복사하지 않는다.
+
 전달과 기록 순서는 다음 계약을 따른다.
 
 - Discord text는 텍스트 전송, 완료 상태 반영, durable commit 뒤 선택적 음성
@@ -87,6 +115,9 @@ checkpoint 저장 실패로 발생한 revocation status는 `fsync`해 fail-close
 - 자율 후속 답변과 Discord 명령 응답도 실제 전송·기록 뒤 즉시 commit한다.
 - 음성 답변은 재생 완료 뒤 history, active session, room owner를 반영하고
   즉시 commit한다.
+- Discord text/command, Control Page 일반·검색, 검색 후속, 자율 후속과
+  음성 완료는 모두 같은 receipt validator를 사용한다. 자율 후속의 generation
+  역시 owner의 `checkpointGeneration`에서만 가져온다.
 
 Discord message reference fallback도 delivery-at-most-once 경계를 따른다.
 
@@ -149,6 +180,8 @@ transcript, 사용자·guild/channel/message/session/turn ID, 경로와 예외
 - 마지막 commit 실패는 `error`와
   `conversation_continuity_commit_failed`로 표시하고 실패 지연은 성공
   percentile에 섞지 않는다.
+- 전달 surface의 receipt 검증 실패는 이미 전달된 턴을 다시 보내지 않지만,
+  해당 surface의 `continuity_commit`을 `failed`로 남긴다.
 - 표본은 재시작 뒤 복구하지 않는다. 오래된 프로세스의 stale 경고는 Runtime
   Errors의 현재 경고로 승격하지 않는다.
 - Runtime Errors와 Control Page는 허용 필드만 다시 투영하며 알 수 없는
@@ -176,6 +209,10 @@ transcript, 사용자·guild/channel/message/session/turn ID, 경로와 예외
 필수 테스트는 다음을 포함한다.
 
 - 완료 턴 및 active follow-up의 fresh restart 복구
+- 실제 owner status가 exact minimal receipt로 축약되는지 검증
+- 부분·legacy·손상 status와 이전 실패 metric의 durable 성공 오판 방지
+- Discord text/command, Control Page 일반·검색, 검색 후속, 자율 후속,
+  음성 완료의 동일 receipt 판정
 - 현재 system prompt 재삽입과 raw audio/부분 STT 제외
 - 경과 시간에 따른 follow-up 만료
 - stale·corrupt·oversized checkpoint 거부와 폐기

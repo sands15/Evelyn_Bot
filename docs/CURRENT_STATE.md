@@ -2,7 +2,7 @@
 
 Document status: **Current**
 Last reviewed: 2026-07-31 KST
-Source branch: `codex/dependency-config-hardening` through `26c97e8`
+Source branch: `codex/dependency-config-hardening` through `2272668`
 
 이 문서는 현재 확인된 사실만 기록한다. 목표 구조와 과거 계획은 다른 설계/계획 문서를 사용한다.
 
@@ -63,6 +63,13 @@ Source branch: `codex/dependency-config-hardening` through `26c97e8`
   - Control Page 일반·검색, 검색 후속, 자율 후속, Discord 명령, 음성 재생
     완료도 같은 commit 계약을 사용한다. 실패 시 중복 전송하지 않고
     `conversation_continuity_commit_failed`만 기록한다.
+  - 모든 전달 surface는 callback 반환만으로 durable 성공을 선언하지 않는다.
+    status schema, ready state, current head, verified integrity, rollback
+    protection, 양수 generation/session count와 이번 commit의 성공 metric을
+    검증한 `conversation_continuity.commit-receipt.v1`만 받는다.
+  - 부분·legacy·손상 status는 이미 전달된 답변을 다시 보내지 않되
+    continuity 실패로 남긴다. 자율 후속의 generation 0 오기록도 실제
+    `checkpointGeneration` receipt로 수정했다.
   - Discord reference fallback은 로컬 reference 생성 실패 또는 비모호한
     Discord 4xx 거부에서만 일반 메시지를 한 번 보낸다. timeout, 연결 오류,
     상태 없는 예외, 5xx와 `408|409|425|429`처럼 첫 요청의 성공 여부가
@@ -912,6 +919,18 @@ Source branch: `codex/dependency-config-hardening` through `26c97e8`
   내부 `compileall`, `pip check`, 새 계약 포함 확인과 이미지 내부 집중
   테스트 78개를 통과했다. 실제 Discord/Main 서비스는 시작하지 않았다.
   실행 중인 Control Page와 Bot API 두 서비스는 그대로 유지했다.
+- `2272668`은 완료 턴의 commit callback 반환값을 모든 전달 surface에서
+  exact durable receipt로 재검증한다. 부분 status나 이전 실패 metric은
+  성공으로 기록되지 않으며, 자율 후속의 production generation이 항상 0이던
+  필드 불일치를 함께 수정했다.
+- receipt/owner/surface 집중 테스트 61개, Discord I/O 101개, UI 156개
+  (skip 7), 음성 415개, runtime 393개(skip 2)를 통과했다. core 483개는
+  기능 assertion 실패 0개였고 이미지에 `git`이 없어 난 기존 2개는 Windows
+  모듈 13개로 보완했다.
+- 새 Discord/Main image
+  `sha256:9e0b178be17328a9ffec393b72e31343b9dfd645dba9f1d8da955ac1f6e3b93d`는
+  내부 `compileall`, `pip check`, receipt 계약 import와 이미지 내부 집중
+  테스트 61개를 통과했다. 실제 Discord/Main 서비스는 시작하지 않았다.
 
 ## Operational boundaries
 
