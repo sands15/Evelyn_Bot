@@ -31,6 +31,7 @@ class TurnTraceSummaryTests(unittest.TestCase):
             "memory_grounding_state",
             "memory_supplied_note_ids",
             "memory_legacy_evidence_ids",
+            "memory_legacy_source_evidence_ids",
             "memory_legacy_source_turn_ids",
             "memory_receipt_content_free",
             "memory_writer_decision",
@@ -77,6 +78,7 @@ class TurnTraceSummaryTests(unittest.TestCase):
                             "legacyAttributedItemCount": 2,
                             "legacyUnattributedItemCount": 1,
                             "legacyEvidenceIds": ["turn:a:user", "turn:a:assistant"],
+                            "legacySourceEvidenceIds": ["turn:source:user"],
                             "legacySourceTurnIds": ["a"],
                             "hotContextState": "provided",
                             "memoryVersion": 7,
@@ -116,6 +118,10 @@ class TurnTraceSummaryTests(unittest.TestCase):
         self.assertEqual(
             payload["memory_legacy_evidence_ids"],
             ["turn:a:user", "turn:a:assistant"],
+        )
+        self.assertEqual(
+            payload["memory_legacy_source_evidence_ids"],
+            ["turn:source:user"],
         )
         self.assertEqual(payload["memory_legacy_source_turn_ids"], ["a"])
         self.assertEqual(payload["memory_hot_context_state"], "provided")

@@ -199,8 +199,118 @@ class MemoryContextStateTests(unittest.TestCase):
         self.assertEqual(receipt["legacyAttributedItemCount"], 1)
         self.assertEqual(receipt["legacyUnattributedItemCount"], 0)
         self.assertEqual(receipt["legacyEvidenceIds"], ["turn:abc123:user"])
+        self.assertEqual(receipt["legacySourceEvidenceIds"], [])
         self.assertEqual(receipt["legacySourceTurnIds"], ["abc123"])
         self.assertNotIn("PRIVATE_RAW_TEXT", str(receipt))
+
+    def test_derived_legacy_items_report_content_free_input_lineage(self) -> None:
+        layers = {
+            "guild": {
+                "label": "서버 기억",
+                "summary": "PRIVATE_SUMMARY_TEXT",
+                "summary_provenance": {
+                    "evidence_id": "memory:summary:new",
+                    "evidence_kind": "derived_summary",
+                    "source_evidence_ids": ["turn:source-a:user"],
+                    "source_turn_ids": ["source-a"],
+                },
+                "raw": [],
+                "facts": [
+                    {
+                        "text": "PRIVATE_FACT_TEXT",
+                        "saved_at": 2,
+                        "evidence_id": "memory:fact:new",
+                        "evidence_kind": "derived_fact",
+                        "source_evidence_ids": ["memory:summary:new", "turn:source-b:user"],
+                        "source_turn_ids": ["source-a", "source-b"],
+                    }
+                ],
+                "questions": [
+                    {
+                        "text": "PRIVATE_QUESTION_TEXT",
+                        "saved_at": 3,
+                        "evidence_id": "memory:question:new",
+                        "evidence_kind": "derived_question",
+                        "source_evidence_ids": ["turn:source-b:assistant"],
+                        "source_turn_ids": ["source-b"],
+                    }
+                ],
+                "vault_raw": [],
+            }
+        }
+
+        def empty_vault(*_args, receipt=None, **_kwargs):
+            receipt.update({"state": "empty", "memoryVersion": 1, "suppliedNoteIds": []})
+            return ""
+
+        receipt = {}
+        with patch("evelyn_core.memory_context_state.collect_memory_layers", return_value=layers):
+            with patch(
+                "evelyn_core.memory_context_state.build_memory_vault_context",
+                side_effect=empty_vault,
+            ):
+                context = build_memory_context(
+                    123,
+                    "PRIVATE",
+                    cognitive_state={},
+                    receipt=receipt,
+                )
+
+        self.assertIn("PRIVATE_SUMMARY_TEXT", context)
+        self.assertEqual(receipt["groundingState"], "attributed")
+        self.assertEqual(receipt["legacyAttributedItemCount"], 3)
+        self.assertEqual(receipt["legacyUnattributedItemCount"], 0)
+        self.assertEqual(
+            receipt["legacyEvidenceIds"],
+            ["memory:fact:new", "memory:question:new", "memory:summary:new"],
+        )
+        self.assertEqual(
+            receipt["legacySourceEvidenceIds"],
+            [
+                "memory:summary:new",
+                "turn:source-a:user",
+                "turn:source-b:assistant",
+                "turn:source-b:user",
+            ],
+        )
+        self.assertEqual(receipt["legacySourceTurnIds"], ["source-a", "source-b"])
+        self.assertNotIn("PRIVATE_", str(receipt))
+
+    def test_invalid_derived_provenance_remains_unattributed(self) -> None:
+        layers = {
+            "guild": {
+                "label": "서버 기억",
+                "summary": "summary",
+                "summary_provenance": {
+                    "evidence_id": "memory:summary:invalid",
+                    "evidence_kind": "derived_summary",
+                    "source_evidence_ids": [],
+                },
+                "raw": [],
+                "facts": [
+                    {
+                        "text": "fact",
+                        "saved_at": 1,
+                        "evidence_id": "not valid evidence",
+                        "evidence_kind": "derived_fact",
+                        "source_evidence_ids": ["turn:source:user"],
+                    }
+                ],
+                "questions": [],
+                "vault_raw": [],
+            }
+        }
+
+        receipt = {}
+        with patch("evelyn_core.memory_context_state.collect_memory_layers", return_value=layers):
+            with patch("evelyn_core.memory_context_state.build_memory_vault_context", return_value=""):
+                build_memory_context(123, "fact", cognitive_state={}, receipt=receipt)
+
+        self.assertEqual(receipt["groundingState"], "unattributed")
+        self.assertEqual(receipt["legacyAttributedItemCount"], 0)
+        self.assertEqual(receipt["legacyUnattributedItemCount"], 2)
+        self.assertEqual(receipt["legacyEvidenceIds"], [])
+        self.assertEqual(receipt["legacySourceEvidenceIds"], [])
 
     def test_empty_payload_returns_empty_string(self) -> None:
         self.assertEqual(

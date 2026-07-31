@@ -1,3 +1,4 @@
+import hashlib
 import json
 import re
 import time
@@ -19,6 +20,10 @@ from .memory_vault import (
     build_memory_vault_context,
     run_memory_vault_maintenance_once,
 )
+
+
+MEMORY_LEGACY_EVIDENCE_SCHEMA = "memory.legacy-evidence.v1"
+_MEMORY_EVIDENCE_ID_RE = re.compile(r"^[A-Za-z0-9._:-]+$")
 
 
 def guild_memory_dir(guild_id: int) -> Path:
@@ -60,6 +65,19 @@ def memory_vault_dir(guild_id: int, *, scope_type: str = "guild", scope_key: str
 
 def memory_summary_path(guild_id: int, *, scope_type: str = "guild", scope_key: str | None = None) -> Path:
     return scoped_memory_dir(guild_id, scope_type=scope_type, scope_key=scope_key) / "rolling_summary.txt"
+
+
+def memory_summary_provenance_path(
+    guild_id: int,
+    *,
+    scope_type: str = "guild",
+    scope_key: str | None = None,
+) -> Path:
+    return scoped_memory_dir(
+        guild_id,
+        scope_type=scope_type,
+        scope_key=scope_key,
+    ) / "rolling_summary.provenance.json"
 
 
 def memory_raw_path(guild_id: int, *, scope_type: str = "guild", scope_key: str | None = None) -> Path:
@@ -121,6 +139,114 @@ def read_json_file(path: Path) -> dict:
 def write_json_file(path: Path, data: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _clean_memory_evidence_id(value: object, *, max_chars: int = 120) -> str:
+    cleaned = clean_text(str(value or ""))[:max_chars]
+    return cleaned if _MEMORY_EVIDENCE_ID_RE.fullmatch(cleaned) else ""
+
+
+def _clean_memory_evidence_ids(value: object, *, max_items: int = 64) -> list[str]:
+    if not isinstance(value, (list, tuple)):
+        return []
+    return list(
+        dict.fromkeys(
+            cleaned
+            for item in value[:max_items]
+            if (cleaned := _clean_memory_evidence_id(item))
+        )
+    )
+
+
+def write_memory_summary_with_provenance(
+    guild_id: int,
+    summary: str,
+    *,
+    evidence_id: str,
+    source_evidence_ids: list[str] | tuple[str, ...],
+    source_turn_ids: list[str] | tuple[str, ...],
+    scope_type: str = "guild",
+    scope_key: str | None = None,
+) -> None:
+    normalized_summary = compact_working_summary(summary)
+    write_text_file(
+        memory_summary_path(
+            guild_id,
+            scope_type=scope_type,
+            scope_key=scope_key,
+        ),
+        normalized_summary,
+    )
+    write_json_file(
+        memory_summary_provenance_path(
+            guild_id,
+            scope_type=scope_type,
+            scope_key=scope_key,
+        ),
+        {
+            "schema": MEMORY_LEGACY_EVIDENCE_SCHEMA,
+            "evidence_id": _clean_memory_evidence_id(evidence_id),
+            "evidence_kind": "derived_summary",
+            "source_evidence_ids": _clean_memory_evidence_ids(source_evidence_ids),
+            "source_turn_ids": _clean_memory_evidence_ids(
+                source_turn_ids,
+                max_items=32,
+            ),
+            "content_sha256": hashlib.sha256(
+                normalized_summary.encode("utf-8", errors="ignore")
+            ).hexdigest(),
+        },
+    )
+
+
+def read_memory_summary_provenance(
+    guild_id: int,
+    *,
+    scope_type: str = "guild",
+    scope_key: str | None = None,
+) -> dict:
+    summary = read_text_file(
+        memory_summary_path(
+            guild_id,
+            scope_type=scope_type,
+            scope_key=scope_key,
+        )
+    )
+    payload = read_json_file(
+        memory_summary_provenance_path(
+            guild_id,
+            scope_type=scope_type,
+            scope_key=scope_key,
+        )
+    )
+    if (
+        not summary
+        or payload.get("schema") != MEMORY_LEGACY_EVIDENCE_SCHEMA
+        or payload.get("evidence_kind") != "derived_summary"
+    ):
+        return {}
+    expected_hash = hashlib.sha256(
+        summary.encode("utf-8", errors="ignore")
+    ).hexdigest()
+    if clean_text(str(payload.get("content_sha256") or "")) != expected_hash:
+        return {}
+    evidence_id = _clean_memory_evidence_id(payload.get("evidence_id"))
+    source_evidence_ids = _clean_memory_evidence_ids(
+        payload.get("source_evidence_ids")
+    )
+    source_turn_ids = _clean_memory_evidence_ids(
+        payload.get("source_turn_ids"),
+        max_items=32,
+    )
+    if not evidence_id or not source_evidence_ids:
+        return {}
+    return {
+        "schema": MEMORY_LEGACY_EVIDENCE_SCHEMA,
+        "evidence_id": evidence_id,
+        "evidence_kind": "derived_summary",
+        "source_evidence_ids": source_evidence_ids,
+        "source_turn_ids": source_turn_ids,
+    }
 
 
 def read_jsonl(path: Path) -> list[dict]:
@@ -253,16 +379,21 @@ def append_raw_transcript_rows(
         }
         evidence_id = clean_text(str(row.get("evidence_id") or ""))[:120]
         source_turn_id = clean_text(str(row.get("source_turn_id") or ""))[:80]
-        if re.fullmatch(r"[A-Za-z0-9._:-]+", evidence_id):
-            saved_row["evidence_id"] = evidence_id
-        if re.fullmatch(r"[A-Za-z0-9._:-]+", source_turn_id):
-            saved_row["source_turn_id"] = source_turn_id
+        expected_evidence_id = f"turn:{source_turn_id}:{saved_row['role']}"
         if (
-            saved_row.get("evidence_id")
-            and saved_row.get("source_turn_id")
+            saved_row["role"] in {"user", "assistant"}
+            and evidence_id == expected_evidence_id
+            and re.fullmatch(r"[A-Za-z0-9._:-]+", evidence_id)
+            and re.fullmatch(r"[A-Za-z0-9._:-]+", source_turn_id)
             and clean_text(str(row.get("evidence_kind") or "")) == "conversation_turn"
         ):
-            saved_row["evidence_kind"] = "conversation_turn"
+            saved_row.update(
+                {
+                    "evidence_id": evidence_id,
+                    "source_turn_id": source_turn_id,
+                    "evidence_kind": "conversation_turn",
+                }
+            )
         normalized.append(saved_row)
 
     if normalized:
@@ -300,6 +431,28 @@ def append_unique_memory_rows(path: Path, rows: list[dict], limit: int, *, mirro
             "type": clean_text(str(row.get("type", "memory"))) or "memory",
             "saved_at": int(time.time()),
         }
+        evidence_id = _clean_memory_evidence_id(row.get("evidence_id"))
+        evidence_kind = clean_text(str(row.get("evidence_kind") or ""))
+        source_evidence_ids = _clean_memory_evidence_ids(
+            row.get("source_evidence_ids")
+        )
+        source_turn_ids = _clean_memory_evidence_ids(
+            row.get("source_turn_ids"),
+            max_items=32,
+        )
+        if (
+            evidence_id
+            and evidence_kind in {"derived_fact", "derived_question"}
+            and source_evidence_ids
+        ):
+            saved_row.update(
+                {
+                    "evidence_id": evidence_id,
+                    "evidence_kind": evidence_kind,
+                    "source_evidence_ids": source_evidence_ids,
+                    "source_turn_ids": source_turn_ids,
+                }
+            )
         seen.add(text)
         existing.append(saved_row)
         appended_rows.append(saved_row)

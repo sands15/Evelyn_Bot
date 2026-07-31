@@ -100,16 +100,55 @@ def build_memory_context_payload(
     )
 
 
-def _conversation_turn_evidence(row: dict[str, Any]) -> tuple[str, str] | None:
-    if clean_text(str(row.get("evidence_kind") or "")) != "conversation_turn":
+def _legacy_memory_evidence(
+    row: dict[str, Any],
+    *,
+    expected_kind: str,
+) -> tuple[str, tuple[str, ...], tuple[str, ...]] | None:
+    evidence_kind = clean_text(str(row.get("evidence_kind") or ""))
+    if evidence_kind != expected_kind:
         return None
     evidence_id = clean_text(str(row.get("evidence_id") or ""))[:120]
-    source_turn_id = clean_text(str(row.get("source_turn_id") or ""))[:80]
     if not re.fullmatch(r"[A-Za-z0-9._:-]+", evidence_id):
         return None
-    if not re.fullmatch(r"[A-Za-z0-9._:-]+", source_turn_id):
+    if evidence_kind == "conversation_turn":
+        source_turn_id = clean_text(str(row.get("source_turn_id") or ""))[:80]
+        if not re.fullmatch(r"[A-Za-z0-9._:-]+", source_turn_id):
+            return None
+        role = clean_text(str(row.get("role") or "user")).lower()
+        if role not in {"user", "assistant"}:
+            return None
+        if evidence_id != f"turn:{source_turn_id}:{role}":
+            return None
+        return evidence_id, (), (source_turn_id,)
+    if evidence_kind not in {"derived_summary", "derived_fact", "derived_question"}:
         return None
-    return evidence_id, source_turn_id
+    source_evidence_ids = row.get("source_evidence_ids")
+    if not isinstance(source_evidence_ids, (list, tuple)):
+        return None
+    cleaned_source_evidence_ids = tuple(
+        dict.fromkeys(
+            cleaned
+            for item in source_evidence_ids[:64]
+            if re.fullmatch(
+                r"[A-Za-z0-9._:-]+",
+                (cleaned := clean_text(str(item))[:120]),
+            )
+        )
+    )
+    if not cleaned_source_evidence_ids:
+        return None
+    source_turn_ids = tuple(
+        dict.fromkeys(
+            cleaned
+            for item in (row.get("source_turn_ids") or [])[:32]
+            if re.fullmatch(
+                r"[A-Za-z0-9._:-]+",
+                (cleaned := clean_text(str(item))[:80]),
+            )
+        )
+    ) if isinstance(row.get("source_turn_ids"), (list, tuple)) else ()
+    return evidence_id, cleaned_source_evidence_ids, source_turn_ids
 
 
 def build_memory_context(
@@ -201,17 +240,37 @@ def build_memory_context(
         "questions": len(questions),
     }
     legacy_item_count = sum(legacy_counts.values())
+    summary_evidence_items = [
+        layer.get("summary_provenance")
+        for layer in layers.values()
+        if layer.get("summary")
+        and isinstance(layer.get("summary_provenance"), dict)
+    ]
     legacy_evidence = [
-        evidence
-        for row in [
-            *session_rows,
-            *person_rows,
-            *room_rows,
-            *vault_raw_rows,
-            *facts,
-            *questions,
-        ]
-        if (evidence := _conversation_turn_evidence(row)) is not None
+        *(
+            evidence
+            for row in summary_evidence_items
+            if (evidence := _legacy_memory_evidence(row, expected_kind="derived_summary"))
+            is not None
+        ),
+        *(
+            evidence
+            for row in [*session_rows, *person_rows, *room_rows, *vault_raw_rows]
+            if (evidence := _legacy_memory_evidence(row, expected_kind="conversation_turn"))
+            is not None
+        ),
+        *(
+            evidence
+            for row in facts
+            if (evidence := _legacy_memory_evidence(row, expected_kind="derived_fact"))
+            is not None
+        ),
+        *(
+            evidence
+            for row in questions
+            if (evidence := _legacy_memory_evidence(row, expected_kind="derived_question"))
+            is not None
+        ),
     ]
     legacy_attributed_item_count = len(legacy_evidence)
     legacy_unattributed_item_count = max(
@@ -219,7 +278,20 @@ def build_memory_context(
         legacy_item_count - legacy_attributed_item_count,
     )
     legacy_evidence_ids = sorted({item[0] for item in legacy_evidence})
-    legacy_source_turn_ids = sorted({item[1] for item in legacy_evidence})
+    legacy_source_turn_ids = sorted(
+        {
+            source_turn_id
+            for item in legacy_evidence
+            for source_turn_id in item[2]
+        }
+    )
+    legacy_source_evidence_ids = sorted(
+        {
+            source_evidence_id
+            for item in legacy_evidence
+            for source_evidence_id in item[1]
+        }
+    )
     supplied_note_ids = sorted(
         {
             clean_text(str(item))
@@ -264,6 +336,7 @@ def build_memory_context(
                 "legacyAttributedItemCount": legacy_attributed_item_count,
                 "legacyUnattributedItemCount": legacy_unattributed_item_count,
                 "legacyEvidenceIds": legacy_evidence_ids,
+                "legacySourceEvidenceIds": legacy_source_evidence_ids,
                 "legacySourceTurnIds": legacy_source_turn_ids,
                 "contentFree": True,
             }

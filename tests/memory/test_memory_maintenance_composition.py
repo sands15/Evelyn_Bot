@@ -24,8 +24,10 @@ class MemoryMaintenanceCompositionTests(unittest.IsolatedAsyncioTestCase):
         return MemoryMaintenanceComposition(deps),deps
 
     async def test_long_term_update_detaches_task(self):
-        composition,deps=self.build(); await composition.update_long_term_memory(1,"u","a")
-        deps.run_long_term_memory_update.assert_awaited_once(); deps.detach_task.assert_called_once_with(None,"task")
+        composition,deps=self.build(); await composition.update_long_term_memory(1,"u","a",source_turn_id="turn-1")
+        deps.run_long_term_memory_update.assert_awaited_once()
+        self.assertEqual(deps.run_long_term_memory_update.await_args.kwargs["source_turn_id"],"turn-1")
+        deps.detach_task.assert_called_once_with(None,"task")
 
     def test_vault_interval_gate_skips_recent_run(self):
         composition,deps=self.build(vault_last_maintenance_at={1:500.0})

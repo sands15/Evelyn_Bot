@@ -6,6 +6,7 @@ from .memory import (
     compact_working_summary,
     memory_raw_path,
     memory_summary_path,
+    read_memory_summary_provenance,
     read_fact_rows,
     read_jsonl,
     read_question_rows,
@@ -27,6 +28,7 @@ def collect_memory_layers(
             "scope_type": "guild",
             "scope_key": None,
             "summary": compact_working_summary(read_text_file(memory_summary_path(guild_id))),
+            "summary_provenance": read_memory_summary_provenance(guild_id),
             "raw": read_jsonl(memory_raw_path(guild_id)),
             "vault_raw": read_vault_raw_rows(guild_id),
             "facts": read_fact_rows(guild_id),
@@ -42,6 +44,11 @@ def collect_memory_layers(
             "summary": compact_working_summary(
                 read_text_file(memory_summary_path(guild_id, scope_type="room", scope_key=room_key))
             ),
+            "summary_provenance": read_memory_summary_provenance(
+                guild_id,
+                scope_type="room",
+                scope_key=room_key,
+            ),
             "raw": read_jsonl(memory_raw_path(guild_id, scope_type="room", scope_key=room_key)),
             "vault_raw": read_vault_raw_rows(guild_id, scope_type="room", scope_key=room_key),
             "facts": read_fact_rows(guild_id, scope_type="room", scope_key=room_key),
@@ -56,6 +63,11 @@ def collect_memory_layers(
             "summary": compact_working_summary(
                 read_text_file(memory_summary_path(guild_id, scope_type="person", scope_key=person_key))
             ),
+            "summary_provenance": read_memory_summary_provenance(
+                guild_id,
+                scope_type="person",
+                scope_key=person_key,
+            ),
             "raw": read_jsonl(memory_raw_path(guild_id, scope_type="person", scope_key=person_key)),
             "vault_raw": read_vault_raw_rows(guild_id, scope_type="person", scope_key=person_key),
             "facts": read_fact_rows(guild_id, scope_type="person", scope_key=person_key),
@@ -69,6 +81,11 @@ def collect_memory_layers(
             "scope_key": session_memory_key,
             "summary": compact_working_summary(
                 read_text_file(memory_summary_path(guild_id, scope_type="session", scope_key=session_memory_key))
+            ),
+            "summary_provenance": read_memory_summary_provenance(
+                guild_id,
+                scope_type="session",
+                scope_key=session_memory_key,
             ),
             "raw": read_jsonl(memory_raw_path(guild_id, scope_type="session", scope_key=session_memory_key)),
             "vault_raw": read_vault_raw_rows(guild_id, scope_type="session", scope_key=session_memory_key),

@@ -94,6 +94,7 @@ class MemoryMaintenanceComposition:
         room_key: str | None = None,
         person_key: str | None = None,
         session_memory_key: str | None = None,
+        source_turn_id: str | None = None,
         turn_scope: Any | None = None,
     ) -> None:
         deps = self.deps
@@ -108,6 +109,7 @@ class MemoryMaintenanceComposition:
                     room_key=room_key,
                     person_key=person_key,
                     session_memory_key=session_memory_key,
+                    source_turn_id=source_turn_id,
                     turn_scope=turn_scope,
                     collect_layers=deps.collect_memory_layers,
                     ask_summary_llm=deps.ask_summary_llm,

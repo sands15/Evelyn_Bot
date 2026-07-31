@@ -151,6 +151,7 @@ def schedule_memory_update_from_runtime(
                             room_key=room_key,
                             person_key=person_key,
                             session_memory_key=session_memory_key,
+                            source_turn_id=getattr(turn_scope, "turn_id", None),
                             turn_scope=turn_scope,
                         ),
                         lambda: deps.update_cognitive_state(
@@ -193,6 +194,7 @@ def schedule_memory_update_from_runtime(
                     room_key=room_key,
                     person_key=person_key,
                     session_memory_key=session_memory_key,
+                    source_turn_id=getattr(turn_scope, "turn_id", None),
                     turn_scope=turn_scope,
                 ),
                 lambda: deps.update_cognitive_state(

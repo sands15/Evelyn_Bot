@@ -377,11 +377,19 @@ row만 receipt와 turn summary에 기록하므로 이후 턴에서 어느 원문
 제공됐는지 역추적할 수 있다. 기존 raw row는 내용을 이용해 ID를 소급 추론하지
 않고 `unattributed`로 남긴다.
 
-다만 rolling summary와 facts/questions에는 아직 source evidence linkage가 없다.
-이 항목들이 prompt에 함께 들어간 턴은 receipt가 `partial` 또는 `unattributed`로
-명시하며 vault note ID로 거짓 귀속하지 않는다. 다음 개선은 summary sidecar와
-새 derived row에 실제 summary-LLM 입력 evidence ID를 묶고, 마이그레이션되지
-않은 요약의 주입 정책을 별도로 결정하는 것이다.
+새로 생성되는 rolling summary는 본문 hash에 묶인 content-free sidecar에 자체
+파생 evidence ID와 실제 Summary LLM 입력 evidence/turn ID를 기록한다. 새
+facts/questions도 같은 입력 계보와 별도 파생 ID를 hot JSONL과 mirror에
+보존한다. context-size compact 재시도에서는 첫 시도의 최근 row를 source로
+남기지 않고 compact prompt에 실제 포함된 summary와 현재 턴만 연결한다. sidecar
+본문 hash가 다르거나 row provenance가 손상되면 receipt는 이를 근거로 인정하지
+않고 fail-closed한다.
+
+남은 coverage 위험은 배포 전의 rolling summary·facts/questions와 과거 raw row가
+여전히 근거 없는 상태라는 점이다. 내용 유사도나 시간 인접성으로 이를 소급
+연결하지 않으므로 해당 항목이 prompt에 선택되면 receipt는 계속 `partial` 또는
+`unattributed`다. 다음 개선은 마이그레이션되지 않은 legacy 요약을 계속 주입할지,
+사용자 검토 전 격리할지에 대한 운영 정책과 실제 데이터 coverage 측정이다.
 
 남은 위험은 coverage와 correction이 구조적 근거 연결만 다루며 기억 내용이나
 사용자의 선택이 사실임을 보증하지 않는다는 점이다. hash chain과 head는

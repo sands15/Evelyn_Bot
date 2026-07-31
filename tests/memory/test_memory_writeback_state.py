@@ -37,9 +37,44 @@ class MemoryWritebackStateTests(unittest.TestCase):
             "guild": {
                 "label": "서버 기억",
                 "summary": "기존 요약",
-                "raw": [{"speaker": "정훈", "text": "이전 대화", "saved_at": 1}],
-                "facts": [{"type": "decision", "text": "작게 분리", "saved_at": 2}],
-                "questions": [{"type": "next", "text": "다음 후보", "saved_at": 3}],
+                "summary_provenance": {
+                    "evidence_id": "memory:summary:prior",
+                    "evidence_kind": "derived_summary",
+                    "source_evidence_ids": ["turn:summary-source:user"],
+                    "source_turn_ids": ["summary-source"],
+                },
+                "raw": [
+                    {
+                        "speaker": "정훈",
+                        "text": "이전 대화",
+                        "saved_at": 1,
+                        "evidence_id": "turn:raw-source:user",
+                        "evidence_kind": "conversation_turn",
+                        "source_turn_id": "raw-source",
+                    }
+                ],
+                "facts": [
+                    {
+                        "type": "decision",
+                        "text": "작게 분리",
+                        "saved_at": 2,
+                        "evidence_id": "memory:fact:prior",
+                        "evidence_kind": "derived_fact",
+                        "source_evidence_ids": ["turn:fact-source:user"],
+                        "source_turn_ids": ["fact-source"],
+                    }
+                ],
+                "questions": [
+                    {
+                        "type": "next",
+                        "text": "다음 후보",
+                        "saved_at": 3,
+                        "evidence_id": "memory:question:prior",
+                        "evidence_kind": "derived_question",
+                        "source_evidence_ids": ["turn:question-source:user"],
+                        "source_turn_ids": ["question-source"],
+                    }
+                ],
             }
         }
 
@@ -59,6 +94,8 @@ class MemoryWritebackStateTests(unittest.TestCase):
                 session_memory_key="session-1",
                 memory_fact_limit=20,
                 memory_loop_limit=20,
+                source_evidence_ids=["turn:source:user", "turn:source:assistant"],
+                source_turn_ids=["source"],
             )
 
             scopes = [
@@ -71,6 +108,14 @@ class MemoryWritebackStateTests(unittest.TestCase):
                 memory.read_text_file(memory.memory_summary_path(123, scope_type=scope_type, scope_key=scope_key))
                 for scope_type, scope_key in scopes
             ]
+            summary_provenance = [
+                memory.read_memory_summary_provenance(
+                    123,
+                    scope_type=scope_type,
+                    scope_key=scope_key,
+                )
+                for scope_type, scope_key in scopes
+            ]
             facts = memory.read_jsonl(memory.memory_facts_path(123))
             mirrored_facts = memory.read_jsonl(memory.vault_facts_path(123))
             questions = memory.read_jsonl(memory.memory_questions_path(123))
@@ -81,12 +126,51 @@ class MemoryWritebackStateTests(unittest.TestCase):
         self.assertEqual(applied["summary_written"], 4)
         self.assertEqual(applied["facts_written"], 4)
         self.assertEqual(applied["questions_written"], 4)
+        self.assertEqual(applied["source_evidence_count"], 2)
         self.assertEqual(summaries, ["새 요약"] * 4)
+        self.assertEqual(
+            {item["evidence_id"] for item in summary_provenance},
+            {summary_provenance[0]["evidence_id"]},
+        )
+        self.assertEqual(summary_provenance[0]["evidence_kind"], "derived_summary")
+        self.assertEqual(
+            summary_provenance[0]["source_evidence_ids"],
+            ["turn:source:user", "turn:source:assistant"],
+        )
+        self.assertEqual(summary_provenance[0]["source_turn_ids"], ["source"])
         self.assertEqual(facts[0]["text"], "작게 분리한다")
+        self.assertEqual(facts[0]["evidence_kind"], "derived_fact")
+        self.assertEqual(facts[0]["source_evidence_ids"], ["turn:source:user", "turn:source:assistant"])
+        self.assertEqual(facts[0]["source_turn_ids"], ["source"])
+        self.assertTrue(facts[0]["evidence_id"].startswith("memory:fact:"))
+        self.assertEqual(facts[0]["evidence_id"], mirrored_facts[0]["evidence_id"])
         self.assertEqual(mirrored_facts[0]["text"], "작게 분리한다")
         self.assertEqual(questions[0]["text"], "다음 후보 확인 필요")
+        self.assertEqual(questions[0]["evidence_kind"], "derived_question")
+        self.assertEqual(questions[0]["source_turn_ids"], ["source"])
+        self.assertTrue(questions[0]["evidence_id"].startswith("memory:question:"))
+        self.assertEqual(questions[0]["evidence_id"], mirrored_questions[0]["evidence_id"])
         self.assertEqual(mirrored_questions[0]["text"], "다음 후보 확인 필요")
         self.assertEqual(len(proactive), 1)
+
+    def test_summary_provenance_fails_closed_after_summary_content_changes(self) -> None:
+        with TemporaryMemoryRoot():
+            memory.write_memory_summary_with_provenance(
+                123,
+                "원래 요약",
+                evidence_id="memory:summary:bound",
+                source_evidence_ids=["turn:source:user"],
+                source_turn_ids=["source"],
+            )
+            self.assertEqual(
+                memory.read_memory_summary_provenance(123)["evidence_id"],
+                "memory:summary:bound",
+            )
+
+            memory.write_text_file(memory.memory_summary_path(123), "바뀐 요약")
+            stale = memory.read_memory_summary_provenance(123)
+
+        self.assertEqual(stale, {})
 
     def test_apply_long_term_memory_result_ignores_invalid_sections(self) -> None:
         with TemporaryMemoryRoot():
@@ -128,6 +212,7 @@ class MemoryWritebackStateTests(unittest.TestCase):
                     "계속해",
                     "분리했어",
                     room_key="room-1",
+                    source_turn_id="turn-new",
                     collect_layers=lambda *args, **kwargs: self._layers(),
                     ask_summary_llm=fake_ask,
                     is_context_size_error=lambda exc: False,
@@ -143,12 +228,28 @@ class MemoryWritebackStateTests(unittest.TestCase):
             summary = memory.read_text_file(memory.memory_summary_path(123))
             room_summary = memory.read_text_file(memory.memory_summary_path(123, scope_type="room", scope_key="room-1"))
             facts = memory.read_jsonl(memory.memory_facts_path(123))
+            provenance = memory.read_memory_summary_provenance(123)
 
         self.assertTrue(outcome["ok"])
         self.assertEqual(outcome["applied"]["scope_count"], 2)
         self.assertEqual(summary, "새 장기기억 요약")
         self.assertEqual(room_summary, "새 장기기억 요약")
         self.assertEqual(facts[0]["text"], "writebehind 모듈 분리")
+        self.assertEqual(
+            provenance["source_evidence_ids"],
+            [
+                "memory:summary:prior",
+                "turn:raw-source:user",
+                "memory:fact:prior",
+                "memory:question:prior",
+                "turn:turn-new:user",
+                "turn:turn-new:assistant",
+            ],
+        )
+        self.assertEqual(
+            provenance["source_turn_ids"],
+            ["summary-source", "raw-source", "fact-source", "question-source", "turn-new"],
+        )
         self.assertEqual(calls[0][1]["purpose"], "memory_summary")
         self.assertIn("현재 layered_summary", calls[0][0][1]["content"])
         self.assertTrue(any("[MEMORY LATENCY] guild=123 scope=room-1 ms=250" in line for line in logs))
@@ -172,6 +273,7 @@ class MemoryWritebackStateTests(unittest.TestCase):
                     123,
                     "긴 입력",
                     "긴 답변",
+                    source_turn_id="turn-compact",
                     collect_layers=lambda *args, **kwargs: self._layers(),
                     ask_summary_llm=fake_ask,
                     is_context_size_error=lambda exc: isinstance(exc, ContextTooLarge),
@@ -184,12 +286,26 @@ class MemoryWritebackStateTests(unittest.TestCase):
             )
 
             summary = memory.read_text_file(memory.memory_summary_path(123))
+            provenance = memory.read_memory_summary_provenance(123)
 
         self.assertTrue(outcome["ok"])
         self.assertEqual(len(calls), 2)
         self.assertEqual(calls[1][1]["max_tokens"], 220)
         self.assertIn("새 대화:", calls[1][0][1]["content"])
         self.assertEqual(summary, "compact 요약")
+        self.assertEqual(
+            provenance["source_evidence_ids"],
+            [
+                "memory:summary:prior",
+                "turn:turn-compact:user",
+                "turn:turn-compact:assistant",
+            ],
+        )
+        self.assertEqual(
+            provenance["source_turn_ids"],
+            ["summary-source", "turn-compact"],
+        )
+        self.assertNotIn("turn:raw-source:user", provenance["source_evidence_ids"])
         self.assertIn("[MEMORY] compact retry 성공", logs)
 
 

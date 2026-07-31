@@ -307,9 +307,18 @@ Source branch: `codex/dependency-config-hardening`, current Fast Control action-
     유지한다. ID에는 발화 내용이 들어가지 않으며 allowlist 형식에 맞지 않는
     metadata는 저장하지 않는다.
   - receipt와 turn summary는 실제 prompt에 선택된 raw row의 evidence/turn
-    ID와 attributed/unattributed legacy 항목 수를 공개한다. 기존 row와
-    rolling summary·facts·questions는 근거를 추측해 소급 부여하지 않고 계속
-    `partial|unattributed`로 드러낸다.
+    ID와 attributed/unattributed legacy 항목 수를 공개한다. 새 rolling
+    summary는 내용 SHA-256에 묶인 sidecar에 파생 evidence ID와 실제 Summary
+    LLM 입력 evidence/turn ID를 저장하고, 내용이 따로 바뀌면 provenance만
+    fail-closed로 버린다. 새 facts/questions도 같은 실제 입력 ID와 별도 파생
+    evidence ID를 JSONL과 mirror에 보존한다. 일반 경로는 summary·선택된 최근
+    raw/fact/question·현재 턴만, context-size compact 재시도는 summary와 현재
+    턴만 source로 연결한다.
+  - receipt와 turn summary는 새 파생 항목의 evidence ID, 직접 입력 evidence
+    ID와 원본 turn ID를 content-free 필드로 공개한다. 이는 Summary/Main LLM에
+    “제공된 입력”의 계보이며 모델이 실제로 사용했거나 기억 내용이 사실임을
+    뜻하지 않는다. 기존 raw/summary/fact/question은 내용을 보고 근거를 추측해
+    소급 부여하지 않고 계속 `partial|unattributed`로 드러낸다.
   - pinned hot-context는 현재 recall의 memory version과 정확히 같고 포함 note
     ID가 있는 경우에만 live prompt에 들어간다. 과거 형식, 손상, 삭제/파생
     상태 불일치와 stale version은 fail-closed로 제외한다.
@@ -1135,6 +1144,14 @@ Source branch: `codex/dependency-config-hardening`, current Fast Control action-
   534개는 기능 assertion 실패 0개였고 `git` 부재의 기존 서명 검사 환경 오류
   2개는 Windows의 해당 모듈 13개로 보완했다. bundled Python 집중 66개와
   `compileall`, `git diff --check`도 통과했다.
+- derived memory evidence 변경의 current-source 검증은 집중 45개, memory
+  139개, runtime 413개(skip 2), UI 156개(skip 7), Discord I/O 108개,
+  voice 415개를 통과했다. Discord 의존 이미지의 core 536개는 기능 assertion
+  실패 0개였고 이미지에 `git`이 없어 난 기존 서명 검사 환경 오류 2개는
+  Windows의 해당 모듈 13개로 보완했다. bundled Python과 두 테스트 이미지의
+  `pip check`, `compileall`, 전체 profile Compose config, `git diff --check`도
+  통과했다. source는 read-only mount, runtime artifacts와 test memory는
+  컨테이너 임시 경로를 사용했으며 실행 중인 서비스는 교체하지 않았다.
 
 ## Operational boundaries
 

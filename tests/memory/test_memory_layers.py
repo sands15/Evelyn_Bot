@@ -39,10 +39,21 @@ class MemoryLayersTests(unittest.TestCase):
                 ("session", "session-1", "현재 세션 기억", "session summary"),
             ]
             for scope_type, scope_key, _label, summary in scopes:
-                memory.write_text_file(
-                    memory.memory_summary_path(123, scope_type=scope_type, scope_key=scope_key),
-                    summary,
-                )
+                if scope_type == "guild":
+                    memory.write_memory_summary_with_provenance(
+                        123,
+                        summary,
+                        evidence_id="memory:summary:guild",
+                        source_evidence_ids=["turn:guild-turn:user"],
+                        source_turn_ids=["guild-turn"],
+                        scope_type=scope_type,
+                        scope_key=scope_key,
+                    )
+                else:
+                    memory.write_text_file(
+                        memory.memory_summary_path(123, scope_type=scope_type, scope_key=scope_key),
+                        summary,
+                    )
                 memory.append_raw_transcript_rows(
                     123,
                     [
@@ -86,6 +97,10 @@ class MemoryLayersTests(unittest.TestCase):
             self.assertEqual(layer["label"], label)
             self.assertEqual(layer["scope_key"], scope_key)
             self.assertEqual(layer["summary"], summary)
+            if key == "guild":
+                self.assertEqual(layer["summary_provenance"]["evidence_id"], "memory:summary:guild")
+            else:
+                self.assertEqual(layer["summary_provenance"], {})
             self.assertEqual(layer["raw"][0]["text"], f"{key} raw")
             self.assertEqual(layer["vault_raw"][0]["text"], f"{key} raw")
             self.assertEqual(layer["raw"][0]["evidence_id"], f"turn:{key}-turn:user")
@@ -101,6 +116,46 @@ class MemoryLayersTests(unittest.TestCase):
         self.assertEqual(list(layers), ["guild"])
         self.assertEqual(layers["guild"]["label"], "공용 방 기억")
         self.assertEqual(layers["guild"]["raw"], [])
+        self.assertEqual(layers["guild"]["summary_provenance"], {})
+
+    def test_collect_memory_layers_rejects_stale_summary_provenance(self) -> None:
+        with TemporaryMemoryRoot():
+            memory.write_memory_summary_with_provenance(
+                123,
+                "해시로 묶인 요약",
+                evidence_id="memory:summary:bound",
+                source_evidence_ids=["turn:source:user"],
+                source_turn_ids=["source"],
+            )
+            memory.write_text_file(memory.memory_summary_path(123), "다른 요약")
+
+            layers = collect_memory_layers(123)
+
+        self.assertEqual(layers["guild"]["summary"], "다른 요약")
+        self.assertEqual(layers["guild"]["summary_provenance"], {})
+
+    def test_raw_writer_drops_mismatched_turn_evidence_tuple(self) -> None:
+        with TemporaryMemoryRoot():
+            memory.append_raw_transcript_rows(
+                123,
+                [
+                    {
+                        "role": "assistant",
+                        "speaker": "이블린",
+                        "source": "text",
+                        "text": "응답",
+                        "evidence_id": "turn:turn-1:user",
+                        "source_turn_id": "turn-1",
+                        "evidence_kind": "conversation_turn",
+                    }
+                ],
+            )
+
+            row = memory.read_jsonl(memory.memory_raw_path(123))[0]
+
+        self.assertNotIn("evidence_id", row)
+        self.assertNotIn("source_turn_id", row)
+        self.assertNotIn("evidence_kind", row)
 
 
 if __name__ == "__main__":
