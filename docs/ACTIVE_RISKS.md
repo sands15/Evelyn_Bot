@@ -41,6 +41,12 @@ proof, 만료·상태 불명 시 fail-closed 정지는 구현됐다. Bot API 단
 공유 claim을 통한 경쟁 owner 차단, Discord 인증 위임, split Fast Control의
 승인 경로도 구현했다. Local I/O Bridge와 legacy auto-start 우회는 차단했다.
 
+계획된 Bot API 교체의 claim handoff도 실제 컨테이너에서 검증했다. shutdown
+취소를 포함한 모든 cleanup 경로가 `finally`에서 claim을 반납하고 30초 stop
+grace를 사용한다. 실제 SIGTERM은 4.2초 안에 claim을 제거했으며 다음
+`--force-recreate`는 첫 시도에 healthy가 됐다. 전원 차단·SIGKILL처럼 cleanup이
+불가능한 종료는 의도적으로 15초 stale guard 뒤에만 새 owner가 인수한다.
+
 공식 Discord 이미지에서 grant crash/restart 비복구, 실행 중 교체·만료,
 audit write 실패, exact evidence, Discord status 노출, Minecraft lease와
 실제 `main.py` crash/restart를 포함한 집중 테스트 96개를 통과했다. 전체 core

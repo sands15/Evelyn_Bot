@@ -2,7 +2,7 @@
 
 Document status: **Current**
 Last reviewed: 2026-07-31 KST
-Source branch: `codex/dependency-config-hardening` through `3473a44`
+Source branch: `codex/dependency-config-hardening` through `d504303`
 
 이 문서는 현재 확인된 사실만 기록한다. 목표 구조와 과거 계획은 다른 설계/계획 문서를 사용한다.
 
@@ -26,6 +26,10 @@ Source branch: `codex/dependency-config-hardening` through `3473a44`
     `explicit_postcondition` 결과 검증을 모두 요구한다.
   - 누락·손상·상위 상태와 모순된 Mindcraft 계약은 fail-closed하며,
     Control Page와 Runtime Health는 같은 validator를 사용한다.
+  - Bot API의 Minecraft 단일-owner claim은 정상 종료와 취소된 cleanup 모두
+    `finally`에서 반납한다. Bot API 컨테이너에는 외부 runtime 정리를 끝낼 수
+    있는 30초 stop grace를 적용한다. 강제 종료의 15초 stale takeover와
+    경쟁 owner fail-closed 규칙은 유지한다.
 - 음성 P0 검증 FSM과 로컬 재생 연속성 경계를 강화했다.
   - 현재 surface와 barge-in에 연결된 interrupt 단계만 이벤트를 받을 수 있다.
     지난 단계 재시도와 재생 완료 전 청취 확인은 서버에서 거부한다.
@@ -774,6 +778,15 @@ Source branch: `codex/dependency-config-hardening` through `3473a44`
   컨테이너의 owner claim이 15초 stale 유예 안에 있어 fail-closed 종료됐고,
   유예 뒤 같은 컨테이너가 정상 인수했다. 현재 두 서비스는 `healthy`,
   restart count 0이다. Discord와 마이크·LLM/STT/TTS는 시작하지 않았다.
+- `d504303`의 owner handoff 변경은 Minecraft 전체 80개와 Fast Control/
+  shutdown/lease boundary 85개, owner·Compose 집중 33개를 통과했다.
+  실제 Bot API SIGTERM은 4.2초 안에 exit 0으로 claim을 제거했고, 그 이미지
+  사이의 `docker compose --force-recreate`는 stale 대기나 첫 프로세스 종료
+  없이 바로 `healthy`가 됐다.
+- 현재 Bot API 이미지 digest는
+  `sha256:141fdc86304f7c0ac6e91a40b09e4eccf9994fb70f652701ad3f32d45d4d0eb7`이며
+  `stopTimeout=30`, `healthy`, restart count 0이다. 이미지 내부
+  `compileall`과 `pip check`, Compose config, `git diff --check`를 통과했다.
 - 배포 뒤 공식 `check_docker_runtime.ps1 -IncludeLocalBridge`는
   Control Page, Bot API, Main/Router/Sub LLM, TTS, STT, Vision과 Windows
   Local I/O Bridge를 모두 준비 상태로 판정했다. 실제 Discord bot,
