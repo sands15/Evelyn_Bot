@@ -305,8 +305,9 @@ An unrelated but urgent survival risk was visible after reconnect: health was
 approximately `3.76`, hunger was `0`, and the inventory contained 9 wheat but
 no edible food. `acquire_food` repeatedly failed because bread crafting requires
 a crafting table and the deterministic recovery does not currently navigate to
-one. This predates the combat replacement and needs a separate normal-player
-food-recovery change; do not report overall survival as stable.
+one. This predates the combat replacement. The staged normal-player remediation
+is documented below, but do not report live survival as stable until its
+acceptance scenario passes.
 
 ## Dependency consolidation (2026-08-01)
 
@@ -333,3 +334,27 @@ production audit remains moderate 12, high 0, critical 0. The final staged image
 is `sha256:6e6b95a5e87efcb5187df3d0ae53478740f4c35ee025db172ecc3669b4690f37`.
 It was inspected only; no Minecraft process, account login, or live service was
 started.
+
+## Evidence-gated wheat food recovery (2026-08-01)
+
+The earlier live starvation incident had nine wheat but no edible item or
+crafting table. The food-priority candidate previously remained a generic
+`obtain #food` goal, so it could not select the crafting prerequisites already
+implied by the inventory.
+
+The staged Goal Manager now derives a bounded recovery chain from current
+inventory: obtain one log only when needed, craft four planks, craft and retain
+a workbench, then craft as many as three bread recipes from carried wheat. Each
+step advances only after its inventory predicate changes; a success-shaped
+result string without the corresponding world-state change does not advance the
+chain. The active step and completed evidence survive a Goal Manager restart.
+Wood species are preserved when choosing the planks recipe, including stripped
+logs, stems, and hyphae.
+
+Focused food-chain tests passed 4/4, the complete Node suite passed 86/86, and
+the Python Mindcraft contracts passed 15/15. Image
+`sha256:1017243d8844055ec06f9dac53ca89381ba4406bba1943df00a4b4266faa4c8a`
+also passed the build-time lint/custom-PvP gates, complete Node suite, offline
+production dependency-tree check, and Goal Manager syntax check. It was staged
+only; no Minecraft process, account login, or live service was started. Real
+starvation recovery remains an explicit live acceptance scenario.

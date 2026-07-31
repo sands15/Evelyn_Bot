@@ -56,6 +56,7 @@ const TARGET_PREREQUISITES = {
     ],
     '#logs': ['oak_log'],
     '#planks': ['oak_planks', '#logs', 'oak_log'],
+    bread: ['wheat', 'crafting_table', '#planks', '#logs'],
     crafting_table: ['#planks', '#logs'],
     wooden_pickaxe: ['stick', '#planks', '#logs', 'crafting_table'],
     wooden_sword: ['stick', '#planks', '#logs', 'crafting_table'],
@@ -368,11 +369,28 @@ export function minimumKitStatus(snapshot) {
     };
 }
 
-export function minimumKitCandidate(snapshot) {
+function planksTargetForInventory(inventory) {
+    for (const [rawName, rawCount] of Object.entries(inventory || {})) {
+        if (Number(rawCount || 0) < 1) continue;
+        const name = String(rawName || '').toLowerCase().replace(/^stripped_/, '');
+        for (const suffix of ['_log', '_stem', '_hyphae']) {
+            if (name.endsWith(suffix)) {
+                return `${name.slice(0, -suffix.length)}_planks`;
+            }
+        }
+    }
+    return null;
+}
+
+export function foodRecoveryCandidate(snapshot) {
     const inventory = snapshot?.inventory || {};
-    const kit = minimumKitStatus(snapshot);
-    const logs = inventoryCountForTarget(inventory, '#logs');
-    if (kit.food < 3 && Number(snapshot?.hunger ?? 20) <= 14) {
+    const food = inventoryCountForTarget(inventory, '#food');
+    const hunger = Number(snapshot?.hunger ?? 20);
+    if (food >= 3 || hunger > 14) return null;
+
+    const wheat = Math.max(0, Number(inventory.wheat || 0));
+    const breadRecipes = Math.floor(wheat / 3);
+    if (breadRecipes < 1) {
         return {
             id: 'restore_food_reserve',
             kind: 'obtain',
@@ -385,6 +403,70 @@ export function minimumKitCandidate(snapshot) {
             risk: 'low'
         };
     }
+
+    if (Number(inventory.crafting_table || 0) < 1) {
+        const planks = inventoryCountForTarget(inventory, '#planks');
+        if (planks < 4) {
+            const planksTarget = planksTargetForInventory(inventory);
+            if (planksTarget) {
+                return {
+                    id: 'craft_food_recovery_planks',
+                    kind: 'craft',
+                    target: planksTarget,
+                    quantity: 1,
+                    reason: 'Convert one carried log into planks for the food-recovery workbench.',
+                    success: {kind: 'inventory', target: '#planks', count: 4},
+                    prerequisite_targets: ['#logs'],
+                    action_budget: 4,
+                    unlock_score: 8,
+                    risk: 'low'
+                };
+            }
+            return {
+                id: 'obtain_food_recovery_log',
+                kind: 'obtain',
+                target: '#logs',
+                quantity: 1,
+                reason: 'One log unlocks a workbench for converting carried wheat into bread.',
+                success: {kind: 'inventory', target: '#logs', count: 1},
+                action_budget: 6,
+                unlock_score: 8,
+                risk: 'low'
+            };
+        }
+        return {
+            id: 'craft_food_recovery_table',
+            kind: 'craft',
+            target: 'crafting_table',
+            quantity: 1,
+            reason: 'Build the workbench required to convert carried wheat into bread.',
+            success: {kind: 'inventory', target: 'crafting_table', count: 1},
+            action_budget: 4,
+            unlock_score: 8,
+            risk: 'low'
+        };
+    }
+
+    const recipes = Math.min(Math.max(1, 3 - food), breadRecipes);
+    return {
+        id: 'craft_emergency_bread',
+        kind: 'craft',
+        target: 'bread',
+        quantity: recipes,
+        reason: 'Convert carried wheat into immediately edible food.',
+        success: {kind: 'inventory', target: '#food', count: food + recipes},
+        action_budget: 4,
+        unlock_score: 9,
+        risk: 'low'
+    };
+}
+
+export function minimumKitCandidate(snapshot) {
+    const inventory = snapshot?.inventory || {};
+    const kit = minimumKitStatus(snapshot);
+    const logs = inventoryCountForTarget(inventory, '#logs');
+    const urgentFood = foodRecoveryCandidate(snapshot);
+    if (urgentFood) return urgentFood;
     if ((kit.weapons < 1 || kit.pickaxes < 1) && logs < 3) {
         return {
             id: 'obtain_initial_logs',

@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {
     EvelynGoalManager,
+    foodRecoveryCandidate,
     minimumKitCandidate,
     minimumKitStatus,
 } from '../src/agent/evelyn_goal_manager.js';
@@ -288,6 +289,148 @@ test('minimum kit fills food, weapon, and pickaxe capabilities in dependency ord
         ['oak_log', 3],
     ]));
     assert.equal(minimumKitCandidate(armed).target, 'wooden_pickaxe');
+});
+
+test('urgent wheat recovery advances through log, planks, table, and bread', () => {
+    const starving = {food: 6};
+    assert.equal(
+        foodRecoveryCandidate(buildWorldState(fakeBot([['wheat', 9]], starving))).target,
+        '#logs',
+    );
+
+    const planks = foodRecoveryCandidate(buildWorldState(fakeBot([
+        ['wheat', 9],
+        ['stripped_crimson_stem', 1],
+    ], starving)));
+    assert.equal(planks.target, 'crimson_planks');
+    assert.deepEqual(planks.success, {kind: 'inventory', target: '#planks', count: 4});
+
+    const table = foodRecoveryCandidate(buildWorldState(fakeBot([
+        ['wheat', 9],
+        ['crimson_planks', 4],
+    ], starving)));
+    assert.equal(table.target, 'crafting_table');
+
+    const bread = foodRecoveryCandidate(buildWorldState(fakeBot([
+        ['wheat', 9],
+        ['crafting_table', 1],
+    ], starving)));
+    assert.equal(bread.target, 'bread');
+    assert.equal(bread.quantity, 3);
+    assert.deepEqual(bread.success, {kind: 'inventory', target: '#food', count: 3});
+
+    assert.equal(
+        foodRecoveryCandidate(buildWorldState(fakeBot([['wheat', 2]], starving))).target,
+        '#food',
+    );
+});
+
+test('food priority persists across the verified workbench and bread chain', async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'evelyn-goal-food-chain-'));
+    const items = [['wheat', 9]];
+    const replaceItems = (...next) => items.splice(0, items.length, ...next);
+    try {
+        const bot = fakeBot(items, {food: 6});
+        let manager = new EvelynGoalManager(
+            fakeAgent(bot, []),
+            {
+                statePath: path.join(directory, 'state.json'),
+                mode: 'gated',
+                ultimateGoal: 'Defeat the Ender Dragon',
+            },
+        );
+        await manager.initialize();
+
+        const advance = async (command, result, nextItems) => {
+            const before = manager.captureSnapshot();
+            replaceItems(...nextItems);
+            const after = manager.captureSnapshot();
+            await manager.recordActionResult(
+                command,
+                result,
+                before,
+                after,
+                {autonomous: true},
+            );
+            assert.equal(manager.state.currentSubgoal, null);
+            manager.requestPriorityGoal('food', after);
+            await manager.prepareForPrompt();
+        };
+
+        manager.requestPriorityGoal('food', manager.captureSnapshot());
+        await manager.prepareForPrompt();
+        assert.equal(manager.state.currentSubgoal.id, 'obtain_food_recovery_log');
+        assert.ok(manager.state.currentSubgoal.allowedCommands.includes('!collectBlocks'));
+
+        const unchanged = manager.captureSnapshot();
+        await manager.recordActionResult(
+            '!collectBlocks("oak_log", 1)',
+            'Collected one oak log.',
+            unchanged,
+            unchanged,
+            {autonomous: true},
+        );
+        assert.equal(manager.state.currentSubgoal.id, 'obtain_food_recovery_log');
+        assert.equal(manager.state.completedSubgoals.length, 0);
+
+        await advance(
+            '!collectBlocks("oak_log", 1)',
+            'Collected one oak log.',
+            [['wheat', 9], ['oak_log', 1]],
+        );
+        assert.equal(manager.state.currentSubgoal.id, 'craft_food_recovery_planks');
+        assert.ok(manager.state.currentSubgoal.allowedCommands.includes('!craftRecipe'));
+
+        manager = new EvelynGoalManager(
+            fakeAgent(bot, []),
+            {
+                statePath: path.join(directory, 'state.json'),
+                mode: 'gated',
+                ultimateGoal: 'Defeat the Ender Dragon',
+            },
+        );
+        await manager.initialize();
+        assert.equal(manager.state.currentSubgoal.id, 'craft_food_recovery_planks');
+
+        await advance(
+            '!craftRecipe("oak_planks", 1)',
+            'Crafted four oak planks.',
+            [['wheat', 9], ['oak_planks', 4]],
+        );
+        assert.equal(manager.state.currentSubgoal.id, 'craft_food_recovery_table');
+
+        await advance(
+            '!craftRecipe("crafting_table", 1)',
+            'Crafted one crafting table.',
+            [['wheat', 9], ['crafting_table', 1]],
+        );
+        assert.equal(manager.state.currentSubgoal.id, 'craft_emergency_bread');
+        assert.equal(manager.state.currentSubgoal.quantity, 3);
+
+        const beforeBread = manager.captureSnapshot();
+        replaceItems(['crafting_table', 1], ['bread', 3]);
+        await manager.recordActionResult(
+            '!craftRecipe("bread", 3)',
+            'Crafted three bread.',
+            beforeBread,
+            manager.captureSnapshot(),
+            {autonomous: true},
+        );
+
+        assert.equal(manager.state.currentSubgoal, null);
+        assert.deepEqual(
+            manager.state.completedSubgoals.slice(-4).map(({id}) => id),
+            [
+                'obtain_food_recovery_log',
+                'craft_food_recovery_planks',
+                'craft_food_recovery_table',
+                'craft_emergency_bread',
+            ],
+        );
+        assert.ok(fs.existsSync(path.join(directory, 'state.json')));
+    } finally {
+        fs.rmSync(directory, {recursive: true, force: true});
+    }
 });
 
 test('critical food request preempts a normal progression subgoal', async () => {

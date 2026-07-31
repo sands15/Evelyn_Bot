@@ -16,9 +16,16 @@ Mindcraft 계약도 fail-closed하며 고정 blocker만 공개한다.
 따라서 lease 승인부터 runner 연결, 실제 task effect, 연결 단절과 재시작까지
 한 세션에서 readiness가 정확히 전이하는지는 아직 확인하지 못했다.
 
+기아 상태에서 밀만 있고 제작대가 없는 경우도 인벤토리 기반 선행조건 체인으로
+보강했다. Goal Manager는 성공 문구가 아니라 실제 아이템 증가를 확인하면서
+`통나무 1개 → 판자 4개 → 제작대 1개 → 빵` 순서로 진행하고, 중간 재시작 뒤에도
+현재 단계를 복구한다. 격리 회귀와 이미지 검증은 통과했지만 실제 기아 월드에서
+제작대 배치·회수와 빵 소비까지 이어지는지는 아직 live 증거가 없다.
+
 다음 조치: 사용자가 별도 Minecraft 검증 세션을 시작할 때
 `blocked → starting → ready → blocked` 전이와 실제 world effect를
-Control Page, Runtime Health, Mindcraft telemetry에서 함께 대조한다.
+Control Page, Runtime Health, Mindcraft telemetry에서 함께 대조하고, 밀 9개·
+식량 0개·제작대 0개 fixture에서 식량 복구 체인을 수용 테스트한다.
 
 ## P0 — 승인된 자율행동 live E2E 검증 대기
 
