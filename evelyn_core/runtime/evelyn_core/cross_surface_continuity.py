@@ -4,6 +4,7 @@ import hashlib
 import json
 import math
 import os
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,6 +24,9 @@ from .text import clean_text
 CROSS_SURFACE_CONTINUITY_STATUS_SCHEMA = (
     "cross_surface_continuity.status.v1"
 )
+CROSS_SURFACE_CONTINUITY_MERGE_SCHEMA = (
+    "cross_surface_continuity.merge.v1"
+)
 DEFAULT_CROSS_SURFACE_MAX_AGE_SEC = 30 * 60.0
 DEFAULT_CROSS_SURFACE_MAX_MESSAGES = 8
 DEFAULT_CROSS_SURFACE_MAX_SESSIONS = 8
@@ -31,6 +35,48 @@ DEFAULT_CROSS_SURFACE_FUTURE_SKEW_SEC = 60.0
 _HEAD_MAX_BYTES = 128 * 1024
 _REVOCATIONS_MAX_BYTES = 128 * 1024
 _ALLOWED_ROLES = frozenset({"user", "assistant"})
+_MERGE_STATES = frozenset(
+    {
+        "idle",
+        "disabled",
+        "scope_mismatch",
+        "local_only",
+        "reset_boundary",
+        "rejected",
+        "merged",
+    }
+)
+_MERGE_REASON_CODES = frozenset(
+    {
+        "",
+        "cross_surface_disabled",
+        "cross_surface_scope_not_configured",
+        "cross_surface_scope_mismatch",
+        "local_owner_rejected",
+        "local_reset_boundary_newer",
+        "cross_owner_missing",
+        "cross_owner_stale",
+        "cross_owner_empty",
+        "cross_owner_rejected",
+        "cross_owner_unavailable",
+    }
+)
+_OWNER_STATES = frozenset(
+    {
+        "unknown",
+        "verified",
+        "missing",
+        "stale",
+        "empty",
+        "rejected",
+    }
+)
+_SOURCE_SURFACES = frozenset(
+    {"", "main", "fast_control"}
+)
+_MERGE_ORDERINGS = frozenset(
+    {"", "cross_before_local", "cross_after_local"}
+)
 
 
 def _finite_float(value: Any, *, default: float = -1.0) -> float:
@@ -49,6 +95,16 @@ def _positive_int(value: Any) -> int | None:
     except (TypeError, ValueError):
         return None
     return parsed if parsed > 0 else None
+
+
+def _nonnegative_int(value: Any) -> int:
+    if isinstance(value, bool):
+        return 0
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, parsed)
 
 
 def _valid_sha256(value: Any) -> str:
@@ -357,6 +413,132 @@ class VerifiedContinuitySnapshot:
         }
 
 
+@dataclass(frozen=True)
+class CrossSurfaceMergeOutcome:
+    messages: tuple[dict[str, Any], ...]
+    evidence: dict[str, Any]
+
+    def public_status(self) -> dict[str, Any]:
+        return _copy_merge_evidence(self.evidence)
+
+
+def _copy_merge_evidence(
+    evidence: dict[str, Any],
+) -> dict[str, Any]:
+    state = clean_text(evidence.get("state"))
+    source_surface = clean_text(
+        evidence.get("sourceSurface")
+    )
+    reason_code = clean_text(
+        evidence.get("reasonCode")
+    )
+    local_owner_state = clean_text(
+        evidence.get("localOwnerState")
+    )
+    cross_owner_state = clean_text(
+        evidence.get("crossOwnerState")
+    )
+    ordering = clean_text(evidence.get("ordering"))
+    return {
+        "schema": CROSS_SURFACE_CONTINUITY_MERGE_SCHEMA,
+        "state": (
+            state if state in _MERGE_STATES else "rejected"
+        ),
+        "sourceSurface": (
+            source_surface
+            if source_surface in _SOURCE_SURFACES
+            else ""
+        ),
+        "reasonCode": (
+            reason_code
+            if reason_code in _MERGE_REASON_CODES
+            else "cross_owner_unavailable"
+        ),
+        "localOwnerState": (
+            local_owner_state
+            if local_owner_state in _OWNER_STATES
+            else "unknown"
+        ),
+        "crossOwnerState": (
+            cross_owner_state
+            if cross_owner_state in _OWNER_STATES
+            else "unknown"
+        ),
+        "localGeneration": _nonnegative_int(
+            evidence.get("localGeneration")
+        ),
+        "crossGeneration": _nonnegative_int(
+            evidence.get("crossGeneration")
+        ),
+        "localMessageCount": _nonnegative_int(
+            evidence.get("localMessageCount")
+        ),
+        "crossMessageCount": _nonnegative_int(
+            evidence.get("crossMessageCount")
+        ),
+        "outputMessageCount": _nonnegative_int(
+            evidence.get("outputMessageCount")
+        ),
+        "ordering": (
+            ordering
+            if ordering in _MERGE_ORDERINGS
+            else ""
+        ),
+        "updatedAt": max(
+            0.0,
+            _finite_float(
+                evidence.get("updatedAt"),
+                default=0.0,
+            ),
+        ),
+        "latencyMs": round(
+            max(
+                0.0,
+                _finite_float(
+                    evidence.get("latencyMs"),
+                    default=0.0,
+                ),
+            ),
+            3,
+        ),
+        "policy": {
+            "contentFree": True,
+            "persisted": False,
+            "readOnly": True,
+        },
+    }
+
+
+def _cross_owner_reason_code(state: str) -> str:
+    return {
+        "missing": "cross_owner_missing",
+        "stale": "cross_owner_stale",
+        "empty": "cross_owner_empty",
+        "rejected": "cross_owner_rejected",
+    }.get(state, "cross_owner_unavailable")
+
+
+def _merge_ordering(
+    local_snapshot: VerifiedContinuitySnapshot,
+    cross_snapshot: VerifiedContinuitySnapshot,
+) -> str:
+    local_saved_at = _finite_float(
+        local_snapshot.saved_at,
+        default=-1.0,
+    )
+    cross_saved_at = _finite_float(
+        cross_snapshot.saved_at,
+        default=-1.0,
+    )
+    if (
+        local_saved_at >= 0.0
+        and cross_saved_at >= 0.0
+        and cross_saved_at < local_saved_at
+    ):
+        return "cross_before_local"
+    return "cross_after_local"
+
+
 class CrossSurfaceContinuityBridge:
     """Read and merge two independently owned continuity checkpoints."""
 
@@ -366,10 +548,155 @@ class CrossSurfaceContinuityBridge:
         artifacts_root: Path,
         config: CrossSurfaceContinuityConfig,
         wall_time: Callable[[], float] = time.time,
+        latency_clock: Callable[[], float] = (
+            time.perf_counter
+        ),
     ) -> None:
         self.artifacts_root = Path(artifacts_root)
         self.config = config
         self.wall_time = wall_time
+        self.latency_clock = latency_clock
+        self._status_lock = threading.Lock()
+        self._last_merge_status = self._build_merge_evidence(
+            state="idle",
+            source_surface="",
+            reason_code="",
+            local_snapshot=None,
+            cross_snapshot=None,
+            local_message_count=0,
+            output_message_count=0,
+            ordering="",
+            latency_ms=0.0,
+        )
+
+    @staticmethod
+    def _conversation_message_count(
+        messages: Iterable[dict[str, Any]],
+    ) -> int:
+        return len(_normalized_messages(messages))
+
+    def _build_merge_evidence(
+        self,
+        *,
+        state: str,
+        source_surface: str,
+        reason_code: str,
+        local_snapshot: (
+            VerifiedContinuitySnapshot | None
+        ),
+        cross_snapshot: (
+            VerifiedContinuitySnapshot | None
+        ),
+        local_message_count: int,
+        output_message_count: int,
+        ordering: str,
+        latency_ms: float,
+    ) -> dict[str, Any]:
+        return {
+            "schema": CROSS_SURFACE_CONTINUITY_MERGE_SCHEMA,
+            "state": state,
+            "sourceSurface": source_surface,
+            "reasonCode": reason_code,
+            "localOwnerState": (
+                local_snapshot.state
+                if local_snapshot is not None
+                else "unknown"
+            ),
+            "crossOwnerState": (
+                cross_snapshot.state
+                if cross_snapshot is not None
+                else "unknown"
+            ),
+            "localGeneration": (
+                local_snapshot.generation
+                if local_snapshot is not None
+                else 0
+            ),
+            "crossGeneration": (
+                cross_snapshot.generation
+                if cross_snapshot is not None
+                else 0
+            ),
+            "localMessageCount": max(
+                0,
+                int(local_message_count),
+            ),
+            "crossMessageCount": (
+                len(cross_snapshot.messages)
+                if cross_snapshot is not None
+                else 0
+            ),
+            "outputMessageCount": max(
+                0,
+                int(output_message_count),
+            ),
+            "ordering": ordering,
+            "updatedAt": self.wall_time(),
+            "latencyMs": round(
+                max(0.0, float(latency_ms)),
+                3,
+            ),
+            "policy": {
+                "contentFree": True,
+                "persisted": False,
+                "readOnly": True,
+            },
+        }
+
+    def _outcome(
+        self,
+        messages: Iterable[dict[str, Any]],
+        *,
+        started_at: float,
+        state: str,
+        source_surface: str,
+        reason_code: str = "",
+        local_snapshot: (
+            VerifiedContinuitySnapshot | None
+        ) = None,
+        cross_snapshot: (
+            VerifiedContinuitySnapshot | None
+        ) = None,
+        local_message_count: int = 0,
+        ordering: str = "",
+    ) -> CrossSurfaceMergeOutcome:
+        copied_messages = tuple(
+            dict(message)
+            for message in messages
+            if isinstance(message, dict)
+        )
+        latency_ms = max(
+            0.0,
+            (
+                float(self.latency_clock())
+                - float(started_at)
+            )
+            * 1000.0,
+        )
+        evidence = self._build_merge_evidence(
+            state=state,
+            source_surface=source_surface,
+            reason_code=reason_code,
+            local_snapshot=local_snapshot,
+            cross_snapshot=cross_snapshot,
+            local_message_count=local_message_count,
+            output_message_count=(
+                self._conversation_message_count(
+                    copied_messages
+                )
+            ),
+            ordering=ordering,
+            latency_ms=latency_ms,
+        )
+        with self._status_lock:
+            self._last_merge_status = (
+                _copy_merge_evidence(evidence)
+            )
+        return CrossSurfaceMergeOutcome(
+            messages=copied_messages,
+            evidence=_copy_merge_evidence(evidence),
+        )
+
 
     def _read_main(self) -> VerifiedContinuitySnapshot:
         return read_verified_continuity_snapshot(
@@ -399,33 +726,145 @@ class CrossSurfaceContinuityBridge:
         session_key: str | None,
         current_user_text: str,
     ) -> list[dict[str, Any]]:
+        return [
+            dict(message)
+            for message in self.merge_for_main_observed(
+                local_messages,
+                session_key=session_key,
+                current_user_text=current_user_text,
+            ).messages
+        ]
+
+    def merge_for_main_observed(
+        self,
+        local_messages: Iterable[dict[str, Any]],
+        *,
+        session_key: str | None,
+        current_user_text: str,
+    ) -> CrossSurfaceMergeOutcome:
+        started_at = self.latency_clock()
         source_messages = [
             dict(message)
             for message in local_messages
             if isinstance(message, dict)
         ]
-        if (
-            not self.config.scope_ready
-            or not session_scope_matches(
+        local_message_count = (
+            self._conversation_message_count(
+                source_messages
+            )
+        )
+        if not self.config.enabled:
+            return self._outcome(
+                source_messages,
+                started_at=started_at,
+                state="disabled",
+                source_surface="main",
+                reason_code="cross_surface_disabled",
+                local_message_count=local_message_count,
+            )
+        if not self.config.scope_ready:
+            return self._outcome(
+                source_messages,
+                started_at=started_at,
+                state="rejected",
+                source_surface="main",
+                reason_code=(
+                    "cross_surface_scope_not_configured"
+                ),
+                local_message_count=local_message_count,
+            )
+        if not session_scope_matches(
                 session_key,
                 guild_id=self.config.guild_id,
                 user_id=self.config.user_id,
-            )
         ):
-            return source_messages
+            return self._outcome(
+                source_messages,
+                started_at=started_at,
+                state="scope_mismatch",
+                source_surface="main",
+                reason_code=(
+                    "cross_surface_scope_mismatch"
+                ),
+                local_message_count=local_message_count,
+            )
         local_snapshot = self._read_main()
         cross_snapshot = self._read_fast()
+        if local_snapshot.state == "rejected":
+            return self._outcome(
+                source_messages,
+                started_at=started_at,
+                state="rejected",
+                source_surface="main",
+                reason_code="local_owner_rejected",
+                local_snapshot=local_snapshot,
+                cross_snapshot=cross_snapshot,
+                local_message_count=local_message_count,
+            )
         if _cross_snapshot_precedes_empty_local_boundary(
             local_snapshot,
             cross_snapshot,
         ):
-            return source_messages
-        return merge_verified_recent_context(
+            return self._outcome(
+                source_messages,
+                started_at=started_at,
+                state="reset_boundary",
+                source_surface="main",
+                reason_code=(
+                    "local_reset_boundary_newer"
+                ),
+                local_snapshot=local_snapshot,
+                cross_snapshot=cross_snapshot,
+                local_message_count=local_message_count,
+            )
+        if not cross_snapshot.verified:
+            state = (
+                "rejected"
+                if cross_snapshot.state == "rejected"
+                else "local_only"
+            )
+            return self._outcome(
+                source_messages,
+                started_at=started_at,
+                state=state,
+                source_surface="main",
+                reason_code=_cross_owner_reason_code(
+                    cross_snapshot.state
+                ),
+                local_snapshot=local_snapshot,
+                cross_snapshot=cross_snapshot,
+                local_message_count=local_message_count,
+            )
+        if not cross_snapshot.messages:
+            return self._outcome(
+                source_messages,
+                started_at=started_at,
+                state="local_only",
+                source_surface="main",
+                reason_code="cross_owner_empty",
+                local_snapshot=local_snapshot,
+                cross_snapshot=cross_snapshot,
+                local_message_count=local_message_count,
+            )
+        merged = merge_verified_recent_context(
             source_messages,
             cross_snapshot,
             local_saved_at=local_snapshot.saved_at,
             current_user_text=current_user_text,
             limit=self.config.max_messages,
+        )
+        return self._outcome(
+            merged,
+            started_at=started_at,
+            state="merged",
+            source_surface="main",
+            local_snapshot=local_snapshot,
+            cross_snapshot=cross_snapshot,
+            local_message_count=local_message_count,
+            ordering=_merge_ordering(
+                local_snapshot,
+                cross_snapshot,
+            ),
         )
 
     def merge_for_fast(
@@ -434,32 +873,141 @@ class CrossSurfaceContinuityBridge:
         *,
         current_user_text: str,
     ) -> list[dict[str, Any]]:
+        return [
+            dict(message)
+            for message in self.merge_for_fast_observed(
+                local_messages,
+                current_user_text=current_user_text,
+            ).messages
+        ]
+
+    def merge_for_fast_observed(
+        self,
+        local_messages: Iterable[dict[str, Any]],
+        *,
+        current_user_text: str,
+    ) -> CrossSurfaceMergeOutcome:
+        started_at = self.latency_clock()
         source_messages = [
             dict(message)
             for message in local_messages
             if isinstance(message, dict)
         ]
+        local_message_count = (
+            self._conversation_message_count(
+                source_messages
+            )
+        )
+        if not self.config.enabled:
+            return self._outcome(
+                source_messages,
+                started_at=started_at,
+                state="disabled",
+                source_surface="fast_control",
+                reason_code="cross_surface_disabled",
+                local_message_count=local_message_count,
+            )
         if not self.config.scope_ready:
-            return source_messages
+            return self._outcome(
+                source_messages,
+                started_at=started_at,
+                state="rejected",
+                source_surface="fast_control",
+                reason_code=(
+                    "cross_surface_scope_not_configured"
+                ),
+                local_message_count=local_message_count,
+            )
         local_snapshot = self._read_fast()
         cross_snapshot = self._read_main()
+        if local_snapshot.state == "rejected":
+            return self._outcome(
+                source_messages,
+                started_at=started_at,
+                state="rejected",
+                source_surface="fast_control",
+                reason_code="local_owner_rejected",
+                local_snapshot=local_snapshot,
+                cross_snapshot=cross_snapshot,
+                local_message_count=local_message_count,
+            )
         if _cross_snapshot_precedes_empty_local_boundary(
             local_snapshot,
             cross_snapshot,
         ):
-            return source_messages
-        return merge_verified_recent_context(
+            return self._outcome(
+                source_messages,
+                started_at=started_at,
+                state="reset_boundary",
+                source_surface="fast_control",
+                reason_code=(
+                    "local_reset_boundary_newer"
+                ),
+                local_snapshot=local_snapshot,
+                cross_snapshot=cross_snapshot,
+                local_message_count=local_message_count,
+            )
+        if not cross_snapshot.verified:
+            state = (
+                "rejected"
+                if cross_snapshot.state == "rejected"
+                else "local_only"
+            )
+            return self._outcome(
+                source_messages,
+                started_at=started_at,
+                state=state,
+                source_surface="fast_control",
+                reason_code=_cross_owner_reason_code(
+                    cross_snapshot.state
+                ),
+                local_snapshot=local_snapshot,
+                cross_snapshot=cross_snapshot,
+                local_message_count=local_message_count,
+            )
+        if not cross_snapshot.messages:
+            return self._outcome(
+                source_messages,
+                started_at=started_at,
+                state="local_only",
+                source_surface="fast_control",
+                reason_code="cross_owner_empty",
+                local_snapshot=local_snapshot,
+                cross_snapshot=cross_snapshot,
+                local_message_count=local_message_count,
+            )
+        merged = merge_verified_recent_context(
             source_messages,
             cross_snapshot,
             local_saved_at=local_snapshot.saved_at,
             current_user_text=current_user_text,
             limit=self.config.max_messages,
         )
+        return self._outcome(
+            merged,
+            started_at=started_at,
+            state="merged",
+            source_surface="fast_control",
+            local_snapshot=local_snapshot,
+            cross_snapshot=cross_snapshot,
+            local_message_count=local_message_count,
+            ordering=_merge_ordering(
+                local_snapshot,
+                cross_snapshot,
+            ),
+        )
 
     def public_status(self) -> dict[str, Any]:
         config_status = self.config.public_status()
         if not self.config.scope_ready:
-            return config_status
+            with self._status_lock:
+                last_merge = _copy_merge_evidence(
+                    self._last_merge_status
+                )
+            return {
+                **config_status,
+                "lastMerge": last_merge,
+            }
         main_snapshot = self._read_main()
         fast_snapshot = self._read_fast()
         states = {
@@ -475,6 +1023,10 @@ class CrossSurfaceContinuityBridge:
                 else "waiting"
             )
         )
+        with self._status_lock:
+            last_merge = _copy_merge_evidence(
+                self._last_merge_status
+            )
         return {
             **config_status,
             "state": state,
@@ -482,6 +1034,7 @@ class CrossSurfaceContinuityBridge:
                 "main": main_snapshot.public_status(),
                 "fastControl": fast_snapshot.public_status(),
             },
+            "lastMerge": last_merge,
         }
 
 
@@ -820,9 +1373,11 @@ def merge_verified_recent_context(
 
 
 __all__ = [
+    "CROSS_SURFACE_CONTINUITY_MERGE_SCHEMA",
     "CROSS_SURFACE_CONTINUITY_STATUS_SCHEMA",
     "CrossSurfaceContinuityBridge",
     "CrossSurfaceContinuityConfig",
+    "CrossSurfaceMergeOutcome",
     "VerifiedContinuitySnapshot",
     "merge_verified_recent_context",
     "read_verified_continuity_snapshot",

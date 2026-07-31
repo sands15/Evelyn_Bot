@@ -24,6 +24,9 @@ from evelyn_core.llm_context_assembly import (  # noqa: E402
     apply_vision_evidence_to_tool_decisions,
     prepare_llm_messages_from_runtime,
 )
+from evelyn_core.cross_surface_continuity import (  # noqa: E402
+    CrossSurfaceMergeOutcome,
+)
 from evelyn_core.vision_runtime import VisionEvidence, record_vision_evidence  # noqa: E402
 
 
@@ -187,16 +190,46 @@ class LlmContextAssemblyVisionEvidenceIntegrationTests(unittest.IsolatedAsyncioT
 
         def merge(messages, **kwargs):
             calls.append((list(messages), dict(kwargs)))
-            return [
-                {
-                    "role": "user",
-                    "content": "다른 surface의 검증된 질문",
+            return CrossSurfaceMergeOutcome(
+                messages=(
+                    {
+                        "role": "user",
+                        "content": (
+                            "다른 surface의 검증된 질문"
+                        ),
+                    },
+                    {
+                        "role": "assistant",
+                        "content": (
+                            "다른 surface의 검증된 답"
+                        ),
+                    },
+                ),
+                evidence={
+                    "schema": (
+                        "cross_surface_continuity.merge.v1"
+                    ),
+                    "state": "merged",
+                    "sourceSurface": "main",
+                    "reasonCode": "",
+                    "localOwnerState": "verified",
+                    "crossOwnerState": "verified",
+                    "localGeneration": 3,
+                    "crossGeneration": 4,
+                    "localMessageCount": 0,
+                    "crossMessageCount": 2,
+                    "outputMessageCount": 2,
+                    "ordering": "cross_after_local",
+                    "updatedAt": 1000.0,
+                    "latencyMs": 0.5,
+                    "policy": {
+                        "contentFree": True,
+                        "persisted": False,
+                        "readOnly": True,
+                    },
+                    "privateMessage": "TURN_PRIVATE_CONTENT",
                 },
-                {
-                    "role": "assistant",
-                    "content": "다른 surface의 검증된 답",
-                },
-            ]
+            )
 
         async def no_vision(
             _user_text: str,
@@ -237,6 +270,27 @@ class LlmContextAssemblyVisionEvidenceIntegrationTests(unittest.IsolatedAsyncioT
                 == "다른 surface의 검증된 질문"
                 for message in messages
             )
+        )
+        evidence = metrics["meta"][
+            "cross_surface_continuity"
+        ]
+        self.assertEqual(
+            evidence["schema"],
+            "cross_surface_continuity.merge.v1",
+        )
+        self.assertEqual(evidence["state"], "merged")
+        serialized_evidence = str(evidence)
+        self.assertNotIn(
+            "다른 surface의 검증된 질문",
+            serialized_evidence,
+        )
+        self.assertNotIn(
+            "다른 surface의 검증된 답",
+            serialized_evidence,
+        )
+        self.assertNotIn(
+            "TURN_PRIVATE_CONTENT",
+            serialized_evidence,
         )
         self.assertTrue(
             any(

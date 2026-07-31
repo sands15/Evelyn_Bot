@@ -72,6 +72,24 @@ single-writer 경계다. surface 전환은 별도 mutation owner를 추가하지
 generation, message/session count와 고정 오류 코드만 공개하며 대화문·ID는
 공개하지 않는다.
 
+각 prompt 조립은 `cross_surface_continuity.merge.v1` 증거를 process
+memory에서만 만든다. Main/Discord는 해당 턴의 metrics
+`meta.cross_surface_continuity`에 exact-field 사본을 넣고, Fast Control은
+`runtime.crossSurfaceContinuity.lastMerge`에 마지막 시도만 공개한다. 이
+증거는 checkpoint나 별도 artifact에 저장하지 않는다.
+
+- `state`는 `idle`, `disabled`, `scope_mismatch`, `local_only`,
+  `reset_boundary`, `rejected`, `merged` 중 하나이며 `sourceSurface`는
+  `main|fast_control`의 고정 값이다.
+- 양 owner의 검증 상태와 generation, local/cross/output message count,
+  owner chunk ordering, 갱신 시각, 병합 지연과 고정 reason code만 포함한다.
+- `policy`는 항상 `contentFree=true`, `persisted=false`, `readOnly=true`다.
+- 대화문, user/guild/session/turn ID, checkpoint hash·경로와 callback의
+  임의 private 필드는 exact-field consumer projection에서 버린다.
+- 현재 surface owner가 손상·변조로 `rejected`이면 상대 owner가 정상이어도
+  교차 문맥을 넣지 않는다. 로컬 reset/delete 경계를 확인할 수 없는 상태에서
+  상대 문맥을 되살리지 않기 위한 fail-closed 규칙이다.
+
 체크포인트 스키마는 `conversation_continuity.checkpoint.v2`다. 기본 유효 시간은
 15분이고 파일 상한은 1 MiB다. 만료·손상·스키마 불일치·크기 초과 파일은
 복구하지 않고 즉시 폐기한다. 저장 실패 시 이전 체크포인트도 폐기해 초기화된
@@ -317,6 +335,10 @@ transcript, 사용자·guild/channel/message/session/turn ID, 경로와 예외
   prompt 주입
 - 더 최신 empty/reset boundary가 다른 owner의 오래된 대화를 되살리지 않는지
   검증
+- 현재 owner가 거부된 경우 정상인 상대 문맥도 주입하지 않는 fail-closed
+  경계
+- Main 턴 metrics와 Fast `lastMerge`의 exact-field, content-free,
+  process-local 증거 및 임의 private 필드 제거
 
 `tests.core.test_session_continuity_restart`는 periodic writer가 실제
 checkpoint를 만든 뒤 첫 Python 프로세스를 `os._exit(74)`로 종료한다. 두 번째

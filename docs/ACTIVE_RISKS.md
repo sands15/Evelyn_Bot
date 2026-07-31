@@ -152,11 +152,19 @@ Control Page를 교체하지 않았고 Discord도 시작하지 않았으므로, 
 완료 턴이 실제 다른 surface의 다음 응답 의미에 반영되는 live 증거와
 동시 write 중 반복 read의 Windows filesystem 지연 표본은 아직 없다.
 
+코드는 이제 매 prompt 시도의 결과를
+`cross_surface_continuity.merge.v1`으로 계측한다. Main 턴 metrics와 Fast
+Control의 `lastMerge`에서 merged/reset/rejected 상태, generation/count,
+ordering과 latency를 확인할 수 있어 live E2E가 단순 응답 의미 추정에만
+의존하지 않는다. 증거는 원문·사용자/세션 ID·hash·경로를 포함하지 않고
+저장하지 않는다. 현재 owner가 손상되면 정상인 상대 owner도 주입하지 않아
+검증할 수 없는 reset 경계를 우회하지 않는다.
+
 다음 조치: 사용자가 별도 Discord 검증 세션을 시작할 때 개인 scope를 설정하고
 Control Page→Discord, Discord text→Control Page, Discord voice→Control Page를
 각각 실행한다. 다른 사용자와 다른 guild가 섞이지 않는지, reset 직후 이전
-surface 문맥이 비복구인지, status가 원문 없이 state/count만 공개하는지도
-함께 대조한다.
+surface 문맥이 비복구인지, 각 턴의 merge 증거와 status가 원문 없이
+state/count만 공개하는지도 함께 대조한다.
 
 새 공식 Discord 이미지에서 guild reset/continuity/Discord command wiring과
 opt-in real-main crash/restart 집중 테스트 68개, `compileall`, `pip check`를

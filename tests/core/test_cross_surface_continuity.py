@@ -18,6 +18,7 @@ if str(RUNTIME_ROOT) not in sys.path:
 from evelyn_core.cross_surface_continuity import (  # noqa: E402
     CrossSurfaceContinuityBridge,
     CrossSurfaceContinuityConfig,
+    CrossSurfaceMergeOutcome,
     merge_verified_recent_context,
     read_verified_continuity_snapshot,
     session_scope_matches,
@@ -489,13 +490,14 @@ class CrossSurfaceContinuityTests(unittest.TestCase):
             denied,
             [{"role": "system", "content": "system"}],
         )
-        for_fast = bridge.merge_for_fast(
+        fast_outcome = bridge.merge_for_fast_observed(
             [
                 {"role": "user", "content": "컨트롤 질문"},
                 {"role": "assistant", "content": "컨트롤 답"},
             ],
             current_user_text="후속 질문",
         )
+        for_fast = list(fast_outcome.messages)
         self.assertEqual(
             [row["content"] for row in for_fast],
             [
@@ -505,12 +507,65 @@ class CrossSurfaceContinuityTests(unittest.TestCase):
                 "컨트롤 답",
             ],
         )
+        fast_outcome.evidence["privateMessage"] = (
+            "노출되면 안 되는 원문"
+        )
         serialized_status = json.dumps(
             bridge.public_status(),
             ensure_ascii=False,
         )
         self.assertNotIn("디스코드 질문", serialized_status)
         self.assertNotIn("컨트롤 질문", serialized_status)
+        self.assertNotIn("노출되면 안 되는 원문", serialized_status)
+        last_merge = bridge.public_status()["lastMerge"]
+        self.assertEqual(
+            set(last_merge),
+            {
+                "schema",
+                "state",
+                "sourceSurface",
+                "reasonCode",
+                "localOwnerState",
+                "crossOwnerState",
+                "localGeneration",
+                "crossGeneration",
+                "localMessageCount",
+                "crossMessageCount",
+                "outputMessageCount",
+                "ordering",
+                "updatedAt",
+                "latencyMs",
+                "policy",
+            },
+        )
+        self.assertEqual(
+            set(last_merge["policy"]),
+            {"contentFree", "persisted", "readOnly"},
+        )
+        self.assertEqual(
+            last_merge["schema"],
+            "cross_surface_continuity.merge.v1",
+        )
+        self.assertEqual(last_merge["state"], "merged")
+        self.assertEqual(
+            last_merge["sourceSurface"],
+            "fast_control",
+        )
+        self.assertEqual(
+            last_merge["ordering"],
+            "cross_before_local",
+        )
+        self.assertEqual(
+            last_merge["localMessageCount"],
+            2,
+        )
+        self.assertEqual(
+            last_merge["crossMessageCount"],
+            2,
+        )
+        self.assertTrue(last_merge["policy"]["contentFree"])
+        self.assertFalse(last_merge["policy"]["persisted"])
+        self.assertTrue(last_merge["policy"]["readOnly"])
 
     def test_newer_empty_owner_boundary_does_not_resurrect_other_owner(
         self,
@@ -540,12 +595,98 @@ class CrossSurfaceContinuityTests(unittest.TestCase):
             wall_time=self.clock.wall_time,
         )
 
-        merged = bridge.merge_for_fast(
+        outcome = bridge.merge_for_fast_observed(
             [],
             current_user_text="새 질문",
         )
 
-        self.assertEqual(merged, [])
+        self.assertIsInstance(
+            outcome,
+            CrossSurfaceMergeOutcome,
+        )
+        self.assertEqual(list(outcome.messages), [])
+        self.assertEqual(
+            outcome.evidence["state"],
+            "reset_boundary",
+        )
+        self.assertEqual(
+            outcome.evidence["reasonCode"],
+            "local_reset_boundary_newer",
+        )
+
+    def test_rejected_local_owner_blocks_valid_cross_context(
+        self,
+    ) -> None:
+        artifacts = self.root / "runtime_artifacts"
+        main_root = artifacts / "conversation_continuity"
+        fast_root = artifacts / "fast_control_continuity"
+        self.write_checkpoint(
+            root=main_root,
+            sessions=[
+                (
+                    "guild:7:text:8:user:9",
+                    "로컬 질문",
+                    "로컬 답",
+                )
+            ],
+        )
+        self.clock.wall += 1.0
+        self.write_checkpoint(
+            root=fast_root,
+            sessions=[
+                (
+                    "fast-control:control-page:owner",
+                    "주입되면 안 되는 질문",
+                    "주입되면 안 되는 답",
+                )
+            ],
+        )
+        main_checkpoint = main_root / "active.json"
+        payload = json.loads(
+            main_checkpoint.read_text(encoding="utf-8")
+        )
+        payload["sessions"][0]["history"][0][
+            "content"
+        ] = "변조"
+        main_checkpoint.write_text(
+            json.dumps(payload, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        bridge = CrossSurfaceContinuityBridge(
+            artifacts_root=artifacts,
+            config=CrossSurfaceContinuityConfig(
+                enabled=True,
+                guild_id=7,
+                user_id=9,
+            ),
+            wall_time=self.clock.wall_time,
+        )
+        local = [
+            {"role": "system", "content": "system"},
+            {"role": "user", "content": "현재 로컬"},
+        ]
+
+        outcome = bridge.merge_for_main_observed(
+            local,
+            session_key="guild:7:text:8:user:9",
+            current_user_text="새 질문",
+        )
+
+        self.assertEqual(list(outcome.messages), local)
+        self.assertEqual(
+            outcome.evidence["state"],
+            "rejected",
+        )
+        self.assertEqual(
+            outcome.evidence["reasonCode"],
+            "local_owner_rejected",
+        )
+        public = json.dumps(
+            outcome.public_status(),
+            ensure_ascii=False,
+        )
+        self.assertNotIn("주입되면 안 되는", public)
+        self.assertNotIn("현재 로컬", public)
 
 
 if __name__ == "__main__":

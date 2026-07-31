@@ -2,7 +2,7 @@
 
 Document status: **Current**
 Last reviewed: 2026-07-31 KST
-Source branch: `codex/dependency-config-hardening` through `f0543b7` plus current cross-surface continuity work
+Source branch: `codex/dependency-config-hardening`, current cross-surface merge-evidence increment
 
 이 문서는 현재 확인된 사실만 기록한다. 목표 구조와 과거 계획은 다른 설계/계획 문서를 사용한다.
 
@@ -86,6 +86,13 @@ Source branch: `codex/dependency-config-hardening` through `f0543b7` plus curren
   - 더 최신 empty owner 또는 target scope가 비어 있는 더 최신 checkpoint를
     reset boundary로 취급해 다른 owner의 오래된 대화가 삭제 뒤 되살아나지
     않는다. 공개 상태는 count/generation/고정 code만 포함한다.
+  - 각 prompt merge는 `cross_surface_continuity.merge.v1`의 process-local
+    증거를 남긴다. Main/Discord는 턴 metrics, Fast Control은 마지막 merge
+    status에서 state, owner generation/count, ordering, latency만 공개한다.
+    원문·사용자/세션 ID·hash·경로와 임의 private 필드는 exact-field
+    projection에서 제거하고 artifact에는 저장하지 않는다.
+  - 현재 surface owner가 손상돼 reset/delete 경계를 검증할 수 없으면
+    정상인 상대 owner도 주입하지 않는 fail-closed 규칙을 적용한다.
   - 모든 전달 surface는 callback 반환만으로 durable 성공을 선언하지 않는다.
     status schema, ready state, current head, verified integrity, rollback
     protection, 양수 generation/session count와 이번 commit의 성공 metric을
@@ -1010,6 +1017,18 @@ Source branch: `codex/dependency-config-hardening` through `f0543b7` plus curren
   continuity·공통 prompt 집중 47개를 통과했다. 두 이미지 모두
   `compileall`과 `pip check`를 통과했고 전체 profile Compose config와
   정적 Compose 계약 18개도 통과했다.
+- 이번 merge-evidence 변경 뒤 기존 공식 이미지의 current-source
+  read-only mount에서 runtime 400개(skip 2), UI 156개(skip 7), Discord
+  I/O 107개, voice 415개를 통과했다. core 503개는 기능 assertion 실패가
+  0개였고, 이미지에 `git`이 없어 난 기존 서명 검사 환경 오류 2개는
+  Windows의 해당 모듈 13개로 보완했다.
+- 새 내장 소스 Bot API image
+  `sha256:6d37750cdb905937c858348a1ec9ddcee7244a0ca58d65ef127a733fd8855c82`는
+  Fast Control·stream·merge-evidence 집중 86개를 통과했다. 새
+  Discord/Main image
+  `sha256:fd33eeb2041823044f3ed07fd82f190a2c5dbf530654d0a1c7a461639272bea0`는
+  continuity·공통 prompt·merge-evidence 집중 48개를 통과했다. 두 이미지
+  모두 내장 소스 `compileall`과 `pip check`를 통과했다.
 - 실제 인증된 Discord↔Control Page handoff는 아래 운영 경계 때문에 별도
   검증 상태로 남긴다. 새 이미지만 빌드했고 실행 중인 기존 Bot API와
   Control Page는 교체하지 않았으며 둘 다 healthy 상태다.

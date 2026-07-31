@@ -85,7 +85,7 @@ class LlmContextAssemblyComposition:
             or CrossSurfaceContinuityBridge(
                 artifacts_root=deps.runtime_artifacts_root,
                 config=CrossSurfaceContinuityConfig.from_env(),
-            ).merge_for_main
+            ).merge_for_main_observed
         )
 
     def build_evelyn_runtime_dependency_context(self) -> str:

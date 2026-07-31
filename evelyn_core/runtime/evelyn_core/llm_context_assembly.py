@@ -6,6 +6,9 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from .context_pipeline import ContextBuilder, ContextPolicy
+from .cross_surface_continuity import (
+    CrossSurfaceMergeOutcome,
+)
 from .vision_runtime import VisionEvidence, record_vision_evidence, vision_evidence_from_metrics
 
 
@@ -56,7 +59,14 @@ class LlmContextAssemblyDeps:
     log_turn_event: Callable[..., Any]
     visible_text: Callable[[str], str]
     merge_cross_surface_context: (
-        Callable[..., list[dict[str, Any]]] | None
+        Callable[
+            ...,
+            (
+                CrossSurfaceMergeOutcome
+                | list[dict[str, Any]]
+            ),
+        ]
+        | None
     ) = None
     log: Callable[..., Any] = print
 
@@ -119,11 +129,25 @@ async def prepare_llm_messages_from_runtime(
         )
     messages = list(deps.get_conversation_history(session_key=session_key, guild_id=guild_id))
     if deps.merge_cross_surface_context is not None:
-        messages = deps.merge_cross_surface_context(
+        merge_outcome = deps.merge_cross_surface_context(
             messages,
             session_key=session_key,
             current_user_text=user_text,
         )
+        if isinstance(
+            merge_outcome,
+            CrossSurfaceMergeOutcome,
+        ):
+            messages = [
+                dict(message)
+                for message in merge_outcome.messages
+            ]
+            if metrics is not None:
+                metrics.setdefault("meta", {})[
+                    "cross_surface_continuity"
+                ] = merge_outcome.public_status()
+        else:
+            messages = list(merge_outcome)
     cognitive_state: dict | None = None
 
     if turn_scope is not None:

@@ -1366,6 +1366,15 @@ class FastControlApiToolTests(unittest.TestCase):
         self.assertTrue(
             cross_surface["policy"]["contentFree"]
         )
+        self.assertEqual(
+            cross_surface["lastMerge"]["schema"],
+            "cross_surface_continuity.merge.v1",
+        )
+        self.assertTrue(
+            cross_surface["lastMerge"]["policy"][
+                "contentFree"
+            ]
+        )
         serialized = fast_api.json.dumps(
             cross_surface,
             ensure_ascii=False,
