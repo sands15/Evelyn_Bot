@@ -153,6 +153,56 @@ async def handle_discord_text_message(message: Any, deps: DiscordTextMessageHand
     text_delivery_plan = None
     text_delivered = False
     text_turn_summary_logged = False
+
+    async def finish_and_commit_delivered_turn(
+        answer_text: str,
+        *,
+        awaiting_reply: bool,
+    ) -> None:
+        deps.finish_assistant_text_turn(
+            session_key,
+            user_text,
+            answer_text,
+            guild_id=message.guild.id,
+            user_id=message.author.id,
+            awaiting_user_reply=awaiting_reply,
+            topic_id=topic_id,
+        )
+        try:
+            continuity_status = (
+                await deps.commit_session_continuity()
+            )
+            continuity_receipt = (
+                require_durable_continuity_receipt(
+                    continuity_status
+                )
+            )
+            text_metrics.setdefault("meta", {}).update(
+                {
+                    "continuity_commit": "durable",
+                    "continuity_generation": int(
+                        continuity_receipt["generation"]
+                    ),
+                }
+            )
+        except Exception as exc:
+            text_metrics.setdefault("meta", {}).update(
+                {
+                    "continuity_commit": "failed",
+                    "continuity_error": (
+                        "conversation_continuity_commit_failed"
+                    ),
+                }
+            )
+            deps.log(
+                (
+                    "[TEXT TURN] "
+                    "continuity_commit_failed "
+                    "errorType="
+                ),
+                type(exc).__name__,
+            )
+
     try:
         async with reply_lock:
             async with message.channel.typing():
@@ -187,50 +237,10 @@ async def handle_discord_text_message(message: Any, deps: DiscordTextMessageHand
                         "awaiting_user_reply"
                     )
                 )
-                deps.finish_assistant_text_turn(
-                    session_key,
-                    user_text,
+                await finish_and_commit_delivered_turn(
                     plain_answer,
-                    guild_id=message.guild.id,
-                    user_id=message.author.id,
-                    awaiting_user_reply=awaiting_reply,
-                    topic_id=topic_id,
+                    awaiting_reply=awaiting_reply,
                 )
-                try:
-                    continuity_status = (
-                        await deps.commit_session_continuity()
-                    )
-                    continuity_receipt = (
-                        require_durable_continuity_receipt(
-                            continuity_status
-                        )
-                    )
-                    text_metrics.setdefault("meta", {}).update(
-                        {
-                            "continuity_commit": "durable",
-                            "continuity_generation": int(
-                                continuity_receipt["generation"]
-                            ),
-                        }
-                    )
-                except Exception as exc:
-                    text_metrics.setdefault("meta", {}).update(
-                        {
-                            "continuity_commit": "failed",
-                            "continuity_error": (
-                                "conversation_continuity_"
-                                "commit_failed"
-                            ),
-                        }
-                    )
-                    deps.log(
-                        (
-                            "[TEXT TURN] "
-                            "continuity_commit_failed "
-                            "errorType="
-                        ),
-                        type(exc).__name__,
-                    )
                 runtime_mode = (
                     (text_metrics.get("meta") or {}).get(
                         "runtime_mode"
@@ -339,9 +349,59 @@ async def handle_discord_text_message(message: Any, deps: DiscordTextMessageHand
     except Exception as exc:
         deps.log("전체 오류 type=", type(exc).__name__)
         if not text_delivered:
-            await message.channel.send(
-                public_failure_message("text_turn_failed")
+            failure_reply = public_failure_message(
+                "text_turn_failed"
             )
+            try:
+                await message.channel.send(failure_reply)
+            except Exception as delivery_exc:
+                deps.log(
+                    (
+                        "[TEXT TURN] "
+                        "failure_reply_delivery_failed "
+                        "errorType="
+                    ),
+                    type(delivery_exc).__name__,
+                )
+            else:
+                text_delivered = True
+                answer = failure_reply
+                plain_answer = failure_reply
+                text_metrics.setdefault("meta", {}).update(
+                    {
+                        "failure_reply_delivered": True,
+                        "error_layer": "text_generation",
+                        "error": "text_turn_failed",
+                    }
+                )
+                try:
+                    async with state_lock:
+                        deps.session_speculative_policies.pop(
+                            session_key,
+                            None,
+                        )
+                        await finish_and_commit_delivered_turn(
+                            failure_reply,
+                            awaiting_reply=False,
+                        )
+                except Exception as record_exc:
+                    text_metrics.setdefault("meta", {}).update(
+                        {
+                            "continuity_commit": "failed",
+                            "continuity_error": (
+                                "conversation_continuity_"
+                                "commit_failed"
+                            ),
+                        }
+                    )
+                    deps.log(
+                        (
+                            "[TEXT TURN] "
+                            "failure_turn_record_failed "
+                            "errorType="
+                        ),
+                        type(record_exc).__name__,
+                    )
     finally:
         if text_metrics and not text_turn_summary_logged:
             text_metrics.setdefault("meta", {})["error_layer"] = "text_turn"

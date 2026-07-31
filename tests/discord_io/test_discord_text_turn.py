@@ -276,30 +276,171 @@ class DiscordTextTurnHandlerTests(unittest.TestCase):
 
     def test_pre_delivery_failure_returns_fixed_public_message(self) -> None:
         calls: list[tuple[str, object]] = []
+        summaries: list[dict] = []
 
         async def fail_stream(*args, **kwargs):
             raise RuntimeError(
                 "token=discord-secret http://internal:9820 C:\\private"
             )
 
-        deps = make_deps(calls, stream_text_reply=fail_stream)
+        channel = FakeChannel()
+        original_send = channel.send
+
+        async def tracked_send(text: str) -> None:
+            calls.append(("failure_reply_send", text))
+            await original_send(text)
+
+        channel.send = tracked_send  # type: ignore[method-assign]
+        deps = make_deps(
+            calls,
+            stream_text_reply=fail_stream,
+            log_voice_bottleneck_summary=(
+                lambda metrics, **_kwargs: summaries.append(
+                    dict(metrics)
+                )
+            ),
+        )
+        message = make_message(
+            guild=SimpleNamespace(id=1, name="Guild"),
+            channel=channel,
+        )
+
+        asyncio.run(handle_discord_text_message(message, deps))
+
+        failure_reply = (
+            "❌ 응답을 전달하지 못했어. 잠깐 뒤에 다시 시도해줘. "
+            "(text_turn_failed)"
+        )
+        self.assertEqual(
+            message.channel.sent,
+            [failure_reply],
+        )
+        self.assertNotIn("discord-secret", message.channel.sent[0])
+        self.assertIn(
+            (
+                "finish",
+                (
+                    "guild:1:text:2:user:3",
+                    "hi",
+                    failure_reply,
+                    "topic:hi",
+                ),
+            ),
+            calls,
+        )
+        send_index = next(
+            index
+            for index, call in enumerate(calls)
+            if call[0] == "failure_reply_send"
+        )
+        finish_index = next(
+            index
+            for index, call in enumerate(calls)
+            if call[0] == "finish"
+        )
+        commit_index = next(
+            index
+            for index, call in enumerate(calls)
+            if call[0] == "commit_continuity"
+        )
+        self.assertLess(send_index, finish_index)
+        self.assertLess(finish_index, commit_index)
+        self.assertTrue(
+            summaries[0]["meta"]["failure_reply_delivered"]
+        )
+        self.assertEqual(
+            summaries[0]["meta"]["continuity_commit"],
+            "durable",
+        )
+
+    def test_failed_fallback_delivery_does_not_mutate_continuity(
+        self,
+    ) -> None:
+        calls: list[tuple[str, object]] = []
+        secret = (
+            "Bearer discord-fallback-secret "
+            r"C:\Users\Admin\private.txt"
+        )
+
+        async def fail_stream(*_args, **_kwargs):
+            raise RuntimeError("generation_failed")
+
+        class FailingChannel(FakeChannel):
+            async def send(self, _text: str) -> None:
+                raise RuntimeError(secret)
+
+        deps = make_deps(
+            calls,
+            stream_text_reply=fail_stream,
+        )
+        message = make_message(
+            guild=SimpleNamespace(id=1, name="Guild"),
+            channel=FailingChannel(),
+        )
+
+        asyncio.run(handle_discord_text_message(message, deps))
+
+        self.assertFalse(
+            any(
+                call[0] in {"finish", "commit_continuity"}
+                for call in calls
+            )
+        )
+        rendered_logs = " ".join(
+            str(call)
+            for call in calls
+            if call[0] == "log"
+        )
+        self.assertIn(
+            "failure_reply_delivery_failed",
+            rendered_logs,
+        )
+        self.assertIn("RuntimeError", rendered_logs)
+        self.assertNotIn("discord-fallback-secret", rendered_logs)
+        self.assertNotIn("Users", rendered_logs)
+
+    def test_delivered_failure_contains_record_error_without_retry(
+        self,
+    ) -> None:
+        calls: list[tuple[str, object]] = []
+        secret = (
+            "Bearer failure-record-secret "
+            r"C:\Users\Admin\checkpoint.json"
+        )
+
+        async def fail_stream(*_args, **_kwargs):
+            raise RuntimeError("generation_failed")
+
+        def fail_finish(*_args, **_kwargs):
+            raise RuntimeError(secret)
+
+        deps = make_deps(
+            calls,
+            stream_text_reply=fail_stream,
+            finish_assistant_text_turn=fail_finish,
+        )
         message = make_message(
             guild=SimpleNamespace(id=1, name="Guild")
         )
 
         asyncio.run(handle_discord_text_message(message, deps))
 
-        self.assertEqual(
-            message.channel.sent,
-            [
-                "❌ 응답을 전달하지 못했어. 잠깐 뒤에 다시 시도해줘. "
-                "(text_turn_failed)"
-            ],
-        )
-        self.assertNotIn("discord-secret", message.channel.sent[0])
+        self.assertEqual(len(message.channel.sent), 1)
         self.assertFalse(
-            any(call[0] == "finish" for call in calls)
+            any(call[0] == "commit_continuity" for call in calls)
         )
+        rendered_logs = " ".join(
+            str(call)
+            for call in calls
+            if call[0] == "log"
+        )
+        self.assertIn(
+            "failure_turn_record_failed",
+            rendered_logs,
+        )
+        self.assertIn("RuntimeError", rendered_logs)
+        self.assertNotIn("failure-record-secret", rendered_logs)
+        self.assertNotIn("checkpoint.json", rendered_logs)
 
 
 if __name__ == "__main__":
