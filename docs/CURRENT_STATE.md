@@ -60,6 +60,10 @@ Source branch: `codex/dependency-config-hardening` through `2272668`
   - 외부 전달이 끝난 완료 턴은 1초 periodic writer를 기다리지 않고 즉시
     durable commit한다. Discord text는 commit 뒤 선택적 TTS를 실행하므로
     TTS 실패가 이미 전달된 답변을 history에서 잃게 하지 않는다.
+  - Discord text 생성이 실패해도 고정 `text_turn_failed` 응답 전송에
+    성공하면 그 실패 턴을 history와 checkpoint에 즉시 남긴다. fallback
+    전송이 실패하거나 모호하면 기록하지 않고, 기록 실패 때문에 같은
+    fallback을 다시 보내지 않는다.
   - Control Page 일반·검색, 검색 후속, 자율 후속, Discord 명령, 음성 재생
     완료도 같은 commit 계약을 사용한다. 실패 시 중복 전송하지 않고
     `conversation_continuity_commit_failed`만 기록한다.
@@ -947,6 +951,17 @@ Source branch: `codex/dependency-config-hardening` through `2272668`
   이미지 내부 `compileall`, `pip check`와 읽기 전용 테스트 마운트로 실행한
   집중 테스트 36개를 통과했다. 이미지는 시작하지 않았고 실행 중인 Bot API와
   Control Page 두 서비스는 그대로 healthy다.
+- `2fcf597`은 Discord 일반 대화가 생성 단계에서 실패해도 고정 실패 응답이
+  실제 전달된 경우 그 실패 턴을 완료 상태로 기록하고 즉시 durable commit한다.
+  fallback 전송 실패는 무기록, 완료 기록 실패는 무재전송이며 예외 원문은
+  history·artifact·metric·log 어디에도 들어가지 않는다.
+- 실패 턴 집중 테스트 8개, Discord I/O 107개와 surface 공통
+  commit/receipt/restart 테스트 72개가 공식 Discord 이미지에서 통과했다.
+- 새 Discord/Main image
+  `sha256:09ada81d7802c35f672e40f528d74f0b63ce9eb9027d5a7249640247b4117130`는
+  이미지 내부 `compileall`, `pip check`와 읽기 전용 테스트 마운트의
+  continuity 집중 테스트 44개를 통과했다. 이미지는 시작하지 않았고 실행
+  중인 Bot API와 Control Page 두 서비스는 그대로 healthy다.
 
 ## Operational boundaries
 

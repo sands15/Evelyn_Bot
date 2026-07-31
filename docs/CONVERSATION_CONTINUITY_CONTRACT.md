@@ -108,6 +108,11 @@ rollback protection 누락, 이전 commit의 실패 지표는 모두 고정
 
 - Discord text는 텍스트 전송, 완료 상태 반영, durable commit 뒤 선택적 음성
   재생을 수행한다. 선택적 TTS가 실패해도 이미 전달된 텍스트는 남는다.
+- Discord text 생성이 완료 전에 실패해 고정 `text_turn_failed` 응답을
+  전달한 경우에도 그 전송 성공 뒤 실패 응답을 완료 턴으로 기록하고 같은
+  durable commit을 수행한다. fallback 전송이 실패하거나 성공 여부가
+  모호하면 history/checkpoint를 변경하지 않으며, 기록·commit 실패 때문에
+  fallback을 다시 보내지 않는다.
 - Control Page 일반·검색 답변은 세션 완료 상태를 반영하고 durable commit한
   뒤 로컬 TTS를 예약한다.
 - 검색 후속 답변은 Discord text 전달 직후 한 번만 history와 checkpoint를
@@ -238,6 +243,8 @@ transcript, 사용자·guild/channel/message/session/turn ID, 경로와 예외
 - revocation ledger의 content-free·corrupt fail-closed 계약
 - single-flight periodic writer와 직접 사전 변경 감지
 - Discord text 전달 뒤 선택적 TTS 실패 전 즉시 durable commit
+- Discord text의 전달된 고정 실패 턴 commit, fallback 전송 실패 시
+  무기록, 기록 실패 시 무재전송
 - Discord reference의 로컬 생성 실패·확정 4xx fallback과
   timeout·5xx·상태 없는 ambiguous failure의 무재전송
 - Control Page 일반·검색, 검색 후속, 자율 후속, Discord 명령과 음성 완료
