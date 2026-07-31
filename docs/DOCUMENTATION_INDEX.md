@@ -46,6 +46,11 @@ implemented behavior.
   - Current dependency compatibility matrix, typed owner configuration,
     exception observability, and dedicated Codex credential boundary.
 
+- `docs/CLOUD_MIGRATION.md`
+  - 클라우드 개발·빌드에 사용하는 source-only transfer 계약. pinned Mindcraft
+    소스를 포함하는 재현 가능한 번들, secret/runtime/audio 차단 규칙과 hybrid
+    배치 경계를 정의한다.
+
 - `docs/CONVERSATION_CONTINUITY_CONTRACT.md`
   - 프로세스 재시작 뒤 완료된 대화 턴과 active follow-up을 15분 동안
     제한적으로 복구하는 checkpoint, 전달 직후 durable commit, content-free
