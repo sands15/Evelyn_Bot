@@ -15,6 +15,7 @@ from evelyn_core.context_pipeline import (  # noqa: E402
     ContextPolicy,
     ToolUseDecision,
     build_basic_context_packet,
+    build_conversation_state_context,
     build_tool_use_decisions,
     build_vision_context_hint,
     render_tool_use_context,
@@ -127,6 +128,8 @@ class LlmContextAssemblyVisionEvidenceIntegrationTests(unittest.IsolatedAsyncioT
         *,
         merge_cross_surface_context=None,
         memory_context_callback=None,
+        conversation_history=None,
+        conversation_context_callback=None,
     ) -> LlmContextAssemblyDeps:
         async def unused_async(*_args, **_kwargs):
             return None
@@ -137,7 +140,9 @@ class LlmContextAssemblyVisionEvidenceIntegrationTests(unittest.IsolatedAsyncioT
             classify_llm_route_fallback=lambda *_args, **_kwargs: "chat",
             classify_llm_route_async=unused_async,
             session_topic_ids={},
-            get_conversation_history=lambda **_kwargs: [],
+            get_conversation_history=lambda **_kwargs: list(
+                conversation_history or []
+            ),
             read_cached_cognitive_state=lambda *_args, **_kwargs: None,
             get_matching_speculative_policy=lambda *_args, **_kwargs: None,
             fast_path_policy=lambda *_args, **_kwargs: None,
@@ -165,7 +170,10 @@ class LlmContextAssemblyVisionEvidenceIntegrationTests(unittest.IsolatedAsyncioT
             attach_minecraft_runtime_snapshot=lambda value, **_kwargs: value,
             control_page_minecraft_cache_refresh_sec=1.0,
             control_page_minecraft_cache_max_stale_sec=2.0,
-            build_conversation_state_context=lambda **_kwargs: "",
+            build_conversation_state_context=(
+                conversation_context_callback
+                or (lambda **_kwargs: "")
+            ),
             build_runtime_state_context=lambda **_kwargs: "",
             build_evelyn_runtime_dependency_context=lambda: "",
             render_self_judgment_context=lambda *_args, **_kwargs: "",
@@ -303,6 +311,152 @@ class LlmContextAssemblyVisionEvidenceIntegrationTests(unittest.IsolatedAsyncioT
                 == "다른 surface의 검증된 답"
                 for message in messages
             )
+        )
+
+    async def test_unanswered_history_gets_content_free_continuity_rule(self) -> None:
+        async def no_vision(
+            _user_text: str,
+            *,
+            metrics: dict | None = None,
+        ) -> str:
+            return ""
+
+        private_text = "PRIVATE_UNANSWERED_HISTORY_TEXT"
+        metrics = {
+            "started_at": time.monotonic(),
+            "meta": {},
+            "marks": {},
+        }
+        messages, _state, _route, _policy = (
+            await prepare_llm_messages_from_runtime(
+                "current request",
+                deps=self.build_deps(
+                    no_vision,
+                    conversation_history=[
+                        {"role": "user", "content": private_text},
+                    ],
+                    conversation_context_callback=(
+                        build_conversation_state_context
+                    ),
+                ),
+                metrics=metrics,
+            )
+        )
+
+        self.assertIn(
+            "continuity_schema: conversation.unanswered-user.v1",
+            messages[0]["content"],
+        )
+        self.assertEqual(
+            [
+                message
+                for message in messages
+                if message.get("role") == "user"
+            ],
+            [{"role": "user", "content": private_text}],
+        )
+        context_meta = metrics["meta"]["context_pipeline"]
+        self.assertTrue(context_meta["unanswered_user_turn_context"])
+        self.assertNotIn(private_text, str(context_meta))
+
+    async def test_answered_history_does_not_get_unanswered_rule(self) -> None:
+        async def no_vision(
+            _user_text: str,
+            *,
+            metrics: dict | None = None,
+        ) -> str:
+            return ""
+
+        metrics = {
+            "started_at": time.monotonic(),
+            "meta": {},
+            "marks": {},
+        }
+        messages, _state, _route, _policy = (
+            await prepare_llm_messages_from_runtime(
+                "current request",
+                deps=self.build_deps(
+                    no_vision,
+                    conversation_history=[
+                        {"role": "user", "content": "previous"},
+                        {"role": "assistant", "content": "delivered"},
+                    ],
+                    conversation_context_callback=(
+                        build_conversation_state_context
+                    ),
+                ),
+                metrics=metrics,
+            )
+        )
+
+        self.assertNotIn(
+            "conversation.unanswered-user.v1",
+            messages[0]["content"],
+        )
+        self.assertFalse(
+            metrics["meta"]["context_pipeline"][
+                "unanswered_user_turn_context"
+            ]
+        )
+
+    async def test_cross_surface_unanswered_history_gets_same_rule(self) -> None:
+        async def no_vision(
+            _user_text: str,
+            *,
+            metrics: dict | None = None,
+        ) -> str:
+            return ""
+
+        def merge(_messages, **_kwargs):
+            return CrossSurfaceMergeOutcome(
+                messages=(
+                    {
+                        "role": "user",
+                        "content": "PRIVATE_CROSS_SURFACE_UNANSWERED",
+                    },
+                ),
+                evidence={
+                    "state": "merged",
+                    "sourceSurface": "fast_control",
+                    "localOwnerState": "empty",
+                    "crossOwnerState": "verified",
+                    "crossMessageCount": 1,
+                    "outputMessageCount": 1,
+                    "ordering": "cross_after_local",
+                },
+            )
+
+        metrics = {
+            "started_at": time.monotonic(),
+            "meta": {},
+            "marks": {},
+        }
+        messages, _state, _route, _policy = (
+            await prepare_llm_messages_from_runtime(
+                "current request",
+                deps=self.build_deps(
+                    no_vision,
+                    merge_cross_surface_context=merge,
+                    conversation_context_callback=(
+                        build_conversation_state_context
+                    ),
+                ),
+                metrics=metrics,
+            )
+        )
+
+        self.assertIn(
+            "continuity_schema: conversation.unanswered-user.v1",
+            messages[0]["content"],
+        )
+        self.assertTrue(
+            metrics["meta"]["context_pipeline"][
+                "unanswered_user_turn_context"
+            ]
+        )
+        self.assertNotIn(
+            "PRIVATE_CROSS_SURFACE_UNANSWERED",
+            str(metrics["meta"]),
         )
 
     async def test_failure_message_is_context_but_not_observation_evidence(self) -> None:

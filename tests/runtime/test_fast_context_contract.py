@@ -15,6 +15,7 @@ if str(RUNTIME_ROOT) not in sys.path:
 from evelyn_core.fast_context_contract import (  # noqa: E402
     build_fast_log_context,
     build_fast_control_context,
+    build_fast_main_llm_request,
     build_fast_main_llm_messages,
 )
 from evelyn_core.host_vision_client import HostVisionResult  # noqa: E402
@@ -453,6 +454,53 @@ class FastContextContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("web_current_info", messages[0]["content"])
         self.assertIn("Weather Example", messages[0]["content"])
         self.assertEqual(messages[-1], {"role": "user", "content": "final user text"})
+
+    async def test_fast_main_preserves_unanswered_turn_and_adds_fixed_rule(self) -> None:
+        private_text = "PRIVATE_FAST_UNANSWERED_TEXT"
+
+        request = await build_fast_main_llm_request(
+            base_system_prompt="base prompt",
+            recent_messages=[
+                {"role": "user", "content": private_text},
+            ],
+            user_text="continue",
+            final_user_text="current request",
+            source="control_page",
+            runtime_health_provider=fake_runtime_health,
+        )
+
+        self.assertTrue(request.context.unanswered_user_turn_context)
+        self.assertIn(
+            "continuity_schema: conversation.unanswered-user.v1",
+            request.messages[0]["content"],
+        )
+        self.assertEqual(
+            request.messages[-2:],
+            [
+                {"role": "user", "content": private_text},
+                {"role": "user", "content": "current request"},
+            ],
+        )
+        self.assertNotIn(private_text, request.context.system_context)
+
+    async def test_fast_main_omits_rule_after_delivered_answer(self) -> None:
+        request = await build_fast_main_llm_request(
+            base_system_prompt="base prompt",
+            recent_messages=[
+                {"role": "user", "content": "previous"},
+                {"role": "assistant", "content": "delivered"},
+            ],
+            user_text="continue",
+            final_user_text="current request",
+            source="control_page",
+            runtime_health_provider=fake_runtime_health,
+        )
+
+        self.assertFalse(request.context.unanswered_user_turn_context)
+        self.assertNotIn(
+            "conversation.unanswered-user.v1",
+            request.messages[0]["content"],
+        )
 
     async def test_screen_text_request_uses_live_host_evidence(self) -> None:
         context = await build_fast_control_context(

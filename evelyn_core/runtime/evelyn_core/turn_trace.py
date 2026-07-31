@@ -56,6 +56,7 @@ TURN_SUMMARY_KEYS: tuple[str, ...] = (
     "context_message_count",
     "context_sections",
     "context_section_chars",
+    "unanswered_user_turn_context",
     "memory_context_state",
     "memory_grounding_state",
     "memory_use_policy",
@@ -370,6 +371,9 @@ def build_turn_summary_payload(
         "context_message_count": context_meta.get("message_count"),
         "context_sections": context_meta.get("sections"),
         "context_section_chars": section_chars,
+        "unanswered_user_turn_context": _bool_or_none(
+            context_meta.get("unanswered_user_turn_context")
+        ),
         "memory_context_state": _clean_optional(memory_receipt.get("state")),
         "memory_grounding_state": _clean_optional(memory_receipt.get("groundingState")),
         "memory_use_policy": _clean_optional(memory_receipt.get("usePolicy")),

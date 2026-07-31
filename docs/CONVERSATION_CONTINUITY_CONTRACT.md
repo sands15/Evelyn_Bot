@@ -40,6 +40,16 @@ Last reviewed: 2026-07-31 KST
   수행한다.
 - 전달되지 않은 답변을 기억으로 쓰거나 cognitive/search follow-up을 시작하지
   않는다. 다음 정상 턴은 보존된 사용자 발화를 문맥으로 받아 관계를 이어간다.
+- Main과 Fast Control의 최종 prompt 경계는 최근 non-empty conversational row가
+  `user`이면 고정 `conversation.unanswered-user.v1` 규칙을 system context에
+  추가한다. 이 규칙은 직전 발화가 전달된 assistant 답변 없이 남았음을 모델에
+  알리고 현재 요청과 함께 필요에 따라 다루게 하며, 실제 사용자 문장은 복제하지
+  않는다. 답변이 정상 전달되어 history가 `assistant`로 끝나면 규칙은 자동으로
+  사라진다.
+- `context_pipeline`과 `turn_summary.v1`에는 content-free boolean
+  `unanswered_user_turn_context`만 남긴다. checkpoint 복구와 검증된 cross-surface
+  merge 뒤에도 같은 history 기반 판정을 다시 수행하므로 별도 미응답 본문이나
+  shadow state를 저장하지 않는다.
 - 실패 메타데이터는 `voice_connection_unavailable`, `voice_delivery_empty`,
   `voice_delivery_failed`, `conversation_continuity_commit_failed` 같은 고정 코드와
   예외 클래스 이름만 사용한다. 예외 메시지·경로·토큰은 status와 turn summary에

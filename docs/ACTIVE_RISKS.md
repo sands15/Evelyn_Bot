@@ -324,9 +324,12 @@ fail-closed 요청한다. 상태는 제어 메타데이터만 저장하고 음�
 소스 계약에서는 reply gate를 통과한 사용자 발화 뒤 Discord 연결 부재, 빈 답변,
 LLM/TTS 전달 실패가 나도 사용자 row만 즉시 continuity checkpoint에 한 번
 보존한다. 가짜 assistant row, memory write, search follow-up은 만들지 않고 공개
-voice 상태와 turn summary에는 고정 오류 코드·예외 타입만 남긴다. 다만 실제
-Discord 연결 단절과 스피커/TTS 장애를 일으킨 뒤 재시작해 다음 응답이 이 미응답
-발화를 이어가는 live failure-injection은 아직 수행하지 않았다.
+voice 상태와 turn summary에는 고정 오류 코드·예외 타입만 남긴다. Main/Fast의
+다음 prompt는 restart restore와 cross-surface merge 뒤에도 history가 `user`로
+끝나면 content-free `conversation.unanswered-user.v1` 규칙을 받아 미응답 문맥임을
+명시하고, 추적에는 boolean만 남긴다. 다만 실제 Discord 연결 단절과 스피커/TTS
+장애를 일으킨 뒤 재시작해 다음 응답이 이 미응답 발화를 이어가는 live
+failure-injection은 아직 수행하지 않았다.
 
 다음 조치: 사용자가 Control Page의 “검증 세션 동안 마이크 허용”을 직접 확인한
 뒤 로컬/Discord 10턴, barge-in, 무음 구간과 연결/TTS failure-injection을

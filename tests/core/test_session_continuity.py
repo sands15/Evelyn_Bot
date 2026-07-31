@@ -28,6 +28,10 @@ from evelyn_core.session_continuity import (  # noqa: E402
 from evelyn_core.continuity_commit_contract import (  # noqa: E402
     require_durable_continuity_receipt,
 )
+from evelyn_core.context_pipeline import (  # noqa: E402
+    build_conversation_state_context,
+    has_unanswered_user_turn,
+)
 from evelyn_core.runtime_artifact_io import atomic_json_write  # noqa: E402
 from evelyn_core.session_memory_state import SessionStateStore  # noqa: E402
 
@@ -259,6 +263,25 @@ class SessionContinuityTests(unittest.TestCase):
         self.assertEqual(
             restored_store.last_speaker[session_key],
             "user",
+        )
+        restored_history = restored_store.get_conversation_history(
+            system_prompt="current system prompt",
+            session_key=session_key,
+            guild_id=1,
+        )
+        self.assertTrue(has_unanswered_user_turn(restored_history))
+        semantic_context = build_conversation_state_context(
+            unanswered_user_turn=has_unanswered_user_turn(
+                restored_history
+            )
+        )
+        self.assertIn(
+            "continuity_schema: conversation.unanswered-user.v1",
+            semantic_context,
+        )
+        self.assertNotIn(
+            "재생에 실패해도 이 부탁은 잊지 마",
+            semantic_context,
         )
 
     def test_completed_turn_commit_is_immediately_durable(self) -> None:

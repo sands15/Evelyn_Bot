@@ -14,9 +14,11 @@ from .context_pipeline import (
     ContextPolicy,
     ToolUseDecision,
     build_basic_context_packet,
+    build_conversation_state_context,
     build_context_policy_for_turn,
     build_runtime_state_context,
     build_tool_use_decisions,
+    has_unanswered_user_turn,
     render_tool_use_context,
 )
 from .fast_action_runtime import compact_local_bridge_context
@@ -56,6 +58,7 @@ class FastControlContext:
     vision_evidence: VisionEvidence = field(default_factory=VisionEvidence)
     required_evidence_failure_reply: str = ""
     grounded_evidence_reply: str = ""
+    unanswered_user_turn_context: bool = False
 
 
 @dataclass(slots=True)
@@ -785,6 +788,18 @@ async def build_fast_main_llm_request(
         local_bridge_status_provider=local_bridge_status_provider,
         vision_provider=vision_provider,
     )
+    context.unanswered_user_turn_context = has_unanswered_user_turn(
+        recent_messages
+    )
+    if context.unanswered_user_turn_context:
+        continuity_context = build_conversation_state_context(
+            unanswered_user_turn=True,
+        )
+        context.system_context = "\n\n".join(
+            part
+            for part in (context.system_context, continuity_context)
+            if clean_text(part)
+        )
     system_content = "\n\n".join(
         part
         for part in (

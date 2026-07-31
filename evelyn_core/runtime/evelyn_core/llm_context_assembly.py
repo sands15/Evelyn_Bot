@@ -5,7 +5,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
-from .context_pipeline import ContextBuilder, ContextPolicy
+from .context_pipeline import (
+    ContextBuilder,
+    ContextPolicy,
+    has_unanswered_user_turn,
+)
 from .cross_surface_continuity import (
     CrossSurfaceMergeOutcome,
 )
@@ -347,10 +351,12 @@ async def prepare_llm_messages_from_runtime(
                     else max(0.0, float(runtime_snapshot.get("age_sec") or 0.0) * 1000.0)
                 )
                 metrics.setdefault("meta", {})["minecraft_snapshot_freshness"] = runtime_snapshot.get("freshness")
+    unanswered_user_turn_context = has_unanswered_user_turn(messages)
     conversation_context = deps.build_conversation_state_context(
         cognitive_state=cognitive_state,
         session_state=session_snapshot,
         route=route,
+        unanswered_user_turn=unanswered_user_turn_context,
     )
     runtime_context = deps.build_runtime_state_context(
         source=source,
@@ -456,6 +462,7 @@ async def prepare_llm_messages_from_runtime(
             "memory_receipt": dict(memory_receipt),
             "tool_decisions": [decision.to_dict() for decision in tool_use_decisions],
             "message_count": len(messages),
+            "unanswered_user_turn_context": unanswered_user_turn_context,
             "sections": [section.source or section.name for section in context_packet.sections()],
             "section_chars": {
                 section.source or section.name: len(section.cleaned_content())

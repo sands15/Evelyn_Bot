@@ -745,6 +745,7 @@ def build_conversation_state_context(
     cognitive_state: dict[str, Any] | None = None,
     session_state: dict[str, Any] | None = None,
     route: str = "",
+    unanswered_user_turn: bool = False,
 ) -> str:
     lines: list[str] = []
     if route:
@@ -764,7 +765,41 @@ def build_conversation_state_context(
         lines.append(f"topic_id: {clean_text(str(session.get('topic_id')))}")
     if session.get("last_speaker"):
         lines.append(f"last_speaker: {clean_text(str(session.get('last_speaker')))}")
+    if unanswered_user_turn:
+        lines.extend(
+            (
+                "continuity_schema: conversation.unanswered-user.v1",
+                "unanswered_user_turn: true",
+                "continuity_content_free: true",
+                (
+                    "continuity_rule: The latest accepted user message in "
+                    "conversation history has no delivered assistant reply. "
+                    "Treat it as unanswered context, address it together with "
+                    "the current request when relevant, and never claim it was "
+                    "already answered."
+                ),
+            )
+        )
     return "\n".join(lines)
+
+
+def has_unanswered_user_turn(messages: list[dict[str, Any]]) -> bool:
+    """Return whether the latest non-empty conversational row is user-only.
+
+    The result intentionally carries no message content so it is safe to expose
+    through metrics and turn summaries.
+    """
+
+    for message in reversed(messages):
+        if not isinstance(message, dict):
+            continue
+        role = clean_text(str(message.get("role") or "")).casefold()
+        if role not in {"user", "assistant"}:
+            continue
+        if not clean_text(str(message.get("content") or "")):
+            continue
+        return role == "user"
+    return False
 
 
 def build_runtime_state_context(
@@ -1113,5 +1148,6 @@ __all__ = [
     "build_tool_use_decisions",
     "build_vision_context_hint",
     "clean_block_text",
+    "has_unanswered_user_turn",
     "render_tool_use_context",
 ]

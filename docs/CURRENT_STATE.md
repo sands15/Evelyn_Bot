@@ -1306,6 +1306,12 @@ Source branch: `codex/dependency-config-hardening`, current evidence-bound user 
   history에 남기고 즉시 durable continuity commit한다. 존재하지 않는 assistant
   답변, memory write, cognitive/search follow-up은 만들지 않는다. 새 프로세스의
   checkpoint restore에서도 마지막 speaker와 미응답 사용자 발화가 유지된다.
+- 복구된 미응답 발화는 이제 저장에만 머물지 않는다. Main과 Fast Control의
+  최종 prompt assembly가 history의 마지막 non-empty 대화 row를 판정해
+  `conversation.unanswered-user.v1` 고정 규칙을 system context에 넣는다. 정상
+  assistant 답변 뒤에는 자동 제거되고, restart 및 검증된 cross-surface history에도
+  같은 규칙이 적용된다. metrics와 `turn_summary.v1`에는 사용자 본문 없이
+  `unanswered_user_turn_context` boolean만 기록한다.
 - voice pipeline snapshot, rejoin 상태, STT/wake/TTS 로그와 turn summary는 고정
   오류 코드와 검증된 예외 클래스 이름만 사용한다. legacy 오류 메시지·경로·토큰은
   공개 projection에서 제거하며 STT/TTS/voice delivery 카운터의 고정 코드는
@@ -1325,6 +1331,21 @@ Source branch: `codex/dependency-config-hardening`, current evidence-bound user 
   `git diff --check`를 통과했다. 실행 중인 기존 Bot API와 Control Page는 교체하지
   않았고 실제 Discord, 마이크, 스피커, 무거운 모델과 사용자 runtime artifact는
   변경하거나 시작하지 않았다.
+- 미응답 prompt 연속성 변경은 source-mounted 집중 91개와 core 556개 중 기능
+  assertion 실패 0개를 확인했다. core 이미지에 `git`이 없어 난 기존 signature
+  환경 오류 2개는 Windows의 해당 모듈 13개로 보완했다. runtime 423개(skip 2),
+  voice 424개, UI 157개(skip 7), Discord I/O 109개, memory 158개도 통과했다.
+- 현재 소스를 내장한 검증 이미지는 Discord/Main
+  `sha256:4f1ab18fd0d6866d0f1f94b709fffdd368849f69cbe26939951e41f029f47a68`,
+  Bot API
+  `sha256:34ed66e232f2d31bef83c84999d733838bbecf0951274bdef93a319c08df05a9`,
+  Control Page
+  `sha256:65900f3903090c84e94f7c9cdcc02966fa116b644157b04013f06bae66fdc72c`이다.
+  이미지 내부 제품 소스에 read-only test harness를 연결한 집중 테스트 91개씩과
+  각 이미지 `compileall`/`pip check`, 전체 profile Compose config, voice
+  validation JavaScript `node --check`, `git diff --check`를 통과했다. 실행 중인
+  서비스는 교체하지 않았고 Discord, 마이크, 스피커, Minecraft와 사용자 runtime
+  artifact는 변경하거나 시작하지 않았다.
 
 ## Operational boundaries
 

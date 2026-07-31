@@ -251,6 +251,10 @@ Phase 1 is the stable contract that later phases will wire into.
 - Router LLM output now requests a `context_policy` object and normalizes it through `ContextPolicy.from_mapping()` before prompt assembly.
 - Router route response budget now defaults to `220` tokens so the policy JSON is not truncated.
 - Runtime state, skill graph hints, and vision hints now have first-class packet sections.
+- Main과 Fast Control은 공통 `conversation.unanswered-user.v1` system-context
+  규칙으로 마지막 history row가 `user`인 미응답 턴을 명시한다. 판정은 restart
+  restore와 cross-surface merge 뒤에 수행하며 metrics/turn summary에는 사용자
+  문장 없이 `unanswered_user_turn_context` boolean만 기록한다.
 - Per-turn screen observation uses the fail-closed `vision.evidence.v2`
   contract: a request, hint, capture attempt, failure string, legacy payload,
   or evidence older than 15 seconds cannot mark a vision tool executed; scene

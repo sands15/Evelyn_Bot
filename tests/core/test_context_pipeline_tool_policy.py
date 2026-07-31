@@ -14,14 +14,59 @@ from evelyn_core.context_pipeline import (
     ContextBuilder,
     ContextPolicy,
     build_basic_context_packet,
+    build_conversation_state_context,
     build_context_policy_for_turn,
     build_tool_use_decisions,
     build_vision_context_hint,
+    has_unanswered_user_turn,
     render_tool_use_context,
 )
 
 
 class ContextPipelineToolPolicyTests(unittest.TestCase):
+    def test_unanswered_turn_detection_uses_latest_conversational_row(self) -> None:
+        self.assertTrue(
+            has_unanswered_user_turn(
+                [
+                    {"role": "assistant", "content": "answered"},
+                    {"role": "system", "content": "ignored"},
+                    {"role": "user", "content": "still pending"},
+                ]
+            )
+        )
+        self.assertFalse(
+            has_unanswered_user_turn(
+                [
+                    {"role": "user", "content": "question"},
+                    {"role": "assistant", "content": "answer"},
+                ]
+            )
+        )
+        self.assertFalse(
+            has_unanswered_user_turn(
+                [{"role": "user", "content": "   "}]
+            )
+        )
+
+    def test_unanswered_turn_context_is_fixed_and_content_free(self) -> None:
+        private_text = "PRIVATE_UNANSWERED_USER_TEXT"
+
+        context = build_conversation_state_context(
+            route="chat",
+            unanswered_user_turn=has_unanswered_user_turn(
+                [{"role": "user", "content": private_text}]
+            ),
+        )
+
+        self.assertIn(
+            "continuity_schema: conversation.unanswered-user.v1",
+            context,
+        )
+        self.assertIn("unanswered_user_turn: true", context)
+        self.assertIn("continuity_content_free: true", context)
+        self.assertIn("no delivered assistant reply", context)
+        self.assertNotIn(private_text, context)
+
     def test_runtime_status_question_requests_runtime_tool(self) -> None:
         policy = build_context_policy_for_turn(user_text="지금 VRAM이랑 OOM 상태 어때?", source="text", route="main_direct")
 

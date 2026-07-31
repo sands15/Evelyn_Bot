@@ -48,6 +48,7 @@ class TurnTraceSummaryTests(unittest.TestCase):
             "memory_write_error",
             "memory_write_content_free",
             "minecraft_snapshot_freshness",
+            "unanswered_user_turn_context",
             "error_layer",
             "validation_session_id",
             "validation_step_id",
@@ -79,6 +80,7 @@ class TurnTraceSummaryTests(unittest.TestCase):
                             "response_mode": "short",
                         },
                         "message_count": 4,
+                        "unanswered_user_turn_context": True,
                         "sections": ["runtime"],
                         "section_chars": {"runtime": 120},
                         "memory_receipt": {
@@ -136,6 +138,7 @@ class TurnTraceSummaryTests(unittest.TestCase):
         self.assertEqual(payload["needs_tts"], True)
         self.assertEqual(payload["route_priority"], "latency")
         self.assertEqual(payload["response_mode"], "short")
+        self.assertTrue(payload["unanswered_user_turn_context"])
         self.assertEqual(payload["memory_context_state"], "provided")
         self.assertEqual(payload["memory_grounding_state"], "partial")
         self.assertEqual(payload["memory_use_policy"], "memory.context-use.v1")
