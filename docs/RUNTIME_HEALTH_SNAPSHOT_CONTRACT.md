@@ -66,6 +66,30 @@ The public Control Page may expose the compact subset needed for its control
 plane status. `checkedAt` remains the collection timestamp; `generatedAt`
 remains the response timestamp.
 
+## Public projection boundary
+
+The collector keeps full probe evidence in-process long enough to derive
+service state, Minecraft functional readiness, voice capabilities,
+diagnostics, and repair suggestions. Both cache owners project that internal
+snapshot through `public_runtime_health_snapshot()` before it is attached to a
+Control Page response.
+
+The browser contract is `runtime_health.public.v1`. It retains service and
+capability state, fixed reason/blocker codes, safe numeric timing/freshness
+fields, boolean readiness dependencies, and allowlisted repair actions. It
+does not expose:
+
+- probe `target`, response `payload`, or exception `error` fields;
+- service host/default-host/environment configuration;
+- artifact paths, process IDs, output-device names, or raw upstream status;
+- diagnostic details or arbitrary observability/legacy extension fields.
+
+`legacyServices` and `observability.exceptions` are also rebuilt from closed
+field lists. This prevents a future producer field from becoming public merely
+because it was added to an internal snapshot. Runtime error class names remain
+available only through their existing syntax-sanitized observability field;
+exception messages and stack traces remain prohibited.
+
 ## Fresh operations
 
 The cache is for repeated state composition and the state attached to ordinary
@@ -88,6 +112,8 @@ Unit and integration coverage verifies:
 - stale refresh failure fail-closed transformation;
 - state-handler snapshot reuse and additive metadata;
 - Control Page proxy and override behavior.
+- public projection redaction while preserving computed readiness and repair
+  decisions.
 
 The deployed local runtime was measured with the optional model, Discord, and
 Minecraft services intentionally deferred. Direct Bot API state polling moved

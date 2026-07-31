@@ -147,6 +147,11 @@ Source branch: `codex/dependency-config-hardening`, current evidence-bound user 
     error log 원문을 넣지 않는다. `runtime.recent-error.v1`의 exact
     owner/code/coarse age bucket만 최대 3개 렌더링하고 최종 consumer가
     allowlist를 다시 검증한다.
+  - Runtime Health collector의 raw probe payload는 내부 readiness·capability·
+    diagnostic 합성까지만 사용한다. Bot API와 Control Page cache owner는
+    `runtime_health.public.v1` 폐쇄형 projection을 거친 결과만 브라우저에
+    제공한다. probe target/payload/error, host 설정, artifact 경로, PID,
+    장치명과 임의 legacy/observability 확장 필드는 공개되지 않는다.
 - 자율행동의 승인과 결과 증거를 같은 action·grant에 묶었다.
   - `autonomy.outcome-evidence-policy.v1`이 모든 supported action의 exact
     evidence code를 정의한다. 비어 있지 않은 임의 코드나 다른 action의
@@ -1283,6 +1288,19 @@ Source branch: `codex/dependency-config-hardening`, current evidence-bound user 
   내장 소스 집중 90개·22개·14개와 각 이미지 `compileall`/`pip check`를
   통과했다. 실행 중 기존 Bot API와 Control Page는 교체하지 않았고 healthy다.
   실제 사용자 기억과 Discord, 마이크, Minecraft는 변경하거나 시작하지 않았다.
+- Runtime Health 공개 projection 변경은 집중 100개, runtime 전체 419개
+  (skip 2), UI 157개(skip 7)를 통과했다. core 547개는 기능 assertion 실패
+  0개였고 Discord/Main 이미지의 `git` 부재 오류 2개는 Windows의 해당 모듈
+  13개로 보완했다. 새 projection은 readiness·capability·복구 결정을 유지하면서
+  raw probe payload, target, exception field, host 설정, PID, 장치명과 임의
+  legacy/observability 확장 필드가 직렬화되지 않음을 검증했다.
+- 현재 소스를 내장한 검증 이미지는 Bot API
+  `sha256:94fd9824ff568ccad11141910ca46bd943b4a342b30219f1ffa58f714966c343`,
+  Control Page
+  `sha256:9c2cdb09f4e763732b5ee9629012d10f3443244173908d7cd045e9d9bccae21c`이다.
+  이미지 내부 소스 기준 집중 테스트 100개·38개와 양쪽 `compileall`,
+  `pip check`, 전체 profile Compose config가 통과했다. 실행 중인 기존 Bot API와
+  Control Page는 교체하지 않았다.
 
 ## Operational boundaries
 

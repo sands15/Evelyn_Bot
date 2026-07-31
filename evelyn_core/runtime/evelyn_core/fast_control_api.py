@@ -92,7 +92,11 @@ from .minecraft_world_lease_http_runtime import (
 )
 from .memory_prompt_policy import MEMORY_CONTEXT_USE_POLICY
 from .query_intents import answer_current_datetime_query
-from .runtime_health import collect_runtime_health, default_probe_runner
+from .runtime_health import (
+    collect_runtime_health,
+    default_probe_runner,
+    public_runtime_health_snapshot,
+)
 from .runtime_health_snapshot_cache import (
     RuntimeHealthSnapshotCache,
 )
@@ -2353,7 +2357,9 @@ async def cached_fast_runtime_health(
     *,
     force: bool = False,
 ) -> dict[str, Any]:
-    return await FAST_RUNTIME_HEALTH_CACHE.get(force=force)
+    return public_runtime_health_snapshot(
+        await FAST_RUNTIME_HEALTH_CACHE.get(force=force)
+    )
 
 
 async def minecraft_world_lease_owner_context(

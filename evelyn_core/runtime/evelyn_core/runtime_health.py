@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import math
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,7 +18,11 @@ from .minecraft_autonomy_readiness import (
     MINECRAFT_READINESS_BLOCKERS,
     validate_minecraft_autonomy_readiness,
 )
-from .runtime_error_observability import collect_runtime_error_observability
+from .runtime_error_observability import (
+    collect_runtime_error_observability,
+    sanitize_runtime_error_code,
+    sanitize_runtime_error_type,
+)
 from .voice_capabilities import attach_voice_capabilities
 
 
@@ -32,6 +38,31 @@ LEGACY_SERVICE_READY_KEYS = {
     "vision": "visionReady",
     "voyager": "voyagerReady",
     "codex_gateway": "codexReady",
+}
+
+PUBLIC_RUNTIME_HEALTH_SCHEMA = "runtime_health.public.v1"
+_PUBLIC_CODE_RE = re.compile(r"^[a-z0-9_.:-]{1,120}$")
+_PUBLIC_DIAGNOSTIC_RE = re.compile(r"^[A-Z0-9_:-]{1,120}$")
+_PUBLIC_CAPABILITY_STATES = {
+    "ready",
+    "degraded",
+    "unavailable",
+    "unknown",
+}
+_PUBLIC_CAPABILITY_IDS = {
+    "voiceLocal",
+    "voiceDiscord",
+    "screenVision",
+}
+_PUBLIC_ERROR_SOURCES = {
+    "hostSupervisor": "Host Supervisor",
+    "localBridge": "Local I/O Bridge",
+    "discord": "Discord",
+    "conversationContinuity": "Conversation Continuity",
+    "stt": "STT",
+    "vision": "Vision",
+    "mindcraft": "Mindcraft",
+    "codexGateway": "Codex Gateway",
 }
 
 
@@ -764,6 +795,666 @@ def apply_runtime_health_overrides(
     next_health["legacyServices"] = legacy_services_from_health(service_map)
     next_health["simulatedOverrides"] = active_overrides
     return next_health
+
+
+def _public_code(value: Any, *, fallback: str) -> str:
+    text = str(value or "").strip().lower()
+    return text if _PUBLIC_CODE_RE.fullmatch(text) else fallback
+
+
+def _public_identifier(value: Any) -> str:
+    return _public_code(value, fallback="")
+
+
+def _public_number(value: Any) -> int | float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return value if math.isfinite(float(value)) else None
+    return None
+
+
+def _public_count(value: Any) -> int:
+    number = _public_number(value)
+    if number is None:
+        return 0
+    return max(0, int(number))
+
+
+def _public_legacy_services(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    result: dict[str, Any] = {}
+    readiness_keys = {
+        *LEGACY_SERVICE_READY_KEYS.values(),
+        "voyagerHttpReady",
+        "voyagerRuntimeReady",
+    }
+    for key in readiness_keys:
+        if isinstance(value.get(key), bool):
+            result[key] = bool(value[key])
+    if isinstance(value.get("codexRequired"), bool):
+        result["codexRequired"] = bool(value["codexRequired"])
+    if value.get("codexBackend") == "codex-gateway":
+        result["codexBackend"] = "codex-gateway"
+    required_keys = {
+        "botReady",
+        "mainReady",
+        "routerReady",
+        "subReady",
+        "ttsReady",
+        "sttReady",
+    }
+    if required_keys.issubset(result):
+        if not result["botReady"]:
+            result["summary"] = (
+                "Control-Page is open; Bot API is not ready."
+            )
+        elif all(
+            result[key]
+            for key in (
+                "mainReady",
+                "routerReady",
+                "subReady",
+                "ttsReady",
+                "sttReady",
+            )
+        ):
+            result["summary"] = (
+                "Control-Page and Evelyn runtime are ready."
+            )
+        else:
+            result["summary"] = (
+                "Control-Page is open; model or voice services are still starting."
+            )
+    return result
+
+
+def _public_commit_metrics(value: Any) -> dict[str, Any] | None:
+    if (
+        not isinstance(value, dict)
+        or value.get("schema")
+        != "conversation_continuity.commit-metrics.v1"
+    ):
+        return None
+    result: dict[str, Any] = {
+        "schema": "conversation_continuity.commit-metrics.v1",
+        "state": _public_code(value.get("state"), fallback="unknown"),
+        "attemptCount": _public_count(value.get("attemptCount")),
+        "successCount": _public_count(value.get("successCount")),
+        "failureCount": _public_count(value.get("failureCount")),
+        "sampleCount": _public_count(value.get("sampleCount")),
+        "lastSucceeded": (
+            value.get("lastSucceeded")
+            if isinstance(value.get("lastSucceeded"), bool)
+            else None
+        ),
+        "warningCode": sanitize_runtime_error_code(
+            value.get("warningCode"),
+            fallback="",
+        ),
+    }
+    for key in (
+        "lastMs",
+        "p50Ms",
+        "p95Ms",
+        "maxMs",
+        "lastAt",
+        "warningThresholdMs",
+    ):
+        result[key] = _public_number(value.get(key))
+    return result
+
+
+def _public_error_source(
+    source_id: str,
+    value: Any,
+) -> dict[str, Any] | None:
+    if source_id not in _PUBLIC_ERROR_SOURCES or not isinstance(value, dict):
+        return None
+    result: dict[str, Any] = {
+        "id": source_id,
+        "label": _PUBLIC_ERROR_SOURCES[source_id],
+        "state": _public_code(value.get("state"), fallback="unknown"),
+        "available": bool(value.get("available")),
+        "stale": bool(value.get("stale")),
+        "heartbeatAt": _public_number(value.get("heartbeatAt")),
+        "errorCount": _public_count(value.get("errorCount")),
+        "lastErrorAt": _public_number(value.get("lastErrorAt")),
+        "lastErrorCode": sanitize_runtime_error_code(
+            value.get("lastErrorCode"),
+            fallback="",
+        ),
+        "lastErrorType": sanitize_runtime_error_type(
+            value.get("lastErrorType")
+        ),
+        "errorCounters": {},
+        "hasCurrentError": bool(value.get("hasCurrentError")),
+    }
+    counters = value.get("errorCounters")
+    if isinstance(counters, dict):
+        for raw_code, raw_count in list(counters.items())[:64]:
+            code = sanitize_runtime_error_code(raw_code, fallback="")
+            if code:
+                result["errorCounters"][code] = _public_count(raw_count)
+    commit_metrics = _public_commit_metrics(
+        value.get("completedTurnCommit")
+    )
+    if commit_metrics is not None:
+        result["completedTurnCommit"] = commit_metrics
+    return result
+
+
+def _public_error_observability(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    errors = value.get("exceptions")
+    if not isinstance(errors, dict):
+        return {}
+    raw_summary = errors.get("summary")
+    summary = {
+        key: _public_count(raw_summary.get(key))
+        for key in (
+            "sourceCount",
+            "availableCount",
+            "staleCount",
+            "currentErrorCount",
+            "recentErrorCount",
+            "totalCount",
+        )
+    } if isinstance(raw_summary, dict) else {}
+    raw_sources = errors.get("sources")
+    sources = {
+        source_id: source
+        for source_id, item in (
+            raw_sources.items()
+            if isinstance(raw_sources, dict)
+            else ()
+        )
+        if (
+            source := _public_error_source(str(source_id), item)
+        ) is not None
+    }
+    recent_errors: list[dict[str, Any]] = []
+    for item in errors.get("recentErrors") or []:
+        if not isinstance(item, dict):
+            continue
+        source_id = str(item.get("source") or "")
+        if source_id not in _PUBLIC_ERROR_SOURCES:
+            continue
+        recent_errors.append(
+            {
+                "source": source_id,
+                "at": _public_number(item.get("at")),
+                "code": sanitize_runtime_error_code(
+                    item.get("code"),
+                    fallback="runtime_error",
+                ),
+                "type": sanitize_runtime_error_type(item.get("type")),
+            }
+        )
+        if len(recent_errors) >= 10:
+            break
+    warnings: list[dict[str, str]] = []
+    for item in errors.get("warnings") or []:
+        if not isinstance(item, dict):
+            continue
+        source_id = str(item.get("source") or "")
+        code = sanitize_runtime_error_code(item.get("code"), fallback="")
+        if source_id in _PUBLIC_ERROR_SOURCES and code:
+            warnings.append({"source": source_id, "code": code})
+    return {
+        "exceptions": {
+            "schema": "runtime_errors.summary.v1",
+            "state": _public_code(
+                errors.get("state"),
+                fallback="unknown",
+            ),
+            "generatedAt": _public_number(errors.get("generatedAt")),
+            "recentAfterSec": _public_number(
+                errors.get("recentAfterSec")
+            ),
+            "summary": summary,
+            "sources": sources,
+            "recentErrors": recent_errors,
+            "warnings": warnings,
+            "privacy": {
+                "exceptionMessages": False,
+                "stackTraces": False,
+                "filesystemPaths": False,
+            },
+        }
+    }
+
+
+def _public_action(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    action_id = _public_identifier(
+        value.get("actionId") or value.get("id")
+    )
+    if not action_id:
+        return None
+    result: dict[str, Any] = {
+        "id": action_id,
+        "label": str(value.get("label") or action_id)[:160],
+        "risk": _public_code(
+            value.get("risk"),
+            fallback="medium",
+        ),
+        "requiresConfirm": bool(value.get("requiresConfirm", True)),
+    }
+    service_id = _public_identifier(value.get("serviceId"))
+    if service_id:
+        result["serviceId"] = service_id
+    strategy = _public_identifier(value.get("strategy"))
+    if strategy:
+        result["strategy"] = strategy
+    return result
+
+
+def _public_probe_check(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    result: dict[str, Any] = {
+        "kind": _public_code(
+            value.get("kind"),
+            fallback="unknown",
+        ),
+        "ok": bool(value.get("ok")),
+        "reason": _public_code(
+            value.get("reason"),
+            fallback="probe_failed",
+        ),
+    }
+    for source_key, public_key in (
+        ("status", "status"),
+        ("elapsedMs", "elapsedMs"),
+        ("ageSec", "ageSec"),
+        ("staleAfterSec", "staleAfterSec"),
+    ):
+        number = _public_number(value.get(source_key))
+        if number is not None:
+            result[public_key] = number
+    return result
+
+
+def _public_functional_readiness(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    dependencies = value.get("dependencies")
+    task_contract = value.get("taskContract")
+    result: dict[str, Any] = {
+        "schema": _public_code(
+            value.get("schema"),
+            fallback="minecraft_autonomy_readiness",
+        ),
+        "state": _public_code(
+            value.get("state"),
+            fallback="unknown",
+        ),
+        "ready": bool(value.get("ready")),
+        "blockers": [
+            code
+            for item in (value.get("blockers") or [])
+            if (code := _public_identifier(item))
+        ][:24],
+        "contentFree": bool(value.get("contentFree")),
+    }
+    if isinstance(dependencies, dict):
+        result["dependencies"] = {
+            str(key): bool(item)
+            for key, item in dependencies.items()
+            if _PUBLIC_CODE_RE.fullmatch(str(key).strip().lower())
+            and isinstance(item, bool)
+        }
+    if isinstance(task_contract, dict):
+        result["taskContract"] = {
+            str(key): normalized
+            for key, item in task_contract.items()
+            if _PUBLIC_CODE_RE.fullmatch(str(key).strip().lower())
+            and (
+                normalized := _public_code(
+                    item,
+                    fallback="",
+                )
+            )
+        }
+    return result
+
+
+def _public_service(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    service_id = _public_identifier(value.get("id"))
+    if not service_id:
+        return None
+    result: dict[str, Any] = {
+        "id": service_id,
+        "label": str(value.get("label") or service_id)[:160],
+        "required": bool(value.get("required")),
+        "state": _public_code(
+            value.get("state"),
+            fallback="unknown",
+        ),
+        "ready": bool(value.get("ready")),
+        "reason": _public_code(
+            value.get("reason"),
+            fallback="probe_failed",
+        ),
+        "checks": [],
+        "suggestedActions": [],
+    }
+    for key in ("port", "defaultPort", "checkedAt", "elapsedMs"):
+        number = _public_number(value.get(key))
+        if number is not None:
+            result[key] = number
+    cached_state = _public_identifier(value.get("cachedState"))
+    if cached_state:
+        result["cachedState"] = cached_state
+    for key in ("httpReady", "runtimeReady", "simulated"):
+        if isinstance(value.get(key), bool):
+            result[key] = bool(value[key])
+    contract_state = _public_identifier(
+        value.get("readinessContractState")
+    )
+    if contract_state:
+        result["readinessContractState"] = contract_state
+    blockers = [
+        code
+        for item in (value.get("readinessBlockers") or [])
+        if (code := _public_identifier(item))
+    ][:24]
+    if blockers:
+        result["readinessBlockers"] = blockers
+    functional = _public_functional_readiness(
+        value.get("functionalReadiness")
+    )
+    if functional is not None:
+        result["functionalReadiness"] = functional
+    expires_at = _public_number(value.get("overrideExpiresAt"))
+    if expires_at is not None:
+        result["overrideExpiresAt"] = expires_at
+    result["checks"] = [
+        check
+        for item in (value.get("checks") or [])
+        if (check := _public_probe_check(item)) is not None
+    ]
+    result["suggestedActions"] = [
+        action
+        for item in (value.get("suggestedActions") or [])
+        if (action := _public_action(item)) is not None
+    ]
+    return result
+
+
+def _public_diagnostic(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    raw_code = str(value.get("code") or "").strip().upper()
+    code = (
+        raw_code
+        if _PUBLIC_DIAGNOSTIC_RE.fullmatch(raw_code)
+        else "RUNTIME_HEALTH_DIAGNOSTIC"
+    )
+    service_ids = [
+        service_id
+        for item in (value.get("serviceIds") or [])
+        if (service_id := _public_identifier(item))
+    ][:16]
+    message = str(value.get("message") or code).replace(
+        "\r",
+        " ",
+    ).replace("\n", " ").strip()[:300]
+    if code.endswith("_DOWN_SIMULATED"):
+        label = service_ids[0] if service_ids else "runtime service"
+        message = f"{label} is simulated as unavailable by a local override."
+    severity = _public_code(
+        value.get("severity"),
+        fallback="warning",
+    )
+    if severity not in {"info", "warning", "error"}:
+        severity = "warning"
+    return {
+        "code": code,
+        "severity": severity,
+        "message": message,
+        "details": "",
+        "serviceIds": service_ids,
+        "suggestedActions": [
+            action
+            for item in (value.get("suggestedActions") or [])
+            if (action := _public_action(item)) is not None
+        ],
+    }
+
+
+def _public_capability_item(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    state = _public_code(value.get("state"), fallback="unknown")
+    if state not in _PUBLIC_CAPABILITY_STATES:
+        state = "unknown"
+
+    def public_issue(item: Any) -> dict[str, Any] | None:
+        if not isinstance(item, dict):
+            return None
+        code = _public_identifier(item.get("code"))
+        if not code:
+            return None
+        service_id = _public_identifier(item.get("serviceId"))
+        result = {
+            "code": code,
+            "message": str(item.get("message") or code).replace(
+                "\r",
+                " ",
+            ).replace("\n", " ").strip()[:240],
+        }
+        if service_id:
+            result["serviceId"] = service_id
+        return result
+
+    dependencies: list[dict[str, Any]] = []
+    for item in value.get("dependencies") or []:
+        if not isinstance(item, dict):
+            continue
+        service_id = _public_identifier(item.get("id"))
+        if not service_id:
+            continue
+        dependencies.append(
+            {
+                "id": service_id,
+                "label": str(item.get("label") or service_id)[:160],
+                "state": _public_code(
+                    item.get("state"),
+                    fallback="unknown",
+                ),
+                "ready": bool(item.get("ready")),
+                "reason": _public_code(
+                    item.get("reason"),
+                    fallback="missing",
+                ),
+                "checkedAt": _public_number(item.get("checkedAt")),
+            }
+        )
+    repairs: list[dict[str, Any]] = []
+    for item in value.get("repairActions") or []:
+        action = _public_action(item)
+        if action is None:
+            continue
+        action["actionId"] = action.pop("id")
+        if (
+            item.get("manualCommand")
+            == "start_local.bat --background"
+        ):
+            action["manualCommand"] = (
+                "start_local.bat --background"
+            )
+        repairs.append(action)
+    return {
+        "state": state,
+        "ready": bool(value.get("ready")),
+        "blockers": [
+            issue
+            for item in (value.get("blockers") or [])
+            if (issue := public_issue(item)) is not None
+        ],
+        "warnings": [
+            issue
+            for item in (value.get("warnings") or [])
+            if (issue := public_issue(item)) is not None
+        ],
+        "dependencies": dependencies,
+        "repairActions": repairs,
+    }
+
+
+def public_runtime_health_snapshot(
+    health: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Return the browser-safe runtime-health projection.
+
+    Probe payloads remain available inside the collector for readiness,
+    capability, and repair decisions. They are not part of the public API.
+    """
+
+    source = health if isinstance(health, dict) else {}
+    legacy_services = _public_legacy_services(
+        source.get("legacyServices")
+    )
+    required_legacy_keys = (
+        "botReady",
+        "mainReady",
+        "routerReady",
+        "subReady",
+        "ttsReady",
+        "sttReady",
+    )
+    inferred_ok = bool(
+        all(key in legacy_services for key in required_legacy_keys)
+        and all(
+            legacy_services.get(key) is True
+            for key in required_legacy_keys
+        )
+    )
+    public_ok = (
+        bool(source.get("ok"))
+        if isinstance(source.get("ok"), bool)
+        else inferred_ok
+    )
+    optional_degraded = bool(source.get("optionalDegraded"))
+    diagnostics = [
+        diagnostic
+        for item in (source.get("diagnostics") or [])
+        if (diagnostic := _public_diagnostic(item)) is not None
+    ]
+    overall_state = _public_code(
+        source.get("overallState"),
+        fallback=(
+            "degraded"
+            if public_ok and optional_degraded
+            else "up"
+            if public_ok
+            else "unknown"
+        ),
+    )
+    result: dict[str, Any] = {
+        "schema": PUBLIC_RUNTIME_HEALTH_SCHEMA,
+        "ok": public_ok,
+        "fullyHealthy": (
+            bool(source.get("fullyHealthy"))
+            if isinstance(source.get("fullyHealthy"), bool)
+            else public_ok and not optional_degraded
+        ),
+        "coreState": _public_code(
+            source.get("coreState"),
+            fallback="up" if public_ok else "unknown",
+        ),
+        "optionalDegraded": optional_degraded,
+        "overallState": overall_state,
+        "summary": (
+            diagnostics[0]["message"]
+            if diagnostics
+            else _summary(overall_state, [])
+        ),
+        "manifestVersion": str(source.get("manifestVersion") or "")[:40],
+        "runtimeName": str(source.get("runtimeName") or "")[:80],
+        "checkedAt": _public_number(source.get("checkedAt")),
+        "services": [
+            service
+            for item in (source.get("services") or [])
+            if (service := _public_service(item)) is not None
+        ],
+        "diagnostics": diagnostics,
+        "legacyServices": legacy_services,
+        "observability": _public_error_observability(
+            source.get("observability")
+        ),
+        "capabilities": {
+            capability_id: capability
+            for key, item in (
+                source.get("capabilities") or {}
+            ).items()
+            if (
+                capability_id := str(key)
+            )
+            in _PUBLIC_CAPABILITY_IDS
+            and (
+                capability := _public_capability_item(item)
+            )
+            is not None
+        },
+        "privacy": {
+            "rawProbePayloads": False,
+            "probeTargets": False,
+            "filesystemPaths": False,
+            "processIds": False,
+            "deviceNames": False,
+        },
+    }
+    revision = _public_number(source.get("revision"))
+    if revision is not None:
+        result["revision"] = revision
+    cache = source.get("cache")
+    if isinstance(cache, dict):
+        result["cache"] = {
+            "schema": str(cache.get("schema") or "")[:80],
+            "ageSec": _public_number(cache.get("ageSec")),
+            "stale": bool(cache.get("stale")),
+            "refreshing": bool(cache.get("refreshing")),
+            "refreshAfterSec": _public_number(
+                cache.get("refreshAfterSec")
+            ),
+            "maxStaleSec": _public_number(cache.get("maxStaleSec")),
+            "lastRefreshError": _public_code(
+                cache.get("lastRefreshError"),
+                fallback="",
+            ),
+        }
+    overrides: list[dict[str, Any]] = []
+    for item in source.get("simulatedOverrides") or []:
+        if not isinstance(item, dict):
+            continue
+        service_id = _public_identifier(item.get("serviceId"))
+        if not service_id:
+            continue
+        overrides.append(
+            {
+                "serviceId": service_id,
+                "state": _public_code(
+                    item.get("state"),
+                    fallback="unknown",
+                ),
+                "reason": _public_code(
+                    item.get("reason"),
+                    fallback="operator_simulated_down",
+                ),
+                "expiresAt": _public_number(item.get("expiresAt")),
+            }
+        )
+    if overrides:
+        result["simulatedOverrides"] = overrides
+    return result
 
 
 async def collect_runtime_health(

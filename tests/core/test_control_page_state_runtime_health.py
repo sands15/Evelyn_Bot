@@ -124,6 +124,51 @@ class ControlPageStateMergeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["error"], "repair_execution_not_enabled")
         self.assertIn("Use dryRun=true", payload["message"])
 
+    async def test_cached_health_returns_browser_safe_projection(self) -> None:
+        raw_health = {
+            "ok": False,
+            "fullyHealthy": False,
+            "coreState": "down",
+            "optionalDegraded": True,
+            "overallState": "down",
+            "manifestVersion": "1.1",
+            "runtimeName": "evelyn-local",
+            "services": [
+                {
+                    "id": "local_io_bridge",
+                    "label": "Local I/O Bridge",
+                    "required": False,
+                    "state": "degraded",
+                    "ready": False,
+                    "reason": "check_failed",
+                    "checks": [
+                        {
+                            "kind": "artifact_json",
+                            "ok": False,
+                            "reason": "artifact_stale",
+                            "target": "/app/runtime_artifacts/private.json",
+                            "payload": {"pid": 42},
+                        }
+                    ],
+                }
+            ],
+            "diagnostics": [],
+            "legacyServices": {},
+            "capabilities": {},
+        }
+        with patch.object(
+            control_page_server.CONTROL_PAGE_RUNTIME_HEALTH_CACHE,
+            "get",
+            new=AsyncMock(return_value=raw_health),
+        ):
+            public = await control_page_server.cached_runtime_health()
+
+        check = public["services"][0]["checks"][0]
+        self.assertEqual(public["schema"], "runtime_health.public.v1")
+        self.assertNotIn("target", check)
+        self.assertNotIn("payload", check)
+        self.assertFalse(public["privacy"]["rawProbePayloads"])
+
     def test_control_plane_status_text_covers_port_combinations_and_proxy_timeout(self) -> None:
         control_page_only = control_page_server.build_control_plane_state(ports={"bot": False})
         bot_open_timeout = control_page_server.build_control_plane_state(

@@ -43,7 +43,11 @@ from .memory_vault import (
     update_memory_vault_user_note,
 )
 from .public_error_contract import public_error_code, public_failure_message
-from .runtime_health import apply_runtime_health_overrides, collect_runtime_health
+from .runtime_health import (
+    apply_runtime_health_overrides,
+    collect_runtime_health,
+    public_runtime_health_snapshot,
+)
 from .runtime_health_snapshot_cache import (
     RuntimeHealthSnapshotCache,
 )
@@ -206,7 +210,9 @@ CONTROL_PAGE_RUNTIME_HEALTH_CACHE = RuntimeHealthSnapshotCache(
 
 
 async def cached_runtime_health(*, force: bool = False) -> dict[str, Any]:
-    return await CONTROL_PAGE_RUNTIME_HEALTH_CACHE.get(force=force)
+    return public_runtime_health_snapshot(
+        await CONTROL_PAGE_RUNTIME_HEALTH_CACHE.get(force=force)
+    )
 
 
 async def proxy_json(request: web.Request, method: str, path: str, *, body: Any = None) -> web.Response | None:

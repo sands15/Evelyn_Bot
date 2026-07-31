@@ -278,6 +278,23 @@ config dependency를 명시적으로 고정한 새 이미지에서
 대부분 `fixAvailable=false`이며 제안된 일부 강제 수정은 주요 버전 역행을 포함한다.
 다음 조치: 강제 audit fix는 금지하고, 별도 호환성 검증에서 Mineflayer 체인을 갱신한다.
 
+## P1 — Runtime Health 공개 projection 배포 대기
+
+소스와 새 검증 이미지에서는 Runtime Health의 raw probe evidence를 서비스·
+capability 판정에만 사용하고 `runtime_health.public.v1` 폐쇄형 projection을
+거친 결과만 Control Page에 제공한다. artifact 경로, probe target/payload/error,
+host 설정, PID, 출력 장치명과 임의 legacy/observability 확장 필드는 제거된다.
+
+이번 작업은 실행 중인 Bot API와 Control Page를 의도적으로 교체하지 않았다.
+따라서 현재 `127.0.0.1:8799`의 기존 컨테이너는 다음 계획된 배포 전까지 이전
+응답 형식을 계속 제공한다. 이는 loopback 경계 안의 로컬 정보 노출이지만 새
+계약이 live 상태라는 뜻은 아니다.
+
+다음 조치: 사용자가 서비스 교체를 허용한 유지보수 세션에서 새 Bot API와
+Control Page를 순서대로 배포한다. 이후 실제 `/api/control-page/state`와
+`/api/control-page/runtime-health` 응답을 재귀 검사해 금지 필드가 0개인지,
+readiness와 복구 preview가 배포 전과 같은지 확인한다.
+
 ## P1 — 실제 음성 하드웨어 E2E 미검증
 
 Windows Host Supervisor는 이제 별도 `.venv-host`와 최소 lock으로 재현 가능하게

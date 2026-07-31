@@ -1554,6 +1554,15 @@ class FastControlApiToolTests(unittest.TestCase):
                         "id": "bot_api",
                         "state": "up",
                         "ready": True,
+                        "checks": [
+                            {
+                                "kind": "artifact_json",
+                                "ok": True,
+                                "reason": "ok",
+                                "target": "/app/runtime_artifacts/private.json",
+                                "payload": {"pid": 42},
+                            }
+                        ],
                     }
                 ],
             }
@@ -1596,6 +1605,14 @@ class FastControlApiToolTests(unittest.TestCase):
             first["runtime"]["serviceHealth"]["revision"],
             1,
         )
+        public_health = first["runtime"]["serviceHealth"]
+        self.assertEqual(
+            public_health["schema"],
+            "runtime_health.public.v1",
+        )
+        public_check = public_health["services"][0]["checks"][0]
+        self.assertNotIn("target", public_check)
+        self.assertNotIn("payload", public_check)
         self.assertEqual(
             second["runtime"]["serviceHealth"]["revision"],
             1,

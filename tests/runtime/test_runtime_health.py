@@ -12,7 +12,11 @@ RUNTIME_ROOT = REPO_ROOT / "evelyn_core" / "runtime"
 if str(RUNTIME_ROOT) not in sys.path:
     sys.path.insert(0, str(RUNTIME_ROOT))
 
-from evelyn_core.runtime_health import apply_runtime_health_overrides, collect_runtime_health  # noqa: E402
+from evelyn_core.runtime_health import (  # noqa: E402
+    apply_runtime_health_overrides,
+    collect_runtime_health,
+    public_runtime_health_snapshot,
+)
 from evelyn_core.runtime_services import HealthProbeSpec, ServiceSpec, load_service_manifest  # noqa: E402
 
 
@@ -189,6 +193,244 @@ def fake_probe(states: dict[str, str]):
 
 
 class RuntimeHealthTests(unittest.IsolatedAsyncioTestCase):
+    async def test_public_projection_removes_raw_probe_evidence(self) -> None:
+        raw = {
+            "revision": 7,
+            "ok": False,
+            "fullyHealthy": False,
+            "coreState": "down",
+            "optionalDegraded": True,
+            "overallState": "down",
+            "summary": "private summary",
+            "manifestVersion": "1.1",
+            "runtimeName": "evelyn-local",
+            "checkedAt": 1234.5,
+            "services": [
+                {
+                    "id": "local_io_bridge",
+                    "label": "Local I/O Bridge",
+                    "required": False,
+                    "host": "private-host",
+                    "defaultHost": "C:\\private\\host",
+                    "hostEnv": "PRIVATE_HOST",
+                    "port": 0,
+                    "state": "degraded",
+                    "ready": False,
+                    "reason": "check_failed",
+                    "checkedAt": 1234.0,
+                    "elapsedMs": 3.2,
+                    "checks": [
+                        {
+                            "kind": "artifact_json",
+                            "ok": False,
+                            "reason": "artifact_stale",
+                            "target": "/app/runtime_artifacts/local_bridge/status.json",
+                            "payload": {
+                                "pid": 4242,
+                                "outputDevices": [
+                                    {"name": "Private Headphones"}
+                                ],
+                            },
+                            "error": "PrivateProbeError",
+                            "ageSec": 9.0,
+                            "staleAfterSec": 4.0,
+                        }
+                    ],
+                    "suggestedActions": [
+                        {
+                            "id": "start_local_io_bridge",
+                            "label": "Start Local I/O Bridge",
+                            "risk": "medium",
+                            "requiresConfirm": True,
+                            "strategy": "start_if_down",
+                        }
+                    ],
+                }
+            ],
+            "diagnostics": [
+                {
+                    "code": "LOCAL_IO_BRIDGE_DOWN",
+                    "severity": "error",
+                    "message": "Local I/O Bridge is unavailable.",
+                    "details": "read C:\\private\\status.json",
+                    "serviceIds": ["local_io_bridge"],
+                    "suggestedActions": [],
+                }
+            ],
+            "legacyServices": {
+                "botReady": True,
+                "privatePath": "C:\\private\\legacy.json",
+            },
+            "observability": {
+                "exceptions": {
+                    "schema": "runtime_errors.summary.v1",
+                    "state": "attention",
+                    "generatedAt": 1234.0,
+                    "recentAfterSec": 3600.0,
+                    "summary": {
+                        "sourceCount": 1,
+                        "availableCount": 1,
+                        "staleCount": 0,
+                        "currentErrorCount": 0,
+                        "recentErrorCount": 1,
+                        "totalCount": 1,
+                        "privatePath": "C:\\private\\summary.json",
+                    },
+                    "sources": {
+                        "localBridge": {
+                            "id": "localBridge",
+                            "label": "Private device label",
+                            "state": "ready",
+                            "available": True,
+                            "stale": False,
+                            "heartbeatAt": 1234.0,
+                            "errorCount": 1,
+                            "lastErrorAt": 1233.0,
+                            "lastErrorCode": "tts_warmup_attempt_failed",
+                            "lastErrorType": "TimeoutError",
+                            "errorCounters": {
+                                "tts_warmup_attempt_failed": 1,
+                            },
+                            "privatePayload": {
+                                "path": "C:\\private\\errors.json",
+                            },
+                        }
+                    },
+                    "recentErrors": [
+                        {
+                            "source": "localBridge",
+                            "at": 1233.0,
+                            "code": "tts_warmup_attempt_failed",
+                            "type": "TimeoutError",
+                            "message": "C:\\private\\error.wav",
+                        }
+                    ],
+                    "warnings": [],
+                    "privatePayload": {"pid": 7777},
+                }
+            },
+            "capabilities": {
+                "voiceLocal": {
+                    "state": "unavailable",
+                    "ready": False,
+                    "blockers": [
+                        {
+                            "code": "local_io_bridge_degraded",
+                            "message": "Local I/O Bridge is unavailable.",
+                            "serviceId": "local_io_bridge",
+                        }
+                    ],
+                    "warnings": [],
+                    "dependencies": [
+                        {
+                            "id": "local_io_bridge",
+                            "label": "Local I/O Bridge",
+                            "state": "degraded",
+                            "ready": False,
+                            "reason": "check_failed",
+                            "checkedAt": 1234.0,
+                        }
+                    ],
+                    "repairActions": [
+                        {
+                            "actionId": "start_host_supervisor_manual",
+                            "serviceId": "host_supervisor",
+                            "label": "Start Host Supervisor",
+                            "requiresConfirm": False,
+                            "manualCommand": "start_local.bat --background",
+                        }
+                    ],
+                }
+            },
+        }
+
+        public = public_runtime_health_snapshot(raw)
+        service = public["services"][0]
+        check = service["checks"][0]
+
+        self.assertEqual(public["schema"], "runtime_health.public.v1")
+        self.assertEqual(public["revision"], 7)
+        self.assertEqual(service["state"], "degraded")
+        self.assertEqual(check["reason"], "artifact_stale")
+        self.assertNotIn("host", service)
+        self.assertNotIn("defaultHost", service)
+        self.assertNotIn("hostEnv", service)
+        self.assertNotIn("target", check)
+        self.assertNotIn("payload", check)
+        self.assertNotIn("error", check)
+        self.assertEqual(public["diagnostics"][0]["details"], "")
+        self.assertEqual(
+            public["capabilities"]["voiceLocal"]["repairActions"][0][
+                "manualCommand"
+            ],
+            "start_local.bat --background",
+        )
+        serialized = str(public)
+        self.assertNotIn("Private Headphones", serialized)
+        self.assertNotIn("PrivateProbeError", serialized)
+        self.assertNotIn("/app/runtime_artifacts", serialized)
+        self.assertNotIn("C:\\private", serialized)
+        self.assertNotIn("Private device label", serialized)
+        self.assertNotIn("privatePayload", serialized)
+        self.assertNotIn("7777", serialized)
+        forbidden_keys = {
+            "defaultHost",
+            "error",
+            "host",
+            "hostEnv",
+            "payload",
+            "portEnv",
+            "target",
+        }
+
+        def assert_closed(value: Any) -> None:
+            if isinstance(value, dict):
+                self.assertFalse(forbidden_keys.intersection(value))
+                for child in value.values():
+                    assert_closed(child)
+            elif isinstance(value, list):
+                for child in value:
+                    assert_closed(child)
+
+        assert_closed(public)
+        self.assertEqual(
+            public["observability"]["exceptions"]["sources"][
+                "localBridge"
+            ]["label"],
+            "Local I/O Bridge",
+        )
+        self.assertFalse(public["privacy"]["rawProbePayloads"])
+        self.assertFalse(public["privacy"]["filesystemPaths"])
+
+    async def test_public_projection_preserves_computed_readiness(self) -> None:
+        manifest = load_service_manifest(force=True)
+        health = await collect_runtime_health(
+            manifest=manifest,
+            probe_runner=fake_probe({}),
+        )
+
+        public = public_runtime_health_snapshot(health)
+        voyager = next(
+            service
+            for service in public["services"]
+            if service["id"] == "voyager"
+        )
+
+        self.assertTrue(voyager["runtimeReady"])
+        self.assertEqual(
+            voyager["functionalReadiness"]["state"],
+            "ready",
+        )
+        self.assertTrue(
+            voyager["functionalReadiness"]["dependencies"][
+                "minecraftConnected"
+            ]
+        )
+        for service in public["services"]:
+            for check in service["checks"]:
+                self.assertNotIn("payload", check)
+                self.assertNotIn("target", check)
+
     async def test_runtime_error_observability_is_additive(self) -> None:
         expected = {
             "schema": "runtime_errors.summary.v1",
