@@ -29,6 +29,33 @@ class DockerComposeContractTests(unittest.TestCase):
         self.assertIn("STT_SERVICE_FALLBACK_LOCAL: \"false\"", source)
         self.assertIn("VISION_WATCH_ENABLED: \"false\"", source)
 
+    def test_cross_surface_scope_is_wired_to_both_checkpoint_readers(
+        self,
+    ) -> None:
+        source = COMPOSE.read_text(encoding="utf-8")
+        bot_api = source.split("  bot_api:\n", 1)[1].split(
+            "\n  control_page:",
+            1,
+        )[0]
+        discord_bot = source.split(
+            "  discord_bot:\n",
+            1,
+        )[1].split("\n  main_llm:", 1)[0]
+
+        for service in (bot_api, discord_bot):
+            self.assertIn(
+                "CROSS_SURFACE_CONTINUITY_ENABLED:",
+                service,
+            )
+            self.assertIn(
+                "CROSS_SURFACE_CONTINUITY_GUILD_ID:",
+                service,
+            )
+            self.assertIn(
+                "CROSS_SURFACE_CONTINUITY_USER_ID:",
+                service,
+            )
+
     def test_docker_services_use_internal_service_urls_for_core_dependencies(self) -> None:
         source = COMPOSE.read_text(encoding="utf-8")
 

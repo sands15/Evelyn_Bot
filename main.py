@@ -984,7 +984,7 @@ llm_context_assembly_composition = LlmContextAssemblyComposition(
         extract_question_policy_from_route_meta=extract_question_policy_from_route_meta,
         update_cognitive_state=lambda *args, **kwargs: update_cognitive_state(*args, **kwargs),
         schedule_cognitive_refresh=lambda *args, **kwargs: schedule_cognitive_refresh(*args, **kwargs),
-        build_runtime_status_context=build_runtime_status_context, project_root=PROJECT_ROOT,
+        build_runtime_status_context=build_runtime_status_context, project_root=PROJECT_ROOT, runtime_artifacts_root=RUNTIME_ARTIFACTS_ROOT,
         observe_live_minecraft_state=lambda *args, **kwargs: observe_live_minecraft_state(*args, **kwargs),
         control_page_minecraft_cache_refresh_sec=CONTROL_PAGE_MINECRAFT_CACHE_REFRESH_SEC,
         control_page_minecraft_cache_max_stale_sec=CONTROL_PAGE_MINECRAFT_CACHE_MAX_STALE_SEC, local_tts_snapshot=local_tts_playback_manager.snapshot,

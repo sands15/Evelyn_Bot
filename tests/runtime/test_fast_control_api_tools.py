@@ -155,6 +155,86 @@ class FastControlApiToolTests(unittest.TestCase):
             ],
         )
 
+    def test_verified_cross_surface_context_feeds_planner_and_llm(
+        self,
+    ) -> None:
+        class Bridge:
+            def __init__(self) -> None:
+                self.calls: list[str] = []
+
+            def merge_for_fast(
+                self,
+                messages,
+                *,
+                current_user_text,
+            ):
+                self.calls.append(current_user_text)
+                return [
+                    *messages,
+                    {
+                        "role": "user",
+                        "content": "디스코드에서 한 질문",
+                    },
+                    {
+                        "role": "assistant",
+                        "content": "디스코드에서 한 답",
+                    },
+                ]
+
+        bridge = Bridge()
+        built = SimpleNamespace(
+            messages=[
+                {"role": "system", "content": "system"},
+                {"role": "user", "content": "새 질문"},
+            ],
+            context=SimpleNamespace(
+                required_evidence_failure_reply="",
+                grounded_evidence_reply="",
+            ),
+        )
+        with (
+            patch.object(
+                fast_api,
+                "CROSS_SURFACE_CONTINUITY_BRIDGE",
+                bridge,
+            ),
+            patch.object(
+                fast_api,
+                "build_fast_main_llm_request",
+                new=AsyncMock(return_value=built),
+            ) as build_request,
+        ):
+            planner_context = (
+                fast_api.recent_chat_messages_for_planner(
+                    "새 질문",
+                )
+            )
+            asyncio.run(
+                fast_api.build_main_llm_request_payload(
+                    "새 질문",
+                    source="control_page",
+                )
+            )
+
+        expected = [
+            {
+                "role": "user",
+                "content": "디스코드에서 한 질문",
+            },
+            {
+                "role": "assistant",
+                "content": "디스코드에서 한 답",
+            },
+        ]
+        self.assertEqual(planner_context, expected)
+        self.assertEqual(
+            build_request.await_args.kwargs[
+                "recent_messages"
+            ],
+            expected,
+        )
+        self.assertEqual(bridge.calls, ["새 질문", "새 질문"])
+
     def test_web_capability_question_bypasses_main_llm(self) -> None:
         reply = asyncio.run(
             fast_api.resolve_pre_llm_reply("웹검색 권한 없어?", source="local_bridge")
@@ -1276,6 +1356,22 @@ class FastControlApiToolTests(unittest.TestCase):
         self.assertEqual(control_plane["botApi"]["role"], "Bot API")
         self.assertEqual(control_plane["botApi"]["port"], fast_api.PORT)
         self.assertIn("Bot API", state["statusText"])
+        cross_surface = state["runtime"][
+            "crossSurfaceContinuity"
+        ]
+        self.assertEqual(
+            cross_surface["schema"],
+            "cross_surface_continuity.status.v1",
+        )
+        self.assertTrue(
+            cross_surface["policy"]["contentFree"]
+        )
+        serialized = fast_api.json.dumps(
+            cross_surface,
+            ensure_ascii=False,
+        )
+        self.assertNotIn("guildId", serialized)
+        self.assertNotIn("userId", serialized)
 
     def test_state_handler_returns_expected_control_page_schema(self) -> None:
         async def fake_collect_runtime_health(*, manifest, probe_runner):

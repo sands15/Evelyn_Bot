@@ -17,6 +17,7 @@ class LlmContextAssemblyCompositionTests(unittest.TestCase):
     def build(self):
         callback = Mock()
         async_callback = AsyncMock()
+        merge_callback = Mock()
         deps = LlmContextAssemblyCompositionDeps(
             compute_runtime_mode=callback, apply_runtime_mode=callback,
             classify_llm_route_async=async_callback, session_topic_ids={},
@@ -25,7 +26,8 @@ class LlmContextAssemblyCompositionTests(unittest.TestCase):
             session_state_snapshot=callback, context_policy_for_fast_path_policy=callback,
             extract_question_policy_from_route_meta=callback, update_cognitive_state=async_callback,
             schedule_cognitive_refresh=callback, build_runtime_status_context=async_callback,
-            project_root=REPO_ROOT, observe_live_minecraft_state=async_callback,
+            project_root=REPO_ROOT, runtime_artifacts_root=REPO_ROOT / "runtime_artifacts",
+            observe_live_minecraft_state=async_callback,
             control_page_minecraft_cache_refresh_sec=1.0,
             control_page_minecraft_cache_max_stale_sec=2.0,
             local_tts_snapshot=Mock(return_value={"enabled": True}),
@@ -36,7 +38,9 @@ class LlmContextAssemblyCompositionTests(unittest.TestCase):
             omnivoice_server_url="http://tts", omnivoice_voice="voice", omnivoice_speed=1.0,
             voice_input_mode_status_line=Mock(return_value="voice=local"),
             odyssey_capability_json_dir=REPO_ROOT, build_live_vision_context=async_callback,
-            log_turn_event=callback, log=callback,
+            log_turn_event=callback,
+            merge_cross_surface_context=merge_callback,
+            log=callback,
         )
         return LlmContextAssemblyComposition(deps)
 
@@ -52,6 +56,10 @@ class LlmContextAssemblyCompositionTests(unittest.TestCase):
         runtime = composition.build_runtime_deps()
         self.assertIs(runtime.fast_path_policy, composition.deps.fast_path_policy)
         self.assertIs(runtime.classify_llm_route_async, composition.deps.classify_llm_route_async)
+        self.assertIs(
+            runtime.merge_cross_surface_context,
+            composition.deps.merge_cross_surface_context,
+        )
 
     def test_main_uses_explicit_binding(self) -> None:
         source = (REPO_ROOT / "main.py").read_text(encoding="utf-8")

@@ -117,7 +117,12 @@ class LlmContextAssemblyVisionEvidenceTests(unittest.TestCase):
 
 
 class LlmContextAssemblyVisionEvidenceIntegrationTests(unittest.IsolatedAsyncioTestCase):
-    def build_deps(self, live_vision_callback) -> LlmContextAssemblyDeps:
+    def build_deps(
+        self,
+        live_vision_callback,
+        *,
+        merge_cross_surface_context=None,
+    ) -> LlmContextAssemblyDeps:
         async def unused_async(*_args, **_kwargs):
             return None
 
@@ -169,7 +174,76 @@ class LlmContextAssemblyVisionEvidenceIntegrationTests(unittest.IsolatedAsyncioT
             apply_ask_gating=lambda state, **_kwargs: state,
             log_turn_event=lambda *_args, **_kwargs: None,
             visible_text=lambda value: value,
+            merge_cross_surface_context=(
+                merge_cross_surface_context
+            ),
             log=lambda *_args, **_kwargs: None,
+        )
+
+    async def test_verified_cross_surface_context_enters_common_prompt(
+        self,
+    ) -> None:
+        calls = []
+
+        def merge(messages, **kwargs):
+            calls.append((list(messages), dict(kwargs)))
+            return [
+                {
+                    "role": "user",
+                    "content": "다른 surface의 검증된 질문",
+                },
+                {
+                    "role": "assistant",
+                    "content": "다른 surface의 검증된 답",
+                },
+            ]
+
+        async def no_vision(
+            _user_text: str,
+            *,
+            metrics: dict | None = None,
+        ) -> str:
+            return ""
+
+        metrics = {
+            "started_at": time.monotonic(),
+            "meta": {},
+            "marks": {},
+        }
+        messages, _state, _route, _policy = (
+            await prepare_llm_messages_from_runtime(
+                "현재 질문",
+                deps=self.build_deps(
+                    no_vision,
+                    merge_cross_surface_context=merge,
+                ),
+                guild_id=7,
+                session_key="guild:7:text:8:user:9",
+                metrics=metrics,
+            )
+        )
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(
+            calls[0][1],
+            {
+                "session_key": "guild:7:text:8:user:9",
+                "current_user_text": "현재 질문",
+            },
+        )
+        self.assertTrue(
+            any(
+                message.get("content")
+                == "다른 surface의 검증된 질문"
+                for message in messages
+            )
+        )
+        self.assertTrue(
+            any(
+                message.get("content")
+                == "다른 surface의 검증된 답"
+                for message in messages
+            )
         )
 
     async def test_failure_message_is_context_but_not_observation_evidence(self) -> None:

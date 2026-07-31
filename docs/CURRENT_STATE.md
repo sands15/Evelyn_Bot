@@ -2,7 +2,7 @@
 
 Document status: **Current**
 Last reviewed: 2026-07-31 KST
-Source branch: `codex/dependency-config-hardening` through `2272668`
+Source branch: `codex/dependency-config-hardening` through `f0543b7` plus current cross-surface continuity work
 
 이 문서는 현재 확인된 사실만 기록한다. 목표 구조와 과거 계획은 다른 설계/계획 문서를 사용한다.
 
@@ -76,6 +76,16 @@ Source branch: `codex/dependency-config-hardening` through `2272668`
     `fast_control_continuity` v2 chain에 일반·stream·background의 정상·고정
     실패 턴을 최대 30분/40개로 저장하고, 시작 시 UI와 다음 LLM context로
     복구한다.
+  - 두 owner는 계속 각 파일의 single writer다. 새 read-only verifier가
+    v2 hash/current head, TTL, privacy policy와 revocation ledger를 모두
+    검증한 snapshot만 Discord/Main 공통 LLM context와 Fast Control
+    LLM/tool planner의 최근 8개 대화로 양방향 합친다.
+  - 교차 연결은 명시한 개인 Discord guild/user scope가 모두 일치할 때만
+    활성화된다. 다른 member/server는 제외하고, 설정 누락·변조·lagging
+    head·손상·stale 상태는 기존 surface history만 쓰는 fail-closed다.
+  - 더 최신 empty owner 또는 target scope가 비어 있는 더 최신 checkpoint를
+    reset boundary로 취급해 다른 owner의 오래된 대화가 삭제 뒤 되살아나지
+    않는다. 공개 상태는 count/generation/고정 code만 포함한다.
   - 모든 전달 surface는 callback 반환만으로 durable 성공을 선언하지 않는다.
     status schema, ready state, current head, verified integrity, rollback
     protection, 양수 generation/session count와 이번 commit의 성공 metric을
@@ -981,6 +991,28 @@ Source branch: `codex/dependency-config-hardening` through `2272668`
   이미지 내부 `compileall`, `pip check`와 읽기 전용 테스트 마운트의
   Fast Control continuity 집중 테스트 93개를 통과했다. 이미지는 시작하지
   않았고 실행 중인 기존 Bot API와 Control Page는 그대로 healthy다.
+- 현재 작업은 두 checkpoint를 합쳐 경쟁 writer를 만들지 않고, 검증된
+  snapshot만 prompt-time에 읽는 양방향 surface handoff를 연결했다. Main은
+  공통 `prepare_llm_messages`, Fast Control은 LLM payload와 tool planner에서
+  같은 bounded merge를 사용한다.
+- owner-level read-only/tamper/stale/revocation/scope/reset/양방향 merge와
+  composition wiring 집중 테스트 23개가 Windows bundled Python에서
+  통과했다(Windows symlink 생성 불가 1개 skip).
+- 공식 이미지 source-mount 전체 회귀는 core 501개 중 기능 assertion
+  실패 0개와 이미지에 Git이 없어 난 기존 서명 검사 2개 환경 오류,
+  runtime 399개(skip 2), UI 156개(skip 7), Discord I/O 107개, voice
+  415개를 기록했다. 두 서명 모듈 13개는 Windows에서 통과했다.
+- 최종 내장 소스 Bot API image
+  `sha256:a01daecc9a861ad4ca639aa46716b4c1142e718bb6769acd7e07df4dfe4f3d9a`는
+  Fast Control·stream·cross-surface 집중 85개를 통과했다. 최종
+  Discord/Main image
+  `sha256:514e753663d090888591a3ef002d4cd9cc5bbb75cd4eea982f11067942523db0`는
+  continuity·공통 prompt 집중 47개를 통과했다. 두 이미지 모두
+  `compileall`과 `pip check`를 통과했고 전체 profile Compose config와
+  정적 Compose 계약 18개도 통과했다.
+- 실제 인증된 Discord↔Control Page handoff는 아래 운영 경계 때문에 별도
+  검증 상태로 남긴다. 새 이미지만 빌드했고 실행 중인 기존 Bot API와
+  Control Page는 교체하지 않았으며 둘 다 healthy 상태다.
 
 ## Operational boundaries
 

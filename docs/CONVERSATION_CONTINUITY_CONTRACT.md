@@ -42,9 +42,35 @@ hash-chain·rollback protection·exact receipt 검증을 사용한다.
   고정 오류 코드만 공개하며 대화 내용은 포함하지 않는다.
 
 이 분리는 두 프로세스가 하나의 checkpoint를 경쟁해서 덮어쓰는 것을 막는
-현재의 안전 경계다. Discord와 Fast Control의 두 short-lived history를 하나의
-cross-surface owner로 merge하는 작업은 아직 남아 있으며, 독립 checkpoint가
-최종 통합 상태라는 뜻은 아니다.
+single-writer 경계다. surface 전환은 별도 mutation owner를 추가하지 않고
+`cross_surface_continuity.py`의 read-only verifier가 양쪽 checkpoint를
+검증한 뒤 다음 LLM request의 bounded recent context에서만 합친다.
+
+- checkpoint v2 self-hash와 content-free head의 generation/hash가 정확히
+  일치하는 current snapshot만 읽는다. writer가 복구할 수 있는 one-generation
+  lag도 reader는 직접 수리하지 않고 거부한다.
+- stale·future·expired·oversized·symlink·손상 파일, privacy policy 위반과
+  손상된 guild revocation ledger는 fail-closed한다.
+- Main checkpoint에서 Control Page로 가져올 session은 명시적으로 설정한
+  Discord guild ID와 user ID가 모두 일치해야 한다. 반대 방향도 현재 Discord
+  turn의 session key가 같은 personal scope일 때만 Fast Control 문맥을 읽는다.
+- 현재 owner의 더 최신 empty boundary 또는 대상 scope가 없는 더 최신
+  checkpoint는 reset 경계다. 그보다 오래된 다른 owner의 문맥을 다시 넣지
+  않아 삭제 전 대화가 surface 전환으로 되살아나는 것을 막는다.
+- 양 owner의 `savedAt`으로 owner chunk 순서를 정하고, 현재 user input과 인접
+  중복을 제거한 뒤 Main의 최신 eligible session 한 개에서 기본 최근 8개만
+  prompt에 넣는다. 원문은 새 artifact나 status에 복사하지 않는다.
+- Fast Control의 tool planner와 Main LLM payload가 같은 merged context를
+  사용한다. Main/Discord는 공통 `prepare_llm_messages` 진입점에서 합치므로
+  text와 voice 응답이 같은 경계를 지난다.
+
+교차 연결은 `CROSS_SURFACE_CONTINUITY_ENABLED=true`와 양의
+`CROSS_SURFACE_CONTINUITY_GUILD_ID`,
+`CROSS_SURFACE_CONTINUITY_USER_ID`가 모두 있어야 활성화된다. 하나라도 없으면
+`cross_surface_scope_not_configured`로 fail-closed하며 기존 각 surface의
+독립 history만 사용한다. `cross_surface_continuity.status.v1`은 owner state,
+generation, message/session count와 고정 오류 코드만 공개하며 대화문·ID는
+공개하지 않는다.
 
 체크포인트 스키마는 `conversation_continuity.checkpoint.v2`다. 기본 유효 시간은
 15분이고 파일 상한은 1 MiB다. 만료·손상·스키마 불일치·크기 초과 파일은
@@ -283,6 +309,14 @@ transcript, 사용자·guild/channel/message/session/turn ID, 경로와 예외
 - Control Page의 읽기 전용 p50/p95·표본 수 표시와 JavaScript parse
 - Fast Control 정상·실패·planner 실패·stream·background follow-up의
   commit과 fresh-process 복구, LLM recent context 재주입
+- read-only cross-surface reader의 current hash/head 검증, 변조·lagging
+  head·symlink·stale·손상 revocation 거부와 무변경 파일 증거
+- Discord guild/user exact scope, 다른 member/server 제외와 content-free
+  status
+- owner `savedAt` 순서, 현재 input 제거, bounded merge와 양방향 Main/Fast
+  prompt 주입
+- 더 최신 empty/reset boundary가 다른 owner의 오래된 대화를 되살리지 않는지
+  검증
 
 `tests.core.test_session_continuity_restart`는 periodic writer가 실제
 checkpoint를 만든 뒤 첫 Python 프로세스를 `os._exit(74)`로 종료한다. 두 번째

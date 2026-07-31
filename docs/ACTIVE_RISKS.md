@@ -137,12 +137,26 @@ process-local `CHAT_MESSAGES` 손실을 닫았다. Fast Control 일반·stream·
 fresh process가 UI와 LLM recent context로 복구한다. 이 owner는 Discord/Main
 owner와 같은 파일을 동시에 쓰지 않으므로 multi-process overwrite는 없다.
 
-남은 구조적 P1은 두 short-lived owner의 cross-surface merge다. 현재 Control
-Page 재시작과 Discord 재시작은 각각의 관계 history를 보존하지만, 한 surface의
-마지막 턴이 다른 surface의 다음 턴 context에 즉시 합쳐지는 중앙 owner/API는
-아직 없다. 다음 조치는 Bot API를 중앙 continuity mutation owner로 승격하고
-Discord가 verified commit RPC를 위임하되, 기존 checkpoint generation/head와
-guild reset revocation을 원자적으로 이관하는 것이다.
+두 short-lived owner의 prompt-time cross-surface merge는 구현됐다. 각
+checkpoint의 single writer는 유지하고 상대 process는 current hash/head,
+TTL, privacy policy와 revocation ledger를 read-only로 검증한다. Main/Discord와
+Fast Control은 owner `savedAt` 순서로 bounded recent context를 양방향
+사용하며, 더 최신 empty/reset boundary보다 오래된 상대 문맥은 되살리지
+않는다. 중앙 mutation owner로 이관할 때 생기는 multi-process overwrite
+위험은 도입하지 않았다.
+
+남은 공백은 실제 인증된 Discord↔Control Page handoff다. 교차 연결은
+`CROSS_SURFACE_CONTINUITY_ENABLED`와 개인 guild/user ID를 명시해야 하며,
+기본값은 의도적으로 fail-closed다. 이번 작업에서는 실행 중인 Bot API와
+Control Page를 교체하지 않았고 Discord도 시작하지 않았으므로, 한 surface의
+완료 턴이 실제 다른 surface의 다음 응답 의미에 반영되는 live 증거와
+동시 write 중 반복 read의 Windows filesystem 지연 표본은 아직 없다.
+
+다음 조치: 사용자가 별도 Discord 검증 세션을 시작할 때 개인 scope를 설정하고
+Control Page→Discord, Discord text→Control Page, Discord voice→Control Page를
+각각 실행한다. 다른 사용자와 다른 guild가 섞이지 않는지, reset 직후 이전
+surface 문맥이 비복구인지, status가 원문 없이 state/count만 공개하는지도
+함께 대조한다.
 
 새 공식 Discord 이미지에서 guild reset/continuity/Discord command wiring과
 opt-in real-main crash/restart 집중 테스트 68개, `compileall`, `pip check`를

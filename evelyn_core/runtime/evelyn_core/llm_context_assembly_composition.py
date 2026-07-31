@@ -5,6 +5,10 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from .cognitive_policy_state import apply_ask_gating, ask_confidence_threshold_for_source, build_fast_cognitive_state
+from .cross_surface_continuity import (
+    CrossSurfaceContinuityBridge,
+    CrossSurfaceContinuityConfig,
+)
 from .context_pipeline import (
     build_basic_context_packet,
     build_context_policy_for_turn,
@@ -44,6 +48,7 @@ class LlmContextAssemblyCompositionDeps:
     schedule_cognitive_refresh: Callable[..., Any]
     build_runtime_status_context: Callable[..., Awaitable[str]]
     project_root: Path
+    runtime_artifacts_root: Path
     observe_live_minecraft_state: Callable[..., Awaitable[dict[str, Any] | None]]
     control_page_minecraft_cache_refresh_sec: float
     control_page_minecraft_cache_max_stale_sec: float
@@ -64,6 +69,9 @@ class LlmContextAssemblyCompositionDeps:
     odyssey_capability_json_dir: Path
     build_live_vision_context: Callable[..., Awaitable[str]]
     log_turn_event: Callable[..., Any]
+    merge_cross_surface_context: (
+        Callable[..., list[dict[str, Any]]] | None
+    ) = None
     log: Callable[..., Any] = print
 
 
@@ -72,6 +80,13 @@ class LlmContextAssemblyComposition:
 
     def __init__(self, deps: LlmContextAssemblyCompositionDeps) -> None:
         self.deps = deps
+        self.merge_cross_surface_context = (
+            deps.merge_cross_surface_context
+            or CrossSurfaceContinuityBridge(
+                artifacts_root=deps.runtime_artifacts_root,
+                config=CrossSurfaceContinuityConfig.from_env(),
+            ).merge_for_main
+        )
 
     def build_evelyn_runtime_dependency_context(self) -> str:
         deps = self.deps
@@ -139,6 +154,9 @@ class LlmContextAssemblyComposition:
             apply_ask_gating=apply_ask_gating,
             log_turn_event=deps.log_turn_event,
             visible_text=visible_text,
+            merge_cross_surface_context=(
+                self.merge_cross_surface_context
+            ),
             log=deps.log,
         )
 

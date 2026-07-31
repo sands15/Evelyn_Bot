@@ -53,6 +53,10 @@ from .fast_tool_planner import (
 from .fast_control_continuity import (
     FastControlContinuityOwner,
 )
+from .cross_surface_continuity import (
+    CrossSurfaceContinuityBridge,
+    CrossSurfaceContinuityConfig,
+)
 from .paths import get_runtime_artifacts_root
 from .public_error_contract import (
     public_error_code,
@@ -185,6 +189,10 @@ BOOT_STEPS = (
 FAST_CONTROL_CONTINUITY_OWNER = FastControlContinuityOwner(
     artifacts_root=get_runtime_artifacts_root(),
     enabled=FAST_CONTROL_CONTINUITY_ENABLED,
+)
+CROSS_SURFACE_CONTINUITY_BRIDGE = CrossSurfaceContinuityBridge(
+    artifacts_root=get_runtime_artifacts_root(),
+    config=CrossSurfaceContinuityConfig.from_env(),
 )
 CHAT_MESSAGES: list[dict[str, Any]] = (
     FAST_CONTROL_CONTINUITY_OWNER.restored_chat_messages()[
@@ -445,7 +453,20 @@ def recent_chat_messages_for_planner(text: str, *, limit: int = 8) -> list[dict[
         and messages[-1]["content"] == clean_text(text)
     ):
         messages.pop()
-    return messages[-limit:]
+    merged = CROSS_SURFACE_CONTINUITY_BRIDGE.merge_for_fast(
+        messages,
+        current_user_text=text,
+    )
+    return [
+        {
+            "role": clean_text(message.get("role")),
+            "content": clean_text(message.get("content")),
+        }
+        for message in merged[-limit:]
+        if clean_text(message.get("role"))
+        in {"user", "assistant"}
+        and clean_text(message.get("content"))
+    ]
 
 
 def local_bridge_status_snapshot(*, now: float | None = None) -> dict[str, Any]:
@@ -1548,13 +1569,10 @@ async def build_main_llm_request_payload(
     source: str,
     tool_plan: FastToolPlan | None = None,
 ) -> tuple[dict[str, Any], str]:
-    recent_messages = [
-        {"role": message.get("role"), "content": clean_text(message.get("text"))}
-        for message in CHAT_MESSAGES[-8:]
-        if message.get("role") in {"user", "assistant"} and clean_text(message.get("text"))
-    ]
-    if recent_messages and recent_messages[-1].get("content") == clean_text(text):
-        recent_messages = recent_messages[:-1]
+    recent_messages = recent_chat_messages_for_planner(
+        text,
+        limit=8,
+    )
     final_user_text = build_fast_main_llm_user_text(text)
     llm_request = await build_fast_main_llm_request(
         base_system_prompt=FAST_MAIN_LLM_SYSTEM_PROMPT,
@@ -1991,6 +2009,9 @@ def build_control_state(health: dict[str, Any]) -> dict[str, Any]:
             "controlPlane": control_plane,
             "continuity": (
                 FAST_CONTROL_CONTINUITY_OWNER.status()
+            ),
+            "crossSurfaceContinuity": (
+                CROSS_SURFACE_CONTINUITY_BRIDGE.public_status()
             ),
             "bootProgress": boot_progress,
             "capabilities": dict(health.get("capabilities") or {}),
