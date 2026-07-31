@@ -59,6 +59,12 @@ from .fast_tool_planner import (
 from .fast_control_continuity import (
     FastControlContinuityOwner,
 )
+from .explicit_memory_confirmation import (
+    ExplicitMemoryConfirmationError,
+    MEMORY_USER_CONFIRMATION_SCHEMA,
+    parse_explicit_memory_confirmation,
+    store_explicit_memory_confirmation,
+)
 from .cross_surface_continuity import (
     CrossSurfaceContinuityBridge,
     CrossSurfaceContinuityConfig,
@@ -295,6 +301,70 @@ def clean_text(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value or "").strip())
 
 
+def execute_explicit_memory_confirmation(
+    text: str,
+    *,
+    action_id: object = "",
+) -> tuple[bool, str, dict[str, Any] | None, str]:
+    try:
+        fact = parse_explicit_memory_confirmation(text)
+    except ExplicitMemoryConfirmationError as exc:
+        return (
+            True,
+            "기억할 내용을 함께 적어줘. 예: /remember 나는 산책을 좋아해",
+            {
+                "schema": MEMORY_USER_CONFIRMATION_SCHEMA,
+                "state": "rejected",
+                "error": exc.code,
+                "contentFree": True,
+            },
+            exc.code,
+        )
+    if fact is None:
+        return False, "", None, ""
+    try:
+        receipt = store_explicit_memory_confirmation(
+            fact,
+            action_id=action_id,
+        )
+    except ExplicitMemoryConfirmationError as exc:
+        return (
+            True,
+            "지금은 그 기억을 근거와 함께 저장하지 못했어. 다시 시도해줘.",
+            {
+                "schema": MEMORY_USER_CONFIRMATION_SCHEMA,
+                "state": "failed",
+                "error": exc.code,
+                "contentFree": True,
+            },
+            exc.code,
+        )
+    except Exception as exc:
+        print(
+            "[FAST CONTROL] explicit_memory_confirmation_failed "
+            f"errorType={type(exc).__name__}",
+            flush=True,
+        )
+        return (
+            True,
+            "지금은 그 기억을 근거와 함께 저장하지 못했어. 다시 시도해줘.",
+            {
+                "schema": MEMORY_USER_CONFIRMATION_SCHEMA,
+                "state": "failed",
+                "error": "memory_confirmation_write_failed",
+                "contentFree": True,
+            },
+            "memory_confirmation_write_failed",
+        )
+    state = clean_text(receipt.get("state"))
+    reply = (
+        "이미 같은 내용이 근거 있는 기억으로 저장되어 있어."
+        if state == "duplicate"
+        else "지금 요청을 근거로 새 기억에 저장했어."
+    )
+    return True, reply, receipt, ""
+
+
 def should_emit_memory_recall_progress(text: str, *, source: str) -> bool:
     if clean_text(source).lower() not in MEMORY_RECALL_PROGRESS_SOURCES:
         return False
@@ -369,6 +439,7 @@ def append_chat_message(
     task_id: str | None = None,
     task_status: str | None = None,
     memory_receipt: dict[str, Any] | None = None,
+    memory_write_receipt: dict[str, Any] | None = None,
 ) -> None:
     message = {
         "role": role,
@@ -384,6 +455,10 @@ def append_chat_message(
         message["taskStatus"] = clean_text(task_status)
     if isinstance(memory_receipt, dict):
         message["memoryReceipt"] = dict(memory_receipt)
+    if isinstance(memory_write_receipt, dict):
+        message["memoryWriteReceipt"] = dict(
+            memory_write_receipt
+        )
     CHAT_MESSAGES.append(message)
     if len(CHAT_MESSAGES) > CHAT_LOG_LIMIT:
         del CHAT_MESSAGES[:-CHAT_LOG_LIMIT]
@@ -2458,6 +2533,11 @@ async def chat_handler(request: web.Request) -> web.StreamResponse:
     if not text:
         return json_response({"ok": False, "error": "empty_text"}, status=400)
     source = clean_text((payload or {}).get("source")) or "control_page"
+    action_id = (
+        (payload or {}).get("turnId")
+        or (payload or {}).get("requestId")
+        or ""
+    )
     reset_fast_memory_context_receipt()
     suppress_tts = should_suppress_tts_for_command(text)
     append_chat_message("user", "정훈", text, source=source)
@@ -2466,37 +2546,51 @@ async def chat_handler(request: web.Request) -> web.StreamResponse:
     error_code = ""
     task_record: FastActionTask | None = None
     task_runner: Callable[[str, str], Awaitable[str]] | None = None
+    memory_write_receipt: dict[str, Any] | None = None
     try:
-        tool_plan = await plan_fast_tool_request_for_turn(
-            text
+        (
+            memory_command_matched,
+            memory_command_reply,
+            memory_write_receipt,
+            memory_command_error,
+        ) = execute_explicit_memory_confirmation(
+            text,
+            action_id=action_id,
         )
-        pre_llm_reply = await resolve_pre_llm_reply(text, source=source)
-        if pre_llm_reply is not None:
-            reply = pre_llm_reply
+        if memory_command_matched:
+            reply = memory_command_reply
+            error_code = memory_command_error
         else:
-            prepared_action = prepare_tool_plan_background_action(
-                tool_plan,
-                text,
-                source=source,
-            ) or prepare_registered_background_action(text, source=source)
-            if prepared_action is not None:
-                task_record, task_runner = prepared_action
-                reply = task_record.start_reply
+            tool_plan = await plan_fast_tool_request_for_turn(
+                text
+            )
+            pre_llm_reply = await resolve_pre_llm_reply(text, source=source)
+            if pre_llm_reply is not None:
+                reply = pre_llm_reply
             else:
-                if should_queue_local_bridge_speech(source):
-                    if tool_plan is None:
-                        reply, queued_speech_count = await ask_main_llm_and_queue_speech(text, source=source)
-                    else:
-                        reply, queued_speech_count = await ask_main_llm_and_queue_speech(
-                            text,
-                            source=source,
-                            tool_plan=tool_plan,
-                        )
+                prepared_action = prepare_tool_plan_background_action(
+                    tool_plan,
+                    text,
+                    source=source,
+                ) or prepare_registered_background_action(text, source=source)
+                if prepared_action is not None:
+                    task_record, task_runner = prepared_action
+                    reply = task_record.start_reply
                 else:
-                    if tool_plan is None:
-                        reply = await ask_main_llm(text, source=source)
+                    if should_queue_local_bridge_speech(source):
+                        if tool_plan is None:
+                            reply, queued_speech_count = await ask_main_llm_and_queue_speech(text, source=source)
+                        else:
+                            reply, queued_speech_count = await ask_main_llm_and_queue_speech(
+                                text,
+                                source=source,
+                                tool_plan=tool_plan,
+                            )
                     else:
-                        reply = await ask_main_llm(text, source=source, tool_plan=tool_plan)
+                        if tool_plan is None:
+                            reply = await ask_main_llm(text, source=source)
+                        else:
+                            reply = await ask_main_llm(text, source=source, tool_plan=tool_plan)
             if not reply:
                 reply = "응답이 비어 있었어. 다시 한 번 말해줘."
         reply = enforce_registered_tool_capability_truth(
@@ -2528,6 +2622,7 @@ async def chat_handler(request: web.Request) -> web.StreamResponse:
         task_id=task_record.task_id if task_record is not None else None,
         task_status=task_record.status if task_record is not None else None,
         memory_receipt=current_fast_memory_context_receipt(),
+        memory_write_receipt=memory_write_receipt,
     )
     continuity = (
         commit_fast_control_terminal_turn(
@@ -2554,6 +2649,8 @@ async def chat_handler(request: web.Request) -> web.StreamResponse:
         "continuity": continuity,
         "memoryReceipt": current_fast_memory_context_receipt(),
     }
+    if memory_write_receipt is not None:
+        result["memoryWriteReceipt"] = memory_write_receipt
     if error_code:
         result["error"] = error_code
     if task_record is not None:
@@ -2574,6 +2671,11 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
     if not text:
         return json_response({"ok": False, "error": "empty_text"}, status=400)
     source = clean_text((payload or {}).get("source")) or "local_bridge"
+    action_id = (
+        (payload or {}).get("turnId")
+        or (payload or {}).get("requestId")
+        or ""
+    )
     reset_fast_memory_context_receipt()
     suppress_tts = should_suppress_tts_for_command(text)
     append_chat_message("user", "정훈", text, source=source)
@@ -2601,6 +2703,8 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
     task_record: FastActionTask | None = None
     task_runner: Callable[[str, str], Awaitable[str]] | None = None
     speech_filter = SafeIncrementalSpeechFilter()
+    memory_write_receipt: dict[str, Any] | None = None
+    memory_command_error = ""
 
     async def emit_delta(fragment: str) -> None:
         nonlocal first_delta_ms
@@ -2660,71 +2764,86 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
         )
 
     try:
-        tool_plan = await plan_fast_tool_request_for_turn(
-            text
+        (
+            memory_command_matched,
+            memory_command_reply,
+            memory_write_receipt,
+            memory_command_error,
+        ) = execute_explicit_memory_confirmation(
+            text,
+            action_id=action_id,
         )
-        pre_llm_reply = await resolve_pre_llm_reply(text, source=source)
-        if pre_llm_reply is not None:
-            reply = enforce_action_reply_contract(pre_llm_reply)
+        if memory_command_matched:
+            reply = enforce_action_reply_contract(
+                memory_command_reply
+            )
             await emit_sentence(reply)
         else:
-            prepared_action = prepare_tool_plan_background_action(
-                tool_plan,
-                text,
-                source=source,
-            ) or prepare_registered_background_action(text, source=source)
-            if prepared_action is not None:
-                task_record, task_runner = prepared_action
-                reply = enforce_action_reply_contract(
-                    task_record.start_reply,
-                    active_task_id=task_record.task_id,
-                )
+            tool_plan = await plan_fast_tool_request_for_turn(
+                text
+            )
+            pre_llm_reply = await resolve_pre_llm_reply(text, source=source)
+            if pre_llm_reply is not None:
+                reply = enforce_action_reply_contract(pre_llm_reply)
                 await emit_sentence(reply)
             else:
-                if should_emit_memory_recall_progress(text, source=source):
-                    await emit_progress(
-                        next_memory_recall_progress_text(),
-                        stage="memory_recall",
+                prepared_action = prepare_tool_plan_background_action(
+                    tool_plan,
+                    text,
+                    source=source,
+                ) or prepare_registered_background_action(text, source=source)
+                if prepared_action is not None:
+                    task_record, task_runner = prepared_action
+                    reply = enforce_action_reply_contract(
+                        task_record.start_reply,
+                        active_task_id=task_record.task_id,
                     )
-                llm_stream = (
-                    iter_main_llm_deltas(text, source=source)
-                    if tool_plan is None
-                    else iter_main_llm_deltas(text, source=source, tool_plan=tool_plan)
-                )
-                async for delta in llm_stream:
-                    raw_parts.append(delta)
-                    cleaned = visible_text("".join(raw_parts))
-                    new_text = cleaned[clean_seen_len:]
-                    clean_seen_len = len(cleaned)
-                    if not new_text:
-                        continue
-                    for safe_fragment in speech_filter.push(new_text):
+                    await emit_sentence(reply)
+                else:
+                    if should_emit_memory_recall_progress(text, source=source):
+                        await emit_progress(
+                            next_memory_recall_progress_text(),
+                            stage="memory_recall",
+                        )
+                    llm_stream = (
+                        iter_main_llm_deltas(text, source=source)
+                        if tool_plan is None
+                        else iter_main_llm_deltas(text, source=source, tool_plan=tool_plan)
+                    )
+                    async for delta in llm_stream:
+                        raw_parts.append(delta)
+                        cleaned = visible_text("".join(raw_parts))
+                        new_text = cleaned[clean_seen_len:]
+                        clean_seen_len = len(cleaned)
+                        if not new_text:
+                            continue
+                        for safe_fragment in speech_filter.push(new_text):
+                            await emit_delta(safe_fragment)
+                        sentence_buffer += new_text
+                        chunks, sentence_buffer = pop_speakable_chunks(sentence_buffer)
+                        for chunk in chunks:
+                            if has_unbacked_progress_claim(chunk):
+                                continue
+                            await emit_sentence(chunk)
+                    for safe_fragment in speech_filter.finish():
                         await emit_delta(safe_fragment)
-                    sentence_buffer += new_text
-                    chunks, sentence_buffer = pop_speakable_chunks(sentence_buffer)
-                    for chunk in chunks:
+                    tail_chunks, sentence_buffer = pop_speakable_chunks(sentence_buffer, force=True)
+                    for chunk in tail_chunks:
                         if has_unbacked_progress_claim(chunk):
                             continue
                         await emit_sentence(chunk)
-                for safe_fragment in speech_filter.finish():
-                    await emit_delta(safe_fragment)
-                tail_chunks, sentence_buffer = pop_speakable_chunks(sentence_buffer, force=True)
-                for chunk in tail_chunks:
-                    if has_unbacked_progress_claim(chunk):
-                        continue
-                    await emit_sentence(chunk)
-                reply = enforce_registered_tool_capability_truth(
-                    enforce_action_reply_contract(visible_text("".join(raw_parts)))
-                )
-                if not reply:
-                    reply = "답변이 비어 있었어. 다시 한 번 말해줘."
-                emitted_text = clean_text(" ".join(emitted_chunks))
-                if not emitted_text:
-                    await emit_sentence(reply)
-                elif reply.startswith(emitted_text):
-                    await emit_sentence(reply[len(emitted_text) :])
-                elif reply != emitted_text:
-                    reply = enforce_action_reply_contract(emitted_text)
+                    reply = enforce_registered_tool_capability_truth(
+                        enforce_action_reply_contract(visible_text("".join(raw_parts)))
+                    )
+                    if not reply:
+                        reply = "답변이 비어 있었어. 다시 한 번 말해줘."
+                    emitted_text = clean_text(" ".join(emitted_chunks))
+                    if not emitted_text:
+                        await emit_sentence(reply)
+                    elif reply.startswith(emitted_text):
+                        await emit_sentence(reply[len(emitted_text) :])
+                    elif reply != emitted_text:
+                        reply = enforce_action_reply_contract(emitted_text)
         append_chat_message(
             "assistant",
             "Evelyn",
@@ -2733,19 +2852,22 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
             task_id=task_record.task_id if task_record is not None else None,
             task_status=task_record.status if task_record is not None else None,
             memory_receipt=current_fast_memory_context_receipt(),
+            memory_write_receipt=memory_write_receipt,
         )
         continuity = commit_fast_control_turn(text, reply)
         await write_stream_event(
             response,
             {
                 "type": "done",
-                "ok": True,
+                "ok": not bool(memory_command_error),
+                "error": memory_command_error,
                 "reply": reply,
                 "suppressTts": suppress_tts,
                 "taskId": task_record.task_id if task_record is not None else None,
                 "taskStatus": task_record.status if task_record is not None else None,
                 "continuity": continuity,
                 "memoryReceipt": current_fast_memory_context_receipt(),
+                "memoryWriteReceipt": memory_write_receipt,
                 "firstSentenceMs": round(first_sentence_ms, 1) if first_sentence_ms is not None else None,
                 "firstDeltaMs": round(first_delta_ms, 1) if first_delta_ms is not None else None,
                 "firstProgressMs": round(first_progress_ms, 1) if first_progress_ms is not None else None,

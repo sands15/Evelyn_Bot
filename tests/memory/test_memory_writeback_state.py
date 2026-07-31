@@ -308,6 +308,41 @@ class MemoryWritebackStateTests(unittest.TestCase):
         self.assertNotIn("turn:raw-source:user", provenance["source_evidence_ids"])
         self.assertIn("[MEMORY] compact retry 성공", logs)
 
+    def test_current_exchange_without_turn_id_does_not_borrow_prior_evidence(self) -> None:
+        async def fake_ask(messages, **kwargs):
+            return {
+                "summary_update": "근거 없는 현재 대화 요약",
+                "durable_facts": [
+                    {"type": "preference", "text": "새 선호"}
+                ],
+                "open_questions": [],
+            }
+
+        with TemporaryMemoryRoot():
+            outcome = asyncio.run(
+                run_long_term_memory_update(
+                    123,
+                    "현재 발화",
+                    "현재 답변",
+                    source_turn_id=None,
+                    collect_layers=lambda *args, **kwargs: self._layers(),
+                    ask_summary_llm=fake_ask,
+                    is_context_size_error=lambda exc: False,
+                    should_log_latency=lambda ms: False,
+                    memory_fact_limit=20,
+                    memory_loop_limit=20,
+                    raw_limit=8,
+                )
+            )
+            provenance = memory.read_memory_summary_provenance(123)
+            facts = memory.read_jsonl(memory.memory_facts_path(123))
+
+        self.assertTrue(outcome["ok"])
+        self.assertEqual(outcome["applied"]["source_evidence_count"], 0)
+        self.assertEqual(provenance, {})
+        self.assertNotIn("source_evidence_ids", facts[0])
+        self.assertNotIn("source_turn_ids", facts[0])
+
 
 if __name__ == "__main__":
     unittest.main()

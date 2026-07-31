@@ -2,7 +2,7 @@
 
 Document status: **Current**
 Last reviewed: 2026-07-31 KST
-Source branch: `codex/dependency-config-hardening`, current Fast Control action-recovery increment
+Source branch: `codex/dependency-config-hardening`, current evidence-bound user memory increment
 
 이 문서는 현재 확인된 사실만 기록한다. 목표 구조와 과거 계획은 다른 설계/계획 문서를 사용한다.
 
@@ -340,6 +340,20 @@ Source branch: `codex/dependency-config-hardening`, current Fast Control action-
     누락·불일치 evidence, 읽기 실패와 unsafe location도 count로만 남긴다.
     저장 row 기준이라 hot/일자별 mirror를 함께 셀 수 있고 실제 prompt 선택 수는
     아니라는 한계를 계약과 화면에 명시한다.
+  - 현재 발화나 답변을 Summary LLM 입력에 포함하면서 유효한 current turn ID가
+    없으면 과거 기억의 evidence를 새 결과의 근거로 빌려 쓰지 않는다. 이때 새
+    summary/fact/question은 귀속 정보가 없는 확인 전용 상태로 fail-closed한다.
+  - Fast Control은 `/remember <fact>`, `/memory remember <fact>`와 엄격한
+    `기억해줘: <fact>` 형식만 직접 사용자 확인 기억으로 저장한다. 일반 대화나
+    “기억”이라는 단어가 포함된 문장을 자동 영구 저장하지 않는다.
+  - 저장 노트는 `control-page-user` 직접 출처, 현재 request/voice turn 참조,
+    본문 evidence hash와 `confirmed_at`을 하나의 Markdown write에 함께 남긴다.
+    같은 action ID 재시도는 같은 노트로 멱등 처리하고 다른 본문으로 재사용하면
+    거부한다. API/stream/chat 관측 receipt는 note ID·상태·turn 참조·확인 시각만
+    포함하며 기억 본문이나 transcript를 넣지 않는다.
+  - Control Page는 요청마다 request ID를 만들고 Local I/O Bridge는 기존 음성
+    turn ID를 일반·stream 요청에 전달한다. 노트 파일명과 공개 ID는 기억 본문
+    hash에서 만들지 않아 content-free receipt가 본문 equality oracle이 되지 않는다.
   - pinned hot-context는 현재 recall의 memory version과 정확히 같고 포함 note
     ID가 있는 경우에만 live prompt에 들어간다. 과거 형식, 손상, 삭제/파생
     상태 불일치와 stale version은 fail-closed로 제외한다.
@@ -1195,6 +1209,20 @@ Source branch: `codex/dependency-config-hardening`, current Fast Control action-
   profile Compose config와 `git diff --check`도 통과했다. 실제 `bot_memory`는
   읽기 전용 집계만 수행했고 scope 3개, legacy 저장 항목 0개(`empty`)였다.
   실행 중인 서비스와 사용자 기억은 변경하지 않았다.
+- evidence-bound user memory 변경은 memory 147개, runtime 417개(skip 2), UI
+  157개(skip 7), voice 415개를 통과했다. Main/Discord 이미지의 core 545개는
+  기능 assertion 실패 0개였고 이미지에 `git`이 없어 난 기존 서명 검사 환경 오류
+  2개만 남았다. 전체 discovery는 2,007개를 실행해 같은 `git` 오류 2개,
+  Linux의 Windows OCR 환경 오류 1개와 서드파티 Voyager `gymnasium` 의존성
+  오류 1개만 남겼다. Compose config, source `py_compile`, UI inline
+  `node --check`, `git diff --check`를 통과했다.
+- 새 내장 소스 검증 이미지는 Bot API
+  `sha256:65758f34b495c799effc382bd538320c3a8b31f6d10b2495a89017a731c9a4f8`,
+  Control Page
+  `sha256:23794015780b40316f080365d5f1f82b5e6375ad176e9f596b1c0e096442c861`이며
+  둘 다 내장 package `compileall`과 `pip check`를 통과했다. 실행 중인 기존
+  Bot API와 Control Page는 교체하지 않았고 계속 healthy다. 실제 사용자 기억,
+  Discord, 마이크, Minecraft와 무거운 모델 서비스도 변경하거나 시작하지 않았다.
 
 ## Operational boundaries
 

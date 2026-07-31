@@ -895,7 +895,11 @@ class LocalIoBridge:
 
     async def _chat(self, text: str) -> str:
         assert self.session is not None
-        payload = {"text": text, "source": "local_bridge"}
+        payload = {
+            "text": text,
+            "source": "local_bridge",
+            "turnId": self.active_turn_id,
+        }
         async with self.session.post(f"{BOT_API_BASE}/api/control-page/chat", json=payload, timeout=aiohttp.ClientTimeout(total=150)) as resp:
             data = await resp.json(content_type=None)
             if resp.status != 200 or not data.get("ok"):
@@ -909,7 +913,11 @@ class LocalIoBridge:
 
     async def _chat_delta_stream_and_speak(self, text: str) -> dict[str, Any]:
         assert self.session is not None
-        payload = {"text": text, "source": "local_bridge"}
+        payload = {
+            "text": text,
+            "source": "local_bridge",
+            "turnId": self.active_turn_id,
+        }
         started_at = time.perf_counter()
         sentence_count = 0
         first_sentence_ms: float | None = None
@@ -1107,7 +1115,11 @@ class LocalIoBridge:
 
     async def _chat_sentence_stream_and_speak(self, text: str) -> dict[str, Any]:
         assert self.session is not None
-        payload = {"text": text, "source": "local_bridge"}
+        payload = {
+            "text": text,
+            "source": "local_bridge",
+            "turnId": self.active_turn_id,
+        }
         started_at = time.perf_counter()
         tts_ms = 0.0
         sentence_count = 0

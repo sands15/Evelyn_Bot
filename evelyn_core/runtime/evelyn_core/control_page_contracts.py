@@ -100,6 +100,7 @@ def build_fast_control_default_commands() -> list[dict[str, str]]:
     return [
         {"command": "/help", "template": "/help", "summary": "사용 가능한 명령 보기", "visibility": "always", "group": "기본"},
         {"command": "/status", "template": "/status", "summary": "이블린 핵심 서비스 상태 보기", "visibility": "always", "group": "기본"},
+        {"command": "/remember <fact>", "template": "/remember ", "summary": "현재 요청을 근거로 새 기억 저장", "visibility": "always", "group": "기억"},
         {"command": "/memory", "template": "/memory", "summary": "메모리 패널 열기/숨기기", "visibility": "always", "group": "페이지"},
         {"command": "/obsidian", "template": "/obsidian", "summary": "Obsidian 메모리 저장소 열기", "visibility": "always", "group": "페이지"},
         {"command": "/voice status", "template": "/voice status", "summary": "Windows 음성 브리지 상태 보기", "visibility": "always", "group": "음성"},

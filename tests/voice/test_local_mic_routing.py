@@ -464,6 +464,7 @@ class LocalMicRoutingTests(unittest.TestCase):
         self.assertIn("LOCAL_BRIDGE_TTS_WARMUP_TEXT", bridge_source)
         self.assertIn("tts_warmup_done", bridge_source)
         self.assertIn("/api/control-page/chat-stream", bridge_source)
+        self.assertIn('"turnId": self.active_turn_id', bridge_source)
         self.assertIn('if event_type == "progress":', bridge_source)
         self.assertIn('await websocket.send_json({"type": "commit"})', bridge_source)
         self.assertIn('"progressCount": progress_count', bridge_source)

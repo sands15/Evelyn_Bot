@@ -133,6 +133,7 @@ class ControlPageChatTests(unittest.TestCase):
         for command in (
             "/help",
             "/status",
+            "/remember <fact>",
             "/memory",
             "/obsidian",
             "/voice status",
@@ -153,6 +154,10 @@ class ControlPageChatTests(unittest.TestCase):
         ):
             with self.subTest(command=command):
                 self.assertIn(f'{{ command: "{command}"', self.html)
+
+    def test_chat_assigns_a_stable_request_id_for_memory_evidence(self) -> None:
+        self.assertIn("globalThis.crypto.randomUUID()", self.html)
+        self.assertIn("requestId:", self.html)
         self.assertNotIn('{ command: "/voice continuity"', self.html)
         self.assertNotIn('{ command: "/voice input auto"', self.html)
 

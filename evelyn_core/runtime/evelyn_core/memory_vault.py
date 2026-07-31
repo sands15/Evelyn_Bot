@@ -3078,6 +3078,7 @@ def write_memory_vault_note(
     note_type: str,
     title: str,
     body: str,
+    storage_key: str | None = None,
     tags: list[str] | None = None,
     projects: list[str] | None = None,
     links: list[str] | None = None,
@@ -3085,6 +3086,7 @@ def write_memory_vault_note(
     source_refs: list[str] | None = None,
     derived_from: list[str] | None = None,
     evidence_hashes: list[str] | None = None,
+    confirmed_at: str | None = None,
     importance: float = 0.5,
     confidence: str = "medium",
     root: Path | None = None,
@@ -3103,7 +3105,7 @@ def write_memory_vault_note(
         "project": "projects",
     }
     folder = folder_by_type.get(normalized_type, "concepts")
-    slug = _slug(title, default=normalized_type)
+    slug = _slug(storage_key or title, default=normalized_type)
     path = vault / folder / f"{slug}.md"
     note_id = f"{normalized_type}-{_stable_id(folder + '/' + slug)}"
     normalized_derivations = list(
@@ -3129,25 +3131,27 @@ def write_memory_vault_note(
             f"memory note {note_id} was permanently deleted"
         )
     now = _utc_now_iso()
-    front_matter = _format_front_matter(
-        {
-            "id": note_id,
-            "type": normalized_type,
-            "title": title,
-            "status": "active",
-            "created_at": now,
-            "updated_at": now,
-            "importance": max(0.0, min(1.0, importance)),
-            "confidence": confidence,
-            "source": source,
-            "source_refs": source_refs or [],
-            "derived_from": normalized_derivations,
-            "evidence_hashes": evidence_hashes or [],
-            "tags": tags or [],
-            "projects": projects or [DEFAULT_PROJECT],
-            "links": links or [],
-        }
-    )
+    metadata = {
+        "id": note_id,
+        "type": normalized_type,
+        "title": title,
+        "status": "active",
+        "created_at": now,
+        "updated_at": now,
+        "importance": max(0.0, min(1.0, importance)),
+        "confidence": confidence,
+        "source": source,
+        "source_refs": source_refs or [],
+        "derived_from": normalized_derivations,
+        "evidence_hashes": evidence_hashes or [],
+        "tags": tags or [],
+        "projects": projects or [DEFAULT_PROJECT],
+        "links": links or [],
+    }
+    normalized_confirmed_at = clean_text(confirmed_at)
+    if normalized_confirmed_at:
+        metadata["confirmed_at"] = normalized_confirmed_at
+    front_matter = _format_front_matter(metadata)
     content = f"{front_matter}\n\n# {clean_text(title)}\n\n{clean_text(body)}\n"
     with _memory_edit_lock:
         atomic_text_write(path, content, durable=True)

@@ -54,6 +54,12 @@ def _memory_input_evidence(
     answer: str,
     include_recent: bool,
 ) -> tuple[list[str], list[str]]:
+    normalized_turn_id = _evidence_id(source_turn_id, max_chars=80)
+    if (clean_text(user_text) or clean_text(answer)) and not normalized_turn_id:
+        # The summary model sees the current exchange. Prior attributed memory
+        # cannot, by itself, prove claims newly inferred from an unattributed
+        # current exchange, so keep the resulting write confirmation-only.
+        return [], []
     evidence_ids: list[str] = []
     source_turn_ids: list[str] = []
     for layer in (
@@ -112,7 +118,6 @@ def _memory_input_evidence(
                 source_turn_ids.extend(
                     _evidence_ids(row.get("source_turn_ids"), max_items=32)
                 )
-    normalized_turn_id = _evidence_id(source_turn_id, max_chars=80)
     if normalized_turn_id:
         if clean_text(user_text):
             evidence_ids.append(f"turn:{normalized_turn_id}:user")

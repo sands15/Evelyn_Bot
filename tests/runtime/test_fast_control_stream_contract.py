@@ -425,6 +425,39 @@ class FastControlStreamContractTests(unittest.IsolatedAsyncioTestCase):
         done = next(event for event in events if event["type"] == "done")
         self.assertIsNone(done["firstProgressMs"])
 
+    async def test_explicit_memory_stream_returns_write_receipt_without_llm(self) -> None:
+        receipt = {
+            "schema": "memory.user-confirmation.v1",
+            "state": "stored",
+            "noteId": "concept-stream-test",
+            "sourceRef": "turn:stream-test:user",
+            "confirmedAt": "2026-07-31T00:00:00+00:00",
+            "contentFree": True,
+        }
+        with patch.object(
+            fast_api,
+            "store_explicit_memory_confirmation",
+            return_value=receipt,
+        ), patch.object(
+            fast_api,
+            "plan_fast_tool_request_for_turn",
+            new=AsyncMock(),
+        ) as planner:
+            events = await self.post_stream(
+                "기억해줘: 나는 조용한 밤을 좋아해"
+            )
+
+        done = next(
+            event for event in events if event["type"] == "done"
+        )
+        self.assertTrue(done["ok"])
+        self.assertEqual(done["memoryWriteReceipt"], receipt)
+        self.assertNotIn(
+            "조용한 밤",
+            json.dumps(receipt, ensure_ascii=False),
+        )
+        planner.assert_not_awaited()
+
     async def test_stream_allows_start_reply_only_after_task_id_exists(self) -> None:
         async def runner(user_text: str, source: str) -> str:
             await asyncio.sleep(0)

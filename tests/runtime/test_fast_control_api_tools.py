@@ -70,6 +70,7 @@ class FastControlApiToolTests(unittest.TestCase):
             {
                 "/help",
                 "/status",
+                "/remember <fact>",
                 "/memory",
                 "/obsidian",
                 "/voice status",
@@ -345,6 +346,60 @@ class FastControlApiToolTests(unittest.TestCase):
         self.assertIn("/minecraft status", reply or "")
         self.assertIn("/shutdown", reply or "")
         self.assertNotIn("/voice continuity", reply or "")
+
+    def test_explicit_memory_confirmation_bypasses_planner_and_returns_content_free_receipt(self) -> None:
+        class _Request:
+            async def json(self):
+                return {
+                    "text": "/remember 나는 산책을 좋아해",
+                    "source": "control_page",
+                    "requestId": "control-request-123",
+                }
+
+        async def fake_collect_runtime_health(*, manifest, probe_runner):
+            return {
+                "ok": True,
+                "overallState": "up",
+                "legacyServices": {},
+                "services": [],
+            }
+
+        receipt = {
+            "schema": "memory.user-confirmation.v1",
+            "state": "stored",
+            "noteId": "concept-test",
+            "sourceRef": "turn:control-request-123:user",
+            "confirmedAt": "2026-07-31T00:00:00+00:00",
+            "contentFree": True,
+        }
+        with patch.object(
+            fast_api,
+            "store_explicit_memory_confirmation",
+            return_value=receipt,
+        ) as store, patch.object(
+            fast_api,
+            "plan_fast_tool_request_for_turn",
+            new=AsyncMock(),
+        ) as planner, patch.object(
+            fast_api,
+            "collect_runtime_health",
+            new=AsyncMock(side_effect=fake_collect_runtime_health),
+        ):
+            response = asyncio.run(fast_api.chat_handler(_Request()))
+
+        payload = fast_api.json.loads(response.text or "{}")
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["memoryWriteReceipt"], receipt)
+        self.assertNotIn("산책", fast_api.json.dumps(receipt, ensure_ascii=False))
+        self.assertEqual(
+            fast_api.CHAT_MESSAGES[-1]["memoryWriteReceipt"],
+            receipt,
+        )
+        store.assert_called_once_with(
+            "나는 산책을 좋아해",
+            action_id="control-request-123",
+        )
+        planner.assert_not_awaited()
 
     def test_help_chat_response_is_visible_but_not_queued_for_tts(self) -> None:
         class _Request:
