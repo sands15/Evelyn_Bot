@@ -13,6 +13,7 @@ class DiscordCommandSessionRuntimeDeps:
     resolve_text_thread_id: Callable[..., int | None]
     is_text_thread_parent: Callable[[Any], bool]
     make_text_session_key: Callable[..., str]
+    start_new_turn: Callable[[str], str]
     record_command_assistant_turn: Callable[..., None]
     system_prompt: str
     max_history_items: int
@@ -88,6 +89,7 @@ def mark_text_session_from_command_runtime(
         ctx.author.id,
         thread_id=thread_id,
     )
+    turn_id = deps.start_new_turn(session_key)
     deps.record_command_assistant_turn(
         session_key,
         user_text,
@@ -104,7 +106,10 @@ def mark_text_session_from_command_runtime(
     )
     try:
         require_durable_continuity_receipt(
-            deps.commit_session_continuity(session_key)
+            deps.commit_session_continuity(
+                session_key,
+                turn_id,
+            )
         )
     except Exception as exc:
         deps.log(

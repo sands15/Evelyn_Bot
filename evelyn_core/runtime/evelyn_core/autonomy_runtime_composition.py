@@ -38,6 +38,7 @@ class AutonomyRuntimeCompositionDeps:
     get_inflight_llm_requests: Callable[[], int]
     last_autonomy_ping_at: MutableMapping[int, float]
     answer_promises_search: Callable[..., Any]
+    start_new_turn: Callable[..., str]
     append_history: Callable[..., Any]
     schedule_memory_update: Callable[..., Any]
     mark_session_active: Callable[..., Any]
@@ -94,6 +95,7 @@ class AutonomyRuntimeComposition:
             get_inflight_llm_requests=deps.get_inflight_llm_requests,
             last_autonomy_ping_at=deps.last_autonomy_ping_at,
             answer_promises_search=deps.answer_promises_search,
+            start_new_turn=deps.start_new_turn,
             append_history=deps.append_history,
             schedule_memory_update=deps.schedule_memory_update,
             mark_session_active=deps.mark_session_active,

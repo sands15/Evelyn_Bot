@@ -48,6 +48,7 @@ class DiscordAppDependencyCompositionDeps:
     format_display_text: Callable[..., str]
     resolve_text_thread_id: Callable[..., int | None]
     make_text_session_key: Callable[..., str]
+    start_new_turn: Callable[..., str]
     record_command_assistant_turn: Callable[..., Any]
     system_prompt: str
     max_history_items: int
@@ -116,6 +117,7 @@ class DiscordAppDependencyComposition:
             resolve_text_thread_id=deps.resolve_text_thread_id,
             is_text_thread_parent=deps.is_thread_parent,
             make_text_session_key=deps.make_text_session_key,
+            start_new_turn=deps.start_new_turn,
             record_command_assistant_turn=deps.record_command_assistant_turn,
             system_prompt=deps.system_prompt,
             max_history_items=deps.max_history_items,

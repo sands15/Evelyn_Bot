@@ -227,9 +227,10 @@ checkpoint 저장 실패로 발생한 revocation status는 `fsync`해 fail-close
 `conversation_continuity_commit_failed`로 정규화한다.
 
 commit 대상 session은 `maxSessions` 순위 밖이어도 이번 checkpoint에 반드시
-포함한다. writer는 current head와 checkpoint를 다시 읽어 exact session과,
-제공된 경우 exact turn ID가 실제 저장됐는지 확인한다. 다른 최신 session만
-저장된 결과나 같은 session의 이전 turn은 이번 commit의 성공 증거가 아니다.
+포함한다. writer는 current head와 checkpoint를 다시 읽어 exact session과
+turn ID가 실제 저장됐는지 확인한다. 자율 후속과 Discord 명령도 전달마다 새
+turn ID를 먼저 발급한다. 다른 최신 session만 저장된 결과나 같은 session의
+이전 turn은 이번 commit의 성공 증거가 아니다.
 
 각 전달 surface는 commit callback이 예외 없이 반환됐다는 사실만으로 성공을
 판정하지 않는다. 반환된 `conversation_continuity.status.v1`에서 다음 증거를

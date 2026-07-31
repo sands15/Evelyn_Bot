@@ -125,11 +125,12 @@ fail-closed하며, 자율 후속이 실제 owner 필드 대신 없는 `generatio
 답변을 재전송하지 않고 durability 실패만 정확히 드러낸다.
 
 현재 branch는 receipt를 방금 완료한 대상에도 결박한다. 각 surface가 exact
-session과 가능한 경우 turn ID를 writer에 넘기고, writer는 `maxSessions` 상한
+session과 turn ID를 writer에 넘기고, writer는 `maxSessions` 상한
 밖의 대상도 checkpoint에 우선 포함한 뒤 current head에서 다시 읽어 일치를
 검증한다. 다른 session 하나가 저장됐다는 이유로 이번 턴을 durable로 오인하지
 않으며, `lastTargetVerified=true`가 없는 status는 소비자가 거부한다. 공개
-status에는 대상 session/turn 값이 아니라 검증 여부만 남는다.
+status에는 대상 session/turn 값이 아니라 검증 여부만 남는다. 기존 user turn이
+없는 자율 후속과 Discord 명령은 실제 전달마다 전용 turn ID를 새로 발급한다.
 
 `67a7adf`는 Discord reference 전송의 fallback도 같은 중복 방지 경계로
 좁혔다. reference 생성이 네트워크 전에 로컬에서 실패했거나 Discord가 첫

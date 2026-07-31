@@ -121,6 +121,9 @@ class DiscordCommandSessionRuntimeTests(unittest.TestCase):
             resolve_text_thread_id=resolve_text_thread_id,
             is_text_thread_parent=lambda parent: getattr(parent, "is_text_channel", False),
             make_text_session_key=make_text_session_key,
+            start_new_turn=lambda session_key: (
+                f"command-turn:{session_key}"
+            ),
             record_command_assistant_turn=lambda *args, **kwargs: calls.append((args, kwargs)),
             system_prompt="system",
             max_history_items=12,
@@ -149,7 +152,10 @@ class DiscordCommandSessionRuntimeTests(unittest.TestCase):
 
         self.assertEqual(thread_checks, [True])
         self.assertEqual(len(calls), 1)
-        self.assertEqual(commits, [("1:2:3:77",)])
+        self.assertEqual(
+            commits,
+            [("1:2:3:77", "command-turn:1:2:3:77")],
+        )
         args, kwargs = calls[0]
         self.assertEqual(args, ("1:2:3:77", "user", "answer"))
         self.assertEqual(
@@ -173,6 +179,7 @@ class DiscordCommandSessionRuntimeTests(unittest.TestCase):
             resolve_text_thread_id=lambda *args, **kwargs: 1,
             is_text_thread_parent=lambda parent: True,
             make_text_session_key=lambda *args, **kwargs: "session",
+            start_new_turn=lambda session_key: f"turn:{session_key}",
             record_command_assistant_turn=lambda *args, **kwargs: calls.append((args, kwargs)),
             system_prompt="system",
             max_history_items=12,
@@ -206,6 +213,9 @@ class DiscordCommandSessionRuntimeTests(unittest.TestCase):
             is_text_thread_parent=lambda _parent: False,
             make_text_session_key=(
                 lambda *_args, **_kwargs: "session"
+            ),
+            start_new_turn=(
+                lambda session_key: f"turn:{session_key}"
             ),
             record_command_assistant_turn=(
                 lambda *_args, **_kwargs: None

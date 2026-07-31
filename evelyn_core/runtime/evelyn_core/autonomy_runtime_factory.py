@@ -45,6 +45,7 @@ class AutonomyRuntimeFactoryDeps:
     get_inflight_llm_requests: Callable[[], int]
     last_autonomy_ping_at: MutableMapping[int, float]
     answer_promises_search: Callable[..., bool]
+    start_new_turn: Callable[..., str]
     append_history: Callable[..., Any]
     schedule_memory_update: Callable[..., Any]
     mark_session_active: Callable[..., Any]
@@ -195,6 +196,7 @@ def get_or_create_autonomy_engine_from_runtime(
             return {"status": "blocked", "reason": "no_followup_channel"}
         await deps.send_discord_text(channel, text)
         session_key = deps.runtime_session_key(guild_id=guild_id)
+        turn_id = deps.start_new_turn(session_key)
         deps.append_history(session_key, user_text or "[autonomy]", text, guild_id=guild_id)
         deps.schedule_memory_update(
             guild_id,
@@ -222,7 +224,8 @@ def get_or_create_autonomy_engine_from_runtime(
         continuity_generation = 0
         try:
             continuity_status = await deps.commit_session_continuity(
-                session_key
+                session_key,
+                turn_id,
             )
             continuity_receipt = (
                 require_durable_continuity_receipt(

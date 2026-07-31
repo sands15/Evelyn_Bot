@@ -83,6 +83,9 @@ class AutonomyRuntimeFactoryTests(unittest.IsolatedAsyncioTestCase):
             get_inflight_llm_requests=lambda: 1,
             last_autonomy_ping_at=self.last_ping,
             answer_promises_search=lambda _text: False,
+            start_new_turn=lambda session_key: (
+                f"autonomy-turn:{session_key}"
+            ),
             append_history=lambda *args, **kwargs: self.events.append(("history", (args, kwargs))),
             schedule_memory_update=lambda *args, **kwargs: self.events.append(("memory", (args, kwargs))),
             mark_session_active=lambda *args, **kwargs: self.events.append(("session", (args, kwargs))),
@@ -177,7 +180,10 @@ class AutonomyRuntimeFactoryTests(unittest.IsolatedAsyncioTestCase):
             for kind, payload in self.events
             if kind == "commit"
         )
-        self.assertEqual(commit_payload, ("runtime:11",))
+        self.assertEqual(
+            commit_payload,
+            ("runtime:11", "autonomy-turn:runtime:11"),
+        )
 
     async def test_send_followup_rejects_partial_commit_status(
         self,

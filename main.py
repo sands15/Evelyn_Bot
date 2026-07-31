@@ -651,7 +651,7 @@ autonomy_runtime_composition = AutonomyRuntimeComposition(
         read_vision_watch_state=read_vision_watch_state, local_tts_snapshot=local_tts_playback_manager.snapshot,
         serialize_local_mic_runtime_state=lambda: serialize_local_mic_runtime_state(), get_active_session_count=lambda: len(session_state_store.active_until),
         get_inflight_llm_requests=inflight_llm_requests_counter.get, last_autonomy_ping_at=last_autonomy_ping_at,
-        answer_promises_search=answer_promises_search, append_history=append_history,
+        answer_promises_search=answer_promises_search, start_new_turn=start_new_turn, append_history=append_history,
         schedule_memory_update=lambda *args, **kwargs: schedule_memory_update(*args, **kwargs), mark_session_active=mark_session_active,
         build_topic_id=build_topic_id, mark_self_state_assistant_output=mark_self_state_assistant_output,
         select_and_mark_proactive_question=select_and_mark_proactive_question,
@@ -2377,6 +2377,7 @@ discord_app_dependency_composition = DiscordAppDependencyComposition(
         commit_session_continuity_sync=session_continuity_checkpoint.commit_completed_turn, log=print,
         log_voice_bottleneck_summary=log_voice_bottleneck_summary, format_display_text=format_display_text,
         resolve_text_thread_id=resolve_text_thread_id, make_text_session_key=make_text_session_key,
+        start_new_turn=start_new_turn,
         record_command_assistant_turn=session_state_store.record_command_assistant_turn, system_prompt=SYSTEM_PROMPT,
         max_history_items=MAX_HISTORY_ITEMS, normal_ttl_sec=ACTIVE_CONVERSATION_TEXT_SEC, question_ttl_sec=ACTIVE_CONVERSATION_TEXT_QUESTION_SEC,
     )
