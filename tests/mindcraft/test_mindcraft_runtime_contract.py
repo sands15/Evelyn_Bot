@@ -436,6 +436,49 @@ class MindcraftRuntimeContractTests(unittest.TestCase):
         self.assertIn('MINDCRAFT_GOAL_MANAGER_MODE: "gated"', compose)
         self.assertIn("goal_manager_state.json", compose)
 
+    def test_runtime_lint_gate_is_installed_and_fail_closed(
+        self,
+    ) -> None:
+        overlay_root = (
+            REPO_ROOT / "external" / "mindcraft_evelyn"
+        )
+        package = json.loads(
+            (overlay_root / "package.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        dockerfile = (
+            REPO_ROOT / "docker" / "Dockerfile.mindcraft"
+        ).read_text(encoding="utf-8")
+        lint_patch = (overlay_root / "lint.patch").read_text(
+            encoding="utf-8"
+        )
+        smoke = (
+            overlay_root
+            / "scripts"
+            / "verify_runtime_lint.mjs"
+        ).read_text(encoding="utf-8")
+
+        dependencies = package["dependencies"]
+        self.assertEqual(dependencies["eslint"], "10.8.0")
+        self.assertEqual(dependencies["@eslint/js"], "10.0.1")
+        self.assertEqual(dependencies["globals"], "17.8.0")
+        self.assertEqual(
+            dependencies["eslint-plugin-no-floating-promise"],
+            "2.0.0",
+        )
+        self.assertIn("lint.patch", dockerfile)
+        self.assertIn("verify_runtime_lint.mjs", dockerfile)
+        self.assertIn(
+            "generated code will not execute",
+            lint_patch,
+        )
+        self.assertNotIn("catch (error)", lint_patch)
+        self.assertIn(
+            "no-floating-promise/no-floating-promise",
+            smoke,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,0 +1,25 @@
+diff --git a/src/agent/coder.js b/src/agent/coder.js
+index 01a589c..63a525c 100644
+--- a/src/agent/coder.js
++++ b/src/agent/coder.js
+@@ -128,8 +128,18 @@ export class Coder {
+             return result;
+         }
+ 
+-        const eslint = new ESLint();
+-        const results = await eslint.lintText(code);
++        let results;
++        try {
++            const eslint = new ESLint();
++            results = await eslint.lintText(code);
++        } catch {
++            console.warn(
++                'Code lint gate unavailable; generated code will not execute.'
++            );
++            return (
++                'Code lint gate unavailable; generated code was not executed.'
++            );
++        }
+         const codeLines = code.split('\n');
+         const exceptions = results.map(r => r.messages).flat();
+ 

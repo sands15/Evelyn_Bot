@@ -28,6 +28,7 @@ COPY external/mindcraft_evelyn/priority.patch /tmp/evelyn-mindcraft-priority.pat
 COPY external/mindcraft_evelyn/combat.patch /tmp/evelyn-mindcraft-combat.patch
 COPY external/mindcraft_evelyn/pathfinder.patch /tmp/evelyn-mindcraft-pathfinder.patch
 COPY external/mindcraft_evelyn/relocation.patch /tmp/evelyn-mindcraft-relocation.patch
+COPY external/mindcraft_evelyn/lint.patch /tmp/evelyn-mindcraft-lint.patch
 RUN sed -i 's/\r$//' \
       profiles/defaults/survival.json \
       src/agent/action_manager.js \
@@ -45,7 +46,8 @@ RUN sed -i 's/\r$//' \
     patch -p1 < /tmp/evelyn-mindcraft-combat.patch && \
     patch -p1 < /tmp/evelyn-mindcraft-pathfinder.patch && \
     patch -p1 < /tmp/evelyn-mindcraft-relocation.patch && \
-    rm /tmp/evelyn-mindcraft.patch /tmp/evelyn-mindcraft-safety.patch /tmp/evelyn-mindcraft-pathfloor.patch /tmp/evelyn-mindcraft-priority.patch /tmp/evelyn-mindcraft-combat.patch /tmp/evelyn-mindcraft-pathfinder.patch /tmp/evelyn-mindcraft-relocation.patch
+    patch -p1 < /tmp/evelyn-mindcraft-lint.patch && \
+    rm /tmp/evelyn-mindcraft.patch /tmp/evelyn-mindcraft-safety.patch /tmp/evelyn-mindcraft-pathfloor.patch /tmp/evelyn-mindcraft-priority.patch /tmp/evelyn-mindcraft-combat.patch /tmp/evelyn-mindcraft-pathfinder.patch /tmp/evelyn-mindcraft-relocation.patch /tmp/evelyn-mindcraft-lint.patch
 
 COPY external/mindcraft_evelyn/src/models/codex_gateway.js /app/mindcraft/src/models/codex_gateway.js
 COPY external/mindcraft_evelyn/src/models/evelyn_planner.js /app/mindcraft/src/models/evelyn_planner.js
@@ -59,6 +61,8 @@ COPY external/mindcraft_evelyn/src/agent/connection_handler.js /app/mindcraft/sr
 COPY external/mindcraft_evelyn/src/agent/vision/browser_viewer.js /app/mindcraft/src/agent/vision/browser_viewer.js
 COPY external/mindcraft_evelyn/src/agent/vision/vision_interpreter.js /app/mindcraft/src/agent/vision/vision_interpreter.js
 COPY external/mindcraft_evelyn/profiles/evelyn.json /app/mindcraft/profiles/evelyn.json
+COPY external/mindcraft_evelyn/scripts/verify_runtime_lint.mjs /app/mindcraft/scripts/verify_runtime_lint.mjs
+RUN node /app/mindcraft/scripts/verify_runtime_lint.mjs
 
 COPY docker/requirements.mindcraft.txt /app/docker/requirements.mindcraft.txt
 RUN python3 -m pip install --break-system-packages --no-cache-dir -r /app/docker/requirements.mindcraft.txt
