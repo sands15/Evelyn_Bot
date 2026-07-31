@@ -235,6 +235,32 @@ class RuntimeArtifactsRetentionTests(unittest.TestCase):
             ],
         )
 
+    def test_stale_fast_control_continuity_checkpoint_is_selected(
+        self,
+    ) -> None:
+        now = time.time()
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name in ("active.json", "checkpoint_head.json"):
+                write_file(
+                    root / "fast_control_continuity" / name,
+                    '{"contentFree": true}',
+                    mtime=now - 2 * 86400,
+                )
+
+            plan = build_cleanup_plan(root, now=now)
+
+        self.assertEqual(
+            [item.relative_path for item in plan.candidates],
+            [
+                "fast_control_continuity/active.json",
+                (
+                    "fast_control_continuity/"
+                    "checkpoint_head.json"
+                ),
+            ],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

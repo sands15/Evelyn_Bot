@@ -26,6 +26,9 @@ from .control_page_contracts import (
     memory_panel_reply,
 )
 from .context_pipeline import build_context_policy_for_turn, build_tool_use_decisions
+from .continuity_commit_contract import (
+    require_durable_continuity_receipt,
+)
 from .fast_context_contract import build_fast_main_llm_request
 from .fast_action_runtime import (
     FastActionCoordinator,
@@ -46,6 +49,9 @@ from .fast_tool_planner import (
     answer_fast_tool_capability_question,
     enforce_registered_tool_capability_truth,
     plan_fast_tool_request,
+)
+from .fast_control_continuity import (
+    FastControlContinuityOwner,
 )
 from .paths import get_runtime_artifacts_root
 from .public_error_contract import (
@@ -150,6 +156,13 @@ FAST_RUNTIME_HEALTH_MAX_STALE_SEC = max(
     ),
 )
 CHAT_LOG_LIMIT = max(4, int(os.getenv("FAST_CONTROL_CHAT_LOG_LIMIT", "40")))
+FAST_CONTROL_CONTINUITY_ENABLED = (
+    os.getenv(
+        "FAST_CONTROL_CONTINUITY_ENABLED",
+        "",
+    ).strip().lower()
+    in {"1", "true", "yes", "on"}
+)
 LOCAL_BRIDGE_STALE_AFTER_SEC = max(3.0, float(os.getenv("LOCAL_BRIDGE_STALE_AFTER_SEC", "8.0")))
 FAST_MAIN_LLM_SYSTEM_PROMPT = "\n".join(
     (
@@ -169,7 +182,15 @@ BOOT_STEPS = (
     ("stt", "STT"),
 )
 
-CHAT_MESSAGES: list[dict[str, Any]] = []
+FAST_CONTROL_CONTINUITY_OWNER = FastControlContinuityOwner(
+    artifacts_root=get_runtime_artifacts_root(),
+    enabled=FAST_CONTROL_CONTINUITY_ENABLED,
+)
+CHAT_MESSAGES: list[dict[str, Any]] = (
+    FAST_CONTROL_CONTINUITY_OWNER.restored_chat_messages()[
+        -CHAT_LOG_LIMIT:
+    ]
+)
 ACTION_COORDINATOR = FastActionCoordinator(history_limit=CHAT_LOG_LIMIT)
 BACKGROUND_ACTION_HANDLERS: list[dict[str, Any]] = []
 BACKGROUND_ACTION_TASKS: set[asyncio.Task[Any]] = set()
@@ -313,6 +334,99 @@ def append_chat_message(
     CHAT_MESSAGES.append(message)
     if len(CHAT_MESSAGES) > CHAT_LOG_LIMIT:
         del CHAT_MESSAGES[:-CHAT_LOG_LIMIT]
+
+
+def _fast_control_continuity_result(
+    *,
+    raw_status: object | None = None,
+    enabled: bool,
+) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "schema": "fast_control.delivery-continuity.v1",
+        "enabled": bool(enabled),
+        "durable": False,
+        "generation": 0,
+        "persistedSessionCount": 0,
+        "error": "",
+    }
+    if not enabled:
+        return result
+    try:
+        receipt = require_durable_continuity_receipt(
+            raw_status
+        )
+    except Exception as exc:
+        result["error"] = (
+            "conversation_continuity_commit_failed"
+        )
+        print(
+            "[FAST CONTROL] continuity_commit_failed "
+            f"errorType={type(exc).__name__}",
+            flush=True,
+        )
+        return result
+    result.update(
+        {
+            "durable": True,
+            "generation": int(receipt["generation"]),
+            "persistedSessionCount": int(
+                receipt["persistedSessionCount"]
+            ),
+        }
+    )
+    return result
+
+
+def commit_fast_control_turn(
+    user_text: str,
+    assistant_text: str,
+) -> dict[str, Any]:
+    owner = FAST_CONTROL_CONTINUITY_OWNER
+    if not owner.enabled:
+        return _fast_control_continuity_result(
+            enabled=False,
+        )
+    try:
+        raw_status = owner.record_completed_turn(
+            user_text,
+            assistant_text,
+        )
+    except Exception as exc:
+        print(
+            "[FAST CONTROL] continuity_record_failed "
+            f"errorType={type(exc).__name__}",
+            flush=True,
+        )
+        raw_status = None
+    return _fast_control_continuity_result(
+        raw_status=raw_status,
+        enabled=True,
+    )
+
+
+def commit_fast_control_followup(
+    assistant_text: str,
+) -> dict[str, Any]:
+    owner = FAST_CONTROL_CONTINUITY_OWNER
+    if not owner.enabled:
+        return _fast_control_continuity_result(
+            enabled=False,
+        )
+    try:
+        raw_status = owner.record_assistant_followup(
+            assistant_text
+        )
+    except Exception as exc:
+        print(
+            "[FAST CONTROL] followup_continuity_record_failed "
+            f"errorType={type(exc).__name__}",
+            flush=True,
+        )
+        raw_status = None
+    return _fast_control_continuity_result(
+        raw_status=raw_status,
+        enabled=True,
+    )
 
 
 def recent_chat_messages_for_planner(text: str, *, limit: int = 8) -> list[dict[str, str]]:
@@ -1202,6 +1316,9 @@ def launch_background_action(
                 task_id=completed.task_id,
                 task_status=completed.status,
             )
+            commit_fast_control_followup(
+                completed.final_reply
+            )
             queue_local_bridge_speech(completed.final_reply, source="fast_control_action_followup")
         except Exception as exc:
             print(
@@ -1231,6 +1348,9 @@ def launch_background_action(
                 source="fast_control_action_followup",
                 task_id=failed.task_id,
                 task_status=failed.status,
+            )
+            commit_fast_control_followup(
+                failed.final_reply
             )
             queue_local_bridge_speech(failed.final_reply, source="fast_control_action_followup")
 
@@ -1869,6 +1989,9 @@ def build_control_state(health: dict[str, Any]) -> dict[str, Any]:
                 "voyagerRuntimeReady": bool(legacy.get("voyagerRuntimeReady")),
             },
             "controlPlane": control_plane,
+            "continuity": (
+                FAST_CONTROL_CONTINUITY_OWNER.status()
+            ),
             "bootProgress": boot_progress,
             "capabilities": dict(health.get("capabilities") or {}),
             "serviceHealth": health,
@@ -2024,12 +2147,15 @@ async def chat_handler(request: web.Request) -> web.StreamResponse:
     source = clean_text((payload or {}).get("source")) or "control_page"
     suppress_tts = should_suppress_tts_for_command(text)
     append_chat_message("user", "정훈", text, source=source)
-    tool_plan = await plan_fast_tool_request_for_turn(text)
+    tool_plan: FastToolPlan | None = None
     queued_speech_count = 0
     error_code = ""
     task_record: FastActionTask | None = None
     task_runner: Callable[[str, str], Awaitable[str]] | None = None
     try:
+        tool_plan = await plan_fast_tool_request_for_turn(
+            text
+        )
         pre_llm_reply = await resolve_pre_llm_reply(text, source=source)
         if pre_llm_reply is not None:
             reply = pre_llm_reply
@@ -2088,6 +2214,7 @@ async def chat_handler(request: web.Request) -> web.StreamResponse:
         task_id=task_record.task_id if task_record is not None else None,
         task_status=task_record.status if task_record is not None else None,
     )
+    continuity = commit_fast_control_turn(text, reply)
     if not suppress_tts and should_queue_local_bridge_speech(source) and queued_speech_count <= 0:
         queue_local_bridge_speech(reply, source=source)
     if task_record is not None and task_runner is not None and task_record.status == "running":
@@ -2098,6 +2225,7 @@ async def chat_handler(request: web.Request) -> web.StreamResponse:
         "reply": reply,
         "suppressTts": suppress_tts,
         "state": build_control_state(health),
+        "continuity": continuity,
     }
     if error_code:
         result["error"] = error_code
@@ -2121,7 +2249,7 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
     source = clean_text((payload or {}).get("source")) or "local_bridge"
     suppress_tts = should_suppress_tts_for_command(text)
     append_chat_message("user", "정훈", text, source=source)
-    tool_plan = await plan_fast_tool_request_for_turn(text)
+    tool_plan: FastToolPlan | None = None
 
     response = web.StreamResponse(
         status=200,
@@ -2204,6 +2332,9 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
         )
 
     try:
+        tool_plan = await plan_fast_tool_request_for_turn(
+            text
+        )
         pre_llm_reply = await resolve_pre_llm_reply(text, source=source)
         if pre_llm_reply is not None:
             reply = enforce_action_reply_contract(pre_llm_reply)
@@ -2274,6 +2405,7 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
             task_id=task_record.task_id if task_record is not None else None,
             task_status=task_record.status if task_record is not None else None,
         )
+        continuity = commit_fast_control_turn(text, reply)
         await write_stream_event(
             response,
             {
@@ -2283,6 +2415,7 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
                 "suppressTts": suppress_tts,
                 "taskId": task_record.task_id if task_record is not None else None,
                 "taskStatus": task_record.status if task_record is not None else None,
+                "continuity": continuity,
                 "firstSentenceMs": round(first_sentence_ms, 1) if first_sentence_ms is not None else None,
                 "firstDeltaMs": round(first_delta_ms, 1) if first_delta_ms is not None else None,
                 "firstProgressMs": round(first_progress_ms, 1) if first_progress_ms is not None else None,
@@ -2293,6 +2426,7 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
             launch_background_action(task_record, task_runner)
     except Exception as exc:
         error_code = "fast_control_stream_failed"
+        failure_reply = public_failure_message(error_code)
         print(
             "[FAST CONTROL] chat_stream_failed "
             f"errorType={type(exc).__name__}",
@@ -2302,8 +2436,9 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
             failed = ACTION_COORDINATOR.fail(
                 task_record.task_id,
                 error_code,
-                reply=public_failure_message(error_code),
+                reply=failure_reply,
             )
+            failure_reply = failed.final_reply
             append_chat_message(
                 "assistant",
                 "Evelyn",
@@ -2312,13 +2447,25 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
                 task_id=failed.task_id,
                 task_status=failed.status,
             )
+        else:
+            append_chat_message(
+                "assistant",
+                "Evelyn",
+                failure_reply,
+                source="fast_control_api_stream",
+            )
+        continuity = commit_fast_control_turn(
+            text,
+            failure_reply,
+        )
         await write_stream_event(
             response,
             {
                 "type": "error",
                 "ok": False,
                 "error": error_code,
-                "message": public_failure_message(error_code),
+                "message": failure_reply,
+                "continuity": continuity,
             },
         )
     await response.write_eof()

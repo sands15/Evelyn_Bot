@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import sys
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -14,6 +16,9 @@ if str(RUNTIME_ROOT) not in sys.path:
     sys.path.insert(0, str(RUNTIME_ROOT))
 
 from evelyn_core import fast_control_api as fast_api  # noqa: E402
+from tests.continuity_test_support import (  # noqa: E402
+    durable_continuity_status,
+)
 
 
 class FastControlApiToolTests(unittest.TestCase):
@@ -87,6 +92,68 @@ class FastControlApiToolTests(unittest.TestCase):
 
     def test_visible_text_strips_internal_answer_tag(self) -> None:
         self.assertEqual(fast_api.visible_text("[\ub2f5\ubcc0] \uc548\ub155"), "\uc548\ub155")
+
+    def test_restored_chat_messages_feed_next_llm_request(
+        self,
+    ) -> None:
+        fast_api.CHAT_MESSAGES.extend(
+            [
+                {
+                    "role": "user",
+                    "author": "정훈",
+                    "text": "재시작 전 질문",
+                    "source": (
+                        "fast_control_continuity_restore"
+                    ),
+                },
+                {
+                    "role": "assistant",
+                    "author": "Evelyn",
+                    "text": "재시작 전 답변",
+                    "source": (
+                        "fast_control_continuity_restore"
+                    ),
+                },
+            ]
+        )
+        built = SimpleNamespace(
+            messages=[
+                {"role": "system", "content": "system"},
+                {"role": "user", "content": "새 질문"},
+            ],
+            context=SimpleNamespace(
+                required_evidence_failure_reply="",
+                grounded_evidence_reply="",
+            ),
+        )
+
+        with patch.object(
+            fast_api,
+            "build_fast_main_llm_request",
+            new=AsyncMock(return_value=built),
+        ) as build_request:
+            asyncio.run(
+                fast_api.build_main_llm_request_payload(
+                    "새 질문",
+                    source="control_page",
+                )
+            )
+
+        self.assertEqual(
+            build_request.await_args.kwargs[
+                "recent_messages"
+            ],
+            [
+                {
+                    "role": "user",
+                    "content": "재시작 전 질문",
+                },
+                {
+                    "role": "assistant",
+                    "content": "재시작 전 답변",
+                },
+            ],
+        )
 
     def test_web_capability_question_bypasses_main_llm(self) -> None:
         reply = asyncio.run(
@@ -828,14 +895,47 @@ class FastControlApiToolTests(unittest.TestCase):
                 "Bearer api-secret http://internal:9820 C:\\private"
             )
 
+        class ContinuityOwner:
+            enabled = True
+
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, str]] = []
+
+            def record_completed_turn(
+                self,
+                user_text: str,
+                assistant_text: str,
+            ):
+                self.calls.append(
+                    (user_text, assistant_text)
+                )
+                return durable_continuity_status(7)
+
+            @staticmethod
+            def status():
+                return {
+                    "schema": (
+                        "fast_control.continuity-status.v1"
+                    ),
+                    "enabled": True,
+                    "state": "ready",
+                    "policy": {"contentFree": True},
+                }
+
+        owner = ContinuityOwner()
         original_collect = fast_api.collect_runtime_health
         original_ask = fast_api.ask_main_llm
         fast_api.collect_runtime_health = fake_collect_runtime_health
         fast_api.ask_main_llm = fail_main_llm
         try:
-            response = asyncio.run(
-                fast_api.chat_handler(_Request())
-            )
+            with patch.object(
+                fast_api,
+                "FAST_CONTROL_CONTINUITY_OWNER",
+                owner,
+            ):
+                response = asyncio.run(
+                    fast_api.chat_handler(_Request())
+                )
         finally:
             fast_api.collect_runtime_health = original_collect
             fast_api.ask_main_llm = original_ask
@@ -857,6 +957,125 @@ class FastControlApiToolTests(unittest.TestCase):
         self.assertNotIn("api-secret", public_text)
         self.assertNotIn("internal:9820", public_text)
         self.assertNotIn("C:\\\\private", public_text)
+        self.assertTrue(payload["continuity"]["durable"])
+        self.assertEqual(
+            payload["continuity"]["generation"],
+            7,
+        )
+        self.assertEqual(
+            owner.calls,
+            [("실패 테스트", payload["reply"])],
+        )
+
+    def test_chat_handler_planner_failure_uses_same_durable_boundary(
+        self,
+    ) -> None:
+        class _Request:
+            async def json(self):
+                return {
+                    "text": "계획 실패 테스트",
+                    "source": "control_page",
+                }
+
+        private = (
+            "Bearer planner-secret "
+            r"C:\Users\Admin\planner.json"
+        )
+        continuity = {
+            "schema": "fast_control.delivery-continuity.v1",
+            "enabled": True,
+            "durable": True,
+            "generation": 13,
+            "persistedSessionCount": 1,
+            "error": "",
+        }
+        with patch.object(
+            fast_api,
+            "plan_fast_tool_request_for_turn",
+            new=AsyncMock(
+                side_effect=RuntimeError(private)
+            ),
+        ), patch.object(
+            fast_api,
+            "commit_fast_control_turn",
+            return_value=continuity,
+        ) as commit_turn, patch.object(
+            fast_api,
+            "cached_fast_runtime_health",
+            new=AsyncMock(return_value={
+                "ok": True,
+                "overallState": "up",
+                "legacyServices": {},
+                "services": [],
+            }),
+        ):
+            response = asyncio.run(
+                fast_api.chat_handler(_Request())
+            )
+
+        payload = fast_api.json.loads(response.text or "{}")
+        self.assertFalse(payload["ok"])
+        self.assertEqual(
+            payload["error"],
+            "fast_control_chat_failed",
+        )
+        self.assertEqual(payload["continuity"], continuity)
+        commit_turn.assert_called_once_with(
+            "계획 실패 테스트",
+            payload["reply"],
+        )
+        self.assertNotIn(private, str(payload))
+
+    def test_fast_control_rejects_partial_continuity_status(
+        self,
+    ) -> None:
+        private = (
+            "Bearer fast-control-continuity-secret "
+            r"C:\Users\Admin\checkpoint.json"
+        )
+
+        class PartialOwner:
+            enabled = True
+
+            @staticmethod
+            def record_completed_turn(
+                _user_text: str,
+                _assistant_text: str,
+            ):
+                return {
+                    "state": "ready",
+                    "rollbackProtected": True,
+                    "privateMessage": private,
+                }
+
+        output = StringIO()
+        with patch.object(
+            fast_api,
+            "FAST_CONTROL_CONTINUITY_OWNER",
+            PartialOwner(),
+        ), redirect_stdout(output):
+            result = fast_api.commit_fast_control_turn(
+                "질문",
+                "답변",
+            )
+
+        rendered = fast_api.json.dumps(
+            result,
+            ensure_ascii=False,
+        )
+        self.assertFalse(result["durable"])
+        self.assertEqual(
+            result["error"],
+            "conversation_continuity_commit_failed",
+        )
+        self.assertNotIn(
+            "fast-control-continuity-secret",
+            rendered + output.getvalue(),
+        )
+        self.assertNotIn(
+            "checkpoint.json",
+            rendered + output.getvalue(),
+        )
 
     def test_registered_background_action_adds_followup_chat_and_events(self) -> None:
         async def runner(user_text: str, source: str) -> str:
@@ -885,7 +1104,11 @@ class FastControlApiToolTests(unittest.TestCase):
             await background
             return task
 
-        task = asyncio.run(scenario())
+        with patch.object(
+            fast_api,
+            "commit_fast_control_followup",
+        ) as commit_followup:
+            task = asyncio.run(scenario())
         snapshot = fast_api.ACTION_COORDINATOR.snapshot()
 
         self.assertEqual(snapshot["tasks"][0]["status"], "completed")
@@ -893,6 +1116,9 @@ class FastControlApiToolTests(unittest.TestCase):
         self.assertEqual(fast_api.CHAT_MESSAGES[-1]["taskId"], task.task_id)
         self.assertEqual(fast_api.CHAT_MESSAGES[-1]["taskStatus"], "completed")
         self.assertIn("완료: 긴 작업", fast_api.CHAT_MESSAGES[-1]["text"])
+        commit_followup.assert_called_once_with(
+            fast_api.CHAT_MESSAGES[-1]["text"]
+        )
 
     def test_background_action_failure_publishes_specific_followup_reply(self) -> None:
         async def runner(user_text: str, source: str) -> str:

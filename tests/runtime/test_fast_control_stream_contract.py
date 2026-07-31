@@ -16,6 +16,9 @@ if str(RUNTIME_ROOT) not in sys.path:
     sys.path.insert(0, str(RUNTIME_ROOT))
 
 from evelyn_core import fast_control_api as fast_api  # noqa: E402
+from tests.continuity_test_support import (  # noqa: E402
+    durable_continuity_status,
+)
 
 
 class FastControlStreamContractTests(unittest.IsolatedAsyncioTestCase):
@@ -225,6 +228,31 @@ class FastControlStreamContractTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_stream_failure_emits_only_fixed_error_code(self) -> None:
         original_iter = fast_api.iter_main_llm_deltas
+        recorded: list[tuple[str, str]] = []
+
+        class ContinuityOwner:
+            enabled = True
+
+            @staticmethod
+            def record_completed_turn(
+                user_text: str,
+                assistant_text: str,
+            ):
+                recorded.append(
+                    (user_text, assistant_text)
+                )
+                return durable_continuity_status(11)
+
+            @staticmethod
+            def status():
+                return {
+                    "schema": (
+                        "fast_control.continuity-status.v1"
+                    ),
+                    "enabled": True,
+                    "state": "ready",
+                    "policy": {"contentFree": True},
+                }
 
         async def fail_iter(text: str, *, source: str):
             if False:
@@ -235,7 +263,12 @@ class FastControlStreamContractTests(unittest.IsolatedAsyncioTestCase):
 
         fast_api.iter_main_llm_deltas = fail_iter
         try:
-            events = await self.post_stream("실패 테스트")
+            with patch.object(
+                fast_api,
+                "FAST_CONTROL_CONTINUITY_OWNER",
+                ContinuityOwner(),
+            ):
+                events = await self.post_stream("실패 테스트")
         finally:
             fast_api.iter_main_llm_deltas = original_iter
 
@@ -252,10 +285,72 @@ class FastControlStreamContractTests(unittest.IsolatedAsyncioTestCase):
             "fast_control_stream_failed",
             error["message"],
         )
+        self.assertTrue(error["continuity"]["durable"])
+        self.assertEqual(
+            error["continuity"]["generation"],
+            11,
+        )
+        self.assertEqual(
+            recorded,
+            [("실패 테스트", error["message"])],
+        )
+        self.assertEqual(
+            fast_api.CHAT_MESSAGES[-1]["text"],
+            error["message"],
+        )
         public_text = json.dumps(events, ensure_ascii=False)
         self.assertNotIn("stream-secret", public_text)
         self.assertNotIn("internal:9820", public_text)
         self.assertNotIn("C:\\\\private", public_text)
+
+    async def test_stream_planner_failure_uses_same_terminal_contract(
+        self,
+    ) -> None:
+        private = (
+            "Bearer stream-planner-secret "
+            r"C:\Users\Admin\planner.json"
+        )
+        continuity = {
+            "schema": "fast_control.delivery-continuity.v1",
+            "enabled": True,
+            "durable": True,
+            "generation": 17,
+            "persistedSessionCount": 1,
+            "error": "",
+        }
+        with patch.object(
+            fast_api,
+            "plan_fast_tool_request_for_turn",
+            new=AsyncMock(
+                side_effect=RuntimeError(private)
+            ),
+        ), patch.object(
+            fast_api,
+            "commit_fast_control_turn",
+            return_value=continuity,
+        ) as commit_turn:
+            events = await self.post_stream(
+                "stream planner 실패"
+            )
+
+        error = next(
+            event
+            for event in events
+            if event["type"] == "error"
+        )
+        self.assertEqual(
+            error["error"],
+            "fast_control_stream_failed",
+        )
+        self.assertEqual(error["continuity"], continuity)
+        commit_turn.assert_called_once_with(
+            "stream planner 실패",
+            error["message"],
+        )
+        self.assertNotIn(
+            "stream-planner-secret",
+            json.dumps(events, ensure_ascii=False),
+        )
 
     async def test_memory_recall_progress_is_non_terminal_and_final_reply_continues(self) -> None:
         original_iter = fast_api.iter_main_llm_deltas

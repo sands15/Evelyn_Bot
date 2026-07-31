@@ -12,6 +12,7 @@ services:
       - "host.docker.internal:host-gateway"
     environment:
       EVELYN_FAST_BOOT: "1"
+      FAST_CONTROL_CONTINUITY_ENABLED: "true"
       TZ: "Asia/Seoul"
       DISCORD_ENABLED: "false"
       LOCAL_ONLY: "true"
