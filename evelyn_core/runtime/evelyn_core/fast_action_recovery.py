@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .continuity_authenticity import (
+    CONTINUITY_AUTH_ANCHOR_SLOT_FAST_ACTION_HEAD,
     CONTINUITY_AUTH_ARTIFACT_FAST_ACTION_HEAD,
     ContinuityAuthenticity,
     ContinuityAuthenticityError,
@@ -156,6 +157,15 @@ class FastActionRecoveryJournal:
         )
         self._head_authenticity = (
             "disabled" if not self.enabled else "missing"
+        )
+        self._anchor_state = (
+            "disabled"
+            if not self.enabled
+            else (
+                "missing"
+                if self.authenticity.external_anchor_configured
+                else "unconfigured"
+            )
         )
         self._auth_error_code = ""
         self._load_state = (
@@ -556,6 +566,15 @@ class FastActionRecoveryJournal:
             ),
             "continuity_auth_key_required": "key_required",
         }.get(exc.code, "failed")
+        if exc.code.startswith("continuity_anchor_"):
+            self._anchor_state = {
+                "continuity_anchor_bootstrap_required": (
+                    "bootstrap_required"
+                ),
+                "continuity_anchor_replay_detected": (
+                    "replay_detected"
+                ),
+            }.get(exc.code, "failed")
 
     def _load(self) -> None:
         head: dict[str, Any] | None = None
@@ -570,6 +589,19 @@ class FastActionRecoveryJournal:
                     raise ValueError(
                         "fast_action_journal_missing_after_head"
                     )
+                self.authenticity.reconcile_external_anchor(
+                    CONTINUITY_AUTH_ANCHOR_SLOT_FAST_ACTION_HEAD,
+                    generation=0,
+                    artifact_hash=(
+                        FAST_ACTION_RECOVERY_CHAIN_GENESIS
+                    ),
+                    updated_at=self._now(),
+                )
+                self._anchor_state = (
+                    "verified"
+                    if self.authenticity.external_anchor_configured
+                    else "unconfigured"
+                )
                 self._write()
                 return
             if (
@@ -668,6 +700,18 @@ class FastActionRecoveryJournal:
                         "fast_action_rollback_or_head_mismatch"
                     )
                 integrity = "verified"
+            self.authenticity.reconcile_external_anchor(
+                CONTINUITY_AUTH_ANCHOR_SLOT_FAST_ACTION_HEAD,
+                generation=generation,
+                artifact_hash=journal_hash,
+                previous_hash=previous_hash,
+                updated_at=self._now(),
+            )
+            self._anchor_state = (
+                "verified"
+                if self.authenticity.external_anchor_configured
+                else "unconfigured"
+            )
             self._actions = actions
             self._last_recovery_at = last_recovery_at
             self._last_recovery_count = last_recovery_count
@@ -741,12 +785,40 @@ class FastActionRecoveryJournal:
                 generation=generation,
                 journal_hash=journal_hash,
             )
+            self.authenticity.commit_external_anchor(
+                CONTINUITY_AUTH_ANCHOR_SLOT_FAST_ACTION_HEAD,
+                previous_generation=self._generation,
+                previous_hash=self._journal_hash,
+                generation=generation,
+                artifact_hash=journal_hash,
+                updated_at=self._now(),
+            )
             self._generation = generation
             self._journal_hash = journal_hash
             self._integrity = "verified"
             self._head_state = "current"
             self._load_state = "ready"
             self._auth_error_code = ""
+            self._anchor_state = (
+                "verified"
+                if self.authenticity.external_anchor_configured
+                else "unconfigured"
+            )
+        except ContinuityAuthenticityError as exc:
+            self._load_state = "auth_error"
+            self._integrity = "failed"
+            self._head_state = "write_failed"
+            self._auth_error_code = exc.code
+            self._last_error_code = exc.code
+            self._anchor_state = {
+                "continuity_anchor_bootstrap_required": (
+                    "bootstrap_required"
+                ),
+                "continuity_anchor_replay_detected": (
+                    "replay_detected"
+                ),
+            }.get(exc.code, "failed")
+            raise
         except Exception:
             self._load_state = "error"
             self._integrity = "failed"
@@ -876,6 +948,10 @@ class FastActionRecoveryJournal:
                     and (
                         not self.authenticity.configured
                         or self._head_authenticity == "verified"
+                    )
+                    and (
+                        not self.authenticity.external_anchor_configured
+                        or self._anchor_state == "verified"
                     )
                 )
             )
@@ -1073,8 +1149,17 @@ class FastActionRecoveryJournal:
                 "generation": self._generation,
                 "headState": self._head_state,
                 "headAuthenticity": self._head_authenticity,
+                "anchorState": self._anchor_state,
                 "keyedAuthenticity": (
                     self.authenticity.configured
+                ),
+                "externalAnchorConfigured": (
+                    self.authenticity.external_anchor_configured
+                ),
+                "externalReplayProtected": bool(
+                    self.authenticity.external_anchor_configured
+                    and self._load_state == "ready"
+                    and self._anchor_state == "verified"
                 ),
                 "tamperEvident": bool(
                     self.authenticity.configured
@@ -1083,6 +1168,10 @@ class FastActionRecoveryJournal:
                     and self._head_authenticity == "verified"
                     and self._integrity
                     in {"legacy_anchored", "verified"}
+                    and (
+                        not self.authenticity.external_anchor_configured
+                        or self._anchor_state == "verified"
+                    )
                 ),
                 "rollbackProtected": bool(
                     self.enabled
@@ -1093,6 +1182,10 @@ class FastActionRecoveryJournal:
                     and (
                         not self.authenticity.configured
                         or self._head_authenticity == "verified"
+                    )
+                    and (
+                        not self.authenticity.external_anchor_configured
+                        or self._anchor_state == "verified"
                     )
                 ),
                 "noticeCorrelationReady": bool(

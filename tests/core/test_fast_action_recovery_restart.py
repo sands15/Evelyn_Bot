@@ -34,7 +34,9 @@ WRITER_PROCESS = textwrap.dedent(
 
     root = Path(sys.argv[1])
     authenticity = ContinuityAuthenticity(
-        key=Path(sys.argv[2]).read_bytes()
+        key=Path(sys.argv[2]).read_bytes(),
+        allow_unsigned_bootstrap=True,
+        anchor_root=Path(sys.argv[3]),
     )
     owner = FastControlContinuityOwner(
         artifacts_root=root,
@@ -77,7 +79,8 @@ RECOVERY_PROCESS = textwrap.dedent(
 
     root = Path(sys.argv[1])
     authenticity = ContinuityAuthenticity(
-        key=Path(sys.argv[2]).read_bytes()
+        key=Path(sys.argv[2]).read_bytes(),
+        anchor_root=Path(sys.argv[3]),
     )
     owner = FastControlContinuityOwner(
         artifacts_root=root,
@@ -143,6 +146,8 @@ class FastActionRecoveryRestartTests(unittest.TestCase):
             key_path.write_bytes(
                 b"fast-action-restart-auth-key-32-bytes"
             )
+            anchor_root = base / "continuity-anchor"
+            anchor_root.mkdir()
             writer = subprocess.run(
                 [
                     sys.executable,
@@ -150,6 +155,7 @@ class FastActionRecoveryRestartTests(unittest.TestCase):
                     WRITER_PROCESS,
                     str(root),
                     str(key_path),
+                    str(anchor_root),
                 ],
                 cwd=REPO_ROOT,
                 env=self.subprocess_environment(),
@@ -184,6 +190,7 @@ class FastActionRecoveryRestartTests(unittest.TestCase):
                     RECOVERY_PROCESS,
                     str(root),
                     str(key_path),
+                    str(anchor_root),
                 ],
                 cwd=REPO_ROOT,
                 env=self.subprocess_environment(),
@@ -206,6 +213,7 @@ class FastActionRecoveryRestartTests(unittest.TestCase):
                     RECOVERY_PROCESS,
                     str(root),
                     str(key_path),
+                    str(anchor_root),
                 ],
                 cwd=REPO_ROOT,
                 env=self.subprocess_environment(),
@@ -231,6 +239,9 @@ class FastActionRecoveryRestartTests(unittest.TestCase):
         )
         self.assertEqual(result["journal"]["state"], "recovered")
         self.assertTrue(result["journal"]["tamperEvident"])
+        self.assertTrue(
+            result["journal"]["externalReplayProtected"]
+        )
         self.assertEqual(result["generation"], 2)
         notice = result["messages"][-1]["text"]
         self.assertIn("자동으로 다시 시도하지 않았어", notice)

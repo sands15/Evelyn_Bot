@@ -7,9 +7,12 @@ import hmac
 import json
 import math
 import os
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Mapping
+
+from .runtime_artifact_io import atomic_json_write
 
 
 CONTINUITY_AUTH_KEY_FILE_ENV = (
@@ -17,6 +20,9 @@ CONTINUITY_AUTH_KEY_FILE_ENV = (
 )
 CONTINUITY_AUTH_BOOTSTRAP_ENV = (
     "EVELYN_CONTINUITY_AUTH_BOOTSTRAP"
+)
+CONTINUITY_AUTH_ANCHOR_DIR_ENV = (
+    "EVELYN_CONTINUITY_AUTH_ANCHOR_DIR"
 )
 CONTINUITY_HEAD_SCHEMA_V1 = (
     "conversation_continuity.checkpoint-head.v1"
@@ -31,6 +37,7 @@ CONTINUITY_AUTH_DOMAIN = (
 CONTINUITY_AUTH_MIN_KEY_BYTES = 32
 CONTINUITY_AUTH_MAX_KEY_BYTES = 4096
 CONTINUITY_AUTH_MAX_FILE_BYTES = 8192
+CONTINUITY_AUTH_ANCHOR_MAX_FILE_BYTES = 128 * 1024
 CONTINUITY_CHAIN_GENESIS = "0" * 64
 CONTINUITY_AUTH_SCOPE_MAIN = "conversation_continuity"
 CONTINUITY_AUTH_SCOPE_FAST_CONTROL = (
@@ -47,6 +54,38 @@ CONTINUITY_AUTH_ARTIFACT_GUILD_REVOCATIONS = (
 )
 CONTINUITY_AUTH_ARTIFACT_FAST_ACTION_HEAD = (
     "fast_control.action_recovery_head"
+)
+CONTINUITY_AUTH_ANCHOR_SCHEMA = (
+    "conversation_continuity.external-anchor.v1"
+)
+CONTINUITY_AUTH_ANCHOR_SLOT_MAIN_HEAD = (
+    "conversation_continuity.checkpoint_head"
+)
+CONTINUITY_AUTH_ANCHOR_SLOT_FAST_CONTROL_HEAD = (
+    "fast_control_continuity.checkpoint_head"
+)
+CONTINUITY_AUTH_ANCHOR_SLOT_GUILD_REVOCATIONS = (
+    "conversation_continuity.guild_revocations"
+)
+CONTINUITY_AUTH_ANCHOR_SLOT_FAST_ACTION_HEAD = (
+    "fast_control.action_recovery_head"
+)
+_CONTINUITY_AUTH_ANCHOR_FILES = {
+    CONTINUITY_AUTH_ANCHOR_SLOT_MAIN_HEAD: (
+        "conversation-continuity-checkpoint.json"
+    ),
+    CONTINUITY_AUTH_ANCHOR_SLOT_FAST_CONTROL_HEAD: (
+        "fast-control-continuity-checkpoint.json"
+    ),
+    CONTINUITY_AUTH_ANCHOR_SLOT_GUILD_REVOCATIONS: (
+        "conversation-continuity-guild-revocations.json"
+    ),
+    CONTINUITY_AUTH_ANCHOR_SLOT_FAST_ACTION_HEAD: (
+        "fast-control-action-recovery.json"
+    ),
+}
+_CONTINUITY_AUTH_ANCHOR_DOMAIN = (
+    b"evelyn.conversation-continuity.external-anchor.v1\n"
 )
 _CONTINUITY_AUTH_ARTIFACT_DOMAINS = {
     CONTINUITY_AUTH_ARTIFACT_GUILD_REVOCATIONS: (
@@ -127,9 +166,14 @@ def _is_within(path: Path, root: Path) -> bool:
 class ContinuityAuthenticity:
     key: bytes | None = field(default=None, repr=False)
     allow_unsigned_bootstrap: bool = False
+    anchor_root: Path | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         if self.key is None:
+            if self.anchor_root is not None:
+                raise ContinuityAuthenticityError(
+                    "continuity_anchor_without_key"
+                )
             if self.allow_unsigned_bootstrap:
                 raise ContinuityAuthenticityError(
                     "continuity_auth_bootstrap_without_key"
@@ -143,6 +187,25 @@ class ContinuityAuthenticity:
             raise ContinuityAuthenticityError(
                 "continuity_auth_key_invalid"
             )
+        if self.anchor_root is not None:
+            try:
+                root = Path(self.anchor_root)
+                if (
+                    not root.is_absolute()
+                    or root.is_symlink()
+                    or not root.is_dir()
+                ):
+                    raise ContinuityAuthenticityError(
+                        "continuity_anchor_directory_rejected"
+                    )
+                resolved = root.resolve(strict=True)
+            except ContinuityAuthenticityError:
+                raise
+            except OSError:
+                raise ContinuityAuthenticityError(
+                    "continuity_anchor_unavailable"
+                ) from None
+            object.__setattr__(self, "anchor_root", resolved)
 
     @property
     def configured(self) -> bool:
@@ -153,6 +216,20 @@ class ContinuityAuthenticity:
         if self.key is None:
             return ""
         return hashlib.sha256(self.key).hexdigest()[:16]
+
+    @property
+    def external_anchor_configured(self) -> bool:
+        return self.anchor_root is not None
+
+    @staticmethod
+    def checkpoint_anchor_slot(auth_scope: str) -> str:
+        if auth_scope == CONTINUITY_AUTH_SCOPE_MAIN:
+            return CONTINUITY_AUTH_ANCHOR_SLOT_MAIN_HEAD
+        if auth_scope == CONTINUITY_AUTH_SCOPE_FAST_CONTROL:
+            return CONTINUITY_AUTH_ANCHOR_SLOT_FAST_CONTROL_HEAD
+        raise ContinuityAuthenticityError(
+            "continuity_auth_scope_invalid"
+        )
 
     def _tag_for_domain(
         self,
@@ -320,6 +397,333 @@ class ContinuityAuthenticity:
                 "continuity_auth_failed"
             )
 
+    @staticmethod
+    def _anchor_position(
+        generation: Any,
+        artifact_hash: Any,
+    ) -> tuple[int, str]:
+        if (
+            isinstance(generation, bool)
+            or not isinstance(generation, int)
+            or generation < 0
+        ):
+            raise ContinuityAuthenticityError(
+                "continuity_anchor_position_invalid"
+            )
+        validated_hash = _valid_sha256(artifact_hash)
+        if not validated_hash:
+            raise ContinuityAuthenticityError(
+                "continuity_anchor_position_invalid"
+            )
+        return generation, validated_hash
+
+    def _anchor_path(self, slot: str) -> Path:
+        filename = _CONTINUITY_AUTH_ANCHOR_FILES.get(slot)
+        if filename is None:
+            raise ContinuityAuthenticityError(
+                "continuity_anchor_slot_invalid"
+            )
+        if self.anchor_root is None:
+            raise ContinuityAuthenticityError(
+                "continuity_anchor_unavailable"
+            )
+        return self.anchor_root / filename
+
+    def _anchor_tag(
+        self,
+        payload: Mapping[str, Any],
+    ) -> str:
+        return self._tag_for_domain(
+            payload,
+            domain=_CONTINUITY_AUTH_ANCHOR_DOMAIN,
+        )
+
+    def _read_external_anchor(
+        self,
+        slot: str,
+    ) -> dict[str, Any] | None:
+        if not self.external_anchor_configured:
+            return None
+        path = self._anchor_path(slot)
+        try:
+            if not path.exists() and not path.is_symlink():
+                return None
+            if (
+                path.is_symlink()
+                or not path.is_file()
+                or path.stat().st_size
+                > CONTINUITY_AUTH_ANCHOR_MAX_FILE_BYTES
+            ):
+                raise ContinuityAuthenticityError(
+                    "continuity_anchor_record_rejected"
+                )
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            expected_keys = {
+                "schema",
+                "slot",
+                "generation",
+                "artifactHash",
+                "updatedAt",
+                "contentFree",
+                "authAlgorithm",
+                "authScope",
+                "authKeyId",
+                "authTag",
+            }
+            if (
+                not isinstance(payload, dict)
+                or set(payload) != expected_keys
+                or payload.get("schema")
+                != CONTINUITY_AUTH_ANCHOR_SCHEMA
+                or payload.get("slot") != slot
+                or payload.get("authScope") != slot
+                or payload.get("authAlgorithm")
+                != CONTINUITY_AUTH_ALGORITHM
+                or payload.get("authKeyId") != self.key_id
+                or payload.get("contentFree") is not True
+            ):
+                raise ContinuityAuthenticityError(
+                    "continuity_anchor_record_rejected"
+                )
+            generation, artifact_hash = self._anchor_position(
+                payload.get("generation"),
+                payload.get("artifactHash"),
+            )
+            try:
+                updated_at = float(payload.get("updatedAt"))
+            except (TypeError, ValueError):
+                updated_at = -1.0
+            if not math.isfinite(updated_at) or updated_at < 0.0:
+                raise ContinuityAuthenticityError(
+                    "continuity_anchor_record_rejected"
+                )
+            supplied = str(payload.get("authTag") or "").lower()
+            unsigned = {
+                key: value
+                for key, value in payload.items()
+                if key != "authTag"
+            }
+            if (
+                len(supplied) != 64
+                or not all(
+                    character in "0123456789abcdef"
+                    for character in supplied
+                )
+                or not hmac.compare_digest(
+                    supplied,
+                    self._anchor_tag(unsigned),
+                )
+            ):
+                raise ContinuityAuthenticityError(
+                    "continuity_anchor_auth_failed"
+                )
+            return {
+                "generation": generation,
+                "artifactHash": artifact_hash,
+                "updatedAt": updated_at,
+            }
+        except ContinuityAuthenticityError:
+            raise
+        except (UnicodeError, json.JSONDecodeError, TypeError, ValueError):
+            raise ContinuityAuthenticityError(
+                "continuity_anchor_record_rejected"
+            ) from None
+        except OSError:
+            raise ContinuityAuthenticityError(
+                "continuity_anchor_unavailable"
+            ) from None
+
+    def _write_external_anchor(
+        self,
+        slot: str,
+        *,
+        generation: int,
+        artifact_hash: str,
+        updated_at: float | None = None,
+    ) -> None:
+        generation, artifact_hash = self._anchor_position(
+            generation,
+            artifact_hash,
+        )
+        path = self._anchor_path(slot)
+        timestamp = (
+            time.time() if updated_at is None else float(updated_at)
+        )
+        if not math.isfinite(timestamp) or timestamp < 0.0:
+            raise ContinuityAuthenticityError(
+                "continuity_anchor_position_invalid"
+            )
+        payload = {
+            "schema": CONTINUITY_AUTH_ANCHOR_SCHEMA,
+            "slot": slot,
+            "generation": generation,
+            "artifactHash": artifact_hash,
+            "updatedAt": timestamp,
+            "contentFree": True,
+            "authAlgorithm": CONTINUITY_AUTH_ALGORITHM,
+            "authScope": slot,
+            "authKeyId": self.key_id,
+        }
+        payload["authTag"] = self._anchor_tag(payload)
+        try:
+            if path.is_symlink() or (
+                path.exists() and not path.is_file()
+            ):
+                raise ContinuityAuthenticityError(
+                    "continuity_anchor_record_rejected"
+                )
+            atomic_json_write(path, payload, durable=True)
+        except ContinuityAuthenticityError:
+            raise
+        except OSError:
+            raise ContinuityAuthenticityError(
+                "continuity_anchor_unavailable"
+            ) from None
+
+    def external_anchor_position(
+        self,
+        slot: str,
+    ) -> tuple[int, str] | None:
+        record = self._read_external_anchor(slot)
+        if record is None:
+            return None
+        return (
+            int(record["generation"]),
+            str(record["artifactHash"]),
+        )
+
+    def verify_external_anchor(
+        self,
+        slot: str,
+        *,
+        generation: int,
+        artifact_hash: str,
+    ) -> str:
+        if not self.external_anchor_configured:
+            return "unconfigured"
+        generation, artifact_hash = self._anchor_position(
+            generation,
+            artifact_hash,
+        )
+        record = self._read_external_anchor(slot)
+        if record is None:
+            raise ContinuityAuthenticityError(
+                "continuity_anchor_bootstrap_required"
+            )
+        if (
+            int(record["generation"]) != generation
+            or str(record["artifactHash"]) != artifact_hash
+        ):
+            raise ContinuityAuthenticityError(
+                "continuity_anchor_replay_detected"
+            )
+        return "verified"
+
+    def reconcile_external_anchor(
+        self,
+        slot: str,
+        *,
+        generation: int,
+        artifact_hash: str,
+        previous_hash: str = "",
+        allow_unlinked_one_step: bool = False,
+        updated_at: float | None = None,
+    ) -> str:
+        if not self.external_anchor_configured:
+            return "unconfigured"
+        generation, artifact_hash = self._anchor_position(
+            generation,
+            artifact_hash,
+        )
+        previous = _valid_sha256(previous_hash)
+        record = self._read_external_anchor(slot)
+        if record is None:
+            if not self.allow_unsigned_bootstrap:
+                raise ContinuityAuthenticityError(
+                    "continuity_anchor_bootstrap_required"
+                )
+            self._write_external_anchor(
+                slot,
+                generation=generation,
+                artifact_hash=artifact_hash,
+                updated_at=updated_at,
+            )
+            return "bootstrapped"
+        anchored_generation = int(record["generation"])
+        anchored_hash = str(record["artifactHash"])
+        if (
+            anchored_generation == generation
+            and anchored_hash == artifact_hash
+        ):
+            return "verified"
+        if (
+            generation == anchored_generation + 1
+            and (
+                previous == anchored_hash
+                or allow_unlinked_one_step
+            )
+        ):
+            self._write_external_anchor(
+                slot,
+                generation=generation,
+                artifact_hash=artifact_hash,
+                updated_at=updated_at,
+            )
+            return "recovered"
+        raise ContinuityAuthenticityError(
+            "continuity_anchor_replay_detected"
+        )
+
+    def commit_external_anchor(
+        self,
+        slot: str,
+        *,
+        previous_generation: int,
+        previous_hash: str,
+        generation: int,
+        artifact_hash: str,
+        updated_at: float | None = None,
+    ) -> str:
+        if not self.external_anchor_configured:
+            return "unconfigured"
+        previous_generation, previous_hash = self._anchor_position(
+            previous_generation,
+            previous_hash,
+        )
+        generation, artifact_hash = self._anchor_position(
+            generation,
+            artifact_hash,
+        )
+        if generation != previous_generation + 1:
+            raise ContinuityAuthenticityError(
+                "continuity_anchor_position_invalid"
+            )
+        record = self._read_external_anchor(slot)
+        if record is None:
+            if not self.allow_unsigned_bootstrap:
+                raise ContinuityAuthenticityError(
+                    "continuity_anchor_bootstrap_required"
+                )
+        elif (
+            int(record["generation"]) == generation
+            and str(record["artifactHash"]) == artifact_hash
+        ):
+            return "verified"
+        elif (
+            int(record["generation"]) != previous_generation
+            or str(record["artifactHash"]) != previous_hash
+        ):
+            raise ContinuityAuthenticityError(
+                "continuity_anchor_replay_detected"
+            )
+        self._write_external_anchor(
+            slot,
+            generation=generation,
+            artifact_hash=artifact_hash,
+            updated_at=updated_at,
+        )
+        return "advanced"
+
 
 def load_continuity_authenticity(
     *,
@@ -331,10 +735,17 @@ def load_continuity_authenticity(
     raw_path = str(
         values.get(CONTINUITY_AUTH_KEY_FILE_ENV) or ""
     ).strip()
+    raw_anchor_root = str(
+        values.get(CONTINUITY_AUTH_ANCHOR_DIR_ENV) or ""
+    ).strip()
     bootstrap = _enabled(
         values.get(CONTINUITY_AUTH_BOOTSTRAP_ENV)
     )
     if not raw_path:
+        if raw_anchor_root:
+            raise ContinuityAuthenticityError(
+                "continuity_anchor_without_key"
+            )
         return ContinuityAuthenticity(
             allow_unsigned_bootstrap=bootstrap,
         )
@@ -369,6 +780,29 @@ def load_continuity_authenticity(
                 "continuity_auth_key_file_rejected"
             )
         key = _decode_key_file(resolved.read_bytes())
+        anchor_root: Path | None = None
+        if raw_anchor_root:
+            candidate = Path(raw_anchor_root)
+            if not candidate.is_absolute() or candidate.is_symlink():
+                raise ContinuityAuthenticityError(
+                    "continuity_anchor_directory_rejected"
+                )
+            try:
+                anchor_root = candidate.resolve(strict=True)
+            except OSError:
+                raise ContinuityAuthenticityError(
+                    "continuity_anchor_unavailable"
+                ) from None
+            if (
+                not anchor_root.is_dir()
+                or any(
+                    _is_within(anchor_root, root)
+                    for root in protected_roots
+                )
+            ):
+                raise ContinuityAuthenticityError(
+                    "continuity_anchor_directory_rejected"
+                )
     except ContinuityAuthenticityError:
         raise
     except OSError:
@@ -378,6 +812,7 @@ def load_continuity_authenticity(
     return ContinuityAuthenticity(
         key=key,
         allow_unsigned_bootstrap=bootstrap,
+        anchor_root=anchor_root,
     )
 
 
@@ -491,6 +926,12 @@ def validate_continuity_head(
 
 
 __all__ = [
+    "CONTINUITY_AUTH_ANCHOR_DIR_ENV",
+    "CONTINUITY_AUTH_ANCHOR_SCHEMA",
+    "CONTINUITY_AUTH_ANCHOR_SLOT_FAST_ACTION_HEAD",
+    "CONTINUITY_AUTH_ANCHOR_SLOT_FAST_CONTROL_HEAD",
+    "CONTINUITY_AUTH_ANCHOR_SLOT_GUILD_REVOCATIONS",
+    "CONTINUITY_AUTH_ANCHOR_SLOT_MAIN_HEAD",
     "CONTINUITY_AUTH_ALGORITHM",
     "CONTINUITY_AUTH_ARTIFACT_FAST_ACTION_HEAD",
     "CONTINUITY_AUTH_ARTIFACT_GUILD_REVOCATIONS",

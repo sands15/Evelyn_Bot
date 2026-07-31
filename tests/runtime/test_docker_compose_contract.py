@@ -20,7 +20,7 @@ LAUNCHERS = REPO_ROOT / "evelyn_core" / "runtime" / "launchers"
 
 
 class DockerComposeContractTests(unittest.TestCase):
-    def test_continuity_auth_override_shares_read_only_external_key(
+    def test_continuity_auth_override_shares_key_and_external_anchor(
         self,
     ) -> None:
         source = CONTINUITY_AUTH_COMPOSE.read_text(
@@ -40,6 +40,23 @@ class DockerComposeContractTests(unittest.TestCase):
         )
         self.assertEqual(
             source.count("- evelyn_continuity_auth_key"),
+            2,
+        )
+        self.assertIn(
+            "${EVELYN_CONTINUITY_AUTH_ANCHOR_DIR:?",
+            source,
+        )
+        self.assertEqual(
+            source.count(
+                "EVELYN_CONTINUITY_AUTH_ANCHOR_DIR: "
+                "/var/lib/evelyn-continuity-anchor"
+            ),
+            2,
+        )
+        self.assertEqual(
+            source.count(
+                "target: /var/lib/evelyn-continuity-anchor"
+            ),
             2,
         )
         self.assertNotIn("runtime_artifacts/secrets", source)

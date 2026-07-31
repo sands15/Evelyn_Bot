@@ -270,6 +270,7 @@ class RealMainProcessStartupSmokeTests(unittest.TestCase):
         *,
         temp_root: Path | None = None,
         continuity_auth_key_path: Path | None = None,
+        continuity_auth_anchor_path: Path | None = None,
     ) -> subprocess.Popen[str]:
         temp_root = temp_root or self.allocate_temp_root()
         env = os.environ.copy()
@@ -299,6 +300,10 @@ class RealMainProcessStartupSmokeTests(unittest.TestCase):
         if continuity_auth_key_path is not None:
             env["EVELYN_CONTINUITY_AUTH_KEY_FILE"] = str(
                 continuity_auth_key_path
+            )
+        if continuity_auth_anchor_path is not None:
+            env["EVELYN_CONTINUITY_AUTH_ANCHOR_DIR"] = str(
+                continuity_auth_anchor_path
             )
         stdout_path = temp_root / "main.stdout.log"
         stderr_path = temp_root / "main.stderr.log"
@@ -401,8 +406,12 @@ class RealMainProcessStartupSmokeTests(unittest.TestCase):
         auth_key_path.write_bytes(
             b"real-main-continuity-auth-key-32-bytes"
         )
+        auth_anchor_path = temp_root / "continuity-anchor"
+        auth_anchor_path.mkdir()
         authenticity = ContinuityAuthenticity(
-            key=auth_key_path.read_bytes()
+            key=auth_key_path.read_bytes(),
+            allow_unsigned_bootstrap=True,
+            anchor_root=auth_anchor_path,
         )
         shared_checkpoint_path = (
             REPO_ROOT
@@ -445,6 +454,7 @@ class RealMainProcessStartupSmokeTests(unittest.TestCase):
             unused_tcp_port(),
             temp_root=temp_root,
             continuity_auth_key_path=auth_key_path,
+            continuity_auth_anchor_path=auth_anchor_path,
         )
         first_status = self.wait_for_continuity_restore(status_path)
         first_restored_at = float(
@@ -460,6 +470,7 @@ class RealMainProcessStartupSmokeTests(unittest.TestCase):
             unused_tcp_port(),
             temp_root=temp_root,
             continuity_auth_key_path=auth_key_path,
+            continuity_auth_anchor_path=auth_anchor_path,
         )
         second_status = self.wait_for_continuity_restore(
             status_path,
@@ -469,6 +480,10 @@ class RealMainProcessStartupSmokeTests(unittest.TestCase):
         self.assertEqual(second_status["restoredSessionCount"], 1)
         self.assertTrue(second_status["keyedAuthenticity"])
         self.assertTrue(second_status["tamperEvident"])
+        self.assertTrue(second_status["externalReplayProtected"])
+        self.assertTrue(
+            second_status["guildRevocationsReplayProtected"]
+        )
         self.assertEqual(
             json.loads(head_path.read_text(encoding="utf-8"))[
                 "schema"

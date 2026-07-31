@@ -52,6 +52,10 @@ def require_durable_continuity_receipt(
                     or value.get("tamperEvident") is not True
                 )
             )
+            or (
+                value.get("externalAnchorConfigured") is True
+                and value.get("externalReplayProtected") is not True
+            )
             or generation is None
             or generation < 1
             or persisted_count is None

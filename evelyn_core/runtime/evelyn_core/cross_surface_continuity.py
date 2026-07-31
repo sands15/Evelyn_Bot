@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable
 
 from .continuity_authenticity import (
+    CONTINUITY_AUTH_ANCHOR_SLOT_GUILD_REVOCATIONS,
     CONTINUITY_AUTH_ARTIFACT_GUILD_REVOCATIONS,
     CONTINUITY_AUTH_SCOPE_FAST_CONTROL,
     CONTINUITY_AUTH_SCOPE_MAIN,
@@ -22,9 +23,12 @@ from .session_continuity import (
     DEFAULT_MAX_FILE_BYTES,
     DEFAULT_MAX_GUILD_REVOCATIONS,
     DEFAULT_MAX_SESSIONS,
+    SESSION_CONTINUITY_ANCHORED_REVOCATIONS_SCHEMA,
     SESSION_CONTINUITY_CHECKPOINT_SCHEMA,
+    SESSION_CONTINUITY_CHAIN_GENESIS,
     SESSION_CONTINUITY_AUTHENTICATED_REVOCATIONS_SCHEMA,
     SESSION_CONTINUITY_REVOCATIONS_SCHEMA,
+    _revocations_hash,
 )
 from .text import clean_text
 
@@ -223,6 +227,7 @@ def _read_revocations(
     path: Path,
     *,
     authenticity: ContinuityAuthenticity,
+    external_anchor_required: bool,
 ) -> dict[int, float]:
     payload = _read_regular_json(
         path,
@@ -230,13 +235,22 @@ def _read_revocations(
         missing_ok=True,
     )
     if payload is None:
+        if external_anchor_required:
+            authenticity.verify_external_anchor(
+                CONTINUITY_AUTH_ANCHOR_SLOT_GUILD_REVOCATIONS,
+                generation=0,
+                artifact_hash=SESSION_CONTINUITY_CHAIN_GENESIS,
+            )
         return {}
     policy = payload.get("policy")
     guilds = payload.get("guilds")
     schema = clean_text(payload.get("schema"))
     base_keys = {"schema", "updatedAt", "guilds", "policy"}
     expected_keys = set(base_keys)
-    if schema == SESSION_CONTINUITY_AUTHENTICATED_REVOCATIONS_SCHEMA:
+    if schema in {
+        SESSION_CONTINUITY_AUTHENTICATED_REVOCATIONS_SCHEMA,
+        SESSION_CONTINUITY_ANCHORED_REVOCATIONS_SCHEMA,
+    }:
         expected_keys.update(
             {
                 "authAlgorithm",
@@ -245,12 +259,17 @@ def _read_revocations(
                 "authTag",
             }
         )
+    if schema == SESSION_CONTINUITY_ANCHORED_REVOCATIONS_SCHEMA:
+        expected_keys.update(
+            {"generation", "previousHash", "ledgerHash"}
+        )
     if (
         set(payload) != expected_keys
         or schema
         not in {
             SESSION_CONTINUITY_REVOCATIONS_SCHEMA,
             SESSION_CONTINUITY_AUTHENTICATED_REVOCATIONS_SCHEMA,
+            SESSION_CONTINUITY_ANCHORED_REVOCATIONS_SCHEMA,
         }
         or not isinstance(guilds, dict)
         or len(guilds) > DEFAULT_MAX_GUILD_REVOCATIONS
@@ -262,7 +281,10 @@ def _read_revocations(
         or _finite_float(payload.get("updatedAt")) < 0.0
     ):
         raise ValueError("revocations_rejected")
-    if schema == SESSION_CONTINUITY_AUTHENTICATED_REVOCATIONS_SCHEMA:
+    if schema in {
+        SESSION_CONTINUITY_AUTHENTICATED_REVOCATIONS_SCHEMA,
+        SESSION_CONTINUITY_ANCHORED_REVOCATIONS_SCHEMA,
+    }:
         authenticity.verify_scoped_artifact(
             payload,
             artifact_scope=(
@@ -272,6 +294,29 @@ def _read_revocations(
     elif authenticity.configured:
         raise ContinuityAuthenticityError(
             "continuity_auth_bootstrap_required"
+        )
+    if schema == SESSION_CONTINUITY_ANCHORED_REVOCATIONS_SCHEMA:
+        generation = payload.get("generation")
+        previous_hash = _valid_sha256(payload.get("previousHash"))
+        ledger_hash = _valid_sha256(payload.get("ledgerHash"))
+        if (
+            isinstance(generation, bool)
+            or not isinstance(generation, int)
+            or generation < 1
+            or not previous_hash
+            or not ledger_hash
+            or ledger_hash != _revocations_hash(payload)
+        ):
+            raise ValueError("revocations_rejected")
+        if external_anchor_required:
+            authenticity.verify_external_anchor(
+                CONTINUITY_AUTH_ANCHOR_SLOT_GUILD_REVOCATIONS,
+                generation=generation,
+                artifact_hash=ledger_hash,
+            )
+    elif external_anchor_required:
+        raise ContinuityAuthenticityError(
+            "continuity_anchor_bootstrap_required"
         )
     revocations: dict[int, float] = {}
     for raw_guild_id, raw_timestamp in guilds.items():
@@ -1096,6 +1141,15 @@ def read_verified_continuity_snapshot(
                 missing_ok=True,
             )
             if empty_head is None:
+                head_authenticity.verify_external_anchor(
+                    head_authenticity.checkpoint_anchor_slot(
+                        authenticity_scope
+                    ),
+                    generation=0,
+                    artifact_hash=(
+                        SESSION_CONTINUITY_CHAIN_GENESIS
+                    ),
+                )
                 return VerifiedContinuitySnapshot(
                     source=source,
                     state="missing",
@@ -1109,6 +1163,17 @@ def read_verified_continuity_snapshot(
                 raise ValueError(
                     "checkpoint_missing_after_active_head"
                 )
+            head_authenticity.verify_external_anchor(
+                head_authenticity.checkpoint_anchor_slot(
+                    authenticity_scope
+                ),
+                generation=int(
+                    validated_empty_head["generation"]
+                ),
+                artifact_hash=str(
+                    validated_empty_head["checkpointHash"]
+                ),
+            )
             return VerifiedContinuitySnapshot(
                 source=source,
                 state="empty",
@@ -1172,6 +1237,13 @@ def read_verified_continuity_snapshot(
             or checkpoint_hash != head_hash
         ):
             raise ValueError("continuity_integrity_rejected")
+        head_authenticity.verify_external_anchor(
+            head_authenticity.checkpoint_anchor_slot(
+                authenticity_scope
+            ),
+            generation=generation,
+            artifact_hash=checkpoint_hash,
+        )
         policy = checkpoint.get("policy")
         if (
             not isinstance(policy, dict)
@@ -1214,6 +1286,11 @@ def read_verified_continuity_snapshot(
         revocations = _read_revocations(
             root / "guild_revocations.json",
             authenticity=head_authenticity,
+            external_anchor_required=(
+                head_authenticity.external_anchor_configured
+                and authenticity_scope
+                == CONTINUITY_AUTH_SCOPE_MAIN
+            ),
         )
         sessions = checkpoint.get("sessions")
         if not isinstance(sessions, list):

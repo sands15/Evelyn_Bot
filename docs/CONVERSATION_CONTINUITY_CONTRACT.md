@@ -75,7 +75,7 @@ hash-chain·rollback protection·exact receipt 검증을 사용한다.
 - `fast_control.continuity-status.v1`은 state, generation, message count와
   고정 오류 코드만 공개하며 대화 내용은 포함하지 않는다.
 
-## Keyed continuity authenticity
+## Keyed authenticity and external monotonic anchors
 
 `EVELYN_CONTINUITY_AUTH_KEY_FILE`을 설정하면 Main/Discord owner와 Fast Control
 owner는 content-free checkpoint head를
@@ -88,8 +88,9 @@ owner 폴더로 복사하는 교차-owner replay를 거부한다.
 같은 키는 서로 다른 HMAC domain으로 두 content-free 보조 저장소도 인증한다.
 
 - `conversation_continuity.guild_revocations.v2`는 ledger 전체를 인증해 guild ID,
-  철회 시각과 정책의 변경을 거부한다. Main restore와 cross-surface reader가 같은
-  tag를 검증한다.
+  철회 시각과 정책의 변경을 거부한다. 외부 앵커를 켜면 generation, previous
+  hash, ledger hash가 추가된 v3로 승격된다. Main restore와 cross-surface
+  reader가 같은 tag와 현재 앵커 위치를 검증한다.
 - `fast_control.action-recovery-head.v2`는 recovery journal의 generation/hash를
   인증한다. journal과 일반 head hash를 함께 다시 계산해도 tag가 없으면
   `auth_error`가 된다.
@@ -97,11 +98,39 @@ owner 폴더로 복사하는 교차-owner replay를 거부한다.
   않는다. 올바른 키로 재시작할 수 있도록 journal/head를 보존하고 background
   action 시작과 continuity commit을 막는다.
 
+`EVELYN_CONTINUITY_AUTH_ANCHOR_DIR`도 설정하면 runtime artifact와 분리된 보호
+디렉터리에 다음 네 content-free 단조 슬롯을 기록한다.
+
+- Main/Discord checkpoint generation/hash
+- Fast Control checkpoint generation/hash
+- Main guild revocation ledger generation/hash
+- Fast Action recovery journal generation/hash
+
+각 슬롯은 `conversation_continuity.external-anchor.v1` HMAC record를 서로 다른
+파일에 저장한다. record에는 slot, generation, artifact hash, 갱신 시각과
+`contentFree=true`만 들어가며 대화문, ID, 경로, action 내용은 들어가지 않는다.
+owner restore와 writer는 현재 artifact가 앵커와 정확히 같은지 검증한다. artifact
+commit 뒤 앵커 commit 전에 죽은 경우에는 인증된 chain이 정확히 한 generation
+앞서 있고 이전 hash가 현재 앵커와 연결될 때만 앵커를 전진시킨다. read-only
+cross-surface reader는 lagging 앵커를 직접 승격하지 않는다.
+
+따라서 보호된 앵커는 다음을 구분한다.
+
+- 정상 현재 상태: generation/hash가 정확히 일치한다.
+- 단일 commit crash: owner만 한 단계 앞선 chain을 복구하고 앵커를 전진시킨다.
+- 이미 서명된 과거 artifact replay: 현재 앵커보다 뒤이므로 fail-closed한다.
+- runtime continuity 폴더 전체 삭제: 남아 있는 앵커와 빈 generation 0이
+  불일치하므로 새 빈 상태를 만들지 않는다.
+
 - 키 파일은 최소 32바이트의 raw key 또는 `base64:` 접두사가 붙은 base64
   key여야 한다. 상대 경로, symlink, 8KiB 초과 파일과 repository 또는
   `runtime_artifacts` 보호 경계 내부의 키 파일은 거부한다.
 - 키·키 경로·auth tag는 status나 오류 로그에 노출하지 않는다. 공개 상태에는
-  `keyedAuthenticity`, `tamperEvident`, 고정 오류 코드만 남긴다.
+  `keyedAuthenticity`, `tamperEvident`, `externalAnchorConfigured`,
+  `externalReplayProtected`, 각 anchor state와 고정 오류 코드만 남긴다.
+- 앵커 경로도 절대 경로여야 하며 repository와 `runtime_artifacts` 밖에 미리
+  생성된 실제 디렉터리여야 한다. symlink, 누락, 내부 경로는 거부한다. 키 없이
+  앵커만 설정하는 구성도 거부한다.
 - 서명된 v2 head를 키 없이 읽거나 잘못된 키/tag로 읽으면 fail-closed한다.
   이때 checkpoint/head 원본은 지우거나 새 상태로 덮지 않아 올바른 키로 다시
   시작할 수 있다.
@@ -110,16 +139,26 @@ owner 폴더로 복사하는 교차-owner replay를 거부한다.
   `EVELYN_CONTINUITY_AUTH_BOOTSTRAP=true`로 시작해야 v2로 승격된다. 승격 후에는
   즉시 `false`로 되돌린다. read-only cross-surface 경로는 bootstrap 상태를
   직접 신뢰하거나 승격하지 않는다.
+- 기존 keyed head와 revocation v2에 외부 앵커를 처음 도입할 때도 같은 one-shot
+  bootstrap이 필요하다. 운영자는 서비스를 모두 멈추고 현재 artifact를 검토·
+  백업한 뒤 빈 외부 앵커 디렉터리로 한 번만 bootstrap한다. 모든 owner status의
+  `checkpointAnchorState=verified`, `externalReplayProtected=true`와 Main의
+  `guildRevocationsAnchorState=verified`를 확인한 뒤 즉시 bootstrap을 끈다.
 - Docker에서는 base compose와 `docker-compose.continuity-auth.yml`을 함께
   사용한다. override는 호스트의 절대 키 경로를 `/run/secrets`에 read-only
-  secret으로 마운트해 Bot API와 Discord가 같은 키를 사용하게 한다.
+  secret으로 마운트하고, 별도의 절대 앵커 디렉터리를
+  `/var/lib/evelyn-continuity-anchor`에 read-write bind mount해 Bot API와
+  Discord가 같은 키와 네 독립 슬롯을 사용하게 한다. 앵커 디렉터리는 두
+  서비스 계정만 쓸 수 있도록 host ACL을 제한한다.
 
-이 HMAC 경계는 공유 continuity 폴더의 관리자가 checkpoint/head,
+키만 켠 HMAC 경계는 공유 continuity 폴더의 관리자가 checkpoint/head,
 guild-revocation ledger, action journal/head를 임의의 새 내용으로 다시 쓰는
-공격을 탐지한다. 그러나 공격자가 이미 서명된 과거 artifact 쌍을 그대로
-replay하거나 한 저장소의 모든 파일을 삭제하는 것은 외부 단조 counter가 없으면
-탐지할 수 없다. 따라서 `tamperEvident=true`는 임의 위조 방지를 뜻하며, 외부
-불변 anchor나 완전한 삭제 탐지를 뜻하지 않는다.
+공격을 탐지한다. 외부 앵커까지 켜면 runtime artifact 관리자가 이미 서명된 과거
+세트를 replay하거나 continuity 폴더 전체를 지우는 공격도 탐지한다. 단, 이
+보장은 외부 앵커 디렉터리가 artifact 공격자에게서 분리·보호된다는 신뢰 경계에
+의존한다. 공격자가 앵커의 과거 사본까지 artifact와 함께 replay하거나 키를
+사용할 수 있으면 로컬 파일만으로는 이를 구분할 수 없으며 TPM NV counter나
+원격 append-only 원장이 다음 강화 단계다.
 
 Fast Control의 background 조사 작업은 시작 답변만 복구되고 실제
 `asyncio.Task`는 재시작 뒤 복구할 수 없다. 이를 진행 중인 것처럼 남기거나
@@ -166,11 +205,14 @@ Fast Control의 background 조사 작업은 시작 답변만 복구되고 실제
   고정한다. v2 진행 entry에는 action 시작 continuity generation이 없으므로
   오래된 안내를 재사용하지 않고 보수적으로 새 안내를 commit한 뒤 v3로
   전환한다. 외부 키를 켜면 journal/head 동시 임의 재작성은 인증에서 거부되며,
-  이미 서명된 과거 쌍의 replay와 두 파일 동시 삭제는 외부 anchor 경계다.
+  외부 앵커를 함께 켜면 이미 서명된 과거 쌍의 replay와 두 파일 동시 삭제도
+  현재 action anchor와 불일치해 거부된다.
 - 공개 `actions.recovery` 상태는 pending/recovery count, 고정 오류 코드와
   generation/integrity/head 상태, `rollbackProtected`, `contentFree=true`,
   `rawText=false`, `automaticRetry=false`만 포함한다. 외부 키 사용 시 content-free
-  `headAuthenticity`, `keyedAuthenticity`, `tamperEvident`도 포함한다.
+  `headAuthenticity`, `keyedAuthenticity`, `tamperEvident`도 포함하고, 외부 앵커
+  사용 시 `anchorState`, `externalAnchorConfigured`,
+  `externalReplayProtected`를 추가한다.
 
 이 분리는 두 프로세스가 하나의 checkpoint를 경쟁해서 덮어쓰는 것을 막는
 single-writer 경계다. surface 전환은 별도 mutation owner를 추가하지 않고
@@ -179,7 +221,9 @@ single-writer 경계다. surface 전환은 별도 mutation owner를 추가하지
 
 - checkpoint v2 self-hash와 content-free head의 generation/hash가 정확히
   일치하는 current snapshot만 읽는다. writer가 복구할 수 있는 one-generation
-  lag도 reader는 직접 수리하지 않고 거부한다.
+  lag도 reader는 직접 수리하지 않고 거부한다. 외부 앵커가 설정된 경우 owner
+  scope에 맞는 checkpoint anchor와 Main guild-revocation anchor도 정확히
+  일치해야 한다.
 - stale·future·expired·oversized·symlink·손상 파일, privacy policy 위반과
   손상된 guild revocation ledger는 fail-closed한다.
 - Main checkpoint에서 Control Page로 가져올 session은 명시적으로 설정한
@@ -252,14 +296,16 @@ generation과 checkpoint hash를 고정하는 content-free durable head다. sche
   변경에서 checkpoint v2 generation 1로 연결한다.
 
 무키 hash/head는 우발적·비협조적 변조와 일반 rollback을 탐지한다. keyed head
-v2는 checkpoint와 일반 head를 함께 임의 재작성하는 공격까지 탐지한다. 다만
-이미 서명된 과거 쌍의 replay와 전체 삭제를 탐지하는 외부 불변 원장은 아니다.
+v2는 checkpoint와 일반 head를 함께 임의 재작성하는 공격까지 탐지한다. 외부
+단조 앵커를 함께 쓰면 보호된 앵커 기준의 서명 replay와 전체 artifact 삭제도
+거부한다.
 
 `runtime_artifacts/conversation_continuity/guild_revocations.json`은 길드 초기화가
 체크포인트보다 먼저 내구성 있게 기록됐음을 나타내는 write-ahead ledger다.
 무키 스키마는 `conversation_continuity.guild_revocations.v1`, 외부 키 사용
-스키마는 HMAC 필드가 추가된 v2이며 최근 길드 최대 256개의 숫자 ID와 철회
-시각만 저장한다. 대화문, 사용자 ID, 채널 ID, 세션 키, 경로와 오류 메시지는
+스키마는 HMAC 필드가 추가된 v2, 외부 앵커 사용 스키마는 hash chain이 추가된
+v3이며 최근 길드 최대 256개의 숫자 ID와 철회 시각만 저장한다. 대화문, 사용자
+ID, 채널 ID, 세션 키, 경로와 오류 메시지는
 저장하지 않는다. ledger가 손상됐거나 schema·크기·파일 형식·인증 검사를
 통과하지 못하면 기존 checkpoint 전체를 복구하지 않는 fail-closed 정책을
 적용한다.
@@ -290,6 +336,7 @@ turn ID를 먼저 발급한다. 다른 최신 session만 저장된 결과나 같
 - `rollbackProtected=true`
 - `checkpointIntegrity=verified`
 - `checkpointHeadState=current`
+- 외부 앵커가 설정된 경우 `externalReplayProtected=true`
 - 양수 `checkpointGeneration`과 `persistedSessionCount`
 - `conversation_continuity.commit-metrics.v1`의 양수 시도·성공·표본 수와
   `lastSucceeded=true`, `lastTargetVerified=true`

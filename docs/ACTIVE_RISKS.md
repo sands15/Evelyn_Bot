@@ -110,6 +110,17 @@ signed 상태의 key 누락·불일치와 검토되지 않은 v1
 recovery head의 journal generation/hash도 인증한다. Action 인증 오류는 자동
 중단 안내나 ack로 원본을 덮지 않고 `auth_error`에서 멈춘다.
 
+외부 단조 앵커도 구현됐다. repository와 `runtime_artifacts` 밖의 미리 생성한
+보호 디렉터리를 `EVELYN_CONTINUITY_AUTH_ANCHOR_DIR`로 주입하면 Main checkpoint,
+Fast Control checkpoint, Main guild revocation ledger, Fast Action journal이
+각각 독립적인 HMAC generation/hash 슬롯을 사용한다. runtime artifact만 이미
+서명된 과거 세트로 되돌리거나 전체 삭제하면 현재 앵커와 불일치해 원본을 새
+빈 상태로 덮지 않고 fail-closed한다. artifact commit 뒤 앵커 commit 전 crash는
+인증된 chain이 정확히 한 generation 앞선 경우에만 owner가 복구한다. 기존
+keyed 상태를 처음 앵커에 채택할 때도 one-shot bootstrap이 필요하고 read-only
+cross-surface reader는 승격하지 않는다. guild revocation ledger는 이 모드에서
+generation/previous hash/ledger hash를 포함한 v3를 사용한다.
+
 periodic writer가 저장한 직후 첫 Python 프로세스를 `os._exit`로 강제 종료하고
 두 번째 새 프로세스가 완료 턴, active follow-up, user ownership, 현재 system
 prompt와 reply target을 복구하는 owner-level E2E도 통과했다. 부분 STT와 이전
@@ -195,8 +206,9 @@ opt-in real-main crash/restart 집중 테스트 68개, `compileall`, `pip check`
 새 v2 이미지에서도 재계산 hash 변조, 과거 generation rollback, checkpoint
 삭제, v1 migration, head commit crash 복구와 실제 `main.py` crash/restart를
 검증했다. 외부 키가 설정된 경우 checkpoint/head 동시 임의 재작성도 새
-authenticity 테스트가 거부한다. 다만 이미 서명된 과거 쌍의 replay와 전체 삭제를
-탐지할 외부 단조 counter·불변 원장은 아직 제공하지 않는다.
+authenticity 테스트가 거부한다. 새 외부 앵커 집중 테스트는 checkpoint,
+revocation, Fast Action의 서명된 과거 세트 replay와 전체 artifact 삭제를
+거부하고, 세 경로의 한 단계 anchor commit lag를 복구함을 확인한다.
 
 `67a7adf` 공식 Discord 이미지에서는 새 전달 테스트 9개, 인접 경로 8개,
 Discord I/O 전체 98개를 통과했다. core 468개도 기능 assertion 실패는
@@ -251,9 +263,10 @@ v3는 각 action marker에 시작 당시 Fast continuity generation도 기록한
 generation이 없는 v1/v2 pending marker는 보수적으로 새 안내를 요구한다.
 
 action journal/head와 guild revocation ledger도 외부 키를 켜면 임의 위조를
-거부한다. 남은 위험은 이미 서명된 과거 artifact 쌍의 replay나 한 저장소의
-전체 파일 삭제를 외부 단조 anchor 없이 탐지하지 못한다는 점이다. 실제 Control
-Page에서 장시간 웹 조사 중 Bot API 컨테이너를 강제 종료하는 운영 E2E도 아직
+거부하고, 외부 앵커까지 켜면 runtime artifact replay와 전체 삭제를 거부한다.
+남은 위험은 host의 보호된 앵커 디렉터리까지 과거 사본으로 되돌릴 수 있는
+공격자다. 이 범위에는 TPM NV counter나 원격 append-only 원장이 필요하다. 실제
+Control Page에서 장시간 웹 조사 중 Bot API 컨테이너를 강제 종료하는 운영 E2E도 아직
 수행하지 않았다. live 검증에서는 시작 답변 뒤 강제 종료, 고정 중단 안내,
 자동 재요청 0회와 `actions.recovery`의 content-free 상태를 함께 확인한다.
 

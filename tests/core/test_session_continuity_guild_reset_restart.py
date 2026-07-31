@@ -33,10 +33,12 @@ WRITER_PROCESS = textwrap.dedent(
 
     root = Path(sys.argv[1])
     authenticity = ContinuityAuthenticity(
-        key=Path(sys.argv[2]).read_bytes()
+        key=Path(sys.argv[2]).read_bytes(),
+        allow_unsigned_bootstrap=True,
+        anchor_root=Path(sys.argv[3]),
     )
-    phase = sys.argv[3]
-    crash_code = int(sys.argv[4])
+    phase = sys.argv[4]
+    crash_code = int(sys.argv[5])
     store = SessionStateStore.create_empty()
     sessions = (
         (
@@ -113,7 +115,8 @@ RECOVERY_PROCESS = textwrap.dedent(
 
     root = Path(sys.argv[1])
     authenticity = ContinuityAuthenticity(
-        key=Path(sys.argv[2]).read_bytes()
+        key=Path(sys.argv[2]).read_bytes(),
+        anchor_root=Path(sys.argv[3]),
     )
     store = SessionStateStore.create_empty()
     manager = SessionContinuityCheckpoint(
@@ -160,6 +163,8 @@ class SessionContinuityGuildResetRestartTests(unittest.TestCase):
                 key_path.write_bytes(
                     b"guild-reset-restart-auth-key-32-bytes"
                 )
+                anchor_root = base / "continuity-anchor"
+                anchor_root.mkdir()
                 writer = subprocess.run(
                     [
                         sys.executable,
@@ -167,6 +172,7 @@ class SessionContinuityGuildResetRestartTests(unittest.TestCase):
                         WRITER_PROCESS,
                         str(root),
                         str(key_path),
+                        str(anchor_root),
                         phase,
                         str(exit_code),
                     ],
@@ -193,6 +199,7 @@ class SessionContinuityGuildResetRestartTests(unittest.TestCase):
                         RECOVERY_PROCESS,
                         str(root),
                         str(key_path),
+                        str(anchor_root),
                     ],
                     cwd=REPO_ROOT,
                     env=self.subprocess_environment(),
@@ -212,6 +219,14 @@ class SessionContinuityGuildResetRestartTests(unittest.TestCase):
                 self.assertEqual(
                     result["status"]["guildRevocationsAuthenticity"],
                     "verified",
+                )
+                self.assertTrue(
+                    result["status"][
+                        "guildRevocationsReplayProtected"
+                    ]
+                )
+                self.assertTrue(
+                    result["status"]["externalReplayProtected"]
                 )
                 self.assertEqual(
                     result["status"]["restoredSessionCount"],

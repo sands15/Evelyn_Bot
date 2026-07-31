@@ -2,16 +2,26 @@ services:
   bot_api:
     environment:
       EVELYN_CONTINUITY_AUTH_KEY_FILE: /run/secrets/evelyn_continuity_auth.key
+      EVELYN_CONTINUITY_AUTH_ANCHOR_DIR: /var/lib/evelyn-continuity-anchor
       EVELYN_CONTINUITY_AUTH_BOOTSTRAP: "${EVELYN_CONTINUITY_AUTH_BOOTSTRAP:-false}"
     secrets:
       - evelyn_continuity_auth_key
+    volumes:
+      - type: bind
+        source: "${EVELYN_CONTINUITY_AUTH_ANCHOR_DIR:?Set an absolute external continuity anchor directory}"
+        target: /var/lib/evelyn-continuity-anchor
 
   discord_bot:
     environment:
       EVELYN_CONTINUITY_AUTH_KEY_FILE: /run/secrets/evelyn_continuity_auth.key
+      EVELYN_CONTINUITY_AUTH_ANCHOR_DIR: /var/lib/evelyn-continuity-anchor
       EVELYN_CONTINUITY_AUTH_BOOTSTRAP: "${EVELYN_CONTINUITY_AUTH_BOOTSTRAP:-false}"
     secrets:
       - evelyn_continuity_auth_key
+    volumes:
+      - type: bind
+        source: "${EVELYN_CONTINUITY_AUTH_ANCHOR_DIR:?Set an absolute external continuity anchor directory}"
+        target: /var/lib/evelyn-continuity-anchor
 
 secrets:
   evelyn_continuity_auth_key:

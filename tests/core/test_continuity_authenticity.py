@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 REPO_ROOT = next(
@@ -17,6 +18,10 @@ if str(RUNTIME_ROOT) not in sys.path:
     sys.path.insert(0, str(RUNTIME_ROOT))
 
 from evelyn_core.continuity_authenticity import (  # noqa: E402
+    CONTINUITY_AUTH_ANCHOR_SLOT_FAST_ACTION_HEAD,
+    CONTINUITY_AUTH_ANCHOR_SLOT_FAST_CONTROL_HEAD,
+    CONTINUITY_AUTH_ANCHOR_SLOT_GUILD_REVOCATIONS,
+    CONTINUITY_AUTH_ANCHOR_SLOT_MAIN_HEAD,
     CONTINUITY_AUTH_SCOPE_FAST_CONTROL,
     CONTINUITY_AUTH_SCOPE_MAIN,
     CONTINUITY_HEAD_SCHEMA_V1,
@@ -41,6 +46,7 @@ from evelyn_core.fast_action_recovery import (  # noqa: E402
 )
 from evelyn_core import fast_action_recovery as action_recovery  # noqa: E402
 from evelyn_core.session_continuity import (  # noqa: E402
+    SESSION_CONTINUITY_ANCHORED_REVOCATIONS_SCHEMA,
     SESSION_CONTINUITY_AUTHENTICATED_REVOCATIONS_SCHEMA,
     SessionContinuityCheckpoint,
     _checkpoint_hash,
@@ -73,12 +79,15 @@ class ContinuityAuthenticityTests(unittest.TestCase):
         )
         self.key_path = self.root / "continuity-auth.key"
         self.key_path.write_bytes(b"k" * 32)
+        self.anchor_root = self.root / "continuity-anchor"
+        self.anchor_root.mkdir()
         self.clock = FakeClock()
 
     def authenticity(
         self,
         *,
         bootstrap: bool = False,
+        anchor: bool = False,
         key_path: Path | None = None,
     ) -> ContinuityAuthenticity:
         return load_continuity_authenticity(
@@ -89,6 +98,9 @@ class ContinuityAuthenticityTests(unittest.TestCase):
                 ),
                 "EVELYN_CONTINUITY_AUTH_BOOTSTRAP": (
                     "true" if bootstrap else "false"
+                ),
+                "EVELYN_CONTINUITY_AUTH_ANCHOR_DIR": (
+                    str(self.anchor_root) if anchor else ""
                 ),
             },
         )
@@ -257,6 +269,264 @@ class ContinuityAuthenticityTests(unittest.TestCase):
         )
         self.assertEqual(wrong_scope.state, "rejected")
 
+    def test_external_anchor_requires_explicit_bootstrap_and_external_root(
+        self,
+    ) -> None:
+        authenticity = self.authenticity(anchor=True)
+        with self.assertRaises(ContinuityAuthenticityError) as caught:
+            authenticity.reconcile_external_anchor(
+                CONTINUITY_AUTH_ANCHOR_SLOT_MAIN_HEAD,
+                generation=0,
+                artifact_hash="0" * 64,
+                updated_at=self.clock.wall,
+            )
+        self.assertEqual(
+            caught.exception.code,
+            "continuity_anchor_bootstrap_required",
+        )
+
+        bootstrapped = self.authenticity(
+            anchor=True,
+            bootstrap=True,
+        )
+        self.assertEqual(
+            bootstrapped.reconcile_external_anchor(
+                CONTINUITY_AUTH_ANCHOR_SLOT_MAIN_HEAD,
+                generation=0,
+                artifact_hash="0" * 64,
+                updated_at=self.clock.wall,
+            ),
+            "bootstrapped",
+        )
+        self.assertEqual(
+            authenticity.verify_external_anchor(
+                CONTINUITY_AUTH_ANCHOR_SLOT_MAIN_HEAD,
+                generation=0,
+                artifact_hash="0" * 64,
+            ),
+            "verified",
+        )
+        anchor_path = next(self.anchor_root.glob("*.json"))
+        anchor_text = anchor_path.read_text(encoding="utf-8")
+        self.assertNotIn("이전 이야기를 이어줘", anchor_text)
+        anchor_payload = json.loads(anchor_text)
+        anchor_payload["generation"] = 1
+        anchor_path.write_text(
+            json.dumps(anchor_payload),
+            encoding="utf-8",
+        )
+        with self.assertRaises(ContinuityAuthenticityError) as caught:
+            authenticity.verify_external_anchor(
+                CONTINUITY_AUTH_ANCHOR_SLOT_MAIN_HEAD,
+                generation=0,
+                artifact_hash="0" * 64,
+            )
+        self.assertEqual(
+            caught.exception.code,
+            "continuity_anchor_auth_failed",
+        )
+        anchor_path.write_text(anchor_text, encoding="utf-8")
+
+        internal_anchor = self.artifacts / "protected-anchor"
+        internal_anchor.mkdir(parents=True)
+        with self.assertRaises(ContinuityAuthenticityError) as caught:
+            load_continuity_authenticity(
+                protected_root=self.artifacts,
+                environ={
+                    "EVELYN_CONTINUITY_AUTH_KEY_FILE": str(
+                        self.key_path
+                    ),
+                    "EVELYN_CONTINUITY_AUTH_ANCHOR_DIR": str(
+                        internal_anchor
+                    ),
+                },
+            )
+        self.assertEqual(
+            caught.exception.code,
+            "continuity_anchor_directory_rejected",
+        )
+        with self.assertRaises(ContinuityAuthenticityError) as caught:
+            load_continuity_authenticity(
+                protected_root=self.artifacts,
+                environ={
+                    "EVELYN_CONTINUITY_AUTH_KEY_FILE": str(
+                        self.key_path
+                    ),
+                    "EVELYN_CONTINUITY_AUTH_ANCHOR_DIR": str(
+                        self.root / "missing-anchor"
+                    ),
+                },
+            )
+        self.assertEqual(
+            caught.exception.code,
+            "continuity_anchor_unavailable",
+        )
+
+    def test_external_anchor_rejects_signed_checkpoint_replay_and_deletion(
+        self,
+    ) -> None:
+        bootstrap = self.authenticity(
+            anchor=True,
+            bootstrap=True,
+        )
+        store = self.store()
+        manager = self.manager(
+            store=store,
+            authenticity=bootstrap,
+        )
+        first = manager.flush(force=True)
+        checkpoint_path = self.owner_root / "active.json"
+        head_path = self.owner_root / "checkpoint_head.json"
+        old_checkpoint = checkpoint_path.read_bytes()
+        old_head = head_path.read_bytes()
+        old_generation = first["checkpointGeneration"]
+
+        store.append_history(
+            "guild:7:text:8:user:9",
+            "두 번째 질문",
+            "두 번째 답변",
+            system_prompt="private prompt",
+            max_history_items=12,
+        )
+        self.clock.wall += 1.0
+        current = manager.flush(force=True)
+        self.assertGreater(
+            current["checkpointGeneration"],
+            old_generation,
+        )
+        self.assertTrue(current["externalReplayProtected"])
+        verified_current = read_verified_continuity_snapshot(
+            self.owner_root,
+            source="main",
+            wall_time=self.clock.wall_time,
+            guild_id=7,
+            user_id=9,
+            authenticity=self.authenticity(anchor=True),
+        )
+        self.assertTrue(verified_current.verified)
+
+        checkpoint_path.write_bytes(old_checkpoint)
+        head_path.write_bytes(old_head)
+        replayed_checkpoint = checkpoint_path.read_bytes()
+        replayed_head = head_path.read_bytes()
+        authenticity = self.authenticity(anchor=True)
+        rejected = self.manager(
+            authenticity=authenticity,
+        ).restore()
+        cross = read_verified_continuity_snapshot(
+            self.owner_root,
+            source="main",
+            wall_time=self.clock.wall_time,
+            guild_id=7,
+            user_id=9,
+            authenticity=authenticity,
+        )
+        self.assertEqual(rejected["state"], "error")
+        self.assertEqual(
+            rejected["lastErrorCode"],
+            "continuity_anchor_replay_detected",
+        )
+        self.assertEqual(
+            rejected["checkpointAnchorState"],
+            "replay_detected",
+        )
+        self.assertEqual(checkpoint_path.read_bytes(), replayed_checkpoint)
+        self.assertEqual(head_path.read_bytes(), replayed_head)
+        self.assertEqual(cross.state, "rejected")
+
+        checkpoint_path.unlink()
+        head_path.unlink()
+        deleted = self.manager(
+            authenticity=authenticity,
+        ).restore()
+        self.assertEqual(
+            deleted["lastErrorCode"],
+            "continuity_anchor_replay_detected",
+        )
+        self.assertFalse(checkpoint_path.exists())
+        self.assertFalse(head_path.exists())
+
+    def test_external_anchor_recovers_one_checkpoint_commit_lag(self) -> None:
+        bootstrap = self.authenticity(
+            anchor=True,
+            bootstrap=True,
+        )
+        store = self.store()
+        manager = self.manager(
+            store=store,
+            authenticity=bootstrap,
+        )
+        manager.flush(force=True)
+        anchor_path = next(
+            path
+            for path in self.anchor_root.glob("*.json")
+            if "checkpoint" in path.name
+            and "fast-control" not in path.name
+        )
+        lagging_anchor = anchor_path.read_bytes()
+        store.append_history(
+            "guild:7:text:8:user:9",
+            "앵커 crash 질문",
+            "앵커 crash 답변",
+            system_prompt="private prompt",
+            max_history_items=12,
+        )
+        self.clock.wall += 1.0
+        advanced = manager.flush(force=True)
+        anchor_path.write_bytes(lagging_anchor)
+
+        restored = self.manager(
+            authenticity=self.authenticity(anchor=True),
+        ).restore()
+        position = bootstrap.external_anchor_position(
+            CONTINUITY_AUTH_ANCHOR_SLOT_MAIN_HEAD
+        )
+        self.assertEqual(restored["state"], "restored")
+        self.assertEqual(
+            position[0] if position else -1,
+            advanced["checkpointGeneration"],
+        )
+        self.assertTrue(restored["externalReplayProtected"])
+
+    def test_checkpoint_anchor_write_failure_recovers_next_owner(self) -> None:
+        bootstrap = self.authenticity(
+            anchor=True,
+            bootstrap=True,
+        )
+        store = self.store()
+        manager = self.manager(
+            store=store,
+            authenticity=bootstrap,
+        )
+        manager.flush(force=True)
+        store.append_history(
+            "guild:7:text:8:user:9",
+            "앵커 저장 실패 질문",
+            "앵커 저장 실패 답변",
+            system_prompt="private prompt",
+            max_history_items=12,
+        )
+        self.clock.wall += 1.0
+        with patch.object(
+            ContinuityAuthenticity,
+            "commit_external_anchor",
+            side_effect=ContinuityAuthenticityError(
+                "continuity_anchor_unavailable"
+            ),
+        ):
+            failed = manager.flush(force=True)
+
+        self.assertEqual(failed["state"], "error")
+        self.assertEqual(
+            failed["lastErrorCode"],
+            "continuity_anchor_unavailable",
+        )
+        restored = self.manager(
+            authenticity=self.authenticity(anchor=True),
+        ).restore()
+        self.assertEqual(restored["state"], "restored")
+        self.assertTrue(restored["externalReplayProtected"])
+
     def test_fast_control_receipt_requires_verified_keyed_head(
         self,
     ) -> None:
@@ -296,6 +566,52 @@ class ContinuityAuthenticityTests(unittest.TestCase):
             ConversationContinuityCommitError
         ):
             require_durable_continuity_receipt(forged_status)
+
+    def test_fast_control_uses_independent_external_anchor_slot(
+        self,
+    ) -> None:
+        authenticity = self.authenticity(
+            anchor=True,
+            bootstrap=True,
+        )
+        owner = FastControlContinuityOwner(
+            artifacts_root=self.artifacts,
+            enabled=True,
+            wall_time=self.clock.wall_time,
+            monotonic=self.clock.monotonic,
+            authenticity=authenticity,
+        )
+
+        raw = owner.record_completed_turn(
+            "앵커 컨트롤 질문",
+            "앵커 컨트롤 답변",
+        )
+        receipt = require_durable_continuity_receipt(raw)
+
+        self.assertTrue(raw["externalAnchorConfigured"])
+        self.assertTrue(raw["externalReplayProtected"])
+        self.assertTrue(receipt["durable"])
+        with self.assertRaises(
+            ConversationContinuityCommitError
+        ):
+            require_durable_continuity_receipt(
+                {**raw, "externalReplayProtected": False}
+            )
+        self.assertIsNotNone(
+            authenticity.external_anchor_position(
+                CONTINUITY_AUTH_ANCHOR_SLOT_FAST_CONTROL_HEAD
+            )
+        )
+        self.assertIsNone(
+            authenticity.external_anchor_position(
+                CONTINUITY_AUTH_ANCHOR_SLOT_MAIN_HEAD
+            )
+        )
+        self.assertIsNone(
+            authenticity.external_anchor_position(
+                CONTINUITY_AUTH_ANCHOR_SLOT_GUILD_REVOCATIONS
+            )
+        )
 
     def test_fast_action_rewrite_is_auth_blocked_without_overwrite(
         self,
@@ -413,6 +729,121 @@ class ContinuityAuthenticityTests(unittest.TestCase):
         )
         self.assertEqual(head_path.read_bytes(), signed_bytes)
 
+    def test_external_anchor_rejects_fast_action_replay_and_deletion(
+        self,
+    ) -> None:
+        bootstrap = self.authenticity(
+            anchor=True,
+            bootstrap=True,
+        )
+        path = self.artifacts / "fast_control_actions" / "recovery.json"
+        journal = FastActionRecoveryJournal(
+            path=path,
+            enabled=True,
+            wall_time=self.clock.wall_time,
+            authenticity=bootstrap,
+        )
+        old_journal = path.read_bytes()
+        old_head = journal.head_path.read_bytes()
+        anchor_path = self.anchor_root / (
+            "fast-control-action-recovery.json"
+        )
+        lagging_anchor = anchor_path.read_bytes()
+        journal.begin("fast-action-1")
+        self.assertTrue(
+            journal.public_status()["externalReplayProtected"]
+        )
+        anchor_path.write_bytes(lagging_anchor)
+        recovered = FastActionRecoveryJournal(
+            path=path,
+            enabled=True,
+            wall_time=self.clock.wall_time,
+            authenticity=self.authenticity(anchor=True),
+        )
+        self.assertEqual(recovered.public_status()["state"], "pending")
+        self.assertTrue(
+            recovered.public_status()["externalReplayProtected"]
+        )
+
+        path.write_bytes(old_journal)
+        journal.head_path.write_bytes(old_head)
+        replay = FastActionRecoveryJournal(
+            path=path,
+            enabled=True,
+            wall_time=self.clock.wall_time,
+            authenticity=self.authenticity(anchor=True),
+        )
+        self.assertEqual(replay.public_status()["state"], "auth_error")
+        self.assertEqual(
+            replay.public_status()["lastErrorCode"],
+            "continuity_anchor_replay_detected",
+        )
+        self.assertEqual(
+            replay.public_status()["anchorState"],
+            "replay_detected",
+        )
+
+        path.unlink()
+        journal.head_path.unlink()
+        deleted = FastActionRecoveryJournal(
+            path=path,
+            enabled=True,
+            wall_time=self.clock.wall_time,
+            authenticity=self.authenticity(anchor=True),
+        )
+        self.assertEqual(
+            deleted.public_status()["lastErrorCode"],
+            "continuity_anchor_replay_detected",
+        )
+        self.assertFalse(path.exists())
+        self.assertFalse(journal.head_path.exists())
+        self.assertEqual(
+            bootstrap.external_anchor_position(
+                CONTINUITY_AUTH_ANCHOR_SLOT_FAST_ACTION_HEAD
+            )[0],
+            2,
+        )
+
+    def test_fast_action_anchor_write_failure_recovers_pending_marker(
+        self,
+    ) -> None:
+        bootstrap = self.authenticity(
+            anchor=True,
+            bootstrap=True,
+        )
+        path = self.artifacts / "fast_control_actions" / "recovery.json"
+        journal = FastActionRecoveryJournal(
+            path=path,
+            enabled=True,
+            wall_time=self.clock.wall_time,
+            authenticity=bootstrap,
+        )
+        with patch.object(
+            ContinuityAuthenticity,
+            "commit_external_anchor",
+            side_effect=ContinuityAuthenticityError(
+                "continuity_anchor_unavailable"
+            ),
+        ):
+            with self.assertRaises(ContinuityAuthenticityError):
+                journal.begin("fast-action-1")
+        self.assertEqual(
+            journal.public_status()["state"],
+            "auth_error",
+        )
+
+        restored = FastActionRecoveryJournal(
+            path=path,
+            enabled=True,
+            wall_time=self.clock.wall_time,
+            authenticity=self.authenticity(anchor=True),
+        )
+        self.assertEqual(restored.public_status()["state"], "pending")
+        self.assertEqual(restored.public_status()["pendingCount"], 1)
+        self.assertTrue(
+            restored.public_status()["externalReplayProtected"]
+        )
+
     def test_signed_guild_revocations_reject_rewrite(
         self,
     ) -> None:
@@ -501,6 +932,84 @@ class ContinuityAuthenticityTests(unittest.TestCase):
         self.assertEqual(
             caught.exception.code,
             "continuity_auth_key_required",
+        )
+
+    def test_external_anchor_rejects_revocation_replay_and_deletion(
+        self,
+    ) -> None:
+        bootstrap = self.authenticity(
+            anchor=True,
+            bootstrap=True,
+        )
+        manager = self.manager(
+            store=self.store(),
+            authenticity=bootstrap,
+        )
+        manager.flush(force=True)
+        self.assertEqual(manager._load_guild_revocations(), {})
+        manager._write_guild_revocations({7: 1000.0})
+        ledger_path = self.owner_root / "guild_revocations.json"
+        old_ledger = ledger_path.read_bytes()
+        anchor_path = self.anchor_root / (
+            "conversation-continuity-guild-revocations.json"
+        )
+        lagging_anchor = anchor_path.read_bytes()
+        manager._write_guild_revocations({7: 1001.0})
+        current = json.loads(ledger_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            current["schema"],
+            SESSION_CONTINUITY_ANCHORED_REVOCATIONS_SCHEMA,
+        )
+        self.assertEqual(current["generation"], 2)
+        anchor_path.write_bytes(lagging_anchor)
+        recovered = self.manager(
+            authenticity=self.authenticity(anchor=True)
+        )
+        self.assertEqual(
+            recovered._load_guild_revocations(),
+            {7: 1001.0},
+        )
+
+        ledger_path.write_bytes(old_ledger)
+        replay = self.manager(
+            authenticity=self.authenticity(anchor=True)
+        )
+        with self.assertRaises(ContinuityAuthenticityError) as caught:
+            replay._load_guild_revocations()
+        self.assertEqual(
+            caught.exception.code,
+            "continuity_anchor_replay_detected",
+        )
+        self.assertEqual(
+            replay.status()["guildRevocationsAnchorState"],
+            "replay_detected",
+        )
+        cross = read_verified_continuity_snapshot(
+            self.owner_root,
+            source="main",
+            wall_time=self.clock.wall_time,
+            guild_id=7,
+            user_id=9,
+            authenticity=self.authenticity(anchor=True),
+        )
+        self.assertEqual(cross.state, "rejected")
+
+        ledger_path.unlink()
+        deleted = self.manager(
+            authenticity=self.authenticity(anchor=True)
+        )
+        with self.assertRaises(ContinuityAuthenticityError) as caught:
+            deleted._load_guild_revocations()
+        self.assertEqual(
+            caught.exception.code,
+            "continuity_anchor_replay_detected",
+        )
+        self.assertFalse(ledger_path.exists())
+        self.assertEqual(
+            bootstrap.external_anchor_position(
+                CONTINUITY_AUTH_ANCHOR_SLOT_GUILD_REVOCATIONS
+            )[0],
+            2,
         )
 
     def test_rewritten_checkpoint_and_head_fail_without_deletion(

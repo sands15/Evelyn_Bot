@@ -14,6 +14,7 @@ from .continuity_commit_contract import (
     CONTINUITY_STATUS_SCHEMA,
 )
 from .continuity_authenticity import (
+    CONTINUITY_AUTH_ANCHOR_SLOT_GUILD_REVOCATIONS,
     CONTINUITY_AUTH_ARTIFACT_GUILD_REVOCATIONS,
     CONTINUITY_AUTH_SCOPE_MAIN,
     CONTINUITY_HEAD_SCHEMA_V1,
@@ -47,6 +48,9 @@ SESSION_CONTINUITY_REVOCATIONS_SCHEMA = (
 )
 SESSION_CONTINUITY_AUTHENTICATED_REVOCATIONS_SCHEMA = (
     "conversation_continuity.guild_revocations.v2"
+)
+SESSION_CONTINUITY_ANCHORED_REVOCATIONS_SCHEMA = (
+    "conversation_continuity.guild_revocations.v3"
 )
 DEFAULT_MAX_AGE_SEC = 15 * 60.0
 DEFAULT_FLUSH_INTERVAL_SEC = 1.0
@@ -152,6 +156,24 @@ def _checkpoint_hash(payload: dict[str, Any]) -> str:
         key: value
         for key, value in payload.items()
         if key != "checkpointHash"
+    }
+    return hashlib.sha256(
+        _canonical_json(unsigned).encode("utf-8")
+    ).hexdigest()
+
+
+def _revocations_hash(payload: dict[str, Any]) -> str:
+    unsigned = {
+        key: value
+        for key, value in payload.items()
+        if key
+        not in {
+            "ledgerHash",
+            "authAlgorithm",
+            "authScope",
+            "authKeyId",
+            "authTag",
+        }
     }
     return hashlib.sha256(
         _canonical_json(unsigned).encode("utf-8")
@@ -266,10 +288,28 @@ class SessionContinuityCheckpoint:
         self._persisted_session_count = 0
         self._guild_revocations: dict[int, float] = {}
         self._guild_revocations_authenticity = "missing"
+        self._guild_revocations_generation = 0
+        self._guild_revocations_hash = (
+            SESSION_CONTINUITY_CHAIN_GENESIS
+        )
+        self._guild_revocations_anchor_state = (
+            "missing"
+            if (
+                self.authenticity.external_anchor_configured
+                and self.authenticity_scope
+                == CONTINUITY_AUTH_SCOPE_MAIN
+            )
+            else "unconfigured"
+        )
         self._checkpoint_integrity = "unknown"
         self._checkpoint_generation = 0
         self._checkpoint_head_state = "missing"
         self._checkpoint_head_authenticity = "missing"
+        self._checkpoint_anchor_state = (
+            "missing"
+            if self.authenticity.external_anchor_configured
+            else "unconfigured"
+        )
         self._commit_attempt_count = 0
         self._commit_success_count = 0
         self._commit_failure_count = 0
@@ -282,6 +322,13 @@ class SessionContinuityCheckpoint:
     def _emit(self, message: str) -> None:
         if self.log is not None:
             self.log(message)
+
+    def _guild_revocations_anchor_configured(self) -> bool:
+        return bool(
+            self.authenticity.external_anchor_configured
+            and self.authenticity_scope
+            == CONTINUITY_AUTH_SCOPE_MAIN
+        )
 
     @staticmethod
     def _mapping_keys(mapping: Any) -> list[Any]:
@@ -477,9 +524,20 @@ class SessionContinuityCheckpoint:
             "guildRevocationsAuthenticity": (
                 self._guild_revocations_authenticity
             ),
+            "guildRevocationsGeneration": (
+                self._guild_revocations_generation
+            ),
+            "guildRevocationsAnchorState": (
+                self._guild_revocations_anchor_state
+            ),
             "guildRevocationsTamperEvident": bool(
                 self.authenticity.configured
                 and self._guild_revocations_authenticity
+                == "verified"
+            ),
+            "guildRevocationsReplayProtected": bool(
+                self._guild_revocations_anchor_configured()
+                and self._guild_revocations_anchor_state
                 == "verified"
             ),
             "checkpointIntegrity": self._checkpoint_integrity,
@@ -488,8 +546,20 @@ class SessionContinuityCheckpoint:
             "checkpointHeadAuthenticity": (
                 self._checkpoint_head_authenticity
             ),
+            "checkpointAnchorState": (
+                self._checkpoint_anchor_state
+            ),
             "keyedAuthenticity": (
                 self.authenticity.configured
+            ),
+            "externalAnchorConfigured": (
+                self.authenticity.external_anchor_configured
+            ),
+            "externalReplayProtected": bool(
+                self.authenticity.external_anchor_configured
+                and self._checkpoint_anchor_state == "verified"
+                and self._checkpoint_head_state
+                in {"current", "empty", "missing"}
             ),
             "tamperEvident": bool(
                 self.authenticity.configured
@@ -497,6 +567,10 @@ class SessionContinuityCheckpoint:
                 == "verified"
                 and self._checkpoint_head_state
                 in {"current", "empty"}
+                and (
+                    not self.authenticity.external_anchor_configured
+                    or self._checkpoint_anchor_state == "verified"
+                )
             ),
             "rollbackProtected": bool(
                 self._checkpoint_head_state
@@ -701,6 +775,8 @@ class SessionContinuityCheckpoint:
                     if head is not None
                     else SESSION_CONTINUITY_CHAIN_GENESIS
                 ),
+                "previousHash": SESSION_CONTINUITY_CHAIN_GENESIS,
+                "discardCheckpoint": False,
                 "integrity": "empty",
                 "headState": (
                     "empty"
@@ -750,6 +826,8 @@ class SessionContinuityCheckpoint:
                 "schema": schema,
                 "generation": 0,
                 "checkpointHash": checkpoint_hash,
+                "previousHash": SESSION_CONTINUITY_CHAIN_GENESIS,
+                "discardCheckpoint": False,
                 "integrity": "legacy",
                 "headState": head_state,
                 "headAuthenticity": head_authenticity,
@@ -811,6 +889,25 @@ class SessionContinuityCheckpoint:
             == SESSION_CONTINUITY_CHAIN_GENESIS
         ):
             head_state = "lagging"
+        elif (
+            head["state"] == "empty"
+            and int(head["generation"]) == generation + 1
+            and head["checkpointHash"]
+            == SESSION_CONTINUITY_CHAIN_GENESIS
+            and head.get("_authenticity") == "verified"
+        ):
+            return {
+                "payload": None,
+                "rawText": raw_text,
+                "schema": schema,
+                "generation": int(head["generation"]),
+                "checkpointHash": SESSION_CONTINUITY_CHAIN_GENESIS,
+                "previousHash": checkpoint_hash,
+                "discardCheckpoint": True,
+                "integrity": "empty",
+                "headState": "empty",
+                "headAuthenticity": head_authenticity,
+            }
         else:
             raise ValueError("checkpoint_rollback_or_head_mismatch")
         return {
@@ -819,6 +916,8 @@ class SessionContinuityCheckpoint:
             "schema": schema,
             "generation": generation,
             "checkpointHash": checkpoint_hash,
+            "previousHash": previous_hash,
+            "discardCheckpoint": False,
             "integrity": "verified",
             "headState": head_state,
             "headAuthenticity": head_authenticity,
@@ -829,6 +928,9 @@ class SessionContinuityCheckpoint:
         snapshot: dict[str, Any],
     ) -> dict[str, Any]:
         payload = snapshot.get("payload")
+        anchor_slot = self.authenticity.checkpoint_anchor_slot(
+            self.authenticity_scope
+        )
         if payload is None:
             if (
                 snapshot.get("headState") == "empty"
@@ -846,6 +948,26 @@ class SessionContinuityCheckpoint:
                     **snapshot,
                     "headAuthenticity": "verified",
                 }
+            self.authenticity.reconcile_external_anchor(
+                anchor_slot,
+                generation=int(snapshot["generation"]),
+                artifact_hash=str(snapshot["checkpointHash"]),
+                previous_hash=str(
+                    snapshot.get("previousHash") or ""
+                ),
+                allow_unlinked_one_step=bool(
+                    snapshot.get("headState") == "empty"
+                    and int(snapshot["generation"]) > 0
+                ),
+                updated_at=self.wall_time(),
+            )
+            self._checkpoint_anchor_state = (
+                "verified"
+                if self.authenticity.external_anchor_configured
+                else "unconfigured"
+            )
+            if snapshot.get("discardCheckpoint") is True:
+                self._discard_checkpoint()
             self._checkpoint_generation = int(
                 snapshot["generation"]
             )
@@ -878,6 +1000,20 @@ class SessionContinuityCheckpoint:
                     else "unconfigured"
                 ),
             }
+        self.authenticity.reconcile_external_anchor(
+            anchor_slot,
+            generation=int(snapshot["generation"]),
+            artifact_hash=str(snapshot["checkpointHash"]),
+            previous_hash=str(
+                snapshot.get("previousHash") or ""
+            ),
+            updated_at=self.wall_time(),
+        )
+        self._checkpoint_anchor_state = (
+            "verified"
+            if self.authenticity.external_anchor_configured
+            else "unconfigured"
+        )
         self._checkpoint_generation = int(
             snapshot["generation"]
         )
@@ -895,15 +1031,42 @@ class SessionContinuityCheckpoint:
     def _revoke_checkpoint_chain(self) -> None:
         self._checkpoint_revoked_at = self.wall_time()
         generation = self._checkpoint_generation
+        checkpoint_hash = SESSION_CONTINUITY_CHAIN_GENESIS
+        anchor_slot = self.authenticity.checkpoint_anchor_slot(
+            self.authenticity_scope
+        )
+        if self.authenticity.external_anchor_configured:
+            try:
+                anchored = self.authenticity.external_anchor_position(
+                    anchor_slot
+                )
+            except ContinuityAuthenticityError as exc:
+                self._checkpoint_anchor_state = "failed"
+                self._checkpoint_head_state = "failed"
+                self._checkpoint_integrity = "failed"
+                return
+            if anchored is None:
+                self._checkpoint_anchor_state = (
+                    "bootstrap_required"
+                )
+                self._checkpoint_head_state = "failed"
+                self._checkpoint_integrity = "failed"
+                return
+            generation, checkpoint_hash = anchored
         try:
             head = self._load_checkpoint_head()
-            if head is not None:
+            if (
+                head is not None
+                and not self.authenticity.external_anchor_configured
+            ):
                 generation = max(
                     generation,
                     int(head["generation"]),
                 )
+                checkpoint_hash = str(head["checkpointHash"])
         except Exception:
-            self._discard_checkpoint_head()
+            if not self.authenticity.external_anchor_configured:
+                self._discard_checkpoint_head()
         try:
             self._write_checkpoint_head(
                 state="empty",
@@ -912,19 +1075,67 @@ class SessionContinuityCheckpoint:
                     SESSION_CONTINUITY_CHAIN_GENESIS
                 ),
             )
+            self.authenticity.commit_external_anchor(
+                anchor_slot,
+                previous_generation=generation,
+                previous_hash=checkpoint_hash,
+                generation=generation + 1,
+                artifact_hash=SESSION_CONTINUITY_CHAIN_GENESIS,
+                updated_at=self.wall_time(),
+            )
             self._checkpoint_generation = generation + 1
             self._checkpoint_head_state = "empty"
+            self._checkpoint_anchor_state = (
+                "verified"
+                if self.authenticity.external_anchor_configured
+                else "unconfigured"
+            )
         except Exception:
-            self._discard_checkpoint_head()
+            if not self.authenticity.external_anchor_configured:
+                self._discard_checkpoint_head()
+            else:
+                self._checkpoint_head_state = "failed"
+                self._checkpoint_anchor_state = "failed"
+                self._checkpoint_integrity = "failed"
+                self._last_signature = ""
+                return
             self._checkpoint_head_state = "failed"
+            self._checkpoint_anchor_state = "unconfigured"
         self._checkpoint_integrity = "failed"
         self._last_signature = ""
         self._discard_checkpoint()
 
     def _load_guild_revocations(self) -> dict[int, float]:
         path = self.revocations_path
-        if not path.exists():
+        if not path.exists() and not path.is_symlink():
             self._guild_revocations_authenticity = "missing"
+            if self._guild_revocations_anchor_configured():
+                try:
+                    self.authenticity.reconcile_external_anchor(
+                        CONTINUITY_AUTH_ANCHOR_SLOT_GUILD_REVOCATIONS,
+                        generation=0,
+                        artifact_hash=SESSION_CONTINUITY_CHAIN_GENESIS,
+                        updated_at=self.wall_time(),
+                    )
+                except ContinuityAuthenticityError as exc:
+                    self._guild_revocations_anchor_state = {
+                        "continuity_anchor_bootstrap_required": (
+                            "bootstrap_required"
+                        ),
+                        "continuity_anchor_replay_detected": (
+                            "replay_detected"
+                        ),
+                    }.get(exc.code, "failed")
+                    raise
+            self._guild_revocations_generation = 0
+            self._guild_revocations_hash = (
+                SESSION_CONTINUITY_CHAIN_GENESIS
+            )
+            self._guild_revocations_anchor_state = (
+                "verified"
+                if self._guild_revocations_anchor_configured()
+                else "unconfigured"
+            )
             return {}
         if (
             path.is_symlink()
@@ -945,7 +1156,10 @@ class SessionContinuityCheckpoint:
             "policy",
         }
         expected_keys = set(base_keys)
-        if schema == SESSION_CONTINUITY_AUTHENTICATED_REVOCATIONS_SCHEMA:
+        if schema in {
+            SESSION_CONTINUITY_AUTHENTICATED_REVOCATIONS_SCHEMA,
+            SESSION_CONTINUITY_ANCHORED_REVOCATIONS_SCHEMA,
+        }:
             expected_keys.update(
                 {
                     "authAlgorithm",
@@ -954,6 +1168,10 @@ class SessionContinuityCheckpoint:
                     "authTag",
                 }
             )
+        if schema == SESSION_CONTINUITY_ANCHORED_REVOCATIONS_SCHEMA:
+            expected_keys.update(
+                {"generation", "previousHash", "ledgerHash"}
+            )
         if (
             not isinstance(payload, dict)
             or set(payload) != expected_keys
@@ -961,6 +1179,7 @@ class SessionContinuityCheckpoint:
             not in {
                 SESSION_CONTINUITY_REVOCATIONS_SCHEMA,
                 SESSION_CONTINUITY_AUTHENTICATED_REVOCATIONS_SCHEMA,
+                SESSION_CONTINUITY_ANCHORED_REVOCATIONS_SCHEMA,
             }
             or not isinstance(payload.get("guilds"), dict)
             or not isinstance(payload.get("policy"), dict)
@@ -977,7 +1196,10 @@ class SessionContinuityCheckpoint:
         ):
             raise ValueError("guild_revocations_rejected")
         try:
-            if schema == SESSION_CONTINUITY_AUTHENTICATED_REVOCATIONS_SCHEMA:
+            if schema in {
+                SESSION_CONTINUITY_AUTHENTICATED_REVOCATIONS_SCHEMA,
+                SESSION_CONTINUITY_ANCHORED_REVOCATIONS_SCHEMA,
+            }:
                 self.authenticity.verify_scoped_artifact(
                     payload,
                     artifact_scope=(
@@ -1019,9 +1241,82 @@ class SessionContinuityCheckpoint:
                 key=lambda item: (-item[1], item[0]),
             )[:DEFAULT_MAX_GUILD_REVOCATIONS]
         )
-        if auth_state == "bootstrap_required":
+        if schema == SESSION_CONTINUITY_ANCHORED_REVOCATIONS_SCHEMA:
+            generation = payload.get("generation")
+            previous_hash = _valid_sha256(
+                payload.get("previousHash")
+            )
+            ledger_hash = _valid_sha256(payload.get("ledgerHash"))
+            if (
+                isinstance(generation, bool)
+                or not isinstance(generation, int)
+                or generation < 1
+                or not previous_hash
+                or not ledger_hash
+                or ledger_hash != _revocations_hash(payload)
+            ):
+                raise ValueError("guild_revocations_rejected")
+            if self._guild_revocations_anchor_configured():
+                try:
+                    self.authenticity.reconcile_external_anchor(
+                        CONTINUITY_AUTH_ANCHOR_SLOT_GUILD_REVOCATIONS,
+                        generation=generation,
+                        artifact_hash=ledger_hash,
+                        previous_hash=previous_hash,
+                        updated_at=self.wall_time(),
+                    )
+                except ContinuityAuthenticityError as exc:
+                    self._guild_revocations_anchor_state = {
+                        "continuity_anchor_bootstrap_required": (
+                            "bootstrap_required"
+                        ),
+                        "continuity_anchor_replay_detected": (
+                            "replay_detected"
+                        ),
+                    }.get(exc.code, "failed")
+                    raise
+            self._guild_revocations_generation = generation
+            self._guild_revocations_hash = ledger_hash
+            self._guild_revocations_anchor_state = (
+                "verified"
+                if self._guild_revocations_anchor_configured()
+                else "unconfigured"
+            )
+            self._guild_revocations_authenticity = "verified"
+        elif self._guild_revocations_anchor_configured():
+            if not self.authenticity.allow_unsigned_bootstrap:
+                self._guild_revocations_anchor_state = (
+                    "bootstrap_required"
+                )
+                raise ContinuityAuthenticityError(
+                    "continuity_anchor_bootstrap_required"
+                )
+            anchored = self.authenticity.external_anchor_position(
+                CONTINUITY_AUTH_ANCHOR_SLOT_GUILD_REVOCATIONS
+            )
+            if anchored not in {
+                None,
+                (0, SESSION_CONTINUITY_CHAIN_GENESIS),
+            }:
+                self._guild_revocations_anchor_state = (
+                    "replay_detected"
+                )
+                raise ContinuityAuthenticityError(
+                    "continuity_anchor_replay_detected"
+                )
+            self._guild_revocations_generation = 0
+            self._guild_revocations_hash = (
+                SESSION_CONTINUITY_CHAIN_GENESIS
+            )
+            self._write_guild_revocations(bounded)
+        elif auth_state == "bootstrap_required":
             self._write_guild_revocations(bounded)
         else:
+            self._guild_revocations_generation = 0
+            self._guild_revocations_hash = (
+                SESSION_CONTINUITY_CHAIN_GENESIS
+            )
+            self._guild_revocations_anchor_state = "unconfigured"
             self._guild_revocations_authenticity = auth_state
         return bounded
 
@@ -1035,11 +1330,22 @@ class SessionContinuityCheckpoint:
                 key=lambda item: (-item[1], item[0]),
             )[:DEFAULT_MAX_GUILD_REVOCATIONS]
         )
+        anchored_schema = bool(
+            self._guild_revocations_anchor_configured()
+            or self._guild_revocations_generation > 0
+        )
+        previous_generation = self._guild_revocations_generation
+        previous_hash = self._guild_revocations_hash
+        generation = previous_generation + 1
         payload = {
             "schema": (
-                SESSION_CONTINUITY_AUTHENTICATED_REVOCATIONS_SCHEMA
-                if self.authenticity.configured
-                else SESSION_CONTINUITY_REVOCATIONS_SCHEMA
+                SESSION_CONTINUITY_ANCHORED_REVOCATIONS_SCHEMA
+                if anchored_schema
+                else (
+                    SESSION_CONTINUITY_AUTHENTICATED_REVOCATIONS_SCHEMA
+                    if self.authenticity.configured
+                    else SESSION_CONTINUITY_REVOCATIONS_SCHEMA
+                )
             ),
             "updatedAt": self.wall_time(),
             "guilds": {
@@ -1051,6 +1357,15 @@ class SessionContinuityCheckpoint:
                 "maxGuilds": DEFAULT_MAX_GUILD_REVOCATIONS,
             },
         }
+        if anchored_schema:
+            payload.update(
+                {
+                    "generation": generation,
+                    "previousHash": previous_hash,
+                    "ledgerHash": "",
+                }
+            )
+            payload["ledgerHash"] = _revocations_hash(payload)
         payload = self.authenticity.sign_scoped_artifact(
             payload,
             artifact_scope=(
@@ -1062,6 +1377,36 @@ class SessionContinuityCheckpoint:
             payload,
             durable=True,
         )
+        if anchored_schema:
+            if self._guild_revocations_anchor_configured():
+                try:
+                    self.authenticity.commit_external_anchor(
+                        CONTINUITY_AUTH_ANCHOR_SLOT_GUILD_REVOCATIONS,
+                        previous_generation=previous_generation,
+                        previous_hash=previous_hash,
+                        generation=generation,
+                        artifact_hash=str(payload["ledgerHash"]),
+                        updated_at=self.wall_time(),
+                    )
+                except ContinuityAuthenticityError as exc:
+                    self._guild_revocations_anchor_state = {
+                        "continuity_anchor_bootstrap_required": (
+                            "bootstrap_required"
+                        ),
+                        "continuity_anchor_replay_detected": (
+                            "replay_detected"
+                        ),
+                    }.get(exc.code, "failed")
+                    raise
+            self._guild_revocations_generation = generation
+            self._guild_revocations_hash = str(
+                payload["ledgerHash"]
+            )
+            self._guild_revocations_anchor_state = (
+                "verified"
+                if self._guild_revocations_anchor_configured()
+                else "unconfigured"
+            )
         self._guild_revocations = bounded
         self._guild_revocations_authenticity = (
             "verified"
@@ -1092,6 +1437,16 @@ class SessionContinuityCheckpoint:
         self,
         exc: ContinuityAuthenticityError,
     ) -> dict[str, Any]:
+        if exc.code.startswith("continuity_anchor_"):
+            self._checkpoint_anchor_state = {
+                "continuity_anchor_bootstrap_required": (
+                    "bootstrap_required"
+                ),
+                "continuity_anchor_replay_detected": (
+                    "replay_detected"
+                ),
+            }.get(exc.code, "failed")
+            return self._record_error(exc.code, exc)
         self._checkpoint_head_authenticity = {
             "continuity_auth_bootstrap_required": (
                 "bootstrap_required"
@@ -1163,6 +1518,8 @@ class SessionContinuityCheckpoint:
                 snapshot = self._anchor_checkpoint_snapshot(
                     snapshot
                 )
+            except ContinuityAuthenticityError as exc:
+                return self._record_authenticity_error(exc)
             except Exception as exc:
                 self._checkpoint_head_state = "failed"
                 return self._record_error(
@@ -1170,6 +1527,23 @@ class SessionContinuityCheckpoint:
                     exc,
                 )
             if snapshot["payload"] is None:
+                if self._guild_revocations_anchor_configured():
+                    try:
+                        self._guild_revocations = (
+                            self._load_guild_revocations()
+                        )
+                    except ContinuityAuthenticityError as exc:
+                        return self._record_error(exc.code, exc)
+                    except (
+                        OSError,
+                        TypeError,
+                        ValueError,
+                        json.JSONDecodeError,
+                    ) as exc:
+                        return self._record_error(
+                            "conversation_continuity_checkpoint_rejected",
+                            exc,
+                        )
                 self._checkpoint_revoked_at = None
                 self._state = "missing"
                 self._write_status()
@@ -1368,12 +1742,31 @@ class SessionContinuityCheckpoint:
                 snapshot = self._anchor_checkpoint_snapshot(
                     snapshot
                 )
+            except ContinuityAuthenticityError as exc:
+                return self._record_authenticity_error(exc)
             except Exception as exc:
                 self._checkpoint_head_state = "failed"
                 return self._record_error(
                     "conversation_continuity_flush_failed",
                     exc,
                 )
+            if self._guild_revocations_anchor_configured():
+                try:
+                    self._guild_revocations = (
+                        self._load_guild_revocations()
+                    )
+                except ContinuityAuthenticityError as exc:
+                    return self._record_error(exc.code, exc)
+                except (
+                    OSError,
+                    TypeError,
+                    ValueError,
+                    json.JSONDecodeError,
+                ) as exc:
+                    return self._record_error(
+                        "conversation_continuity_checkpoint_rejected",
+                        exc,
+                    )
             try:
                 material = self._material(
                     required_session_key=required_session_key,
@@ -1395,12 +1788,13 @@ class SessionContinuityCheckpoint:
                 return self.status()
             sessions = material["sessions"]
             if not sessions:
+                previous_generation = int(snapshot["generation"])
+                previous_hash = str(snapshot["checkpointHash"])
+                generation = previous_generation + 1
                 try:
                     self._write_checkpoint_head(
                         state="empty",
-                        generation=(
-                            int(snapshot["generation"]) + 1
-                        ),
+                        generation=generation,
                         checkpoint_hash=(
                             SESSION_CONTINUITY_CHAIN_GENESIS
                         ),
@@ -1411,10 +1805,28 @@ class SessionContinuityCheckpoint:
                         "conversation_continuity_flush_failed",
                         exc,
                     )
+                try:
+                    self.authenticity.commit_external_anchor(
+                        self.authenticity.checkpoint_anchor_slot(
+                            self.authenticity_scope
+                        ),
+                        previous_generation=previous_generation,
+                        previous_hash=previous_hash,
+                        generation=generation,
+                        artifact_hash=(
+                            SESSION_CONTINUITY_CHAIN_GENESIS
+                        ),
+                        updated_at=self.wall_time(),
+                    )
+                    self._checkpoint_anchor_state = (
+                        "verified"
+                        if self.authenticity.external_anchor_configured
+                        else "unconfigured"
+                    )
+                except ContinuityAuthenticityError as exc:
+                    return self._record_authenticity_error(exc)
                 self._discard_checkpoint()
-                self._checkpoint_generation = (
-                    int(snapshot["generation"]) + 1
-                )
+                self._checkpoint_generation = generation
                 self._checkpoint_integrity = "empty"
                 self._checkpoint_head_state = "empty"
                 self._last_signature = signature
@@ -1475,6 +1887,24 @@ class SessionContinuityCheckpoint:
                     "conversation_continuity_flush_failed",
                     exc,
                 )
+            try:
+                self.authenticity.commit_external_anchor(
+                    self.authenticity.checkpoint_anchor_slot(
+                        self.authenticity_scope
+                    ),
+                    previous_generation=int(snapshot["generation"]),
+                    previous_hash=str(snapshot["checkpointHash"]),
+                    generation=generation,
+                    artifact_hash=str(payload["checkpointHash"]),
+                    updated_at=self.wall_time(),
+                )
+                self._checkpoint_anchor_state = (
+                    "verified"
+                    if self.authenticity.external_anchor_configured
+                    else "unconfigured"
+                )
+            except ContinuityAuthenticityError as exc:
+                return self._record_authenticity_error(exc)
             self._checkpoint_head_state = "current"
             self._state = "ready"
             self._write_status()
@@ -1619,6 +2049,7 @@ __all__ = [
     "SESSION_CONTINUITY_COMMIT_METRICS_SCHEMA",
     "SESSION_CONTINUITY_AUTHENTICATED_HEAD_SCHEMA",
     "SESSION_CONTINUITY_AUTHENTICATED_REVOCATIONS_SCHEMA",
+    "SESSION_CONTINUITY_ANCHORED_REVOCATIONS_SCHEMA",
     "SESSION_CONTINUITY_HEAD_SCHEMA",
     "SESSION_CONTINUITY_LEGACY_CHECKPOINT_SCHEMA",
     "SESSION_CONTINUITY_REVOCATIONS_SCHEMA",
