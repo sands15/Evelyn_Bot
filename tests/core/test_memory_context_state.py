@@ -63,14 +63,14 @@ class MemoryContextStateTests(unittest.TestCase):
             vault_raw_rows=[{"speaker": "user", "source": "vault", "text": "이전 기록", "saved_at": 3}],
         )
 
-        self.assertIn("현재 작업 요약:", context)
-        self.assertIn("현재 세션 최근 대화:", context)
-        self.assertIn("방 최근 대화:", context)
+        self.assertIn("미확인 과거 작업 요약(확인 전용):", context)
+        self.assertIn("미확인 현재 세션 과거 대화(확인 전용):", context)
+        self.assertIn("미확인 방 과거 대화(확인 전용):", context)
         self.assertIn("현재 내부 상태(사용자 발화 아님):", context)
         self.assertIn("- 권장 행동: 질문하기", context)
-        self.assertIn("Structured memory vault recall:\nvault hit", context)
-        self.assertIn("장기 기억 후보:\n- 주요 결정", context)
-        self.assertIn("열린 질문/가설:\n- 남은 후보", context)
+        self.assertIn("미확인 Structured memory vault recall(확인 전용):\nvault hit", context)
+        self.assertIn("미확인 장기 기억 후보(확인 전용):\n- 주요 결정", context)
+        self.assertIn("미확인 열린 질문/가설(확인 전용):\n- 남은 후보", context)
 
     def test_build_memory_context_collects_sources_and_vault_recall(self) -> None:
         layers = {
@@ -94,10 +94,10 @@ class MemoryContextStateTests(unittest.TestCase):
                     session_state={"topic_id": "topic-1", "last_speaker": "정훈"},
                 )
 
-        self.assertIn("Structured memory vault recall:\nvault ctx", context)
-        self.assertIn("장기 기억 후보:\n- 작업은 작게 분리한다", context)
-        self.assertIn("열린 질문/가설:\n- 다음 작업 후보 확인", context)
-        self.assertIn("문서 보관함에서 꺼낸 관련 대화:\n- user (vault): 작업 기록", context)
+        self.assertIn("미확인 Structured memory vault recall(확인 전용):\nvault ctx", context)
+        self.assertIn("미확인 장기 기억 후보(확인 전용):\n- 작업은 작게 분리한다", context)
+        self.assertIn("미확인 열린 질문/가설(확인 전용):\n- 다음 작업 후보 확인", context)
+        self.assertIn("미확인 문서 보관함 과거 대화(확인 전용):\n- user (vault): 작업 기록", context)
         self.assertIn("- 현재 topic_id: topic-1", context)
         vault.assert_called_once()
 
@@ -144,6 +144,10 @@ class MemoryContextStateTests(unittest.TestCase):
         self.assertEqual(receipt["schema"], "memory.context-receipt.v1")
         self.assertEqual(receipt["state"], "provided")
         self.assertEqual(receipt["groundingState"], "partial")
+        self.assertEqual(receipt["usePolicy"], "memory.context-use.v1")
+        self.assertEqual(receipt["confirmOnlyItemCount"], 1)
+        self.assertEqual(receipt["legacyConfirmOnlyItemCount"], 1)
+        self.assertFalse(receipt["vaultConfirmOnly"])
         self.assertEqual(receipt["suppliedNoteIds"], ["note-1", "note-2"])
         self.assertEqual(receipt["legacyItemCount"], 1)
         self.assertTrue(receipt["contentFree"])
@@ -195,7 +199,10 @@ class MemoryContextStateTests(unittest.TestCase):
                 )
 
         self.assertIn("PRIVATE_RAW_TEXT", context)
+        self.assertIn("근거 연결된 방 최근 대화:", context)
+        self.assertNotIn("확인 전용", context)
         self.assertEqual(receipt["groundingState"], "attributed")
+        self.assertEqual(receipt["confirmOnlyItemCount"], 0)
         self.assertEqual(receipt["legacyAttributedItemCount"], 1)
         self.assertEqual(receipt["legacyUnattributedItemCount"], 0)
         self.assertEqual(receipt["legacyEvidenceIds"], ["turn:abc123:user"])
@@ -257,7 +264,11 @@ class MemoryContextStateTests(unittest.TestCase):
                 )
 
         self.assertIn("PRIVATE_SUMMARY_TEXT", context)
+        self.assertIn("근거 연결된 현재 작업 요약", context)
+        self.assertIn("근거 연결된 장기 기억 후보", context)
+        self.assertNotIn("확인 전용", context)
         self.assertEqual(receipt["groundingState"], "attributed")
+        self.assertEqual(receipt["confirmOnlyItemCount"], 0)
         self.assertEqual(receipt["legacyAttributedItemCount"], 3)
         self.assertEqual(receipt["legacyUnattributedItemCount"], 0)
         self.assertEqual(
@@ -304,9 +315,13 @@ class MemoryContextStateTests(unittest.TestCase):
         receipt = {}
         with patch("evelyn_core.memory_context_state.collect_memory_layers", return_value=layers):
             with patch("evelyn_core.memory_context_state.build_memory_vault_context", return_value=""):
-                build_memory_context(123, "fact", cognitive_state={}, receipt=receipt)
+                context = build_memory_context(123, "fact", cognitive_state={}, receipt=receipt)
 
+        self.assertIn("미확인 과거 작업 요약(확인 전용):", context)
+        self.assertIn("미확인 장기 기억 후보(확인 전용):", context)
         self.assertEqual(receipt["groundingState"], "unattributed")
+        self.assertEqual(receipt["confirmOnlyItemCount"], 2)
+        self.assertEqual(receipt["legacyConfirmOnlyItemCount"], 2)
         self.assertEqual(receipt["legacyAttributedItemCount"], 0)
         self.assertEqual(receipt["legacyUnattributedItemCount"], 2)
         self.assertEqual(receipt["legacyEvidenceIds"], [])

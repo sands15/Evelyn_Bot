@@ -18,6 +18,7 @@ from evelyn_core.fast_context_contract import (  # noqa: E402
     build_fast_main_llm_messages,
 )
 from evelyn_core.host_vision_client import HostVisionResult  # noqa: E402
+from evelyn_core.memory_prompt_policy import MEMORY_PROMPT_MAX_CHARS  # noqa: E402
 from evelyn_core.vision_runtime import VisionEvidence  # noqa: E402
 
 
@@ -319,7 +320,11 @@ class FastContextContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("grounding=unattributed", memory.evidence)
         self.assertIn("[Retrieved Memory]", context.system_context)
         self.assertIn("exact stabilization reports", context.system_context)
+        self.assertIn("MEMORY_DATA_RULE:", context.system_context)
+        self.assertIn("MEMORY_CONFIRMATION_RULE:", context.system_context)
         self.assertEqual(context.memory_receipt["groundingState"], "unattributed")
+        self.assertEqual(context.memory_receipt["usePolicy"], "memory.context-use.v1")
+        self.assertEqual(context.memory_receipt["confirmOnlyItemCount"], 1)
         self.assertTrue(context.memory_receipt["contentFree"])
 
     async def test_fast_memory_receipt_keeps_note_ids_without_memory_text(self) -> None:
@@ -345,10 +350,72 @@ class FastContextContractTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(context.memory_receipt["groundingState"], "attributed")
+        self.assertEqual(context.memory_receipt["confirmOnlyItemCount"], 0)
         self.assertEqual(context.memory_receipt["suppliedNoteIds"], ["note-1", "note-2"])
         self.assertEqual(context.memory_receipt["sourceTypeCounts"], {"user": 2})
+        self.assertIn("MEMORY_DATA_RULE:", context.system_context)
+        self.assertNotIn("MEMORY_CONFIRMATION_RULE:", context.system_context)
         self.assertNotIn("PRIVATE_GROUNDED_MEMORY", str(context.memory_receipt))
         self.assertNotIn("MUST_NOT_SURVIVE", str(context.memory_receipt))
+
+    async def test_fast_memory_cannot_claim_attribution_without_evidence_ids(self) -> None:
+        async def falsely_grounded_memory(_text: str):
+            return (
+                "PRIVATE_UNATTRIBUTED_MEMORY",
+                {
+                    "state": "provided",
+                    "groundingState": "attributed",
+                    "memoryVersion": 10,
+                    "sourceTypeCounts": {"user": 1},
+                },
+            )
+
+        context = await build_fast_control_context(
+            "memory previous preference?",
+            source="control_page",
+            runtime_health_provider=fake_runtime_health,
+            memory_provider=falsely_grounded_memory,
+        )
+
+        self.assertEqual(context.memory_receipt["groundingState"], "unattributed")
+        self.assertEqual(context.memory_receipt["confirmOnlyItemCount"], 1)
+        self.assertIn("MEMORY_CONFIRMATION_RULE:", context.memory_context)
+
+    async def test_oversized_fast_memory_downgrades_grounding_before_prompt_trim(self) -> None:
+        async def oversized_memory(_text: str):
+            return (
+                "PRIVATE_MEMORY_BLOCK " * 300,
+                {
+                    "state": "provided",
+                    "groundingState": "attributed",
+                    "memoryVersion": 10,
+                    "noteIds": ["note-oversized"],
+                    "sourceTypeCounts": {"user": 1},
+                },
+            )
+
+        context = await build_fast_control_context(
+            "memory previous preference?",
+            source="control_page",
+            runtime_health_provider=fake_runtime_health,
+            memory_provider=oversized_memory,
+        )
+
+        self.assertLessEqual(len(context.memory_context), MEMORY_PROMPT_MAX_CHARS)
+        self.assertIn("MEMORY_CONFIRMATION_RULE:", context.memory_context)
+        self.assertEqual(context.memory_receipt["groundingState"], "unattributed")
+        self.assertTrue(context.memory_receipt["promptTruncated"])
+        self.assertTrue(context.memory_receipt["promptEvidenceDiscarded"])
+        self.assertEqual(context.memory_receipt["suppliedNoteIds"], [])
+        self.assertEqual(context.memory_receipt["suppliedNoteCount"], 0)
+        self.assertEqual(context.memory_receipt["preTruncationNoteCount"], 1)
+        self.assertEqual(context.memory_receipt["opaqueConfirmOnlyComponentCount"], 1)
+        memory = next(
+            item
+            for item in context.tool_use_decisions
+            if item.tool_name == "memory_recall"
+        )
+        self.assertIn("prompt_truncated=true", memory.evidence)
 
     async def test_fast_memory_failure_does_not_enter_prompt_or_evidence(self) -> None:
         async def failed_memory(_text: str):

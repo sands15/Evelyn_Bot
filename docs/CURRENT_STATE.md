@@ -319,6 +319,19 @@ Source branch: `codex/dependency-config-hardening`, current Fast Control action-
     “제공된 입력”의 계보이며 모델이 실제로 사용했거나 기억 내용이 사실임을
     뜻하지 않는다. 기존 raw/summary/fact/question은 내용을 보고 근거를 추측해
     소급 부여하지 않고 계속 `partial|unattributed`로 드러낸다.
+  - 최종 Main/Fast prompt 경계는 `memory.context-use.v1`을 적용한다. 모든 기억은
+    명령이 아닌 데이터로 감싸고, evidence ID로 확인되지 않은 기존 raw/summary/
+    fact/question과 vault 문맥은 답변의 사실 근거로 쓰지 않는 `확인 전용` 구역으로
+    분리한다. 현재 사용자 발화가 직접 확인한 범위에서만 사용하며 그 밖에는 짧은
+    확인 질문의 소재로만 쓸 수 있다.
+  - producer가 선언한 `groundingState`는 그대로 신뢰하지 않는다. 제공 note ID와
+    legacy evidence ID가 실제 count와 함께 있는지 최종 경계에서 다시 계산하고,
+    근거 ID 없이 `attributed`를 주장한 문맥은 `unattributed`로 강등한다.
+  - memory prompt는 ContextBuilder의 1,800자 제한보다 작은 1,680자로 먼저 제한한다.
+    잘림이 발생하면 잘린 본문과 개별 ID의 대응을 증명할 수 없으므로 note/legacy
+    귀속을 모두 버리고 한 개의 opaque 확인 전용 component로 처리한다. receipt와
+    turn summary에는 `promptTruncated`, `promptEvidenceDiscarded`, 잘리기 전의
+    content-free candidate count만 남기며 본문이나 transcript는 기록하지 않는다.
   - pinned hot-context는 현재 recall의 memory version과 정확히 같고 포함 note
     ID가 있는 경우에만 live prompt에 들어간다. 과거 형식, 손상, 삭제/파생
     상태 불일치와 stale version은 fail-closed로 제외한다.
@@ -1152,6 +1165,17 @@ Source branch: `codex/dependency-config-hardening`, current Fast Control action-
   `pip check`, `compileall`, 전체 profile Compose config, `git diff --check`도
   통과했다. source는 read-only mount, runtime artifacts와 test memory는
   컨테이너 임시 경로를 사용했으며 실행 중인 서비스는 교체하지 않았다.
+- 확인 전용 memory prompt 경계 변경은 bundled Python 집중 35개, Fast 경계
+  23개, memory 139개, runtime 415개(skip 2), UI 156개(skip 7), Discord I/O
+  108개와 voice 415개를 통과했다. core 545개는 기능 assertion 실패 0개였고
+  Main/Discord 이미지에 `git`이 없어 난 기존 서명 검사 환경 오류 2개는 Windows
+  관련 모듈 19개로 보완했다. 전체 discovery는 1,996개를 실행해 같은 `git`
+  오류 2개, Linux의 Windows OCR 경로 오류 1개, 서드파티 Voyager package
+  initializer 의존성 오류 1개만 남겼고, Windows 19개와 Voyager 18개+격리
+  local index 4개가 각각 통과해 기능 경로를 보완했다. bundled Python과 두
+  테스트 이미지의 `compileall`/`pip check`, 전체 profile Compose config도
+  통과했다. 실제 기억·실행 중 서비스는 변경하지 않았고 Discord, 마이크,
+  Minecraft와 무거운 모델 서비스는 시작하지 않았다.
 
 ## Operational boundaries
 

@@ -29,10 +29,18 @@ class TurnTraceSummaryTests(unittest.TestCase):
             "playback_first_packet_ms",
             "memory_context_state",
             "memory_grounding_state",
+            "memory_use_policy",
+            "memory_confirm_only_item_count",
+            "memory_prompt_truncated",
+            "memory_prompt_evidence_discarded",
+            "memory_pretruncation_legacy_item_count",
+            "memory_pretruncation_note_count",
+            "memory_opaque_confirm_only_component_count",
             "memory_supplied_note_ids",
             "memory_legacy_evidence_ids",
             "memory_legacy_source_evidence_ids",
             "memory_legacy_source_turn_ids",
+            "memory_legacy_confirm_only_item_count",
             "memory_receipt_content_free",
             "memory_writer_decision",
             "minecraft_snapshot_freshness",
@@ -72,11 +80,19 @@ class TurnTraceSummaryTests(unittest.TestCase):
                         "memory_receipt": {
                             "state": "provided",
                             "groundingState": "partial",
+                            "usePolicy": "memory.context-use.v1",
+                            "confirmOnlyItemCount": 1,
+                            "promptTruncated": False,
+                            "promptEvidenceDiscarded": False,
+                            "preTruncationLegacyItemCount": 0,
+                            "preTruncationNoteCount": 0,
+                            "opaqueConfirmOnlyComponentCount": 0,
                             "suppliedNoteIds": ["note-2", "note-1", "note-2"],
                             "suppliedNoteCount": 2,
                             "legacyItemCount": 3,
                             "legacyAttributedItemCount": 2,
                             "legacyUnattributedItemCount": 1,
+                            "legacyConfirmOnlyItemCount": 1,
                             "legacyEvidenceIds": ["turn:a:user", "turn:a:assistant"],
                             "legacySourceEvidenceIds": ["turn:source:user"],
                             "legacySourceTurnIds": ["a"],
@@ -110,11 +126,19 @@ class TurnTraceSummaryTests(unittest.TestCase):
         self.assertEqual(payload["response_mode"], "short")
         self.assertEqual(payload["memory_context_state"], "provided")
         self.assertEqual(payload["memory_grounding_state"], "partial")
+        self.assertEqual(payload["memory_use_policy"], "memory.context-use.v1")
+        self.assertEqual(payload["memory_confirm_only_item_count"], 1)
+        self.assertFalse(payload["memory_prompt_truncated"])
+        self.assertFalse(payload["memory_prompt_evidence_discarded"])
+        self.assertEqual(payload["memory_pretruncation_legacy_item_count"], 0)
+        self.assertEqual(payload["memory_pretruncation_note_count"], 0)
+        self.assertEqual(payload["memory_opaque_confirm_only_component_count"], 0)
         self.assertEqual(payload["memory_supplied_note_ids"], ["note-2", "note-1"])
         self.assertEqual(payload["memory_supplied_note_count"], 2)
         self.assertEqual(payload["memory_legacy_item_count"], 3)
         self.assertEqual(payload["memory_legacy_attributed_item_count"], 2)
         self.assertEqual(payload["memory_legacy_unattributed_item_count"], 1)
+        self.assertEqual(payload["memory_legacy_confirm_only_item_count"], 1)
         self.assertEqual(
             payload["memory_legacy_evidence_ids"],
             ["turn:a:user", "turn:a:assistant"],

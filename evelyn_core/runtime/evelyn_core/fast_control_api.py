@@ -87,6 +87,7 @@ from .minecraft_world_lease_delegation import (
 from .minecraft_world_lease_http_runtime import (
     MinecraftWorldLeaseHttpRuntime,
 )
+from .memory_prompt_policy import MEMORY_CONTEXT_USE_POLICY
 from .query_intents import answer_current_datetime_query
 from .runtime_health import collect_runtime_health, default_probe_runner
 from .runtime_health_snapshot_cache import (
@@ -341,6 +342,13 @@ def reset_fast_memory_context_receipt() -> dict[str, Any]:
         "schema": "memory.context-receipt.v1",
         "state": "not_requested",
         "groundingState": "not_requested",
+        "usePolicy": MEMORY_CONTEXT_USE_POLICY,
+        "confirmOnlyItemCount": 0,
+        "promptTruncated": False,
+        "promptEvidenceDiscarded": False,
+        "preTruncationLegacyItemCount": 0,
+        "preTruncationNoteCount": 0,
+        "opaqueConfirmOnlyComponentCount": 0,
         "contentFree": True,
     }
     FAST_MEMORY_CONTEXT_RECEIPT.set(receipt)

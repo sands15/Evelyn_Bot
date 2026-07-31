@@ -22,6 +22,12 @@ from .context_pipeline import (
 from .fast_action_runtime import compact_local_bridge_context
 from .fast_tool_planner import render_fast_tool_registry_context
 from .host_vision_client import HostVisionResult, request_host_vision
+from .memory_prompt_policy import (
+    MEMORY_CONTEXT_USE_POLICY,
+    prepare_memory_context_for_prompt,
+    reconcile_memory_receipt_for_prompt,
+    validated_memory_grounding_state,
+)
 from .runtime_health import collect_runtime_health
 from .runtime_services import load_service_manifest
 from .text import clean_text
@@ -214,10 +220,28 @@ def _fast_memory_context_receipt(
                 count = 0
             if count > 0:
                 source_type_counts[source_type] = count
+    try:
+        confirm_only_item_count = max(
+            0,
+            int(source.get("confirmOnlyItemCount") or 0),
+        )
+    except (TypeError, ValueError):
+        confirm_only_item_count = 0
+    if has_context and grounding_state in {"partial", "unattributed"}:
+        confirm_only_item_count = max(1, confirm_only_item_count)
+    elif grounding_state == "attributed":
+        confirm_only_item_count = 0
     return {
         "schema": "memory.context-receipt.v1",
         "state": state,
         "groundingState": grounding_state,
+        "usePolicy": MEMORY_CONTEXT_USE_POLICY,
+        "confirmOnlyItemCount": confirm_only_item_count,
+        "promptTruncated": False,
+        "promptEvidenceDiscarded": False,
+        "preTruncationLegacyItemCount": 0,
+        "preTruncationNoteCount": 0,
+        "opaqueConfirmOnlyComponentCount": 0,
         "vaultState": state,
         "memoryVersion": memory_version,
         "retrievalMode": clean_text(str(source.get("retrievalMode") or "unknown"))[:40],
@@ -230,6 +254,7 @@ def _fast_memory_context_receipt(
         "legacyItemCount": 0,
         "legacyAttributedItemCount": 0,
         "legacyUnattributedItemCount": 0,
+        "legacyConfirmOnlyItemCount": 0,
         "legacyEvidenceIds": [],
         "legacySourceEvidenceIds": [],
         "legacySourceTurnIds": [],
@@ -477,6 +502,13 @@ async def build_fast_control_context(
         "schema": "memory.context-receipt.v1",
         "state": "not_requested",
         "groundingState": "not_requested",
+        "usePolicy": MEMORY_CONTEXT_USE_POLICY,
+        "confirmOnlyItemCount": 0,
+        "promptTruncated": False,
+        "promptEvidenceDiscarded": False,
+        "preTruncationLegacyItemCount": 0,
+        "preTruncationNoteCount": 0,
+        "opaqueConfirmOnlyComponentCount": 0,
         "contentFree": True,
     }
     log_context = ""
@@ -648,6 +680,13 @@ async def build_fast_control_context(
                     "schema": "memory.context-receipt.v1",
                     "state": "unavailable",
                     "groundingState": "unavailable",
+                    "usePolicy": MEMORY_CONTEXT_USE_POLICY,
+                    "confirmOnlyItemCount": 0,
+                    "promptTruncated": False,
+                    "promptEvidenceDiscarded": False,
+                    "preTruncationLegacyItemCount": 0,
+                    "preTruncationNoteCount": 0,
+                    "opaqueConfirmOnlyComponentCount": 0,
                     "contentFree": True,
                 }
                 decision.status = "failed"
@@ -667,9 +706,30 @@ async def build_fast_control_context(
         )
         if clean_text(part)
     )
+    memory_grounding_state = validated_memory_grounding_state(
+        memory_receipt,
+        has_context=bool(clean_text(memory_context)),
+    )
+    memory_prompt_boundary = prepare_memory_context_for_prompt(
+        memory_context,
+        grounding_state=memory_grounding_state,
+    )
+    reconcile_memory_receipt_for_prompt(memory_receipt, memory_prompt_boundary)
+    prompt_memory_context = memory_prompt_boundary.context
+    for decision in decisions:
+        if decision.tool_name != "memory_recall" or decision.status == "failed":
+            continue
+        decision.evidence = (
+            f"memory_context_chars={len(prompt_memory_context)}; "
+            f"receipt_state={memory_receipt['state']}; "
+            f"grounding={memory_receipt['groundingState']}; "
+            f"note_count={memory_receipt.get('suppliedNoteCount', 0)}; "
+            f"confirm_only_count={memory_receipt.get('confirmOnlyItemCount', 0)}; "
+            f"prompt_truncated={str(bool(memory_receipt.get('promptTruncated'))).lower()}"
+        )
     packet = build_basic_context_packet(
         current_user_input="",
-        memory_context=memory_context,
+        memory_context=prompt_memory_context,
         runtime_state=runtime_context,
         conversation_state="route: fast_control_api",
         tool_context=render_tool_use_context(decisions),
@@ -682,7 +742,7 @@ async def build_fast_control_context(
         tool_use_decisions=decisions,
         system_context=ContextBuilder().render_system_context(packet),
         search_context=search_context,
-        memory_context=memory_context,
+        memory_context=prompt_memory_context,
         memory_receipt=memory_receipt,
         log_context=log_context,
         local_bridge_context=local_bridge_context,

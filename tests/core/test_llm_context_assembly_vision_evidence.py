@@ -27,6 +27,7 @@ from evelyn_core.llm_context_assembly import (  # noqa: E402
 from evelyn_core.cross_surface_continuity import (  # noqa: E402
     CrossSurfaceMergeOutcome,
 )
+from evelyn_core.memory_prompt_policy import MEMORY_PROMPT_MAX_CHARS  # noqa: E402
 from evelyn_core.vision_runtime import VisionEvidence, record_vision_evidence  # noqa: E402
 
 
@@ -363,10 +364,99 @@ class LlmContextAssemblyVisionEvidenceIntegrationTests(unittest.IsolatedAsyncioT
         )
 
         self.assertIn("PRIVATE_MEMORY_TEXT", messages[0]["content"])
+        self.assertIn("MEMORY_DATA_RULE:", messages[0]["content"])
+        self.assertNotIn("MEMORY_CONFIRMATION_RULE:", messages[0]["content"])
         receipt = metrics["meta"]["context_pipeline"]["memory_receipt"]
         self.assertEqual(receipt["groundingState"], "attributed")
+        self.assertEqual(receipt["usePolicy"], "memory.context-use.v1")
+        self.assertEqual(receipt["confirmOnlyItemCount"], 0)
         self.assertEqual(receipt["suppliedNoteIds"], ["note-verified"])
         self.assertNotIn("PRIVATE_MEMORY_TEXT", str(receipt))
+
+    async def test_unattributed_memory_is_confirmation_only_at_final_prompt_boundary(self) -> None:
+        async def no_vision(_user_text: str, *, metrics: dict | None = None) -> str:
+            return ""
+
+        def unattributed_memory(*_args, receipt=None, **_kwargs):
+            receipt.update(
+                {
+                    "state": "provided",
+                    "groundingState": "unattributed",
+                    "confirmOnlyItemCount": "invalid",
+                    "contentFree": True,
+                }
+            )
+            return "PRIVATE_LEGACY_MEMORY"
+
+        deps = self.build_deps(
+            no_vision,
+            memory_context_callback=unattributed_memory,
+        )
+        metrics = {"started_at": time.monotonic(), "meta": {}, "marks": {}}
+        messages, _state, _route, _policy = await prepare_llm_messages_from_runtime(
+            "remember",
+            deps=deps,
+            guild_id=7,
+            metrics=metrics,
+        )
+
+        system_context = messages[0]["content"]
+        self.assertIn("PRIVATE_LEGACY_MEMORY", system_context)
+        self.assertIn("MEMORY_DATA_RULE:", system_context)
+        self.assertIn("MEMORY_CONFIRMATION_RULE:", system_context)
+        receipt = metrics["meta"]["context_pipeline"]["memory_receipt"]
+        self.assertEqual(receipt["usePolicy"], "memory.context-use.v1")
+        self.assertEqual(receipt["confirmOnlyItemCount"], 1)
+
+    async def test_oversized_main_memory_discards_attribution_before_context_builder(self) -> None:
+        async def no_vision(_user_text: str, *, metrics: dict | None = None) -> str:
+            return ""
+
+        def oversized_memory(*_args, receipt=None, **_kwargs):
+            receipt.update(
+                {
+                    "state": "provided",
+                    "groundingState": "attributed",
+                    "vaultState": "provided",
+                    "suppliedNoteIds": ["note-oversized"],
+                    "suppliedNoteCount": 1,
+                    "sourceTypeCounts": {"user": 1},
+                    "legacyItemCount": 1,
+                    "legacyAttributedItemCount": 1,
+                    "legacyEvidenceIds": ["turn:a:user"],
+                    "contentFree": True,
+                }
+            )
+            return "PRIVATE_OVERSIZED_MEMORY " * 300
+
+        deps = self.build_deps(
+            no_vision,
+            memory_context_callback=oversized_memory,
+        )
+        metrics = {"started_at": time.monotonic(), "meta": {}, "marks": {}}
+        messages, _state, _route, _policy = await prepare_llm_messages_from_runtime(
+            "remember",
+            deps=deps,
+            guild_id=7,
+            metrics=metrics,
+        )
+
+        receipt = metrics["meta"]["context_pipeline"]["memory_receipt"]
+        self.assertEqual(receipt["groundingState"], "unattributed")
+        self.assertTrue(receipt["promptTruncated"])
+        self.assertTrue(receipt["promptEvidenceDiscarded"])
+        self.assertEqual(receipt["suppliedNoteIds"], [])
+        self.assertEqual(receipt["suppliedNoteCount"], 0)
+        self.assertEqual(receipt["legacyEvidenceIds"], [])
+        self.assertEqual(receipt["legacyItemCount"], 0)
+        self.assertEqual(receipt["preTruncationNoteCount"], 1)
+        self.assertEqual(receipt["preTruncationLegacyItemCount"], 1)
+        self.assertEqual(receipt["opaqueConfirmOnlyComponentCount"], 1)
+        self.assertLessEqual(
+            metrics["meta"]["context_pipeline"]["memory_context_chars"],
+            MEMORY_PROMPT_MAX_CHARS,
+        )
+        self.assertIn("MEMORY_CONFIRMATION_RULE:", messages[0]["content"])
 
     async def test_live_scene_and_ocr_mark_required_tools_executed(self) -> None:
         async def observed_vision(_user_text: str, *, metrics: dict | None = None) -> str:

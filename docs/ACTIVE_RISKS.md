@@ -385,11 +385,20 @@ facts/questions도 같은 입력 계보와 별도 파생 ID를 hot JSONL과 mirr
 본문 hash가 다르거나 row provenance가 손상되면 receipt는 이를 근거로 인정하지
 않고 fail-closed한다.
 
-남은 coverage 위험은 배포 전의 rolling summary·facts/questions와 과거 raw row가
-여전히 근거 없는 상태라는 점이다. 내용 유사도나 시간 인접성으로 이를 소급
-연결하지 않으므로 해당 항목이 prompt에 선택되면 receipt는 계속 `partial` 또는
-`unattributed`다. 다음 개선은 마이그레이션되지 않은 legacy 요약을 계속 주입할지,
-사용자 검토 전 격리할지에 대한 운영 정책과 실제 데이터 coverage 측정이다.
+배포 전의 rolling summary·facts/questions와 과거 raw row는 여전히 근거 없는
+상태지만 사용 정책은 닫았다. 내용 유사도나 시간 인접성으로 소급 연결하지 않고,
+해당 항목은 `memory.context-use.v1` 아래 `확인 전용`으로만 prompt에 남는다.
+답변의 사실 근거로 쓰거나 단정할 수 없고 현재 사용자의 직접 확인 또는 짧은
+확인 질문에만 사용할 수 있다. producer의 `groundingState`도 근거 ID/count로
+재계산하며, 최종 1,680자 경계에서 문맥이 잘리면 개별 귀속을 버리고 하나의
+opaque 확인 전용 component로 강등한다.
+
+남은 coverage 위험은 실제 legacy 항목 중 어느 것이 사용자 확인을 거쳐 새 근거로
+재작성되어야 하는지 운영 데이터에서 아직 측정·검토하지 않았다는 점이다. 확인
+전용 문구는 모델 행동 계약이지 기억 내용의 진실성 보증이 아니므로 실제 대화에서
+단정 억제와 확인 질문 품질도 평가해야 한다. 다음 조치는 content-free coverage
+집계로 legacy 확인 전용 비율을 관측하고, 사용자가 확인한 항목만 새 evidence에
+연결하는 preview/apply 흐름을 설계하는 것이다.
 
 남은 위험은 coverage와 correction이 구조적 근거 연결만 다루며 기억 내용이나
 사용자의 선택이 사실임을 보증하지 않는다는 점이다. hash chain과 head는

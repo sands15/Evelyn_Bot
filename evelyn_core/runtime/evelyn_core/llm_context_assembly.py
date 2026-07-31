@@ -9,6 +9,12 @@ from .context_pipeline import ContextBuilder, ContextPolicy
 from .cross_surface_continuity import (
     CrossSurfaceMergeOutcome,
 )
+from .memory_prompt_policy import (
+    MEMORY_CONTEXT_USE_POLICY,
+    prepare_memory_context_for_prompt,
+    reconcile_memory_receipt_for_prompt,
+    validated_memory_grounding_state,
+)
 from .vision_runtime import VisionEvidence, record_vision_evidence, vision_evidence_from_metrics
 
 
@@ -257,6 +263,13 @@ async def prepare_llm_messages_from_runtime(
         "schema": "memory.context-receipt.v1",
         "state": "not_requested",
         "groundingState": "not_requested",
+        "usePolicy": MEMORY_CONTEXT_USE_POLICY,
+        "confirmOnlyItemCount": 0,
+        "promptTruncated": False,
+        "promptEvidenceDiscarded": False,
+        "preTruncationLegacyItemCount": 0,
+        "preTruncationNoteCount": 0,
+        "opaqueConfirmOnlyComponentCount": 0,
         "contentFree": True,
     }
     if guild_id is not None and context_policy.needs_memory:
@@ -272,6 +285,19 @@ async def prepare_llm_messages_from_runtime(
             session_memory_key=session_memory_key,
             receipt=memory_receipt,
         )
+        memory_grounding_state = validated_memory_grounding_state(
+            memory_receipt,
+            has_context=bool(deps.clean_text(memory_context)),
+        )
+        memory_prompt_boundary = prepare_memory_context_for_prompt(
+            memory_context,
+            grounding_state=memory_grounding_state,
+        )
+        reconcile_memory_receipt_for_prompt(
+            memory_receipt,
+            memory_prompt_boundary,
+        )
+        memory_context = memory_prompt_boundary.context
         if metrics is not None:
             memory_elapsed = (time.monotonic() - memory_started_at) * 1000.0
             metrics.setdefault("marks", {})["memory_ready"] = memory_elapsed
@@ -289,7 +315,8 @@ async def prepare_llm_messages_from_runtime(
                 f"memory_context_chars={len(memory_context)}; "
                 f"receipt_state={deps.clean_text(str(memory_receipt.get('state') or 'unknown'))}; "
                 f"grounding={deps.clean_text(str(memory_receipt.get('groundingState') or 'unknown'))}; "
-                f"note_count={int(memory_receipt.get('suppliedNoteCount') or 0)}"
+                f"note_count={int(memory_receipt.get('suppliedNoteCount') or 0)}; "
+                f"confirm_only_count={int(memory_receipt.get('confirmOnlyItemCount') or 0)}"
             )
         else:
             decision.status = "executed_empty"
