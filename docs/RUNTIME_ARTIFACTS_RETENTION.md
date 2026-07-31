@@ -56,6 +56,9 @@ Environment overrides:
   authorization/outcome journals older than 30 days or over 20 MB total.
 - `benchmarks/*.jsonl`: keep newest 3, remove rows older than 30 days or over 20 MB total.
 - `memory/*.jsonl`: keep newest 3, remove write-behind status logs older than 30 days or over 20 MB total.
+- `conversation_continuity/active.json` and `checkpoint_head.json`, plus the
+  split Bot API equivalents under `fast_control_continuity/`: remove stale
+  short-lived checkpoints older than 1 day or over 2 MB per owner.
 - Legacy `runtime_artifacts/voice_debug/**/*.wav` and `*.pcm`: keep newest 50, remove audio older than 7 days or over 2 GB total. The active top-level `debug_audio/` store uses the separate bundle-aware command above.
 - `control_page/dumps/*`: keep newest 3, remove dumps older than 7 days or over 50 MB total.
 - `minecraft/window_state/*.json`: keep newest 10, remove window snapshots older than 30 days or over 50 MB total.

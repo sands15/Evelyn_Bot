@@ -71,6 +71,11 @@ Source branch: `codex/dependency-config-hardening` through `2272668`
     post-delivery context owner를 통과한다. 성공한 plain-text 전송만
     history와 checkpoint에 한 번 기록하며, 전송 실패는 기록하지 않고
     Minecraft의 이전 수동 기록도 제거해 이중 commit을 막는다.
+  - 실제 Control Page가 호출하는 standalone Bot API도 더 이상
+    process-local `CHAT_MESSAGES`만 사용하지 않는다. 별도 single-writer
+    `fast_control_continuity` v2 chain에 일반·stream·background의 정상·고정
+    실패 턴을 최대 30분/40개로 저장하고, 시작 시 UI와 다음 LLM context로
+    복구한다.
   - 모든 전달 surface는 callback 반환만으로 durable 성공을 선언하지 않는다.
     status schema, ready state, current head, verified integrity, rollback
     protection, 양수 generation/session count와 이번 commit의 성공 metric을
@@ -962,6 +967,20 @@ Source branch: `codex/dependency-config-hardening` through `2272668`
   이미지 내부 `compileall`, `pip check`와 읽기 전용 테스트 마운트의
   continuity 집중 테스트 44개를 통과했다. 이미지는 시작하지 않았고 실행
   중인 Bot API와 Control Page 두 서비스는 그대로 healthy다.
+- `f0543b7`은 standalone Bot API의 volatile `CHAT_MESSAGES`에 전용
+  `fast_control_continuity` single-writer owner를 연결했다. 일반 JSON,
+  NDJSON stream, planner 실패와 background 완료·실패가 exact durable
+  receipt를 검증하며 fresh process가 복구한 role/content를 다음 LLM request에
+  다시 넣는다.
+- owner/restart/retention 집중 20개와 Fast Control 인접 테스트를 포함한
+  92개, runtime 398개(skip 2), UI 156개(skip 7)를 통과했다. core 490개는
+  기능 assertion 실패 0개였고 이미지에 Git이 없어 난 기존 서명 검사 2개는
+  Windows 모듈 13개로 보완했다.
+- 새 Bot API image
+  `sha256:74394ea08b6254e4c70bea1e7b840d4d73db709213e2f90f5cdeb96c1e572316`은
+  이미지 내부 `compileall`, `pip check`와 읽기 전용 테스트 마운트의
+  Fast Control continuity 집중 테스트 93개를 통과했다. 이미지는 시작하지
+  않았고 실행 중인 기존 Bot API와 Control Page는 그대로 healthy다.
 
 ## Operational boundaries
 

@@ -131,6 +131,19 @@ timeout, 연결 오류, 상태 없는 예외, 5xx와 `408|409|425|429`는 첫 �
 성공 여부가 모호하므로 자동 재전송하지 않는다. 서버에는 성공했지만 응답만
 유실된 요청을 일반 메시지로 다시 보내는 중복 창을 닫은 것이다.
 
+`f0543b7`은 실제 Control Page가 호출하는 standalone Bot API의
+process-local `CHAT_MESSAGES` 손실을 닫았다. Fast Control 일반·stream·planner
+실패·background follow-up은 이제 별도 v2 hash-chain owner에 즉시 commit되고
+fresh process가 UI와 LLM recent context로 복구한다. 이 owner는 Discord/Main
+owner와 같은 파일을 동시에 쓰지 않으므로 multi-process overwrite는 없다.
+
+남은 구조적 P1은 두 short-lived owner의 cross-surface merge다. 현재 Control
+Page 재시작과 Discord 재시작은 각각의 관계 history를 보존하지만, 한 surface의
+마지막 턴이 다른 surface의 다음 턴 context에 즉시 합쳐지는 중앙 owner/API는
+아직 없다. 다음 조치는 Bot API를 중앙 continuity mutation owner로 승격하고
+Discord가 verified commit RPC를 위임하되, 기존 checkpoint generation/head와
+guild reset revocation을 원자적으로 이관하는 것이다.
+
 새 공식 Discord 이미지에서 guild reset/continuity/Discord command wiring과
 opt-in real-main crash/restart 집중 테스트 68개, `compileall`, `pip check`를
 통과했다. 전체 core 440개도 기능 assertion 실패는 0개였고, 이미지에 `git`

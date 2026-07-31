@@ -25,6 +25,27 @@ Last reviewed: 2026-07-31 KST
 - system prompt
 - stack trace, 예외 메시지, 파일시스템 경로
 
+split Docker의 standalone Bot API는 Discord/Main owner와 같은 파일을 동시에
+쓰지 않는다. 대신 `runtime_artifacts/fast_control_continuity/`에 독립된
+`active.json`, `checkpoint_head.json`, `status.json`을 두고 동일한 v2
+hash-chain·rollback protection·exact receipt 검증을 사용한다.
+
+- 보존 범위는 최대 30분, 최근 role/content 40개이며 system prompt와
+  task/runtime secret은 저장하지 않는다.
+- Bot API 시작 시 정상·고정 실패 턴과 background follow-up을 복구해
+  Control Page chat과 다음 Main LLM request의 recent context에 다시 넣는다.
+- 일반 JSON, NDJSON stream의 성공·고정 실패, background 완료·실패는
+  completion 응답 전에 즉시 durable commit한다.
+- tool planner 자체가 실패해도 일반·stream과 같은 고정 오류 및 commit
+  경계를 통과한다.
+- `fast_control.continuity-status.v1`은 state, generation, message count와
+  고정 오류 코드만 공개하며 대화 내용은 포함하지 않는다.
+
+이 분리는 두 프로세스가 하나의 checkpoint를 경쟁해서 덮어쓰는 것을 막는
+현재의 안전 경계다. Discord와 Fast Control의 두 short-lived history를 하나의
+cross-surface owner로 merge하는 작업은 아직 남아 있으며, 독립 checkpoint가
+최종 통합 상태라는 뜻은 아니다.
+
 체크포인트 스키마는 `conversation_continuity.checkpoint.v2`다. 기본 유효 시간은
 15분이고 파일 상한은 1 MiB다. 만료·손상·스키마 불일치·크기 초과 파일은
 복구하지 않고 즉시 폐기한다. 저장 실패 시 이전 체크포인트도 폐기해 초기화된
@@ -131,6 +152,8 @@ rollback protection 누락, 이전 commit의 실패 지표는 모두 고정
 - Discord text/command, Control Page 일반·검색, 검색 후속, 자율 후속과
   음성 완료는 모두 같은 receipt validator를 사용한다. 자율 후속의 generation
   역시 owner의 `checkpointGeneration`에서만 가져온다.
+- split Fast Control 일반·stream·background 응답도 같은 receipt validator를
+  사용하되 별도 single-writer checkpoint에 기록한다.
 
 Discord message reference fallback도 delivery-at-most-once 경계를 따른다.
 
@@ -258,6 +281,8 @@ transcript, 사용자·guild/channel/message/session/turn ID, 경로와 예외
 - Runtime Errors의 commit 지연 경고 투영, stale 비승격과 nested-field
   privacy
 - Control Page의 읽기 전용 p50/p95·표본 수 표시와 JavaScript parse
+- Fast Control 정상·실패·planner 실패·stream·background follow-up의
+  commit과 fresh-process 복구, LLM recent context 재주입
 
 `tests.core.test_session_continuity_restart`는 periodic writer가 실제
 checkpoint를 만든 뒤 첫 Python 프로세스를 `os._exit(74)`로 종료한다. 두 번째
