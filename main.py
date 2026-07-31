@@ -17,7 +17,6 @@ from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 from typing import Any, Awaitable, Callable
-
 PROJECT_ROOT = Path(__file__).resolve().parent
 EVELYN_CORE_RUNTIME = PROJECT_ROOT / "evelyn_core" / "runtime"
 os.environ.setdefault("EVELYN_PROJECT_ROOT", str(PROJECT_ROOT))
@@ -109,6 +108,7 @@ from evelyn_core.session_memory_state import (
     new_turn_id as new_session_turn_id,
 )
 from evelyn_core.session_continuity import SessionContinuityCheckpoint
+from evelyn_core.continuity_authenticity import load_continuity_authenticity
 from evelyn_core.conversation_policy_dependency_composition import ConversationPolicyDependencyComposition, ConversationPolicyDependencyCompositionDeps
 from evelyn_core.room_speaker_activity import RoomSpeakerActivityStore
 from evelyn_core.response_output_policy import (
@@ -307,12 +307,10 @@ if VOICE_CONSOLE_ONLY_STT_AND_REPLY:
     logging.getLogger("discord").setLevel(logging.CRITICAL)
     logging.getLogger("aiohttp").setLevel(logging.CRITICAL)
     logging.getLogger("evelyn_voice").setLevel(logging.CRITICAL)
-
 # =========================================================
 # 봇 설정
 # =========================================================
 intents = build_discord_intents()
-
 guild_prefix_cache: dict[int, str] = {}
 room_last_voice_utterance_for_merge: dict[str, VoiceUtteranceMergeRecord] = {}
 session_state_store = SessionStateStore.create_empty()
@@ -328,7 +326,8 @@ session_continuity_checkpoint = SessionContinuityCheckpoint(
         / "conversation_continuity"
         / "status.json"
     ),
-    system_prompt=SYSTEM_PROMPT, log=print,
+    system_prompt=SYSTEM_PROMPT, authenticity=load_continuity_authenticity(
+        protected_root=PROJECT_ROOT, additional_protected_roots=(RUNTIME_ARTIFACTS_ROOT,)), log=print,
 )
 search_followup_recovery = SearchFollowupRecoveryJournal(path=RUNTIME_ARTIFACTS_ROOT / "search_followup_recovery" / "active.json", enabled=DISCORD_ENABLED)
 autonomy_authorization_manager = AutonomyAuthorizationManager(
@@ -999,7 +998,7 @@ llm_context_assembly_composition = LlmContextAssemblyComposition(
         omnivoice_voice=OMNIVOICE_VOICE, omnivoice_speed=OMNIVOICE_SPEED,
         voice_input_mode_status_line=lambda: voice_input_mode_status_line(), odyssey_capability_json_dir=ODYSSEY_CAPABILITY_JSON_DIR,
         build_live_vision_context=build_live_vision_context, log_turn_event=log_turn_event,
-        log=print,
+        continuity_authenticity=session_continuity_checkpoint.authenticity, log=print,
     )
 )
 

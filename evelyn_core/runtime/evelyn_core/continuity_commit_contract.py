@@ -44,6 +44,14 @@ def require_durable_continuity_receipt(
             or value.get("rollbackProtected") is not True
             or value.get("checkpointIntegrity") != "verified"
             or value.get("checkpointHeadState") != "current"
+            or (
+                value.get("keyedAuthenticity") is True
+                and (
+                    value.get("checkpointHeadAuthenticity")
+                    != "verified"
+                    or value.get("tamperEvident") is not True
+                )
+            )
             or generation is None
             or generation < 1
             or persisted_count is None

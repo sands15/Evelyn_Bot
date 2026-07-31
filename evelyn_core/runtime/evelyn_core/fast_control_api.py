@@ -30,6 +30,9 @@ from .context_pipeline import build_context_policy_for_turn, build_tool_use_deci
 from .continuity_commit_contract import (
     require_durable_continuity_receipt,
 )
+from .continuity_authenticity import (
+    load_continuity_authenticity,
+)
 from .fast_context_contract import build_fast_main_llm_request
 from .fast_action_runtime import (
     FastActionCoordinator,
@@ -66,7 +69,7 @@ from .cross_surface_continuity import (
     CrossSurfaceContinuityBridge,
     CrossSurfaceContinuityConfig,
 )
-from .paths import get_runtime_artifacts_root
+from .paths import get_repo_root, get_runtime_artifacts_root
 from .public_error_contract import (
     public_error_code,
     public_failure_message,
@@ -204,9 +207,15 @@ BOOT_STEPS = (
     ("stt", "STT"),
 )
 
+CONTINUITY_ARTIFACTS_ROOT = get_runtime_artifacts_root()
+CONTINUITY_AUTHENTICITY = load_continuity_authenticity(
+    protected_root=get_repo_root(),
+    additional_protected_roots=(CONTINUITY_ARTIFACTS_ROOT,),
+)
 FAST_CONTROL_CONTINUITY_OWNER = FastControlContinuityOwner(
-    artifacts_root=get_runtime_artifacts_root(),
+    artifacts_root=CONTINUITY_ARTIFACTS_ROOT,
     enabled=FAST_CONTROL_CONTINUITY_ENABLED,
+    authenticity=CONTINUITY_AUTHENTICITY,
 )
 FAST_ACTION_RECOVERY_JOURNAL = FastActionRecoveryJournal(
     path=(
@@ -217,8 +226,9 @@ FAST_ACTION_RECOVERY_JOURNAL = FastActionRecoveryJournal(
     enabled=FAST_CONTROL_CONTINUITY_ENABLED,
 )
 CROSS_SURFACE_CONTINUITY_BRIDGE = CrossSurfaceContinuityBridge(
-    artifacts_root=get_runtime_artifacts_root(),
+    artifacts_root=CONTINUITY_ARTIFACTS_ROOT,
     config=CrossSurfaceContinuityConfig.from_env(),
+    authenticity=CONTINUITY_AUTHENTICITY,
 )
 CHAT_MESSAGES: list[dict[str, Any]] = (
     FAST_CONTROL_CONTINUITY_OWNER.restored_chat_messages()[

@@ -10,12 +10,17 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
+from .continuity_authenticity import (
+    CONTINUITY_AUTH_SCOPE_FAST_CONTROL,
+    CONTINUITY_AUTH_SCOPE_MAIN,
+    ContinuityAuthenticity,
+    validate_continuity_head,
+)
 from .session_continuity import (
     DEFAULT_MAX_FILE_BYTES,
     DEFAULT_MAX_GUILD_REVOCATIONS,
     DEFAULT_MAX_SESSIONS,
     SESSION_CONTINUITY_CHECKPOINT_SCHEMA,
-    SESSION_CONTINUITY_HEAD_SCHEMA,
     SESSION_CONTINUITY_REVOCATIONS_SCHEMA,
 )
 from .text import clean_text
@@ -254,48 +259,24 @@ def _read_revocations(
 
 def _validated_head(
     payload: dict[str, Any],
+    *,
+    authenticity: ContinuityAuthenticity,
+    authenticity_scope: str,
 ) -> dict[str, Any]:
-    expected_keys = {
-        "schema",
-        "state",
-        "generation",
-        "checkpointHash",
-        "updatedAt",
-        "contentFree",
-    }
-    generation = payload.get("generation")
-    checkpoint_hash = _valid_sha256(
-        payload.get("checkpointHash")
+    validated, auth_state = validate_continuity_head(
+        payload,
+        authenticity=authenticity,
+        auth_scope=authenticity_scope,
+        permit_unsigned_bootstrap=False,
     )
-    updated_at = _finite_float(payload.get("updatedAt"))
-    state = clean_text(payload.get("state"))
     if (
-        set(payload) != expected_keys
-        or payload.get("schema")
-        != SESSION_CONTINUITY_HEAD_SCHEMA
-        or state not in {"active", "empty"}
-        or isinstance(generation, bool)
-        or not isinstance(generation, int)
-        or generation < 0
-        or not checkpoint_hash
-        or updated_at < 0.0
-        or payload.get("contentFree") is not True
-        or (
-            state == "active"
-            and generation < 1
-        )
-        or (
-            state == "empty"
-            and checkpoint_hash != "0" * 64
-        )
+        validated["state"] == "active"
+        and validated["generation"] < 1
     ):
         raise ValueError("continuity_head_rejected")
     return {
-        **payload,
-        "state": state,
-        "generation": generation,
-        "checkpointHash": checkpoint_hash,
-        "updatedAt": updated_at,
+        **validated,
+        "_authenticity": auth_state,
     }
 
 
@@ -547,6 +528,7 @@ class CrossSurfaceContinuityBridge:
         *,
         artifacts_root: Path,
         config: CrossSurfaceContinuityConfig,
+        authenticity: ContinuityAuthenticity | None = None,
         wall_time: Callable[[], float] = time.time,
         latency_clock: Callable[[], float] = (
             time.perf_counter
@@ -554,6 +536,9 @@ class CrossSurfaceContinuityBridge:
     ) -> None:
         self.artifacts_root = Path(artifacts_root)
         self.config = config
+        self.authenticity = (
+            authenticity or ContinuityAuthenticity()
+        )
         self.wall_time = wall_time
         self.latency_clock = latency_clock
         self._status_lock = threading.Lock()
@@ -708,6 +693,8 @@ class CrossSurfaceContinuityBridge:
             max_messages=self.config.max_messages,
             guild_id=self.config.guild_id,
             user_id=self.config.user_id,
+            authenticity=self.authenticity,
+            authenticity_scope=CONTINUITY_AUTH_SCOPE_MAIN,
         )
 
     def _read_fast(self) -> VerifiedContinuitySnapshot:
@@ -717,6 +704,10 @@ class CrossSurfaceContinuityBridge:
             wall_time=self.wall_time,
             max_age_sec=self.config.max_age_sec,
             max_messages=self.config.max_messages,
+            authenticity=self.authenticity,
+            authenticity_scope=(
+                CONTINUITY_AUTH_SCOPE_FAST_CONTROL
+            ),
         )
 
     def merge_for_main(
@@ -998,7 +989,12 @@ class CrossSurfaceContinuityBridge:
         )
 
     def public_status(self) -> dict[str, Any]:
-        config_status = self.config.public_status()
+        config_status = {
+            **self.config.public_status(),
+            "keyedAuthenticity": (
+                self.authenticity.configured
+            ),
+        }
         if not self.config.scope_ready:
             with self._status_lock:
                 last_merge = _copy_merge_evidence(
@@ -1051,8 +1047,13 @@ def read_verified_continuity_snapshot(
     ),
     guild_id: int | None = None,
     user_id: int | None = None,
+    authenticity: ContinuityAuthenticity | None = None,
+    authenticity_scope: str = CONTINUITY_AUTH_SCOPE_MAIN,
 ) -> VerifiedContinuitySnapshot:
     root = Path(owner_root)
+    head_authenticity = (
+        authenticity or ContinuityAuthenticity()
+    )
     checkpoint_path = root / "active.json"
     if (
         not checkpoint_path.exists()
@@ -1070,7 +1071,9 @@ def read_verified_continuity_snapshot(
                     state="missing",
                 )
             validated_empty_head = _validated_head(
-                empty_head
+                empty_head,
+                authenticity=head_authenticity,
+                authenticity_scope=authenticity_scope,
             )
             if validated_empty_head["state"] != "empty":
                 raise ValueError(
@@ -1109,7 +1112,11 @@ def read_verified_continuity_snapshot(
         )
         if head is None or checkpoint is None:
             raise ValueError("continuity_artifact_missing")
-        head = _validated_head(head)
+        head = _validated_head(
+            head,
+            authenticity=head_authenticity,
+            authenticity_scope=authenticity_scope,
+        )
         head_generation = head["generation"]
         head_hash = head["checkpointHash"]
         if head["state"] != "active":

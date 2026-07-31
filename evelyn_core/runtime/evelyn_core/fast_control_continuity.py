@@ -5,6 +5,10 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
+from .continuity_authenticity import (
+    CONTINUITY_AUTH_SCOPE_FAST_CONTROL,
+    ContinuityAuthenticity,
+)
 from .session_continuity import SessionContinuityCheckpoint
 from .session_memory_state import (
     SessionStateStore,
@@ -38,6 +42,7 @@ class FastControlContinuityOwner:
         ),
         wall_time: Callable[[], float] = time.time,
         monotonic: Callable[[], float] = time.monotonic,
+        authenticity: ContinuityAuthenticity | None = None,
         log: Callable[..., Any] = print,
     ) -> None:
         self.enabled = bool(enabled)
@@ -49,6 +54,9 @@ class FastControlContinuityOwner:
         )
         self.wall_time = wall_time
         self.monotonic = monotonic
+        self.authenticity = (
+            authenticity or ContinuityAuthenticity()
+        )
         self.log = log
         self._lock = threading.RLock()
         self.store = SessionStateStore.create_empty()
@@ -69,6 +77,10 @@ class FastControlContinuityOwner:
             max_history_items=self.max_history_items,
             wall_time=self.wall_time,
             monotonic=self.monotonic,
+            authenticity=self.authenticity,
+            authenticity_scope=(
+                CONTINUITY_AUTH_SCOPE_FAST_CONTROL
+            ),
             log=self.log,
         )
         self.restore_status = self.checkpoint.restore()
@@ -233,6 +245,8 @@ class FastControlContinuityOwner:
                 "persistedSessionCount": 0,
                 "messageCount": 0,
                 "lastErrorCode": "",
+                "keyedAuthenticity": False,
+                "tamperEvident": False,
                 "policy": {"contentFree": True},
             }
         raw = self.checkpoint.status()
@@ -244,6 +258,10 @@ class FastControlContinuityOwner:
                 raw.get("rollbackProtected") is True
                 and raw.get("checkpointIntegrity") == "verified"
                 and raw.get("checkpointHeadState") == "current"
+                and (
+                    raw.get("keyedAuthenticity") is not True
+                    or raw.get("tamperEvident") is True
+                )
             ),
             "generation": max(
                 0,
@@ -258,6 +276,12 @@ class FastControlContinuityOwner:
             ),
             "lastErrorCode": clean_text(
                 raw.get("lastErrorCode")
+            ),
+            "keyedAuthenticity": bool(
+                raw.get("keyedAuthenticity")
+            ),
+            "tamperEvident": bool(
+                raw.get("tamperEvident")
             ),
             "policy": {"contentFree": True},
         }

@@ -1,0 +1,18 @@
+services:
+  bot_api:
+    environment:
+      EVELYN_CONTINUITY_AUTH_KEY_FILE: /run/secrets/evelyn_continuity_auth.key
+      EVELYN_CONTINUITY_AUTH_BOOTSTRAP: "${EVELYN_CONTINUITY_AUTH_BOOTSTRAP:-false}"
+    secrets:
+      - evelyn_continuity_auth_key
+
+  discord_bot:
+    environment:
+      EVELYN_CONTINUITY_AUTH_KEY_FILE: /run/secrets/evelyn_continuity_auth.key
+      EVELYN_CONTINUITY_AUTH_BOOTSTRAP: "${EVELYN_CONTINUITY_AUTH_BOOTSTRAP:-false}"
+    secrets:
+      - evelyn_continuity_auth_key
+
+secrets:
+  evelyn_continuity_auth_key:
+    file: "${EVELYN_CONTINUITY_AUTH_KEY_FILE:?Set an absolute external continuity auth key file}"

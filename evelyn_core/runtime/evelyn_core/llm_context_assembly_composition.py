@@ -4,6 +4,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
+from .continuity_authenticity import (
+    ContinuityAuthenticity,
+    load_continuity_authenticity,
+)
 from .cognitive_policy_state import apply_ask_gating, ask_confidence_threshold_for_source, build_fast_cognitive_state
 from .cross_surface_continuity import (
     CrossSurfaceContinuityBridge,
@@ -72,6 +76,9 @@ class LlmContextAssemblyCompositionDeps:
     merge_cross_surface_context: (
         Callable[..., list[dict[str, Any]]] | None
     ) = None
+    continuity_authenticity: (
+        ContinuityAuthenticity | None
+    ) = None
     log: Callable[..., Any] = print
 
 
@@ -80,13 +87,25 @@ class LlmContextAssemblyComposition:
 
     def __init__(self, deps: LlmContextAssemblyCompositionDeps) -> None:
         self.deps = deps
-        self.merge_cross_surface_context = (
-            deps.merge_cross_surface_context
-            or CrossSurfaceContinuityBridge(
+        if deps.merge_cross_surface_context is not None:
+            self.merge_cross_surface_context = (
+                deps.merge_cross_surface_context
+            )
+        else:
+            authenticity = (
+                deps.continuity_authenticity
+                or load_continuity_authenticity(
+                    protected_root=deps.project_root,
+                    additional_protected_roots=(
+                        deps.runtime_artifacts_root,
+                    ),
+                )
+            )
+            self.merge_cross_surface_context = CrossSurfaceContinuityBridge(
                 artifacts_root=deps.runtime_artifacts_root,
                 config=CrossSurfaceContinuityConfig.from_env(),
+                authenticity=authenticity,
             ).merge_for_main_observed
-        )
 
     def build_evelyn_runtime_dependency_context(self) -> str:
         deps = self.deps

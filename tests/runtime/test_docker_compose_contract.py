@@ -6,6 +6,9 @@ from pathlib import Path
 
 REPO_ROOT = next(path for path in Path(__file__).resolve().parents if (path / "main.py").exists())
 COMPOSE = REPO_ROOT / "docker-compose.fast-control.yml"
+CONTINUITY_AUTH_COMPOSE = (
+    REPO_ROOT / "docker-compose.continuity-auth.yml"
+)
 DOCKER_DIR = REPO_ROOT / "docker"
 CODEX_GATEWAY = REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "codex_gateway_server.py"
 MAIN = REPO_ROOT / "main.py"
@@ -17,6 +20,30 @@ LAUNCHERS = REPO_ROOT / "evelyn_core" / "runtime" / "launchers"
 
 
 class DockerComposeContractTests(unittest.TestCase):
+    def test_continuity_auth_override_shares_read_only_external_key(
+        self,
+    ) -> None:
+        source = CONTINUITY_AUTH_COMPOSE.read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn(
+            "${EVELYN_CONTINUITY_AUTH_KEY_FILE:?",
+            source,
+        )
+        self.assertEqual(
+            source.count(
+                "EVELYN_CONTINUITY_AUTH_KEY_FILE: "
+                "/run/secrets/evelyn_continuity_auth.key"
+            ),
+            2,
+        )
+        self.assertEqual(
+            source.count("- evelyn_continuity_auth_key"),
+            2,
+        )
+        self.assertNotIn("runtime_artifacts/secrets", source)
+
     def test_discord_bot_worker_is_declared_as_separate_profile(self) -> None:
         source = COMPOSE.read_text(encoding="utf-8")
 

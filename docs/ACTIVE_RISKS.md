@@ -97,6 +97,16 @@ fail-closed한다. checkpoint commit 뒤 head commit 전에 죽은 경우에만 
 0 head에 먼저 고정한 뒤 다음 변경에서 v2로 연결하며, 빈 store는 empty head를
 먼저 전진시킨 뒤 checkpoint를 제거한다.
 
+선택적 외부 키 인증도 구현됐다. repository 밖의 최소 32바이트 key file을
+`EVELYN_CONTINUITY_AUTH_KEY_FILE`로 주입하면 두 owner는 head v2에
+HMAC-SHA256을 붙이고 writer, cross-surface reader, exact durable receipt가
+같은 tag를 검증한다. checkpoint와 일반 hash head를 함께 임의 재작성해도 tag를
+위조하지 못하면 거부되고, owner scope가 달라도 정상 tag를 재사용할 수 없다.
+signed 상태의 key 누락·불일치와 검토되지 않은 v1
+상태는 원본을 지우지 않고 fail-closed하며, v1 승격은 one-shot
+`EVELYN_CONTINUITY_AUTH_BOOTSTRAP=true`가 있어야 한다. 기본 환경에는 운영 키를
+포함하지 않으므로 배포에서 override를 실제 사용해야 이 보호가 활성화된다.
+
 periodic writer가 저장한 직후 첫 Python 프로세스를 `os._exit`로 강제 종료하고
 두 번째 새 프로세스가 완료 턴, active follow-up, user ownership, 현재 system
 prompt와 reply target을 복구하는 owner-level E2E도 통과했다. 부분 STT와 이전
@@ -181,8 +191,9 @@ opt-in real-main crash/restart 집중 테스트 68개, `compileall`, `pip check`
 
 새 v2 이미지에서도 재계산 hash 변조, 과거 generation rollback, checkpoint
 삭제, v1 migration, head commit crash 복구와 실제 `main.py` crash/restart를
-검증했다. 다만 checkpoint와 head를 함께 다시 쓸 수 있는 filesystem 관리자에
-대한 keyed authenticity나 외부 불변 원장은 아직 제공하지 않는다.
+검증했다. 외부 키가 설정된 경우 checkpoint/head 동시 임의 재작성도 새
+authenticity 테스트가 거부한다. 다만 이미 서명된 과거 쌍의 replay와 전체 삭제를
+탐지할 외부 단조 counter·불변 원장은 아직 제공하지 않는다.
 
 `67a7adf` 공식 Discord 이미지에서는 새 전달 테스트 9개, 인접 경로 8개,
 Discord I/O 전체 98개를 통과했다. core 468개도 기능 assertion 실패는
@@ -236,12 +247,13 @@ v3는 각 action marker에 시작 당시 Fast continuity generation도 기록한
 현재 generation이 이번 안내의 durable 전달을 증명해 중복 안내를 막는다. 시작
 generation이 없는 v1/v2 pending marker는 보수적으로 새 안내를 요구한다.
 
-남은 위험은 journal과 head, continuity checkpoint까지 함께 다시 쓰거나 함께
-삭제할 수 있는 filesystem 관리자에 대한 외부 authenticity가 없다는 점과,
-실제 Control Page에서 장시간 웹 조사 중 Bot API 컨테이너를 강제 종료하는 운영
-E2E는 아직 수행하지 않았다는 점이다. live 검증에서는 시작 답변 뒤 강제 종료,
-고정 중단 안내, 자동 재요청 0회와 `actions.recovery`의 content-free 상태를 함께
-확인한다.
+남은 위험은 action journal/head 자체에는 아직 외부 keyed authenticity가 없어
+둘을 함께 재작성할 수 있다는 점이다. continuity checkpoint는 외부 키를 켜면
+임의 위조를 거부하지만, 이미 서명된 과거 쌍의 replay나 전체 파일 삭제는 외부
+단조 anchor 없이는 탐지하지 못한다. 실제 Control Page에서 장시간 웹 조사 중
+Bot API 컨테이너를 강제 종료하는 운영 E2E도 아직 수행하지 않았다. live
+검증에서는 시작 답변 뒤 강제 종료, 고정 중단 안내, 자동 재요청 0회와
+`actions.recovery`의 content-free 상태를 함께 확인한다.
 
 ## P1 — Python 모델 런타임 의존성 잔여 취약점
 

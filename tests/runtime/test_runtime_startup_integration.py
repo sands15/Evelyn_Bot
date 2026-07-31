@@ -21,6 +21,10 @@ if str(RUNTIME_ROOT) not in sys.path:
 from evelyn_core.runtime_health import collect_runtime_health  # noqa: E402
 from evelyn_core.runtime_services import HealthProbeSpec, ServiceManifest, ServiceSpec  # noqa: E402
 from evelyn_core.session_continuity import SessionContinuityCheckpoint  # noqa: E402
+from evelyn_core.continuity_authenticity import (  # noqa: E402
+    CONTINUITY_HEAD_SCHEMA_V2,
+    ContinuityAuthenticity,
+)
 from evelyn_core.session_memory_state import SessionStateStore  # noqa: E402
 
 
@@ -265,6 +269,7 @@ class RealMainProcessStartupSmokeTests(unittest.TestCase):
         port: int,
         *,
         temp_root: Path | None = None,
+        continuity_auth_key_path: Path | None = None,
     ) -> subprocess.Popen[str]:
         temp_root = temp_root or self.allocate_temp_root()
         env = os.environ.copy()
@@ -291,6 +296,10 @@ class RealMainProcessStartupSmokeTests(unittest.TestCase):
                 ),
             }
         )
+        if continuity_auth_key_path is not None:
+            env["EVELYN_CONTINUITY_AUTH_KEY_FILE"] = str(
+                continuity_auth_key_path
+            )
         stdout_path = temp_root / "main.stdout.log"
         stderr_path = temp_root / "main.stderr.log"
         with stdout_path.open("w", encoding="utf-8") as stdout_handle, stderr_path.open(
@@ -387,6 +396,14 @@ class RealMainProcessStartupSmokeTests(unittest.TestCase):
         continuity_root = artifacts_root / "conversation_continuity"
         checkpoint_path = continuity_root / "active.json"
         status_path = continuity_root / "status.json"
+        head_path = continuity_root / "checkpoint_head.json"
+        auth_key_path = temp_root / "continuity-auth.key"
+        auth_key_path.write_bytes(
+            b"real-main-continuity-auth-key-32-bytes"
+        )
+        authenticity = ContinuityAuthenticity(
+            key=auth_key_path.read_bytes()
+        )
         shared_checkpoint_path = (
             REPO_ROOT
             / "runtime_artifacts"
@@ -421,11 +438,13 @@ class RealMainProcessStartupSmokeTests(unittest.TestCase):
             checkpoint_path=checkpoint_path,
             status_path=status_path,
             system_prompt="seed prompt",
+            authenticity=authenticity,
         ).flush(force=True)
 
         first = self.start_main_process(
             unused_tcp_port(),
             temp_root=temp_root,
+            continuity_auth_key_path=auth_key_path,
         )
         first_status = self.wait_for_continuity_restore(status_path)
         first_restored_at = float(
@@ -440,6 +459,7 @@ class RealMainProcessStartupSmokeTests(unittest.TestCase):
         second = self.start_main_process(
             unused_tcp_port(),
             temp_root=temp_root,
+            continuity_auth_key_path=auth_key_path,
         )
         second_status = self.wait_for_continuity_restore(
             status_path,
@@ -447,6 +467,14 @@ class RealMainProcessStartupSmokeTests(unittest.TestCase):
         )
         self.assertIsNone(second.poll())
         self.assertEqual(second_status["restoredSessionCount"], 1)
+        self.assertTrue(second_status["keyedAuthenticity"])
+        self.assertTrue(second_status["tamperEvident"])
+        self.assertEqual(
+            json.loads(head_path.read_text(encoding="utf-8"))[
+                "schema"
+            ],
+            CONTINUITY_HEAD_SCHEMA_V2,
+        )
         self.assertGreater(
             float(second_status.get("lastRestoredAt") or 0.0),
             first_restored_at,

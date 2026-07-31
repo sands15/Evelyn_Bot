@@ -75,6 +75,39 @@ hash-chain·rollback protection·exact receipt 검증을 사용한다.
 - `fast_control.continuity-status.v1`은 state, generation, message count와
   고정 오류 코드만 공개하며 대화 내용은 포함하지 않는다.
 
+## Keyed head authenticity
+
+`EVELYN_CONTINUITY_AUTH_KEY_FILE`을 설정하면 Main/Discord owner와 Fast Control
+owner는 content-free checkpoint head를
+`conversation_continuity.checkpoint-head.v2`로 기록하고 HMAC-SHA256으로
+인증한다. cross-surface reader와 완료 턴 durable receipt도 같은 인증을 통과한
+current head만 받아들인다. 서명에는 `conversation_continuity` 또는
+`fast_control_continuity` owner scope도 포함되어 한 owner의 정상 서명본을 다른
+owner 폴더로 복사하는 교차-owner replay를 거부한다.
+
+- 키 파일은 최소 32바이트의 raw key 또는 `base64:` 접두사가 붙은 base64
+  key여야 한다. 상대 경로, symlink, 8KiB 초과 파일과 repository 또는
+  `runtime_artifacts` 보호 경계 내부의 키 파일은 거부한다.
+- 키·키 경로·auth tag는 status나 오류 로그에 노출하지 않는다. 공개 상태에는
+  `keyedAuthenticity`, `tamperEvident`, 고정 오류 코드만 남긴다.
+- 서명된 v2 head를 키 없이 읽거나 잘못된 키/tag로 읽으면 fail-closed한다.
+  이때 checkpoint/head 원본은 지우거나 새 상태로 덮지 않아 올바른 키로 다시
+  시작할 수 있다.
+- 기존 unsigned v1 head는 키를 설정했다는 이유만으로 자동 신뢰하지 않는다.
+  운영자가 원본을 별도로 검토한 뒤 한 번만
+  `EVELYN_CONTINUITY_AUTH_BOOTSTRAP=true`로 시작해야 v2로 승격된다. 승격 후에는
+  즉시 `false`로 되돌린다. read-only cross-surface 경로는 bootstrap 상태를
+  직접 신뢰하거나 승격하지 않는다.
+- Docker에서는 base compose와 `docker-compose.continuity-auth.yml`을 함께
+  사용한다. override는 호스트의 절대 키 경로를 `/run/secrets`에 read-only
+  secret으로 마운트해 Bot API와 Discord가 같은 키를 사용하게 한다.
+
+이 HMAC 경계는 공유 continuity 폴더의 관리자가 checkpoint와 head를 임의의
+새 내용으로 함께 다시 쓰는 공격을 탐지한다. 그러나 공격자가 이미 서명된 과거
+checkpoint/head 쌍을 그대로 replay하거나 모든 continuity 파일을 삭제하는 것은
+외부 단조 counter가 없으면 탐지할 수 없다. 따라서 `tamperEvident=true`는
+임의 위조 방지를 뜻하며, 외부 불변 anchor나 완전한 삭제 탐지를 뜻하지 않는다.
+
 Fast Control의 background 조사 작업은 시작 답변만 복구되고 실제
 `asyncio.Task`는 재시작 뒤 복구할 수 없다. 이를 진행 중인 것처럼 남기거나
 자동 재실행하지 않기 위해
@@ -189,7 +222,8 @@ v2 checkpoint는 1부터 증가하는 `generation`, 직전 checkpoint의
 `runtime_artifacts/conversation_continuity/checkpoint_head.json`은 최신
 generation과 checkpoint hash를 고정하는 content-free durable head다. schema,
 `active|empty`, generation, hash, 갱신 시각과 `contentFree=true`만 저장하고
-대화문·사용자·guild/channel/message/session ID는 저장하지 않는다.
+대화문·사용자·guild/channel/message/session ID는 저장하지 않는다. 외부 키를
+사용하는 v2 head에는 HMAC 알고리즘, content-free key ID와 auth tag가 추가된다.
 
 - checkpoint를 먼저 `fsync`·원자 교체하고 head를 durable 교체한다.
 - checkpoint가 head보다 정확히 한 generation 앞서고 `previousHash`가 기존
@@ -198,13 +232,14 @@ generation과 checkpoint hash를 고정하는 content-free durable head다. sche
   checkpoint 삭제는 fail-closed한다.
 - 빈 store는 먼저 `empty` head를 한 generation 전진시킨 뒤 checkpoint를
   삭제한다. unlink가 지연돼도 이전 대화가 복구되지 않는다.
-- 기존 v1 checkpoint는 raw JSON 전체의 domain-separated SHA-256으로
-  generation 0 head에 먼저 고정한다. 다음 상태 변경에서 v2 generation 1로
-  연결한다.
+- 무키 모드의 기존 v1 checkpoint는 raw JSON 전체의 domain-separated
+  SHA-256으로 generation 0 head에 먼저 고정한다. 외부 키를 켠 상태에서는
+  검토 후 one-shot bootstrap을 명시해야만 signed head로 승격하며, 다음 상태
+  변경에서 checkpoint v2 generation 1로 연결한다.
 
-hash/head는 우발적·비협조적 변조와 rollback을 탐지한다. checkpoint와 head를
-함께 다시 쓸 수 있는 filesystem 관리자에 대한 keyed authenticity나 외부
-불변 원장은 아니다.
+무키 hash/head는 우발적·비협조적 변조와 일반 rollback을 탐지한다. keyed head
+v2는 checkpoint와 일반 head를 함께 임의 재작성하는 공격까지 탐지한다. 다만
+이미 서명된 과거 쌍의 replay와 전체 삭제를 탐지하는 외부 불변 원장은 아니다.
 
 `runtime_artifacts/conversation_continuity/guild_revocations.json`은 길드 초기화가
 체크포인트보다 먼저 내구성 있게 기록됐음을 나타내는 write-ahead ledger다.

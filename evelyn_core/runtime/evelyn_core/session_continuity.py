@@ -13,6 +13,15 @@ from .continuity_commit_contract import (
     CONTINUITY_COMMIT_METRICS_SCHEMA,
     CONTINUITY_STATUS_SCHEMA,
 )
+from .continuity_authenticity import (
+    CONTINUITY_AUTH_SCOPE_MAIN,
+    CONTINUITY_HEAD_SCHEMA_V1,
+    CONTINUITY_HEAD_SCHEMA_V2,
+    ContinuityAuthenticity,
+    ContinuityAuthenticityError,
+    build_continuity_head,
+    validate_continuity_head,
+)
 from .runtime_artifact_io import atomic_json_write
 from .runtime_error_observability import RuntimeErrorCounter
 from .text import clean_text
@@ -23,7 +32,10 @@ SESSION_CONTINUITY_LEGACY_CHECKPOINT_SCHEMA = (
     "conversation_continuity.checkpoint.v1"
 )
 SESSION_CONTINUITY_HEAD_SCHEMA = (
-    "conversation_continuity.checkpoint-head.v1"
+    CONTINUITY_HEAD_SCHEMA_V1
+)
+SESSION_CONTINUITY_AUTHENTICATED_HEAD_SCHEMA = (
+    CONTINUITY_HEAD_SCHEMA_V2
 )
 SESSION_CONTINUITY_STATUS_SCHEMA = CONTINUITY_STATUS_SCHEMA
 SESSION_CONTINUITY_COMMIT_METRICS_SCHEMA = (
@@ -191,6 +203,8 @@ class SessionContinuityCheckpoint:
         commit_latency_sample_limit: int = (
             DEFAULT_COMMIT_LATENCY_SAMPLE_LIMIT
         ),
+        authenticity: ContinuityAuthenticity | None = None,
+        authenticity_scope: str = CONTINUITY_AUTH_SCOPE_MAIN,
         log: Callable[[str], Any] | None = None,
     ) -> None:
         self.store = store
@@ -231,6 +245,10 @@ class SessionContinuityCheckpoint:
             self.commit_latency_warning_min_samples,
             int(commit_latency_sample_limit),
         )
+        self.authenticity = (
+            authenticity or ContinuityAuthenticity()
+        )
+        self.authenticity_scope = str(authenticity_scope)
         self.log = log
         self.runtime_errors = RuntimeErrorCounter(now=wall_time)
         self._lock = threading.RLock()
@@ -246,6 +264,7 @@ class SessionContinuityCheckpoint:
         self._checkpoint_integrity = "unknown"
         self._checkpoint_generation = 0
         self._checkpoint_head_state = "missing"
+        self._checkpoint_head_authenticity = "missing"
         self._commit_attempt_count = 0
         self._commit_success_count = 0
         self._commit_failure_count = 0
@@ -453,6 +472,19 @@ class SessionContinuityCheckpoint:
             "checkpointIntegrity": self._checkpoint_integrity,
             "checkpointGeneration": self._checkpoint_generation,
             "checkpointHeadState": self._checkpoint_head_state,
+            "checkpointHeadAuthenticity": (
+                self._checkpoint_head_authenticity
+            ),
+            "keyedAuthenticity": (
+                self.authenticity.configured
+            ),
+            "tamperEvident": bool(
+                self.authenticity.configured
+                and self._checkpoint_head_authenticity
+                == "verified"
+                and self._checkpoint_head_state
+                in {"current", "empty"}
+            ),
             "rollbackProtected": bool(
                 self._checkpoint_head_state
                 in {"current", "empty"}
@@ -581,57 +613,17 @@ class SessionContinuityCheckpoint:
         ):
             raise ValueError("checkpoint_head_rejected")
         payload = json.loads(path.read_text(encoding="utf-8"))
-        expected_keys = {
-            "schema",
-            "state",
-            "generation",
-            "checkpointHash",
-            "updatedAt",
-            "contentFree",
-        }
-        generation = (
-            payload.get("generation")
-            if isinstance(payload, dict)
-            else None
-        )
-        state = (
-            str(payload.get("state") or "")
-            if isinstance(payload, dict)
-            else ""
-        )
-        checkpoint_hash = (
-            _valid_sha256(payload.get("checkpointHash"))
-            if isinstance(payload, dict)
-            else ""
-        )
-        updated_at = (
-            _finite_float(payload.get("updatedAt"), default=-1.0)
-            if isinstance(payload, dict)
-            else -1.0
-        )
-        if (
-            not isinstance(payload, dict)
-            or set(payload) != expected_keys
-            or payload.get("schema")
-            != SESSION_CONTINUITY_HEAD_SCHEMA
-            or state not in {"active", "empty"}
-            or isinstance(generation, bool)
-            or not isinstance(generation, int)
-            or generation < 0
-            or not checkpoint_hash
-            or updated_at < 0.0
-            or payload.get("contentFree") is not True
-            or (
-                state == "empty"
-                and checkpoint_hash
-                != SESSION_CONTINUITY_CHAIN_GENESIS
-            )
-        ):
+        if not isinstance(payload, dict):
             raise ValueError("checkpoint_head_rejected")
+        validated, auth_state = validate_continuity_head(
+            payload,
+            authenticity=self.authenticity,
+            auth_scope=self.authenticity_scope,
+            permit_unsigned_bootstrap=True,
+        )
         return {
-            **payload,
-            "checkpointHash": checkpoint_hash,
-            "updatedAt": updated_at,
+            **validated,
+            "_authenticity": auth_state,
         }
 
     def _write_checkpoint_head(
@@ -641,17 +633,23 @@ class SessionContinuityCheckpoint:
         generation: int,
         checkpoint_hash: str,
     ) -> None:
+        head = build_continuity_head(
+            state=state,
+            generation=generation,
+            checkpoint_hash=checkpoint_hash,
+            updated_at=self.wall_time(),
+            authenticity=self.authenticity,
+            auth_scope=self.authenticity_scope,
+        )
         atomic_json_write(
             self.head_path,
-            {
-                "schema": SESSION_CONTINUITY_HEAD_SCHEMA,
-                "state": state,
-                "generation": int(generation),
-                "checkpointHash": str(checkpoint_hash),
-                "updatedAt": self.wall_time(),
-                "contentFree": True,
-            },
+            head,
             durable=True,
+        )
+        self._checkpoint_head_authenticity = (
+            "verified"
+            if self.authenticity.configured
+            else "unconfigured"
         )
 
     def _discard_checkpoint_head(self) -> None:
@@ -667,6 +665,11 @@ class SessionContinuityCheckpoint:
 
     def _checkpoint_snapshot(self) -> dict[str, Any]:
         head = self._load_checkpoint_head()
+        head_authenticity = (
+            str(head.get("_authenticity") or "")
+            if head is not None
+            else "missing"
+        )
         path = self.checkpoint_path
         if not path.exists() and not path.is_symlink():
             if head is not None and head["state"] == "active":
@@ -691,6 +694,7 @@ class SessionContinuityCheckpoint:
                     if head is not None
                     else "missing"
                 ),
+                "headAuthenticity": head_authenticity,
             }
         if (
             path.is_symlink()
@@ -706,7 +710,19 @@ class SessionContinuityCheckpoint:
         if schema == SESSION_CONTINUITY_LEGACY_CHECKPOINT_SCHEMA:
             checkpoint_hash = _legacy_checkpoint_hash(raw_text)
             if head is None:
+                if (
+                    self.authenticity.configured
+                    and not self.authenticity.allow_unsigned_bootstrap
+                ):
+                    raise ContinuityAuthenticityError(
+                        "continuity_auth_bootstrap_required"
+                    )
                 head_state = "missing"
+                head_authenticity = (
+                    "bootstrap_required"
+                    if self.authenticity.configured
+                    else "missing"
+                )
             elif (
                 head["state"] == "active"
                 and int(head["generation"]) == 0
@@ -723,6 +739,7 @@ class SessionContinuityCheckpoint:
                 "checkpointHash": checkpoint_hash,
                 "integrity": "legacy",
                 "headState": head_state,
+                "headAuthenticity": head_authenticity,
             }
         if schema != SESSION_CONTINUITY_CHECKPOINT_SCHEMA:
             raise ValueError("invalid_schema")
@@ -744,12 +761,24 @@ class SessionContinuityCheckpoint:
             raise ValueError("checkpoint_integrity_failed")
         if head is None:
             if (
+                self.authenticity.configured
+                and not self.authenticity.allow_unsigned_bootstrap
+            ):
+                raise ContinuityAuthenticityError(
+                    "continuity_auth_bootstrap_required"
+                )
+            if (
                 generation != 1
                 or previous_hash
                 != SESSION_CONTINUITY_CHAIN_GENESIS
             ):
                 raise ValueError("checkpoint_head_missing")
             head_state = "lagging"
+            head_authenticity = (
+                "bootstrap_required"
+                if self.authenticity.configured
+                else "missing"
+            )
         elif (
             head["state"] == "active"
             and generation == int(head["generation"])
@@ -779,6 +808,7 @@ class SessionContinuityCheckpoint:
             "checkpointHash": checkpoint_hash,
             "integrity": "verified",
             "headState": head_state,
+            "headAuthenticity": head_authenticity,
         }
 
     def _anchor_checkpoint_snapshot(
@@ -787,6 +817,22 @@ class SessionContinuityCheckpoint:
     ) -> dict[str, Any]:
         payload = snapshot.get("payload")
         if payload is None:
+            if (
+                snapshot.get("headState") == "empty"
+                and snapshot.get("headAuthenticity")
+                == "bootstrap_required"
+            ):
+                self._write_checkpoint_head(
+                    state="empty",
+                    generation=int(snapshot["generation"]),
+                    checkpoint_hash=str(
+                        snapshot["checkpointHash"]
+                    ),
+                )
+                snapshot = {
+                    **snapshot,
+                    "headAuthenticity": "verified",
+                }
             self._checkpoint_generation = int(
                 snapshot["generation"]
             )
@@ -794,8 +840,15 @@ class SessionContinuityCheckpoint:
             self._checkpoint_head_state = str(
                 snapshot["headState"]
             )
+            self._checkpoint_head_authenticity = str(
+                snapshot["headAuthenticity"]
+            )
             return snapshot
-        if snapshot["headState"] != "current":
+        if (
+            snapshot["headState"] != "current"
+            or snapshot.get("headAuthenticity")
+            == "bootstrap_required"
+        ):
             self._write_checkpoint_head(
                 state="active",
                 generation=int(snapshot["generation"]),
@@ -806,6 +859,11 @@ class SessionContinuityCheckpoint:
             snapshot = {
                 **snapshot,
                 "headState": "current",
+                "headAuthenticity": (
+                    "verified"
+                    if self.authenticity.configured
+                    else "unconfigured"
+                ),
             }
         self._checkpoint_generation = int(
             snapshot["generation"]
@@ -816,6 +874,9 @@ class SessionContinuityCheckpoint:
             else "verified"
         )
         self._checkpoint_head_state = "current"
+        self._checkpoint_head_authenticity = str(
+            snapshot["headAuthenticity"]
+        )
         return snapshot
 
     def _revoke_checkpoint_chain(self) -> None:
@@ -931,6 +992,18 @@ class SessionContinuityCheckpoint:
         )
         return self.status()
 
+    def _record_authenticity_error(
+        self,
+        exc: ContinuityAuthenticityError,
+    ) -> dict[str, Any]:
+        self._checkpoint_head_authenticity = {
+            "continuity_auth_bootstrap_required": (
+                "bootstrap_required"
+            ),
+            "continuity_auth_key_required": "key_required",
+        }.get(exc.code, "failed")
+        return self._record_error(exc.code, exc)
+
     def _discard_checkpoint(self) -> None:
         try:
             if (
@@ -972,6 +1045,8 @@ class SessionContinuityCheckpoint:
             self._last_signature = self._signature(material)
             try:
                 snapshot = self._checkpoint_snapshot()
+            except ContinuityAuthenticityError as exc:
+                return self._record_authenticity_error(exc)
             except (
                 OSError,
                 UnicodeError,
@@ -1178,6 +1253,8 @@ class SessionContinuityCheckpoint:
         with self._lock:
             try:
                 snapshot = self._checkpoint_snapshot()
+            except ContinuityAuthenticityError as exc:
+                return self._record_authenticity_error(exc)
             except (
                 OSError,
                 UnicodeError,
@@ -1357,6 +1434,11 @@ class SessionContinuityCheckpoint:
                 snapshot = self._checkpoint_snapshot()
                 target_verified = bool(
                     snapshot.get("headState") == "current"
+                    and (
+                        not self.authenticity.configured
+                        or snapshot.get("headAuthenticity")
+                        == "verified"
+                    )
                     and self._snapshot_contains_commit_target(
                         snapshot,
                         session_key=required_session,
@@ -1437,6 +1519,7 @@ __all__ = [
     "SESSION_CONTINUITY_CHAIN_GENESIS",
     "SESSION_CONTINUITY_CHECKPOINT_SCHEMA",
     "SESSION_CONTINUITY_COMMIT_METRICS_SCHEMA",
+    "SESSION_CONTINUITY_AUTHENTICATED_HEAD_SCHEMA",
     "SESSION_CONTINUITY_HEAD_SCHEMA",
     "SESSION_CONTINUITY_LEGACY_CHECKPOINT_SCHEMA",
     "SESSION_CONTINUITY_REVOCATIONS_SCHEMA",
