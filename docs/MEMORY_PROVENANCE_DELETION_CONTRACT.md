@@ -1,7 +1,7 @@
 # Memory Provenance And Deletion Contract
 
 Document status: **Current**
-Last reviewed: 2026-07-30 KST
+Last reviewed: 2026-08-01 KST
 
 이 문서는 Evelyn Memory Vault가 기억의 근거를 공개하고 사용자 삭제를
 영구적으로 지키는 현재 런타임 계약을 정의한다.
@@ -103,6 +103,24 @@ transcript는 넣지 않는다. 집계기는 없는 디렉터리를 만들거나
 수치는 저장된 row와 summary 기준이다. hot 파일과 일자별 vault mirror를 모두
 셀 수 있으므로 고유 대화 턴 수나 실제 한 요청에서 prompt에 선택된 항목 수로
 해석하면 안 된다. 이 한계는 `itemSemantics`와 `mayContainMirrors`에 명시한다.
+
+## Final prompt withholding boundary
+
+Main과 Fast Control의 최종 prompt 경계는 `groundingState=attributed`인 결합
+문맥만 기억 본문으로 제공한다. `partial` 또는 `unattributed`이면 결합 문자열에서
+안전한 component를 다시 분리할 구조적 대응표가 없으므로 본문 전체를
+fail-closed로 보류한다. 모델에는 content-free `MEMORY_WITHHELD_RULE`만 제공해
+보류된 기억의 구체적인 내용을 보았다고 주장하지 못하게 하고, 꼭 필요할 때
+사용자에게 관련 정보를 다시 말하거나 직접 확인해 달라고 요청하게 한다.
+
+1,680자 제한을 넘은 attributed 문맥도 잘린 본문과 evidence ID의 대응을 증명할
+수 없으므로 같은 보류 경계를 사용한다. receipt의 `state=withheld`,
+`promptMemoryWithheld=true`, `withheldItemCount`, `withheldNoteCount`,
+`withheldLegacyItemCount`는 이 판정을 content-free로 기록한다. 실제로 모델에
+제공된 note/legacy evidence ID와 count는 0으로 비우며, 길이 초과였다면 기존
+`promptTruncated`와 잘리기 전 candidate count도 함께 남긴다.
+`confirmOnlyItemCount`와 `opaqueConfirmOnlyComponentCount`는 원문 component가
+prompt에 남지 않으므로 0이다.
 
 ## Two-step provenance backfill
 

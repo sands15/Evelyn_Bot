@@ -63,6 +63,10 @@ TURN_SUMMARY_KEYS: tuple[str, ...] = (
     "memory_confirm_only_item_count",
     "memory_prompt_truncated",
     "memory_prompt_evidence_discarded",
+    "memory_prompt_withheld",
+    "memory_withheld_item_count",
+    "memory_withheld_note_count",
+    "memory_withheld_legacy_item_count",
     "memory_pretruncation_legacy_item_count",
     "memory_pretruncation_note_count",
     "memory_opaque_confirm_only_component_count",
@@ -380,6 +384,18 @@ def build_turn_summary_payload(
         "memory_confirm_only_item_count": _int_or_none(memory_receipt.get("confirmOnlyItemCount")),
         "memory_prompt_truncated": _bool_or_none(memory_receipt.get("promptTruncated")),
         "memory_prompt_evidence_discarded": _bool_or_none(memory_receipt.get("promptEvidenceDiscarded")),
+        "memory_prompt_withheld": _bool_or_none(
+            memory_receipt.get("promptMemoryWithheld")
+        ),
+        "memory_withheld_item_count": _int_or_none(
+            memory_receipt.get("withheldItemCount")
+        ),
+        "memory_withheld_note_count": _int_or_none(
+            memory_receipt.get("withheldNoteCount")
+        ),
+        "memory_withheld_legacy_item_count": _int_or_none(
+            memory_receipt.get("withheldLegacyItemCount")
+        ),
         "memory_pretruncation_legacy_item_count": _int_or_none(memory_receipt.get("preTruncationLegacyItemCount")),
         "memory_pretruncation_note_count": _int_or_none(memory_receipt.get("preTruncationNoteCount")),
         "memory_opaque_confirm_only_component_count": _int_or_none(memory_receipt.get("opaqueConfirmOnlyComponentCount")),

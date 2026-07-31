@@ -719,6 +719,7 @@ def render_tool_use_context(decisions: list[ToolUseDecision]) -> str:
         "Required tool evidence is a hard gate: do not answer from guesswork when required=true.",
         "If a required tool is unavailable, failed, or not executed, say that clearly and avoid claiming tool-backed evidence.",
         "If status is executed, ground the answer in evidence. If status is planned/needs_local_tool/needs_permission_or_external_tool, either execute the tool in the runtime path first or state that the evidence is still missing.",
+        "If status is executed_withheld, the tool ran but its result was deliberately excluded from model input; do not use or infer that result as evidence.",
     ]
     for decision in decisions:
         item = decision.to_dict()

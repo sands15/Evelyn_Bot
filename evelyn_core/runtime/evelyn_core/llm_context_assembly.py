@@ -271,6 +271,10 @@ async def prepare_llm_messages_from_runtime(
         "confirmOnlyItemCount": 0,
         "promptTruncated": False,
         "promptEvidenceDiscarded": False,
+        "promptMemoryWithheld": False,
+        "withheldItemCount": 0,
+        "withheldNoteCount": 0,
+        "withheldLegacyItemCount": 0,
         "preTruncationLegacyItemCount": 0,
         "preTruncationNoteCount": 0,
         "opaqueConfirmOnlyComponentCount": 0,
@@ -314,13 +318,19 @@ async def prepare_llm_messages_from_runtime(
             decision.status = "skipped_no_memory_scope"
             decision.evidence = "No guild/session memory scope was available for this turn."
         elif deps.clean_text(memory_context):
-            decision.status = "executed"
+            decision.status = (
+                "executed_withheld"
+                if memory_receipt.get("state") == "withheld"
+                else "executed"
+            )
             decision.evidence = (
                 f"memory_context_chars={len(memory_context)}; "
                 f"receipt_state={deps.clean_text(str(memory_receipt.get('state') or 'unknown'))}; "
                 f"grounding={deps.clean_text(str(memory_receipt.get('groundingState') or 'unknown'))}; "
                 f"note_count={int(memory_receipt.get('suppliedNoteCount') or 0)}; "
-                f"confirm_only_count={int(memory_receipt.get('confirmOnlyItemCount') or 0)}"
+                f"confirm_only_count={int(memory_receipt.get('confirmOnlyItemCount') or 0)}; "
+                f"prompt_withheld={str(bool(memory_receipt.get('promptMemoryWithheld'))).lower()}; "
+                f"withheld_count={int(memory_receipt.get('withheldItemCount') or 0)}"
             )
         else:
             decision.status = "executed_empty"

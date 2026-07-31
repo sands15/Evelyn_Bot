@@ -204,7 +204,7 @@ def _fast_memory_context_receipt(
         }
     ) if isinstance(raw_note_ids, (list, tuple)) else []
     state = clean_text(str(source.get("state") or ("provided" if has_context else "empty")))
-    if state not in {"provided", "empty", "unavailable"}:
+    if state not in {"provided", "empty", "unavailable", "withheld"}:
         state = "provided" if has_context else "empty"
     grounding_state = clean_text(str(source.get("groundingState") or ""))
     if grounding_state not in {"attributed", "partial", "unattributed", "empty", "unavailable"}:
@@ -242,6 +242,10 @@ def _fast_memory_context_receipt(
         "confirmOnlyItemCount": confirm_only_item_count,
         "promptTruncated": False,
         "promptEvidenceDiscarded": False,
+        "promptMemoryWithheld": False,
+        "withheldItemCount": 0,
+        "withheldNoteCount": 0,
+        "withheldLegacyItemCount": 0,
         "preTruncationLegacyItemCount": 0,
         "preTruncationNoteCount": 0,
         "opaqueConfirmOnlyComponentCount": 0,
@@ -509,6 +513,10 @@ async def build_fast_control_context(
         "confirmOnlyItemCount": 0,
         "promptTruncated": False,
         "promptEvidenceDiscarded": False,
+        "promptMemoryWithheld": False,
+        "withheldItemCount": 0,
+        "withheldNoteCount": 0,
+        "withheldLegacyItemCount": 0,
         "preTruncationLegacyItemCount": 0,
         "preTruncationNoteCount": 0,
         "opaqueConfirmOnlyComponentCount": 0,
@@ -687,6 +695,10 @@ async def build_fast_control_context(
                     "confirmOnlyItemCount": 0,
                     "promptTruncated": False,
                     "promptEvidenceDiscarded": False,
+                    "promptMemoryWithheld": False,
+                    "withheldItemCount": 0,
+                    "withheldNoteCount": 0,
+                    "withheldLegacyItemCount": 0,
                     "preTruncationLegacyItemCount": 0,
                     "preTruncationNoteCount": 0,
                     "opaqueConfirmOnlyComponentCount": 0,
@@ -722,13 +734,17 @@ async def build_fast_control_context(
     for decision in decisions:
         if decision.tool_name != "memory_recall" or decision.status == "failed":
             continue
+        if memory_receipt.get("state") == "withheld":
+            decision.status = "executed_withheld"
         decision.evidence = (
             f"memory_context_chars={len(prompt_memory_context)}; "
             f"receipt_state={memory_receipt['state']}; "
             f"grounding={memory_receipt['groundingState']}; "
             f"note_count={memory_receipt.get('suppliedNoteCount', 0)}; "
             f"confirm_only_count={memory_receipt.get('confirmOnlyItemCount', 0)}; "
-            f"prompt_truncated={str(bool(memory_receipt.get('promptTruncated'))).lower()}"
+            f"prompt_truncated={str(bool(memory_receipt.get('promptTruncated'))).lower()}; "
+            f"prompt_withheld={str(bool(memory_receipt.get('promptMemoryWithheld'))).lower()}; "
+            f"withheld_count={memory_receipt.get('withheldItemCount', 0)}"
         )
     packet = build_basic_context_packet(
         current_user_input="",

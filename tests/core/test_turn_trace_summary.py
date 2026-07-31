@@ -33,6 +33,10 @@ class TurnTraceSummaryTests(unittest.TestCase):
             "memory_confirm_only_item_count",
             "memory_prompt_truncated",
             "memory_prompt_evidence_discarded",
+            "memory_prompt_withheld",
+            "memory_withheld_item_count",
+            "memory_withheld_note_count",
+            "memory_withheld_legacy_item_count",
             "memory_pretruncation_legacy_item_count",
             "memory_pretruncation_note_count",
             "memory_opaque_confirm_only_component_count",
@@ -90,6 +94,10 @@ class TurnTraceSummaryTests(unittest.TestCase):
                             "confirmOnlyItemCount": 1,
                             "promptTruncated": False,
                             "promptEvidenceDiscarded": False,
+                            "promptMemoryWithheld": False,
+                            "withheldItemCount": 0,
+                            "withheldNoteCount": 0,
+                            "withheldLegacyItemCount": 0,
                             "preTruncationLegacyItemCount": 0,
                             "preTruncationNoteCount": 0,
                             "opaqueConfirmOnlyComponentCount": 0,
@@ -145,6 +153,10 @@ class TurnTraceSummaryTests(unittest.TestCase):
         self.assertEqual(payload["memory_confirm_only_item_count"], 1)
         self.assertFalse(payload["memory_prompt_truncated"])
         self.assertFalse(payload["memory_prompt_evidence_discarded"])
+        self.assertFalse(payload["memory_prompt_withheld"])
+        self.assertEqual(payload["memory_withheld_item_count"], 0)
+        self.assertEqual(payload["memory_withheld_note_count"], 0)
+        self.assertEqual(payload["memory_withheld_legacy_item_count"], 0)
         self.assertEqual(payload["memory_pretruncation_legacy_item_count"], 0)
         self.assertEqual(payload["memory_pretruncation_note_count"], 0)
         self.assertEqual(payload["memory_opaque_confirm_only_component_count"], 0)
@@ -187,6 +199,39 @@ class TurnTraceSummaryTests(unittest.TestCase):
         self.assertEqual(payload["tts_first_audio_ms"], 88.8)
         self.assertIsNone(payload["playback_completed"])
         self.assertIsNone(payload["error"])
+
+    def test_summary_payload_exposes_only_content_free_withheld_memory_counts(self) -> None:
+        payload = build_turn_summary_payload(
+            {
+                "meta": {
+                    "context_pipeline": {
+                        "memory_receipt": {
+                            "state": "withheld",
+                            "groundingState": "partial",
+                            "usePolicy": "memory.context-use.v1",
+                            "promptEvidenceDiscarded": True,
+                            "promptMemoryWithheld": True,
+                            "withheldItemCount": 3,
+                            "withheldNoteCount": 1,
+                            "withheldLegacyItemCount": 2,
+                            "privateBody": "PRIVATE_WITHHELD_MEMORY",
+                        },
+                    },
+                },
+            },
+            label="memory_guard",
+            event_name="text_turn_summary",
+            total_ms=1.0,
+        )
+
+        self.assertEqual(payload["memory_context_state"], "withheld")
+        self.assertEqual(payload["memory_grounding_state"], "partial")
+        self.assertTrue(payload["memory_prompt_evidence_discarded"])
+        self.assertTrue(payload["memory_prompt_withheld"])
+        self.assertEqual(payload["memory_withheld_item_count"], 3)
+        self.assertEqual(payload["memory_withheld_note_count"], 1)
+        self.assertEqual(payload["memory_withheld_legacy_item_count"], 2)
+        self.assertNotIn("PRIVATE_WITHHELD_MEMORY", str(payload))
 
     def test_error_is_serialized_without_raising(self) -> None:
         payload = build_turn_summary_payload(

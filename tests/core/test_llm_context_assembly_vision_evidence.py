@@ -501,6 +501,7 @@ class LlmContextAssemblyVisionEvidenceIntegrationTests(unittest.IsolatedAsyncioT
                     "hotContextState": "empty",
                     "memoryVersion": 4,
                     "contentFree": True,
+                    "privateReceiptField": "PRIVATE_RECEIPT_FIELD",
                 }
             )
             return "PRIVATE_MEMORY_TEXT"
@@ -526,8 +527,9 @@ class LlmContextAssemblyVisionEvidenceIntegrationTests(unittest.IsolatedAsyncioT
         self.assertEqual(receipt["confirmOnlyItemCount"], 0)
         self.assertEqual(receipt["suppliedNoteIds"], ["note-verified"])
         self.assertNotIn("PRIVATE_MEMORY_TEXT", str(receipt))
+        self.assertNotIn("PRIVATE_RECEIPT_FIELD", str(receipt))
 
-    async def test_unattributed_memory_is_confirmation_only_at_final_prompt_boundary(self) -> None:
+    async def test_unattributed_memory_body_is_withheld_at_final_prompt_boundary(self) -> None:
         async def no_vision(_user_text: str, *, metrics: dict | None = None) -> str:
             return ""
 
@@ -555,12 +557,21 @@ class LlmContextAssemblyVisionEvidenceIntegrationTests(unittest.IsolatedAsyncioT
         )
 
         system_context = messages[0]["content"]
-        self.assertIn("PRIVATE_LEGACY_MEMORY", system_context)
+        self.assertNotIn("PRIVATE_LEGACY_MEMORY", system_context)
         self.assertIn("MEMORY_DATA_RULE:", system_context)
         self.assertIn("MEMORY_CONFIRMATION_RULE:", system_context)
+        self.assertIn("MEMORY_WITHHELD_RULE:", system_context)
+        self.assertIn("status=executed_withheld", system_context)
+        self.assertIn(
+            "the tool ran but its result was deliberately excluded",
+            system_context,
+        )
         receipt = metrics["meta"]["context_pipeline"]["memory_receipt"]
         self.assertEqual(receipt["usePolicy"], "memory.context-use.v1")
-        self.assertEqual(receipt["confirmOnlyItemCount"], 1)
+        self.assertEqual(receipt["state"], "withheld")
+        self.assertEqual(receipt["confirmOnlyItemCount"], 0)
+        self.assertTrue(receipt["promptMemoryWithheld"])
+        self.assertEqual(receipt["withheldItemCount"], 1)
 
     async def test_oversized_main_memory_discards_attribution_before_context_builder(self) -> None:
         async def no_vision(_user_text: str, *, metrics: dict | None = None) -> str:
@@ -596,21 +607,28 @@ class LlmContextAssemblyVisionEvidenceIntegrationTests(unittest.IsolatedAsyncioT
         )
 
         receipt = metrics["meta"]["context_pipeline"]["memory_receipt"]
+        self.assertEqual(receipt["state"], "withheld")
         self.assertEqual(receipt["groundingState"], "unattributed")
         self.assertTrue(receipt["promptTruncated"])
         self.assertTrue(receipt["promptEvidenceDiscarded"])
+        self.assertTrue(receipt["promptMemoryWithheld"])
         self.assertEqual(receipt["suppliedNoteIds"], [])
         self.assertEqual(receipt["suppliedNoteCount"], 0)
         self.assertEqual(receipt["legacyEvidenceIds"], [])
         self.assertEqual(receipt["legacyItemCount"], 0)
         self.assertEqual(receipt["preTruncationNoteCount"], 1)
         self.assertEqual(receipt["preTruncationLegacyItemCount"], 1)
-        self.assertEqual(receipt["opaqueConfirmOnlyComponentCount"], 1)
+        self.assertEqual(receipt["withheldItemCount"], 2)
+        self.assertEqual(receipt["withheldNoteCount"], 1)
+        self.assertEqual(receipt["withheldLegacyItemCount"], 1)
+        self.assertEqual(receipt["opaqueConfirmOnlyComponentCount"], 0)
         self.assertLessEqual(
             metrics["meta"]["context_pipeline"]["memory_context_chars"],
             MEMORY_PROMPT_MAX_CHARS,
         )
         self.assertIn("MEMORY_CONFIRMATION_RULE:", messages[0]["content"])
+        self.assertIn("MEMORY_WITHHELD_RULE:", messages[0]["content"])
+        self.assertNotIn("PRIVATE_OVERSIZED_MEMORY", messages[0]["content"])
 
     async def test_live_scene_and_ocr_mark_required_tools_executed(self) -> None:
         async def observed_vision(_user_text: str, *, metrics: dict | None = None) -> str:

@@ -316,16 +316,25 @@ class FastContextContractTests(unittest.IsolatedAsyncioTestCase):
         )
 
         memory = next(item for item in context.tool_use_decisions if item.tool_name == "memory_recall")
-        self.assertEqual(memory.status, "executed")
+        self.assertEqual(memory.status, "executed_withheld")
         self.assertNotIn("exact stabilization reports", memory.evidence)
         self.assertIn("grounding=unattributed", memory.evidence)
+        self.assertIn("status=executed_withheld", context.system_context)
+        self.assertIn(
+            "the tool ran but its result was deliberately excluded",
+            context.system_context,
+        )
         self.assertIn("[Retrieved Memory]", context.system_context)
-        self.assertIn("exact stabilization reports", context.system_context)
+        self.assertNotIn("exact stabilization reports", context.system_context)
         self.assertIn("MEMORY_DATA_RULE:", context.system_context)
         self.assertIn("MEMORY_CONFIRMATION_RULE:", context.system_context)
+        self.assertIn("MEMORY_WITHHELD_RULE:", context.system_context)
+        self.assertEqual(context.memory_receipt["state"], "withheld")
         self.assertEqual(context.memory_receipt["groundingState"], "unattributed")
         self.assertEqual(context.memory_receipt["usePolicy"], "memory.context-use.v1")
-        self.assertEqual(context.memory_receipt["confirmOnlyItemCount"], 1)
+        self.assertEqual(context.memory_receipt["confirmOnlyItemCount"], 0)
+        self.assertTrue(context.memory_receipt["promptMemoryWithheld"])
+        self.assertEqual(context.memory_receipt["withheldItemCount"], 1)
         self.assertTrue(context.memory_receipt["contentFree"])
 
     async def test_fast_memory_receipt_keeps_note_ids_without_memory_text(self) -> None:
@@ -379,8 +388,11 @@ class FastContextContractTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(context.memory_receipt["groundingState"], "unattributed")
-        self.assertEqual(context.memory_receipt["confirmOnlyItemCount"], 1)
+        self.assertEqual(context.memory_receipt["state"], "withheld")
+        self.assertEqual(context.memory_receipt["confirmOnlyItemCount"], 0)
+        self.assertTrue(context.memory_receipt["promptMemoryWithheld"])
         self.assertIn("MEMORY_CONFIRMATION_RULE:", context.memory_context)
+        self.assertNotIn("PRIVATE_UNATTRIBUTED_MEMORY", context.memory_context)
 
     async def test_oversized_fast_memory_downgrades_grounding_before_prompt_trim(self) -> None:
         async def oversized_memory(_text: str):
@@ -404,13 +416,19 @@ class FastContextContractTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertLessEqual(len(context.memory_context), MEMORY_PROMPT_MAX_CHARS)
         self.assertIn("MEMORY_CONFIRMATION_RULE:", context.memory_context)
+        self.assertIn("MEMORY_WITHHELD_RULE:", context.memory_context)
+        self.assertNotIn("PRIVATE_MEMORY_BLOCK", context.memory_context)
+        self.assertEqual(context.memory_receipt["state"], "withheld")
         self.assertEqual(context.memory_receipt["groundingState"], "unattributed")
         self.assertTrue(context.memory_receipt["promptTruncated"])
         self.assertTrue(context.memory_receipt["promptEvidenceDiscarded"])
+        self.assertTrue(context.memory_receipt["promptMemoryWithheld"])
         self.assertEqual(context.memory_receipt["suppliedNoteIds"], [])
         self.assertEqual(context.memory_receipt["suppliedNoteCount"], 0)
         self.assertEqual(context.memory_receipt["preTruncationNoteCount"], 1)
-        self.assertEqual(context.memory_receipt["opaqueConfirmOnlyComponentCount"], 1)
+        self.assertEqual(context.memory_receipt["withheldItemCount"], 1)
+        self.assertEqual(context.memory_receipt["withheldNoteCount"], 1)
+        self.assertEqual(context.memory_receipt["opaqueConfirmOnlyComponentCount"], 0)
         memory = next(
             item
             for item in context.tool_use_decisions

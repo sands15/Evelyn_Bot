@@ -1,8 +1,8 @@
 # Evelyn Current State
 
 Document status: **Current**
-Last reviewed: 2026-07-31 KST
-Source branch: `codex/dependency-config-hardening`, current evidence-bound user memory increment
+Last reviewed: 2026-08-01 KST
+Source branch: `codex/dependency-config-hardening`, current grounded-memory prompt boundary increment
 
 이 문서는 현재 확인된 사실만 기록한다. 목표 구조와 과거 계획은 다른 설계/계획 문서를 사용한다.
 
@@ -325,18 +325,21 @@ Source branch: `codex/dependency-config-hardening`, current evidence-bound user 
     뜻하지 않는다. 기존 raw/summary/fact/question은 내용을 보고 근거를 추측해
     소급 부여하지 않고 계속 `partial|unattributed`로 드러낸다.
   - 최종 Main/Fast prompt 경계는 `memory.context-use.v1`을 적용한다. 모든 기억은
-    명령이 아닌 데이터로 감싸고, evidence ID로 확인되지 않은 기존 raw/summary/
-    fact/question과 vault 문맥은 답변의 사실 근거로 쓰지 않는 `확인 전용` 구역으로
-    분리한다. 현재 사용자 발화가 직접 확인한 범위에서만 사용하며 그 밖에는 짧은
-    확인 질문의 소재로만 쓸 수 있다.
+    명령이 아닌 데이터로 감싼다. evidence ID/count가 완전한 `attributed` 결합
+    문맥만 본문을 모델에 제공한다. 기존 raw/summary/fact/question이나 vault
+    문맥이 섞여 `partial|unattributed`이면 component별 안전한 분리를 추측하지
+    않고 본문 전체를 보류하며 고정 `MEMORY_WITHHELD_RULE`만 제공한다. 모델은
+    보류된 기억의 구체적인 내용을 보았다고 주장할 수 없고, 꼭 필요할 때만
+    사용자에게 관련 정보를 다시 말하거나 직접 확인해 달라고 요청한다.
   - producer가 선언한 `groundingState`는 그대로 신뢰하지 않는다. 제공 note ID와
     legacy evidence ID가 실제 count와 함께 있는지 최종 경계에서 다시 계산하고,
     근거 ID 없이 `attributed`를 주장한 문맥은 `unattributed`로 강등한다.
   - memory prompt는 ContextBuilder의 1,800자 제한보다 작은 1,680자로 먼저 제한한다.
     잘림이 발생하면 잘린 본문과 개별 ID의 대응을 증명할 수 없으므로 note/legacy
-    귀속을 모두 버리고 한 개의 opaque 확인 전용 component로 처리한다. receipt와
-    turn summary에는 `promptTruncated`, `promptEvidenceDiscarded`, 잘리기 전의
-    content-free candidate count만 남기며 본문이나 transcript는 기록하지 않는다.
+    귀속을 모두 버리고 본문 전체를 보류한다. receipt와 turn summary에는
+    `state=withheld`, `promptMemoryWithheld`, `promptEvidenceDiscarded`, 보류된
+    note/legacy/item count와 길이 초과 시 `promptTruncated`·잘리기 전 candidate
+    count만 남긴다. 실제 supplied ID/count, 본문과 transcript는 기록하지 않는다.
   - Control Page의 provenance 감사 응답·저장 보고서·UI는 별도
     `memory.legacy-context-coverage.v1` 집계를 제공한다. guild/room/person/session
     scope의 저장 summary/raw/fact/question을 prompt와 같은 evidence 규칙으로
@@ -1346,6 +1349,28 @@ Source branch: `codex/dependency-config-hardening`, current evidence-bound user 
   validation JavaScript `node --check`, `git diff --check`를 통과했다. 실행 중인
   서비스는 교체하지 않았고 Discord, 마이크, 스피커, Minecraft와 사용자 runtime
   artifact는 변경하거나 시작하지 않았다.
+- grounded-memory 최종 prompt 경계는 `partial|unattributed` 기억 본문과 길이
+  초과로 귀속 대응이 깨진 본문을 Main/Fast 모델 입력에서 보류한다. 고정
+  `MEMORY_WITHHELD_RULE`만 남기고 supplied evidence를 비우며 receipt/turn
+  summary에는 `state=withheld`, 보류 여부와 content-free item/note/legacy
+  count만 기록한다. 알 수 없는 producer receipt 필드도 최종 allowlist
+  projection에서 제거한다. `attributed` 기억 본문과 직접 사용자 확인·삭제
+  lifecycle은 그대로 유지한다.
+- current-source 검증은 core 558개 중 기능 assertion 실패 0개를 확인했다.
+  이미지에 `git`이 없어 난 기존 signature 환경 오류 2개는 Windows의 해당
+  모듈 13개로 보완했다. runtime 423개(skip 2), memory 158개, voice 424개,
+  UI 157개(skip 7), Discord I/O 109개도 통과했다.
+- 현재 소스를 내장한 검증 이미지는 Discord/Main
+  `sha256:23832d0ab649ca6d0073c02ffc7f3fffd47d9518206cd727a82b9cf5a22f0489`,
+  Bot API
+  `sha256:d099566ace6d1e06a68f04059c9908174c2ca62faaa76aebc257ced16812c19e`,
+  Control Page
+  `sha256:05e99df8f6e3ef79fbd2005eee45734d2d3e4ced2f59c67a0033f7c60b14271b`이다.
+  이미지 내부 제품 소스에 read-only test harness를 연결한 집중 테스트 147개씩,
+  각 이미지 `compileall`/`pip check`, 전체 profile Compose config, voice
+  validation JavaScript `node --check`, bundled Python `compileall`과
+  `git diff --check`를 통과했다. 실행 중인 서비스는 교체하지 않았고 실제 사용자
+  기억, Discord, 마이크, 스피커, Minecraft와 runtime artifact는 변경하지 않았다.
 
 ## Operational boundaries
 

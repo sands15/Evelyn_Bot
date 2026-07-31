@@ -1,7 +1,7 @@
 # Evelyn Active Risks
 
 Document status: **Current**
-Last reviewed: 2026-07-31 KST
+Last reviewed: 2026-08-01 KST
 Evaluation stance: 실패 가능성과 검증 공백을 우선 기록
 
 ## P0 — Minecraft functional readiness live E2E 대기
@@ -414,12 +414,14 @@ facts/questions도 같은 입력 계보와 별도 파생 ID를 hot JSONL과 mirr
 않고 fail-closed한다.
 
 배포 전의 rolling summary·facts/questions와 과거 raw row는 여전히 근거 없는
-상태지만 사용 정책은 닫았다. 내용 유사도나 시간 인접성으로 소급 연결하지 않고,
-해당 항목은 `memory.context-use.v1` 아래 `확인 전용`으로만 prompt에 남는다.
-답변의 사실 근거로 쓰거나 단정할 수 없고 현재 사용자의 직접 확인 또는 짧은
-확인 질문에만 사용할 수 있다. producer의 `groundingState`도 근거 ID/count로
-재계산하며, 최종 1,680자 경계에서 문맥이 잘리면 개별 귀속을 버리고 하나의
-opaque 확인 전용 component로 강등한다.
+상태지만 사용 정책은 결정적으로 닫았다. 내용 유사도나 시간 인접성으로 소급
+연결하지 않고, 최종 Main/Fast 경계에서 `partial|unattributed` 결합 본문 전체를
+모델 입력에서 보류한다. prompt에는 구체 내용을 포함하지 않는
+`MEMORY_WITHHELD_RULE`만 남아 필요하면 사용자에게 정보를 다시 말해 달라고
+요청한다. producer의 `groundingState`도 근거 ID/count로 재계산하며, 최종
+1,680자 경계에서 문맥이 잘리면 같은 본문 보류 정책을 적용한다. receipt와 turn
+summary는 `state=withheld`, `promptMemoryWithheld`와 content-free 보류 count만
+기록하고 supplied evidence는 0으로 비운다.
 
 저장 legacy coverage는 이제 `memory.legacy-context-coverage.v1`로 측정한다.
 summary/raw/fact/question을 prompt와 같은 evidence 규칙으로 재검사하고
@@ -446,8 +448,9 @@ context에서 제외한다. Control Page는 본문을 숨기지 않고 사용자
 확인만으로 과거 source에 소급 귀속할 수 없다는 점이다. 안전한 확인 흐름은 기존
 row를 고치는 backfill이 아니라 현재 확인 발화를 새 turn evidence로 가진 새 기억을
 만들고, 원래 항목은 계속 미확인으로 보존하거나 별도 철회하는 방식이어야 한다.
-또한 확인 전용 문구는 모델 행동 계약이지 내용의 진실성 보증이 아니므로 실제
-대화에서 단정 억제와 확인 질문 품질은 아직 평가해야 한다.
+본문 보류로 근거 없는 legacy 내용을 모델이 단정하는 직접 경로는 닫혔다. 다만
+실제 대화에서 사용자가 필요한 정보를 자연스럽게 다시 제공하도록 이끄는 확인
+질문의 품질과, 이후 새 직접 사용자 근거로 저장되는 흐름은 아직 평가해야 한다.
 
 남은 위험은 coverage와 correction이 구조적 근거 연결만 다루며 기억 내용이나
 사용자의 선택이 사실임을 보증하지 않는다는 점이다. hash chain과 head는
