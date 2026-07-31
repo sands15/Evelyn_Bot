@@ -519,6 +519,8 @@ async def request_minecraft_control_service(
     method: str,
     path: str,
     payload: dict[str, Any] | None = None,
+    *,
+    log_failure: bool = True,
 ) -> tuple[dict[str, Any] | None, str]:
     url = f"{MINECRAFT_AUTONOMY_SERVICE_BASE}{path}"
     timeout = ClientTimeout(total=MINECRAFT_CONTROL_TIMEOUT_SEC)
@@ -546,11 +548,12 @@ async def request_minecraft_control_service(
                     return None, "invalid_minecraft_response"
                 return payload, ""
     except Exception as exc:
-        print(
-            "[FAST CONTROL] minecraft_request_failed "
-            f"method={method} path={path} "
-            f"errorType={type(exc).__name__}"
-        )
+        if log_failure:
+            print(
+                "[FAST CONTROL] minecraft_request_failed "
+                f"method={method} path={path} "
+                f"errorType={type(exc).__name__}"
+            )
         return None, "minecraft_service_unavailable"
 
 
@@ -584,10 +587,16 @@ async def _request_minecraft_world_runtime(
     path: str,
     payload: dict[str, Any] | None,
 ) -> tuple[dict[str, Any] | None, str]:
+    is_internal_status_probe = (
+        method.upper() == "GET"
+        and path == "/status"
+        and payload is None
+    )
     return await request_minecraft_control_service(
         method,
         path,
         payload,
+        log_failure=not is_internal_status_probe,
     )
 
 

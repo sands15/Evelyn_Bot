@@ -133,6 +133,7 @@ class MinecraftWorldLeaseTests(unittest.IsolatedAsyncioTestCase):
             default_ttl_sec=60.0,
             max_ttl_sec=60.0,
             watchdog_interval_sec=1.0,
+            standby_probe_interval_sec=5.0,
             log=lambda *_args: None,
         )
         self.owner.initialize()
@@ -372,6 +373,37 @@ class MinecraftWorldLeaseTests(unittest.IsolatedAsyncioTestCase):
             self.owner.status()["lastStopOutcome"],
             "minecraft_stopped",
         )
+
+    async def test_watchdog_refreshes_claim_while_throttling_standby_probe(
+        self,
+    ) -> None:
+        ticks = 0
+
+        async def advance_clock(_interval: float) -> None:
+            nonlocal ticks
+            ticks += 1
+            if ticks > 5:
+                raise asyncio.CancelledError()
+            self.clock.value += 1.0
+
+        self.owner.sleep = advance_clock
+        self.owner._defer_standby_probe()
+        self.runtime.calls.clear()
+
+        with self.assertRaises(asyncio.CancelledError):
+            await self.owner._watchdog_loop()
+
+        self.assertEqual(
+            self.runtime.calls,
+            [("status", None)],
+        )
+        claim = json.loads(
+            self.owner.owner_claim_path.read_text(encoding="utf-8")
+        )
+        self.assertEqual(claim["updatedAt"], 1005.0)
+        policy = self.owner.status()["policy"]
+        self.assertEqual(policy["watchdogIntervalSec"], 1.0)
+        self.assertEqual(policy["standbyProbeIntervalSec"], 5.0)
 
     async def test_connect_stops_unauthorized_runtime_first(
         self,

@@ -35,6 +35,7 @@ DEFAULT_WORLD_LEASE_TTL_SEC = 60 * 60.0
 MAX_WORLD_LEASE_TTL_SEC = 4 * 60 * 60.0
 MIN_WORLD_LEASE_TTL_SEC = 60.0
 DEFAULT_WATCHDOG_INTERVAL_SEC = 5.0
+DEFAULT_STANDBY_PROBE_INTERVAL_SEC = 30.0
 MIN_OWNER_CLAIM_STALE_SEC = 15.0
 STOP_RETRY_WINDOW_SEC = 10 * 60.0
 STOP_RETRY_LIMIT = 3
@@ -170,6 +171,9 @@ class MinecraftWorldLeaseOwner:
         default_ttl_sec: float = DEFAULT_WORLD_LEASE_TTL_SEC,
         max_ttl_sec: float = MAX_WORLD_LEASE_TTL_SEC,
         watchdog_interval_sec: float = DEFAULT_WATCHDOG_INTERVAL_SEC,
+        standby_probe_interval_sec: float = (
+            DEFAULT_STANDBY_PROBE_INTERVAL_SEC
+        ),
         log: Callable[..., Any] = print,
     ) -> None:
         self.status_path = Path(status_path)
@@ -224,6 +228,13 @@ class MinecraftWorldLeaseOwner:
             MIN_OWNER_CLAIM_STALE_SEC,
             self.watchdog_interval_sec * 3.0,
         )
+        self.standby_probe_interval_sec = max(
+            self.watchdog_interval_sec,
+            _finite_float(
+                standby_probe_interval_sec,
+                DEFAULT_STANDBY_PROBE_INTERVAL_SEC,
+            ),
+        )
         self.log = log
         self.process_nonce = secrets.token_hex(8)
         self.authorization_token = secrets.token_urlsafe(32)
@@ -239,6 +250,7 @@ class MinecraftWorldLeaseOwner:
         self._operation_lock = asyncio.Lock()
         self._start_lock = asyncio.Lock()
         self._watchdog_task: Any = None
+        self._next_standby_probe_at = 0.0
 
     def _append_event(
         self,
@@ -322,6 +334,14 @@ class MinecraftWorldLeaseOwner:
         while self._stop_attempts and self._stop_attempts[0] < threshold:
             self._stop_attempts.popleft()
 
+    def _standby_probe_due(self) -> bool:
+        return self.monotonic() >= self._next_standby_probe_at
+
+    def _defer_standby_probe(self) -> None:
+        self._next_standby_probe_at = (
+            self.monotonic() + self.standby_probe_interval_sec
+        )
+
     def _status_payload(self) -> dict[str, Any]:
         timestamp = self.now()
         lease = self._lease
@@ -353,6 +373,9 @@ class MinecraftWorldLeaseOwner:
                 "defaultTtlSec": self.default_ttl_sec,
                 "maxTtlSec": self.max_ttl_sec,
                 "watchdogIntervalSec": self.watchdog_interval_sec,
+                "standbyProbeIntervalSec": (
+                    self.standby_probe_interval_sec
+                ),
                 "stopRetryLimit": STOP_RETRY_LIMIT,
                 "stopRetryWindowSec": STOP_RETRY_WINDOW_SEC,
                 "issuerRefPublic": False,
@@ -550,6 +573,7 @@ class MinecraftWorldLeaseOwner:
             self._last_stop_outcome = ""
             self._last_error_code = ""
             self._stop_attempts.clear()
+            self._next_standby_probe_at = 0.0
             try:
                 claim_acquired = self._acquire_owner_claim()
             except OSError:
@@ -813,6 +837,8 @@ class MinecraftWorldLeaseOwner:
                 reason="process_restart",
                 force_stop=True,
             )
+            with self._data_lock:
+                self._defer_standby_probe()
             self._watchdog_task = self.create_task(
                 self._watchdog_loop()
             )
@@ -833,9 +859,20 @@ class MinecraftWorldLeaseOwner:
                         self._state = "authorized"
                         self._write_status()
                         continue
+                    if (
+                        lease is None
+                        and not self._standby_probe_due()
+                    ):
+                        self._write_status()
+                        continue
+                    if lease is None:
+                        self._defer_standby_probe()
                 await self.reconcile_once(
                     reason="watchdog_retry",
                 )
+                with self._data_lock:
+                    if lease is not None and self._lease is None:
+                        self._defer_standby_probe()
             except asyncio.CancelledError:
                 raise
             except Exception:

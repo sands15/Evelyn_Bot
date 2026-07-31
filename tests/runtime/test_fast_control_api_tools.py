@@ -114,6 +114,38 @@ class FastControlApiToolTests(unittest.TestCase):
         self.assertIsNotNone(reply)
         self.assertIn("\uc9c0\uae08\uc740", reply or "")
 
+    def test_internal_minecraft_status_probe_is_quiet_only_for_reads(
+        self,
+    ) -> None:
+        request = AsyncMock(return_value=({}, ""))
+
+        with patch.object(
+            fast_api,
+            "request_minecraft_control_service",
+            new=request,
+        ):
+            asyncio.run(
+                fast_api._request_minecraft_world_runtime(
+                    "GET",
+                    "/status",
+                    None,
+                )
+            )
+            asyncio.run(
+                fast_api._request_minecraft_world_runtime(
+                    "POST",
+                    "/start",
+                    {},
+                )
+            )
+
+        self.assertFalse(
+            request.await_args_list[0].kwargs["log_failure"]
+        )
+        self.assertTrue(
+            request.await_args_list[1].kwargs["log_failure"]
+        )
+
     def test_grounded_exact_reply_bypasses_main_llm_stream(self) -> None:
         request = SimpleNamespace(
             context=SimpleNamespace(
