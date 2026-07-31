@@ -5,6 +5,9 @@ import time
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
+from .continuity_commit_contract import (
+    require_durable_continuity_receipt,
+)
 from .text import clean_text, is_similar, strip_omnivoice_tags
 from .search_query_context import build_search_query_from_context
 
@@ -100,7 +103,12 @@ async def deliver_proactive_followup_from_runtime(
             return
         deps.append_history(session_key, query, plain_answer, guild_id=guild_id)
         try:
-            await deps.commit_session_continuity()
+            continuity_status = (
+                await deps.commit_session_continuity()
+            )
+            require_durable_continuity_receipt(
+                continuity_status
+            )
         except Exception as exc:
             deps.log(
                 "[SEARCH] followup_continuity_commit_failed "

@@ -25,6 +25,9 @@ from evelyn_core.session_continuity import (  # noqa: E402
     SessionContinuityCheckpoint,
     _checkpoint_hash,
 )
+from evelyn_core.continuity_commit_contract import (  # noqa: E402
+    require_durable_continuity_receipt,
+)
 from evelyn_core.runtime_artifact_io import atomic_json_write  # noqa: E402
 from evelyn_core.session_memory_state import SessionStateStore  # noqa: E402
 
@@ -210,8 +213,14 @@ class SessionContinuityTests(unittest.TestCase):
         manager = self.manager(store, clock)
 
         status = manager.commit_completed_turn()
+        receipt = require_durable_continuity_receipt(status)
 
         self.assertEqual(status["state"], "ready")
+        self.assertTrue(receipt["durable"])
+        self.assertEqual(
+            receipt["generation"],
+            status["checkpointGeneration"],
+        )
         self.assertTrue(status["rollbackProtected"])
         self.assertEqual(status["persistedSessionCount"], 1)
         self.assertTrue(self.checkpoint_path.exists())

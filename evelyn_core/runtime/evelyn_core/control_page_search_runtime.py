@@ -3,6 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
+from .continuity_commit_contract import (
+    require_durable_continuity_receipt,
+)
 
 @dataclass(frozen=True)
 class ControlPageSearchRuntimeDeps:
@@ -92,9 +95,14 @@ async def answer_control_page_search_text_from_runtime(
         )
         try:
             continuity_status = await deps.commit_session_continuity()
+            continuity_receipt = (
+                require_durable_continuity_receipt(
+                    continuity_status
+                )
+            )
             metrics["meta"]["continuity_commit"] = "durable"
             metrics["meta"]["continuity_generation"] = int(
-                continuity_status.get("generation") or 0
+                continuity_receipt["generation"]
             )
         except Exception as exc:
             metrics["meta"]["continuity_commit"] = "failed"

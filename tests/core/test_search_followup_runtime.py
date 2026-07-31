@@ -16,6 +16,9 @@ from evelyn_core.search_followup_runtime import (  # noqa: E402
     build_search_query_from_runtime,
     deliver_proactive_followup_from_runtime,
 )
+from tests.continuity_test_support import (  # noqa: E402
+    durable_continuity_status,
+)
 
 
 def build_deps(
@@ -46,7 +49,7 @@ def build_deps(
         return f"compact::{text}::{compact_summary}"
 
     async def _commit_session_continuity():
-        return {"generation": 1}
+        return durable_continuity_status(1)
 
     return SearchFollowupRuntimeDeps(
         bot=object(),
@@ -152,7 +155,7 @@ class SearchFollowupRuntimeTests(unittest.TestCase):
 
         async def commit():
             events.append("commit")
-            return {"generation": 2}
+            return durable_continuity_status(2)
 
         async def speak(*_args, **_kwargs):
             events.append("voice")
@@ -194,6 +197,87 @@ class SearchFollowupRuntimeTests(unittest.TestCase):
             events,
             ["send", "history", "commit", "memory", "voice"],
         )
+
+    def test_partial_commit_status_logs_failure_and_keeps_turn(
+        self,
+    ) -> None:
+        events: list[str] = []
+        logs: list[tuple] = []
+        private = (
+            "Bearer followup-continuity-secret "
+            "https://internal.example/private"
+        )
+
+        class Channel:
+            async def send(self, *_args, **_kwargs):
+                return None
+
+        class Bot:
+            def get_guild(self, _guild_id):
+                return type(
+                    "Guild",
+                    (),
+                    {"voice_client": None},
+                )()
+
+            def get_channel(self, _channel_id):
+                return Channel()
+
+        async def partial_commit():
+            events.append("commit")
+            return {
+                "state": "ready",
+                "privateMessage": private,
+            }
+
+        async def send(*_args, **_kwargs):
+            return None
+
+        deps = build_deps()
+        deps = SearchFollowupRuntimeDeps(
+            **{
+                **deps.__dict__,
+                "bot": Bot(),
+                "send_discord_text": send,
+                "append_history": (
+                    lambda *_args, **_kwargs: events.append(
+                        "history"
+                    )
+                ),
+                "schedule_memory_update": (
+                    lambda *_args, **_kwargs: events.append(
+                        "memory"
+                    )
+                ),
+                "commit_session_continuity": partial_commit,
+                "log": (
+                    lambda *args, **_kwargs: logs.append(args)
+                ),
+            }
+        )
+
+        asyncio.run(
+            deliver_proactive_followup_from_runtime(
+                1,
+                "query",
+                "answer",
+                deps=deps,
+                session_key="session",
+                room_key=None,
+                person_key=None,
+                session_memory_key=None,
+                channel_id=10,
+                source="search",
+            )
+        )
+
+        self.assertEqual(events, ["history", "commit", "memory"])
+        rendered = str(logs)
+        self.assertIn(
+            "ConversationContinuityCommitError",
+            rendered,
+        )
+        self.assertNotIn("followup-continuity-secret", rendered)
 
 
 if __name__ == "__main__":

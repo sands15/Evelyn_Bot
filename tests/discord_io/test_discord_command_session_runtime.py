@@ -12,6 +12,9 @@ from evelyn_core.discord_command_session_runtime import (
     DiscordCommandSessionRuntimeDeps,
     mark_text_session_from_command_runtime,
 )
+from tests.continuity_test_support import (
+    durable_continuity_status,
+)
 
 
 class DiscordCommandSessionRuntimeTests(unittest.TestCase):
@@ -37,7 +40,8 @@ class DiscordCommandSessionRuntimeTests(unittest.TestCase):
             normal_ttl_sec=30.0,
             question_ttl_sec=45.0,
             commit_session_continuity=lambda: (
-                commits.append("commit") or {"generation": 3}
+                commits.append("commit")
+                or durable_continuity_status(3)
             ),
             log=lambda *args, **kwargs: None,
         )
@@ -87,7 +91,9 @@ class DiscordCommandSessionRuntimeTests(unittest.TestCase):
             max_history_items=12,
             normal_ttl_sec=30.0,
             question_ttl_sec=45.0,
-            commit_session_continuity=lambda: {"generation": 1},
+            commit_session_continuity=(
+                lambda: durable_continuity_status(1)
+            ),
             log=lambda *args, **kwargs: None,
         )
 
@@ -99,6 +105,55 @@ class DiscordCommandSessionRuntimeTests(unittest.TestCase):
         )
 
         self.assertEqual(calls, [])
+
+    def test_partial_commit_status_is_logged_as_fixed_failure(
+        self,
+    ) -> None:
+        logs: list[tuple] = []
+        private = (
+            "Bearer command-continuity-secret "
+            r"C:\Users\Admin\checkpoint.json"
+        )
+        deps = DiscordCommandSessionRuntimeDeps(
+            resolve_text_thread_id=lambda *_args, **_kwargs: None,
+            is_text_thread_parent=lambda _parent: False,
+            make_text_session_key=(
+                lambda *_args, **_kwargs: "session"
+            ),
+            record_command_assistant_turn=(
+                lambda *_args, **_kwargs: None
+            ),
+            system_prompt="system",
+            max_history_items=12,
+            normal_ttl_sec=30.0,
+            question_ttl_sec=45.0,
+            commit_session_continuity=lambda: {
+                "state": "ready",
+                "privateMessage": private,
+            },
+            log=lambda *args, **_kwargs: logs.append(args),
+        )
+        ctx = SimpleNamespace(
+            guild=SimpleNamespace(id=1),
+            channel=SimpleNamespace(id=2),
+            author=SimpleNamespace(id=3),
+            message=SimpleNamespace(id=4),
+        )
+
+        mark_text_session_from_command_runtime(
+            ctx,
+            "user",
+            "answer",
+            deps=deps,
+        )
+
+        rendered = str(logs)
+        self.assertIn(
+            "ConversationContinuityCommitError",
+            rendered,
+        )
+        self.assertNotIn("command-continuity-secret", rendered)
+        self.assertNotIn("Users", rendered)
 
 
 if __name__ == "__main__":

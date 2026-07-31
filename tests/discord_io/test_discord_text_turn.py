@@ -13,6 +13,9 @@ if str(RUNTIME_ROOT) not in sys.path:
     sys.path.insert(0, str(RUNTIME_ROOT))
 
 from evelyn_core.discord_text_turn import DiscordTextMessageHandlerDeps, handle_discord_text_message  # noqa: E402
+from tests.continuity_test_support import (  # noqa: E402
+    durable_continuity_status,
+)
 
 
 class AsyncTyping:
@@ -66,10 +69,7 @@ def make_deps(calls: list[tuple[str, object]], **overrides) -> DiscordTextMessag
 
     async def commit_session_continuity():
         calls.append(("commit_continuity", None))
-        return {
-            "state": "ready",
-            "rollbackProtected": True,
-        }
+        return durable_continuity_status(5)
 
     deps = dict(
         process_commands=process_commands,
@@ -230,6 +230,49 @@ class DiscordTextTurnHandlerTests(unittest.TestCase):
             calls[-1],
             ("process_commands", "Evelyn hi"),
         )
+
+    def test_partial_commit_status_is_not_marked_durable(
+        self,
+    ) -> None:
+        calls: list[tuple[str, object]] = []
+        summaries: list[dict] = []
+        private = (
+            "Bearer text-continuity-secret "
+            "https://internal.example/private"
+        )
+
+        async def partial_commit():
+            calls.append(("commit_continuity", None))
+            return {
+                "state": "ready",
+                "rollbackProtected": True,
+                "privateMessage": private,
+            }
+
+        deps = make_deps(
+            calls,
+            commit_session_continuity=partial_commit,
+            log_voice_bottleneck_summary=(
+                lambda metrics, **_kwargs: summaries.append(
+                    metrics
+                )
+            ),
+        )
+        message = make_message(
+            guild=SimpleNamespace(id=1, name="Guild")
+        )
+
+        asyncio.run(handle_discord_text_message(message, deps))
+
+        self.assertEqual(
+            summaries[0]["meta"]["continuity_commit"],
+            "failed",
+        )
+        self.assertEqual(
+            summaries[0]["meta"]["continuity_error"],
+            "conversation_continuity_commit_failed",
+        )
+        self.assertNotIn(private, str(summaries))
 
     def test_pre_delivery_failure_returns_fixed_public_message(self) -> None:
         calls: list[tuple[str, object]] = []

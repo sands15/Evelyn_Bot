@@ -11,6 +11,9 @@ from .discord_ingress import (
     decide_text_message_precheck,
     is_reply_to_target_user,
 )
+from .continuity_commit_contract import (
+    require_durable_continuity_receipt,
+)
 from .public_error_contract import public_failure_message
 from .turn_lifecycle import TurnScope
 
@@ -197,14 +200,16 @@ async def handle_discord_text_message(message: Any, deps: DiscordTextMessageHand
                     continuity_status = (
                         await deps.commit_session_continuity()
                     )
+                    continuity_receipt = (
+                        require_durable_continuity_receipt(
+                            continuity_status
+                        )
+                    )
                     text_metrics.setdefault("meta", {}).update(
                         {
                             "continuity_commit": "durable",
                             "continuity_generation": int(
-                                continuity_status.get(
-                                    "checkpointGeneration"
-                                )
-                                or 0
+                                continuity_receipt["generation"]
                             ),
                         }
                     )

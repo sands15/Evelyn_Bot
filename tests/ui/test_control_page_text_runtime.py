@@ -16,6 +16,9 @@ from evelyn_core.control_page_text_runtime import (  # noqa: E402
     ControlPageTextRuntimeDeps,
     answer_control_page_text_from_runtime,
 )
+from tests.continuity_test_support import (  # noqa: E402
+    durable_continuity_status,
+)
 
 
 class FakeScope:
@@ -53,10 +56,7 @@ class ControlPageTextRuntimeTests(unittest.IsolatedAsyncioTestCase):
     def build_deps(self) -> ControlPageTextRuntimeDeps:
         async def commit_session_continuity():
             self.commits.append("commit")
-            return {
-                "state": "ready",
-                "rollbackProtected": True,
-            }
+            return durable_continuity_status(6)
 
         return ControlPageTextRuntimeDeps(
             effective_guild_id=lambda guild: guild.id if guild is not None else 0,
@@ -122,6 +122,47 @@ class ControlPageTextRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("검은 프레임", result)
         self.assertIn("Windows 캡처 세션", self.finished[0][0][2])
         self.assertNotIn("원본 답변", result)
+
+    async def test_partial_commit_status_is_not_marked_durable(
+        self,
+    ) -> None:
+        private = (
+            "Bearer control-continuity-secret "
+            r"C:\Users\Admin\checkpoint.json"
+        )
+
+        async def partial_commit():
+            return {
+                "state": "ready",
+                "rollbackProtected": True,
+                "privateMessage": private,
+            }
+
+        deps = self.build_deps()
+        deps = ControlPageTextRuntimeDeps(
+            **{
+                **deps.__dict__,
+                "commit_session_continuity": partial_commit,
+            }
+        )
+
+        result = await answer_control_page_text_from_runtime(
+            None,
+            "질문",
+            deps=deps,
+        )
+        metrics = self.summaries[0][0]["meta"]
+
+        self.assertIn("display:", result)
+        self.assertEqual(
+            metrics["continuity_commit"],
+            "failed",
+        )
+        self.assertEqual(
+            metrics["continuity_error"],
+            "conversation_continuity_commit_failed",
+        )
+        self.assertNotIn(private, str(self.summaries))
 
     async def test_failure_logs_error_summary_and_always_clears_scope(self) -> None:
         self.ask_error = RuntimeError("LLM failed")

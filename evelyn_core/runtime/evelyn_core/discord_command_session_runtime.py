@@ -3,6 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from .continuity_commit_contract import (
+    require_durable_continuity_receipt,
+)
 
 @dataclass(frozen=True)
 class DiscordCommandSessionRuntimeDeps:
@@ -54,7 +57,9 @@ def mark_text_session_from_command_runtime(
         question_ttl_sec=deps.question_ttl_sec,
     )
     try:
-        deps.commit_session_continuity()
+        require_durable_continuity_receipt(
+            deps.commit_session_continuity()
+        )
     except Exception as exc:
         deps.log(
             "[DISCORD] command_continuity_commit_failed "

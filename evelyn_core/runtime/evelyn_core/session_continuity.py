@@ -9,6 +9,10 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
+from .continuity_commit_contract import (
+    CONTINUITY_COMMIT_METRICS_SCHEMA,
+    CONTINUITY_STATUS_SCHEMA,
+)
 from .runtime_artifact_io import atomic_json_write
 from .runtime_error_observability import RuntimeErrorCounter
 from .text import clean_text
@@ -21,9 +25,9 @@ SESSION_CONTINUITY_LEGACY_CHECKPOINT_SCHEMA = (
 SESSION_CONTINUITY_HEAD_SCHEMA = (
     "conversation_continuity.checkpoint-head.v1"
 )
-SESSION_CONTINUITY_STATUS_SCHEMA = "conversation_continuity.status.v1"
+SESSION_CONTINUITY_STATUS_SCHEMA = CONTINUITY_STATUS_SCHEMA
 SESSION_CONTINUITY_COMMIT_METRICS_SCHEMA = (
-    "conversation_continuity.commit-metrics.v1"
+    CONTINUITY_COMMIT_METRICS_SCHEMA
 )
 SESSION_CONTINUITY_REVOCATIONS_SCHEMA = (
     "conversation_continuity.guild_revocations.v1"

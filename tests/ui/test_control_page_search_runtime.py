@@ -16,6 +16,9 @@ from evelyn_core.control_page_search_runtime import (  # noqa: E402
     ControlPageSearchRuntimeDeps,
     answer_control_page_search_text_from_runtime,
 )
+from tests.continuity_test_support import (  # noqa: E402
+    durable_continuity_status,
+)
 
 
 def _deps(**overrides) -> tuple[ControlPageSearchRuntimeDeps, dict[str, object]]:
@@ -46,7 +49,7 @@ def _deps(**overrides) -> tuple[ControlPageSearchRuntimeDeps, dict[str, object]]
 
     async def commit_session_continuity():
         state["events"].append("commit")
-        return {"generation": 4}
+        return durable_continuity_status(4)
 
     deps = ControlPageSearchRuntimeDeps(
         control_page_effective_guild_id=lambda guild: int(getattr(guild, "id", 999) or 999),
@@ -117,6 +120,39 @@ class ControlPageSearchRuntimeTests(unittest.TestCase):
         reply = asyncio.run(self._run(deps))
 
         self.assertEqual(reply, "display:search answer")
+
+    def test_partial_commit_status_is_not_marked_durable(
+        self,
+    ) -> None:
+        private = (
+            "Bearer search-continuity-secret "
+            "https://internal.example/private"
+        )
+
+        async def partial_commit():
+            return {
+                "state": "ready",
+                "rollbackProtected": True,
+                "privateMessage": private,
+            }
+
+        deps, state = _deps(
+            commit_session_continuity=partial_commit
+        )
+
+        reply = asyncio.run(self._run(deps))
+        metrics = state["synthesis"][0]["metrics"]["meta"]
+
+        self.assertEqual(reply, "display:final answer")
+        self.assertEqual(
+            metrics["continuity_commit"],
+            "failed",
+        )
+        self.assertEqual(
+            metrics["continuity_error"],
+            "conversation_continuity_commit_failed",
+        )
+        self.assertNotIn(private, str(metrics))
 
 
 if __name__ == "__main__":

@@ -3,6 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable, MutableMapping
 
+from .continuity_commit_contract import (
+    require_durable_continuity_receipt,
+)
 
 @dataclass(frozen=True)
 class VoiceReplySideEffectDeps:
@@ -116,14 +119,14 @@ def finalize_voice_reply_side_effects_from_runtime(
     )
     try:
         continuity_status = deps.commit_session_continuity()
+        continuity_receipt = require_durable_continuity_receipt(
+            continuity_status
+        )
         metrics.setdefault("meta", {}).update(
             {
                 "continuity_commit": "durable",
                 "continuity_generation": int(
-                    continuity_status.get(
-                        "checkpointGeneration"
-                    )
-                    or 0
+                    continuity_receipt["generation"]
                 ),
             }
         )

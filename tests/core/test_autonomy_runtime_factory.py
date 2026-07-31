@@ -15,6 +15,9 @@ from evelyn_core.autonomy_runtime_factory import (
     AutonomyRuntimeFactoryDeps,
     get_or_create_autonomy_engine_from_runtime,
 )
+from tests.continuity_test_support import (
+    durable_continuity_status,
+)
 
 
 class FakeGuild:
@@ -49,7 +52,7 @@ class AutonomyRuntimeFactoryTests(unittest.IsolatedAsyncioTestCase):
 
         async def commit_session_continuity() -> dict[str, Any]:
             self.events.append(("commit", None))
-            return {"generation": 9}
+            return durable_continuity_status(9)
 
         return AutonomyRuntimeFactoryDeps(
             autonomy_engines=self.engines,
@@ -167,6 +170,38 @@ class AutonomyRuntimeFactoryTests(unittest.IsolatedAsyncioTestCase):
         session_payload = next(payload for kind, payload in self.events if kind == "session")
         self.assertEqual(session_payload[1]["ttl_sec"], 30.0)
         self.assertTrue(session_payload[1]["awaiting_user_reply"])
+
+    async def test_send_followup_rejects_partial_commit_status(
+        self,
+    ) -> None:
+        private = (
+            "Bearer autonomy-continuity-secret "
+            "https://internal.example/private"
+        )
+
+        async def partial_commit() -> dict[str, Any]:
+            self.events.append(("commit", None))
+            return {
+                "state": "ready",
+                "rollbackProtected": True,
+                "privateMessage": private,
+            }
+
+        self.deps = AutonomyRuntimeFactoryDeps(
+            **{
+                **self.deps.__dict__,
+                "commit_session_continuity": partial_commit,
+            }
+        )
+
+        result = await self.default_executor().send_followup_fn(
+            "후속 답변"
+        )
+
+        self.assertTrue(result["verified"])
+        self.assertFalse(result["continuityDurable"])
+        self.assertEqual(result["continuityGeneration"], 0)
+        self.assertNotIn(private, str(result))
 
     async def test_send_followup_blocks_without_channel(self) -> None:
         self.guild = FakeGuild()

@@ -3,6 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
+from .continuity_commit_contract import (
+    require_durable_continuity_receipt,
+)
 
 @dataclass(frozen=True)
 class ControlPageTextRuntimeDeps:
@@ -120,14 +123,16 @@ async def answer_control_page_text_from_runtime(
                 continuity_status = (
                     await deps.commit_session_continuity()
                 )
+                continuity_receipt = (
+                    require_durable_continuity_receipt(
+                        continuity_status
+                    )
+                )
                 text_metrics.setdefault("meta", {}).update(
                     {
                         "continuity_commit": "durable",
                         "continuity_generation": int(
-                            continuity_status.get(
-                                "checkpointGeneration"
-                            )
-                            or 0
+                            continuity_receipt["generation"]
                         ),
                     }
                 )
@@ -143,9 +148,10 @@ async def answer_control_page_text_from_runtime(
                 deps.log(
                     (
                         "[CONTROL PAGE] "
-                        "continuity_commit_failed:"
+                        "continuity_commit_failed "
+                        "errorType="
                     ),
-                    repr(exc),
+                    type(exc).__name__,
                 )
         deps.log_voice_bottleneck_summary(
             text_metrics,

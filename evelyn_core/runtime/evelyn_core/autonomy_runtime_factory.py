@@ -12,6 +12,9 @@ from .autonomy_observation_state import (
     build_default_autonomy_observation,
 )
 from .autonomy_router import DefaultAutonomyExecutor, RoutedAutonomyExecutor
+from .continuity_commit_contract import (
+    require_durable_continuity_receipt,
+)
 
 
 @dataclass(frozen=True)
@@ -219,9 +222,14 @@ def get_or_create_autonomy_engine_from_runtime(
         continuity_generation = 0
         try:
             continuity_status = await deps.commit_session_continuity()
+            continuity_receipt = (
+                require_durable_continuity_receipt(
+                    continuity_status
+                )
+            )
             continuity_durable = True
             continuity_generation = int(
-                continuity_status.get("generation") or 0
+                continuity_receipt["generation"]
             )
         except Exception as exc:
             deps.log(
