@@ -363,6 +363,21 @@ chain/head 손상이나 writer 경쟁은 note와 token을 건드리기 전에 fa
 API는 HTTP 503을 반환한다. journal append 뒤 head 교체 전에 중단된 경우에만
 유효한 chain prefix를 같은 writer lease 아래 복구한다.
 
+live prompt 경계도 이제 구조적 receipt를 남긴다. Vault recall과 pinned
+hot-context에서 실제로 모델에 제공한 note ID, memory version, retrieval mode,
+source-type 집계만 `memory.context-receipt.v1`에 기록하고 본문·제목·경로·
+transcript는 넣지 않는다. stale memory version, 삭제/파생 상태 불일치,
+note ID가 없는 과거 hot-context는 prompt에서 제외한다. Discord/Main turn
+summary와 Fast Control 일반·stream 응답은 이 receipt를 노출하며 “제공됨”과
+“모델이 실제 사용함”을 구분한다.
+
+다만 기존 rolling summary, raw/facts/questions 계층에는 stable evidence ID가
+없다. 이 항목들이 prompt에 함께 들어간 턴은 receipt가 `partial` 또는
+`unattributed`로 명시하지만, 아직 개별 원문 턴까지 구조적으로 역추적할 수는
+없다. 이를 숨기기 위해 vault note ID로 거짓 귀속하지 않는다. 다음 개선은
+legacy memory row에 content-free stable ID와 source-turn linkage를 부여하고,
+마이그레이션되지 않은 요약의 주입 정책을 별도로 결정하는 것이다.
+
 남은 위험은 coverage와 correction이 구조적 근거 연결만 다루며 기억 내용이나
 사용자의 선택이 사실임을 보증하지 않는다는 점이다. hash chain과 head는
 우발적·비협조적 파일 변조의 증거이지, journal과 head를 함께 다시 쓸 수 있는

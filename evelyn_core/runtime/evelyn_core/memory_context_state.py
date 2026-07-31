@@ -109,6 +109,7 @@ def build_memory_context(
     room_key: str | None = None,
     person_key: str | None = None,
     session_memory_key: str | None = None,
+    receipt: dict[str, Any] | None = None,
 ) -> str:
     layers = collect_memory_layers(
         guild_id,
@@ -139,6 +140,7 @@ def build_memory_context(
     )
     state = normalize_cognitive_state(state if cognitive_state is None else cognitive_state)
     active_session_state = dict(session_state or {})
+    vault_receipt: dict[str, Any] = {}
     vault_context = build_memory_vault_context(
         guild_id,
         user_text,
@@ -151,9 +153,10 @@ def build_memory_context(
             clean_text(str(state.get("state_summary", ""))),
         ],
         max_items=5,
+        receipt=vault_receipt,
     )
 
-    return build_memory_context_payload(
+    context = build_memory_context_payload(
         layers=layers,
         state=state,
         session_state=active_session_state,
@@ -162,6 +165,73 @@ def build_memory_context(
         questions=questions,
         vault_raw_rows=vault_raw_rows,
     )
+    summary_count = sum(1 for layer in layers.values() if layer.get("summary"))
+    session_raw_count = len(
+        merge_recent_memory_rows(
+            *(layer["raw"] for layer in (layers.get("session"),) if layer),
+            limit=4,
+        )
+    )
+    person_raw_count = len(
+        merge_recent_memory_rows(
+            *(layer["raw"] for layer in (layers.get("person"),) if layer),
+            limit=4,
+        )
+    )
+    room_raw_count = len(
+        merge_recent_memory_rows(
+            *(layer["raw"] for layer in (layers.get("room"), layers.get("guild")) if layer),
+            limit=MEMORY_RAW_CONTEXT_LIMIT,
+        )
+    )
+    legacy_counts = {
+        "summaries": summary_count,
+        "sessionRaw": session_raw_count,
+        "personRaw": person_raw_count,
+        "roomRaw": room_raw_count,
+        "vaultRaw": len(vault_raw_rows),
+        "facts": len(facts),
+        "questions": len(questions),
+    }
+    legacy_item_count = sum(legacy_counts.values())
+    supplied_note_ids = sorted(
+        {
+            clean_text(str(item))
+            for item in (vault_receipt.get("suppliedNoteIds") or [])
+            if clean_text(str(item))
+        }
+    )
+    if not context:
+        grounding_state = "empty"
+    elif legacy_item_count and supplied_note_ids:
+        grounding_state = "partial"
+    elif legacy_item_count:
+        grounding_state = "unattributed"
+    elif supplied_note_ids:
+        grounding_state = "attributed"
+    else:
+        grounding_state = "unattributed"
+    if receipt is not None:
+        receipt.clear()
+        receipt.update(
+            {
+                "schema": "memory.context-receipt.v1",
+                "state": "provided" if context else "empty",
+                "groundingState": grounding_state,
+                "vaultState": clean_text(str(vault_receipt.get("state") or "unknown")),
+                "memoryVersion": int(vault_receipt.get("memoryVersion") or 0),
+                "retrievalMode": clean_text(str(vault_receipt.get("retrievalMode") or "unknown"))[:40],
+                "cacheHit": bool(vault_receipt.get("cacheHit")),
+                "hotContextState": clean_text(str(vault_receipt.get("hotContextState") or "unknown")),
+                "suppliedNoteIds": supplied_note_ids,
+                "suppliedNoteCount": len(supplied_note_ids),
+                "sourceTypeCounts": dict(vault_receipt.get("sourceTypeCounts") or {}),
+                "legacyItemCounts": legacy_counts,
+                "legacyItemCount": legacy_item_count,
+                "contentFree": True,
+            }
+        )
+    return context
 
 
 __all__ = [

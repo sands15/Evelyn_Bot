@@ -1364,16 +1364,70 @@ class MemoryVaultTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             activate_memory_vault_for_guild(123, root=root)
+            receipt = {}
             context = build_memory_vault_context(
                 123,
                 "what is the memory structure",
                 source="test",
                 max_items=3,
                 root=root,
+                receipt=receipt,
             )
 
         self.assertIn("[Pinned Memory Vault]", context)
         self.assertIn("Evelyn Memory Source Contract", context)
+        self.assertEqual(receipt["schema"], "memory.vault-context-receipt.v1")
+        self.assertEqual(receipt["state"], "provided")
+        self.assertEqual(receipt["groundingState"], "attributed")
+        self.assertGreater(receipt["suppliedNoteCount"], 0)
+        self.assertEqual(receipt["suppliedNoteCount"], len(receipt["suppliedNoteIds"]))
+        self.assertTrue(receipt["contentFree"])
+        self.assertNotIn("Memory Source Contract", str(receipt))
+
+    def test_context_builder_rejects_hot_context_from_an_older_memory_version(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            note_path = write_memory_vault_note(
+                note_type="core",
+                title="Pinned Version Boundary",
+                body="old pinned marker",
+                source="user-edit",
+                root=root,
+            )
+            hot_payload = refresh_memory_hot_context(root=root)
+            old_version = int(hot_payload["memory_version"])
+            self.assertIn(
+                "old pinned marker",
+                read_memory_hot_context(
+                    root=root,
+                    expected_memory_version=old_version,
+                ),
+            )
+
+            note_path.write_text(
+                note_path.read_text(encoding="utf-8").replace(
+                    "old pinned marker",
+                    "new indexed marker",
+                ),
+                encoding="utf-8",
+            )
+            new_version = sync_memory_vault_index(root=root)
+            receipt = {}
+            context = build_memory_vault_context(
+                123,
+                "new indexed marker",
+                source="test",
+                max_items=3,
+                root=root,
+                receipt=receipt,
+            )
+
+        self.assertGreater(new_version, old_version)
+        self.assertNotIn("[Pinned Memory Vault]", context)
+        self.assertNotIn("old pinned marker", context)
+        self.assertIn("new indexed marker", context)
+        self.assertEqual(receipt["hotContextState"], "stale_memory_version")
+        self.assertEqual(receipt["memoryVersion"], new_version)
 
     def test_sub_llm_dependency_probe_reports_fallback_without_server(self) -> None:
         result = probe_sub_llm_dependency(summary_llm_url="http://127.0.0.1:9/v1/chat/completions", timeout_s=0.05)

@@ -253,6 +253,12 @@ async def prepare_llm_messages_from_runtime(
             decision.evidence = deps.clean_text(repr(exc))[:240]
 
     memory_context = ""
+    memory_receipt: dict[str, Any] = {
+        "schema": "memory.context-receipt.v1",
+        "state": "not_requested",
+        "groundingState": "not_requested",
+        "contentFree": True,
+    }
     if guild_id is not None and context_policy.needs_memory:
         memory_started_at = time.monotonic()
         memory_context = deps.build_memory_context(
@@ -264,6 +270,7 @@ async def prepare_llm_messages_from_runtime(
             room_key=room_key,
             person_key=person_key,
             session_memory_key=session_memory_key,
+            receipt=memory_receipt,
         )
         if metrics is not None:
             memory_elapsed = (time.monotonic() - memory_started_at) * 1000.0
@@ -278,7 +285,12 @@ async def prepare_llm_messages_from_runtime(
             decision.evidence = "No guild/session memory scope was available for this turn."
         elif deps.clean_text(memory_context):
             decision.status = "executed"
-            decision.evidence = f"memory_context_chars={len(memory_context)}"
+            decision.evidence = (
+                f"memory_context_chars={len(memory_context)}; "
+                f"receipt_state={deps.clean_text(str(memory_receipt.get('state') or 'unknown'))}; "
+                f"grounding={deps.clean_text(str(memory_receipt.get('groundingState') or 'unknown'))}; "
+                f"note_count={int(memory_receipt.get('suppliedNoteCount') or 0)}"
+            )
         else:
             decision.status = "executed_empty"
             decision.evidence = "No relevant memory rows were selected."
@@ -414,6 +426,7 @@ async def prepare_llm_messages_from_runtime(
             "route": route,
             "policy": context_policy.to_dict(),
             "memory_context_chars": len(memory_context),
+            "memory_receipt": dict(memory_receipt),
             "tool_decisions": [decision.to_dict() for decision in tool_use_decisions],
             "message_count": len(messages),
             "sections": [section.source or section.name for section in context_packet.sections()],

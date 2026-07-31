@@ -101,6 +101,54 @@ class MemoryContextStateTests(unittest.TestCase):
         self.assertIn("- 현재 topic_id: topic-1", context)
         vault.assert_called_once()
 
+    def test_build_memory_context_emits_content_free_grounding_receipt(self) -> None:
+        layers = {
+            "guild": {
+                "label": "서버 기억",
+                "summary": "private summary text",
+                "raw": [],
+                "facts": [],
+                "questions": [],
+                "vault_raw": [],
+            }
+        }
+
+        def fake_vault_context(*_args, receipt=None, **_kwargs):
+            receipt.update(
+                {
+                    "state": "provided",
+                    "memoryVersion": 7,
+                    "retrievalMode": "fts+vector",
+                    "cacheHit": False,
+                    "hotContextState": "provided",
+                    "suppliedNoteIds": ["note-2", "note-1"],
+                    "sourceTypeCounts": {"conversation": 2},
+                }
+            )
+            return "private vault text"
+
+        receipt = {}
+        with patch("evelyn_core.memory_context_state.collect_memory_layers", return_value=layers):
+            with patch(
+                "evelyn_core.memory_context_state.build_memory_vault_context",
+                side_effect=fake_vault_context,
+            ):
+                context = build_memory_context(
+                    123,
+                    "private user text",
+                    cognitive_state={"action": "answer"},
+                    receipt=receipt,
+                )
+
+        self.assertIn("private vault text", context)
+        self.assertEqual(receipt["schema"], "memory.context-receipt.v1")
+        self.assertEqual(receipt["state"], "provided")
+        self.assertEqual(receipt["groundingState"], "partial")
+        self.assertEqual(receipt["suppliedNoteIds"], ["note-1", "note-2"])
+        self.assertEqual(receipt["legacyItemCount"], 1)
+        self.assertTrue(receipt["contentFree"])
+        self.assertNotIn("private", str(receipt).lower())
+
     def test_empty_payload_returns_empty_string(self) -> None:
         self.assertEqual(
             build_memory_context_payload(

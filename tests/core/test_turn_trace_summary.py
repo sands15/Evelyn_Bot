@@ -27,6 +27,10 @@ class TurnTraceSummaryTests(unittest.TestCase):
             "playback_cancelled",
             "tts_first_audio_ms",
             "playback_first_packet_ms",
+            "memory_context_state",
+            "memory_grounding_state",
+            "memory_supplied_note_ids",
+            "memory_receipt_content_free",
             "memory_writer_decision",
             "minecraft_snapshot_freshness",
             "error_layer",
@@ -62,6 +66,16 @@ class TurnTraceSummaryTests(unittest.TestCase):
                         "message_count": 4,
                         "sections": ["runtime"],
                         "section_chars": {"runtime": 120},
+                        "memory_receipt": {
+                            "state": "provided",
+                            "groundingState": "partial",
+                            "suppliedNoteIds": ["note-2", "note-1", "note-2"],
+                            "suppliedNoteCount": 2,
+                            "legacyItemCount": 3,
+                            "hotContextState": "provided",
+                            "memoryVersion": 7,
+                            "contentFree": True,
+                        },
                     },
                     "minecraft_snapshot_age_ms": 1234.4,
                     "minecraft_snapshot_freshness": "fresh",
@@ -86,6 +100,14 @@ class TurnTraceSummaryTests(unittest.TestCase):
         self.assertEqual(payload["needs_tts"], True)
         self.assertEqual(payload["route_priority"], "latency")
         self.assertEqual(payload["response_mode"], "short")
+        self.assertEqual(payload["memory_context_state"], "provided")
+        self.assertEqual(payload["memory_grounding_state"], "partial")
+        self.assertEqual(payload["memory_supplied_note_ids"], ["note-2", "note-1"])
+        self.assertEqual(payload["memory_supplied_note_count"], 2)
+        self.assertEqual(payload["memory_legacy_item_count"], 3)
+        self.assertEqual(payload["memory_hot_context_state"], "provided")
+        self.assertEqual(payload["memory_version"], 7)
+        self.assertTrue(payload["memory_receipt_content_free"])
         self.assertEqual(payload["minecraft_snapshot_age_ms"], 1234.4)
         self.assertEqual(payload["minecraft_snapshot_freshness"], "fresh")
         self.assertEqual(payload["validation_session_id"], "validation-1")

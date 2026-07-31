@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextvars import ContextVar
 import json
 import os
 import random
@@ -123,6 +124,10 @@ MEMORY_RECALL_PROGRESS_TEXTS = (
 )
 MEMORY_RECALL_PROGRESS_SOURCES = frozenset({"local_bridge", "local_mic", "voice"})
 MEMORY_RECALL_PROGRESS_LAST_TEXT: str | None = None
+FAST_MEMORY_CONTEXT_RECEIPT: ContextVar[dict[str, Any] | None] = ContextVar(
+    "fast_memory_context_receipt",
+    default=None,
+)
 RESEARCH_PROGRESS_TEXTS = (
     "잠깐, 관련 자료를 찾아볼게.",
     "음… 제대로 비교해볼게.",
@@ -331,6 +336,22 @@ def visible_text(value: Any) -> str:
     return clean_text(shared_visible_text(text))
 
 
+def reset_fast_memory_context_receipt() -> dict[str, Any]:
+    receipt = {
+        "schema": "memory.context-receipt.v1",
+        "state": "not_requested",
+        "groundingState": "not_requested",
+        "contentFree": True,
+    }
+    FAST_MEMORY_CONTEXT_RECEIPT.set(receipt)
+    return dict(receipt)
+
+
+def current_fast_memory_context_receipt() -> dict[str, Any]:
+    receipt = FAST_MEMORY_CONTEXT_RECEIPT.get()
+    return dict(receipt) if isinstance(receipt, dict) else reset_fast_memory_context_receipt()
+
+
 def append_chat_message(
     role: str,
     author: str,
@@ -339,6 +360,7 @@ def append_chat_message(
     source: str | None = None,
     task_id: str | None = None,
     task_status: str | None = None,
+    memory_receipt: dict[str, Any] | None = None,
 ) -> None:
     message = {
         "role": role,
@@ -352,6 +374,8 @@ def append_chat_message(
         message["taskId"] = clean_text(task_id)
     if clean_text(task_status):
         message["taskStatus"] = clean_text(task_status)
+    if isinstance(memory_receipt, dict):
+        message["memoryReceipt"] = dict(memory_receipt)
     CHAT_MESSAGES.append(message)
     if len(CHAT_MESSAGES) > CHAT_LOG_LIMIT:
         del CHAT_MESSAGES[:-CHAT_LOG_LIMIT]
@@ -1846,6 +1870,12 @@ async def build_main_llm_request_payload(
         llm_request.context.required_evidence_failure_reply
         or llm_request.context.grounded_evidence_reply
     )
+    memory_receipt = getattr(llm_request.context, "memory_receipt", None)
+    FAST_MEMORY_CONTEXT_RECEIPT.set(
+        dict(memory_receipt)
+        if isinstance(memory_receipt, dict)
+        else reset_fast_memory_context_receipt()
+    )
     return payload, deterministic_reply
 
 
@@ -2420,6 +2450,7 @@ async def chat_handler(request: web.Request) -> web.StreamResponse:
     if not text:
         return json_response({"ok": False, "error": "empty_text"}, status=400)
     source = clean_text((payload or {}).get("source")) or "control_page"
+    reset_fast_memory_context_receipt()
     suppress_tts = should_suppress_tts_for_command(text)
     append_chat_message("user", "정훈", text, source=source)
     tool_plan: FastToolPlan | None = None
@@ -2488,6 +2519,7 @@ async def chat_handler(request: web.Request) -> web.StreamResponse:
         source="fast_control_api",
         task_id=task_record.task_id if task_record is not None else None,
         task_status=task_record.status if task_record is not None else None,
+        memory_receipt=current_fast_memory_context_receipt(),
     )
     continuity = (
         commit_fast_control_terminal_turn(
@@ -2512,6 +2544,7 @@ async def chat_handler(request: web.Request) -> web.StreamResponse:
         "suppressTts": suppress_tts,
         "state": build_control_state(health),
         "continuity": continuity,
+        "memoryReceipt": current_fast_memory_context_receipt(),
     }
     if error_code:
         result["error"] = error_code
@@ -2533,6 +2566,7 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
     if not text:
         return json_response({"ok": False, "error": "empty_text"}, status=400)
     source = clean_text((payload or {}).get("source")) or "local_bridge"
+    reset_fast_memory_context_receipt()
     suppress_tts = should_suppress_tts_for_command(text)
     append_chat_message("user", "정훈", text, source=source)
     tool_plan: FastToolPlan | None = None
@@ -2690,6 +2724,7 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
             source="fast_control_api_stream",
             task_id=task_record.task_id if task_record is not None else None,
             task_status=task_record.status if task_record is not None else None,
+            memory_receipt=current_fast_memory_context_receipt(),
         )
         continuity = commit_fast_control_turn(text, reply)
         await write_stream_event(
@@ -2702,6 +2737,7 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
                 "taskId": task_record.task_id if task_record is not None else None,
                 "taskStatus": task_record.status if task_record is not None else None,
                 "continuity": continuity,
+                "memoryReceipt": current_fast_memory_context_receipt(),
                 "firstSentenceMs": round(first_sentence_ms, 1) if first_sentence_ms is not None else None,
                 "firstDeltaMs": round(first_delta_ms, 1) if first_delta_ms is not None else None,
                 "firstProgressMs": round(first_progress_ms, 1) if first_progress_ms is not None else None,
@@ -2732,6 +2768,7 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
                 source="fast_control_action_followup",
                 task_id=failed.task_id,
                 task_status=failed.status,
+                memory_receipt=current_fast_memory_context_receipt(),
             )
         else:
             append_chat_message(
@@ -2739,6 +2776,7 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
                 "Evelyn",
                 failure_reply,
                 source="fast_control_api_stream",
+                memory_receipt=current_fast_memory_context_receipt(),
             )
         continuity = (
             commit_fast_control_terminal_turn(
@@ -2759,6 +2797,7 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
                 "ok": False,
                 "error": error_code,
                 "message": failure_reply,
+                "memoryReceipt": current_fast_memory_context_receipt(),
                 "continuity": continuity,
             },
         )

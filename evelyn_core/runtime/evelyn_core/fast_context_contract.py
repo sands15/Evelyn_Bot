@@ -30,7 +30,7 @@ from .vision_runtime import VisionEvidence, vision_evidence_from_payload
 
 RuntimeHealthProvider = Callable[[], Awaitable[dict[str, Any]]]
 SearchProvider = Callable[[str], Awaitable[tuple[str, list[dict[str, Any]]]]]
-MemoryProvider = Callable[[str], Awaitable[str]]
+MemoryProvider = Callable[[str], Awaitable[str | tuple[str, dict[str, Any]]]]
 LogProvider = Callable[[str], Awaitable[str]]
 LocalBridgeStatusProvider = Callable[[], Any]
 VisionProvider = Callable[..., Awaitable[HostVisionResult]]
@@ -43,6 +43,7 @@ class FastControlContext:
     system_context: str
     search_context: str = ""
     memory_context: str = ""
+    memory_receipt: dict[str, Any] = field(default_factory=dict)
     log_context: str = ""
     local_bridge_context: str = ""
     vision_context: str = ""
@@ -179,9 +180,61 @@ async def default_search_provider(query: str) -> tuple[str, list[dict[str, Any]]
     return cleaned_query, [result.to_dict() for result in results]
 
 
-async def default_memory_provider(user_text: str) -> str:
+def _fast_memory_context_receipt(
+    value: dict[str, Any] | None,
+    *,
+    has_context: bool,
+) -> dict[str, Any]:
+    source = value if isinstance(value, dict) else {}
+    raw_note_ids = source.get("suppliedNoteIds") or source.get("noteIds") or []
+    note_ids = sorted(
+        {
+            clean_text(str(item))
+            for item in raw_note_ids[:12]
+            if clean_text(str(item))
+        }
+    ) if isinstance(raw_note_ids, (list, tuple)) else []
+    state = clean_text(str(source.get("state") or ("provided" if has_context else "empty")))
+    if state not in {"provided", "empty", "unavailable"}:
+        state = "provided" if has_context else "empty"
+    grounding_state = clean_text(str(source.get("groundingState") or ""))
+    if grounding_state not in {"attributed", "partial", "unattributed", "empty", "unavailable"}:
+        grounding_state = "attributed" if has_context and note_ids else ("unattributed" if has_context else state)
+    try:
+        memory_version = int(source.get("memoryVersion") or 0)
+    except (TypeError, ValueError):
+        memory_version = 0
+    source_type_counts: dict[str, int] = {}
+    raw_source_type_counts = source.get("sourceTypeCounts")
+    if isinstance(raw_source_type_counts, dict):
+        for source_type in ("system", "legacy", "derived", "conversation", "user", "runtime", "unknown"):
+            try:
+                count = int(raw_source_type_counts.get(source_type) or 0)
+            except (TypeError, ValueError):
+                count = 0
+            if count > 0:
+                source_type_counts[source_type] = count
+    return {
+        "schema": "memory.context-receipt.v1",
+        "state": state,
+        "groundingState": grounding_state,
+        "vaultState": state,
+        "memoryVersion": memory_version,
+        "retrievalMode": clean_text(str(source.get("retrievalMode") or "unknown"))[:40],
+        "cacheHit": bool(source.get("cacheHit")),
+        "hotContextState": "not_requested",
+        "suppliedNoteIds": note_ids,
+        "suppliedNoteCount": len(note_ids),
+        "sourceTypeCounts": source_type_counts,
+        "legacyItemCounts": {},
+        "legacyItemCount": 0,
+        "contentFree": True,
+    }
+
+
+async def _default_memory_provider_result(user_text: str) -> tuple[str, dict[str, Any]]:
     from .assistant_contracts import MemoryRecallRequest
-    from .memory_vault import recall_memory_vault
+    from .memory_vault import build_memory_recall_receipt, recall_memory_vault
 
     request = MemoryRecallRequest(
         turn_id=f"fast-control-{int(time.time() * 1000)}",
@@ -194,9 +247,16 @@ async def default_memory_provider(user_text: str) -> str:
         metadata={"active_project": "evelyn", "context_focus": ["control_page", "local_runtime"]},
     )
     result = await asyncio.to_thread(recall_memory_vault, request)
-    if not result.ok:
-        return f"Memory recall failed: {clean_text(result.error_text or 'unknown')}"
-    return clean_text(result.context_text)
+    context = clean_text(result.context_text) if result.ok else ""
+    return context, _fast_memory_context_receipt(
+        build_memory_recall_receipt(result),
+        has_context=bool(context),
+    )
+
+
+async def default_memory_provider(user_text: str) -> str:
+    context, _receipt = await _default_memory_provider_result(user_text)
+    return context
 
 
 def default_log_roots() -> list[Path]:
@@ -408,6 +468,12 @@ async def build_fast_control_context(
     provider = runtime_health_provider or default_runtime_health_provider
     search_context = ""
     memory_context = ""
+    memory_receipt = {
+        "schema": "memory.context-receipt.v1",
+        "state": "not_requested",
+        "groundingState": "not_requested",
+        "contentFree": True,
+    }
     log_context = ""
     local_bridge_context = ""
     vision_context = ""
@@ -535,12 +601,52 @@ async def build_fast_control_context(
                 decision.evidence = clean_text(repr(exc))[:240]
         elif decision.tool_name == "memory_recall":
             try:
-                memory_context = await (memory_provider or default_memory_provider)(decision_text)
-                decision.status = "executed" if clean_text(memory_context) else "executed_empty"
-                decision.evidence = clean_text(memory_context)[:1000] if memory_context else "No relevant memory was found."
-            except Exception as exc:
+                if memory_provider is None:
+                    memory_context, memory_receipt = await _default_memory_provider_result(decision_text)
+                else:
+                    provider_result = await memory_provider(decision_text)
+                    if (
+                        isinstance(provider_result, tuple)
+                        and len(provider_result) == 2
+                        and isinstance(provider_result[1], dict)
+                    ):
+                        memory_context = clean_text(str(provider_result[0] or ""))
+                        memory_receipt = _fast_memory_context_receipt(
+                            provider_result[1],
+                            has_context=bool(memory_context),
+                        )
+                    else:
+                        memory_context = clean_text(str(provider_result or ""))
+                        memory_receipt = _fast_memory_context_receipt(
+                            {
+                                "state": "provided" if memory_context else "empty",
+                                "groundingState": "unattributed" if memory_context else "empty",
+                            },
+                            has_context=bool(memory_context),
+                        )
+                decision.status = (
+                    "failed_or_unavailable"
+                    if memory_receipt["state"] == "unavailable"
+                    else "executed"
+                    if memory_context
+                    else "executed_empty"
+                )
+                decision.evidence = (
+                    f"memory_context_chars={len(memory_context)}; "
+                    f"receipt_state={memory_receipt['state']}; "
+                    f"grounding={memory_receipt['groundingState']}; "
+                    f"note_count={memory_receipt['suppliedNoteCount']}"
+                )
+            except Exception:
+                memory_context = ""
+                memory_receipt = {
+                    "schema": "memory.context-receipt.v1",
+                    "state": "unavailable",
+                    "groundingState": "unavailable",
+                    "contentFree": True,
+                }
                 decision.status = "failed"
-                decision.evidence = clean_text(repr(exc))[:240]
+                decision.evidence = "memory_recall_runtime_error"
         elif decision.required_before_answer and not decision.auto_allowed:
             decision.evidence = decision.evidence or (
                 "This tool is required before a verified answer, but it is not auto-executed in the fast control route."
@@ -572,6 +678,7 @@ async def build_fast_control_context(
         system_context=ContextBuilder().render_system_context(packet),
         search_context=search_context,
         memory_context=memory_context,
+        memory_receipt=memory_receipt,
         log_context=log_context,
         local_bridge_context=local_bridge_context,
         vision_context=vision_context,

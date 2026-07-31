@@ -125,6 +125,7 @@ class LlmContextAssemblyVisionEvidenceIntegrationTests(unittest.IsolatedAsyncioT
         live_vision_callback,
         *,
         merge_cross_surface_context=None,
+        memory_context_callback=None,
     ) -> LlmContextAssemblyDeps:
         async def unused_async(*_args, **_kwargs):
             return None
@@ -154,7 +155,10 @@ class LlmContextAssemblyVisionEvidenceIntegrationTests(unittest.IsolatedAsyncioT
             clean_text=lambda value: str(value or "").strip(),
             build_local_tool_diagnostic_context=lambda *_args, **_kwargs: "",
             project_root=REPO_ROOT,
-            build_memory_context=lambda *_args, **_kwargs: "",
+            build_memory_context=(
+                memory_context_callback
+                or (lambda *_args, **_kwargs: "")
+            ),
             update_self_state_for_turn=lambda *_args, **_kwargs: {},
             observe_live_minecraft_state=unused_async,
             attach_minecraft_runtime_snapshot=lambda value, **_kwargs: value,
@@ -325,6 +329,44 @@ class LlmContextAssemblyVisionEvidenceIntegrationTests(unittest.IsolatedAsyncioT
         self.assertTrue(context_meta["vision_context"])
         self.assertFalse(context_meta["vision_evidence_available"])
         self.assertEqual(context_meta["vision_evidence_state"], "failed")
+
+    async def test_memory_receipt_reaches_context_metrics_without_memory_text(self) -> None:
+        async def no_vision(_user_text: str, *, metrics: dict | None = None) -> str:
+            return ""
+
+        def grounded_memory(*_args, receipt=None, **_kwargs):
+            receipt.update(
+                {
+                    "schema": "memory.context-receipt.v1",
+                    "state": "provided",
+                    "groundingState": "attributed",
+                    "suppliedNoteIds": ["note-verified"],
+                    "suppliedNoteCount": 1,
+                    "legacyItemCount": 0,
+                    "hotContextState": "empty",
+                    "memoryVersion": 4,
+                    "contentFree": True,
+                }
+            )
+            return "PRIVATE_MEMORY_TEXT"
+
+        deps = self.build_deps(
+            no_vision,
+            memory_context_callback=grounded_memory,
+        )
+        metrics = {"started_at": time.monotonic(), "meta": {}, "marks": {}}
+        messages, _state, _route, _policy = await prepare_llm_messages_from_runtime(
+            "remember my preference",
+            deps=deps,
+            guild_id=7,
+            metrics=metrics,
+        )
+
+        self.assertIn("PRIVATE_MEMORY_TEXT", messages[0]["content"])
+        receipt = metrics["meta"]["context_pipeline"]["memory_receipt"]
+        self.assertEqual(receipt["groundingState"], "attributed")
+        self.assertEqual(receipt["suppliedNoteIds"], ["note-verified"])
+        self.assertNotIn("PRIVATE_MEMORY_TEXT", str(receipt))
 
     async def test_live_scene_and_ocr_mark_required_tools_executed(self) -> None:
         async def observed_vision(_user_text: str, *, metrics: dict | None = None) -> str:

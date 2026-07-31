@@ -124,6 +124,13 @@ class FastControlApiToolTests(unittest.TestCase):
             context=SimpleNamespace(
                 required_evidence_failure_reply="",
                 grounded_evidence_reply="",
+                memory_receipt={
+                    "schema": "memory.context-receipt.v1",
+                    "state": "provided",
+                    "groundingState": "attributed",
+                    "suppliedNoteIds": ["note-restored"],
+                    "contentFree": True,
+                },
             ),
         )
 
@@ -132,12 +139,14 @@ class FastControlApiToolTests(unittest.TestCase):
             "build_fast_main_llm_request",
             new=AsyncMock(return_value=built),
         ) as build_request:
-            asyncio.run(
-                fast_api.build_main_llm_request_payload(
+            async def build_and_read_receipt():
+                await fast_api.build_main_llm_request_payload(
                     "새 질문",
                     source="control_page",
                 )
-            )
+                return fast_api.current_fast_memory_context_receipt()
+
+            memory_receipt = asyncio.run(build_and_read_receipt())
 
         self.assertEqual(
             build_request.await_args.kwargs[
@@ -153,6 +162,10 @@ class FastControlApiToolTests(unittest.TestCase):
                     "content": "재시작 전 답변",
                 },
             ],
+        )
+        self.assertEqual(
+            memory_receipt["suppliedNoteIds"],
+            ["note-restored"],
         )
 
     def test_verified_cross_surface_context_feeds_planner_and_llm(
@@ -363,6 +376,12 @@ class FastControlApiToolTests(unittest.TestCase):
         payload = fast_api.json.loads(response.text or "{}")
         self.assertTrue(payload["suppressTts"])
         self.assertIn("/shutdown", payload["reply"])
+        self.assertEqual(payload["memoryReceipt"]["state"], "not_requested")
+        self.assertTrue(payload["memoryReceipt"]["contentFree"])
+        self.assertEqual(
+            payload["state"]["chat"]["messages"][-1]["memoryReceipt"],
+            payload["memoryReceipt"],
+        )
         self.assertEqual(fast_api.LOCAL_BRIDGE_SPEAK_QUEUE, [])
 
     def test_natural_runtime_commands_create_scoped_requests(self) -> None:

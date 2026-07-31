@@ -290,6 +290,20 @@ Source branch: `codex/dependency-config-hardening`, current Fast Control action-
 - memory snapshot은 격리 수, 재합성 가능 수, 차단 수, 가장 오래된 대기
   시각·경과 초를 `memory.quarantine.status.v1`로 집계한다. 집계에는
   note ID나 콘텐츠를 넣지 않는다.
+- 실제 답변 문맥은 `memory.context-receipt.v1`을 함께 만든다.
+  - receipt에는 모델에 제공된 vault note ID, memory version, retrieval mode,
+    cache 여부, source-type별 수와 legacy 항목 수만 남긴다. 기억 본문, 제목,
+    경로, transcript와 사용자 입력은 넣지 않는다.
+  - Discord/Main의 turn summary는 `provided|empty|not_requested`,
+    `attributed|partial|unattributed`, 제공 note ID/count, legacy count와
+    hot-context 상태를 additive 필드로 기록한다. 이는 “모델에 제공됨”의
+    증거이며 모델이 실제 답변에 사용했다고 과장하지 않는다.
+  - Fast Control 일반·stream 응답과 해당 assistant chat card도 같은
+    content-free receipt를 반환한다. 사용자 주입 memory provider처럼 exact
+    note ID를 증명하지 못하는 경로는 `unattributed`로 표시한다.
+  - pinned hot-context는 현재 recall의 memory version과 정확히 같고 포함 note
+    ID가 있는 경우에만 live prompt에 들어간다. 과거 형식, 손상, 삭제/파생
+    상태 불일치와 stale version은 fail-closed로 제외한다.
 
 ## Deployment state
 
@@ -1098,6 +1112,15 @@ Source branch: `codex/dependency-config-hardening`, current Fast Control action-
 - 실제 인증된 Discord↔Control Page handoff는 아래 운영 경계 때문에 별도
   검증 상태로 남긴다. 새 이미지만 빌드했고 실행 중인 기존 Bot API와
   Control Page는 교체하지 않았으며 둘 다 healthy 상태다.
+- memory context receipt 변경의 current-source 검증은 focused 140개,
+  memory 134개, runtime 413개(skip 2), UI 156개(skip 7), voice 415개를
+  통과했다. Discord 의존 이미지의 core 533개는 기능 assertion 실패 0개였고
+  이미지에 `git`이 없어 난 기존 서명 검사 환경 오류 2개는 Windows의 해당
+  모듈 13개로 보완했다. bundled Python의 비네트워크 집중 59개와
+  `compileall`, `git diff --check`도 통과했다.
+- 이 변경에서는 실제 사용자 기억을 수정·삭제하지 않았고 Discord, 마이크,
+  Minecraft와 무거운 모델 서비스를 시작하지 않았다. source-mount 검증만
+  수행했으며 실행 중인 Bot API와 Control Page도 교체하지 않았다.
 
 ## Operational boundaries
 

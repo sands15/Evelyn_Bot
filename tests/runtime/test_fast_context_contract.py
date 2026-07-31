@@ -315,9 +315,57 @@ class FastContextContractTests(unittest.IsolatedAsyncioTestCase):
 
         memory = next(item for item in context.tool_use_decisions if item.tool_name == "memory_recall")
         self.assertEqual(memory.status, "executed")
-        self.assertIn("exact stabilization reports", memory.evidence)
+        self.assertNotIn("exact stabilization reports", memory.evidence)
+        self.assertIn("grounding=unattributed", memory.evidence)
         self.assertIn("[Retrieved Memory]", context.system_context)
         self.assertIn("exact stabilization reports", context.system_context)
+        self.assertEqual(context.memory_receipt["groundingState"], "unattributed")
+        self.assertTrue(context.memory_receipt["contentFree"])
+
+    async def test_fast_memory_receipt_keeps_note_ids_without_memory_text(self) -> None:
+        async def grounded_memory(_text: str):
+            return (
+                "PRIVATE_GROUNDED_MEMORY",
+                {
+                    "state": "provided",
+                    "groundingState": "attributed",
+                    "memoryVersion": 9,
+                    "retrievalMode": "fts",
+                    "noteIds": ["note-2", "note-1"],
+                    "sourceTypeCounts": {"user": 2},
+                    "private": "MUST_NOT_SURVIVE",
+                },
+            )
+
+        context = await build_fast_control_context(
+            "memory previous preference?",
+            source="control_page",
+            runtime_health_provider=fake_runtime_health,
+            memory_provider=grounded_memory,
+        )
+
+        self.assertEqual(context.memory_receipt["groundingState"], "attributed")
+        self.assertEqual(context.memory_receipt["suppliedNoteIds"], ["note-1", "note-2"])
+        self.assertEqual(context.memory_receipt["sourceTypeCounts"], {"user": 2})
+        self.assertNotIn("PRIVATE_GROUNDED_MEMORY", str(context.memory_receipt))
+        self.assertNotIn("MUST_NOT_SURVIVE", str(context.memory_receipt))
+
+    async def test_fast_memory_failure_does_not_enter_prompt_or_evidence(self) -> None:
+        async def failed_memory(_text: str):
+            raise RuntimeError("PRIVATE_MEMORY_FAILURE")
+
+        context = await build_fast_control_context(
+            "memory previous preference?",
+            source="control_page",
+            runtime_health_provider=fake_runtime_health,
+            memory_provider=failed_memory,
+        )
+
+        memory = next(item for item in context.tool_use_decisions if item.tool_name == "memory_recall")
+        self.assertEqual(memory.status, "failed")
+        self.assertEqual(memory.evidence, "memory_recall_runtime_error")
+        self.assertEqual(context.memory_receipt["state"], "unavailable")
+        self.assertNotIn("PRIVATE_MEMORY_FAILURE", context.system_context)
 
     async def test_fast_main_llm_messages_include_context_pipeline_contract(self) -> None:
         messages = await build_fast_main_llm_messages(

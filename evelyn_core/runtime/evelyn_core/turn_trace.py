@@ -52,6 +52,14 @@ TURN_SUMMARY_KEYS: tuple[str, ...] = (
     "context_message_count",
     "context_sections",
     "context_section_chars",
+    "memory_context_state",
+    "memory_grounding_state",
+    "memory_supplied_note_ids",
+    "memory_supplied_note_count",
+    "memory_legacy_item_count",
+    "memory_hot_context_state",
+    "memory_version",
+    "memory_receipt_content_free",
     "memory_writer_decision",
     "minecraft_snapshot_age_ms",
     "minecraft_snapshot_freshness",
@@ -159,6 +167,28 @@ def _round_ms(value: Any) -> float | None:
         return None
 
 
+def _int_or_none(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _memory_note_ids(value: Any) -> list[str] | None:
+    if not isinstance(value, (list, tuple)):
+        return None
+    note_ids = list(
+        dict.fromkeys(
+            cleaned
+            for item in value[:12]
+            if (cleaned := clean_text(str(item)))
+        )
+    )
+    return note_ids or []
+
+
 def _first_ms(*values: Any) -> float | None:
     for value in values:
         rounded = _round_ms(value)
@@ -220,6 +250,7 @@ def build_turn_summary_payload(
     marks = _as_mapping(metrics_map.get("marks"))
     context_meta = _as_mapping(meta.get("context_pipeline"))
     policy = _as_mapping(context_meta.get("policy"))
+    memory_receipt = _as_mapping(context_meta.get("memory_receipt"))
     p95 = _as_mapping(p95_summary)
     section_chars = context_meta.get("section_chars")
 
@@ -268,6 +299,14 @@ def build_turn_summary_payload(
         "context_message_count": context_meta.get("message_count"),
         "context_sections": context_meta.get("sections"),
         "context_section_chars": section_chars,
+        "memory_context_state": _clean_optional(memory_receipt.get("state")),
+        "memory_grounding_state": _clean_optional(memory_receipt.get("groundingState")),
+        "memory_supplied_note_ids": _memory_note_ids(memory_receipt.get("suppliedNoteIds")),
+        "memory_supplied_note_count": _int_or_none(memory_receipt.get("suppliedNoteCount")),
+        "memory_legacy_item_count": _int_or_none(memory_receipt.get("legacyItemCount")),
+        "memory_hot_context_state": _clean_optional(memory_receipt.get("hotContextState")),
+        "memory_version": _int_or_none(memory_receipt.get("memoryVersion")),
+        "memory_receipt_content_free": _bool_or_none(memory_receipt.get("contentFree")),
         "memory_writer_decision": meta.get("memory_writer_decision"),
         "minecraft_snapshot_age_ms": _round_ms(meta.get("minecraft_snapshot_age_ms")),
         "minecraft_snapshot_freshness": _clean_optional(meta.get("minecraft_snapshot_freshness")),

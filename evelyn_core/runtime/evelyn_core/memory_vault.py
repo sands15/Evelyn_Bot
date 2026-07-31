@@ -2937,6 +2937,51 @@ def recall_memory_vault(
         )
 
 
+def build_memory_recall_receipt(result: MemoryRecallResult) -> dict[str, Any]:
+    metadata = result.metadata if isinstance(result.metadata, dict) else {}
+    try:
+        version = int(metadata.get("memory_version", 0) or 0)
+    except (TypeError, ValueError):
+        version = 0
+    provenance = list(metadata.get("provenance") or []) if result.ok else []
+    note_ids = sorted(
+        {
+            clean_text(str(item.get("noteId") or ""))
+            for item in provenance
+            if isinstance(item, dict)
+            and clean_text(str(item.get("noteId") or ""))
+        }
+    )
+    source_type_counts: dict[str, int] = {}
+    for item in provenance:
+        if not isinstance(item, dict):
+            continue
+        source_type = clean_text(str(item.get("sourceType") or "unknown"))
+        source_type_counts[source_type] = source_type_counts.get(source_type, 0) + 1
+    state = "provided" if result.ok and result.context_text else ("empty" if result.ok else "unavailable")
+    return {
+        "schema": "memory.recall-receipt.v1",
+        "state": state,
+        "groundingState": (
+            "attributed"
+            if state == "provided" and note_ids
+            else "unattributed"
+            if state == "provided"
+            else "empty"
+            if state == "empty"
+            else "unavailable"
+        ),
+        "memoryVersion": version,
+        "retrievalMode": clean_text(str(metadata.get("retrieval_mode") or "unknown"))[:40],
+        "cacheHit": bool(metadata.get("cache_hit")) if result.ok else False,
+        "noteIds": note_ids,
+        "noteCount": len(note_ids),
+        "provenanceCount": len(provenance),
+        "sourceTypeCounts": dict(sorted(source_type_counts.items())),
+        "contentFree": True,
+    }
+
+
 def build_memory_vault_context(
     guild_id: int,
     user_text: str,
@@ -2947,6 +2992,7 @@ def build_memory_vault_context(
     context_focus: list[str] | None = None,
     max_items: int = 5,
     root: Path | None = None,
+    receipt: dict[str, Any] | None = None,
 ) -> str:
     request = MemoryRecallRequest(
         turn_id=f"memory-vault-{int(time.time() * 1000)}",
@@ -2962,18 +3008,67 @@ def build_memory_vault_context(
         },
     )
     result = recall_memory_vault(request, root=root)
-    if not result.ok or not result.context_text:
-        hot_context = read_memory_hot_context(root=root, max_chars=1200)
-        return f"[Pinned Memory Vault]\n{hot_context}" if hot_context else ""
-    cache_label = "hit" if result.metadata.get("cache_hit") else "miss"
-    version = result.metadata.get("memory_version", 0)
-    mode = clean_text(str(result.metadata.get("retrieval_mode") or "unknown"))
-    hot_context = read_memory_hot_context(root=root, max_chars=1200)
+    recall_receipt = build_memory_recall_receipt(result)
+    version = int(recall_receipt["memoryVersion"])
+    if result.ok:
+        hot_payload, hot_validation_state = _validated_memory_hot_context_payload(
+            root=root,
+            expected_memory_version=version,
+        )
+    else:
+        hot_payload, hot_validation_state = {}, "recall_unavailable"
+    hot_context = clean_text(str(hot_payload.get("content") or ""))
+    hot_note_ids = [
+        clean_text(str(item))
+        for item in (hot_payload.get("note_ids") or [])
+        if clean_text(str(item))
+    ]
+    hot_context_state = hot_validation_state
+    if hot_context and not hot_note_ids:
+        # Old hot-context files cannot prove which notes supplied their text.
+        # Omit them from live prompts until maintenance rebuilds the file.
+        hot_context = ""
+        hot_context_state = "unattributed"
+    elif hot_context:
+        hot_context_state = "provided"
+    elif hot_validation_state == "verified":
+        hot_context_state = "empty"
+
+    recall_note_ids = list(recall_receipt["noteIds"])
+
     parts = []
     if hot_context:
         parts.append("[Pinned Memory Vault]\n" + hot_context)
-    parts.append(result.context_text)
-    parts.append(f"[Memory Cache]\n- retrieval_cache: {cache_label}\n- retrieval_mode: {mode}\n- memory_version: {version}")
+    if result.ok and result.context_text:
+        parts.append(result.context_text)
+    supplied_note_ids = sorted(set(recall_note_ids) | set(hot_note_ids if hot_context else []))
+    if receipt is not None:
+        receipt.clear()
+        receipt.update(
+            {
+                "schema": "memory.vault-context-receipt.v1",
+                "state": "provided" if parts else ("empty" if result.ok else "unavailable"),
+                "groundingState": "attributed" if parts and supplied_note_ids else ("empty" if not parts else "unattributed"),
+                "memoryVersion": version,
+                "retrievalMode": recall_receipt["retrievalMode"],
+                "cacheHit": recall_receipt["cacheHit"],
+                "recallState": recall_receipt["state"],
+                "recallNoteIds": recall_note_ids,
+                "recallProvenanceCount": recall_receipt["provenanceCount"],
+                "sourceTypeCounts": recall_receipt["sourceTypeCounts"],
+                "hotContextState": hot_context_state,
+                "hotContextNoteIds": sorted(set(hot_note_ids)) if hot_context else [],
+                "suppliedNoteIds": supplied_note_ids,
+                "suppliedNoteCount": len(supplied_note_ids),
+                "contentFree": True,
+            }
+        )
+    if not parts:
+        return ""
+    cache_label = "hit" if result.metadata.get("cache_hit") else "miss"
+    mode = clean_text(str(result.metadata.get("retrieval_mode") or "unknown"))
+    if result.ok and result.context_text:
+        parts.append(f"[Memory Cache]\n- retrieval_cache: {cache_label}\n- retrieval_mode: {mode}\n- memory_version: {version}")
     return "\n\n".join(parts)
 
 
@@ -6416,11 +6511,17 @@ def refresh_memory_hot_context(
 
         block_lines: list[str] = []
         source_paths: list[str] = []
+        note_ids: list[str] = []
+        rendered_chars = 0
         for row in rows:
             snippet = _truncate_note(row, max_chars=360)
             if snippet:
                 block_lines.append(snippet)
-                source_paths.append(clean_text(str(row["rel_path"])))
+                separator_chars = 1 if rendered_chars else 0
+                if rendered_chars + separator_chars < max_chars:
+                    source_paths.append(clean_text(str(row["rel_path"])))
+                    note_ids.append(clean_text(str(row["note_id"])))
+                rendered_chars += separator_chars + len(snippet)
 
         content = "\n".join(block_lines)
         if len(content) > max_chars:
@@ -6438,11 +6539,13 @@ def refresh_memory_hot_context(
         ):
             content = ""
             source_paths = []
+            note_ids = []
         payload = {
             "memory_version": version,
             "created_at": time.time(),
             "content": content,
             "sources": source_paths,
+            "note_ids": note_ids,
             "deletion_journal_mtime_ns": deletion_journal_state[0],
             "deletion_journal_size": deletion_journal_state[1],
             "derivation_revocations_mtime_ns": (
@@ -6480,17 +6583,22 @@ def refresh_memory_hot_context(
     return payload
 
 
-def read_memory_hot_context(*, root: Path | None = None, max_chars: int = HOT_CONTEXT_MAX_CHARS) -> str:
+def _validated_memory_hot_context_payload(
+    *,
+    root: Path | None = None,
+    expected_memory_version: int | None = None,
+) -> tuple[dict[str, Any], str]:
     path = memory_index_dir(root) / "hot_context.json"
     if not path.exists():
-        return ""
+        return {}, "missing"
     try:
         payload = json.loads(path.read_text(encoding="utf-8", errors="ignore"))
     except Exception:
-        return ""
+        return {}, "malformed"
     if not isinstance(payload, dict):
-        return ""
+        return {}, "malformed"
     try:
+        cached_memory_version = int(payload.get("memory_version") or 0)
         cached_deletion_journal_mtime_ns = int(
             payload.get("deletion_journal_mtime_ns") or 0
         )
@@ -6508,19 +6616,33 @@ def read_memory_hot_context(*, root: Path | None = None, max_chars: int = HOT_CO
             or 0
         )
     except (TypeError, ValueError):
-        return ""
+        return {}, "malformed"
+    if expected_memory_version is not None and cached_memory_version != int(expected_memory_version):
+        return {}, "stale_memory_version"
     if (
-        (
-            cached_deletion_journal_mtime_ns,
-            cached_deletion_journal_size,
-        )
-        != _memory_deletion_journal_state(root)
-        or (
-            cached_derivation_revocations_mtime_ns,
-            cached_derivation_revocations_size,
-        )
-        != _memory_derivation_revocation_file_state(root)
-    ):
+        cached_deletion_journal_mtime_ns,
+        cached_deletion_journal_size,
+    ) != _memory_deletion_journal_state(root):
+        return {}, "stale_deletion_state"
+    if (
+        cached_derivation_revocations_mtime_ns,
+        cached_derivation_revocations_size,
+    ) != _memory_derivation_revocation_file_state(root):
+        return {}, "stale_derivation_state"
+    return payload, "verified"
+
+
+def read_memory_hot_context(
+    *,
+    root: Path | None = None,
+    max_chars: int = HOT_CONTEXT_MAX_CHARS,
+    expected_memory_version: int | None = None,
+) -> str:
+    payload, validation_state = _validated_memory_hot_context_payload(
+        root=root,
+        expected_memory_version=expected_memory_version,
+    )
+    if validation_state != "verified":
         return ""
     content = clean_text(str(payload.get("content") or ""))
     if len(content) > max_chars:
@@ -6678,6 +6800,7 @@ __all__ = [
     "apply_memory_provenance_backfill",
     "append_turn_rows_to_memory_vault",
     "bootstrap_memory_vault_source",
+    "build_memory_recall_receipt",
     "build_memory_vault_context",
     "ensure_memory_vault_layout",
     "export_memory_graph",
