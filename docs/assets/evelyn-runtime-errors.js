@@ -33,6 +33,24 @@
     return node;
   }
 
+  function formatDuration(value) {
+    const milliseconds = Number(value);
+    if (!Number.isFinite(milliseconds) || milliseconds < 0) return "측정 전";
+    if (milliseconds < 10) return `${milliseconds.toFixed(1)}ms`;
+    return `${Math.round(milliseconds)}ms`;
+  }
+
+  function commitDetail(source) {
+    const metrics = source && source.completedTurnCommit;
+    if (!metrics || metrics.schema !== "conversation_continuity.commit-metrics.v1") {
+      return "";
+    }
+    const sampleCount = Number(metrics.sampleCount) || 0;
+    if (!sampleCount) return "내구 커밋 지연 측정 전";
+    const prefix = metrics.state === "warning" ? "내구 커밋 지연 경고" : "내구 커밋 지연";
+    return `${prefix} · p50 ${formatDuration(metrics.p50Ms)} · p95 ${formatDuration(metrics.p95Ms)} · ${sampleCount}개`;
+  }
+
   function renderUnavailable() {
     mount.replaceChildren();
     const summary = element("div", "runtime-errors-summary");
@@ -55,7 +73,21 @@
       const errorType = source.lastErrorType ? ` · ${source.lastErrorType}` : "";
       return `${source.lastErrorCode}${errorType} · ${formatTime(source.lastErrorAt)}`;
     }
+    const commit = commitDetail(source);
+    if (commit) return commit;
     return "기록된 오류 없음";
+  }
+
+  function sourceValue(source) {
+    const metrics = source && source.completedTurnCommit;
+    if (
+      metrics &&
+      metrics.schema === "conversation_continuity.commit-metrics.v1" &&
+      Number(metrics.sampleCount) > 0
+    ) {
+      return `p95 ${formatDuration(metrics.p95Ms)}`;
+    }
+    return `${Number(source.errorCount) || 0}회`;
   }
 
   function render(payload) {
@@ -90,7 +122,7 @@
       );
       row.append(
         sourceCopy,
-        element("span", "runtime-errors-source-value", `${Number(source.errorCount) || 0}회`)
+        element("span", "runtime-errors-source-value", sourceValue(source))
       );
       sourceList.append(row);
     }

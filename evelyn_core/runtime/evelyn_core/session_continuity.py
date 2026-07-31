@@ -22,6 +22,9 @@ SESSION_CONTINUITY_HEAD_SCHEMA = (
     "conversation_continuity.checkpoint-head.v1"
 )
 SESSION_CONTINUITY_STATUS_SCHEMA = "conversation_continuity.status.v1"
+SESSION_CONTINUITY_COMMIT_METRICS_SCHEMA = (
+    "conversation_continuity.commit-metrics.v1"
+)
 SESSION_CONTINUITY_REVOCATIONS_SCHEMA = (
     "conversation_continuity.guild_revocations.v1"
 )
@@ -32,6 +35,9 @@ DEFAULT_MAX_HISTORY_ITEMS = 12
 DEFAULT_MAX_CONTENT_CHARS = 2000
 DEFAULT_MAX_FILE_BYTES = 1024 * 1024
 DEFAULT_MAX_GUILD_REVOCATIONS = 256
+DEFAULT_COMMIT_LATENCY_WARNING_MS = 100.0
+DEFAULT_COMMIT_LATENCY_WARNING_MIN_SAMPLES = 20
+DEFAULT_COMMIT_LATENCY_SAMPLE_LIMIT = 256
 SESSION_CONTINUITY_CHAIN_GENESIS = "0" * 64
 _ALLOWED_HISTORY_ROLES = frozenset({"user", "assistant"})
 _ALLOWED_SPEAKERS = frozenset({"user", "assistant"})
@@ -162,6 +168,16 @@ class SessionContinuityCheckpoint:
         max_file_bytes: int = DEFAULT_MAX_FILE_BYTES,
         wall_time: Callable[[], float] = time.time,
         monotonic: Callable[[], float] = time.monotonic,
+        commit_latency_clock: Callable[[], float] = time.perf_counter,
+        commit_latency_warning_ms: float = (
+            DEFAULT_COMMIT_LATENCY_WARNING_MS
+        ),
+        commit_latency_warning_min_samples: int = (
+            DEFAULT_COMMIT_LATENCY_WARNING_MIN_SAMPLES
+        ),
+        commit_latency_sample_limit: int = (
+            DEFAULT_COMMIT_LATENCY_SAMPLE_LIMIT
+        ),
         log: Callable[[str], Any] | None = None,
     ) -> None:
         self.store = store
@@ -186,6 +202,22 @@ class SessionContinuityCheckpoint:
         self.max_file_bytes = max(4096, int(max_file_bytes))
         self.wall_time = wall_time
         self.monotonic = monotonic
+        self.commit_latency_clock = commit_latency_clock
+        self.commit_latency_warning_ms = max(
+            1.0,
+            _finite_float(
+                commit_latency_warning_ms,
+                DEFAULT_COMMIT_LATENCY_WARNING_MS,
+            ),
+        )
+        self.commit_latency_warning_min_samples = max(
+            1,
+            int(commit_latency_warning_min_samples),
+        )
+        self.commit_latency_sample_limit = max(
+            self.commit_latency_warning_min_samples,
+            int(commit_latency_sample_limit),
+        )
         self.log = log
         self.runtime_errors = RuntimeErrorCounter(now=wall_time)
         self._lock = threading.RLock()
@@ -201,6 +233,13 @@ class SessionContinuityCheckpoint:
         self._checkpoint_integrity = "unknown"
         self._checkpoint_generation = 0
         self._checkpoint_head_state = "missing"
+        self._commit_attempt_count = 0
+        self._commit_success_count = 0
+        self._commit_failure_count = 0
+        self._commit_latency_samples_ms: list[float] = []
+        self._commit_last_ms: float | None = None
+        self._commit_last_at: float | None = None
+        self._commit_last_succeeded: bool | None = None
 
     def _emit(self, message: str) -> None:
         if self.log is not None:
@@ -383,8 +422,99 @@ class SessionContinuityCheckpoint:
                 "rawAudio": False,
                 "partialTranscript": False,
             },
+            "completedTurnCommit": self._commit_metrics(),
             **self.runtime_errors.snapshot(),
         }
+
+    @staticmethod
+    def _percentile(
+        samples: list[float],
+        percentile: float,
+    ) -> float | None:
+        if not samples:
+            return None
+        ordered = sorted(samples)
+        rank = max(
+            0,
+            min(
+                len(ordered) - 1,
+                math.ceil(float(percentile) * len(ordered)) - 1,
+            ),
+        )
+        return round(ordered[rank], 3)
+
+    def _commit_metrics(self) -> dict[str, Any]:
+        samples = self._commit_latency_samples_ms
+        p50_ms = self._percentile(samples, 0.50)
+        p95_ms = self._percentile(samples, 0.95)
+        if self._commit_last_succeeded is False:
+            state = "error"
+            warning_code = "conversation_continuity_commit_failed"
+        elif len(samples) < self.commit_latency_warning_min_samples:
+            state = "warming" if samples else "idle"
+            warning_code = ""
+        elif (
+            p95_ms is not None
+            and p95_ms > self.commit_latency_warning_ms
+        ):
+            state = "warning"
+            warning_code = (
+                "conversation_continuity_commit_latency_high"
+            )
+        else:
+            state = "ready"
+            warning_code = ""
+        return {
+            "schema": SESSION_CONTINUITY_COMMIT_METRICS_SCHEMA,
+            "state": state,
+            "attemptCount": self._commit_attempt_count,
+            "successCount": self._commit_success_count,
+            "failureCount": self._commit_failure_count,
+            "sampleCount": len(samples),
+            "lastMs": self._commit_last_ms,
+            "p50Ms": p50_ms,
+            "p95Ms": p95_ms,
+            "maxMs": (
+                round(max(samples), 3)
+                if samples
+                else None
+            ),
+            "lastAt": self._commit_last_at,
+            "lastSucceeded": self._commit_last_succeeded,
+            "warningThresholdMs": (
+                self.commit_latency_warning_ms
+            ),
+            "warningCode": warning_code,
+        }
+
+    def _record_commit_attempt(
+        self,
+        *,
+        started_at: float,
+        succeeded: bool,
+    ) -> None:
+        try:
+            elapsed_ms = max(
+                0.0,
+                (float(self.commit_latency_clock()) - started_at)
+                * 1000.0,
+            )
+        except (OverflowError, TypeError, ValueError):
+            elapsed_ms = 0.0
+        self._commit_attempt_count += 1
+        self._commit_last_ms = round(elapsed_ms, 3)
+        self._commit_last_at = self.wall_time()
+        self._commit_last_succeeded = bool(succeeded)
+        if succeeded:
+            self._commit_success_count += 1
+            self._commit_latency_samples_ms.append(
+                self._commit_last_ms
+            )
+            del self._commit_latency_samples_ms[
+                : -self.commit_latency_sample_limit
+            ]
+        else:
+            self._commit_failure_count += 1
 
     def _load_checkpoint_head(self) -> dict[str, Any] | None:
         path = self.head_path
@@ -1114,16 +1244,32 @@ class SessionContinuityCheckpoint:
 
     def commit_completed_turn(self) -> dict[str, Any]:
         """Durably anchor a completed user/assistant turn before returning."""
-        status = self.flush(force=True)
-        if (
-            status.get("state") == "error"
-            or status.get("rollbackProtected") is not True
-            or int(status.get("persistedSessionCount") or 0) < 1
-        ):
-            raise RuntimeError(
-                "conversation_continuity_commit_failed"
+        started_at = float(self.commit_latency_clock())
+        try:
+            status = self.flush(force=True)
+            if (
+                status.get("state") == "error"
+                or status.get("rollbackProtected") is not True
+                or int(status.get("persistedSessionCount") or 0) < 1
+            ):
+                raise RuntimeError(
+                    "conversation_continuity_commit_failed"
+                )
+        except Exception:
+            with self._lock:
+                self._record_commit_attempt(
+                    started_at=started_at,
+                    succeeded=False,
+                )
+                self._write_status()
+            raise
+        with self._lock:
+            self._record_commit_attempt(
+                started_at=started_at,
+                succeeded=True,
             )
-        return status
+            self._write_status()
+            return self.status()
 
     async def commit_completed_turn_async(
         self,
@@ -1150,10 +1296,14 @@ class SessionContinuityCheckpoint:
 
 
 __all__ = [
+    "DEFAULT_COMMIT_LATENCY_SAMPLE_LIMIT",
+    "DEFAULT_COMMIT_LATENCY_WARNING_MIN_SAMPLES",
+    "DEFAULT_COMMIT_LATENCY_WARNING_MS",
     "DEFAULT_FLUSH_INTERVAL_SEC",
     "DEFAULT_MAX_AGE_SEC",
     "SESSION_CONTINUITY_CHAIN_GENESIS",
     "SESSION_CONTINUITY_CHECKPOINT_SCHEMA",
+    "SESSION_CONTINUITY_COMMIT_METRICS_SCHEMA",
     "SESSION_CONTINUITY_HEAD_SCHEMA",
     "SESSION_CONTINUITY_LEGACY_CHECKPOINT_SCHEMA",
     "SESSION_CONTINUITY_REVOCATIONS_SCHEMA",

@@ -56,6 +56,7 @@ class SessionContinuityTests(unittest.TestCase):
         *,
         system_prompt: str = "current system prompt",
         max_age_sec: float = 900.0,
+        **kwargs,
     ) -> SessionContinuityCheckpoint:
         return SessionContinuityCheckpoint(
             store=store,
@@ -65,6 +66,7 @@ class SessionContinuityTests(unittest.TestCase):
             max_age_sec=max_age_sec,
             wall_time=clock.wall_time,
             monotonic=clock.monotonic_time,
+            **kwargs,
         )
 
     def populated_store(self) -> SessionStateStore:
@@ -214,6 +216,55 @@ class SessionContinuityTests(unittest.TestCase):
         self.assertEqual(status["persistedSessionCount"], 1)
         self.assertTrue(self.checkpoint_path.exists())
         self.assertTrue(manager.head_path.exists())
+        commit_metrics = status["completedTurnCommit"]
+        self.assertEqual(commit_metrics["attemptCount"], 1)
+        self.assertEqual(commit_metrics["successCount"], 1)
+        self.assertEqual(commit_metrics["failureCount"], 0)
+        self.assertEqual(commit_metrics["sampleCount"], 1)
+        self.assertTrue(commit_metrics["lastSucceeded"])
+        self.assertEqual(commit_metrics["state"], "warming")
+
+    def test_completed_turn_commit_reports_content_free_latency_warning(
+        self,
+    ) -> None:
+        clock = FakeClock(wall=1000.0, monotonic=100.0)
+        ticks = iter(
+            value
+            for index in range(20)
+            for value in (float(index), float(index) + 0.12)
+        )
+        manager = self.manager(
+            self.populated_store(),
+            clock,
+            commit_latency_clock=lambda: next(ticks),
+            commit_latency_warning_ms=100.0,
+            commit_latency_warning_min_samples=20,
+        )
+
+        for _ in range(20):
+            status = manager.commit_completed_turn()
+
+        metrics = status["completedTurnCommit"]
+        self.assertEqual(metrics["attemptCount"], 20)
+        self.assertEqual(metrics["successCount"], 20)
+        self.assertEqual(metrics["failureCount"], 0)
+        self.assertEqual(metrics["sampleCount"], 20)
+        self.assertAlmostEqual(metrics["p50Ms"], 120.0)
+        self.assertAlmostEqual(metrics["p95Ms"], 120.0)
+        self.assertEqual(metrics["state"], "warning")
+        self.assertEqual(
+            metrics["warningCode"],
+            "conversation_continuity_commit_latency_high",
+        )
+        serialized = json.dumps(status)
+        self.assertNotIn("재시작 뒤에도", serialized)
+        persisted_status = json.loads(
+            self.status_path.read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            persisted_status["completedTurnCommit"],
+            metrics,
+        )
 
     def test_completed_turn_commit_raises_fixed_error_on_failure(
         self,
@@ -237,6 +288,16 @@ class SessionContinuityTests(unittest.TestCase):
 
         status = manager.status()
         self.assertEqual(status["state"], "error")
+        commit_metrics = status["completedTurnCommit"]
+        self.assertEqual(commit_metrics["attemptCount"], 1)
+        self.assertEqual(commit_metrics["successCount"], 0)
+        self.assertEqual(commit_metrics["failureCount"], 1)
+        self.assertFalse(commit_metrics["lastSucceeded"])
+        self.assertEqual(commit_metrics["state"], "error")
+        self.assertEqual(
+            commit_metrics["warningCode"],
+            "conversation_continuity_commit_failed",
+        )
         self.assertNotIn(
             "continuity-secret",
             json.dumps(status),

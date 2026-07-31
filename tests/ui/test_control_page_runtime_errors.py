@@ -25,6 +25,9 @@ class ControlPageRuntimeErrorsTests(unittest.TestCase):
         source = JS.read_text(encoding="utf-8")
         self.assertIn("/api/control-page/runtime-errors", source)
         self.assertIn("메시지·스택·파일 경로는 수집하지 않습니다.", source)
+        self.assertIn("conversation_continuity.commit-metrics.v1", source)
+        self.assertIn("p50", source)
+        self.assertIn("p95", source)
         self.assertNotIn('method: "POST"', source)
         self.assertNotIn("lastError\"", source)
 

@@ -28,6 +28,8 @@ _KNOWN_ERROR_CODES = frozenset(
         "control_page_start_failed",
         "control_tts_failed",
         "conversation_continuity_checkpoint_rejected",
+        "conversation_continuity_commit_failed",
+        "conversation_continuity_commit_latency_high",
         "conversation_continuity_flush_failed",
         "conversation_continuity_guild_reset_failed",
         "conversation_continuity_guild_reset_finalize_failed",
@@ -226,6 +228,46 @@ def _unavailable_source(spec: dict[str, Any], *, state: str) -> dict[str, Any]:
     }
 
 
+def _safe_continuity_commit_metrics(
+    value: Any,
+) -> dict[str, Any] | None:
+    if (
+        not isinstance(value, Mapping)
+        or value.get("schema")
+        != "conversation_continuity.commit-metrics.v1"
+    ):
+        return None
+    state = str(value.get("state") or "").strip().lower()
+    if state not in {"idle", "warming", "ready", "warning", "error"}:
+        return None
+    warning_code = sanitize_runtime_error_code(
+        value.get("warningCode"),
+        fallback="",
+    )
+    return {
+        "schema": "conversation_continuity.commit-metrics.v1",
+        "state": state,
+        "attemptCount": _safe_count(value.get("attemptCount")),
+        "successCount": _safe_count(value.get("successCount")),
+        "failureCount": _safe_count(value.get("failureCount")),
+        "sampleCount": _safe_count(value.get("sampleCount")),
+        "lastMs": _safe_number(value.get("lastMs")),
+        "p50Ms": _safe_number(value.get("p50Ms")),
+        "p95Ms": _safe_number(value.get("p95Ms")),
+        "maxMs": _safe_number(value.get("maxMs")),
+        "lastAt": _safe_number(value.get("lastAt")),
+        "lastSucceeded": (
+            value.get("lastSucceeded")
+            if isinstance(value.get("lastSucceeded"), bool)
+            else None
+        ),
+        "warningThresholdMs": _safe_number(
+            value.get("warningThresholdMs")
+        ),
+        "warningCode": warning_code,
+    }
+
+
 def _read_source(
     root: Path,
     spec: dict[str, Any],
@@ -264,22 +306,46 @@ def _read_source(
                 in {"error", "down", "degraded"}
             )
         )
+        commit_metrics = (
+            _safe_continuity_commit_metrics(
+                payload.get("completedTurnCommit")
+            )
+            if spec["id"] == "conversationContinuity"
+            else None
+        )
+        commit_warning = bool(
+            commit_metrics
+            and commit_metrics["state"] == "warning"
+            and commit_metrics["warningCode"]
+            == "conversation_continuity_commit_latency_high"
+            and not stale
+        )
+        source_state = "stale" if stale else (
+            "degraded" if commit_warning else "ready"
+        )
+        source = {
+            "id": spec["id"],
+            "label": spec["label"],
+            "state": source_state,
+            "available": True,
+            "stale": stale,
+            "heartbeatAt": heartbeat_at,
+            "errorCount": error_count,
+            "lastErrorAt": last_error_at,
+            "lastErrorCode": last_error_code,
+            "lastErrorType": last_error_type,
+            "errorCounters": counters,
+            "hasCurrentError": has_current_error,
+        }
+        if commit_metrics is not None:
+            source["completedTurnCommit"] = commit_metrics
         return (
-            {
-                "id": spec["id"],
-                "label": spec["label"],
-                "state": "stale" if stale else "ready",
-                "available": True,
-                "stale": stale,
-                "heartbeatAt": heartbeat_at,
-                "errorCount": error_count,
-                "lastErrorAt": last_error_at,
-                "lastErrorCode": last_error_code,
-                "lastErrorType": last_error_type,
-                "errorCounters": counters,
-                "hasCurrentError": has_current_error,
-            },
-            None,
+            source,
+            (
+                "conversation_continuity_commit_latency_high"
+                if commit_warning
+                else None
+            ),
         )
     except (OSError, OverflowError, TypeError, ValueError) as exc:
         return (
@@ -411,7 +477,11 @@ def collect_runtime_error_observability(
     )
     if current_error_count:
         state = "error"
-    elif recent_errors:
+    elif recent_errors or any(
+        warning["code"]
+        == "conversation_continuity_commit_latency_high"
+        for warning in warnings
+    ):
         state = "attention"
     elif available_count and stale_count < available_count:
         state = "clear"

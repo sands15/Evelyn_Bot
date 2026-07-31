@@ -265,6 +265,114 @@ class RuntimeErrorObservabilityTests(unittest.TestCase):
         )
         self.assertNotIn("private", json.dumps(summary))
 
+    def test_continuity_commit_latency_warning_is_projected_privately(
+        self,
+    ) -> None:
+        write_status(
+            self.root,
+            "conversation_continuity/status.json",
+            {
+                "schema": "conversation_continuity.status.v1",
+                "state": "ready",
+                "heartbeatAt": self.now,
+                "errorCount": 0,
+                "lastErrorAt": None,
+                "lastErrorCode": "",
+                "lastErrorType": "",
+                "errorCounters": {},
+                "completedTurnCommit": {
+                    "schema": (
+                        "conversation_continuity.commit-metrics.v1"
+                    ),
+                    "state": "warning",
+                    "attemptCount": 20,
+                    "successCount": 20,
+                    "failureCount": 0,
+                    "sampleCount": 20,
+                    "lastMs": 140.0,
+                    "p50Ms": 80.0,
+                    "p95Ms": 125.0,
+                    "maxMs": 140.0,
+                    "lastAt": self.now - 1,
+                    "lastSucceeded": True,
+                    "warningThresholdMs": 100.0,
+                    "warningCode": (
+                        "conversation_continuity_commit_latency_high"
+                    ),
+                    "privateMessage": "C:\\private\\turn",
+                },
+            },
+        )
+
+        summary = collect_runtime_error_observability(
+            artifacts_root=self.root,
+            now=self.now,
+        )
+
+        source = summary["sources"]["conversationContinuity"]
+        self.assertEqual(summary["state"], "attention")
+        self.assertEqual(source["state"], "degraded")
+        self.assertEqual(
+            source["completedTurnCommit"]["p95Ms"],
+            125.0,
+        )
+        self.assertEqual(
+            summary["warnings"],
+            [
+                {
+                    "source": "conversationContinuity",
+                    "code": (
+                        "conversation_continuity_commit_latency_high"
+                    ),
+                }
+            ],
+        )
+        self.assertNotIn("private", json.dumps(summary))
+
+    def test_stale_continuity_latency_does_not_raise_current_warning(
+        self,
+    ) -> None:
+        write_status(
+            self.root,
+            "conversation_continuity/status.json",
+            {
+                "schema": "conversation_continuity.status.v1",
+                "state": "ready",
+                "heartbeatAt": self.now - 10,
+                "errorCount": 0,
+                "lastErrorAt": None,
+                "lastErrorCode": "",
+                "lastErrorType": "",
+                "errorCounters": {},
+                "completedTurnCommit": {
+                    "schema": (
+                        "conversation_continuity.commit-metrics.v1"
+                    ),
+                    "state": "warning",
+                    "attemptCount": 20,
+                    "successCount": 20,
+                    "failureCount": 0,
+                    "sampleCount": 20,
+                    "p95Ms": 125.0,
+                    "lastSucceeded": True,
+                    "warningThresholdMs": 100.0,
+                    "warningCode": (
+                        "conversation_continuity_commit_latency_high"
+                    ),
+                },
+            },
+        )
+
+        summary = collect_runtime_error_observability(
+            artifacts_root=self.root,
+            now=self.now,
+        )
+
+        source = summary["sources"]["conversationContinuity"]
+        self.assertEqual(summary["state"], "unknown")
+        self.assertEqual(source["state"], "stale")
+        self.assertEqual(summary["warnings"], [])
+
 
 if __name__ == "__main__":
     unittest.main()
