@@ -228,6 +228,10 @@ def _fast_memory_context_receipt(
         "sourceTypeCounts": source_type_counts,
         "legacyItemCounts": {},
         "legacyItemCount": 0,
+        "legacyAttributedItemCount": 0,
+        "legacyUnattributedItemCount": 0,
+        "legacyEvidenceIds": [],
+        "legacySourceTurnIds": [],
         "contentFree": True,
     }
 

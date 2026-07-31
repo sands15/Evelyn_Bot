@@ -371,12 +371,17 @@ note ID가 없는 과거 hot-context는 prompt에서 제외한다. Discord/Main 
 summary와 Fast Control 일반·stream 응답은 이 receipt를 노출하며 “제공됨”과
 “모델이 실제 사용함”을 구분한다.
 
-다만 기존 rolling summary, raw/facts/questions 계층에는 stable evidence ID가
-없다. 이 항목들이 prompt에 함께 들어간 턴은 receipt가 `partial` 또는
-`unattributed`로 명시하지만, 아직 개별 원문 턴까지 구조적으로 역추적할 수는
-없다. 이를 숨기기 위해 vault note ID로 거짓 귀속하지 않는다. 다음 개선은
-legacy memory row에 content-free stable ID와 source-turn linkage를 부여하고,
-마이그레이션되지 않은 요약의 주입 정책을 별도로 결정하는 것이다.
+새로 저장되는 raw 대화 row는 content-free stable evidence ID와 source turn
+ID를 guild/room/person/session scope에 동일하게 보존한다. Prompt에 실제 선택된
+row만 receipt와 turn summary에 기록하므로 이후 턴에서 어느 원문 turn이
+제공됐는지 역추적할 수 있다. 기존 raw row는 내용을 이용해 ID를 소급 추론하지
+않고 `unattributed`로 남긴다.
+
+다만 rolling summary와 facts/questions에는 아직 source evidence linkage가 없다.
+이 항목들이 prompt에 함께 들어간 턴은 receipt가 `partial` 또는 `unattributed`로
+명시하며 vault note ID로 거짓 귀속하지 않는다. 다음 개선은 summary sidecar와
+새 derived row에 실제 summary-LLM 입력 evidence ID를 묶고, 마이그레이션되지
+않은 요약의 주입 정책을 별도로 결정하는 것이다.
 
 남은 위험은 coverage와 correction이 구조적 근거 연결만 다루며 기억 내용이나
 사용자의 선택이 사실임을 보증하지 않는다는 점이다. hash chain과 head는

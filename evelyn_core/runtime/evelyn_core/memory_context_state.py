@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from .cognitive_policy_state import read_layered_cognitive_state
@@ -99,6 +100,18 @@ def build_memory_context_payload(
     )
 
 
+def _conversation_turn_evidence(row: dict[str, Any]) -> tuple[str, str] | None:
+    if clean_text(str(row.get("evidence_kind") or "")) != "conversation_turn":
+        return None
+    evidence_id = clean_text(str(row.get("evidence_id") or ""))[:120]
+    source_turn_id = clean_text(str(row.get("source_turn_id") or ""))[:80]
+    if not re.fullmatch(r"[A-Za-z0-9._:-]+", evidence_id):
+        return None
+    if not re.fullmatch(r"[A-Za-z0-9._:-]+", source_turn_id):
+        return None
+    return evidence_id, source_turn_id
+
+
 def build_memory_context(
     guild_id: int,
     user_text: str,
@@ -166,34 +179,47 @@ def build_memory_context(
         vault_raw_rows=vault_raw_rows,
     )
     summary_count = sum(1 for layer in layers.values() if layer.get("summary"))
-    session_raw_count = len(
-        merge_recent_memory_rows(
-            *(layer["raw"] for layer in (layers.get("session"),) if layer),
-            limit=4,
-        )
+    session_rows = merge_recent_memory_rows(
+        *(layer["raw"] for layer in (layers.get("session"),) if layer),
+        limit=4,
     )
-    person_raw_count = len(
-        merge_recent_memory_rows(
-            *(layer["raw"] for layer in (layers.get("person"),) if layer),
-            limit=4,
-        )
+    person_rows = merge_recent_memory_rows(
+        *(layer["raw"] for layer in (layers.get("person"),) if layer),
+        limit=4,
     )
-    room_raw_count = len(
-        merge_recent_memory_rows(
-            *(layer["raw"] for layer in (layers.get("room"), layers.get("guild")) if layer),
-            limit=MEMORY_RAW_CONTEXT_LIMIT,
-        )
+    room_rows = merge_recent_memory_rows(
+        *(layer["raw"] for layer in (layers.get("room"), layers.get("guild")) if layer),
+        limit=MEMORY_RAW_CONTEXT_LIMIT,
     )
     legacy_counts = {
         "summaries": summary_count,
-        "sessionRaw": session_raw_count,
-        "personRaw": person_raw_count,
-        "roomRaw": room_raw_count,
+        "sessionRaw": len(session_rows),
+        "personRaw": len(person_rows),
+        "roomRaw": len(room_rows),
         "vaultRaw": len(vault_raw_rows),
         "facts": len(facts),
         "questions": len(questions),
     }
     legacy_item_count = sum(legacy_counts.values())
+    legacy_evidence = [
+        evidence
+        for row in [
+            *session_rows,
+            *person_rows,
+            *room_rows,
+            *vault_raw_rows,
+            *facts,
+            *questions,
+        ]
+        if (evidence := _conversation_turn_evidence(row)) is not None
+    ]
+    legacy_attributed_item_count = len(legacy_evidence)
+    legacy_unattributed_item_count = max(
+        0,
+        legacy_item_count - legacy_attributed_item_count,
+    )
+    legacy_evidence_ids = sorted({item[0] for item in legacy_evidence})
+    legacy_source_turn_ids = sorted({item[1] for item in legacy_evidence})
     supplied_note_ids = sorted(
         {
             clean_text(str(item))
@@ -201,13 +227,20 @@ def build_memory_context(
             if clean_text(str(item))
         }
     )
+    attributed_component_count = legacy_attributed_item_count
+    unattributed_component_count = legacy_unattributed_item_count
+    if vault_context:
+        if supplied_note_ids:
+            attributed_component_count += 1
+        else:
+            unattributed_component_count += 1
+    if context and attributed_component_count == 0 and unattributed_component_count == 0:
+        unattributed_component_count = 1
     if not context:
         grounding_state = "empty"
-    elif legacy_item_count and supplied_note_ids:
+    elif attributed_component_count and unattributed_component_count:
         grounding_state = "partial"
-    elif legacy_item_count:
-        grounding_state = "unattributed"
-    elif supplied_note_ids:
+    elif attributed_component_count:
         grounding_state = "attributed"
     else:
         grounding_state = "unattributed"
@@ -228,6 +261,10 @@ def build_memory_context(
                 "sourceTypeCounts": dict(vault_receipt.get("sourceTypeCounts") or {}),
                 "legacyItemCounts": legacy_counts,
                 "legacyItemCount": legacy_item_count,
+                "legacyAttributedItemCount": legacy_attributed_item_count,
+                "legacyUnattributedItemCount": legacy_unattributed_item_count,
+                "legacyEvidenceIds": legacy_evidence_ids,
+                "legacySourceTurnIds": legacy_source_turn_ids,
                 "contentFree": True,
             }
         )

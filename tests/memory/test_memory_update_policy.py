@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 
 REPO_ROOT = next(path for path in Path(__file__).resolve().parents if (path / "main.py").exists())
@@ -22,6 +23,7 @@ from evelyn_core.memory_update_policy import (  # noqa: E402
     should_run_memory_update,
     write_memory_turn_records,
 )
+from evelyn_core.memory_update_runtime import schedule_memory_update_from_runtime  # noqa: E402
 
 
 class MemoryUpdatePolicyTests(unittest.TestCase):
@@ -45,6 +47,29 @@ class MemoryUpdatePolicyTests(unittest.TestCase):
             memory_scope_labels(room_key="r", person_key="p", session_memory_key="s"),
             ["guild", "room:r", "person:p", "session:s"],
         )
+
+    def test_memory_turn_rows_add_content_free_turn_evidence_when_available(self) -> None:
+        rows = build_memory_turn_rows(
+            user_text="private user text",
+            answer="private assistant text",
+            source="voice",
+            turn_id="abc123def456",
+        )
+
+        self.assertEqual(rows[0]["evidence_id"], "turn:abc123def456:user")
+        self.assertEqual(rows[1]["evidence_id"], "turn:abc123def456:assistant")
+        self.assertTrue(all(row["source_turn_id"] == "abc123def456" for row in rows))
+        self.assertTrue(all(row["evidence_kind"] == "conversation_turn" for row in rows))
+        evidence = str(
+            [
+                {
+                    key: row[key]
+                    for key in ("evidence_id", "source_turn_id", "evidence_kind")
+                }
+                for row in rows
+            ]
+        )
+        self.assertNotIn("private", evidence)
 
     def test_explicit_fact_or_question_runs_memory_update(self) -> None:
         self.assertTrue(
@@ -141,6 +166,7 @@ class MemoryUpdatePolicyTests(unittest.TestCase):
             source="text",
             user_speaker="정훈",
             assistant_speaker="이블린",
+            turn_id="turn-write-1",
             record_identity_turn=record_identity,
             append_raw_rows=lambda *args, **kwargs: raw_calls.append((args, kwargs)),
             append_vault_rows=lambda *args, **kwargs: vault_calls.append((args, kwargs)),
@@ -150,6 +176,7 @@ class MemoryUpdatePolicyTests(unittest.TestCase):
         self.assertEqual(result.memory_answer, "응")
         self.assertTrue(result.vault_mirrored)
         self.assertEqual(result.identity_record_decision["source"], "text")
+        self.assertEqual(result.rows[0]["evidence_id"], "turn:turn-write-1:user")
         self.assertEqual(len(raw_calls), 4)
         self.assertEqual(raw_calls[0][0][:2], (123, result.rows))
         self.assertEqual(raw_calls[1][1]["scope_type"], "room")
@@ -175,6 +202,61 @@ class MemoryUpdatePolicyTests(unittest.TestCase):
 
         self.assertFalse(result.vault_mirrored)
         self.assertIn("[MEMORY VAULT] daily mirror failed:", logs[0])
+
+    def test_schedule_passes_turn_scope_id_into_raw_memory_records(self) -> None:
+        captured = {}
+
+        def write_records(*_args, **kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(
+                memory_user_text="user",
+                memory_answer="answer",
+                vault_mirrored=True,
+                identity_record_decision={},
+            )
+
+        deps = SimpleNamespace(
+            write_memory_turn_records=write_records,
+            vision_memory_write_enabled=False,
+            record_self_identity_turn=lambda *_args, **_kwargs: {},
+            append_raw_transcript_rows=lambda *_args, **_kwargs: None,
+            append_turn_rows_to_memory_vault=lambda *_args, **_kwargs: None,
+            schedule_memory_vault_maintenance=lambda *_args, **_kwargs: None,
+            memory_refresh_inputs_for_turn=lambda **_kwargs: SimpleNamespace(),
+            get_conversation_history=lambda **_kwargs: [],
+            session_last_active_at={},
+            needs_search_or_deep_routing=lambda *_args, **_kwargs: False,
+            build_memory_writer_decision_for_turn=lambda **_kwargs: SimpleNamespace(),
+            build_memory_writer_decision=lambda *_args, **_kwargs: None,
+            build_memory_writer_decision_payload=lambda *_args, **_kwargs: {},
+            plan_memory_writebehind_schedule=lambda *_args, **_kwargs: SimpleNamespace(
+                action="skip",
+                status="skipped",
+                writebehind_reason="test",
+            ),
+            runtime_session_key=lambda *_args, **_kwargs: None,
+            memory_writebehind_task_key=lambda *_args, **_kwargs: None,
+            should_replace_existing_memory_task=lambda *_args, **_kwargs: False,
+            mark_memory_writer_status=lambda *_args, **_kwargs: None,
+            memory_writebehind_status_log=None,
+            background_memory_tasks={},
+            create_turn_scoped_task=lambda *_args, **_kwargs: None,
+            run_memory_writebehind_steps=lambda *_args, **_kwargs: None,
+            update_long_term_memory=lambda *_args, **_kwargs: None,
+            update_cognitive_state=lambda *_args, **_kwargs: None,
+            log=lambda *_args, **_kwargs: None,
+        )
+
+        schedule_memory_update_from_runtime(
+            123,
+            "user",
+            "answer",
+            deps=deps,
+            turn_scope=SimpleNamespace(turn_id="turn-scope-42"),
+            runtime_mode="realtime",
+        )
+
+        self.assertEqual(captured["turn_id"], "turn-scope-42")
 
     def test_memory_writer_decision_payload_adds_runtime_metadata(self) -> None:
         class Decision:

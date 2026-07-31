@@ -30,6 +30,8 @@ class TurnTraceSummaryTests(unittest.TestCase):
             "memory_context_state",
             "memory_grounding_state",
             "memory_supplied_note_ids",
+            "memory_legacy_evidence_ids",
+            "memory_legacy_source_turn_ids",
             "memory_receipt_content_free",
             "memory_writer_decision",
             "minecraft_snapshot_freshness",
@@ -72,6 +74,10 @@ class TurnTraceSummaryTests(unittest.TestCase):
                             "suppliedNoteIds": ["note-2", "note-1", "note-2"],
                             "suppliedNoteCount": 2,
                             "legacyItemCount": 3,
+                            "legacyAttributedItemCount": 2,
+                            "legacyUnattributedItemCount": 1,
+                            "legacyEvidenceIds": ["turn:a:user", "turn:a:assistant"],
+                            "legacySourceTurnIds": ["a"],
                             "hotContextState": "provided",
                             "memoryVersion": 7,
                             "contentFree": True,
@@ -105,6 +111,13 @@ class TurnTraceSummaryTests(unittest.TestCase):
         self.assertEqual(payload["memory_supplied_note_ids"], ["note-2", "note-1"])
         self.assertEqual(payload["memory_supplied_note_count"], 2)
         self.assertEqual(payload["memory_legacy_item_count"], 3)
+        self.assertEqual(payload["memory_legacy_attributed_item_count"], 2)
+        self.assertEqual(payload["memory_legacy_unattributed_item_count"], 1)
+        self.assertEqual(
+            payload["memory_legacy_evidence_ids"],
+            ["turn:a:user", "turn:a:assistant"],
+        )
+        self.assertEqual(payload["memory_legacy_source_turn_ids"], ["a"])
         self.assertEqual(payload["memory_hot_context_state"], "provided")
         self.assertEqual(payload["memory_version"], 7)
         self.assertTrue(payload["memory_receipt_content_free"])

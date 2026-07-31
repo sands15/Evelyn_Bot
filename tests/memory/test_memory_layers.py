@@ -45,7 +45,18 @@ class MemoryLayersTests(unittest.TestCase):
                 )
                 memory.append_raw_transcript_rows(
                     123,
-                    [{"role": "user", "speaker": scope_type, "source": "test", "text": f"{scope_type} raw"}],
+                    [
+                        {
+                            "role": "user",
+                            "speaker": scope_type,
+                            "source": "test",
+                            "text": f"{scope_type} raw",
+                            "evidence_id": f"turn:{scope_type}-turn:user",
+                            "source_turn_id": f"{scope_type}-turn",
+                            "evidence_kind": "conversation_turn",
+                            "private_metadata": "must-not-survive",
+                        }
+                    ],
                     scope_type=scope_type,
                     scope_key=scope_key,
                 )
@@ -77,6 +88,9 @@ class MemoryLayersTests(unittest.TestCase):
             self.assertEqual(layer["summary"], summary)
             self.assertEqual(layer["raw"][0]["text"], f"{key} raw")
             self.assertEqual(layer["vault_raw"][0]["text"], f"{key} raw")
+            self.assertEqual(layer["raw"][0]["evidence_id"], f"turn:{key}-turn:user")
+            self.assertEqual(layer["vault_raw"][0]["source_turn_id"], f"{key}-turn")
+            self.assertNotIn("private_metadata", layer["raw"][0])
             self.assertEqual(layer["facts"][0]["text"], f"{key} fact")
             self.assertEqual(layer["questions"][0]["text"], f"{key} question")
 

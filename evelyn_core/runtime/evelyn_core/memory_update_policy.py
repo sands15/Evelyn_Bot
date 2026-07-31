@@ -72,8 +72,9 @@ def build_memory_turn_rows(
     source: str,
     user_speaker: str = "user",
     assistant_speaker: str = "Evelyn",
+    turn_id: str | None = None,
 ) -> list[dict[str, str]]:
-    return [
+    rows = [
         {
             "role": "user",
             "speaker": clean_text(user_speaker) or "user",
@@ -87,6 +88,14 @@ def build_memory_turn_rows(
             "text": clean_text(answer),
         },
     ]
+    normalized_turn_id = clean_text(str(turn_id or ""))[:80]
+    if re.fullmatch(r"[A-Za-z0-9._:-]+", normalized_turn_id):
+        for row in rows:
+            role = clean_text(str(row.get("role") or "memory"))
+            row["evidence_id"] = f"turn:{normalized_turn_id}:{role}"
+            row["source_turn_id"] = normalized_turn_id
+            row["evidence_kind"] = "conversation_turn"
+    return rows
 
 
 def memory_scope_labels(
@@ -116,6 +125,7 @@ def write_memory_turn_records(
     source: str = "chat",
     user_speaker: str = "user",
     assistant_speaker: str = "Evelyn",
+    turn_id: str | None = None,
     vision_memory_write_enabled: bool = False,
     record_identity_turn: Callable[..., dict[str, Any]],
     append_raw_rows: Callable[..., Any],
@@ -136,6 +146,7 @@ def write_memory_turn_records(
         source=source,
         user_speaker=user_speaker,
         assistant_speaker=assistant_speaker,
+        turn_id=turn_id,
     )
     identity_record_decision = record_identity_turn(
         memory_user_text,

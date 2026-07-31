@@ -244,15 +244,26 @@ def append_raw_transcript_rows(
         text = clean_text(str(row.get("text", "")))
         if len(text) < 1:
             continue
-        normalized.append(
-            {
-                "role": clean_text(str(row.get("role", "user"))) or "user",
-                "speaker": clean_text(str(row.get("speaker", ""))),
-                "source": clean_text(str(row.get("source", "unknown"))) or "unknown",
-                "text": text,
-                "saved_at": int(row.get("saved_at", now)),
-            }
-        )
+        saved_row = {
+            "role": clean_text(str(row.get("role", "user"))) or "user",
+            "speaker": clean_text(str(row.get("speaker", ""))),
+            "source": clean_text(str(row.get("source", "unknown"))) or "unknown",
+            "text": text,
+            "saved_at": int(row.get("saved_at", now)),
+        }
+        evidence_id = clean_text(str(row.get("evidence_id") or ""))[:120]
+        source_turn_id = clean_text(str(row.get("source_turn_id") or ""))[:80]
+        if re.fullmatch(r"[A-Za-z0-9._:-]+", evidence_id):
+            saved_row["evidence_id"] = evidence_id
+        if re.fullmatch(r"[A-Za-z0-9._:-]+", source_turn_id):
+            saved_row["source_turn_id"] = source_turn_id
+        if (
+            saved_row.get("evidence_id")
+            and saved_row.get("source_turn_id")
+            and clean_text(str(row.get("evidence_kind") or "")) == "conversation_turn"
+        ):
+            saved_row["evidence_kind"] = "conversation_turn"
+        normalized.append(saved_row)
 
     if normalized:
         append_jsonl_rows(memory_raw_path(guild_id, scope_type=scope_type, scope_key=scope_key), normalized, MEMORY_RAW_LIMIT)

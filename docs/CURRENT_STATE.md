@@ -301,6 +301,15 @@ Source branch: `codex/dependency-config-hardening`, current Fast Control action-
   - Fast Control 일반·stream 응답과 해당 assistant chat card도 같은
     content-free receipt를 반환한다. 사용자 주입 memory provider처럼 exact
     note ID를 증명하지 못하는 경로는 `unattributed`로 표시한다.
+  - 새 raw 대화 memory row는 현재 turn ID에서 만든 stable `evidence_id`,
+    `source_turn_id`, 고정 `conversation_turn` kind를 guild/room/person/session
+    raw JSONL에 동일하게 보존하고 JSONL mirror가 활성인 호출도 같은 필드를
+    유지한다. ID에는 발화 내용이 들어가지 않으며 allowlist 형식에 맞지 않는
+    metadata는 저장하지 않는다.
+  - receipt와 turn summary는 실제 prompt에 선택된 raw row의 evidence/turn
+    ID와 attributed/unattributed legacy 항목 수를 공개한다. 기존 row와
+    rolling summary·facts·questions는 근거를 추측해 소급 부여하지 않고 계속
+    `partial|unattributed`로 드러낸다.
   - pinned hot-context는 현재 recall의 memory version과 정확히 같고 포함 note
     ID가 있는 경우에만 live prompt에 들어간다. 과거 형식, 손상, 삭제/파생
     상태 불일치와 stale version은 fail-closed로 제외한다.
@@ -1121,6 +1130,11 @@ Source branch: `codex/dependency-config-hardening`, current Fast Control action-
 - 이 변경에서는 실제 사용자 기억을 수정·삭제하지 않았고 Discord, 마이크,
   Minecraft와 무거운 모델 서비스를 시작하지 않았다. source-mount 검증만
   수행했으며 실행 중인 Bot API와 Control Page도 교체하지 않았다.
+- raw turn evidence 변경의 current-source 검증은 memory 136개, runtime
+  413개(skip 2), voice 415개를 통과했다. Discord 의존 이미지의 core
+  534개는 기능 assertion 실패 0개였고 `git` 부재의 기존 서명 검사 환경 오류
+  2개는 Windows의 해당 모듈 13개로 보완했다. bundled Python 집중 66개와
+  `compileall`, `git diff --check`도 통과했다.
 
 ## Operational boundaries
 

@@ -149,6 +149,59 @@ class MemoryContextStateTests(unittest.TestCase):
         self.assertTrue(receipt["contentFree"])
         self.assertNotIn("private", str(receipt).lower())
 
+    def test_new_raw_turn_rows_are_attributed_to_stable_evidence(self) -> None:
+        layers = {
+            "guild": {
+                "label": "서버 기억",
+                "summary": "",
+                "raw": [
+                    {
+                        "role": "user",
+                        "source": "voice",
+                        "text": "PRIVATE_RAW_TEXT",
+                        "saved_at": 1,
+                        "evidence_id": "turn:abc123:user",
+                        "source_turn_id": "abc123",
+                        "evidence_kind": "conversation_turn",
+                    }
+                ],
+                "facts": [],
+                "questions": [],
+                "vault_raw": [],
+            }
+        }
+
+        def empty_vault(*_args, receipt=None, **_kwargs):
+            receipt.update(
+                {
+                    "state": "empty",
+                    "memoryVersion": 1,
+                    "suppliedNoteIds": [],
+                }
+            )
+            return ""
+
+        receipt = {}
+        with patch("evelyn_core.memory_context_state.collect_memory_layers", return_value=layers):
+            with patch(
+                "evelyn_core.memory_context_state.build_memory_vault_context",
+                side_effect=empty_vault,
+            ):
+                context = build_memory_context(
+                    123,
+                    "raw",
+                    cognitive_state={},
+                    receipt=receipt,
+                )
+
+        self.assertIn("PRIVATE_RAW_TEXT", context)
+        self.assertEqual(receipt["groundingState"], "attributed")
+        self.assertEqual(receipt["legacyAttributedItemCount"], 1)
+        self.assertEqual(receipt["legacyUnattributedItemCount"], 0)
+        self.assertEqual(receipt["legacyEvidenceIds"], ["turn:abc123:user"])
+        self.assertEqual(receipt["legacySourceTurnIds"], ["abc123"])
+        self.assertNotIn("PRIVATE_RAW_TEXT", str(receipt))
+
     def test_empty_payload_returns_empty_string(self) -> None:
         self.assertEqual(
             build_memory_context_payload(

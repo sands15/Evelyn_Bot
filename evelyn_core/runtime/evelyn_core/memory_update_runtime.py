@@ -60,6 +60,7 @@ def schedule_memory_update_from_runtime(
         source=source,
         user_speaker=user_speaker,
         assistant_speaker=assistant_speaker,
+        turn_id=getattr(turn_scope, "turn_id", None),
         vision_memory_write_enabled=deps.vision_memory_write_enabled,
         record_identity_turn=deps.record_self_identity_turn,
         append_raw_rows=deps.append_raw_transcript_rows,
