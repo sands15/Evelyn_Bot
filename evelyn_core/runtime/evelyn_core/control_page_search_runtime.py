@@ -20,7 +20,7 @@ class ControlPageSearchRuntimeDeps:
     get_session_lock: Callable[[str], Any]
     append_history: Callable[..., None]
     mark_session_active: Callable[..., None]
-    commit_session_continuity: Callable[[], Awaitable[dict[str, Any]]]
+    commit_session_continuity: Callable[..., Awaitable[dict[str, Any]]]
     active_conversation_text_sec: float
     build_topic_id: Callable[..., str]
     schedule_local_control_tts: Callable[..., None]
@@ -94,7 +94,10 @@ async def answer_control_page_search_text_from_runtime(
             user_text=user_text,
         )
         try:
-            continuity_status = await deps.commit_session_continuity()
+            continuity_status = await deps.commit_session_continuity(
+                session_key,
+                deps.current_turn_id(session_key) or "",
+            )
             continuity_receipt = (
                 require_durable_continuity_receipt(
                     continuity_status

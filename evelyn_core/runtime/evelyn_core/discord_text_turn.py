@@ -179,7 +179,10 @@ async def handle_discord_text_message(message: Any, deps: DiscordTextMessageHand
         )
         try:
             continuity_status = (
-                await deps.commit_session_continuity()
+                await deps.commit_session_continuity(
+                    session_key,
+                    turn_id,
+                )
             )
             continuity_receipt = (
                 require_durable_continuity_receipt(

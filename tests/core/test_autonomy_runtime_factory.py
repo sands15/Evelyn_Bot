@@ -50,8 +50,10 @@ class AutonomyRuntimeFactoryTests(unittest.IsolatedAsyncioTestCase):
             self.events.append(("refresh", (args, kwargs)))
             return {"updated_at": "now", "action": "reply", "confidence": 0.9}
 
-        async def commit_session_continuity() -> dict[str, Any]:
-            self.events.append(("commit", None))
+        async def commit_session_continuity(
+            *args: Any,
+        ) -> dict[str, Any]:
+            self.events.append(("commit", args))
             return durable_continuity_status(9)
 
         return AutonomyRuntimeFactoryDeps(
@@ -170,6 +172,12 @@ class AutonomyRuntimeFactoryTests(unittest.IsolatedAsyncioTestCase):
         session_payload = next(payload for kind, payload in self.events if kind == "session")
         self.assertEqual(session_payload[1]["ttl_sec"], 30.0)
         self.assertTrue(session_payload[1]["awaiting_user_reply"])
+        commit_payload = next(
+            payload
+            for kind, payload in self.events
+            if kind == "commit"
+        )
+        self.assertEqual(commit_payload, ("runtime:11",))
 
     async def test_send_followup_rejects_partial_commit_status(
         self,
@@ -179,7 +187,7 @@ class AutonomyRuntimeFactoryTests(unittest.IsolatedAsyncioTestCase):
             "https://internal.example/private"
         )
 
-        async def partial_commit() -> dict[str, Any]:
+        async def partial_commit(*_args: Any) -> dict[str, Any]:
             self.events.append(("commit", None))
             return {
                 "state": "ready",

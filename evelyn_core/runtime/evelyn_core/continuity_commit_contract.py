@@ -52,6 +52,7 @@ def require_durable_continuity_receipt(
             or metrics.get("schema")
             != CONTINUITY_COMMIT_METRICS_SCHEMA
             or metrics.get("lastSucceeded") is not True
+            or metrics.get("lastTargetVerified") is not True
         ):
             raise ValueError(CONTINUITY_COMMIT_FAILED)
         attempt_count = _exact_nonnegative_int(

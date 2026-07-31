@@ -117,6 +117,10 @@ Source branch: `codex/dependency-config-hardening`, current grounded-memory prom
     status schema, ready state, current head, verified integrity, rollback
     protection, 양수 generation/session count와 이번 commit의 성공 metric을
     검증한 `conversation_continuity.commit-receipt.v1`만 받는다.
+  - receipt는 exact commit target에도 결박된다. writer는 요청된 session을
+    `maxSessions` 밖에서도 포함하고, 가능한 경우 turn ID까지 current
+    checkpoint/head에서 재검증한다. 공개 지표에는 ID 없이
+    `lastTargetVerified`만 남긴다.
   - 부분·legacy·손상 status는 이미 전달된 답변을 다시 보내지 않되
     continuity 실패로 남긴다. 자율 후속의 generation 0 오기록도 실제
     `checkpointGeneration` receipt로 수정했다.

@@ -68,8 +68,8 @@ def make_deps(calls: list[tuple[str, object]], **overrides) -> DiscordTextMessag
         calls.append(("stream", kwargs["user_text"] if "user_text" in kwargs else args[1]))
         return "<voice>answer</voice>", None, {"meta": {}}, None
 
-    async def commit_session_continuity():
-        calls.append(("commit_continuity", None))
+    async def commit_session_continuity(*args):
+        calls.append(("commit_continuity", args))
         return durable_continuity_status(5)
 
     deps = dict(
@@ -160,7 +160,16 @@ class DiscordTextTurnHandlerTests(unittest.TestCase):
             ),
             calls,
         )
-        self.assertIn(("commit_continuity", None), calls)
+        self.assertIn(
+            (
+                "commit_continuity",
+                (
+                    "guild:1:text:2:user:3",
+                    "turn:guild:1:text:2:user:3",
+                ),
+            ),
+            calls,
+        )
         self.assertIn(("summary", "text_turn_summary"), calls)
         self.assertEqual(calls[-1], ("process_commands", "Evelyn hi"))
         self.assertEqual(message.channel.typing_count, 1)
@@ -222,7 +231,19 @@ class DiscordTextTurnHandlerTests(unittest.TestCase):
             ["지금 요청을 근거로 새 기억에 저장했어."],
         )
         self.assertFalse(any(call[0] == "stream" for call in calls))
-        self.assertIn(("commit_continuity", None), calls)
+        self.assertTrue(
+            any(
+                call
+                == (
+                    "commit_continuity",
+                    (
+                        "guild:1:text:2:user:3",
+                        "turn:guild:1:text:2:user:3",
+                    ),
+                )
+                for call in calls
+            )
+        )
         self.assertEqual(
             summaries[0]["meta"]["memory_write_receipt"],
             receipt,
@@ -317,7 +338,7 @@ class DiscordTextTurnHandlerTests(unittest.TestCase):
             "https://internal.example/private"
         )
 
-        async def partial_commit():
+        async def partial_commit(*_args):
             calls.append(("commit_continuity", None))
             return {
                 "state": "ready",

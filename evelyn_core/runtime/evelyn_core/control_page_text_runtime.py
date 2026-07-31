@@ -25,7 +25,7 @@ class ControlPageTextRuntimeDeps:
     maybe_append_proactive_question: Callable[..., tuple[str, bool]]
     finish_assistant_text_turn: Callable[..., None]
     commit_session_continuity: Callable[
-        [],
+        [str, str],
         Awaitable[dict[str, Any]],
     ]
     log_voice_bottleneck_summary: Callable[..., None]
@@ -121,7 +121,10 @@ async def answer_control_page_text_from_runtime(
             )
             try:
                 continuity_status = (
-                    await deps.commit_session_continuity()
+                    await deps.commit_session_continuity(
+                        session_key,
+                        started_turn.turn_id,
+                    )
                 )
                 continuity_receipt = (
                     require_durable_continuity_receipt(

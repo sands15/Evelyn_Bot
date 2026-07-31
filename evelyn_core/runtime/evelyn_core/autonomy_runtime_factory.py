@@ -62,7 +62,7 @@ class AutonomyRuntimeFactoryDeps:
     get_authorized_actions: Callable[[int], list[str]]
     authorize_action: Callable[[int, str], dict[str, Any]]
     record_action_outcome: Callable[[int, str, dict[str, Any]], None]
-    commit_session_continuity: Callable[[], Awaitable[dict[str, Any]]]
+    commit_session_continuity: Callable[..., Awaitable[dict[str, Any]]]
     log: Callable[..., Any]
 
 
@@ -221,7 +221,9 @@ def get_or_create_autonomy_engine_from_runtime(
         continuity_durable = False
         continuity_generation = 0
         try:
-            continuity_status = await deps.commit_session_continuity()
+            continuity_status = await deps.commit_session_continuity(
+                session_key
+            )
             continuity_receipt = (
                 require_durable_continuity_receipt(
                     continuity_status

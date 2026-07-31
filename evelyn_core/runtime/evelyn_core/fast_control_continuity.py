@@ -140,6 +140,10 @@ class FastControlContinuityOwner:
             )
             if before_commit is not None:
                 before_commit(current_generation + 1)
+            turn_id = self.store.start_new_turn(
+                FAST_CONTROL_SESSION_KEY,
+                now_monotonic=self.monotonic(),
+            )
             self.store.finish_assistant_text_turn(
                 FAST_CONTROL_SESSION_KEY,
                 cleaned_user,
@@ -155,7 +159,10 @@ class FastControlContinuityOwner:
                 ),
                 now_monotonic=self.monotonic(),
             )
-            return checkpoint.commit_completed_turn()
+            return checkpoint.commit_completed_turn(
+                FAST_CONTROL_SESSION_KEY,
+                turn_id,
+            )
 
     def record_assistant_followup(
         self,
@@ -179,6 +186,10 @@ class FastControlContinuityOwner:
             )
             if before_commit is not None:
                 before_commit(current_generation + 1)
+            turn_id = self.store.start_new_turn(
+                FAST_CONTROL_SESSION_KEY,
+                now_monotonic=self.monotonic(),
+            )
             history = self.store.get_conversation_history(
                 system_prompt=FAST_CONTROL_SYSTEM_PROMPT,
                 session_key=FAST_CONTROL_SESSION_KEY,
@@ -206,7 +217,10 @@ class FastControlContinuityOwner:
                 ),
                 now_monotonic=self.monotonic(),
             )
-            return checkpoint.commit_completed_turn()
+            return checkpoint.commit_completed_turn(
+                FAST_CONTROL_SESSION_KEY,
+                turn_id,
+            )
 
     def status(self) -> dict[str, Any]:
         if not self.enabled or self.checkpoint is None:

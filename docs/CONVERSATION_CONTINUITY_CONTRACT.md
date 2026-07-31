@@ -220,10 +220,16 @@ checkpoint 저장 실패로 발생한 revocation status는 `fsync`해 fail-close
 경계를 내구성 있게 남긴다. head도 같은 durable atomic writer를 사용한다.
 
 외부에 답변 전달이 완료된 턴은 1초 periodic writer를 기다리지 않는다.
-`commit_completed_turn()` 또는 async wrapper가 즉시 강제 flush하고,
+`commit_completed_turn(session_key, turn_id)` 또는 async wrapper가 즉시
+강제 flush하고,
 `state=active|empty`, `rollbackProtected=true`, 저장 세션 수와 generation을
 검증한다. 검증 실패는 원문 예외 없이
 `conversation_continuity_commit_failed`로 정규화한다.
+
+commit 대상 session은 `maxSessions` 순위 밖이어도 이번 checkpoint에 반드시
+포함한다. writer는 current head와 checkpoint를 다시 읽어 exact session과,
+제공된 경우 exact turn ID가 실제 저장됐는지 확인한다. 다른 최신 session만
+저장된 결과나 같은 session의 이전 turn은 이번 commit의 성공 증거가 아니다.
 
 각 전달 surface는 commit callback이 예외 없이 반환됐다는 사실만으로 성공을
 판정하지 않는다. 반환된 `conversation_continuity.status.v1`에서 다음 증거를
@@ -235,7 +241,7 @@ checkpoint 저장 실패로 발생한 revocation status는 `fsync`해 fail-close
 - `checkpointHeadState=current`
 - 양수 `checkpointGeneration`과 `persistedSessionCount`
 - `conversation_continuity.commit-metrics.v1`의 양수 시도·성공·표본 수와
-  `lastSucceeded=true`
+  `lastSucceeded=true`, `lastTargetVerified=true`
 
 검증 성공 후 소비자에게 남기는 최소 receipt는 다음과 같다.
 
@@ -332,7 +338,7 @@ Runtime Health의 `runtime_errors.summary.v1`에는
 `status.json`의 additive `completedTurnCommit`은
 `conversation_continuity.commit-metrics.v1`이다. 이 지표는 현재 프로세스에서
 성공한 최근 256개 durable checkpoint/head commit의 last/p50/p95/max
-밀리초와 누적 시도·성공·실패 횟수, 마지막 성공 여부만 보존한다. 대화문,
+밀리초와 누적 시도·성공·실패 횟수, 마지막 성공 및 대상 검증 여부만 보존한다. 대화문,
 transcript, 사용자·guild/channel/message/session/turn ID, 경로와 예외
 메시지는 저장하지 않는다.
 

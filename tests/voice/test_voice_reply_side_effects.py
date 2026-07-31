@@ -110,6 +110,15 @@ class VoiceReplySideEffectsTests(unittest.TestCase):
                 "commit_session_continuity",
             ],
         )
+        continuity_call = next(
+            row
+            for row in calls
+            if row[0] == "commit_session_continuity"
+        )
+        self.assertEqual(
+            continuity_call[1],
+            ("session-1", "turn-failed-1"),
+        )
         self.assertEqual(
             by_name["append_history"][0],
             (
@@ -167,7 +176,7 @@ class VoiceReplySideEffectsTests(unittest.TestCase):
             session_state_snapshot=unexpected,
             mark_session_active=lambda *_args, **_kwargs: None,
             set_room_owner=lambda *_args, **_kwargs: None,
-            commit_session_continuity=lambda: (_ for _ in ()).throw(
+            commit_session_continuity=lambda *_args: (_ for _ in ()).throw(
                 RuntimeError("Bearer private-token C:\\private")
             ),
             log=lambda *args: logs.append(args),
@@ -288,6 +297,10 @@ class VoiceReplySideEffectsTests(unittest.TestCase):
         self.assertEqual(by_name["set_room_owner"][1]["turn_id"], "turn-1")
         self.assertIn("commit_session_continuity", by_name)
         self.assertEqual(
+            by_name["commit_session_continuity"][0],
+            ("session-1", "turn-1"),
+        )
+        self.assertEqual(
             metrics["meta"]["continuity_commit"],
             "durable",
         )
@@ -321,7 +334,7 @@ class VoiceReplySideEffectsTests(unittest.TestCase):
         def noop(*_args: Any, **_kwargs: Any) -> Any:
             return None
 
-        def commit() -> None:
+        def commit(*_args: Any) -> None:
             raise RuntimeError(
                 "Bearer continuity-secret C:\\private"
             )
@@ -407,7 +420,7 @@ class VoiceReplySideEffectsTests(unittest.TestCase):
             },
             mark_session_active=noop,
             set_room_owner=noop,
-            commit_session_continuity=lambda: {
+            commit_session_continuity=lambda *_args: {
                 "state": "ready",
                 "rollbackProtected": True,
                 "privateMessage": private,
@@ -483,7 +496,7 @@ class VoiceReplySideEffectsTests(unittest.TestCase):
                 lambda *_args, **_kwargs: calls.append("owner")
             ),
             commit_session_continuity=(
-                lambda: calls.append("commit")
+                lambda *_args: calls.append("commit")
                 or durable_continuity_status(8)
             ),
             log=lambda *_args: calls.append("log"),

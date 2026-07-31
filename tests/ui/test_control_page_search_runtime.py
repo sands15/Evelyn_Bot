@@ -30,6 +30,7 @@ def _deps(**overrides) -> tuple[ControlPageSearchRuntimeDeps, dict[str, object]]
         "search": [],
         "synthesis": [],
         "events": [],
+        "commitTargets": [],
         "locks": {},
     }
 
@@ -47,8 +48,9 @@ def _deps(**overrides) -> tuple[ControlPageSearchRuntimeDeps, dict[str, object]]
             locks[session_key] = asyncio.Lock()
         return locks[session_key]
 
-    async def commit_session_continuity():
+    async def commit_session_continuity(*args):
         state["events"].append("commit")
+        state["commitTargets"].append(args)
         return durable_continuity_status(4)
 
     deps = ControlPageSearchRuntimeDeps(
@@ -107,6 +109,10 @@ class ControlPageSearchRuntimeTests(unittest.TestCase):
         self.assertEqual(state["tts"][0][1]["turn_id"], "turn:control:7")
         self.assertEqual(state["events"], ["history", "active", "commit", "tts"])
         self.assertEqual(
+            state["commitTargets"],
+            [("control:7", "turn:control:7")],
+        )
+        self.assertEqual(
             state["synthesis"][0]["metrics"]["meta"]["continuity_generation"],
             4,
         )
@@ -129,7 +135,7 @@ class ControlPageSearchRuntimeTests(unittest.TestCase):
             "https://internal.example/private"
         )
 
-        async def partial_commit():
+        async def partial_commit(*_args):
             return {
                 "state": "ready",
                 "rollbackProtected": True,

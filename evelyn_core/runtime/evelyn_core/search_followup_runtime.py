@@ -45,7 +45,7 @@ class SearchFollowupRuntimeDeps:
     attach_current_task: Callable[[Any], asyncio.Task | None]
     detach_task: Callable[[Any, asyncio.Task | None], Any]
     record_search_followup_queued: Callable[[], Any]
-    commit_session_continuity: Callable[[], Awaitable[dict[str, Any]]]
+    commit_session_continuity: Callable[..., Awaitable[dict[str, Any]]]
     search_followup_recovery: Any | None = None
     continuity_status: Callable[[], dict[str, Any]] | None = None
     sleep: Callable[[float], Awaitable[Any]] = asyncio.sleep
@@ -124,7 +124,10 @@ async def deliver_proactive_followup_from_runtime(
         deps.append_history(session_key, query, plain_answer, guild_id=guild_id)
         try:
             continuity_status = (
-                await deps.commit_session_continuity()
+                await deps.commit_session_continuity(
+                    session_key,
+                    str(deps.current_turn_id(session_key) or ""),
+                )
             )
             continuity_receipt = require_durable_continuity_receipt(
                 continuity_status

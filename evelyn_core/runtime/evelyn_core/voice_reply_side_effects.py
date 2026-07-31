@@ -105,7 +105,10 @@ def finalize_voice_reply_side_effects_from_runtime(
                 segment_id=segment_id,
             )
             continuity_receipt = require_durable_continuity_receipt(
-                deps.commit_session_continuity()
+                deps.commit_session_continuity(
+                    session_key,
+                    accepted_turn_id,
+                )
             )
             meta.update(
                 {
@@ -204,7 +207,10 @@ def finalize_voice_reply_side_effects_from_runtime(
         segment_id=segment_id,
     )
     try:
-        continuity_status = deps.commit_session_continuity()
+        continuity_status = deps.commit_session_continuity(
+            session_key,
+            accepted_turn_id,
+        )
         continuity_receipt = require_durable_continuity_receipt(
             continuity_status
         )

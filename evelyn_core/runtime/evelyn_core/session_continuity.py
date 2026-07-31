@@ -75,6 +75,15 @@ def _valid_session_key(value: Any) -> str:
     return text
 
 
+def _valid_turn_id(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    text = value.strip()
+    if not text or len(text) > 80:
+        return ""
+    return text
+
+
 def _safe_history(value: Any, *, max_items: int, max_chars: int) -> list[dict[str, str]]:
     if not isinstance(value, list):
         return []
@@ -244,6 +253,7 @@ class SessionContinuityCheckpoint:
         self._commit_last_ms: float | None = None
         self._commit_last_at: float | None = None
         self._commit_last_succeeded: bool | None = None
+        self._commit_last_target_verified: bool | None = None
 
     def _emit(self, message: str) -> None:
         if self.log is not None:
@@ -260,7 +270,11 @@ class SessionContinuityCheckpoint:
                 continue
         raise RuntimeError("session_store_busy")
 
-    def _selected_keys(self) -> list[str]:
+    def _selected_keys(
+        self,
+        *,
+        required_session_key: str = "",
+    ) -> list[str]:
         candidates: set[Any] = set()
         for mapping in (
             self.store.histories,
@@ -273,18 +287,47 @@ class SessionContinuityCheckpoint:
             self.store.turn_ids,
         ):
             candidates.update(self._mapping_keys(mapping))
+        required = _valid_session_key(required_session_key)
+        if required_session_key and not required:
+            raise ValueError("continuity_commit_target_invalid")
         valid = [key for key in candidates if _valid_session_key(key)]
-        return sorted(
+        if required and required not in valid:
+            raise ValueError("continuity_commit_target_missing")
+        ranked = sorted(
             valid,
             key=lambda key: (
                 -_finite_float(self.store.last_active_at.get(key)),
                 key,
             ),
-        )[: self.max_sessions]
+        )
+        selected = ranked[: self.max_sessions]
+        if required and required not in selected:
+            selected[-1] = required
+            selected.sort(key=ranked.index)
+        return selected
 
-    def _material(self) -> dict[str, Any]:
+    def _material(
+        self,
+        *,
+        required_session_key: str = "",
+        required_turn_id: str = "",
+    ) -> dict[str, Any]:
+        required = _valid_session_key(required_session_key)
+        expected_turn = _valid_turn_id(required_turn_id)
+        if required_turn_id and not expected_turn:
+            raise ValueError("continuity_commit_target_invalid")
+        if expected_turn and not required:
+            raise ValueError("continuity_commit_target_invalid")
+        if expected_turn:
+            current_turn = _valid_turn_id(
+                self.store.turn_ids.get(required)
+            )
+            if current_turn != expected_turn:
+                raise ValueError("continuity_commit_target_mismatch")
         sessions: list[dict[str, Any]] = []
-        for session_key in self._selected_keys():
+        for session_key in self._selected_keys(
+            required_session_key=required,
+        ):
             history = _safe_history(
                 self.store.histories.get(session_key),
                 max_items=self.max_history_items,
@@ -485,6 +528,9 @@ class SessionContinuityCheckpoint:
             ),
             "lastAt": self._commit_last_at,
             "lastSucceeded": self._commit_last_succeeded,
+            "lastTargetVerified": (
+                self._commit_last_target_verified
+            ),
             "warningThresholdMs": (
                 self.commit_latency_warning_ms
             ),
@@ -496,6 +542,7 @@ class SessionContinuityCheckpoint:
         *,
         started_at: float,
         succeeded: bool,
+        target_verified: bool,
     ) -> None:
         try:
             elapsed_ms = max(
@@ -509,6 +556,9 @@ class SessionContinuityCheckpoint:
         self._commit_last_ms = round(elapsed_ms, 3)
         self._commit_last_at = self.wall_time()
         self._commit_last_succeeded = bool(succeeded)
+        self._commit_last_target_verified = bool(
+            target_verified
+        )
         if succeeded:
             self._commit_success_count += 1
             self._commit_latency_samples_ms.append(
@@ -1118,7 +1168,13 @@ class SessionContinuityCheckpoint:
                 )
             return self.status()
 
-    def flush(self, *, force: bool = False) -> dict[str, Any]:
+    def flush(
+        self,
+        *,
+        force: bool = False,
+        required_session_key: str = "",
+        required_turn_id: str = "",
+    ) -> dict[str, Any]:
         with self._lock:
             try:
                 snapshot = self._checkpoint_snapshot()
@@ -1144,7 +1200,10 @@ class SessionContinuityCheckpoint:
                     exc,
                 )
             try:
-                material = self._material()
+                material = self._material(
+                    required_session_key=required_session_key,
+                    required_turn_id=required_turn_id,
+                )
                 signature = self._signature(material)
             except Exception as exc:
                 return self._record_error(
@@ -1246,40 +1305,110 @@ class SessionContinuityCheckpoint:
             self._write_status()
             return self.status()
 
-    def commit_completed_turn(self) -> dict[str, Any]:
-        """Durably anchor a completed user/assistant turn before returning."""
+    @staticmethod
+    def _snapshot_contains_commit_target(
+        snapshot: dict[str, Any],
+        *,
+        session_key: str,
+        turn_id: str,
+    ) -> bool:
+        payload = snapshot.get("payload")
+        if not isinstance(payload, dict):
+            return False
+        sessions = payload.get("sessions")
+        if not isinstance(sessions, list):
+            return False
+        for row in sessions:
+            if (
+                not isinstance(row, dict)
+                or row.get("sessionKey") != session_key
+            ):
+                continue
+            if not turn_id:
+                return True
+            state = row.get("state")
+            return bool(
+                isinstance(state, dict)
+                and state.get("turnId") == turn_id
+            )
+        return False
+
+    def commit_completed_turn(
+        self,
+        session_key: str,
+        turn_id: str = "",
+    ) -> dict[str, Any]:
+        """Durably anchor the named completed turn before returning."""
         started_at = float(self.commit_latency_clock())
         try:
-            status = self.flush(force=True)
+            required_session = _valid_session_key(session_key)
+            required_turn = _valid_turn_id(turn_id)
             if (
-                status.get("state") == "error"
-                or status.get("rollbackProtected") is not True
-                or int(status.get("persistedSessionCount") or 0) < 1
+                not required_session
+                or (turn_id and not required_turn)
             ):
-                raise RuntimeError(
-                    "conversation_continuity_commit_failed"
+                raise ValueError("continuity_commit_target_invalid")
+            with self._lock:
+                status = self.flush(
+                    force=True,
+                    required_session_key=required_session,
+                    required_turn_id=required_turn,
                 )
-        except Exception:
+                snapshot = self._checkpoint_snapshot()
+                target_verified = bool(
+                    snapshot.get("headState") == "current"
+                    and self._snapshot_contains_commit_target(
+                        snapshot,
+                        session_key=required_session,
+                        turn_id=required_turn,
+                    )
+                )
+                if (
+                    status.get("state") == "error"
+                    or status.get("rollbackProtected") is not True
+                    or int(
+                        status.get("persistedSessionCount") or 0
+                    )
+                    < 1
+                    or not target_verified
+                ):
+                    raise RuntimeError(
+                        "conversation_continuity_commit_failed"
+                    )
+                self._record_commit_attempt(
+                    started_at=started_at,
+                    succeeded=True,
+                    target_verified=True,
+                )
+                self._write_status()
+                return self.status()
+        except Exception as exc:
             with self._lock:
                 self._record_commit_attempt(
                     started_at=started_at,
                     succeeded=False,
+                    target_verified=False,
                 )
+                if self._state != "error":
+                    self.runtime_errors.record(
+                        "conversation_continuity_commit_failed",
+                        exc,
+                    )
+                    self._state = "error"
                 self._write_status()
-            raise
-        with self._lock:
-            self._record_commit_attempt(
-                started_at=started_at,
-                succeeded=True,
-            )
-            self._write_status()
-            return self.status()
+            raise RuntimeError(
+                "conversation_continuity_commit_failed"
+            ) from None
 
     async def commit_completed_turn_async(
         self,
+        session_key: str,
+        turn_id: str = "",
     ) -> dict[str, Any]:
         return await asyncio.to_thread(
-            self.commit_completed_turn
+            self.commit_completed_turn,
+            session_key,
+            turn_id,
         )
 
     async def _run(self) -> None:

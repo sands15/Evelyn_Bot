@@ -107,7 +107,7 @@ class DiscordCommandSessionRuntimeTests(unittest.TestCase):
 
     def test_mark_text_session_from_command_records_turn_with_message_context(self) -> None:
         calls: list[tuple] = []
-        commits: list[str] = []
+        commits: list[tuple[object, ...]] = []
         thread_checks: list[object] = []
 
         def resolve_text_thread_id(channel, *, is_thread_parent):
@@ -126,8 +126,8 @@ class DiscordCommandSessionRuntimeTests(unittest.TestCase):
             max_history_items=12,
             normal_ttl_sec=30.0,
             question_ttl_sec=45.0,
-            commit_session_continuity=lambda: (
-                commits.append("commit")
+            commit_session_continuity=lambda *args: (
+                commits.append(args)
                 or durable_continuity_status(3)
             ),
             log=lambda *args, **kwargs: None,
@@ -149,7 +149,7 @@ class DiscordCommandSessionRuntimeTests(unittest.TestCase):
 
         self.assertEqual(thread_checks, [True])
         self.assertEqual(len(calls), 1)
-        self.assertEqual(commits, ["commit"])
+        self.assertEqual(commits, [("1:2:3:77",)])
         args, kwargs = calls[0]
         self.assertEqual(args, ("1:2:3:77", "user", "answer"))
         self.assertEqual(
@@ -179,7 +179,7 @@ class DiscordCommandSessionRuntimeTests(unittest.TestCase):
             normal_ttl_sec=30.0,
             question_ttl_sec=45.0,
             commit_session_continuity=(
-                lambda: durable_continuity_status(1)
+                lambda *_args: durable_continuity_status(1)
             ),
             log=lambda *args, **kwargs: None,
         )
@@ -214,7 +214,7 @@ class DiscordCommandSessionRuntimeTests(unittest.TestCase):
             max_history_items=12,
             normal_ttl_sec=30.0,
             question_ttl_sec=45.0,
-            commit_session_continuity=lambda: {
+            commit_session_continuity=lambda *_args: {
                 "state": "ready",
                 "privateMessage": private,
             },

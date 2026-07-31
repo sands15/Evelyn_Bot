@@ -96,6 +96,7 @@ class ContinuityCommitContractTests(unittest.TestCase):
             "failureCount": 1,
             "sampleCount": 0,
             "lastSucceeded": False,
+            "lastTargetVerified": False,
         }
         for field, invalid in cases.items():
             status = durable_continuity_status(3)

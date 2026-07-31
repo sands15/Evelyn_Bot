@@ -277,6 +277,11 @@ def _safe_continuity_commit_metrics(
             if isinstance(value.get("lastSucceeded"), bool)
             else None
         ),
+        "lastTargetVerified": (
+            value.get("lastTargetVerified")
+            if isinstance(value.get("lastTargetVerified"), bool)
+            else None
+        ),
         "warningThresholdMs": _safe_number(
             value.get("warningThresholdMs")
         ),

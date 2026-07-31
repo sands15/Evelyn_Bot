@@ -25,6 +25,7 @@ def durable_continuity_status(
             "failureCount": 0,
             "sampleCount": 1,
             "lastSucceeded": True,
+            "lastTargetVerified": True,
         },
     }
 

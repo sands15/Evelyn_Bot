@@ -238,7 +238,10 @@ class SessionContinuityTests(unittest.TestCase):
             source,
             source_clock,
             system_prompt="private system prompt",
-        ).commit_completed_turn()
+        ).commit_completed_turn(
+            session_key,
+            source.current_turn_id(session_key) or "",
+        )
 
         self.assertEqual(committed["state"], "ready")
         restored_store = SessionStateStore.create_empty()
@@ -289,7 +292,10 @@ class SessionContinuityTests(unittest.TestCase):
         store = self.populated_store()
         manager = self.manager(store, clock)
 
-        status = manager.commit_completed_turn()
+        status = manager.commit_completed_turn(
+            "guild:1:text:2:user:3",
+            store.current_turn_id("guild:1:text:2:user:3") or "",
+        )
         receipt = require_durable_continuity_receipt(status)
 
         self.assertEqual(status["state"], "ready")
@@ -308,7 +314,66 @@ class SessionContinuityTests(unittest.TestCase):
         self.assertEqual(commit_metrics["failureCount"], 0)
         self.assertEqual(commit_metrics["sampleCount"], 1)
         self.assertTrue(commit_metrics["lastSucceeded"])
+        self.assertTrue(commit_metrics["lastTargetVerified"])
         self.assertEqual(commit_metrics["state"], "warming")
+
+    def test_completed_turn_commit_prioritizes_exact_target_at_session_limit(
+        self,
+    ) -> None:
+        clock = FakeClock(wall=1000.0, monotonic=100.0)
+        store = self.populated_store()
+        target_key = "guild:1:text:2:user:3"
+        target_turn = store.current_turn_id(target_key) or ""
+        newer_key = self.add_other_guild(store)
+        store.last_active_at[target_key] = 1.0
+        store.last_active_at[newer_key] = 2.0
+        manager = self.manager(
+            store,
+            clock,
+            max_sessions=1,
+        )
+
+        status = manager.commit_completed_turn(
+            target_key,
+            target_turn,
+        )
+
+        require_durable_continuity_receipt(status)
+        payload = json.loads(
+            self.checkpoint_path.read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            [row["sessionKey"] for row in payload["sessions"]],
+            [target_key],
+        )
+        self.assertEqual(
+            payload["sessions"][0]["state"]["turnId"],
+            target_turn,
+        )
+
+    def test_completed_turn_commit_rejects_wrong_turn_without_false_receipt(
+        self,
+    ) -> None:
+        clock = FakeClock(wall=1000.0, monotonic=100.0)
+        manager = self.manager(self.populated_store(), clock)
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "^conversation_continuity_commit_failed$",
+        ):
+            manager.commit_completed_turn(
+                "guild:1:text:2:user:3",
+                "wrong-private-turn-id",
+            )
+
+        status = manager.status()
+        metrics = status["completedTurnCommit"]
+        self.assertEqual(status["state"], "error")
+        self.assertFalse(metrics["lastSucceeded"])
+        self.assertFalse(metrics["lastTargetVerified"])
+        self.assertNotIn("wrong-private-turn-id", json.dumps(status))
+        with self.assertRaises(Exception):
+            require_durable_continuity_receipt(status)
 
     def test_completed_turn_commit_reports_content_free_latency_warning(
         self,
@@ -328,7 +393,9 @@ class SessionContinuityTests(unittest.TestCase):
         )
 
         for _ in range(20):
-            status = manager.commit_completed_turn()
+            status = manager.commit_completed_turn(
+                "guild:1:text:2:user:3"
+            )
 
         metrics = status["completedTurnCommit"]
         self.assertEqual(metrics["attemptCount"], 20)
@@ -370,7 +437,9 @@ class SessionContinuityTests(unittest.TestCase):
                 "^conversation_continuity_commit_failed$",
             ),
         ):
-            manager.commit_completed_turn()
+            manager.commit_completed_turn(
+                "guild:1:text:2:user:3"
+            )
 
         status = manager.status()
         self.assertEqual(status["state"], "error")

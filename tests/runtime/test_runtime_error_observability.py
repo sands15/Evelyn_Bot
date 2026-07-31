@@ -325,6 +325,7 @@ class RuntimeErrorObservabilityTests(unittest.TestCase):
                     "maxMs": 140.0,
                     "lastAt": self.now - 1,
                     "lastSucceeded": True,
+                    "lastTargetVerified": True,
                     "warningThresholdMs": 100.0,
                     "warningCode": (
                         "conversation_continuity_commit_latency_high"
@@ -345,6 +346,11 @@ class RuntimeErrorObservabilityTests(unittest.TestCase):
         self.assertEqual(
             source["completedTurnCommit"]["p95Ms"],
             125.0,
+        )
+        self.assertTrue(
+            source["completedTurnCommit"][
+                "lastTargetVerified"
+            ]
         )
         self.assertEqual(
             summary["warnings"],

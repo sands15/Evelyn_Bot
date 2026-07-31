@@ -56,7 +56,7 @@ def build_deps(
     def _compact_working_summary(text: str) -> str:
         return f"compact::{text}::{compact_summary}"
 
-    async def _commit_session_continuity():
+    async def _commit_session_continuity(*_args):
         return durable_continuity_status(1)
 
     return SearchFollowupRuntimeDeps(
@@ -161,8 +161,11 @@ class SearchFollowupRuntimeTests(unittest.TestCase):
         async def send(*_args, **_kwargs):
             events.append("send")
 
-        async def commit():
+        commit_targets: list[tuple[object, ...]] = []
+
+        async def commit(*args):
             events.append("commit")
+            commit_targets.append(args)
             return durable_continuity_status(2)
 
         async def speak(*_args, **_kwargs):
@@ -205,6 +208,10 @@ class SearchFollowupRuntimeTests(unittest.TestCase):
             events,
             ["send", "history", "commit", "memory", "voice"],
         )
+        self.assertEqual(
+            commit_targets,
+            [("session", "turn")],
+        )
 
     def test_partial_commit_status_logs_failure_and_keeps_turn(
         self,
@@ -231,7 +238,7 @@ class SearchFollowupRuntimeTests(unittest.TestCase):
             def get_channel(self, _channel_id):
                 return Channel()
 
-        async def partial_commit():
+        async def partial_commit(*_args):
             events.append("commit")
             return {
                 "state": "ready",
@@ -387,7 +394,7 @@ class SearchFollowupRuntimeTests(unittest.TestCase):
                 )
                 self.assertIsNotNone(intent_id)
 
-                async def commit():
+                async def commit(*_args):
                     return durable_continuity_status(5)
 
                 deps = build_deps(
@@ -740,7 +747,7 @@ class SearchFollowupRuntimeTests(unittest.TestCase):
                     search_calls += 1
                     return []
 
-                async def commit():
+                async def commit(*_args):
                     return durable_continuity_status(5)
 
                 deps = build_deps()

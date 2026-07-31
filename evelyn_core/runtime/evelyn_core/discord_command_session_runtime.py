@@ -18,7 +18,7 @@ class DiscordCommandSessionRuntimeDeps:
     max_history_items: int
     normal_ttl_sec: float
     question_ttl_sec: float
-    commit_session_continuity: Callable[[], dict[str, Any]]
+    commit_session_continuity: Callable[..., dict[str, Any]]
     log: Callable[..., Any]
 
 
@@ -104,7 +104,7 @@ def mark_text_session_from_command_runtime(
     )
     try:
         require_durable_continuity_receipt(
-            deps.commit_session_continuity()
+            deps.commit_session_continuity(session_key)
         )
     except Exception as exc:
         deps.log(

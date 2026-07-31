@@ -41,6 +41,7 @@ class ControlPageTextRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.cleared: list[tuple[str, FakeScope]] = []
         self.append_calls: list[tuple[tuple, dict]] = []
         self.commits: list[str] = []
+        self.commit_targets: list[tuple[object, ...]] = []
 
     async def ask_streaming(self, _text: str, **kwargs) -> str:
         if self.ask_error is not None:
@@ -54,8 +55,9 @@ class ControlPageTextRuntimeTests(unittest.IsolatedAsyncioTestCase):
         return f"{args[0]} 추가 질문?", self.append_proactive
 
     def build_deps(self) -> ControlPageTextRuntimeDeps:
-        async def commit_session_continuity():
+        async def commit_session_continuity(*args):
             self.commits.append("commit")
+            self.commit_targets.append(args)
             return durable_continuity_status(6)
 
         return ControlPageTextRuntimeDeps(
@@ -98,6 +100,10 @@ class ControlPageTextRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.finished[0][0][:3], ("control:7", "질문", "원본 답변 추가 질문?"))
         self.assertTrue(self.finished[0][1]["awaiting_user_reply"])
         self.assertEqual(self.commits, ["commit"])
+        self.assertEqual(
+            self.commit_targets,
+            [("control:7", "turn-1")],
+        )
         self.assertEqual(self.scheduled[0][0], ("원본 답변 추가 질문?",))
         self.assertEqual(self.scheduled[0][1]["turn_id"], "turn-1")
         self.assertEqual(self.summaries[0][1]["event_name"], "text_turn_summary")
@@ -131,7 +137,7 @@ class ControlPageTextRuntimeTests(unittest.IsolatedAsyncioTestCase):
             r"C:\Users\Admin\checkpoint.json"
         )
 
-        async def partial_commit():
+        async def partial_commit(*_args):
             return {
                 "state": "ready",
                 "rollbackProtected": True,
