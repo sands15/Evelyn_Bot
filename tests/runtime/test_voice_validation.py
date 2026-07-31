@@ -18,6 +18,7 @@ from evelyn_core.voice_validation import (  # noqa: E402
     MAX_ATTEMPTS,
     SUITE_ID,
     VoiceValidationManager,
+    emit_voice_validation_event,
     observe_turn_trace_for_voice_validation,
     sanitize_validation_event,
     transcript_match,
@@ -256,6 +257,174 @@ class VoiceValidationTests(unittest.TestCase):
         session = self.manager.snapshot()
         self.assertEqual(session["state"], "failed")
         self.assertEqual(session["failureCode"], "session_expired")
+
+    def test_expired_session_rejects_mutation_without_prior_snapshot(self) -> None:
+        operations = {
+            "confirm": lambda manager, session: manager.confirm(
+                session_id=session["sessionId"],
+                step_id=session["currentStep"]["id"],
+                heard=True,
+            ),
+            "retry": lambda manager, session: manager.retry(
+                session_id=session["sessionId"],
+                step_id=session["currentStep"]["id"],
+            ),
+            "abort": lambda manager, session: manager.abort(
+                session_id=session["sessionId"],
+            ),
+            "record_event": lambda manager, session: manager.record_event(
+                {
+                    "event": "turn_accepted",
+                    "surface": "local",
+                    "stepId": session["currentStep"]["id"],
+                }
+            ),
+        }
+        for name, operation in operations.items():
+            with self.subTest(operation=name):
+                clock = FakeClock()
+                root = self.root / name
+                manager = VoiceValidationManager(root=root, now=clock, ttl_sec=1800)
+                started = manager.start(
+                    suite=SUITE_ID,
+                    surfaces=("local",),
+                    capabilities=READY_CAPABILITIES,
+                )["session"]
+                clock.advance(1800)
+
+                result = operation(manager, started)
+
+                self.assertFalse(result["ok"])
+                self.assertEqual(result["session"]["state"], "failed")
+                self.assertEqual(result["session"]["failureCode"], "session_expired")
+                report = (
+                    root
+                    / "voice_validation"
+                    / "reports"
+                    / f"{started['sessionId']}.json"
+                )
+                self.assertTrue(report.exists())
+
+    def test_expired_preflight_cannot_be_resumed_without_prior_snapshot(self) -> None:
+        blocked = {
+            **READY_CAPABILITIES,
+            "voiceLocal": {
+                "state": "unavailable",
+                "ready": False,
+                "blockers": [{"code": "local_mic_capture_not_ready"}],
+            },
+        }
+        session = self.manager.start(
+            suite=SUITE_ID,
+            surfaces=("local",),
+            capabilities=blocked,
+        )["session"]
+        self.assertEqual(session["state"], "preflight")
+        self.clock.advance(1800)
+
+        result = self.manager.resume_after_preflight(capabilities=READY_CAPABILITIES)
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["session"]["state"], "failed")
+        self.assertEqual(result["session"]["failureCode"], "session_expired")
+
+    def test_runtime_event_emission_rejects_expired_active_file(self) -> None:
+        session = self.start()
+        self.clock.advance(1800)
+
+        with patch("evelyn_core.voice_validation.time.time", new=self.clock):
+            emitted = emit_voice_validation_event(
+                "local",
+                "turn_accepted",
+                root=self.root,
+                session_id=session["sessionId"],
+                step_id=session["currentStep"]["id"],
+            )
+
+        self.assertIsNone(emitted)
+        events = self.root / "voice_validation" / "events" / f"{session['sessionId']}.jsonl"
+        self.assertFalse(events.exists())
+
+    def test_runtime_event_emission_rejects_explicit_foreign_session_and_step(self) -> None:
+        session = self.start()
+
+        for session_id, step_id in (
+            ("foreign-session", session["currentStep"]["id"]),
+            (session["sessionId"], "03-mood"),
+        ):
+            with self.subTest(session_id=session_id, step_id=step_id):
+                emitted = emit_voice_validation_event(
+                    "local",
+                    "turn_accepted",
+                    root=self.root,
+                    session_id=session_id,
+                    step_id=step_id,
+                    now=self.clock,
+                )
+                self.assertIsNone(emitted)
+
+        events = self.root / "voice_validation" / "events" / f"{session['sessionId']}.jsonl"
+        self.assertFalse(events.exists())
+
+    def test_runtime_event_emission_accepts_current_and_paired_interrupt_steps(self) -> None:
+        session = self.start()
+        current = emit_voice_validation_event(
+            "local",
+            "turn_accepted",
+            root=self.root,
+            session_id=session["sessionId"],
+            step_id=session["currentStep"]["id"],
+            now=self.clock,
+        )
+        self.assertIsNotNone(current)
+        self.assertEqual(current["stepId"], "01-wake")
+
+        paired_root = self.root / "paired-interrupt"
+        paired_manager = VoiceValidationManager(root=paired_root, now=self.clock)
+        paired_session = paired_manager.start(
+            suite=SUITE_ID,
+            surfaces=("local",),
+            capabilities=READY_CAPABILITIES,
+        )["session"]
+        active_path = paired_root / "voice_validation" / "active.json"
+        active = json.loads(active_path.read_text(encoding="utf-8"))
+        active["surface"] = "local"
+        active["currentStep"] = {
+            "id": "07-barge-source",
+            "kind": "barge_source",
+            "interruptStepId": "08-barge-interrupt",
+        }
+        active_path.write_text(json.dumps(active), encoding="utf-8")
+
+        interrupt = emit_voice_validation_event(
+            "local",
+            "barge_in_accepted",
+            root=paired_root,
+            session_id=paired_session["sessionId"],
+            step_id="08-barge-interrupt",
+            now=self.clock,
+        )
+
+        self.assertIsNotNone(interrupt)
+        self.assertEqual(interrupt["stepId"], "08-barge-interrupt")
+
+    def test_invalid_persisted_expiry_fails_closed_without_crashing(self) -> None:
+        session = self.start()
+        active_path = self.root / "voice_validation" / "active.json"
+
+        for invalid_expiry in (None, "not-a-number", "NaN", "Infinity", -1):
+            with self.subTest(expires_at=invalid_expiry):
+                active = json.loads(active_path.read_text(encoding="utf-8"))
+                active["state"] = "running"
+                active["expiresAt"] = invalid_expiry
+                active_path.write_text(json.dumps(active), encoding="utf-8")
+
+                recovered = VoiceValidationManager(root=self.root, now=self.clock)
+                snapshot = recovered.snapshot()
+
+                self.assertEqual(snapshot["sessionId"], session["sessionId"])
+                self.assertEqual(snapshot["state"], "failed")
+                self.assertEqual(snapshot["failureCode"], "session_expiry_invalid")
 
     def test_partial_jsonl_tail_is_ignored_until_complete(self) -> None:
         session = self.start()

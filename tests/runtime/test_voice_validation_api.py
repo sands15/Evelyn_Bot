@@ -174,6 +174,41 @@ class VoiceValidationApiTests(unittest.IsolatedAsyncioTestCase):
                     "csrf_token_required",
                 )
 
+    async def test_expiry_discovered_by_retry_revokes_local_capture_consent(self):
+        now = [2_000.0]
+        self.manager.now = lambda: now[0]
+        preview = self.consent_manager.preview()
+        pending = self.consent_manager.begin_apply(
+            confirm_token=preview["confirmToken"]
+        )
+        self.consent_manager.finish_apply(
+            lease_id=pending["leaseId"],
+            applied=True,
+            capture_ready=True,
+        )
+        started_response = await self.client.post(
+            "/api/control-page/voice-validation/start",
+            headers=self.headers(),
+            json={"suite": "voice-p0.v1", "surfaces": ["local"]},
+        )
+        started = await started_response.json()
+        now[0] += 1800
+
+        response = await self.client.post(
+            "/api/control-page/voice-validation/retry",
+            headers=self.headers(),
+            json={
+                "sessionId": started["session"]["sessionId"],
+                "stepId": started["session"]["currentStep"]["id"],
+            },
+        )
+        payload = await response.json()
+
+        self.assertEqual(response.status, 409)
+        self.assertEqual(payload["session"]["failureCode"], "session_expired")
+        self.assertEqual(self.consent_manager.status()["state"], "inactive")
+        self.assertIn(False, [call.args[0] for call in self.mic_control.await_args_list])
+
     async def test_preflight_options_is_non_mutating(self):
         response = await self.client.options(
             "/api/control-page/voice-validation/start",

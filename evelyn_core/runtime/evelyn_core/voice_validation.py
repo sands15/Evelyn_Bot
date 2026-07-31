@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import statistics
@@ -172,6 +173,16 @@ def _safe_json_read(path: Path) -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) else None
 
 
+def _session_expiry_state(session: dict[str, Any], *, now: float) -> str:
+    try:
+        expires_at = float(session.get("expiresAt"))
+    except (TypeError, ValueError):
+        return "invalid"
+    if not math.isfinite(expires_at) or expires_at <= 0:
+        return "invalid"
+    return "expired" if float(now) >= expires_at else "active"
+
+
 def _event_id(event: dict[str, Any]) -> str:
     explicit = str(event.get("eventId") or "").strip()
     if explicit:
@@ -209,10 +220,14 @@ def active_validation_context(
     surface: str,
     root: Path | None = None,
     prefer_interrupt: bool = False,
+    now: Any | None = None,
 ) -> dict[str, str] | None:
     base = Path(root or get_runtime_artifacts_root()) / "voice_validation"
     active = _safe_json_read(base / "active.json")
     if not active or active.get("state") != "running" or active.get("surface") != surface:
+        return None
+    current_time = (now or time.time)()
+    if _session_expiry_state(active, now=current_time) != "active":
         return None
     current = active.get("currentStep")
     if not isinstance(current, dict) or not current.get("id"):
@@ -236,16 +251,35 @@ def emit_voice_validation_event(
     root: Path | None = None,
     session_id: str | None = None,
     step_id: str | None = None,
+    now: Any | None = None,
     **payload: Any,
 ) -> dict[str, Any] | None:
     normalized_surface = str(surface or "").strip().lower()
     if normalized_surface not in ALLOWED_SURFACES:
         return None
-    context = active_validation_context(surface=normalized_surface, root=root)
-    resolved_session_id = str(session_id or (context or {}).get("sessionId") or "")
-    resolved_step_id = str(step_id or (context or {}).get("stepId") or "")
-    if not resolved_session_id or not resolved_step_id:
+    contexts = [
+        active_validation_context(surface=normalized_surface, root=root, now=now),
+        active_validation_context(
+            surface=normalized_surface,
+            root=root,
+            prefer_interrupt=True,
+            now=now,
+        ),
+    ]
+    context = next(
+        (
+            candidate
+            for candidate in contexts
+            if candidate
+            and (not session_id or str(session_id) == candidate.get("sessionId"))
+            and (not step_id or str(step_id) == candidate.get("stepId"))
+        ),
+        None,
+    )
+    if context is None:
         return None
+    resolved_session_id = str(context.get("sessionId") or "")
+    resolved_step_id = str(context.get("stepId") or "")
     base = Path(root or get_runtime_artifacts_root()) / "voice_validation"
     record = sanitize_validation_event(
         {
@@ -276,23 +310,42 @@ def emit_transcript_validation_event(
     **payload: Any,
 ) -> dict[str, Any] | None:
     base_root = Path(root or get_runtime_artifacts_root())
+    normalized_surface = str(surface or "").strip().lower()
+    contexts = [
+        active_validation_context(
+            surface=normalized_surface,
+            root=base_root,
+            prefer_interrupt=prefer_interrupt,
+        ),
+        active_validation_context(
+            surface=normalized_surface,
+            root=base_root,
+            prefer_interrupt=not prefer_interrupt,
+        ),
+    ]
+    context = next(
+        (
+            candidate
+            for candidate in contexts
+            if candidate
+            and (not session_id or str(session_id) == candidate.get("sessionId"))
+            and (not step_id or str(step_id) == candidate.get("stepId"))
+        ),
+        None,
+    )
+    if context is None:
+        return None
     active = _safe_json_read(base_root / "voice_validation" / "active.json")
     if not active:
         return None
-    resolved_session_id = str(session_id or active.get("sessionId") or "")
-    current = active.get("currentStep") if isinstance(active.get("currentStep"), dict) else {}
-    resolved_step_id = str(
-        step_id
-        or (current.get("interruptStepId") if prefer_interrupt else None)
-        or current.get("id")
-        or ""
-    )
+    resolved_session_id = str(context.get("sessionId") or "")
+    resolved_step_id = str(context.get("stepId") or "")
     step = next(
         (
             item
             for item in active.get("_steps") or []
             if isinstance(item, dict)
-            and item.get("surface") == surface
+            and item.get("surface") == normalized_surface
             and item.get("id") == resolved_step_id
         ),
         None,
@@ -305,7 +358,7 @@ def emit_transcript_validation_event(
         keywords=step.get("keywords") or (),
     )
     return emit_voice_validation_event(
-        surface,
+        normalized_surface,
         "stt_final",
         root=base_root,
         session_id=resolved_session_id,
@@ -383,10 +436,14 @@ class VoiceValidationManager:
     def _expire_if_needed(self) -> None:
         if not self._session or self._session.get("state") in TERMINAL_STATES:
             return
-        expires_at = float(self._session.get("expiresAt") or 0.0)
-        if expires_at and self.now() > expires_at:
+        expiry_state = _session_expiry_state(self._session, now=self.now())
+        if expiry_state != "active":
             self._session["state"] = "failed"
-            self._session["failureCode"] = "session_expired"
+            self._session["failureCode"] = (
+                "session_expired"
+                if expiry_state == "expired"
+                else "session_expiry_invalid"
+            )
             self._session["completedAt"] = self.now()
             self._finalize_report()
 
@@ -429,6 +486,7 @@ class VoiceValidationManager:
         capabilities: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         with self._lock:
+            self._expire_if_needed()
             if suite != SUITE_ID:
                 return {"ok": False, "error": "unsupported_suite", "suite": suite}
             normalized_surfaces: list[str] = []
@@ -505,8 +563,12 @@ class VoiceValidationManager:
 
     def resume_after_preflight(self, *, capabilities: dict[str, Any]) -> dict[str, Any]:
         with self._lock:
+            self._expire_if_needed()
             if not self._session or self._session.get("state") != "preflight":
-                return {"ok": False, "error": "preflight_session_required"}
+                result = {"ok": False, "error": "preflight_session_required"}
+                if self._session:
+                    result["session"] = self._public_session(capabilities=capabilities)
+                return result
             requested = self._session.get("surfaces") or []
             blockers = []
             for surface in requested:
@@ -560,8 +622,12 @@ class VoiceValidationManager:
 
     def record_event(self, event: dict[str, Any]) -> dict[str, Any]:
         with self._lock:
+            self._expire_if_needed()
             if not self._session or self._session.get("state") != "running":
-                return {"ok": False, "error": "validation_session_not_running"}
+                result = {"ok": False, "error": "validation_session_not_running"}
+                if self._session:
+                    result["session"] = self._public_session()
+                return result
             surface = str(event.get("surface") or self._session.get("surface") or "")
             step_id = str(
                 event.get("stepId")
@@ -587,6 +653,7 @@ class VoiceValidationManager:
                 root=self.paths.root.parent,
                 session_id=str(self._session.get("sessionId") or ""),
                 step_id=step_id,
+                now=self.now,
                 **{
                     key: value
                     for key, value in event.items()
@@ -794,11 +861,16 @@ class VoiceValidationManager:
 
     def confirm(self, *, session_id: str, step_id: str, heard: bool) -> dict[str, Any]:
         with self._lock:
+            self._expire_if_needed()
             self._ingest_event_log()
             if not self._session or session_id != self._session.get("sessionId"):
                 return {"ok": False, "error": "validation_session_not_found"}
             if self._session.get("state") != "running":
-                return {"ok": False, "error": "validation_session_not_running"}
+                return {
+                    "ok": False,
+                    "error": "validation_session_not_running",
+                    "session": self._public_session(),
+                }
             current = self._session.get("currentStep") or {}
             if step_id != current.get("id"):
                 return {"ok": False, "error": "validation_step_not_current"}
@@ -824,10 +896,15 @@ class VoiceValidationManager:
 
     def retry(self, *, session_id: str, step_id: str) -> dict[str, Any]:
         with self._lock:
+            self._expire_if_needed()
             if not self._session or session_id != self._session.get("sessionId"):
                 return {"ok": False, "error": "validation_session_not_found"}
             if self._session.get("state") != "running":
-                return {"ok": False, "error": "validation_session_not_running"}
+                return {
+                    "ok": False,
+                    "error": "validation_session_not_running",
+                    "session": self._public_session(),
+                }
             current = self._session.get("currentStep") or {}
             if step_id != current.get("id"):
                 return {"ok": False, "error": "validation_step_not_current"}
@@ -866,10 +943,15 @@ class VoiceValidationManager:
 
     def abort(self, *, session_id: str) -> dict[str, Any]:
         with self._lock:
+            self._expire_if_needed()
             if not self._session or session_id != self._session.get("sessionId"):
                 return {"ok": False, "error": "validation_session_not_found"}
             if self._session.get("state") in TERMINAL_STATES:
-                return {"ok": False, "error": "validation_session_terminal"}
+                return {
+                    "ok": False,
+                    "error": "validation_session_terminal",
+                    "session": self._public_session(),
+                }
             self._session["state"] = "aborted"
             self._session["completedAt"] = self.now()
             self._finalize_report()

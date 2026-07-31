@@ -1262,13 +1262,14 @@ async def voice_validation_confirm_handler(request: web.Request) -> web.StreamRe
         payload = await request.json()
     except Exception:
         payload = {}
-    result = get_voice_validation_manager().confirm(
+    validation_manager = get_voice_validation_manager()
+    result = validation_manager.confirm(
         session_id=str((payload or {}).get("sessionId") or ""),
         step_id=str((payload or {}).get("stepId") or ""),
         heard=bool((payload or {}).get("heard")),
     )
-    session = dict(result.get("session") or {})
-    if result.get("ok") and session.get("state") in {"passed", "failed", "aborted"}:
+    session = dict(result.get("session") or validation_manager.snapshot())
+    if session.get("state") in {"passed", "failed", "aborted"}:
         await _reconcile_voice_capture_consent(
             request.app,
             validation_session=session,
@@ -1281,10 +1282,17 @@ async def voice_validation_retry_handler(request: web.Request) -> web.StreamResp
         payload = await request.json()
     except Exception:
         payload = {}
-    result = get_voice_validation_manager().retry(
+    validation_manager = get_voice_validation_manager()
+    result = validation_manager.retry(
         session_id=str((payload or {}).get("sessionId") or ""),
         step_id=str((payload or {}).get("stepId") or ""),
     )
+    session = dict(result.get("session") or validation_manager.snapshot())
+    if session.get("state") in {"passed", "failed", "aborted"}:
+        await _reconcile_voice_capture_consent(
+            request.app,
+            validation_session=session,
+        )
     return json_response(result, status=200 if result.get("ok") else 409)
 
 
@@ -1293,11 +1301,12 @@ async def voice_validation_abort_handler(request: web.Request) -> web.StreamResp
         payload = await request.json()
     except Exception:
         payload = {}
-    result = get_voice_validation_manager().abort(
+    validation_manager = get_voice_validation_manager()
+    result = validation_manager.abort(
         session_id=str((payload or {}).get("sessionId") or ""),
     )
-    session = dict(result.get("session") or {})
-    if result.get("ok"):
+    session = dict(result.get("session") or validation_manager.snapshot())
+    if session.get("state") in {"passed", "failed", "aborted"}:
         await _reconcile_voice_capture_consent(
             request.app,
             validation_session=session,

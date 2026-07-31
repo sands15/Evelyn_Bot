@@ -373,8 +373,13 @@ fail-closed 요청한다. 상태는 제어 메타데이터만 저장하고 음�
 검증 FSM은 이제 현재 단계와 연결된 interrupt 단계 외 이벤트를 거부하고,
 재생 완료 전 청취 확인과 지난 단계 재시도를 허용하지 않는다. STT 불일치,
 중복 final/turn/playback/interrupt, 완료·취소 동시 관측, 무음 구간 활동도
-즉시 실패다. 로컬 브리지는 재생 직전 일반 큐 발화를 TTS cleanup에서 잃지
-않고, clone voice fallback도 단일 playback owner 안에서 수행한다. 전체 음성
+즉시 실패다. 30분 TTL은 상태 조회뿐 아니라 preflight 재개, confirm, retry,
+abort와 runtime event 기록에서도 먼저 적용하며, mutation 중 만료를 발견해도
+로컬 마이크 동의 임대를 즉시 해제한다. 따라서 사전 GET이 없어도 만료된 세션은
+새 증거나 동작을 받아들이지 않는다. 누락·비수치·비유한 만료값과 현재 세션/단계에
+맞지 않는 명시적 runtime event ID도 fail-closed한다. 로컬 브리지는 재생 직전
+일반 큐 발화를 TTS cleanup에서 잃지 않고, clone voice fallback도 단일 playback
+owner 안에서 수행한다. 전체 음성
 414개와 관련 검증/runtime/UI 50개는 통과했지만 이는 합성 입력과 mock 장치를
 사용한 계약 검증이다.
 
