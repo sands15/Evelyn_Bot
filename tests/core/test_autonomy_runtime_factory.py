@@ -134,6 +134,31 @@ class AutonomyRuntimeFactoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(self.engines[11], first)
         self.assertEqual(first.poll_interval_sec, 4.0)
 
+    def test_factory_injects_minecraft_route_without_eager_effect(
+        self,
+    ) -> None:
+        route_executor = object()
+        build_calls: list[int] = []
+        self.deps = AutonomyRuntimeFactoryDeps(
+            **{
+                **self.deps.__dict__,
+                "build_minecraft_executor": (
+                    lambda guild_id: build_calls.append(guild_id)
+                    or route_executor
+                ),
+            }
+        )
+
+        engine = self.create_engine()
+
+        self.assertEqual(build_calls, [11])
+        self.assertIs(
+            engine.executor.executors["minecraft"],
+            route_executor,
+        )
+        self.assertEqual(engine.executor.enabled_domains, set())
+        self.assertFalse(engine._executor_connected)
+
     async def test_notify_cleans_text_and_uses_preferred_channel(self) -> None:
         engine = self.create_engine()
 

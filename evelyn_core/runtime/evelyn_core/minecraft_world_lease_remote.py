@@ -8,6 +8,17 @@ from typing import Any, Awaitable, Callable
 from urllib import error as urllib_error
 from urllib import request as urllib_request
 
+from .minecraft_action_contract import (
+    MINECRAFT_ACTION_RESULT_SCHEMA,
+    bind_minecraft_action_request,
+    validate_minecraft_action_dispatch,
+    validate_minecraft_action_request,
+    validate_minecraft_action_result,
+)
+from .minecraft_mode_composition import (
+    MINECRAFT_STOPPED_OUTCOME,
+    minecraft_stop_confirmed,
+)
 from .minecraft_world_lease_contract import (
     MINECRAFT_WORLD_LEASE_SECRET_SCHEMA,
     MINECRAFT_WORLD_LEASE_STATUS_SCHEMA,
@@ -55,6 +66,9 @@ class MinecraftWorldLeaseRemote:
         sleep: Callable[[float], Awaitable[Any]] = asyncio.sleep,
         poll_interval_sec: float = 5.0,
         request_timeout_sec: float = 5.0,
+        action_poll_interval_sec: float = 0.25,
+        action_timeout_sec: float = 120.0,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         self.base_url = str(base_url or "").rstrip("/")
         if not self.base_url:
@@ -71,6 +85,18 @@ class MinecraftWorldLeaseRemote:
             0.5,
             float(request_timeout_sec),
         )
+        self.action_poll_interval_sec = max(
+            0.01,
+            float(action_poll_interval_sec),
+        )
+        self.action_timeout_sec = max(
+            self.action_poll_interval_sec,
+            float(action_timeout_sec),
+        )
+        self.monotonic = monotonic
+        self._action_execution_lock = asyncio.Lock()
+        self._inflight_actions: dict[str, dict[str, Any]] = {}
+        self._shutting_down = False
         self._watchdog_task: Any = None
         self._status: dict[str, Any] = {
             "schema": "minecraft_world_lease.status.v1",
@@ -84,6 +110,8 @@ class MinecraftWorldLeaseRemote:
         }
 
     def initialize(self) -> dict[str, Any]:
+        self._inflight_actions.clear()
+        self._shutting_down = False
         self._status = {
             "schema": "minecraft_world_lease.status.v1",
             "state": "remote_initializing",
@@ -382,6 +410,7 @@ class MinecraftWorldLeaseRemote:
             raise RuntimeError(
                 "minecraft_world_lease_response_invalid"
             )
+        self._inflight_actions.clear()
         return dict(result)
 
     async def disconnect(self, guild_id: int) -> dict[str, Any]:
@@ -397,6 +426,7 @@ class MinecraftWorldLeaseRemote:
             raise RuntimeError(
                 "minecraft_world_lease_response_invalid"
             )
+        self._inflight_actions.clear()
         return dict(result)
 
     async def set_goal(
@@ -421,12 +451,373 @@ class MinecraftWorldLeaseRemote:
             )
         return dict(result)
 
+    def _bound_remote_action(
+        self,
+        request: dict[str, Any],
+        dispatch: dict[str, Any],
+    ) -> dict[str, Any]:
+        status = self.status()
+        lease = status.get("lease")
+        if (
+            status.get("active") is not True
+            or not isinstance(lease, dict)
+        ):
+            raise RuntimeError(
+                "minecraft_world_authorization_required"
+            )
+        return bind_minecraft_action_request(
+            request,
+            goal_run_id=str(dispatch.get("goalRunId") or ""),
+            lease_id=str(lease.get("leaseId") or ""),
+            lease_process_nonce=str(
+                status.get("processNonce") or ""
+            ),
+        )
+
+    async def _cancel_uncertain_dispatch(
+        self,
+        guild_id: int,
+        request: dict[str, Any],
+    ) -> None:
+        try:
+            response = await self._call(
+                "POST",
+                "/internal/minecraft-world-lease/cancel_action",
+                payload={
+                    "guildId": int(guild_id),
+                    "actionRunId": request["actionRunId"],
+                },
+                mutation=True,
+            )
+            result = response.get("result")
+            if not isinstance(result, dict):
+                raise RuntimeError(
+                    "minecraft_action_cancel_unverified"
+                )
+            bound = self._bound_remote_action(request, result)
+            cancelled = validate_minecraft_action_dispatch(
+                result,
+                expected_request=bound,
+            )
+            if cancelled["status"] != "cancelled":
+                raise RuntimeError(
+                    "minecraft_action_cancel_unverified"
+                )
+            return
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            await self._verified_disconnect_after_uncertain_cancel(
+                guild_id
+            )
+
+    async def _verified_disconnect_after_uncertain_cancel(
+        self,
+        guild_id: int,
+    ) -> dict[str, Any]:
+        """Revoke the owner lease and verify the whole runtime stopped.
+
+        This is deliberately separate from the ordinary remote ``disconnect``
+        adapter: cancellation cleanup must not discard local correlation merely
+        because an authenticated response happened to contain a mapping.
+        """
+
+        response = await self._call(
+            "POST",
+            "/internal/minecraft-world-lease/disconnect",
+            payload={"guildId": int(guild_id)},
+            mutation=True,
+        )
+        result = response.get("result")
+        lease_status = self.status()
+        if (
+            not isinstance(result, dict)
+            or result.get("outcome_verified") is not True
+            or result.get("outcome_code")
+            != MINECRAFT_STOPPED_OUTCOME
+            or not minecraft_stop_confirmed(result)
+            or lease_status.get("active") is not False
+            or lease_status.get("lease") is not None
+            or lease_status.get("auditReady") is not True
+            or lease_status.get("statusReady") is not True
+        ):
+            raise RuntimeError(
+                "minecraft_action_cancel_unverified"
+            )
+        self._inflight_actions.clear()
+        return dict(result)
+
+    async def _cancel_or_disconnect_inflight(
+        self,
+        guild_id: int,
+        action_run_id: str,
+    ) -> bool:
+        """Finish cancellation despite caller cancellation.
+
+        Returns whether an additional cancellation request arrived while the
+        cleanup steps were shielded.  Correlation is retained unless exact
+        cancellation or a verified owner-level stop succeeds.
+        """
+
+        cancellation_requested = False
+        try:
+            _, cancelled = await self._await_shutdown_step(
+                self.cancel_action(guild_id, action_run_id)
+            )
+            return cancelled
+        except asyncio.CancelledError:
+            cancellation_requested = True
+        except Exception:
+            pass
+        try:
+            _, cancelled = await self._await_shutdown_step(
+                self._verified_disconnect_after_uncertain_cancel(
+                    guild_id
+                )
+            )
+            return cancellation_requested or cancelled
+        except asyncio.CancelledError as exc:
+            raise RuntimeError(
+                "minecraft_action_cancel_unverified"
+            ) from exc
+        except Exception as exc:
+            raise RuntimeError(
+                "minecraft_action_cancel_unverified"
+            ) from exc
+
+    async def dispatch_action(
+        self,
+        guild_id: int,
+        request: dict[str, Any],
+    ) -> dict[str, Any]:
+        if self._shutting_down:
+            raise RuntimeError("minecraft_world_owner_shutting_down")
+        normalized = validate_minecraft_action_request(
+            request,
+            bound=False,
+        )
+        if normalized["guildId"] != int(guild_id):
+            raise RuntimeError("minecraft_action_correlation_mismatch")
+        if self._inflight_actions:
+            raise RuntimeError("minecraft_world_action_busy")
+        try:
+            response = await self._call(
+                "POST",
+                "/internal/minecraft-world-lease/action",
+                payload={
+                    "guildId": int(guild_id),
+                    "request": normalized,
+                },
+                mutation=True,
+            )
+            result = response.get("result")
+            if not isinstance(result, dict):
+                raise RuntimeError(
+                    "minecraft_world_lease_response_invalid"
+                )
+            bound = self._bound_remote_action(normalized, result)
+            dispatch = validate_minecraft_action_dispatch(
+                result,
+                expected_request=bound,
+            )
+            if dispatch["status"] not in {"accepted", "running"}:
+                raise RuntimeError(
+                    "minecraft_action_dispatch_unverified"
+                )
+        except asyncio.CancelledError:
+            _, cancelled = await self._await_shutdown_step(
+                self._cancel_uncertain_dispatch(
+                    guild_id,
+                    normalized,
+                )
+            )
+            _ = cancelled
+            raise
+        except Exception:
+            _, cancelled = await self._await_shutdown_step(
+                self._cancel_uncertain_dispatch(
+                    guild_id,
+                    normalized,
+                )
+            )
+            if cancelled:
+                raise asyncio.CancelledError()
+            raise
+        self._inflight_actions[dispatch["actionRunId"]] = {
+            "guildId": int(guild_id),
+            "request": bound,
+        }
+        return dispatch
+
+    async def action_status(
+        self,
+        guild_id: int,
+        *,
+        action_run_id: str,
+    ) -> dict[str, Any]:
+        raw_run_id = str(action_run_id or "")
+        run_id = raw_run_id.strip()
+        record = self._inflight_actions.get(run_id)
+        if (
+            run_id != raw_run_id
+            or not isinstance(record, dict)
+            or record.get("guildId") != int(guild_id)
+            or not isinstance(record.get("request"), dict)
+        ):
+            raise RuntimeError("minecraft_action_not_inflight")
+        request = validate_minecraft_action_request(
+            record["request"],
+            bound=True,
+        )
+        response = await self._call(
+            "POST",
+            "/internal/minecraft-world-lease/action_status",
+            payload={
+                "guildId": int(guild_id),
+                "goalRunId": request["goalRunId"],
+                "actionRunId": request["actionRunId"],
+                "actionKey": request["actionKey"],
+                "contractCode": request["contractCode"],
+            },
+            mutation=True,
+        )
+        result = response.get("result")
+        if not isinstance(result, dict):
+            raise RuntimeError(
+                "minecraft_world_lease_response_invalid"
+            )
+        if result.get("schema") == MINECRAFT_ACTION_RESULT_SCHEMA:
+            verified = validate_minecraft_action_result(
+                result,
+                expected_request=request,
+            )
+            self._inflight_actions.pop(
+                request["actionRunId"],
+                None,
+            )
+            return verified
+        status = validate_minecraft_action_dispatch(
+            result,
+            expected_request=request,
+        )
+        if status["status"] in {"failed", "cancelled"}:
+            self._inflight_actions.pop(
+                request["actionRunId"],
+                None,
+            )
+        return status
+
+    async def cancel_action(
+        self,
+        guild_id: int,
+        action_run_id: str,
+    ) -> dict[str, Any]:
+        raw_run_id = str(action_run_id or "")
+        run_id = raw_run_id.strip()
+        record = self._inflight_actions.get(run_id)
+        if (
+            run_id != raw_run_id
+            or not isinstance(record, dict)
+            or record.get("guildId") != int(guild_id)
+            or not isinstance(record.get("request"), dict)
+        ):
+            raise RuntimeError("minecraft_action_not_inflight")
+        request = validate_minecraft_action_request(
+            record["request"],
+            bound=True,
+        )
+        response = await self._call(
+            "POST",
+            "/internal/minecraft-world-lease/cancel_action",
+            payload={
+                "guildId": int(guild_id),
+                "actionRunId": request["actionRunId"],
+            },
+            mutation=True,
+        )
+        result = response.get("result")
+        if not isinstance(result, dict):
+            raise RuntimeError(
+                "minecraft_action_cancel_unverified"
+            )
+        cancelled = validate_minecraft_action_dispatch(
+            result,
+            expected_request=request,
+        )
+        if cancelled["status"] != "cancelled":
+            raise RuntimeError(
+                "minecraft_action_cancel_unverified"
+            )
+        self._inflight_actions.pop(run_id, None)
+        return cancelled
+
+    async def execute_action(
+        self,
+        guild_id: int,
+        request: dict[str, Any],
+    ) -> dict[str, Any]:
+        async with self._action_execution_lock:
+            dispatch = await self.dispatch_action(
+                guild_id,
+                request,
+            )
+            action_run_id = dispatch["actionRunId"]
+            deadline = self.monotonic() + self.action_timeout_sec
+            try:
+                while self.monotonic() < deadline:
+                    status = await self.action_status(
+                        guild_id,
+                        action_run_id=action_run_id,
+                    )
+                    if status.get("schema") == MINECRAFT_ACTION_RESULT_SCHEMA:
+                        return status
+                    if status.get("status") == "failed":
+                        raise RuntimeError("minecraft_action_failed")
+                    if status.get("status") == "cancelled":
+                        raise RuntimeError("minecraft_action_cancelled")
+                    await self.sleep(self.action_poll_interval_sec)
+                await self.cancel_action(guild_id, action_run_id)
+                raise RuntimeError("minecraft_action_timeout")
+            except asyncio.CancelledError:
+                await self._cancel_or_disconnect_inflight(
+                    guild_id,
+                    action_run_id,
+                )
+                raise
+            except Exception:
+                if action_run_id in self._inflight_actions:
+                    cancellation_requested = (
+                        await self._cancel_or_disconnect_inflight(
+                            guild_id,
+                            action_run_id,
+                        )
+                    )
+                    if cancellation_requested:
+                        raise asyncio.CancelledError()
+                raise
+
+    async def _await_shutdown_step(
+        self,
+        awaitable: Awaitable[Any],
+    ) -> tuple[Any, bool]:
+        step = asyncio.create_task(awaitable)
+        cancellation_requested = False
+        while not step.done():
+            try:
+                await asyncio.shield(step)
+            except asyncio.CancelledError:
+                cancellation_requested = True
+                continue
+        return step.result(), cancellation_requested
+
     async def shutdown(
         self,
         *,
         reason: str = "shutdown",
     ) -> dict[str, Any]:
         _ = reason
+        self._shutting_down = True
+        cancellation_requested = False
         task = self._watchdog_task
         self._watchdog_task = None
         if task is not None and not task.done():
@@ -434,11 +825,61 @@ class MinecraftWorldLeaseRemote:
             try:
                 await task
             except asyncio.CancelledError:
-                pass
-        return {
+                current = asyncio.current_task()
+                cancellation_requested = bool(
+                    current is not None and current.cancelling()
+                )
+        cancelled_actions = 0
+        fallback_disconnects = 0
+        shutdown_error: BaseException | None = None
+        records = tuple(self._inflight_actions.values())
+        for record in records:
+            guild_id = int(record.get("guildId") or 0)
+            request = record.get("request") or {}
+            action_run_id = str(
+                request.get("actionRunId") or ""
+            )
+            try:
+                _, cancelled = await self._await_shutdown_step(
+                    self.cancel_action(guild_id, action_run_id)
+                )
+                cancellation_requested = (
+                    cancellation_requested or cancelled
+                )
+                cancelled_actions += 1
+                continue
+            except asyncio.CancelledError as exc:
+                shutdown_error = exc
+            except Exception as exc:
+                shutdown_error = exc
+            try:
+                _, cancelled = await self._await_shutdown_step(
+                    self._verified_disconnect_after_uncertain_cancel(
+                        guild_id
+                    )
+                )
+                cancellation_requested = (
+                    cancellation_requested or cancelled
+                )
+                fallback_disconnects += 1
+                shutdown_error = None
+            except asyncio.CancelledError as exc:
+                shutdown_error = exc
+            except Exception as exc:
+                shutdown_error = exc
+        if shutdown_error is not None:
+            raise RuntimeError(
+                "minecraft_action_cancel_unverified"
+            ) from shutdown_error
+        result = {
             "stopped": False,
             "action": "remote_delegation_closed",
+            "actionsCancelled": cancelled_actions,
+            "fallbackDisconnects": fallback_disconnects,
         }
+        if cancellation_requested:
+            raise asyncio.CancelledError()
+        return result
 
 
 __all__ = [

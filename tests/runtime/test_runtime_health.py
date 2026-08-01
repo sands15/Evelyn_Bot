@@ -54,6 +54,7 @@ def fake_probe(states: dict[str, str]):
                             "telemetryFresh": True,
                             "minecraftConnected": True,
                             "taskContractReady": True,
+                            "effectObserverReady": True,
                             "autonomyActive": True,
                         },
                         "taskContract": {
@@ -132,6 +133,7 @@ def fake_probe(states: dict[str, str]):
                             "telemetryFresh": True,
                             "minecraftConnected": False,
                             "taskContractReady": True,
+                            "effectObserverReady": True,
                             "autonomyActive": True,
                         },
                         "taskContract": {
@@ -168,6 +170,7 @@ def fake_probe(states: dict[str, str]):
                             "telemetryFresh": True,
                             "minecraftConnected": True,
                             "taskContractReady": True,
+                            "effectObserverReady": True,
                             "autonomyActive": True,
                         },
                         "taskContract": {

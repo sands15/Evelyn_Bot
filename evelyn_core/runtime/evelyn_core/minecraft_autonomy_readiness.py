@@ -13,6 +13,7 @@ MINECRAFT_READINESS_DEPENDENCIES = (
     "telemetryFresh",
     "minecraftConnected",
     "taskContractReady",
+    "effectObserverReady",
     "autonomyActive",
 )
 MINECRAFT_READINESS_BLOCKERS = {
@@ -21,6 +22,7 @@ MINECRAFT_READINESS_BLOCKERS = {
     "telemetryFresh": "telemetry_stale",
     "minecraftConnected": "minecraft_not_connected",
     "taskContractReady": "task_contract_unavailable",
+    "effectObserverReady": "effect_observer_unavailable",
     "autonomyActive": "autonomy_not_active",
 }
 
@@ -33,6 +35,7 @@ def expected_readiness_state(
     if (
         not dependencies["worldLeaseAuthorized"]
         or not dependencies["taskContractReady"]
+        or not dependencies["effectObserverReady"]
         or not dependencies["autonomyActive"]
     ):
         return "blocked"

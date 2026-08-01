@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import ast
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import AsyncMock, Mock
 
 
 REPO_ROOT = next(path for path in Path(__file__).resolve().parents if (path / "main.py").exists())
@@ -13,6 +15,8 @@ if str(RUNTIME_ROOT) not in sys.path:
 
 from evelyn_core.autonomy_runtime_composition import (  # noqa: E402
     AutonomyRuntimeComposition,
+    MinecraftAutonomyRouteComposition,
+    MinecraftAutonomyRouteCompositionDeps,
 )
 
 
@@ -65,6 +69,40 @@ class AutonomyRuntimeCompositionTests(unittest.TestCase):
         self.assertNotIn("globals()", source)
         self.assertNotIn("import main", source)
         self.assertIn("AutonomyRuntimeFactoryDeps(", source)
+
+    def test_minecraft_route_composition_requires_a_router(self) -> None:
+        create_engine = Mock()
+        composition = MinecraftAutonomyRouteComposition(
+            MinecraftAutonomyRouteCompositionDeps(
+                create_engine=create_engine,
+                get_router=lambda _guild_id: None,
+            )
+        )
+
+        self.assertFalse(asyncio.run(composition.enable(7)))
+        self.assertFalse(asyncio.run(composition.disable(7)))
+        self.assertFalse(composition.is_enabled(7))
+        create_engine.assert_called_once_with(7)
+
+    def test_minecraft_route_composition_controls_exact_domain(self) -> None:
+        router = Mock()
+        router.enable_domain = AsyncMock(return_value=True)
+        router.disable_domain = AsyncMock(return_value=True)
+        router.is_domain_enabled.return_value = True
+        create_engine = Mock()
+        composition = MinecraftAutonomyRouteComposition(
+            MinecraftAutonomyRouteCompositionDeps(
+                create_engine=create_engine,
+                get_router=lambda guild_id: router if guild_id == 9 else None,
+            )
+        )
+
+        self.assertTrue(asyncio.run(composition.enable(9)))
+        self.assertTrue(asyncio.run(composition.disable(9)))
+        self.assertTrue(composition.is_enabled(9))
+        router.enable_domain.assert_awaited_once_with("minecraft")
+        router.disable_domain.assert_awaited_once_with("minecraft")
+        router.is_domain_enabled.assert_called_once_with("minecraft")
 
 
 if __name__ == "__main__":

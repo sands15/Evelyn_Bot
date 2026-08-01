@@ -52,6 +52,33 @@ function fakeAgent(bot, candidates) {
     };
 }
 
+function worldEffectBinding(overrides = {}) {
+    return {
+        goalRunId: 'goal-run-1',
+        actionRunId: 'action-run-1',
+        actionKey: 'minecraft:find_food_source',
+        contractCode: 'mindcraft_food_recovery.v1',
+        leaseId: 'lease-1',
+        leaseProcessNonce: 'lease-process-1',
+        producerNonce: 'producer-nonce-1',
+        ...overrides,
+    };
+}
+
+function foodReserveSubgoal() {
+    return {
+        id: 'restore_food_reserve',
+        kind: 'obtain',
+        target: '#food',
+        quantity: 3,
+        success: {kind: 'inventory', target: '#food', count: 3},
+        allowedTargets: ['#food', 'bread'],
+        allowedCommands: ['!collectBlocks'],
+        actionBudget: 8,
+        attempts: 0,
+    };
+}
+
 test('world state groups inventory into progression tags', () => {
     const snapshot = buildWorldState(fakeBot([
         ['oak_log', 2],
@@ -623,6 +650,346 @@ test('subgoal completes only when the post-action world state satisfies its pred
         );
         assert.equal(manager.state.currentSubgoal, null);
         assert.equal(manager.state.completedSubgoals.at(-1).id, 'obtain_initial_logs');
+    } finally {
+        fs.rmSync(directory, {recursive: true, force: true});
+    }
+});
+
+test('world effect candidate is content-free, action-bound, and emitted once', async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'evelyn-goal-effect-candidate-'));
+    try {
+        const bot = fakeBot([], {food: 6});
+        const manager = new EvelynGoalManager(
+            fakeAgent(bot, []),
+            {
+                statePath: path.join(directory, 'state.json'),
+                mode: 'gated',
+                ultimateGoal: 'Defeat the Ender Dragon',
+                worldEffectBinding: worldEffectBinding(),
+            },
+        );
+        await manager.initialize();
+        manager.state.currentSubgoal = foodReserveSubgoal();
+        const before = buildWorldState(fakeBot([], {food: 6}));
+        const after = buildWorldState(fakeBot([['bread', 3]], {food: 6}));
+
+        await manager.recordActionResult(
+            '!collectBlocks("bread", 3)',
+            'Collected three bread.',
+            before,
+            after,
+            {autonomous: true},
+        );
+
+        const candidate = bot.evelynGoalState.postcondition_candidate;
+        assert.ok(candidate);
+        assert.equal(manager.state.autonomyState, 'manual_pause');
+        assert.equal(
+            manager.state.manualPauseReason,
+            'world_effect_candidate_published',
+        );
+        assert.deepEqual(
+            manager.gateCommand('!collectBlocks("bread", 1)', {autonomous: true}),
+            {
+                allowed: false,
+                relevant: false,
+                reason: 'autonomy_not_active',
+            },
+        );
+        assert.deepEqual(candidate, {
+            schema: 'mindcraft.postcondition-candidate.v1',
+            producerNonce: 'producer-nonce-1',
+            goalRunId: 'goal-run-1',
+            actionRunId: 'action-run-1',
+            actionKey: 'minecraft:find_food_source',
+            contractCode: 'mindcraft_food_recovery.v1',
+            leaseId: 'lease-1',
+            leaseProcessNonce: 'lease-process-1',
+            candidateSequence: 1,
+            executionSequence: 1,
+            observedAt: candidate.observedAt,
+            evidenceCode: 'mindcraft_explicit_postcondition_candidate',
+            postconditionCode: 'food_reserve_ready',
+            beforeSatisfied: false,
+            afterSatisfied: true,
+            autonomous: true,
+            relevant: true,
+            actionSucceeded: true,
+            worldChanged: true,
+            goalProgress: true,
+            predicateCompleted: true,
+            completionDelta: 1,
+            blockedDelta: 0,
+            contentFree: true,
+        });
+        assert.ok(Number.isFinite(candidate.observedAt));
+        for (const forbidden of [
+            'goal', 'command', 'result', 'inventory', 'position',
+            'coordinates', 'target', 'predicate',
+        ]) {
+            assert.equal(Object.hasOwn(candidate, forbidden), false);
+        }
+
+        const firstCandidate = structuredClone(candidate);
+        manager.state.currentSubgoal = foodReserveSubgoal();
+        await manager.recordActionResult(
+            '!collectBlocks("cooked_beef", 3)',
+            'Collected three cooked beef.',
+            before,
+            buildWorldState(fakeBot([['cooked_beef', 3]], {food: 6})),
+            {autonomous: true},
+        );
+        assert.deepEqual(
+            bot.evelynGoalState.postcondition_candidate,
+            firstCandidate,
+        );
+    } finally {
+        fs.rmSync(directory, {recursive: true, force: true});
+    }
+});
+
+test('lease-bound world effect run never restores prior action state', () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'evelyn-goal-effect-fresh-'));
+    try {
+        const statePath = path.join(directory, 'state.json');
+        fs.writeFileSync(statePath, JSON.stringify({
+            version: 1,
+            ultimateGoal: 'Defeat the Ender Dragon',
+            mode: 'gated',
+            autonomyState: 'manual_pause',
+            manualPauseReason: 'world_effect_candidate_published',
+            currentSubgoal: foodReserveSubgoal(),
+            completedSubgoals: [],
+            blockedSubgoals: [],
+            recentActions: [],
+            executionSequence: 99,
+        }));
+
+        const manager = new EvelynGoalManager(
+            fakeAgent(fakeBot([], {food: 6}), []),
+            {
+                statePath,
+                mode: 'gated',
+                ultimateGoal: 'Defeat the Ender Dragon',
+                worldEffectBinding: worldEffectBinding({
+                    goalRunId: 'goal-run-fresh',
+                    actionRunId: 'action-run-fresh',
+                }),
+            },
+        );
+
+        assert.equal(manager.state.autonomyState, 'active');
+        assert.equal(manager.state.manualPauseReason, null);
+        assert.equal(manager.state.executionSequence, 0);
+        assert.equal(manager.state.currentSubgoal, null);
+    } finally {
+        fs.rmSync(directory, {recursive: true, force: true});
+    }
+});
+
+test('world effect environment binding is typed and fails closed', async () => {
+    const environment = {
+        MINDCRAFT_WORLD_EFFECT_GOAL_RUN_ID: 'goal-run-env',
+        MINDCRAFT_WORLD_EFFECT_ACTION_RUN_ID: 'action-run-env',
+        MINDCRAFT_WORLD_EFFECT_ACTION_KEY: 'minecraft:find_food_source',
+        MINDCRAFT_WORLD_EFFECT_CONTRACT_CODE: 'mindcraft_food_recovery.v1',
+        MINDCRAFT_WORLD_EFFECT_LEASE_ID: 'lease-env',
+        MINDCRAFT_WORLD_EFFECT_LEASE_PROCESS_NONCE: 'lease-process-env',
+        MINDCRAFT_WORLD_EFFECT_PRODUCER_NONCE: 'producer-env',
+    };
+    const previous = Object.fromEntries(
+        Object.keys(environment).map((key) => [key, process.env[key]])
+    );
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'evelyn-goal-effect-env-'));
+    try {
+        Object.assign(process.env, environment);
+        const bot = fakeBot([], {food: 6});
+        const manager = new EvelynGoalManager(
+            fakeAgent(bot, []),
+            {
+                statePath: path.join(directory, 'valid-state.json'),
+                mode: 'gated',
+                ultimateGoal: 'Defeat the Ender Dragon',
+            },
+        );
+        await manager.initialize();
+        manager.state.currentSubgoal = foodReserveSubgoal();
+        await manager.recordActionResult(
+            '!collectBlocks("bread", 3)',
+            'Collected three bread.',
+            buildWorldState(fakeBot([], {food: 6})),
+            buildWorldState(fakeBot([['bread', 3]], {food: 6})),
+            {autonomous: true},
+        );
+        assert.equal(
+            bot.evelynGoalState.postcondition_candidate.goalRunId,
+            'goal-run-env',
+        );
+
+        const invalidBot = fakeBot([], {food: 6});
+        const invalidManager = new EvelynGoalManager(
+            fakeAgent(invalidBot, []),
+            {
+                statePath: path.join(directory, 'invalid-state.json'),
+                mode: 'gated',
+                ultimateGoal: 'Defeat the Ender Dragon',
+                worldEffectBinding: worldEffectBinding({
+                    actionKey: 'minecraft:gather_logs',
+                }),
+            },
+        );
+        await invalidManager.initialize();
+        invalidManager.state.currentSubgoal = foodReserveSubgoal();
+        await invalidManager.recordActionResult(
+            '!collectBlocks("bread", 3)',
+            'Collected three bread.',
+            buildWorldState(fakeBot([], {food: 6})),
+            buildWorldState(fakeBot([['bread', 3]], {food: 6})),
+            {autonomous: true},
+        );
+        assert.equal(
+            invalidBot.evelynGoalState.postcondition_candidate,
+            null,
+        );
+    } finally {
+        for (const [key, value] of Object.entries(previous)) {
+            if (value === undefined) delete process.env[key];
+            else process.env[key] = value;
+        }
+        fs.rmSync(directory, {recursive: true, force: true});
+    }
+});
+
+test('world effect candidate requires every semantic action condition', async () => {
+    const scenarios = [
+        {
+            name: 'manual action',
+            current: foodReserveSubgoal(),
+            command: '!collectBlocks("bread", 3)',
+            result: 'Collected three bread.',
+            before: buildWorldState(fakeBot([], {food: 6})),
+            after: buildWorldState(fakeBot([['bread', 3]], {food: 6})),
+            autonomous: false,
+        },
+        {
+            name: 'failed action result',
+            current: foodReserveSubgoal(),
+            command: '!collectBlocks("bread", 3)',
+            result: 'Could not collect bread.',
+            before: buildWorldState(fakeBot([], {food: 6})),
+            after: buildWorldState(fakeBot([['bread', 3]], {food: 6})),
+            autonomous: true,
+        },
+        {
+            name: 'unchanged world',
+            current: foodReserveSubgoal(),
+            command: '!collectBlocks("bread", 3)',
+            result: 'No change.',
+            before: buildWorldState(fakeBot([], {food: 6})),
+            after: buildWorldState(fakeBot([], {food: 6})),
+            autonomous: true,
+        },
+        {
+            name: 'irrelevant action',
+            current: foodReserveSubgoal(),
+            command: '!collectBlocks("sandstone", 1)',
+            result: 'Collected sandstone.',
+            before: buildWorldState(fakeBot([], {food: 6})),
+            after: buildWorldState(fakeBot([['bread', 3]], {food: 6})),
+            autonomous: true,
+        },
+        {
+            name: 'different completed predicate',
+            current: {
+                ...foodReserveSubgoal(),
+                id: 'obtain_food_recovery_log',
+                target: '#logs',
+                success: {kind: 'inventory', target: '#logs', count: 1},
+                allowedTargets: ['#logs', 'oak_log'],
+            },
+            command: '!collectBlocks("oak_log", 1)',
+            result: 'Collected one oak log.',
+            before: buildWorldState(fakeBot([], {food: 6})),
+            after: buildWorldState(fakeBot([['oak_log', 1]], {food: 6})),
+            autonomous: true,
+        },
+    ];
+
+    for (const scenario of scenarios) {
+        const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'evelyn-goal-effect-reject-'));
+        try {
+            const bot = fakeBot([], {food: 6});
+            const manager = new EvelynGoalManager(
+                fakeAgent(bot, []),
+                {
+                    statePath: path.join(directory, 'state.json'),
+                    mode: 'gated',
+                    ultimateGoal: 'Defeat the Ender Dragon',
+                    worldEffectBinding: worldEffectBinding(),
+                },
+            );
+            await manager.initialize();
+            manager.state.currentSubgoal = scenario.current;
+            await manager.recordActionResult(
+                scenario.command,
+                scenario.result,
+                scenario.before,
+                scenario.after,
+                {autonomous: scenario.autonomous},
+            );
+            assert.equal(
+                bot.evelynGoalState.postcondition_candidate,
+                null,
+                scenario.name,
+            );
+        } finally {
+            fs.rmSync(directory, {recursive: true, force: true});
+        }
+    }
+});
+
+test('initial and periodic predicate completion never publish effect candidates', async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'evelyn-goal-effect-passive-'));
+    try {
+        const initialBot = fakeBot([['bread', 3]], {food: 6});
+        const initialManager = new EvelynGoalManager(
+            fakeAgent(initialBot, []),
+            {
+                statePath: path.join(directory, 'initial-state.json'),
+                mode: 'gated',
+                ultimateGoal: 'Defeat the Ender Dragon',
+                worldEffectBinding: worldEffectBinding(),
+            },
+        );
+        initialManager.state.currentSubgoal = foodReserveSubgoal();
+        await initialManager.initialize();
+        assert.equal(initialManager.state.currentSubgoal, null);
+        assert.equal(
+            initialBot.evelynGoalState.postcondition_candidate,
+            null,
+        );
+
+        const periodicBot = fakeBot([['bread', 3]], {food: 6});
+        const periodicManager = new EvelynGoalManager(
+            fakeAgent(periodicBot, []),
+            {
+                statePath: path.join(directory, 'periodic-state.json'),
+                mode: 'gated',
+                ultimateGoal: 'Defeat the Ender Dragon',
+                worldEffectBinding: worldEffectBinding({
+                    goalRunId: 'goal-run-2',
+                    actionRunId: 'action-run-2',
+                }),
+            },
+        );
+        await periodicManager.initialize();
+        periodicManager.state.currentSubgoal = foodReserveSubgoal();
+        await periodicManager.update();
+        assert.equal(periodicManager.state.currentSubgoal, null);
+        assert.equal(
+            periodicBot.evelynGoalState.postcondition_candidate,
+            null,
+        );
     } finally {
         fs.rmSync(directory, {recursive: true, force: true});
     }

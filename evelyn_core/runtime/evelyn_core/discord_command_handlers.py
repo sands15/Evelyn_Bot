@@ -15,12 +15,16 @@ except Exception:  # pragma: no cover
     commands = _FallbackCommands()
 
 from .text import clean_text
+from .autonomy_authorization import ASSISTANT_AUTONOMY_ACTIONS
 from .discord_commands import (
     control_command_check_failure_message,
     is_control_command_authorized_payload,
 )
+from .minecraft_action_contract import MINECRAFT_ROUTE_ACTIONS
 from .minecraft_mode_composition import (
+    MINECRAFT_CONNECTED_OUTCOME,
     MINECRAFT_STOPPED_OUTCOME,
+    minecraft_connection_confirmed,
     minecraft_stop_confirmed,
 )
 from .public_error_contract import public_failure_message
@@ -146,6 +150,8 @@ async def handle_autonomy_start_command(
     *,
     autonomy_enabled: bool,
     get_or_create_autonomy_engine: Any,
+    is_minecraft_autonomy_route_enabled: Any,
+    enable_minecraft_autonomy_route: Any,
     grant_autonomy_authorization: Any,
     revoke_autonomy_authorization: Any,
     guild_only_message: Any,
@@ -156,15 +162,56 @@ async def handle_autonomy_start_command(
     if not autonomy_enabled:
         await ctx.send("자율 행동 기능이 설정에서 비활성화되어 있어.")
         return
+    guild_id = ctx.guild.id
+    try:
+        engine = get_or_create_autonomy_engine(guild_id)
+    except Exception:
+        await ctx.send("❌ 자율 행동 시작에 실패했어.")
+        return
+
+    try:
+        minecraft_route_enabled = bool(
+            is_minecraft_autonomy_route_enabled(guild_id)
+        )
+    except Exception:
+        minecraft_route_enabled = False
+
+    state = getattr(engine, "state", None)
+    engine_running = bool(
+        getattr(state, "enabled", False)
+        or getattr(state, "status", "") == "running"
+    )
+    if engine_running:
+        try:
+            await engine.stop()
+        except Exception:
+            revoke_autonomy_authorization(
+                guild_id,
+                reason_code="start_failed",
+            )
+            await ctx.send("❌ 자율 행동 시작에 실패했고 승인은 폐기했어.")
+            return
+    if minecraft_route_enabled:
+        try:
+            minecraft_route_enabled = bool(
+                await enable_minecraft_autonomy_route(guild_id)
+            )
+        except Exception:
+            minecraft_route_enabled = False
+
+    scopes = list(ASSISTANT_AUTONOMY_ACTIONS)
+    if minecraft_route_enabled:
+        scopes.extend(MINECRAFT_ROUTE_ACTIONS)
     grant = grant_autonomy_authorization(
-        ctx.guild.id,
+        guild_id,
         f"discord_user:{getattr(ctx.author, 'id', '')}",
+        scopes=tuple(dict.fromkeys(scopes)),
     )
     if not isinstance(grant, dict) or not grant.get("ok"):
         await ctx.send("❌ 자율 행동 승인을 발급하지 못했어.")
         return
     try:
-        await get_or_create_autonomy_engine(ctx.guild.id).start()
+        await engine.start()
         await ctx.send("🤖 자율 행동 루프를 시작했어.")
     except Exception:
         revoke_autonomy_authorization(
@@ -382,6 +429,7 @@ async def handle_minecraft_connect_command(
     ctx: Any,
     *,
     enable_minecraft_mode: Any,
+    enable_minecraft_autonomy_route: Any,
     build_reply: Any,
     guild_only_message: Any,
     log: Any = print,
@@ -397,6 +445,20 @@ async def handle_minecraft_connect_command(
             ),
             source="discord_command",
         )
+        if (
+            isinstance(observed, dict)
+            and observed.get("outcome_verified") is True
+            and observed.get("outcome_code")
+            == MINECRAFT_CONNECTED_OUTCOME
+            and minecraft_connection_confirmed(observed)
+        ):
+            try:
+                await enable_minecraft_autonomy_route(ctx.guild.id)
+            except Exception as exc:
+                log(
+                    "마인크래프트 자율 경로 활성화 보류 type=",
+                    type(exc).__name__,
+                )
         reply_text = build_reply(observed)
         await ctx.send(reply_text)
     except Exception as exc:
@@ -411,12 +473,20 @@ async def handle_minecraft_disconnect_command(
     ctx: Any,
     *,
     disable_minecraft_mode: Any,
+    disable_minecraft_autonomy_route: Any,
     guild_only_message: Any,
     log: Any = print,
 ) -> None:
     if ctx.guild is None:
         await ctx.send(guild_only_message())
         return
+    try:
+        await disable_minecraft_autonomy_route(ctx.guild.id)
+    except Exception as exc:
+        log(
+            "마인크래프트 자율 경로 비활성화 오류 type=",
+            type(exc).__name__,
+        )
     try:
         stopped = await disable_minecraft_mode(ctx.guild.id)
         if not (

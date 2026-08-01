@@ -48,13 +48,11 @@ from evelyn_core.audio import (
     is_probably_silent, prepare_stt_audio, resample_audio_float, slice_audio_window,
 )
 from evelyn_core.autonomy import AutonomyEngine
-from evelyn_core.autonomy_authorization import (
-    ASSISTANT_AUTONOMY_ACTIONS,
-    AutonomyAuthorizationManager,
-)
+from evelyn_core.autonomy_authorization import AutonomyAuthorizationManager
 from evelyn_core.autonomy_observation_state import pick_recent_user_text
 from evelyn_core.autonomy_router import ResolveRouteExecutorRuntimeDeps, RoutedAutonomyExecutor, get_routed_autonomy_executor_from_runtime
 from evelyn_core.autonomy_runtime_composition import AutonomyRuntimeComposition, AutonomyRuntimeCompositionDeps
+from evelyn_core import autonomy_runtime_composition as autonomy_route_composition
 from evelyn_core.config import *
 from evelyn_core.console_output import ConsoleOutputFilter
 from evelyn_core.main_runtime_config import *
@@ -62,6 +60,7 @@ from evelyn_core.instance_lock_runtime import InstanceLockManager, build_instanc
 from evelyn_core.guild_runtime_reset_composition import GuildRuntimeResetComposition, GuildRuntimeResetCompositionDeps
 from evelyn_core.memory import *
 from evelyn_core.minecraft_autonomy_client import MinecraftAutonomyClient
+from evelyn_core.minecraft_autonomy_executor import build_minecraft_autonomy_executor_from_runtime
 from evelyn_core.memory_writebehind import (
     mark_memory_writer_status, memory_writebehind_task_key, run_memory_writebehind_steps, should_replace_existing_memory_task,
 )
@@ -77,7 +76,7 @@ from evelyn_core.minecraft_runtime_snapshot import (
 )
 from evelyn_core.minecraft_live_state_runtime import MinecraftLiveObservationRuntimeDeps, observe_live_minecraft_state_from_runtime
 from evelyn_core.minecraft_mode_composition import MinecraftModeComposition, MinecraftModeCompositionDeps
-from evelyn_core.minecraft_world_lease import MinecraftWorldLeaseOwner
+from evelyn_core.minecraft_world_lease import build_local_minecraft_world_lease_owner
 from evelyn_core.minecraft_world_lease_remote import MinecraftWorldLeaseRemote
 from evelyn_core.question_shaping import enforce_question_limits
 from evelyn_core.proactive_questions import evaluate_proactive_question_gate, select_question_to_ask
@@ -656,6 +655,9 @@ autonomy_runtime_composition = AutonomyRuntimeComposition(
         get_authorized_actions=autonomy_authorization_manager.authorized_actions,
         authorize_action=autonomy_authorization_manager.authorize, record_action_outcome=autonomy_authorization_manager.record_outcome,
         commit_session_continuity=session_continuity_checkpoint.commit_completed_turn_async, log=print,
+        build_minecraft_executor=partial(build_minecraft_autonomy_executor_from_runtime,
+            get_world_lease_owner=lambda: minecraft_world_lease_owner,
+            get_client=lambda: get_minecraft_client(), now=time.time),
     )
 )
 build_autonomy_runtime_factory_deps = (
@@ -1608,17 +1610,14 @@ minecraft_mode_composition = MinecraftModeComposition(
         sleep=asyncio.sleep,
     )
 )
-
 wait_for_minecraft_ready = minecraft_mode_composition.wait_for_minecraft_ready
-local_minecraft_world_lease_owner = MinecraftWorldLeaseOwner(
+local_minecraft_world_lease_owner = build_local_minecraft_world_lease_owner(
     status_path=RUNTIME_ARTIFACTS_ROOT / "minecraft_world_lease" / "status.json",
     events_dir=RUNTIME_ARTIFACTS_ROOT / "minecraft_world_lease" / "events",
-    get_runtime_status=lambda: get_minecraft_client().status(),
+    get_client=get_minecraft_client,
     enable_mode=minecraft_mode_composition.enable_minecraft_mode,
     disable_mode=minecraft_mode_composition.disable_minecraft_mode,
-    set_goal=lambda goal, **kwargs: get_minecraft_client().set_goal(goal, **kwargs),
-    create_task=asyncio.create_task,
-    log=print,
+    create_task=asyncio.create_task, log=print,
 )
 minecraft_world_lease_owner = (
     MinecraftWorldLeaseRemote(
@@ -1632,7 +1631,9 @@ minecraft_world_lease_owner = (
 enable_minecraft_mode = minecraft_world_lease_owner.connect
 disable_minecraft_mode = minecraft_world_lease_owner.disconnect
 set_minecraft_goal = minecraft_world_lease_owner.set_goal
-
+minecraft_autonomy_route_composition = autonomy_route_composition.MinecraftAutonomyRouteComposition(
+    autonomy_route_composition.MinecraftAutonomyRouteCompositionDeps(
+        create_engine=get_or_create_autonomy_engine, get_router=get_routed_autonomy_executor))
 control_page_ui_dependency_composition = ControlPageUiDependencyComposition(
     ControlPageUiDependencyCompositionDeps(
         memory_index_dir=Path(MEMORY_ROOT) / "memory_index",
@@ -2419,14 +2420,18 @@ discord_app_composition = DiscordAppComposition(
             autonomy_enabled=AUTONOMY_ENABLED,
             get_or_create_autonomy_engine=get_or_create_autonomy_engine, autonomy_engines=autonomy_engines,
             get_routed_autonomy_executor=get_routed_autonomy_executor, build_autonomy_status_reply=build_autonomy_status_command_text,
-            grant_autonomy_authorization=lambda guild_id, issuer_ref: autonomy_authorization_manager.grant(
+            grant_autonomy_authorization=lambda guild_id, issuer_ref, *, scopes: autonomy_authorization_manager.grant(
                 guild_id=guild_id, issuer_ref=issuer_ref,
-                source="discord_command", scopes=ASSISTANT_AUTONOMY_ACTIONS,
+                source="discord_command", scopes=scopes,
             ),
             revoke_autonomy_authorization=autonomy_authorization_manager.revoke,
             get_autonomy_authorization_status=autonomy_authorization_manager.status,
             command_session=build_discord_command_session_runtime_deps, enable_minecraft_mode=enable_minecraft_mode,
-            disable_minecraft_mode=disable_minecraft_mode, get_minecraft_client=get_minecraft_client,
+            enable_minecraft_autonomy_route=minecraft_autonomy_route_composition.enable,
+            disable_minecraft_mode=disable_minecraft_mode,
+            disable_minecraft_autonomy_route=minecraft_autonomy_route_composition.disable,
+            is_minecraft_autonomy_route_enabled=minecraft_autonomy_route_composition.is_enabled,
+            get_minecraft_client=get_minecraft_client,
             get_minecraft_world_lease_status=minecraft_world_lease_owner.status,
             set_minecraft_goal=set_minecraft_goal,
             build_minecraft_connect_reply=build_minecraft_connect_reply, build_minecraft_goal_missing_reply=build_minecraft_goal_missing_reply,

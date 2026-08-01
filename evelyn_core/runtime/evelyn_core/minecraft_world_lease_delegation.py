@@ -97,6 +97,49 @@ async def execute_minecraft_world_lease_delegation(
         if not goal:
             raise RuntimeError("minecraft_goal_missing")
         result = await owner.set_goal(guild_id, goal)
+    elif normalized_action == "action":
+        if set(payload) != {"guildId", "request"}:
+            raise RuntimeError(
+                "minecraft_action_delegation_fields_invalid"
+            )
+        request = payload.get("request")
+        if not isinstance(request, dict):
+            raise RuntimeError(
+                "minecraft_action_request_invalid"
+            )
+        result = await owner.dispatch_action(
+            guild_id,
+            dict(request),
+        )
+    elif normalized_action == "action_status":
+        if set(payload) != {
+            "guildId",
+            "goalRunId",
+            "actionRunId",
+            "actionKey",
+            "contractCode",
+        }:
+            raise RuntimeError(
+                "minecraft_action_status_fields_invalid"
+            )
+        result = await owner.action_status(
+            guild_id,
+            goal_run_id=str(payload.get("goalRunId") or ""),
+            action_run_id=str(payload.get("actionRunId") or ""),
+            action_key=str(payload.get("actionKey") or ""),
+            contract_code=str(
+                payload.get("contractCode") or ""
+            ),
+        )
+    elif normalized_action == "cancel_action":
+        if set(payload) != {"guildId", "actionRunId"}:
+            raise RuntimeError(
+                "minecraft_action_cancel_fields_invalid"
+            )
+        result = await owner.cancel_action(
+            guild_id,
+            str(payload.get("actionRunId") or ""),
+        )
     else:
         raise RuntimeError(
             "minecraft_world_delegation_action_invalid"

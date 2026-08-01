@@ -25,13 +25,23 @@ class MindcraftRuntimeContractTests(unittest.TestCase):
         self.world_action_lock_path = (
             Path(self.temp_dir.name) / "world_action.lock"
         )
-        lock_path_patch = patch.object(
-            mindcraft_service,
-            "WORLD_ACTION_LOCK_PATH",
-            self.world_action_lock_path,
+        self.process_identity_path = (
+            Path(self.temp_dir.name) / "process_identity.json"
         )
-        lock_path_patch.start()
-        self.addCleanup(lock_path_patch.stop)
+        for active_patch in (
+            patch.object(
+                mindcraft_service,
+                "WORLD_ACTION_LOCK_PATH",
+                self.world_action_lock_path,
+            ),
+            patch.object(
+                mindcraft_service,
+                "MINDCRAFT_PROCESS_IDENTITY_PATH",
+                self.process_identity_path,
+            ),
+        ):
+            active_patch.start()
+            self.addCleanup(active_patch.stop)
 
     def test_default_goal_targets_the_ender_dragon_with_survival_prerequisites(self) -> None:
         goal = mindcraft_service.DEFAULT_GOAL
@@ -317,6 +327,7 @@ class MindcraftRuntimeContractTests(unittest.TestCase):
             running=True,
             telemetry_fresh=True,
             connected=True,
+            effect_observer_ready=True,
             telemetry={
                 "goal_manager": {
                     "mode": "shadow",
@@ -347,6 +358,7 @@ class MindcraftRuntimeContractTests(unittest.TestCase):
             running=False,
             telemetry_fresh=False,
             connected=False,
+            effect_observer_ready=False,
             telemetry={},
         )
 
@@ -360,6 +372,7 @@ class MindcraftRuntimeContractTests(unittest.TestCase):
                 "telemetry_stale",
                 "minecraft_not_connected",
                 "task_contract_unavailable",
+                "effect_observer_unavailable",
                 "autonomy_not_active",
             ],
         )
@@ -405,6 +418,177 @@ class MindcraftRuntimeContractTests(unittest.TestCase):
         self.assertEqual(snapshot["lastErrorCode"], "mindcraft_stop_failed")
         self.assertEqual(snapshot["lastErrorType"], "OSError")
         self.assertNotIn("private host path", json.dumps(snapshot))
+
+    def test_inflight_restart_reaps_only_exact_durable_process_identity(
+        self,
+    ) -> None:
+        runtime = mindcraft_service.MindcraftRuntime()
+        birth_identity = (
+            "windows:987654"
+            if mindcraft_service.os.name == "nt"
+            else "linux:987654"
+        )
+        runtime._write_process_identity(
+            state="active",
+            pid=4321,
+            birth_identity=birth_identity,
+        )
+
+        with (
+            patch.object(
+                mindcraft_service,
+                "_process_birth_identity",
+                side_effect=[birth_identity, None],
+            ) as inspect_identity,
+            patch.object(
+                mindcraft_service,
+                "_terminate_process_identity",
+                return_value=True,
+            ) as terminate_identity,
+        ):
+            reconciled, error = runtime.reconcile_inflight_restart()
+
+        self.assertTrue(reconciled)
+        self.assertEqual(error, "")
+        self.assertEqual(inspect_identity.call_count, 2)
+        terminate_identity.assert_called_once_with(4321, birth_identity)
+        persisted = json.loads(
+            self.process_identity_path.read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            set(persisted),
+            {
+                "schema",
+                "state",
+                "pid",
+                "birthIdentity",
+                "updatedAt",
+                "contentFree",
+            },
+        )
+        self.assertEqual(persisted["state"], "stopped")
+        self.assertEqual(persisted["pid"], 0)
+        self.assertEqual(persisted["birthIdentity"], "")
+        self.assertTrue(persisted["contentFree"])
+
+    def test_inflight_restart_keeps_live_unreaped_identity_quarantined(
+        self,
+    ) -> None:
+        runtime = mindcraft_service.MindcraftRuntime()
+        birth_identity = (
+            "windows:987654"
+            if mindcraft_service.os.name == "nt"
+            else "linux:987654"
+        )
+        runtime._write_process_identity(
+            state="active",
+            pid=4321,
+            birth_identity=birth_identity,
+        )
+
+        with (
+            patch.object(
+                mindcraft_service,
+                "_process_birth_identity",
+                return_value=birth_identity,
+            ),
+            patch.object(
+                mindcraft_service,
+                "_terminate_process_identity",
+                return_value=False,
+            ) as terminate_identity,
+        ):
+            reconciled, error = runtime.reconcile_inflight_restart()
+
+        self.assertFalse(reconciled)
+        self.assertEqual(
+            error,
+            "minecraft_prior_process_stop_unverified",
+        )
+        terminate_identity.assert_called_once_with(4321, birth_identity)
+        persisted = json.loads(
+            self.process_identity_path.read_text(encoding="utf-8")
+        )
+        self.assertEqual(persisted["state"], "active")
+        self.assertEqual(persisted["pid"], 4321)
+        self.assertEqual(persisted["birthIdentity"], birth_identity)
+        self.assertTrue(persisted["contentFree"])
+
+    def test_inflight_restart_starting_marker_is_ambiguous_and_never_signalled(
+        self,
+    ) -> None:
+        runtime = mindcraft_service.MindcraftRuntime()
+        runtime._write_process_identity(state="starting")
+
+        with patch.object(
+            mindcraft_service,
+            "_terminate_process_identity",
+        ) as terminate_identity:
+            reconciled, error = runtime.reconcile_inflight_restart()
+
+        self.assertFalse(reconciled)
+        self.assertEqual(
+            error,
+            "minecraft_prior_process_start_ambiguous",
+        )
+        terminate_identity.assert_not_called()
+        persisted = json.loads(
+            self.process_identity_path.read_text(encoding="utf-8")
+        )
+        self.assertEqual(persisted["state"], "starting")
+        self.assertEqual(persisted["pid"], 0)
+        self.assertEqual(persisted["birthIdentity"], "")
+
+    def test_inflight_restart_missing_or_corrupt_identity_fails_closed(
+        self,
+    ) -> None:
+        runtime = mindcraft_service.MindcraftRuntime()
+        reconciled, error = runtime.reconcile_inflight_restart()
+        self.assertFalse(reconciled)
+        self.assertEqual(
+            error,
+            "minecraft_prior_process_identity_missing",
+        )
+
+        self.process_identity_path.write_text("{broken", encoding="utf-8")
+        reconciled, error = runtime.reconcile_inflight_restart()
+        self.assertFalse(reconciled)
+        self.assertEqual(
+            error,
+            "minecraft_prior_process_identity_invalid",
+        )
+
+    def test_inflight_restart_reused_pid_is_not_signalled(self) -> None:
+        runtime = mindcraft_service.MindcraftRuntime()
+        prefix = "windows" if mindcraft_service.os.name == "nt" else "linux"
+        old_identity = f"{prefix}:111111"
+        replacement_identity = f"{prefix}:222222"
+        runtime._write_process_identity(
+            state="active",
+            pid=4321,
+            birth_identity=old_identity,
+        )
+
+        with (
+            patch.object(
+                mindcraft_service,
+                "_process_birth_identity",
+                side_effect=[replacement_identity, replacement_identity],
+            ),
+            patch.object(
+                mindcraft_service,
+                "_terminate_process_identity",
+            ) as terminate_identity,
+        ):
+            reconciled, error = runtime.reconcile_inflight_restart()
+
+        self.assertTrue(reconciled)
+        self.assertEqual(error, "")
+        terminate_identity.assert_not_called()
+        persisted = json.loads(
+            self.process_identity_path.read_text(encoding="utf-8")
+        )
+        self.assertEqual(persisted["state"], "stopped")
 
     def test_overlay_blocks_slash_commands_and_uses_profile_cache(self) -> None:
         runtime_source = (

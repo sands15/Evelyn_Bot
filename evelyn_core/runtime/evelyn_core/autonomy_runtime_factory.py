@@ -65,6 +65,7 @@ class AutonomyRuntimeFactoryDeps:
     record_action_outcome: Callable[[int, str, dict[str, Any]], None]
     commit_session_continuity: Callable[..., Awaitable[dict[str, Any]]]
     log: Callable[..., Any]
+    build_minecraft_executor: Callable[[int], Any] | None = None
 
 
 def get_or_create_autonomy_engine_from_runtime(
@@ -378,7 +379,15 @@ def get_or_create_autonomy_engine_from_runtime(
                 maybe_ping_user_fn=default_maybe_ping_user,
                 refresh_cognitive_state_fn=default_refresh_cognitive_state,
             ),
-            executors={},
+            executors=(
+                {
+                    "minecraft": deps.build_minecraft_executor(
+                        guild_id
+                    )
+                }
+                if deps.build_minecraft_executor is not None
+                else {}
+            ),
         ),
         notify=notify,
         poll_interval_sec=deps.autonomy_poll_interval_sec,

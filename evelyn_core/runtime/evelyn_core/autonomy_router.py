@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import inspect
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
-from .autonomy import AutonomyExecutor
+from .autonomy import AutonomyExecutionContext, AutonomyExecutor
 from .autonomy_failure_contract import (
     AUTONOMY_EXECUTOR_OBSERVE_FAILED,
     AUTONOMY_FAILURE_DOMAINS,
@@ -80,7 +81,13 @@ class DefaultAutonomyExecutor:
             base.update(observed)
         return base
 
-    async def execute_step(self, step: dict[str, Any]) -> dict[str, Any]:
+    async def execute_step(
+        self,
+        step: dict[str, Any],
+        *,
+        context: AutonomyExecutionContext | None = None,
+    ) -> dict[str, Any]:
+        _ = context
         action = str(step.get("action", "idle"))
         if action == "send_followup":
             text = clean_text(str(step.get("text", "")))
@@ -241,12 +248,26 @@ class RoutedAutonomyExecutor:
         observed["enabled_domains"] = self.list_enabled_domains()
         return observed
 
-    async def execute_step(self, step: dict[str, Any]) -> dict[str, Any]:
+    async def execute_step(
+        self,
+        step: dict[str, Any],
+        *,
+        context: AutonomyExecutionContext | None = None,
+    ) -> dict[str, Any]:
         domain = clean_text(str(step.get("domain") or self.active_environment or "assistant")) or "assistant"
         if domain in self.executors and domain not in self.enabled_domains:
             return {"status": "blocked", "domain": domain, "reason": "executor_disabled"}
         executor = self.executors.get(domain, self.default_executor)
-        result = await executor.execute_step(step)
+        execute_step = executor.execute_step
+        try:
+            inspect.signature(execute_step).bind(
+                step,
+                context=context,
+            )
+        except (TypeError, ValueError):
+            result = await execute_step(step)
+        else:
+            result = await execute_step(step, context=context)
         if isinstance(result, dict):
             result.setdefault("domain", domain)
         return result

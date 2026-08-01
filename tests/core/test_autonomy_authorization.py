@@ -434,6 +434,35 @@ class AutonomyEngineAuthorizationTests(unittest.IsolatedAsyncioTestCase):
         engine.persist_state = lambda: None
         return engine
 
+    async def test_disconnect_failure_keeps_retry_state(self) -> None:
+        class FlakyDisconnectExecutor(DummyExecutor):
+            def __init__(inner_self) -> None:
+                super().__init__()
+                inner_self.fail_disconnect = True
+
+            async def disconnect(inner_self) -> None:
+                inner_self.disconnect_count += 1
+                if inner_self.fail_disconnect:
+                    raise RuntimeError(
+                        "minecraft_action_cancel_unverified"
+                    )
+
+        executor = FlakyDisconnectExecutor()
+        engine = self.engine(executor)
+        await engine._connect_executor_once()
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "minecraft_action_cancel_unverified",
+        ):
+            await engine._disconnect_executor_once()
+
+        self.assertTrue(engine._executor_connected)
+        executor.fail_disconnect = False
+        await engine._disconnect_executor_once()
+        self.assertFalse(engine._executor_connected)
+        self.assertEqual(executor.disconnect_count, 2)
+
     async def test_start_fails_closed_without_current_process_grant(
         self,
     ) -> None:
@@ -535,6 +564,64 @@ class AutonomyEngineAuthorizationTests(unittest.IsolatedAsyncioTestCase):
                 if row["actionRunId"] == action_run_id
             ]
             self.assertEqual(len(matching_checks), 2)
+
+    async def test_execution_context_reaches_typed_executor(
+        self,
+    ) -> None:
+        granted = self.manager.grant(
+            guild_id=7,
+            issuer_ref="discord_user:123",
+            source="discord_command",
+            scopes=["assistant:idle"],
+        )
+        captured: list[object] = []
+
+        class ContextExecutor(DummyExecutor):
+            async def execute_step(
+                inner_self,
+                step: dict,
+                *,
+                context: object = None,
+            ) -> dict:
+                captured.append(context)
+                return await super().execute_step(step)
+
+        engine = self.engine(ContextExecutor())
+        engine.state.enabled = True
+        engine.state.allowed_actions = ["assistant:idle"]
+        plan = AutonomyPlan(
+            goal_kind="idle",
+            summary="wait",
+            steps=[{"domain": "assistant", "action": "idle"}],
+        )
+
+        result = await engine.execute_next_step(plan)
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(len(captured), 1)
+        context = captured[0]
+        self.assertEqual(context.guild_id, 7)
+        self.assertEqual(context.action_key, "assistant:idle")
+        self.assertTrue(context.action_run_id)
+        self.assertEqual(
+            context.authorization_grant_id,
+            granted["grant"]["grantId"],
+        )
+
+        rows = self.read_events()
+        correlated = [
+            row
+            for row in rows
+            if row.get("actionRunId") == context.action_run_id
+        ]
+        self.assertEqual(
+            [row["event"] for row in correlated],
+            [
+                "action_authorized",
+                "action_authorized",
+                "action_outcome",
+            ],
+        )
 
     async def test_skip_reason_without_evidence_does_not_advance(
         self,

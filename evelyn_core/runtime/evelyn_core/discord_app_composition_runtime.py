@@ -104,7 +104,10 @@ class DiscordCommandCompositionDeps:
     get_autonomy_authorization_status: Callable[[], dict[str, Any]]
     command_session: DepsFactory
     enable_minecraft_mode: Callable[..., Any]
+    enable_minecraft_autonomy_route: Callable[..., Any]
     disable_minecraft_mode: Callable[..., Any]
+    disable_minecraft_autonomy_route: Callable[..., Any]
+    is_minecraft_autonomy_route_enabled: Callable[[int], bool]
     get_minecraft_client: Callable[[], Any]
     get_minecraft_world_lease_status: Callable[
         [],
@@ -383,6 +386,12 @@ class DiscordAppComposition:
             ctx,
             autonomy_enabled=deps.autonomy_enabled,
             get_or_create_autonomy_engine=deps.get_or_create_autonomy_engine,
+            is_minecraft_autonomy_route_enabled=(
+                deps.is_minecraft_autonomy_route_enabled
+            ),
+            enable_minecraft_autonomy_route=(
+                deps.enable_minecraft_autonomy_route
+            ),
             grant_autonomy_authorization=deps.grant_autonomy_authorization,
             revoke_autonomy_authorization=deps.revoke_autonomy_authorization,
             guild_only_message=deps.guild_only_message,
@@ -434,8 +443,12 @@ class DiscordAppComposition:
         await handle_minecraft_connect_command(
             ctx,
             enable_minecraft_mode=deps.enable_minecraft_mode,
+            enable_minecraft_autonomy_route=(
+                deps.enable_minecraft_autonomy_route
+            ),
             build_reply=deps.build_minecraft_connect_reply,
             guild_only_message=deps.guild_only_message,
+            log=deps.log,
         )
 
     async def minecraft_disconnect_command(self, ctx: Any) -> None:
@@ -444,7 +457,11 @@ class DiscordAppComposition:
         await handle_minecraft_disconnect_command(
             ctx,
             disable_minecraft_mode=deps.disable_minecraft_mode,
+            disable_minecraft_autonomy_route=(
+                deps.disable_minecraft_autonomy_route
+            ),
             guild_only_message=deps.guild_only_message,
+            log=deps.log,
         )
 
     async def minecraft_status_command(self, ctx: Any) -> None:

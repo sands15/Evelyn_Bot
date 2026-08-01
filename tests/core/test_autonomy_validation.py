@@ -36,6 +36,10 @@ from evelyn_core.minecraft_world_lease import (  # noqa: E402
 from evelyn_core.minecraft_world_lease_contract import (  # noqa: E402
     MINECRAFT_WORLD_LEASE_STATUS_SCHEMA,
 )
+from evelyn_core.mindcraft_world_effect import (  # noqa: E402
+    MINDCRAFT_WORLD_EFFECT_BINDING_SCHEMA,
+    MindcraftWorldEffectProjector,
+)
 
 
 class Clock:
@@ -101,11 +105,16 @@ class AutonomyValidationTests(unittest.TestCase):
         auth_process_nonce: str = "auth-process-1",
         lease_process_nonce: str = "lease-process-1",
         last_stop_outcome: str = "",
+        grant_id: str = "grant-1",
+        grant_scopes: list[str] | None = None,
+        lease_id: str = "lease-1",
     ) -> None:
         grant = {
-            "grantId": "grant-1",
+            "grantId": grant_id,
             "guildId": guild_id,
-            "scopes": ["assistant:check_status"],
+            "scopes": list(
+                grant_scopes or ["assistant:check_status"]
+            ),
             "issuedAt": self.clock.value - 1,
             "expiresAt": self.clock.value + 600,
         }
@@ -127,7 +136,7 @@ class AutonomyValidationTests(unittest.TestCase):
             },
         }
         lease = {
-            "leaseId": "lease-1",
+            "leaseId": lease_id,
             "guildId": guild_id,
             "expiresAt": self.clock.value + 600,
         }
@@ -215,6 +224,11 @@ class AutonomyValidationTests(unittest.TestCase):
         lease_id: str = "lease-1",
         process_nonce: str = "lease-process-1",
         guild_id: int | None = 7,
+        action_run_id: str = "",
+        authorization_grant_id: str = "",
+        goal_run_id: str = "",
+        action_key: str = "",
+        contract_code: str = "",
     ) -> dict:
         self.lease_event_index += 1
         payload = {
@@ -232,6 +246,16 @@ class AutonomyValidationTests(unittest.TestCase):
             "outcomeCode": outcome_code,
             "verified": verified,
         }
+        if action_run_id:
+            payload.update(
+                {
+                    "actionRunId": action_run_id,
+                    "authorizationGrantId": authorization_grant_id,
+                    "goalRunId": goal_run_id,
+                    "actionKey": action_key,
+                    "contractCode": contract_code,
+                }
+            )
         self.lease_events_path.parent.mkdir(parents=True, exist_ok=True)
         with self.lease_events_path.open("a", encoding="utf-8", newline="\n") as stream:
             stream.write(json.dumps(payload, ensure_ascii=False) + "\n")
@@ -300,6 +324,169 @@ class AutonomyValidationTests(unittest.TestCase):
             authorization_current=True,
         )
         self.write_statuses(grant_active=True)
+        return self.manager.snapshot()
+
+    def advance_to_minecraft_action_boundary(self) -> dict:
+        route_action = "minecraft:find_food_source"
+        route_scopes = ["assistant:check_status", route_action]
+        action_run_id = "minecraft-action-run-order"
+        goal_run_id = "minecraft-goal-run-order"
+        grant_id = "grant-minecraft-order"
+
+        self.write_statuses()
+        self.start()
+        self.confirm_current()
+        self.advance_assistant_track()
+        self.confirm_current()
+        self.clock.advance()
+        self.append_lease_event("lease_issued")
+        self.clock.advance()
+        self.append_lease_event(
+            "runtime_start_verified",
+            outcome_code="minecraft_connected",
+            verified=True,
+        )
+        self.write_statuses(grant_active=True, lease_active=True)
+        self.assertEqual(
+            self.manager.snapshot()["currentStep"]["id"],
+            "05-world-postcondition",
+        )
+
+        self.clock.advance()
+        self.append_auth_event("grant_revoked", grant_id="grant-1")
+        self.clock.advance()
+        self.append_auth_event(
+            "grant_issued",
+            grant_id=grant_id,
+            scopes=route_scopes,
+            action_run_id="",
+        )
+        self.write_statuses(
+            grant_active=True,
+            lease_active=True,
+            grant_id=grant_id,
+            grant_scopes=route_scopes,
+        )
+        self.clock.advance()
+        self.append_auth_event(
+            "action_authorized",
+            action=route_action,
+            grant_id=grant_id,
+            scopes=route_scopes,
+            action_run_id=action_run_id,
+        )
+        return {
+            "routeAction": route_action,
+            "routeScopes": route_scopes,
+            "actionRunId": action_run_id,
+            "goalRunId": goal_run_id,
+            "grantId": grant_id,
+            "bindingFields": {
+                "action_run_id": action_run_id,
+                "authorization_grant_id": grant_id,
+                "goal_run_id": goal_run_id,
+                "action_key": route_action,
+                "contract_code": "mindcraft_food_recovery.v1",
+            },
+        }
+
+    def publish_minecraft_world_effect(self, evidence: dict) -> None:
+        projector = MindcraftWorldEffectProjector(
+            status_path=(
+                self.root
+                / "mindcraft_world_effect"
+                / "status.json"
+            ),
+            events_dir=(
+                self.root
+                / "mindcraft_world_effect"
+                / "events"
+            ),
+            validate_guarded_lease=lambda _binding: (True, ""),
+            validate_readiness=lambda _binding: (True, ""),
+            now=self.clock,
+        )
+        binding = {
+            "schema": MINDCRAFT_WORLD_EFFECT_BINDING_SCHEMA,
+            "goalRunId": evidence["goalRunId"],
+            "actionRunId": evidence["actionRunId"],
+            "actionKey": evidence["routeAction"],
+            "contractCode": "mindcraft_food_recovery.v1",
+            "leaseId": "lease-1",
+            "leaseProcessNonce": "lease-process-1",
+            "producerNonce": "producer-order-nonce",
+            "candidateSequence": 1,
+            "contentFree": True,
+        }
+        self.assertTrue(projector.arm(binding)["accepted"])
+        self.clock.advance()
+        candidate = {
+            "schema": "mindcraft.postcondition-candidate.v1",
+            **{
+                key: binding[key]
+                for key in (
+                    "goalRunId",
+                    "actionRunId",
+                    "actionKey",
+                    "contractCode",
+                    "leaseId",
+                    "leaseProcessNonce",
+                    "producerNonce",
+                    "candidateSequence",
+                )
+            },
+            "executionSequence": 1,
+            "observedAt": self.clock.value,
+            "evidenceCode": "mindcraft_explicit_postcondition_candidate",
+            "postconditionCode": "food_reserve_ready",
+            "beforeSatisfied": False,
+            "afterSatisfied": True,
+            "autonomous": True,
+            "relevant": True,
+            "actionSucceeded": True,
+            "worldChanged": True,
+            "goalProgress": True,
+            "predicateCompleted": True,
+            "completionDelta": 1,
+            "blockedDelta": 0,
+            "contentFree": True,
+        }
+        self.assertTrue(projector.observe(candidate)["verified"])
+
+    def complete_minecraft_action_evidence(self, evidence: dict) -> dict:
+        self.clock.advance()
+        self.append_lease_event(
+            "action_completed",
+            outcome_code="minecraft_action_completed",
+            verified=True,
+            **evidence["bindingFields"],
+        )
+        self.clock.advance()
+        self.append_auth_event(
+            "action_authorized",
+            action=evidence["routeAction"],
+            grant_id=evidence["grantId"],
+            scopes=evidence["routeScopes"],
+            action_run_id=evidence["actionRunId"],
+        )
+        self.clock.advance()
+        self.append_auth_event(
+            "action_outcome",
+            action=evidence["routeAction"],
+            grant_id=evidence["grantId"],
+            scopes=evidence["routeScopes"],
+            action_run_id=evidence["actionRunId"],
+            outcome_status="ok",
+            verified=True,
+            evidence_code="minecraft_find_food_source_completed",
+            authorization_current=True,
+        )
+        self.write_statuses(
+            grant_active=True,
+            lease_active=True,
+            grant_id=evidence["grantId"],
+            grant_scopes=evidence["routeScopes"],
+        )
         return self.manager.snapshot()
 
     def test_start_is_dry_only_and_public_contract_is_content_free(self):
@@ -465,15 +652,390 @@ class AutonomyValidationTests(unittest.TestCase):
         session = self.manager.snapshot()
 
         self.assertEqual(session["currentStep"]["id"], "05-world-postcondition")
-        self.assertEqual(session["currentStep"]["status"], "blocked")
-        self.assertIn(MINECRAFT_ROUTE_BLOCKER, session["currentStep"]["errors"])
+        self.assertEqual(session["currentStep"]["status"], "pending")
+        self.assertIn(MINECRAFT_ROUTE_BLOCKER, session["productionBlockers"])
         self.assertIn(
             MINECRAFT_POSTCONDITION_BLOCKER,
-            session["currentStep"]["errors"],
+            session["productionBlockers"],
         )
-        self.assertEqual(session["summary"]["minecraftTrack"], "blocked")
+        self.assertEqual(session["summary"]["minecraftTrack"], "pending")
         self.assertFalse(session["summary"]["eligibleToPass"])
         self.assertNotEqual(session["state"], "passed")
+
+    def test_exact_minecraft_action_effect_and_outcome_pass_track(self):
+        route_action = "minecraft:find_food_source"
+        route_scopes = ["assistant:check_status", route_action]
+        action_run_id = "minecraft-action-run-1"
+        goal_run_id = "minecraft-goal-run-1"
+        grant_id = "grant-2"
+
+        self.write_statuses()
+        self.start()
+        self.confirm_current()
+        self.advance_assistant_track()
+        self.confirm_current()
+
+        self.clock.advance()
+        self.append_lease_event("lease_issued")
+        self.clock.advance()
+        self.append_lease_event(
+            "runtime_start_verified",
+            outcome_code="minecraft_connected",
+            verified=True,
+        )
+        self.write_statuses(grant_active=True, lease_active=True)
+        self.assertEqual(
+            self.manager.snapshot()["currentStep"]["id"],
+            "05-world-postcondition",
+        )
+
+        self.clock.advance()
+        self.append_auth_event("grant_revoked", grant_id="grant-1")
+        self.clock.advance()
+        self.append_auth_event(
+            "grant_issued",
+            grant_id=grant_id,
+            scopes=route_scopes,
+            action_run_id="",
+        )
+        self.write_statuses(
+            grant_active=True,
+            lease_active=True,
+            grant_id=grant_id,
+            grant_scopes=route_scopes,
+        )
+
+        self.clock.advance()
+        self.append_auth_event(
+            "action_authorized",
+            action=route_action,
+            grant_id=grant_id,
+            scopes=route_scopes,
+            action_run_id=action_run_id,
+        )
+        binding_fields = {
+            "action_run_id": action_run_id,
+            "authorization_grant_id": grant_id,
+            "goal_run_id": goal_run_id,
+            "action_key": route_action,
+            "contract_code": "mindcraft_food_recovery.v1",
+        }
+        self.clock.advance()
+        self.append_lease_event(
+            "action_dispatch_attempted",
+            verified=False,
+            **binding_fields,
+        )
+        self.clock.advance()
+        self.append_lease_event(
+            "action_dispatch_verified",
+            outcome_code="minecraft_action_dispatched",
+            verified=True,
+            **binding_fields,
+        )
+
+        projector = MindcraftWorldEffectProjector(
+            status_path=(
+                self.root
+                / "mindcraft_world_effect"
+                / "status.json"
+            ),
+            events_dir=(
+                self.root
+                / "mindcraft_world_effect"
+                / "events"
+            ),
+            validate_guarded_lease=lambda _binding: (True, ""),
+            validate_readiness=lambda _binding: (True, ""),
+            now=self.clock,
+        )
+        effect_binding = {
+            "schema": MINDCRAFT_WORLD_EFFECT_BINDING_SCHEMA,
+            "goalRunId": goal_run_id,
+            "actionRunId": action_run_id,
+            "actionKey": route_action,
+            "contractCode": "mindcraft_food_recovery.v1",
+            "leaseId": "lease-1",
+            "leaseProcessNonce": "lease-process-1",
+            "producerNonce": "producer-nonce-1",
+            "candidateSequence": 1,
+            "contentFree": True,
+        }
+        self.assertTrue(projector.arm(effect_binding)["accepted"])
+        self.clock.advance()
+        candidate = {
+            "schema": "mindcraft.postcondition-candidate.v1",
+            "goalRunId": goal_run_id,
+            "actionRunId": action_run_id,
+            "actionKey": route_action,
+            "contractCode": "mindcraft_food_recovery.v1",
+            "leaseId": "lease-1",
+            "leaseProcessNonce": "lease-process-1",
+            "producerNonce": "producer-nonce-1",
+            "candidateSequence": 1,
+            "executionSequence": 1,
+            "observedAt": self.clock.value,
+            "evidenceCode": "mindcraft_explicit_postcondition_candidate",
+            "postconditionCode": "food_reserve_ready",
+            "beforeSatisfied": False,
+            "afterSatisfied": True,
+            "autonomous": True,
+            "relevant": True,
+            "actionSucceeded": True,
+            "worldChanged": True,
+            "goalProgress": True,
+            "predicateCompleted": True,
+            "completionDelta": 1,
+            "blockedDelta": 0,
+            "contentFree": True,
+        }
+        self.assertTrue(projector.observe(candidate)["verified"])
+
+        self.clock.advance()
+        self.append_lease_event(
+            "action_completed",
+            outcome_code="minecraft_action_completed",
+            verified=True,
+            **binding_fields,
+        )
+        self.clock.advance()
+        self.append_auth_event(
+            "action_authorized",
+            action=route_action,
+            grant_id=grant_id,
+            scopes=route_scopes,
+            action_run_id=action_run_id,
+        )
+        self.clock.advance()
+        self.append_auth_event(
+            "action_outcome",
+            action=route_action,
+            grant_id=grant_id,
+            scopes=route_scopes,
+            action_run_id=action_run_id,
+            outcome_status="ok",
+            verified=True,
+            evidence_code="minecraft_find_food_source_completed",
+            authorization_current=True,
+        )
+        self.write_statuses(
+            grant_active=True,
+            lease_active=True,
+            grant_id=grant_id,
+            grant_scopes=route_scopes,
+        )
+
+        observed = self.manager.snapshot()
+
+        self.assertEqual(observed["currentStep"]["id"], "06-revoke-and-stop")
+        self.assertEqual(observed["summary"]["minecraftTrack"], "passed")
+        self.assertEqual(observed["productionBlockers"], [])
+
+        self.confirm_current()
+        self.clock.advance()
+        self.append_auth_event(
+            "grant_revoked",
+            grant_id=grant_id,
+            scopes=route_scopes,
+        )
+        self.clock.advance()
+        self.append_lease_event("lease_revoked")
+        self.clock.advance()
+        self.append_lease_event(
+            "runtime_stop_verified",
+            outcome_code="minecraft_stopped",
+            verified=True,
+        )
+        self.write_statuses(
+            grant_active=False,
+            lease_active=False,
+            grant_id=grant_id,
+            grant_scopes=route_scopes,
+            last_stop_outcome="minecraft_stopped",
+        )
+
+        completed = self.manager.snapshot()
+
+        self.assertEqual(completed["state"], "passed")
+        self.assertTrue(completed["summary"]["eligibleToPass"])
+        self.assertEqual(completed["summary"]["cleanupTrack"], "passed")
+        self.assertEqual(completed["summary"]["stepsPassed"], 6)
+
+    def test_world_effect_before_dispatch_attempt_fails_closed(self):
+        evidence = self.advance_to_minecraft_action_boundary()
+        self.publish_minecraft_world_effect(evidence)
+        self.clock.advance()
+        self.append_lease_event(
+            "action_dispatch_attempted",
+            verified=False,
+            **evidence["bindingFields"],
+        )
+        self.clock.advance()
+        self.append_lease_event(
+            "action_dispatch_verified",
+            outcome_code="minecraft_action_dispatched",
+            verified=True,
+            **evidence["bindingFields"],
+        )
+
+        observed = self.complete_minecraft_action_evidence(evidence)
+
+        self.assertEqual(observed["currentStep"]["status"], "failed")
+        self.assertIn(
+            "minecraft_postcondition_order_invalid",
+            observed["currentStep"]["errors"],
+        )
+        self.assertNotEqual(observed["summary"]["minecraftTrack"], "passed")
+
+    def test_duplicate_dispatch_attempt_fails_closed(self):
+        evidence = self.advance_to_minecraft_action_boundary()
+        self.clock.advance()
+        self.append_lease_event(
+            "action_dispatch_attempted",
+            verified=False,
+            **evidence["bindingFields"],
+        )
+        self.clock.advance()
+        self.append_lease_event(
+            "action_dispatch_attempted",
+            verified=False,
+            **evidence["bindingFields"],
+        )
+        self.clock.advance()
+        self.append_lease_event(
+            "action_dispatch_verified",
+            outcome_code="minecraft_action_dispatched",
+            verified=True,
+            **evidence["bindingFields"],
+        )
+        self.publish_minecraft_world_effect(evidence)
+
+        observed = self.complete_minecraft_action_evidence(evidence)
+
+        self.assertEqual(observed["currentStep"]["status"], "failed")
+        self.assertIn(
+            "minecraft_action_dispatch_attempt_duplicate",
+            observed["currentStep"]["errors"],
+        )
+        self.assertNotEqual(observed["summary"]["minecraftTrack"], "passed")
+
+    def test_cleanup_reissue_cannot_pass_until_current_status_is_inactive(self):
+        evidence = self.advance_to_minecraft_action_boundary()
+        self.clock.advance()
+        self.append_lease_event(
+            "action_dispatch_attempted",
+            verified=False,
+            **evidence["bindingFields"],
+        )
+        self.clock.advance()
+        self.append_lease_event(
+            "action_dispatch_verified",
+            outcome_code="minecraft_action_dispatched",
+            verified=True,
+            **evidence["bindingFields"],
+        )
+        self.publish_minecraft_world_effect(evidence)
+        world_passed = self.complete_minecraft_action_evidence(evidence)
+        self.assertEqual(world_passed["currentStep"]["id"], "06-revoke-and-stop")
+        self.confirm_current()
+
+        self.clock.advance()
+        self.append_auth_event(
+            "grant_revoked",
+            grant_id=evidence["grantId"],
+            scopes=evidence["routeScopes"],
+        )
+        self.clock.advance()
+        self.append_lease_event("lease_revoked", lease_id="lease-1")
+        self.clock.advance()
+        self.append_lease_event(
+            "runtime_stop_verified",
+            outcome_code="minecraft_stopped",
+            verified=True,
+            lease_id="lease-1",
+        )
+
+        replacement_grant_id = "grant-minecraft-reissued"
+        replacement_lease_id = "lease-reissued"
+        self.clock.advance()
+        self.append_auth_event(
+            "grant_issued",
+            grant_id=replacement_grant_id,
+            scopes=evidence["routeScopes"],
+            action_run_id="",
+        )
+        self.clock.advance()
+        self.append_lease_event(
+            "lease_issued",
+            lease_id=replacement_lease_id,
+        )
+        self.clock.advance()
+        self.append_lease_event(
+            "runtime_start_verified",
+            outcome_code="minecraft_connected",
+            verified=True,
+            lease_id=replacement_lease_id,
+        )
+        self.write_statuses(
+            grant_active=True,
+            lease_active=True,
+            grant_id=replacement_grant_id,
+            grant_scopes=evidence["routeScopes"],
+            lease_id=replacement_lease_id,
+        )
+
+        still_active = self.manager.snapshot()
+
+        self.assertEqual(still_active["state"], "running")
+        self.assertEqual(still_active["currentStep"]["status"], "pending")
+        self.assertTrue(still_active["summary"]["cleanupRequired"])
+        self.assertFalse(still_active["summary"]["cleanupStateUnknown"])
+        self.assertFalse(still_active["summary"]["eligibleToPass"])
+        self.assertFalse(
+            still_active["currentStep"]["requirements"][
+                "targetAuthorizationInactive"
+            ]
+        )
+        self.assertFalse(
+            still_active["currentStep"]["requirements"][
+                "targetWorldLeaseInactive"
+            ]
+        )
+
+        self.clock.advance()
+        self.append_auth_event(
+            "grant_revoked",
+            grant_id=replacement_grant_id,
+            scopes=evidence["routeScopes"],
+        )
+        self.clock.advance()
+        self.append_lease_event(
+            "lease_revoked",
+            lease_id=replacement_lease_id,
+        )
+        self.clock.advance()
+        self.append_lease_event(
+            "runtime_stop_verified",
+            outcome_code="minecraft_stopped",
+            verified=True,
+            lease_id=replacement_lease_id,
+        )
+        self.write_statuses(
+            grant_active=False,
+            lease_active=False,
+            grant_id=replacement_grant_id,
+            grant_scopes=evidence["routeScopes"],
+            lease_id=replacement_lease_id,
+            last_stop_outcome="minecraft_stopped",
+        )
+
+        completed = self.manager.snapshot()
+
+        self.assertEqual(completed["state"], "passed")
+        self.assertFalse(completed["summary"]["cleanupRequired"])
+        self.assertFalse(completed["summary"]["cleanupStateUnknown"])
+        self.assertTrue(completed["summary"]["eligibleToPass"])
+        self.assertEqual(completed["summary"]["cleanupTrack"], "passed")
 
     def test_abort_requires_observed_grant_cleanup_then_accepts_revoke(self):
         self.write_statuses()

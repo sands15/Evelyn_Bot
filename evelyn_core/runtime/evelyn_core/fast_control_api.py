@@ -1433,6 +1433,9 @@ MINECRAFT_WORLD_LEASE_OWNER = MinecraftWorldLeaseOwner(
     enable_mode=MINECRAFT_WORLD_MODE.enable_minecraft_mode,
     disable_mode=MINECRAFT_WORLD_MODE.disable_minecraft_mode,
     set_goal=MINECRAFT_WORLD_HTTP_RUNTIME.set_goal,
+    dispatch_action=MINECRAFT_WORLD_HTTP_RUNTIME.dispatch_action,
+    get_action_status=MINECRAFT_WORLD_HTTP_RUNTIME.action_status,
+    cancel_action=MINECRAFT_WORLD_HTTP_RUNTIME.cancel_action,
     create_task=asyncio.create_task,
     log=print,
 )

@@ -25,6 +25,16 @@ from .autonomy_outcome_evidence import (
 )
 from .minecraft_world_lease import MINECRAFT_WORLD_LEASE_EVENT_SCHEMA
 from .minecraft_world_lease_contract import MINECRAFT_WORLD_LEASE_STATUS_SCHEMA
+from .minecraft_action_contract import (
+    MINECRAFT_ACTION_SPECS,
+    MINECRAFT_ROUTE_ACTIONS,
+)
+from .mindcraft_world_effect import (
+    MINDCRAFT_WORLD_EFFECT_EVENT_SCHEMA,
+    MINDCRAFT_WORLD_EFFECT_STATUS_SCHEMA,
+    MINDCRAFT_WORLD_EFFECT_EVIDENCE_CODE,
+    validate_mindcraft_world_effect_status,
+)
 from .paths import get_runtime_artifacts_root
 from .runtime_artifact_io import atomic_json_write
 
@@ -80,6 +90,51 @@ _LEASE_EVENTS = frozenset(
         "goal_attempted",
         "goal_failed",
         "goal_verified",
+        "action_dispatch_attempted",
+        "action_dispatch_verified",
+        "action_completed",
+        "action_failed",
+        "action_cancel_attempted",
+        "action_cancel_verified",
+        "action_cancel_failed",
+    }
+)
+_WORLD_EFFECT_EVENTS = frozenset(
+    {
+        "process_started",
+        "binding_armed",
+        "telemetry_rejected",
+        "effect_verified",
+        "binding_disarmed",
+        "audit_failed",
+        "status_failed",
+    }
+)
+_WORLD_EFFECT_EVENT_FIELDS = frozenset(
+    {
+        "schema",
+        "eventId",
+        "at",
+        "event",
+        "processNonce",
+        "goalRunId",
+        "actionRunId",
+        "actionKey",
+        "contractCode",
+        "leaseId",
+        "leaseProcessNonce",
+        "producerNonce",
+        "candidateSequence",
+        "executionSequence",
+        "errorCode",
+        "evidenceCode",
+        "postconditionCode",
+        "autonomous",
+        "relevant",
+        "succeeded",
+        "worldChanged",
+        "goalProgress",
+        "contentFree",
     }
 )
 _OWN_EVENTS = frozenset(
@@ -216,6 +271,14 @@ class AutonomyValidationPaths:
     def world_lease_events(self) -> Path:
         return self.artifacts_root / "minecraft_world_lease" / "events"
 
+    @property
+    def world_effect_status(self) -> Path:
+        return self.artifacts_root / "mindcraft_world_effect" / "status.json"
+
+    @property
+    def world_effect_events(self) -> Path:
+        return self.artifacts_root / "mindcraft_world_effect" / "events"
+
 
 def _new_step(definition: dict[str, Any], *, now: float) -> dict[str, Any]:
     return {
@@ -278,7 +341,7 @@ class AutonomyValidationManager:
             "stepsPassed": 0,
             "stepsTotal": len(_STEP_DEFINITIONS),
             "assistantTrack": "pending",
-            "minecraftTrack": "blocked",
+            "minecraftTrack": "pending",
             "cleanupTrack": "pending",
             "cleanupRequired": False,
             "cleanupStateUnknown": True,
@@ -298,12 +361,6 @@ class AutonomyValidationManager:
             )
         ):
             return False
-        # This source revision intentionally cannot pass the Minecraft track:
-        # its production route and trusted postcondition observer are explicit
-        # blockers. Accepting a persisted `passed` claim would let a hand-edited
-        # active file bypass that fail-closed boundary.
-        if payload.get("state") == "passed":
-            return False
         created = _finite_float(payload.get("createdAt"))
         expires = _finite_float(payload.get("expiresAt"))
         index = payload.get("_stepIndex")
@@ -317,6 +374,13 @@ class AutonomyValidationManager:
             or not 0 <= index < len(_STEP_DEFINITIONS)
             or not isinstance(steps, list)
             or len(steps) != len(_STEP_DEFINITIONS)
+        ):
+            return False
+        if payload.get("state") == "passed" and not all(
+            isinstance(step, dict)
+            and step.get("status") == "passed"
+            and step.get("machineEvidenceObserved") is True
+            for step in steps
         ):
             return False
         for step, definition in zip(steps, _STEP_DEFINITIONS):
@@ -476,13 +540,34 @@ class AutonomyValidationManager:
             expected_schema=MINECRAFT_WORLD_LEASE_STATUS_SCHEMA,
             observer="world_lease",
         )
+        effect_raw, effect_error = _safe_json_object(
+            self.paths.world_effect_status
+        )
+        effect_status = None
+        if not effect_error and effect_raw is not None:
+            effect_status, effect_error = (
+                validate_mindcraft_world_effect_status(
+                    effect_raw,
+                    now=self.now(),
+                    max_age_sec=self.status_max_age_sec,
+                )
+            )
+        effect_blocker = (
+            MINECRAFT_POSTCONDITION_BLOCKER
+            if effect_error
+            else ""
+        )
         capabilities = {
             "authorizationObserver": authorization,
             "worldLeaseObserver": lease,
             "minecraftWorldEffect": {
-                "state": "unavailable",
-                "ready": False,
-                "blockers": list(MINECRAFT_PRODUCTION_BLOCKERS),
+                "state": (
+                    str((effect_status or {}).get("state") or "ready")
+                    if effect_status is not None
+                    else "unavailable"
+                ),
+                "ready": effect_status is not None,
+                "blockers": [effect_blocker] if effect_blocker else [],
                 "warnings": [],
             },
         }
@@ -526,22 +611,42 @@ class AutonomyValidationManager:
             str(self._session.get("sessionId") or ""), value
         ) == self._session.get("_guildFingerprint")
 
-    def _cleanup_state(self) -> tuple[bool, bool]:
+    def _cleanup_state(
+        self,
+        *,
+        authorization_status: dict[str, Any] | None = None,
+        lease_status: dict[str, Any] | None = None,
+    ) -> tuple[bool, bool]:
         """Return ``(required, unknown)`` without exposing target identity."""
 
         if self._session is None:
             return False, True
         steps = self._session.get("_steps") or []
+        authority_grant_step = (
+            steps[4]
+            if len(steps) > 4 and steps[4].get("_grantFingerprint")
+            else steps[0]
+            if steps
+            else {}
+        )
         grant_was_observed = bool(
-            steps and steps[0].get("_grantFingerprint")
+            authority_grant_step.get("_grantFingerprint")
         )
         lease_was_observed = bool(
             len(steps) > 3 and steps[3].get("_leaseFingerprint")
         )
-        authorization, auth_error = _safe_json_object(
-            self.paths.authorization_status
-        )
-        lease, lease_error = _safe_json_object(self.paths.world_lease_status)
+        if authorization_status is None or lease_status is None:
+            authorization, auth_error = _safe_json_object(
+                self.paths.authorization_status
+            )
+            lease, lease_error = _safe_json_object(
+                self.paths.world_lease_status
+            )
+        else:
+            authorization = authorization_status
+            lease = lease_status
+            auth_error = "" if isinstance(authorization, dict) else "invalid"
+            lease_error = "" if isinstance(lease, dict) else "invalid"
         if (
             auth_error
             or lease_error
@@ -585,10 +690,10 @@ class AutonomyValidationManager:
             authorization.get("processNonce"),
         )
         grant_fingerprint = str(
-            (steps[0] if steps else {}).get("_grantFingerprint") or ""
+            authority_grant_step.get("_grantFingerprint") or ""
         )
         grant_process = str(
-            (steps[0] if steps else {}).get("_processFingerprint") or ""
+            authority_grant_step.get("_processFingerprint") or ""
         )
         if not grant_process and grant_fingerprint:
             issued = next(
@@ -602,7 +707,9 @@ class AutonomyValidationManager:
             )
             grant_process = str((issued or {}).get("processFingerprint") or "")
         grant_observed_at = float(
-            (steps[0] if steps else {}).get("_observedAt") or 0.0
+            authority_grant_step.get("_grantObservedAt")
+            or authority_grant_step.get("_observedAt")
+            or 0.0
         )
         grant_explicit_cleanup = bool(
             not auth_events_error
@@ -749,6 +856,75 @@ class AutonomyValidationManager:
             False,
         )
 
+    def _current_target_authority_inactive(
+        self,
+        *,
+        authorization_status: dict[str, Any] | None,
+        lease_status: dict[str, Any] | None,
+    ) -> tuple[bool, bool, bool]:
+        """Project the same-refresh target authority state fail-closed.
+
+        Return ``(authorization_inactive, lease_inactive, unknown)``.  The
+        validation cursor must never infer cleanup from historical revoke/stop
+        events alone: a replacement grant or lease can be issued immediately
+        after those events.
+        """
+
+        if (
+            not isinstance(authorization_status, dict)
+            or authorization_status.get("schema")
+            != AUTONOMY_AUTHORIZATION_STATUS_SCHEMA
+            or authorization_status.get("auditReady") is not True
+            or not isinstance(lease_status, dict)
+            or lease_status.get("schema")
+            != MINECRAFT_WORLD_LEASE_STATUS_SCHEMA
+            or lease_status.get("auditReady") is not True
+            or lease_status.get("statusReady") is not True
+        ):
+            return False, False, True
+
+        active_grants = authorization_status.get("activeGrants")
+        active_grant_count = authorization_status.get("activeGrantCount")
+        if (
+            not isinstance(active_grants, list)
+            or type(active_grant_count) is not int
+            or active_grant_count != len(active_grants)
+            or any(
+                not isinstance(grant, dict)
+                or _positive_int(grant.get("guildId")) is None
+                for grant in active_grants
+            )
+        ):
+            return False, False, True
+        target_grant_active = any(
+            self._target_matches(grant.get("guildId"))
+            for grant in active_grants
+        )
+
+        active = lease_status.get("active")
+        active_lease = lease_status.get("lease")
+        if type(active) is not bool:
+            return False, False, True
+        if active:
+            if (
+                not isinstance(active_lease, dict)
+                or _positive_int(active_lease.get("guildId")) is None
+                or not _safe_id(active_lease.get("leaseId"))
+            ):
+                return False, False, True
+            target_lease_active = self._target_matches(
+                active_lease.get("guildId")
+            )
+        else:
+            if active_lease is not None:
+                return False, False, True
+            target_lease_active = False
+        return (
+            not target_grant_active,
+            not target_lease_active,
+            False,
+        )
+
     def _id_matches(self, value: Any, fingerprint: str) -> bool:
         if self._session is None or not fingerprint:
             return False
@@ -825,7 +1001,11 @@ class AutonomyValidationManager:
                 ):
                     return [], f"{source_code}_event_invalid"
                 seen_ids.add(event_id)
-                target_matched = self._target_matches(payload.get("guildId"))
+                target_matched = (
+                    True
+                    if source_code == "world_effect"
+                    else self._target_matches(payload.get("guildId"))
+                )
                 global_epoch_event = bool(
                     event == "process_started"
                     or (
@@ -891,7 +1071,19 @@ class AutonomyValidationManager:
                             ),
                         }
                     )
-                else:
+                elif source_code == "world_lease":
+                    action_code = _safe_id(payload.get("actionKey"))
+                    action_event = event.startswith("action_")
+                    if action_event and (
+                        action_code not in MINECRAFT_ROUTE_ACTIONS
+                        or not _safe_id(payload.get("actionRunId"))
+                        or not _safe_id(payload.get("goalRunId"))
+                        or not _safe_id(
+                            payload.get("authorizationGrantId")
+                        )
+                        or not _safe_id(payload.get("contractCode"))
+                    ):
+                        return [], "world_lease_event_invalid"
                     descriptor.update(
                         {
                             "leaseFingerprint": _fingerprint(
@@ -901,6 +1093,104 @@ class AutonomyValidationManager:
                             "reasonCode": _safe_id(payload.get("reasonCode")),
                             "outcomeCode": _safe_id(payload.get("outcomeCode")),
                             "verified": payload.get("verified") is True,
+                            "grantFingerprint": _fingerprint(
+                                str(self._session.get("sessionId") or ""),
+                                payload.get("authorizationGrantId"),
+                            ),
+                            "actionRunFingerprint": _fingerprint(
+                                str(self._session.get("sessionId") or ""),
+                                payload.get("actionRunId"),
+                            ),
+                            "goalRunFingerprint": _fingerprint(
+                                str(self._session.get("sessionId") or ""),
+                                payload.get("goalRunId"),
+                            ),
+                            "actionCode": action_code,
+                            "contractCode": _safe_id(
+                                payload.get("contractCode")
+                            ),
+                        }
+                    )
+                else:
+                    if (
+                        set(payload) != _WORLD_EFFECT_EVENT_FIELDS
+                        or payload.get("contentFree") is not True
+                    ):
+                        return [], "world_effect_event_invalid"
+                    action_code = _safe_id(payload.get("actionKey"))
+                    identity_required = event in {
+                        "binding_armed",
+                        "telemetry_rejected",
+                        "effect_verified",
+                        "binding_disarmed",
+                    }
+                    raw_identity_fields = (
+                        "leaseId",
+                        "leaseProcessNonce",
+                        "actionRunId",
+                        "goalRunId",
+                        "producerNonce",
+                    )
+                    if identity_required and any(
+                        not _safe_id(payload.get(field))
+                        for field in raw_identity_fields
+                    ):
+                        return [], "world_effect_event_invalid"
+                    identity_values = {
+                        "leaseFingerprint": _fingerprint(
+                            str(self._session.get("sessionId") or ""),
+                            payload.get("leaseId"),
+                        ),
+                        "leaseProcessFingerprint": _fingerprint(
+                            str(self._session.get("sessionId") or ""),
+                            payload.get("leaseProcessNonce"),
+                        ),
+                        "actionRunFingerprint": _fingerprint(
+                            str(self._session.get("sessionId") or ""),
+                            payload.get("actionRunId"),
+                        ),
+                        "goalRunFingerprint": _fingerprint(
+                            str(self._session.get("sessionId") or ""),
+                            payload.get("goalRunId"),
+                        ),
+                        "producerFingerprint": _fingerprint(
+                            str(self._session.get("sessionId") or ""),
+                            payload.get("producerNonce"),
+                        ),
+                    }
+                    if identity_required and (
+                        action_code not in MINECRAFT_ROUTE_ACTIONS
+                        or not all(identity_values.values())
+                        or not _safe_id(payload.get("contractCode"))
+                    ):
+                        return [], "world_effect_event_invalid"
+                    boolean_fields = {
+                        "autonomous": payload.get("autonomous") is True,
+                        "relevant": payload.get("relevant") is True,
+                        "succeeded": payload.get("succeeded") is True,
+                        "worldChanged": payload.get("worldChanged") is True,
+                        "goalProgress": payload.get("goalProgress") is True,
+                    }
+                    descriptor.update(
+                        {
+                            **identity_values,
+                            "actionCode": action_code,
+                            "contractCode": _safe_id(
+                                payload.get("contractCode")
+                            ),
+                            "evidenceCode": _safe_id(
+                                payload.get("evidenceCode")
+                            ),
+                            "postconditionCode": _safe_id(
+                                payload.get("postconditionCode")
+                            ),
+                            "candidateSequence": _positive_int(
+                                payload.get("candidateSequence")
+                            ),
+                            "executionSequence": _positive_int(
+                                payload.get("executionSequence")
+                            ),
+                            **boolean_fields,
                         }
                     )
                 rows.append(descriptor)
@@ -948,6 +1238,45 @@ class AutonomyValidationManager:
             row for row in lease if row.get("processFingerprint") == lease_process
         ]
         return authorization, lease, ""
+
+    def _world_effect_source_events(
+        self,
+    ) -> tuple[list[dict[str, Any]], str]:
+        raw, error = _safe_json_object(self.paths.world_effect_status)
+        if error or raw is None:
+            return [], MINECRAFT_POSTCONDITION_BLOCKER
+        status, status_error = validate_mindcraft_world_effect_status(
+            raw,
+            now=self.now(),
+            max_age_sec=self.status_max_age_sec,
+        )
+        if status_error or status is None:
+            return [], MINECRAFT_POSTCONDITION_BLOCKER
+        rows, error = self._scan_events(
+            directory=self.paths.world_effect_events,
+            schema=MINDCRAFT_WORLD_EFFECT_EVENT_SCHEMA,
+            allowed_events=_WORLD_EFFECT_EVENTS,
+            source_code="world_effect",
+        )
+        if error:
+            return [], error
+        process_fingerprint = _fingerprint(
+            str(self._session.get("sessionId") or "")
+            if self._session
+            else "",
+            status.get("processNonce"),
+        )
+        if not process_fingerprint:
+            return [], "world_effect_process_identity_invalid"
+        return (
+            [
+                row
+                for row in rows
+                if row.get("processFingerprint")
+                == process_fingerprint
+            ],
+            "",
+        )
 
     def _current_step(self) -> dict[str, Any] | None:
         if self._session is None:
@@ -1120,10 +1449,107 @@ class AutonomyValidationManager:
         ):
             self._finalize_report()
 
+    def _advance_cleanup_evidence(
+        self,
+        *,
+        steps: list[dict[str, Any]],
+        authorization: list[dict[str, Any]],
+        lease: list[dict[str, Any]],
+        authorization_status: dict[str, Any] | None,
+        lease_status: dict[str, Any] | None,
+        lease_fingerprint: str,
+        default_grant_fingerprint: str,
+        world_boundary: float,
+    ) -> None:
+        if self._session is None:
+            return
+        world_step = steps[4]
+        cleanup_step = steps[5]
+        cleanup_grant_fingerprint = str(
+            world_step.get("_grantFingerprint")
+            or default_grant_fingerprint
+        )
+        cleanup_boundary = max(
+            float(world_step.get("_observedAt") or world_boundary),
+            float(cleanup_step.get("attemptStartedAt") or 0.0),
+        )
+        auth_cleanup = [
+            row
+            for row in self._events_after(authorization, cleanup_boundary)
+            if row.get("event") in {"grant_revoked", "grant_expired"}
+            and row.get("grantFingerprint")
+            == cleanup_grant_fingerprint
+        ]
+        lease_revocations = [
+            row
+            for row in self._events_after(lease, cleanup_boundary)
+            if row.get("event") == "lease_revoked"
+            and row.get("leaseFingerprint") == lease_fingerprint
+        ]
+        stop_boundary = (
+            float(lease_revocations[0]["at"])
+            if lease_revocations
+            else cleanup_boundary
+        )
+        stops = [
+            row
+            for row in self._events_after(lease, stop_boundary)
+            if row.get("event") == "runtime_stop_verified"
+            and row.get("verified") is True
+            and row.get("outcomeCode") == "minecraft_stopped"
+            and row.get("leaseFingerprint") == lease_fingerprint
+        ]
+        (
+            target_authorization_inactive,
+            target_lease_inactive,
+            authority_state_unknown,
+        ) = self._current_target_authority_inactive(
+            authorization_status=authorization_status,
+            lease_status=lease_status,
+        )
+        cleanup_required, cleanup_unknown = self._cleanup_state(
+            authorization_status=authorization_status,
+            lease_status=lease_status,
+        )
+        self._mark_machine_evidence(
+            cleanup_step,
+            requirements={
+                "grantRevokedOrExpired": bool(auth_cleanup),
+                "leaseRevoked": bool(lease_revocations),
+                "runtimeStopVerified": bool(stops),
+                "targetAuthorizationInactive": bool(
+                    target_authorization_inactive
+                ),
+                "targetWorldLeaseInactive": bool(target_lease_inactive),
+                "cleanupStateKnown": not bool(
+                    authority_state_unknown or cleanup_unknown
+                ),
+                "cleanupNotRequired": not bool(cleanup_required),
+            },
+        )
+        self._pass_step(cleanup_step)
+        if (
+            all(step.get("status") == "passed" for step in steps)
+            and not cleanup_required
+            and not cleanup_unknown
+            and not authority_state_unknown
+        ):
+            self._session["state"] = "passed"
+            self._session["completedAt"] = self.now()
+            if self._append_own_event(
+                "session_passed",
+                step=cleanup_step,
+            ):
+                self._finalize_report()
+
     def _advance_evidence(
         self,
         authorization: list[dict[str, Any]],
         lease: list[dict[str, Any]],
+        world_effect: list[dict[str, Any]] | None = None,
+        *,
+        authorization_status: dict[str, Any] | None = None,
+        lease_status: dict[str, Any] | None = None,
     ) -> None:
         if self._session is None or self._session.get("state") != "running":
             return
@@ -1383,66 +1809,288 @@ class AutonomyValidationManager:
             float(lease_step.get("_startedAt") or 0.0),
             float(world_step.get("attemptStartedAt") or 0.0),
         )
-        goal_failures = self._events_after(lease, world_boundary)
-        if any(
-            row.get("event") == "goal_failed" for row in goal_failures
-        ):
-            self._fail_step(world_step, "minecraft_goal_failed")
+        if world_step.get("status") == "passed":
+            self._advance_cleanup_evidence(
+                steps=steps,
+                authorization=authorization,
+                lease=lease,
+                authorization_status=authorization_status,
+                lease_status=lease_status,
+                lease_fingerprint=lease_fingerprint,
+                default_grant_fingerprint=grant_fingerprint,
+                world_boundary=world_boundary,
+            )
             return
-        goal_verified = [
+        effect_rows = list(world_effect or [])
+        route_action = MINECRAFT_ROUTE_ACTIONS[0]
+        spec = MINECRAFT_ACTION_SPECS[route_action]
+        minecraft_grants = [
             row
-            for row in goal_failures
-            if row.get("event") == "goal_verified"
-            and row.get("leaseFingerprint") == lease_fingerprint
-            and row.get("verified") is True
-            and row.get("outcomeCode") == "minecraft_goal_confirmed"
+            for row in self._events_after(
+                authorization,
+                world_boundary,
+                event="grant_issued",
+            )
+            if route_action in (row.get("scopes") or [])
+            and row.get("grantFingerprint")
         ]
-        world_step["requirements"] = {
-            "goalAuditObserved": bool(goal_verified),
-            "autonomyRouteWired": False,
-            "trustedPostconditionObserved": False,
+        minecraft_grant = minecraft_grants[-1] if minecraft_grants else None
+        minecraft_grant_fingerprint = str(
+            (minecraft_grant or {}).get("grantFingerprint") or ""
+        )
+        minecraft_grant_at = float(
+            (minecraft_grant or {}).get("at") or world_boundary
+        )
+        action_rows = [
+            row
+            for row in self._events_after(lease, minecraft_grant_at)
+            if row.get("leaseFingerprint") == lease_fingerprint
+            and row.get("grantFingerprint")
+            == minecraft_grant_fingerprint
+            and row.get("actionCode") == route_action
+            and row.get("contractCode") == spec.contract_code
+        ]
+        if any(
+            row.get("event")
+            in {"action_failed", "action_cancel_failed"}
+            for row in action_rows
+        ):
+            self._fail_step(world_step, "minecraft_action_failed")
+            return
+        dispatches = [
+            row
+            for row in action_rows
+            if row.get("event") == "action_dispatch_verified"
+            and row.get("verified") is True
+            and row.get("outcomeCode") == "minecraft_action_dispatched"
+            and row.get("actionRunFingerprint")
+            and row.get("goalRunFingerprint")
+        ]
+        if len(dispatches) > 1:
+            self._fail_evidence_integrity(
+                world_step,
+                "minecraft_action_dispatch_duplicate",
+            )
+            return
+        dispatch = dispatches[0] if dispatches else None
+        action_run_fingerprint = str(
+            (dispatch or {}).get("actionRunFingerprint") or ""
+        )
+        goal_run_fingerprint = str(
+            (dispatch or {}).get("goalRunFingerprint") or ""
+        )
+        attempted = [
+            row
+            for row in action_rows
+            if row.get("event") == "action_dispatch_attempted"
+            and row.get("actionRunFingerprint") == action_run_fingerprint
+            and row.get("goalRunFingerprint") == goal_run_fingerprint
+        ]
+        if len(attempted) > 1:
+            self._fail_evidence_integrity(
+                world_step,
+                "minecraft_action_dispatch_attempt_duplicate",
+            )
+            return
+        attempt = attempted[0] if attempted else None
+        if dispatch is not None and attempt is None:
+            self._fail_evidence_integrity(
+                world_step,
+                "minecraft_action_dispatch_attempt_missing",
+            )
+            return
+        if (
+            dispatch is not None
+            and attempt is not None
+            and int(attempt.get("sourceSequence") or 0)
+            >= int(dispatch.get("sourceSequence") or 0)
+        ):
+            self._fail_evidence_integrity(
+                world_step,
+                "minecraft_action_dispatch_order_invalid",
+            )
+            return
+        candidate_effects = [
+            row
+            for row in self._events_after(effect_rows, minecraft_grant_at)
+            if row.get("event") == "effect_verified"
+            and row.get("leaseFingerprint") == lease_fingerprint
+            and row.get("leaseProcessFingerprint")
+            == lease_step.get("_processFingerprint")
+            and row.get("actionRunFingerprint") == action_run_fingerprint
+            and row.get("goalRunFingerprint") == goal_run_fingerprint
+            and row.get("actionCode") == route_action
+            and row.get("contractCode") == spec.contract_code
+            and row.get("evidenceCode")
+            == MINDCRAFT_WORLD_EFFECT_EVIDENCE_CODE
+            and row.get("postconditionCode") == spec.postcondition_code
+            and row.get("candidateSequence") == 1
+            and row.get("executionSequence") is not None
+            and row.get("autonomous") is True
+            and row.get("relevant") is True
+            and row.get("succeeded") is True
+            and row.get("worldChanged") is True
+            and row.get("goalProgress") is True
+        ]
+        if len(candidate_effects) > 1:
+            self._fail_evidence_integrity(
+                world_step,
+                "minecraft_postcondition_duplicate",
+            )
+            return
+        effect = candidate_effects[0] if candidate_effects else None
+        if (
+            effect is not None
+            and attempt is not None
+            and float(effect.get("at") or 0.0)
+            <= float(attempt.get("at") or 0.0)
+        ):
+            self._fail_evidence_integrity(
+                world_step,
+                "minecraft_postcondition_order_invalid",
+            )
+            return
+        completed = [
+            row
+            for row in action_rows
+            if row.get("event") == "action_completed"
+            and row.get("verified") is True
+            and row.get("outcomeCode") == "minecraft_action_completed"
+            and row.get("actionRunFingerprint") == action_run_fingerprint
+            and row.get("goalRunFingerprint") == goal_run_fingerprint
+            and (
+                dispatch is None
+                or int(row.get("sourceSequence") or 0)
+                > int(dispatch.get("sourceSequence") or 0)
+            )
+            and (
+                effect is None
+                or float(row.get("at") or 0.0)
+                >= float(effect.get("at") or 0.0)
+            )
+        ]
+        if len(completed) > 1:
+            self._fail_evidence_integrity(
+                world_step,
+                "minecraft_action_completion_duplicate",
+            )
+            return
+        completion = completed[0] if completed else None
+        auth_run_rows = [
+            row
+            for row in self._events_after(
+                authorization,
+                minecraft_grant_at,
+            )
+            if row.get("grantFingerprint")
+            == minecraft_grant_fingerprint
+            and row.get("actionCode") == route_action
+            and row.get("actionRunFingerprint") == action_run_fingerprint
+            and row.get("event")
+            in {"action_authorized", "action_denied", "action_outcome"}
+        ]
+        if any(row.get("event") == "action_denied" for row in auth_run_rows):
+            self._fail_evidence_integrity(
+                world_step,
+                "minecraft_action_denied",
+            )
+            return
+        auth_decisions = [
+            row
+            for row in auth_run_rows
+            if row.get("event") == "action_authorized"
+        ]
+        outcomes = [
+            row
+            for row in auth_run_rows
+            if row.get("event") == "action_outcome"
+        ]
+        if len(auth_decisions) > 2 or len(outcomes) > 1:
+            self._fail_evidence_integrity(
+                world_step,
+                "minecraft_authorization_evidence_duplicate",
+            )
+            return
+        outcome = outcomes[0] if outcomes else None
+        authorization_ordered = bool(
+            len(auth_decisions) == 2
+            and dispatch is not None
+            and completion is not None
+            and float(auth_decisions[0].get("at") or 0.0)
+            <= float(dispatch.get("at") or 0.0)
+            and float(auth_decisions[1].get("at") or 0.0)
+            >= float(completion.get("at") or 0.0)
+            and outcome is not None
+            and int(outcome.get("sourceSequence") or 0)
+            > int(auth_decisions[1].get("sourceSequence") or 0)
+        )
+        outcome_exact = bool(
+            outcome is not None
+            and outcome.get("outcomeStatus") in AUTONOMY_SUCCESS_STATUSES
+            and outcome.get("verified") is True
+            and outcome.get("authorizationCurrent") is True
+            and outcome.get("evidenceCode") == spec.evidence_code
+        )
+        if outcome is not None and not outcome_exact:
+            self._fail_step(
+                world_step,
+                "minecraft_outcome_evidence_invalid",
+            )
+            return
+        requirements = {
+            "minecraftScopeGranted": bool(minecraft_grant_fingerprint),
+            "preAndPostAuthorizationObserved": authorization_ordered,
+            "dispatchAttempted": bool(attempted),
+            "autonomyRouteWired": bool(dispatch),
+            "trustedPostconditionObserved": bool(effect),
+            "ownerCompletionVerified": bool(completion),
+            "outcomeVerified": outcome_exact,
+            "sameActionRun": bool(action_run_fingerprint),
+            "sameGoalRun": bool(goal_run_fingerprint),
+            "sameGrant": bool(minecraft_grant_fingerprint),
+            "sameLease": bool(lease_fingerprint),
+            "exactEvidenceCode": outcome_exact,
         }
-        world_step["machineEvidenceObserved"] = False
-        world_step["status"] = "blocked"
-        world_step["errors"] = list(MINECRAFT_PRODUCTION_BLOCKERS)
+        if minecraft_grant is not None:
+            world_step["_grantFingerprint"] = (
+                minecraft_grant_fingerprint
+            )
+            world_step["_processFingerprint"] = (
+                minecraft_grant.get("processFingerprint")
+            )
+            world_step["_grantObservedAt"] = minecraft_grant_at
+        if action_run_fingerprint:
+            world_step["_actionRunFingerprint"] = (
+                action_run_fingerprint
+            )
+            world_step["_goalRunFingerprint"] = goal_run_fingerprint
+        if outcome_exact:
+            world_step["_observedAt"] = float(
+                outcome.get("at") or 0.0
+            )
+        self._mark_machine_evidence(
+            world_step,
+            requirements=requirements,
+            action_code=route_action,
+            evidence_code=(
+                str(outcome.get("evidenceCode") or "")
+                if outcome_exact
+                else ""
+            ),
+        )
+        self._pass_step(world_step)
+        if world_step.get("status") != "passed":
+            return
 
-        cleanup_step = steps[5]
-        cleanup_boundary = max(
-            world_boundary,
-            float(cleanup_step.get("attemptStartedAt") or 0.0),
-        )
-        auth_cleanup = [
-            row
-            for row in self._events_after(authorization, cleanup_boundary)
-            if row.get("event") in {"grant_revoked", "grant_expired"}
-            and row.get("grantFingerprint") == grant_fingerprint
-        ]
-        lease_revocations = [
-            row
-            for row in self._events_after(lease, cleanup_boundary)
-            if row.get("event") == "lease_revoked"
-            and row.get("leaseFingerprint") == lease_fingerprint
-        ]
-        stop_boundary = (
-            float(lease_revocations[0]["at"])
-            if lease_revocations
-            else cleanup_boundary
-        )
-        stops = [
-            row
-            for row in self._events_after(lease, stop_boundary)
-            if row.get("event") == "runtime_stop_verified"
-            and row.get("verified") is True
-            and row.get("outcomeCode") == "minecraft_stopped"
-            and row.get("leaseFingerprint") == lease_fingerprint
-        ]
-        cleanup_step["requirements"] = {
-            "grantRevokedOrExpired": bool(auth_cleanup),
-            "leaseRevoked": bool(lease_revocations),
-            "runtimeStopVerified": bool(stops),
-        }
-        cleanup_step["machineEvidenceObserved"] = bool(
-            all(cleanup_step["requirements"].values())
+        self._advance_cleanup_evidence(
+            steps=steps,
+            authorization=authorization,
+            lease=lease,
+            authorization_status=authorization_status,
+            lease_status=lease_status,
+            lease_fingerprint=lease_fingerprint,
+            default_grant_fingerprint=grant_fingerprint,
+            world_boundary=world_boundary,
         )
 
     def _refresh(self) -> None:
@@ -1466,6 +2114,8 @@ class AutonomyValidationManager:
         relevant = [capabilities["authorizationObserver"]]
         if current_kind in {"world_lease", "world_postcondition", "cleanup"}:
             relevant.append(capabilities["worldLeaseObserver"])
+        if current_kind == "world_postcondition":
+            relevant.append(capabilities["minecraftWorldEffect"])
         blocker = next(
             (
                 str(code)
@@ -1504,6 +2154,9 @@ class AutonomyValidationManager:
                     for row in authorization
                     if row.get("processFingerprint") == auth_process
                 ]
+        world_effect: list[dict[str, Any]] = []
+        if not error and current_kind == "world_postcondition":
+            world_effect, error = self._world_effect_source_events()
         if error:
             steps = self._session.get("_steps") or []
             source_not_yet_observed = bool(
@@ -1523,7 +2176,13 @@ class AutonomyValidationManager:
                 return
             authorization = authorization if isinstance(authorization, list) else []
             lease = lease if isinstance(lease, list) else []
-        self._advance_evidence(authorization, lease)
+        self._advance_evidence(
+            authorization,
+            lease,
+            world_effect,
+            authorization_status=authorization_raw,
+            lease_status=lease_raw,
+        )
         self._update_summary()
         self._persist()
 
@@ -1534,9 +2193,17 @@ class AutonomyValidationManager:
         assistant_passed = all(
             step.get("status") == "passed" for step in steps[:3]
         )
+        minecraft_passed = bool(
+            len(steps) > 4
+            and all(
+                step.get("status") == "passed"
+                for step in steps[3:5]
+            )
+        )
         cleanup_required, cleanup_unknown = self._cleanup_state()
         effect_observed = bool(
             (steps and steps[0].get("_grantFingerprint"))
+            or (len(steps) > 4 and steps[4].get("_grantFingerprint"))
             or (len(steps) > 3 and steps[3].get("_leaseFingerprint"))
         )
         cleanup_observed = bool(
@@ -1561,13 +2228,40 @@ class AutonomyValidationManager:
             ),
             "stepsTotal": len(steps),
             "assistantTrack": "passed" if assistant_passed else "pending",
-            "minecraftTrack": "blocked",
-            "cleanupTrack": "observed" if cleanup_observed else "pending",
+            "minecraftTrack": "passed" if minecraft_passed else "pending",
+            "cleanupTrack": (
+                "passed"
+                if len(steps) > 5 and steps[5].get("status") == "passed"
+                else "observed"
+                if cleanup_observed
+                else "pending"
+            ),
             "cleanupRequired": cleanup_required,
             "cleanupStateUnknown": cleanup_unknown,
-            "eligibleToPass": False,
+            "eligibleToPass": bool(
+                assistant_passed
+                and minecraft_passed
+                and cleanup_observed
+                and not cleanup_required
+                and not cleanup_unknown
+            ),
         }
         self._session["warnings"] = []
+
+    def _production_blockers(self) -> list[str]:
+        if self._session is None:
+            return list(MINECRAFT_PRODUCTION_BLOCKERS)
+        steps = self._session.get("_steps") or []
+        world_step = steps[4] if len(steps) > 4 else {}
+        if world_step.get("status") == "passed":
+            return []
+        requirements = world_step.get("requirements") or {}
+        blockers: list[str] = []
+        if not requirements.get("autonomyRouteWired"):
+            blockers.append(MINECRAFT_ROUTE_BLOCKER)
+        if not requirements.get("trustedPostconditionObserved"):
+            blockers.append(MINECRAFT_POSTCONDITION_BLOCKER)
+        return blockers
 
     def _public_step(self, step: dict[str, Any] | None) -> dict[str, Any]:
         if not step:
@@ -1611,7 +2305,7 @@ class AutonomyValidationManager:
                 if self._session.get("state") == "preflight"
                 else []
             ),
-            "productionBlockers": list(MINECRAFT_PRODUCTION_BLOCKERS),
+            "productionBlockers": self._production_blockers(),
             "blockers": sorted(
                 {
                     str(code)
@@ -1915,7 +2609,7 @@ class AutonomyValidationManager:
                 self._session.get("summary") or self._empty_summary()
             ),
             "warnings": deepcopy(self._session.get("warnings") or []),
-            "productionBlockers": list(MINECRAFT_PRODUCTION_BLOCKERS),
+            "productionBlockers": self._production_blockers(),
             "steps": [self._public_step(step) for step in self._session.get("_steps") or []],
             "privacy": {
                 "contentFree": True,

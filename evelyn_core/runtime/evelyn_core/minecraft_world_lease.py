@@ -13,6 +13,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
+from .minecraft_action_contract import (
+    MINECRAFT_ACTION_RESULT_SCHEMA,
+    bind_minecraft_action_request,
+    validate_minecraft_action_dispatch,
+    validate_minecraft_action_request,
+    validate_minecraft_action_result,
+)
 from .minecraft_mode_composition import (
     MINECRAFT_CONNECTED_OUTCOME,
     MINECRAFT_STOPPED_OUTCOME,
@@ -55,6 +62,9 @@ MINECRAFT_WORLD_ACTION_LOCK_BUSY = (
 MINECRAFT_WORLD_ACTION_LOCK_UNAVAILABLE = (
     "minecraft_world_action_lock_unavailable"
 )
+MINECRAFT_WORLD_ACTION_LOCK_TIMEOUT = (
+    "minecraft_world_action_lock_timeout"
+)
 _OWNER_AUTHORITY_ERROR_CODES = frozenset(
     {
         MINECRAFT_WORLD_LEASE_OWNER_CONFLICT,
@@ -63,6 +73,7 @@ _OWNER_AUTHORITY_ERROR_CODES = frozenset(
         MINECRAFT_WORLD_LEASE_OWNER_CLAIM_FAILED,
         MINECRAFT_WORLD_ACTION_LOCK_BUSY,
         MINECRAFT_WORLD_ACTION_LOCK_UNAVAILABLE,
+        MINECRAFT_WORLD_ACTION_LOCK_TIMEOUT,
     }
 )
 DEFAULT_WORLD_LEASE_TTL_SEC = 60 * 60.0
@@ -101,6 +112,10 @@ _ALLOWED_REASONS = frozenset(
         "audit_unavailable",
         "status_write_failed",
         "secret_unavailable",
+        "autonomy_action",
+        "action_cancelled",
+        "action_failed",
+        "action_timeout",
     }
 )
 _ALLOWED_EVENTS = frozenset(
@@ -115,6 +130,13 @@ _ALLOWED_EVENTS = frozenset(
         "goal_attempted",
         "goal_failed",
         "goal_verified",
+        "action_dispatch_attempted",
+        "action_dispatch_verified",
+        "action_completed",
+        "action_failed",
+        "action_cancel_attempted",
+        "action_cancel_verified",
+        "action_cancel_failed",
     }
 )
 _ALLOWED_OUTCOMES = frozenset(
@@ -126,8 +148,18 @@ _ALLOWED_OUTCOMES = frozenset(
         "minecraft_goal_failed",
         "minecraft_stop_failed",
         "minecraft_stop_retry_budget_exhausted",
+        "minecraft_action_dispatched",
+        "minecraft_action_completed",
+        "minecraft_action_failed",
+        "minecraft_action_cancelled",
+        "minecraft_action_cancel_unverified",
     }
 )
+
+DEFAULT_ACTION_POLL_INTERVAL_SEC = 0.25
+DEFAULT_ACTION_TIMEOUT_SEC = 120.0
+DEFAULT_ACTION_CANCEL_TIMEOUT_SEC = 5.0
+DEFAULT_ACTION_SHUTDOWN_LOCK_TIMEOUT_SEC = 5.0
 
 
 def _finite_float(value: Any, default: float) -> float:
@@ -226,6 +258,9 @@ class MinecraftWorldLeaseOwner:
         enable_mode: Callable[..., Awaitable[dict[str, Any]]],
         disable_mode: Callable[[int], Awaitable[dict[str, Any]]],
         set_goal: Callable[..., Awaitable[dict[str, Any]]],
+        dispatch_action: Callable[..., Awaitable[dict[str, Any]]] | None = None,
+        get_action_status: Callable[[str], Awaitable[dict[str, Any]]] | None = None,
+        cancel_action: Callable[..., Awaitable[dict[str, Any]]] | None = None,
         now: Callable[[], float] = time.time,
         monotonic: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], Awaitable[Any]] = asyncio.sleep,
@@ -235,6 +270,16 @@ class MinecraftWorldLeaseOwner:
         watchdog_interval_sec: float = DEFAULT_WATCHDOG_INTERVAL_SEC,
         standby_probe_interval_sec: float = (
             DEFAULT_STANDBY_PROBE_INTERVAL_SEC
+        ),
+        action_poll_interval_sec: float = (
+            DEFAULT_ACTION_POLL_INTERVAL_SEC
+        ),
+        action_timeout_sec: float = DEFAULT_ACTION_TIMEOUT_SEC,
+        action_cancel_timeout_sec: float = (
+            DEFAULT_ACTION_CANCEL_TIMEOUT_SEC
+        ),
+        action_shutdown_lock_timeout_sec: float = (
+            DEFAULT_ACTION_SHUTDOWN_LOCK_TIMEOUT_SEC
         ),
         log: Callable[..., Any] = print,
     ) -> None:
@@ -276,6 +321,9 @@ class MinecraftWorldLeaseOwner:
         self.enable_mode = enable_mode
         self.disable_mode = disable_mode
         self.set_goal_callback = set_goal
+        self.dispatch_action_callback = dispatch_action
+        self.get_action_status_callback = get_action_status
+        self.cancel_action_callback = cancel_action
         self.now = now
         self.monotonic = monotonic
         self.sleep = sleep
@@ -312,6 +360,34 @@ class MinecraftWorldLeaseOwner:
                 DEFAULT_STANDBY_PROBE_INTERVAL_SEC,
             ),
         )
+        self.action_poll_interval_sec = max(
+            0.01,
+            _finite_float(
+                action_poll_interval_sec,
+                DEFAULT_ACTION_POLL_INTERVAL_SEC,
+            ),
+        )
+        self.action_timeout_sec = max(
+            self.action_poll_interval_sec,
+            _finite_float(
+                action_timeout_sec,
+                DEFAULT_ACTION_TIMEOUT_SEC,
+            ),
+        )
+        self.action_cancel_timeout_sec = max(
+            0.05,
+            _finite_float(
+                action_cancel_timeout_sec,
+                DEFAULT_ACTION_CANCEL_TIMEOUT_SEC,
+            ),
+        )
+        self.action_shutdown_lock_timeout_sec = max(
+            0.05,
+            _finite_float(
+                action_shutdown_lock_timeout_sec,
+                DEFAULT_ACTION_SHUTDOWN_LOCK_TIMEOUT_SEC,
+            ),
+        )
         self.log = log
         self.process_nonce = secrets.token_hex(8)
         self.authorization_token = secrets.token_urlsafe(32)
@@ -328,9 +404,12 @@ class MinecraftWorldLeaseOwner:
         self._stop_attempts: deque[float] = deque()
         self._data_lock = threading.RLock()
         self._operation_lock = asyncio.Lock()
+        self._action_execution_lock = asyncio.Lock()
         self._start_lock = asyncio.Lock()
         self._watchdog_task: Any = None
         self._next_standby_probe_at = 0.0
+        self._inflight_actions: dict[str, dict[str, Any]] = {}
+        self._shutting_down = False
 
     def _append_event(
         self,
@@ -341,6 +420,7 @@ class MinecraftWorldLeaseOwner:
         reason: str = "",
         outcome: str = "",
         verified: bool | None = None,
+        action_binding: dict[str, Any] | None = None,
     ) -> bool:
         timestamp = self.now()
         safe_event = _safe_identifier(event)
@@ -389,6 +469,33 @@ class MinecraftWorldLeaseOwner:
             ),
             "verified": verified,
         }
+        if action_binding is not None:
+            record.update(
+                {
+                    "actionRunId": _safe_identifier(
+                        action_binding.get("actionRunId"),
+                        limit=128,
+                    ),
+                    "authorizationGrantId": _safe_identifier(
+                        action_binding.get(
+                            "authorizationGrantId"
+                        ),
+                        limit=128,
+                    ),
+                    "goalRunId": _safe_identifier(
+                        action_binding.get("goalRunId"),
+                        limit=128,
+                    ),
+                    "actionKey": _safe_identifier(
+                        action_binding.get("actionKey"),
+                        limit=128,
+                    ),
+                    "contractCode": _safe_identifier(
+                        action_binding.get("contractCode"),
+                        limit=128,
+                    ),
+                }
+            )
         try:
             self.events_dir.mkdir(parents=True, exist_ok=True)
             date_key = datetime.fromtimestamp(
@@ -968,6 +1075,8 @@ class MinecraftWorldLeaseOwner:
             self._last_stop_outcome = ""
             self._last_error_code = ""
             self._stop_attempts.clear()
+            self._inflight_actions.clear()
+            self._shutting_down = False
             self._next_standby_probe_at = 0.0
             self._world_action_lock_quarantined = False
             try:
@@ -1054,7 +1163,7 @@ class MinecraftWorldLeaseOwner:
         )
         issued_at = self.now()
         lease = MinecraftWorldLease(
-            lease_id=secrets.token_urlsafe(18),
+            lease_id=f"lease-{secrets.token_urlsafe(18)}",
             guild_id=resolved_guild_id,
             issuer_ref=resolved_issuer,
             source=resolved_source,
@@ -1092,6 +1201,7 @@ class MinecraftWorldLeaseOwner:
     def _revoke_lease(self, *, reason: str) -> bool:
         lease = self._lease
         self._lease = None
+        self._inflight_actions.clear()
         audit_ok = self._audit_ready
         if lease is not None:
             audit_ok = bool(
@@ -1267,7 +1377,6 @@ class MinecraftWorldLeaseOwner:
         if cancellation_requested:
             raise asyncio.CancelledError()
         return result
-
     async def reconcile_once(
         self,
         *,
@@ -1449,6 +1558,10 @@ class MinecraftWorldLeaseOwner:
     ) -> dict[str, Any]:
         await self.ensure_started()
         async with self._operation_lock:
+            if self._shutting_down:
+                raise RuntimeError("minecraft_world_owner_shutting_down")
+            if self._inflight_actions:
+                raise RuntimeError("minecraft_world_action_busy")
             boundary_error = self._boundary_error_code()
             if boundary_error:
                 if boundary_error == MINECRAFT_WORLD_LEASE_AUDIT_UNAVAILABLE:
@@ -1720,6 +1833,15 @@ class MinecraftWorldLeaseOwner:
                 raise RuntimeError(
                     "minecraft_world_lease_owner_mismatch"
                 )
+            action_cancel_failed = False
+            for record in tuple(self._inflight_actions.values()):
+                request = record.get("request") or {}
+                if request.get("guildId") != int(guild_id):
+                    continue
+                try:
+                    await self._cancel_bound_action_locked(record)
+                except Exception:
+                    action_cancel_failed = True
             revoke_audited = self._revoke_lease(
                 reason="explicit_disconnect"
             )
@@ -1739,6 +1861,10 @@ class MinecraftWorldLeaseOwner:
                     boundary_error
                     or MINECRAFT_WORLD_LEASE_AUDIT_UNAVAILABLE
                 )
+            if action_cancel_failed:
+                raise RuntimeError(
+                    "minecraft_action_cancel_unverified"
+                )
             return {
                 "running": False,
                 "connected": False,
@@ -1753,6 +1879,10 @@ class MinecraftWorldLeaseOwner:
     ) -> dict[str, Any]:
         await self.ensure_started()
         async with self._operation_lock:
+            if self._shutting_down:
+                raise RuntimeError("minecraft_world_owner_shutting_down")
+            if self._inflight_actions:
+                raise RuntimeError("minecraft_world_action_busy")
             boundary_error = self._boundary_error_code()
             if boundary_error:
                 await self._shielded_stop_runtime(
@@ -1910,6 +2040,470 @@ class MinecraftWorldLeaseOwner:
                 raise RuntimeError(self._boundary_error_code())
             return result
 
+    def _require_action_transport(self) -> None:
+        if (
+            self.dispatch_action_callback is None
+            or self.get_action_status_callback is None
+            or self.cancel_action_callback is None
+        ):
+            raise RuntimeError(
+                "minecraft_action_transport_unavailable"
+            )
+
+    def _authorized_action_lease(
+        self,
+        guild_id: int,
+        *,
+        expected_lease_id: str = "",
+    ) -> tuple[MinecraftWorldLease, dict[str, Any]]:
+        boundary_error = self._boundary_error_code()
+        if boundary_error:
+            raise RuntimeError(boundary_error)
+        lease = self._lease
+        if (
+            lease is None
+            or lease.expires_at <= self.now()
+            or lease.guild_id != int(guild_id)
+            or (
+                expected_lease_id
+                and lease.lease_id != expected_lease_id
+            )
+        ):
+            raise RuntimeError(
+                "minecraft_world_authorization_required"
+            )
+        proof = self._lease_proof(lease)
+        if not proof:
+            raise RuntimeError(
+                "minecraft_world_authorization_required"
+            )
+        return lease, proof
+
+    def _get_inflight_action(
+        self,
+        *,
+        guild_id: int,
+        action_run_id: str,
+        goal_run_id: str = "",
+        action_key: str = "",
+        contract_code: str = "",
+    ) -> dict[str, Any]:
+        raw_run_id = str(action_run_id or "")
+        run_id = _safe_identifier(raw_run_id, limit=128)
+        record = self._inflight_actions.get(run_id)
+        if (
+            not run_id
+            or run_id != raw_run_id
+            or not isinstance(record, dict)
+        ):
+            raise RuntimeError("minecraft_action_not_inflight")
+        request = record.get("request")
+        if not isinstance(request, dict):
+            raise RuntimeError("minecraft_action_not_inflight")
+        exact = {
+            "guildId": int(guild_id),
+            "actionRunId": run_id,
+        }
+        for field, value in (
+            ("goalRunId", goal_run_id),
+            ("actionKey", action_key),
+            ("contractCode", contract_code),
+        ):
+            if value:
+                raw_value = str(value)
+                if (
+                    _safe_identifier(raw_value, limit=128)
+                    != raw_value
+                ):
+                    raise RuntimeError(
+                        "minecraft_action_correlation_mismatch"
+                    )
+                exact[field] = raw_value
+        if any(request.get(key) != value for key, value in exact.items()):
+            raise RuntimeError("minecraft_action_correlation_mismatch")
+        return record
+
+    async def _force_stop_after_action_failure(
+        self,
+        record: dict[str, Any],
+    ) -> None:
+        lease = record.get("lease")
+        request = record.get("request") or {}
+        if (
+            isinstance(lease, MinecraftWorldLease)
+            and self._lease is not None
+            and self._lease.lease_id == lease.lease_id
+        ):
+            self._revoke_lease(reason="action_failed")
+        await self._shielded_stop_runtime(
+            guild_id=int(request.get("guildId") or 0),
+            reason="action_failed",
+            force=True,
+            lease=(
+                lease
+                if isinstance(lease, MinecraftWorldLease)
+                else None
+            ),
+        )
+
+    async def _cancel_bound_action_locked(
+        self,
+        record: dict[str, Any],
+    ) -> dict[str, Any]:
+        self._require_action_transport()
+        request = validate_minecraft_action_request(
+            record.get("request"),
+            bound=True,
+        )
+        lease = record.get("lease")
+        if not isinstance(lease, MinecraftWorldLease):
+            raise RuntimeError("minecraft_action_not_inflight")
+        proof = self._lease_proof(lease) or dict(
+            record.get("worldLease") or {}
+        )
+        if not self._append_required_event(
+            "action_cancel_attempted",
+            lease=lease,
+            reason="action_cancelled",
+            outcome="",
+            verified=False,
+            action_binding=request,
+        ):
+            await self._force_stop_after_action_failure(record)
+            raise RuntimeError(self._boundary_error_code())
+        try:
+            response = await asyncio.wait_for(
+                self.cancel_action_callback(
+                    request,
+                    world_lease=proof,
+                ),
+                timeout=self.action_cancel_timeout_sec,
+            )
+            acknowledged = validate_minecraft_action_dispatch(
+                response,
+                expected_request=request,
+            )
+            if acknowledged["status"] != "cancelled":
+                raise RuntimeError(
+                    "minecraft_action_cancel_unverified"
+                )
+        except asyncio.CancelledError:
+            await self._force_stop_after_action_failure(record)
+            raise
+        except Exception as exc:
+            self._append_required_event(
+                "action_cancel_failed",
+                lease=lease,
+                reason="action_failed",
+                outcome="minecraft_action_cancel_unverified",
+                verified=False,
+                action_binding=request,
+            )
+            await self._force_stop_after_action_failure(record)
+            raise RuntimeError(
+                "minecraft_action_cancel_unverified"
+            ) from exc
+        if not self._append_required_event(
+            "action_cancel_verified",
+            lease=lease,
+            reason="action_cancelled",
+            outcome="minecraft_action_cancelled",
+            verified=True,
+            action_binding=request,
+        ):
+            await self._force_stop_after_action_failure(record)
+            raise RuntimeError(self._boundary_error_code())
+        self._inflight_actions.pop(request["actionRunId"], None)
+        return acknowledged
+
+    async def dispatch_action(
+        self,
+        guild_id: int,
+        request: dict[str, Any],
+    ) -> dict[str, Any]:
+        await self.ensure_started()
+        normalized = validate_minecraft_action_request(
+            request,
+            bound=False,
+        )
+        if normalized["guildId"] != int(guild_id):
+            raise RuntimeError("minecraft_action_correlation_mismatch")
+        async with self._operation_lock:
+            if self._shutting_down:
+                raise RuntimeError("minecraft_world_owner_shutting_down")
+            self._require_action_transport()
+            lease, proof = self._authorized_action_lease(guild_id)
+            if self._inflight_actions:
+                raise RuntimeError("minecraft_world_action_busy")
+            bound = bind_minecraft_action_request(
+                normalized,
+                goal_run_id=secrets.token_hex(12),
+                lease_id=lease.lease_id,
+                lease_process_nonce=self.process_nonce,
+            )
+            if not self._append_required_event(
+                "action_dispatch_attempted",
+                lease=lease,
+                reason="autonomy_action",
+                verified=False,
+                action_binding=bound,
+            ):
+                await self._shielded_stop_runtime(
+                    guild_id=guild_id,
+                    reason=self._boundary_stop_reason(),
+                    force=True,
+                    lease=lease,
+                )
+                raise RuntimeError(self._boundary_error_code())
+            record = {
+                "request": bound,
+                "lease": lease,
+                "worldLease": proof,
+                "dispatchedAtMonotonic": self.monotonic(),
+            }
+            self._inflight_actions[bound["actionRunId"]] = record
+            try:
+                response = await self.dispatch_action_callback(
+                    bound,
+                    world_lease=proof,
+                )
+                acknowledged = validate_minecraft_action_dispatch(
+                    response,
+                    expected_request=bound,
+                )
+                if acknowledged["status"] not in {
+                    "accepted",
+                    "running",
+                }:
+                    raise RuntimeError(
+                        "minecraft_action_dispatch_unverified"
+                    )
+            except asyncio.CancelledError:
+                try:
+                    await self._cancel_bound_action_locked(record)
+                finally:
+                    self._inflight_actions.pop(
+                        bound["actionRunId"],
+                        None,
+                    )
+                raise
+            except Exception as exc:
+                try:
+                    await self._cancel_bound_action_locked(record)
+                except Exception:
+                    pass
+                self._append_required_event(
+                    "action_failed",
+                    lease=lease,
+                    reason="action_failed",
+                    outcome="minecraft_action_failed",
+                    verified=False,
+                    action_binding=bound,
+                )
+                self._inflight_actions.pop(
+                    bound["actionRunId"],
+                    None,
+                )
+                raise RuntimeError(
+                    "minecraft_action_dispatch_unverified"
+                ) from exc
+            if not self._append_required_event(
+                "action_dispatch_verified",
+                lease=lease,
+                reason="autonomy_action",
+                outcome="minecraft_action_dispatched",
+                verified=True,
+                action_binding=bound,
+            ):
+                try:
+                    await self._cancel_bound_action_locked(record)
+                except Exception:
+                    pass
+                await self._force_stop_after_action_failure(record)
+                raise RuntimeError(self._boundary_error_code())
+            return acknowledged
+
+    async def action_status(
+        self,
+        guild_id: int,
+        *,
+        goal_run_id: str,
+        action_run_id: str,
+        action_key: str,
+        contract_code: str,
+    ) -> dict[str, Any]:
+        await self.ensure_started()
+        async with self._operation_lock:
+            self._require_action_transport()
+            record = self._get_inflight_action(
+                guild_id=guild_id,
+                action_run_id=action_run_id,
+                goal_run_id=goal_run_id,
+                action_key=action_key,
+                contract_code=contract_code,
+            )
+            request = validate_minecraft_action_request(
+                record["request"],
+                bound=True,
+            )
+            self._authorized_action_lease(
+                guild_id,
+                expected_lease_id=request["leaseId"],
+            )
+            response = await self.get_action_status_callback(
+                request["goalRunId"]
+            )
+            if (
+                isinstance(response, dict)
+                and response.get("schema")
+                == MINECRAFT_ACTION_RESULT_SCHEMA
+            ):
+                result = validate_minecraft_action_result(
+                    response,
+                    expected_request=request,
+                )
+                if not self._append_required_event(
+                    "action_completed",
+                    lease=record["lease"],
+                    reason="autonomy_action",
+                    outcome="minecraft_action_completed",
+                    verified=True,
+                    action_binding=request,
+                ):
+                    await self._force_stop_after_action_failure(
+                        record
+                    )
+                    raise RuntimeError(self._boundary_error_code())
+                self._inflight_actions.pop(
+                    request["actionRunId"],
+                    None,
+                )
+                return result
+            status = validate_minecraft_action_dispatch(
+                response,
+                expected_request=request,
+            )
+            if status["status"] in {"failed", "cancelled"}:
+                event = (
+                    "action_cancel_verified"
+                    if status["status"] == "cancelled"
+                    else "action_failed"
+                )
+                reason = (
+                    "action_cancelled"
+                    if status["status"] == "cancelled"
+                    else "action_failed"
+                )
+                outcome = (
+                    "minecraft_action_cancelled"
+                    if status["status"] == "cancelled"
+                    else "minecraft_action_failed"
+                )
+                if not self._append_required_event(
+                    event,
+                    lease=record["lease"],
+                    reason=reason,
+                    outcome=outcome,
+                    verified=(status["status"] == "cancelled"),
+                    action_binding=request,
+                ):
+                    await self._force_stop_after_action_failure(
+                        record
+                    )
+                    raise RuntimeError(self._boundary_error_code())
+                self._inflight_actions.pop(
+                    request["actionRunId"],
+                    None,
+                )
+            return status
+
+    async def cancel_action(
+        self,
+        guild_id: int,
+        action_run_id: str,
+    ) -> dict[str, Any]:
+        await self.ensure_started()
+        async with self._operation_lock:
+            record = self._get_inflight_action(
+                guild_id=guild_id,
+                action_run_id=action_run_id,
+            )
+            return await self._cancel_bound_action_locked(record)
+
+    async def execute_action(
+        self,
+        guild_id: int,
+        request: dict[str, Any],
+    ) -> dict[str, Any]:
+        async with self._action_execution_lock:
+            dispatch = await self.dispatch_action(
+                guild_id,
+                request,
+            )
+            action_run_id = dispatch["actionRunId"]
+            deadline = self.monotonic() + self.action_timeout_sec
+            try:
+                while self.monotonic() < deadline:
+                    status = await self.action_status(
+                        guild_id,
+                        goal_run_id=dispatch["goalRunId"],
+                        action_run_id=action_run_id,
+                        action_key=dispatch["actionKey"],
+                        contract_code=dispatch["contractCode"],
+                    )
+                    if status.get("schema") == MINECRAFT_ACTION_RESULT_SCHEMA:
+                        return status
+                    if status.get("status") == "failed":
+                        raise RuntimeError("minecraft_action_failed")
+                    if status.get("status") == "cancelled":
+                        raise RuntimeError("minecraft_action_cancelled")
+                    await self.sleep(self.action_poll_interval_sec)
+                await self.cancel_action(guild_id, action_run_id)
+                raise RuntimeError("minecraft_action_timeout")
+            except asyncio.CancelledError:
+                try:
+                    await self.cancel_action(guild_id, action_run_id)
+                except Exception:
+                    pass
+                raise
+            except Exception:
+                if action_run_id in self._inflight_actions:
+                    try:
+                        await self.cancel_action(
+                            guild_id,
+                            action_run_id,
+                        )
+                    except Exception as cancel_exc:
+                        raise RuntimeError(
+                            "minecraft_action_cancel_unverified"
+                        ) from cancel_exc
+                raise
+
+    async def _cancel_inflight_before_shutdown(self) -> tuple[bool, bool]:
+        """Release a known service-held action lock before handoff fencing."""
+
+        async with self._operation_lock:
+            records = tuple(self._inflight_actions.values())
+            cancellation_failed = False
+            for record in records:
+                try:
+                    await self._cancel_bound_action_locked(record)
+                except asyncio.CancelledError:
+                    cancellation_failed = True
+                    request = record.get("request") or {}
+                    if request.get("actionRunId") in self._inflight_actions:
+                        await self._force_stop_after_action_failure(
+                            record
+                        )
+                except Exception:
+                    cancellation_failed = True
+                    request = record.get("request") or {}
+                    if request.get("actionRunId") in self._inflight_actions:
+                        await self._force_stop_after_action_failure(
+                            record
+                        )
+            return bool(records), cancellation_failed
+
     async def _shutdown_runtime_cleanup(
         self,
         *,
@@ -1994,15 +2588,31 @@ class MinecraftWorldLeaseOwner:
                 continue
         return step_task.result(), cancellation_requested
 
-    async def _acquire_world_action_lock_for_shutdown(self) -> bool:
+    async def _acquire_world_action_lock_for_shutdown(
+        self,
+        *,
+        timeout_sec: float | None = None,
+    ) -> bool:
         """Poll the nonblocking primitive without orphan worker threads."""
 
         cancellation_requested = False
+        deadline = (
+            asyncio.get_running_loop().time() + timeout_sec
+            if timeout_sec is not None
+            else None
+        )
         while True:
             try:
                 self._world_action_lock.acquire()
                 return cancellation_requested
             except MinecraftOwnerLockBusy:
+                if (
+                    deadline is not None
+                    and asyncio.get_running_loop().time() >= deadline
+                ):
+                    raise TimeoutError(
+                        MINECRAFT_WORLD_ACTION_LOCK_TIMEOUT
+                    )
                 try:
                     await asyncio.sleep(WORLD_ACTION_LOCK_RETRY_SEC)
                 except asyncio.CancelledError:
@@ -2022,30 +2632,48 @@ class MinecraftWorldLeaseOwner:
                 }
 
         action_lock_acquired = False
-        action_lock_unavailable = False
+        action_lock_error = ""
         stale_grace_elapsed = False
         cancellation_requested = False
         result: dict[str, Any]
         try:
+            pre_cancel_value, cancelled = await self._await_shutdown_step(
+                self._cancel_inflight_before_shutdown()
+            )
+            known_inflight, action_cancel_failed = pre_cancel_value
+            cancellation_requested = cancellation_requested or cancelled
             # A service may already have validated a proof while holding this
-            # lock.  Wait for that effect to commit before stopping the world,
-            # and keep the lock through artifact fencing and owner release.
+            # lock. A locally tracked action is cancelled first because its
+            # service lock is intentionally held until terminal/cancel.
+            # Unknown external admissions retain the original wait semantics.
             try:
+                lock_wait_cancelled = (
+                    await self._acquire_world_action_lock_for_shutdown(
+                        timeout_sec=(
+                            self.action_shutdown_lock_timeout_sec
+                            if known_inflight
+                            else None
+                        ),
+                    )
+                )
                 cancellation_requested = (
-                    await self._acquire_world_action_lock_for_shutdown()
+                    cancellation_requested or lock_wait_cancelled
                 )
                 action_lock_acquired = True
+            except TimeoutError:
+                action_lock_error = MINECRAFT_WORLD_ACTION_LOCK_TIMEOUT
             except (MinecraftOwnerLockUnavailable, OSError):
-                action_lock_unavailable = True
+                action_lock_error = (
+                    MINECRAFT_WORLD_ACTION_LOCK_UNAVAILABLE
+                )
+            if action_lock_error:
                 with self._data_lock:
                     self._state = "manual_intervention_required"
-                    self._last_error_code = (
-                        MINECRAFT_WORLD_ACTION_LOCK_UNAVAILABLE
-                    )
+                    self._last_error_code = action_lock_error
                     self._withhold_delegation_capability()
                 # No new proof can be admitted through a shared unavailable
-                # boundary.  Carry any request admitted before the fault past
-                # the same stale window, then perform the final safety stop.
+                # or bounded-out boundary. Carry any request admitted before
+                # the fault past the stale window, then safety-stop the world.
                 _, cancelled = await self._await_shutdown_step(
                     self.sleep(WORLD_LEASE_ARTIFACT_FENCE_GRACE_SEC)
                 )
@@ -2059,8 +2687,12 @@ class MinecraftWorldLeaseOwner:
             )
             result = dict(result_value)
             cancellation_requested = cancellation_requested or cancelled
-            if action_lock_unavailable:
-                result["error"] = MINECRAFT_WORLD_ACTION_LOCK_UNAVAILABLE
+            if action_lock_error:
+                result["error"] = action_lock_error
+            elif action_cancel_failed:
+                result["error"] = (
+                    "minecraft_action_cancel_unverified"
+                )
         finally:
             with self._data_lock:
                 authority_fenced = self._release_owner_claim()
@@ -2113,6 +2745,7 @@ class MinecraftWorldLeaseOwner:
         return result
 
     async def shutdown(self, *, reason: str = "shutdown") -> dict[str, Any]:
+        self._shutting_down = True
         cancellation_requested = False
         task = self._watchdog_task
         self._watchdog_task = None
@@ -2138,11 +2771,51 @@ class MinecraftWorldLeaseOwner:
         return result
 
 
+def build_local_minecraft_world_lease_owner(
+    *,
+    status_path: Path,
+    events_dir: Path,
+    get_client: Callable[[], Any],
+    enable_mode: Callable[..., Awaitable[dict[str, Any]]],
+    disable_mode: Callable[[int], Awaitable[dict[str, Any]]],
+    create_task: Callable[[Awaitable[Any]], Any] = asyncio.create_task,
+    log: Callable[..., Any] = print,
+) -> MinecraftWorldLeaseOwner:
+    """Compose the in-process owner with the typed Mindcraft client."""
+
+    return MinecraftWorldLeaseOwner(
+        status_path=status_path,
+        events_dir=events_dir,
+        get_runtime_status=lambda: get_client().status(),
+        enable_mode=enable_mode,
+        disable_mode=disable_mode,
+        set_goal=lambda goal, **kwargs: get_client().set_goal(goal, **kwargs),
+        dispatch_action=(
+            lambda request, **kwargs: get_client().dispatch_action(
+                request,
+                **kwargs,
+            )
+        ),
+        get_action_status=(
+            lambda goal_run_id: get_client().action_status(goal_run_id)
+        ),
+        cancel_action=(
+            lambda request, **kwargs: get_client().cancel_action(
+                request,
+                **kwargs,
+            )
+        ),
+        create_task=create_task,
+        log=log,
+    )
+
+
 __all__ = [
     "DEFAULT_WATCHDOG_INTERVAL_SEC",
     "DEFAULT_WORLD_LEASE_TTL_SEC",
     "MAX_WORLD_LEASE_TTL_SEC",
     "MINECRAFT_WORLD_ACTION_LOCK_BUSY",
+    "MINECRAFT_WORLD_ACTION_LOCK_TIMEOUT",
     "MINECRAFT_WORLD_ACTION_LOCK_UNAVAILABLE",
     "MINECRAFT_WORLD_LEASE_EVENT_SCHEMA",
     "MINECRAFT_WORLD_LEASE_OWNER_CLAIM_FAILED",
@@ -2153,5 +2826,6 @@ __all__ = [
     "MINECRAFT_WORLD_LEASE_STATUS_SCHEMA",
     "MinecraftWorldLease",
     "MinecraftWorldLeaseOwner",
+    "build_local_minecraft_world_lease_owner",
     "minecraft_runtime_active",
 ]

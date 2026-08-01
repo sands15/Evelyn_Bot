@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import sys
@@ -54,6 +55,19 @@ def active_lease_status() -> dict:
     }
 
 
+def inactive_lease_status() -> dict:
+    return {
+        "schema": "minecraft_world_lease.status.v1",
+        "state": "authorization_required",
+        "updatedAt": time.time(),
+        "processNonce": "process-1",
+        "active": False,
+        "auditReady": True,
+        "statusReady": True,
+        "lease": None,
+    }
+
+
 class FakeOwner:
     def __init__(self) -> None:
         self.calls: list[tuple[str, object]] = []
@@ -72,6 +86,30 @@ class FakeOwner:
     async def set_goal(self, guild_id: int, goal: str) -> dict:
         self.calls.append(("goal", (guild_id, goal)))
         return {"goal": goal, "outcome_verified": True}
+
+    async def dispatch_action(
+        self,
+        guild_id: int,
+        request: dict,
+    ) -> dict:
+        self.calls.append(("action", (guild_id, request)))
+        return {"status": "accepted"}
+
+    async def action_status(self, guild_id: int, **kwargs) -> dict:
+        self.calls.append(
+            ("action_status", (guild_id, kwargs))
+        )
+        return {"status": "running"}
+
+    async def cancel_action(
+        self,
+        guild_id: int,
+        action_run_id: str,
+    ) -> dict:
+        self.calls.append(
+            ("cancel_action", (guild_id, action_run_id))
+        )
+        return {"status": "cancelled"}
 
 
 class MinecraftWorldLeaseDelegationTests(
@@ -135,6 +173,63 @@ class MinecraftWorldLeaseDelegationTests(
             )
 
         self.assertEqual(owner.calls, [])
+
+    async def test_action_delegation_is_quick_typed_and_exact(
+        self,
+    ) -> None:
+        owner = FakeOwner()
+        request = {
+            "schema": "minecraft_autonomy.action-request.v1",
+            "guildId": 7,
+            "actionKey": "minecraft:find_food_source",
+            "actionRunId": "action-run-1",
+            "authorizationGrantId": "grant-1",
+            "contractCode": "mindcraft_food_recovery.v1",
+            "parameters": {},
+        }
+
+        await execute_minecraft_world_lease_delegation(
+            owner,
+            action="action",
+            payload={"guildId": 7, "request": request},
+        )
+        await execute_minecraft_world_lease_delegation(
+            owner,
+            action="action_status",
+            payload={
+                "guildId": 7,
+                "goalRunId": "goal-run-1",
+                "actionRunId": "action-run-1",
+                "actionKey": "minecraft:find_food_source",
+                "contractCode": "mindcraft_food_recovery.v1",
+            },
+        )
+        await execute_minecraft_world_lease_delegation(
+            owner,
+            action="cancel_action",
+            payload={
+                "guildId": 7,
+                "actionRunId": "action-run-1",
+            },
+        )
+
+        self.assertEqual(
+            [row[0] for row in owner.calls],
+            ["action", "action_status", "cancel_action"],
+        )
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "minecraft_action_delegation_fields_invalid",
+        ):
+            await execute_minecraft_world_lease_delegation(
+                owner,
+                action="action",
+                payload={
+                    "guildId": 7,
+                    "request": request,
+                    "goal": "raw content",
+                },
+            )
 
     def test_token_comparison_and_error_redaction(self) -> None:
         self.assertTrue(
@@ -542,6 +637,368 @@ class MinecraftWorldLeaseRemoteTests(
         self.assertEqual(self.remote.status()["state"], "remote_error")
         self.assertFalse(self.remote.status()["active"])
 
+    async def test_remote_action_dispatches_then_polls_exact_result(
+        self,
+    ) -> None:
+        calls: list[tuple[str, dict, dict[str, str]]] = []
+        bound: dict = {}
+
+        def dispatch(status: str) -> dict:
+            return {
+                "schema": "minecraft_autonomy.action-dispatch.v1",
+                "status": status,
+                **{
+                    key: bound[key]
+                    for key in (
+                        "guildId",
+                        "actionKey",
+                        "actionRunId",
+                        "authorizationGrantId",
+                        "goalRunId",
+                        "leaseId",
+                        "leaseProcessNonce",
+                        "contractCode",
+                    )
+                },
+                "accepted": status in {"accepted", "running"},
+                "contentFree": True,
+                "errorCode": "",
+            }
+
+        async def action_request(method, path, payload, headers):
+            calls.append((path, dict(payload or {}), dict(headers)))
+            if path.endswith("/action"):
+                bound.update(payload["request"])
+                bound.update(
+                    {
+                        "goalRunId": "goal-run-1",
+                        "leaseId": "lease-1",
+                        "leaseProcessNonce": "process-1",
+                    }
+                )
+                result = dispatch("accepted")
+            elif path.endswith("/action_status"):
+                result = {
+                    "schema": "minecraft_autonomy.action-result.v1",
+                    "status": "completed",
+                    **{
+                        key: bound[key]
+                        for key in (
+                            "guildId",
+                            "actionKey",
+                            "actionRunId",
+                            "authorizationGrantId",
+                            "goalRunId",
+                            "leaseId",
+                            "leaseProcessNonce",
+                            "contractCode",
+                        )
+                    },
+                    "postconditionCode": "food_reserve_ready",
+                    "evidenceCode": (
+                        "minecraft_find_food_source_completed"
+                    ),
+                    "verified": True,
+                    "contentFree": True,
+                }
+            else:
+                self.fail(path)
+            return {
+                "ok": True,
+                "result": result,
+                "leaseStatus": active_lease_status(),
+            }
+
+        self.remote.request = action_request
+        result = await self.remote.execute_action(
+            7,
+            {
+                "schema": "minecraft_autonomy.action-request.v1",
+                "guildId": 7,
+                "actionKey": "minecraft:find_food_source",
+                "actionRunId": "action-run-1",
+                "authorizationGrantId": "grant-1",
+                "contractCode": "mindcraft_food_recovery.v1",
+                "parameters": {},
+            },
+        )
+
+        self.assertTrue(result["verified"])
+        self.assertEqual(
+            [path.rsplit("/", 1)[-1] for path, _, _ in calls],
+            ["action", "action_status"],
+        )
+        self.assertTrue(
+            all(
+                headers[
+                    MINECRAFT_WORLD_LEASE_DELEGATION_TOKEN_HEADER
+                ]
+                == "secret-1"
+                for _, _, headers in calls
+            )
+        )
+        self.assertNotIn(
+            '"goal":',
+            json.dumps(calls).lower(),
+        )
+
+    async def test_cancel_transport_failure_uses_verified_disconnect(
+        self,
+    ) -> None:
+        paths: list[str] = []
+        bound: dict = {}
+        status_started = asyncio.Event()
+
+        def accepted() -> dict:
+            return {
+                "schema": "minecraft_autonomy.action-dispatch.v1",
+                "status": "accepted",
+                **{
+                    key: bound[key]
+                    for key in (
+                        "guildId",
+                        "actionKey",
+                        "actionRunId",
+                        "authorizationGrantId",
+                        "goalRunId",
+                        "leaseId",
+                        "leaseProcessNonce",
+                        "contractCode",
+                    )
+                },
+                "accepted": True,
+                "contentFree": True,
+                "errorCode": "",
+            }
+
+        async def request(_method, path, payload, _headers):
+            paths.append(path)
+            if path.endswith("/action"):
+                bound.update(payload["request"])
+                bound.update(
+                    {
+                        "goalRunId": "goal-run-1",
+                        "leaseId": "lease-1",
+                        "leaseProcessNonce": "process-1",
+                    }
+                )
+                return {
+                    "ok": True,
+                    "result": accepted(),
+                    "leaseStatus": active_lease_status(),
+                }
+            if path.endswith("/action_status"):
+                status_started.set()
+                await asyncio.Future()
+            if path.endswith("/cancel_action"):
+                raise RuntimeError(
+                    "minecraft_world_lease_owner_unavailable"
+                )
+            if path.endswith("/disconnect"):
+                return {
+                    "ok": True,
+                    "result": {
+                        "running": False,
+                        "connected": False,
+                        "outcome_verified": True,
+                        "outcome_code": "minecraft_stopped",
+                    },
+                    "leaseStatus": inactive_lease_status(),
+                }
+            self.fail(path)
+
+        self.remote.request = request
+        task = asyncio.create_task(
+            self.remote.execute_action(
+                7,
+                {
+                    "schema": "minecraft_autonomy.action-request.v1",
+                    "guildId": 7,
+                    "actionKey": "minecraft:find_food_source",
+                    "actionRunId": "action-run-1",
+                    "authorizationGrantId": "grant-1",
+                    "contractCode": "mindcraft_food_recovery.v1",
+                    "parameters": {},
+                },
+            )
+        )
+        await status_started.wait()
+        task.cancel()
+
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+
+        self.assertEqual(
+            paths,
+            [
+                "/internal/minecraft-world-lease/action",
+                "/internal/minecraft-world-lease/action_status",
+                "/internal/minecraft-world-lease/cancel_action",
+                "/internal/minecraft-world-lease/disconnect",
+            ],
+        )
+        self.assertEqual(self.remote._inflight_actions, {})
+        self.assertFalse(self.remote.status()["active"])
+
+    async def test_cancel_and_disconnect_failure_retains_correlation(
+        self,
+    ) -> None:
+        bound: dict = {}
+        status_started = asyncio.Event()
+
+        def accepted() -> dict:
+            return {
+                "schema": "minecraft_autonomy.action-dispatch.v1",
+                "status": "accepted",
+                **{
+                    key: bound[key]
+                    for key in (
+                        "guildId",
+                        "actionKey",
+                        "actionRunId",
+                        "authorizationGrantId",
+                        "goalRunId",
+                        "leaseId",
+                        "leaseProcessNonce",
+                        "contractCode",
+                    )
+                },
+                "accepted": True,
+                "contentFree": True,
+                "errorCode": "",
+            }
+
+        async def request(_method, path, payload, _headers):
+            if path.endswith("/action"):
+                bound.update(payload["request"])
+                bound.update(
+                    {
+                        "goalRunId": "goal-run-1",
+                        "leaseId": "lease-1",
+                        "leaseProcessNonce": "process-1",
+                    }
+                )
+                return {
+                    "ok": True,
+                    "result": accepted(),
+                    "leaseStatus": active_lease_status(),
+                }
+            if path.endswith("/action_status"):
+                status_started.set()
+                await asyncio.Future()
+            if path.endswith(("/cancel_action", "/disconnect")):
+                raise RuntimeError(
+                    "minecraft_world_lease_owner_unavailable"
+                )
+            self.fail(path)
+
+        self.remote.request = request
+        task = asyncio.create_task(
+            self.remote.execute_action(
+                7,
+                {
+                    "schema": "minecraft_autonomy.action-request.v1",
+                    "guildId": 7,
+                    "actionKey": "minecraft:find_food_source",
+                    "actionRunId": "action-run-1",
+                    "authorizationGrantId": "grant-1",
+                    "contractCode": "mindcraft_food_recovery.v1",
+                    "parameters": {},
+                },
+            )
+        )
+        await status_started.wait()
+        task.cancel()
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "minecraft_action_cancel_unverified",
+        ):
+            await task
+
+        self.assertIn(
+            "action-run-1",
+            self.remote._inflight_actions,
+        )
+
+    async def test_malformed_remote_dispatch_is_cancelled_by_run_id(
+        self,
+    ) -> None:
+        paths: list[str] = []
+        bound: dict = {}
+
+        def ack(status: str) -> dict:
+            return {
+                "schema": "minecraft_autonomy.action-dispatch.v1",
+                "status": status,
+                **{
+                    key: bound[key]
+                    for key in (
+                        "guildId",
+                        "actionKey",
+                        "actionRunId",
+                        "authorizationGrantId",
+                        "goalRunId",
+                        "leaseId",
+                        "leaseProcessNonce",
+                        "contractCode",
+                    )
+                },
+                "accepted": status in {"accepted", "running"},
+                "contentFree": True,
+                "errorCode": (
+                    "" if status in {"accepted", "running"}
+                    else "minecraft_action_cancelled"
+                ),
+            }
+
+        async def request(_method, path, payload, _headers):
+            paths.append(path)
+            if path.endswith("/action"):
+                bound.update(payload["request"])
+                bound.update(
+                    {
+                        "goalRunId": "goal-run-1",
+                        "leaseId": "lease-1",
+                        "leaseProcessNonce": "process-1",
+                    }
+                )
+                result = ack("accepted")
+                result["actionRunId"] = "wrong-run"
+            elif path.endswith("/cancel_action"):
+                result = ack("cancelled")
+            else:
+                self.fail(path)
+            return {
+                "ok": True,
+                "result": result,
+                "leaseStatus": active_lease_status(),
+            }
+
+        self.remote.request = request
+        with self.assertRaises(ValueError):
+            await self.remote.dispatch_action(
+                7,
+                {
+                    "schema": "minecraft_autonomy.action-request.v1",
+                    "guildId": 7,
+                    "actionKey": "minecraft:find_food_source",
+                    "actionRunId": "action-run-1",
+                    "authorizationGrantId": "grant-1",
+                    "contractCode": "mindcraft_food_recovery.v1",
+                    "parameters": {},
+                },
+            )
+
+        self.assertEqual(
+            paths,
+            [
+                "/internal/minecraft-world-lease/action",
+                "/internal/minecraft-world-lease/cancel_action",
+            ],
+        )
+        self.assertEqual(self.remote._inflight_actions, {})
+
     async def test_remote_shutdown_never_revokes_central_lease(
         self,
     ) -> None:
@@ -554,6 +1011,65 @@ class MinecraftWorldLeaseRemoteTests(
             "remote_delegation_closed",
         )
         self.assertEqual(self.calls, [])
+
+    async def test_remote_shutdown_cancels_inflight_without_revoking_lease(
+        self,
+    ) -> None:
+        bound = {
+            "schema": "minecraft_autonomy.action-request.v1",
+            "guildId": 7,
+            "actionKey": "minecraft:find_food_source",
+            "actionRunId": "action-run-1",
+            "authorizationGrantId": "grant-1",
+            "contractCode": "mindcraft_food_recovery.v1",
+            "parameters": {},
+            "goalRunId": "goal-run-1",
+            "leaseId": "lease-1",
+            "leaseProcessNonce": "process-1",
+        }
+        self.remote._inflight_actions["action-run-1"] = {
+            "guildId": 7,
+            "request": bound,
+        }
+        paths: list[str] = []
+
+        async def cancel_request(_method, path, _payload, _headers):
+            paths.append(path)
+            return {
+                "ok": True,
+                "result": {
+                    "schema": "minecraft_autonomy.action-dispatch.v1",
+                    "status": "cancelled",
+                    **{
+                        key: bound[key]
+                        for key in (
+                            "guildId",
+                            "actionKey",
+                            "actionRunId",
+                            "authorizationGrantId",
+                            "goalRunId",
+                            "leaseId",
+                            "leaseProcessNonce",
+                            "contractCode",
+                        )
+                    },
+                    "accepted": False,
+                    "contentFree": True,
+                    "errorCode": "minecraft_action_cancelled",
+                },
+                "leaseStatus": active_lease_status(),
+            }
+
+        self.remote.request = cancel_request
+        result = await self.remote.shutdown()
+
+        self.assertEqual(result["actionsCancelled"], 1)
+        self.assertEqual(result["fallbackDisconnects"], 0)
+        self.assertEqual(
+            paths,
+            ["/internal/minecraft-world-lease/cancel_action"],
+        )
+        self.assertTrue(self.remote.status()["active"])
 
     async def test_poll_failure_is_fail_closed(self) -> None:
         async def unavailable(*_args):

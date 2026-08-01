@@ -1,7 +1,7 @@
 # Minecraft Autonomy Readiness Contract
 
 Document status: **Current**
-Last reviewed: 2026-07-31 KST
+Last reviewed: 2026-08-01 KST
 Schema: `minecraft_autonomy.readiness.v1`
 
 ## Purpose
@@ -26,6 +26,7 @@ Mindcraft `/status`와 `/health`는 `functional_readiness`를 제공한다.
     "telemetryFresh": true,
     "minecraftConnected": false,
     "taskContractReady": true,
+    "effectObserverReady": true,
     "autonomyActive": true
   },
   "taskContract": {
@@ -39,7 +40,7 @@ Mindcraft `/status`와 `/health`는 `functional_readiness`를 제공한다.
 }
 ```
 
-`ready=true`는 여섯 dependency가 모두 정확한 boolean `true`일 때만 가능하다.
+`ready=true`는 일곱 dependency가 모두 정확한 boolean `true`일 때만 가능하다.
 소비자는 전달된 `ready`, `state`, `blockers`를 신뢰하지 않고 dependency에서
 다시 계산한다.
 
@@ -52,7 +53,8 @@ dependency 순서와 blocker 순서는 고정한다.
 3. `telemetry_stale`
 4. `minecraft_not_connected`
 5. `task_contract_unavailable`
-6. `autonomy_not_active`
+6. `effect_observer_unavailable`
+7. `autonomy_not_active`
 
 임의 문자열, 누락 필드, 잘못된 순서, 중복 blocker는 계약 전체를
 `invalid`로 만든다.
@@ -60,7 +62,8 @@ dependency 순서와 blocker 순서는 고정한다.
 ## State calculation
 
 - 모든 dependency가 true: `ready`
-- world lease, task contract 또는 active autonomy가 false: `blocked`
+- world lease, task contract, effect observer 또는 active autonomy가 false:
+  `blocked`
 - 그 외 runner/telemetry/connection 준비 중: `starting`
 
 Mindcraft top-level의 `world_lease_authorized`, `running`,
@@ -80,6 +83,21 @@ Mindcraft top-level의 `world_lease_authorized`, `running`,
 `autonomyActive=true`는 task contract와 telemetry의 autonomy state가 모두
 `active`일 때만 유효하다.
 
+`effectObserverReady=true`는 단순히 observer 객체가 존재한다는 뜻이 아니다.
+현재 Mindcraft process의 world-effect projector가 `auditReady=true`,
+`statusReady=true`이고 `idle|armed|verified|rejected` 중 안전한 상태여야 하며,
+action gateway의 durable replay fence도 사용 가능해야 한다. observer event나
+status를 내구 기록하지 못하거나 gateway 상태가 손상되면 readiness는
+`effect_observer_unavailable`로 차단한다.
+
+완료·취소·실패한 one-shot action 뒤에는 Mindcraft runner가 정지되어 일반
+readiness가 false일 수 있다. 이미 일반 readiness로 `connect()`를 마친 동일
+executor만 exact `mindcraft_action_gateway.readiness.v1` terminal projection의
+`ready`, `acceptsNewAction`, `repeatActionReady`, `contentFree`가 모두 true이고
+`terminalStatus`가 `completed|cancelled|failed`일 때 다음 typed action을 시작할
+수 있다. 이 terminal projection은 최초 접속 readiness나 새 executor의
+authorization을 대신하지 않는다.
+
 ## Consumers
 
 - `mindcraft_service.py`: runner/telemetry/lease에서 계약을 생산한다.
@@ -89,6 +107,8 @@ Mindcraft top-level의 `world_lease_authorized`, `running`,
   blocker diagnostic을 만든다.
 - `minecraft_autonomy_client.py`: Control Page의 `voyagerReady` probe에 같은
   validator를 사용한다.
+- `mindcraft_world_effect.py`: lease와 readiness를 다시 검사하며 exact
+  postcondition edge를 content-free durable event/status로 투영한다.
 
 legacy Voyager는 새 계약이 완전히 없고 runtime이 `mindcraft`가 아닐 때만
 기존 typed `recovery_state`를 사용할 수 있다. 새 계약이 존재하지만

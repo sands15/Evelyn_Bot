@@ -38,6 +38,7 @@ def ready_status() -> dict[str, object]:
                 "telemetryFresh": True,
                 "minecraftConnected": True,
                 "taskContractReady": True,
+                "effectObserverReady": True,
                 "autonomyActive": True,
             },
             "taskContract": {
@@ -117,6 +118,33 @@ class MinecraftAutonomyReadinessTests(unittest.TestCase):
 
                 self.assertIsNone(readiness)
                 self.assertEqual(state, "invalid")
+
+    def test_effect_observer_is_a_required_fail_closed_dependency(
+        self,
+    ) -> None:
+        payload = ready_status()
+        payload["functional_readiness"]["dependencies"][
+            "effectObserverReady"
+        ] = False
+        payload["functional_readiness"].update(
+            {
+                "state": "blocked",
+                "ready": False,
+                "blockers": ["effect_observer_unavailable"],
+            }
+        )
+
+        readiness, state = validate_minecraft_autonomy_readiness(
+            payload
+        )
+
+        self.assertEqual(state, "valid")
+        self.assertIsNotNone(readiness)
+        self.assertFalse(readiness["ready"])
+        self.assertEqual(
+            readiness["blockers"],
+            ["effect_observer_unavailable"],
+        )
 
 
 if __name__ == "__main__":

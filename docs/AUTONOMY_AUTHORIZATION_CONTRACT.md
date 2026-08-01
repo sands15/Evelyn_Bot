@@ -101,10 +101,12 @@ assistant 기본 executor의 대표 증거 코드는 다음과 같다.
 
 `maybe_ping_user`는 실제 메시지를 보냈을 때 `discord_send_completed`, 보낼
 필요가 없음을 gate에서 확인했을 때 `proactive_gate_completed`만 허용한다.
-다른 action의 올바른 코드를 교차 제출해도 검증되지 않는다. Minecraft action은
-각 action별 `minecraft_<action>_completed`를 사용하며, inventory/hazard/
-hostile/target/food 부재로 명시적으로 생략하는 일부 단계만 각자의 고정
-absence evidence code를 추가로 허용한다.
+다른 action의 올바른 코드를 교차 제출해도 검증되지 않는다. Minecraft policy는
+각 action별 `minecraft_<action>_completed`를 사용하며, inventory/hazard/hostile/
+target/food 부재로 명시적으로 생략하는 일부 action만 고정 absence evidence를
+추가로 허용한다. 현재 실제로 배선된 Minecraft route는
+`minecraft:find_food_source` 하나이며, 이 action에는
+`minecraft_find_food_source_completed`만 허용되고 absence·skip evidence는 없다.
 
 ## Minecraft 직접 제어 결과
 
@@ -186,6 +188,73 @@ arguments, token과 임의 예외 원문을 저장하지 않는다.
 watchdog으로 아직 연결되어 있지는 않다. 따라서 이 계약의 시간 제한 grant를
 Minecraft의 지속 실행까지 확장했다고 해석하면 안 된다.
 
+## Minecraft exact one-shot 자율행동
+
+현재 production `RoutedAutonomyExecutor`에는 typed Minecraft executor가
+등록되어 있다. 다만 접속만으로 action 권한이 생기지는 않는다. Discord
+`마크접속`이 실제 연결을 확인한 뒤 guild의 route를 활성화하고, `자율시작`이
+그 route를 다시 연결·검증한 경우에만 새 grant scope에
+`minecraft:find_food_source`를 추가한다. `마크종료`는 route도 비활성화한다.
+저장된 route 상태, 이전 grant 또는 terminal gateway 상태는 새 승인을 대신하지
+않는다.
+
+허용되는 step은 `domain=minecraft`, `action=find_food_source`, 선택 reason
+`low_health_no_food`뿐이다. executor는 이를 exact
+`minecraft_autonomy.action-request.v1`로 만들며 `parameters`는 항상 빈 객체다.
+raw goal, command, argv, code, 좌표, inventory, transcript와 임의 추가 필드는
+재귀적으로 거부한다. owner는 현재 guild lease 아래에서만 `goalRunId`,
+`leaseId`, `leaseProcessNonce`를 추가해 request를 bind한다.
+
+성공으로 plan cursor가 진행되는 순서는 다음과 같이 하나로 고정한다.
+
+1. 같은 `actionRunId`와 Minecraft scope grant로 실행 전
+   `action_authorized`가 durable 기록된다.
+2. lease owner가 exact request와 현재 lease를 확인하고
+   `action_dispatch_attempted`를 fsync한 뒤 Mindcraft action gateway에
+   dispatch한다. accepted/running 응답의 모든 run·grant·lease·contract 필드는
+   bound request와 정확히 같아야 한다.
+3. gateway는 `world_action.lock`을 획득한 채 proof와 일곱 dependency readiness를
+   검증하고 `mindcraft_food_recovery.v1` binding으로 world-effect projector를
+   arm한 뒤 고정 food-recovery task로 runner를 시작한다.
+4. gated goal manager는 실제 action result 뒤에만 content-free
+   `mindcraft.postcondition-candidate.v1`을 1회 게시한다. projector는 같은
+   `goalRunId`, `actionRunId`, action, contract, lease epoch, producer nonce와
+   정확히 증가한 sequence를 요구한다. `food_reserve_ready`의 false-to-true,
+   autonomous·relevant·actionSucceeded·worldChanged·goalProgress·
+   predicateCompleted, `completionDelta=1`, `blockedDelta=0`가 모두 성립해야
+   `effect_verified` event를 fsync한다.
+5. effect가 검증되면 gateway는 Mindcraft runner를 먼저 정지한다. 정지 실패,
+   result/status 내구 저장 실패 또는 guard 상실은 성공 결과로 바꾸지 않는다.
+   특히 stop 예외, stop 뒤 생존 또는 생존 확인 실패는 active binding과
+   `world_action.lock`을 유지한 채 gateway를 unavailable로 격리한다. 같은 active
+   request의 exact cancel이 정지를 다시 검증하거나 운영자가 개입하기 전에는 새
+   action이나 terminal success/failure를 게시하지 않는다.
+   그 뒤에만 exact `minecraft_autonomy.action-result.v1`의
+   `status=completed`, `verified=true`,
+   `postconditionCode=food_reserve_ready`,
+   `evidenceCode=minecraft_find_food_source_completed`를 반환하고 retained
+   `world_action.lock`을 해제한다.
+6. owner poller가 exact result를 다시 검증하고 같은 run/goal/lease의
+   `action_completed`를 fsync한다. assistant loop는 같은 grant의 실행 후
+   `action_authorized` 재검사와 그 뒤의 exact `action_outcome`까지 성공해야만
+   cursor를 진행한다.
+
+검증된 완료·취소·실패는 모두 one-shot terminal이다. gateway는 runtime 정지가
+확인된 경우에만 active binding을 제거하고 terminal record를 내구 저장한다. 같은 process와
+이미 연결 검증을 마친 executor에서만 exact content-free terminal readiness의
+`repeatActionReady=true`를 다음 action의 재시작 admission으로 사용할 수 있다.
+최초 `connect()`나 새 grant의 근거로는 사용할 수 없다. actionRunId와 goalRunId는
+gateway status와 effect journal에서 replay-fenced되며, 재시작 때 accepted/running
+record는 이전 Mindcraft 자식의 종료를 durable process identity로 증명한 뒤에만
+`minecraft_action_authority_lost_on_restart` 실패로 닫고 재개하지 않는다. identity가
+없거나 손상됐거나 stop/liveness를 검증할 수 없으면 gateway는
+고정 prior-process 오류를 가진 unavailable 상태로 닫혀 운영자 개입을 요구하며,
+terminal/repeat readiness와 새 action을 게시하지 않는다.
+
+projector status와 event에는 원문 goal, command, inventory, position, chat 또는
+transcript를 저장하지 않는다. 검증 가능한 것은 binding ID, contract와
+postcondition/evidence code, sequence, 고정 boolean transition뿐이다.
+
 ## Control Page `autonomy-p0.v1` 관찰 검증
 
 Control Page의 자율행동 검증기는 승인 또는 effect 실행기가 아니다. `start`는
@@ -219,13 +288,15 @@ inactive authority와 새 epoch의 verified global stop을 함께 요구한다. 
 실행 준비 증거일 뿐이다. 따라서 gated readiness와 별도의 trusted explicit
 postcondition 투영이 모두 없으면 효과 단계는 통과하지 않는다.
 
-현재 production의 `RoutedAutonomyExecutor`에는 Minecraft executor가 등록되지
-않았고 Discord `자율시작` grant도 assistant scope만 발급한다. durable trusted
-Minecraft postcondition observer도 아직 validation 세션에 연결되지 않았다.
-검증기는 이를 `minecraft_autonomy_route_unwired`와
-`minecraft_postcondition_observer_unavailable`로 차단한다. 그러므로 현 단계의
-두 트랙 관찰 결과를 “승인된 Minecraft 자율행동 단일 E2E 통과”로 합쳐 주장하면
-안 된다.
+production route와 durable postcondition observer는 이제 연결되어 있다.
+검증기는 Minecraft scope grant, 실행 전·후 authorization, owner의 dispatch
+attempt/verification, projector의 `effect_verified`, owner의 `action_completed`,
+assistant의 exact outcome을 같은 grant·lease·actionRunId·goalRunId·contract로
+상관시킨다. 이 전체 증거가 실제로 관찰된 경우에만
+`minecraft_autonomy_route_unwired`와
+`minecraft_postcondition_observer_unavailable` blocker가 사라진다. 단순히
+코드가 배선되어 있거나 readiness가 ready라는 사실만으로 blocker를 제거하지
+않는다.
 
 ## 검증 범위와 남은 증거
 
@@ -241,14 +312,21 @@ Minecraft postcondition observer도 아직 validation 세션에 연결되지 않
 - retry budget 소진의 미검증·cursor 유지
 - 미검증 결과와 미검증 skip이 plan cursor를 진행하지 않음
 - Minecraft 접속·종료·목표 변경의 긍정/부정 outcome
+- `minecraft:find_food_source` exact request/result, guild·grant·run·goal·lease
+  correlation과 raw payload 거부
+- action gateway dispatch/poll/cancel, replay fence, effect false-to-true 검증,
+  terminal runtime stop과 동일 actionRunId validation correlation
 - lifetime owner lock의 live-owner 경쟁 거부, crash release, nonce/token 회전과
   refresh/status/release adversarial interleaving
 - 변경성 Discord 명령의 owner/admin 권한 검사
 - 감사 journal retention 기본값
 
-실제 Discord 메시지 전송, 장시간 grant 만료, Minecraft 연결·종료·목표 변경을
-한 세션에서 수행하는 live E2E는 별도 운영 증거가 필요하다. 이 검증이 끝나기
-전에는 자율행동 P0를 운영 완료로 판정하지 않는다. 직전 world-action lease의
+실제 Discord 메시지 전송, 장시간 grant 만료, Minecraft 연결·종료·목표 변경과
+승인된 `minecraft:find_food_source`가 실제 world에서 `food_reserve_ready`를
+만드는 과정을 한 세션에서 수행하는 live E2E는 별도 운영 증거가 필요하다. 현재
+구현은 route와 observer가 source에 연결된 상태이지, Microsoft 인증 Minecraft와
+Discord를 사용한 실제 E2E 통과가 확인된 상태는 아니다. 이 검증이 끝나기 전에는
+자율행동 P0를 운영 완료로 판정하지 않는다. 직전 world-action lease의
 2026-08-01 durable-audit snapshot은 bundled Python에서 Minecraft 115개
 (skip 7), runtime 513개(skip 4), 인접 Discord/Mindcraft/UI 39개 회귀를
 통과했다. 다만 실제 Minecraft E2E 증거는 아니므로 운영 완료 근거로 사용하지
@@ -263,3 +341,5 @@ Minecraft 연결이나 컨테이너 간 lifetime lock의 live 증거를 대신�
 저장소 전체 2,503개(skip 18)를 통과했다. shutdown handoff 중 이전 epoch의
 ensure-start 차단과 forged lock capability 거부를 합성 경합으로 검증했지만, 실제
 두 프로세스/컨테이너와 Minecraft world effect를 사용한 live 증거는 아니다.
+이전 source 회귀 수치는 이번 one-shot action gateway·effect projector 경로의
+실제 Minecraft 행동 성공을 증명하지 않는다.

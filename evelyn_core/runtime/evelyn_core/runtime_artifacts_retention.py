@@ -116,6 +116,13 @@ DEFAULT_RETENTION_RULES: tuple[RetentionRule, ...] = (
         preserve_newest=7,
     ),
     RetentionRule(
+        "mindcraft_world_effect_events",
+        ("mindcraft_world_effect/events/*.jsonl",),
+        max_age_days=30,
+        max_total_bytes=20 * 1024 * 1024,
+        preserve_newest=7,
+    ),
+    RetentionRule(
         "host_ui_action_events",
         ("host_ui_action/events/*.jsonl",),
         max_age_days=30,

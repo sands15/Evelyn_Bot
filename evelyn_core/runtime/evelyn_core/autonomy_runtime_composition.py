@@ -58,6 +58,7 @@ class AutonomyRuntimeCompositionDeps:
     record_action_outcome: Callable[[int, str, dict[str, Any]], None]
     commit_session_continuity: Callable[..., Any]
     log: Callable[..., Any]
+    build_minecraft_executor: Callable[[int], Any] | None = None
 
 
 class AutonomyRuntimeComposition:
@@ -115,6 +116,7 @@ class AutonomyRuntimeComposition:
             record_action_outcome=deps.record_action_outcome,
             commit_session_continuity=deps.commit_session_continuity,
             log=deps.log,
+            build_minecraft_executor=deps.build_minecraft_executor,
         )
 
     def get_or_create_autonomy_engine(self, guild_id: int) -> AutonomyEngine:
@@ -124,4 +126,43 @@ class AutonomyRuntimeComposition:
         )
 
 
-__all__ = ["AutonomyRuntimeComposition", "AutonomyRuntimeCompositionDeps"]
+@dataclass(frozen=True)
+class MinecraftAutonomyRouteCompositionDeps:
+    create_engine: Callable[[int], Any]
+    get_router: Callable[[int], Any]
+
+
+class MinecraftAutonomyRouteComposition:
+    """Owns the explicit Discord-to-Minecraft autonomy route switch."""
+
+    def __init__(self, deps: MinecraftAutonomyRouteCompositionDeps) -> None:
+        self.deps = deps
+
+    async def enable(self, guild_id: int) -> bool:
+        normalized_guild_id = int(guild_id)
+        self.deps.create_engine(normalized_guild_id)
+        router = self.deps.get_router(normalized_guild_id)
+        if router is None:
+            return False
+        return bool(await router.enable_domain("minecraft"))
+
+    async def disable(self, guild_id: int) -> bool:
+        router = self.deps.get_router(int(guild_id))
+        if router is None:
+            return False
+        return bool(await router.disable_domain("minecraft"))
+
+    def is_enabled(self, guild_id: int) -> bool:
+        router = self.deps.get_router(int(guild_id))
+        return bool(
+            router is not None
+            and router.is_domain_enabled("minecraft")
+        )
+
+
+__all__ = [
+    "AutonomyRuntimeComposition",
+    "AutonomyRuntimeCompositionDeps",
+    "MinecraftAutonomyRouteComposition",
+    "MinecraftAutonomyRouteCompositionDeps",
+]

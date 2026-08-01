@@ -40,6 +40,9 @@ def make_command_deps(**overrides) -> DiscordCommandCompositionDeps:
         guild_only_message=lambda: "guild only",
         autonomy_enabled=True,
         autonomy_engines={},
+        enable_minecraft_autonomy_route=AsyncMock(return_value=False),
+        disable_minecraft_autonomy_route=AsyncMock(return_value=False),
+        is_minecraft_autonomy_route_enabled=lambda _guild_id: False,
         command_session=lambda: object(),
         is_control_command_authorized=lambda _ctx: True,
     )

@@ -57,11 +57,24 @@ def assistant_proactive_impulse_text(impulse: str, fallback: str = "") -> str:
     return text or "정훈, 필요하면 바로 이어서 볼게."
 
 
+@dataclass(frozen=True)
+class AutonomyExecutionContext:
+    guild_id: int
+    action_key: str
+    action_run_id: str
+    authorization_grant_id: str
+
+
 class AutonomyExecutor(Protocol):
     async def connect(self) -> None: ...
     async def disconnect(self) -> None: ...
     async def observe(self) -> dict[str, Any]: ...
-    async def execute_step(self, step: dict[str, Any]) -> dict[str, Any]: ...
+    async def execute_step(
+        self,
+        step: dict[str, Any],
+        *,
+        context: AutonomyExecutionContext | None = None,
+    ) -> dict[str, Any]: ...
 
 
 @dataclass
@@ -291,8 +304,8 @@ class AutonomyEngine:
     async def _disconnect_executor_once(self) -> None:
         if not self._executor_connected:
             return
-        self._executor_connected = False
         await self.executor.disconnect()
+        self._executor_connected = False
 
     async def _run_loop(self) -> None:
         try:
@@ -889,6 +902,22 @@ class AutonomyEngine:
             return False, "authorization_changed_during_action"
         return True, "authorized"
 
+    async def _execute_step_with_context(
+        self,
+        step: dict[str, Any],
+        *,
+        context: AutonomyExecutionContext,
+    ) -> dict[str, Any]:
+        execute_step = self.executor.execute_step
+        try:
+            inspect.signature(execute_step).bind(
+                step,
+                context=context,
+            )
+        except (TypeError, ValueError):
+            return await execute_step(step)
+        return await execute_step(step, context=context)
+
     async def execute_next_step(self, plan: AutonomyPlan | None) -> dict[str, Any] | None:
         if plan is None:
             return None
@@ -936,7 +965,17 @@ class AutonomyEngine:
                 action_run_id=action_run_id,
             )
         try:
-            result = await self.executor.execute_step(step)
+            result = await self._execute_step_with_context(
+                step,
+                context=AutonomyExecutionContext(
+                    guild_id=self.guild_id,
+                    action_key=action_key,
+                    action_run_id=action_run_id,
+                    authorization_grant_id=(
+                        authorization_grant_id
+                    ),
+                ),
+            )
         except asyncio.CancelledError:
             raise
         except Exception:

@@ -33,6 +33,12 @@ from evelyn_core.discord_command_handlers import (  # noqa: E402
     handle_shutdown_bot_command,
     handle_status_command,
 )
+from evelyn_core.autonomy_authorization import (  # noqa: E402
+    ASSISTANT_AUTONOMY_ACTIONS,
+)
+from evelyn_core.minecraft_action_contract import (  # noqa: E402
+    MINECRAFT_ROUTE_ACTIONS,
+)
 
 
 class FakeContext:
@@ -145,18 +151,30 @@ class DiscordCommandHandlerTests(unittest.TestCase):
             self.assertEqual(guild_id, 1)
             self.assertEqual(issuer_ref, "discord_user:3")
             self.assertEqual(source, "discord_command")
-            return {"connected": True}
+            return {
+                "connected": True,
+                "outcome_verified": True,
+                "outcome_code": "minecraft_connected",
+            }
+
+        route_enabled: list[int] = []
+
+        async def enable_route(guild_id: int) -> bool:
+            route_enabled.append(guild_id)
+            return True
 
         asyncio.run(
             handle_minecraft_connect_command(
                 ctx,
                 enable_minecraft_mode=enable,
+                enable_minecraft_autonomy_route=enable_route,
                 build_reply=lambda observed: f"connect:{observed['connected']}",
                 guild_only_message=lambda: "guild only",
             )
         )
 
         self.assertEqual(ctx.sent, ["connect:True"])
+        self.assertEqual(route_enabled, [1])
 
     def test_minecraft_disconnect_requires_verified_stop(self) -> None:
         guild = SimpleNamespace(id=1)
@@ -176,6 +194,9 @@ class DiscordCommandHandlerTests(unittest.TestCase):
 
         kwargs = {
             "guild_only_message": lambda: "guild only",
+            "disable_minecraft_autonomy_route": (
+                lambda _guild_id: asyncio.sleep(0, result=True)
+            ),
         }
         asyncio.run(
             handle_minecraft_disconnect_command(
@@ -200,6 +221,35 @@ class DiscordCommandHandlerTests(unittest.TestCase):
                 "확인해줘. (minecraft_disconnect_failed)"
             ],
         )
+
+    def test_minecraft_connect_does_not_enable_route_from_unverified_echo(
+        self,
+    ) -> None:
+        ctx = FakeContext(guild=SimpleNamespace(id=1))
+        route_calls: list[int] = []
+
+        async def unverified_connect(*_args, **_kwargs):
+            return {
+                "connected": True,
+                "goal": "find food",
+            }
+
+        async def enable_route(guild_id: int) -> bool:
+            route_calls.append(guild_id)
+            return True
+
+        asyncio.run(
+            handle_minecraft_connect_command(
+                ctx,
+                enable_minecraft_mode=unverified_connect,
+                enable_minecraft_autonomy_route=enable_route,
+                build_reply=lambda _observed: "observed",
+                guild_only_message=lambda: "guild only",
+            )
+        )
+
+        self.assertEqual(route_calls, [])
+        self.assertEqual(ctx.sent, ["observed"])
 
     def test_minecraft_status_command_sends_failure_reply(self) -> None:
         guild = SimpleNamespace(id=1)
@@ -294,16 +344,23 @@ class DiscordCommandHandlerTests(unittest.TestCase):
                 return name == "minecraft"
 
         engines = {1: Engine()}
-        authorizations: list[tuple[str, int, str]] = []
+        authorizations: list[tuple[object, ...]] = []
         asyncio.run(
             handle_autonomy_start_command(
                 start_ctx,
                 autonomy_enabled=True,
                 get_or_create_autonomy_engine=lambda guild_id: engines[guild_id],
+                is_minecraft_autonomy_route_enabled=lambda _guild_id: True,
+                enable_minecraft_autonomy_route=(
+                    lambda _guild_id: asyncio.sleep(
+                        0,
+                        result=(calls.append("route_enable") or True),
+                    )
+                ),
                 grant_autonomy_authorization=(
-                    lambda guild_id, issuer_ref: (
+                    lambda guild_id, issuer_ref, *, scopes: (
                         authorizations.append(
-                            ("grant", guild_id, issuer_ref)
+                            ("grant", guild_id, issuer_ref, tuple(scopes))
                         )
                         or {"ok": True}
                     )
@@ -345,11 +402,19 @@ class DiscordCommandHandlerTests(unittest.TestCase):
             )
         )
 
-        self.assertEqual(calls, ["start", "stop"])
+        self.assertEqual(
+            calls,
+            ["stop", "route_enable", "start", "stop"],
+        )
         self.assertEqual(
             authorizations,
             [
-                ("grant", 1, "discord_user:3"),
+                (
+                    "grant",
+                    1,
+                    "discord_user:3",
+                    (*ASSISTANT_AUTONOMY_ACTIONS, *MINECRAFT_ROUTE_ACTIONS),
+                ),
                 ("revoke", 1, "explicit_autonomy_stop"),
             ],
         )
@@ -372,8 +437,12 @@ class DiscordCommandHandlerTests(unittest.TestCase):
                 get_or_create_autonomy_engine=lambda _guild_id: (
                     self.fail("engine must not be created")
                 ),
+                is_minecraft_autonomy_route_enabled=lambda _guild_id: False,
+                enable_minecraft_autonomy_route=(
+                    lambda _guild_id: asyncio.sleep(0, result=False)
+                ),
                 grant_autonomy_authorization=(
-                    lambda guild_id, _issuer_ref: (
+                    lambda guild_id, _issuer_ref, *, scopes: (
                         grants.append(guild_id) or {"ok": True}
                     )
                 ),
@@ -387,6 +456,85 @@ class DiscordCommandHandlerTests(unittest.TestCase):
             ["자율 행동 기능이 설정에서 비활성화되어 있어."],
         )
         self.assertEqual(grants, [])
+
+    def test_autonomy_start_without_verified_minecraft_route_grants_assistant_only(
+        self,
+    ) -> None:
+        ctx = FakeContext(guild=SimpleNamespace(id=9))
+        granted_scopes: list[tuple[str, ...]] = []
+
+        class Engine:
+            state = SimpleNamespace(status="idle", enabled=False)
+
+            async def start(self) -> None:
+                return None
+
+        asyncio.run(
+            handle_autonomy_start_command(
+                ctx,
+                autonomy_enabled=True,
+                get_or_create_autonomy_engine=lambda _guild_id: Engine(),
+                is_minecraft_autonomy_route_enabled=lambda _guild_id: False,
+                enable_minecraft_autonomy_route=(
+                    lambda _guild_id: asyncio.sleep(0, result=False)
+                ),
+                grant_autonomy_authorization=(
+                    lambda _guild_id, _issuer_ref, *, scopes: (
+                        granted_scopes.append(tuple(scopes))
+                        or {"ok": True}
+                    )
+                ),
+                revoke_autonomy_authorization=(
+                    lambda *_args, **_kwargs: None
+                ),
+                guild_only_message=lambda: "guild only",
+            )
+        )
+
+        self.assertEqual(granted_scopes, [ASSISTANT_AUTONOMY_ACTIONS])
+        self.assertNotIn(
+            "minecraft:retreat",
+            granted_scopes[0],
+        )
+        self.assertEqual(ctx.sent, ["🤖 자율 행동 루프를 시작했어."])
+
+    def test_autonomy_start_revalidates_sticky_minecraft_route_before_scope(
+        self,
+    ) -> None:
+        ctx = FakeContext(guild=SimpleNamespace(id=11))
+        granted_scopes: list[tuple[str, ...]] = []
+        revalidated: list[int] = []
+
+        class Engine:
+            state = SimpleNamespace(status="idle", enabled=False)
+
+            async def start(self) -> None:
+                return None
+
+        async def revalidate(guild_id: int) -> bool:
+            revalidated.append(guild_id)
+            return False
+
+        asyncio.run(
+            handle_autonomy_start_command(
+                ctx,
+                autonomy_enabled=True,
+                get_or_create_autonomy_engine=lambda _guild_id: Engine(),
+                is_minecraft_autonomy_route_enabled=lambda _guild_id: True,
+                enable_minecraft_autonomy_route=revalidate,
+                grant_autonomy_authorization=(
+                    lambda _guild_id, _issuer_ref, *, scopes: (
+                        granted_scopes.append(tuple(scopes))
+                        or {"ok": True}
+                    )
+                ),
+                revoke_autonomy_authorization=lambda *_args, **_kwargs: None,
+                guild_only_message=lambda: "guild only",
+            )
+        )
+
+        self.assertEqual(revalidated, [11])
+        self.assertEqual(granted_scopes, [ASSISTANT_AUTONOMY_ACTIONS])
 
     def test_command_failures_do_not_expose_exception_text(self) -> None:
         secret = (
@@ -435,6 +583,7 @@ class DiscordCommandHandlerTests(unittest.TestCase):
             handle_minecraft_connect_command(
                 minecraft_ctx,
                 enable_minecraft_mode=fail,
+                enable_minecraft_autonomy_route=fail,
                 build_reply=lambda _observed: "connected",
                 guild_only_message=lambda: "guild only",
                 log=lambda *args: logged.append(args),

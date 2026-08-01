@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import {randomBytes} from 'node:crypto';
 import {
     buildWorldState,
     inventoryCountForTarget,
@@ -8,6 +9,26 @@ import {
 } from './evelyn_world_state.js';
 
 const DEFAULT_STATE_PATH = '/app/runtime_artifacts/mindcraft/goal_manager_state.json';
+const POSTCONDITION_CANDIDATE_SCHEMA = 'mindcraft.postcondition-candidate.v1';
+const WORLD_EFFECT_EVIDENCE_CODE = 'mindcraft_explicit_postcondition_candidate';
+const DEFAULT_WORLD_EFFECT_PRODUCER_NONCE = randomBytes(16).toString('hex');
+const TYPED_IDENTIFIER_PATTERN = /^[A-Za-z0-9][A-Za-z0-9:_\-.]{0,127}$/;
+const WORLD_EFFECT_CONTRACTS = new Map([
+    [
+        'mindcraft_food_recovery.v1',
+        {
+            postconditionCode: 'food_reserve_ready',
+            actionKeys: new Set(['minecraft:find_food_source']),
+            matchesPredicate(predicate) {
+                return Boolean(
+                    predicate?.kind === 'inventory' &&
+                    String(predicate?.target || '').toLowerCase() === '#food' &&
+                    Number(predicate?.count || 0) >= 3
+                );
+            }
+        }
+    ]
+]);
 const SURVIVAL_RECOVERY_MAX_FAILURES = Math.max(
     1,
     Number(process.env.MINDCRAFT_SURVIVAL_RECOVERY_MAX_FAILURES || 12)
@@ -166,6 +187,61 @@ function safeId(value, fallback) {
         .replace(/[^a-z0-9_:-]+/g, '_')
         .replace(/^_+|_+$/g, '');
     return normalized || fallback;
+}
+
+function typedIdentifier(value) {
+    const text = String(value || '').trim();
+    return TYPED_IDENTIFIER_PATTERN.test(text) ? text : '';
+}
+
+function normalizeWorldEffectBinding(options = {}) {
+    if (options.worldEffectBinding === false) return null;
+    const supplied = (
+        options.worldEffectBinding &&
+        typeof options.worldEffectBinding === 'object'
+    ) ? options.worldEffectBinding : {};
+    const value = (key, environmentKey) => (
+        supplied[key] ?? process.env[environmentKey]
+    );
+    const binding = {
+        goalRunId: typedIdentifier(
+            value('goalRunId', 'MINDCRAFT_WORLD_EFFECT_GOAL_RUN_ID')
+        ),
+        actionRunId: typedIdentifier(
+            value('actionRunId', 'MINDCRAFT_WORLD_EFFECT_ACTION_RUN_ID')
+        ),
+        actionKey: typedIdentifier(
+            value('actionKey', 'MINDCRAFT_WORLD_EFFECT_ACTION_KEY')
+        ),
+        contractCode: typedIdentifier(
+            value('contractCode', 'MINDCRAFT_WORLD_EFFECT_CONTRACT_CODE')
+        ),
+        leaseId: typedIdentifier(
+            value('leaseId', 'MINDCRAFT_WORLD_EFFECT_LEASE_ID')
+        ),
+        leaseProcessNonce: typedIdentifier(
+            value(
+                'leaseProcessNonce',
+                'MINDCRAFT_WORLD_EFFECT_LEASE_PROCESS_NONCE'
+            )
+        ),
+        producerNonce: typedIdentifier(
+            value(
+                'producerNonce',
+                'MINDCRAFT_WORLD_EFFECT_PRODUCER_NONCE'
+            ) || DEFAULT_WORLD_EFFECT_PRODUCER_NONCE
+        )
+    };
+    if (
+        Object.values(binding).some((item) => !item) ||
+        !WORLD_EFFECT_CONTRACTS.has(binding.contractCode) ||
+        !WORLD_EFFECT_CONTRACTS
+            .get(binding.contractCode)
+            .actionKeys.has(binding.actionKey)
+    ) {
+        return null;
+    }
+    return Object.freeze(binding);
 }
 
 function survivalRecoveryPhase(phase) {
@@ -737,6 +813,9 @@ export class EvelynGoalManager {
         this.mode = safeText(options.mode || process.env.MINDCRAFT_GOAL_MANAGER_MODE || 'shadow', 20).toLowerCase();
         if (!['shadow', 'gated', 'off'].includes(this.mode)) this.mode = 'shadow';
         this.ultimateGoal = safeText(options.ultimateGoal || process.env.MINDCRAFT_GOAL, 2000);
+        this.worldEffectBinding = normalizeWorldEffectBinding(options);
+        this.worldEffectCandidate = null;
+        this.worldEffectCandidateSequence = 0;
         this.state = {
             version: 1,
             ultimateGoal: this.ultimateGoal,
@@ -760,7 +839,10 @@ export class EvelynGoalManager {
         this.lastSnapshot = null;
         this.lastUpdateAt = 0;
         this.preparePromise = null;
-        this.restore();
+        // A lease-bound action is a fresh one-shot run. Reusing goal-manager
+        // state from an earlier run could restore a terminal/manual pause and
+        // silently transfer authority across actionRunId boundaries.
+        if (!this.worldEffectBinding) this.restore();
     }
 
     restore() {
@@ -830,9 +912,75 @@ export class EvelynGoalManager {
             death_count: Number(this.state.deathCount || 0),
             last_death_at: this.state.lastDeathAt,
             last_execution: this.state.lastExecution,
+            postcondition_candidate: this.worldEffectCandidate
+                ? {...this.worldEffectCandidate}
+                : null,
             ultimate_goal_completed_at: this.state.ultimateGoalCompletedAt,
             updated_at: this.state.updatedAt
         };
+    }
+
+    publishPostconditionCandidate({
+        current,
+        execution,
+        autonomous,
+        relevant,
+        failed,
+        changed,
+        goalProgress,
+        beforeSatisfied,
+        afterSatisfied,
+        predicateCompleted,
+    }) {
+        if (this.worldEffectCandidate || !this.worldEffectBinding) return false;
+        const contract = WORLD_EFFECT_CONTRACTS.get(
+            this.worldEffectBinding.contractCode
+        );
+        if (
+            !contract ||
+            !contract.matchesPredicate(current?.success) ||
+            autonomous !== true ||
+            relevant !== true ||
+            failed !== false ||
+            changed !== true ||
+            goalProgress !== true ||
+            beforeSatisfied !== false ||
+            afterSatisfied !== true ||
+            predicateCompleted !== true ||
+            !Number.isInteger(execution?.sequence) ||
+            execution.sequence <= 0 ||
+            !Number.isFinite(Number(execution?.recordedAt))
+        ) {
+            return false;
+        }
+        this.worldEffectCandidateSequence += 1;
+        this.worldEffectCandidate = Object.freeze({
+            schema: POSTCONDITION_CANDIDATE_SCHEMA,
+            producerNonce: this.worldEffectBinding.producerNonce,
+            goalRunId: this.worldEffectBinding.goalRunId,
+            actionRunId: this.worldEffectBinding.actionRunId,
+            actionKey: this.worldEffectBinding.actionKey,
+            contractCode: this.worldEffectBinding.contractCode,
+            leaseId: this.worldEffectBinding.leaseId,
+            leaseProcessNonce: this.worldEffectBinding.leaseProcessNonce,
+            candidateSequence: this.worldEffectCandidateSequence,
+            executionSequence: execution.sequence,
+            observedAt: Number(execution.recordedAt),
+            evidenceCode: WORLD_EFFECT_EVIDENCE_CODE,
+            postconditionCode: contract.postconditionCode,
+            beforeSatisfied: false,
+            afterSatisfied: true,
+            autonomous: true,
+            relevant: true,
+            actionSucceeded: true,
+            worldChanged: true,
+            goalProgress: true,
+            predicateCompleted: true,
+            completionDelta: 1,
+            blockedDelta: 0,
+            contentFree: true,
+        });
+        return true;
     }
 
     captureSnapshot() {
@@ -1113,6 +1261,13 @@ export class EvelynGoalManager {
 
     gateCommand(command, {autonomous = false} = {}) {
         if (this.mode === 'off' || !autonomous) return {allowed: true, relevant: true, reason: 'not_autonomous'};
+        if (this.state.autonomyState !== 'active') {
+            return {
+                allowed: false,
+                relevant: false,
+                reason: 'autonomy_not_active',
+            };
+        }
         const name = commandName(command);
         const current = this.state.currentSubgoal;
         const survivalRecovery = survivalRecoveryActive(this.agent?.bot?.evelynSurvivalState);
@@ -1301,6 +1456,12 @@ export class EvelynGoalManager {
             : resultFailed(result);
         const beforeMeasure = current ? predicateMeasure(current.success, before) : null;
         const afterMeasure = current ? predicateMeasure(current.success, after) : null;
+        const beforeSatisfied = current
+            ? predicateSatisfied(current.success, before)
+            : false;
+        const afterSatisfied = current
+            ? predicateSatisfied(current.success, after)
+            : false;
         const goalProgress = current
             ? predicateProgressMade(current.success, before, after)
             : false;
@@ -1407,7 +1568,26 @@ export class EvelynGoalManager {
         this.state.recentActions.push(execution);
         this.state.recentActions = this.state.recentActions.slice(-20);
         this.lastSnapshot = after;
-        this.verifyCurrentSubgoal(after);
+        const predicateCompleted = this.verifyCurrentSubgoal(after);
+        const postconditionCandidatePublished = this.publishPostconditionCandidate({
+            current,
+            execution,
+            autonomous,
+            relevant: related,
+            failed,
+            changed,
+            goalProgress,
+            beforeSatisfied,
+            afterSatisfied,
+            predicateCompleted,
+        });
+        if (postconditionCandidatePublished) {
+            // A bound autonomy action is one-shot.  Fence the planner before
+            // publishing state so no later command can mutate the world while
+            // Python durably verifies this candidate.
+            this.state.autonomyState = 'manual_pause';
+            this.state.manualPauseReason = 'world_effect_candidate_published';
+        }
         if (this.state.currentSubgoal?.attempts >= this.state.currentSubgoal?.actionBudget) {
             this.blockCurrentSubgoal('action_budget_exhausted');
         }

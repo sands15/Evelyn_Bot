@@ -24,6 +24,9 @@ from .paths import get_repo_root, get_runtime_artifacts_root
 from .minecraft_autonomy_readiness import (
     validate_minecraft_autonomy_readiness,
 )
+from .minecraft_action_contract import (
+    validate_minecraft_action_request,
+)
 
 
 REPO_ROOT = get_repo_root()
@@ -480,6 +483,89 @@ class MinecraftAutonomyClient:
         verified["outcome_verified"] = True
         verified["outcome_code"] = "minecraft_goal_confirmed"
         return verified
+
+    async def dispatch_action(
+        self,
+        request: dict[str, Any],
+        *,
+        world_lease: dict[str, Any],
+    ) -> dict[str, Any]:
+        bound_request = validate_minecraft_action_request(
+            request,
+            bound=True,
+        )
+        proof = dict(world_lease or {})
+        if (
+            proof.get("leaseId") != bound_request["leaseId"]
+            or proof.get("processNonce")
+            != bound_request["leaseProcessNonce"]
+        ):
+            raise RuntimeError(
+                "minecraft_world_authorization_required"
+            )
+        return await self._request(
+            "POST",
+            "/action",
+            {
+                "request": bound_request,
+                "worldLease": proof,
+            },
+            ensure_service=False,
+        )
+
+    async def action_status(
+        self,
+        goal_run_id: str,
+    ) -> dict[str, Any]:
+        goal_id = str(goal_run_id or "").strip()
+        if (
+            not goal_id
+            or len(goal_id) > 128
+            or any(
+                character
+                not in (
+                    "abcdefghijklmnopqrstuvwxyz"
+                    "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+                    "0123456789:_-."
+                )
+                for character in goal_id
+            )
+        ):
+            raise RuntimeError("minecraft_goal_run_id_invalid")
+        return await self._request(
+            "GET",
+            f"/action/{goal_id}",
+            ensure_service=False,
+        )
+
+    async def cancel_action(
+        self,
+        request: dict[str, Any],
+        *,
+        world_lease: dict[str, Any],
+    ) -> dict[str, Any]:
+        bound_request = validate_minecraft_action_request(
+            request,
+            bound=True,
+        )
+        proof = dict(world_lease or {})
+        if (
+            proof.get("leaseId") != bound_request["leaseId"]
+            or proof.get("processNonce")
+            != bound_request["leaseProcessNonce"]
+        ):
+            raise RuntimeError(
+                "minecraft_world_authorization_required"
+            )
+        return await self._request(
+            "POST",
+            "/action/cancel",
+            {
+                "request": bound_request,
+                "worldLease": proof,
+            },
+            ensure_service=False,
+        )
 
     async def is_connected(self) -> bool:
         status = await self.status()

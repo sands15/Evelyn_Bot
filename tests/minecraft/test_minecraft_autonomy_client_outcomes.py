@@ -37,6 +37,21 @@ class MinecraftAutonomyClientOutcomeTests(
         client._persist_goal_override = Mock()
         return client
 
+    @staticmethod
+    def bound_action() -> dict:
+        return {
+            "schema": "minecraft_autonomy.action-request.v1",
+            "guildId": 7,
+            "actionKey": "minecraft:find_food_source",
+            "actionRunId": "action-run-1",
+            "authorizationGrantId": "grant-1",
+            "contractCode": "mindcraft_food_recovery.v1",
+            "parameters": {},
+            "goalRunId": "goal-run-1",
+            "leaseId": "lease-1",
+            "leaseProcessNonce": "process-1",
+        }
+
     async def test_start_forwards_world_lease_proof(self) -> None:
         client = self.client({"connected": True})
         client.ensure_codex_gateway = AsyncMock()
@@ -82,6 +97,7 @@ class MinecraftAutonomyClientOutcomeTests(
                         "telemetryFresh": True,
                         "minecraftConnected": True,
                         "taskContractReady": True,
+                        "effectObserverReady": True,
                         "autonomyActive": True,
                     },
                     "taskContract": {
@@ -178,6 +194,70 @@ class MinecraftAutonomyClientOutcomeTests(
             await client.set_goal("diamond")
 
         client._persist_goal_override.assert_not_called()
+
+    async def test_action_transport_is_proof_bound_and_non_spawning(
+        self,
+    ) -> None:
+        client = self.client({"ok": True})
+        request = self.bound_action()
+        proof = {
+            "schema": "minecraft_world_lease.proof.v1",
+            "leaseId": "lease-1",
+            "processNonce": "process-1",
+        }
+
+        await client.dispatch_action(
+            request,
+            world_lease=proof,
+        )
+        client._request.assert_awaited_once_with(
+            "POST",
+            "/action",
+            {"request": request, "worldLease": proof},
+            ensure_service=False,
+        )
+
+        client._request.reset_mock()
+        await client.action_status("goal-run-1")
+        client._request.assert_awaited_once_with(
+            "GET",
+            "/action/goal-run-1",
+            ensure_service=False,
+        )
+
+        client._request.reset_mock()
+        await client.cancel_action(
+            request,
+            world_lease=proof,
+        )
+        client._request.assert_awaited_once_with(
+            "POST",
+            "/action/cancel",
+            {"request": request, "worldLease": proof},
+            ensure_service=False,
+        )
+
+    async def test_action_transport_rejects_raw_or_missing_proof(
+        self,
+    ) -> None:
+        client = self.client({"ok": True})
+        request = self.bound_action()
+        request["goal"] = "private"
+
+        with self.assertRaises(ValueError):
+            await client.dispatch_action(
+                request,
+                world_lease={"leaseId": "lease-1"},
+            )
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "minecraft_world_authorization_required",
+        ):
+            await client.cancel_action(
+                self.bound_action(),
+                world_lease={},
+            )
+        client._request.assert_not_awaited()
 
 
 if __name__ == "__main__":
