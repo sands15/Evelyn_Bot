@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -26,6 +27,17 @@ from tests.continuity_test_support import (  # noqa: E402
 
 class FastControlStreamContractTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
+        unsafe_test_owner = fast_api.FastControlContinuityOwner(
+            artifacts_root=Path(tempfile.gettempdir()),
+            enabled=False,
+        )
+        unsafe_test_owner._test_only_allow_unsafe_ingress = True
+        self._owner_patcher = patch.object(
+            fast_api,
+            "FAST_CONTROL_CONTINUITY_OWNER",
+            unsafe_test_owner,
+        )
+        self._owner_patcher.start()
         self._original_local_voice_admission = fast_api.LOCAL_VOICE_ADMISSION
         fast_api.LOCAL_VOICE_ADMISSION = fast_api.LocalVoiceAdmissionManager()
         self._validation_context_patcher = patch.object(
@@ -58,6 +70,7 @@ class FastControlStreamContractTests(unittest.IsolatedAsyncioTestCase):
         fast_api.clear_background_action_handlers()
         self._validation_context_patcher.stop()
         fast_api.LOCAL_VOICE_ADMISSION = self._original_local_voice_admission
+        self._owner_patcher.stop()
 
     def admitted_local_payload(self, text: str) -> dict[str, object]:
         self._voice_turn_seq += 1
@@ -769,11 +782,37 @@ class FastControlStreamContractTests(unittest.IsolatedAsyncioTestCase):
             enabled = True
 
             @staticmethod
+            def claim_ingress(*, request_id, accepted_text):
+                return {
+                    "entryId": "ingress-" + "a" * 64,
+                    "turnId": "journal-turn",
+                    "phase": "accepted",
+                    "shouldProcess": True,
+                }
+
+            @staticmethod
+            def mark_ingress_delivery_inflight(*_args, **_kwargs):
+                return {}
+
+            @staticmethod
+            def bind_ingress_response(*_args, **_kwargs):
+                return {}
+
+            @staticmethod
+            def mark_ingress_delivery_succeeded(*_args, **_kwargs):
+                return {}
+
+            @staticmethod
+            def mark_ingress_delivery_ambiguous(*_args, **_kwargs):
+                return {}
+
+            @staticmethod
             def record_completed_turn(
                 user_text: str,
                 assistant_text: str,
                 *,
                 memory_receipt=None,
+                ingress_entry_id="",
             ):
                 recorded.append(
                     (user_text, assistant_text)
@@ -822,11 +861,8 @@ class FastControlStreamContractTests(unittest.IsolatedAsyncioTestCase):
             "fast_control_stream_failed",
             error["message"],
         )
-        self.assertTrue(error["continuity"]["durable"])
-        self.assertEqual(
-            error["continuity"]["generation"],
-            11,
-        )
+        self.assertFalse(error["continuity"]["durable"])
+        self.assertTrue(error["continuity"]["pendingDelivery"])
         self.assertEqual(
             recorded,
             [("실패 테스트", error["message"])],

@@ -500,6 +500,9 @@ class VoiceIoComposition:
         include_voice: bool = False,
         turn_scope: Any | None = None,
         proactive_resolution: dict | None = None,
+        ingress_recovery_context: dict | None = None,
+        before_text_delivery: Callable[..., Any] | None = None,
+        after_text_delivery: Callable[..., Any] | None = None,
     ) -> tuple[str, Any | None, dict, Any]:
         return await stream_text_reply_from_runtime(
             channel,
@@ -515,6 +518,9 @@ class VoiceIoComposition:
             include_voice=include_voice,
             turn_scope=turn_scope,
             proactive_resolution=proactive_resolution,
+            ingress_recovery_context=ingress_recovery_context,
+            before_text_delivery=before_text_delivery,
+            after_text_delivery=after_text_delivery,
             deps=self.deps.text_reply(),
         )
 

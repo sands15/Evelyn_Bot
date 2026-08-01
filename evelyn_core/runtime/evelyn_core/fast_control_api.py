@@ -66,6 +66,10 @@ from .fast_tool_planner import (
 from .fast_control_continuity import (
     FastControlContinuityOwner,
 )
+from .conversation_ingress_recovery import (
+    ConversationIngressBindingMismatch,
+    ConversationIngressRecoveryError,
+)
 from .explicit_memory_confirmation import (
     execute_explicit_memory_confirmation,
 )
@@ -104,19 +108,23 @@ from .minecraft_world_lease_http_runtime import (
 from .memory_deletion_journal import (
     MEMORY_DELETION_JOURNAL_INTEGRITY_ERROR,
     MemoryDeletionJournalIntegrityError,
+    memory_deletion_journal_guard,
 )
 from .memory_deletion_outbound import (
+    capture_memory_deletion_outbound_position,
     reset_memory_deletion_outbound_position,
 )
 from .conversation_memory_exposure import (
     capture_combined_memory_exposure,
     filter_conversation_history_for_memory_exposure,
+    memory_exposure_position_from_receipt,
     memory_receipt_ref_from_exposure,
 )
 from .conversation_memory_receipt import (
     memory_receipt_ref_from_receipt,
     merge_memory_receipt_refs,
     not_used_memory_receipt_ref,
+    sanitize_memory_receipt_ref,
     unattributed_memory_receipt_ref,
 )
 from .config import MEMORY_ROOT
@@ -241,6 +249,17 @@ FAST_RUNTIME_HEALTH_MAX_STALE_SEC = max(
     ),
 )
 CHAT_LOG_LIMIT = max(4, int(os.getenv("FAST_CONTROL_CHAT_LOG_LIMIT", "40")))
+FAST_CONTROL_HTTP_DELIVERY_REF = "fast-control:http-json"
+FAST_CONTROL_STREAM_DELIVERY_REF = "fast-control:http-ndjson"
+FAST_CONTROL_INGRESS_PENDING_ERROR = (
+    "conversation_ingress_request_pending"
+)
+FAST_CONTROL_INGRESS_REPLAY_ERROR = (
+    "conversation_ingress_cached_response_unavailable"
+)
+FAST_CONTROL_INGRESS_REDELIVERY_SUPPRESSED_ERROR = (
+    "conversation_ingress_completed_redelivery_suppressed"
+)
 FAST_CONTROL_CONTINUITY_ENABLED = (
     os.getenv(
         "FAST_CONTROL_CONTINUITY_ENABLED",
@@ -380,6 +399,8 @@ class MemoryGuardedJsonResponse(web.Response):
         expected_position: MemoryExposurePosition | None,
         status: int = 200,
         after_write: Callable[[], None] | None = None,
+        before_write: Callable[[], None] | None = None,
+        after_write_failure: Callable[[str], None] | None = None,
     ) -> None:
         super().__init__(
             text=json.dumps(payload, ensure_ascii=False),
@@ -390,8 +411,12 @@ class MemoryGuardedJsonResponse(web.Response):
         self._memory_expected_position = expected_position
         self._memory_guard: Any | None = None
         self._memory_guard_disabled = False
-        self._after_write = after_write
-        self._after_write_called = False
+        self._before_write = before_write
+        self._before_write_called = False
+        self._after_write_success = after_write
+        self._after_write_success_called = False
+        self._after_write_failure = after_write_failure
+        self._after_write_failure_called = False
         self.headers["Cache-Control"] = "no-store"
         self.headers.update(
             control_page_memory_handoff_headers(expected_position)
@@ -402,7 +427,9 @@ class MemoryGuardedJsonResponse(web.Response):
 
         self._memory_expected_position = None
         self._memory_guard_disabled = True
-        self._after_write = None
+        self._before_write = None
+        self._after_write_success = None
+        self._after_write_failure = None
         self.set_status(503)
         self.text = json.dumps(
             {
@@ -441,12 +468,24 @@ class MemoryGuardedJsonResponse(web.Response):
                 exc.__traceback__ if exc is not None else None,
             )
 
-    def _run_after_write(self) -> None:
-        if self._after_write_called:
+    def _run_before_write(self) -> None:
+        if self._before_write_called:
             return
-        self._after_write_called = True
-        callback = self._after_write
-        self._after_write = None
+        self._before_write_called = True
+        callback = self._before_write
+        self._before_write = None
+        if callback is not None:
+            callback()
+
+    def _run_after_write(self) -> None:
+        """Run success-only work after EOF; retained for focused tests."""
+
+        if self._after_write_success_called:
+            return
+        self._after_write_success_called = True
+        callback = self._after_write_success
+        self._after_write_success = None
+        self._after_write_failure = None
         if callback is None:
             return
         try:
@@ -458,9 +497,28 @@ class MemoryGuardedJsonResponse(web.Response):
                 flush=True,
             )
 
+    def _run_after_write_failure(self, error_code: str) -> None:
+        if self._after_write_failure_called:
+            return
+        self._after_write_failure_called = True
+        callback = self._after_write_failure
+        self._after_write_failure = None
+        self._after_write_success = None
+        if callback is None:
+            return
+        try:
+            callback(error_code)
+        except Exception as exc:
+            print(
+                "[FAST CONTROL] post_write_failure_callback_failed "
+                f"errorType={type(exc).__name__}",
+                flush=True,
+            )
+
     async def prepare(self, request: web.BaseRequest) -> Any:
         try:
             self._enter_memory_guard()
+            self._run_before_write()
             return await super().prepare(request)
         except MemoryDeletionJournalIntegrityError:
             self._exit_memory_guard()
@@ -470,6 +528,10 @@ class MemoryGuardedJsonResponse(web.Response):
             return await super().prepare(request)
         except BaseException as exc:
             self._exit_memory_guard(exc)
+            if self._before_write_called:
+                self._run_after_write_failure(
+                    "conversation_ingress_delivery_failed"
+                )
             raise
 
     async def write_eof(self, data: bytes = b"") -> None:
@@ -478,7 +540,9 @@ class MemoryGuardedJsonResponse(web.Response):
             await super().write_eof(data)
         except BaseException as exc:
             self._exit_memory_guard(exc)
-            self._run_after_write()
+            self._run_after_write_failure(
+                "conversation_ingress_delivery_disconnected"
+            )
             raise
         else:
             self._exit_memory_guard()
@@ -491,12 +555,16 @@ def memory_guarded_json_response(
     expected_position: MemoryExposurePosition | None,
     status: int = 200,
     after_write: Callable[[], None] | None = None,
+    before_write: Callable[[], None] | None = None,
+    after_write_failure: Callable[[str], None] | None = None,
 ) -> MemoryGuardedJsonResponse:
     return MemoryGuardedJsonResponse(
         payload,
         expected_position=expected_position,
         status=status,
         after_write=after_write,
+        before_write=before_write,
+        after_write_failure=after_write_failure,
     )
 
 
@@ -648,6 +716,205 @@ def current_fast_response_memory_receipt_ref() -> dict[str, Any]:
     return merged or memory_receipt_ref_from_receipt(None)
 
 
+def _ingress_error_response(
+    error_code: str,
+    *,
+    status: int,
+) -> MemoryGuardedJsonResponse:
+    return memory_guarded_json_response(
+        {"ok": False, "error": error_code},
+        expected_position=None,
+        status=status,
+    )
+
+
+def _prepare_fast_control_ingress(
+    payload: dict[str, Any],
+    *,
+    accepted_text: str,
+    source: str,
+) -> tuple[
+    dict[str, Any] | None,
+    tuple[dict[str, Any], MemoryExposurePosition | None] | None,
+    web.StreamResponse | None,
+]:
+    """Claim once and project only safe completed retries."""
+
+    owner = FAST_CONTROL_CONTINUITY_OWNER
+    if not owner.enabled:
+        if getattr(
+            owner,
+            "_test_only_allow_unsafe_ingress",
+            False,
+        ) is True:
+            return None, None, None
+        return (
+            None,
+            None,
+            _ingress_error_response(
+                "conversation_ingress_recovery_unavailable",
+                status=503,
+            ),
+        )
+    normalized_source = clean_text(source).lower() or "control_page"
+    request_id = clean_text(
+        payload.get("requestId") or payload.get("turnId")
+    )
+    if normalized_source == "local_bridge":
+        bridge_instance_id = clean_text(
+            payload.get("bridgeInstanceId")
+        )
+        bridge_turn_id = clean_text(payload.get("turnId"))
+        if not bridge_instance_id or not bridge_turn_id:
+            return (
+                None,
+                None,
+                _ingress_error_response(
+                    "conversation_ingress_request_id_required",
+                    status=400,
+                ),
+            )
+        request_id = json.dumps(
+            [bridge_instance_id, bridge_turn_id],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+    if not request_id:
+        return (
+            None,
+            None,
+            _ingress_error_response(
+                "conversation_ingress_request_id_required",
+                status=400,
+            ),
+        )
+    try:
+        claim = owner.claim_ingress(
+            request_id=request_id,
+            accepted_text=accepted_text,
+        )
+        claim = dict(claim)
+        claim["_effectId"] = request_id
+    except ConversationIngressBindingMismatch:
+        return (
+            None,
+            None,
+            _ingress_error_response(
+                "conversation_ingress_binding_mismatch",
+                status=409,
+            ),
+        )
+    except ConversationIngressRecoveryError as exc:
+        invalid_request_codes = {
+            "conversation_ingress_source_delivery_id_invalid",
+            "conversation_ingress_scope_invalid",
+            "conversation_ingress_surface_invalid",
+            "conversation_ingress_accepted_text_invalid",
+        }
+        return (
+            None,
+            None,
+            _ingress_error_response(
+                (
+                    "conversation_ingress_request_invalid"
+                    if exc.code in invalid_request_codes
+                    else "conversation_ingress_recovery_unavailable"
+                ),
+                status=(
+                    400 if exc.code in invalid_request_codes else 503
+                ),
+            ),
+        )
+    if claim.get("shouldProcess") is True:
+        return claim, None, None
+    if claim.get("phase") != "completed":
+        return (
+            claim,
+            None,
+            _ingress_error_response(
+                FAST_CONTROL_INGRESS_PENDING_ERROR,
+                status=409,
+            ),
+        )
+    if normalized_source != "control_page":
+        return (
+            claim,
+            None,
+            _ingress_error_response(
+                FAST_CONTROL_INGRESS_REDELIVERY_SUPPRESSED_ERROR,
+                status=409,
+            ),
+        )
+
+    try:
+        record = owner.ingress_record(
+            claim["entryId"],
+            replay=True,
+        )
+        if record is None:
+            raise ConversationIngressRecoveryError(
+                "conversation_ingress_replay_not_terminal"
+            )
+        receipt_ref = sanitize_memory_receipt_ref(
+            record.get("memoryReceiptRef")
+        )
+        if (
+            receipt_ref is None
+            or receipt_ref.get("state") not in {"bound", "not_used"}
+        ):
+            raise ConversationIngressRecoveryError(
+                "conversation_ingress_replay_unattributed"
+            )
+        memory_index_dir = Path(MEMORY_ROOT) / "memory_index"
+        with memory_deletion_journal_guard(
+            memory_index_dir,
+            require_stable=True,
+        ) as deletion_position:
+            capture_memory_deletion_outbound_position(
+                deletion_position
+            )
+            exposure = memory_exposure_position_from_receipt(
+                receipt_ref,
+                deletion_position=deletion_position,
+                required=receipt_ref["state"] == "bound",
+            )
+        with memory_exposure_guard(
+            expected_position=exposure,
+            required=receipt_ref["state"] == "bound",
+            index_dir=memory_index_dir,
+        ):
+            pass
+        return claim, (record, exposure), None
+    except (
+        ConversationIngressRecoveryError,
+        MemoryDeletionJournalIntegrityError,
+        OSError,
+        RuntimeError,
+        TypeError,
+        ValueError,
+    ):
+        return (
+            claim,
+            None,
+            _ingress_error_response(
+                FAST_CONTROL_INGRESS_REPLAY_ERROR,
+                status=409,
+            ),
+        )
+
+
+def _pending_fast_control_continuity_result() -> dict[str, Any]:
+    return {
+        "schema": "fast_control.delivery-continuity.v1",
+        "enabled": True,
+        "durable": False,
+        "generation": 0,
+        "persistedSessionCount": 0,
+        "pendingDelivery": True,
+        "error": "",
+    }
+
+
 def append_chat_message(
     role: str,
     author: str,
@@ -732,6 +999,7 @@ def commit_fast_control_turn(
     assistant_text: str,
     *,
     memory_receipt: Any = None,
+    ingress_entry_id: str = "",
 ) -> dict[str, Any]:
     owner = FAST_CONTROL_CONTINUITY_OWNER
     if not owner.enabled:
@@ -755,6 +1023,7 @@ def commit_fast_control_turn(
             user_text,
             assistant_text,
             memory_receipt=memory_receipt,
+            ingress_entry_id=ingress_entry_id,
         )
     except Exception as exc:
         print(
@@ -894,6 +1163,7 @@ def commit_fast_control_terminal_turn(
     assistant_text: str,
     *,
     memory_receipt: Any = None,
+    ingress_entry_id: str = "",
 ) -> dict[str, Any]:
     owner = FAST_CONTROL_CONTINUITY_OWNER
     journal = FAST_ACTION_RECOVERY_JOURNAL
@@ -916,6 +1186,7 @@ def commit_fast_control_terminal_turn(
             assistant_text,
             before_commit=prepare_terminal,
             memory_receipt=memory_receipt,
+            ingress_entry_id=ingress_entry_id,
         )
     except Exception as exc:
         print(
@@ -1053,6 +1324,49 @@ def recent_chat_messages_for_planner(text: str, *, limit: int = 8) -> list[dict[
         and messages[-1]["content"] == clean_text(text)
     ):
         messages.pop()
+    recovered_loader = getattr(
+        FAST_CONTROL_CONTINUITY_OWNER,
+        "recovered_ingress_context_messages",
+        None,
+    )
+    if callable(recovered_loader):
+        current_text = clean_text(text)
+        seen_messages = {
+            (
+                clean_text(message.get("role")),
+                clean_text(message.get("content")),
+            )
+            for message in messages
+        }
+        seen_recovery_entries: set[str] = set()
+        for recovered in recovered_loader(limit=min(4, limit)):
+            if not isinstance(recovered, dict):
+                continue
+            entry_id = clean_text(
+                recovered.get("_ingressRecoveryEntryId")
+            )
+            role = clean_text(recovered.get("role")).lower()
+            content = clean_text(recovered.get("content"))
+            key = (role, content)
+            if (
+                role != "user"
+                or not entry_id
+                or not content
+                or entry_id in seen_recovery_entries
+                or content == current_text
+                or key in seen_messages
+            ):
+                continue
+            seen_recovery_entries.add(entry_id)
+            seen_messages.add(key)
+            messages.append(
+                {
+                    "role": "user",
+                    "content": content,
+                    "_ingressRecoveryEntryId": entry_id,
+                    "_ingressRecoveryUnanswered": True,
+                }
+            )
     merged = CROSS_SURFACE_CONTINUITY_BRIDGE.merge_for_fast(
         messages,
         current_user_text=text,
@@ -3354,6 +3668,133 @@ async def local_voice_admission_handler(
     )
 
 
+def _cached_fast_control_json_response(
+    record: dict[str, Any],
+    *,
+    exposure: MemoryExposurePosition | None,
+    source: str,
+) -> MemoryGuardedJsonResponse:
+    receipt_ref = sanitize_memory_receipt_ref(
+        record.get("memoryReceiptRef")
+    )
+    if receipt_ref is None:
+        return _ingress_error_response(
+            FAST_CONTROL_INGRESS_REPLAY_ERROR,
+            status=409,
+        )
+    payload: dict[str, Any] = {
+        "ok": True,
+        "reply": str(record["assistantText"]),
+        "cached": True,
+        "suppressTts": should_suppress_tts_for_command(
+            str(record["acceptedText"])
+        ),
+        "memoryReceiptRef": receipt_ref,
+        "ingress": {
+            "state": "completed",
+            "cached": True,
+            "automaticReplay": False,
+        },
+    }
+    if clean_text(source) in {"local_bridge", "local_mic", "voice"}:
+        payload.update(
+            {
+                "memoryState": (
+                    "bound" if exposure is not None else "not_used"
+                ),
+                "memoryBoundary": (
+                    memory_exposure_position_to_dict(exposure)
+                    if exposure is not None
+                    else None
+                ),
+            }
+        )
+    return memory_guarded_json_response(
+        payload,
+        expected_position=exposure,
+    )
+
+
+async def _cached_fast_control_stream_response(
+    request: web.Request,
+    record: dict[str, Any],
+    *,
+    exposure: MemoryExposurePosition | None,
+    source: str,
+) -> web.StreamResponse:
+    receipt_ref = sanitize_memory_receipt_ref(
+        record.get("memoryReceiptRef")
+    )
+    if receipt_ref is None:
+        return _ingress_error_response(
+            FAST_CONTROL_INGRESS_REPLAY_ERROR,
+            status=409,
+        )
+    response = web.StreamResponse(
+        status=200,
+        headers={
+            "Content-Type": "application/x-ndjson; charset=utf-8",
+            "Cache-Control": "no-store",
+            "X-Accel-Buffering": "no",
+        },
+    )
+    local_handoff = clean_text(source) in {
+        "local_bridge",
+        "local_mic",
+        "voice",
+    }
+    with memory_exposure_guard(
+        expected_position=exposure,
+        required=receipt_ref["state"] == "bound",
+        index_dir=Path(MEMORY_ROOT) / "memory_index",
+    ):
+        await response.prepare(request)
+        if local_handoff:
+            await write_stream_event(
+                response,
+                {
+                    "type": "memory_boundary",
+                    "memoryState": (
+                        "bound" if exposure is not None else "not_used"
+                    ),
+                    "memoryBoundary": (
+                        memory_exposure_position_to_dict(exposure)
+                        if exposure is not None
+                        else None
+                    ),
+                },
+            )
+        reply = str(record["assistantText"])
+        await write_stream_event(
+            response,
+            {
+                "type": "sentence",
+                "text": reply,
+                "cached": True,
+                "suppressTts": should_suppress_tts_for_command(
+                    str(record["acceptedText"])
+                ),
+            },
+        )
+        await write_stream_event(
+            response,
+            {
+                "type": "done",
+                "ok": True,
+                "reply": reply,
+                "cached": True,
+                "memoryReceiptRef": receipt_ref,
+                "ingress": {
+                    "state": "completed",
+                    "cached": True,
+                    "automaticReplay": False,
+                },
+            },
+        )
+        await response.write_eof()
+    return response
+
+
 async def _finalize_fast_chat_response(
     *,
     text: str,
@@ -3365,6 +3806,7 @@ async def _finalize_fast_chat_response(
     task_runner: Callable[[str, str], Awaitable[str]] | None,
     memory_write_receipt: dict[str, Any] | None,
     error_code: str,
+    ingress_claim: dict[str, Any] | None = None,
 ) -> web.StreamResponse:
     response_exposure = capture_combined_memory_exposure(
         FAST_MEMORY_EXPOSURE_POSITION.get(),
@@ -3379,6 +3821,21 @@ async def _finalize_fast_chat_response(
         response_memory_receipt_ref = (
             current_fast_response_memory_receipt_ref()
         )
+        ingress_entry_id = clean_text(
+            (ingress_claim or {}).get("entryId")
+        )
+        if ingress_entry_id:
+            try:
+                FAST_CONTROL_CONTINUITY_OWNER.bind_ingress_response(
+                    ingress_entry_id,
+                    assistant_text=reply,
+                    memory_receipt_ref=response_memory_receipt_ref,
+                )
+            except ConversationIngressRecoveryError:
+                return _ingress_error_response(
+                    "conversation_ingress_recovery_unavailable",
+                    status=503,
+                )
         append_chat_message(
             "assistant",
             "Evelyn",
@@ -3398,20 +3855,24 @@ async def _finalize_fast_chat_response(
             memory_write_receipt=memory_write_receipt,
         )
         continuity = (
-            commit_fast_control_terminal_turn(
-                task_record.task_id,
-                text,
-                reply,
-                memory_receipt=response_memory_receipt_ref,
-            )
-            if (
-                task_record is not None
-                and task_record.status != "running"
-            )
-            else commit_fast_control_turn(
-                text,
-                reply,
-                memory_receipt=response_memory_receipt_ref,
+            _pending_fast_control_continuity_result()
+            if ingress_entry_id
+            else (
+                commit_fast_control_terminal_turn(
+                    task_record.task_id,
+                    text,
+                    reply,
+                    memory_receipt=response_memory_receipt_ref,
+                )
+                if (
+                    task_record is not None
+                    and task_record.status != "running"
+                )
+                else commit_fast_control_turn(
+                    text,
+                    reply,
+                    memory_receipt=response_memory_receipt_ref,
+                )
             )
         )
         if (
@@ -3446,8 +3907,68 @@ async def _finalize_fast_chat_response(
             result["error"] = error_code
         if task_record is not None:
             result["task"] = task_record.to_dict()
+        if ingress_entry_id:
+            result["ingress"] = {
+                "state": "delivery_pending",
+                "cached": False,
+                "automaticReplay": False,
+            }
         after_write: Callable[[], None] | None = None
-        if (
+        before_write: Callable[[], None] | None = None
+        after_write_failure: Callable[[str], None] | None = None
+        if ingress_entry_id:
+            def begin_ingress_delivery() -> None:
+                FAST_CONTROL_CONTINUITY_OWNER.mark_ingress_delivery_inflight(
+                    ingress_entry_id,
+                    delivery_ref=FAST_CONTROL_HTTP_DELIVERY_REF,
+                )
+
+            def fail_ingress_delivery(failure_code: str) -> None:
+                FAST_CONTROL_CONTINUITY_OWNER.mark_ingress_delivery_ambiguous(
+                    ingress_entry_id,
+                    error_code=failure_code,
+                )
+
+            def complete_ingress_delivery() -> None:
+                FAST_CONTROL_CONTINUITY_OWNER.mark_ingress_delivery_succeeded(
+                    ingress_entry_id,
+                    delivery_ref=FAST_CONTROL_HTTP_DELIVERY_REF,
+                )
+                committed = (
+                    commit_fast_control_terminal_turn(
+                        task_record.task_id,
+                        text,
+                        reply,
+                        memory_receipt=response_memory_receipt_ref,
+                        ingress_entry_id=ingress_entry_id,
+                    )
+                    if (
+                        task_record is not None
+                        and task_record.status != "running"
+                    )
+                    else commit_fast_control_turn(
+                        text,
+                        reply,
+                        memory_receipt=response_memory_receipt_ref,
+                        ingress_entry_id=ingress_entry_id,
+                    )
+                )
+                if committed.get("durable") is not True:
+                    return
+                if (
+                    task_record is not None
+                    and task_runner is not None
+                    and task_record.status == "running"
+                ):
+                    launch_background_action(
+                        task_record,
+                        task_runner,
+                    )
+
+            before_write = begin_ingress_delivery
+            after_write_failure = fail_ingress_delivery
+            after_write = complete_ingress_delivery
+        elif (
             task_record is not None
             and task_runner is not None
             and task_record.status == "running"
@@ -3464,6 +3985,8 @@ async def _finalize_fast_chat_response(
             result,
             expected_position=final_response_exposure,
             after_write=after_write,
+            before_write=before_write,
+            after_write_failure=after_write_failure,
         )
 
 
@@ -3503,6 +4026,24 @@ async def chat_handler(request: web.Request) -> web.StreamResponse:
     if admission_rejection is not None:
         return admission_rejection
     reset_fast_memory_context_receipt()
+    ingress_claim, cached_replay, ingress_rejection = (
+        _prepare_fast_control_ingress(
+            payload,
+            accepted_text=text,
+            source=source,
+        )
+    )
+    if ingress_rejection is not None:
+        return ingress_rejection
+    if cached_replay is not None:
+        cached_record, cached_exposure = cached_replay
+        return _cached_fast_control_json_response(
+            cached_record,
+            exposure=cached_exposure,
+            source=source,
+        )
+    if ingress_claim is not None:
+        action_id = str(ingress_claim["_effectId"])
     suppress_tts = should_suppress_tts_for_command(text)
     append_chat_message("user", "정훈", text, source=source)
     tool_plan: FastToolPlan | None = None
@@ -3591,6 +4132,7 @@ async def chat_handler(request: web.Request) -> web.StreamResponse:
         task_runner=task_runner,
         memory_write_receipt=memory_write_receipt,
         error_code=error_code,
+        ingress_claim=ingress_claim,
     )
 
 
@@ -3622,6 +4164,25 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
     if admission_rejection is not None:
         return admission_rejection
     reset_fast_memory_context_receipt()
+    ingress_claim, cached_replay, ingress_rejection = (
+        _prepare_fast_control_ingress(
+            payload,
+            accepted_text=text,
+            source=source,
+        )
+    )
+    if ingress_rejection is not None:
+        return ingress_rejection
+    if cached_replay is not None:
+        cached_record, cached_exposure = cached_replay
+        return await _cached_fast_control_stream_response(
+            request,
+            cached_record,
+            exposure=cached_exposure,
+            source=source,
+        )
+    if ingress_claim is not None:
+        action_id = str(ingress_claim["_effectId"])
     suppress_tts = should_suppress_tts_for_command(text)
     append_chat_message("user", "정훈", text, source=source)
     tool_plan: FastToolPlan | None = None
@@ -3659,10 +4220,50 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
     }
     stream_memory_boundary_emitted = False
     stream_memory_exposure: MemoryExposurePosition | None = None
+    ingress_entry_id = clean_text(
+        (ingress_claim or {}).get("entryId")
+    )
+    ingress_delivery_started = False
+    ingress_delivery_failed = False
+
+    def mark_stream_delivery_ambiguous(error_code: str) -> None:
+        nonlocal ingress_delivery_failed
+        if (
+            not ingress_entry_id
+            or not ingress_delivery_started
+            or ingress_delivery_failed
+        ):
+            return
+        ingress_delivery_failed = True
+        try:
+            FAST_CONTROL_CONTINUITY_OWNER.mark_ingress_delivery_ambiguous(
+                ingress_entry_id,
+                error_code=error_code,
+            )
+        except ConversationIngressRecoveryError as exc:
+            print(
+                "[FAST CONTROL] stream_ingress_ambiguous_failed "
+                f"errorCode={exc.code}",
+                flush=True,
+            )
 
     async def ensure_response_prepared() -> None:
+        nonlocal ingress_delivery_started
         if not response.prepared:
-            await response.prepare(request)
+            if ingress_entry_id and not ingress_delivery_started:
+                FAST_CONTROL_CONTINUITY_OWNER.mark_ingress_delivery_inflight(
+                    ingress_entry_id,
+                    delivery_ref=FAST_CONTROL_STREAM_DELIVERY_REF,
+                    streaming=True,
+                )
+                ingress_delivery_started = True
+            try:
+                await response.prepare(request)
+            except BaseException:
+                mark_stream_delivery_ambiguous(
+                    "conversation_ingress_delivery_failed"
+                )
+                raise
 
     def active_stream_memory_exposure() -> MemoryExposurePosition | None:
         position = capture_combined_memory_exposure(
@@ -3681,8 +4282,14 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
             required=position is not None,
             index_dir=Path(MEMORY_ROOT) / "memory_index",
         ):
-            await ensure_response_prepared()
-            await write_stream_event(response, event_payload)
+            try:
+                await ensure_response_prepared()
+                await write_stream_event(response, event_payload)
+            except BaseException:
+                mark_stream_delivery_ambiguous(
+                    "conversation_ingress_delivery_disconnected"
+                )
+                raise
 
     async def ensure_local_memory_boundary() -> None:
         nonlocal stream_memory_boundary_emitted, stream_memory_exposure
@@ -3817,75 +4424,110 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
     async def finalize_success_delivery() -> None:
         nonlocal response_finished, terminal_reply_recorded
         response_exposure = active_stream_memory_exposure()
-        launch_after_handoff = False
-        try:
-            with memory_exposure_guard(
-                expected_position=response_exposure,
-                required=response_exposure is not None,
-                index_dir=Path(MEMORY_ROOT) / "memory_index",
-            ):
-                await ensure_local_memory_boundary()
-                response_memory_receipt_ref = (
-                    current_fast_response_memory_receipt_ref()
+        with memory_exposure_guard(
+            expected_position=response_exposure,
+            required=response_exposure is not None,
+            index_dir=Path(MEMORY_ROOT) / "memory_index",
+        ):
+            await ensure_local_memory_boundary()
+            response_memory_receipt_ref = (
+                current_fast_response_memory_receipt_ref()
+            )
+            if ingress_entry_id:
+                FAST_CONTROL_CONTINUITY_OWNER.bind_ingress_response(
+                    ingress_entry_id,
+                    assistant_text=reply,
+                    memory_receipt_ref=response_memory_receipt_ref,
                 )
-                append_chat_message(
-                    "assistant",
-                    "Evelyn",
-                    reply,
-                    source="fast_control_api_stream",
-                    task_id=(
-                        task_record.task_id
-                        if task_record is not None
-                        else None
-                    ),
-                    task_status=(
-                        task_record.status
-                        if task_record is not None
-                        else None
-                    ),
-                    memory_receipt=response_memory_receipt_ref,
-                    memory_write_receipt=memory_write_receipt,
-                )
-                terminal_reply_recorded = True
-                continuity = commit_fast_control_turn(
+            append_chat_message(
+                "assistant",
+                "Evelyn",
+                reply,
+                source="fast_control_api_stream",
+                task_id=(
+                    task_record.task_id
+                    if task_record is not None
+                    else None
+                ),
+                task_status=(
+                    task_record.status
+                    if task_record is not None
+                    else None
+                ),
+                memory_receipt=response_memory_receipt_ref,
+                memory_write_receipt=memory_write_receipt,
+            )
+            terminal_reply_recorded = True
+            continuity = (
+                _pending_fast_control_continuity_result()
+                if ingress_entry_id
+                else commit_fast_control_turn(
                     text,
                     reply,
                     memory_receipt=response_memory_receipt_ref,
                 )
-                launch_after_handoff = bool(
-                    task_record is not None
-                    and task_runner is not None
-                    and task_record.status == "running"
-                )
-                await write_response_event(
-                    {
-                    "type": "done",
-                    "ok": not bool(memory_command_error),
-                    "error": memory_command_error,
-                    "reply": reply,
-                    "suppressTts": suppress_tts,
-                    "taskId": task_record.task_id if task_record is not None else None,
-                    "taskStatus": task_record.status if task_record is not None else None,
-                    "continuity": continuity,
-                    "memoryReceipt": current_fast_memory_context_receipt(),
-                    "memoryWriteReceipt": memory_write_receipt,
-                    "firstSentenceMs": round(first_sentence_ms, 1) if first_sentence_ms is not None else None,
-                    "firstDeltaMs": round(first_delta_ms, 1) if first_delta_ms is not None else None,
-                    "firstProgressMs": round(first_progress_ms, 1) if first_progress_ms is not None else None,
-                    "elapsedMs": round((time.perf_counter() - started_at) * 1000.0, 1),
-                        **local_memory_handoff_fields(),
-                    },
-                )
+            )
+            await write_response_event(
+                {
+                "type": "done",
+                "ok": not bool(memory_command_error),
+                "error": memory_command_error,
+                "reply": reply,
+                "suppressTts": suppress_tts,
+                "taskId": task_record.task_id if task_record is not None else None,
+                "taskStatus": task_record.status if task_record is not None else None,
+                "continuity": continuity,
+                "memoryReceipt": current_fast_memory_context_receipt(),
+                "memoryWriteReceipt": memory_write_receipt,
+                "firstSentenceMs": round(first_sentence_ms, 1) if first_sentence_ms is not None else None,
+                "firstDeltaMs": round(first_delta_ms, 1) if first_delta_ms is not None else None,
+                "firstProgressMs": round(first_progress_ms, 1) if first_progress_ms is not None else None,
+                "elapsedMs": round((time.perf_counter() - started_at) * 1000.0, 1),
+                    **local_memory_handoff_fields(),
+                    **(
+                        {
+                            "ingress": {
+                                "state": "delivery_pending",
+                                "cached": False,
+                                "automaticReplay": False,
+                            }
+                        }
+                        if ingress_entry_id
+                        else {}
+                    ),
+                },
+            )
+            try:
                 await response.write_eof()
-                response_finished = True
-        finally:
-            if (
-                launch_after_handoff
-                and task_record is not None
-                and task_runner is not None
-                and task_record.status == "running"
-            ):
-                launch_background_action(task_record, task_runner)
+            except BaseException:
+                mark_stream_delivery_ambiguous(
+                    "conversation_ingress_delivery_disconnected"
+                )
+                raise
+            response_finished = True
+
+        delivery_committed = True
+        if ingress_entry_id:
+            FAST_CONTROL_CONTINUITY_OWNER.mark_ingress_delivery_succeeded(
+                ingress_entry_id,
+                delivery_ref=FAST_CONTROL_STREAM_DELIVERY_REF,
+            )
+            delivery_continuity = commit_fast_control_turn(
+                text,
+                reply,
+                memory_receipt=response_memory_receipt_ref,
+                ingress_entry_id=ingress_entry_id,
+            )
+            delivery_committed = bool(
+                delivery_continuity.get("durable") is True
+            )
+        if (
+            delivery_committed
+            and task_record is not None
+            and task_runner is not None
+            and task_record.status == "running"
+        ):
+            launch_background_action(task_record, task_runner)
 
     try:
         (
@@ -3974,6 +4616,12 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
                             reply = enforce_action_reply_contract(emitted_text)
         await finalize_success_delivery()
     except MemoryDeletionJournalIntegrityError:
+        if ingress_delivery_started:
+            mark_stream_delivery_ambiguous(
+                "conversation_ingress_delivery_failed"
+            )
+            response_finished = True
+            return response
         raise
     except Exception as exc:
         error_code = "fast_control_stream_failed"
@@ -3983,9 +4631,17 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
             f"errorType={type(exc).__name__}",
             flush=True,
         )
-        if terminal_reply_recorded:
-            # The reply and continuity already committed. A failed socket
-            # write must not manufacture a second terminal assistant turn.
+        if ingress_delivery_started:
+            # Once any stream event crossed the HTTP boundary, a later
+            # generation failure cannot be represented by a second fixed
+            # assistant payload. Preserve the observed prefix as ambiguous
+            # and leave it non-replayable/non-terminal.
+            mark_stream_delivery_ambiguous(
+                "conversation_ingress_delivery_ambiguous"
+            )
+            response_finished = True
+            return response
+        if ingress_delivery_failed or terminal_reply_recorded:
             response_finished = True
             return response
         if task_record is not None and task_record.status == "running":
@@ -4013,30 +4669,94 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
                 source="fast_control_api_stream",
                 memory_receipt=not_used_memory_receipt_ref(),
             )
+        failure_receipt = not_used_memory_receipt_ref()
+        if ingress_entry_id:
+            try:
+                FAST_CONTROL_CONTINUITY_OWNER.bind_ingress_response(
+                    ingress_entry_id,
+                    assistant_text=failure_reply,
+                    memory_receipt_ref=failure_receipt,
+                )
+            except ConversationIngressRecoveryError:
+                if ingress_delivery_started:
+                    mark_stream_delivery_ambiguous(
+                        "conversation_ingress_delivery_failed"
+                    )
+                    response_finished = True
+                    return response
+                return _ingress_error_response(
+                    "conversation_ingress_recovery_unavailable",
+                    status=503,
+                )
         continuity = (
-            commit_fast_control_terminal_turn(
-                task_record.task_id,
-                text,
-                failure_reply,
-                memory_receipt=not_used_memory_receipt_ref(),
-            )
-            if task_record is not None
-            else commit_fast_control_turn(
-                text,
-                failure_reply,
-                memory_receipt=not_used_memory_receipt_ref(),
+            _pending_fast_control_continuity_result()
+            if ingress_entry_id
+            else (
+                commit_fast_control_terminal_turn(
+                    task_record.task_id,
+                    text,
+                    failure_reply,
+                    memory_receipt=failure_receipt,
+                )
+                if task_record is not None
+                else commit_fast_control_turn(
+                    text,
+                    failure_reply,
+                    memory_receipt=failure_receipt,
+                )
             )
         )
-        await write_response_event(
-            {
-                "type": "error",
-                "ok": False,
-                "error": error_code,
-                "message": failure_reply,
-                "memoryReceipt": current_fast_memory_context_receipt(),
-                "continuity": continuity,
-            },
-        )
+        try:
+            await write_response_event(
+                {
+                    "type": "error",
+                    "ok": False,
+                    "error": error_code,
+                    "message": failure_reply,
+                    "memoryReceipt": current_fast_memory_context_receipt(),
+                    "continuity": continuity,
+                    **(
+                        {
+                            "ingress": {
+                                "state": "delivery_pending",
+                                "cached": False,
+                                "automaticReplay": False,
+                            }
+                        }
+                        if ingress_entry_id
+                        else {}
+                    ),
+                },
+            )
+            await response.write_eof()
+            response_finished = True
+        except BaseException:
+            mark_stream_delivery_ambiguous(
+                "conversation_ingress_delivery_disconnected"
+            )
+            response_finished = True
+            return response
+        if ingress_entry_id:
+            FAST_CONTROL_CONTINUITY_OWNER.mark_ingress_delivery_succeeded(
+                ingress_entry_id,
+                delivery_ref=FAST_CONTROL_STREAM_DELIVERY_REF,
+            )
+            (
+                commit_fast_control_terminal_turn(
+                    task_record.task_id,
+                    text,
+                    failure_reply,
+                    memory_receipt=failure_receipt,
+                    ingress_entry_id=ingress_entry_id,
+                )
+                if task_record is not None
+                else commit_fast_control_turn(
+                    text,
+                    failure_reply,
+                    memory_receipt=failure_receipt,
+                    ingress_entry_id=ingress_entry_id,
+                )
+            )
     finally:
         if llm_stream is not None:
             close_stream = getattr(
@@ -4055,7 +4775,13 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
             index_dir=Path(MEMORY_ROOT) / "memory_index",
         ):
             await ensure_response_prepared()
-            await response.write_eof()
+            try:
+                await response.write_eof()
+            except BaseException:
+                mark_stream_delivery_ambiguous(
+                    "conversation_ingress_delivery_disconnected"
+                )
+                raise
     return response
 
 

@@ -2496,6 +2496,9 @@
     const WALLPAPER_DB_VERSION = 1;
     const WALLPAPER_STORE_NAME = "preferences";
     const WALLPAPER_STORE_KEY = "wallpaper";
+    const PENDING_CHAT_STORAGE_KEY = "evelyn.control-page.pending-chat.v1";
+    // Keep a full minute below the server's 15-minute ingress lease.
+    const PENDING_CHAT_MAX_AGE_MS = 14 * 60 * 1000;
     const LIVE2D_PREVIEW_MODE = new URLSearchParams(window.location.search).get("live2dPreview") === "1";
     let bootProgressPollTimer = null;
     let statePollTimer = null;
@@ -5654,6 +5657,60 @@
       return true;
     }
 
+    function readPendingChatMessage() {
+      try {
+        const parsed = JSON.parse(sessionStorage.getItem(PENDING_CHAT_STORAGE_KEY) || "null");
+        const requestId = String(parsed && parsed.requestId || "").trim();
+        const text = String(parsed && parsed.text || "").trim();
+        const createdAt = Number(parsed && parsed.createdAt || 0);
+        if (
+          !requestId ||
+          !text ||
+          !Number.isFinite(createdAt) ||
+          createdAt <= 0 ||
+          Date.now() - createdAt > PENDING_CHAT_MAX_AGE_MS
+        ) {
+          sessionStorage.removeItem(PENDING_CHAT_STORAGE_KEY);
+          return null;
+        }
+        return { requestId, text, createdAt };
+      } catch {
+        return null;
+      }
+    }
+
+    function pendingChatMessageFor(text) {
+      const existing = readPendingChatMessage();
+      if (existing && existing.text === text) {
+        return { ...existing, reused: true };
+      }
+      const pending = {
+        requestId: (
+          globalThis.crypto && typeof globalThis.crypto.randomUUID === "function"
+            ? globalThis.crypto.randomUUID()
+            : `control-${Date.now()}-${Math.random().toString(16).slice(2)}`
+        ),
+        text,
+        createdAt: Date.now()
+      };
+      try {
+        sessionStorage.setItem(PENDING_CHAT_STORAGE_KEY, JSON.stringify(pending));
+      } catch {
+        // The request still carries a stable ID for this attempt.
+      }
+      return { ...pending, reused: false };
+    }
+
+    function clearPendingChatMessage(requestId) {
+      const pending = readPendingChatMessage();
+      if (!pending || pending.requestId !== requestId) return;
+      try {
+        sessionStorage.removeItem(PENDING_CHAT_STORAGE_KEY);
+      } catch {
+        // A storage failure must not turn a delivered response into an error.
+      }
+    }
+
     async function handleSubmit() {
       const value = composer.value.trim();
       if (!value || sending) return;
@@ -5675,14 +5732,17 @@
       if (await handleRepairCommand(normalized)) {
         return;
       }
+      const pendingChat = pendingChatMessageFor(value);
       sending = true;
       sendButton.disabled = true;
-      appendChatMessage({
-        role: "user",
-        author: "정훈",
-        text: value,
-        at: Date.now() / 1000
-      });
+      if (!pendingChat.reused) {
+        appendChatMessage({
+          role: "user",
+          author: "정훈",
+          text: value,
+          at: Date.now() / 1000
+        });
+      }
       setBubble("보내는 중...");
       try {
         const payload = await fetchApi("/api/control-page/chat", {
@@ -5690,19 +5750,20 @@
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             text: value,
-            requestId: (
-              globalThis.crypto && typeof globalThis.crypto.randomUUID === "function"
-                ? globalThis.crypto.randomUUID()
-                : `control-${Date.now()}-${Math.random().toString(16).slice(2)}`
-            )
+            requestId: pendingChat.requestId
           })
         });
+        if (!payload || payload.ok !== true) {
+          throw new Error("chat_delivery_unconfirmed");
+        }
+        clearPendingChatMessage(pendingChat.requestId);
         if (payload.state) {
           applyState(payload.state, { runInitialPanelCommands: true });
         } else {
           setBubble(payload.reply || "응답을 받았어.");
         }
       } catch (error) {
+        if (!composer.value.trim()) composer.value = value;
         setBubble(`전송 실패: ${error.message}`);
       } finally {
         sending = false;
@@ -5710,6 +5771,10 @@
       }
     }
 
+    const pendingChatAtLoad = readPendingChatMessage();
+    if (pendingChatAtLoad && !composer.value.trim()) {
+      composer.value = pendingChatAtLoad.text;
+    }
     sendButton.addEventListener("click", handleSubmit);
     if (runtimeRepairPreviewButton) {
       runtimeRepairPreviewButton.addEventListener("click", () => {

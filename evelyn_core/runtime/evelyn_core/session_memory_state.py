@@ -246,10 +246,15 @@ class SessionStateStore:
         guild_id: int | None = None,
         user_id: int | None = None,
         previous_topic_id: str = "",
+        turn_id: str | None = None,
         now_monotonic: float | None = None,
     ) -> UserTextTurnStart:
         topic_id = build_topic_id(user_text, previous_topic_id)
-        turn_id = self.start_new_turn(session_key, now_monotonic=now_monotonic)
+        turn_id = self.start_new_turn(
+            session_key,
+            turn_id=turn_id,
+            now_monotonic=now_monotonic,
+        )
         self.update_session_state(
             session_key,
             user_id=user_id,

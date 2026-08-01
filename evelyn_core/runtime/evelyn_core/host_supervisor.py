@@ -21,11 +21,21 @@ from .host_supervisor_client import (
     SUPERVISOR_RESPONSE_SCHEMA,
     SUPERVISOR_STATUS_SCHEMA,
 )
+from .instance_lock_runtime import (
+    InstanceLockManager,
+    build_instance_lock_runtime_deps,
+)
 from .paths import get_repo_root, get_runtime_artifacts_root
+from .process_identity import (
+    birth_identity_matches_current_platform,
+    process_birth_identity,
+    terminate_process_identity,
+)
 from .runtime_artifact_io import atomic_json_write
 from .runtime_error_observability import RuntimeErrorCounter
 from .storage_retention_report import StorageRetentionReporter
 from .voice_validation import active_validation_context, emit_voice_validation_event
+from .windows_process_job import KillOnCloseProcessOwner
 
 
 PREVIEW_TTL_SEC = 120.0
@@ -33,6 +43,10 @@ AUTO_RESTART_LIMIT = 3
 AUTO_RESTART_WINDOW_SEC = 10 * 60
 HEARTBEAT_INTERVAL_SEC = 1.0
 _REQUEST_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_-]{1,96}$")
+BRIDGE_PROCESS_IDENTITY_SCHEMA = (
+    "host_supervisor.local-bridge-process-identity.v1"
+)
+BRIDGE_STATUS_FRESH_SEC = 3.0
 
 
 class HostSupervisor:
@@ -45,6 +59,11 @@ class HostSupervisor:
         run_command: Callable[..., Any] = subprocess.run,
         now: Callable[[], float] = time.time,
         retention_reporter: Any | None = None,
+        birth_identity_reader: Callable[[int], str | None] = process_birth_identity,
+        exact_process_terminator: Callable[[int, str], bool] = terminate_process_identity,
+        process_owner: Any | None = None,
+        bridge_lock_probe: Callable[[], bool] | None = None,
+        sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self.project_root = Path(project_root or get_repo_root()).resolve()
         self.artifacts_root = Path(
@@ -56,14 +75,23 @@ class HostSupervisor:
         self.status_path = self.root / "status.json"
         self.stop_request_path = self.root / "stop.request"
         self.bridge_status_path = self.artifacts_root / "local_bridge" / "status.json"
+        self.bridge_lock_path = self.artifacts_root / "local_bridge" / "instance.lock"
+        self.bridge_identity_path = self.root / "local_bridge_process_identity.json"
         self.bridge_log_path = self.artifacts_root / "logs" / "Local-IO-Bridge.log"
         self.popen = popen
         self.run_command = run_command
         self.now = now
+        self.sleep = sleep
+        self.birth_identity_reader = birth_identity_reader
+        self.exact_process_terminator = exact_process_terminator
+        self.bridge_lock_probe = bridge_lock_probe
         self.started_at = self.now()
         self.child: Any | None = None
         self.child_started_at: float | None = None
         self.child_exit_code: int | None = None
+        self.child_birth_identity = ""
+        self.bridge_identity_state = "unknown"
+        self._startup_reconciled = False
         self.restart_history: deque[float] = deque()
         self.manual_intervention_required = False
         self.last_error = ""
@@ -73,11 +101,217 @@ class HostSupervisor:
         self._stopping = False
         self._heartbeat_stop = threading.Event()
         self._heartbeat_thread: threading.Thread | None = None
+        self.process_owner_error = ""
+        self.process_owner = process_owner
+        if self.process_owner is None:
+            try:
+                self.process_owner = KillOnCloseProcessOwner()
+            except Exception as exc:
+                self.process_owner = None
+                self.process_owner_error = "host_supervisor_process_owner_unavailable"
+                self.runtime_errors.record(
+                    self.process_owner_error,
+                    exc,
+                )
         self.retention_reporter = retention_reporter or StorageRetentionReporter(
             project_root=self.project_root,
             artifacts_root=self.artifacts_root,
             now=self.now,
         )
+
+    @staticmethod
+    def _bridge_identity_payload(
+        *,
+        state: str,
+        pid: int = 0,
+        birth_identity: str = "",
+        updated_at: float,
+    ) -> dict[str, Any]:
+        return {
+            "schema": BRIDGE_PROCESS_IDENTITY_SCHEMA,
+            "state": state,
+            "pid": int(pid),
+            "birthIdentity": str(birth_identity),
+            "updatedAt": float(updated_at),
+            "contentFree": True,
+        }
+
+    @staticmethod
+    def _valid_bridge_identity(payload: Any) -> bool:
+        if not isinstance(payload, dict) or set(payload) != {
+            "schema",
+            "state",
+            "pid",
+            "birthIdentity",
+            "updatedAt",
+            "contentFree",
+        }:
+            return False
+        if (
+            payload.get("schema") != BRIDGE_PROCESS_IDENTITY_SCHEMA
+            or payload.get("state") not in {"starting", "active", "stopped"}
+            or isinstance(payload.get("pid"), bool)
+            or not isinstance(payload.get("pid"), int)
+            or isinstance(payload.get("updatedAt"), bool)
+            or not isinstance(payload.get("updatedAt"), (int, float))
+            or payload.get("contentFree") is not True
+            or not isinstance(payload.get("birthIdentity"), str)
+        ):
+            return False
+        if payload["state"] in {"starting", "stopped"}:
+            return payload["pid"] == 0 and payload["birthIdentity"] == ""
+        prefix, separator, value = payload["birthIdentity"].partition(":")
+        return bool(
+            payload["pid"] > 0
+            and separator
+            and prefix in {"linux", "windows"}
+            and value.isdigit()
+            and len(value) <= 32
+        )
+
+    def _write_bridge_identity(
+        self,
+        *,
+        state: str,
+        pid: int = 0,
+        birth_identity: str = "",
+    ) -> None:
+        payload = self._bridge_identity_payload(
+            state=state,
+            pid=pid,
+            birth_identity=birth_identity,
+            updated_at=self.now(),
+        )
+        if not self._valid_bridge_identity(payload):
+            raise ValueError("local_bridge_process_identity_invalid")
+        atomic_json_write(self.bridge_identity_path, payload, durable=True)
+        self.bridge_identity_state = state
+
+    def _load_bridge_identity(self) -> tuple[dict[str, Any] | None, str]:
+        try:
+            payload = json.loads(self.bridge_identity_path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return None, "local_bridge_prior_process_identity_missing"
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            return None, "local_bridge_prior_process_identity_invalid"
+        if not self._valid_bridge_identity(payload):
+            return None, "local_bridge_prior_process_identity_invalid"
+        self.bridge_identity_state = str(payload["state"])
+        return payload, ""
+
+    def _bridge_lock_is_free(self) -> bool:
+        if self.bridge_lock_probe is not None:
+            return bool(self.bridge_lock_probe())
+        deps = build_instance_lock_runtime_deps(self.bridge_lock_path)
+        if deps.msvcrt_module is None and deps.fcntl_module is None:
+            raise RuntimeError("local_bridge_instance_lock_backend_unavailable")
+        manager = InstanceLockManager(deps)
+        try:
+            manager.acquire(wait_sec=0.0)
+        except RuntimeError:
+            return False
+        finally:
+            manager.release()
+        return True
+
+    def _bridge_status_is_fresh(self) -> bool:
+        try:
+            payload = json.loads(self.bridge_status_path.read_text(encoding="utf-8"))
+            heartbeat_at = float(payload.get("heartbeatAt"))
+        except (FileNotFoundError, OSError, ValueError, TypeError, json.JSONDecodeError):
+            return False
+        age = self.now() - heartbeat_at
+        return (
+            payload.get("schema") == "local_io_bridge.status.v1"
+            and 0.0 <= age <= BRIDGE_STATUS_FRESH_SEC
+        )
+
+    def _manual_failure(self, error: str) -> dict[str, Any]:
+        self.manual_intervention_required = True
+        self.last_error = error
+        self.runtime_errors.record(error)
+        return {
+            "ok": False,
+            "error": error,
+            "manualInterventionRequired": True,
+        }
+
+    def reconcile_prior_bridge(self) -> dict[str, Any]:
+        """Prove no prior Local Bridge owns host I/O before a new spawn."""
+
+        if self._startup_reconciled:
+            return {"ok": True, "status": "already_reconciled"}
+        payload, load_error = self._load_bridge_identity()
+        if payload is None and load_error == "local_bridge_prior_process_identity_invalid":
+            return self._manual_failure(load_error)
+        try:
+            lock_free = self._bridge_lock_is_free()
+        except Exception:
+            return self._manual_failure("local_bridge_instance_lock_unverified")
+        if payload is None:
+            # A fresh legacy heartbeat without a durable identity is an
+            # authority ambiguity.  Never guess a PID from process listings.
+            if not lock_free or self._bridge_status_is_fresh():
+                return self._manual_failure(
+                    "local_bridge_prior_process_identity_missing_live_bridge"
+                )
+        elif payload["state"] == "active":
+            pid = int(payload["pid"])
+            birth_identity = str(payload["birthIdentity"])
+            if not birth_identity_matches_current_platform(birth_identity):
+                return self._manual_failure(
+                    "local_bridge_prior_process_identity_unverified"
+                )
+            try:
+                observed = self.birth_identity_reader(pid)
+            except (OSError, ValueError):
+                return self._manual_failure(
+                    "local_bridge_prior_process_identity_unverified"
+                )
+            if observed == birth_identity:
+                try:
+                    stopped = self.exact_process_terminator(pid, birth_identity)
+                except (OSError, ValueError):
+                    stopped = False
+                if not stopped:
+                    return self._manual_failure(
+                        "local_bridge_prior_process_stop_unverified"
+                    )
+                try:
+                    remaining = self.birth_identity_reader(pid)
+                except (OSError, ValueError):
+                    return self._manual_failure(
+                        "local_bridge_prior_process_identity_unverified"
+                    )
+                if remaining == birth_identity:
+                    return self._manual_failure(
+                        "local_bridge_prior_process_stop_unverified"
+                    )
+            # A different birth identity proves PID reuse.  It must never be
+            # signalled; the old Local Bridge is already gone.
+            try:
+                lock_free = self._bridge_lock_is_free()
+            except Exception:
+                return self._manual_failure("local_bridge_instance_lock_unverified")
+            if not lock_free:
+                return self._manual_failure("local_bridge_instance_lock_held")
+        elif not lock_free:
+            error = (
+                "local_bridge_prior_process_start_ambiguous"
+                if payload["state"] == "starting"
+                else "local_bridge_instance_lock_held"
+            )
+            return self._manual_failure(error)
+        try:
+            self._write_bridge_identity(state="stopped")
+        except (OSError, TypeError, ValueError):
+            return self._manual_failure(
+                "local_bridge_prior_process_identity_write_failed"
+            )
+        self._startup_reconciled = True
+        self.manual_intervention_required = False
+        self.last_error = ""
+        return {"ok": True, "status": "reconciled"}
 
     def _bridge_command(self) -> list[str]:
         return [
@@ -107,8 +341,29 @@ class HostSupervisor:
         return env
 
     def start_bridge(self, *, automatic: bool = False) -> dict[str, Any]:
-        if self.child is not None and self.child.poll() is None:
-            return {"ok": True, "status": "already_running", "pid": self.child.pid}
+        if self.child is not None:
+            observed_exit = self.child.poll()
+            if observed_exit is None:
+                return {"ok": True, "status": "already_running", "pid": self.child.pid}
+            self.child_exit_code = int(observed_exit)
+            self.child = None
+            self.child_birth_identity = ""
+            try:
+                self._write_bridge_identity(state="stopped")
+            except (OSError, TypeError, ValueError):
+                return self._manual_failure(
+                    "local_bridge_process_identity_write_failed"
+                )
+        reconciled = self.reconcile_prior_bridge()
+        if not reconciled.get("ok"):
+            return reconciled
+        if self.process_owner is None or not bool(
+            getattr(self.process_owner, "ready", False)
+        ):
+            return self._manual_failure(
+                self.process_owner_error
+                or "host_supervisor_process_owner_unavailable"
+            )
         if automatic and not self._consume_restart_budget():
             self.manual_intervention_required = True
             self.last_error = "automatic_restart_budget_exhausted"
@@ -118,44 +373,210 @@ class HostSupervisor:
                 "error": self.last_error,
                 "manualInterventionRequired": True,
             }
+        try:
+            self._write_bridge_identity(state="starting")
+        except (OSError, TypeError, ValueError):
+            return self._manual_failure(
+                "local_bridge_process_identity_write_failed"
+            )
         self.bridge_log_path.parent.mkdir(parents=True, exist_ok=True)
         log_handle = self.bridge_log_path.open("a", encoding="utf-8")
         try:
-            self.child = self.popen(
-                self._bridge_command(),
-                cwd=str(self.project_root),
-                env=self._bridge_environment(),
-                stdout=log_handle,
-                stderr=subprocess.STDOUT,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-            )
+            try:
+                child = self.popen(
+                    self._bridge_command(),
+                    cwd=str(self.project_root),
+                    env=self._bridge_environment(),
+                    stdout=log_handle,
+                    stderr=subprocess.STDOUT,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+            except Exception as exc:
+                try:
+                    self._write_bridge_identity(state="stopped")
+                except Exception:
+                    pass
+                self.runtime_errors.record("local_bridge_launch_failed", exc)
+                return self._manual_failure("local_bridge_launch_failed")
         finally:
             log_handle.close()
+        birth_identity = ""
+        for _ in range(20):
+            try:
+                birth_identity = self.birth_identity_reader(int(child.pid)) or ""
+            except (OSError, ValueError) as exc:
+                self.runtime_errors.record(
+                    "local_bridge_process_identity_unavailable",
+                    exc,
+                )
+                break
+            if birth_identity or child.poll() is not None:
+                break
+            self.sleep(0.01)
+        if not birth_identity or not birth_identity_matches_current_platform(
+            birth_identity
+        ):
+            stopped, _ = self._terminate_spawned_child(child)
+            if not stopped:
+                self.child = child
+                self.child_started_at = self.now()
+                return self._manual_failure(
+                    "local_bridge_failed_spawn_stop_unverified"
+                )
+            try:
+                self._write_bridge_identity(state="stopped")
+            except Exception:
+                pass
+            return self._manual_failure(
+                "local_bridge_process_identity_unavailable"
+            )
+        try:
+            assigned = bool(self.process_owner.assign(child, birth_identity))
+        except Exception as exc:
+            self.runtime_errors.record(
+                "local_bridge_process_owner_assignment_failed",
+                exc,
+            )
+            assigned = False
+        if not assigned:
+            stopped, _ = self._terminate_spawned_child(child)
+            if not stopped:
+                self.child = child
+                self.child_started_at = self.now()
+                return self._manual_failure(
+                    "local_bridge_failed_spawn_stop_unverified"
+                )
+            try:
+                self._write_bridge_identity(state="stopped")
+            except Exception:
+                pass
+            return self._manual_failure("local_bridge_process_owner_assignment_failed")
+        try:
+            self._write_bridge_identity(
+                state="active",
+                pid=int(child.pid),
+                birth_identity=birth_identity,
+            )
+        except (OSError, TypeError, ValueError):
+            stopped, _ = self._terminate_spawned_child(child)
+            if not stopped:
+                try:
+                    self.process_owner.close()
+                    child.wait(timeout=2)
+                except Exception:
+                    pass
+                stopped = child.poll() is not None
+            if not stopped:
+                self.child = child
+                self.child_started_at = self.now()
+                self.child_birth_identity = birth_identity
+                return self._manual_failure(
+                    "local_bridge_failed_spawn_stop_unverified"
+                )
+            try:
+                self._write_bridge_identity(state="stopped")
+            except Exception:
+                pass
+            return self._manual_failure(
+                "local_bridge_process_identity_write_failed"
+            )
+        self.child = child
+        self.child_birth_identity = birth_identity
         self.child_started_at = self.now()
         self.child_exit_code = None
         self.manual_intervention_required = False
         self.last_error = ""
         return {"ok": True, "status": "started", "pid": self.child.pid}
 
+    @staticmethod
+    def _terminate_spawned_child(
+        child: Any,
+        *,
+        graceful_timeout_sec: float = 5.0,
+    ) -> tuple[bool, str]:
+        """Stop the exact Popen handle; never rediscover or signal by PID."""
+
+        if child.poll() is not None:
+            return True, "already_exited"
+        try:
+            child.terminate()
+            child.wait(timeout=max(0.1, graceful_timeout_sec))
+            return child.poll() is not None, "terminated"
+        except subprocess.TimeoutExpired:
+            try:
+                child.kill()
+                child.wait(timeout=2)
+            except Exception:
+                return False, "kill_failed"
+            return child.poll() is not None, "killed_after_timeout"
+        except Exception:
+            return False, "terminate_failed"
+
     def stop_bridge(self, *, graceful_timeout_sec: float = 5.0) -> dict[str, Any]:
         child = self.child
-        if child is None or child.poll() is not None:
+        if child is None:
+            payload, load_error = self._load_bridge_identity()
+            if payload is None and load_error.endswith("_invalid"):
+                return self._manual_failure(load_error)
+            if payload is not None and payload["state"] in {"active", "starting"}:
+                # No in-memory Popen handle means this supervisor does not own
+                # authority to declare the process stopped.  Reconcile the
+                # exact durable identity (or fail closed) before transition.
+                self._startup_reconciled = False
+                reconciled = self.reconcile_prior_bridge()
+                if not reconciled.get("ok"):
+                    return reconciled
+            elif payload is None and not self._startup_reconciled:
+                reconciled = self.reconcile_prior_bridge()
+                if not reconciled.get("ok"):
+                    return reconciled
             self.child = None
+            self.child_birth_identity = ""
             return {"ok": True, "status": "not_running"}
-        child.terminate()
+        if child.poll() is not None:
+            self.child_exit_code = child.returncode
+            self.child = None
+            self.child_birth_identity = ""
+            try:
+                self._write_bridge_identity(state="stopped")
+            except (OSError, TypeError, ValueError):
+                return self._manual_failure(
+                    "local_bridge_process_identity_write_failed"
+                )
+            return {
+                "ok": True,
+                "status": "already_exited",
+                "exitCode": self.child_exit_code,
+            }
+        stopped, status = self._terminate_spawned_child(
+            child,
+            graceful_timeout_sec=graceful_timeout_sec,
+        )
+        if not stopped:
+            return self._manual_failure("local_bridge_process_stop_unverified")
         try:
-            child.wait(timeout=max(0.1, graceful_timeout_sec))
-            status = "terminated"
-        except subprocess.TimeoutExpired:
-            child.kill()
-            child.wait(timeout=2)
-            status = "killed_after_timeout"
+            self._write_bridge_identity(state="stopped")
+        except (OSError, TypeError, ValueError):
+            return self._manual_failure(
+                "local_bridge_process_identity_write_failed"
+            )
         self.child_exit_code = child.returncode
         self.child = None
+        self.child_birth_identity = ""
         return {"ok": True, "status": status, "exitCode": self.child_exit_code}
 
     def restart_bridge(self) -> dict[str, Any]:
         stopped = self.stop_bridge()
+        if not stopped.get("ok"):
+            return {
+                "ok": False,
+                "stopped": stopped,
+                "started": {
+                    "ok": False,
+                    "status": "not_attempted",
+                    "error": "local_bridge_stop_required",
+                },
+            }
         started = self.start_bridge(automatic=False)
         return {"ok": bool(started.get("ok")), "stopped": stopped, "started": started}
 
@@ -332,6 +753,10 @@ class HostSupervisor:
 
     def status(self) -> dict[str, Any]:
         child_running = bool(self.child is not None and self.child.poll() is None)
+        owner_ready = bool(
+            self.process_owner is not None
+            and getattr(self.process_owner, "ready", False)
+        )
         return {
             "schema": SUPERVISOR_STATUS_SCHEMA,
             "heartbeatAt": self.now(),
@@ -351,6 +776,22 @@ class HostSupervisor:
                 "lastExitCode": self.child_exit_code,
                 "automaticRestartsInWindow": len(self.restart_history),
                 "automaticRestartLimit": AUTO_RESTART_LIMIT,
+                "ownershipMode": str(
+                    getattr(
+                        self.process_owner,
+                        "mode",
+                        "unavailable",
+                    )
+                ),
+                "ownershipReady": bool(
+                    owner_ready
+                    and self._startup_reconciled
+                    and (not child_running or bool(self.child_birth_identity))
+                ),
+                "birthIdentityRecorded": bool(
+                    child_running and self.child_birth_identity
+                ),
+                "processIdentityState": self.bridge_identity_state,
             },
             "lastAction": dict(self.last_action),
             "allowedActions": sorted(ALLOWED_HOST_ACTIONS),
@@ -387,6 +828,14 @@ class HostSupervisor:
             return
         self.child_exit_code = int(exit_code)
         self.child = None
+        self.child_birth_identity = ""
+        try:
+            self._write_bridge_identity(state="stopped")
+        except (OSError, TypeError, ValueError):
+            self.manual_intervention_required = True
+            self.last_error = "local_bridge_process_identity_write_failed"
+            self.runtime_errors.record(self.last_error)
+            return
         if self._stopping:
             return
         self.runtime_errors.record("local_bridge_unexpected_exit")
@@ -459,6 +908,17 @@ class HostSupervisor:
                     f"retention_reporter_stop_failed:{type(exc).__name__}"
                 )
             self.stop_bridge()
+            if self.process_owner is not None:
+                try:
+                    self.process_owner.close()
+                except Exception as exc:
+                    self.runtime_errors.record(
+                        "host_supervisor_process_owner_close_failed",
+                        exc,
+                    )
+                    self.last_error = (
+                        "host_supervisor_process_owner_close_failed"
+                    )
             self.write_status()
         return 0
 
@@ -485,4 +945,8 @@ if __name__ == "__main__":
     raise SystemExit(main())
 
 
-__all__ = ["HostSupervisor", "main"]
+__all__ = [
+    "BRIDGE_PROCESS_IDENTITY_SCHEMA",
+    "HostSupervisor",
+    "main",
+]

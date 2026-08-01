@@ -27,6 +27,19 @@ class ShutdownScriptContractTests(unittest.TestCase):
         self.assertIn("$env:DISCORD_BOT_TOKEN = 'local-only-disabled'", script)
         self.assertIn("Remove-Item Env:DISCORD_BOT_TOKEN", script)
 
+    def test_local_stop_requests_supervisor_owned_shutdown_before_fallback(self) -> None:
+        script = self.read_script("stop_evelyn_local.ps1")
+
+        request_index = script.index(
+            "Set-Content -LiteralPath $supervisorStopRequest"
+        )
+        wait_index = script.index("evelyn_core\\.host_supervisor", request_index)
+        compose_index = script.index("Invoke-EvelynDockerComposeStop", wait_index)
+        fallback_index = script.index("$collected = Collect-Targets", compose_index)
+        self.assertLess(request_index, wait_index)
+        self.assertLess(wait_index, compose_index)
+        self.assertLess(compose_index, fallback_index)
+
     def test_stack_stop_script_has_safe_contract(self) -> None:
         script = self.read_script("stop_evelyn_stack.ps1")
 
@@ -166,6 +179,12 @@ class ShutdownScriptContractTests(unittest.TestCase):
         )
         self.assertIn("$bridgeHeartbeat -gt $lastBridgeHeartbeat", readiness)
         self.assertIn("$consecutiveFreshHeartbeats -ge 2", readiness)
+        self.assertIn("$supervisor.localBridge.ownershipReady -eq $true", readiness)
+        self.assertIn(
+            "$supervisor.localBridge.birthIdentityRecorded -eq $true",
+            readiness,
+        )
+        self.assertIn("[int]$bridge.pid -eq [int]$supervisor.localBridge.pid", readiness)
         self.assertGreaterEqual(
             readiness.count("$consecutiveFreshHeartbeats = 0"),
             3,

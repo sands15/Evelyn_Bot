@@ -403,6 +403,41 @@ Discord message reference fallback도 delivery-at-most-once 경계를 따른다.
 중복 전송하지 않는다. 대신 고정 오류 코드와 예외 타입만 관측하고 periodic
 writer가 다시 저장을 시도한다.
 
+## Fast Control ingress delivery boundary
+
+Fast Control은 LLM, planner, 기억 쓰기와 action 준비보다 먼저 durable ingress
+claim을 만든다. 브라우저는 `requestId`, Local I/O Bridge는 canonical
+`[bridgeInstanceId, turnId]`를 source delivery key로 사용한다. 이 key는 action과
+명시적 기억 쓰기의 idempotency key로 유지하며, journal이 발급한 `turnId`는
+continuity history 결합에만 사용한다.
+
+- 미완료 ingress가 하나라도 있으면 같은 source delivery key의 상태 조회 외 새
+  claim을 거부한다. 이는 post-write commit 실패와 restart 복구 중 후속 턴이 먼저
+  저장되는 순서 역전을 막는다.
+- 완료 응답의 cached replay는 `control_page`에만 허용하고, 현재 삭제 journal과
+  memory exposure guard를 다시 통과해야 한다. `local_bridge`, `local_mic`,
+  `voice`의 완료 재전달은 중복 TTS/재생을 막기 위해 `409`로 억제한다.
+- non-stream 응답은 body write 직전에 `delivery_inflight`, 성공한 EOF 뒤에만
+  `delivery_succeeded`와 terminal commit을 기록한다. prepare/EOF 실패는
+  `delivery_ambiguous`이고 background action을 시작하지 않는다.
+- stream은 첫 외부 event 전에 stream 전용 inflight를 기록한다. 한 event라도
+  노출된 뒤 생성 오류가 나면 두 번째 고정 실패 payload나 continuity commit을
+  만들지 않고 ambiguous/non-replayable로 남긴다.
+- terminal 순서는 `begin_terminal_commit -> checkpoint commit -> complete`다.
+  재시작은 exact generation과 checkpoint의 turn/text/receipt 결합이 일치할 때만
+  중간 terminal 상태를 한 번 완료한다.
+- restart에서 복구된 미완료 입력은 최대 4개의 user-only prompt context로만
+  주입한다. 자동 실행·자동 전송·assistant 합성은 없고, 동일 prompt의 entry/text
+  중복과 공개 status의 raw text, source ID, entry ID, turn ID 노출을 금지한다.
+- 브라우저 pending request lease는 14분으로 server ingress 15분보다 1분 짧다.
+  Control Page proxy는 Bot API 오류 HTTP status를 보존하고, UI는 HTTP 성공뿐
+  아니라 `payload.ok === true`를 확인한 뒤에만 pending request ID를 지운다.
+
+현재 Local Voice admission manager에는 durable claim과 token consume을 한
+transaction으로 묶는 API가 없다. 따라서 `consume -> claim` 사이 process crash를
+완전히 없앴다고 주장하지 않으며, 이 원자화는 admission/ingress owner 간 별도
+typed transaction 계약이 생길 때 닫는다.
+
 ## Restore and lifecycle
 
 - 인스턴스 잠금을 획득한 프로세스만 체크포인트를 복구한다.

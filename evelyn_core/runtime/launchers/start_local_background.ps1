@@ -225,7 +225,16 @@ function Wait-HostSupervisorReady {
                     [string]$supervisor.state -eq 'running' -and
                     ($supervisor.localBridge.running -is [bool]) -and
                     $supervisor.localBridge.running -eq $true -and
+                    ($supervisor.localBridge.ownershipReady -is [bool]) -and
+                    $supervisor.localBridge.ownershipReady -eq $true -and
+                    ($supervisor.localBridge.birthIdentityRecorded -is [bool]) -and
+                    $supervisor.localBridge.birthIdentityRecorded -eq $true -and
                     $supervisorHeartbeat -ge $MinimumHeartbeat
+                )
+                $bridgePidMatches = (
+                    $null -ne $bridge.pid -and
+                    $null -ne $supervisor.localBridge.pid -and
+                    [int]$bridge.pid -eq [int]$supervisor.localBridge.pid
                 )
                 $micStateMatches = (
                     ($bridge.micEnabled -is [bool]) -and
@@ -246,6 +255,7 @@ function Wait-HostSupervisorReady {
                     [string]$bridge.schema -eq 'local_io_bridge.status.v1' -and
                     ($bridge.ready -is [bool]) -and
                     $bridge.ready -eq $true -and
+                    $bridgePidMatches -and
                     $captureReady -and
                     $bridgeHeartbeat -ge $MinimumHeartbeat
                 )

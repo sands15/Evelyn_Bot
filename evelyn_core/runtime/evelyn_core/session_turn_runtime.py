@@ -70,6 +70,7 @@ def begin_user_text_turn_from_runtime(
     *,
     guild_id: int | None = None,
     user_id: int | None = None,
+    turn_id: str | None = None,
     deps: SessionTurnRuntimeDeps,
 ) -> Any:
     return deps.session_state_store.begin_user_text_turn(
@@ -81,6 +82,7 @@ def begin_user_text_turn_from_runtime(
         guild_id=guild_id,
         user_id=user_id,
         previous_topic_id=deps.session_topic_ids.get(session_key, ""),
+        turn_id=turn_id,
     )
 
 

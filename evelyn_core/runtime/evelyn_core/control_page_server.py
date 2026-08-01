@@ -2555,7 +2555,7 @@ async def chat_handler(request: web.Request) -> web.StreamResponse:
             status=500,
         )
     proxied = await proxy_json(request, "POST", "/api/control-page/chat", body=payload)
-    if proxied is not None and proxied.status < 500:
+    if proxied is not None:
         return proxied
     state = await degraded_state(proxy_failure=last_proxy_failure(request))
     return json_response(
@@ -2564,7 +2564,8 @@ async def chat_handler(request: web.Request) -> web.StreamResponse:
             "error": "bot_api_unavailable",
             "reply": state.get("statusText") or "Control-Page is live, but Bot API is unavailable.",
             "state": state,
-        }
+        },
+        status=503,
     )
 
 

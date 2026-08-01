@@ -161,6 +161,34 @@ class ControlPageChatTests(unittest.TestCase):
         self.assertNotIn('{ command: "/voice continuity"', self.html)
         self.assertNotIn('{ command: "/voice input auto"', self.html)
 
+    def test_chat_retry_id_expires_before_server_ingress_lease(self) -> None:
+        self.assertIn(
+            'const PENDING_CHAT_STORAGE_KEY = "evelyn.control-page.pending-chat.v1";',
+            self.html,
+        )
+        self.assertIn(
+            "const PENDING_CHAT_MAX_AGE_MS = 14 * 60 * 1000;",
+            self.html,
+        )
+        self.assertIn(
+            "below the server's 15-minute ingress lease",
+            self.html,
+        )
+        self.assertIn("function pendingChatMessageFor(text)", self.html)
+        self.assertIn("existing && existing.text === text", self.html)
+        self.assertIn("Date.now() - createdAt > PENDING_CHAT_MAX_AGE_MS", self.html)
+
+    def test_chat_clears_retry_id_only_after_confirmed_success(self) -> None:
+        success_guard = 'if (!payload || payload.ok !== true) {'
+        clear_call = "clearPendingChatMessage(pendingChat.requestId);"
+        self.assertIn(success_guard, self.html)
+        self.assertIn('throw new Error("chat_delivery_unconfirmed")', self.html)
+        self.assertLess(
+            self.html.index(success_guard),
+            self.html.index(clear_call),
+        )
+        self.assertIn("if (!composer.value.trim()) composer.value = value;", self.html)
+
     def test_control_panel_commands_drive_memory_window(self) -> None:
         self.assertIn("let lastControlPanelCommandId = 0;", self.html)
         self.assertIn("function applyControlPanelCommands(state, options = {})", self.html)

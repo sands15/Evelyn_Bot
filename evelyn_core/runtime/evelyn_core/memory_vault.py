@@ -69,6 +69,8 @@ PROVENANCE_FORWARD_REJECTIONS_NAME = (
     "memory_provenance_forward_write_rejections.json"
 )
 RETRIEVAL_CACHE_TTL_SECONDS = 300
+MEMORY_RETRIEVAL_CACHE_SCHEMA = "memory.retrieval-cache.v1"
+MEMORY_RECALL_MAX_RENDERED_NOTES = 12
 MEMORY_DELETE_PREVIEW_TTL_SECONDS = 120
 MEMORY_PROVENANCE_BACKFILL_PREVIEW_TTL_SECONDS = 120
 DEFAULT_PROJECT = "evelyn"
@@ -84,7 +86,16 @@ SEMANTIC_CONSOLIDATION_MAX_NOTES = 6
 MEMORY_GRAPH_MAX_NODES = 160
 MEMORY_GRAPH_MAX_GROUP_EDGES = 180
 MEMORY_GRAPH_MAX_VECTOR_EDGES = 220
-MEMORY_INTERNAL_NOTE_TYPES = {"procedure", "internal", "system", "debug", "runtime", "tool"}
+MEMORY_PROCEDURE_NOTE_TYPES = frozenset(
+    {"procedure", "procedural", "procedures"}
+)
+MEMORY_INTERNAL_NOTE_TYPES = set(MEMORY_PROCEDURE_NOTE_TYPES) | {
+    "internal",
+    "system",
+    "debug",
+    "runtime",
+    "tool",
+}
 MEMORY_GRAPH_INTERNAL_NOTE_TYPES = frozenset(MEMORY_INTERNAL_NOTE_TYPES)
 MEMORY_PROVENANCE_SCHEMA = "memory.provenance.v1"
 MEMORY_DELETE_PREVIEW_SCHEMA = "memory.deletion.preview.v1"
@@ -1585,6 +1596,13 @@ def _is_internal_memory_note_type(note_type: str) -> bool:
     return clean_text(note_type).lower() in MEMORY_INTERNAL_NOTE_TYPES
 
 
+def _is_procedure_memory_note(row: sqlite3.Row) -> bool:
+    return (
+        clean_text(str(row["note_type"])).lower()
+        in MEMORY_PROCEDURE_NOTE_TYPES
+    )
+
+
 def _note_score(row: sqlite3.Row, query_tokens: set[str], focus_tokens: set[str], active_project: str) -> int:
     title = clean_text(str(row["title"]))
     body = clean_text(str(row["body"]))
@@ -1596,7 +1614,10 @@ def _note_score(row: sqlite3.Row, query_tokens: set[str], focus_tokens: set[str]
     score += len(focus_tokens & tokens) * 4
     if active_project and active_project in {item.lower() for item in projects}:
         score += 6
-    if row["note_type"] in {"core", "procedure", "project"}:
+    if (
+        clean_text(str(row["note_type"])).lower()
+        in {"core", "project"} | MEMORY_PROCEDURE_NOTE_TYPES
+    ):
         score += 2
     try:
         score += int(float(row["importance"]) * 4)
@@ -1744,13 +1765,16 @@ def _truncate_note(row: sqlite3.Row, max_chars: int = 420) -> str:
 def _cache_key(request: MemoryRecallRequest, memory_version: int) -> str:
     metadata = request.metadata if isinstance(request.metadata, dict) else {}
     payload = {
+        "retrieval_cache_schema": MEMORY_RETRIEVAL_CACHE_SCHEMA,
         "version": memory_version,
         "guild_id": request.guild_id,
         "session_key": request.session_key,
         "user_text": clean_text(request.user_text).lower(),
         "topic_id": request.topic_id,
         "source": request.source,
-        "max_items": request.max_items,
+        "max_items": _normalized_memory_recall_max_items(
+            request.max_items
+        ),
         "active_project": clean_text(str(metadata.get("active_project") or DEFAULT_PROJECT)).lower(),
         "context_focus": metadata.get("context_focus") if isinstance(metadata.get("context_focus"), list) else [],
         "allow_internal_memory": _allows_internal_memory_recall(
@@ -1759,6 +1783,72 @@ def _cache_key(request: MemoryRecallRequest, memory_version: int) -> str:
         ),
     }
     return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def _normalized_memory_recall_max_items(value: object) -> int:
+    if isinstance(value, bool):
+        return 1
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return 1
+    return min(MEMORY_RECALL_MAX_RENDERED_NOTES, max(1, parsed))
+
+
+def _retrieval_cache_payload_is_current(payload: dict[str, Any]) -> bool:
+    expected_keys = {
+        "schema",
+        "context_text",
+        "facts",
+        "sources",
+        "retrieval_mode",
+        "provenance",
+        "rendered_note_ids",
+    }
+    if (
+        set(payload) != expected_keys
+        or payload.get("schema") != MEMORY_RETRIEVAL_CACHE_SCHEMA
+        or not isinstance(payload.get("context_text"), str)
+        or not isinstance(payload.get("retrieval_mode"), str)
+    ):
+        return False
+
+    facts = payload.get("facts")
+    sources = payload.get("sources")
+    provenance = payload.get("provenance")
+    rendered_note_ids = payload.get("rendered_note_ids")
+    if (
+        not isinstance(facts, list)
+        or not isinstance(sources, list)
+        or not isinstance(provenance, list)
+        or not isinstance(rendered_note_ids, list)
+        or not all(isinstance(item, str) for item in facts)
+        or not all(isinstance(item, str) for item in sources)
+        or not all(isinstance(item, dict) for item in provenance)
+        or not all(
+            memory_deletion_note_id_is_canonical(item)
+            for item in rendered_note_ids
+        )
+        or len(rendered_note_ids) > MEMORY_RECALL_MAX_RENDERED_NOTES
+        or len(set(rendered_note_ids)) != len(rendered_note_ids)
+        or bool(payload["context_text"].strip())
+        != bool(rendered_note_ids)
+        or not (
+            len(facts)
+            == len(sources)
+            == len(provenance)
+            == len(rendered_note_ids)
+        )
+    ):
+        return False
+    try:
+        provenance_note_ids = [
+            memory_deletion_ledger_note_id(item.get("noteId"))
+            for item in provenance
+        ]
+    except MemoryDeletionJournalIntegrityError:
+        return False
+    return provenance_note_ids == rendered_note_ids
 
 
 def _read_retrieval_cache(conn: sqlite3.Connection, key: str, memory_version: int) -> dict[str, Any] | None:
@@ -1773,7 +1863,11 @@ def _read_retrieval_cache(conn: sqlite3.Connection, key: str, memory_version: in
         payload = json.loads(str(row["payload"]))
     except Exception:
         return None
-    return payload if isinstance(payload, dict) else None
+    if not isinstance(payload, dict) or not _retrieval_cache_payload_is_current(
+        payload
+    ):
+        return None
+    return payload
 
 
 def _write_retrieval_cache(conn: sqlite3.Connection, key: str, memory_version: int, payload: dict[str, Any]) -> None:
@@ -3168,7 +3262,9 @@ def recall_memory_vault(
             _ensure_schema(conn)
             cached = _read_retrieval_cache(conn, cache_key, version)
             if cached is not None:
-                context_text = clean_text(str(cached.get("context_text") or ""))
+                context_text = str(
+                    cached.get("context_text") or ""
+                ).strip()
                 return MemoryRecallResult(
                     turn_id=request.turn_id,
                     ok=True,
@@ -3183,21 +3279,27 @@ def recall_memory_vault(
                             cached.get("retrieval_mode") or "cache"
                         ),
                         "provenance": list(cached.get("provenance") or []),
+                        "rendered_note_ids": list(
+                            cached.get("rendered_note_ids") or []
+                        ),
                     },
                 )
 
+            requested_max_items = _normalized_memory_recall_max_items(
+                request.max_items
+            )
             rows, retrieval_mode = _fetch_candidate_rows(
                 conn,
                 query_tokens=query_tokens,
                 focus_tokens=focus_tokens,
-                limit=max(80, request.max_items * 20),
+                limit=max(80, requested_max_items * 20),
             )
             if not allow_internal_memory:
                 rows = [row for row in rows if not _is_internal_memory_note(row)]
             vector_scores = _fetch_vector_scores(
                 conn,
                 " ".join([request.user_text, " ".join(clean_text(str(item)) for item in focus_items)]),
-                limit=max(20, request.max_items * 8),
+                limit=max(20, requested_max_items * 8),
             )
             if vector_scores:
                 existing_note_ids = {clean_text(str(row["note_id"])) for row in rows}
@@ -3217,30 +3319,87 @@ def recall_memory_vault(
                 if score > 0:
                     scored.append((score, -recency, row))
             if not scored and rows:
-                scored = [(1, -index, row) for index, row in enumerate(rows[: request.max_items])]
+                scored = [
+                    (1, -index, row)
+                    for index, row in enumerate(
+                        rows[:requested_max_items]
+                    )
+                ]
             scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
-            selected = [row for _, _, row in scored[: max(1, request.max_items)]]
+            selected = [
+                row for _, _, row in scored[:requested_max_items]
+            ]
             graph_neighbors = _expand_graph_neighbors(
                 conn,
                 selected,
-                max_extra=max(0, request.max_items - len(selected)),
+                max_extra=max(0, requested_max_items - len(selected)),
             )
             if not allow_internal_memory:
                 graph_neighbors = [row for row in graph_neighbors if not _is_internal_memory_note(row)]
             if graph_neighbors:
                 selected.extend(graph_neighbors)
-            snippets = [_truncate_note(row) for row in selected]
-            sources = [clean_text(str(row["rel_path"])) for row in selected]
-            provenance = [_memory_row_provenance(row) for row in selected]
             procedure_rows = [
                 row for _, _, row in scored
-                if allow_internal_memory and clean_text(str(row["note_type"])) == "procedure"
+                if allow_internal_memory
+                and _is_procedure_memory_note(row)
             ][:2]
-            procedure_snippets = [_truncate_note(row, max_chars=300) for row in procedure_rows]
+
+            rendered_rows: list[sqlite3.Row] = []
+            seen_rendered_note_ids: set[str] = set()
+            for row in [*selected, *procedure_rows]:
+                note_id = clean_text(str(row["note_id"]))
+                if not note_id or note_id in seen_rendered_note_ids:
+                    continue
+                seen_rendered_note_ids.add(note_id)
+                rendered_rows.append(row)
+                if (
+                    len(rendered_rows)
+                    >= MEMORY_RECALL_MAX_RENDERED_NOTES
+                ):
+                    break
+
+            rendered_snippets = [
+                (
+                    row,
+                    _truncate_note(
+                        row,
+                        max_chars=(
+                            300
+                            if _is_procedure_memory_note(row)
+                            else 420
+                        ),
+                    ),
+                )
+                for row in rendered_rows
+            ]
+            note_snippets = [
+                snippet
+                for row, snippet in rendered_snippets
+                if not _is_procedure_memory_note(row)
+            ]
+            procedure_snippets = [
+                snippet
+                for row, snippet in rendered_snippets
+                if _is_procedure_memory_note(row)
+            ]
+            snippets = [snippet for _, snippet in rendered_snippets]
+            sources = [
+                clean_text(str(row["rel_path"]))
+                for row in rendered_rows
+            ]
+            provenance = [
+                _memory_row_provenance(row) for row in rendered_rows
+            ]
+            rendered_note_ids = [
+                memory_deletion_ledger_note_id(row["note_id"])
+                for row in rendered_rows
+            ]
 
             context_parts: list[str] = []
-            if snippets:
-                context_parts.append("[Memory Vault Notes]\n" + "\n".join(snippets))
+            if note_snippets:
+                context_parts.append(
+                    "[Memory Vault Notes]\n" + "\n".join(note_snippets)
+                )
             if procedure_snippets:
                 context_parts.append("[Procedural Memory]\n" + "\n".join(procedure_snippets))
             if provenance:
@@ -3253,11 +3412,13 @@ def recall_memory_vault(
                 )
             context_text = "\n\n".join(context_parts)
             payload = {
+                "schema": MEMORY_RETRIEVAL_CACHE_SCHEMA,
                 "context_text": context_text,
                 "facts": snippets,
                 "sources": sources,
                 "retrieval_mode": retrieval_mode,
                 "provenance": provenance,
+                "rendered_note_ids": rendered_note_ids,
             }
             _write_retrieval_cache(conn, cache_key, version, payload)
 
@@ -3273,6 +3434,7 @@ def recall_memory_vault(
                 "memory_version": version,
                 "retrieval_mode": retrieval_mode,
                 "provenance": provenance,
+                "rendered_note_ids": rendered_note_ids,
             },
         )
     except MemoryDeletionJournalIntegrityError:
@@ -3297,29 +3459,75 @@ def build_memory_recall_receipt(result: MemoryRecallResult) -> dict[str, Any]:
     metadata = result.metadata if isinstance(result.metadata, dict) else {}
     try:
         version = int(metadata.get("memory_version", 0) or 0)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         version = 0
-    provenance = list(metadata.get("provenance") or []) if result.ok else []
-    note_ids = sorted(
-        {
-            memory_deletion_ledger_note_id(
-                clean_text(str(item.get("noteId") or ""))
-            )
-            for item in provenance
-            if isinstance(item, dict)
-            and clean_text(str(item.get("noteId") or ""))
-        }
+    has_rendered_context = bool(str(result.context_text).strip())
+    raw_provenance = metadata.get("provenance")
+    provenance_input_is_valid = isinstance(
+        raw_provenance,
+        (list, tuple),
     )
-    source_type_counts: dict[str, int] = {}
-    for item in provenance:
-        if not isinstance(item, dict):
-            continue
-        source_type = normalize_memory_deletion_source_type(
-            clean_text(str(item.get("sourceType") or "unknown"))
-            or "unknown"
+    provenance = (
+        list(raw_provenance)
+        if result.ok
+        and has_rendered_context
+        and provenance_input_is_valid
+        else []
+    )
+    provenance_is_well_formed = (
+        provenance_input_is_valid
+        and all(
+            isinstance(item, dict)
+            and bool(clean_text(str(item.get("noteId") or "")))
+            for item in provenance
         )
-        source_type_counts[source_type] = source_type_counts.get(source_type, 0) + 1
-    state = "provided" if result.ok and result.context_text else ("empty" if result.ok else "unavailable")
+    )
+    try:
+        note_ids_in_render_order = (
+            [
+                memory_deletion_ledger_note_id(
+                    clean_text(str(item["noteId"]))
+                )
+                for item in provenance
+            ]
+            if provenance_is_well_formed
+            else []
+        )
+    except MemoryDeletionJournalIntegrityError:
+        provenance_is_well_formed = False
+        note_ids_in_render_order = []
+    declared_rendered_note_ids = metadata.get("rendered_note_ids")
+    if (
+        not provenance_is_well_formed
+        or len(set(note_ids_in_render_order))
+        != len(note_ids_in_render_order)
+        or not isinstance(declared_rendered_note_ids, list)
+        or declared_rendered_note_ids != note_ids_in_render_order
+    ):
+        provenance = []
+        note_ids_in_render_order = []
+    note_ids = sorted(note_ids_in_render_order)
+    source_type_counts: dict[str, int] = {}
+    try:
+        for item in provenance:
+            source_type = normalize_memory_deletion_source_type(
+                clean_text(str(item.get("sourceType") or "unknown"))
+                or "unknown"
+            )
+            source_type_counts[source_type] = (
+                source_type_counts.get(source_type, 0) + 1
+            )
+    except MemoryDeletionJournalIntegrityError:
+        provenance = []
+        note_ids = []
+        source_type_counts = {}
+    state = (
+        "provided"
+        if result.ok and has_rendered_context
+        else "empty"
+        if result.ok
+        else "unavailable"
+    )
     return {
         "schema": "memory.recall-receipt.v1",
         "state": state,
@@ -3481,6 +3689,7 @@ def write_memory_vault_note(
         "semantic": "concepts",
         "procedure": "procedures",
         "procedural": "procedures",
+        "procedures": "procedures",
         "project": "projects",
     }
     folder = folder_by_type.get(normalized_type, "concepts")
@@ -3622,7 +3831,7 @@ def _memory_vault_note_category(note: MemoryVaultNote) -> str:
         return "대화 기록"
     if note_type in {"project", "projects"}:
         return "프로젝트"
-    if note_type in {"procedure", "procedural"}:
+    if note_type in MEMORY_PROCEDURE_NOTE_TYPES:
         return "운영 방법"
     if note_type in {"episode", "episodes"}:
         return "대화 요약"
@@ -7557,6 +7766,7 @@ def _memory_vault_note_path(*, note_type: str, title: str, root: Path | None = N
         "semantic": "concepts",
         "procedure": "procedures",
         "procedural": "procedures",
+        "procedures": "procedures",
         "project": "projects",
     }
     folder = folder_by_type.get(normalized_type, "concepts")

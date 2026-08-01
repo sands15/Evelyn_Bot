@@ -92,9 +92,6 @@ def acquire_instance_lock_from_runtime(
 
     deps.lock_path.parent.mkdir(parents=True, exist_ok=True)
     handle = deps.open_file(deps.lock_path, "a+", encoding="utf-8")
-    handle.seek(0)
-    handle.write("0")
-    handle.flush()
     deadline = deps.monotonic() + max(0.0, wait_sec)
 
     while True:

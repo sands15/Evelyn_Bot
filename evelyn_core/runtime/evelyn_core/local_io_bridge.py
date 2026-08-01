@@ -61,6 +61,10 @@ from .config import (
 from .fast_action_runtime import detect_minecraft_runtime_command
 from .host_vision_bridge import HostVisionBridge
 from .host_ui_action_bridge import HostUiActionBridge
+from .instance_lock_runtime import (
+    InstanceLockManager,
+    build_instance_lock_runtime_deps,
+)
 from .local_mic import LocalMicCaptureService
 from .local_tts_playback import normalize_output_device
 from .memory_deletion_journal import (
@@ -146,6 +150,9 @@ LOCAL_BRIDGE_MINECRAFT_START_TIMEOUT_SEC = max(
     float(os.getenv("LOCAL_BRIDGE_MINECRAFT_START_TIMEOUT_SEC", "300")),
 )
 LOCAL_BRIDGE_STATUS_PATH = get_runtime_artifacts_root() / "local_bridge" / "status.json"
+LOCAL_BRIDGE_INSTANCE_LOCK_PATH = (
+    get_runtime_artifacts_root() / "local_bridge" / "instance.lock"
+)
 LOCAL_VOICE_ADMISSION_REFRESH_AFTER_SEC = 5.0
 
 
@@ -2379,6 +2386,7 @@ class LocalIoBridge:
         payload: dict[str, Any] = {
             "schema": "local_io_bridge.status.v1",
             "heartbeatAt": time.time(),
+            "pid": os.getpid(),
             "bridgeInstanceId": self.bridge_instance_id,
             "enabled": True,
             "ready": self.ready,
@@ -2688,10 +2696,32 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def main() -> None:
+def main() -> int:
     parse_args()
-    asyncio.run(LocalIoBridge().run())
+    lock_deps = build_instance_lock_runtime_deps(
+        LOCAL_BRIDGE_INSTANCE_LOCK_PATH
+    )
+    if lock_deps.msvcrt_module is None and lock_deps.fcntl_module is None:
+        print(
+            "[LOCAL BRIDGE] local_bridge_instance_lock_backend_unavailable",
+            flush=True,
+        )
+        return 73
+    instance_lock = InstanceLockManager(lock_deps)
+    try:
+        instance_lock.acquire(wait_sec=0.0)
+    except RuntimeError:
+        print(
+            "[LOCAL BRIDGE] local_bridge_instance_lock_held",
+            flush=True,
+        )
+        return 73
+    try:
+        asyncio.run(LocalIoBridge().run())
+    finally:
+        instance_lock.release()
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

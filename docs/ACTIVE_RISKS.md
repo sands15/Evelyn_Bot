@@ -457,6 +457,29 @@ Windows Host Supervisor는 이제 별도 `.venv-host`와 최소 lock으로 재�
 fresh heartbeat를 확인한 뒤에만 준비 완료를 보고한다. TTS 음성 프로필의 WAV,
 JSON, `ref_text`도 Docker 시작 전에 검사한다.
 
+2026-08-02 source 경계에서는 Local I/O Bridge가 캡처를 시작하기 전에
+process-lifetime OS file lock을 fail-closed로 획득한다. Windows Supervisor는
+`KILL_ON_JOB_CLOSE` Job Object에 생성한 exact Popen handle을 넣고, 동시에
+content-free PID+OS birth identity를 durable write한다. Supervisor crash 뒤에는
+같은 PID와 birth identity가 모두 일치하는 이전 자식만 종료하고 부재를 다시
+확인한다. PID가 재사용됐으면 신호를 보내지 않으며, identity 손상·starting
+ambiguity·잠금 충돌·Job assignment 실패는 새 브리지를 시작하지 않고
+`manual_intervention_required`로 닫힌다. launcher도 Supervisor/Bridge PID 일치,
+Job ownership과 birth identity 기록을 확인한다. 실제 Windows Job close로 할당된
+테스트 자식이 종료되는 통합 테스트는 통과했지만, 이 source를 현재 실행 중인
+Supervisor에 배포하거나 실제 마이크를 켜지는 않았다.
+
+2026-08-02 ingress owner는 Fast Control과 Discord text의 LLM/tool/전달 전 claim,
+부분 전달 ambiguity, 중복 억제와 restart reconcile을 닫았다. 다만 Local Voice
+admission manager에는 token consume과 durable ingress claim을 한 transaction으로
+묶는 typed API가 아직 없다. 따라서 `consume -> claim` 사이 process crash는
+발화를 소비한 뒤 journal에 남기지 못할 수 있으며, 이 원자화 전까지 local voice
+crash-loss P0는 미폐쇄다. 실제 Discord reconnect/timeout/redelivery와 local 음성
+E2E도 현재 source로 실행하지 않았다. 전체 Windows discover에 남은 두 오류는
+별도 Mindcraft world-action 테스트가 살아 있는 OS lock handle을 temp cleanup 전에
+닫지 못하는 문제이며 이번 ingress 경로의 기능 실패는 아니지만 전체 green 기준에는
+여전히 포함된다.
+
 그러나 CI의 실제 프로세스 smoke는 `main.py`가 기동 가능한지만 확인한다. 마이크
 입력부터 STT, 대화, TTS, 로컬 재생까지 계획된 surface별 10턴과 무음 구간을
 보장하지 않는다.

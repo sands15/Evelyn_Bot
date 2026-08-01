@@ -56,6 +56,17 @@ class FastControlDeliveryMemoryBoundaryTests(
     async def asyncSetUp(self) -> None:
         self._temporary = tempfile.TemporaryDirectory()
         self.root = Path(self._temporary.name)
+        unsafe_test_owner = fast_api.FastControlContinuityOwner(
+            artifacts_root=self.root,
+            enabled=False,
+        )
+        unsafe_test_owner._test_only_allow_unsafe_ingress = True
+        self._owner_patcher = patch.object(
+            fast_api,
+            "FAST_CONTROL_CONTINUITY_OWNER",
+            unsafe_test_owner,
+        )
+        self._owner_patcher.start()
         self.bot_memory = self.root / "bot_memory"
         self.runtime_artifacts = self.root / "runtime_artifacts"
         self.bot_memory.mkdir()
@@ -95,6 +106,7 @@ class FastControlDeliveryMemoryBoundaryTests(
         fast_api.FAST_MEMORY_EXPOSURE_POSITION.set(None)
         self._memory_root.stop()
         self._environment.stop()
+        self._owner_patcher.stop()
         self._temporary.cleanup()
 
     @staticmethod

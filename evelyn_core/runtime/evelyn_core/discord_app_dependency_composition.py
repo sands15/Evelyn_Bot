@@ -22,8 +22,10 @@ class DiscordAppDependencyCompositionDeps:
     log_turn_event: Callable[..., Any]
     current_turn_id: Callable[..., Any]
     resolve_pending_proactive_question_for_turn: Callable[..., Any]
+    conversation_ingress: Any
     session_locks: MutableMapping[str, Any]
     reply_slot_locks: MutableMapping[str, Any]
+    reply_slot_admission_locks: MutableMapping[str, Any]
     begin_user_text_turn: Callable[..., Any]
     replace_room_turn_scope: Callable[..., Any]
     attach_current_task: Callable[..., Any]
@@ -81,8 +83,33 @@ class DiscordAppDependencyComposition:
             resolve_pending_proactive_question_for_turn=(
                 deps.resolve_pending_proactive_question_for_turn
             ),
+            claim_conversation_ingress=(
+                deps.conversation_ingress.claim_discord_text
+            ),
+            conversation_ingress_recovery_context=(
+                deps.conversation_ingress.recovery_context_for_scope
+            ),
+            mark_ingress_response_ready=(
+                deps.conversation_ingress.mark_response_ready
+            ),
+            mark_ingress_delivery_inflight=(
+                deps.conversation_ingress.mark_delivery_inflight
+            ),
+            mark_ingress_delivery_succeeded=(
+                deps.conversation_ingress.mark_delivery_succeeded
+            ),
+            mark_ingress_delivery_ambiguous=(
+                deps.conversation_ingress.mark_delivery_ambiguous
+            ),
+            begin_ingress_terminal_commit=(
+                deps.conversation_ingress.begin_terminal_commit
+            ),
+            complete_ingress=deps.conversation_ingress.complete,
             session_locks=deps.session_locks,
             reply_slot_locks=deps.reply_slot_locks,
+            reply_slot_admission_locks=(
+                deps.reply_slot_admission_locks
+            ),
             begin_user_text_turn=deps.begin_user_text_turn,
             replace_room_turn_scope=deps.replace_room_turn_scope,
             attach_current_task=deps.attach_current_task,

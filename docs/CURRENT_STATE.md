@@ -1690,6 +1690,33 @@ Source branch: `codex/dependency-config-hardening`, current conversation memory 
   config와 Python/PowerShell 구문 검사도 통과했다. 실행 중인 오래된 Bot API와
   Control Page는 교체하지 않았고 실제 마이크, 스피커, Discord, Minecraft와
   사용자 runtime artifact를 시작하거나 변경하지 않았다.
+- 2026-08-02의 Local Bridge process-lifetime 경계는 OS single-instance lock,
+  Windows `KILL_ON_JOB_CLOSE` Job Object와 durable PID+birth identity startup
+  reconcile을 함께 사용한다. Supervisor가 죽으면 Job close가 할당된 자식을
+  정리하고, 재시작 시에는 exact birth identity가 같은 고아만 종료·사후 검증한다.
+  PID reuse는 신호를 보내지 않으며 ambiguous identity/lock, Job assignment와
+  durable write 실패는 새 브리지를 만들지 않는다. launcher readiness도 현재
+  Supervisor child PID와 Bridge heartbeat PID의 일치, ownership ready와 birth
+  기록을 요구한다. focused 139개와 실제 Windows Job close child test를 통과했지만
+  현재 실행 서비스 교체와 실제 음성 E2E는 수행하지 않았다.
+- 2026-08-02 current source에는 LLM·tool·외부 전달 전에 stable source delivery를
+  기록하는 `conversation.ingress-recovery.v1` journal/head owner가 추가됐다.
+  Fast Control은 browser `requestId`와 Local Bridge의 canonical
+  `[bridgeInstanceId, turnId]`, Discord text는 message ID를 사용하고 journal
+  `turnId`를 continuity의 권위 있는 turn ID로 재사용한다. pending/in-flight/
+  ambiguous delivery는 재시작 뒤 자동 실행·재전송하지 않으며, 실제 HTTP EOF와
+  Discord 전송 성공 뒤에만 `delivery_succeeded -> terminal_committing -> completed`
+  순서로 진행한다. Fast partial stream 실패는 ambiguous로 남고, Discord는
+  session/reply-slot 선점으로 동시 claim을 직렬화하며 기존 turn P 뒤 전달된 turn
+  Q도 exact sent text/receipt를 보존해 재시작 reconcile한다. 공개 status에는 raw
+  text와 source/entry/turn ID를 내보내지 않는다.
+- current ingress 검증은 core journal 20개, Discord owner 묶음 129개, Fast
+  continuity/stream/proxy/UI 묶음 89개와 기존 Fast API 63개, bootstrap generation에
+  맞춘 Fast Action 28개를 통과했다. memory 263개와 Supervisor/single-instance 58개,
+  `compileall`과 `git diff --check`도 통과했다. `.venv-host` 전체 discover는 2,829개
+  중 20개 skip과 별도 Minecraft world-action lock 정리 오류 2개만 남겼다. 현재
+  실행 서비스 교체, 실제 Discord redelivery/network timeout, 마이크·스피커 live
+  E2E는 수행하지 않았다.
 - 자율행동 P0에는 별도 content-free dry observer를 추가했다.
   - `autonomy-p0.v1`은 Control Page에서 session 상태와 고정 blocker를 보여주되,
     Discord 명령, grant/lease, runtime repair, 서비스, Minecraft goal/effect 또는

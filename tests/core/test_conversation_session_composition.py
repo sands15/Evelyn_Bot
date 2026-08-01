@@ -69,7 +69,11 @@ class ConversationSessionCompositionTests(unittest.TestCase):
             "evelyn_core.conversation_session_composition.mark_session_active_from_runtime",
         ) as mark_active:
             result = composition.begin_user_text_turn(
-                "session-1", "hello", guild_id=10, user_id=20
+                "session-1",
+                "hello",
+                guild_id=10,
+                user_id=20,
+                turn_id="claimed-turn",
             )
             composition.mark_session_active(
                 "session-1", ttl_sec=30.0, awaiting_user_reply=True
@@ -81,6 +85,7 @@ class ConversationSessionCompositionTests(unittest.TestCase):
             "hello",
             guild_id=10,
             user_id=20,
+            turn_id="claimed-turn",
             deps=session_deps,
         )
         mark_active.assert_called_once_with(
@@ -268,18 +273,22 @@ class ConversationSessionCompositionTests(unittest.TestCase):
             )
 
         mismatches = []
-        receipt_extended = {
-            "finish_assistant_text_turn",
-            "append_history",
+        additive_keyword_defaults = {
+            "begin_user_text_turn": ("turn_id", "None"),
+            "finish_assistant_text_turn": (
+                "memory_receipt",
+                "None",
+            ),
+            "append_history": ("memory_receipt", "None"),
         }
         for old_name, new_name in mapping.items():
             old_signature = signature(old_functions[old_name])
             new_signature = signature(new_methods[new_name], method=True)
             comparable_signature = new_signature
-            if old_name in receipt_extended:
+            if old_name in additive_keyword_defaults:
                 self.assertEqual(
                     new_signature[4][-1],
-                    ("memory_receipt", "None"),
+                    additive_keyword_defaults[old_name],
                 )
                 comparable_signature = (
                     *new_signature[:4],

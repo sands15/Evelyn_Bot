@@ -404,6 +404,27 @@ class SessionContinuityTests(unittest.TestCase):
         self.assertTrue(commit_metrics["lastTargetVerified"])
         self.assertEqual(commit_metrics["state"], "warming")
 
+    def test_before_commit_binds_generation_before_checkpoint_write(
+        self,
+    ) -> None:
+        clock = FakeClock(wall=1000.0, monotonic=100.0)
+        store = self.populated_store()
+        manager = self.manager(store, clock)
+        observed: list[tuple[int, bool]] = []
+
+        status = manager.commit_completed_turn(
+            "guild:1:text:2:user:3",
+            before_commit=lambda generation: observed.append(
+                (generation, self.checkpoint_path.exists())
+            ),
+        )
+
+        self.assertEqual(
+            observed,
+            [(status["checkpointGeneration"], False)],
+        )
+        require_durable_continuity_receipt(status)
+
     def test_completed_turn_commit_prioritizes_exact_target_at_session_limit(
         self,
     ) -> None:

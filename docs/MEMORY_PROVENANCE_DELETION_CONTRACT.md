@@ -1,7 +1,7 @@
 # Memory Provenance And Deletion Contract
 
 Document status: **Current**
-Last reviewed: 2026-08-01 KST
+Last reviewed: 2026-08-02 KST
 
 이 문서는 Evelyn Memory Vault가 기억의 근거를 공개하고 사용자 삭제를
 영구적으로 지키는 현재 런타임 계약을 정의한다.
@@ -19,6 +19,36 @@ Control Page의 memory card와 recall metadata는
 recall prompt에는 원문 전체 대신 선택된 기억의 note ID, source, evidence
 요약과 confidence를 넣는다. 파생 기억은 원본 note ID와 evidence hash를
 유지해야 한다.
+
+### Exact rendered-set recall attribution
+
+turn-time recall은 기본 선택 note, graph 확장 note와 task-like procedural
+추가 note를 note ID 기준으로 합친 단일 `rendered_rows` 집합을 만든다. 일반
+memory와 procedural memory section은 표시 위치만 다르며, 같은 note를 두 section에
+중복 렌더링하지 않는다. 실제 prompt에 렌더링한 모든 note와 오직 그 note만 다음
+항목에 동일하게 들어가야 한다.
+
+`procedure`, `procedural`, `procedures` type은 모두 같은 internal procedural
+분류로 정규화해 일반 recall에서는 숨기고 명시적 관리 recall에서만 procedural
+section에 넣는다. `max_items`는 selection과 cache key를 만들기 전에 1~12로
+정규화하며 procedural 추가 note도 전체 12-note receipt 한도를 넘지 않는다.
+
+- `MemoryRecallResult.facts`, `sources`
+- `metadata.provenance`, canonical `metadata.rendered_note_ids`
+- `memory.recall-receipt.v1.noteIds`와 최종
+  `memory.context-receipt.v1.suppliedNoteIds`
+- retrieval cache의 facts, sources, provenance와 rendered note IDs
+
+이 집합이나 순서가 cache payload 내부에서 불일치하면 cache miss로 처리하고 현재
+vault에서 다시 계산한다. retrieval cache schema는 cache key와 payload 양쪽에
+결속한다. schema가 없는 과거 cache 또는 다른 알고리즘 버전의 cache는 TTL이
+남았더라도 재사용하지 않으며 cache hit도 section 줄바꿈을 그대로 보존한다.
+빈 context는 note ID를 공급한 것으로 기록하지 않는다. malformed provenance,
+중복 note ID, 누락된 `rendered_note_ids` 또는 선언 집합 불일치는 본문이 있더라도
+`groundingState=unattributed`와 빈 note ID 집합으로 fail-closed한다. 따라서
+procedural 추가 note도 삭제 exposure와
+assistant conversation receipt에 항상 결속되고, 해당 note 삭제 뒤 이전 version의
+assistant history는 재사용 전에 제거된다.
 
 ## Legacy provenance backfill audit
 
@@ -776,6 +806,11 @@ prompt block과 user state가 의도적으로 남아 있다.
 - fresh-process torn/missing/lag 상태와 same-ID resurrection 차단
 - cached recall, 전체 vault context, semantic Sub-LLM, derivation recomposition
   경계의 concurrent delete 선형화
+- `max_items=1`에서 selected concept 밖 procedural note가 추가되어도 렌더링,
+  provenance, cache와 receipt note 집합이 정확히 같고 selected procedure는 한 번만
+  렌더링되는 계약
+- schema 없는 legacy retrieval cache의 재사용 거부와 procedural note 삭제 뒤
+  이전 receipt-bound assistant history 제거
 - 전체 legacy+vault context position capture, content-free receipt projection,
   build와 Main/Voice/Fast HTTP admission 사이 삭제 시 POST 0회 fail-closed
 - unlink 실패 시 source Markdown의 title/body가 content-free stub으로 먼저

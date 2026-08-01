@@ -272,9 +272,11 @@ class SessionMemoryStateTests(unittest.TestCase):
             guild_id=1,
             user_id=7,
             previous_topic_id="old-topic",
+            turn_id="claimed-turn-1",
             now_monotonic=5.0,
         )
 
+        self.assertEqual(started.turn_id, "claimed-turn-1")
         self.assertEqual(started.turn_id, store.current_turn_id("s1"))
         self.assertEqual(started.topic_id, build_topic_id("hello", "old-topic"))
         self.assertEqual(started.history, [{"role": "system", "content": "system"}])

@@ -68,6 +68,12 @@ implemented behavior.
     correlation과 자동 재시도 금지, Discord ambiguous-send 무재전송, privacy,
     deletion, observability 계약.
 
+- `docs/CONVERSATION_INGRESS_RECOVERY_CONTRACT.md`
+  - LLM·도구·외부 전달 전에 stable source delivery를 내구성 있게 claim하고,
+    재시작 뒤 pending/in-flight/ambiguous 턴을 자동 재실행하지 않는 ingress
+    상태 머신, stream write 경계, continuity generation 결합, privacy·retention
+    및 Fast Control·Discord owner 통합 계약.
+
 - `docs/MEMORY_PROVENANCE_DELETION_CONTRACT.md`
   - 기억의 source/evidence provenance, content-hash 기반 충돌 없는 사용자
     수정, 2단계 삭제, tombstone-first 내구성, 파생 기억의 연쇄 철회·격리·

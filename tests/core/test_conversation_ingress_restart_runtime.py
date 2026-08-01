@@ -1,0 +1,164 @@
+from __future__ import annotations
+
+import sys
+import unittest
+from pathlib import Path
+
+
+REPO_ROOT = next(
+    path for path in Path(__file__).resolve().parents
+    if (path / "main.py").exists()
+)
+RUNTIME_ROOT = REPO_ROOT / "evelyn_core" / "runtime"
+if str(RUNTIME_ROOT) not in sys.path:
+    sys.path.insert(0, str(RUNTIME_ROOT))
+
+from evelyn_core.conversation_ingress_restart_runtime import (  # noqa: E402
+    ConversationIngressRestartDeps,
+    reconcile_recovered_delivery_succeeded,
+    verify_recovered_terminal_commit,
+)
+from evelyn_core.conversation_memory_receipt import (  # noqa: E402
+    unattributed_memory_receipt_ref,
+)
+from evelyn_core.session_memory_state import SessionStateStore  # noqa: E402
+from tests.continuity_test_support import durable_continuity_status  # noqa: E402
+
+
+class FakeCheckpoint:
+    def __init__(self, generation: int = 4) -> None:
+        self.generation = generation
+        self.commits: list[tuple[str, str]] = []
+
+    def commit_completed_turn(self, scope: str, turn_id: str):
+        self.commits.append((scope, turn_id))
+        self.generation += 1
+        return durable_continuity_status(self.generation)
+
+    def status(self):
+        return durable_continuity_status(self.generation)
+
+
+class ConversationIngressRestartRuntimeTests(unittest.TestCase):
+    def deps(self, *, generation: int = 4):
+        store = SessionStateStore.create_empty()
+        checkpoint = FakeCheckpoint(generation)
+        deps = ConversationIngressRestartDeps(
+            session_state_store=store,
+            session_continuity_checkpoint=checkpoint,
+            system_prompt="system",
+            max_history_items=10,
+            normal_ttl_sec=90.0,
+            question_ttl_sec=300.0,
+            log=lambda *_args: None,
+        )
+        return deps, store, checkpoint
+
+    @staticmethod
+    def record(*, phase: str, generation: int = 0):
+        return {
+            "surface": "discord_text",
+            "scope": "guild:1:text:2:user:3",
+            "turnId": "journal-turn-1",
+            "phase": phase,
+            "acceptedText": "prior user turn",
+            "assistantText": "delivered answer",
+            "memoryReceiptRef": unattributed_memory_receipt_ref(),
+            "continuityGeneration": generation,
+        }
+
+    def test_delivery_succeeded_rebuilds_history_once_and_commits_exact_turn(
+        self,
+    ) -> None:
+        deps, store, checkpoint = self.deps()
+        generation = reconcile_recovered_delivery_succeeded(
+            self.record(phase="delivery_succeeded"),
+            deps=deps,
+        )
+
+        self.assertEqual(generation, 5)
+        self.assertEqual(
+            checkpoint.commits,
+            [("guild:1:text:2:user:3", "journal-turn-1")],
+        )
+        self.assertEqual(store.current_turn_id("guild:1:text:2:user:3"), "journal-turn-1")
+        history = store.get_conversation_history(
+            system_prompt="system",
+            session_key="guild:1:text:2:user:3",
+        )
+        self.assertEqual([row["role"] for row in history[-2:]], ["user", "assistant"])
+
+        reconcile_recovered_delivery_succeeded(
+            self.record(phase="delivery_succeeded"),
+            deps=deps,
+        )
+        self.assertEqual(len(history), 3)
+
+    def test_prior_checkpoint_then_next_delivered_turn_reconciles(self) -> None:
+        deps, store, checkpoint = self.deps()
+        store.start_new_turn(
+            "guild:1:text:2:user:3",
+            turn_id="prior-turn",
+        )
+        store.finish_assistant_text_turn(
+            "guild:1:text:2:user:3",
+            "prior checkpoint user",
+            "prior checkpoint answer",
+            system_prompt="system",
+            max_history_items=10,
+            guild_id=1,
+            user_id=3,
+            awaiting_user_reply=False,
+            normal_ttl_sec=90.0,
+            question_ttl_sec=300.0,
+        )
+
+        generation = reconcile_recovered_delivery_succeeded(
+            self.record(phase="delivery_succeeded"),
+            deps=deps,
+        )
+
+        self.assertEqual(generation, 5)
+        self.assertEqual(
+            store.current_turn_id("guild:1:text:2:user:3"),
+            "journal-turn-1",
+        )
+        history = store.get_conversation_history(
+            system_prompt="system",
+            session_key="guild:1:text:2:user:3",
+        )
+        self.assertEqual(
+            [row["content"] for row in history[-2:]],
+            ["prior user turn", "delivered answer"],
+        )
+
+    def test_terminal_commit_requires_exact_turn_history_and_generation(
+        self,
+    ) -> None:
+        deps, store, checkpoint = self.deps(generation=7)
+        record = self.record(phase="terminal_committing", generation=7)
+        store.start_new_turn(
+            "guild:1:text:2:user:3",
+            turn_id="journal-turn-1",
+        )
+        store.finish_assistant_text_turn(
+            "guild:1:text:2:user:3",
+            "prior user turn",
+            "delivered answer",
+            system_prompt="system",
+            max_history_items=10,
+            guild_id=1,
+            user_id=3,
+            awaiting_user_reply=False,
+            normal_ttl_sec=90.0,
+            question_ttl_sec=300.0,
+            memory_receipt=record["memoryReceiptRef"],
+        )
+
+        self.assertTrue(verify_recovered_terminal_commit(record, deps=deps))
+        checkpoint.generation = 8
+        self.assertFalse(verify_recovered_terminal_commit(record, deps=deps))
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 REPO_ROOT = next(
@@ -18,6 +19,13 @@ if str(RUNTIME_ROOT) not in sys.path:
 
 from evelyn_core.continuity_commit_contract import (  # noqa: E402
     require_durable_continuity_receipt,
+)
+from evelyn_core.conversation_ingress_recovery import (  # noqa: E402
+    ConversationIngressBindingMismatch,
+    ConversationIngressRecoveryError,
+)
+from evelyn_core.conversation_memory_receipt import (  # noqa: E402
+    not_used_memory_receipt_ref,
 )
 from evelyn_core.fast_control_continuity import (  # noqa: E402
     FAST_CONTROL_CONTINUITY_STATUS_SCHEMA,
@@ -42,6 +50,33 @@ def full_receipt(note_id: str, *, version: int) -> dict:
 
 
 class FastControlContinuityTests(unittest.TestCase):
+    @staticmethod
+    def _deliver_ingress(
+        owner: FastControlContinuityOwner,
+        *,
+        request_id: str = "request-1",
+        user_text: str = "질문",
+        assistant_text: str = "답변",
+    ) -> dict:
+        claim = owner.claim_ingress(
+            request_id=request_id,
+            accepted_text=user_text,
+        )
+        owner.bind_ingress_response(
+            claim["entryId"],
+            assistant_text=assistant_text,
+            memory_receipt_ref=not_used_memory_receipt_ref(),
+        )
+        owner.mark_ingress_delivery_inflight(
+            claim["entryId"],
+            delivery_ref="test:http",
+        )
+        owner.mark_ingress_delivery_succeeded(
+            claim["entryId"],
+            delivery_ref="test:http",
+        )
+        return claim
+
     def test_disabled_owner_never_creates_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -295,6 +330,204 @@ class FastControlContinuityTests(unittest.TestCase):
                 ("assistant", "answer-3"),
             ],
         )
+
+    def test_ingress_bootstrap_is_rollback_protected_and_claim_is_stable(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            owner = FastControlContinuityOwner(
+                artifacts_root=Path(temp_dir),
+                enabled=True,
+                log=lambda *_args, **_kwargs: None,
+            )
+            journal_status = owner.ingress.public_status()
+            first = owner.claim_ingress(
+                request_id="stable-request",
+                accepted_text="같은 질문",
+            )
+            duplicate = owner.claim_ingress(
+                request_id="stable-request",
+                accepted_text="같은 질문",
+            )
+            with self.assertRaises(ConversationIngressBindingMismatch):
+                owner.claim_ingress(
+                    request_id="stable-request",
+                    accepted_text="다른 질문",
+                )
+            with self.assertRaisesRegex(
+                ConversationIngressRecoveryError,
+                "conversation_ingress_recovery_pending",
+            ):
+                owner.claim_ingress(
+                    request_id="later-request",
+                    accepted_text="후속 질문",
+                )
+
+        self.assertEqual(journal_status["generation"], 1)
+        self.assertTrue(journal_status["rollbackProtected"])
+        self.assertTrue(first["shouldProcess"])
+        self.assertFalse(duplicate["shouldProcess"])
+        self.assertEqual(first["entryId"], duplicate["entryId"])
+
+    def test_ingress_terminal_order_and_authoritative_turn_id(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            owner = FastControlContinuityOwner(
+                artifacts_root=Path(temp_dir),
+                enabled=True,
+                log=lambda *_args, **_kwargs: None,
+            )
+            claim = self._deliver_ingress(owner)
+            events: list[str] = []
+            begin = owner.ingress.begin_terminal_commit
+            commit = owner.checkpoint.commit_completed_turn
+            complete = owner.ingress.complete
+
+            def record_begin(*args, **kwargs):
+                events.append("begin_terminal_commit")
+                return begin(*args, **kwargs)
+
+            def record_commit(*args, **kwargs):
+                events.append("checkpoint_commit")
+                return commit(*args, **kwargs)
+
+            def record_complete(*args, **kwargs):
+                events.append("complete")
+                return complete(*args, **kwargs)
+
+            with (
+                patch.object(
+                    owner.ingress,
+                    "begin_terminal_commit",
+                    side_effect=record_begin,
+                ),
+                patch.object(
+                    owner.checkpoint,
+                    "commit_completed_turn",
+                    side_effect=record_commit,
+                ),
+                patch.object(
+                    owner.ingress,
+                    "complete",
+                    side_effect=record_complete,
+                ),
+            ):
+                owner.record_completed_turn(
+                    "질문",
+                    "답변",
+                    memory_receipt=not_used_memory_receipt_ref(),
+                    ingress_entry_id=claim["entryId"],
+                )
+
+            record = owner.ingress_record(claim["entryId"])
+            later = owner.claim_ingress(
+                request_id="request-2",
+                accepted_text="후속 질문",
+            )
+
+        self.assertEqual(
+            events,
+            [
+                "begin_terminal_commit",
+                "checkpoint_commit",
+                "complete",
+            ],
+        )
+        self.assertEqual(record["phase"], "completed")
+        self.assertEqual(
+            owner.store.current_turn_id("fast-control:control-page:owner"),
+            claim["turnId"],
+        )
+        self.assertTrue(later["shouldProcess"])
+
+    def test_post_delivery_commit_gap_blocks_new_claim_and_reconciles_once(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            first = FastControlContinuityOwner(
+                artifacts_root=root,
+                enabled=True,
+                log=lambda *_args, **_kwargs: None,
+            )
+            claim = self._deliver_ingress(first)
+            with patch.object(
+                first.ingress,
+                "complete",
+                side_effect=OSError("simulated crash after checkpoint"),
+            ):
+                with self.assertRaises(OSError):
+                    first.record_completed_turn(
+                        "질문",
+                        "답변",
+                        memory_receipt=not_used_memory_receipt_ref(),
+                        ingress_entry_id=claim["entryId"],
+                    )
+            with self.assertRaisesRegex(
+                ConversationIngressRecoveryError,
+                "conversation_ingress_recovery_pending",
+            ):
+                first.claim_ingress(
+                    request_id="too-early",
+                    accepted_text="순서가 뒤집히면 안 돼",
+                )
+
+            second = FastControlContinuityOwner(
+                artifacts_root=root,
+                enabled=True,
+                log=lambda *_args, **_kwargs: None,
+            )
+            restored = second.restored_chat_messages()
+            recovered_record = second.ingress_record(claim["entryId"])
+
+        self.assertEqual(recovered_record["phase"], "completed")
+        self.assertEqual(
+            [(item["role"], item["text"]) for item in restored],
+            [("user", "질문"), ("assistant", "답변")],
+        )
+
+    def test_recovered_pending_context_is_private_user_only_and_blocks_order(
+        self,
+    ) -> None:
+        private_text = "재시작 전 미완료 사용자 요청"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            first = FastControlContinuityOwner(
+                artifacts_root=root,
+                enabled=True,
+                log=lambda *_args, **_kwargs: None,
+            )
+            claim = first.claim_ingress(
+                request_id="private-source-delivery",
+                accepted_text=private_text,
+            )
+            second = FastControlContinuityOwner(
+                artifacts_root=root,
+                enabled=True,
+                log=lambda *_args, **_kwargs: None,
+            )
+            context = second.recovered_ingress_context_messages()
+            rendered_status = json.dumps(
+                second.status(),
+                ensure_ascii=False,
+            )
+            with self.assertRaisesRegex(
+                ConversationIngressRecoveryError,
+                "conversation_ingress_recovery_pending",
+            ):
+                second.claim_ingress(
+                    request_id="new-source-delivery",
+                    accepted_text="새 요청",
+                )
+
+        self.assertEqual(len(context), 1)
+        self.assertEqual(context[0]["role"], "user")
+        self.assertEqual(context[0]["content"], private_text)
+        self.assertTrue(context[0]["_ingressRecoveryUnanswered"])
+        self.assertNotIn("assistant", [item["role"] for item in context])
+        self.assertNotIn(private_text, rendered_status)
+        self.assertNotIn("private-source-delivery", rendered_status)
+        self.assertNotIn(claim["entryId"], rendered_status)
+        self.assertNotIn(claim["turnId"], rendered_status)
 
 
 if __name__ == "__main__":

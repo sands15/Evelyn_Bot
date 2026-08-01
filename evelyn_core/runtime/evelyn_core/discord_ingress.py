@@ -18,6 +18,7 @@ class DiscordTextIngressContext:
     person_key: str | None
     session_memory_key: str | None
     reply_slot_key: str
+    message_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -90,6 +91,7 @@ def build_text_ingress_context(
     channel_id: int,
     user_id: int,
     thread_id: int | None = None,
+    message_id: int | None = None,
 ) -> DiscordTextIngressContext:
     session_key = make_text_session_key(guild_id, channel_id, user_id, thread_id=thread_id)
     return DiscordTextIngressContext(
@@ -102,6 +104,7 @@ def build_text_ingress_context(
         person_key=make_person_memory_key(user_id),
         session_memory_key=make_session_memory_key(session_key, user_id),
         reply_slot_key=make_text_reply_slot_key(guild_id, channel_id, thread_id=thread_id),
+        message_id=message_id,
     )
 
 
@@ -122,11 +125,17 @@ def build_text_ingress_context_from_message(
     guild = getattr(message, "guild")
     channel = getattr(message, "channel")
     author = getattr(message, "author")
+    raw_message_id = getattr(message, "id", None)
+    try:
+        message_id = int(raw_message_id)
+    except (TypeError, ValueError, OverflowError):
+        message_id = None
     return build_text_ingress_context(
         guild_id=int(getattr(guild, "id")),
         channel_id=int(getattr(channel, "id")),
         user_id=int(getattr(author, "id")),
         thread_id=resolve_text_thread_id(channel, is_thread_parent=is_thread_parent),
+        message_id=message_id,
     )
 
 

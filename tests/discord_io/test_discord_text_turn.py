@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,6 +16,17 @@ if str(RUNTIME_ROOT) not in sys.path:
     sys.path.insert(0, str(RUNTIME_ROOT))
 
 from evelyn_core.discord_text_turn import DiscordTextMessageHandlerDeps, handle_discord_text_message  # noqa: E402
+from evelyn_core.conversation_ingress_composition import (  # noqa: E402
+    ConversationIngressComposition,
+    ConversationIngressCompositionDeps,
+)
+from evelyn_core.conversation_ingress_recovery import (  # noqa: E402
+    ConversationIngressRecoveryJournal,
+)
+from evelyn_core.conversation_memory_receipt import (  # noqa: E402
+    unattributed_memory_receipt_ref,
+)
+from evelyn_core.discord_ingress import build_text_ingress_context  # noqa: E402
 from tests.continuity_test_support import (  # noqa: E402
     durable_continuity_status,
 )
@@ -66,10 +79,28 @@ def make_deps(calls: list[tuple[str, object]], **overrides) -> DiscordTextMessag
 
     async def stream_text_reply(*args, **kwargs):
         calls.append(("stream", kwargs["user_text"] if "user_text" in kwargs else args[1]))
-        return "<voice>answer</voice>", None, {"meta": {}}, None
+        metrics = {"meta": {}}
+        before_delivery = kwargs.get("before_text_delivery")
+        if before_delivery is not None:
+            await before_delivery(
+                answer_text="<voice>answer</voice>",
+                final_text="answer",
+                metrics=metrics,
+            )
+        after_delivery = kwargs.get("after_text_delivery")
+        if after_delivery is not None:
+            await after_delivery(
+                sent_message=SimpleNamespace(id=77),
+                final_text="answer",
+                metrics=metrics,
+            )
+        return "<voice>answer</voice>", None, metrics, None
 
-    async def commit_session_continuity(*args):
+    async def commit_session_continuity(*args, **kwargs):
         calls.append(("commit_continuity", args))
+        before_commit = kwargs.get("before_commit")
+        if before_commit is not None:
+            before_commit(5)
         return durable_continuity_status(5)
 
     deps = dict(
@@ -86,11 +117,44 @@ def make_deps(calls: list[tuple[str, object]], **overrides) -> DiscordTextMessag
         log_turn_event=lambda *args, **kwargs: calls.append(("log_turn", kwargs.get("reason"))),
         current_turn_id=lambda session_key: f"current:{session_key}",
         resolve_pending_proactive_question_for_turn=lambda *args, **kwargs: {"resolved": False},
+        claim_conversation_ingress=lambda ingress, _text: {
+            "entryId": f"entry:{ingress.message_id}",
+            "turnId": f"turn:{ingress.session_key}",
+            "phase": "accepted",
+            "shouldProcess": True,
+        },
+        conversation_ingress_recovery_context=lambda scope, **_kwargs: {
+            "schema": "conversation.ingress-recovery-context.v1",
+            "surface": "discord_text",
+            "scope": scope,
+            "pendingCount": 0,
+            "records": [],
+            "automaticReplay": False,
+        },
+        mark_ingress_response_ready=lambda *args, **kwargs: calls.append(
+            ("ingress_response_ready", args[0])
+        ),
+        mark_ingress_delivery_inflight=lambda *args, **kwargs: calls.append(
+            ("ingress_delivery_inflight", args[0])
+        ),
+        mark_ingress_delivery_succeeded=lambda *args, **kwargs: calls.append(
+            ("ingress_delivery_succeeded", args[0])
+        ),
+        mark_ingress_delivery_ambiguous=lambda *args, **kwargs: calls.append(
+            ("ingress_delivery_ambiguous", args[0])
+        ),
+        begin_ingress_terminal_commit=lambda *args, **kwargs: calls.append(
+            ("ingress_terminal", args[0])
+        ),
+        complete_ingress=lambda *args, **kwargs: calls.append(
+            ("ingress_complete", args[0])
+        ),
         session_locks={},
         reply_slot_locks={},
+        reply_slot_admission_locks={},
         begin_user_text_turn=lambda session_key, user_text, **kwargs: SimpleNamespace(
             topic_id=f"topic:{user_text}",
-            turn_id=f"turn:{session_key}",
+            turn_id=(kwargs.get("turn_id") or f"turn:{session_key}"),
         ),
         replace_room_turn_scope=lambda session_key, turn_scope: calls.append(("replace_scope", session_key)),
         attach_current_task=lambda turn_scope: "task",
@@ -538,6 +602,571 @@ class DiscordTextTurnHandlerTests(unittest.TestCase):
         self.assertIn("RuntimeError", rendered_logs)
         self.assertNotIn("failure-record-secret", rendered_logs)
         self.assertNotIn("checkpoint.json", rendered_logs)
+
+
+class DiscordTextIngressRecoveryIntegrationTests(unittest.TestCase):
+    @staticmethod
+    def owner(
+        root: Path,
+        *,
+        reconcile=None,
+        verify=None,
+    ) -> ConversationIngressComposition:
+        owner = ConversationIngressComposition(
+            ConversationIngressCompositionDeps(
+                journal_factory=lambda: ConversationIngressRecoveryJournal(
+                    path=root / "main.json",
+                    head_path=root / "main.head.json",
+                ),
+                log=lambda *_args: None,
+                reconcile_delivery_succeeded=reconcile,
+                verify_terminal_commit=verify,
+            )
+        )
+        owner.activate_after_continuity_restore()
+        return owner
+
+    @staticmethod
+    def ingress_overrides(owner: ConversationIngressComposition):
+        return {
+            "claim_conversation_ingress": owner.claim_discord_text,
+            "conversation_ingress_recovery_context": (
+                owner.recovery_context_for_scope
+            ),
+            "mark_ingress_response_ready": owner.mark_response_ready,
+            "mark_ingress_delivery_inflight": owner.mark_delivery_inflight,
+            "mark_ingress_delivery_succeeded": owner.mark_delivery_succeeded,
+            "mark_ingress_delivery_ambiguous": owner.mark_delivery_ambiguous,
+            "begin_ingress_terminal_commit": owner.begin_terminal_commit,
+            "complete_ingress": owner.complete,
+        }
+
+    def test_completed_gateway_redelivery_runs_no_downstream_work(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first_owner = self.owner(root)
+            first_calls: list[tuple[str, object]] = []
+            message = make_message(guild=SimpleNamespace(id=1, name="Guild"))
+            first_deps = make_deps(
+                first_calls,
+                **self.ingress_overrides(first_owner),
+            )
+
+            asyncio.run(handle_discord_text_message(message, first_deps))
+            self.assertEqual(
+                first_owner.public_status()["phases"]["completed"],
+                1,
+            )
+
+            restarted_owner = self.owner(root)
+            restarted_calls: list[tuple[str, object]] = []
+            restarted_deps = make_deps(
+                restarted_calls,
+                **self.ingress_overrides(restarted_owner),
+            )
+            asyncio.run(
+                handle_discord_text_message(message, restarted_deps)
+            )
+
+        forbidden = {
+            "stream",
+            "finish",
+            "commit_continuity",
+            "benchmark",
+            "search_followup",
+            "process_commands",
+        }
+        self.assertFalse(
+            any(call[0] in forbidden for call in restarted_calls)
+        )
+
+    def test_pending_restart_and_changed_binding_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first_owner = self.owner(root)
+            ingress = build_text_ingress_context(
+                guild_id=1,
+                channel_id=2,
+                user_id=3,
+                message_id=99,
+            )
+            first_owner.claim_discord_text(ingress, "hi")
+
+            restarted_owner = self.owner(root)
+            same_calls: list[tuple[str, object]] = []
+            same_message = make_message(
+                guild=SimpleNamespace(id=1, name="Guild")
+            )
+            asyncio.run(
+                handle_discord_text_message(
+                    same_message,
+                    make_deps(
+                        same_calls,
+                        **self.ingress_overrides(restarted_owner),
+                    ),
+                )
+            )
+            changed_calls: list[tuple[str, object]] = []
+            changed_message = make_message(
+                content="Evelyn changed",
+                guild=SimpleNamespace(id=1, name="Guild"),
+            )
+            asyncio.run(
+                handle_discord_text_message(
+                    changed_message,
+                    make_deps(
+                        changed_calls,
+                        **self.ingress_overrides(restarted_owner),
+                    ),
+                )
+            )
+
+        for calls in (same_calls, changed_calls):
+            self.assertFalse(any(call[0] == "stream" for call in calls))
+            self.assertFalse(any(call[0] == "finish" for call in calls))
+
+    def test_missing_message_id_is_fail_closed_before_turn_start(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            owner = self.owner(Path(tmp))
+            calls: list[tuple[str, object]] = []
+            message = make_message(
+                guild=SimpleNamespace(id=1, name="Guild"),
+                message_id=None,
+            )
+            asyncio.run(
+                handle_discord_text_message(
+                    message,
+                    make_deps(
+                        calls,
+                        **self.ingress_overrides(owner),
+                    ),
+                )
+            )
+
+        self.assertFalse(any(call[0] == "stream" for call in calls))
+        self.assertFalse(any(call[0] == "finish" for call in calls))
+
+    def test_send_side_effect_then_timeout_is_ambiguous_without_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            owner = self.owner(Path(tmp))
+            calls: list[tuple[str, object]] = []
+            channel = FakeChannel()
+
+            async def ambiguous_stream(channel, _user_text, **kwargs):
+                metrics = {"meta": {}}
+                await kwargs["before_text_delivery"](
+                    answer_text="answer",
+                    final_text="answer",
+                    metrics=metrics,
+                )
+                await channel.send("answer")
+                raise TimeoutError("outcome unknown")
+
+            message = make_message(
+                guild=SimpleNamespace(id=1, name="Guild"),
+                channel=channel,
+            )
+            asyncio.run(
+                handle_discord_text_message(
+                    message,
+                    make_deps(
+                        calls,
+                        stream_text_reply=ambiguous_stream,
+                        **self.ingress_overrides(owner),
+                    ),
+                )
+            )
+
+            status = owner.public_status()
+
+        self.assertEqual(channel.sent, ["answer"])
+        self.assertEqual(status["phases"]["delivery_ambiguous"], 1)
+        self.assertEqual(status["phases"]["completed"], 0)
+        self.assertFalse(any(call[0] == "finish" for call in calls))
+
+    def test_journal_and_history_bind_exact_discord_final_text(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            owner = self.owner(Path(tmp))
+            calls: list[tuple[str, object]] = []
+            channel = FakeChannel()
+            claimed: dict[str, str] = {}
+
+            def claim(ingress, accepted_text):
+                receipt = owner.claim_discord_text(ingress, accepted_text)
+                claimed["entry_id"] = receipt["entryId"]
+                return receipt
+
+            async def formatted_stream(channel, _user_text, **kwargs):
+                metrics = {"meta": {}}
+                await kwargs["before_text_delivery"](
+                    answer_text="semantic answer",
+                    final_text="[display] exact sent answer",
+                    metrics=metrics,
+                )
+                await channel.send("[display] exact sent answer")
+                await kwargs["after_text_delivery"](
+                    sent_message=SimpleNamespace(id=77),
+                    final_text="[display] exact sent answer",
+                    metrics=metrics,
+                )
+                return "semantic answer", None, metrics, None
+
+            overrides = self.ingress_overrides(owner)
+            overrides["claim_conversation_ingress"] = claim
+            message = make_message(
+                guild=SimpleNamespace(id=1, name="Guild"),
+                channel=channel,
+            )
+            asyncio.run(
+                handle_discord_text_message(
+                    message,
+                    make_deps(
+                        calls,
+                        stream_text_reply=formatted_stream,
+                        **overrides,
+                    ),
+                )
+            )
+            record = owner.record_for(claimed["entry_id"])
+
+        self.assertEqual(channel.sent, ["[display] exact sent answer"])
+        self.assertEqual(
+            record["assistantText"],
+            "[display] exact sent answer",
+        )
+        finish = next(call for call in calls if call[0] == "finish")
+        self.assertEqual(
+            finish[1][2],
+            "[display] exact sent answer",
+        )
+
+    def test_continuity_failure_blocks_followups_and_next_same_scope_claim(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            owner = self.owner(Path(tmp))
+            calls: list[tuple[str, object]] = []
+            channel = FakeChannel()
+
+            async def delivered_stream(channel, _user_text, **kwargs):
+                metrics = {"meta": {}}
+                await kwargs["before_text_delivery"](
+                    answer_text="answer",
+                    final_text="answer",
+                    metrics=metrics,
+                )
+                await channel.send("answer")
+                await kwargs["after_text_delivery"](
+                    sent_message=SimpleNamespace(id=77),
+                    final_text="answer",
+                    metrics=metrics,
+                )
+                return (
+                    "answer",
+                    None,
+                    metrics,
+                    SimpleNamespace(should_play_voice=True),
+                )
+
+            async def failed_commit(*_args, **kwargs):
+                kwargs["before_commit"](5)
+                raise RuntimeError("checkpoint unavailable")
+
+            async def ensure_voice(_message):
+                return SimpleNamespace()
+
+            overrides = self.ingress_overrides(owner)
+            deps = make_deps(
+                calls,
+                stream_text_reply=delivered_stream,
+                commit_session_continuity=failed_commit,
+                auto_join_voice=True,
+                ensure_voice_client=ensure_voice,
+                record_context_pipeline_benchmark=lambda **_kwargs: calls.append(
+                    ("benchmark_after_failed_commit", None)
+                ),
+                schedule_memory_update=lambda *_args, **_kwargs: calls.append(
+                    ("memory_after_failed_commit", None)
+                ),
+                schedule_search_followup=lambda *_args, **_kwargs: calls.append(
+                    ("search_after_failed_commit", None)
+                ),
+                execute_voice_delivery_plan=lambda *_args, **_kwargs: calls.append(
+                    ("voice_after_failed_commit", None)
+                ),
+                **overrides,
+            )
+            first_message = make_message(
+                guild=SimpleNamespace(id=1, name="Guild"),
+                channel=channel,
+                message_id=99,
+            )
+            asyncio.run(handle_discord_text_message(first_message, deps))
+            second_message = make_message(
+                content="Evelyn next",
+                guild=SimpleNamespace(id=1, name="Guild"),
+                channel=channel,
+                message_id=100,
+            )
+            asyncio.run(handle_discord_text_message(second_message, deps))
+            status = owner.public_status()
+
+        self.assertEqual(channel.sent, ["answer"])
+        self.assertEqual(status["phases"]["terminal_committing"], 1)
+        self.assertEqual(status["entryCount"], 1)
+        forbidden = {
+            "benchmark_after_failed_commit",
+            "memory_after_failed_commit",
+            "search_after_failed_commit",
+            "voice_after_failed_commit",
+        }
+        self.assertFalse(any(call[0] in forbidden for call in calls))
+
+    def test_concurrent_messages_cannot_start_two_state_turns(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            owner = self.owner(Path(tmp))
+            calls: list[tuple[str, object]] = []
+            first_started: asyncio.Event
+            release_first: asyncio.Event
+            begin_count = 0
+            base_deps = make_deps(calls, **self.ingress_overrides(owner))
+            original_begin = base_deps.begin_user_text_turn
+
+            def begin(*args, **kwargs):
+                nonlocal begin_count
+                begin_count += 1
+                return original_begin(*args, **kwargs)
+
+            async def scenario() -> None:
+                nonlocal first_started, release_first
+                first_started = asyncio.Event()
+                release_first = asyncio.Event()
+
+                async def held_stream(channel, user_text, **kwargs):
+                    metrics = {"meta": {}}
+                    if user_text == "one":
+                        first_started.set()
+                        await release_first.wait()
+                    await kwargs["before_text_delivery"](
+                        answer_text=f"answer:{user_text}",
+                        final_text=f"answer:{user_text}",
+                        metrics=metrics,
+                    )
+                    await channel.send(f"answer:{user_text}")
+                    await kwargs["after_text_delivery"](
+                        sent_message=SimpleNamespace(id=77),
+                        final_text=f"answer:{user_text}",
+                        metrics=metrics,
+                    )
+                    return f"answer:{user_text}", None, metrics, None
+
+                deps = make_deps(
+                    calls,
+                    begin_user_text_turn=begin,
+                    stream_text_reply=held_stream,
+                    **self.ingress_overrides(owner),
+                )
+                channel = FakeChannel()
+                first = asyncio.create_task(
+                    handle_discord_text_message(
+                        make_message(
+                            content="Evelyn one",
+                            guild=SimpleNamespace(id=1, name="Guild"),
+                            channel=channel,
+                            message_id=101,
+                        ),
+                        deps,
+                    )
+                )
+                await first_started.wait()
+                second = asyncio.create_task(
+                    handle_discord_text_message(
+                        make_message(
+                            content="Evelyn two",
+                            guild=SimpleNamespace(id=1, name="Guild"),
+                            channel=channel,
+                            message_id=102,
+                        ),
+                        deps,
+                    )
+                )
+                await asyncio.sleep(0)
+                release_first.set()
+                await asyncio.gather(first, second)
+
+            asyncio.run(scenario())
+            status = owner.public_status()
+
+        self.assertEqual(begin_count, 1)
+        self.assertEqual(status["entryCount"], 1)
+
+    def test_concurrent_users_share_atomic_reply_slot_admission(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            owner = self.owner(Path(tmp))
+            calls: list[tuple[str, object]] = []
+            claim_count = 0
+            begin_count = 0
+            count_lock = threading.Lock()
+            first_claim_started = threading.Event()
+            second_claim_started = threading.Event()
+            release_claim = threading.Event()
+            base_deps = make_deps(calls)
+            original_begin = base_deps.begin_user_text_turn
+
+            def claim(ingress, accepted_text):
+                nonlocal claim_count
+                with count_lock:
+                    claim_count += 1
+                    current_count = claim_count
+                if current_count == 1:
+                    first_claim_started.set()
+                elif current_count == 2:
+                    second_claim_started.set()
+                release_claim.wait(timeout=2.0)
+                return owner.claim_discord_text(ingress, accepted_text)
+
+            def begin(*args, **kwargs):
+                nonlocal begin_count
+                begin_count += 1
+                return original_begin(*args, **kwargs)
+
+            async def scenario() -> None:
+                ingress_overrides = self.ingress_overrides(owner)
+                ingress_overrides[
+                    "claim_conversation_ingress"
+                ] = claim
+                deps = make_deps(
+                    calls,
+                    begin_user_text_turn=begin,
+                    **ingress_overrides,
+                )
+                channel = FakeChannel()
+                first = asyncio.create_task(
+                    handle_discord_text_message(
+                        make_message(
+                            content="Evelyn one",
+                            guild=SimpleNamespace(id=1, name="Guild"),
+                            channel=channel,
+                            author=SimpleNamespace(
+                                id=3,
+                                bot=False,
+                                display_name="User 3",
+                            ),
+                            message_id=101,
+                        ),
+                        deps,
+                    )
+                )
+                second = None
+                try:
+                    started = await asyncio.to_thread(
+                        first_claim_started.wait,
+                        2.0,
+                    )
+                    self.assertTrue(started)
+                    second = asyncio.create_task(
+                        handle_discord_text_message(
+                            make_message(
+                                content="Evelyn two",
+                                guild=SimpleNamespace(id=1, name="Guild"),
+                                channel=channel,
+                                author=SimpleNamespace(
+                                    id=4,
+                                    bot=False,
+                                    display_name="User 4",
+                                ),
+                                message_id=102,
+                            ),
+                            deps,
+                        )
+                    )
+                    await asyncio.to_thread(
+                        second_claim_started.wait,
+                        0.1,
+                    )
+                finally:
+                    release_claim.set()
+                if second is not None:
+                    await asyncio.gather(first, second)
+                else:
+                    await first
+
+            asyncio.run(scenario())
+            status = owner.public_status()
+
+        self.assertEqual(claim_count, 1)
+        self.assertEqual(begin_count, 1)
+        self.assertEqual(status["entryCount"], 1)
+
+    def test_locked_reply_slot_is_rejected_before_durable_claim(self) -> None:
+        calls: list[tuple[str, object]] = []
+        claim_count = 0
+
+        def claim(*_args, **_kwargs):
+            nonlocal claim_count
+            claim_count += 1
+            raise AssertionError("claim must not run while slot is busy")
+
+        async def scenario() -> FakeChannel:
+            lock = asyncio.Lock()
+            await lock.acquire()
+            channel = FakeChannel()
+            deps = make_deps(
+                calls,
+                claim_conversation_ingress=claim,
+                reply_slot_locks={"guild:1:reply:text:2": lock},
+            )
+            try:
+                await handle_discord_text_message(
+                    make_message(
+                        guild=SimpleNamespace(id=1, name="Guild"),
+                        channel=channel,
+                    ),
+                    deps,
+                )
+            finally:
+                lock.release()
+            return channel
+
+        channel = asyncio.run(scenario())
+        self.assertEqual(claim_count, 0)
+        self.assertEqual(channel.sent, [])
+
+    def test_restart_reconciles_critical_phases_or_disables_owner(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            owner = self.owner(root)
+            ingress = build_text_ingress_context(
+                guild_id=1,
+                channel_id=2,
+                user_id=3,
+                message_id=99,
+            )
+            claim = owner.claim_discord_text(ingress, "hi")
+            memory_ref = unattributed_memory_receipt_ref()
+            owner.mark_response_ready(
+                claim["entryId"],
+                assistant_text="answer",
+                memory_receipt_ref=memory_ref,
+            )
+            owner.mark_delivery_inflight(
+                claim["entryId"],
+                delivery_ref="delivery-1",
+            )
+            owner.mark_delivery_succeeded(
+                claim["entryId"],
+                delivery_ref="delivery-1",
+            )
+
+            blocked_owner = self.owner(root, reconcile=lambda _record: None)
+            self.assertFalse(blocked_owner.public_status()["ownerReady"])
+
+            reconciled_owner = self.owner(root, reconcile=lambda _record: 7)
+            status = reconciled_owner.public_status()
+
+        self.assertTrue(status["ownerReady"])
+        self.assertEqual(status["phases"]["completed"], 1)
+        self.assertEqual(status["reconciledRecoveryCount"], 1)
 
 
 if __name__ == "__main__":

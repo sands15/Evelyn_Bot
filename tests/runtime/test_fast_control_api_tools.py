@@ -26,6 +26,18 @@ from tests.continuity_test_support import (  # noqa: E402
 
 class FastControlApiToolTests(unittest.TestCase):
     def setUp(self) -> None:
+        unsafe_test_owner = fast_api.FastControlContinuityOwner(
+            artifacts_root=Path(tempfile.gettempdir()),
+            enabled=False,
+        )
+        unsafe_test_owner._test_only_allow_unsafe_ingress = True
+        owner_patcher = patch.object(
+            fast_api,
+            "FAST_CONTROL_CONTINUITY_OWNER",
+            unsafe_test_owner,
+        )
+        owner_patcher.start()
+        self.addCleanup(owner_patcher.stop)
         original_local_voice_admission = fast_api.LOCAL_VOICE_ADMISSION
         fast_api.LOCAL_VOICE_ADMISSION = fast_api.LocalVoiceAdmissionManager()
         self.addCleanup(
@@ -1240,6 +1252,7 @@ class FastControlApiToolTests(unittest.TestCase):
                 return {
                     "text": "실패 테스트",
                     "source": "control_page",
+                    "requestId": "fixed-failure-request",
                 }
 
         async def fake_collect_runtime_health(
@@ -1266,12 +1279,38 @@ class FastControlApiToolTests(unittest.TestCase):
                 self.calls: list[tuple[str, str]] = []
                 self.receipts: list[dict[str, object]] = []
 
+            @staticmethod
+            def claim_ingress(*, request_id, accepted_text):
+                return {
+                    "entryId": "ingress-" + "b" * 64,
+                    "turnId": "journal-turn",
+                    "phase": "accepted",
+                    "shouldProcess": True,
+                }
+
+            @staticmethod
+            def bind_ingress_response(*_args, **_kwargs):
+                return {}
+
+            @staticmethod
+            def mark_ingress_delivery_inflight(*_args, **_kwargs):
+                return {}
+
+            @staticmethod
+            def mark_ingress_delivery_succeeded(*_args, **_kwargs):
+                return {}
+
+            @staticmethod
+            def mark_ingress_delivery_ambiguous(*_args, **_kwargs):
+                return {}
+
             def record_completed_turn(
                 self,
                 user_text: str,
                 assistant_text: str,
                 *,
                 memory_receipt=None,
+                ingress_entry_id="",
             ):
                 self.calls.append(
                     (user_text, assistant_text)
@@ -1308,6 +1347,14 @@ class FastControlApiToolTests(unittest.TestCase):
             fast_api.collect_runtime_health = original_collect
             fast_api.ask_main_llm = original_ask
 
+        with patch.object(
+            fast_api,
+            "FAST_CONTROL_CONTINUITY_OWNER",
+            owner,
+        ):
+            response._run_before_write()
+            self.assertEqual(owner.calls, [])
+            response._run_after_write()
         payload = fast_api.json.loads(response.text or "{}")
         self.assertFalse(payload["ok"])
         self.assertEqual(
@@ -1325,11 +1372,8 @@ class FastControlApiToolTests(unittest.TestCase):
         self.assertNotIn("api-secret", public_text)
         self.assertNotIn("internal:9820", public_text)
         self.assertNotIn("C:\\\\private", public_text)
-        self.assertTrue(payload["continuity"]["durable"])
-        self.assertEqual(
-            payload["continuity"]["generation"],
-            7,
-        )
+        self.assertFalse(payload["continuity"]["durable"])
+        self.assertTrue(payload["continuity"]["pendingDelivery"])
         self.assertEqual(
             owner.calls,
             [("실패 테스트", payload["reply"])],

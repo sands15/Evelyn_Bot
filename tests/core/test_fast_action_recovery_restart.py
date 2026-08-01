@@ -242,7 +242,8 @@ class FastActionRecoveryRestartTests(unittest.TestCase):
         self.assertTrue(
             result["journal"]["externalReplayProtected"]
         )
-        self.assertEqual(result["generation"], 2)
+        # Bootstrap generation 1 + original turn + recovery notice.
+        self.assertEqual(result["generation"], 3)
         notice = result["messages"][-1]["text"]
         self.assertIn("자동으로 다시 시도하지 않았어", notice)
         self.assertEqual(

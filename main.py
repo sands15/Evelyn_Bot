@@ -138,6 +138,7 @@ from evelyn_core.voice_runtime_composition_runtime import (
     LocalMicCompositionDeps, VoiceDebugCompositionDeps, VoicePipelineCompositionDeps, VoiceRuntimeComposition, VoiceRuntimeCompositionDeps,
 )
 from evelyn_core.conversation_session_composition import ConversationSessionComposition, ConversationSessionCompositionDeps
+from evelyn_core.conversation_ingress_composition import build_main_conversation_ingress_composition
 from evelyn_core.conversation_observability_composition import ConversationObservabilityComposition, ConversationObservabilityCompositionDeps
 from evelyn_core.runtime_lifecycle_composition import (
     RuntimeLifecycleComposition, RuntimeLifecycleCompositionDeps, RuntimeProcessCompositionDeps, RuntimeStartupCompositionDeps,
@@ -290,16 +291,13 @@ from evelyn_core.voice_pipeline import (
     build_route_decision, build_transcript_result, build_voice_reply_request, build_voice_segment, classify_dialogue_turn,
 )
 from evelyn_voice import EvelynVoiceClient
-
 control_page_minecraft_item_icon_loader = MinecraftItemIconLoader(PROJECT_ROOT)
 _ORIGINAL_PRINT = builtins.print
 turn_trace_file_lock = threading.Lock()
-
 print = ConsoleOutputFilter(
     enabled=VOICE_CONSOLE_ONLY_STT_AND_REPLY, output=_ORIGINAL_PRINT,
     allowed_prefixes=ALLOWED_CONSOLE_PREFIXES,
 )
-
 if VOICE_CONSOLE_ONLY_STT_AND_REPLY:
     builtins.print = print
     logging.getLogger().setLevel(logging.CRITICAL)
@@ -328,6 +326,10 @@ session_continuity_checkpoint = SessionContinuityCheckpoint(
     system_prompt=SYSTEM_PROMPT, authenticity=load_continuity_authenticity(
         protected_root=PROJECT_ROOT, additional_protected_roots=(RUNTIME_ARTIFACTS_ROOT,)), log=print,
 )
+conversation_ingress_composition = build_main_conversation_ingress_composition(
+    RUNTIME_ARTIFACTS_ROOT, DISCORD_ENABLED, session_continuity_checkpoint,
+    ACTIVE_CONVERSATION_TEXT_SEC, ACTIVE_CONVERSATION_TEXT_QUESTION_SEC, print,
+)
 search_followup_recovery = SearchFollowupRecoveryJournal(path=RUNTIME_ARTIFACTS_ROOT / "search_followup_recovery" / "active.json", enabled=DISCORD_ENABLED)
 autonomy_authorization_manager = AutonomyAuthorizationManager(
     status_path=(
@@ -345,19 +347,16 @@ room_speaker_activity_store = RoomSpeakerActivityStore.create_empty()
 room_reply_in_progress: dict[str, bool] = {}
 voice_connect_locks: dict[int, asyncio.Lock] = {}
 instance_lock_path = Path(os.getenv("EVELYN_INSTANCE_LOCK_PATH", str(Path(__file__).resolve().with_name(".evelyn_bot.lock"))))
-
 discord_settings_runtime_deps = build_discord_settings_runtime_deps_from_main(
     default_command_prefix=DEFAULT_COMMAND_PREFIX, prefix_cache=guild_prefix_cache,
     now=time.time,
 )
 discord_settings = build_discord_settings_entrypoints(discord_settings_runtime_deps)
-
 instance_lock_manager = InstanceLockManager(
     build_instance_lock_runtime_deps(instance_lock_path)
 )
 release_instance_lock = instance_lock_manager.release
 acquire_instance_lock = instance_lock_manager.acquire
-
 atexit.register(release_instance_lock)
 
 bot = commands.Bot(
@@ -371,9 +370,8 @@ bot = commands.Bot(
 )
 
 SYSTEM_PROMPT = build_evelyn_system_prompt(omnivoice_tag_guidance=OMNIVOICE_TAG_GUIDANCE)
-
 session_locks: dict[str, asyncio.Lock] = {}
-reply_slot_locks: dict[str, asyncio.Lock] = {}
+reply_slot_locks: dict[str, asyncio.Lock] = {}; reply_slot_admission_locks: dict[str, asyncio.Lock] = {}
 tts_lock = asyncio.Lock()
 tts_playback_tracker = TtsPlaybackTracker()
 tts_playback_manager = TtsPlaybackManager(tts_playback_tracker)
@@ -2359,6 +2357,7 @@ discord_app_dependency_composition = DiscordAppDependencyComposition(
         empty_wake_text="이름만 부름. 친구처럼 짧게 반말로, 원래 하던 일을 잠깐 말하며 자연스럽게 반응해.", log_turn_event=log_turn_event,
         current_turn_id=current_turn_id, resolve_pending_proactive_question_for_turn=resolve_pending_proactive_question_for_turn,
         session_locks=session_locks, reply_slot_locks=reply_slot_locks,
+        reply_slot_admission_locks=reply_slot_admission_locks, conversation_ingress=conversation_ingress_composition,
         begin_user_text_turn=begin_user_text_turn, replace_room_turn_scope=replace_room_turn_scope,
         attach_current_task=_attach_current_task, auto_join_voice=AUTO_JOIN_VOICE,
         ensure_voice_client=ensure_voice_client, stream_text_reply=stream_text_reply,
@@ -2403,6 +2402,7 @@ discord_app_composition = DiscordAppComposition(
             runtime_status=DiscordRuntimeStatus(
                 gateway_ready=lambda: discord_gateway_connected(bot), bot_guilds=lambda: list(bot.guilds),
                 voice_client_type=EvelynVoiceClient, search_followup_recovery_status=search_followup_recovery.public_status,
+                conversation_ingress_recovery_status=conversation_ingress_composition.public_status,
             ),
         ),
         commands=DiscordCommandCompositionDeps(
@@ -2489,7 +2489,7 @@ if DISCORD_ENABLED and not DISCORD_BOT_TOKEN:
 acquire_instance_lock()
 autonomy_authorization_manager.initialize()
 minecraft_world_lease_owner.initialize()
-session_continuity_checkpoint.restore()
+session_continuity_checkpoint.restore(); conversation_ingress_composition.activate_after_continuity_restore()
 atexit.register(session_continuity_checkpoint.flush)
 if DISCORD_ENABLED:
     bot.run(DISCORD_BOT_TOKEN)

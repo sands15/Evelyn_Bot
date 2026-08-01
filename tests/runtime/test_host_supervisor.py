@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -13,7 +14,10 @@ RUNTIME_ROOT = REPO_ROOT / "evelyn_core" / "runtime"
 if str(RUNTIME_ROOT) not in sys.path:
     sys.path.insert(0, str(RUNTIME_ROOT))
 
-from evelyn_core.host_supervisor import HostSupervisor  # noqa: E402
+from evelyn_core.host_supervisor import (  # noqa: E402
+    BRIDGE_PROCESS_IDENTITY_SCHEMA,
+    HostSupervisor,
+)
 from evelyn_core.host_supervisor_client import SUPERVISOR_REQUEST_SCHEMA  # noqa: E402
 from evelyn_core.voice_validation import SUITE_ID, VoiceValidationManager  # noqa: E402
 
@@ -40,6 +44,35 @@ class FakeProcess:
 
     def wait(self, timeout=None):
         return self.returncode
+
+    def kill(self):
+        self.returncode = 1
+
+
+class UnstoppableFakeProcess(FakeProcess):
+    def terminate(self):
+        raise OSError("cannot stop")
+
+    def kill(self):
+        raise OSError("cannot kill")
+
+
+class FakeProcessOwner:
+    mode = "windows_job_kill_on_close"
+
+    def __init__(self, *, assign_result: bool = True) -> None:
+        self.ready = True
+        self.assign_result = assign_result
+        self.assignments: list[tuple[int, str]] = []
+        self.closed = False
+
+    def assign(self, process, birth_identity: str) -> bool:
+        self.assignments.append((int(process.pid), birth_identity))
+        return self.assign_result
+
+    def close(self) -> None:
+        self.closed = True
+        self.ready = False
 
 
 class FakeRetentionReporter:
@@ -68,6 +101,10 @@ class HostSupervisorTests(unittest.TestCase):
         root = Path(self.temp_dir.name)
         self.clock = FakeClock()
         self.commands = []
+        self.birth_identity = (
+            "windows:123456" if os.name == "nt" else "linux:123456"
+        )
+        self.process_owner = FakeProcessOwner()
 
         def run(command, **kwargs):
             self.commands.append((command, kwargs))
@@ -78,6 +115,12 @@ class HostSupervisorTests(unittest.TestCase):
             artifacts_root=root / "runtime_artifacts",
             run_command=run,
             now=self.clock,
+            birth_identity_reader=lambda pid: (
+                self.birth_identity if pid == FakeProcess.pid else None
+            ),
+            exact_process_terminator=lambda _pid, _birth: True,
+            process_owner=self.process_owner,
+            bridge_lock_probe=lambda: True,
         )
 
     def request(self, **overrides):
@@ -298,6 +341,10 @@ class HostSupervisorTests(unittest.TestCase):
             run_command=self.supervisor.run_command,
             now=self.clock,
             retention_reporter=reporter,
+            birth_identity_reader=lambda _pid: self.birth_identity,
+            exact_process_terminator=lambda _pid, _birth: True,
+            process_owner=self.process_owner,
+            bridge_lock_probe=lambda: True,
         )
         supervisor.request_stop()
 
@@ -306,6 +353,269 @@ class HostSupervisorTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertTrue(reporter.started)
         self.assertTrue(reporter.stopped)
+        self.assertTrue(self.process_owner.closed)
+
+    def write_prior_identity(
+        self,
+        *,
+        state: str,
+        pid: int = 0,
+        birth_identity: str = "",
+    ) -> None:
+        self.supervisor.bridge_identity_path.parent.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+        self.supervisor.bridge_identity_path.write_text(
+            json.dumps(
+                {
+                    "schema": BRIDGE_PROCESS_IDENTITY_SCHEMA,
+                    "state": state,
+                    "pid": pid,
+                    "birthIdentity": birth_identity,
+                    "updatedAt": self.clock(),
+                    "contentFree": True,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    def test_startup_reconciles_exact_orphan_from_crashed_supervisor(self):
+        prior_pid = 7788
+        self.write_prior_identity(
+            state="active",
+            pid=prior_pid,
+            birth_identity=self.birth_identity,
+        )
+        observations = [self.birth_identity, None]
+        terminated: list[tuple[int, str]] = []
+        self.supervisor.birth_identity_reader = lambda _pid: observations.pop(0)
+        self.supervisor.exact_process_terminator = (
+            lambda pid, birth: terminated.append((pid, birth)) or True
+        )
+
+        result = self.supervisor.reconcile_prior_bridge()
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(terminated, [(prior_pid, self.birth_identity)])
+        persisted = json.loads(
+            self.supervisor.bridge_identity_path.read_text(encoding="utf-8")
+        )
+        self.assertEqual(persisted["state"], "stopped")
+        self.assertEqual(persisted["pid"], 0)
+
+    def test_startup_never_signals_a_reused_pid(self):
+        prior_pid = 7788
+        reused_identity = (
+            "windows:999999" if os.name == "nt" else "linux:999999"
+        )
+        self.write_prior_identity(
+            state="active",
+            pid=prior_pid,
+            birth_identity=self.birth_identity,
+        )
+        terminate_calls: list[tuple[int, str]] = []
+        self.supervisor.birth_identity_reader = lambda _pid: reused_identity
+        self.supervisor.exact_process_terminator = (
+            lambda pid, birth: terminate_calls.append((pid, birth)) or True
+        )
+
+        result = self.supervisor.reconcile_prior_bridge()
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(terminate_calls, [])
+
+    def test_startup_fails_closed_when_orphan_stop_cannot_be_verified(self):
+        self.write_prior_identity(
+            state="active",
+            pid=7788,
+            birth_identity=self.birth_identity,
+        )
+        self.supervisor.birth_identity_reader = lambda _pid: self.birth_identity
+        self.supervisor.exact_process_terminator = lambda _pid, _birth: True
+
+        result = self.supervisor.reconcile_prior_bridge()
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(
+            result["error"],
+            "local_bridge_prior_process_stop_unverified",
+        )
+        self.assertTrue(self.supervisor.manual_intervention_required)
+
+    def test_stop_without_owned_handle_preserves_unverified_active_identity(self):
+        self.write_prior_identity(
+            state="active",
+            pid=7788,
+            birth_identity=self.birth_identity,
+        )
+        self.supervisor.birth_identity_reader = lambda _pid: self.birth_identity
+        self.supervisor.exact_process_terminator = lambda _pid, _birth: False
+        self.supervisor.child = None
+
+        result = self.supervisor.stop_bridge()
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(
+            result["error"],
+            "local_bridge_prior_process_stop_unverified",
+        )
+        persisted = json.loads(
+            self.supervisor.bridge_identity_path.read_text(encoding="utf-8")
+        )
+        self.assertEqual(persisted["state"], "active")
+        self.assertEqual(persisted["pid"], 7788)
+        self.assertEqual(persisted["birthIdentity"], self.birth_identity)
+
+    def test_stop_without_owned_handle_exactly_reconciles_orphan(self):
+        self.write_prior_identity(
+            state="active",
+            pid=7788,
+            birth_identity=self.birth_identity,
+        )
+        observations = [self.birth_identity, None]
+        self.supervisor.birth_identity_reader = lambda _pid: observations.pop(0)
+        self.supervisor.exact_process_terminator = lambda _pid, _birth: True
+        self.supervisor.child = None
+
+        result = self.supervisor.stop_bridge()
+
+        self.assertTrue(result["ok"], result)
+        persisted = json.loads(
+            self.supervisor.bridge_identity_path.read_text(encoding="utf-8")
+        )
+        self.assertEqual(persisted["state"], "stopped")
+
+    def test_startup_fails_closed_on_ambiguous_start_with_held_lock(self):
+        self.write_prior_identity(state="starting")
+        launches: list[bool] = []
+        self.supervisor.bridge_lock_probe = lambda: False
+        self.supervisor.popen = lambda *_args, **_kwargs: (
+            launches.append(True) or FakeProcess()
+        )
+
+        result = self.supervisor.start_bridge()
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(
+            result["error"],
+            "local_bridge_prior_process_start_ambiguous",
+        )
+        self.assertEqual(launches, [])
+
+    def test_job_assignment_failure_stops_exact_spawned_handle(self):
+        process = FakeProcess()
+        owner = FakeProcessOwner(assign_result=False)
+        supervisor = HostSupervisor(
+            project_root=self.supervisor.project_root,
+            artifacts_root=self.supervisor.artifacts_root,
+            popen=lambda *_args, **_kwargs: process,
+            run_command=self.supervisor.run_command,
+            now=self.clock,
+            birth_identity_reader=lambda _pid: self.birth_identity,
+            exact_process_terminator=lambda _pid, _birth: True,
+            process_owner=owner,
+            bridge_lock_probe=lambda: True,
+        )
+
+        result = supervisor.start_bridge()
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(
+            result["error"],
+            "local_bridge_process_owner_assignment_failed",
+        )
+        self.assertEqual(process.returncode, 0)
+        self.assertIsNone(supervisor.child)
+
+    def test_unstoppable_failed_spawn_keeps_handle_and_starting_identity(self):
+        process = UnstoppableFakeProcess()
+        owner = FakeProcessOwner(assign_result=False)
+        supervisor = HostSupervisor(
+            project_root=self.supervisor.project_root,
+            artifacts_root=self.supervisor.artifacts_root,
+            popen=lambda *_args, **_kwargs: process,
+            run_command=self.supervisor.run_command,
+            now=self.clock,
+            birth_identity_reader=lambda _pid: self.birth_identity,
+            exact_process_terminator=lambda _pid, _birth: True,
+            process_owner=owner,
+            bridge_lock_probe=lambda: True,
+        )
+
+        result = supervisor.start_bridge()
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(
+            result["error"],
+            "local_bridge_failed_spawn_stop_unverified",
+        )
+        self.assertIs(supervisor.child, process)
+        persisted = json.loads(
+            supervisor.bridge_identity_path.read_text(encoding="utf-8")
+        )
+        self.assertEqual(persisted["state"], "starting")
+
+    def test_restart_never_starts_when_exact_stop_failed(self):
+        starts: list[bool] = []
+        self.supervisor.stop_bridge = lambda: {
+            "ok": False,
+            "error": "local_bridge_process_stop_unverified",
+        }
+        self.supervisor.start_bridge = lambda *, automatic=False: (
+            starts.append(automatic) or {"ok": True}
+        )
+
+        result = self.supervisor.restart_bridge()
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(starts, [])
+        self.assertEqual(result["started"]["status"], "not_attempted")
+
+    def test_launch_failure_exposes_only_fixed_error_code(self):
+        def fail_launch(*_args, **_kwargs):
+            raise LookupError("private process detail")
+
+        self.supervisor.popen = fail_launch
+
+        result = self.supervisor.start_bridge()
+        public = json.dumps(self.supervisor.status())
+
+        self.assertEqual(result["error"], "local_bridge_launch_failed")
+        self.assertNotIn("LookupError", public)
+        self.assertNotIn("private process detail", public)
+
+    def test_identity_failure_exposes_only_fixed_error_code(self):
+        self.supervisor.popen = lambda *_args, **_kwargs: FakeProcess()
+
+        def fail_identity(_pid):
+            raise OSError("private identity detail")
+
+        self.supervisor.birth_identity_reader = fail_identity
+
+        result = self.supervisor.start_bridge()
+        public = json.dumps(self.supervisor.status())
+
+        self.assertEqual(
+            result["error"],
+            "local_bridge_process_identity_unavailable",
+        )
+        self.assertNotIn("OSError", public)
+        self.assertNotIn("private identity detail", public)
+
+    def test_status_requires_job_and_birth_identity_for_owned_child(self):
+        self.supervisor._startup_reconciled = True
+        self.supervisor.child = FakeProcess()
+        self.supervisor.child_birth_identity = self.birth_identity
+
+        payload = self.supervisor.status()
+
+        self.assertTrue(payload["localBridge"]["ownershipReady"])
+        self.assertTrue(payload["localBridge"]["birthIdentityRecorded"])
+        self.assertEqual(
+            payload["localBridge"]["ownershipMode"],
+            "windows_job_kill_on_close",
+        )
 
 
 if __name__ == "__main__":

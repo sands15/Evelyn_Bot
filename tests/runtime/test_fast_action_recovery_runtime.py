@@ -615,7 +615,9 @@ class FastActionRecoveryRuntimeTests(unittest.TestCase):
                 )
 
             self.assertFalse(result["durable"])
-            self.assertEqual(owner.status()["generation"], 0)
+            # The corrupt action journal must not advance the already-durable
+            # content-free bootstrap generation.
+            self.assertEqual(owner.status()["generation"], 1)
             self.assertEqual(
                 journal.public_status()["state"],
                 "corrupt",

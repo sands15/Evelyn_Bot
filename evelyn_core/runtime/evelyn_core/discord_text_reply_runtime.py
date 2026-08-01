@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -7,6 +8,9 @@ from typing import Any, Awaitable, Callable
 from .memory_exposure import (
     current_memory_exposure_position,
     memory_exposure_guard,
+)
+from .conversation_ingress_context import (
+    render_conversation_ingress_recovery_context,
 )
 
 
@@ -100,6 +104,17 @@ class DiscordEditSink:
         await self.streamer.close(final_text)
 
 
+async def _invoke_delivery_callback(
+    callback: Callable[..., Any] | None,
+    **kwargs: Any,
+) -> None:
+    if callback is None:
+        return
+    result = callback(**kwargs)
+    if inspect.isawaitable(result):
+        await result
+
+
 async def stream_text_reply_from_runtime(
     channel: Any,
     user_text: str,
@@ -115,6 +130,9 @@ async def stream_text_reply_from_runtime(
     include_voice: bool = False,
     turn_scope: Any = None,
     proactive_resolution: dict[str, Any] | None = None,
+    ingress_recovery_context: dict[str, Any] | None = None,
+    before_text_delivery: Callable[..., Any] | None = None,
+    after_text_delivery: Callable[..., Any] | None = None,
     deps: DiscordTextReplyRuntimeDeps,
 ) -> tuple[str, Any, dict[str, Any], Any]:
     task = deps.attach_current_task(turn_scope)
@@ -129,8 +147,23 @@ async def stream_text_reply_from_runtime(
         )
         metrics.setdefault("meta", {})["needs_tts"] = bool(include_voice)
 
+        rendered_recovery_context = (
+            render_conversation_ingress_recovery_context(
+                ingress_recovery_context
+            )
+        )
+        llm_user_text = (
+            f"{rendered_recovery_context}\n\n"
+            f"[현재 사용자 메시지]\n{user_text}"
+            if rendered_recovery_context
+            else user_text
+        )
+        if rendered_recovery_context:
+            metrics.setdefault("meta", {})[
+                "conversation_ingress_recovery_context"
+            ] = True
         answer = await deps.ask_llm_streaming(
-            user_text,
+            llm_user_text,
             guild_id=guild_id,
             session_key=session_key,
             room_key=room_key,
@@ -184,7 +217,21 @@ async def stream_text_reply_from_runtime(
                 text_message=final_text,
                 split_chunks=deps.split_tts_sentences,
             )
-            sent_message = (await deps.send_discord_text(channel, final_text)).message
+            await _invoke_delivery_callback(
+                before_text_delivery,
+                answer_text=answer,
+                final_text=final_text,
+                metrics=metrics,
+            )
+            sent_message = (
+                await deps.send_discord_text(channel, final_text)
+            ).message
+            await _invoke_delivery_callback(
+                after_text_delivery,
+                sent_message=sent_message,
+                final_text=final_text,
+                metrics=metrics,
+            )
             return answer, sent_message, metrics, delivery_plan
     finally:
         deps.detach_task(turn_scope, task)

@@ -512,7 +512,8 @@ class FastActionRecoveryTests(unittest.TestCase):
         )
 
         generation = status["checkpointGeneration"]
-        self.assertEqual(generation, 2)
+        # Generation 1 is the durable, content-free bootstrap head.
+        self.assertEqual(generation, 3)
         restored_owner = self.owner()
         restored_journal = self.journal()
         self.assertEqual(
@@ -535,7 +536,7 @@ class FastActionRecoveryTests(unittest.TestCase):
         journal.begin("fast-action-1")
         journal.prepare_terminal(
             "fast-action-1",
-            expected_generation=2,
+            expected_generation=3,
         )
 
         restored_owner = self.owner()
@@ -548,7 +549,7 @@ class FastActionRecoveryTests(unittest.TestCase):
 
         self.assertEqual(
             restored_owner.status()["generation"],
-            1,
+            2,
         )
         self.assertTrue(decision["noticeRequired"])
         self.assertEqual(
@@ -565,7 +566,7 @@ class FastActionRecoveryTests(unittest.TestCase):
         journal.begin("fast-action-1")
         journal.prepare_terminal(
             "fast-action-1",
-            expected_generation=2,
+            expected_generation=3,
         )
         journal.mark_interrupted("fast-action-1")
 
@@ -583,7 +584,7 @@ class FastActionRecoveryTests(unittest.TestCase):
 
         self.assertEqual(
             restored_owner.status()["generation"],
-            2,
+            3,
         )
         self.assertTrue(decision["noticeRequired"])
         self.assertEqual(

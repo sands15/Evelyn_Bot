@@ -65,6 +65,38 @@ class ControlPageProxyIntegrationTests(unittest.IsolatedAsyncioTestCase):
         control_page_server.CONTROL_PAGE_RUNTIME_HEALTH_CACHE.clear()
         control_page_server.bot_state_last_success_at = 0.0
 
+    async def test_chat_proxy_preserves_upstream_ingress_503(self) -> None:
+        class _ChatRequest:
+            async def json(self) -> dict[str, str]:
+                return {
+                    "text": "retry-safe question",
+                    "source": "control_page",
+                    "requestId": "stable-request-id",
+                }
+
+        upstream = web.json_response(
+            {
+                "ok": False,
+                "error": "conversation_ingress_recovery_unavailable",
+            },
+            status=503,
+        )
+        with patch.object(
+            control_page_server,
+            "proxy_json",
+            new=AsyncMock(return_value=upstream),
+        ):
+            response = await control_page_server.chat_handler(
+                _ChatRequest()
+            )
+
+        self.assertIs(response, upstream)
+        self.assertEqual(response.status, 503)
+        self.assertEqual(
+            json.loads(response.text)["error"],
+            "conversation_ingress_recovery_unavailable",
+        )
+
     async def start_bot_api(self, handler) -> tuple[web.AppRunner, int]:
         app = web.Application()
         app.router.add_get("/api/control-page/state", handler)

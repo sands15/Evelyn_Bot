@@ -21,6 +21,14 @@ from evelyn_core.assistant_contracts import (  # noqa: E402
     MemoryRecallResult,
 )
 from evelyn_core import memory_vault as memory_vault_module  # noqa: E402
+from evelyn_core.conversation_memory_exposure import (  # noqa: E402
+    filter_conversation_history_for_memory_exposure,
+)
+from evelyn_core.memory_prompt_policy import (  # noqa: E402
+    prepare_memory_context_for_prompt,
+    reconcile_memory_receipt_for_prompt,
+    validated_memory_grounding_state,
+)
 from evelyn_core.memory_vault import (  # noqa: E402
     MEMORY_DELETE_TOMBSTONE_SCHEMA,
     MEMORY_PROVENANCE_SCHEMA,
@@ -73,6 +81,102 @@ class MemoryVaultTests(unittest.TestCase):
 
         self.assertEqual(receipt["retrievalMode"], "unknown")
         self.assertNotIn(private_canary, str(receipt))
+
+    def test_recall_receipt_fails_closed_for_empty_or_malformed_sets(
+        self,
+    ) -> None:
+        note_id = "concept-0123456789abcdef"
+        empty = build_memory_recall_receipt(
+            MemoryRecallResult(
+                turn_id="turn-empty-rendered-set",
+                ok=True,
+                context_text="",
+                metadata={
+                    "provenance": [{"noteId": note_id}],
+                    "rendered_note_ids": [note_id],
+                },
+            )
+        )
+        malformed = build_memory_recall_receipt(
+            MemoryRecallResult(
+                turn_id="turn-malformed-provenance",
+                ok=True,
+                context_text="memory body",
+                metadata={
+                    "provenance": 7,
+                    "rendered_note_ids": [note_id],
+                },
+            )
+        )
+        mismatched = build_memory_recall_receipt(
+            MemoryRecallResult(
+                turn_id="turn-mismatched-rendered-set",
+                ok=True,
+                context_text="memory body",
+                metadata={
+                    "provenance": [{"noteId": note_id}],
+                    "rendered_note_ids": [],
+                },
+            )
+        )
+        malformed_source = build_memory_recall_receipt(
+            MemoryRecallResult(
+                turn_id="turn-malformed-source-type",
+                ok=True,
+                context_text="memory body",
+                metadata={
+                    "memory_version": float("inf"),
+                    "provenance": [
+                        {
+                            "noteId": note_id,
+                            "sourceType": "x" * 1_000,
+                        }
+                    ],
+                    "rendered_note_ids": [note_id],
+                },
+            )
+        )
+        duplicate = build_memory_recall_receipt(
+            MemoryRecallResult(
+                turn_id="turn-duplicate-provenance",
+                ok=True,
+                context_text="memory body",
+                metadata={
+                    "provenance": [
+                        {"noteId": note_id},
+                        {"noteId": note_id},
+                    ],
+                },
+            )
+        )
+        missing_declared_set = build_memory_recall_receipt(
+            MemoryRecallResult(
+                turn_id="turn-missing-rendered-set",
+                ok=True,
+                context_text="memory body",
+                metadata={
+                    "provenance": [{"noteId": note_id}],
+                },
+            )
+        )
+
+        self.assertEqual(empty["state"], "empty")
+        self.assertEqual(empty["groundingState"], "empty")
+        self.assertEqual(empty["noteIds"], [])
+        self.assertEqual(empty["provenanceCount"], 0)
+        for receipt in (
+            malformed,
+            mismatched,
+            malformed_source,
+            duplicate,
+            missing_declared_set,
+        ):
+            self.assertEqual(receipt["state"], "provided")
+            self.assertEqual(receipt["groundingState"], "unattributed")
+            self.assertEqual(receipt["noteIds"], [])
+            self.assertEqual(receipt["noteCount"], 0)
+            self.assertEqual(receipt["provenanceCount"], 0)
+        self.assertEqual(malformed_source["memoryVersion"], 0)
 
     def test_parse_front_matter_note(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -210,6 +314,79 @@ class MemoryVaultTests(unittest.TestCase):
         )
         self.assertEqual(receipt["retrievalMode"], "unknown")
         self.assertNotIn(private_canary, str(receipt))
+
+    def test_recall_rejects_schema_less_legacy_cache_payload(
+        self,
+    ) -> None:
+        private_canary = "LEGACY_UNTRACKED_PROCEDURE_CANARY"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_memory_vault_note(
+                note_type="concept",
+                title="Current Cache Contract",
+                body="current cache contract evidence",
+                root=root,
+            )
+            version = sync_memory_vault_index(root=root)
+            request = MemoryRecallRequest(
+                turn_id="turn-legacy-cache-contract",
+                session_key="session",
+                guild_id=None,
+                user_text="current cache contract evidence",
+                topic_id=None,
+                source="test",
+                max_items=1,
+            )
+            cache_key = memory_vault_module._cache_key(request, version)
+            legacy_payload = {
+                "context_text": (
+                    "[Procedural Memory]\n"
+                    f"- {private_canary}"
+                ),
+                "facts": [],
+                "sources": [],
+                "retrieval_mode": "cache",
+                "provenance": [],
+            }
+            with closing(
+                sqlite3.connect(
+                    memory_vault_module.memory_index_db_path(root)
+                )
+            ) as connection:
+                connection.execute(
+                    "INSERT OR REPLACE INTO retrieval_cache"
+                    "(cache_key, created_at, memory_version, payload) "
+                    "VALUES(?, ?, ?, ?)",
+                    (
+                        cache_key,
+                        memory_vault_module.time.time(),
+                        version,
+                        json.dumps(legacy_payload),
+                    ),
+                )
+                connection.commit()
+
+            result = recall_memory_vault(request, root=root)
+            with closing(
+                sqlite3.connect(
+                    memory_vault_module.memory_index_db_path(root)
+                )
+            ) as connection:
+                rewritten_payload = json.loads(
+                    connection.execute(
+                        "SELECT payload FROM retrieval_cache "
+                        "WHERE cache_key = ?",
+                        (cache_key,),
+                    ).fetchone()[0]
+                )
+
+        self.assertTrue(result.ok)
+        self.assertFalse(result.metadata["cache_hit"])
+        self.assertNotIn(private_canary, result.context_text)
+        self.assertEqual(
+            rewritten_payload["schema"],
+            memory_vault_module.MEMORY_RETRIEVAL_CACHE_SCHEMA,
+        )
 
     def test_cache_hit_closes_every_product_index_connection(
         self,
@@ -447,6 +624,255 @@ class MemoryVaultTests(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertIn("Test Evelyn TTS", result.context_text)
         self.assertIn("[Procedural Memory]", result.context_text)
+
+    def test_extra_procedure_uses_the_exact_rendered_note_set(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            concept_path = write_memory_vault_note(
+                note_type="concept",
+                title="Exact Set Concept",
+                body="exactset alpha beta gamma concept evidence",
+                importance=1.0,
+                root=root,
+            )
+            procedure_path = write_memory_vault_note(
+                note_type="procedure",
+                title="Exact Set Procedure",
+                body="exactset cleanup procedure evidence",
+                importance=0.0,
+                root=root,
+            )
+            concept_id = parse_memory_note(concept_path).note_id
+            procedure_id = parse_memory_note(procedure_path).note_id
+            request = MemoryRecallRequest(
+                turn_id="turn-extra-procedure-exact-set",
+                session_key=None,
+                guild_id=None,
+                user_text=(
+                    "memory vault exactset alpha beta gamma"
+                ),
+                topic_id=None,
+                source="test",
+                max_items=1,
+                metadata={"allow_internal_memory": True},
+            )
+            result = recall_memory_vault(request, root=root)
+            cached = recall_memory_vault(request, root=root)
+            receipt = build_memory_recall_receipt(result)
+
+        expected_ids = sorted([concept_id, procedure_id])
+        self.assertTrue(result.ok)
+        self.assertIn("[Memory Vault Notes]", result.context_text)
+        self.assertIn("[Procedural Memory]", result.context_text)
+        self.assertEqual(len(result.facts), 2)
+        self.assertTrue(
+            all(
+                result.context_text.count(snippet) == 1
+                for snippet in result.facts
+            )
+        )
+        self.assertEqual(len(result.sources), 2)
+        self.assertEqual(len(result.metadata["provenance"]), 2)
+        self.assertEqual(
+            sorted(result.metadata["rendered_note_ids"]),
+            expected_ids,
+        )
+        self.assertEqual(receipt["noteIds"], expected_ids)
+        self.assertEqual(receipt["noteCount"], 2)
+        self.assertEqual(receipt["provenanceCount"], 2)
+        self.assertTrue(cached.metadata["cache_hit"])
+        self.assertEqual(cached.context_text, result.context_text)
+        self.assertEqual(cached.facts, result.facts)
+        self.assertEqual(cached.sources, result.sources)
+        self.assertEqual(
+            cached.metadata["rendered_note_ids"],
+            result.metadata["rendered_note_ids"],
+        )
+        self.assertEqual(
+            cached.metadata["provenance"],
+            result.metadata["provenance"],
+        )
+
+    def test_selected_procedure_is_deduplicated_from_procedure_extras(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            primary_path = write_memory_vault_note(
+                note_type="procedure",
+                title="Dominant Procedure",
+                body="dominant alpha beta gamma operational steps",
+                importance=1.0,
+                root=root,
+            )
+            secondary_path = write_memory_vault_note(
+                note_type="procedure",
+                title="Secondary Procedure",
+                body="dominant fallback operational steps",
+                importance=0.0,
+                root=root,
+            )
+            expected_ids = sorted(
+                [
+                    parse_memory_note(primary_path).note_id,
+                    parse_memory_note(secondary_path).note_id,
+                ]
+            )
+            result = recall_memory_vault(
+                MemoryRecallRequest(
+                    turn_id="turn-procedure-dedupe",
+                    session_key=None,
+                    guild_id=None,
+                    user_text=(
+                        "memory vault dominant alpha beta gamma"
+                    ),
+                    topic_id=None,
+                    source="test",
+                    max_items=1,
+                    metadata={"allow_internal_memory": True},
+                ),
+                root=root,
+            )
+            receipt = build_memory_recall_receipt(result)
+
+        self.assertTrue(result.ok)
+        self.assertNotIn("[Memory Vault Notes]", result.context_text)
+        self.assertIn("[Procedural Memory]", result.context_text)
+        self.assertEqual(len(result.facts), 2)
+        self.assertTrue(
+            all(
+                result.context_text.count(snippet) == 1
+                for snippet in result.facts
+            )
+        )
+        self.assertEqual(len(set(result.sources)), 2)
+        self.assertEqual(
+            len(result.metadata["rendered_note_ids"]),
+            2,
+        )
+        self.assertEqual(
+            len(set(result.metadata["rendered_note_ids"])),
+            2,
+        )
+        self.assertEqual(receipt["noteIds"], expected_ids)
+        self.assertEqual(receipt["noteCount"], len(result.facts))
+        self.assertEqual(
+            receipt["provenanceCount"],
+            len(result.metadata["provenance"]),
+        )
+
+    def test_recall_normalizes_max_items_before_cache_and_fallback(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_memory_vault_note(
+                note_type="concept",
+                title="Normalized Recall Limit",
+                body="normalized recall limit marker",
+                root=root,
+            )
+            zero_request = MemoryRecallRequest(
+                turn_id="turn-zero-max-items",
+                session_key=None,
+                guild_id=None,
+                user_text="normalized recall limit marker",
+                topic_id=None,
+                source="test",
+                max_items=0,
+            )
+            one_request = MemoryRecallRequest(
+                turn_id="turn-one-max-items",
+                session_key=None,
+                guild_id=None,
+                user_text="normalized recall limit marker",
+                topic_id=None,
+                source="test",
+                max_items=1,
+            )
+            twelve_request = MemoryRecallRequest(
+                turn_id="turn-twelve-max-items",
+                session_key=None,
+                guild_id=None,
+                user_text="normalized recall limit marker",
+                topic_id=None,
+                source="test",
+                max_items=12,
+            )
+            oversized_request = MemoryRecallRequest(
+                turn_id="turn-oversized-max-items",
+                session_key=None,
+                guild_id=None,
+                user_text="normalized recall limit marker",
+                topic_id=None,
+                source="test",
+                max_items=999,
+            )
+            result = recall_memory_vault(zero_request, root=root)
+            version = result.metadata["memory_version"]
+
+        self.assertTrue(result.ok)
+        self.assertEqual(len(result.facts), 1)
+        self.assertEqual(
+            memory_vault_module._cache_key(zero_request, version),
+            memory_vault_module._cache_key(one_request, version),
+        )
+        self.assertEqual(
+            memory_vault_module._cache_key(twelve_request, version),
+            memory_vault_module._cache_key(
+                oversized_request,
+                version,
+            ),
+        )
+
+    def test_procedural_alias_is_internal_and_uses_procedure_section(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_memory_vault_note(
+                note_type="procedural",
+                title="Procedural Alias Boundary",
+                body="procedural alias boundary marker",
+                root=root,
+            )
+            general = recall_memory_vault(
+                MemoryRecallRequest(
+                    turn_id="turn-general-procedural-alias",
+                    session_key=None,
+                    guild_id=None,
+                    user_text="procedural alias boundary marker",
+                    topic_id=None,
+                    source="test",
+                    max_items=1,
+                ),
+                root=root,
+            )
+            admin = recall_memory_vault(
+                MemoryRecallRequest(
+                    turn_id="turn-admin-procedural-alias",
+                    session_key=None,
+                    guild_id=None,
+                    user_text=(
+                        "memory vault procedural alias boundary marker"
+                    ),
+                    topic_id=None,
+                    source="test",
+                    max_items=1,
+                ),
+                root=root,
+            )
+
+        self.assertTrue(general.ok)
+        self.assertNotIn("Procedural Alias Boundary", general.context_text)
+        self.assertTrue(admin.ok)
+        self.assertNotIn("[Memory Vault Notes]", admin.context_text)
+        self.assertIn("[Procedural Memory]", admin.context_text)
+        self.assertEqual(len(admin.facts), 1)
+        self.assertEqual(
+            admin.context_text.count(admin.facts[0]),
+            1,
+        )
 
     def test_general_recall_hides_runtime_management_notes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1371,6 +1797,84 @@ class MemoryVaultTests(unittest.TestCase):
         self.assertIsInstance(recreated_error, MemoryNoteDeletedError)
         self.assertEqual(reused["error"], "memory_delete_token_reused")
 
+    def test_deleted_procedure_invalidates_prior_receipt_bound_history(
+        self,
+    ) -> None:
+        assistant_canary = "ANSWER_DERIVED_FROM_DELETED_PROCEDURE"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_memory_vault_note(
+                note_type="concept",
+                title="History Exact Set Concept",
+                body="historyexact alpha beta gamma concept evidence",
+                importance=1.0,
+                root=root,
+            )
+            procedure_path = write_memory_vault_note(
+                note_type="procedure",
+                title="History Exact Set Procedure",
+                body="historyexact cleanup procedure evidence",
+                source="control-page-user",
+                importance=0.0,
+                root=root,
+            )
+            procedure = parse_memory_note(procedure_path)
+            receipt: dict[str, object] = {}
+            context = build_memory_vault_context(
+                7,
+                "memory vault historyexact alpha beta gamma",
+                source="test",
+                max_items=1,
+                root=root,
+                receipt=receipt,
+            )
+            grounding_state = validated_memory_grounding_state(
+                receipt,
+                has_context=bool(context),
+            )
+            boundary = prepare_memory_context_for_prompt(
+                context,
+                grounding_state=grounding_state,
+            )
+            reconcile_memory_receipt_for_prompt(receipt, boundary)
+            prior_version = receipt["memoryVersion"]
+
+            tombstone = memory_vault_module._append_memory_deletion_tombstone(
+                {
+                    "schema": MEMORY_DELETE_TOMBSTONE_SCHEMA,
+                    "noteId": procedure.note_id,
+                    "noteType": procedure.note_type,
+                    "sourceType": "user",
+                    "reason": "privacy_request",
+                    "deletedAt": "2026-08-02T00:00:00Z",
+                },
+                root=root,
+            )
+            current_version = sync_memory_vault_index(root=root)
+            outcome = filter_conversation_history_for_memory_exposure(
+                [
+                    {"role": "user", "text": "keep user turn"},
+                    {
+                        "role": "assistant",
+                        "text": assistant_canary,
+                        "memoryReceipt": receipt,
+                    },
+                ],
+                memory_index_dir=root / "memory_index",
+            )
+
+        self.assertIn("History Exact Set Procedure", boundary.context)
+        self.assertIn(procedure.note_id, receipt["suppliedNoteIds"])
+        self.assertEqual(tombstone["noteId"], procedure.note_id)
+        self.assertGreater(current_version, prior_version)
+        self.assertEqual(
+            outcome.messages,
+            ({"role": "user", "text": "keep user turn"},),
+        )
+        self.assertEqual(outcome.dropped_stale_version_count, 1)
+        self.assertIsNone(outcome.memory_exposure_position)
+        self.assertNotIn(assistant_canary, str(outcome.messages))
+
     def test_delete_opaque_canonicalizes_natural_language_front_matter_id(
         self,
     ) -> None:
@@ -1951,6 +2455,15 @@ class MemoryVaultTests(unittest.TestCase):
                 root=root,
                 receipt=receipt,
             )
+            cached_receipt: dict[str, object] = {}
+            cached_context = build_memory_vault_context(
+                123,
+                "receipt projection marker",
+                source="test",
+                max_items=5,
+                root=root,
+                receipt=cached_receipt,
+            )
             memory_provenance_backfill_preview(root=root)
             audit_raw = (
                 root
@@ -1963,8 +2476,15 @@ class MemoryVaultTests(unittest.TestCase):
         self.assertEqual(source.note_id, private_id)
         self.assertIn("receipt projection marker body", context)
         self.assertTrue(receipt["contentFree"])
+        self.assertIn("receipt projection marker body", cached_context)
+        self.assertTrue(cached_receipt["cacheHit"])
+        self.assertEqual(
+            cached_receipt["suppliedNoteIds"],
+            receipt["suppliedNoteIds"],
+        )
         self.assertTrue(audit_payload["contentFree"])
         self.assertNotIn(private_id, receipt_raw)
+        self.assertNotIn(private_id, str(cached_receipt))
         self.assertNotIn(source_label, receipt_raw)
         self.assertNotIn(private_id, audit_raw)
         self.assertTrue(

@@ -49,6 +49,9 @@ class DiscordRuntimeStatus:
         interval_sec: float = 1.0,
         now: Callable[[], float] = time.time,
         search_followup_recovery_status: Callable[[], dict[str, Any]] | None = None,
+        conversation_ingress_recovery_status: (
+            Callable[[], dict[str, Any]] | None
+        ) = None,
     ) -> None:
         self.gateway_ready = gateway_ready
         self.bot_guilds = bot_guilds
@@ -60,6 +63,9 @@ class DiscordRuntimeStatus:
         self.now = now
         self.search_followup_recovery_status = (
             search_followup_recovery_status
+        )
+        self.conversation_ingress_recovery_status = (
+            conversation_ingress_recovery_status
         )
         self.started_at = self.now()
         self.task: asyncio.Task[Any] | None = None
@@ -118,6 +124,81 @@ class DiscordRuntimeStatus:
                     "search_followup_recovery_status_failed",
                     exc,
                 )
+        conversation_ingress_recovery: dict[str, Any] = {}
+        if self.conversation_ingress_recovery_status is not None:
+            try:
+                raw_ingress_status = dict(
+                    self.conversation_ingress_recovery_status() or {}
+                )
+                raw_phases = raw_ingress_status.get("phases")
+                raw_phases = (
+                    raw_phases if isinstance(raw_phases, dict) else {}
+                )
+                conversation_ingress_recovery = {
+                    "schema": str(
+                        raw_ingress_status.get("schema") or ""
+                    ),
+                    "state": str(
+                        raw_ingress_status.get("state") or "unknown"
+                    ),
+                    "enabled": (
+                        raw_ingress_status.get("enabled") is True
+                    ),
+                    "ownerReady": (
+                        raw_ingress_status.get("ownerReady") is True
+                    ),
+                    "entryCount": int(
+                        raw_ingress_status.get("entryCount", 0) or 0
+                    ),
+                    "phases": {
+                        phase: int(raw_phases.get(phase, 0) or 0)
+                        for phase in (
+                            "accepted",
+                            "response_ready",
+                            "delivery_inflight",
+                            "delivery_succeeded",
+                            "delivery_ambiguous",
+                            "terminal_committing",
+                            "completed",
+                        )
+                    },
+                    "unansweredRecoveryCount": int(
+                        raw_ingress_status.get(
+                            "unansweredRecoveryCount",
+                            0,
+                        )
+                        or 0
+                    ),
+                    "ambiguousRecoveryCount": int(
+                        raw_ingress_status.get(
+                            "ambiguousRecoveryCount",
+                            0,
+                        )
+                        or 0
+                    ),
+                    "reconciledRecoveryCount": int(
+                        raw_ingress_status.get(
+                            "reconciledRecoveryCount",
+                            0,
+                        )
+                        or 0
+                    ),
+                    "reconciliationFailureCount": int(
+                        raw_ingress_status.get(
+                            "reconciliationFailureCount",
+                            0,
+                        )
+                        or 0
+                    ),
+                    "lastErrorCode": str(
+                        raw_ingress_status.get("lastErrorCode") or ""
+                    ),
+                }
+            except Exception as exc:
+                self.record_error(
+                    "conversation_ingress_recovery_status_failed",
+                    exc,
+                )
         return {
             "schema": DISCORD_STATUS_SCHEMA,
             "heartbeatAt": self.now(),
@@ -132,6 +213,9 @@ class DiscordRuntimeStatus:
             "sourceReady": source_identity.get("ready") is True,
             "sourceIdentity": source_identity,
             "searchFollowupRecovery": search_recovery,
+            "conversationIngressRecovery": (
+                conversation_ingress_recovery
+            ),
             "lastError": self.last_error,
             **self.runtime_errors.snapshot(),
         }

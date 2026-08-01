@@ -1965,6 +1965,8 @@ class SessionContinuityCheckpoint:
         self,
         session_key: str,
         turn_id: str = "",
+        *,
+        before_commit: Callable[[int], Any] | None = None,
     ) -> dict[str, Any]:
         """Durably anchor the named completed turn before returning."""
         started_at = float(self.commit_latency_clock())
@@ -1977,6 +1979,11 @@ class SessionContinuityCheckpoint:
             ):
                 raise ValueError("continuity_commit_target_invalid")
             with self._lock:
+                if before_commit is not None:
+                    snapshot = self._anchor_checkpoint_snapshot(
+                        self._checkpoint_snapshot()
+                    )
+                    before_commit(int(snapshot["generation"]) + 1)
                 status = self.flush(
                     force=True,
                     required_session_key=required_session,
@@ -2037,11 +2044,14 @@ class SessionContinuityCheckpoint:
         self,
         session_key: str,
         turn_id: str = "",
+        *,
+        before_commit: Callable[[int], Any] | None = None,
     ) -> dict[str, Any]:
         return await asyncio.to_thread(
             self.commit_completed_turn,
             session_key,
             turn_id,
+            before_commit=before_commit,
         )
 
     async def _run(self) -> None:

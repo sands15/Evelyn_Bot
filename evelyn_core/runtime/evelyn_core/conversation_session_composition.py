@@ -88,12 +88,14 @@ class ConversationSessionComposition:
         *,
         guild_id: int | None = None,
         user_id: int | None = None,
+        turn_id: str | None = None,
     ) -> Any:
         return begin_user_text_turn_from_runtime(
             session_key,
             user_text,
             guild_id=guild_id,
             user_id=user_id,
+            turn_id=turn_id,
             deps=self.deps.session(),
         )
 

@@ -35,6 +35,9 @@ Current invariants:
   cannot export a free-form identifier or mode label. Legacy evidence/turn IDs
   and explicit-confirmation source references use separate domain-separated
   opaque projections at the producer, final receipt, and durable turn summary.
+- recall renders one deduplicated note set; snippets, sources, provenance,
+  versioned retrieval-cache payloads, and receipt note IDs describe exactly
+  that set, including task-like procedural additions.
 - derivation-revocation state is canonical content-free JSON. Noncanonical or
   ambiguous IDs fail closed; a canonical target already absent from the live
   graph is retained only long enough for reconciliation to remove the stale
