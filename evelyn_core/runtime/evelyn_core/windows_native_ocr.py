@@ -80,7 +80,7 @@ class WindowsNativeOcr:
 
     def _confined_image(self, image_path: Path) -> Path:
         resolved_root = self.screenshot_root.resolve()
-        resolved_image = Path(image_path).resolve()
+        resolved_image = type(self.screenshot_root)(image_path).resolve()
         if (
             resolved_root not in (resolved_image, *resolved_image.parents)
             or not resolved_image.is_file()
