@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import threading
 import time
 from dataclasses import dataclass
@@ -8,6 +9,7 @@ from typing import Any, Callable
 
 from .config import DISCORD_FRAME_BYTES, DISCORD_PCM_CHANNELS, DISCORD_PCM_RATE, LOCAL_TTS_TAIL_SILENCE_MS
 from .text import clean_text
+from .voice_validation import validation_attempt_binding_is_current
 
 try:
     import sounddevice as sd
@@ -65,6 +67,33 @@ class LocalTtsPlaybackSnapshot:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class LocalTtsSourceContext:
+    source_turn_id: str | None
+    source_session_key: str | None
+    output_mode: str
+    validation_session_id: str | None
+    validation_step_id: str | None
+    validation_attempt_id: str | None
+
+
+@dataclass(slots=True)
+class _ActiveLocalTtsBinding:
+    token: object
+    generation: int
+    source: Any
+    turn_id: str | None
+    session_key: str | None
+    metrics: dict[str, Any] | None
+    stream: Any | None = None
+    worker: asyncio.Task[int] | None = None
+    stop_requested: bool = False
+    stop_acceptance_token: object | None = None
+    playback_started: bool = False
+    worker_terminal: bool = False
+    qualified_interrupt_committed: bool = False
+
+
 class LocalTtsPlaybackManager:
     def __init__(
         self,
@@ -72,6 +101,7 @@ class LocalTtsPlaybackManager:
         enabled: bool,
         device: str | int | None = None,
         log: Callable[[str], None] | None = None,
+        stop_wait_timeout_sec: float = 1.0,
     ) -> None:
         self.enabled = bool(enabled)
         self.device = normalize_output_device(device)
@@ -86,7 +116,9 @@ class LocalTtsPlaybackManager:
         self._state_lock = threading.Lock()
         self._current_source: Any | None = None
         self._current_stream: Any | None = None
-        self._stop_requested = False
+        self._active_binding: _ActiveLocalTtsBinding | None = None
+        self._generation = 0
+        self._stop_wait_timeout_sec = max(0.01, float(stop_wait_timeout_sec))
 
     def snapshot(self) -> dict[str, Any]:
         return LocalTtsPlaybackSnapshot(
@@ -100,25 +132,206 @@ class LocalTtsPlaybackManager:
             last_finished_at=self.last_finished_at,
         ).to_dict()
 
-    def request_stop(self, *, reason: str = "interrupt") -> bool:
-        with self._state_lock:
-            was_active = bool(self.active or self._current_source is not None or self._current_stream is not None)
-            if not was_active:
-                return False
-            self._stop_requested = True
-            source = self._current_source
-            stream = self._current_stream
+    @staticmethod
+    def _source_context(binding: _ActiveLocalTtsBinding) -> LocalTtsSourceContext:
+        meta = (
+            binding.metrics.get("meta", {})
+            if isinstance(binding.metrics, dict)
+            and isinstance(binding.metrics.get("meta"), dict)
+            else {}
+        )
 
+        def optional_text(value: Any) -> str | None:
+            cleaned = str(value or "").strip()
+            return cleaned or None
+
+        return LocalTtsSourceContext(
+            source_turn_id=optional_text(binding.turn_id),
+            source_session_key=optional_text(binding.session_key),
+            output_mode="local_speaker",
+            validation_session_id=optional_text(meta.get("validation_session_id")),
+            validation_step_id=optional_text(meta.get("validation_step_id")),
+            validation_attempt_id=optional_text(meta.get("validation_attempt_id")),
+        )
+
+    def active_source_context(self) -> LocalTtsSourceContext | None:
+        with self._state_lock:
+            binding = self._active_binding
+            return self._source_context(binding) if binding is not None else None
+
+    def request_stop(
+        self,
+        *,
+        reason: str = "interrupt",
+    ) -> LocalTtsSourceContext | None:
+        with self._state_lock:
+            binding = self._active_binding
+        if binding is None:
+            return None
+        context, controls_ok, _stop_acceptance_token = self._request_stop_for_binding(
+            binding,
+            reason=reason,
+        )
+        # A synchronous caller cannot prove that the exact playback worker has
+        # terminated. Qualified evidence therefore uses request_stop_and_wait().
+        if reason == "qualified_user_audio":
+            return None
+        return context if controls_ok else None
+
+    async def request_stop_and_wait(
+        self,
+        *,
+        reason: str = "interrupt",
+    ) -> LocalTtsSourceContext | None:
+        """Stop one exact binding and return evidence only after clean teardown.
+
+        The bounded wait is deliberately separate from request_stop(): the
+        interrupt gate needs proof that the device worker finished, while sync
+        cancellation callers must never block the event loop or a playback
+        worker on itself.
+        """
+        with self._state_lock:
+            binding = self._active_binding
+            generation = binding.generation if binding is not None else -1
+            worker = binding.worker if binding is not None else None
+            playback_started = bool(binding and binding.playback_started)
+            worker_terminal = bool(binding and binding.worker_terminal)
+        if binding is None or worker_terminal:
+            return None
+
+        validation_current = self._validation_attempt_is_current(binding)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self._stop_wait_timeout_sec
+        stop_result = await self._request_stop_for_binding_bounded(
+            binding,
+            reason=reason,
+            deadline=deadline,
+        )
+        if stop_result is None:
+            self._log(f"[LOCAL TTS] stop_timeout reason={reason}")
+            return None
+        context, controls_ok, stop_acceptance_token = stop_result
+        if (
+            reason == "qualified_user_audio"
+            and (
+                not playback_started
+                or not validation_current
+                or context is None
+                or worker is None
+                or not controls_ok
+                or stop_acceptance_token is None
+            )
+        ):
+            return None
+        if context is None or worker is None or not controls_ok:
+            return None
+
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            self._log(f"[LOCAL TTS] stop_timeout reason={reason}")
+            return None
+        try:
+            await asyncio.wait_for(
+                asyncio.shield(worker),
+                timeout=remaining,
+            )
+        except asyncio.TimeoutError:
+            self._log(f"[LOCAL TTS] stop_timeout reason={reason}")
+            return None
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self._log(
+                f"[LOCAL TTS] stop_failed reason={reason} "
+                f"errorType={type(exc).__name__}"
+            )
+            return None
+
+        with self._state_lock:
+            stale_generation = self._generation != generation
+        if stale_generation or not self._validation_attempt_is_current(binding):
+            return None
+        if reason == "qualified_user_audio":
+            if not self._commit_qualified_interrupt(
+                binding,
+                stop_acceptance_token=stop_acceptance_token,
+            ):
+                return None
+        return context
+
+    async def _request_stop_for_binding_bounded(
+        self,
+        binding: _ActiveLocalTtsBinding,
+        *,
+        reason: str,
+        deadline: float,
+    ) -> tuple[LocalTtsSourceContext | None, bool, object | None] | None:
+        """Run potentially blocking driver controls off-loop within one budget."""
+        result: list[tuple[LocalTtsSourceContext | None, bool, object | None]] = []
+        finished = threading.Event()
+
+        def control_worker() -> None:
+            try:
+                result.append(self._request_stop_for_binding(binding, reason=reason))
+            finally:
+                finished.set()
+
+        threading.Thread(
+            target=control_worker,
+            name=f"local-tts-stop-{id(binding.token)}",
+            daemon=True,
+        ).start()
+        loop = asyncio.get_running_loop()
+        while not finished.is_set():
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return None
+            await asyncio.sleep(min(0.01, remaining))
+        return result[0] if result else (None, False, None)
+
+    def _request_stop_for_binding(
+        self,
+        binding: _ActiveLocalTtsBinding,
+        *,
+        reason: str,
+    ) -> tuple[LocalTtsSourceContext | None, bool, object | None]:
+        with self._state_lock:
+            if (
+                self._active_binding is not binding
+                or binding.worker_terminal
+                or binding.stop_requested
+            ):
+                return None, False, None
+            binding.stop_requested = True
+            stop_acceptance_token = object()
+            binding.stop_acceptance_token = stop_acceptance_token
+            source = binding.source
+            stream = binding.stream
+            context = self._source_context(binding)
+
+        controls_ok = True
         if source is not None:
             finish = getattr(source, "finish", None)
             cleanup = getattr(source, "cleanup", None)
             try:
                 if finish is not None:
-                    finish()
+                    stopped = finish()
                 elif cleanup is not None:
-                    cleanup()
-            except Exception:
-                pass
+                    stopped = cleanup()
+                else:
+                    stopped = None
+                if stopped is False:
+                    controls_ok = False
+                    self._log(
+                        f"[LOCAL TTS] source_stop_failed reason={reason} "
+                        "errorType=ExplicitFalse"
+                    )
+            except Exception as exc:
+                controls_ok = False
+                self._log(
+                    f"[LOCAL TTS] source_stop_failed reason={reason} "
+                    f"errorType={type(exc).__name__}"
+                )
 
         if stream is not None:
             for method_name in ("abort", "stop"):
@@ -126,13 +339,23 @@ class LocalTtsPlaybackManager:
                 if method is None:
                     continue
                 try:
-                    method()
-                except Exception:
-                    pass
+                    stopped = method()
+                    if stopped is False:
+                        controls_ok = False
+                        self._log(
+                            f"[LOCAL TTS] stream_stop_failed method={method_name} "
+                            f"reason={reason} errorType=ExplicitFalse"
+                        )
+                except Exception as exc:
+                    controls_ok = False
+                    self._log(
+                        f"[LOCAL TTS] stream_stop_failed method={method_name} "
+                        f"reason={reason} errorType={type(exc).__name__}"
+                    )
                 break
 
         self._log(f"[LOCAL TTS] stop_requested reason={reason}")
-        return True
+        return context, controls_ok, stop_acceptance_token
 
     async def play_source(
         self,
@@ -140,6 +363,9 @@ class LocalTtsPlaybackManager:
         *,
         cleanup_source: bool = True,
         on_first_playback: Callable[[], None] | None = None,
+        turn_id: str | None = None,
+        session_key: str | None = None,
+        metrics: dict[str, Any] | None = None,
     ) -> bool:
         if not self.enabled:
             return False
@@ -152,51 +378,130 @@ class LocalTtsPlaybackManager:
 
         async with self._lock:
             with self._state_lock:
-                self._stop_requested = False
+                stopped_by_turn_lease = bool(
+                    isinstance(metrics, dict)
+                    and isinstance(metrics.get("meta"), dict)
+                    and metrics["meta"].get("qualified_tts_interrupt") is True
+                )
+            if stopped_by_turn_lease:
+                if cleanup_source:
+                    self._cleanup_source(source)
+                return False
+            with self._state_lock:
+                self._generation += 1
+                binding = _ActiveLocalTtsBinding(
+                    token=object(),
+                    generation=self._generation,
+                    source=source,
+                    turn_id=turn_id,
+                    session_key=session_key,
+                    metrics=metrics,
+                )
+                self._active_binding = binding
                 self._current_source = source
                 self._current_stream = None
                 self.active = True
                 self.last_error = ""
                 self.last_started_at = time.time()
             self._log(f"[LOCAL TTS] start device={self.device if self.device is not None else 'default'}")
-            try:
-                played = await asyncio.to_thread(
+            worker = asyncio.create_task(
+                asyncio.to_thread(
                     self._play_source_sync,
                     source,
+                    binding=binding,
                     on_first_playback=on_first_playback,
-                )
-                self.played_bytes += played
-                self.play_count += 1
+                ),
+                name=f"local-tts-playback-{id(binding.token)}",
+            )
+            with self._state_lock:
+                if self._active_binding is binding:
+                    binding.worker = worker
+            try:
+                played = await asyncio.shield(worker)
                 if played > 0:
+                    self.played_bytes += played
+                    self.play_count += 1
                     self._log(f"[LOCAL TTS] finished bytes={played} play_count={self.play_count}")
                 else:
                     self._log("[LOCAL TTS] no_audio")
                 return played > 0
             except asyncio.CancelledError:
-                self._cleanup_source(source)
+                self._request_stop_for_binding(
+                    binding,
+                    reason="playback_task_cancelled",
+                )
+                await self._await_worker_termination(worker)
                 raise
             except Exception as exc:
-                self.last_error = repr(exc)
-                self._log(f"[LOCAL TTS] playback_failed err={exc!r}")
+                error_type = type(exc).__name__
+                self.last_error = f"playback_failed:{error_type}"
+                self._log(
+                    f"[LOCAL TTS] playback_failed errorType={error_type}"
+                )
                 return False
             finally:
                 if cleanup_source:
                     self._cleanup_source(source)
                 with self._state_lock:
-                    self.last_finished_at = time.time()
-                    self.active = False
-                    self._current_source = None
-                    self._current_stream = None
-                    self._stop_requested = False
+                    if self._active_binding is binding:
+                        self.last_finished_at = time.time()
+                        self.active = False
+                        self._active_binding = None
+                        self._current_source = None
+                        self._current_stream = None
 
-    def _play_source_sync(self, source: Any, *, on_first_playback: Callable[[], None] | None = None) -> int:
-        if self._is_stop_requested():
+    @staticmethod
+    async def _await_worker_termination(worker: asyncio.Task[int]) -> None:
+        """Do not release the playback binding while its thread still owns audio."""
+        while not worker.done():
+            try:
+                await asyncio.shield(worker)
+            except asyncio.CancelledError:
+                # A repeated parent cancellation must not let the thread outlive
+                # the playback lock and binding that protect the output device.
+                continue
+            except Exception:
+                break
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            worker.result()
+
+    def _play_source_sync(
+        self,
+        source: Any,
+        *,
+        binding: _ActiveLocalTtsBinding,
+        on_first_playback: Callable[[], None] | None = None,
+    ) -> int:
+        try:
+            return self._play_source_sync_inner(
+                source,
+                binding=binding,
+                on_first_playback=on_first_playback,
+            )
+        finally:
+            with self._state_lock:
+                binding.worker_terminal = True
+
+    def _play_source_sync_inner(
+        self,
+        source: Any,
+        *,
+        binding: _ActiveLocalTtsBinding,
+        on_first_playback: Callable[[], None] | None = None,
+    ) -> int:
+        if self._is_stop_requested(binding):
             return 0
         first_chunk = source.read()
         source_error = getattr(source, "error", None)
         if source_error is not None:
             raise source_error
         if not first_chunk:
+            return 0
+        if not self._validation_attempt_is_current(binding):
+            self._mark_terminal_no_fallback(
+                binding,
+                reason="validation_attempt_stale",
+            )
             return 0
 
         played = 0
@@ -208,10 +513,22 @@ class LocalTtsPlaybackManager:
             blocksize=max(1, DISCORD_FRAME_BYTES // (DISCORD_PCM_CHANNELS * 2)),
         ) as stream:
             with self._state_lock:
-                self._current_stream = stream
-            if self._is_stop_requested():
+                if self._active_binding is binding:
+                    binding.stream = stream
+                    self._current_stream = stream
+            if self._is_stop_requested(binding):
                 return played
+            if not self._validation_attempt_is_current(binding):
+                self._mark_terminal_no_fallback(
+                    binding,
+                    reason="validation_attempt_stale",
+                )
+                return played
+            self._mark_first_playback_attempt(binding)
             stream.write(first_chunk)
+            with self._state_lock:
+                if self._active_binding is binding:
+                    binding.playback_started = True
             if on_first_playback is not None:
                 try:
                     on_first_playback()
@@ -219,12 +536,12 @@ class LocalTtsPlaybackManager:
                     pass
             played += len(first_chunk)
             while True:
-                if self._is_stop_requested():
+                if self._is_stop_requested(binding):
                     break
                 chunk = source.read()
                 if not chunk:
                     break
-                if self._is_stop_requested():
+                if self._is_stop_requested(binding):
                     break
                 stream.write(chunk)
                 played += len(chunk)
@@ -232,14 +549,83 @@ class LocalTtsPlaybackManager:
             if source_error is not None:
                 raise source_error
             tail_silence = local_tts_tail_silence_bytes()
-            if played > 0 and tail_silence and not self._is_stop_requested():
+            if played > 0 and tail_silence and not self._is_stop_requested(binding):
                 stream.write(tail_silence)
                 played += len(tail_silence)
         return played
 
-    def _is_stop_requested(self) -> bool:
+    @staticmethod
+    def _mark_first_playback_attempt(binding: _ActiveLocalTtsBinding) -> None:
+        """Lease the turn before a device write can partially emit and fail."""
+        metrics = binding.metrics
+        if not isinstance(metrics, dict):
+            return
+        meta = metrics.get("meta")
+        if not isinstance(meta, dict):
+            meta = {}
+            metrics["meta"] = meta
+        meta["local_tts_playback_attempted"] = True
+
+    def _commit_qualified_interrupt(
+        self,
+        binding: _ActiveLocalTtsBinding,
+        *,
+        stop_acceptance_token: object,
+    ) -> bool:
         with self._state_lock:
-            return self._stop_requested
+            if (
+                binding.qualified_interrupt_committed
+                or not binding.playback_started
+                or not binding.worker_terminal
+                or binding.stop_acceptance_token is not stop_acceptance_token
+                or self._generation != binding.generation
+            ):
+                return False
+            metrics = binding.metrics
+            if not isinstance(metrics, dict):
+                return False
+            meta = metrics.get("meta")
+            if not isinstance(meta, dict):
+                meta = {}
+                metrics["meta"] = meta
+            if meta.get("qualified_tts_interrupt") is True:
+                return False
+            meta["qualified_tts_interrupt"] = True
+            binding.qualified_interrupt_committed = True
+            return True
+
+    @staticmethod
+    def _validation_attempt_is_current(binding: _ActiveLocalTtsBinding) -> bool:
+        metrics = binding.metrics
+        meta = metrics.get("meta") if isinstance(metrics, dict) else None
+        try:
+            return validation_attempt_binding_is_current(
+                meta,
+                surface="local",
+                reject_unbound_when_active=True,
+            )
+        except Exception:
+            return False
+
+    @staticmethod
+    def _mark_terminal_no_fallback(
+        binding: _ActiveLocalTtsBinding,
+        *,
+        reason: str,
+    ) -> None:
+        metrics = binding.metrics
+        if not isinstance(metrics, dict):
+            return
+        meta = metrics.get("meta")
+        if not isinstance(meta, dict):
+            meta = {}
+            metrics["meta"] = meta
+        meta["local_tts_playback_terminal_no_fallback"] = True
+        meta["local_tts_playback_rejected_reason"] = reason
+
+    def _is_stop_requested(self, binding: _ActiveLocalTtsBinding) -> bool:
+        with self._state_lock:
+            return self._active_binding is not binding or binding.stop_requested
 
     @staticmethod
     def _cleanup_source(source: Any) -> None:

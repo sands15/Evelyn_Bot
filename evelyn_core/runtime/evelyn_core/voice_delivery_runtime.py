@@ -31,10 +31,18 @@ class VoiceDeliveryRuntimeDeps:
 
 
 class ReplyStreamFanout:
-    def __init__(self, sinks: list[Any]):
+    def __init__(
+        self,
+        sinks: list[Any],
+        *,
+        on_reply_started: Callable[[], None] | None = None,
+    ):
         self.sinks = [sink for sink in sinks if sink is not None]
+        self.on_reply_started = on_reply_started
 
     async def on_chunk(self, text: str) -> None:
+        if clean_text(text) and self.on_reply_started is not None:
+            self.on_reply_started()
         for sink in self.sinks:
             await sink.on_chunk(text)
 
@@ -69,9 +77,14 @@ def _prepare_voice_metrics(
         metrics.setdefault("meta", {})
     meta = metrics.setdefault("meta", {})
     meta["needs_tts"] = True
+    meta.setdefault("reply_started", False)
+    meta.setdefault("reply_final", False)
+    meta.setdefault("qualified_tts_interrupt", False)
     if local_speaker:
         meta["output_mode"] = "local_speaker"
         meta["delivery_mode"] = "llm_sentence_stream"
+        meta.setdefault("local_tts_playback_attempted", False)
+        meta.setdefault("local_tts_playback_terminal_no_fallback", False)
     metrics.setdefault("tts_request_logged", False)
     metrics.setdefault("tts_response_headers_logged", False)
     metrics.setdefault("tts_first_byte_logged", False)
@@ -79,6 +92,22 @@ def _prepare_voice_metrics(
     metrics.setdefault("first_packet_sent_logged", False)
     metrics.setdefault("local_first_playback_logged", False)
     return metrics
+
+
+def _local_tts_fallback_block_reason(metrics: dict[str, Any]) -> str | None:
+    meta = metrics.get("meta")
+    if isinstance(meta, dict):
+        if meta.get("local_tts_playback_terminal_no_fallback") is True:
+            return str(
+                meta.get("local_tts_playback_rejected_reason")
+                or "terminal_no_fallback"
+            )
+        if meta.get("local_tts_playback_attempted") is True:
+            return "playback_attempted"
+    marks = metrics.get("marks")
+    if isinstance(marks, dict) and "local_tts_first_playback" in marks:
+        return "playback_attempted"
+    return None
 
 
 async def finalize_voice_answer_from_runtime(
@@ -90,6 +119,12 @@ async def finalize_voice_answer_from_runtime(
     deps: VoiceDeliveryRuntimeDeps,
 ) -> tuple[str, int]:
     cleaned_answer = clean_text(answer)
+    meta = metrics.setdefault("meta", {})
+    if cleaned_answer:
+        meta["reply_started"] = True
+    meta["reply_final"] = bool(cleaned_answer)
+    if not cleaned_answer:
+        meta["voice_delivery_failure_code"] = "voice_delivery_empty"
     deps.log_voice_stage(metrics, "LLM 완료", extra=f"chars={len(cleaned_answer)}", key="llm_done")
     if cleaned_answer and on_final_answer is not None:
         await on_final_answer(cleaned_answer)
@@ -185,7 +220,13 @@ async def ask_llm_and_speak_local_from_runtime(
             session_key=session_key,
             turn_scope=turn_scope,
         )
-        fanout = ReplyStreamFanout([delivery])
+        fanout = ReplyStreamFanout(
+            [delivery],
+            on_reply_started=lambda: metrics.setdefault("meta", {}).__setitem__(
+                "reply_started",
+                True,
+            ),
+        )
         answer = ""
         cleaned_answer = ""
         queued_sentence_count = 0
@@ -229,7 +270,18 @@ async def ask_llm_and_speak_local_from_runtime(
                 )
                 fallback_needed = True
             playback_count_after = deps.local_playback_count()
-            if queued_sentence_count <= 0 or playback_count_after <= playback_count_before:
+            fallback_block_reason = _local_tts_fallback_block_reason(metrics)
+            no_completed_playback = (
+                queued_sentence_count <= 0
+                or playback_count_after <= playback_count_before
+            )
+            if fallback_block_reason is not None:
+                if fallback_needed or no_completed_playback:
+                    metrics.setdefault("meta", {})[
+                        "local_streaming_tts_fallback_suppressed_reason"
+                    ] = fallback_block_reason
+                fallback_needed = False
+            elif no_completed_playback:
                 fallback_needed = True
                 metrics.setdefault("meta", {})["local_streaming_tts_fallback_reason"] = (
                     "no_sentence_queued" if queued_sentence_count <= 0 else "no_local_playback"
@@ -333,7 +385,13 @@ async def ask_llm_and_speak_streaming_from_runtime(
             session_key=session_key,
             turn_scope=turn_scope,
         )
-        fanout = ReplyStreamFanout([delivery])
+        fanout = ReplyStreamFanout(
+            [delivery],
+            on_reply_started=lambda: metrics.setdefault("meta", {}).__setitem__(
+                "reply_started",
+                True,
+            ),
+        )
 
         answer = ""
         queued_sentence_count = 0

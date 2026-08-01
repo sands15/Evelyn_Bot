@@ -50,6 +50,13 @@ class TranscribeRequest(BaseModel):
     max_new_tokens: int = 256
     stage: str = "full"
     language: str | None = None
+    validation_bound: bool = False
+
+
+def validation_text_for_log(value: Any, *, validation_bound: bool) -> Any:
+    if not validation_bound:
+        return value
+    return f"<validation-text chars={len(str(value or ''))}>"
 
 
 def resolve_torch_dtype() -> torch.dtype:
@@ -202,7 +209,12 @@ def transcribe(payload: TranscribeRequest) -> dict[str, Any]:
         raise
     text = clean_text(getattr(results[0], "text", "") if results else "")
     duration_ms = (time.monotonic() - started) * 1000.0
-    print(f"[STT SERVICE DONE][{payload.stage}] sec={audio.size / float(sampling_rate):.2f} text={text!r}", flush=True)
+    print(
+        f"[STT SERVICE DONE][{payload.stage}] "
+        f"sec={audio.size / float(sampling_rate):.2f} "
+        f"text={validation_text_for_log(text, validation_bound=payload.validation_bound)!r}",
+        flush=True,
+    )
     return {
         "text": text,
         "durationMs": round(duration_ms, 1),

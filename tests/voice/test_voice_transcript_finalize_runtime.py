@@ -78,7 +78,11 @@ class VoiceTranscriptFinalizeRuntimeTests(unittest.TestCase):
 
     def finalize(self):
         return finalize_voice_transcript_from_runtime(
-            member=SimpleNamespace(id=7, display_name="정훈"),
+            member=SimpleNamespace(
+                id=7,
+                display_name="정훈",
+                guild=SimpleNamespace(id=11),
+            ),
             text="원문",
             partial_text="부분",
             session_key="voice:11:7",
@@ -162,6 +166,14 @@ class VoiceTranscriptFinalizeRuntimeTests(unittest.TestCase):
 
     def test_validation_observer_adds_trace_metadata_without_transcript(self) -> None:
         calls = []
+        self.metrics["meta"].update(
+            {
+                "validation_session_id": "validation-1",
+                "validation_step_id": "02-listening",
+                "validation_attempt": 2,
+                "validation_attempt_id": "attempt-private-2",
+            }
+        )
         self.deps = replace(
             self.deps,
             validation_transcript_observer=lambda surface, transcript, **kwargs: (
@@ -169,6 +181,8 @@ class VoiceTranscriptFinalizeRuntimeTests(unittest.TestCase):
                 or {
                     "sessionId": "validation-1",
                     "stepId": "02-listening",
+                    "attempt": 2,
+                    "attemptId": "attempt-private-2",
                     "matched": True,
                 }
             ),
@@ -178,6 +192,10 @@ class VoiceTranscriptFinalizeRuntimeTests(unittest.TestCase):
 
         self.assertEqual(calls[0][0], "discord")
         self.assertEqual(calls[0][1], "수정 문장")
+        self.assertEqual(calls[0][2]["session_id"], "validation-1")
+        self.assertEqual(calls[0][2]["step_id"], "02-listening")
+        self.assertEqual(calls[0][2]["attempt_id"], "attempt-private-2")
+        self.assertEqual(calls[0][2]["guildId"], 11)
         self.assertEqual(
             self.metrics["meta"]["validation_session_id"],
             "validation-1",
@@ -186,7 +204,40 @@ class VoiceTranscriptFinalizeRuntimeTests(unittest.TestCase):
             self.metrics["meta"]["validation_step_id"],
             "02-listening",
         )
+        self.assertEqual(self.metrics["meta"]["validation_attempt"], 2)
+        self.assertEqual(
+            self.metrics["meta"]["validation_attempt_id"],
+            "attempt-private-2",
+        )
         self.assertNotIn("validation_transcript", self.metrics["meta"])
+
+    def test_validation_bound_transcript_is_redacted_from_observability_logs(self) -> None:
+        secret = "VOICE_PRIVACY_SENTINEL_FINALIZE_7c91"
+        self.metrics["meta"].update(
+            {
+                "validation_session_id": "validation-private",
+                "validation_step_id": "08-barge-in",
+                "validation_attempt": 2,
+                "validation_attempt_id": "attempt-private-2",
+                "tts_interrupted_by_user_audio": True,
+            }
+        )
+        self.transcript = FakeTranscriptResult(secret, secret)
+        self.final_flow.corrected_text = secret
+        self.final_flow.committed_text = secret
+        self.final_flow.transcript_result = self.transcript
+        self.merge_result = (f"merged {secret}", {"delta_sec": 0.42})
+
+        self.finalize()
+
+        observable_events = [
+            payload
+            for kind, payload in self.events
+            if kind in {"print", "stage"}
+        ]
+        rendered = repr(observable_events)
+        self.assertNotIn(secret, rendered)
+        self.assertIn("<validation-text chars=", rendered)
 
     def test_main_delegates_transcript_finalization_to_runtime_module(self) -> None:
         source = (REPO_ROOT / "main.py").read_text(encoding="utf-8")

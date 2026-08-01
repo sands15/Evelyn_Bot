@@ -62,6 +62,7 @@ class VoiceTurnDependencyCompositionDeps:
     build_voice_ingress_context: Callable[..., Any]
     next_segment_id: Callable[..., int]
     new_turn_id: Callable[..., str]
+    validation_context_provider: Callable[..., dict[str, Any] | None]
     build_voice_ingress_item: Callable[..., Any]
     voice_ingress_queue_depth: Callable[[], int]
     schedule_voice_utterance_item: Callable[..., Any]
@@ -164,6 +165,7 @@ class VoiceTurnDependencyComposition:
             next_segment_id=deps.next_segment_id,
             new_turn_id=deps.new_turn_id,
             room_state_snapshot=deps.room_state_snapshot,
+            validation_context_provider=deps.validation_context_provider,
             build_voice_ingress_item=deps.build_voice_ingress_item,
             voice_ingress_queue_depth=deps.voice_ingress_queue_depth,
             schedule_voice_utterance_item=deps.schedule_voice_utterance_item,

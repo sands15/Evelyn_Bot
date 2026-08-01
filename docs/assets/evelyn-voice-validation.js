@@ -97,16 +97,20 @@
   function renderStep(session) {
     const step = session.currentStep || {};
     if (!step.id || session.state !== "running") return "";
+    const replyEvidence = step.kind === "barge_source"
+      ? validationEvent("답변 시작", eventCount(step, "reply_started") === 1)
+      : validationEvent("답변 완료", eventCount(step, "reply_final") === 1);
     const events = [
       validationEvent("STT 일치", Boolean(step.match && step.match.matched)),
       validationEvent("턴 수락", eventCount(step, "turn_accepted") === 1),
-      validationEvent("답변", eventCount(step, "reply_final") === 1),
+      replyEvidence,
       validationEvent("재생 시작", eventCount(step, "playback_started") === 1),
       validationEvent("재생 완료", eventCount(step, "playback_completed") === 1),
       validationEvent("재생 취소", eventCount(step, "playback_cancelled") === 1),
     ].join("");
     const heardApplicable = step.kind === "normal" || step.kind === "barge_interrupt";
     const canConfirm = heardApplicable && eventCount(step, "playback_completed") === 1;
+    const canRetry = step.status === "failed";
     const silenceStarted = Number(step.silenceStartedAt || 0);
     const silenceRemaining = step.kind === "silence"
       ? Math.max(0, Number(step.silenceSec || 15) - Math.floor(Date.now() / 1000 - silenceStarted))
@@ -132,7 +136,7 @@
       `<div class="voice-validation-events">${events}</div>`,
       '<div class="voice-validation-actions">',
       heardApplicable ? `<button class="is-primary" type="button" data-voice-confirm="1" ${canConfirm ? "" : "disabled"}>실제로 들렸음</button>` : "",
-      `<button type="button" data-voice-retry="1">단계 재시도</button>`,
+      `<button type="button" data-voice-retry="1" ${canRetry ? "" : "disabled"}>단계 재시도</button>`,
       `<button class="is-danger" type="button" data-voice-abort="1">세션 중단</button>`,
       "</div>",
       "</article>",
@@ -370,12 +374,14 @@
       await mutate("/api/control-page/voice-validation/confirm", {
         sessionId: session.sessionId,
         stepId: step.id,
+        attempt: step.attempt,
         heard: true,
       });
     } else if (event.target.closest("[data-voice-retry]")) {
       await mutate("/api/control-page/voice-validation/retry", {
         sessionId: session.sessionId,
         stepId: step.id,
+        attempt: step.attempt,
       });
     } else if (event.target.closest("[data-voice-abort]")) {
       if (window.confirm("현재 음성 검증 세션을 중단할까요?")) {

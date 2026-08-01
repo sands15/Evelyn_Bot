@@ -106,6 +106,25 @@ class VoicePipelineStateTests(unittest.TestCase):
         self.assertEqual(events[0][1]["error_type"], "RuntimeError")
         self.assertNotIn("boom", str(events))
 
+    def test_playback_failure_marks_typed_turn_summary_evidence(self) -> None:
+        metrics = {"meta": {"turn_id": "turn-playback"}}
+
+        record_voice_pipeline_failure_from_runtime(
+            default_voice_pipeline_counters(),
+            default_voice_pipeline_state(),
+            "tts_playback_failed",
+            RuntimeError("private playback detail"),
+            merge_log_event_payload=lambda *, explicit, extra=None: {
+                **explicit,
+                **(extra or {}),
+            },
+            log_turn_event=lambda _event, **_payload: None,
+            metrics=metrics,
+        )
+
+        self.assertIs(metrics["meta"]["playback_failed"], True)
+        self.assertNotIn("private playback detail", str(metrics))
+
     def test_snapshot_closes_over_legacy_private_failure_fields(self) -> None:
         state = default_voice_pipeline_state()
         state.update(

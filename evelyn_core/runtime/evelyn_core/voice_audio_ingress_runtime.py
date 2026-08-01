@@ -131,6 +131,16 @@ def prepare_voice_audio_ingress_from_runtime(
         segment_id=segment_id,
     )
     if isinstance(debug_meta, dict):
+        meta = metrics.setdefault("meta", {})
+        for key in (
+            "validation_session_id",
+            "validation_step_id",
+            "validation_attempt",
+            "validation_attempt_id",
+        ):
+            value = debug_meta.get(key)
+            if value not in (None, ""):
+                meta[key] = value
         queue_wait_ms = debug_meta.get("queue_wait_ms")
         if queue_wait_ms is not None:
             try:
@@ -138,9 +148,9 @@ def prepare_voice_audio_ingress_from_runtime(
             except (TypeError, ValueError):
                 pass
             else:
-                metrics.setdefault("meta", {})["voice_queue_wait_ms"] = parsed_queue_wait_ms
+                meta["voice_queue_wait_ms"] = parsed_queue_wait_ms
                 metrics.setdefault("marks", {})["voice_queue_wait_ms"] = parsed_queue_wait_ms
-        metrics.setdefault("meta", {})["ingress_source"] = str(debug_meta.get("source") or "discord_voice")
+        meta["ingress_source"] = str(debug_meta.get("source") or "discord_voice")
     deps.log_voice_stage(
         metrics,
         "voice_worker_turn 시작",

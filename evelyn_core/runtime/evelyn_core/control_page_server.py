@@ -65,7 +65,11 @@ from .voice_capture_consent import (
     attach_voice_capture_consent,
     get_voice_capture_consent_manager,
 )
-from .voice_validation import SUITE_ID, get_voice_validation_manager
+from .voice_validation import (
+    SUITE_ID,
+    get_voice_validation_manager,
+    resolve_discord_validation_target,
+)
 
 
 PROJECT_ROOT = Path(os.getenv("EVELYN_PROJECT_ROOT") or Path(__file__).resolve().parents[3])
@@ -1236,12 +1240,28 @@ async def voice_validation_start_handler(request: web.Request) -> web.StreamResp
         request.app,
         validation_session=current_validation,
     )
-    health = await cached_runtime_health(force=True)
+    raw_health = await CONTROL_PAGE_RUNTIME_HEALTH_CACHE.get(force=True)
+    health = public_runtime_health_snapshot(raw_health)
     capabilities = _voice_capabilities_with_capture_consent(health)
+    normalized_requested_surfaces = {
+        str(item or "").strip().lower() for item in surfaces
+    }
+    discord_target = None
+    if suite == SUITE_ID and "discord" in normalized_requested_surfaces:
+        target_resolution = resolve_discord_validation_target(raw_health)
+        if not target_resolution.get("ok") and current_validation.get("state") in {
+            "idle",
+            "passed",
+            "failed",
+            "aborted",
+        }:
+            return json_response(target_resolution, status=409)
+        discord_target = target_resolution.get("discordTarget")
     result = validation_manager.start(
         suite=suite,
         surfaces=[str(item) for item in surfaces],
         capabilities=capabilities,
+        discord_target=discord_target,
     )
     session = dict(result.get("session") or {})
     if (
@@ -1253,7 +1273,18 @@ async def voice_validation_start_handler(request: web.Request) -> web.StreamResp
             str(session.get("sessionId") or "")
         )
         result["session"] = validation_manager.snapshot(capabilities=capabilities)
-    status = 201 if result.get("ok") else 409 if result.get("error") == "validation_session_active" else 400
+    status = (
+        201
+        if result.get("ok")
+        else 409
+        if result.get("error")
+        in {
+            "validation_session_active",
+            "discord_target_unavailable",
+            "ambiguous_discord_target",
+        }
+        else 400
+    )
     return json_response(result, status=status)
 
 
@@ -1262,11 +1293,21 @@ async def voice_validation_confirm_handler(request: web.Request) -> web.StreamRe
         payload = await request.json()
     except Exception:
         payload = {}
+    if not isinstance(payload, dict) or type(payload.get("heard")) is not bool:
+        return json_response(
+            {"ok": False, "error": "heard_boolean_required"},
+            status=400,
+        )
     validation_manager = get_voice_validation_manager()
+    confirm_args: dict[str, Any] = {
+        "session_id": str(payload.get("sessionId") or ""),
+        "step_id": str(payload.get("stepId") or ""),
+        "heard": payload["heard"],
+    }
+    if "attempt" in payload:
+        confirm_args["attempt"] = payload["attempt"]
     result = validation_manager.confirm(
-        session_id=str((payload or {}).get("sessionId") or ""),
-        step_id=str((payload or {}).get("stepId") or ""),
-        heard=bool((payload or {}).get("heard")),
+        **confirm_args,
     )
     session = dict(result.get("session") or validation_manager.snapshot())
     if session.get("state") in {"passed", "failed", "aborted"}:
@@ -1286,6 +1327,7 @@ async def voice_validation_retry_handler(request: web.Request) -> web.StreamResp
     result = validation_manager.retry(
         session_id=str((payload or {}).get("sessionId") or ""),
         step_id=str((payload or {}).get("stepId") or ""),
+        attempt=(payload or {}).get("attempt"),
     )
     session = dict(result.get("session") or validation_manager.snapshot())
     if session.get("state") in {"passed", "failed", "aborted"}:

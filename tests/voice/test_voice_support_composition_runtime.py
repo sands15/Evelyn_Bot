@@ -143,6 +143,32 @@ class VoiceSupportCompositionRuntimeTests(unittest.IsolatedAsyncioTestCase):
             stage="wake",
         )
 
+    def test_validation_bound_transcription_propagates_privacy_flag(self) -> None:
+        runtime = Mock(return_value="raw validation transcript")
+        composition = VoiceSupportComposition(self.build_deps())
+
+        with patch(
+            "evelyn_core.voice_support_composition_runtime.transcribe_audio16k_from_runtime",
+            runtime,
+        ):
+            result = composition.transcribe_audio16k_sync(
+                "audio",
+                77,
+                sampling_rate=16000,
+                stage="full",
+                validation_bound=True,
+            )
+
+        self.assertEqual(result, "raw validation transcript")
+        runtime.assert_called_once_with(
+            "audio",
+            77,
+            deps="stt-transcription-deps",
+            sampling_rate=16000,
+            stage="full",
+            validation_bound=True,
+        )
+
     async def test_existing_voice_client_is_rearmed_warmed_and_persisted(self) -> None:
         channel = FakeVoiceChannel()
         voice_client = FakeVoiceClient(channel, healthy=False)

@@ -379,9 +379,57 @@ abort와 runtime event 기록에서도 먼저 적용하며, mutation 중 만료�
 새 증거나 동작을 받아들이지 않는다. 누락·비수치·비유한 만료값과 현재 세션/단계에
 맞지 않는 명시적 runtime event ID도 fail-closed한다. 로컬 브리지는 재생 직전
 일반 큐 발화를 TTS cleanup에서 잃지 않고, clone voice fallback도 단일 playback
-owner 안에서 수행한다. 전체 음성
-414개와 관련 검증/runtime/UI 50개는 통과했지만 이는 합성 입력과 mock 장치를
-사용한 계약 검증이다.
+owner 안에서 수행한다. Discord streaming뿐 아니라 canned wake와 명시적 기억
+응답도 terminal turn summary를 남기며, transcript match, accepted-turn contract,
+content-free reply-started/final과 playback failure·terminal outcome을 typed
+field로 전달한다. 정상·interrupt 단계는 실제 final reply를 요구하고, 의도적인
+barge-source 취소만 현재 세션·단계의 reply-started와 playback-started/cancelled
+근거를 정확히 한 번 요구한다. 추가로 active playback manager가 source turn과
+private metrics를 대조해 남긴 `qualified_tts_interrupt` typed 근거가 같은 accepted
+turn ID와 일치해야 한다. 이때 완료되지 않은 답변을 final로 합성하지 않으며,
+로컬·Discord 모두 답변이 실제로 먼저 완료된 뒤 취소됐다면 final 근거를 별도로
+보존한다. 다른 취소, 오류·빈 답변·재생 실패·불완전 terminal은 positive
+event보다 먼저 단일 실패로 닫으므로 barge-source가 늦은 오류보다 먼저
+통과하거나 단계가 무기한 대기하지 않는다. 새 Discord 이미지의 전체 음성 회귀와
+Bot API의 검증/API/runtime/UI 회귀, 호스트 focused 회귀는 통과했지만 이는 합성
+입력과 mock 장치를 사용한 계약 검증이다.
+
+추가 인과성 감사에서는 retry·abort 뒤 오래된 작업이 실제 출력으로 이어지는
+경계도 닫았다. local/Discord ingress, STT 전후, interrupt debounce, 답변 dispatch와
+실제 장치·Discord playback 직전에 같은 session/step/private attempt binding을
+다시 확인한다. 검증 시작 전에 큐에 들어온 무표식 작업도 실행 시 해당 surface의
+검증이 활성 상태면 폐기하므로 무음 단계가 관측 밖 발화와 동시에 통과하지 않는다.
+paired interrupt 실패는 source 단계가 건너뛰지 못하며, 정상·interrupt 단계는
+허용되지 않은 추가 interrupt evidence가 하나라도 있으면 통과하지 않는다.
+
+재생 소유권은 generation으로 격리했다. 오래된 Discord teardown은 await 뒤 새
+재생을 정지하거나 새 registry/metric을 지울 수 없고, source·voice client·worker
+종료 중 하나라도 실패하면 성공 취소나 qualified interrupt로 기록하지 않는다.
+로컬은 첫 장치 write 전에 attempt lease를 잡고, 부분 write 또는 stale 판정 뒤에는
+전체 답변 fallback을 재생하지 않는다. 따라서 취소된 원본과 대체 응답의 동시 재생,
+부분 재생 뒤 전체 답변 중복, 실제 재생 전 positive interrupt evidence를 막는다.
+추가로 실제 첫 PCM write 성공 뒤 worker terminal 전에 exact binding에 stop이
+원자적으로 접수돼 고유 token을 받은 경우만 인정한다. stop control·worker 종료는
+단일 제한 시간 안에 끝나야 하며, 자연 종료 scheduling gap, timeout, 예외, 명시적
+`False`, 중복 stop, stale generation/attempt는 context와 positive lease를 만들지
+않는다. 로컬 playback 예외도 고정 실패 코드와 타입만 status/log에 남긴다.
+
+검증 중 raw audio는 debug capture가 켜져 있어도 저장 큐에 들어가지 않는다.
+STT·wake·reply 로그도 원문 대신 문자 수만 남기며 공개 bridge status에서 private
+attempt token을 제거한다. 여기서 `transcriptStored=false`는 검증 event/report와
+운영 로그의 비저장을 뜻한다. 사용자가 실제로 수행한 검증 대화가 일반 대화
+history/continuity 정책을 따르는 것은 별도 계약이며, 보고서에는 원문이 복제되지
+않는다.
+
+Host Supervisor는 검증 실행 중 Local I/O Bridge가 비정상 종료되면 같은 attempt를
+자동 재시작해 이어가지 않는다. 현재 단계를 고정 오류로 실패시키고
+`manual_intervention_required`를 보고하므로, preflight 복구 뒤 새 attempt 또는 새
+세션으로 시작해야 한다. 복구된 session은 canonical suite·surface·11-step 행렬과
+attempt 구조를 다시 검증하고, session ID와 event/report 경로는 허용 문자와
+artifact root containment를 모두 통과해야 한다. 청취 확인도 JSON boolean만
+받으므로 문자열 `"false"` 같은 값은 성공 확인으로 변환되지 않는다. 공개 v1의
+attempt 없는 confirm은 최초 attempt에서만 호환하며, retry 뒤에는 현재 attempt
+revision을 명시하지 않거나 이전 revision을 보내면 상태를 바꾸지 않고 거부한다.
 
 소스 계약에서는 reply gate를 통과한 사용자 발화 뒤 Discord 연결 부재, 빈 답변,
 LLM/TTS 전달 실패가 나도 사용자 row만 즉시 continuity checkpoint에 한 번
@@ -609,7 +657,7 @@ handoff와 복구 절차가 검증되기 전에는 범위를 넓히지 않는다
 
 ## P2 — `main.py` 선언형 wiring 밀도
 
-`main.py`는 2,402줄로 목표 범위에 들어왔고 함수 정의와 `global`/`nonlocal`은 0개다. 남은 본문은 대부분 명시적 typed dependency wiring이며, 줄 수를 맞추기 위해 한 줄에 최대 두 인자를 배치해 이전보다 가로 밀도가 높다. 이는 현재 동작 위험보다는 리뷰 가독성의 잔여 비용이다.
+`main.py`는 2,500줄로 현재 상한을 지키고 함수 정의와 `global`/`nonlocal`은 0개다. 남은 본문은 대부분 명시적 typed dependency wiring이며, 줄 수를 맞추기 위해 한 줄에 최대 두 인자를 배치해 이전보다 가로 밀도가 높다. 이는 현재 동작 위험보다는 리뷰 가독성의 잔여 비용이다.
 
 다음 조치: 줄 수만을 위한 추가 이동이나 암시적 registry 도입은 하지 않는다. 새 동작은 owner 모듈에 추가하고, `main.py`에는 최대 158자·함수 정의 0개·`global`/`nonlocal` 0개 경계를 유지한다.
 

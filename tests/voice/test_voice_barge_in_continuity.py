@@ -38,6 +38,7 @@ class VoiceBargeInContinuityTests(unittest.TestCase):
                 "guild_id": 1,
                 "validation_session_id": "validation-1",
                 "validation_step_id": "08-barge-interrupt",
+                "validation_attempt_id": "attempt-private-1",
                 "validation_transcript_match": True,
             }
         }
@@ -71,6 +72,7 @@ class VoiceBargeInContinuityTests(unittest.TestCase):
             events[0][1]["validation_step_id"],
             "08-barge-interrupt",
         )
+        self.assertEqual(events[0][1]["validation_attempt_id"], "attempt-private-1")
 
     def test_failure_classification_resets_success_streak(self) -> None:
         tracker = self.make_tracker()

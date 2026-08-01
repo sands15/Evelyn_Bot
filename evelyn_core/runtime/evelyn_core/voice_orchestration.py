@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Awaitable, Callable, Mapping, MutableMapping
 
 from .assistant_contracts import AcceptedVoiceTurn, RejectedVoiceTurn
@@ -20,6 +20,48 @@ from .explicit_memory_confirmation import (
 )
 from .voice_pipeline import AnswerPayload, DeliveryPlan, RouteDecision, TranscriptResult, VoiceReplyRequest, VoiceSegment
 from .voice_barge_in import remember_voice_utterance_for_merge
+
+
+_VALIDATION_BINDING_KEYS = (
+    "validation_session_id",
+    "validation_step_id",
+    "validation_attempt",
+    "validation_attempt_id",
+    "validationSessionId",
+    "validationStepId",
+    "validationAttempt",
+    "validationAttemptId",
+)
+
+
+def _validation_bound(metrics: Mapping[str, Any] | None) -> bool:
+    if not isinstance(metrics, Mapping):
+        return False
+    meta = metrics.get("meta")
+    sources = (metrics, meta if isinstance(meta, Mapping) else {})
+    return any(
+        source.get(key) not in (None, "")
+        for source in sources
+        for key in _VALIDATION_BINDING_KEYS
+    )
+
+
+def _observability_text(
+    value: Any,
+    metrics: Mapping[str, Any] | None,
+) -> Any:
+    if not _validation_bound(metrics):
+        return value
+    return f"<validation-text chars={len(str(value or ''))}>"
+
+
+def _observability_error(
+    error: BaseException,
+    metrics: Mapping[str, Any] | None,
+) -> BaseException | str:
+    if not _validation_bound(metrics):
+        return error
+    return type(error).__name__
 
 
 @dataclass(frozen=True)
@@ -217,6 +259,11 @@ class VoiceTurnOrchestrator:
             raise
 
         on_first_chunk = request.on_first_chunk
+        safe_debug_text = (
+            _observability_text(request.debug_text, request.metrics)
+            if request.debug_text is not None
+            else None
+        )
 
         try:
             short_circuit_answer, on_first_chunk = await self._deps.maybe_handle_short_circuit_route(
@@ -228,7 +275,7 @@ class VoiceTurnOrchestrator:
                 room_key=request.room_key,
                 person_key=request.person_key,
                 session_memory_key=request.session_memory_key,
-                debug_text=request.debug_text,
+                debug_text=safe_debug_text,
                 on_sentence=request.on_sentence,
                 on_first_chunk=on_first_chunk,
                 awaiting_user_reply=route_context.awaiting_user_reply,
@@ -257,7 +304,7 @@ class VoiceTurnOrchestrator:
                 room_key=request.room_key,
                 person_key=request.person_key,
                 session_memory_key=request.session_memory_key,
-                debug_text=request.debug_text,
+                debug_text=safe_debug_text,
                 metrics=request.metrics,
                 cognitive_state=route_context.cognitive_state,
                 messages=route_context.messages,
@@ -316,7 +363,11 @@ class VoiceTurnOrchestrator:
 
         try:
             answer = await self._deps.run_main_llm_turn(
-                request=request,
+                request=(
+                    replace(request, debug_text=safe_debug_text)
+                    if safe_debug_text != request.debug_text
+                    else request
+                ),
                 route_context=route_context,
                 on_first_chunk=on_first_chunk,
             )
@@ -339,7 +390,11 @@ class VoiceTurnOrchestrator:
             person_key=request.person_key,
             session_memory_key=request.session_memory_key,
             source=request.source,
-            debug_text=request.debug_text,
+            debug_text=(
+                _observability_text(request.debug_text, request.metrics)
+                if request.debug_text is not None
+                else None
+            ),
             metrics=request.metrics,
             turn_scope=request.turn_scope,
         )
@@ -616,13 +671,17 @@ def prepare_voice_reply_for_delivery(
         }
     )
     if not ok:
+        observability_text = _observability_text(
+            transcript.final_text,
+            metrics,
+        )
         register_drop_reason(
             metrics,
             reason,
             session_key=session_key,
             room_session_key=room_session_key,
             owner_user_id=owner_user_id,
-            text=transcript.final_text,
+            text=observability_text,
         )
         log_voice_stage(metrics, "응답 차단", extra=f"reason={reason} gate={gate_mode}")
         log_voice_bottleneck_summary(
@@ -663,7 +722,8 @@ def prepare_voice_reply_for_delivery(
         "응답 게이트 통과",
         extra=(
             f"gate={gate_mode} turn_type={voice_reply.turn_type} "
-            f"path={voice_reply.selected_path} user_text={voice_reply.raw_user_text!r}"
+            f"path={voice_reply.selected_path} "
+            f"user_text={_observability_text(voice_reply.raw_user_text, metrics)!r}"
         ),
     )
     return VoiceReplyPreparationResult(
@@ -786,13 +846,20 @@ def prepare_voice_reply_delivery_runtime(
     speaker_display_name: str,
     visible_text: Callable[[str], str],
     print_fn: Callable[..., Any],
+    metrics: Mapping[str, Any] | None = None,
 ) -> VoiceReplyDeliveryRuntime:
     async def on_final_answer(answer_text: str) -> None:
-        print_fn(f"💬 [Evelyn] {visible_text(answer_text)}")
+        visible_answer = visible_text(answer_text)
+        print_fn(
+            f"💬 [Evelyn] "
+            f"{_observability_text(visible_answer, metrics)}"
+        )
 
     def report_waiting_on_lock(reply: VoiceReplyRequest) -> None:
         print_fn(
-            f"[VOICE WAIT] room={room_session_key} speaker={speaker_display_name} text={reply.history_user_text!r}"
+            f"[VOICE WAIT] room={room_session_key} "
+            f"speaker={speaker_display_name} "
+            f"text={_observability_text(reply.history_user_text, metrics)!r}"
         )
 
     def report_delivery_error(exc: Exception) -> None:
@@ -884,6 +951,7 @@ def prepare_accepted_voice_reply_delivery_runtime(
         speaker_display_name=speaker_display_name,
         visible_text=visible_text,
         print_fn=print_fn,
+        metrics=metrics,
     )
 
 
@@ -914,6 +982,7 @@ async def run_locked_voice_reply_delivery(
     strip_omnivoice_tags: Callable[[str], str],
     report_waiting_on_lock: Callable[[VoiceReplyRequest], None] | None,
     report_delivery_error: Callable[[Exception], None],
+    log_voice_bottleneck_summary: Callable[..., Any] | None = None,
 ) -> VoiceReplyDeliveryResult | None:
     if lock.locked():
         if report_waiting_on_lock is not None:
@@ -933,6 +1002,14 @@ async def run_locked_voice_reply_delivery(
                 metrics,
                 stage="voice_connection",
             )
+            if log_voice_bottleneck_summary is not None:
+                metrics.setdefault("meta", {})["voice_turn_summary_emitted"] = True
+                log_voice_bottleneck_summary(
+                    metrics,
+                    label="voice_turn",
+                    extra="error=true mode=voice_connection",
+                    event_name="voice_turn_summary",
+                )
             finalize_delivered_voice_reply(
                 guild_id=guild_id,
                 member=member,
@@ -976,6 +1053,7 @@ async def run_locked_voice_reply_delivery(
             log_voice_stage=log_voice_stage,
             strip_omnivoice_tags=strip_omnivoice_tags,
             report_delivery_error=report_delivery_error,
+            log_voice_bottleneck_summary=log_voice_bottleneck_summary,
         )
         if delivery_result is None:
             failure_code = str(
@@ -984,6 +1062,19 @@ async def run_locked_voice_reply_delivery(
                 )
                 or "voice_delivery_failed"
             )
+            summary_meta = metrics.setdefault("meta", {})
+            if (
+                log_voice_bottleneck_summary is not None
+                and summary_meta.get("reply_source") != "llm_streaming"
+                and not summary_meta.get("voice_turn_summary_emitted")
+            ):
+                summary_meta["voice_turn_summary_emitted"] = True
+                log_voice_bottleneck_summary(
+                    metrics,
+                    label="voice_turn",
+                    extra="error=true mode=single_reply",
+                    event_name="voice_turn_summary",
+                )
             finalize_delivered_voice_reply(
                 guild_id=guild_id,
                 member=member,
@@ -1056,6 +1147,7 @@ async def execute_accepted_voice_reply(
     set_room_reply_in_progress: Callable[..., Any],
     detach_task: Callable[[Any, Any], None],
     clear_room_turn_scope: Callable[[str | None, Any], None],
+    log_voice_bottleneck_summary: Callable[..., Any] | None = None,
 ) -> VoiceReplyDeliveryResult | None:
     try:
         return await run_locked_voice_reply_delivery(
@@ -1084,6 +1176,7 @@ async def execute_accepted_voice_reply(
             strip_omnivoice_tags=strip_omnivoice_tags,
             report_waiting_on_lock=delivery_runtime.report_waiting_on_lock,
             report_delivery_error=delivery_runtime.report_delivery_error,
+            log_voice_bottleneck_summary=log_voice_bottleneck_summary,
         )
     finally:
         finish_voice_reply_execution(
@@ -1147,6 +1240,7 @@ async def prepare_and_execute_accepted_voice_reply(
     detach_task: Callable[[Any, Any], None],
     clear_room_turn_scope: Callable[[str | None, Any], None],
     room_last_voice_utterance_for_merge: MutableMapping[str, Any] | None = None,
+    log_voice_bottleneck_summary: Callable[..., Any] | None = None,
 ) -> VoiceReplyDeliveryResult | None:
     delivery_runtime = prepare_accepted_voice_reply_delivery_runtime(
         session_key=session_key,
@@ -1206,6 +1300,7 @@ async def prepare_and_execute_accepted_voice_reply(
         set_room_reply_in_progress=set_room_reply_in_progress,
         detach_task=detach_task,
         clear_room_turn_scope=clear_room_turn_scope,
+        log_voice_bottleneck_summary=log_voice_bottleneck_summary,
     )
 
 
@@ -1257,11 +1352,15 @@ async def handle_prepared_voice_reply(
     get_room_turn_scope: Callable[[str | None], Any],
     detach_task: Callable[[Any, Any], None],
     clear_room_turn_scope: Callable[[str | None, Any], None],
+    log_voice_bottleneck_summary: Callable[..., Any] | None = None,
 ) -> VoiceReplyDeliveryResult | None:
     gate_mode = reply_prep.gate_mode
     if not reply_prep.accepted or gate_mode is None or reply_prep.voice_reply is None:
         if reply_prep.drop_reason:
-            print_fn(f"[STT IGNORE] {reply_prep.drop_reason}: {transcript_final_text!r}")
+            print_fn(
+                f"[STT IGNORE] {reply_prep.drop_reason}: "
+                f"{_observability_text(transcript_final_text, metrics)!r}"
+            )
         return None
 
     return await prepare_and_execute_accepted_voice_reply(
@@ -1312,6 +1411,7 @@ async def handle_prepared_voice_reply(
         get_room_turn_scope=get_room_turn_scope,
         detach_task=detach_task,
         clear_room_turn_scope=clear_room_turn_scope,
+        log_voice_bottleneck_summary=log_voice_bottleneck_summary,
     )
 
 
@@ -1460,6 +1560,7 @@ async def process_voice_reply_from_transcript(
         get_room_turn_scope=get_room_turn_scope,
         detach_task=detach_task,
         clear_room_turn_scope=clear_room_turn_scope,
+        log_voice_bottleneck_summary=log_voice_bottleneck_summary,
     )
 
 
@@ -1554,7 +1655,35 @@ async def deliver_voice_reply(
     log_voice_stage: Callable[..., Any],
     strip_omnivoice_tags: Callable[[str], str],
     report_delivery_error: Callable[[Exception], None],
+    log_voice_bottleneck_summary: Callable[..., Any] | None = None,
 ) -> VoiceReplyDeliveryResult | None:
+    def emit_single_reply_summary_once(*, extra: str) -> None:
+        summary_meta = metrics.setdefault("meta", {})
+        if (
+            log_voice_bottleneck_summary is None
+            or summary_meta.get("voice_turn_summary_emitted")
+        ):
+            return
+        summary_meta["voice_turn_summary_emitted"] = True
+        log_voice_bottleneck_summary(
+            metrics,
+            label="voice_turn",
+            extra=extra,
+            event_name="voice_turn_summary",
+        )
+
+    def mark_single_reply_cancelled() -> None:
+        metrics.setdefault("meta", {}).update(
+            {
+                "playback_completed": False,
+                "playback_cancelled": True,
+                "error": "cancelled",
+            }
+        )
+        emit_single_reply_summary_once(
+            extra="cancelled=true mode=single_reply",
+        )
+
     try:
         memory_command_matched = False
         memory_command_reply = ""
@@ -1589,7 +1718,19 @@ async def deliver_voice_reply(
                     "memory_write_receipt": (
                         memory_write_receipt
                     ),
-                    "memory_write_error": memory_command_error,
+                    "memory_write_error": (
+                        "memory_write_failed"
+                        if memory_command_error
+                        and _validation_bound(metrics)
+                        else memory_command_error
+                    ),
+                }
+            )
+            has_reply = bool(clean_text(answer))
+            metrics.setdefault("meta", {}).update(
+                {
+                    "reply_started": has_reply,
+                    "reply_final": has_reply,
                 }
             )
             if on_final_answer is not None:
@@ -1603,14 +1744,35 @@ async def deliver_voice_reply(
                     turn_scope=turn_scope,
                     metrics=metrics,
                 )
+            except asyncio.CancelledError:
+                mark_single_reply_cancelled()
+                raise
             except Exception as e:
                 record_voice_pipeline_failure(
                     "tts_playback_failed",
-                    e,
+                    _observability_error(e, metrics),
                     metrics,
                     stage="memory_confirmation_speak_answer",
                 )
+                if log_voice_bottleneck_summary is not None:
+                    metrics.setdefault("meta", {})[
+                        "voice_turn_summary_emitted"
+                    ] = True
+                    log_voice_bottleneck_summary(
+                        metrics,
+                        label="voice_turn",
+                        extra="error=true mode=single_reply",
+                        event_name="voice_turn_summary",
+                    )
                 raise
+            if log_voice_bottleneck_summary is not None:
+                metrics.setdefault("meta", {})["voice_turn_summary_emitted"] = True
+                log_voice_bottleneck_summary(
+                    metrics,
+                    label="voice_turn",
+                    extra="mode=single_reply",
+                    event_name="voice_turn_summary",
+                )
             used_wake_only_reply = False
         elif voice_reply.wake_only_turn:
             answer = canned_wake_reply
@@ -1621,7 +1783,18 @@ async def deliver_voice_reply(
                     "reply_source": "canned_wake_reply",
                 }
             )
-            log_voice_stage(metrics, "웨이크 전용 턴 canned reply", extra=f"answer={answer!r}")
+            has_reply = bool(clean_text(answer))
+            metrics.setdefault("meta", {}).update(
+                {
+                    "reply_started": has_reply,
+                    "reply_final": has_reply,
+                }
+            )
+            log_voice_stage(
+                metrics,
+                "웨이크 전용 턴 canned reply",
+                extra=f"answer={_observability_text(answer, metrics)!r}",
+            )
             if on_final_answer is not None:
                 await on_final_answer(answer)
             try:
@@ -1633,9 +1806,35 @@ async def deliver_voice_reply(
                     turn_scope=turn_scope,
                     metrics=metrics,
                 )
-            except Exception as e:
-                record_voice_pipeline_failure("tts_playback_failed", e, metrics, stage="wake_only_speak_answer")
+            except asyncio.CancelledError:
+                mark_single_reply_cancelled()
                 raise
+            except Exception as e:
+                record_voice_pipeline_failure(
+                    "tts_playback_failed",
+                    _observability_error(e, metrics),
+                    metrics,
+                    stage="wake_only_speak_answer",
+                )
+                if log_voice_bottleneck_summary is not None:
+                    metrics.setdefault("meta", {})[
+                        "voice_turn_summary_emitted"
+                    ] = True
+                    log_voice_bottleneck_summary(
+                        metrics,
+                        label="voice_turn",
+                        extra="error=true mode=single_reply",
+                        event_name="voice_turn_summary",
+                    )
+                raise
+            if log_voice_bottleneck_summary is not None:
+                metrics.setdefault("meta", {})["voice_turn_summary_emitted"] = True
+                log_voice_bottleneck_summary(
+                    metrics,
+                    label="voice_turn",
+                    extra="mode=single_reply",
+                    event_name="voice_turn_summary",
+                )
             used_wake_only_reply = True
         else:
             metrics.setdefault("meta", {}).update(
@@ -1656,20 +1855,37 @@ async def deliver_voice_reply(
                     person_key=person_key,
                     session_memory_key=session_memory_key,
                     source="voice",
-                    debug_text=voice_reply.history_user_text,
+                    debug_text=_observability_text(
+                        voice_reply.history_user_text,
+                        metrics,
+                    ),
                     metrics=metrics,
                     turn_scope=turn_scope,
                 )
             except Exception as e:
-                record_voice_pipeline_failure("voice_delivery_failed", e, metrics, stage="llm_tts_delivery")
+                record_voice_pipeline_failure(
+                    "voice_delivery_failed",
+                    _observability_error(e, metrics),
+                    metrics,
+                    stage="llm_tts_delivery",
+                )
                 raise
             used_wake_only_reply = False
         log_voice_stage(metrics, "LLM/TTS 완료", extra=f"answer_len={len(answer)}")
+    except asyncio.CancelledError:
+        if metrics.setdefault("meta", {}).get("reply_source") != "llm_streaming":
+            mark_single_reply_cancelled()
+        raise
     except Exception as e:
         metrics.setdefault("meta", {})[
             "voice_delivery_failure_code"
         ] = "voice_delivery_failed"
-        report_delivery_error(e)
+        observability_error = _observability_error(e, metrics)
+        report_delivery_error(
+            observability_error
+            if isinstance(observability_error, BaseException)
+            else RuntimeError(f"errorType={observability_error}")
+        )
         return None
 
     answer = clean_text(answer)

@@ -12,6 +12,7 @@ if str(RUNTIME_ROOT) not in sys.path:
     sys.path.insert(0, str(RUNTIME_ROOT))
 
 from evelyn_core.turn_trace import TURN_SUMMARY_KEYS, build_turn_summary_payload, write_turn_trace_event  # noqa: E402
+from evelyn_core.assistant_contracts import AcceptedVoiceTurn  # noqa: E402
 
 
 class TurnTraceSummaryTests(unittest.TestCase):
@@ -22,9 +23,14 @@ class TurnTraceSummaryTests(unittest.TestCase):
             "needs_main_llm",
             "needs_memory",
             "needs_tts",
+            "turn_accepted",
+            "reply_started",
+            "reply_final",
             "playback_started",
             "playback_completed",
             "playback_cancelled",
+            "playback_failed",
+            "qualified_tts_interrupt",
             "tts_first_audio_ms",
             "playback_first_packet_ms",
             "memory_context_state",
@@ -56,6 +62,7 @@ class TurnTraceSummaryTests(unittest.TestCase):
             "error_layer",
             "validation_session_id",
             "validation_step_id",
+            "validation_attempt_id",
             "validation_transcript_match",
         }
 
@@ -127,6 +134,7 @@ class TurnTraceSummaryTests(unittest.TestCase):
                     "minecraft_snapshot_freshness": "fresh",
                     "validation_session_id": "validation-1",
                     "validation_step_id": "02-listening",
+                    "validation_attempt_id": "attempt-private-2",
                     "validation_transcript_match": True,
                 },
             },
@@ -325,6 +333,43 @@ class TurnTraceSummaryTests(unittest.TestCase):
         self.assertEqual(payload["playback_started"], True)
         self.assertEqual(payload["playback_completed"], True)
         self.assertEqual(payload["playback_cancelled"], False)
+
+    def test_validation_evidence_fields_are_typed_and_content_free(self) -> None:
+        accepted = AcceptedVoiceTurn(
+            accepted_turn_id="turn-validation",
+            segment=None,
+            transcript=None,
+            gate_mode="wake",
+            ingress_source="discord",
+            queue_wait_ms=1.0,
+            accepted_at_unix=2.0,
+            reply_scope_key="room",
+        )
+        payload = build_turn_summary_payload(
+            {
+                "marks": {},
+                "meta": {
+                    "turn_id": "turn-validation",
+                    "accepted_turn_contract": accepted,
+                    "reply_started": True,
+                    "reply_final": True,
+                    "playback_failed": False,
+                    "qualified_tts_interrupt": True,
+                    "voice_delivery_failure_code": "voice_delivery_empty",
+                },
+            },
+            label="voice_turn",
+            event_name="voice_turn_summary",
+            total_ms=10.0,
+        )
+
+        self.assertIs(payload["turn_accepted"], True)
+        self.assertIs(payload["reply_started"], True)
+        self.assertIs(payload["reply_final"], True)
+        self.assertIs(payload["playback_failed"], False)
+        self.assertIs(payload["qualified_tts_interrupt"], True)
+        self.assertEqual(payload["error"], "voice_delivery_empty")
+        self.assertNotIn("accepted_turn_contract", payload)
 
     def test_explicit_playback_completed_false_is_preserved(self) -> None:
         payload = build_turn_summary_payload(

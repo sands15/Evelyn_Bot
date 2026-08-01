@@ -25,6 +25,7 @@ from .paths import get_repo_root, get_runtime_artifacts_root
 from .runtime_artifact_io import atomic_json_write
 from .runtime_error_observability import RuntimeErrorCounter
 from .storage_retention_report import StorageRetentionReporter
+from .voice_validation import active_validation_context, emit_voice_validation_event
 
 
 PREVIEW_TTL_SEC = 120.0
@@ -389,6 +390,32 @@ class HostSupervisor:
         if self._stopping:
             return
         self.runtime_errors.record("local_bridge_unexpected_exit")
+        validation_context = active_validation_context(
+            surface="local",
+            root=self.artifacts_root,
+            now=self.now,
+        )
+        if validation_context is not None:
+            self.manual_intervention_required = True
+            self.last_error = "validation_active_local_bridge_exit"
+            self.runtime_errors.record(self.last_error)
+            try:
+                emit_voice_validation_event(
+                    "local",
+                    "error",
+                    root=self.artifacts_root,
+                    session_id=str(validation_context.get("sessionId") or ""),
+                    step_id=str(validation_context.get("stepId") or ""),
+                    attempt_id=str(validation_context.get("attemptId") or ""),
+                    now=self.now,
+                    errorCode="local_bridge_unexpected_exit",
+                )
+            except Exception as exc:
+                self.runtime_errors.record(
+                    "validation_bridge_exit_event_write_failed",
+                    exc,
+                )
+            return
         result = self.start_bridge(automatic=True)
         if not result.get("ok"):
             self.manual_intervention_required = True

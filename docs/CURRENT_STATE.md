@@ -1405,6 +1405,32 @@ Source branch: `codex/dependency-config-hardening`, current grounded-memory prom
   JavaScript `node --check`, bundled Python `compileall`, `git diff --check`를
   통과했다. 실행 중인 서비스를 교체하지 않았고 실제 사용자 기억과 runtime
   artifact를 읽거나 수정하지 않았다.
+- Voice P0 최종 인과성·보안 경계는 retry/abort 뒤 stale attempt, 검증 시작 전
+  대기 중이던 무표식 입력·출력, local partial-write fallback 중복, Discord
+  teardown ABA와 실제 재생 전·자연 종료 뒤 positive interrupt evidence를 차단한다.
+  로컬 interrupt는 첫 PCM write 성공, worker terminal 전 atomic stop acceptance
+  token, 정확한 worker 종료·generation·현재 validation attempt가 모두 있어야
+  확정된다. 손상된 session ID/path, symlink 탈출, 축약·변조된 canonical suite와
+  위조 terminal `passed`, 비-boolean 청취 확인도 fail-closed한다. 최초 attempt의
+  기존 confirm payload는 호환하지만 retry 뒤에는 현재 attempt revision을 명시해야
+  한다. 검증 중 raw audio debug capture와 STT/wake/reply/재생 예외 원문 운영 로그는
+  저장하지 않으며, Host Supervisor는 검증 중 Local Bridge crash를 자동 재시작하지
+  않고 현재 attempt를 실패시킨다.
+- 최종 소스는 host validation/UI 66개(skip 1), local interrupt 35개,
+  Bot validation/API/UI 82개(skip 1), readiness 91개, 전체 voice 499개를
+  통과했다. repository 전체 2,260개는 기능
+  assertion 실패 0개였고 Discord slim 이미지의 `git` 부재 2개, Linux의 Windows
+  OCR 1개, 선택 Voyager `gymnasium` 부재 1개만 환경 오류였다. 앞의 세 환경
+  오류 경로는 Windows host 20개로 보완했다. 실제 `main.py` Control Page 격리
+  smoke, 양 이미지 `compileall`/`pip check`, 기본·전체 profile Compose config,
+  voice validation JavaScript `node --check`도 통과했다.
+- 최종 검증 이미지는 Bot API
+  `sha256:fd5ff7dbe5c5224f3de6157fffd85ccc1697d6d6810b94808c8bca1ad98fd33b`,
+  Discord/Main
+  `sha256:75e0ce25d6d7a738a03d48fa04dab65099b3cce61cac8a47a331ce7efb8584be`이다.
+  이미지는 빌드·격리 검증만 했고 실행 중인 서비스를 교체하지 않았다. 실제
+  Discord, 마이크, 스피커, Minecraft, 무거운 모델과 사용자 runtime artifact는
+  시작하거나 읽거나 수정하지 않았다.
 
 ## Operational boundaries
 

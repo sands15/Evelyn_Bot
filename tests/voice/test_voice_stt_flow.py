@@ -363,6 +363,139 @@ class VoiceSttFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.speculative_policy["text"], "committed")
         self.assertEqual(stages, [("partial", 4.0)])
 
+    async def test_validation_bound_partial_stt_logs_only_content_free_markers(self) -> None:
+        partial_secret = "VOICE_PRIVACY_SENTINEL_PARTIAL_61ac"
+        committed_secret = "VOICE_PRIVACY_SENTINEL_COMMITTED_84e0"
+        calls: list[dict[str, Any]] = []
+        logs: list[str] = []
+
+        async def run_blocking(func: Any, **_kwargs: Any) -> tuple[str, str]:
+            return func()
+
+        def get_partial(*_args: Any, **kwargs: Any) -> tuple[str, str]:
+            calls.append(kwargs)
+            return partial_secret, committed_secret
+
+        result = await run_partial_stt_flow(
+            FakeAudio(20000),
+            sampling_rate=16000,
+            session_key="guild:user",
+            timeout_sec=4.0,
+            build_partial_stt_window=lambda _audio, **_kwargs: FakeAudio(16000),
+            get_partial_transcript=get_partial,
+            read_committed_text=lambda _key: "",
+            run_blocking_stt_task=run_blocking,
+            speculate_from_committed_stt=lambda _text, _state: None,
+            room_state={},
+            clean_text=lambda text: str(text).strip(),
+            metrics={
+                "meta": {
+                    "validation_session_id": "validation-private",
+                    "validation_step_id": "02-listening",
+                    "validation_attempt_id": "attempt-private",
+                }
+            },
+            print_fn=logs.append,
+        )
+
+        self.assertEqual(result.partial_text, partial_secret)
+        self.assertEqual(result.committed_text, committed_secret)
+        self.assertIs(calls[0]["validation_bound"], True)
+        rendered = "\n".join(logs)
+        self.assertNotIn(partial_secret, rendered)
+        self.assertNotIn(committed_secret, rendered)
+        self.assertIn("<validation-text chars=", rendered)
+
+    async def test_validation_bound_full_rescore_preserves_choice_but_redacts_observability(self) -> None:
+        primary_secret = "VOICE_PRIVACY_SENTINEL_PRIMARY_352f"
+        rescore_secret = "VOICE_PRIVACY_SENTINEL_RESCORE_76db"
+        calls: list[dict[str, Any]] = []
+        logs: list[str] = []
+        stages: list[tuple[str, dict[str, Any]]] = []
+
+        async def run_blocking(func: Any, **_kwargs: Any) -> str:
+            return func()
+
+        def transcribe(_audio: Any, _tokens: int, **kwargs: Any) -> str:
+            calls.append(kwargs)
+            return primary_secret if kwargs["stage"] == "full" else rescore_secret
+
+        result = await run_full_stt_with_optional_rescore(
+            "audio",
+            sampling_rate=16000,
+            duration_sec=2.0,
+            wake_probe="",
+            max_new_tokens=32,
+            full_timeout_sec=12.0,
+            rescore_enabled=True,
+            rescore_extra_tokens=16,
+            rescore_min_audio_sec=1.0,
+            rescore_min_text_len=4,
+            rescore_timeout_sec=3.0,
+            run_blocking_stt_task=run_blocking,
+            transcribe_audio=transcribe,
+            choose_candidate=lambda primary, rescore: (
+                rescore,
+                {
+                    "selected": "rescore",
+                    "primary_score": 1.0,
+                    "rescore_score": 3.0,
+                    "primary_text": primary,
+                    "rescore_text": rescore,
+                },
+            ),
+            clean_text=lambda text: str(text).strip(),
+            log_stage=lambda _metrics, label, **kwargs: stages.append((label, kwargs)),
+            metrics={"meta": {"validation_attempt_id": "attempt-private"}},
+            print_fn=logs.append,
+            speaker_name="speaker",
+        )
+
+        self.assertEqual(result.text, rescore_secret)
+        self.assertEqual(result.primary_text, primary_secret)
+        self.assertTrue(all(call["validation_bound"] for call in calls))
+        self.assertIn("<validation-text chars=", result.stt_meta["primary_text"])
+        self.assertIn("<validation-text chars=", result.stt_meta["rescore_text"])
+        rendered = repr((logs, stages, result.stt_meta))
+        self.assertNotIn(primary_secret, rendered)
+        self.assertNotIn(rescore_secret, rendered)
+        self.assertIn("<validation-text chars=", rendered)
+
+    async def test_validation_bound_rescore_error_message_is_not_observable(self) -> None:
+        error_secret = "VOICE_PRIVACY_SENTINEL_RESCORE_ERROR_6f44"
+        logs: list[str] = []
+        stages: list[tuple[str, dict[str, Any]]] = []
+
+        async def run_blocking(func: Any, **kwargs: Any) -> str:
+            if kwargs["stage"] == "full-rescore":
+                raise RuntimeError(error_secret)
+            return func()
+
+        result = await run_full_stt_with_optional_rescore(
+            "audio",
+            sampling_rate=16000,
+            duration_sec=2.0,
+            wake_probe="",
+            max_new_tokens=32,
+            full_timeout_sec=12.0,
+            rescore_enabled=True,
+            rescore_extra_tokens=16,
+            rescore_min_audio_sec=1.0,
+            rescore_min_text_len=4,
+            rescore_timeout_sec=3.0,
+            run_blocking_stt_task=run_blocking,
+            transcribe_audio=lambda *_args, **_kwargs: "safe primary",
+            choose_candidate=lambda primary, _rescore: (primary, {"selected": "primary"}),
+            clean_text=lambda text: str(text).strip(),
+            log_stage=lambda _metrics, label, **kwargs: stages.append((label, kwargs)),
+            metrics={"meta": {"validation_session_id": "validation-private"}},
+            print_fn=logs.append,
+        )
+
+        rendered = repr((logs, stages, result.stt_meta))
+        self.assertNotIn(error_secret, rendered)
+        self.assertIn("errorType=RuntimeError", rendered)
+
 
 if __name__ == "__main__":
     unittest.main()

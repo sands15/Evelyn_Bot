@@ -17,12 +17,40 @@ if str(RUNTIME_ROOT) not in sys.path:
 from evelyn_core import control_page_server  # noqa: E402
 from evelyn_core.control_page_http import CONTROL_PAGE_CSRF_HEADER  # noqa: E402
 from evelyn_core.voice_capture_consent import VoiceCaptureConsentManager  # noqa: E402
-from evelyn_core.voice_validation import VoiceValidationManager  # noqa: E402
+from evelyn_core.voice_validation import (  # noqa: E402
+    SUITE_ID,
+    VoiceValidationManager,
+    active_validation_context,
+)
 
 
 READY_CAPABILITIES = {
     "voiceLocal": {"state": "ready", "ready": True, "blockers": []},
     "voiceDiscord": {"state": "ready", "ready": True, "blockers": []},
+}
+READY_HEALTH = {
+    "capabilities": READY_CAPABILITIES,
+    "services": [
+        {
+            "id": "discord_bot",
+            "checks": [
+                {
+                    "kind": "artifact_json",
+                    "ok": True,
+                    "payload": {
+                        "voiceConnections": [
+                            {
+                                "guildId": 7,
+                                "channelId": 9,
+                                "connected": True,
+                                "listening": True,
+                            }
+                        ]
+                    },
+                }
+            ],
+        }
+    ],
 }
 
 
@@ -47,7 +75,12 @@ class VoiceValidationApiTests(unittest.IsolatedAsyncioTestCase):
         self.health_patch = patch.object(
             control_page_server,
             "cached_runtime_health",
-            new=AsyncMock(return_value={"capabilities": READY_CAPABILITIES}),
+            new=AsyncMock(return_value=READY_HEALTH),
+        )
+        self.raw_health_patch = patch.object(
+            control_page_server.CONTROL_PAGE_RUNTIME_HEALTH_CACHE,
+            "get",
+            new=AsyncMock(return_value=READY_HEALTH),
         )
         self.mic_control = AsyncMock(side_effect=self.mic_control_result)
         self.mic_patch = patch.object(
@@ -57,7 +90,8 @@ class VoiceValidationApiTests(unittest.IsolatedAsyncioTestCase):
         )
         self.manager_patch.start()
         self.consent_manager_patch.start()
-        self.health_patch.start()
+        self.health_mock = self.health_patch.start()
+        self.raw_health_mock = self.raw_health_patch.start()
         self.mic_patch.start()
         self.client = TestClient(TestServer(control_page_server.create_app()))
         await self.client.start_server()
@@ -71,6 +105,7 @@ class VoiceValidationApiTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         await self.client.close()
         self.mic_patch.stop()
+        self.raw_health_patch.stop()
         self.health_patch.stop()
         self.consent_manager_patch.stop()
         self.manager_patch.stop()
@@ -98,6 +133,43 @@ class VoiceValidationApiTests(unittest.IsolatedAsyncioTestCase):
             CONTROL_PAGE_CSRF_HEADER: self.csrf,
         }
 
+    def start_manager_session(self):
+        result = self.manager.start(
+            suite=SUITE_ID,
+            surfaces=("local",),
+            capabilities=READY_CAPABILITIES,
+        )
+        self.assertTrue(result["ok"], result)
+        return result["session"]
+
+    def record_current(self, event, **payload):
+        snapshot = self.manager.snapshot()
+        step = snapshot["currentStep"]
+        context = active_validation_context(
+            surface=step["surface"],
+            root=Path(self.temp_dir.name),
+        )
+        self.assertIsNotNone(context)
+        result = self.manager.record_event(
+            {
+                "event": event,
+                "surface": step["surface"],
+                "stepId": step["id"],
+                "attemptId": context["attemptId"],
+                **payload,
+            }
+        )
+        self.assertTrue(result["ok"], result)
+
+    def record_valid_current_normal_step(self):
+        step = self.manager.snapshot()["currentStep"]
+        self.record_current("stt_final", transcript=step["prompt"])
+        self.record_current("turn_accepted")
+        self.record_current("reply_started")
+        self.record_current("reply_final")
+        self.record_current("playback_started")
+        self.record_current("playback_completed")
+
     async def test_start_get_and_abort_follow_public_session_contract(self):
         preview = self.consent_manager.preview()
         pending = self.consent_manager.begin_apply(
@@ -115,8 +187,14 @@ class VoiceValidationApiTests(unittest.IsolatedAsyncioTestCase):
         )
         started = await started_response.json()
         self.assertEqual(started_response.status, 201)
+        self.raw_health_mock.assert_awaited_once_with(force=True)
+        self.health_mock.assert_not_awaited()
         self.assertEqual(started["session"]["schema"], "voice_validation.session.v1")
         self.assertEqual(started["session"]["state"], "running")
+        self.assertEqual(
+            started["session"]["discordTarget"],
+            {"guildId": "7", "channelId": "9"},
+        )
 
         state_response = await self.client.get(
             "/api/control-page/voice-validation",
@@ -138,6 +216,94 @@ class VoiceValidationApiTests(unittest.IsolatedAsyncioTestCase):
             False,
             [call.args[0] for call in self.mic_control.await_args_list],
         )
+
+    async def test_discord_start_requires_exactly_one_connected_listening_target(self):
+        cases = (
+            ([], "discord_target_unavailable"),
+            (
+                [
+                    {
+                        "guildId": 7,
+                        "channelId": 9,
+                        "connected": True,
+                        "listening": True,
+                    },
+                    {
+                        "guildId": 8,
+                        "channelId": 10,
+                        "connected": True,
+                        "listening": True,
+                    },
+                ],
+                "ambiguous_discord_target",
+            ),
+        )
+        for rows, expected_error in cases:
+            with self.subTest(error=expected_error):
+                self.raw_health_mock.return_value = {
+                    "capabilities": READY_CAPABILITIES,
+                    "services": [
+                        {
+                            "id": "discord_bot",
+                            "checks": [
+                                {
+                                    "kind": "artifact_json",
+                                    "ok": True,
+                                    "payload": {"voiceConnections": rows},
+                                }
+                            ],
+                        }
+                    ],
+                }
+                response = await self.client.post(
+                    "/api/control-page/voice-validation/start",
+                    headers=self.headers(),
+                    json={"suite": "voice-p0.v1", "surfaces": ["discord"]},
+                )
+                payload = await response.json()
+
+                self.assertEqual(response.status, 409)
+                self.assertEqual(payload["error"], expected_error)
+                self.assertEqual(self.manager.snapshot()["state"], "idle")
+
+    async def test_unsupported_suite_precedes_discord_target_resolution(self):
+        self.raw_health_mock.return_value = {
+            "capabilities": READY_CAPABILITIES,
+            "services": [],
+        }
+
+        response = await self.client.post(
+            "/api/control-page/voice-validation/start",
+            headers=self.headers(),
+            json={"suite": "voice-p0.invalid", "surfaces": ["discord"]},
+        )
+        payload = await response.json()
+
+        self.assertEqual(response.status, 400)
+        self.assertEqual(payload["error"], "unsupported_suite")
+        self.assertEqual(self.manager.snapshot()["state"], "idle")
+
+    async def test_active_session_precedes_missing_discord_target(self):
+        first = await self.client.post(
+            "/api/control-page/voice-validation/start",
+            headers=self.headers(),
+            json={"suite": "voice-p0.v1", "surfaces": ["local"]},
+        )
+        self.assertEqual(first.status, 201)
+        self.raw_health_mock.return_value = {
+            "capabilities": READY_CAPABILITIES,
+            "services": [],
+        }
+
+        response = await self.client.post(
+            "/api/control-page/voice-validation/start",
+            headers=self.headers(),
+            json={"suite": "voice-p0.v1", "surfaces": ["discord"]},
+        )
+        payload = await response.json()
+
+        self.assertEqual(response.status, 409)
+        self.assertEqual(payload["error"], "validation_session_active")
 
     async def test_every_mutating_route_requires_csrf(self):
         for suffix in ("start", "confirm", "retry", "abort"):
@@ -173,6 +339,124 @@ class VoiceValidationApiTests(unittest.IsolatedAsyncioTestCase):
                     (await response.json())["error"],
                     "csrf_token_required",
                 )
+
+    async def test_confirm_requires_json_boolean_heard_value(self):
+        invalid_values = ("true", "false", 1, 0, [], {}, None)
+        with patch.object(self.manager, "confirm", wraps=self.manager.confirm) as confirm:
+            for heard in invalid_values:
+                with self.subTest(heard=heard):
+                    response = await self.client.post(
+                        "/api/control-page/voice-validation/confirm",
+                        headers=self.headers(),
+                        json={
+                            "sessionId": "session-1",
+                            "stepId": "01-wake",
+                            "attempt": 1,
+                            "heard": heard,
+                        },
+                    )
+                    payload = await response.json()
+
+                    self.assertEqual(response.status, 400)
+                    self.assertEqual(payload["error"], "heard_boolean_required")
+            self.assertEqual(confirm.call_count, 0)
+
+            response = await self.client.post(
+                "/api/control-page/voice-validation/confirm",
+                headers=self.headers(),
+                json={
+                    "sessionId": "session-1",
+                    "stepId": "01-wake",
+                    "attempt": 1,
+                    "heard": True,
+                },
+            )
+
+            self.assertEqual(response.status, 409)
+            self.assertEqual(confirm.call_count, 1)
+
+    async def test_confirm_v1_omission_is_accepted_only_on_first_attempt(self):
+        session = self.start_manager_session()
+        step = session["currentStep"]
+        self.record_valid_current_normal_step()
+
+        explicit_null = await self.client.post(
+            "/api/control-page/voice-validation/confirm",
+            headers=self.headers(),
+            json={
+                "sessionId": session["sessionId"],
+                "stepId": step["id"],
+                "attempt": None,
+                "heard": True,
+            },
+        )
+        explicit_null_payload = await explicit_null.json()
+        self.assertEqual(explicit_null.status, 409)
+        self.assertEqual(
+            explicit_null_payload["error"],
+            "validation_attempt_revision_mismatch",
+        )
+
+        compatible = await self.client.post(
+            "/api/control-page/voice-validation/confirm",
+            headers=self.headers(),
+            json={
+                "sessionId": session["sessionId"],
+                "stepId": step["id"],
+                "heard": True,
+            },
+        )
+        self.assertEqual(compatible.status, 200)
+        self.assertTrue((await compatible.json())["ok"])
+
+    async def test_confirm_omission_after_retry_requires_current_attempt(self):
+        session = self.start_manager_session()
+        step = session["currentStep"]
+        self.record_current("stt_final", transcript="완전히 다른 말")
+
+        retried = await self.client.post(
+            "/api/control-page/voice-validation/retry",
+            headers=self.headers(),
+            json={
+                "sessionId": session["sessionId"],
+                "stepId": step["id"],
+                "attempt": step["attempt"],
+            },
+        )
+        retried_payload = await retried.json()
+        self.assertEqual(retried.status, 200)
+        current = retried_payload["session"]["currentStep"]
+        self.assertEqual(current["attempt"], 2)
+        self.record_valid_current_normal_step()
+
+        omitted = await self.client.post(
+            "/api/control-page/voice-validation/confirm",
+            headers=self.headers(),
+            json={
+                "sessionId": session["sessionId"],
+                "stepId": current["id"],
+                "heard": True,
+            },
+        )
+        omitted_payload = await omitted.json()
+        self.assertEqual(omitted.status, 409)
+        self.assertEqual(
+            omitted_payload["error"],
+            "validation_attempt_revision_mismatch",
+        )
+
+        accepted = await self.client.post(
+            "/api/control-page/voice-validation/confirm",
+            headers=self.headers(),
+            json={
+                "sessionId": session["sessionId"],
+                "stepId": current["id"],
+                "attempt": current["attempt"],
+                "heard": True,
+            },
+        )
+        self.assertEqual(accepted.status, 200)
+        self.assertTrue((await accepted.json())["ok"])
 
     async def test_expiry_discovered_by_retry_revokes_local_capture_consent(self):
         now = [2_000.0]

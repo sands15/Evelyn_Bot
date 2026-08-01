@@ -109,6 +109,7 @@ def get_partial_transcript_from_runtime(
     max_new_tokens: int,
     transcribe_audio16k_sync: Callable[..., str],
     deps: SttTextRuntimeDeps,
+    validation_bound: bool = False,
 ) -> tuple[str, str]:
     partial_audio = build_partial_stt_window_from_runtime(audio16k, sampling_rate=sampling_rate)
     partial_samples = int(partial_audio.size)
@@ -129,12 +130,14 @@ def get_partial_transcript_from_runtime(
         )
         return partial_text, committed_text
 
-    partial_text = transcribe_audio16k_sync(
-        partial_audio,
-        max_new_tokens=max_new_tokens,
-        sampling_rate=sampling_rate,
-        stage="partial",
-    )
+    transcribe_kwargs: dict[str, Any] = {
+        "max_new_tokens": max_new_tokens,
+        "sampling_rate": sampling_rate,
+        "stage": "partial",
+    }
+    if validation_bound:
+        transcribe_kwargs["validation_bound"] = True
+    partial_text = transcribe_audio16k_sync(partial_audio, **transcribe_kwargs)
     deps.partial_stt_cache[cache_key] = {
         "hash": audio_hash,
         "partial_text": partial_text,
@@ -248,14 +251,17 @@ def detect_wake_word_sync_from_runtime(
     fuzzy_leading_wake_alias: Callable[[str], str | None],
     looks_like_gibberish_probe: Callable[[str], bool],
     slice_audio_window: Callable[[np.ndarray, float, int], np.ndarray],
+    validation_bound: bool = False,
 ) -> dict[str, str | bool | None]:
     wake_audio = slice_audio_window(audio, wake_audio_sec, sampling_rate=sampling_rate)
-    wake_raw_text = transcribe_audio16k_sync(
-        wake_audio,
-        max_new_tokens=wake_max_tokens,
-        sampling_rate=sampling_rate,
-        stage="wake",
-    )
+    wake_kwargs: dict[str, Any] = {
+        "max_new_tokens": wake_max_tokens,
+        "sampling_rate": sampling_rate,
+        "stage": "wake",
+    }
+    if validation_bound:
+        wake_kwargs["validation_bound"] = True
+    wake_raw_text = transcribe_audio16k_sync(wake_audio, **wake_kwargs)
     wake_text = apply_stt_post_corrections(wake_raw_text, wake_detected=False)
 
     probe_text = strip_leading_voice_fillers(wake_text)
@@ -283,11 +289,16 @@ def detect_wake_word_sync_from_runtime(
         }
 
     confirm_audio = slice_audio_window(audio, wake_confirm_audio_sec, sampling_rate=sampling_rate)
+    confirm_kwargs: dict[str, Any] = {
+        "max_new_tokens": wake_confirm_max_tokens,
+        "sampling_rate": sampling_rate,
+        "stage": "wake-confirm",
+    }
+    if validation_bound:
+        confirm_kwargs["validation_bound"] = True
     confirm_raw_text = transcribe_audio16k_sync(
         confirm_audio,
-        max_new_tokens=wake_confirm_max_tokens,
-        sampling_rate=sampling_rate,
-        stage="wake-confirm",
+        **confirm_kwargs,
     )
     confirm_text = apply_stt_post_corrections(confirm_raw_text, wake_detected=False)
     confirm_probe = strip_leading_voice_fillers(confirm_text)

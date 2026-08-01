@@ -130,6 +130,42 @@ class SttTranscriptionRuntimeTests(unittest.TestCase):
         self.assertEqual(call["language"], "Korean")
         self.assertFalse(call["return_time_stamps"])
 
+    def test_validation_bound_transcript_and_remote_error_are_redacted_from_logs(self) -> None:
+        transcript_secret = "VOICE_PRIVACY_SENTINEL_STT_RESULT_71c2"
+        error_secret = "VOICE_PRIVACY_SENTINEL_STT_ERROR_4db9"
+        self.remote_error = RuntimeError(error_secret)
+        self.model.results = [SimpleNamespace(text=transcript_secret)]
+
+        result = transcribe_audio16k_from_runtime(
+            FakeAudio(16000),
+            deps=self.build_deps(),
+            sampling_rate=16000,
+            validation_bound=True,
+        )
+
+        self.assertEqual(result, transcript_secret)
+        rendered_logs = "\n".join(self.logs)
+        self.assertNotIn(transcript_secret, rendered_logs)
+        self.assertNotIn(error_secret, rendered_logs)
+        self.assertIn("<validation-text chars=", rendered_logs)
+        self.assertIn("errorType=RuntimeError", rendered_logs)
+        self.assertIs(self.remote_calls[0][1]["validation_bound"], True)
+
+    def test_validation_bound_remote_result_stays_raw_for_caller_only(self) -> None:
+        secret = "VOICE_PRIVACY_SENTINEL_REMOTE_STT_093f"
+        self.remote_result = {"text": secret}
+
+        result = transcribe_audio16k_from_runtime(
+            FakeAudio(16000),
+            deps=self.build_deps(),
+            sampling_rate=16000,
+            validation_bound=True,
+        )
+
+        self.assertEqual(result, secret)
+        self.assertNotIn(secret, "\n".join(self.logs))
+        self.assertIn("<validation-text chars=", "\n".join(self.logs))
+
     def test_main_delegates_sync_transcription_to_runtime_module(self) -> None:
         source = (
             REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core" / "voice_support_composition_runtime.py"

@@ -43,12 +43,17 @@ class FakePlaybackManager:
         self.enabled = enabled
         self.error = error
         self.played: list[object] = []
+        self.calls: list[dict] = []
+        self.stop_after_first = False
 
-    async def play_source(self, source, *, cleanup_source: bool, on_first_playback):
+    async def play_source(self, source, **kwargs):
         self.played.append(source)
+        self.calls.append(kwargs)
         if self.error is not None:
             raise self.error
-        on_first_playback()
+        kwargs["on_first_playback"]()
+        if self.stop_after_first:
+            kwargs["metrics"].setdefault("meta", {})["qualified_tts_interrupt"] = True
         return True
 
 
@@ -137,6 +142,9 @@ class LocalTtsStreamRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(scope.transitions, [("tts-running", "local_speaker_stream_tts")])
         self.assertGreaterEqual(scope.cancel_checks, 2)
         self.assertEqual(self.manager.played, [self.created_sources[0][2]])
+        self.assertEqual(self.manager.calls[0]["turn_id"], "turn-1")
+        self.assertEqual(self.manager.calls[0]["session_key"], "session-1")
+        self.assertIs(self.manager.calls[0]["metrics"], metrics)
         self.assertEqual(self.first_playbacks[0][1]["chunk_index"], 2)
         self.assertEqual(self.events[0], (
             "local_tts_first_packet_sent",
@@ -144,6 +152,29 @@ class LocalTtsStreamRuntimeTests(unittest.IsolatedAsyncioTestCase):
         ))
         self.assertEqual(self.detached, [(scope, ("attached", scope))])
         self.assertEqual(self.failures, [])
+
+    async def test_qualified_stop_lease_prevents_next_prepared_sentence(self) -> None:
+        self.manager.stop_after_first = True
+        metrics = {"meta": {}}
+
+        async def prefetch(_sentence_queue, prepared_queue, *, synthesize_source, **_kwargs) -> None:
+            first = await synthesize_source("첫째", 1)
+            second = await synthesize_source("둘째", 2)
+            await prepared_queue.put((1, first))
+            await prepared_queue.put((2, second))
+            await prepared_queue.put(None)
+
+        result = await stream_local_tts_sentences_from_runtime(
+            asyncio.Queue(),
+            deps=self.build_deps(prefetch=prefetch),
+            metrics=metrics,
+            turn_id="turn-source-1",
+            session_key="session-source-1",
+        )
+
+        self.assertEqual(result, 1)
+        self.assertEqual(self.manager.played, [self.created_sources[0][2]])
+        self.assertIn((2, self.created_sources[1][2]), self.cleaned)
 
     async def test_playback_failure_is_recorded_and_leftovers_are_cleaned(self) -> None:
         self.manager.error = RuntimeError("speaker failed")

@@ -223,13 +223,19 @@ class VoiceSupportComposition:
         *,
         sampling_rate: int = TARGET_RATE,
         stage: str = "full",
+        validation_bound: bool = False,
     ) -> str:
+        runtime_kwargs: dict[str, Any] = {
+            "deps": self.deps.stt_transcription(),
+            "sampling_rate": sampling_rate,
+            "stage": stage,
+        }
+        if validation_bound:
+            runtime_kwargs["validation_bound"] = True
         return transcribe_audio16k_from_runtime(
             audio16k,
             max_new_tokens,
-            deps=self.deps.stt_transcription(),
-            sampling_rate=sampling_rate,
-            stage=stage,
+            **runtime_kwargs,
         )
 
     def build_partial_stt_window(self, audio16k: Any, *, sampling_rate: int = TARGET_RATE) -> Any:
@@ -251,6 +257,7 @@ class VoiceSupportComposition:
         audio16k: Any,
         *,
         sampling_rate: int = TARGET_RATE,
+        validation_bound: bool = False,
     ) -> tuple[str, str]:
         return get_partial_transcript_from_runtime(
             session_key,
@@ -259,6 +266,7 @@ class VoiceSupportComposition:
             max_new_tokens=self.deps.partial_stt_max_new_tokens,
             transcribe_audio16k_sync=self.transcribe_audio16k_sync,
             deps=self.deps.stt_text(),
+            validation_bound=validation_bound,
         )
 
     def score_stt_candidate(self, text: str, *, wake_probe: str = "") -> float:
@@ -287,6 +295,7 @@ class VoiceSupportComposition:
         audio: Any,
         *,
         sampling_rate: int = TARGET_RATE,
+        validation_bound: bool = False,
     ) -> dict[str, str | bool | None]:
         return detect_wake_word_sync_from_runtime(
             audio,
@@ -302,6 +311,7 @@ class VoiceSupportComposition:
             fuzzy_leading_wake_alias=self.deps.fuzzy_leading_wake_alias,
             looks_like_gibberish_probe=self.deps.looks_like_gibberish_probe,
             slice_audio_window=self.deps.slice_audio_window,
+            validation_bound=validation_bound,
         )
 
     async def wait_for_internal_voice_reconnect(self, target_channel: Any) -> Any | None:

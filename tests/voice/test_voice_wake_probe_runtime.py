@@ -256,6 +256,42 @@ class VoiceWakeProbeRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result.wake_detected)
         self.assertEqual(result.wake_reject_reason, "wake_ignore")
 
+    async def test_validation_bound_probe_is_redacted_from_observability_logs(self) -> None:
+        secret = "VOICE_PRIVACY_SENTINEL_WAKE_PROBE_4d38"
+        detect_calls: list[dict[str, Any]] = []
+        self.wake_result = {
+            "wake_detected": False,
+            "wake_probe_text": secret,
+            "wake_confirm_text": secret,
+            "wake_alias": secret,
+            "wake_reject_reason": "confirm_miss",
+        }
+        deps = replace(
+            self.deps,
+            detect_wake_word_sync=lambda _audio, **kwargs: (
+                detect_calls.append(kwargs) or self.wake_result
+            ),
+        )
+
+        result = await self.run_probe(
+            deps=deps,
+            debug_meta={
+                "validation_session_id": "validation-private",
+                "validation_step_id": "02-listening",
+                "validation_attempt": 3,
+                "validation_attempt_id": "attempt-private-3",
+            }
+        )
+
+        self.assertIsNone(result)
+        self.assertIs(detect_calls[0]["validation_bound"], True)
+        for kind in ("print", "stage", "drop"):
+            rendered = repr(
+                [payload for event_kind, payload in self.events if event_kind == kind]
+            )
+            self.assertNotIn(secret, rendered, kind)
+            self.assertIn("<validation-text chars=", rendered, kind)
+
     def test_main_delegates_wake_filtering_to_runtime_module(self) -> None:
         source = (REPO_ROOT / "main.py").read_text(encoding="utf-8")
         composition_source = (

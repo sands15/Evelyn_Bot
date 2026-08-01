@@ -29,6 +29,15 @@ EVENT_REORDER_GRACE_SEC = 2.0
 ALLOWED_SURFACES = ("local", "discord")
 TERMINAL_STATES = frozenset({"passed", "failed", "aborted"})
 LATENCY_WARNING_MS = {"local": 2500.0, "discord": 3000.0}
+SILENCE_NON_ACCEPTED_DROP_REASONS = frozenset(
+    {
+        "env_ignore",
+        "filler_ignore",
+        "noise_text_ignore",
+        "too_short_total",
+        "vad_ignore",
+    }
+)
 
 _PRIVATE_EVENT_KEYS = frozenset(
     {
@@ -49,11 +58,17 @@ _PRIVATE_EVENT_KEYS = frozenset(
 _PRIVATE_EVENT_KEY_TOKENS = frozenset(
     re.sub(r"[^a-z0-9]+", "", key.lower()) for key in _PRIVATE_EVENT_KEYS
 )
+_ATTEMPT_SOURCE_BINDINGS: dict[str, tuple[str, str]] = {}
+_ATTEMPT_SOURCE_BINDINGS_LOCK = threading.Lock()
+_ATTEMPT_REVISION_OMITTED = object()
+_SESSION_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}\Z", re.ASCII)
+_ATTEMPT_ID_PATTERN = re.compile(r"[0-9a-f]{32}\Z", re.ASCII)
 _ALLOWED_EVENT_TYPES = frozenset(
     {
         "capture",
         "stt_final",
         "turn_accepted",
+        "reply_started",
         "reply_final",
         "playback_started",
         "playback_completed",
@@ -123,6 +138,20 @@ def normalize_validation_text(value: Any) -> str:
     return "".join(ch for ch in normalized if ch.isalnum())
 
 
+def _parse_attempt_revision(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, float) and (
+        not math.isfinite(value) or not value.is_integer()
+    ):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return parsed if parsed > 0 else None
+
+
 def transcript_match(
     transcript: Any,
     expected: Any,
@@ -173,6 +202,36 @@ def _safe_json_read(path: Path) -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) else None
 
 
+def _session_id_is_safe(value: Any) -> bool:
+    return isinstance(value, str) and bool(_SESSION_ID_PATTERN.fullmatch(value))
+
+
+def _contained_validation_path(
+    artifacts_root: Path,
+    candidate: Path,
+) -> Path | None:
+    try:
+        validation_boundary = artifacts_root.resolve(strict=False) / "voice_validation"
+        candidate.resolve(strict=False).relative_to(validation_boundary)
+    except (OSError, RuntimeError, ValueError):
+        return None
+    return candidate
+
+
+def _session_artifact_path(
+    artifacts_root: Path,
+    directory: Path,
+    session_id: Any,
+    suffix: str,
+) -> Path | None:
+    if not _session_id_is_safe(session_id):
+        return None
+    return _contained_validation_path(
+        artifacts_root,
+        directory / f"{session_id}{suffix}",
+    )
+
+
 def _session_expiry_state(session: dict[str, Any], *, now: float) -> str:
     try:
         expires_at = float(session.get("expiresAt"))
@@ -215,16 +274,101 @@ def sanitize_validation_event(event: dict[str, Any]) -> dict[str, Any]:
     return sanitized
 
 
+def _normalize_discord_target(value: Any) -> dict[str, str] | None:
+    if not isinstance(value, dict):
+        return None
+    guild_id = value.get("guildId")
+    channel_id = value.get("channelId")
+    if (
+        isinstance(guild_id, bool)
+        or isinstance(channel_id, bool)
+        or guild_id is None
+        or channel_id is None
+    ):
+        return None
+    normalized_guild_id = str(guild_id).strip()
+    normalized_channel_id = str(channel_id).strip()
+    if (
+        not normalized_guild_id.isdigit()
+        or not normalized_channel_id.isdigit()
+        or int(normalized_guild_id) <= 0
+        or int(normalized_channel_id) <= 0
+    ):
+        return None
+    return {
+        "guildId": normalized_guild_id,
+        "channelId": normalized_channel_id,
+    }
+
+
+def resolve_discord_validation_target(
+    health: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Select one live Discord voice target from a fresh runtime-health snapshot."""
+
+    source = health if isinstance(health, dict) else {}
+    cache = source.get("cache") if isinstance(source.get("cache"), dict) else {}
+    if cache.get("stale") is True or str(cache.get("lastRefreshError") or ""):
+        return {"ok": False, "error": "discord_target_unavailable"}
+    service_rows = source.get("services")
+    discord_service = next(
+        (
+            row
+            for row in service_rows
+            if isinstance(row, dict) and row.get("id") == "discord_bot"
+        ),
+        None,
+    ) if isinstance(service_rows, (list, tuple)) else None
+    artifact_payload: dict[str, Any] = {}
+    checks = (discord_service or {}).get("checks")
+    for check in checks if isinstance(checks, (list, tuple)) else ():
+        if isinstance(check, dict) and check.get("kind") == "artifact_json":
+            if check.get("ok") is not True:
+                break
+            payload = check.get("payload")
+            if isinstance(payload, dict):
+                artifact_payload = payload
+            break
+    candidates: list[dict[str, str]] = []
+    voice_connections = artifact_payload.get("voiceConnections")
+    for row in (
+        voice_connections if isinstance(voice_connections, (list, tuple)) else ()
+    ):
+        if not isinstance(row, dict):
+            continue
+        if row.get("connected") is not True or row.get("listening") is not True:
+            continue
+        target = _normalize_discord_target(row)
+        if target is not None:
+            candidates.append(target)
+    if not candidates:
+        return {"ok": False, "error": "discord_target_unavailable"}
+    if len(candidates) != 1:
+        return {"ok": False, "error": "ambiguous_discord_target"}
+    return {"ok": True, "discordTarget": candidates[0]}
+
+
 def active_validation_context(
     *,
     surface: str,
     root: Path | None = None,
     prefer_interrupt: bool = False,
     now: Any | None = None,
-) -> dict[str, str] | None:
+) -> dict[str, Any] | None:
     base = Path(root or get_runtime_artifacts_root()) / "voice_validation"
-    active = _safe_json_read(base / "active.json")
-    if not active or active.get("state") != "running" or active.get("surface") != surface:
+    active_path = _contained_validation_path(base.parent, base / "active.json")
+    active = _safe_json_read(active_path) if active_path is not None else None
+    if (
+        not active
+        or active.get("schema") != SESSION_SCHEMA
+        or not _session_id_is_safe(active.get("sessionId"))
+        or active.get("state") != "running"
+        or active.get("surface") != surface
+        or not VoiceValidationManager._loaded_session_is_canonical(
+            active,
+            allow_missing_attempt_ids=False,
+        )
+    ):
         return None
     current_time = (now or time.time)()
     if _session_expiry_state(active, now=current_time) != "active":
@@ -237,11 +381,93 @@ def active_validation_context(
         if prefer_interrupt and current.get("interruptStepId")
         else str(current.get("id") or "")
     )
+    target_step = next(
+        (
+            item
+            for item in active.get("_steps") or []
+            if isinstance(item, dict)
+            and item.get("surface") == surface
+            and item.get("id") == step_id
+        ),
+        current if step_id == str(current.get("id") or "") else {},
+    )
+    attempt_id = str(target_step.get("_attemptId") or "")
+    with _ATTEMPT_SOURCE_BINDINGS_LOCK:
+        bound_guild_id, bound_turn_id = _ATTEMPT_SOURCE_BINDINGS.get(
+            attempt_id,
+            ("", ""),
+        )
+    discord_target = (
+        _normalize_discord_target(active.get("discordTarget"))
+        if surface == "discord"
+        else None
+    )
     return {
         "sessionId": str(active.get("sessionId") or ""),
         "stepId": step_id,
         "surface": surface,
+        "kind": str(target_step.get("kind") or ""),
+        "attempt": int(target_step.get("attempt") or 1),
+        "attemptId": attempt_id,
+        "discordTarget": deepcopy(discord_target),
+        "guildId": bound_guild_id or None,
+        "turnId": bound_turn_id or None,
     }
+
+
+def validation_attempt_binding_is_current(
+    metadata: dict[str, Any] | None,
+    *,
+    surface: str,
+    root: Path | None = None,
+    now: Any | None = None,
+    reject_unbound_when_active: bool = False,
+) -> bool:
+    source = metadata if isinstance(metadata, dict) else {}
+    session_id = str(
+        source.get("validation_session_id")
+        or source.get("validationSessionId")
+        or ""
+    )
+    step_id = str(
+        source.get("validation_step_id")
+        or source.get("validationStepId")
+        or ""
+    )
+    attempt_id = str(
+        source.get("validation_attempt_id")
+        or source.get("validationAttemptId")
+        or ""
+    )
+    if not (session_id or step_id or attempt_id):
+        if not reject_unbound_when_active:
+            return True
+        return not any(
+            active_validation_context(
+                surface=surface,
+                root=root,
+                prefer_interrupt=prefer_interrupt,
+                now=now,
+            )
+            for prefer_interrupt in (False, True)
+        )
+    if not (session_id and step_id and attempt_id):
+        return False
+    for prefer_interrupt in (False, True):
+        context = active_validation_context(
+            surface=surface,
+            root=root,
+            prefer_interrupt=prefer_interrupt,
+            now=now,
+        )
+        if (
+            context
+            and context.get("sessionId") == session_id
+            and context.get("stepId") == step_id
+            and context.get("attemptId") == attempt_id
+        ):
+            return True
+    return False
 
 
 def emit_voice_validation_event(
@@ -251,6 +477,7 @@ def emit_voice_validation_event(
     root: Path | None = None,
     session_id: str | None = None,
     step_id: str | None = None,
+    attempt_id: str | None = None,
     now: Any | None = None,
     **payload: Any,
 ) -> dict[str, Any] | None:
@@ -273,6 +500,10 @@ def emit_voice_validation_event(
             if candidate
             and (not session_id or str(session_id) == candidate.get("sessionId"))
             and (not step_id or str(step_id) == candidate.get("stepId"))
+            and (
+                not attempt_id
+                or str(attempt_id) == candidate.get("attemptId")
+            )
         ),
         None,
     )
@@ -288,9 +519,18 @@ def emit_voice_validation_event(
             "sessionId": resolved_session_id,
             "stepId": resolved_step_id,
             "surface": normalized_surface,
+            "attempt": int(context.get("attempt") or 1),
+            "attemptId": str(context.get("attemptId") or ""),
         }
     )
-    events_path = base / "events" / f"{resolved_session_id}.jsonl"
+    events_path = _session_artifact_path(
+        base.parent,
+        base / "events",
+        resolved_session_id,
+        ".jsonl",
+    )
+    if events_path is None:
+        return None
     events_path.parent.mkdir(parents=True, exist_ok=True)
     encoded = json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n"
     with events_path.open("a", encoding="utf-8") as handle:
@@ -306,6 +546,7 @@ def emit_transcript_validation_event(
     root: Path | None = None,
     session_id: str | None = None,
     step_id: str | None = None,
+    attempt_id: str | None = None,
     prefer_interrupt: bool = False,
     **payload: Any,
 ) -> dict[str, Any] | None:
@@ -330,6 +571,10 @@ def emit_transcript_validation_event(
             if candidate
             and (not session_id or str(session_id) == candidate.get("sessionId"))
             and (not step_id or str(step_id) == candidate.get("stepId"))
+            and (
+                not attempt_id
+                or str(attempt_id) == candidate.get("attemptId")
+            )
         ),
         None,
     )
@@ -357,15 +602,28 @@ def emit_transcript_validation_event(
         step.get("prompt"),
         keywords=step.get("keywords") or (),
     )
-    return emit_voice_validation_event(
+    record = emit_voice_validation_event(
         normalized_surface,
         "stt_final",
         root=base_root,
         session_id=resolved_session_id,
         step_id=resolved_step_id,
+        attempt_id=str(context.get("attemptId") or ""),
         **payload,
         **match,
     )
+    if record is not None and match.get("matched") is True:
+        guild_id = str(payload.get("guildId") or "").strip()
+        turn_id = str(payload.get("turnId") or "").strip()
+        token = str(context.get("attemptId") or "")
+        if normalized_surface == "discord" and token and guild_id and turn_id:
+            with _ATTEMPT_SOURCE_BINDINGS_LOCK:
+                _ATTEMPT_SOURCE_BINDINGS.setdefault(token, (guild_id, turn_id))
+                if len(_ATTEMPT_SOURCE_BINDINGS) > 256:
+                    oldest_token = next(iter(_ATTEMPT_SOURCE_BINDINGS))
+                    if oldest_token != token:
+                        _ATTEMPT_SOURCE_BINDINGS.pop(oldest_token, None)
+    return record
 
 
 @dataclass(frozen=True)
@@ -402,6 +660,269 @@ class VoiceValidationManager:
         self._event_offset = 0
         self._load_active()
 
+    @staticmethod
+    def _new_attempt_id() -> str:
+        return uuid.uuid4().hex
+
+    def _ensure_attempt_bindings(self) -> bool:
+        if not self._session:
+            return False
+        changed = False
+        for step in self._session.get("_steps") or []:
+            if not isinstance(step, dict):
+                continue
+            if not str(step.get("_attemptId") or ""):
+                step["_attemptId"] = self._new_attempt_id()
+                changed = True
+        return changed
+
+    @staticmethod
+    def _persisted_step_pass_evidence_is_complete(step: dict[str, Any]) -> bool:
+        events = step.get("events") or {}
+
+        def count(event: str) -> int:
+            return int(events.get(event) or 0)
+
+        kind = str(step.get("kind") or "")
+        if kind == "silence":
+            voice_activity = sum(
+                count(event)
+                for event in (
+                    "stt_final",
+                    "turn_accepted",
+                    "reply_started",
+                    "reply_final",
+                    "playback_started",
+                    "playback_completed",
+                    "playback_cancelled",
+                    "barge_in_accepted",
+                    "tts_interrupt",
+                    "barge_in_continuity",
+                )
+            )
+            return count("silence_completed") == 1 and voice_activity == 0
+        stt_finals = count("stt_final")
+        accepted = count("turn_accepted")
+        reply_started = count("reply_started")
+        replies = count("reply_final")
+        started = count("playback_started")
+        completed = count("playback_completed")
+        cancelled = count("playback_cancelled")
+        interrupt = count("barge_in_accepted")
+        qualified_tts_interrupt = count("tts_interrupt")
+        continuity = count("barge_in_continuity")
+        match_ok = bool((step.get("match") or {}).get("matched"))
+        if kind == "normal":
+            return bool(
+                stt_finals
+                == accepted
+                == reply_started
+                == replies
+                == started
+                == completed
+                == 1
+                and cancelled == interrupt == qualified_tts_interrupt == continuity == 0
+                and match_ok
+                and step.get("heard") is True
+            )
+        if kind == "barge_source":
+            return bool(
+                stt_finals == accepted == reply_started == started == cancelled == 1
+                and replies in {0, 1}
+                and completed == interrupt == continuity == 0
+                and qualified_tts_interrupt == 1
+                and step.get("acceptedTurnId")
+                and step.get("qualifiedTtsInterruptTurnId")
+                == step.get("acceptedTurnId")
+                and match_ok
+            )
+        if kind == "barge_interrupt":
+            return bool(
+                stt_finals
+                == accepted
+                == reply_started
+                == replies
+                == started
+                == completed
+                == interrupt
+                == continuity
+                == 1
+                and cancelled == qualified_tts_interrupt == 0
+                and match_ok
+                and step.get("heard") is True
+            )
+        return False
+
+    @classmethod
+    def _loaded_session_is_canonical(
+        cls,
+        payload: dict[str, Any],
+        *,
+        allow_missing_attempt_ids: bool = True,
+    ) -> bool:
+        if payload.get("suite") != SUITE_ID:
+            return False
+        state = payload.get("state")
+        if state not in {"preflight", "running", *TERMINAL_STATES}:
+            return False
+        surfaces = payload.get("surfaces")
+        if (
+            not isinstance(surfaces, list)
+            or not surfaces
+            or len(surfaces) != len(set(surfaces))
+            or any(surface not in ALLOWED_SURFACES for surface in surfaces)
+        ):
+            return False
+        current_surface = payload.get("surface")
+        if current_surface not in surfaces:
+            return False
+        steps = payload.get("_steps")
+        definitions = _suite_steps()
+        expected = [
+            (surface, definition)
+            for surface in surfaces
+            for definition in definitions
+        ]
+        if not isinstance(steps, list) or len(steps) != len(expected):
+            return False
+        seen_step_keys: set[tuple[str, str]] = set()
+        for step, (surface, definition) in zip(steps, expected):
+            if not isinstance(step, dict):
+                return False
+            step_key = (str(step.get("surface") or ""), str(step.get("id") or ""))
+            if step_key in seen_step_keys:
+                return False
+            seen_step_keys.add(step_key)
+            if any(
+                step.get(key) != expected_value
+                for key, expected_value in (
+                    ("surface", surface),
+                    ("id", definition["id"]),
+                    ("kind", definition["kind"]),
+                    ("prompt", definition["prompt"]),
+                    ("keywords", definition["keywords"]),
+                    ("silenceSec", definition["silenceSec"]),
+                )
+            ):
+                return False
+            attempt = step.get("attempt")
+            if (
+                not isinstance(attempt, int)
+                or isinstance(attempt, bool)
+                or not 1 <= attempt <= MAX_ATTEMPTS
+            ):
+                return False
+            attempt_id = step.get("_attemptId")
+            if attempt_id in (None, ""):
+                if not allow_missing_attempt_ids:
+                    return False
+            elif (
+                not isinstance(attempt_id, str)
+                or not _ATTEMPT_ID_PATTERN.fullmatch(attempt_id)
+            ):
+                return False
+            if step.get("status") not in {"pending", "passed", "failed"}:
+                return False
+            events = step.get("events")
+            if not isinstance(events, dict) or any(
+                not isinstance(event, str)
+                or event not in _ALLOWED_EVENT_TYPES
+                or not isinstance(count, int)
+                or isinstance(count, bool)
+                or count < 0
+                for event, count in events.items()
+            ):
+                return False
+            errors = step.get("errors")
+            if not isinstance(errors, list) or any(
+                not isinstance(error, str) for error in errors
+            ):
+                return False
+            if not isinstance(step.get("heard"), bool):
+                return False
+            match = step.get("match")
+            if match is not None and not isinstance(match, dict):
+                return False
+            latency = step.get("latencyMs")
+            if latency is not None and (
+                isinstance(latency, bool)
+                or not isinstance(latency, (int, float))
+                or not math.isfinite(float(latency))
+                or float(latency) < 0
+            ):
+                return False
+            if (
+                step.get("status") == "passed"
+                and not cls._persisted_step_pass_evidence_is_complete(step)
+            ):
+                return False
+        if state == "passed" and any(
+            step.get("status") != "passed" for step in steps
+        ):
+            return False
+        index = payload.get("_stepIndex")
+        if (
+            not isinstance(index, int)
+            or isinstance(index, bool)
+            or not 0 <= index < len(steps)
+        ):
+            return False
+        current = payload.get("currentStep")
+        indexed_step = steps[index]
+        if not isinstance(current, dict) or any(
+            current.get(key) != indexed_step.get(key)
+            for key in ("id", "surface", "kind", "prompt", "status", "attempt")
+        ):
+            return False
+        if indexed_step.get("surface") != current_surface:
+            return False
+        surface_index = payload.get("_surfaceIndex")
+        if (
+            not isinstance(surface_index, int)
+            or isinstance(surface_index, bool)
+            or surface_index != surfaces.index(current_surface)
+        ):
+            return False
+        if payload.get("attempt") != indexed_step.get("attempt"):
+            return False
+        if indexed_step.get("kind") == "barge_source":
+            if index + 1 >= len(steps):
+                return False
+            interrupt_step = steps[index + 1]
+            if (
+                interrupt_step.get("surface") != current_surface
+                or interrupt_step.get("kind") != "barge_interrupt"
+                or current.get("interruptStepId") != interrupt_step.get("id")
+                or current.get("interruptPrompt") != interrupt_step.get("prompt")
+            ):
+                return False
+        return True
+
+    def _invalidate_loaded_session(self, payload: dict[str, Any]) -> None:
+        self._session = payload
+        self._session["state"] = "failed"
+        self._session["suite"] = SUITE_ID
+        self._session["failureCode"] = "session_invalid"
+        self._session["lastFailureCode"] = "session_invalid"
+        self._session["completedAt"] = self.now()
+        self._session["surface"] = None
+        self._session["surfaces"] = []
+        self._session["currentStep"] = {}
+        self._session["attempt"] = 1
+        self._session["summary"] = {
+            "surfacesPassed": 0,
+            "surfacesTotal": 0,
+            "stepsPassed": 0,
+            "stepsTotal": 0,
+        }
+        self._session["warnings"] = []
+        self._session["_surfaceIndex"] = 0
+        self._session["_stepIndex"] = 0
+        self._session["_steps"] = []
+        self._seen_event_ids = set()
+        self._event_offset = 0
+        self._persist()
+
     def _idle(self, *, capabilities: dict[str, Any] | None = None) -> dict[str, Any]:
         return {
             "schema": SESSION_SCHEMA,
@@ -423,15 +944,50 @@ class VoiceValidationManager:
 
     def _load_active(self) -> None:
         with self._lock:
-            payload = _safe_json_read(self.paths.active)
-            if not payload or payload.get("schema") != SESSION_SCHEMA:
+            active_path = _contained_validation_path(
+                self.paths.root.parent,
+                self.paths.active,
+            )
+            payload = _safe_json_read(active_path) if active_path is not None else None
+            if (
+                not payload
+                or payload.get("schema") != SESSION_SCHEMA
+                or not _session_id_is_safe(payload.get("sessionId"))
+            ):
                 self._session = None
+                return
+            if not self._loaded_session_is_canonical(payload):
+                self._invalidate_loaded_session(payload)
                 return
             self._session = payload
             self._event_offset = 0
             self._seen_event_ids = set(str(item) for item in payload.get("_seenEventIds") or [])
+            current = self._session.get("currentStep") or {}
+            current_step = self._step_by_id(
+                str(self._session.get("surface") or ""),
+                str(current.get("id") or ""),
+            )
+            current_binding_missing = bool(
+                current_step is not None
+                and not str(current_step.get("_attemptId") or "")
+            )
+            bindings_added = self._ensure_attempt_bindings()
+            if (
+                current_binding_missing
+                and current_step is not None
+                and self._session.get("state") == "running"
+            ):
+                self._fail_attempt(
+                    current_step,
+                    "attempt_binding_migration_required",
+                )
+                self._sync_current_step()
+                self._update_summary()
+                bindings_added = True
             self._expire_if_needed()
             self._ingest_event_log()
+            if bindings_added:
+                self._persist()
 
     def _expire_if_needed(self) -> None:
         if not self._session or self._session.get("state") in TERMINAL_STATES:
@@ -450,9 +1006,15 @@ class VoiceValidationManager:
     def _persist(self) -> None:
         if not self._session:
             return
+        active_path = _contained_validation_path(
+            self.paths.root.parent,
+            self.paths.active,
+        )
+        if active_path is None:
+            return
         self._session["updatedAt"] = self.now()
         self._session["_seenEventIds"] = list(sorted(self._seen_event_ids))[-1000:]
-        _atomic_json_write(self.paths.active, self._session)
+        _atomic_json_write(active_path, self._session)
 
     def _public_session(self, capabilities: dict[str, Any] | None = None) -> dict[str, Any]:
         if not self._session:
@@ -484,6 +1046,7 @@ class VoiceValidationManager:
         suite: str,
         surfaces: Iterable[str],
         capabilities: dict[str, Any] | None = None,
+        discord_target: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         with self._lock:
             self._expire_if_needed()
@@ -502,6 +1065,10 @@ class VoiceValidationManager:
                     "error": "validation_session_active",
                     "session": self._public_session(capabilities=capabilities),
                 }
+
+            normalized_discord_target = _normalize_discord_target(discord_target)
+            if "discord" in normalized_surfaces and normalized_discord_target is None:
+                return {"ok": False, "error": "discord_target_unavailable"}
 
             capability_map = dict(capabilities or {})
             requested_capabilities = [
@@ -526,6 +1093,7 @@ class VoiceValidationManager:
                             "surface": surface,
                             "status": "pending",
                             "attempt": 1,
+                            "_attemptId": self._new_attempt_id(),
                             "events": {},
                             "errors": [],
                             "latencyMs": None,
@@ -553,6 +1121,8 @@ class VoiceValidationManager:
                 "_steps": steps,
                 "_seenEventIds": [],
             }
+            if normalized_discord_target is not None:
+                self._session["discordTarget"] = normalized_discord_target
             self._seen_event_ids = set()
             self._event_offset = 0
             self._sync_current_step()
@@ -588,7 +1158,12 @@ class VoiceValidationManager:
     def _events_path(self) -> Path | None:
         if not self._session:
             return None
-        return self.paths.events / f"{self._session.get('sessionId')}.jsonl"
+        return _session_artifact_path(
+            self.paths.root.parent,
+            self.paths.events,
+            self._session.get("sessionId"),
+            ".jsonl",
+        )
 
     def _ingest_event_log(self) -> None:
         path = self._events_path()
@@ -636,34 +1211,64 @@ class VoiceValidationManager:
             )
             if not self._event_target_is_active(surface=surface, step_id=step_id):
                 return {"ok": False, "error": "validation_event_step_not_active"}
+            step = self._step_by_id(surface, step_id)
+            supplied_attempt_id = str(
+                event.get("attemptId") or event.get("attempt_id") or ""
+            )
+            if (
+                step is None
+                or not supplied_attempt_id
+                or supplied_attempt_id != str(step.get("_attemptId") or "")
+            ):
+                return {
+                    "ok": False,
+                    "error": "validation_attempt_binding_mismatch",
+                    "session": self._public_session(),
+                }
             if "transcript" in event:
-                step = self._step_by_id(surface, step_id)
-                if step is not None:
-                    event = {
-                        **event,
-                        **transcript_match(
-                            event.get("transcript"),
-                            step.get("prompt"),
-                            keywords=step.get("keywords") or (),
-                        ),
-                    }
+                event = {
+                    **event,
+                    **transcript_match(
+                        event.get("transcript"),
+                        step.get("prompt"),
+                        keywords=step.get("keywords") or (),
+                    ),
+                }
             emitted = emit_voice_validation_event(
                 surface,
                 str(event.get("event") or "error"),
                 root=self.paths.root.parent,
                 session_id=str(self._session.get("sessionId") or ""),
                 step_id=step_id,
+                attempt_id=str(
+                    step.get("_attemptId")
+                    or ""
+                ),
                 now=self.now,
                 **{
                     key: value
                     for key, value in event.items()
-                    if key not in {"event", "surface", "stepId", "sessionId"}
+                    if key
+                    not in {
+                        "event",
+                        "surface",
+                        "stepId",
+                        "sessionId",
+                        "attempt_id",
+                        "attemptId",
+                    }
                 },
             )
             if emitted is None:
                 return {"ok": False, "error": "validation_event_rejected"}
             self._ingest_event_log()
-            return {"ok": True, "event": emitted, "session": self._public_session()}
+            public_event = deepcopy(emitted)
+            public_event.pop("attemptId", None)
+            return {
+                "ok": True,
+                "event": public_event,
+                "session": self._public_session(),
+            }
 
     def _step_by_id(self, surface: str, step_id: str) -> dict[str, Any] | None:
         if not self._session:
@@ -703,9 +1308,6 @@ class VoiceValidationManager:
         if not self._session or event.get("sessionId") != self._session.get("sessionId"):
             return
         event_id = str(event.get("eventId") or "")
-        if event_id in self._seen_event_ids:
-            return
-        self._seen_event_ids.add(event_id)
         surface = str(event.get("surface") or "")
         step_id = str(event.get("stepId") or "")
         if not self._event_target_is_active(surface=surface, step_id=step_id):
@@ -713,6 +1315,19 @@ class VoiceValidationManager:
         step = self._step_by_id(surface, step_id)
         if step is None:
             return
+        attempt_id = str(event.get("attemptId") or "")
+        if not attempt_id or attempt_id != str(step.get("_attemptId") or ""):
+            return
+        try:
+            event_attempt = int(event.get("attempt"))
+        except (TypeError, ValueError):
+            return
+        if event_attempt != int(step.get("attempt") or 1):
+            return
+        dedupe_key = f"{attempt_id}:{event_id}"
+        if dedupe_key in self._seen_event_ids or event_id in self._seen_event_ids:
+            return
+        self._seen_event_ids.add(dedupe_key)
         event_type = str(event.get("event") or "")
         events = step.setdefault("events", {})
         events[event_type] = int(events.get(event_type) or 0) + 1
@@ -725,6 +1340,16 @@ class VoiceValidationManager:
                 "requiredKeywordCount": int(event.get("requiredKeywordCount") or 0),
                 "threshold": float(event.get("threshold") or 0.70),
             }
+        if event_type == "turn_accepted" and event.get("turnId"):
+            step["acceptedTurnId"] = str(event.get("turnId"))[:128]
+        if (
+            event_type == "tts_interrupt"
+            and event.get("qualified") is True
+            and event.get("sourceTurnId")
+        ):
+            step["qualifiedTtsInterruptTurnId"] = str(
+                event.get("sourceTurnId")
+            )[:128]
         latency = event.get("latencyMs")
         if isinstance(latency, (int, float)) and latency >= 0:
             step["latencyMs"] = round(float(latency), 1)
@@ -740,27 +1365,91 @@ class VoiceValidationManager:
     def _event_count(step: dict[str, Any], event: str) -> int:
         return int((step.get("events") or {}).get(event) or 0)
 
+    def _terminal_machine_evidence_complete(self, step: dict[str, Any]) -> bool:
+        kind = str(step.get("kind") or "")
+        stt_finals = self._event_count(step, "stt_final")
+        accepted = self._event_count(step, "turn_accepted")
+        reply_started = self._event_count(step, "reply_started")
+        replies = self._event_count(step, "reply_final")
+        started = self._event_count(step, "playback_started")
+        completed = self._event_count(step, "playback_completed")
+        cancelled = self._event_count(step, "playback_cancelled")
+        interrupt = self._event_count(step, "barge_in_accepted")
+        qualified_tts_interrupt = self._event_count(step, "tts_interrupt")
+        continuity = self._event_count(step, "barge_in_continuity")
+        match_ok = bool((step.get("match") or {}).get("matched"))
+        qualified_interrupt_matches = bool(
+            step.get("acceptedTurnId")
+            and step.get("qualifiedTtsInterruptTurnId")
+            == step.get("acceptedTurnId")
+        )
+        if kind == "normal":
+            return bool(
+                stt_finals
+                == accepted
+                == reply_started
+                == replies
+                == started
+                == completed
+                == 1
+                and cancelled == interrupt == qualified_tts_interrupt == continuity == 0
+                and match_ok
+            )
+        if kind == "barge_source":
+            return bool(
+                stt_finals == accepted == reply_started == started == cancelled == 1
+                and replies in {0, 1}
+                and completed == interrupt == continuity == 0
+                and qualified_tts_interrupt == 1
+                and qualified_interrupt_matches
+                and match_ok
+            )
+        if kind == "barge_interrupt":
+            return bool(
+                stt_finals
+                == accepted
+                == reply_started
+                == replies
+                == started
+                == completed
+                == interrupt
+                == continuity
+                == 1
+                and cancelled == qualified_tts_interrupt == 0
+                and match_ok
+            )
+        return False
+
     def _evaluate_step(self, step: dict[str, Any]) -> None:
         if step.get("status") in {"passed", "failed"}:
             return
         kind = step.get("kind")
         accepted = self._event_count(step, "turn_accepted")
+        reply_started = self._event_count(step, "reply_started")
         replies = self._event_count(step, "reply_final")
         stt_finals = self._event_count(step, "stt_final")
         started = self._event_count(step, "playback_started")
         completed = self._event_count(step, "playback_completed")
         cancelled = self._event_count(step, "playback_cancelled")
         interrupt = self._event_count(step, "barge_in_accepted")
+        qualified_tts_interrupt = self._event_count(step, "tts_interrupt")
         continuity = self._event_count(step, "barge_in_continuity")
+        qualified_interrupt_matches = bool(
+            step.get("acceptedTurnId")
+            and step.get("qualifiedTtsInterruptTurnId")
+            == step.get("acceptedTurnId")
+        )
         failed = self._event_count(step, "playback_failed") + self._event_count(step, "error")
         if (
             stt_finals > 1
             or accepted > 1
+            or reply_started > 1
             or replies > 1
             or started > 1
             or completed > 1
             or cancelled > 1
             or interrupt > 1
+            or qualified_tts_interrupt > 1
             or continuity > 1
         ):
             self._fail_attempt(step, "duplicate_turn_or_playback")
@@ -774,53 +1463,38 @@ class VoiceValidationManager:
         elif stt_finals == 1 and not bool((step.get("match") or {}).get("matched")):
             self._fail_attempt(step, "stt_mismatch")
         elif (
-            completed == 1
-            and (accepted != 1 or replies != 1 or started != 1)
+            completed + cancelled == 1
             and self.now() - float(step.get("terminalEventObservedAt") or self.now())
             >= EVENT_REORDER_GRACE_SEC
+            and not self._terminal_machine_evidence_complete(step)
         ):
-            self._fail_attempt(step, "orphan_or_incomplete_playback")
-        elif (
-            cancelled == 1
-            and (accepted != 1 or replies != 1 or started != 1)
-            and self.now() - float(step.get("terminalEventObservedAt") or self.now())
-            >= EVENT_REORDER_GRACE_SEC
-        ):
-            self._fail_attempt(step, "orphan_or_incomplete_cancelled_playback")
+            self._fail_attempt(
+                step,
+                "orphan_or_incomplete_cancelled_playback"
+                if cancelled == 1
+                else "orphan_or_incomplete_playback",
+            )
         elif kind == "normal":
-            match_ok = bool((step.get("match") or {}).get("matched"))
-            if (
-                accepted == replies == started == completed == 1
-                and cancelled == interrupt == continuity == 0
-                and match_ok
-                and step.get("heard")
-            ):
+            if self._terminal_machine_evidence_complete(step) and step.get("heard"):
                 step["status"] = "passed"
         elif kind == "barge_source":
-            if (
-                accepted == replies == started == cancelled == 1
-                and completed == interrupt == continuity == 0
-                and bool((step.get("match") or {}).get("matched"))
-            ):
+            if self._terminal_machine_evidence_complete(step):
                 step["status"] = "passed"
         elif kind == "barge_interrupt":
-            if (
-                accepted == replies == started == completed == interrupt == continuity == 1
-                and cancelled == 0
-                and bool((step.get("match") or {}).get("matched"))
-                and step.get("heard")
-            ):
+            if self._terminal_machine_evidence_complete(step) and step.get("heard"):
                 step["status"] = "passed"
         elif kind == "silence":
             silence_completed = self._event_count(step, "silence_completed")
             voice_activity = (
                 stt_finals
                 + accepted
+                + reply_started
                 + replies
                 + started
                 + completed
                 + cancelled
                 + interrupt
+                + qualified_tts_interrupt
                 + continuity
             )
             if voice_activity:
@@ -859,7 +1533,16 @@ class VoiceValidationManager:
                 self._update_summary()
                 self._persist()
 
-    def confirm(self, *, session_id: str, step_id: str, heard: bool) -> dict[str, Any]:
+    def confirm(
+        self,
+        *,
+        session_id: str,
+        step_id: str,
+        heard: bool,
+        attempt: Any = _ATTEMPT_REVISION_OMITTED,
+    ) -> dict[str, Any]:
+        if type(heard) is not bool:
+            return {"ok": False, "error": "heard_boolean_required"}
         with self._lock:
             self._expire_if_needed()
             self._ingest_event_log()
@@ -877,6 +1560,18 @@ class VoiceValidationManager:
             step = self._step_by_id(str(self._session.get("surface") or ""), step_id)
             if step is None:
                 return {"ok": False, "error": "validation_step_not_found"}
+            current_attempt = int(step.get("attempt") or 1)
+            omitted_first_attempt = (
+                attempt is _ATTEMPT_REVISION_OMITTED and current_attempt == 1
+            )
+            if not omitted_first_attempt and (
+                _parse_attempt_revision(attempt) != current_attempt
+            ):
+                return {
+                    "ok": False,
+                    "error": "validation_attempt_revision_mismatch",
+                    "session": self._public_session(),
+                }
             if step.get("kind") not in {"normal", "barge_interrupt"}:
                 return {"ok": False, "error": "heard_confirmation_not_applicable"}
             if step.get("status") == "failed":
@@ -894,7 +1589,13 @@ class VoiceValidationManager:
             self._persist()
             return {"ok": True, "session": self._public_session()}
 
-    def retry(self, *, session_id: str, step_id: str) -> dict[str, Any]:
+    def retry(
+        self,
+        *,
+        session_id: str,
+        step_id: str,
+        attempt: int | None,
+    ) -> dict[str, Any]:
         with self._lock:
             self._expire_if_needed()
             if not self._session or session_id != self._session.get("sessionId"):
@@ -911,8 +1612,36 @@ class VoiceValidationManager:
             step = self._step_by_id(str(self._session.get("surface") or ""), step_id)
             if step is None:
                 return {"ok": False, "error": "validation_step_not_found"}
-            attempt = int(step.get("attempt") or 1)
-            if attempt >= MAX_ATTEMPTS:
+            current_attempt = int(step.get("attempt") or 1)
+            if _parse_attempt_revision(attempt) != current_attempt:
+                return {
+                    "ok": False,
+                    "error": "validation_attempt_revision_mismatch",
+                    "session": self._public_session(),
+                }
+            if step.get("status") != "failed":
+                return {
+                    "ok": False,
+                    "error": "validation_step_not_failed",
+                    "session": self._public_session(),
+                }
+            rewind_source: dict[str, Any] | None = None
+            rewind_source_index: int | None = None
+            if step.get("kind") == "barge_interrupt":
+                steps = self._session.get("_steps") or []
+                current_index = int(self._session.get("_stepIndex") or 0)
+                if current_index > 0:
+                    candidate = steps[current_index - 1]
+                    if (
+                        candidate.get("surface") == step.get("surface")
+                        and candidate.get("kind") == "barge_source"
+                    ):
+                        rewind_source = candidate
+                        rewind_source_index = current_index - 1
+            if current_attempt >= MAX_ATTEMPTS or (
+                rewind_source is not None
+                and int(rewind_source.get("attempt") or 1) >= MAX_ATTEMPTS
+            ):
                 step["status"] = "failed"
                 step["errors"].append("attempt_budget_exhausted")
                 self._session["state"] = "failed"
@@ -922,7 +1651,8 @@ class VoiceValidationManager:
                 return {"ok": False, "error": "attempt_budget_exhausted", "session": self._public_session()}
             step.update(
                 {
-                    "attempt": attempt + 1,
+                    "attempt": current_attempt + 1,
+                    "_attemptId": self._new_attempt_id(),
                     "status": "pending",
                     "events": {},
                     "errors": [],
@@ -932,8 +1662,49 @@ class VoiceValidationManager:
                 }
             )
             step.pop("terminalEventObservedAt", None)
+            step.pop("acceptedTurnId", None)
+            step.pop("qualifiedTtsInterruptTurnId", None)
+            if rewind_source is not None and rewind_source_index is not None:
+                rewind_source.update(
+                    {
+                        "attempt": int(rewind_source.get("attempt") or 1) + 1,
+                        "_attemptId": self._new_attempt_id(),
+                        "status": "pending",
+                        "events": {},
+                        "errors": [],
+                        "latencyMs": None,
+                        "match": None,
+                        "heard": False,
+                    }
+                )
+                rewind_source.pop("terminalEventObservedAt", None)
+                rewind_source.pop("acceptedTurnId", None)
+                rewind_source.pop("qualifiedTtsInterruptTurnId", None)
+                self._session["_stepIndex"] = rewind_source_index
+            if step.get("kind") == "barge_source":
+                interrupt_step_id = str(current.get("interruptStepId") or "")
+                paired = self._step_by_id(
+                    str(self._session.get("surface") or ""),
+                    interrupt_step_id,
+                )
+                if paired is not None:
+                    paired.update(
+                        {
+                            "_attemptId": self._new_attempt_id(),
+                            "status": "pending",
+                            "events": {},
+                            "errors": [],
+                            "latencyMs": None,
+                            "match": None,
+                            "heard": False,
+                        }
+                    )
+                    paired.pop("terminalEventObservedAt", None)
+                    paired.pop("acceptedTurnId", None)
+                    paired.pop("qualifiedTtsInterruptTurnId", None)
             self._session["state"] = "running"
-            self._session["attempt"] = attempt + 1
+            active_retry_step = rewind_source if rewind_source is not None else step
+            self._session["attempt"] = int(active_retry_step.get("attempt") or 1)
             self._session.pop("failureCode", None)
             self._session.pop("lastFailureCode", None)
             self._sync_current_step()
@@ -971,16 +1742,38 @@ class VoiceValidationManager:
             ),
             -1,
         )
+        failed_index = next(
+            (
+                index
+                for index, step in enumerate(steps)
+                if step.get("status") == "failed"
+            ),
+            None,
+        )
+        if failed_index is not None:
+            self._session["_stepIndex"] = failed_index
+            self._session["surface"] = steps[failed_index].get("surface")
+            self._session["attempt"] = int(steps[failed_index].get("attempt") or 1)
+            self._sync_current_step()
+            self._update_summary()
+            self._persist()
+            return
         next_index = next(
             (
                 index
                 for index in range(current_index + 1, len(steps))
-                if steps[index].get("status") not in {"passed", "failed"}
+                if steps[index].get("status") != "passed"
             ),
             None,
         )
         if next_index is None:
-            self._session["state"] = "passed"
+            all_passed = bool(steps) and all(
+                step.get("status") == "passed" for step in steps
+            )
+            self._session["state"] = "passed" if all_passed else "failed"
+            if not all_passed:
+                self._session["failureCode"] = "incomplete_validation_suite"
+                self._session["lastFailureCode"] = "incomplete_validation_suite"
             self._session["completedAt"] = self.now()
             self._finalize_report()
             return
@@ -997,6 +1790,9 @@ class VoiceValidationManager:
         steps = self._session.get("_steps") or []
         index = int(self._session.get("_stepIndex") or 0)
         step = steps[index] if 0 <= index < len(steps) else {}
+        surfaces = self._session.get("surfaces") or []
+        if step.get("surface") in surfaces:
+            self._session["_surfaceIndex"] = surfaces.index(step.get("surface"))
         if step.get("kind") == "silence" and not step.get("silenceStartedAt"):
             step["silenceStartedAt"] = self.now()
             events = step.setdefault("events", {})
@@ -1043,7 +1839,11 @@ class VoiceValidationManager:
             return
         events = step.setdefault("events", {})
         events["silence_completed"] = 1
-        if self._event_count(step, "turn_accepted") or self._event_count(step, "playback_started"):
+        if (
+            self._event_count(step, "turn_accepted")
+            or self._event_count(step, "reply_started")
+            or self._event_count(step, "playback_started")
+        ):
             self._fail_attempt(step, "silence_activity_detected")
             self._update_summary()
             self._persist()
@@ -1130,6 +1930,18 @@ class VoiceValidationManager:
                     "errorCodes": list(step.get("errors") or []),
                     "match": deepcopy(step.get("match")),
                     "latencyMs": step.get("latencyMs"),
+                    "reply": {
+                        "started": self._event_count(step, "reply_started"),
+                        "final": self._event_count(step, "reply_final"),
+                    },
+                    "interrupt": {
+                        "qualifiedTts": self._event_count(step, "tts_interrupt"),
+                        "sourceTurnMatched": bool(
+                            step.get("acceptedTurnId")
+                            and step.get("qualifiedTtsInterruptTurnId")
+                            == step.get("acceptedTurnId")
+                        ),
+                    },
                     "playback": {
                         "started": self._event_count(step, "playback_started"),
                         "completed": self._event_count(step, "playback_completed"),
@@ -1156,22 +1968,50 @@ class VoiceValidationManager:
         if not self._session:
             return
         self._update_summary()
-        report_path = self.paths.reports / f"{self._session.get('sessionId')}.json"
+        report_path = _session_artifact_path(
+            self.paths.root.parent,
+            self.paths.reports,
+            self._session.get("sessionId"),
+            ".json",
+        )
+        if report_path is None:
+            self._persist()
+            return
         _atomic_json_write(report_path, self._report_payload())
         self._persist()
         self.prune_reports()
 
     def prune_reports(self) -> list[str]:
-        self.paths.reports.mkdir(parents=True, exist_ok=True)
-        now = self.now()
-        reports = sorted(
-            self.paths.reports.glob("*.json"),
-            key=lambda item: item.stat().st_mtime,
-            reverse=True,
+        reports_dir = _contained_validation_path(
+            self.paths.root.parent,
+            self.paths.reports,
         )
+        if reports_dir is None:
+            return []
+        reports_dir.mkdir(parents=True, exist_ok=True)
+        now = self.now()
+        report_rows: list[tuple[Path, float]] = []
+        for path in reports_dir.glob("*.json"):
+            if _contained_validation_path(self.paths.root.parent, path) is None:
+                continue
+            try:
+                report_rows.append((path, path.stat().st_mtime))
+            except OSError:
+                continue
+        reports = [
+            path
+            for path, _mtime in sorted(
+                report_rows,
+                key=lambda item: item[1],
+                reverse=True,
+            )
+        ]
         removed: list[str] = []
         for index, path in enumerate(reports):
-            age_days = max(0.0, now - path.stat().st_mtime) / 86400.0
+            try:
+                age_days = max(0.0, now - path.stat().st_mtime) / 86400.0
+            except OSError:
+                continue
             if index < REPORT_PRESERVE_NEWEST and age_days <= REPORT_MAX_AGE_DAYS:
                 continue
             try:
@@ -1216,65 +2056,187 @@ def observe_turn_trace_for_voice_validation(event: str, payload: dict[str, Any])
         or meta.get("validation_step_id")
         or ""
     )
+    attempt_id = str(
+        payload.get("validation_attempt_id")
+        or meta.get("validation_attempt_id")
+        or ""
+    )
     turn_id = payload.get("turn_id") or meta.get("turn_id")
-    if event == "voice_turn_summary" and session_id and step_id:
+    if event == "voice_turn_summary" and session_id and step_id and attempt_id:
         common = {
             "session_id": session_id,
             "step_id": step_id,
+            "attempt_id": attempt_id,
             "turnId": turn_id,
         }
-        emit_voice_validation_event("discord", "turn_accepted", **common)
-        emit_voice_validation_event("discord", "reply_final", **common)
-        if payload.get("playback_started"):
+        summary_error = str(payload.get("error") or "").strip()
+        if payload.get("playback_failed") is True:
             emit_voice_validation_event(
                 "discord",
-                "playback_started",
-                latencyMs=payload.get("playback_first_packet_ms")
-                if payload.get("playback_first_packet_ms") is not None
-                else payload.get("total_ms"),
+                "playback_failed",
+                errorCode=summary_error or "tts_playback_failed",
                 **common,
             )
-        if payload.get("playback_completed"):
-            emit_voice_validation_event("discord", "playback_completed", **common)
-        if payload.get("playback_cancelled"):
-            emit_voice_validation_event("discord", "playback_cancelled", **common)
-        if payload.get("error"):
+            return
+        active_context = active_validation_context(surface="discord")
+        intentional_barge_cancel = bool(
+            summary_error == "cancelled"
+            and active_context
+            and active_context.get("sessionId") == session_id
+            and active_context.get("stepId") == step_id
+            and active_context.get("attemptId") == attempt_id
+            and active_context.get("kind") == "barge_source"
+            and payload.get("validation_transcript_match") is True
+            and payload.get("turn_accepted") is True
+            and payload.get("qualified_tts_interrupt") is True
+            and payload.get("reply_started") is True
+            and payload.get("playback_started") is True
+            and payload.get("playback_completed") is not True
+            and payload.get("playback_cancelled") is True
+        )
+        if summary_error and not intentional_barge_cancel:
             emit_voice_validation_event(
                 "discord",
                 "error",
-                errorCode=payload.get("error"),
+                errorCode=summary_error,
                 **common,
             )
+            return
+        if payload.get("validation_transcript_match") is not True:
+            emit_voice_validation_event(
+                "discord",
+                "error",
+                errorCode="validation_transcript_not_matched",
+                **common,
+            )
+            return
+        if payload.get("turn_accepted") is not True:
+            emit_voice_validation_event(
+                "discord",
+                "error",
+                errorCode="voice_turn_acceptance_unproven",
+                **common,
+            )
+            return
+        if payload.get("reply_final") is not True and not intentional_barge_cancel:
+            emit_voice_validation_event(
+                "discord",
+                "error",
+                errorCode="voice_delivery_empty",
+                **common,
+            )
+            return
+        playback_started = payload.get("playback_started") is True
+        playback_completed = payload.get("playback_completed") is True
+        playback_cancelled = payload.get("playback_cancelled") is True
+        if not playback_started or playback_completed == playback_cancelled:
+            emit_voice_validation_event(
+                "discord",
+                "playback_failed",
+                errorCode=(
+                    "conflicting_playback_terminal_events"
+                    if playback_completed and playback_cancelled
+                    else "tts_playback_failed"
+                ),
+                **common,
+            )
+            return
+        emit_voice_validation_event("discord", "turn_accepted", **common)
+        if intentional_barge_cancel:
+            emit_voice_validation_event(
+                "discord",
+                "tts_interrupt",
+                qualified=True,
+                sourceTurnId=turn_id,
+                reason="qualified_user_audio",
+                **common,
+            )
+        if payload.get("reply_started") is True:
+            emit_voice_validation_event("discord", "reply_started", **common)
+        if payload.get("reply_final") is True:
+            emit_voice_validation_event("discord", "reply_final", **common)
+        emit_voice_validation_event(
+            "discord",
+            "playback_started",
+            latencyMs=payload.get("playback_first_packet_ms")
+            if payload.get("playback_first_packet_ms") is not None
+            else payload.get("total_ms"),
+            **common,
+        )
+        if playback_completed:
+            emit_voice_validation_event("discord", "playback_completed", **common)
+        if playback_cancelled:
+            emit_voice_validation_event("discord", "playback_cancelled", **common)
         return
-    if event == "voice_drop_summary" and session_id and step_id:
+    if event == "voice_drop_summary" and session_id and step_id and attempt_id:
+        drop_reason = str(
+            payload.get("drop_reason") or payload.get("error") or "voice_drop"
+        ).strip().lower()
+        silence_context = active_validation_context(surface="discord")
+        if (
+            silence_context
+            and silence_context.get("kind") == "silence"
+            and silence_context.get("sessionId") == session_id
+            and silence_context.get("stepId") == step_id
+            and silence_context.get("attemptId") == attempt_id
+            and payload.get("turn_accepted") is False
+            and drop_reason in SILENCE_NON_ACCEPTED_DROP_REASONS
+        ):
+            return
         emit_voice_validation_event(
             "discord",
             "error",
             session_id=session_id,
             step_id=step_id,
+            attempt_id=attempt_id,
             turnId=turn_id,
-            errorCode=payload.get("drop_reason") or payload.get("error") or "voice_drop",
+            errorCode=drop_reason,
         )
         return
     if event == "tts_interrupt":
-        context = active_validation_context(surface="discord", prefer_interrupt=True)
-        if context:
+        source_context = active_validation_context(surface="discord")
+        interrupt_context = active_validation_context(
+            surface="discord",
+            prefer_interrupt=True,
+        )
+        source_turn_id = str(
+            payload.get("source_turn_id") or payload.get("turn_id") or ""
+        ).strip()
+        if (
+            source_context
+            and source_context.get("kind") == "barge_source"
+            and source_context.get("sessionId") == session_id
+            and source_context.get("stepId") == step_id
+            and source_context.get("attemptId") == attempt_id
+            and str(source_context.get("guildId") or "")
+            == str(payload.get("guild_id") or "")
+            and str(source_context.get("turnId") or "") == source_turn_id
+            and interrupt_context
+            and interrupt_context.get("kind") == "barge_interrupt"
+            and interrupt_context.get("sessionId") == session_id
+            and payload.get("qualified") is True
+            and payload.get("reason") == "qualified_user_audio"
+            and source_turn_id
+        ):
             emit_voice_validation_event(
                 "discord",
                 "barge_in_accepted",
-                session_id=context["sessionId"],
-                step_id=context["stepId"],
-                turnId=turn_id,
-                reason=payload.get("reason") or "tts_interrupt",
+                session_id=interrupt_context["sessionId"],
+                step_id=interrupt_context["stepId"],
+                attempt_id=interrupt_context.get("attemptId"),
+                turnId=source_turn_id,
+                reason="qualified_user_audio",
             )
         return
     if event == "barge_in_continuity":
-        context = (
-            {"sessionId": session_id, "stepId": step_id}
-            if session_id and step_id
-            else active_validation_context(surface="discord", prefer_interrupt=True)
-        )
-        if not context:
+        context = active_validation_context(surface="discord", prefer_interrupt=True)
+        if (
+            not context
+            or context.get("kind") != "barge_interrupt"
+            or context.get("sessionId") != session_id
+            or context.get("stepId") != step_id
+            or context.get("attemptId") != attempt_id
+        ):
             return
         status = str(payload.get("status") or "").strip().lower()
         success = status == "success" or bool(payload.get("success"))
@@ -1283,6 +2245,7 @@ def observe_turn_trace_for_voice_validation(event: str, payload: dict[str, Any])
             "barge_in_continuity" if success else "error",
             session_id=context["sessionId"],
             step_id=context["stepId"],
+            attempt_id=context.get("attemptId"),
             turnId=turn_id,
             errorCode=None if success else "barge_in_continuity_failed",
             reason=payload.get("reason_code") or payload.get("reason") or status,
@@ -1293,6 +2256,7 @@ __all__ = [
     "ALLOWED_SURFACES",
     "MAX_ATTEMPTS",
     "SESSION_SCHEMA",
+    "SILENCE_NON_ACCEPTED_DROP_REASONS",
     "SUITE_ID",
     "VoiceValidationManager",
     "active_validation_context",
@@ -1302,5 +2266,7 @@ __all__ = [
     "normalize_validation_text",
     "observe_turn_trace_for_voice_validation",
     "sanitize_validation_event",
+    "resolve_discord_validation_target",
     "transcript_match",
+    "validation_attempt_binding_is_current",
 ]

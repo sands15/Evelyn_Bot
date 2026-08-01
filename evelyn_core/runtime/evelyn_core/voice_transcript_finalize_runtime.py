@@ -53,6 +53,14 @@ def finalize_voice_transcript_from_runtime(
     deps: VoiceTranscriptFinalizeDeps,
 ) -> VoiceTranscriptFinalizeResult:
     raw_text = text
+    meta = metrics.setdefault("meta", {})
+    validation_bound = bool(meta.get("validation_attempt_id"))
+
+    def log_text(value: Any) -> Any:
+        if not validation_bound:
+            return value
+        return f"<validation-text chars={len(str(value or ''))}>"
+
     final_transcript = deps.build_final_transcript_flow(
         text=text,
         partial_text=partial_text,
@@ -74,7 +82,10 @@ def finalize_voice_transcript_from_runtime(
         speculate_from_committed_stt=deps.speculate_from_committed_stt,
     )
     if final_transcript.was_corrected:
-        deps.print_fn(f"[STT CORRECT] raw={raw_text!r} -> corrected={final_transcript.corrected_text!r}")
+        deps.print_fn(
+            f"[STT CORRECT] raw={log_text(raw_text)!r} "
+            f"-> corrected={log_text(final_transcript.corrected_text)!r}"
+        )
 
     text = final_transcript.corrected_text
     committed_text = final_transcript.committed_text
@@ -84,7 +95,6 @@ def finalize_voice_transcript_from_runtime(
     if committed_text and len(deps.clean_text(text)) >= len(committed_text):
         text = deps.clean_text(text)
 
-    meta = metrics.setdefault("meta", {})
     interrupted_at_raw = meta.get("tts_interrupted_at")
     interrupted_at = None
     if interrupted_at_raw is not None:
@@ -121,22 +131,31 @@ def finalize_voice_transcript_from_runtime(
             deps.log_voice_stage(
                 metrics,
                 "TTS barge-in utterance merged",
-                extra=f"delta={merge_meta.get('delta_sec')} text={merged_text!r}",
+                extra=(
+                    f"delta={merge_meta.get('delta_sec')} "
+                    f"text={log_text(merged_text)!r}"
+                ),
             )
 
     deps.print_fn(
-        f"[STT RESULT][full-final] text={transcript_result.final_text!r} "
-        f"committed={transcript_result.committed_text!r} wake_detected={transcript_result.wake_detected}"
+        f"[STT RESULT][full-final] text={log_text(transcript_result.final_text)!r} "
+        f"committed={log_text(transcript_result.committed_text)!r} "
+        f"wake_detected={transcript_result.wake_detected}"
     )
     if deps.validation_transcript_observer is not None:
         try:
+            validation_meta = metrics.setdefault("meta", {})
             validation_event = deps.validation_transcript_observer(
                 "discord",
                 transcript_result.final_text,
+                session_id=validation_meta.get("validation_session_id"),
+                step_id=validation_meta.get("validation_step_id"),
+                attempt_id=validation_meta.get("validation_attempt_id"),
                 turnId=turn_id,
+                guildId=getattr(getattr(member, "guild", None), "id", None),
                 prefer_interrupt=bool(
-                    metrics.setdefault("meta", {}).get("tts_interrupted_by_user_audio")
-                    or metrics.setdefault("meta", {}).get("local_tts_interrupted_by_user_audio")
+                    validation_meta.get("tts_interrupted_by_user_audio")
+                    or validation_meta.get("local_tts_interrupted_by_user_audio")
                 ),
             )
         except Exception:
@@ -146,6 +165,8 @@ def finalize_voice_transcript_from_runtime(
                 {
                     "validation_session_id": validation_event.get("sessionId"),
                     "validation_step_id": validation_event.get("stepId"),
+                    "validation_attempt": validation_event.get("attempt"),
+                    "validation_attempt_id": validation_event.get("attemptId"),
                     "validation_transcript_match": bool(validation_event.get("matched")),
                 }
             )

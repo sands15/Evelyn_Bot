@@ -29,6 +29,21 @@ from .question_policy_runtime import (
 )
 
 
+def _redact_validation_attempt_token(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: _redact_validation_attempt_token(nested)
+            for key, nested in value.items()
+            if "".join(ch for ch in str(key).lower() if ch.isalnum())
+            != "validationattemptid"
+        }
+    if isinstance(value, list):
+        return [_redact_validation_attempt_token(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_redact_validation_attempt_token(item) for item in value)
+    return value
+
+
 @dataclass(frozen=True)
 class ConversationObservabilityCompositionDeps:
     question_policy: Callable[[], Any]
@@ -67,9 +82,15 @@ class ConversationObservabilityComposition:
 
     def log_turn_event(self, event: str, **payload) -> None:
         deps = self.deps
+        public_payload = _redact_validation_attempt_token(payload)
+        if deps.voice_validation_observer is not None:
+            try:
+                deps.voice_validation_observer(event, dict(payload))
+            except Exception as exc:
+                deps.original_print(f"[VOICE VALIDATION OBSERVER ERROR] {exc!r}")
         deps.write_turn_trace_event(
             event,
-            payload,
+            public_payload,
             turn_trace_json_log=deps.turn_trace_json_log,
             bottleneck_events=deps.bottleneck_events,
             summary_events=deps.summary_events,
@@ -81,11 +102,6 @@ class ConversationObservabilityComposition:
             original_print=deps.original_print,
             trace_print=deps.trace_print,
         )
-        if deps.voice_validation_observer is not None:
-            try:
-                deps.voice_validation_observer(event, dict(payload))
-            except Exception as exc:
-                deps.original_print(f"[VOICE VALIDATION OBSERVER ERROR] {exc!r}")
 
     def record_model_call_trace(
         self,

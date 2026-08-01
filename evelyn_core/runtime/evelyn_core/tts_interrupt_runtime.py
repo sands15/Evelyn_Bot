@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
 from .discord_session_policy import TtsInterruptMeta
+from .voice_validation import validation_attempt_binding_is_current
 
 
 @dataclass(frozen=True)
@@ -52,10 +53,25 @@ async def stop_active_tts_playback_from_runtime(
     deps: TtsInterruptRuntimeDeps,
     reason: str = "interrupt",
 ) -> bool:
-    stopped = await deps.tts_playback_manager.cancel_guild(guild_id)
+    source_context = deps.tts_playback_manager.source_context(guild_id) or {}
+    stopped = await deps.tts_playback_manager.cancel_guild(
+        guild_id,
+        reason=reason,
+    )
     if not stopped:
         return False
-    deps.log_turn_event("tts_interrupt", guild_id=guild_id, reason=reason)
+    deps.log_turn_event(
+        "tts_interrupt",
+        guild_id=guild_id,
+        reason=reason,
+        qualified=reason == "qualified_user_audio",
+        source_turn_id=source_context.get("source_turn_id"),
+        source_session_key=source_context.get("source_session_key"),
+        output_mode=source_context.get("output_mode") or "discord_voice",
+        validation_session_id=source_context.get("validation_session_id"),
+        validation_step_id=source_context.get("validation_step_id"),
+        validation_attempt_id=source_context.get("validation_attempt_id"),
+    )
     return True
 
 
@@ -139,6 +155,13 @@ async def run_voice_tts_interrupt_gate_from_runtime(
     metrics: dict[str, Any],
     deps: VoiceTtsInterruptGateDeps,
 ) -> VoiceTtsInterruptGateResult | None:
+    validation_meta = metrics.get("meta") if isinstance(metrics, dict) else None
+    if not validation_attempt_binding_is_current(
+        validation_meta,
+        surface="discord",
+        reject_unbound_when_active=True,
+    ):
+        return None
     display_name = getattr(member, "display_name", None)
     interrupt_meta = TtsInterruptMeta(
         active_speaker_match=active_speaker_user_id == member.id,
@@ -164,6 +187,12 @@ async def run_voice_tts_interrupt_gate_from_runtime(
             source=str(metrics.setdefault("meta", {}).get("ingress_source") or "discord_voice"),
             metrics=metrics,
         )
+        if not validation_attempt_binding_is_current(
+            validation_meta,
+            surface="discord",
+            reject_unbound_when_active=True,
+        ):
+            return None
         if not deps.speaker_verification_allows_tts_interrupt(speaker_verification):
             _register_gate_drop(
                 deps,
@@ -187,17 +216,39 @@ async def run_voice_tts_interrupt_gate_from_runtime(
     local_tts_interrupted = False
     if local_tts_active:
         if qualified_tts_interrupt:
-            stopped = deps.local_tts_playback_manager.request_stop(reason="qualified_user_audio")
-            local_tts_interrupted = bool(stopped)
-            metrics.setdefault("meta", {})["local_tts_interrupted_by_user_audio"] = bool(stopped)
-            if stopped:
+            stopped_context = await deps.local_tts_playback_manager.request_stop_and_wait(
+                reason="qualified_user_audio"
+            )
+            local_tts_interrupted = bool(stopped_context)
+            metrics.setdefault("meta", {})["local_tts_interrupted_by_user_audio"] = bool(
+                stopped_context
+            )
+            if stopped_context:
                 deps.start_voice_barge_in_continuity_probe(metrics, source="local_tts")
                 metrics.setdefault("meta", {})["tts_interrupted_at"] = deps.monotonic()
                 deps.log_turn_event(
                     "tts_interrupt",
                     guild_id=guild_id,
                     reason="qualified_user_audio",
-                    output_mode="local_speaker",
+                    qualified=True,
+                    output_mode=getattr(stopped_context, "output_mode", "local_speaker"),
+                    source_turn_id=getattr(stopped_context, "source_turn_id", None),
+                    source_session_key=getattr(stopped_context, "source_session_key", None),
+                    validation_session_id=getattr(
+                        stopped_context,
+                        "validation_session_id",
+                        None,
+                    ),
+                    validation_step_id=getattr(
+                        stopped_context,
+                        "validation_step_id",
+                        None,
+                    ),
+                    validation_attempt_id=getattr(
+                        stopped_context,
+                        "validation_attempt_id",
+                        None,
+                    ),
                 )
                 deps.log_voice_stage(
                     metrics,
@@ -227,6 +278,12 @@ async def run_voice_tts_interrupt_gate_from_runtime(
     discord_tts_interrupted = False
     if tts_suppression == "bot_is_speaking" and qualified_tts_interrupt:
         await deps.sleep(deps.tts_interrupt_debounce_sec)
+        if not validation_attempt_binding_is_current(
+            validation_meta,
+            surface="discord",
+            reject_unbound_when_active=True,
+        ):
+            return None
         tts_suppression = deps.tts_playback_manager.input_suppression_reason(
             guild_id=guild_id,
             post_tts_ignore_sec=deps.post_tts_ignore_sec,

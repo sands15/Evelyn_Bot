@@ -49,7 +49,12 @@ class VoiceSessionGateRuntimeTests(unittest.TestCase):
             print_fn=lambda *args, **_kwargs: self.events.append(("print", args)),
         )
 
-    def run_gate(self):
+    def run_gate(
+        self,
+        *,
+        wake_probe: str = "이블린",
+        wake_confirm: str = "이블린",
+    ):
         return run_voice_session_gate_from_runtime(
             member=SimpleNamespace(id=7, display_name="정훈"),
             transcript_result=self.transcript,
@@ -64,8 +69,8 @@ class VoiceSessionGateRuntimeTests(unittest.TestCase):
             room_session_key="room:11",
             owner_user_id=7,
             owner_followup_active=False,
-            wake_probe="이블린",
-            wake_confirm="이블린",
+            wake_probe=wake_probe,
+            wake_confirm=wake_confirm,
             wake_detected=True,
             wake_alias="기존별칭",
             metrics=self.metrics,
@@ -138,6 +143,46 @@ class VoiceSessionGateRuntimeTests(unittest.TestCase):
 
         self.assertIsNotNone(result)
         self.assertEqual(result.wake_alias, "이블린")
+
+    def test_validation_bound_transcript_is_redacted_from_observability_logs(self) -> None:
+        secret = "VOICE_PRIVACY_SENTINEL_SESSION_GATE_2a54"
+        self.metrics["meta"].update(
+            {
+                "validation_session_id": "validation-private",
+                "validation_step_id": "05-listening",
+                "validation_attempt": 1,
+                "validation_attempt_id": "attempt-private-1",
+            }
+        )
+        self.transcript = SimpleNamespace(
+            final_text=secret,
+            committed_text=secret,
+            wake_detected=True,
+            wake_match_mode="exact",
+            wake_alias="이블린",
+            probe_text=secret,
+            confirm_text=secret,
+            reject_reason=None,
+        )
+        self.wake_decision = SimpleNamespace(
+            accepted=False,
+            wake_alias=None,
+            reject_reason="full_text_veto",
+        )
+        self.run_gate(wake_probe=secret, wake_confirm=secret)
+        self.wake_decision = SimpleNamespace(
+            accepted=True,
+            wake_alias="이블린",
+            reject_reason=None,
+        )
+        self.run_gate(wake_probe=secret, wake_confirm=secret)
+
+        for kind in ("print", "stage", "drop"):
+            rendered = repr(
+                [payload for event_kind, payload in self.events if event_kind == kind]
+            )
+            self.assertNotIn(secret, rendered, kind)
+            self.assertIn("<validation-text chars=", rendered, kind)
 
     def test_main_delegates_short_and_final_wake_gate_to_runtime_module(self) -> None:
         source = (REPO_ROOT / "main.py").read_text(encoding="utf-8")

@@ -185,6 +185,31 @@ class VoiceRuntimeCompositionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(kwargs["ensure_worker_started"].__self__, composition)
         self.assertEqual(kwargs["stage_label"], "final")
 
+    async def test_validation_audio_never_enters_debug_persistence_queue(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            composition = make_composition(Path(temp_dir))
+            audio = np.zeros(4, dtype=np.float32)
+
+            with patch(
+                "evelyn_core.voice_runtime_composition_runtime.enqueue_voice_debug_audio_from_runtime"
+            ) as enqueue:
+                composition.save_voice_debug_audio(
+                    7,
+                    "user",
+                    b"private-pcm",
+                    audio,
+                    final_text="private transcript",
+                    debug_meta={
+                        "validation_session_id": "validation-1",
+                        "validation_step_id": "01-wake",
+                        "validation_attempt": 1,
+                        "validation_attempt_id": "private-attempt",
+                    },
+                    stage_label="final",
+                )
+
+        enqueue.assert_not_called()
+
     async def test_stt_task_adapter_uses_owned_lock_cooldown_and_counters(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             composition = make_composition(Path(temp_dir))

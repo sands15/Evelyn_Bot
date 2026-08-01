@@ -1,16 +1,26 @@
 from __future__ import annotations
 
+import json
+import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
+
+import numpy as np
 
 
 REPO_ROOT = next(path for path in Path(__file__).resolve().parents if (path / "main.py").exists())
 RUNTIME_ROOT = REPO_ROOT / "evelyn_core" / "runtime" / "evelyn_core"
+RUNTIME_PACKAGE_ROOT = REPO_ROOT / "evelyn_core" / "runtime"
+if str(RUNTIME_PACKAGE_ROOT) not in sys.path:
+    sys.path.insert(0, str(RUNTIME_PACKAGE_ROOT))
 STT_SERVICE = RUNTIME_ROOT / "stt_service.py"
 STT_CLIENT = RUNTIME_ROOT / "stt_client.py"
 STT_TRANSCRIPTION_RUNTIME = RUNTIME_ROOT / "stt_transcription_runtime.py"
 MAIN = REPO_ROOT / "main.py"
 COMPOSE = REPO_ROOT / "docker-compose.fast-control.yml"
+
+from evelyn_core.stt_client import transcribe_audio16k_via_service  # noqa: E402
 
 
 class SttServiceContractTests(unittest.TestCase):
@@ -50,6 +60,49 @@ class SttServiceContractTests(unittest.TestCase):
         self.assertIn("np.asarray(audio, dtype=np.float32)", source)
         self.assertIn("base64.b64encode(stt_audio.tobytes())", source)
         self.assertIn("/v1/stt/transcribe", source)
+
+    def test_validation_privacy_flag_reaches_service_without_binding_ids(self) -> None:
+        requests = []
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self) -> bytes:
+                return b'{"text":"raw-result"}'
+
+        def open_request(req, **_kwargs):
+            requests.append(req)
+            return Response()
+
+        with patch(
+            "evelyn_core.stt_client.request.urlopen",
+            side_effect=open_request,
+        ):
+            result = transcribe_audio16k_via_service(
+                np.zeros(16, dtype=np.float32),
+                service_url="http://stt",
+                timeout_sec=3.0,
+                sampling_rate=16000,
+                max_new_tokens=12,
+                stage="full",
+                validation_bound=True,
+            )
+
+        payload = json.loads(requests[0].data.decode("utf-8"))
+        self.assertEqual(result["text"], "raw-result")
+        self.assertIs(payload["validation_bound"], True)
+        self.assertFalse(any("session" in key or "attempt" in key for key in payload))
+
+    def test_stt_service_redacts_validation_transcript_print(self) -> None:
+        source = STT_SERVICE.read_text(encoding="utf-8")
+
+        self.assertIn("validation_bound: bool = False", source)
+        self.assertIn("validation_text_for_log(text", source)
+        self.assertNotIn("text={text!r}", source)
 
     def test_compose_declares_stt_profile(self) -> None:
         source = COMPOSE.read_text(encoding="utf-8")

@@ -15,6 +15,7 @@ if str(RUNTIME_ROOT) not in sys.path:
 
 from evelyn_core.host_supervisor import HostSupervisor  # noqa: E402
 from evelyn_core.host_supervisor_client import SUPERVISOR_REQUEST_SCHEMA  # noqa: E402
+from evelyn_core.voice_validation import SUITE_ID, VoiceValidationManager  # noqa: E402
 
 
 class FakeClock:
@@ -146,6 +147,102 @@ class HostSupervisorTests(unittest.TestCase):
         self.assertFalse(self.supervisor._consume_restart_budget())
         self.clock.value += 601
         self.assertTrue(self.supervisor._consume_restart_budget())
+
+    def test_unexpected_bridge_exit_does_not_restart_during_validation(self):
+        manager = VoiceValidationManager(
+            root=self.supervisor.artifacts_root,
+            now=self.clock,
+        )
+        started = manager.start(
+            suite=SUITE_ID,
+            surfaces=("local",),
+            capabilities={
+                "voiceLocal": {"state": "ready", "ready": True, "blockers": []},
+                "voiceDiscord": {"state": "ready", "ready": True, "blockers": []},
+            },
+        )
+        self.assertTrue(started["ok"], started)
+        session_id = started["session"]["sessionId"]
+        failed_child = FakeProcess()
+        failed_child.returncode = 9
+        self.supervisor.child = failed_child
+        starts: list[bool] = []
+        self.supervisor.start_bridge = lambda *, automatic=False: (
+            starts.append(automatic) or {"ok": True}
+        )
+
+        self.supervisor._observe_child()
+
+        self.assertEqual(starts, [])
+        self.assertTrue(self.supervisor.manual_intervention_required)
+        self.assertEqual(
+            self.supervisor.last_error,
+            "validation_active_local_bridge_exit",
+        )
+        event_path = (
+            self.supervisor.artifacts_root
+            / "voice_validation"
+            / "events"
+            / f"{session_id}.jsonl"
+        )
+        event = json.loads(event_path.read_text(encoding="utf-8"))
+        self.assertEqual(event["event"], "error")
+        self.assertEqual(event["errorCode"], "local_bridge_unexpected_exit")
+        failed_session = manager.snapshot()
+        self.assertEqual(failed_session["currentStep"]["status"], "failed")
+        self.assertIn(
+            "local_bridge_unexpected_exit",
+            failed_session["currentStep"]["errors"],
+        )
+
+    def test_unexpected_bridge_exit_restarts_when_validation_is_inactive(self):
+        failed_child = FakeProcess()
+        failed_child.returncode = 9
+        self.supervisor.child = failed_child
+        starts: list[bool] = []
+        self.supervisor.start_bridge = lambda *, automatic=False: (
+            starts.append(automatic) or {"ok": True}
+        )
+
+        self.supervisor._observe_child()
+
+        self.assertEqual(starts, [True])
+        self.assertFalse(self.supervisor.manual_intervention_required)
+
+    def test_wrong_schema_active_file_does_not_suppress_bridge_restart(self):
+        manager = VoiceValidationManager(
+            root=self.supervisor.artifacts_root,
+            now=self.clock,
+        )
+        started = manager.start(
+            suite=SUITE_ID,
+            surfaces=("local",),
+            capabilities={
+                "voiceLocal": {"state": "ready", "ready": True, "blockers": []},
+                "voiceDiscord": {"state": "ready", "ready": True, "blockers": []},
+            },
+        )
+        self.assertTrue(started["ok"], started)
+        active_path = (
+            self.supervisor.artifacts_root
+            / "voice_validation"
+            / "active.json"
+        )
+        active = json.loads(active_path.read_text(encoding="utf-8"))
+        active["schema"] = "voice_validation.session.v0"
+        active_path.write_text(json.dumps(active), encoding="utf-8")
+        failed_child = FakeProcess()
+        failed_child.returncode = 9
+        self.supervisor.child = failed_child
+        starts: list[bool] = []
+        self.supervisor.start_bridge = lambda *, automatic=False: (
+            starts.append(automatic) or {"ok": True}
+        )
+
+        self.supervisor._observe_child()
+
+        self.assertEqual(starts, [True])
+        self.assertFalse(self.supervisor.manual_intervention_required)
 
     def test_successful_status_write_clears_transient_heartbeat_error(self):
         self.supervisor.last_error = "heartbeat_write_failed:PermissionError"

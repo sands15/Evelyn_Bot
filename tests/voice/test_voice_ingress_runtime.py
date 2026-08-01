@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
+import tempfile
 import unittest
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import patch
 
 
 REPO_ROOT = next(path for path in Path(__file__).resolve().parents if (path / "main.py").exists())
@@ -20,8 +23,11 @@ from evelyn_core.voice_ingress_runtime import (  # noqa: E402
     flush_voice_utterance_buffer_from_runtime,
     process_member_audio_from_runtime,
     schedule_voice_utterance_item_from_runtime,
+    voice_ingress_worker_from_runtime,
+    voice_utterance_buffer_key,
 )
 from evelyn_core.voice_utterance import UtteranceAssemblyConfig, discord_pcm_seconds  # noqa: E402
+from evelyn_core.voice_validation import SUITE_ID, VoiceValidationManager  # noqa: E402
 
 
 @dataclass(frozen=True)
@@ -98,6 +104,113 @@ class VoiceIngressRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(queued["debug_meta"]["voice_queue_depth_at_enqueue"], 0)
         self.assertEqual(harness.buffers, {})
 
+    async def test_validation_attempts_use_distinct_utterance_buffers(self) -> None:
+        base = {
+            "session_key": "s1",
+            "debug_meta": {
+                "validation_session_id": "validation-1",
+                "validation_step_id": "02-listening",
+                "validation_attempt_id": "attempt-1",
+            },
+        }
+        retried = {
+            **base,
+            "debug_meta": {
+                **base["debug_meta"],
+                "validation_attempt_id": "attempt-2",
+            },
+        }
+
+        self.assertNotEqual(
+            voice_utterance_buffer_key(base),
+            voice_utterance_buffer_key(retried),
+        )
+
+    async def test_worker_drops_item_from_rotated_validation_attempt(self) -> None:
+        harness = IngressHarness()
+        item = {
+            "session_key": "s1",
+            "pcm_bytes": b"private-pcm",
+            "debug_meta": {
+                "validation_session_id": "validation-1",
+                "validation_step_id": "01-wake",
+                "validation_attempt_id": "stale-attempt",
+            },
+        }
+        await harness.queue.put(item)
+
+        with patch(
+            "evelyn_core.voice_ingress_runtime.validation_attempt_binding_is_current",
+            return_value=False,
+        ) as guard:
+            worker = asyncio.create_task(
+                voice_ingress_worker_from_runtime(deps=harness.deps())
+            )
+            await asyncio.wait_for(harness.queue.join(), timeout=1.0)
+            worker.cancel()
+            await asyncio.gather(worker, return_exceptions=True)
+
+        guard.assert_called_once_with(
+            item["debug_meta"],
+            surface="discord",
+            reject_unbound_when_active=True,
+        )
+
+        self.assertEqual(harness.processed, [])
+        self.assertIn("validation_attempt_stale_drop_count", harness.counters)
+        self.assertIn(
+            "[VOICE QUEUE DROP] reason=validation_attempt_stale",
+            harness.logs,
+        )
+
+    async def test_worker_drops_unbound_item_queued_before_validation_during_silence(self) -> None:
+        harness = IngressHarness()
+        await harness.queue.put(
+            {
+                "session_key": "s-before-validation",
+                "pcm_bytes": b"private-pcm-before-validation",
+                "debug_meta": {},
+            }
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {"EVELYN_RUNTIME_ARTIFACTS_DIR": temp_dir},
+        ):
+            manager = VoiceValidationManager(root=Path(temp_dir))
+            started = manager.start(
+                suite=SUITE_ID,
+                surfaces=("discord",),
+                capabilities={
+                    "voiceDiscord": {
+                        "state": "ready",
+                        "ready": True,
+                        "blockers": [],
+                    }
+                },
+                discord_target={"guildId": "7", "channelId": "9"},
+            )
+            self.assertTrue(started["ok"], started)
+            assert manager._session is not None
+            manager._session["_stepIndex"] = 10
+            manager._sync_current_step()
+            manager._persist()
+            self.assertEqual(manager.snapshot()["currentStep"]["kind"], "silence")
+
+            worker = asyncio.create_task(
+                voice_ingress_worker_from_runtime(deps=harness.deps())
+            )
+            await asyncio.wait_for(harness.queue.join(), timeout=1.0)
+            worker.cancel()
+            await asyncio.gather(worker, return_exceptions=True)
+
+        self.assertEqual(harness.processed, [])
+        self.assertIn("validation_attempt_stale_drop_count", harness.counters)
+        self.assertIn(
+            "[VOICE QUEUE DROP] reason=validation_attempt_stale",
+            harness.logs,
+        )
+
     async def test_flush_merges_segments_and_enqueues_base_item(self) -> None:
         harness = IngressHarness()
         left = b"\x01\x00" * (4800 * 2)
@@ -158,6 +271,14 @@ class VoiceIngressRuntimeTests(unittest.IsolatedAsyncioTestCase):
             next_segment_id=lambda session_key: 5,
             new_turn_id=lambda: "turn-1",
             room_state_snapshot=lambda room_session_key: {"reply_in_progress": True, "owner_user_id": 99},
+            validation_context_provider=lambda **kwargs: {
+                "sessionId": "validation-1",
+                "stepId": "03-interrupt",
+                "attempt": 2,
+                "attemptId": "attempt-private-2",
+                "discordTarget": {"guildId": "7", "channelId": "9"},
+                "preferInterrupt": kwargs["prefer_interrupt"],
+            },
             build_voice_ingress_item=build_voice_ingress_item,
             voice_ingress_queue_depth=lambda: 3,
             schedule_voice_utterance_item=schedule_voice_utterance_item,
@@ -173,6 +294,10 @@ class VoiceIngressRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(item["pcm_bytes"], b"pcm")
         self.assertEqual(item["debug_meta"]["source"], "discord_voice")
         self.assertTrue(item["debug_meta"]["unstable"])
+        self.assertEqual(item["debug_meta"]["validation_session_id"], "validation-1")
+        self.assertEqual(item["debug_meta"]["validation_step_id"], "03-interrupt")
+        self.assertEqual(item["debug_meta"]["validation_attempt"], 2)
+        self.assertEqual(item["debug_meta"]["validation_attempt_id"], "attempt-private-2")
         self.assertEqual(item["session_key"], "session-1")
         self.assertEqual(item["room_session_key"], "room-session")
         self.assertEqual(item["turn_id"], "turn-1")
@@ -181,6 +306,31 @@ class VoiceIngressRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(item["owner_user_id_on_ingress"], 99)
         self.assertEqual(item["queue_depth_at_enqueue"], 3)
         self.assertEqual(item["enqueued_at"], 123.0)
+
+        for guild_id, channel_id in ((8, 9), (7, 10)):
+            with self.subTest(guild_id=guild_id, channel_id=channel_id):
+                scheduled.clear()
+                mismatched_member = SimpleNamespace(
+                    id=42,
+                    bot=False,
+                    guild=SimpleNamespace(
+                        id=guild_id,
+                        voice_client=SimpleNamespace(
+                            channel=SimpleNamespace(id=channel_id)
+                        ),
+                    ),
+                )
+                await process_member_audio_from_runtime(
+                    mismatched_member,
+                    b"pcm",
+                    {"validation_attempt_id": "untrusted"},
+                    deps=deps,
+                )
+                self.assertEqual(len(scheduled), 1)
+                mismatched_meta = scheduled[0]["debug_meta"]
+                self.assertNotIn("validation_session_id", mismatched_meta)
+                self.assertNotIn("validation_step_id", mismatched_meta)
+                self.assertNotIn("validation_attempt_id", mismatched_meta)
 
     async def test_process_member_audio_respects_local_mic_suppression(self) -> None:
         scheduled: list[dict[str, Any]] = []
@@ -206,6 +356,7 @@ class VoiceIngressRuntimeTests(unittest.IsolatedAsyncioTestCase):
             next_segment_id=lambda _session_key: 0,
             new_turn_id=lambda: "turn",
             room_state_snapshot=lambda _room_session_key: {},
+            validation_context_provider=lambda **_kwargs: None,
             build_voice_ingress_item=lambda **kwargs: dict(kwargs),
             voice_ingress_queue_depth=lambda: 0,
             schedule_voice_utterance_item=schedule_voice_utterance_item,

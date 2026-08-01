@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
+from .voice_validation import validation_attempt_binding_is_current
+
 
 @dataclass(frozen=True)
 class VoiceMemberAudioPipelineDeps:
@@ -39,6 +41,12 @@ async def process_member_audio_pipeline_from_runtime(
     owner_user_id_on_ingress: int | None = None,
     deps: VoiceMemberAudioPipelineDeps,
 ) -> None:
+    if not validation_attempt_binding_is_current(
+        debug_meta,
+        surface="discord",
+        reject_unbound_when_active=True,
+    ):
+        return
     ingress = deps.prepare_audio_ingress(
         member,
         pcm_bytes,
@@ -52,6 +60,12 @@ async def process_member_audio_pipeline_from_runtime(
         deps=deps.build_audio_ingress_deps(),
     )
     if ingress is None:
+        return
+    if not validation_attempt_binding_is_current(
+        debug_meta,
+        surface="discord",
+        reject_unbound_when_active=True,
+    ):
         return
 
     guild = ingress.guild
@@ -89,6 +103,12 @@ async def process_member_audio_pipeline_from_runtime(
     )
     if wake is None:
         return
+    if not validation_attempt_binding_is_current(
+        debug_meta,
+        surface="discord",
+        reject_unbound_when_active=True,
+    ):
+        return
 
     interrupt_gate = await deps.run_tts_interrupt_gate(
         member=member,
@@ -109,6 +129,12 @@ async def process_member_audio_pipeline_from_runtime(
     )
     if interrupt_gate is None:
         return
+    if not validation_attempt_binding_is_current(
+        debug_meta,
+        surface="discord",
+        reject_unbound_when_active=True,
+    ):
+        return
 
     stt_execution = await deps.run_stt_execution(
         member=member,
@@ -127,6 +153,12 @@ async def process_member_audio_pipeline_from_runtime(
         deps=deps.build_stt_execution_deps(),
     )
     if stt_execution is None:
+        return
+    if not validation_attempt_binding_is_current(
+        debug_meta,
+        surface="discord",
+        reject_unbound_when_active=True,
+    ):
         return
 
     transcript_finalization = deps.finalize_transcript(
@@ -169,6 +201,12 @@ async def process_member_audio_pipeline_from_runtime(
         deps=deps.build_session_gate_deps(),
     )
     if session_gate is None:
+        return
+    if not validation_attempt_binding_is_current(
+        debug_meta,
+        surface="discord",
+        reject_unbound_when_active=True,
+    ):
         return
 
     await deps.dispatch_voice_reply(

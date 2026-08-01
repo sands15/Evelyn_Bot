@@ -111,6 +111,24 @@ async def run_voice_wake_probe_from_runtime(
 ) -> VoiceWakeProbeResult | None:
     member_id = int(member.id)
     display_name = getattr(member, "display_name", None)
+    validation_bound = bool(
+        isinstance(debug_meta, dict)
+        and any(
+            debug_meta.get(key) not in (None, "")
+            for key in (
+                "validation_session_id",
+                "validation_step_id",
+                "validation_attempt",
+                "validation_attempt_id",
+            )
+        )
+    )
+
+    def log_text(value: Any) -> Any:
+        if not validation_bound:
+            return value
+        return f"<validation-text chars={len(str(value or ''))}>"
+
     owner_followup_active = deps.is_room_owner_active(room_session_key, member_id) and deps.is_session_active_for_user(
         session_key,
         member_id,
@@ -138,7 +156,11 @@ async def run_voice_wake_probe_from_runtime(
         )
         try:
             wake_result = await deps.run_blocking_stt_task(
-                lambda: deps.detect_wake_word_sync(audio_for_wake, sampling_rate=wake_sampling_rate),
+                lambda: deps.detect_wake_word_sync(
+                    audio_for_wake,
+                    sampling_rate=wake_sampling_rate,
+                    validation_bound=validation_bound,
+                ),
                 stage="wake",
                 timeout_sec=max(5.0, deps.wake_stt_timeout_sec),
                 metrics=metrics,
@@ -177,8 +199,10 @@ async def run_voice_wake_probe_from_runtime(
         wake_alias = wake_interpretation.wake_alias
         wake_reject_reason = wake_interpretation.wake_reject_reason
         deps.print_fn(
-            f"[STT RESULT][wake] probe={wake_probe!r} confirm={wake_confirm!r} detected={wake_detected} "
-            f"mode={wake_match_mode} alias={wake_alias!r} reject={wake_reject_reason!r}"
+            f"[STT RESULT][wake] probe={log_text(wake_probe)!r} "
+            f"confirm={log_text(wake_confirm)!r} detected={wake_detected} "
+            f"mode={wake_match_mode} alias={log_text(wake_alias)!r} "
+            f"reject={wake_reject_reason!r}"
         )
 
         wake_interpretation = deps.apply_strict_wake_confirm_policy(
@@ -194,8 +218,10 @@ async def run_voice_wake_probe_from_runtime(
             metrics,
             "웨이크 프로브 완료",
             extra=(
-                f"wake_detected={wake_detected} wake_match_mode={wake_match_mode} wake_alias={wake_alias!r} "
-                f"wake_probe_text={wake_probe!r} wake_confirm_text={wake_confirm!r} "
+                f"wake_detected={wake_detected} wake_match_mode={wake_match_mode} "
+                f"wake_alias={log_text(wake_alias)!r} "
+                f"wake_probe_text={log_text(wake_probe)!r} "
+                f"wake_confirm_text={log_text(wake_confirm)!r} "
                 f"wake_reject_reason={wake_reject_reason!r}"
             ),
             key="wake_done",
@@ -213,7 +239,11 @@ async def run_voice_wake_probe_from_runtime(
             deps.log_voice_stage(
                 metrics,
                 "웨이크 근접오타 완화",
-                extra=f"probe={wake_probe!r} confirm={wake_confirm!r} alias={wake_alias!r}",
+                extra=(
+                    f"probe={log_text(wake_probe)!r} "
+                    f"confirm={log_text(wake_confirm)!r} "
+                    f"alias={log_text(wake_alias)!r}"
+                ),
             )
         if not wake_detected:
             reject_reason = wake_reject_reason or "confirm_miss"
@@ -225,10 +255,10 @@ async def run_voice_wake_probe_from_runtime(
                     session_key=session_key,
                     room_session_key=room_session_key,
                     owner_user_id=owner_user_id,
-                    wake_probe_text=wake_probe,
-                    wake_confirm_text=wake_confirm,
+                    wake_probe_text=log_text(wake_probe),
+                    wake_confirm_text=log_text(wake_confirm),
                     wake_match_mode=wake_match_mode,
-                    wake_alias=wake_alias,
+                    wake_alias=log_text(wake_alias),
                 )
                 deps.log_voice_stage(
                     metrics,
@@ -248,10 +278,13 @@ async def run_voice_wake_probe_from_runtime(
                 sampling_rate=wake_sampling_rate,
             )
             if not wake_detected and raw_seconds <= deps.voice_no_wake_max_continue_sec:
-                deps.print_fn(f"[FULL STT SKIP] reason=env_ignore speaker={display_name} probe={wake_probe!r}")
+                deps.print_fn(
+                    f"[FULL STT SKIP] reason=env_ignore speaker={display_name} "
+                    f"probe={log_text(wake_probe)!r}"
+                )
                 deps.print_fn(
                     f"[ENV IGNORE] speaker={display_name} band_ratio={band_ratio:.3f} flatness={flatness:.3f} "
-                    f"rms={rms:.4f} probe={wake_probe!r}"
+                    f"rms={rms:.4f} probe={log_text(wake_probe)!r}"
                 )
                 deps.save_voice_debug_audio(
                     guild_id,
@@ -272,23 +305,40 @@ async def run_voice_wake_probe_from_runtime(
                     session_key=session_key,
                     room_session_key=room_session_key,
                     owner_user_id=owner_user_id,
-                    wake_probe_text=wake_probe,
+                    wake_probe_text=log_text(wake_probe),
                     bad_audio_count=bad_audio_count,
                 )
-                deps.log_voice_stage(metrics, "환경음 후보 조기 종료", extra=f"wake_probe_text={wake_probe!r}")
+                deps.log_voice_stage(
+                    metrics,
+                    "환경음 후보 조기 종료",
+                    extra=f"wake_probe_text={log_text(wake_probe)!r}",
+                )
                 _log_wake_drop_summary(deps, metrics, "env_ignore")
                 return None
-            deps.print_fn(f"[FULL STT CONTINUE] reason=env_ignore speaker={display_name} probe={wake_probe!r}")
+            deps.print_fn(
+                f"[FULL STT CONTINUE] reason=env_ignore speaker={display_name} "
+                f"probe={log_text(wake_probe)!r}"
+            )
             deps.print_fn(
                 f"[ENV IGNORE] speaker={display_name} band_ratio={band_ratio:.3f} flatness={flatness:.3f} "
-                f"rms={rms:.4f} probe={wake_probe!r}"
+                f"rms={rms:.4f} probe={log_text(wake_probe)!r}"
             )
-            deps.log_voice_stage(metrics, "환경음 후보지만 본문 STT 진행", extra=f"wake_probe_text={wake_probe!r}")
+            deps.log_voice_stage(
+                metrics,
+                "환경음 후보지만 본문 STT 진행",
+                extra=f"wake_probe_text={log_text(wake_probe)!r}",
+            )
 
         if filler_candidate:
             if not wake_detected and raw_seconds <= deps.voice_no_wake_max_continue_sec:
-                deps.print_fn(f"[FULL STT SKIP] reason=filler_ignore speaker={display_name} probe={wake_probe!r}")
-                deps.print_fn(f"[FILLER IGNORE] speaker={display_name} probe={wake_probe!r}")
+                deps.print_fn(
+                    f"[FULL STT SKIP] reason=filler_ignore speaker={display_name} "
+                    f"probe={log_text(wake_probe)!r}"
+                )
+                deps.print_fn(
+                    f"[FILLER IGNORE] speaker={display_name} "
+                    f"probe={log_text(wake_probe)!r}"
+                )
                 deps.save_voice_debug_audio(
                     guild_id,
                     speaker_name,
@@ -307,19 +357,39 @@ async def run_voice_wake_probe_from_runtime(
                     session_key=session_key,
                     room_session_key=room_session_key,
                     owner_user_id=owner_user_id,
-                    wake_probe_text=wake_probe,
+                    wake_probe_text=log_text(wake_probe),
                 )
-                deps.log_voice_stage(metrics, "짧은 필러 후보 조기 종료", extra=f"wake_probe_text={wake_probe!r}")
+                deps.log_voice_stage(
+                    metrics,
+                    "짧은 필러 후보 조기 종료",
+                    extra=f"wake_probe_text={log_text(wake_probe)!r}",
+                )
                 _log_wake_drop_summary(deps, metrics, "filler_ignore")
                 return None
-            deps.print_fn(f"[FULL STT CONTINUE] reason=filler_ignore speaker={display_name} probe={wake_probe!r}")
-            deps.print_fn(f"[FILLER IGNORE] speaker={display_name} probe={wake_probe!r}")
-            deps.log_voice_stage(metrics, "짧은 필러 후보지만 본문 STT 진행", extra=f"wake_probe_text={wake_probe!r}")
+            deps.print_fn(
+                f"[FULL STT CONTINUE] reason=filler_ignore speaker={display_name} "
+                f"probe={log_text(wake_probe)!r}"
+            )
+            deps.print_fn(
+                f"[FILLER IGNORE] speaker={display_name} "
+                f"probe={log_text(wake_probe)!r}"
+            )
+            deps.log_voice_stage(
+                metrics,
+                "짧은 필러 후보지만 본문 STT 진행",
+                extra=f"wake_probe_text={log_text(wake_probe)!r}",
+            )
 
         if repetitive_noise_candidate:
             if not wake_detected:
-                deps.print_fn(f"[FULL STT SKIP] reason=noise_text_ignore speaker={display_name} probe={wake_probe!r}")
-                deps.print_fn(f"[NOISE TEXT IGNORE] speaker={display_name} probe={wake_probe!r}")
+                deps.print_fn(
+                    f"[FULL STT SKIP] reason=noise_text_ignore speaker={display_name} "
+                    f"probe={log_text(wake_probe)!r}"
+                )
+                deps.print_fn(
+                    f"[NOISE TEXT IGNORE] speaker={display_name} "
+                    f"probe={log_text(wake_probe)!r}"
+                )
                 deps.save_voice_debug_audio(
                     guild_id,
                     speaker_name,
@@ -338,19 +408,38 @@ async def run_voice_wake_probe_from_runtime(
                     session_key=session_key,
                     room_session_key=room_session_key,
                     owner_user_id=owner_user_id,
-                    wake_probe_text=wake_probe,
+                    wake_probe_text=log_text(wake_probe),
                 )
-                deps.log_voice_stage(metrics, "반복 소음 후보 조기 종료", extra=f"wake_probe_text={wake_probe!r}")
+                deps.log_voice_stage(
+                    metrics,
+                    "반복 소음 후보 조기 종료",
+                    extra=f"wake_probe_text={log_text(wake_probe)!r}",
+                )
                 _log_wake_drop_summary(deps, metrics, "noise_text_ignore")
                 return None
-            deps.print_fn(f"[FULL STT CONTINUE] reason=noise_text_ignore speaker={display_name} probe={wake_probe!r}")
-            deps.print_fn(f"[NOISE TEXT IGNORE] speaker={display_name} probe={wake_probe!r}")
-            deps.log_voice_stage(metrics, "반복 소음 후보지만 본문 STT 진행", extra=f"wake_probe_text={wake_probe!r}")
+            deps.print_fn(
+                f"[FULL STT CONTINUE] reason=noise_text_ignore speaker={display_name} "
+                f"probe={log_text(wake_probe)!r}"
+            )
+            deps.print_fn(
+                f"[NOISE TEXT IGNORE] speaker={display_name} "
+                f"probe={log_text(wake_probe)!r}"
+            )
+            deps.log_voice_stage(
+                metrics,
+                "반복 소음 후보지만 본문 STT 진행",
+                extra=f"wake_probe_text={log_text(wake_probe)!r}",
+            )
 
         if not wake_detected:
-            deps.print_fn(f"[FULL STT CONTINUE] reason=wake_ignore speaker={display_name} probe={wake_probe!r}")
+            deps.print_fn(
+                f"[FULL STT CONTINUE] reason=wake_ignore speaker={display_name} "
+                f"probe={log_text(wake_probe)!r}"
+            )
             if wake_probe:
-                deps.print_fn(f"[WAKE IGNORE] {display_name}: {wake_probe!r}")
+                deps.print_fn(
+                    f"[WAKE IGNORE] {display_name}: {log_text(wake_probe)!r}"
+                )
             if deps.should_skip_full_stt_after_wake_probe(
                 wake_detected=wake_detected,
                 wake_probe=wake_probe,
@@ -358,7 +447,7 @@ async def run_voice_wake_probe_from_runtime(
             ):
                 deps.print_fn(
                     f"[FULL STT SKIP] reason=wake_probe_low_signal speaker={display_name} "
-                    f"probe={wake_probe!r} sec={duration_sec:.2f}"
+                    f"probe={log_text(wake_probe)!r} sec={duration_sec:.2f}"
                 )
                 deps.save_voice_debug_audio(
                     guild_id,
@@ -378,16 +467,23 @@ async def run_voice_wake_probe_from_runtime(
                     session_key=session_key,
                     room_session_key=room_session_key,
                     owner_user_id=owner_user_id,
-                    wake_probe_text=wake_probe,
+                    wake_probe_text=log_text(wake_probe),
                     wake_detected=wake_detected,
                 )
                 deps.log_voice_stage(
                     metrics,
                     "웨이크 프로브 기반 조기 종료",
-                    extra=f"wake_probe_text={wake_probe!r} sec={duration_sec:.2f}",
+                    extra=(
+                        f"wake_probe_text={log_text(wake_probe)!r} "
+                        f"sec={duration_sec:.2f}"
+                    ),
                 )
                 return None
-            deps.log_voice_stage(metrics, "웨이크 미검출이지만 본문 STT 진행", extra=f"wake_probe_text={wake_probe!r}")
+            deps.log_voice_stage(
+                metrics,
+                "웨이크 미검출이지만 본문 STT 진행",
+                extra=f"wake_probe_text={log_text(wake_probe)!r}",
+            )
 
     return VoiceWakeProbeResult(
         owner_followup_active=owner_followup_active,

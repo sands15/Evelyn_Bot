@@ -95,6 +95,44 @@ class ConversationObservabilityCompositionTests(unittest.TestCase):
             },
         )
 
+    def test_validation_attempt_token_is_only_visible_to_internal_observer(self) -> None:
+        observer = Mock()
+        composition, deps, *_ = self.build_composition(
+            voice_validation_observer=observer
+        )
+        payload = {
+            "turn_id": "turn-1",
+            "validation_attempt_id": "attempt-private-1",
+            "meta": {
+                "validationAttemptId": "attempt-private-2",
+                "safe": "kept",
+                "nested": [
+                    {
+                        "validation_attempt_id": "attempt-private-3",
+                        "attemptId": "public-retry-2",
+                        "count": 1,
+                    }
+                ],
+            },
+        }
+
+        composition.log_turn_event("voice_turn_summary", **payload)
+
+        observer.assert_called_once_with("voice_turn_summary", payload)
+        writer_payload = deps.write_turn_trace_event.call_args.args[1]
+        self.assertNotIn("validation_attempt_id", writer_payload)
+        self.assertEqual(writer_payload["meta"]["safe"], "kept")
+        self.assertNotIn("validationAttemptId", writer_payload["meta"])
+        self.assertNotIn(
+            "validation_attempt_id",
+            writer_payload["meta"]["nested"][0],
+        )
+        self.assertEqual(
+            writer_payload["meta"]["nested"][0]["attemptId"],
+            "public-retry-2",
+        )
+        self.assertEqual(payload["validation_attempt_id"], "attempt-private-1")
+
     def test_turn_scope_and_model_metric_adapters_share_injected_stores(self) -> None:
         composition, deps, *_ = self.build_composition()
         scope = object()

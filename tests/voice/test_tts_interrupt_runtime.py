@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import patch
 
 
 REPO_ROOT = next(path for path in Path(__file__).resolve().parents if (path / "main.py").exists())
@@ -35,10 +36,31 @@ class FakeSpeakerResult:
 class FakePlaybackManager:
     def __init__(self, stopped: bool) -> None:
         self.stopped = stopped
-        self.cancelled: list[int | None] = []
+        self.cancelled: list[tuple[int | None, str]] = []
 
-    async def cancel_guild(self, guild_id: int | None) -> bool:
-        self.cancelled.append(guild_id)
+    def get(self, guild_id: int | None) -> dict[str, str]:
+        return {
+            "turn_id": "turn-source-1",
+            "session_key": "session-source-1",
+        }
+
+    def source_context(self, guild_id: int | None) -> dict[str, str]:
+        return {
+            "source_turn_id": "turn-source-1",
+            "source_session_key": "session-source-1",
+            "output_mode": "discord_voice",
+            "validation_session_id": "validation-1",
+            "validation_step_id": "07-barge-source",
+            "validation_attempt_id": "attempt-private-1",
+        }
+
+    async def cancel_guild(
+        self,
+        guild_id: int | None,
+        *,
+        reason: str = "interrupt",
+    ) -> bool:
+        self.cancelled.append((guild_id, reason))
         return self.stopped
 
 
@@ -82,7 +104,25 @@ class TtsInterruptRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 reason="qualified_user_audio",
             )
         )
-        self.assertEqual(events, [("tts_interrupt", {"guild_id": 7, "reason": "qualified_user_audio"})])
+        self.assertEqual(
+            events,
+            [
+                (
+                    "tts_interrupt",
+                    {
+                        "guild_id": 7,
+                        "reason": "qualified_user_audio",
+                        "qualified": True,
+                        "source_turn_id": "turn-source-1",
+                        "source_session_key": "session-source-1",
+                        "output_mode": "discord_voice",
+                        "validation_session_id": "validation-1",
+                        "validation_step_id": "07-barge-source",
+                        "validation_attempt_id": "attempt-private-1",
+                    },
+                )
+            ],
+        )
 
         events.clear()
         self.assertFalse(await stop_active_tts_playback_from_runtime(7, deps=self.build_deps(stopped=False, events=events)))
@@ -132,9 +172,18 @@ class FakeGateLocalPlaybackManager:
     def snapshot(self) -> dict[str, bool]:
         return {"active": self.active}
 
-    def request_stop(self, *, reason: str) -> bool:
+    async def request_stop_and_wait(self, *, reason: str) -> Any:
         self.stop_reasons.append(reason)
-        return self.stopped
+        if not self.stopped:
+            return None
+        return SimpleNamespace(
+            source_turn_id="turn-source-local",
+            source_session_key="session-source-local",
+            output_mode="local_speaker",
+            validation_session_id="validation-local",
+            validation_step_id="07-local-barge-source",
+            validation_attempt_id="attempt-local-1",
+        )
 
 
 class FakeGatePlaybackManager:
@@ -253,6 +302,30 @@ class VoiceTtsInterruptGateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.metrics["meta"]["tts_interrupted_at"], 123.5)
         verify_payload = next(payload for kind, payload in self.events if kind == "verify")
         self.assertEqual(verify_payload["source"], "local_mic")
+        interrupt_event = next(payload for kind, payload in self.events if kind == "turn")
+        self.assertEqual(interrupt_event[0], "tts_interrupt")
+        self.assertIs(interrupt_event[1]["qualified"], True)
+        self.assertEqual(interrupt_event[1]["source_turn_id"], "turn-source-local")
+        self.assertEqual(interrupt_event[1]["source_session_key"], "session-source-local")
+        self.assertEqual(interrupt_event[1]["validation_session_id"], "validation-local")
+        self.assertEqual(interrupt_event[1]["validation_step_id"], "07-local-barge-source")
+        self.assertEqual(interrupt_event[1]["validation_attempt_id"], "attempt-local-1")
+
+    async def test_qualified_local_stop_failure_emits_no_interrupt_evidence(self) -> None:
+        self.qualified = True
+        self.local_manager.active = True
+        self.local_manager.stopped = False
+        self.metrics = {"meta": {"ingress_source": "local_mic"}}
+
+        result = await self.run_gate()
+
+        self.assertIsNotNone(result)
+        self.assertFalse(result.local_tts_interrupted)
+        self.assertEqual(self.local_manager.stop_reasons, ["qualified_user_audio"])
+        self.assertFalse(self.metrics["meta"]["local_tts_interrupted_by_user_audio"])
+        self.assertNotIn("tts_interrupted_at", self.metrics["meta"])
+        self.assertFalse(any(kind == "turn" for kind, _payload in self.events))
+        self.assertFalse(any(kind == "continuity" for kind, _payload in self.events))
 
     async def test_speaker_verification_rejection_stops_gate(self) -> None:
         self.qualified = True
@@ -281,6 +354,32 @@ class VoiceTtsInterruptGateTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.metrics["meta"]["tts_interrupted_by_user_audio"])
         self.assertIn(("sleep", 0.12), self.events)
         self.assertTrue(any(kind == "stop_discord" for kind, _payload in self.events))
+
+    async def test_retry_rotation_during_debounce_prevents_stale_interrupt(self) -> None:
+        self.qualified = True
+        self.playback_manager.reasons = ["bot_is_speaking", "bot_is_speaking"]
+        self.metrics = {
+            "meta": {
+                "ingress_source": "discord_voice",
+                "validation_session_id": "validation-1",
+                "validation_step_id": "08-barge-interrupt",
+                "validation_attempt_id": "attempt-1",
+            }
+        }
+
+        with patch(
+            "evelyn_core.tts_interrupt_runtime.validation_attempt_binding_is_current",
+            side_effect=(True, True, False),
+        ) as guard:
+            result = await self.run_gate()
+
+        self.assertIsNone(result)
+        self.assertIn(("sleep", 0.12), self.events)
+        self.assertFalse(any(kind == "stop_discord" for kind, _payload in self.events))
+        self.assertEqual(guard.call_count, 3)
+        for call in guard.call_args_list:
+            self.assertEqual(call.kwargs["surface"], "discord")
+            self.assertIs(call.kwargs["reject_unbound_when_active"], True)
 
     async def test_post_tts_suppression_after_debounce_stops_gate(self) -> None:
         self.qualified = True

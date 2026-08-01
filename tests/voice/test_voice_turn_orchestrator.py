@@ -39,6 +39,7 @@ class VoiceTurnOrchestratorTests(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         finalized: list[dict[str, Any]] = []
         failures: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+        summaries: list[dict[str, Any]] = []
         metrics: dict[str, Any] = {"meta": {}}
         member = type(
             "Member",
@@ -95,6 +96,9 @@ class VoiceTurnOrchestratorTests(unittest.IsolatedAsyncioTestCase):
             strip_omnivoice_tags=lambda text: text,
             report_waiting_on_lock=None,
             report_delivery_error=lambda _exc: None,
+            log_voice_bottleneck_summary=lambda _metrics, **payload: summaries.append(
+                payload
+            ),
         )
 
         self.assertIsNone(result)
@@ -125,6 +129,8 @@ class VoiceTurnOrchestratorTests(unittest.IsolatedAsyncioTestCase):
                 )
             ],
         )
+        self.assertEqual(len(summaries), 1)
+        self.assertEqual(summaries[0]["event_name"], "voice_turn_summary")
 
     def make_orchestrator(
         self,
@@ -352,6 +358,143 @@ class VoiceTurnOrchestratorTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(result.accepted)
         self.assertTrue(captured_kwargs["ignore_tts_suppression"])
+
+    def test_validation_bound_reply_gate_redacts_transcript_observability(self) -> None:
+        secret = "VOICE_PRIVACY_SENTINEL_REPLY_GATE_904a"
+        transcript = TranscriptResult(
+            wake_detected=True,
+            wake_match_mode="exact",
+            wake_alias="evelyn",
+            probe_text="evelyn",
+            confirm_text="evelyn",
+            reject_reason=None,
+            partial_text="",
+            committed_text="",
+            final_text=secret,
+            speaker_user_id=10,
+            duration_sec=0.6,
+        )
+        segment = VoiceSegment(
+            guild_id=123,
+            room_session_key="room-1",
+            session_key="session-1",
+            speaker_user_id=10,
+            speaker_name="tester",
+            audio16k=np.zeros(1600, dtype=np.float32),
+            sampling_rate=16000,
+            duration_sec=0.6,
+            segment_id=1,
+            owner_user_id=None,
+        )
+        metrics = {
+            "meta": {
+                "validation_session_id": "validation-private",
+                "validation_step_id": "02-listening",
+                "validation_attempt_id": "attempt-private",
+            }
+        }
+        stage_events: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+        gate_texts: list[str] = []
+
+        def build_reply(**kwargs: Any) -> VoiceReplyRequest:
+            return VoiceReplyRequest(
+                transcript=kwargs["transcript"],
+                segment=kwargs["segment"],
+                gate_mode=kwargs["gate_mode"],
+                raw_user_text=secret,
+                prompt_user_text=secret,
+                history_user_text=secret,
+                wake_only_turn=False,
+                turn_type="normal",
+                selected_path="main",
+                reply_source="voice",
+                topic_id="topic-1",
+            )
+
+        result = prepare_voice_reply_for_delivery(
+            guild_id=123,
+            transcript=transcript,
+            voice_segment=segment,
+            session_key="session-1",
+            room_session_key="room-1",
+            owner_user_id=None,
+            active_speaker_user_id=10,
+            metrics=metrics,
+            session_topic_seed="",
+            now_monotonic=1.0,
+            should_reply_to_voice=lambda _guild, text, **_kwargs: (
+                gate_texts.append(text) or (True, "ok", "wake_entry")
+            ),
+            register_drop_reason=lambda *_args, **_kwargs: None,
+            log_voice_stage=lambda *args, **kwargs: stage_events.append((args, kwargs)),
+            log_voice_bottleneck_summary=lambda *_args, **_kwargs: None,
+            reset_session_bad_audio=lambda _key: None,
+            build_voice_reply_request=build_reply,
+            build_topic_id=lambda _seed: "topic-1",
+            session_last_stt_text={},
+            room_last_voice_reply_at={},
+        )
+
+        self.assertTrue(result.accepted)
+        self.assertEqual(gate_texts, [secret])
+        rendered = repr(stage_events)
+        self.assertNotIn(secret, rendered)
+        self.assertIn("<validation-text chars=", rendered)
+
+    def test_validation_bound_reply_drop_reason_receives_redacted_text(self) -> None:
+        secret = "VOICE_PRIVACY_SENTINEL_REPLY_DROP_58b1"
+        transcript = TranscriptResult(
+            wake_detected=False,
+            wake_match_mode="rejected",
+            wake_alias=None,
+            probe_text="",
+            confirm_text="",
+            reject_reason="wake_miss",
+            partial_text="",
+            committed_text="",
+            final_text=secret,
+            speaker_user_id=10,
+            duration_sec=0.6,
+        )
+        segment = VoiceSegment(
+            guild_id=123,
+            room_session_key="room-1",
+            session_key="session-1",
+            speaker_user_id=10,
+            speaker_name="tester",
+            audio16k=np.zeros(1600, dtype=np.float32),
+            sampling_rate=16000,
+            duration_sec=0.6,
+            segment_id=1,
+            owner_user_id=None,
+        )
+        drops: list[dict[str, Any]] = []
+
+        result = prepare_voice_reply_for_delivery(
+            guild_id=123,
+            transcript=transcript,
+            voice_segment=segment,
+            session_key="session-1",
+            room_session_key="room-1",
+            owner_user_id=None,
+            active_speaker_user_id=10,
+            metrics={"meta": {"validation_attempt_id": "attempt-private"}},
+            session_topic_seed="",
+            now_monotonic=1.0,
+            should_reply_to_voice=lambda *_args, **_kwargs: (False, "wake_miss", "wake"),
+            register_drop_reason=lambda *_args, **kwargs: drops.append(kwargs),
+            log_voice_stage=lambda *_args, **_kwargs: None,
+            log_voice_bottleneck_summary=lambda *_args, **_kwargs: None,
+            reset_session_bad_audio=lambda _key: None,
+            build_voice_reply_request=lambda **_kwargs: self.fail("reply must remain blocked"),
+            build_topic_id=lambda _seed: "topic-1",
+            session_last_stt_text={},
+            room_last_voice_reply_at={},
+        )
+
+        self.assertFalse(result.accepted)
+        self.assertNotIn(secret, repr(drops))
+        self.assertIn("<validation-text chars=", drops[0]["text"])
 
     async def test_policy_no_main_llm_delivers_preface_without_main_llm(self) -> None:
         events: list[Any] = []

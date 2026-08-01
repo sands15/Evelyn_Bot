@@ -120,7 +120,16 @@ class VoiceAudioIngressRuntimeTests(unittest.TestCase):
         return [payload[0] for kind, payload in self.events if kind == "drop"]
 
     def test_happy_path_returns_explicit_audio_contract(self) -> None:
-        result = self.run_ingress(debug_meta={"queue_wait_ms": "12.5", "source": "local_mic"})
+        result = self.run_ingress(
+            debug_meta={
+                "queue_wait_ms": "12.5",
+                "source": "local_mic",
+                "validation_session_id": "validation-1",
+                "validation_step_id": "03-interrupt",
+                "validation_attempt": 2,
+                "validation_attempt_id": "attempt-private-2",
+            }
+        )
 
         self.assertIsNotNone(result)
         assert result is not None
@@ -135,6 +144,10 @@ class VoiceAudioIngressRuntimeTests(unittest.TestCase):
         self.assertEqual(result.voice_like_prob, 0.9)
         self.assertEqual(result.metrics["meta"]["voice_queue_wait_ms"], 12.5)
         self.assertEqual(result.metrics["meta"]["ingress_source"], "local_mic")
+        self.assertEqual(result.metrics["meta"]["validation_session_id"], "validation-1")
+        self.assertEqual(result.metrics["meta"]["validation_step_id"], "03-interrupt")
+        self.assertEqual(result.metrics["meta"]["validation_attempt"], 2)
+        self.assertEqual(result.metrics["meta"]["validation_attempt_id"], "attempt-private-2")
         self.assertEqual(self.pipeline_state["last_voice_segment_at"], 123.5)
         self.assertEqual(self.drop_reasons(), [])
 

@@ -11,6 +11,7 @@ from .voice_utterance import (
     merge_debug_meta,
     merge_discord_pcm_segments,
 )
+from .voice_validation import validation_attempt_binding_is_current
 
 
 @dataclass(frozen=True)
@@ -43,6 +44,7 @@ class VoiceIngressEntrypointDeps:
     next_segment_id: Callable[[str], int]
     new_turn_id: Callable[[], str]
     room_state_snapshot: Callable[[str], dict[str, Any]]
+    validation_context_provider: Callable[..., dict[str, Any] | None]
     build_voice_ingress_item: Callable[..., dict[str, Any]]
     voice_ingress_queue_depth: Callable[[], int]
     schedule_voice_utterance_item: Callable[[dict[str, Any]], Awaitable[Any]]
@@ -50,7 +52,21 @@ class VoiceIngressEntrypointDeps:
 
 
 def voice_utterance_buffer_key(item: dict[str, Any]) -> str:
-    return str(item.get("session_key") or "")
+    session_key = str(item.get("session_key") or "")
+    meta = item.get("debug_meta") if isinstance(item.get("debug_meta"), dict) else {}
+    validation_session_id = str(meta.get("validation_session_id") or "")
+    validation_step_id = str(meta.get("validation_step_id") or "")
+    validation_attempt_id = str(meta.get("validation_attempt_id") or "")
+    if validation_session_id and validation_step_id and validation_attempt_id:
+        return "|".join(
+            (
+                session_key,
+                validation_session_id,
+                validation_step_id,
+                validation_attempt_id,
+            )
+        )
+    return session_key
 
 
 async def process_member_audio_from_runtime(
@@ -89,6 +105,37 @@ async def process_member_audio_from_runtime(
     segment_id = deps.next_segment_id(session_key)
     turn_id = deps.new_turn_id()
     room_state = deps.room_state_snapshot(room_session_key)
+    for key in (
+        "validation_session_id",
+        "validation_step_id",
+        "validation_attempt",
+        "validation_attempt_id",
+    ):
+        debug_meta_input.pop(key, None)
+    validation_context = deps.validation_context_provider(
+        surface="discord",
+        prefer_interrupt=bool(room_state.get("reply_in_progress")),
+    )
+    discord_target = (
+        validation_context.get("discordTarget")
+        if isinstance(validation_context, dict)
+        and isinstance(validation_context.get("discordTarget"), dict)
+        else {}
+    )
+    validation_target_matches = bool(
+        discord_target
+        and str(discord_target.get("guildId") or "") == str(guild_id)
+        and str(discord_target.get("channelId") or "") == str(voice_channel_id)
+    )
+    if validation_context and validation_target_matches:
+        debug_meta_input.update(
+            {
+                "validation_session_id": validation_context.get("sessionId"),
+                "validation_step_id": validation_context.get("stepId"),
+                "validation_attempt": validation_context.get("attempt"),
+                "validation_attempt_id": validation_context.get("attemptId"),
+            }
+        )
     item = deps.build_voice_ingress_item(
         member=member,
         pcm_bytes=pcm_bytes,
@@ -128,6 +175,16 @@ async def voice_ingress_worker_from_runtime(*, deps: VoiceIngressRuntimeDeps) ->
                 )
                 continue
             deps.apply_voice_ingress_dequeue_debug_meta(item, dequeue_plan)
+            if not validation_attempt_binding_is_current(
+                item.get("debug_meta"),
+                surface="discord",
+                reject_unbound_when_active=True,
+            ):
+                deps.increment_voice_pipeline_counter(
+                    "validation_attempt_stale_drop_count"
+                )
+                deps.log("[VOICE QUEUE DROP] reason=validation_attempt_stale")
+                continue
             process_item = dict(item)
             process_item.pop("enqueued_at", None)
             await deps.process_member_audio(**process_item)

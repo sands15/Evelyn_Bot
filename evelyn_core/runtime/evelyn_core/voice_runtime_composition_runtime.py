@@ -359,6 +359,16 @@ class VoiceRuntimeComposition:
         session_key: str | None = None,
         stage_label: str | None = None,
     ) -> None:
+        if isinstance(debug_meta, dict) and any(
+            debug_meta.get(key) not in (None, "")
+            for key in (
+                "validation_session_id",
+                "validation_step_id",
+                "validation_attempt",
+                "validation_attempt_id",
+            )
+        ):
+            return
         deps = self.deps.debug
         enqueue_voice_debug_audio_from_runtime(
             enabled=deps.enabled,

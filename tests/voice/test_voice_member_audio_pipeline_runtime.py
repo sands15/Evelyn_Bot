@@ -6,6 +6,7 @@ from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import patch
 
 REPO_ROOT = next(path for path in Path(__file__).resolve().parents if (path / "main.py").exists())
 RUNTIME_ROOT = REPO_ROOT / "evelyn_core" / "runtime"
@@ -108,11 +109,16 @@ class VoiceMemberAudioPipelineRuntimeTests(unittest.IsolatedAsyncioTestCase):
             build_reply_dispatch_deps=lambda: "dispatch-deps",
         )
 
-    async def run_pipeline(self, *, deps: VoiceMemberAudioPipelineDeps | None = None) -> None:
+    async def run_pipeline(
+        self,
+        *,
+        deps: VoiceMemberAudioPipelineDeps | None = None,
+        debug_meta: dict[str, Any] | None = None,
+    ) -> None:
         await process_member_audio_pipeline_from_runtime(
             SimpleNamespace(id=7, display_name="정훈"),
             b"pcm",
-            {"source": "local_mic"},
+            debug_meta or {"source": "local_mic"},
             session_key="voice:11:7",
             room_session_key="room:11",
             room_key="room-memory",
@@ -149,6 +155,25 @@ class VoiceMemberAudioPipelineRuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.run_pipeline(deps=replace(self.deps, run_wake_probe=no_wake))
 
         self.assertEqual(self.stage_names(), ["ingress", "wake"])
+
+    async def test_retry_rotation_during_wake_stops_before_interrupt_side_effect(self) -> None:
+        validation_meta = {
+            "source": "discord_voice",
+            "validation_session_id": "validation-1",
+            "validation_step_id": "01-wake",
+            "validation_attempt_id": "attempt-1",
+        }
+        with patch(
+            "evelyn_core.voice_member_audio_pipeline_runtime.validation_attempt_binding_is_current",
+            side_effect=(True, True, False),
+        ) as guard:
+            await self.run_pipeline(debug_meta=validation_meta)
+
+        self.assertEqual(self.stage_names(), ["ingress", "wake"])
+        self.assertEqual(guard.call_count, 3)
+        for call in guard.call_args_list:
+            self.assertEqual(call.kwargs["surface"], "discord")
+            self.assertIs(call.kwargs["reject_unbound_when_active"], True)
 
     async def test_interrupt_none_stops_before_stt(self) -> None:
         async def rejected(**kwargs: Any) -> None:

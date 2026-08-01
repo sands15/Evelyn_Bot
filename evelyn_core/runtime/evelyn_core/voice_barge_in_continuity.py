@@ -457,6 +457,7 @@ class VoiceBargeInContinuityTracker:
             guild_id=meta.get("guild_id"),
             validation_session_id=meta.get("validation_session_id"),
             validation_step_id=meta.get("validation_step_id"),
+            validation_attempt_id=meta.get("validation_attempt_id"),
             validation_transcript_match=meta.get("validation_transcript_match"),
             event=event,
             status="success" if success else "failure",

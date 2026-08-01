@@ -4,6 +4,53 @@ from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
 
+_VALIDATION_BINDING_KEYS = (
+    "validation_session_id",
+    "validation_step_id",
+    "validation_attempt",
+    "validation_attempt_id",
+    "validationSessionId",
+    "validationStepId",
+    "validationAttempt",
+    "validationAttemptId",
+)
+
+
+def _validation_bound(metrics: dict[str, Any] | None) -> bool:
+    if not isinstance(metrics, dict):
+        return False
+    meta = metrics.get("meta")
+    sources = (metrics, meta if isinstance(meta, dict) else {})
+    return any(
+        source.get(key) not in (None, "")
+        for source in sources
+        for key in _VALIDATION_BINDING_KEYS
+    )
+
+
+def _text_for_log(value: Any, *, validation_bound: bool) -> Any:
+    if not validation_bound:
+        return value
+    return f"<validation-text chars={len(str(value or ''))}>"
+
+
+def _redact_stt_meta_text(
+    value: dict[str, Any],
+    *,
+    validation_bound: bool,
+) -> dict[str, Any]:
+    if not validation_bound:
+        return value
+    redacted = dict(value)
+    for key, raw_value in tuple(redacted.items()):
+        if "text" in str(key).lower():
+            redacted[key] = _text_for_log(
+                raw_value,
+                validation_bound=True,
+            )
+    return redacted
+
+
 @dataclass(frozen=True)
 class WakeSttResult:
     wake_detected: bool
@@ -271,6 +318,7 @@ async def run_partial_stt_flow(
     metrics: dict[str, Any] | None = None,
     print_fn: Callable[[str], Any] | None = None,
 ) -> PartialSttResult:
+    validation_bound = _validation_bound(metrics)
     partial_audio = build_partial_stt_window(audio, sampling_rate=sampling_rate)
     partial_min_samples = max(1, int(float(sampling_rate) * 0.85))
     partial_should_run = getattr(partial_audio, "size", 0) >= partial_min_samples
@@ -280,14 +328,24 @@ async def run_partial_stt_flow(
         committed_text = clean_text(read_committed_text(session_key))
         return PartialSttResult("", committed_text, skipped_reason="insufficient_audio")
 
+    def get_partial() -> tuple[str, str]:
+        kwargs: dict[str, Any] = {"sampling_rate": sampling_rate}
+        if validation_bound:
+            kwargs["validation_bound"] = True
+        return get_partial_transcript(session_key, audio, **kwargs)
+
     partial_text, committed_text = await run_blocking_stt_task(
-        lambda: get_partial_transcript(session_key, audio, sampling_rate=sampling_rate),
+        get_partial,
         stage="partial",
         timeout_sec=timeout_sec,
         metrics=metrics,
     )
     if print_fn is not None and partial_text:
-        print_fn(f"[STT RESULT][partial] text={partial_text!r} committed={committed_text!r}")
+        print_fn(
+            f"[STT RESULT][partial] "
+            f"text={_text_for_log(partial_text, validation_bound=validation_bound)!r} "
+            f"committed={_text_for_log(committed_text, validation_bound=validation_bound)!r}"
+        )
 
     speculative = speculate_from_committed_stt(committed_text or partial_text, room_state)
     return PartialSttResult(partial_text, committed_text, speculative_policy=speculative)
@@ -316,20 +374,29 @@ async def run_full_stt_with_optional_rescore(
     speaker_name: str = "",
 ) -> FullSttResult:
     del wake_probe
+    validation_bound = _validation_bound(metrics)
+
+    def transcribe(*, token_count: int, stage: str) -> str:
+        kwargs: dict[str, Any] = {
+            "sampling_rate": sampling_rate,
+            "stage": stage,
+        }
+        if validation_bound:
+            kwargs["validation_bound"] = True
+        return transcribe_audio(audio, token_count, **kwargs)
+
     primary_text = await run_blocking_stt_task(
-        lambda: transcribe_audio(
-            audio,
-            max_new_tokens,
-            sampling_rate=sampling_rate,
-            stage="full",
-        ),
+        lambda: transcribe(token_count=max_new_tokens, stage="full"),
         stage="full",
         timeout_sec=max(8.0, full_timeout_sec),
         metrics=metrics,
     )
 
     if print_fn is not None:
-        print_fn(f"[STT RESULT][full-primary] text={primary_text!r}")
+        print_fn(
+            f"[STT RESULT][full-primary] "
+            f"text={_text_for_log(primary_text, validation_bound=validation_bound)!r}"
+        )
 
     text = primary_text
     clean_primary_text = clean_text(primary_text)
@@ -344,10 +411,8 @@ async def run_full_stt_with_optional_rescore(
             log_stage(metrics, "full STT rescore start")
         try:
             rescore_text = await run_blocking_stt_task(
-                lambda: transcribe_audio(
-                    audio,
-                    max_new_tokens + max(0, rescore_extra_tokens),
-                    sampling_rate=sampling_rate,
+                lambda: transcribe(
+                    token_count=max_new_tokens + max(0, rescore_extra_tokens),
                     stage="full-rescore",
                 ),
                 stage="full-rescore",
@@ -360,17 +425,35 @@ async def run_full_stt_with_optional_rescore(
                     f"[STT RESCORE] speaker={speaker_name} selected={stt_meta['selected']} "
                     f"primary_score={stt_meta['primary_score']:.3f} rescore_score={stt_meta['rescore_score']:.3f}"
                 )
-                print_fn(f"[STT RESULT][full-rescore] text={rescore_text!r}")
+                print_fn(
+                    f"[STT RESULT][full-rescore] "
+                    f"text={_text_for_log(rescore_text, validation_bound=validation_bound)!r}"
+                )
                 if stt_meta["selected"] == "rescore":
-                    print_fn(f"[STT RESCORE PICK] primary={primary_text!r} -> rescore={rescore_text!r}")
+                    print_fn(
+                        "[STT RESCORE PICK] "
+                        f"primary={_text_for_log(primary_text, validation_bound=validation_bound)!r} "
+                        "-> "
+                        f"rescore={_text_for_log(rescore_text, validation_bound=validation_bound)!r}"
+                    )
             if log_stage is not None:
                 log_stage(metrics, "full STT rescore done", extra=f"selected={stt_meta['selected']}")
         except Exception as exc:
-            stt_meta = {"enabled": True, "selected": "primary", "rescore_error": repr(exc), "primary_text": primary_text}
+            error_detail = (
+                f"errorType={type(exc).__name__}"
+                if validation_bound
+                else repr(exc)
+            )
+            stt_meta = {
+                "enabled": True,
+                "selected": "primary",
+                "rescore_error": error_detail,
+                "primary_text": primary_text,
+            }
             if print_fn is not None:
-                print_fn(f"[STT RESCORE FAIL] {exc}")
+                print_fn(f"[STT RESCORE FAIL] {error_detail}")
             if log_stage is not None:
-                log_stage(metrics, "full STT rescore failed", extra=repr(exc))
+                log_stage(metrics, "full STT rescore failed", extra=error_detail)
     else:
         stt_meta = {
             "enabled": bool(rescore_enabled),
@@ -381,4 +464,11 @@ async def run_full_stt_with_optional_rescore(
         if rescore_skip_reason and log_stage is not None:
             log_stage(metrics, "STT rescore skip", extra=rescore_skip_reason)
 
-    return FullSttResult(text=text, primary_text=primary_text, stt_meta=stt_meta)
+    return FullSttResult(
+        text=text,
+        primary_text=primary_text,
+        stt_meta=_redact_stt_meta_text(
+            stt_meta,
+            validation_bound=validation_bound,
+        ),
+    )

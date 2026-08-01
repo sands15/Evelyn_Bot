@@ -27,12 +27,17 @@ class ControlPageVoiceValidationTests(unittest.TestCase):
         self.assertIn("/api/control-page/voice-validation/start", source)
         self.assertIn("/api/control-page/voice-validation/confirm", source)
         self.assertIn("/api/control-page/voice-validation/retry", source)
+        self.assertIn("attempt: step.attempt", source)
         self.assertIn("/api/control-page/voice-validation/abort", source)
         self.assertIn("/api/control-page/voice-capture-consent/preview", source)
         self.assertIn("/api/control-page/voice-capture-consent/apply", source)
         self.assertIn("/api/control-page/voice-capture-consent/revoke", source)
         self.assertIn("/api/control-page/session", source)
         self.assertIn("X-Evelyn-CSRF-Token", source)
+        self.assertIn('eventCount(step, "reply_started") === 1', source)
+        self.assertIn('step.kind === "barge_source"', source)
+        self.assertIn('const canRetry = step.status === "failed";', source)
+        self.assertIn('${canRetry ? "" : "disabled"}>단계 재시도', source)
         self.assertNotIn("rawAudio", source)
 
     def test_server_registers_all_voice_validation_routes(self):

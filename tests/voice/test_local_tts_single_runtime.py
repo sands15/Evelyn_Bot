@@ -47,13 +47,13 @@ class FakePlaybackManager:
     def __init__(self) -> None:
         self.enabled = True
         self.error: BaseException | None = None
-        self.calls: list[tuple[object, bool]] = []
+        self.calls: list[tuple[object, dict]] = []
 
-    async def play_source(self, source, *, cleanup_source: bool, on_first_playback):
-        self.calls.append((source, cleanup_source))
+    async def play_source(self, source, **kwargs):
+        self.calls.append((source, kwargs))
         if self.error is not None:
             raise self.error
-        on_first_playback()
+        kwargs["on_first_playback"]()
         return True
 
 
@@ -112,6 +112,7 @@ class LocalTtsSingleRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_plays_ready_source_and_runs_trace_callbacks(self) -> None:
         scope = FakeScope()
+        metrics = {"marks": {}}
 
         result = await speak_answer_local_from_runtime(
             "[question-oh] 안녕",
@@ -119,7 +120,7 @@ class LocalTtsSingleRuntimeTests(unittest.IsolatedAsyncioTestCase):
             turn_id="turn-1",
             session_key="session-1",
             turn_scope=scope,
-            metrics={"marks": {}},
+            metrics=metrics,
         )
         callbacks = self.created[0][1]
         callbacks["on_request_start"]()
@@ -131,7 +132,10 @@ class LocalTtsSingleRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result)
         self.assertEqual(self.created[0][0], "안녕")
         self.assertEqual(self.created[0][2].ready_timeouts, [30.0])
-        self.assertTrue(self.manager.calls[0][1])
+        self.assertTrue(self.manager.calls[0][1]["cleanup_source"])
+        self.assertEqual(self.manager.calls[0][1]["turn_id"], "turn-1")
+        self.assertEqual(self.manager.calls[0][1]["session_key"], "session-1")
+        self.assertIs(self.manager.calls[0][1]["metrics"], metrics)
         self.assertEqual(scope.transitions, [("tts-running", "local_speaker_tts")])
         self.assertEqual(self.first_playbacks[0]["chunk_index"], 1)
         self.assertEqual(self.events[0][0], "local_tts_first_packet_sent")

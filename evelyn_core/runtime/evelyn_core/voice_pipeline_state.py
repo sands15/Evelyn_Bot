@@ -116,6 +116,9 @@ def record_voice_pipeline_failure_from_runtime(
         else ""
     )
     meta = (metrics or {}).get("meta") or {}
+    if metrics is not None and error_code == "tts_playback_failed":
+        meta = metrics.setdefault("meta", {})
+        meta["playback_failed"] = True
     log_turn_event(
         error_code,
         **merge_log_event_payload(

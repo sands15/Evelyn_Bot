@@ -19,6 +19,7 @@ class SingleOwnerPlaybackController:
 
     def __init__(self) -> None:
         self._owner_id = ""
+        self._owner_token: object | None = None
         self._cancel: Callable[[], Any] | None = None
         self._cancel_requested = False
 
@@ -30,17 +31,37 @@ class SingleOwnerPlaybackController:
     def cancel_requested(self) -> bool:
         return self._cancel_requested
 
+    @property
+    def owner_token(self) -> object | None:
+        return self._owner_token
+
     def claim(self, owner_id: str, cancel: Callable[[], Any]) -> bool:
         normalized = str(owner_id or "").strip()
         if not normalized:
             raise ValueError("playback owner id is required")
         if self._owner_id and self._owner_id != normalized:
             return False
+        if not self._owner_id:
+            self._owner_token = object()
         self._owner_id = normalized
         self._cancel = cancel
         return True
 
-    def request_cancel(self) -> bool:
+    def request_cancel(
+        self,
+        *,
+        expected_owner_id: str | None = None,
+        expected_owner_token: object | None = None,
+    ) -> bool:
+        if expected_owner_id is not None and self._owner_id != str(
+            expected_owner_id or ""
+        ).strip():
+            return False
+        if (
+            expected_owner_token is not None
+            and self._owner_token is not expected_owner_token
+        ):
+            return False
         if not self._owner_id or self._cancel is None or self._cancel_requested:
             return False
         self._cancel_requested = True
@@ -51,9 +72,50 @@ class SingleOwnerPlaybackController:
         if not self._owner_id or self._owner_id != str(owner_id or "").strip():
             return False
         self._owner_id = ""
+        self._owner_token = None
         self._cancel = None
         self._cancel_requested = False
         return True
+
+
+def local_barge_source_binding_matches(
+    segment_meta: dict[str, Any] | None,
+    *,
+    active_turn_id: str,
+    active_validation: dict[str, Any] | None,
+    active_owner_id: str,
+    active_owner_token: object | None,
+) -> bool:
+    """Match a queued barge-in to the exact playback generation it heard."""
+    source = (
+        segment_meta.get("_bargeSource")
+        if isinstance(segment_meta, dict)
+        else None
+    )
+    if not isinstance(source, dict):
+        return False
+    if source.get("interruptPairingValid") is False:
+        return False
+    source_turn_id = str(source.get("turnId") or "").strip()
+    source_owner_id = str(source.get("ownerId") or "").strip()
+    if not source_turn_id or source_turn_id != str(active_turn_id or "").strip():
+        return False
+    if not source_owner_id or source_owner_id != str(active_owner_id or "").strip():
+        return False
+    source_owner_token = source.get("ownerToken")
+    if source_owner_token is None or source_owner_token is not active_owner_token:
+        return False
+
+    validation = dict(active_validation or {})
+    return (
+        str(source.get("validationSessionId") or "")
+        == str(validation.get("sessionId") or "")
+        and str(source.get("validationStepId") or "")
+        == str(validation.get("stepId") or "")
+        and str(source.get("validationAttemptId") or "")
+        == str(validation.get("attemptId") or "")
+        and source.get("validationAttempt") == validation.get("attempt")
+    )
 
 
 def build_local_tts_interrupt_meta(
@@ -139,4 +201,5 @@ __all__ = [
     "SingleOwnerPlaybackController",
     "build_local_tts_interrupt_meta",
     "evaluate_local_barge_in",
+    "local_barge_source_binding_matches",
 ]

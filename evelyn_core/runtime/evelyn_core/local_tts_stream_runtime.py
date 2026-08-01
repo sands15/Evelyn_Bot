@@ -131,6 +131,9 @@ async def speak_answer_local_from_runtime(
             return await deps.playback_manager.play_source(
                 source,
                 cleanup_source=True,
+                turn_id=turn_id,
+                session_key=session_key,
+                metrics=metrics,
                 on_first_playback=lambda: deps.mark_local_tts_first_playback(
                     metrics,
                     turn_id=turn_id,
@@ -241,6 +244,12 @@ async def stream_local_tts_sentences_from_runtime(
             )
             while True:
                 check_cancelled()
+                if (
+                    isinstance(metrics, dict)
+                    and isinstance(metrics.get("meta"), dict)
+                    and metrics["meta"].get("qualified_tts_interrupt") is True
+                ):
+                    break
                 item = await prepared_queue.get()
                 if item is None:
                     break
@@ -253,6 +262,9 @@ async def stream_local_tts_sentences_from_runtime(
                     ok = await deps.playback_manager.play_source(
                         source,
                         cleanup_source=True,
+                        turn_id=turn_id,
+                        session_key=session_key,
+                        metrics=metrics,
                         on_first_playback=lambda ci=int(chunk_index or 0): deps.mark_local_tts_first_playback(
                             metrics,
                             turn_id=turn_id,
@@ -273,6 +285,12 @@ async def stream_local_tts_sentences_from_runtime(
                     raise
                 if ok:
                     played_chunks += 1
+                if (
+                    isinstance(metrics, dict)
+                    and isinstance(metrics.get("meta"), dict)
+                    and metrics["meta"].get("qualified_tts_interrupt") is True
+                ):
+                    break
     finally:
         if prefetch_task is not None and not prefetch_task.done():
             prefetch_task.cancel()

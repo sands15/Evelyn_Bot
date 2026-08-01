@@ -2,6 +2,7 @@ import sys
 import unittest
 import asyncio
 from pathlib import Path
+from unittest.mock import patch
 
 
 REPO_ROOT = next(path for path in Path(__file__).resolve().parents if (path / "main.py").exists())
@@ -220,6 +221,335 @@ class TtsPlaybackContractTests(unittest.TestCase):
         self.assertFalse(manager.is_active(123))
         self.assertTrue(manager.is_active(456))
 
+    def test_qualified_cancel_marks_only_exact_active_source_metrics(self) -> None:
+        async def runner(reason: str, tracked_turn_id: str) -> tuple[dict, dict | None]:
+            manager = TtsPlaybackManager()
+            metrics: dict = {
+                "meta": {
+                    "playback_started": True,
+                    "validation_session_id": "validation-1",
+                    "validation_step_id": "07-barge-source",
+                    "validation_attempt_id": "attempt-private-1",
+                    "private_text": "must-not-leak",
+                }
+            }
+            manager.start(
+                guild_id=123,
+                turn_id="turn-source",
+                session_key="session-source",
+            )
+            manager._source_metrics[123] = (tracked_turn_id, metrics)
+            source_context = manager.source_context(123)
+            stopped = await manager.cancel_guild(123, reason=reason)
+            self.assertTrue(stopped)
+            self.assertNotIn("_source_metrics", manager.snapshot(123))
+            self.assertEqual(manager._source_metrics, {})
+            return metrics, source_context
+
+        qualified, context = asyncio.run(runner("qualified_user_audio", "turn-source"))
+        unrelated, _ = asyncio.run(runner("interrupt", "turn-source"))
+        mismatched, mismatched_context = asyncio.run(runner("qualified_user_audio", "other-turn"))
+
+        self.assertIs(qualified["meta"]["qualified_tts_interrupt"], True)
+        self.assertNotIn("qualified_tts_interrupt", unrelated["meta"])
+        self.assertNotIn("qualified_tts_interrupt", mismatched["meta"])
+        self.assertEqual(context["source_turn_id"], "turn-source")
+        self.assertEqual(context["source_session_key"], "session-source")
+        self.assertEqual(context["validation_attempt_id"], "attempt-private-1")
+        self.assertNotIn("private_text", context)
+        self.assertIsNone(mismatched_context)
+
+    def test_failed_cancel_does_not_mark_positive_source_evidence(self) -> None:
+        async def runner() -> tuple[bool, dict]:
+            manager = TtsPlaybackManager()
+            metrics: dict = {"meta": "invalid"}
+            manager.start(guild_id=123, turn_id="turn-source")
+            manager._source_metrics[123] = ("turn-source", metrics)
+            with patch(
+                "evelyn_core.tts_playback.stop_tracked_tts_playback",
+                return_value=False,
+            ):
+                stopped = await manager.cancel_guild(
+                    123,
+                    reason="qualified_user_audio",
+                )
+            return stopped, metrics
+
+        stopped, metrics = asyncio.run(runner())
+
+        self.assertFalse(stopped)
+        self.assertEqual(metrics["meta"], "invalid")
+
+    def test_real_stop_failure_returns_false_and_rolls_back_qualified_lease(self) -> None:
+        class FakeVc:
+            def is_playing(self) -> bool:
+                return True
+
+            def is_paused(self) -> bool:
+                return False
+
+            def stop(self) -> None:
+                raise RuntimeError("device stop failed")
+
+        class FakeSource:
+            def __init__(self) -> None:
+                self.finished = False
+
+            def finish(self) -> None:
+                self.finished = True
+
+        async def runner() -> tuple[bool, dict, TtsPlaybackManager, FakeSource]:
+            manager = TtsPlaybackManager()
+            metrics: dict = {"meta": {"playback_started": True}}
+            source = FakeSource()
+            manager.start(
+                guild_id=123,
+                turn_id="turn-source",
+                vc=FakeVc(),
+                playback_source=source,
+            )
+            manager._source_metrics[123] = ("turn-source", metrics)
+
+            stopped = await manager.cancel_guild(
+                123,
+                reason="qualified_user_audio",
+            )
+            return stopped, metrics, manager, source
+
+        stopped, metrics, manager, source = asyncio.run(runner())
+
+        self.assertFalse(stopped)
+        self.assertTrue(source.finished)
+        self.assertNotIn("qualified_tts_interrupt", metrics["meta"])
+        self.assertTrue(manager.is_active(123))
+        self.assertEqual(manager._source_metrics[123][0], "turn-source")
+
+    def test_qualified_cancel_lease_is_visible_during_stop_and_rolls_back_on_false(self) -> None:
+        async def runner(stopped_result: bool) -> tuple[dict, list[bool], bool]:
+            manager = TtsPlaybackManager()
+            metrics: dict = {"meta": {"playback_started": True}}
+            manager.start(guild_id=123, turn_id="turn-source")
+            binding = ("turn-source", metrics)
+            manager._source_metrics[123] = binding
+            observed: list[bool] = []
+
+            async def stop_with_summary(**_kwargs) -> bool:
+                observed.append(
+                    metrics["meta"].get("qualified_tts_interrupt") is True
+                )
+                return stopped_result
+
+            with patch(
+                "evelyn_core.tts_playback.stop_tracked_tts_playback",
+                side_effect=stop_with_summary,
+            ):
+                stopped = await manager.cancel_guild(
+                    123,
+                    reason="qualified_user_audio",
+                )
+            return metrics, observed, stopped
+
+        succeeded, success_observed, success = asyncio.run(runner(True))
+        failed, failure_observed, failure = asyncio.run(runner(False))
+
+        self.assertTrue(success)
+        self.assertEqual(success_observed, [True])
+        self.assertIs(succeeded["meta"]["qualified_tts_interrupt"], True)
+        self.assertFalse(failure)
+        self.assertEqual(failure_observed, [True])
+        self.assertNotIn("qualified_tts_interrupt", failed["meta"])
+
+    def test_qualified_cancel_lease_is_visible_to_real_playback_task_finally(self) -> None:
+        async def runner() -> tuple[bool, list[bool]]:
+            manager = TtsPlaybackManager()
+            metrics: dict = {"meta": {"playback_started": True}}
+            observed_by_summary: list[bool] = []
+            playback_started = asyncio.Event()
+
+            async def playback() -> None:
+                playback_started.set()
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    observed_by_summary.append(
+                        metrics["meta"].get("qualified_tts_interrupt") is True
+                    )
+
+            playback_task = asyncio.create_task(playback())
+            await playback_started.wait()
+            manager.start(
+                guild_id=123,
+                turn_id="turn-source",
+                playback_task=playback_task,
+            )
+            manager._source_metrics[123] = ("turn-source", metrics)
+            stopped = await manager.cancel_guild(
+                123,
+                reason="qualified_user_audio",
+            )
+            self.assertTrue(playback_task.done())
+            return stopped, observed_by_summary
+
+        stopped, observed = asyncio.run(runner())
+
+        self.assertTrue(stopped)
+        self.assertEqual(observed, [True])
+
+    def test_qualified_cancel_before_play_start_has_no_positive_evidence(self) -> None:
+        async def runner() -> tuple[bool, dict]:
+            manager = TtsPlaybackManager()
+            metrics: dict = {"meta": {"playback_started": False}}
+            manager.start(guild_id=123, turn_id="turn-source")
+            manager._source_metrics[123] = ("turn-source", metrics)
+
+            stopped = await manager.cancel_guild(
+                123,
+                reason="qualified_user_audio",
+            )
+            return stopped, metrics
+
+        stopped, metrics = asyncio.run(runner())
+
+        self.assertTrue(stopped)
+        self.assertNotIn("qualified_tts_interrupt", metrics["meta"])
+
+    def test_old_finish_cannot_remove_newer_exact_source_binding(self) -> None:
+        manager = TtsPlaybackManager()
+        shared_metrics: dict = {"meta": {}}
+        old_binding = ("turn-a", shared_metrics)
+        new_binding = ("turn-b", shared_metrics)
+        manager.start(guild_id=123, turn_id="turn-a")
+        old_generation = manager.tracker.registry.generation(123)
+        manager.start(guild_id=123, turn_id="turn-b")
+        manager._source_metrics[123] = new_binding
+
+        manager.finish(
+            guild_id=123,
+            source_metrics_binding=old_binding,
+            playback_generation=old_generation,
+        )
+
+        self.assertIs(manager._source_metrics[123], new_binding)
+        self.assertEqual(manager.get(123)["turn_id"], "turn-b")
+
+    def test_cancel_a_cannot_clear_b_started_while_a_task_unwinds(self) -> None:
+        async def runner() -> tuple[bool, TtsPlaybackManager, tuple]:
+            manager = TtsPlaybackManager()
+            metrics_a: dict = {"meta": {}}
+            metrics_b: dict = {"meta": {}}
+            binding_b = ("turn-b", metrics_b)
+            started = asyncio.Event()
+
+            async def playback_a() -> None:
+                started.set()
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    manager.start(guild_id=123, turn_id="turn-b")
+                    manager._source_metrics[123] = binding_b
+
+            task_a = asyncio.create_task(playback_a())
+            await started.wait()
+            manager.start(
+                guild_id=123,
+                turn_id="turn-a",
+                playback_task=task_a,
+            )
+            manager._source_metrics[123] = ("turn-a", metrics_a)
+            stopped = await manager.cancel_guild(
+                123,
+                reason="qualified_user_audio",
+            )
+            return stopped, manager, binding_b
+
+        stopped, manager, binding_b = asyncio.run(runner())
+
+        self.assertTrue(stopped)
+        self.assertEqual(manager.get(123)["turn_id"], "turn-b")
+        self.assertIs(manager._source_metrics[123], binding_b)
+
+    def test_full_queue_cannot_delay_a_stop_until_after_b_replaces_it(self) -> None:
+        class SharedVc:
+            def __init__(self) -> None:
+                self.owner = "turn-a"
+                self.stop_owners: list[str] = []
+
+            def is_playing(self) -> bool:
+                return True
+
+            def is_paused(self) -> bool:
+                return False
+
+            def stop(self) -> None:
+                self.stop_owners.append(self.owner)
+
+        async def runner() -> tuple[bool, SharedVc, TtsPlaybackRegistry]:
+            registry = TtsPlaybackRegistry()
+            vc = SharedVc()
+            prepared_queue: asyncio.Queue[object] = asyncio.Queue(maxsize=1)
+            prepared_queue.put_nowait("prepared-audio-a")
+            registry.set(
+                123,
+                vc=vc,
+                prepared_queue=prepared_queue,
+                turn_id="turn-a",
+            )
+            generation_a = registry.generation(123)
+
+            async def replace_with_b() -> None:
+                vc.owner = "turn-b"
+                registry.set(123, vc=vc, turn_id="turn-b")
+                prepared_queue.get_nowait()
+
+            replacement = asyncio.create_task(replace_with_b())
+            stopped = await stop_tracked_tts_playback(
+                registry=registry,
+                guild_id=123,
+                expected_generation=generation_a,
+            )
+            await replacement
+            return stopped, vc, registry
+
+        stopped, vc, registry = asyncio.run(runner())
+
+        self.assertTrue(stopped)
+        self.assertEqual(vc.stop_owners, ["turn-a"])
+        self.assertEqual(registry.get(123)["turn_id"], "turn-b")
+
+    def test_stale_expected_generation_cannot_stop_replacement(self) -> None:
+        class FakeVc:
+            def __init__(self) -> None:
+                self.stopped = False
+
+            def is_playing(self) -> bool:
+                return True
+
+            def is_paused(self) -> bool:
+                return False
+
+            def stop(self) -> None:
+                self.stopped = True
+
+        async def runner() -> tuple[bool, FakeVc, TtsPlaybackRegistry]:
+            registry = TtsPlaybackRegistry()
+            registry.set(123, turn_id="turn-a")
+            generation_a = registry.generation(123)
+            vc_b = FakeVc()
+            registry.set(123, vc=vc_b, turn_id="turn-b")
+
+            stopped = await stop_tracked_tts_playback(
+                registry=registry,
+                guild_id=123,
+                expected_generation=generation_a,
+            )
+            return stopped, vc_b, registry
+
+        stopped, vc_b, registry = asyncio.run(runner())
+
+        self.assertFalse(stopped)
+        self.assertFalse(vc_b.stopped)
+        self.assertEqual(registry.get(123)["turn_id"], "turn-b")
+
     def test_playback_manager_play_source_once_tracks_and_finishes(self) -> None:
         class FakeGuild:
             id = 123
@@ -275,6 +605,64 @@ class TtsPlaybackContractTests(unittest.TestCase):
         self.assertEqual(metrics["meta"]["playback_completed"], True)
         self.assertFalse(manager.is_active(123))
         self.assertIn(123, manager.tracker.last_audio_end_at)
+
+    def test_play_source_once_blocks_stale_validation_before_vc_play(self) -> None:
+        class FakeGuild:
+            id = 123
+
+        class FakeVc:
+            guild = FakeGuild()
+
+            def __init__(self) -> None:
+                self.play_called = False
+
+            def is_playing(self) -> bool:
+                return False
+
+            def is_paused(self) -> bool:
+                return False
+
+            def play(self, _source: object, *, after: object) -> None:
+                self.play_called = True
+                after(None)
+
+        async def runner() -> tuple[bool, FakeVc, dict, TtsPlaybackManager]:
+            manager = TtsPlaybackManager()
+            vc = FakeVc()
+            metrics: dict = {
+                "meta": {
+                    "validation_session_id": "session-stale",
+                    "validation_step_id": "step-stale",
+                    "validation_attempt_id": "attempt-stale",
+                }
+            }
+            with patch(
+                "evelyn_core.tts_playback.validation_attempt_binding_is_current",
+                return_value=False,
+            ) as guard:
+                played = await manager.play_source_once(
+                    TtsSourcePlaybackRequest(
+                        vc=vc,
+                        source=object(),
+                        guild_id=123,
+                        turn_id="turn-stale",
+                        metrics=metrics,
+                    )
+                )
+                guard.assert_called_once_with(
+                    metrics["meta"],
+                    surface="discord",
+                    reject_unbound_when_active=True,
+                )
+            return played, vc, metrics, manager
+
+        played, vc, metrics, manager = asyncio.run(runner())
+
+        self.assertFalse(played)
+        self.assertFalse(vc.play_called)
+        self.assertIs(metrics["meta"]["playback_started"], False)
+        self.assertIs(metrics["meta"]["playback_completed"], False)
+        self.assertNotIn(123, manager.tracker.last_audio_end_at)
 
     def test_playback_manager_stream_sentences_runs_prepared_playback(self) -> None:
         class FakeGuild:
@@ -351,6 +739,89 @@ class TtsPlaybackContractTests(unittest.TestCase):
         self.assertEqual(metrics["meta"]["playback_completed"], True)
         self.assertFalse(manager.is_active(123))
         self.assertIn(123, manager.tracker.last_audio_end_at)
+
+    def test_stream_sentences_blocks_stale_validation_before_vc_play(self) -> None:
+        class FakeGuild:
+            id = 123
+
+        class FakeVc:
+            guild = FakeGuild()
+
+            def __init__(self) -> None:
+                self.play_called = False
+
+            def is_playing(self) -> bool:
+                return False
+
+            def is_paused(self) -> bool:
+                return False
+
+            def play(self, _source: object, *, after: object) -> None:
+                self.play_called = True
+                after(None)
+
+        class FakeSource:
+            error = None
+
+            async def wait_until_ready(self, timeout: float = 1.0) -> bool:
+                return True
+
+            def read(self) -> bytes:
+                return b""
+
+            def is_exhausted(self) -> bool:
+                return True
+
+            def cleanup(self) -> None:
+                return None
+
+        async def runner() -> tuple[FakeVc, dict, TtsPlaybackManager]:
+            manager = TtsPlaybackManager()
+            vc = FakeVc()
+            sentence_queue: asyncio.Queue[str | None] = asyncio.Queue()
+            sentence_queue.put_nowait("hello")
+            sentence_queue.put_nowait(None)
+            metrics: dict = {
+                "meta": {
+                    "validation_session_id": "session-stale",
+                    "validation_step_id": "step-stale",
+                    "validation_attempt_id": "attempt-stale",
+                }
+            }
+
+            async def synthesize_source(_sentence: str, _chunk_index: int) -> FakeSource:
+                return FakeSource()
+
+            with patch(
+                "evelyn_core.tts_playback.validation_attempt_binding_is_current",
+                return_value=False,
+            ) as guard:
+                await manager.stream_sentences(
+                    TtsStreamingPlaybackRequest(
+                        vc=vc,
+                        sentence_queue=sentence_queue,
+                        synthesize_source=synthesize_source,
+                        guild_id=123,
+                        turn_id="turn-stale",
+                        metrics=metrics,
+                        prefetch_chunks=1,
+                        lookahead_chunks=1,
+                        lookahead_timeout_ms=10,
+                    )
+                )
+                guard.assert_called_once_with(
+                    metrics["meta"],
+                    surface="discord",
+                    reject_unbound_when_active=True,
+                )
+            return vc, metrics, manager
+
+        vc, metrics, manager = asyncio.run(runner())
+
+        self.assertFalse(vc.play_called)
+        self.assertIs(metrics["meta"]["playback_started"], False)
+        self.assertIs(metrics["meta"]["playback_completed"], False)
+        self.assertNotIn(123, manager.tracker.last_audio_end_at)
 
     def test_clear_tts_playback_tracking_resets_guild_state(self) -> None:
         registry = TtsPlaybackRegistry()
@@ -660,7 +1131,7 @@ class TtsPlaybackContractTests(unittest.TestCase):
             source = FakeSource()
             sentence_queue: asyncio.Queue[object] = asyncio.Queue()
             prepared_queue: asyncio.Queue[object] = asyncio.Queue()
-            await stop_tts_playback_state(
+            stopped = await stop_tts_playback_state(
                 {
                     "vc": vc,
                     "sentence_queue": sentence_queue,
@@ -668,6 +1139,7 @@ class TtsPlaybackContractTests(unittest.TestCase):
                     "playback_source": source,
                 }
             )
+            self.assertTrue(stopped)
             return vc, source, sentence_queue, prepared_queue
 
         vc, source, sentence_queue, prepared_queue = asyncio.run(runner())

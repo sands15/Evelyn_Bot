@@ -17,6 +17,7 @@ def transcribe_audio16k_via_service(
     max_new_tokens: int,
     stage: str,
     language: str | None = None,
+    validation_bound: bool = False,
 ) -> dict[str, Any]:
     stt_audio = np.asarray(audio, dtype=np.float32)
     payload: dict[str, Any] = {
@@ -28,6 +29,8 @@ def transcribe_audio16k_via_service(
     }
     if language:
         payload["language"] = language
+    if validation_bound:
+        payload["validation_bound"] = True
 
     root = service_url.rstrip("/")
     req = request.Request(

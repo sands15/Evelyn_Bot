@@ -147,7 +147,7 @@ from evelyn_core.discord_app_composition_runtime import (
     DiscordAppComposition, DiscordAppCompositionDeps, DiscordCommandCompositionDeps, DiscordEventCompositionDeps, build_discord_intents,
 )
 from evelyn_core.discord_runtime_status import DiscordRuntimeStatus
-from evelyn_core.voice_validation import observe_turn_trace_for_voice_validation
+from evelyn_core.voice_validation import active_validation_context, observe_turn_trace_for_voice_validation
 from evelyn_core.search_memory_dependency_composition import SearchMemoryDependencyComposition, SearchMemoryDependencyCompositionDeps
 from evelyn_core.memory_context_state import build_memory_context
 from evelyn_core.startup_audio_runtime import OpusStartupRuntimeDeps, SttWarmupRuntimeDeps
@@ -743,7 +743,7 @@ voice_turn_dependency_composition = VoiceTurnDependencyComposition(
             *args, **kwargs
         ),
         build_voice_ingress_context=build_voice_ingress_context, next_segment_id=next_segment_id,
-        new_turn_id=new_turn_id, build_voice_ingress_item=build_voice_ingress_item,
+        new_turn_id=new_turn_id, validation_context_provider=active_validation_context, build_voice_ingress_item=build_voice_ingress_item,
         voice_ingress_queue_depth=voice_ingress_queue.qsize,
         schedule_voice_utterance_item=lambda *args, **kwargs: _schedule_voice_utterance_item(
             *args, **kwargs

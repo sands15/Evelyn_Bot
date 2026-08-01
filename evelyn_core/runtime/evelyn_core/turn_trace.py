@@ -7,6 +7,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from .assistant_contracts import AcceptedVoiceTurn
 from .text import clean_text
 from .memory_confirmation_contract import (
     is_explicit_memory_confirmation_receipt,
@@ -89,9 +90,14 @@ TURN_SUMMARY_KEYS: tuple[str, ...] = (
     "memory_write_content_free",
     "minecraft_snapshot_age_ms",
     "minecraft_snapshot_freshness",
+    "turn_accepted",
+    "reply_started",
+    "reply_final",
     "playback_started",
     "playback_completed",
     "playback_cancelled",
+    "playback_failed",
+    "qualified_tts_interrupt",
     "error_layer",
     "error",
     "t_ingress",
@@ -116,6 +122,7 @@ TURN_SUMMARY_KEYS: tuple[str, ...] = (
     "cancelled_stale_turn_count",
     "validation_session_id",
     "validation_step_id",
+    "validation_attempt_id",
     "validation_transcript_match",
     "extra",
 )
@@ -339,6 +346,13 @@ def build_turn_summary_payload(
     playback_completed = _bool_or_none(meta.get("playback_completed"))
     if playback_completed is None and playback_started and playback_cancelled is False:
         playback_completed = True
+    accepted_turn = meta.get("accepted_turn_contract")
+    turn_id = str(meta.get("turn_id") or "")
+    turn_accepted = bool(
+        turn_id
+        and isinstance(accepted_turn, AcceptedVoiceTurn)
+        and accepted_turn.accepted_turn_id == turn_id
+    )
 
     payload: dict[str, Any] = {
         "summary_schema": "turn_summary.v1",
@@ -426,11 +440,22 @@ def build_turn_summary_payload(
         ),
         "minecraft_snapshot_age_ms": _round_ms(meta.get("minecraft_snapshot_age_ms")),
         "minecraft_snapshot_freshness": _clean_optional(meta.get("minecraft_snapshot_freshness")),
+        "turn_accepted": turn_accepted,
+        "reply_started": _bool_or_none(meta.get("reply_started")),
+        "reply_final": _bool_or_none(meta.get("reply_final")),
         "playback_started": playback_started,
         "playback_completed": playback_completed,
         "playback_cancelled": playback_cancelled,
+        "playback_failed": _bool_or_none(meta.get("playback_failed")),
+        "qualified_tts_interrupt": _bool_or_none(
+            meta.get("qualified_tts_interrupt")
+        ),
         "error_layer": error_layer or meta.get("error_layer"),
-        "error": _turn_summary_error(error or meta.get("error")),
+        "error": _turn_summary_error(
+            error
+            or meta.get("error")
+            or meta.get("voice_delivery_failure_code")
+        ),
         "t_ingress": _round_ms(marks.get("t_ingress")),
         "t_policy": _round_ms(marks.get("t_policy")),
         "t_context_build": _round_ms(marks.get("t_context_build")),
@@ -460,6 +485,7 @@ def build_turn_summary_payload(
         "cancelled_stale_turn_count": p95.get("cancelled_stale_turn_count"),
         "validation_session_id": meta.get("validation_session_id"),
         "validation_step_id": meta.get("validation_step_id"),
+        "validation_attempt_id": meta.get("validation_attempt_id"),
         "validation_transcript_match": _bool_or_none(meta.get("validation_transcript_match")),
         "extra": extra or None,
     }

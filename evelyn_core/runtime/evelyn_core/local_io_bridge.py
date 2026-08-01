@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import threading
 import time
 import uuid
 from typing import Any
@@ -63,6 +64,7 @@ from .local_tts_playback import normalize_output_device
 from .local_bridge_barge_in import (
     SingleOwnerPlaybackController,
     evaluate_local_barge_in,
+    local_barge_source_binding_matches,
 )
 from .paths import get_runtime_artifacts_root
 from .runtime_artifact_io import atomic_json_write
@@ -72,6 +74,7 @@ from .voice_validation import (
     active_validation_context,
     emit_transcript_validation_event,
     emit_voice_validation_event,
+    validation_attempt_binding_is_current,
 )
 
 try:
@@ -200,11 +203,14 @@ class LocalIoBridge:
         self.host_ui_action_task: asyncio.Task[Any] | None = None
         self.active_turn_id = ""
         self.active_turn_started_at: float | None = None
-        self.active_validation: dict[str, str] | None = None
+        self.active_validation: dict[str, Any] | None = None
         self.playback_started_for_turn = False
         self.playback_cancelled_for_turn = False
+        self.reply_started_for_turn = False
         self.reply_final_for_turn = False
         self.playback_controller = SingleOwnerPlaybackController()
+        self._barge_source_lock = threading.Lock()
+        self._barge_source_snapshot: dict[str, Any] | None = None
         self._speaker_verifier: Any | None = None
         self._speaker_verifier_initialized = False
 
@@ -312,17 +318,44 @@ class LocalIoBridge:
         loop = asyncio.get_running_loop()
 
         def on_segment(pcm_bytes: bytes, meta: dict[str, Any]) -> None:
+            with self._barge_source_lock:
+                barge_source = (
+                    dict(self._barge_source_snapshot)
+                    if self._barge_source_snapshot is not None
+                    else None
+                )
+            interrupt_validation = (
+                active_validation_context(
+                    surface="local",
+                    prefer_interrupt=True,
+                )
+                if barge_source is not None
+                else None
+            )
+            if barge_source is not None:
+                source_session_id = str(
+                    barge_source.get("validationSessionId") or ""
+                )
+                interrupt_session_id = str(
+                    (interrupt_validation or {}).get("sessionId") or ""
+                )
+                barge_source["interruptPairingValid"] = not bool(
+                    source_session_id
+                    and interrupt_session_id
+                    and source_session_id != interrupt_session_id
+                )
+
             def enqueue() -> None:
                 segment_meta = dict(meta)
                 segment_meta.setdefault("turnId", uuid.uuid4().hex)
-                if self.speaking:
-                    validation = active_validation_context(
-                        surface="local",
-                        prefer_interrupt=True,
-                    )
+                if barge_source is not None:
+                    segment_meta["_bargeSource"] = dict(barge_source)
+                    validation = interrupt_validation
                     if validation:
                         segment_meta["validationSessionId"] = validation["sessionId"]
                         segment_meta["validationStepId"] = validation["stepId"]
+                        segment_meta["validationAttempt"] = validation.get("attempt")
+                        segment_meta["validationAttemptId"] = validation.get("attemptId")
                     if self.barge_in_queue.full():
                         with contextlib.suppress(Exception):
                             self.barge_in_queue.get_nowait()
@@ -336,6 +369,8 @@ class LocalIoBridge:
                 if validation:
                     segment_meta["validationSessionId"] = validation["sessionId"]
                     segment_meta["validationStepId"] = validation["stepId"]
+                    segment_meta["validationAttempt"] = validation.get("attempt")
+                    segment_meta["validationAttemptId"] = validation.get("attemptId")
                 if self.queue.full():
                     try:
                         self.queue.get_nowait()
@@ -576,13 +611,24 @@ class LocalIoBridge:
     def _validation_context_from_meta(
         self,
         meta: dict[str, Any] | None = None,
-    ) -> dict[str, str] | None:
+    ) -> dict[str, Any] | None:
+        if meta is None:
+            return self.active_validation
         source = dict(meta or {})
         session_id = str(source.get("validationSessionId") or "")
         step_id = str(source.get("validationStepId") or "")
-        if session_id and step_id:
-            return {"sessionId": session_id, "stepId": step_id, "surface": "local"}
-        return self.active_validation
+        attempt_id = str(source.get("validationAttemptId") or "")
+        if session_id or step_id or attempt_id:
+            if not (session_id and step_id and attempt_id):
+                return None
+            return {
+                "sessionId": session_id,
+                "stepId": step_id,
+                "surface": "local",
+                "attempt": source.get("validationAttempt"),
+                "attemptId": attempt_id,
+            }
+        return None
 
     def _emit_validation(
         self,
@@ -599,13 +645,16 @@ class LocalIoBridge:
             event,
             session_id=context.get("sessionId"),
             step_id=context.get("stepId"),
+            attempt_id=context.get("attemptId"),
             turnId=str((meta or {}).get("turnId") or self.active_turn_id or ""),
             **payload,
         )
 
     def _mark_playback_started_once(self) -> None:
+        self._ensure_validation_attempt_current()
         if self.playback_started_for_turn:
             return
+        self._mark_reply_started_once()
         self.playback_started_for_turn = True
         latency_ms = (
             (time.perf_counter() - self.active_turn_started_at) * 1000.0
@@ -617,24 +666,68 @@ class LocalIoBridge:
             latencyMs=round(latency_ms, 1) if latency_ms is not None else None,
         )
 
+    def _ensure_validation_attempt_current(self) -> None:
+        if not validation_attempt_binding_is_current(
+            self.active_validation,
+            surface="local",
+            reject_unbound_when_active=True,
+        ):
+            raise RuntimeError("validation_attempt_stale")
+
     def _claim_playback_owner(self) -> str:
         active_task = self.active_turn_task
         if active_task is not None and not active_task.done():
             owner_id = self.active_turn_id
             cancel = active_task.cancel
+            source_turn_id = self.active_turn_id
+            source_validation = dict(self.active_validation or {})
         else:
             current_task = asyncio.current_task()
             if current_task is None:
                 raise RuntimeError("playback_task_missing")
             owner_id = f"control-{id(current_task)}"
             cancel = current_task.cancel
+            source_turn_id = owner_id
+            source_validation = {}
         if not self.playback_controller.claim(owner_id, cancel):
             raise RuntimeError("active_playback_owner_conflict")
+        with self._barge_source_lock:
+            self._barge_source_snapshot = {
+                "turnId": source_turn_id,
+                "ownerId": owner_id,
+                "ownerToken": self.playback_controller.owner_token,
+                "validationSessionId": source_validation.get("sessionId"),
+                "validationStepId": source_validation.get("stepId"),
+                "validationAttempt": source_validation.get("attempt"),
+                "validationAttemptId": source_validation.get("attemptId"),
+            }
         return owner_id
+
+    def _release_playback_owner(self, owner_id: str) -> bool:
+        owner_token = self.playback_controller.owner_token
+        released = self.playback_controller.release(owner_id)
+        if not released:
+            return False
+        with self._barge_source_lock:
+            snapshot = self._barge_source_snapshot
+            if (
+                snapshot is not None
+                and snapshot.get("ownerId") == owner_id
+                and snapshot.get("ownerToken") is owner_token
+            ):
+                self._barge_source_snapshot = None
+        return True
+
+    def _mark_reply_started_once(self) -> None:
+        if self.reply_started_for_turn:
+            return
+        self.reply_started_for_turn = True
+        self._emit_validation("reply_started")
 
     def _mark_reply_final_once(self) -> None:
         if self.reply_final_for_turn:
             return
+        self._mark_reply_started_once()
         self.reply_final_for_turn = True
         self._emit_validation("reply_final")
 
@@ -708,16 +801,72 @@ class LocalIoBridge:
                         **decision_payload,
                     )
                     continue
-                original_context = self.active_validation
-                original_turn_id = self.active_turn_id
-                self._mark_reply_final_once()
-                controller_cancelled = self.playback_controller.request_cancel()
-                if (
-                    not controller_cancelled
-                    and self.active_turn_task is not None
-                    and not self.active_turn_task.done()
+                source_binding = dict(meta.get("_bargeSource") or {})
+                if not (
+                    validation_attempt_binding_is_current(
+                        meta,
+                        surface="local",
+                        reject_unbound_when_active=True,
+                    )
+                    and validation_attempt_binding_is_current(
+                        source_binding,
+                        surface="local",
+                        reject_unbound_when_active=True,
+                    )
                 ):
-                    self.active_turn_task.cancel()
+                    self._emit_validation(
+                        "barge_in_rejected",
+                        meta=meta,
+                        **{**decision_payload, "reason": "validation_attempt_stale"},
+                    )
+                    continue
+                if not local_barge_source_binding_matches(
+                    meta,
+                    active_turn_id=self.active_turn_id,
+                    active_validation=self.active_validation,
+                    active_owner_id=self.playback_controller.owner_id,
+                    active_owner_token=self.playback_controller.owner_token,
+                ):
+                    self._emit_validation(
+                        "barge_in_rejected",
+                        meta=meta,
+                        **{**decision_payload, "reason": "barge_in_stale_source"},
+                    )
+                    continue
+                original_turn_id = str(source_binding.get("turnId") or "")
+                source_owner_id = str(source_binding.get("ownerId") or "")
+                source_owner_token = source_binding.get("ownerToken")
+                original_context = {
+                    "sessionId": source_binding.get("validationSessionId"),
+                    "stepId": source_binding.get("validationStepId"),
+                    "attempt": source_binding.get("validationAttempt"),
+                    "attemptId": source_binding.get("validationAttemptId"),
+                }
+                if not original_context["sessionId"] or not original_context["stepId"]:
+                    original_context = None
+                controller_cancelled = self.playback_controller.request_cancel(
+                    expected_owner_id=source_owner_id,
+                    expected_owner_token=source_owner_token,
+                )
+                if not controller_cancelled:
+                    self._emit_validation(
+                        "barge_in_rejected",
+                        meta=meta,
+                        **{**decision_payload, "reason": "barge_in_stale_source"},
+                    )
+                    continue
+                if original_context and original_turn_id:
+                    emit_voice_validation_event(
+                        "local",
+                        "tts_interrupt",
+                        session_id=original_context.get("sessionId"),
+                        step_id=original_context.get("stepId"),
+                        attempt_id=original_context.get("attemptId"),
+                        turnId=original_turn_id,
+                        sourceTurnId=original_turn_id,
+                        qualified=True,
+                        reason="qualified_user_audio",
+                    )
                 if not self.playback_cancelled_for_turn:
                     self.playback_cancelled_for_turn = True
                     if original_context:
@@ -726,6 +875,7 @@ class LocalIoBridge:
                             "playback_cancelled",
                             session_id=original_context.get("sessionId"),
                             step_id=original_context.get("stepId"),
+                            attempt_id=original_context.get("attemptId"),
                             turnId=original_turn_id,
                             reason=decision.reason,
                         )
@@ -764,6 +914,7 @@ class LocalIoBridge:
         self.active_validation = self._validation_context_from_meta(meta)
         self.playback_started_for_turn = False
         self.playback_cancelled_for_turn = False
+        self.reply_started_for_turn = False
         self.reply_final_for_turn = False
         stt_ms: float | None = None
         chat_ms: float | None = None
@@ -775,11 +926,29 @@ class LocalIoBridge:
             durationSec=meta.get("duration_sec"),
             bargeIn=bool(meta.get("bargeInAccepted")),
         )
-        await self._post_status(extra={"lastSegmentMeta": meta})
+        public_segment_meta = dict(meta)
+        public_segment_meta.pop("_bargeSource", None)
+        public_segment_meta.pop("validationAttemptId", None)
+        public_segment_meta.pop("validation_attempt_id", None)
+        await self._post_status(extra={"lastSegmentMeta": public_segment_meta})
+        if not validation_attempt_binding_is_current(
+            meta,
+            surface="local",
+            reject_unbound_when_active=True,
+        ):
+            self.discarded_pending_mic_segment_count += 1
+            return
         try:
             stage_started = time.perf_counter()
             text = await self._transcribe(pcm_bytes)
             stt_ms = (time.perf_counter() - stage_started) * 1000.0
+            if not validation_attempt_binding_is_current(
+                meta,
+                surface="local",
+                reject_unbound_when_active=True,
+            ):
+                self.discarded_pending_mic_segment_count += 1
+                return
             if len(text) < LOCAL_BRIDGE_MIN_TEXT_CHARS:
                 return
             context = self._validation_context_from_meta(meta)
@@ -789,15 +958,18 @@ class LocalIoBridge:
                     text,
                     session_id=context.get("sessionId"),
                     step_id=context.get("stepId"),
+                    attempt_id=context.get("attemptId"),
                     turnId=self.active_turn_id,
                 )
             self.transcript_count += 1
             self._emit_validation("turn_accepted", meta=meta)
-            print(f"[LOCAL BRIDGE] transcript={text!r}", flush=True)
+            print(f"[LOCAL BRIDGE] transcript_received chars={len(text)}", flush=True)
             if should_suppress_tts_for_command(text):
                 stage_started = time.perf_counter()
                 reply = await self._chat(text)
                 chat_ms = (time.perf_counter() - stage_started) * 1000.0
+                if reply:
+                    self._mark_reply_final_once()
                 tts_ms = 0.0
             elif LOCAL_BRIDGE_STREAMING_TTS_ENABLED and LOCAL_BRIDGE_TTS_ENABLED:
                 try:
@@ -807,11 +979,21 @@ class LocalIoBridge:
                     tts_ms = stream_result.get("ttsMs")
                 except Exception as stream_exc:
                     self.runtime_errors.record("chat_stream_failed", stream_exc)
+                    if self.playback_started_for_turn:
+                        self._emit_validation(
+                            "playback_failed",
+                            meta=meta,
+                            errorCode="streaming_tts_failed_after_playback_started",
+                        )
+                        raise RuntimeError(
+                            "streaming_tts_failed_after_playback_started"
+                        ) from stream_exc
                     print(f"[LOCAL BRIDGE] chat_stream_failed fallback_to_full err={stream_exc!r}", flush=True)
                     stage_started = time.perf_counter()
                     reply = await self._chat(text)
                     chat_ms = (time.perf_counter() - stage_started) * 1000.0
                     if reply:
+                        self._mark_reply_final_once()
                         stage_started = time.perf_counter()
                         await self._speak(reply)
                         tts_ms = (time.perf_counter() - stage_started) * 1000.0
@@ -820,6 +1002,7 @@ class LocalIoBridge:
                 reply = await self._chat(text)
                 chat_ms = (time.perf_counter() - stage_started) * 1000.0
                 if reply and LOCAL_BRIDGE_TTS_ENABLED:
+                    self._mark_reply_final_once()
                     stage_started = time.perf_counter()
                     await self._speak(reply)
                     tts_ms = (time.perf_counter() - stage_started) * 1000.0
@@ -840,7 +1023,7 @@ class LocalIoBridge:
                     meta=meta,
                     errorCode="playback_not_started",
                 )
-            print(f"[LOCAL BRIDGE] reply={reply!r}", flush=True)
+            print(f"[LOCAL BRIDGE] reply_ready chars={len(reply or '')}", flush=True)
         except asyncio.CancelledError:
             if self.playback_started_for_turn and not self.playback_cancelled_for_turn:
                 self.playback_cancelled_for_turn = True
@@ -911,6 +1094,77 @@ class LocalIoBridge:
             return await self._chat_delta_stream_and_speak(text)
         return await self._chat_sentence_stream_and_speak(text)
 
+    @staticmethod
+    def _stop_delta_output_stream(stream: Any | None) -> None:
+        if stream is None:
+            return
+        for method_name in ("abort", "stop"):
+            method = getattr(stream, method_name, None)
+            if not callable(method):
+                continue
+            try:
+                method()
+                break
+            except Exception:
+                continue
+
+    @staticmethod
+    async def _await_delta_task_shutdown(
+        task: asyncio.Task[Any],
+        *,
+        cancel: bool,
+    ) -> None:
+        if cancel and not task.done():
+            task.cancel()
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                # Repeated parent cancellation cannot release the playback owner
+                # while a receiver or websocket-close task is still running.
+                continue
+            except Exception:
+                break
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            task.result()
+
+    async def _write_delta_stream_chunk(self, stream: Any, payload: bytes) -> None:
+        self._ensure_validation_attempt_current()
+        write_task = asyncio.create_task(
+            asyncio.to_thread(stream.write, payload),
+            name="local-voxcpm-output-write",
+        )
+        try:
+            await asyncio.shield(write_task)
+        except asyncio.CancelledError:
+            self._stop_delta_output_stream(stream)
+            await self._await_delta_task_shutdown(write_task, cancel=False)
+            raise
+
+    async def _teardown_delta_playback(
+        self,
+        *,
+        playback_owner: str,
+        websocket: Any | None,
+        receiver: asyncio.Task[Any] | None,
+        output_stream: Any | None,
+    ) -> None:
+        self._stop_delta_output_stream(output_stream)
+        if receiver is not None and not receiver.done():
+            receiver.cancel()
+
+        if websocket is not None and not bool(getattr(websocket, "closed", False)):
+            with contextlib.suppress(Exception):
+                close_task = asyncio.create_task(
+                    websocket.close(),
+                    name="local-voxcpm-websocket-close",
+                )
+                await self._await_delta_task_shutdown(close_task, cancel=False)
+
+        if receiver is not None:
+            await self._await_delta_task_shutdown(receiver, cancel=False)
+        self._release_playback_owner(playback_owner)
+
     async def _chat_delta_stream_and_speak(self, text: str) -> dict[str, Any]:
         assert self.session is not None
         payload = {
@@ -931,13 +1185,13 @@ class LocalIoBridge:
         first_playback_ms: float | None = None
         websocket: aiohttp.ClientWebSocketResponse | None = None
         receiver: asyncio.Task[None] | None = None
+        active_output_stream: Any | None = None
         playback_owner = self._claim_playback_owner()
 
         self.speaking = True
-        await self._post_status()
 
         async def receive_tts_audio() -> None:
-            nonlocal audio_bytes, played_bytes, first_playback_ms
+            nonlocal audio_bytes, played_bytes, first_playback_ms, active_output_stream
             remainder = b""
             with sd.RawOutputStream(
                 samplerate=TTS_PCM_RATE,
@@ -945,52 +1199,58 @@ class LocalIoBridge:
                 dtype="int16",
                 device=self.output_device,
             ) as stream:
-                assert websocket is not None
-                async for message in websocket:
-                    if message.type == aiohttp.WSMsgType.BINARY:
-                        chunk = bytes(message.data or b"")
-                        if not chunk:
+                active_output_stream = stream
+                try:
+                    assert websocket is not None
+                    async for message in websocket:
+                        if message.type == aiohttp.WSMsgType.BINARY:
+                            chunk = bytes(message.data or b"")
+                            if not chunk:
+                                continue
+                            audio_bytes += len(chunk)
+                            data = remainder + chunk
+                            aligned_len = len(data) - (len(data) % TTS_SAMPLE_WIDTH_BYTES)
+                            if aligned_len > 0:
+                                playable = data[:aligned_len]
+                                if first_playback_ms is None:
+                                    first_playback_ms = (time.perf_counter() - started_at) * 1000.0
+                                    self._mark_playback_started_once()
+                                await self._write_delta_stream_chunk(stream, playable)
+                                played_bytes += len(playable)
+                            remainder = data[aligned_len:]
                             continue
-                        audio_bytes += len(chunk)
-                        data = remainder + chunk
-                        aligned_len = len(data) - (len(data) % TTS_SAMPLE_WIDTH_BYTES)
-                        if aligned_len > 0:
-                            playable = data[:aligned_len]
-                            await asyncio.to_thread(stream.write, playable)
-                            if first_playback_ms is None:
-                                first_playback_ms = (time.perf_counter() - started_at) * 1000.0
-                                self._mark_playback_started_once()
-                            played_bytes += len(playable)
-                        remainder = data[aligned_len:]
-                        continue
-                    if message.type == aiohttp.WSMsgType.TEXT:
-                        event = json.loads(str(message.data or "{}"))
-                        event_type = clean_text(event.get("type"))
-                        if event_type == "error":
-                            raise RuntimeError(clean_text(event.get("error")) or "voxcpm_stream_failed")
-                        if event_type in {"done", "canceled"}:
+                        if message.type == aiohttp.WSMsgType.TEXT:
+                            event = json.loads(str(message.data or "{}"))
+                            event_type = clean_text(event.get("type"))
+                            if event_type == "error":
+                                raise RuntimeError(clean_text(event.get("error")) or "voxcpm_stream_failed")
+                            if event_type in {"done", "canceled"}:
+                                break
+                            continue
+                        if message.type in {
+                            aiohttp.WSMsgType.CLOSE,
+                            aiohttp.WSMsgType.CLOSED,
+                            aiohttp.WSMsgType.ERROR,
+                        }:
                             break
-                        continue
-                    if message.type in {
-                        aiohttp.WSMsgType.CLOSE,
-                        aiohttp.WSMsgType.CLOSED,
-                        aiohttp.WSMsgType.ERROR,
-                    }:
-                        break
-                if remainder:
-                    padded = remainder + (b"\x00" * (TTS_SAMPLE_WIDTH_BYTES - len(remainder)))
-                    await asyncio.to_thread(stream.write, padded)
-                    if first_playback_ms is None:
-                        first_playback_ms = (time.perf_counter() - started_at) * 1000.0
-                        self._mark_playback_started_once()
-                    played_bytes += len(padded)
-                if played_bytes > 0:
-                    await asyncio.to_thread(
-                        stream.write,
-                        b"\x00" * int(TTS_PCM_RATE * TTS_PCM_CHANNELS * 2 * 0.18),
-                    )
+                    if remainder:
+                        padded = remainder + (b"\x00" * (TTS_SAMPLE_WIDTH_BYTES - len(remainder)))
+                        if first_playback_ms is None:
+                            first_playback_ms = (time.perf_counter() - started_at) * 1000.0
+                            self._mark_playback_started_once()
+                        await self._write_delta_stream_chunk(stream, padded)
+                        played_bytes += len(padded)
+                    if played_bytes > 0:
+                        await self._write_delta_stream_chunk(
+                            stream,
+                            b"\x00" * int(TTS_PCM_RATE * TTS_PCM_CHANNELS * 2 * 0.18),
+                        )
+                finally:
+                    if active_output_stream is stream:
+                        active_output_stream = None
 
         try:
+            await self._post_status()
             websocket = await self.session.ws_connect(
                 voxcpm_stream_url(),
                 heartbeat=30.0,
@@ -1052,6 +1312,8 @@ class LocalIoBridge:
                         continue
                     if event_type == "done":
                         final_reply = clean_text(event.get("reply"))
+                        if final_reply:
+                            self._mark_reply_final_once()
                         chat_done_ms = (time.perf_counter() - started_at) * 1000.0
                         continue
                     if event_type == "error":
@@ -1059,7 +1321,6 @@ class LocalIoBridge:
 
             await websocket.send_json({"type": "flush"})
             await receiver
-            receiver = None
             if audio_bytes <= 0 or played_bytes <= 0:
                 raise RuntimeError(
                     f"voxcpm_stream_empty_audio audio_bytes={audio_bytes} played_bytes={played_bytes}"
@@ -1100,15 +1361,14 @@ class LocalIoBridge:
             if websocket is not None and not websocket.closed:
                 with contextlib.suppress(Exception):
                     await websocket.send_json({"type": "cancel"})
-            if receiver is not None and not receiver.done():
-                receiver.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await receiver
             raise
         finally:
-            if websocket is not None and not websocket.closed:
-                await websocket.close()
-            self.playback_controller.release(playback_owner)
+            await self._teardown_delta_playback(
+                playback_owner=playback_owner,
+                websocket=websocket,
+                receiver=receiver,
+                output_stream=active_output_stream,
+            )
             self.speaking = False
             self.mic_input_suppressed_until = time.monotonic() + LOCAL_BRIDGE_TTS_INPUT_SUPPRESS_AFTER_SEC
             await self._post_status()
@@ -1155,6 +1415,8 @@ class LocalIoBridge:
                     continue
                 if event_type == "done":
                     final_reply = clean_text(event.get("reply"))
+                    if final_reply:
+                        self._mark_reply_final_once()
                     continue
                 if event_type == "error":
                     raise RuntimeError(clean_text(event.get("error")) or "chat_stream_failed")
@@ -1406,7 +1668,7 @@ class LocalIoBridge:
                 flush=True,
             )
         finally:
-            self.playback_controller.release(playback_owner)
+            self._release_playback_owner(playback_owner)
             self.speaking = False
             self.mic_input_suppressed_until = time.monotonic() + LOCAL_BRIDGE_TTS_INPUT_SUPPRESS_AFTER_SEC
             await self._post_status()
@@ -1437,20 +1699,23 @@ class LocalIoBridge:
                 aligned_len = len(data) - (len(data) % TTS_SAMPLE_WIDTH_BYTES)
                 if aligned_len > 0:
                     playable = data[:aligned_len]
-                    stream.write(playable)
                     if first_playback_ms is None:
                         first_playback_ms = (time.perf_counter() - started_at) * 1000.0
                         self._mark_playback_started_once()
+                    self._ensure_validation_attempt_current()
+                    stream.write(playable)
                     played_bytes += len(playable)
                 remainder = data[aligned_len:]
             if remainder:
                 padded = remainder + (b"\x00" * (TTS_SAMPLE_WIDTH_BYTES - len(remainder)))
-                stream.write(padded)
                 if first_playback_ms is None:
                     first_playback_ms = (time.perf_counter() - started_at) * 1000.0
                     self._mark_playback_started_once()
+                self._ensure_validation_attempt_current()
+                stream.write(padded)
                 played_bytes += len(padded)
             if played_bytes > 0:
+                self._ensure_validation_attempt_current()
                 stream.write(b"\x00" * int(TTS_PCM_RATE * TTS_PCM_CHANNELS * 2 * 0.18))
         return audio_bytes, played_bytes, first_playback_ms
 
@@ -1467,8 +1732,10 @@ class LocalIoBridge:
             for chunk in iter_pcm_aligned_chunks(chunks):
                 if played_bytes == 0:
                     self._mark_playback_started_once()
+                self._ensure_validation_attempt_current()
                 stream.write(chunk)
                 played_bytes += len(chunk)
+            self._ensure_validation_attempt_current()
             stream.write(b"\x00" * int(TTS_PCM_RATE * TTS_PCM_CHANNELS * 2 * 0.18))
         return played_bytes
 

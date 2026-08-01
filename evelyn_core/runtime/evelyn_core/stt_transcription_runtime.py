@@ -21,6 +21,12 @@ class SttTranscriptionRuntimeDeps:
     log: Callable[[str], Any]
 
 
+def _text_for_log(value: Any, *, validation_bound: bool) -> Any:
+    if not validation_bound:
+        return value
+    return f"<validation-text chars={len(str(value or ''))}>"
+
+
 def transcribe_audio16k_from_runtime(
     audio16k: Any,
     max_new_tokens: int = 256,
@@ -28,6 +34,7 @@ def transcribe_audio16k_from_runtime(
     deps: SttTranscriptionRuntimeDeps,
     sampling_rate: int,
     stage: str = "full",
+    validation_bound: bool = False,
 ) -> str:
     if audio16k.size == 0:
         return ""
@@ -44,20 +51,30 @@ def transcribe_audio16k_from_runtime(
                 if deps.stt_force_language
                 else None
             )
-            result = deps.transcribe_via_service(
-                audio16k,
-                service_url=deps.stt_service_url,
-                timeout_sec=deps.stt_service_timeout_sec,
-                sampling_rate=effective_rate,
-                max_new_tokens=max_new_tokens,
-                stage=stage,
-                language=language,
-            )
+            remote_kwargs: dict[str, Any] = {
+                "service_url": deps.stt_service_url,
+                "timeout_sec": deps.stt_service_timeout_sec,
+                "sampling_rate": effective_rate,
+                "max_new_tokens": max_new_tokens,
+                "stage": stage,
+                "language": language,
+            }
+            if validation_bound:
+                remote_kwargs["validation_bound"] = True
+            result = deps.transcribe_via_service(audio16k, **remote_kwargs)
             text = deps.clean_text(str(result.get("text") or ""))
-            deps.log(f"[STT REMOTE DONE][{stage}] text={text!r}")
+            deps.log(
+                f"[STT REMOTE DONE][{stage}] "
+                f"text={_text_for_log(text, validation_bound=validation_bound)!r}"
+            )
             return text
         except Exception as exc:
-            deps.log(f"[STT REMOTE FAIL][{stage}] {exc!r}")
+            error_detail = (
+                f"errorType={type(exc).__name__}"
+                if validation_bound
+                else repr(exc)
+            )
+            deps.log(f"[STT REMOTE FAIL][{stage}] {error_detail}")
             if not deps.stt_service_fallback_local:
                 raise
 
@@ -87,7 +104,10 @@ def transcribe_audio16k_from_runtime(
         return ""
 
     text = deps.clean_text(getattr(results[0], "text", "") or "")
-    deps.log(f"[STT DONE][{stage}] text={text!r}")
+    deps.log(
+        f"[STT DONE][{stage}] "
+        f"text={_text_for_log(text, validation_bound=validation_bound)!r}"
+    )
     return text
 
 

@@ -46,6 +46,16 @@ def run_voice_session_gate_from_runtime(
     deps: VoiceSessionGateDeps,
 ) -> VoiceSessionGateResult | None:
     final_text = transcript_result.final_text
+    validation_bound = bool(
+        isinstance(metrics.get("meta"), dict)
+        and metrics["meta"].get("validation_attempt_id")
+    )
+
+    def log_text(value: Any) -> Any:
+        if not validation_bound:
+            return value
+        return f"<validation-text chars={len(str(value or ''))}>"
+
     short_followup_candidate = deps.is_short_followup_candidate(
         final_text,
         pcm_bytes,
@@ -58,7 +68,9 @@ def run_voice_session_gate_from_runtime(
         wake_detected=transcript_result.wake_detected,
     ):
         if short_followup_candidate:
-            deps.print_fn(f"[SHORT FOLLOWUP CANDIDATE] text={final_text!r}")
+            deps.print_fn(
+                f"[SHORT FOLLOWUP CANDIDATE] text={log_text(final_text)!r}"
+            )
             metrics.setdefault("meta", {})["short_followup_candidate"] = True
             deps.save_voice_debug_audio(
                 guild_id,
@@ -73,7 +85,7 @@ def run_voice_session_gate_from_runtime(
                 stage_label="drop",
             )
         else:
-            deps.print_fn(f"[STT IGNORE] short_noise: {final_text!r}")
+            deps.print_fn(f"[STT IGNORE] short_noise: {log_text(final_text)!r}")
             deps.save_voice_debug_audio(
                 guild_id,
                 speaker_name,
@@ -86,7 +98,11 @@ def run_voice_session_gate_from_runtime(
                 session_key=session_key,
                 stage_label="drop",
             )
-            deps.log_voice_stage(metrics, "짧은 STT 무시", extra=f"text={final_text!r}")
+            deps.log_voice_stage(
+                metrics,
+                "짧은 STT 무시",
+                extra=f"text={log_text(final_text)!r}",
+            )
             return None
 
     final_wake_decision = deps.decide_final_wake_veto(
@@ -102,9 +118,9 @@ def run_voice_session_gate_from_runtime(
             session_key=session_key,
             room_session_key=room_session_key,
             owner_user_id=owner_user_id,
-            wake_probe_text=wake_probe,
-            wake_confirm_text=wake_confirm,
-            final_text=final_text,
+            wake_probe_text=log_text(wake_probe),
+            wake_confirm_text=log_text(wake_confirm),
+            final_text=log_text(final_text),
         )
         deps.save_voice_debug_audio(
             guild_id,
@@ -121,7 +137,10 @@ def run_voice_session_gate_from_runtime(
         deps.log_voice_stage(
             metrics,
             "final text veto",
-            extra=f"wake_reject_reason={wake_reject_reason} text={final_text!r}",
+            extra=(
+                f"wake_reject_reason={wake_reject_reason} "
+                f"text={log_text(final_text)!r}"
+            ),
         )
         deps.log_voice_bottleneck_summary(
             metrics,
@@ -149,9 +168,10 @@ def run_voice_session_gate_from_runtime(
     deps.print_fn(
         f"🎤 [{member.display_name}] wake_detected={transcript_result.wake_detected} "
         f"wake_match_mode={transcript_result.wake_match_mode} wake_alias={transcript_result.wake_alias!r} "
-        f"wake_probe_text={transcript_result.probe_text!r} "
-        f"wake_confirm_text={transcript_result.confirm_text!r} "
-        f"wake_reject_reason={transcript_result.reject_reason!r} text={final_text}"
+        f"wake_probe_text={log_text(transcript_result.probe_text)!r} "
+        f"wake_confirm_text={log_text(transcript_result.confirm_text)!r} "
+        f"wake_reject_reason={transcript_result.reject_reason!r} "
+        f"text={log_text(final_text)}"
     )
     return VoiceSessionGateResult(
         wake_alias=wake_alias,
